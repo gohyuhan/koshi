@@ -34,6 +34,9 @@ pub struct SessionRow {
     pub id: SessionId,
     /// The session's display name.
     pub name: String,
+    /// The saved server this session runs on, by the name it was saved under
+    /// or its `host:port` address. `None` for a session on this machine.
+    pub server: Option<String>,
 }
 
 /// One `list-tabs` row.
@@ -262,6 +265,7 @@ pub fn session_rows(overviews: &[SessionOverview]) -> Vec<SessionRow> {
         .map(|overview| SessionRow {
             id: overview.session.id,
             name: overview.session.name.clone(),
+            server: None,
         })
         .collect()
 }

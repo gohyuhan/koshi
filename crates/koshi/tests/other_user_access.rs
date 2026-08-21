@@ -364,10 +364,12 @@ fn start_session_server_under(
 #[cfg(unix)]
 fn one_session_listing(session_id: SessionId) -> String {
     let id = session_id.to_string();
+    let name_width = SESSION_NAME.len().max("name".len());
     format!(
-        "{:width$}  name\n{id}  {SESSION_NAME}\n",
+        "{:id_width$}  {:name_width$}  server\n{id}  {SESSION_NAME:name_width$}  local\n",
         "id",
-        width = id.len()
+        "name",
+        id_width = id.len(),
     )
 }
 

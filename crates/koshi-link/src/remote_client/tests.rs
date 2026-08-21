@@ -315,3 +315,164 @@ fn read_hidden_line_edits_and_terminators() {
     let mut ended = std::io::Cursor::new(b"secret".to_vec());
     assert_eq!(read_hidden_line(&mut ended).unwrap(), "secret");
 }
+
+// The sweep completion: every asked server comes back as exactly one entry,
+// sorted by server name.
+#[test]
+fn a_server_not_heard_from_comes_back_unreachable() {
+    let heard = vec![Reach::Reached {
+        server: "desk".to_string(),
+        rows: Vec::new(),
+    }];
+    let asked = vec!["desk".to_string(), "work".to_string()];
+
+    assert_eq!(
+        complete_sweep(heard, asked),
+        vec![
+            Reach::Reached {
+                server: "desk".to_string(),
+                rows: Vec::new(),
+            },
+            Reach::Unreachable {
+                server: "work".to_string(),
+            },
+        ]
+    );
+}
+
+#[test]
+fn a_sweep_with_every_server_heard_adds_nothing_and_sorts_by_server() {
+    let heard = vec![
+        Reach::Refused {
+            server: "work".to_string(),
+        },
+        Reach::Reached {
+            server: "desk".to_string(),
+            rows: Vec::new(),
+        },
+    ];
+    let asked = vec!["desk".to_string(), "work".to_string()];
+
+    assert_eq!(
+        complete_sweep(heard, asked),
+        vec![
+            Reach::Reached {
+                server: "desk".to_string(),
+                rows: Vec::new(),
+            },
+            Reach::Refused {
+                server: "work".to_string(),
+            },
+        ]
+    );
+}
+
+#[test]
+fn a_sweep_that_heard_nothing_reports_every_asked_server() {
+    let asked = vec!["work".to_string(), "desk".to_string()];
+
+    assert_eq!(
+        complete_sweep(Vec::new(), asked),
+        vec![
+            Reach::Unreachable {
+                server: "desk".to_string(),
+            },
+            Reach::Unreachable {
+                server: "work".to_string(),
+            },
+        ]
+    );
+}
+
+// Control characters in a server-sent name are removed before the name is
+// printed anywhere.
+#[test]
+fn control_characters_are_stripped_from_server_sent_text() {
+    assert_eq!(without_control("dev\x1b[2K\x1b[A"), "dev[2K[A");
+    assert_eq!(without_control("web \x07bell\x7f"), "web bell");
+    assert_eq!(
+        without_control("csi\u{9b}31m"),
+        "csi31m",
+        "the C1 range too"
+    );
+    assert_eq!(without_control("plain-name"), "plain-name");
+    assert_eq!(without_control("héllo wörld"), "héllo wörld");
+}
+
+/// An in-memory byte source serving as one half of a framed link. The
+/// deadline is taken and ignored.
+struct ByteStream(std::io::Cursor<Vec<u8>>);
+
+impl Read for ByteStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+impl koshi_ipc::transport::Deadlined for ByteStream {
+    fn set_deadline(&mut self, _at: Option<Instant>) {}
+}
+
+/// An in-memory byte sink serving as one half of a framed link, keeping every
+/// written byte. The deadline is taken and ignored.
+struct SharedBuffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl Write for SharedBuffer {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("no other holder panics").extend(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl koshi_ipc::transport::Deadlined for SharedBuffer {
+    fn set_deadline(&mut self, _at: Option<Instant>) {}
+}
+
+/// A link whose server side already answered `answer`, and whose own writes
+/// go into a kept buffer nobody reads.
+fn link_answering(answer: &RemoteServerFrame) -> RemoteLink {
+    use koshi_ipc::transport::frame_halves;
+
+    let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (_, mut encoder) = frame_halves(
+        Box::new(ByteStream(std::io::Cursor::new(Vec::new()))),
+        Box::new(SharedBuffer(written.clone())),
+    );
+    encoder.send(answer).expect("a buffer takes every byte");
+    let encoded = written.lock().expect("the encoder is finished").clone();
+
+    let (reader, writer) = frame_halves(
+        Box::new(ByteStream(std::io::Cursor::new(encoded))),
+        Box::new(SharedBuffer(std::sync::Arc::new(std::sync::Mutex::new(
+            Vec::new(),
+        )))),
+    );
+    RemoteLink {
+        reader,
+        writer,
+        fingerprint: "00".repeat(32),
+    }
+}
+
+#[test]
+fn listed_rows_arrive_with_control_characters_removed() {
+    let id = SessionId::new();
+    let mut link = link_answering(&RemoteServerFrame::Sessions {
+        rows: vec![RemoteSessionRow {
+            id,
+            name: "dev\x1b[2K".to_string(),
+        }],
+    });
+
+    assert_eq!(
+        list_remote_sessions(&mut link).expect("the sessions frame is the answer"),
+        vec![RemoteSessionRow {
+            id,
+            name: "dev[2K".to_string(),
+        }]
+    );
+}

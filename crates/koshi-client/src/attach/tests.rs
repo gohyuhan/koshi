@@ -88,11 +88,12 @@ fn painted_frame_in(lock_mode: LockMode) -> PaintedFrame {
     }
 }
 
-/// One listing row for a session displayed as `name`.
+/// One listing row for a session displayed as `name`, on this machine.
 fn session_row(name: &str) -> SessionRow {
     SessionRow {
         id: SessionId::new(),
         name: String::from(name),
+        server: None,
     }
 }
 
@@ -104,9 +105,28 @@ fn no_running_session_leaves_nothing_to_attach_to() {
 }
 
 #[test]
-fn one_running_session_is_the_answer_without_reading_a_line() {
+fn one_row_settles_without_reading_a_line() {
     let rows = vec![session_row("solo")];
-    assert_eq!(pick(&rows, "").expect("one row needs no picking"), 0);
+    assert_eq!(settle_on(&rows).expect("one row needs no picking"), 0);
+}
+
+#[test]
+fn only_a_single_local_row_settles_without_asking() {
+    // (total rows, how many are local) → whether the picker skips the prompt.
+    assert!(settles_unasked(1, 1), "one local session, nothing remote");
+    assert!(!settles_unasked(1, 0), "one remote session still asks");
+    assert!(!settles_unasked(2, 2), "two local sessions ask");
+    assert!(!settles_unasked(2, 1), "one local beside one remote asks");
+    assert!(!settles_unasked(3, 0), "remote-only listings ask");
+}
+
+#[test]
+fn a_single_row_still_needs_its_number_typed_when_picking() {
+    // `choose` sends a lone remote row through `pick`: an empty line
+    // refuses instead of settling on the row.
+    let rows = vec![session_row("solo")];
+    pick(&rows, "").expect_err("an empty line names no row");
+    assert_eq!(pick(&rows, "1").expect("1 is in range"), 0);
 }
 
 #[test]
@@ -126,11 +146,13 @@ fn two_rows_carrying_one_session_id_are_told_apart_by_their_place() {
     let rows = vec![
         SessionRow {
             id: shared,
-            name: String::from("desk web"),
+            name: String::from("web"),
+            server: Some(String::from("desk")),
         },
         SessionRow {
             id: shared,
-            name: String::from("desk-ip web"),
+            name: String::from("web"),
+            server: Some(String::from("desk-ip")),
         },
     ];
 

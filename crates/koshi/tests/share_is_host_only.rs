@@ -71,10 +71,10 @@ fn a_remote_flag_after_a_share_verb_is_refused_before_anything_is_asked() {
         let (code, stdout, stderr) = koshi(&args);
 
         // `--remote` is global, so this spelling parses and reaches koshi's own
-        // check: `--remote` carries `attach` and the action verbs, and a share
-        // verb is neither. Exit 2 is `CliExitCode::UsageOrConfig`, which
-        // `CliError::InvalidArgs` maps to — the same code clap's own usage
-        // error uses.
+        // check: `--remote` carries `attach`, `list-sessions`, and the action
+        // verbs, and a share verb is none of them. Exit 2 is
+        // `CliExitCode::UsageOrConfig`, which `CliError::InvalidArgs` maps to
+        // — the same code clap's own usage error uses.
         assert_eq!(
             code,
             Some(2),
@@ -83,8 +83,8 @@ fn a_remote_flag_after_a_share_verb_is_refused_before_anything_is_asked() {
         );
         assert_eq!(
             stderr.trim_end(),
-            "koshi: invalid arguments: --remote needs a command, \
-             such as `koshi attach --remote <server>`",
+            "koshi: invalid arguments: --remote works with `attach`, `list-sessions`, \
+             and the action verbs, such as `koshi attach --remote <server>`",
             "the refusal names what to type instead"
         );
         assert!(

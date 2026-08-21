@@ -146,7 +146,7 @@ use koshi_link::discovery::{self, SessionRow};
 use koshi_link::error::CliError;
 use koshi_link::in_session::InSessionContext;
 use koshi_link::ipc_client;
-use koshi_link::remote_client::{self, DialError, Reach, ServerArg};
+use koshi_link::remote_client::{self, DialError, Reach, ServerArg, REACH_WAIT};
 use koshi_link::router_client::router_request;
 use koshi_link::talk;
 
@@ -187,11 +187,6 @@ const MAX_REDIAL_WAIT: Duration = Duration::from_secs(8);
 /// seconds, which is how long a session holds a detached client's view under
 /// its resume token.
 const REDIAL_WINDOW: Duration = Duration::from_secs(120);
-
-/// How long a bare `koshi attach` waits for the saved servers to answer with
-/// their sessions. It is one deadline over all of them at once, so an
-/// unreachable machine costs this much and no more.
-const REACH_WAIT: Duration = Duration::from_secs(2);
 
 /// The number the first connection of one attachment carries. Coming back after
 /// the session replaces its own process image counts up from here.
@@ -540,9 +535,11 @@ fn resolve_session(runtime_dir: &Path, selector: Option<&str>) -> Result<Session
 /// Join a running session in this terminal as a new client.
 ///
 /// `selector` is a `session-<uuid>` id, a bare UUID, or a session display
-/// name. `None` picks one from the sessions running for this user instead:
-/// nothing running is a failure, one session is taken straight away, and more
-/// than one is printed as a numbered list to answer on stdin.
+/// name. `None` picks one from the sessions running for this user and the
+/// sessions on every saved server that answered: no session running anywhere
+/// is a failure, exactly one session on this machine is taken straight away,
+/// and anything else — several sessions, or one session on a saved server —
+/// is printed as a numbered list to answer on stdin.
 pub fn run(selector: Option<&str>) -> Result<(), CliError> {
     let runtime_dir = ipc_client::runtime_dir()?;
     let Some(selector) = selector else {
@@ -606,7 +603,8 @@ fn attach_picked(runtime_dir: PathBuf) -> Result<(), CliError> {
         .iter()
         .map(|(server, row)| SessionRow {
             id: row.id,
-            name: format!("{server} {}", row.name),
+            name: row.name.clone(),
+            server: Some(server.clone()),
         })
         .collect();
     let (server, row) = match choose(&runtime_dir, offered)? {
@@ -639,11 +637,11 @@ fn reachable_rows() -> Vec<(String, RemoteSessionRow)> {
             Reach::Reached { server, rows } => {
                 offered.extend(rows.into_iter().map(|row| (server.clone(), row)));
             }
-            Reach::Refused { server } => println!(
+            Reach::Refused { server } => eprintln!(
                 "{server}: the saved secret was refused; \
                  run `koshi remote set-secret {server}`"
             ),
-            Reach::Unreachable => {}
+            Reach::Unreachable { .. } => {}
         }
     }
     offered
@@ -670,6 +668,7 @@ fn choose_remote(server: &str, rows: &[RemoteSessionRow]) -> Result<SessionSelec
         .map(|row| SessionRow {
             id: row.id,
             name: row.name.clone(),
+            server: Some(server.to_string()),
         })
         .collect();
     let at = settle_on(&listed)?;
@@ -1472,11 +1471,12 @@ fn drop_input_from_the_blackout(incoming_rx: &mpsc::Receiver<Incoming>) -> bool 
 /// The local rows are the ones `koshi list-sessions` prints, from the same sweep
 /// of the runtime directory, so nothing here probes anything that listing does
 /// not. `remote` holds one row per session on a saved server that answered,
-/// already named after that server; a picker for a session switch passes none,
-/// since a session on another machine is not one this session can move a client
-/// to. One row is the answer on its own; more than one is printed and the number
-/// typed on stdin picks the row. This runs before the terminal enters raw mode,
-/// so the prompt is a plain stdin read.
+/// each carrying that server in its `server` field; a picker for a session
+/// switch passes none, since a session on another machine is not one this
+/// session can move a client to. A single local row is the answer on its own.
+/// Every other non-empty listing — several rows, or one row on a saved server —
+/// is printed and the number typed on stdin picks the row. This runs before
+/// the terminal enters raw mode, so the prompt is a plain stdin read.
 ///
 /// A session that is listening but could not answer leaves both "nothing is
 /// running" and "this is the only one" unprovable, so a list of under two local
@@ -1493,11 +1493,24 @@ fn choose(runtime_dir: &Path, remote: Vec<SessionRow>) -> Result<Picked, CliErro
     }
     let local = rows.len();
     rows.extend(remote);
-    let at = settle_on(&rows)?;
+    let at = if rows.is_empty() {
+        return Err(CliError::NoSessions);
+    } else if settles_unasked(rows.len(), local) {
+        0
+    } else {
+        pick(&rows, &ask(&rows)?)?
+    };
     Ok(match at.checked_sub(local) {
         Some(remote_at) => Picked::Remote(remote_at),
         None => Picked::Local(rows[at].id.to_string()),
     })
+}
+
+/// Whether a listing of `total` rows, the first `local` of them on this
+/// machine, settles on its only row without asking: exactly one row, and that
+/// row is local. A single remote row, and every longer listing, is asked.
+fn settles_unasked(total: usize, local: usize) -> bool {
+    total == 1 && local == 1
 }
 
 /// Which row a listing settled on.
@@ -1517,23 +1530,33 @@ enum Picked {
 /// [`CliError::NoSessions`] for an empty `rows`. [`CliError::InvalidArgs`] when
 /// stdin cannot be read, and when the line is not one of the listed numbers.
 fn settle_on(rows: &[SessionRow]) -> Result<usize, CliError> {
-    let line = if rows.len() > 1 {
-        ask(rows)?
-    } else {
-        String::new()
-    };
-    pick(rows, &line)
+    match rows {
+        [] => Err(CliError::NoSessions),
+        [_] => Ok(0),
+        many => pick(many, &ask(many)?),
+    }
 }
 
-/// Print one numbered line per session — number, name, id — and read back the
-/// line the user answers with.
+/// Print one numbered line per session — number, name, id, and for a session
+/// on a saved server `(remote: <server>)` — and read back the line the user
+/// answers with. The prompt names the range, `[1-3]`, or `[1]` for a single
+/// row.
 ///
 /// A line that cannot be read names the number that was expected.
 fn ask(rows: &[SessionRow]) -> Result<String, CliError> {
     for (index, row) in rows.iter().enumerate() {
-        println!("{}) {} {}", index + 1, row.name, row.id);
+        match &row.server {
+            Some(server) => {
+                println!("{}) {} {} (remote: {server})", index + 1, row.name, row.id);
+            }
+            None => println!("{}) {} {}", index + 1, row.name, row.id),
+        }
     }
-    print!("attach to which session? [1-{}] ", rows.len());
+    let range = match rows.len() {
+        1 => String::from("1"),
+        count => format!("1-{count}"),
+    };
+    print!("attach to which session? [{range}] ");
     let _ = io::stdout().flush();
     let mut line = String::new();
     io::stdin()
@@ -1547,34 +1570,30 @@ fn ask(rows: &[SessionRow]) -> Result<String, CliError> {
     Ok(line)
 }
 
-/// Where in `rows` a listing settles: place `0` when the listing has one row,
-/// and otherwise the place the number on `line` names.
+/// Where in `rows` a listing settles: the place the number on `line` names.
 ///
-/// `line` is read only when the listing has more than one row. Empty `rows` is
-/// [`CliError::NoSessions`]; a number outside `1..=rows.len()`, and a line that
-/// is not a number, are [`CliError::InvalidArgs`] naming the range.
+/// Empty `rows` is [`CliError::NoSessions`]; a number outside
+/// `1..=rows.len()`, and a line that is not a number, are
+/// [`CliError::InvalidArgs`] naming the range.
 fn pick(rows: &[SessionRow], line: &str) -> Result<usize, CliError> {
-    match rows {
-        [] => Err(CliError::NoSessions),
-        [_] => Ok(0),
-        many => {
-            let typed = line.trim();
-            typed
-                .parse::<usize>()
-                .ok()
-                .and_then(|number| {
-                    let at = number.checked_sub(1)?;
-                    (at < many.len()).then_some(at)
-                })
-                .ok_or_else(|| CliError::InvalidArgs {
-                    detail: format!(
-                        "`{typed}` is not one of the listed sessions; \
-                         expected a number 1 to {}",
-                        many.len()
-                    ),
-                })
-        }
+    if rows.is_empty() {
+        return Err(CliError::NoSessions);
     }
+    let typed = line.trim();
+    typed
+        .parse::<usize>()
+        .ok()
+        .and_then(|number| {
+            let at = number.checked_sub(1)?;
+            (at < rows.len()).then_some(at)
+        })
+        .ok_or_else(|| CliError::InvalidArgs {
+            detail: format!(
+                "`{typed}` is not one of the listed sessions; \
+                 expected a number 1 to {}",
+                rows.len()
+            ),
+        })
 }
 
 /// Ask the router where the session `selector` names listens, starting a

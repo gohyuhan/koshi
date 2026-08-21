@@ -77,6 +77,10 @@ pub const REPLY_WAIT: Duration = Duration::from_secs(20);
 /// past this count are not asked; [`reach_all`] names how many on stderr.
 pub const MAX_REACHED_AT_ONCE: usize = 16;
 
+/// How long [`reach_all`] waits for every saved server together, one deadline
+/// over the whole sweep.
+pub const REACH_WAIT: Duration = Duration::from_secs(2);
+
 /// Which server an invocation talks to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerArg {
@@ -159,8 +163,12 @@ pub enum Reach {
         /// The server's name when it has one, else its address.
         server: String,
     },
-    /// The server could not be reached inside the deadline.
-    Unreachable,
+    /// The server could not be reached, or was still unanswered at the
+    /// deadline.
+    Unreachable {
+        /// The server's name when it has one, else its address.
+        server: String,
+    },
 }
 
 /// The saved-server store and the path it came from, under the private data
@@ -547,7 +555,7 @@ pub fn connect_saved(
 }
 
 /// The sessions this connection's secret reaches, in the order the server
-/// holds them.
+/// holds them. Control characters in a session name are removed.
 ///
 /// # Errors
 /// [`CliError::Runtime`] when the server refused the request, and
@@ -562,10 +570,24 @@ pub fn list_remote_sessions(link: &mut RemoteLink) -> Result<Vec<RemoteSessionRo
         .recv::<RemoteServerFrame>()
         .map_err(talk_failed)?
     {
-        RemoteServerFrame::Sessions { rows } => Ok(rows),
+        RemoteServerFrame::Sessions { rows } => Ok(rows
+            .into_iter()
+            .map(|row| RemoteSessionRow {
+                id: row.id,
+                name: without_control(&row.name),
+            })
+            .collect()),
         RemoteServerFrame::Refused { message } => Err(CliError::Runtime { detail: message }),
         RemoteServerFrame::Welcome { .. } => Err(unexpected_answer("the server")),
     }
+}
+
+/// `text` with every control character removed — the C0 range, DEL, and the
+/// C1 range.
+///
+/// Example — `"dev\x1b[2K"` becomes `"dev[2K"`.
+fn without_control(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control()).collect()
 }
 
 /// Ask to attach to `selector` and hand the connection's two halves back.
@@ -625,6 +647,8 @@ pub fn submit_remote(
 /// full: tabs, panes, and attached clients.
 ///
 /// Sends [`IpcRequestKind::Discovery`] over one remote connection of its own.
+/// Control characters in the session name, the tab names, and the pane titles
+/// are removed.
 ///
 /// # Errors
 /// Whatever [`connect_saved`] reports, and [`CliError::IpcUnavailable`] when
@@ -638,7 +662,18 @@ pub fn fetch_remote_overview(
         kind: IpcRequestKind::Discovery,
     };
     match one_request(arg, session, request)? {
-        IpcResult::Overview(overview) => Ok(overview),
+        IpcResult::Overview(mut overview) => {
+            overview.session.name = without_control(&overview.session.name);
+            for tab in &mut overview.tabs {
+                tab.name = without_control(&tab.name);
+            }
+            for pane in &mut overview.panes {
+                if let Some(title) = &pane.title {
+                    pane.title = Some(without_control(title));
+                }
+            }
+            Ok(overview)
+        }
         IpcResult::Error(refusal) => Err(refused(&refusal)),
         other => Err(talk::SESSION.unexpected_reply(&other)),
     }
@@ -667,18 +702,17 @@ fn one_request(
 /// `timeout` whatever the servers do.
 ///
 /// `timeout` is one deadline over the whole call, not a budget each server
-/// gets. Each record is asked on its own thread, and this returns with the
-/// servers heard from by the deadline. A thread still running at the deadline
-/// is never joined; it writes no file.
+/// gets. Each record is asked on its own thread. A thread still running at
+/// the deadline is never joined; it writes no file.
 ///
 /// At most [`MAX_REACHED_AT_ONCE`] records are asked. The rest are named on
 /// stderr and left out.
 ///
 /// A server that answered and did not admit the saved secret is
-/// [`Reach::Refused`]. A server that could not be reached is
-/// [`Reach::Unreachable`]. A server still unanswered at the deadline is left
-/// out of the answer entirely. A store that cannot be read reads as no saved
-/// servers.
+/// [`Reach::Refused`]. A server that could not be reached, or was still
+/// unanswered at the deadline, is [`Reach::Unreachable`]. Every asked record
+/// comes back as exactly one entry, sorted by server name. A store that
+/// cannot be read reads as no saved servers.
 #[must_use]
 pub fn reach_all(timeout: Duration) -> Vec<Reach> {
     let deadline = Instant::now() + timeout;
@@ -690,9 +724,16 @@ pub fn reach_all(timeout: Duration) -> Vec<Reach> {
     if saved > MAX_REACHED_AT_ONCE {
         eprintln!(
             "koshi: asking the first {MAX_REACHED_AT_ONCE} of {saved} saved servers; \
-             name one with `koshi attach --remote <server>` to reach the rest"
+             name one with `--remote <server>` to reach the rest"
         );
     }
+
+    let unheard: Vec<String> = store
+        .records
+        .iter()
+        .take(MAX_REACHED_AT_ONCE)
+        .map(label_of)
+        .collect();
 
     let (send, receive) = mpsc::channel();
     let mut asked = 0usize;
@@ -720,6 +761,36 @@ pub fn reach_all(timeout: Duration) -> Vec<Reach> {
             Err(_) => break,
         }
     }
+    complete_sweep(heard, unheard)
+}
+
+/// The server one [`Reach`] is about, whatever it answered.
+fn server_of(reach: &Reach) -> &str {
+    match reach {
+        Reach::Reached { server, .. }
+        | Reach::Refused { server }
+        | Reach::Unreachable { server } => server,
+    }
+}
+
+/// Every asked server as exactly one entry, sorted by server: the answers in
+/// `heard`, plus one [`Reach::Unreachable`] per label in `asked` that no
+/// answer names.
+///
+/// Example — `heard` naming only `desk` with `asked` `["desk", "work"]` gives
+/// `desk`'s answer and `Unreachable { server: "work" }`, in that order.
+fn complete_sweep(mut heard: Vec<Reach>, mut asked: Vec<String>) -> Vec<Reach> {
+    for reach in &heard {
+        if let Some(at) = asked.iter().position(|label| label == server_of(reach)) {
+            asked.remove(at);
+        }
+    }
+    heard.extend(
+        asked
+            .into_iter()
+            .map(|server| Reach::Unreachable { server }),
+    );
+    heard.sort_by(|a, b| server_of(a).cmp(server_of(b)));
     heard
 }
 
@@ -740,13 +811,13 @@ fn probe(record: &SavedServer, deadline: Instant) -> Reach {
         Ok(link) => link,
         Err(error) => match CliError::from(error) {
             CliError::Runtime { .. } => return Reach::Refused { server },
-            _ => return Reach::Unreachable,
+            _ => return Reach::Unreachable { server },
         },
     };
     match list_remote_sessions(&mut link) {
         Ok(rows) => Reach::Reached { server, rows },
         Err(CliError::Runtime { .. }) => Reach::Refused { server },
-        Err(_) => Reach::Unreachable,
+        Err(_) => Reach::Unreachable { server },
     }
 }
 

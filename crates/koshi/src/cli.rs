@@ -261,7 +261,7 @@ pub enum FormatArg {
 /// arguments.
 #[derive(Debug, PartialEq, Eq, Subcommand)]
 pub enum CliCommand {
-    /// List running sessions.
+    /// List running sessions, here and on every saved server that answers.
     ListSessions {
         /// Output format.
         #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
@@ -276,7 +276,7 @@ pub enum CliCommand {
     /// Attach this terminal to a running session as a second window onto it.
     Attach {
         /// Session to attach to, by id or name; without one, pick from the
-        /// sessions running for this user.
+        /// sessions running for this user and on the saved servers.
         #[arg(value_name = "SESSION")]
         session: Option<String>,
         /// Save a server reached for the first time under this name, so later
