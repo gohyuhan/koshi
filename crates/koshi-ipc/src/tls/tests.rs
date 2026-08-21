@@ -654,3 +654,38 @@ fn a_framed_half_keeps_the_deadline_it_was_dialled_with_and_can_be_told_to_drop_
 
     let _ = server.join();
 }
+
+/// How many bytes the burst test sends in one go. Far past what one socket
+/// read can hand the decryption state at once, so a reader that drops the
+/// rest of a socket read loses bytes here.
+const BURST_BYTES: usize = 400 * 1024;
+
+#[test]
+fn a_burst_larger_than_one_socket_read_arrives_whole() {
+    let (config, _cert) = fresh_server();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let address = listener.local_addr().expect("read the bound address");
+
+    let sent: Vec<u8> = (0..BURST_BYTES).map(|i| (i % 251) as u8).collect();
+    let written = sent.clone();
+    let server = std::thread::spawn(move || {
+        let (mut sock, _) = listener.accept().expect("accept the client");
+        let conn = ServerConnection::new(Arc::new(config)).expect("a server connection");
+        let mut conn = rustls::Connection::Server(conn);
+        handshake(&mut conn, &mut sock, Instant::now() + LOOPBACK_WAIT)
+            .expect("the loopback handshake finishes");
+        let (_reader, mut writer) = split_tls(conn, sock).expect("split the loopback stream");
+        writer.write_all(&written).expect("the burst is written");
+    });
+
+    let (mut reader, _writer, _presented) =
+        dial(&address.to_string(), None, LOOPBACK_WAIT).expect("the dial opens");
+    reader.set_deadline(Some(Instant::now() + LOOPBACK_WAIT));
+    let mut received = vec![0u8; BURST_BYTES];
+    reader
+        .read_exact(&mut received)
+        .expect("every byte of the burst arrives");
+    assert_eq!(received, sent, "the burst arrived changed");
+
+    server.join().expect("the server thread finished");
+}
