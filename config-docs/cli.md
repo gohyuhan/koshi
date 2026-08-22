@@ -192,12 +192,14 @@ Example: `koshi input --pane pane-… --no-enter "git status"` leaves
 | `koshi share revoke <IDENTITY> [--session <SESSION>]` | Revoke the tokens an identity holds |
 | `koshi share list [--session <SESSION>] [--format table\|json]` | List the tokens granted on this machine |
 | `koshi attach --remote <SERVER> [--save-as <NAME>] [SESSION]` | Attach to a session on the machine `SERVER` names |
+| `koshi remote new` | Save a server, asking for its name, address and secret |
+| `koshi remote edit <SERVER>` | Change one saved server's name, address or secret |
 | `koshi remote list [--format table\|json]` | List the servers this machine has saved |
 | `koshi remote forget <SERVER>` | Drop one saved server |
 | `koshi remote set-secret <SERVER>` | Replace the secret of one saved server |
 
-The first three run on the machine holding the sessions. The last four run on
-the machine connecting to it.
+The first three run on the machine holding the sessions. The rest run on the
+machine connecting to it.
 
 An absent `--session` reads one way on `grant` and another way on `revoke`.
 `koshi share grant alice` gives alice one token that reaches every session on
@@ -343,6 +345,68 @@ readable only by its owner. `koshi remote list` prints the name, address,
 fingerprint and last-used time of each saved server, and never a secret. Once
 the serving machine grants a fresh secret, `koshi remote set-secret <SERVER>`
 replaces the saved one; it reads the new secret the same way a connection does.
+
+`koshi remote new` saves a server without attaching to one of its sessions. It
+asks three questions in turn — the name, the address, and the secret — and
+every answer is needed. It then dials the server once to check that it admits
+the secret:
+
+```text
+$ koshi remote new
+every answer is needed. Ctrl-C stops without saving.
+name: work
+address: laptop.local:7654
+secret:
+checking laptop.local:7654 …
+saved work at laptop.local:7654.
+```
+
+A server that does not admit the secret is named, and the last question is
+whether to save what was typed anyway. A server saved that way holds no
+fingerprint, and its first connection pins the certificate it meets:
+
+```text
+checking laptop.local:7654 …
+koshi: IPC unavailable: laptop.local:7654 refused the connection: nothing is listening on that port. if remote access is not enabled on that machine, run `koshi share grant` there and answer yes to the offer to open the port
+save it anyway? [y/N]: y
+saved work at laptop.local:7654; its certificate is pinned on the first connection.
+```
+
+Answering anything else prints `nothing was saved.` and writes nothing.
+
+`koshi remote edit <SERVER>` asks the same three questions with the saved
+values in brackets. An empty answer keeps the value in brackets, and an empty
+secret keeps the saved secret, so only what changes is typed:
+
+```text
+$ koshi remote edit work
+press Enter to keep the value in brackets. An empty secret keeps the saved one. Ctrl-C stops without saving.
+name [work]:
+address [laptop.local:7654]: laptop.local:7655
+secret:
+checking laptop.local:7655 …
+updated work at laptop.local:7655.
+```
+
+An edit that keeps the address keeps the pinned fingerprint. An edit that
+changes the address drops it, and the next connection pins the certificate at
+the new address. When the check does not pass, that question names it:
+`save the change anyway? The certificate at that address is pinned on the
+first connection to it. [y/N]`.
+
+Nothing is written until every answer has settled. Ctrl-C at any question, and
+input that ends before an answer arrives, leave the saved server unchanged.
+
+The store is read again at the moment the record is written, so a server
+another `koshi` saved while the questions were open is still saved. A name or
+an address that another record took meanwhile is refused, and nothing is
+written.
+
+A saved server that pins no certificate is left out of the sweep that a bare
+`koshi list-sessions` and a bare `koshi attach` make over every saved server,
+and one stderr line names it. Naming it — `koshi list-sessions --remote work` —
+connects, pins the certificate that server presents, and the sweep includes it
+from then on.
 
 A token is full access to every session it reaches. `koshi share grant alice`
 reaches every session on the serving machine, including the sessions started

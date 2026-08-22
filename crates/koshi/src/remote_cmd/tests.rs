@@ -1,5 +1,7 @@
-//! Tests for the `remote` verbs: how the three subcommands parse, what each
-//! of the three answers renders to, and that no rendering prints a secret.
+//! Tests for the `remote` verbs: how the subcommands parse, what each answer
+//! renders to, that no rendering prints a secret, which names and addresses a
+//! record may take, which fingerprint a changed record keeps, and what the
+//! store a settled record goes into holds.
 
 use super::*;
 
@@ -35,7 +37,7 @@ fn two_records() -> Vec<SavedServer> {
             name: Some("work".to_string()),
             address: "laptop.local:7654".to_string(),
             secret: ConnectionToken::new("f00d"),
-            fingerprint: "aa".repeat(32),
+            fingerprint: Some("aa".repeat(32)),
             added_at: at(10),
             last_used_at: Some(at(20)),
         },
@@ -43,7 +45,7 @@ fn two_records() -> Vec<SavedServer> {
             name: None,
             address: "10.0.0.4:7654".to_string(),
             secret: ConnectionToken::new("beef"),
-            fingerprint: "bb".repeat(32),
+            fingerprint: Some("bb".repeat(32)),
             added_at: at(30),
             last_used_at: None,
         },
@@ -211,7 +213,7 @@ fn a_word_naming_one_server_and_addressing_another_is_refused_as_ambiguous() {
             name: Some("desk:7654".to_string()),
             address: "laptop.local:7654".to_string(),
             secret: ConnectionToken::new("f00d"),
-            fingerprint: "aa".repeat(32),
+            fingerprint: Some("aa".repeat(32)),
             added_at: at(10),
             last_used_at: None,
         },
@@ -219,7 +221,7 @@ fn a_word_naming_one_server_and_addressing_another_is_refused_as_ambiguous() {
             name: None,
             address: "desk:7654".to_string(),
             secret: ConnectionToken::new("beef"),
-            fingerprint: "bb".repeat(32),
+            fingerprint: Some("bb".repeat(32)),
             added_at: at(20),
             last_used_at: None,
         },
@@ -232,4 +234,288 @@ fn a_word_naming_one_server_and_addressing_another_is_refused_as_ambiguous() {
         "invalid arguments: desk:7654 is the name of one saved server and the address of \
          another; run `koshi remote list` and name the one you mean"
     );
+}
+
+#[test]
+fn a_new_takes_no_argument_and_an_edit_takes_the_server_it_changes() {
+    assert_eq!(
+        remote_command(&["koshi", "remote", "new"]),
+        RemoteCommand::New
+    );
+    assert_eq!(
+        remote_command(&["koshi", "remote", "edit", "work"]),
+        RemoteCommand::Edit {
+            server: "work".to_string()
+        }
+    );
+}
+
+#[test]
+fn an_edit_with_no_server_is_a_usage_error() {
+    let err = Cli::try_parse_from(["koshi", "remote", "edit"]).expect_err("argv must not parse");
+    assert_eq!(err.exit_code(), 2);
+}
+
+#[test]
+fn a_checked_record_renders_its_name_and_address_and_an_unchecked_one_says_when_it_pins() {
+    let mut record = two_records().remove(0);
+    assert_eq!(
+        output::render_remote_saved(&record),
+        "saved work at laptop.local:7654.\n"
+    );
+    assert_eq!(
+        output::render_remote_updated(&record),
+        "updated work at laptop.local:7654.\n"
+    );
+
+    record.fingerprint = None;
+    assert_eq!(
+        output::render_remote_saved(&record),
+        "saved work at laptop.local:7654; its certificate is pinned on the first connection.\n"
+    );
+}
+
+#[test]
+fn a_record_with_no_name_renders_its_address_alone() {
+    let record = two_records().remove(1);
+    assert_eq!(
+        output::render_remote_updated(&record),
+        "updated 10.0.0.4:7654.\n"
+    );
+}
+
+#[test]
+fn a_discarded_answer_says_nothing_was_saved() {
+    assert_eq!(output::render_remote_discarded(), "nothing was saved.\n");
+}
+
+#[test]
+fn neither_settled_line_prints_the_secret_it_carries() {
+    for record in two_records() {
+        let saved = output::render_remote_saved(&record);
+        let updated = output::render_remote_updated(&record);
+        assert!(
+            !saved.contains("f00d") && !saved.contains("beef"),
+            "{saved}"
+        );
+        assert!(
+            !updated.contains("f00d") && !updated.contains("beef"),
+            "{updated}"
+        );
+    }
+}
+
+#[test]
+fn an_empty_name_is_refused_and_a_free_one_is_taken() {
+    let store = store_of(two_records());
+
+    assert_eq!(
+        free_name(&store, "")
+            .expect_err("an empty name is refused")
+            .to_string(),
+        "invalid arguments: a name is needed, such as work"
+    );
+    free_name(&store, "desk").expect("no record answers to desk");
+}
+
+#[test]
+fn a_name_with_the_shape_of_an_address_is_refused() {
+    let store = store_of(two_records());
+
+    assert!(
+        free_name(&store, "desk.local:7654")
+            .expect_err("a name must not be an address")
+            .to_string()
+            .contains("the shape of an address"),
+        "the refusal names the shape"
+    );
+}
+
+#[test]
+fn a_name_another_record_answers_to_is_refused() {
+    let store = store_of(two_records());
+
+    assert_eq!(
+        free_name(&store, "work")
+            .expect_err("another record answers to it")
+            .to_string(),
+        "invalid arguments: work already answers for a saved server; \
+         run `koshi remote list` and pick another name"
+    );
+}
+
+/// A name is checked for the shape of an address before the store is asked,
+/// so a name that is another record's address is refused for its shape.
+#[test]
+fn a_name_that_is_another_record_s_address_is_refused_for_its_shape() {
+    let store = store_of(two_records());
+
+    assert!(
+        free_name(&store, "10.0.0.4:7654")
+            .expect_err("that is another record's address")
+            .to_string()
+            .contains("the shape of an address"),
+        "the refusal names the shape"
+    );
+}
+
+#[test]
+fn an_address_that_is_not_host_port_is_refused_naming_the_shape() {
+    let store = store_of(two_records());
+
+    for wrong in ["", "laptop.local", "laptop.local:door"] {
+        assert_eq!(
+            free_address(&store, wrong)
+                .expect_err("that is not an address")
+                .to_string(),
+            format!(
+                "invalid arguments: an address is host:port, such as laptop.local:7654, \
+                 and {wrong} is not"
+            )
+        );
+    }
+    free_address(&store, "desk.local:7654").expect("no record answers to that address");
+}
+
+#[test]
+fn an_address_another_record_answers_to_is_refused_naming_the_edit_command() {
+    let store = store_of(two_records());
+
+    assert_eq!(
+        free_address(&store, "10.0.0.4:7654")
+            .expect_err("another record holds that address")
+            .to_string(),
+        "invalid arguments: 10.0.0.4:7654 already answers for a saved server; \
+         run `koshi remote edit 10.0.0.4:7654` to change it"
+    );
+}
+
+/// The four ways a changed record settles its fingerprint: a check that
+/// pinned one wins either way, and with none the address decides.
+#[test]
+fn a_check_that_pinned_wins_and_an_address_that_changed_drops_what_was_held() {
+    let pinned = || Some("aa".repeat(32));
+    let held = || Some("bb".repeat(32));
+
+    assert_eq!(settled_pin(pinned(), held(), false), pinned());
+    assert_eq!(settled_pin(pinned(), held(), true), pinned());
+    assert_eq!(settled_pin(None, held(), false), held());
+    assert_eq!(settled_pin(None, held(), true), None);
+}
+
+/// A record named `desk` at `desk.local:7654`, pinning nothing.
+fn a_new_record() -> SavedServer {
+    SavedServer {
+        name: Some("desk".to_string()),
+        address: "desk.local:7654".to_string(),
+        secret: ConnectionToken::new("cafe"),
+        fingerprint: None,
+        added_at: at(40),
+        last_used_at: None,
+    }
+}
+
+#[test]
+fn a_new_record_joins_the_records_already_there() {
+    let settled = place(store_of(two_records()), &a_new_record(), None)
+        .expect("its name and address are free");
+
+    assert_eq!(
+        settled
+            .records
+            .iter()
+            .map(|record| record.address.as_str())
+            .collect::<Vec<_>>(),
+        vec!["laptop.local:7654", "10.0.0.4:7654", "desk.local:7654"]
+    );
+}
+
+#[test]
+fn a_replaced_record_leaves_the_store_and_the_new_one_takes_its_place() {
+    let mut moved = two_records().remove(0);
+    moved.address = "desk.local:7655".to_string();
+
+    let settled = place(store_of(two_records()), &moved, Some("work")).expect("the record moves");
+
+    assert_eq!(
+        settled
+            .records
+            .iter()
+            .map(|record| (record.name.as_deref(), record.address.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(None, "10.0.0.4:7654"), (Some("work"), "desk.local:7655")],
+        "one record answers for work, at the address the edit typed"
+    );
+}
+
+#[test]
+fn a_record_that_keeps_its_own_name_and_address_is_placed_back() {
+    let mut same = two_records().remove(0);
+    same.secret = ConnectionToken::new("new secret");
+
+    let settled = place(store_of(two_records()), &same, Some("work")).expect("it may keep both");
+
+    assert_eq!(settled.records.len(), 2);
+    assert_eq!(
+        settled
+            .records
+            .iter()
+            .find(|record| record.name.as_deref() == Some("work"))
+            .expect("work is still saved")
+            .secret,
+        ConnectionToken::new("new secret")
+    );
+}
+
+/// The record was forgotten while the questions were open. Placing it back
+/// would return a secret the user dropped, so it is refused.
+#[test]
+fn a_record_that_is_no_longer_saved_is_refused_rather_than_put_back() {
+    assert_eq!(
+        place(ServerStore::new(), &a_new_record(), Some("work"))
+            .expect_err("nothing answers to work now")
+            .to_string(),
+        "invalid arguments: no saved server is named work; run `koshi remote list`"
+    );
+}
+
+/// Another koshi saved a record under this name while the questions were
+/// open. The name is taken now, so the placement is refused.
+#[test]
+fn a_name_another_record_took_meanwhile_is_refused_and_yields_no_store() {
+    let mut taken = a_new_record();
+    taken.name = Some("work".to_string());
+
+    assert_eq!(
+        place(store_of(two_records()), &taken, None)
+            .expect_err("work is taken")
+            .to_string(),
+        "invalid arguments: work already answers for a saved server; \
+         run `koshi remote list` and pick another name"
+    );
+}
+
+#[test]
+fn an_address_another_record_took_meanwhile_is_refused_and_yields_no_store() {
+    let mut taken = a_new_record();
+    taken.address = "10.0.0.4:7654".to_string();
+
+    assert_eq!(
+        place(store_of(two_records()), &taken, None)
+            .expect_err("that address is taken")
+            .to_string(),
+        "invalid arguments: 10.0.0.4:7654 already answers for a saved server; \
+         run `koshi remote edit 10.0.0.4:7654` to change it"
+    );
+}
+
+#[test]
+fn a_record_with_no_name_is_placed_without_a_name_check() {
+    let mut nameless = a_new_record();
+    nameless.name = None;
+
+    let settled = place(store_of(two_records()), &nameless, None).expect("its address is free");
+
+    assert_eq!(settled.records.len(), 3);
+    assert_eq!(settled.records[2].name, None);
 }

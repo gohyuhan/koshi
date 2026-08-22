@@ -31,6 +31,35 @@ Koshi keeps the core focused on terminal work. Panes, tabs, layouts,
 keybindings, themes, and saved layouts are built in. App settings stay in
 small KDL files, and shell commands can control a running session.
 
+Three parts of the design are worth knowing before you start.
+
+**Your keybindings stay on your machine.** The terminal you sit at reads your
+own `keybinding.kdl`. It decides what each key means. It then sends the action
+name and its arguments to the session. Press `<C-p> l`, and the session
+receives `core:new-pane-right`. It never receives the key itself. A session on
+another machine works the same way, so your own shortcuts follow you there.
+You never edit a keybinding file on the other machine.
+
+**Each attached terminal keeps its own view.** The focused pane, the active
+tab, the zoomed pane, the scroll position, the text selection and the lock
+mode belong to the terminal, not to the session. Two people attach to one
+session at the same time. One switches to tab 2, and the other stays on tab 1.
+Each one types into the pane they focused. Neither moves the other's screen.
+
+**A session outlives the terminals that view it.** The session runs as its own
+program. Close your terminal, and its panes keep running. Attach again later,
+from the same machine or another one, and the panes are where you left them.
+
+> [!IMPORTANT]
+> One setting controls this. `auto-close-session` in `koshi.kdl` is `#false` by
+> default, which keeps the session running after its last terminal leaves. Set
+> it to `#true`, and the session ends instead: it asks every program in it to
+> stop, waits up to three seconds, then kills what has not exited.
+>
+> The session reads this setting once, from the `koshi.kdl` on the machine it
+> starts on. A terminal that attaches later cannot change it from its own file.
+> See [config-docs/koshi.md](config-docs/koshi.md#auto-close-session).
+
 ## Features
 
 - 🪟 **Split panes** — open panes left, right, up, or down; layouts fill the tab.
@@ -43,6 +72,7 @@ small KDL files, and shell commands can control a running session.
 - 🖱️ **Mouse support** — focus panes, resize borders, scroll, and select text.
 - 📋 **Clipboard copy** — copy mouse selections through OSC 52, including remote sessions.
 - 🎯 **Mouse selection mode** — select text while a program owns mouse input.
+- 👥 **Multi-client sessions** — attach several terminals to one session; each keeps its own focus, active tab, and zoom.
 - 📜 **Per-pane history** — keep separate scrollback and scroll positions.
 - 🧾 **Terminal support** — true color, text styles, alternate screens, CJK, emoji, and box drawing.
 - 🎨 **Themes** — use the built-in colors or copy one of 25 included themes.
@@ -377,6 +407,8 @@ invocation against the machine `SERVER` names instead of this one.
 | `koshi share list [--session <SESSION>] [--format table\|json]` | List the tokens granted on this machine |
 | `koshi attach --remote <SERVER> [--save-as <NAME>] [SESSION]` | Attach to a session on the machine `SERVER` names |
 | `koshi list-sessions --remote <SERVER>` | List the sessions on the machine `SERVER` names |
+| `koshi remote new` | Save a server, asking for its name, address and secret |
+| `koshi remote edit <SERVER>` | Change one saved server's name, address or secret |
 | `koshi remote list [--format table\|json]` | List the servers this machine has saved |
 | `koshi remote forget <SERVER>` | Drop one saved server |
 | `koshi remote set-secret <SERVER>` | Replace the secret of one saved server |

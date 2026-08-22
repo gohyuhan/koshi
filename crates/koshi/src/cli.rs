@@ -473,7 +473,8 @@ pub enum CliCommand {
         #[command(subcommand)]
         command: ShareCommand,
     },
-    /// List, forget and re-secret the servers this machine has saved.
+    /// Save, change, list, forget and re-secret the servers this machine has
+    /// saved.
     Remote {
         /// What to do with the saved servers.
         #[command(subcommand)]
@@ -710,6 +711,17 @@ pub enum ShareCommand {
 /// prints a saved secret.
 #[derive(Debug, PartialEq, Eq, Subcommand)]
 pub enum RemoteCommand {
+    /// Save a server this machine can dial, asking for its name, its address
+    /// and its secret in turn.
+    New,
+    /// Change what one saved server holds, asking for its name, its address
+    /// and its secret in turn, with the current value kept on an empty
+    /// answer.
+    Edit {
+        /// Server to change, by the name it was saved under or its address.
+        #[arg(value_name = "SERVER")]
+        server: String,
+    },
     /// List the servers this machine has saved.
     List {
         /// Output format.

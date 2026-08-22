@@ -69,7 +69,7 @@ fn a_saved_server() -> SavedServer {
         name: Some("work".to_string()),
         address: "desk.local:7654".to_string(),
         secret: ConnectionToken::generate(),
-        fingerprint: "aa".repeat(32),
+        fingerprint: Some("aa".repeat(32)),
         added_at: SystemTime::UNIX_EPOCH,
         last_used_at: None,
     }
@@ -296,8 +296,8 @@ fn a_certificate_that_changed_carries_an_ipc_failure_and_never_a_runtime_one() {
 }
 
 // The hidden-line reader over an in-memory stream: Enter ends the entry,
-// backspace removes the last byte, Ctrl-C empties it, and end of stream ends
-// the entry where it stands.
+// backspace removes the last byte, Ctrl-C interrupts it, and end of stream
+// ends the entry where it stands.
 #[test]
 fn read_hidden_line_edits_and_terminators() {
     let mut plain = std::io::Cursor::new(b"secret\n".to_vec());
@@ -310,10 +310,28 @@ fn read_hidden_line_edits_and_terminators() {
     assert_eq!(read_hidden_line(&mut backspaced).unwrap(), "secret");
 
     let mut interrupted = std::io::Cursor::new(b"sec\x03ret\n".to_vec());
-    assert_eq!(read_hidden_line(&mut interrupted).unwrap(), "");
+    assert_eq!(
+        read_hidden_line(&mut interrupted)
+            .expect_err("Ctrl-C interrupts the entry")
+            .kind(),
+        io::ErrorKind::Interrupted
+    );
 
     let mut ended = std::io::Cursor::new(b"secret".to_vec());
     assert_eq!(read_hidden_line(&mut ended).unwrap(), "secret");
+}
+
+// End of stream with nothing typed is not an empty answer: it is the input
+// ending, which every prompt that asks again must stop on.
+#[test]
+fn read_hidden_line_reports_an_entry_that_ended_before_anything_was_typed() {
+    let mut nothing = std::io::Cursor::new(Vec::new());
+    assert_eq!(
+        read_hidden_line(&mut nothing)
+            .expect_err("the input ended")
+            .kind(),
+        io::ErrorKind::UnexpectedEof
+    );
 }
 
 // The sweep completion: every asked server comes back as exactly one entry,
@@ -475,4 +493,101 @@ fn listed_rows_arrive_with_control_characters_removed() {
             name: "dev[2K".to_string(),
         }]
     );
+}
+
+// A record pinning no certificate is never dialled by the sweep: presenting
+// the secret to whatever answers at that address is what pinning prevents.
+#[test]
+fn a_record_with_no_pinned_certificate_is_unchecked_and_is_not_dialled() {
+    let mut record = a_saved_server();
+    record.fingerprint = None;
+    // An address nothing listens on: a dial would have to fail, and this
+    // returns before one is made.
+    record.address = "127.0.0.1:1".to_string();
+
+    assert_eq!(
+        probe(&record, Instant::now()),
+        Reach::Unchecked {
+            server: "work".to_string()
+        }
+    );
+}
+
+// Every entry the sweep produces sorts by server name, whatever it says.
+#[test]
+fn an_unchecked_server_takes_its_place_among_the_answers() {
+    let heard = vec![
+        Reach::Unchecked {
+            server: "work".to_string(),
+        },
+        Reach::Reached {
+            server: "desk".to_string(),
+            rows: Vec::new(),
+        },
+    ];
+
+    assert_eq!(
+        complete_sweep(heard, vec!["desk".to_string(), "work".to_string()]),
+        vec![
+            Reach::Reached {
+                server: "desk".to_string(),
+                rows: Vec::new(),
+            },
+            Reach::Unchecked {
+                server: "work".to_string(),
+            },
+        ]
+    );
+}
+
+// Backspace at the start of an entry removes nothing, and both backspace
+// bytes reach the same place.
+#[test]
+fn read_hidden_line_takes_a_backspace_before_anything_was_typed() {
+    let mut leading = std::io::Cursor::new(b"\x7f\x08secret\n".to_vec());
+    assert_eq!(read_hidden_line(&mut leading).unwrap(), "secret");
+
+    let mut both = std::io::Cursor::new(b"secretxy\x08\x7f\n".to_vec());
+    assert_eq!(read_hidden_line(&mut both).unwrap(), "secret");
+}
+
+// A secret is bytes until it is read back, so bytes that are not UTF-8 come
+// back as the replacement character instead of ending the entry.
+#[test]
+fn read_hidden_line_replaces_bytes_that_are_not_utf_8() {
+    let mut broken = std::io::Cursor::new(b"se\xffcret\n".to_vec());
+    assert_eq!(read_hidden_line(&mut broken).unwrap(), "se\u{fffd}cret");
+}
+
+// The pin a dial presents is read from the store by address, so a record that
+// pinned nothing when it was taken is still dialled against the certificate an
+// earlier dial saved.
+#[test]
+fn the_pin_for_an_address_is_the_one_its_record_holds() {
+    let mut store = ServerStore::new();
+    let mut record = a_saved_server();
+    record.fingerprint = Some("cd".repeat(32));
+    store.save(record).expect("the store takes it");
+
+    assert_eq!(
+        pinned_in(&store, "desk.local:7654"),
+        Some("cd".repeat(32)),
+        "the address finds the record that holds the pin"
+    );
+    assert_eq!(
+        pinned_in(&store, "work"),
+        Some("cd".repeat(32)),
+        "and so does the name it was saved under"
+    );
+}
+
+#[test]
+fn an_address_no_record_holds_and_a_record_that_pins_nothing_both_pin_nothing() {
+    let mut store = ServerStore::new();
+    let mut record = a_saved_server();
+    record.fingerprint = None;
+    store.save(record).expect("the store takes it");
+
+    assert_eq!(pinned_in(&store, "desk.local:7654"), None);
+    assert_eq!(pinned_in(&store, "nobody.local:7654"), None);
 }
