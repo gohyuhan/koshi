@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 crossterm = "0.29.0"
+fs4 = "1.1.0"
 koshi-beta = { version = "0.3.0-pr.2", path = "../koshi-beta" }
 koshi-config = { version = "0.3.0-pr.2", path = "../koshi-config" }
 koshi-core = { version = "0.3.0-pr.2", path = "../koshi-core" }

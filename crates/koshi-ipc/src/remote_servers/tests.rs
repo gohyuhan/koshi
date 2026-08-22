@@ -1,6 +1,7 @@
 //! Tests for the saved-server store: where the file lives, the write/read
-//! roundtrip through the atomic writer, the private mode of the file, and
-//! looking a server up by its name or its address.
+//! roundtrip through the atomic writer, the private mode of the file, where
+//! the lock guarding a change lives, and looking a server up by its name or
+//! its address.
 
 use std::time::Duration;
 
@@ -50,6 +51,20 @@ fn the_store_path_is_remote_servers_under_the_data_dir() {
         store_path(Path::new("/home/ada/.local/share/koshi")),
         Path::new("/home/ada/.local/share/koshi/remote/servers")
     );
+}
+
+/// The lock guards the store rather than sitting on it: the store file is
+/// replaced by a rename, so a lock held on that path would guard a file no
+/// later reader opens.
+#[test]
+fn the_lock_path_sits_beside_the_store_and_is_not_the_store() {
+    let data_dir = Path::new("/home/ada/.local/share/koshi");
+
+    assert_eq!(
+        lock_path(data_dir),
+        Path::new("/home/ada/.local/share/koshi/remote/servers.lock")
+    );
+    assert_ne!(lock_path(data_dir), store_path(data_dir));
 }
 
 #[test]

@@ -346,5 +346,18 @@ pub fn store_path(data_dir: &Path) -> PathBuf {
     data_dir.join("remote").join("servers")
 }
 
+/// Where the lock that guards a change to the saved-server store lives:
+/// `remote/servers.lock` under `data_dir`.
+///
+/// A writer holds this file's advisory lock from the read that starts its
+/// change to the write that ends it. [`ServerStore::write`] renames a new file
+/// over [`store_path`], and leaves this path alone.
+///
+/// The file stays empty. It carries the lock and no content.
+#[must_use]
+pub fn lock_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("remote").join("servers.lock")
+}
+
 #[cfg(test)]
 mod tests;

@@ -1,6 +1,7 @@
 //! Tests for the dialling side: which strings count as an address, which saved
 //! names are refused, which of the three lookup answers leads to a pinned dial,
-//! and which answer to a Hello reads as a refusal a repeat dial cannot change.
+//! which answer to a Hello reads as a refusal a repeat dial cannot change, and
+//! how the lock that guards a change to the saved-server store behaves.
 
 use std::time::SystemTime;
 
@@ -590,4 +591,75 @@ fn an_address_no_record_holds_and_a_record_that_pins_nothing_both_pin_nothing() 
 
     assert_eq!(pinned_in(&store, "desk.local:7654"), None);
     assert_eq!(pinned_in(&store, "nobody.local:7654"), None);
+}
+
+/// How long a lock test waits before it reads the lock as held. Short enough
+/// that a refusal test does not slow the suite down.
+const TEST_LOCK_WAIT: Duration = Duration::from_millis(50);
+
+#[test]
+fn a_lock_taken_where_nothing_exists_makes_the_file_and_the_directory() {
+    let dir = tempfile::tempdir().expect("a temp directory");
+    let path = dir.path().join("remote").join("servers.lock");
+
+    let held = hold_store(&path, TEST_LOCK_WAIT).expect("nothing else holds it");
+
+    assert!(path.is_file(), "the lock file is made where it was missing");
+    drop(held);
+}
+
+/// The lock sits beside the saved secrets, so the directory it goes in and the
+/// file itself carry the same owner-only modes the store carries.
+#[cfg(unix)]
+#[test]
+fn a_lock_and_the_directory_holding_it_are_readable_by_their_owner_alone() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("a temp directory");
+    let parent = dir.path().join("remote");
+    let path = parent.join("servers.lock");
+
+    let held = hold_store(&path, TEST_LOCK_WAIT).expect("nothing else holds it");
+
+    let mode = |at: &std::path::Path| {
+        at.metadata()
+            .expect("it was just made")
+            .permissions()
+            .mode()
+            & 0o777
+    };
+    assert_eq!(mode(&parent), 0o700, "nobody else may list the directory");
+    assert_eq!(mode(&path), 0o600, "nobody else may open the lock");
+    drop(held);
+}
+
+/// The second koshi finds the lock held and says so rather than writing over
+/// the first one's change.
+#[test]
+fn a_lock_another_holder_keeps_is_refused_after_the_wait() {
+    let dir = tempfile::tempdir().expect("a temp directory");
+    let path = dir.path().join("servers.lock");
+    let held = hold_store(&path, TEST_LOCK_WAIT).expect("nothing else holds it");
+
+    assert_eq!(
+        hold_store(&path, TEST_LOCK_WAIT)
+            .expect_err("the first holder has it")
+            .to_string(),
+        "IPC unavailable: another koshi is changing the saved servers; try again"
+    );
+    drop(held);
+}
+
+/// The first koshi finished, so the next one takes the lock instead of
+/// reporting it held.
+#[test]
+fn a_lock_its_holder_released_is_taken_by_the_next_caller() {
+    let dir = tempfile::tempdir().expect("a temp directory");
+    let path = dir.path().join("servers.lock");
+
+    let held = hold_store(&path, TEST_LOCK_WAIT).expect("nothing else holds it");
+    drop(held);
+
+    let again = hold_store(&path, TEST_LOCK_WAIT).expect("the first holder let it go");
+    drop(again);
 }

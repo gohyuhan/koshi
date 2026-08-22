@@ -1,7 +1,9 @@
 //! Tests for the `remote` verbs: how the subcommands parse, what each answer
 //! renders to, that no rendering prints a secret, which names and addresses a
-//! record may take, which fingerprint a changed record keeps, and what the
-//! store a settled record goes into holds.
+//! record may take, which fingerprint a changed record keeps, what the store a
+//! settled record goes into holds, that a refused placement changes nothing,
+//! and which change another koshi made while the questions were open refuses
+//! an edit.
 
 use super::*;
 
@@ -390,17 +392,17 @@ fn an_address_another_record_answers_to_is_refused_naming_the_edit_command() {
     );
 }
 
-/// The four ways a changed record settles its fingerprint: a check that
-/// pinned one wins either way, and with none the address decides.
+/// What a changed record offers the check and keeps afterwards: the pinned
+/// fingerprint while the address is unchanged, and nothing once the user
+/// changed the address.
 #[test]
-fn a_check_that_pinned_wins_and_an_address_that_changed_drops_what_was_held() {
-    let pinned = || Some("aa".repeat(32));
+fn an_address_that_changed_drops_what_was_held_and_an_unchanged_one_keeps_it() {
     let held = || Some("bb".repeat(32));
 
-    assert_eq!(settled_pin(pinned(), held(), false), pinned());
-    assert_eq!(settled_pin(pinned(), held(), true), pinned());
-    assert_eq!(settled_pin(None, held(), false), held());
-    assert_eq!(settled_pin(None, held(), true), None);
+    assert_eq!(kept_pin(held(), false), held());
+    assert_eq!(kept_pin(held(), true), None);
+    assert_eq!(kept_pin(None, false), None);
+    assert_eq!(kept_pin(None, true), None);
 }
 
 /// A record named `desk` at `desk.local:7654`, pinning nothing.
@@ -417,8 +419,8 @@ fn a_new_record() -> SavedServer {
 
 #[test]
 fn a_new_record_joins_the_records_already_there() {
-    let settled = place(store_of(two_records()), &a_new_record(), None)
-        .expect("its name and address are free");
+    let mut settled = store_of(two_records());
+    place(&mut settled, &a_new_record(), None).expect("its name and address are free");
 
     assert_eq!(
         settled
@@ -435,7 +437,8 @@ fn a_replaced_record_leaves_the_store_and_the_new_one_takes_its_place() {
     let mut moved = two_records().remove(0);
     moved.address = "desk.local:7655".to_string();
 
-    let settled = place(store_of(two_records()), &moved, Some("work")).expect("the record moves");
+    let mut settled = store_of(two_records());
+    place(&mut settled, &moved, Some("work")).expect("the record moves");
 
     assert_eq!(
         settled
@@ -453,7 +456,8 @@ fn a_record_that_keeps_its_own_name_and_address_is_placed_back() {
     let mut same = two_records().remove(0);
     same.secret = ConnectionToken::new("new secret");
 
-    let settled = place(store_of(two_records()), &same, Some("work")).expect("it may keep both");
+    let mut settled = store_of(two_records());
+    place(&mut settled, &same, Some("work")).expect("it may keep both");
 
     assert_eq!(settled.records.len(), 2);
     assert_eq!(
@@ -472,7 +476,7 @@ fn a_record_that_keeps_its_own_name_and_address_is_placed_back() {
 #[test]
 fn a_record_that_is_no_longer_saved_is_refused_rather_than_put_back() {
     assert_eq!(
-        place(ServerStore::new(), &a_new_record(), Some("work"))
+        place(&mut ServerStore::new(), &a_new_record(), Some("work"))
             .expect_err("nothing answers to work now")
             .to_string(),
         "invalid arguments: no saved server is named work; run `koshi remote list`"
@@ -482,31 +486,53 @@ fn a_record_that_is_no_longer_saved_is_refused_rather_than_put_back() {
 /// Another koshi saved a record under this name while the questions were
 /// open. The name is taken now, so the placement is refused.
 #[test]
-fn a_name_another_record_took_meanwhile_is_refused_and_yields_no_store() {
+fn a_name_another_record_took_meanwhile_is_refused_and_changes_nothing() {
     let mut taken = a_new_record();
     taken.name = Some("work".to_string());
+    let mut store = store_of(two_records());
 
     assert_eq!(
-        place(store_of(two_records()), &taken, None)
+        place(&mut store, &taken, None)
             .expect_err("work is taken")
             .to_string(),
         "invalid arguments: work already answers for a saved server; \
          run `koshi remote list` and pick another name"
     );
+    assert_eq!(store.records, two_records(), "the refusal wrote nothing");
 }
 
 #[test]
-fn an_address_another_record_took_meanwhile_is_refused_and_yields_no_store() {
+fn an_address_another_record_took_meanwhile_is_refused_and_changes_nothing() {
     let mut taken = a_new_record();
     taken.address = "10.0.0.4:7654".to_string();
+    let mut store = store_of(two_records());
 
     assert_eq!(
-        place(store_of(two_records()), &taken, None)
+        place(&mut store, &taken, None)
             .expect_err("that address is taken")
             .to_string(),
         "invalid arguments: 10.0.0.4:7654 already answers for a saved server; \
          run `koshi remote edit 10.0.0.4:7654` to change it"
     );
+    assert_eq!(store.records, two_records(), "the refusal wrote nothing");
+}
+
+/// The replaced record leaves before the checks, so a refusal after that point
+/// must put it back rather than leave the store missing it.
+#[test]
+fn a_replacement_refused_after_the_record_left_puts_every_record_back() {
+    let mut moved = two_records().remove(0);
+    moved.address = "10.0.0.4:7654".to_string();
+    let mut store = store_of(two_records());
+
+    assert_eq!(
+        place(&mut store, &moved, Some("work"))
+            .expect_err("the other record already answers to that address")
+            .to_string(),
+        "invalid arguments: 10.0.0.4:7654 already answers for a saved server; \
+         run `koshi remote edit 10.0.0.4:7654` to change it"
+    );
+    assert_eq!(store.records, two_records(), "work is still saved");
 }
 
 #[test]
@@ -514,8 +540,145 @@ fn a_record_with_no_name_is_placed_without_a_name_check() {
     let mut nameless = a_new_record();
     nameless.name = None;
 
-    let settled = place(store_of(two_records()), &nameless, None).expect("its address is free");
+    let mut settled = store_of(two_records());
+    place(&mut settled, &nameless, None).expect("its address is free");
 
     assert_eq!(settled.records.len(), 3);
     assert_eq!(settled.records[2].name, None);
+}
+
+/// The record on disk still holds everything the questions were answered
+/// against, so the edit goes on.
+#[test]
+fn a_record_no_other_koshi_touched_is_taken_as_it_stands() {
+    let held = two_records().remove(0);
+
+    let now_held = record_if_unchanged(&store_of(two_records()), "work", &held)
+        .expect("nothing about it changed");
+
+    assert_eq!(now_held, held);
+}
+
+/// Another koshi dialled this server while the questions were open, so its
+/// last-used time moved. That is not a change to what the questions asked
+/// about, and the fresh time is the one the edit carries.
+#[test]
+fn a_last_used_time_another_koshi_stamped_is_carried_and_does_not_refuse() {
+    let held = two_records().remove(0);
+    let mut dialled = two_records();
+    dialled[0].last_used_at = Some(at(99));
+
+    let now_held = record_if_unchanged(&store_of(dialled), "work", &held)
+        .expect("only the last-used time moved");
+
+    assert_eq!(now_held.last_used_at, Some(at(99)));
+}
+
+/// Another koshi replaced this record while the questions were open, so its
+/// added time moved. The edit carries the fresh one rather than putting the
+/// old one back.
+#[test]
+fn an_added_time_another_koshi_wrote_is_carried_and_does_not_refuse() {
+    let held = two_records().remove(0);
+    let mut resaved = two_records();
+    resaved[0].added_at = at(77);
+
+    let now_held =
+        record_if_unchanged(&store_of(resaved), "work", &held).expect("only the added time moved");
+
+    assert_eq!(now_held.added_at, at(77));
+}
+
+/// Another koshi replaced the secret while the questions were open. Writing
+/// the edit would put the old secret back, so it is refused.
+#[test]
+fn a_secret_another_koshi_replaced_meanwhile_refuses_the_edit() {
+    let held = two_records().remove(0);
+    let mut replaced = two_records();
+    replaced[0].secret = ConnectionToken::new("newer");
+
+    assert_eq!(
+        record_if_unchanged(&store_of(replaced), "work", &held)
+            .expect_err("the secret is not the one that was asked about")
+            .to_string(),
+        "invalid arguments: work changed while the questions were open, so nothing \
+         was saved; run `koshi remote edit work` again"
+    );
+}
+
+/// Another koshi's first connection pinned a certificate while the questions
+/// were open. Writing the edit would drop that pin, so it is refused.
+#[test]
+fn a_fingerprint_another_koshi_pinned_meanwhile_refuses_the_edit() {
+    let mut held = two_records().remove(0);
+    held.fingerprint = None;
+
+    assert_eq!(
+        record_if_unchanged(&store_of(two_records()), "work", &held)
+            .expect_err("a fingerprint appeared")
+            .to_string(),
+        "invalid arguments: work changed while the questions were open, so nothing \
+         was saved; run `koshi remote edit work` again"
+    );
+}
+
+#[test]
+fn an_address_another_koshi_moved_meanwhile_refuses_the_edit() {
+    let held = two_records().remove(0);
+    let mut moved = two_records();
+    moved[0].address = "laptop.local:7655".to_string();
+
+    assert_eq!(
+        record_if_unchanged(&store_of(moved), "work", &held)
+            .expect_err("it sits at another address now")
+            .to_string(),
+        "invalid arguments: work changed while the questions were open, so nothing \
+         was saved; run `koshi remote edit work` again"
+    );
+}
+
+#[test]
+fn a_record_another_koshi_forgot_meanwhile_refuses_the_edit() {
+    let held = two_records().remove(0);
+
+    assert_eq!(
+        record_if_unchanged(&ServerStore::new(), "work", &held)
+            .expect_err("nothing answers to work now")
+            .to_string(),
+        "invalid arguments: no saved server is named work; run `koshi remote list`"
+    );
+}
+
+/// Another koshi renamed this record while the questions were open. Writing
+/// the edit would put the old name back, so it is refused.
+#[test]
+fn a_name_another_koshi_changed_meanwhile_refuses_the_edit() {
+    let held = two_records().remove(0);
+    let mut renamed = two_records();
+    renamed[0].name = Some("desk".to_string());
+
+    assert_eq!(
+        record_if_unchanged(&store_of(renamed), "laptop.local:7654", &held)
+            .expect_err("it answers to another name now")
+            .to_string(),
+        "invalid arguments: laptop.local:7654 changed while the questions were open, \
+         so nothing was saved; run `koshi remote edit laptop.local:7654` again"
+    );
+}
+
+/// Another koshi saved a record whose address is this record's name while the
+/// questions were open, so the selector answers for two records now.
+#[test]
+fn a_selector_that_answers_for_two_records_meanwhile_refuses_the_edit() {
+    let held = two_records().remove(0);
+    let mut crowded = two_records();
+    crowded[1].address = "work".to_string();
+
+    assert_eq!(
+        record_if_unchanged(&store_of(crowded), "work", &held)
+            .expect_err("work answers for two records")
+            .to_string(),
+        "invalid arguments: work is the name of one saved server and the address of \
+         another; run `koshi remote list` and name the one you mean"
+    );
 }

@@ -388,19 +388,48 @@ checking laptop.local:7655 …
 updated work at laptop.local:7655.
 ```
 
-An edit that keeps the address keeps the pinned fingerprint. An edit that
-changes the address drops it, and the next connection pins the certificate at
-the new address. When the check does not pass, that question names it:
+An edit that keeps the address requires the pinned fingerprint on the check, so
+a certificate that changed under that address does not pass. An edit that
+changes the address requires none: a pinned fingerprint stands for the address
+the record held when that certificate was met.
+
+A check that passes pins the certificate the server presented, either way. A
+check that does not pass keeps the pinned fingerprint while the address is
+unchanged, and keeps none once the address changed; the next connection to the
+new address pins the certificate it meets. When the check does not pass, that
+question names it:
 `save the change anyway? The certificate at that address is pinned on the
 first connection to it. [y/N]`.
 
 Nothing is written until every answer has settled. Ctrl-C at any question, and
 input that ends before an answer arrives, leave the saved server unchanged.
 
-The store is read again at the moment the record is written, so a server
-another `koshi` saved while the questions were open is still saved. A name or
-an address that another record took meanwhile is refused, and nothing is
-written.
+The store is read again at the moment the record is written, and the read and
+the write are held against every other `koshi` by a lock on
+`remote/servers.lock` beside the store. A server another `koshi` saved while
+the questions were open is still saved, and a name or an address that another
+record took meanwhile is refused with nothing written. Every command that
+changes a saved server takes that lock, `koshi attach` included, which stamps
+the record it dialled. A lock another `koshi` still holds after five seconds
+reads as `koshi: IPC unavailable: another koshi is changing the saved servers;
+try again`. The operating system releases the lock if the `koshi` holding it
+dies. The lock is never held while a question waits for an answer.
+
+`koshi remote set-secret` reads the record again under that lock, after the
+secret is typed. A server another `koshi` forgot meanwhile is refused, and the
+record it forgot stays forgotten.
+
+An edit reads the record it changes again at that same moment. A record whose
+name, address, secret or fingerprint another `koshi` changed while the
+questions were open is refused, and the older values are not written:
+
+```text
+koshi: invalid arguments: work changed while the questions were open, so nothing was saved; run `koshi remote edit work` again
+```
+
+The added time and the last-used time are not compared. Another `koshi` that
+only dialled this server does not stop the edit, and the edit carries the
+values the record on disk holds for both.
 
 A saved server that pins no certificate is left out of the sweep that a bare
 `koshi list-sessions` and a bare `koshi attach` make over every saved server,

@@ -26,10 +26,13 @@
 //! Every TLS and remote-frame detail stays inside this module. Callers name
 //! sessions, secrets and addresses, and never a certificate or a frame.
 
+use std::fs::File;
 use std::io::{self, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
+
+use fs4::{FileExt, TryLockError};
 
 use koshi_core::command::{Command, CommandEnvelope, CommandResult, CommandSource};
 use koshi_core::discovery::SessionOverview;
@@ -39,7 +42,7 @@ use koshi_ipc::protocol::{
     ConnectionToken, IncomingResponse, IpcRequest, IpcRequestKind, IpcResult, MIN_PROTOCOL_VERSION,
     PROTOCOL_VERSION,
 };
-use koshi_ipc::remote_servers::{store_path, Lookup, SavedServer, ServerStore};
+use koshi_ipc::remote_servers::{lock_path, store_path, Lookup, SavedServer, ServerStore};
 use koshi_ipc::remote_wire::{
     self, RemoteClientFrame, RemoteServerFrame, RemoteSessionRow, MIN_REMOTE_PROTOCOL_VERSION,
     REMOTE_PROTOCOL_VERSION,
@@ -80,6 +83,15 @@ pub const MAX_REACHED_AT_ONCE: usize = 16;
 /// How long [`reach_all`] waits for every saved server together, one deadline
 /// over the whole sweep.
 pub const REACH_WAIT: Duration = Duration::from_secs(2);
+
+/// How long a change to the saved-server store waits for another koshi to
+/// finish its own change before it gives up. The operating system releases the
+/// lock if that koshi dies.
+pub const STORE_LOCK_WAIT: Duration = Duration::from_secs(5);
+
+/// How long the wait for the saved-server store pauses between attempts on the
+/// lock.
+pub const STORE_LOCK_POLL: Duration = Duration::from_millis(20);
 
 /// Which server an invocation talks to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,12 +195,119 @@ pub enum Reach {
 /// [`CliError::IpcUnavailable`] when the machine has no data directory, and
 /// when the store could not be read.
 pub fn read_store() -> Result<(PathBuf, ServerStore), CliError> {
-    let data_dir = koshi_paths::data_dir().ok_or_else(|| CliError::IpcUnavailable {
-        detail: "no data directory found".to_string(),
-    })?;
+    let data_dir = private_data_dir()?;
     let path = store_path(&data_dir);
     let store = ServerStore::read(&path).map_err(store_failed)?;
     Ok((path, store))
+}
+
+/// The private data directory this machine keeps koshi's files in.
+///
+/// # Errors
+/// [`CliError::IpcUnavailable`] when the machine has no such directory.
+fn private_data_dir() -> Result<PathBuf, CliError> {
+    koshi_paths::data_dir().ok_or_else(|| CliError::IpcUnavailable {
+        detail: "no data directory found".to_string(),
+    })
+}
+
+/// Change the saved-server store, holding it against every other koshi from
+/// the read to the write.
+///
+/// Takes the lock at [`lock_path`], reads the store, hands it to `change`, and
+/// writes it back. The lock is released when this returns, either way. A
+/// `change` that refuses stops the write, so the store on disk keeps what it
+/// held.
+///
+/// The lock is taken again every [`STORE_LOCK_POLL`] for up to
+/// [`STORE_LOCK_WAIT`]. A wait that runs out reports the other koshi rather
+/// than writing over it.
+///
+/// Nothing inside `change` may ask the user a question: every other koshi that
+/// changes the store waits for this one to finish.
+///
+/// # Errors
+/// [`CliError::IpcUnavailable`] when the machine has no data directory, when
+/// the lock could not be taken, when the store could not be read, and when it
+/// could not be written. Whatever `change` reports, with nothing written.
+pub fn update_store<T>(
+    change: impl FnOnce(&mut ServerStore) -> Result<T, CliError>,
+) -> Result<T, CliError> {
+    let data_dir = private_data_dir()?;
+    let path = store_path(&data_dir);
+    let held = hold_store(&lock_path(&data_dir), STORE_LOCK_WAIT)?;
+    let mut store = ServerStore::read(&path).map_err(store_failed)?;
+    let settled = change(&mut store)?;
+    store.write(&path).map_err(store_failed)?;
+    drop(held);
+    Ok(settled)
+}
+
+/// Take the advisory lock on the file at `path`, creating the file and the
+/// directory holding it when they are missing.
+///
+/// Both are restricted to the owning user on Unix: mode `0700` on the
+/// directory and `0600` on a lock file this call creates, the modes
+/// [`ServerStore::write`] keeps on the store beside it. On Windows both take
+/// the data directory's owner-scoped ACLs.
+///
+/// The attempt is repeated every [`STORE_LOCK_POLL`] for up to `wait`.
+/// Dropping the returned file releases the lock, and so does the operating
+/// system when the process holding it dies.
+///
+/// # Errors
+/// [`CliError::IpcUnavailable`] when the directory or the file could not be
+/// made, when the lock could not be attempted, and when another koshi still
+/// held it at the deadline.
+fn hold_store(path: &Path, wait: Duration) -> Result<File, CliError> {
+    let unavailable = |detail: String| CliError::IpcUnavailable { detail };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            unavailable(format!("{} could not be made: {error}", parent.display()))
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).map_err(
+                |error| {
+                    unavailable(format!(
+                        "{} could not be made private: {error}",
+                        parent.display()
+                    ))
+                },
+            )?;
+        }
+    }
+    let mut options = File::options();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options
+        .open(path)
+        .map_err(|error| unavailable(format!("{} could not be opened: {error}", path.display())))?;
+    let deadline = Instant::now() + wait;
+    loop {
+        match FileExt::try_lock(&file) {
+            Ok(()) => return Ok(file),
+            Err(TryLockError::WouldBlock) => {
+                if Instant::now() >= deadline {
+                    return Err(unavailable(
+                        "another koshi is changing the saved servers; try again".to_string(),
+                    ));
+                }
+                std::thread::sleep(STORE_LOCK_POLL);
+            }
+            Err(TryLockError::Error(error)) => {
+                return Err(unavailable(format!(
+                    "{} could not be locked: {error}",
+                    path.display()
+                )))
+            }
+        }
+    }
 }
 
 /// A saved-server store that could not be read or written.
@@ -580,17 +699,15 @@ pub fn connect_saved(
                 reply_wait,
             )?;
             let now = SystemTime::now();
-            match read_store() {
-                Ok((path, mut store)) => {
-                    store.touch(&record.address, now);
-                    if record.fingerprint.is_none() {
-                        store.pin(&record.address, link.fingerprint.clone());
-                    }
-                    if let Err(error) = store.write(&path) {
-                        tracing::warn!(%error, "the record was not updated");
-                    }
+            let stamped = update_store(|store| {
+                store.touch(&record.address, now);
+                if record.fingerprint.is_none() {
+                    store.pin(&record.address, link.fingerprint.clone());
                 }
-                Err(error) => tracing::warn!(%error, "the record was not updated"),
+                Ok(())
+            });
+            if let Err(error) = stamped {
+                tracing::warn!(%error, "the record was not updated");
             }
             let mut used = record.clone();
             used.fingerprint = Some(link.fingerprint.clone());
@@ -612,15 +729,14 @@ pub fn connect_saved(
                 added_at: now,
                 last_used_at: Some(now),
             };
-            let (path, mut store) = read_store().map_err(DialError::Refused)?;
-            store.save(saved.clone()).map_err(|taken| {
-                DialError::Refused(CliError::InvalidArgs {
-                    detail: taken.to_string(),
-                })
-            })?;
-            store
-                .write(&path)
-                .map_err(|error| DialError::Refused(store_failed(error)))?;
+            update_store(|store| {
+                store
+                    .save(saved.clone())
+                    .map_err(|taken| CliError::InvalidArgs {
+                        detail: taken.to_string(),
+                    })
+            })
+            .map_err(DialError::Refused)?;
             Ok((link, saved))
         }
     }
