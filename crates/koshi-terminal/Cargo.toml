@@ -7,7 +7,7 @@ license.workspace = true
 [dependencies]
 percent-encoding = "2.3.2"
 thiserror = "2.0.18"
-koshi-core = { version = "0.3.0-pr.1", path = "../koshi-core" }
+koshi-core = { version = "0.3.0-pr.2", path = "../koshi-core" }
 unicode-segmentation = "1.13.3"
 unicode-width = "0.2.2"
 vte = "0.15.0"

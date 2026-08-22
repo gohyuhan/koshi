@@ -6,8 +6,8 @@ license.workspace = true
 
 [dependencies]
 ratatui = { version = "0.30.2", default-features = false }
-koshi-config = { version = "0.3.0-pr.1", path = "../koshi-config" }
-koshi-core = { version = "0.3.0-pr.1", path = "../koshi-core" }
-koshi-layout = { version = "0.3.0-pr.1", path = "../koshi-layout" }
-koshi-pane = { version = "0.3.0-pr.1", path = "../koshi-pane" }
-koshi-terminal = { version = "0.3.0-pr.1", path = "../koshi-terminal" }
+koshi-config = { version = "0.3.0-pr.2", path = "../koshi-config" }
+koshi-core = { version = "0.3.0-pr.2", path = "../koshi-core" }
+koshi-layout = { version = "0.3.0-pr.2", path = "../koshi-layout" }
+koshi-pane = { version = "0.3.0-pr.2", path = "../koshi-pane" }
+koshi-terminal = { version = "0.3.0-pr.2", path = "../koshi-terminal" }
