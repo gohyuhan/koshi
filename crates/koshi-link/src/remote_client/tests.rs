@@ -1,6 +1,7 @@
 //! Tests for the dialling side: which strings count as an address, which saved
 //! names are refused, which of the three lookup answers leads to a pinned dial,
-//! and which answer to a Hello reads as a refusal a repeat dial cannot change.
+//! which answer to a Hello reads as a refusal a repeat dial cannot change, and
+//! how the lock that guards a change to the saved-server store behaves.
 
 use std::time::SystemTime;
 
@@ -69,7 +70,7 @@ fn a_saved_server() -> SavedServer {
         name: Some("work".to_string()),
         address: "desk.local:7654".to_string(),
         secret: ConnectionToken::generate(),
-        fingerprint: "aa".repeat(32),
+        fingerprint: Some("aa".repeat(32)),
         added_at: SystemTime::UNIX_EPOCH,
         last_used_at: None,
     }
@@ -296,8 +297,8 @@ fn a_certificate_that_changed_carries_an_ipc_failure_and_never_a_runtime_one() {
 }
 
 // The hidden-line reader over an in-memory stream: Enter ends the entry,
-// backspace removes the last byte, Ctrl-C empties it, and end of stream ends
-// the entry where it stands.
+// backspace removes the last byte, Ctrl-C interrupts it, and end of stream
+// ends the entry where it stands.
 #[test]
 fn read_hidden_line_edits_and_terminators() {
     let mut plain = std::io::Cursor::new(b"secret\n".to_vec());
@@ -310,10 +311,28 @@ fn read_hidden_line_edits_and_terminators() {
     assert_eq!(read_hidden_line(&mut backspaced).unwrap(), "secret");
 
     let mut interrupted = std::io::Cursor::new(b"sec\x03ret\n".to_vec());
-    assert_eq!(read_hidden_line(&mut interrupted).unwrap(), "");
+    assert_eq!(
+        read_hidden_line(&mut interrupted)
+            .expect_err("Ctrl-C interrupts the entry")
+            .kind(),
+        io::ErrorKind::Interrupted
+    );
 
     let mut ended = std::io::Cursor::new(b"secret".to_vec());
     assert_eq!(read_hidden_line(&mut ended).unwrap(), "secret");
+}
+
+// End of stream with nothing typed is not an empty answer: it is the input
+// ending, which every prompt that asks again must stop on.
+#[test]
+fn read_hidden_line_reports_an_entry_that_ended_before_anything_was_typed() {
+    let mut nothing = std::io::Cursor::new(Vec::new());
+    assert_eq!(
+        read_hidden_line(&mut nothing)
+            .expect_err("the input ended")
+            .kind(),
+        io::ErrorKind::UnexpectedEof
+    );
 }
 
 // The sweep completion: every asked server comes back as exactly one entry,
@@ -475,4 +494,172 @@ fn listed_rows_arrive_with_control_characters_removed() {
             name: "dev[2K".to_string(),
         }]
     );
+}
+
+// A record pinning no certificate is never dialled by the sweep: presenting
+// the secret to whatever answers at that address is what pinning prevents.
+#[test]
+fn a_record_with_no_pinned_certificate_is_unchecked_and_is_not_dialled() {
+    let mut record = a_saved_server();
+    record.fingerprint = None;
+    // An address nothing listens on: a dial would have to fail, and this
+    // returns before one is made.
+    record.address = "127.0.0.1:1".to_string();
+
+    assert_eq!(
+        probe(&record, Instant::now()),
+        Reach::Unchecked {
+            server: "work".to_string()
+        }
+    );
+}
+
+// Every entry the sweep produces sorts by server name, whatever it says.
+#[test]
+fn an_unchecked_server_takes_its_place_among_the_answers() {
+    let heard = vec![
+        Reach::Unchecked {
+            server: "work".to_string(),
+        },
+        Reach::Reached {
+            server: "desk".to_string(),
+            rows: Vec::new(),
+        },
+    ];
+
+    assert_eq!(
+        complete_sweep(heard, vec!["desk".to_string(), "work".to_string()]),
+        vec![
+            Reach::Reached {
+                server: "desk".to_string(),
+                rows: Vec::new(),
+            },
+            Reach::Unchecked {
+                server: "work".to_string(),
+            },
+        ]
+    );
+}
+
+// Backspace at the start of an entry removes nothing, and both backspace
+// bytes reach the same place.
+#[test]
+fn read_hidden_line_takes_a_backspace_before_anything_was_typed() {
+    let mut leading = std::io::Cursor::new(b"\x7f\x08secret\n".to_vec());
+    assert_eq!(read_hidden_line(&mut leading).unwrap(), "secret");
+
+    let mut both = std::io::Cursor::new(b"secretxy\x08\x7f\n".to_vec());
+    assert_eq!(read_hidden_line(&mut both).unwrap(), "secret");
+}
+
+// A secret is bytes until it is read back, so bytes that are not UTF-8 come
+// back as the replacement character instead of ending the entry.
+#[test]
+fn read_hidden_line_replaces_bytes_that_are_not_utf_8() {
+    let mut broken = std::io::Cursor::new(b"se\xffcret\n".to_vec());
+    assert_eq!(read_hidden_line(&mut broken).unwrap(), "se\u{fffd}cret");
+}
+
+// The pin a dial presents is read from the store by address, so a record that
+// pinned nothing when it was taken is still dialled against the certificate an
+// earlier dial saved.
+#[test]
+fn the_pin_for_an_address_is_the_one_its_record_holds() {
+    let mut store = ServerStore::new();
+    let mut record = a_saved_server();
+    record.fingerprint = Some("cd".repeat(32));
+    store.save(record).expect("the store takes it");
+
+    assert_eq!(
+        pinned_in(&store, "desk.local:7654"),
+        Some("cd".repeat(32)),
+        "the address finds the record that holds the pin"
+    );
+    assert_eq!(
+        pinned_in(&store, "work"),
+        Some("cd".repeat(32)),
+        "and so does the name it was saved under"
+    );
+}
+
+#[test]
+fn an_address_no_record_holds_and_a_record_that_pins_nothing_both_pin_nothing() {
+    let mut store = ServerStore::new();
+    let mut record = a_saved_server();
+    record.fingerprint = None;
+    store.save(record).expect("the store takes it");
+
+    assert_eq!(pinned_in(&store, "desk.local:7654"), None);
+    assert_eq!(pinned_in(&store, "nobody.local:7654"), None);
+}
+
+/// How long a lock test waits before it reads the lock as held. Short enough
+/// that a refusal test does not slow the suite down.
+const TEST_LOCK_WAIT: Duration = Duration::from_millis(50);
+
+#[test]
+fn a_lock_taken_where_nothing_exists_makes_the_file_and_the_directory() {
+    let dir = tempfile::tempdir().expect("a temp directory");
+    let path = dir.path().join("remote").join("servers.lock");
+
+    let held = hold_store(&path, TEST_LOCK_WAIT).expect("nothing else holds it");
+
+    assert!(path.is_file(), "the lock file is made where it was missing");
+    drop(held);
+}
+
+/// The lock sits beside the saved secrets, so the directory it goes in and the
+/// file itself carry the same owner-only modes the store carries.
+#[cfg(unix)]
+#[test]
+fn a_lock_and_the_directory_holding_it_are_readable_by_their_owner_alone() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("a temp directory");
+    let parent = dir.path().join("remote");
+    let path = parent.join("servers.lock");
+
+    let held = hold_store(&path, TEST_LOCK_WAIT).expect("nothing else holds it");
+
+    let mode = |at: &std::path::Path| {
+        at.metadata()
+            .expect("it was just made")
+            .permissions()
+            .mode()
+            & 0o777
+    };
+    assert_eq!(mode(&parent), 0o700, "nobody else may list the directory");
+    assert_eq!(mode(&path), 0o600, "nobody else may open the lock");
+    drop(held);
+}
+
+/// The second koshi finds the lock held and says so rather than writing over
+/// the first one's change.
+#[test]
+fn a_lock_another_holder_keeps_is_refused_after_the_wait() {
+    let dir = tempfile::tempdir().expect("a temp directory");
+    let path = dir.path().join("servers.lock");
+    let held = hold_store(&path, TEST_LOCK_WAIT).expect("nothing else holds it");
+
+    assert_eq!(
+        hold_store(&path, TEST_LOCK_WAIT)
+            .expect_err("the first holder has it")
+            .to_string(),
+        "IPC unavailable: another koshi is changing the saved servers; try again"
+    );
+    drop(held);
+}
+
+/// The first koshi finished, so the next one takes the lock instead of
+/// reporting it held.
+#[test]
+fn a_lock_its_holder_released_is_taken_by_the_next_caller() {
+    let dir = tempfile::tempdir().expect("a temp directory");
+    let path = dir.path().join("servers.lock");
+
+    let held = hold_store(&path, TEST_LOCK_WAIT).expect("nothing else holds it");
+    drop(held);
+
+    let again = hold_store(&path, TEST_LOCK_WAIT).expect("the first holder let it go");
+    drop(again);
 }

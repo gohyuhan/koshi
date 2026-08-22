@@ -1028,6 +1028,7 @@ name = "koshi-link"
 version = "0.3.0-pr.2"
 dependencies = [
  "crossterm",
+ "fs4",
  "koshi-beta",
  "koshi-config",
  "koshi-core",

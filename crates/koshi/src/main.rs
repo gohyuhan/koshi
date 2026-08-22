@@ -401,9 +401,10 @@ fn finish_command(result: CommandResult) -> Result<(), CliError> {
 /// `list-sessions` also lists the sessions on the saved servers: a bare one
 /// sweeps every saved server and appends each session that answered, named
 /// under its server in the `server` column; `--remote <server>` lists that one
-/// server's sessions alone. A saved server that refused the secret, or did
-/// not answer, is named on stderr and its sessions are left out; only a
-/// session on this machine that could not answer fails the listing.
+/// server's sessions alone. A saved server that refused the secret, did not
+/// answer, or pins no certificate yet is named on stderr and its sessions are
+/// left out; only a session on this machine that could not answer fails the
+/// listing.
 fn run_discovery(command: &CliCommand, remote: Option<&str>) -> Result<(), CliError> {
     if let (CliCommand::ListSessions { format }, Some(server)) = (command, remote) {
         let arg = remote_client::resolve_server(server)?;
@@ -449,6 +450,10 @@ fn run_discovery(command: &CliCommand, remote: Option<&str>) -> Result<(), CliEr
                     Reach::Unreachable { server } => {
                         eprintln!("koshi: {server} did not answer; its sessions are not listed");
                     }
+                    Reach::Unchecked { server } => eprintln!(
+                        "koshi: {server} has no pinned certificate yet; \
+                         run `koshi list-sessions --remote {server}` to connect and pin it"
+                    ),
                 }
             }
             output::render_sessions(&rows, *format)

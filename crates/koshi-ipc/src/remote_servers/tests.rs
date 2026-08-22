@@ -1,6 +1,7 @@
 //! Tests for the saved-server store: where the file lives, the write/read
-//! roundtrip through the atomic writer, the private mode of the file, and
-//! looking a server up by its name or its address.
+//! roundtrip through the atomic writer, the private mode of the file, where
+//! the lock guarding a change lives, and looking a server up by its name or
+//! its address.
 
 use std::time::Duration;
 
@@ -29,7 +30,7 @@ fn saved(name: Option<&str>, address: &str) -> SavedServer {
         name: name.map(str::to_string),
         address: address.to_string(),
         secret: ConnectionToken::new("a secret"),
-        fingerprint: "ab".repeat(32),
+        fingerprint: Some("ab".repeat(32)),
         added_at: moment(100),
         last_used_at: None,
     }
@@ -50,6 +51,20 @@ fn the_store_path_is_remote_servers_under_the_data_dir() {
         store_path(Path::new("/home/ada/.local/share/koshi")),
         Path::new("/home/ada/.local/share/koshi/remote/servers")
     );
+}
+
+/// The lock guards the store rather than sitting on it: the store file is
+/// replaced by a rename, so a lock held on that path would guard a file no
+/// later reader opens.
+#[test]
+fn the_lock_path_sits_beside_the_store_and_is_not_the_store() {
+    let data_dir = Path::new("/home/ada/.local/share/koshi");
+
+    assert_eq!(
+        lock_path(data_dir),
+        Path::new("/home/ada/.local/share/koshi/remote/servers.lock")
+    );
+    assert_ne!(lock_path(data_dir), store_path(data_dir));
 }
 
 #[test]
@@ -215,6 +230,53 @@ fn a_record_carries_the_four_fields_a_listing_reports_and_the_secret_it_leaves_b
 }
 
 #[test]
+fn a_record_with_no_pinned_fingerprint_travels_without_the_field_and_reads_back() {
+    let mut record = saved(Some("work"), "laptop.local:7654");
+    record.fingerprint = None;
+
+    let encoded = serde_json::to_value(&record).expect("a record encodes");
+    let fields = encoded.as_object().expect("a record encodes as an object");
+    assert!(
+        !fields.contains_key("fingerprint"),
+        "no pinned fingerprint leaves the file without the field: {fields:?}"
+    );
+
+    let decoded: SavedServer = serde_json::from_value(encoded).expect("the record reads back");
+    assert_eq!(decoded, record);
+}
+
+#[test]
+fn a_file_written_when_every_record_carried_a_fingerprint_still_reads() {
+    let old_shape = serde_json::json!({
+        "name": "work",
+        "address": "laptop.local:7654",
+        "secret": "a secret",
+        "fingerprint": "ab".repeat(32),
+        "added_at": SystemTime::UNIX_EPOCH,
+        "last_used_at": null,
+    });
+
+    let decoded: SavedServer = serde_json::from_value(old_shape).expect("the old shape reads");
+    assert_eq!(decoded.fingerprint, Some("ab".repeat(32)));
+}
+
+#[test]
+fn pinning_puts_the_fingerprint_on_the_named_record_and_an_ambiguous_name_pins_nothing() {
+    let mut store = one_server();
+    store.records[0].fingerprint = None;
+
+    store.pin("work", "ab".repeat(32));
+    assert_eq!(store.records[0].fingerprint, Some("ab".repeat(32)));
+
+    store.pin("nobody", "ff".repeat(32));
+    assert_eq!(
+        store.records[0].fingerprint,
+        Some("ab".repeat(32)),
+        "a selector naming no record pins nothing"
+    );
+}
+
+#[test]
 fn a_selector_naming_one_record_and_addressing_another_names_neither() {
     // A hand-written file can hold what `save` refuses under rule 3.
     let mut store = ServerStore::new();
@@ -222,7 +284,7 @@ fn a_selector_naming_one_record_and_addressing_another_names_neither() {
         name: Some("target.example:7654".to_string()),
         address: "other.example:7654".to_string(),
         secret: ConnectionToken::generate(),
-        fingerprint: "aa".repeat(32),
+        fingerprint: Some("aa".repeat(32)),
         added_at: SystemTime::UNIX_EPOCH,
         last_used_at: None,
     });
@@ -230,7 +292,7 @@ fn a_selector_naming_one_record_and_addressing_another_names_neither() {
         name: None,
         address: "target.example:7654".to_string(),
         secret: ConnectionToken::generate(),
-        fingerprint: "bb".repeat(32),
+        fingerprint: Some("bb".repeat(32)),
         added_at: SystemTime::UNIX_EPOCH,
         last_used_at: None,
     });
@@ -254,7 +316,7 @@ fn a_selector_matching_one_record_by_both_its_name_and_its_address_is_that_recor
         name: Some("desk.local:7654".to_string()),
         address: "desk.local:7654".to_string(),
         secret: ConnectionToken::generate(),
-        fingerprint: "cc".repeat(32),
+        fingerprint: Some("cc".repeat(32)),
         added_at: SystemTime::UNIX_EPOCH,
         last_used_at: None,
     });
@@ -270,7 +332,7 @@ fn an_unambiguous_name_and_an_unambiguous_address_each_find_their_own_record() {
         name: Some("work".to_string()),
         address: "desk.local:7654".to_string(),
         secret: ConnectionToken::generate(),
-        fingerprint: "dd".repeat(32),
+        fingerprint: Some("dd".repeat(32)),
         added_at: SystemTime::UNIX_EPOCH,
         last_used_at: None,
     });
@@ -278,7 +340,7 @@ fn an_unambiguous_name_and_an_unambiguous_address_each_find_their_own_record() {
         name: None,
         address: "laptop.local:7654".to_string(),
         secret: ConnectionToken::generate(),
-        fingerprint: "ee".repeat(32),
+        fingerprint: Some("ee".repeat(32)),
         added_at: SystemTime::UNIX_EPOCH,
         last_used_at: None,
     });
@@ -309,11 +371,11 @@ fn saving_an_address_again_replaces_that_machine_s_record() {
         .save(saved(Some("work"), "desk.local:7654"))
         .expect("the first save");
     let mut again = saved(Some("work"), "desk.local:7654");
-    again.fingerprint = "ff".repeat(32);
+    again.fingerprint = Some("ff".repeat(32));
     store.save(again).expect("the same machine saves again");
 
     assert_eq!(store.records.len(), 1, "one address is one record");
-    assert_eq!(store.records[0].fingerprint, "ff".repeat(32));
+    assert_eq!(store.records[0].fingerprint, Some("ff".repeat(32)));
 }
 
 #[test]
@@ -399,13 +461,13 @@ fn a_machine_keeps_its_own_name_when_it_saves_again() {
         .expect("the first save");
 
     let mut again = saved(Some("work"), "desk.local:7654");
-    again.fingerprint = "ff".repeat(32);
+    again.fingerprint = Some("ff".repeat(32));
     store
         .save(again)
         .expect("the machine that holds the name may keep it");
 
     assert_eq!(store.records.len(), 1);
-    assert_eq!(store.records[0].fingerprint, "ff".repeat(32));
+    assert_eq!(store.records[0].fingerprint, Some("ff".repeat(32)));
 }
 
 #[test]
@@ -486,4 +548,43 @@ fn an_ambiguous_selector_says_so_and_never_reads_as_nothing_saved() {
     assert_eq!(store.find("laptop.local:7654"), Lookup::Ambiguous);
     assert_eq!(store.find("nothing-is-saved-here"), Lookup::NotSaved);
     assert!(matches!(store.find("desk.local:7654"), Lookup::Saved(_)));
+}
+
+#[test]
+fn a_selector_two_records_answer_to_pins_nothing() {
+    // A hand-written file can hold what `save` refuses under rule 3.
+    let mut store = ServerStore::new();
+    store.records.push(SavedServer {
+        name: Some("target.example:7654".to_string()),
+        address: "other.example:7654".to_string(),
+        secret: ConnectionToken::generate(),
+        fingerprint: None,
+        added_at: SystemTime::UNIX_EPOCH,
+        last_used_at: None,
+    });
+    store.records.push(SavedServer {
+        name: None,
+        address: "target.example:7654".to_string(),
+        secret: ConnectionToken::generate(),
+        fingerprint: None,
+        added_at: SystemTime::UNIX_EPOCH,
+        last_used_at: None,
+    });
+
+    store.pin("target.example:7654", "ab".repeat(32));
+
+    assert_eq!(store.records[0].fingerprint, None);
+    assert_eq!(store.records[1].fingerprint, None);
+}
+
+#[test]
+fn a_record_with_no_pinned_fingerprint_survives_the_file_it_is_written_to() {
+    let dir = TempDir::new().expect("make a temp dir");
+    let path = store_path(dir.path());
+    let mut store = one_server();
+    store.records[0].fingerprint = None;
+
+    store.write(&path).expect("write the store");
+
+    assert_eq!(ServerStore::read(&path).expect("read it back"), store);
 }

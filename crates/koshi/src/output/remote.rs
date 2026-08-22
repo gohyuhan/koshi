@@ -1,6 +1,7 @@
-//! Renderers for the three `remote` answers: the listing of every server this
-//! machine has saved, the line naming the server a forget dropped, and the
-//! line naming the server whose secret was replaced.
+//! Renderers for the `remote` answers: the listing of every server this
+//! machine has saved, the line naming a server that was saved or changed, the
+//! line saying nothing was saved, the line naming the server a forget dropped,
+//! and the line naming the server whose secret was replaced.
 //!
 //! A saved server's secret is not a field of the listing row, so no format
 //! this module renders can print one.
@@ -32,6 +33,45 @@ pub fn render_remote_secret(address: &str) -> String {
     format!("the secret for {address} was replaced.\n")
 }
 
+/// Render a `remote new` answer: the one line naming the server this machine
+/// now holds.
+#[must_use]
+pub fn render_remote_saved(record: &SavedServer) -> String {
+    settled_line("saved", record)
+}
+
+/// Render a `remote edit` answer: the one line naming the server this machine
+/// now holds.
+#[must_use]
+pub fn render_remote_updated(record: &SavedServer) -> String {
+    settled_line("updated", record)
+}
+
+/// Render a `remote new` or `remote edit` answer the user chose not to save.
+#[must_use]
+pub fn render_remote_discarded() -> String {
+    "nothing was saved.\n".to_string()
+}
+
+/// The one line a settled record renders to: `verb`, the name when the record
+/// has one, and the address. A record with no pinned fingerprint says when it
+/// pins one.
+///
+/// Example — a named record that was checked renders
+/// `saved work at laptop.local:7654.`
+fn settled_line(verb: &str, record: &SavedServer) -> String {
+    let named = match &record.name {
+        Some(name) => format!("{name} at "),
+        None => String::new(),
+    };
+    let pinning = match record.fingerprint {
+        Some(_) => "",
+        None => "; its certificate is pinned on the first connection",
+    };
+    let address = &record.address;
+    format!("{verb} {named}{address}{pinning}.\n")
+}
+
 /// One saved server as a listing reports it. The secret is not a field here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct RemoteServerRow {
@@ -41,8 +81,9 @@ struct RemoteServerRow {
     /// Where the server listens, as `host:port`.
     address: String,
     /// The sha256 of the certificate this server presented on the first
-    /// connection, as 64 lowercase hex characters.
-    fingerprint: String,
+    /// connection, as 64 lowercase hex characters, or `None` while no
+    /// connection to it has opened.
+    fingerprint: Option<String>,
     /// When a connection to this server last opened, or `None` when none has
     /// since it was saved.
     last_used: Option<SystemTime>,
@@ -66,7 +107,7 @@ fn remote_row_cells(row: &RemoteServerRow) -> Vec<String> {
     vec![
         row.name.clone().unwrap_or_else(|| "-".to_string()),
         row.address.clone(),
-        row.fingerprint.clone(),
+        row.fingerprint.clone().unwrap_or_else(|| "-".to_string()),
         row.last_used.map_or_else(|| "-".to_string(), time_cell),
     ]
 }

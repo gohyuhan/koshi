@@ -3,9 +3,9 @@
 //!
 //! One [`SavedServer`](crate::remote_servers::SavedServer) holds the address,
 //! the secret the operator handed out, the fingerprint of the certificate
-//! that server presented on the first connection, and an optional name the
-//! user chose. After the first connection the user types the name, not the
-//! address.
+//! that server presented on the first connection — or none until a
+//! connection has opened — and an optional name the user chose. After the
+//! first connection the user types the name, not the address.
 //!
 //! The whole set lives in one JSON file —
 //! [`store_path`](crate::remote_servers::store_path) — inside the private
@@ -47,9 +47,13 @@ pub struct SavedServer {
     /// `Debug` and `Display` write it redacted.
     pub secret: ConnectionToken,
     /// The sha256 of the certificate this server presented on the first
-    /// connection, as 64 lowercase hex characters. A later connection that
-    /// presents a different one is refused.
-    pub fingerprint: String,
+    /// connection, as 64 lowercase hex characters, or `None` while no
+    /// connection to it has opened. A later connection that presents a
+    /// different certificate is refused; the first connection of a record
+    /// holding `None` pins whatever certificate it meets. `None` leaves the
+    /// file without this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
     /// When this server was first saved.
     pub added_at: SystemTime,
     /// When a connection to this server last opened, or `None` when none has
@@ -239,6 +243,18 @@ impl ServerStore {
         Some(self.records[index].address.clone())
     }
 
+    /// Put `fingerprint` on the server `arg` names.
+    ///
+    /// Nothing changes when no record answers to `arg`, and nothing changes
+    /// when more than one does.
+    ///
+    /// The store is not written; the caller does that.
+    pub fn pin(&mut self, arg: &str, fingerprint: String) {
+        if let Match::One(index) = self.index_of(arg) {
+            self.records[index].fingerprint = Some(fingerprint);
+        }
+    }
+
     /// Stamp the last-used time of the server `arg` names with `now`.
     ///
     /// Nothing changes when no record answers to `arg`, and nothing changes
@@ -328,6 +344,19 @@ impl std::fmt::Display for NameTaken {
 #[must_use]
 pub fn store_path(data_dir: &Path) -> PathBuf {
     data_dir.join("remote").join("servers")
+}
+
+/// Where the lock that guards a change to the saved-server store lives:
+/// `remote/servers.lock` under `data_dir`.
+///
+/// A writer holds this file's advisory lock from the read that starts its
+/// change to the write that ends it. [`ServerStore::write`] renames a new file
+/// over [`store_path`], and leaves this path alone.
+///
+/// The file stays empty. It carries the lock and no content.
+#[must_use]
+pub fn lock_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("remote").join("servers.lock")
 }
 
 #[cfg(test)]

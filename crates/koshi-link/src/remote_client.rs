@@ -26,10 +26,13 @@
 //! Every TLS and remote-frame detail stays inside this module. Callers name
 //! sessions, secrets and addresses, and never a certificate or a frame.
 
+use std::fs::File;
 use std::io::{self, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
+
+use fs4::{FileExt, TryLockError};
 
 use koshi_core::command::{Command, CommandEnvelope, CommandResult, CommandSource};
 use koshi_core::discovery::SessionOverview;
@@ -39,7 +42,7 @@ use koshi_ipc::protocol::{
     ConnectionToken, IncomingResponse, IpcRequest, IpcRequestKind, IpcResult, MIN_PROTOCOL_VERSION,
     PROTOCOL_VERSION,
 };
-use koshi_ipc::remote_servers::{store_path, Lookup, SavedServer, ServerStore};
+use koshi_ipc::remote_servers::{lock_path, store_path, Lookup, SavedServer, ServerStore};
 use koshi_ipc::remote_wire::{
     self, RemoteClientFrame, RemoteServerFrame, RemoteSessionRow, MIN_REMOTE_PROTOCOL_VERSION,
     REMOTE_PROTOCOL_VERSION,
@@ -81,11 +84,20 @@ pub const MAX_REACHED_AT_ONCE: usize = 16;
 /// over the whole sweep.
 pub const REACH_WAIT: Duration = Duration::from_secs(2);
 
+/// How long a change to the saved-server store waits for another koshi to
+/// finish its own change before it gives up. The operating system releases the
+/// lock if that koshi dies.
+pub const STORE_LOCK_WAIT: Duration = Duration::from_secs(5);
+
+/// How long the wait for the saved-server store pauses between attempts on the
+/// lock.
+pub const STORE_LOCK_POLL: Duration = Duration::from_millis(20);
+
 /// Which server an invocation talks to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerArg {
-    /// A server this machine has connected to before, with its secret and
-    /// its pinned fingerprint.
+    /// A server this machine has saved, with its secret and — once a
+    /// connection to it has opened — its pinned fingerprint.
     Saved(SavedServer),
     /// A server this machine has not connected to, named by the address it
     /// listens on.
@@ -169,6 +181,11 @@ pub enum Reach {
         /// The server's name when it has one, else its address.
         server: String,
     },
+    /// The record pins no certificate, and the sweep did not dial it.
+    Unchecked {
+        /// The server's name when it has one, else its address.
+        server: String,
+    },
 }
 
 /// The saved-server store and the path it came from, under the private data
@@ -178,12 +195,119 @@ pub enum Reach {
 /// [`CliError::IpcUnavailable`] when the machine has no data directory, and
 /// when the store could not be read.
 pub fn read_store() -> Result<(PathBuf, ServerStore), CliError> {
-    let data_dir = koshi_paths::data_dir().ok_or_else(|| CliError::IpcUnavailable {
-        detail: "no data directory found".to_string(),
-    })?;
+    let data_dir = private_data_dir()?;
     let path = store_path(&data_dir);
     let store = ServerStore::read(&path).map_err(store_failed)?;
     Ok((path, store))
+}
+
+/// The private data directory this machine keeps koshi's files in.
+///
+/// # Errors
+/// [`CliError::IpcUnavailable`] when the machine has no such directory.
+fn private_data_dir() -> Result<PathBuf, CliError> {
+    koshi_paths::data_dir().ok_or_else(|| CliError::IpcUnavailable {
+        detail: "no data directory found".to_string(),
+    })
+}
+
+/// Change the saved-server store, holding it against every other koshi from
+/// the read to the write.
+///
+/// Takes the lock at [`lock_path`], reads the store, hands it to `change`, and
+/// writes it back. The lock is released when this returns, either way. A
+/// `change` that refuses stops the write, so the store on disk keeps what it
+/// held.
+///
+/// The lock is taken again every [`STORE_LOCK_POLL`] for up to
+/// [`STORE_LOCK_WAIT`]. A wait that runs out reports the other koshi rather
+/// than writing over it.
+///
+/// Nothing inside `change` may ask the user a question: every other koshi that
+/// changes the store waits for this one to finish.
+///
+/// # Errors
+/// [`CliError::IpcUnavailable`] when the machine has no data directory, when
+/// the lock could not be taken, when the store could not be read, and when it
+/// could not be written. Whatever `change` reports, with nothing written.
+pub fn update_store<T>(
+    change: impl FnOnce(&mut ServerStore) -> Result<T, CliError>,
+) -> Result<T, CliError> {
+    let data_dir = private_data_dir()?;
+    let path = store_path(&data_dir);
+    let held = hold_store(&lock_path(&data_dir), STORE_LOCK_WAIT)?;
+    let mut store = ServerStore::read(&path).map_err(store_failed)?;
+    let settled = change(&mut store)?;
+    store.write(&path).map_err(store_failed)?;
+    drop(held);
+    Ok(settled)
+}
+
+/// Take the advisory lock on the file at `path`, creating the file and the
+/// directory holding it when they are missing.
+///
+/// Both are restricted to the owning user on Unix: mode `0700` on the
+/// directory and `0600` on a lock file this call creates, the modes
+/// [`ServerStore::write`] keeps on the store beside it. On Windows both take
+/// the data directory's owner-scoped ACLs.
+///
+/// The attempt is repeated every [`STORE_LOCK_POLL`] for up to `wait`.
+/// Dropping the returned file releases the lock, and so does the operating
+/// system when the process holding it dies.
+///
+/// # Errors
+/// [`CliError::IpcUnavailable`] when the directory or the file could not be
+/// made, when the lock could not be attempted, and when another koshi still
+/// held it at the deadline.
+fn hold_store(path: &Path, wait: Duration) -> Result<File, CliError> {
+    let unavailable = |detail: String| CliError::IpcUnavailable { detail };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            unavailable(format!("{} could not be made: {error}", parent.display()))
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).map_err(
+                |error| {
+                    unavailable(format!(
+                        "{} could not be made private: {error}",
+                        parent.display()
+                    ))
+                },
+            )?;
+        }
+    }
+    let mut options = File::options();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options
+        .open(path)
+        .map_err(|error| unavailable(format!("{} could not be opened: {error}", path.display())))?;
+    let deadline = Instant::now() + wait;
+    loop {
+        match FileExt::try_lock(&file) {
+            Ok(()) => return Ok(file),
+            Err(TryLockError::WouldBlock) => {
+                if Instant::now() >= deadline {
+                    return Err(unavailable(
+                        "another koshi is changing the saved servers; try again".to_string(),
+                    ));
+                }
+                std::thread::sleep(STORE_LOCK_POLL);
+            }
+            Err(TryLockError::Error(error)) => {
+                return Err(unavailable(format!(
+                    "{} could not be locked: {error}",
+                    path.display()
+                )))
+            }
+        }
+    }
 }
 
 /// A saved-server store that could not be read or written.
@@ -318,6 +442,30 @@ pub fn secret_for(address: &str) -> Result<ConnectionToken, CliError> {
 }
 
 /// Print `prompt`, then read one secret from the terminal without printing
+/// what is typed, with surrounding whitespace trimmed. The answer can be
+/// empty.
+///
+/// # Errors
+/// [`CliError::InvalidArgs`] when the terminal could not be read, when the
+/// entry was interrupted with `0x03`, and when the input ended before an
+/// answer arrived.
+pub fn prompt_secret(prompt: &str) -> Result<String, CliError> {
+    Ok(read_secret(prompt)?.trim().to_string())
+}
+
+/// Print `prompt`, then read one line from the terminal, which the terminal
+/// echoes, with surrounding whitespace trimmed. The answer can be empty.
+///
+/// # Errors
+/// [`CliError::InvalidArgs`] when the terminal could not be read, and when the
+/// input ended before a line arrived.
+pub fn prompt_line(prompt: &str) -> Result<String, CliError> {
+    print!("{prompt}");
+    io::stdout().flush().map_err(prompt_failed)?;
+    Ok(read_plain_line()?.trim().to_string())
+}
+
+/// Print `prompt`, then read one secret from the terminal without printing
 /// what is typed.
 ///
 /// The terminal is put in raw mode while the secret is typed. A terminal that
@@ -327,9 +475,7 @@ fn read_secret(prompt: &str) -> Result<String, CliError> {
     print!("{prompt}");
     io::stdout().flush().map_err(prompt_failed)?;
     if crossterm::terminal::enable_raw_mode().is_err() {
-        let mut line = String::new();
-        io::stdin().read_line(&mut line).map_err(prompt_failed)?;
-        return Ok(line);
+        return read_plain_line();
     }
     let typed = read_hidden_line(&mut io::stdin().lock());
     let _ = crossterm::terminal::disable_raw_mode();
@@ -337,21 +483,46 @@ fn read_secret(prompt: &str) -> Result<String, CliError> {
     typed.map_err(prompt_failed)
 }
 
+/// Read one line from standard input, as the terminal echoes it.
+///
+/// # Errors
+/// [`CliError::InvalidArgs`] when standard input could not be read, and when
+/// it ended before a line arrived.
+fn read_plain_line() -> Result<String, CliError> {
+    let mut line = String::new();
+    match io::stdin().read_line(&mut line).map_err(prompt_failed)? {
+        0 => Err(entry_ended()),
+        _ => Ok(line),
+    }
+}
+
 /// Read from `input` until the Enter key, with none of it printed.
 ///
 /// Ends at `\r`, `\n` or `0x04`. Backspace — `0x7f` or `0x08` — removes the
-/// last byte. `0x03` returns an empty string. End of stream ends the entry
-/// where it stands. Invalid UTF-8 is replaced.
+/// last byte. `0x03` is [`io::ErrorKind::Interrupted`]. End of stream ends the
+/// entry where it stands, and is [`io::ErrorKind::UnexpectedEof`] when nothing
+/// was typed. Invalid UTF-8 is replaced.
 fn read_hidden_line(input: &mut impl Read) -> io::Result<String> {
     let mut typed: Vec<u8> = Vec::new();
     let mut byte = [0u8; 1];
     loop {
         if input.read(&mut byte)? == 0 {
+            if typed.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "the entry ended",
+                ));
+            }
             break;
         }
         match byte[0] {
             b'\r' | b'\n' | 0x04 => break,
-            0x03 => return Ok(String::new()),
+            0x03 => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "the entry was interrupted",
+                ))
+            }
             0x7f | 0x08 => {
                 typed.pop();
             }
@@ -364,7 +535,14 @@ fn read_hidden_line(input: &mut impl Read) -> io::Result<String> {
 /// A terminal that could not be printed to or read from.
 fn prompt_failed(error: io::Error) -> CliError {
     CliError::InvalidArgs {
-        detail: format!("the secret could not be read: {error}"),
+        detail: format!("the answer could not be read: {error}"),
+    }
+}
+
+/// Input that ended before the answer arrived.
+fn entry_ended() -> CliError {
+    CliError::InvalidArgs {
+        detail: "the input ended before the answer arrived".to_string(),
     }
 }
 
@@ -466,8 +644,11 @@ fn check_answer(address: &str, answer: &RemoteServerFrame) -> Result<(), DialErr
 /// connection needs.
 ///
 /// A saved server presents the secret and the fingerprint its record holds, and
-/// its last-used time is stamped once the connection opens. A store that will
-/// not take that stamp leaves a log line and the connection stands.
+/// its last-used time is stamped once the connection opens. A record holding
+/// no fingerprint takes the one the store pins for that address now, and pins
+/// the certificate this connection presented when the store pins none either.
+/// A store that will not take those changes leaves a log line and the
+/// connection stands.
 ///
 /// A server reached for the first time asks for its secret ([`secret_for`]),
 /// pins whatever certificate it presents, and is saved under `save_as` once it
@@ -504,24 +685,32 @@ pub fn connect_saved(
                     ),
                 }));
             }
+            let pinned = match &record.fingerprint {
+                Some(fingerprint) => Some(fingerprint.clone()),
+                None => read_store()
+                    .ok()
+                    .and_then(|(_, store)| pinned_in(&store, &record.address)),
+            };
             let link = connect(
                 &record.address,
                 &record.secret,
-                Some(&record.fingerprint),
+                pinned.as_deref(),
                 DIAL_WAIT,
                 reply_wait,
             )?;
             let now = SystemTime::now();
-            match read_store() {
-                Ok((path, mut store)) => {
-                    store.touch(&record.address, now);
-                    if let Err(error) = store.write(&path) {
-                        tracing::warn!(%error, "the last-used time was not saved");
-                    }
+            let stamped = update_store(|store| {
+                store.touch(&record.address, now);
+                if record.fingerprint.is_none() {
+                    store.pin(&record.address, link.fingerprint.clone());
                 }
-                Err(error) => tracing::warn!(%error, "the last-used time was not saved"),
+                Ok(())
+            });
+            if let Err(error) = stamped {
+                tracing::warn!(%error, "the record was not updated");
             }
             let mut used = record.clone();
+            used.fingerprint = Some(link.fingerprint.clone());
             used.last_used_at = Some(now);
             Ok((link, used))
         }
@@ -536,21 +725,29 @@ pub fn connect_saved(
                 name: save_as.map(str::to_string),
                 address: address.clone(),
                 secret,
-                fingerprint: link.fingerprint.clone(),
+                fingerprint: Some(link.fingerprint.clone()),
                 added_at: now,
                 last_used_at: Some(now),
             };
-            let (path, mut store) = read_store().map_err(DialError::Refused)?;
-            store.save(saved.clone()).map_err(|taken| {
-                DialError::Refused(CliError::InvalidArgs {
-                    detail: taken.to_string(),
-                })
-            })?;
-            store
-                .write(&path)
-                .map_err(|error| DialError::Refused(store_failed(error)))?;
+            update_store(|store| {
+                store
+                    .save(saved.clone())
+                    .map_err(|taken| CliError::InvalidArgs {
+                        detail: taken.to_string(),
+                    })
+            })
+            .map_err(DialError::Refused)?;
             Ok((link, saved))
         }
+    }
+}
+
+/// The fingerprint `store` pins for `address`, or `None` when no record
+/// answers to it, more than one does, or the one that does pins nothing.
+fn pinned_in(store: &ServerStore, address: &str) -> Option<String> {
+    match store.find(address) {
+        Lookup::Saved(record) => record.fingerprint.clone(),
+        Lookup::NotSaved | Lookup::Ambiguous => None,
     }
 }
 
@@ -708,11 +905,14 @@ fn one_request(
 /// At most [`MAX_REACHED_AT_ONCE`] records are asked. The rest are named on
 /// stderr and left out.
 ///
+/// A record pinning no certificate is [`Reach::Unchecked`], and no secret is
+/// presented to it.
+///
 /// A server that answered and did not admit the saved secret is
 /// [`Reach::Refused`]. A server that could not be reached, or was still
-/// unanswered at the deadline, is [`Reach::Unreachable`]. Every asked record
-/// comes back as exactly one entry, sorted by server name. A store that
-/// cannot be read reads as no saved servers.
+/// unanswered at the deadline, is [`Reach::Unreachable`]. Every record comes
+/// back as exactly one entry, sorted by server name. A store that cannot be
+/// read reads as no saved servers.
 #[must_use]
 pub fn reach_all(timeout: Duration) -> Vec<Reach> {
     let deadline = Instant::now() + timeout;
@@ -769,7 +969,8 @@ fn server_of(reach: &Reach) -> &str {
     match reach {
         Reach::Reached { server, .. }
         | Reach::Refused { server }
-        | Reach::Unreachable { server } => server,
+        | Reach::Unreachable { server }
+        | Reach::Unchecked { server } => server,
     }
 }
 
@@ -796,15 +997,20 @@ fn complete_sweep(mut heard: Vec<Reach>, mut asked: Vec<String>) -> Vec<Reach> {
 
 /// Ask one saved server for its sessions.
 ///
+/// A record pinning no certificate is [`Reach::Unchecked`] and is not dialled.
+///
 /// The time left until `deadline` is given to the dial and again to the reply,
 /// so this returns up to twice that after `deadline` passes. Writes no file.
 fn probe(record: &SavedServer, deadline: Instant) -> Reach {
     let server = label_of(record);
+    let Some(pinned) = record.fingerprint.as_deref() else {
+        return Reach::Unchecked { server };
+    };
     let left = deadline.saturating_duration_since(Instant::now());
     let mut link = match connect(
         &record.address,
         &record.secret,
-        Some(&record.fingerprint),
+        Some(pinned),
         left,
         Some(left),
     ) {

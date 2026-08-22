@@ -408,7 +408,7 @@ fn remote_home() -> Home {
             name: Some("work".to_string()),
             address: "laptop.local:7654".to_string(),
             secret: ConnectionToken::generate(),
-            fingerprint: "00".repeat(32),
+            fingerprint: Some("00".repeat(32)),
             added_at: SystemTime::UNIX_EPOCH,
             last_used_at: None,
         }),

@@ -629,7 +629,8 @@ fn attach_picked(runtime_dir: PathBuf) -> Result<(), CliError> {
 /// beside the name of the server serving it.
 ///
 /// A refused secret prints one stderr line naming the command that replaces
-/// it. A server not heard from prints one stderr line and contributes no rows.
+/// it. A server not heard from, and a server pinning no certificate yet, each
+/// print one stderr line and contribute no rows.
 fn reachable_rows() -> Vec<(String, RemoteSessionRow)> {
     let mut offered = Vec::new();
     for reach in remote_client::reach_all(REACH_WAIT) {
@@ -644,6 +645,10 @@ fn reachable_rows() -> Vec<(String, RemoteSessionRow)> {
             Reach::Unreachable { server } => {
                 eprintln!("koshi: {server} did not answer; its sessions are not listed");
             }
+            Reach::Unchecked { server } => eprintln!(
+                "koshi: {server} has no pinned certificate yet; \
+                 run `koshi attach --remote {server}` to connect and pin it"
+            ),
         }
     }
     offered
