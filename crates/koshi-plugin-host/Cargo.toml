@@ -6,4 +6,4 @@ license.workspace = true
 
 [dependencies]
 thiserror = "2.0.18"
-koshi-core = { version = "0.3.0-pr.3", path = "../koshi-core" }
+koshi-core = { version = "0.3.0", path = "../koshi-core" }
