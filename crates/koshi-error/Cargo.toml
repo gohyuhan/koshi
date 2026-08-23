@@ -6,12 +6,12 @@ license.workspace = true
 
 [dependencies]
 thiserror = "2.0.18"
-koshi-link = { version = "0.3.0-pr.2", path = "../koshi-link" }
-koshi-config = { version = "0.3.0-pr.2", path = "../koshi-config" }
-koshi-core = { version = "0.3.0-pr.2", path = "../koshi-core" }
-koshi-ipc = { version = "0.3.0-pr.2", path = "../koshi-ipc" }
-koshi-layout = { version = "0.3.0-pr.2", path = "../koshi-layout" }
-koshi-plugin-host = { version = "0.3.0-pr.2", path = "../koshi-plugin-host" }
-koshi-pty = { version = "0.3.0-pr.2", path = "../koshi-pty" }
-koshi-storage = { version = "0.3.0-pr.2", path = "../koshi-storage" }
-koshi-terminal = { version = "0.3.0-pr.2", path = "../koshi-terminal" }
+koshi-link = { version = "0.3.0-pr.3", path = "../koshi-link" }
+koshi-config = { version = "0.3.0-pr.3", path = "../koshi-config" }
+koshi-core = { version = "0.3.0-pr.3", path = "../koshi-core" }
+koshi-ipc = { version = "0.3.0-pr.3", path = "../koshi-ipc" }
+koshi-layout = { version = "0.3.0-pr.3", path = "../koshi-layout" }
+koshi-plugin-host = { version = "0.3.0-pr.3", path = "../koshi-plugin-host" }
+koshi-pty = { version = "0.3.0-pr.3", path = "../koshi-pty" }
+koshi-storage = { version = "0.3.0-pr.3", path = "../koshi-storage" }
+koshi-terminal = { version = "0.3.0-pr.3", path = "../koshi-terminal" }

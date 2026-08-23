@@ -844,7 +844,7 @@ dependencies = [
 
 [[package]]
 name = "koshi"
-version = "0.3.0-pr.2"
+version = "0.3.0-pr.3"
 dependencies = [
  "clap",
  "flate2",
@@ -882,7 +882,7 @@ dependencies = [
 
 [[package]]
 name = "koshi-beta"
-version = "0.3.0-pr.2"
+version = "0.3.0-pr.3"
 dependencies = [
  "koshi-macro",
  "koshi-observability",
@@ -891,7 +891,7 @@ dependencies = [
 
 [[package]]
 name = "koshi-client"
-version = "0.3.0-pr.2"
+version = "0.3.0-pr.3"
 dependencies = [
  "koshi-config",
  "koshi-core",
@@ -915,7 +915,7 @@ dependencies = [
 
 [[package]]
 name = "koshi-config"
-version = "0.3.0-pr.2"
+version = "0.3.0-pr.3"
 dependencies = [
  "kdl",
  "koshi-core",
@@ -926,7 +926,7 @@ dependencies = [
 
 [[package]]
 name = "koshi-core"
-version = "0.3.0-pr.2"
+version = "0.3.0-pr.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -935,7 +935,7 @@ dependencies = [
 
 [[package]]
 name = "koshi-daemon"
-version = "0.3.0-pr.2"
+version = "0.3.0-pr.3"
 dependencies = [
  "clap",
  "fs4",
@@ -964,7 +964,7 @@ dependencies = [
 
 [[package]]
 name = "koshi-error"
-version = "0.3.0-pr.2"
+version = "0.3.0-pr.3"
 dependencies = [
  "koshi-config",
  "koshi-core",
@@ -980,7 +980,7 @@ dependencies = [
 
 [[package]]
 name = "koshi-input"
-version = "0.3.0-pr.2"
+version = "0.3.0-pr.3"
 dependencies = [
  "crossterm",
  "koshi-core",
@@ -988,7 +988,7 @@ dependencies = [
 
 [[package]]
 name = "koshi-ipc"
-version = "0.3.0-pr.2"
+version = "0.3.0-pr.3"
 dependencies = [
  "base64",
  "getrandom 0.4.3",
@@ -1013,7 +1013,7 @@ dependencies = [
 
 [[package]]
 name = "koshi-layout"
-version = "0.3.0-pr.2"
+version = "0.3.0-pr.3"
 dependencies = [
  "koshi-core",
  "koshi-test-support",
@@ -1025,7 +1025,7 @@ dependencies = [
 
 [[package]]
 name = "koshi-link"
-version = "0.3.0-pr.2"
+version = "0.3.0-pr.3"
 dependencies = [
  "crossterm",
  "fs4",
@@ -1049,7 +1049,7 @@ dependencies = [
 
 [[package]]
 name = "koshi-macro"
-version = "0.3.0-pr.2"
+version = "0.3.0-pr.3"
 dependencies = [
  "quote",
  "syn 2.0.119",
@@ -1057,7 +1057,7 @@ dependencies = [
 
 [[package]]
 name = "koshi-observability"
-version = "0.3.0-pr.2"
+version = "0.3.0-pr.3"
 dependencies = [
  "koshi-core",
  "koshi-paths",
@@ -1069,7 +1069,7 @@ dependencies = [
 
 [[package]]
 name = "koshi-pane"
-version = "0.3.0-pr.2"
+version = "0.3.0-pr.3"
 dependencies = [
  "koshi-core",
  "serde",
@@ -1079,7 +1079,7 @@ dependencies = [
 
 [[package]]
 name = "koshi-paths"
-version = "0.3.0-pr.2"
+version = "0.3.0-pr.3"
 dependencies = [
  "directories",
  "libc",
@@ -1088,11 +1088,11 @@ dependencies = [
 
 [[package]]
 name = "koshi-plugin-api"
-version = "0.3.0-pr.2"
+version = "0.3.0-pr.3"
 
 [[package]]
 name = "koshi-plugin-host"
-version = "0.3.0-pr.2"
+version = "0.3.0-pr.3"
 dependencies = [
  "koshi-core",
  "thiserror 2.0.20",
@@ -1100,11 +1100,11 @@ dependencies = [
 
 [[package]]
 name = "koshi-plugin-manager"
-version = "0.3.0-pr.2"
+version = "0.3.0-pr.3"
 
 [[package]]
 name = "koshi-pty"
-version = "0.3.0-pr.2"
+version = "0.3.0-pr.3"
 dependencies = [
  "koshi-core",
  "koshi-ipc",
@@ -1118,7 +1118,7 @@ dependencies = [
 
 [[package]]
 name = "koshi-renderer"
-version = "0.3.0-pr.2"
+version = "0.3.0-pr.3"
 dependencies = [
  "koshi-config",
  "koshi-core",
@@ -1130,7 +1130,7 @@ dependencies = [
 
 [[package]]
 name = "koshi-runtime"
-version = "0.3.0-pr.2"
+version = "0.3.0-pr.3"
 dependencies = [
  "base64",
  "koshi-client",
@@ -1159,7 +1159,7 @@ dependencies = [
 
 [[package]]
 name = "koshi-session"
-version = "0.3.0-pr.2"
+version = "0.3.0-pr.3"
 dependencies = [
  "koshi-core",
  "koshi-layout",
@@ -1172,7 +1172,7 @@ dependencies = [
 
 [[package]]
 name = "koshi-storage"
-version = "0.3.0-pr.2"
+version = "0.3.0-pr.3"
 dependencies = [
  "koshi-core",
  "tempfile",
@@ -1181,7 +1181,7 @@ dependencies = [
 
 [[package]]
 name = "koshi-terminal"
-version = "0.3.0-pr.2"
+version = "0.3.0-pr.3"
 dependencies = [
  "koshi-core",
  "percent-encoding",
@@ -1195,7 +1195,7 @@ dependencies = [
 
 [[package]]
 name = "koshi-test-support"
-version = "0.3.0-pr.2"
+version = "0.3.0-pr.3"
 dependencies = [
  "koshi-core",
  "koshi-ipc",
@@ -2634,7 +2634,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.3.0-pr.2"
+version = "0.3.0-pr.3"
 dependencies = [
  "cargo_metadata",
 ]
