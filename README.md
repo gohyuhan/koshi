@@ -79,6 +79,12 @@ from the same machine or another one, and the panes are where you left them.
 - ⚙️ **Config files** — keep app settings, themes, keybindings, and layouts separate.
 - 💾 **Saved layouts** — start tabs, panes, commands, directories, and environment values from a profile.
 - 🪵 **Logging** — write optional per-session text or JSON logs without terminal content.
+- 🌐 **Remote sessions** — attach to a session on another machine over TLS, with a pinned certificate and an access token.
+- 🔑 **Access tokens** — grant, revoke, and list the tokens that reach your sessions; each grant covers one session or every session.
+- 🔁 **Reconnect** — a dropped remote link dials again for two minutes and puts your tabs, focus, and scroll position back.
+- 👤 **Same-machine sharing** — let the other users of this machine list, attach to, and kill your sessions.
+- ♻️ **Update in place** — `koshi update` restarts each running session into the new build, keeping its panes, their programs, and their scrollback.
+- 🩺 **Installation check** — `koshi doctor` rates config, shell, terminal, directories, router, and remote access.
 - 🌍 **Cross-platform** — run on Linux, macOS, or Windows; CI tests all three.
 
 ## Installation
@@ -162,7 +168,9 @@ Remove a script-installed binary:
 sudo rm -f /usr/local/bin/koshi
 ```
 
-Remove all Koshi config, logs, update state, cache, and runtime files:
+Remove all Koshi config, logs, update state, cache, runtime files, and the
+remote data — the saved server secrets, the pinned certificates, and the access
+tokens this machine granted:
 
 ```bash
 rm -rf "${XDG_CONFIG_HOME:-$HOME/.config}/koshi"
@@ -187,7 +195,9 @@ brew uninstall --force koshi
 brew untap gohyuhan/koshi
 ```
 
-Remove all Koshi config, logs, update state, cache, and runtime files:
+Remove all Koshi config, logs, update state, cache, runtime files, and the
+remote data — the saved server secrets, the pinned certificates, and the access
+tokens this machine granted:
 
 ```bash
 rm -rf "$HOME/Library/Application Support/koshi"
@@ -224,7 +234,9 @@ $CleanPath = (($UserPath -split ";") | Where-Object {
 Remove-Item $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
 ```
 
-Remove all remaining Koshi config, logs, update state, cache, and runtime files:
+Remove all remaining Koshi config, logs, update state, cache, runtime files,
+and the remote data — the saved server secrets, the pinned certificates, and
+the access tokens this machine granted:
 
 ```powershell
 Remove-Item (Join-Path $env:APPDATA "koshi") `
@@ -397,8 +409,10 @@ holding a `fail` row exits 1, and a run of only `ok` and `warn` rows exits 0.
 
 ### Sharing and remote access
 
-Every subcommand also takes a global `--remote <SERVER>` flag, which runs that
-invocation against the machine `SERVER` names instead of this one.
+The global `--remote <SERVER>` flag runs one invocation against the machine
+`SERVER` names instead of this one. It works with `attach`, with
+`list-sessions`, and with the verbs that act on panes, tabs, and input.
+Every other verb refuses it.
 
 | Command | Result |
 |---|---|

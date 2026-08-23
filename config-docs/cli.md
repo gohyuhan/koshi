@@ -96,7 +96,7 @@ id line.
 
 | Command | Result |
 |---|---|
-| `koshi list-sessions` | List session ids and names |
+| `koshi list-sessions` | List session ids and names, here and on every saved server that answers |
 | `koshi attach [NAME_OR_ID]` | Attach this terminal to that session |
 | `koshi detach [CLIENT_OR_SESSION]` | Detach one terminal; the session keeps running |
 | `koshi detach --all [NAME_OR_ID]` | Detach every terminal of that session |
@@ -112,6 +112,13 @@ id line.
 Every list and inspect command accepts `--format table` or `--format json`.
 Table is the default.
 
+`koshi list-sessions` names each session's machine in its `server` column:
+`local` for a session on this machine, else the saved server it runs on. A bare
+`koshi list-sessions` sweeps every saved server and appends what answered;
+`koshi list-sessions --remote <server>` lists that one server's sessions alone.
+A server that refused the saved secret, and a server that did not answer, are
+named on standard error and their sessions are left out.
+
 `kill-session` takes the session id or its exact generated name; an id goes
 straight to that session with no lookup. With no argument, it works only when
 exactly one session is running. An unknown name or id exits 3; an unreachable
@@ -119,14 +126,20 @@ control socket exits 4.
 
 `attach` run outside koshi opens that session in this terminal. Run inside a
 koshi pane, it moves this terminal to the named session instead. With no
-argument and several sessions running, it numbers them and reads your answer:
+argument it lists the sessions running for this user and the sessions on every
+saved server that answered, numbers them, and reads your answer. A session on a
+saved server carries `(remote: <server>)`:
 
 ```text
 koshi attach
 1) amber-fox session-3f2a…
-2) quiet-heron session-91c4…
+2) quiet-heron session-91c4… (remote: work)
 attach to which session? [1-2]
 ```
+
+A listing of exactly one session, on this machine, is attached without asking.
+Every other listing asks, one session on a saved server included, whose prompt
+reads `attach to which session? [1]`.
 
 `detach` leaves the session running with its panes untouched. Bare `koshi
 detach` works only inside a koshi pane and detaches that terminal. Outside one,
@@ -179,10 +192,13 @@ Example: `koshi input --pane pane-… --no-enter "git status"` leaves
 |---|---|
 | `koshi actions list [--format table\|json]` | List supported actions |
 | `koshi actions explain <ACTION> [--format table\|json]` | Explain one action |
-| `koshi keys list [--mode <MODE>] [--scope default\|user\|session\|layout]` | List effective shortcuts |
+| `koshi keys list [--mode <MODE>] [--scope default\|user\|session\|layout] [--recommended] [--format table\|json]` | List effective shortcuts, or with `--recommended` the shortcuts plugins recommend |
 | `koshi keys describe "<KEY_SEQUENCE>"` | Explain one shortcut |
 | `koshi keys conflicts` | Report clashes, dead shortcuts, and warnings |
 | `koshi keys validate <PATH>` | Check a shortcut file without applying it |
+
+No koshi build launches a plugin, so `koshi keys list --recommended` prints an
+empty table in this release.
 
 ## Remote access
 
@@ -192,14 +208,15 @@ Example: `koshi input --pane pane-… --no-enter "git status"` leaves
 | `koshi share revoke <IDENTITY> [--session <SESSION>]` | Revoke the tokens an identity holds |
 | `koshi share list [--session <SESSION>] [--format table\|json]` | List the tokens granted on this machine |
 | `koshi attach --remote <SERVER> [--save-as <NAME>] [SESSION]` | Attach to a session on the machine `SERVER` names |
+| `koshi list-sessions --remote <SERVER>` | List the sessions on the machine `SERVER` names |
 | `koshi remote new` | Save a server, asking for its name, address and secret |
 | `koshi remote edit <SERVER>` | Change one saved server's name, address or secret |
 | `koshi remote list [--format table\|json]` | List the servers this machine has saved |
 | `koshi remote forget <SERVER>` | Drop one saved server |
 | `koshi remote set-secret <SERVER>` | Replace the secret of one saved server |
 
-The first three run on the machine holding the sessions. The rest run on the
-machine connecting to it.
+The three `share` verbs run on the machine holding the sessions. The rest run
+on the machine connecting to it.
 
 An absent `--session` reads one way on `grant` and another way on `revoke`.
 `koshi share grant alice` gives alice one token that reaches every session on
@@ -459,12 +476,14 @@ prints the command that replaces that secret:
 work: the saved secret was refused; run `koshi remote set-secret work`
 ```
 
-`--remote` never creates a session, and it takes `attach` or an action verb.
-Bare `koshi --remote work` names nothing to run, and `koshi share --remote
-work` is not carried to the other machine; both are refused:
+`--remote` never creates a session. It takes `attach`, `list-sessions`, and the
+action verbs — the verbs that open, close, resize, focus, and type into panes
+and tabs, and the lock verbs. Bare `koshi --remote work` names nothing to run,
+and every other verb, `koshi share --remote work` and `koshi doctor --remote
+work` included, is refused:
 
 ```text
---remote needs a command, such as `koshi attach --remote <server>`
+--remote works with `attach`, `list-sessions`, and the action verbs, such as `koshi attach --remote <server>`
 ```
 
 A pane is the other way in, and that way is closed too. `koshi share grant`
@@ -520,7 +539,7 @@ Tokens are granted only from the machine holding the sessions.
 
 ```text
 koshi version
-koshi 0.2.0
+koshi 0.3.0
 ```
 
 These two answers differ while an update rolls out. `koshi update` installs a
@@ -531,16 +550,16 @@ a newer build than the process answering it:
 ```text
 koshi server-version
 kind     session                                       version
-router   -                                             0.2.0
-session  session-3f2a1c94-8e7b-4d15-9a02-6c5138ef7b40  0.2.0
-session  session-91c4de07-2b53-41a8-bf6e-70d9a2c81f35  0.1.0
+router   -                                             0.3.0
+session  session-3f2a1c94-8e7b-4d15-9a02-6c5138ef7b40  0.3.0
+session  session-91c4de07-2b53-41a8-bf6e-70d9a2c81f35  0.2.0
 ```
 
 The version column reads:
 
 | Cell | Meaning |
 |---|---|
-| a build, like `0.2.0` | The server answered and named it |
+| a build, like `0.3.0` | The server answered and named it |
 | `unknown` | The server answered and is too old to name its build |
 | `not running` | Nothing is listening there |
 | `unreachable` | The server could not be asked; the reason prints on standard error |

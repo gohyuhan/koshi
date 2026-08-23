@@ -46,7 +46,7 @@ esac
 log_info "Detected OS: ${OS_TYPE}, Architecture: ${ARCH_TYPE}"
 
 # Version to install (bump before each release)
-VERSION="v0.2.0"
+VERSION="v0.3.0"
 
 log_info "Installing koshi version: ${VERSION}"
 
