@@ -55,12 +55,16 @@ const CODE_POINT_TAIL: usize = 3;
 /// until that sequence ends.
 const MAX_UNDECODED: usize = 64 * 1024;
 
+/// The most bytes one OSC sequence accumulates. The parser drops every byte
+/// past this and dispatches what it holds when the sequence ends.
+pub(crate) const OSC_CAPACITY: usize = 8 * 1024;
+
 /// One pane's emulation engine: the byte decoder and the screen model it
 /// feeds.
 pub struct TerminalEngine {
     /// The VTE state machine. Holds any partial escape sequence or split
     /// UTF-8 code point between [`advance`](TerminalEngine::advance) calls.
-    parser: vte::Parser,
+    parser: vte::Parser<OSC_CAPACITY>,
     /// The screen model the parser's decoded actions mutate.
     state: TerminalState,
     /// The bytes that put another parser where `parser` stands, as
@@ -69,7 +73,7 @@ pub struct TerminalEngine {
     /// A second parser fed the same bytes as `parser`, driving no screen. It
     /// reports where each sequence ends, so one chunk costs one pass over that
     /// chunk however long the sequence it continues.
-    tail_parser: vte::Parser,
+    tail_parser: vte::Parser<OSC_CAPACITY>,
     /// Set while `tail_parser` sits on a sequence boundary, where `undecoded`
     /// holds at most the first bytes of a UTF-8 code point.
     on_boundary: bool,
@@ -92,10 +96,10 @@ impl TerminalEngine {
     /// caller can honor the user's configured `scrollback` caps.
     pub fn with_scrollback(size: PtySize, limit: ScrollbackLimit) -> Self {
         TerminalEngine {
-            parser: vte::Parser::new(),
+            parser: vte::Parser::<OSC_CAPACITY>::new_with_size(),
             state: TerminalState::with_scrollback(size, limit),
             undecoded: Vec::new(),
-            tail_parser: vte::Parser::new(),
+            tail_parser: vte::Parser::<OSC_CAPACITY>::new_with_size(),
             on_boundary: true,
             in_string_body: false,
         }
@@ -130,10 +134,10 @@ impl TerminalEngine {
     /// running engine.
     pub fn from_state(state: TerminalState, undecoded: &[u8]) -> Self {
         let mut engine = TerminalEngine {
-            parser: vte::Parser::new(),
+            parser: vte::Parser::<OSC_CAPACITY>::new_with_size(),
             state,
             undecoded: Vec::new(),
-            tail_parser: vte::Parser::new(),
+            tail_parser: vte::Parser::<OSC_CAPACITY>::new_with_size(),
             on_boundary: true,
             in_string_body: false,
         };
@@ -209,7 +213,7 @@ impl TerminalEngine {
     fn hold_undecoded(&mut self, chunk: &[u8]) {
         let mut at = 0;
         if let Some(start) = chunk.iter().rposition(|byte| *byte == ESCAPE) {
-            self.tail_parser = vte::Parser::new();
+            self.tail_parser = vte::Parser::<OSC_CAPACITY>::new_with_size();
             self.undecoded.clear();
             self.on_boundary = false;
             self.in_string_body = false;

@@ -39,6 +39,8 @@
 //! ([`osc`]), and CSI parameter accessors ([`params`]) — while the
 //! [`vte::Perform`] trait impl itself stays here as the dispatch surface.
 
+use koshi_core::text::sanitize_reported_text;
+
 use crate::grid::state::{Cell, RowEnd};
 use crate::state::{CursorShape, MouseEncoding, MouseTracking, Screen, TerminalState};
 use unicode_width::UnicodeWidthChar;
@@ -685,11 +687,12 @@ impl vte::Perform for TerminalState {
             return;
         };
         match std::str::from_utf8(command) {
-            // OSC 0/1/2 — set the window/icon title. Decode lossily so a
-            // non-UTF-8 title still shows.
+            // OSC 0/1/2 — set the window/icon title. Decodes lossily, so a
+            // non-UTF-8 title still shows, then bounds and filters it.
             Ok("0" | "1" | "2") if params.len() > 1 => {
                 let title = params[1..].join(&b';');
-                self.title = Some(String::from_utf8_lossy(&title).into_owned());
+                let title = String::from_utf8_lossy(&title);
+                self.title = Some(sanitize_reported_text(&title));
             }
             // OSC 7 — the shell's working directory as a `file://host/path`
             // URI. An unparseable URI leaves the last cwd unchanged so a bad

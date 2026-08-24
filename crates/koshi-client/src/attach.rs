@@ -601,11 +601,7 @@ fn attach_picked(runtime_dir: PathBuf) -> Result<(), CliError> {
     let reached = reachable_rows();
     let offered = reached
         .iter()
-        .map(|(server, row)| SessionRow {
-            id: row.id,
-            name: row.name.clone(),
-            server: Some(server.clone()),
-        })
+        .map(|(server, row)| SessionRow::new(row.id, &row.name, Some(server.clone())))
         .collect();
     let (server, row) = match choose(&runtime_dir, offered)? {
         Picked::Local(id) => {
@@ -672,11 +668,7 @@ fn choose_remote(server: &str, rows: &[RemoteSessionRow]) -> Result<SessionSelec
     }
     let listed: Vec<SessionRow> = rows
         .iter()
-        .map(|row| SessionRow {
-            id: row.id,
-            name: row.name.clone(),
-            server: Some(server.to_string()),
-        })
+        .map(|row| SessionRow::new(row.id, &row.name, Some(server.to_string())))
         .collect();
     let at = settle_on(&listed)?;
     Ok(SessionSelector::Id(listed[at].id))

@@ -7,11 +7,25 @@ use percent_encoding::percent_decode;
 
 use crate::state::ReportedCwd;
 
+/// The longest OSC 7 URI [`parse_osc7_cwd`] accepts. A longer one yields
+/// `None`, leaving the last reported working directory in place.
+pub(super) const MAX_OSC7_URI_BYTES: usize = 4 * 1024;
+
+/// The bytes an OSC 7 payload carries ahead of the URI: the command number
+/// `7` and the `;` separating it.
+const OSC7_PAYLOAD_PREFIX: usize = 2;
+
+// A URI of exactly `MAX_OSC7_URI_BYTES` reaches this function whole, so a
+// truncated one is always longer than the limit and always yields `None`.
+const _: () = assert!(MAX_OSC7_URI_BYTES + OSC7_PAYLOAD_PREFIX <= crate::engine::OSC_CAPACITY);
+
 /// Parse an OSC 7 cwd URI (`file://host/path`) into a [`ReportedCwd`], or
-/// `None` when it is not a `file://` URI or carries no path.
+/// `None` when it is not a `file://` URI, carries no path, or is longer than
+/// [`MAX_OSC7_URI_BYTES`].
 ///
-/// The `host` component (between `//` and the next `/`) lands on the result;
-/// the spawn layer reads it to tell a local report from a remote one. An empty
+/// The `host` component (between `//` and the next `/`) lands on the result,
+/// filtered by [`sanitize_reported_text`](koshi_core::text::sanitize_reported_text).
+/// The spawn layer reads it to tell a local report from a remote one. An empty
 /// authority (`file:///path`) yields no host. The path keeps its leading `/`
 /// and is percent-decoded (`%20` → space, `%C3%A9` → `é`) before being turned
 /// into a [`PathBuf`] by [`bytes_to_path`]; a decoded NUL byte (which cannot
@@ -19,7 +33,10 @@ use crate::state::ReportedCwd;
 pub(super) fn parse_osc7_cwd(uri: &[u8]) -> Option<ReportedCwd> {
     // The `file` scheme is case-insensitive (RFC 3986 §3.1: schemes compare
     // case-insensitively); the `//` authority separator and the path are not.
-    if uri.len() < 7 || !uri[..4].eq_ignore_ascii_case(b"file") || &uri[4..7] != b"://" {
+    if uri.len() < 7 || uri.len() > MAX_OSC7_URI_BYTES {
+        return None;
+    }
+    if !uri[..4].eq_ignore_ascii_case(b"file") || &uri[4..7] != b"://" {
         return None;
     }
     let rest = &uri[7..];
@@ -28,7 +45,9 @@ pub(super) fn parse_osc7_cwd(uri: &[u8]) -> Option<ReportedCwd> {
     // authority means no host. Hosts are ASCII in practice, so decode lossily.
     let host = match &rest[..slash] {
         [] => None,
-        bytes => Some(String::from_utf8_lossy(bytes).into_owned()),
+        bytes => Some(koshi_core::text::sanitize_reported_text(
+            &String::from_utf8_lossy(bytes),
+        )),
     };
     let decoded = percent_decode(&rest[slash..]).collect::<Vec<u8>>();
     // A NUL cannot appear in a real path; reject the whole report.

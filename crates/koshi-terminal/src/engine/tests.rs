@@ -738,3 +738,153 @@ fn a_control_sequence_with_endless_parameters_is_not_held_past_the_limit() {
     assert_eq!(ch(&engine, 0, 0), 'Z');
     assert_eq!(engine.state().active_cursor_position(), (0, 1));
 }
+
+/// The engine holds its OSC buffer inline, so its own size bounds how much one
+/// unterminated sequence can accumulate.
+#[test]
+fn the_engine_carries_a_bounded_osc_buffer() {
+    // One engine exists per pane, so its size is a per-pane cost. The bound is
+    // an absolute figure: expressing it against `OSC_CAPACITY` would rise with
+    // the capacity it is meant to bound.
+    const PER_PANE_LIMIT: usize = 64 * 1024;
+    let size = std::mem::size_of::<TerminalEngine>();
+    assert!(
+        size < PER_PANE_LIMIT,
+        "TerminalEngine is {size} bytes, over the {PER_PANE_LIMIT} byte per-pane limit"
+    );
+}
+
+#[test]
+fn an_unterminated_osc_leaves_the_parser_usable() {
+    let mut engine = TerminalEngine::new(PtySize { rows: 24, cols: 80 });
+    let _ = engine.advance(b"\x1b]0;");
+    let chunk = vec![b'A'; 1 << 20];
+    for _ in 0..64 {
+        let _ = engine.advance(&chunk);
+    }
+    // The sequence is still open, so no title has been set.
+    assert_eq!(engine.state().title(), None);
+
+    // Terminating it yields a title cut to the reported-text limit, and the
+    // parser takes the next sequence normally.
+    let _ = engine.advance(b"\x07");
+    assert_eq!(
+        engine.state().title().map(str::len),
+        Some(koshi_core::text::MAX_REPORTED_TEXT_BYTES)
+    );
+    let _ = engine.advance(b"\x1b]2;ok\x07");
+    assert_eq!(engine.state().title(), Some("ok"));
+}
+
+#[test]
+fn a_title_split_across_chunks_is_still_bounded() {
+    // vte holds the open sequence between calls, so the cap must apply to the
+    // assembled payload rather than to one chunk.
+    let mut engine = TerminalEngine::new(PtySize { rows: 24, cols: 80 });
+    let _ = engine.advance(b"\x1b]2;");
+    for _ in 0..100 {
+        let _ = engine.advance(&[b'A'; 100]);
+    }
+    let _ = engine.advance(b"\x07");
+    assert_eq!(
+        engine.state().title().map(str::len),
+        Some(koshi_core::text::MAX_REPORTED_TEXT_BYTES)
+    );
+}
+
+#[test]
+fn a_refused_character_split_across_chunks_is_still_removed() {
+    // A multi-byte character delivered one byte at a time must be filtered as
+    // the character it forms, not passed through as bytes.
+    let mut engine = TerminalEngine::new(PtySize { rows: 24, cols: 80 });
+    let _ = engine.advance(b"\x1b]2;a");
+    for byte in "\u{202e}".as_bytes() {
+        let _ = engine.advance(&[*byte]);
+    }
+    let _ = engine.advance(b"b\x07");
+    assert_eq!(engine.state().title(), Some("ab"));
+}
+
+#[test]
+fn an_osc_7_uri_split_across_chunks_is_still_refused_past_the_limit() {
+    let mut engine = TerminalEngine::new(PtySize { rows: 24, cols: 80 });
+    let _ = engine.advance(b"\x1b]7;file://localhost/tmp\x07");
+    let _ = engine.advance(b"\x1b]7;file://localhost/");
+    for _ in 0..100 {
+        let _ = engine.advance(&[b'a'; 100]);
+    }
+    let _ = engine.advance(b"\x07");
+    assert_eq!(
+        engine
+            .state()
+            .current_cwd()
+            .map(|cwd| cwd.path().to_path_buf()),
+        Some(std::path::PathBuf::from("/tmp")),
+        "an over-long URI replaced the working directory"
+    );
+}
+
+#[test]
+fn a_title_survives_a_reset_and_can_be_set_again() {
+    let mut engine = TerminalEngine::new(PtySize { rows: 24, cols: 80 });
+    let _ = engine.advance(b"\x1b]2;first\x07");
+    assert_eq!(engine.state().title(), Some("first"));
+    let _ = engine.advance(b"\x1bc");
+    assert_eq!(engine.state().title(), None);
+    let _ = engine.advance("\x1b]2;sec\u{7f}ond\x07".as_bytes());
+    assert_eq!(engine.state().title(), Some("second"));
+}
+
+#[test]
+fn a_title_past_the_parser_capacity_is_identical_to_one_within_it() {
+    // The parser stops taking bytes at `OSC_CAPACITY`, so a longer sequence
+    // reaches `osc_dispatch` short. For a title that changes nothing: the cut
+    // to `MAX_REPORTED_TEXT_BYTES` happens well below the capacity, so both
+    // lengths yield the same bytes.
+    let within = {
+        let mut engine = TerminalEngine::new(PtySize { rows: 24, cols: 80 });
+        let mut seq = Vec::from(&b"\x1b]2;"[..]);
+        seq.extend(std::iter::repeat_n(b'A', 4_000));
+        seq.push(0x07);
+        let _ = engine.advance(&seq);
+        engine.state().title().map(str::to_owned)
+    };
+    let past = {
+        let mut engine = TerminalEngine::new(PtySize { rows: 24, cols: 80 });
+        let mut seq = Vec::from(&b"\x1b]2;"[..]);
+        seq.extend(std::iter::repeat_n(b'A', 200_000));
+        seq.push(0x07);
+        let _ = engine.advance(&seq);
+        engine.state().title().map(str::to_owned)
+    };
+    assert_eq!(within, past);
+    assert_eq!(
+        within.map(|t| t.len()),
+        Some(koshi_core::text::MAX_REPORTED_TEXT_BYTES)
+    );
+}
+
+#[test]
+fn a_sequence_past_the_parser_capacity_does_not_disturb_the_next_one() {
+    // Bytes are dropped from the oversized sequence alone. The parser still
+    // terminates it and reads what follows normally.
+    let mut engine = TerminalEngine::new(PtySize { rows: 24, cols: 80 });
+    let mut seq = Vec::from(&b"\x1b]2;"[..]);
+    seq.extend(std::iter::repeat_n(b'A', 200_000));
+    seq.push(0x07);
+    let _ = engine.advance(&seq);
+
+    let _ = engine.advance(b"\x1b]7;file://localhost/tmp\x07");
+    assert_eq!(
+        engine
+            .state()
+            .current_cwd()
+            .map(|cwd| cwd.path().to_path_buf()),
+        Some(std::path::PathBuf::from("/tmp"))
+    );
+    let _ = engine.advance(b"\x1b]2;after\x07");
+    assert_eq!(engine.state().title(), Some("after"));
+    // A printable glyph still lands on the grid.
+    let _ = engine.advance(b"z");
+    assert_eq!(ch(&engine, 0, 0), 'z');
+}

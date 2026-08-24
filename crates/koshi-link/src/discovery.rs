@@ -20,6 +20,7 @@ use koshi_core::discovery::{ClientInfo, PaneInfo, SessionOverview, TabInfo};
 use koshi_core::event::RejectReason;
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::redact::redact_argv;
+use koshi_core::text::sanitize_reported_text;
 use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::validate::reclaim_stale_socket;
 use serde::Serialize;
@@ -37,6 +38,21 @@ pub struct SessionRow {
     /// The saved server this session runs on, by the name it was saved under
     /// or its `host:port` address. `None` for a session on this machine.
     pub server: Option<String>,
+}
+
+impl SessionRow {
+    /// One row for `id`, naming `server`, with `name` filtered by
+    /// [`sanitize_reported_text`].
+    ///
+    /// `SessionRow::new(id, "web\u{7f}srv", None).name` is `"websrv"`.
+    #[must_use]
+    pub fn new(id: SessionId, name: &str, server: Option<String>) -> Self {
+        SessionRow {
+            id,
+            name: sanitize_reported_text(name),
+            server,
+        }
+    }
 }
 
 /// One `list-tabs` row.
@@ -262,11 +278,7 @@ fn sweep(runtime_dir: &Path, session_id: SessionId) {
 pub fn session_rows(overviews: &[SessionOverview]) -> Vec<SessionRow> {
     overviews
         .iter()
-        .map(|overview| SessionRow {
-            id: overview.session.id,
-            name: overview.session.name.clone(),
-            server: None,
-        })
+        .map(|overview| SessionRow::new(overview.session.id, &overview.session.name, None))
         .collect()
 }
 
@@ -279,9 +291,9 @@ pub fn tab_rows(overviews: &[SessionOverview]) -> Vec<TabRow> {
         .flat_map(|overview| {
             overview.tabs.iter().map(|tab| TabRow {
                 id: tab.id,
-                name: tab.name.clone(),
+                name: sanitize_reported_text(&tab.name),
                 session: overview.session.id,
-                session_name: overview.session.name.clone(),
+                session_name: sanitize_reported_text(&overview.session.name),
             })
         })
         .collect()
@@ -301,11 +313,11 @@ pub fn pane_rows(overviews: &[SessionOverview]) -> Vec<PaneRow> {
                 let tab = overview.tabs.iter().find(|tab| tab.id == pane.tab_id)?;
                 Some(PaneRow {
                     id: pane.id,
-                    name: pane.title.clone(),
+                    name: pane.title.as_deref().map(sanitize_reported_text),
                     tab: tab.id,
-                    tab_name: tab.name.clone(),
+                    tab_name: sanitize_reported_text(&tab.name),
                     session: overview.session.id,
-                    session_name: overview.session.name.clone(),
+                    session_name: sanitize_reported_text(&overview.session.name),
                 })
             })
         })

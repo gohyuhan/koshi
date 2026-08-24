@@ -10,7 +10,7 @@ thiserror = "2.0.18"
 koshi-core = { version = "0.3.0", path = "../koshi-core" }
 unicode-segmentation = "1.13.3"
 unicode-width = "0.2.2"
-vte = "0.15.0"
+vte = { version = "0.15.0", default-features = false }
 serde = { version = "1.0.228", features = ["derive", "rc"] }
 
 [dev-dependencies]

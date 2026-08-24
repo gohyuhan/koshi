@@ -414,11 +414,7 @@ fn run_discovery(command: &CliCommand, remote: Option<&str>) -> Result<(), CliEr
         let label = arg.label();
         let rows: Vec<SessionRow> = listed
             .into_iter()
-            .map(|row| SessionRow {
-                id: row.id,
-                name: row.name,
-                server: Some(label.clone()),
-            })
+            .map(|row| SessionRow::new(row.id, &row.name, Some(label.clone())))
             .collect();
         print!("{}", output::render_sessions(&rows, *format));
         return Ok(());
@@ -437,11 +433,11 @@ fn run_discovery(command: &CliCommand, remote: Option<&str>) -> Result<(), CliEr
                         server,
                         rows: listed,
                     } => {
-                        rows.extend(listed.into_iter().map(|row| SessionRow {
-                            id: row.id,
-                            name: row.name,
-                            server: Some(server.clone()),
-                        }));
+                        rows.extend(
+                            listed.into_iter().map(|row| {
+                                SessionRow::new(row.id, &row.name, Some(server.clone()))
+                            }),
+                        );
                     }
                     Reach::Refused { server } => eprintln!(
                         "koshi: {server}: the saved secret was refused; \

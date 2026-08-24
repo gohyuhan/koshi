@@ -626,3 +626,14 @@ fn a_highlight_running_off_the_top_of_the_view_starts_at_the_first_visible_row()
         "and ends where it ends"
     );
 }
+
+#[test]
+fn display_path_is_bounded_and_filtered() {
+    use super::display_path;
+
+    let long = std::path::PathBuf::from(format!("/{}", "a".repeat(4_000)));
+    assert!(display_path(&long).len() <= koshi_core::text::MAX_REPORTED_TEXT_BYTES);
+
+    let hostile = std::path::PathBuf::from("/tmp/a\u{7f}b\u{202e}c");
+    assert_eq!(display_path(&hostile), "/tmp/abc");
+}

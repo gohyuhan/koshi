@@ -771,22 +771,13 @@ pub fn list_remote_sessions(link: &mut RemoteLink) -> Result<Vec<RemoteSessionRo
             .into_iter()
             .map(|row| RemoteSessionRow {
                 id: row.id,
-                name: without_control(&row.name),
+                name: row.name,
             })
             .collect()),
         RemoteServerFrame::Refused { message } => Err(CliError::Runtime { detail: message }),
         RemoteServerFrame::Welcome { .. } => Err(unexpected_answer("the server")),
     }
 }
-
-/// `text` with every control character removed — the C0 range, DEL, and the
-/// C1 range.
-///
-/// Example — `"dev\x1b[2K"` becomes `"dev[2K"`.
-fn without_control(text: &str) -> String {
-    text.chars().filter(|c| !c.is_control()).collect()
-}
-
 /// Ask to attach to `selector` and hand the connection's two halves back.
 ///
 /// The bytes after this belong to that session's own server. The machine
@@ -859,18 +850,7 @@ pub fn fetch_remote_overview(
         kind: IpcRequestKind::Discovery,
     };
     match one_request(arg, session, request)? {
-        IpcResult::Overview(mut overview) => {
-            overview.session.name = without_control(&overview.session.name);
-            for tab in &mut overview.tabs {
-                tab.name = without_control(&tab.name);
-            }
-            for pane in &mut overview.panes {
-                if let Some(title) = &pane.title {
-                    pane.title = Some(without_control(title));
-                }
-            }
-            Ok(overview)
-        }
+        IpcResult::Overview(overview) => Ok(overview),
         IpcResult::Error(refusal) => Err(refused(&refusal)),
         other => Err(talk::SESSION.unexpected_reply(&other)),
     }

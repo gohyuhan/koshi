@@ -230,7 +230,7 @@ fn driven_through_the_parser_newline_and_carriage_return() {
 
 /// Feed `bytes` through a fresh parser into `state`.
 fn advance(state: &mut TerminalState, bytes: &[u8]) {
-    let mut parser = vte::Parser::new();
+    let mut parser = vte::Parser::<{ crate::engine::OSC_CAPACITY }>::new_with_size();
     parser.advance(state, bytes);
 }
 
@@ -4889,17 +4889,15 @@ fn an_unterminated_osc_sets_no_title() {
 }
 
 #[test]
-fn a_very_long_osc_title_is_accepted_whole_and_recovers() {
-    // vte's OSC buffer grows on the heap, so a 2000-byte title is taken in full
-    // rather than truncated; the parser still returns to ground for the next
-    // command afterward.
+fn a_very_long_osc_title_is_cut_to_the_cap_and_recovers() {
+    // The parser returns to ground for the next command afterward.
     let mut state = state(5, 3);
     let mut seq = Vec::from(&b"\x1b]0;"[..]);
     seq.extend(std::iter::repeat_n(b'A', 2000));
     seq.push(0x07); // BEL terminator
     advance(&mut state, &seq);
     let title = state.title().expect("the title is set");
-    assert_eq!(title.len(), 2000);
+    assert_eq!(title.len(), koshi_core::text::MAX_REPORTED_TEXT_BYTES);
     assert!(title.chars().all(|c| c == 'A'));
     // The parser recovered: a following sequence and glyph land normally.
     advance(&mut state, b"\x1b[2J");
@@ -4988,4 +4986,166 @@ fn a_resize_breaks_a_cluster_run() {
     assert_eq!(cell.ch(), 'e');
     assert_eq!(cell.combining(), [] as [char; 0]);
     assert_eq!(state.active_cursor_position(), (0, 1));
+}
+
+// --- Adversarial: the title is program-controlled text ---
+
+#[test]
+fn an_enormous_osc_title_cannot_grow_the_stored_title() {
+    let mut state = state(5, 3);
+    let mut seq = Vec::from(&b"\x1b]2;"[..]);
+    seq.extend(std::iter::repeat_n(b'A', 5_000_000));
+    seq.push(0x07);
+    advance(&mut state, &seq);
+    let title = state.title().expect("the title is set");
+    assert_eq!(title.len(), koshi_core::text::MAX_REPORTED_TEXT_BYTES);
+}
+
+#[test]
+fn an_osc_title_carrying_del_stores_no_del() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b]2;a\x7fb\x07");
+    assert_eq!(state.title(), Some("ab"));
+}
+
+#[test]
+fn an_osc_title_carrying_a_c1_control_stores_none_of_it() {
+    let mut state = state(5, 3);
+    advance(&mut state, "\x1b]2;a\u{9b}b\x07".as_bytes());
+    assert_eq!(state.title(), Some("ab"));
+}
+
+#[test]
+fn an_osc_title_carrying_a_bidi_override_stores_none_of_it() {
+    let mut state = state(5, 3);
+    advance(&mut state, "\x1b]2;\u{202e}gpj.exe\x07".as_bytes());
+    assert_eq!(state.title(), Some("gpj.exe"));
+}
+
+#[test]
+fn an_osc_title_of_only_control_characters_stores_an_empty_title() {
+    let mut state = state(5, 3);
+    advance(&mut state, "\x1b]2;\u{7f}\u{9b}\u{202e}\x07".as_bytes());
+    assert_eq!(state.title(), Some(""));
+}
+
+#[test]
+fn a_title_that_is_all_controls_then_text_keeps_the_text() {
+    let mut state = state(5, 3);
+    let mut seq = Vec::from(&b"\x1b]2;"[..]);
+    seq.extend(std::iter::repeat_n(0x7f, 1_000));
+    seq.extend_from_slice(b"shell");
+    seq.push(0x07);
+    advance(&mut state, &seq);
+    assert_eq!(state.title(), Some("shell"));
+}
+
+#[test]
+fn a_wide_glyph_title_is_never_cut_inside_a_character() {
+    let mut state = state(5, 3);
+    let mut seq = Vec::from(&b"\x1b]2;"[..]);
+    seq.extend("\u{65e5}".repeat(1_000).as_bytes());
+    seq.push(0x07);
+    advance(&mut state, &seq);
+    let title = state.title().expect("the title is set");
+    assert!(title.len() <= koshi_core::text::MAX_REPORTED_TEXT_BYTES);
+    assert!(title.chars().all(|c| c == '\u{65e5}'));
+}
+
+#[test]
+fn a_truncated_osc_7_uri_is_refused_rather_than_parsed_short() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b]7;file://localhost/tmp\x07");
+    assert_eq!(
+        state.current_cwd().map(|cwd| cwd.path().to_path_buf()),
+        Some(std::path::PathBuf::from("/tmp"))
+    );
+
+    let mut seq = Vec::from(&b"\x1b]7;file://localhost/"[..]);
+    seq.extend(std::iter::repeat_n(b'a', 20_000));
+    seq.push(0x07);
+    advance(&mut state, &seq);
+    assert_eq!(
+        state.current_cwd().map(|cwd| cwd.path().to_path_buf()),
+        Some(std::path::PathBuf::from("/tmp")),
+        "a truncated URI replaced the working directory"
+    );
+}
+
+#[test]
+fn an_osc_7_uri_over_the_limit_leaves_the_cwd_alone() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b]7;file://localhost/tmp\x07");
+    let mut seq = Vec::from(&b"\x1b]7;file://localhost/"[..]);
+    seq.extend(std::iter::repeat_n(b'a', 5_000));
+    seq.push(0x07);
+    advance(&mut state, &seq);
+    assert_eq!(
+        state.current_cwd().map(|cwd| cwd.path().to_path_buf()),
+        Some(std::path::PathBuf::from("/tmp"))
+    );
+}
+
+#[test]
+fn an_osc_7_host_carrying_a_control_character_stores_none_of_it() {
+    let mut state = state(5, 3);
+    advance(
+        &mut state,
+        "\x1b]7;file://ho\u{7f}st\u{202e}x/tmp\x07".as_bytes(),
+    );
+    assert_eq!(
+        state.current_cwd().and_then(|cwd| cwd.host()),
+        Some("hostx")
+    );
+}
+
+#[test]
+fn an_empty_osc_title_payload_stores_an_empty_title() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b]2;\x07");
+    assert_eq!(state.title(), Some(""));
+}
+
+#[test]
+fn a_non_utf8_title_keeps_its_replacement_characters() {
+    // Lossy decoding yields U+FFFD, which is not a refused character.
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b]2;a\xffb\x07");
+    assert_eq!(state.title(), Some("a\u{fffd}b"));
+}
+
+#[test]
+fn a_title_at_the_limit_is_kept_whole_and_one_past_it_is_cut() {
+    let cap = koshi_core::text::MAX_REPORTED_TEXT_BYTES;
+    for (len, expected) in [(cap - 1, cap - 1), (cap, cap), (cap + 1, cap)] {
+        let mut term = state(5, 3);
+        let mut seq = Vec::from(&b"\x1b]2;"[..]);
+        seq.extend(std::iter::repeat_n(b'A', len));
+        seq.push(0x07);
+        advance(&mut term, &seq);
+        assert_eq!(
+            term.title().map(str::len),
+            Some(expected),
+            "a {len}-byte title"
+        );
+    }
+}
+
+#[test]
+fn an_osc_7_host_of_only_refused_characters_is_not_a_local_host() {
+    // The authority filters to an empty string, which is a value an empty
+    // authority never produces: that yields no host at all.
+    let mut filtered = state(5, 3);
+    advance(
+        &mut filtered,
+        "\x1b]7;file://\u{7f}\u{202e}/tmp\x07".as_bytes(),
+    );
+    assert_eq!(filtered.current_cwd().and_then(|cwd| cwd.host()), Some(""));
+
+    let mut empty_authority = state(5, 3);
+    advance(&mut empty_authority, b"\x1b]7;file:///tmp\x07");
+    assert_eq!(
+        empty_authority.current_cwd().and_then(|cwd| cwd.host()),
+        None
+    );
 }

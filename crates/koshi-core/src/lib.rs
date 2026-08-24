@@ -20,6 +20,8 @@
 //! - [`discovery`] — the read-only snapshots the list and inspect queries
 //!   answer with; [`redact`] — scrubbing secrets out of text; [`log`] — the
 //!   log level and format a config file names.
+//! - [`text`] — bounding and filtering what a pane or a remote peer reports
+//!   about itself: titles, working directories, and names.
 //!
 //! [`compat`] holds the table of every versioned surface koshi carries — the
 //! wire protocols two builds speak and the files one build writes for another
@@ -44,3 +46,4 @@ pub mod process;
 pub mod redact;
 pub mod registry;
 pub mod resolve;
+pub mod text;
