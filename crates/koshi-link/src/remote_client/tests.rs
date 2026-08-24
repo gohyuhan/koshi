@@ -403,21 +403,6 @@ fn a_sweep_that_heard_nothing_reports_every_asked_server() {
     );
 }
 
-// Control characters in a server-sent name are removed before the name is
-// printed anywhere.
-#[test]
-fn control_characters_are_stripped_from_server_sent_text() {
-    assert_eq!(without_control("dev\x1b[2K\x1b[A"), "dev[2K[A");
-    assert_eq!(without_control("web \x07bell\x7f"), "web bell");
-    assert_eq!(
-        without_control("csi\u{9b}31m"),
-        "csi31m",
-        "the C1 range too"
-    );
-    assert_eq!(without_control("plain-name"), "plain-name");
-    assert_eq!(without_control("héllo wörld"), "héllo wörld");
-}
-
 /// An in-memory byte source serving as one half of a framed link. The
 /// deadline is taken and ignored.
 struct ByteStream(std::io::Cursor<Vec<u8>>);
@@ -478,7 +463,9 @@ fn link_answering(answer: &RemoteServerFrame) -> RemoteLink {
 }
 
 #[test]
-fn listed_rows_arrive_with_control_characters_removed() {
+fn listed_rows_arrive_exactly_as_the_server_sent_them() {
+    // A name identifies a session, so the listing carries what the server
+    // said. Filtering happens where a name is printed.
     let id = SessionId::new();
     let mut link = link_answering(&RemoteServerFrame::Sessions {
         rows: vec![RemoteSessionRow {
@@ -491,7 +478,7 @@ fn listed_rows_arrive_with_control_characters_removed() {
         list_remote_sessions(&mut link).expect("the sessions frame is the answer"),
         vec![RemoteSessionRow {
             id,
-            name: "dev[2K".to_string(),
+            name: "dev\x1b[2K".to_string(),
         }]
     );
 }
@@ -662,4 +649,20 @@ fn a_lock_its_holder_released_is_taken_by_the_next_caller() {
 
     let again = hold_store(&path, TEST_LOCK_WAIT).expect("the first holder let it go");
     drop(again);
+}
+
+#[test]
+fn this_layer_never_alters_what_a_peer_reported() {
+    // A session or tab name is what `targeting.rs` matches on, so everything
+    // this module returns carries the peer's own bytes. Filtering happens in
+    // the row types built for printing (`discovery::SessionRow` and its
+    // siblings), never here.
+    //
+    // Driving `fetch_remote_overview` needs a live connection, so the rule is
+    // checked against the source instead.
+    let source = include_str!("../remote_client.rs");
+    assert!(
+        !source.contains("sanitize_reported_text"),
+        "remote_client.rs filters reported text; that belongs in the display rows"
+    );
 }

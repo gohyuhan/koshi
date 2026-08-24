@@ -313,12 +313,14 @@ impl Server {
     }
 }
 
-/// One path as pane-title text: the user's home directory prefix shortened
-/// to `~`, everything else verbatim.
+/// One path as pane-title text: the user's home directory prefix shortened to
+/// `~`, then bounded and filtered by
+/// [`sanitize_reported_text`](koshi_core::text::sanitize_reported_text).
+///
+/// `/tmp/a\u{7f}b` results in `/tmp/ab`.
 fn display_path(path: &std::path::Path) -> String {
-    shorten_home(path, home_text())
+    koshi_core::text::sanitize_reported_text(&shorten_home(path, home_text()))
 }
-
 /// The home directory as display text, read from the environment on the first
 /// call and reused after — `HOME`, or `USERPROFILE` on Windows. `None` when
 /// neither is set, which leaves every path whole. A later change to either

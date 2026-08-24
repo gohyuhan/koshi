@@ -624,3 +624,58 @@ fn redacting_pane_commands_across_no_sessions_is_a_noop() {
 
     assert!(overviews.is_empty());
 }
+
+#[test]
+fn display_rows_filter_names_while_the_overview_keeps_them_raw() {
+    // A name is what targeting matches on, so the overview keeps exactly what
+    // the peer sent. Only the rows built for printing are filtered.
+    let mut raw = overview("web\u{7f}srv", &[("ta\u{202e}b", 1)]);
+    raw.panes[0].title = Some("ti\u{7f}tle".to_string());
+
+    assert_eq!(raw.session.name, "web\u{7f}srv");
+    assert_eq!(raw.tabs[0].name, "ta\u{202e}b");
+
+    let sessions = session_rows(std::slice::from_ref(&raw));
+    assert_eq!(sessions[0].name, "websrv");
+
+    let tabs = tab_rows(std::slice::from_ref(&raw));
+    assert_eq!(tabs[0].name, "tab");
+    assert_eq!(tabs[0].session_name, "websrv");
+
+    let panes = pane_rows(std::slice::from_ref(&raw));
+    assert_eq!(panes[0].name.as_deref(), Some("title"));
+    assert_eq!(panes[0].tab_name, "tab");
+    assert_eq!(panes[0].session_name, "websrv");
+}
+
+#[test]
+fn a_display_row_name_is_bounded() {
+    let raw = overview(&"a".repeat(100_000), &[("t", 1)]);
+    assert_eq!(
+        raw.session.name.len(),
+        100_000,
+        "the overview keeps it whole"
+    );
+    assert_eq!(
+        session_rows(std::slice::from_ref(&raw))[0].name.len(),
+        koshi_core::text::MAX_REPORTED_TEXT_BYTES
+    );
+}
+
+#[test]
+fn a_session_row_filters_its_name_however_it_is_built() {
+    // Four sites build a `SessionRow`, and only the constructor filters, so a
+    // name reaches a listing or a picker filtered whichever site made it.
+    let id = SessionId::new();
+    let row = SessionRow::new(id, "web\u{7f}s\u{202e}rv", Some("host-1".to_string()));
+    assert_eq!(row.name, "websrv");
+    assert_eq!(row.id, id, "the id is carried, never altered");
+    assert_eq!(
+        row.server.as_deref(),
+        Some("host-1"),
+        "the server is carried, never altered"
+    );
+
+    let long = SessionRow::new(id, &"a".repeat(100_000), None);
+    assert_eq!(long.name.len(), koshi_core::text::MAX_REPORTED_TEXT_BYTES);
+}

@@ -298,3 +298,27 @@ fn window_title_with_a_focused_pane_absent_from_the_pane_list_falls_back() {
 
     assert_eq!(window_title(&snapshot), "quiet-lake");
 }
+
+#[test]
+fn a_window_title_can_carry_no_osc_terminator() {
+    // `window_title` is written into the viewer's own terminal verbatim,
+    // inside `OSC 0; ... BEL` (crossterm `SetTitle`).
+    for hostile in [
+        "x\u{7}pwned",          // BEL
+        "x\u{1b}]0;pwned\u{7}", // ESC
+        "x\u{9c}pwned",         // C1 ST
+        "x\u{9b}2J",            // C1 CSI
+    ] {
+        let title = koshi_core::text::sanitize_reported_text(hostile);
+        assert!(
+            !title.contains(['\u{7}', '\u{1b}', '\u{9c}', '\u{9b}']),
+            "an OSC terminator survived into the window title: {title:?}"
+        );
+    }
+}
+
+#[test]
+fn a_window_title_is_bounded_by_the_pane_title_cap() {
+    let long = koshi_core::text::sanitize_reported_text(&"a".repeat(100_000));
+    assert_eq!(long.len(), koshi_core::text::MAX_REPORTED_TEXT_BYTES);
+}
