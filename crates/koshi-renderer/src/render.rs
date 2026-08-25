@@ -34,6 +34,7 @@ use koshi_core::lock::LockMode;
 use koshi_terminal::grid::state::{Cell, Grid};
 use koshi_terminal::style::{Color as CellColor, Style as CellStyle, UnderlineStyle};
 
+use crate::region::{NavigatorDto, StatuslineDto};
 use crate::snapshot::{
     ClientSnapshot, CursorStyle, FrameLayout, KeymapHints, PaneSnapshot, Reconnecting,
     RenderSnapshot, SelectionSpans, ViewerChrome,
@@ -120,7 +121,11 @@ pub fn render_frame(
         width: area.width,
         height: 1,
     };
-    draw_tabline(snapshot.layout(viewer), theme, tabline, buf);
+    let navigator = NavigatorDto {
+        frame: snapshot.layout(viewer),
+        theme,
+    };
+    draw_tabline(&navigator, tabline, buf);
 
     if area.height >= 2 {
         let hint_bar = RatatuiRect {
@@ -129,7 +134,12 @@ pub fn render_frame(
             width: area.width,
             height: 1,
         };
-        draw_hint_bar(hints, theme, pending, hint_bar, buf);
+        let statusline = StatuslineDto {
+            hints,
+            theme,
+            pending,
+        };
+        draw_hint_bar(&statusline, hint_bar, buf);
     }
 }
 

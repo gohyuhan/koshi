@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use koshi_core::key::{Key, KeySequence, ModFlags, NamedKey};
+use ratatui::buffer::Cell;
 
 use crate::snapshot::HintBinding;
 
@@ -63,6 +64,27 @@ fn draw(hints: &KeymapHints, width: u16) -> Buffer {
     draw_themed(hints, &Theme::default(), width)
 }
 
+/// Paint `hints` into `buf` over `area`, in `theme`'s colors. `pending` carries
+/// the chords already pressed of an open key sequence, and is `None` when no
+/// sequence is open.
+fn paint_bar(
+    hints: &KeymapHints,
+    theme: &Theme,
+    pending: Option<&KeySequence>,
+    area: RatatuiRect,
+    buf: &mut Buffer,
+) {
+    draw_hint_bar(
+        &StatuslineDto {
+            hints,
+            theme,
+            pending,
+        },
+        area,
+        buf,
+    );
+}
+
 /// Draw in `theme`'s colors with an open sequence.
 fn draw_themed_pending(
     hints: &KeymapHints,
@@ -77,21 +99,13 @@ fn draw_themed_pending(
         height: 1,
     };
     let mut buf = Buffer::empty(area);
-    draw_hint_bar(hints, theme, Some(pending), area, &mut buf);
+    paint_bar(hints, theme, Some(pending), area, &mut buf);
     buf
 }
 
 /// Draw with an open sequence, which the viewer owns and hands to the bar.
 fn draw_pending(hints: &KeymapHints, pending: &KeySequence, width: u16) -> Buffer {
-    let area = RatatuiRect {
-        x: 0,
-        y: 0,
-        width,
-        height: 1,
-    };
-    let mut buf = Buffer::empty(area);
-    draw_hint_bar(hints, &Theme::default(), Some(pending), area, &mut buf);
-    buf
+    draw_themed_pending(hints, &Theme::default(), pending, width)
 }
 
 /// Paint the hint bar in `theme`'s colors, for the tests that check which
@@ -104,7 +118,7 @@ fn draw_themed(hints: &KeymapHints, theme: &Theme, width: u16) -> Buffer {
         height: 1,
     };
     let mut buf = Buffer::empty(area);
-    draw_hint_bar(hints, theme, None, area, &mut buf);
+    paint_bar(hints, theme, None, area, &mut buf);
     buf
 }
 
@@ -115,6 +129,21 @@ fn row_text(buf: &Buffer) -> String {
         .collect::<Vec<_>>()
         .join("");
     row.trim_end().to_string()
+}
+
+/// One cell per `char` of `text`, each carrying that char and `style`.
+///
+/// `painted("ab", Style::default().fg(Color::Reset))` gives two cells whose
+/// symbols are `a` and `b`.
+fn painted(text: &str, style: Style) -> Vec<Cell> {
+    text.chars()
+        .map(|c| {
+            let mut cell = Cell::default();
+            cell.set_char(c);
+            cell.set_style(style);
+            cell
+        })
+        .collect()
 }
 
 /// The default-shaped fixture: two sequences under `<C-p>` labeled `PANE`,
@@ -158,6 +187,36 @@ fn modifier_key_and_action_ribbons_use_the_group_ramp_stop() {
     assert_eq!(buf[(9, 0)].fg, Color::Rgb(0x12, 0x09, 0x1f));
     assert_eq!(buf[(12, 0)].bg, purple_dim);
     assert_eq!(buf[(12, 0)].fg, Color::Rgb(0xf0, 0xec, 0xfa));
+}
+
+#[test]
+fn every_cell_of_the_hint_row_is_painted_the_same_way() {
+    let buf = draw(&pane_fixture(false), 30);
+    let header = Style::default()
+        .fg(Color::Rgb(0xd0, 0xa5, 0xff))
+        .bg(Color::Rgb(0x00, 0x00, 0x00))
+        .add_modifier(Modifier::BOLD);
+    let key = Style::default()
+        .fg(Color::Rgb(0x12, 0x09, 0x1f))
+        .bg(Color::Rgb(0xd0, 0xa5, 0xff))
+        .add_modifier(Modifier::BOLD);
+    let label = Style::default()
+        .fg(Color::Rgb(0xf0, 0xec, 0xfa))
+        .bg(Color::Rgb(0x72, 0x5a, 0x8c));
+    let fill = Style::default().bg(Color::Rgb(0x00, 0x00, 0x00));
+    let expected: Vec<Cell> = [
+        painted(" Ctrl + ", header),
+        painted(" l ", key),
+        painted(" Lock ", label),
+        painted(" p ", key),
+        painted(" PANE ", label),
+        painted("    ", fill),
+    ]
+    .concat();
+    assert_eq!(expected.len(), 30);
+    for (x, want) in expected.iter().enumerate() {
+        assert_eq!(buf[(x as u16, 0)], *want, "col {x}");
+    }
 }
 
 #[test]
@@ -482,7 +541,7 @@ fn empty_mode_blanks_the_row() {
     let mut buf = Buffer::empty(area);
     // Pre-fill the row: the bar owns it, so stale cells must be cleared.
     buf.set_string(0, 0, "X".repeat(20), Style::default());
-    draw_hint_bar(&bar, &Theme::default(), None, area, &mut buf);
+    paint_bar(&bar, &Theme::default(), None, area, &mut buf);
     assert_eq!(row_text(&buf), "");
     // Blank of text, but not of color: the row still carries the bar
     // background, so an empty mode reads as a bar rather than a hole.
@@ -506,7 +565,7 @@ fn zero_size_area_draws_nothing() {
         width: 10,
         height: 1,
     });
-    draw_hint_bar(&bar, &Theme::default(), None, area, &mut buf);
+    paint_bar(&bar, &Theme::default(), None, area, &mut buf);
     assert_eq!(row_text(&buf), "");
 }
 

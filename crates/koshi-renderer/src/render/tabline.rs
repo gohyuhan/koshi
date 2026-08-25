@@ -6,7 +6,10 @@ use super::*;
 #[cfg(test)]
 mod tests;
 
-/// Draw the tabline: the whole row is filled with the theme's bar background
+/// Draw the tabline from `dto` — see [`NavigatorDto`]. `area` is the row to
+/// paint. `buf` is the buffer painted into.
+///
+/// The whole row is filled with the theme's bar background
 /// (black by default), then the session name plus the `[v…]` version badge on
 /// the left and the mode tag on the right are shown whole as colored text over
 /// that fill; only the tab list between them carries its own block
@@ -17,12 +20,8 @@ mod tests;
 /// The block widths and per-tab cell spans come from [`tabline_layout`], the
 /// same solve [`crate::hit_test()`] reads, so the tab a click lands on is the tab
 /// that was drawn there.
-pub(super) fn draw_tabline(
-    frame: FrameLayout<'_>,
-    theme: &Theme,
-    area: RatatuiRect,
-    buf: &mut Buffer,
-) {
+pub(super) fn draw_tabline(dto: &NavigatorDto<'_>, area: RatatuiRect, buf: &mut Buffer) {
+    let NavigatorDto { frame, theme } = *dto;
     // The row is koshi-owned chrome: reset it first so no letterbox fill or
     // stale cell survives, then fill it with the theme's bar background. Text
     // painted after this sets only its foreground, so the fill shows through

@@ -27,6 +27,7 @@ fn allowed_graph_has_no_violations() {
             "koshi-plugin-manager",
             &["koshi-core", "koshi-plugin-api", "koshi-storage"],
         ),
+        ("koshi-plugin-api", &["koshi-core"]),
         // Legitimately reaches wasmtime via the host; not a direct dep here.
         (
             "koshi-runtime",
@@ -66,6 +67,34 @@ fn plugin_manager_host_dep_is_named() {
         "{}",
         v[0]
     );
+}
+
+#[test]
+fn plugin_api_client_dep_is_named() {
+    let g = graph(&[("koshi-plugin-api", &["koshi-client"])]);
+    assert_eq!(
+        check(&g),
+        vec!["forbidden edge: koshi-plugin-api -> koshi-client \
+             (koshi-plugin-api must not depend on client/renderer)"
+            .to_string()]
+    );
+}
+
+#[test]
+fn plugin_api_renderer_dep_is_named() {
+    let g = graph(&[("koshi-plugin-api", &["koshi-renderer"])]);
+    assert_eq!(
+        check(&g),
+        vec!["forbidden edge: koshi-plugin-api -> koshi-renderer \
+             (koshi-plugin-api must not depend on client/renderer)"
+            .to_string()]
+    );
+}
+
+#[test]
+fn a_crate_other_than_plugin_api_may_depend_on_client_and_renderer() {
+    let g = graph(&[("koshi", &["koshi-client", "koshi-renderer"])]);
+    assert_eq!(check(&g), Vec::<String>::new());
 }
 
 #[test]

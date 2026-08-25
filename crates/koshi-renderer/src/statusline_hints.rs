@@ -21,14 +21,17 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Widget};
 
+use crate::region::StatuslineDto;
 use crate::render::{bar_style, set_line_clipped};
 use crate::snapshot::KeymapHints;
 use crate::theme::Theme;
 
 const REVERT_MARKER: &str = " keys! ";
 
-/// Paint one chrome-owned hint row from `hints` — the viewer's keybinding data
-/// for the mode it is in.
+/// Paint one chrome-owned hint row from `dto`.
+///
+/// `dto` holds everything the row draws — see [`StatuslineDto`]. `area` is the
+/// row to paint. `buf` is the buffer painted into.
 ///
 /// Does nothing for a zero-size area. Otherwise paints in this order:
 ///
@@ -41,16 +44,15 @@ const REVERT_MARKER: &str = " keys! ";
 /// 4. Draws each modifier group left to right: its ` Ctrl + ` header, then one
 ///    two-block ribbon per action.
 /// 5. Draws a `…` marker where the row ran out of room, and stops there.
-pub fn draw_hint_bar(
-    hints: &KeymapHints,
-    theme: &Theme,
-    pending: Option<&KeySequence>,
-    area: RatatuiRect,
-    buf: &mut Buffer,
-) {
+pub fn draw_hint_bar(dto: &StatuslineDto<'_>, area: RatatuiRect, buf: &mut Buffer) {
     if area.width == 0 || area.height == 0 {
         return;
     }
+    let StatuslineDto {
+        hints,
+        theme,
+        pending,
+    } = *dto;
     // Clear drops stale cells, then the bar background fills the row whole.
     // Ribbons painted after this set their own background; plain text such as
     // a `Ctrl +` header sets only a foreground and keeps this fill.

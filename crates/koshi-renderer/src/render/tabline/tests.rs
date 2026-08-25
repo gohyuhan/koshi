@@ -106,7 +106,14 @@ fn area(width: u16) -> RatatuiRect {
 fn draw(frame: &Frame, width: u16) -> Buffer {
     let a = area(width);
     let mut buf = Buffer::empty(a);
-    draw_tabline(frame.layout(), &Theme::default(), a, &mut buf);
+    draw_tabline(
+        &NavigatorDto {
+            frame: frame.layout(),
+            theme: &Theme::default(),
+        },
+        a,
+        &mut buf,
+    );
     buf
 }
 
