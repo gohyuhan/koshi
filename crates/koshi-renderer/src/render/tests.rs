@@ -316,6 +316,32 @@ fn hint_bar_paints_the_bottom_row_from_the_hints_it_is_given() {
 }
 
 #[test]
+fn two_rows_is_enough_for_both_chrome_rows() {
+    let snap = build(
+        "sess",
+        &[("shell", true)],
+        &[],
+        None,
+        LockMode::Normal,
+        Size { cols: 40, rows: 2 },
+    );
+    let hints = KeymapHints {
+        entries: Arc::new(vec![crate::snapshot::HintBinding {
+            sequence: KeySequence::from(KeyChord::new(ModFlags::CTRL, Key::Char('l'))),
+            label: "Lock".to_string(),
+            user_set: false,
+            pinned: false,
+        }]),
+        ..KeymapHints::default()
+    };
+    let buf = render_with_hints(&snap, &hints, 40, 2);
+
+    // Row 0 is the tabline, row 1 the hint row: the last height that fits both.
+    assert!(row_text(&buf, 0).starts_with(" sess "));
+    assert_eq!(row_text(&buf, 1).trim_end(), " Ctrl +  l  Lock");
+}
+
+#[test]
 fn tabline_lists_tabs_with_active_marker() {
     let pane = PaneId::new();
     let cols = badge_cols() + 51;

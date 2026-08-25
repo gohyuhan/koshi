@@ -37,7 +37,8 @@ fn is_refused(c: char) -> bool {
     ) || c.is_control()
 }
 
-/// `raw` with every character [`is_refused`] names removed, cut to
+/// `raw` with every control, bidi-control, line and paragraph separator,
+/// noncharacter, interlinear annotation and tag character removed, cut to
 /// [`MAX_REPORTED_TEXT_BYTES`].
 ///
 /// A removed character consumes none of the byte budget. The cut keeps the

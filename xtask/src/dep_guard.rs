@@ -1,11 +1,12 @@
 //! Dependency-direction guard.
 //!
 //! [`run`] reads the workspace dependency graph with `cargo metadata` and
-//! reports every edge these four rules forbid:
+//! reports every edge these five rules forbid:
 //!
 //! - `koshi-core` depends on no crate whose name starts with `koshi-`.
 //! - `koshi-plugin-manager` depends on none of `koshi-runtime`, `koshi-ipc`,
 //!   `koshi-plugin-host`.
+//! - `koshi-plugin-api` depends on neither `koshi-client` nor `koshi-renderer`.
 //! - Only `koshi-plugin-host` depends on `wasmtime`.
 //! - Only `koshi-pty` depends on `portable-pty`.
 //!
@@ -98,6 +99,15 @@ pub fn check(graph: &[CrateDeps]) -> Vec<String> {
                     krate,
                     dep,
                     "koshi-plugin-manager must not depend on runtime/ipc/host",
+                ));
+            }
+            if krate == "koshi-plugin-api"
+                && matches!(dep.as_str(), "koshi-client" | "koshi-renderer")
+            {
+                violations.insert(edge(
+                    krate,
+                    dep,
+                    "koshi-plugin-api must not depend on client/renderer",
                 ));
             }
             if dep == "wasmtime" && krate != "koshi-plugin-host" {
