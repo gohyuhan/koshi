@@ -171,12 +171,23 @@ Example: `koshi input --pane pane-… --no-enter "git status"` leaves
 
 | Command | Main flags | Result |
 |---|---|---|
-| `koshi new-tab` | `--session <NAME_OR_ID>` | Open a tab with one shell pane |
+| `koshi new-tab` | `--session <NAME_OR_ID>`, `--client <CLIENT_ID>` | Open a tab with one shell pane |
 | `koshi close-tab` | `--tab <NAME_OR_ID>`, `--session <NAME_OR_ID>`, `--force` | Close a tab |
 | `koshi next-tab` | `--client` | Focus the next tab |
 | `koshi previous-tab` | `--client` | Focus the previous tab |
 | `koshi focus-tab` | `--index` or `--tab <NAME_OR_ID>`, optional `--client` | Focus one tab |
 | `koshi move-tab` | `--index`, optional `--tab <NAME_OR_ID>` | Move one tab to a zero-based index |
+
+`--client` on `new-tab` names the terminal that switches onto the new tab. With
+one terminal attached the flag is optional. If two or more terminals are
+attached and the command names no terminal, it fails with `several clients are
+attached; name the target client`. A pane opened for a terminal names that
+terminal. A pane the session started with names none, and neither does a
+command from outside koshi.
+
+Example: terminals `client-1a2b…` and `client-3c4d…` both watch session
+`amber-fox`. `koshi new-tab --client client-3c4d…` opens a tab and moves
+`client-3c4d…` onto it; `client-1a2b…` keeps the tab it was on.
 
 ## Input lock
 

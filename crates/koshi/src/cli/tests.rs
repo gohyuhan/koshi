@@ -319,7 +319,13 @@ fn kill_session_rejects_a_second_positional() {
 fn flagless_subcommands_parse_to_their_variants() {
     let cases: &[(&str, CliCommand)] = &[
         ("toggle-pane-fullscreen", CliCommand::TogglePaneFullscreen),
-        ("new-tab", CliCommand::NewTab { session: None }),
+        (
+            "new-tab",
+            CliCommand::NewTab {
+                session: None,
+                client: None,
+            },
+        ),
         ("next-tab", CliCommand::NextTab { client: None }),
         ("previous-tab", CliCommand::PreviousTab { client: None }),
         ("lock", CliCommand::Lock { client: None }),
@@ -1249,13 +1255,62 @@ fn lock_verbs_take_an_optional_client() {
 }
 
 #[test]
-fn new_tab_takes_an_optional_session() {
+fn new_tab_takes_an_optional_session_and_client() {
+    let client_flag = format!("client-{}", fixed_uuid());
+    let client = ClientId::from_uuid(fixed_uuid());
     assert_eq!(
         command(&["koshi", "new-tab", "--session", "amber-fox"]),
         CliCommand::NewTab {
             session: Some(SessionRef::Name("amber-fox".to_string())),
+            client: None,
         }
     );
+    assert_eq!(
+        command(&[
+            "koshi",
+            "new-tab",
+            "--session",
+            "amber-fox",
+            "--client",
+            &client_flag
+        ]),
+        CliCommand::NewTab {
+            session: Some(SessionRef::Name("amber-fox".to_string())),
+            client: Some(client),
+        }
+    );
+    assert_eq!(
+        command(&["koshi", "new-tab", "--session", "amber-fox"]).target_session(),
+        Some(&SessionRef::Name("amber-fox".to_string()))
+    );
+}
+
+#[test]
+fn new_tab_carries_its_client_into_the_command_and_the_routing_target() {
+    let client_flag = format!("client-{}", fixed_uuid());
+    let client = ClientId::from_uuid(fixed_uuid());
+    let parsed = command(&["koshi", "new-tab", "--client", &client_flag]);
+    assert_eq!(parsed.target_client(), Some(client));
+    assert_eq!(parsed.target_session(), None);
+    let (_, mapped) = action_of(&["koshi", "new-tab", "--client", &client_flag]);
+    assert_eq!(
+        mapped,
+        Command::NewTab(NewTabArgs {
+            cwd: None,
+            client: Some(client),
+        })
+    );
+
+    // With no flag the command names no client.
+    let bare = command(&["koshi", "new-tab"]);
+    assert_eq!(bare.target_client(), None);
+}
+
+#[test]
+fn new_tab_client_value_must_read_as_a_client_id() {
+    let err = parse_err(&["koshi", "new-tab", "--client", "amber-fox"]);
+    assert_eq!(err.kind(), ErrorKind::ValueValidation);
+    assert_eq!(err.exit_code(), 2);
 }
 
 #[test]
@@ -2103,6 +2158,7 @@ fn a_session_value_that_is_not_an_id_parses_as_a_name() {
         command(&["koshi", "new-tab", "--session", &value]),
         CliCommand::NewTab {
             session: Some(SessionRef::Name(value)),
+            client: None,
         }
     );
 }
