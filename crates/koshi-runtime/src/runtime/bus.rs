@@ -458,7 +458,7 @@ impl EventBus {
 }
 
 /// The frame an attached client is sent for one item off its queue, or `None`
-/// when the item says nothing about the session's structure.
+/// when no [`SessionEvent`] spells that item.
 ///
 /// A [`Delivery::Frame`] becomes [`SessionEvent::Painted`] carrying the whole
 /// picture in koshi-ipc's wire spellings.
@@ -475,7 +475,15 @@ impl EventBus {
 ///
 /// A [`Delivery::SwitchTo`] becomes [`SessionEvent::SwitchTo`] carrying the id
 /// of the session the client attaches to next.
+///
+/// Every [`Event`] variant with no [`SessionEvent`] spelling is named here and
+/// returns `None`. The match takes no wildcard arm, so a new variant is a
+/// compile error until this function says what the wire does with it.
 #[must_use]
+#[deny(
+    clippy::wildcard_enum_match_arm,
+    clippy::match_wildcard_for_single_variants
+)]
 pub fn wire_event(delivery: &Delivery) -> Option<SessionEvent> {
     match delivery {
         Delivery::Event(event) => match event {
@@ -521,9 +529,41 @@ pub fn wire_event(delivery: &Delivery) -> Option<SessionEvent> {
             }),
             Event::Quit => Some(SessionEvent::Quit),
             Event::Restarting => Some(SessionEvent::Restarting),
-            // Pane content, PTY sizing, input, mouse, selection, plugin and
-            // per-client view events carry no structure change.
-            _ => None,
+
+            // PTY size and content damage: the client redraws from the next
+            // `Painted` frame.
+            Event::PtyResized(_) | Event::PaneOutputUpdated(_) => None,
+            // Visibility: the `Painted` frame already shows which panes have
+            // area.
+            Event::PaneSuppressed(_)
+            | Event::PaneResumed(_)
+            | Event::TerminalTooSmallEntered(_)
+            | Event::TerminalTooSmallExited(_) => None,
+            Event::ConfigReloaded(_) => None,
+            // Per-client input state: the client holds its own mode, its own
+            // mouse-select mode, and the binding it matched.
+            Event::InputModeChanged(_)
+            | Event::MouseSelectChanged(_)
+            | Event::KeybindingMatched(_) => None,
+            // Typed input: these payloads carry pane text.
+            Event::PaneTyped(_) | Event::PaneEnterPressed(_) => None,
+            // Mouse input: the client produced it and sends it the other way.
+            Event::MousePressed(_)
+            | Event::MouseReleased(_)
+            | Event::MouseDragged(_)
+            | Event::MouseScrolled(_)
+            | Event::PaneMouseForwarded(_)
+            | Event::PluginMouseInput(_) => None,
+            // A shell's OSC 133 prompt reports.
+            Event::PaneCommandStarted(_) | Event::PaneCommandFinished(_) => None,
+            // Drop counters and rejections: a subscriber that misses a
+            // critical event is told through `SessionEvent::Resync`.
+            Event::PaneScrollbackTruncated(_)
+            | Event::SubscriberLagged(_)
+            | Event::CommandRejected(_) => None,
+            // Selection and copy: both are client-local.
+            Event::SelectionChanged(_) | Event::Copied(_) => None,
+            Event::Plugin(_) => None,
         },
         Delivery::Frame(snapshot) => Some(SessionEvent::Painted {
             frame: Box::new(wire_frame(snapshot)),
