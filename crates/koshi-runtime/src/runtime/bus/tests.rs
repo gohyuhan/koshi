@@ -14,16 +14,25 @@
 //! Then the two wire conversions: the filter an attaching client sent becomes
 //! the bus's own, and one queue item becomes the frame that client is sent.
 
+use koshi_core::command::CopyTarget;
 use koshi_core::event::{
-    Event, InputMode, InputModeChanged, LayoutChanged, PaneClosing, PaneCreated, PaneFocused,
-    PaneOutputUpdated, PaneProcessExited, PaneRemoved, PaneSuppressed, TabClosed, TabCreated,
-    TabFocused, TabMoved,
+    CommandRejected, ConfigReloaded, Copied, Event, InputMode, InputModeChanged, KeybindingMatched,
+    LayoutChanged, MouseDragged, MousePressed, MouseReleased, MouseScrolled, MouseSelectChanged,
+    PaneClosing, PaneCommandFinished, PaneCommandStarted, PaneCreated, PaneEnterPressed,
+    PaneFocused, PaneMouseForwarded, PaneOutputUpdated, PaneProcessExited, PaneRemoved,
+    PaneResumed, PaneScrollbackTruncated, PaneSuppressed, PaneTyped, PluginEvent, PluginInstalled,
+    PluginMouseInput, PtyResized, RejectReason, SelectionChanged, SubmittedLinePayload, TabClosed,
+    TabCreated, TabFocused, TabMoved, TerminalTooSmallEntered, TerminalTooSmallExited,
+    TypedPayload,
 };
-use koshi_core::geometry::{Direction, Size};
-use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
+use koshi_core::geometry::{Direction, Point, Size};
+use koshi_core::ids::{ClientId, CommandId, PaneId, PluginId, SessionId, SubscriberId, TabId};
 use koshi_core::lock::LockMode;
+use koshi_core::mouse::{MouseButton, ScrollDirection};
+use koshi_core::process::PtySize;
 use koshi_layout::mode::LayoutMode;
 use koshi_renderer::snapshot::{ClientSnapshot, PluginUiSnapshot, SessionSnapshot, TabSnapshot};
+use std::time::SystemTime;
 
 use super::*;
 
@@ -1033,32 +1042,138 @@ fn an_absent_optional_field_stays_absent_on_the_wire() {
 }
 
 #[test]
-fn an_event_that_is_not_a_structure_change_converts_to_nothing() {
+fn every_event_with_no_wire_spelling_converts_to_nothing() {
+    let client = ClientId::new();
     let pane = PaneId::new();
     let tab = TabId::new();
+    let session = SessionId::new();
+    let position = Point { x: 3, y: 4 };
+    let now = SystemTime::UNIX_EPOCH;
 
-    assert_eq!(
-        wire_event(&Delivery::Event(Event::PaneOutputUpdated(
-            PaneOutputUpdated { pane_id: pane }
-        ))),
-        None
-    );
-    assert_eq!(
-        wire_event(&Delivery::Event(Event::PaneSuppressed(PaneSuppressed {
+    let refused = vec![
+        Event::PtyResized(PtyResized {
+            pane_id: pane,
+            size: PtySize { cols: 80, rows: 24 },
+        }),
+        Event::PaneOutputUpdated(PaneOutputUpdated { pane_id: pane }),
+        Event::PaneSuppressed(PaneSuppressed {
             pane_id: pane,
             tab_id: tab,
-        }))),
-        None
-    );
-    assert_eq!(
-        wire_event(&Delivery::Event(Event::InputModeChanged(
-            InputModeChanged {
-                client_id: ClientId::new(),
-                mode: InputMode::Locked,
-            }
-        ))),
-        None
-    );
+        }),
+        Event::PaneResumed(PaneResumed {
+            pane_id: pane,
+            tab_id: tab,
+        }),
+        Event::TerminalTooSmallEntered(TerminalTooSmallEntered {
+            client_id: client,
+            size: Size { cols: 4, rows: 2 },
+        }),
+        Event::TerminalTooSmallExited(TerminalTooSmallExited {
+            client_id: client,
+            size: Size { cols: 80, rows: 24 },
+        }),
+        Event::ConfigReloaded(ConfigReloaded {
+            session_id: session,
+        }),
+        Event::InputModeChanged(InputModeChanged {
+            client_id: client,
+            mode: InputMode::Locked,
+        }),
+        Event::MouseSelectChanged(MouseSelectChanged {
+            client_id: client,
+            on: true,
+        }),
+        Event::KeybindingMatched(KeybindingMatched {
+            client_id: client,
+            command_id: CommandId::new(),
+        }),
+        Event::PaneTyped(PaneTyped {
+            pane_id: pane,
+            tab_id: tab,
+            session_id: session,
+            client_id: client,
+            payload: TypedPayload::SafePublic('k'),
+            timestamp: now,
+        }),
+        Event::PaneEnterPressed(PaneEnterPressed {
+            pane_id: pane,
+            tab_id: tab,
+            session_id: session,
+            client_id: client,
+            line: SubmittedLinePayload::SafePublic("ls -l".to_string()),
+            timestamp: now,
+        }),
+        Event::MousePressed(MousePressed {
+            client_id: client,
+            pane: Some(pane),
+            position,
+            button: MouseButton::Left,
+        }),
+        Event::MouseReleased(MouseReleased {
+            client_id: client,
+            pane: Some(pane),
+            position,
+            button: MouseButton::Left,
+        }),
+        Event::MouseDragged(MouseDragged {
+            client_id: client,
+            pane: Some(pane),
+            position,
+            button: MouseButton::Left,
+        }),
+        Event::MouseScrolled(MouseScrolled {
+            client_id: client,
+            pane: Some(pane),
+            position,
+            direction: ScrollDirection::Up,
+        }),
+        Event::PaneMouseForwarded(PaneMouseForwarded { pane_id: pane }),
+        Event::PluginMouseInput(PluginMouseInput {
+            plugin_id: PluginId::new(),
+        }),
+        Event::PaneCommandStarted(PaneCommandStarted { pane_id: pane }),
+        Event::PaneCommandFinished(PaneCommandFinished {
+            pane_id: pane,
+            exit_code: Some(0),
+        }),
+        Event::PaneScrollbackTruncated(PaneScrollbackTruncated {
+            pane_id: pane,
+            dropped_lines: 12,
+            dropped_bytes: 340,
+        }),
+        Event::SubscriberLagged(SubscriberLagged {
+            subscriber_id: SubscriberId::new(),
+            dropped_count: 7,
+            event_class: EventClass::Critical,
+        }),
+        Event::CommandRejected(CommandRejected {
+            id: CommandId::new(),
+            reason: RejectReason::TargetGone,
+        }),
+        Event::SelectionChanged(SelectionChanged {
+            client_id: client,
+            pane_id: pane,
+            selection: None,
+        }),
+        Event::Copied(Copied {
+            client_id: client,
+            pane_id: pane,
+            target: CopyTarget::Osc52,
+            byte_len: 11,
+        }),
+        Event::Plugin(PluginEvent::Installed(PluginInstalled {
+            plugin_id: PluginId::new(),
+        })),
+    ];
+
+    for event in refused {
+        let name = event.name();
+        assert_eq!(
+            wire_event(&Delivery::Event(event)),
+            None,
+            "{name} reached the wire"
+        );
+    }
 }
 
 #[test]
