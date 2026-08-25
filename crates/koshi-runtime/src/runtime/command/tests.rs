@@ -2994,6 +2994,7 @@ fn focus_from_a_clientless_source_defaults_to_the_sole_client() {
     let env = envelope_from(
         CommandSource::ExternalCli {
             session_id: Some(sid),
+            target_client: None,
         },
         Command::FocusPane(FocusPaneArgs {
             target: FocusTarget::Pane(b),
@@ -3032,6 +3033,7 @@ fn focus_from_a_clientless_source_with_two_clients_is_ambiguous() {
     let env = envelope_from(
         CommandSource::ExternalCli {
             session_id: Some(sid),
+            target_client: None,
         },
         Command::FocusPane(FocusPaneArgs {
             target: FocusTarget::Pane(pane),
@@ -3063,6 +3065,7 @@ fn focus_with_no_attached_client_at_all_is_stale() {
     let env = envelope_from(
         CommandSource::ExternalCli {
             session_id: Some(sid),
+            target_client: None,
         },
         Command::FocusPane(FocusPaneArgs {
             target: FocusTarget::Pane(pane),
@@ -3525,7 +3528,7 @@ fn quit_from_an_external_cli_is_accepted() {
     // `kill-session` sends `Quit` from outside the session. It names no client,
     // so it ends the process whatever `auto-close-session` says.
     let (mut rt, _tx) = new_runtime();
-    let source = CommandSource::external_cli(None);
+    let source = CommandSource::external_cli(None, None);
     let env = envelope_from(source, Command::Quit);
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
     assert!(rt.quit_requested());
@@ -3562,7 +3565,7 @@ fn external_cli_default_pane_with_no_attached_client_is_stale() {
 
     // A session resolves, but its focused-pane default acts through the
     // acting client, and a session with nobody attached has none.
-    let source = CommandSource::external_cli(Some(session_id));
+    let source = CommandSource::external_cli(Some(session_id), None);
     let env = envelope_from(source, Command::ClosePane(ClosePaneArgs::default()));
     let command_id = env.id;
     assert_eq!(
@@ -3615,7 +3618,7 @@ fn run_command_pane_requires_a_pane_anchor() {
     // A session alone is not enough — RunCommandPane splits the acting
     // client's focused pane, like NewPane, and a session with nobody
     // attached has no acting client.
-    let source = CommandSource::external_cli(Some(session_id));
+    let source = CommandSource::external_cli(Some(session_id), None);
     let env = envelope_from(
         source,
         Command::RunCommandPane(RunCommandPaneArgs {
@@ -4331,7 +4334,7 @@ fn new_pane_external_multiple_clients_is_ambiguous() {
     // session has two attached clients — adopting either would hijack a bystander,
     // so it rejects and asks for a named target, changing nothing.
     let env = envelope_from(
-        CommandSource::external_cli(Some(sid)),
+        CommandSource::external_cli(Some(sid), None),
         Command::NewPane(NewPaneArgs {
             source: Some(pane_back),
             ..new_pane_args()
@@ -4375,7 +4378,7 @@ fn new_pane_external_targets_a_named_client() {
     // External CLI names `target`: it is adopted onto the background tab and
     // focuses the new pane; the bystander is left untouched.
     rt.dispatch(envelope_from(
-        CommandSource::external_cli(Some(sid)),
+        CommandSource::external_cli(Some(sid), None),
         Command::NewPane(NewPaneArgs {
             source: Some(pane_back),
             client: Some(target),
@@ -4422,7 +4425,7 @@ fn new_pane_external_unattached_target_client_is_not_found() {
     // The named client is not attached to the session: reject before mutating.
     let ghost = ClientId::new();
     let env = envelope_from(
-        CommandSource::external_cli(Some(sid)),
+        CommandSource::external_cli(Some(sid), None),
         Command::NewPane(NewPaneArgs {
             source: Some(pane_back),
             client: Some(ghost),
@@ -4812,7 +4815,7 @@ fn new_pane_external_sole_client_that_cannot_fit_is_min_size() {
     // client is the unambiguous default, but its viewport cannot hold the split,
     // so it rejects MinSize — before any mutation.
     let env = envelope_from(
-        CommandSource::external_cli(Some(sid)),
+        CommandSource::external_cli(Some(sid), None),
         Command::NewPane(NewPaneArgs {
             source: Some(pane_back),
             ..new_pane_args()
@@ -5056,7 +5059,7 @@ fn new_pane_external_into_a_viewed_tab_adopts_no_one() {
     // viewing: the pane is created and sized to that viewer, but no one is
     // switched or focused — the client's focus stays on the root it was on.
     rt.dispatch(envelope_from(
-        CommandSource::external_cli(Some(sid)),
+        CommandSource::external_cli(Some(sid), None),
         Command::NewPane(NewPaneArgs {
             source: Some(root),
             ..new_pane_args()
@@ -7327,6 +7330,7 @@ fn new_tab_external_source_defaults_to_the_sole_client() {
     let result = rt.dispatch(envelope_from(
         CommandSource::ExternalCli {
             session_id: Some(sid),
+            target_client: None,
         },
         Command::NewTab(NewTabArgs::default()),
     ));
@@ -7361,6 +7365,7 @@ fn new_tab_external_source_with_two_clients_is_ambiguous() {
     let env = envelope_from(
         CommandSource::ExternalCli {
             session_id: Some(sid),
+            target_client: None,
         },
         Command::NewTab(NewTabArgs::default()),
     );
@@ -7390,6 +7395,7 @@ fn new_tab_with_no_attached_client_is_stale() {
     let env = envelope_from(
         CommandSource::ExternalCli {
             session_id: Some(sid),
+            target_client: None,
         },
         Command::NewTab(NewTabArgs::default()),
     );
@@ -8487,6 +8493,7 @@ fn focus_tab_external_source_defaults_to_the_sole_client() {
     let result = rt.dispatch(envelope_from(
         CommandSource::ExternalCli {
             session_id: Some(sid),
+            target_client: None,
         },
         Command::FocusTab(FocusTabArgs {
             target: TabTarget::Id(tab_b),
@@ -8520,6 +8527,7 @@ fn focus_tab_external_source_with_two_clients_is_ambiguous() {
     let env = envelope_from(
         CommandSource::ExternalCli {
             session_id: Some(sid),
+            target_client: None,
         },
         Command::FocusTab(FocusTabArgs {
             target: TabTarget::Id(tab_a),
@@ -8551,6 +8559,7 @@ fn focus_tab_with_no_attached_client_is_stale() {
     let env = envelope_from(
         CommandSource::ExternalCli {
             session_id: Some(sid),
+            target_client: None,
         },
         Command::FocusTab(FocusTabArgs {
             target: TabTarget::Id(tab_a),
@@ -9980,7 +9989,10 @@ fn auto_close_ends_the_session_when_detach_all_empties_it() {
 
     // `DetachAll` runs the same per-client departure the setting watches, so the
     // pass that removes the last one ends the session.
-    let env = envelope_from(CommandSource::external_cli(Some(sid)), Command::DetachAll);
+    let env = envelope_from(
+        CommandSource::external_cli(Some(sid), None),
+        Command::DetachAll,
+    );
     let _ = rt.dispatch(env);
 
     assert_eq!(rt.sessions[&sid].clients.len(), 0);
@@ -9997,7 +10009,10 @@ fn detach_all_leaves_the_session_running_while_auto_close_is_off() {
     let (sid, tab_id, _pane) = only_slot(&rt);
     rt.handle_client_attach(sid, ClientId::new(), size, tab_id, SystemTime::now(), false);
 
-    let env = envelope_from(CommandSource::external_cli(Some(sid)), Command::DetachAll);
+    let env = envelope_from(
+        CommandSource::external_cli(Some(sid), None),
+        Command::DetachAll,
+    );
     let _ = rt.dispatch(env);
 
     assert_eq!(rt.sessions[&sid].clients.len(), 0);
@@ -10402,7 +10417,7 @@ fn unviewed_tab_adoption_sizes_the_new_pane_to_the_pane_region() {
     let sid_adopt = session.id;
     rt_adopt.sessions.insert(sid_adopt, session);
     rt_adopt.dispatch(envelope_from(
-        CommandSource::external_cli(Some(sid_adopt)),
+        CommandSource::external_cli(Some(sid_adopt), None),
         Command::NewPane(NewPaneArgs {
             source: Some(pane_back),
             client: Some(client_adopt),
@@ -10441,7 +10456,7 @@ fn dispatched_command_schedules_a_render() {
     // A command arriving outside the key path — the IPC shape — mutates the
     // layout; the dispatch itself must schedule the frame.
     let result = rt.dispatch(envelope_from(
-        CommandSource::external_cli(Some(sid)),
+        CommandSource::external_cli(Some(sid), None),
         Command::NewPane(NewPaneArgs {
             source: Some(pane),
             ..new_pane_args()
@@ -11110,6 +11125,230 @@ fn fullscreen_from_a_clientless_pane_zooms_the_sole_client() {
     );
 }
 
+/// `is_client_scoped` answers `true` for exactly one command. Every other
+/// variant carries a target of its own, resolved by its own resolver. The
+/// count assert fails when a variant is added to [`EVERY_COMMAND_KIND`], so a
+/// new command has to be classified here.
+#[test]
+fn client_scoped_is_exactly_toggle_mouse_select() {
+    let tab = TabId::new();
+    let pane = PaneId::new();
+    let cases: Vec<Command> = EVERY_COMMAND_KIND
+        .iter()
+        .map(|kind| command_for(*kind, tab, pane))
+        .collect();
+
+    assert_eq!(cases.len(), 20);
+    for command in &cases {
+        assert_eq!(
+            Server::is_client_scoped(command),
+            matches!(command, Command::ToggleMouseSelect),
+            "{command:?}"
+        );
+    }
+}
+
+/// A session with two attached clients on tabs of their own: A views `tab_a`
+/// with `pane_a` focused, B views `tab_b` with `pane_b` focused. Returns the
+/// runtime, the keepalive sender, the session, then A's ids and B's ids.
+fn two_client_fixture() -> (
+    Server,
+    mpsc::Sender<RuntimeEvent>,
+    SessionId,
+    ClientId,
+    TabId,
+    PaneId,
+    ClientId,
+    TabId,
+    PaneId,
+) {
+    let (mut rt, tx) = new_runtime();
+    let (client_a, client_b) = (ClientId::new(), ClientId::new());
+    let (tab_a, tab_b) = (TabId::new(), TabId::new());
+    let (pane_a, pane_b) = (PaneId::new(), PaneId::new());
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_tab(&mut session, tab_a, pane_a);
+    add_pane(&mut session, pane_b);
+    add_tab(&mut session, tab_b, pane_b);
+    add_client(&mut session, client_a, tab_a, Some(pane_a));
+    add_client(&mut session, client_b, tab_b, Some(pane_b));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+    (
+        rt, tx, sid, client_a, tab_a, pane_a, client_b, tab_b, pane_b,
+    )
+}
+
+#[test]
+fn an_explicit_target_client_zooms_that_client() {
+    let (rt, _tx, sid, _client_a, _tab_a, _pane_a, client_b, tab_b, pane_b) = two_client_fixture();
+
+    // The named client decides both halves: its own view flips, and the pane is
+    // the one it has focused in the tab it is looking at.
+    let source = CommandSource::external_cli(Some(sid), Some(client_b));
+    let target = rt
+        .resolve_fullscreen_target(&source, Some(&rt.sessions[&sid]))
+        .ok()
+        .expect("the named client is attached");
+
+    assert_eq!(target.client_id, client_b);
+    assert_eq!(target.tab_id, tab_b);
+    assert_eq!(target.pane_id, pane_b);
+}
+
+#[test]
+fn a_target_client_in_another_session_is_not_found() {
+    let (mut rt, _tx, sid, ..) = two_client_fixture();
+    let stranger = ClientId::new();
+    let stranger_tab = TabId::new();
+    let stranger_pane = PaneId::new();
+    let mut other = bare_session(SessionId::new());
+    add_pane(&mut other, stranger_pane);
+    add_tab(&mut other, stranger_tab, stranger_pane);
+    add_client(&mut other, stranger, stranger_tab, Some(stranger_pane));
+    rt.sessions.insert(other.id, other);
+
+    // The named client is real, but not attached here. It is refused outright,
+    // never swapped for a client of this session.
+    let source = CommandSource::external_cli(Some(sid), Some(stranger));
+    let rejection = rt
+        .resolve_fullscreen_target(&source, Some(&rt.sessions[&sid]))
+        .err()
+        .expect("a client of another session is not a target here");
+
+    assert_eq!(rejection.reason, RejectReason::TargetNotFound);
+}
+
+#[test]
+fn no_flag_with_two_clients_is_ambiguous() {
+    let (rt, _tx, sid, ..) = two_client_fixture();
+
+    // Two clients are attached and the caller named neither, so there is no
+    // single view to flip.
+    let source = CommandSource::external_cli(Some(sid), None);
+    let rejection = rt
+        .resolve_fullscreen_target(&source, Some(&rt.sessions[&sid]))
+        .err()
+        .expect("two attached clients and no flag has no single answer");
+
+    assert_eq!(rejection.reason, RejectReason::TargetAmbiguous);
+}
+
+#[test]
+fn no_flag_with_one_client_takes_that_client() {
+    let (mut rt, _tx, sid, tab, pane) = acting_client_fixture();
+    let client_a = ClientId::new();
+    add_client(
+        rt.sessions.get_mut(&sid).expect("session"),
+        client_a,
+        tab,
+        Some(pane),
+    );
+
+    // With one client attached there is only one view the command could mean.
+    let source = CommandSource::external_cli(Some(sid), None);
+    let target = rt
+        .resolve_fullscreen_target(&source, Some(&rt.sessions[&sid]))
+        .ok()
+        .expect("the sole attached client stands in");
+
+    assert_eq!(target.client_id, client_a);
+}
+
+#[test]
+fn no_flag_with_no_client_is_a_stale_source() {
+    let (rt, _tx, sid, _tab, _pane) = acting_client_fixture();
+
+    // Nobody is attached, so there is no view to flip at all.
+    let source = CommandSource::external_cli(Some(sid), None);
+    let rejection = rt
+        .resolve_fullscreen_target(&source, Some(&rt.sessions[&sid]))
+        .err()
+        .expect("no attached client is no target");
+
+    assert_eq!(rejection.reason, RejectReason::SourceClientStale);
+}
+
+/// Two clients share one tab and `--client <B>` names B: B's own focused pane
+/// fills B's screen, and A keeps the tiled view it had.
+#[test]
+fn a_named_client_zooms_only_its_own_view() {
+    let (mut rt, _tx) = new_runtime();
+    let (client_a, client_b) = (ClientId::new(), ClientId::new());
+    let tab = TabId::new();
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, a);
+    add_pane(&mut session, b);
+    add_tab(&mut session, tab, a);
+    session
+        .tabs
+        .get_mut(&tab)
+        .expect("tab")
+        .update_layout(side_by_side(a, b));
+    add_client(&mut session, client_a, tab, Some(a));
+    add_client(&mut session, client_b, tab, Some(b));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::external_cli(Some(sid), Some(client_b)),
+        Command::TogglePaneFullscreen,
+    );
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id, ..
+        } => assert_eq!(ok_id, command_id),
+        other => panic!("expected Ok, got {other:?}"),
+    }
+
+    assert_eq!(
+        mode_of(&rt, sid, client_b, tab),
+        LayoutMode::Fullscreen { focused: b }
+    );
+    assert_eq!(mode_of(&rt, sid, client_a, tab), LayoutMode::Tiled);
+}
+
+/// Naming the same client twice flips its view back. The client that was never
+/// named stays tiled through both halves.
+#[test]
+fn naming_the_same_client_twice_returns_that_client_to_tiled() {
+    let (mut rt, _tx) = new_runtime();
+    let (client_a, client_b) = (ClientId::new(), ClientId::new());
+    let tab = TabId::new();
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, a);
+    add_pane(&mut session, b);
+    add_tab(&mut session, tab, a);
+    session
+        .tabs
+        .get_mut(&tab)
+        .expect("tab")
+        .update_layout(side_by_side(a, b));
+    add_client(&mut session, client_a, tab, Some(a));
+    add_client(&mut session, client_b, tab, Some(b));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let source = CommandSource::external_cli(Some(sid), Some(client_b));
+    for _ in 0..2 {
+        let env = envelope_from(source.clone(), Command::TogglePaneFullscreen);
+        let command_id = env.id;
+        match rt.dispatch(env) {
+            CommandResult::Ok {
+                command_id: ok_id, ..
+            } => assert_eq!(ok_id, command_id),
+            other => panic!("expected Ok, got {other:?}"),
+        }
+    }
+
+    assert_eq!(mode_of(&rt, sid, client_b, tab), LayoutMode::Tiled);
+    assert_eq!(mode_of(&rt, sid, client_a, tab), LayoutMode::Tiled);
+}
+
 #[test]
 fn focus_tab_from_a_detached_client_falls_back_to_the_sole_client() {
     let (mut rt, _tx, sid, tab, pane) = acting_client_fixture();
@@ -11291,7 +11530,7 @@ fn external_pane_default_acts_on_the_sole_clients_focused_pane() {
     // No --pane: the external command acts where a keypress on the sole
     // attached client would — its focused pane, `pane_a` (the fresh split).
     // Growing its left border by 5 takes 5 columns from root.
-    let source = CommandSource::external_cli(Some(sid));
+    let source = CommandSource::external_cli(Some(sid), None);
     let env = envelope_from(
         source,
         Command::ResizePane(ResizePaneArgs {
@@ -11325,7 +11564,7 @@ fn external_pane_default_with_two_clients_is_ambiguous() {
     rt.sessions.insert(sid, session);
 
     // Two clients could each mean a different focused pane; never guess.
-    let source = CommandSource::external_cli(Some(sid));
+    let source = CommandSource::external_cli(Some(sid), None);
     let env = envelope_from(
         source,
         Command::ResizePane(ResizePaneArgs {
@@ -11363,7 +11602,7 @@ fn external_tab_default_acts_on_the_sole_clients_active_tab() {
     rt.sessions.insert(sid, session);
 
     // No --tab: the sole attached client's active tab is the target.
-    let source = CommandSource::external_cli(Some(sid));
+    let source = CommandSource::external_cli(Some(sid), None);
     let env = envelope_from(
         source,
         Command::MoveTab(MoveTabArgs {
@@ -11637,7 +11876,7 @@ fn external_lock_defaults_to_the_sole_attached_client() {
     rt.sessions.insert(sid, session);
 
     // `koshi lock` from outside: the sole attached client is the target.
-    let source = CommandSource::external_cli(Some(sid));
+    let source = CommandSource::external_cli(Some(sid), None);
     let env = envelope_from(
         source,
         Command::SetLockMode(LockModeArgs {
@@ -11805,7 +12044,7 @@ fn detaching_the_last_client_leaves_the_session_running_with_no_clients() {
     let events = rt.subscribe(client, EventFilter::All);
 
     let env = envelope_from(
-        CommandSource::external_cli(Some(sid)),
+        CommandSource::external_cli(Some(sid), None),
         Command::Detach(DetachArgs {
             client: Some(client),
         }),
@@ -11847,7 +12086,10 @@ fn detach_all_takes_every_attached_client() {
     let first_events = rt.subscribe(first, EventFilter::All);
     let second_events = rt.subscribe(second, EventFilter::All);
 
-    let env = envelope_from(CommandSource::external_cli(Some(sid)), Command::DetachAll);
+    let env = envelope_from(
+        CommandSource::external_cli(Some(sid), None),
+        Command::DetachAll,
+    );
     let command_id = env.id;
 
     // Both clients view the tab at the same size, so neither departure changes
@@ -11887,7 +12129,7 @@ fn detach_naming_a_client_that_is_not_attached_is_not_found() {
     let (sid, _tab, _pane) = only_slot(&rt);
 
     let env = envelope_from(
-        CommandSource::external_cli(Some(sid)),
+        CommandSource::external_cli(Some(sid), None),
         Command::Detach(DetachArgs {
             client: Some(ClientId::new()),
         }),
@@ -11921,7 +12163,7 @@ fn detach_with_several_attached_and_none_named_lists_the_ids_to_choose_from() {
 
     // An external CLI names no client of its own, and two are attached.
     let env = envelope_from(
-        CommandSource::external_cli(Some(sid)),
+        CommandSource::external_cli(Some(sid), None),
         Command::Detach(DetachArgs { client: None }),
     );
     let command_id = env.id;
@@ -11958,7 +12200,7 @@ fn detach_with_a_sole_attached_client_and_none_named_takes_that_client() {
     let events = rt.subscribe(only_client, EventFilter::All);
 
     let env = envelope_from(
-        CommandSource::external_cli(Some(sid)),
+        CommandSource::external_cli(Some(sid), None),
         Command::Detach(DetachArgs { client: None }),
     );
     let command_id = env.id;
@@ -11997,7 +12239,10 @@ fn detach_all_on_a_session_with_no_clients_applies_and_emits_nothing() {
     let sid = session.id;
     rt.sessions.insert(sid, session);
 
-    let env = envelope_from(CommandSource::external_cli(Some(sid)), Command::DetachAll);
+    let env = envelope_from(
+        CommandSource::external_cli(Some(sid), None),
+        Command::DetachAll,
+    );
     let command_id = env.id;
 
     assert_eq!(
@@ -12032,7 +12277,10 @@ fn detach_all_only_detaches_clients_of_the_acting_session() {
         rt.sessions.insert(sid, session);
     }
 
-    let env = envelope_from(CommandSource::external_cli(Some(sid_a)), Command::DetachAll);
+    let env = envelope_from(
+        CommandSource::external_cli(Some(sid_a), None),
+        Command::DetachAll,
+    );
     let command_id = env.id;
 
     let CommandResult::Ok {
@@ -12262,7 +12510,7 @@ fn a_switch_moves_the_client_it_names_with_several_attached() {
     // An external source names no client of its own, so only `client` says who
     // moves.
     let env = envelope_from(
-        CommandSource::external_cli(Some(sid)),
+        CommandSource::external_cli(Some(sid), None),
         Command::SwitchSession(SwitchSessionArgs {
             client: Some(first),
             session: target,

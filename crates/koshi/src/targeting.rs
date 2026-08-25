@@ -3,7 +3,12 @@
 //!
 //! Inside a pane the answer is almost always "this session": the identity
 //! from the pane's environment routes the command over the session's own
-//! socket, and no other process is consulted. Outside any pane — or when
+//! socket, and no other process is consulted. A `--client` on a verb whose
+//! command carries no client field leaves the in-session path, which carries
+//! no target client. Example —
+//! `koshi toggle-pane-fullscreen --client client-<uuid>` typed inside a pane
+//! is answered by the session that client is attached to, which may be this
+//! pane's own. Outside any pane — or when
 //! `--session` names a different session — the routing layer asks the named
 //! session directly (an explicit `--session <id>`), or reads every endpoint
 //! file in the runtime directory and asks each live session to describe
@@ -68,17 +73,23 @@ pub enum Route {
 /// id asks that one session alone; everything else probes the runtime
 /// directory's advertised sessions, skipping an endpoint nobody answers.
 pub fn route(command: &CliCommand, context: Option<&InSessionContext>) -> Result<Route, CliError> {
+    // The in-session route carries no target client. A command whose client
+    // rides on its source never takes that route — not even back to this
+    // pane's own session.
+    let names_source_client = command.source_client().is_some();
+
     // In-session, targeting home: the command stays on its own socket.
     // Flags given as ids ride into the command as-is (`to_action` reads
     // them); only a `--tab` NAME costs a lookup, answered by the session
     // itself.
     if let Some(context) = context {
-        let stays_home = match command.target_session() {
-            None => true,
-            Some(SessionRef::Id(id)) => *id == context.session_id,
-            // A name may or may not be this session's; only a probe can tell.
-            Some(SessionRef::Name(_)) => false,
-        };
+        let stays_home = !names_source_client
+            && match command.target_session() {
+                None => true,
+                Some(SessionRef::Id(id)) => *id == context.session_id,
+                // A name may or may not be this session's; only a probe can tell.
+                Some(SessionRef::Name(_)) => false,
+            };
         if stays_home {
             let tab = match command.target_tab() {
                 Some(tab_ref @ TabRef::Name(_)) => {
@@ -108,7 +119,9 @@ pub fn route(command: &CliCommand, context: Option<&InSessionContext>) -> Result
     // `--session` naming it); then the command still travels as the pane's
     // own, keeping the issuing pane as the default target.
     match context {
-        Some(context) if context.session_id == session => Ok(Route::InSession(targets)),
+        Some(context) if context.session_id == session && !names_source_client => {
+            Ok(Route::InSession(targets))
+        }
         _ => Ok(Route::External { session, targets }),
     }
 }
@@ -151,7 +164,7 @@ pub fn submit_remote(
     let (_, action) = command
         .to_action(&targets, new_pane_direction)
         .expect("only an action verb reaches the remote dispatch");
-    remote_client::submit_remote(&arg, session, action)
+    remote_client::submit_remote(&arg, session, command.source_client(), action)
 }
 
 /// Which of a server's `rows` the census must ask, given the `--session` flag.

@@ -44,7 +44,7 @@ fn kill_session_in(
     session: Option<&SessionRef>,
 ) -> Result<CommandResult, CliError> {
     let session_id = resolve_session(runtime_dir, session)?;
-    ipc_client::submit_external_via_runtime_dir(runtime_dir, session_id, Command::Quit)
+    ipc_client::submit_external_via_runtime_dir(runtime_dir, session_id, None, Command::Quit)
 }
 
 /// The session a `kill-session` or `detach --all` argument names: an id is
@@ -128,6 +128,7 @@ fn detach_client_or_session_in(runtime_dir: &Path, raw: &str) -> Result<CommandR
     ipc_client::submit_external_via_runtime_dir(
         runtime_dir,
         session_id,
+        None,
         Command::Detach(DetachArgs { client }),
     )
 }
@@ -203,7 +204,7 @@ fn detach_all_session_in(
     session: Option<&SessionRef>,
 ) -> Result<CommandResult, CliError> {
     let session_id = resolve_session(runtime_dir, session)?;
-    ipc_client::submit_external_via_runtime_dir(runtime_dir, session_id, Command::DetachAll)
+    ipc_client::submit_external_via_runtime_dir(runtime_dir, session_id, None, Command::DetachAll)
 }
 
 #[cfg(test)]

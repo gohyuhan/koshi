@@ -8,10 +8,12 @@
 //!
 //! A surface's high version moves when an existing field changes its type or
 //! its meaning, in the same commit as that change. A field added or removed
-//! with both sides still decoding cleanly does not move it. The first such
-//! change after a release sets the number to the released value plus one, and
-//! the number then holds until the next release — so one release cycle moves a
-//! surface at most one step, however many changes it takes.
+//! with both sides still decoding cleanly does not move it. A number also moves
+//! when the new version is what one side must see before it may send a field
+//! the other would ignore. The first such change after a release sets the
+//! number to the released value plus one, and the number then holds until the
+//! next release — so one release cycle moves a surface at most one step,
+//! however many changes it takes.
 //!
 //! Example — the control plane spoke 1 in `v0.2.0`. Two later changes each
 //! bumped it, reaching 3, and neither was a meaning change. Folding those two
@@ -51,12 +53,17 @@ pub struct Surface {
 /// The session protocol: what an attached client and a session server speak
 /// over that session's control socket.
 ///
-/// `v0.1.0` spoke 1 and `v0.2.0` speaks 2. The floor is 2. Version 1 has no
-/// attach and puts nothing user-visible on the socket.
+/// `v0.1.0` spoke 1, `v0.2.0` and `v0.3.0` speak 2, and this build speaks 3.
+/// The floor is 2. Version 1 has no attach and puts nothing user-visible on
+/// the socket.
+///
+/// A `koshi` command that names a target client sends that client only to a
+/// peer that settled on 3. A peer that settled on 2 ignores the field, and a
+/// command that names a client is refused locally against such a peer.
 pub const SESSION_PROTOCOL: Surface = Surface {
     name: "session protocol",
     min: 2,
-    max: 2,
+    max: 3,
     released: Some(2),
 };
 

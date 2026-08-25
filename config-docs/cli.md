@@ -68,6 +68,13 @@ Example: one running session + `koshi new-tab` results in a tab in that
 session. Two running sessions + the same command fails with `several sessions
 are running; name one with --session <name-or-id>`.
 
+`--client` names one viewer of a session, and a viewer-scoped command changes
+only that viewer's screen. Example: terminals `client-1a2b…` and `client-3c4d…`
+both watch the same tab. `koshi toggle-pane-fullscreen --client client-3c4d…`
+zooms the focused pane on `client-3c4d…` alone, and `client-1a2b…` keeps its
+panes tiled. A session started by koshi 0.3.0 cannot carry the named viewer, so
+against one the command refuses instead of zooming the wrong viewer.
+
 Session and tab flags that say `NAME_OR_ID` accept either their generated name
 or printed id. A value that reads as an id is always the id — it never falls
 back to a name lookup. A name several targets share is refused, and the error
@@ -158,7 +165,7 @@ in `koshi.kdl`, which ends it once the last terminal leaves.
 | `koshi close-pane` | `--pane`, `--force` | Close a pane |
 | `koshi resize-pane` | `--direction`, `--size`, `--pane` | Move one border by signed cell count |
 | `koshi focus-pane` | `--pane`, `--client` | Focus a pane |
-| `koshi toggle-pane-fullscreen` | None | Toggle the focused pane's fullscreen view |
+| `koshi toggle-pane-fullscreen` | `--client <CLIENT_ID>` | Toggle the focused pane's fullscreen view |
 | `koshi input "<TEXT>"` | `--pane`, `--no-enter` | Type text; Enter follows unless held back |
 
 Directions: `right`, `down`, `left`, `up`. A positive resize grows toward the

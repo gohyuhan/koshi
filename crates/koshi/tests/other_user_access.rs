@@ -729,7 +729,7 @@ fn the_shared_marker_names_the_session_while_it_serves_and_goes_when_it_quits() 
     let mut connection = open(&endpoint);
     let envelope = CommandEnvelope::new(
         CommandId::new(),
-        CommandSource::external_cli(Some(session_id)),
+        CommandSource::external_cli(Some(session_id), None),
         std::time::SystemTime::now(),
         Command::Quit,
     );
