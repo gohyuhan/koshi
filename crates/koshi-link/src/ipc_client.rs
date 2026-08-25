@@ -5,7 +5,9 @@
 //! session's socket address and connection token; reading it is the
 //! same-user proof the Hello presents. The Hello and the command are written
 //! back to back before either reply is read, so a submission costs one round
-//! trip.
+//! trip. A command naming a target client is the exception: the Hello answer
+//! is read first, and a session that settled below protocol version 3 is
+//! refused before the command is written.
 //!
 //! A session another local user started advertises no endpoint file here. It
 //! is found by name in the machine-wide shared directory instead, and reached
@@ -20,7 +22,7 @@ use std::time::SystemTime;
 use koshi_core::command::{Command, CommandEnvelope, CommandResult, CommandSource};
 use koshi_core::discovery::SessionOverview;
 use koshi_core::event::RejectReason;
-use koshi_core::ids::{CommandId, SessionId, TabId};
+use koshi_core::ids::{ClientId, CommandId, SessionId, TabId};
 use koshi_ipc::endpoint::{shared_socket_addr, EndpointFile, RESUME_SUFFIX};
 use koshi_ipc::error::IpcError;
 use koshi_ipc::layout::SessionLayout;
@@ -64,8 +66,18 @@ pub fn submit_in_session(
 /// [`submit_in_session`]; the envelope's source is
 /// [`CommandSource::external_cli`], so the runtime resolves defaults through
 /// the target session's acting client rather than an issuing pane.
-pub fn submit_external(session_id: SessionId, command: Command) -> Result<CommandResult, CliError> {
-    submit_external_via_runtime_dir(&runtime_dir()?, session_id, command)
+///
+/// `client_id` is the client the command acts for, and rides on the source.
+/// Naming one costs a second round trip: the session's Hello answer is read
+/// before the command is written, and a session that settled below protocol
+/// version 3 is refused with [`CliError::IpcUnavailable`]. `None` names no
+/// client and keeps the exchange at one round trip.
+pub fn submit_external(
+    session_id: SessionId,
+    client_id: Option<ClientId>,
+    command: Command,
+) -> Result<CommandResult, CliError> {
+    submit_external_via_runtime_dir(&runtime_dir()?, session_id, client_id, command)
 }
 
 /// [`submit_in_session`] against an explicit runtime directory: the whole
@@ -82,19 +94,32 @@ fn submit_via_runtime_dir(
         context.pane_id,
         PathBuf::from(&endpoint.socket),
     );
-    submit_envelope(&endpoint, context.session_id, source, command)
+    submit_envelope(&endpoint, context.session_id, source, command, None)
 }
 
 /// [`submit_external`] against an explicit runtime directory: the whole
 /// exchange, with the endpoint lookup rooted where the caller says.
+///
+/// `client_id` is the client the command acts for, and rides on the source.
+/// Naming one costs a second round trip: the session's Hello answer is read
+/// before the command is written, and a session that settled below protocol
+/// version 3 is refused with [`CliError::IpcUnavailable`]. `None` names no
+/// client and keeps the exchange at one round trip.
 pub fn submit_external_via_runtime_dir(
     runtime_dir: &Path,
     session_id: SessionId,
+    client_id: Option<ClientId>,
     command: Command,
 ) -> Result<CommandResult, CliError> {
     let endpoint = read_endpoint(runtime_dir, session_id)?;
-    let source = CommandSource::external_cli(Some(session_id));
-    submit_envelope(&endpoint, session_id, source, command)
+    let source = CommandSource::external_cli(Some(session_id), client_id);
+    submit_envelope(
+        &endpoint,
+        session_id,
+        source,
+        command,
+        client_id.is_some().then_some(talk::TARGET_CLIENT_PROTOCOL),
+    )
 }
 
 /// Fill a pane-creating command's unset working directory with this CLI
@@ -114,14 +139,19 @@ fn capture_cwd(mut command: Command) -> Command {
     command
 }
 
-/// One command submission over `endpoint`: connect, pipeline Hello and the
-/// enveloped command, read both replies in order. A pane-creating command
+/// One command submission over `endpoint`: connect, send the Hello and the
+/// enveloped command, and read the command's result. A pane-creating command
 /// with no directory of its own gets this process's ([`capture_cwd`]).
+///
+/// `least_version` goes to [`exchange`] unchanged: `None` writes the Hello
+/// and the command back to back, and `Some(least)` refuses a session that
+/// settled below `least` before the command is written.
 fn submit_envelope(
     endpoint: &EndpointFile,
     session_id: SessionId,
     source: CommandSource,
     command: Command,
+    least_version: Option<u32>,
 ) -> Result<CommandResult, CliError> {
     let command = capture_cwd(command);
     let envelope = CommandEnvelope::new(CommandId::new(), source, SystemTime::now(), command);
@@ -129,7 +159,7 @@ fn submit_envelope(
         request_id: 2,
         kind: IpcRequestKind::SubmitCommand(Box::new(envelope)),
     };
-    match exchange(endpoint, session_id, request)? {
+    match exchange(endpoint, session_id, request, least_version)? {
         IpcResult::CommandResult(result) => Ok(result),
         IpcResult::Error(refusal) => Err(refused(&refusal)),
         other => Err(talk::SESSION.unexpected_reply(&other)),
@@ -166,7 +196,7 @@ fn overview_of(
         request_id: 2,
         kind: IpcRequestKind::Discovery,
     };
-    match exchange(endpoint, session_id, request)? {
+    match exchange(endpoint, session_id, request, None)? {
         IpcResult::Overview(overview) => Ok(overview),
         IpcResult::Error(refusal) => Err(refused(&refusal)),
         other => Err(talk::SESSION.unexpected_reply(&other)),
@@ -199,7 +229,7 @@ pub fn fetch_layout(
         request_id: 2,
         kind: IpcRequestKind::Layout { tab },
     };
-    match exchange(&endpoint, session_id, request)? {
+    match exchange(&endpoint, session_id, request, None)? {
         IpcResult::Layout(layout) => match tab {
             Some(tab_id) if layout.tabs.is_empty() => Err(CliError::CommandRejected {
                 reason: RejectReason::TargetNotFound,
@@ -261,7 +291,7 @@ pub fn restart_running_session(
         request_id: 2,
         kind: IpcRequestKind::Restart,
     };
-    match exchange(&endpoint, session_id, request) {
+    match exchange(&endpoint, session_id, request, None) {
         Ok(IpcResult::Restarting) => Ok(SessionRestart::Restarting),
         Ok(IpcResult::Error(refusal)) if refusal.code == IpcErrorCode::UnsupportedKind => {
             Ok(SessionRestart::TooOld)
@@ -300,7 +330,7 @@ pub fn running_session_version(
     };
     connection.send(&hello).map_err(talk_failed)?;
     let reply: IncomingResponse = connection.recv().map_err(talk_failed)?;
-    talk::session_hello_version(reply).map(Some)
+    talk::session_hello_version(reply).map(|(_, version)| Some(version))
 }
 
 /// Every session with an endpoint file in `runtime_dir`, in no particular
@@ -443,14 +473,21 @@ fn foreign_endpoint(socket: String) -> EndpointFile {
     }
 }
 
-/// Connect to `endpoint`, pipeline the Hello and `request` back to back, and
-/// read both replies in order — the server answers every request in order,
-/// so this costs one round trip. Returns `request`'s result; a failed Hello
-/// is an error.
+/// Connect to `endpoint`, open with the Hello, and run `request` on the same
+/// connection. Returns `request`'s result; a failed Hello is an error.
+///
+/// With `least_version` `None` the Hello and `request` go out back to back
+/// before either reply is read, and the server answers every request in
+/// order, so the exchange costs one round trip.
+///
+/// With `Some(least)` the Hello answer is read first, and a session that
+/// settled below `least` is refused with [`CliError::IpcUnavailable`] before
+/// `request` is written, so it is never sent. That costs a second round trip.
 fn exchange(
     endpoint: &EndpointFile,
     session_id: SessionId,
     request: IpcRequest,
+    least_version: Option<u32>,
 ) -> Result<IpcResult, CliError> {
     let mut connection = connect(endpoint, session_id)?;
     let hello = IpcRequest {
@@ -458,10 +495,20 @@ fn exchange(
         kind: IpcRequestKind::hello(endpoint.token.clone()),
     };
     connection.send(&hello).map_err(talk_failed)?;
-    connection.send(&request).map_err(talk_failed)?;
 
-    let hello_reply: IncomingResponse = connection.recv().map_err(talk_failed)?;
-    talk::session_hello_version(hello_reply)?;
+    match least_version {
+        None => {
+            connection.send(&request).map_err(talk_failed)?;
+            let hello_reply: IncomingResponse = connection.recv().map_err(talk_failed)?;
+            talk::session_hello_version(hello_reply)?;
+        }
+        Some(_) => {
+            let hello_reply: IncomingResponse = connection.recv().map_err(talk_failed)?;
+            let (settled, _) = talk::session_hello_version(hello_reply)?;
+            talk::require_settled_version(settled, least_version)?;
+            connection.send(&request).map_err(talk_failed)?;
+        }
+    }
 
     let reply: IncomingResponse = connection.recv().map_err(talk_failed)?;
     talk::SESSION.take_result(reply)

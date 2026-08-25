@@ -266,6 +266,7 @@ fn new_tab(connection: &mut Connection, session_id: SessionId, request_id: u64) 
         CommandId::new(),
         CommandSource::ExternalCli {
             session_id: Some(session_id),
+            target_client: None,
         },
         SystemTime::UNIX_EPOCH,
         Command::NewTab(NewTabArgs {
@@ -347,6 +348,7 @@ fn submit(
         CommandId::new(),
         CommandSource::ExternalCli {
             session_id: Some(session_id),
+            target_client: None,
         },
         SystemTime::UNIX_EPOCH,
         command,
@@ -575,6 +577,7 @@ fn close_tab(connection: &mut Connection, session_id: SessionId, tab: TabId, req
         CommandId::new(),
         CommandSource::ExternalCli {
             session_id: Some(session_id),
+            target_client: None,
         },
         SystemTime::UNIX_EPOCH,
         Command::CloseTab(CloseTabArgs {

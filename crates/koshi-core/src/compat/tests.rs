@@ -168,11 +168,11 @@ fn a_surface_no_release_carries_is_checked_on_the_floor_alone() {
 }
 
 #[test]
-fn the_session_protocol_speaks_two_and_accepts_nothing_older() {
+fn the_session_protocol_speaks_three_and_accepts_nothing_older() {
     // Version 1 is v0.1.0, which has no attach, so a version-1 peer has
-    // nothing to ask a session server for.
+    // nothing to ask a session server for. This build speaks 3.
     assert_eq!(SESSION_PROTOCOL.min, 2);
-    assert_eq!(SESSION_PROTOCOL.max, 2);
+    assert_eq!(SESSION_PROTOCOL.max, 3);
     assert_eq!(SESSION_PROTOCOL.released, Some(2));
 }
 

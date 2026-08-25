@@ -36,7 +36,7 @@ use fs4::{FileExt, TryLockError};
 
 use koshi_core::command::{Command, CommandEnvelope, CommandResult, CommandSource};
 use koshi_core::discovery::SessionOverview;
-use koshi_core::ids::{CommandId, SessionId};
+use koshi_core::ids::{ClientId, CommandId, SessionId};
 use koshi_ipc::error::IpcError;
 use koshi_ipc::protocol::{
     ConnectionToken, IncomingResponse, IpcRequest, IpcRequestKind, IpcResult, MIN_PROTOCOL_VERSION,
@@ -803,8 +803,14 @@ pub fn attach_remote(
 /// Submit `command` to the session `session` on the server `arg` names, and
 /// hand back the dispatcher's result.
 ///
-/// The command's source is [`CommandSource::external_cli`] carrying `session`.
-/// A pane-creating command carrying no working directory keeps none.
+/// The command's source is [`CommandSource::external_cli`] carrying `session`
+/// and the client the caller named. A pane-creating command carrying no
+/// working directory keeps none.
+///
+/// A named `client` reaches only a session that settled on protocol version 3
+/// or later; a session that settled below it is refused with
+/// [`CliError::IpcUnavailable`] before the command is written. `None` names no
+/// client, and the command is written whatever the session settled on.
 ///
 /// # Errors
 /// Whatever [`connect_saved`] reports, and [`CliError::IpcUnavailable`] when
@@ -812,11 +818,12 @@ pub fn attach_remote(
 pub fn submit_remote(
     arg: &ServerArg,
     session: SessionId,
+    client: Option<ClientId>,
     command: Command,
 ) -> Result<CommandResult, CliError> {
     let envelope = CommandEnvelope::new(
         CommandId::new(),
-        CommandSource::external_cli(Some(session)),
+        CommandSource::external_cli(Some(session), client),
         SystemTime::now(),
         command,
     );
@@ -824,7 +831,12 @@ pub fn submit_remote(
         request_id: 2,
         kind: IpcRequestKind::SubmitCommand(Box::new(envelope)),
     };
-    match one_request(arg, session, request)? {
+    match one_request(
+        arg,
+        session,
+        request,
+        client.is_some().then_some(talk::TARGET_CLIENT_PROTOCOL),
+    )? {
         IpcResult::CommandResult(result) => Ok(result),
         IpcResult::Error(refusal) => Err(refused(&refusal)),
         other => Err(talk::SESSION.unexpected_reply(&other)),
@@ -849,7 +861,7 @@ pub fn fetch_remote_overview(
         request_id: 2,
         kind: IpcRequestKind::Discovery,
     };
-    match one_request(arg, session, request)? {
+    match one_request(arg, session, request, None)? {
         IpcResult::Overview(overview) => Ok(overview),
         IpcResult::Error(refusal) => Err(refused(&refusal)),
         other => Err(talk::SESSION.unexpected_reply(&other)),
@@ -859,16 +871,22 @@ pub fn fetch_remote_overview(
 /// One request against one remote session: dial, attach, settle the version
 /// from the Hello answer the server sent on this caller's behalf, then send
 /// `request` and read its answer.
+///
+/// `least_version` `Some(least)` refuses a session that settled below `least`
+/// with [`CliError::IpcUnavailable`], before `request` is written. `None`
+/// writes `request` whatever the session settled on.
 fn one_request(
     arg: &ServerArg,
     session: SessionId,
     request: IpcRequest,
+    least_version: Option<u32>,
 ) -> Result<IpcResult, CliError> {
     let (link, _) = connect_saved(arg, None, Some(REPLY_WAIT))?;
     let (mut reader, mut writer) = attach_remote(link, SessionSelector::Id(session))?;
 
     let hello_reply: IncomingResponse = reader.recv().map_err(talk_failed)?;
-    talk::session_hello_version(hello_reply)?;
+    let (settled, _) = talk::session_hello_version(hello_reply)?;
+    talk::require_settled_version(settled, least_version)?;
 
     writer.send(&request).map_err(talk_failed)?;
     let reply: IncomingResponse = reader.recv().map_err(talk_failed)?;

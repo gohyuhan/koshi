@@ -442,8 +442,12 @@ fn command_source_variants_roundtrip() {
     });
     roundtrip(&CommandSource::ExternalCli {
         session_id: Some(SessionId::new()),
+        target_client: None,
     });
-    roundtrip(&CommandSource::ExternalCli { session_id: None });
+    roundtrip(&CommandSource::ExternalCli {
+        session_id: None,
+        target_client: None,
+    });
     roundtrip(&CommandSource::Plugin {
         plugin_id: PluginId::new(),
     });
@@ -510,7 +514,10 @@ fn command_source_variant_names_are_canonical() {
             "InSessionCli",
         ),
         (
-            CommandSource::ExternalCli { session_id: None },
+            CommandSource::ExternalCli {
+                session_id: None,
+                target_client: None,
+            },
             "ExternalCli",
         ),
         (
@@ -721,4 +728,111 @@ fn cli_exit_code_maps_command_result() {
         CliExitCode::for_result(&rejected),
         CliExitCode::RuntimeAction
     );
+}
+
+#[test]
+fn toggle_pane_fullscreen_is_a_bare_wire_string() {
+    // The byte shape a still-running 0.3.0 session decodes: a unit variant
+    // carries no object, only its name.
+    assert_eq!(
+        serde_json::to_string(&Command::TogglePaneFullscreen).unwrap(),
+        "\"TogglePaneFullscreen\""
+    );
+    assert_eq!(
+        serde_json::from_str::<Command>("\"TogglePaneFullscreen\"").unwrap(),
+        Command::TogglePaneFullscreen
+    );
+}
+
+#[test]
+fn an_external_cli_source_without_a_client_still_decodes() {
+    // JSON written before `target_client` existed decodes with the field `None`.
+    assert_eq!(
+        serde_json::from_str::<CommandSource>(r#"{"ExternalCli":{"session_id":null}}"#).unwrap(),
+        CommandSource::ExternalCli {
+            session_id: None,
+            target_client: None,
+        }
+    );
+
+    let session_id = SessionId::new();
+    let uuid = session_id.as_uuid();
+    let json = format!(r#"{{"ExternalCli":{{"session_id":"{uuid}"}}}}"#);
+    assert_eq!(
+        serde_json::from_str::<CommandSource>(&json).unwrap(),
+        CommandSource::ExternalCli {
+            session_id: Some(session_id),
+            target_client: None,
+        }
+    );
+}
+
+#[test]
+fn an_older_build_ignores_the_target_client() {
+    /// The `ExternalCli` shape 0.3.0 decodes: a session target and nothing else.
+    #[derive(Deserialize, PartialEq, Debug)]
+    enum OldSource {
+        ExternalCli { session_id: Option<SessionId> },
+    }
+
+    let session_id = SessionId::new();
+    let client_id = ClientId::new();
+    let json = serde_json::to_string(&CommandSource::external_cli(
+        Some(session_id),
+        Some(client_id),
+    ))
+    .expect("serialize");
+
+    assert_eq!(
+        serde_json::from_str::<OldSource>(&json).expect("deserialize"),
+        OldSource::ExternalCli {
+            session_id: Some(session_id),
+        }
+    );
+}
+
+#[test]
+fn the_target_client_is_never_the_acting_client() {
+    let session_id = SessionId::new();
+    let client_id = ClientId::new();
+    let pane_id = PaneId::new();
+    let socket_path = PathBuf::from("/run/koshi/session.sock");
+
+    let targeted = CommandSource::external_cli(Some(session_id), Some(client_id));
+    assert_eq!(targeted.target_client(), Some(client_id));
+    assert_eq!(targeted.client_id(), None);
+
+    assert_eq!(
+        CommandSource::external_cli(Some(session_id), None).target_client(),
+        None
+    );
+    assert_eq!(
+        CommandSource::in_session_cli(session_id, Some(client_id), pane_id, socket_path)
+            .target_client(),
+        None
+    );
+    assert_eq!(
+        CommandSource::KeyBinding { client_id }.target_client(),
+        None
+    );
+    assert_eq!(CommandSource::Mouse { client_id }.target_client(), None);
+    assert_eq!(
+        CommandSource::Plugin {
+            plugin_id: PluginId::new(),
+        }
+        .target_client(),
+        None
+    );
+    assert_eq!(CommandSource::Internal.target_client(), None);
+
+    let envelope = CommandEnvelope::new(
+        CommandId::new(),
+        CommandSource::external_cli(Some(session_id), Some(client_id)),
+        fixed_time(),
+        Command::TogglePaneFullscreen,
+    );
+    assert_eq!(envelope.client_id, None);
+    envelope
+        .validate()
+        .expect("a source naming a target client is a well-formed envelope");
 }

@@ -356,7 +356,12 @@ pub enum CliCommand {
         pane: Option<PaneId>,
     },
     /// Toggle fullscreen on the focused pane.
-    TogglePaneFullscreen,
+    TogglePaneFullscreen {
+        /// Client whose own view goes fullscreen; defaults to the issuing
+        /// client, else the session's only attached one.
+        #[arg(long, value_parser = parse_client_id, value_name = "CLIENT_ID")]
+        client: Option<ClientId>,
+    },
     /// Type text into a pane's shell, as if it had been typed there. The text
     /// is followed by Enter, so the shell runs it; `--no-enter` leaves it
     /// waiting at the prompt.
@@ -963,7 +968,7 @@ impl CliCommand {
                     size: *size,
                 }),
             ),
-            CliCommand::TogglePaneFullscreen => {
+            CliCommand::TogglePaneFullscreen { client: _ } => {
                 ("toggle-pane-fullscreen", Command::TogglePaneFullscreen)
             }
             CliCommand::Input {
@@ -1173,7 +1178,25 @@ impl CliCommand {
             | CliCommand::FocusPane { client, .. }
             | CliCommand::Lock { client }
             | CliCommand::Unlock { client }
-            | CliCommand::ToggleLock { client } => *client,
+            | CliCommand::ToggleLock { client }
+            | CliCommand::TogglePaneFullscreen { client } => *client,
+            _ => None,
+        }
+    }
+
+    /// The client this invocation names that no [`Command`] carries, so it
+    /// rides on the command's source instead
+    /// ([`CommandSource::external_cli`](koshi_core::command::CommandSource::external_cli)).
+    /// Only `toggle-pane-fullscreen` has one: every other client-taking verb
+    /// puts its client in the command's own arguments, which travel on both
+    /// routes.
+    /// [`CommandSource::InSessionCli`](koshi_core::command::CommandSource::InSessionCli)
+    /// has no field to carry this one, so a command with one here never takes
+    /// the in-session route ([`crate::targeting::route`]).
+    #[must_use]
+    pub fn source_client(&self) -> Option<ClientId> {
+        match self {
+            CliCommand::TogglePaneFullscreen { client } => *client,
             _ => None,
         }
     }

@@ -411,7 +411,10 @@ fn sample_request_kinds() -> Vec<IpcRequestKind> {
         IpcRequestKind::Mouse(Vec::new()),
         IpcRequestKind::SubmitCommand(Box::new(koshi_core::command::CommandEnvelope::new(
             koshi_core::ids::CommandId::new(),
-            koshi_core::command::CommandSource::ExternalCli { session_id: None },
+            koshi_core::command::CommandSource::ExternalCli {
+                session_id: None,
+                target_client: None,
+            },
             std::time::UNIX_EPOCH,
             koshi_core::command::Command::ToggleLockMode(
                 koshi_core::command::ToggleLockModeArgs::default(),

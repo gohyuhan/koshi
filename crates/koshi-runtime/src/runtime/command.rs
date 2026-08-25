@@ -201,6 +201,16 @@ struct FocusPaneTarget {
     pane_id: PaneId,
 }
 
+/// A resolved [`Command::TogglePaneFullscreen`] target: the session, the client
+/// whose own view flips, that client's tab, and the pane the zoom fills it
+/// with. The `Ok` half of [`Server::resolve_fullscreen_target`].
+struct FullscreenTarget {
+    session_id: SessionId,
+    client_id: ClientId,
+    tab_id: TabId,
+    pane_id: PaneId,
+}
+
 /// A resolved [`Command::NewTab`] target: the session the tab joins and the
 /// client that switches onto it. The `Ok` half of
 /// [`Server::resolve_new_tab_target`].

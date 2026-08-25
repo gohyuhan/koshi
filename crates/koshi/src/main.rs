@@ -363,7 +363,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                 let (_, command) = cli_command
                     .to_action(&targets, new_pane_direction)
                     .expect("checked to be an action verb above");
-                ipc_client::submit_external(session, command)?
+                ipc_client::submit_external(session, cli_command.source_client(), command)?
             }
         },
     };

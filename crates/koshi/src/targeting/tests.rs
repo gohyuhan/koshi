@@ -482,6 +482,30 @@ fn a_new_tab_client_flag_reaches_the_session_lookup() {
 }
 
 #[test]
+fn a_fullscreen_client_flag_reaches_the_session_lookup() {
+    let holder = SessionId::new();
+    let holder_tab = TabId::new();
+    let client = ClientId::new();
+    let overviews = census([
+        overview("amber-fox", SessionId::new(), &[], &[], &[]),
+        overview("blue-owl", holder, &[(holder_tab, "one")], &[], &[client]),
+    ]);
+    let command = CliCommand::TogglePaneFullscreen {
+        client: Some(client),
+    };
+    let (session, targets) =
+        resolve_targets(&command, &overviews).expect("the client names its session");
+    assert_eq!(session, holder);
+    assert_eq!(
+        targets,
+        ResolvedTargets {
+            session: Some(holder),
+            tab: None,
+        }
+    );
+}
+
+#[test]
 fn tab_id_picks_its_owning_session() {
     let target = SessionId::new();
     let tab = TabId::new();
@@ -792,6 +816,28 @@ fn in_session_focus_tab_by_id_routes_home_and_rides_into_the_command() {
             client: None,
         })
     );
+}
+
+#[test]
+fn a_named_client_leaves_the_home_route() {
+    let context = InSessionContext {
+        session_id: SessionId::new(),
+        client_id: None,
+        pane_id: PaneId::new(),
+    };
+    let bare = CliCommand::TogglePaneFullscreen { client: None };
+    let home = route(&bare, Some(&context)).expect("no flag needs no lookup");
+    assert_eq!(home, Route::InSession(ResolvedTargets::default()));
+
+    let named = CliCommand::TogglePaneFullscreen {
+        client: Some(ClientId::new()),
+    };
+    match route(&named, Some(&context)) {
+        Ok(Route::InSession(targets)) => {
+            panic!("a named client must leave the home route, got {targets:?}")
+        }
+        Ok(Route::External { .. }) | Err(_) => {}
+    }
 }
 
 #[test]

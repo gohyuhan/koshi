@@ -1099,3 +1099,168 @@ fn a_command_without_a_directory_field_is_untouched() {
         Command::ToggleLockMode(ToggleLockModeArgs::default())
     );
 }
+
+// --- Sending a target client only to a session that reads it ----------------
+
+/// When a stand-in session answers the Hello.
+#[derive(Clone, Copy)]
+enum HelloTiming {
+    /// Answer the Hello as soon as it arrives, before reading anything else.
+    AtOnce,
+    /// Read the request after the Hello first, then answer both in order.
+    AfterTheNextRequest,
+}
+
+/// A stand-in session at `runtime_dir` that settles on `protocol_version`.
+///
+/// Answers the Hello per `timing`, then answers a `SubmitCommand` with
+/// [`CommandResult::Ok`]. Every request it reads goes down the returned
+/// receiver, in arrival order. A caller that hangs up after the Hello answer
+/// leaves the second read empty, so the receiver then carries the Hello alone.
+fn fake_settled_session(
+    runtime_dir: &Path,
+    session: SessionId,
+    protocol_version: u32,
+    timing: HelloTiming,
+) -> (JoinHandle<()>, Receiver<IpcRequest>) {
+    let addr = koshi_ipc::endpoint::socket_addr(runtime_dir, session);
+    let listener = Listener::bind(&addr).expect("bind fake session");
+    EndpointFile {
+        socket: addr,
+        token: ConnectionToken::generate(),
+        pid: std::process::id(),
+    }
+    .write(&EndpointFile::path(runtime_dir, session))
+    .expect("write endpoint file");
+
+    let (read_tx, read_rx) = mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let mut connection = listener.accept().expect("accept the CLI");
+        let hello: IpcRequest = connection.recv().expect("read hello");
+        let hello_answer = IpcResult::Hello {
+            protocol_version,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        };
+        if matches!(timing, HelloTiming::AtOnce) {
+            send(&mut connection, hello.request_id, hello_answer.clone());
+        }
+        let next: Option<IpcRequest> = connection.recv().ok();
+        if matches!(timing, HelloTiming::AfterTheNextRequest) {
+            send(&mut connection, hello.request_id, hello_answer);
+        }
+        read_tx.send(hello).expect("report the hello");
+        if let Some(request) = next {
+            if let IpcRequestKind::SubmitCommand(envelope) = &request.kind {
+                send(
+                    &mut connection,
+                    request.request_id,
+                    IpcResult::CommandResult(CommandResult::Ok {
+                        command_id: envelope.id,
+                        emitted_events: Vec::new(),
+                    }),
+                );
+            }
+            read_tx.send(request).expect("report the request read");
+        }
+    });
+    (handle, read_rx)
+}
+
+#[test]
+fn a_named_client_refuses_a_session_that_speaks_two() {
+    let runtime_dir = test_runtime_dir("client-protocol-two");
+    let session = SessionId::new();
+    let client = ClientId::new();
+    let (server, read) = fake_settled_session(&runtime_dir, session, 2, HelloTiming::AtOnce);
+
+    let error = submit_external_via_runtime_dir(
+        &runtime_dir,
+        session,
+        Some(client),
+        Command::TogglePaneFullscreen,
+    )
+    .expect_err("a session speaking 2 ignores the target client");
+
+    let CliError::IpcUnavailable { detail } = error else {
+        panic!("expected IpcUnavailable, got {error:?}");
+    };
+    assert_eq!(
+        detail,
+        "this session speaks protocol 2; --client needs a session started by koshi 0.4.0 or \
+         later"
+    );
+
+    server.join().expect("fake session exits");
+    assert_eq!(
+        read.recv().expect("the session read the Hello").kind.name(),
+        "Hello",
+    );
+    assert!(
+        read.recv().is_err(),
+        "the session read only the Hello; no SubmitCommand was written",
+    );
+
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+#[test]
+fn a_named_client_reaches_a_session_that_speaks_three() {
+    let runtime_dir = test_runtime_dir("client-protocol-three");
+    let session = SessionId::new();
+    let client = ClientId::new();
+    let (server, read) = fake_settled_session(&runtime_dir, session, 3, HelloTiming::AtOnce);
+
+    let result = submit_external_via_runtime_dir(
+        &runtime_dir,
+        session,
+        Some(client),
+        Command::TogglePaneFullscreen,
+    )
+    .expect("a session speaking 3 reads the target client");
+    assert!(matches!(result, CommandResult::Ok { .. }));
+
+    server.join().expect("fake session exits");
+    assert_eq!(
+        read.recv().expect("the session read the Hello").kind.name(),
+        "Hello",
+    );
+    let submitted = read.recv().expect("the session read the SubmitCommand");
+    let IpcRequestKind::SubmitCommand(envelope) = submitted.kind else {
+        panic!("expected a SubmitCommand after the Hello, got {submitted:?}");
+    };
+    assert_eq!(
+        envelope.source,
+        CommandSource::external_cli(Some(session), Some(client)),
+    );
+    assert_eq!(envelope.command, Command::TogglePaneFullscreen);
+
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+#[test]
+fn no_named_client_still_costs_one_round_trip() {
+    let runtime_dir = test_runtime_dir("client-none-pipelined");
+    let session = SessionId::new();
+    let (server, read) =
+        fake_settled_session(&runtime_dir, session, 2, HelloTiming::AfterTheNextRequest);
+
+    let result =
+        submit_external_via_runtime_dir(&runtime_dir, session, None, Command::TogglePaneFullscreen)
+            .expect("a session speaking 2 answers a command naming no client");
+    assert!(matches!(result, CommandResult::Ok { .. }));
+
+    server.join().expect("fake session exits");
+    assert_eq!(
+        read.recv().expect("the session read the Hello").kind.name(),
+        "Hello",
+    );
+    assert_eq!(
+        read.recv()
+            .expect("the session read the SubmitCommand")
+            .kind
+            .name(),
+        "SubmitCommand",
+    );
+
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}

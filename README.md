@@ -360,7 +360,7 @@ Outside Koshi, give a target unless exactly one running session can be chosen.
 | `koshi close-pane [--pane <PANE_ID>] [--force]` | Close a pane |
 | `koshi resize-pane --direction <DIRECTION> [--size <SIZE>] [--pane <PANE_ID>]` | Move one pane border |
 | `koshi focus-pane --pane <PANE_ID> [--client <CLIENT_ID>]` | Focus a pane |
-| `koshi toggle-pane-fullscreen` | Toggle the focused pane's fullscreen view |
+| `koshi toggle-pane-fullscreen [--client <CLIENT_ID>]` | Toggle the focused pane's fullscreen view |
 | `koshi input [--pane <PANE_ID>] [--no-enter] "<TEXT>"` | Send text to a pane |
 
 ### Tabs

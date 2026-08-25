@@ -318,7 +318,10 @@ fn kill_session_rejects_a_second_positional() {
 #[test]
 fn flagless_subcommands_parse_to_their_variants() {
     let cases: &[(&str, CliCommand)] = &[
-        ("toggle-pane-fullscreen", CliCommand::TogglePaneFullscreen),
+        (
+            "toggle-pane-fullscreen",
+            CliCommand::TogglePaneFullscreen { client: None },
+        ),
         (
             "new-tab",
             CliCommand::NewTab {
@@ -1311,6 +1314,144 @@ fn new_tab_client_value_must_read_as_a_client_id() {
     let err = parse_err(&["koshi", "new-tab", "--client", "amber-fox"]);
     assert_eq!(err.kind(), ErrorKind::ValueValidation);
     assert_eq!(err.exit_code(), 2);
+}
+
+#[test]
+fn toggle_pane_fullscreen_takes_a_client_flag() {
+    let client_flag = format!("client-{}", fixed_uuid());
+    let client = ClientId::from_uuid(fixed_uuid());
+    let parsed = command(&["koshi", "toggle-pane-fullscreen", "--client", &client_flag]);
+    assert_eq!(
+        parsed,
+        CliCommand::TogglePaneFullscreen {
+            client: Some(client),
+        }
+    );
+
+    // The flag never reaches the command; it rides on the command's source.
+    let (action, mapped) = parsed
+        .to_action(&ResolvedTargets::default(), Direction::Right)
+        .expect("toggle-pane-fullscreen is an action");
+    assert_eq!(
+        action,
+        ActionRef::core("toggle-pane-fullscreen").expect("valid")
+    );
+    assert_eq!(mapped, Command::TogglePaneFullscreen);
+}
+
+#[test]
+fn only_toggle_pane_fullscreen_puts_its_client_on_the_source() {
+    let client = ClientId::from_uuid(fixed_uuid());
+    assert_eq!(
+        CliCommand::TogglePaneFullscreen {
+            client: Some(client),
+        }
+        .source_client(),
+        Some(client)
+    );
+    assert_eq!(
+        CliCommand::TogglePaneFullscreen { client: None }.source_client(),
+        None
+    );
+
+    // Every other client-taking verb carries its client inside the command.
+    assert_eq!(
+        CliCommand::NewPane {
+            direction: None,
+            stacked: false,
+            pane: None,
+            session: None,
+            tab: None,
+            client: Some(client),
+        }
+        .source_client(),
+        None
+    );
+    assert_eq!(
+        CliCommand::Run {
+            direction: None,
+            stacked: false,
+            pane: None,
+            session: None,
+            tab: None,
+            client: Some(client),
+            command: vec!["htop".to_string()],
+        }
+        .source_client(),
+        None
+    );
+    assert_eq!(
+        CliCommand::NewTab {
+            session: None,
+            client: Some(client),
+        }
+        .source_client(),
+        None
+    );
+    assert_eq!(
+        CliCommand::NextTab {
+            client: Some(client),
+        }
+        .source_client(),
+        None
+    );
+    assert_eq!(
+        CliCommand::PreviousTab {
+            client: Some(client),
+        }
+        .source_client(),
+        None
+    );
+    assert_eq!(
+        CliCommand::FocusTab {
+            index: Some(0),
+            tab: None,
+            client: Some(client),
+        }
+        .source_client(),
+        None
+    );
+    assert_eq!(
+        CliCommand::FocusPane {
+            pane: PaneId::from_uuid(fixed_uuid()),
+            client: Some(client),
+        }
+        .source_client(),
+        None
+    );
+    assert_eq!(
+        CliCommand::Lock {
+            client: Some(client),
+        }
+        .source_client(),
+        None
+    );
+    assert_eq!(
+        CliCommand::Unlock {
+            client: Some(client),
+        }
+        .source_client(),
+        None
+    );
+    assert_eq!(
+        CliCommand::ToggleLock {
+            client: Some(client),
+        }
+        .source_client(),
+        None
+    );
+}
+
+#[test]
+fn a_fullscreen_client_flag_is_a_routing_target() {
+    let client = ClientId::from_uuid(fixed_uuid());
+    assert_eq!(
+        CliCommand::TogglePaneFullscreen {
+            client: Some(client),
+        }
+        .target_client(),
+        Some(client)
+    );
 }
 
 #[test]

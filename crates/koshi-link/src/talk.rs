@@ -59,9 +59,9 @@ impl PeerWords {
     /// The peer picks from the range the Hello named. A version outside that
     /// range stops the exchange.
     ///
-    /// Example — this build asks for 2 to 2 and the reply names 3, so the verb
-    /// fails with `the session settled on protocol version 3, which is outside
-    /// the 2 to 2 this koshi asked for`.
+    /// Example — this build asks for 2 to 3 and the reply names 4, so the verb
+    /// fails with `the session settled on protocol version 4, which is outside
+    /// the 2 to 3 this koshi asked for`.
     pub fn settled_version(&self, protocol_version: u32) -> Result<(), CliError> {
         let (min, max) = (self.surface.min, self.surface.max);
         if (min..=max).contains(&protocol_version) {
@@ -118,21 +118,22 @@ pub fn refused(refusal: &IpcErrorPayload) -> CliError {
     }
 }
 
-/// The build a session named in its Hello answer, once the version it settled
-/// on is checked. An empty string is a session that predates the version field.
+/// The version a session settled on and the build it named in its Hello
+/// answer, once the version is checked against the range this build sent. An
+/// empty build string is a session that predates the version field.
 ///
 /// # Errors
 /// [`CliError::IpcUnavailable`] when the session settled on a version outside
 /// the range this build asked for, refused the Hello, or answered anything
 /// other than a Hello.
-pub(crate) fn session_hello_version(reply: IncomingResponse) -> Result<String, CliError> {
+pub(crate) fn session_hello_version(reply: IncomingResponse) -> Result<(u32, String), CliError> {
     match SESSION.take_result(reply)? {
         IpcResult::Hello {
             protocol_version,
             version,
         } => {
             SESSION.settled_version(protocol_version)?;
-            Ok(version)
+            Ok((protocol_version, version))
         }
         IpcResult::Error(refusal) => Err(refused(&refusal)),
         other => Err(SESSION.unexpected_reply(&other)),
@@ -157,6 +158,30 @@ pub(crate) fn router_hello_version(reply: IncomingRouterResponse) -> Result<Stri
         }
         RouterResult::Error(refusal) => Err(refused(&refusal)),
         other => Err(ROUTER.unexpected_reply(&other)),
+    }
+}
+
+/// The lowest session protocol version that carries a command's target client
+/// on its source. A session that settled below it ignores the field, and a
+/// command naming a client is refused before it is sent.
+pub(crate) const TARGET_CLIENT_PROTOCOL: u32 = 3;
+
+/// Check the version a session settled on against the lowest one this command
+/// needs. `least` `None` accepts every settled version.
+///
+/// # Errors
+/// [`CliError::IpcUnavailable`] when `least` is `Some(v)` and `settled` is
+/// below `v`. For `settled == 2` the sentence reads `this session speaks
+/// protocol 2; --client needs a session started by koshi 0.4.0 or later`.
+pub(crate) fn require_settled_version(settled: u32, least: Option<u32>) -> Result<(), CliError> {
+    match least {
+        Some(least) if settled < least => Err(CliError::IpcUnavailable {
+            detail: format!(
+                "this session speaks protocol {settled}; --client needs a session started by \
+                 koshi 0.4.0 or later"
+            ),
+        }),
+        _ => Ok(()),
     }
 }
 

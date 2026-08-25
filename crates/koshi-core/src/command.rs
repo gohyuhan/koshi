@@ -596,10 +596,10 @@ pub struct ReloadPluginArgs {
 /// Where a command came from. The runtime uses this to resolve focus context,
 /// enforce permissions, and attribute diagnostics.
 ///
-/// `ExternalCli` carries only an optional session target: an external command
-/// with no explicit target acts through the session's sole attached client, and
-/// is rejected when several are attached and none is named. `Plugin` and
-/// `Internal` have no associated client.
+/// `ExternalCli` carries an optional session target and an optional target
+/// client: an external command with no explicit target acts through the
+/// session's sole attached client, and is rejected when several are attached
+/// and none is named. `Plugin` and `Internal` have no associated client.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CommandSource {
     /// A keybinding fired by an attached client.
@@ -628,10 +628,17 @@ pub enum CommandSource {
         socket_path: PathBuf,
     },
     /// An external CLI invocation — a `koshi` command typed outside any
-    /// pane — optionally naming a target session.
+    /// pane — optionally naming a target session and a target client.
     ExternalCli {
         /// Explicit target session; `None` means no session was resolved.
         session_id: Option<SessionId>,
+        /// The client the caller named on the command line, for a command whose
+        /// own arguments carry no client field; `None` when the invocation named
+        /// none. Read by [`CommandSource::target_client`]. A source names this
+        /// client and an issuing client separately, and this one is never the
+        /// issuer.
+        #[serde(default)]
+        target_client: Option<ClientId>,
     },
     /// A command issued by a plugin.
     Plugin {
@@ -646,7 +653,9 @@ impl CommandSource {
     /// The client this source is attributed to, if any. `KeyBinding` and
     /// `Mouse` always name a client; `InSessionCli` names one when the issuing
     /// pane was spawned for a client; `ExternalCli`, `Plugin`, and `Internal`
-    /// never do.
+    /// never do. `ExternalCli` never names a client here even when the
+    /// invocation named one — that client is a target the caller chose, read
+    /// through [`Self::target_client`], not the issuer.
     #[must_use]
     pub const fn client_id(&self) -> Option<ClientId> {
         match self {
@@ -655,6 +664,22 @@ impl CommandSource {
             }
             CommandSource::InSessionCli { client_id, .. } => *client_id,
             CommandSource::ExternalCli { .. }
+            | CommandSource::Plugin { .. }
+            | CommandSource::Internal => None,
+        }
+    }
+
+    /// The client the caller explicitly named as this command's target. Only
+    /// [`CommandSource::ExternalCli`] carries one; every other source returns
+    /// `None`. A target that is not attached to the acting session is refused,
+    /// never replaced by a fallback.
+    #[must_use]
+    pub const fn target_client(&self) -> Option<ClientId> {
+        match self {
+            CommandSource::ExternalCli { target_client, .. } => *target_client,
+            CommandSource::KeyBinding { .. }
+            | CommandSource::Mouse { .. }
+            | CommandSource::InSessionCli { .. }
             | CommandSource::Plugin { .. }
             | CommandSource::Internal => None,
         }
@@ -690,8 +715,14 @@ impl CommandSource {
 
     /// Construct a [`CommandSource::ExternalCli`].
     #[must_use]
-    pub const fn external_cli(session_id: Option<SessionId>) -> Self {
-        CommandSource::ExternalCli { session_id }
+    pub const fn external_cli(
+        session_id: Option<SessionId>,
+        target_client: Option<ClientId>,
+    ) -> Self {
+        CommandSource::ExternalCli {
+            session_id,
+            target_client,
+        }
     }
 
     /// Construct a [`CommandSource::Plugin`].

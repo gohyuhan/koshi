@@ -115,7 +115,10 @@ fn version_refusal(min: u32, max: u32) -> IpcErrorPayload {
 fn submit_command() -> IpcRequestKind {
     IpcRequestKind::SubmitCommand(Box::new(CommandEnvelope::new(
         CommandId::new(),
-        CommandSource::ExternalCli { session_id: None },
+        CommandSource::ExternalCli {
+            session_id: None,
+            target_client: None,
+        },
         UNIX_EPOCH + Duration::from_secs(1_700_000_000),
         Command::ToggleLockMode(ToggleLockModeArgs::default()),
     )))

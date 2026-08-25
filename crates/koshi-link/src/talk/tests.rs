@@ -7,6 +7,7 @@
 
 use super::*;
 
+use koshi_core::command::CliExitCode;
 use koshi_ipc::protocol::{IpcErrorCode, IpcResult};
 
 /// The sentence a failure carries, for asserting on it exactly.
@@ -23,6 +24,7 @@ fn detail(error: CliError) -> String {
 #[test]
 fn a_version_inside_the_range_this_build_sent_is_accepted() {
     assert!(SESSION.settled_version(2).is_ok());
+    assert!(SESSION.settled_version(3).is_ok());
     assert!(ROUTER.settled_version(1).is_ok());
     assert!(ROUTER.settled_version(2).is_ok());
 }
@@ -30,12 +32,12 @@ fn a_version_inside_the_range_this_build_sent_is_accepted() {
 #[test]
 fn a_session_version_above_the_range_names_both_the_version_and_the_range() {
     let refusal = SESSION
-        .settled_version(3)
-        .expect_err("3 is outside the 2 to 2 this build speaks");
+        .settled_version(4)
+        .expect_err("4 is outside the 2 to 3 this build speaks");
 
     assert_eq!(
         detail(refusal),
-        "the session settled on protocol version 3, which is outside the 2 to 2 this koshi \
+        "the session settled on protocol version 4, which is outside the 2 to 3 this koshi \
          asked for"
     );
 }
@@ -61,7 +63,7 @@ fn a_version_below_the_floor_is_refused_the_same_way() {
 
     assert_eq!(
         detail(refusal),
-        "the session settled on protocol version 1, which is outside the 2 to 2 this koshi \
+        "the session settled on protocol version 1, which is outside the 2 to 3 this koshi \
          asked for"
     );
 }
@@ -189,8 +191,8 @@ fn a_session_hello_hands_back_the_build_the_session_named() {
     });
 
     assert_eq!(
-        session_hello_version(reply).expect("2 is inside the 2 to 2 this build speaks"),
-        "0.9.9"
+        session_hello_version(reply).expect("2 is inside the 2 to 3 this build speaks"),
+        (2, "0.9.9".to_string())
     );
 }
 
@@ -203,22 +205,22 @@ fn a_session_predating_the_build_field_hands_back_an_empty_string() {
 
     assert_eq!(
         session_hello_version(reply).expect("a build with no version field still opens"),
-        ""
+        (2, String::new())
     );
 }
 
 #[test]
 fn a_session_hello_naming_a_version_outside_the_range_stops_the_exchange() {
     let reply = session_answer(IpcResult::Hello {
-        protocol_version: 3,
+        protocol_version: 4,
         version: "0.9.9".to_string(),
     });
 
-    let refusal = session_hello_version(reply).expect_err("3 is outside the 2 to 2");
+    let refusal = session_hello_version(reply).expect_err("4 is outside the 2 to 3");
 
     assert_eq!(
         detail(refusal),
-        "the session settled on protocol version 3, which is outside the 2 to 2 this koshi \
+        "the session settled on protocol version 4, which is outside the 2 to 3 this koshi \
          asked for"
     );
 }
@@ -304,4 +306,30 @@ fn a_router_answering_no_hello_at_all_names_the_reply_that_arrived() {
         detail(refusal),
         "the router answered with an unexpected Restarting reply"
     );
+}
+
+#[test]
+fn the_target_client_refusal_names_the_version_and_the_release() {
+    assert_eq!(TARGET_CLIENT_PROTOCOL, 3);
+
+    let refusal = require_settled_version(2, Some(TARGET_CLIENT_PROTOCOL))
+        .expect_err("a session settled on 2 is below 3");
+    assert_eq!(
+        detail(refusal),
+        "this session speaks protocol 2; --client needs a session started by koshi 0.4.0 or \
+         later"
+    );
+
+    let refusal = require_settled_version(2, Some(TARGET_CLIENT_PROTOCOL))
+        .expect_err("a session settled on 2 is below 3");
+    assert_eq!(CliExitCode::from(&refusal).code(), 4);
+}
+
+#[test]
+fn a_settled_version_at_or_above_the_least_is_accepted_and_no_least_accepts_any() {
+    require_settled_version(3, Some(TARGET_CLIENT_PROTOCOL)).expect("3 meets a floor of 3");
+    require_settled_version(4, Some(TARGET_CLIENT_PROTOCOL)).expect("4 is above a floor of 3");
+    // A `None` floor takes every settled version, including one below 3.
+    require_settled_version(2, None).expect("no floor takes 2");
+    require_settled_version(0, None).expect("no floor takes 0");
 }

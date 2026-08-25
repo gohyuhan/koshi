@@ -138,8 +138,8 @@ impl Server {
         }
     }
 
-    /// Whether `command` acts on one client's own view state (mouse-select,
-    /// zoom) and carries no other target, so
+    /// Whether `command` acts on one client's own view state (mouse-select)
+    /// and carries no other target, so
     /// [`Self::resolve_acting_client`] alone decides which client it lands on.
     ///
     /// [`Command::FocusPane`], [`Command::FocusTab`], [`Command::NewTab`],
@@ -147,16 +147,18 @@ impl Server {
     /// [`Command::SwitchSession`] are absent: they also accept an explicit
     /// `client` argument that outranks the source, and their resolvers call
     /// the same helper for the rest.
+    /// [`Command::TogglePaneFullscreen`] is absent for the same reason: it
+    /// accepts an explicit target client on its source
+    /// ([`CommandSource::target_client`]) that outranks the issuer, and
+    /// [`Self::resolve_fullscreen_target`] applies the same ladder the lock
+    /// commands use.
     /// [`Command::Visual`] is absent too: a highlight
     /// belongs to the client that made it, so a gone issuer means the target
     /// is gone, never another client's screen ([`Self::issuing_client`]).
     /// [`Command::ToggleMouseSelect`] has no CLI verb, so
     /// [`Self::allowed_from_source`] refuses it from a CLI before this runs.
     pub(super) fn is_client_scoped(command: &Command) -> bool {
-        matches!(
-            command,
-            Command::ToggleMouseSelect | Command::TogglePaneFullscreen
-        )
+        matches!(command, Command::ToggleMouseSelect)
     }
 
     /// Confirm the pane an in-session CLI command was issued from is still a
@@ -211,12 +213,15 @@ impl Server {
                 .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale)),
             CommandSource::ExternalCli {
                 session_id: Some(session_id),
+                ..
             } => self
                 .sessions()
                 .get(session_id)
                 .map(Some)
                 .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound)),
-            CommandSource::ExternalCli { session_id: None }
+            CommandSource::ExternalCli {
+                session_id: None, ..
+            }
             | CommandSource::Plugin { .. }
             | CommandSource::Internal => Ok(None),
         }
@@ -278,8 +283,14 @@ impl Server {
             Command::Visual(VisualCommand::SetSelection(_) | VisualCommand::ClearSelection(_)) => {
                 Self::issuing_client(source).map(drop)
             }
+            // A zoom flips one client's own view of the pane that client is
+            // looking at. The pane and the client resolve together through one
+            // helper the handler shares.
+            Command::TogglePaneFullscreen => {
+                self.resolve_fullscreen_target(source, session).map(drop)
+            }
             // Copy carries no pane yet, so it still means the focused one.
-            Command::TogglePaneFullscreen | Command::Visual(VisualCommand::Copy(_)) => {
+            Command::Visual(VisualCommand::Copy(_)) => {
                 self.resolve_pane_target(None, source, session).map(drop)
             }
             Command::CloseTab(args) => self
@@ -410,11 +421,17 @@ impl Server {
     /// An explicit pane target is global: its owning session is found by
     /// registry membership, and a winding-down owner rejects. Without one, the
     /// in-session CLI targets the pane it was issued from, and any other
-    /// source targets the acting client's focused pane in its active tab —
-    /// the issuer while attached, else the session's sole attached client
-    /// ([`Self::resolve_acting_client`]), so an external CLI acts exactly
-    /// where a keypress on that client would. Resolved through the shared
-    /// defensive helpers, so a stale focus entry is rejected, never acted on.
+    /// source targets the target client's focused pane in its active tab —
+    /// the client the caller named ([`CommandSource::target_client`]) when
+    /// there is one, else the issuer while attached, else the session's sole
+    /// attached client ([`Self::resolve_view_client`]) — so an external CLI
+    /// acts exactly where a keypress on that client would. Resolved through the
+    /// shared defensive helpers, so a stale focus entry is rejected, never
+    /// acted on.
+    ///
+    /// With clients A and B attached and B named as the target, the result is
+    /// B's focused pane in B's active tab; with neither named, it is
+    /// [`RejectReason::TargetAmbiguous`].
     pub(super) fn resolve_pane_target(
         &self,
         pane: Option<PaneId>,
@@ -454,7 +471,8 @@ impl Server {
                         })
                     }
                     _ => {
-                        let client_id = Self::resolve_acting_client(source, session)?;
+                        let client_id =
+                            Self::resolve_view_client(source.target_client(), source, session)?;
                         let tab_id = session
                             .clients
                             .get(client_id)
@@ -789,6 +807,36 @@ impl Server {
         Ok(NewTabTarget {
             session_id: session.id,
             client_id,
+        })
+    }
+
+    /// Resolve the [`Command::TogglePaneFullscreen`] target: the pane the zoom
+    /// fills the view with and the client whose own view flips. Shared by
+    /// validation and [`Self::handle_toggle_pane_fullscreen`] so both apply one
+    /// contract.
+    ///
+    /// Both halves go through the target client the source names
+    /// ([`CommandSource::target_client`]), so the pane is the one that client
+    /// is looking at. Against a session with clients A and B,
+    /// `koshi toggle-pane-fullscreen --client <B>` zooms B's focused pane on
+    /// B's screen and leaves A tiled. A named client not attached to the acting
+    /// session is [`RejectReason::TargetNotFound`].
+    pub(super) fn resolve_fullscreen_target(
+        &self,
+        source: &CommandSource,
+        session: Option<&Session>,
+    ) -> Result<FullscreenTarget, Rejection> {
+        let target = self.resolve_pane_target(None, source, session)?;
+        let client_id = Self::resolve_view_client(
+            source.target_client(),
+            source,
+            Self::require_session(session)?,
+        )?;
+        Ok(FullscreenTarget {
+            session_id: target.session_id,
+            client_id,
+            tab_id: target.tab_id,
+            pane_id: target.pane_id,
         })
     }
 

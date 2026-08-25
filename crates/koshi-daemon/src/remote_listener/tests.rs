@@ -787,7 +787,7 @@ mod bridge_round_trip {
 
         let envelope = CommandEnvelope::new(
             CommandId::new(),
-            CommandSource::external_cli(Some(session.id)),
+            CommandSource::external_cli(Some(session.id), None),
             SystemTime::now(),
             command,
         );

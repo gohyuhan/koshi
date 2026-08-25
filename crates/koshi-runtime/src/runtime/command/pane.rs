@@ -689,20 +689,23 @@ impl Server {
         Ok(Self::commit_events(&mut self.event_bus, command_id, events))
     }
 
-    /// Handle [`Command::TogglePaneFullscreen`]: switch the **acting client's**
-    /// view of the target pane's tab between tiled and a zoom of that pane.
+    /// Handle [`Command::TogglePaneFullscreen`]: switch the **target client's**
+    /// view of that client's tab between tiled and a zoom of the pane that
+    /// client has focused.
     ///
     /// The zoom belongs to that one client. Another client viewing the same tab
     /// keeps the view it had — its own tiled layout, its own focus, its own
     /// keys reaching its own pane — so zooming never reaches across clients.
     ///
-    /// The target is the command's default pane — the in-session issuing pane,
-    /// else the source client's focused pane. The acting client is the issuer
-    /// while it is still attached, else the session's sole attached client
-    /// ([`Self::resolve_acting_client`]), so the pane and the client it zooms
-    /// for are resolved separately: a CLI command from a pane whose client has
-    /// gone zooms that pane for the one client still watching. An
-    /// already-zoomed client toggles
+    /// [`Self::resolve_fullscreen_target`] is the single resolver validation
+    /// also used: the client is the one the caller named on the command line
+    /// when there is one, else the issuer while it is still attached, else the
+    /// session's sole attached client; the pane is that client's focused pane,
+    /// or the issuing pane for an in-session CLI command. So
+    /// `koshi toggle-pane-fullscreen --client <B>` zooms B's focused pane on
+    /// B's screen while every other client of that tab stays tiled, and a CLI
+    /// command from a pane whose client has gone zooms that pane for the one
+    /// client still watching. An already-zoomed client toggles
     /// back to tiled whichever pane resolved; a tiled client zooms the target
     /// and, when its focus was elsewhere, moves its focus to the pane now
     /// filling its view ([`Event::PaneFocused`]). The zoom is a solve-time
@@ -720,10 +723,8 @@ impl Server {
     ) -> Result<CommandResult, Rejection> {
         let acting = self.acting_session(source)?;
         let pane_min = self.effective_pane_min();
-        let target = self.resolve_pane_target(None, source, acting)?;
-        // The zoom is per-client state, so it lands on the acting client —
-        // the same one validation resolved.
-        let client_id = Self::resolve_acting_client(source, Self::require_session(acting)?)?;
+        let target = self.resolve_fullscreen_target(source, acting)?;
+        let client_id = target.client_id;
 
         let backend = Arc::clone(self.pty_backend());
 
@@ -762,7 +763,7 @@ impl Server {
             }
         };
 
-        // Apply the zoom to the acting client, and to it alone — every other
+        // Apply the zoom to the target client, and to it alone — every other
         // client viewing this tab keeps the view it already had. Entering also
         // moves this client's focus to the zoomed pane, so its focus never sits
         // on a pane its own zoom just hid. Both land BEFORE the reflow: PTY

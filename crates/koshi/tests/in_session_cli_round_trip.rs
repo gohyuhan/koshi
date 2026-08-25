@@ -360,6 +360,36 @@ fn run_cli(
     (result, code)
 }
 
+/// The same walk as [`run_cli`] for a verb typed OUTSIDE any pane: the real
+/// argv, the core command
+/// [`CliCommand::to_action`](koshi::cli::CliCommand::to_action) builds, and the
+/// client
+/// [`CliCommand::source_client`](koshi::cli::CliCommand::source_client) reads
+/// off the same parse, all the way to the session's answer and the exit code.
+///
+/// The command travels as [`CommandSource::ExternalCli`], the only source that
+/// carries a target client.
+fn run_cli_external(session: &RunningSession, argv: &[&str]) -> (CommandResult, CliExitCode) {
+    let cli = Cli::try_parse_from(argv).expect("the argv parses");
+    let parsed = cli.command.as_ref().expect("the argv carries a subcommand");
+    let (_, command) = parsed
+        .to_action(&ResolvedTargets::default(), Direction::Right)
+        .expect("the subcommand is an action verb");
+
+    let result = koshi_link::ipc_client::submit_external_via_runtime_dir(
+        session.dir.path(),
+        session.id,
+        parsed.source_client(),
+        command,
+    )
+    .expect("the session answers the command");
+    let code = match report(&result) {
+        Ok(()) => CliExitCode::Success,
+        Err(error) => CliExitCode::from(&error),
+    };
+    (result, code)
+}
+
 /// Submit `command` to `session` over its control socket, enveloped the way the
 /// CLI running inside `pane` envelopes it, and hand back the dispatcher's
 /// result.
@@ -462,6 +492,29 @@ fn lock_state(session: &RunningSession, client: ClientId) -> LockMode {
         .find(|info| info.id == client)
         .expect("the client is attached to the session");
     found.lock_state
+}
+
+/// One solve per client viewing `tab`, read over the control socket by the
+/// library call `koshi debug dump-layout` makes. Fails the test when the
+/// session reports any tab other than `tab` alone.
+fn solves_of(session: &RunningSession, tab: TabId) -> Vec<koshi_ipc::layout::SolvedTab> {
+    let layout = koshi_link::ipc_client::fetch_layout(session.dir.path(), session.id, None)
+        .expect("the session describes its layout");
+    assert_eq!(layout.tabs.len(), 1);
+    assert_eq!(layout.tabs[0].id, tab);
+    layout.tabs[0].solved.clone()
+}
+
+/// The mode `client` solves the tab in, taken from the solves `solves_of` read.
+fn mode_of(
+    solves: &[koshi_ipc::layout::SolvedTab],
+    client: ClientId,
+) -> koshi_layout::mode::LayoutMode {
+    solves
+        .iter()
+        .find(|solve| solve.client == client)
+        .expect("the client views the tab")
+        .mode
 }
 
 /// Split `pane` in two and hand back the pane the split created, so a test
@@ -740,6 +793,69 @@ fn new_tab_with_a_client_flag_switches_that_client_onto_the_new_tab() {
     assert_eq!(active_tab_of(named.id), new_tab);
     // The client that typed the command stays where it was.
     assert_eq!(active_tab_of(issuer.id), first_tab);
+}
+
+#[test]
+fn a_client_flag_zooms_that_client_and_leaves_the_other_tiled() {
+    let session = RunningSession::start();
+    let issuer = attach(&session);
+    let named = attach(&session);
+    assert_ne!(issuer.id, named.id);
+    let root = session.panes()[0];
+    let tab = only_tab(&session);
+
+    let named_id = named.id.to_string();
+    let (result, code) = run_cli_external(
+        &session,
+        &["koshi", "toggle-pane-fullscreen", "--client", &named_id],
+    );
+
+    let CommandResult::Ok { .. } = &result else {
+        panic!("the command was answered with {result:?}");
+    };
+    assert_eq!(code, CliExitCode::Success);
+    // The zoom lands on the named client's own view. The client that sent the
+    // command keeps its tiled one.
+    let solves = solves_of(&session, tab);
+    assert_eq!(solves.len(), 2);
+    assert_eq!(
+        mode_of(&solves, named.id),
+        koshi_layout::mode::LayoutMode::Fullscreen { focused: root }
+    );
+    assert_eq!(
+        mode_of(&solves, issuer.id),
+        koshi_layout::mode::LayoutMode::Tiled
+    );
+}
+
+#[test]
+fn a_fullscreen_command_naming_no_client_is_refused_and_zooms_nothing() {
+    let session = RunningSession::start();
+    let issuer = attach(&session);
+    let named = attach(&session);
+    assert_ne!(issuer.id, named.id);
+    let tab = only_tab(&session);
+
+    let (result, code) = run_cli_external(&session, &["koshi", "toggle-pane-fullscreen"]);
+
+    match &result {
+        CommandResult::Rejected { reason, .. } => {
+            assert_eq!(*reason, RejectReason::TargetAmbiguous);
+        }
+        other => panic!("the command was answered with {other:?}"),
+    }
+    assert_eq!(code, CliExitCode::RuntimeAction);
+    // A refused toggle changes nothing: both clients still solve the tab tiled.
+    let solves = solves_of(&session, tab);
+    assert_eq!(solves.len(), 2);
+    assert_eq!(
+        mode_of(&solves, named.id),
+        koshi_layout::mode::LayoutMode::Tiled
+    );
+    assert_eq!(
+        mode_of(&solves, issuer.id),
+        koshi_layout::mode::LayoutMode::Tiled
+    );
 }
 
 // --- The debug dumps ---

@@ -41,7 +41,10 @@ fn token() -> ConnectionToken {
 fn envelope() -> CommandEnvelope {
     CommandEnvelope::new(
         CommandId::new(),
-        CommandSource::ExternalCli { session_id: None },
+        CommandSource::ExternalCli {
+            session_id: None,
+            target_client: None,
+        },
         UNIX_EPOCH + Duration::from_secs(1_700_000_000),
         Command::ToggleLockMode(ToggleLockModeArgs::default()),
     )
@@ -259,8 +262,8 @@ fn tag_of(value: &serde_json::Value) -> String {
 }
 
 #[test]
-fn the_protocol_version_this_build_speaks_is_two() {
-    assert_eq!(PROTOCOL_VERSION, 2);
+fn the_protocol_version_this_build_speaks_is_three() {
+    assert_eq!(PROTOCOL_VERSION, 3);
 }
 
 #[test]
@@ -345,7 +348,7 @@ fn the_plane_a_remote_client_reaches_names_no_token_verb() {
 #[test]
 fn a_client_row_decodes_across_the_shape_that_added_origin() {
     // A build without `origin` and a build with it must read each other's
-    // client rows, which is what keeps `PROTOCOL_VERSION` at 2.
+    // client rows, so `origin` alone moves no version number.
     let without_origin = json!({
         "id": "00000000-0000-0000-0000-000000000001",
         "session_id": "00000000-0000-0000-0000-000000000001",

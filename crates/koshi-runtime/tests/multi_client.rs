@@ -297,6 +297,7 @@ fn submit(
         CommandId::new(),
         CommandSource::ExternalCli {
             session_id: Some(session_id),
+            target_client: None,
         },
         SystemTime::UNIX_EPOCH,
         command,

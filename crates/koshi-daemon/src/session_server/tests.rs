@@ -192,6 +192,7 @@ fn a_quit_command_arriving_on_the_socket_ends_the_loop() {
             command_id,
             CommandSource::ExternalCli {
                 session_id: Some(session_id),
+                target_client: None,
             },
             SystemTime::now(),
             Command::Quit,
@@ -443,6 +444,7 @@ fn a_quit_applied_while_the_swap_runs_ends_the_session_instead_of_serving_it_aga
             CommandId::new(),
             CommandSource::ExternalCli {
                 session_id: Some(session_id),
+                target_client: None,
             },
             SystemTime::now(),
             Command::Quit,
@@ -1938,6 +1940,7 @@ fn a_quit_arriving_with_a_restart_in_one_pass_ends_the_session_instead_of_swappi
             CommandId::new(),
             CommandSource::ExternalCli {
                 session_id: Some(session_id),
+                target_client: None,
             },
             SystemTime::now(),
             Command::Quit,
