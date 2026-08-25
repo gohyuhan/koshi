@@ -379,6 +379,10 @@ pub enum CliCommand {
         /// session, else the only running one.
         #[arg(long, value_parser = parse_session_ref, value_name = "SESSION")]
         session: Option<SessionRef>,
+        /// Client that switches onto the new tab; defaults to the issuing
+        /// client, else the session's only attached one.
+        #[arg(long, value_parser = parse_client_id, value_name = "CLIENT_ID")]
+        client: Option<ClientId>,
     },
     /// Close a tab.
     CloseTab {
@@ -978,9 +982,13 @@ impl CliCommand {
                     Command::WriteToPane(WriteToPaneArgs { pane: *pane, data }),
                 )
             }
-            CliCommand::NewTab { session: _ } => {
-                ("new-tab", Command::NewTab(NewTabArgs::default()))
-            }
+            CliCommand::NewTab { session: _, client } => (
+                "new-tab",
+                Command::NewTab(NewTabArgs {
+                    cwd: None,
+                    client: *client,
+                }),
+            ),
             CliCommand::CloseTab {
                 tab,
                 session: _,
@@ -1114,7 +1122,7 @@ impl CliCommand {
         match self {
             CliCommand::NewPane { session, .. }
             | CliCommand::Run { session, .. }
-            | CliCommand::NewTab { session }
+            | CliCommand::NewTab { session, .. }
             | CliCommand::CloseTab { session, .. } => session.as_ref(),
             _ => None,
         }
@@ -1158,6 +1166,7 @@ impl CliCommand {
         match self {
             CliCommand::NewPane { client, .. }
             | CliCommand::Run { client, .. }
+            | CliCommand::NewTab { client, .. }
             | CliCommand::NextTab { client }
             | CliCommand::PreviousTab { client }
             | CliCommand::FocusTab { client, .. }

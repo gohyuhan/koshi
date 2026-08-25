@@ -367,7 +367,7 @@ Outside Koshi, give a target unless exactly one running session can be chosen.
 
 | Command | Result |
 |---|---|
-| `koshi new-tab [--session <NAME_OR_ID>]` | Open a tab with one shell pane |
+| `koshi new-tab [--session <NAME_OR_ID>] [--client <CLIENT_ID>]` | Open a tab with one shell pane |
 | `koshi close-tab [--tab <NAME_OR_ID>] [--session <NAME_OR_ID>] [--force]` | Close a tab |
 | `koshi next-tab [--client <CLIENT_ID>]` | Focus the next tab |
 | `koshi previous-tab [--client <CLIENT_ID>]` | Focus the previous tab |

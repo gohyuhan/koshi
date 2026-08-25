@@ -436,6 +436,52 @@ fn detached_client_is_not_found_anywhere() {
 }
 
 #[test]
+fn a_client_from_another_session_is_not_retargeted() {
+    let named = SessionId::new();
+    let other_tab = TabId::new();
+    let foreign_client = ClientId::new();
+    let overviews = census([
+        overview("amber-fox", named, &[], &[], &[]),
+        overview(
+            "blue-owl",
+            SessionId::new(),
+            &[(other_tab, "one")],
+            &[],
+            &[foreign_client],
+        ),
+    ]);
+    let name = SessionRef::Name("amber-fox".to_string());
+    let error = pick_session(Some(&name), None, None, Some(foreign_client), &overviews)
+        .expect_err("mismatch never retargets");
+    assert_eq!(rejection_reason(&error), RejectReason::TargetNotFound);
+}
+
+#[test]
+fn a_new_tab_client_flag_reaches_the_session_lookup() {
+    let holder = SessionId::new();
+    let holder_tab = TabId::new();
+    let client = ClientId::new();
+    let overviews = census([
+        overview("amber-fox", SessionId::new(), &[], &[], &[]),
+        overview("blue-owl", holder, &[(holder_tab, "one")], &[], &[client]),
+    ]);
+    let command = CliCommand::NewTab {
+        session: None,
+        client: Some(client),
+    };
+    let (session, targets) =
+        resolve_targets(&command, &overviews).expect("the client names its session");
+    assert_eq!(session, holder);
+    assert_eq!(
+        targets,
+        ResolvedTargets {
+            session: Some(holder),
+            tab: None,
+        }
+    );
+}
+
+#[test]
 fn tab_id_picks_its_owning_session() {
     let target = SessionId::new();
     let tab = TabId::new();
@@ -744,6 +790,35 @@ fn in_session_focus_tab_by_id_routes_home_and_rides_into_the_command() {
         koshi_core::command::Command::FocusTab(koshi_core::command::FocusTabArgs {
             target: koshi_core::command::TabTarget::Id(tab),
             client: None,
+        })
+    );
+}
+
+#[test]
+fn in_session_new_tab_with_a_client_stays_home() {
+    let context = InSessionContext {
+        session_id: SessionId::new(),
+        client_id: None,
+        pane_id: PaneId::new(),
+    };
+    let client = ClientId::new();
+    let command = CliCommand::NewTab {
+        session: None,
+        client: Some(client),
+    };
+    let route = route(&command, Some(&context)).expect("a client needs no lookup");
+    let Route::InSession(targets) = route else {
+        panic!("expected the home route, got {route:?}");
+    };
+    assert_eq!(targets, ResolvedTargets::default());
+    let (_, mapped) = command
+        .to_action(&targets, koshi_core::geometry::Direction::Right)
+        .expect("new-tab is an action");
+    assert_eq!(
+        mapped,
+        koshi_core::command::Command::NewTab(koshi_core::command::NewTabArgs {
+            cwd: None,
+            client: Some(client),
         })
     );
 }

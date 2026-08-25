@@ -704,6 +704,44 @@ fn unlock_over_the_socket_returns_the_client_to_normal_input_mode() {
     assert_eq!(lock_state(&session, client.id), LockMode::Normal);
 }
 
+#[test]
+fn new_tab_with_a_client_flag_switches_that_client_onto_the_new_tab() {
+    let session = RunningSession::start();
+    let issuer = attach(&session);
+    let named = attach(&session);
+    assert_ne!(issuer.id, named.id);
+    let root = session.panes()[0];
+    let first_tab = only_tab(&session);
+    let named_id = named.id.to_string();
+
+    let (_, code) = run_cli(
+        &session,
+        &issuer,
+        root,
+        &["koshi", "new-tab", "--client", &named_id],
+    );
+
+    assert_eq!(code, CliExitCode::Success);
+    let overview = session.overview();
+    assert_eq!(overview.tabs.len(), 2);
+    assert_eq!(overview.tabs[0].id, first_tab);
+    let new_tab = overview.tabs[1].id;
+
+    let layout = koshi_link::ipc_client::fetch_layout(session.dir.path(), session.id, None)
+        .expect("the session describes its layout");
+    let active_tab_of = |client: ClientId| {
+        layout
+            .clients
+            .iter()
+            .find(|focus| focus.id == client)
+            .expect("the client is attached to the session")
+            .active_tab
+    };
+    assert_eq!(active_tab_of(named.id), new_tab);
+    // The client that typed the command stays where it was.
+    assert_eq!(active_tab_of(issuer.id), first_tab);
+}
+
 // --- The debug dumps ---
 
 #[test]
