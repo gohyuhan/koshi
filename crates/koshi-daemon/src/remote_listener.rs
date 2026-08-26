@@ -197,7 +197,9 @@ impl Bound {
 fn server_config(cert: &CertFile) -> io::Result<ServerConfig> {
     let chain = vec![CertificateDer::from(cert.cert_der.clone())];
     let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.key_der.clone()));
-    ServerConfig::builder()
+    ServerConfig::builder_with_provider(koshi_ipc::tls::crypto_provider())
+        .with_safe_default_protocol_versions()
+        .expect("aws-lc-rs supports every default protocol version")
         .with_no_client_auth()
         .with_single_cert(chain, key)
         .map_err(|error| io::Error::other(error.to_string()))

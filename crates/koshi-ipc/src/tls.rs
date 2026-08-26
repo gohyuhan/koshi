@@ -30,7 +30,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::crypto::WebPkiSupportedAlgorithms;
+use rustls::crypto::{CryptoProvider, WebPkiSupportedAlgorithms};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, ClientConnection, DigitallySignedStruct, SignatureScheme};
 use sha2::{Digest, Sha256};
@@ -346,9 +346,24 @@ pub fn fingerprint(der: &[u8]) -> String {
     crate::bytes::hex(&Sha256::digest(der))
 }
 
-/// The signature algorithms the ring cryptography provider verifies with.
-fn ring_algorithms() -> WebPkiSupportedAlgorithms {
-    rustls::crypto::ring::default_provider().signature_verification_algorithms
+/// The aws-lc-rs cryptography provider, built fresh on each call.
+///
+/// With rustls's `prefer-post-quantum` feature on, the key exchange groups it
+/// offers are `X25519MLKEM768`, `X25519`, `SECP256R1` and `SECP384R1`, in that
+/// order. With the feature off, `X25519MLKEM768` moves last.
+///
+/// [`dial`] builds its client configuration from this value. A caller that
+/// builds a [`rustls::ServerConfig`], or hands a provider to an HTTP client,
+/// passes this value in.
+#[must_use]
+pub fn crypto_provider() -> Arc<CryptoProvider> {
+    Arc::new(rustls::crypto::aws_lc_rs::default_provider())
+}
+
+/// The signature algorithms [`crypto_provider`] verifies handshake signatures
+/// with.
+fn signature_algorithms() -> WebPkiSupportedAlgorithms {
+    crypto_provider().signature_verification_algorithms
 }
 
 /// Checks a server's certificate against the fingerprint saved from an
@@ -412,7 +427,7 @@ impl ServerCertVerifier for PinVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(message, cert, dss, &ring_algorithms())
+        rustls::crypto::verify_tls12_signature(message, cert, dss, &signature_algorithms())
     }
 
     fn verify_tls13_signature(
@@ -421,11 +436,11 @@ impl ServerCertVerifier for PinVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(message, cert, dss, &ring_algorithms())
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &signature_algorithms())
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        ring_algorithms().supported_schemes()
+        signature_algorithms().supported_schemes()
     }
 }
 
@@ -479,7 +494,9 @@ pub fn dial(
         })?;
 
     let verifier = Arc::new(PinVerifier::new(expected_fingerprint));
-    let config = ClientConfig::builder()
+    let config = ClientConfig::builder_with_provider(crypto_provider())
+        .with_safe_default_protocol_versions()
+        .expect("aws-lc-rs supports every default protocol version")
         .dangerous()
         .with_custom_certificate_verifier(Arc::clone(&verifier) as Arc<dyn ServerCertVerifier>)
         .with_no_client_auth();

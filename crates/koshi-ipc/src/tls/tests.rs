@@ -1,8 +1,9 @@
 //! Tests for the TLS stream: the certificate fingerprint, what the pinning
-//! verifier accepts and refuses, the frames that cross a real loopback stream,
-//! the cause a failed dial carries and the words it prints, and the deadline a
-//! handshake, an opening exchange and a read finish inside, against a peer that
-//! answers nothing and against one that sends a byte at a time.
+//! verifier accepts and refuses, the key exchange group a handshake settles
+//! on, the frames that cross a real loopback stream, the cause a failed dial
+//! carries and the words it prints, and the deadline a handshake, an opening
+//! exchange and a read finish inside, against a peer that answers nothing and
+//! against one that sends a byte at a time.
 //!
 //! The loopback tests bind `127.0.0.1:0`, so the operating system picks a free
 //! port and two runs of the suite never meet on one address.
@@ -11,7 +12,7 @@ use std::net::TcpListener;
 
 use koshi_core::ids::SessionId;
 use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer, UnixTime};
-use rustls::{ServerConfig, ServerConnection};
+use rustls::{NamedGroup, ServerConfig, ServerConnection};
 
 use super::*;
 use crate::protocol::ConnectionToken;
@@ -245,18 +246,34 @@ fn a_server_that_sends_one_byte_at_a_time_ends_the_dial_at_the_deadline() {
     let _ = server.join();
 }
 
-/// A fresh self-signed certificate and the TLS configuration serving it, the
-/// way this machine's own certificate is made.
-fn fresh_server() -> (ServerConfig, Vec<u8>) {
+/// A fresh self-signed certificate and a server configuration serving it with
+/// `provider`.
+fn server_with(provider: Arc<CryptoProvider>) -> (ServerConfig, Vec<u8>) {
     let made = rcgen::generate_simple_self_signed(vec!["koshi".to_string()])
         .expect("generate a self-signed certificate");
     let cert_der = made.cert.der().to_vec();
     let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(made.signing_key.serialize_der()));
-    let config = ServerConfig::builder()
+    let config = ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("aws-lc-rs supports every default protocol version")
         .with_no_client_auth()
         .with_single_cert(vec![CertificateDer::from(cert_der.clone())], key)
         .expect("a certificate and its key make a server configuration");
     (config, cert_der)
+}
+
+/// A fresh self-signed certificate and the TLS configuration serving it, the
+/// way this machine's own certificate is served.
+fn fresh_server() -> (ServerConfig, Vec<u8>) {
+    server_with(crypto_provider())
+}
+
+/// A fresh self-signed certificate and a server configuration whose key
+/// exchange list holds `X25519` alone.
+fn classical_only_server() -> (ServerConfig, Vec<u8>) {
+    let mut provider = rustls::crypto::aws_lc_rs::default_provider();
+    provider.kx_groups = vec![rustls::crypto::aws_lc_rs::kx_group::X25519];
+    server_with(Arc::new(provider))
 }
 
 /// The one session a loopback server reports.
@@ -265,6 +282,53 @@ fn one_row() -> RemoteSessionRow {
         id: SessionId::new(),
         name: "quiet-lake".to_string(),
     }
+}
+
+/// Serve `config` on a loopback port, dial it, and report the key exchange
+/// group the handshake settled on together with the fingerprint the client
+/// was shown.
+fn negotiated_key_exchange(config: ServerConfig) -> (Option<NamedGroup>, String) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let address = listener.local_addr().expect("read the bound address");
+
+    let server = std::thread::spawn(move || {
+        let (mut sock, _) = listener.accept().expect("accept the client");
+        let conn = ServerConnection::new(Arc::new(config)).expect("a server connection");
+        let mut conn = rustls::Connection::Server(conn);
+        handshake(&mut conn, &mut sock, Instant::now() + LOOPBACK_WAIT)
+            .expect("the loopback handshake finishes");
+        conn.negotiated_key_exchange_group().map(|kx| kx.name())
+    });
+
+    let (_reader, _writer, presented) =
+        dial(&address.to_string(), None, LOOPBACK_WAIT).expect("the dial opens");
+    let negotiated = server.join().expect("the server thread finishes");
+    (negotiated, presented)
+}
+
+/// Two koshi peers settle on `X25519MLKEM768`: the X25519 elliptic curve
+/// combined with ML-KEM-768, the post-quantum key encapsulation mechanism.
+/// koshi offers that group ahead of every classical one.
+#[test]
+fn a_loopback_handshake_settles_on_the_hybrid_post_quantum_key_exchange() {
+    let (config, cert_der) = fresh_server();
+
+    let (negotiated, presented) = negotiated_key_exchange(config);
+
+    assert_eq!(negotiated, Some(NamedGroup::X25519MLKEM768));
+    assert_eq!(presented, fingerprint(&cert_der));
+}
+
+/// A server whose key exchange list holds `X25519` alone accepts the dial,
+/// and the handshake settles on `X25519` rather than failing.
+#[test]
+fn a_server_that_offers_only_classical_key_exchange_still_accepts_a_dial() {
+    let (config, cert_der) = classical_only_server();
+
+    let (negotiated, presented) = negotiated_key_exchange(config);
+
+    assert_eq!(negotiated, Some(NamedGroup::X25519));
+    assert_eq!(presented, fingerprint(&cert_der));
 }
 
 #[test]
