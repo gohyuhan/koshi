@@ -29,6 +29,7 @@ use koshi_core::ids::SessionId;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use tempfile::{Builder, TempPath};
+use ureq::tls::TlsConfig;
 use ureq::Agent;
 
 use koshi_link::error::CliError;
@@ -729,10 +730,19 @@ fn load_update_config() -> UpdateConfig {
 /// A configured HTTP agent whose whole call — connection through body — is
 /// bounded by `timeout`. The API check passes [`API_TIMEOUT`]; the binary
 /// download passes [`DOWNLOAD_TIMEOUT`].
+///
+/// The agent encrypts with [`koshi_ipc::tls::crypto_provider`], the provider
+/// koshi's own TLS streams use. `ureq` is built with no provider feature and
+/// takes the one it is given here.
 fn agent(timeout: Duration) -> Agent {
     Agent::new_with_config(
         Agent::config_builder()
             .timeout_global(Some(timeout))
+            .tls_config(
+                TlsConfig::builder()
+                    .unversioned_rustls_crypto_provider(koshi_ipc::tls::crypto_provider())
+                    .build(),
+            )
             .build(),
     )
 }

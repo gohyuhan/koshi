@@ -20,8 +20,8 @@ serde_json.workspace = true
 tracing = "0.1.44"
 
 koshi-renderer = { version = "0.3.0", path = "../koshi-renderer" }
-rcgen = { version = "0.14.9", default-features = false, features = ["ring"] }
-rustls = { version = "0.23.43", default-features = false, features = ["ring", "std", "logging"] }
+rcgen = { version = "0.14.9", default-features = false, features = ["aws_lc_rs"] }
+rustls = { version = "0.23.43", default-features = false, features = ["aws_lc_rs", "prefer-post-quantum", "std", "logging"] }
 
 [target."cfg(unix)".dependencies]
 libc = "0.2.188"
