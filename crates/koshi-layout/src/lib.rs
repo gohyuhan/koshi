@@ -14,6 +14,7 @@ pub mod error;
 pub mod focus;
 pub mod mode;
 pub mod normalize;
+pub mod regions;
 pub mod resize;
 pub mod size;
 pub mod snapshot;
