@@ -476,6 +476,7 @@ impl Stream {
                 filter: EventFilterSpec::All,
                 resume,
                 resume_token: None,
+                pane_area: None,
             },
         };
         connection

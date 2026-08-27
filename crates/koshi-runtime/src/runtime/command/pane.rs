@@ -476,7 +476,8 @@ impl Server {
     /// target pane's tab must be viewed by at least one attached client: the tab is
     /// solved against that real viewport ([`Session::tab_viewport`]), so the
     /// donating side's spare cells are measured against the exact terminal
-    /// displaying the result, and a tab no client currently views rejects.
+    /// displaying the result, and a tab no viewer contributes a pane area to
+    /// rejects.
     /// On success the tab's tree is swapped in — the resizing client's zoom drops,
     /// making the moved border visible to the client that moved it, while any
     /// other client's zoom stands — [`Event::LayoutChanged`] is emitted, and every
@@ -900,6 +901,11 @@ impl Server {
     /// session's sole client, and a session with several attached clients is
     /// [`RejectReason::TargetAmbiguous`].
     ///
+    /// Each client contributes [`Client::pane_area`]; a designated client
+    /// reporting [`PaneArea::Starving`] contributes nothing, and is rejected
+    /// with [`RejectReason::MinSize`] when no other viewer gives the tab a
+    /// size.
+    ///
     /// `candidate` is the post-split tree fit is judged against. Fails
     /// [`RejectReason::MinSize`] when the split cannot fit the chosen viewport,
     /// [`RejectReason::TargetNotFound`] when the designated client (a named
@@ -916,16 +922,14 @@ impl Server {
         target_client: Option<ClientId>,
         min: Size,
     ) -> Result<(Size, Option<ClientId>), Rejection> {
+        let no_room = || Rejection::new(RejectReason::MinSize, "not enough space for a new pane");
         // The chosen viewport, paired with the client designated for it, unless
         // `candidate` does not fit that viewport.
         let admit = |viewport: Size, designated: Option<ClientId>| {
             if fits(candidate, Rect::at_origin(viewport), min) {
                 Ok((viewport, designated))
             } else {
-                Err(Rejection::new(
-                    RejectReason::MinSize,
-                    "not enough space for a new pane",
-                ))
+                Err(no_room())
             }
         };
         let existing = session.tab_viewport(tab_id);
@@ -941,13 +945,13 @@ impl Server {
                     "target client not attached to the session",
                 )
             })?;
-            // Size to the smallest of the current viewers and the designated
-            // client — each as its drawable pane region — so the pane fits
-            // every client that will view the tab.
-            let designated = pane_viewport(client.viewport());
-            let viewport = match existing {
-                Some(existing) => existing.min_axes(designated),
-                None => designated,
+            // The smaller of the tab's current viewport and the designated
+            // client's pane area; a starving designated client adds no size.
+            let viewport = match (existing, client.pane_area()) {
+                (Some(existing), Some(designated)) => existing.min_axes(designated),
+                (Some(existing), None) => existing,
+                (None, Some(designated)) => designated,
+                (None, None) => return Err(no_room()),
             };
             return admit(viewport, Some(client_id));
         }
@@ -961,22 +965,19 @@ impl Server {
         // client; reject when there are several (name one) or none.
         let only =
             Self::sole_attached_client(session, "to view the new pane's tab", "the new pane")?;
-        admit(pane_viewport(only.viewport()), Some(only.id()))
+        let viewport = only.pane_area().ok_or_else(no_room)?;
+        admit(viewport, Some(only.id()))
     }
 
     /// The viewport `tab_id` is solved against when a pane closes: the tab's
     /// own viewport when attached clients view it, else the smallest pane
-    /// region among all attached clients, else a nominal 80x24. Every leg is
-    /// a drawable pane region, so the ranking geometry matches what a viewer
-    /// would actually see.
+    /// area among all attached clients that report one, else a nominal 80x24.
+    /// Every leg is a drawable pane region.
     ///
-    /// The 80x24 leg is reached only when the session has no attached client
-    /// at all — a headless close issued through the CLI, where no terminal
-    /// size exists anywhere. Focus repair still needs a concrete rect to rank
-    /// the surviving panes geometrically, and that ranking is this value's
-    /// sole consumer: no PTY is spawned or resized from it (a tab with no
-    /// viewer keeps its PTY sizes), and the next attach re-solves the tab
-    /// against the client's real terminal.
+    /// The 80x24 leg is reached when no attached client contributes a pane
+    /// area. The value ranks the surviving panes for focus repair and nothing
+    /// else: no PTY is spawned or resized from it, and the next attach
+    /// re-solves the tab against the client's real terminal.
     fn close_viewport(session: &Session, tab_id: TabId) -> Size {
         session
             .tab_viewport(tab_id)
@@ -984,7 +985,7 @@ impl Server {
                 session
                     .clients
                     .list_attached()
-                    .map(|client| pane_viewport(client.viewport()))
+                    .filter_map(|client| client.pane_area())
                     .reduce(Size::min_axes)
             })
             .unwrap_or(Size { cols: 80, rows: 24 })

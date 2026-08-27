@@ -14,7 +14,7 @@ use koshi_pane::{pane::lifecycle::PaneLifecycle, registry::PaneRegistry};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    client::{pane_viewport, Client, ClientRegistry},
+    client::{Client, ClientRegistry},
     error::{InvalidTransition, SessionConsistencyError},
     session::lifecycle::{SessionLifecycle, SessionLifecycleEvent, TabLifecycle},
 };
@@ -234,9 +234,13 @@ impl Session {
         removed
     }
 
-    /// The pane region to size tab `tab_id` against: each viewing client's full
-    /// viewport minus the top tabline and bottom hint row, then the per-axis
-    /// minimum (`cols` and `rows` independently). Returns `None` with no viewer.
+    /// The pane region to size tab `tab_id` against: each viewing client's own
+    /// pane area, then the per-axis minimum (`cols` and `rows` independently).
+    ///
+    /// Each viewer contributes [`Client::pane_area`]; a viewer that reports
+    /// [`PaneArea::Starving`](koshi_core::geometry::PaneArea::Starving)
+    /// contributes nothing. Returns `None` when no viewer of `tab_id`
+    /// contributes a size.
     ///
     /// A single pane is one PTY (pseudo-terminal — the OS handle its shell
     /// process runs through) of one cell grid, so every client viewing it
@@ -245,16 +249,15 @@ impl Session {
     /// unused margin. It is independent of which client (if any) issued the
     /// command.
     ///
-    /// Smallest-wins is the whole rule: a pane cannot scroll its content
-    /// sideways, so no client is ever handed a grid wider or taller than the
-    /// pane rect it draws. Every attach, detach, terminal resize and tab switch
-    /// recomputes this for each tab whose viewer set changed.
+    /// No client is handed a grid wider or taller than the pane rect it
+    /// draws. Every attach, detach, terminal resize and tab switch recomputes
+    /// this for each tab whose viewer set changed.
     #[must_use]
     pub fn tab_viewport(&self, tab_id: TabId) -> Option<Size> {
         self.clients
             .list_attached()
             .filter(|client| client.active_tab() == tab_id)
-            .map(|client| pane_viewport(client.viewport()))
+            .filter_map(Client::pane_area)
             .reduce(|a, b| Size {
                 cols: a.cols.min(b.cols),
                 rows: a.rows.min(b.rows),

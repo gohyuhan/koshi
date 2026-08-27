@@ -126,6 +126,7 @@ fn focused_client(session_id: SessionId, tab_id: TabId, pane: PaneId) -> Client 
         session_id,
         EPOCH,
         VIEWPORT,
+        None,
         tab_id,
         ClientOrigin::Local,
         "C-test-client".to_string(),

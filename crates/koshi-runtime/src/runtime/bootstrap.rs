@@ -299,6 +299,9 @@ impl Server {
 /// viewing `tab_id`, sized to `viewport`, stamped `now`, with a generated
 /// client label and origin [`ClientOrigin::Local`]. A `None` `client_id`
 /// attaches nobody and leaves `session` untouched.
+///
+/// The client is recorded with no pane area report; its pane area resolves to
+/// the viewport minus two rows.
 fn attach_first_client(
     session: &mut Session,
     client_id: Option<ClientId>,
@@ -316,6 +319,7 @@ fn attach_first_client(
         session.id,
         now,
         viewport,
+        None,
         tab_id,
         ClientOrigin::Local,
         client_label,

@@ -659,12 +659,14 @@ fn serve_connection(
                 filter,
                 resume,
                 resume_token,
+                pane_area,
             } => {
                 let answer =
                     ask_dispatcher(&served.intake, inbox_tx, |reply| RuntimeEvent::IpcAttach {
                         resume,
                         resume_token,
                         viewport,
+                        pane_area,
                         filter: filter.into(),
                         attached_at: SystemTime::now(),
                         remote: gate.remote_caller(),
@@ -683,6 +685,7 @@ fn serve_connection(
                         session_id: accepted.session_id,
                         structure: accepted.structure,
                         resume_token: Some(accepted.resume_token),
+                        pane_area: accepted.pane_area,
                     },
                 };
                 if connection.send(&attached).is_err() {
@@ -915,9 +918,13 @@ fn stream_events(
         };
         let event = match kind {
             IpcRequestKind::KeyPress { chord } => RuntimeEvent::ClientKeyPress { client_id, chord },
-            IpcRequestKind::Resize { viewport } => RuntimeEvent::Resize {
+            IpcRequestKind::Resize {
+                viewport,
+                pane_area,
+            } => RuntimeEvent::Resize {
                 client_id,
                 size: viewport,
+                pane_area,
             },
             IpcRequestKind::Paste { text } => RuntimeEvent::HostPaste { client_id, text },
             IpcRequestKind::Mouse(actions) => RuntimeEvent::ClientMouse {

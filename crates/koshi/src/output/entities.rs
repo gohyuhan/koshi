@@ -4,6 +4,7 @@
 //! across every running session.
 
 use super::*;
+use koshi_core::geometry::PaneArea;
 
 /// Render a `list-sessions` answer.
 #[must_use]
@@ -156,11 +157,14 @@ const PANE_HEADERS: &[&str] = &[
 ];
 
 /// Field names for an `inspect client`, matching [`client_row`] order.
+///
+/// `pane_area` prints `-` for no report, `starving`, or `WxH`.
 const CLIENT_HEADERS: &[&str] = &[
     "id",
     "session",
     "attached_at",
     "viewport",
+    "pane_area",
     "active_tab",
     "focused_pane",
     "lock",
@@ -262,6 +266,11 @@ fn client_row(client: &ClientInfo) -> Vec<String> {
         client.session_id.to_string(),
         time_cell(client.attached_at),
         size_cell(client.viewport_size),
+        match client.pane_area {
+            None => "-".to_string(),
+            Some(PaneArea::Starving) => "starving".to_string(),
+            Some(PaneArea::Reported(size)) => size_cell(size),
+        },
         client.active_tab.to_string(),
         opt_cell(client.focused_pane.as_ref()),
         format!("{:?}", client.lock_state),

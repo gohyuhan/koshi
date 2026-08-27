@@ -11,7 +11,7 @@ use koshi_core::client::ClientOrigin;
 use koshi_core::command::{Command, CommandSource, NewPaneArgs, ToggleLockModeArgs};
 use koshi_core::discovery::{ClientInfo, PaneInfo, PaneState, SessionInfo, TabInfo};
 use koshi_core::event::RejectReason;
-use koshi_core::geometry::{Direction, Point, Rect, Size};
+use koshi_core::geometry::{Direction, PaneArea, Point, Rect, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::key::{Key, ModFlags};
 use koshi_core::lock::LockMode;
@@ -176,6 +176,7 @@ fn populated_overview() -> SessionOverview {
             focused_pane: Some(pane_id),
             lock_state: LockMode::Normal,
             origin: Some(ClientOrigin::Local),
+            pane_area: None,
         }],
     }
 }
@@ -321,7 +322,8 @@ fn the_overview_wire_shape_belongs_to_this_protocol_version() {
                 "active_tab": "00000000-0000-0000-0000-000000000001",
                 "focused_pane": "00000000-0000-0000-0000-000000000001",
                 "lock_state": "Normal",
-                "origin": "Local"
+                "origin": "Local",
+                "pane_area": null
             }]
         })
     );
@@ -478,6 +480,7 @@ fn the_attach_wire_shape_belongs_to_this_protocol_version() {
             filter: EventFilterSpec::All,
             resume: None,
             resume_token: None,
+            pane_area: None,
         },
     };
 
@@ -490,7 +493,8 @@ fn the_attach_wire_shape_belongs_to_this_protocol_version() {
                     "viewport": { "cols": 80, "rows": 24 },
                     "filter": "All",
                     "resume": null,
-                    "resume_token": null
+                    "resume_token": null,
+                    "pane_area": null
                 }
             }
         })
@@ -503,6 +507,7 @@ fn the_attach_wire_shape_belongs_to_this_protocol_version() {
             session_id: SessionId::from_uuid(fixed_uuid()),
             structure: populated_structure(),
             resume_token: None,
+            pane_area: None,
         },
     };
 
@@ -529,7 +534,8 @@ fn the_attach_wire_shape_belongs_to_this_protocol_version() {
                             "kind": "Terminal"
                         }]
                     },
-                    "resume_token": null
+                    "resume_token": null,
+                    "pane_area": null
                 }
             }
         })
@@ -608,6 +614,7 @@ fn attach_request_round_trips() {
             filter: EventFilterSpec::All,
             resume: None,
             resume_token: None,
+            pane_area: None,
         },
     };
 
@@ -623,6 +630,7 @@ fn an_attach_request_naming_a_client_to_come_back_as_round_trips() {
             filter: EventFilterSpec::All,
             resume: Some(ClientId::from_uuid(fixed_uuid())),
             resume_token: None,
+            pane_area: None,
         },
     };
 
@@ -648,6 +656,7 @@ fn an_attach_request_written_without_the_resume_fields_decodes_as_no_claim() {
                 filter: EventFilterSpec::All,
                 resume: None,
                 resume_token: None,
+                pane_area: None,
             },
         }
     );
@@ -662,6 +671,7 @@ fn an_attach_request_carrying_a_resume_token_keeps_the_secret_whole() {
             filter: EventFilterSpec::All,
             resume: Some(ClientId::from_uuid(fixed_uuid())),
             resume_token: Some(token()),
+            pane_area: None,
         },
     };
 
@@ -694,8 +704,103 @@ fn an_attach_request_written_without_a_resume_token_beside_a_resume_decodes_as_n
                 filter: EventFilterSpec::All,
                 resume: Some(ClientId::from_uuid(fixed_uuid())),
                 resume_token: None,
+                pane_area: None,
             },
         }
+    );
+}
+
+#[test]
+fn an_attach_request_written_without_a_pane_area_decodes_as_none() {
+    // A caller built before the field exists writes an attach without it. It
+    // must still attach, reporting no pane region.
+    let decoded: IpcRequest = serde_json::from_str(
+        r#"{"request_id":1,"kind":{"Attach":{"viewport":{"cols":120,"rows":40},"filter":"All","resume":null,"resume_token":null}}}"#,
+    )
+    .expect("an attach without the pane area field decodes");
+
+    assert_eq!(
+        decoded,
+        IpcRequest {
+            request_id: 1,
+            kind: IpcRequestKind::Attach {
+                viewport: Size {
+                    cols: 120,
+                    rows: 40,
+                },
+                filter: EventFilterSpec::All,
+                resume: None,
+                resume_token: None,
+                pane_area: None,
+            },
+        }
+    );
+}
+
+#[test]
+fn an_attach_naming_an_unknown_pane_area_is_refused() {
+    let decoded: Result<IpcRequest, _> = serde_json::from_str(
+        r#"{"request_id":1,"kind":{"Attach":{"viewport":{"cols":120,"rows":40},"filter":"All","pane_area":"Bogus"}}}"#,
+    );
+
+    let error = decoded.expect_err("an unknown pane area decoded instead of failing");
+    assert_eq!(
+        error.to_string(),
+        "unknown variant `Bogus`, expected `Reported` or `Starving` at line 1 column 102"
+    );
+}
+
+#[test]
+fn an_attach_request_reporting_a_pane_area_round_trips() {
+    let reported = IpcRequest {
+        request_id: 1,
+        kind: IpcRequestKind::Attach {
+            viewport: Size {
+                cols: 120,
+                rows: 40,
+            },
+            filter: EventFilterSpec::All,
+            resume: None,
+            resume_token: None,
+            pane_area: Some(PaneArea::Reported(Size {
+                cols: 100,
+                rows: 30,
+            })),
+        },
+    };
+    let encoded = serde_json::to_string(&reported).expect("the attach encodes");
+
+    assert!(
+        encoded.contains(r#""pane_area":{"Reported":{"cols":100,"rows":30}}"#),
+        "the reported pane region is written as its own object: {encoded}"
+    );
+    assert_eq!(
+        serde_json::from_str::<IpcRequest>(&encoded).expect("the attach decodes"),
+        reported
+    );
+
+    let starving = IpcRequest {
+        request_id: 1,
+        kind: IpcRequestKind::Attach {
+            viewport: Size {
+                cols: 120,
+                rows: 40,
+            },
+            filter: EventFilterSpec::All,
+            resume: None,
+            resume_token: None,
+            pane_area: Some(PaneArea::Starving),
+        },
+    };
+    let encoded = serde_json::to_string(&starving).expect("the attach encodes");
+
+    assert!(
+        encoded.contains(r#""pane_area":"Starving""#),
+        "the starving pane region is written as a bare name: {encoded}"
+    );
+    assert_eq!(
+        serde_json::from_str::<IpcRequest>(&encoded).expect("the attach decodes"),
+        starving
     );
 }
 
@@ -736,6 +841,7 @@ fn attached_response_round_trips() {
             session_id: SessionId::new(),
             structure: populated_structure(),
             resume_token: None,
+            pane_area: None,
         },
     };
 
@@ -751,6 +857,7 @@ fn an_attached_response_carrying_a_resume_token_keeps_the_secret_whole() {
             session_id: SessionId::from_uuid(fixed_uuid()),
             structure: populated_structure(),
             resume_token: Some(token()),
+            pane_area: None,
         },
     };
 
@@ -788,6 +895,31 @@ fn an_attached_response_written_without_the_resume_token_decodes_as_no_token() {
                     panes: Vec::new(),
                 },
                 resume_token: None,
+                pane_area: None,
+            },
+        }
+    );
+}
+
+#[test]
+fn an_attached_reply_written_without_a_pane_area_decodes_as_none() {
+    // A session server built before the field exists answers without it. The
+    // client must attach, holding no pane region for itself.
+    let decoded: IpcResponse = serde_json::from_str(
+        r#"{"request_id":4,"result":{"Attached":{"client_id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000001","structure":{"id":"00000000-0000-0000-0000-000000000001","name":"quiet-lake","tabs":[{"id":"00000000-0000-0000-0000-000000000001","name":"editor","index":0,"layout":{"Pane":"00000000-0000-0000-0000-000000000001"},"focus_mru":["00000000-0000-0000-0000-000000000001"]}],"panes":[{"id":"00000000-0000-0000-0000-000000000001","kind":"Terminal"}]},"resume_token":null}}}"#,
+    )
+    .expect("an attached answer without the pane area field decodes");
+
+    assert_eq!(
+        decoded,
+        IpcResponse {
+            request_id: Some(4),
+            result: IpcResult::Attached {
+                client_id: ClientId::from_uuid(fixed_uuid()),
+                session_id: SessionId::from_uuid(fixed_uuid()),
+                structure: populated_structure(),
+                resume_token: None,
+                pane_area: None,
             },
         }
     );
@@ -845,6 +977,7 @@ fn an_attach_naming_where_it_connected_from_carries_none_of_it() {
                 filter: EventFilterSpec::All,
                 resume: None,
                 resume_token: None,
+                pane_area: None,
             },
         }
     );
@@ -872,6 +1005,7 @@ fn an_attach_naming_its_own_authority_carries_none_of_it() {
             filter: EventFilterSpec::All,
             resume: None,
             resume_token: None,
+            pane_area: None,
         },
     };
 
@@ -906,10 +1040,35 @@ fn resize_request_round_trips() {
                 cols: 120,
                 rows: 40,
             },
+            pane_area: None,
         },
     };
 
     assert_eq!(round_trip(&request), request);
+}
+
+#[test]
+fn a_resize_request_written_without_a_pane_area_decodes_as_none() {
+    // A client built before the field exists writes a resize carrying only the
+    // viewport. It must still resize, reporting no pane region.
+    let decoded: IpcRequest = serde_json::from_str(
+        r#"{"request_id":6,"kind":{"Resize":{"viewport":{"cols":120,"rows":40}}}}"#,
+    )
+    .expect("a resize without the pane area field decodes");
+
+    assert_eq!(
+        decoded,
+        IpcRequest {
+            request_id: 6,
+            kind: IpcRequestKind::Resize {
+                viewport: Size {
+                    cols: 120,
+                    rows: 40,
+                },
+                pane_area: None,
+            },
+        }
+    );
 }
 
 #[test]
@@ -1309,6 +1468,7 @@ fn each_request_kind_is_tagged_with_its_own_name() {
                 filter: EventFilterSpec::All,
                 resume: None,
                 resume_token: None,
+                pane_area: None,
             })
             .unwrap()
         ),
@@ -1351,6 +1511,7 @@ fn each_result_is_tagged_with_its_own_name() {
                 session_id: SessionId::new(),
                 structure: populated_structure(),
                 resume_token: None,
+                pane_area: None,
             })
             .unwrap()
         ),
@@ -1556,6 +1717,7 @@ fn every_request_kind_names_itself_without_its_payload() {
             filter: EventFilterSpec::All,
             resume: None,
             resume_token: None,
+            pane_area: None,
         }
         .name(),
         "Attach"
@@ -1573,6 +1735,7 @@ fn every_request_kind_names_itself_without_its_payload() {
                 cols: 120,
                 rows: 40,
             },
+            pane_area: None,
         }
         .name(),
         "Resize"

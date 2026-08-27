@@ -19,7 +19,7 @@ use std::time::SystemTime;
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::client::ClientOrigin;
-use crate::geometry::Size;
+use crate::geometry::{PaneArea, Size};
 use crate::ids::{ClientId, PaneId, SessionId, TabId};
 use crate::lock::LockMode;
 
@@ -124,6 +124,10 @@ pub struct ClientInfo {
     /// server did not answer the question.
     #[serde(default)]
     pub origin: Option<ClientOrigin>,
+    /// The pane region the client reported, exactly as it arrived, or `None`
+    /// from a client that reported none.
+    #[serde(default)]
+    pub pane_area: Option<PaneArea>,
 }
 
 /// One session described in full: itself, its tabs, every pane across those

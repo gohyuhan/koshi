@@ -186,6 +186,7 @@ fn add_client_with_origin(
         session.id,
         SystemTime::now(),
         Size { cols: 80, rows: 24 },
+        None,
         tab,
         origin,
         "C-test-client".to_string(),
@@ -201,6 +202,32 @@ fn add_client_with_origin(
 /// `focused` recorded there.
 fn add_client(session: &mut Session, client_id: ClientId, tab: TabId, focused: Option<PaneId>) {
     add_client_with_origin(session, client_id, tab, focused, ClientOrigin::Local);
+}
+
+/// Attach a client with [`ClientOrigin::Local`] viewing `tab` and reporting
+/// `pane_area`, optionally with `focused` recorded there.
+fn add_client_reporting(
+    session: &mut Session,
+    client_id: ClientId,
+    tab: TabId,
+    focused: Option<PaneId>,
+    pane_area: Option<PaneArea>,
+) {
+    let mut client = Client::new(
+        client_id,
+        session.id,
+        SystemTime::now(),
+        Size { cols: 80, rows: 24 },
+        pane_area,
+        tab,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
+    );
+    if let Some(pane) = focused {
+        client.update_focused_pane(tab, pane);
+    }
+    session.attach_client(client);
 }
 
 /// Poll the fake backend until `pane` records a kill, then return the history.
@@ -854,7 +881,7 @@ fn write_to_a_suppressed_pane_still_reaches_its_shell() {
     let (mut rt, fake, _tx, _sid, client_id, _root, pane_a, _size_a) = resize_fixture();
 
     // Shrink the client's terminal until the tab has no room to draw its panes.
-    rt.handle_client_resize(client_id, Size { cols: 3, rows: 3 });
+    rt.handle_client_resize(client_id, Size { cols: 3, rows: 3 }, None);
     assert!(
         rt.build_snapshot(client_id)
             .expect("snapshot")
@@ -1601,6 +1628,7 @@ fn new_pane_stacked_with_no_space_is_min_size() {
         session.id,
         SystemTime::now(),
         Size { cols: 2, rows: 1 },
+        None,
         tab,
         ClientOrigin::Local,
         "C-test-client".to_string(),
@@ -1692,6 +1720,7 @@ fn new_pane_with_no_space_is_min_size() {
         session.id,
         SystemTime::now(),
         Size { cols: 2, rows: 1 },
+        None,
         tab,
         ClientOrigin::Local,
         "C-test-client".to_string(),
@@ -2660,6 +2689,7 @@ fn focus_suppressed_pane_is_rejected_and_mutates_nothing() {
         session.id,
         SystemTime::now(),
         Size { cols: 2, rows: 1 },
+        None,
         tab_id,
         ClientOrigin::Local,
         "C-test-client".to_string(),
@@ -4544,6 +4574,7 @@ fn new_pane_wont_fit_on_a_background_tab_changes_nothing() {
         session.id,
         SystemTime::now(),
         Size { cols: 2, rows: 1 },
+        None,
         tab_front,
         ClientOrigin::Local,
         "C-test-client".to_string(),
@@ -4606,6 +4637,7 @@ fn new_pane_adoption_reflows_the_vacated_tab() {
         session.id,
         SystemTime::now(),
         Size { cols: 40, rows: 10 },
+        None,
         tab_front,
         ClientOrigin::Local,
         "C-test-client".to_string(),
@@ -4716,6 +4748,7 @@ fn new_pane_adoption_reflows_a_stale_sized_background_sibling() {
         session.id,
         SystemTime::now(),
         Size { cols: 40, rows: 10 },
+        None,
         tab_back,
         ClientOrigin::Local,
         "C-test-client".to_string(),
@@ -4732,6 +4765,7 @@ fn new_pane_adoption_reflows_a_stale_sized_background_sibling() {
             cols: 100,
             rows: 50,
         },
+        None,
         tab_front,
         ClientOrigin::Local,
         "C-test-client".to_string(),
@@ -4801,6 +4835,7 @@ fn new_pane_external_sole_client_that_cannot_fit_is_min_size() {
         session.id,
         SystemTime::now(),
         Size { cols: 2, rows: 1 },
+        None,
         tab_front,
         ClientOrigin::Local,
         "C-test-client".to_string(),
@@ -5203,6 +5238,7 @@ fn new_pane_cross_session_sizes_to_a_target_session_viewer() {
         id_b,
         SystemTime::now(),
         Size { cols: 40, rows: 10 },
+        None,
         tab_b,
         ClientOrigin::Local,
         "C-test-client".to_string(),
@@ -5758,6 +5794,7 @@ fn close_pane_unviewed_tab_repairs_stored_focus() {
         session.id,
         SystemTime::now(),
         Size { cols: 60, rows: 20 },
+        None,
         tab_a,
         ClientOrigin::Local,
         "C-test-client".to_string(),
@@ -6021,6 +6058,7 @@ fn close_last_pane_reflows_the_tab_its_viewers_move_to() {
         session.id,
         SystemTime::now(),
         Size { cols: 40, rows: 10 },
+        None,
         tab_solo,
         ClientOrigin::Local,
         "C-test-client".to_string(),
@@ -6233,6 +6271,7 @@ fn close_pane_repairs_focus_for_every_client_focused_on_it() {
         sid,
         SystemTime::now(),
         Size { cols: 80, rows: 24 },
+        None,
         tab,
         ClientOrigin::Local,
         "C-test-client".to_string(),
@@ -7428,6 +7467,7 @@ fn new_tab_reflows_the_vacated_tab_for_its_remaining_viewer() {
         session.id,
         SystemTime::now(),
         Size { cols: 40, rows: 10 },
+        None,
         tab_a,
         ClientOrigin::Local,
         "C-test-client".to_string(),
@@ -7926,6 +7966,7 @@ fn close_tab_reflows_the_tab_its_viewers_move_to() {
         session.id,
         SystemTime::now(),
         Size { cols: 40, rows: 10 },
+        None,
         tab_b,
         ClientOrigin::Local,
         "C-test-client".to_string(),
@@ -8597,6 +8638,7 @@ fn focus_tab_reflows_both_the_target_and_the_left_tab() {
         session.id,
         SystemTime::now(),
         Size { cols: 30, rows: 8 },
+        None,
         tab_a,
         ClientOrigin::Local,
         "C-test-client".to_string(),
@@ -8609,6 +8651,7 @@ fn focus_tab_reflows_both_the_target_and_the_left_tab() {
         session.id,
         SystemTime::now(),
         Size { cols: 40, rows: 10 },
+        None,
         tab_b,
         ClientOrigin::Local,
         "C-test-client".to_string(),
@@ -8689,6 +8732,7 @@ fn new_tab_for_a_client_below_minimum_size_is_rejected() {
         session.id,
         SystemTime::now(),
         Size { cols: 1, rows: 1 },
+        None,
         tab_a,
         ClientOrigin::Local,
         "C-test-client".to_string(),
@@ -8895,6 +8939,7 @@ fn toggle_fullscreen_below_the_pane_floor_is_rejected() {
         session.id,
         SystemTime::now(),
         Size { cols: 3, rows: 3 },
+        None,
         tab_id,
         ClientOrigin::Local,
         "C-test-client".to_string(),
@@ -9675,7 +9720,8 @@ fn client_attach_reflows_the_shared_tab_to_the_smaller_effective_size() {
     // A smaller second client attaches to the same tab: the effective size drops
     // to the per-axis minimum, so the live pane's PTY reflows down.
     let joining = ClientId::new();
-    let events = rt.handle_client_attach(sid, joining, small, tab_id, SystemTime::now(), false);
+    let events =
+        rt.handle_client_attach(sid, joining, small, None, tab_id, SystemTime::now(), false);
 
     let expected = size_root_pane(pane, pane_viewport(small), MIN_PANE_SIZE);
     assert_eq!(fake.resizes(pane).unwrap().len(), resizes_before + 1);
@@ -9712,7 +9758,7 @@ fn client_resize_updates_full_viewport_and_reflows_middle_pane_region() {
         .expect("bootstrap");
     let (_sid, _tab, pane) = only_slot(&rt);
 
-    let events = rt.handle_client_resize(client, resized);
+    let events = rt.handle_client_resize(client, resized, None);
     let expected = size_root_pane(pane, pane_viewport(resized), MIN_PANE_SIZE);
 
     assert_eq!(
@@ -9747,7 +9793,7 @@ fn client_attach_of_a_larger_client_leaves_the_tab_size_unchanged() {
     // The larger client cannot lower the per-axis minimum, so the effective size
     // stays 40x24: no reflow, no resize event.
     let joining = ClientId::new();
-    let events = rt.handle_client_attach(sid, joining, big, tab_id, SystemTime::now(), false);
+    let events = rt.handle_client_attach(sid, joining, big, None, tab_id, SystemTime::now(), false);
 
     // No reflow, but the joining client still lands on the tab's pane.
     assert_eq!(
@@ -9784,7 +9830,15 @@ fn attaching_to_a_session_seeded_with_no_client_lands_on_the_tabs_first_pane() {
     );
 
     let client = ClientId::new();
-    let events = rt.handle_client_attach(sid, client, viewport, tab_id, SystemTime::now(), false);
+    let events = rt.handle_client_attach(
+        sid,
+        client,
+        viewport,
+        None,
+        tab_id,
+        SystemTime::now(),
+        false,
+    );
 
     // The attaching client lands focused on the tab's only pane, so the first
     // key it types reaches that pane's shell.
@@ -9818,7 +9872,15 @@ fn reattaching_keeps_the_pane_the_client_already_focused() {
     // Attach once to take the tab's first pane, then split so the tab holds a
     // second pane and focus moves onto it.
     let client = ClientId::new();
-    rt.handle_client_attach(sid, client, viewport, tab_id, SystemTime::now(), false);
+    rt.handle_client_attach(
+        sid,
+        client,
+        viewport,
+        None,
+        tab_id,
+        SystemTime::now(),
+        false,
+    );
     let second = PaneId::new();
     rt.sessions
         .get_mut(&sid)
@@ -9829,7 +9891,15 @@ fn reattaching_keeps_the_pane_the_client_already_focused() {
         .update_focused_pane(tab_id, second);
 
     // Re-attaching does not drag focus back to the tab's first pane.
-    let events = rt.handle_client_attach(sid, client, viewport, tab_id, SystemTime::now(), false);
+    let events = rt.handle_client_attach(
+        sid,
+        client,
+        viewport,
+        None,
+        tab_id,
+        SystemTime::now(),
+        false,
+    );
 
     assert_eq!(
         rt.sessions[&sid]
@@ -9860,7 +9930,15 @@ fn client_detach_reflows_the_shared_tab_back_to_the_remaining_viewport() {
 
     // Two clients view the tab; the smaller one holds it at 40x24.
     let small_client = ClientId::new();
-    rt.handle_client_attach(sid, small_client, small, tab_id, SystemTime::now(), false);
+    rt.handle_client_attach(
+        sid,
+        small_client,
+        small,
+        None,
+        tab_id,
+        SystemTime::now(),
+        false,
+    );
     let resizes_before = fake.resizes(pane).expect("pane spawned").len();
 
     // The smaller client leaves: only the 80x24 viewer remains, so the tab grows
@@ -9931,7 +10009,7 @@ fn auto_close_keeps_the_session_while_another_client_is_still_attached() {
     rt.config.auto_close_session = true;
 
     let second = ClientId::new();
-    rt.handle_client_attach(sid, second, size, tab_id, SystemTime::now(), false);
+    rt.handle_client_attach(sid, second, size, None, tab_id, SystemTime::now(), false);
 
     // One of two clients leaves: one is still attached, so nothing quits.
     rt.handle_client_detach(first);
@@ -9984,7 +10062,15 @@ fn auto_close_ends_the_session_when_detach_all_empties_it() {
         .expect("bootstrap the genesis client");
     let (sid, tab_id, _pane) = only_slot(&rt);
     rt.config.auto_close_session = true;
-    rt.handle_client_attach(sid, ClientId::new(), size, tab_id, SystemTime::now(), false);
+    rt.handle_client_attach(
+        sid,
+        ClientId::new(),
+        size,
+        None,
+        tab_id,
+        SystemTime::now(),
+        false,
+    );
     assert_eq!(rt.sessions[&sid].clients.len(), 2);
 
     // `DetachAll` runs the same per-client departure the setting watches, so the
@@ -10007,7 +10093,15 @@ fn detach_all_leaves_the_session_running_while_auto_close_is_off() {
     rt.bootstrap_local(SessionId::new(), size, SystemTime::now())
         .expect("bootstrap the genesis client");
     let (sid, tab_id, _pane) = only_slot(&rt);
-    rt.handle_client_attach(sid, ClientId::new(), size, tab_id, SystemTime::now(), false);
+    rt.handle_client_attach(
+        sid,
+        ClientId::new(),
+        size,
+        None,
+        tab_id,
+        SystemTime::now(),
+        false,
+    );
 
     let env = envelope_from(
         CommandSource::external_cli(Some(sid), None),
@@ -10111,7 +10205,7 @@ fn quit_from_one_of_two_clients_keeps_the_session_under_auto_close() {
     let (sid, tab_id, _pane) = only_slot(&rt);
     rt.config.auto_close_session = true;
     let second = ClientId::new();
-    rt.handle_client_attach(sid, second, size, tab_id, SystemTime::now(), false);
+    rt.handle_client_attach(sid, second, size, None, tab_id, SystemTime::now(), false);
 
     // One of two clients quits: the other is still attached, so nothing quits.
     let env = envelope_from(CommandSource::key_binding(first), Command::Quit);
@@ -10181,6 +10275,7 @@ fn client_attach_to_an_unknown_session_is_dropped() {
         SessionId::new(),
         ClientId::new(),
         Size { cols: 80, rows: 24 },
+        None,
         TabId::new(),
         SystemTime::now(),
         false,
@@ -10207,8 +10302,15 @@ fn client_attach_to_an_unknown_tab_is_dropped() {
     // The named tab is not one this session holds: the client is not attached
     // and nothing reflows.
     let stranger = ClientId::new();
-    let events =
-        rt.handle_client_attach(sid, stranger, big, TabId::new(), SystemTime::now(), false);
+    let events = rt.handle_client_attach(
+        sid,
+        stranger,
+        big,
+        None,
+        TabId::new(),
+        SystemTime::now(),
+        false,
+    );
 
     assert!(events.is_empty());
     assert!(rt.sessions[&sid].clients.get(stranger).is_none());
@@ -10244,8 +10346,8 @@ fn client_reattach_onto_a_different_tab_reflows_the_tab_it_left() {
     // Two clients view `tab_1`; the smaller one (C) constrains `pane_1` to 40x24.
     let client_b = ClientId::new();
     let client_c = ClientId::new();
-    rt.handle_client_attach(sid, client_b, big, tab_1, SystemTime::now(), false);
-    rt.handle_client_attach(sid, client_c, small, tab_1, SystemTime::now(), false);
+    rt.handle_client_attach(sid, client_b, big, None, tab_1, SystemTime::now(), false);
+    rt.handle_client_attach(sid, client_c, small, None, tab_1, SystemTime::now(), false);
     assert_eq!(
         *fake.resizes(pane_1).unwrap().last().unwrap(),
         size_root_pane(pane_1, pane_viewport(small), MIN_PANE_SIZE)
@@ -10254,7 +10356,7 @@ fn client_reattach_onto_a_different_tab_reflows_the_tab_it_left() {
 
     // C re-attaches onto `tab_2`: it leaves `tab_1`, where only the 80x24 client
     // B remains, so `pane_1` grows back — the tab the client left is reflowed.
-    let events = rt.handle_client_attach(sid, client_c, big, tab_2, SystemTime::now(), false);
+    let events = rt.handle_client_attach(sid, client_c, big, None, tab_2, SystemTime::now(), false);
 
     let expected = size_root_pane(pane_1, pane_viewport(big), MIN_PANE_SIZE);
     assert_eq!(fake.resizes(pane_1).unwrap().len(), resizes_before + 1);
@@ -10318,6 +10420,7 @@ fn client_attach_schedules_a_render() {
             cols: 120,
             rows: 40,
         },
+        None,
         tab_id,
         SystemTime::now(),
         false,
@@ -10370,6 +10473,7 @@ fn unviewed_tab_adoption_sizes_the_new_pane_to_the_pane_region() {
         session.id,
         SystemTime::now(),
         viewport,
+        None,
         tab_viewed,
         ClientOrigin::Local,
         "C-test-client".to_string(),
@@ -10407,6 +10511,7 @@ fn unviewed_tab_adoption_sizes_the_new_pane_to_the_pane_region() {
         session.id,
         SystemTime::now(),
         viewport,
+        None,
         tab_front,
         ClientOrigin::Local,
         "C-test-client".to_string(),
@@ -10491,7 +10596,7 @@ fn same_session_reattach_preserves_client_view_state() {
         cols: 100,
         rows: 30,
     };
-    rt.handle_client_attach(sid, client, grown, tab_id, SystemTime::now(), false);
+    rt.handle_client_attach(sid, client, grown, None, tab_id, SystemTime::now(), false);
 
     let record = rt.sessions[&sid]
         .clients
@@ -10532,7 +10637,8 @@ fn cross_session_attach_detaches_the_client_from_its_old_session() {
     let pane_1_resizes_before = fake.resizes(pane_1).expect("pane spawned").len();
 
     // Move `client` from session 1 into session 2 at a smaller viewport.
-    let events = rt.handle_client_attach(sid_2, client, small, tab_2, SystemTime::now(), false);
+    let events =
+        rt.handle_client_attach(sid_2, client, small, None, tab_2, SystemTime::now(), false);
 
     // It left session 1 entirely and is now the 40x24 co-viewer of session 2.
     assert!(rt.sessions[&sid_1].clients.get(client).is_none());
@@ -12082,7 +12188,7 @@ fn detach_all_takes_every_attached_client() {
         .expect("bootstrap the genesis client");
     let (sid, tab, pane) = only_slot(&rt);
     let second = ClientId::new();
-    rt.handle_client_attach(sid, second, size, tab, SystemTime::now(), false);
+    rt.handle_client_attach(sid, second, size, None, tab, SystemTime::now(), false);
     let first_events = rt.subscribe(first, EventFilter::All);
     let second_events = rt.subscribe(second, EventFilter::All);
 
@@ -12159,7 +12265,7 @@ fn detach_with_several_attached_and_none_named_lists_the_ids_to_choose_from() {
         .expect("bootstrap the genesis client");
     let (sid, tab, _pane) = only_slot(&rt);
     let second = ClientId::new();
-    rt.handle_client_attach(sid, second, size, tab, SystemTime::now(), false);
+    rt.handle_client_attach(sid, second, size, None, tab, SystemTime::now(), false);
 
     // An external CLI names no client of its own, and two are attached.
     let env = envelope_from(
@@ -12587,7 +12693,15 @@ fn a_client_the_router_bridged_from_another_machine_is_recorded_remote() {
     let (sid, tab_id, _pane) = only_slot(&rt);
 
     let joining = ClientId::new();
-    rt.handle_client_attach(sid, joining, viewport, tab_id, SystemTime::now(), true);
+    rt.handle_client_attach(
+        sid,
+        joining,
+        viewport,
+        None,
+        tab_id,
+        SystemTime::now(),
+        true,
+    );
 
     assert_eq!(
         rt.sessions
@@ -12610,7 +12724,15 @@ fn a_client_that_reached_this_machine_directly_is_recorded_local() {
     let (sid, tab_id, _pane) = only_slot(&rt);
 
     let joining = ClientId::new();
-    rt.handle_client_attach(sid, joining, viewport, tab_id, SystemTime::now(), false);
+    rt.handle_client_attach(
+        sid,
+        joining,
+        viewport,
+        None,
+        tab_id,
+        SystemTime::now(),
+        false,
+    );
 
     assert_eq!(
         rt.sessions
@@ -12633,7 +12755,15 @@ fn resuming_a_local_clients_id_over_a_remote_connection_records_it_remote() {
     let (sid, tab_id, _pane) = only_slot(&rt);
 
     let client = ClientId::new();
-    rt.handle_client_attach(sid, client, viewport, tab_id, SystemTime::now(), false);
+    rt.handle_client_attach(
+        sid,
+        client,
+        viewport,
+        None,
+        tab_id,
+        SystemTime::now(),
+        false,
+    );
     assert_eq!(
         rt.sessions
             .get(&sid)
@@ -12645,7 +12775,7 @@ fn resuming_a_local_clients_id_over_a_remote_connection_records_it_remote() {
         ClientOrigin::Local
     );
 
-    rt.handle_client_attach(sid, client, viewport, tab_id, SystemTime::now(), true);
+    rt.handle_client_attach(sid, client, viewport, None, tab_id, SystemTime::now(), true);
 
     assert_eq!(
         rt.sessions
@@ -12669,9 +12799,17 @@ fn a_remote_client_that_comes_back_on_a_local_connection_records_it_local() {
     let (sid, tab_id, _pane) = only_slot(&rt);
 
     let client = ClientId::new();
-    rt.handle_client_attach(sid, client, viewport, tab_id, SystemTime::now(), true);
+    rt.handle_client_attach(sid, client, viewport, None, tab_id, SystemTime::now(), true);
 
-    rt.handle_client_attach(sid, client, viewport, tab_id, SystemTime::now(), false);
+    rt.handle_client_attach(
+        sid,
+        client,
+        viewport,
+        None,
+        tab_id,
+        SystemTime::now(),
+        false,
+    );
 
     assert_eq!(
         rt.sessions
@@ -12682,5 +12820,493 @@ fn a_remote_client_that_comes_back_on_a_local_connection_records_it_local() {
             .expect("the re-attached client")
             .origin(),
         ClientOrigin::Local
+    );
+}
+
+/// A client with no room to draw a pane gives the session no size to build a
+/// tab against: the new tab is refused.
+#[test]
+fn a_new_tab_for_a_starving_client_is_rejected_for_size() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let pane = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane);
+    add_tab(&mut session, tab, pane);
+    add_client_reporting(
+        &mut session,
+        client_id,
+        tab,
+        Some(pane),
+        Some(PaneArea::Starving),
+    );
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewTab(NewTabArgs::default()),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::MinSize,
+            help: Some("not enough space for a new tab".to_string()),
+        }
+    );
+    assert_eq!(rt.sessions[&sid].tabs.len(), 1);
+    assert_eq!(fake.spawned_panes(), Vec::<PaneId>::new());
+}
+
+/// The tab's only viewer is starving, so neither the tab nor the issuer offers
+/// a size for the split to fit into.
+#[test]
+fn a_new_pane_for_a_starving_client_with_no_other_viewer_is_rejected_for_size() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let pane = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane);
+    add_tab(&mut session, tab, pane);
+    add_client_reporting(
+        &mut session,
+        client_id,
+        tab,
+        Some(pane),
+        Some(PaneArea::Starving),
+    );
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(new_pane_args()),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::MinSize,
+            help: Some("not enough space for a new pane".to_string()),
+        }
+    );
+    assert_eq!(rt.sessions[&sid].panes.len(), 1);
+    assert_eq!(fake.spawned_panes(), Vec::<PaneId>::new());
+}
+
+/// A second viewer sizes the tab at 80x22; the starving issuer's split fits
+/// that size.
+#[test]
+fn a_new_pane_for_a_starving_client_uses_the_other_viewers_size() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let starving = ClientId::new();
+    let sizing = ClientId::new();
+    let tab = TabId::new();
+    let pane = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane);
+    add_tab(&mut session, tab, pane);
+    add_client_reporting(
+        &mut session,
+        starving,
+        tab,
+        Some(pane),
+        Some(PaneArea::Starving),
+    );
+    add_client(&mut session, sizing, tab, Some(pane));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(starving),
+        Command::NewPane(new_pane_args()),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+
+    let new_pane = rt.sessions[&sid]
+        .panes
+        .list()
+        .map(PaneRecord::id)
+        .find(|id| *id != pane)
+        .expect("the split pane");
+
+    // The sizing client's 80x24 terminal minus its two chrome rows.
+    let solved = pane_spawn_sizes(
+        rt.sessions[&sid].tabs[&tab].layout(),
+        Size { cols: 80, rows: 22 },
+        MIN_PANE_SIZE,
+    );
+    let expected = solved
+        .iter()
+        .find(|(id, _)| *id == new_pane)
+        .map(|(_, size)| *size)
+        .expect("the split pane is solved");
+    assert_eq!(rt.pty_sizes[&new_pane], expected);
+}
+
+/// A resize that reports a pane area smaller than the terminal reflows every
+/// live pane of the tab to the solve of that area, once each.
+#[test]
+fn a_resize_reporting_a_smaller_pane_area_resizes_each_pane_once() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let viewport = Size {
+        cols: 120,
+        rows: 40,
+    };
+    let client = rt
+        .bootstrap_local(SessionId::new(), viewport, SystemTime::now())
+        .expect("bootstrap");
+    let (sid, tab, first_pane) = only_slot(&rt);
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client),
+        Command::NewPane(new_pane_args()),
+    ));
+    let second_pane = rt.sessions[&sid]
+        .panes
+        .list()
+        .map(PaneRecord::id)
+        .find(|id| *id != first_pane)
+        .expect("the split pane");
+
+    let reported = Size { cols: 60, rows: 20 };
+    let events = rt.handle_client_resize(client, viewport, Some(PaneArea::Reported(reported)));
+
+    let solved = pane_spawn_sizes(
+        rt.sessions[&sid].tabs[&tab].layout(),
+        reported,
+        MIN_PANE_SIZE,
+    );
+    let size_of = |wanted: PaneId| {
+        solved
+            .iter()
+            .find(|(id, _)| *id == wanted)
+            .map(|(_, size)| *size)
+            .expect("the pane is solved")
+    };
+    assert_eq!(
+        events,
+        vec![
+            Event::PtyResized(PtyResized {
+                pane_id: first_pane,
+                size: size_of(first_pane),
+            }),
+            Event::PtyResized(PtyResized {
+                pane_id: second_pane,
+                size: size_of(second_pane),
+            }),
+        ]
+    );
+    assert_eq!(
+        *fake.resizes(first_pane).expect("resizes").last().unwrap(),
+        size_of(first_pane)
+    );
+    assert_eq!(
+        *fake.resizes(second_pane).expect("resizes").last().unwrap(),
+        size_of(second_pane)
+    );
+}
+
+/// A reported pane area of `0x0` gives the tab an effective size of `0x0`:
+/// every pane is suppressed, so no PTY is resized and every PTY keeps its
+/// size.
+#[test]
+fn a_resize_reporting_a_zero_pane_area_resizes_no_pty() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let viewport = Size {
+        cols: 120,
+        rows: 40,
+    };
+    let client = rt
+        .bootstrap_local(SessionId::new(), viewport, SystemTime::now())
+        .expect("bootstrap");
+    let (sid, _tab, first_pane) = only_slot(&rt);
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client),
+        Command::NewPane(new_pane_args()),
+    ));
+    let second_pane = other_pane(&rt, sid, first_pane);
+    let sizes_before = rt.pty_sizes.clone();
+    let first_resizes = fake.resizes(first_pane).expect("resizes");
+    let second_resizes = fake.resizes(second_pane).expect("resizes");
+
+    let events = rt.handle_client_resize(
+        client,
+        viewport,
+        Some(PaneArea::Reported(Size { cols: 0, rows: 0 })),
+    );
+
+    assert_eq!(events, Vec::new());
+    assert_eq!(rt.pty_sizes, sizes_before);
+    assert_eq!(fake.resizes(first_pane).expect("resizes"), first_resizes);
+    assert_eq!(fake.resizes(second_pane).expect("resizes"), second_resizes);
+    let frame = rt.build_snapshot(client).expect("a frame");
+    assert!(frame.session.active_tab.all_suppressed);
+}
+
+/// A client that reported starving and then reports a size gets the tab
+/// resized to that size, one resize per pane.
+#[test]
+fn a_client_reporting_a_size_after_starving_resizes_each_pane_again() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let viewport = Size {
+        cols: 120,
+        rows: 40,
+    };
+    let client = rt
+        .bootstrap_local(SessionId::new(), viewport, SystemTime::now())
+        .expect("bootstrap");
+    let (sid, tab, first_pane) = only_slot(&rt);
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client),
+        Command::NewPane(new_pane_args()),
+    ));
+    let second_pane = other_pane(&rt, sid, first_pane);
+    assert_eq!(
+        rt.handle_client_resize(client, viewport, Some(PaneArea::Starving)),
+        Vec::new()
+    );
+
+    let reported = Size { cols: 60, rows: 20 };
+    let events = rt.handle_client_resize(client, viewport, Some(PaneArea::Reported(reported)));
+
+    let solved = pane_spawn_sizes(
+        rt.sessions[&sid].tabs[&tab].layout(),
+        reported,
+        MIN_PANE_SIZE,
+    );
+    let size_of = |wanted: PaneId| {
+        solved
+            .iter()
+            .find(|(id, _)| *id == wanted)
+            .map(|(_, size)| *size)
+            .expect("the pane is solved")
+    };
+    assert_eq!(
+        events,
+        vec![
+            Event::PtyResized(PtyResized {
+                pane_id: first_pane,
+                size: size_of(first_pane),
+            }),
+            Event::PtyResized(PtyResized {
+                pane_id: second_pane,
+                size: size_of(second_pane),
+            }),
+        ]
+    );
+}
+
+/// Closing the focused pane while its only viewer is starving still repairs
+/// that viewer's focus onto the survivor.
+#[test]
+fn close_pane_for_a_starving_sole_viewer_refocuses_the_survivor() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let pane_left = PaneId::new();
+    let pane_right = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_left);
+    add_pane(&mut session, pane_right);
+    add_tab(&mut session, tab, pane_left);
+    session
+        .tabs
+        .get_mut(&tab)
+        .unwrap()
+        .update_layout(side_by_side(pane_left, pane_right));
+    add_client_reporting(
+        &mut session,
+        client_id,
+        tab,
+        Some(pane_left),
+        Some(PaneArea::Starving),
+    );
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::ClosePane(ClosePaneArgs::default()),
+    );
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert_eq!(emitted_events.len(), 4);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    assert_eq!(
+        rt.sessions[&sid]
+            .clients
+            .get(client_id)
+            .unwrap()
+            .focused_pane(tab),
+        Some(pane_right)
+    );
+    assert_eq!(
+        rt.sessions[&sid].tabs[&tab].layout(),
+        &LayoutNode::Pane(pane_right)
+    );
+}
+
+/// The tab's only viewer reports it has no room to draw, so the tab has no
+/// effective size and no PTY moves.
+#[test]
+fn a_resize_reporting_starving_leaves_the_tab_sizes_unchanged() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let viewport = Size { cols: 80, rows: 24 };
+    let client = rt
+        .bootstrap_local(SessionId::new(), viewport, SystemTime::now())
+        .expect("bootstrap");
+    let (_sid, _tab, pane) = only_slot(&rt);
+    let before = fake.resizes(pane).expect("resizes");
+
+    let events = rt.handle_client_resize(client, viewport, Some(PaneArea::Starving));
+
+    assert_eq!(events, Vec::new());
+    assert_eq!(fake.resizes(pane).expect("resizes"), before);
+}
+
+/// A re-attach that reports no pane area clears the report the last attach
+/// left, and the tab goes back to the viewport minus the two chrome rows.
+#[test]
+fn a_re_attach_reporting_no_pane_area_replaces_the_earlier_report() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let viewport = Size {
+        cols: 120,
+        rows: 40,
+    };
+    let client = rt
+        .bootstrap_local(SessionId::new(), viewport, SystemTime::now())
+        .expect("bootstrap");
+    let (sid, tab, pane) = only_slot(&rt);
+
+    let reported = PaneArea::Reported(Size { cols: 60, rows: 20 });
+    rt.handle_client_attach(
+        sid,
+        client,
+        viewport,
+        Some(reported),
+        tab,
+        SystemTime::now(),
+        false,
+    );
+    assert_eq!(
+        rt.sessions[&sid]
+            .clients
+            .get(client)
+            .expect("client")
+            .reported_pane_area(),
+        Some(reported)
+    );
+
+    rt.handle_client_attach(sid, client, viewport, None, tab, SystemTime::now(), false);
+
+    let attached = rt.sessions[&sid].clients.get(client).expect("client");
+    assert_eq!(attached.reported_pane_area(), None);
+    assert_eq!(attached.pane_area(), Some(pane_viewport(viewport)));
+    assert_eq!(
+        *fake.resizes(pane).expect("resizes").last().unwrap(),
+        size_root_pane(pane, pane_viewport(viewport), MIN_PANE_SIZE)
+    );
+}
+
+/// A pane command needs the size the tab is drawn at. Its only viewer is
+/// starving, so the tab is not viewed at any size and the command rejects.
+#[test]
+fn a_pane_command_from_a_starving_sole_viewer_is_rejected_as_unviewed() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let pane_left = PaneId::new();
+    let pane_right = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_left);
+    add_pane(&mut session, pane_right);
+    add_tab(&mut session, tab, pane_left);
+    session
+        .tabs
+        .get_mut(&tab)
+        .unwrap()
+        .update_layout(side_by_side(pane_left, pane_right));
+    add_client_reporting(
+        &mut session,
+        client_id,
+        tab,
+        Some(pane_left),
+        Some(PaneArea::Starving),
+    );
+    rt.sessions.insert(session.id, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::ResizePane(ResizePaneArgs {
+            pane: Some(pane_left),
+            direction: Direction::Right,
+            size: 1,
+        }),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("pane's tab is not viewed by any client".to_string()),
+        }
+    );
+}
+
+/// Directional focus ranks panes by the rects the tab solves to. Its only
+/// viewer is starving, so there is nothing to solve and the move rejects.
+#[test]
+fn directional_focus_from_a_starving_sole_viewer_is_rejected() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_id = TabId::new();
+    let pane_left = PaneId::new();
+    let pane_right = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_left);
+    add_pane(&mut session, pane_right);
+    add_tab(&mut session, tab_id, pane_left);
+    session
+        .tabs
+        .get_mut(&tab_id)
+        .unwrap()
+        .update_layout(side_by_side(pane_left, pane_right));
+    add_client_reporting(
+        &mut session,
+        client_id,
+        tab_id,
+        Some(pane_left),
+        Some(PaneArea::Starving),
+    );
+    rt.sessions.insert(session.id, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::FocusPane(FocusPaneArgs {
+            target: FocusTarget::Direction(Direction::Right),
+            client: None,
+        }),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: None,
+        }
     );
 }

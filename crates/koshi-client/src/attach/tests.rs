@@ -714,6 +714,7 @@ fn restarted_session(
                                 panes: Vec::new(),
                             },
                             resume_token: None,
+                            pane_area: None,
                         },
                         Err(message) => IpcResult::Error(IpcErrorPayload {
                             code: IpcErrorCode::BadToken,
@@ -761,6 +762,7 @@ fn coming_back_after_a_restart_asks_for_the_client_record_this_terminal_holds() 
             filter: EventFilterSpec::All,
             resume: Some(client_id),
             resume_token: None,
+            pane_area: None,
         }),
         "the restart path claims the client record by its id and presents no token"
     );
@@ -2543,6 +2545,7 @@ fn a_terminal_resize_moves_the_viewers_own_size_and_tells_the_session() {
         RuntimeEvent::Resize {
             client_id,
             size: bigger,
+            pane_area: None,
         },
     );
 
@@ -2555,7 +2558,10 @@ fn a_terminal_resize_moves_the_viewers_own_size_and_tells_the_session() {
         request,
         IpcRequest {
             request_id: FIRST_LOOP_REQUEST_ID,
-            kind: IpcRequestKind::Resize { viewport: bigger },
+            kind: IpcRequestKind::Resize {
+                viewport: bigger,
+                pane_area: None,
+            },
         }
     );
 }
@@ -2959,6 +2965,7 @@ fn every_event_from_the_blackout_is_dropped_and_the_hangup_still_reported() {
         .send(Incoming::Input(Box::new(RuntimeEvent::Resize {
             client_id: client.id(),
             size: resized,
+            pane_area: None,
         })))
         .expect("the loop's channel takes it");
     incoming_tx
@@ -3004,7 +3011,11 @@ fn a_new_connection_is_told_the_size_the_terminal_is_now() {
 
     let request = sent.try_recv().expect("the size was reported");
     assert_eq!(request.request_id, FIRST_LOOP_REQUEST_ID);
-    let IpcRequestKind::Resize { viewport } = request.kind else {
+    let IpcRequestKind::Resize {
+        viewport,
+        pane_area,
+    } = request.kind
+    else {
         panic!("expected a Resize, got {:?}", request.kind);
     };
     assert_eq!(
@@ -3012,6 +3023,7 @@ fn a_new_connection_is_told_the_size_the_terminal_is_now() {
         client.viewport(),
         "the session is told the size the viewer holds"
     );
+    assert_eq!(pane_area, None, "this client reports no pane area");
     assert_eq!(
         sent.try_recv().err(),
         Some(mpsc::TryRecvError::Empty),

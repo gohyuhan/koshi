@@ -53,6 +53,7 @@ fn client_on(session_id: SessionId, tab_id: TabId) -> Client {
         session_id,
         SystemTime::UNIX_EPOCH,
         VIEWPORT,
+        None,
         tab_id,
         ClientOrigin::Local,
         "C-test-client".to_string(),

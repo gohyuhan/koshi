@@ -23,7 +23,7 @@ use std::time::{Instant, SystemTime};
 use koshi_core::{
     command::{CommandEnvelope, CommandResult},
     discovery::SessionOverview,
-    geometry::Size,
+    geometry::{PaneArea, Size},
     ids::{ClientId, PaneId, SessionId, TabId},
     key::KeyChord,
     mouse::MouseInput,
@@ -67,6 +67,9 @@ pub enum RuntimeEvent {
         client_id: ClientId,
         /// The client's new size in cells, before size reconciliation.
         size: Size,
+        /// The pane region the client draws the tab's panes in at the new
+        /// size; `None` replaces any earlier report.
+        pane_area: Option<PaneArea>,
     },
     /// A client joined a session and began viewing one of its tabs.
     ClientAttached {
@@ -76,6 +79,8 @@ pub enum RuntimeEvent {
         client_id: ClientId,
         /// The client's terminal size in cells.
         viewport: Size,
+        /// The pane region the client reported, recorded on its record.
+        pane_area: Option<PaneArea>,
         /// The tab the client begins viewing.
         active_tab: TabId,
         /// When the producer observed the attach, carried on the event so the
@@ -183,6 +188,8 @@ pub enum RuntimeEvent {
         /// The caller's terminal size in cells, recorded as the client's
         /// viewport.
         viewport: Size,
+        /// The pane region the client reported, recorded on its record.
+        pane_area: Option<PaneArea>,
         /// Which of the session's events the client receives.
         filter: EventFilter,
         /// When the producer received the request, carried on the event so the
@@ -260,6 +267,9 @@ pub struct AttachAccepted {
     /// The fresh secret this attach minted. Presenting it on the next attach
     /// takes back the view this client leaves behind when it detaches.
     pub resume_token: ConnectionToken,
+    /// The pane region the session holds for this client, exactly as the
+    /// attach reported it.
+    pub pane_area: Option<PaneArea>,
 }
 
 /// How a client's event stream ends: the last frame that client's writing

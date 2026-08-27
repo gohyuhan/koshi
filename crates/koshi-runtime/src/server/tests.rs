@@ -14,7 +14,7 @@ use koshi_core::command::{Command, CommandSource, NewPaneArgs, ToggleLockModeArg
 use koshi_core::event::{
     EventClass, InputMode, InputModeChanged, PaneFocused, PtyResized, SubscriberLagged,
 };
-use koshi_core::geometry::Direction;
+use koshi_core::geometry::{Direction, PaneArea};
 use koshi_core::ids::{CommandId, TabId};
 use koshi_core::process::PtySize;
 use koshi_ipc::protocol::ConnectionToken;
@@ -70,6 +70,7 @@ fn attach_second_client(server: &mut Server, first: ClientId, viewport: Size) ->
         session_id,
         second,
         viewport,
+        None,
         active_tab,
         SystemTime::now(),
         false,
@@ -186,6 +187,7 @@ fn every_attached_client_is_local_with_its_own_generated_label() {
         session_id,
         second,
         VIEWPORT,
+        None,
         active_tab,
         SystemTime::now(),
         false,
@@ -224,6 +226,7 @@ fn detaching_a_client_leaves_the_server_healthy_with_panes_alive() {
         session_id,
         second,
         VIEWPORT,
+        None,
         active_tab,
         SystemTime::now(),
         false,
@@ -386,6 +389,34 @@ fn resyncing_hands_a_paused_subscriber_a_frame_of_the_client_it_views() {
         }]
     );
     assert_eq!(server.subscriptions, vec![(subscriber_id, client_id)]);
+}
+
+/// A paused subscriber whose client is the tab's only viewer and reports
+/// [`PaneArea::Starving`] is resynced with a frame carrying every pane
+/// suppressed, and keeps its subscription.
+#[test]
+fn resyncing_a_starving_sole_viewer_keeps_its_subscription() {
+    let (mut server, client_id) = booted_server();
+    let _ = server.handle_client_resize(client_id, VIEWPORT, Some(PaneArea::Starving));
+    let rx = server.subscribe(client_id, EventFilter::All);
+    let (subscriber_id, _) = server.subscriptions[0];
+    pause_subscribers(&mut server);
+    assert_eq!(server.event_bus.desynced(), vec![subscriber_id]);
+    let _backlog: Vec<Delivery> = rx.try_iter().collect();
+
+    server.resync_lagged();
+
+    assert_eq!(server.event_bus.desynced(), Vec::new());
+    assert_eq!(server.subscriptions, vec![(subscriber_id, client_id)]);
+    let delivered: Vec<Delivery> = rx.try_iter().collect();
+    let [Delivery::Snapshot { snapshot, .. }] = delivered.as_slice() else {
+        panic!("one resync frame, got {delivered:?}");
+    };
+    assert!(snapshot.session.active_tab.all_suppressed);
+    assert_eq!(
+        snapshot.session.active_tab.effective_size,
+        Size { cols: 0, rows: 0 }
+    );
 }
 
 #[test]
@@ -919,6 +950,7 @@ fn an_attach_claiming_a_carried_client_keeps_its_id_zoom_focus_and_tab() {
             Some(client_id),
             None,
             REMOTE_VIEWPORT,
+            None,
             EventFilter::All,
             SystemTime::now(),
             false,
@@ -940,6 +972,38 @@ fn an_attach_claiming_a_carried_client_keeps_its_id_zoom_focus_and_tab() {
     assert_eq!(client.viewport(), REMOTE_VIEWPORT);
 }
 
+/// The attach reply hands back the report the session recorded.
+#[test]
+fn handle_ipc_attach_echoes_the_stored_pane_area() {
+    let (mut server, _client_id) = booted_server();
+
+    let starving = server
+        .handle_ipc_attach(
+            None,
+            None,
+            REMOTE_VIEWPORT,
+            Some(PaneArea::Starving),
+            EventFilter::All,
+            SystemTime::now(),
+            false,
+        )
+        .expect("the session mints a client");
+    assert_eq!(starving.pane_area, Some(PaneArea::Starving));
+
+    let unreported = server
+        .handle_ipc_attach(
+            None,
+            None,
+            REMOTE_VIEWPORT,
+            None,
+            EventFilter::All,
+            SystemTime::now(),
+            false,
+        )
+        .expect("the session mints a client");
+    assert_eq!(unreported.pane_area, None);
+}
+
 #[test]
 fn an_attach_claiming_a_client_this_session_does_not_hold_mints_a_new_one() {
     let (mut server, client_id) = booted_server();
@@ -951,6 +1015,7 @@ fn an_attach_claiming_a_client_this_session_does_not_hold_mints_a_new_one() {
             Some(stranger),
             None,
             REMOTE_VIEWPORT,
+            None,
             EventFilter::All,
             SystemTime::now(),
             false,
@@ -978,6 +1043,7 @@ fn an_attach_claiming_a_client_a_connection_is_streaming_for_mints_a_new_one() {
             Some(client_id),
             None,
             VIEWPORT,
+            None,
             EventFilter::All,
             SystemTime::now(),
             false,
@@ -990,6 +1056,7 @@ fn an_attach_claiming_a_client_a_connection_is_streaming_for_mints_a_new_one() {
             Some(client_id),
             None,
             REMOTE_VIEWPORT,
+            None,
             EventFilter::All,
             SystemTime::now(),
             false,
@@ -1040,6 +1107,7 @@ fn an_attach_naming_no_client_to_come_back_as_mints_one_on_the_first_tab() {
             None,
             None,
             REMOTE_VIEWPORT,
+            None,
             EventFilter::All,
             SystemTime::now(),
             false,
@@ -1120,6 +1188,7 @@ fn attach_with_token(
             None,
             resume_token,
             VIEWPORT,
+            None,
             EventFilter::All,
             attached_at,
             false,
@@ -1518,6 +1587,7 @@ fn a_claim_that_wins_keeps_its_record_and_drops_the_presented_tokens_view() {
             Some(client_id),
             Some(leaving.resume_token.clone()),
             VIEWPORT,
+            None,
             EventFilter::All,
             detached_at,
             false,
@@ -1594,6 +1664,7 @@ fn an_attach_that_finds_no_session_spends_no_token() {
         None,
         Some(leaving.resume_token.clone()),
         VIEWPORT,
+        None,
         EventFilter::All,
         now,
         false,
@@ -1701,6 +1772,7 @@ fn closing_the_grace_window_detaches_only_the_clients_that_never_came_back() {
         session_id,
         absent,
         VIEWPORT,
+        None,
         server.sessions[&session_id]
             .clients
             .get(client_id)
@@ -1717,6 +1789,7 @@ fn closing_the_grace_window_detaches_only_the_clients_that_never_came_back() {
             Some(client_id),
             None,
             VIEWPORT,
+            None,
             EventFilter::All,
             SystemTime::now(),
             false,
@@ -2029,6 +2102,7 @@ fn an_attach_claiming_a_client_whose_tab_is_gone_mints_a_new_one_and_leaves_that
             Some(client_id),
             None,
             REMOTE_VIEWPORT,
+            None,
             EventFilter::All,
             SystemTime::now(),
             false,

@@ -282,6 +282,7 @@ fn attach(session: &RunningSession) -> AttachedClient {
             filter: EventFilterSpec::All,
             resume: None,
             resume_token: None,
+            pane_area: None,
         },
     };
     connection

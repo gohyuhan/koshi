@@ -843,6 +843,7 @@ mod bridge_round_trip {
                     filter: EventFilterSpec::All,
                     resume: None,
                     resume_token: None,
+                    pane_area: None,
                 },
             })
             .expect("the attach is written");

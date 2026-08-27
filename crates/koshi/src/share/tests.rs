@@ -619,6 +619,7 @@ fn client_row(id: ClientId, origin: Option<ClientOrigin>) -> ClientInfo {
         focused_pane: None,
         lock_state: LockMode::Normal,
         origin,
+        pane_area: None,
     }
 }
 

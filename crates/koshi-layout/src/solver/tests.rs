@@ -1482,3 +1482,30 @@ fn a_collapsed_member_that_is_a_split_puts_only_its_first_leaf_on_the_strip() {
     );
     assert!(result.suppressed.is_empty());
 }
+
+#[test]
+fn a_zero_rect_suppresses_every_pane_of_a_split() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let result = solve(
+        &split(SplitDirection::Horizontal, &[a, b]),
+        rect(0, 0, 0, 0),
+    );
+
+    assert!(result.all_suppressed);
+    assert_eq!(result.suppressed, [a, b]);
+    assert_eq!(result.panes, [(a, Rect::zero()), (b, Rect::zero())]);
+}
+
+#[test]
+fn a_zero_rect_suppresses_every_pane_of_a_stack() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let result = solve(
+        &LayoutNode::Split(SplitNode::stack(vec![a, b], 0)),
+        rect(0, 0, 0, 0),
+    );
+
+    assert!(result.all_suppressed);
+    assert_eq!(result.suppressed, [a, b]);
+    assert_eq!(result.panes, [(a, Rect::zero()), (b, Rect::zero())]);
+    assert_eq!(result.stack_headers, Vec::new());
+}

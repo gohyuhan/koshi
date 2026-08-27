@@ -142,7 +142,25 @@ fn client_info(origin: Option<ClientOrigin>) -> ClientInfo {
         focused_pane: None,
         lock_state: LockMode::Normal,
         origin,
+        pane_area: None,
     }
+}
+
+#[test]
+fn client_info_json_without_pane_area_decodes_as_none() {
+    let reported = ClientInfo {
+        pane_area: Some(PaneArea::Reported(Size { cols: 80, rows: 22 })),
+        ..client_info(None)
+    };
+    let mut wire = serde_json::to_value(&reported).expect("serialize");
+    wire.as_object_mut()
+        .expect("a client row is a JSON object")
+        .remove("pane_area")
+        .expect("the row carries a `pane_area` field to remove");
+
+    let decoded: ClientInfo = serde_json::from_value(wire).expect("deserialize");
+
+    assert_eq!(decoded, client_info(None));
 }
 
 #[test]

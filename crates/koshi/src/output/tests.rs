@@ -12,7 +12,7 @@ use koshi_core::action::{
     core_action_seeds, ActionHandlerRef, ActionRef, ActionScope, ActionStatus, TargetKind,
 };
 use koshi_core::discovery::{ClientInfo, PaneInfo, PaneState, SessionInfo, TabInfo};
-use koshi_core::geometry::{Point, Rect, Size, SplitDirection};
+use koshi_core::geometry::{PaneArea, Point, Rect, Size, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, PluginId, SessionId, TabId};
 use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags};
 use koshi_core::lock::LockMode;
@@ -120,6 +120,7 @@ fn client_info() -> ClientInfo {
         focused_pane: None,
         lock_state: LockMode::Normal,
         origin: Some(ClientOrigin::Local),
+        pane_area: None,
     }
 }
 
@@ -330,10 +331,31 @@ fn client_json_schema_is_stable() {
   "active_tab": "00000000-0000-0000-0000-000000000001",
   "focused_pane": null,
   "lock_state": "Normal",
-  "origin": "Local"
+  "origin": "Local",
+  "pane_area": null
 }
 "#;
     assert_eq!(render_client(&client_info(), FormatArg::Json), expected);
+}
+
+#[test]
+fn a_reported_pane_area_json_is_a_tagged_size() {
+    let reported = ClientInfo {
+        pane_area: Some(PaneArea::Reported(Size {
+            cols: 100,
+            rows: 30,
+        })),
+        ..client_info()
+    };
+
+    let rendered = render_client(&reported, FormatArg::Json);
+
+    assert!(
+        rendered.contains(
+            "\"pane_area\": {\n    \"Reported\": {\n      \"cols\": 100,\n      \"rows\": 30\n    }\n  }"
+        ),
+        "unexpected pane_area form: {rendered}"
+    );
 }
 
 // --- Table renderings ---
@@ -428,11 +450,45 @@ id: client-00000000-0000-0000-0000-000000000001
 session: session-00000000-0000-0000-0000-000000000001
 attached_at: 1234
 viewport: 120x40
+pane_area: -
 active_tab: tab-00000000-0000-0000-0000-000000000001
 focused_pane: -
 lock: Normal
 ";
     assert_eq!(render_client(&client_info(), FormatArg::Table), expected);
+}
+
+#[test]
+fn a_starving_client_prints_starving_in_the_pane_area_column() {
+    let starving = ClientInfo {
+        pane_area: Some(PaneArea::Starving),
+        ..client_info()
+    };
+
+    let rendered = render_client(&starving, FormatArg::Table);
+
+    assert!(
+        rendered.contains("\npane_area: starving\n"),
+        "unexpected pane_area line: {rendered}"
+    );
+}
+
+#[test]
+fn a_reported_pane_area_prints_as_cols_by_rows() {
+    let reported = ClientInfo {
+        pane_area: Some(PaneArea::Reported(Size {
+            cols: 100,
+            rows: 30,
+        })),
+        ..client_info()
+    };
+
+    let rendered = render_client(&reported, FormatArg::Table);
+
+    assert!(
+        rendered.contains("\npane_area: 100x30\n"),
+        "unexpected pane_area line: {rendered}"
+    );
 }
 
 // --- Action introspection ---
@@ -1304,8 +1360,8 @@ id                                         tab                                  
 pane-00000000-0000-0000-0000-000000000001  tab-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  htop   /home/user  htop --tree  running  1
 
 clients
-id                                           session                                       attached_at  viewport  active_tab                                focused_pane  lock
-client-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  1234         120x40    tab-00000000-0000-0000-0000-000000000001  -             Normal
+id                                           session                                       attached_at  viewport  pane_area  active_tab                                focused_pane  lock
+client-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  1234         120x40    -          tab-00000000-0000-0000-0000-000000000001  -             Normal
 
 ";
     assert_eq!(render_dump_state(&[overview()], FormatArg::Table), expected);
@@ -1324,7 +1380,7 @@ panes
 id  tab  session  title  cwd  command  state  focused_by
 
 clients
-id  session  attached_at  viewport  active_tab  focused_pane  lock
+id  session  attached_at  viewport  pane_area  active_tab  focused_pane  lock
 
 ";
     assert_eq!(render_dump_state(&[], FormatArg::Table), expected);
@@ -1412,7 +1468,8 @@ fn dump_state_json_is_an_array_of_whole_overviews() {
                 "active_tab": "00000000-0000-0000-0000-000000000001",
                 "focused_pane": null,
                 "lock_state": "Normal",
-                "origin": "Local"
+                "origin": "Local",
+                "pane_area": null
             }]
         }])
     );

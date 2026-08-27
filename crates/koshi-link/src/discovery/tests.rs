@@ -144,6 +144,7 @@ fn overview(name: &str, tabs: &[(&str, usize)]) -> SessionOverview {
             focused_pane: None,
             lock_state: LockMode::Normal,
             origin: Some(ClientOrigin::Local),
+            pane_area: None,
         }],
     }
 }
