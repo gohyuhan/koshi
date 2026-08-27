@@ -18,7 +18,7 @@ use ratatui::layout::Rect;
 use ratatui::widgets::Widget;
 use ratatui::Terminal;
 
-use crate::Client;
+use crate::{core_pane_area, Client};
 use koshi_core::geometry::Size;
 use koshi_core::ids::ClientId;
 use koshi_core::key::KeySequence;
@@ -105,7 +105,9 @@ pub fn run(profile: Option<&str>) -> Result<(), CliError> {
 /// keymap, so the palette a frame is painted in and the keys it answers are
 /// this terminal's. `keybinding.kdl` is the one file that can be read and then
 /// refused, so it is the one whose outcome is logged; app settings and the
-/// theme are typed values that always apply.
+/// theme are typed values that always apply. `pane_area_supported` records
+/// whether the attached session echoed the pane-area field. The current
+/// renderer uses the fixed two-row layout when it is false.
 ///
 /// The client owns no session, so the receiver it is handed has no sender: its
 /// frames arrive over the connection instead.
@@ -114,9 +116,11 @@ pub(crate) fn viewer(
     viewport: Size,
     events: mpsc::Receiver<koshi_renderer::snapshot::Delivery>,
     cleanup: TerminalCleanupGuard,
+    pane_area_supported: bool,
     loaded: koshi_link::config::LoadedConfig,
 ) -> Client {
     let mut client = Client::new(client_id, viewport, events, cleanup);
+    client.set_pane_area_supported(pane_area_supported);
     match client.load_startup_config(loaded.app, loaded.theme, loaded.keybindings) {
         Some(report) if report.verdict() != koshi_config::conflict::KeymapVerdict::Apply => {
             tracing::warn!("keybinding.kdl was not applied; run `koshi keys conflicts` to see why");
@@ -144,9 +148,9 @@ fn ensure_koshi_dirs() {
 }
 
 /// Block on crossterm events and send decoded keys, mouse events, pastes and
-/// every terminal resize down `inbox_tx`. Read failure means terminal hangup
-/// and quits. The caller relays what comes out of the channel up its
-/// connection to the session.
+/// every terminal resize down `inbox_tx`. A resize carries the pane area left
+/// by the built-in two-row UI. Read failure means terminal hangup and quits.
+/// The caller relays what comes out of the channel up its connection.
 pub(crate) fn spawn_input_thread(inbox_tx: mpsc::Sender<RuntimeEvent>, client_id: ClientId) {
     let _ = thread::Builder::new()
         .name("koshi-input".to_string())
@@ -158,11 +162,14 @@ pub(crate) fn spawn_input_thread(inbox_tx: mpsc::Sender<RuntimeEvent>, client_id
                     };
                     Some(RuntimeEvent::KeyInput { client_id, chord })
                 }
-                Ok(Event::Resize(cols, rows)) => Some(RuntimeEvent::Resize {
-                    client_id,
-                    size: Size { cols, rows },
-                    pane_area: None,
-                }),
+                Ok(Event::Resize(cols, rows)) => {
+                    let size = Size { cols, rows };
+                    Some(RuntimeEvent::Resize {
+                        client_id,
+                        size,
+                        pane_area: Some(core_pane_area(size)),
+                    })
+                }
                 Ok(Event::Mouse(mouse)) => Some(RuntimeEvent::MouseInput {
                     client_id,
                     mouse: decode_mouse(mouse),

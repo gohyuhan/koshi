@@ -17,9 +17,10 @@ use koshi_core::event::{
     PluginDisabled, PluginDoctorCompleted, PluginEnabled, PluginInstalled, PluginLoadFailed,
     PluginMouseInput, PluginReloaded, PluginUninstalled, PluginUnloaded, PluginUpdated, PtyResized,
     RejectReason, SelectionChanged, SubmittedLinePayload, SubscriberLagged, TabClosed, TabCreated,
-    TabFocused, TabMoved, TerminalTooSmallEntered, TerminalTooSmallExited, TypedPayload,
+    TabFocused, TabMoved, TerminalTooSmallCause, TerminalTooSmallEntered, TerminalTooSmallExited,
+    TypedPayload,
 };
-use koshi_core::geometry::{Point, Size};
+use koshi_core::geometry::{PaneArea, Point, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, PluginId, SessionId, SubscriberId, TabId};
 use koshi_core::mouse::{MouseButton, ScrollDirection};
 use koshi_core::process::PtySize;
@@ -416,8 +417,7 @@ fn a_tab_move_records_the_slot_it_left_and_the_slot_it_landed_on() {
     assert!(out.contains(&format!(r#""tab_id":"{tab_id}""#)), "{out}");
 }
 
-// The two edges of "the window got too small to show anything" must not read
-// the same: each says which way it went, and the size it happened at.
+// The too-small event records the affected viewport, pane area, and cause.
 #[test]
 fn the_too_small_pair_says_which_way_it_went_and_the_size_it_happened_at() {
     let client_id = ClientId::new();
@@ -425,6 +425,8 @@ fn the_too_small_pair_says_which_way_it_went_and_the_size_it_happened_at() {
     let entered = captured(&[Event::TerminalTooSmallEntered(TerminalTooSmallEntered {
         client_id,
         size: Size { cols: 10, rows: 3 },
+        pane_area: Some(PaneArea::Starving),
+        cause: TerminalTooSmallCause::Regions,
     })]);
     assert!(entered.contains(r#""level":"INFO""#), "{entered}");
     assert!(
@@ -433,6 +435,11 @@ fn the_too_small_pair_says_which_way_it_went_and_the_size_it_happened_at() {
     );
     assert!(entered.contains(r#""cols":10"#), "{entered}");
     assert!(entered.contains(r#""rows":3"#), "{entered}");
+    assert!(
+        entered.contains(r#""pane_area":"Some(Starving)""#),
+        "{entered}"
+    );
+    assert!(entered.contains(r#""cause":"Regions""#), "{entered}");
     assert!(
         entered.contains(&format!(r#""client_id":"{client_id}""#)),
         "{entered}"

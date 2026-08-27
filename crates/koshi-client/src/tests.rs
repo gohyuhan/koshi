@@ -156,6 +156,30 @@ fn set_viewport_records_the_new_size() {
 }
 
 #[test]
+fn pane_area_support_is_recorded_for_the_attached_session() {
+    let (mut client, _tx) = new_client();
+    assert!(client.pane_area_supported);
+
+    client.set_pane_area_supported(false);
+    assert!(!client.pane_area_supported);
+
+    client.set_pane_area_supported(true);
+    assert!(client.pane_area_supported);
+}
+
+#[test]
+fn the_core_pane_area_reserves_the_two_chrome_rows() {
+    assert_eq!(
+        core_pane_area(Size { cols: 80, rows: 24 }),
+        PaneArea::Reported(Size { cols: 80, rows: 22 })
+    );
+    assert_eq!(
+        core_pane_area(Size { cols: 80, rows: 1 }),
+        PaneArea::Reported(Size { cols: 80, rows: 0 })
+    );
+}
+
+#[test]
 fn a_theme_file_recolors_the_chrome_the_next_frame_paints_with() {
     let (client, _tx) = with_focused_border(RgbColor::new(1, 2, 3));
     assert_eq!(

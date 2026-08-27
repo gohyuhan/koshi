@@ -67,7 +67,8 @@
 //! keys, pastes and resizes travel back up the same connection: a key the
 //! viewer's keymap does not bind goes up as a key press, a binding that fires
 //! is resolved against the action table here and goes up as the commands it
-//! runs, a paste goes up whole, and a resize goes up as the new viewport.
+//! runs, a paste goes up whole, and a resize goes up as the new viewport and
+//! the pane area left by the built-in rows.
 //! Every request leaves on its own writer thread, so a session slow to take
 //! the bytes backs that thread up and never this terminal's input. The stream
 //! also carries escapes a pane sent to this terminal itself rather than to the
@@ -108,12 +109,12 @@ use serde_json::value::RawValue;
 
 use crate::input::KeyOutcome;
 use crate::mouse::MouseAction;
-use crate::Client;
+use crate::{core_pane_area, Client};
 use koshi_config::types::BoundAction;
 use koshi_core::command::{
     Command, CommandEnvelope, CommandResult, CommandSource, SwitchSessionArgs, VisualCommand,
 };
-use koshi_core::geometry::{Direction, Size};
+use koshi_core::geometry::{Direction, PaneArea, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::key::KeySequence;
 use koshi_core::lock::LockMode;
@@ -509,6 +510,9 @@ struct Joined {
     /// The secret this attach minted, presented on the next attach to get this
     /// attach's view back. `None` from a session server that mints none.
     resume_token: Option<ConnectionToken>,
+    /// Whether the session echoed the pane-area field in its attach result.
+    /// `false` records the fixed two-row compatibility mode for this viewer.
+    pane_area_supported: bool,
 }
 
 /// Resolve what the user typed to one running session, and report where it
@@ -750,6 +754,7 @@ fn attach_once(home: &Home, target: &SessionSelector) -> Result<Option<SessionId
         session_id,
         token,
         resume_token,
+        pane_area_supported,
     } = dial(home, target)?;
 
     // The session accepted the client, so the terminal may change mode now.
@@ -827,7 +832,14 @@ fn attach_once(home: &Home, target: &SessionSelector) -> Result<Option<SessionId
         tracing::warn!("{warning}");
     }
     let (_events_tx, events_rx) = mpsc::channel();
-    let mut client = app::viewer(client_id, viewport(), events_rx, cleanup, loaded);
+    let mut client = app::viewer(
+        client_id,
+        viewport(),
+        events_rx,
+        cleanup,
+        pane_area_supported,
+        loaded,
+    );
     let mut uplink = Uplink {
         requests: spawn_uplink_writer(writer),
         registry: ActionRegistry::new(),
@@ -1054,7 +1066,7 @@ fn run_attachment<B: Backend>(
                                 if drop_input_from_the_blackout(&incoming_rx) {
                                     break Ending::TerminalGone;
                                 }
-                                Some((joined.reader, joined.writer))
+                                Some((joined.reader, joined.writer, joined.pane_area_supported))
                             }
                             Err(cause) => break Ending::LinkLost(cause),
                         }
@@ -1067,9 +1079,10 @@ fn run_attachment<B: Backend>(
                 | Ending::Switch(_)
                 | Ending::LinkLost(_) => None,
             };
-            let Some((reader, writer)) = halves else {
+            let Some((reader, writer, pane_area_supported)) = halves else {
                 break ending;
             };
+            client.set_pane_area_supported(pane_area_supported);
             current_connection += 1;
             spawn_frame_reader(reader, current_connection, incoming_tx.clone());
             // Dropping the queue the old connection's writer thread reads from
@@ -1123,7 +1136,7 @@ fn dial(home: &Home, target: &SessionSelector) -> Result<Joined, CliError> {
             };
             let endpoint = ipc_client::read_endpoint(runtime_dir, session_id)?;
             let mut connection = ipc_client::connect(&endpoint, session_id)?;
-            let (client_id, session_id, resume_token) =
+            let (client_id, session_id, resume_token, pane_area_supported) =
                 join(&mut connection, &endpoint.token, None)?;
             let (reader, writer) = connection.split();
             Ok(Joined {
@@ -1133,6 +1146,7 @@ fn dial(home: &Home, target: &SessionSelector) -> Result<Joined, CliError> {
                 session_id,
                 token: endpoint.token,
                 resume_token,
+                pane_area_supported,
             })
         }
         Home::Remote { server } => dial_remote(server, target, None, None).map_err(CliError::from),
@@ -1171,7 +1185,8 @@ fn dial_remote(
         .send(&attach_request(resume, resume_token))
         .map_err(link_failed)?;
     let reply = reader.recv().map_err(link_failed)?;
-    let (client_id, session_id, minted) = take_attached(reply).map_err(DialError::Refused)?;
+    let (client_id, session_id, minted, pane_area) =
+        take_attached(reply).map_err(DialError::Refused)?;
 
     // Joined: both halves block for as long as it takes from here.
     reader.set_deadline(None);
@@ -1183,6 +1198,7 @@ fn dial_remote(
         session_id,
         token: saved.secret,
         resume_token: minted,
+        pane_area_supported: pane_area.is_some(),
     })
 }
 
@@ -1237,7 +1253,7 @@ fn target_name(target: &SessionSelector) -> String {
 
 /// Come back into `session_id` after it said it is replacing its own process
 /// image, and hand back the two halves of the connection this client comes back
-/// on.
+/// on and whether the session echoed the pane-area field.
 ///
 /// On this machine [`rejoin`] waits for the session's new socket, and `token`
 /// is stamped with the token that socket was advertised under. On a server the
@@ -1257,20 +1273,23 @@ fn target_name(target: &SessionSelector) -> String {
 ///
 /// `None` for every way the client cannot come back, including a session that
 /// no longer holds this client's record. The caller reports each of them as the
-/// session ending unexpectedly.
+/// session ending unexpectedly. The boolean is false when the session omits
+/// the pane-area field.
 fn come_back(
     home: &Home,
     session_id: SessionId,
     client_id: ClientId,
     token: &mut ConnectionToken,
     resume_token: &mut Option<ConnectionToken>,
-) -> Option<(FrameReader, FrameWriter)> {
+) -> Option<(FrameReader, FrameWriter, bool)> {
     match home {
         Home::Local { runtime_dir } => {
-            let (endpoint, connection) = rejoin(runtime_dir, session_id, client_id, token)?;
+            let (endpoint, connection, pane_area_supported) =
+                rejoin(runtime_dir, session_id, client_id, token)?;
             *token = endpoint.token;
             *resume_token = None;
-            Some(connection.split())
+            let (reader, writer) = connection.split();
+            Some((reader, writer, pane_area_supported))
         }
         Home::Remote { server } => {
             let deadline = Instant::now() + RESTART_WINDOW;
@@ -1294,7 +1313,7 @@ fn come_back(
                     Ok(joined) => {
                         *token = joined.token;
                         *resume_token = joined.resume_token;
-                        return Some((joined.reader, joined.writer));
+                        return Some((joined.reader, joined.writer, joined.pane_area_supported));
                     }
                     Err(error) => {
                         if Instant::now() >= deadline {
@@ -1429,17 +1448,17 @@ fn next_redial_wait(wait: Duration) -> Duration {
     (wait * 2).min(MAX_REDIAL_WAIT)
 }
 
-/// Read the terminal's size, record it on `client`, and report it on `uplink`'s
-/// connection.
+/// Read the terminal's size, record it on `client`, and report the viewport and
+/// built-in pane area on `uplink`'s connection.
 ///
-/// The Attach that opened that connection carried the size read when it was
-/// written. Both copies of the size hold what this read returns.
+/// The `Resize` carries `Reported(viewport.rows - 2)`, with rows saturating at
+/// zero. An `80x24` terminal therefore reports an `80x22` pane area.
 fn report_terminal_size(client: &mut Client, uplink: &mut Uplink) {
     let size = viewport();
     client.set_viewport(size);
     uplink.send(IpcRequestKind::Resize {
         viewport: size,
-        pane_area: None,
+        pane_area: Some(core_pane_area(size)),
     });
 }
 
@@ -1631,8 +1650,8 @@ fn selector_of(selector: &str) -> SessionSelector {
 
 /// Join the session on an open connection: write the Hello and the Attach back
 /// to back, then read both replies in order. Returns the client the server
-/// minted for this terminal, the session it says that client joined, and the
-/// secret this attach minted.
+/// minted for this terminal, the session it says that client joined, the secret
+/// this attach minted, and whether the server echoed the pane-area field.
 ///
 /// The client names no identity of its own — the server mints the client id
 /// and answers with it — so every value comes from the reply.
@@ -1650,7 +1669,7 @@ fn join(
     connection: &mut Connection,
     token: &ConnectionToken,
     resume: Option<ClientId>,
-) -> Result<(ClientId, SessionId, Option<ConnectionToken>), CliError> {
+) -> Result<(ClientId, SessionId, Option<ConnectionToken>, bool), CliError> {
     let hello = IpcRequest {
         request_id: 1,
         kind: IpcRequestKind::hello(token.clone()),
@@ -1661,7 +1680,9 @@ fn join(
         .map_err(talk::talk_failed)?;
 
     settle_version(connection.recv().map_err(talk::talk_failed)?)?;
-    take_attached(connection.recv().map_err(talk::talk_failed)?)
+    let (client_id, session_id, resume_token, pane_area) =
+        take_attached(connection.recv().map_err(talk::talk_failed)?)?;
+    Ok((client_id, session_id, resume_token, pane_area.is_some()))
 }
 
 /// The Attach this client writes, numbered 2: the request that follows the
@@ -1670,16 +1691,17 @@ fn join(
 /// `resume` names the client record to come back as, and is `None` on a first
 /// join. `resume_token` is the secret the last attach minted, presented to get
 /// that attach's view back, and is `None` on a first join and whenever no
-/// token was minted. Reports no pane area.
+/// token was minted. Reports the pane area left by the built-in two-row UI.
 fn attach_request(resume: Option<ClientId>, resume_token: Option<&ConnectionToken>) -> IpcRequest {
+    let viewport = viewport();
     IpcRequest {
         request_id: 2,
         kind: IpcRequestKind::Attach {
-            viewport: viewport(),
+            viewport,
             filter: EventFilterSpec::All,
             resume,
             resume_token: resume_token.cloned(),
-            pane_area: None,
+            pane_area: Some(core_pane_area(viewport)),
         },
     }
 }
@@ -1697,18 +1719,28 @@ fn settle_version(reply: IncomingResponse) -> Result<(), CliError> {
 }
 
 /// The client the server minted for this terminal, the session it says that
-/// client joined, and the secret this attach minted, out of an Attach answer.
-/// The secret is `None` from a session server that mints none.
+/// client joined, the secret this attach minted, and the pane area the server
+/// echoed, out of an Attach answer. A missing echo identifies an older session
+/// that uses the fixed two-row compatibility layout.
 fn take_attached(
     reply: IncomingResponse,
-) -> Result<(ClientId, SessionId, Option<ConnectionToken>), CliError> {
+) -> Result<
+    (
+        ClientId,
+        SessionId,
+        Option<ConnectionToken>,
+        Option<PaneArea>,
+    ),
+    CliError,
+> {
     match talk::SESSION.take_result(reply)? {
         IpcResult::Attached {
             client_id,
             session_id,
             resume_token,
+            pane_area,
             ..
-        } => Ok((client_id, session_id, resume_token)),
+        } => Ok((client_id, session_id, resume_token, pane_area)),
         IpcResult::Error(refusal) => Err(talk::refused(&refusal)),
         other => Err(talk::SESSION.unexpected_reply(&other)),
     }
@@ -1716,7 +1748,8 @@ fn take_attached(
 
 /// Come back to a session that is replacing its own process image: wait for its
 /// new socket, connect to it, and join again as `client_id`. Returns the
-/// endpoint file that socket was advertised in and the open connection to it.
+/// endpoint file, the open connection, and whether the session echoed pane area.
+/// The boolean is false for an older session that omits the field.
 ///
 /// `token` is the token this client attached under; the wait watches it for a
 /// change.
@@ -1732,7 +1765,7 @@ fn rejoin(
     session_id: SessionId,
     client_id: ClientId,
     token: &ConnectionToken,
-) -> Option<(EndpointFile, Connection)> {
+) -> Option<(EndpointFile, Connection, bool)> {
     if token.expose().is_empty() {
         tracing::warn!(
             %session_id,
@@ -1748,9 +1781,12 @@ fn rejoin(
     let mut connection = ipc_client::connect(&endpoint, session_id)
         .inspect_err(|error| tracing::warn!(%error, "could not reach the restarted session"))
         .ok()?;
-    let (rejoined, _, _) = join(&mut connection, &endpoint.token, Some(client_id))
-        .inspect_err(|error| tracing::warn!(%error, "the restarted session refused this client"))
-        .ok()?;
+    let (rejoined, _, _, pane_area_supported) =
+        join(&mut connection, &endpoint.token, Some(client_id))
+            .inspect_err(
+                |error| tracing::warn!(%error, "the restarted session refused this client"),
+            )
+            .ok()?;
     if rejoined != client_id {
         tracing::warn!(
             %session_id,
@@ -1758,7 +1794,7 @@ fn rejoin(
         );
         return None;
     }
-    Some((endpoint, connection))
+    Some((endpoint, connection, pane_area_supported))
 }
 
 /// Wait for `session_id` to advertise a socket under a token other than
@@ -1908,8 +1944,8 @@ fn spawn_input_relay(input_rx: mpsc::Receiver<RuntimeEvent>, incoming_tx: mpsc::
 /// any open sequence all live here, so this decides what the press means and
 /// the session sees only the answer — the commands a binding runs, or a press
 /// to write. A press that goes to the pane's program also ends the selection
-/// gesture under way, since the input is the program's. A resize is recorded
-/// here and reported up, since the session reconciles tab sizes from every
+/// gesture under way, since the input is the program's. A resize records the
+/// viewport and pane area, since the session reconciles tab sizes from every
 /// viewer's report. Pasted text goes up whole and ends the gesture too; the
 /// session writes it into the pane, bracketing it when that pane asked for
 /// bracketed paste. A paste of more text than one frame carries never leaves
@@ -1938,9 +1974,10 @@ fn handle_input(client: &mut Client, uplink: &mut Uplink, event: RuntimeEvent) {
             size, pane_area, ..
         } => {
             client.set_viewport(size);
+            let pane_area = pane_area.unwrap_or_else(|| core_pane_area(size));
             uplink.send(IpcRequestKind::Resize {
                 viewport: size,
-                pane_area,
+                pane_area: Some(pane_area),
             });
         }
         RuntimeEvent::HostPaste { text, .. } => {

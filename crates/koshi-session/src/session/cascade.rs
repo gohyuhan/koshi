@@ -19,9 +19,9 @@ use std::time::SystemTime;
 
 use koshi_core::event::{
     Event, LayoutChanged, PaneClosing, PaneFocused, PaneProcessExited, PaneRemoved,
-    TerminalTooSmallEntered,
+    TerminalTooSmallCause, TerminalTooSmallEntered,
 };
-use koshi_core::geometry::{Rect, Size};
+use koshi_core::geometry::{PaneArea, Rect, Size};
 use koshi_core::ids::{ClientId, PaneId, TabId};
 use koshi_layout::edit::{remove_pane, RemoveError};
 use koshi_layout::focus::focus_candidates;
@@ -31,6 +31,7 @@ use koshi_layout::solver::solve_with_mode_min;
 use koshi_pane::pane::lifecycle::PaneLifecycleEvent;
 use koshi_pane::pane::policy::PaneExitPolicy;
 
+use crate::client::pane_viewport;
 use crate::session::focus::{repair_focus, FocusRepairResult};
 use crate::session::policy::EmptyTabPolicy;
 use crate::session::state::Session;
@@ -156,11 +157,14 @@ pub fn remove_pane_cascade(
                         }));
                     }
                     FocusRepairResult::TerminalTooSmall => {
+                        let cause = terminal_too_small_cause(session, tab_id, client_id, tab_rect);
                         if let Some(client) = session.clients.get_mut(client_id) {
                             client.remove_focused_pane(tab_id);
                             events.push(Event::TerminalTooSmallEntered(TerminalTooSmallEntered {
                                 client_id,
                                 size: client.viewport(),
+                                pane_area: client.reported_pane_area(),
+                                cause,
                             }));
                         }
                     }
@@ -182,6 +186,63 @@ pub fn remove_pane_cascade(
     }
 
     events
+}
+
+/// Classify why `client_id` has no visible pane area in `tab_id`.
+///
+/// A reported area smaller than the built-in two-row area means this client's
+/// own regions caused the shortage. Otherwise, a smaller area from another
+/// viewer names that viewer. The remaining case is the terminal itself.
+fn terminal_too_small_cause(
+    session: &Session,
+    tab_id: TabId,
+    client_id: ClientId,
+    tab_rect: Rect,
+) -> TerminalTooSmallCause {
+    let Some(client) = session.clients.get(client_id) else {
+        return TerminalTooSmallCause::Terminal;
+    };
+
+    match client.reported_pane_area() {
+        Some(PaneArea::Starving) => return TerminalTooSmallCause::Regions,
+        Some(PaneArea::Reported(reported)) => {
+            let fallback = pane_viewport(client.viewport());
+            let resolved = reported.min_axes(client.viewport());
+            if resolved.cols < fallback.cols || resolved.rows < fallback.rows {
+                return TerminalTooSmallCause::Regions;
+            }
+        }
+        None => {}
+    }
+
+    let Some(own_area) = client.pane_area() else {
+        return TerminalTooSmallCause::Regions;
+    };
+    let Some(effective) = session.tab_viewport(tab_id) else {
+        return TerminalTooSmallCause::Terminal;
+    };
+
+    if tab_rect.size != effective {
+        return TerminalTooSmallCause::Terminal;
+    }
+
+    if let Some(other_client) = session
+        .clients
+        .list_attached()
+        .filter(|other| other.id() != client_id && other.active_tab() == tab_id)
+        .find(|other| {
+            let Some(other_area) = other.pane_area() else {
+                return false;
+            };
+            let sets_columns = effective.cols < own_area.cols && other_area.cols == effective.cols;
+            let sets_rows = effective.rows < own_area.rows && other_area.rows == effective.rows;
+            sets_columns || sets_rows
+        })
+    {
+        return TerminalTooSmallCause::OtherClient(other_client.id());
+    }
+
+    TerminalTooSmallCause::Terminal
 }
 
 /// Handle a pane's child process exiting, applying its [`PaneExitPolicy`].

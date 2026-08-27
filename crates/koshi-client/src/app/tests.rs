@@ -55,8 +55,24 @@ fn test_client_with(server: &mut Server, client_id: ClientId, loaded: LoadedConf
         VIEWPORT,
         events,
         TerminalCleanupGuard::new(),
+        true,
         loaded,
     )
+}
+
+#[test]
+fn an_old_session_sets_the_viewer_compatibility_state() {
+    let (_events_tx, events_rx) = mpsc::channel();
+    let client = viewer(
+        ClientId::new(),
+        VIEWPORT,
+        events_rx,
+        TerminalCleanupGuard::new(),
+        false,
+        LoadedConfig::default(),
+    );
+
+    assert!(!client.pane_area_supported);
 }
 
 /// The whole rendered screen flattened to a string, for substring assertions.
