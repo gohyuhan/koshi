@@ -106,6 +106,7 @@ fn attach(server: &mut Server) -> AttachAccepted {
         resume: None,
         resume_token: None,
         viewport: STARTING_VIEWPORT,
+        pane_area: None,
         filter: EventFilter::All,
         attached_at: SystemTime::now(),
         remote: false,

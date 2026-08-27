@@ -1437,7 +1437,10 @@ fn next_redial_wait(wait: Duration) -> Duration {
 fn report_terminal_size(client: &mut Client, uplink: &mut Uplink) {
     let size = viewport();
     client.set_viewport(size);
-    uplink.send(IpcRequestKind::Resize { viewport: size });
+    uplink.send(IpcRequestKind::Resize {
+        viewport: size,
+        pane_area: None,
+    });
 }
 
 /// Take everything this terminal typed while the link was down off the loop's
@@ -1667,7 +1670,7 @@ fn join(
 /// `resume` names the client record to come back as, and is `None` on a first
 /// join. `resume_token` is the secret the last attach minted, presented to get
 /// that attach's view back, and is `None` on a first join and whenever no
-/// token was minted.
+/// token was minted. Reports no pane area.
 fn attach_request(resume: Option<ClientId>, resume_token: Option<&ConnectionToken>) -> IpcRequest {
     IpcRequest {
         request_id: 2,
@@ -1676,6 +1679,7 @@ fn attach_request(resume: Option<ClientId>, resume_token: Option<&ConnectionToke
             filter: EventFilterSpec::All,
             resume,
             resume_token: resume_token.cloned(),
+            pane_area: None,
         },
     }
 }
@@ -1930,9 +1934,14 @@ fn handle_input(client: &mut Client, uplink: &mut Uplink, event: RuntimeEvent) {
             // the pass draws it. A discard moves nothing and draws nothing.
             KeyOutcome::Pending | KeyOutcome::Discard => {}
         },
-        RuntimeEvent::Resize { size, .. } => {
+        RuntimeEvent::Resize {
+            size, pane_area, ..
+        } => {
             client.set_viewport(size);
-            uplink.send(IpcRequestKind::Resize { viewport: size });
+            uplink.send(IpcRequestKind::Resize {
+                viewport: size,
+                pane_area,
+            });
         }
         RuntimeEvent::HostPaste { text, .. } => {
             // The text belongs to the program in the pane, so a selection

@@ -318,6 +318,7 @@ fn attach_request() -> IpcRequest {
             filter: EventFilterSpec::All,
             resume: None,
             resume_token: None,
+            pane_area: None,
         },
     }
 }

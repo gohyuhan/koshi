@@ -24,7 +24,7 @@ use koshi_core::command::{
 };
 use koshi_core::discovery::SessionOverview;
 use koshi_core::event::{Event, InputMode, InputModeChanged, PtyResized};
-use koshi_core::geometry::{Point, Rect, Size};
+use koshi_core::geometry::{PaneArea, Point, Rect, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::key::ModFlags;
 use koshi_core::mouse::{MouseButton, MouseInput, MouseKind, MouseTracking};
@@ -214,13 +214,32 @@ fn open(runtime_dir: &Path, session_id: SessionId) -> Connection {
     connection
 }
 
-/// Attach on `connection` reporting `viewport`, and return what the reply
-/// carried. The connection carries only the client's event stream afterwards.
+/// Attach on `connection` reporting `viewport` and no pane area, and return
+/// what the reply carried. The connection carries only the client's event
+/// stream afterwards.
 fn attach_sized(
     connection: &mut Connection,
     request_id: u64,
     viewport: Size,
 ) -> (ClientId, SessionId, AttachedSessionStructureSnapshot) {
+    let (client_id, session_id, structure, _) =
+        attach_reporting(connection, request_id, viewport, None);
+    (client_id, session_id, structure)
+}
+
+/// Attach on `connection` reporting `viewport` and `pane_area`, and return what
+/// the reply carried, including the pane area the reply echoed.
+fn attach_reporting(
+    connection: &mut Connection,
+    request_id: u64,
+    viewport: Size,
+    pane_area: Option<PaneArea>,
+) -> (
+    ClientId,
+    SessionId,
+    AttachedSessionStructureSnapshot,
+    Option<PaneArea>,
+) {
     connection
         .send(&IpcRequest {
             request_id,
@@ -229,6 +248,7 @@ fn attach_sized(
                 filter: EventFilterSpec::All,
                 resume: None,
                 resume_token: None,
+                pane_area,
             },
         })
         .expect("send attach");
@@ -238,12 +258,13 @@ fn attach_sized(
         client_id,
         session_id,
         structure,
+        pane_area,
         ..
     } = reply.result
     else {
         panic!("expected an attach reply, got {:?}", reply.result);
     };
-    (client_id, session_id, structure)
+    (client_id, session_id, structure, pane_area)
 }
 
 /// What the session reports about itself over `connection`.
@@ -400,6 +421,100 @@ fn two_clients_on_one_tab_size_the_pty_to_the_per_axis_minimum() {
             PtySize { cols: 78, rows: 26 },
         ],
     );
+}
+
+/// A client that reports a pane area smaller than its terminal sizes the tab
+/// to that area.
+#[test]
+fn a_client_reporting_a_pane_area_sizes_the_pty_to_that_area() {
+    let (_server, fake, pane_id) = served("reported-pane-area", |dir, session_id, _fake| {
+        let reported = PaneArea::Reported(Size { cols: 60, rows: 20 });
+        let mut client = open(&dir, session_id);
+        let (_, _, structure, echoed) = attach_reporting(&mut client, 2, BIG, Some(reported));
+        let pane_id = structure.panes[0].id;
+        assert_eq!(echoed, Some(reported));
+
+        (vec![client], pane_id)
+    });
+
+    // The seeded size, then the reported 60x20 region minus the pane's 1-cell
+    // border on each side.
+    assert_eq!(
+        fake.resizes(pane_id).expect("the pane was spawned"),
+        vec![SEEDED, PtySize { cols: 58, rows: 18 }],
+    );
+}
+
+/// A client with no room to draw a pane contributes no size, so the tab keeps
+/// the size its other viewer gives it.
+#[test]
+fn a_starving_client_does_not_shrink_the_tab() {
+    let (_server, fake, pane_id) = served("starving-second", |dir, session_id, _fake| {
+        let mut big = open(&dir, session_id);
+        let (_, _, structure, _) = attach_reporting(&mut big, 2, BIG, None);
+        let pane_id = structure.panes[0].id;
+
+        let mut starving = open(&dir, session_id);
+        let (_, _, _, echoed) = attach_reporting(&mut starving, 2, BIG, Some(PaneArea::Starving));
+        assert_eq!(echoed, Some(PaneArea::Starving));
+
+        let mut caller = open(&dir, session_id);
+        wait_for_client_count(&mut caller, 2, 3);
+
+        (vec![caller, big, starving], pane_id)
+    });
+
+    // Two resizes only: the seeded size and the big client's own region. The
+    // starving client moved nothing.
+    assert_eq!(
+        fake.resizes(pane_id).expect("the pane was spawned"),
+        vec![SEEDED, PtySize { cols: 98, rows: 36 }],
+    );
+}
+
+/// The starving client attaches first, so the tab has no viewer that sizes it
+/// while the served loop renders. Nothing panics, that client's frames carry
+/// every pane suppressed, and the seeded size stands until a sized client
+/// arrives.
+#[test]
+fn a_starving_client_attaching_first_leaves_the_seeded_size_until_a_sized_client_arrives() {
+    let (_server, fake, pane_id) = served("starving-first", |dir, session_id, _fake| {
+        let mut starving = open(&dir, session_id);
+        let (_, _, structure, echoed) =
+            attach_reporting(&mut starving, 2, BIG, Some(PaneArea::Starving));
+        let pane_id = structure.panes[0].id;
+        assert_eq!(echoed, Some(PaneArea::Starving));
+
+        // The served loop renders between the two attaches, with the tab's
+        // only viewer contributing no pane area.
+        let mut caller = open(&dir, session_id);
+        wait_for_client_count(&mut caller, 1, 3);
+
+        let mut big = open(&dir, session_id);
+        attach_reporting(&mut big, 2, BIG, None);
+        wait_for_client_count(&mut caller, 2, 1000);
+
+        (vec![caller, starving, big], pane_id)
+    });
+
+    // The seeded size stood while only the starving client viewed the tab,
+    // then the big client's own region took over.
+    assert_eq!(
+        fake.resizes(pane_id).expect("the pane was spawned"),
+        vec![SEEDED, PtySize { cols: 98, rows: 36 }],
+    );
+}
+
+/// An attach that reports no pane area is echoed back as none.
+#[test]
+fn an_attach_without_a_pane_area_echoes_none() {
+    let (_server, _fake, echoed) = served("echoes-none", |dir, session_id, _fake| {
+        let mut client = open(&dir, session_id);
+        let (_, _, _, echoed) = attach_reporting(&mut client, 2, BIG, None);
+        (vec![client], echoed)
+    });
+
+    assert_eq!(echoed, None);
 }
 
 #[test]

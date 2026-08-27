@@ -18,7 +18,7 @@ use std::fmt;
 use koshi_core::command::{Command, CommandEnvelope, CommandResult};
 use koshi_core::compat::SESSION_PROTOCOL;
 use koshi_core::discovery::SessionOverview;
-use koshi_core::geometry::{Direction, Size};
+use koshi_core::geometry::{Direction, PaneArea, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::key::KeyChord;
 use koshi_core::mouse::MouseInput;
@@ -217,6 +217,11 @@ pub enum IpcRequestKind {
         /// instead of failing.
         #[serde(default)]
         resume_token: Option<ConnectionToken>,
+        /// The pane region the caller draws the tab's panes in, which the
+        /// server records on the client. Absent, the server sizes the
+        /// client as its viewport minus two rows.
+        #[serde(default)]
+        pane_area: Option<PaneArea>,
     },
     /// One key press the attached client's keymap did not bind, for the pane
     /// it is typing into.
@@ -228,6 +233,10 @@ pub enum IpcRequestKind {
     Resize {
         /// The client's new terminal size in cells.
         viewport: Size,
+        /// The pane region the client draws the tab's panes in at the new
+        /// size; `None` replaces any earlier report.
+        #[serde(default)]
+        pane_area: Option<PaneArea>,
     },
     /// Text the attached client's outer terminal pasted, for the pane it is
     /// typing into. Carried whole, so no character of it can fire a
@@ -418,6 +427,10 @@ pub enum IpcResult {
         /// predates this field.
         #[serde(default)]
         resume_token: Option<ConnectionToken>,
+        /// The pane region the server holds for this client, exactly as the
+        /// attach reported it.
+        #[serde(default)]
+        pane_area: Option<PaneArea>,
     },
     /// What dispatching the submitted command produced.
     CommandResult(CommandResult),

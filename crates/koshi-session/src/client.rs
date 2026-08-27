@@ -13,15 +13,16 @@ use std::{
 pub use koshi_core::client::ClientOrigin;
 use koshi_core::{
     command::Selection,
-    geometry::Size,
+    geometry::{PaneArea, Size},
     ids::{ClientId, PaneId, SessionId, TabId},
     lock::LockMode,
 };
 use koshi_layout::mode::LayoutMode;
 use serde::{Deserialize, Serialize};
 
-/// Convert a full client terminal viewport into the middle pane region by
-/// reserving one top tabline row and one bottom key-hint row.
+/// The pane region of a client that reported none: the full `viewport` minus
+/// one top tabline row and one bottom key-hint row. `80x24` → `80x22`; a
+/// viewport two rows tall or shorter gives `0` rows.
 #[must_use]
 pub const fn pane_viewport(viewport: Size) -> Size {
     Size {
@@ -33,13 +34,17 @@ pub const fn pane_viewport(viewport: Size) -> Size {
 /// One attached client: a single terminal connected to a session, holding the
 /// identity the server gave it at attach and the view state that is the
 /// client's alone. Two clients on the same session — and even viewing the same
-/// tab — keep independent focus, lock mode and viewport.
+/// tab — keep independent focus, lock mode, viewport and reported pane area.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Client {
     id: ClientId,
     session_id: SessionId,
     attached_at: SystemTime,
     viewport: Size,
+    /// The pane region this client reported for the tab it views. `None`
+    /// when the client reported none.
+    #[serde(default)]
+    pane_area: Option<PaneArea>,
     active_tab: TabId,
     /// Where this client connected from, set by the server at attach.
     origin: ClientOrigin,
@@ -95,7 +100,7 @@ impl Client {
     /// the clock itself.
     // Carries the whole of one attach: the client's identity (`id`,
     // `session_id`, `origin`, `label`, `colour`) and its first view
-    // (`attached_at`, `viewport`, `active_tab`).
+    // (`attached_at`, `viewport`, `pane_area`, `active_tab`).
     #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn new(
@@ -103,6 +108,7 @@ impl Client {
         session_id: SessionId,
         attached_at: SystemTime,
         viewport: Size,
+        pane_area: Option<PaneArea>,
         active_tab: TabId,
         origin: ClientOrigin,
         label: String,
@@ -113,6 +119,7 @@ impl Client {
             session_id,
             attached_at,
             viewport,
+            pane_area,
             active_tab,
             origin,
             label,
@@ -358,6 +365,35 @@ impl Client {
     /// Update this client's viewport size.
     pub fn update_viewport(&mut self, viewport: Size) {
         self.viewport = viewport
+    }
+
+    /// The pane region this client's tab is sized against, in cells. `None`
+    /// when the client reported [`PaneArea::Starving`]; that client takes no
+    /// part in any size minimum.
+    ///
+    /// No report → [`pane_viewport`] of the viewport (`80x24` → `80x22`).
+    /// [`PaneArea::Reported`] → that size clamped per axis to the viewport
+    /// (`200x50` reported on an `80x24` viewport → `80x24`).
+    #[must_use]
+    pub fn pane_area(&self) -> Option<Size> {
+        match self.pane_area {
+            None => Some(pane_viewport(self.viewport)),
+            Some(PaneArea::Reported(size)) => Some(size.min_axes(self.viewport)),
+            Some(PaneArea::Starving) => None,
+        }
+    }
+
+    /// The pane region exactly as this client reported it; `None` when it
+    /// reported none.
+    #[must_use]
+    pub fn reported_pane_area(&self) -> Option<PaneArea> {
+        self.pane_area
+    }
+
+    /// Replace this client's reported pane region with `pane_area`, `None`
+    /// included.
+    pub fn update_pane_area(&mut self, pane_area: Option<PaneArea>) {
+        self.pane_area = pane_area
     }
 
     /// Set where this client's current connection came from.

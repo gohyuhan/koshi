@@ -20,7 +20,7 @@ use koshi_config::types::WheelScroll;
 use koshi_core::command::{
     FocusTabArgs, GridPos, NewPaneArgs, NewTabArgs, Selection, SelectionKind, TabTarget,
 };
-use koshi_core::geometry::{Direction, Point, Size};
+use koshi_core::geometry::{Direction, PaneArea, Point, Size};
 use koshi_core::ids::SessionId;
 use koshi_core::key::ModFlags;
 use koshi_core::mouse::{MouseButton, MouseInput, MouseKind, ScrollDirection};
@@ -1130,6 +1130,28 @@ fn the_forward_door_reports_whether_the_pane_was_written_to() {
         vec![format!("\x1b[<0;{col};{row}M").into_bytes()],
         "the refused press left no record"
     );
+}
+
+/// A tab whose only viewer reports [`PaneArea::Starving`] has no effective
+/// size: every pane is suppressed and the click is forwarded to no pane.
+#[test]
+fn a_click_from_a_starving_sole_viewer_forwards_nothing() {
+    let (mut runtime, fake, client) = runtime_with_fake();
+    let pane = only_pane(&runtime);
+    // Read the cell off the layout while the client still sizes the tab.
+    let (at, _col, _row) = a_content_cell(&runtime, client, pane);
+    runtime.handle_pty_output(pane, b"\x1b[?1000h\x1b[?1006h");
+
+    runtime
+        .session_for_client_mut(client)
+        .expect("session")
+        .clients
+        .get_mut(client)
+        .expect("client")
+        .update_pane_area(Some(PaneArea::Starving));
+
+    assert!(!runtime.forward_mouse_to_pane(client, pane, press(at.x, at.y)));
+    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
 }
 
 #[test]

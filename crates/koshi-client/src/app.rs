@@ -161,6 +161,7 @@ pub(crate) fn spawn_input_thread(inbox_tx: mpsc::Sender<RuntimeEvent>, client_id
                 Ok(Event::Resize(cols, rows)) => Some(RuntimeEvent::Resize {
                     client_id,
                     size: Size { cols, rows },
+                    pane_area: None,
                 }),
                 Ok(Event::Mouse(mouse)) => Some(RuntimeEvent::MouseInput {
                     client_id,

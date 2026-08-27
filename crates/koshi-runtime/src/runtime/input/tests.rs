@@ -12,7 +12,7 @@ use koshi_config::layer::{PartialKeybindingsConfig, PartialKoshiConfig, PartialL
 use koshi_config::types::{BoundAction, KeybindingsConfig, ModeBindings, ModeName};
 use koshi_core::action::ActionRef;
 use koshi_core::command::{Command, CommandResult, FocusPaneArgs, FocusTarget, NewPaneArgs};
-use koshi_core::geometry::{Direction, Size};
+use koshi_core::geometry::{Direction, PaneArea, Size};
 use koshi_core::ids::{PluginId, SessionId};
 use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags, NamedKey};
 use koshi_core::resolve::ActionArgs;
@@ -919,6 +919,30 @@ fn a_key_writes_nothing_when_the_client_has_no_focused_pane() {
     assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
 }
 
+/// A tab whose only viewer reports [`PaneArea::Starving`] has no effective
+/// size, so it solves to no drawn pane and takes no keystroke.
+#[test]
+fn a_key_from_a_starving_sole_viewer_writes_nothing() {
+    let (mut runtime, fake, client, mut viewer) = runtime();
+    let pane = only_pane(&runtime);
+    runtime
+        .session_for_client_mut(client)
+        .expect("session")
+        .clients
+        .get_mut(client)
+        .expect("client")
+        .update_pane_area(Some(PaneArea::Starving));
+
+    press(
+        &mut runtime,
+        &mut viewer,
+        chord(ModFlags::NONE, 'x'),
+        Instant::now(),
+    );
+
+    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
+}
+
 /// A pane the tab has no room to draw takes no keystroke: the client cannot see
 /// it, so a key aimed at the screen is not aimed at it. The terminal shrinks
 /// below the pane's minimum, the pane is suppressed, and `l` reaches no shell.
@@ -929,7 +953,7 @@ fn a_key_writes_nothing_when_the_focused_pane_is_suppressed() {
 
     // Shrink the terminal until the sole pane no longer fits: a pane needs
     // MIN_PANE_SIZE plus its one-cell border, and 3x3 leaves less than that.
-    runtime.handle_client_resize(client, Size { cols: 3, rows: 3 });
+    runtime.handle_client_resize(client, Size { cols: 3, rows: 3 }, None);
     assert!(
         runtime
             .build_snapshot(client)
@@ -957,7 +981,7 @@ fn a_key_reaches_the_pane_again_once_it_is_no_longer_suppressed() {
     let (mut runtime, fake, client, mut viewer) = runtime();
     let pane = only_pane(&runtime);
 
-    runtime.handle_client_resize(client, Size { cols: 3, rows: 3 });
+    runtime.handle_client_resize(client, Size { cols: 3, rows: 3 }, None);
     press(
         &mut runtime,
         &mut viewer,
@@ -966,7 +990,7 @@ fn a_key_reaches_the_pane_again_once_it_is_no_longer_suppressed() {
     );
     assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
 
-    runtime.handle_client_resize(client, Size { cols: 80, rows: 24 });
+    runtime.handle_client_resize(client, Size { cols: 80, rows: 24 }, None);
     press(
         &mut runtime,
         &mut viewer,
@@ -1046,6 +1070,7 @@ fn one_clients_zoom_does_not_stop_another_clients_keys() {
         session_id,
         SystemTime::now(),
         Size { cols: 80, rows: 24 },
+        None,
         tab_id,
         ClientOrigin::Local,
         "C-test-client".to_string(),
@@ -1117,6 +1142,7 @@ fn a_key_writes_nothing_when_the_focused_pane_collapsed_to_a_stack_header() {
         session_id,
         SystemTime::now(),
         Size { cols: 80, rows: 24 },
+        None,
         tab_id,
         ClientOrigin::Local,
         "C-test-client".to_string(),
@@ -1183,6 +1209,7 @@ fn pending_sequences_stay_independent_across_clients_in_the_same_session() {
         session_id,
         SystemTime::now(),
         Size { cols: 80, rows: 24 },
+        None,
         tab_id,
         ClientOrigin::Local,
         "C-test-client".to_string(),
@@ -1250,6 +1277,7 @@ fn one_viewers_open_sequence_is_invisible_to_another() {
         session_id,
         SystemTime::now(),
         Size { cols: 80, rows: 24 },
+        None,
         tab_id,
         ClientOrigin::Local,
         "C-test-client".to_string(),

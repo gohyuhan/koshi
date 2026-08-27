@@ -243,6 +243,7 @@ fn attach_with_token(
                 filter: EventFilterSpec::All,
                 resume: None,
                 resume_token,
+                pane_area: None,
             },
         })
         .expect("send attach");
@@ -253,6 +254,7 @@ fn attach_with_token(
         session_id,
         structure,
         resume_token,
+        ..
     } = reply.result
     else {
         panic!("expected an attach reply, got {:?}", reply.result);
@@ -1076,7 +1078,10 @@ fn an_attached_client_types_into_its_pane_and_resizes_the_tab_it_views() {
         viewer
             .send(&IpcRequest {
                 request_id: 5,
-                kind: IpcRequestKind::Resize { viewport: RESIZED },
+                kind: IpcRequestKind::Resize {
+                    viewport: RESIZED,
+                    pane_area: None,
+                },
             })
             .expect("send resize");
 

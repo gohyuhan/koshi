@@ -39,7 +39,7 @@ use koshi_core::{
         Event, InputMode, InputModeChanged, LayoutChanged, MouseSelectChanged, PaneFocused,
         PtyResized, RejectReason, SelectionChanged,
     },
-    geometry::{Direction, Rect, Size},
+    geometry::{Direction, PaneArea, Rect, Size},
     ids::{ClientId, CommandId, PaneId, SessionId, TabId},
     lock::LockMode,
     naming::{generate_name, NameKind},
@@ -61,7 +61,7 @@ use koshi_pane::pane::{
 };
 use koshi_pty::backend::state::{PtyBackend, PtyHandle};
 use koshi_pty::resize::{compute_pty_size, resize_for_layout_change};
-use koshi_session::client::{pane_viewport, Client, ClientOrigin};
+use koshi_session::client::{Client, ClientOrigin};
 use koshi_session::session::{
     cascade::{on_child_exit, remove_pane_cascade},
     lifecycle::SessionLifecycle,
@@ -771,9 +771,10 @@ impl Server {
 
     /// Reflow `tab_id`'s live PTYs to its current effective size when a client
     /// still views it, appending one [`Event::PtyResized`] per pane actually
-    /// resized. A tab no client views has no [`Session::tab_viewport`] and keeps
-    /// its sizes. The shared shape behind every "a tab's viewer set changed"
-    /// reflow — the full-tab solve with no freshly-spawned pane to skip.
+    /// resized. A tab no viewer contributes a pane area to has no
+    /// [`Session::tab_viewport`] and keeps its sizes. The shared shape behind
+    /// every "a tab's viewer set changed" reflow — the full-tab solve with no
+    /// freshly-spawned pane to skip.
     pub(crate) fn reflow_tab_if_viewed(
         &mut self,
         backend: &dyn PtyBackend,

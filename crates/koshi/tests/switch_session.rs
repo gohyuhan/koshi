@@ -211,6 +211,7 @@ fn attach(connection: &mut Connection, session_id: SessionId) -> ClientId {
             filter: EventFilterSpec::All,
             resume: None,
             resume_token: None,
+            pane_area: None,
         },
     };
     connection

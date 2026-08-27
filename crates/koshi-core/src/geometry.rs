@@ -41,6 +41,15 @@ impl Size {
     }
 }
 
+/// The pane region a client reports for the tab it views.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PaneArea {
+    /// The client draws the tab's panes inside a region of this size.
+    Reported(Size),
+    /// The client has no room to draw a pane.
+    Starving,
+}
+
 /// A rectangular region of cells, anchored at `origin` with the given `size`.
 ///
 /// ```text

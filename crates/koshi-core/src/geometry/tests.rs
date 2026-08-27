@@ -171,6 +171,33 @@ fn serde_roundtrip_enums() {
 }
 
 #[test]
+fn pane_area_reported_encodes_as_a_tagged_size() {
+    let json =
+        serde_json::to_string(&PaneArea::Reported(Size { cols: 80, rows: 22 })).expect("serialize");
+
+    assert_eq!(json, r#"{"Reported":{"cols":80,"rows":22}}"#);
+}
+
+#[test]
+fn pane_area_starving_encodes_as_a_bare_tag() {
+    let json = serde_json::to_string(&PaneArea::Starving).expect("serialize");
+
+    assert_eq!(json, r#""Starving""#);
+}
+
+#[test]
+fn pane_area_round_trips() {
+    for area in [
+        PaneArea::Reported(Size { cols: 80, rows: 22 }),
+        PaneArea::Starving,
+    ] {
+        let json = serde_json::to_string(&area).expect("serialize");
+        let back: PaneArea = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(area, back, "{json}");
+    }
+}
+
+#[test]
 fn direction_opposite_pairs_each_cardinal() {
     assert_eq!(Direction::Left.opposite(), Direction::Right);
     assert_eq!(Direction::Right.opposite(), Direction::Left);

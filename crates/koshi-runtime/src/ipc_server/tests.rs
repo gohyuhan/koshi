@@ -121,6 +121,7 @@ fn spawn_attaching_dispatcher(
                         events: events_rx,
                         ending_notice: Arc::clone(&ending_notice),
                         resume_token: ConnectionToken::new(MINTED_TOKEN),
+                        pane_area: None,
                     }));
                 }
                 detached @ RuntimeEvent::ClientDetached { .. } => {
@@ -164,6 +165,7 @@ fn spawn_ending_dispatcher(
                     events,
                     ending_notice: Arc::clone(&ending_notice),
                     resume_token: ConnectionToken::new(MINTED_TOKEN),
+                    pane_area: None,
                 }));
             }
         }
@@ -428,6 +430,7 @@ fn attach_to(runtime_dir: &Path, session: SessionId, client_id: ClientId) -> Con
                 filter: EventFilterSpec::All,
                 resume: None,
                 resume_token: None,
+                pane_area: None,
             },
         })
         .expect("send attach");
@@ -440,6 +443,7 @@ fn attach_to(runtime_dir: &Path, session: SessionId, client_id: ClientId) -> Con
             session_id: session,
             structure: attached_structure(session),
             resume_token: Some(ConnectionToken::new(MINTED_TOKEN)),
+            pane_area: None,
         },
     );
     connection
@@ -1084,14 +1088,23 @@ fn an_attached_connection_forwards_input_unanswered_and_detaches_on_any_other_re
     connection
         .send(&IpcRequest {
             request_id: 4,
-            kind: IpcRequestKind::Resize { viewport: resized },
+            kind: IpcRequestKind::Resize {
+                viewport: resized,
+                pane_area: None,
+            },
         })
         .expect("send resize");
-    let RuntimeEvent::Resize { client_id, size } = seen.recv().expect("resize event") else {
+    let RuntimeEvent::Resize {
+        client_id,
+        size,
+        pane_area,
+    } = seen.recv().expect("resize event")
+    else {
         panic!("expected Resize");
     };
     assert_eq!(client_id, client);
     assert_eq!(size, resized);
+    assert_eq!(pane_area, None);
 
     connection
         .send(&IpcRequest {
@@ -1832,6 +1845,7 @@ fn an_attached_client_of_another_local_user_is_detached_when_the_setting_goes_of
                 filter: EventFilterSpec::All,
                 resume: None,
                 resume_token: None,
+                pane_area: None,
             },
         })
         .expect("send attach");
@@ -1843,6 +1857,7 @@ fn an_attached_client_of_another_local_user_is_detached_when_the_setting_goes_of
             session_id: session,
             structure: attached_structure(session),
             resume_token: Some(ConnectionToken::new(MINTED_TOKEN)),
+            pane_area: None,
         }
     );
 
@@ -2467,6 +2482,7 @@ fn rotating_the_token_takes_connections_again_after_the_intake_closed() {
                 filter: EventFilterSpec::All,
                 resume: None,
                 resume_token: None,
+                pane_area: None,
             },
         })
         .expect("send attach");
@@ -2622,6 +2638,7 @@ fn spawn_origin_reporting_dispatcher(
                         events: events_rx,
                         ending_notice: Arc::clone(&ending_notice),
                         resume_token: ConnectionToken::new(MINTED_TOKEN),
+                        pane_area: None,
                     }));
                 }
                 RuntimeEvent::ClientDetached { .. } => queues.clear(),
@@ -2666,6 +2683,7 @@ fn attach_saying_remote(
                 filter: EventFilterSpec::All,
                 resume: None,
                 resume_token: None,
+                pane_area: None,
             },
         })
         .expect("send attach");
@@ -2677,6 +2695,7 @@ fn attach_saying_remote(
             session_id: session,
             structure: attached_structure(session),
             resume_token: Some(ConnectionToken::new(MINTED_TOKEN)),
+            pane_area: None,
         },
     );
     connection

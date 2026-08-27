@@ -53,9 +53,11 @@ impl Server {
     /// Returns `None` when no attached client has that id, or its viewed tab has
     /// gone — the caller skips the frame. On success, `session.active_tab` is the
     /// client's own viewed tab, solved over the tab's effective size (the
-    /// per-axis-minimum viewport across every client viewing it), so the renderer
-    /// letterboxes it (centers it with padding) into this client's larger
-    /// viewport.
+    /// per-axis-minimum pane area across every client viewing it), so the
+    /// renderer letterboxes it (centers it with padding) into this client's
+    /// larger viewport. A tab whose every viewer reports
+    /// [`PaneArea::Starving`](koshi_core::geometry::PaneArea::Starving) solves
+    /// at `0x0`: every pane is suppressed and the frame carries `all_suppressed`.
     pub fn build_snapshot(&self, client_id: ClientId) -> Option<RenderSnapshot> {
         let layout = self.build_layout(client_id)?;
         let session = self.session_for_client(client_id)?;
@@ -103,13 +105,15 @@ impl Server {
 
         // Solve the active tab's layout over a rect at origin (0, 0) sized to the
         // shared effective size; the renderer offsets it into the client viewport.
+        // A tab whose every viewer is starving solves at 0x0, which suppresses
+        // every pane.
         //
         // The solve uses THIS client's layout mode: zoom is per-client, so a pane
         // filling the tab for this client can be one tile among several for
         // another client viewing the same tab at the same moment.
         let effective_size = session
             .tab_viewport(active_tab_id)
-            .expect("the requesting client views its own active tab, so tab_viewport is Some");
+            .unwrap_or(Size { cols: 0, rows: 0 });
         let layout_mode = client.layout_mode(active_tab_id);
         let solve = solve_tab(tab, layout_mode, effective_size, self.effective_pane_min());
         let content = content_rects(&solve);

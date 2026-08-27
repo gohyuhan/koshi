@@ -7,7 +7,7 @@
 use std::time::SystemTime;
 
 use koshi_core::command::{GridPos, Selection, SelectionKind};
-use koshi_core::geometry::Size;
+use koshi_core::geometry::{PaneArea, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_layout::mode::LayoutMode;
@@ -21,6 +21,22 @@ fn a_client_with(id: ClientId, active_tab: TabId) -> Client {
         SessionId::new(),
         SystemTime::UNIX_EPOCH,
         Size { cols: 80, rows: 24 },
+        None,
+        active_tab,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
+    )
+}
+
+/// Creates a test client on an 80x24 viewport reporting `pane_area`.
+fn a_client_reporting(active_tab: TabId, pane_area: Option<PaneArea>) -> Client {
+    Client::new(
+        ClientId::new(),
+        SessionId::new(),
+        SystemTime::UNIX_EPOCH,
+        Size { cols: 80, rows: 24 },
+        pane_area,
         active_tab,
         ClientOrigin::Local,
         "C-test-client".to_string(),
@@ -41,6 +57,7 @@ fn a_client_keeps_the_origin_label_and_colour_it_was_made_with() {
             SessionId::new(),
             SystemTime::UNIX_EPOCH,
             Size { cols: 80, rows: 24 },
+            None,
             TabId::new(),
             origin,
             "C-swift-otter".to_string(),
@@ -67,6 +84,7 @@ fn a_client_carries_where_it_connected_from_across_a_serde_round_trip() {
             session_id,
             SystemTime::UNIX_EPOCH,
             Size { cols: 80, rows: 24 },
+            None,
             active_tab,
             origin,
             "C-swift-otter".to_string(),
@@ -612,4 +630,142 @@ fn pane_viewport_never_touches_the_column_count() {
         pane_viewport(Size { cols: 0, rows: 24 }),
         Size { cols: 0, rows: 22 }
     );
+}
+
+// --- pane_area ---------------------------------------------------------
+
+#[test]
+fn a_client_that_reported_no_pane_area_sizes_as_its_viewport_minus_two_rows() {
+    let client = a_client_reporting(TabId::new(), None);
+
+    assert_eq!(client.pane_area(), Some(Size { cols: 80, rows: 22 }));
+    assert_eq!(client.pane_area(), Some(pane_viewport(client.viewport())));
+}
+
+#[test]
+fn a_reported_pane_area_is_clamped_to_the_viewport_per_axis() {
+    // The viewport is 80x24 in every case.
+    let wider_and_taller = a_client_reporting(
+        TabId::new(),
+        Some(PaneArea::Reported(Size {
+            cols: 200,
+            rows: 50,
+        })),
+    );
+    assert_eq!(
+        wider_and_taller.pane_area(),
+        Some(Size { cols: 80, rows: 24 })
+    );
+
+    let inside = a_client_reporting(
+        TabId::new(),
+        Some(PaneArea::Reported(Size { cols: 40, rows: 10 })),
+    );
+    assert_eq!(inside.pane_area(), Some(Size { cols: 40, rows: 10 }));
+
+    let wider_only = a_client_reporting(
+        TabId::new(),
+        Some(PaneArea::Reported(Size {
+            cols: 100,
+            rows: 10,
+        })),
+    );
+    assert_eq!(wider_only.pane_area(), Some(Size { cols: 80, rows: 10 }));
+}
+
+#[test]
+fn a_reported_pane_area_equal_to_the_viewport_is_not_reduced() {
+    let client = a_client_reporting(
+        TabId::new(),
+        Some(PaneArea::Reported(Size { cols: 80, rows: 24 })),
+    );
+
+    // The report stands as given: no chrome rows are taken off it.
+    assert_eq!(client.pane_area(), Some(Size { cols: 80, rows: 24 }));
+}
+
+#[test]
+fn a_reported_pane_area_at_the_maximum_size_is_clamped_to_the_viewport() {
+    let client = a_client_reporting(
+        TabId::new(),
+        Some(PaneArea::Reported(Size {
+            cols: u16::MAX,
+            rows: u16::MAX,
+        })),
+    );
+
+    assert_eq!(client.pane_area(), Some(Size { cols: 80, rows: 24 }));
+}
+
+#[test]
+fn a_starving_client_has_no_pane_area() {
+    let client = a_client_reporting(TabId::new(), Some(PaneArea::Starving));
+
+    assert_eq!(client.pane_area(), None);
+}
+
+#[test]
+fn reported_pane_area_returns_the_raw_report() {
+    let reported = PaneArea::Reported(Size { cols: 40, rows: 10 });
+
+    assert_eq!(
+        a_client_reporting(TabId::new(), None).reported_pane_area(),
+        None
+    );
+    assert_eq!(
+        a_client_reporting(TabId::new(), Some(reported)).reported_pane_area(),
+        Some(reported)
+    );
+    assert_eq!(
+        a_client_reporting(TabId::new(), Some(PaneArea::Starving)).reported_pane_area(),
+        Some(PaneArea::Starving)
+    );
+}
+
+#[test]
+fn update_pane_area_replaces_a_report_with_none() {
+    let mut client = a_client_reporting(
+        TabId::new(),
+        Some(PaneArea::Reported(Size { cols: 40, rows: 10 })),
+    );
+    assert_eq!(client.pane_area(), Some(Size { cols: 40, rows: 10 }));
+
+    client.update_pane_area(None);
+
+    assert_eq!(client.reported_pane_area(), None);
+    assert_eq!(client.pane_area(), Some(Size { cols: 80, rows: 22 }));
+}
+
+#[test]
+fn a_client_json_without_pane_area_decodes_as_none() {
+    let client = a_client_reporting(TabId::new(), Some(PaneArea::Starving));
+    let mut encoded: serde_json::Value = serde_json::to_value(&client).expect("the client encodes");
+    assert!(
+        encoded
+            .as_object_mut()
+            .expect("a client encodes as a json object")
+            .remove("pane_area")
+            .is_some(),
+        "the encoded client carries a pane_area key"
+    );
+
+    let read_back: Client = serde_json::from_value(encoded).expect("the client decodes");
+
+    assert_eq!(read_back.reported_pane_area(), None);
+    assert_eq!(read_back.pane_area(), Some(Size { cols: 80, rows: 22 }));
+}
+
+#[test]
+fn a_client_reported_pane_area_survives_a_serde_round_trip() {
+    for reported in [
+        PaneArea::Starving,
+        PaneArea::Reported(Size { cols: 40, rows: 10 }),
+    ] {
+        let client = a_client_reporting(TabId::new(), Some(reported));
+
+        let text = serde_json::to_string(&client).expect("the client encodes");
+        let read_back: Client = serde_json::from_str(&text).expect("the client decodes");
+
+        assert_eq!(read_back.reported_pane_area(), Some(reported));
+    }
 }

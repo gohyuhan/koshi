@@ -4,26 +4,52 @@ use super::*;
 use std::time::SystemTime;
 
 use koshi_core::command::{GridPos, Selection, SelectionKind};
-use koshi_core::geometry::SplitDirection;
+use koshi_core::geometry::{PaneArea, SplitDirection};
 use koshi_core::lock::LockMode;
 use koshi_layout::tree::{LayoutChild, SplitNode};
 use koshi_pane::pane::state::PaneRecord;
 
 use crate::client::ClientOrigin;
 
-/// Attach a client viewing `tab` with the given viewport.
+/// Attach a client viewing `tab` with the given viewport, reporting no pane
+/// area.
 fn viewer(session: &mut Session, tab: TabId, cols: u16, rows: u16) {
+    reporting_viewer(session, tab, cols, rows, None);
+}
+
+/// Attach a client viewing `tab` with the given viewport, reporting
+/// `pane_area`, and return the id it attached under.
+fn reporting_viewer(
+    session: &mut Session,
+    tab: TabId,
+    cols: u16,
+    rows: u16,
+    pane_area: Option<PaneArea>,
+) -> ClientId {
+    let id = ClientId::new();
     let client = Client::new(
-        ClientId::new(),
+        id,
         session.id,
         SystemTime::UNIX_EPOCH,
         Size { cols, rows },
+        pane_area,
         tab,
         ClientOrigin::Local,
         "C-test-client".to_string(),
         0,
     );
     session.attach_client(client);
+    id
+}
+
+/// A session with no tabs and no clients.
+fn a_session() -> Session {
+    Session::new(
+        SessionId::new(),
+        "s".to_owned(),
+        SystemTime::UNIX_EPOCH,
+        ClientRegistry::new(),
+    )
 }
 
 #[test]
@@ -115,6 +141,152 @@ fn tab_viewport_saturates_rather_than_panics_below_the_chrome_rows() {
 }
 
 #[test]
+fn tab_viewport_leaves_a_starving_viewer_out() {
+    let tab = TabId::new();
+    let mut session = a_session();
+
+    viewer(&mut session, tab, 80, 24);
+    reporting_viewer(&mut session, tab, 80, 24, Some(PaneArea::Starving));
+
+    // Only the viewer that reported a pane area counts: 80x24 minus the two
+    // chrome rows.
+    assert_eq!(session.tab_viewport(tab), Some(Size { cols: 80, rows: 22 }));
+}
+
+#[test]
+fn tab_viewport_with_a_zero_reported_area_is_zero() {
+    let tab = TabId::new();
+    let mut session = a_session();
+
+    viewer(&mut session, tab, 80, 24);
+    reporting_viewer(
+        &mut session,
+        tab,
+        80,
+        24,
+        Some(PaneArea::Reported(Size { cols: 0, rows: 0 })),
+    );
+
+    assert_eq!(session.tab_viewport(tab), Some(Size { cols: 0, rows: 0 }));
+}
+
+#[test]
+fn tab_viewport_is_none_when_every_viewer_is_starving() {
+    let tab = TabId::new();
+    let mut session = a_session();
+
+    reporting_viewer(&mut session, tab, 80, 24, Some(PaneArea::Starving));
+    reporting_viewer(&mut session, tab, 80, 24, Some(PaneArea::Starving));
+
+    assert_eq!(session.tab_viewport(tab), None);
+}
+
+#[test]
+fn tab_viewport_takes_the_minimum_of_a_reported_and_an_unreported_viewer() {
+    let tab = TabId::new();
+    let mut session = a_session();
+
+    reporting_viewer(
+        &mut session,
+        tab,
+        120,
+        40,
+        Some(PaneArea::Reported(Size { cols: 60, rows: 30 })),
+    );
+    viewer(&mut session, tab, 80, 24);
+
+    // 60x30 reported against 80x22 from the unreported viewer.
+    assert_eq!(session.tab_viewport(tab), Some(Size { cols: 60, rows: 22 }));
+}
+
+#[test]
+fn tab_viewport_takes_the_element_wise_minimum_of_two_reports() {
+    let tab = TabId::new();
+    let mut session = a_session();
+
+    reporting_viewer(
+        &mut session,
+        tab,
+        120,
+        40,
+        Some(PaneArea::Reported(Size {
+            cols: 100,
+            rows: 20,
+        })),
+    );
+    reporting_viewer(
+        &mut session,
+        tab,
+        120,
+        40,
+        Some(PaneArea::Reported(Size { cols: 60, rows: 30 })),
+    );
+
+    // The narrower report gives the columns, the shorter one gives the rows.
+    assert_eq!(session.tab_viewport(tab), Some(Size { cols: 60, rows: 20 }));
+}
+
+#[test]
+fn tab_viewport_does_not_depend_on_where_the_starving_viewer_attached() {
+    let tab = TabId::new();
+
+    let mut starving_first = a_session();
+    reporting_viewer(&mut starving_first, tab, 80, 24, Some(PaneArea::Starving));
+    viewer(&mut starving_first, tab, 80, 24);
+
+    let mut starving_second = a_session();
+    viewer(&mut starving_second, tab, 80, 24);
+    reporting_viewer(&mut starving_second, tab, 80, 24, Some(PaneArea::Starving));
+
+    assert_eq!(
+        starving_first.tab_viewport(tab),
+        Some(Size { cols: 80, rows: 22 })
+    );
+    assert_eq!(
+        starving_second.tab_viewport(tab),
+        Some(Size { cols: 80, rows: 22 })
+    );
+}
+
+#[test]
+fn detaching_a_starving_viewer_leaves_tab_viewport_unchanged() {
+    let tab = TabId::new();
+    let mut session = a_session();
+    viewer(&mut session, tab, 80, 24);
+    let starving = reporting_viewer(&mut session, tab, 80, 24, Some(PaneArea::Starving));
+    assert_eq!(session.tab_viewport(tab), Some(Size { cols: 80, rows: 22 }));
+
+    session.detach_client(starving);
+
+    assert_eq!(session.tab_viewport(tab), Some(Size { cols: 80, rows: 22 }));
+}
+
+#[test]
+fn detaching_the_smallest_viewer_lets_tab_viewport_grow() {
+    let tab = TabId::new();
+    let mut session = a_session();
+    let smallest = reporting_viewer(
+        &mut session,
+        tab,
+        120,
+        40,
+        Some(PaneArea::Reported(Size { cols: 60, rows: 30 })),
+    );
+    viewer(&mut session, tab, 120, 40);
+    assert_eq!(session.tab_viewport(tab), Some(Size { cols: 60, rows: 30 }));
+
+    session.detach_client(smallest);
+
+    assert_eq!(
+        session.tab_viewport(tab),
+        Some(Size {
+            cols: 120,
+            rows: 38
+        })
+    );
+}
+
+#[test]
 fn attach_client_returns_the_client_it_displaced_on_reattach() {
     // A re-attach under the same id replaces in place; the caller needs the
     // displaced record back (e.g. to tear down its old view state).
@@ -131,6 +303,7 @@ fn attach_client_returns_the_client_it_displaced_on_reattach() {
         session.id,
         SystemTime::UNIX_EPOCH,
         Size { cols: 0, rows: 0 },
+        None,
         tab,
         ClientOrigin::Local,
         "C-test-client".to_string(),
@@ -143,6 +316,7 @@ fn attach_client_returns_the_client_it_displaced_on_reattach() {
         session.id,
         SystemTime::UNIX_EPOCH,
         Size { cols: 40, rows: 10 },
+        None,
         tab,
         ClientOrigin::Local,
         "C-test-client".to_string(),
@@ -180,6 +354,7 @@ fn attaching_a_client_before_any_tab_leaves_the_session_starting() {
         session.id,
         SystemTime::UNIX_EPOCH,
         Size { cols: 0, rows: 0 },
+        None,
         tab,
         ClientOrigin::Local,
         "C-test-client".to_string(),
@@ -205,6 +380,7 @@ fn detach_client_returns_the_exact_record_it_removed() {
         session.id,
         SystemTime::UNIX_EPOCH,
         Size { cols: 12, rows: 3 },
+        None,
         tab,
         ClientOrigin::Local,
         "C-test-client".to_string(),
@@ -282,6 +458,7 @@ fn detaching_the_last_client_of_a_stopping_session_does_not_revert_it() {
         session.id,
         SystemTime::UNIX_EPOCH,
         Size { cols: 0, rows: 0 },
+        None,
         tab,
         ClientOrigin::Local,
         "C-test-client".to_string(),
@@ -366,6 +543,7 @@ fn a_session_with_tabs_panes_and_clients_survives_a_serde_round_trip() {
             cols: 100,
             rows: 30,
         },
+        None,
         tab_one,
         ClientOrigin::Local,
         "C-brave-otter".to_owned(),
@@ -388,6 +566,7 @@ fn a_session_with_tabs_panes_and_clients_survives_a_serde_round_trip() {
         session.id,
         SystemTime::UNIX_EPOCH,
         Size { cols: 80, rows: 24 },
+        None,
         tab_two,
         ClientOrigin::Local,
         "C-calm-heron".to_owned(),
@@ -496,6 +675,7 @@ fn attaching_a_client_to_a_stopping_session_registers_it_without_reviving_it() {
         session.id,
         SystemTime::UNIX_EPOCH,
         Size { cols: 80, rows: 24 },
+        None,
         tab,
         ClientOrigin::Local,
         "C-test-client".to_string(),

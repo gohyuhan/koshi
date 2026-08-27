@@ -39,9 +39,10 @@ impl Server {
     /// else where the designated client's focused pane currently is
     /// ([`Self::pane_live_cwd`]). After the
     /// commit, the tab the client left reflows to its remaining viewers'
-    /// viewport; a tab left with no viewer keeps its sizes. A launch failure
-    /// commits nothing and rejects, so a tab never exists without its
-    /// process.
+    /// viewport; a tab left with no viewer keeps its sizes. A designated
+    /// client reporting [`PaneArea::Starving`] is rejected with
+    /// [`RejectReason::MinSize`]. A launch failure commits nothing and
+    /// rejects, so a tab never exists without its process.
     pub(super) fn handle_new_tab(
         &mut self,
         command_id: CommandId,
@@ -79,17 +80,15 @@ impl Server {
             .get(target.client_id)
             .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))?;
 
-        // New tab occupies the client's middle pane region, excluding chrome.
-        let viewport = pane_viewport(client.viewport());
+        // The new tab fills the designated client's pane area.
+        let no_room = || Rejection::new(RejectReason::MinSize, "not enough space for a new tab");
+        let viewport = client.pane_area().ok_or_else(no_room)?;
         let new_pane_id = PaneId::new();
         let new_tab_id = TabId::new();
         let candidate = LayoutNode::Pane(new_pane_id);
         let tab_rect = Rect::at_origin(viewport);
         if !fits(&candidate, tab_rect, pane_min) {
-            return Err(Rejection::new(
-                RejectReason::MinSize,
-                "not enough space for a new tab",
-            ));
+            return Err(no_room());
         }
         let spawn_size = size_root_pane(new_pane_id, viewport, pane_min);
 

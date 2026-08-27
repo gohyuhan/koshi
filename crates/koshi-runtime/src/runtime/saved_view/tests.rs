@@ -23,6 +23,7 @@ fn client(id: ClientId, active_tab: TabId) -> Client {
         SessionId::new(),
         moment(0),
         Size { cols: 80, rows: 24 },
+        None,
         active_tab,
         ClientOrigin::Local,
         "C-calm-otter".to_string(),

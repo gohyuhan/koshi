@@ -1143,6 +1143,7 @@ fn two_clients_selecting_in_one_pane_never_see_each_others_highlight() {
         session_id,
         SystemTime::UNIX_EPOCH,
         Size { cols: 80, rows: 24 },
+        None,
         tab,
         koshi_session::client::ClientOrigin::Local,
         "C-test-client".to_string(),

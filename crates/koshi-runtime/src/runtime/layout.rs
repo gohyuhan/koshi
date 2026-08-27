@@ -46,8 +46,9 @@ impl Server {
             .into_iter()
             .map(|tab| {
                 // One size per tab, not per client: `tab_viewport` is the
-                // smallest viewing terminal on each axis, and it is `None`
-                // exactly when no client views the tab.
+                // smallest pane area on each axis among the clients viewing
+                // the tab that report one, and it is `None` when no such
+                // client views the tab.
                 let solved = match session.tab_viewport(tab.id()) {
                     None => Vec::new(),
                     Some(viewport) => session

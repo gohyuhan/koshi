@@ -70,6 +70,7 @@ impl Server {
                 session_id,
                 client_id,
                 viewport,
+                pane_area,
                 active_tab,
                 attached_at,
             } => {
@@ -79,6 +80,7 @@ impl Server {
                     session_id,
                     client_id,
                     viewport,
+                    pane_area,
                     active_tab,
                     attached_at,
                     false,
@@ -100,8 +102,12 @@ impl Server {
                 let events = self.handle_client_detach(client_id);
                 self.publish_events(&events);
             }
-            RuntimeEvent::Resize { client_id, size } => {
-                let events = self.handle_client_resize(client_id, size);
+            RuntimeEvent::Resize {
+                client_id,
+                size,
+                pane_area,
+            } => {
+                let events = self.handle_client_resize(client_id, size, pane_area);
                 self.publish_events(&events);
             }
             // The loop's generic wake-up. The session holds no deadline of its
@@ -117,6 +123,7 @@ impl Server {
                 resume,
                 resume_token,
                 viewport,
+                pane_area,
                 filter,
                 attached_at,
                 remote,
@@ -129,6 +136,7 @@ impl Server {
                     resume,
                     resume_token,
                     viewport,
+                    pane_area,
                     filter,
                     attached_at,
                     remote,

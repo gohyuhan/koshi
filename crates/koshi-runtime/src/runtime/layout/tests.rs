@@ -5,7 +5,7 @@
 use std::sync::{mpsc, Arc};
 use std::time::SystemTime;
 
-use koshi_core::geometry::{Point, Rect, Size, SplitDirection};
+use koshi_core::geometry::{PaneArea, Point, Rect, Size, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, SessionId};
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::size::SizeWeight;
@@ -69,13 +69,14 @@ fn add_tab(session: &mut Session, tab_id: TabId, name: &str, index: usize, root_
         .insert(tab_id, Tab::new(tab_id, name.to_string(), index, root_pane));
 }
 
-/// Attach `client_id` viewing `tab` at `viewport`, focused on `focused`, and
-/// zoomed on `zoomed`.
+/// Attach `client_id` viewing `tab` at `viewport` reporting `pane_area`,
+/// focused on `focused`, and zoomed on `zoomed`.
 fn attach(
     session: &mut Session,
     client_id: ClientId,
     tab: TabId,
     viewport: Size,
+    pane_area: Option<PaneArea>,
     focused: Option<PaneId>,
     zoomed: Option<PaneId>,
 ) {
@@ -84,6 +85,7 @@ fn attach(
         session.id,
         SystemTime::UNIX_EPOCH,
         viewport,
+        pane_area,
         tab,
         ClientOrigin::Local,
         "C-test-client".to_string(),
@@ -131,7 +133,7 @@ fn one_tab_one_client_reports_the_tree_the_solve_and_the_focus() {
     let client = ClientId::new();
     let mut session = empty_session(session_id);
     add_tab(&mut session, tab, "editor", 0, pane);
-    attach(&mut session, client, tab, VIEWPORT, Some(pane), None);
+    attach(&mut session, client, tab, VIEWPORT, None, Some(pane), None);
     let (runtime, _tx) = runtime_with(session);
 
     let layout = runtime
@@ -178,7 +180,7 @@ fn a_client_that_has_focused_nothing_reports_no_focused_pane() {
     let client = ClientId::new();
     let mut session = empty_session(session_id);
     add_tab(&mut session, tab, "editor", 0, pane);
-    attach(&mut session, client, tab, VIEWPORT, None, None);
+    attach(&mut session, client, tab, VIEWPORT, None, None, None);
     let (runtime, _tx) = runtime_with(session);
 
     let layout = runtime
@@ -216,6 +218,38 @@ fn a_session_with_no_tabs_and_no_clients_reports_only_its_own_name() {
 }
 
 #[test]
+fn a_tab_whose_only_viewer_is_starving_lists_no_solved_layout() {
+    let session_id = SessionId::new();
+    let tab = TabId::new();
+    let pane = PaneId::new();
+    let client = ClientId::new();
+    let mut session = empty_session(session_id);
+    add_tab(&mut session, tab, "editor", 0, pane);
+    attach(
+        &mut session,
+        client,
+        tab,
+        VIEWPORT,
+        Some(PaneArea::Starving),
+        Some(pane),
+        None,
+    );
+    let (runtime, _tx) = runtime_with(session);
+
+    let layout = runtime
+        .build_session_layout(None)
+        .expect("one session is running");
+
+    let described = layout
+        .tabs
+        .iter()
+        .find(|entry| entry.id == tab)
+        .expect("the tab is still described");
+    assert_eq!(described.tree, LayoutNode::Pane(pane));
+    assert_eq!(described.solved, Vec::new());
+}
+
+#[test]
 fn a_tab_no_client_views_carries_its_tree_and_no_solve() {
     let session_id = SessionId::new();
     let watched = TabId::new();
@@ -231,6 +265,7 @@ fn a_tab_no_client_views_carries_its_tree_and_no_solve() {
         client,
         watched,
         VIEWPORT,
+        None,
         Some(watched_pane),
         None,
     );
@@ -277,10 +312,19 @@ fn a_client_viewing_another_tab_is_left_out_of_this_tab_solve() {
         on_editor,
         editor,
         VIEWPORT,
+        None,
         Some(editor_pane),
         None,
     );
-    attach(&mut session, on_logs, logs, VIEWPORT, Some(logs_pane), None);
+    attach(
+        &mut session,
+        on_logs,
+        logs,
+        VIEWPORT,
+        None,
+        Some(logs_pane),
+        None,
+    );
     let (runtime, _tx) = runtime_with(session);
 
     let layout = runtime
@@ -350,6 +394,7 @@ fn narrowing_to_one_tab_describes_that_tab_alone_and_still_names_every_client() 
         client,
         first,
         VIEWPORT,
+        None,
         Some(first_pane),
         None,
     );
@@ -381,7 +426,7 @@ fn narrowing_to_a_tab_that_does_not_exist_describes_no_tab_at_all() {
     let client = ClientId::new();
     let mut session = empty_session(session_id);
     add_tab(&mut session, tab, "editor", 0, pane);
-    attach(&mut session, client, tab, VIEWPORT, Some(pane), None);
+    attach(&mut session, client, tab, VIEWPORT, None, Some(pane), None);
     let (runtime, _tx) = runtime_with(session);
 
     let layout = runtime
@@ -422,6 +467,7 @@ fn a_zoomed_client_reports_fullscreen_and_gives_the_whole_tab_to_one_pane() {
         client,
         tab,
         VIEWPORT,
+        None,
         Some(right),
         Some(right),
     );
@@ -467,8 +513,16 @@ fn two_clients_on_one_tab_each_get_their_own_solve_of_the_same_tree() {
         .get_mut(&tab)
         .expect("the tab was just added")
         .update_layout(side_by_side(left, right));
-    attach(&mut session, tiled, tab, VIEWPORT, Some(left), None);
-    attach(&mut session, zoomed, tab, VIEWPORT, Some(left), Some(left));
+    attach(&mut session, tiled, tab, VIEWPORT, None, Some(left), None);
+    attach(
+        &mut session,
+        zoomed,
+        tab,
+        VIEWPORT,
+        None,
+        Some(left),
+        Some(left),
+    );
     let (runtime, _tx) = runtime_with(session);
 
     let layout = runtime
@@ -520,7 +574,7 @@ fn two_clients_of_different_sizes_on_one_tab_both_solve_against_the_smaller() {
     let [small, big] = ids;
     let mut session = empty_session(session_id);
     add_tab(&mut session, tab, "editor", 0, pane);
-    attach(&mut session, small, tab, VIEWPORT, Some(pane), None);
+    attach(&mut session, small, tab, VIEWPORT, None, Some(pane), None);
     attach(
         &mut session,
         big,
@@ -529,6 +583,7 @@ fn two_clients_of_different_sizes_on_one_tab_both_solve_against_the_smaller() {
             cols: 120,
             rows: 40,
         },
+        None,
         Some(pane),
         None,
     );
@@ -580,7 +635,7 @@ fn a_collapsed_stack_member_reports_its_header_strip() {
             vec![shown, collapsed],
             0,
         )));
-    attach(&mut session, client, tab, VIEWPORT, Some(shown), None);
+    attach(&mut session, client, tab, VIEWPORT, None, Some(shown), None);
     let (runtime, _tx) = runtime_with(session);
 
     let layout = runtime
@@ -645,7 +700,7 @@ fn a_stack_whose_active_member_is_flagged_collapsed_still_expands_that_member() 
             weights: vec![SizeWeight::default(), SizeWeight::default()],
             active: 0,
         }));
-    attach(&mut session, client, tab, VIEWPORT, Some(first), None);
+    attach(&mut session, client, tab, VIEWPORT, None, Some(first), None);
     let (runtime, _tx) = runtime_with(session);
 
     let layout = runtime
@@ -691,6 +746,7 @@ fn a_terminal_too_small_for_one_pane_suppresses_every_pane() {
         client,
         tab,
         Size { cols: 3, rows: 5 },
+        None,
         Some(pane),
         None,
     );
@@ -733,6 +789,7 @@ fn a_pane_that_no_longer_fits_beside_its_neighbour_is_the_only_one_suppressed() 
         client,
         tab,
         Size { cols: 6, rows: 6 },
+        None,
         Some(left),
         None,
     );

@@ -45,17 +45,25 @@ impl Server {
     /// Every accepted attach mints a new token, carried back on
     /// [`AttachAccepted::resume_token`].
     ///
+    /// `pane_area` is recorded on the client record, `None` included, and
+    /// handed back on [`AttachAccepted::pane_area`].
+    ///
     /// Registration and subscription land in the same turn, so the structure
     /// returned here and the queue's first event describe one continuous
     /// state: no change can slip between them. `None` when no session is
     /// running, or when the one running holds no tab to view — neither is
     /// something a client can attach to. `attached_at` is supplied by the
     /// caller; the handler never reads the clock itself.
+    // Carries the whole of one attach request: what it claims back (`resume`,
+    // `resume_token`), the view it arrives with (`viewport`, `pane_area`), and
+    // how the connection is served (`filter`, `attached_at`, `remote`).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn handle_ipc_attach(
         &mut self,
         resume: Option<ClientId>,
         resume_token: Option<ConnectionToken>,
         viewport: Size,
+        pane_area: Option<PaneArea>,
         filter: EventFilter,
         attached_at: SystemTime,
         remote: bool,
@@ -100,6 +108,7 @@ impl Server {
             session_id,
             client_id,
             viewport,
+            pane_area,
             active_tab,
             attached_at,
             remote,
@@ -122,6 +131,7 @@ impl Server {
             events,
             ending_notice: Arc::clone(self.event_bus.ending_notice()),
             resume_token,
+            pane_area,
         })
     }
 
@@ -210,21 +220,28 @@ impl Server {
     /// when true, [`ClientOrigin::Local`] otherwise. A re-attach overwrites the
     /// origin the client already carried.
     ///
-    /// The viewer joins each affected tab's effective size
-    /// ([`Session::tab_viewport`], the per-axis minimum across every client
-    /// viewing it), so a smaller client shrinks a tab and a departing one lets it
-    /// grow: the tab's live panes reflow to the new size, one
-    /// [`Event::PtyResized`] each. A tab no client views has no viewport and
+    /// Records `pane_area` on the client, `None` included: a re-attach that
+    /// reports none replaces an earlier report. The viewer joins each affected
+    /// tab's effective size ([`Session::tab_viewport`], the per-axis minimum of
+    /// every viewing client's pane area; a client reporting
+    /// [`PaneArea::Starving`] contributes none), so a smaller client shrinks a
+    /// tab and a departing one lets it grow: the tab's live panes reflow to the
+    /// new size, one [`Event::PtyResized`] each. A tab with no effective size
     /// keeps its sizes. The attach always invalidates
     /// [`InvalidationReason::LayoutChanged`] so every client repaints from the
     /// reconciled snapshot. An attach naming an unknown session, or a tab the
     /// session does not hold, is dropped. `attached_at` is supplied by the
     /// producer; the handler never reads the clock itself.
+    // Carries the whole of one attach: where it lands (`session_id`,
+    // `client_id`, `active_tab`), the view it arrives with (`viewport`,
+    // `pane_area`), and where it came from (`attached_at`, `remote`).
+    #[allow(clippy::too_many_arguments)]
     pub fn handle_client_attach(
         &mut self,
         session_id: SessionId,
         client_id: ClientId,
         viewport: Size,
+        pane_area: Option<PaneArea>,
         active_tab: TabId,
         attached_at: SystemTime,
         remote: bool,
@@ -280,6 +297,7 @@ impl Server {
         let prior_tab = if let Some(client) = session.clients.get_mut(client_id) {
             let prior = client.active_tab();
             client.update_viewport(viewport);
+            client.update_pane_area(pane_area);
             client.update_active_tab(active_tab);
             client.update_origin(origin);
             Some(prior)
@@ -304,6 +322,7 @@ impl Server {
                 session_id,
                 attached_at,
                 viewport,
+                pane_area,
                 active_tab,
                 origin,
                 label,
@@ -350,7 +369,16 @@ impl Server {
 
     /// Update one client's full terminal viewport, reconcile the active tab's
     /// pane region and PTYs, then schedule a frame for the new terminal size.
-    pub fn handle_client_resize(&mut self, client_id: ClientId, viewport: Size) -> Vec<Event> {
+    ///
+    /// `pane_area` replaces the client's report, `None` included. A resize
+    /// reporting [`PaneArea::Starving`] from the tab's only viewer resizes no
+    /// PTY; that client's next frame carries every pane suppressed.
+    pub fn handle_client_resize(
+        &mut self,
+        client_id: ClientId,
+        viewport: Size,
+        pane_area: Option<PaneArea>,
+    ) -> Vec<Event> {
         let backend = Arc::clone(self.pty_backend());
         let Some(session_id) = self.session_for_client(client_id).map(|session| session.id) else {
             return Vec::new();
@@ -364,6 +392,7 @@ impl Server {
         };
         let active_tab = client.active_tab();
         client.update_viewport(viewport);
+        client.update_pane_area(pane_area);
 
         let mut events = Vec::new();
         self.reflow_tab_if_viewed(backend.as_ref(), session_id, active_tab, &mut events);

@@ -7,10 +7,11 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use koshi_core::command::{GridPos, Selection, SelectionKind};
-use koshi_core::geometry::{Point, Rect, Size};
+use koshi_core::geometry::{PaneArea, Point, Rect, Size, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::process::PtySize;
+use koshi_layout::tree::{LayoutChild, LayoutNode, SplitNode};
 use koshi_pane::pane::lifecycle::PaneLifecycleEvent;
 use koshi_pane::pane::state::PaneRecord;
 use koshi_pty::backend::state::PtyBackend;
@@ -40,8 +41,17 @@ fn new_runtime() -> Server {
 }
 
 /// A session with one tab (single-pane layout), the pane registered, and one
-/// client attached viewing that tab focused on the pane.
+/// client attached viewing that tab focused on the pane, reporting no pane
+/// area.
 fn session_with_client(viewport: Size) -> (Session, SessionId, TabId, PaneId, ClientId) {
+    session_with_client_reporting(viewport, None)
+}
+
+/// [`session_with_client`] whose one client reports `pane_area`.
+fn session_with_client_reporting(
+    viewport: Size,
+    pane_area: Option<PaneArea>,
+) -> (Session, SessionId, TabId, PaneId, ClientId) {
     let session_id = SessionId::new();
     let tab_id = TabId::new();
     let pane_id = PaneId::new();
@@ -66,6 +76,7 @@ fn session_with_client(viewport: Size) -> (Session, SessionId, TabId, PaneId, Cl
         session_id,
         SystemTime::now(),
         viewport,
+        pane_area,
         tab_id,
         ClientOrigin::Local,
         "C-test-client".to_string(),
@@ -295,6 +306,7 @@ fn effective_size_is_the_min_viewport_across_clients_not_the_requesters() {
         session_id,
         SystemTime::now(),
         Size { cols: 40, rows: 10 },
+        None,
         tab_id,
         ClientOrigin::Local,
         "C-test-client".to_string(),
@@ -308,6 +320,94 @@ fn effective_size_is_the_min_viewport_across_clients_not_the_requesters() {
     // The requesting client's own viewport is unchanged...
     assert_eq!(snap.client.viewport, Size { cols: 80, rows: 24 });
     // ...but the tab is solved at the shared minimum, which the renderer letterboxes.
+    assert_eq!(
+        snap.session.active_tab.effective_size,
+        Size { cols: 40, rows: 8 }
+    );
+}
+
+#[test]
+fn build_snapshot_for_a_starving_sole_viewer_suppresses_every_pane() {
+    let mut rt = new_runtime();
+    let (mut session, session_id, tab_id, pane_id, client_id) =
+        session_with_client_reporting(Size { cols: 80, rows: 24 }, Some(PaneArea::Starving));
+    let second_pane = PaneId::new();
+    session
+        .panes
+        .insert(PaneRecord::new(second_pane, SystemTime::now()))
+        .expect("unique pane id");
+    session
+        .tabs
+        .get_mut(&tab_id)
+        .expect("tab")
+        .update_layout(LayoutNode::Split(SplitNode::with_equal_weights(
+            SplitDirection::Horizontal,
+            vec![
+                LayoutChild::new(LayoutNode::Pane(pane_id)),
+                LayoutChild::new(LayoutNode::Pane(second_pane)),
+            ],
+        )));
+    rt.sessions.insert(session_id, session);
+    rt.terminal_engines
+        .insert(pane_id, TerminalEngine::new(PtySize { cols: 80, rows: 24 }));
+    rt.terminal_engines.insert(
+        second_pane,
+        TerminalEngine::new(PtySize { cols: 80, rows: 24 }),
+    );
+
+    // The tab's only viewer contributes no pane area: the tab solves at 0x0,
+    // every pane is suppressed, and the client still gets a frame.
+    let snap = rt.build_snapshot(client_id).expect("a frame");
+    assert_eq!(snap.client.viewport, Size { cols: 80, rows: 24 });
+    assert_eq!(
+        snap.session.active_tab.effective_size,
+        Size { cols: 0, rows: 0 }
+    );
+    assert!(snap.session.active_tab.all_suppressed);
+    let slots: Vec<(PaneId, bool, bool, Option<Rect>)> = snap
+        .session
+        .active_tab
+        .layout_solved
+        .iter()
+        .map(|slot| (slot.pane_id, slot.suppressed, slot.visible, slot.inner_rect))
+        .collect();
+    assert_eq!(
+        slots,
+        vec![
+            (pane_id, true, false, None),
+            (second_pane, true, false, None)
+        ]
+    );
+}
+
+#[test]
+fn build_snapshot_for_a_starving_viewer_solves_at_the_other_viewers_pane_area() {
+    let mut rt = new_runtime();
+    let (mut session, session_id, tab_id, pane_id, starving_client) =
+        session_with_client_reporting(Size { cols: 80, rows: 24 }, Some(PaneArea::Starving));
+
+    // A second client views the same tab at a smaller viewport, reporting no
+    // pane area of its own.
+    let sizing_client = ClientId::new();
+    let mut client = Client::new(
+        sizing_client,
+        session_id,
+        SystemTime::now(),
+        Size { cols: 40, rows: 10 },
+        None,
+        tab_id,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
+    );
+    client.update_focused_pane(tab_id, pane_id);
+    session.attach_client(client);
+    rt.sessions.insert(session_id, session);
+
+    let snap = rt.build_snapshot(starving_client).expect("snapshot");
+    // The requesting client's own viewport is unchanged...
+    assert_eq!(snap.client.viewport, Size { cols: 80, rows: 24 });
+    // ...and the tab solves at the one viewer that contributes a pane area.
     assert_eq!(
         snap.session.active_tab.effective_size,
         Size { cols: 40, rows: 8 }

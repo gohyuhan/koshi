@@ -57,12 +57,41 @@ fn resize_carries_its_client_and_size() {
     let event = RuntimeEvent::Resize {
         client_id: client,
         size: Size { cols: 80, rows: 24 },
+        pane_area: None,
     };
-    let RuntimeEvent::Resize { client_id, size } = &event else {
+    let RuntimeEvent::Resize {
+        client_id,
+        size,
+        pane_area,
+    } = &event
+    else {
         panic!("expected Resize");
     };
     assert_eq!(*client_id, client);
     assert_eq!(*size, Size { cols: 80, rows: 24 });
+    assert_eq!(*pane_area, None);
+}
+
+#[test]
+fn resize_carries_a_reported_pane_area() {
+    let client = ClientId::new();
+    let reported = PaneArea::Reported(Size { cols: 60, rows: 20 });
+    let event = RuntimeEvent::Resize {
+        client_id: client,
+        size: Size { cols: 80, rows: 24 },
+        pane_area: Some(reported),
+    };
+    let RuntimeEvent::Resize {
+        client_id,
+        size,
+        pane_area,
+    } = &event
+    else {
+        panic!("expected Resize");
+    };
+    assert_eq!(*client_id, client);
+    assert_eq!(*size, Size { cols: 80, rows: 24 });
+    assert_eq!(*pane_area, Some(reported));
 }
 
 #[test]

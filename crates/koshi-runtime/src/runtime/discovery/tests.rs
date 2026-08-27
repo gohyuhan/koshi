@@ -7,7 +7,7 @@ use std::time::SystemTime;
 use koshi_core::client::ClientOrigin;
 use koshi_core::command::{Command, CommandEnvelope, CommandSource};
 use koshi_core::discovery::PaneState;
-use koshi_core::geometry::{Direction, Size};
+use koshi_core::geometry::{Direction, PaneArea, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::process::{ShellKind, SpawnSpec};
@@ -169,7 +169,7 @@ fn the_overview_reports_where_each_client_connected_from() {
         .copied()
         .expect("the genesis tab");
     let remote = ClientId::new();
-    runtime.handle_client_attach(session_id, remote, VIEWPORT, tab, now, true);
+    runtime.handle_client_attach(session_id, remote, VIEWPORT, None, tab, now, true);
 
     let overview = runtime.build_overview().expect("one session is running");
     let origin_of = |id: ClientId| {
@@ -184,6 +184,50 @@ fn the_overview_reports_where_each_client_connected_from() {
     // client that typed it is on this machine.
     assert_eq!(origin_of(local), Some(Some(ClientOrigin::Local)));
     assert_eq!(origin_of(remote), Some(Some(ClientOrigin::Remote)));
+}
+
+/// The overview carries the client's report exactly as it arrived, next to
+/// the raw terminal viewport it was reported alongside.
+#[test]
+fn discovery_reports_the_raw_pane_area() {
+    let (mut runtime, _tx) = new_runtime();
+    let session_id = SessionId::new();
+    let now = SystemTime::UNIX_EPOCH;
+    let seeded = runtime
+        .bootstrap_local(session_id, VIEWPORT, now)
+        .expect("bootstrap");
+    let tab = runtime.sessions()[&session_id]
+        .tabs
+        .keys()
+        .next()
+        .copied()
+        .expect("the genesis tab");
+    let reporting = ClientId::new();
+    let reported = PaneArea::Reported(Size { cols: 60, rows: 20 });
+    runtime.handle_client_attach(
+        session_id,
+        reporting,
+        VIEWPORT,
+        Some(reported),
+        tab,
+        now,
+        false,
+    );
+
+    let overview = runtime.build_overview().expect("one session is running");
+    let row_of = |id: ClientId| {
+        overview
+            .clients
+            .iter()
+            .find(|client| client.id == id)
+            .expect("the client is listed")
+    };
+
+    assert_eq!(row_of(reporting).pane_area, Some(reported));
+    assert_eq!(row_of(reporting).viewport_size, VIEWPORT);
+    // The seeded client reported nothing, and the row says so.
+    assert_eq!(row_of(seeded).pane_area, None);
+    assert_eq!(row_of(seeded).viewport_size, VIEWPORT);
 }
 
 /// A fixed UUID ending in `tail`, so tab ids sort in a known order.
