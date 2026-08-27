@@ -17,7 +17,7 @@
 //! variant is unit-shaped with no content field.
 
 use crate::command::{CopyTarget, Selection};
-use crate::geometry::{Point, Size};
+use crate::geometry::{PaneArea, Point, Size};
 use crate::ids::{ClientId, CommandId, PaneId, PluginId, SessionId, SubscriberId, TabId};
 use crate::mouse::{MouseButton, ScrollDirection};
 use crate::process::PtySize;
@@ -317,6 +317,18 @@ pub struct PaneResumed {
     pub tab_id: TabId,
 }
 
+/// Why a client has no visible pane area.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TerminalTooSmallCause {
+    /// The client's viewport cannot fit the built-in chrome and pane minimum.
+    #[default]
+    Terminal,
+    /// The client's own edge regions leave no pane area.
+    Regions,
+    /// Another client's pane area sets the shared minimum.
+    OtherClient(ClientId),
+}
+
 /// Payload for [`Event::TerminalTooSmallEntered`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalTooSmallEntered {
@@ -324,6 +336,12 @@ pub struct TerminalTooSmallEntered {
     pub client_id: ClientId,
     /// The viewport size that could not fit any pane.
     pub size: Size,
+    /// The pane area the client reported, or `None` when it reported no area.
+    #[serde(default)]
+    pub pane_area: Option<PaneArea>,
+    /// The reason the client has no visible pane area.
+    #[serde(default)]
+    pub cause: TerminalTooSmallCause,
 }
 
 /// Payload for [`Event::TerminalTooSmallExited`].

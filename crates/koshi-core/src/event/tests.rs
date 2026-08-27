@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::command::{GridPos, SelectionKind};
-use crate::geometry::{Point, Size};
+use crate::geometry::{PaneArea, Point, Size};
 use crate::ids::{ClientId, CommandId, PaneId, PluginId, SessionId, SubscriberId, TabId};
 use crate::process::PtySize;
 use std::time::{Duration, UNIX_EPOCH};
@@ -83,6 +83,8 @@ fn move_suppression_and_reload_events_roundtrip() {
     roundtrip(&Event::TerminalTooSmallEntered(TerminalTooSmallEntered {
         client_id: ClientId::new(),
         size: Size { cols: 1, rows: 1 },
+        pane_area: Some(PaneArea::Reported(Size { cols: 1, rows: 0 })),
+        cause: TerminalTooSmallCause::Terminal,
     }));
     roundtrip(&Event::TerminalTooSmallExited(TerminalTooSmallExited {
         client_id: ClientId::new(),
@@ -91,6 +93,34 @@ fn move_suppression_and_reload_events_roundtrip() {
     roundtrip(&Event::ConfigReloaded(ConfigReloaded {
         session_id: SessionId::new(),
     }));
+}
+
+#[test]
+fn too_small_causes_roundtrip() {
+    let other_client = ClientId::new();
+    for cause in [
+        TerminalTooSmallCause::Terminal,
+        TerminalTooSmallCause::Regions,
+        TerminalTooSmallCause::OtherClient(other_client),
+    ] {
+        roundtrip(&cause);
+    }
+}
+
+#[test]
+fn an_old_too_small_event_defaults_new_fields() {
+    let client_id = ClientId::new();
+    let old = serde_json::json!({
+        "client_id": client_id,
+        "size": { "cols": 80, "rows": 24 }
+    });
+
+    let event: TerminalTooSmallEntered =
+        serde_json::from_value(old).expect("the old event shape remains readable");
+    assert_eq!(event.client_id, client_id);
+    assert_eq!(event.size, Size { cols: 80, rows: 24 });
+    assert_eq!(event.pane_area, None);
+    assert_eq!(event.cause, TerminalTooSmallCause::Terminal);
 }
 
 #[test]
@@ -458,6 +488,8 @@ fn event_cases() -> [(Event, &'static str, EventClass); 38] {
             Event::TerminalTooSmallEntered(TerminalTooSmallEntered {
                 client_id: ClientId::new(),
                 size: Size { cols: 1, rows: 1 },
+                pane_area: Some(PaneArea::Starving),
+                cause: TerminalTooSmallCause::Regions,
             }),
             "TerminalTooSmallEntered",
             EventClass::Critical,

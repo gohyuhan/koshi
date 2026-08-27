@@ -22,10 +22,10 @@ use koshi_core::event::{
     PaneFocused, PaneMouseForwarded, PaneOutputUpdated, PaneProcessExited, PaneRemoved,
     PaneResumed, PaneScrollbackTruncated, PaneSuppressed, PaneTyped, PluginEvent, PluginInstalled,
     PluginMouseInput, PtyResized, RejectReason, SelectionChanged, SubmittedLinePayload, TabClosed,
-    TabCreated, TabFocused, TabMoved, TerminalTooSmallEntered, TerminalTooSmallExited,
-    TypedPayload,
+    TabCreated, TabFocused, TabMoved, TerminalTooSmallCause, TerminalTooSmallEntered,
+    TerminalTooSmallExited, TypedPayload,
 };
-use koshi_core::geometry::{Direction, Point, Size};
+use koshi_core::geometry::{Direction, PaneArea, Point, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, PluginId, SessionId, SubscriberId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseButton, ScrollDirection};
@@ -1067,6 +1067,8 @@ fn every_event_with_no_wire_spelling_converts_to_nothing() {
         Event::TerminalTooSmallEntered(TerminalTooSmallEntered {
             client_id: client,
             size: Size { cols: 4, rows: 2 },
+            pane_area: Some(PaneArea::Reported(Size { cols: 4, rows: 0 })),
+            cause: TerminalTooSmallCause::Terminal,
         }),
         Event::TerminalTooSmallExited(TerminalTooSmallExited {
             client_id: client,

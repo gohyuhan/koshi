@@ -8,8 +8,10 @@
 
 use std::time::SystemTime;
 
-use koshi_core::event::{Event, LayoutChanged, PaneClosing, PaneProcessExited, PaneRemoved};
-use koshi_core::geometry::{Rect, Size, SplitDirection};
+use koshi_core::event::{
+    Event, LayoutChanged, PaneClosing, PaneProcessExited, PaneRemoved, TerminalTooSmallCause,
+};
+use koshi_core::geometry::{PaneArea, Rect, Size, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::solver::MIN_PANE_SIZE;
@@ -18,7 +20,7 @@ use koshi_pane::pane::lifecycle::{PaneLifecycle, PaneLifecycleEvent};
 use koshi_pane::pane::policy::{PaneClosePolicy, PaneExitPolicy};
 use koshi_pane::pane::state::PaneRecord;
 
-use super::{on_child_exit, remove_pane_cascade};
+use super::{on_child_exit, remove_pane_cascade, terminal_too_small_cause};
 use crate::client::{Client, ClientOrigin, ClientRegistry};
 use crate::session::policy::EmptyTabPolicy;
 use crate::session::state::{Session, Tab};
@@ -372,11 +374,19 @@ fn removing_a_focused_pane_with_no_room_to_refocus_clears_focus() {
         EmptyTabPolicy::CloseTab,
     );
 
-    // The overlay is reported and the client's stale focus on the gone pane is
-    // cleared rather than left dangling.
-    assert!(events
+    // The overlay is reported with the viewport and the two-row fallback area,
+    // and the client's stale focus on the gone pane is cleared.
+    let entered = events
         .iter()
-        .any(|e| matches!(e, Event::TerminalTooSmallEntered(t) if t.client_id == client_id)));
+        .find_map(|event| match event {
+            Event::TerminalTooSmallEntered(entered) => Some(entered),
+            _ => None,
+        })
+        .expect("the too-small event was emitted");
+    assert_eq!(entered.client_id, client_id);
+    assert_eq!(entered.size, VIEWPORT);
+    assert_eq!(entered.pane_area, None);
+    assert_eq!(entered.cause, TerminalTooSmallCause::Terminal);
     assert_eq!(
         session.clients.get(client_id).unwrap().focused_pane(tab_id),
         None
@@ -384,6 +394,151 @@ fn removing_a_focused_pane_with_no_room_to_refocus_clears_focus() {
     // The survivor stays — the tab is not empty, just unfocusable for now.
     assert!(session.panes.get(b).is_some());
     assert_eq!(session.tabs[&tab_id].layout().leaf_panes(), vec![b]);
+}
+
+#[test]
+fn a_too_small_event_carries_a_starving_area_and_region_cause() {
+    let tab_id = TabId::new();
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let mut session = session_with(
+        vec![two_pane_tab(tab_id, a, b)],
+        vec![
+            record(a, PaneLifecycle::Running, PaneExitPolicy::CloseOnExit),
+            record(b, PaneLifecycle::Running, PaneExitPolicy::CloseOnExit),
+        ],
+    );
+    let mut client = focused_client(session.id, tab_id, a);
+    client.update_pane_area(Some(PaneArea::Starving));
+    let client_id = client.id();
+    session.attach_client(client);
+
+    let events = remove_pane_cascade(
+        &mut session,
+        tab_id,
+        a,
+        Rect::at_origin(Size { cols: 1, rows: 1 }),
+        MIN_PANE_SIZE,
+        EmptyTabPolicy::CloseTab,
+    );
+    let entered = events
+        .iter()
+        .find_map(|event| match event {
+            Event::TerminalTooSmallEntered(entered) => Some(entered),
+            _ => None,
+        })
+        .expect("the too-small event was emitted");
+
+    assert_eq!(entered.client_id, client_id);
+    assert_eq!(entered.size, VIEWPORT);
+    assert_eq!(entered.pane_area, Some(PaneArea::Starving));
+    assert_eq!(entered.cause, TerminalTooSmallCause::Regions);
+}
+
+#[test]
+fn a_starving_report_names_the_clients_own_regions() {
+    let tab_id = TabId::new();
+    let pane_id = PaneId::new();
+    let mut session = session_with(
+        vec![single_pane_tab(tab_id, pane_id)],
+        vec![record(
+            pane_id,
+            PaneLifecycle::Running,
+            PaneExitPolicy::CloseOnExit,
+        )],
+    );
+    let mut client = focused_client(session.id, tab_id, pane_id);
+    client.update_pane_area(Some(PaneArea::Starving));
+    let client_id = client.id();
+    session.attach_client(client);
+
+    assert_eq!(
+        terminal_too_small_cause(&session, tab_id, client_id, rect()),
+        TerminalTooSmallCause::Regions
+    );
+}
+
+#[test]
+fn a_reported_area_smaller_than_the_default_names_the_clients_regions() {
+    let tab_id = TabId::new();
+    let pane_id = PaneId::new();
+    let mut session = session_with(
+        vec![single_pane_tab(tab_id, pane_id)],
+        vec![record(
+            pane_id,
+            PaneLifecycle::Running,
+            PaneExitPolicy::CloseOnExit,
+        )],
+    );
+    let mut client = focused_client(session.id, tab_id, pane_id);
+    client.update_pane_area(Some(PaneArea::Reported(Size { cols: 40, rows: 22 })));
+    let client_id = client.id();
+    session.attach_client(client);
+
+    assert_eq!(
+        terminal_too_small_cause(&session, tab_id, client_id, rect()),
+        TerminalTooSmallCause::Regions
+    );
+}
+
+#[test]
+fn a_smaller_viewer_names_the_other_client() {
+    let tab_id = TabId::new();
+    let pane_id = PaneId::new();
+    let mut session = session_with(
+        vec![single_pane_tab(tab_id, pane_id)],
+        vec![record(
+            pane_id,
+            PaneLifecycle::Running,
+            PaneExitPolicy::CloseOnExit,
+        )],
+    );
+    let target = focused_client(session.id, tab_id, pane_id);
+    let target_id = target.id();
+    let mut smaller = focused_client(session.id, tab_id, pane_id);
+    smaller.update_pane_area(Some(PaneArea::Reported(Size { cols: 40, rows: 24 })));
+    let smaller_id = smaller.id();
+    session.attach_client(target);
+    session.attach_client(smaller);
+
+    assert_eq!(
+        terminal_too_small_cause(
+            &session,
+            tab_id,
+            target_id,
+            Rect::at_origin(Size { cols: 40, rows: 22 }),
+        ),
+        TerminalTooSmallCause::OtherClient(smaller_id)
+    );
+}
+
+#[test]
+fn a_shorter_solve_rect_is_a_terminal_shortage() {
+    let tab_id = TabId::new();
+    let pane_id = PaneId::new();
+    let mut session = session_with(
+        vec![single_pane_tab(tab_id, pane_id)],
+        vec![record(
+            pane_id,
+            PaneLifecycle::Running,
+            PaneExitPolicy::CloseOnExit,
+        )],
+    );
+    let target = focused_client(session.id, tab_id, pane_id);
+    let target_id = target.id();
+    let mut smaller = focused_client(session.id, tab_id, pane_id);
+    smaller.update_pane_area(Some(PaneArea::Reported(Size { cols: 40, rows: 24 })));
+    session.attach_client(target);
+    session.attach_client(smaller);
+
+    assert_eq!(
+        terminal_too_small_cause(
+            &session,
+            tab_id,
+            target_id,
+            Rect::at_origin(Size { cols: 1, rows: 1 }),
+        ),
+        TerminalTooSmallCause::Terminal
+    );
 }
 
 #[test]

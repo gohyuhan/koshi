@@ -26,7 +26,7 @@ use koshi_core::command::{
     ClearSelectionArgs, CliExitCode, GridPos, Selection, SelectionKind, SetSelectionArgs,
     VisualCommand,
 };
-use koshi_core::geometry::{Direction, Point, Rect};
+use koshi_core::geometry::{Direction, PaneArea, Point, Rect};
 use koshi_core::ids::{ClientId, PaneId, TabId};
 use koshi_core::key::{Key, KeyChord, ModFlags};
 use koshi_core::lock::LockMode;
@@ -35,7 +35,8 @@ use koshi_ipc::attach::AttachedSessionStructureSnapshot;
 use koshi_ipc::endpoint::{socket_addr, EndpointFile};
 use koshi_ipc::frame::{FrameClient, FrameSession, FrameTab, PaintedFrame};
 use koshi_ipc::protocol::{
-    ConnectionToken, IpcErrorCode, IpcErrorPayload, IpcResponse, PROTOCOL_VERSION,
+    ConnectionToken, IncomingResponse, IpcErrorCode, IpcErrorPayload, IpcResponse, IpcResult,
+    PROTOCOL_VERSION,
 };
 use koshi_ipc::remote_servers::SavedServer;
 use koshi_ipc::router::{
@@ -43,6 +44,7 @@ use koshi_ipc::router::{
     ROUTER_PROTOCOL_VERSION,
 };
 use koshi_ipc::transport::{Listener, MAX_FRAME_LEN};
+use koshi_ipc::wire::MaybeKnown;
 use koshi_layout::mode::LayoutMode;
 use koshi_renderer::snapshot::{
     ClientSnapshot, MousePane, PaneKind, PaneSlot, SessionSnapshot, TabMeta, TabSnapshot,
@@ -671,6 +673,25 @@ fn the_wait_ends_at_its_deadline_when_the_session_advertises_nothing() {
     );
 }
 
+/// Build an Attach answer that echoes `pane_area`.
+fn attached_response(pane_area: Option<PaneArea>) -> IncomingResponse {
+    IpcResponse {
+        request_id: Some(2),
+        result: MaybeKnown::Known(IpcResult::Attached {
+            client_id: ClientId::new(),
+            session_id: SessionId::new(),
+            structure: AttachedSessionStructureSnapshot {
+                id: SessionId::new(),
+                name: String::from("session"),
+                tabs: Vec::new(),
+                panes: Vec::new(),
+            },
+            resume_token: None,
+            pane_area,
+        }),
+    }
+}
+
 /// A stand-in session that has just come back from replacing its own process
 /// image: it binds `session_id`'s socket, advertises it under [`NEW_TOKEN`],
 /// and serves one connection.
@@ -737,6 +758,27 @@ fn restarted_session(
 }
 
 #[test]
+fn an_attached_result_echo_identifies_supporting_and_old_sessions() {
+    assert_eq!(
+        take_attached(attached_response(Some(PaneArea::Reported(Size {
+            cols: 80,
+            rows: 22,
+        }))))
+        .expect("the supporting result is accepted")
+        .3,
+        Some(PaneArea::Reported(Size { cols: 80, rows: 22 })),
+        "a reported pane area proves the session understands the field"
+    );
+    assert_eq!(
+        take_attached(attached_response(None))
+            .expect("the old result is still accepted")
+            .3,
+        None,
+        "an absent echo selects the fixed two-row compatibility layout"
+    );
+}
+
+#[test]
 fn coming_back_after_a_restart_asks_for_the_client_record_this_terminal_holds() {
     let runtime_dir = test_runtime_dir();
     let session_id = SessionId::new();
@@ -745,7 +787,7 @@ fn coming_back_after_a_restart_asks_for_the_client_record_this_terminal_holds() 
     let advertised = EndpointFile::read(&EndpointFile::path(runtime_dir.path(), session_id))
         .expect("the stand-in session advertised its socket");
 
-    let (endpoint, connection) = rejoin(
+    let (endpoint, connection, pane_area_supported) = rejoin(
         runtime_dir.path(),
         session_id,
         client_id,
@@ -754,6 +796,7 @@ fn coming_back_after_a_restart_asks_for_the_client_record_this_terminal_holds() 
     .expect("the stand-in session handed the client record back");
     drop(connection);
 
+    assert!(!pane_area_supported);
     assert_eq!(endpoint, advertised);
     assert_eq!(
         asked.lock().expect("the slot outlives every panic").clone(),
@@ -762,9 +805,9 @@ fn coming_back_after_a_restart_asks_for_the_client_record_this_terminal_holds() 
             filter: EventFilterSpec::All,
             resume: Some(client_id),
             resume_token: None,
-            pane_area: None,
+            pane_area: Some(core_pane_area(viewport())),
         }),
-        "the restart path claims the client record by its id and presents no token"
+        "the restart path claims the client record by its id and reports the built-in pane area"
     );
 }
 
@@ -785,7 +828,7 @@ fn a_restarted_session_that_refuses_the_join_leaves_nothing_to_come_back_to() {
         client_id,
         &ConnectionToken::new(OLD_TOKEN),
     );
-    assert_eq!(attached.map(|(endpoint, _)| endpoint), None);
+    assert_eq!(attached.map(|(endpoint, _, _)| endpoint), None);
 }
 
 #[test]
@@ -800,7 +843,7 @@ fn a_restarted_session_that_mints_a_new_client_leaves_nothing_to_come_back_to() 
         ClientId::new(),
         &ConnectionToken::new(OLD_TOKEN),
     );
-    assert_eq!(attached.map(|(endpoint, _)| endpoint), None);
+    assert_eq!(attached.map(|(endpoint, _, _)| endpoint), None);
 }
 
 #[test]
@@ -817,7 +860,7 @@ fn another_local_users_restarting_session_is_not_waited_for() {
         &ConnectionToken::new(""),
     );
 
-    assert_eq!(attached.map(|(endpoint, _)| endpoint), None);
+    assert_eq!(attached.map(|(endpoint, _, _)| endpoint), None);
     assert!(
         started.elapsed() < Duration::from_secs(1),
         "no wait was spent on a session this client cannot watch"
@@ -2560,7 +2603,7 @@ fn a_terminal_resize_moves_the_viewers_own_size_and_tells_the_session() {
             request_id: FIRST_LOOP_REQUEST_ID,
             kind: IpcRequestKind::Resize {
                 viewport: bigger,
-                pane_area: None,
+                pane_area: Some(core_pane_area(bigger)),
             },
         }
     );
@@ -3023,7 +3066,11 @@ fn a_new_connection_is_told_the_size_the_terminal_is_now() {
         client.viewport(),
         "the session is told the size the viewer holds"
     );
-    assert_eq!(pane_area, None, "this client reports no pane area");
+    assert_eq!(
+        pane_area,
+        Some(core_pane_area(client.viewport())),
+        "this client reports the pane area left by the built-in rows"
+    );
     assert_eq!(
         sent.try_recv().err(),
         Some(mpsc::TryRecvError::Empty),

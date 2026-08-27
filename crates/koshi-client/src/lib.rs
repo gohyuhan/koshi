@@ -45,7 +45,7 @@ use koshi_core::mouse::MouseButton;
 use koshi_core::registry::ActionRegistry;
 use koshi_core::{
     event::Event,
-    geometry::Size,
+    geometry::{PaneArea, Size},
     ids::{ClientId, PaneId, TabId},
 };
 use koshi_observability::cleanup::TerminalCleanupGuard;
@@ -56,6 +56,18 @@ use crate::mouse::{LastPress, ResizeDrag, SelectionDrag, TablineDrag};
 
 #[cfg(test)]
 mod tests;
+
+/// Compute the pane area left by the built-in navigator and hint rows.
+///
+/// An `80x24` viewport reports `Reported(80x22)`. A viewport shorter than the
+/// two rows reports zero rows instead of an invalid negative size.
+#[must_use]
+pub(crate) const fn core_pane_area(viewport: Size) -> PaneArea {
+    PaneArea::Reported(Size {
+        cols: viewport.cols,
+        rows: viewport.rows.saturating_sub(2),
+    })
+}
 
 /// One attached terminal's view side: its id, its own terminal size, its event
 /// feed from the session, the settings it read from its own config, the chrome
@@ -70,6 +82,9 @@ pub struct Client {
     /// events and reported to the session, which reconciles tab sizes from
     /// every viewer's report; this copy is the client's alone.
     viewport: Size,
+    /// Whether the attached session echoed the pane-area field. The current
+    /// renderer uses the fixed two-row layout in either mode.
+    pane_area_supported: bool,
     /// Receiving end of this client's event subscription, fed by the session's
     /// bounded fan-out. It carries live events, and the fresh frame the session
     /// sends after this subscriber's queue overflowed.
@@ -152,8 +167,8 @@ impl Client {
     /// the session handed out for it, and the outer-terminal cleanup guard.
     ///
     /// It starts on the built-in defaults: no stored config layers, the stock
-    /// palette, and the shipped keymap. The files the user wrote arrive
-    /// through [`load_startup_config`](Self::load_startup_config).
+    /// palette, the shipped keymap, and pane-area support enabled. The files
+    /// the user wrote arrive through [`load_startup_config`](Self::load_startup_config).
     #[must_use]
     pub fn new(
         id: ClientId,
@@ -169,6 +184,7 @@ impl Client {
         Client {
             id,
             viewport,
+            pane_area_supported: true,
             events,
             layers,
             config,
@@ -284,6 +300,17 @@ impl Client {
     /// resize to the session, which owns the reconciled tab sizes.
     pub fn set_viewport(&mut self, viewport: Size) {
         self.viewport = viewport;
+    }
+
+    /// Record whether the attached session echoed the pane-area field.
+    /// Logs a debug message when `supported` is false.
+    pub(crate) fn set_pane_area_supported(&mut self, supported: bool) {
+        self.pane_area_supported = supported;
+        if !supported {
+            tracing::debug!(
+                "the session does not echo pane area; using the built-in two-row compatibility layout"
+            );
+        }
     }
 
     /// The settings this viewer owns.

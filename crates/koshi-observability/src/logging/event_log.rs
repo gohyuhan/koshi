@@ -95,6 +95,8 @@ pub fn log_event(event: &Event) {
                 client_id = %payload.client_id,
                 cols = payload.size.cols,
                 rows = payload.size.rows,
+                pane_area = ?payload.pane_area,
+                cause = ?payload.cause,
                 "terminal too small; panes hidden"
             );
         }
