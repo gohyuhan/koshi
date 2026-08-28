@@ -13,7 +13,7 @@ use koshi_core::lock::LockMode;
 use koshi_layout::mode::LayoutMode;
 
 use crate::snapshot::{
-    ClientSnapshot, CommittedRegions, HintBinding, PluginUiSnapshot, RenderSnapshot,
+    ClientSnapshot, CommittedRegions, HintBinding, PluginUiSnapshot, Reconnecting, RenderSnapshot,
     SessionSnapshot, TabMeta, TabSnapshot, ViewerChrome,
 };
 
@@ -127,26 +127,62 @@ fn assembling_the_keybinding_row_input_twice_shares_every_allocation() {
 }
 
 #[test]
-fn assembling_the_tab_row_input_twice_borrows_the_same_frame() {
-    let snapshot = snapshot();
+fn assembling_the_tab_row_input_twice_borrows_each_shared_field() {
+    let mut snapshot = snapshot();
+    snapshot.client.lock_mode = LockMode::Locked;
+    snapshot.client.mouse_select = true;
     let theme = Theme::default();
+    let viewer = ViewerChrome {
+        reconnecting: Some(Reconnecting {
+            attempt: 3,
+            retry_in_seconds: 8,
+        }),
+        tabline_offset: Some(2),
+        ..ViewerChrome::default()
+    };
 
     let first = NavigatorDto {
-        frame: snapshot.layout(ViewerChrome::default()),
+        session_name: &snapshot.session.name,
+        tabs: &snapshot.session.tabs_metadata,
+        lock_mode: snapshot.client.lock_mode,
+        mouse_select: snapshot.client.mouse_select,
+        reconnecting: viewer.reconnecting,
+        tabline_offset: viewer.tabline_offset,
         theme: &theme,
     };
     let second = NavigatorDto {
-        frame: snapshot.layout(ViewerChrome::default()),
+        session_name: &snapshot.session.name,
+        tabs: &snapshot.session.tabs_metadata,
+        lock_mode: snapshot.client.lock_mode,
+        mouse_select: snapshot.client.mouse_select,
+        reconnecting: viewer.reconnecting,
+        tabline_offset: viewer.tabline_offset,
         theme: &theme,
     };
 
-    assert!(
-        std::ptr::eq(first.frame.session, second.frame.session),
-        "session was copied"
+    assert_eq!(first.session_name, "one");
+    assert_eq!(first.tabs[0].name, "first");
+    assert_eq!(first.lock_mode, LockMode::Locked);
+    assert!(first.mouse_select);
+    assert_eq!(
+        first.reconnecting,
+        Some(Reconnecting {
+            attempt: 3,
+            retry_in_seconds: 8,
+        })
     );
+    assert_eq!(first.tabline_offset, Some(2));
     assert!(
-        std::ptr::eq(first.frame.client, second.frame.client),
-        "client was copied"
+        std::ptr::eq(first.session_name, second.session_name),
+        "session name was copied"
     );
+    assert!(std::ptr::eq(first.tabs, second.tabs), "tabs were copied");
+    assert_eq!(first.lock_mode, second.lock_mode);
+    assert_eq!(first.mouse_select, second.mouse_select);
+    assert_eq!(first.reconnecting, second.reconnecting);
+    assert_eq!(first.tabline_offset, second.tabline_offset);
     assert!(std::ptr::eq(first.theme, second.theme), "theme was copied");
+
+    let layout = snapshot.layout(viewer);
+    assert_eq!(first.inputs(), layout.navigator());
 }

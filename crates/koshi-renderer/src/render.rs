@@ -34,8 +34,8 @@ use koshi_terminal::style::{Color as CellColor, Style as CellStyle, UnderlineSty
 
 use crate::region::{NavigatorDto, StatuslineDto};
 use crate::snapshot::{
-    ClientSnapshot, CommittedRegions, CursorStyle, FrameLayout, KeymapHints, PaneSnapshot,
-    Reconnecting, RenderSnapshot, SelectionSpans, ViewerChrome,
+    CommittedRegions, CursorStyle, KeymapHints, PaneSnapshot, Reconnecting, RenderSnapshot,
+    SelectionSpans, ViewerChrome,
 };
 use crate::statusline_hints::draw_hint_bar;
 use crate::theme::Theme;
@@ -122,10 +122,13 @@ pub fn render_frame(
     // The margin fills first; the tabline and hint bar paint over it.
     draw_letterbox(area, content, theme, buf);
 
-    let mut layout = snapshot.layout(viewer);
-    layout.committed_regions = Some(committed_regions);
     let navigator = NavigatorDto {
-        frame: layout,
+        session_name: &snapshot.session.name,
+        tabs: &snapshot.session.tabs_metadata,
+        lock_mode: snapshot.client.lock_mode,
+        mouse_select: snapshot.client.mouse_select,
+        reconnecting: viewer.reconnecting,
+        tabline_offset: viewer.tabline_offset,
         theme,
     };
     if let Some(tabline) = region_area(committed_regions, 0, area) {
@@ -520,7 +523,11 @@ fn header_title(snapshot: &RenderSnapshot, pane: PaneId) -> &str {
 /// `RECONNECTING (attempt 4, retry in 8s) · LOCK · SELECT`, and a plain one
 /// grabbing it reads `SELECT`. A client with `reconnecting` set never reads
 /// `BASE`.
-fn mode_tags(client: &ClientSnapshot, reconnecting: Option<Reconnecting>) -> String {
+fn mode_tags(
+    lock_mode: LockMode,
+    mouse_select: bool,
+    reconnecting: Option<Reconnecting>,
+) -> String {
     let reconnect_tag = reconnecting.map(|r| {
         format!(
             "RECONNECTING (attempt {}, retry in {}s)",
@@ -531,10 +538,10 @@ fn mode_tags(client: &ClientSnapshot, reconnecting: Option<Reconnecting>) -> Str
     if let Some(tag) = reconnect_tag.as_deref() {
         tags.push(tag);
     }
-    if let Some(tag) = lock_mode_tag(client.lock_mode) {
+    if let Some(tag) = lock_mode_tag(lock_mode) {
         tags.push(tag);
     }
-    if client.mouse_select {
+    if mouse_select {
         tags.push("SELECT");
     }
     if tags.is_empty() {

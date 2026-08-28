@@ -5,7 +5,7 @@
 
 use super::*;
 
-use crate::snapshot::{FrameLayout, Reconnecting, ViewerChrome};
+use crate::snapshot::{Reconnecting, ViewerChrome};
 
 use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, SessionId, TabId};
@@ -79,13 +79,6 @@ struct Frame {
     chrome: ViewerChrome,
 }
 
-impl Frame {
-    /// Where this frame's surfaces sit, as the tabline reads them.
-    fn layout(&self) -> FrameLayout<'_> {
-        self.snapshot.layout(self.chrome)
-    }
-}
-
 /// Cells the `[v0.1.0] ` version badge takes beside the session name: the
 /// version string plus `[`, `v`, `]`, and the trailing space. Measured rather
 /// than hardcoded, so a version bump that lengthens the string (`0.9.0` →
@@ -106,21 +99,24 @@ fn area(width: u16) -> RatatuiRect {
 fn draw(frame: &Frame, width: u16) -> Buffer {
     let a = area(width);
     let mut buf = Buffer::empty(a);
-    draw_tabline(
-        &NavigatorDto {
-            frame: frame.layout(),
-            theme: &Theme::default(),
-        },
-        a,
-        &mut buf,
-    );
+    let theme = Theme::default();
+    let navigator = NavigatorDto {
+        session_name: &frame.snapshot.session.name,
+        tabs: &frame.snapshot.session.tabs_metadata,
+        lock_mode: frame.snapshot.client.lock_mode,
+        mouse_select: frame.snapshot.client.mouse_select,
+        reconnecting: frame.chrome.reconnecting,
+        tabline_offset: frame.chrome.tabline_offset,
+        theme: &theme,
+    };
+    draw_tabline(&navigator, a, &mut buf);
     buf
 }
 
 /// Solve the tabline for `snapshot` over `area`, taking the whole frame so a
 /// test can pass a snapshot fixture straight in.
 fn solve_tabline(frame: &Frame, area: RatatuiRect) -> TablineLayout {
-    tabline_layout(frame.layout(), area)
+    tabline_layout(frame.snapshot.layout(frame.chrome).navigator(), area)
 }
 
 /// The symbol at cell `x` of the single rendered row.
@@ -471,7 +467,10 @@ fn draw_paints_the_reconnecting_tag_while_the_viewer_has_no_link() {
     // " RECONNECTING (attempt 3, retry in 8s) " fills the row's last 39 cells,
     // and the row is 16 + BADGE cells wider than that block.
     let block = " RECONNECTING (attempt 3, retry in 8s) ";
-    assert_eq!(right_block_text(frame.layout()), block);
+    assert_eq!(
+        right_block_text(frame.snapshot.layout(frame.chrome).navigator()),
+        block
+    );
     let tag_width = text_width(block);
     assert_eq!(tag_width, 39);
     let width = tag_width + 16 + BADGE;
@@ -546,7 +545,7 @@ fn an_absurdly_long_name_saturates_instead_of_wrapping() {
         width: 40,
         height: 1,
     };
-    let layout = tabline_layout(frame.layout(), area);
+    let layout = solve_tabline(&frame, area);
     assert!(
         layout.session_width <= 40,
         "the session block never claims more than the row: {}",
@@ -575,19 +574,24 @@ fn the_version_badge_is_kept_at_exactly_enough_room_and_dropped_one_cell_short()
     // This pins the `<=` boundary of that decision, which is the comparison the
     // session block's width is solved from.
     let fixture = snap("s", &[("one", true)], None, LockMode::Normal, false);
-    let frame = fixture.layout();
+    let layout = fixture.snapshot.layout(fixture.chrome);
+    let frame = layout.navigator();
 
-    let full = session_texts(frame, u16::MAX);
+    let full = session_texts(frame.session_name, u16::MAX);
     let badge_width = text_width(&version_badge());
     let exactly_enough = text_width(&full.name) + badge_width;
 
     assert!(
-        session_texts(frame, exactly_enough).badge.is_some(),
+        session_texts(frame.session_name, exactly_enough)
+            .badge
+            .is_some(),
         "room for both means both: {exactly_enough} cells"
     );
 
     assert!(
-        session_texts(frame, exactly_enough - 1).badge.is_none(),
+        session_texts(frame.session_name, exactly_enough - 1)
+            .badge
+            .is_none(),
         "one cell short drops the badge whole rather than clipping it"
     );
 }

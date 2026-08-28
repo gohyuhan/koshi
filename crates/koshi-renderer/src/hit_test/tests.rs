@@ -312,7 +312,7 @@ fn tabs_hit_by_column() {
         &[(a, "a"), (b, "b")],
     );
     let tabs = tabline_layout(
-        s.layout(chrome()),
+        s.layout(chrome()).navigator(),
         RatatuiRect {
             x: 0,
             y: 0,
@@ -371,7 +371,7 @@ fn scroll_arrows_hit_test_to_their_targets() {
         width: cols,
         height: 8,
     };
-    let layout = tabline_layout(s.layout(peeking), area);
+    let layout = tabline_layout(s.layout(peeking).navigator(), area);
     let (left_x, left_to) = layout.left_arrow.expect("tabs hidden off the left");
     let (right_x, right_to) = layout.right_arrow.expect("tabs hidden off the right");
 
