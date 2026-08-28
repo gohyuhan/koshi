@@ -157,13 +157,14 @@ pub const REMOTE_ACCESS_MARK_FORMAT: Surface = Surface {
 /// The resume file: the state a session server writes before it replaces its
 /// own process image, and the next image reads back.
 ///
-/// Born after `v0.2.0` and not yet in a release, so it has no anchor. The
-/// build being installed states which formats it reads before the running
-/// server commits to the swap.
+/// Born after `v0.2.0` and not yet in a release, so it has no anchor. Format
+/// 3 carries prompt metadata with every terminal row. The build being
+/// installed states which formats it reads before the running server commits
+/// to the swap.
 pub const RESUME_FORMAT: Surface = Surface {
     name: "resume file format",
     min: 1,
-    max: 2,
+    max: 3,
     released: None,
 };
 

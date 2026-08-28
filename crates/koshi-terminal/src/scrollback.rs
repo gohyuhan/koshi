@@ -10,9 +10,10 @@
 
 use std::collections::VecDeque;
 
+use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 
-use crate::grid::state::{content_len, Cell, RowEnd};
+use crate::grid::state::{content_len, Cell, RowEnd, RowMeta};
 
 /// Default scrollback line cap: 10 000 lines per pane.
 const DEFAULT_MAX_LINES: usize = 10_000;
@@ -83,17 +84,17 @@ impl Default for ScrollbackLimit {
 
 /// The scrollback buffer for one pane: a `VecDeque` of rows (oldest at the
 /// front), bounded by line- and byte-count caps with truncation accounting.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Scrollback {
     /// Retained rows, oldest at the front and newest at the back, each paired
-    /// with how it ended ([`RowEnd`]) so a resize reflow can re-join
-    /// soft-wrapped rows that span the history/screen boundary.
+    /// with its row metadata so a resize reflow can re-join soft-wrapped rows
+    /// and carry prompt marks across the history/screen boundary.
     ///
     /// A row holds its text, not a whole screen line: the default blanks that
     /// padded it out to the screen width are dropped on the way in (see
     /// [`kept`]), so a row is as long as its content and reads as blank right
     /// of that.
-    lines: VecDeque<(Vec<Cell>, RowEnd)>,
+    lines: VecDeque<(Vec<Cell>, RowMeta)>,
     /// Maximum rows retained before the oldest are dropped.
     max_lines: usize,
     /// Maximum total bytes (UTF-8 text payload) retained before the oldest rows
@@ -158,12 +159,20 @@ impl Scrollback {
     ///
     /// A hard-ended row is stored without the trailing default blanks that pad
     /// it out to the screen width, so a 200-column row reading `README.md`
-    /// keeps 9 cells. A soft-wrapped row keeps every cell. Taking the row
-    /// borrowed makes one allocation, at the stored size.
+    /// keeps 9 cells. A soft-wrapped row keeps every cell. This method stores
+    /// `prompt: false`; terminal output uses the metadata form when it has a
+    /// prompt mark. Taking the row borrowed makes one allocation, at the stored
+    /// size.
     pub fn push_row(&mut self, row: &[Cell], end: RowEnd) {
-        let line = kept(row, end).to_vec();
+        self.push_row_with_meta(row, RowMeta { end, prompt: false });
+    }
+
+    /// Append `row` with its complete metadata. The terminal performer uses
+    /// this when a row leaves the live grid.
+    pub(crate) fn push_row_with_meta(&mut self, row: &[Cell], meta: RowMeta) {
+        let line = kept(row, meta.end).to_vec();
         let new_bytes = self.line_bytes(&line);
-        self.lines.push_back((line, end));
+        self.lines.push_back((line, meta));
         self.byte_total += new_bytes;
         self.total_pushed += 1;
         self.evict_to_caps();
@@ -178,15 +187,26 @@ impl Scrollback {
     ///
     /// Each row is stored the same way [`push_row`](Self::push_row) stores
     /// one: a hard-ended row without its trailing default blanks, a
-    /// soft-wrapped row whole. Rows arrive owned, so they are shortened in
-    /// place rather than copied.
+    /// soft-wrapped row whole. This method stores `prompt: false` for every
+    /// row; terminal reflow uses the metadata form when it has prompt marks.
+    /// Rows arrive owned, so they are shortened in place rather than copied.
     pub fn replace_lines(&mut self, lines: Vec<(Vec<Cell>, RowEnd)>) {
+        self.replace_lines_with_meta(
+            lines
+                .into_iter()
+                .map(|(cells, end)| (cells, RowMeta { end, prompt: false }))
+                .collect(),
+        );
+    }
+
+    /// Replace retained rows with their complete metadata.
+    pub(crate) fn replace_lines_with_meta(&mut self, lines: Vec<(Vec<Cell>, RowMeta)>) {
         let before = self.lines.len() as u64;
         self.lines = lines
             .into_iter()
-            .map(|(mut cells, end)| {
-                keep_in_place(&mut cells, end);
-                (cells, end)
+            .map(|(mut cells, meta)| {
+                keep_in_place(&mut cells, meta.end);
+                (cells, meta)
             })
             .collect();
         self.byte_total = self
@@ -234,10 +254,9 @@ impl Scrollback {
         self.lines.is_empty()
     }
 
-    /// The retained rows (each with how it ended), oldest at the front. Lets
-    /// the renderer compose a scrolled-back view above the live grid and the
-    /// resize reflow re-join wrapped lines.
-    pub fn lines(&self) -> &VecDeque<(Vec<Cell>, RowEnd)> {
+    /// The retained rows with their metadata, oldest at the front. The
+    /// terminal crate uses this to compose views and reflow wrapped lines.
+    pub fn lines(&self) -> &VecDeque<(Vec<Cell>, RowMeta)> {
         &self.lines
     }
 
@@ -258,6 +277,50 @@ impl Scrollback {
     /// Cumulative bytes dropped to honor the caps.
     pub fn dropped_bytes(&self) -> u64 {
         self.dropped_bytes
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SerializedLine {
+    Current((Vec<Cell>, RowMeta)),
+    Legacy((Vec<Cell>, RowEnd)),
+}
+
+#[derive(Deserialize)]
+struct ScrollbackFields {
+    lines: VecDeque<SerializedLine>,
+    max_lines: usize,
+    max_bytes: usize,
+    byte_total: usize,
+    total_pushed: u64,
+    dropped_lines: u64,
+    dropped_bytes: u64,
+}
+
+impl<'de> Deserialize<'de> for Scrollback {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let fields = ScrollbackFields::deserialize(deserializer)?;
+        let lines = fields
+            .lines
+            .into_iter()
+            .map(|line| match line {
+                SerializedLine::Current((cells, meta)) => (cells, meta),
+                SerializedLine::Legacy((cells, end)) => (cells, RowMeta { end, prompt: false }),
+            })
+            .collect();
+        Ok(Scrollback {
+            lines,
+            max_lines: fields.max_lines,
+            max_bytes: fields.max_bytes,
+            byte_total: fields.byte_total,
+            total_pushed: fields.total_pushed,
+            dropped_lines: fields.dropped_lines,
+            dropped_bytes: fields.dropped_bytes,
+        })
     }
 }
 

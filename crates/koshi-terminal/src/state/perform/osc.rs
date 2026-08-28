@@ -1,11 +1,54 @@
-//! OSC 7 working-directory parsing: turn a shell's `file://host/path` report
-//! into a [`ReportedCwd`], honoring each platform's path encoding.
+//! OSC parsing for shell reports and working-directory updates.
 
 use std::path::PathBuf;
 
 use percent_encoding::percent_decode;
 
 use crate::state::ReportedCwd;
+
+/// A semantic shell marker carried by OSC 133.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Osc133 {
+    /// The shell started a prompt.
+    Prompt,
+    /// The shell started receiving command input.
+    Input,
+    /// The shell started executing the command.
+    CommandStart,
+    /// The shell finished the command and may have reported an exit code.
+    CommandFinished(Option<i32>),
+}
+
+/// Parse an OSC 133 payload, or return `None` for a malformed or unrelated
+/// OSC payload.
+pub(super) fn parse_osc133(params: &[&[u8]]) -> Option<Osc133> {
+    let [command, marker, rest @ ..] = params else {
+        return None;
+    };
+    if *command != b"133" {
+        return None;
+    }
+    if rest.is_empty() {
+        if *marker == b"A" {
+            return Some(Osc133::Prompt);
+        }
+        if *marker == b"B" {
+            return Some(Osc133::Input);
+        }
+        if *marker == b"C" {
+            return Some(Osc133::CommandStart);
+        }
+        if *marker == b"D" {
+            return Some(Osc133::CommandFinished(None));
+        }
+        return None;
+    }
+    if *marker != b"D" || rest.len() != 1 || rest[0].is_empty() {
+        return None;
+    }
+    let exit_code = std::str::from_utf8(rest[0]).ok()?.parse().ok()?;
+    Some(Osc133::CommandFinished(Some(exit_code)))
+}
 
 /// The longest OSC 7 URI [`parse_osc7_cwd`] accepts. A longer one yields
 /// `None`, leaving the last reported working directory in place.
@@ -80,3 +123,6 @@ fn bytes_to_path(mut decoded: Vec<u8>) -> Option<PathBuf> {
     }
     String::from_utf8(decoded).ok().map(PathBuf::from)
 }
+
+#[cfg(test)]
+mod tests;

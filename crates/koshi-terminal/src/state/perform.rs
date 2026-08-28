@@ -24,8 +24,8 @@
 //! - `esc_dispatch` — plain ESC sequences: cursor save/restore, line movement,
 //!   tab-stop setup, terminal reset, and `G0`–`G3` charset designation.
 //! - `osc_dispatch` — OSC sequences (Operating System Command, `ESC ] …`,
-//!   carrying a text payload): the OSC 0/1/2 window title and the OSC 7
-//!   working-directory report.
+//!   carrying a text payload): the OSC 0/1/2 window title, OSC 7
+//!   working-directory report, and OSC 133 shell markers.
 //! - `hook`/`unhook` — start/end of a DCS (device control string,
 //!   `ESC P … ST`). They only clear the in-progress grapheme cluster (a DCS
 //!   ends a text run like any non-printing event); the payload and `put`
@@ -42,11 +42,14 @@
 use koshi_core::text::sanitize_reported_text;
 
 use crate::grid::state::{Cell, RowEnd};
-use crate::state::{CursorShape, MouseEncoding, MouseTracking, Screen, TerminalState};
+use crate::state::{
+    CursorShape, MouseEncoding, MouseTracking, Screen, ShellIntegrationFact, ShellIntegrationState,
+    TerminalState,
+};
 use unicode_width::UnicodeWidthChar;
 
 use self::motion::{next_tab_stop, prev_tab_stop};
-use self::osc::parse_osc7_cwd;
+use self::osc::{parse_osc133, parse_osc7_cwd, Osc133};
 use self::params::{coord_param, first_param, move_count, nth_param};
 use self::sgr::apply_sgr;
 
@@ -675,10 +678,36 @@ impl vte::Perform for TerminalState {
     }
 
     /// Handle an Operating System Command (OSC) sequence: window/icon title
-    /// (OSC 0/1/2) or working-directory report (OSC 7, `file://` URI).
+    /// (OSC 0/1/2), working-directory report (OSC 7, `file://` URI), or shell
+    /// marker (OSC 133).
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
         // Any OSC ends a text run, so no following glyph folds into it.
         self.reset_cluster();
+        if let Some(marker) = parse_osc133(params) {
+            match marker {
+                Osc133::Prompt => {
+                    let row = self.active_cursor().row;
+                    self.active_grid_mut().set_prompt_mark(row, true);
+                    self.shell_integration_state = ShellIntegrationState::Prompt;
+                }
+                Osc133::Input => {
+                    self.shell_integration_state = ShellIntegrationState::Input;
+                }
+                Osc133::CommandStart => {
+                    self.shell_integration_state = ShellIntegrationState::Running;
+                    self.shell_integration_facts
+                        .push(ShellIntegrationFact::CommandStarted);
+                }
+                Osc133::CommandFinished(exit_code) => {
+                    if matches!(self.shell_integration_state, ShellIntegrationState::Running) {
+                        self.shell_integration_state = ShellIntegrationState::Prompt;
+                        self.shell_integration_facts
+                            .push(ShellIntegrationFact::CommandFinished { exit_code });
+                    }
+                }
+            }
+            return;
+        }
         // `params[0]` is the command number. vte splits the payload on every
         // `;`, but only the first `;` is the command/payload separator, so each
         // arm rejoins `params[1..]` with `;` to keep a payload that itself

@@ -1050,7 +1050,7 @@ fn a_carried_session_with_its_client_comes_back_whole() {
 
         let (read_back, raw_body) = read_header(&path).expect("read the header back");
 
-        // Format 2 writes the origin and no authority key. The header's format
+        // Format 3 writes the origin and no authority key. The header's format
         // number and the client record's shape move together.
         let encoded: serde_json::Value =
             serde_json::from_str(raw_body.get()).expect("the body is json");
@@ -1069,7 +1069,7 @@ fn a_carried_session_with_its_client_comes_back_whole() {
         let read_body = read_body(read_back.format, &raw_body).expect("read the body back");
 
         assert_eq!(read_back.format, RESUME_FORMAT);
-        assert_eq!(RESUME_FORMAT, 2);
+        assert_eq!(RESUME_FORMAT, 3);
         let carried = &read_body.sessions[&session_id];
         assert_eq!(carried.id, session_id);
         let client = carried.clients.get(client_id).expect("the carried client");

@@ -2,7 +2,7 @@
 //! index, save / restore cursor, absolute placement, the deferred-wrap latch,
 //! and tab-stop math.
 
-use crate::grid::state::RowEnd;
+use crate::grid::state::{RowEnd, RowMeta};
 use crate::state::{RenderState, SavedCursor, Screen, TerminalState};
 use crate::style::Style;
 
@@ -15,7 +15,7 @@ impl TerminalState {
     }
 
     /// Delete `n` lines starting at `first` (scrolling the band `first..=bottom`
-    /// up), first preserving into scrollback any rows that leave the *top* of the
+    /// up), first preserving all metadata for rows that leave the *top* of the
     /// primary screen.
     ///
     /// Rows leave the top only when `first == 0` on the primary screen — i.e. a
@@ -29,7 +29,7 @@ impl TerminalState {
     /// The departing rows — `rows[0..min(n, bottom + 1)]`, exactly the rows
     /// `delete_lines` removes — are pushed oldest-first so the topmost lands
     /// deepest in history. Capture happens before the delete, which overwrites
-    /// them.
+    /// their cells and metadata.
     pub(super) fn delete_lines_into_scrollback(
         &mut self,
         first: u16,
@@ -41,8 +41,11 @@ impl TerminalState {
             let removed = n.min(bottom.saturating_sub(first).saturating_add(1));
             for row in 0..removed {
                 if let Some(scrolled_off) = self.primary.rows().get(row as usize) {
-                    let end = self.primary.row_end(row);
-                    self.scrollback.push_row(scrolled_off, end);
+                    let meta = RowMeta {
+                        end: self.primary.row_end(row),
+                        prompt: self.primary.prompt_mark(row),
+                    };
+                    self.scrollback.push_row_with_meta(scrolled_off, meta);
                 }
             }
         }
@@ -67,10 +70,10 @@ impl TerminalState {
         }
     }
 
-    /// Soft-wrap the cursor row into the next line, preserving `end` across a
-    /// scroll at the bottom margin. The departing row carries `end` into
-    /// scrollback, and the row shifted above the new blank bottom keeps the same
-    /// link to the glyph written there next.
+    /// Soft-wrap the cursor row into the next line, preserving row metadata
+    /// across a scroll at the bottom margin. The departing row carries its
+    /// prompt mark into scrollback, and the row shifted above the new blank
+    /// bottom keeps the same link to the glyph written there next.
     pub(super) fn wrap_linefeed(&mut self, end: RowEnd) {
         let before = self.active_cursor().row;
         let at_scroll_bottom = before == self.region_bounds().1;

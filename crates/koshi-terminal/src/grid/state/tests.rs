@@ -509,3 +509,61 @@ fn row_end_out_of_bounds_reads_hard_and_ignores_writes() {
     grid.set_row_end(9, RowEnd::Soft); // no-op, no panic
     assert_eq!(grid.row_end(9), RowEnd::Hard);
 }
+
+#[test]
+fn prompt_marks_travel_with_scrolled_rows() {
+    let mut grid = Grid::blank(3, 4, Style::default());
+    grid.set_prompt_mark(1, true);
+
+    grid.delete_lines(0, 2, 1, Style::default());
+
+    assert!(grid.prompt_mark(0));
+    assert!(!grid.prompt_mark(2));
+}
+
+#[test]
+fn prompt_marks_travel_with_inserted_rows_and_cell_edits() {
+    let mut grid = Grid::blank(3, 4, Style::default());
+    grid.set_prompt_mark(1, true);
+
+    grid.insert_lines(1, 2, 1, Style::default());
+    grid.clear_line(2, 0, 4, Style::default());
+
+    assert!(!grid.prompt_mark(1));
+    assert!(grid.prompt_mark(2));
+}
+
+#[test]
+fn current_grid_data_round_trips_row_metadata() {
+    let mut grid = Grid::blank(2, 2, Style::default());
+    grid.set_row_end(0, RowEnd::Soft);
+    grid.set_prompt_mark(0, true);
+
+    let value = serde_json::to_value(&grid).expect("grid serializes");
+    let restored: Grid = serde_json::from_value(value).expect("grid deserializes");
+
+    assert_eq!(restored.row_end(0), RowEnd::Soft);
+    assert!(restored.prompt_mark(0));
+}
+
+#[test]
+fn legacy_row_end_grid_data_deserializes_with_unmarked_rows() {
+    let mut grid = Grid::blank(2, 2, Style::default());
+    grid.set_row_end(0, RowEnd::Soft);
+    grid.set_prompt_mark(0, true);
+    let mut value = serde_json::to_value(&grid).expect("grid serializes");
+    let object = value.as_object_mut().expect("grid is an object");
+    let row_meta = object.remove("row_meta").expect("current metadata exists");
+    let row_ends = row_meta
+        .as_array()
+        .expect("row metadata is an array")
+        .iter()
+        .map(|meta| meta["end"].clone())
+        .collect();
+    object.insert("row_ends".to_string(), serde_json::Value::Array(row_ends));
+
+    let restored: Grid = serde_json::from_value(value).expect("legacy grid deserializes");
+
+    assert_eq!(restored.row_end(0), RowEnd::Soft);
+    assert!(!restored.prompt_mark(0));
+}

@@ -20,6 +20,7 @@ impl TerminalState {
     /// Reset the alternate screen to a fresh, blank buffer:
     /// - cells blanked to the current pen background (BCE, background color
     ///   erase — the blanked cells take the pen's current background color),
+    /// - prompt marks cleared,
     /// - scroll region (DECSTBM, the CSI sequence that sets the top/bottom
     ///   scroll margins) back to the full screen,
     /// - cursor home, shown, no wrap latch, no DECSC stash.
@@ -36,6 +37,7 @@ impl TerminalState {
         let (rows, cols) = alternate.dimensions();
         for row in 0..rows {
             alternate.clear_line(row, 0, cols, fill);
+            alternate.set_prompt_mark(row, false);
         }
         self.alternate_scroll_region = None;
         self.alternate_cursor.row = 0;

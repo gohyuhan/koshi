@@ -140,7 +140,7 @@ fn shrink_overflow_enters_history_and_widen_pulls_it_back() {
     resize(&mut e, 3, 3);
     assert_eq!(history_text(&e), vec!["aaa"]);
     assert_eq!(
-        e.state().scrollback().lines()[0].1,
+        e.state().scrollback().lines()[0].1.end,
         RowEnd::Soft,
         "the history row must remember it soft-wraps into the screen"
     );
@@ -351,15 +351,18 @@ fn rewrap_line_splits_exactly_and_marks_ends() {
     let rows = rewrap_line(&cells, 4, Style::default());
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].0.len(), 4);
-    assert_eq!(rows[0].1, RowEnd::Soft);
+    assert_eq!(rows[0].1.end, RowEnd::Soft);
     assert_eq!(rows[1].0.len(), 2);
-    assert_eq!(rows[1].1, RowEnd::Hard);
+    assert_eq!(rows[1].1.end, RowEnd::Hard);
 }
 
 #[test]
 fn rewrap_line_of_empty_content_is_one_hard_row() {
     let rows = rewrap_line(&[], 4, Style::default());
-    assert_eq!(rows, vec![(Vec::new(), RowEnd::Hard)]);
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].0.is_empty());
+    assert_eq!(rows[0].1.end, RowEnd::Hard);
+    assert!(!rows[0].1.prompt);
 }
 
 #[test]
@@ -384,7 +387,10 @@ fn locate_offset_walks_soft_rows_and_parks_in_final_padding() {
             text.chars()
                 .map(|c| Cell::new(c, 1, Style::default()))
                 .collect::<Vec<_>>(),
-            RowEnd::Soft,
+            RowMeta {
+                end: RowEnd::Soft,
+                prompt: false,
+            },
         )
     };
     let hard = |text: &str| {
@@ -392,7 +398,10 @@ fn locate_offset_walks_soft_rows_and_parks_in_final_padding() {
             text.chars()
                 .map(|c| Cell::new(c, 1, Style::default()))
                 .collect::<Vec<_>>(),
-            RowEnd::Hard,
+            RowMeta {
+                end: RowEnd::Hard,
+                prompt: false,
+            },
         )
     };
     let rows = vec![soft("abcd"), soft("efgh"), hard("ij")];
@@ -409,22 +418,28 @@ fn locate_offset_walks_soft_rows_and_parks_in_final_padding() {
 /// resizes, only how it is cut into rows.
 fn logical_lines(engine: &TerminalEngine) -> Vec<String> {
     let state = engine.state();
-    let mut physical: Vec<(Vec<Cell>, RowEnd)> =
+    let mut physical: Vec<(Vec<Cell>, RowMeta)> =
         state.scrollback().lines().iter().cloned().collect();
     let grid = state.active_grid();
     let (rows, _) = grid.dimensions();
     for row in 0..rows {
-        physical.push((grid.rows()[row as usize].clone(), grid.row_end(row)));
+        physical.push((
+            grid.rows()[row as usize].clone(),
+            RowMeta {
+                end: grid.row_end(row),
+                prompt: grid.prompt_mark(row),
+            },
+        ));
     }
     let mut lines = Vec::new();
     let mut current = String::new();
-    for (cells, end) in physical {
+    for (cells, meta) in physical {
         let text: String = cells
             .iter()
             .filter(|cell| cell.width() != 0)
             .map(Cell::ch)
             .collect();
-        match end {
+        match meta.end {
             RowEnd::Soft => current.push_str(&text),
             RowEnd::SoftWide => {
                 let trimmed = text.strip_suffix(' ').unwrap_or(&text);
@@ -517,7 +532,7 @@ fn a_wrapped_row_keeps_its_link_when_it_scrolls_into_history() {
         .scrollback()
         .lines()
         .iter()
-        .map(|(_, end)| *end)
+        .map(|(_, meta)| meta.end)
         .collect();
     assert_eq!(history, vec![RowEnd::Soft]);
 
@@ -540,7 +555,7 @@ fn a_linefeed_scroll_still_ends_its_row_hard() {
         .scrollback()
         .lines()
         .iter()
-        .map(|(_, end)| *end)
+        .map(|(_, meta)| meta.end)
         .collect();
     assert_eq!(history, vec![RowEnd::Hard]);
 }
