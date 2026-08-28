@@ -3,6 +3,9 @@
 
 use super::*;
 
+use crate::region::NavigatorLayout;
+use crate::snapshot::TabMeta;
+
 #[cfg(test)]
 mod tests;
 
@@ -21,7 +24,8 @@ mod tests;
 /// same solve [`crate::hit_test()`] reads, so the tab a click lands on is the tab
 /// that was drawn there.
 pub(super) fn draw_tabline(dto: &NavigatorDto<'_>, area: RatatuiRect, buf: &mut Buffer) {
-    let NavigatorDto { frame, theme } = *dto;
+    let navigator = dto.inputs();
+    let theme = dto.theme;
     // The row is koshi-owned chrome: reset it first so no letterbox fill or
     // stale cell survives, then fill it with the theme's bar background. Text
     // painted after this sets only its foreground, so the fill shows through
@@ -29,10 +33,10 @@ pub(super) fn draw_tabline(dto: &NavigatorDto<'_>, area: RatatuiRect, buf: &mut 
     Clear.render(area, buf);
     buf.set_style(area, bar_style(theme));
 
-    let layout = tabline_layout(frame, area);
+    let layout = tabline_layout(navigator, area);
 
     // Right block: it owns the right edge whole.
-    let right = right_block(frame, theme);
+    let right = right_block(navigator, theme);
     set_line_clipped(
         buf,
         layout.right_x,
@@ -43,12 +47,16 @@ pub(super) fn draw_tabline(dto: &NavigatorDto<'_>, area: RatatuiRect, buf: &mut 
 
     // Left block: the session name and version badge. The same `room` the
     // solve used, so draw and layout agree on whether the badge is there.
-    let session = session_line(frame, theme, layout.right_x.saturating_sub(area.x));
+    let session = session_line(
+        navigator.session_name,
+        theme,
+        layout.right_x.saturating_sub(area.x),
+    );
     set_line_clipped(buf, area.x, area.y, &session, layout.session_width);
 
     // Tab ribbons in the windowed middle, each on its own ramp stop.
     for &(meta_index, x, width) in &layout.tabs {
-        let tab = tab_line(frame, theme, meta_index);
+        let tab = tab_line(navigator.tabs, theme, meta_index);
         set_line_clipped(buf, x, area.y, &tab, width);
     }
     // Clickable scroll arrows mark tabs hidden off each side, and scroll the
@@ -98,18 +106,19 @@ pub(crate) struct TablineLayout {
 /// [`tabline_offset`](crate::snapshot::ViewerChrome::tabline_offset) when it
 /// is peeking, or — following the active tab — at the smallest index that keeps
 /// the active tab on screen. A one-cell arrow is reserved on each side while
-/// scrolled and drawn on whichever side still hides tabs.
-pub(crate) fn tabline_layout(frame: FrameLayout<'_>, area: RatatuiRect) -> TablineLayout {
-    let right_width = text_width(&right_block_text(frame));
+/// scrolled and drawn on whichever side still hides tabs. It reads only the
+/// narrow navigator input, not pane-bearing frame data.
+pub(crate) fn tabline_layout(navigator: NavigatorLayout<'_>, area: RatatuiRect) -> TablineLayout {
+    let right_width = text_width(&right_block_text(navigator));
     let right_x = area.right().saturating_sub(right_width).max(area.x);
     let room = right_x.saturating_sub(area.x);
-    let session_width = session_texts(frame, room).width.min(room);
+    let session_width = session_texts(navigator.session_name, room).width.min(room);
     let strip_start = area.x.saturating_add(session_width).saturating_add(1);
 
-    let count = frame.session.tabs_metadata.len();
+    let count = navigator.tabs.len();
     let widths: Vec<u16> = (0..count)
         .map(|i| {
-            let (index, name) = tab_texts(frame, i);
+            let (index, name) = tab_texts(navigator.tabs, i);
             text_width(&index).saturating_add(text_width(&name))
         })
         .collect();
@@ -147,13 +156,12 @@ pub(crate) fn tabline_layout(frame: FrameLayout<'_>, area: RatatuiRect) -> Tabli
         return no_tabs();
     }
 
-    let active = frame
-        .session
-        .tabs_metadata
+    let active = navigator
+        .tabs
         .iter()
         .position(|meta| meta.active)
         .unwrap_or(0);
-    let first_visible = match frame.viewer.tabline_offset {
+    let first_visible = match navigator.tabline_offset {
         Some(i) => i.min(count - 1),
         None => reveal_active(&widths, active, lo, hi),
     };
@@ -224,13 +232,20 @@ fn text_width(text: &str) -> u16 {
 /// `RECONNECTING (attempt 4, retry in 8s)` first while the viewer has no link to
 /// the session. Each pane's scroll position lives in its own bottom border (see
 /// [`draw_panes`]), not here.
-fn right_block_text(frame: FrameLayout<'_>) -> String {
-    format!(" {} ", mode_tags(frame.client, frame.viewer.reconnecting))
+fn right_block_text(navigator: NavigatorLayout<'_>) -> String {
+    format!(
+        " {} ",
+        mode_tags(
+            navigator.lock_mode,
+            navigator.mouse_select,
+            navigator.reconnecting,
+        )
+    )
 }
 
 /// The right-anchored block, colored for drawing.
-fn right_block(frame: FrameLayout<'_>, theme: &Theme) -> Line<'static> {
-    Line::from(Span::styled(right_block_text(frame), mode_style(theme)))
+fn right_block(navigator: NavigatorLayout<'_>, theme: &Theme) -> Line<'static> {
+    Line::from(Span::styled(right_block_text(navigator), mode_style(theme)))
 }
 
 /// koshi's own version, shown as the `[v…]` badge beside the session name.
@@ -250,8 +265,8 @@ pub(crate) fn version_badge() -> String {
 /// `room` is the space the block has before the right-anchored mode tag. When
 /// both parts do not fit in it, the badge is dropped whole: a 16-cell row shows
 /// ` s `, never the half-written ` s [v0.1.0`.
-fn session_texts(frame: FrameLayout<'_>, room: u16) -> SessionBlock {
-    let name = format!(" {} ", frame.session.name);
+fn session_texts(session_name: &str, room: u16) -> SessionBlock {
+    let name = format!(" {} ", session_name);
     let badge = version_badge();
     let name_width = text_width(&name);
     let badge_width = text_width(&badge);
@@ -286,8 +301,8 @@ struct SessionBlock {
 }
 
 /// The left-anchored block, colored for drawing.
-fn session_line(frame: FrameLayout<'_>, theme: &Theme, room: u16) -> Line<'static> {
-    let block = session_texts(frame, room);
+fn session_line(session_name: &str, theme: &Theme, room: u16) -> Line<'static> {
+    let block = session_texts(session_name, room);
     let name = Span::styled(block.name, session_style(theme));
     match block.badge {
         Some(badge) => Line::from(vec![name, Span::styled(badge, version_style(theme))]),
@@ -297,17 +312,17 @@ fn session_line(frame: FrameLayout<'_>, theme: &Theme, room: u16) -> Line<'stati
 
 /// One tab's two text blocks at metadata index `meta_index`: its `#N` block
 /// and its name block.
-fn tab_texts(frame: FrameLayout<'_>, meta_index: usize) -> (String, String) {
-    let meta = &frame.session.tabs_metadata[meta_index];
+fn tab_texts(tabs: &[TabMeta], meta_index: usize) -> (String, String) {
+    let meta = &tabs[meta_index];
     (format!(" #{} ", meta.index + 1), format!(" {} ", meta.name))
 }
 
 /// One tab's two-block ribbon (`#N` block + name block) at metadata index
 /// `meta_index`, colored on its own stop of the theme's chrome ramp.
-fn tab_line(frame: FrameLayout<'_>, theme: &Theme, meta_index: usize) -> Line<'static> {
-    let count = frame.session.tabs_metadata.len();
-    let active = frame.session.tabs_metadata[meta_index].active;
-    let (index, name) = tab_texts(frame, meta_index);
+fn tab_line(tabs: &[TabMeta], theme: &Theme, meta_index: usize) -> Line<'static> {
+    let count = tabs.len();
+    let active = tabs[meta_index].active;
+    let (index, name) = tab_texts(tabs, meta_index);
     Line::from(vec![
         Span::styled(index, tab_index_style(theme, active, meta_index, count)),
         Span::styled(name, tab_name_style(theme, active, meta_index, count)),

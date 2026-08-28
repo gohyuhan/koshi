@@ -40,7 +40,7 @@ use koshi_layout::solver::StackHeader;
 use koshi_terminal::grid::state::Grid;
 use koshi_terminal::state::CursorShape;
 
-use crate::region::core_region_solve;
+use crate::region::{core_region_solve, NavigatorLayout};
 
 /// The hint-bar data types live with the keymap that produces them; the
 /// renderer only draws them, and re-exports them here so a caller painting a
@@ -204,12 +204,13 @@ pub struct Reconnecting {
 /// tab, the viewing client, the viewer's own chrome state, and an optional
 /// client-side region commit. Carries no pane content and no colors.
 ///
-/// This is what hit-testing a mouse cell and solving the tabline read. Both
-/// answer in cells, and a cell's position does not depend on what color it is
-/// painted, so no theme reaches here — the colors are applied only where
-/// something is actually drawn. A client-side layout carries the committed
-/// region solve that placed the pane area; a server layout uses the default
-/// whole-area view.
+/// Hit-testing reads the session, client, viewer, and committed region solve
+/// from this value. The `navigator` method returns the session name, tabs, lock
+/// mode, mouse-selection state, reconnect state, and tab offset used by the
+/// tabline solve. Hit-testing and tabline solving use cell coordinates. This
+/// value has no theme; renderers apply colors when they draw cells. A
+/// client-side layout carries the committed region solve that placed the pane
+/// area; a server layout uses the default whole-area compatibility geometry.
 ///
 /// A caller that already holds a [`RenderSnapshot`] borrows one out of it with
 /// [`RenderSnapshot::layout`]. A client-side [`MouseFrame`] adds its committed
@@ -226,6 +227,24 @@ pub struct FrameLayout<'a> {
     /// The region solve committed with the painted frame, when this layout is
     /// the client-side view of a painted frame.
     pub(crate) committed_regions: Option<&'a CommittedRegions>,
+}
+
+impl<'a> FrameLayout<'a> {
+    /// Borrow the tab-row facts from this frame without carrying pane data.
+    ///
+    /// A frame named `work` with tabs `shell` and `logs` yields those names and
+    /// their tab state, but it does not yield a pane slot or terminal grid.
+    #[must_use]
+    pub(crate) fn navigator(&self) -> NavigatorLayout<'_> {
+        NavigatorLayout {
+            session_name: &self.session.name,
+            tabs: &self.session.tabs_metadata,
+            lock_mode: self.client.lock_mode,
+            mouse_select: self.client.mouse_select,
+            reconnecting: self.viewer.reconnecting,
+            tabline_offset: self.viewer.tabline_offset,
+        }
+    }
 }
 
 /// The owned form of [`FrameLayout`], for a caller that builds these two

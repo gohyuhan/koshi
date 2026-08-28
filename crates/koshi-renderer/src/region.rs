@@ -3,9 +3,10 @@
 
 use koshi_core::geometry::Size;
 use koshi_core::key::KeySequence;
+use koshi_core::lock::LockMode;
 use koshi_layout::regions::{solve, Edge, RegionGeometry, RegionSolve};
 
-use crate::snapshot::{FrameLayout, KeymapHints};
+use crate::snapshot::{KeymapHints, Reconnecting, TabMeta};
 use crate::theme::Theme;
 
 /// The compiled-in navigator and statusline inputs.
@@ -39,14 +40,59 @@ pub struct StatuslineDto<'a> {
     pub pending: Option<&'a KeySequence>,
 }
 
+/// The tab-row facts needed to solve its geometry.
+///
+/// This value excludes colors and pane data. A session named `work` with tabs
+/// `shell` and `logs` carries those names, their active markers, and the mode
+/// values, but no pane slot or terminal grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct NavigatorLayout<'a> {
+    /// The session display name shown in the left block.
+    pub(crate) session_name: &'a str,
+    /// The tab metadata shown between the left and right blocks.
+    pub(crate) tabs: &'a [TabMeta],
+    /// The viewing client's lock state shown in the mode tag.
+    pub(crate) lock_mode: LockMode,
+    /// Whether the viewing client is selecting with the mouse.
+    pub(crate) mouse_select: bool,
+    /// The reconnect state shown in the mode tag, if the viewer has no link.
+    pub(crate) reconnecting: Option<Reconnecting>,
+    /// The first tab index the viewer is peeking at, if one is set.
+    pub(crate) tabline_offset: Option<usize>,
+}
+
 /// Everything the tab row is painted from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NavigatorDto<'a> {
-    /// The session being viewed, the viewing client, and the viewer's own
-    /// chrome state, including the committed region solve when one exists.
-    pub frame: FrameLayout<'a>,
+    /// The session display name shown in the left block.
+    pub session_name: &'a str,
+    /// The tab metadata shown between the left and right blocks.
+    pub tabs: &'a [TabMeta],
+    /// The viewing client's lock state shown in the mode tag.
+    pub lock_mode: LockMode,
+    /// Whether the viewing client is selecting with the mouse.
+    pub mouse_select: bool,
+    /// The reconnect state shown in the mode tag, if the viewer has no link.
+    pub reconnecting: Option<Reconnecting>,
+    /// The first tab index the viewer is peeking at, if one is set.
+    pub tabline_offset: Option<usize>,
     /// The colors the row is painted in.
     pub theme: &'a Theme,
+}
+
+impl<'a> NavigatorDto<'a> {
+    /// Select the tab-row facts that the renderer and hit-test share.
+    #[must_use]
+    pub(crate) fn inputs(&self) -> NavigatorLayout<'a> {
+        NavigatorLayout {
+            session_name: self.session_name,
+            tabs: self.tabs,
+            lock_mode: self.lock_mode,
+            mouse_select: self.mouse_select,
+            reconnecting: self.reconnecting,
+            tabline_offset: self.tabline_offset,
+        }
+    }
 }
 
 #[cfg(test)]

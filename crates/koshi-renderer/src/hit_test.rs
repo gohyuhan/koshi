@@ -162,7 +162,7 @@ pub fn hit_test(frame: FrameLayout<'_>, at: Point) -> HitRegion {
 /// Classify a cell on the tabline row at column `x`: a scroll arrow, the tab
 /// whose ribbon spans it, or [`Tabline`](HitRegion::Tabline) off all of them.
 fn tabline_region(frame: FrameLayout<'_>, area: RatatuiRect, x: u16) -> HitRegion {
-    let layout = tabline_layout(frame, area);
+    let layout = tabline_layout(frame.navigator(), area);
     if let Some((arrow_x, to)) = layout.left_arrow {
         if x == arrow_x {
             return HitRegion::TablineScrollLeft { to };
@@ -270,7 +270,7 @@ pub fn tabline_first_visible(frame: FrameLayout<'_>) -> Option<usize> {
     if tabline.width == 0 || tabline.height == 0 {
         return None;
     }
-    Some(tabline_layout(frame, tabline).first_visible)
+    Some(tabline_layout(frame.navigator(), tabline).first_visible)
 }
 
 /// Return the pane rectangle from the committed solve, or the whole area for
