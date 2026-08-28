@@ -1,7 +1,8 @@
 //! Per-pane terminal state: screen buffers, cursor, pen style (the
 //! foreground/background color and attributes applied to newly written
 //! text), modes, horizontal tab stops, title, reported working directory,
-//! scrollback, and the device-reply queue.
+//! shell integration state and facts, prompt-row marks, scrollback, and the
+//! device-reply queue.
 //!
 //! One [`TerminalState`] backs a single terminal pane; panes never share
 //! buffers. The state travels inside a per-pane
@@ -26,7 +27,7 @@ use koshi_core::process::PtySize;
 
 use serde::{Deserialize, Serialize};
 
-use crate::grid::state::{Cell, Grid};
+use crate::grid::state::{Cell, Grid, RowMeta};
 use crate::scrollback::{Scrollback, ScrollbackLimit};
 use crate::selection::TextView;
 use crate::style::Style;
@@ -47,18 +48,40 @@ pub use modes::{CursorShape, MouseEncoding, MouseTracking, TerminalModes};
 pub use render::{Charset, RenderState};
 pub use screen::Screen;
 
+/// The shell lifecycle point last reported through OSC 133.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+enum ShellIntegrationState {
+    /// The shell is showing or returning to a prompt.
+    #[default]
+    Prompt,
+    /// The shell has received command input.
+    Input,
+    /// The shell has started executing the command.
+    Running,
+}
+
+/// A shell-integration fact produced by an OSC 133 marker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ShellIntegrationFact {
+    /// The shell reported that a command started.
+    CommandStarted,
+    /// The shell reported that a command finished.
+    CommandFinished { exit_code: Option<i32> },
+}
+
 /// The full emulation state of one terminal pane.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalState {
-    /// The primary (normal, scrolling) screen buffer, reference-counted so a
-    /// render snapshot can share it without copying; a write clones it once on
-    /// demand (copy-on-write via [`Arc::make_mut`] in [`active_grid_mut`]).
+    /// The primary (normal, scrolling) screen buffer, including row metadata,
+    /// reference-counted so a render snapshot can share it without copying; a
+    /// write clones it once on demand (copy-on-write via [`Arc::make_mut`] in
+    /// [`active_grid_mut`]).
     ///
     /// [`active_grid_mut`]: Self::active_grid_mut
     primary: Arc<Grid>,
-    /// The alternate screen buffer used by full-screen apps; swapped in via DEC
-    /// mode `?1049`/`?47` and never appended to the `scrollback`. Reference-counted
-    /// like `primary`.
+    /// The alternate screen buffer used by full-screen apps, including row
+    /// metadata; swapped in via DEC mode `?1049`/`?47` and never appended to the
+    /// `scrollback`. Reference-counted like `primary`.
     alternate: Arc<Grid>,
     /// Which buffer — `primary` or `alternate` — output currently writes to and
     /// the renderer displays.
@@ -84,6 +107,12 @@ pub struct TerminalState {
     /// decoded path), or `None` until the shell reports one. Consumed by cwd
     /// inheritance so a newly split pane can open in the same directory.
     reported_cwd: Option<ReportedCwd>,
+    /// The shell lifecycle point last reported through OSC 133.
+    #[serde(default)]
+    shell_integration_state: ShellIntegrationState,
+    /// Shell-integration facts not yet taken by the terminal engine caller.
+    #[serde(default)]
+    shell_integration_facts: Vec<ShellIntegrationFact>,
     /// Lines that have scrolled off the top of the primary screen.
     scrollback: Scrollback,
     /// Primary screen's DECSTBM scroll-region margins, 0-based inclusive
@@ -139,6 +168,8 @@ impl TerminalState {
             tab_stops: default_tab_stops(size.cols),
             title: None,
             reported_cwd: None,
+            shell_integration_state: ShellIntegrationState::default(),
+            shell_integration_facts: Vec::new(),
             scrollback: Scrollback::new(limit),
             primary_scroll_region: None,
             alternate_scroll_region: None,
@@ -160,12 +191,12 @@ impl TerminalState {
     ///
     /// The primary screen REFLOWS: soft-wrapped rows re-join into logical
     /// lines ([`RowEnd`](crate::grid::state::RowEnd)) and re-wrap to the new
-    /// width — text wider than the new width wraps onto continuation rows
-    /// instead of being cut off, and widening re-joins what an earlier
-    /// narrow width wrapped. Rows past the new height scroll into history
-    /// (trailing blank padding rows drop instead), a taller screen pulls
-    /// history back in, and the cursor stays on its logical line at its
-    /// content offset. Cursor-line tracking holds for heights of one row or
+    /// width, while prompt marks stay with their rows. Text wider than the new
+    /// width wraps onto continuation rows instead of being cut off, and
+    /// widening re-joins what an earlier narrow width wrapped. Rows past the
+    /// new height scroll into history (trailing blank padding rows drop
+    /// instead), a taller screen pulls history back in, and the cursor stays on
+    /// its logical line at its content offset. Cursor-line tracking holds for heights of one row or
     /// more; a zero-row resize parks every row in history without panicking,
     /// and after regrowing the cursor restarts on the first logical line
     /// (real terminals are never zero-sized — koshi's PTY floor is 2×1).
@@ -181,9 +212,25 @@ impl TerminalState {
         self.reflow_primary(size);
 
         // The alternate screen keeps what fits: crop off the top, pad at the
-        // bottom, no history on either side.
-        let mut rows: Vec<Vec<Cell>> = self.alternate.rows().to_vec();
-        crop_columns(&mut rows, size.cols, alternate_fill);
+        // bottom, no history on either side. Row metadata follows each row.
+        let mut rows: Vec<(Vec<Cell>, RowMeta)> = self
+            .alternate
+            .rows()
+            .iter()
+            .enumerate()
+            .map(|(row, cells)| {
+                (
+                    cells.clone(),
+                    RowMeta {
+                        end: self.alternate.row_end(row as u16),
+                        prompt: self.alternate.prompt_mark(row as u16),
+                    },
+                )
+            })
+            .collect();
+        for (cells, _) in &mut rows {
+            crop_columns(cells, size.cols, alternate_fill);
+        }
         let cropped_top = rows.len().saturating_sub(size.rows as usize);
         rows.drain(..cropped_top);
         self.alternate_cursor.row = self
@@ -192,9 +239,12 @@ impl TerminalState {
             .saturating_sub(u16::try_from(cropped_top).unwrap_or(u16::MAX));
         rows.resize(
             size.rows as usize,
-            vec![Cell::blank_with(alternate_fill); size.cols as usize],
+            (
+                vec![Cell::blank_with(alternate_fill); size.cols as usize],
+                RowMeta::default(),
+            ),
         );
-        self.alternate = Arc::new(Grid::from_rows(rows, size.cols, alternate_fill));
+        self.alternate = Arc::new(Grid::from_rows_with_meta(rows, size.cols, alternate_fill));
 
         // Clamp both cursors to the new bounds.
         self.primary_cursor.row = min(self.primary_cursor.row, size.rows.saturating_sub(1));
@@ -326,16 +376,24 @@ impl TerminalState {
 
         // The visible window: the `scrolled` newest history rows, then the live
         // rows, capped at the screen height. The live grid alone is `rows` tall,
-        // so the chain always yields a full window.
-        let window: Vec<Vec<Cell>> = history
+        // so the chain always yields a full window and keeps row metadata.
+        let window: Vec<(Vec<Cell>, RowMeta)> = history
             .iter()
             .skip(retained - scrolled)
-            .map(|(cells, _)| cells.clone())
-            .chain(grid.rows().iter().cloned())
+            .map(|(cells, meta)| (cells.clone(), *meta))
+            .chain(grid.rows().iter().enumerate().map(|(row, cells)| {
+                (
+                    cells.clone(),
+                    RowMeta {
+                        end: grid.row_end(row as u16),
+                        prompt: grid.prompt_mark(row as u16),
+                    },
+                )
+            }))
             .take(rows as usize)
             .collect();
         (
-            Arc::new(Grid::from_rows(window, cols, Style::default())),
+            Arc::new(Grid::from_rows_with_meta(window, cols, Style::default())),
             scrolled,
         )
     }
@@ -422,6 +480,11 @@ impl TerminalState {
     /// compose a scrolled-back view.
     pub fn scrollback(&self) -> &Scrollback {
         &self.scrollback
+    }
+
+    /// Drain the queued shell-integration facts, leaving the queue empty.
+    pub(crate) fn take_shell_integration_facts(&mut self) -> Vec<ShellIntegrationFact> {
+        std::mem::take(&mut self.shell_integration_facts)
     }
 
     /// Drain the queued device-query replies (DA/DSR/DECRQM answers), leaving
@@ -538,17 +601,15 @@ fn rebuilt_with_width(cell: &Cell, width: u8) -> Cell {
     out
 }
 
-/// Normalize every row to exactly `cols` cells: truncate on the right or pad
-/// with blanks in `fill`. A wide glyph whose right (width-0) half falls past
-/// the new edge leaves its base as the last cell; that dangling base is
-/// blanked so no half glyph survives the crop.
-fn crop_columns(rows: &mut [Vec<Cell>], cols: u16, fill: Style) {
-    for row in rows {
-        row.resize(cols as usize, Cell::blank_with(fill));
-        if let Some(last) = row.last_mut() {
-            if last.width() > 1 {
-                *last = Cell::blank_with(fill);
-            }
+/// Normalize `row` to exactly `cols` cells: truncate on the right or pad with
+/// blanks in `fill`. A wide glyph whose right (width-0) half falls past the new
+/// edge leaves its base as the last cell; that dangling base is blanked so no
+/// half glyph survives the crop.
+fn crop_columns(row: &mut Vec<Cell>, cols: u16, fill: Style) {
+    row.resize(cols as usize, Cell::blank_with(fill));
+    if let Some(last) = row.last_mut() {
+        if last.width() > 1 {
+            *last = Cell::blank_with(fill);
         }
     }
 }

@@ -5,8 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-koshi-macro = { version = "0.3.0", path = "../koshi-macro" }
+koshi-macro = { version = "0.4.0-pr.1", path = "../koshi-macro" }
 tracing = "0.1.44"
 
 [dev-dependencies]
-koshi-observability = { version = "0.3.0", path = "../koshi-observability" }
+koshi-observability = { version = "0.4.0-pr.1", path = "../koshi-observability" }

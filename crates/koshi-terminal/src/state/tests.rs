@@ -40,6 +40,23 @@ fn new_starts_on_primary_with_default_cursor_style_and_no_title() {
 }
 
 #[test]
+fn state_without_shell_metadata_deserializes_as_prompt() {
+    let state = TerminalState::new(PtySize { cols: 5, rows: 3 });
+    let mut value = serde_json::to_value(&state).expect("state serializes");
+    value
+        .as_object_mut()
+        .expect("state is an object")
+        .remove("shell_integration_state");
+
+    let restored: TerminalState = serde_json::from_value(value).expect("legacy state deserializes");
+
+    assert_eq!(
+        restored.shell_integration_state,
+        ShellIntegrationState::Prompt
+    );
+}
+
+#[test]
 fn active_grid_follows_active_screen() {
     let mut state = TerminalState::new(PtySize { cols: 4, rows: 2 });
     assert!(std::ptr::eq(state.active_grid(), state.primary.as_ref()));
@@ -257,12 +274,15 @@ fn resize_alternate_screen_crops_without_touching_scrollback() {
     for row in 0..3 {
         put(&mut state, row, 0, char::from(b'x' + row as u8), 1);
     }
+    state.active_grid_mut().set_prompt_mark(1, true);
 
     state.resize(PtySize { cols: 4, rows: 2 });
     // The top row is cropped away — the alternate screen has no history.
     assert_eq!(state.scrollback.len(), 0);
     assert_eq!(state.alternate.cell(0, 0).unwrap().ch(), 'y');
+    assert!(state.alternate.prompt_mark(0));
     assert_eq!(state.alternate.cell(1, 0).unwrap().ch(), 'z');
+    assert!(!state.alternate.prompt_mark(1));
 }
 
 #[test]
@@ -412,6 +432,23 @@ fn scrolled_view_composes_history_above_the_live_screen() {
     assert_eq!(grid_row(&grid, 0), "h2.");
     assert_eq!(grid_row(&grid, 1), "L0.");
     assert_eq!(effective, 1);
+}
+
+#[test]
+fn scrolled_view_keeps_a_history_row_prompt_mark() {
+    let mut state = state_with_history();
+    state.scrollback.push_row_with_meta(
+        &line("prompt"),
+        RowMeta {
+            end: RowEnd::Hard,
+            prompt: true,
+        },
+    );
+
+    let (grid, _) = state.scrolled_view(1);
+
+    assert!(grid.prompt_mark(0));
+    assert!(!grid.prompt_mark(1));
 }
 
 #[test]

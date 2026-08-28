@@ -2,6 +2,7 @@
 
 use std::cmp::min;
 
+use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 
 use crate::style::Style;
@@ -157,6 +158,15 @@ pub enum RowEnd {
     SoftWide,
 }
 
+/// Everything the terminal records about a row apart from its cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RowMeta {
+    /// How the row ends relative to the row below it.
+    pub end: RowEnd,
+    /// Whether a shell reported a prompt on this row with OSC 133;A.
+    pub prompt: bool,
+}
+
 /// The number of content cells in a hard-ended row: its length with the
 /// trailing run of fully-default blanks (the padding every row is filled
 /// with) excluded. A styled blank — e.g. a background-colored prompt
@@ -174,14 +184,13 @@ pub(crate) fn content_len(row: &[Cell]) -> usize {
 }
 
 /// A fixed-size grid of cells, addressed `rows[row][col]`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Grid {
     /// Row-major cell storage: `rows[row][col]`.
     rows: Vec<Vec<Cell>>,
-    /// Per-row line-continuation state, parallel to `rows`: `row_ends[row]`
-    /// says whether `rows[row]` and `rows[row + 1]` hold one logical line.
-    /// Every operation that adds, removes, or reorders rows maintains it.
-    row_ends: Vec<RowEnd>,
+    /// Per-row metadata, parallel to `rows`. Every operation that adds,
+    /// removes, or reorders rows maintains it.
+    row_meta: Vec<RowMeta>,
 }
 
 impl Grid {
@@ -189,39 +198,64 @@ impl Grid {
     pub fn blank(rows: u16, cols: u16, fill: Style) -> Self {
         Grid {
             rows: vec![vec![Cell::blank_with(fill); cols as usize]; rows as usize],
-            row_ends: vec![RowEnd::Hard; rows as usize],
+            row_meta: vec![RowMeta::default(); rows as usize],
         }
     }
 
     /// Build a grid from ready-made `rows`, normalizing each to exactly `cols`
     /// cells: a longer row is truncated, a shorter one padded with blank spaces
-    /// in `fill` (both via [`Vec::resize`]). Every row end starts [`RowEnd::Hard`];
-    /// a caller carrying real continuation state sets it afterwards with
-    /// [`set_row_end`](Grid::set_row_end). Used to assemble a scrolled-back
-    /// view window from a mix of scrollback and live-screen rows captured at
-    /// possibly differing widths.
-    pub fn from_rows(mut rows: Vec<Vec<Cell>>, cols: u16, fill: Style) -> Self {
-        for row in &mut rows {
+    /// in `fill` (both via [`Vec::resize`]). Every row starts with default
+    /// metadata. Used to assemble a fresh screen or test grid.
+    pub fn from_rows(rows: Vec<Vec<Cell>>, cols: u16, fill: Style) -> Self {
+        let rows = rows
+            .into_iter()
+            .map(|row| (row, RowMeta::default()))
+            .collect();
+        Self::from_rows_with_meta(rows, cols, fill)
+    }
+
+    /// Build a grid from rows and their metadata, normalizing every row to
+    /// exactly `cols` cells.
+    pub(crate) fn from_rows_with_meta(
+        mut rows: Vec<(Vec<Cell>, RowMeta)>,
+        cols: u16,
+        fill: Style,
+    ) -> Self {
+        for (row, _) in &mut rows {
             row.resize(cols as usize, Cell::blank_with(fill));
         }
-        let row_ends = vec![RowEnd::Hard; rows.len()];
-        Grid { rows, row_ends }
+        let (rows, row_meta): (Vec<Vec<Cell>>, Vec<RowMeta>) = rows.into_iter().unzip();
+        Grid { rows, row_meta }
     }
 
     /// How `row` ends relative to the row below it; out of bounds reads as
     /// [`RowEnd::Hard`].
     pub fn row_end(&self, row: u16) -> RowEnd {
-        self.row_ends
+        self.row_meta
             .get(row as usize)
-            .copied()
-            .unwrap_or(RowEnd::Hard)
+            .map_or(RowEnd::Hard, |meta| meta.end)
     }
 
     /// Record how `row` ends relative to the row below it. Out of bounds is a
     /// no-op.
     pub fn set_row_end(&mut self, row: u16, end: RowEnd) {
-        if let Some(slot) = self.row_ends.get_mut(row as usize) {
-            *slot = end;
+        if let Some(meta) = self.row_meta.get_mut(row as usize) {
+            meta.end = end;
+        }
+    }
+
+    /// Whether a shell reported a prompt on `row`; out of bounds reads false.
+    pub fn prompt_mark(&self, row: u16) -> bool {
+        self.row_meta
+            .get(row as usize)
+            .is_some_and(|meta| meta.prompt)
+    }
+
+    /// Set whether a shell reported a prompt on `row`. Out of bounds is a
+    /// no-op.
+    pub fn set_prompt_mark(&mut self, row: u16, prompt: bool) {
+        if let Some(meta) = self.row_meta.get_mut(row as usize) {
+            meta.prompt = prompt;
         }
     }
 
@@ -327,15 +361,15 @@ impl Grid {
         // up to fill the gap — blanks that line to `cols` cells in place, and
         // re-inserts it at the band's bottom, so the band keeps its original
         // height after every step and reuses the departing row's cell buffer.
-        // Row ends travel with their rows, so a soft-wrapped row scrolled off
-        // the top keeps its continuation state.
+        // Row metadata travels with each row, so a soft-wrapped row scrolled
+        // off the top keeps its continuation state and prompt mark.
         for _ in 0..remove_count as usize {
             let mut recycled = self.rows.remove(first as usize);
             recycled.clear();
             recycled.resize(cols as usize, Cell::blank_with(fill));
             self.rows.insert(last as usize, recycled);
-            self.row_ends.remove(first as usize);
-            self.row_ends.insert(last as usize, RowEnd::Hard);
+            self.row_meta.remove(first as usize);
+            self.row_meta.insert(last as usize, RowMeta::default());
         }
         if remove_count > 0 {
             // The removed rows broke two continuations: the row above the
@@ -366,15 +400,15 @@ impl Grid {
         // Each iteration removes the band's bottom line, blanks it to `cols`
         // cells in place, and re-inserts it at the band's top — the lines
         // between slide down — so the band keeps its original height after
-        // every step and reuses the departing row's cell buffer. Row ends
-        // travel with their rows.
+        // every step and reuses the departing row's cell buffer. Row metadata
+        // travels with each row.
         for _ in 0..insert_count as usize {
             let mut recycled = self.rows.remove(last as usize);
             recycled.clear();
             recycled.resize(cols as usize, Cell::blank_with(fill));
             self.rows.insert(first as usize, recycled);
-            self.row_ends.remove(last as usize);
-            self.row_ends.insert(first as usize, RowEnd::Hard);
+            self.row_meta.remove(last as usize);
+            self.row_meta.insert(first as usize, RowMeta::default());
         }
         // The inserted blanks broke two continuations: the row above the band
         // now precedes a blank row, and the row that slid into the band's
@@ -383,6 +417,39 @@ impl Grid {
             self.set_row_end(first - 1, RowEnd::Hard);
         }
         self.set_row_end(last, RowEnd::Hard);
+    }
+}
+
+#[derive(Deserialize)]
+struct GridFields {
+    rows: Vec<Vec<Cell>>,
+    #[serde(default)]
+    row_meta: Option<Vec<RowMeta>>,
+    #[serde(default)]
+    row_ends: Option<Vec<RowEnd>>,
+}
+
+impl<'de> Deserialize<'de> for Grid {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let fields = GridFields::deserialize(deserializer)?;
+        let row_meta = match (fields.row_meta, fields.row_ends) {
+            (Some(row_meta), _) => row_meta,
+            (None, Some(row_ends)) => row_ends
+                .into_iter()
+                .map(|end| RowMeta { end, prompt: false })
+                .collect(),
+            (None, None) => vec![RowMeta::default(); fields.rows.len()],
+        };
+        if row_meta.len() != fields.rows.len() {
+            return Err(de::Error::custom("grid row metadata does not match rows"));
+        }
+        Ok(Grid {
+            rows: fields.rows,
+            row_meta,
+        })
     }
 }
 

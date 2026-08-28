@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use koshi_core::process::PtySize;
 
-use crate::state::Screen;
+use crate::state::{Screen, ShellIntegrationFact, TerminalState};
 use crate::style::{Color, Style};
 
 use super::*;
@@ -49,6 +49,121 @@ fn advance_prints_text_into_the_grid_and_returns_no_replies() {
     assert_eq!(ch(&engine, 0, 0), 'h');
     assert_eq!(ch(&engine, 0, 1), 'i');
     assert_eq!(engine.state().active_cursor_position(), (0, 2));
+}
+
+#[test]
+fn split_osc133_is_completed_by_the_next_chunk() {
+    let mut engine = engine();
+
+    assert!(engine.advance(b"\x1b]133;").is_empty());
+    assert!(!engine.state().active_grid().prompt_mark(0));
+    assert!(engine.advance(b"A\x07").is_empty());
+
+    assert!(engine.state().active_grid().prompt_mark(0));
+}
+
+#[test]
+fn advance_with_shell_integration_returns_command_facts_in_order() {
+    let mut engine = engine();
+
+    let (replies, facts) =
+        engine.advance_with_shell_integration(b"\x1b]133;C\x07\x1b]133;D;137\x07");
+
+    assert!(replies.is_empty());
+    assert_eq!(
+        facts,
+        vec![
+            ShellIntegrationFact::CommandStarted,
+            ShellIntegrationFact::CommandFinished {
+                exit_code: Some(137),
+            },
+        ]
+    );
+}
+
+#[test]
+fn bare_shell_integration_finish_returns_no_exit_code() {
+    let mut engine = engine();
+
+    let (_, facts) = engine.advance_with_shell_integration(b"\x1b]133;C\x07\x1b]133;D\x07");
+
+    assert_eq!(
+        facts,
+        vec![
+            ShellIntegrationFact::CommandStarted,
+            ShellIntegrationFact::CommandFinished { exit_code: None },
+        ]
+    );
+}
+
+#[test]
+fn unmatched_shell_integration_finish_returns_no_fact() {
+    let mut engine = engine();
+
+    let (_, facts) = engine.advance_with_shell_integration(b"\x1b]133;D;1\x07");
+
+    assert!(facts.is_empty());
+}
+
+#[test]
+fn split_shell_integration_command_fact_waits_for_the_terminator() {
+    let mut engine = engine();
+
+    let (_, facts) = engine.advance_with_shell_integration(b"\x1b]133;C\x07\x1b]133;D;");
+    assert_eq!(facts, vec![ShellIntegrationFact::CommandStarted]);
+
+    let (_, facts) = engine.advance_with_shell_integration(b"137\x07");
+    assert_eq!(
+        facts,
+        vec![ShellIntegrationFact::CommandFinished {
+            exit_code: Some(137),
+        }]
+    );
+}
+
+#[test]
+fn pending_shell_facts_survive_a_state_round_trip() {
+    let mut state = TerminalState::new(PtySize { cols: 8, rows: 3 });
+    let mut parser = vte::Parser::<{ crate::engine::OSC_CAPACITY }>::new_with_size();
+    parser.advance(&mut state, b"\x1b]133;C\x07");
+
+    let encoded = serde_json::to_string(&state).expect("state serializes");
+    let mut restored: TerminalState = serde_json::from_str(&encoded).expect("state deserializes");
+
+    assert_eq!(
+        restored.take_shell_integration_facts(),
+        vec![ShellIntegrationFact::CommandStarted]
+    );
+}
+
+#[test]
+fn prompt_marks_survive_scrollback_and_eviction() {
+    let mut engine = TerminalEngine::with_scrollback(
+        PtySize { cols: 4, rows: 2 },
+        crate::scrollback::ScrollbackLimit::new(1, 1_000),
+    );
+    let _ = engine.advance(b"\x1b]133;A\x07\r\nx\r\n");
+
+    assert!(engine.state().scrollback().lines()[0].1.prompt);
+
+    let _ = engine.advance(b"y\r\n");
+
+    assert_eq!(engine.state().scrollback().lines().len(), 1);
+    assert!(!engine.state().scrollback().lines()[0].1.prompt);
+}
+
+#[test]
+fn prompt_marks_follow_their_logical_row_through_reflow() {
+    let mut engine = TerminalEngine::new(PtySize { cols: 8, rows: 5 });
+    let _ = engine.advance(b"abcdefghij\x1b]133;A\x07kl");
+
+    engine.resize(PtySize { cols: 4, rows: 5 });
+    assert!(engine.state().active_grid().prompt_mark(2));
+    assert!(!engine.state().active_grid().prompt_mark(1));
+
+    engine.resize(PtySize { cols: 8, rows: 5 });
+    assert!(engine.state().active_grid().prompt_mark(1));
+    assert!(!engine.state().active_grid().prompt_mark(0));
 }
 
 #[test]

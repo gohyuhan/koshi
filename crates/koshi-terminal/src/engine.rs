@@ -22,7 +22,7 @@
 use koshi_core::process::PtySize;
 
 use crate::scrollback::ScrollbackLimit;
-use crate::state::TerminalState;
+use crate::state::{ShellIntegrationFact, TerminalState};
 
 /// The byte every escape sequence starts with: `ESC`, `0x1b`.
 const ESCAPE: u8 = 0x1b;
@@ -114,12 +114,32 @@ impl TerminalEngine {
     /// Chunks may split an escape sequence or a UTF-8 code point at any byte;
     /// the parser resumes the partial decode on the next call, and
     /// [`undecoded`](Self::undecoded) is set to the bytes that put another
-    /// parser where this one now stands.
+    /// parser where this one now stands. This method drains shell-integration
+    /// facts without returning them; use
+    /// [`Self::advance_with_shell_integration`] when the caller handles those facts.
     #[must_use = "undelivered replies hang the querying app"]
     pub fn advance(&mut self, bytes: &[u8]) -> Vec<u8> {
+        let (replies, _) = self.advance_with_shell_integration(bytes);
+        replies
+    }
+
+    /// Feed one chunk through the parser and return device replies plus the
+    /// shell-integration facts that the chunk produced. A `C` marker returns
+    /// [`ShellIntegrationFact::CommandStarted`], and a matched `D` marker
+    /// returns [`ShellIntegrationFact::CommandFinished`] with its exit code.
+    /// The facts contain no command text. `ESC ] 133 ; C` followed by
+    /// `ESC ] 133 ; D ; 137` returns both facts in that order.
+    #[must_use = "undelivered replies or shell facts are lost"]
+    pub fn advance_with_shell_integration(
+        &mut self,
+        bytes: &[u8],
+    ) -> (Vec<u8>, Vec<ShellIntegrationFact>) {
         self.parser.advance(&mut self.state, bytes);
         self.hold_undecoded(bytes);
-        self.state.take_replies()
+        (
+            self.state.take_replies(),
+            self.state.take_shell_integration_facts(),
+        )
     }
 
     /// An engine wrapped around an existing `state`, with a parser fed

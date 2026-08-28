@@ -929,13 +929,12 @@ fn a_binary_reading_no_format_this_one_writes_is_refused_naming_both_ranges() {
         Ok(())
     );
 
-    // The real case behind the refusal: a koshi that reads format 1 alone is
-    // every build shipped before the client record dropped a field, and this
-    // one writes a body such a build cannot read.
+    // The real case behind the refusal: a koshi that reads formats 1 through
+    // 2 is an older build, and this one writes a body with format 3.
     assert_eq!(
-        reads_the_format_this_build_writes(ResumeSupport { min: 1, max: 1 }, &exe),
+        reads_the_format_this_build_writes(ResumeSupport { min: 1, max: 2 }, &exe),
         Err(format!(
-            "the binary at /opt/koshi/bin/koshi reads resume formats 1 to 1, and this one reads \
+            "the binary at /opt/koshi/bin/koshi reads resume formats 1 to 2, and this one reads \
              {RESUME_FORMAT_MIN} to {RESUME_FORMAT} and writes {RESUME_FORMAT}"
         ))
     );

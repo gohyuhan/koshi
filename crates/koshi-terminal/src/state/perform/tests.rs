@@ -1494,6 +1494,68 @@ fn osc_title_accepts_a_string_terminator() {
 }
 
 #[test]
+fn osc133_marks_the_prompt_row_and_tracks_the_shell_state() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b]133;A\x07");
+
+    assert!(state.active_grid().prompt_mark(0));
+    assert_eq!(state.shell_integration_state, ShellIntegrationState::Prompt);
+    assert_eq!(state.active_cursor_position(), (0, 0));
+    assert_eq!(row_text(&state, 0), "     ");
+
+    advance(&mut state, b"\x1b]133;B\x07");
+    assert_eq!(state.shell_integration_state, ShellIntegrationState::Input);
+    advance(&mut state, b"\x1b]133;C\x07");
+    assert_eq!(
+        state.shell_integration_state,
+        ShellIntegrationState::Running
+    );
+    advance(&mut state, b"\x1b]133;D;137\x07");
+    assert_eq!(state.shell_integration_state, ShellIntegrationState::Prompt);
+}
+
+#[test]
+fn osc133_finish_does_not_close_input_without_command_start() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b]133;B\x07");
+    advance(&mut state, b"\x1b]133;D;1\x07");
+
+    assert_eq!(state.shell_integration_state, ShellIntegrationState::Input);
+}
+
+#[test]
+fn output_without_osc133_keeps_the_unmarked_prompt_state() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"plain shell output");
+
+    assert_eq!(state.shell_integration_state, ShellIntegrationState::Prompt);
+    assert!((0..3).all(|row| !state.active_grid().prompt_mark(row)));
+}
+
+#[test]
+fn each_pane_keeps_its_own_osc133_state() {
+    let mut first = state(5, 3);
+    let mut second = state(5, 3);
+
+    advance(&mut first, b"\x1b]133;A\x07\x1b]133;B\x07\x1b]133;C\x07");
+    advance(&mut second, b"\x1b]133;B\x07");
+    advance(&mut first, b"\x1b]133;D;0\x07");
+
+    assert!(first.active_grid().prompt_mark(0));
+    assert_eq!(first.shell_integration_state, ShellIntegrationState::Prompt);
+    assert_eq!(second.shell_integration_state, ShellIntegrationState::Input);
+}
+
+#[test]
+fn osc133_does_not_mark_a_row_on_the_alternate_screen_after_reset() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b[?1047h\x1b]133;A\x07\x1b[?1047l");
+    advance(&mut state, b"\x1b[?1047h");
+
+    assert!(!state.active_grid().prompt_mark(0));
+}
+
+#[test]
 fn the_title_is_none_until_an_osc_sets_it() {
     let state = state(5, 3);
     assert_eq!(state.title(), None);

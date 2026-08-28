@@ -3,7 +3,9 @@
 use std::sync::Arc;
 
 use crate::grid::state::Grid;
-use crate::state::{Cursor, RenderState, Screen, TerminalModes, TerminalState};
+use crate::state::{
+    Cursor, RenderState, Screen, ShellIntegrationState, TerminalModes, TerminalState,
+};
 use crate::style::Style;
 
 use super::super::default_tab_stops;
@@ -23,7 +25,7 @@ impl TerminalState {
         self.reset_cluster();
     }
 
-    /// Restore terminal display state to its initial values.
+    /// Restore terminal display state and the current shell marker state to their initial values.
     pub(super) fn hard_reset(&mut self) {
         let (rows, columns) = self.primary.dimensions();
         debug_assert_eq!(self.alternate.dimensions(), (rows, columns));
@@ -50,6 +52,7 @@ impl TerminalState {
         self.alternate_scroll_region = None;
         self.tab_stops = default_tab_stops(columns);
         self.title = None;
+        self.shell_integration_state = ShellIntegrationState::default();
         self.reset_cluster();
     }
 }

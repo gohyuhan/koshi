@@ -45,7 +45,7 @@ use std::sync::LazyLock;
 
 use koshi_core::command::{GridPos, Selection, SelectionKind};
 
-use crate::grid::state::{Cell, Grid, RowEnd};
+use crate::grid::state::{Cell, Grid, RowEnd, RowMeta};
 use crate::scrollback::Scrollback;
 
 /// The cell a column past a stored row's end reads as.
@@ -88,7 +88,7 @@ pub const WORD_SEPARATORS: &str = ",│`|:\"' ()[]{}<>\t";
 pub struct TextView<'a> {
     /// Retained history rows, oldest first, or [`None`] for a screen that keeps
     /// no history of its own.
-    history: Option<&'a VecDeque<(Vec<Cell>, RowEnd)>>,
+    history: Option<&'a VecDeque<(Vec<Cell>, RowMeta)>>,
     /// The live screen.
     grid: &'a Grid,
     /// The absolute row number of the live screen's top row.
@@ -168,8 +168,8 @@ impl<'a> TextView<'a> {
             let history = self.history?;
             let from_top = self.top - row;
             let index = history.len().checked_sub(from_top as usize)?;
-            let (cells, end) = history.get(index)?;
-            Some((cells.as_slice(), *end))
+            let (cells, meta) = history.get(index)?;
+            Some((cells.as_slice(), meta.end))
         } else {
             let grid_row = u16::try_from(row - self.top).ok()?;
             let (rows, _) = self.grid.dimensions();

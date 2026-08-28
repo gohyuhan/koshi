@@ -345,3 +345,102 @@ fn trimming_lets_the_byte_cap_hold_the_text_it_was_set_for() {
     assert_eq!(sb.byte_total, 20);
     assert_eq!(sb.dropped_lines(), 0);
 }
+
+#[test]
+fn prompt_marks_stay_with_rows_through_history_replacement() {
+    let mut sb = bounded(10, 1_000_000);
+    sb.replace_lines_with_meta(vec![
+        (
+            line("prompt"),
+            RowMeta {
+                end: RowEnd::Hard,
+                prompt: true,
+            },
+        ),
+        (
+            line("output"),
+            RowMeta {
+                end: RowEnd::Hard,
+                prompt: false,
+            },
+        ),
+    ]);
+
+    assert!(sb.lines()[0].1.prompt);
+    assert!(!sb.lines()[1].1.prompt);
+}
+
+#[test]
+fn prompt_marks_are_evicted_with_their_rows() {
+    let mut sb = bounded(1, 1_000_000);
+    sb.push_row_with_meta(
+        &line("prompt"),
+        RowMeta {
+            end: RowEnd::Hard,
+            prompt: true,
+        },
+    );
+    sb.push_row_with_meta(
+        &line("output"),
+        RowMeta {
+            end: RowEnd::Hard,
+            prompt: false,
+        },
+    );
+
+    assert_eq!(retained(&sb), vec!["output"]);
+    assert!(!sb.lines()[0].1.prompt);
+}
+
+#[test]
+fn current_scrollback_rows_round_trip_with_prompt_metadata() {
+    let mut sb = bounded(10, 1_000_000);
+    sb.push_row_with_meta(
+        &line("prompt"),
+        RowMeta {
+            end: RowEnd::Hard,
+            prompt: true,
+        },
+    );
+
+    let value = serde_json::to_value(&sb).expect("scrollback serializes");
+    let restored: Scrollback = serde_json::from_value(value).expect("scrollback deserializes");
+
+    assert_eq!(restored.lines()[0].1.end, RowEnd::Hard);
+    assert!(restored.lines()[0].1.prompt);
+}
+
+#[test]
+fn legacy_scrollback_rows_deserialize_as_unmarked() {
+    let mut sb = bounded(10, 1_000_000);
+    sb.push_row_with_meta(
+        &line("prompt"),
+        RowMeta {
+            end: RowEnd::Soft,
+            prompt: true,
+        },
+    );
+    let mut value = serde_json::to_value(&sb).expect("scrollback serializes");
+    let object = value.as_object_mut().expect("scrollback is an object");
+    let lines = object
+        .get_mut("lines")
+        .and_then(serde_json::Value::as_array_mut)
+        .expect("scrollback lines are an array");
+    for line in lines {
+        let metadata = line
+            .as_array_mut()
+            .expect("serialized row is an array")
+            .pop()
+            .expect("serialized row has metadata");
+        let end = metadata["end"].clone();
+        line.as_array_mut()
+            .expect("serialized row is an array")
+            .push(end);
+    }
+
+    let restored: Scrollback =
+        serde_json::from_value(value).expect("legacy scrollback deserializes");
+
+    assert_eq!(restored.lines()[0].1.end, RowEnd::Soft);
+    assert!(!restored.lines()[0].1.prompt);
+}

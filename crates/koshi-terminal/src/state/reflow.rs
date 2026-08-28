@@ -2,8 +2,9 @@
 //!
 //! A resize re-wraps the primary screen instead of cropping it: scrollback
 //! and screen rows are unwound into logical lines using each row's
-//! [`RowEnd`], every logical line is re-wrapped to the new width, and the
-//! result is split back into history and screen. Text that soft-wrapped at
+//! [`RowEnd`], prompt marks are attached to row offsets, every logical line is
+//! re-wrapped to the new width, and the result is split back into history and
+//! screen. Text that soft-wrapped at
 //! the old width re-joins at a wider one, and text wider than the new width
 //! wraps onto continuation rows instead of being cut off — printing
 //! `abcdef` at width 6, resizing to width 4, then back to 6 shows `abcd` /
@@ -15,7 +16,7 @@ use std::sync::Arc;
 
 use koshi_core::process::PtySize;
 
-use crate::grid::state::{content_len, Cell, Grid, RowEnd};
+use crate::grid::state::{content_len, Cell, Grid, RowEnd, RowMeta};
 use crate::style::Style;
 
 use super::{rebuilt_with_width, TerminalState};
@@ -32,24 +33,31 @@ impl TerminalState {
         let fill = self.primary_render.style.bg_fill();
 
         // Every physical row: history first (oldest at the front), then the
-        // live screen, each with its continuation state.
-        let mut physical: Vec<(Vec<Cell>, RowEnd)> =
+        // live screen, each with its row metadata.
+        let mut physical: Vec<(Vec<Cell>, RowMeta)> =
             self.scrollback.lines().iter().cloned().collect();
         let history_len = physical.len();
         for (index, row) in self.primary.rows().iter().enumerate() {
-            physical.push((row.clone(), self.primary.row_end(index as u16)));
+            physical.push((
+                row.clone(),
+                RowMeta {
+                    end: self.primary.row_end(index as u16),
+                    prompt: self.primary.prompt_mark(index as u16),
+                },
+            ));
         }
         let cursor_physical = history_len + self.primary_cursor.row as usize;
         let cursor_col = self.primary_cursor.col as usize;
 
         // Unwind into logical lines, tracking which line holds the cursor and
-        // how many content cells precede it there.
-        let mut lines: Vec<Vec<Cell>> = Vec::new();
+        // where each prompt-marked row begins in that line.
+        let mut lines: Vec<(Vec<Cell>, Vec<usize>)> = Vec::new();
         let mut current: Vec<Cell> = Vec::new();
+        let mut prompt_offsets: Vec<usize> = Vec::new();
         let mut cursor_line = 0_usize;
         let mut cursor_offset = 0_usize;
-        for (index, (row, end)) in physical.into_iter().enumerate() {
-            let contributed = match end {
+        for (index, (row, meta)) in physical.into_iter().enumerate() {
+            let contributed = match meta.end {
                 // A soft-wrapped row is full: every cell is content.
                 RowEnd::Soft => row.len(),
                 // Its trailing blank is a spacer standing in for the wide
@@ -58,45 +66,56 @@ impl TerminalState {
                 // Trailing fully-default blanks are padding, not text.
                 RowEnd::Hard => content_len(&row),
             };
+            if meta.prompt {
+                prompt_offsets.push(current.len());
+            }
             if index == cursor_physical {
                 cursor_line = lines.len();
                 // On a line's final row the cursor may rest in the padding
                 // past the text; keep that offset so the position survives
                 // when the new width still holds it.
                 cursor_offset = current.len()
-                    + if end == RowEnd::Hard {
+                    + if meta.end == RowEnd::Hard {
                         cursor_col
                     } else {
                         min(cursor_col, contributed)
                     };
             }
             current.extend(row.into_iter().take(contributed));
-            if end == RowEnd::Hard {
-                lines.push(std::mem::take(&mut current));
+            if meta.end == RowEnd::Hard {
+                lines.push((
+                    std::mem::take(&mut current),
+                    std::mem::take(&mut prompt_offsets),
+                ));
             }
         }
         // A trailing soft-wrapped row with no hard end below it (possible in
         // history after heavy eviction) still forms a line.
-        if !current.is_empty() {
-            lines.push(current);
+        if !current.is_empty() || !prompt_offsets.is_empty() {
+            lines.push((current, prompt_offsets));
         }
 
-        // Re-wrap every logical line to the new width.
-        let mut rewrapped: Vec<(Vec<Cell>, RowEnd)> = Vec::new();
+        // Re-wrap every logical line to the new width and move each prompt
+        // mark to the new row containing the marked row's first content cell.
+        let mut rewrapped: Vec<(Vec<Cell>, RowMeta)> = Vec::new();
         let mut new_cursor_physical = 0_usize;
         let mut new_cursor_col = 0_usize;
-        for (index, content) in lines.iter().enumerate() {
+        for (index, (content, prompt_offsets)) in lines.iter().enumerate() {
             let start = rewrapped.len();
-            let rows = rewrap_line(content, size.cols, fill);
+            let mut rows = rewrap_line(content, size.cols, fill);
             if index == cursor_line {
                 let (row_in_line, col) = locate_offset(&rows, cursor_offset);
                 new_cursor_physical = start + row_in_line;
                 new_cursor_col = col;
             }
+            for offset in prompt_offsets {
+                let (row_in_line, _) = locate_offset(&rows, *offset);
+                rows[row_in_line].1.prompt = true;
+            }
             rewrapped.extend(rows);
         }
         if rewrapped.is_empty() {
-            rewrapped.push((Vec::new(), RowEnd::Hard));
+            rewrapped.push((Vec::new(), RowMeta::default()));
         }
 
         // Trailing blank rows below the cursor are padding the screen can
@@ -107,7 +126,7 @@ impl TerminalState {
             && rewrapped.len() > new_cursor_physical + 1
             && rewrapped
                 .last()
-                .is_some_and(|(row, end)| *end == RowEnd::Hard && content_len(row) == 0)
+                .is_some_and(|(row, meta)| meta.end == RowEnd::Hard && content_len(row) == 0)
         {
             rewrapped.pop();
         }
@@ -115,24 +134,16 @@ impl TerminalState {
         // Rows past the screen's height scroll into history, oldest first;
         // the rest — padded with blanks at the bottom — is the new screen.
         let overflow = rewrapped.len().saturating_sub(size.rows as usize);
-        let history: Vec<(Vec<Cell>, RowEnd)> = rewrapped.drain(..overflow).collect();
-        self.scrollback.replace_lines(history);
+        let history: Vec<(Vec<Cell>, RowMeta)> = rewrapped.drain(..overflow).collect();
+        self.scrollback.replace_lines_with_meta(history);
 
-        let mut cells: Vec<Vec<Cell>> = Vec::with_capacity(size.rows as usize);
-        let mut ends: Vec<RowEnd> = Vec::with_capacity(size.rows as usize);
-        for (row, end) in rewrapped {
-            cells.push(row);
-            ends.push(end);
+        while rewrapped.len() < size.rows as usize {
+            rewrapped.push((
+                vec![Cell::blank_with(fill); size.cols as usize],
+                RowMeta::default(),
+            ));
         }
-        while cells.len() < size.rows as usize {
-            cells.push(vec![Cell::blank_with(fill); size.cols as usize]);
-            ends.push(RowEnd::Hard);
-        }
-        let mut grid = Grid::from_rows(cells, size.cols, fill);
-        for (row, end) in ends.into_iter().enumerate() {
-            grid.set_row_end(row as u16, end);
-        }
-        self.primary = Arc::new(grid);
+        self.primary = Arc::new(Grid::from_rows_with_meta(rewrapped, size.cols, fill));
 
         self.primary_cursor.row = min(
             new_cursor_physical.saturating_sub(overflow),
@@ -149,15 +160,21 @@ impl TerminalState {
 /// column gets a blank spacer there and starts the next row whole
 /// ([`RowEnd::SoftWide`]) — the same rule as the live print path — and in a
 /// one-column screen a wide glyph stores narrow, matching `place_glyph`.
-fn rewrap_line(content: &[Cell], cols: u16, fill: Style) -> Vec<(Vec<Cell>, RowEnd)> {
+fn rewrap_line(content: &[Cell], cols: u16, fill: Style) -> Vec<(Vec<Cell>, RowMeta)> {
     let cols = cols.max(1) as usize;
-    let mut rows: Vec<(Vec<Cell>, RowEnd)> = Vec::new();
+    let mut rows: Vec<(Vec<Cell>, RowMeta)> = Vec::new();
     let mut row: Vec<Cell> = Vec::new();
     let mut index = 0;
     while index < content.len() {
         let cell = &content[index];
         if row.len() == cols {
-            rows.push((std::mem::take(&mut row), RowEnd::Soft));
+            rows.push((
+                std::mem::take(&mut row),
+                RowMeta {
+                    end: RowEnd::Soft,
+                    prompt: false,
+                },
+            ));
         }
         if cell.width() == 2 {
             if cols == 1 {
@@ -174,24 +191,36 @@ fn rewrap_line(content: &[Cell], cols: u16, fill: Style) -> Vec<(Vec<Cell>, RowE
                 // The base would land in the last column, splitting the
                 // pair: leave a spacer and retry the glyph on the next row.
                 row.push(Cell::blank_with(fill));
-                rows.push((std::mem::take(&mut row), RowEnd::SoftWide));
+                rows.push((
+                    std::mem::take(&mut row),
+                    RowMeta {
+                        end: RowEnd::SoftWide,
+                        prompt: false,
+                    },
+                ));
                 continue;
             }
         }
         row.push(cell.clone());
         index += 1;
     }
-    rows.push((row, RowEnd::Hard));
+    rows.push((
+        row,
+        RowMeta {
+            end: RowEnd::Hard,
+            prompt: false,
+        },
+    ));
     rows
 }
 
 /// The (row-within-line, column) where content offset `offset` lands among a
 /// re-wrapped line's rows. An offset past the content parks in the final
 /// row's padding; the caller clamps the column to the screen width.
-fn locate_offset(rows: &[(Vec<Cell>, RowEnd)], offset: usize) -> (usize, usize) {
+fn locate_offset(rows: &[(Vec<Cell>, RowMeta)], offset: usize) -> (usize, usize) {
     let mut remaining = offset;
-    for (index, (row, end)) in rows.iter().enumerate() {
-        let contributed = match end {
+    for (index, (row, meta)) in rows.iter().enumerate() {
+        let contributed = match meta.end {
             RowEnd::Soft => row.len(),
             RowEnd::SoftWide => row.len().saturating_sub(1),
             RowEnd::Hard => row.len(),
