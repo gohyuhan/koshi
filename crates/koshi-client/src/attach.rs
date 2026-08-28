@@ -83,12 +83,11 @@
 //! pass of the loop writes one round, so the events that arrived together fold
 //! into it and every answer only reconciles what the session did.
 //!
-//! The keymap, the colors and the hint bar are this terminal's own, read from
-//! this user's config files. So are the pane under the pointer, the tab strip's
-//! position, the input mode the hint bar lists, and the sequence being typed.
-//! The session reports none of them, so every pass ends by checking them: one
-//! that moved any of them draws the frame on the screen again, with the new
-//! chrome.
+//! The keymap, the colors, the pane under the pointer, the tab strip's
+//! position, and the sequence being typed belong to this terminal. The session
+//! reports the input mode and mouse-select state in events and frames. Each pass
+//! compares these values with the state shown on the screen and repaints when
+//! one changes.
 
 use std::io;
 use std::io::Write;
@@ -135,7 +134,7 @@ use koshi_ipc::transport::{Connection, FrameReader, FrameWriter};
 use koshi_ipc::wire::{MaybeKnown, WireName};
 use koshi_observability::cleanup::{install_panic_hook, TerminalCleanupGuard};
 use koshi_renderer::snapshot::{
-    CursorStyle, MouseFrame, Reconnecting, RenderSnapshot, ViewerChrome,
+    CommittedRegions, CursorStyle, MouseFrame, Reconnecting, RenderSnapshot, ViewerChrome,
 };
 use koshi_runtime::runtime::event::RuntimeEvent;
 
@@ -224,28 +223,46 @@ struct SentBorderMove {
     cells: i32,
 }
 
-/// What a painted frame is drawn from that lives on this viewer, not in the
-/// frame the session sent: the pane under the pointer, where the tab strip is
-/// scrolled, the input mode, and the sequence being typed.
+/// The viewer state a frame paint uses: its chrome, the mode and mouse-select
+/// state shown by the frame, and the sequence the hint bar displays.
 ///
 /// [`Screen`] holds the value the frame on the screen was drawn with, and
 /// compares it against a fresh read at the end of every loop pass.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ViewerPaint {
+pub(crate) struct ViewerPaint {
     /// The pane under the pointer and where the tab strip sits, for the tab the
     /// frame on the screen shows.
-    chrome: ViewerChrome,
+    pub(crate) chrome: ViewerChrome,
     /// The input mode the hint bar lists bindings for.
-    mode: LockMode,
+    pub(crate) mode: LockMode,
+    /// Whether the frame's viewer takes the mouse for text selection.
+    pub(crate) mouse_select: bool,
     /// The multi-chord sequence being typed, which the hint bar draws as a
     /// breadcrumb ahead of the chords that continue it. `None` when no sequence
     /// is open.
-    pending: Option<KeySequence>,
+    pub(crate) pending: Option<KeySequence>,
 }
 
 impl ViewerPaint {
-    /// Read what `client` currently contributes to a frame showing
-    /// `active_tab`.
+    /// Build the viewer state shown by `snapshot` without changing `client`.
+    ///
+    /// A mode change drops an open sequence when the frame is adopted, so the
+    /// sequence is kept only when the frame reports the current mode.
+    pub(crate) fn from_frame(client: &Client, snapshot: &RenderSnapshot) -> Self {
+        let pending = if client.lock_mode() == snapshot.client.lock_mode {
+            client.pending_sequence().cloned()
+        } else {
+            None
+        };
+        ViewerPaint {
+            chrome: client.chrome(snapshot.client.active_tab),
+            mode: snapshot.client.lock_mode,
+            mouse_select: snapshot.client.mouse_select,
+            pending,
+        }
+    }
+
+    /// Read what `client` currently contributes to a frame showing `active_tab`.
     ///
     /// `active_tab` is the tab the frame on the screen shows. A tab-strip peek
     /// made on any other tab does not apply.
@@ -253,31 +270,36 @@ impl ViewerPaint {
         ViewerPaint {
             chrome: client.chrome(active_tab),
             mode: client.lock_mode(),
+            mouse_select: client.mouse_select(),
             pending: client.pending_sequence().cloned(),
         }
     }
 }
 
-/// This terminal's screen: the frame drawn on it, and what the viewer
-/// contributed to that frame.
+/// This terminal's screen: the frame drawn on it, the committed region solve,
+/// and what the viewer contributed to that frame.
 ///
 /// Every draw goes through here, so one place decides whether the screen is out
-/// of date. [`draw`](Self::draw) puts a frame the session sent on the screen.
-/// [`refresh`](Self::refresh) ends every loop pass and draws the frame already
-/// there again when the viewer has moved under it — which is what shows a
-/// change no frame reports, such as an opened key sequence.
+/// of date. [`draw`](Self::draw) puts a frame the session sent on the screen and
+/// returns the mouse view for that paint. [`refresh`](Self::refresh) ends every
+/// loop pass and draws the frame already there again when the viewer has moved
+/// under it — which is what shows a change no frame reports, such as an opened
+/// key sequence.
 struct Screen<B: Backend> {
     /// The ratatui terminal the renderer paints into.
     terminal: Terminal<B>,
-    /// The window title last written to the outer terminal.
+    /// The window title committed with the last successful paint.
     last_title: String,
-    /// The cursor style last written to the outer terminal.
+    /// The cursor style committed with the last successful paint.
     last_cursor: Option<CursorStyle>,
     /// The snapshot last drawn, kept so a viewer-only change can draw it
     /// again without re-reading the frame. Its grids travel behind `Arc`s, so
     /// keeping and cloning it moves no cell data. `None` until the first
     /// draw.
     last_snapshot: Option<RenderSnapshot>,
+    /// The region solve and input revision committed with the frame on the
+    /// screen. It starts with the compiled-in two-row solve.
+    committed_regions: CommittedRegions,
     /// What the viewer contributed to the frame on the screen. `None` until the
     /// first draw.
     shown: Option<ViewerPaint>,
@@ -285,33 +307,47 @@ struct Screen<B: Backend> {
 
 impl<B: Backend> Screen<B> {
     /// A screen that has drawn nothing yet.
-    fn new(terminal: Terminal<B>) -> Self {
+    fn new(terminal: Terminal<B>, viewport: Size) -> Self {
         Screen {
             terminal,
             last_title: String::new(),
             last_cursor: None,
             last_snapshot: None,
+            committed_regions: CommittedRegions::core(viewport, 0),
             shown: None,
         }
     }
 
     /// Draw one frame the session sent, and hand back the frame a mouse event
-    /// is placed against.
+    /// is placed against. Returns `None` when the terminal rejects the paint.
     ///
-    /// It runs [`adopt_frame`] before it paints, so the paint reads the mode the
-    /// frame reports: a frame carrying `LockMode::Locked` draws the locked
-    /// mode's hint bar on that same frame.
+    /// It paints from the incoming frame state, then adopts that state only
+    /// after the terminal accepts the paint. A locked frame therefore draws the
+    /// locked hint bar without changing the viewer when the paint fails.
     ///
-    /// The returned [`MouseFrame`] holds where the surfaces sat and what the
-    /// cells under them were, which is what the next mouse event is answered
-    /// from.
-    fn draw(&mut self, client: &mut Client, frame: Box<PaintedFrame>) -> MouseFrame {
+    /// The returned [`MouseFrame`] holds the committed region solve, where the
+    /// surfaces sit, and what the cells under them were. That is what the next
+    /// mouse event is answered from.
+    fn draw(&mut self, client: &mut Client, frame: Box<PaintedFrame>) -> Option<MouseFrame> {
         let snapshot = to_snapshot(&frame);
+        let committed_regions = self.regions_for(snapshot.client.viewport);
+        let frame_paint = ViewerPaint::from_frame(client, &snapshot);
+        if !paint(
+            &mut self.terminal,
+            client,
+            &snapshot,
+            &committed_regions,
+            &frame_paint,
+            &mut self.last_title,
+            &mut self.last_cursor,
+        ) {
+            return None;
+        }
         adopt_frame(client, &snapshot);
-        self.paint(client, &snapshot);
-        self.shown = Some(ViewerPaint::read(client, snapshot.client.active_tab));
+        self.committed_regions = committed_regions.clone();
+        self.shown = Some(frame_paint);
         self.last_snapshot = Some(snapshot.clone());
-        MouseFrame::from(snapshot)
+        Some(MouseFrame::with_regions(snapshot, committed_regions))
     }
 
     /// Draw the frame already on the screen again when the viewer has moved
@@ -320,35 +356,75 @@ impl<B: Backend> Screen<B> {
     ///
     /// `active_tab` is the tab that frame shows, and `None` before any frame has
     /// been drawn. A viewer that has not moved is left alone, so an idle pass
-    /// draws nothing.
+    /// draws nothing. A resize waits for the next session frame, so the painted
+    /// frame and its committed region solve stay paired.
     fn refresh(&mut self, client: &Client, active_tab: Option<TabId>) {
         let Some(active_tab) = active_tab else {
             return;
         };
-        let current = Some(ViewerPaint::read(client, active_tab));
-        if current == self.shown {
+        if client.viewport() != self.committed_regions.viewport {
+            return;
+        }
+        let current = ViewerPaint::read(client, active_tab);
+        if self.shown.as_ref() == Some(&current) {
             return;
         }
         let Some(snapshot) = self.last_snapshot.clone() else {
             return;
         };
-        self.paint(client, &snapshot);
-        self.shown = current;
-    }
-
-    /// Paint `snapshot` with [`app::paint_frame`].
-    ///
-    /// A draw that fails is logged; the loop keeps running and the next frame
-    /// repaints the whole viewport.
-    fn paint(&mut self, client: &Client, snapshot: &RenderSnapshot) {
-        let _ = app::paint_frame(
+        if paint(
             &mut self.terminal,
             client,
-            snapshot,
+            &snapshot,
+            &self.committed_regions,
+            &current,
             &mut self.last_title,
             &mut self.last_cursor,
-        )
-        .inspect_err(|error| tracing::warn!(%error, "could not paint the frame"));
+        ) {
+            self.shown = Some(current);
+        }
+    }
+
+    /// Select the compiled-in region solve for a painted frame's viewport.
+    ///
+    /// A changed frame viewport is a new region input. The revision increases
+    /// only when that input changes, so another frame with the same viewport
+    /// keeps the same revision.
+    fn regions_for(&self, viewport: Size) -> CommittedRegions {
+        let input_revision = if viewport == self.committed_regions.viewport {
+            self.committed_regions.input_revision
+        } else {
+            self.committed_regions.input_revision.saturating_add(1)
+        };
+        CommittedRegions::core(viewport, input_revision)
+    }
+}
+
+/// Paint one snapshot with its committed region solve and report whether the
+/// terminal accepted the frame.
+fn paint<B: Backend>(
+    terminal: &mut Terminal<B>,
+    client: &Client,
+    snapshot: &RenderSnapshot,
+    committed_regions: &CommittedRegions,
+    frame_paint: &ViewerPaint,
+    last_title: &mut String,
+    last_cursor: &mut Option<CursorStyle>,
+) -> bool {
+    match app::paint_frame(
+        terminal,
+        client,
+        snapshot,
+        committed_regions,
+        frame_paint,
+        last_title,
+        last_cursor,
+    ) {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(%error, "could not paint the frame");
+            false
+        }
     }
 }
 
@@ -845,7 +921,7 @@ fn attach_once(home: &Home, target: &SessionSelector) -> Result<Option<SessionId
         registry: ActionRegistry::new(),
         next_request_id: FIRST_LOOP_REQUEST_ID,
     };
-    let mut screen = Screen::new(terminal);
+    let mut screen = Screen::new(terminal, client.viewport());
 
     let ending = run_attachment(
         home,
@@ -964,7 +1040,9 @@ fn run_attachment<B: Backend>(
                     }
                     match frame {
                         Ok(SessionEvent::Painted { frame }) => {
-                            last_frame = Some(screen.draw(client, frame));
+                            if let Some(mouse_frame) = screen.draw(client, frame) {
+                                last_frame = Some(mouse_frame);
+                            }
                         }
                         Ok(SessionEvent::MouseAnswer {
                             request_id,
@@ -2374,8 +2452,8 @@ fn commands(plan: DispatchPlan) -> Vec<Command> {
 /// it is about to draw: the lock mode, the active tab, and whether mouse-select
 /// is on.
 ///
-/// The caller runs this before it paints. The hint bar lists the bindings of
-/// the mode this sets.
+/// The caller runs this after the frame paint succeeds. The hint bar lists the
+/// bindings of the mode this sets.
 fn adopt_frame(client: &mut Client, snapshot: &RenderSnapshot) {
     client.set_lock_mode(snapshot.client.lock_mode);
     client.note_active_tab(snapshot.client.active_tab);

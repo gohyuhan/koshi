@@ -18,6 +18,7 @@ use ratatui::layout::Rect;
 use ratatui::widgets::Widget;
 use ratatui::Terminal;
 
+use crate::attach::ViewerPaint;
 use crate::{core_pane_area, Client};
 use koshi_core::geometry::Size;
 use koshi_core::ids::ClientId;
@@ -25,7 +26,9 @@ use koshi_core::key::KeySequence;
 use koshi_input::mouse::decode_mouse;
 use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_observability::logging::init_tracing;
-use koshi_renderer::snapshot::{CursorStyle, KeymapHints, RenderSnapshot, ViewerChrome};
+use koshi_renderer::snapshot::{
+    CommittedRegions, CursorStyle, KeymapHints, RenderSnapshot, ViewerChrome,
+};
 use koshi_renderer::theme::Theme;
 use koshi_renderer::{cursor_position, cursor_style, render_frame};
 use koshi_runtime::runtime::event::RuntimeEvent;
@@ -48,12 +51,15 @@ pub(crate) struct SnapshotWidget<'a> {
     pub(crate) pending: Option<&'a KeySequence>,
     /// The pane this viewer's pointer is over, and where its tab strip sits.
     pub(crate) viewer: ViewerChrome,
+    /// The region solve committed with the frame being painted.
+    pub(crate) committed_regions: &'a CommittedRegions,
 }
 
 impl Widget for SnapshotWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         render_frame(
             self.snapshot,
+            self.committed_regions,
             self.theme,
             self.hints,
             self.pending,
@@ -193,37 +199,31 @@ pub(crate) fn spawn_input_thread(inbox_tx: mpsc::Sender<RuntimeEvent>, client_id
 /// Draw `snapshot` into `terminal`, keeping the outer terminal's window title
 /// and cursor style in step with the focused pane.
 ///
-/// `last_title` and `last_cursor` hold what was last sent to the outer terminal,
-/// so each is written only when it changes: focus moving to a pane with a
-/// different DECSCUSR style re-emits that style. The style belongs to the
-/// outer terminal, not to the frame. The bar vim asked its "terminal"
-/// for is the bar the user sees.
+/// `last_title` and `last_cursor` record the title and cursor style committed
+/// with the last successful frame paint. A changed value is sent and recorded
+/// after the buffer paint succeeds. The style belongs to the outer terminal,
+/// not to the frame.
 ///
-/// The hint bar, the theme, the open key sequence, the hovered pane and the tab
-/// strip's position all come from `client` — they are this viewer's own, and the
-/// frame says nothing about them. The one thing the hint bar takes from the
-/// frame is whether mouse-select is on, which decides the label that entry wears.
+/// The theme, the hovered pane and the tab strip's position come from `client`.
+/// `frame_paint` describes the state shown by this paint. The hint bar uses
+/// that state, so a failed paint does not change the viewer state.
+/// `committed_regions` is the geometry shared by the painter and cursor
+/// placement for this frame.
 pub(crate) fn paint_frame<B: Backend>(
     terminal: &mut Terminal<B>,
     client: &Client,
     snapshot: &RenderSnapshot,
+    committed_regions: &CommittedRegions,
+    frame_paint: &ViewerPaint,
     last_title: &mut String,
     last_cursor: &mut Option<CursorStyle>,
 ) -> Result<(), B::Error> {
     let title = window_title(snapshot);
-    if title != *last_title {
-        let _ = execute!(io::stdout(), SetTitle(&title));
-        *last_title = title;
-    }
+    let title_changed = title != *last_title;
     let cursor = cursor_style(snapshot);
-    if cursor != *last_cursor {
-        if let Some(style) = cursor.map(set_cursor_style) {
-            let _ = execute!(io::stdout(), style);
-        }
-        *last_cursor = cursor;
-    }
-    let hints = client.frame_hints(snapshot.client.mouse_select);
-    let viewer = client.chrome(snapshot.client.active_tab);
+    let cursor_changed = cursor != *last_cursor;
+    let hints = client.frame_hints_for(frame_paint.mode, frame_paint.mouse_select);
+    let viewer = frame_paint.chrome;
     terminal.draw(|frame| {
         let area = frame.area();
         frame.render_widget(
@@ -231,15 +231,26 @@ pub(crate) fn paint_frame<B: Backend>(
                 snapshot,
                 theme: client.theme(),
                 hints: &hints,
-                pending: client.pending_sequence(),
+                pending: frame_paint.pending.as_ref(),
                 viewer,
+                committed_regions,
             },
             area,
         );
-        if let Some(position) = cursor_position(snapshot, area) {
+        if let Some(position) = cursor_position(snapshot, committed_regions, area) {
             frame.set_cursor_position(position);
         }
     })?;
+    if title_changed {
+        let _ = execute!(io::stdout(), SetTitle(&title));
+        *last_title = title;
+    }
+    if cursor_changed {
+        if let Some(style) = cursor.map(set_cursor_style) {
+            let _ = execute!(io::stdout(), style);
+        }
+        *last_cursor = cursor;
+    }
     Ok(())
 }
 

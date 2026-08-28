@@ -17,10 +17,13 @@
 //! keeps and what it drops, and what a viewer that stopped dialing prints and
 //! exits with.
 
+use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ratatui::backend::TestBackend;
+use ratatui::backend::{Backend, ClearType, TestBackend, WindowSize};
+use ratatui::buffer::Cell;
+use ratatui::layout::{Position, Size as RatatuiSize};
 
 use koshi_core::command::{
     ClearSelectionArgs, CliExitCode, GridPos, Selection, SelectionKind, SetSelectionArgs,
@@ -47,7 +50,8 @@ use koshi_ipc::transport::{Listener, MAX_FRAME_LEN};
 use koshi_ipc::wire::MaybeKnown;
 use koshi_layout::mode::LayoutMode;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, MousePane, PaneKind, PaneSlot, SessionSnapshot, TabMeta, TabSnapshot,
+    ClientSnapshot, CommittedRegions, MousePane, PaneKind, PaneSlot, SessionSnapshot, TabMeta,
+    TabSnapshot,
 };
 
 use super::*;
@@ -57,6 +61,15 @@ use koshi_test_support::fixtures::test_runtime_dir;
 /// unlocked. [`classify`] reads the frame's variant and nothing inside it.
 fn painted_frame() -> PaintedFrame {
     painted_frame_in(LockMode::Normal)
+}
+
+/// A normal painted frame carrying `viewport` in both its client and active-tab
+/// data.
+fn painted_frame_at(viewport: Size) -> PaintedFrame {
+    let mut frame = painted_frame();
+    frame.session.active_tab.effective_size = viewport;
+    frame.client.viewport = viewport;
+    frame
 }
 
 /// The same frame, reporting the client in `lock_mode`. Each call mints a new
@@ -924,7 +937,7 @@ fn mouse_frame(panes: &[MousePane]) -> MouseFrame {
         .iter()
         .enumerate()
         .map(|(index, pane)| {
-            let top = 1 + band * u16::try_from(index).expect("few panes");
+            let top = band * u16::try_from(index).expect("few panes");
             PaneSlot {
                 pane_id: pane.id,
                 rect: Rect::new(
@@ -956,7 +969,10 @@ fn mouse_frame(panes: &[MousePane]) -> MouseFrame {
                 id: tab_id,
                 name: String::from("one"),
                 layout_solved,
-                effective_size: MOUSE_VIEWPORT,
+                effective_size: Size {
+                    cols: MOUSE_VIEWPORT.cols,
+                    rows: MOUSE_VIEWPORT.rows - 2,
+                },
                 stack_headers: Vec::new(),
                 layout_mode: LayoutMode::Tiled,
                 all_suppressed: false,
@@ -977,6 +993,7 @@ fn mouse_frame(panes: &[MousePane]) -> MouseFrame {
             lock_mode: LockMode::Normal,
             mouse_select: false,
         },
+        committed_regions: CommittedRegions::core(MOUSE_VIEWPORT, 0),
     }
 }
 
@@ -987,7 +1004,7 @@ fn content_cell(frame: &MouseFrame, index: usize) -> Point {
         .expect("a visible pane");
     Point {
         x: inner.origin.x + 1,
-        y: inner.origin.y + 1,
+        y: inner.origin.y + 2,
     }
 }
 
@@ -996,7 +1013,7 @@ fn content_cell(frame: &MouseFrame, index: usize) -> Point {
 fn divider(frame: &MouseFrame) -> Point {
     Point {
         x: 10,
-        y: frame.session.active_tab.layout_solved[1].rect.origin.y,
+        y: frame.session.active_tab.layout_solved[1].rect.origin.y + 1,
     }
 }
 
@@ -2267,11 +2284,11 @@ fn an_answer_for_a_border_drag_that_already_ended_changes_nothing() {
     let second = frame.panes[2].id;
     let upper = Point {
         x: 10,
-        y: frame.session.active_tab.layout_solved[1].rect.origin.y,
+        y: frame.session.active_tab.layout_solved[1].rect.origin.y + 1,
     };
     let lower = Point {
         x: 10,
-        y: frame.session.active_tab.layout_solved[2].rect.origin.y,
+        y: frame.session.active_tab.layout_solved[2].rect.origin.y + 1,
     };
     let held = Point {
         y: lower.y + 1,
@@ -2761,12 +2778,250 @@ fn earliest_of_two_absent_durations_is_none() {
     assert_eq!(earliest(None, None), None);
 }
 
+/// A backend that can reject the buffer draw while keeping the test terminal
+/// at a fixed size.
+struct FailingBackend {
+    size: RatatuiSize,
+    fail_draw: bool,
+}
+
+impl FailingBackend {
+    fn new(size: Size) -> Self {
+        FailingBackend {
+            size: RatatuiSize {
+                width: size.cols,
+                height: size.rows,
+            },
+            fail_draw: false,
+        }
+    }
+}
+
+impl Backend for FailingBackend {
+    type Error = io::Error;
+
+    fn draw<'a, I>(&mut self, _content: I) -> Result<(), Self::Error>
+    where
+        I: Iterator<Item = (u16, u16, &'a Cell)>,
+    {
+        if self.fail_draw {
+            return Err(io::Error::other("the test backend rejected the draw"));
+        }
+        Ok(())
+    }
+
+    fn hide_cursor(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn show_cursor(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn get_cursor_position(&mut self) -> Result<Position, Self::Error> {
+        Ok(Position::ORIGIN)
+    }
+
+    fn set_cursor_position<P: Into<Position>>(&mut self, _position: P) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn clear(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn clear_region(&mut self, _clear_type: ClearType) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn size(&self) -> Result<RatatuiSize, Self::Error> {
+        Ok(self.size)
+    }
+
+    fn window_size(&mut self) -> Result<WindowSize, Self::Error> {
+        Ok(WindowSize {
+            columns_rows: self.size,
+            pixels: RatatuiSize {
+                width: 0,
+                height: 0,
+            },
+        })
+    }
+
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
 /// A screen drawing into memory at [`MOUSE_VIEWPORT`], 80 by 24 cells.
 fn test_screen() -> Screen<TestBackend> {
     Screen::new(
         Terminal::new(TestBackend::new(MOUSE_VIEWPORT.cols, MOUSE_VIEWPORT.rows))
             .expect("build an in-memory terminal"),
+        MOUSE_VIEWPORT,
     )
+}
+
+/// A screen whose backend can fail its next buffer draw.
+fn failing_screen() -> Screen<FailingBackend> {
+    Screen::new(
+        Terminal::new(FailingBackend::new(MOUSE_VIEWPORT))
+            .expect("build a failing in-memory terminal"),
+        MOUSE_VIEWPORT,
+    )
+}
+
+#[test]
+fn a_screen_starts_with_the_compiled_in_region_solve() {
+    let screen = test_screen();
+
+    assert_eq!(screen.committed_regions.viewport, MOUSE_VIEWPORT);
+    assert_eq!(screen.committed_regions.input_revision, 0);
+    assert_eq!(
+        screen.committed_regions.solve.pane_rect,
+        Rect::new(
+            Point { x: 0, y: 1 },
+            Size {
+                cols: MOUSE_VIEWPORT.cols,
+                rows: MOUSE_VIEWPORT.rows - 2,
+            },
+        )
+    );
+}
+
+#[test]
+fn a_new_viewport_commits_a_new_region_revision_with_the_painted_frame() {
+    let mut screen = Screen::new(
+        Terminal::new(TestBackend::new(100, 30)).expect("build an in-memory terminal"),
+        MOUSE_VIEWPORT,
+    );
+    let mut client = viewer();
+    client.set_viewport(Size {
+        cols: 100,
+        rows: 30,
+    });
+
+    let frame = screen
+        .draw(
+            &mut client,
+            Box::new(painted_frame_at(Size {
+                cols: 100,
+                rows: 30,
+            })),
+        )
+        .expect("paint");
+
+    assert_eq!(
+        screen.committed_regions.viewport,
+        Size {
+            cols: 100,
+            rows: 30
+        }
+    );
+    assert_eq!(screen.committed_regions.input_revision, 1);
+    assert_eq!(frame.committed_regions, screen.committed_regions);
+}
+
+#[test]
+fn an_in_flight_frame_uses_its_own_viewport_for_region_geometry() {
+    let mut screen = Screen::new(
+        Terminal::new(TestBackend::new(120, 40)).expect("build an in-memory terminal"),
+        MOUSE_VIEWPORT,
+    );
+    let mut client = viewer();
+    let resized = Size {
+        cols: 120,
+        rows: 40,
+    };
+    client.set_viewport(resized);
+
+    let frame = screen
+        .draw(&mut client, Box::new(painted_frame()))
+        .expect("paint");
+    let expected = CommittedRegions::core(MOUSE_VIEWPORT, 0);
+
+    assert_eq!(frame.committed_regions, expected);
+    assert_eq!(screen.committed_regions, expected);
+}
+
+#[test]
+fn a_failed_paint_keeps_the_visible_frame_and_viewer_state_paired() {
+    let mut screen = failing_screen();
+    let mut client = viewer();
+
+    screen
+        .draw(&mut client, Box::new(painted_frame_in(LockMode::Normal)))
+        .expect("the first frame paints");
+    let shown_before = screen.shown.clone();
+    let snapshot_before = screen.last_snapshot.clone();
+    let regions_before = screen.committed_regions.clone();
+
+    let opener = sequence_opener(&client);
+    assert_eq!(
+        client.resolve_key(opener, Instant::now()),
+        KeyOutcome::Pending
+    );
+
+    let mut failed_frame = painted_frame_in(LockMode::Locked);
+    failed_frame.session.name = String::from("next");
+    failed_frame.client.mouse_select = true;
+    screen.terminal.backend_mut().fail_draw = true;
+
+    assert_eq!(
+        screen.draw(&mut client, Box::new(failed_frame)),
+        None,
+        "the backend rejects the frame"
+    );
+    assert_eq!(client.lock_mode(), LockMode::Normal);
+    assert!(!client.mouse_select());
+    assert_eq!(
+        client.pending_sequence().cloned(),
+        Some(KeySequence::from(opener))
+    );
+    assert_eq!(screen.shown, shown_before);
+    assert_eq!(screen.last_snapshot, snapshot_before);
+    assert_eq!(screen.committed_regions, regions_before);
+    assert_eq!(screen.last_title, "session");
+
+    screen.terminal.backend_mut().fail_draw = false;
+    let mut next_frame = painted_frame_in(LockMode::Locked);
+    next_frame.session.name = String::from("next");
+    next_frame.client.mouse_select = true;
+
+    screen
+        .draw(&mut client, Box::new(next_frame))
+        .expect("the next paint succeeds");
+    assert_eq!(client.lock_mode(), LockMode::Locked);
+    assert!(client.mouse_select());
+    assert_eq!(client.pending_sequence(), None);
+    assert_eq!(
+        screen.shown.as_ref().map(|shown| shown.mode),
+        Some(LockMode::Locked)
+    );
+    assert_eq!(screen.last_title, "next");
+}
+
+#[test]
+fn a_viewer_only_refresh_waits_for_a_frame_after_resize() {
+    let mut screen = test_screen();
+    let mut client = viewer();
+    let frame = painted_frame();
+    let tab = frame.client.active_tab;
+    screen.draw(&mut client, Box::new(frame)).expect("paint");
+    let before = screen.terminal.backend().buffer().clone();
+
+    client.set_viewport(Size {
+        cols: 100,
+        rows: 30,
+    });
+    client.set_reconnecting(Some(Reconnecting {
+        attempt: 1,
+        retry_in_seconds: 1,
+    }));
+    screen.refresh(&client, Some(tab));
+
+    assert_eq!(screen.terminal.backend().buffer(), &before);
+    assert_eq!(screen.committed_regions.viewport, MOUSE_VIEWPORT);
 }
 
 /// The hint bar of what the screen last drew: the bottom row, trailing blanks
@@ -2815,10 +3070,14 @@ fn the_frame_that_locks_the_client_draws_the_locked_hint_bar() {
     let mut client = viewer();
     let mut screen = test_screen();
 
-    screen.draw(&mut client, Box::new(painted_frame_in(LockMode::Normal)));
+    screen
+        .draw(&mut client, Box::new(painted_frame_in(LockMode::Normal)))
+        .expect("paint");
     let normal = hint_row(&screen);
 
-    screen.draw(&mut client, Box::new(painted_frame_in(LockMode::Locked)));
+    screen
+        .draw(&mut client, Box::new(painted_frame_in(LockMode::Locked)))
+        .expect("paint");
     let locked = hint_row(&screen);
 
     assert_eq!(locked, " Ctrl +  l  Unlock  g  Mouse Select  q  Quit");
@@ -2848,7 +3107,7 @@ fn a_prefix_key_typed_after_a_frame_in_one_pass_still_draws_its_breadcrumb() {
     let frame = painted_frame_in(LockMode::Normal);
     let tab = frame.client.active_tab;
 
-    screen.draw(&mut client, Box::new(frame));
+    screen.draw(&mut client, Box::new(frame)).expect("paint");
     let drawn = hint_row(&screen);
 
     let opener = sequence_opener(&client);
@@ -2881,7 +3140,7 @@ fn a_pointer_moved_after_a_frame_in_one_pass_still_draws_the_new_hover() {
     let mouse = mouse_frame(&[plain_pane(first), plain_pane(second)]);
     let mut pending = Vec::new();
 
-    screen.draw(&mut client, Box::new(painted));
+    screen.draw(&mut client, Box::new(painted)).expect("paint");
     let hovered_before = ViewerPaint::read(&client, tab).chrome.hovered_pane;
 
     handle_mouse_event(
@@ -2909,7 +3168,7 @@ fn a_pass_that_moved_nothing_draws_nothing() {
     let frame = painted_frame_in(LockMode::Normal);
     let tab = frame.client.active_tab;
 
-    screen.draw(&mut client, Box::new(frame));
+    screen.draw(&mut client, Box::new(frame)).expect("paint");
     let drawn = screen.terminal.backend().buffer().clone();
     let shown = screen.shown.clone();
 

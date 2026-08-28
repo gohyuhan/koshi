@@ -213,6 +213,10 @@ fn a_mouse_frame_keeps_every_field_a_mouse_event_is_answered_from() {
     // The session and client parts move across whole.
     assert_eq!(frame.client.id, client_id);
     assert_eq!(frame.session.active_tab.id, tab_id);
+    assert_eq!(
+        frame.committed_regions,
+        CommittedRegions::core(Size { cols: 80, rows: 24 }, 0)
+    );
 }
 
 #[test]

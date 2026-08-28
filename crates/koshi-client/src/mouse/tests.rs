@@ -18,9 +18,11 @@ use koshi_core::key::ModFlags;
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseButton, MouseTracking};
 use koshi_layout::mode::LayoutMode;
+use koshi_layout::regions::{solve, Edge, RegionGeometry};
 use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, Delivery, MousePane, PaneSlot, SessionSnapshot, TabMeta, TabSnapshot,
+    ClientSnapshot, CommittedRegions, Delivery, MousePane, PaneSlot, SessionSnapshot, TabMeta,
+    TabSnapshot,
 };
 
 use crate::Client;
@@ -90,7 +92,7 @@ fn frame(panes: &[MousePane], focused: Option<PaneId>, kind: PaneKind) -> MouseF
         .iter()
         .enumerate()
         .map(|(index, pane)| {
-            let top = 1 + band * u16::try_from(index).expect("few panes");
+            let top = band * u16::try_from(index).expect("few panes");
             let rect = Rect::new(
                 Point { x: 0, y: top },
                 Size {
@@ -123,7 +125,10 @@ fn frame(panes: &[MousePane], focused: Option<PaneId>, kind: PaneKind) -> MouseF
                 id: tab_id,
                 name: "one".to_owned(),
                 layout_solved,
-                effective_size: VIEWPORT,
+                effective_size: Size {
+                    cols: VIEWPORT.cols,
+                    rows: VIEWPORT.rows - 2,
+                },
                 stack_headers: Vec::new(),
                 layout_mode: LayoutMode::Tiled,
                 all_suppressed: false,
@@ -144,6 +149,7 @@ fn frame(panes: &[MousePane], focused: Option<PaneId>, kind: PaneKind) -> MouseF
             lock_mode: LockMode::Normal,
             mouse_select: false,
         },
+        committed_regions: CommittedRegions::core(VIEWPORT, 0),
     }
 }
 
@@ -160,7 +166,7 @@ fn content_cell(frame: &MouseFrame, index: usize) -> Point {
         .expect("a visible pane");
     Point {
         x: inner.origin.x + 1,
-        y: inner.origin.y + 1,
+        y: inner.origin.y + 2,
     }
 }
 
@@ -901,13 +907,13 @@ fn a_press_names_the_line_the_frame_showed_on_that_row() {
         .expect("a visible pane");
     let at = Point {
         x: inner.origin.x + 4,
-        y: inner.origin.y + 2,
+        y: inner.origin.y + 3,
     };
     viewer.handle_mouse(press(at), &frame, now);
     let actions = viewer.handle_mouse(
         drag(Point {
             x: inner.origin.x + 9,
-            y: inner.origin.y + 2,
+            y: inner.origin.y + 3,
         }),
         &frame,
         later(now, 1),
@@ -933,7 +939,7 @@ fn output_between_the_paint_and_the_press_does_not_move_what_it_names() {
         .expect("a visible pane");
     let at = Point {
         x: inner.origin.x,
-        y: inner.origin.y + 3,
+        y: inner.origin.y + 4,
     };
     let now = Instant::now();
 
@@ -942,7 +948,7 @@ fn output_between_the_paint_and_the_press_does_not_move_what_it_names() {
     let actions = viewer.handle_mouse(
         drag(Point {
             x: inner.origin.x + 2,
-            y: inner.origin.y + 3,
+            y: inner.origin.y + 4,
         }),
         &painted,
         later(now, 1),
@@ -1154,6 +1160,59 @@ fn a_bare_move_off_the_focused_panes_content_reaches_no_program() {
 }
 
 #[test]
+fn mouse_routing_uses_the_region_solve_committed_with_the_frame() {
+    let pane = PaneId::new();
+    let mut watched = plain_pane(pane);
+    watched.mouse_tracking = MouseTracking::AnyMotion;
+    let mut frame = frame(&[watched], Some(pane), PaneKind::Terminal);
+    frame.session.active_tab.effective_size = Size { cols: 60, rows: 22 };
+    frame.session.active_tab.layout_solved[0] = PaneSlot {
+        pane_id: pane,
+        rect: Rect::new(Point { x: 0, y: 0 }, Size { cols: 60, rows: 22 }),
+        inner_rect: Some(Rect::new(Point { x: 1, y: 1 }, Size { cols: 58, rows: 20 })),
+        kind: PaneKind::Terminal,
+        visible: true,
+        suppressed: false,
+        dead: false,
+    };
+    frame.committed_regions = CommittedRegions::new(
+        VIEWPORT,
+        solve(
+            VIEWPORT,
+            &[
+                RegionGeometry {
+                    edge: Edge::Top,
+                    extent: 1,
+                },
+                RegionGeometry {
+                    edge: Edge::Bottom,
+                    extent: 1,
+                },
+                RegionGeometry {
+                    edge: Edge::Left,
+                    extent: 20,
+                },
+            ],
+        ),
+        9,
+    );
+    let mut viewer = viewer();
+
+    assert_eq!(
+        viewer.handle_mouse(motion(Point { x: 12, y: 2 }), &frame, Instant::now()),
+        Vec::new(),
+        "the committed left region is not pane content"
+    );
+    assert_eq!(
+        viewer.handle_mouse(motion(Point { x: 21, y: 2 }), &frame, Instant::now()),
+        vec![MouseAction::Forward {
+            pane,
+            mouse: motion(Point { x: 21, y: 2 }),
+        }]
+    );
+}
+
+#[test]
 fn a_gesture_is_dropped_when_its_pane_leaves_the_frame() {
     let pane = PaneId::new();
     let frame = one_pane_frame(plain_pane(pane));
@@ -1290,7 +1349,7 @@ fn a_border_press_starts_no_resize_when_the_viewer_turned_it_off() {
     // The shared divider between the two bands: the second pane's top edge.
     let divider = Point {
         x: 10,
-        y: frame.session.active_tab.layout_solved[1].rect.origin.y,
+        y: frame.session.active_tab.layout_solved[1].rect.origin.y + 1,
     };
     let now = Instant::now();
 
@@ -1377,7 +1436,7 @@ fn the_drag_anchor_only_walks_over_the_cells_the_session_accepted() {
     );
     let divider = Point {
         x: 10,
-        y: frame.session.active_tab.layout_solved[1].rect.origin.y,
+        y: frame.session.active_tab.layout_solved[1].rect.origin.y + 1,
     };
     let three_down = Point {
         y: divider.y + 3,
@@ -1629,6 +1688,43 @@ fn mouse_select_mode_takes_a_drag_back_from_a_mouse_aware_program() {
 }
 
 #[test]
+fn shift_drag_selects_text_from_a_mouse_aware_program() {
+    let pane = PaneId::new();
+    let mut content = plain_pane(pane);
+    content.mouse_tracking = MouseTracking::ButtonMotion;
+    let frame = one_pane_frame(content);
+    let at = content_cell(&frame, 0);
+    let to = Point { x: at.x + 4, ..at };
+    let now = Instant::now();
+    let mut viewer = viewer();
+
+    let shifted_press = event(MouseKind::Press(MouseButton::Left), at, ModFlags::SHIFT);
+    assert_eq!(
+        viewer.handle_mouse(shifted_press, &frame, now),
+        vec![MouseAction::Command(Command::Visual(
+            VisualCommand::ClearSelection(ClearSelectionArgs { pane })
+        ))],
+        "Shift makes the press start Koshi selection"
+    );
+
+    let shifted_drag = event(MouseKind::Drag(MouseButton::Left), to, ModFlags::SHIFT);
+    assert_eq!(
+        viewer.handle_mouse(shifted_drag, &frame, later(now, 1)),
+        vec![MouseAction::Command(Command::Visual(
+            VisualCommand::SetSelection(SetSelectionArgs {
+                pane,
+                selection: Selection {
+                    kind: SelectionKind::Character,
+                    anchor: GridPos { row: 1, col: 1 },
+                    cursor: GridPos { row: 1, col: 5 },
+                },
+            })
+        ))],
+        "the drag extends the selection instead of reaching the program"
+    );
+}
+
+#[test]
 fn ending_the_gestures_drops_all_four_and_leaves_the_pointer_and_the_strip_alone() {
     let first = PaneId::new();
     let second = PaneId::new();
@@ -1642,7 +1738,7 @@ fn ending_the_gestures_drops_all_four_and_leaves_the_pointer_and_the_strip_alone
     // The shared divider between the two bands: the second pane's top edge.
     let divider = Point {
         x: 10,
-        y: frame.session.active_tab.layout_solved[1].rect.origin.y,
+        y: frame.session.active_tab.layout_solved[1].rect.origin.y + 1,
     };
     // The bare tab strip, past the one tab's ribbon.
     let strip = Point { x: 40, y: 0 };

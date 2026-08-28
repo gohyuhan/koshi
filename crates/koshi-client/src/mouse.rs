@@ -575,8 +575,8 @@ impl Client {
     /// **Mouse-select mode takes the mouse back.** With the viewer's
     /// `mouse-select` mode on, a drag begins a koshi highlight even over a
     /// mouse-aware program — the way to copy text out of a full-screen `vim` or
-    /// `htop`. A key toggles it: the outer terminal keeps `Shift`+drag for its
-    /// own selection and never forwards it to koshi. The mode is read from
+    /// `htop`. Holding `Shift` on the press also begins a highlight, even when
+    /// the viewer's mode is off. The mode is read from
     /// [`Client::mouse_select`], the viewer's own copy, so a press right after
     /// the key that toggled it already routes the new way.
     fn press_pane_content(
@@ -591,7 +591,8 @@ impl Client {
         }
         let tracking =
             pane_modes(frame, pane_id).map_or(MouseTracking::Off, |pane| pane.mouse_tracking);
-        if reports(tracking, mouse.kind) && !self.mouse_select {
+        let shift_select = mouse.mods.contains(ModFlags::SHIFT);
+        if reports(tracking, mouse.kind) && !self.mouse_select && !shift_select {
             return self.forward(mouse, frame);
         }
         let clicks = self.record_click(MouseButton::Left, now);
