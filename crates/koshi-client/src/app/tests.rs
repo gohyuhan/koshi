@@ -17,7 +17,7 @@ use koshi_config::types::RgbColor;
 use koshi_core::command::{Command, CommandEnvelope, CommandSource};
 use koshi_core::ids::{CommandId, PaneId, SessionId};
 use koshi_pty::backend::state::PtyBackend;
-use koshi_renderer::snapshot::RenderSnapshot;
+use koshi_renderer::snapshot::{CommittedRegions, RenderSnapshot};
 use koshi_runtime::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
 use koshi_runtime::runtime::bus::EventFilter;
 use koshi_runtime::server::Server;
@@ -26,6 +26,10 @@ use koshi_test_support::fake_pty::FakePtyBackend;
 use koshi_link::config::LoadedConfig;
 
 const VIEWPORT: Size = Size { cols: 80, rows: 24 };
+
+fn regions(viewport: Size) -> CommittedRegions {
+    CommittedRegions::core(viewport, 0)
+}
 
 /// A bootstrapped server driven by `fake`, with its client id and sole pane id.
 fn boot(fake: &Arc<FakePtyBackend>) -> (Server, ClientId, PaneId) {
@@ -132,11 +136,17 @@ fn the_painted_hint_bar_follows_the_clients_mouse_select_state() {
     let (mut server, client_id, _pane_id) = boot(&fake);
     let client = test_client(&mut server, client_id);
     let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
+    let snapshot = frame(&server, client_id);
 
     paint_frame(
         &mut terminal,
         &client,
-        &frame(&server, client_id),
+        &snapshot,
+        &regions(Size {
+            cols: 120,
+            rows: 24,
+        }),
+        &ViewerPaint::from_frame(&client, &snapshot),
         &mut String::new(),
         &mut None,
     )
@@ -149,10 +159,16 @@ fn the_painted_hint_bar_follows_the_clients_mouse_select_state() {
         SystemTime::now(),
         Command::ToggleMouseSelect,
     ));
+    let snapshot = frame(&server, client_id);
     paint_frame(
         &mut terminal,
         &client,
-        &frame(&server, client_id),
+        &snapshot,
+        &regions(Size {
+            cols: 120,
+            rows: 24,
+        }),
+        &ViewerPaint::from_frame(&client, &snapshot),
         &mut String::new(),
         &mut None,
     )
@@ -176,10 +192,13 @@ fn pty_output_is_painted_to_the_screen() {
 
     let client = test_client(&mut server, client_id);
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+    let snapshot = frame(&server, client_id);
     paint_frame(
         &mut terminal,
         &client,
-        &frame(&server, client_id),
+        &snapshot,
+        &regions(VIEWPORT),
+        &ViewerPaint::from_frame(&client, &snapshot),
         &mut String::new(),
         &mut None,
     )
@@ -207,10 +226,13 @@ fn painting_emits_a_changed_cursor_style_and_records_it() {
         .is_continue());
     let client = test_client(&mut server, client_id);
     let mut last_cursor = None;
+    let snapshot = frame(&server, client_id);
     paint_frame(
         &mut terminal,
         &client,
-        &frame(&server, client_id),
+        &snapshot,
+        &regions(VIEWPORT),
+        &ViewerPaint::from_frame(&client, &snapshot),
         &mut String::new(),
         &mut last_cursor,
     )

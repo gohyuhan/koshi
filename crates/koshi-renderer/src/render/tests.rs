@@ -25,11 +25,12 @@ use koshi_terminal::style::{Color as TermColor, Style as TermStyle};
 use koshi_terminal::state::CursorShape;
 
 use crate::snapshot::{
-    ClientSnapshot, CursorSnapshot, CursorStyle, GridView, KeymapHints, PaneSlot, PaneSnapshot,
-    PluginUiSnapshot, ScrollbackMeta, SelectionSpans, SessionSnapshot, TabMeta, TabSnapshot,
-    ViewerChrome,
+    ClientSnapshot, CommittedRegions, CursorSnapshot, CursorStyle, GridView, KeymapHints, PaneSlot,
+    PaneSnapshot, PluginUiSnapshot, ScrollbackMeta, SelectionSpans, SessionSnapshot, TabMeta,
+    TabSnapshot, ViewerChrome,
 };
 use koshi_layout::mode::LayoutMode;
+use koshi_layout::regions::{solve, Edge, RegionGeometry, RegionSolve};
 use koshi_layout::solver::StackHeader;
 use koshi_pane::pane::state::PaneKind;
 
@@ -132,6 +133,37 @@ fn build(
     }
 }
 
+/// The compiled-in region solve for a viewport-sized test area.
+fn core_regions(w: u16, h: u16) -> CommittedRegions {
+    CommittedRegions::core(Size { cols: w, rows: h }, 0)
+}
+
+/// The pre-region whole-area geometry used by the existing characterization
+/// frames in this module.
+fn legacy_regions(w: u16, h: u16) -> CommittedRegions {
+    let size = Size { cols: w, rows: h };
+    let top = Rect::new(
+        Point { x: 0, y: 0 },
+        Size {
+            cols: w,
+            rows: h.min(1),
+        },
+    );
+    let bottom = if h >= 2 {
+        Rect::new(Point { x: 0, y: h - 1 }, Size { cols: w, rows: 1 })
+    } else {
+        Rect::zero()
+    };
+    CommittedRegions::new(
+        size,
+        RegionSolve {
+            regions: vec![top, bottom],
+            pane_rect: Rect::at_origin(size),
+        },
+        0,
+    )
+}
+
 /// Render a snapshot into a fresh `w x h` buffer.
 fn render(snapshot: &RenderSnapshot, w: u16, h: u16) -> Buffer {
     render_with(snapshot, &Theme::default(), w, h)
@@ -147,8 +179,10 @@ fn render_with(snapshot: &RenderSnapshot, theme: &Theme, w: u16, h: u16) -> Buff
         height: h,
     };
     let mut buf = Buffer::empty(area);
+    let regions = legacy_regions(w, h);
     render_frame(
         snapshot,
+        &regions,
         theme,
         &KeymapHints::default(),
         None,
@@ -169,8 +203,10 @@ fn render_peeking(snapshot: &RenderSnapshot, viewer: ViewerChrome, w: u16, h: u1
         height: h,
     };
     let mut buf = Buffer::empty(area);
+    let regions = legacy_regions(w, h);
     render_frame(
         snapshot,
+        &regions,
         &Theme::default(),
         &KeymapHints::default(),
         None,
@@ -191,8 +227,10 @@ fn render_hovering(snapshot: &RenderSnapshot, hovered: Option<PaneId>, w: u16, h
         height: h,
     };
     let mut buf = Buffer::empty(area);
+    let regions = legacy_regions(w, h);
     render_frame(
         snapshot,
+        &regions,
         &Theme::default(),
         &KeymapHints::default(),
         None,
@@ -217,8 +255,10 @@ fn render_with_hints(snapshot: &RenderSnapshot, hints: &KeymapHints, w: u16, h: 
         height: h,
     };
     let mut buf = Buffer::empty(area);
+    let regions = legacy_regions(w, h);
     render_frame(
         snapshot,
+        &regions,
         &Theme::default(),
         hints,
         None,
@@ -227,6 +267,112 @@ fn render_with_hints(snapshot: &RenderSnapshot, hints: &KeymapHints, w: u16, h: 
         &mut buf,
     );
     buf
+}
+
+fn render_with_regions(snapshot: &RenderSnapshot, regions: &CommittedRegions) -> Buffer {
+    let area = RatatuiRect {
+        x: 0,
+        y: 0,
+        width: regions.viewport.cols,
+        height: regions.viewport.rows,
+    };
+    let mut buf = Buffer::empty(area);
+    render_frame(
+        snapshot,
+        regions,
+        &Theme::default(),
+        &KeymapHints::default(),
+        None,
+        ViewerChrome::default(),
+        area,
+        &mut buf,
+    );
+    buf
+}
+
+#[test]
+fn committed_core_regions_keep_the_default_frame_byte_identical() {
+    let pane = PaneId::new();
+    let viewport = Size { cols: 80, rows: 24 };
+    let mut snapshot = build(
+        "sess",
+        &[("shell", true)],
+        &[(pane, rect(0, 0, 80, 22), true)],
+        Some(pane),
+        LockMode::Normal,
+        viewport,
+    );
+    snapshot.session.active_tab.effective_size = Size { cols: 80, rows: 22 };
+
+    let committed = core_regions(viewport.cols, viewport.rows);
+    assert_eq!(
+        render(&snapshot, 80, 24),
+        render_with_regions(&snapshot, &committed)
+    );
+}
+
+#[test]
+fn committed_regions_keep_panes_and_cursor_inside_a_side_region() {
+    let pane = PaneId::new();
+    let viewport = Size {
+        cols: 120,
+        rows: 40,
+    };
+    let effective = Size {
+        cols: 100,
+        rows: 38,
+    };
+    let mut snapshot = build(
+        "sess",
+        &[("shell", true)],
+        &[(pane, rect(0, 0, effective.cols, effective.rows), true)],
+        Some(pane),
+        LockMode::Normal,
+        viewport,
+    );
+    snapshot.session.active_tab.effective_size = effective;
+    snapshot.panes[0].grid_view = Some(GridView {
+        grid: Arc::new(Grid::blank(36, 98, TermStyle::default())),
+        view_offset: 0,
+    });
+    let regions = CommittedRegions::new(
+        viewport,
+        solve(
+            viewport,
+            &[
+                RegionGeometry {
+                    edge: Edge::Top,
+                    extent: 1,
+                },
+                RegionGeometry {
+                    edge: Edge::Bottom,
+                    extent: 1,
+                },
+                RegionGeometry {
+                    edge: Edge::Left,
+                    extent: 20,
+                },
+            ],
+        ),
+        3,
+    );
+
+    let buf = render_with_regions(&snapshot, &regions);
+    assert_eq!(buf[(20, 1)].symbol(), "┌");
+    assert_eq!(buf[(10, 1)].symbol(), " ");
+    assert_eq!(
+        cursor_position(
+            &snapshot,
+            &regions,
+            RatatuiRect {
+                x: 0,
+                y: 0,
+                width: viewport.cols,
+                height: viewport.rows,
+            },
+        ),
+        Some(Position::new(21, 2))
+    );
 }
 
 /// The client's viewport as an origin-`(0, 0)` render area, matching what
@@ -238,6 +384,12 @@ fn viewport_area(snapshot: &RenderSnapshot) -> RatatuiRect {
         width: snapshot.client.viewport.cols,
         height: snapshot.client.viewport.rows,
     }
+}
+
+fn legacy_cursor(snapshot: &RenderSnapshot) -> Option<Position> {
+    let area = viewport_area(snapshot);
+    let regions = legacy_regions(area.width, area.height);
+    cursor_position(snapshot, &regions, area)
 }
 
 /// The visible text of buffer row `y`.
@@ -713,8 +865,10 @@ fn reused_buffer_is_blanked_before_painting() {
         }
     }
 
+    let regions = legacy_regions(area.width, area.height);
     render_frame(
         &snap,
+        &regions,
         &Theme::default(),
         &KeymapHints::default(),
         None,
@@ -1159,10 +1313,7 @@ fn cursor_at_focused_pane_maps_to_content_cell() {
         blink: false,
         shape: None,
     };
-    assert_eq!(
-        cursor_position(&snap, viewport_area(&snap)),
-        Some(Position::new(6, 4))
-    );
+    assert_eq!(legacy_cursor(&snap), Some(Position::new(6, 4)));
 }
 
 #[test]
@@ -1184,10 +1335,7 @@ fn cursor_past_content_rect_is_clamped_inside_it() {
         blink: false,
         shape: None,
     };
-    assert_eq!(
-        cursor_position(&snap, viewport_area(&snap)),
-        Some(Position::new(38, 5))
-    );
+    assert_eq!(legacy_cursor(&snap), Some(Position::new(38, 5)));
 }
 
 #[test]
@@ -1258,7 +1406,7 @@ fn hidden_cursor_places_nothing() {
         Size { cols: 40, rows: 8 },
     );
     snap.panes[0].cursor.visible = false;
-    assert_eq!(cursor_position(&snap, viewport_area(&snap)), None);
+    assert_eq!(legacy_cursor(&snap), None);
 }
 
 #[test]
@@ -1273,7 +1421,7 @@ fn a_scrolled_back_view_places_no_cursor() {
     );
     assert!(snap.panes[0].cursor.visible);
     snap.panes[0].grid_view.as_mut().unwrap().view_offset = 3;
-    assert_eq!(cursor_position(&snap, viewport_area(&snap)), None);
+    assert_eq!(legacy_cursor(&snap), None);
 }
 
 #[test]
@@ -1287,7 +1435,7 @@ fn no_focused_pane_places_no_cursor() {
         LockMode::Normal,
         Size { cols: 40, rows: 8 },
     );
-    assert_eq!(cursor_position(&snap, viewport_area(&snap)), None);
+    assert_eq!(legacy_cursor(&snap), None);
 }
 
 #[test]
@@ -1305,7 +1453,7 @@ fn plugin_pane_places_no_cursor() {
     );
     assert!(snap.panes[0].grid_view.is_none());
     assert!(snap.panes[0].cursor.visible);
-    assert_eq!(cursor_position(&snap, viewport_area(&snap)), None);
+    assert_eq!(legacy_cursor(&snap), None);
 }
 
 #[test]
@@ -1320,7 +1468,7 @@ fn invisible_focused_pane_places_no_cursor() {
         LockMode::Normal,
         Size { cols: 40, rows: 8 },
     );
-    assert_eq!(cursor_position(&snap, viewport_area(&snap)), None);
+    assert_eq!(legacy_cursor(&snap), None);
 }
 
 #[test]
@@ -1344,17 +1492,11 @@ fn cursor_follows_focus_and_never_leaks_to_unfocused_panes() {
     }
 
     // Focused on B (content origin (21,2)): the cursor sits in B, never in A.
-    assert_eq!(
-        cursor_position(&snap, viewport_area(&snap)),
-        Some(Position::new(21, 2))
-    );
+    assert_eq!(legacy_cursor(&snap), Some(Position::new(21, 2)));
 
     // Refocus A (content origin (1,2)): the cursor jumps to A.
     snap.client.focused_pane = Some(a);
-    assert_eq!(
-        cursor_position(&snap, viewport_area(&snap)),
-        Some(Position::new(1, 2))
-    );
+    assert_eq!(legacy_cursor(&snap), Some(Position::new(1, 2)));
 }
 
 #[test]
@@ -1450,7 +1592,7 @@ fn too_small_frame_places_no_cursor() {
     // Every pane is suppressed (no content area), so the overlay frame shows no
     // hardware cursor.
     let snap = too_small_snap(Size { cols: 60, rows: 10 });
-    assert_eq!(cursor_position(&snap, viewport_area(&snap)), None);
+    assert_eq!(legacy_cursor(&snap), None);
 }
 
 #[test]
@@ -1496,8 +1638,10 @@ fn small_and_zero_size_areas_are_safe() {
         width: 0,
         height: 0,
     });
+    let regions = legacy_regions(0, 0);
     render_frame(
         &snap,
+        &regions,
         &Theme::default(),
         &KeymapHints::default(),
         None,
@@ -1583,10 +1727,7 @@ fn cursor_shifts_into_centered_content() {
 
     // Content origin offset (10,2); pane inner origin (1,1) places to (11,3);
     // cursor row 2, col 5 lands at (16,5).
-    assert_eq!(
-        cursor_position(&snap, viewport_area(&snap)),
-        Some(Position::new(16, 5))
-    );
+    assert_eq!(legacy_cursor(&snap), Some(Position::new(16, 5)));
 }
 
 #[test]
@@ -1605,8 +1746,10 @@ fn letterbox_clips_to_a_buffer_smaller_than_the_area() {
         width: 30,
         height: 6,
     });
+    let regions = core_regions(60, 12);
     render_frame(
         &snap,
+        &regions,
         &Theme::default(),
         &KeymapHints::default(),
         None,
@@ -1659,8 +1802,10 @@ fn chrome_below_a_shrunk_buffer_is_skipped_not_panicked() {
         width: 30,
         height: 5,
     });
+    let regions = legacy_regions(30, 5);
     render_frame(
         &snap,
+        &regions,
         &Theme::default(),
         &KeymapHints::default(),
         None,
@@ -1908,7 +2053,7 @@ fn cursor_position_with_focused_pane_absent_from_layout_returns_none() {
         grid: Arc::new(Grid::blank(4, 18, TermStyle::default())),
         view_offset: 0,
     });
-    assert_eq!(cursor_position(&snap, viewport_area(&snap)), None);
+    assert_eq!(legacy_cursor(&snap), None);
 }
 
 #[test]

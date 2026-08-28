@@ -12,10 +12,11 @@ use koshi_core::geometry::{Direction, Point, Rect, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_layout::mode::LayoutMode;
+use koshi_layout::regions::{solve, Edge, RegionGeometry};
 use koshi_layout::solver::StackHeader;
 use koshi_pane::pane::state::PaneKind;
 
-use crate::snapshot::ViewerChrome;
+use crate::snapshot::{CommittedRegions, MouseFrame, ViewerChrome};
 
 /// Cells the tabline's version badge takes, measured from the badge the tabline
 /// actually paints.
@@ -205,6 +206,70 @@ fn centered_layout_exposes_top_bottom_borders_and_letterbox() {
     assert_eq!(hit_test(s.layout(chrome()), at(0, 7)), HitRegion::None);
     // A non-chrome row above the content rect → letterbox margin.
     assert_eq!(hit_test(s.layout(chrome()), at(22, 1)), HitRegion::None);
+}
+
+#[test]
+fn mouse_hit_testing_stays_on_the_painted_region_revision() {
+    let pane = PaneId::new();
+    let viewport = Size {
+        cols: 120,
+        rows: 40,
+    };
+    let effective = Size {
+        cols: 100,
+        rows: 38,
+    };
+    let snapshot = snap(
+        viewport,
+        effective,
+        &[(pane, rect(0, 0, effective.cols, effective.rows), true)],
+        &[],
+        &[],
+    );
+    let default_regions = CommittedRegions::core(viewport, 4);
+    let side_regions = CommittedRegions::new(
+        viewport,
+        solve(
+            viewport,
+            &[
+                RegionGeometry {
+                    edge: Edge::Top,
+                    extent: 1,
+                },
+                RegionGeometry {
+                    edge: Edge::Bottom,
+                    extent: 1,
+                },
+                RegionGeometry {
+                    edge: Edge::Left,
+                    extent: 20,
+                },
+            ],
+        ),
+        5,
+    );
+
+    let painted = MouseFrame::with_regions(snapshot.clone(), default_regions.clone());
+    assert_eq!(
+        hit_test(painted.layout(chrome()), at(12, 2)),
+        HitRegion::PaneContent { pane_id: pane }
+    );
+    assert_eq!(
+        hit_test(painted.layout(chrome()), at(1, 0)),
+        HitRegion::Tabline
+    );
+    assert_eq!(
+        hit_test(painted.layout(chrome()), at(1, 39)),
+        HitRegion::Statusline
+    );
+    assert_eq!(painted.committed_regions.input_revision, 4);
+
+    let replacement = MouseFrame::with_regions(snapshot, side_regions);
+    assert_eq!(
+        hit_test(replacement.layout(chrome()), at(12, 2)),
+        HitRegion::None
+    );
+    assert_eq!(painted.committed_regions.input_revision, 4);
 }
 
 /// A collapsed stack member's strip hit-tests to its pane.

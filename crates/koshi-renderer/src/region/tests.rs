@@ -6,15 +6,15 @@ use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use koshi_core::geometry::Size;
+use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::{ClientId, SessionId, TabId};
 use koshi_core::key::{Key, KeyChord, ModFlags};
 use koshi_core::lock::LockMode;
 use koshi_layout::mode::LayoutMode;
 
 use crate::snapshot::{
-    ClientSnapshot, HintBinding, PluginUiSnapshot, RenderSnapshot, SessionSnapshot, TabMeta,
-    TabSnapshot, ViewerChrome,
+    ClientSnapshot, CommittedRegions, HintBinding, PluginUiSnapshot, RenderSnapshot,
+    SessionSnapshot, TabMeta, TabSnapshot, ViewerChrome,
 };
 
 /// A frame of one session named `one`, holding one tab named `first` with no
@@ -68,6 +68,25 @@ fn hints() -> KeymapHints {
         removed: Arc::new(BTreeSet::new()),
         reverted: false,
     }
+}
+
+#[test]
+fn core_regions_commit_exact_chrome_rectangles_and_revision() {
+    let committed = CommittedRegions::core(Size { cols: 80, rows: 24 }, 7);
+
+    assert_eq!(committed.viewport, Size { cols: 80, rows: 24 });
+    assert_eq!(committed.input_revision, 7);
+    assert_eq!(
+        committed.solve.regions,
+        vec![
+            Rect::new(Point { x: 0, y: 0 }, Size { cols: 80, rows: 1 }),
+            Rect::new(Point { x: 0, y: 23 }, Size { cols: 80, rows: 1 }),
+        ]
+    );
+    assert_eq!(
+        committed.solve.pane_rect,
+        Rect::new(Point { x: 0, y: 1 }, Size { cols: 80, rows: 22 })
+    );
 }
 
 #[test]

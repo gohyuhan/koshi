@@ -4,7 +4,8 @@
 //! space (`(0, 0)` top-left, `x` rightward, `y` downward). Before koshi can act
 //! on a click — focus a pane, drag a border, forward to a program — it must know
 //! *what* that cell sits on. [`hit_test`] answers that from one frame's
-//! [`FrameLayout`] — where its surfaces sit — returning a [`HitRegion`] label.
+//! [`FrameLayout`] — including its committed region solve — returning a
+//! [`HitRegion`] label.
 //! It only classifies; it never changes state and never forwards anything.
 //!
 //! The frame is read the same way [`crate::render`] draws it, so the region a
@@ -13,9 +14,10 @@
 //! - The **tabline** (top row) and the **hint bar** (bottom row) are koshi-owned
 //!   chrome painted last, over whatever lies beneath, so a click on those rows
 //!   is chrome, not the pane under it.
-//! - The rest is the **pane area**: the solved layout centered in the viewport,
-//!   with a dim letterbox margin around it when the client is larger than the
-//!   size the layout was solved for. A click in that margin hits nothing.
+//! - The rest is the **pane area**: the solved layout centered in the pane
+//!   rectangle left by the committed region solve, with a dim letterbox margin
+//!   around it when the client is larger than the size the layout was solved for.
+//!   A click in that margin hits nothing.
 //! - Inside the pane area, a pane's one-cell **border** ring is distinct from its
 //!   **content**; a collapsed stack member's title strip hit-tests like a border.
 
@@ -23,7 +25,7 @@ use koshi_core::geometry::{Direction, Point, Rect};
 use koshi_core::ids::{PaneId, TabId};
 use ratatui::layout::Rect as RatatuiRect;
 
-use crate::render::{content_rect, tabline_layout};
+use crate::render::{content_rect, pane_area as committed_pane_area, region_area, tabline_layout};
 use crate::snapshot::FrameLayout;
 
 /// The UI region under a client-local screen cell, as classified by
@@ -83,9 +85,9 @@ pub enum HitRegion {
 /// Classify the client-local screen cell `at` against the frame `frame`.
 ///
 /// Reads the frame in the renderer's own paint order so chrome wins over the
-/// pane content beneath it: the tabline (top row) and hint bar (bottom row) are
-/// tested before the pane area, and the pane area is the layout centered inside
-/// the viewport with a letterbox margin that hits nothing.
+/// pane content beneath it: the committed tabline and hint-bar regions are
+/// tested before the pane area, and the pane area is centered inside the
+/// committed pane rectangle with a letterbox margin that hits nothing.
 #[must_use]
 pub fn hit_test(frame: FrameLayout<'_>, at: Point) -> HitRegion {
     let area = viewport_area(frame);
@@ -102,16 +104,19 @@ pub fn hit_test(frame: FrameLayout<'_>, at: Point) -> HitRegion {
 
     // Chrome rows are painted last and cover the pane area beneath them, so a
     // click on those rows is chrome regardless of what the layout put there.
-    if at.y == area.y {
-        return tabline_region(frame, area, at.x);
+    let tabline = tabline_area(frame, area);
+    if contains(tabline, at) {
+        return tabline_region(frame, tabline, at.x);
     }
-    if area.height >= 2 && at.y == area.bottom() - 1 {
-        return HitRegion::Statusline;
+    if let Some(statusline) = statusline_area(frame, area) {
+        if contains(statusline, at) {
+            return HitRegion::Statusline;
+        }
     }
 
-    // The pane area: the effective-sized layout centered in the viewport. A
-    // cell outside it is letterbox margin.
-    let content = content_rect(area, tab.effective_size);
+    // The pane area is the effective-sized layout centered in the rectangle
+    // left by the committed regions. A cell outside it is letterbox margin.
+    let content = content_rect(frame_pane_area(frame, area), tab.effective_size);
     if at.x < content.x || at.x >= content.right() || at.y < content.y || at.y >= content.bottom() {
         return HitRegion::None;
     }
@@ -183,8 +188,8 @@ fn tabline_region(frame: FrameLayout<'_>, area: RatatuiRect, x: u16) -> HitRegio
 ///
 /// This is the region a program's own grid maps onto — its cells inside the
 /// border. Read the frame the same way [`hit_test`] does (the layout centered in
-/// the viewport with a letterbox margin), so a cell forwarded to a program is
-/// the cell the user clicked.
+/// the committed pane rectangle with a letterbox margin), so a cell forwarded
+/// to a program is the cell the user clicked.
 #[must_use]
 pub fn pane_content_rect(frame: FrameLayout<'_>, pane_id: PaneId) -> Option<Rect> {
     let area = viewport_area(frame);
@@ -195,7 +200,7 @@ pub fn pane_content_rect(frame: FrameLayout<'_>, pane_id: PaneId) -> Option<Rect
     if tab.all_suppressed {
         return None;
     }
-    let content = content_rect(area, tab.effective_size);
+    let content = content_rect(frame_pane_area(frame, area), tab.effective_size);
     let slot = tab
         .layout_solved
         .iter()
@@ -245,8 +250,8 @@ pub fn pane_cell_clamped(frame: FrameLayout<'_>, pane_id: PaneId, at: Point) -> 
     ))
 }
 
-/// The metadata index of the first tab currently visible in `frame`'s tabline
-/// window, or [`None`] when no tabline is drawn this frame — a zero-size
+/// The metadata index of the first tab currently visible in `frame`'s committed
+/// tabline window, or [`None`] when no tabline is drawn this frame — a zero-size
 /// viewport, or every pane suppressed for want of room.
 ///
 /// The mouse-routing layer reads this to anchor a peek-drag and to step the
@@ -261,19 +266,78 @@ pub fn tabline_first_visible(frame: FrameLayout<'_>) -> Option<usize> {
     if frame.session.active_tab.all_suppressed {
         return None;
     }
-    Some(tabline_layout(frame, area).first_visible)
+    let tabline = tabline_area(frame, area);
+    if tabline.width == 0 || tabline.height == 0 {
+        return None;
+    }
+    Some(tabline_layout(frame, tabline).first_visible)
+}
+
+/// Return the pane rectangle from the committed solve, or the whole area for
+/// the server-side layout view that has no client commit.
+fn frame_pane_area(frame: FrameLayout<'_>, area: RatatuiRect) -> RatatuiRect {
+    frame
+        .committed_regions
+        .map_or(area, |regions| committed_pane_area(regions, area))
 }
 
 /// The viewing client's whole viewport as a screen rect, origin `(0, 0)`. A
 /// client 80 cells across and 24 rows tall gives `x: 0, y: 0, width: 80,
 /// height: 24`.
 fn viewport_area(frame: FrameLayout<'_>) -> RatatuiRect {
+    let size = frame
+        .committed_regions
+        .map_or(frame.client.viewport, |regions| regions.viewport);
     RatatuiRect {
         x: 0,
         y: 0,
-        width: frame.client.viewport.cols,
-        height: frame.client.viewport.rows,
+        width: size.cols,
+        height: size.rows,
     }
+}
+
+/// The tabline rectangle, using the committed solve when this is a painted
+/// client frame and the built-in top row for a server layout view.
+fn tabline_area(frame: FrameLayout<'_>, area: RatatuiRect) -> RatatuiRect {
+    match frame.committed_regions {
+        Some(regions) => region_area(regions, 0, area).unwrap_or(RatatuiRect {
+            x: area.x,
+            y: area.y,
+            width: 0,
+            height: 0,
+        }),
+        None => RatatuiRect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: area.height.min(1),
+        },
+    }
+}
+
+/// The statusline rectangle, or `None` when a one-row viewport has no bottom
+/// row distinct from its tabline.
+fn statusline_area(frame: FrameLayout<'_>, area: RatatuiRect) -> Option<RatatuiRect> {
+    if area.height < 2 {
+        return None;
+    }
+    match frame.committed_regions {
+        Some(regions) => region_area(regions, 1, area),
+        None => Some(RatatuiRect {
+            x: area.x,
+            y: area.bottom() - 1,
+            width: area.width,
+            height: 1,
+        }),
+    }
+}
+
+/// Whether `at` is inside the half-open ratatui rectangle `area`.
+fn contains(area: RatatuiRect, at: Point) -> bool {
+    at.x >= area.x
+        && at.y >= area.y
+        && u32::from(at.x) < u32::from(area.x) + u32::from(area.width)
+        && u32::from(at.y) < u32::from(area.y) + u32::from(area.height)
 }
 
 /// The side of `rect`'s one-cell border ring that `point` lies on. `point` is

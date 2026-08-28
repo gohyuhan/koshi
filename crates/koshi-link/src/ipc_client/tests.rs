@@ -1115,8 +1115,8 @@ enum HelloTiming {
 ///
 /// Answers the Hello per `timing`, then answers a `SubmitCommand` with
 /// [`CommandResult::Ok`]. Every request it reads goes down the returned
-/// receiver, in arrival order. A caller that hangs up after the Hello answer
-/// leaves the second read empty, so the receiver then carries the Hello alone.
+/// receiver, in arrival order. An at-once answer below the target client
+/// protocol reports the Hello and exits without waiting for a request.
 fn fake_settled_session(
     runtime_dir: &Path,
     session: SessionId,
@@ -1143,6 +1143,12 @@ fn fake_settled_session(
         };
         if matches!(timing, HelloTiming::AtOnce) {
             send(&mut connection, hello.request_id, hello_answer.clone());
+        }
+        if matches!(timing, HelloTiming::AtOnce)
+            && protocol_version < crate::talk::TARGET_CLIENT_PROTOCOL
+        {
+            read_tx.send(hello).expect("report the Hello");
+            return;
         }
         let next: Option<IpcRequest> = connection.recv().ok();
         if matches!(timing, HelloTiming::AfterTheNextRequest) {
@@ -1197,7 +1203,7 @@ fn a_named_client_refuses_a_session_that_speaks_two() {
     );
     assert!(
         read.recv().is_err(),
-        "the session read only the Hello; no SubmitCommand was written",
+        "the refusal stand-in reported only the Hello",
     );
 
     let _ = std::fs::remove_dir_all(&runtime_dir);

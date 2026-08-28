@@ -49,6 +49,7 @@ use koshi_core::{
     ids::{ClientId, PaneId, TabId},
 };
 use koshi_observability::cleanup::TerminalCleanupGuard;
+use koshi_renderer::region::core_region_solve;
 use koshi_renderer::snapshot::{Delivery, Reconnecting};
 use koshi_renderer::theme::Theme;
 
@@ -57,16 +58,13 @@ use crate::mouse::{LastPress, ResizeDrag, SelectionDrag, TablineDrag};
 #[cfg(test)]
 mod tests;
 
-/// Compute the pane area left by the built-in navigator and hint rows.
+/// Compute the pane area left by the compiled-in navigator and hint regions.
 ///
 /// An `80x24` viewport reports `Reported(80x22)`. A viewport shorter than the
 /// two rows reports zero rows instead of an invalid negative size.
 #[must_use]
-pub(crate) const fn core_pane_area(viewport: Size) -> PaneArea {
-    PaneArea::Reported(Size {
-        cols: viewport.cols,
-        rows: viewport.rows.saturating_sub(2),
-    })
+pub(crate) fn core_pane_area(viewport: Size) -> PaneArea {
+    PaneArea::Reported(core_region_solve(viewport).pane_rect.size)
 }
 
 /// One attached terminal's view side: its id, its own terminal size, its event
@@ -349,13 +347,18 @@ impl Client {
         self.keymap.hints_for(self.lock_mode)
     }
 
-    /// The hint-bar data one frame is painted from: this viewer's current
-    /// mode, with the mouse-select entry's label following `mouse_select` —
-    /// the acting client's mouse-select state, which the session reports in the
-    /// frame's snapshot.
+    /// The hint-bar data one frame is painted from, using `mode` and the
+    /// acting client's `mouse_select` state.
+    #[must_use]
+    pub(crate) fn frame_hints_for(&self, mode: LockMode, mouse_select: bool) -> KeymapHints {
+        mouse_select_hints(self.keymap.hints_for(mode), mouse_select)
+    }
+
+    /// The hint-bar data for the viewer's current mode, with the mouse-select
+    /// entry's label following `mouse_select`.
     #[must_use]
     pub fn frame_hints(&self, mouse_select: bool) -> KeymapHints {
-        mouse_select_hints(self.keymap_hints(), mouse_select)
+        self.frame_hints_for(self.lock_mode, mouse_select)
     }
 
     /// Take everything the subscription has delivered and apply what the

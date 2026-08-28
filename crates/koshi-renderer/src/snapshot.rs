@@ -35,9 +35,12 @@ use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::MouseTracking;
 use koshi_layout::mode::LayoutMode;
+use koshi_layout::regions::RegionSolve;
 use koshi_layout::solver::StackHeader;
 use koshi_terminal::grid::state::Grid;
 use koshi_terminal::state::CursorShape;
+
+use crate::region::core_region_solve;
 
 /// The hint-bar data types live with the keymap that produces them; the
 /// renderer only draws them, and re-exports them here so a caller painting a
@@ -68,15 +71,50 @@ pub struct RenderSnapshot {
 }
 
 impl RenderSnapshot {
-    /// Borrow the parts of this frame that say where things sit, with `viewer`
-    /// supplying what the session does not hold.
+    /// Borrow the server-provided parts of this frame that say where things
+    /// sit, with `viewer` supplying what the session does not hold. The client
+    /// adds its committed region solve when it builds a [`MouseFrame`].
     #[must_use]
     pub fn layout(&self, viewer: ViewerChrome) -> FrameLayout<'_> {
         FrameLayout {
             session: &self.session,
             client: &self.client,
             viewer,
+            committed_regions: None,
         }
+    }
+}
+
+/// The region geometry that was committed with one painted frame.
+///
+/// `viewport` is the client-local terminal size used to solve `solve`.
+/// `input_revision` changes when the region inputs change. The renderer and
+/// mouse path read the same value from the last painted frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommittedRegions {
+    /// The client viewport used for this solve.
+    pub viewport: Size,
+    /// The ordered region rectangles and the pane rectangle left by them.
+    pub solve: RegionSolve,
+    /// The region-input revision that produced this solve.
+    pub input_revision: u64,
+}
+
+impl CommittedRegions {
+    /// Build a committed region value from an exact solve and its input revision.
+    #[must_use]
+    pub fn new(viewport: Size, solve: RegionSolve, input_revision: u64) -> Self {
+        Self {
+            viewport,
+            solve,
+            input_revision,
+        }
+    }
+
+    /// Build the compiled-in navigator and statusline solve.
+    #[must_use]
+    pub fn core(viewport: Size, input_revision: u64) -> Self {
+        Self::new(viewport, core_region_solve(viewport), input_revision)
     }
 }
 
@@ -163,17 +201,20 @@ pub struct Reconnecting {
 }
 
 /// Where a frame's surfaces sit, borrowed: the session with its solved active
-/// tab, the viewing client, and the viewer's own chrome state. Carries no pane
-/// content and no colors.
+/// tab, the viewing client, the viewer's own chrome state, and an optional
+/// client-side region commit. Carries no pane content and no colors.
 ///
 /// This is what hit-testing a mouse cell and solving the tabline read. Both
 /// answer in cells, and a cell's position does not depend on what color it is
 /// painted, so no theme reaches here — the colors are applied only where
-/// something is actually drawn.
+/// something is actually drawn. A client-side layout carries the committed
+/// region solve that placed the pane area; a server layout uses the default
+/// whole-area view.
 ///
 /// A caller that already holds a [`RenderSnapshot`] borrows one out of it with
-/// [`RenderSnapshot::layout`]; a caller answering a mouse event builds these
-/// on their own and skips every pane's grid, title, and highlight.
+/// [`RenderSnapshot::layout`]. A client-side [`MouseFrame`] adds its committed
+/// regions before hit-testing. A server layout view has no client commit and
+/// uses the built-in whole-area compatibility geometry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameLayout<'a> {
     /// The session being viewed, including its solved active tab.
@@ -182,6 +223,9 @@ pub struct FrameLayout<'a> {
     pub client: &'a ClientSnapshot,
     /// The viewer's pointer, tab-strip, and link state.
     pub viewer: ViewerChrome,
+    /// The region solve committed with the painted frame, when this layout is
+    /// the client-side view of a painted frame.
+    pub(crate) committed_regions: Option<&'a CommittedRegions>,
 }
 
 /// The owned form of [`FrameLayout`], for a caller that builds these two
@@ -206,13 +250,14 @@ impl OwnedFrameLayout {
             session: &self.session,
             client: &self.client,
             viewer,
+            committed_regions: None,
         }
     }
 }
 
 /// A painted frame cut down to what answering a mouse event reads: where the
-/// surfaces sit, plus the few per-pane fields that say which line each pane's
-/// top row shows and where an event over it goes.
+/// surfaces sit, the committed region solve, and the few per-pane fields that
+/// say which line each pane's top row shows and where an event over it goes.
 ///
 /// It carries no cells, no cursor and no titles, so a viewer holding one
 /// between paints holds no pane's [`Grid`].
@@ -225,30 +270,40 @@ pub struct MouseFrame {
     /// One entry per pane the frame carried content for, matched to a
     /// [`PaneSlot`] by id.
     pub panes: Vec<MousePane>,
+    /// The region solve and input revision that were painted with this frame.
+    pub committed_regions: CommittedRegions,
 }
 
 impl MouseFrame {
-    /// Borrow the parts of this frame that say where things sit, with `viewer`
-    /// supplying what the session does not hold.
+    /// Borrow the parts of this painted frame that say where things sit, with
+    /// `viewer` supplying the pointer and tab-strip state.
     #[must_use]
     pub fn layout(&self, viewer: ViewerChrome) -> FrameLayout<'_> {
         FrameLayout {
             session: &self.session,
             client: &self.client,
             viewer,
+            committed_regions: Some(&self.committed_regions),
+        }
+    }
+
+    /// Build the mouse frame with the exact region solve that was painted.
+    #[must_use]
+    pub fn with_regions(snapshot: RenderSnapshot, committed_regions: CommittedRegions) -> Self {
+        Self {
+            panes: snapshot.panes.iter().map(MousePane::from).collect(),
+            session: snapshot.session,
+            client: snapshot.client,
+            committed_regions,
         }
     }
 }
 
 impl From<RenderSnapshot> for MouseFrame {
-    /// Takes the frame by value, so the session and client parts move across and
-    /// only the per-pane entries are built: one [`Vec`] of [`Copy`] structs.
+    /// Takes the frame by value and uses the compiled-in region solve.
     fn from(snapshot: RenderSnapshot) -> Self {
-        Self {
-            panes: snapshot.panes.iter().map(MousePane::from).collect(),
-            session: snapshot.session,
-            client: snapshot.client,
-        }
+        let committed_regions = CommittedRegions::core(snapshot.client.viewport, 0);
+        Self::with_regions(snapshot, committed_regions)
     }
 }
 
