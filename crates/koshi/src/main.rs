@@ -1,5 +1,6 @@
 //! The `koshi` binary entrypoint.
 
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime};
 
@@ -30,10 +31,21 @@ use koshi_link::error::CliError;
 use koshi_link::in_session::InSessionContext;
 use koshi_link::ipc_client;
 use koshi_link::remote_client::{self, Reach, REACH_WAIT};
+use koshi_observability::cleanup::{install_panic_hook, TerminalCleanupGuard};
+use koshi_observability::logging;
 
 fn main() -> ExitCode {
     // Usage errors print through clap and exit 2; --help/--version exit 0.
     let cli = Cli::parse();
+    // The session server publishes events before it serves clients, so arm its
+    // crash report before startup can publish an event or panic.
+    let _session_panic = if matches!(&cli.command, Some(CliCommand::ServeSession { .. })) {
+        let cleanup = TerminalCleanupGuard::new();
+        let panic_guard = install_panic_hook(&cleanup, koshi_paths::data_dir());
+        Some((cleanup, panic_guard))
+    } else {
+        None
+    };
 
     // A failure prints `koshi: <error>` on standard error before the process
     // exits with that error's code.
@@ -502,12 +514,25 @@ fn run_debug(command: &DebugCommand) -> Result<(), CliError> {
     match command {
         DebugCommand::DumpState { format } => run_dump_state(*format),
         DebugCommand::DumpLayout { tab, format } => run_dump_layout(tab.as_ref(), *format),
+        DebugCommand::TailLog { since } => run_debug_tail_log(*since),
         DebugCommand::Events {
             since,
             filter,
             format,
         } => run_debug_events(*since, filter.as_deref(), *format),
     }
+}
+
+/// Print the newest local log lines from every session log file.
+fn run_debug_tail_log(since: Option<Duration>) -> Result<(), CliError> {
+    let directory = logging::log_dir().unwrap_or_else(|| PathBuf::from("logs"));
+    let oldest_kept = output::oldest_kept(SystemTime::now(), since);
+    let rendered =
+        logging::tail_logs(&directory, oldest_kept).map_err(|error| CliError::Runtime {
+            detail: error.to_string(),
+        })?;
+    print!("{rendered}");
+    Ok(())
 }
 
 /// Print every running session's full record, with each pane's command

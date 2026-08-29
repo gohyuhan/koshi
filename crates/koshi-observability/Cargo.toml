@@ -11,3 +11,7 @@ koshi-core = { version = "0.4.0-pr.1", path = "../koshi-core" }
 koshi-paths = { version = "0.4.0-pr.1", path = "../koshi-paths" }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["json"] }
+
+[target."cfg(windows)".dependencies]
+# Crash reports replace inherited ACLs with an owner-only DACL.
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_SystemServices"] }

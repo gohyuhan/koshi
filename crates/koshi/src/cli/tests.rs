@@ -489,6 +489,28 @@ fn dump_layout_takes_a_tab_and_the_json_format_together() {
 }
 
 #[test]
+fn debug_tail_log_defaults_to_every_local_log_line() {
+    assert_eq!(
+        parse(&["koshi", "debug", "tail-log"]).command,
+        Some(CliCommand::Debug {
+            command: DebugCommand::TailLog { since: None },
+        })
+    );
+}
+
+#[test]
+fn debug_tail_log_takes_a_since_window() {
+    assert_eq!(
+        parse(&["koshi", "debug", "tail-log", "--since", "10m"]).command,
+        Some(CliCommand::Debug {
+            command: DebugCommand::TailLog {
+                since: Some(Duration::from_secs(600)),
+            },
+        })
+    );
+}
+
+#[test]
 fn debug_events_defaults_to_every_event_and_the_table_format() {
     assert_eq!(
         parse(&["koshi", "debug", "events"]).command,
@@ -1131,7 +1153,7 @@ fn resize_pane_help_renders_its_about_usage_and_flags() {
          [default: 1]\n\n      \
          --pane <PANE_ID>\n          Pane to resize; defaults to the focused pane\n\n      \
          --remote <SERVER>\n          \
-         Run this invocation against the machine SERVER names — the name it was saved under, \
+         Run this supported invocation against the machine SERVER names — the name it was saved under, \
          or the `host:port` it listens on — instead of this one\n\n  \
          -h, --help\n          Print help (see a summary with '-h')\n"
     );

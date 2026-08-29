@@ -133,6 +133,7 @@ use koshi_ipc::router::{RouterRequestKind, RouterResult, SessionAddress, Session
 use koshi_ipc::transport::{Connection, FrameReader, FrameWriter};
 use koshi_ipc::wire::{MaybeKnown, WireName};
 use koshi_observability::cleanup::{install_panic_hook, TerminalCleanupGuard};
+use koshi_observability::logging::recent_events;
 use koshi_renderer::snapshot::{
     CommittedRegions, CursorStyle, MouseFrame, Reconnecting, RenderSnapshot, ViewerChrome,
 };
@@ -836,7 +837,8 @@ fn attach_once(home: &Home, target: &SessionSelector) -> Result<Option<SessionId
     // The session accepted the client, so the terminal may change mode now.
     // The hooks undo every mode this function sets, and the panic hook shares
     // them, so an unwinding panic restores the terminal too and then writes a
-    // crash report into the data directory.
+    // crash report into the data directory. The event loop also records the
+    // content-free session frames this client receives in that report's ring.
     let cleanup = TerminalCleanupGuard::new();
     app::register_terminal_restore(&cleanup);
     let _panic_guard = install_panic_hook(&cleanup, koshi_paths::data_dir());
@@ -1034,6 +1036,7 @@ fn run_attachment<B: Backend>(
                 // reporting that socket closing.
                 Incoming::Frame { connection, .. } if connection != current_connection => {}
                 Incoming::Frame { frame, .. } => {
+                    record_received_event(session_id, &frame);
                     if let Some(ending) = classify(&frame) {
                         ended = Some(ending);
                         break;
@@ -2458,6 +2461,44 @@ fn adopt_frame(client: &mut Client, snapshot: &RenderSnapshot) {
     client.set_lock_mode(snapshot.client.lock_mode);
     client.note_active_tab(snapshot.client.active_tab);
     client.set_mouse_select(snapshot.client.mouse_select);
+}
+
+/// Record the content-free session activity this client received before the
+/// frame changes the attachment state or ends the stream.
+fn record_received_event(session_id: SessionId, frame: &Result<SessionEvent, IpcError>) {
+    let Ok(event) = frame else {
+        return;
+    };
+
+    let (client, tab, pane) = match event {
+        SessionEvent::Painted { .. }
+        | SessionEvent::Detached
+        | SessionEvent::Resync { .. }
+        | SessionEvent::MouseAnswer { .. }
+        | SessionEvent::HostWrite { .. }
+        | SessionEvent::SwitchTo { .. } => return,
+        SessionEvent::PaneCreated { pane_id, tab_id } => (None, Some(*tab_id), Some(*pane_id)),
+        SessionEvent::PaneProcessExited { pane_id, .. } | SessionEvent::PaneClosing { pane_id } => {
+            (None, None, Some(*pane_id))
+        }
+        SessionEvent::PaneRemoved { pane_id, tab_id } => (None, Some(*tab_id), Some(*pane_id)),
+        SessionEvent::PaneFocused {
+            client_id,
+            tab_id,
+            pane_id,
+            ..
+        } => (Some(*client_id), Some(*tab_id), Some(*pane_id)),
+        SessionEvent::LayoutChanged { tab_id }
+        | SessionEvent::TabCreated { tab_id }
+        | SessionEvent::TabClosed { tab_id }
+        | SessionEvent::TabMoved { tab_id, .. } => (None, Some(*tab_id), None),
+        SessionEvent::TabFocused {
+            client_id, tab_id, ..
+        } => (Some(*client_id), Some(*tab_id), None),
+        SessionEvent::Quit | SessionEvent::Restarting => (None, None, None),
+    };
+
+    recent_events::record_client_event(session_id, event.name(), client, tab, pane);
 }
 
 /// Classify one frame read from the event stream. `None` keeps the loop

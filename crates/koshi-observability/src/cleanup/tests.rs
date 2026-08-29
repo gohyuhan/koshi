@@ -4,24 +4,14 @@
 //! the hooks after it.
 //!
 //! Then the crash report: what the file is named and what it holds, that the
-//! cleanup hooks run before it is written, and that every way the write can
-//! fail leaves no file and still restores the terminal.
+//! recent-event fields exclude payloads, that a locked ring does not block the
+//! hook, that cleanup runs before writing, and that write failures leave no file.
 
 use super::*;
+use koshi_core::event::{Event, PaneEnterPressed, SubmittedLinePayload};
+use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::OnceLock;
-
-/// Returns a shared lock that serializes the panic-hook tests.
-///
-/// Every test that installs a panic hook mutates the process-global hook slot.
-/// Rust runs tests in parallel, so a second test's `set_hook` can land between
-/// the first test's install and its `catch_unwind`. This lock keeps one such
-/// test running at a time.
-fn panic_hook_test_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
 
 #[test]
 fn drop_runs_hooks_in_registration_order() {
@@ -298,6 +288,7 @@ fn fixed_report() -> CrashReport {
         message: "boom".to_string(),
         location: "src/main.rs:10:5".to_string(),
         backtrace: "frame one\nframe two".to_string(),
+        recent_events: Some(Vec::new()),
     }
 }
 
@@ -324,12 +315,104 @@ fn a_crash_report_writes_a_file_named_by_its_timestamp_holding_every_fact() {
     assert_eq!(
         text,
         format!(
-            "version: {}\nplatform: {} {}\ntimestamp: 1700000000\nmessage: boom\nlocation: src/main.rs:10:5\nbacktrace:\nframe one\nframe two\n",
+            "version: {}\nplatform: {} {}\ntimestamp: 1700000000\nmessage: boom\nlocation: src/main.rs:10:5\nrecent_events:\nbacktrace:\nframe one\nframe two\n",
             env!("CARGO_PKG_VERSION"),
             std::env::consts::OS,
             std::env::consts::ARCH
         )
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn crash_reports_with_the_same_timestamp_get_distinct_files() {
+    let dir = crash_dir("same-timestamp");
+    let mut first = fixed_report();
+    first.message = "first".to_string();
+    first.write(&dir);
+    let mut second = fixed_report();
+    second.message = "second".to_string();
+    second.write(&dir);
+
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .expect("the crash directory exists")
+        .map(|entry| entry.expect("the directory entry is readable").path())
+        .collect();
+    paths.sort();
+    assert_eq!(paths.len(), 2);
+    let contents: Vec<String> = paths
+        .iter()
+        .map(|path| std::fs::read_to_string(path).expect("the report is readable"))
+        .collect();
+    assert!(contents.iter().any(|text| text.contains("message: first")));
+    assert!(contents.iter().any(|text| text.contains("message: second")));
+
+    for _ in 0..9 {
+        fixed_report().write(&dir);
+    }
+    let count = std::fs::read_dir(&dir)
+        .expect("the crash directory exists")
+        .count();
+    assert_eq!(count, MAX_CRASH_REPORTS);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_crash_report_keeps_only_the_newest_ten_files() {
+    let dir = crash_dir("retention");
+
+    for timestamp in 0..=10_u64 {
+        let mut report = fixed_report();
+        report.timestamp = timestamp;
+        report.write(&dir);
+    }
+
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .expect("the crash directory exists")
+        .map(|entry| entry.expect("the directory entry is readable").path())
+        .collect();
+    paths.sort();
+    assert_eq!(paths.len(), 10);
+    assert!(!dir.join("crash-0.txt").exists());
+    assert!(dir.join("crash-10.txt").exists());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_crash_report_directory_is_private() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = crash_dir("directory-mode");
+    fixed_report().write(&dir);
+
+    let mode = std::fs::metadata(&dir)
+        .expect("the crash directory exists")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o700);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_crash_report_file_is_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = crash_dir("file-mode");
+    fixed_report().write(&dir);
+
+    let mode = std::fs::metadata(dir.join("crash-1700000000.txt"))
+        .expect("the report exists")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600);
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -376,8 +459,8 @@ fn a_crash_report_whose_directory_cannot_be_created_writes_nothing() {
 
 #[test]
 fn a_crash_report_whose_file_path_is_a_directory_writes_nothing() {
-    // The directory is writable, but the report's own file name is taken by
-    // a directory, so the write itself fails.
+    // The directory exists before its private ACL is applied. The existing
+    // child must remain readable when the report name is taken by a directory.
     let dir = crash_dir("file-is-a-directory");
     let taken = dir.join("crash-1700000000.txt");
     std::fs::create_dir_all(&taken).expect("create the blocking directory");
@@ -396,38 +479,29 @@ fn a_crash_report_whose_file_path_is_a_directory_writes_nothing() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// Only Unix can make a directory read-only through `std`. On Windows a failing
-// write is covered by
-// `a_crash_report_whose_file_path_is_a_directory_writes_nothing`.
 #[cfg(unix)]
 #[test]
-fn a_crash_report_into_a_read_only_directory_writes_nothing() {
+fn a_crash_report_repairs_a_same_user_directory_to_private_mode() {
     use std::os::unix::fs::PermissionsExt;
 
-    let dir = crash_dir("read-only");
+    let dir = crash_dir("repair-directory-mode");
     std::fs::create_dir_all(&dir).expect("create the crash directory");
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500))
-        .expect("make the directory read-only");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))
+        .expect("make the directory wider than private");
 
-    // A user who overrides directory permissions (root) can still write
-    // here, so probe first and only assert once the permission holds.
-    let probe = dir.join("probe");
-    let enforced = std::fs::write(&probe, b"x").is_err();
-    let _ = std::fs::remove_file(&probe);
+    fixed_report().write(&dir);
 
-    if enforced {
-        fixed_report().write(&dir);
-        assert_eq!(
-            std::fs::read_dir(&dir)
-                .expect("the directory is readable")
-                .count(),
-            0,
-            "a read-only directory takes no report"
-        );
-    }
+    let mode = std::fs::metadata(&dir)
+        .expect("the crash directory exists")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o700);
+    assert!(
+        dir.join("crash-1700000000.txt").is_file(),
+        "the report is written after the directory is repaired"
+    );
 
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
-        .expect("restore the directory so it can be removed");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -524,6 +598,86 @@ fn a_panic_with_a_multi_line_message_keeps_every_line() {
     assert!(
         text.contains("\nmessage: first line\nsecond line\nthird\nlocation: "),
         "every line of the message is kept, and `location` follows it: {text}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_panic_writes_recent_event_names_and_ids_without_payload_text() {
+    let _serial = panic_hook_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _recent_serial = crate::logging::recent_events::lock_for_test();
+    let dir = crash_dir("panic-recent-events");
+    let session_id = SessionId::new();
+    let client_id = ClientId::new();
+    let tab_id = TabId::new();
+    let pane_id = PaneId::new();
+    let secret = "crash-event-payload-secret";
+    crate::logging::recent_events::record(&Event::PaneEnterPressed(PaneEnterPressed {
+        pane_id,
+        tab_id,
+        session_id,
+        client_id,
+        line: SubmittedLinePayload::SafePublic(secret.to_string()),
+        timestamp: SystemTime::now(),
+    }));
+    let saved = panic::take_hook();
+    panic::set_hook(Box::new(|_| {}));
+
+    {
+        let guard = TerminalCleanupGuard::new();
+        let _panic_guard = install_panic_hook(&guard, Some(dir.clone()));
+        let result = panic::catch_unwind(AssertUnwindSafe(|| panic!("boom")));
+        assert!(result.is_err());
+    }
+
+    panic::set_hook(saved);
+
+    let text = only_crash_report(&dir);
+    assert!(text.contains("event: PaneEnterPressed"), "{text}");
+    assert!(text.contains(&session_id.to_string()), "{text}");
+    assert!(text.contains(&client_id.to_string()), "{text}");
+    assert!(text.contains(&tab_id.to_string()), "{text}");
+    assert!(text.contains(&pane_id.to_string()), "{text}");
+    assert!(!text.contains(secret), "event payload leaked: {text}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_panic_while_recent_events_are_locked_still_writes_the_crash_report() {
+    let _serial = panic_hook_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _recent_serial = crate::logging::recent_events::lock_for_test();
+    let dir = crash_dir("panic-recent-events-locked");
+    let saved = panic::take_hook();
+    panic::set_hook(Box::new(|_| {}));
+
+    {
+        let guard = TerminalCleanupGuard::new();
+        let _panic_guard = install_panic_hook(&guard, Some(dir.clone()));
+        let result = panic::catch_unwind(AssertUnwindSafe(|| {
+            crate::logging::recent_events::with_lock_for_test(|| panic!("boom"));
+        }));
+        assert!(result.is_err(), "the deliberate panic must unwind");
+    }
+
+    panic::set_hook(saved);
+
+    let text = only_crash_report(&dir);
+    let (header, _) = text
+        .split_once("\nbacktrace:\n")
+        .expect("the report ends with the stack");
+    assert!(
+        !header.contains("recent_events:"),
+        "the locked ring must omit its unavailable section: {text}"
+    );
+    assert!(
+        header.contains("\nlocation: "),
+        "the locked ring must not block the panic hook: {text}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

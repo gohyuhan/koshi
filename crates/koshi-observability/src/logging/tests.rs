@@ -91,6 +91,101 @@ fn two_sessions_get_two_distinct_log_files() {
     assert_ne!(a, b, "each session must name its own log file");
 }
 
+#[test]
+fn tail_logs_reads_local_files_in_name_order_and_applies_since() {
+    let dir = std::env::temp_dir().join(format!("koshi-tail-log-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create the log directory");
+    std::fs::write(
+        dir.join("koshi-log-b.log"),
+        "1970-01-01T00:00:01.000000Z old\n  1970-01-01T00:01:00.000000Z boundary\n1970-01-01T00:01:10.000000Z new\n",
+    )
+    .expect("write the older and newer records");
+    std::fs::write(
+        dir.join("koshi-log-a.log"),
+        "{\"timestamp\":\"1970-01-01T00:01:20.000000Z\",\"message\":\"json\"}\n",
+    )
+    .expect("write the JSON record");
+    std::fs::write(dir.join("not-a-koshi-log.txt"), "ignored\n").expect("write the ignored file");
+
+    let rendered = tail_logs(&dir, Some(UNIX_EPOCH + Duration::from_secs(60)))
+        .expect("read the local log files");
+
+    assert_eq!(
+        rendered,
+        "== koshi-log-a.log ==\n{\"timestamp\":\"1970-01-01T00:01:20.000000Z\",\"message\":\"json\"}\n== koshi-log-b.log ==\n  1970-01-01T00:01:00.000000Z boundary\n1970-01-01T00:01:10.000000Z new\n"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn tail_logs_returns_an_empty_answer_before_logging_creates_the_directory() {
+    let dir = std::env::temp_dir().join(format!("koshi-tail-log-missing-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(
+        tail_logs(&dir, None).expect("a missing log directory is empty"),
+        ""
+    );
+}
+
+#[test]
+fn tail_logs_keeps_only_the_bounded_tail_of_each_file() {
+    let dir = std::env::temp_dir().join(format!("koshi-tail-log-cap-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create the log directory");
+    let contents = (0..=1000)
+        .map(|line| format!("line {line}\n"))
+        .collect::<String>();
+    std::fs::write(dir.join("koshi-log-one.log"), contents).expect("write the log lines");
+
+    let rendered = tail_logs(&dir, None).expect("read the local log file");
+
+    assert_eq!(
+        rendered.lines().count(),
+        1001,
+        "the header plus exactly the newest lines are rendered"
+    );
+    assert!(
+        !rendered.contains("line 0\n"),
+        "the oldest line was not tailed"
+    );
+    assert!(
+        rendered.contains("line 1\n"),
+        "the first retained line was tailed"
+    );
+    assert!(
+        rendered.contains("line 1000\n"),
+        "the newest line was tailed"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn tail_logs_reports_invalid_matching_file_bytes_without_partial_output() {
+    let dir = std::env::temp_dir().join(format!("koshi-tail-log-invalid-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create the log directory");
+    std::fs::write(
+        dir.join("koshi-log-a.log"),
+        "1970-01-01T00:01:20.000000Z readable\n",
+    )
+    .expect("write the readable log");
+    std::fs::write(dir.join("koshi-log-b.log"), [0xff, 0xfe]).expect("write the invalid log bytes");
+
+    let error = tail_logs(&dir, None).expect_err("invalid log bytes must fail the snapshot");
+    let LogTailError::File { path, source } = error else {
+        panic!("the error must name the unreadable matching file");
+    };
+
+    assert_eq!(path, dir.join("koshi-log-b.log"));
+    assert_eq!(source.kind(), std::io::ErrorKind::InvalidData);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // Enabled + a line at the configured level: the file (and its `logs/` parent)
 // is created lazily on that first write, and a second install fails since a
 // process has one global subscriber. This is the only test that claims the

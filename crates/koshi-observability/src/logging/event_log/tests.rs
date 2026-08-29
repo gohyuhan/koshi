@@ -139,6 +139,10 @@ fn plugin_install_is_info_and_a_failed_load_is_a_warning() {
         failed.contains(r#""message":"plugin failed to load; continuing without it""#),
         "{failed}"
     );
+    assert!(
+        !failed.contains("wasm module has no"),
+        "plugin reason leaked: {failed}"
+    );
 }
 
 // The copy line records how much was copied and where to, never the text.
@@ -539,12 +543,15 @@ fn each_plugin_lifecycle_fact_writes_its_own_message_at_its_own_level() {
         );
     }
 
-    // The one that names why it failed writes that reason on the line.
+    // The failure reason is payload content, so the log keeps it out.
     let broken = captured(&[Event::Plugin(PluginEvent::Broken(PluginBroken {
         plugin_id,
         reason: "manifest names no entry point".to_string(),
     }))]);
-    assert!(broken.contains("manifest names no entry point"), "{broken}");
+    assert!(
+        !broken.contains("manifest names no entry point"),
+        "plugin reason leaked: {broken}"
+    );
 }
 
 // The rest of the events kept out of the file, one per reason. Together with

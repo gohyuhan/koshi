@@ -239,14 +239,12 @@ fn log_plugin_event(event: &PluginEvent) {
         PluginEvent::LoadFailed(payload) => {
             tracing::warn!(
                 plugin_id = %payload.plugin_id,
-                reason = %payload.reason,
                 "plugin failed to load; continuing without it"
             );
         }
         PluginEvent::Broken(payload) => {
             tracing::warn!(
                 plugin_id = %payload.plugin_id,
-                reason = %payload.reason,
                 "plugin marked broken and disabled"
             );
         }

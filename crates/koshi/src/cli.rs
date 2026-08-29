@@ -4,7 +4,7 @@
 //! A bare `koshi` launches the interactive app: it spawns a new session and
 //! attaches this terminal to it. The root `--headless` flag spawns the session
 //! and attaches nothing. Every verb is a subcommand, `attach` and `detach`
-//! included. The root `--remote` flag reaches every subcommand and names the
+//! included. The root `--remote` flag reaches supported commands and names the
 //! machine that invocation runs against. Parsing yields typed values only; no
 //! command here talks to a runtime.
 //!
@@ -57,8 +57,9 @@ pub struct Cli {
     #[arg(long, value_name = "NAME")]
     pub profile: Option<String>,
 
-    /// Run this invocation against the machine SERVER names — the name it was
-    /// saved under, or the `host:port` it listens on — instead of this one.
+    /// Run this supported invocation against the machine SERVER names — the
+    /// name it was saved under, or the `host:port` it listens on — instead of
+    /// this one.
     #[arg(long, global = true, value_name = "SERVER")]
     pub remote: Option<String>,
 
@@ -799,6 +800,12 @@ pub enum DebugCommand {
         /// Output format.
         #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
         format: FormatArg,
+    },
+    /// Print the newest lines from every local session log file.
+    TailLog {
+        /// Keep only log lines stamped within this much of now, e.g. `10m`.
+        #[arg(long, value_parser = parse_since, value_name = "LENGTH")]
+        since: Option<Duration>,
     },
     /// Print the events each running session published most recently, oldest
     /// first. Each line names the event and the ids it named, never any

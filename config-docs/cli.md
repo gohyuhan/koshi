@@ -677,6 +677,7 @@ holding different values use different directories and do not find each other.
 |---|---|
 | `koshi debug dump-state [--format table\|json]` | Print every running session's sessions, tabs, panes, and clients |
 | `koshi debug dump-layout [--tab <NAME_OR_ID>] [--format table\|json]` | Print each tab's split tree, solved rectangles, panes with no room, stacks, and per-client focus |
+| `koshi debug tail-log [--since <LENGTH>]` | Print the newest lines from every local session log file |
 | `koshi debug events [--since <LENGTH>] [--filter <NAME>] [--format table\|json]` | Print the events each running session published most recently, oldest first |
 
 A pane's command arguments print as `***`; the program name stays visible.
@@ -694,6 +695,12 @@ viewing prints its tree and no rectangles.
 A session that started before you installed this Koshi cannot report its
 layout. `dump-layout` says so and names what to do: restart that session, or
 run `dump-state`, which every session answers.
+
+`koshi debug tail-log` reads only this machine's `state_dir/logs` directory. If
+this machine has no home directory, it reads the relative `logs/` directory.
+It keeps the newest 1000 lines from each session log file. `--since` keeps
+lines with a timestamp within the given length, such as `10m`. The command does
+not connect to a remote host. Run it on that host to inspect a remote session.
 
 `koshi debug events` prints the last 1000 events a session published. Each line
 names when the record was stamped, which event it was, and the ids it named. No

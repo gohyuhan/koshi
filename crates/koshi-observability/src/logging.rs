@@ -58,6 +58,7 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
 use tracing::Level;
@@ -110,8 +111,8 @@ pub fn log_dir() -> Option<PathBuf> {
 }
 
 /// The log file for `session_id`: `koshi-log-<uuid>.log` in [`log_dir`]. If no
-/// home directory can be found at all, the file lands in the current directory
-/// as a last resort.
+/// home directory can be found at all, the file lands in the relative `logs/`
+/// directory as a last resort.
 ///
 /// Example: session `…446655440000` resolves on Linux to
 /// `~/.local/state/koshi/logs/koshi-log-…446655440000.log`.
@@ -120,8 +121,204 @@ pub fn session_log_path(session_id: SessionId) -> PathBuf {
     let name = format!("koshi-log-{}.log", session_id.as_uuid());
     match log_dir() {
         Some(dir) => dir.join(name),
-        None => PathBuf::from(name),
+        None => PathBuf::from("logs").join(name),
     }
+}
+
+const LOG_FILE_PREFIX: &str = "koshi-log-";
+const LOG_FILE_SUFFIX: &str = ".log";
+const MAX_TAIL_LINES: usize = 1000;
+
+/// Why [`tail_logs`] could not read the local log files.
+#[derive(Debug, Error)]
+pub enum LogTailError {
+    /// The local log directory could not be listed.
+    #[error("cannot read log directory {path}: {source}")]
+    Directory { path: PathBuf, source: io::Error },
+    /// One matching local log file could not be read.
+    #[error("cannot read log file {path}: {source}")]
+    File { path: PathBuf, source: io::Error },
+}
+
+/// Read the last local log lines from every session file in `dir`.
+///
+/// `oldest_kept` is the inclusive timestamp cutoff. When it is `None`, the
+/// newest 1000 lines from each file are returned. Files are
+/// ordered by their names, and each file has a header before its lines.
+/// Missing `dir` means that logging has not created a file yet and returns an
+/// empty answer.
+pub fn tail_logs(dir: &Path, oldest_kept: Option<SystemTime>) -> Result<String, LogTailError> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(String::new()),
+        Err(source) => {
+            return Err(LogTailError::Directory {
+                path: dir.to_path_buf(),
+                source,
+            });
+        }
+    };
+
+    let mut paths = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|source| LogTailError::Directory {
+            path: dir.to_path_buf(),
+            source,
+        })?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with(LOG_FILE_PREFIX) || !name.ends_with(LOG_FILE_SUFFIX) {
+            continue;
+        }
+        if entry
+            .file_type()
+            .map_err(|source| LogTailError::File {
+                path: entry.path(),
+                source,
+            })?
+            .is_file()
+        {
+            paths.push(entry.path());
+        }
+    }
+    paths.sort();
+
+    let mut rendered = String::new();
+    for path in paths {
+        let contents = std::fs::read_to_string(&path).map_err(|source| LogTailError::File {
+            path: path.clone(),
+            source,
+        })?;
+        let lines = selected_log_lines(&contents, oldest_kept);
+        if lines.is_empty() {
+            continue;
+        }
+        rendered.push_str("== ");
+        rendered.push_str(
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("log"),
+        );
+        rendered.push_str(" ==\n");
+        for line in lines {
+            rendered.push_str(line);
+            rendered.push('\n');
+        }
+    }
+    Ok(rendered)
+}
+
+/// Select recent log lines and keep the result bounded per file.
+fn selected_log_lines(contents: &str, oldest_kept: Option<SystemTime>) -> Vec<&str> {
+    let mut lines = contents
+        .lines()
+        .filter(|line| match oldest_kept {
+            None => true,
+            Some(oldest) => parse_log_timestamp(line).is_some_and(|at| at >= oldest),
+        })
+        .collect::<Vec<_>>();
+    if lines.len() > MAX_TAIL_LINES {
+        lines.drain(..lines.len() - MAX_TAIL_LINES);
+    }
+    lines
+}
+
+/// Read tracing-subscriber 0.3's UTC timestamp from a pretty or JSON line.
+fn parse_log_timestamp(line: &str) -> Option<SystemTime> {
+    const TIMESTAMP_LENGTH: usize = 27;
+    let line = line.trim_start();
+    let bytes = line.as_bytes();
+    let starts_with_timestamp = bytes.first().is_some_and(|byte| byte.is_ascii_digit())
+        && bytes.get(4) == Some(&b'-')
+        && bytes.get(7) == Some(&b'-')
+        && bytes.get(10) == Some(&b'T');
+    let start = if starts_with_timestamp {
+        0
+    } else {
+        line.find("\"timestamp\":\"")
+            .map(|index| index + "\"timestamp\":\"".len())?
+    };
+    let timestamp = bytes.get(start..start + TIMESTAMP_LENGTH)?;
+    if timestamp[4] != b'-'
+        || timestamp[7] != b'-'
+        || timestamp[10] != b'T'
+        || timestamp[13] != b':'
+        || timestamp[16] != b':'
+        || timestamp[19] != b'.'
+        || timestamp[26] != b'Z'
+    {
+        return None;
+    }
+    let year = decimal(&timestamp[0..4])?;
+    let month = decimal(&timestamp[5..7])?;
+    let day = decimal(&timestamp[8..10])?;
+    let hour = decimal(&timestamp[11..13])?;
+    let minute = decimal(&timestamp[14..16])?;
+    let second = decimal(&timestamp[17..19])?;
+    let micros = decimal(&timestamp[20..26])?;
+    if month == 0
+        || month > 12
+        || day == 0
+        || day > days_in_month(year, month)
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
+        return None;
+    }
+    let days = days_from_civil(year, month, day);
+    let seconds = days
+        .checked_mul(86_400)?
+        .checked_add(i64::from(hour) * 3_600)?
+        .checked_add(i64::from(minute) * 60)?
+        .checked_add(i64::from(second))?;
+    if seconds < 0 {
+        return None;
+    }
+    UNIX_EPOCH
+        .checked_add(Duration::from_secs(seconds as u64))?
+        .checked_add(Duration::from_micros(u64::from(micros)))
+}
+
+/// Read a fixed-width decimal field.
+fn decimal(bytes: &[u8]) -> Option<u32> {
+    let mut value: u32 = 0;
+    for byte in bytes {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        value = value.checked_mul(10)?.checked_add(u32::from(byte - b'0'))?;
+    }
+    Some(value)
+}
+
+/// Return the number of days in one Gregorian month.
+fn days_in_month(year: u32, month: u32) -> u32 {
+    match month {
+        2 if year.is_multiple_of(400) || (year.is_multiple_of(4) && !year.is_multiple_of(100)) => {
+            29
+        }
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
+}
+
+/// Convert a Gregorian date to days since 1970-01-01.
+fn days_from_civil(year: u32, month: u32, day: u32) -> i64 {
+    let year = i64::from(year) - i64::from(month <= 2);
+    let era = if year >= 0 {
+        year / 400
+    } else {
+        (year - 399) / 400
+    };
+    let year_of_era = year - era * 400;
+    let month = i64::from(month);
+    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + i64::from(day) - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
 }
 
 /// Why [`init_tracing`] could not install a subscriber.

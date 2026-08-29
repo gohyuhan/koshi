@@ -436,7 +436,14 @@ the machine connecting to it.
 |---|---|
 | `koshi debug dump-state [--format table\|json]` | Print every running session's sessions, tabs, panes, and clients |
 | `koshi debug dump-layout [--tab <NAME_OR_ID>] [--format table\|json]` | Print each tab's split tree, solved rectangles, and per-client focus |
+| `koshi debug tail-log [--since <LENGTH>]` | Print the newest lines from every local session log file |
 | `koshi debug events [--since <LENGTH>] [--filter <NAME>] [--format table\|json]` | Print the events each running session published most recently, oldest first |
+
+`koshi debug tail-log` reads only this machine's `state_dir/logs` directory. If
+this machine has no home directory, it reads the relative `logs/` directory.
+It keeps the newest 1000 lines from each session log file. `--since` keeps
+lines with a timestamp within the given length, such as `10m`. The command does
+not connect to a remote host. Run it on that host to inspect a remote session.
 
 ### Versions and updating
 

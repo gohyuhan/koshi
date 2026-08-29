@@ -11,19 +11,14 @@
 
 use super::*;
 
-use std::sync::{Mutex as StdMutex, MutexGuard};
+use std::sync::MutexGuard;
 
 use koshi_core::event::{PaneCreated, PaneTyped, TypedPayload};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 
-/// Held for the length of one test, so two tests never share the ring.
-static SERIAL: StdMutex<()> = StdMutex::new(());
-
 /// Take the ring for this test and empty it.
 fn exclusive() -> MutexGuard<'static, ()> {
-    let guard = SERIAL
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let guard = lock_for_test();
     clear();
     guard
 }
@@ -41,6 +36,16 @@ fn an_empty_ring_reports_nothing() {
     let _guard = exclusive();
 
     assert_eq!(recent(), Vec::new());
+}
+
+#[test]
+fn try_recent_reads_the_ring_without_changing_its_records() {
+    let _guard = exclusive();
+    record(&Event::Quit);
+
+    let held = try_recent().expect("the ring is not locked");
+
+    assert_eq!(held, recent());
 }
 
 #[test]
@@ -70,6 +75,34 @@ fn a_record_carries_the_ids_its_event_named() {
     assert_eq!(held[0].pane, Some(pane_id));
     assert_eq!(held[0].tab, Some(tab_id));
     assert_eq!(held[0].client, None);
+}
+
+#[test]
+fn a_client_event_records_the_session_and_wire_ids() {
+    let _guard = exclusive();
+    let session_id = SessionId::new();
+    let client_id = ClientId::new();
+    let tab_id = TabId::new();
+    let pane_id = PaneId::new();
+
+    record_client_event(
+        session_id,
+        "PaneFocused",
+        Some(client_id),
+        Some(tab_id),
+        Some(pane_id),
+    );
+
+    let held = recent();
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].name, "PaneFocused");
+    assert_eq!(held[0].session, Some(session_id));
+    assert_eq!(held[0].client, Some(client_id));
+    assert_eq!(held[0].tab, Some(tab_id));
+    assert_eq!(held[0].pane, Some(pane_id));
+    assert_eq!(held[0].plugin, None);
+    assert_eq!(held[0].command, None);
+    assert_eq!(held[0].subscriber, None);
 }
 
 #[test]
@@ -143,6 +176,9 @@ fn a_record_is_stamped_with_the_wall_clock_at_the_moment_it_was_made() {
 // lock instead of panicking.
 #[test]
 fn the_ring_answers_after_a_thread_died_holding_it() {
+    let _panic_serial = crate::cleanup::panic_hook_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let _guard = exclusive();
     record(&Event::Quit);
 
