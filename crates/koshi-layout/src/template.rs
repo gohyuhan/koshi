@@ -27,7 +27,8 @@ use crate::tree::{LayoutChild, LayoutNode, SplitNode};
 #[cfg(test)]
 mod tests;
 
-/// A whole profile file: the tabs it defines and which one starts focused.
+/// A whole profile file: the tabs it defines, which one starts focused, and
+/// whether the first client to attach starts in locked input mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProfileTemplate {
     /// The tabs in file order. Never empty: a profile without tabs is a
@@ -35,6 +36,11 @@ pub struct ProfileTemplate {
     pub tabs: Vec<TabTemplate>,
     /// Index into `tabs` of the tab selected when the profile opens.
     pub focused_tab: usize,
+    /// True when the file carries the `lock` marker. The session this
+    /// template seeds starts its first client in
+    /// [`LockMode::Locked`](koshi_core::lock::LockMode::Locked), and no
+    /// client after that one.
+    pub locked: bool,
 }
 
 /// One tab's pane arrangement and its initial focus.

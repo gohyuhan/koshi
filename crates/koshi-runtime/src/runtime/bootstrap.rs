@@ -15,6 +15,7 @@ use std::time::SystemTime;
 
 use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
+use koshi_core::lock::LockMode;
 use koshi_core::naming::{generate_name, NameKind};
 use koshi_core::process::{KillPolicy, PtySize, ShellKind, SpawnSpec};
 use koshi_layout::template::{LeafTemplate, ProfileTemplate, TemplateError, TerminalTemplate};
@@ -256,6 +257,7 @@ impl Server {
         let focused_tab = template.focused_tab.min(plans.len().saturating_sub(1));
         let focused_tab_id = plans[focused_tab].tab_id;
         let mut session = Session::new(session_id, session_name, now, ClientRegistry::new());
+        session.start_locked = template.locked;
         attach_first_client(&mut session, client_id, viewport, focused_tab_id, now);
 
         // Commit each tab; only the focused one moves the client onto it.
@@ -302,6 +304,12 @@ impl Server {
 ///
 /// The client is recorded with no pane area report; its pane area resolves to
 /// the viewport minus two rows.
+///
+/// The client takes the session's starting lock: a session seeded from a
+/// profile carrying `lock` attaches it in
+/// [`LockMode::Locked`](koshi_core::lock::LockMode::Locked), and the flag is
+/// spent, so no later attach is locked. Emits no event; the first frame this
+/// client is painted into carries the mode.
 fn attach_first_client(
     session: &mut Session,
     client_id: Option<ClientId>,
@@ -314,7 +322,7 @@ fn attach_first_client(
     };
     // The session holds no other client, so no existing label can collide.
     let client_label = generate_name(NameKind::Client, |_| false);
-    session.attach_client(Client::new(
+    let mut client = Client::new(
         client_id,
         session.id,
         now,
@@ -324,7 +332,11 @@ fn attach_first_client(
         ClientOrigin::Local,
         client_label,
         0,
-    ));
+    );
+    if session.take_start_lock() {
+        client.update_lock_mode(LockMode::Locked);
+    }
+    session.attach_client(client);
 }
 
 /// One tab's fully-planned genesis: the ids, tree, and specs its panes need.

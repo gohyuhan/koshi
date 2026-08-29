@@ -232,6 +232,70 @@ fn remove_focus_mru_on_an_empty_history_is_a_noop() {
 }
 
 #[test]
+fn the_starting_lock_is_taken_once() {
+    let mut session = Session::new(
+        SessionId::new(),
+        "work".to_owned(),
+        SystemTime::UNIX_EPOCH,
+        ClientRegistry::new(),
+    );
+    session.start_locked = true;
+
+    assert!(session.take_start_lock(), "the first read takes the lock");
+    assert!(!session.take_start_lock(), "the second read finds none");
+    assert!(!session.start_locked);
+}
+
+#[test]
+fn a_session_seeded_without_the_lock_marker_has_no_starting_lock() {
+    let mut session = Session::new(
+        SessionId::new(),
+        "work".to_owned(),
+        SystemTime::UNIX_EPOCH,
+        ClientRegistry::new(),
+    );
+
+    assert!(!session.take_start_lock());
+}
+
+#[test]
+fn the_starting_lock_survives_a_serde_round_trip() {
+    let mut session = Session::new(
+        SessionId::new(),
+        "work".to_owned(),
+        SystemTime::UNIX_EPOCH,
+        ClientRegistry::new(),
+    );
+    session.start_locked = true;
+
+    let json = serde_json::to_string(&session).expect("serialize");
+    let restored: Session = serde_json::from_str(&json).expect("deserialize");
+
+    assert!(
+        restored.start_locked,
+        "a session server that restarts before any client attaches still locks the first one"
+    );
+}
+
+#[test]
+fn the_starting_lock_is_stored_as_a_plain_json_bool() {
+    // A session written by one build has to load in the next, so the key and
+    // its shape on disk are a file format. A round-trip test cannot see this:
+    // it reads back whatever it wrote.
+    let mut session = Session::new(
+        SessionId::new(),
+        "work".to_owned(),
+        SystemTime::UNIX_EPOCH,
+        ClientRegistry::new(),
+    );
+    session.start_locked = true;
+
+    let value = serde_json::to_value(&session).expect("serialize");
+
+    assert_eq!(value["start_locked"], serde_json::Value::Bool(true));
+}
+
+#[test]
 fn a_tab_survives_a_serde_round_trip() {
     let root = PaneId::new();
     let mut tab = Tab::new(TabId::new(), "code".to_owned(), 2, root);

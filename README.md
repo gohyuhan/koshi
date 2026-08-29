@@ -77,7 +77,7 @@ from the same machine or another one, and the panes are where you left them.
 - 🧾 **Terminal support** — true color, text styles, alternate screens, CJK, emoji, and box drawing.
 - 🎨 **Themes** — use the built-in colors or copy one of 25 included themes.
 - ⚙️ **Config files** — keep app settings, themes, keybindings, and layouts separate.
-- 💾 **Saved layouts** — start tabs, panes, commands, directories, and environment values from a profile.
+- 💾 **Saved layouts** — start tabs, panes, commands, directories, environment values, and locked input from a profile.
 - 🪵 **Logging** — write optional per-session text or JSON logs without terminal content.
 - 🌐 **Remote sessions** — attach to a session on another machine over TLS, with a pinned certificate and an access token.
 - 🔑 **Access tokens** — grant, revoke, and list the tokens that reach your sessions; each grant covers one session or every session.
@@ -291,7 +291,7 @@ Koshi uses four optional KDL file types. Each present file must declare
 | `koshi.kdl` | Theme, pane, scrollback, layout, mouse, copy, terminal, logging, update, beta-feature, session-closing, other-user access, and remote access settings |
 | `themes/<name>.kdl` | Koshi interface colors |
 | `keybinding.kdl` | Keybindings and input modes |
-| `profile/<name>.kdl` | Tabs, pane layouts, commands, directories, and environment values |
+| `profile/<name>.kdl` | Tabs, pane layouts, commands, directories, environment values, and the starting input mode |
 
 Config directories:
 

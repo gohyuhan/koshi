@@ -133,7 +133,8 @@ pub struct PluginRuntimeHandle;
 /// Anything one client may see differently from another — focus, viewport,
 /// input mode — lives on that client's entry in [`ClientRegistry`], never
 /// as a session-global field: two attached clients must be able to look at
-/// different tabs and panes at the same time.
+/// different tabs and panes at the same time. `start_locked` is the mode the
+/// session hands the first client to attach, not a mode the session is in.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Session {
     /// Unique id, stable for the session's whole life.
@@ -159,6 +160,14 @@ pub struct Session {
     /// one reads back as `None`.
     #[serde(skip)]
     pub plugin_runtime_ref: Option<PluginRuntimeHandle>,
+    /// True while the next client to attach must start in
+    /// [`LockMode::Locked`](koshi_core::lock::LockMode::Locked). A profile
+    /// carrying the `lock` marker sets it; [`Session::take_start_lock`] reads
+    /// it and clears it, so exactly one attach is locked. A session seeded
+    /// without that marker holds `false` and locks nobody. Absent from a
+    /// stored session, it reads back `false`.
+    #[serde(default)]
+    pub start_locked: bool,
 
     lifecycle: SessionLifecycle,
 }
@@ -183,8 +192,19 @@ impl Session {
             clients: client_registry,
             config_snapshot: SessionConfig,
             plugin_runtime_ref: None,
+            start_locked: false,
             lifecycle: SessionLifecycle::Starting,
         }
+    }
+
+    /// Whether this attach must start in
+    /// [`LockMode::Locked`](koshi_core::lock::LockMode::Locked), clearing the
+    /// flag as it reads it.
+    ///
+    /// Reads [`start_locked`](Self::start_locked) and clears it in one step,
+    /// so it returns `true` at most once per session.
+    pub fn take_start_lock(&mut self) -> bool {
+        std::mem::take(&mut self.start_locked)
     }
 
     /// The session's current lifecycle state.

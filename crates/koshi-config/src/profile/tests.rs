@@ -66,6 +66,7 @@ fn minimal_profile_is_one_shell_tab() {
                 focused_leaf: 0,
             }],
             focused_tab: 0,
+            locked: false,
         }
     );
 }
@@ -187,6 +188,7 @@ tab {
             focused_leaf: 0,
         }],
         focused_tab: 0,
+        locked: false,
     };
     assert_eq!(template, expected);
 }
@@ -402,6 +404,24 @@ tab {
         TemplateNode::Leaf(LeafTemplate::Plugin(PluginTemplate { name }))
             if name == "session-manager"
     ));
+}
+
+#[test]
+fn lock_marker_sets_the_starting_lock() {
+    let template = parse("version 1\nlock\ntab { pane }").unwrap();
+    assert!(template.locked);
+}
+
+#[test]
+fn the_lock_marker_is_read_before_version_too() {
+    let template = parse("lock\nversion 1\ntab { pane }").unwrap();
+    assert!(template.locked);
+}
+
+#[test]
+fn a_profile_without_the_lock_marker_starts_unlocked() {
+    let template = parse("version 1\ntab { pane }").unwrap();
+    assert!(!template.locked);
 }
 
 // -------------------------------------------------------------- invalid files
@@ -1098,5 +1118,40 @@ tab { stack { pane } }
              `stack`",
             "`stack` needs at least two members",
         ]
+    );
+}
+
+#[test]
+fn lock_with_a_value_is_reported() {
+    assert_eq!(
+        messages("version 1\nlock #true\ntab { pane }"),
+        ["`lock` is a bare marker and takes no values or children"]
+    );
+}
+
+#[test]
+fn lock_with_children_is_reported() {
+    assert_eq!(
+        messages("version 1\nlock { pane }\ntab { pane }"),
+        ["`lock` is a bare marker and takes no values or children"]
+    );
+}
+
+#[test]
+fn a_malformed_second_lock_reports_its_shape_and_the_duplicate() {
+    assert_eq!(
+        messages("version 1\nlock\nlock #true\ntab { pane }"),
+        [
+            "`lock` is a bare marker and takes no values or children",
+            "`lock` is declared more than once",
+        ]
+    );
+}
+
+#[test]
+fn a_second_lock_marker_is_reported() {
+    assert_eq!(
+        messages("version 1\nlock\nlock\ntab { pane }"),
+        ["`lock` is declared more than once"]
     );
 }

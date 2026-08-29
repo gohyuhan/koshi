@@ -10,7 +10,8 @@
 //! (`size` cells or `"N%"`, `weight`, `min`, `preferred`) is valid only on
 //! children of `horizontal`/`vertical`; `expanded` marks a stack's one
 //! expanded member; `focus` marks the starting pane (one per tab) and, as a
-//! direct `tab` child, the starting tab.
+//! direct `tab` child, the starting tab. A bare top-level `lock` node starts
+//! the session's first client in locked input mode.
 //!
 //! Validation is all-or-nothing per file: every problem is collected as a
 //! span-tagged [`ProfileDiagnostic`] and a file with any problem yields no
@@ -200,12 +201,14 @@ impl Walker<'_> {
         });
     }
 
-    /// Parses the whole document: a `version` node plus one or more `tab`
-    /// nodes. Returns `None` when the file has no usable tab list.
+    /// Parses the whole document: a `version` node, one or more `tab` nodes,
+    /// and an optional bare `lock` marker. Returns `None` when the file has no
+    /// usable tab list.
     fn document(&mut self, doc: &KdlDocument) -> Option<ProfileTemplate> {
         let mut version_seen = false;
         let mut tabs = Vec::new();
         let mut focused_tab: Option<(usize, SourceSpan)> = None;
+        let mut locked = false;
         for node in doc.nodes() {
             match node.name().value() {
                 "version" => {
@@ -230,7 +233,17 @@ impl Walker<'_> {
                         }
                     }
                 }
-                other => self.error(node.span(), unknown_key(other, &["version", "tab"])),
+                "lock" => {
+                    let is_bare = self.marker(node, "lock");
+                    if locked {
+                        self.error(node.span(), "`lock` is declared more than once");
+                    } else if is_bare {
+                        locked = true;
+                    }
+                }
+                other => {
+                    self.error(node.span(), unknown_key(other, &["version", "tab", "lock"]));
+                }
             }
         }
         if !version_seen {
@@ -243,6 +256,7 @@ impl Walker<'_> {
         Some(ProfileTemplate {
             tabs,
             focused_tab: focused_tab.map_or(0, |(index, _)| index),
+            locked,
         })
     }
 

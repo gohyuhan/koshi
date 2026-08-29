@@ -215,6 +215,12 @@ impl Server {
     /// `C-<adjective>-<noun>` label that no client in the session already
     /// holds, and the lowest palette index no attached client is painted in.
     ///
+    /// A fresh id also takes the session's starting lock: a session seeded from
+    /// a profile carrying `lock` registers its first client in
+    /// [`LockMode::Locked`] and emits [`Event::InputModeChanged`] for it. The
+    /// flag is spent by that attach, so every client after it starts in
+    /// [`LockMode::Normal`].
+    ///
     /// `remote` names where the connection carrying this attach came from. It
     /// is recorded as the client's [`ClientOrigin`]: [`ClientOrigin::Remote`]
     /// when true, [`ClientOrigin::Local`] otherwise. A re-attach overwrites the
@@ -317,7 +323,7 @@ impl Server {
                 })
                 // Every palette index is in use, so this client shares one.
                 .unwrap_or(0);
-            session.attach_client(Client::new(
+            let mut client = Client::new(
                 client_id,
                 session_id,
                 attached_at,
@@ -327,7 +333,17 @@ impl Server {
                 origin,
                 label,
                 colour,
-            ));
+            );
+            // A profile carrying `lock` hands its starting mode to the first
+            // client that attaches, and the flag is spent there.
+            if session.take_start_lock() {
+                client.update_lock_mode(LockMode::Locked);
+                events.push(Event::InputModeChanged(InputModeChanged {
+                    client_id,
+                    mode: InputMode::Locked,
+                }));
+            }
+            session.attach_client(client);
             None
         };
 
