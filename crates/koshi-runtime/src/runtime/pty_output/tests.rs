@@ -1,21 +1,24 @@
 //! Tests for PTY output handling: bytes reach only the owning pane's engine,
-//! a decode carries across chunks, output schedules a render, device-query
-//! replies are written back to the pane's PTY, and bytes for a pane with no
-//! engine are dropped.
+//! a decode carries across chunks, output schedules a render, shell-integration
+//! markers publish command lifecycle events, device-query replies are written
+//! back to the pane's PTY, and bytes for a pane with no engine are dropped.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
 use std::time::Instant;
 
+use koshi_core::event::{Event, PaneCommandFinished, PaneCommandStarted};
+use koshi_core::ids::ClientId;
 use koshi_core::process::{PtySize, ShellKind, SpawnSpec};
 use koshi_pty::backend::state::PtyBackend;
+use koshi_renderer::snapshot::Delivery;
 use koshi_terminal::engine::TerminalEngine;
 use koshi_terminal::style::{Color, Style};
 use koshi_test_support::fake_pty::FakePtyBackend;
 
 use crate::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
-use crate::runtime::event::RuntimeEvent;
+use crate::runtime::{bus::EventFilter, event::RuntimeEvent};
 
 use super::*;
 
@@ -128,6 +131,94 @@ fn output_schedules_a_render() {
     // PtyOutput was marked pending and nothing has rendered yet, so a render
     // is due immediately.
     assert!(rt.render_scheduler.poll(Instant::now()));
+}
+
+#[test]
+fn shell_markers_publish_command_events_in_order() {
+    let (mut rt, _fake, _tx) = new_runtime();
+    let pane = add_engine(&mut rt);
+    let deliveries = rt.subscribe(ClientId::new(), EventFilter::All);
+
+    rt.handle_pty_output(pane, b"\x1b]133;C\x07\x1b]133;D;137\x07");
+
+    assert_eq!(
+        deliveries.try_iter().collect::<Vec<_>>(),
+        vec![
+            Delivery::Event(Event::PaneCommandStarted(PaneCommandStarted {
+                pane_id: pane,
+            })),
+            Delivery::Event(Event::PaneCommandFinished(PaneCommandFinished {
+                pane_id: pane,
+                exit_code: Some(137),
+            })),
+        ]
+    );
+}
+
+#[test]
+fn duplicate_shell_starts_publish_one_command_pair() {
+    let (mut rt, _fake, _tx) = new_runtime();
+    let pane = add_engine(&mut rt);
+    let deliveries = rt.subscribe(ClientId::new(), EventFilter::All);
+
+    rt.handle_pty_output(pane, b"\x1b]133;C\x07\x1b]133;C\x07\x1b]133;D;0\x07");
+
+    assert_eq!(
+        deliveries.try_iter().collect::<Vec<_>>(),
+        vec![
+            Delivery::Event(Event::PaneCommandStarted(PaneCommandStarted {
+                pane_id: pane,
+            })),
+            Delivery::Event(Event::PaneCommandFinished(PaneCommandFinished {
+                pane_id: pane,
+                exit_code: Some(0),
+            })),
+        ]
+    );
+}
+
+#[test]
+fn an_unmatched_finish_and_plain_output_publish_no_command_events() {
+    let (mut rt, _fake, _tx) = new_runtime();
+    let pane = add_engine(&mut rt);
+    let deliveries = rt.subscribe(ClientId::new(), EventFilter::All);
+
+    rt.handle_pty_output(pane, b"\x1b]133;D;1\x07plain output");
+
+    assert!(deliveries.try_iter().next().is_none());
+}
+
+#[test]
+fn command_lifecycle_state_is_independent_per_pane() {
+    let (mut rt, _fake, _tx) = new_runtime();
+    let first = add_engine(&mut rt);
+    let second = add_engine(&mut rt);
+    let deliveries = rt.subscribe(ClientId::new(), EventFilter::All);
+
+    rt.handle_pty_output(first, b"\x1b]133;C\x07");
+    rt.handle_pty_output(second, b"\x1b]133;C\x07");
+    rt.handle_pty_output(first, b"\x1b]133;D;0\x07");
+    rt.handle_pty_output(second, b"\x1b]133;D\x07");
+
+    assert_eq!(
+        deliveries.try_iter().collect::<Vec<_>>(),
+        vec![
+            Delivery::Event(Event::PaneCommandStarted(PaneCommandStarted {
+                pane_id: first,
+            })),
+            Delivery::Event(Event::PaneCommandStarted(PaneCommandStarted {
+                pane_id: second,
+            })),
+            Delivery::Event(Event::PaneCommandFinished(PaneCommandFinished {
+                pane_id: first,
+                exit_code: Some(0),
+            })),
+            Delivery::Event(Event::PaneCommandFinished(PaneCommandFinished {
+                pane_id: second,
+                exit_code: None,
+            })),
+        ]
+    );
 }
 
 #[test]

@@ -16,7 +16,8 @@ fn test_addr(tag: &str) -> String {
     let unique = format!("koshi-ipc-{}-{tag}", std::process::id());
     #[cfg(unix)]
     {
-        std::env::temp_dir()
+        // Unix socket addresses have a bounded path length.
+        std::path::Path::new("/tmp")
             .join(unique)
             .with_extension("sock")
             .to_string_lossy()

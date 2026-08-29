@@ -124,7 +124,8 @@ impl TerminalEngine {
     }
 
     /// Feed one chunk through the parser and return device replies plus the
-    /// shell-integration facts that the chunk produced. A `C` marker returns
+    /// shell-integration facts that the chunk produced. A `C` marker when the
+    /// shell is not already running a command returns
     /// [`ShellIntegrationFact::CommandStarted`], and a matched `D` marker
     /// returns [`ShellIntegrationFact::CommandFinished`] with its exit code.
     /// The facts contain no command text. `ESC ] 133 ; C` followed by
