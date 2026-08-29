@@ -1,6 +1,7 @@
 //! The `koshi` binary entrypoint.
 
 use std::process::ExitCode;
+use std::time::{Duration, SystemTime};
 
 use clap::Parser;
 use koshi::cli::{
@@ -501,6 +502,11 @@ fn run_debug(command: &DebugCommand) -> Result<(), CliError> {
     match command {
         DebugCommand::DumpState { format } => run_dump_state(*format),
         DebugCommand::DumpLayout { tab, format } => run_dump_layout(tab.as_ref(), *format),
+        DebugCommand::Events {
+            since,
+            filter,
+            format,
+        } => run_debug_events(*since, filter.as_deref(), *format),
     }
 }
 
@@ -547,6 +553,46 @@ fn run_dump_layout(tab: Option<&TabRef>, format: FormatArg) -> Result<(), CliErr
             .collect::<Result<Vec<_>, CliError>>()?,
     };
     print!("{}", output::render_layouts(&layouts, format));
+
+    match found.incomplete_listing() {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// Serve a `koshi debug events` from live state: find the sessions in scope,
+/// ask each for its recent events, narrow them, and print them.
+///
+/// `since` keeps the events recorded within that much of now, and keeps every
+/// event when it reaches back further than the clock can represent. `filter`
+/// keeps the events whose name contains that text, matched ignoring case. Both
+/// absent keeps every event the session remembers.
+///
+/// A session that refuses the request fails the command before anything
+/// prints; a session that was listening but could not be probed fails it after
+/// everything prints.
+fn run_debug_events(
+    since: Option<Duration>,
+    filter: Option<&str>,
+    format: FormatArg,
+) -> Result<(), CliError> {
+    let runtime_dir = ipc_client::runtime_dir()?;
+    let found = targeting::scope_sessions(&runtime_dir, None)?;
+    let oldest_kept = output::oldest_kept(SystemTime::now(), since);
+
+    let sessions = found
+        .sessions
+        .iter()
+        .map(|overview| {
+            let events = ipc_client::fetch_recent_events(&runtime_dir, overview.session.id)?;
+            Ok(output::SessionEvents {
+                session: overview.session.id,
+                name: overview.session.name.clone(),
+                events: output::narrow(events, oldest_kept, filter),
+            })
+        })
+        .collect::<Result<Vec<_>, CliError>>()?;
+    print!("{}", output::render_recent_events(&sessions, format));
 
     match found.incomplete_listing() {
         Some(error) => Err(error),

@@ -436,6 +436,7 @@ the machine connecting to it.
 |---|---|
 | `koshi debug dump-state [--format table\|json]` | Print every running session's sessions, tabs, panes, and clients |
 | `koshi debug dump-layout [--tab <NAME_OR_ID>] [--format table\|json]` | Print each tab's split tree, solved rectangles, and per-client focus |
+| `koshi debug events [--since <LENGTH>] [--filter <NAME>] [--format table\|json]` | Print the events each running session published most recently, oldest first |
 
 ### Versions and updating
 

@@ -356,7 +356,9 @@ fn variant_name<T: std::fmt::Debug>(value: &T) -> String {
 }
 
 /// One instance per top-level `Event` variant, its canonical name, and class.
-fn event_cases() -> [(Event, &'static str, EventClass); 38] {
+/// The array's length forces every variant to appear, so a reader of this list
+/// sees the whole enum.
+pub(crate) fn event_cases() -> [(Event, &'static str, EventClass); 38] {
     [
         (
             Event::PaneCreated(PaneCreated {

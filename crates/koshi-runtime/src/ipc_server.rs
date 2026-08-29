@@ -71,6 +71,7 @@ use koshi_ipc::validate::{
     reclaim_stale_socket, validate_shared_socket_addr, validate_socket_addr,
 };
 use koshi_ipc::wire::MaybeKnown;
+use koshi_observability::logging::recent_events;
 use koshi_renderer::snapshot::Delivery;
 
 use crate::runtime::bus::wire_event;
@@ -748,6 +749,10 @@ fn serve_connection(
                     Some(None) | None => return,
                 }
             }
+            IpcRequestKind::RecentEvents => IpcResponse {
+                request_id,
+                result: IpcResult::RecentEvents(recent_events::recent()),
+            },
             IpcRequestKind::Restart => {
                 let answer = ask_dispatcher(&served.intake, inbox_tx, |reply| {
                     RuntimeEvent::IpcRestart { reply }
@@ -949,6 +954,7 @@ fn stream_events(
             | IpcRequestKind::Attach { .. }
             | IpcRequestKind::Discovery
             | IpcRequestKind::Layout { .. }
+            | IpcRequestKind::RecentEvents
             | IpcRequestKind::Restart => break,
         };
         if !served.intake.hand_over(inbox_tx, event) {

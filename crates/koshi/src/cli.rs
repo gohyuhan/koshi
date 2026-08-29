@@ -185,6 +185,27 @@ pub enum Expiry {
     Never,
 }
 
+/// Parse a length argument: a decimal count followed by one unit character —
+/// `s` seconds, `m` minutes, `h` hours, `d` days. `30s` is thirty seconds.
+///
+/// `expected` is reported for every value this cannot read: an empty value, a
+/// unit character that is none of the four, a count that is not a whole
+/// number, and a count times its unit that overflows `u64` seconds.
+fn parse_length(value: &str, expected: &'static str) -> Result<Duration, String> {
+    let mut characters = value.chars();
+    let unit = characters.next_back().ok_or(expected)?;
+    let unit_seconds: u64 = match unit {
+        's' => 1,
+        'm' => 60,
+        'h' => 3600,
+        'd' => 86400,
+        _ => return Err(expected.to_string()),
+    };
+    let count: u64 = characters.as_str().parse().map_err(|_| expected)?;
+    let seconds = count.checked_mul(unit_seconds).ok_or(expected)?;
+    Ok(Duration::from_secs(seconds))
+}
+
 /// Parse an expiry argument: the word `never`, or a decimal count followed by
 /// one unit character — `s` seconds, `m` minutes, `h` hours, `d` days.
 ///
@@ -195,18 +216,24 @@ pub fn parse_expiry(value: &str) -> Result<Expiry, String> {
     if value == "never" {
         return Ok(Expiry::Never);
     }
-    let mut characters = value.chars();
-    let unit = characters.next_back().ok_or(EXPECTED)?;
-    let unit_seconds: u64 = match unit {
-        's' => 1,
-        'm' => 60,
-        'h' => 3600,
-        'd' => 86400,
-        _ => return Err(EXPECTED.to_string()),
-    };
-    let count: u64 = characters.as_str().parse().map_err(|_| EXPECTED)?;
-    let seconds = count.checked_mul(unit_seconds).ok_or(EXPECTED)?;
-    Ok(Expiry::After(Duration::from_secs(seconds)))
+    Ok(Expiry::After(parse_length(value, EXPECTED)?))
+}
+
+/// Parse a `--since` flag value: a decimal count followed by one unit
+/// character — `s` seconds, `m` minutes, `h` hours, `d` days. Every value this
+/// cannot read is `Err("expected a length such as 30s, 15m, 24h or 7d")`.
+fn parse_since(value: &str) -> Result<Duration, String> {
+    parse_length(value, "expected a length such as 30s, 15m, 24h or 7d")
+}
+
+/// Parse a `--filter` flag value: any text an event name may contain. An empty
+/// value is `Err("expected part of an event name, such as pane or TabMoved")`,
+/// since every name contains the empty string.
+fn parse_event_filter(value: &str) -> Result<String, String> {
+    if value.is_empty() {
+        return Err("expected part of an event name, such as pane or TabMoved".to_string());
+    }
+    Ok(value.to_string())
 }
 
 /// Parse a `--tab` flag value: an id when the value reads as one, else a
@@ -769,6 +796,22 @@ pub enum DebugCommand {
         /// Narrow the answer to one tab, by id or name.
         #[arg(long, value_parser = parse_tab_ref, value_name = "TAB")]
         tab: Option<TabRef>,
+        /// Output format.
+        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
+        format: FormatArg,
+    },
+    /// Print the events each running session published most recently, oldest
+    /// first. Each line names the event and the ids it named, never any
+    /// content it carried.
+    Events {
+        /// Keep only the events recorded within this much of now, e.g. `30s`,
+        /// `5m`, `2h`, `7d`.
+        #[arg(long, value_parser = parse_since, value_name = "LENGTH")]
+        since: Option<Duration>,
+        /// Keep only the events whose name contains this text, matched
+        /// ignoring case, e.g. `pane` or `TabMoved`.
+        #[arg(long, value_parser = parse_event_filter, value_name = "NAME")]
+        filter: Option<String>,
         /// Output format.
         #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
         format: FormatArg,

@@ -8,13 +8,16 @@
 //! fails partway leaves no events behind.
 //!
 //! Sealing is also where each event becomes a log line, via
-//! [`koshi_observability::logging::event_log::log_event`], and where the batch
+//! [`koshi_observability::logging::event_log::log_event`], where it is added to
+//! the recent-events ring, via
+//! [`koshi_observability::logging::recent_events::record`], and where the batch
 //! is delivered to subscribers over the [`EventBus`]. Every committed event
-//! passes through here; an uncommitted scope logs nothing and delivers
-//! nothing.
+//! passes through here; an uncommitted scope logs nothing, records nothing and
+//! delivers nothing.
 
 use koshi_core::{command::CommandResult, event::Event, ids::CommandId};
 use koshi_observability::logging::event_log::log_event;
+use koshi_observability::logging::recent_events;
 
 use crate::runtime::bus::EventBus;
 
@@ -46,9 +49,9 @@ impl TransactionScope {
     }
 
     /// Consume the scope and seal its batch: write each buffered event to the
-    /// log, deliver it to every subscriber on `bus`, and report the same
-    /// ordered events as an applied [`CommandResult::Ok`] keyed to
-    /// `command_id`.
+    /// log and the recent-events ring, deliver it to every subscriber on
+    /// `bus`, and report the same ordered events as an applied
+    /// [`CommandResult::Ok`] keyed to `command_id`.
     #[must_use]
     pub(crate) fn commit(self, command_id: CommandId, bus: &mut EventBus) -> CommandResult {
         let emitted_events = self
@@ -56,6 +59,7 @@ impl TransactionScope {
             .into_iter()
             .inspect(|event| {
                 log_event(event);
+                recent_events::record(event);
                 bus.publish(event);
             })
             .collect();

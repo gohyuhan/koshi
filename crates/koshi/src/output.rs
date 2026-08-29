@@ -1,7 +1,7 @@
 //! Rendering for CLI answers: created ids from applied commands, discovery
 //! (`list-*`, `inspect`), action introspection (`actions list`, `actions
 //! explain`), keymap introspection (the `keys` queries), the `debug`
-//! dumps, the two version answers (`version`, `server-version`), the three
+//! dumps and the `debug events` listing, the two version answers (`version`, `server-version`), the three
 //! `share` answers, the three `remote` answers, and the `doctor` answer.
 //! Read-only queries print as aligned columns (`--format table`, the default)
 //! or JSON (`--format json`).
@@ -9,7 +9,8 @@
 //! List queries render every item as one table row; `inspect`, `actions
 //! explain`, and `keys describe` render a single item as `field: value`
 //! lines; `debug dump-state` renders one named table per record kind; `debug
-//! dump-layout` renders an indented tree, two spaces per level. `version`
+//! dump-layout` renders an indented tree, two spaces per level; `debug events`
+//! renders one table row per remembered event. `version`
 //! prints the one line `--version` prints, and `server-version` renders one
 //! table row per koshi server. `share list` renders one table row per grant
 //! and `remote list` one per saved server; `share grant`, `share revoke`,
@@ -101,6 +102,7 @@ mod actions;
 mod command;
 mod doctor;
 mod entities;
+mod events;
 mod keys;
 mod layout;
 mod remote;
@@ -111,6 +113,7 @@ pub use actions::*;
 pub use command::*;
 pub use doctor::*;
 pub use entities::*;
+pub use events::*;
 pub use keys::*;
 pub use layout::*;
 pub use remote::*;

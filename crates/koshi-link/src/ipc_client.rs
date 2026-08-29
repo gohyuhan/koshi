@@ -23,6 +23,7 @@ use koshi_core::command::{Command, CommandEnvelope, CommandResult, CommandSource
 use koshi_core::discovery::SessionOverview;
 use koshi_core::event::RejectReason;
 use koshi_core::ids::{ClientId, CommandId, SessionId, TabId};
+use koshi_core::recent_event::RecentEvent;
 use koshi_ipc::endpoint::{shared_socket_addr, EndpointFile, RESUME_SUFFIX};
 use koshi_ipc::error::IpcError;
 use koshi_ipc::layout::SessionLayout;
@@ -247,6 +248,40 @@ pub fn fetch_layout(
                 detail: "this session was started by an older koshi that cannot report its \
                          layout; restart the session to use `debug dump-layout`, or run \
                          `koshi debug dump-state`, which this session does answer"
+                    .to_string(),
+            })
+        }
+        IpcResult::Error(refusal) => Err(refused(&refusal)),
+        other => Err(talk::SESSION.unexpected_reply(&other)),
+    }
+}
+
+/// Ask `session_id` for the events it published most recently, oldest first.
+///
+/// A session with no such request kind answers `UnsupportedKind`, and a
+/// session that cannot read the bytes answers `MalformedRequest`; both become
+/// a [`CliError::IpcUnavailable`] naming what to do instead. Every other
+/// refusal carries its own message through.
+pub fn fetch_recent_events(
+    runtime_dir: &Path,
+    session_id: SessionId,
+) -> Result<Vec<RecentEvent>, CliError> {
+    let endpoint = read_endpoint(runtime_dir, session_id)?;
+    let request = IpcRequest {
+        request_id: 2,
+        kind: IpcRequestKind::RecentEvents,
+    };
+    match exchange(&endpoint, session_id, request, None)? {
+        IpcResult::RecentEvents(events) => Ok(events),
+        IpcResult::Error(refusal)
+            if matches!(
+                refusal.code,
+                IpcErrorCode::UnsupportedKind | IpcErrorCode::MalformedRequest
+            ) =>
+        {
+            Err(CliError::IpcUnavailable {
+                detail: "this session was started by an older koshi that keeps no recent-events \
+                         buffer; restart the session to use `debug events`"
                     .to_string(),
             })
         }

@@ -424,6 +424,7 @@ fn sample_request_kinds() -> Vec<IpcRequestKind> {
         ))),
         IpcRequestKind::Discovery,
         IpcRequestKind::Layout { tab: None },
+        IpcRequestKind::RecentEvents,
         IpcRequestKind::Restart,
         IpcRequestKind::Leaving,
     ]
@@ -464,6 +465,7 @@ fn sample_results() -> Vec<IpcResult> {
             tabs: Vec::new(),
             clients: Vec::new(),
         }),
+        IpcResult::RecentEvents(Vec::new()),
         IpcResult::Restarting,
         IpcResult::Error(crate::protocol::IpcErrorPayload {
             code: crate::protocol::IpcErrorCode::BadToken,

@@ -164,3 +164,36 @@ fn two_scopes_commit_independently_with_no_shared_state() {
         _ => panic!("commit must apply, never reject"),
     }
 }
+
+#[test]
+fn commit_remembers_the_batch_in_the_recent_events_ring() {
+    let command_id = CommandId::new();
+    let tab = TabId::new();
+    let mut bus = EventBus::new();
+    let mut scope = TransactionScope::new();
+    scope.emit(Event::TabCreated(TabCreated { tab_id: tab }));
+    scope.emit(Event::LayoutChanged(LayoutChanged { tab_id: tab }));
+
+    let _ = scope.commit(command_id, &mut bus);
+
+    // The ring is process-wide and every test in this binary writes to it, so
+    // the two records are found by this tab's own id rather than by position.
+    let names: Vec<String> = recent_events::recent()
+        .iter()
+        .filter(|event| event.tab == Some(tab))
+        .map(|event| event.name.to_string())
+        .collect();
+    assert_eq!(names, ["TabCreated", "LayoutChanged"]);
+}
+
+#[test]
+fn an_uncommitted_scope_remembers_nothing() {
+    let tab = TabId::new();
+    let mut scope = TransactionScope::new();
+    scope.emit(Event::TabCreated(TabCreated { tab_id: tab }));
+    drop(scope);
+
+    assert!(recent_events::recent()
+        .iter()
+        .all(|event| event.tab != Some(tab)));
+}
