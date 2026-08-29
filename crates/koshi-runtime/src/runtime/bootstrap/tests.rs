@@ -1,5 +1,6 @@
 //! Tests for profile genesis: a `--profile` template opening its tabs and
-//! panes, focusing the pane the profile marks, and refusing a plugin pane.
+//! panes, focusing the pane the profile marks, starting its first client
+//! locked, and refusing a plugin pane.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -8,8 +9,10 @@ use std::time::SystemTime;
 
 use koshi_config::layer::{PartialKoshiConfig, PartialLayoutDefaults};
 use koshi_config::profile::parse_profile;
+use koshi_core::event::{Event, InputMode, InputModeChanged};
 use koshi_core::geometry::{Direction, Size, SplitDirection};
 use koshi_core::ids::{ClientId, SessionId};
+use koshi_core::lock::LockMode;
 use koshi_layout::template::{ProfileTemplate, TemplateError};
 use koshi_layout::tree::LayoutNode;
 use koshi_pty::error::PtyError;
@@ -471,4 +474,193 @@ fn a_profile_focusing_a_tab_it_does_not_have_opens_on_its_last_tab() {
             .active_tab(),
         last,
     );
+}
+
+#[test]
+fn a_profile_with_the_lock_marker_starts_its_first_client_locked() {
+    let (mut rt, _fake) = runtime();
+    let tmpl = template("version 1\nlock\ntab { pane }");
+    let client = ClientId::new();
+    let () = rt
+        .bootstrap_profile(
+            SessionId::new(),
+            tmpl,
+            viewport(),
+            SystemTime::UNIX_EPOCH,
+            Some(client),
+        )
+        .expect("profile launches");
+
+    let session = rt.sessions.values().next().expect("one session");
+    assert_eq!(
+        session
+            .clients
+            .get(client)
+            .expect("the client attached")
+            .lock_mode(),
+        LockMode::Locked
+    );
+    assert!(
+        !session.start_locked,
+        "the first client spent the profile's starting lock"
+    );
+}
+
+#[test]
+fn a_profile_without_the_lock_marker_starts_its_first_client_unlocked() {
+    let (mut rt, _fake) = runtime();
+    let tmpl = template("version 1\ntab { pane }");
+    let client = ClientId::new();
+    let () = rt
+        .bootstrap_profile(
+            SessionId::new(),
+            tmpl,
+            viewport(),
+            SystemTime::UNIX_EPOCH,
+            Some(client),
+        )
+        .expect("profile launches");
+
+    let session = rt.sessions.values().next().expect("one session");
+    assert_eq!(
+        session
+            .clients
+            .get(client)
+            .expect("the client attached")
+            .lock_mode(),
+        LockMode::Normal
+    );
+}
+
+#[test]
+fn the_lock_marker_reaches_only_the_first_client_to_attach() {
+    let (mut rt, _fake) = runtime();
+    let tmpl = template("version 1\nlock\ntab { pane }");
+    let session_id = SessionId::new();
+    // The shape `koshi --profile` takes: the session server seeds the session
+    // with no client, and every client arrives later over the control socket.
+    let () = rt
+        .bootstrap_profile(session_id, tmpl, viewport(), SystemTime::UNIX_EPOCH, None)
+        .expect("profile launches");
+    let tab_id = *rt
+        .sessions
+        .get(&session_id)
+        .expect("the seeded session")
+        .tabs
+        .keys()
+        .next()
+        .expect("one tab");
+
+    let first = ClientId::new();
+    let events = rt.handle_client_attach(
+        session_id,
+        first,
+        viewport(),
+        None,
+        tab_id,
+        SystemTime::UNIX_EPOCH,
+        false,
+    );
+    assert_eq!(
+        rt.sessions
+            .get(&session_id)
+            .expect("the seeded session")
+            .clients
+            .get(first)
+            .expect("the first client attached")
+            .lock_mode(),
+        LockMode::Locked
+    );
+    assert_eq!(
+        mode_changes(&events),
+        vec![InputModeChanged {
+            client_id: first,
+            mode: InputMode::Locked,
+        }]
+    );
+
+    let second = ClientId::new();
+    let events = rt.handle_client_attach(
+        session_id,
+        second,
+        viewport(),
+        None,
+        tab_id,
+        SystemTime::UNIX_EPOCH,
+        false,
+    );
+    assert_eq!(
+        rt.sessions
+            .get(&session_id)
+            .expect("the seeded session")
+            .clients
+            .get(second)
+            .expect("the second client attached")
+            .lock_mode(),
+        LockMode::Normal
+    );
+    assert_eq!(mode_changes(&events), vec![]);
+}
+
+#[test]
+fn a_locked_client_reattaching_keeps_its_mode_and_takes_no_second_lock() {
+    let (mut rt, _fake) = runtime();
+    let tmpl = template("version 1\nlock\ntab { pane }");
+    let session_id = SessionId::new();
+    let () = rt
+        .bootstrap_profile(session_id, tmpl, viewport(), SystemTime::UNIX_EPOCH, None)
+        .expect("profile launches");
+    let tab_id = *rt
+        .sessions
+        .get(&session_id)
+        .expect("the seeded session")
+        .tabs
+        .keys()
+        .next()
+        .expect("one tab");
+
+    let client = ClientId::new();
+    let _first = rt.handle_client_attach(
+        session_id,
+        client,
+        viewport(),
+        None,
+        tab_id,
+        SystemTime::UNIX_EPOCH,
+        false,
+    );
+    // The same id arriving again is a re-attach: it updates the view in place
+    // and leaves the mode alone.
+    let events = rt.handle_client_attach(
+        session_id,
+        client,
+        viewport(),
+        None,
+        tab_id,
+        SystemTime::UNIX_EPOCH,
+        false,
+    );
+
+    assert_eq!(
+        rt.sessions
+            .get(&session_id)
+            .expect("the seeded session")
+            .clients
+            .get(client)
+            .expect("the client is still attached")
+            .lock_mode(),
+        LockMode::Locked
+    );
+    assert_eq!(mode_changes(&events), vec![]);
+}
+
+/// Every [`Event::InputModeChanged`] in `events`, in order.
+fn mode_changes(events: &[Event]) -> Vec<InputModeChanged> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::InputModeChanged(changed) => Some(*changed),
+            _ => None,
+        })
+        .collect()
 }
