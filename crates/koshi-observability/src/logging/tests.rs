@@ -120,6 +120,31 @@ fn tail_logs_reads_local_files_in_name_order_and_applies_since() {
 }
 
 #[test]
+fn tail_logs_since_keeps_pretty_record_continuation_lines() {
+    let dir = std::env::temp_dir().join(format!(
+        "koshi-tail-log-pretty-record-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create the log directory");
+    std::fs::write(
+        dir.join("koshi-log-pretty.log"),
+        "  1970-01-01T00:00:01.000000Z old\n    at old.rs:3\n  1970-01-01T00:01:00.000000Z kept\n    at kept.rs:4\n    on ThreadId(1)\n",
+    )
+    .expect("write the pretty records");
+
+    let rendered = tail_logs(&dir, Some(UNIX_EPOCH + Duration::from_secs(60)))
+        .expect("read the local log file");
+
+    assert_eq!(
+        rendered,
+        "== koshi-log-pretty.log ==\n  1970-01-01T00:01:00.000000Z kept\n    at kept.rs:4\n    on ThreadId(1)\n"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn tail_logs_returns_an_empty_answer_before_logging_creates_the_directory() {
     let dir = std::env::temp_dir().join(format!("koshi-tail-log-missing-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -158,6 +183,64 @@ fn tail_logs_keeps_only_the_bounded_tail_of_each_file() {
     assert!(
         rendered.contains("line 1000\n"),
         "the newest line was tailed"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn tail_logs_cap_starts_at_a_pretty_record_boundary() {
+    let dir =
+        std::env::temp_dir().join(format!("koshi-tail-log-record-cap-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create the log directory");
+    let mut contents = String::from("  1970-01-01T00:00:01.000000Z old\n    at old.rs:3\n");
+    for record in 0..999 {
+        contents.push_str(&format!("  1970-01-01T00:01:00.000000Z record {record}\n"));
+    }
+    std::fs::write(dir.join("koshi-log-pretty.log"), contents).expect("write the pretty records");
+
+    let rendered = tail_logs(&dir, None).expect("read the local log file");
+
+    assert_eq!(rendered.lines().count(), 1000);
+    assert!(!rendered.contains("old"), "the split record was dropped");
+    assert!(
+        rendered.contains("record 0\n"),
+        "the first complete record remains"
+    );
+    assert!(
+        rendered.contains("record 998\n"),
+        "the newest record remains"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn tail_logs_keeps_an_oversized_newest_record_whole() {
+    let dir = std::env::temp_dir().join(format!(
+        "koshi-tail-log-oversized-record-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create the log directory");
+    let mut contents = String::from("  1970-01-01T00:01:00.000000Z newest\n");
+    for line in 0..1000 {
+        contents.push_str(&format!("    continuation {line}\n"));
+    }
+    std::fs::write(dir.join("koshi-log-oversized.log"), contents)
+        .expect("write the oversized record");
+
+    let rendered = tail_logs(&dir, None).expect("read the local log file");
+
+    assert_eq!(rendered.lines().count(), 1002);
+    assert!(
+        rendered.contains("1970-01-01T00:01:00.000000Z newest\n"),
+        "the newest record header remains"
+    );
+    assert!(
+        rendered.contains("continuation 0\n") && rendered.contains("continuation 999\n"),
+        "the newest record stays complete"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

@@ -523,7 +523,7 @@ fn run_debug(command: &DebugCommand) -> Result<(), CliError> {
     }
 }
 
-/// Print the newest local log lines from every session log file.
+/// Print the newest local log records from every session log file.
 fn run_debug_tail_log(since: Option<Duration>) -> Result<(), CliError> {
     let directory = logging::log_dir().unwrap_or_else(|| PathBuf::from("logs"));
     let oldest_kept = output::oldest_kept(SystemTime::now(), since);

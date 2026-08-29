@@ -96,9 +96,9 @@ impl CrashReport {
         )
     }
 
-    /// Write the report to a unique `crash-<timestamp>.txt` file. The directory
-    /// and file are private to this user, and old reports are removed after the
-    /// complete file becomes visible.
+    /// Write the report to a unique crash-report file. The directory and file
+    /// are private to this user, and old reports are removed after the complete
+    /// file becomes visible.
     fn write(&self, dir: &Path) {
         if koshi_paths::ensure_private_dir(dir).is_err() {
             return;
@@ -107,6 +107,9 @@ impl CrashReport {
         if ensure_windows_private(dir).is_err() {
             return;
         }
+        let Ok(_lock) = lock_crash_reports(dir) else {
+            return;
+        };
 
         use std::io::Write as _;
         #[cfg(unix)]
@@ -146,7 +149,19 @@ impl CrashReport {
 
 const MAX_CRASH_REPORTS: usize = 10;
 static NEXT_REPORT_TEMPORARY_SUFFIX: AtomicU64 = AtomicU64::new(0);
-static NEXT_REPORT_COLLISION_SUFFIX: AtomicU64 = AtomicU64::new(0);
+
+/// Lock publication and retention for every process that shares `dir`.
+fn lock_crash_reports(dir: &Path) -> std::io::Result<std::fs::File> {
+    let path = dir.join(".crash-reports.lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)?;
+    lock.lock()?;
+    Ok(lock)
+}
 
 /// Reserve a hidden temporary file without replacing another report.
 fn open_temporary_report(dir: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
@@ -171,22 +186,24 @@ fn open_temporary_report(dir: &Path) -> std::io::Result<(PathBuf, std::fs::File)
 
 /// Publish a complete temporary report under a new crash-report name.
 fn publish_report(temporary_path: &Path, dir: &Path, timestamp: u64) -> Option<PathBuf> {
+    let (mut next_sequence, has_collision) = crash_report_state(dir, timestamp)?;
     for attempt in 0..100 {
-        let path = if attempt == 0 {
+        let use_plain_name = attempt == 0 && !has_collision;
+        let path = if use_plain_name {
             dir.join(format!("crash-{timestamp}.txt"))
         } else {
-            let suffix = NEXT_REPORT_COLLISION_SUFFIX.fetch_add(1, Ordering::Relaxed);
-            dir.join(format!(
-                "crash-{timestamp}-{}-{suffix}.txt",
-                std::process::id()
-            ))
+            let sequence = next_sequence;
+            next_sequence = sequence.checked_add(1)?;
+            dir.join(format!("crash-{timestamp}-{sequence}.txt"))
         };
         match std::fs::hard_link(temporary_path, &path) {
             Ok(()) => return Some(path),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                if let Ok(metadata) = std::fs::symlink_metadata(&path) {
-                    if !metadata.file_type().is_file() {
-                        return None;
+                if use_plain_name {
+                    if let Ok(metadata) = std::fs::symlink_metadata(&path) {
+                        if !metadata.file_type().is_file() {
+                            return None;
+                        }
                     }
                 }
             }
@@ -194,6 +211,29 @@ fn publish_report(temporary_path: &Path, dir: &Path, timestamp: u64) -> Option<P
         }
     }
     None
+}
+
+/// Read the next publication sequence and whether this timestamp has a collision.
+fn crash_report_state(dir: &Path, timestamp: u64) -> Option<(u128, bool)> {
+    let mut next_sequence = 1;
+    let mut has_collision = false;
+    for entry in std::fs::read_dir(dir).ok()? {
+        let entry = entry.ok()?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some((report_timestamp, sequence, collision)) = crash_report_name(name) else {
+            continue;
+        };
+        if report_timestamp == timestamp && collision {
+            has_collision = true;
+        }
+        if let Some(sequence) = sequence {
+            next_sequence = next_sequence.max(sequence.checked_add(1)?);
+        }
+    }
+    Some((next_sequence, has_collision))
 }
 
 /// Render the recent-event section without reading any event payload.
@@ -247,7 +287,7 @@ fn retain_crash_reports(dir: &Path) {
             .filter_map(|entry| {
                 let name = entry.file_name();
                 let name = name.to_str()?;
-                let timestamp = crash_report_timestamp(name)?;
+                let (timestamp, sequence, collision) = crash_report_name(name)?;
                 if !entry.file_type().ok()?.is_file() {
                     return None;
                 }
@@ -256,7 +296,23 @@ fn retain_crash_reports(dir: &Path) {
                     let _ = std::fs::remove_file(entry.path());
                     return None;
                 }
-                Some((timestamp, entry.path()))
+                let metadata = entry.metadata().ok();
+                let modified = metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.modified().ok())
+                    .unwrap_or(UNIX_EPOCH);
+                let created = metadata
+                    .and_then(|metadata| metadata.created().ok())
+                    .unwrap_or(UNIX_EPOCH);
+                // Modification time orders reports across timestamp names.
+                // Creation time resolves equal modification times.
+                let (kind, order) = match (sequence, collision) {
+                    (None, false) => (0, 0),
+                    (Some(sequence), _) => (1, sequence),
+                    (None, true) => (2, 0),
+                };
+                // Parsed name fields break remaining ties.
+                Some((timestamp, modified, created, kind, order, entry.path()))
             })
             .collect::<Vec<_>>();
         reports.sort();
@@ -264,7 +320,7 @@ fn retain_crash_reports(dir: &Path) {
         if reports.len() <= MAX_CRASH_REPORTS {
             return;
         }
-        let (_, path) = reports.remove(0);
+        let (_, _, _, _, _, path) = reports.remove(0);
         if let Err(error) = std::fs::remove_file(path) {
             if error.kind() != std::io::ErrorKind::NotFound {
                 return;
@@ -273,17 +329,18 @@ fn retain_crash_reports(dir: &Path) {
     }
 }
 
-/// Read the timestamp prefix from a normal or collision-suffixed report name.
-fn crash_report_timestamp(name: &str) -> Option<u64> {
+/// Read the timestamp and publication sequence from a crash-report name.
+fn crash_report_name(name: &str) -> Option<(u64, Option<u128>, bool)> {
     let stem = name.strip_prefix("crash-")?.strip_suffix(".txt")?;
     let mut pieces = stem.split('-');
     let timestamp = pieces.next()?.parse().ok()?;
     match (pieces.next(), pieces.next(), pieces.next()) {
-        (None, None, None) => Some(timestamp),
+        (None, None, None) => Some((timestamp, None, false)),
+        (Some(sequence), None, None) => Some((timestamp, Some(sequence.parse().ok()?), true)),
         (Some(process_id), Some(suffix), None)
             if process_id.parse::<u32>().is_ok() && suffix.parse::<u64>().is_ok() =>
         {
-            Some(timestamp)
+            Some((timestamp, None, true))
         }
         _ => None,
     }
@@ -549,8 +606,8 @@ impl Drop for PanicHookGuard {
 /// first, so by the time the panic message prints, the terminal is already
 /// back on its normal screen with raw mode disabled.
 ///
-/// The crash report goes to `crash_dir` under a unique `crash-<timestamp>.txt`
-/// name, after the cleanup hooks. `None` reads no panic and writes no file.
+/// The crash report goes to `crash_dir` under a unique crash-report name, after
+/// the cleanup hooks. `None` reads no panic and writes no file.
 ///
 /// The panic hook shares the guard's registry, so a panic and a later drop draw
 /// from the same set: whichever runs first drains it, and the other is a no-op.
@@ -586,7 +643,7 @@ pub fn install_panic_hook(
 ///
 /// A hook that panics on the spawned thread re-enters this function through
 /// the chained hook. It finds the registry empty, runs no hook, and writes its
-/// own report. A collision suffix keeps reports from replacing each other.
+/// own report. The crash-directory lock serializes publication and retention.
 fn restore_then_report(hooks: &Registry, report: Option<(PathBuf, CrashReport)>) {
     let drained = drain_hooks(hooks);
     on_fresh_thread(move || {

@@ -142,11 +142,12 @@ pub enum LogTailError {
 
 /// Read the last local log lines from every session file in `dir`.
 ///
-/// `oldest_kept` is the inclusive timestamp cutoff. When it is `None`, the
-/// newest 1000 lines from each file are returned. Files are
-/// ordered by their names, and each file has a header before its lines.
-/// Missing `dir` means that logging has not created a file yet and returns an
-/// empty answer.
+/// `oldest_kept` is the inclusive timestamp cutoff for each record. When it
+/// is `None`, the newest 1000 physical lines from each file are returned.
+/// A kept record includes its physical continuation lines. A record that alone
+/// exceeds the cap is kept whole. Files are ordered by their names, and each
+/// file has a header before its lines. Missing `dir` means that logging has not
+/// created a file yet and returns an empty answer.
 pub fn tail_logs(dir: &Path, oldest_kept: Option<SystemTime>) -> Result<String, LogTailError> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -210,17 +211,45 @@ pub fn tail_logs(dir: &Path, oldest_kept: Option<SystemTime>) -> Result<String, 
     Ok(rendered)
 }
 
-/// Select recent log lines and keep the result bounded per file.
+/// Select recent log records and keep the result bounded per file.
+///
+/// When the file has timestamped records, the physical cap starts at a
+/// timestamped record boundary.
 fn selected_log_lines(contents: &str, oldest_kept: Option<SystemTime>) -> Vec<&str> {
-    let mut lines = contents
-        .lines()
-        .filter(|line| match oldest_kept {
-            None => true,
-            Some(oldest) => parse_log_timestamp(line).is_some_and(|at| at >= oldest),
-        })
-        .collect::<Vec<_>>();
+    let mut lines = Vec::new();
+    let mut keep_record = false;
+    for line in contents.lines() {
+        if let Some(oldest) = oldest_kept {
+            if let Some(at) = parse_log_timestamp(line) {
+                keep_record = at >= oldest;
+            }
+            if !keep_record {
+                continue;
+            }
+        }
+        lines.push(line);
+    }
     if lines.len() > MAX_TAIL_LINES {
-        lines.drain(..lines.len() - MAX_TAIL_LINES);
+        let tail_start = lines.len() - MAX_TAIL_LINES;
+        let starts_inside_record = parse_log_timestamp(lines[tail_start]).is_none()
+            && lines[..tail_start]
+                .iter()
+                .any(|line| parse_log_timestamp(line).is_some());
+        let start = if starts_inside_record {
+            match lines[tail_start..]
+                .iter()
+                .position(|line| parse_log_timestamp(line).is_some())
+            {
+                Some(offset) => tail_start + offset,
+                None => lines[..tail_start]
+                    .iter()
+                    .rposition(|line| parse_log_timestamp(line).is_some())
+                    .map_or(tail_start, |offset| offset),
+            }
+        } else {
+            tail_start
+        };
+        lines.drain(..start);
     }
     lines
 }

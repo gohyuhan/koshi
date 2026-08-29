@@ -801,9 +801,10 @@ pub enum DebugCommand {
         #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
         format: FormatArg,
     },
-    /// Print the newest lines from every local session log file.
+    /// Print the newest records from every local session log file.
     TailLog {
-        /// Keep only log lines stamped within this much of now, e.g. `10m`.
+        /// Keep only records stamped within this much of now, e.g. `10m`, with
+        /// their physical continuation lines.
         #[arg(long, value_parser = parse_since, value_name = "LENGTH")]
         since: Option<Duration>,
     },

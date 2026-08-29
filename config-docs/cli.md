@@ -698,9 +698,12 @@ run `dump-state`, which every session answers.
 
 `koshi debug tail-log` reads only this machine's `state_dir/logs` directory. If
 this machine has no home directory, it reads the relative `logs/` directory.
-It keeps the newest 1000 lines from each session log file. `--since` keeps
-lines with a timestamp within the given length, such as `10m`. The command does
-not connect to a remote host. Run it on that host to inspect a remote session.
+It keeps the newest 1000 physical lines from each session log file. The cap
+starts at a record boundary, and a record that alone exceeds the cap stays
+whole. `--since` keeps records whose timestamp is within the given length, such
+as `10m`, with all physical continuation lines.
+The command does not connect to a remote host. Run it on that host to inspect a
+remote session.
 
 `koshi debug events` prints the last 1000 events a session published. Each line
 names when the record was stamped, which event it was, and the ids it named. No

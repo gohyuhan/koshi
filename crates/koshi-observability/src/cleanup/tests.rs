@@ -292,13 +292,22 @@ fn fixed_report() -> CrashReport {
     }
 }
 
-/// The text of the one crash report under `dir`. Panics when the directory
-/// holds anything other than exactly one file.
-fn only_crash_report(dir: &Path) -> String {
-    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
+/// The paths of the crash reports under `dir`, excluding the report lock.
+fn crash_report_paths(dir: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(dir)
         .expect("the crash directory exists")
         .map(|entry| entry.expect("the directory entry is readable").path())
-        .collect();
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("crash-") && name.ends_with(".txt"))
+        })
+        .collect()
+}
+
+/// The text of the one crash report under `dir`.
+fn only_crash_report(dir: &Path) -> String {
+    let mut paths = crash_report_paths(dir);
     paths.sort();
     assert_eq!(paths.len(), 1, "expected one crash report, found {paths:?}");
     std::fs::read_to_string(&paths[0]).expect("the crash report is readable")
@@ -335,10 +344,7 @@ fn crash_reports_with_the_same_timestamp_get_distinct_files() {
     second.message = "second".to_string();
     second.write(&dir);
 
-    let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .expect("the crash directory exists")
-        .map(|entry| entry.expect("the directory entry is readable").path())
-        .collect();
+    let mut paths = crash_report_paths(&dir);
     paths.sort();
     assert_eq!(paths.len(), 2);
     let contents: Vec<String> = paths
@@ -351,10 +357,144 @@ fn crash_reports_with_the_same_timestamp_get_distinct_files() {
     for _ in 0..9 {
         fixed_report().write(&dir);
     }
-    let count = std::fs::read_dir(&dir)
-        .expect("the crash directory exists")
-        .count();
+    let count = crash_report_paths(&dir).len();
     assert_eq!(count, MAX_CRASH_REPORTS);
+
+    let mut twelfth = fixed_report();
+    twelfth.message = "twelfth".to_string();
+    twelfth.write(&dir);
+    let contents = crash_report_paths(&dir)
+        .iter()
+        .map(|path| std::fs::read_to_string(path).expect("the report is readable"))
+        .collect::<Vec<_>>();
+    assert_eq!(contents.len(), MAX_CRASH_REPORTS);
+    assert!(
+        contents
+            .iter()
+            .any(|text| text.contains("message: twelfth")),
+        "the newest same-time report remains after retention"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn crash_report_does_not_reuse_plain_name_after_a_legacy_collision() {
+    let dir = crash_dir("legacy-collision");
+    std::fs::create_dir_all(&dir).expect("create the crash directory");
+    std::fs::write(dir.join("crash-1700000000-42-0.txt"), "legacy\n")
+        .expect("write the legacy report");
+
+    fixed_report().write(&dir);
+
+    assert!(!dir.join("crash-1700000000.txt").exists());
+    assert!(dir.join("crash-1700000000-1.txt").is_file());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn crash_report_retention_treats_the_plain_name_as_oldest() {
+    let dir = crash_dir("legacy-order");
+    std::fs::create_dir_all(&dir).expect("create the crash directory");
+    std::fs::write(dir.join("crash-1700000000.txt"), "plain\n").expect("write the plain report");
+    std::fs::write(dir.join("crash-1700000000-42-0.txt"), "legacy\n")
+        .expect("write the legacy report");
+    for sequence in 1..=9 {
+        let path = dir.join(format!("crash-1700000000-{sequence}.txt"));
+        std::fs::write(path, format!("message: report {sequence}\n"))
+            .expect("write the sequenced report");
+    }
+
+    retain_crash_reports(&dir);
+
+    assert_eq!(crash_report_paths(&dir).len(), MAX_CRASH_REPORTS);
+    assert!(!dir.join("crash-1700000000.txt").exists());
+    assert!(dir.join("crash-1700000000-42-0.txt").is_file());
+    assert!(dir.join("crash-1700000000-9.txt").is_file());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn crash_report_retention_keeps_a_newer_legacy_collision() {
+    let dir = crash_dir("legacy-publication-order");
+    std::fs::create_dir_all(&dir).expect("create the crash directory");
+    let set_modified = |path: &Path, seconds: u64| {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("open the report for timestamp setup")
+            .set_modified(UNIX_EPOCH + std::time::Duration::from_secs(seconds))
+            .expect("set the report timestamp");
+    };
+    for sequence in 1..=10 {
+        let path = dir.join(format!("crash-1700000000-{sequence}.txt"));
+        std::fs::write(&path, format!("message: report {sequence}\n"))
+            .expect("write the sequenced report");
+        set_modified(&path, sequence);
+    }
+    let legacy = dir.join("crash-1700000000-42-0.txt");
+    std::fs::write(&legacy, "legacy\n").expect("write the legacy report");
+    set_modified(&legacy, 11);
+
+    retain_crash_reports(&dir);
+
+    assert_eq!(crash_report_paths(&dir).len(), MAX_CRASH_REPORTS);
+    assert!(!dir.join("crash-1700000000-1.txt").exists());
+    assert!(legacy.is_file());
+    assert!(dir.join("crash-1700000000-10.txt").is_file());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn crash_report_retention_keeps_legacy_when_modification_times_tie() {
+    let dir = crash_dir("legacy-equal-modification-time");
+    std::fs::create_dir_all(&dir).expect("create the crash directory");
+    let set_modified = |path: &Path| {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("open the report for timestamp setup")
+            .set_modified(UNIX_EPOCH)
+            .expect("set the report timestamp");
+    };
+    for sequence in 1..=10 {
+        let path = dir.join(format!("crash-1700000000-{sequence}.txt"));
+        std::fs::write(&path, format!("message: report {sequence}\n"))
+            .expect("write the sequenced report");
+        set_modified(&path);
+    }
+    let legacy = dir.join("crash-1700000000-42-0.txt");
+    std::fs::write(&legacy, "legacy\n").expect("write the legacy report");
+    set_modified(&legacy);
+
+    retain_crash_reports(&dir);
+
+    assert_eq!(crash_report_paths(&dir).len(), MAX_CRASH_REPORTS);
+    assert!(!dir.join("crash-1700000000-1.txt").exists());
+    assert!(legacy.is_file());
+    assert!(dir.join("crash-1700000000-10.txt").is_file());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn crash_reports_with_publication_sequences_retain_the_newest_files() {
+    let dir = crash_dir("publication-sequence");
+    std::fs::create_dir_all(&dir).expect("create the crash directory");
+    for sequence in 1..=11 {
+        let path = dir.join(format!("crash-1700000000-{sequence}.txt"));
+        std::fs::write(path, format!("message: report {sequence}\n"))
+            .expect("write the sequenced report");
+    }
+
+    retain_crash_reports(&dir);
+
+    assert_eq!(crash_report_paths(&dir).len(), MAX_CRASH_REPORTS);
+    assert!(!dir.join("crash-1700000000-1.txt").exists());
+    assert!(dir.join("crash-1700000000-11.txt").is_file());
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -369,10 +509,7 @@ fn a_crash_report_keeps_only_the_newest_ten_files() {
         report.write(&dir);
     }
 
-    let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .expect("the crash directory exists")
-        .map(|entry| entry.expect("the directory entry is readable").path())
-        .collect();
+    let mut paths = crash_report_paths(&dir);
     paths.sort();
     assert_eq!(paths.len(), 10);
     assert!(!dir.join("crash-0.txt").exists());
