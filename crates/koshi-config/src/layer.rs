@@ -287,12 +287,16 @@ pub struct PartialPaneConfig {
     pub min_cols: Option<u16>,
     /// Minimum pane height in rows.
     pub min_rows: Option<u16>,
+    /// Blank cells between two panes that meet along a horizontal or vertical
+    /// split. `0` places panes edge to edge.
+    pub gap: Option<u16>,
 }
 
 impl PartialPaneConfig {
     fn apply(self, target: &mut PaneConfig) {
         merge_field(&mut target.min_cols, self.min_cols);
         merge_field(&mut target.min_rows, self.min_rows);
+        merge_field(&mut target.gap, self.gap);
     }
 }
 

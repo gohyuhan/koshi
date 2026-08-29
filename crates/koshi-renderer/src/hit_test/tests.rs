@@ -101,6 +101,7 @@ fn snap(
                 stack_headers: headers.to_vec(),
                 layout_mode: LayoutMode::Tiled,
                 all_suppressed: false,
+                gap: 0,
             },
             tabs_metadata,
         },

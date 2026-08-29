@@ -55,7 +55,7 @@ impl Server {
         // Clone the shared backend before borrowing a session: spawn then
         // needs no `&self` borrow, so it coexists with `&mut Session`.
         let backend = Arc::clone(self.pty_backend());
-        let pane_min = self.effective_pane_min();
+        let sizing = self.pane_sizing();
         // The root pane runs the default shell in the requested directory.
         // Built before the session is borrowed so it can read the terminal
         // config off `self`.
@@ -87,10 +87,10 @@ impl Server {
         let new_tab_id = TabId::new();
         let candidate = LayoutNode::Pane(new_pane_id);
         let tab_rect = Rect::at_origin(viewport);
-        if !fits(&candidate, tab_rect, pane_min) {
+        if !fits(&candidate, tab_rect, sizing) {
             return Err(no_room());
         }
-        let spawn_size = size_root_pane(new_pane_id, viewport, pane_min);
+        let spawn_size = size_root_pane(new_pane_id, viewport, sizing);
 
         // Resolve the tab's name before the spawn: a generated one no
         // existing tab in the session already uses.

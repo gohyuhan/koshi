@@ -245,8 +245,7 @@ impl Server {
     ) -> Result<(), Rejection> {
         match command {
             Command::FocusPane(args) => {
-                Self::resolve_focus_target(args, source, session, self.effective_pane_min())
-                    .map(drop)
+                Self::resolve_focus_target(args, source, session, self.pane_sizing()).map(drop)
             }
             Command::ClosePane(args) => self
                 .resolve_pane_target(args.pane, source, session)
@@ -582,7 +581,7 @@ impl Server {
         args: &FocusPaneArgs,
         source: &CommandSource,
         session: Option<&Session>,
-        min: Size,
+        sizing: PaneSizing,
     ) -> Result<FocusPaneTarget, Rejection> {
         let session = Self::require_session(session)?;
         let client_id = Self::resolve_view_client(args.client, source, session)?;
@@ -590,7 +589,7 @@ impl Server {
             FocusTarget::Pane(pane_id) => pane_id,
             FocusTarget::Direction(direction) => {
                 let from = Self::resolve_focused_pane(session, client_id)?;
-                Self::directional_neighbor(session, client_id, from, direction, min)?
+                Self::directional_neighbor(session, client_id, from, direction, sizing)?
             }
         };
         Self::require_pane_in_active_tab(session, client_id, pane_id)?;
@@ -622,7 +621,7 @@ impl Server {
         client_id: ClientId,
         from: PaneId,
         direction: Direction,
-        min: Size,
+        sizing: PaneSizing,
     ) -> Result<PaneId, Rejection> {
         let client = session
             .clients
@@ -639,7 +638,7 @@ impl Server {
         // Directional focus moves within what THIS client sees, so the tab is
         // solved in this client's own mode: a zoomed client draws one pane and
         // has no neighbour to move to.
-        let solve = solve_tab(tab, client.layout_mode(tab_id), viewport, min);
+        let solve = solve_tab(tab, client.layout_mode(tab_id), viewport, sizing);
         let from_rect = solve
             .panes
             .iter()

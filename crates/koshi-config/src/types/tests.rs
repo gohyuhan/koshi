@@ -25,6 +25,7 @@ fn default_loads_with_expected_values() {
 
     assert_eq!(server.pane.min_cols, 2);
     assert_eq!(server.pane.min_rows, 1);
+    assert_eq!(server.pane.gap, 0);
 
     assert_eq!(server.scrollback.max_lines, 10_000);
     assert_eq!(server.scrollback.max_bytes, 32 * 1024 * 1024);

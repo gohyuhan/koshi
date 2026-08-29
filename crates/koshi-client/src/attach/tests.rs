@@ -88,6 +88,7 @@ fn painted_frame_in(lock_mode: LockMode) -> PaintedFrame {
                 stack_headers: Vec::new(),
                 layout_mode: LayoutMode::Tiled,
                 all_suppressed: false,
+                gap: 0,
             },
             tabs: Vec::new(),
         },
@@ -976,6 +977,7 @@ fn mouse_frame(panes: &[MousePane]) -> MouseFrame {
                 stack_headers: Vec::new(),
                 layout_mode: LayoutMode::Tiled,
                 all_suppressed: false,
+                gap: 0,
             },
             tabs_metadata: vec![TabMeta {
                 id: tab_id,

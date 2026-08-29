@@ -794,6 +794,28 @@ fn a_duplicate_field_partial_section_warns_and_keeps_the_first() {
     );
 }
 
+#[test]
+fn the_pane_gap_line_records_its_value() {
+    assert_eq!(
+        parse("pane {\n    gap 3\n}")
+            .pane
+            .expect("pane present")
+            .gap,
+        Some(3)
+    );
+}
+
+#[test]
+fn a_pane_block_without_a_gap_line_leaves_the_gap_unset() {
+    assert_eq!(
+        parse("pane {\n    min-cols 2\n}")
+            .pane
+            .expect("pane present")
+            .gap,
+        None
+    );
+}
+
 // -- adversarial: type confusion and bounds -------------------------------
 
 #[test]
@@ -803,6 +825,36 @@ fn a_string_pane_dimension_is_skipped_as_a_non_integer() {
     assert_eq!(
         warnings,
         vec!["ignored `pane.min-cols`: expected an integer".to_string()]
+    );
+}
+
+#[test]
+fn a_string_pane_gap_is_skipped_as_a_non_integer() {
+    let (layer, warnings) = parse_with_warnings("pane {\n    gap \"wide\"\n}");
+    assert_eq!(layer.pane.expect("pane present").gap, None);
+    assert_eq!(
+        warnings,
+        vec!["ignored `pane.gap`: expected an integer".to_string()]
+    );
+}
+
+#[test]
+fn a_negative_pane_gap_is_skipped_not_clamped() {
+    let (layer, warnings) = parse_with_warnings("pane {\n    gap -1\n}");
+    assert_eq!(layer.pane.expect("pane present").gap, None);
+    assert_eq!(
+        warnings,
+        vec!["ignored `pane.gap`: must be between 0 and 65535".to_string()]
+    );
+}
+
+#[test]
+fn a_pane_gap_past_the_cell_count_limit_is_skipped() {
+    let (layer, warnings) = parse_with_warnings("pane {\n    gap 70000\n}");
+    assert_eq!(layer.pane.expect("pane present").gap, None);
+    assert_eq!(
+        warnings,
+        vec!["ignored `pane.gap`: must be between 0 and 65535".to_string()]
     );
 }
 

@@ -14,7 +14,7 @@ use koshi_core::event::{
 use koshi_core::geometry::{PaneArea, Rect, Size, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_layout::mode::LayoutMode;
-use koshi_layout::solver::MIN_PANE_SIZE;
+use koshi_layout::solver::{PaneSizing, MIN_PANE_SIZE};
 use koshi_layout::tree::{LayoutChild, LayoutNode, SplitNode};
 use koshi_pane::pane::lifecycle::{PaneLifecycle, PaneLifecycleEvent};
 use koshi_pane::pane::policy::{PaneClosePolicy, PaneExitPolicy};
@@ -188,7 +188,10 @@ fn removing_a_focused_pane_focuses_a_survivor() {
         tab_id,
         a,
         rect(),
-        MIN_PANE_SIZE,
+        PaneSizing {
+            min: MIN_PANE_SIZE,
+            gap: 0,
+        },
         EmptyTabPolicy::CloseTab,
     );
 
@@ -236,7 +239,10 @@ fn removing_a_pane_missing_from_the_layout_still_repairs_focus_and_zoom() {
         tab_id,
         a,
         rect(),
-        MIN_PANE_SIZE,
+        PaneSizing {
+            min: MIN_PANE_SIZE,
+            gap: 0,
+        },
         EmptyTabPolicy::CloseTab,
     );
 
@@ -272,7 +278,10 @@ fn removing_a_nonfocused_pane_leaves_focus_untouched() {
         tab_id,
         a,
         rect(),
-        MIN_PANE_SIZE,
+        PaneSizing {
+            min: MIN_PANE_SIZE,
+            gap: 0,
+        },
         EmptyTabPolicy::CloseTab,
     );
 
@@ -300,7 +309,10 @@ fn collapsing_a_multi_pane_tab_emits_layout_changed() {
         tab_id,
         a,
         rect(),
-        MIN_PANE_SIZE,
+        PaneSizing {
+            min: MIN_PANE_SIZE,
+            gap: 0,
+        },
         EmptyTabPolicy::CloseTab,
     );
 
@@ -333,7 +345,10 @@ fn focus_repair_runs_for_every_client_on_the_removed_pane() {
         tab_id,
         a,
         rect(),
-        MIN_PANE_SIZE,
+        PaneSizing {
+            min: MIN_PANE_SIZE,
+            gap: 0,
+        },
         EmptyTabPolicy::CloseTab,
     );
 
@@ -370,7 +385,10 @@ fn removing_a_focused_pane_with_no_room_to_refocus_clears_focus() {
         tab_id,
         a,
         tiny,
-        MIN_PANE_SIZE,
+        PaneSizing {
+            min: MIN_PANE_SIZE,
+            gap: 0,
+        },
         EmptyTabPolicy::CloseTab,
     );
 
@@ -417,7 +435,10 @@ fn a_too_small_event_carries_a_starving_area_and_region_cause() {
         tab_id,
         a,
         Rect::at_origin(Size { cols: 1, rows: 1 }),
-        MIN_PANE_SIZE,
+        PaneSizing {
+            min: MIN_PANE_SIZE,
+            gap: 0,
+        },
         EmptyTabPolicy::CloseTab,
     );
     let entered = events
@@ -561,7 +582,10 @@ fn the_removed_pane_leaves_the_tab_focus_history() {
         tab_id,
         a,
         rect(),
-        MIN_PANE_SIZE,
+        PaneSizing {
+            min: MIN_PANE_SIZE,
+            gap: 0,
+        },
         EmptyTabPolicy::CloseTab,
     );
 
@@ -588,7 +612,10 @@ fn removing_the_last_pane_closes_the_tab_and_quits() {
         tab_id,
         only,
         rect(),
-        MIN_PANE_SIZE,
+        PaneSizing {
+            min: MIN_PANE_SIZE,
+            gap: 0,
+        },
         EmptyTabPolicy::CloseTab,
     );
 
@@ -630,7 +657,10 @@ fn closing_the_last_pane_of_one_tab_among_several_does_not_quit() {
         tab_one,
         pane_one,
         rect(),
-        MIN_PANE_SIZE,
+        PaneSizing {
+            min: MIN_PANE_SIZE,
+            gap: 0,
+        },
         EmptyTabPolicy::CloseTab,
     );
 
@@ -665,7 +695,10 @@ fn on_child_exit_for_an_unknown_pane_only_emits_the_exit_fact() {
         Some(1),
         SystemTime::UNIX_EPOCH,
         rect(),
-        MIN_PANE_SIZE,
+        PaneSizing {
+            min: MIN_PANE_SIZE,
+            gap: 0,
+        },
         EmptyTabPolicy::CloseTab,
     );
 
@@ -699,7 +732,10 @@ fn removing_an_unknown_pane_emits_nothing() {
         tab_id,
         PaneId::new(),
         rect(),
-        MIN_PANE_SIZE,
+        PaneSizing {
+            min: MIN_PANE_SIZE,
+            gap: 0,
+        },
         EmptyTabPolicy::CloseTab,
     );
 
@@ -728,7 +764,10 @@ fn a_respawn_shell_pane_returns_to_spawning() {
         Some(1),
         SystemTime::UNIX_EPOCH,
         rect(),
-        MIN_PANE_SIZE,
+        PaneSizing {
+            min: MIN_PANE_SIZE,
+            gap: 0,
+        },
         EmptyTabPolicy::CloseTab,
     );
 
@@ -760,7 +799,10 @@ fn a_close_on_exit_pane_runs_the_removal_cascade() {
         Some(0),
         SystemTime::UNIX_EPOCH,
         rect(),
-        MIN_PANE_SIZE,
+        PaneSizing {
+            min: MIN_PANE_SIZE,
+            gap: 0,
+        },
         EmptyTabPolicy::CloseTab,
     );
 
@@ -799,7 +841,10 @@ fn closing_a_clients_active_tab_moves_it_to_the_previous_tab() {
         middle,
         b,
         rect(),
-        MIN_PANE_SIZE,
+        PaneSizing {
+            min: MIN_PANE_SIZE,
+            gap: 0,
+        },
         EmptyTabPolicy::CloseTab,
     );
 
@@ -832,7 +877,10 @@ fn closing_the_first_tab_moves_the_client_to_the_next_tab() {
         first,
         a,
         rect(),
-        MIN_PANE_SIZE,
+        PaneSizing {
+            min: MIN_PANE_SIZE,
+            gap: 0,
+        },
         EmptyTabPolicy::CloseTab,
     );
 
@@ -861,7 +909,10 @@ fn closing_a_tab_a_client_is_not_viewing_leaves_its_active_tab() {
         other,
         a,
         rect(),
-        MIN_PANE_SIZE,
+        PaneSizing {
+            min: MIN_PANE_SIZE,
+            gap: 0,
+        },
         EmptyTabPolicy::CloseTab,
     );
 
@@ -893,7 +944,10 @@ fn closing_the_last_tab_prunes_client_focus_and_quits() {
         tab_id,
         pane,
         rect(),
-        MIN_PANE_SIZE,
+        PaneSizing {
+            min: MIN_PANE_SIZE,
+            gap: 0,
+        },
         EmptyTabPolicy::CloseTab,
     );
 
@@ -930,7 +984,10 @@ fn removing_a_hidden_pane_leaves_a_zoomed_client_zoomed() {
         tab_id,
         b,
         rect(),
-        MIN_PANE_SIZE,
+        PaneSizing {
+            min: MIN_PANE_SIZE,
+            gap: 0,
+        },
         EmptyTabPolicy::CloseTab,
     );
 
@@ -978,7 +1035,10 @@ fn removing_the_zoomed_pane_drops_that_clients_zoom() {
         tab_id,
         b,
         rect(),
-        MIN_PANE_SIZE,
+        PaneSizing {
+            min: MIN_PANE_SIZE,
+            gap: 0,
+        },
         EmptyTabPolicy::CloseTab,
     );
 
@@ -1019,7 +1079,10 @@ fn a_registry_pane_missing_from_the_layout_is_dropped_without_touching_the_tab()
         tab_id,
         ghost,
         rect(),
-        MIN_PANE_SIZE,
+        PaneSizing {
+            min: MIN_PANE_SIZE,
+            gap: 0,
+        },
         EmptyTabPolicy::CloseTab,
     );
 
@@ -1076,7 +1139,10 @@ fn a_repeated_exit_still_returns_a_respawn_pane_to_spawning() {
         Some(2),
         SystemTime::UNIX_EPOCH,
         rect(),
-        MIN_PANE_SIZE,
+        PaneSizing {
+            min: MIN_PANE_SIZE,
+            gap: 0,
+        },
         EmptyTabPolicy::CloseTab,
     );
 

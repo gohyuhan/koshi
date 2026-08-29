@@ -21,13 +21,13 @@ use koshi_core::event::{
     Event, LayoutChanged, PaneClosing, PaneFocused, PaneProcessExited, PaneRemoved,
     TerminalTooSmallCause, TerminalTooSmallEntered,
 };
-use koshi_core::geometry::{PaneArea, Rect, Size};
+use koshi_core::geometry::{PaneArea, Rect};
 use koshi_core::ids::{ClientId, PaneId, TabId};
 use koshi_layout::edit::{remove_pane, RemoveError};
 use koshi_layout::focus::focus_candidates;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::normalize::normalize;
-use koshi_layout::solver::solve_with_mode_min;
+use koshi_layout::solver::{solve_with_mode_min, PaneSizing};
 use koshi_pane::pane::lifecycle::PaneLifecycleEvent;
 use koshi_pane::pane::policy::PaneExitPolicy;
 
@@ -52,17 +52,16 @@ use crate::session::tab_ops::close_and_refocus_tab;
 ///    quits the session.
 ///
 /// `tab_rect` is the viewport the tab is solved against, needed to rank focus
-/// candidates geometrically. `min` is the effective per-pane minimum content
-/// size, so the post-removal reflow agrees with the placement solve on which
-/// panes fit. Returns the events for the caller to emit; an unknown pane or tab
-/// is a no-op with no events.
+/// candidates geometrically. `sizing` carries the per-pane content minimum and
+/// the gap between split children. Returns the events for the caller to emit;
+/// an unknown pane or tab is a no-op with no events.
 #[must_use]
 pub fn remove_pane_cascade(
     session: &mut Session,
     tab_id: TabId,
     pane_id: PaneId,
     tab_rect: Rect,
-    min: Size,
+    sizing: PaneSizing,
     empty_tab_policy: EmptyTabPolicy,
 ) -> Vec<Event> {
     // An unknown pane id is a no-op: nothing was removed, so nothing happened.
@@ -89,7 +88,7 @@ pub fn remove_pane_cascade(
     // live, so the pass canonicalizes shape only and drops nothing.
     // `Some` carries the rect the pane vacated, which ranks the spatial focus
     // candidates; `None` means the tab is now empty.
-    let removal = match remove_pane(tab.layout(), tab_rect, pane_id, min) {
+    let removal = match remove_pane(tab.layout(), tab_rect, pane_id, sizing) {
         Ok((new_tree, info)) => {
             let live: HashSet<PaneId> = new_tree.leaf_panes().into_iter().collect();
             let canonical = normalize(&new_tree, &live).unwrap_or(new_tree);
@@ -125,7 +124,7 @@ pub fn remove_pane_cascade(
                 // here was focused on the removed pane, and zoom follows focus,
                 // so any zoom of theirs was on that pane and has just been
                 // dropped: the layout they are about to see is the tiled one.
-                let solved = solve_with_mode_min(tab.layout(), LayoutMode::Tiled, tab_rect, min);
+                let solved = solve_with_mode_min(tab.layout(), LayoutMode::Tiled, tab_rect, sizing);
                 let candidates = focus_candidates(old_rect, &solved.panes, &solved.stack_headers);
                 // The verdict reads the tab, the registry and the candidates —
                 // nothing client-specific — so every repaired client inherits
@@ -257,13 +256,12 @@ fn terminal_too_small_cause(
 ///
 /// `exited_at` is supplied by the caller — the runtime that observed the exit —
 /// rather than read from the clock here, so the timestamp crosses the IPC
-/// boundary intact and tests stay deterministic. `min` is the effective per-pane
-/// minimum content size, forwarded to [`remove_pane_cascade`] so a close-on-exit
-/// reflow agrees with placement on which panes fit. An unknown `pane_id` emits
-/// only the exit event.
+/// boundary intact and tests stay deterministic. `sizing` carries the per-pane
+/// content minimum and the gap between split children. An unknown `pane_id`
+/// emits only the exit event.
 // Carries a child-exit's full context to the shared cascade: the exit fact
-// (`exit_code`, `exited_at`), the reflow geometry (`tab_rect`, `min`), and the
-// empty-tab policy.
+// (`exit_code`, `exited_at`), the reflow geometry (`tab_rect`, `sizing`), and
+// the empty-tab policy.
 #[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn on_child_exit(
@@ -273,7 +271,7 @@ pub fn on_child_exit(
     exit_code: Option<i32>,
     exited_at: SystemTime,
     tab_rect: Rect,
-    min: Size,
+    sizing: PaneSizing,
     empty_tab_policy: EmptyTabPolicy,
 ) -> Vec<Event> {
     let mut events = vec![Event::PaneProcessExited(PaneProcessExited {
@@ -308,7 +306,7 @@ pub fn on_child_exit(
                 tab_id,
                 pane_id,
                 tab_rect,
-                min,
+                sizing,
                 empty_tab_policy,
             ));
         }

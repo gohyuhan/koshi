@@ -145,7 +145,7 @@ impl Server {
             tab,
             client.layout_mode(tab_id),
             viewport,
-            self.effective_pane_min(),
+            self.pane_sizing(),
         ))
         .into_iter()
         .any(|(pane, content)| pane == pane_id && content.is_some())

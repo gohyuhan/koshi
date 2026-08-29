@@ -25,6 +25,17 @@ fn explain_reports_file_default_and_meaning() {
     );
 }
 
+#[test]
+fn explain_answers_for_the_pane_gap() {
+    let output = explain("koshi.pane.gap").unwrap();
+
+    assert_eq!(
+        output,
+        "koshi.pane.gap\nfile: koshi.kdl\ndefault: 0\n\
+         Blank cells between two panes that meet along a split.\n"
+    );
+}
+
 /// The beta knob is top-level like `theme`, and `explain` answers for it the
 /// same way it answers for every other key the parser accepts.
 #[test]

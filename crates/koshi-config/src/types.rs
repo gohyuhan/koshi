@@ -182,6 +182,9 @@ pub struct PaneConfig {
     pub min_cols: u16,
     /// Minimum pane height in rows.
     pub min_rows: u16,
+    /// Blank cells between two panes that meet along a horizontal or vertical
+    /// split. `0` places panes edge to edge.
+    pub gap: u16,
 }
 
 impl Default for PaneConfig {
@@ -189,6 +192,7 @@ impl Default for PaneConfig {
         Self {
             min_cols: 2,
             min_rows: 1,
+            gap: 0,
         }
     }
 }

@@ -37,7 +37,7 @@ impl Server {
         // Clone the shared backend before borrowing a session: spawn and resize
         // then need no `&self` borrow, so they coexist with `&mut Session`.
         let backend = Arc::clone(self.pty_backend());
-        let pane_min = self.effective_pane_min();
+        let sizing = self.pane_sizing();
         // Resolve the spawn spec before the session is borrowed, so it can read
         // the terminal config off `self`: an explicit command keeps its own
         // program, a bare new pane runs the configured default shell. Either way
@@ -100,7 +100,7 @@ impl Server {
             &candidate,
             target.focus_client,
             args.client,
-            pane_min,
+            sizing,
         )?;
 
         // Solve the candidate against that viewport to size the new pane and
@@ -112,7 +112,7 @@ impl Server {
             &candidate,
             LayoutMode::Tiled,
             tab_rect,
-            pane_min,
+            sizing,
         ));
         let new_rect = rects
             .iter()
@@ -217,7 +217,7 @@ impl Server {
         // Clone the shared backend before borrowing a session: the kill thread
         // takes its own handle, so no `&self` borrow crosses the commit.
         let backend = Arc::clone(self.pty_backend());
-        let pane_min = self.effective_pane_min();
+        let sizing = self.pane_sizing();
 
         let session = self
             .sessions
@@ -258,7 +258,7 @@ impl Server {
             target.tab_id,
             target.pane_id,
             tab_rect,
-            pane_min,
+            sizing,
             EmptyTabPolicy::default(),
         );
 
@@ -412,7 +412,7 @@ impl Server {
         // Clone the shared backend before borrowing the session: releasing the
         // pane's PTY entry then needs no `&self` across the mutation.
         let backend = Arc::clone(self.pty_backend());
-        let pane_min = self.effective_pane_min();
+        let sizing = self.pane_sizing();
 
         let session = self
             .sessions
@@ -439,7 +439,7 @@ impl Server {
             exit_code,
             exited_at,
             tab_rect,
-            pane_min,
+            sizing,
             EmptyTabPolicy::default(),
         );
 
@@ -500,7 +500,7 @@ impl Server {
 
         let backend = Arc::clone(self.pty_backend());
 
-        let pane_min = self.effective_pane_min();
+        let sizing = self.pane_sizing();
         let (session, viewport) = self.session_and_viewport(target.session_id, target.tab_id)?;
         let tab_rect = Rect::at_origin(viewport);
         let tab = session
@@ -519,7 +519,7 @@ impl Server {
             target.pane_id,
             args.direction,
             args.size,
-            pane_min,
+            sizing,
         )
         .or_else(|error| match error {
             ResizeError::NoAdjacentBorder { .. } => resize_with_min(
@@ -528,7 +528,7 @@ impl Server {
                 target.pane_id,
                 args.direction.opposite(),
                 args.size.saturating_neg(),
-                pane_min,
+                sizing,
             ),
             other => Err(other),
         })
@@ -551,7 +551,7 @@ impl Server {
         let mut events = vec![Event::LayoutChanged(LayoutChanged {
             tab_id: target.tab_id,
         })];
-        let rects = Self::tab_content_rects(session, target.tab_id, viewport, pane_min);
+        let rects = Self::tab_content_rects(session, target.tab_id, viewport, sizing);
         self.reflow_changed(backend.as_ref(), rects, None, &mut events);
 
         Ok(Self::commit_events(&mut self.event_bus, command_id, events))
@@ -598,8 +598,8 @@ impl Server {
         args: &FocusPaneArgs,
     ) -> Result<CommandResult, Rejection> {
         let acting = self.acting_session(source)?;
-        let pane_min = self.effective_pane_min();
-        let target = Self::resolve_focus_target(args, source, acting, pane_min)?;
+        let sizing = self.pane_sizing();
+        let target = Self::resolve_focus_target(args, source, acting, sizing)?;
 
         let backend = Arc::clone(self.pty_backend());
 
@@ -632,7 +632,7 @@ impl Server {
         // Solve the tab as this client will display it: a pane suppressed for
         // lack of space cannot take focus.
         let tab_rect = Rect::at_origin(viewport);
-        let solved = solve_with_mode_min(tab.layout(), effective_mode, tab_rect, pane_min);
+        let solved = solve_with_mode_min(tab.layout(), effective_mode, tab_rect, sizing);
         if solved.suppressed.contains(&target.pane_id) {
             return Err(Rejection::new(
                 RejectReason::InvalidState,
@@ -674,7 +674,7 @@ impl Server {
             events.push(Event::LayoutChanged(LayoutChanged {
                 tab_id: target.tab_id,
             }));
-            let rects = Self::tab_content_rects(session, target.tab_id, viewport, pane_min);
+            let rects = Self::tab_content_rects(session, target.tab_id, viewport, sizing);
             self.reflow_changed(backend.as_ref(), rects, None, &mut events);
         }
 
@@ -723,7 +723,7 @@ impl Server {
         source: &CommandSource,
     ) -> Result<CommandResult, Rejection> {
         let acting = self.acting_session(source)?;
-        let pane_min = self.effective_pane_min();
+        let sizing = self.pane_sizing();
         let target = self.resolve_fullscreen_target(source, acting)?;
         let client_id = target.client_id;
 
@@ -753,7 +753,7 @@ impl Server {
                     focused: target.pane_id,
                 };
                 let tab_rect = Rect::at_origin(viewport);
-                let solved = solve_with_mode_min(tab.layout(), mode, tab_rect, pane_min);
+                let solved = solve_with_mode_min(tab.layout(), mode, tab_rect, sizing);
                 if solved.suppressed.contains(&target.pane_id) {
                     return Err(Rejection::new(
                         RejectReason::InvalidState,
@@ -791,7 +791,7 @@ impl Server {
         // This client's view changed: re-solve the tab and resize each live PTY
         // whose size changed.
         let mut events = vec![Event::LayoutChanged(LayoutChanged { tab_id })];
-        let rects = Self::tab_content_rects(session, tab_id, viewport, pane_min);
+        let rects = Self::tab_content_rects(session, tab_id, viewport, sizing);
         self.reflow_changed(backend.as_ref(), rects, None, &mut events);
 
         if focus_moved {
@@ -920,13 +920,13 @@ impl Server {
         candidate: &LayoutNode,
         focus_client: Option<ClientId>,
         target_client: Option<ClientId>,
-        min: Size,
+        sizing: PaneSizing,
     ) -> Result<(Size, Option<ClientId>), Rejection> {
         let no_room = || Rejection::new(RejectReason::MinSize, "not enough space for a new pane");
         // The chosen viewport, paired with the client designated for it, unless
         // `candidate` does not fit that viewport.
         let admit = |viewport: Size, designated: Option<ClientId>| {
-            if fits(candidate, Rect::at_origin(viewport), min) {
+            if fits(candidate, Rect::at_origin(viewport), sizing) {
                 Ok((viewport, designated))
             } else {
                 Err(no_room())

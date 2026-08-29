@@ -14,6 +14,15 @@ fn rect(x: u16, y: u16, cols: u16, rows: u16) -> Rect {
     Rect::new(Point { x, y }, Size { cols, rows })
 }
 
+/// The default content floor with the given gap between kept children of a
+/// directional split.
+fn sizing(gap: u16) -> PaneSizing {
+    PaneSizing {
+        min: MIN_PANE_SIZE,
+        gap,
+    }
+}
+
 /// Wrap a pane ID in a leaf node.
 fn leaf(pane: PaneId) -> LayoutChild {
     LayoutChild::new(LayoutNode::Pane(pane))
@@ -440,8 +449,8 @@ fn fits_accepts_a_layout_with_room_for_every_floor() {
     let tree = split(SplitDirection::Horizontal, &[a, b]);
     // Two bordered panes need a four-by-three box each: eight columns, three
     // rows side by side.
-    assert!(fits(&tree, rect(0, 0, 8, 3), MIN_PANE_SIZE));
-    assert!(fits(&tree, rect(0, 0, 80, 24), MIN_PANE_SIZE));
+    assert!(fits(&tree, rect(0, 0, 8, 3), sizing(0)));
+    assert!(fits(&tree, rect(0, 0, 80, 24), sizing(0)));
 }
 
 #[test]
@@ -449,7 +458,7 @@ fn fits_rejects_a_layout_whose_floors_exceed_the_rect() {
     let (a, b) = (PaneId::new(), PaneId::new());
     let tree = split(SplitDirection::Horizontal, &[a, b]);
     // Two panes at two columns each need four; three is one short.
-    assert!(!fits(&tree, rect(0, 0, 3, 24), MIN_PANE_SIZE));
+    assert!(!fits(&tree, rect(0, 0, 3, 24), sizing(0)));
 }
 
 #[test]
@@ -467,9 +476,9 @@ fn fits_accounts_for_nested_axis_minimums() {
     // Each bordered pane needs a four-by-three box. The three-deep column
     // stacks to nine rows; the leaf beside it adds its four columns, so the
     // tree needs eight columns and nine rows.
-    assert!(fits(&tree, rect(0, 0, 8, 9), MIN_PANE_SIZE));
-    assert!(!fits(&tree, rect(0, 0, 8, 8), MIN_PANE_SIZE));
-    assert!(!fits(&tree, rect(0, 0, 7, 9), MIN_PANE_SIZE));
+    assert!(fits(&tree, rect(0, 0, 8, 9), sizing(0)));
+    assert!(!fits(&tree, rect(0, 0, 8, 8), sizing(0)));
+    assert!(!fits(&tree, rect(0, 0, 7, 9), sizing(0)));
 }
 
 #[test]
@@ -482,8 +491,8 @@ fn fits_uses_declared_floors_not_just_defaults() {
     );
     // `a`'s declared 30 plus the default sibling's border-inclusive floor of
     // 4 need 34 columns.
-    assert!(fits(&tree, rect(0, 0, 34, 24), MIN_PANE_SIZE));
-    assert!(!fits(&tree, rect(0, 0, 33, 24), MIN_PANE_SIZE));
+    assert!(fits(&tree, rect(0, 0, 34, 24), sizing(0)));
+    assert!(!fits(&tree, rect(0, 0, 33, 24), sizing(0)));
 }
 
 #[test]
@@ -517,7 +526,7 @@ fn a_larger_min_suppresses_a_pane_that_fits_at_the_default_floor() {
     // Twelve columns hold two bordered panes at the 2-column default floor
     // (four each), so nothing suppresses.
     let tab = rect(0, 0, 12, 24);
-    let default = solve_with_min(&tree, tab, MIN_PANE_SIZE);
+    let default = solve_with_min(&tree, tab, sizing(0));
     assert!(default.suppressed.is_empty());
     assert!(default.panes.iter().all(|(_, r)| !r.is_empty()));
 
@@ -525,7 +534,14 @@ fn a_larger_min_suppresses_a_pane_that_fits_at_the_default_floor() {
     // twenty in all — so the same twelve columns now fit only the first, and the
     // second suppresses. This fails if the configured minimum stops reaching the
     // solver.
-    let raised = solve_with_min(&tree, tab, Size { cols: 8, rows: 1 });
+    let raised = solve_with_min(
+        &tree,
+        tab,
+        PaneSizing {
+            min: Size { cols: 8, rows: 1 },
+            gap: 0,
+        },
+    );
     assert_eq!(raised.suppressed, [b]);
     assert_eq!(raised.panes, [(a, rect(0, 0, 12, 24)), (b, Rect::zero())]);
 }
@@ -888,7 +904,7 @@ fn an_empty_directional_split_solves_to_no_panes_without_panicking() {
     assert!(result.panes.is_empty());
     assert!(result.suppressed.is_empty());
     assert!(!result.all_suppressed);
-    assert_eq!(min_size(&empty, MIN_PANE_SIZE), Size { cols: 0, rows: 0 });
+    assert_eq!(min_size(&empty, sizing(0)), Size { cols: 0, rows: 0 });
 }
 
 #[test]
@@ -900,7 +916,7 @@ fn an_empty_stack_solves_to_no_panes_without_panicking() {
     let result = solve(&empty, rect(0, 0, 80, 24));
     assert!(result.panes.is_empty());
     assert!(result.stack_headers.is_empty());
-    assert_eq!(min_size(&empty, MIN_PANE_SIZE), Size { cols: 0, rows: 0 });
+    assert_eq!(min_size(&empty, sizing(0)), Size { cols: 0, rows: 0 });
 }
 
 #[test]
@@ -971,7 +987,7 @@ fn fits_accepts_a_zero_rect_for_an_empty_split() {
         SplitDirection::Horizontal,
         Vec::new(),
     ));
-    assert!(fits(&empty, Rect::zero(), MIN_PANE_SIZE));
+    assert!(fits(&empty, Rect::zero(), sizing(0)));
 }
 
 #[test]
@@ -1185,7 +1201,7 @@ fn a_fifty_deep_alternating_tree_tiles_exactly_and_solves_deterministically() {
     let tree = deep_alternating(&panes);
     let tab = rect(0, 0, 1000, 1000);
 
-    assert!(fits(&tree, tab, MIN_PANE_SIZE));
+    assert!(fits(&tree, tab, sizing(0)));
     let result = solve(&tree, tab);
     assert_eq!(result.panes.len(), 51);
     assert_eq!(
@@ -1508,4 +1524,272 @@ fn a_zero_rect_suppresses_every_pane_of_a_stack() {
     assert_eq!(result.suppressed, [a, b]);
     assert_eq!(result.panes, [(a, Rect::zero()), (b, Rect::zero())]);
     assert_eq!(result.stack_headers, Vec::new());
+}
+
+#[test]
+fn two_columns_split_the_axis_left_after_one_gap() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = split(SplitDirection::Horizontal, &[a, b]);
+    let tab = rect(0, 0, 120, 24);
+
+    // No gap: the two halves meet at column 60.
+    let tight = solve_with_min(&tree, tab, sizing(0));
+    assert_eq!(
+        tight.panes,
+        [(a, rect(0, 0, 60, 24)), (b, rect(60, 0, 60, 24))]
+    );
+
+    // A two-column gap leaves 118 cells to share, 59 each, and columns 59
+    // and 60 stay blank.
+    let spaced = solve_with_min(&tree, tab, sizing(2));
+    assert_eq!(
+        spaced.panes,
+        [(a, rect(0, 0, 59, 24)), (b, rect(61, 0, 59, 24))]
+    );
+    assert!(spaced.suppressed.is_empty());
+}
+
+#[test]
+fn three_columns_reserve_two_gaps() {
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let tree = split(SplitDirection::Horizontal, &[a, b, c]);
+    let tab = rect(0, 0, 120, 24);
+
+    // Two gaps of two take four cells; 116 divided three ways is 38 each
+    // with two over, and the two trailing children take one each.
+    let result = solve_with_min(&tree, tab, sizing(2));
+    assert_eq!(
+        result.panes,
+        [
+            (a, rect(0, 0, 38, 24)),
+            (b, rect(40, 0, 39, 24)),
+            (c, rect(81, 0, 39, 24)),
+        ]
+    );
+}
+
+#[test]
+fn a_fixed_child_keeps_its_cells_when_a_gap_is_reserved() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = split_with(
+        SplitDirection::Horizontal,
+        vec![
+            (a, SizeWeight::new(SizeConstraint::Fixed(30))),
+            (b, SizeWeight::default()),
+        ],
+    );
+    let tab = rect(0, 0, 120, 24);
+
+    // The gap comes off the axis first: 118 cells reach the children, the
+    // fixed 30 is untouched, and the flexible sibling takes the other 88.
+    let result = solve_with_min(&tree, tab, sizing(2));
+    assert_eq!(
+        result.panes,
+        [(a, rect(0, 0, 30, 24)), (b, rect(32, 0, 88, 24))]
+    );
+}
+
+#[test]
+fn a_percent_child_takes_its_share_of_the_axis_left_after_the_gap() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = split_with(
+        SplitDirection::Horizontal,
+        vec![
+            (a, SizeWeight::new(SizeConstraint::Percent(50))),
+            (b, SizeWeight::default()),
+        ],
+    );
+    let tab = rect(0, 0, 120, 24);
+
+    // Half of the 118 cells left after the gap is 59; the flexible sibling
+    // takes the remaining 59.
+    let result = solve_with_min(&tree, tab, sizing(2));
+    assert_eq!(
+        result.panes,
+        [(a, rect(0, 0, 59, 24)), (b, rect(61, 0, 59, 24))]
+    );
+}
+
+#[test]
+fn a_nested_split_reserves_its_own_gap_inside_its_rect() {
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let tree = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![
+            leaf(a),
+            LayoutChild::new(split(SplitDirection::Vertical, &[b, c])),
+        ],
+    ));
+    let tab = rect(0, 0, 120, 24);
+
+    // The outer split hands 119 columns to two children as 59 then 60, with
+    // column 59 blank. The inner split hands 23 rows as 11 then 12, with row
+    // 11 blank.
+    let result = solve_with_min(&tree, tab, sizing(1));
+    assert_eq!(
+        result.panes,
+        [
+            (a, rect(0, 0, 59, 24)),
+            (b, rect(60, 0, 60, 11)),
+            (c, rect(60, 12, 60, 12)),
+        ]
+    );
+}
+
+#[test]
+fn min_size_and_fits_count_the_gap() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = split(SplitDirection::Horizontal, &[a, b]);
+
+    // Two bordered panes need four columns each; one gap sits between them.
+    for gap in [0u16, 2] {
+        assert_eq!(
+            min_size(&tree, sizing(gap)),
+            Size {
+                cols: 8 + gap,
+                rows: 3,
+            }
+        );
+        assert!(!fits(&tree, rect(0, 0, 8 + gap - 1, 24), sizing(gap)));
+        assert!(fits(&tree, rect(0, 0, 8 + gap, 24), sizing(gap)));
+    }
+}
+
+#[test]
+fn a_suppressed_trailing_pane_gives_its_leading_gap_back() {
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let tree = split(SplitDirection::Horizontal, &[a, b, c]);
+
+    // Twelve columns hold two floors of four plus one gap of two, but not
+    // the third floor and its gap: c suppresses and the ten remaining cells
+    // are shared by a and b.
+    let two_fit = solve_with_min(&tree, rect(0, 0, 12, 24), sizing(2));
+    assert_eq!(
+        two_fit.panes,
+        [
+            (a, rect(0, 0, 5, 24)),
+            (b, rect(7, 0, 5, 24)),
+            (c, Rect::zero()),
+        ]
+    );
+    assert_eq!(two_fit.suppressed, [c]);
+    assert!(!two_fit.all_suppressed);
+
+    // Nine columns hold one floor but not a second floor plus its gap, so a
+    // alone survives and takes the whole axis with no gap reserved.
+    let one_fits = solve_with_min(&tree, rect(0, 0, 9, 24), sizing(2));
+    assert_eq!(
+        one_fits.panes,
+        [(a, rect(0, 0, 9, 24)), (b, Rect::zero()), (c, Rect::zero()),]
+    );
+    assert_eq!(one_fits.suppressed, [b, c]);
+}
+
+#[test]
+fn a_stack_places_no_gap_between_its_members() {
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let tree = LayoutNode::Split(SplitNode::stack(vec![a, b, c], 0));
+    let tab = rect(0, 0, 80, 24);
+
+    // The active member takes every row the two header strips leave, and the
+    // three rects run row by row with nothing between them.
+    let spaced = solve_with_min(&tree, tab, sizing(5));
+    assert_eq!(
+        spaced.panes,
+        [
+            (a, rect(0, 0, 80, 22)),
+            (b, rect(0, 22, 80, 1)),
+            (c, rect(0, 23, 80, 1)),
+        ]
+    );
+    assert_eq!(spaced, solve_with_min(&tree, tab, sizing(0)));
+}
+
+#[test]
+fn min_size_saturates_when_the_gap_fills_the_axis() {
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let tree = split(SplitDirection::Horizontal, &[a, b, c]);
+
+    assert_eq!(
+        min_size(&tree, sizing(u16::MAX)),
+        Size {
+            cols: u16::MAX,
+            rows: 3,
+        }
+    );
+}
+
+#[test]
+fn a_gap_wider_than_the_axis_keeps_only_the_first_pane() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = split(SplitDirection::Horizontal, &[a, b]);
+
+    // The first floor of four fits eight columns; the second needs its
+    // leading gap first, which alone is wider than the axis, so b suppresses
+    // and no gap is reserved for it.
+    let result = solve_with_min(&tree, rect(0, 0, 8, 24), sizing(u16::MAX));
+    assert_eq!(result.panes, [(a, rect(0, 0, 8, 24)), (b, Rect::zero())]);
+    assert_eq!(result.suppressed, [b]);
+    assert!(!result.all_suppressed);
+}
+
+#[test]
+fn two_rows_split_the_axis_left_after_one_gap() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = split(SplitDirection::Vertical, &[a, b]);
+
+    // A two-row gap leaves 22 rows to share, 11 each; rows 11 and 12 stay
+    // blank.
+    let result = solve_with_min(&tree, rect(0, 0, 80, 24), sizing(2));
+    assert_eq!(
+        result.panes,
+        [(a, rect(0, 0, 80, 11)), (b, rect(0, 13, 80, 11))]
+    );
+}
+
+#[test]
+fn a_full_percent_child_leaves_its_sibling_its_floor_past_the_gap() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = split_with(
+        SplitDirection::Horizontal,
+        vec![
+            (a, SizeWeight::new(SizeConstraint::Percent(100))),
+            (b, SizeWeight::default()),
+        ],
+    );
+
+    // All 118 cells past the gap go to the percent child first; the floor
+    // pass then takes four back for b, which starts after the two-cell gap.
+    let result = solve_with_min(&tree, rect(0, 0, 120, 24), sizing(2));
+    assert_eq!(
+        result.panes,
+        [(a, rect(0, 0, 114, 24)), (b, rect(116, 0, 4, 24))]
+    );
+    assert!(result.suppressed.is_empty());
+}
+
+#[test]
+fn a_middle_child_dropped_for_its_height_gives_its_gap_to_the_survivors() {
+    let a = PaneId::new();
+    let c = PaneId::new();
+    let tall: Vec<PaneId> = (0..9).map(|_| PaneId::new()).collect();
+    let tree = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![
+            leaf(a),
+            LayoutChild::new(split(SplitDirection::Vertical, &tall)),
+            leaf(c),
+        ],
+    ));
+
+    // Nine bordered rows need 27 rows; the tab has 24, so the middle column
+    // drops out on its own. a and c then share 118 columns with one gap
+    // between them, not two.
+    let result = solve_with_min(&tree, rect(0, 0, 120, 24), sizing(2));
+    let mut expected = vec![(a, rect(0, 0, 59, 24))];
+    expected.extend(tall.iter().map(|&pane| (pane, Rect::zero())));
+    expected.push((c, rect(61, 0, 59, 24)));
+    assert_eq!(result.panes, expected);
+    assert_eq!(result.suppressed, tall);
+    assert!(!result.all_suppressed);
 }

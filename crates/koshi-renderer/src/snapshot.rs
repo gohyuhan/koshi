@@ -416,6 +416,9 @@ pub struct TabSnapshot {
     /// True when every pane is suppressed because the tab has no room to draw —
     /// the renderer fills the whole frame with the "terminal too small" overlay.
     pub all_suppressed: bool,
+    /// Blank cells between two panes that meet along a horizontal or
+    /// vertical split, in the [`layout_solved`](Self::layout_solved) space.
+    pub gap: u16,
 }
 
 /// One pane's placement in the solved layout: where its box sits, its content

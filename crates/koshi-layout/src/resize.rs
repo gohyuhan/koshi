@@ -18,7 +18,7 @@ use koshi_core::ids::PaneId;
 use thiserror::Error;
 
 use crate::size::SizeWeight;
-use crate::solver::{directional_child_rects, slot_floor, stack_min_size, MIN_PANE_SIZE};
+use crate::solver::{directional_child_rects, slot_floor, stack_min_size, PaneSizing};
 use crate::tree::{split_axis, LayoutNode};
 
 /// A rejected resize. The caller's tree is unchanged in every case.
@@ -75,19 +75,20 @@ pub fn resize(
     direction: Direction,
     size: i16,
 ) -> Result<LayoutNode, ResizeError> {
-    resize_with_min(tree, tab_rect, pane, direction, size, MIN_PANE_SIZE)
+    resize_with_min(tree, tab_rect, pane, direction, size, PaneSizing::default())
 }
 
 /// Like [`resize`] but with an explicit per-pane content minimum — the
-/// configured pane minimum, floored at [`MIN_PANE_SIZE`] by the caller — so
-/// the donating side's spare is measured against that floor.
+/// configured pane minimum, floored at [`crate::solver::MIN_PANE_SIZE`] by the caller — so
+/// the donating side's spare is measured against that floor. The donor's
+/// solved size excludes the [`PaneSizing::gap`] beside it.
 pub fn resize_with_min(
     tree: &LayoutNode,
     tab_rect: Rect,
     pane: PaneId,
     direction: Direction,
     size: i16,
-    min: Size,
+    sizing: PaneSizing,
 ) -> Result<LayoutNode, ResizeError> {
     let Some(path) = tree.path_to(pane) else {
         return Err(ResizeError::PaneNotFound { pane });
@@ -114,14 +115,14 @@ pub fn resize_with_min(
 
     // The donor can give only what its solved size holds above its floor.
     let split = tree.split_at(&path[..depth]);
-    let split_rect = rect_at(tree, tab_rect, &path[..depth], min);
-    let donor_rect = directional_child_rects(split, split_rect, min)[donor];
+    let split_rect = rect_at(tree, tab_rect, &path[..depth], sizing);
+    let donor_rect = directional_child_rects(split, split_rect, sizing)[donor];
     let donor_cells = if horizontal {
         donor_rect.size.cols
     } else {
         donor_rect.size.rows
     };
-    let spare = donor_cells.saturating_sub(slot_floor(split, donor, horizontal, min));
+    let spare = donor_cells.saturating_sub(slot_floor(split, donor, horizontal, sizing));
     if amount > spare {
         return Err(ResizeError::MinSize {
             requested: amount,
@@ -216,7 +217,7 @@ fn find_border(
 /// with the shared child-rect computation; a stacked level carves one
 /// header row per collapsed member out of the active child's rect, shifted
 /// below the headers above it, and passes zero to collapsed ones.
-fn rect_at(tree: &LayoutNode, tab_rect: Rect, path: &[usize], min: Size) -> Rect {
+fn rect_at(tree: &LayoutNode, tab_rect: Rect, path: &[usize], sizing: PaneSizing) -> Rect {
     let mut node = tree;
     let mut rect = tab_rect;
     for &index in path {
@@ -225,7 +226,7 @@ fn rect_at(tree: &LayoutNode, tab_rect: Rect, path: &[usize], min: Size) -> Rect
         };
         rect = match split.direction {
             SplitDirection::Horizontal | SplitDirection::Vertical => {
-                directional_child_rects(split, rect, min)[index]
+                directional_child_rects(split, rect, sizing)[index]
             }
             SplitDirection::Stacked => {
                 // Mirror `solve_stacked`: a rect that cannot hold every
@@ -233,7 +234,7 @@ fn rect_at(tree: &LayoutNode, tab_rect: Rect, path: &[usize], min: Size) -> Rect
                 // the whole stack to zero area; otherwise one header row per
                 // other member is carved out of the active rect, headers
                 // above the active member shifting it down.
-                let needed = stack_min_size(split, min);
+                let needed = stack_min_size(split, sizing);
                 if rect.size.rows < needed.rows || rect.size.cols < needed.cols {
                     Rect::zero()
                 } else if index == split.active_index() {

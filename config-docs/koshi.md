@@ -42,6 +42,7 @@ it sees the same sizes.
 |---|---|---|---|
 | `min-cols` | integer — smallest width a pane may shrink to | `2` | ≥ 0.1.0 |
 | `min-rows` | integer — smallest height a pane may shrink to | `1` | ≥ 0.1.0 |
+| `gap` | integer — blank cells between two panes that meet along a horizontal or vertical split; stacked panes stay contiguous | `0` | ≥ 0.4.0 |
 
 ## `scrollback`
 
@@ -325,6 +326,7 @@ remote-reconnect #true
 pane {
     min-cols 2
     min-rows 1
+    gap 0
 }
 
 scrollback {

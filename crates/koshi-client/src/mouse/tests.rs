@@ -132,6 +132,7 @@ fn frame(panes: &[MousePane], focused: Option<PaneId>, kind: PaneKind) -> MouseF
                 stack_headers: Vec::new(),
                 layout_mode: LayoutMode::Tiled,
                 all_suppressed: false,
+                gap: 0,
             },
             tabs_metadata: vec![TabMeta {
                 id: tab_id,
@@ -1785,4 +1786,86 @@ fn ending_the_gestures_drops_all_four_and_leaves_the_pointer_and_the_strip_alone
         Vec::new(),
         "no gesture is under way, so the drag decides nothing"
     );
+}
+
+#[test]
+fn a_neighbor_across_the_gap_counts_as_adjacent() {
+    let left = PaneId::new();
+    let right = PaneId::new();
+    let mut frame = frame(
+        &[plain_pane(left), plain_pane(right)],
+        Some(left),
+        PaneKind::Terminal,
+    );
+    frame.session.active_tab.gap = 2;
+    frame.session.active_tab.layout_solved[0].rect =
+        Rect::new(Point { x: 0, y: 0 }, Size { cols: 40, rows: 20 });
+    frame.session.active_tab.layout_solved[1].rect =
+        Rect::new(Point { x: 42, y: 0 }, Size { cols: 38, rows: 20 });
+
+    assert!(
+        border_has_neighbor(&frame, left, Direction::Right),
+        "the right pane starts 2 cells past column 39"
+    );
+    assert!(
+        border_has_neighbor(&frame, right, Direction::Left),
+        "the left pane ends 2 cells before column 42"
+    );
+
+    frame.session.active_tab.layout_solved[1].rect.origin.x = 43;
+
+    assert!(
+        !border_has_neighbor(&frame, left, Direction::Right),
+        "a 3-cell distance is not the tab's gap"
+    );
+    assert!(!border_has_neighbor(&frame, right, Direction::Left));
+
+    frame.session.active_tab.layout_solved[1].rect.origin.x = 41;
+
+    assert!(
+        !border_has_neighbor(&frame, left, Direction::Right),
+        "a 1-cell distance is not the tab's gap"
+    );
+    assert!(!border_has_neighbor(&frame, right, Direction::Left));
+}
+
+#[test]
+fn a_neighbor_below_the_gap_counts_as_adjacent() {
+    let top = PaneId::new();
+    let bottom = PaneId::new();
+    let mut frame = frame(
+        &[plain_pane(top), plain_pane(bottom)],
+        Some(top),
+        PaneKind::Terminal,
+    );
+    frame.session.active_tab.gap = 2;
+    frame.session.active_tab.layout_solved[0].rect =
+        Rect::new(Point { x: 0, y: 0 }, Size { cols: 40, rows: 20 });
+    frame.session.active_tab.layout_solved[1].rect =
+        Rect::new(Point { x: 0, y: 22 }, Size { cols: 40, rows: 18 });
+
+    assert!(
+        border_has_neighbor(&frame, top, Direction::Down),
+        "the bottom pane starts 2 cells past row 19"
+    );
+    assert!(
+        border_has_neighbor(&frame, bottom, Direction::Up),
+        "the top pane ends 2 cells before row 22"
+    );
+
+    frame.session.active_tab.layout_solved[1].rect.origin.y = 23;
+
+    assert!(
+        !border_has_neighbor(&frame, top, Direction::Down),
+        "a 3-cell distance is not the tab's gap"
+    );
+    assert!(!border_has_neighbor(&frame, bottom, Direction::Up));
+
+    frame.session.active_tab.layout_solved[1].rect.origin.y = 21;
+
+    assert!(
+        !border_has_neighbor(&frame, top, Direction::Down),
+        "a 1-cell distance is not the tab's gap"
+    );
+    assert!(!border_has_neighbor(&frame, bottom, Direction::Up));
 }
