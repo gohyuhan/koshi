@@ -51,6 +51,7 @@ fn snapshot() -> Box<RenderSnapshot> {
                 stack_headers: Vec::new(),
                 layout_mode: LayoutMode::Tiled,
                 all_suppressed: false,
+                gap: 0,
             },
             tabs_metadata: Vec::new(),
         },

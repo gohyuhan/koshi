@@ -7,11 +7,35 @@ use koshi_test_support::layout_assert::{
 };
 
 use super::*;
-use crate::solver::solve;
+use crate::solver::{solve, solve_with_min, MIN_PANE_SIZE};
 use crate::tree::{LayoutChild, SplitNode};
 
 fn tab() -> Rect {
     Rect::at_origin(Size { cols: 80, rows: 24 })
+}
+
+/// The default content floor with the given gap between kept children of a
+/// directional split.
+fn sizing(gap: u16) -> PaneSizing {
+    PaneSizing {
+        min: MIN_PANE_SIZE,
+        gap,
+    }
+}
+
+/// Construct a rectangle with the given origin (x, y) and size (cols, rows).
+fn rect(x: u16, y: u16, cols: u16, rows: u16) -> Rect {
+    Rect::new(Point { x, y }, Size { cols, rows })
+}
+
+/// Solves the layout under `sizing` and returns the rect of the given pane.
+fn solved_rect(tree: &LayoutNode, tab: Rect, sizing: PaneSizing, pane: PaneId) -> Rect {
+    solve_with_min(tree, tab, sizing)
+        .panes
+        .into_iter()
+        .find(|&(id, _)| id == pane)
+        .expect("pane is in the layout")
+        .1
 }
 
 fn leaf(pane: PaneId) -> LayoutChild {
@@ -452,7 +476,6 @@ fn a_pane_still_resizes_after_a_sibling_was_closed() {
     // survivors carry no stale resize delta, so a following resize moves the
     // border by exactly its cell count.
     use crate::edit::remove_pane;
-    use crate::solver::MIN_PANE_SIZE;
 
     let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
     let tree = LayoutNode::Split(SplitNode::with_equal_weights(
@@ -460,7 +483,7 @@ fn a_pane_still_resizes_after_a_sibling_was_closed() {
         vec![leaf(a), leaf(b), leaf(c)],
     ));
 
-    let (after_close, _) = remove_pane(&tree, tab(), b, MIN_PANE_SIZE).unwrap();
+    let (after_close, _) = remove_pane(&tree, tab(), b, sizing(0)).unwrap();
     assert_eq!(after_close.leaf_panes(), [a, c]);
     // The two survivors share the tab evenly with no leftover delta.
     assert_eq!(solved_size(&after_close, tab(), a).cols, 40);
@@ -492,6 +515,53 @@ fn a_request_exactly_at_the_spare_boundary_succeeds_one_past_it_fails() {
         ResizeError::MinSize {
             requested: 2,
             spare: 1,
+        }
+    );
+}
+
+#[test]
+fn a_resize_moves_the_border_by_its_cell_count_with_a_gap_reserved() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = pair(SplitDirection::Horizontal, a, b);
+    let sizing = PaneSizing {
+        min: MIN_PANE_SIZE,
+        gap: 2,
+    };
+
+    // The two-column gap comes off the 80-column axis first, so the two
+    // panes share 78 cells as 39 each.
+    assert_eq!(solved_rect(&tree, tab(), sizing, a), rect(0, 0, 39, 24));
+    assert_eq!(solved_rect(&tree, tab(), sizing, b), rect(41, 0, 39, 24));
+
+    // Growing a's right border by one column moves exactly one column
+    // across; the gap keeps its two cells.
+    let resized = resize_with_min(&tree, tab(), a, Direction::Right, 1, sizing).unwrap();
+    assert_eq!(solved_rect(&resized, tab(), sizing, a), rect(0, 0, 40, 24));
+    assert_eq!(solved_rect(&resized, tab(), sizing, b), rect(42, 0, 38, 24));
+}
+
+#[test]
+fn the_spare_across_a_gap_comes_from_the_donor_rect_the_gap_left() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = pair(SplitDirection::Horizontal, a, b);
+    let sizing = PaneSizing {
+        min: MIN_PANE_SIZE,
+        gap: 2,
+    };
+
+    // b holds 39 of the 78 columns past the gap and floors at four, so it
+    // can give exactly 35. Taking all 35 leaves b its floor two cells past
+    // a's new edge; asking for one more is refused with that same spare.
+    let allowed = resize_with_min(&tree, tab(), a, Direction::Right, 35, sizing).unwrap();
+    assert_eq!(solved_rect(&allowed, tab(), sizing, a), rect(0, 0, 74, 24));
+    assert_eq!(solved_rect(&allowed, tab(), sizing, b), rect(76, 0, 4, 24));
+
+    let err = resize_with_min(&tree, tab(), a, Direction::Right, 36, sizing).unwrap_err();
+    assert_eq!(
+        err,
+        ResizeError::MinSize {
+            requested: 36,
+            spare: 35,
         }
     );
 }

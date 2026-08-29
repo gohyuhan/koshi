@@ -205,6 +205,7 @@ fn snapshot(content: PaneId, empty: PaneId) -> RenderSnapshot {
                 stack_headers: Vec::new(),
                 layout_mode: LayoutMode::Fullscreen { focused: content },
                 all_suppressed: false,
+                gap: 0,
             },
             tabs_metadata: vec![
                 TabMeta {
@@ -418,4 +419,16 @@ fn the_session_tab_slot_and_client_fields_copy_straight_across() {
             mouse_select: true,
         }
     );
+}
+
+#[test]
+fn the_tab_gap_travels_with_the_frame() {
+    let content = PaneId::new();
+    let empty = PaneId::new();
+    let mut snapshot = snapshot(content, empty);
+    snapshot.session.active_tab.gap = 2;
+
+    let frame = wire_frame(&snapshot);
+
+    assert_eq!(frame.session.active_tab.gap, 2);
 }

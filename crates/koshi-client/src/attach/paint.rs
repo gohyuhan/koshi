@@ -53,6 +53,7 @@ pub fn to_snapshot(frame: &PaintedFrame) -> RenderSnapshot {
                 stack_headers: tab.stack_headers.clone(),
                 layout_mode: tab.layout_mode,
                 all_suppressed: tab.all_suppressed,
+                gap: tab.gap,
             },
             tabs_metadata: frame.session.tabs.iter().map(to_tab_meta).collect(),
         },

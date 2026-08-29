@@ -95,8 +95,7 @@ impl Server {
         let pane_id = PaneId::new();
 
         // Chrome owns one row above and below the pane region.
-        let spawn_size =
-            size_root_pane(pane_id, pane_viewport(viewport), self.effective_pane_min());
+        let spawn_size = size_root_pane(pane_id, pane_viewport(viewport), self.pane_sizing());
 
         // Launch the shell first: on failure nothing is registered. The spec
         // carries the pane's in-session identity vars in its env overlay.
@@ -219,11 +218,11 @@ impl Server {
         // what was already spawned so no orphan child outlives the launch.
         let runtime_dir = koshi_paths::runtime_dir();
         let mut handles: Vec<(PaneId, PtyHandle, PtySize)> = Vec::new();
-        let pane_min = self.effective_pane_min();
+        let sizing = self.pane_sizing();
         for plan in &plans {
             // Size every pane against the tab's whole tree, so a multi-pane tab
             // spawns each child at its tiled slice rather than the full tab.
-            let sizes = pane_spawn_sizes(&plan.layout, region, pane_min);
+            let sizes = pane_spawn_sizes(&plan.layout, region, sizing);
             for (pane_id, spawn) in plan.pane_ids.iter().zip(&plan.spawns) {
                 let spawn_size = sizes
                     .iter()

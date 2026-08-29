@@ -282,6 +282,7 @@ fn a_field_a_later_layer_leaves_unset_keeps_the_middle_layers_override() {
         pane: Some(PartialPaneConfig {
             min_cols: Some(3),
             min_rows: None,
+            gap: None,
         }),
         ..Default::default()
     };
@@ -297,6 +298,7 @@ fn sections_from_different_layers_combine() {
         pane: Some(PartialPaneConfig {
             min_cols: Some(10),
             min_rows: None,
+            gap: None,
         }),
         ..Default::default()
     };
@@ -315,6 +317,23 @@ fn sections_from_different_layers_combine() {
     assert_eq!(server.pane.min_rows, 1);
     assert_eq!(client.mouse.scroll_lines, 7);
     assert!(client.mouse.border_resize);
+}
+
+#[test]
+fn a_layer_that_sets_the_pane_gap_overrides_the_default() {
+    let layer = PartialKoshiConfig {
+        pane: Some(PartialPaneConfig {
+            min_cols: None,
+            min_rows: None,
+            gap: Some(3),
+        }),
+        ..Default::default()
+    };
+    let set = merge_server(ServerConfig::default(), vec![layer]);
+    let unset = merge_server(ServerConfig::default(), Vec::new());
+
+    assert_eq!(set.pane.gap, 3);
+    assert_eq!(unset.pane.gap, 0);
 }
 
 #[test]

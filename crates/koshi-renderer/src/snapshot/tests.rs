@@ -42,6 +42,7 @@ fn fixture(grid: Arc<Grid>) -> RenderSnapshot {
         stack_headers: Vec::new(),
         layout_mode: LayoutMode::Tiled,
         all_suppressed: false,
+        gap: 0,
     };
 
     let session = SessionSnapshot {

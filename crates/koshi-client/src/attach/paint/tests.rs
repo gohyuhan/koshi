@@ -154,6 +154,7 @@ fn snapshot(panes: Vec<PaneSnapshot>) -> RenderSnapshot {
                 stack_headers: Vec::new(),
                 layout_mode: LayoutMode::Fullscreen { focused: content },
                 all_suppressed: false,
+                gap: 0,
             },
             tabs_metadata: vec![
                 TabMeta {
@@ -187,6 +188,15 @@ fn snapshot(panes: Vec<PaneSnapshot>) -> RenderSnapshot {
 fn a_frame_that_travels_and_is_read_back_is_the_frame_that_was_sent() {
     let sent = snapshot(vec![content_pane(PaneId::new()), empty_pane(PaneId::new())]);
     assert_eq!(to_snapshot(&wire_frame(&sent)), sent);
+}
+
+#[test]
+fn the_tabs_gap_arrives_with_the_frame() {
+    let sent = snapshot(vec![content_pane(PaneId::new()), empty_pane(PaneId::new())]);
+    let mut wire = wire_frame(&sent);
+    wire.session.active_tab.gap = 2;
+
+    assert_eq!(to_snapshot(&wire).session.active_tab.gap, 2);
 }
 
 #[test]

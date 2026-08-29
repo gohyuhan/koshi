@@ -31,7 +31,7 @@ use koshi_core::ids::{ClientId, PaneId};
 use koshi_core::mouse::MouseTracking;
 use koshi_layout::content::content_rects;
 use koshi_layout::mode::LayoutMode;
-use koshi_layout::solver::{solve_with_mode_min, SolveResult};
+use koshi_layout::solver::{solve_with_mode_min, PaneSizing, SolveResult};
 use koshi_pane::pane::lifecycle::PaneLifecycle;
 use koshi_pane::pane::state::PaneKind;
 use koshi_renderer::snapshot::{
@@ -115,7 +115,8 @@ impl Server {
             .tab_viewport(active_tab_id)
             .unwrap_or(Size { cols: 0, rows: 0 });
         let layout_mode = client.layout_mode(active_tab_id);
-        let solve = solve_tab(tab, layout_mode, effective_size, self.effective_pane_min());
+        let sizing = self.pane_sizing();
+        let solve = solve_tab(tab, layout_mode, effective_size, sizing);
         let content = content_rects(&solve);
 
         // One `PaneSlot` per leaf: outer rect from the solve, inner (content) rect
@@ -154,6 +155,7 @@ impl Server {
             stack_headers: solve.stack_headers,
             layout_mode,
             all_suppressed: solve.all_suppressed,
+            gap: sizing.gap,
         };
 
         // Metadata for every tab in the session, in display (index) order.
@@ -360,8 +362,13 @@ fn shorten_home(path: &std::path::Path, home: Option<&str>) -> String {
 /// `mode` is a viewing client's, never the tab's: the tab holds only the tree,
 /// and whether a pane is zoomed is a fact about one client's view. Two clients
 /// on this tab can pass different modes for the same tree in the same frame.
-pub(crate) fn solve_tab(tab: &Tab, mode: LayoutMode, viewport: Size, min: Size) -> SolveResult {
-    solve_with_mode_min(tab.layout(), mode, Rect::at_origin(viewport), min)
+pub(crate) fn solve_tab(
+    tab: &Tab,
+    mode: LayoutMode,
+    viewport: Size,
+    sizing: PaneSizing,
+) -> SolveResult {
+    solve_with_mode_min(tab.layout(), mode, Rect::at_origin(viewport), sizing)
 }
 
 /// Cut `selection` down to the rows this frame shows, as a column range per

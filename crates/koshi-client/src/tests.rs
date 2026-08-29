@@ -62,6 +62,7 @@ fn frame(client_id: ClientId, lock_mode: LockMode, mouse_select: bool) -> Box<Re
                 stack_headers: Vec::new(),
                 layout_mode: LayoutMode::Tiled,
                 all_suppressed: false,
+                gap: 0,
             },
             tabs_metadata: Vec::new(),
         },

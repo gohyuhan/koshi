@@ -639,6 +639,7 @@ fn painted_frame() -> crate::frame::PaintedFrame {
                 stack_headers: Vec::new(),
                 layout_mode: koshi_layout::mode::LayoutMode::Tiled,
                 all_suppressed: false,
+                gap: 0,
             },
             tabs: Vec::new(),
         },

@@ -100,6 +100,12 @@ const FIELDS: &[FieldHelp] = &[
         "Smallest pane height in rows.",
     ),
     field(
+        "koshi.pane.gap",
+        "koshi.kdl",
+        "0",
+        "Blank cells between two panes that meet along a split.",
+    ),
+    field(
         "koshi.scrollback.max-lines",
         "koshi.kdl",
         "10000",

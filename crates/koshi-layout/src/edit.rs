@@ -6,12 +6,12 @@
 //! nothing; there is no half-edited tree.
 
 use koshi_core::error::{DomainCategory, DomainError, Severity};
-use koshi_core::geometry::{Direction, Rect, Size, SplitDirection};
+use koshi_core::geometry::{Direction, Rect, SplitDirection};
 use koshi_core::ids::PaneId;
 use thiserror::Error;
 
 use crate::size::SizeWeight;
-use crate::solver::{cell_area, solve_with_min};
+use crate::solver::{cell_area, solve_with_min, PaneSizing};
 use crate::tree::{split_axis, LayoutChild, LayoutNode, SplitNode};
 
 /// A rejected split.
@@ -181,9 +181,9 @@ pub struct RemovalInfo {
 /// member with a selectable header until something closes it explicitly.
 ///
 /// `tab_rect` is the rect the tree currently solves into; it anchors the
-/// returned [`RemovalInfo`] geometry. `min` is the effective per-pane minimum
-/// content size, so the before/after solves here agree with the caller's own
-/// solve on which panes are suppressed.
+/// returned [`RemovalInfo`] geometry. `sizing` is the caller's own
+/// [`PaneSizing`], so the before/after solves here agree with the caller's
+/// solve on which panes are suppressed and where each rect sits.
 ///
 /// # Errors
 ///
@@ -195,10 +195,10 @@ pub fn remove_pane(
     tree: &LayoutNode,
     tab_rect: Rect,
     pane: PaneId,
-    min: Size,
+    sizing: PaneSizing,
 ) -> Result<(LayoutNode, RemovalInfo), RemoveError> {
     // Solve once before the edit so the rect being freed is known exactly.
-    let before = solve_with_min(tree, tab_rect, min);
+    let before = solve_with_min(tree, tab_rect, sizing);
     let Some(&(_, old_rect)) = before.panes.iter().find(|&&(id, _)| id == pane) else {
         return Err(RemoveError::PaneNotFound { pane });
     };
@@ -214,7 +214,7 @@ pub fn remove_pane(
 
     // Solve again after the edit and collect every surviving, visible pane
     // that either grew into the freed space or simply changed size.
-    let after = solve_with_min(&result, tab_rect, min);
+    let after = solve_with_min(&result, tab_rect, sizing);
     let mut absorbers: Vec<(PaneId, u64)> = after
         .panes
         .iter()

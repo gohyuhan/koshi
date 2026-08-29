@@ -33,7 +33,7 @@ impl Server {
         // One process serves one session: genesis seeds exactly one and no
         // command creates another in-process.
         let session = self.sessions.values().next()?;
-        let min = self.effective_pane_min();
+        let sizing = self.pane_sizing();
 
         let mut wanted_tabs: Vec<&Tab> = session
             .tabs
@@ -58,7 +58,7 @@ impl Server {
                         .map(|client| {
                             let mode = client.layout_mode(tab.id());
                             let solve =
-                                crate::runtime::snapshot::solve_tab(tab, mode, viewport, min);
+                                crate::runtime::snapshot::solve_tab(tab, mode, viewport, sizing);
                             SolvedTab {
                                 client: client.id(),
                                 viewport,

@@ -52,6 +52,7 @@ pub fn wire_frame(snapshot: &RenderSnapshot) -> PaintedFrame {
                 stack_headers: tab.stack_headers.clone(),
                 layout_mode: tab.layout_mode,
                 all_suppressed: tab.all_suppressed,
+                gap: tab.gap,
             },
             tabs: snapshot
                 .session

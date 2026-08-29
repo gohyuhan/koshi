@@ -56,6 +56,7 @@ fn painted_frame() -> PaintedFrame {
                 stack_headers: Vec::new(),
                 layout_mode: LayoutMode::Tiled,
                 all_suppressed: false,
+                gap: 0,
             },
             tabs: vec![FrameTabMeta {
                 id: tab_id,

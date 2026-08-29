@@ -100,6 +100,11 @@ pub struct FrameTab {
     /// True when every pane is suppressed because the tab has no room to draw;
     /// the client fills the whole frame with the "terminal too small" overlay.
     pub all_suppressed: bool,
+    /// Blank cells between two panes that meet along a horizontal or
+    /// vertical split, in the [`slots`](Self::slots) space. A frame from a
+    /// server without this field reads as `0`.
+    #[serde(default, deserialize_with = "crate::wire::or_default")]
+    pub gap: u16,
 }
 
 /// One tab's entry in the tab bar: enough to draw the tab list without its

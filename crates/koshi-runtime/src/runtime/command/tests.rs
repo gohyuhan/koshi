@@ -25,7 +25,7 @@ use koshi_core::naming;
 use koshi_core::process::{ExitStatus, PtySize, ShellKind, SpawnSpec};
 use koshi_layout::edit::split_leaf;
 use koshi_layout::mode::LayoutMode;
-use koshi_layout::solver::MIN_PANE_SIZE;
+use koshi_layout::solver::PaneSizing;
 use koshi_layout::tree::{LayoutChild, SplitNode};
 use koshi_pane::pane::lifecycle::{PaneLifecycle, PaneLifecycleEvent};
 use koshi_pane::pane::policy::PaneExitPolicy;
@@ -5272,7 +5272,7 @@ fn new_pane_cross_session_sizes_to_a_target_session_viewer() {
             &candidate,
             LayoutMode::Tiled,
             Rect::at_origin(Size { cols: 40, rows: 8 }),
-            MIN_PANE_SIZE,
+            PaneSizing::default(),
         ));
         let rect = rects
             .iter()
@@ -6812,7 +6812,7 @@ fn resize_pane_min_size_rejection_reports_the_spare_and_mutates_nothing() {
         &rt.sessions[&sid],
         rt.sessions[&sid].tabs.keys().copied().next().unwrap(),
         viewport,
-        MIN_PANE_SIZE,
+        PaneSizing::default(),
     );
     let resizes_before = fake.resizes(pane_a).unwrap().len();
 
@@ -6842,7 +6842,7 @@ fn resize_pane_min_size_rejection_reports_the_spare_and_mutates_nothing() {
         &rt.sessions[&sid],
         rt.sessions[&sid].tabs.keys().copied().next().unwrap(),
         viewport,
-        MIN_PANE_SIZE,
+        PaneSizing::default(),
     );
     assert_eq!(rects_after, rects_before);
     assert_eq!(fake.resizes(pane_a).unwrap().len(), resizes_before);
@@ -6963,7 +6963,8 @@ fn resize_pane_with_no_attached_client_is_rejected() {
     let sid = session.id;
     rt.sessions.insert(sid, session);
     let viewport = Size { cols: 80, rows: 24 };
-    let rects_before = Server::tab_content_rects(&rt.sessions[&sid], tab, viewport, MIN_PANE_SIZE);
+    let rects_before =
+        Server::tab_content_rects(&rt.sessions[&sid], tab, viewport, PaneSizing::default());
 
     // No client is attached anywhere, so no tab is viewed and no terminal
     // displays the result.
@@ -6982,7 +6983,7 @@ fn resize_pane_with_no_attached_client_is_rejected() {
         }
     );
     assert_eq!(
-        Server::tab_content_rects(&rt.sessions[&sid], tab, viewport, MIN_PANE_SIZE),
+        Server::tab_content_rects(&rt.sessions[&sid], tab, viewport, PaneSizing::default()),
         rects_before
     );
 }
@@ -7011,8 +7012,12 @@ fn resize_pane_in_an_unviewed_tab_is_rejected() {
     let sid = session.id;
     rt.sessions.insert(sid, session);
     let viewport = Size { cols: 80, rows: 24 };
-    let rects_before =
-        Server::tab_content_rects(&rt.sessions[&sid], tab_back, viewport, MIN_PANE_SIZE);
+    let rects_before = Server::tab_content_rects(
+        &rt.sessions[&sid],
+        tab_back,
+        viewport,
+        PaneSizing::default(),
+    );
 
     // A client is attached, but none views the back tab — no terminal
     // displays the result, so the resize rejects and mutates nothing.
@@ -7034,7 +7039,12 @@ fn resize_pane_in_an_unviewed_tab_is_rejected() {
         }
     );
     assert_eq!(
-        Server::tab_content_rects(&rt.sessions[&sid], tab_back, viewport, MIN_PANE_SIZE),
+        Server::tab_content_rects(
+            &rt.sessions[&sid],
+            tab_back,
+            viewport,
+            PaneSizing::default()
+        ),
         rects_before
     );
 }
@@ -9723,7 +9733,7 @@ fn client_attach_reflows_the_shared_tab_to_the_smaller_effective_size() {
     let events =
         rt.handle_client_attach(sid, joining, small, None, tab_id, SystemTime::now(), false);
 
-    let expected = size_root_pane(pane, pane_viewport(small), MIN_PANE_SIZE);
+    let expected = size_root_pane(pane, pane_viewport(small), PaneSizing::default());
     assert_eq!(fake.resizes(pane).unwrap().len(), resizes_before + 1);
     assert_eq!(*fake.resizes(pane).unwrap().last().unwrap(), expected);
     // The joining client had focused nothing here, so it lands on the tab's
@@ -9759,7 +9769,7 @@ fn client_resize_updates_full_viewport_and_reflows_middle_pane_region() {
     let (_sid, _tab, pane) = only_slot(&rt);
 
     let events = rt.handle_client_resize(client, resized, None);
-    let expected = size_root_pane(pane, pane_viewport(resized), MIN_PANE_SIZE);
+    let expected = size_root_pane(pane, pane_viewport(resized), PaneSizing::default());
 
     assert_eq!(
         rt.session_for_client(client)
@@ -9945,7 +9955,7 @@ fn client_detach_reflows_the_shared_tab_back_to_the_remaining_viewport() {
     // back and the pane's PTY reflows up.
     let events = rt.handle_client_detach(small_client);
 
-    let expected = size_root_pane(pane, pane_viewport(big), MIN_PANE_SIZE);
+    let expected = size_root_pane(pane, pane_viewport(big), PaneSizing::default());
     assert_eq!(fake.resizes(pane).unwrap().len(), resizes_before + 1);
     assert_eq!(*fake.resizes(pane).unwrap().last().unwrap(), expected);
     assert_eq!(
@@ -10350,7 +10360,7 @@ fn client_reattach_onto_a_different_tab_reflows_the_tab_it_left() {
     rt.handle_client_attach(sid, client_c, small, None, tab_1, SystemTime::now(), false);
     assert_eq!(
         *fake.resizes(pane_1).unwrap().last().unwrap(),
-        size_root_pane(pane_1, pane_viewport(small), MIN_PANE_SIZE)
+        size_root_pane(pane_1, pane_viewport(small), PaneSizing::default())
     );
     let resizes_before = fake.resizes(pane_1).unwrap().len();
 
@@ -10358,7 +10368,7 @@ fn client_reattach_onto_a_different_tab_reflows_the_tab_it_left() {
     // B remains, so `pane_1` grows back — the tab the client left is reflowed.
     let events = rt.handle_client_attach(sid, client_c, big, None, tab_2, SystemTime::now(), false);
 
-    let expected = size_root_pane(pane_1, pane_viewport(big), MIN_PANE_SIZE);
+    let expected = size_root_pane(pane_1, pane_viewport(big), PaneSizing::default());
     assert_eq!(fake.resizes(pane_1).unwrap().len(), resizes_before + 1);
     assert_eq!(*fake.resizes(pane_1).unwrap().last().unwrap(), expected);
     // `client_c` moved onto `tab_2`, where it had focused nothing, so it lands
@@ -10653,7 +10663,7 @@ fn cross_session_attach_detaches_the_client_from_its_old_session() {
 
     // Session 2's pane shrinks to the new minimum; session 1's pane keeps its
     // size (its tab lost its only viewer).
-    let expected = size_root_pane(pane_2, pane_viewport(small), MIN_PANE_SIZE);
+    let expected = size_root_pane(pane_2, pane_viewport(small), PaneSizing::default());
     assert_eq!(*fake.resizes(pane_2).unwrap().last().unwrap(), expected);
     assert_eq!(fake.resizes(pane_1).unwrap().len(), pane_1_resizes_before);
     // The client had focused nothing in session 2, so it lands on that tab's
@@ -10789,7 +10799,7 @@ fn pane_spawn_sizes_gives_each_pane_of_a_two_pane_tab_its_own_tile() {
 
     // Each pane is sized to its 40-column half minus its one-cell border on
     // each side (38 content columns, 22 rows), not the whole 80-column tab.
-    let sizes = pane_spawn_sizes(&tree, viewport, MIN_PANE_SIZE);
+    let sizes = pane_spawn_sizes(&tree, viewport, PaneSizing::default());
     assert_eq!(
         sizes,
         vec![
@@ -10801,7 +10811,7 @@ fn pane_spawn_sizes_gives_each_pane_of_a_two_pane_tab_its_own_tile() {
     // A single pane over the same viewport keeps the full inner width, so the
     // two-pane tiles really are narrower.
     assert_eq!(
-        size_root_pane(a, viewport, MIN_PANE_SIZE),
+        size_root_pane(a, viewport, PaneSizing::default()),
         PtySize { cols: 78, rows: 22 }
     );
 }
@@ -10839,19 +10849,56 @@ fn terminal_identity_env_keeps_a_panes_own_value_over_the_config() {
 }
 
 #[test]
-fn effective_pane_min_floors_a_below_minimum_config_to_the_hard_minimum() {
+fn pane_sizing_floors_the_minimum_and_carries_the_gap() {
     let (mut rt, _fake, _tx) = new_runtime_with_fake();
+
+    // The default config gives the hard floor and no gap.
+    assert_eq!(
+        rt.pane_sizing(),
+        PaneSizing {
+            min: Size { cols: 2, rows: 1 },
+            gap: 0,
+        }
+    );
 
     // A configured minimum below the hard floor is raised to it, so a pane can
     // never be driven below the size a PTY can run at.
     rt.config.pane.min_cols = 0;
     rt.config.pane.min_rows = 0;
-    assert_eq!(rt.effective_pane_min(), Size { cols: 2, rows: 1 });
+    assert_eq!(rt.pane_sizing().min, Size { cols: 2, rows: 1 });
 
     // A configured minimum above the floor is honored as written.
     rt.config.pane.min_cols = 10;
     rt.config.pane.min_rows = 5;
-    assert_eq!(rt.effective_pane_min(), Size { cols: 10, rows: 5 });
+    assert_eq!(rt.pane_sizing().min, Size { cols: 10, rows: 5 });
+
+    // The configured gap is carried through as written.
+    rt.config.pane.gap = 3;
+    assert_eq!(rt.pane_sizing().gap, 3);
+}
+
+#[test]
+fn the_snapshot_carries_the_gap_and_leaves_it_between_two_side_by_side_panes() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let viewport = Size { cols: 80, rows: 24 };
+    let client = rt
+        .bootstrap_local(SessionId::new(), viewport, SystemTime::now())
+        .expect("bootstrap");
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client),
+        Command::NewPane(new_pane_args()),
+    ));
+    rt.config.pane.gap = 2;
+
+    let snap = rt.build_snapshot(client).expect("a snapshot");
+
+    assert_eq!(snap.session.active_tab.gap, 2);
+    let slots = &snap.session.active_tab.layout_solved;
+    assert_eq!(slots.len(), 2);
+    assert_eq!(
+        slots[1].rect.origin.x,
+        slots[0].rect.origin.x + slots[0].rect.size.cols + 2
+    );
 }
 
 #[test]
@@ -12939,7 +12986,7 @@ fn a_new_pane_for_a_starving_client_uses_the_other_viewers_size() {
     let solved = pane_spawn_sizes(
         rt.sessions[&sid].tabs[&tab].layout(),
         Size { cols: 80, rows: 22 },
-        MIN_PANE_SIZE,
+        PaneSizing::default(),
     );
     let expected = solved
         .iter()
@@ -12979,7 +13026,7 @@ fn a_resize_reporting_a_smaller_pane_area_resizes_each_pane_once() {
     let solved = pane_spawn_sizes(
         rt.sessions[&sid].tabs[&tab].layout(),
         reported,
-        MIN_PANE_SIZE,
+        PaneSizing::default(),
     );
     let size_of = |wanted: PaneId| {
         solved
@@ -13077,7 +13124,7 @@ fn a_client_reporting_a_size_after_starving_resizes_each_pane_again() {
     let solved = pane_spawn_sizes(
         rt.sessions[&sid].tabs[&tab].layout(),
         reported,
-        MIN_PANE_SIZE,
+        PaneSizing::default(),
     );
     let size_of = |wanted: PaneId| {
         solved
@@ -13216,7 +13263,7 @@ fn a_re_attach_reporting_no_pane_area_replaces_the_earlier_report() {
     assert_eq!(attached.pane_area(), Some(pane_viewport(viewport)));
     assert_eq!(
         *fake.resizes(pane).expect("resizes").last().unwrap(),
-        size_root_pane(pane, pane_viewport(viewport), MIN_PANE_SIZE)
+        size_root_pane(pane, pane_viewport(viewport), PaneSizing::default())
     );
 }
 

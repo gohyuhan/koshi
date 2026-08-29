@@ -78,6 +78,7 @@ fn frame() -> PaintedFrame {
                 stack_headers: Vec::new(),
                 layout_mode: LayoutMode::Tiled,
                 all_suppressed: false,
+                gap: 0,
             },
             tabs: vec![FrameTabMeta {
                 id: tab,
@@ -274,7 +275,8 @@ fn a_frame_encodes_to_the_shape_a_client_decodes() {
                     "effective_size": { "cols": 4, "rows": 3 },
                     "stack_headers": [],
                     "layout_mode": "Tiled",
-                    "all_suppressed": false
+                    "all_suppressed": false,
+                    "gap": 0
                 },
                 "tabs": [{
                     "id": "00000000-0000-0000-0000-000000000002",
@@ -342,6 +344,30 @@ fn a_frame_carrying_an_unknown_field_ignores_it() {
         frame(),
         "the extra field left nothing behind in the decoded frame"
     );
+}
+
+/// A frame from a server that sends no `gap` reads as `0`, and a frame that
+/// sends one reads back the value it was written with.
+#[test]
+fn a_frame_without_a_gap_reads_as_zero() {
+    let mut encoded = serde_json::to_value(frame()).expect("frame encodes");
+    encoded["session"]["active_tab"]
+        .as_object_mut()
+        .expect("a tab encodes as an object")
+        .remove("gap")
+        .expect("the tab encodes a gap");
+
+    // Decoded from text, the way the transport does it.
+    let decoded: PaintedFrame =
+        serde_json::from_str(&encoded.to_string()).expect("a frame with no gap decodes");
+    assert_eq!(decoded.session.active_tab.gap, 0);
+
+    let mut spaced = frame();
+    spaced.session.active_tab.gap = 2;
+    let encoded = serde_json::to_value(&spaced).expect("frame encodes");
+    let decoded: PaintedFrame =
+        serde_json::from_str(&encoded.to_string()).expect("a frame with a gap decodes");
+    assert_eq!(decoded.session.active_tab.gap, 2);
 }
 
 /// A value enum this build has no name for falls back to its plainest value,
@@ -443,4 +469,17 @@ fn a_cursor_shape_and_an_underline_colour_with_no_name_here_read_as_none() {
             .underline_color,
         None
     );
+}
+
+/// A `gap` that is not a cell count — negative, or a string — reads as `0`
+/// and leaves the rest of the frame intact.
+#[test]
+fn a_frame_whose_gap_is_not_a_count_reads_as_zero() {
+    for hostile in [serde_json::json!(-1), serde_json::json!("2")] {
+        let mut encoded = serde_json::to_value(frame()).expect("frame encodes");
+        encoded["session"]["active_tab"]["gap"] = hostile;
+        let decoded: PaintedFrame =
+            serde_json::from_str(&encoded.to_string()).expect("a frame with a bad gap decodes");
+        assert_eq!(decoded, frame());
+    }
 }

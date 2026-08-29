@@ -51,7 +51,7 @@ use koshi_layout::{
     focus::stack_activate,
     mode::LayoutMode,
     resize::{resize_with_min, ResizeError},
-    solver::{fits, solve_with_min, solve_with_mode_min},
+    solver::{fits, solve_with_min, solve_with_mode_min, PaneSizing},
     tree::LayoutNode,
 };
 use koshi_pane::pane::{
@@ -77,10 +77,10 @@ use koshi_session::session::{
 ///
 /// A pane the solve gives no content rect falls back to the whole `viewport`
 /// rect.
-pub(crate) fn size_root_pane(pane_id: PaneId, viewport: Size, min: Size) -> PtySize {
+pub(crate) fn size_root_pane(pane_id: PaneId, viewport: Size, sizing: PaneSizing) -> PtySize {
     let candidate = LayoutNode::Pane(pane_id);
     let tab_rect = Rect::at_origin(viewport);
-    let rects = content_rects(&solve_with_min(&candidate, tab_rect, min));
+    let rects = content_rects(&solve_with_min(&candidate, tab_rect, sizing));
     let rect = rects
         .iter()
         .find(|(id, _)| *id == pane_id)
@@ -98,10 +98,10 @@ pub(crate) fn size_root_pane(pane_id: PaneId, viewport: Size, min: Size) -> PtyS
 pub(crate) fn pane_spawn_sizes(
     layout: &LayoutNode,
     viewport: Size,
-    min: Size,
+    sizing: PaneSizing,
 ) -> Vec<(PaneId, PtySize)> {
     let tab_rect = Rect::at_origin(viewport);
-    content_rects(&solve_with_min(layout, tab_rect, min))
+    content_rects(&solve_with_min(layout, tab_rect, sizing))
         .into_iter()
         .map(|(pane, content)| (pane, compute_pty_size(content.unwrap_or(tab_rect))))
         .collect()
@@ -691,7 +691,7 @@ impl Server {
         session: &Session,
         tab_id: TabId,
         viewport: Size,
-        min: Size,
+        sizing: PaneSizing,
     ) -> Vec<(PaneId, Option<Rect>)> {
         let Some(tab) = session.tabs.get(&tab_id) else {
             return Vec::new();
@@ -708,7 +708,7 @@ impl Server {
                     tab.layout(),
                     client.layout_mode(tab_id),
                     tab_rect,
-                    min,
+                    sizing,
                 ))
             })
             .collect();
@@ -788,7 +788,7 @@ impl Server {
         let Some(viewport) = session.tab_viewport(tab_id) else {
             return;
         };
-        let rects = Self::tab_content_rects(session, tab_id, viewport, self.effective_pane_min());
+        let rects = Self::tab_content_rects(session, tab_id, viewport, self.pane_sizing());
         self.reflow_changed(backend, rects, None, events);
     }
 

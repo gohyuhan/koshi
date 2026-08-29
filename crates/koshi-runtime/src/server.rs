@@ -27,7 +27,7 @@ use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, PaneId, SessionId, SubscriberId};
 use koshi_core::process::PtySize;
 use koshi_core::registry::ActionRegistry;
-use koshi_layout::solver::MIN_PANE_SIZE;
+use koshi_layout::solver::{PaneSizing, MIN_PANE_SIZE};
 use koshi_observability::logging::event_log::log_event;
 use koshi_observability::logging::recent_events;
 use koshi_pty::backend::state::{PtyBackend, PtyHandle};
@@ -766,14 +766,16 @@ impl Server {
         &self.sessions
     }
 
-    /// The effective per-pane minimum content size the layout solver enforces:
-    /// the configured `pane.min-cols`/`min-rows`, each raised to the hard
-    /// [`MIN_PANE_SIZE`] floor so a smaller (or zero) configured value can never
-    /// drive a pane below the size a PTY can run at.
-    pub(crate) fn effective_pane_min(&self) -> Size {
-        Size {
-            cols: self.config.pane.min_cols.max(MIN_PANE_SIZE.cols),
-            rows: self.config.pane.min_rows.max(MIN_PANE_SIZE.rows),
+    /// The per-pane sizing every layout solve in this server uses: the
+    /// configured pane minimum floored at [`MIN_PANE_SIZE`], and the
+    /// configured gap between split children.
+    pub(crate) fn pane_sizing(&self) -> PaneSizing {
+        PaneSizing {
+            min: Size {
+                cols: self.config.pane.min_cols.max(MIN_PANE_SIZE.cols),
+                rows: self.config.pane.min_rows.max(MIN_PANE_SIZE.rows),
+            },
+            gap: self.config.pane.gap,
         }
     }
 

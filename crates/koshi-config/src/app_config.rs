@@ -251,11 +251,12 @@ fn parse_pane(node: &KdlNode, warnings: &mut Vec<String>) -> PartialPaneConfig {
         match key {
             "min-cols" => set(&mut cfg.min_cols, value_u16(child), "pane", key, warnings),
             "min-rows" => set(&mut cfg.min_rows, value_u16(child), "pane", key, warnings),
+            "gap" => set(&mut cfg.gap, value_u16(child), "pane", key, warnings),
             other => warnings.push(format!(
                 "ignored {}",
                 unknown_key(
                     &format!("pane.{other}"),
-                    &["pane.min-cols", "pane.min-rows"],
+                    &["pane.min-cols", "pane.min-rows", "pane.gap"],
                 )
             )),
         }

@@ -20,7 +20,7 @@ use koshi_core::event::{
 use koshi_core::geometry::{Rect, Size, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::process::{PtySize, ShellKind, SpawnSpec};
-use koshi_layout::solver::MIN_PANE_SIZE;
+use koshi_layout::solver::{PaneSizing, MIN_PANE_SIZE};
 use koshi_layout::tree::{LayoutChild, LayoutNode, SplitNode};
 use koshi_pane::pane::lifecycle::{PaneLifecycle, PaneLifecycleEvent};
 use koshi_pane::pane::policy::PaneExitPolicy;
@@ -181,7 +181,10 @@ fn pump_exit(
                 exit_code,
                 EPOCH,
                 tab_rect,
-                MIN_PANE_SIZE,
+                PaneSizing {
+                    min: MIN_PANE_SIZE,
+                    gap: 0,
+                },
                 empty_tab_policy,
             )
         }
@@ -572,7 +575,10 @@ fn closing_the_focused_pane_removes_it_and_refocuses_a_survivor() {
         tab_id,
         a,
         rect(),
-        MIN_PANE_SIZE,
+        PaneSizing {
+            min: MIN_PANE_SIZE,
+            gap: 0,
+        },
         EmptyTabPolicy::CloseTab,
     );
 

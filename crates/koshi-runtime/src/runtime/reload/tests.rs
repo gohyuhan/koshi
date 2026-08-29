@@ -54,6 +54,7 @@ fn load_startup_config_applies_the_app_layer_before_genesis() {
         pane: Some(PartialPaneConfig {
             min_cols: Some(11),
             min_rows: None,
+            gap: None,
         }),
         scrollback: Some(PartialScrollbackConfig {
             max_lines: None,
@@ -87,6 +88,7 @@ fn app_config_reload_replaces_the_startup_settings_and_notifies_each_session() {
         pane: Some(PartialPaneConfig {
             min_cols: Some(7),
             min_rows: None,
+            gap: None,
         }),
         ..PartialKoshiConfig::default()
     });
@@ -142,6 +144,7 @@ fn app_config_reload_lands_the_session_owned_sections_on_the_server() {
         pane: Some(PartialPaneConfig {
             min_cols: Some(20),
             min_rows: Some(5),
+            gap: None,
         }),
         scrollback: Some(PartialScrollbackConfig {
             max_lines: Some(50_000),
@@ -178,6 +181,7 @@ fn reload_with_no_live_sessions_emits_no_events_but_still_applies() {
         pane: Some(PartialPaneConfig {
             min_cols: Some(9),
             min_rows: None,
+            gap: None,
         }),
         ..PartialKoshiConfig::default()
     });

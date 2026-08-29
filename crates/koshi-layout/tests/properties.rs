@@ -26,7 +26,7 @@ use koshi_core::ids::PaneId;
 use koshi_layout::edit::{add_to_stack, remove_pane, split_leaf};
 use koshi_layout::normalize::normalize;
 use koshi_layout::resize::resize;
-use koshi_layout::solver::{fits, solve, StackHeader, MIN_PANE_SIZE};
+use koshi_layout::solver::{fits, solve, PaneSizing, StackHeader, MIN_PANE_SIZE};
 use koshi_layout::tree::LayoutNode;
 use koshi_test_support::layout_assert::{
     assert_all_space_occupied, assert_live_pane_refs, assert_min_size_respected, assert_no_outside,
@@ -157,7 +157,7 @@ fn apply(op: &Op, tree: &mut LayoutNode, tab: Rect, live: &mut HashSet<PaneId>) 
         }
         Op::Remove { target } => {
             let victim = pick(target);
-            if let Ok((next, _)) = remove_pane(tree, tab, victim, MIN_PANE_SIZE) {
+            if let Ok((next, _)) = remove_pane(tree, tab, victim, PaneSizing::default()) {
                 *tree = next;
                 live.remove(&victim);
             }
@@ -188,7 +188,7 @@ fn assert_invariants(tree: &LayoutNode, tab: Rect, live: &HashSet<PaneId>) {
     assert_no_overlap(&result.panes).unwrap();
     assert_no_outside(&result.panes, tab).unwrap();
     assert_min_size_respected(&result.panes, MIN_PANE_SIZE).unwrap();
-    if fits(tree, tab, MIN_PANE_SIZE) {
+    if fits(tree, tab, PaneSizing::default()) {
         assert_all_space_occupied(&result.panes, tab).unwrap();
     }
     assert_live_pane_refs(&tree.leaf_panes(), live).unwrap();

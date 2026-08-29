@@ -1026,15 +1026,20 @@ fn pane_under(region: HitRegion) -> Option<PaneId> {
 /// Whether the `side` border of `pane` has another pane drawn right beside it in
 /// `frame` — the only kind of border a drag can move.
 ///
-/// Pane boxes sit edge to edge: a pane at columns 0–39 next to one at 40–79 has
-/// a neighbor on its right, while the second pane's right edge at column 79 is
-/// the tab's outer frame and has none. A zoomed view draws one pane and no
-/// dividers, and the boundary above a collapsed stack header has no drawn pane
-/// on the far side, so neither is draggable.
+/// A neighbor's box starts exactly [`TabSnapshot::gap`] cells past the pane's
+/// edge on that side and covers at least one of the same rows (or columns).
+/// With `gap` 0, a pane at columns 0–39 next to one at 40–79 has a neighbor on
+/// its right; with `gap` 2 the neighbor starts at column 42. The second pane's
+/// right edge is the tab's outer frame and has none. A zoomed view draws one
+/// pane and no dividers, and the boundary above a collapsed stack header has
+/// no drawn pane on the far side; neither is draggable.
+///
+/// [`TabSnapshot::gap`]: koshi_renderer::snapshot::TabSnapshot::gap
 fn border_has_neighbor(frame: &MouseFrame, pane: PaneId, side: Direction) -> bool {
     let Some(rect) = drawn_slot(frame, pane).map(|slot| slot.rect) else {
         return false;
     };
+    let gap = frame.session.active_tab.gap;
     frame
         .session
         .active_tab
@@ -1045,16 +1050,20 @@ fn border_has_neighbor(frame: &MouseFrame, pane: PaneId, side: Direction) -> boo
             let other = slot.rect;
             match side {
                 Direction::Right => {
-                    other.origin.x == rect.origin.x + rect.size.cols && overlaps_rows(rect, other)
+                    other.origin.x == (rect.origin.x + rect.size.cols).saturating_add(gap)
+                        && overlaps_rows(rect, other)
                 }
                 Direction::Left => {
-                    other.origin.x + other.size.cols == rect.origin.x && overlaps_rows(rect, other)
+                    (other.origin.x + other.size.cols).saturating_add(gap) == rect.origin.x
+                        && overlaps_rows(rect, other)
                 }
                 Direction::Down => {
-                    other.origin.y == rect.origin.y + rect.size.rows && overlaps_cols(rect, other)
+                    other.origin.y == (rect.origin.y + rect.size.rows).saturating_add(gap)
+                        && overlaps_cols(rect, other)
                 }
                 Direction::Up => {
-                    other.origin.y + other.size.rows == rect.origin.y && overlaps_cols(rect, other)
+                    (other.origin.y + other.size.rows).saturating_add(gap) == rect.origin.y
+                        && overlaps_cols(rect, other)
                 }
             }
         })
