@@ -8,10 +8,13 @@
 //! (answers to DA/DSR/DECRQM: escape sequences the child sends to ask "what
 //! terminal are you" / "what's your status" / "is this mode on") back into
 //! the pane's PTY, and marks the screen stale so the event loop schedules a
-//! repaint. Bytes for a pane with no engine (one closed while the event sat in
-//! the inbox) are dropped without touching any state.
+//! repaint. Shell-integration events are published in marker order. Bytes for
+//! a pane with no engine (one closed while the event sat in the inbox) are
+//! dropped without touching any state.
 
+use koshi_core::event::{Event, PaneCommandFinished, PaneCommandStarted};
 use koshi_core::ids::PaneId;
+use koshi_terminal::state::ShellIntegrationFact;
 
 use crate::{runtime::render_schedule::InvalidationReason, server::Server};
 
@@ -36,6 +39,8 @@ impl Server {
     /// drops every client's highlight in it: a highlight names a line by how many
     /// the pane had pushed into scrollback, and the alternate screen keeps no
     /// scrollback and shares no lines, so the name means nothing there.
+    ///
+    /// Shell-integration facts become command lifecycle events in marker order.
     pub fn handle_pty_output(&mut self, pane_id: PaneId, bytes: &[u8]) {
         let Some(engine) = self.terminal_engines.get_mut(&pane_id) else {
             return;
@@ -47,7 +52,7 @@ impl Server {
         let pushed_before = before.total_pushed();
         let len_before = before.len();
         let screen_before = engine.state().active_screen();
-        let replies = engine.advance(bytes);
+        let (replies, shell_facts) = engine.advance_with_shell_integration(bytes);
         let after = engine.state().scrollback();
         let len_after = after.len();
         let pushed = (after.total_pushed() - pushed_before) as usize;
@@ -74,6 +79,20 @@ impl Server {
         if pushed > 0 || len_after < len_before {
             self.drop_evicted_selections(pane_id);
             self.anchor_held_views(pane_id, pushed, len_after);
+        }
+        if !shell_facts.is_empty() {
+            let events: Vec<Event> = shell_facts
+                .into_iter()
+                .map(|fact| match fact {
+                    ShellIntegrationFact::CommandStarted => {
+                        Event::PaneCommandStarted(PaneCommandStarted { pane_id })
+                    }
+                    ShellIntegrationFact::CommandFinished { exit_code } => {
+                        Event::PaneCommandFinished(PaneCommandFinished { pane_id, exit_code })
+                    }
+                })
+                .collect();
+            self.publish_events(&events);
         }
         self.render_scheduler
             .invalidate(InvalidationReason::PtyOutput);

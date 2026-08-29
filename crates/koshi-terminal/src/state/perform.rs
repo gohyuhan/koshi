@@ -694,9 +694,11 @@ impl vte::Perform for TerminalState {
                     self.shell_integration_state = ShellIntegrationState::Input;
                 }
                 Osc133::CommandStart => {
-                    self.shell_integration_state = ShellIntegrationState::Running;
-                    self.shell_integration_facts
-                        .push(ShellIntegrationFact::CommandStarted);
+                    if self.shell_integration_state != ShellIntegrationState::Running {
+                        self.shell_integration_state = ShellIntegrationState::Running;
+                        self.shell_integration_facts
+                            .push(ShellIntegrationFact::CommandStarted);
+                    }
                 }
                 Osc133::CommandFinished(exit_code) => {
                     if matches!(self.shell_integration_state, ShellIntegrationState::Running) {
