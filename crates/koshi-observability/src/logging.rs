@@ -70,6 +70,8 @@ use koshi_core::redact::redact_env_map;
 
 /// Writing a log line for a committed runtime event.
 pub mod event_log;
+/// Keeping the last committed runtime events for `koshi debug events`.
+pub mod recent_events;
 
 /// The canonical field names every cross-cutting log line should carry. They are
 /// correlation IDs — the join keys for tracing one event back to its cause across

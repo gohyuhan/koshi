@@ -22,6 +22,7 @@ use koshi_core::geometry::{Direction, PaneArea, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::key::KeyChord;
 use koshi_core::mouse::MouseInput;
+use koshi_core::recent_event::RecentEvent;
 use koshi_core::redact::REDACTED;
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
@@ -261,6 +262,10 @@ pub enum IpcRequestKind {
         /// The one tab to describe, or every tab when absent.
         tab: Option<TabId>,
     },
+    /// Ask the session for the events it published most recently, newest last.
+    /// The answer holds each event's name and the ids it named, and no payload
+    /// content of any kind.
+    RecentEvents,
     /// Restart the session server: it sends its answer, then replaces its own
     /// process image with the binary at the path it started from. Every pane,
     /// its child process, its terminal and its scrollback stay as they are, so
@@ -305,6 +310,7 @@ impl IpcRequestKind {
             IpcRequestKind::SubmitCommand(_) => "SubmitCommand",
             IpcRequestKind::Discovery => "Discovery",
             IpcRequestKind::Layout { .. } => "Layout",
+            IpcRequestKind::RecentEvents => "RecentEvents",
             IpcRequestKind::Restart => "Restart",
             IpcRequestKind::Leaving => "Leaving",
         }
@@ -438,6 +444,9 @@ pub enum IpcResult {
     Overview(SessionOverview),
     /// The session's layout: each tab's split tree and its solved rectangles.
     Layout(SessionLayout),
+    /// The events the session published most recently, oldest first, each
+    /// reduced to its name and the ids it named.
+    RecentEvents(Vec<RecentEvent>),
     /// Answers [`IpcRequestKind::Restart`]: the reply is sent, then the
     /// session server replaces its image with the binary now on disk.
     Restarting,
@@ -531,6 +540,7 @@ impl WireVariants for IpcRequestKind {
         "SubmitCommand",
         "Discovery",
         "Layout",
+        "RecentEvents",
         "Restart",
         "Leaving",
     ];
@@ -551,6 +561,7 @@ impl WireVariants for IpcResult {
         "CommandResult",
         "Overview",
         "Layout",
+        "RecentEvents",
         "Restarting",
         "Error",
     ];
@@ -564,6 +575,7 @@ impl WireName for IpcResult {
             IpcResult::CommandResult(_) => "CommandResult",
             IpcResult::Overview(_) => "Overview",
             IpcResult::Layout(_) => "Layout",
+            IpcResult::RecentEvents(_) => "RecentEvents",
             IpcResult::Restarting => "Restarting",
             IpcResult::Error(_) => "Error",
         }

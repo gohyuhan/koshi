@@ -12,10 +12,14 @@ use koshi_core::action::{
     core_action_seeds, ActionHandlerRef, ActionRef, ActionScope, ActionStatus, TargetKind,
 };
 use koshi_core::discovery::{ClientInfo, PaneInfo, PaneState, SessionInfo, TabInfo};
+use koshi_core::event::{
+    Event, PaneCreated, PaneEnterPressed, PaneTyped, SubmittedLinePayload, TypedPayload,
+};
 use koshi_core::geometry::{PaneArea, Point, Rect, Size, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, PluginId, SessionId, TabId};
 use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags};
 use koshi_core::lock::LockMode;
+use koshi_core::recent_event::{self, RecentEvent};
 use koshi_core::resolve::ActionArgs;
 use koshi_ipc::layout::{ClientFocus, SessionLayout, SolvedPane, SolvedTab, TabLayout};
 use koshi_layout::mode::LayoutMode;
@@ -1816,4 +1820,331 @@ fn dump_layout_json_is_an_array_of_whole_layouts() {
 #[test]
 fn dump_layout_json_of_no_sessions_is_an_empty_array() {
     assert_eq!(render_layouts(&[], FormatArg::Json), "[]\n");
+}
+
+// --- debug events ---
+
+/// One session's remembered events, over the fixed ids the layout fixtures use.
+fn session_events(events: Vec<RecentEvent>) -> SessionEvents {
+    SessionEvents {
+        session: layout_session(),
+        name: "quiet-lake".to_string(),
+        events,
+    }
+}
+
+/// The record a `PaneCreated` for the first pane of the fixture tab makes.
+fn pane_created_record() -> RecentEvent {
+    recent_event::record(
+        &Event::PaneCreated(PaneCreated {
+            pane_id: first_pane(),
+            tab_id: layout_tab(),
+        }),
+        fixed_time(),
+    )
+}
+
+#[test]
+fn debug_events_table_shows_when_what_and_which_ids() {
+    let expected = "\
+session                                       name        at    event        ids
+session-00000000-0000-0000-0000-000000000001  quiet-lake  1234  PaneCreated  tab-00000000-0000-0000-0000-000000000002 pane-00000000-0000-0000-0000-000000000004
+session-00000000-0000-0000-0000-000000000001  quiet-lake  1234  Quit         -
+";
+    let rendered = render_recent_events(
+        &[session_events(vec![
+            pane_created_record(),
+            recent_event::record(&Event::Quit, fixed_time()),
+        ])],
+        FormatArg::Table,
+    );
+
+    assert_eq!(rendered, expected);
+}
+
+#[test]
+fn debug_events_table_of_a_session_that_remembers_nothing_is_the_header_alone() {
+    assert_eq!(
+        render_recent_events(&[session_events(Vec::new())], FormatArg::Table),
+        "session  name  at  event  ids\n"
+    );
+}
+
+#[test]
+fn debug_events_table_tells_two_sessions_sharing_a_name_apart() {
+    let twin = SessionEvents {
+        session: SessionId::from_uuid(uuid_ending(9)),
+        name: "quiet-lake".to_string(),
+        events: vec![recent_event::record(&Event::Restarting, fixed_time())],
+    };
+
+    let rendered = render_recent_events(
+        &[session_events(vec![pane_created_record()]), twin],
+        FormatArg::Table,
+    );
+
+    assert_eq!(
+        rendered,
+        "\
+session                                       name        at    event        ids
+session-00000000-0000-0000-0000-000000000001  quiet-lake  1234  PaneCreated  tab-00000000-0000-0000-0000-000000000002 pane-00000000-0000-0000-0000-000000000004
+session-00000000-0000-0000-0000-000000000009  quiet-lake  1234  Restarting   -
+"
+    );
+}
+
+#[test]
+fn debug_events_json_carries_the_name_the_ids_and_the_time() {
+    let rendered = render_recent_events(
+        &[session_events(vec![pane_created_record()])],
+        FormatArg::Json,
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&rendered).expect("the listing is JSON");
+
+    assert_eq!(
+        parsed,
+        serde_json::json!([{
+            "session": "00000000-0000-0000-0000-000000000001",
+            "name": "quiet-lake",
+            "events": [{
+                "at": { "secs_since_epoch": 1234, "nanos_since_epoch": 0 },
+                "name": "PaneCreated",
+                "session": null,
+                "client": null,
+                "tab": "00000000-0000-0000-0000-000000000002",
+                "pane": "00000000-0000-0000-0000-000000000004",
+                "plugin": null,
+                "command": null,
+                "subscriber": null
+            }]
+        }])
+    );
+}
+
+#[test]
+fn debug_events_table_of_typed_input_shows_ids_and_no_typed_content() {
+    let typed = recent_event::record(
+        &Event::PaneTyped(PaneTyped {
+            pane_id: first_pane(),
+            tab_id: layout_tab(),
+            session_id: layout_session(),
+            client_id: layout_client(),
+            payload: TypedPayload::SafePublic('%'),
+            timestamp: fixed_time(),
+        }),
+        fixed_time(),
+    );
+    let submitted = recent_event::record(
+        &Event::PaneEnterPressed(PaneEnterPressed {
+            pane_id: first_pane(),
+            tab_id: layout_tab(),
+            session_id: layout_session(),
+            client_id: layout_client(),
+            line: SubmittedLinePayload::SafePublic("mysql -u root -phunter2".to_string()),
+            timestamp: fixed_time(),
+        }),
+        fixed_time(),
+    );
+
+    let rendered =
+        render_recent_events(&[session_events(vec![typed, submitted])], FormatArg::Table);
+
+    assert_eq!(
+        rendered,
+        "\
+session                                       name        at    event             ids
+session-00000000-0000-0000-0000-000000000001  quiet-lake  1234  PaneTyped         session-00000000-0000-0000-0000-000000000001 client-00000000-0000-0000-0000-000000000003 tab-00000000-0000-0000-0000-000000000002 pane-00000000-0000-0000-0000-000000000004
+session-00000000-0000-0000-0000-000000000001  quiet-lake  1234  PaneEnterPressed  session-00000000-0000-0000-0000-000000000001 client-00000000-0000-0000-0000-000000000003 tab-00000000-0000-0000-0000-000000000002 pane-00000000-0000-0000-0000-000000000004
+"
+    );
+    assert!(!rendered.contains('%'), "{rendered}");
+    assert!(!rendered.contains("hunter2"), "{rendered}");
+}
+
+/// A record for `Event::TabCreated`, stamped `at`.
+fn tab_created_at(at: SystemTime) -> RecentEvent {
+    recent_event::record(
+        &Event::TabCreated(koshi_core::event::TabCreated {
+            tab_id: layout_tab(),
+        }),
+        at,
+    )
+}
+
+#[test]
+fn no_since_flag_keeps_every_event() {
+    assert_eq!(oldest_kept(fixed_time(), None), None);
+}
+
+#[test]
+fn a_since_window_counts_back_from_now() {
+    assert_eq!(
+        oldest_kept(fixed_time(), Some(Duration::from_secs(34))),
+        Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1200))
+    );
+}
+
+#[test]
+fn a_since_window_older_than_the_clock_can_reach_keeps_every_event() {
+    assert_eq!(
+        oldest_kept(fixed_time(), Some(Duration::from_secs(u64::MAX))),
+        None
+    );
+}
+
+#[test]
+fn narrowing_with_no_flags_keeps_every_event() {
+    let events = vec![pane_created_record(), tab_created_at(fixed_time())];
+
+    assert_eq!(narrow(events.clone(), None, None), events);
+}
+
+#[test]
+fn narrowing_by_name_ignores_case_and_matches_any_part_of_it() {
+    let events = vec![pane_created_record(), tab_created_at(fixed_time())];
+
+    let kept = narrow(events.clone(), None, Some("pane"));
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].name, "PaneCreated");
+
+    let kept = narrow(events.clone(), None, Some("TABCREATED"));
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].name, "TabCreated");
+
+    assert_eq!(narrow(events, None, Some("Copied")), Vec::new());
+}
+
+#[test]
+fn narrowing_by_time_keeps_the_boundary_and_drops_what_is_older() {
+    let older = tab_created_at(SystemTime::UNIX_EPOCH + Duration::from_secs(1233));
+    let boundary = tab_created_at(fixed_time());
+    let newer = tab_created_at(SystemTime::UNIX_EPOCH + Duration::from_secs(1235));
+
+    let kept = narrow(
+        vec![older, boundary.clone(), newer.clone()],
+        Some(fixed_time()),
+        None,
+    );
+
+    assert_eq!(kept, vec![boundary, newer]);
+}
+
+#[test]
+fn narrowing_by_time_and_name_together_keeps_only_what_passes_both() {
+    let old_pane = recent_event::record(
+        &Event::PaneCreated(PaneCreated {
+            pane_id: first_pane(),
+            tab_id: layout_tab(),
+        }),
+        SystemTime::UNIX_EPOCH + Duration::from_secs(1233),
+    );
+    let new_pane = pane_created_record();
+    let new_tab = tab_created_at(fixed_time());
+
+    let kept = narrow(
+        vec![old_pane, new_pane.clone(), new_tab],
+        Some(fixed_time()),
+        Some("pane"),
+    );
+
+    assert_eq!(kept, vec![new_pane]);
+}
+
+#[test]
+fn debug_events_json_of_no_sessions_is_an_empty_array() {
+    assert_eq!(render_recent_events(&[], FormatArg::Json), "[]\n");
+}
+
+#[test]
+fn narrowing_an_empty_listing_keeps_it_empty() {
+    assert_eq!(
+        narrow(Vec::new(), Some(fixed_time()), Some("pane")),
+        Vec::new()
+    );
+}
+
+#[test]
+fn a_zero_length_since_window_keeps_only_what_was_recorded_at_that_moment() {
+    let earlier = tab_created_at(SystemTime::UNIX_EPOCH + Duration::from_secs(1233));
+    let now = tab_created_at(fixed_time());
+
+    let kept = narrow(
+        vec![earlier, now.clone()],
+        oldest_kept(fixed_time(), Some(Duration::ZERO)),
+        None,
+    );
+
+    assert_eq!(kept, vec![now]);
+}
+
+#[test]
+fn a_filter_that_matches_no_event_name_keeps_nothing() {
+    let events = vec![pane_created_record(), tab_created_at(fixed_time())];
+
+    for wanted in [
+        "'; DROP TABLE events",
+        "../../etc/passwd",
+        "パネル",
+        "🦀",
+        "%s%n",
+    ] {
+        assert_eq!(
+            narrow(events.clone(), None, Some(wanted)),
+            Vec::new(),
+            "--filter {wanted}"
+        );
+    }
+}
+
+#[test]
+fn a_dotted_capital_i_does_not_match_an_ascii_i_in_an_event_name() {
+    // "İ".to_lowercase() is "i" plus a combining dot, which no ASCII name holds.
+    let events = vec![recent_event::record(
+        &Event::InputModeChanged(koshi_core::event::InputModeChanged {
+            client_id: layout_client(),
+            mode: koshi_core::event::InputMode::Normal,
+        }),
+        fixed_time(),
+    )];
+
+    assert_eq!(narrow(events.clone(), None, Some("İ")), Vec::new());
+    assert_eq!(narrow(events, None, Some("i")).len(), 1);
+}
+
+#[test]
+fn debug_events_table_pads_a_non_ascii_session_name_by_characters() {
+    let wide = SessionEvents {
+        session: SessionId::from_uuid(uuid_ending(9)),
+        name: "S-ふるい-みず".to_string(),
+        events: vec![recent_event::record(&Event::Quit, fixed_time())],
+    };
+
+    let rendered = render_recent_events(
+        &[session_events(vec![pane_created_record()]), wide],
+        FormatArg::Table,
+    );
+
+    let name_column: Vec<&str> = rendered
+        .lines()
+        .map(|line| line.split_at(46).1)
+        .map(|rest| rest.split("  ").next().unwrap_or(rest))
+        .collect();
+    assert_eq!(
+        name_column,
+        ["name", "quiet-lake", "S-ふるい-みず"],
+        "{rendered}"
+    );
+}
+
+#[test]
+fn debug_events_table_renders_a_row_for_every_event_a_full_ring_holds() {
+    let events = vec![pane_created_record(); 1000];
+
+    let rendered = render_recent_events(&[session_events(events)], FormatArg::Table);
+
+    assert_eq!(
+        rendered.lines().count(),
+        1001,
+        "the header plus one row each"
+    );
 }

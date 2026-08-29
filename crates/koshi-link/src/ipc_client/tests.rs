@@ -397,6 +397,92 @@ fn fetching_the_whole_layout_asks_for_no_tab() {
 }
 
 #[test]
+fn fetching_recent_events_returns_them_in_the_order_the_session_sent() {
+    let runtime_dir = test_runtime_dir("events-round-trip");
+    let session = SessionId::new();
+    let tab = TabId::new();
+    let answer = vec![
+        koshi_core::recent_event::record(
+            &koshi_core::event::Event::TabCreated(koshi_core::event::TabCreated { tab_id: tab }),
+            SystemTime::UNIX_EPOCH,
+        ),
+        koshi_core::recent_event::record(&koshi_core::event::Event::Quit, SystemTime::UNIX_EPOCH),
+    ];
+    let (server, asked) = fake_layout_session(
+        &runtime_dir,
+        session,
+        IpcResult::RecentEvents(answer.clone()),
+    );
+
+    let events = fetch_recent_events(&runtime_dir, session).expect("the session answers");
+
+    assert_eq!(events, answer);
+    assert_eq!(
+        asked.recv().expect("the session read one request"),
+        IpcRequestKind::RecentEvents,
+    );
+
+    server.join().expect("fake session exits");
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+#[test]
+fn a_recent_events_request_a_session_has_no_name_for_reports_it_as_too_old() {
+    let runtime_dir = test_runtime_dir("events-too-old");
+    let session = SessionId::new();
+    let (server, _asked) = fake_layout_session(
+        &runtime_dir,
+        session,
+        IpcResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::UnsupportedKind,
+            message: "this session has no request kind named RecentEvents".to_string(),
+        }),
+    );
+
+    let error = fetch_recent_events(&runtime_dir, session).expect_err("the request is refused");
+
+    assert_eq!(
+        error.to_string(),
+        CliError::IpcUnavailable {
+            detail: "this session was started by an older koshi that keeps no recent-events \
+                     buffer; restart the session to use `debug events`"
+                .to_string(),
+        }
+        .to_string(),
+    );
+
+    server.join().expect("fake session exits");
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+#[test]
+fn a_recent_events_refusal_that_is_not_about_reading_carries_its_own_message() {
+    let runtime_dir = test_runtime_dir("events-refused");
+    let session = SessionId::new();
+    let (server, _asked) = fake_layout_session(
+        &runtime_dir,
+        session,
+        IpcResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::BadToken,
+            message: "the token presented does not match this Koshi's".to_string(),
+        }),
+    );
+
+    let error = fetch_recent_events(&runtime_dir, session).expect_err("the request is refused");
+
+    assert_eq!(
+        error.to_string(),
+        CliError::IpcUnavailable {
+            detail: "the token presented does not match this Koshi's".to_string(),
+        }
+        .to_string(),
+    );
+
+    server.join().expect("fake session exits");
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+#[test]
 fn fetching_a_layout_with_no_endpoint_file_reports_the_session_not_running() {
     let runtime_dir = test_runtime_dir("layout-no-endpoint");
     let session = SessionId::new();

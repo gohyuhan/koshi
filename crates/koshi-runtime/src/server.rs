@@ -29,6 +29,7 @@ use koshi_core::process::PtySize;
 use koshi_core::registry::ActionRegistry;
 use koshi_layout::solver::MIN_PANE_SIZE;
 use koshi_observability::logging::event_log::log_event;
+use koshi_observability::logging::recent_events;
 use koshi_pty::backend::state::{PtyBackend, PtyHandle};
 use koshi_pty::portable::CarriedPtyPane;
 use koshi_renderer::snapshot::Delivery;
@@ -577,16 +578,18 @@ impl Server {
         moved
     }
 
-    /// Log each of `events`, then deliver it to every subscriber. The shared
-    /// tail of every handler that emits events outside a command transaction
-    /// (attach, detach, resize, child exit); a command's events pass through
-    /// the same pair when its transaction is sealed.
+    /// Log each of `events`, add it to the recent-events ring, then deliver it
+    /// to every subscriber. The shared tail of every handler that emits events
+    /// outside a command transaction (attach, detach, resize, child exit); a
+    /// command's events pass through the same three steps when its transaction
+    /// is sealed.
     ///
     /// A subscriber the delivery removes — its receiver is gone — takes its
     /// `subscriptions` entry with it.
     pub(crate) fn publish_events(&mut self, events: &[Event]) {
         for event in events {
             log_event(event);
+            recent_events::record(event);
             let removed = self.event_bus.publish(event);
             if !removed.is_empty() {
                 self.subscriptions.retain(|(id, _)| !removed.contains(id));

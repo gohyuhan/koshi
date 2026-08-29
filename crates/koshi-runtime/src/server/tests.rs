@@ -340,6 +340,26 @@ fn publish_events_delivers_out_of_command_events_to_subscribers() {
 }
 
 #[test]
+fn publish_events_remembers_out_of_command_events_in_the_recent_events_ring() {
+    let (mut server, _client_id) = booted_server();
+    let tab_id = TabId::new();
+
+    server.publish_events(&[Event::LayoutChanged(koshi_core::event::LayoutChanged {
+        tab_id,
+    })]);
+
+    // The ring is process-wide and every test in this binary writes to it, so
+    // the record is found by this tab's own id rather than by position.
+    let held = recent_events::recent();
+    let recorded = held
+        .iter()
+        .find(|event| event.tab == Some(tab_id))
+        .expect("the published event is remembered");
+    assert_eq!(recorded.name, "LayoutChanged");
+    assert_eq!(recorded.pane, None);
+}
+
+#[test]
 fn subscribing_records_which_client_the_subscriber_views() {
     let (mut server, client_id) = booted_server();
 

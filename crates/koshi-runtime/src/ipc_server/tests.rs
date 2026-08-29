@@ -1288,6 +1288,46 @@ fn discovery_with_no_running_session_closes_the_connection() {
 }
 
 #[test]
+fn a_recent_events_request_answers_from_the_ring_without_asking_the_dispatcher() {
+    let (server, session, runtime_dir, dispatcher) = serve("recent-events", None);
+    let tab_id = TabId::new();
+    recent_events::record(&koshi_core::event::Event::LayoutChanged(
+        koshi_core::event::LayoutChanged { tab_id },
+    ));
+    let mut connection = connect_to(&runtime_dir, session);
+
+    connection
+        .send(&hello_for(&runtime_dir, session))
+        .expect("send hello");
+    connection
+        .send(&IpcRequest {
+            request_id: 2,
+            kind: IpcRequestKind::RecentEvents,
+        })
+        .expect("send recent-events request");
+
+    let hello_reply: IpcResponse = connection.recv().expect("hello reply");
+    assert_eq!(hello_reply.result, hello_accepted());
+    let events_reply: IpcResponse = connection.recv().expect("recent-events reply");
+    assert_eq!(events_reply.request_id, Some(2));
+    let IpcResult::RecentEvents(events) = events_reply.result else {
+        panic!("expected recent events, got {:?}", events_reply.result);
+    };
+    // The ring is process-wide and every test in this binary writes to it, so
+    // the record is found by this tab's own id rather than by position.
+    let recorded = events
+        .iter()
+        .find(|event| event.tab == Some(tab_id))
+        .expect("the answer carries the record this test made");
+    assert_eq!(recorded.name, "LayoutChanged");
+
+    drop(connection);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_dir);
+}
+
+#[test]
 fn a_layout_request_answers_with_the_dispatchers_layout_and_names_the_tab_asked_for() {
     let (server, session, runtime_dir, dispatcher, asked) =
         serve_layout("layout-one-tab", Some(layout_named("workspace")));

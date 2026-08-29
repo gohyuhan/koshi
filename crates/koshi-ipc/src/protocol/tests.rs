@@ -96,6 +96,17 @@ fn overview() -> SessionOverview {
     }
 }
 
+/// One remembered event: a pane created in a tab, stamped at the epoch.
+fn recent() -> RecentEvent {
+    koshi_core::recent_event::record(
+        &koshi_core::event::Event::PaneCreated(koshi_core::event::PaneCreated {
+            pane_id: PaneId::from_uuid(fixed_uuid()),
+            tab_id: TabId::from_uuid(fixed_uuid()),
+        }),
+        std::time::SystemTime::UNIX_EPOCH,
+    )
+}
+
 /// The layout of a session with one tab, holding one pane, that one client
 /// views. The wire form of every field is pinned in `crate::layout::tests`.
 fn layout() -> SessionLayout {
@@ -1487,6 +1498,10 @@ fn each_request_kind_is_tagged_with_its_own_name() {
         "Layout"
     );
     assert_eq!(
+        serde_json::to_value(IpcRequestKind::RecentEvents).unwrap(),
+        json!("RecentEvents")
+    );
+    assert_eq!(
         serde_json::to_value(IpcRequestKind::Restart).unwrap(),
         json!("Restart")
     );
@@ -1534,6 +1549,10 @@ fn each_result_is_tagged_with_its_own_name() {
     assert_eq!(
         tag_of(&serde_json::to_value(IpcResult::Layout(layout())).unwrap()),
         "Layout"
+    );
+    assert_eq!(
+        tag_of(&serde_json::to_value(IpcResult::RecentEvents(vec![recent()])).unwrap()),
+        "RecentEvents"
     );
     assert_eq!(
         serde_json::to_value(IpcResult::Restarting).unwrap(),

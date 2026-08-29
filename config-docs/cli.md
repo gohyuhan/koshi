@@ -677,6 +677,7 @@ holding different values use different directories and do not find each other.
 |---|---|
 | `koshi debug dump-state [--format table\|json]` | Print every running session's sessions, tabs, panes, and clients |
 | `koshi debug dump-layout [--tab <NAME_OR_ID>] [--format table\|json]` | Print each tab's split tree, solved rectangles, panes with no room, stacks, and per-client focus |
+| `koshi debug events [--since <LENGTH>] [--filter <NAME>] [--format table\|json]` | Print the events each running session published most recently, oldest first |
 
 A pane's command arguments print as `***`; the program name stays visible.
 `koshi inspect pane` shows the command in full.
@@ -693,3 +694,25 @@ viewing prints its tree and no rectangles.
 A session that started before you installed this Koshi cannot report its
 layout. `dump-layout` says so and names what to do: restart that session, or
 run `dump-state`, which every session answers.
+
+`koshi debug events` prints the last 1000 events a session published. Each line
+names when the record was stamped, which event it was, and the ids it named. No
+line carries content: a keystroke prints as `PaneTyped` with its session, client,
+tab and pane ids, never as the character typed.
+
+A session remembers events only for as long as its server process runs. A
+restart starts the list empty.
+
+Each row names the session by id and by name, so two sessions sharing a name
+stay apart.
+
+`--since` keeps the events recorded within a length of now — `30s`, `5m`, `2h`,
+`7d`. `--filter` keeps the events whose name contains the text given, matched
+ignoring case, so `--filter pane` keeps `PaneCreated` and `PaneFocused`. An
+empty `--filter` is a usage error, since every name contains it.
+
+Example: `koshi debug events --since 30s --filter tab` prints the tab events of
+the last thirty seconds and nothing else.
+
+A session that started before you installed this Koshi keeps no such buffer.
+`events` says so and names what to do: restart that session.

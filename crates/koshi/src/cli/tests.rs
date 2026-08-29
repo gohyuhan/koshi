@@ -489,6 +489,87 @@ fn dump_layout_takes_a_tab_and_the_json_format_together() {
 }
 
 #[test]
+fn debug_events_defaults_to_every_event_and_the_table_format() {
+    assert_eq!(
+        parse(&["koshi", "debug", "events"]).command,
+        Some(CliCommand::Debug {
+            command: DebugCommand::Events {
+                since: None,
+                filter: None,
+                format: FormatArg::Table,
+            },
+        })
+    );
+}
+
+#[test]
+fn debug_events_takes_a_window_a_filter_and_the_json_format_together() {
+    assert_eq!(
+        parse(&[
+            "koshi", "debug", "events", "--since", "5m", "--filter", "pane", "--format", "json",
+        ])
+        .command,
+        Some(CliCommand::Debug {
+            command: DebugCommand::Events {
+                since: Some(Duration::from_secs(300)),
+                filter: Some("pane".to_string()),
+                format: FormatArg::Json,
+            },
+        })
+    );
+}
+
+#[test]
+fn debug_events_reads_every_length_unit() {
+    for (typed, seconds) in [("45s", 45), ("5m", 300), ("2h", 7200), ("7d", 604_800)] {
+        let argv = ["koshi", "debug", "events", "--since", typed];
+        assert_eq!(
+            parse(&argv).command,
+            Some(CliCommand::Debug {
+                command: DebugCommand::Events {
+                    since: Some(Duration::from_secs(seconds)),
+                    filter: None,
+                    format: FormatArg::Table,
+                },
+            }),
+            "--since {typed}"
+        );
+    }
+}
+
+#[test]
+fn debug_events_refuses_an_empty_filter() {
+    assert_eq!(
+        parse_err(&["koshi", "debug", "events", "--filter", ""]).kind(),
+        ErrorKind::ValueValidation
+    );
+}
+
+#[test]
+fn debug_events_refuses_a_window_it_cannot_read() {
+    for typed in [
+        "",
+        "5",
+        "5w",
+        "five minutes",
+        "never",
+        "18446744073709551615d",
+    ] {
+        assert_eq!(
+            parse_err(&["koshi", "debug", "events", "--since", typed]).kind(),
+            ErrorKind::ValueValidation,
+            "--since {typed}"
+        );
+    }
+    // A leading `-` reaches the parser only when the value is attached, since
+    // clap reads a detached one as another flag.
+    assert_eq!(
+        parse_err(&["koshi", "debug", "events", "--since=-5s"]).kind(),
+        ErrorKind::ValueValidation
+    );
+}
+
+#[test]
 fn bare_debug_requires_a_subcommand() {
     assert_eq!(
         parse_err(&["koshi", "debug"]).kind(),
@@ -517,6 +598,7 @@ fn the_debug_dumps_are_queries_and_map_to_no_action() {
     for argv in [
         vec!["koshi", "debug", "dump-state"],
         vec!["koshi", "debug", "dump-layout"],
+        vec!["koshi", "debug", "events"],
     ] {
         assert_eq!(
             command(&argv).to_action(&ResolvedTargets::default(), Direction::Right),
