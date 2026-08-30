@@ -1,7 +1,7 @@
 //! Pane-module integration tests: driving a `PaneRecord` across the whole
-//! lifecycle state machine (`state` + `lifecycle` together), including the
-//! respawn loop, terminality of `Removed`, and that a plugin pane threads its
-//! kind into a rejected-transition error.
+//! lifecycle state machine (`state` + `lifecycle` together), including that
+//! `Exited` never returns to a live state, terminality of `Removed`, and that a
+//! plugin pane threads its kind into a rejected-transition error.
 
 use std::time::{Duration, SystemTime};
 
@@ -55,7 +55,7 @@ fn a_pane_walks_from_spawning_to_removed_one_event_at_a_time() {
 }
 
 #[test]
-fn an_exited_pane_can_respawn_back_to_spawning() {
+fn an_exited_pane_only_moves_on_to_closing() {
     let at = SystemTime::UNIX_EPOCH + Duration::from_secs(2);
     let mut record = PaneRecord::new(PaneId::new(), SystemTime::UNIX_EPOCH);
 
@@ -65,34 +65,33 @@ fn an_exited_pane_can_respawn_back_to_spawning() {
     record
         .update_lifecycle(PaneLifecycleEvent::ProcessExited { code: None, at })
         .expect("ProcessExited is legal from Running");
-    record
-        .update_lifecycle(PaneLifecycleEvent::Respawn)
-        .expect("Respawn is legal from Exited");
 
-    assert_eq!(record.lifecycle(), &PaneLifecycle::Spawning);
-}
-
-#[test]
-fn a_pane_can_respawn_more_than_once() {
-    let mut record = PaneRecord::new(PaneId::new(), SystemTime::UNIX_EPOCH);
-
-    for round in 1..=3u64 {
-        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(round);
-        record
-            .update_lifecycle(PaneLifecycleEvent::ProcessStarted)
-            .expect("ProcessStarted is legal from Spawning");
-        record
-            .update_lifecycle(PaneLifecycleEvent::ProcessExited { code: Some(1), at })
-            .expect("ProcessExited is legal from Running");
+    // `Exited` has exactly one way out. Neither restarting the child nor
+    // finishing a cleanup that was never requested is legal.
+    for event in [
+        PaneLifecycleEvent::ProcessStarted,
+        PaneLifecycleEvent::Cleaned,
+    ] {
+        assert_eq!(
+            record.update_lifecycle(event),
+            Err(InvalidTransition {
+                from: PaneLifecycle::Exited { code: None, at },
+                event,
+                kind: PaneKind::Terminal,
+            })
+        );
         assert_eq!(
             record.lifecycle(),
-            &PaneLifecycle::Exited { code: Some(1), at }
+            &PaneLifecycle::Exited { code: None, at }
         );
-        record
-            .update_lifecycle(PaneLifecycleEvent::Respawn)
-            .expect("Respawn is legal from Exited");
-        assert_eq!(record.lifecycle(), &PaneLifecycle::Spawning);
     }
+
+    let since = SystemTime::UNIX_EPOCH + Duration::from_secs(3);
+    record
+        .update_lifecycle(PaneLifecycleEvent::CloseRequested { since })
+        .expect("CloseRequested is legal from Exited");
+
+    assert_eq!(record.lifecycle(), &PaneLifecycle::Closing { since });
 }
 
 #[test]

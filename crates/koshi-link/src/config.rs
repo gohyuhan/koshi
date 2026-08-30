@@ -23,7 +23,7 @@
 
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use koshi_config::app_config::{parse_app_config, AppConfigFile};
@@ -141,9 +141,7 @@ pub fn other_users_policy(
     if !forced_on.unwrap_or(server.allow_other_users) {
         return None;
     }
-    let shared_dir = server
-        .shared_sessions_dir
-        .or_else(koshi_paths::shared_sessions_dir)?;
+    let shared_dir = shared_sessions_dir(&server)?;
     let still_on: OtherUsersSetting = if forced_on == Some(true) {
         Arc::new(|| true)
     } else {
@@ -153,6 +151,20 @@ pub fn other_users_policy(
         shared_dir,
         still_on,
     })
+}
+
+/// The machine-wide directory the sessions of one user are advertised in:
+/// `server`'s `shared-sessions-dir` when it names one, and the platform's own
+/// machine-wide location otherwise. `None` when neither names one — Windows
+/// reporting no `ProgramData`.
+///
+/// The session server creates its socket here, and a `koshi` command looks
+/// here for the sessions the other local users started.
+pub(crate) fn shared_sessions_dir(server: &ServerConfig) -> Option<PathBuf> {
+    server
+        .shared_sessions_dir
+        .clone()
+        .or_else(koshi_paths::shared_sessions_dir)
 }
 
 /// The `server` settings `koshi.kdl` carries right now. Reads and parses the

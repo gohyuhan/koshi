@@ -1,7 +1,6 @@
 //! Tests for the pane metadata record: creation defaults, lifecycle
 //! ownership through `update_lifecycle`, and the serialized form.
 
-use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use koshi_core::error::DomainCategory;
@@ -14,7 +13,7 @@ use crate::pane::policy::{PaneClosePolicy, PaneExitPolicy};
 
 /// The JSON form of a fresh terminal record with the nil uuid as its id and
 /// `UNIX_EPOCH` as its creation time.
-const FRESH_TERMINAL_RECORD_JSON: &str = r#"{"id":"00000000-0000-0000-0000-000000000000","kind":"Terminal","command":null,"cwd":null,"close_policy":{"Graceful":{"timeout":3}},"exit_policy":"CloseOnExit","env":{},"lifecycle":"Spawning","created_at":{"secs_since_epoch":0,"nanos_since_epoch":0}}"#;
+const FRESH_TERMINAL_RECORD_JSON: &str = r#"{"id":"00000000-0000-0000-0000-000000000000","kind":"Terminal","command":null,"cwd":null,"close_policy":{"Graceful":{"timeout":3}},"exit_policy":"CloseOnExit","lifecycle":"Spawning","created_at":{"secs_since_epoch":0,"nanos_since_epoch":0}}"#;
 
 /// The `PaneId` whose uuid is all zeros.
 fn nil_pane_id() -> PaneId {
@@ -39,8 +38,7 @@ fn a_new_record_starts_spawning_with_empty_metadata() {
     assert_eq!(record.cwd, None);
     assert_eq!(record.close_policy, PaneClosePolicy::default());
     assert_eq!(record.exit_policy, PaneExitPolicy::CloseOnExit);
-    assert_eq!(record.env, BTreeMap::new());
-    assert_eq!(record.created_at, SystemTime::UNIX_EPOCH);
+    assert_eq!(record.created_at(), SystemTime::UNIX_EPOCH);
 }
 
 #[test]
@@ -180,6 +178,24 @@ fn a_record_ignores_an_unknown_field_when_deserializing() {
     );
 }
 
+/// Stored JSON that carries an `env` map decodes to the same record as JSON
+/// without one. `env` is not a field of `PaneRecord`, so it is skipped.
+#[test]
+fn a_record_carrying_a_stored_env_map_still_deserializes() {
+    let json = FRESH_TERMINAL_RECORD_JSON.replacen(
+        r#""lifecycle""#,
+        r#""env":{"EDITOR":"vi"},"lifecycle""#,
+        1,
+    );
+
+    let restored: PaneRecord = serde_json::from_str(&json).expect("deserialize");
+
+    assert_eq!(
+        restored,
+        PaneRecord::new(nil_pane_id(), SystemTime::UNIX_EPOCH)
+    );
+}
+
 #[test]
 fn a_record_without_a_lifecycle_fails_to_deserialize() {
     let json = FRESH_TERMINAL_RECORD_JSON.replacen(r#""lifecycle":"Spawning","#, "", 1);
@@ -188,6 +204,6 @@ fn a_record_without_a_lifecycle_fails_to_deserialize() {
 
     assert_eq!(
         error.to_string(),
-        "missing field `lifecycle` at line 1 column 226"
+        "missing field `lifecycle` at line 1 column 217"
     );
 }

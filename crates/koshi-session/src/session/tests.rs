@@ -11,7 +11,7 @@ use koshi_core::constant::MAX_TAB_FOCUS_MRU;
 use koshi_core::event::{Event, PaneClosing, PaneRemoved, TabClosed};
 use koshi_core::geometry::{Size, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
-use koshi_layout::tree::{LayoutChild, LayoutNode, SplitNode};
+use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pane::pane::lifecycle::{PaneLifecycle, PaneLifecycleEvent};
 use koshi_pane::pane::state::PaneRecord;
 
@@ -77,7 +77,6 @@ fn a_new_session_starts_empty() {
     assert_eq!(session.id, id);
     assert_eq!(session.name, "main");
     assert!(session.tabs.is_empty());
-    assert!(session.plugin_runtime_ref.is_none());
     assert!(session.panes.is_empty());
     assert!(session.clients.is_empty());
 }
@@ -1171,10 +1170,7 @@ fn a_pane_appearing_twice_in_one_tabs_tree_is_reported() {
     let mut tab = Tab::new(tab_id, "code".to_owned(), 0, doubled);
     tab.update_layout(LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![
-            LayoutChild::new(LayoutNode::Pane(doubled)),
-            LayoutChild::new(LayoutNode::Pane(doubled)),
-        ],
+        vec![LayoutNode::Pane(doubled), LayoutNode::Pane(doubled)],
     )));
     session.tabs.insert(tab_id, tab);
 

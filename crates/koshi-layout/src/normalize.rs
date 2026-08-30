@@ -9,8 +9,7 @@
 //! - same-direction directional splits merge into their parent when every
 //!   weight involved is a plain flex share,
 //! - weight values are clamped into their valid ranges, weight lists are
-//!   re-paired with children, directional splits carry `active` as `0` with
-//!   no collapsed child, and stacks keep exactly one expanded child.
+//!   re-paired with children, and directional splits carry `active` as `0`.
 //!
 //! The pass is idempotent: normalizing a normalized tree returns it
 //! unchanged.
@@ -21,7 +20,7 @@ use koshi_core::geometry::SplitDirection;
 use koshi_core::ids::PaneId;
 
 use crate::size::{SizeConstraint, SizeWeight, Weight};
-use crate::tree::{LayoutChild, LayoutNode, SplitNode};
+use crate::tree::{LayoutNode, SplitNode};
 
 /// Normalize `tree` against `live_panes`, the set of panes still alive.
 ///
@@ -43,7 +42,7 @@ pub fn normalize(tree: &LayoutNode, live_panes: &HashSet<PaneId>) -> Option<Layo
     // missing weight becomes the default share, an extra one is dropped.
     let mut entries: Vec<Entry> = Vec::with_capacity(split.children.len());
     for (index, child) in split.children.iter().enumerate() {
-        let Some(node) = normalize(&child.node, live_panes) else {
+        let Some(node) = normalize(child, live_panes) else {
             continue;
         };
         let weight = split.weights.get(index).copied().unwrap_or_default();
@@ -79,16 +78,7 @@ pub fn normalize(tree: &LayoutNode, live_panes: &HashSet<PaneId>) -> Option<Layo
 
     let (children, weights) = entries
         .into_iter()
-        .enumerate()
-        .map(|(index, entry)| {
-            (
-                LayoutChild {
-                    node: entry.node,
-                    collapsed: stacked && index != active,
-                },
-                entry.weight,
-            )
-        })
+        .map(|entry| (entry.node, entry.weight))
         .unzip();
     Some(LayoutNode::Split(SplitNode {
         direction: split.direction,
@@ -158,7 +148,7 @@ fn merge_same_direction(direction: SplitDirection, entries: Vec<Entry>) -> Vec<E
         };
         for (child, weight) in inner.children.into_iter().zip(weights) {
             merged.push(Entry {
-                node: child.node,
+                node: child,
                 weight,
                 old_index: entry.old_index,
             });

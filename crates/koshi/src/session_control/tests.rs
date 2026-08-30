@@ -7,7 +7,7 @@ use std::time::SystemTime;
 
 use koshi_core::command::CliExitCode;
 use koshi_core::discovery::{SessionInfo, SessionOverview};
-use koshi_core::event::Event;
+use koshi_core::event::{Event, RejectReason};
 use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::protocol::{
     ConnectionToken, IpcErrorCode, IpcErrorPayload, IpcRequest, IpcRequestKind, IpcResponse,
@@ -380,7 +380,7 @@ fn an_answer_to_another_request_names_what_came_back() {
     let CliError::IpcUnavailable { detail } = error else {
         panic!("expected IpcUnavailable, got {error:?}");
     };
-    assert_eq!(detail, "the router answered a create session with Hello");
+    assert_eq!(detail, "the router answered with an unexpected Hello reply");
     let (hello_ok, request) = saw(&router);
     assert!(hello_ok, "the hello opens the gate");
     assert_eq!(request, Some(expected_create(None, None)));

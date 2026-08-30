@@ -392,3 +392,65 @@ fn a_frame_carrying_no_panes_reads_back_with_no_panes() {
     assert_eq!(read_back.panes, Vec::<PaneSnapshot>::new());
     assert_eq!(read_back, sent);
 }
+
+#[test]
+fn every_name_the_answering_session_chose_reads_back_filtered() {
+    // This process paints all four into its own terminal, and puts the session
+    // name and the focused pane's title inside an `OSC 0` window title.
+    let pane = PaneId::new();
+    let mut sent = snapshot(vec![content_pane(pane), empty_pane(PaneId::new())]);
+    sent.session.name = String::from("dev\u{7}\u{1b}]0;owned\u{7}");
+    sent.session.active_tab.name = String::from("build\u{1b}[2J");
+    sent.session.tabs_metadata[0].name = String::from("build\u{9b}2J");
+    sent.session.tabs_metadata[1].name = String::from("\u{202e}gpj.exe");
+    sent.panes[0].title = Some(String::from("~/work\u{7}\u{1b}]0;owned\u{7}"));
+
+    let read_back = to_snapshot(&wire_frame(&sent));
+
+    assert_eq!(read_back.session.name, "dev]0;owned");
+    assert_eq!(read_back.session.active_tab.name, "build[2J");
+    assert_eq!(read_back.session.tabs_metadata[0].name, "build2J");
+    assert_eq!(read_back.session.tabs_metadata[1].name, "gpj.exe");
+    assert_eq!(
+        read_back.panes[0].title.as_deref(),
+        Some("~/work]0;owned"),
+        "the pane title reaches the window title"
+    );
+}
+
+#[test]
+fn a_name_past_the_reported_text_cap_reads_back_cut_to_it() {
+    let cap = koshi_core::text::MAX_REPORTED_TEXT_BYTES;
+    let mut sent = snapshot(vec![content_pane(PaneId::new()), empty_pane(PaneId::new())]);
+    sent.session.name = "a".repeat(cap + 1);
+
+    let read_back = to_snapshot(&wire_frame(&sent));
+
+    assert_eq!(read_back.session.name, "a".repeat(cap));
+}
+
+#[test]
+fn a_pane_cell_holding_a_control_character_reads_back_holding_it() {
+    // A cell is the pane's own screen. The grid stores what the pane drew, and
+    // the renderer places each cell rather than writing it through.
+    let pane = PaneId::new();
+    let mut sent = snapshot(vec![content_pane(pane), empty_pane(PaneId::new())]);
+    let mut grid = grid();
+    *grid.cell_mut(1, 0).expect("the grid has a cell at (1, 0)") =
+        Cell::new('\u{1b}', 1, Style::default());
+    sent.panes[0].grid_view = Some(GridView {
+        grid: Arc::new(grid),
+        view_offset: 0,
+    });
+
+    let read_back = to_snapshot(&wire_frame(&sent));
+
+    let view = read_back.panes[0]
+        .grid_view
+        .as_ref()
+        .expect("the pane carries a grid");
+    assert_eq!(
+        view.grid.cell(1, 0).expect("the cell survives").ch(),
+        '\u{1b}'
+    );
+}

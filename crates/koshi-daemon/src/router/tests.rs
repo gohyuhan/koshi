@@ -36,6 +36,7 @@ use koshi_ipc::remote_wire::{
     self, RemoteClientFrame, RemoteServerFrame, MIN_REMOTE_PROTOCOL_VERSION,
     REMOTE_PROTOCOL_VERSION, REMOTE_REFUSED,
 };
+use koshi_ipc::router::RouterRequest;
 use koshi_link::remote_client::{self, DIAL_WAIT};
 use koshi_test_support::fixtures::test_runtime_dir;
 
@@ -50,7 +51,6 @@ fn registry_of(entries: &[(SessionId, &str)]) -> Registry {
                     name: (*name).to_string(),
                     socket: socket_addr(Path::new("/nowhere"), *id),
                     pid: 4242,
-                    created_at: UNIX_EPOCH,
                 },
             )
         })
@@ -443,7 +443,6 @@ fn the_rebuild_registers_a_session_another_local_user_started() {
                 name: "S-quiet-lake".to_string(),
                 socket: addr,
                 pid: 0,
-                created_at,
             },
         )]),
     );
@@ -862,7 +861,6 @@ fn a_lookup_for_a_session_that_answers_hands_back_where_it_listens() {
                 name: "S-quiet-lake".to_string(),
                 socket,
                 pid: 4242,
-                created_at: UNIX_EPOCH,
             },
         )]),
         "a session that answered stays in the list"
@@ -1366,24 +1364,61 @@ fn a_restart_that_cannot_exec_leaves_the_write_to_a_hung_up_client_ignored() {
     assert_eq!(prior, libc::SIG_IGN);
 }
 
-/// A serving thread's SIGPIPE block must hold while the process-wide
-/// disposition sits at its default, the state a running exec puts it in. The
-/// raise is thread-directed, like the signal a write to a hung-up peer
-/// raises; blocked, it stays pending, the thread runs on, and the pending
-/// signal dies with the thread.
-#[cfg(unix)]
+/// The accept loop gates every connection on the user the OS reports for it,
+/// so a connection this router's own user opens must still be served. This
+/// test's caller runs in the test process, under that same user; another
+/// user's connection needs a second OS account and is covered by neither this
+/// test nor any other.
 #[test]
-fn a_serving_threads_sigpipe_block_holds_under_the_default_disposition() {
-    let survived = std::thread::spawn(|| {
-        block_sigpipe_on_this_thread();
-        let prior = unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
-        let raised = unsafe { libc::raise(libc::SIGPIPE) };
-        unsafe { libc::signal(libc::SIGPIPE, prior) };
-        raised == 0
-    })
-    .join()
-    .expect("the thread survives the raised SIGPIPE");
-    assert!(survived, "the raise itself reported an error");
+fn the_accept_loop_serves_a_connection_this_user_opened() {
+    let runtime_dir = test_runtime_dir();
+    let addr = router_socket_addr(runtime_dir.path());
+    let listener = Listener::bind(&addr).expect("the router socket is bound");
+    let token = ConnectionToken::generate();
+    let (events_tx, events_rx) = mpsc::channel();
+    let shutting_down = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&shutting_down);
+    let accepted_token = token.clone();
+    let accepting = std::thread::spawn(move || {
+        accept_loop(&listener, &accepted_token, &events_tx, &flag);
+    });
+
+    let mut caller = Connection::connect(&addr).expect("the caller reaches the router");
+    caller
+        .send(&RouterRequest {
+            request_id: 1,
+            kind: RouterRequestKind::hello(token),
+        })
+        .expect("the hello is written");
+    let answered: RouterResponse = caller.recv().expect("the hello is answered");
+    assert_eq!(
+        answered,
+        RouterResponse {
+            request_id: Some(1),
+            result: RouterResult::Hello {
+                protocol_version: ROUTER_PROTOCOL_VERSION,
+                version: BUILD_VERSION.to_string(),
+            },
+        }
+    );
+    caller
+        .send(&RouterRequest {
+            request_id: 2,
+            kind: RouterRequestKind::ListSessions,
+        })
+        .expect("the listing request is written");
+    let reached = events_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the request reaches the dispatcher");
+    let RouterEvent::Request { kind, reply: _ } = reached else {
+        panic!("the accept loop passed on something other than a request");
+    };
+    assert_eq!(kind, RouterRequestKind::ListSessions);
+
+    shutting_down.store(true, Ordering::SeqCst);
+    drop(caller);
+    let _ = Connection::connect(&addr);
+    accepting.join().expect("the accept loop ends");
 }
 
 /// One token request answered the way the dispatcher answers it: against the
@@ -2464,6 +2499,73 @@ fn an_attach_naming_a_session_this_machine_does_not_run_reaches_nothing() {
         located(&SessionSelector::Id(running)),
         Some(EndpointFile::path(runtime_dir.path(), running)),
         "and the session that is running is still reached"
+    );
+}
+
+#[test]
+fn a_session_another_local_user_started_is_neither_listed_nor_reached_from_a_remote_connection() {
+    // The rebuild registers those sessions from the machine-wide shared
+    // directory, under `pid` 0, and the bridge reads the endpoint file under
+    // this router's own runtime directory, which holds none of them. Listing
+    // one would name a session every attach then refuses, and would carry
+    // another local user's session name and id out over the network.
+    let own = SessionId::new();
+    let foreign = SessionId::new();
+    let runtime_dir = test_runtime_dir();
+    let mut registry = registry_of(&[(own, "S-quiet-lake")]);
+    registry.insert(
+        foreign,
+        SessionEntry {
+            name: "S-loud-river".to_string(),
+            socket: socket_addr(Path::new("/nowhere"), foreign),
+            pid: 0,
+        },
+    );
+    let mut remote = no_remote();
+    let (_caller, served) = loopback_pair();
+    remote.live.push(LiveRemote {
+        hash: "a".repeat(64),
+        stream: served,
+        id: 5,
+    });
+    let located = |selector: &SessionSelector| {
+        locate_remote(
+            runtime_dir.path(),
+            &registry,
+            &remote,
+            &TokenScope::HostWide,
+            5,
+            selector,
+        )
+    };
+
+    assert_eq!(
+        remote_rows(&registry, &TokenScope::HostWide),
+        vec![RemoteSessionRow {
+            id: own,
+            name: "S-quiet-lake".to_string(),
+        }],
+        "a host-wide grant is shown the session this router started and no other"
+    );
+    assert_eq!(
+        remote_rows(&registry, &TokenScope::Session(foreign)),
+        Vec::<RemoteSessionRow>::new(),
+        "and a grant naming that session outright is shown nothing"
+    );
+    assert_eq!(
+        located(&SessionSelector::Id(foreign)),
+        None,
+        "an attach naming it by id reaches nothing"
+    );
+    assert_eq!(
+        located(&SessionSelector::Name("S-loud-river".to_string())),
+        None,
+        "and naming it reaches nothing either"
+    );
+    assert_eq!(
+        located(&SessionSelector::Id(own)),
+        Some(EndpointFile::path(runtime_dir.path(), own)),
+        "while the session this router started is still reached"
     );
 }
 

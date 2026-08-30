@@ -66,14 +66,6 @@ fn version_diagnostic_offers_an_upgrade_hint() {
 }
 
 #[test]
-fn not_found_error_names_the_path() {
-    let err = ConfigError::NotFound {
-        path: "/etc/koshi.kdl".to_string(),
-    };
-    assert_eq!(err.to_string(), "config file not found: /etc/koshi.kdl");
-}
-
-#[test]
 fn parse_error_shows_path_and_detail() {
     let err = ConfigError::Parse {
         path: "koshi.kdl".to_string(),
@@ -123,8 +115,9 @@ fn parse_conversion_without_sub_diagnostics_uses_the_kdl_display() {
 
 #[test]
 fn config_errors_classify_as_recoverable_config_problems() {
-    let err = ConfigError::NotFound {
-        path: "x".to_string(),
+    let err = ConfigError::Validation {
+        key: "scrollback".to_string(),
+        detail: "x".to_string(),
     };
     assert_eq!(err.category(), DomainCategory::Config);
     assert_eq!(err.severity(), Severity::Recoverable);

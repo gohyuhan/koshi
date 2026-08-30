@@ -4,25 +4,17 @@
 use super::*;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::mpsc;
 
 use koshi_config::conflict::{KeyMapLayer, LayerOrigin};
 use koshi_config::hints::KeymapHintCatalog;
 use koshi_config::types::{KeybindingsConfig, ModeBindings, ModeName};
 use koshi_core::registry::ActionRegistry;
-use koshi_observability::cleanup::TerminalCleanupGuard;
 
 use crate::Client;
 
 /// A viewer on the built-in keymap.
 fn client() -> Client {
-    let (_tx, rx) = mpsc::sync_channel(8);
-    Client::new(
-        koshi_core::ids::ClientId::new(),
-        koshi_core::geometry::Size { cols: 80, rows: 24 },
-        rx,
-        TerminalCleanupGuard::new(),
-    )
+    crate::tests::new_client().0
 }
 
 fn chord(mods: ModFlags, key: char) -> KeyChord {
@@ -344,9 +336,9 @@ fn a_sequence_that_is_both_a_binding_and_a_prefix_fires_on_its_deadline() {
 #[test]
 fn the_hint_bar_follows_the_viewers_own_mode() {
     let mut client = client();
-    let normal = client.keymap_hints();
+    let normal = client.frame_hints_for(client.lock_mode(), false);
     client.set_lock_mode(LockMode::Locked);
-    let locked = client.keymap_hints();
+    let locked = client.frame_hints_for(client.lock_mode(), false);
 
     assert_ne!(
         normal.entries, locked.entries,
@@ -369,18 +361,6 @@ fn setting_the_mode_the_viewer_is_already_in_leaves_an_open_sequence_alone() {
     client.set_lock_mode(LockMode::Normal);
 
     assert_eq!(client.pending_sequence(), Some(&KeySequence::from(prefix)));
-}
-
-#[test]
-fn clearing_the_sequence_drops_the_chords_being_held() {
-    let mut client = client();
-    let prefix = chord(ModFlags::CTRL, 'p');
-    client.resolve_key(prefix, Instant::now());
-    assert_eq!(client.pending_sequence(), Some(&KeySequence::from(prefix)));
-
-    client.clear_pending_sequence();
-
-    assert_eq!(client.pending_sequence(), None);
 }
 
 #[test]

@@ -45,7 +45,7 @@ fn runtime_error_display_with_empty_name_and_detail() {
 }
 
 #[test]
-fn display_does_not_escape_backticks_in_name() {
+fn load_error_display_does_not_escape_backticks_in_name() {
     // The `#[error]` format substitutes `name` as plain text. A backtick in
     // `name` reaches the message unescaped.
     let err = PluginError::Load {
@@ -56,7 +56,7 @@ fn display_does_not_escape_backticks_in_name() {
 }
 
 #[test]
-fn display_preserves_multibyte_unicode_in_name() {
+fn runtime_error_display_preserves_multibyte_unicode() {
     let err = PluginError::Runtime {
         name: "プラグイン".to_string(),
         detail: "パニック".to_string(),
@@ -125,7 +125,7 @@ fn load_error_display_preserves_multibyte_unicode() {
 }
 
 #[test]
-fn display_substitutes_brace_shaped_fields_verbatim() {
+fn load_error_display_substitutes_brace_shaped_fields_verbatim() {
     // `{name}` and `{detail}` are substituted once. Braces inside a field
     // reach the message as plain text.
     let err = PluginError::Load {
@@ -136,7 +136,7 @@ fn display_substitutes_brace_shaped_fields_verbatim() {
 }
 
 #[test]
-fn display_keeps_control_characters_in_detail() {
+fn runtime_error_display_keeps_control_characters_in_detail() {
     let err = PluginError::Runtime {
         name: "status-bar".to_string(),
         detail: "line one\nline two\ttabbed".to_string(),

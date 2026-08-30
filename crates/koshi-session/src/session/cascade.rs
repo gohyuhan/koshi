@@ -3,10 +3,10 @@
 //!
 //! A pane leaves for one of two reasons — its shell exited, or a client asked
 //! to close it — and both run the *same* removal routine. [`on_child_exit`] is
-//! the shell-exit entry: it consults the pane's [`PaneExitPolicy`] and, only
-//! when that policy says to remove, hands off to [`remove_pane_cascade`]. A
-//! user close enters [`remove_pane_cascade`] directly, so a self-exiting shell
-//! and an explicit close converge on identical behaviour.
+//! the shell-exit entry: it emits the exit event, consults the pane's
+//! [`PaneExitPolicy`], and hands off to [`remove_pane_cascade`]. A user close
+//! enters [`remove_pane_cascade`] directly, so a self-exiting shell and an
+//! explicit close converge on identical behaviour.
 //!
 //! [`remove_pane_cascade`] is the cascade proper: drop the pane, collapse the
 //! layout, repair each affected client's focus, and — if that empties the tab —
@@ -15,7 +15,6 @@
 //! the terminal or spawns a process.
 
 use std::collections::HashSet;
-use std::time::SystemTime;
 
 use koshi_core::event::{
     Event, LayoutChanged, PaneClosing, PaneFocused, PaneProcessExited, PaneRemoved,
@@ -28,7 +27,6 @@ use koshi_layout::focus::focus_candidates;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::normalize::normalize;
 use koshi_layout::solver::{solve_with_mode_min, PaneSizing};
-use koshi_pane::pane::lifecycle::PaneLifecycleEvent;
 use koshi_pane::pane::policy::PaneExitPolicy;
 
 use crate::client::pane_viewport;
@@ -178,8 +176,6 @@ pub fn remove_pane_cascade(
             EmptyTabPolicy::CloseTab => {
                 events.extend(close_and_refocus_tab(session, tab_id));
             }
-            // `RespawnShell` leaves the empty tab in place and emits no events.
-            EmptyTabPolicy::RespawnShell => {}
         },
     }
 
@@ -251,27 +247,21 @@ fn terminal_too_small_cause(
 /// Handle a pane's child process exiting, applying its [`PaneExitPolicy`].
 ///
 /// Emits a process-exited event unconditionally — the exit is a fact whatever
-/// the policy — then:
-/// - [`PaneExitPolicy::RespawnShell`]: advance the pane `Exited` then back to
-///   `Spawning`; the runtime spawns the replacement process.
-/// - [`PaneExitPolicy::CloseOnExit`]: remove the pane through
-///   [`remove_pane_cascade`], so a self-exiting shell tears down exactly like an
-///   explicit close.
+/// the policy — then applies [`PaneExitPolicy::CloseOnExit`]: the pane is
+/// removed through [`remove_pane_cascade`], so a self-exiting shell tears down
+/// exactly like an explicit close.
 ///
-/// `exited_at` is the time the caller observed the exit; this never reads the
-/// clock. `sizing` carries the per-pane content minimum and the gap between
-/// split children. An unknown `pane_id` emits only the exit event.
+/// `sizing` carries the per-pane content minimum and the gap between split
+/// children. An unknown `pane_id` emits only the exit event.
 // Carries a child-exit's full context to the shared cascade: the exit fact
-// (`exit_code`, `exited_at`), the reflow geometry (`tab_rect`, `sizing`), and
-// the empty-tab policy.
-#[allow(clippy::too_many_arguments)]
+// (`exit_code`), the reflow geometry (`tab_rect`, `sizing`), and the empty-tab
+// policy.
 #[must_use]
 pub fn on_child_exit(
     session: &mut Session,
     tab_id: TabId,
     pane_id: PaneId,
     exit_code: Option<i32>,
-    exited_at: SystemTime,
     tab_rect: Rect,
     sizing: PaneSizing,
     empty_tab_policy: EmptyTabPolicy,
@@ -286,18 +276,6 @@ pub fn on_child_exit(
     };
 
     match policy {
-        // Respawn in place: Running -> Exited -> Spawning. Only the lifecycle
-        // advances here; the runtime spawns the process. A pane that was not
-        // `Running` rejects the step and keeps the state it had.
-        PaneExitPolicy::RespawnShell => {
-            if let Some(pane) = session.panes.get_mut(pane_id) {
-                let _ = pane.update_lifecycle(PaneLifecycleEvent::ProcessExited {
-                    code: exit_code,
-                    at: exited_at,
-                });
-                let _ = pane.update_lifecycle(PaneLifecycleEvent::Respawn);
-            }
-        }
         // A self-exiting shell removes its pane through the shared cascade.
         PaneExitPolicy::CloseOnExit => {
             events.extend(remove_pane_cascade(

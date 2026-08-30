@@ -18,14 +18,12 @@
 //!
 //! It ends in one of two ways: the session server sends
 //! [`Shutdown`](koshi_ipc::supervisor::SupervisorRequestKind::Shutdown) when
-//! the session ends, or it has had no link for
-//! [`SUPERVISOR_IDLE_EXIT`](crate::pty_supervisor::SUPERVISOR_IDLE_EXIT).
-//! Either way it closes every pane it still holds before it goes.
+//! the session ends, or it has had no link for `SUPERVISOR_IDLE_EXIT`, which
+//! is 30 seconds. Either way it closes every pane it still holds before it
+//! goes.
 
 use std::collections::HashSet;
 use std::path::Path;
-#[cfg(windows)]
-use std::process::Stdio;
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -57,7 +55,7 @@ pub const PTY_SUPERVISOR_SUBCOMMAND: &str = "serve-pty-supervisor";
 ///
 /// Longer than the wait a session server coming up from carried state spends
 /// on the link.
-pub const SUPERVISOR_IDLE_EXIT: Duration = Duration::from_secs(30);
+pub(crate) const SUPERVISOR_IDLE_EXIT: Duration = Duration::from_secs(30);
 
 /// How long the accept loop pauses after a failed accept before trying again.
 const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
@@ -302,8 +300,8 @@ enum LinkOutcome {
 /// the session server generated it and started this process with it.
 ///
 /// Returns once the session server asks the supervisor to end, or once it has
-/// had no link for [`SUPERVISOR_IDLE_EXIT`]. Either way every pane it still
-/// holds is closed first.
+/// had no link for `SUPERVISOR_IDLE_EXIT`, which is 30 seconds. Either way
+/// every pane it still holds is closed first.
 ///
 /// # Errors
 /// Returns [`IpcError`] when the link address cannot be bound.
@@ -620,23 +618,19 @@ fn done_or_refused(outcome: Result<(), koshi_pty::error::PtyError>) -> Superviso
 /// Returns the [`std::io::Error`] of a supervisor that could not be started,
 /// with nothing started. The caller reports it as the pane failing to open.
 #[cfg(windows)]
-pub fn spawn_pty_supervisor(
+pub(crate) fn spawn_pty_supervisor(
     runtime_dir: &Path,
     session_id: SessionId,
     token: &ConnectionToken,
 ) -> std::io::Result<u32> {
-    use std::os::windows::process::CommandExt;
-
-    std::process::Command::new(std::env::current_exe()?)
-        .arg(PTY_SUPERVISOR_SUBCOMMAND)
-        .arg(session_id.to_string())
-        .arg(token.expose())
-        .arg(koshi_link::router_client::RUNTIME_DIR_FLAG)
-        .arg(runtime_dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .creation_flags(crate::router::DETACHED_PROCESS | crate::router::CREATE_NEW_PROCESS_GROUP)
-        .spawn()
-        .map(|child| child.id())
+    crate::process::detached(
+        std::process::Command::new(std::env::current_exe()?)
+            .arg(PTY_SUPERVISOR_SUBCOMMAND)
+            .arg(session_id.to_string())
+            .arg(token.expose())
+            .arg(koshi_link::router_client::RUNTIME_DIR_FLAG)
+            .arg(runtime_dir),
+    )
+    .spawn()
+    .map(|child| child.id())
 }

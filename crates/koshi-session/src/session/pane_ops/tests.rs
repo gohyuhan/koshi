@@ -17,7 +17,7 @@ use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::process::{ShellKind, SpawnSpec};
 use koshi_layout::edit::split_leaf;
 use koshi_layout::mode::LayoutMode;
-use koshi_layout::tree::{LayoutChild, LayoutNode, SplitNode};
+use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pane::pane::lifecycle::PaneLifecycle;
 use koshi_pane::pane::state::PaneRecord;
 
@@ -145,10 +145,7 @@ fn commit_emits_events_swaps_the_tree_and_focuses_the_new_pane() {
         session.tabs.get(&tab).expect("tab").layout(),
         &LayoutNode::Split(SplitNode::with_equal_weights(
             SplitDirection::Horizontal,
-            vec![
-                LayoutChild::new(LayoutNode::Pane(source)),
-                LayoutChild::new(LayoutNode::Pane(new_id)),
-            ],
+            vec![LayoutNode::Pane(source), LayoutNode::Pane(new_id),],
         ))
     );
 
@@ -335,7 +332,7 @@ fn commit_stamps_the_supplied_created_at_on_the_new_pane_record() {
     );
 
     assert_eq!(
-        session.panes.get(new_id).expect("record").created_at,
+        session.panes.get(new_id).expect("record").created_at(),
         created_at
     );
 }

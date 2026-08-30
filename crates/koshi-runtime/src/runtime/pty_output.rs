@@ -16,12 +16,12 @@ use koshi_core::event::{Event, PaneCommandFinished, PaneCommandStarted};
 use koshi_core::ids::PaneId;
 use koshi_terminal::state::ShellIntegrationFact;
 
-use crate::{runtime::render_schedule::InvalidationReason, server::Server};
+use crate::server::Server;
 
 impl Server {
     /// Feed one chunk of child output into `pane_id`'s terminal engine, write
     /// any device-query replies the chunk produced back into the pane's PTY,
-    /// and mark the screen stale with [`InvalidationReason::PtyOutput`].
+    /// and mark the screen stale.
     ///
     /// A `pane_id` with no engine — the pane closed while the chunk waited in
     /// the inbox — is ignored: no engine is touched, nothing is published, and
@@ -92,8 +92,7 @@ impl Server {
                 .collect();
             self.publish_events(&events);
         }
-        self.render_scheduler
-            .invalidate(InvalidationReason::PtyOutput);
+        self.render_scheduler.invalidate();
     }
 }
 

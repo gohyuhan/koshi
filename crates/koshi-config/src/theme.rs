@@ -29,7 +29,7 @@ use kdl::KdlNode;
 
 use crate::error::{check_version, validation, ConfigError};
 use crate::layer::{PartialColorPalette, PartialThemeConfig};
-use crate::parser::{parse_kdl, set, unknown_key, value_string, value_u32};
+use crate::parser::{parse_kdl, section_block, set, unknown_key, value_string, version_arg};
 use crate::types::RgbColor;
 
 /// The node names allowed inside `colors`, each already carrying the
@@ -52,8 +52,9 @@ const COLOR_KEYS: &[&str] = &[
 ];
 
 /// Parses a theme file's `source` into a [`PartialThemeConfig`] override layer
-/// and one warning per skipped color, unknown key, and repeated `colors`
-/// block, in file order. The returned layer's
+/// and one warning per skipped color, unknown key, value written on the
+/// `colors` line, and repeated `colors` block, in file order. The returned
+/// layer's
 /// [`name`](PartialThemeConfig::name) is left unset: the theme is named by its
 /// file, which the caller knows and this parser does not.
 ///
@@ -82,10 +83,8 @@ pub fn parse_theme(
                     ));
                 }
                 version_seen = true;
-                if node.children().is_some() {
-                    return Err(validation("version", "`version` takes no children"));
-                }
-                let found = value_u32(node).map_err(|detail| validation("version", &detail))?;
+                let found =
+                    version_arg(node).map_err(|(_, detail)| validation("version", detail))?;
                 check_version(found)
                     .map_err(|diagnostic| validation("version", &diagnostic.to_string()))?;
             }
@@ -111,10 +110,11 @@ pub fn parse_theme(
 
 /// Reads the `colors { … }` block into per-role overrides. A role whose value
 /// is unreadable, and a name outside [`COLOR_KEYS`], are left unset and pushed
-/// onto `warnings`. A `colors` node with no `{ … }` block sets no role.
+/// onto `warnings`. A `colors` node with no `{ … }` block sets no role, and a
+/// value written on the `colors` line itself is warned about and ignored.
 fn parse_colors(node: &KdlNode, warnings: &mut Vec<String>) -> PartialColorPalette {
     let mut palette = PartialColorPalette::default();
-    let Some(children) = node.children() else {
+    let Some(children) = section_block(node, warnings) else {
         return palette;
     };
     for child in children.nodes() {

@@ -143,14 +143,15 @@ fn reading_junk_bytes_is_token_store_unreadable() {
     std::fs::write(&path, b"not json").expect("write junk");
 
     match TokenStore::read(&path) {
-        Err(IpcError::TokenStoreUnreadable {
+        Err(IpcError::RemoteFileUnreadable {
+            file: RemoteFile::TokenStore,
             path: reported,
             detail,
         }) => {
             assert_eq!(reported, path.display().to_string());
             assert_eq!(detail, "expected ident at line 1 column 2");
         }
-        other => panic!("expected TokenStoreUnreadable, got {other:?}"),
+        other => panic!("expected a token store RemoteFileUnreadable, got {other:?}"),
     }
 }
 
@@ -161,7 +162,8 @@ fn a_file_with_an_unknown_field_is_unreadable() {
     std::fs::write(&path, r#"{"format":1,"records":[],"extra":1}"#).expect("write file");
 
     match TokenStore::read(&path) {
-        Err(IpcError::TokenStoreUnreadable {
+        Err(IpcError::RemoteFileUnreadable {
+            file: RemoteFile::TokenStore,
             path: reported,
             detail,
         }) => {
@@ -171,7 +173,7 @@ fn a_file_with_an_unknown_field_is_unreadable() {
                 "unknown field `extra`, expected `format` or `records` at line 1 column 32"
             );
         }
-        other => panic!("expected TokenStoreUnreadable, got {other:?}"),
+        other => panic!("expected a token store RemoteFileUnreadable, got {other:?}"),
     }
 }
 
@@ -182,14 +184,15 @@ fn a_file_whose_format_number_is_two_is_unreadable() {
     std::fs::write(&path, r#"{"format":2,"records":[]}"#).expect("write file");
 
     match TokenStore::read(&path) {
-        Err(IpcError::TokenStoreUnreadable {
+        Err(IpcError::RemoteFileUnreadable {
+            file: RemoteFile::TokenStore,
             path: reported,
             detail,
         }) => {
             assert_eq!(reported, path.display().to_string());
             assert_eq!(detail, "format 2 is not the 1 this build reads");
         }
-        other => panic!("expected TokenStoreUnreadable, got {other:?}"),
+        other => panic!("expected a token store RemoteFileUnreadable, got {other:?}"),
     }
 }
 
@@ -202,10 +205,14 @@ fn writing_where_the_directory_cannot_exist_is_token_store_write() {
     let path = store_path(dir.path());
 
     match TokenStore::new().write(&path) {
-        Err(IpcError::TokenStoreWrite { path: reported, .. }) => {
+        Err(IpcError::RemoteFileWrite {
+            file: RemoteFile::TokenStore,
+            path: reported,
+            ..
+        }) => {
             assert_eq!(reported, path.display().to_string());
         }
-        other => panic!("expected TokenStoreWrite, got {other:?}"),
+        other => panic!("expected a token store RemoteFileWrite, got {other:?}"),
     }
 }
 
@@ -752,12 +759,13 @@ fn a_store_whose_bytes_stop_part_way_is_refused_and_admits_nothing() {
 
     let error = TokenStore::read(&path).expect_err("a truncated store is refused");
 
-    let IpcError::TokenStoreUnreadable {
+    let IpcError::RemoteFileUnreadable {
+        file: RemoteFile::TokenStore,
         path: named,
         detail,
     } = error
     else {
-        panic!("expected TokenStoreUnreadable, got {error:?}");
+        panic!("expected a token store RemoteFileUnreadable, got {error:?}");
     };
     assert_eq!(named, path.display().to_string());
     assert_eq!(detail, "EOF while parsing a string at line 1 column 38");
@@ -773,8 +781,13 @@ fn a_directory_where_the_store_belongs_is_refused_rather_than_read_as_empty() {
 
     let error = TokenStore::read(&path).expect_err("a directory is refused");
 
-    let IpcError::TokenStoreUnreadable { path: named, .. } = error else {
-        panic!("expected TokenStoreUnreadable, got {error:?}");
+    let IpcError::RemoteFileUnreadable {
+        file: RemoteFile::TokenStore,
+        path: named,
+        ..
+    } = error
+    else {
+        panic!("expected a token store RemoteFileUnreadable, got {error:?}");
     };
     assert_eq!(named, path.display().to_string());
 }
@@ -1061,12 +1074,13 @@ fn a_record_carrying_an_unknown_field_makes_the_store_unreadable() {
 
     let error = TokenStore::read(&path).expect_err("an unknown record field is refused");
 
-    let IpcError::TokenStoreUnreadable {
+    let IpcError::RemoteFileUnreadable {
+        file: RemoteFile::TokenStore,
         path: named,
         detail,
     } = error
     else {
-        panic!("expected TokenStoreUnreadable, got {error:?}");
+        panic!("expected a token store RemoteFileUnreadable, got {error:?}");
     };
     assert_eq!(named, path.display().to_string());
     assert_eq!(
@@ -1104,12 +1118,13 @@ fn a_file_missing_its_record_list_is_unreadable() {
 
     let error = TokenStore::read(&path).expect_err("a store without records is refused");
 
-    let IpcError::TokenStoreUnreadable {
+    let IpcError::RemoteFileUnreadable {
+        file: RemoteFile::TokenStore,
         path: named,
         detail,
     } = error
     else {
-        panic!("expected TokenStoreUnreadable, got {error:?}");
+        panic!("expected a token store RemoteFileUnreadable, got {error:?}");
     };
     assert_eq!(named, path.display().to_string());
     assert_eq!(detail, "missing field `records` at line 1 column 12");
@@ -1123,12 +1138,13 @@ fn a_file_whose_format_number_is_zero_is_unreadable() {
 
     let error = TokenStore::read(&path).expect_err("format 0 is refused");
 
-    let IpcError::TokenStoreUnreadable {
+    let IpcError::RemoteFileUnreadable {
+        file: RemoteFile::TokenStore,
         path: named,
         detail,
     } = error
     else {
-        panic!("expected TokenStoreUnreadable, got {error:?}");
+        panic!("expected a token store RemoteFileUnreadable, got {error:?}");
     };
     assert_eq!(named, path.display().to_string());
     assert_eq!(detail, "format 0 is not the 1 this build reads");

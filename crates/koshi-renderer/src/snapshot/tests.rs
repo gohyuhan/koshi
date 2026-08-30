@@ -386,7 +386,7 @@ fn a_mouse_frame_layout_carries_the_regions_that_were_painted() {
 }
 
 #[test]
-fn the_navigator_view_takes_its_fields_from_the_session_client_and_viewer() {
+fn the_tabline_view_takes_its_fields_from_the_session_client_and_viewer() {
     let mut snap = fixture(fixture_grid());
     snap.client.lock_mode = LockMode::Locked;
     snap.client.mouse_select = true;
@@ -401,14 +401,14 @@ fn the_navigator_view_takes_its_fields_from_the_session_client_and_viewer() {
     };
 
     let layout = snap.layout(viewer);
-    let navigator = layout.navigator();
+    let tabline = layout.tabline();
 
-    assert_eq!(navigator.session_name, "sess");
-    assert_eq!(navigator.tabs, snap.session.tabs_metadata.as_slice());
-    assert_eq!(navigator.lock_mode, LockMode::Locked);
-    assert!(navigator.mouse_select);
-    assert_eq!(navigator.reconnecting, Some(reconnecting));
-    assert_eq!(navigator.tabline_offset, Some(2));
+    assert_eq!(tabline.session_name, "sess");
+    assert_eq!(tabline.tabs, snap.session.tabs_metadata.as_slice());
+    assert_eq!(tabline.lock_mode, LockMode::Locked);
+    assert!(tabline.mouse_select);
+    assert_eq!(tabline.reconnecting, Some(reconnecting));
+    assert_eq!(tabline.tabline_offset, Some(2));
 }
 
 #[test]

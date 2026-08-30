@@ -155,7 +155,9 @@ fn fake_session(
                     IpcResult::CommandResult(CommandResult::Rejected {
                         command_id: envelope.id,
                         reason: koshi_core::event::RejectReason::Unauthorized,
-                        help: Some("no client is attached to the session".to_string()),
+                        help: Some(
+                            "\u{1b}[2Jno client is attached\u{7f} to the session".to_string(),
+                        ),
                     }),
                 );
             }
@@ -243,9 +245,11 @@ fn a_rejected_command_comes_back_with_reason_and_help() {
         panic!("expected the rejection to ride back, got {result:?}");
     };
     assert_eq!(reason, koshi_core::event::RejectReason::Unauthorized);
+    // The session that answered writes the hint, and a session reached through
+    // the shared directory belongs to another user, so the hint is filtered.
     assert_eq!(
         help.as_deref(),
-        Some("no client is attached to the session"),
+        Some("[2Jno client is attached to the session"),
     );
 
     server.join().expect("fake session exits");

@@ -35,7 +35,7 @@
 //!
 //! # Word boundaries
 //!
-//! A double-click grows the selection to a whole "word". [`WORD_SEPARATORS`]
+//! A double-click grows the selection to a whole "word". The separator set
 //! leaves out `/`, `.`, `-`, and `_`: double-clicking `/usr/local/bin` selects
 //! the whole path, and `foo.tar.gz` comes out whole.
 
@@ -75,7 +75,7 @@ fn cell_or_padding(cells: &[Cell], col: u16, cols: u16) -> Option<&Cell> {
 /// double-clicking inside `(foo bar)` selects `foo` alone. Double-clicking a
 /// separator itself selects the run of that same character — the two spaces in
 /// `foo  bar`, not the words around them.
-pub const WORD_SEPARATORS: &str = ",│`|:\"' ()[]{}<>\t";
+pub(crate) const WORD_SEPARATORS: &str = ",│`|:\"' ()[]{}<>\t";
 
 /// One pane's text — its scrollback history and its live screen — addressed by
 /// absolute row number. See the module docs for what the numbering means.
@@ -97,9 +97,8 @@ impl<'a> TextView<'a> {
     /// the primary screen.
     ///
     /// **Only for the primary screen.** The alternate screen keeps no history of
-    /// its own while `scrollback` still holds the *primary's*. Use
-    /// [`screen_only`](Self::screen_only) there; [`TerminalState::text_view`]
-    /// picks the right one.
+    /// its own while `scrollback` still holds the *primary's*;
+    /// [`TerminalState::text_view`] builds the right view for each screen.
     ///
     /// [`TerminalState::text_view`]: crate::state::TerminalState::text_view
     #[must_use]
@@ -117,7 +116,7 @@ impl<'a> TextView<'a> {
     /// `top` is the absolute row number its first row takes. Positions resolved
     /// here and on the primary agree on what a row number means.
     #[must_use]
-    pub fn screen_only(grid: &'a Grid, top: u64) -> Self {
+    pub(crate) fn screen_only(grid: &'a Grid, top: u64) -> Self {
         TextView {
             history: None,
             grid,

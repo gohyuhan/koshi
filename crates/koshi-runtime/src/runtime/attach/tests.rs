@@ -7,7 +7,7 @@ use std::time::SystemTime;
 use koshi_core::geometry::SplitDirection;
 use koshi_core::ids::{PaneId, SessionId, TabId};
 use koshi_ipc::attach::{PaneStructure, TabStructure};
-use koshi_layout::tree::{LayoutChild, LayoutNode, SplitNode};
+use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pane::pane::state::{PaneKind, PaneRecord};
 use koshi_session::client::ClientRegistry;
 use koshi_session::session::state::{Session, Tab};
@@ -83,10 +83,7 @@ fn a_split_layout_travels_unsolved_with_its_weights_and_direction() {
     let right = add_pane(&mut session);
     let split = SplitNode::with_equal_weights(
         SplitDirection::Vertical,
-        vec![
-            LayoutChild::new(LayoutNode::Pane(left)),
-            LayoutChild::new(LayoutNode::Pane(right)),
-        ],
+        vec![LayoutNode::Pane(left), LayoutNode::Pane(right)],
     );
     let tab_id = TabId::new();
     let mut tab = Tab::new(tab_id, "edit".to_string(), 0, left);
@@ -122,7 +119,8 @@ fn a_stacked_tab_keeps_every_collapsed_flag_and_the_active_index() {
         carried
             .children
             .iter()
-            .map(|child| child.collapsed)
+            .enumerate()
+            .map(|(index, _)| carried.is_collapsed(index))
             .collect::<Vec<bool>>(),
         vec![true, false, true]
     );
@@ -180,12 +178,9 @@ fn every_tab_is_carried_not_only_the_first() {
     assert_eq!(structure.tabs[1].layout, LayoutNode::Pane(second_pane));
 }
 
-/// How many panes the ordering tests register.
-///
-/// `PaneRegistry` stores records in a `HashMap`, so a builder that dropped the
-/// sort would emit hash order. Hash order happens to be ascending for one
-/// arrangement out of every factorial of this count, so twelve panes leaves
-/// about one chance in 479 million of such a builder passing.
+/// How many panes the ordering tests register. Twelve ids, minted in ascending
+/// order and registered in that order, prove the snapshot carries every one of
+/// them in id order.
 const PANE_ORDER_SAMPLE: usize = 12;
 
 #[test]

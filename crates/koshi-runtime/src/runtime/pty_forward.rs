@@ -13,7 +13,6 @@
 //! already wired to a sink.
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
-use std::time::SystemTime;
 
 use koshi_core::ids::PaneId;
 use koshi_core::process::{ExitStatus, PtySize};
@@ -53,15 +52,13 @@ impl PtySink for InboxSink {
             .is_ok()
     }
 
-    /// Queue the child's exit as [`RuntimeEvent::ChildExit`], stamped with
-    /// `SystemTime::now()`. The backend calls this after the pane's last
-    /// output, and reads the pane no further. A closed inbox drops the event.
+    /// Queue the child's exit as [`RuntimeEvent::ChildExit`]. The backend calls
+    /// this after the pane's last output, and reads the pane no further. A
+    /// closed inbox drops the event.
     fn exit(&self, pane_id: PaneId, status: ExitStatus) {
-        let _ = self.inbox_tx.send(RuntimeEvent::ChildExit {
-            pane_id,
-            status,
-            exited_at: SystemTime::now(),
-        });
+        let _ = self
+            .inbox_tx
+            .send(RuntimeEvent::ChildExit { pane_id, status });
     }
 }
 

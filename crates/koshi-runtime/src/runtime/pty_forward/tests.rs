@@ -13,8 +13,6 @@ use koshi_core::process::SpawnSpec;
 use koshi_pty::backend::state::PtyBackend;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
-use crate::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
-
 use super::*;
 
 const PANE_SIZE: PtySize = PtySize { cols: 80, rows: 24 };
@@ -43,16 +41,8 @@ fn expect_pty_output(rx: &mpsc::Receiver<RuntimeEvent>, pane: PaneId, bytes: &[u
 fn new_runtime_with_fake() -> (Server, Arc<FakePtyBackend>, mpsc::Sender<RuntimeEvent>) {
     let fake = Arc::new(FakePtyBackend::new());
     let pty_backend: Arc<dyn PtyBackend> = fake.clone();
-    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
-    let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (tx, inbox_rx) = mpsc::channel();
-    let runtime = Server::new(
-        pty_backend,
-        snapshot_provider,
-        storage,
-        inbox_rx,
-        tx.clone(),
-    );
+    let runtime = Server::new(pty_backend, inbox_rx, tx.clone());
     (runtime, fake, tx)
 }
 
@@ -156,21 +146,15 @@ fn the_child_exit_is_forwarded_after_all_output_drains() {
 
     fake.push_output(pane, b"out".to_vec()).expect("push");
     fake.close_output(pane).expect("close");
-    let before = SystemTime::now();
     fake.trigger_child_exit(pane, ExitStatus::ExitCode(0))
         .expect("exit");
 
     let rx = rt.inbox_rx();
     expect_pty_output(rx, pane, b"out");
     match rx.recv_timeout(DEADLINE) {
-        Ok(RuntimeEvent::ChildExit {
-            pane_id,
-            status,
-            exited_at,
-        }) => {
+        Ok(RuntimeEvent::ChildExit { pane_id, status }) => {
             assert_eq!(pane_id, pane);
             assert_eq!(status, ExitStatus::ExitCode(0));
-            assert!(exited_at >= before);
         }
         other => panic!("expected ChildExit, got {other:?}"),
     }
@@ -308,23 +292,17 @@ fn a_sink_tags_each_chunk_with_the_pane_it_came_from() {
 }
 
 #[test]
-fn a_sink_stamps_the_childs_exit_and_queues_it() {
+fn a_sink_queues_the_childs_exit_with_its_status() {
     let (tx, rx) = mpsc::channel::<RuntimeEvent>();
     let sink = InboxSink::new(tx);
     let pane = PaneId::new();
 
-    let before = SystemTime::now();
     sink.exit(pane, ExitStatus::Signaled(9));
 
     match rx.recv_timeout(DEADLINE) {
-        Ok(RuntimeEvent::ChildExit {
-            pane_id,
-            status,
-            exited_at,
-        }) => {
+        Ok(RuntimeEvent::ChildExit { pane_id, status }) => {
             assert_eq!(pane_id, pane);
             assert_eq!(status, ExitStatus::Signaled(9));
-            assert!(exited_at >= before);
         }
         other => panic!("expected ChildExit, got {other:?}"),
     }

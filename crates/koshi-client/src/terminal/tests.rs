@@ -1,5 +1,5 @@
-//! Tests for the pieces the bare launch and `koshi attach` share: the viewer,
-//! painting a frame, the cursor-style mapping, and the window title. A fake PTY
+//! Tests for the outer terminal an attached client owns: the viewer built for
+//! it, painting a frame, the cursor-style mapping, and the window title. A fake PTY
 //! backend stands in for real children and ratatui's `TestBackend` renders into
 //! an in-memory buffer, so painting runs without a terminal. The crossterm
 //! terminal I/O and the input thread's `event::read` are TTY-bound and out of
@@ -18,14 +18,13 @@ use koshi_core::command::{Command, CommandEnvelope, CommandSource};
 use koshi_core::ids::{CommandId, PaneId, SessionId};
 use koshi_pty::backend::state::PtyBackend;
 use koshi_renderer::snapshot::{CommittedRegions, RenderSnapshot};
-use koshi_runtime::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
 use koshi_runtime::runtime::bus::EventFilter;
 use koshi_runtime::server::Server;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
 use koshi_link::config::LoadedConfig;
 
-const VIEWPORT: Size = Size { cols: 80, rows: 24 };
+use crate::tests::VIEWPORT;
 
 fn regions(viewport: Size) -> CommittedRegions {
     CommittedRegions::core(viewport, 0)
@@ -34,10 +33,8 @@ fn regions(viewport: Size) -> CommittedRegions {
 /// A bootstrapped server driven by `fake`, with its client id and sole pane id.
 fn boot(fake: &Arc<FakePtyBackend>) -> (Server, ClientId, PaneId) {
     let backend: Arc<dyn PtyBackend> = fake.clone();
-    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
-    let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (tx, rx) = mpsc::channel();
-    let mut server = Server::new(backend, snapshot_provider, storage, rx, tx);
+    let mut server = Server::new(backend, rx, tx);
     let client_id = server
         .bootstrap_local(SessionId::new(), VIEWPORT, SystemTime::now())
         .expect("bootstrap");
@@ -59,41 +56,8 @@ fn test_client_with(server: &mut Server, client_id: ClientId, loaded: LoadedConf
         VIEWPORT,
         events,
         TerminalCleanupGuard::new(),
-        true,
         loaded,
     )
-}
-
-#[test]
-fn an_old_session_sets_the_viewer_compatibility_state() {
-    let (_events_tx, events_rx) = mpsc::channel();
-    let client = viewer(
-        ClientId::new(),
-        VIEWPORT,
-        events_rx,
-        TerminalCleanupGuard::new(),
-        false,
-        LoadedConfig::default(),
-    );
-
-    assert!(!client.pane_area_supported);
-}
-
-#[test]
-fn a_current_session_sets_the_viewer_compatibility_state() {
-    // The flag is forwarded, not hardcoded: a viewer built for a session that
-    // echoed the pane-area field must record that it did.
-    let (_events_tx, events_rx) = mpsc::channel();
-    let client = viewer(
-        ClientId::new(),
-        VIEWPORT,
-        events_rx,
-        TerminalCleanupGuard::new(),
-        true,
-        LoadedConfig::default(),
-    );
-
-    assert!(client.pane_area_supported);
 }
 
 /// The whole rendered screen flattened to a string, for substring assertions.
@@ -517,26 +481,61 @@ fn window_title_with_a_focused_pane_absent_from_the_pane_list_falls_back() {
     assert_eq!(window_title(&snapshot), "quiet-lake");
 }
 
+/// The title `window_title` builds for a session named `session_name` holding
+/// one focused pane titled `pane_title`, after that frame has travelled the
+/// session-to-client wire and been read back by
+/// [`to_snapshot`](crate::attach::paint::to_snapshot).
+fn title_off_the_wire(session_name: &str, pane_title: &str) -> String {
+    let fake = Arc::new(FakePtyBackend::new());
+    let (server, client_id, pane_id) = boot(&fake);
+    let mut sent = frame(&server, client_id);
+    sent.session.name = session_name.to_string();
+    sent.client.focused_pane = Some(pane_id);
+    for pane in &mut sent.panes {
+        if pane.id == pane_id {
+            pane.title = Some(pane_title.to_string());
+        }
+    }
+
+    let read_back =
+        crate::attach::paint::to_snapshot(&koshi_runtime::runtime::frame::wire_frame(&sent));
+    window_title(&read_back)
+}
+
 #[test]
 fn a_window_title_can_carry_no_osc_terminator() {
     // `window_title` is written into the viewer's own terminal verbatim,
-    // inside `OSC 0; ... BEL` (crossterm `SetTitle`).
+    // inside `OSC 0; ... BEL` (crossterm `SetTitle`). A session server this
+    // client did not build chooses both halves of that title.
     for hostile in [
         "x\u{7}pwned",          // BEL
         "x\u{1b}]0;pwned\u{7}", // ESC
         "x\u{9c}pwned",         // C1 ST
         "x\u{9b}2J",            // C1 CSI
     ] {
-        let title = koshi_core::text::sanitize_reported_text(hostile);
+        let from_session_name = title_off_the_wire(hostile, "bash");
         assert!(
-            !title.contains(['\u{7}', '\u{1b}', '\u{9c}', '\u{9b}']),
-            "an OSC terminator survived into the window title: {title:?}"
+            !from_session_name.contains(['\u{7}', '\u{1b}', '\u{9c}', '\u{9b}']),
+            "an OSC terminator survived into the window title: {from_session_name:?}"
+        );
+        let from_pane_title = title_off_the_wire("dev", hostile);
+        assert!(
+            !from_pane_title.contains(['\u{7}', '\u{1b}', '\u{9c}', '\u{9b}']),
+            "an OSC terminator survived into the window title: {from_pane_title:?}"
         );
     }
 }
 
 #[test]
+fn a_window_title_names_the_session_and_the_pane_the_wire_carried() {
+    assert_eq!(title_off_the_wire("dev", "bash"), "dev | bash");
+    assert_eq!(title_off_the_wire("dev\u{7}", "\u{1b}bash"), "dev | bash");
+}
+
+#[test]
 fn a_window_title_is_bounded_by_the_pane_title_cap() {
-    let long = koshi_core::text::sanitize_reported_text(&"a".repeat(100_000));
-    assert_eq!(long.len(), koshi_core::text::MAX_REPORTED_TEXT_BYTES);
+    let cap = koshi_core::text::MAX_REPORTED_TEXT_BYTES;
+    let title = title_off_the_wire("dev", &"a".repeat(100_000));
+
+    assert_eq!(title, format!("dev | {}", "a".repeat(cap)));
 }

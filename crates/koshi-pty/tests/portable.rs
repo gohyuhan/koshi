@@ -183,6 +183,28 @@ fn spawn_env_reaches_the_child() {
 }
 
 #[test]
+fn the_koshi_env_overlay_reaches_the_child() {
+    // `${PROMPT_EOL_MARK+set}` prints `set` for a variable that exists, and
+    // nothing for one that does not: the zsh bootstrap key is empty, so its
+    // value alone cannot tell the two apart.
+    let backend = PortablePtyBackend::new();
+    let mut launch = spec(
+        "/bin/sh",
+        &[
+            "-c",
+            "echo \"T=$TERM C=$COLORTERM P=${PROMPT_EOL_MARK+set} end\"",
+        ],
+    );
+    launch.shell_kind = ShellKind::Zsh;
+    let handle = spawn_pane(&backend, launch);
+    let out = read_until(&handle, "end", Duration::from_secs(5));
+    assert!(
+        out.contains("T=xterm-256color C=truecolor P=set end"),
+        "koshi's terminal identity and the zsh bootstrap must reach the child, got {out:?}"
+    );
+}
+
+#[test]
 fn spawn_reports_clean_exit() {
     let backend = PortablePtyBackend::new();
     let handle = spawn_pane(&backend, spec("/bin/echo", &["bye"]));

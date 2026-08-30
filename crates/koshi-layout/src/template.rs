@@ -16,12 +16,13 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use koshi_core::error::{DomainCategory, DomainError, Severity};
 use koshi_core::geometry::SplitDirection;
 use koshi_core::ids::PaneId;
 use thiserror::Error;
 
 use crate::size::SizeWeight;
-use crate::tree::{LayoutChild, LayoutNode, SplitNode};
+use crate::tree::{LayoutNode, SplitNode};
 
 #[cfg(test)]
 mod tests;
@@ -79,11 +80,7 @@ impl TemplateNode {
     fn leaf_count(&self) -> usize {
         match self {
             Self::Leaf(_) => 1,
-            Self::Split(split) => split
-                .children
-                .iter()
-                .map(|child| child.node.leaf_count())
-                .sum(),
+            Self::Split(split) => split.children.iter().map(|child| child.leaf_count()).sum(),
         }
     }
 
@@ -93,7 +90,7 @@ impl TemplateNode {
             Self::Leaf(leaf) => out.push(leaf),
             Self::Split(split) => {
                 for child in &split.children {
-                    child.node.collect_leaves(out);
+                    child.collect_leaves(out);
                 }
             }
         }
@@ -126,17 +123,17 @@ impl TemplateNode {
                 };
                 let skipped: usize = split.children[..pick]
                     .iter()
-                    .map(|earlier| earlier.node.leaf_count())
+                    .map(|earlier| earlier.leaf_count())
                     .sum();
-                skipped + child.node.first_visible_leaf()
+                skipped + child.first_visible_leaf()
             }
         }
     }
 
     /// Builds the live tree this template describes. `ids` supplies one
     /// [`PaneId`] per leaf, in layout order: `ids[i]` fills the `i`-th leaf
-    /// of [`TemplateNode::leaves`]. Structure, directions, weights, active
-    /// members, and collapsed flags carry over unchanged.
+    /// of [`TemplateNode::leaves`]. Structure, directions, weights, and
+    /// active members carry over unchanged.
     ///
     /// # Errors
     /// [`TemplateError::PaneCountMismatch`] when `ids` does not hold exactly
@@ -166,10 +163,7 @@ impl TemplateNode {
                 let children = split
                     .children
                     .iter()
-                    .map(|child| LayoutChild {
-                        node: child.node.build(ids, next),
-                        collapsed: child.collapsed,
-                    })
+                    .map(|child| child.build(ids, next))
                     .collect();
                 LayoutNode::Split(SplitNode {
                     direction: split.direction,
@@ -227,23 +221,13 @@ pub struct PluginTemplate {
 pub struct TemplateSplit {
     /// How the children divide this node's rectangle.
     pub direction: SplitDirection,
-    /// The child slots, in layout order.
-    pub children: Vec<TemplateChild>,
+    /// The child subtrees, in layout order.
+    pub children: Vec<TemplateNode>,
     /// Per-child size constraints, parallel to `children`.
     pub weights: Vec<SizeWeight>,
     /// Index of the active child. Only meaningful for `Stacked` nodes,
     /// where it names the one expanded member.
     pub active: usize,
-}
-
-/// One child slot of a template split, mirroring [`LayoutChild`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TemplateChild {
-    /// The subtree occupying this slot.
-    pub node: TemplateNode,
-    /// `true` when a stacked child starts collapsed to its one-row header.
-    /// Directional splits never collapse children; this stays `false` there.
-    pub collapsed: bool,
 }
 
 /// A failed template instantiation.
@@ -257,4 +241,14 @@ pub enum TemplateError {
         /// Length of the supplied id slice.
         got: usize,
     },
+}
+
+impl DomainError for TemplateError {
+    fn category(&self) -> DomainCategory {
+        DomainCategory::Layout
+    }
+
+    fn severity(&self) -> Severity {
+        Severity::Recoverable
+    }
 }

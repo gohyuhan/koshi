@@ -3,11 +3,14 @@
 //!
 //! Each case starts from a single pane and applies a short random sequence
 //! of public edits — directional splits, stacking, removals, resizes,
-//! normalization. After every step the solved layout must uphold:
+//! normalization — under a random gap between split children. After every
+//! step the solved layout must uphold:
 //!
 //! - no two panes overlap and nothing leaves the tab,
 //! - every visible pane meets the minimum size,
-//! - when the tree fits at minimum size, the panes tile the tab exactly,
+//! - at gap `0`, when the tree fits at minimum size, the panes tile the tab
+//!   exactly (a larger gap leaves blank cells between children, so the tiling
+//!   check runs only at gap `0`),
 //! - every layout leaf references a live pane,
 //! - solving is deterministic.
 //!
@@ -23,13 +26,15 @@ use koshi_core::geometry::{Direction, Point, Rect, Size, SplitDirection};
 use koshi_core::ids::PaneId;
 use koshi_layout::edit::{add_to_stack, remove_pane, split_leaf};
 use koshi_layout::normalize::normalize;
-use koshi_layout::resize::resize;
+use koshi_layout::resize::resize_with_min;
 use koshi_layout::size::SizeWeight;
-use koshi_layout::solver::{fits, solve, PaneSizing, SolveResult, StackHeader, MIN_PANE_SIZE};
-use koshi_layout::tree::{LayoutChild, LayoutNode, SplitNode};
+use koshi_layout::solver::{
+    fits, solve, solve_with_min, PaneSizing, SolveResult, StackHeader, MIN_PANE_SIZE,
+};
+use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_test_support::layout_assert::{
-    assert_all_space_occupied, assert_live_pane_refs, assert_min_size_respected, assert_no_outside,
-    assert_no_overlap,
+    check_all_space_occupied, check_live_pane_refs, check_min_size_respected, check_no_outside,
+    check_no_overlap,
 };
 use proptest::prelude::*;
 use proptest::strategy::Union;
@@ -90,6 +95,15 @@ fn op_strategy() -> BoxedStrategy<Op> {
     .boxed()
 }
 
+/// The sizing a case runs under: the default pane floor and `gap` blank
+/// cells between split children.
+fn sizing(gap: u16) -> PaneSizing {
+    PaneSizing {
+        gap,
+        ..PaneSizing::default()
+    }
+}
+
 #[test]
 fn random_edit_sequences_uphold_the_layout_invariants() {
     let config = Config {
@@ -101,38 +115,40 @@ fn random_edit_sequences_uphold_the_layout_invariants() {
         prop::collection::vec(op_strategy(), 1..12),
         4..=120u16,
         2..=40u16,
+        0..=2u16,
     );
 
     TestRunner::new(config)
-        .run(&strategy, |(ops, cols, rows)| {
-            check_sequence(&ops, cols, rows);
+        .run(&strategy, |(ops, cols, rows, gap)| {
+            check_sequence(&ops, cols, rows, gap);
             Ok(())
         })
         .unwrap();
 }
 
-/// Starts from one pane in a `cols` x `rows` tab, applies each op in turn,
-/// and checks the invariants before the first op and after every op.
-/// Returns the final tree and the set of live panes.
-fn check_sequence(ops: &[Op], cols: u16, rows: u16) -> (LayoutNode, HashSet<PaneId>) {
+/// Starts from one pane in a `cols` x `rows` tab with `gap` cells between
+/// split children, applies each op in turn, and checks the invariants before
+/// the first op and after every op. Returns the final tree and the set of
+/// live panes.
+fn check_sequence(ops: &[Op], cols: u16, rows: u16, gap: u16) -> (LayoutNode, HashSet<PaneId>) {
     let tab = Rect::at_origin(Size { cols, rows });
     let first = PaneId::new();
     let mut tree = LayoutNode::Pane(first);
     let mut live: HashSet<PaneId> = HashSet::from([first]);
 
-    assert_invariants(&tree, tab, &live);
+    assert_invariants(&tree, tab, &live, gap);
     for op in ops {
-        apply(op, &mut tree, tab, &mut live);
-        assert_invariants(&tree, tab, &live);
+        apply(op, &mut tree, tab, &mut live, gap);
+        assert_invariants(&tree, tab, &live, gap);
     }
     (tree, live)
 }
 
-/// Applies one op through the public edit API. A split or stack adds its
-/// new pane to `live`; a removal drops the victim from `live`. An edit the
-/// API rejects (no border to resize, a resize past the donor's floor,
-/// removing the last pane) leaves `tree` and `live` unchanged.
-fn apply(op: &Op, tree: &mut LayoutNode, tab: Rect, live: &mut HashSet<PaneId>) {
+/// Applies one op through the public edit API under `gap`. A split or stack
+/// adds its new pane to `live`; a removal drops the victim from `live`. An
+/// edit the API rejects (no border to resize, a resize past the donor's
+/// floor, removing the last pane) leaves `tree` and `live` unchanged.
+fn apply(op: &Op, tree: &mut LayoutNode, tab: Rect, live: &mut HashSet<PaneId>, gap: u16) {
     let leaves = tree.leaf_panes();
     let pick = |target: usize| leaves[target % leaves.len()];
     match *op {
@@ -152,7 +168,7 @@ fn apply(op: &Op, tree: &mut LayoutNode, tab: Rect, live: &mut HashSet<PaneId>) 
         }
         Op::Remove { target } => {
             let victim = pick(target);
-            if let Ok((next, _)) = remove_pane(tree, tab, victim, PaneSizing::default()) {
+            if let Ok((next, _)) = remove_pane(tree, tab, victim, sizing(gap)) {
                 *tree = next;
                 live.remove(&victim);
             }
@@ -162,7 +178,8 @@ fn apply(op: &Op, tree: &mut LayoutNode, tab: Rect, live: &mut HashSet<PaneId>) 
             direction,
             size,
         } => {
-            if let Ok(next) = resize(tree, tab, pick(target), direction, size) {
+            if let Ok(next) = resize_with_min(tree, tab, pick(target), direction, size, sizing(gap))
+            {
                 *tree = next;
             }
         }
@@ -174,21 +191,22 @@ fn apply(op: &Op, tree: &mut LayoutNode, tab: Rect, live: &mut HashSet<PaneId>) 
     }
 }
 
-/// Checks the layout invariants of `tree` solved over `tab`: no two panes
-/// overlap, no pane leaves the tab, every visible pane meets
-/// [`MIN_PANE_SIZE`], the panes tile the tab exactly when the tree fits at
-/// minimum size, every leaf names a pane in `live`, and a second solve
-/// equals the first.
-fn assert_invariants(tree: &LayoutNode, tab: Rect, live: &HashSet<PaneId>) {
-    let result = solve(tree, tab);
-    assert_no_overlap(&result.panes).unwrap();
-    assert_no_outside(&result.panes, tab).unwrap();
-    assert_min_size_respected(&result.panes, MIN_PANE_SIZE).unwrap();
-    if fits(tree, tab, PaneSizing::default()) {
-        assert_all_space_occupied(&result.panes, tab).unwrap();
+/// Checks the layout invariants of `tree` solved over `tab` under `gap`: no
+/// two panes overlap, no pane leaves the tab, every visible pane meets
+/// [`MIN_PANE_SIZE`], every leaf names a pane in `live`, and a second solve
+/// equals the first. At gap `0`, the panes also tile the tab exactly whenever
+/// the tree fits at minimum size; a larger gap leaves blank cells between
+/// children, so that check does not apply.
+fn assert_invariants(tree: &LayoutNode, tab: Rect, live: &HashSet<PaneId>, gap: u16) {
+    let result = solve_with_min(tree, tab, sizing(gap));
+    check_no_overlap(&result.panes).unwrap();
+    check_no_outside(&result.panes, tab).unwrap();
+    check_min_size_respected(&result.panes, MIN_PANE_SIZE).unwrap();
+    if gap == 0 && fits(tree, tab, sizing(gap)) {
+        check_all_space_occupied(&result.panes, tab).unwrap();
     }
-    assert_live_pane_refs(&tree.leaf_panes(), live).unwrap();
-    assert_eq!(solve(tree, tab), result);
+    check_live_pane_refs(&tree.leaf_panes(), live).unwrap();
+    assert_eq!(solve_with_min(tree, tab, sizing(gap)), result);
 }
 
 /// After any random edit sequence, normalizing the resulting tree is
@@ -210,11 +228,12 @@ fn normalizing_after_any_random_edit_sequence_is_idempotent() {
         prop::collection::vec(op_strategy(), 1..12),
         4..=120u16,
         2..=40u16,
+        0..=2u16,
     );
 
     TestRunner::new(config)
-        .run(&strategy, |(ops, cols, rows)| {
-            let (tree, live) = check_sequence(&ops, cols, rows);
+        .run(&strategy, |(ops, cols, rows, gap)| {
+            let (tree, live) = check_sequence(&ops, cols, rows, gap);
             let normalized =
                 normalize(&tree, &live).expect("at least one live pane always survives");
             prop_assert_eq!(normalize(&normalized, &live), Some(normalized));
@@ -252,7 +271,7 @@ const PINNED_OPS: [Op; 6] = [
 /// every step, and the run ends on one exact tree and one exact placement.
 #[test]
 fn a_fixed_op_sequence_lands_on_its_exact_layout() {
-    let (tree, live) = check_sequence(&PINNED_OPS, 80, 24);
+    let (tree, live) = check_sequence(&PINNED_OPS, 80, 24, 0);
     let tab = Rect::at_origin(Size { cols: 80, rows: 24 });
 
     // Three panes survive, and the live set is exactly the tree's leaves.
@@ -268,11 +287,8 @@ fn a_fixed_op_sequence_lands_on_its_exact_layout() {
         LayoutNode::Split(SplitNode {
             direction: SplitDirection::Horizontal,
             children: vec![
-                LayoutChild::new(LayoutNode::Pane(leaves[0])),
-                LayoutChild::new(LayoutNode::Split(SplitNode::stack(
-                    vec![leaves[1], leaves[2]],
-                    1
-                ))),
+                LayoutNode::Pane(leaves[0]),
+                LayoutNode::Split(SplitNode::stack(vec![leaves[1], leaves[2]], 1)),
             ],
             weights: vec![
                 SizeWeight {

@@ -24,14 +24,14 @@ use kdl::{KdlDocument, KdlNode};
 use koshi_core::geometry::SplitDirection;
 use koshi_layout::size::{SizeConstraint, SizeWeight};
 use koshi_layout::template::{
-    CommandTemplate, LeafTemplate, PluginTemplate, ProfileTemplate, TabTemplate, TemplateChild,
-    TemplateNode, TemplateSplit, TerminalTemplate,
+    CommandTemplate, LeafTemplate, PluginTemplate, ProfileTemplate, TabTemplate, TemplateNode,
+    TemplateSplit, TerminalTemplate,
 };
 use miette::{Diagnostic, NamedSource, SourceSpan};
 use thiserror::Error;
 
 use crate::error::{check_version, ConfigParseDiagnostic};
-use crate::parser::{parse_kdl, unknown_key};
+use crate::parser::{parse_kdl, unknown_key, version_arg};
 
 #[cfg(test)]
 mod tests;
@@ -264,27 +264,13 @@ impl Walker<'_> {
     /// Validates the `version` node: one integer at least one, nothing else,
     /// no newer than this build's schema.
     fn version(&mut self, node: &KdlNode) {
-        if node.children().is_some() {
-            self.error(node.span(), "`version` takes no children");
-            return;
-        }
-        let entry = match node.entries() {
-            [entry] if entry.name().is_none() => entry,
-            _ => {
-                self.error(node.span(), "`version` takes exactly one integer argument");
-                return;
+        match version_arg(node) {
+            Ok(found) => {
+                if let Err(err) = check_version(found) {
+                    self.error(node.span(), err.to_string());
+                }
             }
-        };
-        let Some(found) = entry
-            .value()
-            .as_integer()
-            .and_then(|v| u32::try_from(v).ok())
-        else {
-            self.error(entry.span(), "`version` must be a non-negative integer");
-            return;
-        };
-        if let Err(err) = check_version(found) {
-            self.error(node.span(), err.to_string());
+            Err((span, detail)) => self.error(span, detail),
         }
     }
 
@@ -563,13 +549,7 @@ impl Walker<'_> {
             );
         }
         let weights = slots.iter().map(|slot| slot.sizing.weight()).collect();
-        let children = slots
-            .into_iter()
-            .map(|slot| TemplateChild {
-                node: slot.node,
-                collapsed: false,
-            })
-            .collect();
+        let children = slots.into_iter().map(|slot| slot.node).collect();
         Slot {
             node: TemplateNode::Split(TemplateSplit {
                 direction,
@@ -667,14 +647,7 @@ impl Walker<'_> {
             );
         }
         let weights = vec![SizeWeight::default(); members.len()];
-        let children = members
-            .into_iter()
-            .enumerate()
-            .map(|(index, slot)| TemplateChild {
-                node: slot.node,
-                collapsed: index != active,
-            })
-            .collect();
+        let children = members.into_iter().map(|slot| slot.node).collect();
         Slot {
             node: TemplateNode::Split(TemplateSplit {
                 direction: SplitDirection::Stacked,
@@ -888,7 +861,8 @@ impl Walker<'_> {
     }
 
     /// Parses a `command` node: the program plus its arguments, all strings.
-    /// The program must be non-empty; arguments may be empty strings.
+    /// The program must be non-empty; arguments may be empty strings. No word
+    /// may hold a NUL character.
     fn command(&mut self, node: &KdlNode) -> Option<CommandTemplate> {
         if node.children().is_some() {
             self.error(node.span(), "`command` takes no children");
@@ -904,6 +878,13 @@ impl Walker<'_> {
                 self.error(entry.span(), "`command` arguments must be strings");
                 return None;
             };
+            if word.contains('\0') {
+                self.error(
+                    entry.span(),
+                    "`command` program and arguments must not contain a NUL character",
+                );
+                return None;
+            }
             words.push(word.to_string());
         }
         if words.is_empty() {
@@ -977,17 +958,25 @@ impl Walker<'_> {
         env.insert((*name).to_string(), (*value).to_string());
     }
 
-    /// Parses a single-string-argument node (`cwd`). An empty string is
-    /// reported and yields `None`.
+    /// Parses a single-string-argument node (`cwd`). An empty string, and a
+    /// string holding a NUL character, are each reported and yield `None`.
     fn single_string(&mut self, node: &KdlNode, name: &str) -> Option<String> {
         let entry = self.single_argument(node, name)?;
-        match entry.value().as_string() {
-            Some(value) if !value.is_empty() => Some(value.to_string()),
+        let value = match entry.value().as_string() {
+            Some(value) if !value.is_empty() => value,
             _ => {
                 self.error(entry.span(), format!("`{name}` takes one non-empty string"));
-                None
+                return None;
             }
+        };
+        if value.contains('\0') {
+            self.error(
+                entry.span(),
+                format!("`{name}` must not contain a NUL character"),
+            );
+            return None;
         }
+        Some(value.to_string())
     }
 
     /// Validates a node down to exactly one positional argument and no

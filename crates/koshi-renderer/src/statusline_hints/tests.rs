@@ -1,4 +1,4 @@
-//! Tests for the keybinding hint bar: idle grouping (leaf hints, labeled
+//! Tests for the statusline: idle grouping (leaf hints, labeled
 //! default prefix groups, `+N` fallbacks once a user entry or removal touches
 //! a group), the pending-sequence face (breadcrumb plus continuations, nested
 //! groups), pinned-first ordering, whole-item truncation, the right-aligned
@@ -75,15 +75,7 @@ fn paint_bar(
     area: RatatuiRect,
     buf: &mut Buffer,
 ) {
-    draw_hint_bar(
-        &StatuslineDto {
-            hints,
-            theme,
-            pending,
-        },
-        area,
-        buf,
-    );
+    draw_statusline(StatuslineInputs { hints, pending }, theme, area, buf);
 }
 
 /// Draw in `theme`'s colors with an open sequence.
@@ -109,7 +101,7 @@ fn draw_pending(hints: &KeymapHints, pending: &KeySequence, width: u16) -> Buffe
     draw_themed_pending(hints, &Theme::default(), pending, width)
 }
 
-/// Paint the hint bar in `theme`'s colors, for the tests that check which
+/// Paint the statusline in `theme`'s colors, for the tests that check which
 /// color a piece of the bar takes.
 fn draw_themed(hints: &KeymapHints, theme: &Theme, width: u16) -> Buffer {
     let area = RatatuiRect {

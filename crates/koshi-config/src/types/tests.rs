@@ -60,8 +60,6 @@ fn default_loads_with_expected_values() {
 
     assert_eq!(config.layout.new_pane_direction, Direction::Right);
 
-    assert!(config.plugins.entries.is_empty());
-
     assert!(config.mouse.border_resize);
     assert_eq!(config.mouse.scroll_lines, 3);
     assert_eq!(config.mouse.wheel, WheelScroll::ScrollScrollback);
@@ -363,9 +361,6 @@ fn each_default_mode_binds_every_action_to_one_key() {
 
 #[test]
 fn enum_defaults_are_the_shipped_variants() {
-    assert_eq!(ActivationAction::default(), ActivationAction::Enable);
-    assert_eq!(ActivationScope::default(), ActivationScope::Global);
-    assert_eq!(KeymapOptIn::default(), KeymapOptIn::None);
     assert_eq!(WheelScroll::default(), WheelScroll::ScrollScrollback);
     assert_eq!(ClipboardBackend::default(), ClipboardBackend::Osc52);
     assert_eq!(Leader::default(), Leader::Mods(ModFlags::CTRL));

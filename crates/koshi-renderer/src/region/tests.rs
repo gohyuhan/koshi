@@ -132,17 +132,14 @@ fn core_region_solve_keeps_a_rectangle_per_region_on_short_viewports() {
 #[test]
 fn assembling_the_keybinding_row_input_twice_shares_every_allocation() {
     let hints = hints();
-    let theme = Theme::default();
     let pending = KeySequence::new(KeyChord::new(ModFlags::CTRL, Key::Char('p')), Vec::new());
 
-    let first = StatuslineDto {
+    let first = StatuslineInputs {
         hints: &hints,
-        theme: &theme,
         pending: Some(&pending),
     };
-    let second = StatuslineDto {
+    let second = StatuslineInputs {
         hints: &hints,
-        theme: &theme,
         pending: Some(&pending),
     };
 
@@ -159,7 +156,6 @@ fn assembling_the_keybinding_row_input_twice_shares_every_allocation() {
         "removed was copied"
     );
     assert!(std::ptr::eq(first.hints, second.hints), "hints was copied");
-    assert!(std::ptr::eq(first.theme, second.theme), "theme was copied");
     assert!(
         std::ptr::eq(first.pending.unwrap(), second.pending.unwrap()),
         "pending was copied"
@@ -171,7 +167,6 @@ fn assembling_the_tab_row_input_twice_borrows_each_shared_field() {
     let mut snapshot = snapshot();
     snapshot.client.lock_mode = LockMode::Locked;
     snapshot.client.mouse_select = true;
-    let theme = Theme::default();
     let viewer = ViewerChrome {
         reconnecting: Some(Reconnecting {
             attempt: 3,
@@ -181,23 +176,21 @@ fn assembling_the_tab_row_input_twice_borrows_each_shared_field() {
         ..ViewerChrome::default()
     };
 
-    let first = NavigatorDto {
+    let first = TablineInputs {
         session_name: &snapshot.session.name,
         tabs: &snapshot.session.tabs_metadata,
         lock_mode: snapshot.client.lock_mode,
         mouse_select: snapshot.client.mouse_select,
         reconnecting: viewer.reconnecting,
         tabline_offset: viewer.tabline_offset,
-        theme: &theme,
     };
-    let second = NavigatorDto {
+    let second = TablineInputs {
         session_name: &snapshot.session.name,
         tabs: &snapshot.session.tabs_metadata,
         lock_mode: snapshot.client.lock_mode,
         mouse_select: snapshot.client.mouse_select,
         reconnecting: viewer.reconnecting,
         tabline_offset: viewer.tabline_offset,
-        theme: &theme,
     };
 
     assert_eq!(first.session_name, "one");
@@ -221,29 +214,8 @@ fn assembling_the_tab_row_input_twice_borrows_each_shared_field() {
     assert_eq!(first.mouse_select, second.mouse_select);
     assert_eq!(first.reconnecting, second.reconnecting);
     assert_eq!(first.tabline_offset, second.tabline_offset);
-    assert!(std::ptr::eq(first.theme, second.theme), "theme was copied");
 
-    // `inputs` carries every shared field across, value for value.
-    let inputs = first.inputs();
-    assert_eq!(inputs.session_name, "one");
-    assert_eq!(inputs.tabs.len(), 1);
-    assert_eq!(inputs.tabs[0].name, "first");
-    assert_eq!(inputs.lock_mode, LockMode::Locked);
-    assert!(inputs.mouse_select);
-    assert_eq!(
-        inputs.reconnecting,
-        Some(Reconnecting {
-            attempt: 3,
-            retry_in_seconds: 8,
-        })
-    );
-    assert_eq!(inputs.tabline_offset, Some(2));
-    assert!(
-        std::ptr::eq(inputs.session_name, first.session_name),
-        "session name was copied"
-    );
-    assert!(std::ptr::eq(inputs.tabs, first.tabs), "tabs were copied");
-
+    // The frame yields the same value, field for field.
     let layout = snapshot.layout(viewer);
-    assert_eq!(inputs, layout.navigator());
+    assert_eq!(first, layout.tabline());
 }

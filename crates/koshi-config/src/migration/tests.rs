@@ -99,7 +99,7 @@ fn a_version_with_two_arguments_is_rejected() {
 fn a_version_given_as_a_property_is_rejected() {
     assert_eq!(
         version_reason("version schema=1\n"),
-        "`version` takes an argument, not a property"
+        "`version` takes exactly one integer argument"
     );
 }
 
@@ -107,7 +107,7 @@ fn a_version_given_as_a_property_is_rejected() {
 fn a_non_integer_version_is_rejected() {
     assert_eq!(
         version_reason("version \"1\"\n"),
-        "`version` must be an integer"
+        "`version` must be an integer from 1 to 4294967295"
     );
 }
 
@@ -115,7 +115,7 @@ fn a_non_integer_version_is_rejected() {
 fn a_negative_version_is_rejected() {
     assert_eq!(
         version_reason("version -1\n"),
-        "`version` must be between 1 and 4294967295"
+        "`version` must be an integer from 1 to 4294967295"
     );
 }
 
@@ -123,7 +123,7 @@ fn a_negative_version_is_rejected() {
 fn a_version_above_the_u32_ceiling_is_rejected() {
     assert_eq!(
         version_reason("version 4294967296\n"),
-        "`version` must be between 1 and 4294967295"
+        "`version` must be an integer from 1 to 4294967295"
     );
 }
 
@@ -136,7 +136,7 @@ fn version_zero_is_rejected() {
         error,
         MigrationError::Version {
             path: "koshi.kdl".to_string(),
-            detail: "`version` must be at least 1".to_string(),
+            detail: "config schema version must be at least 1".to_string(),
         }
     );
 }

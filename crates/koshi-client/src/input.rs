@@ -85,12 +85,6 @@ impl Client {
         self.pending.as_ref().map(|pending| &pending.sequence)
     }
 
-    /// Drop any open sequence. A keymap change retires the bindings the held
-    /// chords were reaching for, so they resolve to nothing and are dropped.
-    pub fn clear_pending_sequence(&mut self) {
-        self.pending = None;
-    }
-
     /// Decide what `chord` means in this viewer's current mode.
     ///
     /// `<C-l>` while locked yields `Fire(core:unlock)` whatever the keymap

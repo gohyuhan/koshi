@@ -85,23 +85,6 @@ fn constructors_reject_invalid_values() {
 }
 
 #[test]
-fn weight_overlays_validate_and_compose() {
-    let weight = SizeWeight::new(SizeConstraint::Flex(2))
-        .with_min(20)
-        .unwrap()
-        .with_preferred(50)
-        .unwrap();
-    assert_eq!(weight.primary, SizeConstraint::Flex(2));
-    assert_eq!(weight.min, Some(20));
-    assert_eq!(weight.preferred, Some(50));
-    assert_eq!(weight.resize_delta, 0);
-
-    let base = SizeWeight::new(SizeConstraint::Flex(1));
-    assert_eq!(base.with_min(0), Err(ConstraintError::ZeroMin));
-    assert_eq!(base.with_preferred(0), Err(ConstraintError::ZeroPreferred));
-}
-
-#[test]
 fn constructors_accept_their_maximum_values() {
     assert_eq!(
         SizeConstraint::flex(u32::MAX),
@@ -130,16 +113,12 @@ fn percent_rejects_its_type_maximum() {
 }
 
 #[test]
-fn an_overlay_applies_to_any_primary_and_the_last_call_wins() {
-    let weight = SizeWeight::new(SizeConstraint::Percent(40))
-        .with_min(3)
-        .unwrap()
-        .with_min(9)
-        .unwrap()
-        .with_preferred(5)
-        .unwrap()
-        .with_preferred(6)
-        .unwrap();
+fn both_overlays_apply_to_any_primary() {
+    let weight = SizeWeight {
+        min: Some(9),
+        preferred: Some(6),
+        ..SizeWeight::new(SizeConstraint::Percent(40))
+    };
     assert_eq!(
         weight,
         SizeWeight {

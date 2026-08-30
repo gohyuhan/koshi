@@ -7,8 +7,9 @@
 //!
 //! `koshi.kdl`'s top-level `allow-beta-features` decides whether a gated entry
 //! point runs. Koshi reads that setting once at startup and stores it here with
-//! [`set_allowed`]. The body is always compiled in. Every call reads the stored
-//! flag.
+//! [`set_allowed`]. The body is always compiled in. The gate reads the stored
+//! flag where the body would start: at the call for an ordinary function, at
+//! the first poll for an `async fn`.
 //!
 //! [`koshi-macro`](koshi_macro) compiles the attribute. This crate re-exports
 //! it. A crate that gates a function depends on this crate alone.
@@ -33,27 +34,25 @@ pub fn allowed() -> bool {
     ALLOWED.load(Ordering::Relaxed)
 }
 
-/// Returns the message for a blocked entry point named `function`. The message
-/// says `function` did nothing and names the `koshi.kdl` line that lets it run.
+/// Emits one `tracing` event at `WARN` level on every call. The event carries
+/// a `function` field holding `function`. Its message says `function` did
+/// nothing and names the `koshi.kdl` line that lets it run. `function` goes
+/// into the message unchanged: no escaping, no truncation.
 ///
-/// `blocked_message("attach")` returns:
+/// The code `#[beta_feature]` generates calls this on the first blocked call
+/// of each gated function only, and passes the module path and the identifier
+/// joined by `::`, such as `session::attach`.
+///
+/// `log_blocked("attach")` writes the message:
 /// ``` text
 /// `attach` is a beta feature and did nothing; add a top-level `allow-beta-features #true` line to koshi.kdl to run it
 /// ```
-#[must_use]
-pub fn blocked_message(function: &str) -> String {
-    format!(
+pub fn log_blocked(function: &str) {
+    tracing::warn!(
+        function,
         "`{function}` is a beta feature and did nothing; add a top-level \
          `allow-beta-features #true` line to koshi.kdl to run it"
-    )
-}
-
-/// Emits one `tracing` event at `WARN` level on every call. The event carries
-/// a `function` field holding `function` and [`blocked_message`]`(function)` as
-/// its message. The code `#[beta_feature]` generates calls this on the first
-/// blocked call of each gated function only.
-pub fn log_blocked(function: &str) {
-    tracing::warn!(function, "{}", blocked_message(function));
+    );
 }
 
 #[cfg(test)]

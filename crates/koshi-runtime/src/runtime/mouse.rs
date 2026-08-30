@@ -30,7 +30,9 @@ use koshi_core::command::{
 };
 use koshi_core::geometry::Direction;
 use koshi_core::ids::{ClientId, CommandId, PaneId};
+use koshi_core::key::{Key, KeyChord, ModFlags, NamedKey};
 use koshi_core::mouse::{reports, MouseAnswer, MouseInput, MouseKind};
+use koshi_input::keyboard::encode;
 use koshi_ipc::protocol::WireMouseAction;
 use koshi_renderer::pane_cell_clamped;
 use koshi_renderer::snapshot::ViewerChrome;
@@ -260,7 +262,7 @@ impl Server {
     ///
     /// A `count` of `0` writes nothing.
     pub fn write_alt_scroll_arrows(&mut self, pane_id: PaneId, up: bool, count: usize) {
-        let letter = if up { b'A' } else { b'B' };
+        let arrow = if up { NamedKey::Up } else { NamedKey::Down };
         let Some(app_keys) = self.terminal_engines.get(&pane_id).and_then(|engine| {
             let state = engine.state();
             (state.alt_scroll() && state.active_screen() == Screen::Alternate)
@@ -268,11 +270,10 @@ impl Server {
         }) else {
             return;
         };
-        let intro: &[u8] = if app_keys { b"\x1bO" } else { b"\x1b[" };
-        let mut bytes = Vec::with_capacity(count * 3);
+        let one_tick = encode(KeyChord::new(ModFlags::NONE, Key::Named(arrow)), app_keys);
+        let mut bytes = Vec::with_capacity(count * one_tick.len());
         for _ in 0..count {
-            bytes.extend_from_slice(intro);
-            bytes.push(letter);
+            bytes.extend_from_slice(&one_tick);
         }
         if !bytes.is_empty() {
             let _ = self.pty_backend().write(pane_id, &bytes);

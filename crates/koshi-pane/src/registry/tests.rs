@@ -194,18 +194,18 @@ fn a_lifecycle_step_through_get_mut_is_visible_through_get_and_remove() {
 }
 
 #[test]
-fn list_yields_every_record() {
+fn list_yields_every_record_in_id_order() {
     let mut registry = PaneRegistry::new();
-    let ids: Vec<PaneId> = (0..3).map(|_| PaneId::new()).collect();
-    for &id in &ids {
+    let mut ids: Vec<PaneId> = (0..3).map(|_| PaneId::new()).collect();
+    ids.sort_unstable();
+
+    // Insert highest id first; `list` must still walk lowest id first.
+    for &id in ids.iter().rev() {
         registry.insert(terminal_record(id)).expect("insert");
     }
 
-    // `list` has no fixed order: compare sorted by id.
-    let mut listed: Vec<PaneRecord> = registry.list().cloned().collect();
-    listed.sort_by_key(PaneRecord::id);
-    let mut expected: Vec<PaneRecord> = ids.iter().map(|&id| terminal_record(id)).collect();
-    expected.sort_by_key(PaneRecord::id);
+    let listed: Vec<PaneRecord> = registry.list().cloned().collect();
+    let expected: Vec<PaneRecord> = ids.iter().map(|&id| terminal_record(id)).collect();
 
     assert_eq!(listed, expected);
     assert_eq!(registry.len(), 3);
@@ -234,15 +234,14 @@ fn a_pane_record_survives_a_serde_round_trip() {
         program: PathBuf::from("/bin/bash"),
         args: vec!["-l".to_owned()],
         cwd: Some(PathBuf::from("/home/u")),
-        env: env.clone(),
+        env,
         shell_kind: ShellKind::Bash,
     });
     record.cwd = Some(PathBuf::from("/home/u"));
     record.close_policy = PaneClosePolicy::Graceful {
         timeout: Duration::from_secs(3),
     };
-    record.exit_policy = PaneExitPolicy::RespawnShell;
-    record.env = env;
+    record.exit_policy = PaneExitPolicy::CloseOnExit;
     // Drive to `Exited { code: Some(0), .. }` through legal events.
     record
         .update_lifecycle(PaneLifecycleEvent::ProcessStarted)

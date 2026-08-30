@@ -6,9 +6,7 @@
 //! targets).
 
 use koshi_core::geometry::{Point, Rect, Size};
-use koshi_test_support::layout_assert::{
-    assert_all_space_occupied, assert_no_outside, assert_no_overlap,
-};
+use koshi_test_support::layout_assert::check_exact_tiling;
 
 use super::*;
 use crate::size::SizeWeight;
@@ -16,8 +14,8 @@ use crate::solver::{solve, solve_with_min, PaneSizing, MIN_PANE_SIZE};
 use crate::test_trees::deep_alternating;
 
 /// Wraps a single pane ID as a leaf node ready to insert into a tree.
-fn leaf(pane: PaneId) -> LayoutChild {
-    LayoutChild::new(LayoutNode::Pane(pane))
+fn leaf(pane: PaneId) -> LayoutNode {
+    LayoutNode::Pane(pane)
 }
 
 /// Creates a split node with two equally-weighted pane children in the given direction.
@@ -36,7 +34,7 @@ fn find_split_of(tree: &LayoutNode, member: PaneId) -> &SplitNode {
             if split
                 .children
                 .iter()
-                .any(|child| matches!(child.node, LayoutNode::Pane(id) if id == member))
+                .any(|child| matches!(child, LayoutNode::Pane(id) if *id == member))
             {
                 split
             } else {
@@ -45,9 +43,8 @@ fn find_split_of(tree: &LayoutNode, member: PaneId) -> &SplitNode {
                     .iter()
                     .find_map(|child| {
                         child
-                            .node
                             .contains_pane(member)
-                            .then(|| find_split_of(&child.node, member))
+                            .then(|| find_split_of(child, member))
                     })
                     .expect("member not found")
             }
@@ -162,9 +159,7 @@ fn split_result_still_tiles_the_tab() {
 
     let tab = Rect::at_origin(Size { cols: 80, rows: 24 });
     let result = solve(&split, tab);
-    assert_all_space_occupied(&result.panes, tab).unwrap();
-    assert_no_overlap(&result.panes).unwrap();
-    assert_no_outside(&result.panes, tab).unwrap();
+    check_exact_tiling(&result.panes, tab).unwrap();
 }
 
 /// Returns a standard test tab size: 80 columns × 24 rows at origin (0, 0).
@@ -184,9 +179,7 @@ fn sizing(gap: u16) -> PaneSizing {
 /// Verifies that a solved layout completely tiles the tab with no gaps, overlaps, or panes outside bounds.
 fn assert_tiles(tree: &LayoutNode, tab: Rect) {
     let result = solve(tree, tab);
-    assert_all_space_occupied(&result.panes, tab).unwrap();
-    assert_no_overlap(&result.panes).unwrap();
-    assert_no_outside(&result.panes, tab).unwrap();
+    check_exact_tiling(&result.panes, tab).unwrap();
 }
 
 #[test]
@@ -221,7 +214,7 @@ fn removing_a_siblingless_leaf_prunes_the_emptied_split() {
     ));
     let tree = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![leaf(a), LayoutChild::new(column)],
+        vec![leaf(a), column],
     ));
 
     let (removed, info) = remove_pane(&tree, tab(), b, sizing(0)).unwrap();
@@ -239,7 +232,7 @@ fn removing_the_last_pane_in_a_split_leaves_a_unary_split_for_normalization() {
     ));
     let tree = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![leaf(a), LayoutChild::new(column)],
+        vec![leaf(a), column],
     ));
 
     let (removed, _) = remove_pane(&tree, tab(), c, sizing(0)).unwrap();
@@ -249,7 +242,7 @@ fn removing_the_last_pane_in_a_split_leaves_a_unary_split_for_normalization() {
     let LayoutNode::Split(outer) = &removed else {
         panic!("root must stay a split");
     };
-    let LayoutNode::Split(inner) = &outer.children[1].node else {
+    let LayoutNode::Split(inner) = &outer.children[1] else {
         panic!("column must survive as a unary split");
     };
     assert_eq!(inner.children.len(), 1);
@@ -265,7 +258,7 @@ fn absorbed_by_skips_collapsed_stack_members() {
     let stack = LayoutNode::Split(SplitNode::stack(vec![b, c], 0));
     let tree = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![leaf(x), LayoutChild::new(stack)],
+        vec![leaf(x), stack],
     ));
 
     let (removed, info) = remove_pane(&tree, tab(), x, sizing(0)).unwrap();
@@ -308,7 +301,7 @@ fn removing_the_active_member_lists_the_member_that_expands_into_its_place() {
     let stack = LayoutNode::Split(SplitNode::stack(vec![a, b], 0));
     let tree = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![leaf(x), LayoutChild::new(stack)],
+        vec![leaf(x), stack],
     ));
 
     // `a` held columns 40..80 over rows 0..23, with `b`'s header on row 23.
@@ -438,7 +431,9 @@ fn removing_the_active_stack_child_activates_the_next_one() {
         panic!("stack must survive");
     };
     assert_eq!(stack.active, 1);
-    let collapsed: Vec<bool> = stack.children.iter().map(|child| child.collapsed).collect();
+    let collapsed: Vec<bool> = (0..stack.children.len())
+        .map(|index| stack.is_collapsed(index))
+        .collect();
     assert_eq!(collapsed, [true, false]);
     assert_eq!(removed.leaf_panes(), [a, c]);
 }
@@ -453,7 +448,7 @@ fn removing_the_last_active_stack_child_steps_back() {
         panic!("stack must survive");
     };
     assert_eq!(stack.active, 0);
-    assert!(!stack.children[0].collapsed);
+    assert!(!stack.is_collapsed(0));
 }
 
 #[test]
@@ -467,7 +462,7 @@ fn removing_before_the_active_stack_child_keeps_it_active() {
     };
     // c is still the active pane, now at index 1.
     assert_eq!(stack.active, 1);
-    assert!(!stack.children[1].collapsed);
+    assert!(!stack.is_collapsed(1));
     assert_eq!(removed.leaf_panes(), [b, c]);
 }
 
@@ -481,7 +476,7 @@ fn removing_after_the_active_stack_child_keeps_it_active() {
         panic!("stack must survive");
     };
     assert_eq!(stack.active, 1);
-    assert!(!stack.children[1].collapsed);
+    assert!(!stack.is_collapsed(1));
     assert_eq!(removed.leaf_panes(), [a, b]);
 }
 
@@ -495,7 +490,7 @@ fn a_stack_reduced_to_one_member_normalizes_to_a_plain_leaf() {
     let stack = LayoutNode::Split(SplitNode::stack(vec![a, b], 0));
     let tree = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![leaf(x), LayoutChild::new(stack)],
+        vec![leaf(x), stack],
     ));
 
     let (removed, _) = remove_pane(&tree, tab(), a, sizing(0)).unwrap();
@@ -506,7 +501,7 @@ fn a_stack_reduced_to_one_member_normalizes_to_a_plain_leaf() {
         panic!("root must stay a split");
     };
     // The one-member stack collapsed into b's plain leaf.
-    assert_eq!(outer.children[1].node, LayoutNode::Pane(b));
+    assert_eq!(outer.children[1], LayoutNode::Pane(b));
     assert_tiles(&normalized, tab());
     // No header strip remains for a pane that is no longer stacked.
     assert!(solve(&normalized, tab()).stack_headers.is_empty());
@@ -543,7 +538,7 @@ fn removing_the_last_stack_member_prunes_the_stack() {
     let stack = LayoutNode::Split(SplitNode::stack(vec![a], 0));
     let tree = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![leaf(x), LayoutChild::new(stack)],
+        vec![leaf(x), stack],
     ));
 
     let (removed, info) = remove_pane(&tree, tab(), a, sizing(0)).unwrap();
@@ -666,7 +661,9 @@ fn removing_stack_members_until_one_remains_then_normalizing_gives_a_leaf() {
         tree = next;
         // After every removal exactly one child stays expanded.
         if let LayoutNode::Split(stack) = &tree {
-            let expanded = stack.children.iter().filter(|c| !c.collapsed).count();
+            let expanded = (0..stack.children.len())
+                .filter(|&index| !stack.is_collapsed(index))
+                .count();
             assert_eq!(expanded, 1, "a stack always has one expanded member");
         }
     }
@@ -708,12 +705,14 @@ fn stacking_onto_a_plain_pane_creates_a_stack_with_the_new_pane_active() {
     let LayoutNode::Split(outer) = &stacked else {
         panic!("root must stay a split");
     };
-    let LayoutNode::Split(stack) = &outer.children[1].node else {
+    let LayoutNode::Split(stack) = &outer.children[1] else {
         panic!("b's slot must become a stack");
     };
     assert_eq!(stack.direction, SplitDirection::Stacked);
     assert_eq!(stack.active, 1);
-    let collapsed: Vec<bool> = stack.children.iter().map(|child| child.collapsed).collect();
+    let collapsed: Vec<bool> = (0..stack.children.len())
+        .map(|index| stack.is_collapsed(index))
+        .collect();
     assert_eq!(collapsed, [true, false]);
 }
 
@@ -730,7 +729,9 @@ fn stacking_onto_a_stack_member_appends_to_that_stack() {
     assert_eq!(stack.weights.len(), 3);
     assert_eq!(stack.active, 2);
     assert_eq!(stacked.leaf_panes(), [a, b, n]);
-    let collapsed: Vec<bool> = stack.children.iter().map(|child| child.collapsed).collect();
+    let collapsed: Vec<bool> = (0..stack.children.len())
+        .map(|index| stack.is_collapsed(index))
+        .collect();
     assert_eq!(collapsed, [true, true, false]);
 }
 
@@ -739,16 +740,7 @@ fn stacking_onto_a_pane_inside_a_split_member_appends_to_that_stack() {
     let (a, b, c, n) = (PaneId::new(), PaneId::new(), PaneId::new(), PaneId::new());
     let tree = LayoutNode::Split(SplitNode {
         direction: SplitDirection::Stacked,
-        children: vec![
-            LayoutChild {
-                node: LayoutNode::Pane(a),
-                collapsed: false,
-            },
-            LayoutChild {
-                node: pair(SplitDirection::Horizontal, b, c),
-                collapsed: true,
-            },
-        ],
+        children: vec![LayoutNode::Pane(a), pair(SplitDirection::Horizontal, b, c)],
         weights: vec![SizeWeight::default(); 2],
         active: 0,
     });
@@ -762,12 +754,11 @@ fn stacking_onto_a_pane_inside_a_split_member_appends_to_that_stack() {
     assert_eq!(stack.children.len(), 3);
     assert_eq!(stack.weights.len(), 3);
     assert_eq!(stack.active, 2);
-    assert_eq!(
-        stack.children[1].node,
-        pair(SplitDirection::Horizontal, b, c)
-    );
-    assert_eq!(stack.children[2].node, LayoutNode::Pane(n));
-    let collapsed: Vec<bool> = stack.children.iter().map(|child| child.collapsed).collect();
+    assert_eq!(stack.children[1], pair(SplitDirection::Horizontal, b, c));
+    assert_eq!(stack.children[2], LayoutNode::Pane(n));
+    let collapsed: Vec<bool> = (0..stack.children.len())
+        .map(|index| stack.is_collapsed(index))
+        .collect();
     assert_eq!(collapsed, [true, true, false]);
     assert_eq!(stacked.leaf_panes(), [a, b, c, n]);
 }
@@ -778,16 +769,7 @@ fn stacking_onto_a_member_of_a_nested_stack_joins_the_innermost_stack() {
     let inner = LayoutNode::Split(SplitNode::stack(vec![b, c], 0));
     let tree = LayoutNode::Split(SplitNode {
         direction: SplitDirection::Stacked,
-        children: vec![
-            LayoutChild {
-                node: LayoutNode::Pane(a),
-                collapsed: true,
-            },
-            LayoutChild {
-                node: inner,
-                collapsed: false,
-            },
-        ],
+        children: vec![LayoutNode::Pane(a), inner],
         weights: vec![SizeWeight::default(); 2],
         active: 1,
     });
@@ -799,13 +781,15 @@ fn stacking_onto_a_member_of_a_nested_stack_joins_the_innermost_stack() {
     // The outer stack is untouched: two members, the inner stack active.
     assert_eq!(outer.children.len(), 2);
     assert_eq!(outer.active, 1);
-    let LayoutNode::Split(inner) = &outer.children[1].node else {
+    let LayoutNode::Split(inner) = &outer.children[1] else {
         panic!("the inner stack must survive");
     };
     assert_eq!(inner.children.len(), 3);
     assert_eq!(inner.active, 2);
-    assert_eq!(inner.children[2].node, LayoutNode::Pane(n));
-    let collapsed: Vec<bool> = inner.children.iter().map(|child| child.collapsed).collect();
+    assert_eq!(inner.children[2], LayoutNode::Pane(n));
+    let collapsed: Vec<bool> = (0..inner.children.len())
+        .map(|index| inner.is_collapsed(index))
+        .collect();
     assert_eq!(collapsed, [true, true, false]);
     assert_eq!(stacked.leaf_panes(), [a, b, c, n]);
 }
@@ -824,7 +808,7 @@ fn a_directional_split_treats_the_whole_stack_as_one_operand() {
     let stack = LayoutNode::Split(SplitNode::stack(vec![a, b], 1));
     let tree = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![leaf(x), LayoutChild::new(stack.clone())],
+        vec![leaf(x), stack.clone()],
     ));
 
     // Splitting downward from a stack member puts the new pane under the
@@ -833,12 +817,12 @@ fn a_directional_split_treats_the_whole_stack_as_one_operand() {
     let LayoutNode::Split(outer) = &split else {
         panic!("root must stay a split");
     };
-    let LayoutNode::Split(column) = &outer.children[1].node else {
+    let LayoutNode::Split(column) = &outer.children[1] else {
         panic!("the stack's slot must become a vertical split");
     };
     assert_eq!(column.direction, SplitDirection::Vertical);
-    assert_eq!(column.children[0].node, stack);
-    assert_eq!(column.children[1].node, LayoutNode::Pane(n));
+    assert_eq!(column.children[0], stack);
+    assert_eq!(column.children[1], LayoutNode::Pane(n));
     assert_eq!(split.leaf_panes(), [x, a, b, n]);
 }
 
@@ -852,8 +836,8 @@ fn a_directional_split_before_a_stack_places_the_new_pane_first() {
         panic!("root must become a split");
     };
     assert_eq!(row.direction, SplitDirection::Horizontal);
-    assert_eq!(row.children[0].node, LayoutNode::Pane(n));
-    assert_eq!(row.children[1].node, stack);
+    assert_eq!(row.children[0], LayoutNode::Pane(n));
+    assert_eq!(row.children[1], stack);
 }
 
 #[test]
@@ -925,16 +909,7 @@ fn a_directional_split_from_a_nested_stack_wraps_the_outermost_stack() {
     let inner = LayoutNode::Split(SplitNode::stack(vec![b, c], 0));
     let tree = LayoutNode::Split(SplitNode {
         direction: SplitDirection::Stacked,
-        children: vec![
-            LayoutChild {
-                node: LayoutNode::Pane(a),
-                collapsed: true,
-            },
-            LayoutChild {
-                node: inner,
-                collapsed: false,
-            },
-        ],
+        children: vec![LayoutNode::Pane(a), inner],
         weights: vec![SizeWeight::default(); 2],
         active: 1,
     });
@@ -946,8 +921,8 @@ fn a_directional_split_from_a_nested_stack_wraps_the_outermost_stack() {
         panic!("the root must become a split");
     };
     assert_eq!(row.direction, SplitDirection::Horizontal);
-    assert_eq!(row.children[0].node, tree);
-    assert_eq!(row.children[1].node, LayoutNode::Pane(new));
+    assert_eq!(row.children[0], tree);
+    assert_eq!(row.children[1], LayoutNode::Pane(new));
     assert_eq!(split.leaf_panes(), [a, b, c, new]);
 }
 
@@ -993,7 +968,7 @@ fn removing_the_last_pane_beside_an_empty_split_is_rejected() {
     ));
     let tree = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![leaf(a), LayoutChild::new(empty)],
+        vec![leaf(a), empty],
     ));
 
     let error = remove_pane(&tree, tab(), a, PaneSizing::default())

@@ -26,7 +26,7 @@ pub mod mouse;
 pub mod pty_forward;
 pub mod pty_output;
 pub mod reload;
-pub mod render_schedule;
+pub(crate) mod render_schedule;
 pub mod saved_view;
 pub mod scroll;
 pub mod selection;

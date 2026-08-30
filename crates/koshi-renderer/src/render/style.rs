@@ -57,7 +57,7 @@ pub(super) fn scroll_arrow_style(theme: &Theme) -> Style {
 }
 
 /// The background filling a koshi-owned bar row whole — the tab bar and the
-/// key-hint bar — laid down before any text.
+/// statusline — laid down before any text.
 pub(crate) fn bar_style(theme: &Theme) -> Style {
     Style::default().bg(theme.bar_bg)
 }

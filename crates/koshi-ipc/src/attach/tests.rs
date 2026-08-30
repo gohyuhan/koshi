@@ -1,11 +1,11 @@
 //! Tests for the attach structure's wire form: it survives an encode/decode
-//! round trip with every field intact, including each stacked child's collapsed
-//! flag, a field this build does not know is ignored, and a field this build
-//! needs is refused when absent.
+//! round trip with every field intact, including a stack's active member, a
+//! field this build does not know is ignored, and a field this build needs is
+//! refused when absent.
 
 use koshi_core::geometry::SplitDirection;
 use koshi_core::ids::{PaneId, PluginId, SessionId, TabId};
-use koshi_layout::tree::{LayoutChild, SplitNode};
+use koshi_layout::tree::{LayoutNode, SplitNode};
 
 use super::*;
 
@@ -83,10 +83,8 @@ fn a_stacked_tab_arrives_with_its_collapsed_flags_and_active_index() {
     assert_eq!(stack.direction, SplitDirection::Stacked);
     assert_eq!(stack.active, 1);
     assert_eq!(
-        stack
-            .children
-            .iter()
-            .map(|child| child.collapsed)
+        (0..stack.children.len())
+            .map(|index| stack.is_collapsed(index))
             .collect::<Vec<bool>>(),
         vec![true, false, true]
     );
@@ -125,10 +123,7 @@ fn a_directional_split_arrives_with_its_direction_and_child_order() {
             index: 0,
             layout: LayoutNode::Split(SplitNode::with_equal_weights(
                 SplitDirection::Vertical,
-                vec![
-                    LayoutChild::new(LayoutNode::Pane(left)),
-                    LayoutChild::new(LayoutNode::Pane(right)),
-                ],
+                vec![LayoutNode::Pane(left), LayoutNode::Pane(right)],
             )),
             focus_mru: vec![left],
         }],
@@ -153,11 +148,7 @@ fn a_directional_split_arrives_with_its_direction_and_child_order() {
     };
     assert_eq!(split.direction, SplitDirection::Vertical);
     assert_eq!(
-        split
-            .children
-            .iter()
-            .map(|child| child.node.clone())
-            .collect::<Vec<LayoutNode>>(),
+        split.children,
         vec![LayoutNode::Pane(left), LayoutNode::Pane(right)]
     );
 }

@@ -706,25 +706,6 @@ fn cli_exit_codes_match_spec() {
 }
 
 #[test]
-fn cli_exit_code_maps_command_result() {
-    let applied = CommandResult::Ok {
-        command_id: CommandId::new(),
-        emitted_events: vec![],
-    };
-    assert_eq!(CliExitCode::for_result(&applied), CliExitCode::Success);
-
-    let rejected = CommandResult::Rejected {
-        command_id: CommandId::new(),
-        reason: RejectReason::Unauthorized,
-        help: None,
-    };
-    assert_eq!(
-        CliExitCode::for_result(&rejected),
-        CliExitCode::RuntimeAction
-    );
-}
-
-#[test]
 fn toggle_pane_fullscreen_is_a_bare_wire_string() {
     // The byte shape a still-running 0.3.0 session decodes: a unit variant
     // carries no object, only its name.

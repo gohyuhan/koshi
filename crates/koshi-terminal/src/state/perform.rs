@@ -419,12 +419,14 @@ impl vte::Perform for TerminalState {
                 let mode = first_param(params).unwrap_or(0);
                 match mode {
                     // Cursor to end of screen: rest of this row, then every row
-                    // below.
+                    // below. A row erased end to end also loses its prompt
+                    // mark; the partly erased cursor row keeps its own.
                     0 => {
                         let grid = self.active_grid_mut();
                         grid.clear_line(r, c, cols, fill);
                         for row in r.saturating_add(1)..rows {
                             grid.clear_line(row, 0, cols, fill);
+                            grid.set_prompt_mark(row, false);
                         }
                     }
                     // Start of screen to cursor: every row above, then this row
@@ -433,6 +435,7 @@ impl vte::Perform for TerminalState {
                         let grid = self.active_grid_mut();
                         for row in 0..r {
                             grid.clear_line(row, 0, cols, fill);
+                            grid.set_prompt_mark(row, false);
                         }
                         grid.clear_line(r, 0, c.saturating_add(1), fill);
                     }
@@ -441,6 +444,7 @@ impl vte::Perform for TerminalState {
                         let grid = self.active_grid_mut();
                         for row in 0..rows {
                             grid.clear_line(row, 0, cols, fill);
+                            grid.set_prompt_mark(row, false);
                         }
                     }
                     // Erase scrollback only (xterm "erase saved lines"): drop
@@ -473,8 +477,13 @@ impl vte::Perform for TerminalState {
                     1 => self
                         .active_grid_mut()
                         .clear_line(r, 0, c.saturating_add(1), fill),
-                    // Whole line.
-                    2 => self.active_grid_mut().clear_line(r, 0, cols, fill),
+                    // Whole line: the row is erased end to end and loses its
+                    // prompt mark.
+                    2 => {
+                        let grid = self.active_grid_mut();
+                        grid.clear_line(r, 0, cols, fill);
+                        grid.set_prompt_mark(r, false);
+                    }
                     // Unknown EL mode: ignored.
                     _ => {}
                 }

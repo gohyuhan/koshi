@@ -2,12 +2,12 @@
 
 use koshi_core::geometry::{Point, SplitDirection};
 use koshi_test_support::layout_assert::{
-    assert_all_space_occupied, assert_min_size_respected, assert_no_outside, assert_no_overlap,
+    check_exact_tiling, check_min_size_respected, check_no_outside, check_no_overlap,
 };
 
 use super::*;
 use crate::test_trees::deep_alternating;
-use crate::tree::LayoutChild;
+use crate::tree::LayoutNode;
 
 /// Construct a rectangle with the given origin (x, y) and size (cols, rows).
 fn rect(x: u16, y: u16, cols: u16, rows: u16) -> Rect {
@@ -24,8 +24,8 @@ fn sizing(gap: u16) -> PaneSizing {
 }
 
 /// Wrap a pane ID in a leaf node.
-fn leaf(pane: PaneId) -> LayoutChild {
-    LayoutChild::new(LayoutNode::Pane(pane))
+fn leaf(pane: PaneId) -> LayoutNode {
+    LayoutNode::Pane(pane)
 }
 
 /// Create a split node in the given direction with equal-weight children for each pane.
@@ -48,9 +48,7 @@ fn split_with(direction: SplitDirection, children: Vec<(PaneId, SizeWeight)>) ->
 
 /// Verify that the solved panes fill the tab completely with no gaps, overlaps, or spillage.
 fn assert_tiles_exactly(result: &SolveResult, tab: Rect) {
-    assert_all_space_occupied(&result.panes, tab).unwrap();
-    assert_no_overlap(&result.panes).unwrap();
-    assert_no_outside(&result.panes, tab).unwrap();
+    check_exact_tiling(&result.panes, tab).unwrap();
 }
 
 #[test]
@@ -121,13 +119,13 @@ fn nested_tree_tiles_the_tab_exactly() {
     ));
     let tree = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![leaf(a), LayoutChild::new(inner)],
+        vec![leaf(a), inner],
     ));
     let tab = rect(0, 0, 81, 25);
 
     let result = solve(&tree, tab);
     assert_tiles_exactly(&result, tab);
-    assert_min_size_respected(&result.panes, Size { cols: 2, rows: 1 }).unwrap();
+    check_min_size_respected(&result.panes, Size { cols: 2, rows: 1 }).unwrap();
     assert_eq!(
         result.panes,
         [
@@ -279,7 +277,10 @@ fn all_fixed_underfill_gives_slack_to_the_last_child() {
 #[test]
 fn min_floor_is_honored_when_the_layout_fits() {
     let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
-    let wide = SizeWeight::default().with_min(20).unwrap();
+    let wide = SizeWeight {
+        min: Some(20),
+        ..SizeWeight::default()
+    };
     let tree = split_with(
         SplitDirection::Horizontal,
         vec![
@@ -296,7 +297,7 @@ fn min_floor_is_honored_when_the_layout_fits() {
     // remaining 10 down to their border-inclusive floor of 4.
     assert_eq!(widths, [20, 6, 4]);
     assert_tiles_exactly(&result, tab);
-    assert_min_size_respected(&result.panes, Size { cols: 2, rows: 1 }).unwrap();
+    check_min_size_respected(&result.panes, Size { cols: 2, rows: 1 }).unwrap();
 }
 
 #[test]
@@ -341,7 +342,13 @@ fn preferred_target_stops_at_the_donors_floor() {
         SplitDirection::Horizontal,
         vec![
             (a, SizeWeight::new(SizeConstraint::Preferred(90))),
-            (b, SizeWeight::default().with_min(20).unwrap()),
+            (
+                b,
+                SizeWeight {
+                    min: Some(20),
+                    ..SizeWeight::default()
+                },
+            ),
         ],
     );
     let tab = rect(0, 0, 100, 24);
@@ -380,7 +387,13 @@ fn floors_outrank_fixed_sizes_when_no_flexible_donor_remains() {
     let tree = split_with(
         SplitDirection::Horizontal,
         vec![
-            (a, SizeWeight::default().with_min(20).unwrap()),
+            (
+                a,
+                SizeWeight {
+                    min: Some(20),
+                    ..SizeWeight::default()
+                },
+            ),
             (b, SizeWeight::new(SizeConstraint::Fixed(30))),
         ],
     );
@@ -481,7 +494,7 @@ fn fits_accounts_for_nested_axis_minimums() {
     ));
     let tree = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![leaf(a), LayoutChild::new(column)],
+        vec![leaf(a), column],
     ));
 
     // Each bordered pane needs a four-by-three box. The three-deep column
@@ -495,7 +508,10 @@ fn fits_accounts_for_nested_axis_minimums() {
 #[test]
 fn fits_uses_declared_floors_not_just_defaults() {
     let (a, b) = (PaneId::new(), PaneId::new());
-    let wide = SizeWeight::default().with_min(30).unwrap();
+    let wide = SizeWeight {
+        min: Some(30),
+        ..SizeWeight::default()
+    };
     let tree = split_with(
         SplitDirection::Horizontal,
         vec![(a, wide), (b, SizeWeight::default())],
@@ -595,7 +611,7 @@ fn a_tab_grown_shrunk_to_nothing_then_regrown_returns_the_exact_first_solve() {
     ));
     let tree = LayoutNode::Split(SplitNode {
         direction: SplitDirection::Horizontal,
-        children: vec![leaf(a), LayoutChild::new(inner)],
+        children: vec![leaf(a), inner],
         weights: vec![
             SizeWeight {
                 resize_delta: 7,
@@ -654,7 +670,7 @@ fn cross_axis_too_small_suppresses_only_the_unfittable_subtree() {
     ));
     let tree = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![leaf(a), LayoutChild::new(column)],
+        vec![leaf(a), column],
     ));
     let tab = rect(0, 0, 80, 3);
 
@@ -675,9 +691,9 @@ fn suppression_never_overlaps_or_spills() {
     for cols in 1..14 {
         let tab = rect(0, 0, cols, 4);
         let result = solve(&tree, tab);
-        assert_no_overlap(&result.panes).unwrap();
-        assert_no_outside(&result.panes, tab).unwrap();
-        assert_min_size_respected(&result.panes, MIN_PANE_SIZE).unwrap();
+        check_no_overlap(&result.panes).unwrap();
+        check_no_outside(&result.panes, tab).unwrap();
+        check_min_size_respected(&result.panes, MIN_PANE_SIZE).unwrap();
     }
 }
 
@@ -756,7 +772,7 @@ fn five_member_stack_keeps_headers_in_layout_order_around_the_active_child() {
         ]
     );
     assert_tiles_exactly(&result, tab);
-    assert_min_size_respected(&result.panes, MIN_PANE_SIZE).unwrap();
+    check_min_size_respected(&result.panes, MIN_PANE_SIZE).unwrap();
 }
 
 #[test]
@@ -777,7 +793,7 @@ fn stack_beside_a_pane_solves_inside_its_own_slot() {
     let stack = LayoutNode::Split(SplitNode::stack(vec![b, c], 0));
     let tree = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![leaf(a), LayoutChild::new(stack)],
+        vec![leaf(a), stack],
     ));
     let tab = rect(0, 0, 80, 24);
 
@@ -860,16 +876,7 @@ fn an_active_subtree_splits_the_active_region() {
     ));
     let stack = SplitNode {
         direction: SplitDirection::Stacked,
-        children: vec![
-            LayoutChild {
-                node: LayoutNode::Pane(a),
-                collapsed: true,
-            },
-            LayoutChild {
-                node: pair,
-                collapsed: false,
-            },
-        ],
+        children: vec![LayoutNode::Pane(a), pair],
         weights: vec![SizeWeight::default(), SizeWeight::default()],
         active: 1,
     };
@@ -1024,15 +1031,16 @@ fn a_fixed_child_is_raised_to_its_own_border_floor_by_a_flexible_donor() {
     let widths: Vec<u16> = result.panes.iter().map(|(_, r)| r.size.cols).collect();
     assert_eq!(widths, [4, 16]);
     assert_tiles_exactly(&result, tab);
-    assert_min_size_respected(&result.panes, MIN_PANE_SIZE).unwrap();
+    check_min_size_respected(&result.panes, MIN_PANE_SIZE).unwrap();
 }
 
 #[test]
 fn a_declared_min_overlay_outranks_a_smaller_min_primary() {
     let (a, b) = (PaneId::new(), PaneId::new());
-    let overlaid = SizeWeight::new(SizeConstraint::Min(10))
-        .with_min(20)
-        .unwrap();
+    let overlaid = SizeWeight {
+        min: Some(20),
+        ..SizeWeight::new(SizeConstraint::Min(10))
+    };
     let tree = split_with(
         SplitDirection::Horizontal,
         vec![(a, overlaid), (b, SizeWeight::new(SizeConstraint::Flex(1)))],
@@ -1114,7 +1122,7 @@ fn a_two_by_two_cell_tab_suppresses_every_pane() {
     ));
     let tree = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![LayoutChild::new(left), LayoutChild::new(right)],
+        vec![left, right],
     ));
 
     let result = solve(&tree, rect(0, 0, 2, 2));
@@ -1145,7 +1153,7 @@ fn a_two_by_two_grid_tiles_a_normal_tab_exactly() {
     ));
     let tree = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![LayoutChild::new(left), LayoutChild::new(right)],
+        vec![left, right],
     ));
     let tab = rect(0, 0, 80, 24);
 
@@ -1254,7 +1262,7 @@ fn nested_same_direction_splits_send_each_levels_remainder_trailing() {
     ));
     let tree = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![leaf(a), LayoutChild::new(inner)],
+        vec![leaf(a), inner],
     ));
     let tab = rect(0, 0, 81, 24);
 
@@ -1288,7 +1296,7 @@ fn a_fifty_deep_alternating_tree_tiles_exactly_and_solves_deterministically() {
     );
     assert!(result.suppressed.is_empty());
     assert_tiles_exactly(&result, tab);
-    assert_min_size_respected(&result.panes, MIN_PANE_SIZE).unwrap();
+    check_min_size_respected(&result.panes, MIN_PANE_SIZE).unwrap();
     assert_eq!(solve(&tree, tab), result);
 }
 
@@ -1312,7 +1320,7 @@ fn two_full_percent_children_over_the_total_share_donate_at_the_floor() {
     let widths: Vec<u16> = result.panes.iter().map(|(_, r)| r.size.cols).collect();
     assert_eq!(widths, [96, 4]);
     assert_tiles_exactly(&result, tab);
-    assert_min_size_respected(&result.panes, MIN_PANE_SIZE).unwrap();
+    check_min_size_respected(&result.panes, MIN_PANE_SIZE).unwrap();
 }
 
 #[test]
@@ -1403,7 +1411,7 @@ fn targeting_a_collapsed_stack_member_by_name_expands_it() {
     let stack = LayoutNode::Split(SplitNode::stack(vec![b, c], 0));
     let mut tree = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![leaf(a), LayoutChild::new(stack)],
+        vec![leaf(a), stack],
     ));
     let tab = rect(0, 0, 80, 24);
 
@@ -1496,7 +1504,13 @@ fn a_floor_deficit_is_funded_by_the_flexible_sibling_before_the_fixed_one() {
     let tree = split_with(
         SplitDirection::Horizontal,
         vec![
-            (a, SizeWeight::default().with_min(50).unwrap()),
+            (
+                a,
+                SizeWeight {
+                    min: Some(50),
+                    ..SizeWeight::default()
+                },
+            ),
             (b, SizeWeight::new(SizeConstraint::Fixed(30))),
             (c, SizeWeight::new(SizeConstraint::Flex(1))),
         ],
@@ -1517,7 +1531,13 @@ fn a_floor_deficit_takes_from_the_trailing_flexible_sibling_first() {
     let tree = split_with(
         SplitDirection::Horizontal,
         vec![
-            (a, SizeWeight::default().with_min(50).unwrap()),
+            (
+                a,
+                SizeWeight {
+                    min: Some(50),
+                    ..SizeWeight::default()
+                },
+            ),
             (b, SizeWeight::new(SizeConstraint::Flex(1))),
             (c, SizeWeight::new(SizeConstraint::Flex(1))),
         ],
@@ -1539,14 +1559,8 @@ fn a_collapsed_member_that_is_a_split_puts_only_its_first_leaf_on_the_strip() {
     let stack = SplitNode {
         direction: SplitDirection::Stacked,
         children: vec![
-            LayoutChild {
-                node: split(SplitDirection::Horizontal, &[x, y]),
-                collapsed: true,
-            },
-            LayoutChild {
-                node: LayoutNode::Pane(active),
-                collapsed: false,
-            },
+            split(SplitDirection::Horizontal, &[x, y]),
+            LayoutNode::Pane(active),
         ],
         weights: vec![SizeWeight::default(); 2],
         active: 1,
@@ -1693,10 +1707,7 @@ fn a_nested_split_reserves_its_own_gap_inside_its_rect() {
     let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
     let tree = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![
-            leaf(a),
-            LayoutChild::new(split(SplitDirection::Vertical, &[b, c])),
-        ],
+        vec![leaf(a), split(SplitDirection::Vertical, &[b, c])],
     ));
     let tab = rect(0, 0, 120, 24);
 
@@ -1853,11 +1864,7 @@ fn a_middle_child_dropped_for_its_height_gives_its_gap_to_the_survivors() {
     let tall: Vec<PaneId> = (0..9).map(|_| PaneId::new()).collect();
     let tree = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![
-            leaf(a),
-            LayoutChild::new(split(SplitDirection::Vertical, &tall)),
-            leaf(c),
-        ],
+        vec![leaf(a), split(SplitDirection::Vertical, &tall), leaf(c)],
     ));
 
     // Nine bordered rows need 27 rows; the tab has 24, so the middle column
@@ -1934,9 +1941,10 @@ fn a_percent_share_that_floors_to_zero_cells_is_raised_to_the_border_floor() {
 #[test]
 fn a_preferred_overlay_outranks_a_preferred_primary() {
     let (a, b) = (PaneId::new(), PaneId::new());
-    let overlaid = SizeWeight::new(SizeConstraint::Preferred(10))
-        .with_preferred(30)
-        .unwrap();
+    let overlaid = SizeWeight {
+        preferred: Some(30),
+        ..SizeWeight::new(SizeConstraint::Preferred(10))
+    };
     let tree = split_with(
         SplitDirection::Horizontal,
         vec![(a, overlaid), (b, SizeWeight::new(SizeConstraint::Flex(1)))],
@@ -1986,7 +1994,13 @@ fn a_floor_deficit_taps_the_fixed_sibling_once_the_flexible_one_is_at_its_floor(
     let tree = split_with(
         SplitDirection::Horizontal,
         vec![
-            (a, SizeWeight::default().with_min(70).unwrap()),
+            (
+                a,
+                SizeWeight {
+                    min: Some(70),
+                    ..SizeWeight::default()
+                },
+            ),
             (b, SizeWeight::new(SizeConstraint::Fixed(30))),
             (c, SizeWeight::new(SizeConstraint::Flex(1))),
         ],
@@ -2029,7 +2043,10 @@ fn slot_floor_is_the_larger_of_the_subtree_minimum_and_the_declared_floor() {
     let (a, b) = (PaneId::new(), PaneId::new());
     let mut split =
         SplitNode::with_equal_weights(SplitDirection::Horizontal, vec![leaf(a), leaf(b)]);
-    split.weights[0] = SizeWeight::default().with_min(20).unwrap();
+    split.weights[0] = SizeWeight {
+        min: Some(20),
+        ..SizeWeight::default()
+    };
 
     // Along the columns: a declares 20, above its four-column border
     // minimum; b declares nothing and keeps the four. A slot past the last

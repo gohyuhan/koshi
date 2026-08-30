@@ -69,8 +69,7 @@ impl std::fmt::Display for Severity {
     }
 }
 
-/// Classifies one failure. Implemented by every crate's domain error; the
-/// aggregate `KoshiError` (in `koshi-error`) delegates through this trait.
+/// Classifies one failure. Implemented by every crate's domain error.
 pub trait DomainError {
     /// Which domain the failure belongs to.
     fn category(&self) -> DomainCategory;

@@ -22,8 +22,8 @@ impl Server {
     /// 3. plugin notification — a no-op, no plugin host is wired,
     /// 4. group-kill immediately for a quit with no issuing client, otherwise
     ///    graceful kill,
-    /// 5. session-snapshot persistence — a no-op, the storage service is
-    ///    [`NullStorage`](crate::placeholder::NullStorage).
+    /// 5. session-snapshot persistence — a no-op, nothing writes session state
+    ///    to disk.
     ///
     /// Stages 6–7 (restore terminal, flush logs) are left to the caller's
     /// guards, which drop in that order after this returns.
@@ -49,8 +49,8 @@ impl Server {
             self.graceful_kill_all_panes();
         }
 
-        // Stage 5 — session-snapshot persistence: a no-op, the storage service
-        // is the NullStorage stand-in.
+        // Stage 5 — session-snapshot persistence: a no-op, nothing writes
+        // session state to disk.
     }
 
     /// Graceful-then-group-kill every live pane's child

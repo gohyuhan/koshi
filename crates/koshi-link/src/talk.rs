@@ -15,6 +15,7 @@
 //!
 //! What a request means, and what its answer is worth, stays with the caller.
 
+use koshi_core::command::CommandResult;
 use koshi_core::compat::Surface;
 use koshi_core::text::sanitize_reported_text;
 use koshi_ipc::error::IpcError;
@@ -122,6 +123,28 @@ pub fn talk_failed(error: IpcError) -> CliError {
     }
 }
 
+/// `result` with a rejection's hint filtered by [`sanitize_reported_text`].
+/// An applied result is unchanged, and so is a rejection carrying no hint.
+///
+/// The hint is written by the session that answered, which is another user's
+/// process for a session reached through the shared directory and another
+/// machine's for one reached over TLS. A hint of `"\u{1b}[2Jattach first"`
+/// comes back as `"[2Jattach first"`.
+pub(crate) fn filter_rejection_hint(result: CommandResult) -> CommandResult {
+    match result {
+        CommandResult::Rejected {
+            command_id,
+            reason,
+            help,
+        } => CommandResult::Rejected {
+            command_id,
+            reason,
+            help: help.as_deref().map(sanitize_reported_text),
+        },
+        applied => applied,
+    }
+}
+
 /// A refusal the peer sent at the protocol level — a bad token, a version
 /// mismatch, or a request it could not read — as
 /// [`CliError::IpcUnavailable`] carrying `refusal.message` filtered by
@@ -136,6 +159,12 @@ pub fn refused(refusal: &IpcErrorPayload) -> CliError {
 /// answer, once the version is checked against the range this build sent. An
 /// empty build string is a session that predates the version field.
 ///
+/// The build string is written by the session that answered, which is another
+/// user's process for a session reached through the shared directory and
+/// another machine's for one reached over TLS, and `koshi server-version`
+/// prints it. It is filtered by [`sanitize_reported_text`], so a build of
+/// `"\u{1b}[2J0.3.0"` comes back as `"[2J0.3.0"`.
+///
 /// # Errors
 /// [`CliError::IpcUnavailable`] when the session settled on a version outside
 /// the range this build asked for, refused the Hello, or answered anything
@@ -147,7 +176,7 @@ pub(crate) fn session_hello_version(reply: IncomingResponse) -> Result<(u32, Str
             version,
         } => {
             SESSION.settled_version(protocol_version)?;
-            Ok((protocol_version, version))
+            Ok((protocol_version, sanitize_reported_text(&version)))
         }
         IpcResult::Error(refusal) => Err(refused(&refusal)),
         other => Err(SESSION.unexpected_reply(&other)),
@@ -180,24 +209,25 @@ pub(crate) fn router_hello_version(reply: IncomingRouterResponse) -> Result<Stri
 /// command naming a client is refused before it is sent.
 pub(crate) const TARGET_CLIENT_PROTOCOL: u32 = 3;
 
-/// Check the version a session settled on against the lowest one this command
-/// needs. `least` `None` accepts every settled version.
+/// Check the version a session settled on against
+/// [`TARGET_CLIENT_PROTOCOL`], for a command that names a target client.
+/// `names_client` `false` accepts every settled version.
 ///
 /// # Errors
-/// [`CliError::IpcUnavailable`] when `least` is `Some(v)` and `settled` is
-/// below `v`. For `settled == 2` the sentence reads `this session speaks
-/// protocol 2; --client needs a session started by koshi 0.4.0 or later`. It
-/// names `--client` and koshi 0.4.0 whatever `least` holds.
-pub(crate) fn require_settled_version(settled: u32, least: Option<u32>) -> Result<(), CliError> {
-    match least {
-        Some(least) if settled < least => Err(CliError::IpcUnavailable {
+/// [`CliError::IpcUnavailable`] when `names_client` is `true` and `settled` is
+/// below [`TARGET_CLIENT_PROTOCOL`]. For `settled == 2` the sentence reads
+/// `this session speaks protocol 2; --client needs a session started by koshi
+/// 0.4.0 or later`.
+pub(crate) fn require_client_targeting(settled: u32, names_client: bool) -> Result<(), CliError> {
+    if names_client && settled < TARGET_CLIENT_PROTOCOL {
+        return Err(CliError::IpcUnavailable {
             detail: format!(
                 "this session speaks protocol {settled}; --client needs a session started by \
                  koshi 0.4.0 or later"
             ),
-        }),
-        _ => Ok(()),
+        });
     }
+    Ok(())
 }
 
 #[cfg(test)]

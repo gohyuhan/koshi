@@ -41,6 +41,7 @@ use crate::key_sequence::parse_sequence;
 use crate::layer::PartialKeybindingsConfig;
 use crate::parser::parse_kdl;
 use crate::parser::unknown_key;
+use crate::parser::version_arg;
 use crate::types::{BoundAction, ModeBindings, ModeName};
 
 #[cfg(test)]
@@ -159,7 +160,7 @@ impl Walker<'_> {
                 "version" | "chord-timeout-ms" | "which-key-delay-ms" | "max-chord-depth"
                 | "leader" | "unlock-alternative" => {
                     if !seen.insert(name) {
-                        self.error(node.span(), format!("duplicate `{name}` node"));
+                        self.error(node.span(), format!("`{name}` is declared more than once"));
                         continue;
                     }
                     self.setting(node, &mut partial);
@@ -209,15 +210,14 @@ impl Walker<'_> {
     /// supported schema version.
     fn setting(&mut self, node: &KdlNode, partial: &mut PartialKeybindingsConfig) {
         match node.name().value() {
-            "version" => {
-                if let Some(found) = self.integer_arg(node, u64::from(u32::MAX)) {
-                    // The bound above keeps the value in u32 range.
-                    let found = u32::try_from(found).expect("bounded by integer_arg");
+            "version" => match version_arg(node) {
+                Ok(found) => {
                     if let Err(err) = check_version(found) {
                         self.error(node.span(), err.to_string());
                     }
                 }
-            }
+                Err((span, detail)) => self.error(span, detail),
+            },
             "chord-timeout-ms" => {
                 if let Some(v) = self.integer_arg(node, u64::from(u32::MAX)) {
                     partial.chord_timeout_ms = Some(u32::try_from(v).expect("bounded"));

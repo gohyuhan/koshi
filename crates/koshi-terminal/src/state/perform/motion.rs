@@ -2,7 +2,7 @@
 //! index, save / restore cursor, absolute placement, the deferred-wrap latch,
 //! and tab-stop math.
 
-use crate::grid::state::{RowEnd, RowMeta};
+use crate::grid::state::RowEnd;
 use crate::state::{RenderState, SavedCursor, Screen, TerminalState};
 use crate::style::Style;
 
@@ -35,11 +35,8 @@ impl TerminalState {
             let removed = n.min(band_height);
             for row in 0..removed {
                 if let Some(scrolled_off) = self.primary.rows().get(row as usize) {
-                    let meta = RowMeta {
-                        end: self.primary.row_end(row),
-                        prompt: self.primary.prompt_mark(row),
-                    };
-                    self.scrollback.push_row_with_meta(scrolled_off, meta);
+                    let meta = self.primary.row_meta(row);
+                    self.scrollback.push_row(scrolled_off, meta);
                 }
             }
         }

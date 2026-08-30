@@ -10,21 +10,17 @@ koshi-core = { version = "0.4.0-pr.1", path = "../koshi-core" }
 koshi-observability = { version = "0.4.0-pr.1", path = "../koshi-observability" }
 koshi-input = { version = "0.4.0-pr.1", path = "../koshi-input" }
 koshi-ipc = { version = "0.4.0-pr.1", path = "../koshi-ipc" }
-koshi-layout = { version = "0.4.0-pr.1", path = "../koshi-layout" }
 koshi-link = { version = "0.4.0-pr.1", path = "../koshi-link" }
 koshi-paths = { version = "0.4.0-pr.1", path = "../koshi-paths" }
 koshi-renderer = { version = "0.4.0-pr.1", path = "../koshi-renderer" }
 koshi-runtime = { version = "0.4.0-pr.1", path = "../koshi-runtime" }
 koshi-terminal = { version = "0.4.0-pr.1", path = "../koshi-terminal" }
-ratatui = { version = "0.30.2", default-features = false, features = [
-  "crossterm",
-] }
+ratatui = { workspace = true, features = ["crossterm"] }
 serde_json.workspace = true
 uuid.workspace = true
-tracing = "0.1.44"
+tracing.workspace = true
 
 [dev-dependencies]
-koshi-layout = { path = "../koshi-layout" }
-koshi-pty = { path = "../koshi-pty" }
-koshi-test-support = { path = "../koshi-test-support" }
-tempfile.workspace = true
+koshi-layout = { version = "0.4.0-pr.1", path = "../koshi-layout" }
+koshi-pty = { version = "0.4.0-pr.1", path = "../koshi-pty" }
+koshi-test-support = { version = "0.4.0-pr.1", path = "../koshi-test-support" }

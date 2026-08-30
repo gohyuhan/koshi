@@ -9,6 +9,11 @@
 //! with a reply channel; the dispatcher's answer comes back on it and leaves as
 //! the connection's response frame.
 //!
+//! A `SubmitCommand`'s [`CommandSource`] is set here, from the connection the
+//! request arrived on, over whatever source the peer wrote: a control
+//! connection carries a CLI source, and an attached client's connection
+//! carries [`CommandSource::KeyBinding`] naming that connection's own client.
+//!
 //! An `Attach` is the one request that keeps its connection: once the reply
 //! carrying the session's structure is written, the connection is split. The
 //! writing half carries that client's event stream, and the reading half
@@ -53,6 +58,7 @@ use std::sync::{Arc, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
 
+use koshi_core::command::{CommandEnvelope, CommandSource};
 use koshi_core::ids::{ClientId, SessionId};
 use koshi_ipc::endpoint::{
     advert_path, remove_advert, remove_socket_file, shared_socket_addr, socket_addr, write_advert,
@@ -583,6 +589,10 @@ fn accept_loop(
 /// the inbox and answer with its reply. `RecentEvents` is answered on this
 /// thread, from the process-wide log ring, and reaches no dispatcher.
 ///
+/// A `SubmitCommand` on this connection has its source stamped by
+/// [`cli_source`] before it crosses to the dispatcher: this connection carries
+/// a `koshi` CLI invocation.
+///
 /// A `Restart` the dispatcher refuses is answered with
 /// [`IpcErrorCode::MalformedRequest`] carrying the sentence naming what is
 /// wrong, and the connection keeps serving.
@@ -638,8 +648,9 @@ fn serve_connection(
                 unreachable!("Hello is answered by the connection thread before dispatch")
             }
             IpcRequestKind::SubmitCommand(envelope) => {
+                let envelope = cli_source(*envelope);
                 let answer = ask_dispatcher(&served.intake, inbox_tx, |reply| RuntimeEvent::Ipc {
-                    envelope: *envelope,
+                    envelope,
                     reply,
                 });
                 let Some(result) = answer else {
@@ -798,6 +809,10 @@ fn serve_connection(
 /// of any other kind, end of stream, a transport fault, or a dispatcher that is
 /// gone all end the reading loop.
 ///
+/// A `SubmitCommand` on this connection has its source stamped by
+/// [`client_source`], so it is attributed to `client_id` and to no other
+/// client.
+///
 /// Either half ending detaches the client, which removes its record and drops
 /// its subscription; the closed queue, or the terminal `Quit` or `Restarting`
 /// frame, then ends the writing thread. Both notify, so a write that fails
@@ -942,7 +957,7 @@ fn stream_events(
                 // into it fails.
                 let (reply, _) = mpsc::channel();
                 RuntimeEvent::Ipc {
-                    envelope: *envelope,
+                    envelope: client_source(*envelope, client_id),
                     reply,
                 }
             }
@@ -968,6 +983,51 @@ fn stream_events(
             streamed: true,
         },
     );
+}
+
+/// Rebuild `envelope` with the source a control connection carries, over
+/// whatever source its sender wrote.
+///
+/// A control connection carries a `koshi` CLI invocation. Its two sources,
+/// [`CommandSource::InSessionCli`] and [`CommandSource::ExternalCli`], are kept
+/// as they stand. Every other source becomes
+/// `ExternalCli { session_id: None, target_client: None }`, which names no
+/// session and no client.
+///
+/// The envelope's `client_id` is re-derived from the stamped source; the two
+/// always agree.
+///
+/// A sender that writes `CommandSource::Internal` and
+/// `Command::ToggleMouseSelect` reaches the dispatcher as
+/// `ExternalCli { session_id: None, target_client: None }` carrying
+/// `Command::ToggleMouseSelect`. The dispatcher's CLI-admission check refuses
+/// it: the CLI has no mouse-select verb.
+fn cli_source(envelope: CommandEnvelope) -> CommandEnvelope {
+    let source = match envelope.source {
+        source @ (CommandSource::InSessionCli { .. } | CommandSource::ExternalCli { .. }) => source,
+        CommandSource::KeyBinding { .. }
+        | CommandSource::Mouse { .. }
+        | CommandSource::Plugin { .. }
+        | CommandSource::Internal => CommandSource::external_cli(None, None),
+    };
+    CommandEnvelope::new(envelope.id, source, envelope.issued_at, envelope.command)
+}
+
+/// Rebuild `envelope` with [`CommandSource::KeyBinding`] naming `client_id`,
+/// over whatever source its sender wrote.
+///
+/// `client_id` is the client this connection attached as. A command this
+/// connection sends is attributed to that client and to no other.
+///
+/// The envelope's `client_id` is re-derived from the stamped source; the two
+/// always agree.
+fn client_source(envelope: CommandEnvelope, client_id: ClientId) -> CommandEnvelope {
+    CommandEnvelope::new(
+        envelope.id,
+        CommandSource::key_binding(client_id),
+        envelope.issued_at,
+        envelope.command,
+    )
 }
 
 /// Hand one request to the dispatcher thread and wait for its answer: build

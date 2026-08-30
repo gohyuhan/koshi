@@ -29,7 +29,6 @@ use koshi_session::session::state::Session;
 use koshi_session::session::tab_ops;
 
 use crate::runtime::command::{pane_spawn_sizes, size_root_pane};
-use crate::runtime::render_schedule::InvalidationReason;
 use crate::runtime::spawn_env::koshi_env;
 use crate::server::Server;
 
@@ -134,8 +133,7 @@ impl Server {
 
         self.sessions.insert(session_id, session);
         self.park_pane_pty(pane_id, handle, spawn_size);
-        self.render_scheduler
-            .invalidate(InvalidationReason::LayoutChanged);
+        self.render_scheduler.invalidate();
 
         Ok(())
     }
@@ -303,8 +301,7 @@ impl Server {
         // The resize events are dropped.
         let mut events = Vec::new();
         self.reflow_tab_if_viewed(backend.as_ref(), session_id, focused_tab_id, &mut events);
-        self.render_scheduler
-            .invalidate(InvalidationReason::LayoutChanged);
+        self.render_scheduler.invalidate();
 
         Ok(())
     }

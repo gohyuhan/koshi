@@ -1,15 +1,16 @@
 //! `koshi-test-support` — testing utilities shared across the workspace.
 //!
-//! The crate holds an event-sequence recorder, an in-memory fake PTY
+//! The crate holds an event-sequence assertion, an in-memory fake PTY
 //! (pseudo-terminal, the virtual terminal a shell process runs inside)
-//! backend, layout invariant assertions, a rate-bounded byte pump, and the
+//! backend, layout invariant checks, a rate-bounded byte pump, and the
 //! shared runtime-directory fixture.
 
-/// Deterministic event-sequence recorder for command-transaction tests.
+/// Event-sequence assertion.
 ///
-/// Records ordered bursts of [`koshi_core::event::Event`]s and provides consuming
-/// assertions that pretty-print diffs when sequences diverge.
-pub mod event_queue;
+/// [`event_assert::assert_events`] compares an emitted burst of
+/// [`koshi_core::event::Event`]s against the expected sequence and panics with
+/// an index-aligned diff when they differ.
+pub mod event_assert;
 
 /// In-memory fake PTY backend for isolation testing.
 ///
@@ -21,11 +22,12 @@ pub mod fake_pty;
 /// Test fixtures shared across the suite: the temporary runtime directory.
 pub mod fixtures;
 
-/// Layout invariant assertions for pure-layout tests.
+/// Layout invariant checks for pure-layout tests.
 ///
 /// Checks that placed panes hold the geometric invariants: exact tiling of
 /// the tab area, no overlaps, no spills, and respect for minimum cell sizes.
-/// Also checks that every layout leaf references a live pane.
+/// Also checks that every layout leaf references a live pane. Each check
+/// returns `Result`, never panics.
 pub mod layout_assert;
 
 /// Rate-bounded byte pump for tests that need a slow link.

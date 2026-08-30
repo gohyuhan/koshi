@@ -854,3 +854,20 @@ fn insert_lines_with_a_zero_count_moves_nothing_and_keeps_row_ends() {
     assert_eq!(grid.row_end(0), RowEnd::Soft);
     assert_eq!(grid.row_end(2), RowEnd::Soft);
 }
+
+#[test]
+fn row_meta_reads_both_facts_at_once_and_defaults_out_of_bounds() {
+    let mut grid = Grid::blank(2, 2, Style::default());
+    grid.set_row_end(0, RowEnd::Soft);
+    grid.set_prompt_mark(0, true);
+
+    assert_eq!(
+        grid.row_meta(0),
+        RowMeta {
+            end: RowEnd::Soft,
+            prompt: true
+        }
+    );
+    assert_eq!(grid.row_meta(1), RowMeta::default());
+    assert_eq!(grid.row_meta(9), RowMeta::default());
+}

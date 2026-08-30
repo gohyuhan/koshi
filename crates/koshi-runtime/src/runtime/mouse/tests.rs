@@ -31,7 +31,6 @@ use koshi_renderer::snapshot::{Delivery, MouseFrame, ViewerChrome};
 use koshi_renderer::{hit_test, pane_local_cell, HitRegion};
 use koshi_test_support::fake_pty::FakePtyBackend;
 
-use crate::placeholder::{NullSnapshotProvider, NullStorage};
 use crate::runtime::bus::EventFilter;
 
 fn runtime() -> (Server, ClientId) {
@@ -171,13 +170,7 @@ fn runtime_with_fake() -> (Server, Arc<FakePtyBackend>, ClientId) {
 fn runtime_sized(viewport: Size) -> (Server, Arc<FakePtyBackend>, ClientId) {
     let fake = Arc::new(FakePtyBackend::new());
     let (tx, rx) = mpsc::channel();
-    let mut runtime = Server::new(
-        fake.clone(),
-        Arc::new(NullSnapshotProvider),
-        Arc::new(NullStorage),
-        rx,
-        tx,
-    );
+    let mut runtime = Server::new(fake.clone(), rx, tx);
     let client = runtime
         .bootstrap_local(SessionId::new(), viewport, SystemTime::UNIX_EPOCH)
         .expect("bootstrap");

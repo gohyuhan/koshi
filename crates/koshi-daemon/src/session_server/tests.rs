@@ -22,7 +22,6 @@ use koshi_core::process::ExitStatus;
 #[cfg(unix)]
 use koshi_ipc::endpoint::EndpointFile;
 use koshi_renderer::snapshot::Delivery;
-use koshi_runtime::placeholder::{SnapshotProvider, Storage};
 use koshi_runtime::runtime::bus::EventFilter;
 use koshi_runtime::runtime::event::AttachAccepted;
 use koshi_test_support::fake_pty::FakePtyBackend;
@@ -33,10 +32,8 @@ use tempfile::TempDir;
 /// way the control socket does.
 fn test_server(fake: Arc<FakePtyBackend>) -> (Server, mpsc::Sender<RuntimeEvent>) {
     let backend: Arc<dyn PtyBackend> = fake;
-    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
-    let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (tx, rx) = mpsc::channel();
-    let mut server = Server::new(backend, snapshot_provider, storage, rx, tx.clone());
+    let mut server = Server::new(backend, rx, tx.clone());
     server.load_startup_config(None);
     (server, tx)
 }
@@ -234,7 +231,6 @@ fn the_last_childs_exit_ends_the_loop_with_no_quit_asked_for() {
     tx.send(RuntimeEvent::ChildExit {
         pane_id,
         status: ExitStatus::ExitCode(0),
-        exited_at: SystemTime::now(),
     })
     .expect("the child's exit is queued");
 
@@ -667,10 +663,10 @@ fn the_carried_state_reads_back_with_every_tab_pane_and_screen() {
         .iter()
         .map(|(pane, engine)| (*pane, engine.state().clone()))
         .collect();
-    let carried: Vec<koshi_pty::portable::CarriedPtyPane> = panes
+    let carried: Vec<CarriedPtyPane> = panes
         .iter()
         .enumerate()
-        .map(|(index, pane_id)| koshi_pty::portable::CarriedPtyPane {
+        .map(|(index, pane_id)| CarriedPtyPane {
             pane_id: *pane_id,
             #[cfg(unix)]
             terminal_fd: Some(30 + index as i32),
@@ -680,7 +676,7 @@ fn the_carried_state_reads_back_with_every_tab_pane_and_screen() {
         })
         .collect();
 
-    let (header, body) = server.carry_out(session_id, "quiet-lake".to_string(), &carried);
+    let (header, body) = server.carry_out(&carried).expect("a session to carry");
     resume::write(&resume_file, &header, &body).expect("the carried state is written");
     let (read_back, raw_body) = resume::read_header(&resume_file).expect("the header reads back");
     let read_body = resume::read_body(read_back.format, &raw_body).expect("the body reads back");
@@ -1483,7 +1479,7 @@ fn a_child_that_ends_after_the_header_is_built_still_carries_its_real_status() {
         ],
     };
 
-    let now = |pane_id, exit| koshi_pty::portable::CarriedPtyPane {
+    let now = |pane_id, exit| CarriedPtyPane {
         pane_id,
         #[cfg(unix)]
         terminal_fd: None,
@@ -2276,7 +2272,6 @@ fn a_restart_accepted_in_the_pass_that_loses_the_last_pane_ends_the_session() {
     tx.send(RuntimeEvent::ChildExit {
         pane_id,
         status: ExitStatus::ExitCode(0),
-        exited_at: SystemTime::now(),
     })
     .expect("the child's exit is queued");
 

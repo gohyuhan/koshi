@@ -47,12 +47,21 @@ pub fn log_event(event: &Event) {
         }
         Event::PaneProcessExited(payload) => {
             // `exit_code` is `None` for a signal-terminated child; the line
-            // then carries no `exit_code` field.
-            tracing::info!(
-                pane_id = %payload.pane_id,
-                exit_code = payload.exit_code,
-                "pane process exited"
-            );
+            // then carries no `exit_code` field. An exit code of `0` logs at
+            // info; every other code, and a signal, logs at warn.
+            if payload.exit_code == Some(0) {
+                tracing::info!(
+                    pane_id = %payload.pane_id,
+                    exit_code = payload.exit_code,
+                    "pane process exited"
+                );
+            } else {
+                tracing::warn!(
+                    pane_id = %payload.pane_id,
+                    exit_code = payload.exit_code,
+                    "pane process exited"
+                );
+            }
         }
         Event::PaneRemoved(payload) => {
             tracing::info!(pane_id = %payload.pane_id, tab_id = %payload.tab_id, "pane removed");

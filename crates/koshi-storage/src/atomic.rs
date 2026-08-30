@@ -40,9 +40,11 @@ mod tests;
 /// Writes `data` to `dst`, replacing any existing file atomically.
 ///
 /// Joins a relative `dst` to the current directory once, at entry. An empty
-/// `dst` is [`StorageError::Io`] carrying `resolve cwd for : cannot make an
-/// empty path absolute`, and nothing is staged. Stages `data` in a private
-/// temp beside `dst`. On Unix the temp takes `dst`'s mode
+/// `dst` is [`StorageError::Io`] carrying `empty destination path`, and
+/// nothing is staged. A `dst` that names no file
+/// once anchored — a filesystem root such as `/` — is [`StorageError::Io`]
+/// carrying `no parent directory for /`, and nothing is staged. Stages `data`
+/// in a private temp beside `dst`. On Unix the temp takes `dst`'s mode
 /// when `dst` is an existing regular file; a new file keeps the private `0600`
 /// default. Fsyncs the temp, renames it over `dst`, then fsyncs the directory
 /// on Unix. If any step up to and including the rename fails, removes the temp
@@ -67,9 +69,7 @@ pub fn write_atomic(dst: &Path, data: &[u8]) -> Result<(), StorageError> {
     // rename below use this path; a change of the working directory mid-call
     // moves neither of them.
     if dst.as_os_str().is_empty() {
-        return Err(io_err(
-            "resolve cwd for : cannot make an empty path absolute".to_string(),
-        ));
+        return Err(io_err("empty destination path".to_string()));
     }
     let anchored;
     let dst = if dst.is_absolute() {
@@ -80,7 +80,9 @@ pub fn write_atomic(dst: &Path, data: &[u8]) -> Result<(), StorageError> {
             .join(dst);
         anchored.as_path()
     };
-    let dir = parent_dir(dst);
+    let Some(dir) = dst.parent() else {
+        return Err(io_err(format!("no parent directory for {}", dst.display())));
+    };
     // Read `dst`'s mode before the rename replaces `dst`.
     let target_mode = target_permissions(dst)?;
 
@@ -91,17 +93,19 @@ pub fn write_atomic(dst: &Path, data: &[u8]) -> Result<(), StorageError> {
         .map_err(|e| io_err(format!("create temp in {}: {e}", dir.display())))?;
     tmp.write_all(data)
         .map_err(|e| io_err(format!("write temp for {}: {e}", dst.display())))?;
-    // The mode is set before the fsync; the fsynced inode carries it. The
-    // renamed file is never readable by anyone that mode excludes.
+    // The mode goes on the open temp, before the fsync; the fsynced inode
+    // carries it. The renamed file is never readable by anyone that mode
+    // excludes.
     if let Some(perms) = target_mode {
-        fs::set_permissions(tmp.path(), perms)
+        tmp.as_file()
+            .set_permissions(perms)
             .map_err(|e| io_err(format!("set perms for {}: {e}", dst.display())))?;
     }
     tmp.as_file()
         .sync_all()
         .map_err(|e| io_err(format!("fsync temp for {}: {e}", dst.display())))?;
     persist_over(tmp, dst)?;
-    fsync_parent_dir(dst)?;
+    fsync_parent_dir(dir, dst)?;
     Ok(())
 }
 
@@ -181,26 +185,22 @@ fn target_permissions(_dst: &Path) -> Result<Option<fs::Permissions>, StorageErr
     Ok(None)
 }
 
-/// Fsyncs `dst`'s directory. Returns [`StorageError::Io`] when the directory
-/// cannot be opened or fsynced. Unix only.
+/// Fsyncs `dir`, which holds `dst`. Names `dst` in its errors. Returns
+/// [`StorageError::Io`] when the directory cannot be opened or fsynced. Unix
+/// only.
 #[cfg(unix)]
-fn fsync_parent_dir(dst: &Path) -> Result<(), StorageError> {
-    let dir = fs::File::open(parent_dir(dst))
-        .map_err(|e| io_err(format!("open dir for {}: {e}", dst.display())))?;
-    dir.sync_all()
+fn fsync_parent_dir(dir: &Path, dst: &Path) -> Result<(), StorageError> {
+    let handle =
+        fs::File::open(dir).map_err(|e| io_err(format!("open dir for {}: {e}", dst.display())))?;
+    handle
+        .sync_all()
         .map_err(|e| io_err(format!("fsync dir for {}: {e}", dst.display())))
 }
 
 /// Returns `Ok(())` and touches nothing on every platform but Unix.
 #[cfg(not(unix))]
-fn fsync_parent_dir(_dst: &Path) -> Result<(), StorageError> {
+fn fsync_parent_dir(_dir: &Path, _dst: &Path) -> Result<(), StorageError> {
     Ok(())
-}
-
-/// `dst`'s parent directory, where the temp is staged. A `dst` with no parent
-/// (a filesystem root) gives `.`; the rename over such a `dst` fails.
-fn parent_dir(dst: &Path) -> &Path {
-    dst.parent().unwrap_or(Path::new("."))
 }
 
 /// Builds a [`StorageError::Io`] from a detail string.

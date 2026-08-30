@@ -24,3 +24,6 @@ impl DomainError for TerminalError {
         Severity::Recoverable
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -27,9 +27,6 @@ pub enum PtyError {
     Signal { detail: String },
 }
 
-/// Result of a [`PtyBackend`](crate::backend::state::PtyBackend) operation.
-pub type Result<T> = std::result::Result<T, PtyError>;
-
 impl DomainError for PtyError {
     fn category(&self) -> DomainCategory {
         DomainCategory::Pty
@@ -39,3 +36,6 @@ impl DomainError for PtyError {
         Severity::Recoverable
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -31,6 +31,29 @@ fn warns_once() -> u32 {
     1
 }
 
+/// A site the cross-thread case calls. It runs on a spawned thread and touches
+/// the gate only by reading it.
+#[beta_feature(otherwise = 0)]
+fn on_another_thread() -> u32 {
+    1
+}
+
+/// Two sites that share the identifier `attach` and differ only in their
+/// module.
+mod session {
+    #[koshi_beta::beta_feature(otherwise = 0)]
+    pub fn attach() -> u32 {
+        1
+    }
+}
+
+mod router {
+    #[koshi_beta::beta_feature(otherwise = 0)]
+    pub fn attach() -> u32 {
+        1
+    }
+}
+
 /// Returns the captured log lines whose `function` field is `function`.
 fn warnings_for<'a>(lines: &'a [String], function: &str) -> Vec<&'a String> {
     let field = format!(r#""function":"{function}""#);
@@ -64,8 +87,12 @@ fn a_gated_body_runs_only_when_beta_features_are_allowed() {
     for _ in 0..3 {
         assert_eq!(warns_once(), 0);
     }
+    // Two blocked sites named `attach` in different modules.
+    assert_eq!(session::attach(), 0);
+    assert_eq!(router::attach(), 0);
+
     let lines = logs.lines();
-    let warnings = warnings_for(&lines, "warns_once");
+    let warnings = warnings_for(&lines, "gate::warns_once");
     assert_eq!(
         warnings.len(),
         1,
@@ -80,15 +107,44 @@ fn a_gated_body_runs_only_when_beta_features_are_allowed() {
     );
     assert!(
         warnings[0].contains(
-            r#""message":"`warns_once` is a beta feature and did nothing; add a top-level `allow-beta-features #true` line to koshi.kdl to run it""#
+            r#""message":"`gate::warns_once` is a beta feature and did nothing; add a top-level `allow-beta-features #true` line to koshi.kdl to run it""#
         ),
         "{warnings:?}"
     );
 
+    // The name is the module path plus the identifier, so two sites named
+    // `attach` in different modules get one warning each under their own name.
+    // No record carries the bare identifier.
+    assert_eq!(
+        warnings_for(&lines, "gate::session::attach").len(),
+        1,
+        "{lines:?}"
+    );
+    assert_eq!(
+        warnings_for(&lines, "gate::router::attach").len(),
+        1,
+        "{lines:?}"
+    );
+    assert_eq!(warnings_for(&lines, "attach").len(), 0, "{lines:?}");
+
     // The limit is per site. `double` and `count_runs` were each blocked twice
     // with an allowed call in between; each warned once. Allowed calls log
-    // nothing: the three warnings are the whole log.
-    assert_eq!(warnings_for(&lines, "double").len(), 1, "{lines:?}");
-    assert_eq!(warnings_for(&lines, "count_runs").len(), 1, "{lines:?}");
-    assert_eq!(lines.len(), 3, "{lines:?}");
+    // nothing: the five warnings are the whole log.
+    assert_eq!(warnings_for(&lines, "gate::double").len(), 1, "{lines:?}");
+    assert_eq!(
+        warnings_for(&lines, "gate::count_runs").len(),
+        1,
+        "{lines:?}"
+    );
+    assert_eq!(lines.len(), 5, "{lines:?}");
+
+    // The flag is process-wide. A gated site called on a spawned thread, which
+    // never sets the flag itself, answers what this thread stored last.
+    koshi_beta::set_allowed(true);
+    let on_a_spawned_thread = std::thread::spawn(on_another_thread).join().unwrap();
+    assert_eq!(on_a_spawned_thread, 1);
+
+    koshi_beta::set_allowed(false);
+    let on_a_spawned_thread = std::thread::spawn(on_another_thread).join().unwrap();
+    assert_eq!(on_a_spawned_thread, 0);
 }

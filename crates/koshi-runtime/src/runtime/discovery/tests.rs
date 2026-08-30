@@ -19,7 +19,6 @@ use koshi_session::session::state::{Session, Tab};
 use koshi_test_support::fake_pty::FakePtyBackend;
 use uuid::Uuid;
 
-use crate::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
 use crate::runtime::event::RuntimeEvent;
 use crate::server::Server;
 
@@ -29,16 +28,8 @@ const VIEWPORT: Size = Size { cols: 80, rows: 24 };
 /// so the inbox stays open.
 fn new_runtime() -> (Server, mpsc::Sender<RuntimeEvent>) {
     let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::new());
-    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
-    let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (tx, inbox_rx) = mpsc::channel();
-    let runtime = Server::new(
-        pty_backend,
-        snapshot_provider,
-        storage,
-        inbox_rx,
-        tx.clone(),
-    );
+    let runtime = Server::new(pty_backend, inbox_rx, tx.clone());
     (runtime, tx)
 }
 

@@ -1,12 +1,12 @@
 //! Unit tests for per-pane terminal state.
 
 use super::*;
-use crate::grid::state::{Cell, Grid, RowEnd};
+use crate::grid::state::{Cell, Grid, RowEnd, RowMeta};
 use crate::style::{Color, Style};
 
 /// Overwrite the cell at (`row`, `col`) of the active grid with `ch` of the
-/// given display `width`, in the default style. Plants wide glyphs (base
-/// `width == 2` + a `width == 0` continuation) for the `clip_row` tests.
+/// given display `width`, in the default style. Plants wide glyphs as a base
+/// `width == 2` cell followed by a `width == 0` continuation.
 fn put(state: &mut TerminalState, row: u16, col: u16, ch: char, width: u8) {
     *state.active_grid_mut().cell_mut(row, col).unwrap() = Cell::new(ch, width, Style::default());
 }
@@ -286,96 +286,6 @@ fn resize_alternate_screen_crops_without_touching_scrollback() {
 }
 
 #[test]
-fn clip_row_passes_a_narrow_row_through_untouched() {
-    let mut state = TerminalState::new(PtySize { cols: 5, rows: 1 });
-    for col in 0..5 {
-        put(&mut state, 0, col, 'a', 1);
-    }
-    let clipped = state.clip_row(0, 5);
-    assert!(!clipped.right_pad());
-    assert_eq!(clipped.cells(), line("aaaaa").as_slice());
-}
-
-#[test]
-fn clip_row_pads_when_a_wide_base_is_the_last_visible_column() {
-    // Row: a a 世 <cont> a — the wide base sits at col 2, its continuation at
-    // col 3. Clipping to 3 columns ends between the halves.
-    let mut state = TerminalState::new(PtySize { cols: 5, rows: 1 });
-    put(&mut state, 0, 0, 'a', 1);
-    put(&mut state, 0, 1, 'a', 1);
-    put(&mut state, 0, 2, '世', 2);
-    put(&mut state, 0, 3, ' ', 0);
-    put(&mut state, 0, 4, 'a', 1);
-
-    let clipped = state.clip_row(0, 3);
-    assert!(clipped.right_pad());
-    // The wide base is dropped; only the two narrow cells before it remain.
-    assert_eq!(clipped.cells(), line("aa").as_slice());
-}
-
-#[test]
-fn clip_row_keeps_a_whole_wide_glyph_when_both_halves_fit() {
-    // Same row, but clipping to 4 columns keeps the wide glyph's continuation.
-    let mut state = TerminalState::new(PtySize { cols: 5, rows: 1 });
-    put(&mut state, 0, 0, 'a', 1);
-    put(&mut state, 0, 1, 'a', 1);
-    put(&mut state, 0, 2, '世', 2);
-    put(&mut state, 0, 3, ' ', 0);
-    put(&mut state, 0, 4, 'a', 1);
-
-    let clipped = state.clip_row(0, 4);
-    assert!(!clipped.right_pad());
-    assert_eq!(
-        clipped.cells(),
-        &[
-            Cell::new('a', 1, Style::default()),
-            Cell::new('a', 1, Style::default()),
-            Cell::new('世', 2, Style::default()),
-            Cell::new(' ', 0, Style::default()),
-        ]
-    );
-}
-
-#[test]
-fn clip_row_with_zero_inner_width_returns_no_cells() {
-    let state = TerminalState::new(PtySize { cols: 5, rows: 1 });
-    let clipped = state.clip_row(0, 0);
-    assert!(!clipped.right_pad());
-    assert!(clipped.cells().is_empty());
-}
-
-#[test]
-fn clip_row_clamps_an_inner_width_past_the_row_length() {
-    let mut state = TerminalState::new(PtySize { cols: 4, rows: 1 });
-    for col in 0..4 {
-        put(&mut state, 0, col, 'a', 1);
-    }
-    let clipped = state.clip_row(0, 10);
-    assert!(!clipped.right_pad());
-    assert_eq!(clipped.cells(), line("aaaa").as_slice());
-}
-
-#[test]
-fn clip_row_on_an_out_of_range_row_returns_no_cells() {
-    let state = TerminalState::new(PtySize { cols: 4, rows: 2 });
-    let clipped = state.clip_row(5, 4);
-    assert!(!clipped.right_pad());
-    assert!(clipped.cells().is_empty());
-}
-
-#[test]
-fn clip_row_in_a_single_column_pane_pads_a_wide_glyph() {
-    // A 1-column pane cannot hold a wide glyph's two halves; `print` stores the
-    // base (width 2) in that lone column. Clipping must still pad, never show
-    // the half.
-    let mut state = TerminalState::new(PtySize { cols: 1, rows: 1 });
-    put(&mut state, 0, 0, '世', 2);
-    let clipped = state.clip_row(0, 1);
-    assert!(clipped.right_pad());
-    assert!(clipped.cells().is_empty());
-}
-
-#[test]
 fn new_starts_with_an_empty_scrollback() {
     let state = TerminalState::new(PtySize { cols: 5, rows: 3 });
     assert!(state.scrollback().is_empty());
@@ -411,9 +321,9 @@ fn state_with_history() -> TerminalState {
         *state.active_grid_mut().cell_mut(1, col as u16).unwrap() =
             Cell::new(ch, 1, Style::default());
     }
-    state.scrollback.push_row(&line("h0."), RowEnd::Hard);
-    state.scrollback.push_row(&line("h1."), RowEnd::Hard);
-    state.scrollback.push_row(&line("h2."), RowEnd::Hard);
+    state.scrollback.push_row(&line("h0."), RowMeta::default());
+    state.scrollback.push_row(&line("h1."), RowMeta::default());
+    state.scrollback.push_row(&line("h2."), RowMeta::default());
     state
 }
 
@@ -440,7 +350,7 @@ fn scrolled_view_composes_history_above_the_live_screen() {
 #[test]
 fn scrolled_view_keeps_a_history_row_prompt_mark() {
     let mut state = state_with_history();
-    state.scrollback.push_row_with_meta(
+    state.scrollback.push_row(
         &line("prompt"),
         RowMeta {
             end: RowEnd::Hard,
@@ -509,7 +419,7 @@ fn scrolled_view_pads_history_rows_with_the_blanks_that_were_trimmed() {
     // line as it was, not as the running program currently paints.
     let mut state = TerminalState::new(PtySize { cols: 3, rows: 2 });
     state.primary_render.style.set_bg(Color::Indexed(4));
-    state.scrollback.push_row(&line("ab"), RowEnd::Hard);
+    state.scrollback.push_row(&line("ab"), RowMeta::default());
 
     let (grid, _) = state.scrolled_view(1);
     let padded = grid.cell(0, 2).unwrap();
@@ -527,7 +437,7 @@ fn scrolled_view_keeps_a_history_rows_own_background() {
     red.set_bg(Color::Indexed(1));
     state
         .scrollback
-        .push_row(&vec![Cell::blank_with(red); 3], RowEnd::Hard);
+        .push_row(&vec![Cell::blank_with(red); 3], RowMeta::default());
 
     let (grid, _) = state.scrolled_view(1);
     for col in 0..3 {

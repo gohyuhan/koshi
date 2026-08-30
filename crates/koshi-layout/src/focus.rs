@@ -13,7 +13,7 @@
 use koshi_core::geometry::{Rect, SplitDirection};
 use koshi_core::ids::PaneId;
 
-use crate::solver::{cell_area, StackHeader};
+use crate::solver::{cell_area, shows_content, StackHeader};
 use crate::tree::SplitNode;
 
 /// Focus targets after a removal, for the caller to rank against its own
@@ -48,9 +48,7 @@ pub fn focus_candidates(
     let visible: Vec<(PaneId, Rect)> = surviving_panes
         .iter()
         .copied()
-        .filter(|&(id, rect)| {
-            !rect.is_empty() && !stack_headers.iter().any(|header| header.pane == id)
-        })
+        .filter(|&(id, rect)| shows_content(id, rect, stack_headers))
         .collect();
 
     let spatial_neighbor = visible
@@ -112,21 +110,6 @@ pub struct StackFocusChange {
     pub deactivated: Option<PaneId>,
 }
 
-/// Expand the next stack member, wrapping at the end.
-///
-/// Returns `None` when nothing can change: the node is not a stack, or no
-/// other member can take focus. The stack is unchanged in that case.
-pub fn stack_focus_next(stack: &mut SplitNode) -> Option<StackFocusChange> {
-    stack_focus_step(stack, 1)
-}
-
-/// Expand the previous stack member, wrapping at the start.
-///
-/// Returns `None` when nothing can change, leaving the stack unchanged.
-pub fn stack_focus_prev(stack: &mut SplitNode) -> Option<StackFocusChange> {
-    stack_focus_step(stack, -1)
-}
-
 /// Expand the stack member holding `pane`. A collapsed member is a valid
 /// target. The member may be a subtree; [`StackFocusChange::newly_active`]
 /// is then its first leaf, which can differ from `pane`.
@@ -141,55 +124,24 @@ pub fn stack_activate(stack: &mut SplitNode, pane: PaneId) -> Option<StackFocusC
     let target = stack
         .children
         .iter()
-        .position(|child| child.node.contains_pane(pane))?;
+        .position(|child| child.contains_pane(pane))?;
     if target == stack.active_index() {
         return None;
     }
     Some(set_active(stack, target))
 }
 
-/// The pane to focus when a client enters this stack from outside: the
-/// first leaf of the member in the active slot. `None` when the stack has
-/// no members or that member holds no pane.
-#[must_use]
-pub fn stack_entry_target(stack: &SplitNode) -> Option<PaneId> {
-    let child = stack.children.get(stack.active_index())?;
-    child.node.first_leaf()
-}
-
-/// Walk `step` (`1` forward, `-1` backward, wrapping) through the members to
-/// the first one that holds a pane, and expand it. `None` when `stack` is
-/// not a stack, has fewer than two members, or no other member holds a pane.
-fn stack_focus_step(stack: &mut SplitNode, step: i64) -> Option<StackFocusChange> {
-    if stack.direction != SplitDirection::Stacked || stack.children.len() < 2 {
-        return None;
-    }
-    let count = stack.children.len() as i64;
-    let active = stack.active_index() as i64;
-    for offset in 1..count {
-        let candidate = (active + step * offset).rem_euclid(count) as usize;
-        if stack.children[candidate].node.first_leaf().is_some() {
-            return Some(set_active(stack, candidate));
-        }
-    }
-    None
-}
-
-/// Set the stack's active member to `target` and mark every other member
-/// collapsed. `deactivated` is the first leaf of the member that was in the
+/// Set the stack's active member to `target`, which collapses every other
+/// member. `deactivated` is the first leaf of the member that was in the
 /// active slot. Panics when the member at `target` holds no pane.
 fn set_active(stack: &mut SplitNode, target: usize) -> StackFocusChange {
     let deactivated = stack
         .children
         .get(stack.active_index())
-        .and_then(|child| child.node.first_leaf());
+        .and_then(|child| child.first_leaf());
     stack.active = target;
-    for (index, child) in stack.children.iter_mut().enumerate() {
-        child.collapsed = index != target;
-    }
     StackFocusChange {
         newly_active: stack.children[target]
-            .node
             .first_leaf()
             .expect("callers only activate members that hold a pane"),
         deactivated,

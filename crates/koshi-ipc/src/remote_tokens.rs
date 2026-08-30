@@ -30,9 +30,9 @@ use subtle::ConstantTimeEq;
 
 use koshi_core::ids::SessionId;
 
-use crate::error::IpcError;
+use crate::error::{IpcError, RemoteFile};
 use crate::protocol::ConnectionToken;
-use crate::remote_state::write_owner_only;
+use crate::remote_state::{format_mismatch, unreadable, write_private};
 
 /// The format number this build writes into every store, and the only one it
 /// reads back.
@@ -202,26 +202,21 @@ impl TokenStore {
     /// A path with no file is an empty store: this machine has granted
     /// nothing yet. A file that cannot be read, whose bytes are not a
     /// readable store, or whose format number is not
-    /// [`TOKEN_STORE_FORMAT`] is [`IpcError::TokenStoreUnreadable`].
+    /// [`TOKEN_STORE_FORMAT`] is [`IpcError::RemoteFileUnreadable`] naming
+    /// [`RemoteFile::TokenStore`].
     pub fn read(path: &Path) -> Result<TokenStore, IpcError> {
-        let unreadable = |detail: String| IpcError::TokenStoreUnreadable {
-            path: path.display().to_string(),
-            detail,
-        };
+        let refused = |detail: String| unreadable(RemoteFile::TokenStore, path, detail);
         let data = match std::fs::read(path) {
             Ok(data) => data,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(TokenStore::new())
             }
-            Err(error) => return Err(unreadable(error.to_string())),
+            Err(error) => return Err(refused(error.to_string())),
         };
         let store: TokenStore =
-            serde_json::from_slice(&data).map_err(|error| unreadable(error.to_string()))?;
-        if store.format != TOKEN_STORE_FORMAT {
-            return Err(unreadable(format!(
-                "format {} is not the {TOKEN_STORE_FORMAT} this build reads",
-                store.format
-            )));
+            serde_json::from_slice(&data).map_err(|error| refused(error.to_string()))?;
+        if let Some(detail) = format_mismatch(store.format, TOKEN_STORE_FORMAT) {
+            return Err(refused(detail));
         }
         Ok(store)
     }
@@ -234,12 +229,10 @@ impl TokenStore {
     /// Windows the file takes the data directory's owner-scoped ACLs. The
     /// directory itself gets mode `0700` on Unix.
     ///
-    /// Any failure along the way is [`IpcError::TokenStoreWrite`].
+    /// Any failure along the way is [`IpcError::RemoteFileWrite`] naming
+    /// [`RemoteFile::TokenStore`].
     pub fn write(&self, path: &Path) -> Result<(), IpcError> {
-        write_owner_only(path, self).map_err(|detail| IpcError::TokenStoreWrite {
-            path: path.display().to_string(),
-            detail,
-        })
+        write_private(RemoteFile::TokenStore, path, self)
     }
 
     /// Hand `identity` a fresh secret on `scope` and keep its hash.

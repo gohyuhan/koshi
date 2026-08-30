@@ -41,7 +41,7 @@ use koshi_renderer::snapshot::{
     PluginUiSnapshot, RenderSnapshot, ScrollbackMeta, SelectionSpans, SessionSnapshot, TabMeta,
     TabSnapshot,
 };
-use koshi_session::session::state::{Session, Tab};
+use koshi_session::session::state::Tab;
 use koshi_terminal::grid::state::Grid;
 use koshi_terminal::scrollback::Scrollback;
 use koshi_terminal::selection::order;
@@ -277,42 +277,6 @@ impl Server {
                 retained_lines: scrollback.len(),
             },
         }
-    }
-
-    /// The session that owns `client_id`, or `None` if no attached client has
-    /// that id. Shared with command dispatch's `acting_session`, which resolves
-    /// the same key-binding/mouse client to its session.
-    pub(crate) fn session_for_client(&self, client_id: ClientId) -> Option<&Session> {
-        self.sessions()
-            .values()
-            .find(|session| session.clients.get(client_id).is_some())
-    }
-
-    /// Mutable twin of [`session_for_client`](Self::session_for_client): the same
-    /// client→session lookup, for callers that edit the client's view state (e.g.
-    /// the scroll handlers).
-    pub(crate) fn session_for_client_mut(&mut self, client_id: ClientId) -> Option<&mut Session> {
-        self.sessions
-            .values_mut()
-            .find(|session| session.clients.get(client_id).is_some())
-    }
-
-    /// The session that owns `pane_id`, or `None` if no session's registry holds
-    /// that pane. The single pane→session lookup, shared by pane-target
-    /// resolution and child-exit routing.
-    pub(crate) fn session_for_pane(&self, pane_id: PaneId) -> Option<&Session> {
-        self.sessions()
-            .values()
-            .find(|session| session.panes.get(pane_id).is_some())
-    }
-
-    /// Mutable twin of [`session_for_pane`](Self::session_for_pane), for callers
-    /// that edit the owning session's state — the scroll re-anchor and the
-    /// selection handlers.
-    pub(crate) fn session_for_pane_mut(&mut self, pane_id: PaneId) -> Option<&mut Session> {
-        self.sessions
-            .values_mut()
-            .find(|session| session.panes.get(pane_id).is_some())
     }
 }
 

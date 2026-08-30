@@ -58,7 +58,7 @@ fn lifecycle_events_roundtrip() {
     }));
     roundtrip(&Event::InputModeChanged(InputModeChanged {
         client_id: ClientId::new(),
-        mode: InputMode::Locked,
+        mode: LockMode::Locked,
     }));
     roundtrip(&Event::MouseSelectChanged(MouseSelectChanged {
         client_id: ClientId::new(),
@@ -505,7 +505,7 @@ pub(crate) fn event_cases() -> [(Event, &'static str, EventClass); 38] {
         (
             Event::InputModeChanged(InputModeChanged {
                 client_id: ClientId::new(),
-                mode: InputMode::Normal,
+                mode: LockMode::Normal,
             }),
             "InputModeChanged",
             EventClass::Critical,

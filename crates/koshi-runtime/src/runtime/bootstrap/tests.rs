@@ -10,7 +10,7 @@ use std::time::SystemTime;
 
 use koshi_config::layer::{PartialKoshiConfig, PartialLayoutDefaults};
 use koshi_config::profile::parse_profile;
-use koshi_core::event::{Event, InputMode, InputModeChanged};
+use koshi_core::event::{Event, InputModeChanged};
 use koshi_core::geometry::{Direction, Size, SplitDirection};
 use koshi_core::ids::{ClientId, SessionId};
 use koshi_core::lock::LockMode;
@@ -22,7 +22,6 @@ use koshi_session::client::ClientOrigin;
 use koshi_session::session::lifecycle::SessionLifecycle;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
-use crate::placeholder::{NullSnapshotProvider, NullStorage};
 use crate::runtime::spawn_env::koshi_env;
 
 use super::{ProfileLaunchError, Server};
@@ -31,13 +30,7 @@ use super::{ProfileLaunchError, Server};
 fn runtime() -> (Server, Arc<FakePtyBackend>) {
     let fake = Arc::new(FakePtyBackend::new());
     let (tx, rx) = mpsc::channel();
-    let runtime = Server::new(
-        fake.clone(),
-        Arc::new(NullSnapshotProvider),
-        Arc::new(NullStorage),
-        rx,
-        tx,
-    );
+    let runtime = Server::new(fake.clone(), rx, tx);
     (runtime, fake)
 }
 
@@ -591,7 +584,7 @@ fn the_lock_marker_reaches_only_the_first_client_to_attach() {
         mode_changes(&events),
         vec![InputModeChanged {
             client_id: first,
-            mode: InputMode::Locked,
+            mode: LockMode::Locked,
         }]
     );
 

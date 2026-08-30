@@ -39,7 +39,6 @@ fn a_new_buffer_is_empty_with_no_drops() {
 
 #[test]
 fn line_bytes_sums_base_and_combining_as_utf8_lengths() {
-    let sb = bounded(10, 1000);
     // 'a' (1 byte) + '世' (3 bytes) + 'e' carrying a combining acute (1 + 2).
     let mut accented = Cell::new('e', 1, Style::default());
     accented.push_combining('\u{0301}'); // U+0301, two UTF-8 bytes
@@ -48,12 +47,11 @@ fn line_bytes_sums_base_and_combining_as_utf8_lengths() {
         Cell::new('世', 2, Style::default()),
         accented,
     ];
-    assert_eq!(sb.line_bytes(&row), 1 + 3 + (1 + 2));
+    assert_eq!(line_bytes(&row), 1 + 3 + (1 + 2));
 }
 
 #[test]
 fn line_bytes_skips_wide_glyph_continuation_placeholders() {
-    let sb = bounded(10, 1000);
     // A wide glyph occupies two cells: a width-2 base carrying '世' (3 bytes)
     // and a width-0 continuation placeholder (a blank space). Only the base
     // carries text; the placeholder adds nothing.
@@ -61,15 +59,15 @@ fn line_bytes_skips_wide_glyph_continuation_placeholders() {
         Cell::new('世', 2, Style::default()),
         Cell::new(' ', 0, Style::default()),
     ];
-    assert_eq!(sb.line_bytes(&row), 3); // the space placeholder is skipped
+    assert_eq!(line_bytes(&row), 3); // the space placeholder is skipped
 }
 
 #[test]
 fn pushing_within_both_caps_retains_every_row_in_order() {
     let mut sb = bounded(10, 1000);
-    sb.push_row(&line("one"), RowEnd::Hard);
-    sb.push_row(&line("two"), RowEnd::Hard);
-    sb.push_row(&line("three"), RowEnd::Hard);
+    sb.push_row(&line("one"), RowMeta::default());
+    sb.push_row(&line("two"), RowMeta::default());
+    sb.push_row(&line("three"), RowMeta::default());
     assert_eq!(sb.len(), 3);
     assert_eq!(retained(&sb), vec!["one", "two", "three"]);
     assert_eq!(sb.dropped_lines(), 0);
@@ -80,10 +78,10 @@ fn pushing_within_both_caps_retains_every_row_in_order() {
 #[test]
 fn exceeding_the_line_cap_drops_oldest_first() {
     let mut sb = bounded(3, 100_000);
-    sb.push_row(&line("L0"), RowEnd::Hard); // dropped by the fourth push
-    sb.push_row(&line("L1"), RowEnd::Hard);
-    sb.push_row(&line("L2"), RowEnd::Hard);
-    sb.push_row(&line("L3"), RowEnd::Hard);
+    sb.push_row(&line("L0"), RowMeta::default()); // dropped by the fourth push
+    sb.push_row(&line("L1"), RowMeta::default());
+    sb.push_row(&line("L2"), RowMeta::default());
+    sb.push_row(&line("L3"), RowMeta::default());
     assert_eq!(sb.len(), 3);
     assert_eq!(retained(&sb), vec!["L1", "L2", "L3"]);
     assert_eq!(sb.dropped_lines(), 1);
@@ -96,9 +94,9 @@ fn exceeding_the_byte_cap_drops_oldest_until_within_budget() {
     // Four-byte rows, a ten-byte cap: a third row pushes the total to 12 and
     // forces exactly one drop back to 8.
     let mut sb = bounded(100_000, 10);
-    sb.push_row(&line("aaaa"), RowEnd::Hard);
-    sb.push_row(&line("bbbb"), RowEnd::Hard);
-    sb.push_row(&line("cccc"), RowEnd::Hard);
+    sb.push_row(&line("aaaa"), RowMeta::default());
+    sb.push_row(&line("bbbb"), RowMeta::default());
+    sb.push_row(&line("cccc"), RowMeta::default());
     assert_eq!(sb.len(), 2);
     assert_eq!(retained(&sb), vec!["bbbb", "cccc"]);
     assert_eq!(sb.dropped_lines(), 1);
@@ -111,7 +109,7 @@ fn a_lone_row_larger_than_the_byte_cap_is_kept_not_dropped() {
     // The `len > 1` guard means the byte cap never empties the buffer: a single
     // oversized row is retained even though it busts the budget.
     let mut sb = bounded(100_000, 2);
-    sb.push_row(&line("oversized"), RowEnd::Hard);
+    sb.push_row(&line("oversized"), RowMeta::default());
     assert_eq!(sb.len(), 1);
     assert_eq!(sb.dropped_lines(), 0);
     assert_eq!(sb.byte_total, 9);
@@ -122,8 +120,8 @@ fn a_later_push_drops_the_retained_oversized_row() {
     // With a second row present the guard no longer applies: the oversized
     // row is dropped and the total falls back under the cap.
     let mut sb = bounded(100_000, 2);
-    sb.push_row(&line("oversized"), RowEnd::Hard); // 9 bytes, kept by the guard
-    sb.push_row(&line("x"), RowEnd::Hard); // 1 byte: total 10, len 2 -> drop the front
+    sb.push_row(&line("oversized"), RowMeta::default()); // 9 bytes, kept by the guard
+    sb.push_row(&line("x"), RowMeta::default()); // 1 byte: total 10, len 2 -> drop the front
     assert_eq!(sb.len(), 1);
     assert_eq!(retained(&sb), vec!["x"]);
     assert_eq!(sb.dropped_lines(), 1);
@@ -135,7 +133,7 @@ fn a_later_push_drops_the_retained_oversized_row() {
 fn the_line_cap_can_drop_to_empty_unlike_the_byte_cap() {
     // The line cap has no `len > 1` guard: a zero cap retains nothing.
     let mut sb = bounded(0, 100_000);
-    sb.push_row(&line("gone"), RowEnd::Hard);
+    sb.push_row(&line("gone"), RowMeta::default());
     assert!(sb.is_empty());
     assert_eq!(sb.dropped_lines(), 1);
     assert_eq!(sb.dropped_bytes(), 4);
@@ -146,18 +144,18 @@ fn the_line_cap_can_drop_to_empty_unlike_the_byte_cap() {
 fn byte_total_stays_equal_to_the_sum_of_retained_rows() {
     let mut sb = bounded(3, 100_000);
     for s in ["alpha", "beta", "gamma", "delta", "epsilon"] {
-        sb.push_row(&line(s), RowEnd::Hard);
+        sb.push_row(&line(s), RowMeta::default());
     }
-    let expected: usize = sb.lines().iter().map(|(row, _)| sb.line_bytes(row)).sum();
+    let expected: usize = sb.lines().iter().map(|(row, _)| line_bytes(row)).sum();
     assert_eq!(sb.byte_total, expected);
 }
 
 #[test]
 fn dropped_tallies_accumulate_across_many_drops() {
     let mut sb = bounded(1, 100_000); // every push past the first drops one row
-    sb.push_row(&line("aa"), RowEnd::Hard); // 2 bytes
-    sb.push_row(&line("bbb"), RowEnd::Hard); // 3 bytes, drops "aa"
-    sb.push_row(&line("c"), RowEnd::Hard); // 1 byte, drops "bbb"
+    sb.push_row(&line("aa"), RowMeta::default()); // 2 bytes
+    sb.push_row(&line("bbb"), RowMeta::default()); // 3 bytes, drops "aa"
+    sb.push_row(&line("c"), RowMeta::default()); // 1 byte, drops "bbb"
     assert_eq!(sb.len(), 1);
     assert_eq!(retained(&sb), vec!["c"]);
     assert_eq!(sb.dropped_lines(), 2);
@@ -167,8 +165,8 @@ fn dropped_tallies_accumulate_across_many_drops() {
 #[test]
 fn clear_empties_the_buffer_but_keeps_the_drop_tallies() {
     let mut sb = bounded(1, 100_000); // line cap of 1 forces a drop
-    sb.push_row(&line("aa"), RowEnd::Hard);
-    sb.push_row(&line("bbb"), RowEnd::Hard); // drops "aa": dropped_lines 1, dropped_bytes 2
+    sb.push_row(&line("aa"), RowMeta::default());
+    sb.push_row(&line("bbb"), RowMeta::default()); // drops "aa": dropped_lines 1, dropped_bytes 2
     assert_eq!(sb.dropped_lines(), 1);
 
     sb.clear();
@@ -183,15 +181,15 @@ fn clear_empties_the_buffer_but_keeps_the_drop_tallies() {
 #[test]
 fn total_pushed_counts_every_push_and_survives_a_clear() {
     let mut sb = bounded(2, 1000); // line cap 2: a push that drops still counts
-    sb.push_row(&line("a"), RowEnd::Hard);
-    sb.push_row(&line("b"), RowEnd::Hard);
-    sb.push_row(&line("c"), RowEnd::Hard); // drops "a"; the push itself still counts
+    sb.push_row(&line("a"), RowMeta::default());
+    sb.push_row(&line("b"), RowMeta::default());
+    sb.push_row(&line("c"), RowMeta::default()); // drops "a"; the push itself still counts
     assert_eq!(sb.total_pushed(), 3);
 
     sb.clear();
     assert_eq!(sb.total_pushed(), 3); // an erase never rewinds the counter
 
-    sb.push_row(&line("d"), RowEnd::Hard);
+    sb.push_row(&line("d"), RowMeta::default());
     assert_eq!(sb.total_pushed(), 4);
 }
 
@@ -206,7 +204,7 @@ fn padded(text: &str, width: usize) -> Vec<Cell> {
 #[test]
 fn a_hard_row_drops_the_blanks_padding_it_out_to_the_screen_width() {
     let mut sb = bounded(10, 1_000_000);
-    sb.push_row(&padded("README.md", 200), RowEnd::Hard);
+    sb.push_row(&padded("README.md", 200), RowMeta::default());
 
     let (stored, _) = &sb.lines()[0];
     assert_eq!(stored.len(), 9);
@@ -219,7 +217,7 @@ fn a_trimmed_row_releases_the_memory_and_does_not_just_hide_it() {
     // it. `Vec` promises a capacity of at least the length, never an exact
     // figure: the check is a bound, not an equality.
     let mut sb = bounded(10, 1_000_000);
-    sb.push_row(&padded("hi", 200), RowEnd::Hard);
+    sb.push_row(&padded("hi", 200), RowMeta::default());
 
     let (stored, _) = &sb.lines()[0];
     assert_eq!(stored.len(), 2);
@@ -234,7 +232,13 @@ fn a_trimmed_row_releases_the_memory_and_does_not_just_hide_it() {
 fn a_soft_wrapped_row_keeps_every_cell() {
     // Every cell of a soft-wrapped row is content, trailing blanks included.
     let mut sb = bounded(10, 1_000_000);
-    sb.push_row(&padded("ab", 6), RowEnd::Soft);
+    sb.push_row(
+        &padded("ab", 6),
+        RowMeta {
+            end: RowEnd::Soft,
+            prompt: false,
+        },
+    );
 
     let (stored, _) = &sb.lines()[0];
     assert_eq!(stored.len(), 6);
@@ -244,7 +248,13 @@ fn a_soft_wrapped_row_keeps_every_cell() {
 fn a_wide_glyph_wrap_row_keeps_its_spacer() {
     // The final blank stands in for the wide glyph that starts the next row.
     let mut sb = bounded(10, 1_000_000);
-    sb.push_row(&padded("ab", 6), RowEnd::SoftWide);
+    sb.push_row(
+        &padded("ab", 6),
+        RowMeta {
+            end: RowEnd::SoftWide,
+            prompt: false,
+        },
+    );
 
     let (stored, _) = &sb.lines()[0];
     assert_eq!(stored.len(), 6);
@@ -261,7 +271,7 @@ fn a_background_colored_blank_is_content_and_survives() {
     row.resize(200, Cell::blank());
 
     let mut sb = bounded(10, 1_000_000);
-    sb.push_row(&row, RowEnd::Hard);
+    sb.push_row(&row, RowMeta::default());
 
     let (stored, _) = &sb.lines()[0];
     assert_eq!(stored.len(), 3);
@@ -279,7 +289,7 @@ fn a_wide_glyphs_continuation_cell_is_content_and_survives() {
     row.resize(200, Cell::blank());
 
     let mut sb = bounded(10, 1_000_000);
-    sb.push_row(&row, RowEnd::Hard);
+    sb.push_row(&row, RowMeta::default());
 
     let (stored, _) = &sb.lines()[0];
     assert_eq!(stored.len(), 2);
@@ -289,7 +299,7 @@ fn a_wide_glyphs_continuation_cell_is_content_and_survives() {
 #[test]
 fn a_row_of_nothing_but_padding_stores_no_cells() {
     let mut sb = bounded(10, 1_000_000);
-    sb.push_row(&padded("", 200), RowEnd::Hard);
+    sb.push_row(&padded("", 200), RowMeta::default());
 
     let (stored, _) = &sb.lines()[0];
     assert!(stored.is_empty());
@@ -301,8 +311,14 @@ fn a_reflow_rebuild_trims_the_same_way_a_push_does() {
     // A replacement trims a hard row the same way a push does.
     let mut sb = bounded(10, 1_000_000);
     sb.replace_lines(vec![
-        (padded("one", 200), RowEnd::Hard),
-        (padded("ab", 200), RowEnd::Soft),
+        (padded("one", 200), RowMeta::default()),
+        (
+            padded("ab", 200),
+            RowMeta {
+                end: RowEnd::Soft,
+                prompt: false,
+            },
+        ),
     ]);
 
     let (hard, _) = &sb.lines()[0];
@@ -317,7 +333,7 @@ fn a_reflow_rebuild_releases_the_memory_the_padding_held() {
     // `Vec` never promises a capacity equal to the length: the check is a
     // bound, not an equality.
     let mut sb = bounded(10, 1_000_000);
-    sb.replace_lines(vec![(padded("hi", 200), RowEnd::Hard)]);
+    sb.replace_lines(vec![(padded("hi", 200), RowMeta::default())]);
 
     let (stored, _) = &sb.lines()[0];
     assert_eq!(stored.len(), 2);
@@ -334,7 +350,7 @@ fn trimming_lets_the_byte_cap_hold_the_text_it_was_set_for() {
     // and ten of them fit a cap of 20.
     let mut sb = bounded(1000, 20);
     for _ in 0..10 {
-        sb.push_row(&padded("hi", 200), RowEnd::Hard);
+        sb.push_row(&padded("hi", 200), RowMeta::default());
     }
     assert_eq!(sb.len(), 10);
     assert_eq!(sb.byte_total, 20);
@@ -344,7 +360,7 @@ fn trimming_lets_the_byte_cap_hold_the_text_it_was_set_for() {
 #[test]
 fn prompt_marks_stay_with_rows_through_history_replacement() {
     let mut sb = bounded(10, 1_000_000);
-    sb.replace_lines_with_meta(vec![
+    sb.replace_lines(vec![
         (
             line("prompt"),
             RowMeta {
@@ -368,14 +384,14 @@ fn prompt_marks_stay_with_rows_through_history_replacement() {
 #[test]
 fn prompt_marks_are_evicted_with_their_rows() {
     let mut sb = bounded(1, 1_000_000);
-    sb.push_row_with_meta(
+    sb.push_row(
         &line("prompt"),
         RowMeta {
             end: RowEnd::Hard,
             prompt: true,
         },
     );
-    sb.push_row_with_meta(
+    sb.push_row(
         &line("output"),
         RowMeta {
             end: RowEnd::Hard,
@@ -390,7 +406,7 @@ fn prompt_marks_are_evicted_with_their_rows() {
 #[test]
 fn current_scrollback_rows_round_trip_with_prompt_metadata() {
     let mut sb = bounded(10, 1_000_000);
-    sb.push_row_with_meta(
+    sb.push_row(
         &line("prompt"),
         RowMeta {
             end: RowEnd::Hard,
@@ -408,7 +424,7 @@ fn current_scrollback_rows_round_trip_with_prompt_metadata() {
 #[test]
 fn legacy_scrollback_rows_deserialize_as_unmarked() {
     let mut sb = bounded(10, 1_000_000);
-    sb.push_row_with_meta(
+    sb.push_row(
         &line("prompt"),
         RowMeta {
             end: RowEnd::Soft,
@@ -457,14 +473,13 @@ fn new_copies_both_caps_from_the_limit() {
 
 #[test]
 fn line_bytes_of_an_empty_row_is_zero() {
-    let sb = bounded(10, 1000);
-    assert_eq!(sb.line_bytes(&[]), 0);
+    assert_eq!(line_bytes(&[]), 0);
 }
 
 #[test]
 fn pushing_an_empty_row_counts_a_line_of_zero_bytes() {
     let mut sb = bounded(10, 1000);
-    sb.push_row(&[], RowEnd::Hard);
+    sb.push_row(&[], RowMeta::default());
     assert_eq!(sb.len(), 1);
     assert_eq!(sb.byte_total, 0);
     assert_eq!(sb.total_pushed(), 1);
@@ -474,13 +489,13 @@ fn pushing_an_empty_row_counts_a_line_of_zero_bytes() {
 #[test]
 fn a_byte_total_exactly_at_the_cap_keeps_every_row() {
     let mut sb = bounded(100, 8);
-    sb.push_row(&line("aaaa"), RowEnd::Hard);
-    sb.push_row(&line("bbbb"), RowEnd::Hard); // total 8: at the cap, not past it
+    sb.push_row(&line("aaaa"), RowMeta::default());
+    sb.push_row(&line("bbbb"), RowMeta::default()); // total 8: at the cap, not past it
     assert_eq!(sb.len(), 2);
     assert_eq!(sb.byte_total, 8);
     assert_eq!(sb.dropped_lines(), 0);
 
-    sb.push_row(&line("c"), RowEnd::Hard); // total 9: one past, drops "aaaa"
+    sb.push_row(&line("c"), RowMeta::default()); // total 9: one past, drops "aaaa"
     assert_eq!(retained(&sb), vec!["bbbb", "c"]);
     assert_eq!(sb.byte_total, 5);
     assert_eq!(sb.dropped_lines(), 1);
@@ -490,8 +505,8 @@ fn a_byte_total_exactly_at_the_cap_keeps_every_row() {
 #[test]
 fn a_row_count_exactly_at_the_line_cap_keeps_every_row() {
     let mut sb = bounded(2, 1000);
-    sb.push_row(&line("a"), RowEnd::Hard);
-    sb.push_row(&line("b"), RowEnd::Hard);
+    sb.push_row(&line("a"), RowMeta::default());
+    sb.push_row(&line("b"), RowMeta::default());
     assert_eq!(sb.len(), 2);
     assert_eq!(sb.dropped_lines(), 0);
 }
@@ -499,9 +514,9 @@ fn a_row_count_exactly_at_the_line_cap_keeps_every_row() {
 #[test]
 fn one_push_can_drop_for_the_line_cap_and_then_the_byte_cap() {
     let mut sb = bounded(2, 2);
-    sb.push_row(&line("a"), RowEnd::Hard);
-    sb.push_row(&line("b"), RowEnd::Hard); // len 2, bytes 2: both caps hold
-    sb.push_row(&line("cc"), RowEnd::Hard); // len 3 drops "a"; bytes 3 then drops "b"
+    sb.push_row(&line("a"), RowMeta::default());
+    sb.push_row(&line("b"), RowMeta::default()); // len 2, bytes 2: both caps hold
+    sb.push_row(&line("cc"), RowMeta::default()); // len 3 drops "a"; bytes 3 then drops "b"
     assert_eq!(retained(&sb), vec!["cc"]);
     assert_eq!(sb.byte_total, 2);
     assert_eq!(sb.dropped_lines(), 2);
@@ -511,15 +526,21 @@ fn one_push_can_drop_for_the_line_cap_and_then_the_byte_cap() {
 #[test]
 fn a_soft_row_charges_its_padding_against_the_byte_cap() {
     let mut sb = bounded(10, 1_000_000);
-    sb.push_row(&padded("ab", 6), RowEnd::Soft);
+    sb.push_row(
+        &padded("ab", 6),
+        RowMeta {
+            end: RowEnd::Soft,
+            prompt: false,
+        },
+    );
     assert_eq!(sb.byte_total, 6);
 }
 
 #[test]
 fn dropped_bytes_count_the_stored_row_not_the_screen_row() {
     let mut sb = bounded(1, 1_000_000);
-    sb.push_row(&padded("hi", 200), RowEnd::Hard);
-    sb.push_row(&line("x"), RowEnd::Hard); // drops the trimmed "hi"
+    sb.push_row(&padded("hi", 200), RowMeta::default());
+    sb.push_row(&line("x"), RowMeta::default()); // drops the trimmed "hi"
     assert_eq!(sb.dropped_lines(), 1);
     assert_eq!(sb.dropped_bytes(), 2);
 }
@@ -528,9 +549,9 @@ fn dropped_bytes_count_the_stored_row_not_the_screen_row() {
 fn replacing_with_fewer_rows_leaves_total_pushed_unchanged() {
     let mut sb = bounded(10, 1_000_000);
     for s in ["one", "two", "three"] {
-        sb.push_row(&line(s), RowEnd::Hard);
+        sb.push_row(&line(s), RowMeta::default());
     }
-    sb.replace_lines(vec![(line("only"), RowEnd::Hard)]);
+    sb.replace_lines(vec![(line("only"), RowMeta::default())]);
     assert_eq!(retained(&sb), vec!["only"]);
     assert_eq!(sb.byte_total, 4);
     assert_eq!(sb.total_pushed(), 3);
@@ -540,11 +561,11 @@ fn replacing_with_fewer_rows_leaves_total_pushed_unchanged() {
 #[test]
 fn replacing_with_more_rows_grows_total_pushed_by_the_difference() {
     let mut sb = bounded(10, 1_000_000);
-    sb.push_row(&line("one"), RowEnd::Hard);
+    sb.push_row(&line("one"), RowMeta::default());
     sb.replace_lines(vec![
-        (line("a"), RowEnd::Hard),
-        (line("b"), RowEnd::Hard),
-        (line("c"), RowEnd::Hard),
+        (line("a"), RowMeta::default()),
+        (line("b"), RowMeta::default()),
+        (line("c"), RowMeta::default()),
     ]);
     assert_eq!(retained(&sb), vec!["a", "b", "c"]);
     assert_eq!(sb.byte_total, 3);
@@ -555,10 +576,10 @@ fn replacing_with_more_rows_grows_total_pushed_by_the_difference() {
 fn replacing_past_the_line_cap_evicts_the_oldest_and_tallies_them() {
     let mut sb = bounded(2, 1_000_000);
     sb.replace_lines(vec![
-        (line("aa"), RowEnd::Hard),
-        (line("bbb"), RowEnd::Hard),
-        (line("c"), RowEnd::Hard),
-        (line("dd"), RowEnd::Hard),
+        (line("aa"), RowMeta::default()),
+        (line("bbb"), RowMeta::default()),
+        (line("c"), RowMeta::default()),
+        (line("dd"), RowMeta::default()),
     ]);
     assert_eq!(retained(&sb), vec!["c", "dd"]);
     assert_eq!(sb.byte_total, 3);
@@ -572,9 +593,9 @@ fn replacing_past_the_line_cap_evicts_the_oldest_and_tallies_them() {
 fn replacing_past_the_byte_cap_keeps_the_newest_rows_within_budget() {
     let mut sb = bounded(100, 4);
     sb.replace_lines(vec![
-        (line("aaa"), RowEnd::Hard),
-        (line("bb"), RowEnd::Hard),
-        (line("cc"), RowEnd::Hard),
+        (line("aaa"), RowMeta::default()),
+        (line("bb"), RowMeta::default()),
+        (line("cc"), RowMeta::default()),
     ]);
     assert_eq!(retained(&sb), vec!["bb", "cc"]);
     assert_eq!(sb.byte_total, 4);
@@ -585,8 +606,8 @@ fn replacing_past_the_byte_cap_keeps_the_newest_rows_within_budget() {
 #[test]
 fn replacing_with_nothing_empties_the_buffer_and_keeps_the_counters() {
     let mut sb = bounded(1, 1_000_000);
-    sb.push_row(&line("aa"), RowEnd::Hard);
-    sb.push_row(&line("bb"), RowEnd::Hard); // drops "aa"
+    sb.push_row(&line("aa"), RowMeta::default());
+    sb.push_row(&line("bb"), RowMeta::default()); // drops "aa"
     sb.replace_lines(Vec::new());
     assert!(sb.is_empty());
     assert_eq!(sb.byte_total, 0);
@@ -598,7 +619,13 @@ fn replacing_with_nothing_empties_the_buffer_and_keeps_the_counters() {
 #[test]
 fn a_wide_glyph_wrap_row_keeps_its_spacer_through_replace_lines() {
     let mut sb = bounded(10, 1_000_000);
-    sb.replace_lines(vec![(padded("ab", 6), RowEnd::SoftWide)]);
+    sb.replace_lines(vec![(
+        padded("ab", 6),
+        RowMeta {
+            end: RowEnd::SoftWide,
+            prompt: false,
+        },
+    )]);
 
     let (stored, meta) = &sb.lines()[0];
     assert_eq!(stored.len(), 6);
@@ -608,9 +635,9 @@ fn a_wide_glyph_wrap_row_keeps_its_spacer_through_replace_lines() {
 #[test]
 fn a_push_after_clear_starts_the_byte_total_from_zero() {
     let mut sb = bounded(10, 1000);
-    sb.push_row(&line("abc"), RowEnd::Hard);
+    sb.push_row(&line("abc"), RowMeta::default());
     sb.clear();
-    sb.push_row(&line("de"), RowEnd::Hard);
+    sb.push_row(&line("de"), RowMeta::default());
     assert_eq!(retained(&sb), vec!["de"]);
     assert_eq!(sb.byte_total, 2);
     assert_eq!(sb.total_pushed(), 2);
@@ -627,9 +654,15 @@ fn clear_on_an_empty_buffer_changes_nothing() {
 fn a_buffer_with_drops_round_trips_through_serde_field_for_field() {
     let mut sb = bounded(2, 1000);
     for s in ["aa", "bbb", "c"] {
-        sb.push_row(&line(s), RowEnd::Soft);
+        sb.push_row(
+            &line(s),
+            RowMeta {
+                end: RowEnd::Soft,
+                prompt: false,
+            },
+        );
     }
-    sb.push_row_with_meta(
+    sb.push_row(
         &line("prompt"),
         RowMeta {
             end: RowEnd::Hard,
@@ -662,15 +695,54 @@ fn a_stored_byte_total_that_does_not_match_the_rows_is_recomputed() {
     // The byte total is derived from the rows on the way in, so a stored total
     // below their real size cannot underflow the first eviction.
     let mut scrollback = bounded(1, 1_000_000);
-    scrollback.push_row(&line("abc"), RowEnd::Hard);
+    scrollback.push_row(&line("abc"), RowMeta::default());
     let mut value = serde_json::to_value(&scrollback).expect("scrollback serializes");
     value["byte_total"] = serde_json::json!(0);
 
     let mut restored: Scrollback = serde_json::from_value(value).expect("scrollback deserializes");
     assert_eq!(restored.byte_total, 3);
 
-    restored.push_row(&line("d"), RowEnd::Hard);
+    restored.push_row(&line("d"), RowMeta::default());
 
     assert_eq!(restored.byte_total, 1);
     assert_eq!(retained(&restored), vec!["d"]);
+}
+
+#[test]
+fn stored_rows_over_the_line_cap_are_dropped_on_the_way_in() {
+    // A buffer serialized at a 4-line cap, re-read with the cap edited down to
+    // 2: the two oldest rows are dropped at load and tallied, and the load is
+    // already within the cap.
+    let mut scrollback = bounded(4, 1_000_000);
+    for text in ["a", "bb", "ccc", "dddd"] {
+        scrollback.push_row(&line(text), RowMeta::default());
+    }
+    let mut value = serde_json::to_value(&scrollback).expect("scrollback serializes");
+    value["max_lines"] = serde_json::json!(2);
+
+    let restored: Scrollback = serde_json::from_value(value).expect("scrollback deserializes");
+
+    assert_eq!(retained(&restored), vec!["ccc", "dddd"]);
+    assert_eq!(restored.len(), 2);
+    assert_eq!(restored.byte_total, 7);
+    assert_eq!(restored.dropped_lines(), 2);
+    assert_eq!(restored.dropped_bytes(), 3);
+    assert_eq!(restored.total_pushed(), 4);
+}
+
+#[test]
+fn stored_rows_over_the_byte_cap_are_dropped_on_the_way_in() {
+    let mut scrollback = bounded(100, 1_000_000);
+    for text in ["aaaa", "bbbb", "cc"] {
+        scrollback.push_row(&line(text), RowMeta::default());
+    }
+    let mut value = serde_json::to_value(&scrollback).expect("scrollback serializes");
+    value["max_bytes"] = serde_json::json!(6);
+
+    let restored: Scrollback = serde_json::from_value(value).expect("scrollback deserializes");
+
+    assert_eq!(retained(&restored), vec!["bbbb", "cc"]);
+    assert_eq!(restored.byte_total, 6);
+    assert_eq!(restored.dropped_lines(), 1);
+    assert_eq!(restored.dropped_bytes(), 4);
 }

@@ -11,8 +11,8 @@ use koshi_core::ids::PaneId;
 use thiserror::Error;
 
 use crate::size::SizeWeight;
-use crate::solver::{cell_area, solve_with_min, PaneSizing};
-use crate::tree::{split_axis, LayoutChild, LayoutNode, SplitNode};
+use crate::solver::{cell_area, shows_content, solve_with_min, PaneSizing};
+use crate::tree::{split_axis, LayoutNode, SplitNode};
 
 /// A rejected split or stack edit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -71,8 +71,8 @@ pub fn split_leaf(
     let slot = result.node_at_mut(&path[..operand_depth]);
     let operand = std::mem::replace(slot, LayoutNode::Pane(new_pane));
 
-    let old = LayoutChild::new(operand);
-    let new = LayoutChild::new(LayoutNode::Pane(new_pane));
+    let old = operand;
+    let new = LayoutNode::Pane(new_pane);
     let children = match direction {
         Direction::Right | Direction::Down => vec![old, new],
         Direction::Left | Direction::Up => vec![new, old],
@@ -107,14 +107,9 @@ pub fn add_to_stack(
 
     let mut result = tree.clone();
     if let Some(stack) = result.stack_containing_mut(anchor) {
-        stack
-            .children
-            .push(LayoutChild::new(LayoutNode::Pane(new_pane)));
+        stack.children.push(LayoutNode::Pane(new_pane));
         stack.weights.push(SizeWeight::default());
         stack.active = stack.children.len() - 1;
-        for (index, child) in stack.children.iter_mut().enumerate() {
-            child.collapsed = index != stack.active;
-        }
     } else {
         let path = result.path_to(anchor).expect("presence checked above");
         let slot = result.node_at_mut(&path);
@@ -215,11 +210,8 @@ pub fn remove_pane(
     let mut absorbers: Vec<(PaneId, u64)> = after
         .panes
         .iter()
-        .filter(|&&(id, _)| !after.stack_headers.iter().any(|header| header.pane == id))
+        .filter(|&&(id, rect)| shows_content(id, rect, &after.stack_headers))
         .filter_map(|&(id, rect)| {
-            if rect.is_empty() {
-                return None;
-            }
             let overlap = rect.intersection(old_rect).map_or(0, cell_area);
             let resized = before
                 .panes
@@ -264,7 +256,7 @@ fn remove_leaf(node: &mut LayoutNode, pane: PaneId) -> Removal {
     };
 
     for index in 0..split.children.len() {
-        match remove_leaf(&mut split.children[index].node, pane) {
+        match remove_leaf(&mut split.children[index], pane) {
             Removal::NotHere => continue,
             Removal::Done => return Removal::Done,
             Removal::NodeEmptied => {
@@ -287,18 +279,12 @@ fn remove_leaf(node: &mut LayoutNode, pane: PaneId) -> Removal {
 
 /// Keep `active` pointing at the same child after the child at
 /// `removed_index` is gone, clamped into bounds: removing the active child
-/// activates the one that slid into its place. In a stack, exactly the
-/// active child is left expanded.
+/// activates the one that slid into its place.
 fn reseat_active(split: &mut SplitNode, removed_index: usize) {
     if removed_index < split.active {
         split.active -= 1;
     }
     split.active = split.active_index();
-    if split.direction == SplitDirection::Stacked {
-        for (index, child) in split.children.iter_mut().enumerate() {
-            child.collapsed = index != split.active;
-        }
-    }
 }
 
 #[cfg(test)]

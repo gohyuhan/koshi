@@ -6,9 +6,9 @@ use serde_json::json;
 
 use super::*;
 
-/// Helper to create a layout child wrapping a single pane.
-fn leaf(pane: PaneId) -> LayoutChild {
-    LayoutChild::new(LayoutNode::Pane(pane))
+/// Wraps a pane id in a leaf node.
+fn leaf(pane: PaneId) -> LayoutNode {
+    LayoutNode::Pane(pane)
 }
 
 /// One pane beside a vertical pair:
@@ -27,7 +27,7 @@ fn nested_tree(a: PaneId, b: PaneId, c: PaneId) -> LayoutNode {
     ));
     LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![leaf(a), LayoutChild::new(right)],
+        vec![leaf(a), right],
     ))
 }
 
@@ -37,7 +37,7 @@ fn stack_beside_a_pane(outside: PaneId, a: PaneId, b: PaneId) -> LayoutNode {
     let stack = LayoutNode::Split(SplitNode::stack(vec![a, b], 0));
     LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![leaf(outside), LayoutChild::new(stack)],
+        vec![leaf(outside), stack],
     ))
 }
 
@@ -47,14 +47,8 @@ fn nested_stacks(a: PaneId, b: PaneId, c: PaneId) -> SplitNode {
     SplitNode {
         direction: SplitDirection::Stacked,
         children: vec![
-            LayoutChild {
-                node: LayoutNode::Pane(a),
-                collapsed: true,
-            },
-            LayoutChild {
-                node: LayoutNode::Split(SplitNode::stack(vec![b, c], 0)),
-                collapsed: false,
-            },
+            LayoutNode::Pane(a),
+            LayoutNode::Split(SplitNode::stack(vec![b, c], 0)),
         ],
         weights: vec![SizeWeight::default(); 2],
         active: 1,
@@ -144,7 +138,7 @@ fn first_leaf_skips_an_empty_split_before_a_pane() {
     ));
     let tree = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![LayoutChild::new(empty), leaf(pane)],
+        vec![empty, leaf(pane)],
     ));
     assert_eq!(tree.first_leaf(), Some(pane));
 }
@@ -273,7 +267,9 @@ fn stack_expands_exactly_the_active_child() {
 
     assert_eq!(stack.direction, SplitDirection::Stacked);
     assert_eq!(stack.active, 1);
-    let collapsed: Vec<bool> = stack.children.iter().map(|c| c.collapsed).collect();
+    let collapsed: Vec<bool> = (0..stack.children.len())
+        .map(|index| stack.is_collapsed(index))
+        .collect();
     assert_eq!(collapsed, [true, false, true]);
     assert_eq!(stack.weights, [SizeWeight::default(); 3]);
 }
@@ -329,17 +325,42 @@ fn with_equal_weights_of_no_children_has_no_weights() {
 }
 
 #[test]
-fn with_equal_weights_keeps_the_collapsed_flags_it_is_given() {
+fn with_equal_weights_activates_the_first_child_and_collapses_the_rest() {
     let (a, b) = (PaneId::new(), PaneId::new());
-    let collapsed = LayoutChild {
-        node: LayoutNode::Pane(a),
-        collapsed: true,
-    };
-    let split = SplitNode::with_equal_weights(SplitDirection::Stacked, vec![collapsed, leaf(b)]);
-    let flags: Vec<bool> = split.children.iter().map(|c| c.collapsed).collect();
-    assert_eq!(flags, [true, false]);
+    let split = SplitNode::with_equal_weights(SplitDirection::Stacked, vec![leaf(a), leaf(b)]);
+    let flags: Vec<bool> = (0..split.children.len())
+        .map(|index| split.is_collapsed(index))
+        .collect();
+    assert_eq!(flags, [false, true]);
     assert_eq!(split.weights, [SizeWeight::default(); 2]);
     assert_eq!(split.active, 0);
+}
+
+#[test]
+fn a_directional_split_collapses_no_child() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let split = SplitNode::with_equal_weights(SplitDirection::Horizontal, vec![leaf(a), leaf(b)]);
+    assert!(!split.is_collapsed(0));
+    assert!(!split.is_collapsed(1));
+}
+
+#[test]
+fn an_out_of_range_active_index_collapses_every_child_but_the_last() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let mut stack = SplitNode::stack(vec![a, b], 0);
+    stack.active = 9;
+    assert!(stack.is_collapsed(0));
+    assert!(!stack.is_collapsed(1));
+}
+
+#[test]
+fn a_child_index_past_the_last_child_is_not_collapsed() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let stack = SplitNode::stack(vec![a, b], 0);
+    assert!(!stack.is_collapsed(2));
+
+    let empty = SplitNode::stack(Vec::new(), 0);
+    assert!(!empty.is_collapsed(0));
 }
 
 #[test]
@@ -364,7 +385,7 @@ fn mixed_tree_roundtrips_through_serde() {
     let stack = LayoutNode::Split(SplitNode::stack(vec![b, c], 0));
     let tree = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![leaf(a), LayoutChild::new(stack)],
+        vec![leaf(a), stack],
     ));
 
     let json = serde_json::to_string(&tree).expect("serialize");
@@ -398,14 +419,8 @@ fn a_stack_serializes_field_by_field() {
             "Split": {
                 "direction": "Stacked",
                 "children": [
-                    {
-                        "node": { "Pane": "00000000-0000-0000-0000-000000000001" },
-                        "collapsed": true
-                    },
-                    {
-                        "node": { "Pane": "00000000-0000-0000-0000-000000000002" },
-                        "collapsed": false
-                    }
+                    { "Pane": "00000000-0000-0000-0000-000000000001" },
+                    { "Pane": "00000000-0000-0000-0000-000000000002" }
                 ],
                 "weights": [default_weight.clone(), default_weight],
                 "active": 1
@@ -425,6 +440,98 @@ fn a_deserialized_active_index_past_the_last_child_is_kept_and_clamped_on_read()
     let split: SplitNode = serde_json::from_value(json!({
         "direction": "Stacked",
         "children": [
+            { "Pane": "00000000-0000-0000-0000-000000000001" },
+            { "Pane": "00000000-0000-0000-0000-000000000002" }
+        ],
+        "weights": [default_weight.clone(), default_weight],
+        "active": 9
+    }))
+    .expect("deserialize");
+    assert_eq!(split.active, 9);
+    assert_eq!(split.active_index(), 1);
+}
+
+#[test]
+fn a_stored_child_wrapped_in_a_node_record_reads_as_the_node_itself() {
+    let default_weight = json!({
+        "primary": { "Flex": 1 },
+        "min": null,
+        "preferred": null,
+        "resize_delta": 0
+    });
+    let wrapped: SplitNode = serde_json::from_value(json!({
+        "direction": "Horizontal",
+        "children": [
+            { "node": { "Pane": "00000000-0000-0000-0000-000000000001" } },
+            { "node": { "Split": {
+                "direction": "Vertical",
+                "children": [{ "node": { "Pane": "00000000-0000-0000-0000-000000000002" } }],
+                "weights": [default_weight.clone()],
+                "active": 0
+            } } }
+        ],
+        "weights": [default_weight.clone(), default_weight.clone()],
+        "active": 0
+    }))
+    .expect("deserialize");
+    let bare: SplitNode = serde_json::from_value(json!({
+        "direction": "Horizontal",
+        "children": [
+            { "Pane": "00000000-0000-0000-0000-000000000001" },
+            { "Split": {
+                "direction": "Vertical",
+                "children": [{ "Pane": "00000000-0000-0000-0000-000000000002" }],
+                "weights": [default_weight.clone()],
+                "active": 0
+            } }
+        ],
+        "weights": [default_weight.clone(), default_weight],
+        "active": 0
+    }))
+    .expect("deserialize");
+    assert_eq!(wrapped, bare);
+    assert_eq!(
+        wrapped.children,
+        [
+            LayoutNode::Pane(fixed_pane("00000000-0000-0000-0000-000000000001")),
+            LayoutNode::Split(SplitNode::with_equal_weights(
+                SplitDirection::Vertical,
+                vec![LayoutNode::Pane(fixed_pane(
+                    "00000000-0000-0000-0000-000000000002"
+                ))],
+            )),
+        ]
+    );
+}
+
+#[test]
+fn a_stored_child_that_is_neither_a_node_nor_a_node_record_is_refused() {
+    let default_weight = json!({
+        "primary": { "Flex": 1 },
+        "min": null,
+        "preferred": null,
+        "resize_delta": 0
+    });
+    let refused = serde_json::from_value::<SplitNode>(json!({
+        "direction": "Horizontal",
+        "children": [{ "slot": { "Pane": "00000000-0000-0000-0000-000000000001" } }],
+        "weights": [default_weight],
+        "active": 0
+    }));
+    assert!(refused.is_err());
+}
+
+#[test]
+fn a_stored_child_carrying_a_collapsed_flag_still_reads_and_drops_it() {
+    let default_weight = json!({
+        "primary": { "Flex": 1 },
+        "min": null,
+        "preferred": null,
+        "resize_delta": 0
+    });
+    let split: SplitNode = serde_json::from_value(json!({
+        "direction": "Stacked",
+        "children": [
             {
                 "node": { "Pane": "00000000-0000-0000-0000-000000000001" },
                 "collapsed": false
@@ -435,11 +542,21 @@ fn a_deserialized_active_index_past_the_last_child_is_kept_and_clamped_on_read()
             }
         ],
         "weights": [default_weight.clone(), default_weight],
-        "active": 9
+        "active": 0
     }))
     .expect("deserialize");
-    assert_eq!(split.active, 9);
-    assert_eq!(split.active_index(), 1);
+    // `active` alone decides the collapse, so the stored flags are ignored:
+    // the stored file says child 0 is expanded and child 1 collapsed, and
+    // `active` 0 says the same.
+    assert!(!split.is_collapsed(0));
+    assert!(split.is_collapsed(1));
+    assert_eq!(
+        split.children,
+        [
+            LayoutNode::Pane(fixed_pane("00000000-0000-0000-0000-000000000001")),
+            LayoutNode::Pane(fixed_pane("00000000-0000-0000-0000-000000000002")),
+        ]
+    );
 }
 
 #[test]

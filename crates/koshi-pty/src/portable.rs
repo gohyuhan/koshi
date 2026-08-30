@@ -68,7 +68,7 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty};
 use std::sync::Condvar;
 
 use crate::{
-    backend::state::{PtyBackend, PtyHandle, PtySink},
+    backend::state::{CarriedPtyPane, PtyBackend, PtyHandle, PtySink, UNOBSERVED_EXIT},
     env::build_env,
     error::PtyError,
     kill::{PtyChildKillControl, StopRequest},
@@ -1515,7 +1515,7 @@ fn wait_for_child(pid: u32) -> ExitStatus {
             Ok(WaitStatus::Signaled(_, signal, _)) => return ExitStatus::Signaled(signal as i32),
             Ok(_) => {}
             Err(Errno::EINTR) => {}
-            Err(_) => return ExitStatus::ExitCode(-1),
+            Err(_) => return UNOBSERVED_EXIT,
         }
     }
 }
@@ -1531,7 +1531,7 @@ fn wait_for_child(pid: u32) -> ExitStatus {
 /// One descriptor carries both of those directions: a pane holds a single
 /// copy of the master, and its reader, writer and resize all use that one.
 /// With the reader's waker, a pane spends two descriptors in total.
-pub struct PaneEntry {
+struct PaneEntry {
     /// This pane's terminal. While it is held the kernel keeps the pair open,
     /// and [`resize`](PortablePtyBackend::resize) retunes the window size
     /// through it.
@@ -1628,31 +1628,9 @@ pub struct PaneEntry {
     exit_grace_cancel: Sender<()>,
 }
 
-/// One live pane, as a process about to replace its own image hands it on.
-///
-/// The descriptor and the process id are what the next image needs to take the
-/// pane back; the size is what that image must record as the window the child
-/// already has; the exit is how the child ended, when this process saw it end.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CarriedPtyPane {
-    /// The pane this record is for.
-    pub pane_id: PaneId,
-    /// The pane's own terminal descriptor. `None` for a terminal that exposes
-    /// none, which no image can carry.
-    #[cfg(unix)]
-    pub terminal_fd: Option<std::os::fd::RawFd>,
-    /// The child's process id, waited on again once the pane is taken back.
-    pub pid: u32,
-    /// The last size the pane's terminal was set to.
-    pub size: PtySize,
-    /// How the pane's child ended, if this process's watcher reaped it. `None`
-    /// while the child runs, and the next image waits on the process id itself.
-    pub exit: Option<ExitStatus>,
-}
-
 /// Real OS-PTY backend built on the `portable-pty` crate. Each spawned pane gets
 /// a kernel PTY plus three helper threads (reader, writer, watcher); the backend
-/// owns them all through the [`PaneEntry`] map.
+/// owns them all through one pane map, keyed by [`PaneId`].
 pub struct PortablePtyBackend {
     /// Every live pane's PTY, threads, and kill handle, keyed by [`PaneId`].
     /// Locked: [`spawn`](PtyBackend::spawn), [`resize`](PtyBackend::resize),
@@ -1877,8 +1855,10 @@ impl PortablePtyBackend {
     ///
     /// # Errors
     /// Returns [`PtyError::Io`] if this platform offers no one-descriptor wake
-    /// for the reader, which is what parks it. `terminal_fd` is closed on that
-    /// error.
+    /// for the reader, which is what parks it, and [`PtyError::Spawn`] —
+    /// `pane <id> is already open` — when this backend already drives
+    /// `pane_id`. `terminal_fd` is closed on either error, and a refused
+    /// take-back leaves the live pane and the child behind `pid` untouched.
     #[cfg(unix)]
     pub fn adopt(
         &self,
@@ -1904,13 +1884,16 @@ impl PortablePtyBackend {
         let exited = Arc::new(AtomicBool::new(false));
         let exit_seen = Arc::new(OnceLock::new());
 
-        // Every fallible step is past: nothing below returns early holding
-        // the pane map. The caller owns the id and must not reuse a live one.
+        // Take the pane map and hold it until this pane is in it. An id the
+        // backend already holds is refused here, with the map locked: the entry
+        // it would replace keeps its terminal and its I/O threads, and nothing
+        // below starts a thread for a pane that is already open.
         let mut panes = self.panes.lock().unwrap();
-        debug_assert!(
-            !panes.contains_key(&pane_id),
-            "adopt into an already-live pane id {pane_id}; kill it first"
-        );
+        if panes.contains_key(&pane_id) {
+            return Err(PtyError::Spawn {
+                detail: format!("pane {pane_id} is already open"),
+            });
+        }
 
         let reader_thread = start_owned_reader(
             delivery,
@@ -2269,7 +2252,7 @@ impl PtyBackend for PortablePtyBackend {
             let mut child = child; // owns it; wait() needs &mut
             let status = match child.wait() {
                 Ok(s) => map_status(s),
-                Err(_) => ExitStatus::ExitCode(-1),
+                Err(_) => UNOBSERVED_EXIT,
             };
             release.publish(status);
 

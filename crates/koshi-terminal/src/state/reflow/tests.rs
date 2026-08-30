@@ -798,7 +798,7 @@ fn resizing_to_the_same_size_changes_nothing() {
 #[test]
 fn a_trailing_soft_history_row_becomes_a_hard_line_on_regrow() {
     let mut state = TerminalState::new(PtySize { cols: 4, rows: 0 });
-    state.scrollback.push_row_with_meta(
+    state.scrollback.push_row(
         &cells("ab"),
         RowMeta {
             end: RowEnd::Soft,
@@ -819,7 +819,7 @@ fn a_trailing_soft_history_row_becomes_a_hard_line_on_regrow() {
 #[test]
 fn a_prompt_mark_on_an_empty_trailing_soft_row_survives_regrow() {
     let mut state = TerminalState::new(PtySize { cols: 4, rows: 0 });
-    state.scrollback.push_row_with_meta(
+    state.scrollback.push_row(
         &[],
         RowMeta {
             end: RowEnd::Soft,

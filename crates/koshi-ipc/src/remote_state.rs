@@ -16,7 +16,8 @@
 //! the owning user, and are replaced through
 //! [`koshi_storage::atomic::write_atomic`]. The token store and the
 //! saved-server store are written the same way, through the
-//! `write_owner_only` this module holds.
+//! `write_owner_only` this module holds, and each of the four files states a
+//! format number this build does not read through the same `format_mismatch`.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -72,15 +73,8 @@ impl CertFile {
     /// [`CERT_FILE_FORMAT`] are all [`IpcError::RemoteFileUnreadable`].
     pub fn read(path: &Path) -> Result<CertFile, IpcError> {
         let file: CertFile = read_private(RemoteFile::Certificate, path)?;
-        if file.format != CERT_FILE_FORMAT {
-            return Err(unreadable(
-                RemoteFile::Certificate,
-                path,
-                format!(
-                    "format {} is not the {CERT_FILE_FORMAT} this build reads",
-                    file.format
-                ),
-            ));
+        if let Some(detail) = format_mismatch(file.format, CERT_FILE_FORMAT) {
+            return Err(unreadable(RemoteFile::Certificate, path, detail));
         }
         Ok(file)
     }
@@ -123,15 +117,8 @@ impl EnabledFile {
     /// [`ENABLED_FILE_FORMAT`] are all [`IpcError::RemoteFileUnreadable`].
     pub fn read(path: &Path) -> Result<EnabledFile, IpcError> {
         let file: EnabledFile = read_private(RemoteFile::RemoteAccessMark, path)?;
-        if file.format != ENABLED_FILE_FORMAT {
-            return Err(unreadable(
-                RemoteFile::RemoteAccessMark,
-                path,
-                format!(
-                    "format {} is not the {ENABLED_FILE_FORMAT} this build reads",
-                    file.format
-                ),
-            ));
+        if let Some(detail) = format_mismatch(file.format, ENABLED_FILE_FORMAT) {
+            return Err(unreadable(RemoteFile::RemoteAccessMark, path, detail));
         }
         Ok(file)
     }
@@ -152,8 +139,17 @@ pub fn remote_enabled(data_dir: &Path) -> bool {
     EnabledFile::read(&EnabledFile::path(data_dir)).is_ok()
 }
 
+/// The reason `found` is not the format number this build reads, or `None`
+/// when it is that number.
+///
+/// Example — `found` 2 against `expected` 1 gives `Some("format 2 is not the
+/// 1 this build reads")`.
+pub(crate) fn format_mismatch(found: u32, expected: u32) -> Option<String> {
+    (found != expected).then(|| format!("format {found} is not the {expected} this build reads"))
+}
+
 /// A file under `remote/` that could not be used, named in plain words.
-fn unreadable(file: RemoteFile, path: &Path, detail: String) -> IpcError {
+pub(crate) fn unreadable(file: RemoteFile, path: &Path, detail: String) -> IpcError {
     IpcError::RemoteFileUnreadable {
         file,
         path: path.display().to_string(),
@@ -171,7 +167,11 @@ fn read_private<T: DeserializeOwned>(file: RemoteFile, path: &Path) -> Result<T,
 
 /// Encode `value` and write it at `path` as a file only the owning user
 /// reaches, naming the failure as [`IpcError::RemoteFileWrite`] on `file`.
-fn write_private<T: Serialize>(file: RemoteFile, path: &Path, value: &T) -> Result<(), IpcError> {
+pub(crate) fn write_private<T: Serialize>(
+    file: RemoteFile,
+    path: &Path,
+    value: &T,
+) -> Result<(), IpcError> {
     write_owner_only(path, value).map_err(|detail| IpcError::RemoteFileWrite {
         file,
         path: path.display().to_string(),

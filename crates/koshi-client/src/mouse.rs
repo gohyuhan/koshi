@@ -9,10 +9,12 @@
 //! pane's program had. That is everything a mouse event needs, so the viewer
 //! decides and the session only executes.
 //!
-//! Mouse-select mode is the one piece of session state read live rather than
-//! from the frame: [`Client::mouse_select`] follows the session's report of the
-//! toggle, so a press right after the key that flipped it routes the new way
-//! without waiting for a paint.
+//! Mouse-select mode is the one piece of session state read from the viewer's
+//! own copy rather than from the frame passed in: routing reads
+//! [`Client::mouse_select`]. An attached client moves that copy when it adopts
+//! a painted frame, so a press routes the way the last painted frame said. A
+//! viewer fed by a session subscription moves it from that subscription's
+//! events as well.
 //!
 //! Every answer comes back from [`Client::handle_mouse`] as a list of
 //! [`MouseAction`]: move a pane's view, hand the event to a pane's program,
@@ -579,8 +581,7 @@ impl Client {
     /// mouse-aware program — the way to copy text out of a full-screen `vim` or
     /// `htop`. Holding `Shift` on the press also begins a highlight, even when
     /// the viewer's mode is off. The mode is read from
-    /// [`Client::mouse_select`], the viewer's own copy, so a press right after
-    /// the key that toggled it already routes the new way.
+    /// [`Client::mouse_select`], the viewer's own copy, and not from `frame`.
     fn press_pane_content(
         &mut self,
         pane_id: PaneId,

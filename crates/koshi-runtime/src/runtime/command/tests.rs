@@ -31,7 +31,7 @@ use koshi_core::process::{ExitStatus, PtySize, ShellKind, SpawnSpec};
 use koshi_layout::edit::split_leaf;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::solver::PaneSizing;
-use koshi_layout::tree::{LayoutChild, SplitNode};
+use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pane::pane::lifecycle::{PaneLifecycle, PaneLifecycleEvent};
 use koshi_pane::pane::policy::PaneExitPolicy;
 use koshi_pane::pane::state::{PaneKind, PaneRecord};
@@ -43,7 +43,6 @@ use koshi_session::session::state::{Session, Tab};
 use koshi_session::session::tab_ops;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
-use crate::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
 use crate::runtime::bus::EventFilter;
 use crate::runtime::event::RuntimeEvent;
 use koshi_renderer::snapshot::Delivery;
@@ -68,16 +67,8 @@ fn new_pane_args() -> NewPaneArgs {
 /// the inbox stays open.
 fn new_runtime() -> (Server, mpsc::Sender<RuntimeEvent>) {
     let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::new());
-    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
-    let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (tx, inbox_rx) = mpsc::channel();
-    let runtime = Server::new(
-        pty_backend,
-        snapshot_provider,
-        storage,
-        inbox_rx,
-        tx.clone(),
-    );
+    let runtime = Server::new(pty_backend, inbox_rx, tx.clone());
     (runtime, tx)
 }
 
@@ -87,16 +78,8 @@ fn new_runtime() -> (Server, mpsc::Sender<RuntimeEvent>) {
 fn new_runtime_with_fake() -> (Server, Arc<FakePtyBackend>, mpsc::Sender<RuntimeEvent>) {
     let fake = Arc::new(FakePtyBackend::new());
     let pty_backend: Arc<dyn PtyBackend> = fake.clone();
-    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
-    let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (tx, inbox_rx) = mpsc::channel();
-    let runtime = Server::new(
-        pty_backend,
-        snapshot_provider,
-        storage,
-        inbox_rx,
-        tx.clone(),
-    );
+    let runtime = Server::new(pty_backend, inbox_rx, tx.clone());
     (runtime, fake, tx)
 }
 
@@ -999,7 +982,7 @@ fn write_to_a_plugin_pane_is_rejected_and_writes_nothing() {
     // Re-file `pane_a`'s record under `Plugin`, keeping its id and its place in
     // the layout.
     let session = rt.sessions.get_mut(&sid).expect("session");
-    let created_at = session.panes.get(pane_a).expect("pane record").created_at;
+    let created_at = session.panes.get(pane_a).expect("pane record").created_at();
     session.panes.remove(pane_a);
     session
         .panes
@@ -2405,6 +2388,37 @@ fn clearing_a_pane_with_no_highlight_is_accepted_and_changes_nothing() {
 }
 
 #[test]
+fn clearing_a_highlight_in_a_pane_the_session_lost_is_target_gone() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let pane = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane);
+    add_tab(&mut session, tab, pane);
+    add_client(&mut session, client_id, tab, Some(pane));
+    rt.sessions.insert(session.id, session);
+
+    // Setting and clearing a highlight answer one pane the same way: a pane the
+    // session does not hold is gone for both.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::Visual(VisualCommand::ClearSelection(ClearSelectionArgs {
+            pane: PaneId::new(),
+        })),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::TargetGone,
+            help: None,
+        }
+    );
+}
+
+#[test]
 fn a_host_paste_lands_whole_in_the_focused_pane() {
     // The OS paste key pressed in the outer terminal: the text arrives as one
     // block and is written whole — a pasted Tab lands in the shell instead of
@@ -2635,10 +2649,7 @@ fn focus_pane_moves_focus_records_mru_and_emits_one_event() {
         .expect("tab")
         .update_layout(LayoutNode::Split(SplitNode::with_equal_weights(
             SplitDirection::Horizontal,
-            vec![
-                LayoutChild::new(LayoutNode::Pane(a)),
-                LayoutChild::new(LayoutNode::Pane(b)),
-            ],
+            vec![LayoutNode::Pane(a), LayoutNode::Pane(b)],
         )));
     add_client(&mut session, client_id, tab_id, Some(a));
     let sid = session.id;
@@ -2691,10 +2702,7 @@ fn focus_suppressed_pane_is_rejected_and_mutates_nothing() {
         .expect("tab")
         .update_layout(LayoutNode::Split(SplitNode::with_equal_weights(
             SplitDirection::Vertical,
-            vec![
-                LayoutChild::new(LayoutNode::Pane(a)),
-                LayoutChild::new(LayoutNode::Pane(b)),
-            ],
+            vec![LayoutNode::Pane(a), LayoutNode::Pane(b)],
         )));
     // A 2x1 viewport is below every pane's border-inclusive floor, so the
     // solve suppresses the whole split — `b` cannot take focus.
@@ -2817,8 +2825,8 @@ fn focus_active_stack_member_changes_no_layout() {
     let layout = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
         vec![
-            LayoutChild::new(LayoutNode::Pane(a)),
-            LayoutChild::new(LayoutNode::Split(SplitNode::stack(vec![b, c], 0))),
+            LayoutNode::Pane(a),
+            LayoutNode::Split(SplitNode::stack(vec![b, c], 0)),
         ],
     ));
     session
@@ -2927,10 +2935,7 @@ fn focus_explicit_client_wins_over_the_issuer() {
         .expect("tab")
         .update_layout(LayoutNode::Split(SplitNode::with_equal_weights(
             SplitDirection::Horizontal,
-            vec![
-                LayoutChild::new(LayoutNode::Pane(q)),
-                LayoutChild::new(LayoutNode::Pane(r)),
-            ],
+            vec![LayoutNode::Pane(q), LayoutNode::Pane(r)],
         )));
     add_client(&mut session, issuer, tab_x, Some(p));
     add_client(&mut session, target, tab_y, Some(q));
@@ -3029,10 +3034,7 @@ fn focus_from_a_clientless_source_defaults_to_the_sole_client() {
         .expect("tab")
         .update_layout(LayoutNode::Split(SplitNode::with_equal_weights(
             SplitDirection::Horizontal,
-            vec![
-                LayoutChild::new(LayoutNode::Pane(a)),
-                LayoutChild::new(LayoutNode::Pane(b)),
-            ],
+            vec![LayoutNode::Pane(a), LayoutNode::Pane(b)],
         )));
     add_client(&mut session, client_id, tab_id, Some(a));
     let sid = session.id;
@@ -3146,10 +3148,7 @@ fn focus_an_exited_pane_succeeds() {
         .expect("tab")
         .update_layout(LayoutNode::Split(SplitNode::with_equal_weights(
             SplitDirection::Horizontal,
-            vec![
-                LayoutChild::new(LayoutNode::Pane(a)),
-                LayoutChild::new(LayoutNode::Pane(b)),
-            ],
+            vec![LayoutNode::Pane(a), LayoutNode::Pane(b)],
         )));
     // A dead pane is a visible, focusable placeholder until it is removed.
     let exited_at = SystemTime::now();
@@ -3268,8 +3267,8 @@ fn focus_activation_reflows_the_expanded_member_pty() {
         &LayoutNode::Split(SplitNode::with_equal_weights(
             SplitDirection::Horizontal,
             vec![
-                LayoutChild::new(LayoutNode::Pane(a)),
-                LayoutChild::new(LayoutNode::Split(SplitNode::stack(vec![b, c], 0))),
+                LayoutNode::Pane(a),
+                LayoutNode::Split(SplitNode::stack(vec![b, c], 0)),
             ],
         ))
     );
@@ -3523,6 +3522,27 @@ fn mouse_select_cannot_be_issued_from_the_cli() {
         PathBuf::from("/sock"),
     );
     let env = envelope_from(source, Command::ToggleMouseSelect);
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::Unauthorized,
+            help: Some("command cannot be issued from the CLI".to_string()),
+        }
+    );
+}
+
+#[test]
+fn mouse_select_is_refused_from_the_source_a_control_connection_stamps() {
+    // A control connection that presented `CommandSource::Internal` reaches
+    // dispatch as `ExternalCli { session_id: None, target_client: None }`, so
+    // the CLI-admission check refuses the verb the CLI has no word for.
+    let (mut rt, _tx) = new_runtime();
+    let env = envelope_from(
+        CommandSource::external_cli(None, None),
+        Command::ToggleMouseSelect,
+    );
     let command_id = env.id;
     assert_eq!(
         rt.dispatch(env),
@@ -5817,7 +5837,13 @@ fn close_pane_last_pane_of_a_tab_moves_viewers_to_the_nearest_tab() {
             assert_eq!(ok_id, command_id);
             assert_eq!(
                 event_names(&emitted_events),
-                ["PaneClosing", "PaneRemoved", "TabClosed", "TabFocused"]
+                [
+                    "PaneClosing",
+                    "PaneRemoved",
+                    "TabClosed",
+                    "TabFocused",
+                    "PaneFocused"
+                ]
             );
         }
         other => panic!("expected Ok, got {other:?}"),
@@ -6196,6 +6222,7 @@ fn close_last_pane_reflows_the_tab_its_viewers_move_to() {
                     "PaneRemoved",
                     "TabClosed",
                     "TabFocused",
+                    "PaneFocused",
                     "PtyResized"
                 ]
             );
@@ -6772,10 +6799,7 @@ fn close_pane_explicit_target_in_another_session_closes_there() {
 fn side_by_side(left: PaneId, right: PaneId) -> LayoutNode {
     LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![
-            LayoutChild::new(LayoutNode::Pane(left)),
-            LayoutChild::new(LayoutNode::Pane(right)),
-        ],
+        vec![LayoutNode::Pane(left), LayoutNode::Pane(right)],
     ))
 }
 
@@ -7827,7 +7851,8 @@ fn close_tab_removes_state_kills_children_and_moves_viewers() {
                     "PaneClosing",
                     "PaneRemoved",
                     "TabClosed",
-                    "TabFocused"
+                    "TabFocused",
+                    "PaneFocused"
                 ]
             );
         }
@@ -7892,16 +7917,8 @@ fn close_tab_kills_every_pane_concurrently() {
         inner: fake.clone(),
         barrier: Barrier::new(3),
     });
-    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
-    let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (tx, inbox_rx) = mpsc::channel();
-    let mut rt = Server::new(
-        pty_backend,
-        snapshot_provider,
-        storage,
-        inbox_rx,
-        tx.clone(),
-    );
+    let mut rt = Server::new(pty_backend, inbox_rx, tx.clone());
 
     let client_id = ClientId::new();
     let tab_a = TabId::new();
@@ -8269,6 +8286,7 @@ fn close_tab_reflows_the_tab_its_viewers_move_to() {
                     "PaneRemoved",
                     "TabClosed",
                     "TabFocused",
+                    "PaneFocused",
                     "PtyResized"
                 ]
             );
@@ -8550,8 +8568,9 @@ fn focus_tab_switches_the_view_and_emits() {
             emitted_events,
         } => {
             assert_eq!(ok_id, command_id);
-            // TabFocused only: neither tab holds a live PTY to reflow.
-            assert_eq!(event_names(&emitted_events), ["TabFocused"]);
+            // The client held no focus in the tab it switches to, so it lands
+            // on that tab's landing pane. Neither tab holds a live PTY to reflow.
+            assert_eq!(event_names(&emitted_events), ["TabFocused", "PaneFocused"]);
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -8967,7 +8986,10 @@ fn focus_tab_reflows_both_the_target_and_the_left_tab() {
     match result {
         CommandResult::Ok { emitted_events, .. } => {
             // TabFocused + the tightened PTY's resize (tab_a holds no PTY).
-            assert_eq!(event_names(&emitted_events), ["TabFocused", "PtyResized"]);
+            assert_eq!(
+                event_names(&emitted_events),
+                ["TabFocused", "PaneFocused", "PtyResized"]
+            );
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -9796,7 +9818,7 @@ fn child_exit_close_on_exit_removes_the_pane_and_reaps_it() {
     let new_pane = other_pane(&rt, sid, root);
 
     // The split pane's `CloseOnExit` child dies.
-    let events = rt.handle_child_exit(new_pane, ExitStatus::ExitCode(0), SystemTime::UNIX_EPOCH);
+    let events = rt.handle_child_exit(new_pane, ExitStatus::ExitCode(0));
 
     // The exit is reported first, carrying the pane and its code.
     match events.first() {
@@ -9837,7 +9859,7 @@ fn child_exit_of_the_last_pane_closes_the_tab_and_quits() {
     let sid = session.id;
     rt.sessions.insert(sid, session);
 
-    let events = rt.handle_child_exit(root, ExitStatus::ExitCode(0), SystemTime::UNIX_EPOCH);
+    let events = rt.handle_child_exit(root, ExitStatus::ExitCode(0));
 
     // Removing the last pane closes the tab, and closing the last tab quits.
     assert!(rt.sessions[&sid].panes.get(root).is_none());
@@ -9873,7 +9895,7 @@ fn child_exit_empties_a_tab_and_moves_the_viewer_to_a_sibling() {
 
     // The sole pane of tab A exits: tab A closes, but tab B survives, so the
     // session does not quit and the viewer moves to tab B (which reflows).
-    let events = rt.handle_child_exit(pane_a, ExitStatus::ExitCode(0), SystemTime::UNIX_EPOCH);
+    let events = rt.handle_child_exit(pane_a, ExitStatus::ExitCode(0));
 
     assert!(rt.sessions[&sid].panes.get(pane_a).is_none());
     assert!(!rt.sessions[&sid].tabs.contains_key(&tab_a));
@@ -9885,7 +9907,8 @@ fn child_exit_empties_a_tab_and_moves_the_viewer_to_a_sibling() {
             "PaneClosing",
             "PaneRemoved",
             "TabClosed",
-            "TabFocused"
+            "TabFocused",
+            "PaneFocused"
         ]
     );
     assert_eq!(
@@ -9903,11 +9926,7 @@ fn child_exit_of_an_unknown_pane_is_dropped() {
     let (mut rt, _tx) = new_runtime();
 
     // No session owns the pane (closed while its exit waited in the inbox).
-    let events = rt.handle_child_exit(
-        PaneId::new(),
-        ExitStatus::ExitCode(0),
-        SystemTime::UNIX_EPOCH,
-    );
+    let events = rt.handle_child_exit(PaneId::new(), ExitStatus::ExitCode(0));
 
     assert!(events.is_empty());
 }
@@ -9932,72 +9951,13 @@ fn child_exit_by_signal_reports_no_exit_code() {
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
     let new_pane = other_pane(&rt, sid, root);
 
-    let events = rt.handle_child_exit(new_pane, ExitStatus::Signaled(9), SystemTime::UNIX_EPOCH);
+    let events = rt.handle_child_exit(new_pane, ExitStatus::Signaled(9));
 
     // A signal has no numeric code.
     match events.first() {
         Some(Event::PaneProcessExited(exited)) => assert_eq!(exited.exit_code, None),
         other => panic!("expected PaneProcessExited first, got {other:?}"),
     }
-}
-
-#[test]
-fn child_exit_respawn_shell_keeps_the_pane_and_its_bookkeeping() {
-    let (mut rt, fake, _tx) = new_runtime_with_fake();
-    let client_id = ClientId::new();
-    let tab = TabId::new();
-    let root = PaneId::new();
-    let mut session = bare_session(SessionId::new());
-    add_pane(&mut session, root);
-    add_tab(&mut session, tab, root);
-    add_client(&mut session, client_id, tab, Some(root));
-    let sid = session.id;
-    rt.sessions.insert(sid, session);
-
-    let env = envelope_from(
-        CommandSource::key_binding(client_id),
-        Command::NewPane(new_pane_args()),
-    );
-    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
-    let new_pane = other_pane(&rt, sid, root);
-
-    // Make the pane respawn on exit, with its child marked running.
-    {
-        let record = rt
-            .sessions
-            .get_mut(&sid)
-            .unwrap()
-            .panes
-            .get_mut(new_pane)
-            .unwrap();
-        record.exit_policy = PaneExitPolicy::RespawnShell;
-        let _ = record.update_lifecycle(PaneLifecycleEvent::ProcessStarted);
-    }
-
-    let events = rt.handle_child_exit(new_pane, ExitStatus::ExitCode(0), SystemTime::UNIX_EPOCH);
-
-    // Only the exit is reported — the pane is not removed.
-    assert_eq!(events.len(), 1);
-    match events.first() {
-        Some(Event::PaneProcessExited(exited)) => {
-            assert_eq!(exited.pane_id, new_pane);
-            assert_eq!(exited.exit_code, Some(0));
-        }
-        other => panic!("expected PaneProcessExited, got {other:?}"),
-    }
-    assert!(rt.sessions[&sid].panes.get(new_pane).is_some());
-
-    // The lifecycle advanced Running -> Exited -> Spawning: the respawn decision.
-    assert_eq!(
-        *rt.sessions[&sid].panes.get(new_pane).unwrap().lifecycle(),
-        PaneLifecycle::Spawning
-    );
-
-    // Bookkeeping is kept and the pane is never killed — it lives on.
-    assert!(rt.pty_handles.contains_key(&new_pane));
-    assert!(rt.pty_sizes.contains_key(&new_pane));
-    assert!(rt.terminal_engines.contains_key(&new_pane));
-    assert!(fake.kills(new_pane).unwrap().is_empty());
 }
 
 /// The `(session, tab, pane)` of a runtime `bootstrap_local` built: exactly one
@@ -11088,10 +11048,7 @@ fn pane_spawn_sizes_gives_each_pane_of_a_two_pane_tab_its_own_tile() {
     let (a, b) = (PaneId::new(), PaneId::new());
     let tree = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![
-            LayoutChild::new(LayoutNode::Pane(a)),
-            LayoutChild::new(LayoutNode::Pane(b)),
-        ],
+        vec![LayoutNode::Pane(a), LayoutNode::Pane(b)],
     ));
     let viewport = Size { cols: 80, rows: 24 };
 
@@ -11134,10 +11091,7 @@ fn pane_spawn_sizes_falls_back_to_the_tab_rect_for_a_suppressed_pane() {
     let (a, b) = (PaneId::new(), PaneId::new());
     let tree = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![
-            LayoutChild::new(LayoutNode::Pane(a)),
-            LayoutChild::new(LayoutNode::Pane(b)),
-        ],
+        vec![LayoutNode::Pane(a), LayoutNode::Pane(b)],
     ));
 
     // Neither half fits in a 3x3 viewport, so both panes are suppressed and
@@ -11314,13 +11268,13 @@ fn a_second_child_exit_for_the_same_pane_is_dropped_and_the_survivor_is_untouche
         .expect("a third pane exists");
 
     // First exit removes pane_a.
-    let first = rt.handle_child_exit(pane_a, ExitStatus::ExitCode(0), SystemTime::UNIX_EPOCH);
+    let first = rt.handle_child_exit(pane_a, ExitStatus::ExitCode(0));
     assert!(matches!(first.first(), Some(Event::PaneProcessExited(_))));
     assert!(rt.sessions[&sid].panes.get(pane_a).is_none());
     let survivor_resizes = fake.resizes(pane_b).expect("pane_b spawned").len();
 
     // Second exit for the same gone pane: dropped whole.
-    let second = rt.handle_child_exit(pane_a, ExitStatus::ExitCode(0), SystemTime::UNIX_EPOCH);
+    let second = rt.handle_child_exit(pane_a, ExitStatus::ExitCode(0));
     assert!(second.is_empty(), "a duplicate exit emits nothing");
 
     // The survivor is untouched: still present, still holding all its bookkeeping,
@@ -11366,7 +11320,7 @@ fn output_arriving_after_a_child_exit_is_dropped_and_a_live_pane_still_updates()
     let (exited, live) = (engine_panes[0], engine_panes[1]);
 
     // The exit removes the pane and its engine.
-    let _ = rt.handle_child_exit(exited, ExitStatus::ExitCode(0), SystemTime::UNIX_EPOCH);
+    let _ = rt.handle_child_exit(exited, ExitStatus::ExitCode(0));
     assert!(!rt.terminal_engines().contains_key(&exited));
 
     // Late output for the now-engineless pane is a no-op.

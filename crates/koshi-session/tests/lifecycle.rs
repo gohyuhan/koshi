@@ -20,7 +20,7 @@ use koshi_core::geometry::{Rect, Size, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::process::{PtySize, ShellKind, SpawnSpec};
 use koshi_layout::solver::{PaneSizing, MIN_PANE_SIZE};
-use koshi_layout::tree::{LayoutChild, LayoutNode, SplitNode};
+use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pane::pane::lifecycle::{PaneLifecycle, PaneLifecycleEvent};
 use koshi_pane::pane::policy::PaneExitPolicy;
 use koshi_pane::pane::state::PaneRecord;
@@ -30,7 +30,7 @@ use koshi_session::session::lifecycle::SessionLifecycle;
 use koshi_session::session::policy::EmptyTabPolicy;
 use koshi_session::session::state::{Session, Tab};
 use koshi_session::session::tab_ops::close_tab;
-use koshi_test_support::event_queue::RecordedEvents;
+use koshi_test_support::event_assert::assert_events;
 use koshi_test_support::fake_pty::{ExitStatus, FakePtyBackend, PtyBackend, PtyHandle};
 
 /// A fixed epoch timestamp so every lifecycle transition stays deterministic.
@@ -105,10 +105,7 @@ fn two_pane_tab(tab_id: TabId, left: PaneId, right: PaneId) -> Tab {
     let mut tab = Tab::new(tab_id, "code".to_owned(), 0, left);
     tab.update_layout(LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![
-            LayoutChild::new(LayoutNode::Pane(left)),
-            LayoutChild::new(LayoutNode::Pane(right)),
-        ],
+        vec![LayoutNode::Pane(left), LayoutNode::Pane(right)],
     )));
     tab
 }
@@ -175,7 +172,6 @@ fn pump_exit(
                 tab_id,
                 handle.pane_id(),
                 exit_code,
-                EPOCH,
                 tab_rect,
                 PaneSizing {
                     min: MIN_PANE_SIZE,
@@ -198,15 +194,6 @@ fn route_output(session: &Session, handle: &PtyHandle) -> Option<(Vec<u8>, bool)
     handle
         .try_read_output()
         .map(|chunk| (chunk, session.panes.get(handle.pane_id()).is_some()))
-}
-
-/// Assert an emitted burst is exactly `expected` — same events, same order,
-/// nothing extra — through the shared recorder's index-aligned diff.
-fn assert_events(events: Vec<Event>, expected: &[Event]) {
-    let mut recorded = RecordedEvents::new();
-    let mut emitted = events.into_iter();
-    recorded.drain_from(|| emitted.next());
-    recorded.assert_exact(expected);
 }
 
 #[test]
@@ -269,7 +256,7 @@ fn child_exit_in_focused_pane_refocuses_a_survivor() {
     // The exit fact threads the code through from the backend, and is emitted
     // before the focus repair it triggers.
     assert_events(
-        events,
+        &events,
         &[
             Event::PaneProcessExited(PaneProcessExited {
                 pane_id: a,
@@ -315,7 +302,7 @@ fn a_signal_killed_child_reports_no_exit_code() {
 
     assert!(session.panes.get(a).is_none());
     assert_events(
-        events,
+        &events,
         &[
             Event::PaneProcessExited(PaneProcessExited {
                 pane_id: a,
@@ -365,7 +352,7 @@ fn a_second_exit_for_an_already_removed_pane_only_reports_the_exit() {
     // The pane left the registry on the first exit, so the second reports the
     // exit and removes nothing: the survivor and the tab are untouched.
     assert_events(
-        second,
+        &second,
         &[Event::PaneProcessExited(PaneProcessExited {
             pane_id: a,
             exit_code: Some(0),
@@ -413,7 +400,7 @@ fn child_exit_in_nonfocused_pane_leaves_focus_untouched() {
         Some(b)
     );
     assert_events(
-        events,
+        &events,
         &[
             Event::PaneProcessExited(PaneProcessExited {
                 pane_id: a,
@@ -526,7 +513,7 @@ fn child_exit_with_no_room_to_refocus_clears_focus() {
     // the terminal as the cause: the shortage comes from the tab rect, not from
     // this client's regions or another viewer.
     assert_events(
-        events,
+        &events,
         &[
             Event::PaneProcessExited(PaneProcessExited {
                 pane_id: a,
@@ -574,7 +561,7 @@ fn last_pane_exit_closes_the_tab_and_quits() {
     // closing, then the quit it cascades into. The tab held one pane, so the
     // layout never changes shape and no `LayoutChanged` is emitted.
     assert_events(
-        events,
+        &events,
         &[
             Event::PaneProcessExited(PaneProcessExited {
                 pane_id: only,
@@ -638,7 +625,7 @@ fn last_pane_exit_in_one_of_several_tabs_does_not_quit() {
         "the surviving tab takes the closed tab's position"
     );
     assert_events(
-        events,
+        &events,
         &[
             Event::PaneProcessExited(PaneProcessExited {
                 pane_id: closing,
@@ -657,13 +644,13 @@ fn last_pane_exit_in_one_of_several_tabs_does_not_quit() {
 }
 
 #[test]
-fn last_pane_respawn_policy_keeps_the_pane() {
+fn a_failing_last_pane_is_removed_and_the_session_quits() {
     let pty = FakePtyBackend::new();
     let (pane, handle) = spawn_child(&pty);
     let tab_id = TabId::new();
     let mut session = session_with(
         vec![single_pane_tab(tab_id, pane)],
-        vec![running_pane(pane, PaneExitPolicy::RespawnShell)],
+        vec![running_pane(pane, PaneExitPolicy::CloseOnExit)],
     );
 
     pty.trigger_child_exit(pane, ExitStatus::ExitCode(1))
@@ -676,61 +663,24 @@ fn last_pane_respawn_policy_keeps_the_pane() {
         EmptyTabPolicy::CloseTab,
     );
 
-    // A respawn-policy pane is not removed: it loops back to `Spawning` for the
-    // runtime to relaunch, and nothing tears down.
-    let kept = session.panes.get(pane).expect("the pane is kept");
-    assert_eq!(*kept.lifecycle(), PaneLifecycle::Spawning);
-    assert_eq!(session.tabs[&tab_id].layout().leaf_panes(), vec![pane]);
-    // The exit is the whole burst: no removal, no tab close, no quit.
+    // A non-zero exit tears down exactly like a clean one: the pane goes, its
+    // tab goes with it, and the empty session quits.
+    assert_eq!(session.panes.get(pane), None);
+    assert!(session.tabs.is_empty());
     assert_events(
-        events,
-        &[Event::PaneProcessExited(PaneProcessExited {
-            pane_id: pane,
-            exit_code: Some(1),
-        })],
-    );
-}
-
-#[test]
-fn last_pane_exit_under_respawn_tab_policy_keeps_the_tab() {
-    let pty = FakePtyBackend::new();
-    let (pane, handle) = spawn_child(&pty);
-    let tab_id = TabId::new();
-    let mut session = session_with(
-        vec![single_pane_tab(tab_id, pane)],
-        vec![running_pane(pane, PaneExitPolicy::CloseOnExit)],
-    );
-
-    pty.trigger_child_exit(pane, ExitStatus::ExitCode(0))
-        .expect("the pane is known to the backend");
-    let events = pump_exit(
-        &mut session,
-        &handle,
-        tab_id,
-        rect(),
-        EmptyTabPolicy::RespawnShell,
-    );
-
-    // The exiting pane is removed, but the empty-tab respawn policy leaves the
-    // tab in place for the runtime to refill rather than closing it — so the
-    // session does not quit.
-    assert!(session.panes.get(pane).is_none());
-    assert!(session.tabs.contains_key(&tab_id));
-    assert_eq!(session.lifecycle(), &SessionLifecycle::Starting);
-    // The burst stops at the removal: the respawn policy emits nothing of its
-    // own, so no tab close and no quit follow.
-    assert_events(
-        events,
+        &events,
         &[
             Event::PaneProcessExited(PaneProcessExited {
                 pane_id: pane,
-                exit_code: Some(0),
+                exit_code: Some(1),
             }),
             Event::PaneClosing(PaneClosing { pane_id: pane }),
             Event::PaneRemoved(PaneRemoved {
                 pane_id: pane,
                 tab_id,
             }),
+            Event::TabClosed(TabClosed { tab_id }),
+            Event::Quit,
         ],
     );
 }
@@ -782,7 +732,7 @@ fn closing_the_focused_pane_removes_it_and_refocuses_a_survivor() {
 
     // The whole burst, in order. No process-exited event: no child exited.
     assert_events(
-        events,
+        &events,
         &[
             Event::PaneClosing(PaneClosing { pane_id: a }),
             Event::PaneRemoved(PaneRemoved { pane_id: a, tab_id }),
@@ -844,7 +794,7 @@ fn closing_a_tab_removes_every_pane_without_killing_via_pty() {
     // attached, so nothing is refocused; the sibling tab keeps the session up,
     // so nothing quits.
     assert_events(
-        events,
+        &events,
         &[
             Event::PaneClosing(PaneClosing { pane_id: a }),
             Event::PaneRemoved(PaneRemoved {
@@ -906,7 +856,7 @@ fn child_exit_drops_the_pane_from_focus_history() {
     // No client watched the pane, so the burst is the exit and the removal
     // alone: the history cleanup is state, never an event of its own.
     assert_events(
-        events,
+        &events,
         &[
             Event::PaneProcessExited(PaneProcessExited {
                 pane_id: a,
@@ -953,7 +903,7 @@ fn output_for_a_removed_pane_is_dropped() {
     );
     assert!(session.panes.get(a).is_none());
     assert_events(
-        events,
+        &events,
         &[
             Event::PaneProcessExited(PaneProcessExited {
                 pane_id: a,

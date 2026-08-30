@@ -1333,10 +1333,12 @@ fn rows_run_every_check_in_print_order() {
 fn row(name: &'static str, verdict: Verdict) -> CheckRow {
     CheckRow {
         name,
-        verdict,
-        reason: "a fact".to_string(),
-        help: None,
-        detail: None,
+        outcome: Outcome {
+            verdict,
+            reason: "a fact".to_string(),
+            help: None,
+            detail: None,
+        },
     }
 }
 

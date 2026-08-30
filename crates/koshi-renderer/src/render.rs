@@ -4,9 +4,9 @@
 //! [`Buffer`] as three stock zones: a **tabline** (session name, the running
 //! koshi version, and the tab list on the left, the right-aligned mode tag),
 //! the **pane area** (a bordered box per visible pane, the focused pane's
-//! border highlighted), and the **keybinding hint bar** — a koshi-owned row
-//! painted by [`crate::statusline_hints`] from the per-mode keybinding data the
-//! caller passes in. The committed region solve supplies all three zones.
+//! border highlighted), and the **statusline** — a koshi-owned keybinding row
+//! painted from the per-mode keybinding data the caller passes in. The
+//! committed region solve supplies all three zones.
 //!
 //! Collapsed members of a stacked pane group are drawn as one-row title strips
 //! in the pane area, and each visible terminal pane's cells are painted into its
@@ -32,12 +32,12 @@ use koshi_core::lock::LockMode;
 use koshi_terminal::grid::state::{Cell, Grid};
 use koshi_terminal::style::{Color as CellColor, Style as CellStyle, UnderlineStyle};
 
-use crate::region::{NavigatorDto, StatuslineDto};
+use crate::region::StatuslineInputs;
 use crate::snapshot::{
     CommittedRegions, CursorStyle, KeymapHints, PaneSnapshot, Reconnecting, RenderSnapshot,
     SelectionSpans, ViewerChrome,
 };
-use crate::statusline_hints::draw_hint_bar;
+use crate::statusline_hints::draw_statusline;
 use crate::theme::Theme;
 
 /// Paint `snapshot` into `buf` over `area` with the region solve committed with
@@ -58,11 +58,10 @@ use crate::theme::Theme;
 /// 5. Fills the letterbox margin: every cell of `area` outside the centered
 ///    layout, the chrome rows included.
 /// 6. Draws the tabline in the first committed region, over that margin.
-/// 7. Draws the keybinding hint bar in the second committed region, over that
-///    margin.
+/// 7. Draws the statusline in the second committed region, over that margin.
 ///
 /// `theme`, `hints`, `pending`, and `viewer` come from the viewer: the colors
-/// it paints koshi's chrome in, the hint-bar data for the mode it is in, the
+/// it paints koshi's chrome in, the statusline data for the mode it is in, the
 /// multi-chord sequence it has open, and the pane its pointer is over together
 /// with where its tab strip is scrolled and whether it is dialing the session
 /// again.
@@ -97,7 +96,7 @@ pub fn render_frame(
     );
 
     // Reset every cell of `area` first, so a buffer carried over from the
-    // previous frame keeps no cell in the tabline gap, the reserved hint row,
+    // previous frame keeps no cell in the tabline gap, the reserved statusline row,
     // or a pane interior this frame does not paint.
     Clear.render(area, buf);
 
@@ -122,29 +121,18 @@ pub fn render_frame(
     draw_pane_contents(snapshot, offset, buf);
     draw_stack_headers(snapshot, theme, offset, buf);
 
-    // The margin fills first; the tabline and hint bar paint over it.
+    // The margin fills first; the tabline and statusline paint over it.
     draw_letterbox(area, content, theme, buf);
 
-    let navigator = NavigatorDto {
-        session_name: &snapshot.session.name,
-        tabs: &snapshot.session.tabs_metadata,
-        lock_mode: snapshot.client.lock_mode,
-        mouse_select: snapshot.client.mouse_select,
-        reconnecting: viewer.reconnecting,
-        tabline_offset: viewer.tabline_offset,
-        theme,
-    };
+    // The same tab-row facts hit-testing reads, so the tabline drawn is the
+    // tabline classified.
+    let tabline_inputs = snapshot.layout(viewer).tabline();
     if let Some(tabline) = region_area(committed_regions, 0, area) {
-        draw_tabline(&navigator, tabline, buf);
+        draw_tabline(tabline_inputs, theme, tabline, buf);
     }
 
-    if let Some(hint_bar) = region_area(committed_regions, 1, area) {
-        let statusline = StatuslineDto {
-            hints,
-            theme,
-            pending,
-        };
-        draw_hint_bar(&statusline, hint_bar, buf);
+    if let Some(statusline) = region_area(committed_regions, 1, area) {
+        draw_statusline(StatuslineInputs { hints, pending }, theme, statusline, buf);
     }
 }
 
@@ -304,7 +292,7 @@ fn draw_panes(
         // nothing. Each pane carries its own offset, so several can show at once.
         if let Some((up, total)) = pane.and_then(pane_scroll) {
             let text = format!(" {up}/{total} ");
-            let width = text.len() as u16;
+            let width = text_width(&text);
             if rect.width >= width + 2 {
                 let line = Line::from(Span::styled(text, style));
                 let x = rect.right() - 1 - width;
@@ -324,7 +312,7 @@ fn draw_too_small_overlay(area: RatatuiRect, buf: &mut Buffer) {
         "Terminal too small — enlarge window",
         too_small_style(),
     ));
-    let width = message.width() as u16;
+    let width = line_width(&message);
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height / 2;
     set_line_clipped(buf, x, y, &message, area.right().saturating_sub(x));
@@ -496,7 +484,7 @@ fn draw_stack_headers(snapshot: &RenderSnapshot, theme: &Theme, offset: Point, b
         // Right-align `[N/total]`, with its start column clamped to `rect.x`. A
         // strip narrower than the indicator writes only inside the strip.
         let indicator = Line::from(format!("[{}/{}]", header.position + 1, header.total));
-        let width = indicator.width() as u16;
+        let width = line_width(&indicator);
         let x = rect.right().saturating_sub(width).max(rect.x);
         set_line_clipped(buf, x, rect.y, &indicator, rect.right() - x);
     }
@@ -609,6 +597,25 @@ pub(crate) fn pane_area(committed_regions: &CommittedRegions, area: RatatuiRect)
     place(committed_regions.solve.pane_rect, origin(area))
 }
 
+/// The cells `text` occupies when drawn, counted as Unicode display width and
+/// never from its bytes or chars: `漢字` is 4, `🦀` is 2, `e` plus a combining
+/// acute is 1.
+///
+/// Text wider than `u16::MAX` cells gives `u16::MAX`, which every width
+/// comparison in this crate reads as wider than the row.
+pub(crate) fn text_width(text: &str) -> u16 {
+    u16::try_from(Span::raw(text).width()).unwrap_or(u16::MAX)
+}
+
+/// The cells `line` occupies when drawn, summed over its spans and never taken
+/// from their styles.
+///
+/// A line wider than `u16::MAX` cells gives `u16::MAX`, which every width
+/// comparison in this crate reads as wider than the row.
+pub(crate) fn line_width(line: &Line<'_>) -> u16 {
+    u16::try_from(line.width()).unwrap_or(u16::MAX)
+}
+
 /// Draw a line, writing nothing when `y` lies outside the buffer's rows.
 ///
 /// [`Buffer::set_line`] clips a line horizontally but writes its row with no
@@ -694,7 +701,7 @@ mod tabline;
 
 use style::*;
 use tabline::draw_tabline;
-// The hint bar fills its row with the same bar background as the tab bar.
+// The statusline fills its row with the same bar background as the tabline.
 pub(crate) use style::bar_style;
 pub(crate) use tabline::tabline_layout;
 // The badge text, reachable from the sibling test modules.

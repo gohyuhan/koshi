@@ -109,8 +109,6 @@ pub struct ClientConfig {
     pub keybindings: KeybindingsConfig,
     /// Defaults applied when creating panes and layouts.
     pub layout: LayoutDefaults,
-    /// Per-plugin activation and keymap opt-in preferences.
-    pub plugins: PluginActivationConfig,
     /// Mouse routing behavior.
     pub mouse: MouseConfig,
     /// Selection and clipboard behavior.
@@ -139,7 +137,6 @@ impl Default for ClientConfig {
             version: SCHEMA_VERSION,
             keybindings: KeybindingsConfig::default(),
             layout: LayoutDefaults::default(),
-            plugins: PluginActivationConfig::default(),
             mouse: MouseConfig::default(),
             copy: CopyConfig::default(),
             scrollback: ScrollbackView::default(),
@@ -494,60 +491,6 @@ impl Default for LayoutDefaults {
             new_pane_direction: Direction::Right,
         }
     }
-}
-
-/// Per-plugin activation and keymap opt-in preferences. Empty by default;
-/// entries come from the user's `plugins` config block.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct PluginActivationConfig {
-    /// One entry per plugin the user configured.
-    pub entries: Vec<PluginActivation>,
-}
-
-/// One plugin's activation preference.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PluginActivation {
-    /// The plugin identifier.
-    pub name: String,
-    /// Whether to enable or disable the plugin.
-    pub action: ActivationAction,
-    /// The scope the preference applies to.
-    pub scope: ActivationScope,
-    /// Which of the plugin's recommended keymaps to adopt.
-    pub keymaps: KeymapOptIn,
-}
-
-/// Whether a plugin activation entry enables or disables the plugin.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum ActivationAction {
-    /// Enable the plugin.
-    #[default]
-    Enable,
-    /// Disable the plugin.
-    Disable,
-}
-
-/// The scope a plugin activation preference applies to.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub enum ActivationScope {
-    /// Applies to every session.
-    #[default]
-    Global,
-    /// Applies to the named session only.
-    Session(String),
-}
-
-/// How much of a plugin's recommended keymap set to adopt.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub enum KeymapOptIn {
-    /// Adopt none of the plugin's keymaps.
-    #[default]
-    None,
-    /// Adopt all of the plugin's recommended keymaps.
-    Recommended,
-    /// Adopt only the recommendations for the listed local action names, at
-    /// whatever key the plugin currently recommends for each.
-    Subset(Vec<String>),
 }
 
 /// Mouse routing behavior.

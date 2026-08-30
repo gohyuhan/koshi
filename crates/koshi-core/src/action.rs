@@ -339,11 +339,6 @@ pub enum ActionStatus {
     ComingSoon,
 }
 
-/// Typed schema for an action's arguments. Carries no fields. Every entry in
-/// [`core_action_seeds`] leaves [`ActionMetadata::args_schema`] `None`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ActionArgsSchema {}
-
 /// How an action is dispatched once it fires.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ActionHandlerRef {
@@ -374,8 +369,6 @@ pub struct ActionMetadata {
     pub scope_class: ActionScope,
     /// Entity kinds the action can target.
     pub target_compat: Vec<TargetKind>,
-    /// Typed argument schema, when the action takes arguments.
-    pub args_schema: Option<ActionArgsSchema>,
     /// How the action is dispatched.
     pub handler: ActionHandlerRef,
     /// Whether the runtime implements the action.
@@ -389,7 +382,7 @@ pub struct ActionMetadata {
 }
 
 /// Build one `core:` seed entry, with `namespace` set to
-/// [`ActionNamespace::Core`], `args_schema` `None`, and `continuous` `false`.
+/// [`ActionNamespace::Core`] and `continuous` `false`.
 ///
 /// # Panics
 /// Panics if `name` violates the action-name grammar.
@@ -410,7 +403,6 @@ fn core_seed(
         description: description.to_string(),
         scope_class,
         target_compat,
-        args_schema: None,
         handler,
         status,
         continuous: false,

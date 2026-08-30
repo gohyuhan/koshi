@@ -41,7 +41,6 @@ use koshi_layout::mode::LayoutMode;
 use koshi_layout::tree::LayoutNode;
 use koshi_pty::backend::state::PtyBackend;
 use koshi_runtime::ipc_server::IpcServer;
-use koshi_runtime::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
 use koshi_runtime::runtime::event::RuntimeEvent;
 use koshi_runtime::server::Server;
 use koshi_session::client::{pane_viewport, ClientOrigin};
@@ -101,16 +100,8 @@ fn served<T: Send + 'static>(
     let session_id = SessionId::new();
     let fake = Arc::new(FakePtyBackend::new());
     let backend: Arc<dyn PtyBackend> = fake.clone();
-    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
-    let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (inbox_tx, inbox_rx) = mpsc::channel();
-    let mut server = Server::new(
-        backend,
-        snapshot_provider,
-        storage,
-        inbox_rx,
-        inbox_tx.clone(),
-    );
+    let mut server = Server::new(backend, inbox_rx, inbox_tx.clone());
     server
         .bootstrap_session(
             session_id,
@@ -1506,17 +1497,19 @@ fn two_rounds_sent_back_to_back_are_answered_in_the_order_they_were_sent() {
     });
 }
 
-/// Submit a command over `connection` as the keybinding of `client_id`, and
-/// return the events it emitted. Panics unless the session applied it.
-fn submit_as_client(
+/// Submit a command over `connection` — an external `koshi` invocation naming
+/// `session_id` and targeting `client_id` — and return the events it emitted.
+/// Panics unless the session applied it.
+fn submit_for_client(
     connection: &mut Connection,
+    session_id: SessionId,
     client_id: ClientId,
     command: Command,
     request_id: u64,
 ) -> Vec<Event> {
     let envelope = CommandEnvelope::new(
         CommandId::new(),
-        CommandSource::KeyBinding { client_id },
+        CommandSource::external_cli(Some(session_id), Some(client_id)),
         SystemTime::UNIX_EPOCH,
         command,
     );
@@ -1568,11 +1561,18 @@ fn attaching_again_with_the_token_brings_back_the_tab_focus_zoom_and_scroll() {
                 })
                 .expect("send mouse round");
             let (viewer, _frames) = read_to_mouse_answer(viewer, 4);
-            submit_as_client(&mut caller, left, Command::TogglePaneFullscreen, 5);
+            submit_for_client(
+                &mut caller,
+                session_id,
+                left,
+                Command::TogglePaneFullscreen,
+                5,
+            );
             // Adding a tab moves the client that asked for it onto that tab.
             let added_tab = new_tab(&mut caller, session_id, 6);
-            submit_as_client(
+            submit_for_client(
                 &mut caller,
+                session_id,
                 left,
                 Command::FocusTab(FocusTabArgs {
                     target: TabTarget::Id(added_tab),

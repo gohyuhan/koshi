@@ -79,10 +79,10 @@ pub fn version_refusal(caller_min: u32, caller_max: u32) -> String {
 
 /// One message from a remote client to the machine serving it.
 ///
-/// Decoding rejects any field it does not know, so a misspelled name is an
-/// error.
+/// A field this build does not know is ignored. A client that adds one still
+/// decodes here. Every field below is required: a misspelled name is the
+/// missing-field error for the name it displaced.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub enum RemoteClientFrame {
     /// Opens the stream: names the doorway versions and the session protocol
     /// versions the client speaks, and presents the secret from a grant. Sent
@@ -115,10 +115,10 @@ pub enum RemoteClientFrame {
 
 /// One message from the machine serving a remote client back to it.
 ///
-/// Decoding rejects any field it does not know, so a misspelled name is an
-/// error.
+/// A field this build does not know is ignored. A server that adds one still
+/// decodes here. Every field below is required: a misspelled name is the
+/// missing-field error for the name it displaced.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub enum RemoteServerFrame {
     /// Answers [`RemoteClientFrame::Hello`]: the stream is open.
     Welcome {
@@ -189,10 +189,10 @@ pub fn open(
 
 /// One session as a remote client may see it.
 ///
-/// Decoding rejects any field it does not know, so a misspelled name is an
-/// error.
+/// A field this build does not know is ignored. A server that adds one still
+/// decodes here. Both fields below are required: a misspelled name is the
+/// missing-field error for the name it displaced.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RemoteSessionRow {
     /// The session's stable id.
     pub id: SessionId,

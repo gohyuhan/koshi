@@ -1,4 +1,5 @@
-//! Bottom keybinding bar with Zellij-style modifier groups and action ribbons.
+//! The statusline: the bottom keybinding row, with Zellij-style modifier
+//! groups and action ribbons.
 //!
 //! Idle view groups every top-level hint under one human modifier header such
 //! as `Ctrl +` or `Alt +`; keys with the same action label fold into one ribbon.
@@ -21,17 +22,16 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Widget};
 
-use crate::region::StatuslineDto;
-use crate::render::{bar_style, set_line_clipped};
+use crate::region::StatuslineInputs;
+use crate::render::{bar_style, line_width, set_line_clipped};
 use crate::snapshot::KeymapHints;
 use crate::theme::Theme;
 
 const REVERT_MARKER: &str = " keys! ";
 
-/// Paint one chrome-owned hint row from `dto`.
-///
-/// `dto` holds everything the row draws — see [`StatuslineDto`]. `area` is the
-/// row to paint. `buf` is the buffer painted into.
+/// Paint the statusline from `inputs` — see [`StatuslineInputs`] — in
+/// `theme`'s colors. `area` is the row to paint. `buf` is the buffer painted
+/// into.
 ///
 /// Does nothing for a zero-size area. Otherwise paints in this order:
 ///
@@ -45,15 +45,16 @@ const REVERT_MARKER: &str = " keys! ";
 /// 4. Draws each modifier group left to right: its ` Ctrl + ` header, then one
 ///    two-block ribbon per action.
 /// 5. Draws a `…` marker where the row ran out of room, and stops there.
-pub fn draw_hint_bar(dto: &StatuslineDto<'_>, area: RatatuiRect, buf: &mut Buffer) {
+pub(crate) fn draw_statusline(
+    inputs: StatuslineInputs<'_>,
+    theme: &Theme,
+    area: RatatuiRect,
+    buf: &mut Buffer,
+) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let StatuslineDto {
-        hints,
-        theme,
-        pending,
-    } = *dto;
+    let StatuslineInputs { hints, pending } = inputs;
     // Clear drops stale cells, then the bar background fills the row whole.
     // Ribbons painted after this set their own background; plain text such as
     // a `Ctrl +` header sets only a foreground and keeps this fill.
@@ -64,7 +65,7 @@ pub fn draw_hint_bar(dto: &StatuslineDto<'_>, area: RatatuiRect, buf: &mut Buffe
     let mut right_edge = area.right();
     if hints.reverted {
         let marker = Line::from(Span::styled(REVERT_MARKER, revert_style()));
-        let width = marker.width() as u16;
+        let width = line_width(&marker);
         let x = right_edge.saturating_sub(width).max(area.x);
         set_line_clipped(buf, x, area.y, &marker, right_edge - x);
         right_edge = x;
@@ -109,9 +110,9 @@ pub fn draw_hint_bar(dto: &StatuslineDto<'_>, area: RatatuiRect, buf: &mut Buffe
             ))
         });
         let first_width = group.entries.first().map_or(0, |entry| {
-            ribbon_width(&entry_ribbon(entry, key_style, label_style))
+            line_width(&entry_ribbon(entry, key_style, label_style))
         });
-        let header_width = header.as_ref().map_or(0, ribbon_width);
+        let header_width = header.as_ref().map_or(0, line_width);
         if x.saturating_add(header_width).saturating_add(first_width) > right_edge {
             draw_overflow_marker(buf, theme, x, area.y, area.x, right_edge);
             return;
@@ -385,15 +386,8 @@ fn key_rank(key: Key) -> (u8, String) {
     (direction, human_key(key))
 }
 
-/// The cell width of `line`, held at `u16::MAX` for a line wider than that.
-///
-/// A width that wrapped would read as a line that fits.
-fn ribbon_width(line: &Line<'_>) -> u16 {
-    u16::try_from(line.width()).unwrap_or(u16::MAX)
-}
-
 fn paint_whole(buf: &mut Buffer, x: &mut u16, y: u16, right_edge: u16, line: &Line<'_>) -> bool {
-    let width = ribbon_width(line);
+    let width = line_width(line);
     if x.saturating_add(width) > right_edge {
         return false;
     }

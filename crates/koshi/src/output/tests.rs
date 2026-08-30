@@ -25,7 +25,7 @@ use koshi_ipc::layout::{ClientFocus, SessionLayout, SolvedPane, SolvedTab, TabLa
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::size::SizeWeight;
 use koshi_layout::solver::StackHeader;
-use koshi_layout::tree::{LayoutChild, LayoutNode, SplitNode};
+use koshi_layout::tree::{LayoutNode, SplitNode};
 use uuid::Uuid;
 
 use super::*;
@@ -1339,8 +1339,8 @@ fn side_by_side() -> LayoutNode {
     LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
         vec![
-            LayoutChild::new(LayoutNode::Pane(first_pane())),
-            LayoutChild::new(LayoutNode::Pane(second_pane())),
+            LayoutNode::Pane(first_pane()),
+            LayoutNode::Pane(second_pane()),
         ],
     ))
 }
@@ -1645,23 +1645,17 @@ session session-00000000-0000-0000-0000-000000000001 quiet-lake
 }
 
 #[test]
-fn dump_layout_table_marks_an_active_member_that_carries_the_collapsed_flag() {
-    // `active` and the per-child `collapsed` flag are stored apart, so a
-    // stack can name member 0 active while that member is flagged collapsed.
+fn dump_layout_table_marks_every_member_but_the_active_one() {
+    // `active` alone decides the mark: an index past the last child names
+    // the last child active, so member 0 is the collapsed one.
     let stack = LayoutNode::Split(SplitNode {
         direction: SplitDirection::Stacked,
         children: vec![
-            LayoutChild {
-                node: LayoutNode::Pane(first_pane()),
-                collapsed: true,
-            },
-            LayoutChild {
-                node: LayoutNode::Pane(second_pane()),
-                collapsed: false,
-            },
+            LayoutNode::Pane(first_pane()),
+            LayoutNode::Pane(second_pane()),
         ],
         weights: vec![SizeWeight::default(), SizeWeight::default()],
-        active: 0,
+        active: 9,
     });
     let layout = layout_of(stack, Vec::new(), None);
 
@@ -1669,7 +1663,7 @@ fn dump_layout_table_marks_an_active_member_that_carries_the_collapsed_flag() {
 
     assert!(
         rendered.contains(
-            "      stacked split, active member 0\n        pane pane-00000000-0000-0000-0000-000000000004 (collapsed)\n        pane pane-00000000-0000-0000-0000-000000000005\n"
+            "      stacked split, active member 9\n        pane pane-00000000-0000-0000-0000-000000000004 (collapsed)\n        pane pane-00000000-0000-0000-0000-000000000005\n"
         ),
         "{rendered}",
     );
@@ -1680,8 +1674,8 @@ fn dump_layout_table_shows_a_vertical_split_by_name() {
     let tree = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Vertical,
         vec![
-            LayoutChild::new(LayoutNode::Pane(first_pane())),
-            LayoutChild::new(LayoutNode::Pane(second_pane())),
+            LayoutNode::Pane(first_pane()),
+            LayoutNode::Pane(second_pane()),
         ],
     ));
     let layout = layout_of(tree, Vec::new(), None);
@@ -2122,7 +2116,7 @@ fn a_dotted_capital_i_does_not_match_an_ascii_i_in_an_event_name() {
     let events = vec![recent_event::record(
         &Event::InputModeChanged(koshi_core::event::InputModeChanged {
             client_id: layout_client(),
-            mode: koshi_core::event::InputMode::Normal,
+            mode: koshi_core::lock::LockMode::Normal,
         }),
         fixed_time(),
     )];

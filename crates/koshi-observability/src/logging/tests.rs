@@ -1,35 +1,22 @@
-//! Tests for the tracing subscriber bootstrap and redaction machinery.
+//! Tests for the tracing subscriber bootstrap and the writers it uses.
 //!
 //! Coverage: the session log path, per-session lazy file creation, the level
 //! cutoff, single global install, the disabled no-op, the per-session file
-//! writer, the capture writer, and environment-map redaction.
+//! writer, and the capture writer.
 
 use super::*;
 
 /// Install a JSON subscriber on this thread with the cutoff `level` gives, and
 /// capture its output.
 fn captured_at(level: LogLevel) -> (tracing::subscriber::DefaultGuard, CapturedLogs) {
-    let logs = CapturedLogs::default();
-    let subscriber = fmt()
-        .with_max_level(max_level(level))
-        .json()
-        .with_writer(logs.clone())
-        .finish();
-    (tracing::subscriber::set_default(subscriber), logs)
+    capture_at(max_level(level))
 }
 
-// The sample line carries every canonical field. The env value reaches the
-// line scrubbed: the token renders as `***`, `HOME` passes through.
+// Every correlation ID named in the module policy reaches the line under its
+// own field name.
 #[test]
-fn sample_event_has_canonical_fields_and_redacts_token() {
+fn a_line_carries_every_correlation_id_field_it_was_given() {
     let (_guard, logs) = with_test_writer();
-
-    let mut env = BTreeMap::new();
-    env.insert(
-        "KOSHI_CONTEXT_TOKEN".to_string(),
-        "super-secret".to_string(),
-    );
-    env.insert("HOME".to_string(), "/home/dev".to_string());
 
     tracing::info!(
         session_id = "sess-1",
@@ -39,76 +26,19 @@ fn sample_event_has_canonical_fields_and_redacts_token() {
         command_id = "cmd-1",
         plugin_id = "plugin-1",
         subscriber_id = "sub-1",
-        env = %redacted_env_field(&env),
         "sample event"
     );
 
     let out = logs.contents();
     assert_eq!(out.lines().count(), 1, "{out}");
-    for field in CANONICAL_FIELDS {
-        assert!(out.contains(field), "missing canonical field `{field}`");
-    }
     assert!(out.contains(r#""session_id":"sess-1""#), "{out}");
+    assert!(out.contains(r#""client_id":"client-1""#), "{out}");
+    assert!(out.contains(r#""tab_id":"tab-1""#), "{out}");
+    assert!(out.contains(r#""pane_id":"pane-1""#), "{out}");
+    assert!(out.contains(r#""command_id":"cmd-1""#), "{out}");
+    assert!(out.contains(r#""plugin_id":"plugin-1""#), "{out}");
     assert!(out.contains(r#""subscriber_id":"sub-1""#), "{out}");
-    assert!(
-        out.contains(r#""env":"HOME=/home/dev KOSHI_CONTEXT_TOKEN=***""#),
-        "{out}"
-    );
-    assert!(
-        !out.contains("super-secret"),
-        "token leaked into log output"
-    );
-    assert!(out.contains("***"), "redaction marker absent");
-    assert!(
-        out.contains("/home/dev"),
-        "non-sensitive value should pass through"
-    );
-}
-
-#[test]
-fn canonical_fields_are_the_seven_correlation_ids() {
-    assert_eq!(
-        CANONICAL_FIELDS,
-        [
-            "session_id",
-            "client_id",
-            "tab_id",
-            "pane_id",
-            "command_id",
-            "plugin_id",
-            "subscriber_id",
-        ]
-    );
-}
-
-#[test]
-fn redacted_env_field_hides_sensitive_keys_only() {
-    let mut env = BTreeMap::new();
-    env.insert("API_TOKEN".to_string(), "abc123".to_string());
-    env.insert("PATH".to_string(), "/usr/bin".to_string());
-
-    let field = redacted_env_field(&env);
-
-    assert_eq!(field, "API_TOKEN=*** PATH=/usr/bin");
-    assert!(!field.contains("abc123"));
-}
-
-#[test]
-fn redacted_env_field_of_empty_map_is_empty_string() {
-    let env: BTreeMap<String, String> = BTreeMap::new();
-    assert_eq!(redacted_env_field(&env), "");
-}
-
-// Keys come out in byte order, uppercase before lowercase. A visible value is
-// written as it is, spaces and `=` included.
-#[test]
-fn redacted_env_field_orders_keys_bytewise_and_keeps_visible_values_verbatim() {
-    let mut env = BTreeMap::new();
-    env.insert("zeta".to_string(), "last".to_string());
-    env.insert("Beta".to_string(), "b=c d".to_string());
-    env.insert("api_key".to_string(), "hidden".to_string());
-
-    assert_eq!(redacted_env_field(&env), "Beta=b=c d api_key=*** zeta=last");
+    assert!(out.contains(r#""message":"sample event""#), "{out}");
 }
 
 #[test]
@@ -365,6 +295,31 @@ fn session_log_writer_reports_the_error_when_its_parent_is_a_regular_file() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// The log file and the directory the writer creates for it are this user's
+// own, the same as the crash report the cleanup domain writes: file `0600`,
+// directory `0700`.
+#[cfg(unix)]
+#[test]
+fn a_created_log_file_is_0600_in_a_0700_directory() {
+    use std::io::Write as _;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = std::env::temp_dir().join(format!("koshi-writer-mode-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let logs = dir.join("logs");
+    let path = logs.join("koshi-log-writer.log");
+
+    let mut writer = SessionLogWriter { path: path.clone() };
+    writer.write_all(b"line one\n").expect("the first write");
+
+    let file_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    let dir_mode = std::fs::metadata(&logs).unwrap().permissions().mode() & 0o777;
+    assert_eq!(file_mode, 0o600, "the log file is owner read-write only");
+    assert_eq!(dir_mode, 0o700, "the logs directory is owner-only");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // The capture writer records raw bytes, `contents` returns them verbatim, and
 // `lines` splits on newlines; flush reports success without touching the buffer.
 #[test]
@@ -499,6 +454,33 @@ fn a_capture_sees_a_call_site_first_fired_from_an_uncaptured_thread() {
     assert_eq!(out.lines().count(), 1, "{out}");
     assert!(
         out.contains(r#""message":"probe fired""#),
+        "capture is empty: {out:?}"
+    );
+}
+
+/// An error both threads in the test below fire through one shared call site.
+fn probe_error() {
+    tracing::error!("cutoff probe fired");
+}
+
+// A capture with a cutoff below `trace` gets the same anchor: it still sees an
+// event whose call site was first executed by a thread with no subscriber.
+#[test]
+fn a_level_capped_capture_sees_a_call_site_first_fired_from_an_uncaptured_thread() {
+    let (_guard, logs) = captured_at(LogLevel::Error);
+
+    std::thread::spawn(|| {
+        tracing::dispatcher::with_default(&tracing::Dispatch::none(), probe_error);
+    })
+    .join()
+    .expect("probe thread runs to completion");
+
+    probe_error();
+
+    let out = logs.contents();
+    assert_eq!(out.lines().count(), 1, "{out}");
+    assert!(
+        out.contains(r#""message":"cutoff probe fired""#),
         "capture is empty: {out:?}"
     );
 }

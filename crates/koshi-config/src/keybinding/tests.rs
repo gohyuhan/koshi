@@ -369,7 +369,7 @@ mode "normal" { bind "<C-w>" "core:close-pane" }
 #[test]
 fn duplicate_setting_node_is_rejected() {
     let msgs = messages("chord-timeout-ms 500\nchord-timeout-ms 600");
-    assert_eq!(msgs, ["duplicate `chord-timeout-ms` node"]);
+    assert_eq!(msgs, ["`chord-timeout-ms` is declared more than once"]);
 }
 
 #[test]
@@ -575,7 +575,7 @@ mode "normal" {
 fn duplicate_leader_node_is_rejected() {
     assert_eq!(
         messages("leader \"<C-p>\"\nleader \"<A-p>\""),
-        ["duplicate `leader` node"]
+        ["`leader` is declared more than once"]
     );
 }
 
@@ -628,7 +628,7 @@ fn a_duplicate_version_node_is_reported_once_and_the_second_is_not_checked() {
     // second node produces no too-new error of its own.
     assert_eq!(
         messages("version 1\nversion 999"),
-        ["duplicate `version` node"]
+        ["`version` is declared more than once"]
     );
 }
 

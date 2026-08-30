@@ -18,15 +18,14 @@ use koshi_core::command::{
 use koshi_core::geometry::{Direction, Size};
 use koshi_core::ids::{ClientId, CommandId, TabId};
 use koshi_core::process::PtySize;
+use koshi_pty::backend::state::CarriedPtyPane;
 use koshi_pty::backend::state::{PtyBackend, PtyHandle};
-use koshi_pty::portable::CarriedPtyPane;
 use koshi_session::client::{Client, ClientOrigin, ClientRegistry};
 use koshi_terminal::grid::state::Cell;
 use koshi_test_support::fake_pty::FakePtyBackend;
 use tempfile::TempDir;
 
 use super::*;
-use crate::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
 use crate::runtime::event::RuntimeEvent;
 use crate::server::Server;
 
@@ -85,16 +84,8 @@ fn apply(server: &mut Server, client: ClientId, command: Command) {
 /// output fed into every pane's engine.
 fn populated_server() -> Populated {
     let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::new());
-    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
-    let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (inbox_tx, inbox_rx) = mpsc::channel();
-    let mut server = Server::new(
-        pty_backend,
-        snapshot_provider,
-        storage,
-        inbox_rx,
-        inbox_tx.clone(),
-    );
+    let mut server = Server::new(pty_backend, inbox_rx, inbox_tx.clone());
 
     let session_id = SessionId::new();
     let first_client = server
@@ -307,7 +298,8 @@ fn a_carried_session_reads_back_with_every_tab_pane_client_and_screen() {
 
     let (header, body) = populated
         .server
-        .carry_out(session_id, "carried".to_string(), &panes);
+        .carry_out(&panes)
+        .expect("a session to carry");
     write(&path, &header, &body).expect("write the resume file");
     let (read_header, raw_body) = read_header(&path).expect("read the header back");
     let read_body = read_body(read_header.format, &raw_body).expect("read the body back");
@@ -396,7 +388,8 @@ fn carrying_the_state_out_leaves_the_server_holding_nothing() {
 
     let (_header, body) = populated
         .server
-        .carry_out(session_id, "carried".to_string(), &panes);
+        .carry_out(&panes)
+        .expect("a session to carry");
 
     assert_eq!(
         populated.server.terminal_engines.len(),
@@ -434,7 +427,8 @@ fn a_report_the_swap_cut_in_half_finishes_in_the_next_image() {
 
     let (header, body) = populated
         .server
-        .carry_out(session_id, "carried".to_string(), &panes);
+        .carry_out(&panes)
+        .expect("a session to carry");
     assert_eq!(
         body.undecoded,
         HashMap::from([(pane, b"\x1b]7;file://host/Users/yuhan/Proj".to_vec())]),
@@ -474,7 +468,8 @@ fn a_body_written_without_the_held_bytes_reads_back_with_none() {
     let panes = carried_pty_panes(&populated.server, session_id);
     let (header, body) = populated
         .server
-        .carry_out(session_id, "carried".to_string(), &panes);
+        .carry_out(&panes)
+        .expect("a session to carry");
     write(&path, &header, &body).expect("write the resume file");
 
     // The body with its map of held bytes taken out of the JSON.
@@ -502,7 +497,8 @@ fn the_header_names_every_pane_with_the_size_the_server_holds_for_it() {
 
     let (header, _body) = populated
         .server
-        .carry_out(session_id, "carried".to_string(), &panes);
+        .carry_out(&panes)
+        .expect("a session to carry");
 
     assert_eq!(header.format, RESUME_FORMAT);
     assert_eq!(header.panes.len(), 4, "one record per live pane");
@@ -532,7 +528,8 @@ fn a_pane_the_server_holds_no_size_for_takes_the_size_the_backend_reports() {
 
     let (header, _body) = populated
         .server
-        .carry_out(session_id, "carried".to_string(), &panes);
+        .carry_out(&panes)
+        .expect("a session to carry");
 
     let record = header
         .panes
@@ -551,7 +548,8 @@ fn an_unreadable_body_still_leaves_every_pane_descriptor_and_process_id() {
     let panes = carried_pty_panes(&populated.server, session_id);
     let (header, body) = populated
         .server
-        .carry_out(session_id, "carried".to_string(), &panes);
+        .carry_out(&panes)
+        .expect("a session to carry");
     write(&path, &header, &body).expect("write the resume file");
 
     // Only the body is broken; the header on disk is untouched.
@@ -685,7 +683,8 @@ fn a_resumed_server_starts_with_no_socket_and_no_shutdown_pending() {
     let panes = carried_pty_panes(&populated.server, session_id);
     let (header, body) = populated
         .server
-        .carry_out(session_id, "carried".to_string(), &panes);
+        .carry_out(&panes)
+        .expect("a session to carry");
 
     let (resumed, _inbox_tx) = resumed_server(&header, body);
 
@@ -767,7 +766,8 @@ fn a_resume_file_whose_bytes_stop_part_way_is_a_corrupt_failure_naming_the_path(
     let panes = carried_pty_panes(&populated.server, session_id);
     let (header, body) = populated
         .server
-        .carry_out(session_id, "carried".to_string(), &panes);
+        .carry_out(&panes)
+        .expect("a session to carry");
     write(&path, &header, &body).expect("write the resume file");
 
     let whole = std::fs::read(&path).expect("read the file back");
@@ -801,7 +801,8 @@ fn a_body_missing_one_of_its_two_halves_is_corrupt_while_the_header_still_reads(
     let panes = carried_pty_panes(&populated.server, session_id);
     let (header, body) = populated
         .server
-        .carry_out(session_id, "carried".to_string(), &panes);
+        .carry_out(&panes)
+        .expect("a session to carry");
     write(&path, &header, &body).expect("write the resume file");
 
     let mut on_disk: serde_json::Value =
@@ -841,9 +842,7 @@ fn a_session_holding_no_pane_carries_out_and_reads_back_with_no_pane() {
     let mut populated = populated_server();
     let session_id = populated.session_id;
 
-    let (header, body) = populated
-        .server
-        .carry_out(session_id, "carried".to_string(), &[]);
+    let (header, body) = populated.server.carry_out(&[]).expect("a session to carry");
     write(&path, &header, &body).expect("write the resume file");
     let (read_back, raw_body) = read_header(&path).expect("read the header back");
     let read_body = read_body(read_back.format, &raw_body).expect("read the body back");
@@ -873,7 +872,6 @@ fn a_session_holding_many_panes_carries_every_one_of_them_in_order() {
     let dir = TempDir::new().expect("create temp dir");
     let path = dir.path().join("many.resume");
     let mut populated = populated_server();
-    let session_id = populated.session_id;
 
     let many: Vec<CarriedPtyPane> = (0..64)
         .map(|index| CarriedPtyPane {
@@ -891,7 +889,8 @@ fn a_session_holding_many_panes_carries_every_one_of_them_in_order() {
 
     let (header, body) = populated
         .server
-        .carry_out(session_id, "carried".to_string(), &many);
+        .carry_out(&many)
+        .expect("a session to carry");
     write(&path, &header, &body).expect("write the resume file");
     let (read_back, _raw_body) = read_header(&path).expect("read the header back");
 
@@ -927,7 +926,8 @@ fn held_bytes_naming_a_pane_the_body_carries_no_screen_for_are_dropped_with_that
     let panes = carried_pty_panes(&populated.server, session_id);
     let (header, mut body) = populated
         .server
-        .carry_out(session_id, "carried".to_string(), &panes);
+        .carry_out(&panes)
+        .expect("a session to carry");
     let stray = PaneId::new();
     body.undecoded.insert(stray, b"\x1b[".to_vec());
     let mut carried_screens: Vec<PaneId> = body.engines.keys().copied().collect();
@@ -960,7 +960,8 @@ fn a_screen_the_header_names_no_pane_for_comes_back_with_no_handle_and_no_size()
     );
     let (header, body) = populated
         .server
-        .carry_out(session_id, "carried".to_string(), &panes);
+        .carry_out(&panes)
+        .expect("a session to carry");
 
     let mut named_by_the_header: Vec<PaneId> =
         header.panes.iter().map(|pane| pane.pane_id).collect();
@@ -999,7 +1000,8 @@ fn a_body_whose_two_halves_are_swapped_is_corrupt_before_any_pane_is_touched() {
     let panes = carried_pty_panes(&populated.server, session_id);
     let (header, body) = populated
         .server
-        .carry_out(session_id, "carried".to_string(), &panes);
+        .carry_out(&panes)
+        .expect("a session to carry");
     write(&path, &header, &body).expect("write the resume file");
     let mut on_disk: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).expect("read the file")).expect("valid json");
@@ -1204,7 +1206,8 @@ fn a_body_written_without_a_quit_reads_back_with_none() {
     let panes = carried_pty_panes(&populated.server, session_id);
     let (header, body) = populated
         .server
-        .carry_out(session_id, "carried".to_string(), &panes);
+        .carry_out(&panes)
+        .expect("a session to carry");
     write(&path, &header, &body).expect("write the resume file");
 
     // The body with its quit key taken out of the JSON.

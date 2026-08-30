@@ -40,24 +40,8 @@ fn plugin_leaf(name: &str) -> TemplateNode {
     TemplateNode::Leaf(plugin(name))
 }
 
-/// An expanded child slot.
-fn expanded(node: TemplateNode) -> TemplateChild {
-    TemplateChild {
-        node,
-        collapsed: false,
-    }
-}
-
-/// A collapsed child slot.
-fn collapsed(node: TemplateNode) -> TemplateChild {
-    TemplateChild {
-        node,
-        collapsed: true,
-    }
-}
-
 /// A split of `direction` with one default weight per child.
-fn split(direction: SplitDirection, children: Vec<TemplateChild>, active: usize) -> TemplateNode {
+fn split(direction: SplitDirection, children: Vec<TemplateNode>, active: usize) -> TemplateNode {
     TemplateNode::Split(TemplateSplit {
         direction,
         weights: vec![SizeWeight::default(); children.len()],
@@ -76,15 +60,12 @@ fn empty_split() -> TemplateNode {
 fn nested_template() -> TemplateNode {
     let inner = split(
         SplitDirection::Vertical,
-        vec![
-            expanded(shell_leaf()),
-            expanded(plugin_leaf("session-manager")),
-        ],
+        vec![shell_leaf(), plugin_leaf("session-manager")],
         0,
     );
     TemplateNode::Split(TemplateSplit {
         direction: SplitDirection::Horizontal,
-        children: vec![expanded(command_leaf("nvim")), expanded(inner)],
+        children: vec![command_leaf("nvim"), inner],
         weights: vec![
             SizeWeight::new(SizeConstraint::Percent(60)),
             SizeWeight::new(SizeConstraint::Percent(40)),
@@ -121,16 +102,13 @@ fn to_layout_node_mirrors_structure_weights_and_direction() {
     let expected = LayoutNode::Split(SplitNode {
         direction: SplitDirection::Horizontal,
         children: vec![
-            LayoutChild::new(LayoutNode::Pane(a)),
-            LayoutChild::new(LayoutNode::Split(SplitNode {
+            LayoutNode::Pane(a),
+            LayoutNode::Split(SplitNode {
                 direction: SplitDirection::Vertical,
-                children: vec![
-                    LayoutChild::new(LayoutNode::Pane(b)),
-                    LayoutChild::new(LayoutNode::Pane(c)),
-                ],
+                children: vec![LayoutNode::Pane(b), LayoutNode::Pane(c)],
                 weights: vec![SizeWeight::default(), SizeWeight::default()],
                 active: 0,
-            })),
+            }),
         ],
         weights: vec![
             SizeWeight::new(SizeConstraint::Percent(60)),
@@ -150,26 +128,17 @@ fn to_layout_node_assigns_ids_in_leaf_order() {
 }
 
 #[test]
-fn stacked_template_preserves_active_and_collapsed() {
+fn stacked_template_preserves_its_active_member() {
     let template = split(
         SplitDirection::Stacked,
-        vec![collapsed(command_leaf("htop")), expanded(shell_leaf())],
+        vec![command_leaf("htop"), shell_leaf()],
         1,
     );
     let (a, b) = (PaneId::new(), PaneId::new());
     let tree = template.to_layout_node(&[a, b]).unwrap();
     let expected = LayoutNode::Split(SplitNode {
         direction: SplitDirection::Stacked,
-        children: vec![
-            LayoutChild {
-                node: LayoutNode::Pane(a),
-                collapsed: true,
-            },
-            LayoutChild {
-                node: LayoutNode::Pane(b),
-                collapsed: false,
-            },
-        ],
+        children: vec![LayoutNode::Pane(a), LayoutNode::Pane(b)],
         weights: vec![SizeWeight::default(), SizeWeight::default()],
         active: 1,
     });
@@ -180,23 +149,14 @@ fn stacked_template_preserves_active_and_collapsed() {
 fn to_layout_node_copies_an_out_of_range_active_unchanged() {
     let template = split(
         SplitDirection::Stacked,
-        vec![expanded(shell_leaf()), collapsed(command_leaf("htop"))],
+        vec![shell_leaf(), command_leaf("htop")],
         9,
     );
     let (a, b) = (PaneId::new(), PaneId::new());
     let tree = template.to_layout_node(&[a, b]).unwrap();
     let expected = LayoutNode::Split(SplitNode {
         direction: SplitDirection::Stacked,
-        children: vec![
-            LayoutChild {
-                node: LayoutNode::Pane(a),
-                collapsed: false,
-            },
-            LayoutChild {
-                node: LayoutNode::Pane(b),
-                collapsed: true,
-            },
-        ],
+        children: vec![LayoutNode::Pane(a), LayoutNode::Pane(b)],
         weights: vec![SizeWeight::default(), SizeWeight::default()],
         active: 9,
     });
@@ -225,7 +185,7 @@ fn first_visible_leaf_of_a_directional_split_is_its_first_leaf() {
 fn first_visible_leaf_ignores_active_on_a_directional_split() {
     let root = split(
         SplitDirection::Horizontal,
-        vec![expanded(shell_leaf()), expanded(command_leaf("htop"))],
+        vec![shell_leaf(), command_leaf("htop")],
         1,
     );
     assert_eq!(root.first_visible_leaf(), 0);
@@ -238,14 +198,10 @@ fn first_visible_leaf_skips_collapsed_stack_members() {
     // and the first VISIBLE one is the expanded member at index 1.
     let stack = split(
         SplitDirection::Stacked,
-        vec![collapsed(shell_leaf()), expanded(command_leaf("htop"))],
+        vec![shell_leaf(), command_leaf("htop")],
         1,
     );
-    let root = split(
-        SplitDirection::Horizontal,
-        vec![expanded(stack), expanded(shell_leaf())],
-        0,
-    );
+    let root = split(SplitDirection::Horizontal, vec![stack, shell_leaf()], 0);
     assert_eq!(root.first_visible_leaf(), 1);
 }
 
@@ -255,12 +211,12 @@ fn first_visible_leaf_counts_every_leaf_of_earlier_stack_members() {
     // member comes after the two leaves of the collapsed member.
     let pair = split(
         SplitDirection::Vertical,
-        vec![expanded(shell_leaf()), expanded(command_leaf("htop"))],
+        vec![shell_leaf(), command_leaf("htop")],
         0,
     );
     let stack = split(
         SplitDirection::Stacked,
-        vec![collapsed(pair), expanded(plugin_leaf("session-manager"))],
+        vec![pair, plugin_leaf("session-manager")],
         1,
     );
     assert_eq!(stack.first_visible_leaf(), 2);
@@ -272,17 +228,10 @@ fn first_visible_leaf_descends_into_a_nested_stack() {
     // leaves are [shell, htop, plugin] and the visible one is plugin.
     let inner = split(
         SplitDirection::Stacked,
-        vec![
-            collapsed(command_leaf("htop")),
-            expanded(plugin_leaf("session-manager")),
-        ],
+        vec![command_leaf("htop"), plugin_leaf("session-manager")],
         1,
     );
-    let outer = split(
-        SplitDirection::Stacked,
-        vec![collapsed(shell_leaf()), expanded(inner)],
-        1,
-    );
+    let outer = split(SplitDirection::Stacked, vec![shell_leaf(), inner], 1);
     assert_eq!(outer.first_visible_leaf(), 2);
 }
 
@@ -298,7 +247,7 @@ fn first_visible_leaf_with_out_of_range_active_names_the_last_member() {
     // template is instantiated.
     let stack = split(
         SplitDirection::Stacked,
-        vec![expanded(shell_leaf()), collapsed(command_leaf("htop"))],
+        vec![shell_leaf(), command_leaf("htop")],
         9,
     );
     assert_eq!(stack.first_visible_leaf(), 1);
@@ -322,11 +271,7 @@ fn empty_split_template_instantiates_with_no_ids() {
 fn an_empty_split_child_consumes_no_ids() {
     let template = split(
         SplitDirection::Horizontal,
-        vec![
-            expanded(shell_leaf()),
-            expanded(empty_split()),
-            expanded(plugin_leaf("session-manager")),
-        ],
+        vec![shell_leaf(), empty_split(), plugin_leaf("session-manager")],
         0,
     );
     let (a, b) = (PaneId::new(), PaneId::new());
@@ -334,14 +279,14 @@ fn an_empty_split_child_consumes_no_ids() {
     let expected = LayoutNode::Split(SplitNode {
         direction: SplitDirection::Horizontal,
         children: vec![
-            LayoutChild::new(LayoutNode::Pane(a)),
-            LayoutChild::new(LayoutNode::Split(SplitNode {
+            LayoutNode::Pane(a),
+            LayoutNode::Split(SplitNode {
                 direction: SplitDirection::Horizontal,
                 children: Vec::new(),
                 weights: Vec::new(),
                 active: 0,
-            })),
-            LayoutChild::new(LayoutNode::Pane(b)),
+            }),
+            LayoutNode::Pane(b),
         ],
         weights: vec![SizeWeight::default(); 3],
         active: 0,

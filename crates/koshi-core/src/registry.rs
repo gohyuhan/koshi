@@ -27,12 +27,14 @@ use crate::action::{
 };
 use crate::error::{DomainCategory, DomainError, Severity};
 use crate::ids::PluginId;
+use crate::text::sanitize_reported_text;
 
 /// The number of entries a single plugin may hold in the registry at once.
 /// Registration past it is refused.
 ///
-/// The cap counts entries. It does not bound the byte length of a plugin's
-/// `display_name` or `description`.
+/// The cap counts entries. `display_name` and `description` are bounded
+/// separately, by [`crate::text::sanitize_reported_text`] in
+/// [`ActionRegistry::register`].
 pub const MAX_PLUGIN_ACTIONS: usize = 32;
 
 /// Why an [`ActionRegistry::register`] call was refused. Each variant carries
@@ -164,7 +166,7 @@ impl ActionRegistry {
         &mut self,
         caller: PluginId,
         action: ActionRef,
-        metadata: ActionMetadata,
+        mut metadata: ActionMetadata,
     ) -> Result<(), RegistryError> {
         // 1. The reference must be in `caller`'s own `plugin:` namespace.
         match action.namespace {
@@ -205,6 +207,12 @@ impl ActionRegistry {
                 cap: MAX_PLUGIN_ACTIONS,
             });
         }
+
+        // 6. `display_name` and `description` are plugin-supplied text, cut to
+        // `MAX_REPORTED_TEXT_BYTES` with control, bidi-control and tag
+        // characters removed.
+        metadata.display_name = sanitize_reported_text(&metadata.display_name);
+        metadata.description = sanitize_reported_text(&metadata.description);
 
         self.entries.insert(action, metadata);
         self.version += 1;

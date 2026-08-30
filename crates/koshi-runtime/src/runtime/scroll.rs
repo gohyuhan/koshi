@@ -2,20 +2,19 @@
 //! into history or back down to live output, and re-anchoring held views as new
 //! output pushes lines into scrollback.
 //!
-//! The offset is per-client view state ([`Client::scroll_offset`]), so two
+//! The offset is per-client view state ([`Client::scroll_offset`](koshi_session::client::Client::scroll_offset)), so two
 //! clients scroll a shared pane independently. Every public entry point keeps
 //! the offset inside `[0, scrollback len]` and marks the frame stale when the
 //! offset moves.
 //!
 //! Scrolling moves a view; it never decides whether the view is *held* against
-//! live output. That is [`Client::is_view_held`], derived from the offset and
+//! live output. That is [`Client::is_view_held`](koshi_session::client::Client::is_view_held), derived from the offset and
 //! the client's highlight: scrolling back to the bottom follows live again only
 //! when no highlight is holding the view there.
 
 use koshi_core::ids::{ClientId, PaneId};
-use koshi_session::client::Client;
 
-use crate::{runtime::render_schedule::InvalidationReason, server::Server};
+use crate::server::Server;
 
 impl Server {
     /// Scroll `client_id`'s view of `pane_id` up by `lines` into scrollback,
@@ -35,8 +34,7 @@ impl Server {
         let target = current.saturating_add(lines).min(retained);
         if target != current {
             client.set_scroll_offset(pane_id, target);
-            self.render_scheduler
-                .invalidate(InvalidationReason::StatusChanged);
+            self.render_scheduler.invalidate();
         }
     }
 
@@ -52,8 +50,7 @@ impl Server {
         let target = current.saturating_sub(lines);
         if target != current {
             client.set_scroll_offset(pane_id, target);
-            self.render_scheduler
-                .invalidate(InvalidationReason::StatusChanged);
+            self.render_scheduler.invalidate();
         }
     }
 
@@ -96,16 +93,6 @@ impl Server {
                 client.set_scroll_offset(pane_id, (current + pushed).min(len_after));
             }
         }
-    }
-
-    /// Mutable access to the client attached under `client_id` in any session, or
-    /// `None` if no attached client has that id. Resolves the owning session via
-    /// [`session_for_client_mut`](Self::session_for_client_mut), the shared
-    /// client→session lookup.
-    pub(crate) fn client_mut(&mut self, client_id: ClientId) -> Option<&mut Client> {
-        self.session_for_client_mut(client_id)?
-            .clients
-            .get_mut(client_id)
     }
 }
 

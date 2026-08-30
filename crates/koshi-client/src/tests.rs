@@ -18,6 +18,7 @@ use koshi_core::event::{EventClass, InputModeChanged, MouseSelectChanged, Subscr
 use koshi_core::geometry::Direction;
 use koshi_core::ids::{PaneId, SessionId, SubscriberId};
 use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags};
+use koshi_core::lock::LockMode;
 use koshi_core::mouse::MouseAnswer;
 use koshi_core::resolve::ActionArgs;
 use koshi_layout::mode::LayoutMode;
@@ -28,14 +29,17 @@ use koshi_renderer::snapshot::{
 
 use super::*;
 
-fn new_client() -> (Client, mpsc::SyncSender<Delivery>) {
+/// The terminal size every fixture in this crate's tests is built at.
+pub(crate) const VIEWPORT: Size = Size { cols: 80, rows: 24 };
+
+/// A viewer on the built-in defaults, and the sender of its subscription.
+///
+/// Every test module in this crate builds its clients from here. An attached
+/// client's frames arrive over its connection instead, so a test standing in
+/// for one drops the sender.
+pub(crate) fn new_client() -> (Client, mpsc::SyncSender<Delivery>) {
     let (tx, rx) = mpsc::sync_channel(8);
-    let client = Client::new(
-        ClientId::new(),
-        Size { cols: 80, rows: 24 },
-        rx,
-        TerminalCleanupGuard::new(),
-    );
+    let client = Client::new(ClientId::new(), VIEWPORT, rx, TerminalCleanupGuard::new());
     (client, tx)
 }
 
@@ -88,8 +92,13 @@ fn resync(
     mouse_select: bool,
     dropped_count: u64,
 ) -> Delivery {
+    resync_from(frame(client_id, lock_mode, mouse_select), dropped_count)
+}
+
+/// The same, resuming from `snapshot`, whose active tab the caller reads.
+fn resync_from(snapshot: Box<RenderSnapshot>, dropped_count: u64) -> Delivery {
     Delivery::Snapshot {
-        snapshot: frame(client_id, lock_mode, mouse_select),
+        snapshot,
         lagged: SubscriberLagged {
             subscriber_id: SubscriberId::new(),
             dropped_count,
@@ -134,10 +143,9 @@ fn binds_ctrl_y() -> PartialKeybindingsConfig {
 }
 
 #[test]
-fn a_new_client_holds_its_id_viewport_and_guard() {
+fn a_new_client_holds_the_viewport_it_was_built_at() {
     let (client, _tx) = new_client();
-    assert_eq!(client.viewport(), Size { cols: 80, rows: 24 });
-    let _ = client.cleanup_guard();
+    assert_eq!(client.viewport(), VIEWPORT);
 }
 
 #[test]
@@ -154,18 +162,6 @@ fn set_viewport_records_the_new_size() {
             rows: 40,
         }
     );
-}
-
-#[test]
-fn pane_area_support_is_recorded_for_the_attached_session() {
-    let (mut client, _tx) = new_client();
-    assert!(client.pane_area_supported);
-
-    client.set_pane_area_supported(false);
-    assert!(!client.pane_area_supported);
-
-    client.set_pane_area_supported(true);
-    assert!(client.pane_area_supported);
 }
 
 #[test]
@@ -764,7 +760,10 @@ fn a_keybinding_file_removes_a_default_binding_only_in_the_mode_that_declares_it
         client.keymap.match_sequence(LockMode::Normal, &quit),
         KeyMatch::default()
     );
-    assert!(client.keymap_hints().removed.contains(&quit));
+    assert!(client
+        .frame_hints_for(client.lock_mode(), false)
+        .removed
+        .contains(&quit));
     // Locked mode's own quit binding is untouched: removal is scoped to the
     // mode that declares it.
     assert_eq!(
@@ -786,8 +785,8 @@ fn label_count(hints: &KeymapHints, label: &str) -> usize {
 fn frame_hints_flip_the_mouse_select_label_only_while_it_is_on() {
     let (client, _tx) = new_client();
 
-    let off = client.frame_hints(false);
-    let on = client.frame_hints(true);
+    let off = client.frame_hints_for(client.lock_mode(), false);
+    let on = client.frame_hints_for(client.lock_mode(), true);
 
     assert_eq!(label_count(&off, MOUSE_SELECT_HINT), 1);
     assert_eq!(label_count(&off, MOUSE_UNSELECT_HINT), 0);
@@ -802,9 +801,9 @@ fn frame_hints_flip_the_mouse_select_label_only_while_it_is_on() {
 #[test]
 fn frame_hints_follow_the_viewers_own_mode() {
     let (mut client, _tx) = new_client();
-    let normal = client.frame_hints(false);
+    let normal = client.frame_hints_for(client.lock_mode(), false);
     client.set_lock_mode(LockMode::Locked);
-    let locked = client.frame_hints(false);
+    let locked = client.frame_hints_for(client.lock_mode(), false);
 
     assert_eq!(normal.entries.len(), 22, "the shipped normal-mode bindings");
     // The reserved unlock (pinned) plus the quit and mouse-select chords.
@@ -874,7 +873,7 @@ fn a_lock_report_for_this_viewer_moves_its_own_mode_both_ways() {
 
     tx.send(Delivery::Event(Event::InputModeChanged(InputModeChanged {
         client_id: client.id(),
-        mode: InputMode::Locked,
+        mode: LockMode::Locked,
     })))
     .expect("the viewer's queue has room");
     assert_eq!(client.apply_events(), 1);
@@ -882,7 +881,7 @@ fn a_lock_report_for_this_viewer_moves_its_own_mode_both_ways() {
 
     tx.send(Delivery::Event(Event::InputModeChanged(InputModeChanged {
         client_id: client.id(),
-        mode: InputMode::Normal,
+        mode: LockMode::Normal,
     })))
     .expect("the viewer's queue has room");
     assert_eq!(client.apply_events(), 1);
@@ -897,7 +896,7 @@ fn a_lock_report_for_another_viewer_is_ignored() {
 
     tx.send(Delivery::Event(Event::InputModeChanged(InputModeChanged {
         client_id: ClientId::new(),
-        mode: InputMode::Locked,
+        mode: LockMode::Locked,
     })))
     .expect("the viewer's queue has room");
 
@@ -1064,13 +1063,48 @@ fn an_event_queued_after_a_resync_frame_applies_on_top_of_it() {
         .expect("the viewer's queue has room");
     tx.send(Delivery::Event(Event::InputModeChanged(InputModeChanged {
         client_id: client.id(),
-        mode: InputMode::Normal,
+        mode: LockMode::Normal,
     })))
     .expect("the viewer's queue has room");
 
     assert_eq!(client.apply_events(), 2, "the frame and the event");
     assert_eq!(client.lock_mode(), LockMode::Normal, "the event won");
     assert!(client.mouse_select(), "and the frame's own value stands");
+}
+
+#[test]
+fn a_resync_frame_throws_away_a_tab_strip_peek_made_on_another_tab() {
+    // The viewer learns a tab switch from the frames it sees, and a resync
+    // frame is one of them.
+    let (mut client, tx) = new_client();
+    let peeked = TabId::new();
+    client.tabline_peek = Some((peeked, 3));
+    tx.send(resync_from(frame(client.id(), LockMode::Normal, false), 4))
+        .expect("the viewer's queue has room");
+
+    assert_eq!(client.apply_events(), 1);
+
+    assert_eq!(client.tabline_peek, None);
+    assert_eq!(
+        client.chrome(peeked).tabline_offset,
+        None,
+        "switching back to the peeked tab starts the strip at its own first tab"
+    );
+}
+
+#[test]
+fn a_resync_frame_keeps_a_tab_strip_peek_made_on_the_tab_it_names() {
+    let (mut client, tx) = new_client();
+    let snapshot = frame(client.id(), LockMode::Normal, false);
+    let active = snapshot.client.active_tab;
+    client.tabline_peek = Some((active, 3));
+    tx.send(resync_from(snapshot, 4))
+        .expect("the viewer's queue has room");
+
+    assert_eq!(client.apply_events(), 1);
+
+    assert_eq!(client.tabline_peek, Some((active, 3)));
+    assert_eq!(client.chrome(active).tabline_offset, Some(3));
 }
 
 #[test]

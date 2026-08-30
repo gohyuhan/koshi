@@ -14,9 +14,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use koshi_config::conflict::{
-    built_in_modes, detect_conflicts, keymap_layers, ConflictReport, KeymapVerdict,
-};
+use koshi_config::conflict::{detect_conflicts, keymap_layers, ConflictReport, KeymapVerdict};
 use koshi_config::keybinding::{parse_keybindings, KeybindingParseError};
 use koshi_config::keymap_merge::{merge_keymaps, MergedKeyMap};
 use koshi_config::layer::PartialKeybindingsConfig;
@@ -107,7 +105,6 @@ pub fn view_from_partial(
         None => None,
     };
 
-    let modes = built_in_modes();
     let layers = keymap_layers(user_modes, config.leader);
     let report = detect_conflicts(
         &layers,
@@ -115,7 +112,6 @@ pub fn view_from_partial(
         config.unlock_alternative,
         config.max_chord_depth,
         &registry,
-        &modes,
     );
 
     // All-or-nothing: a refused user layer drops the whole section back to
@@ -132,7 +128,6 @@ pub fn view_from_partial(
         config.unlock_alternative,
         config.max_chord_depth,
         &registry,
-        &modes,
     );
     KeymapView {
         config,

@@ -5,7 +5,7 @@
 //! everything else about that pane: its kind, its command, its working
 //! directory, its lifecycle state and its timestamps.
 
-use std::{collections::BTreeMap, path::PathBuf, time::SystemTime};
+use std::{path::PathBuf, time::SystemTime};
 
 use koshi_core::{
     error::DomainCategory,
@@ -37,7 +37,7 @@ impl PaneKind {
     /// The diagnostics domain for a failure on this pane. A terminal pane
     /// reports `Terminal`. A plugin pane reports `Plugin`.
     #[must_use]
-    pub fn domain_category(&self) -> DomainCategory {
+    pub(crate) fn domain_category(&self) -> DomainCategory {
         match self {
             PaneKind::Terminal => DomainCategory::Terminal,
             PaneKind::Plugin { .. } => DomainCategory::Plugin,
@@ -61,12 +61,10 @@ pub struct PaneRecord {
     pub close_policy: PaneClosePolicy,
     /// What happens to the pane when its child process ends.
     pub exit_policy: PaneExitPolicy,
-    /// The environment overrides that apply at spawn, in name order.
-    pub env: BTreeMap<String, String>,
     /// Where the pane sits in its lifecycle.
     lifecycle: PaneLifecycle,
-    /// The time when the pane was created.
-    pub created_at: SystemTime,
+    /// The time when the pane was created. It never changes.
+    created_at: SystemTime,
 }
 
 impl PaneRecord {
@@ -85,7 +83,6 @@ impl PaneRecord {
             cwd: None,
             close_policy: PaneClosePolicy::default(),
             exit_policy: PaneExitPolicy::default(),
-            env: BTreeMap::new(),
             lifecycle: PaneLifecycle::Spawning,
             created_at,
         }
@@ -102,6 +99,13 @@ impl PaneRecord {
     #[must_use]
     pub fn kind(&self) -> &PaneKind {
         &self.kind
+    }
+
+    /// The time this pane was created. It is set at creation and never
+    /// changes.
+    #[must_use]
+    pub fn created_at(&self) -> SystemTime {
+        self.created_at
     }
 
     /// Where this pane sits in its lifecycle state machine.

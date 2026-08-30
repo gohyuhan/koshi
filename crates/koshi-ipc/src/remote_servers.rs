@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{IpcError, RemoteFile};
 use crate::protocol::ConnectionToken;
-use crate::remote_state::write_owner_only;
+use crate::remote_state::{format_mismatch, write_owner_only};
 
 /// The format number this build writes into every saved-server file, and the
 /// only one it reads back.
@@ -112,11 +112,8 @@ impl ServerStore {
         };
         let store: ServerStore =
             serde_json::from_slice(&data).map_err(|error| unreadable(error.to_string()))?;
-        if store.format != SERVER_STORE_FORMAT {
-            return Err(unreadable(format!(
-                "format {} is not the {SERVER_STORE_FORMAT} this build reads",
-                store.format
-            )));
+        if let Some(detail) = format_mismatch(store.format, SERVER_STORE_FORMAT) {
+            return Err(unreadable(detail));
         }
         Ok(store)
     }

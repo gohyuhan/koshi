@@ -2924,3 +2924,47 @@ fn spawning_a_pane_id_the_backend_already_holds_is_refused() {
         .kill(pane, KillPolicy::Tree)
         .expect("close the pane");
 }
+
+#[cfg(unix)]
+#[test]
+fn taking_back_a_pane_id_the_backend_already_holds_is_refused() {
+    // The live entry keeps its terminal and its threads: replacing it would
+    // detach them and leave the first child with nothing that can kill it.
+    let sink = CountingSink::new();
+    let (backend, pane) = backend_running(sink.clone(), "sleep 30");
+
+    let (second_child, terminal, pid) = {
+        let _gate = PTY_GATE.lock().expect("pty gate");
+        let pair = native_pty_system()
+            .openpty(to_pp_size(PANE_SIZE))
+            .expect("openpty");
+        let terminal = own_terminal_fd(&*pair.master).expect("terminal descriptor");
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.arg("-c");
+        cmd.arg("sleep 30");
+        let child = ChildGuard::new(pair.slave.spawn_command(cmd).expect("spawn"));
+        drop(pair.slave);
+        let pid = child.process_id().expect("pid");
+        (child, terminal, pid)
+    };
+
+    let refused = backend
+        .adopt(pane, terminal, pid, PANE_SIZE, None)
+        .expect_err("the id is already open");
+
+    assert_eq!(
+        refused.to_string(),
+        format!("failed to spawn pty: pane {pane} is already open")
+    );
+    assert!(
+        process_alive(pid),
+        "a refused take-back must leave the second child running"
+    );
+    backend
+        .resize(pane, PANE_SIZE)
+        .expect("the first pane is still held");
+    backend
+        .kill(pane, KillPolicy::Tree)
+        .expect("close the pane");
+    drop(second_child);
+}

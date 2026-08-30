@@ -18,7 +18,6 @@ use koshi_session::session::state::{Session, Tab};
 use koshi_terminal::engine::TerminalEngine;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
-use crate::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
 use crate::runtime::event::RuntimeEvent;
 use crate::runtime::render_schedule::FRAME_INTERVAL;
 use crate::server::Server;
@@ -28,16 +27,8 @@ use crate::server::Server;
 /// line into scrollback. Returns the runtime plus the pane and client ids.
 fn runtime_with_pane() -> (Server, PaneId, ClientId) {
     let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::new());
-    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
-    let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (tx, inbox_rx) = mpsc::channel::<RuntimeEvent>();
-    let mut rt = Server::new(
-        pty_backend,
-        snapshot_provider,
-        storage,
-        inbox_rx,
-        tx.clone(),
-    );
+    let mut rt = Server::new(pty_backend, inbox_rx, tx.clone());
     let (pane_id, client_id) = attach_session_with_pane(&mut rt);
     (rt, pane_id, client_id)
 }

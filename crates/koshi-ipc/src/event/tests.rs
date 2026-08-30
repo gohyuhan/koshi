@@ -456,7 +456,109 @@ fn the_payload_frames_wire_shape_belongs_to_this_protocol_version() {
             bytes: vec![0x1b, b']', 0xc3, 0xa9],
         })
         .expect("event encodes"),
-        json!({ "HostWrite": { "bytes": [27, 93, 195, 169] } })
+        json!({ "HostWrite": { "bytes": "G13DqQ==" } })
+    );
+}
+
+#[test]
+fn a_host_write_travels_as_one_base64_string() {
+    let sent = SessionEvent::HostWrite {
+        bytes: vec![0x1b, b']', 0xc3, 0xa9],
+    };
+
+    let encoded = serde_json::to_string(&sent).expect("event encodes");
+
+    assert_eq!(encoded, r#"{"HostWrite":{"bytes":"G13DqQ=="}}"#);
+    let received: SessionEvent = serde_json::from_str(&encoded).expect("event decodes");
+    assert_eq!(received, sent);
+}
+
+#[test]
+fn every_byte_value_survives_a_host_write() {
+    let all: Vec<u8> = (0..=u8::MAX).collect();
+    let sent = SessionEvent::HostWrite { bytes: all.clone() };
+
+    let encoded = serde_json::to_value(&sent).expect("event encodes");
+
+    assert_eq!(
+        encoded,
+        json!({ "HostWrite": { "bytes": "\
+AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7\
+PD0+P0BBQkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWltcXV5fYGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3\
+eHl6e3x9fn+AgYKDhIWGh4iJiouMjY6PkJGSk5SVlpeYmZqbnJ2en6ChoqOkpaanqKmqq6ytrq+wsbKz\
+tLW2t7i5uru8vb6/wMHCw8TFxsfIycrLzM3Oz9DR0tPU1dbX2Nna29zd3t/g4eLj5OXm5+jp6uvs7e7v\
+8PHy8/T19vf4+fr7/P3+/w==" } })
+    );
+    let received: SessionEvent = serde_json::from_value(encoded).expect("event decodes");
+    assert_eq!(received, SessionEvent::HostWrite { bytes: all });
+}
+
+/// The shape a session server speaking session protocol 2 writes. A client
+/// that upgraded while such a session is still running reads it.
+#[test]
+fn a_host_write_carrying_a_list_of_numbers_still_reads() {
+    let decoded: SessionEvent =
+        serde_json::from_str(r#"{"HostWrite":{"bytes":[27,93,195,169]}}"#).expect("event decodes");
+
+    assert_eq!(
+        decoded,
+        SessionEvent::HostWrite {
+            bytes: vec![0x1b, b']', 0xc3, 0xa9],
+        }
+    );
+    // What it decoded to is written back as base64, never as the list it came
+    // from.
+    assert_eq!(
+        serde_json::to_string(&decoded).expect("event encodes"),
+        r#"{"HostWrite":{"bytes":"G13DqQ=="}}"#
+    );
+}
+
+#[test]
+fn an_empty_host_write_reads_from_either_shape() {
+    let from_list: SessionEvent =
+        serde_json::from_str(r#"{"HostWrite":{"bytes":[]}}"#).expect("event decodes");
+    let from_base64: SessionEvent =
+        serde_json::from_str(r#"{"HostWrite":{"bytes":""}}"#).expect("event decodes");
+
+    assert_eq!(from_list, SessionEvent::HostWrite { bytes: Vec::new() });
+    assert_eq!(from_base64, from_list);
+}
+
+#[test]
+fn a_host_write_list_entry_outside_a_byte_is_refused() {
+    let error = serde_json::from_str::<SessionEvent>(r#"{"HostWrite":{"bytes":[27,256]}}"#)
+        .expect_err("256 is not a byte");
+
+    assert!(
+        error.to_string().contains("invalid value"),
+        "unexpected refusal: {error}"
+    );
+}
+
+#[test]
+fn a_host_write_carrying_neither_shape_is_refused() {
+    let error = serde_json::from_str::<SessionEvent>(r#"{"HostWrite":{"bytes":27}}"#)
+        .expect_err("a number is neither shape");
+
+    assert!(
+        error
+            .to_string()
+            .contains("bytes as a base64 string or as a list of numbers"),
+        "unexpected refusal: {error}"
+    );
+}
+
+#[test]
+fn a_host_write_carrying_text_that_is_not_base64_is_refused() {
+    let error = serde_json::from_str::<SessionEvent>(r#"{"HostWrite":{"bytes":"a"}}"#)
+        .expect_err("one character is not a base64 group");
+
+    assert!(
+        error
+            .to_string()
+            .contains("the base64 text length is not a multiple of four"),
+        "unexpected refusal: {error}"
     );
 }
 

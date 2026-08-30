@@ -6,7 +6,7 @@ use std::time::SystemTime;
 use koshi_core::command::{GridPos, Selection, SelectionKind};
 use koshi_core::geometry::{PaneArea, SplitDirection};
 use koshi_core::lock::LockMode;
-use koshi_layout::tree::{LayoutChild, SplitNode};
+use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pane::pane::state::PaneRecord;
 
 use crate::client::ClientOrigin;
@@ -657,14 +657,11 @@ fn a_session_with_tabs_panes_and_clients_survives_a_serde_round_trip() {
     let tab_one_layout = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
         vec![
-            LayoutChild::new(LayoutNode::Pane(pane_one)),
-            LayoutChild::new(LayoutNode::Split(SplitNode::with_equal_weights(
+            LayoutNode::Pane(pane_one),
+            LayoutNode::Split(SplitNode::with_equal_weights(
                 SplitDirection::Vertical,
-                vec![
-                    LayoutChild::new(LayoutNode::Pane(pane_two)),
-                    LayoutChild::new(LayoutNode::Pane(pane_three)),
-                ],
-            ))),
+                vec![LayoutNode::Pane(pane_two), LayoutNode::Pane(pane_three)],
+            )),
         ],
     ));
     let mut first_tab = Tab::new(tab_one, "one".to_owned(), 0, pane_one);
@@ -739,8 +736,6 @@ fn a_session_with_tabs_panes_and_clients_survives_a_serde_round_trip() {
     assert_eq!(read_back.name, "carried");
     assert_eq!(read_back.created_at, SystemTime::UNIX_EPOCH);
     assert_eq!(*read_back.lifecycle(), SessionLifecycle::Running);
-    // `plugin_runtime_ref` is `#[serde(skip)]`, so it reads back as `None`.
-    assert!(read_back.plugin_runtime_ref.is_none());
 
     assert_eq!(read_back.tabs.len(), 2);
     let recovered_one = read_back.tabs.get(&tab_one).expect("tab one is carried");
@@ -808,6 +803,34 @@ fn a_session_with_tabs_panes_and_clients_survives_a_serde_round_trip() {
     assert_eq!(recovered_second.zoomed_pane(tab_one), None);
     assert_eq!(recovered_second.scroll_offset(pane_three), 3);
     assert_eq!(recovered_second.scroll_offset(pane_two), 0);
+}
+
+#[test]
+fn a_stored_session_carrying_a_config_snapshot_key_still_reads() {
+    // `config_snapshot` is not a field of `Session`, so a stored session that
+    // names it reads back with the key ignored and every other field taken.
+    let session_id = SessionId::new();
+    let stored = serde_json::json!({
+        "id": session_id,
+        "name": "carried",
+        "created_at": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+        "tabs": {},
+        "panes": { "records": {} },
+        "clients": { "records": {} },
+        "config_snapshot": null,
+        "lifecycle": "Starting",
+    });
+
+    let read_back: Session = serde_json::from_value(stored).expect("the stored session reads back");
+
+    assert_eq!(read_back.id, session_id);
+    assert_eq!(read_back.name, "carried");
+    assert_eq!(read_back.created_at, SystemTime::UNIX_EPOCH);
+    assert_eq!(*read_back.lifecycle(), SessionLifecycle::Starting);
+    assert!(!read_back.start_locked);
+    assert!(read_back.tabs.is_empty());
+    assert!(read_back.panes.is_empty());
+    assert!(read_back.clients.is_empty());
 }
 
 #[test]

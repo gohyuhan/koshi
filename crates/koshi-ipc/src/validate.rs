@@ -4,7 +4,8 @@
 //! On Unix the socket is a file.
 //! [`validate_socket_addr`](crate::validate::validate_socket_addr) accepts
 //! only a path directly inside the koshi runtime directory while that
-//! directory has mode `0700`. On Windows the socket is a named pipe with no
+//! directory is a directory owned by this user with mode `0700`, and is not a
+//! symbolic link. On Windows the socket is a named pipe with no
 //! filesystem location, and the check is that the name starts with `koshi-`.
 //! Who may open the pipe is settled by the listener that creates it and by
 //! the check on the connected peer, not by this module.
@@ -32,11 +33,12 @@ use crate::transport::Connection;
 /// Check that `addr` is a trustworthy place for a koshi control socket.
 ///
 /// On Unix, `addr` must name a file directly inside `runtime_dir` (no
-/// subdirectory, no path that steps out through `..`), and `runtime_dir`
-/// must be readable with permission bits exactly `0700`; the set-user-id,
-/// set-group-id and sticky bits are not checked. The check follows a
-/// symbolic link at `runtime_dir`. On Windows, `addr` is a pipe name and
-/// must start with `koshi-`; `runtime_dir` is not read.
+/// subdirectory, no path that steps out through `..`), and `runtime_dir` must
+/// be a directory owned by this user with permission bits exactly `0700`; the
+/// set-user-id, set-group-id and sticky bits are not checked. The check reads
+/// `runtime_dir` without following a symbolic link, and refuses a link. On
+/// Windows, `addr` is a pipe name and must start with `koshi-`; `runtime_dir`
+/// is not read.
 ///
 /// Each refusal is [`IpcError::UntrustedSocket`] naming `addr` and the
 /// reason.
@@ -49,19 +51,36 @@ pub fn validate_socket_addr(addr: &str, runtime_dir: &Path) -> Result<(), IpcErr
     };
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
         if Path::new(addr).parent() != Some(runtime_dir) {
             return Err(untrusted(
                 "not directly inside the koshi runtime directory".to_string(),
             ));
         }
-        let metadata = std::fs::metadata(runtime_dir)
+        let metadata = std::fs::symlink_metadata(runtime_dir)
             .map_err(|error| untrusted(format!("runtime directory is unreadable: {error}")))?;
+        if metadata.file_type().is_symlink() {
+            return Err(untrusted(
+                "runtime directory is a symbolic link".to_string(),
+            ));
+        }
+        if !metadata.is_dir() {
+            return Err(untrusted(
+                "runtime directory is not a directory".to_string(),
+            ));
+        }
         let mode = metadata.permissions().mode() & 0o777;
         if mode != 0o700 {
             return Err(untrusted(format!(
                 "runtime directory mode is {mode:03o}, expected 700"
+            )));
+        }
+        let owner = metadata.uid();
+        let euid = unsafe { libc::geteuid() };
+        if owner != euid {
+            return Err(untrusted(format!(
+                "runtime directory is owned by uid {owner}, expected {euid}"
             )));
         }
         Ok(())

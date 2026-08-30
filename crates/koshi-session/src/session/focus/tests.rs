@@ -486,28 +486,9 @@ fn empty_tab() -> Tab {
 }
 
 #[test]
-fn an_empty_tab_reports_the_empty_tab_policy() {
-    // A tab with no leaves at all falls to its empty-tab policy, carried out.
-    let tab = empty_tab();
-    let registry = PaneRegistry::new();
-
-    let result = repair_focus(
-        &tab,
-        &registry,
-        candidates(None, None, Vec::new()),
-        EmptyTabPolicy::RespawnShell,
-    );
-
-    assert_eq!(
-        result,
-        FocusRepairResult::EmptyTab(EmptyTabPolicy::RespawnShell)
-    );
-}
-
-#[test]
-fn an_empty_tab_carries_the_close_tab_policy_back_unchanged() {
-    // The policy is passed straight through, so the other variant comes back
-    // just as `RespawnShell` does.
+fn an_empty_tab_carries_the_empty_tab_policy_back_unchanged() {
+    // A tab with no leaves at all falls to its empty-tab policy, passed
+    // straight through to the caller.
     let tab = empty_tab();
     let registry = PaneRegistry::new();
 

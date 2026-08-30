@@ -369,26 +369,17 @@ impl Server {
     ///
     /// The child is already dead: the backend's watcher reaped it and set its
     /// `exited` flag before this exit became observable. [`on_child_exit`]
-    /// applies the pane's exit policy — a `CloseOnExit` pane is removed (its tab
-    /// may close and the last tab quit) and its runtime bookkeeping is released
-    /// while the survivors reflow; a `RespawnShell` pane keeps its slot and its
-    /// bookkeeping, its lifecycle advancing to `Spawning`. An exit for a pane
-    /// already gone — closed while the exit waited in the inbox — is dropped.
+    /// applies the pane's exit policy: the pane is removed — its tab may close
+    /// and the last tab quit — and its runtime bookkeeping is released while the
+    /// survivors reflow. An exit for a pane already gone — closed while the exit
+    /// waited in the inbox — is dropped.
     ///
     /// Releasing a removed pane's bookkeeping drops its PTY handle, size cache,
     /// terminal engine, and the backend's own PTY entry. The backend purge goes
     /// through `kill`, which drops the writer, joins the finished watcher, and
     /// frees the master fd; the `exited` flag the watcher set makes it send no
     /// signal to the dead child, so the purge is a bounded, inline call.
-    ///
-    /// `exited_at` is supplied by the producer that observed the exit; the
-    /// handler never reads the clock itself.
-    pub fn handle_child_exit(
-        &mut self,
-        pane_id: PaneId,
-        status: ExitStatus,
-        exited_at: SystemTime,
-    ) -> Vec<Event> {
+    pub fn handle_child_exit(&mut self, pane_id: PaneId, status: ExitStatus) -> Vec<Event> {
         // A signal-terminated child carries no numeric code; the session models
         // that as `None`.
         let exit_code = match status {
@@ -422,27 +413,19 @@ impl Server {
         // candidates geometrically even when no client currently views the tab.
         let tab_rect = Rect::at_origin(Self::close_viewport(session, tab_id));
 
-        // Apply the exit policy: `PaneProcessExited`, then either the removal
-        // cascade (`CloseOnExit`) or a lifecycle advance to `Spawning`
-        // (`RespawnShell`).
+        // Apply the exit policy: `PaneProcessExited`, then the removal cascade.
         let mut events = on_child_exit(
             session,
             tab_id,
             pane_id,
             exit_code,
-            exited_at,
             tab_rect,
             sizing,
             EmptyTabPolicy::default(),
         );
 
-        // A respawning pane keeps its slot and bookkeeping — nothing to release.
-        if session.panes.get(pane_id).is_some() {
-            return events;
-        }
-
-        // The policy removed the pane: drop its runtime bookkeeping and reflow
-        // the survivors into the space it freed.
+        // Drop the removed pane's runtime bookkeeping and reflow the survivors
+        // into the space it freed.
         self.release_pane_and_reflow(session_id, tab_id, pane_id, backend.as_ref(), &mut events);
 
         // Release the backend's own PTY entry. The child already exited, so the
@@ -450,8 +433,7 @@ impl Server {
         // joins the finished watcher, and frees the master fd.
         let _ = backend.kill(pane_id, KillPolicy::Force);
 
-        self.render_scheduler
-            .invalidate(InvalidationReason::LayoutChanged);
+        self.render_scheduler.invalidate();
 
         events
     }
@@ -545,8 +527,12 @@ impl Server {
         let mut events = vec![Event::LayoutChanged(LayoutChanged {
             tab_id: target.tab_id,
         })];
-        let rects = Self::tab_content_rects(session, target.tab_id, viewport, sizing);
-        self.reflow_changed(backend.as_ref(), rects, None, &mut events);
+        self.reflow_tab_if_viewed(
+            backend.as_ref(),
+            target.session_id,
+            target.tab_id,
+            &mut events,
+        );
 
         Ok(Self::commit_events(&mut self.event_bus, command_id, events))
     }
@@ -668,8 +654,12 @@ impl Server {
             events.push(Event::LayoutChanged(LayoutChanged {
                 tab_id: target.tab_id,
             }));
-            let rects = Self::tab_content_rects(session, target.tab_id, viewport, sizing);
-            self.reflow_changed(backend.as_ref(), rects, None, &mut events);
+            self.reflow_tab_if_viewed(
+                backend.as_ref(),
+                target.session_id,
+                target.tab_id,
+                &mut events,
+            );
         }
 
         if prior_pane != Some(target.pane_id) {
@@ -785,8 +775,7 @@ impl Server {
         // This client's view changed: re-solve the tab and resize each live PTY
         // whose size changed.
         let mut events = vec![Event::LayoutChanged(LayoutChanged { tab_id })];
-        let rects = Self::tab_content_rects(session, tab_id, viewport, sizing);
-        self.reflow_changed(backend.as_ref(), rects, None, &mut events);
+        self.reflow_tab_if_viewed(backend.as_ref(), target.session_id, tab_id, &mut events);
 
         if focus_moved {
             events.push(Event::PaneFocused(PaneFocused {

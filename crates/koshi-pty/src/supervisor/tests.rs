@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use koshi_core::process::ShellKind;
+use koshi_core::process::{ExitStatus, ShellKind};
 use koshi_ipc::supervisor::{SupervisorPane, SupervisorRequestKind};
 use koshi_ipc::transport::Listener;
 

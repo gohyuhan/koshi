@@ -931,3 +931,28 @@ fn painted_frame() -> crate::frame::PaintedFrame {
         },
     }
 }
+
+#[test]
+fn an_unknown_name_is_filtered_as_it_is_read() {
+    // The name is quoted back in a refusal and written on a log line, and the
+    // peer that chose it may be another local user or another machine.
+    let decoded: MaybeKnown<Sample> =
+        serde_json::from_str("{\"\\u001b[2JAdded\":{\"pane\":3}}").unwrap();
+    assert_eq!(
+        decoded,
+        MaybeKnown::Unknown {
+            name: "[2JAdded".to_string(),
+        }
+    );
+}
+
+#[test]
+fn an_unknown_name_is_cut_to_the_reported_text_cap() {
+    let long = "A".repeat(100_000);
+    let decoded: MaybeKnown<Sample> =
+        serde_json::from_str(&format!(r#"{{"{long}":{{"pane":3}}}}"#)).unwrap();
+    let MaybeKnown::Unknown { name } = decoded else {
+        panic!("a name this build does not have reads as unknown");
+    };
+    assert_eq!(name.len(), koshi_core::text::MAX_REPORTED_TEXT_BYTES);
+}

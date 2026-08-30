@@ -15,7 +15,6 @@ use koshi_core::key::{Key, KeyChord, ModFlags, NamedKey};
 use koshi_core::process::{ExitStatus, KillPolicy};
 use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_pty::backend::state::PtyBackend;
-use koshi_runtime::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
 use koshi_runtime::runtime::bus::EventFilter;
 use koshi_runtime::runtime::event::RuntimeEvent;
 use koshi_runtime::server::Server;
@@ -27,10 +26,8 @@ const VIEWPORT: Size = Size { cols: 80, rows: 24 };
 /// clone for the pane forwarders.
 fn server_with(fake: Arc<FakePtyBackend>) -> Server {
     let backend: Arc<dyn PtyBackend> = fake;
-    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
-    let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (tx, rx) = mpsc::channel();
-    Server::new(backend, snapshot_provider, storage, rx, tx)
+    Server::new(backend, rx, tx)
 }
 
 /// Receive the first inbox event `want` accepts, dropping the ones before it.
@@ -180,7 +177,6 @@ fn child_exit_is_forwarded_and_ends_the_last_pane() {
     let RuntimeEvent::ChildExit {
         pane_id: exited,
         status,
-        exited_at,
     } = event
     else {
         unreachable!("matched above")
@@ -189,7 +185,7 @@ fn child_exit_is_forwarded_and_ends_the_last_pane() {
     assert_eq!(status, ExitStatus::ExitCode(0));
 
     // Applying the exit removes the only pane, so the loop's exit condition trips.
-    let _ = rt.handle_child_exit(exited, status, exited_at);
+    let _ = rt.handle_child_exit(exited, status);
     assert!(!rt.has_active_panes());
 }
 
@@ -230,7 +226,6 @@ fn trailing_output_is_forwarded_before_the_exit() {
         RuntimeEvent::ChildExit {
             pane_id: exited,
             status,
-            exited_at: _,
         } => {
             assert_eq!(exited, pane_id);
             assert_eq!(status, ExitStatus::ExitCode(3));

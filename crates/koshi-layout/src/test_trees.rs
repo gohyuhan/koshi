@@ -3,7 +3,7 @@
 use koshi_core::geometry::SplitDirection;
 use koshi_core::ids::PaneId;
 
-use crate::tree::{LayoutChild, LayoutNode, SplitNode};
+use crate::tree::{LayoutNode, SplitNode};
 
 /// A chain of `panes.len() - 1` two-child splits. Each split holds one leaf
 /// as its first child and the rest of the chain as its second child. The
@@ -27,10 +27,7 @@ pub(crate) fn deep_alternating(panes: &[PaneId]) -> LayoutNode {
         };
         node = LayoutNode::Split(SplitNode::with_equal_weights(
             direction,
-            vec![
-                LayoutChild::new(LayoutNode::Pane(pane)),
-                LayoutChild::new(node),
-            ],
+            vec![LayoutNode::Pane(pane), node],
         ));
     }
     node

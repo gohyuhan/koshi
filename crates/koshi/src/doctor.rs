@@ -42,7 +42,7 @@ pub enum Verdict {
 }
 
 /// One check's answer.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Outcome {
     /// What the check concluded.
     pub verdict: Verdict,
@@ -280,16 +280,10 @@ impl Context {
 pub struct CheckRow {
     /// The check's name.
     pub name: &'static str,
-    /// What the check concluded.
-    pub verdict: Verdict,
-    /// The fact behind the verdict.
-    pub reason: String,
-    /// What to do about it, or `None` when there is nothing to do.
-    pub help: Option<String>,
-    /// The full text behind a shortened `reason`, or `None` when `reason`
-    /// already says the whole thing. `--format json` prints it and the table
-    /// leaves it out.
-    pub detail: Option<String>,
+    /// What the check concluded. `--format json` prints its fields beside
+    /// `name` in the same object.
+    #[serde(flatten)]
+    pub outcome: Outcome,
 }
 
 /// Run every check against `context`, in print order.
@@ -297,15 +291,9 @@ pub struct CheckRow {
 pub fn rows(context: &Context) -> Vec<CheckRow> {
     CHECKS
         .iter()
-        .map(|check| {
-            let outcome = (check.run)(context);
-            CheckRow {
-                name: check.name,
-                verdict: outcome.verdict,
-                reason: outcome.reason,
-                help: outcome.help,
-                detail: outcome.detail,
-            }
+        .map(|check| CheckRow {
+            name: check.name,
+            outcome: (check.run)(context),
         })
         .collect()
 }
@@ -327,7 +315,7 @@ pub fn run(format: FormatArg) -> Result<(), CliError> {
 fn failed(rows: &[CheckRow]) -> Option<CliError> {
     let count = rows
         .iter()
-        .filter(|row| row.verdict == Verdict::Fail)
+        .filter(|row| row.outcome.verdict == Verdict::Fail)
         .count();
     if count == 0 {
         return None;
@@ -412,7 +400,11 @@ fn check_runtime_dir(context: &Context) -> Outcome {
         return no_home_directory("runtime");
     };
     let mut outcome = runtime_dir_state(dir, context.runtime_mode);
-    outcome.reason = format!("{}; {}", outcome.reason, runtime_dir_rule_phrase(rule));
+    outcome.reason = one_line(format!(
+        "{}; {}",
+        outcome.reason,
+        runtime_dir_rule_phrase(rule)
+    ));
     outcome
 }
 

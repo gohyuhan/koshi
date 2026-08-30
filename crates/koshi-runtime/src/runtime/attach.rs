@@ -32,7 +32,8 @@ pub fn session_structure(session: &Session) -> AttachedSessionStructureSnapshot 
         .collect();
     tabs.sort_by_key(|tab| tab.index);
 
-    let mut panes: Vec<PaneStructure> = session
+    // `PaneRegistry::list` walks in id order, so the snapshot is already sorted.
+    let panes: Vec<PaneStructure> = session
         .panes
         .list()
         .map(|record| PaneStructure {
@@ -40,7 +41,6 @@ pub fn session_structure(session: &Session) -> AttachedSessionStructureSnapshot 
             kind: *record.kind(),
         })
         .collect();
-    panes.sort_by_key(|pane| pane.id);
 
     AttachedSessionStructureSnapshot {
         id: session.id,

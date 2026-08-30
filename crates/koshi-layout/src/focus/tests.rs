@@ -190,36 +190,9 @@ fn panes_at_the_coordinate_limit_rank_without_overflow() {
 }
 
 fn collapsed_flags(stack: &SplitNode) -> Vec<bool> {
-    stack.children.iter().map(|child| child.collapsed).collect()
-}
-
-#[test]
-fn focus_next_cycles_forward_and_wraps() {
-    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
-    let mut stack = SplitNode::stack(vec![a, b, c], 0);
-
-    let change = stack_focus_next(&mut stack).unwrap();
-    assert_eq!(change.newly_active, b);
-    assert_eq!(change.deactivated, Some(a));
-    assert_eq!(stack.active, 1);
-    assert_eq!(collapsed_flags(&stack), [true, false, true]);
-
-    stack_focus_next(&mut stack).unwrap();
-    let wrapped = stack_focus_next(&mut stack).unwrap();
-    assert_eq!(wrapped.newly_active, a);
-    assert_eq!(stack.active, 0);
-}
-
-#[test]
-fn focus_prev_cycles_backward_and_wraps() {
-    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
-    let mut stack = SplitNode::stack(vec![a, b, c], 0);
-
-    let change = stack_focus_prev(&mut stack).unwrap();
-    assert_eq!(change.newly_active, c);
-    assert_eq!(change.deactivated, Some(a));
-    assert_eq!(stack.active, 2);
-    assert_eq!(collapsed_flags(&stack), [true, true, false]);
+    (0..stack.children.len())
+        .map(|index| stack.is_collapsed(index))
+        .collect()
 }
 
 #[test]
@@ -246,80 +219,31 @@ fn activating_the_active_member_or_a_stranger_changes_nothing() {
 }
 
 #[test]
-fn a_single_member_stack_cannot_cycle() {
-    let a = PaneId::new();
-    let mut stack = SplitNode::stack(vec![a], 0);
-    assert_eq!(stack_focus_next(&mut stack), None);
-    assert_eq!(stack_focus_prev(&mut stack), None);
-}
-
-#[test]
 fn directional_splits_refuse_stack_focus_ops() {
     let (a, b) = (PaneId::new(), PaneId::new());
     let mut split = SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
         vec![
-            crate::tree::LayoutChild::new(crate::tree::LayoutNode::Pane(a)),
-            crate::tree::LayoutChild::new(crate::tree::LayoutNode::Pane(b)),
+            crate::tree::LayoutNode::Pane(a),
+            crate::tree::LayoutNode::Pane(b),
         ],
     );
-    assert_eq!(stack_focus_next(&mut split), None);
     assert_eq!(stack_activate(&mut split, b), None);
-}
-
-#[test]
-fn entering_a_stack_targets_its_active_member() {
-    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
-    let stack = SplitNode::stack(vec![a, b, c], 1);
-    assert_eq!(stack_entry_target(&stack), Some(b));
-}
-
-#[test]
-fn entering_an_empty_stack_targets_nothing() {
-    let stack = SplitNode::stack(Vec::new(), 0);
-    assert_eq!(stack_entry_target(&stack), None);
-}
-
-#[test]
-fn entering_a_stack_whose_active_member_holds_no_pane_targets_nothing() {
-    let (a, c) = (PaneId::new(), PaneId::new());
-    let stack = stack_with_an_empty_middle_member(a, c, 1);
-    assert_eq!(stack_entry_target(&stack), None);
-}
-
-#[test]
-fn entering_a_stack_with_an_out_of_range_active_index_targets_the_last_member() {
-    let (a, b) = (PaneId::new(), PaneId::new());
-    let mut stack = SplitNode::stack(vec![a, b], 0);
-    stack.active = 7;
-    assert_eq!(stack_entry_target(&stack), Some(b));
 }
 
 #[test]
 fn activating_a_pane_nested_in_a_split_member_expands_that_member() {
     use crate::size::SizeWeight;
-    use crate::tree::{LayoutChild, LayoutNode};
+    use crate::tree::LayoutNode;
 
     let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
     let row = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![
-            LayoutChild::new(LayoutNode::Pane(b)),
-            LayoutChild::new(LayoutNode::Pane(c)),
-        ],
+        vec![LayoutNode::Pane(b), LayoutNode::Pane(c)],
     ));
     let mut stack = SplitNode {
         direction: SplitDirection::Stacked,
-        children: vec![
-            LayoutChild {
-                node: LayoutNode::Pane(a),
-                collapsed: false,
-            },
-            LayoutChild {
-                node: row,
-                collapsed: true,
-            },
-        ],
+        children: vec![LayoutNode::Pane(a), row],
         weights: vec![SizeWeight::default(); 2],
         active: 0,
     };
@@ -362,16 +286,13 @@ fn an_out_of_range_active_index_counts_as_the_last_member() {
 
 #[test]
 fn the_deepest_stack_holding_a_pane_is_found_for_activation() {
-    use crate::tree::{LayoutChild, LayoutNode};
+    use crate::tree::LayoutNode;
 
     let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
     let stack = LayoutNode::Split(SplitNode::stack(vec![b, c], 0));
     let mut tree = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![
-            LayoutChild::new(LayoutNode::Pane(a)),
-            LayoutChild::new(stack),
-        ],
+        vec![LayoutNode::Pane(a), stack],
     ));
 
     let found = tree.stack_containing_mut(c).expect("c lives in a stack");
@@ -384,7 +305,7 @@ fn the_deepest_stack_holding_a_pane_is_found_for_activation() {
 /// that holds no pane at all — with `active` naming the expanded one.
 fn stack_with_an_empty_middle_member(first: PaneId, last: PaneId, active: usize) -> SplitNode {
     use crate::size::SizeWeight;
-    use crate::tree::{LayoutChild, LayoutNode};
+    use crate::tree::LayoutNode;
 
     let empty = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
@@ -392,97 +313,22 @@ fn stack_with_an_empty_middle_member(first: PaneId, last: PaneId, active: usize)
     ));
     SplitNode {
         direction: SplitDirection::Stacked,
-        children: vec![
-            LayoutChild {
-                node: LayoutNode::Pane(first),
-                collapsed: active != 0,
-            },
-            LayoutChild {
-                node: empty,
-                collapsed: active != 1,
-            },
-            LayoutChild {
-                node: LayoutNode::Pane(last),
-                collapsed: active != 2,
-            },
-        ],
+        children: vec![LayoutNode::Pane(first), empty, LayoutNode::Pane(last)],
         weights: vec![SizeWeight::default(); 3],
         active,
     }
 }
 
 #[test]
-fn cycling_forward_skips_a_member_that_holds_no_pane() {
-    let (a, c) = (PaneId::new(), PaneId::new());
-    let mut stack = stack_with_an_empty_middle_member(a, c, 0);
-
-    // One step forward lands on the empty middle member, which cannot be
-    // focused, so the walk continues to c.
-    let change = stack_focus_next(&mut stack).unwrap();
-    assert_eq!(change.newly_active, c);
-    assert_eq!(change.deactivated, Some(a));
-    assert_eq!(stack.active, 2);
-    assert_eq!(collapsed_flags(&stack), [true, true, false]);
-}
-
-#[test]
-fn cycling_backward_skips_a_member_that_holds_no_pane() {
-    let (a, c) = (PaneId::new(), PaneId::new());
-    let mut stack = stack_with_an_empty_middle_member(a, c, 2);
-
-    let change = stack_focus_prev(&mut stack).unwrap();
-    assert_eq!(
-        change,
-        StackFocusChange {
-            newly_active: a,
-            deactivated: Some(c),
-        }
-    );
-    assert_eq!(stack.active, 0);
-    assert_eq!(collapsed_flags(&stack), [false, true, true]);
-}
-
-#[test]
-fn cycling_finds_no_target_when_every_other_member_holds_no_pane() {
-    use crate::size::SizeWeight;
-    use crate::tree::{LayoutChild, LayoutNode};
-
-    let a = PaneId::new();
-    let empty = LayoutNode::Split(SplitNode::with_equal_weights(
-        SplitDirection::Vertical,
-        Vec::new(),
-    ));
-    let mut stack = SplitNode {
-        direction: SplitDirection::Stacked,
-        children: vec![
-            LayoutChild {
-                node: LayoutNode::Pane(a),
-                collapsed: false,
-            },
-            LayoutChild {
-                node: empty,
-                collapsed: true,
-            },
-        ],
-        weights: vec![SizeWeight::default(); 2],
-        active: 0,
-    };
-    let snapshot = stack.clone();
-
-    assert_eq!(stack_focus_next(&mut stack), None);
-    assert_eq!(stack_focus_prev(&mut stack), None);
-    assert_eq!(stack, snapshot);
-}
-
-#[test]
-fn cycling_away_from_a_member_with_no_pane_deactivates_nothing() {
+fn activating_away_from_a_member_with_no_pane_deactivates_nothing() {
     let (a, c) = (PaneId::new(), PaneId::new());
     let mut stack = stack_with_an_empty_middle_member(a, c, 1);
 
-    let change = stack_focus_next(&mut stack).unwrap();
+    let change = stack_activate(&mut stack, c).unwrap();
     assert_eq!(change.newly_active, c);
     assert_eq!(change.deactivated, None);
     assert_eq!(stack.active, 2);
+    assert_eq!(collapsed_flags(&stack), [true, true, false]);
 }
 
 #[test]

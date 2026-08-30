@@ -347,8 +347,8 @@ fn the_protocol_version_this_build_speaks_is_three() {
 }
 
 #[test]
-fn the_lowest_protocol_version_this_build_speaks_is_two() {
-    assert_eq!(MIN_PROTOCOL_VERSION, 2);
+fn the_lowest_protocol_version_this_build_speaks_is_three() {
+    assert_eq!(MIN_PROTOCOL_VERSION, 3);
 }
 
 #[test]

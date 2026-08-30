@@ -38,7 +38,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use kdl::{KdlDocument, KdlNode};
+use kdl::KdlNode;
 use koshi_core::geometry::Direction;
 use koshi_core::log::{LogFormat, LogLevel};
 
@@ -49,8 +49,8 @@ use crate::layer::{
     PartialUpdateConfig,
 };
 use crate::parser::{
-    parse_kdl, set, unknown_key, value_bool, value_integer, value_nonempty_string, value_string,
-    value_u16, value_u32,
+    parse_kdl, section_block, set, unknown_key, value_bool, value_integer, value_nonempty_string,
+    value_string, value_u16, value_u32, version_arg,
 };
 use crate::types::WheelScroll;
 
@@ -116,17 +116,18 @@ pub fn parse_app_config(path: &Path, source: &str) -> Result<AppConfigFile, Conf
         // and the first stands.
         if SECTIONS.contains(&name) && !seen.insert(name) {
             if name == "version" || name == "update" {
-                return Err(validation(name, &format!("duplicate `{name}` section")));
+                return Err(validation(
+                    name,
+                    &format!("`{name}` is declared more than once"),
+                ));
             }
             warnings.push(format!("ignored duplicate `{name}` section"));
             continue;
         }
         match name {
             "version" => {
-                if node.children().is_some() {
-                    return Err(validation("version", "`version` takes no children"));
-                }
-                let found = read_u32(node, "version")?;
+                let found =
+                    version_arg(node).map_err(|(_, detail)| validation("version", detail))?;
                 check_version(found)
                     .map_err(|diagnostic| validation("version", &diagnostic.to_string()))?;
             }
@@ -210,22 +211,6 @@ fn set_top_level<T>(
         Ok(value) => *slot = Some(value),
         Err(detail) => warnings.push(format!("ignored `{key}`: {detail}")),
     }
-}
-
-/// The `{ … }` block of a section node, warning about a value written on the
-/// section line, which no section reads.
-///
-/// `scrollback 5000` gives `None` and the warning ``ignored `scrollback`
-/// value: a section takes a `{ … }` block``. `scrollback { max-lines 5000 }`
-/// gives the block and no warning.
-fn section_block<'a>(node: &'a KdlNode, warnings: &mut Vec<String>) -> Option<&'a KdlDocument> {
-    if !node.entries().is_empty() {
-        warnings.push(format!(
-            "ignored `{}` value: a section takes a `{{ … }}` block",
-            node.name().value()
-        ));
-    }
-    node.children()
 }
 
 /// Reads the strict `update { … }` block. A field whose value is the wrong

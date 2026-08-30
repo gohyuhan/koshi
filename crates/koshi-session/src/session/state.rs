@@ -119,14 +119,6 @@ impl Tab {
     }
 }
 
-/// The configuration a session captured when it started. Carries no fields.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SessionConfig;
-
-/// Handle to a session's plugin runtime. Carries no fields.
-#[derive(Debug)]
-pub struct PluginRuntimeHandle;
-
 /// One running session: the aggregate root owning the tabs, the pane
 /// registry, and the attached-client registry.
 ///
@@ -153,12 +145,6 @@ pub struct Session {
     pub panes: PaneRegistry,
     /// The clients currently attached.
     pub clients: ClientRegistry,
-    /// The configuration this session started with.
-    pub config_snapshot: SessionConfig,
-    /// The session's plugin runtime, once one is running. A serialized session
-    /// leaves it out, and a deserialized one reads it back as `None`.
-    #[serde(skip)]
-    pub plugin_runtime_ref: Option<PluginRuntimeHandle>,
     /// True while the next client to attach must start in
     /// [`LockMode::Locked`](koshi_core::lock::LockMode::Locked). A profile
     /// carrying the `lock` marker sets it; [`Session::take_start_lock`] reads
@@ -172,8 +158,8 @@ pub struct Session {
 }
 
 impl Session {
-    /// A session with no tabs, no panes, and no plugin runtime yet, holding the
-    /// supplied client registry. Starts in `Starting` with `start_locked`
+    /// A session with no tabs and no panes, holding the supplied client
+    /// registry. Starts in `Starting` with `start_locked`
     /// `false`. `created_at` is supplied by the caller at the creation
     /// boundary, never read from the clock here.
     #[must_use]
@@ -190,8 +176,6 @@ impl Session {
             tabs: BTreeMap::new(),
             panes: PaneRegistry::new(),
             clients: client_registry,
-            config_snapshot: SessionConfig,
-            plugin_runtime_ref: None,
             start_locked: false,
             lifecycle: SessionLifecycle::Starting,
         }

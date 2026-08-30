@@ -57,9 +57,6 @@ pub enum RuntimeEvent {
         pane_id: PaneId,
         /// How the child ended: an exit code or a terminating signal.
         status: ExitStatus,
-        /// When the producer observed the exit, carried on the event so the
-        /// handler never reads the clock itself.
-        exited_at: SystemTime,
     },
     /// A client's outer terminal changed size.
     Resize {
@@ -70,22 +67,6 @@ pub enum RuntimeEvent {
         /// The pane region the client draws the tab's panes in at the new
         /// size; `None` replaces any earlier report.
         pane_area: Option<PaneArea>,
-    },
-    /// A client joined a session and began viewing one of its tabs.
-    ClientAttached {
-        /// Session the client attached to.
-        session_id: SessionId,
-        /// The arriving client.
-        client_id: ClientId,
-        /// The client's terminal size in cells.
-        viewport: Size,
-        /// The pane region the client reported, recorded on its record.
-        pane_area: Option<PaneArea>,
-        /// The tab the client begins viewing.
-        active_tab: TabId,
-        /// When the producer observed the attach, carried on the event so the
-        /// handler never reads the clock itself.
-        attached_at: SystemTime,
     },
     /// A client left, stopping its view of whatever tab it held.
     ClientDetached {

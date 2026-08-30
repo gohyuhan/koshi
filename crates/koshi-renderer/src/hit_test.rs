@@ -11,7 +11,7 @@
 //! The frame is read the same way [`crate::render`] draws it, so the region a
 //! click lands on is the region that was painted there:
 //!
-//! - The **tabline** (top row) and the **hint bar** (bottom row) are koshi-owned
+//! - The **tabline** (top row) and the **statusline** (bottom row) are koshi-owned
 //!   chrome painted last, over whatever lies beneath, so a click on those rows
 //!   is chrome, not the pane under it.
 //! - The rest is the **pane area**: the solved layout centered in the pane
@@ -74,7 +74,7 @@ pub enum HitRegion {
     /// The tabline row, off any tab ribbon or arrow (session name, gap, or mode
     /// tag).
     Tabline,
-    /// The keybinding hint bar on the bottom row.
+    /// The keybinding statusline on the bottom row.
     Statusline,
     /// No region: the letterbox margin, a cell inside the pane area that no
     /// pane box covers, the too-small overlay, or a zero-size viewport.
@@ -84,7 +84,7 @@ pub enum HitRegion {
 /// Classify the client-local screen cell `at` against the frame `frame`.
 ///
 /// Reads the frame in the renderer's own paint order so chrome wins over the
-/// pane content beneath it: the committed tabline and hint-bar regions are
+/// pane content beneath it: the committed tabline and statusline regions are
 /// tested before the pane area, and the pane area is centered inside the
 /// committed pane rectangle with a letterbox margin that hits nothing.
 #[must_use]
@@ -161,7 +161,7 @@ pub fn hit_test(frame: FrameLayout<'_>, at: Point) -> HitRegion {
 /// Classify a cell on the tabline row at column `x`: a scroll arrow, the tab
 /// whose ribbon spans it, or [`Tabline`](HitRegion::Tabline) off all of them.
 fn tabline_region(frame: FrameLayout<'_>, area: RatatuiRect, x: u16) -> HitRegion {
-    let layout = tabline_layout(frame.navigator(), area);
+    let layout = tabline_layout(frame.tabline(), area);
     if let Some((arrow_x, to)) = layout.left_arrow {
         if x == arrow_x {
             return HitRegion::TablineScrollLeft { to };
@@ -263,7 +263,7 @@ pub fn tabline_first_visible(frame: FrameLayout<'_>) -> Option<usize> {
     if tabline.width == 0 || tabline.height == 0 {
         return None;
     }
-    Some(tabline_layout(frame.navigator(), tabline).first_visible)
+    Some(tabline_layout(frame.tabline(), tabline).first_visible)
 }
 
 /// Return the pane rectangle from the committed solve, or the whole area for

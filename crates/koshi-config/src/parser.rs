@@ -9,6 +9,7 @@
 use std::path::Path;
 
 use kdl::{KdlDiagnostic, KdlDocument, KdlError, KdlNode, KdlValue};
+use miette::SourceSpan;
 
 use crate::error::ConfigParseDiagnostic;
 
@@ -162,6 +163,25 @@ pub fn parse_kdl(path: &Path, source: &str) -> Result<KdlDocument, ConfigParseDi
 // takes one field node (`key value`) and returns the value, or a plain-words
 // reason it could not be read.
 
+/// The `{ … }` block of a section node, warning about a value written on the
+/// section line, which no section reads.
+///
+/// `scrollback 5000` gives `None` and the warning ``ignored `scrollback`
+/// value: a section takes a `{ … }` block``. `scrollback { max-lines 5000 }`
+/// gives the block and no warning.
+pub(crate) fn section_block<'a>(
+    node: &'a KdlNode,
+    warnings: &mut Vec<String>,
+) -> Option<&'a KdlDocument> {
+    if !node.entries().is_empty() {
+        warnings.push(format!(
+            "ignored `{}` value: a section takes a `{{ … }}` block",
+            node.name().value()
+        ));
+    }
+    node.children()
+}
+
 /// The node's single unnamed argument.
 ///
 /// Returns `takes no children` when the node carries a `{ … }` child block:
@@ -225,6 +245,44 @@ pub(crate) fn value_u16(node: &KdlNode) -> Result<u16, String> {
 /// gives `must be between 0 and 4294967295`.
 pub(crate) fn value_u32(node: &KdlNode) -> Result<u32, String> {
     u32::try_from(value_integer(node)?).map_err(|_| "must be between 0 and 4294967295".to_string())
+}
+
+/// Reads the schema number a `version` node declares. Every config file that
+/// carries a `version` node reads it through this function, so one mistake
+/// reads the same way in `koshi.kdl`, a theme, `keybinding.kdl`, a profile,
+/// and migration.
+///
+/// `version 3` gives `Ok(3)`.
+///
+/// # Errors
+/// Each error carries the span a caret points at and the reason:
+///
+/// - the whole node and ``` `version` takes no children ``` when the node
+///   carries a `{ … }` block;
+/// - the whole node and ``` `version` takes exactly one integer argument ```
+///   when the node's arguments are not exactly one unnamed value;
+/// - the argument and ``` `version` must be an integer from 1 to 4294967295 ```
+///   when that value is not an integer or falls outside `0..=4294967295`.
+///
+/// A declared `0` is returned as `Ok(0)`;
+/// [`check_version`](crate::error::check_version) rejects it.
+pub(crate) fn version_arg(node: &KdlNode) -> Result<u32, (SourceSpan, &'static str)> {
+    if node.children().is_some() {
+        return Err((node.span(), "`version` takes no children"));
+    }
+    let [entry] = node.entries() else {
+        return Err((node.span(), "`version` takes exactly one integer argument"));
+    };
+    if entry.name().is_some() {
+        return Err((node.span(), "`version` takes exactly one integer argument"));
+    }
+    let range = "`version` must be an integer from 1 to 4294967295";
+    let value = entry
+        .value()
+        .as_integer()
+        .ok_or((entry.span(), range))
+        .and_then(|value| u32::try_from(value).map_err(|_| (entry.span(), range)))?;
+    Ok(value)
 }
 
 /// Stores a parsed field-partial value in `slot`. On `Err`, leaves `slot`

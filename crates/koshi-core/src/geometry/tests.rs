@@ -1,7 +1,7 @@
 //! Unit tests for rectangular geometry operations and layout enums.
 //!
 //! Tests `Rect` containment, intersection, insetting, and serde round-trips;
-//! `Axis`, `Direction`, and `SplitDirection` enum serialization.
+//! `Direction` and `SplitDirection` enum serialization.
 
 use super::*;
 
@@ -78,7 +78,6 @@ fn intersection_touching_only_at_a_corner_is_not_an_overlap() {
     let base = rect(2, 2, 4, 4); // [2,6) x [2,6)
     let corner_only = rect(6, 6, 4, 4); // [6,10) x [6,10), touches at (6,6)
     assert_eq!(base.intersection(corner_only), None);
-    assert!(!base.intersects(corner_only));
 }
 
 #[test]
@@ -114,14 +113,6 @@ fn contains_at_the_grid_maximum_does_not_overflow() {
     let wide = rect(u16::MAX - 1, 0, 2, 1); // x in [65534, 65536), y in [0, 1)
     assert!(wide.contains(Point { x: u16::MAX, y: 0 }));
     assert!(!wide.contains(Point { x: u16::MAX, y: 1 }));
-}
-
-#[test]
-fn intersects_matches_intersection() {
-    let base = rect(2, 2, 4, 4);
-    assert!(base.intersects(rect(4, 4, 4, 4)));
-    assert!(!base.intersects(rect(6, 2, 3, 4))); // adjacent
-    assert!(!base.intersects(rect(20, 20, 1, 1)));
 }
 
 #[test]
@@ -188,11 +179,6 @@ fn serde_roundtrip_rect() {
 
 #[test]
 fn serde_roundtrip_enums() {
-    for axis in [Axis::Horizontal, Axis::Vertical] {
-        let json = serde_json::to_string(&axis).expect("serialize");
-        let back: Axis = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(axis, back);
-    }
     for dir in [
         Direction::Left,
         Direction::Right,
@@ -274,10 +260,6 @@ fn rect_encodes_origin_then_size() {
 
 #[test]
 fn layout_enums_encode_as_bare_variant_names() {
-    assert_eq!(
-        serde_json::to_string(&Axis::Horizontal).expect("serialize"),
-        r#""Horizontal""#
-    );
     assert_eq!(
         serde_json::to_string(&Direction::Up).expect("serialize"),
         r#""Up""#

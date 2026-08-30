@@ -3,7 +3,7 @@
 //! [`compute_pty_size`] floors layout dimensions to the PTY minimum (2 cols,
 //! 1 row). [`resize_for_layout_change`] applies PTY resizes in input order, a
 //! backend error on one pane never stops the rest, and a pane with no content
-//! is reported as keeping its last size.
+//! never reaches the backend.
 
 use std::sync::Mutex;
 
@@ -142,7 +142,6 @@ fn a_none_pane_is_skipped_without_a_backend_call() {
         vec![ResizeResult {
             pane_id: pane,
             applied: None,
-            kept_last_valid: true,
         }]
     );
     assert_eq!(backend.calls(), Vec::new());
@@ -160,7 +159,6 @@ fn a_visible_pane_resizes_to_its_floored_size() {
         vec![ResizeResult {
             pane_id: pane,
             applied: Some(PtySize { cols: 10, rows: 5 }),
-            kept_last_valid: false,
         }]
     );
     assert_eq!(backend.calls(), vec![(pane, PtySize { cols: 10, rows: 5 })]);
@@ -178,7 +176,6 @@ fn a_tiny_visible_pane_is_floored_before_resizing() {
         vec![ResizeResult {
             pane_id: pane,
             applied: Some(PtySize { cols: 2, rows: 1 }),
-            kept_last_valid: false,
         }]
     );
     assert_eq!(backend.calls(), vec![(pane, PtySize { cols: 2, rows: 1 })]);
@@ -206,17 +203,14 @@ fn a_mixed_batch_preserves_order_and_skips_none_panes() {
             ResizeResult {
                 pane_id: first,
                 applied: Some(PtySize { cols: 10, rows: 5 }),
-                kept_last_valid: false,
             },
             ResizeResult {
                 pane_id: skipped,
                 applied: None,
-                kept_last_valid: true,
             },
             ResizeResult {
                 pane_id: last,
                 applied: Some(PtySize { cols: 20, rows: 8 }),
-                kept_last_valid: false,
             },
         ]
     );
@@ -254,17 +248,14 @@ fn a_backend_error_on_one_pane_does_not_stop_the_rest() {
             ResizeResult {
                 pane_id: first,
                 applied: Some(PtySize { cols: 10, rows: 5 }),
-                kept_last_valid: false,
             },
             ResizeResult {
                 pane_id: failing,
                 applied: None,
-                kept_last_valid: false,
             },
             ResizeResult {
                 pane_id: after,
                 applied: Some(PtySize { cols: 20, rows: 8 }),
-                kept_last_valid: false,
             },
         ]
     );
@@ -290,15 +281,13 @@ fn a_failing_pane_alone_yields_one_failed_result_and_no_backend_record() {
         vec![ResizeResult {
             pane_id: failing,
             applied: None,
-            kept_last_valid: false,
         }]
     );
     assert_eq!(backend.calls(), Vec::new());
 }
 
 #[test]
-fn a_failed_resize_and_a_no_content_skip_are_told_apart() {
-    // Both carry `applied: None`; only the skip carries `kept_last_valid`.
+fn a_failed_resize_and_a_no_content_skip_both_report_no_new_size() {
     let failing = PaneId::new();
     let hidden = PaneId::new();
     let backend = RecordingBackend::failing_on(failing);
@@ -312,12 +301,10 @@ fn a_failed_resize_and_a_no_content_skip_are_told_apart() {
             ResizeResult {
                 pane_id: failing,
                 applied: None,
-                kept_last_valid: false,
             },
             ResizeResult {
                 pane_id: hidden,
                 applied: None,
-                kept_last_valid: true,
             },
         ]
     );
@@ -340,12 +327,10 @@ fn a_pane_listed_twice_is_resized_twice_in_input_order() {
             ResizeResult {
                 pane_id: pane,
                 applied: Some(PtySize { cols: 10, rows: 5 }),
-                kept_last_valid: false,
             },
             ResizeResult {
                 pane_id: pane,
                 applied: Some(PtySize { cols: 20, rows: 8 }),
-                kept_last_valid: false,
             },
         ]
     );
@@ -372,12 +357,10 @@ fn a_batch_of_only_hidden_panes_touches_the_backend_for_none_of_them() {
             ResizeResult {
                 pane_id: first,
                 applied: None,
-                kept_last_valid: true,
             },
             ResizeResult {
                 pane_id: second,
                 applied: None,
-                kept_last_valid: true,
             },
         ]
     );

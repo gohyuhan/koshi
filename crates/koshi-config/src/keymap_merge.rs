@@ -35,7 +35,7 @@ use koshi_core::key::{KeyChord, KeySequence};
 use koshi_core::registry::ActionRegistry;
 
 use crate::conflict::{
-    is_firing, removal_index, removed_above, FiringRules, KeyMapLayer, LayerOrigin,
+    built_in_modes, is_firing, removal_index, removed_above, FiringRules, KeyMapLayer, LayerOrigin,
 };
 use crate::types::{BoundAction, KeybindingsConfig, ModeName};
 
@@ -81,10 +81,10 @@ pub struct MergedKeyMap {
 ///
 /// `registry` is the live action table each binding is resolved against
 /// for the firing judgment; `max_chord_depth` is the cap a firing sequence
-/// must fit; `known_modes` holds every registered mode name — a layer's
-/// bindings in an unregistered mode are skipped, matching detection. The
-/// reserved unlock chord is `unlock_alternative` when set, otherwise
-/// [`KeybindingsConfig::RESERVED_UNLOCK`].
+/// must fit. A layer's binding whose mode is not one of the
+/// [`LockMode`](koshi_core::lock::LockMode) names is skipped, matching
+/// detection. The reserved unlock chord is `unlock_alternative` when set,
+/// otherwise [`KeybindingsConfig::RESERVED_UNLOCK`].
 ///
 /// Per key, the highest firing entry wins. A firing user-authored entry on
 /// a defaulted key takes it and the displaced default moves to
@@ -100,8 +100,8 @@ pub fn merge_keymaps(
     unlock_alternative: Option<KeyChord>,
     max_chord_depth: u8,
     registry: &ActionRegistry,
-    known_modes: &BTreeSet<ModeName>,
 ) -> MergedKeyMap {
+    let known_modes = &built_in_modes();
     let reserved = unlock_alternative.unwrap_or(KeybindingsConfig::RESERVED_UNLOCK);
     let locked = ModeName::new("locked");
     let removals = removal_index(layers, known_modes);

@@ -2,9 +2,9 @@
 //!
 //! These tests verify that pane removal (via exit or user action) correctly
 //! cascades: focus is repaired on all clients, sibling panes inherit focus,
-//! empty tabs close under `CloseTab` and stay open under `RespawnShell`, and
-//! the session quits when no tabs remain. Also tests the inverse — on child
-//! process exit, the exit policy (`CloseOnExit`, `RespawnShell`) decides
+//! emptying a tab closes it under `CloseTab`, and the session quits when no
+//! tabs remain. Also tests the inverse — on child
+//! process exit, the exit policy (`CloseOnExit`) decides
 //! whether a pane is removed or restarted — and which of the terminal, the
 //! client's own regions, or another viewer is named when no pane fits.
 
@@ -18,7 +18,7 @@ use koshi_core::geometry::{PaneArea, Rect, Size, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::solver::{PaneSizing, MIN_PANE_SIZE};
-use koshi_layout::tree::{LayoutChild, LayoutNode, SplitNode};
+use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pane::pane::lifecycle::{PaneLifecycle, PaneLifecycleEvent};
 use koshi_pane::pane::policy::{PaneClosePolicy, PaneExitPolicy};
 use koshi_pane::pane::state::PaneRecord;
@@ -109,10 +109,7 @@ fn two_pane_tab(tab_id: TabId, left: PaneId, right: PaneId) -> Tab {
     let mut tab = Tab::new(tab_id, "code".to_owned(), 0, left);
     tab.update_layout(LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![
-            LayoutChild::new(LayoutNode::Pane(left)),
-            LayoutChild::new(LayoutNode::Pane(right)),
-        ],
+        vec![LayoutNode::Pane(left), LayoutNode::Pane(right)],
     )));
     tab
 }
@@ -778,11 +775,11 @@ fn removing_the_last_pane_closes_the_tab_and_quits() {
     );
 }
 
-/// The other empty-tab policy: emptying the tab's last pane under
-/// `RespawnShell` keeps the tab, so neither `TabClosed` nor `Quit` follows the
-/// two removal facts.
+/// Emptying the only tab while a client focuses its last pane leaves nothing
+/// dangling: the pane record, the tab and the client's focus entry all go, and
+/// the session passes its own consistency check.
 #[test]
-fn emptying_a_tab_under_the_respawn_policy_keeps_the_tab_and_the_session() {
+fn removing_the_last_pane_a_client_focuses_leaves_a_consistent_session() {
     let tab_id = TabId::new();
     let only = PaneId::new();
     let mut session = session_with(
@@ -793,6 +790,9 @@ fn emptying_a_tab_under_the_respawn_policy_keeps_the_tab_and_the_session() {
             PaneExitPolicy::CloseOnExit,
         )],
     );
+    let client = focused_client(session.id, tab_id, only);
+    let client_id = client.id();
+    session.attach_client(client);
 
     let events = remove_pane_cascade(
         &mut session,
@@ -803,7 +803,7 @@ fn emptying_a_tab_under_the_respawn_policy_keeps_the_tab_and_the_session() {
             min: MIN_PANE_SIZE,
             gap: 0,
         },
-        EmptyTabPolicy::RespawnShell,
+        EmptyTabPolicy::CloseTab,
     );
 
     assert_eq!(
@@ -814,13 +814,24 @@ fn emptying_a_tab_under_the_respawn_policy_keeps_the_tab_and_the_session() {
                 pane_id: only,
                 tab_id,
             }),
+            Event::TabClosed(TabClosed { tab_id }),
+            Event::Quit,
         ]
     );
+    assert_eq!(session.panes.get(only).map(PaneRecord::id), None);
     assert_eq!(
         session.tabs.keys().copied().collect::<Vec<TabId>>(),
-        vec![tab_id]
+        Vec::new()
     );
-    assert_eq!(session.panes.get(only).map(PaneRecord::id), None);
+    assert_eq!(
+        session
+            .clients
+            .get(client_id)
+            .expect("the client stays attached")
+            .focused_pane(tab_id),
+        None
+    );
+    assert_eq!(session.validate(), Ok(()));
 }
 
 #[test]
@@ -897,7 +908,6 @@ fn on_child_exit_for_an_unknown_pane_only_emits_the_exit_fact() {
         tab_id,
         unknown,
         Some(1),
-        SystemTime::UNIX_EPOCH,
         rect(),
         PaneSizing {
             min: MIN_PANE_SIZE,
@@ -985,45 +995,6 @@ fn removing_a_pane_under_an_unknown_tab_changes_nothing_and_emits_nothing() {
 }
 
 #[test]
-fn a_respawn_shell_pane_returns_to_spawning() {
-    let tab_id = TabId::new();
-    let pane = PaneId::new();
-    let mut session = session_with(
-        vec![single_pane_tab(tab_id, pane)],
-        vec![record(
-            pane,
-            PaneLifecycle::Running,
-            PaneExitPolicy::RespawnShell,
-        )],
-    );
-
-    let events = on_child_exit(
-        &mut session,
-        tab_id,
-        pane,
-        Some(1),
-        SystemTime::UNIX_EPOCH,
-        rect(),
-        PaneSizing {
-            min: MIN_PANE_SIZE,
-            gap: 0,
-        },
-        EmptyTabPolicy::CloseTab,
-    );
-
-    let kept = session.panes.get(pane).expect("the pane is kept");
-    assert_eq!(*kept.lifecycle(), PaneLifecycle::Spawning);
-    // The exit is reported; the pane is not removed, so the cascade never runs.
-    assert_eq!(
-        events,
-        vec![Event::PaneProcessExited(PaneProcessExited {
-            pane_id: pane,
-            exit_code: Some(1),
-        })]
-    );
-}
-
-#[test]
 fn a_close_on_exit_pane_runs_the_removal_cascade() {
     let tab_id = TabId::new();
     let pane = PaneId::new();
@@ -1041,7 +1012,6 @@ fn a_close_on_exit_pane_runs_the_removal_cascade() {
         tab_id,
         pane,
         Some(0),
-        SystemTime::UNIX_EPOCH,
         rect(),
         PaneSizing {
             min: MIN_PANE_SIZE,
@@ -1386,12 +1356,11 @@ fn a_registry_pane_missing_from_the_layout_is_dropped_without_touching_the_tab()
     );
 }
 
-/// A second exit report for the same child. `ProcessExited` is illegal from
-/// `Exited` and is dropped, but `Respawn` still applies, so a `RespawnShell`
-/// pane lands in `Spawning` and the runtime starts its replacement. Were the
-/// pane left `Exited`, no replacement shell would ever be spawned.
+/// A second exit report for a pane already recorded as `Exited`. The removal
+/// cascade reads the policy, not the lifecycle, so the pane is removed and its
+/// last tab closes exactly as on the first report.
 #[test]
-fn a_repeated_exit_still_returns_a_respawn_pane_to_spawning() {
+fn a_repeated_exit_still_removes_the_pane() {
     let tab_id = TabId::new();
     let pane = PaneId::new();
     let mut session = session_with(
@@ -1402,7 +1371,7 @@ fn a_repeated_exit_still_returns_a_respawn_pane_to_spawning() {
                 code: Some(1),
                 at: SystemTime::UNIX_EPOCH,
             },
-            PaneExitPolicy::RespawnShell,
+            PaneExitPolicy::CloseOnExit,
         )],
     );
 
@@ -1411,7 +1380,6 @@ fn a_repeated_exit_still_returns_a_respawn_pane_to_spawning() {
         tab_id,
         pane,
         Some(2),
-        SystemTime::UNIX_EPOCH,
         rect(),
         PaneSizing {
             min: MIN_PANE_SIZE,
@@ -1421,15 +1389,15 @@ fn a_repeated_exit_still_returns_a_respawn_pane_to_spawning() {
     );
 
     assert_eq!(
-        events,
-        vec![Event::PaneProcessExited(PaneProcessExited {
+        events.first(),
+        Some(&Event::PaneProcessExited(PaneProcessExited {
             pane_id: pane,
             exit_code: Some(2),
-        })]
+        }))
     );
+    assert_eq!(session.panes.get(pane), None);
     assert_eq!(
-        *session.panes.get(pane).expect("record").lifecycle(),
-        PaneLifecycle::Spawning
+        session.tabs.keys().copied().collect::<Vec<TabId>>(),
+        Vec::new()
     );
-    assert_eq!(session.tabs[&tab_id].layout(), &LayoutNode::Pane(pane));
 }

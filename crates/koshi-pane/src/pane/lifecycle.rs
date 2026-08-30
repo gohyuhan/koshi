@@ -11,7 +11,7 @@
 //!   the request time.
 //! - `Removed` — the pane is removed from the registry. This state is terminal.
 //!
-//! [`PaneLifecycleEvent`] drives the state one step at a time. Seven steps are
+//! [`PaneLifecycleEvent`] drives the state one step at a time. Six steps are
 //! legal.
 //!
 //! - `Spawning` on `ProcessStarted` becomes `Running`.
@@ -19,10 +19,12 @@
 //! - `Running` on `ProcessExited` becomes `Exited`.
 //! - `Running` on `CloseRequested` becomes `Closing`.
 //! - `Exited` on `CloseRequested` becomes `Closing`.
-//! - `Exited` on `Respawn` becomes `Spawning`.
 //! - `Closing` on `Cleaned` becomes `Removed`.
 //!
-//! [`PaneLifecycle::transition`] rejects every other pair.
+//! `PaneLifecycle::transition` rejects every other pair.
+//! [`PaneRecord::update_lifecycle`] is the only way to apply a step to a pane.
+//!
+//! [`PaneRecord::update_lifecycle`]: crate::pane::state::PaneRecord::update_lifecycle
 
 use std::time::SystemTime;
 
@@ -48,9 +50,9 @@ pub enum PaneLifecycle {
 
 impl PaneLifecycle {
     /// Applies `event` to this state and returns the next state. Returns
-    /// [`InvalidTransition`] when the pair is not one of the seven legal steps.
+    /// [`InvalidTransition`] when the pair is not one of the six legal steps.
     /// `kind` only fills in that error.
-    pub fn transition(
+    pub(crate) fn transition(
         self,
         event: PaneLifecycleEvent,
         kind: PaneKind,
@@ -73,9 +75,6 @@ impl PaneLifecycle {
             }
             (PaneLifecycle::Closing { .. }, PaneLifecycleEvent::Cleaned) => {
                 Ok(PaneLifecycle::Removed)
-            }
-            (PaneLifecycle::Exited { .. }, PaneLifecycleEvent::Respawn) => {
-                Ok(PaneLifecycle::Spawning)
             }
 
             _ => Err(InvalidTransition {
@@ -102,9 +101,6 @@ pub enum PaneLifecycleEvent {
     CloseRequested { since: SystemTime },
     /// The close finished its cleanup.
     Cleaned,
-    /// The `RespawnShell` exit policy restarts an exited pane in place. The pane
-    /// returns to `Spawning` and drops its exit code and time.
-    Respawn,
 }
 
 #[cfg(test)]

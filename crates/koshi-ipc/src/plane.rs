@@ -70,7 +70,7 @@ pub trait Plane {
 
     /// The answer to an accepted Hello. `agreed` is the version both sides
     /// settled on. `build` is the answering program's own version, e.g.
-    /// `"0.3.0"`; a protocol whose Hello carries no build version ignores it.
+    /// `"0.3.0"`.
     fn hello(agreed: u32, build: &str) -> Self::Result;
 }
 

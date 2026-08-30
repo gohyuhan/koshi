@@ -12,12 +12,12 @@
 //! stack's outer one, never a border between two stack members.
 
 use koshi_core::error::{DomainCategory, DomainError, Severity};
-use koshi_core::geometry::{Direction, Point, Rect, Size, SplitDirection};
+use koshi_core::geometry::{Direction, Rect, SplitDirection};
 use koshi_core::ids::PaneId;
 use thiserror::Error;
 
 use crate::size::SizeWeight;
-use crate::solver::{directional_child_rects, slot_floor, stack_min_size, PaneSizing};
+use crate::solver::{directional_child_rects, slot_floor, stacked_child_rects, PaneSizing};
 use crate::tree::{split_axis, LayoutNode};
 
 /// A rejected resize. The caller's tree is unchanged in every case.
@@ -146,19 +146,6 @@ pub fn resize_with_min(
     Ok(result)
 }
 
-/// `true` when [`resize`] on `pane` toward `direction` finds a border to
-/// move: the pane is in the tree and an ancestor split on the matching axis,
-/// above any collapsed stack member, has a sibling on that side. `false`
-/// for a pane not in the tree, for a side on the tab edge, and for the
-/// boundary against a collapsed stack header.
-#[must_use]
-pub fn has_adjacent_border(tree: &LayoutNode, pane: PaneId, direction: Direction) -> bool {
-    let Some(path) = tree.path_to(pane) else {
-        return false;
-    };
-    find_border(tree, &path, split_axis(direction), direction).is_some()
-}
-
 /// The deepest ancestor split of direction `wanted`, above any collapsed
 /// stack member on `path`, whose path child has a sibling on the `direction`
 /// side: its depth in `path`, the path child's index, and the sibling's
@@ -181,7 +168,7 @@ fn find_border(
             visible = depth;
             break;
         }
-        node = &split.children[index].node;
+        node = &split.children[index];
     }
 
     for depth in (0..visible).rev() {
@@ -206,10 +193,7 @@ fn find_border(
 /// The rect the node at `path` solves into, starting from `tab_rect`.
 ///
 /// A directional level takes the child rect [`directional_child_rects`]
-/// derives. A stacked level gives the active member the stack rect minus
-/// one header row per other member, shifted down by the headers above it;
-/// a collapsed member, or every member of a stack whose rect is smaller
-/// than [`stack_min_size`], gets a zero rect.
+/// derives; a stacked level the child rect [`stacked_child_rects`] derives.
 fn rect_at(tree: &LayoutNode, tab_rect: Rect, path: &[usize], sizing: PaneSizing) -> Rect {
     let mut node = tree;
     let mut rect = tab_rect;
@@ -221,28 +205,9 @@ fn rect_at(tree: &LayoutNode, tab_rect: Rect, path: &[usize], sizing: PaneSizing
             SplitDirection::Horizontal | SplitDirection::Vertical => {
                 directional_child_rects(split, rect, sizing)[index]
             }
-            SplitDirection::Stacked => {
-                let needed = stack_min_size(split, sizing);
-                if rect.size.rows < needed.rows || rect.size.cols < needed.cols {
-                    Rect::zero()
-                } else if index == split.active_index() {
-                    let header_rows = split.children.len().saturating_sub(1) as u16;
-                    Rect::new(
-                        Point {
-                            x: rect.origin.x,
-                            y: rect.origin.y.saturating_add(index as u16),
-                        },
-                        Size {
-                            cols: rect.size.cols,
-                            rows: rect.size.rows.saturating_sub(header_rows),
-                        },
-                    )
-                } else {
-                    Rect::zero()
-                }
-            }
+            SplitDirection::Stacked => stacked_child_rects(split, rect, sizing)[index],
         };
-        node = &split.children[index].node;
+        node = &split.children[index];
     }
     rect
 }

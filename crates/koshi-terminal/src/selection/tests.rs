@@ -33,7 +33,7 @@ fn cells_of(line: &str) -> Vec<Cell> {
 fn scrollback_of(lines: &[&str], max_lines: usize) -> Scrollback {
     let mut scrollback = Scrollback::new(ScrollbackLimit::new(max_lines, usize::MAX));
     for line in lines {
-        scrollback.push_row(&cells_of(line), RowEnd::Hard);
+        scrollback.push_row(&cells_of(line), RowMeta::default());
     }
     scrollback
 }
@@ -75,8 +75,8 @@ fn a_row_number_still_names_the_same_line_after_more_output() {
     }
 
     // `live0` and `live1` scroll off into history; two fresh lines take their place.
-    scrollback.push_row(&cells_of("live0"), RowEnd::Hard);
-    scrollback.push_row(&cells_of("live1"), RowEnd::Hard);
+    scrollback.push_row(&cells_of("live0"), RowMeta::default());
+    scrollback.push_row(&cells_of("live1"), RowMeta::default());
     let grid = grid_of(&["new0", "new1"], 10);
     let view = TextView::new(&scrollback, &grid);
 
@@ -115,7 +115,7 @@ fn erasing_saved_lines_leaves_surviving_rows_their_numbers() {
     // rely on that counter.
     let mut scrollback = scrollback_of(&["old0", "old1", "old2"], 100);
     scrollback.clear();
-    scrollback.push_row(&cells_of("after"), RowEnd::Hard);
+    scrollback.push_row(&cells_of("after"), RowMeta::default());
     let grid = grid_of(&["live0"], 10);
     let view = TextView::new(&scrollback, &grid);
 
@@ -251,7 +251,13 @@ fn a_word_crosses_a_soft_wrap_out_of_history_onto_the_screen() {
     // The wrap runs across the history/screen boundary: the last history line
     // wrapped into the screen's top row, so the word spans both.
     let mut scrollback = Scrollback::new(ScrollbackLimit::new(100, usize::MAX));
-    scrollback.push_row(&cells_of("abc"), RowEnd::Soft);
+    scrollback.push_row(
+        &cells_of("abc"),
+        RowMeta {
+            end: RowEnd::Soft,
+            prompt: false,
+        },
+    );
     let grid = grid_of(&["def"], 3);
     let view = TextView::new(&scrollback, &grid);
 
@@ -392,7 +398,13 @@ fn a_word_on_a_screen_with_no_history_stops_at_its_top_row() {
     // SOFT, so a walk that could see history would step into it. With no
     // history there is nothing to step into.
     let mut scrollback = Scrollback::new(ScrollbackLimit::new(100, usize::MAX));
-    scrollback.push_row(&cells_of("abc"), RowEnd::Soft);
+    scrollback.push_row(
+        &cells_of("abc"),
+        RowMeta {
+            end: RowEnd::Soft,
+            prompt: false,
+        },
+    );
     let grid = grid_of(&["def"], 3);
 
     // Built for the primary, the word crosses the boundary — correct there.
@@ -760,7 +772,7 @@ fn scrollback_padded(lines: &[&str], cols: u16, max_lines: usize) -> Scrollback 
     for line in lines {
         let mut row = cells_of(line);
         row.resize(cols as usize, Cell::blank());
-        scrollback.push_row(&row, RowEnd::Hard);
+        scrollback.push_row(&row, RowMeta::default());
     }
     scrollback
 }
@@ -883,8 +895,14 @@ fn ordering_two_equal_ends_keeps_the_anchor_first() {
 #[test]
 fn a_history_row_reports_how_it_ended() {
     let mut scrollback = Scrollback::new(ScrollbackLimit::new(100, usize::MAX));
-    scrollback.push_row(&cells_of("abc"), RowEnd::Soft);
-    scrollback.push_row(&cells_of("de"), RowEnd::Hard);
+    scrollback.push_row(
+        &cells_of("abc"),
+        RowMeta {
+            end: RowEnd::Soft,
+            prompt: false,
+        },
+    );
+    scrollback.push_row(&cells_of("de"), RowMeta::default());
     let grid = grid_of(&["live"], 4);
     let view = TextView::new(&scrollback, &grid);
 

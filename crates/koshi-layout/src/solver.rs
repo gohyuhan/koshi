@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 use crate::mode::LayoutMode;
 use crate::size::SizeConstraint;
 use crate::size::SizeWeight;
-use crate::tree::{LayoutChild, LayoutNode, SplitNode};
+use crate::tree::{LayoutNode, SplitNode};
 
 /// The smallest content size of a pane: two columns by one row. A pane's PTY
 /// (the pseudo-terminal process feeding its content) is never sized below
@@ -93,8 +93,8 @@ pub struct SolveResult {
 /// The one-row strip standing in for a collapsed stack member.
 ///
 /// A member is collapsed when it is not the stack's active member (the
-/// stack's `active` index, clamped into bounds); the solver does not read
-/// [`LayoutChild::collapsed`]. The strip is a Koshi-owned region: the
+/// stack's `active` index, clamped into bounds). The strip is a Koshi-owned
+/// region: the
 /// renderer draws it and mouse routing hit-tests it, and a click on it
 /// activates the member instead of reaching a PTY.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -171,20 +171,14 @@ pub fn solve_with_min(tree: &LayoutNode, tab_rect: Rect, sizing: PaneSizing) -> 
     state.into_result()
 }
 
-/// Solve `tree` over `tab_rect` under a layout mode.
+/// Solve `tree` over `tab_rect` under a layout mode, with an explicit
+/// [`PaneSizing`]; see [`solve_with_min`] for what `sizing` sets.
 ///
-/// `Tiled` is [`solve`]. `Fullscreen` gives the focused pane the whole tab
-/// and zero area to every other pane, changes no tree, and emits no stack
-/// headers. A tab smaller than the focused pane's border-inclusive floor
-/// suppresses it. A fullscreen mode whose focused pane is not in the tree
-/// falls back to the tiled solve.
-#[must_use]
-pub fn solve_with_mode(tree: &LayoutNode, mode: LayoutMode, tab_rect: Rect) -> SolveResult {
-    solve_with_mode_min(tree, mode, tab_rect, PaneSizing::default())
-}
-
-/// [`solve_with_mode`] with an explicit [`PaneSizing`]; see
-/// [`solve_with_min`] for what `sizing` sets.
+/// `Tiled` is [`solve_with_min`]. `Fullscreen` gives the focused pane the
+/// whole tab and zero area to every other pane, changes no tree, and emits
+/// no stack headers. A tab smaller than the focused pane's border-inclusive
+/// floor suppresses it. A fullscreen mode whose focused pane is not in the
+/// tree falls back to the tiled solve.
 #[must_use]
 pub fn solve_with_mode_min(
     tree: &LayoutNode,
@@ -202,8 +196,7 @@ pub fn solve_with_mode_min(
     let mut state = SolveState::new(sizing);
     // The focused pane is suppressed when the tab is below its
     // border-inclusive floor, the same floor the tiled path uses.
-    let floor = border_inclusive_min(sizing.min, true);
-    let too_small = tab_rect.size.cols < floor.cols || tab_rect.size.rows < floor.rows;
+    let too_small = !leaf_fits(tab_rect, sizing);
     for pane in tree.leaf_panes() {
         if pane != focused {
             state.panes.push((pane, Rect::zero()));
@@ -228,8 +221,7 @@ pub fn fits(tree: &LayoutNode, rect: Rect, sizing: PaneSizing) -> bool {
 /// `content_min` plus one cell per side on each axis when `has_borders` is
 /// `true`, saturating at `u16::MAX`; `content_min` unchanged when `false`.
 /// A 2 by 1 content minimum with borders is 4 by 3.
-#[must_use]
-pub fn border_inclusive_min(content_min: Size, has_borders: bool) -> Size {
+fn border_inclusive_min(content_min: Size, has_borders: bool) -> Size {
     if has_borders {
         Size {
             cols: content_min.cols.saturating_add(2),
@@ -242,8 +234,8 @@ pub fn border_inclusive_min(content_min: Size, has_borders: bool) -> Size {
 
 /// The smallest rectangle this subtree can be solved into.
 ///
-/// A leaf needs `sizing.min` plus one border cell per side
-/// ([`border_inclusive_min`]); siblings do not share border cells. A
+/// A leaf needs `sizing.min` plus one border cell per side; siblings do not
+/// share border cells. A
 /// horizontal or vertical split sums its children's floors along the split
 /// axis, plus one `sizing.gap` between each pair of children, and takes the
 /// largest child floor across it; a slot's declared floor (`Min` primary or
@@ -262,8 +254,7 @@ pub fn min_size(node: &LayoutNode, sizing: PaneSizing) -> Size {
                 let mut along: u16 = 0;
                 let mut across: u16 = 0;
                 for (index, child) in split.children.iter().enumerate() {
-                    let (axis_min, cross_min) =
-                        axis_and_cross(min_size(&child.node, sizing), horizontal);
+                    let (axis_min, cross_min) = axis_and_cross(min_size(child, sizing), horizontal);
                     along = along.saturating_add(child_floor(split, index, axis_min));
                     across = across.max(cross_min);
                 }
@@ -297,7 +288,7 @@ pub(crate) fn stack_min_size(split: &SplitNode, sizing: PaneSizing) -> Size {
     let mut cols: u16 = 0;
     let mut active_rows: u16 = 0;
     for (index, child) in split.children.iter().enumerate() {
-        let child_min = min_size(&child.node, sizing);
+        let child_min = min_size(child, sizing);
         cols = cols.max(child_min.cols);
         if index == active {
             active_rows = child_min.rows;
@@ -322,9 +313,7 @@ pub(crate) fn slot_floor(
     let child_min = split
         .children
         .get(index)
-        .map_or(Size { cols: 0, rows: 0 }, |child| {
-            min_size(&child.node, sizing)
-        });
+        .map_or(Size { cols: 0, rows: 0 }, |child| min_size(child, sizing));
     child_floor(split, index, axis_and_cross(child_min, horizontal).0)
 }
 
@@ -357,17 +346,31 @@ fn child_floor(split: &SplitNode, index: usize, subtree_axis_min: u16) -> u16 {
     subtree_axis_min.max(weight_floor)
 }
 
+/// `true` when `rect` holds one leaf pane: it meets the border-inclusive
+/// floor of `sizing.min` on both axes. A 3 by 3
+/// rect holds a leaf at the 2 by 1 default minimum; a 3 by 2 rect does not.
+pub(crate) fn leaf_fits(rect: Rect, sizing: PaneSizing) -> bool {
+    let floor = border_inclusive_min(sizing.min, true);
+    rect.size.cols >= floor.cols && rect.size.rows >= floor.rows
+}
+
+/// `true` when `pane` shows its own content at `rect`: the rect covers cells
+/// and `pane` does not stand on a collapsed stack member's header strip in
+/// `stack_headers`.
+pub(crate) fn shows_content(pane: PaneId, rect: Rect, stack_headers: &[StackHeader]) -> bool {
+    !rect.is_empty() && !stack_headers.iter().any(|header| header.pane == pane)
+}
+
 fn solve_node(node: &LayoutNode, rect: Rect, state: &mut SolveState) {
     match node {
         LayoutNode::Pane(id) => {
             // A leaf whose rect is below its border-inclusive floor on
             // either axis is suppressed.
-            let floor = border_inclusive_min(state.sizing.min, true);
-            if rect.size.cols < floor.cols || rect.size.rows < floor.rows {
+            if leaf_fits(rect, state.sizing) {
+                state.panes.push((*id, rect));
+            } else {
                 state.panes.push((*id, Rect::zero()));
                 state.suppressed.push(*id);
-            } else {
-                state.panes.push((*id, rect));
             }
         }
         LayoutNode::Split(split) => match split.direction {
@@ -398,9 +401,9 @@ fn solve_directional(split: &SplitNode, rect: Rect, state: &mut SolveState) {
     let rects = directional_child_rects(split, rect, state.sizing);
     for (child, child_rect) in split.children.iter().zip(rects) {
         if child_rect.is_empty() {
-            suppress_subtree(&child.node, state);
+            suppress_subtree(child, state);
         } else {
-            solve_node(&child.node, child_rect, state);
+            solve_node(child, child_rect, state);
         }
     }
 }
@@ -432,7 +435,7 @@ pub(crate) fn directional_child_rects(
     let mut floors_fit = true;
     let mut claimed: u32 = 0;
     for (index, child) in split.children.iter().enumerate() {
-        let (axis_min, cross_min) = axis_and_cross(min_size(&child.node, sizing), horizontal);
+        let (axis_min, cross_min) = axis_and_cross(min_size(child, sizing), horizontal);
         let floor = child_floor(split, index, axis_min);
         if cross_min > available_cross {
             continue;
@@ -499,37 +502,32 @@ pub(crate) fn directional_child_rects(
     rects
 }
 
-/// Stacked children share the rect: the active child expands into whatever
-/// remains after every collapsed member takes a one-row header strip.
+/// The rectangle each child of a stacked split receives inside `rect`, in
+/// child order. Members stay in layout order: each collapsed member takes a
+/// one-row header strip spanning the stack's width, and the active member
+/// takes the band left over between them.
 ///
-/// Headers stay in layout order: members before the active child sit above
-/// it, members after it sit below. A collapsed member's pane rect *is* its
-/// header strip; the matching [`StackHeader`] entry carries the indicator
-/// metadata.
-///
-/// If the rect cannot hold every header plus the active child at minimum
-/// size, or is narrower than the widest member needs, the whole stack
-/// suppresses as one unit: no headers, every member zero-area.
-fn solve_stacked(split: &SplitNode, rect: Rect, state: &mut SolveState) {
-    if split.children.is_empty() {
-        return;
-    }
-    let active = split.active_index();
+/// Every rect is `Rect::zero()` when `rect` cannot hold every header plus the
+/// active member at minimum size, or is narrower than the widest member needs
+/// ([`stack_min_size`]). A stack with no children yields no rects.
+pub(crate) fn stacked_child_rects(split: &SplitNode, rect: Rect, sizing: PaneSizing) -> Vec<Rect> {
     let total = split.children.len();
-    let header_count = (total - 1) as u16;
-
-    let needed = stack_min_size(split, state.sizing);
+    if total == 0 {
+        return Vec::new();
+    }
+    let needed = stack_min_size(split, sizing);
     if rect.size.rows < needed.rows || rect.size.cols < needed.cols {
-        for child in &split.children {
-            suppress_subtree(&child.node, state);
-        }
-        return;
+        return vec![Rect::zero(); total];
     }
 
+    let active = split.active_index();
+    let header_count = (total - 1) as u16;
     let active_rows = rect.size.rows - header_count;
-    // A band of `rows` rows starting at `y`, spanning the stack's width.
-    let rows_at = |y: u16, rows: u16| {
-        Rect::new(
+    let mut rects = Vec::with_capacity(total);
+    let mut y = rect.origin.y;
+    for index in 0..total {
+        let rows = if index == active { active_rows } else { 1 };
+        rects.push(Rect::new(
             Point {
                 x: rect.origin.x,
                 y,
@@ -538,16 +536,31 @@ fn solve_stacked(split: &SplitNode, rect: Rect, state: &mut SolveState) {
                 cols: rect.size.cols,
                 rows,
             },
-        )
-    };
-    let mut y = rect.origin.y;
-    for (index, child) in split.children.iter().enumerate() {
-        if index == active {
-            solve_node(&child.node, rows_at(y, active_rows), state);
-            y = y.saturating_add(active_rows);
+        ));
+        y = y.saturating_add(rows);
+    }
+    rects
+}
+
+/// Stacked children share the rect: the active child expands into whatever
+/// remains after every collapsed member takes a one-row header strip.
+///
+/// A collapsed member's pane rect *is* its header strip; the matching
+/// [`StackHeader`] entry carries the indicator metadata.
+///
+/// If [`stacked_child_rects`] gives the stack no room, it suppresses as one
+/// unit: no headers, every member zero-area.
+fn solve_stacked(split: &SplitNode, rect: Rect, state: &mut SolveState) {
+    let total = split.children.len();
+    let active = split.active_index();
+    let rects = stacked_child_rects(split, rect, state.sizing);
+    for (index, (child, child_rect)) in split.children.iter().zip(rects).enumerate() {
+        if child_rect.is_empty() {
+            suppress_subtree(child, state);
+        } else if index == active {
+            solve_node(child, child_rect, state);
         } else {
-            emit_header(child, rows_at(y, 1), index, total, state);
-            y = y.saturating_add(1);
+            emit_header(child, child_rect, index, total, state);
         }
     }
 }
@@ -558,13 +571,13 @@ fn solve_stacked(split: &SplitNode, rect: Rect, state: &mut SolveState) {
 /// leaves solve to zero area and are not listed as suppressed. A member with
 /// no leaf gets no header and no pane entry.
 fn emit_header(
-    child: &LayoutChild,
+    child: &LayoutNode,
     header_rect: Rect,
     index: usize,
     total: usize,
     state: &mut SolveState,
 ) {
-    let leaves = child.node.leaf_panes();
+    let leaves = child.leaf_panes();
     let Some((&first, rest)) = leaves.split_first() else {
         return;
     };

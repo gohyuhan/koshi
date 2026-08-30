@@ -23,10 +23,11 @@ use koshi_core::command::{
     NewTabArgs, SwitchSessionArgs, TabTarget,
 };
 use koshi_core::discovery::SessionOverview;
-use koshi_core::event::{Event, InputMode, InputModeChanged, PtyResized};
+use koshi_core::event::{Event, InputModeChanged, PtyResized};
 use koshi_core::geometry::{PaneArea, Point, Rect, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::key::ModFlags;
+use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseButton, MouseInput, MouseKind, MouseTracking};
 use koshi_core::process::PtySize;
 use koshi_ipc::attach::AttachedSessionStructureSnapshot;
@@ -41,7 +42,6 @@ use koshi_ipc::transport::Connection;
 use koshi_pane::pane::state::PaneKind;
 use koshi_pty::backend::state::PtyBackend;
 use koshi_runtime::ipc_server::IpcServer;
-use koshi_runtime::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
 use koshi_runtime::runtime::event::RuntimeEvent;
 use koshi_runtime::server::Server;
 use koshi_test_support::fake_pty::FakePtyBackend;
@@ -120,16 +120,8 @@ fn served<T: Send + 'static>(
     let session_id = SessionId::new();
     let fake = Arc::new(FakePtyBackend::new());
     let backend: Arc<dyn PtyBackend> = fake.clone();
-    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
-    let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (inbox_tx, inbox_rx) = mpsc::channel();
-    let mut server = Server::new(
-        backend,
-        snapshot_provider,
-        storage,
-        inbox_rx,
-        inbox_tx.clone(),
-    );
+    let mut server = Server::new(backend, inbox_rx, inbox_tx.clone());
     server
         .bootstrap_session(
             session_id,
@@ -766,7 +758,7 @@ fn locking_one_client_leaves_the_other_clients_lock_state_unchanged() {
             emitted,
             vec![Event::InputModeChanged(InputModeChanged {
                 client_id: big_client,
-                mode: InputMode::Locked,
+                mode: LockMode::Locked,
             })],
         );
 
@@ -786,7 +778,7 @@ fn locking_one_client_leaves_the_other_clients_lock_state_unchanged() {
             emitted,
             vec![Event::InputModeChanged(InputModeChanged {
                 client_id: small_client,
-                mode: InputMode::Locked,
+                mode: LockMode::Locked,
             })],
         );
 
@@ -814,7 +806,7 @@ fn setting_the_lock_mode_a_client_already_holds_emits_nothing() {
             submit(&mut caller, session_id, set_locked(true), 3),
             vec![Event::InputModeChanged(InputModeChanged {
                 client_id: viewer_client,
-                mode: InputMode::Locked,
+                mode: LockMode::Locked,
             })],
         );
         assert_eq!(
@@ -825,7 +817,7 @@ fn setting_the_lock_mode_a_client_already_holds_emits_nothing() {
             submit(&mut caller, session_id, set_locked(false), 5),
             vec![Event::InputModeChanged(InputModeChanged {
                 client_id: viewer_client,
-                mode: InputMode::Normal,
+                mode: LockMode::Normal,
             })],
         );
         assert_eq!(
@@ -1134,16 +1126,8 @@ fn served_until_quit(
 
     let session_id = SessionId::new();
     let backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::new());
-    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
-    let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (inbox_tx, inbox_rx) = mpsc::channel();
-    let mut server = Server::new(
-        backend,
-        snapshot_provider,
-        storage,
-        inbox_rx,
-        inbox_tx.clone(),
-    );
+    let mut server = Server::new(backend, inbox_rx, inbox_tx.clone());
     server.load_startup_config(Some(PartialKoshiConfig {
         auto_close_session: Some(auto_close),
         ..PartialKoshiConfig::default()

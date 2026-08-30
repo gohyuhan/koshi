@@ -469,7 +469,6 @@ fn action_metadata_roundtrips() {
         description: "Split the focused pane".to_string(),
         scope_class: ActionScope::PaneSession,
         target_compat: vec![TargetKind::Pane],
-        args_schema: Some(ActionArgsSchema::default()),
         handler: ActionHandlerRef::CoreCommand(CommandKind::NewPane),
         status: ActionStatus::Available,
         continuous: false,
@@ -485,7 +484,6 @@ fn action_metadata_continuous_is_false_when_absent_on_the_wire() {
         description: "Grow or shrink the focused pane along one edge".to_string(),
         scope_class: ActionScope::PaneSession,
         target_compat: vec![TargetKind::Pane],
-        args_schema: None,
         handler: ActionHandlerRef::CoreCommand(CommandKind::ResizePane),
         status: ActionStatus::Available,
         continuous: true,
@@ -543,9 +541,6 @@ fn core_seed_order_kind_scope_and_targets_are_pinned() {
     use TargetKind::{Client as ClientTarget, Pane, Session, Tab as TabTarget};
 
     let seeds = core_action_seeds();
-    for (_, metadata) in &seeds {
-        assert_eq!(metadata.args_schema, None);
-    }
     let actual: Vec<(String, ActionHandlerRef, ActionScope, Vec<TargetKind>)> = seeds
         .into_iter()
         .map(|(action, metadata)| {

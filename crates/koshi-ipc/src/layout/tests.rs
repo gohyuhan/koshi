@@ -5,7 +5,7 @@
 
 use koshi_core::geometry::{Point, SplitDirection};
 use koshi_layout::size::SizeWeight;
-use koshi_layout::tree::{LayoutChild, SplitNode};
+use koshi_layout::tree::{LayoutNode, SplitNode};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::json;
@@ -64,14 +64,8 @@ fn populated_layout() -> SessionLayout {
             tree: LayoutNode::Split(SplitNode {
                 direction: SplitDirection::Stacked,
                 children: vec![
-                    LayoutChild {
-                        node: LayoutNode::Pane(active_pane()),
-                        collapsed: false,
-                    },
-                    LayoutChild {
-                        node: LayoutNode::Pane(collapsed_pane()),
-                        collapsed: true,
-                    },
+                    LayoutNode::Pane(active_pane()),
+                    LayoutNode::Pane(collapsed_pane()),
                 ],
                 weights: vec![SizeWeight::default(), SizeWeight::default()],
                 active: 0,
@@ -123,14 +117,8 @@ fn populated_layout_json() -> serde_json::Value {
                 "Split": {
                     "direction": "Stacked",
                     "children": [
-                        {
-                            "node": { "Pane": "00000000-0000-0000-0000-000000000004" },
-                            "collapsed": false
-                        },
-                        {
-                            "node": { "Pane": "00000000-0000-0000-0000-000000000005" },
-                            "collapsed": true
-                        }
+                        { "Pane": "00000000-0000-0000-0000-000000000004" },
+                        { "Pane": "00000000-0000-0000-0000-000000000005" }
                     ],
                     "weights": [
                         {

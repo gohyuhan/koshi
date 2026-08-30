@@ -24,7 +24,6 @@ use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_renderer::snapshot::{MouseFrame, ViewerChrome};
 use koshi_test_support::fake_pty::FakePtyBackend;
 
-use crate::placeholder::{NullSnapshotProvider, NullStorage};
 use crate::runtime::bus::EventFilter;
 
 /// A runtime with one bootstrapped 80x24 client, its viewer half, and its
@@ -32,13 +31,7 @@ use crate::runtime::bus::EventFilter;
 fn runtime() -> (Server, ViewerClient, PaneId) {
     let fake = Arc::new(FakePtyBackend::new());
     let (tx, rx) = mpsc::channel();
-    let mut rt = Server::new(
-        fake,
-        Arc::new(NullSnapshotProvider),
-        Arc::new(NullStorage),
-        rx,
-        tx,
-    );
+    let mut rt = Server::new(fake, rx, tx);
     let client = rt
         .bootstrap_local(
             SessionId::new(),

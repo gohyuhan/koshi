@@ -33,14 +33,47 @@ fn spawn_records_spec_and_initial_size() {
 
 #[cfg(debug_assertions)]
 #[test]
-#[should_panic(expected = "already-live pane id")]
-fn spawning_into_a_live_pane_id_panics() {
+fn spawning_into_a_live_pane_id_is_refused() {
+    let pty = FakePtyBackend::new();
+    let pane = PaneId::new();
+    let handle = pty.spawn(pane, spec(), size(80, 24)).unwrap();
+
+    assert_eq!(
+        pty.spawn(pane, spec(), size(100, 30)).err(),
+        Some(PtyError::Spawn {
+            detail: format!("pane {pane} is already open"),
+        })
+    );
+
+    // The refused spawn changed nothing: the live pane keeps its record, its
+    // handle, and its single place in the spawn order.
+    assert_eq!(pty.resizes(pane).unwrap(), vec![size(80, 24)]);
+    assert_eq!(pty.spawned_panes(), vec![pane]);
+    pty.push_output(pane, b"still mine".to_vec()).unwrap();
+    assert_eq!(handle.try_read_output(), Some(b"still mine".to_vec()));
+}
+
+#[test]
+fn a_killed_pane_id_can_be_spawned_again() {
     let pty = FakePtyBackend::new();
     let pane = PaneId::new();
     pty.spawn(pane, spec(), size(80, 24)).unwrap();
-    // Reusing a live id (a caller bug: respawn without kill first) trips the
-    // debug-build precondition.
-    let _ = pty.spawn(pane, spec(), size(80, 24));
+    pty.write(pane, b"first\n").unwrap();
+    pty.kill(pane, KillPolicy::Force).unwrap();
+
+    let respawned = pty.spawn(pane, spec(), size(100, 30)).unwrap();
+
+    // The record starts over at the new spawn's size, and the spawn order
+    // names the id once per spawn.
+    assert_eq!(respawned.pane_id(), pane);
+    assert_eq!(pty.resizes(pane).unwrap(), vec![size(100, 30)]);
+    assert_eq!(pty.writes(pane).unwrap(), Vec::<Vec<u8>>::new());
+    assert_eq!(pty.kills(pane).unwrap(), Vec::<KillPolicy>::new());
+    assert_eq!(pty.spawned_panes(), vec![pane, pane]);
+
+    // The pane is live again.
+    pty.write(pane, b"second\n").unwrap();
+    assert_eq!(pty.writes(pane).unwrap(), vec![b"second\n".to_vec()]);
 }
 
 #[test]
@@ -91,26 +124,25 @@ fn resizes_are_captured_after_initial() {
 #[test]
 fn kills_are_captured() {
     let pty = FakePtyBackend::new();
-    let pane = PaneId::new();
-    pty.spawn(pane, spec(), size(80, 24)).unwrap();
+    let (forced, graceful) = (PaneId::new(), PaneId::new());
+    pty.spawn(forced, spec(), size(80, 24)).unwrap();
+    pty.spawn(graceful, spec(), size(80, 24)).unwrap();
 
-    pty.kill(pane, KillPolicy::Force).unwrap();
+    pty.kill(forced, KillPolicy::Force).unwrap();
     pty.kill(
-        pane,
+        graceful,
         KillPolicy::Graceful {
             timeout: Duration::from_secs(5),
         },
     )
     .unwrap();
 
+    assert_eq!(pty.kills(forced).unwrap(), vec![KillPolicy::Force]);
     assert_eq!(
-        pty.kills(pane).unwrap(),
-        vec![
-            KillPolicy::Force,
-            KillPolicy::Graceful {
-                timeout: Duration::from_secs(5)
-            }
-        ]
+        pty.kills(graceful).unwrap(),
+        vec![KillPolicy::Graceful {
+            timeout: Duration::from_secs(5)
+        }]
     );
 }
 
@@ -173,47 +205,33 @@ fn multiple_panes_are_isolated() {
 }
 
 #[test]
-fn write_after_kill_is_still_recorded() {
-    // `kill` only records the kill request; it does not remove the pane's
-    // record, so a write issued after kill still succeeds and is captured.
+fn a_killed_pane_is_unknown_to_every_later_backend_call() {
     let pty = FakePtyBackend::new();
     let pane = PaneId::new();
     pty.spawn(pane, spec(), size(80, 24)).unwrap();
+    pty.write(pane, b"before\n").unwrap();
 
     pty.kill(pane, KillPolicy::Force).unwrap();
-    pty.write(pane, b"still here\n").unwrap();
-
-    assert_eq!(pty.writes(pane).unwrap(), vec![b"still here\n".to_vec()]);
-}
-
-#[test]
-fn resize_after_kill_is_still_recorded() {
-    let pty = FakePtyBackend::new();
-    let pane = PaneId::new();
-    pty.spawn(pane, spec(), size(80, 24)).unwrap();
-
-    pty.kill(pane, KillPolicy::Force).unwrap();
-    pty.resize(pane, size(100, 30)).unwrap();
 
     assert_eq!(
-        pty.resizes(pane).unwrap(),
-        vec![size(80, 24), size(100, 30)]
+        pty.write(pane, b"after\n"),
+        Err(PtyError::UnknownPane { pane })
     );
-}
-
-#[test]
-fn kill_called_twice_records_both_calls_not_deduplicated() {
-    let pty = FakePtyBackend::new();
-    let pane = PaneId::new();
-    pty.spawn(pane, spec(), size(80, 24)).unwrap();
-
-    pty.kill(pane, KillPolicy::Force).unwrap();
-    pty.kill(pane, KillPolicy::Tree).unwrap();
-
     assert_eq!(
-        pty.kills(pane).unwrap(),
-        vec![KillPolicy::Force, KillPolicy::Tree]
+        pty.resize(pane, size(100, 30)),
+        Err(PtyError::UnknownPane { pane })
     );
+    assert_eq!(
+        pty.kill(pane, KillPolicy::Tree),
+        Err(PtyError::UnknownPane { pane })
+    );
+
+    // The record the pane built while it was live stays readable, and the
+    // refused calls added nothing to it.
+    assert_eq!(pty.writes(pane).unwrap(), vec![b"before\n".to_vec()]);
+    assert_eq!(pty.resizes(pane).unwrap(), vec![size(80, 24)]);
+    assert_eq!(pty.kills(pane).unwrap(), vec![KillPolicy::Force]);
+    assert_eq!(pty.spawn_spec(pane).unwrap(), spec());
 }
 
 #[test]

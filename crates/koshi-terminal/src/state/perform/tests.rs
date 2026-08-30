@@ -6,6 +6,7 @@
 
 use super::glyph::MAX_GRAPHEME_CONTINUATIONS;
 use super::*;
+use crate::grid::state::RowMeta;
 use crate::scrollback::{Scrollback, ScrollbackLimit};
 use crate::state::{Charset, RenderState, TerminalModes};
 use crate::style::{Color, Style, UnderlineStyle};
@@ -4722,7 +4723,7 @@ fn decstr_resets_only_its_active_dec_state() {
     advance(&mut state, b"\x1b[?1;5;7;12;1000;1006;1007;2004h\x1b[5 q");
     state.active_cursor_mut().pending_wrap = true;
     let history_row = state.active_grid().rows()[0].clone();
-    state.scrollback.push_row(&history_row, RowEnd::Hard);
+    state.scrollback.push_row(&history_row, RowMeta::default());
 
     let grid = state.active_grid().clone();
     let tabs = state.tab_stops.clone();
@@ -4830,9 +4831,9 @@ fn ris_restores_display_state_but_keeps_session_metadata() {
     let mut state = TerminalState::with_scrollback(size, ScrollbackLimit::new(1, 1024));
     print_str(&mut state, "primary");
     let history_row = state.active_grid().rows()[0].clone();
-    state.scrollback.push_row(&history_row, RowEnd::Hard);
-    state.scrollback.push_row(&history_row, RowEnd::Hard);
-    state.scrollback.push_row(&history_row, RowEnd::Hard);
+    state.scrollback.push_row(&history_row, RowMeta::default());
+    state.scrollback.push_row(&history_row, RowMeta::default());
+    state.scrollback.push_row(&history_row, RowMeta::default());
     advance(
         &mut state,
         b"\x1b]2;reset me\x07\x1b]7;file://localhost/work\x07\x1b[c",
@@ -4891,8 +4892,8 @@ fn ris_restores_display_state_but_keeps_session_metadata() {
     assert_eq!(state.replies, replies);
 
     let blank_row = state.primary.rows()[0].clone();
-    state.scrollback.push_row(&blank_row, RowEnd::Hard);
-    state.scrollback.push_row(&blank_row, RowEnd::Hard);
+    state.scrollback.push_row(&blank_row, RowMeta::default());
+    state.scrollback.push_row(&blank_row, RowMeta::default());
     assert_eq!(state.scrollback.len(), 1);
 }
 
@@ -5562,4 +5563,73 @@ fn a_wrap_on_the_last_row_below_the_region_leaves_the_row_hard() {
 
     assert_eq!(state.active_cursor_position(), (3, 1));
     assert_eq!(state.active_grid().row_end(3), RowEnd::Hard);
+}
+
+#[test]
+fn ed_two_clears_the_prompt_marks_of_every_row_it_erases() {
+    let mut state = state(5, 3);
+    for row in 1..=3 {
+        advance(&mut state, format!("\x1b[{row};1H").as_bytes());
+        advance(&mut state, b"\x1b]133;A\x07");
+    }
+    advance(&mut state, b"\x1b[2J");
+    assert!((0..3).all(|row| !state.active_grid().prompt_mark(row)));
+}
+
+#[test]
+fn ed_zero_clears_the_prompt_marks_below_the_cursor_and_keeps_the_cursor_row() {
+    let mut state = state(5, 3);
+    for row in 1..=3 {
+        advance(&mut state, format!("\x1b[{row};1H").as_bytes());
+        advance(&mut state, b"\x1b]133;A\x07");
+    }
+    advance(&mut state, b"\x1b[2;3H\x1b[0J"); // cursor on row 1, column 2
+    assert!(state.active_grid().prompt_mark(0));
+    assert!(state.active_grid().prompt_mark(1));
+    assert!(!state.active_grid().prompt_mark(2));
+}
+
+#[test]
+fn ed_one_clears_the_prompt_marks_above_the_cursor_and_keeps_the_cursor_row() {
+    let mut state = state(5, 3);
+    for row in 1..=3 {
+        advance(&mut state, format!("\x1b[{row};1H").as_bytes());
+        advance(&mut state, b"\x1b]133;A\x07");
+    }
+    advance(&mut state, b"\x1b[2;3H\x1b[1J"); // cursor on row 1, column 2
+    assert!(!state.active_grid().prompt_mark(0));
+    assert!(state.active_grid().prompt_mark(1));
+    assert!(state.active_grid().prompt_mark(2));
+}
+
+#[test]
+fn el_two_clears_the_row_prompt_mark_and_the_partial_erases_keep_it() {
+    for (sequence, kept) in [
+        (b"\x1b[2K".as_slice(), false),
+        (b"\x1b[0K".as_slice(), true),
+        (b"\x1b[1K".as_slice(), true),
+    ] {
+        let mut state = state(5, 3);
+        advance(&mut state, b"\x1b[2;3H\x1b]133;A\x07");
+        advance(&mut state, sequence);
+        assert_eq!(state.active_grid().prompt_mark(1), kept, "{sequence:?}");
+    }
+}
+
+#[test]
+fn a_cleared_screen_shrinks_without_pushing_blank_rows_into_history() {
+    // The bottom row carries a prompt mark, `ED 2` erases every row, and the
+    // pane then shrinks from 24 rows to 10. With the mark gone the reflow
+    // drops the 14 surplus blank rows; a mark left on a blanked row would
+    // have parked all 14 in history instead.
+    let mut state = TerminalState::new(PtySize { cols: 80, rows: 24 });
+    advance(&mut state, b"\x1b[24;1H\x1b]133;A\x07");
+    advance(&mut state, b"\x1b[H\x1b[2J");
+
+    state.resize(PtySize { cols: 80, rows: 10 });
+
+    assert_eq!(state.scrollback().len(), 0);
+    assert_eq!(state.scrollback().total_pushed(), 0);
+    assert_eq!(state.active_grid().dimensions(), (10, 80));
+    assert_eq!(state.active_cursor_position(), (0, 0));
 }

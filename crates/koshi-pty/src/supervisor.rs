@@ -24,7 +24,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use koshi_core::ids::PaneId;
-use koshi_core::process::{ExitStatus, KillPolicy, PtySize, SpawnSpec};
+use koshi_core::process::{KillPolicy, PtySize, SpawnSpec};
 use koshi_ipc::protocol::ConnectionToken;
 use koshi_ipc::supervisor::{
     IncomingSupervisorMessage, SupervisorEvent, SupervisorMessage, SupervisorRequest,
@@ -33,16 +33,8 @@ use koshi_ipc::supervisor::{
 use koshi_ipc::transport::{Connection, FrameReader, FrameWriter};
 use koshi_ipc::wire::{MaybeKnown, WireName};
 
-use crate::backend::state::{PtyBackend, PtyHandle, PtySink};
+use crate::backend::state::{CarriedPtyPane, PtyBackend, PtyHandle, PtySink, UNOBSERVED_EXIT};
 use crate::error::PtyError;
-use crate::portable::CarriedPtyPane;
-
-/// The exit reported for a pane the supervisor no longer holds: no session
-/// server observed the child's status.
-///
-/// The same value a Unix pane taken back through `PortablePtyBackend::adopt`
-/// reports for a child that cannot be waited on.
-const UNOBSERVED_EXIT: ExitStatus = ExitStatus::ExitCode(-1);
 
 /// How long one request waits for its answer. A request not answered within
 /// this window is reported as failed.
@@ -114,8 +106,8 @@ impl SupervisorPtyBackend {
     ///   [`KillPolicy::Tree`], in the order the supervisor listed it. The
     ///   answer to that kill is not checked.
     /// - A pane in `panes` the supervisor does not hold is reported to `sink`
-    ///   as ended, carrying [`ExitStatus::ExitCode`]`(-1)`: the status a child
-    ///   that cannot be waited on reports. Every kill above is sent first.
+    ///   as ended, carrying `ExitCode(-1)` — the status a child that cannot be
+    ///   waited on reports. Every kill above is sent first.
     ///
     /// Every remaining pane is driven by the returned backend, at the process
     /// id and size the supervisor listed.

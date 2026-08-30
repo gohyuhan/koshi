@@ -418,8 +418,8 @@ fn write_atomic_copies_a_mode_wider_than_the_umask() {
     let dir = TempDir::new().unwrap();
     let dst = dir.path().join("cfg.kdl");
     std::fs::write(&dst, b"old").unwrap();
-    // A 022 umask narrows a newly created file to 0644. The mode copy uses
-    // chmod and lands 0666 unchanged.
+    // A 022 umask narrows a newly created file to 0644. The mode copy sets the
+    // mode on the staged file and lands 0666 unchanged.
     std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o666)).unwrap();
 
     write_atomic(&dst, b"new").unwrap();
@@ -484,8 +484,43 @@ fn an_empty_path_is_refused_before_a_temp_is_staged() {
     let StorageError::Io { detail } = error else {
         panic!("expected an Io error, got {error:?}");
     };
+    assert_eq!(detail, "empty destination path");
+}
+
+#[test]
+fn a_filesystem_root_is_refused_before_a_temp_is_staged() {
+    // A filesystem root has no parent, so there is no directory to stage a temp
+    // in. The call is refused instead of staging one in the current directory.
+    let root = std::env::current_dir()
+        .unwrap()
+        .ancestors()
+        .last()
+        .unwrap()
+        .to_path_buf();
+
+    let error = write_atomic(&root, b"x").expect_err("a filesystem root names no file");
+
+    let StorageError::Io { detail } = error else {
+        panic!("expected an Io error, got {error:?}");
+    };
     assert_eq!(
         detail,
-        "resolve cwd for : cannot make an empty path absolute"
+        format!("no parent directory for {}", root.display())
     );
+}
+
+#[test]
+fn a_failed_write_is_a_recoverable_storage_error() {
+    use koshi_core::error::{DomainCategory, DomainError, Severity};
+
+    let dir = TempDir::new().unwrap();
+    // A directory at `dst` blocks the rename, so the failure comes from the
+    // replace step.
+    let dst = dir.path().join("target");
+    std::fs::create_dir(&dst).unwrap();
+
+    let error = write_atomic(&dst, b"x").expect_err("a directory at dst blocks the rename");
+
+    assert_eq!(error.category(), DomainCategory::Storage);
+    assert_eq!(error.severity(), Severity::Recoverable);
 }

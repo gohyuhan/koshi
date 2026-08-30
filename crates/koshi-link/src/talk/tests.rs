@@ -7,6 +7,7 @@
 use super::*;
 
 use koshi_core::command::CliExitCode;
+use koshi_core::event::RejectReason;
 use koshi_ipc::protocol::{IpcErrorCode, IpcResult};
 
 /// The sentence a failure carries, for asserting on it exactly. Panics on any
@@ -401,38 +402,32 @@ fn a_router_answering_no_hello_at_all_names_the_reply_that_arrived() {
 fn the_target_client_refusal_names_the_version_and_the_release() {
     assert_eq!(TARGET_CLIENT_PROTOCOL, 3);
 
-    let refusal = require_settled_version(2, Some(TARGET_CLIENT_PROTOCOL))
-        .expect_err("a session settled on 2 is below 3");
+    let refusal = require_client_targeting(2, true).expect_err("a session settled on 2 is below 3");
     assert_eq!(
         detail(refusal),
         "this session speaks protocol 2; --client needs a session started by koshi 0.4.0 or \
          later"
     );
 
-    let refusal = require_settled_version(2, Some(TARGET_CLIENT_PROTOCOL))
-        .expect_err("a session settled on 2 is below 3");
+    let refusal = require_client_targeting(2, true).expect_err("a session settled on 2 is below 3");
     assert_eq!(CliExitCode::from(&refusal).code(), 4);
-}
 
-#[test]
-fn a_settled_version_at_or_above_the_least_is_accepted_and_no_least_accepts_any() {
-    require_settled_version(3, Some(TARGET_CLIENT_PROTOCOL)).expect("3 meets a floor of 3");
-    require_settled_version(4, Some(TARGET_CLIENT_PROTOCOL)).expect("4 is above a floor of 3");
-    // A `None` floor takes every settled version, including one below 3.
-    require_settled_version(2, None).expect("no floor takes 2");
-    require_settled_version(0, None).expect("no floor takes 0");
-}
-
-#[test]
-fn the_client_refusal_names_the_flag_whatever_floor_it_is_given() {
-    let refusal =
-        require_settled_version(0, Some(1)).expect_err("a session settled on 0 is below 1");
-
+    let refusal = require_client_targeting(0, true).expect_err("a session settled on 0 is below 3");
     assert_eq!(
         detail(refusal),
         "this session speaks protocol 0; --client needs a session started by koshi 0.4.0 or \
          later"
     );
+}
+
+#[test]
+fn a_settled_version_at_or_above_three_is_accepted_and_no_named_client_accepts_any() {
+    require_client_targeting(3, true).expect("3 meets a floor of 3");
+    require_client_targeting(4, true).expect("4 is above a floor of 3");
+    // A command naming no client takes every settled version, including one
+    // below 3.
+    require_client_targeting(2, false).expect("no named client takes 2");
+    require_client_targeting(0, false).expect("no named client takes 0");
 }
 
 #[test]
@@ -450,5 +445,52 @@ fn a_transport_failure_carrying_peer_bytes_is_filtered() {
     assert!(
         !detail(talk_failed(IpcError::MalformedFrame { detail: hostile })).contains('\u{1b}'),
         "no escape byte reaches the sentence"
+    );
+}
+
+#[test]
+fn a_rejections_hint_is_filtered_and_an_applied_result_is_left_alone() {
+    let command_id = koshi_core::ids::CommandId::new();
+    let filtered = filter_rejection_hint(CommandResult::Rejected {
+        command_id,
+        reason: RejectReason::Unauthorized,
+        help: Some("\u{1b}[2Jattach\u{7f} first".to_string()),
+    });
+
+    assert_eq!(
+        filtered,
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::Unauthorized,
+            help: Some("[2Jattach first".to_string()),
+        }
+    );
+
+    let no_hint = CommandResult::Rejected {
+        command_id,
+        reason: RejectReason::Unauthorized,
+        help: None,
+    };
+    assert_eq!(filter_rejection_hint(no_hint.clone()), no_hint);
+
+    let applied = CommandResult::Ok {
+        command_id,
+        emitted_events: Vec::new(),
+    };
+    assert_eq!(filter_rejection_hint(applied.clone()), applied);
+}
+
+#[test]
+fn a_session_hello_filters_the_build_it_named() {
+    // `koshi server-version` prints this string, and the session that answered
+    // is another user's process or another machine's.
+    let reply = session_answer(IpcResult::Hello {
+        protocol_version: 3,
+        version: "\u{1b}]0;pwned\u{7}0.9.9".to_string(),
+    });
+
+    assert_eq!(
+        session_hello_version(reply).expect("3 is the top of the 2 to 3 this build speaks"),
+        (3, "]0;pwned0.9.9".to_string())
     );
 }

@@ -3,14 +3,14 @@
 
 use super::*;
 
-use crate::region::NavigatorLayout;
+use crate::region::TablineInputs;
 use crate::snapshot::TabMeta;
 
 #[cfg(test)]
 mod tests;
 
-/// Draw the tabline from `dto` — see [`NavigatorDto`]. `area` is the row to
-/// paint. `buf` is the buffer painted into.
+/// Draw the tabline from `inputs` — see [`TablineInputs`] — in `theme`'s
+/// colors. `area` is the row to paint. `buf` is the buffer painted into.
 ///
 /// The whole row is filled with the theme's bar background (black by default).
 /// The session name with the `[v…]` version badge sits on the left and the mode
@@ -21,10 +21,17 @@ mod tests;
 /// the side it went off.
 ///
 /// The block widths and per-tab cell spans come from [`tabline_layout`], the
-/// same solve [`crate::hit_test()`] reads. A row outside `buf` paints nothing.
-pub(super) fn draw_tabline(dto: &NavigatorDto<'_>, area: RatatuiRect, buf: &mut Buffer) {
-    let navigator = dto.inputs();
-    let theme = dto.theme;
+/// same solve [`crate::hit_test()`] reads. A row outside `buf` paints nothing,
+/// and a zero-width or zero-height `area` paints nothing.
+pub(super) fn draw_tabline(
+    inputs: TablineInputs<'_>,
+    theme: &Theme,
+    area: RatatuiRect,
+    buf: &mut Buffer,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
     // Reset every cell of the row, then fill it with the theme's bar
     // background. The session name, badge, mode tag, and arrows set only a
     // foreground, so the fill stays their background; an inactive tab's two
@@ -32,10 +39,10 @@ pub(super) fn draw_tabline(dto: &NavigatorDto<'_>, area: RatatuiRect, buf: &mut 
     Clear.render(area, buf);
     buf.set_style(area, bar_style(theme));
 
-    let layout = tabline_layout(navigator, area);
+    let layout = tabline_layout(inputs, area);
 
     // Right block: it owns the right edge whole.
-    let right = right_block(navigator, theme);
+    let right = right_block(inputs, theme);
     set_line_clipped(
         buf,
         layout.right_x,
@@ -47,7 +54,7 @@ pub(super) fn draw_tabline(dto: &NavigatorDto<'_>, area: RatatuiRect, buf: &mut 
     // Left block: the session name and version badge, measured with the same
     // `room` the solve used.
     let session = session_line(
-        navigator.session_name,
+        inputs.session_name,
         theme,
         layout.right_x.saturating_sub(area.x),
     );
@@ -55,7 +62,7 @@ pub(super) fn draw_tabline(dto: &NavigatorDto<'_>, area: RatatuiRect, buf: &mut 
 
     // Tab ribbons in the windowed middle, each on its own ramp stop.
     for &(meta_index, x, width) in &layout.tabs {
-        let tab = tab_line(navigator.tabs, theme, meta_index);
+        let tab = tab_line(inputs.tabs, theme, meta_index);
         set_line_clipped(buf, x, area.y, &tab, width);
     }
     // A `◀`/`▶` on each side that still hides tabs.
@@ -114,14 +121,14 @@ pub(crate) struct TablineLayout {
 /// The first tab marked active is the one followed, and index 0 when none is
 /// marked. A row leaving no gap between the two blocks yields no tabs and no
 /// arrows.
-pub(crate) fn tabline_layout(navigator: NavigatorLayout<'_>, area: RatatuiRect) -> TablineLayout {
-    let right_width = text_width(&right_block_text(navigator));
+pub(crate) fn tabline_layout(inputs: TablineInputs<'_>, area: RatatuiRect) -> TablineLayout {
+    let right_width = text_width(&right_block_text(inputs));
     let right_x = area.right().saturating_sub(right_width).max(area.x);
     let room = right_x.saturating_sub(area.x);
-    let session_width = session_texts(navigator.session_name, room).width.min(room);
+    let session_width = session_texts(inputs.session_name, room).width.min(room);
     let strip_start = area.x.saturating_add(session_width).saturating_add(1);
 
-    let count = navigator.tabs.len();
+    let count = inputs.tabs.len();
     let no_tabs = || TablineLayout {
         session_width,
         right_x,
@@ -136,7 +143,7 @@ pub(crate) fn tabline_layout(navigator: NavigatorLayout<'_>, area: RatatuiRect) 
 
     let widths: Vec<u16> = (0..count)
         .map(|i| {
-            let (index, name) = tab_texts(navigator.tabs, i);
+            let (index, name) = tab_texts(inputs.tabs, i);
             text_width(&index).saturating_add(text_width(&name))
         })
         .collect();
@@ -162,12 +169,8 @@ pub(crate) fn tabline_layout(navigator: NavigatorLayout<'_>, area: RatatuiRect) 
         return no_tabs();
     }
 
-    let active = navigator
-        .tabs
-        .iter()
-        .position(|meta| meta.active)
-        .unwrap_or(0);
-    let first_visible = match navigator.tabline_offset {
+    let active = inputs.tabs.iter().position(|meta| meta.active).unwrap_or(0);
+    let first_visible = match inputs.tabline_offset {
         Some(i) => i.min(count - 1),
         None => reveal_active(&widths, active, lo, hi),
     };
@@ -224,34 +227,20 @@ fn reveal_active(widths: &[u16], active: usize, lo: u16, hi: u16) -> usize {
     start
 }
 
-/// The cells `text` occupies when drawn, counted as Unicode display width and
-/// never from its style: `漢字` is 4, `🦀` is 2, `e` plus a combining acute
-/// is 1.
-///
-/// Text wider than `u16::MAX` cells gives `u16::MAX`, which every comparison
-/// here reads as wider than the row.
-fn text_width(text: &str) -> u16 {
-    u16::try_from(Span::raw(text).width()).unwrap_or(u16::MAX)
-}
-
 /// The tabline's right-anchored block text: the tag [`mode_tags`] composes,
 /// with a space each side. A plain client gives ` BASE `; one that is locked,
 /// selecting, and dialing the session again gives
 /// ` RECONNECTING (attempt 4, retry in 8s) · LOCK · SELECT `.
-fn right_block_text(navigator: NavigatorLayout<'_>) -> String {
+fn right_block_text(inputs: TablineInputs<'_>) -> String {
     format!(
         " {} ",
-        mode_tags(
-            navigator.lock_mode,
-            navigator.mouse_select,
-            navigator.reconnecting,
-        )
+        mode_tags(inputs.lock_mode, inputs.mouse_select, inputs.reconnecting,)
     )
 }
 
 /// The right-anchored block, colored for drawing.
-fn right_block(navigator: NavigatorLayout<'_>, theme: &Theme) -> Line<'static> {
-    Line::from(Span::styled(right_block_text(navigator), mode_style(theme)))
+fn right_block(inputs: TablineInputs<'_>, theme: &Theme) -> Line<'static> {
+    Line::from(Span::styled(right_block_text(inputs), mode_style(theme)))
 }
 
 /// koshi's own version, shown as the `[v…]` badge beside the session name.

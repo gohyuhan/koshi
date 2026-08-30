@@ -26,6 +26,8 @@
 
 use std::time::SystemTime;
 
+use crate::runtime::snapshot::solve_tab;
+use crate::server::Server;
 use koshi_config::types::BoundAction;
 use koshi_core::command::{CommandEnvelope, CommandSource};
 use koshi_core::geometry::Direction;
@@ -35,10 +37,6 @@ use koshi_core::resolve::{resolve_action, DispatchPlan};
 use koshi_input::keyboard::encode;
 use koshi_layout::content::content_rects;
 use koshi_pane::pane::state::PaneKind;
-
-use crate::runtime::render_schedule::InvalidationReason;
-use crate::runtime::snapshot::solve_tab;
-use crate::server::Server;
 
 impl Server {
     /// React to input reaching `pane_id`'s child from `client_id`: drop the
@@ -182,8 +180,7 @@ impl Server {
             return;
         };
         self.dispatch_plan(client_id, plan);
-        self.render_scheduler
-            .invalidate(InvalidationReason::StatusChanged);
+        self.render_scheduler.invalidate();
     }
 
     /// Write one key the viewer did not bind to the pane it is typing into,

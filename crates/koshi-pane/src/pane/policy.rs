@@ -57,8 +57,6 @@ pub enum PaneExitPolicy {
     /// Close the pane when its child process ends.
     #[default]
     CloseOnExit,
-    /// Start a new shell in the pane when the child process ends.
-    RespawnShell,
 }
 
 #[cfg(test)]

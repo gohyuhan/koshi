@@ -18,7 +18,7 @@
 
 use koshi_core::command::CopyTarget;
 use koshi_core::event::{
-    CommandRejected, ConfigReloaded, Copied, Event, InputMode, InputModeChanged, KeybindingMatched,
+    CommandRejected, ConfigReloaded, Copied, Event, InputModeChanged, KeybindingMatched,
     LayoutChanged, MouseDragged, MousePressed, MouseReleased, MouseScrolled, MouseSelectChanged,
     PaneClosing, PaneCommandFinished, PaneCommandStarted, PaneCreated, PaneEnterPressed,
     PaneFocused, PaneMouseForwarded, PaneOutputUpdated, PaneProcessExited, PaneRemoved,
@@ -1327,7 +1327,7 @@ fn every_event_with_no_wire_spelling_converts_to_nothing() {
         }),
         Event::InputModeChanged(InputModeChanged {
             client_id: client,
-            mode: InputMode::Locked,
+            mode: LockMode::Locked,
         }),
         Event::MouseSelectChanged(MouseSelectChanged {
             client_id: client,

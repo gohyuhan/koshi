@@ -165,39 +165,41 @@ fn a_surface_no_release_carries_is_checked_on_the_floor_alone() {
 
 #[test]
 fn the_session_protocol_speaks_three_and_accepts_nothing_older() {
-    assert_eq!(SESSION_PROTOCOL.min, 2);
+    assert_eq!(SESSION_PROTOCOL.min, 3);
     assert_eq!(SESSION_PROTOCOL.max, 3);
     assert_eq!(SESSION_PROTOCOL.released, Some(2));
 }
 
 #[test]
-fn the_control_plane_speaks_two_and_still_serves_the_released_one() {
+fn the_control_plane_speaks_two_and_still_accepts_one() {
     assert_eq!(CONTROL_PROTOCOL.min, 1);
     assert_eq!(CONTROL_PROTOCOL.max, 2);
-    assert_eq!(CONTROL_PROTOCOL.released, Some(1));
+    assert_eq!(CONTROL_PROTOCOL.released, Some(2));
 }
 
+/// The `max` each surface reads in the `v0.3.0` tag, which is the last
+/// release. A surface that tag does not carry reads `None`.
+const WHAT_V0_3_0_SPEAKS: [(&str, Option<u32>); 10] = [
+    ("session protocol", Some(2)),
+    ("control plane", Some(2)),
+    ("supervisor link", Some(1)),
+    ("token store format", Some(1)),
+    ("remote doorway", Some(1)),
+    ("saved server file format", Some(1)),
+    ("remote certificate file format", Some(1)),
+    ("remote access record format", Some(1)),
+    ("resume file format", Some(2)),
+    ("config schema", Some(1)),
+];
+
 #[test]
-fn every_surface_no_release_carries_is_one_born_after_the_last_tag() {
-    // A surface added to the table with `released: None` lands in this list.
-    let unreleased: Vec<&str> = SURFACES
+fn every_anchor_holds_the_version_the_v0_3_0_tag_speaks() {
+    let anchors: Vec<(&str, Option<u32>)> = SURFACES
         .iter()
-        .filter(|surface| surface.released.is_none())
-        .map(|surface| surface.name)
+        .map(|surface| (surface.name, surface.released))
         .collect();
 
-    assert_eq!(
-        unreleased,
-        [
-            "supervisor link",
-            "token store format",
-            "remote doorway",
-            "saved server file format",
-            "remote certificate file format",
-            "remote access record format",
-            "resume file format"
-        ]
-    );
+    assert_eq!(anchors, WHAT_V0_3_0_SPEAKS);
 }
 
 #[test]
@@ -210,15 +212,15 @@ fn the_table_pins_every_surface_by_name_and_numbers() {
     assert_eq!(
         rows,
         [
-            ("session protocol", 2, 3, Some(2)),
-            ("control plane", 1, 2, Some(1)),
-            ("supervisor link", 1, 1, None),
-            ("token store format", 1, 1, None),
-            ("remote doorway", 1, 1, None),
-            ("saved server file format", 1, 1, None),
-            ("remote certificate file format", 1, 1, None),
-            ("remote access record format", 1, 1, None),
-            ("resume file format", 1, 3, None),
+            ("session protocol", 3, 3, Some(2)),
+            ("control plane", 1, 2, Some(2)),
+            ("supervisor link", 1, 1, Some(1)),
+            ("token store format", 1, 1, Some(1)),
+            ("remote doorway", 1, 1, Some(1)),
+            ("saved server file format", 1, 1, Some(1)),
+            ("remote certificate file format", 1, 1, Some(1)),
+            ("remote access record format", 1, 1, Some(1)),
+            ("resume file format", 1, 3, Some(2)),
             ("config schema", 1, 1, Some(1)),
         ]
     );

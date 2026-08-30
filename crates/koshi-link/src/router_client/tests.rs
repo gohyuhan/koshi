@@ -407,6 +407,28 @@ fn any_other_refusal_of_the_count_carries_the_sentence_the_router_gave() {
     router.join().expect("the stand-in router exits");
 }
 
+/// A refusal goes straight to the terminal, so the characters a terminal acts
+/// on are removed before any caller reports it.
+#[test]
+fn a_refusal_loses_what_a_terminal_would_act_on() {
+    let runtime_dir = test_runtime_dir();
+    let router = fake_router(
+        runtime_dir.path(),
+        Script::AcceptAndAnswer(RouterResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::MalformedRequest,
+            message: "\u{1b}[2Jthe bytes\u{7f} are not a request".to_string(),
+        })),
+    );
+
+    assert_eq!(
+        running_router_remote_connections(runtime_dir.path()),
+        RemoteConnections::NoAnswer {
+            detail: "[2Jthe bytes are not a request".to_string(),
+        }
+    );
+    router.join().expect("the stand-in router exits");
+}
+
 #[test]
 fn a_reply_that_answers_no_count_is_reported_as_unexpected() {
     let runtime_dir = test_runtime_dir();
@@ -622,6 +644,9 @@ fn a_reply_that_creates_nothing_names_what_the_router_answered() {
     let CliError::IpcUnavailable { detail } = error else {
         panic!("expected IpcUnavailable, got {error:?}");
     };
-    assert_eq!(detail, "the router answered a create session with Sessions");
+    assert_eq!(
+        detail,
+        "the router answered with an unexpected Sessions reply"
+    );
     router.join().expect("the stand-in router exits");
 }

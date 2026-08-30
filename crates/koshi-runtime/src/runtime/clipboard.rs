@@ -4,7 +4,7 @@
 //! **outer terminal** — the program koshi itself runs in — which owns the real
 //! clipboard. The payload is base64. Base64 carries every byte value.
 //!
-//! `Osc52Clipboard` is the only `ClipboardWriter` koshi builds. A copy naming
+//! OSC 52 is the only clipboard koshi writes to. A copy naming
 //! `CopyTarget::Native` writes nothing.
 //!
 //! The copy command carries which clipboard it means: the viewer that decided
@@ -17,25 +17,6 @@ use koshi_core::command::CopyTarget;
 use koshi_core::ids::ClientId;
 
 use crate::server::Server;
-
-/// One destination that can receive copied text.
-pub(crate) trait ClipboardWriter {
-    /// Write `text`, returning whether the destination accepted it.
-    fn write(&mut self, text: &str) -> bool;
-}
-
-/// Collects one OSC 52 write for the client's outer terminal.
-#[derive(Default)]
-struct Osc52Clipboard {
-    bytes: Vec<u8>,
-}
-
-impl ClipboardWriter for Osc52Clipboard {
-    fn write(&mut self, text: &str) -> bool {
-        self.bytes = osc52_copy(text);
-        true
-    }
-}
 
 /// The OSC 52 sequence that puts `text` on the clipboard: `ESC ] 52 ; c ;
 /// <base64 of text> BEL`. The `c` names the clipboard selection.
@@ -67,12 +48,7 @@ impl Server {
         text: &str,
     ) {
         match target {
-            CopyTarget::Osc52 => {
-                let mut clipboard = Osc52Clipboard::default();
-                if clipboard.write(text) {
-                    self.queue_host_write(client_id, &clipboard.bytes);
-                }
-            }
+            CopyTarget::Osc52 => self.queue_host_write(client_id, &osc52_copy(text)),
             CopyTarget::Native => {}
         }
     }

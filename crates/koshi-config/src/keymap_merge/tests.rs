@@ -76,16 +76,12 @@ fn defaults() -> KeyMapLayer {
     }
 }
 
-fn known() -> BTreeSet<ModeName> {
-    BTreeSet::from([mode("normal"), mode("locked")])
-}
-
 /// The chord-depth cap the tests run under, matching the shipped default.
 const DEPTH: u8 = 4;
 
 /// Merges with no unlock alternative and the seeded core registry.
 fn merge(layers: &[KeyMapLayer]) -> MergedKeyMap {
-    merge_keymaps(layers, None, DEPTH, &ActionRegistry::new(), &known())
+    merge_keymaps(layers, None, DEPTH, &ActionRegistry::new())
 }
 
 /// The `<A-f>` → `core:toggle-pane-fullscreen` shipped default, a
@@ -100,28 +96,10 @@ fn no_layers_yield_an_empty_merged_map() {
 }
 
 #[test]
-fn an_empty_known_mode_set_skips_every_layer() {
-    let merged = merge_keymaps(
-        &[defaults()],
-        None,
-        DEPTH,
-        &ActionRegistry::new(),
-        &BTreeSet::new(),
-    );
-    assert_eq!(merged, MergedKeyMap::default());
-}
-
-#[test]
-fn a_registered_mode_no_layer_binds_is_absent_from_the_merged_map() {
-    // `known_modes` names the modes a layer MAY bind in; it never seeds an
-    // entry of its own. The shipped defaults bind `normal` and `locked` only.
-    let merged = merge_keymaps(
-        &[defaults()],
-        None,
-        DEPTH,
-        &ActionRegistry::new(),
-        &BTreeSet::from([mode("normal"), mode("locked"), mode("resize")]),
-    );
+fn a_built_in_mode_no_layer_binds_is_absent_from_the_merged_map() {
+    // A built-in mode never seeds an entry of its own. The shipped defaults
+    // bind `normal` and `locked` only, so `resize` gets no entry.
+    let merged = merge_keymaps(&[defaults()], None, DEPTH, &ActionRegistry::new());
     assert_eq!(
         merged.modes.keys().cloned().collect::<Vec<_>>(),
         vec![mode("locked"), mode("normal")]
@@ -145,7 +123,7 @@ fn a_mode_a_layer_names_with_no_entries_still_reaches_the_merged_map() {
 fn a_zero_chord_depth_cap_leaves_every_map_empty() {
     // Every sequence holds at least one chord. A cap of zero admits none:
     // the mode entries exist and hold nothing.
-    let merged = merge_keymaps(&[defaults()], None, 0, &ActionRegistry::new(), &known());
+    let merged = merge_keymaps(&[defaults()], None, 0, &ActionRegistry::new());
     assert_eq!(merged.modes[&mode("normal")], MergedModeMap::default());
     assert_eq!(merged.modes[&mode("locked")], MergedModeMap::default());
 }
@@ -761,7 +739,6 @@ fn unlock_alternative_moves_the_reserved_chord() {
         Some(alternative),
         DEPTH,
         &ActionRegistry::new(),
-        &known(),
     );
     let locked = &merged.modes[&mode("locked")];
 
@@ -905,7 +882,6 @@ fn binding_past_the_chord_depth_cap_is_transparent() {
         None,
         1,
         &ActionRegistry::new(),
-        &known(),
     );
     let normal = &merged.modes[&mode("normal")];
 

@@ -7,6 +7,8 @@
 
 use std::time::SystemTime;
 
+use koshi_core::text::MAX_REPORTED_TEXT_BYTES;
+
 use super::*;
 
 #[test]
@@ -281,12 +283,15 @@ fn a_session_listing_where_a_welcome_belongs_is_refused() {
 
     let refusal = check_answer("desk.local:7654", &answer).expect_err("a listing is not a welcome");
 
-    let DialError::Refused(CliError::IpcUnavailable { detail }) = refusal else {
-        panic!("a frame this dial cannot use is a transport failure, not a runtime one");
+    // `probe` reads a refused dial carrying `CliError::IpcUnavailable` as the
+    // pinned-certificate check, so a frame that answers nothing carries
+    // `CliError::Runtime` like every other refusal `check_answer` builds.
+    let DialError::Refused(CliError::Runtime { detail }) = refusal else {
+        panic!("a server that answered gives every dial after it the same answer");
     };
     assert_eq!(
         detail,
-        "desk.local:7654 answered with a frame this request cannot produce"
+        "desk.local:7654 answered with an unexpected Sessions reply"
     );
 }
 
@@ -652,7 +657,7 @@ fn a_welcome_where_a_listing_belongs_is_refused() {
     };
     assert_eq!(
         detail,
-        "the server answered with a frame this request cannot produce"
+        "the server answered with an unexpected Welcome reply"
     );
 }
 
@@ -925,19 +930,55 @@ fn a_lock_its_holder_released_is_taken_by_the_next_caller() {
     drop(again);
 }
 
+/// A name is what `targeting.rs` matches on, so a listed row carries the
+/// server's own bytes and is filtered where it is printed
+/// (`discovery::SessionRow`). A refusal is never matched on and never reaches a
+/// row type: it goes straight to the terminal, so it is filtered here.
 #[test]
-fn this_layer_never_alters_what_a_peer_reported() {
-    // A session or tab name is what `targeting.rs` matches on, so everything
-    // this module returns carries the peer's own bytes. Filtering happens in
-    // the row types built for printing (`discovery::SessionRow` and its
-    // siblings), never here.
-    //
-    // Driving `fetch_remote_overview` needs a live connection, so the rule is
-    // checked against the source instead.
-    let source = include_str!("../remote_client.rs");
-    assert!(
-        !source.contains("sanitize_reported_text"),
-        "remote_client.rs filters reported text; that belongs in the display rows"
+fn a_refused_listing_loses_what_a_terminal_would_act_on() {
+    let mut link = link_answering(&RemoteServerFrame::Refused {
+        message: "\u{1b}[2Jthe session\u{7f} is gone".to_string(),
+    });
+
+    let refusal = list_remote_sessions(&mut link).expect_err("the listing is refused");
+
+    let CliError::Runtime { detail } = refusal else {
+        panic!("a refusal the server sent is a runtime failure, not a transport one");
+    };
+    assert_eq!(detail, "[2Jthe session is gone");
+}
+
+#[test]
+fn a_refused_dial_loses_what_a_terminal_would_act_on() {
+    let answer = RemoteServerFrame::Refused {
+        message: "\u{1b}[2Jthe session\u{7f} is gone".to_string(),
+    };
+
+    let refusal = check_answer("desk.local:7654", &answer).expect_err("a refusal is not a welcome");
+
+    let DialError::Refused(CliError::Runtime { detail }) = refusal else {
+        panic!("a server that answered gives every dial after it the same answer");
+    };
+    assert_eq!(detail, "[2Jthe session is gone (server desk.local:7654)");
+}
+
+#[test]
+fn a_refusal_longer_than_the_cap_is_cut_to_it() {
+    let answer = RemoteServerFrame::Refused {
+        message: "n".repeat(MAX_REPORTED_TEXT_BYTES + 100),
+    };
+
+    let refusal = check_answer("desk.local:7654", &answer).expect_err("a refusal is not a welcome");
+
+    let DialError::Refused(CliError::Runtime { detail }) = refusal else {
+        panic!("a server that answered gives every dial after it the same answer");
+    };
+    assert_eq!(
+        detail,
+        format!(
+            "{} (server desk.local:7654)",
+            "n".repeat(MAX_REPORTED_TEXT_BYTES)
+        )
     );
 }
 

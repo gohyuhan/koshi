@@ -153,7 +153,11 @@ pub enum SessionEvent {
     },
     /// Bytes for the terminal this client runs in, written to it verbatim.
     HostWrite {
-        /// The bytes to write, in the order the session queued them.
+        /// The bytes to write, in the order the session queued them. Written
+        /// as one base64 string: the two bytes `[104, 105]` are `"aGk="`. Read
+        /// from that string or from a list of numbers, the shape a session
+        /// server speaking session protocol 2 writes.
+        #[serde(with = "crate::bytes::base64_or_list")]
         bytes: Vec<u8>,
     },
     /// The client drops this session and attaches to the named one.

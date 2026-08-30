@@ -6,7 +6,7 @@
 //! restores the exact prior layout.
 //!
 //! Each client holds its own mode. The solver takes the mode as an argument
-//! ([`crate::solver::solve_with_mode`]). Two clients can solve the same tree
+//! ([`crate::solver::solve_with_mode_min`]). Two clients can solve the same tree
 //! in the same frame, one fullscreen and one tiled.
 
 use koshi_core::ids::PaneId;

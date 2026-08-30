@@ -23,8 +23,7 @@ use std::thread;
 use std::time::SystemTime;
 
 use crate::runtime::{
-    bus::EventBus, render_schedule::InvalidationReason, snapshot::solve_tab, spawn_env::koshi_env,
-    transaction::TransactionScope,
+    bus::EventBus, snapshot::solve_tab, spawn_env::koshi_env, transaction::TransactionScope,
 };
 use crate::server::Server;
 use koshi_core::{
@@ -36,8 +35,8 @@ use koshi_core::{
         ToggleLockModeArgs, VisualCommand, WriteToPaneArgs,
     },
     event::{
-        Event, InputMode, InputModeChanged, LayoutChanged, MouseSelectChanged, PaneFocused,
-        PtyResized, RejectReason, SelectionChanged,
+        Event, InputModeChanged, LayoutChanged, MouseSelectChanged, PaneFocused, PtyResized,
+        RejectReason, SelectionChanged,
     },
     geometry::{Direction, PaneArea, Rect, Size},
     ids::{ClientId, CommandId, PaneId, SessionId, TabId},
@@ -190,21 +189,14 @@ struct PaneTarget {
     pane_id: PaneId,
 }
 
-/// A resolved [`Command::FocusPane`] target: the session and client whose
-/// focus moves, that client's active tab — the tab the pane was resolved
-/// in — and the pane taking focus. The `Ok` half of
-/// [`Server::resolve_focus_target`].
-struct FocusPaneTarget {
-    session_id: SessionId,
-    client_id: ClientId,
-    tab_id: TabId,
-    pane_id: PaneId,
-}
-
-/// A resolved [`Command::TogglePaneFullscreen`] target: the session, the client
-/// whose own view flips, that client's tab, and the pane the zoom fills it
-/// with. The `Ok` half of [`Server::resolve_fullscreen_target`].
-struct FullscreenTarget {
+/// The resolved concrete target of a command that changes one client's own
+/// view of a pane ([`Command::FocusPane`], [`Command::TogglePaneFullscreen`]):
+/// the owning session, the client whose view changes, that client's active
+/// tab, and the pane. The `Ok` half of both
+/// [`Server::resolve_focus_target`] and
+/// [`Server::resolve_fullscreen_target`]. All fields are `Copy`, so resolving
+/// holds no borrow into the session map.
+struct ClientPaneTarget {
     session_id: SessionId,
     client_id: ClientId,
     tab_id: TabId,
@@ -304,8 +296,7 @@ impl Server {
                 self.handle_switch_session(command_id, &envelope.source, &args)
             }
         };
-        self.render_scheduler
-            .invalidate(InvalidationReason::StatusChanged);
+        self.render_scheduler.invalidate();
         match outcome {
             Ok(result) => (result, None),
             Err(rejection) => {
@@ -771,9 +762,11 @@ impl Server {
     /// Reflow `tab_id`'s live PTYs to its current effective size when a client
     /// still views it, appending one [`Event::PtyResized`] per pane actually
     /// resized. A tab no viewer contributes a pane area to has no
-    /// [`Session::tab_viewport`] and keeps its sizes. The shared shape behind
-    /// every "a tab's viewer set changed" reflow — the full-tab solve with no
-    /// freshly-spawned pane to skip.
+    /// [`Session::tab_viewport`] and keeps its sizes. The one spelling of a
+    /// full-tab reflow: every caller that changed what the tab's viewers
+    /// display — a moved border, a moved focus, a flipped zoom, a viewer
+    /// joining or leaving — reaches it here, with no freshly-spawned pane to
+    /// skip.
     pub(crate) fn reflow_tab_if_viewed(
         &mut self,
         backend: &dyn PtyBackend,

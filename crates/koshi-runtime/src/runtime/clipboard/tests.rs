@@ -8,7 +8,6 @@ use std::sync::{mpsc, Arc};
 use koshi_pty::backend::state::PtyBackend;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
-use crate::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
 use crate::runtime::event::RuntimeEvent;
 
 use super::*;
@@ -16,16 +15,8 @@ use super::*;
 /// A bare runtime over a fake backend. The sender keeps the inbox open.
 fn new_runtime() -> (Server, mpsc::Sender<RuntimeEvent>) {
     let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::new());
-    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
-    let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (tx, inbox_rx) = mpsc::channel();
-    let runtime = Server::new(
-        pty_backend,
-        snapshot_provider,
-        storage,
-        inbox_rx,
-        tx.clone(),
-    );
+    let runtime = Server::new(pty_backend, inbox_rx, tx.clone());
     (runtime, tx)
 }
 
@@ -68,14 +59,6 @@ fn an_escape_in_the_text_is_base64_and_cannot_end_the_sequence() {
         STANDARD.decode(payload).expect("valid base64"),
         text.as_bytes()
     );
-}
-
-#[test]
-fn the_osc52_writer_produces_the_sequence() {
-    let mut clipboard = Osc52Clipboard::default();
-
-    assert!(clipboard.write("hello"));
-    assert_eq!(clipboard.bytes, b"\x1b]52;c;aGVsbG8=\x07");
 }
 
 #[test]

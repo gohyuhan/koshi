@@ -12,7 +12,6 @@ use koshi_core::process::{KillPolicy, PtySize, SpawnSpec};
 use koshi_pty::backend::state::PtyBackend;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
-use crate::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
 use crate::runtime::event::RuntimeEvent;
 use crate::server::Server;
 
@@ -23,10 +22,8 @@ const DEADLINE: Duration = Duration::from_secs(5);
 fn a_spawned_pane_forwards_output_reports_active_and_is_killed_on_graceful_shutdown() {
     let fake = Arc::new(FakePtyBackend::new());
     let pty_backend: Arc<dyn PtyBackend> = fake.clone();
-    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
-    let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (tx, inbox_rx) = mpsc::channel();
-    let mut rt = Server::new(pty_backend, snapshot_provider, storage, inbox_rx, tx);
+    let mut rt = Server::new(pty_backend, inbox_rx, tx);
 
     assert!(!rt.has_active_panes(), "a fresh server parks no pane");
     assert!(!rt.is_draining(), "a fresh server is serving");

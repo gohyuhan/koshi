@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::conflict::{built_in_modes, keymap_layers, KeyMapLayer};
+use crate::conflict::{keymap_layers, KeyMapLayer};
 use crate::key::Leader;
 use crate::keymap_merge::{merge_keymaps, MergedKeyMap, MergedModeMap};
 use crate::types::{default_prefix_labels, BoundAction, KeybindingsConfig, ModeName};
@@ -128,7 +128,6 @@ impl KeymapHintCatalog {
             config.unlock_alternative,
             config.max_chord_depth,
             registry,
-            &built_in_modes(),
         );
 
         let unlock = ActionRef::core("unlock")

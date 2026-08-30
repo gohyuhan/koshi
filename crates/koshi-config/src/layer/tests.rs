@@ -9,9 +9,7 @@ use koshi_core::geometry::Direction;
 use koshi_core::key::{Key, KeyChord, ModFlags};
 
 use super::*;
-use crate::types::{
-    ActivationAction, ActivationScope, KeymapOptIn, ModeBindings, ModeName, RgbColor,
-};
+use crate::types::{ModeBindings, ModeName, RgbColor};
 
 #[test]
 fn empty_layer_changes_nothing() {
@@ -531,25 +529,6 @@ fn keybindings_scalars_keep_untouched_siblings() {
     assert_eq!(merged.keybindings.leader, Leader::Mods(ModFlags::ALT));
     assert_eq!(merged.keybindings.chord_timeout_ms, 500); // default kept
     assert_eq!(merged.keybindings.max_chord_depth, 4); // default kept
-}
-
-#[test]
-fn plugin_entries_replaced_wholesale() {
-    let entry = PluginActivation {
-        name: "statusbar".to_string(),
-        action: ActivationAction::Enable,
-        scope: ActivationScope::Global,
-        keymaps: KeymapOptIn::Recommended,
-    };
-    let layer = PartialKoshiConfig {
-        plugins: Some(PartialPluginActivationConfig {
-            entries: Some(vec![entry.clone()]),
-        }),
-        ..Default::default()
-    };
-    let merged = merge_client(ClientConfig::default(), vec![layer]);
-
-    assert_eq!(merged.plugins.entries, vec![entry]);
 }
 
 #[test]

@@ -27,10 +27,11 @@
 //! Every refusal is
 //! [`REMOTE_REFUSED`](koshi_ipc::remote_wire::REMOTE_REFUSED) and closes the
 //! connection. A wrong secret, a revoked secret, a session that does not exist,
-//! and a session the secret holds no grant for produce the same bytes and the
-//! same work: no caller-supplied name reaches a socket connect, a wait, or a
-//! file until the admitted scope has been proven to cover it. Order is
-//! `admit` → `resolve` → `covers` → open.
+//! a session the secret holds no grant for, and a session another local user
+//! started produce the same bytes and the same work: no caller-supplied name
+//! reaches a socket connect, a wait, or a file until the admitted scope has
+//! been proven to cover it. Order is `admit` → `resolve` → `covers` →
+//! `started_by_this_router` → open.
 //!
 //! This listener carries the three remote frames and then one session server's
 //! own bytes. No path from it reaches the router's control plane, so
@@ -447,7 +448,7 @@ fn serve_remote(
     counted: InAdmission,
 ) {
     #[cfg(unix)]
-    crate::router::block_sigpipe_on_this_thread();
+    crate::process::block_sigpipe_on_this_thread();
 
     let deadline = Instant::now() + ADMISSION_WINDOW;
     let Ok(control) = sock.try_clone() else {
@@ -701,7 +702,7 @@ fn bridge_to_session(
         .name("koshi-remote-in".to_string())
         .spawn(move || {
             #[cfg(unix)]
-            crate::router::block_sigpipe_on_this_thread();
+            crate::process::block_sigpipe_on_this_thread();
             let _ = io::copy(&mut inbound, &mut to_session);
             closer.close();
             let _ = inbound_control.shutdown(Shutdown::Both);
@@ -724,7 +725,7 @@ fn bridge_to_session(
         .name("koshi-remote-out".to_string())
         .spawn(move || {
             #[cfg(unix)]
-            crate::router::block_sigpipe_on_this_thread();
+            crate::process::block_sigpipe_on_this_thread();
             let _ = io::copy(&mut from_session, &mut outbound);
             let _ = outbound_control.shutdown(Shutdown::Both);
             outbound_ended.once();

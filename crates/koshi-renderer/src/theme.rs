@@ -2,13 +2,13 @@
 //! surfaces with. The viewer passes it to the renderer next to the frame
 //! snapshot; the snapshot itself carries no colors.
 //!
-//! Chrome elements that come in runs — the tab list, the hint bar's modifier
+//! Chrome elements that come in runs — the tab list, the statusline's modifier
 //! groups — each take one stop on a gradient by their position.
 //! [`Theme::ramp`] gives a run element its stop; [`Theme::ramp_dim`] is the
 //! same stop pulled toward black, used as the quiet half of a two-block ribbon
 //! (label next to key, for example). The single accent for in-progress state
 //! (the pending-sequence breadcrumb) is [`Theme::accent`]. Both koshi-owned
-//! rows — the tab bar and the key-hint bar — are filled with [`Theme::bar_bg`]
+//! rows — the tabline and the statusline — are filled with [`Theme::bar_bg`]
 //! before anything is painted over them. [`Theme::default`] is the stock koshi
 //! look — a light-purple → light-blue ramp with a pink accent over black bars;
 //! the viewing client builds a non-default `Theme` from the config theme's
@@ -17,7 +17,7 @@
 use ratatui::style::Color;
 
 /// Every color the renderer's chrome styles draw with. The style helper
-/// functions in [`crate::render`] and [`crate::statusline_hints`] are the
+/// functions in [`crate::render`] and the statusline module are the
 /// only places chrome picks a color, and each reads its colors from here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Theme {
@@ -50,7 +50,7 @@ pub struct Theme {
     /// Backdrop of the letterbox margin around a centered layout.
     pub letterbox: Color,
     /// Background filling koshi's own two rows whole: the tab bar on top and
-    /// the key-hint bar on the bottom.
+    /// the statusline on the bottom.
     pub bar_bg: Color,
 }
 

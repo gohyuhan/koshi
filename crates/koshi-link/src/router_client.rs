@@ -20,6 +20,7 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use koshi_core::ids::SessionId;
+use koshi_core::text::sanitize_reported_text;
 use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::error::IpcError;
 use koshi_ipc::protocol::{IpcErrorCode, IpcErrorPayload};
@@ -27,7 +28,6 @@ use koshi_ipc::router::{
     router_endpoint_path, IncomingRouterResponse, RouterRequest, RouterRequestKind, RouterResult,
 };
 use koshi_ipc::transport::Connection;
-use koshi_ipc::wire::WireName;
 
 use crate::error::CliError;
 use crate::talk::{self, talk_failed};
@@ -102,8 +102,9 @@ pub fn router_request(
 /// means no router was running, so nothing restarted.
 ///
 /// A router that refuses the request is [`CliError::IpcUnavailable`] carrying
-/// the sentence the router sent. A router whose build has no Restart kind
-/// refuses it, and that sentence names both builds.
+/// the sentence the router sent, filtered by [`sanitize_reported_text`]. A
+/// router whose build has no Restart kind refuses it, and that sentence names
+/// both builds.
 pub fn restart_running_router(runtime_dir: &Path) -> Result<bool, CliError> {
     match exchange(runtime_dir, &RouterRequestKind::Restart)? {
         None => Ok(false),
@@ -206,6 +207,9 @@ fn open_router(runtime_dir: &Path) -> Result<Option<(Connection, EndpointFile)>,
 /// One exchange with a running router: read its endpoint file, connect,
 /// pipeline the Hello and `kind` back to back, and read both replies in order.
 ///
+/// A [`RouterResult::Error`] comes back through [`name_other_build`], so its
+/// message is filtered before any caller reports it.
+///
 /// `Ok(None)` means no router is running — the endpoint file is missing, or
 /// nothing listens at the address it names — and nothing was sent.
 fn exchange(
@@ -235,12 +239,17 @@ fn exchange(
         .map(|result| Some(name_other_build(result, &router_version)))
 }
 
-/// A request kind the router does not have, restated to name both builds.
+/// A refusal filtered by [`sanitize_reported_text`], and — for a request kind
+/// the router does not have — restated to name both builds.
+///
+/// Every refusal passes through this, so the sentence a caller reports carries
+/// no control, bidi-control or tag character, and no more than
+/// [`MAX_REPORTED_TEXT_BYTES`](koshi_core::text::MAX_REPORTED_TEXT_BYTES) of
+/// what the router sent.
 ///
 /// Only [`IpcErrorCode::UnsupportedKind`] is restated, and only when the
-/// router reports a build other than this one. Every other answer, every other
-/// refusal, and every refusal from a router on this build passes through
-/// unchanged.
+/// router reports a build other than this one. Every answer that is not a
+/// refusal passes through unchanged.
 ///
 /// `router_version` is the build the router reported in its Hello, empty when
 /// the router predates that field.
@@ -249,8 +258,12 @@ fn name_other_build(result: RouterResult, router_version: &str) -> RouterResult 
     let RouterResult::Error(refusal) = result else {
         return result;
     };
+    let message = sanitize_reported_text(&refusal.message);
     if refusal.code != IpcErrorCode::UnsupportedKind || router_version == this_version {
-        return RouterResult::Error(refusal);
+        return RouterResult::Error(IpcErrorPayload {
+            code: refusal.code,
+            message,
+        });
     }
     let running = if router_version.is_empty() {
         "an older koshi that does not report its build".to_string()
@@ -260,10 +273,9 @@ fn name_other_build(result: RouterResult, router_version: &str) -> RouterResult 
     RouterResult::Error(IpcErrorPayload {
         code: refusal.code,
         message: format!(
-            "{} — the running router is {running} and this command is koshi {this_version}; the \
-             router serves its own build until it restarts, which it does once no session is \
-             left running",
-            refusal.message
+            "{message} — the running router is {running} and this command is koshi \
+             {this_version}; the router serves its own build until it restarts, which it does \
+             once no session is left running"
         ),
     })
 }
@@ -338,11 +350,6 @@ pub fn request_new_session(
         RouterResult::Error(refusal) => Err(CliError::IpcUnavailable {
             detail: refusal.message,
         }),
-        other => Err(CliError::IpcUnavailable {
-            detail: format!(
-                "the router answered a create session with {}",
-                other.wire_name()
-            ),
-        }),
+        other => Err(talk::ROUTER.unexpected_reply(&other)),
     }
 }

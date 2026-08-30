@@ -31,9 +31,7 @@ impl Server {
     /// counting a pane that `panes` gives no row.
     #[must_use]
     pub fn build_overview(&self) -> Option<SessionOverview> {
-        // One process serves one session: genesis seeds exactly one and no
-        // command creates another in-process.
-        let session = self.sessions.values().next()?;
+        let session = self.sole_session()?;
 
         let mut tabs: Vec<&Tab> = session.tabs.values().collect();
         tabs.sort_by_key(|tab| tab.index());

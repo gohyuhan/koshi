@@ -3,8 +3,11 @@
 //! `XDG_RUNTIME_DIR` holds, `KOSHI_RUNTIME_DIR` names it only when absolute,
 //! every other `KOSHI_*` variable is ignored, and the ensure helpers refuse
 //! what another user could have planted and set the modes the machine-wide
-//! shared directories need. Every test that touches the process environment
-//! holds `ENV_LOCK` and restores the prior values on drop.
+//! shared directories need. Two tests run a whole startup path: the directory
+//! `KOSHI_RUNTIME_DIR` names is resolved and then created private, and this
+//! user's shared directory is created under a base created first. Every test
+//! that touches the process environment holds `ENV_LOCK` and restores the
+//! prior values on drop.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -68,7 +71,6 @@ fn each_resolver_routes_to_its_own_platform_dir() {
     let dirs = project_dirs().expect("test machine has a home directory");
     assert_eq!(config_dir(), Some(dirs.config_dir().to_path_buf()));
     assert_eq!(data_dir(), Some(dirs.data_dir().to_path_buf()));
-    assert_eq!(cache_dir(), Some(dirs.cache_dir().to_path_buf()));
     assert_eq!(
         state_dir(),
         Some(
@@ -81,19 +83,16 @@ fn each_resolver_routes_to_its_own_platform_dir() {
 
 #[test]
 fn koshi_dir_env_vars_are_ignored() {
-    // Setting `KOSHI_CONFIG_DIR`, `KOSHI_DATA_DIR`, `KOSHI_CACHE_DIR` and
-    // `KOSHI_STATE_DIR` leaves every resolved directory at its platform
-    // default.
+    // Setting `KOSHI_CONFIG_DIR`, `KOSHI_DATA_DIR` and `KOSHI_STATE_DIR`
+    // leaves every resolved directory at its platform default.
     let mut env = EnvGuard::new();
     env.set("KOSHI_CONFIG_DIR", "/override/config");
     env.set("KOSHI_DATA_DIR", "/override/data");
-    env.set("KOSHI_CACHE_DIR", "/override/cache");
     env.set("KOSHI_STATE_DIR", "/override/state");
 
     let dirs = project_dirs().expect("test machine has a home directory");
     assert_eq!(config_dir(), Some(dirs.config_dir().to_path_buf()));
     assert_eq!(data_dir(), Some(dirs.data_dir().to_path_buf()));
-    assert_eq!(cache_dir(), Some(dirs.cache_dir().to_path_buf()));
     assert_eq!(
         state_dir(),
         Some(
@@ -256,7 +255,6 @@ fn macos_paths_land_under_library() {
         data_dir(),
         Some(home.join("Library/Application Support/koshi"))
     );
-    assert_eq!(cache_dir(), Some(home.join("Library/Caches/koshi")));
     assert_eq!(
         state_dir(),
         Some(home.join("Library/Application Support/koshi"))
@@ -281,12 +279,10 @@ fn absolute_xdg_variables_move_the_per_user_directories() {
     let mut env = EnvGuard::new();
     env.set("XDG_CONFIG_HOME", "/xdg/config");
     env.set("XDG_DATA_HOME", "/xdg/data");
-    env.set("XDG_CACHE_HOME", "/xdg/cache");
     env.set("XDG_STATE_HOME", "/xdg/state");
 
     assert_eq!(config_dir(), Some(PathBuf::from("/xdg/config/koshi")));
     assert_eq!(data_dir(), Some(PathBuf::from("/xdg/data/koshi")));
-    assert_eq!(cache_dir(), Some(PathBuf::from("/xdg/cache/koshi")));
     assert_eq!(state_dir(), Some(PathBuf::from("/xdg/state/koshi")));
 }
 
@@ -297,7 +293,6 @@ fn relative_xdg_variables_are_ignored() {
     env.set("HOME", "/tmp/koshi-xdg-home");
     env.set("XDG_CONFIG_HOME", "xdg/config");
     env.set("XDG_DATA_HOME", "xdg/data");
-    env.set("XDG_CACHE_HOME", "xdg/cache");
     env.set("XDG_STATE_HOME", "xdg/state");
 
     assert_eq!(
@@ -307,10 +302,6 @@ fn relative_xdg_variables_are_ignored() {
     assert_eq!(
         data_dir(),
         Some(PathBuf::from("/tmp/koshi-xdg-home/.local/share/koshi"))
-    );
-    assert_eq!(
-        cache_dir(),
-        Some(PathBuf::from("/tmp/koshi-xdg-home/.cache/koshi"))
     );
     assert_eq!(
         state_dir(),
@@ -378,6 +369,25 @@ fn ensure_private_dir_creates_every_missing_parent() {
     assert!(private.is_dir());
     #[cfg(unix)]
     assert_eq!(mode_of(&private), 0o700);
+}
+
+#[test]
+fn the_runtime_dir_the_variable_names_is_created_private() {
+    // The startup path every consumer runs: `KOSHI_RUNTIME_DIR` names the
+    // directory, `runtime_dir` answers it, `ensure_private_dir` creates it and
+    // every missing parent below it.
+    let root = tempfile::tempdir().expect("tempdir");
+    let named = root.path().join("state").join("run");
+    let mut env = EnvGuard::new();
+    env.set("KOSHI_RUNTIME_DIR", &named);
+
+    let resolved = runtime_dir().expect("the variable names the runtime dir");
+    assert_eq!(resolved, named);
+    ensure_private_dir(&resolved).expect("create the runtime dir");
+
+    assert!(resolved.is_dir());
+    #[cfg(unix)]
+    assert_eq!(mode_of(&resolved), 0o700);
 }
 
 #[test]
@@ -542,6 +552,15 @@ fn the_shared_directory_is_koshi_under_program_data() {
 fn a_machine_reporting_no_program_data_has_no_shared_directory() {
     let mut env = EnvGuard::new();
     env.unset("ProgramData");
+
+    assert_eq!(shared_sessions_dir(), None);
+}
+
+#[cfg(windows)]
+#[test]
+fn a_relative_program_data_gives_no_shared_directory() {
+    let mut env = EnvGuard::new();
+    env.set("ProgramData", r"TestProgramData\koshi");
 
     assert_eq!(shared_sessions_dir(), None);
 }

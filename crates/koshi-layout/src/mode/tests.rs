@@ -3,11 +3,16 @@
 use koshi_core::geometry::{Rect, Size, SplitDirection};
 
 use super::*;
-use crate::solver::{solve, solve_with_mode};
-use crate::tree::{LayoutChild, LayoutNode, SplitNode};
+use crate::solver::{solve, solve_with_mode_min, PaneSizing, SolveResult};
+use crate::tree::{LayoutNode, SplitNode};
 
-fn leaf(pane: PaneId) -> LayoutChild {
-    LayoutChild::new(LayoutNode::Pane(pane))
+/// [`solve_with_mode_min`] at the default [`PaneSizing`].
+fn solve_with_mode(tree: &LayoutNode, mode: LayoutMode, tab_rect: Rect) -> SolveResult {
+    solve_with_mode_min(tree, mode, tab_rect, PaneSizing::default())
+}
+
+fn leaf(pane: PaneId) -> LayoutNode {
+    LayoutNode::Pane(pane)
 }
 
 fn tab() -> Rect {
@@ -22,7 +27,7 @@ fn nested(a: PaneId, b: PaneId, c: PaneId) -> LayoutNode {
     ));
     LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![leaf(a), LayoutChild::new(column)],
+        vec![leaf(a), column],
     ))
 }
 
@@ -116,7 +121,7 @@ fn fullscreen_promotes_a_collapsed_stack_member_without_touching_the_stack() {
     let stack = LayoutNode::Split(SplitNode::stack(vec![b, c], 0));
     let tree = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![leaf(a), LayoutChild::new(stack)],
+        vec![leaf(a), stack],
     ));
     let snapshot = tree.clone();
 
@@ -137,7 +142,7 @@ fn fullscreen_promotes_a_collapsed_stack_member_without_touching_the_stack() {
     let LayoutNode::Split(outer) = &tree else {
         panic!("root must stay a split");
     };
-    let LayoutNode::Split(stack) = &outer.children[1].node else {
+    let LayoutNode::Split(stack) = &outer.children[1] else {
         panic!("stack must survive");
     };
     assert_eq!(stack.active, 0);

@@ -162,32 +162,6 @@ impl SizeWeight {
             resize_delta: 0,
         }
     }
-
-    /// Overlay a validated floor in cells on top of the primary constraint.
-    ///
-    /// # Errors
-    ///
-    /// [`ConstraintError::ZeroMin`] when `cells` is zero.
-    pub fn with_min(mut self, cells: u16) -> Result<Self, ConstraintError> {
-        if cells == 0 {
-            return Err(ConstraintError::ZeroMin);
-        }
-        self.min = Some(cells);
-        Ok(self)
-    }
-
-    /// Overlay a validated target in cells on top of the primary constraint.
-    ///
-    /// # Errors
-    ///
-    /// [`ConstraintError::ZeroPreferred`] when `cells` is zero.
-    pub fn with_preferred(mut self, cells: u16) -> Result<Self, ConstraintError> {
-        if cells == 0 {
-            return Err(ConstraintError::ZeroPreferred);
-        }
-        self.preferred = Some(cells);
-        Ok(self)
-    }
 }
 
 impl Default for SizeWeight {

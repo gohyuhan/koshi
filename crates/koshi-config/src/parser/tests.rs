@@ -9,7 +9,7 @@ use miette::{Diagnostic, SourceSpan};
 use super::{
     first_brace_past_the_depth_limit, parse_kdl, past_string, set, single_value, unknown_key,
     value_bool, value_integer, value_nonempty_string, value_string, value_u16, value_u32,
-    MAX_BLOCK_DEPTH,
+    version_arg, MAX_BLOCK_DEPTH,
 };
 use crate::error::ConfigError;
 
@@ -480,4 +480,152 @@ fn a_string_run_ends_where_its_closing_quote_does() {
     assert_eq!(past_string(b"#true", 0), 1);
     assert_eq!(past_string(b"\"never closed", 0), 13);
     assert_eq!(past_string(b"#\"never closed", 0), 14);
+}
+
+#[test]
+fn version_arg_reads_the_declared_number() {
+    assert_eq!(version_arg(&node("version 1")), Ok(1));
+    assert_eq!(version_arg(&node("version 0")), Ok(0));
+    assert_eq!(version_arg(&node("version 4294967295")), Ok(4_294_967_295));
+}
+
+/// The reason [`version_arg`] gives for `source`, without its span.
+fn version_reason(source: &str) -> &'static str {
+    version_arg(&node(source)).expect_err("the node is wrong").1
+}
+
+#[test]
+fn version_arg_names_each_way_the_node_can_be_wrong() {
+    assert_eq!(
+        version_reason("version 1 {}"),
+        "`version` takes no children"
+    );
+    assert_eq!(
+        version_reason("version"),
+        "`version` takes exactly one integer argument"
+    );
+    assert_eq!(
+        version_reason("version 1 2"),
+        "`version` takes exactly one integer argument"
+    );
+    assert_eq!(
+        version_reason("version schema=1"),
+        "`version` takes exactly one integer argument"
+    );
+    assert_eq!(
+        version_reason("version \"1\""),
+        "`version` must be an integer from 1 to 4294967295"
+    );
+    assert_eq!(
+        version_reason("version -1"),
+        "`version` must be an integer from 1 to 4294967295"
+    );
+    assert_eq!(
+        version_reason("version 4294967296"),
+        "`version` must be an integer from 1 to 4294967295"
+    );
+}
+
+#[test]
+fn a_bad_version_argument_puts_the_caret_on_the_argument() {
+    let source = "version -1";
+    let (span, _) = version_arg(&node(source)).expect_err("-1 is not a u32");
+    assert_eq!(&source[span.offset()..span.offset() + span.len()], "-1");
+}
+
+#[test]
+fn a_version_node_that_is_wrong_as_a_whole_puts_the_caret_on_the_node() {
+    let source = "version 1 2";
+    let (span, _) = version_arg(&node(source)).expect_err("two values is wrong");
+    assert_eq!(&source[span.offset()..span.offset() + span.len()], source);
+}
+
+/// The first problem `koshi.kdl` reports for `source`.
+fn app_version_detail(source: &str) -> String {
+    match crate::app_config::parse_app_config(Path::new("koshi.kdl"), source) {
+        Err(ConfigError::Validation { detail, .. }) => detail,
+        other => panic!("expected a validation error, got {other:?}"),
+    }
+}
+
+/// The first problem a theme file reports for `source`.
+fn theme_version_detail(source: &str) -> String {
+    match crate::theme::parse_theme(Path::new("themes/midnight.kdl"), source) {
+        Err(ConfigError::Validation { detail, .. }) => detail,
+        other => panic!("expected a validation error, got {other:?}"),
+    }
+}
+
+/// The first problem `keybinding.kdl` reports for `source`.
+fn keybinding_version_detail(source: &str) -> String {
+    match crate::keybinding::parse_keybindings(Path::new("keybinding.kdl"), source) {
+        Err(crate::keybinding::KeybindingParseError::Invalid { diagnostics, .. }) => {
+            diagnostics[0].message().to_string()
+        }
+        other => panic!("expected schema diagnostics, got {other:?}"),
+    }
+}
+
+/// The first problem a profile file reports for `source`.
+fn profile_version_detail(source: &str) -> String {
+    let source = format!("{source}\ntab {{ pane }}");
+    match crate::profile::parse_profile(Path::new("profile/dev.kdl"), &source) {
+        Err(crate::profile::ProfileError::Invalid { diagnostics, .. }) => {
+            diagnostics[0].message().to_string()
+        }
+        other => panic!("expected schema diagnostics, got {other:?}"),
+    }
+}
+
+/// The problem migration reports for `source`.
+fn migration_version_detail(source: &str) -> String {
+    match crate::migration::validate_config(
+        crate::migration::ConfigFileKind::App,
+        Path::new("koshi.kdl"),
+        source,
+    ) {
+        Err(crate::migration::MigrationError::Version { detail, .. }) => detail,
+        other => panic!("expected a version error, got {other:?}"),
+    }
+}
+
+#[test]
+fn every_config_file_words_a_bad_version_the_same_way() {
+    for (source, want) in [
+        ("version 1 {}", "`version` takes no children"),
+        (
+            "version 1 2",
+            "`version` takes exactly one integer argument",
+        ),
+        (
+            "version schema=1",
+            "`version` takes exactly one integer argument",
+        ),
+        (
+            "version \"1\"",
+            "`version` must be an integer from 1 to 4294967295",
+        ),
+        (
+            "version -1",
+            "`version` must be an integer from 1 to 4294967295",
+        ),
+        (
+            "version 4294967296",
+            "`version` must be an integer from 1 to 4294967295",
+        ),
+    ] {
+        assert_eq!(app_version_detail(source), want, "koshi.kdl: {source}");
+        assert_eq!(theme_version_detail(source), want, "theme: {source}");
+        assert_eq!(
+            keybinding_version_detail(source),
+            want,
+            "keybinding.kdl: {source}"
+        );
+        assert_eq!(profile_version_detail(source), want, "profile: {source}");
+        assert_eq!(
+            migration_version_detail(source),
+            want,
+            "migration: {source}"
+        );
+    }
 }

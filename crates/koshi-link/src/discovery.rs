@@ -14,7 +14,7 @@
 //! entity — creation time, working directory, argv, lock state — belongs to
 //! `inspect`, which renders the `koshi-core` structs themselves.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use koshi_core::discovery::{ClientInfo, PaneInfo, SessionOverview, TabInfo};
 use koshi_core::event::RejectReason;
@@ -339,6 +339,36 @@ pub fn client_rows(overviews: &[SessionOverview]) -> Vec<ClientRow> {
             })
         })
         .collect()
+}
+
+/// Filter every string `overview` took from the session that answered through
+/// [`sanitize_reported_text`]: the session name, each tab name, and each pane's
+/// title, working directory and argv. Ids, times, sizes and counts are left as
+/// they are.
+///
+/// Callers run this the moment an overview comes off a socket, so every reader
+/// of it — a listing row, an `inspect` record, a `--session <name>` lookup —
+/// sees the same filtered text.
+///
+/// A pane whose argv is `["sh", "-c", "\u{1b}[2J"]` reads back as
+/// `["sh", "-c", "[2J"]`.
+pub fn filter_reported_text(overview: &mut SessionOverview) {
+    overview.session.name = sanitize_reported_text(&overview.session.name);
+    for tab in &mut overview.tabs {
+        tab.name = sanitize_reported_text(&tab.name);
+    }
+    for pane in &mut overview.panes {
+        pane.title = pane.title.as_deref().map(sanitize_reported_text);
+        pane.cwd = pane
+            .cwd
+            .as_ref()
+            .map(|cwd| PathBuf::from(sanitize_reported_text(&cwd.to_string_lossy())));
+        if let Some(argv) = &mut pane.command {
+            for arg in argv.iter_mut() {
+                *arg = sanitize_reported_text(arg);
+            }
+        }
+    }
 }
 
 /// Hide the arguments of every pane's command across `overviews`, leaving

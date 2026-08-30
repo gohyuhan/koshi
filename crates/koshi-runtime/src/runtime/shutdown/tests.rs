@@ -15,7 +15,6 @@ use koshi_pty::error::PtyError;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
 use crate::ipc_server::IpcServer;
-use crate::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
 use crate::runtime::event::RuntimeEvent;
 
 use super::*;
@@ -27,16 +26,8 @@ const PANE_SIZE: PtySize = PtySize { cols: 80, rows: 24 };
 fn new_runtime_with_fake() -> (Server, Arc<FakePtyBackend>, mpsc::Sender<RuntimeEvent>) {
     let fake = Arc::new(FakePtyBackend::new());
     let pty_backend: Arc<dyn PtyBackend> = fake.clone();
-    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
-    let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (tx, inbox_rx) = mpsc::channel();
-    let runtime = Server::new(
-        pty_backend,
-        snapshot_provider,
-        storage,
-        inbox_rx,
-        tx.clone(),
-    );
+    let runtime = Server::new(pty_backend, inbox_rx, tx.clone());
     (runtime, fake, tx)
 }
 
@@ -115,7 +106,7 @@ fn shutdown_with_no_parked_panes_enters_draining_and_kills_nothing() {
 }
 
 #[test]
-fn calling_shutdown_again_requests_another_group_kill() {
+fn calling_shutdown_again_kills_the_pane_group_once() {
     let (mut rt, fake, _tx) = new_runtime_with_fake();
     let pane = PaneId::new();
     spawn_and_park(&mut rt, &fake, pane);
@@ -124,11 +115,10 @@ fn calling_shutdown_again_requests_another_group_kill() {
     rt.shutdown();
     rt.shutdown();
 
+    // The first shutdown closes the pane in the backend. The second one's kill
+    // for it answers `PtyError::UnknownPane` and signals nothing.
     assert!(rt.is_draining());
-    assert_eq!(
-        fake.kills(pane).expect("pane"),
-        vec![KillPolicy::Tree, KillPolicy::Tree]
-    );
+    assert_eq!(fake.kills(pane).expect("pane"), vec![KillPolicy::Tree]);
 }
 
 #[test]

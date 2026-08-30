@@ -5,7 +5,7 @@
 //! event.
 //!
 //! Two independent settings shape a report (both tracked in
-//! [`TerminalModes`](crate::state::TerminalModes)):
+//! `TerminalModes`):
 //!
 //! - **Tracking level** ([`MouseTracking`]) — which events are reported at all.
 //!   The levels form a ladder: `X10` reports only presses, `Normal` adds

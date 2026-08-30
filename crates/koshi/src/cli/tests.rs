@@ -1158,6 +1158,27 @@ fn the_argument_free_verbs_take_no_arguments() {
 }
 
 #[test]
+fn the_grammar_takes_the_verbs_the_spawners_name() {
+    let grammar = Cli::command();
+    let subcommands: Vec<&str> = grammar
+        .get_subcommands()
+        .map(clap::Command::get_name)
+        .collect();
+
+    for named in [
+        koshi_link::router_client::ROUTER_SUBCOMMAND,
+        koshi_daemon::pty_supervisor::PTY_SUPERVISOR_SUBCOMMAND,
+        koshi_daemon::session_server::SESSION_SERVER_SUBCOMMAND,
+        koshi_daemon::session_server::RESUME_SUPPORT_SUBCOMMAND,
+    ] {
+        assert!(
+            subcommands.contains(&named),
+            "a spawner runs `koshi {named}`, and the grammar has no such verb: {subcommands:?}"
+        );
+    }
+}
+
+#[test]
 fn the_help_hides_the_self_run_subcommands_and_the_unwired_plugin_verb() {
     let hidden: Vec<String> = Cli::command()
         .get_subcommands()

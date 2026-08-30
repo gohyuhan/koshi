@@ -1,4 +1,5 @@
-//! The `PtyBackend` trait and the `PtyHandle` struct that a spawned pane is driven through.
+//! The `PtyBackend` trait, the `PtyHandle` struct a spawned pane is driven
+//! through, and the `CarriedPtyPane` record a pane is handed on as.
 //!
 //! A PTY (pseudo-terminal) is the OS-level channel a spawned shell or program
 //! runs inside; it makes the program behave as if attached to a real terminal.
@@ -12,6 +13,13 @@ use koshi_core::{
 };
 
 use crate::error::PtyError;
+
+/// The exit status a pane reports for a child whose end nothing observed.
+///
+/// Reported by a `waitpid` that answers `ECHILD`, by a `portable-pty` wait that
+/// fails, and for a pane the supervisor no longer holds when a new link settles
+/// its pane list.
+pub(crate) const UNOBSERVED_EXIT: ExitStatus = ExitStatus::ExitCode(-1);
 
 /// The PTY backend: spawns children in PTYs and drives their I/O and teardown.
 ///
@@ -28,7 +36,8 @@ pub trait PtyBackend: Send + Sync {
     /// `pane_id` must not already be live in the backend; spawning over a live
     /// id orphans the previous child's PTY and I/O threads. A caller re-running
     /// a command in an existing pane must [`kill`](PtyBackend::kill) it first.
-    /// Implementations assert this in debug builds.
+    /// An implementation either refuses the call with [`PtyError::Spawn`] or
+    /// asserts in a debug build.
     fn spawn(&self, pane_id: PaneId, spec: SpawnSpec, size: PtySize)
         -> Result<PtyHandle, PtyError>;
     /// Resize an existing pane's PTY.
@@ -76,6 +85,34 @@ pub trait PtySink: Send + Sync {
     /// resumes past that point is no longer read; nothing arrives after the
     /// exit.
     fn exit(&self, pane: PaneId, status: ExitStatus);
+}
+
+/// One live pane, as a process about to replace its own image hands it on.
+///
+/// The descriptor and the process id are what the next image needs to take the
+/// pane back; the size is what that image must record as the window the child
+/// already has; the exit is how the child ended, when this process saw it end.
+///
+/// Every backend answers with this record: a
+/// [`PortablePtyBackend`](crate::portable::PortablePtyBackend) fills in the
+/// descriptor it owns, and a
+/// [`SupervisorPtyBackend`](crate::supervisor::SupervisorPtyBackend) leaves it
+/// `None`, the descriptor being the supervisor's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CarriedPtyPane {
+    /// The pane this record is for.
+    pub pane_id: PaneId,
+    /// The pane's own terminal descriptor. `None` for a terminal that exposes
+    /// none, which no image can carry.
+    #[cfg(unix)]
+    pub terminal_fd: Option<std::os::fd::RawFd>,
+    /// The child's process id, waited on again once the pane is taken back.
+    pub pid: u32,
+    /// The last size the pane's terminal was set to.
+    pub size: PtySize,
+    /// How the pane's child ended, if this process's watcher reaped it. `None`
+    /// while the child runs, and the next image waits on the process id itself.
+    pub exit: Option<ExitStatus>,
 }
 
 /// The read side of one spawned pane: its id and the channels the backend

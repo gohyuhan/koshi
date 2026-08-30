@@ -294,6 +294,12 @@ pub(super) fn time_cell(time: SystemTime) -> String {
     }
 }
 
+/// A timestamp that may be absent as a cell: [`time_cell`] when present, `-`
+/// when absent.
+pub(super) fn optional_time_cell(time: Option<SystemTime>) -> String {
+    time.map_or_else(|| "-".to_string(), time_cell)
+}
+
 /// A size as a cell: `<cols>x<rows>`.
 pub(super) fn size_cell(size: Size) -> String {
     format!("{}x{}", size.cols, size.rows)

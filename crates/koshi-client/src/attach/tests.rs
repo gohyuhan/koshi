@@ -58,6 +58,7 @@ use koshi_renderer::snapshot::{
 };
 
 use super::*;
+use crate::tests::VIEWPORT;
 use koshi_test_support::fixtures::test_runtime_dir;
 
 /// The smallest frame a session can paint: one empty tab, no panes, the client
@@ -690,15 +691,20 @@ fn the_wait_ends_at_its_deadline_when_the_session_advertises_nothing() {
     );
 }
 
-/// Build an Attach answer that echoes `pane_area`.
-fn attached_response(pane_area: Option<PaneArea>) -> IncomingResponse {
+/// Build an Attach answer naming `client_id` and `session_id`, echoing
+/// `pane_area`.
+fn attached_response(
+    client_id: ClientId,
+    session_id: SessionId,
+    pane_area: Option<PaneArea>,
+) -> IncomingResponse {
     IpcResponse {
         request_id: Some(2),
         result: MaybeKnown::Known(IpcResult::Attached {
-            client_id: ClientId::new(),
-            session_id: SessionId::new(),
+            client_id,
+            session_id,
             structure: AttachedSessionStructureSnapshot {
-                id: SessionId::new(),
+                id: session_id,
                 name: String::from("session"),
                 tabs: Vec::new(),
                 panes: Vec::new(),
@@ -775,24 +781,21 @@ fn restarted_session(
 }
 
 #[test]
-fn an_attached_result_echo_identifies_supporting_and_old_sessions() {
-    assert_eq!(
-        take_attached(attached_response(Some(PaneArea::Reported(Size {
-            cols: 80,
-            rows: 22,
-        }))))
-        .expect("the supporting result is accepted")
-        .3,
+fn an_attach_answer_is_taken_whether_or_not_it_echoes_a_pane_area() {
+    let client_id = ClientId::new();
+    let session_id = SessionId::new();
+
+    let echoed = take_attached(attached_response(
+        client_id,
+        session_id,
         Some(PaneArea::Reported(Size { cols: 80, rows: 22 })),
-        "a reported pane area proves the session understands the field"
-    );
-    assert_eq!(
-        take_attached(attached_response(None))
-            .expect("the old result is still accepted")
-            .3,
-        None,
-        "an absent echo selects the fixed two-row compatibility layout"
-    );
+    ))
+    .expect("the answer of a session that echoes the field is accepted");
+    let silent = take_attached(attached_response(client_id, session_id, None))
+        .expect("the answer of an older session is accepted too");
+
+    assert_eq!(echoed, (client_id, session_id, None));
+    assert_eq!(silent, (client_id, session_id, None));
 }
 
 #[test]
@@ -804,7 +807,7 @@ fn coming_back_after_a_restart_asks_for_the_client_record_this_terminal_holds() 
     let advertised = EndpointFile::read(&EndpointFile::path(runtime_dir.path(), session_id))
         .expect("the stand-in session advertised its socket");
 
-    let (endpoint, connection, pane_area_supported) = rejoin(
+    let (endpoint, connection) = rejoin(
         runtime_dir.path(),
         session_id,
         client_id,
@@ -813,7 +816,6 @@ fn coming_back_after_a_restart_asks_for_the_client_record_this_terminal_holds() 
     .expect("the stand-in session handed the client record back");
     drop(connection);
 
-    assert!(!pane_area_supported);
     assert_eq!(endpoint, advertised);
     assert_eq!(
         asked.lock().expect("the slot outlives every panic").clone(),
@@ -845,7 +847,7 @@ fn a_restarted_session_that_refuses_the_join_leaves_nothing_to_come_back_to() {
         client_id,
         &ConnectionToken::new(OLD_TOKEN),
     );
-    assert_eq!(attached.map(|(endpoint, _, _)| endpoint), None);
+    assert_eq!(attached.map(|(endpoint, _)| endpoint), None);
 }
 
 #[test]
@@ -860,7 +862,7 @@ fn a_restarted_session_that_mints_a_new_client_leaves_nothing_to_come_back_to() 
         ClientId::new(),
         &ConnectionToken::new(OLD_TOKEN),
     );
-    assert_eq!(attached.map(|(endpoint, _, _)| endpoint), None);
+    assert_eq!(attached.map(|(endpoint, _)| endpoint), None);
 }
 
 #[test]
@@ -877,7 +879,7 @@ fn another_local_users_restarting_session_is_not_waited_for() {
         &ConnectionToken::new(""),
     );
 
-    assert_eq!(attached.map(|(endpoint, _, _)| endpoint), None);
+    assert_eq!(attached.map(|(endpoint, _)| endpoint), None);
     assert!(
         started.elapsed() < Duration::from_secs(1),
         "no wait was spent on a session this client cannot watch"
@@ -900,20 +902,11 @@ fn a_restart_this_client_cannot_come_back_from_reports_the_death_it_reports_toda
     assert_eq!(CliExitCode::from(&error), CliExitCode::RuntimeAction);
 }
 
-/// The terminal size every mouse fixture below is built at.
-const MOUSE_VIEWPORT: Size = Size { cols: 80, rows: 24 };
-
 /// A viewer on the stock settings — `scroll_lines` 3, wheel scrolls scrollback,
 /// border resize on. Its subscription has no sender: frames reach an attached
 /// client over the connection instead.
 fn viewer() -> Client {
-    let (_events_tx, events_rx) = mpsc::sync_channel(8);
-    Client::new(
-        ClientId::new(),
-        MOUSE_VIEWPORT,
-        events_rx,
-        TerminalCleanupGuard::new(),
-    )
+    crate::tests::new_client().0
 }
 
 /// One plain terminal pane: no highlight, no mouse mode, on the primary screen.
@@ -936,7 +929,7 @@ fn plain_pane(id: PaneId) -> MousePane {
 /// panes share.
 fn mouse_frame(panes: &[MousePane]) -> MouseFrame {
     let tab_id = TabId::new();
-    let band = (MOUSE_VIEWPORT.rows - 2) / u16::try_from(panes.len()).expect("few panes");
+    let band = (VIEWPORT.rows - 2) / u16::try_from(panes.len()).expect("few panes");
     let layout_solved: Vec<PaneSlot> = panes
         .iter()
         .enumerate()
@@ -947,14 +940,14 @@ fn mouse_frame(panes: &[MousePane]) -> MouseFrame {
                 rect: Rect::new(
                     Point { x: 0, y: top },
                     Size {
-                        cols: MOUSE_VIEWPORT.cols,
+                        cols: VIEWPORT.cols,
                         rows: band,
                     },
                 ),
                 inner_rect: Some(Rect::new(
                     Point { x: 1, y: top + 1 },
                     Size {
-                        cols: MOUSE_VIEWPORT.cols - 2,
+                        cols: VIEWPORT.cols - 2,
                         rows: band - 2,
                     },
                 )),
@@ -974,8 +967,8 @@ fn mouse_frame(panes: &[MousePane]) -> MouseFrame {
                 name: String::from("one"),
                 layout_solved,
                 effective_size: Size {
-                    cols: MOUSE_VIEWPORT.cols,
-                    rows: MOUSE_VIEWPORT.rows - 2,
+                    cols: VIEWPORT.cols,
+                    rows: VIEWPORT.rows - 2,
                 },
                 stack_headers: Vec::new(),
                 layout_mode: LayoutMode::Tiled,
@@ -992,13 +985,13 @@ fn mouse_frame(panes: &[MousePane]) -> MouseFrame {
         panes: panes.to_vec(),
         client: ClientSnapshot {
             id: ClientId::new(),
-            viewport: MOUSE_VIEWPORT,
+            viewport: VIEWPORT,
             active_tab: tab_id,
             focused_pane: panes.first().map(|pane| pane.id),
             lock_mode: LockMode::Normal,
             mouse_select: false,
         },
-        committed_regions: CommittedRegions::core(MOUSE_VIEWPORT, 0),
+        committed_regions: CommittedRegions::core(VIEWPORT, 0),
     }
 }
 
@@ -2602,7 +2595,7 @@ fn a_terminal_resize_moves_the_viewers_own_size_and_tells_the_session() {
         cols: 132,
         rows: 43,
     };
-    assert_eq!(client.viewport(), MOUSE_VIEWPORT);
+    assert_eq!(client.viewport(), VIEWPORT);
 
     handle_input(
         &mut client,
@@ -2858,21 +2851,20 @@ impl Backend for FailingBackend {
     }
 }
 
-/// A screen drawing into memory at [`MOUSE_VIEWPORT`], 80 by 24 cells.
+/// A screen drawing into memory at [`VIEWPORT`], 80 by 24 cells.
 fn test_screen() -> Screen<TestBackend> {
     Screen::new(
-        Terminal::new(TestBackend::new(MOUSE_VIEWPORT.cols, MOUSE_VIEWPORT.rows))
+        Terminal::new(TestBackend::new(VIEWPORT.cols, VIEWPORT.rows))
             .expect("build an in-memory terminal"),
-        MOUSE_VIEWPORT,
+        VIEWPORT,
     )
 }
 
 /// A screen whose backend can fail its next buffer draw.
 fn failing_screen() -> Screen<FailingBackend> {
     Screen::new(
-        Terminal::new(FailingBackend::new(MOUSE_VIEWPORT))
-            .expect("build a failing in-memory terminal"),
-        MOUSE_VIEWPORT,
+        Terminal::new(FailingBackend::new(VIEWPORT)).expect("build a failing in-memory terminal"),
+        VIEWPORT,
     )
 }
 
@@ -2880,15 +2872,15 @@ fn failing_screen() -> Screen<FailingBackend> {
 fn a_screen_starts_with_the_compiled_in_region_solve() {
     let screen = test_screen();
 
-    assert_eq!(screen.committed_regions.viewport, MOUSE_VIEWPORT);
+    assert_eq!(screen.committed_regions.viewport, VIEWPORT);
     assert_eq!(screen.committed_regions.input_revision, 0);
     assert_eq!(
         screen.committed_regions.solve.pane_rect,
         Rect::new(
             Point { x: 0, y: 1 },
             Size {
-                cols: MOUSE_VIEWPORT.cols,
-                rows: MOUSE_VIEWPORT.rows - 2,
+                cols: VIEWPORT.cols,
+                rows: VIEWPORT.rows - 2,
             },
         )
     );
@@ -2898,7 +2890,7 @@ fn a_screen_starts_with_the_compiled_in_region_solve() {
 fn a_new_viewport_commits_a_new_region_revision_with_the_painted_frame() {
     let mut screen = Screen::new(
         Terminal::new(TestBackend::new(100, 30)).expect("build an in-memory terminal"),
-        MOUSE_VIEWPORT,
+        VIEWPORT,
     );
     let mut client = viewer();
     client.set_viewport(Size {
@@ -2931,7 +2923,7 @@ fn a_new_viewport_commits_a_new_region_revision_with_the_painted_frame() {
 fn an_in_flight_frame_uses_its_own_viewport_for_region_geometry() {
     let mut screen = Screen::new(
         Terminal::new(TestBackend::new(120, 40)).expect("build an in-memory terminal"),
-        MOUSE_VIEWPORT,
+        VIEWPORT,
     );
     let mut client = viewer();
     let resized = Size {
@@ -2943,7 +2935,7 @@ fn an_in_flight_frame_uses_its_own_viewport_for_region_geometry() {
     let frame = screen
         .draw(&mut client, Box::new(painted_frame()))
         .expect("paint");
-    let expected = CommittedRegions::core(MOUSE_VIEWPORT, 0);
+    let expected = CommittedRegions::core(VIEWPORT, 0);
 
     assert_eq!(frame.committed_regions, expected);
     assert_eq!(screen.committed_regions, expected);
@@ -3026,7 +3018,7 @@ fn a_viewer_only_refresh_waits_for_a_frame_after_resize() {
     screen.refresh(&client, Some(tab));
 
     assert_eq!(screen.terminal.backend().buffer(), &before);
-    assert_eq!(screen.committed_regions.viewport, MOUSE_VIEWPORT);
+    assert_eq!(screen.committed_regions.viewport, VIEWPORT);
 }
 
 /// The hint bar of what the screen last drew: the bottom row, trailing blanks
@@ -3050,7 +3042,7 @@ fn hint_row(screen: &Screen<TestBackend>) -> String {
 /// one press that opens a sequence and sends nothing.
 fn sequence_opener(client: &Client) -> KeyChord {
     client
-        .keymap_hints()
+        .frame_hints_for(client.lock_mode(), false)
         .entries
         .iter()
         .find(|entry| entry.sequence.chords().len() > 1)

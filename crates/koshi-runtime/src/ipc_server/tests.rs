@@ -489,6 +489,78 @@ fn serve_shared(
     (server, session, runtime_dir, shared_dir, dispatcher)
 }
 
+/// A stand-in dispatcher that reports every submitted command's envelope on the
+/// returned receiver before answering it with `Ok`. Every other event it drains
+/// is dropped. Exits when every inbox sender is gone.
+fn spawn_reporting_dispatcher(
+    inbox_rx: Receiver<RuntimeEvent>,
+) -> (JoinHandle<()>, Receiver<CommandEnvelope>) {
+    let (seen_tx, seen_rx) = mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        while let Ok(event) = inbox_rx.recv() {
+            if let RuntimeEvent::Ipc { envelope, reply } = event {
+                let _ = reply.send(CommandResult::Ok {
+                    command_id: envelope.id,
+                    emitted_events: Vec::new(),
+                });
+                if seen_tx.send(envelope).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+    (handle, seen_rx)
+}
+
+/// A served socket in a fresh runtime dir whose stand-in dispatcher reports
+/// every submitted command's envelope.
+fn serve_reporting(
+    tag: &str,
+) -> (
+    IpcServer,
+    SessionId,
+    PathBuf,
+    JoinHandle<()>,
+    Receiver<CommandEnvelope>,
+) {
+    let runtime_dir = test_runtime_dir(tag);
+    let session = SessionId::new();
+    let (inbox_tx, inbox_rx) = mpsc::channel();
+    let (dispatcher, seen) = spawn_reporting_dispatcher(inbox_rx);
+    let server = IpcServer::start(&runtime_dir, session, inbox_tx, None).expect("start serving");
+    (server, session, runtime_dir, dispatcher, seen)
+}
+
+/// Open a control connection to `session`, send the Hello, read its answer, and
+/// hand back the connection ready for the next request.
+fn greeted(runtime_dir: &Path, session: SessionId) -> Connection {
+    let mut connection = connect_to(runtime_dir, session);
+    connection
+        .send(&hello_for(runtime_dir, session))
+        .expect("send hello");
+    let hello_reply: IpcResponse = connection.recv().expect("hello reply");
+    assert_eq!(hello_reply.result, hello_accepted());
+    connection
+}
+
+/// Submit `envelope` on `connection` and hand back the envelope the dispatcher
+/// was given, after reading the reply the submission earns.
+fn submitted(
+    connection: &mut Connection,
+    seen: &Receiver<CommandEnvelope>,
+    envelope: CommandEnvelope,
+) -> CommandEnvelope {
+    connection
+        .send(&IpcRequest {
+            request_id: 2,
+            kind: IpcRequestKind::SubmitCommand(Box::new(envelope)),
+        })
+        .expect("send submit");
+    let dispatched = seen.recv().expect("the dispatcher was given the command");
+    let _: IpcResponse = connection.recv().expect("submit reply");
+    dispatched
+}
+
 /// A deterministic envelope for submissions.
 fn envelope() -> CommandEnvelope {
     CommandEnvelope::new(
@@ -593,6 +665,97 @@ fn overview_named(name: &str) -> SessionOverview {
         panes: Vec::new(),
         clients: Vec::new(),
     }
+}
+
+#[test]
+fn a_control_connection_replaces_an_internal_source_with_an_external_cli_one() {
+    // The CLI-admission check lets every command through an `Internal` source.
+    // A peer presenting one on a control connection is stamped back to the
+    // source that connection carries.
+    let (server, session, runtime_dir, dispatcher, seen) = serve_reporting("stamp-internal");
+    let mut connection = greeted(&runtime_dir, session);
+    let sent = CommandEnvelope::new(
+        CommandId::new(),
+        CommandSource::Internal,
+        SystemTime::UNIX_EPOCH,
+        Command::ToggleMouseSelect,
+    );
+
+    let dispatched = submitted(&mut connection, &seen, sent.clone());
+
+    assert_eq!(dispatched.source, CommandSource::external_cli(None, None));
+    assert_eq!(dispatched.client_id, None);
+    assert_eq!(dispatched.id, sent.id);
+    assert_eq!(dispatched.command, Command::ToggleMouseSelect);
+
+    drop(connection);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher joins");
+    cleanup(&runtime_dir);
+}
+
+#[test]
+fn a_control_connection_cannot_present_another_clients_keybinding_source() {
+    let (server, session, runtime_dir, dispatcher, seen) = serve_reporting("stamp-keybinding");
+    let mut connection = greeted(&runtime_dir, session);
+    let victim = ClientId::new();
+    let sent = CommandEnvelope::new(
+        CommandId::new(),
+        CommandSource::key_binding(victim),
+        SystemTime::UNIX_EPOCH,
+        Command::ToggleMouseSelect,
+    );
+
+    let dispatched = submitted(&mut connection, &seen, sent);
+
+    assert_eq!(dispatched.source, CommandSource::external_cli(None, None));
+    assert_eq!(dispatched.client_id, None);
+
+    drop(connection);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher joins");
+    cleanup(&runtime_dir);
+}
+
+#[test]
+fn a_control_connection_keeps_the_two_cli_sources_a_koshi_invocation_sends() {
+    let (server, session, runtime_dir, dispatcher, seen) = serve_reporting("stamp-cli");
+    let mut connection = greeted(&runtime_dir, session);
+    let client = ClientId::new();
+    let in_session =
+        CommandSource::in_session_cli(session, Some(client), PaneId::new(), PathBuf::from("/sock"));
+    let external = CommandSource::external_cli(Some(session), Some(client));
+
+    let dispatched = submitted(
+        &mut connection,
+        &seen,
+        CommandEnvelope::new(
+            CommandId::new(),
+            in_session.clone(),
+            SystemTime::UNIX_EPOCH,
+            Command::ToggleLockMode(ToggleLockModeArgs::default()),
+        ),
+    );
+    assert_eq!(dispatched.source, in_session);
+    assert_eq!(dispatched.client_id, Some(client));
+
+    let dispatched = submitted(
+        &mut connection,
+        &seen,
+        CommandEnvelope::new(
+            CommandId::new(),
+            external.clone(),
+            SystemTime::UNIX_EPOCH,
+            Command::ToggleLockMode(ToggleLockModeArgs::default()),
+        ),
+    );
+    assert_eq!(dispatched.source, external);
+    assert_eq!(dispatched.client_id, None);
+
+    drop(connection);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher joins");
+    cleanup(&runtime_dir);
 }
 
 #[test]
@@ -1116,7 +1279,15 @@ fn an_attached_connection_forwards_input_unanswered_and_detaches_on_any_other_re
     let RuntimeEvent::Ipc { envelope, reply } = seen.recv().expect("submit event") else {
         panic!("expected Ipc");
     };
-    assert_eq!(envelope, env);
+    assert_eq!(envelope.id, env.id);
+    assert_eq!(envelope.command, env.command);
+    assert_eq!(envelope.issued_at, env.issued_at);
+    assert_eq!(
+        envelope.source,
+        CommandSource::key_binding(client),
+        "this connection's own client is stamped over what the peer sent",
+    );
+    assert_eq!(envelope.client_id, Some(client));
     let unread = CommandResult::Ok {
         command_id: env.id,
         emitted_events: Vec::new(),
@@ -2346,7 +2517,7 @@ fn a_restart_naming_a_binary_that_cannot_run_is_refused_and_the_session_keeps_se
 #[test]
 fn a_restart_with_a_pane_that_has_no_terminal_descriptor_is_refused_naming_that_pane() {
     let stranded = PaneId::new();
-    let panes = [koshi_pty::portable::CarriedPtyPane {
+    let panes = [koshi_pty::backend::state::CarriedPtyPane {
         pane_id: stranded,
         terminal_fd: None,
         pid: 51234,

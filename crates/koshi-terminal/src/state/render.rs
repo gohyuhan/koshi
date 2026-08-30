@@ -12,7 +12,7 @@ use crate::style::Style;
 /// Part of the per-screen [`RenderState`]. An unrecognized designation final
 /// byte selects [`Ascii`](Charset::Ascii).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub enum Charset {
+pub(crate) enum Charset {
     /// US-ASCII (`ESC ( B`): every byte prints as itself. The default.
     #[default]
     Ascii,
@@ -31,10 +31,9 @@ pub enum Charset {
 /// Held per screen — the primary and the alternate each own one. A switch
 /// from the primary to the alternate screen (`?47`/`?1047`/`?1049`) copies the
 /// primary's render state into the alternate. DECSC snapshots the active
-/// screen's render state into a [`SavedCursor`](crate::state::SavedCursor);
-/// DECRC restores it.
+/// screen's render state into a `SavedCursor`; DECRC restores it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RenderState {
+pub(crate) struct RenderState {
     /// The pen applied to printed cells (colors + text attributes).
     pub(in crate::state) style: Style,
     /// The `G0`–`G3` charset designations (`ESC ( ) * +`), indexed by slot.

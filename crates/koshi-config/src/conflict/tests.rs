@@ -76,10 +76,6 @@ fn defaults() -> KeyMapLayer {
     }
 }
 
-fn known() -> BTreeSet<ModeName> {
-    BTreeSet::from([mode("normal"), mode("locked")])
-}
-
 /// The chord-depth cap the tests run under, matching the shipped default.
 const DEPTH: u8 = 4;
 
@@ -92,7 +88,6 @@ fn detect(layers: &[KeyMapLayer]) -> ConflictReport {
         None,
         DEPTH,
         &ActionRegistry::new(),
-        &known(),
     )
 }
 
@@ -890,7 +885,6 @@ fn shadow_with_a_bound_alternative_passes() {
         Some(alternative),
         DEPTH,
         &ActionRegistry::new(),
-        &known(),
     );
     assert_eq!(report.diagnostics, Vec::new());
     assert_eq!(report.verdict(), KeymapVerdict::Apply);
@@ -905,7 +899,6 @@ fn declared_but_unbound_alternative_is_fatal() {
         Some(alternative),
         DEPTH,
         &ActionRegistry::new(),
-        &known(),
     );
     assert_eq!(
         report.diagnostics,
@@ -925,7 +918,6 @@ fn typeable_alternative_is_fatal() {
         Some(alternative),
         DEPTH,
         &ActionRegistry::new(),
-        &known(),
     );
     assert_eq!(
         report.diagnostics,
@@ -1257,7 +1249,6 @@ fn shift_only_mods_leader_warns() {
         None,
         DEPTH,
         &ActionRegistry::new(),
-        &known(),
     );
     assert_eq!(
         report.diagnostics,
@@ -1271,14 +1262,7 @@ fn shift_only_mods_leader_warns() {
 #[test]
 fn typeable_chord_leader_warns() {
     let leader = Leader::Chord(chord(ModFlags::NONE, ','));
-    let report = detect_conflicts(
-        &[defaults()],
-        leader,
-        None,
-        DEPTH,
-        &ActionRegistry::new(),
-        &known(),
-    );
+    let report = detect_conflicts(&[defaults()], leader, None, DEPTH, &ActionRegistry::new());
     assert_eq!(
         report.diagnostics,
         vec![ConflictDiagnostic::TypeableLeader { leader }]
@@ -1293,14 +1277,7 @@ fn non_typeable_leaders_do_not_warn() {
         Leader::Mods(ModFlags::ALT.union(ModFlags::SHIFT)),
         Leader::Chord(chord(ModFlags::CTRL, 'b')),
     ] {
-        let report = detect_conflicts(
-            &[defaults()],
-            leader,
-            None,
-            DEPTH,
-            &ActionRegistry::new(),
-            &known(),
-        );
+        let report = detect_conflicts(&[defaults()], leader, None, DEPTH, &ActionRegistry::new());
         assert_eq!(report.diagnostics, Vec::new());
     }
 }
@@ -1809,7 +1786,6 @@ fn binding_past_the_chord_depth_cap_warns_and_applies() {
         None,
         1,
         &ActionRegistry::new(),
-        &known(),
     );
     assert_eq!(
         report.diagnostics,
@@ -1846,7 +1822,6 @@ fn binding_with_exactly_max_chord_depth_chords_fires() {
         None,
         1,
         &ActionRegistry::new(),
-        &known(),
     );
     assert_eq!(report.diagnostics, Vec::new());
     assert_eq!(report.verdict(), KeymapVerdict::Apply);
@@ -1873,7 +1848,6 @@ fn a_reserved_led_sequence_past_the_cap_warns_dead_not_depth() {
         None,
         1,
         &ActionRegistry::new(),
-        &known(),
     );
     assert_eq!(
         report.diagnostics,
@@ -1929,7 +1903,6 @@ fn a_chord_depth_of_zero_fails_the_unlock_guarantee() {
         None,
         0,
         &ActionRegistry::new(),
-        &known(),
     );
     assert_eq!(
         report.diagnostics,

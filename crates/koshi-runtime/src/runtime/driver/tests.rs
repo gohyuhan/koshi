@@ -18,9 +18,8 @@ use koshi_core::process::{PtySize, SpawnSpec};
 use koshi_pty::backend::state::PtyBackend;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
-use crate::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
 use crate::runtime::event::RuntimeEvent;
-use crate::runtime::render_schedule::{InvalidationReason, FRAME_INTERVAL};
+use crate::runtime::render_schedule::FRAME_INTERVAL;
 
 use super::*;
 
@@ -31,16 +30,8 @@ const PANE_SIZE: PtySize = PtySize { cols: 80, rows: 24 };
 fn new_runtime_with_fake() -> (Server, Arc<FakePtyBackend>, mpsc::Sender<RuntimeEvent>) {
     let fake = Arc::new(FakePtyBackend::new());
     let pty_backend: Arc<dyn PtyBackend> = fake.clone();
-    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
-    let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (tx, inbox_rx) = mpsc::channel();
-    let runtime = Server::new(
-        pty_backend,
-        snapshot_provider,
-        storage,
-        inbox_rx,
-        tx.clone(),
-    );
+    let runtime = Server::new(pty_backend, inbox_rx, tx.clone());
     (runtime, fake, tx)
 }
 
@@ -313,8 +304,7 @@ fn nothing_is_pending_so_the_loop_sleeps_and_no_render_is_due() {
 #[test]
 fn a_pending_invalidation_is_due_at_once_then_clears_after_one_render() {
     let (mut rt, _fake, _tx) = new_runtime_with_fake();
-    rt.render_scheduler
-        .invalidate(InvalidationReason::PtyOutput);
+    rt.render_scheduler.invalidate();
     let now = Instant::now();
 
     assert_eq!(rt.next_render_wakeup(now), Some(Duration::ZERO));
@@ -327,12 +317,10 @@ fn a_pending_invalidation_is_due_at_once_then_clears_after_one_render() {
 fn an_invalidation_right_after_a_render_waits_out_the_frame_cadence() {
     let (mut rt, _fake, _tx) = new_runtime_with_fake();
     let now = Instant::now();
-    rt.render_scheduler
-        .invalidate(InvalidationReason::PtyOutput);
+    rt.render_scheduler.invalidate();
     assert!(rt.poll_render(now));
 
-    rt.render_scheduler
-        .invalidate(InvalidationReason::PtyOutput);
+    rt.render_scheduler.invalidate();
 
     assert_eq!(rt.next_render_wakeup(now), Some(FRAME_INTERVAL));
     assert!(!rt.poll_render(now));

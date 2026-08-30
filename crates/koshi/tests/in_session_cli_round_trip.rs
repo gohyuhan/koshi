@@ -38,8 +38,8 @@ use koshi::cli::{Cli, ResolvedTargets};
 use koshi_core::command::{CliExitCode, Command, CommandEnvelope, CommandResult, CommandSource};
 use koshi_core::constant::GRACEFUL_TIMEOUT_DURATION;
 use koshi_core::event::{
-    Event, InputMode, InputModeChanged, LayoutChanged, PaneClosing, PaneCreated, PaneFocused,
-    PaneRemoved, PtyResized, RejectReason,
+    Event, InputModeChanged, LayoutChanged, PaneClosing, PaneCreated, PaneFocused, PaneRemoved,
+    PtyResized, RejectReason,
 };
 use koshi_core::geometry::{Direction, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
@@ -55,7 +55,6 @@ use koshi_ipc::transport::Connection;
 use koshi_link::error::CliError;
 use koshi_pty::backend::state::PtyBackend;
 use koshi_runtime::ipc_server::IpcServer;
-use koshi_runtime::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
 use koshi_runtime::runtime::event::RuntimeEvent;
 use koshi_runtime::server::Server;
 use koshi_test_support::fake_pty::FakePtyBackend;
@@ -163,15 +162,7 @@ fn serve_session(
     inbox_tx: mpsc::Sender<RuntimeEvent>,
 ) {
     let backend: Arc<dyn PtyBackend> = pty;
-    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
-    let storage: Arc<dyn Storage> = Arc::new(NullStorage);
-    let mut server = Server::new(
-        backend,
-        snapshot_provider,
-        storage,
-        inbox_rx,
-        inbox_tx.clone(),
-    );
+    let mut server = Server::new(backend, inbox_rx, inbox_tx.clone());
     server.load_startup_config(None);
     server
         .bootstrap_session(
@@ -729,7 +720,7 @@ fn lock_over_the_socket_puts_the_client_in_locked_input_mode() {
         applied_events(&result),
         [Event::InputModeChanged(InputModeChanged {
             client_id: client.id,
-            mode: InputMode::Locked,
+            mode: LockMode::Locked,
         })]
     );
     assert_eq!(code, CliExitCode::Success);
@@ -751,7 +742,7 @@ fn unlock_over_the_socket_returns_the_client_to_normal_input_mode() {
         applied_events(&result),
         [Event::InputModeChanged(InputModeChanged {
             client_id: client.id,
-            mode: InputMode::Normal,
+            mode: LockMode::Normal,
         })]
     );
     assert_eq!(code, CliExitCode::Success);

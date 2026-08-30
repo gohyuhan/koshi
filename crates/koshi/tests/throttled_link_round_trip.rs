@@ -53,7 +53,6 @@ use koshi_ipc::protocol::{
 use koshi_ipc::transport::{frame_halves, Connection, Deadlined, FrameReader, FrameWriter};
 use koshi_pty::backend::state::PtyBackend;
 use koshi_runtime::ipc_server::IpcServer;
-use koshi_runtime::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
 use koshi_runtime::runtime::event::RuntimeEvent;
 use koshi_runtime::server::Server;
 use koshi_test_support::fake_pty::FakePtyBackend;
@@ -184,15 +183,7 @@ fn serve_session(
     inbox_tx: mpsc::Sender<RuntimeEvent>,
 ) {
     let backend: Arc<dyn PtyBackend> = pty;
-    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
-    let storage: Arc<dyn Storage> = Arc::new(NullStorage);
-    let mut server = Server::new(
-        backend,
-        snapshot_provider,
-        storage,
-        inbox_rx,
-        inbox_tx.clone(),
-    );
+    let mut server = Server::new(backend, inbox_rx, inbox_tx.clone());
     server.load_startup_config(None);
     server
         .bootstrap_session(

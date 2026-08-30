@@ -8,19 +8,19 @@ use super::*;
 
 use koshi_core::command::CopyTarget;
 use koshi_core::event::{
-    CommandRejected, ConfigReloaded, Copied, EventClass, InputMode, InputModeChanged,
-    KeybindingMatched, LayoutChanged, MouseDragged, MousePressed, MouseReleased, MouseScrolled,
-    MouseSelectChanged, PaneClosing, PaneCommandFinished, PaneCommandStarted, PaneCreated,
-    PaneEnterPressed, PaneFocused, PaneMouseForwarded, PaneOutputUpdated, PaneProcessExited,
-    PaneRemoved, PaneResumed, PaneScrollbackTruncated, PaneSuppressed, PaneTyped, PluginBroken,
-    PluginDisabled, PluginDoctorCompleted, PluginEnabled, PluginInstalled, PluginLoadFailed,
-    PluginMouseInput, PluginReloaded, PluginUninstalled, PluginUnloaded, PluginUpdated, PtyResized,
-    RejectReason, SelectionChanged, SubmittedLinePayload, SubscriberLagged, TabClosed, TabCreated,
-    TabFocused, TabMoved, TerminalTooSmallCause, TerminalTooSmallEntered, TerminalTooSmallExited,
-    TypedPayload,
+    CommandRejected, ConfigReloaded, Copied, EventClass, InputModeChanged, KeybindingMatched,
+    LayoutChanged, MouseDragged, MousePressed, MouseReleased, MouseScrolled, MouseSelectChanged,
+    PaneClosing, PaneCommandFinished, PaneCommandStarted, PaneCreated, PaneEnterPressed,
+    PaneFocused, PaneMouseForwarded, PaneOutputUpdated, PaneProcessExited, PaneRemoved,
+    PaneResumed, PaneScrollbackTruncated, PaneSuppressed, PaneTyped, PluginBroken, PluginDisabled,
+    PluginDoctorCompleted, PluginEnabled, PluginInstalled, PluginLoadFailed, PluginMouseInput,
+    PluginReloaded, PluginUninstalled, PluginUnloaded, PluginUpdated, PtyResized, RejectReason,
+    SelectionChanged, SubmittedLinePayload, SubscriberLagged, TabClosed, TabCreated, TabFocused,
+    TabMoved, TerminalTooSmallCause, TerminalTooSmallEntered, TerminalTooSmallExited, TypedPayload,
 };
 use koshi_core::geometry::{PaneArea, Point, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, PluginId, SessionId, SubscriberId, TabId};
+use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseButton, ScrollDirection};
 use koshi_core::process::PtySize;
 
@@ -220,7 +220,7 @@ fn input_mode_change_is_info_naming_the_mode_now_in_effect() {
 
     let out = captured(&[Event::InputModeChanged(InputModeChanged {
         client_id,
-        mode: InputMode::Locked,
+        mode: LockMode::Locked,
     })]);
 
     assert_eq!(out.lines().count(), 1, "expected exactly one line: {out}");
@@ -405,6 +405,35 @@ fn a_pane_exit_writes_its_code_as_a_number_and_omits_an_absent_one() {
         "{signalled}"
     );
     assert!(!signalled.contains("exit_code"), "{signalled}");
+}
+
+// `Some(0)` is the only code that logs at info. Every other code, and
+// `None` for a signal-terminated child, logs at warn.
+#[test]
+fn a_pane_exit_is_info_only_when_the_program_exited_zero() {
+    let pane_id = PaneId::new();
+    let cases = [(Some(0), "INFO"), (Some(127), "WARN"), (None, "WARN")];
+
+    for (exit_code, level) in cases {
+        let out = captured(&[Event::PaneProcessExited(PaneProcessExited {
+            pane_id,
+            exit_code,
+        })]);
+
+        assert_eq!(out.lines().count(), 1, "{exit_code:?}: {out}");
+        assert!(
+            out.contains(&format!(r#""level":"{level}""#)),
+            "{exit_code:?} must log at {level}: {out}"
+        );
+        assert!(
+            out.contains(r#""message":"pane process exited""#),
+            "{exit_code:?}: {out}"
+        );
+        assert!(
+            out.contains(&format!(r#""pane_id":"{pane_id}""#)),
+            "{exit_code:?}: {out}"
+        );
+    }
 }
 
 // `prior_pane` and `prior_tab` are on the events and are not written.

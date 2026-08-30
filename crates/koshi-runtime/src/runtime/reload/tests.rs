@@ -16,8 +16,6 @@ use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, SessionId};
 use koshi_test_support::fake_pty::FakePtyBackend;
 
-use crate::placeholder::{NullSnapshotProvider, NullStorage};
-
 fn runtime() -> (Server, ClientId) {
     let mut runtime = runtime_with_no_sessions();
     let client = runtime
@@ -33,13 +31,7 @@ fn runtime() -> (Server, ClientId) {
 /// A runtime with no bootstrapped session — zero live clients to notify.
 fn runtime_with_no_sessions() -> Server {
     let (tx, rx) = mpsc::channel();
-    Server::new(
-        Arc::new(FakePtyBackend::new()),
-        Arc::new(NullSnapshotProvider),
-        Arc::new(NullStorage),
-        rx,
-        tx,
-    )
+    Server::new(Arc::new(FakePtyBackend::new()), rx, tx)
 }
 
 fn only_session_id(runtime: &Server) -> SessionId {

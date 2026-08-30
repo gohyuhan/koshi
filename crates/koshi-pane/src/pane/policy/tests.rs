@@ -155,11 +155,12 @@ fn an_unknown_close_policy_fails_to_deserialize() {
 
 #[test]
 fn an_exit_policy_survives_a_serde_round_trip() {
-    for policy in [PaneExitPolicy::CloseOnExit, PaneExitPolicy::RespawnShell] {
-        let json = serde_json::to_string(&policy).expect("serialize");
-        let restored: PaneExitPolicy = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(policy, restored);
-    }
+    let policy = PaneExitPolicy::CloseOnExit;
+
+    let json = serde_json::to_string(&policy).expect("serialize");
+    let restored: PaneExitPolicy = serde_json::from_str(&json).expect("deserialize");
+
+    assert_eq!(policy, restored);
 }
 
 #[test]
@@ -175,14 +176,10 @@ fn the_unit_close_policies_serialize_as_their_variant_names() {
 }
 
 #[test]
-fn the_exit_policies_serialize_as_their_variant_names() {
+fn the_exit_policy_serializes_as_its_variant_name() {
     assert_eq!(
         serde_json::to_string(&PaneExitPolicy::CloseOnExit).expect("serialize"),
         r#""CloseOnExit""#
-    );
-    assert_eq!(
-        serde_json::to_string(&PaneExitPolicy::RespawnShell).expect("serialize"),
-        r#""RespawnShell""#
     );
 }
 
@@ -193,6 +190,19 @@ fn an_unknown_exit_policy_fails_to_deserialize() {
 
     assert_eq!(
         error.to_string(),
-        "unknown variant `KeepOpen`, expected `CloseOnExit` or `RespawnShell` at line 1 column 10"
+        "unknown variant `KeepOpen`, expected `CloseOnExit` at line 1 column 10"
+    );
+}
+
+/// `CloseOnExit` is the whole enum: a stored `"RespawnShell"` is an unknown
+/// variant, not a second policy.
+#[test]
+fn a_stored_respawn_shell_policy_fails_to_deserialize() {
+    let error =
+        serde_json::from_str::<PaneExitPolicy>(r#""RespawnShell""#).expect_err("unknown variant");
+
+    assert_eq!(
+        error.to_string(),
+        "unknown variant `RespawnShell`, expected `CloseOnExit` at line 1 column 14"
     );
 }

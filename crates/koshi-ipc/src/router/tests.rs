@@ -555,7 +555,7 @@ fn every_answer_names_itself_and_both_wire_lists_are_complete() {
 
 #[test]
 fn a_request_kind_this_build_lacks_reads_as_unknown_carrying_its_name() {
-    let decoded: IncomingRouterRequest =
+    let decoded: RouterRequest<MaybeKnown<RouterRequestKind>> =
         serde_json::from_str(r#"{"request_id":9,"kind":{"RehomeToken":{"identity":"build-box"}}}"#)
             .expect("a kind this build does not have still reads");
 
@@ -572,7 +572,7 @@ fn a_request_kind_this_build_lacks_reads_as_unknown_carrying_its_name() {
 
 #[test]
 fn an_unknown_kind_sent_as_a_bare_name_reads_as_unknown_carrying_its_name() {
-    let decoded: IncomingRouterRequest =
+    let decoded: RouterRequest<MaybeKnown<RouterRequestKind>> =
         serde_json::from_str(r#"{"request_id":9,"kind":"RehomeToken"}"#)
             .expect("a kind this build does not have still reads");
 
@@ -589,7 +589,7 @@ fn an_unknown_kind_sent_as_a_bare_name_reads_as_unknown_carrying_its_name() {
 
 #[test]
 fn a_kind_this_build_has_with_a_payload_it_cannot_read_keeps_the_decoding_error() {
-    let decoded: Result<IncomingRouterRequest, _> =
+    let decoded: Result<RouterRequest<MaybeKnown<RouterRequestKind>>, _> =
         serde_json::from_str(r#"{"request_id":3,"kind":{"AttachLookup":{"selector":7}}}"#);
 
     assert_eq!(

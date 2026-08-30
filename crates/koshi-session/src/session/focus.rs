@@ -30,7 +30,7 @@ pub enum FocusRepairResult {
     /// shows the terminal-too-small overlay.
     TerminalTooSmall,
     /// The tab's layout holds no panes at all. Carries `empty_tab_policy` for
-    /// the caller to apply — close the tab or respawn a shell.
+    /// the caller to apply — close the tab.
     EmptyTab(EmptyTabPolicy),
 }
 

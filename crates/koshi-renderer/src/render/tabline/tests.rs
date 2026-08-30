@@ -96,16 +96,15 @@ fn area(width: u16) -> RatatuiRect {
     }
 }
 
-/// Everything `draw_tabline` paints `frame` from, in `theme`'s colors.
-fn navigator<'a>(frame: &'a Frame, theme: &'a Theme) -> NavigatorDto<'a> {
-    NavigatorDto {
+/// Everything `draw_tabline` paints `frame` from.
+fn inputs(frame: &Frame) -> TablineInputs<'_> {
+    TablineInputs {
         session_name: &frame.snapshot.session.name,
         tabs: &frame.snapshot.session.tabs_metadata,
         lock_mode: frame.snapshot.client.lock_mode,
         mouse_select: frame.snapshot.client.mouse_select,
         reconnecting: frame.chrome.reconnecting,
         tabline_offset: frame.chrome.tabline_offset,
-        theme,
     }
 }
 
@@ -114,13 +113,13 @@ fn draw(frame: &Frame, width: u16) -> Buffer {
     let a = area(width);
     let mut buf = Buffer::empty(a);
     let theme = Theme::default();
-    draw_tabline(&navigator(frame, &theme), a, &mut buf);
+    draw_tabline(inputs(frame), &theme, a, &mut buf);
     buf
 }
 
 /// Solve the tabline for `frame` over `area`.
 fn solve_tabline(frame: &Frame, area: RatatuiRect) -> TablineLayout {
-    tabline_layout(frame.snapshot.layout(frame.chrome).navigator(), area)
+    tabline_layout(frame.snapshot.layout(frame.chrome).tabline(), area)
 }
 
 /// The symbol at cell `x` of the single rendered row.
@@ -515,7 +514,7 @@ fn a_composed_mode_tag_pushes_the_right_block_further_left() {
     let frame = snap("s", &[("a", true)], None, LockMode::Locked, true);
     let block = " LOCK · SELECT ";
     assert_eq!(
-        right_block_text(frame.snapshot.layout(frame.chrome).navigator()),
+        right_block_text(frame.snapshot.layout(frame.chrome).tabline()),
         block
     );
     assert_eq!(text_width(block), 15);
@@ -700,7 +699,7 @@ fn a_row_below_the_buffer_leaves_every_cell_untouched() {
         width: 20 + BADGE,
         height: 1,
     };
-    draw_tabline(&navigator(&frame, &theme), below, &mut buf);
+    draw_tabline(inputs(&frame), &theme, below, &mut buf);
     assert_eq!(buf, before);
 }
 
@@ -792,7 +791,7 @@ fn draw_paints_the_reconnecting_tag_while_the_viewer_has_no_link() {
     // and the row is 16 + BADGE cells wider than that block.
     let block = " RECONNECTING (attempt 3, retry in 8s) ";
     assert_eq!(
-        right_block_text(frame.snapshot.layout(frame.chrome).navigator()),
+        right_block_text(frame.snapshot.layout(frame.chrome).tabline()),
         block
     );
     let tag_width = text_width(block);
@@ -880,27 +879,12 @@ fn an_absurdly_long_name_saturates_instead_of_wrapping() {
 }
 
 #[test]
-fn text_width_counts_display_cells_not_bytes_or_chars() {
-    // The solve places blocks in terminal cells, so measuring must use display
-    // width. "漢字" is 2 chars and 6 bytes but occupies 4 cells; an emoji is
-    // 1 char and 4 bytes but occupies 2; a combining mark adds none.
-    assert_eq!(text_width("漢字"), 4);
-    assert_eq!(text_width("🦀"), 2);
-    assert_eq!(
-        text_width("e\u{0301}"),
-        1,
-        "e + combining acute is one cell"
-    );
-    assert_eq!(text_width(""), 0);
-}
-
-#[test]
 fn the_version_badge_is_kept_at_exactly_enough_room_and_dropped_one_cell_short() {
     // The badge is all-or-nothing: it fits or it goes whole, never clipped.
     // This pins the `<=` boundary the session block's width is solved from.
     let fixture = snap("s", &[("one", true)], None, LockMode::Normal, false);
     let layout = fixture.snapshot.layout(fixture.chrome);
-    let frame = layout.navigator();
+    let frame = layout.tabline();
 
     let full = session_texts(frame.session_name, u16::MAX);
     let name_width = text_width(&full.name);

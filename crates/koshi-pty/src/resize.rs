@@ -37,11 +37,9 @@ pub struct ResizeResult {
     /// The pane this result describes.
     pub pane_id: PaneId,
     /// The size the PTY was resized to. `None` when the pane was skipped or
-    /// the backend refused the resize.
+    /// the backend refused the resize; the PTY keeps its last size in both
+    /// cases.
     pub applied: Option<PtySize>,
-    /// `true` when the pane was skipped (no content) and kept its last size.
-    /// `false` for a pane the backend refused.
-    pub kept_last_valid: bool,
 }
 
 /// Resize every pane's PTY to match a freshly solved layout.
@@ -50,12 +48,12 @@ pub struct ResizeResult {
 /// crate's `content_rects`) in order:
 ///
 /// - A `None` rect is a pane showing no content: no backend call, and the
-///   result carries `applied: None` and `kept_last_valid: true`.
+///   result carries `applied: None`.
 /// - A `Some` rect is floored by [`compute_pty_size`] and applied through
 ///   [`crate::backend::state::PtyBackend::resize`]. The result carries the
-///   floored size in `applied` and `kept_last_valid: false`.
-/// - A backend error on a pane is dropped: the result carries `applied: None`
-///   and `kept_last_valid: false`, and the walk continues with the next pane.
+///   floored size in `applied`.
+/// - A backend error on a pane is dropped: the result carries `applied: None`,
+///   and the walk continues with the next pane.
 ///
 /// Holds no per-pane state: the caller picks which panes to pass, and reads
 /// `applied` to learn each pane's new size.
@@ -68,23 +66,15 @@ pub fn resize_for_layout_change(
 ) -> Vec<ResizeResult> {
     pane_items
         .into_iter()
-        .map(|(pane_id, content)| match content {
-            None => ResizeResult {
-                pane_id,
-                applied: None,
-                kept_last_valid: true,
-            },
-            Some(rect) => {
+        .map(|(pane_id, content)| ResizeResult {
+            pane_id,
+            applied: content.and_then(|rect| {
                 let computed = compute_pty_size(rect);
-                ResizeResult {
-                    pane_id,
-                    applied: backend
-                        .resize(pane_id, computed)
-                        .is_ok()
-                        .then_some(computed),
-                    kept_last_valid: false,
-                }
-            }
+                backend
+                    .resize(pane_id, computed)
+                    .is_ok()
+                    .then_some(computed)
+            }),
         })
         .collect()
 }

@@ -10,7 +10,7 @@
 use koshi_core::geometry::Rect;
 use koshi_core::ids::PaneId;
 
-use crate::solver::SolveResult;
+use crate::solver::{shows_content, SolveResult};
 
 /// The content rect for every pane in `solve`, in solve order.
 ///
@@ -34,10 +34,9 @@ pub fn content_rects(solve: &SolveResult) -> Vec<(PaneId, Option<Rect>)> {
         .panes
         .iter()
         .map(|&(pane, outer)| {
-            let shows_content = !outer.is_empty()
-                && !solve.suppressed.contains(&pane)
-                && !solve.stack_headers.iter().any(|header| header.pane == pane);
-            (pane, shows_content.then(|| outer.inner_with_border()))
+            let visible = !solve.suppressed.contains(&pane)
+                && shows_content(pane, outer, &solve.stack_headers);
+            (pane, visible.then(|| outer.inner_with_border()))
         })
         .collect()
 }

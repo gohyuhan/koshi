@@ -39,9 +39,9 @@ use koshi_layout::solver::StackHeader;
 use koshi_terminal::grid::state::Grid;
 use koshi_terminal::state::CursorShape;
 
-use crate::region::{core_region_solve, NavigatorLayout};
+use crate::region::{core_region_solve, TablineInputs};
 
-/// The hint-bar data the renderer draws, re-exported from the keymap crate
+/// The statusline data the renderer draws, re-exported from the keymap crate
 /// that produces it: `koshi_config::hints`.
 pub use koshi_config::hints::{HintBinding, KeymapHints};
 
@@ -109,7 +109,7 @@ impl CommittedRegions {
         }
     }
 
-    /// Build a committed region value whose solve is the compiled-in navigator
+    /// Build a committed region value whose solve is the compiled-in tabline
     /// and statusline solve for `viewport`, tagged with `input_revision`.
     #[must_use]
     pub fn core(viewport: Size, input_revision: u64) -> Self {
@@ -203,7 +203,7 @@ pub struct Reconnecting {
 /// client-side region commit. Carries no pane content and no colors.
 ///
 /// Hit-testing reads the session, client, viewer, and committed region solve
-/// from this value. The `navigator` method returns the session name, tabs, lock
+/// from this value. The `tabline` method returns the session name, tabs, lock
 /// mode, mouse-selection state, reconnect state, and tab offset used by the
 /// tabline solve. Hit-testing and tabline solving use cell coordinates. This
 /// value has no theme; renderers apply colors when they draw cells.
@@ -234,8 +234,8 @@ impl<'a> FrameLayout<'a> {
     /// A frame named `work` with tabs `shell` and `logs` yields those names and
     /// their tab state, but it does not yield a pane slot or terminal grid.
     #[must_use]
-    pub(crate) fn navigator(&self) -> NavigatorLayout<'_> {
-        NavigatorLayout {
+    pub(crate) fn tabline(&self) -> TablineInputs<'a> {
+        TablineInputs {
             session_name: &self.session.name,
             tabs: &self.session.tabs_metadata,
             lock_mode: self.client.lock_mode,
@@ -429,8 +429,8 @@ pub struct TabSnapshot {
 /// true exactly when [`inner_rect`](Self::inner_rect) is `Some` (the pane has a
 /// content area to draw), and a [`suppressed`](Self::suppressed) pane is not
 /// visible. [`dead`](Self::dead) is an orthogonal axis: it does not by itself
-/// change visibility — an exited pane stays laid out, drawn dimmed, until it is
-/// removed. `inner_rect` is `None` for three distinct reasons — no room,
+/// change visibility — an exited pane stays laid out, drawn like any other,
+/// until it is removed. `inner_rect` is `None` for three distinct reasons — no room,
 /// hidden, or a collapsed stack member — and [`suppressed`](Self::suppressed)
 /// marks the no-room case.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -452,7 +452,8 @@ pub struct PaneSlot {
     pub visible: bool,
     /// Whether the pane is suppressed for lack of room.
     pub suppressed: bool,
-    /// Whether the pane's process has exited (drawn dimmed / with a marker).
+    /// Whether the pane's process has exited. The renderer paints an exited
+    /// pane the same as a live one.
     pub dead: bool,
 }
 
@@ -594,7 +595,10 @@ pub struct GridView {
     pub view_offset: usize,
 }
 
-/// Scrollback state the renderer needs for the scroll-position indicator.
+/// A pane's scrollback state. The renderer draws
+/// [`retained_lines`](Self::retained_lines) as the total in the
+/// scroll-position indicator and paints nothing from
+/// [`truncated`](Self::truncated).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScrollbackMeta {
     /// Whether the buffer reached its cap and dropped its oldest lines.

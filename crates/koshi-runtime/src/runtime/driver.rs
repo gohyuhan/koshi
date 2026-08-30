@@ -24,12 +24,8 @@ impl Server {
         match event {
             RuntimeEvent::Quit => return ControlFlow::Break(()),
             RuntimeEvent::PtyOutput { pane_id, bytes } => self.handle_pty_output(pane_id, &bytes),
-            RuntimeEvent::ChildExit {
-                pane_id,
-                status,
-                exited_at,
-            } => {
-                let events = self.handle_child_exit(pane_id, status, exited_at);
+            RuntimeEvent::ChildExit { pane_id, status } => {
+                let events = self.handle_child_exit(pane_id, status);
                 self.publish_events(&events);
             }
             // A raw chord is the viewer's to read: it holds the keymap, the
@@ -64,26 +60,6 @@ impl Server {
             }
             RuntimeEvent::HostPaste { client_id, text } => {
                 self.handle_host_paste(client_id, &text);
-            }
-            RuntimeEvent::ClientAttached {
-                session_id,
-                client_id,
-                viewport,
-                pane_area,
-                active_tab,
-                attached_at,
-            } => {
-                // Every client this arm registers is on this machine.
-                let events = self.handle_client_attach(
-                    session_id,
-                    client_id,
-                    viewport,
-                    pane_area,
-                    active_tab,
-                    attached_at,
-                    false,
-                );
-                self.publish_events(&events);
             }
             RuntimeEvent::ClientDetached {
                 client_id,

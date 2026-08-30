@@ -910,3 +910,63 @@ fn a_session_row_name_of_nothing_but_filtered_characters_is_empty() {
     assert_eq!(SessionRow::new(id, "", None).name, "");
     assert_eq!(SessionRow::new(id, "\u{7f}\u{202e}\u{200e}", None).name, "");
 }
+
+#[test]
+fn filter_reported_text_filters_every_string_the_answering_session_chose() {
+    let mut answered = overview("quiet\u{1b}lake", &[("edit\u{7f}or", 1)]);
+    answered.panes[0].title = Some("ssh \u{202e}gpj.exe".to_string());
+    answered.panes[0].cwd = Some(PathBuf::from("/tmp/a\u{1b}[2Jb"));
+    answered.panes[0].command = Some(vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        "\u{1b}]0;pwned\u{7}".to_string(),
+    ]);
+    let ids: Vec<PaneId> = answered.panes.iter().map(|pane| pane.id).collect();
+
+    filter_reported_text(&mut answered);
+
+    assert_eq!(answered.session.name, "quietlake");
+    assert_eq!(answered.tabs[0].name, "editor");
+    assert_eq!(answered.panes[0].title.as_deref(), Some("ssh gpj.exe"));
+    assert_eq!(answered.panes[0].cwd, Some(PathBuf::from("/tmp/a[2Jb")));
+    assert_eq!(
+        answered.panes[0].command.as_deref(),
+        Some(["sh".to_string(), "-c".to_string(), "]0;pwned".to_string()].as_slice())
+    );
+    assert_eq!(
+        answered
+            .panes
+            .iter()
+            .map(|pane| pane.id)
+            .collect::<Vec<_>>(),
+        ids,
+        "ids are carried, never altered"
+    );
+}
+
+#[test]
+fn a_session_that_answers_with_escapes_is_filtered_before_the_caller_sees_it() {
+    // The answering session is another process, so what it sends is not
+    // trusted. `inspect` and `debug dump-state` render these fields straight,
+    // and a filtered overview is what reaches them.
+    let dir = test_runtime_dir("hostile-answer");
+    let mut hostile = overview("quiet-lake", &[("editor", 1)]);
+    let session_id = hostile.session.id;
+    hostile.session.name = "quiet\u{1b}[2Jlake".to_string();
+    hostile.tabs[0].name = "edi\u{7f}tor".to_string();
+    hostile.panes[0].command = Some(vec!["\u{1b}]0;pwned\u{7}".to_string()]);
+    hostile.panes[0].cwd = Some(PathBuf::from("/tmp/\u{1b}[2J"));
+    let serving = serve_overview(&dir, hostile);
+
+    let fetched = fetch_one(&dir, session_id).expect("the session answers");
+    serving.join().expect("the stand-in session finishes");
+
+    assert_eq!(fetched.session.name, "quiet[2Jlake");
+    assert_eq!(fetched.tabs[0].name, "editor");
+    assert_eq!(
+        fetched.panes[0].command.as_deref(),
+        Some(["]0;pwned".to_string()].as_slice())
+    );
+    assert_eq!(fetched.panes[0].cwd, Some(PathBuf::from("/tmp/[2J")));
+    let _ = std::fs::remove_dir_all(&dir);
+}

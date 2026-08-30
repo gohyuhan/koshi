@@ -25,6 +25,14 @@
 //! The variant name lives in the JSON the transport speaks: a variant carrying
 //! fields is a one-key object whose key is the name, and a variant carrying
 //! none is that name as a bare string.
+//!
+//! An unknown name is what a refusal and a log line quote back, so it is
+//! filtered by
+//! [`sanitize_reported_text`](koshi_core::text::sanitize_reported_text) as it
+//! is read: `{"\u{1b}[2JFloating":{}}` reads as
+//! `MaybeKnown::Unknown { name: "[2JFloating" }`, and a name of a million
+//! characters is cut to
+//! [`MAX_REPORTED_TEXT_BYTES`](koshi_core::text::MAX_REPORTED_TEXT_BYTES).
 
 use std::fmt;
 
@@ -96,7 +104,12 @@ pub enum MaybeKnown<T> {
     Known(T),
     /// The peer named a variant this build does not have.
     Unknown {
-        /// The name as the peer spelled it.
+        /// The name the peer spelled, filtered by
+        /// [`sanitize_reported_text`](koshi_core::text::sanitize_reported_text):
+        /// no control or bidi character, and at most
+        /// [`MAX_REPORTED_TEXT_BYTES`](koshi_core::text::MAX_REPORTED_TEXT_BYTES)
+        /// bytes. Every variant name this build has is unchanged by that
+        /// filter.
         name: String,
     },
 }
@@ -128,7 +141,9 @@ where
         if T::VARIANTS.contains(&name.as_str()) {
             return Err(D::Error::custom(refusal));
         }
-        Ok(MaybeKnown::Unknown { name })
+        Ok(MaybeKnown::Unknown {
+            name: koshi_core::text::sanitize_reported_text(&name),
+        })
     }
 }
 

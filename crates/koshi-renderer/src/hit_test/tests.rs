@@ -166,7 +166,7 @@ fn full_pane_content_border_and_chrome() {
     );
     // Top row is the tabline (drawn over the pane), off any tab ribbon here.
     assert_eq!(hit_test(s.layout(chrome()), at(20, 0)), HitRegion::Tabline);
-    // Bottom row is the hint bar.
+    // Bottom row is the statusline.
     assert_eq!(
         hit_test(s.layout(chrome()), at(20, 9)),
         HitRegion::Statusline
@@ -199,7 +199,7 @@ fn centered_layout_exposes_top_bottom_borders_and_letterbox() {
             side: Direction::Up
         }
     );
-    // Bottom border row of the pane, above the hint bar.
+    // Bottom border row of the pane, above the statusline.
     assert_eq!(
         hit_test(s.layout(chrome()), at(22, 11)),
         HitRegion::PaneBorder {
@@ -395,7 +395,7 @@ fn a_committed_solve_with_no_regions_leaves_every_row_to_the_panes() {
     );
     let hit = |x, y| hit_test(painted.layout(chrome()), at(x, y));
 
-    // The rows the tabline and the hint bar would own are the pane's own top
+    // The rows the tabline and the statusline would own are the pane's own top
     // and bottom border rows.
     assert_eq!(
         hit(20, 0),
@@ -497,7 +497,7 @@ fn a_stack_header_wins_a_cell_over_the_pane_under_it() {
     assert_eq!(hit(20, 4), HitRegion::PaneContent { pane_id: pane });
 }
 
-/// A one-row viewport is all tabline: no hint bar row exists, and a cell past
+/// A one-row viewport is all tabline: no statusline row exists, and a cell past
 /// the single row hits nothing.
 #[test]
 fn a_one_row_viewport_is_all_tabline() {
@@ -559,7 +559,7 @@ fn tabs_hit_by_column() {
         &[(a, "a"), (b, "b")],
     );
     let tabs = tabline_layout(
-        s.layout(chrome()).navigator(),
+        s.layout(chrome()).tabline(),
         RatatuiRect {
             x: 0,
             y: 0,
@@ -618,7 +618,7 @@ fn scroll_arrows_hit_test_to_their_targets() {
         width: cols,
         height: 8,
     };
-    let layout = tabline_layout(s.layout(peeking).navigator(), area);
+    let layout = tabline_layout(s.layout(peeking).tabline(), area);
     let (left_x, left_to) = layout.left_arrow.expect("tabs hidden off the left");
     let (right_x, right_to) = layout.right_arrow.expect("tabs hidden off the right");
 

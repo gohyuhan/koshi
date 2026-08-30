@@ -244,7 +244,7 @@ fn a_non_integer_version_is_a_validation_error() {
     match error {
         ConfigError::Validation { key, detail } => {
             assert_eq!(key, "version");
-            assert_eq!(detail, "expected an integer");
+            assert_eq!(detail, "`version` must be an integer from 1 to 4294967295");
         }
         other => panic!("expected a validation error, got {other:?}"),
     }
@@ -303,7 +303,7 @@ fn a_negative_version_is_rejected() {
         panic!("expected version validation error, got {error:?}");
     };
     assert_eq!(key, "version");
-    assert_eq!(detail, "must be between 0 and 4294967295");
+    assert_eq!(detail, "`version` must be an integer from 1 to 4294967295");
 }
 
 #[test]
@@ -315,7 +315,7 @@ fn a_version_with_two_values_is_rejected() {
         panic!("expected version validation error, got {error:?}");
     };
     assert_eq!(key, "version");
-    assert_eq!(detail, "expected exactly one value");
+    assert_eq!(detail, "`version` takes exactly one integer argument");
 }
 
 #[test]
@@ -412,5 +412,21 @@ fn warnings_come_out_in_file_order() {
             "ignored unknown key `colors.foreground`; did you mean `colors.ramp-end`?",
             "ignored duplicate `colors` section",
         ]
+    );
+}
+
+#[test]
+fn a_value_on_the_colors_line_is_warned_about_and_ignored() {
+    let (theme, warnings) = parse("colors \"oops\" {\n    accent \"#ff0000\"\n}");
+    assert_eq!(
+        warnings,
+        ["ignored `colors` value: a section takes a `{ … }` block"]
+    );
+    assert_eq!(
+        theme.colors,
+        Some(PartialColorPalette {
+            accent: Some(RgbColor::new(0xff, 0x00, 0x00)),
+            ..PartialColorPalette::default()
+        })
     );
 }

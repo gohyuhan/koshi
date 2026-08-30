@@ -70,13 +70,10 @@ pub enum SessionSelector {
 /// know, so a misspelled `request_id` is an error.
 ///
 /// `K` is the request kind. A sender uses `RouterRequest`, where `K` is
-/// [`RouterRequestKind`]. The router uses [`IncomingRouterRequest`], where a
-/// kind this build does not have arrives as [`MaybeKnown::Unknown`].
+/// [`RouterRequestKind`]. The router reads
+/// `RouterRequest<MaybeKnown<RouterRequestKind>>`, where a kind this build
+/// does not have arrives as [`MaybeKnown::Unknown`].
 pub type RouterRequest<K = RouterRequestKind> = Envelope<K>;
-
-/// A control-plane request as the router reads it: the kind may name something
-/// this build does not have.
-pub type IncomingRouterRequest = RouterRequest<MaybeKnown<RouterRequestKind>>;
 
 /// What a control-plane request asks for.
 ///

@@ -37,13 +37,7 @@ impl TerminalState {
             self.scrollback.lines().iter().cloned().collect();
         let history_len = physical.len();
         for (index, row) in self.primary.rows().iter().enumerate() {
-            physical.push((
-                row.clone(),
-                RowMeta {
-                    end: self.primary.row_end(index as u16),
-                    prompt: self.primary.prompt_mark(index as u16),
-                },
-            ));
+            physical.push((row.clone(), self.primary.row_meta(index as u16)));
         }
         let cursor_physical = history_len + self.primary_cursor.row as usize;
         let cursor_col = self.primary_cursor.col as usize;
@@ -133,7 +127,7 @@ impl TerminalState {
         // the rest — padded with blanks at the bottom — is the new screen.
         let overflow = rewrapped.len().saturating_sub(size.rows as usize);
         let history: Vec<(Vec<Cell>, RowMeta)> = rewrapped.drain(..overflow).collect();
-        self.scrollback.replace_lines_with_meta(history);
+        self.scrollback.replace_lines(history);
 
         while rewrapped.len() < size.rows as usize {
             rewrapped.push((

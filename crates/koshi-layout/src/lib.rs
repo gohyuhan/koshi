@@ -5,19 +5,17 @@
 //! turns a tree plus a tab rectangle into pane rectangles, the structural
 //! edits (split, stack, remove), resize transactions, normalization after an
 //! edit, the fullscreen mode, focus candidates after a pane closes, per-pane
-//! content rectangles, stack snapshots for persistence, and layout templates
-//! that describe an arrangement before any pane exists.
+//! content rectangles, and layout templates that describe an arrangement
+//! before any pane exists.
 
 pub mod content;
 pub mod edit;
-pub mod error;
 pub mod focus;
 pub mod mode;
 pub mod normalize;
 pub mod regions;
 pub mod resize;
 pub mod size;
-pub mod snapshot;
 pub mod solver;
 pub mod template;
 #[cfg(test)]

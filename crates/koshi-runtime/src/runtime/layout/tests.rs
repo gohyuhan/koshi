@@ -10,14 +10,13 @@ use koshi_core::ids::{ClientId, PaneId, SessionId};
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::size::SizeWeight;
 use koshi_layout::solver::StackHeader;
-use koshi_layout::tree::{LayoutChild, LayoutNode, SplitNode};
+use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pty::backend::state::PtyBackend;
 use koshi_session::client::{Client, ClientOrigin, ClientRegistry};
 use koshi_session::session::state::Session;
 use koshi_test_support::fake_pty::FakePtyBackend;
 use uuid::Uuid;
 
-use crate::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
 use crate::runtime::event::RuntimeEvent;
 
 use super::*;
@@ -33,16 +32,8 @@ const TAB_VIEWPORT: Size = Size { cols: 80, rows: 22 };
 /// so the inbox stays open.
 fn new_runtime() -> (Server, mpsc::Sender<RuntimeEvent>) {
     let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::new());
-    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
-    let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (tx, inbox_rx) = mpsc::channel();
-    let runtime = Server::new(
-        pty_backend,
-        snapshot_provider,
-        storage,
-        inbox_rx,
-        tx.clone(),
-    );
+    let runtime = Server::new(pty_backend, inbox_rx, tx.clone());
     (runtime, tx)
 }
 
@@ -111,10 +102,7 @@ fn runtime_with(session: Session) -> (Server, mpsc::Sender<RuntimeEvent>) {
 fn side_by_side(left: PaneId, right: PaneId) -> LayoutNode {
     LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![
-            LayoutChild::new(LayoutNode::Pane(left)),
-            LayoutChild::new(LayoutNode::Pane(right)),
-        ],
+        vec![LayoutNode::Pane(left), LayoutNode::Pane(right)],
     ))
 }
 
@@ -903,16 +891,7 @@ fn a_stack_whose_active_member_is_flagged_collapsed_still_expands_that_member() 
         .expect("the tab was just added")
         .update_layout(LayoutNode::Split(SplitNode {
             direction: SplitDirection::Stacked,
-            children: vec![
-                LayoutChild {
-                    node: LayoutNode::Pane(first),
-                    collapsed: true,
-                },
-                LayoutChild {
-                    node: LayoutNode::Pane(second),
-                    collapsed: false,
-                },
-            ],
+            children: vec![LayoutNode::Pane(first), LayoutNode::Pane(second)],
             weights: vec![SizeWeight::default(), SizeWeight::default()],
             active: 0,
         }));

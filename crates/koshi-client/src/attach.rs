@@ -113,7 +113,7 @@ use koshi_config::types::BoundAction;
 use koshi_core::command::{
     Command, CommandEnvelope, CommandResult, CommandSource, SwitchSessionArgs, VisualCommand,
 };
-use koshi_core::geometry::{Direction, PaneArea, Size};
+use koshi_core::geometry::{Direction, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::key::KeySequence;
 use koshi_core::lock::LockMode;
@@ -138,8 +138,8 @@ use koshi_renderer::snapshot::{
 };
 use koshi_runtime::runtime::event::RuntimeEvent;
 
-use crate::app;
 use crate::attach::paint::to_snapshot;
+use crate::terminal;
 use koshi_core::ids::parse_prefixed_uuid;
 use koshi_ipc::endpoint::RESTART_WINDOW;
 use koshi_link::discovery::{self, SessionRow};
@@ -411,7 +411,7 @@ fn paint<B: Backend>(
     last_title: &mut String,
     last_cursor: &mut Option<CursorStyle>,
 ) -> bool {
-    match app::paint_frame(
+    match terminal::paint_frame(
         terminal,
         client,
         snapshot,
@@ -586,9 +586,6 @@ struct Joined {
     /// The secret this attach minted, presented on the next attach to get this
     /// attach's view back. `None` from a session server that mints none.
     resume_token: Option<ConnectionToken>,
-    /// Whether the session echoed the pane-area field in its attach result.
-    /// `false` records the fixed two-row compatibility mode for this viewer.
-    pane_area_supported: bool,
 }
 
 /// Resolve what the user typed to one running session, and report where it
@@ -834,7 +831,6 @@ fn attach_once(home: &Home, target: &SessionSelector) -> Result<Option<SessionId
         session_id,
         token,
         resume_token,
-        pane_area_supported,
     } = dial(home, target)?;
 
     // The session accepted the client, so the terminal may change mode now.
@@ -842,7 +838,7 @@ fn attach_once(home: &Home, target: &SessionSelector) -> Result<Option<SessionId
     // them, so an unwinding panic restores the terminal too and then writes a
     // crash report into the data directory.
     let cleanup = TerminalCleanupGuard::new();
-    app::register_terminal_restore(&cleanup);
+    terminal::register_terminal_restore(&cleanup);
     let _panic_guard = install_panic_hook(&cleanup, koshi_paths::data_dir());
     // A terminal that refuses any of these modes still streams: the failure is
     // logged and the loop runs on.
@@ -894,7 +890,7 @@ fn attach_once(home: &Home, target: &SessionSelector) -> Result<Option<SessionId
     // failure a started thread reports is therefore this terminal going away.
     if io::stdin().is_tty() {
         let (input_tx, input_rx) = mpsc::channel();
-        app::spawn_input_thread(input_tx, client_id);
+        terminal::spawn_input_thread(input_tx, client_id);
         spawn_input_relay(input_rx, incoming_tx.clone());
     } else {
         tracing::info!("standard input is not a terminal, so this client reads no keys");
@@ -919,14 +915,7 @@ fn attach_once(home: &Home, target: &SessionSelector) -> Result<Option<SessionId
         tracing::warn!("{warning}");
     }
     let (_events_tx, events_rx) = mpsc::channel();
-    let mut client = app::viewer(
-        client_id,
-        viewport(),
-        events_rx,
-        cleanup,
-        pane_area_supported,
-        loaded,
-    );
+    let mut client = terminal::viewer(client_id, viewport(), events_rx, cleanup, loaded);
     let mut uplink = Uplink {
         requests: spawn_uplink_writer(writer),
         registry: ActionRegistry::new(),
@@ -1155,7 +1144,7 @@ fn run_attachment<B: Backend>(
                                 if drop_input_from_the_blackout(&incoming_rx) {
                                     break Ending::TerminalGone;
                                 }
-                                Some((joined.reader, joined.writer, joined.pane_area_supported))
+                                Some((joined.reader, joined.writer))
                             }
                             Err(cause) => break Ending::LinkLost(cause),
                         }
@@ -1168,10 +1157,9 @@ fn run_attachment<B: Backend>(
                 | Ending::Switch(_)
                 | Ending::LinkLost(_) => None,
             };
-            let Some((reader, writer, pane_area_supported)) = halves else {
+            let Some((reader, writer)) = halves else {
                 break ending;
             };
-            client.set_pane_area_supported(pane_area_supported);
             current_connection += 1;
             spawn_frame_reader(reader, current_connection, incoming_tx.clone());
             // Dropping the queue the old connection's writer thread reads from
@@ -1225,7 +1213,7 @@ fn dial(home: &Home, target: &SessionSelector) -> Result<Joined, CliError> {
             };
             let endpoint = ipc_client::read_endpoint(runtime_dir, session_id)?;
             let mut connection = ipc_client::connect(&endpoint, session_id)?;
-            let (client_id, session_id, resume_token, pane_area_supported) =
+            let (client_id, session_id, resume_token) =
                 join(&mut connection, &endpoint.token, None)?;
             let (reader, writer) = connection.split();
             Ok(Joined {
@@ -1235,7 +1223,6 @@ fn dial(home: &Home, target: &SessionSelector) -> Result<Joined, CliError> {
                 session_id,
                 token: endpoint.token,
                 resume_token,
-                pane_area_supported,
             })
         }
         Home::Remote { server } => dial_remote(server, target, None, None).map_err(CliError::from),
@@ -1274,8 +1261,7 @@ fn dial_remote(
         .send(&attach_request(resume, resume_token))
         .map_err(link_failed)?;
     let reply = reader.recv().map_err(link_failed)?;
-    let (client_id, session_id, minted, pane_area) =
-        take_attached(reply).map_err(DialError::Refused)?;
+    let (client_id, session_id, minted) = take_attached(reply).map_err(DialError::Refused)?;
 
     // Joined: both halves block for as long as it takes from here.
     reader.set_deadline(None);
@@ -1287,7 +1273,6 @@ fn dial_remote(
         session_id,
         token: saved.secret,
         resume_token: minted,
-        pane_area_supported: pane_area.is_some(),
     })
 }
 
@@ -1342,7 +1327,7 @@ fn target_name(target: &SessionSelector) -> String {
 
 /// Come back into `session_id` after it said it is replacing its own process
 /// image, and hand back the two halves of the connection this client comes back
-/// on and whether the session echoed the pane-area field.
+/// on.
 ///
 /// On this machine [`rejoin`] waits for the session's new socket, and `token`
 /// is stamped with the token that socket was advertised under. On a server the
@@ -1362,23 +1347,21 @@ fn target_name(target: &SessionSelector) -> String {
 ///
 /// `None` for every way the client cannot come back, including a session that
 /// no longer holds this client's record. The caller reports each of them as the
-/// session ending unexpectedly. The boolean is false when the session omits
-/// the pane-area field.
+/// session ending unexpectedly.
 fn come_back(
     home: &Home,
     session_id: SessionId,
     client_id: ClientId,
     token: &mut ConnectionToken,
     resume_token: &mut Option<ConnectionToken>,
-) -> Option<(FrameReader, FrameWriter, bool)> {
+) -> Option<(FrameReader, FrameWriter)> {
     match home {
         Home::Local { runtime_dir } => {
-            let (endpoint, connection, pane_area_supported) =
-                rejoin(runtime_dir, session_id, client_id, token)?;
+            let (endpoint, connection) = rejoin(runtime_dir, session_id, client_id, token)?;
             *token = endpoint.token;
             *resume_token = None;
             let (reader, writer) = connection.split();
-            Some((reader, writer, pane_area_supported))
+            Some((reader, writer))
         }
         Home::Remote { server } => {
             let deadline = Instant::now() + RESTART_WINDOW;
@@ -1402,7 +1385,7 @@ fn come_back(
                     Ok(joined) => {
                         *token = joined.token;
                         *resume_token = joined.resume_token;
-                        return Some((joined.reader, joined.writer, joined.pane_area_supported));
+                        return Some((joined.reader, joined.writer));
                     }
                     Err(error) => {
                         if Instant::now() >= deadline {
@@ -1740,8 +1723,8 @@ fn selector_of(selector: &str) -> SessionSelector {
 
 /// Join the session on an open connection: write the Hello and the Attach back
 /// to back, then read both replies in order. Returns the client the server
-/// minted for this terminal, the session it says that client joined, the secret
-/// this attach minted, and whether the server echoed the pane-area field.
+/// minted for this terminal, the session it says that client joined, and the
+/// secret this attach minted.
 ///
 /// The client names no identity of its own — the server mints the client id
 /// and answers with it — so every value comes from the reply.
@@ -1759,7 +1742,7 @@ fn join(
     connection: &mut Connection,
     token: &ConnectionToken,
     resume: Option<ClientId>,
-) -> Result<(ClientId, SessionId, Option<ConnectionToken>, bool), CliError> {
+) -> Result<(ClientId, SessionId, Option<ConnectionToken>), CliError> {
     let hello = IpcRequest {
         request_id: 1,
         kind: IpcRequestKind::hello(token.clone()),
@@ -1770,9 +1753,7 @@ fn join(
         .map_err(talk::talk_failed)?;
 
     settle_version(connection.recv().map_err(talk::talk_failed)?)?;
-    let (client_id, session_id, resume_token, pane_area) =
-        take_attached(connection.recv().map_err(talk::talk_failed)?)?;
-    Ok((client_id, session_id, resume_token, pane_area.is_some()))
+    take_attached(connection.recv().map_err(talk::talk_failed)?)
 }
 
 /// The Attach this client writes, numbered 2: the request that follows the
@@ -1809,20 +1790,13 @@ fn settle_version(reply: IncomingResponse) -> Result<(), CliError> {
 }
 
 /// The client the server minted for this terminal, the session it says that
-/// client joined, the secret this attach minted, and the pane area the server
-/// echoed, out of an Attach answer. A missing echo identifies an older session
-/// that uses the fixed two-row compatibility layout.
+/// client joined, and the secret this attach minted, out of an Attach answer.
+///
+/// An answer that echoes no pane area is taken as it stands, and logs one
+/// debug line.
 fn take_attached(
     reply: IncomingResponse,
-) -> Result<
-    (
-        ClientId,
-        SessionId,
-        Option<ConnectionToken>,
-        Option<PaneArea>,
-    ),
-    CliError,
-> {
+) -> Result<(ClientId, SessionId, Option<ConnectionToken>), CliError> {
     match talk::SESSION.take_result(reply)? {
         IpcResult::Attached {
             client_id,
@@ -1830,7 +1804,12 @@ fn take_attached(
             resume_token,
             pane_area,
             ..
-        } => Ok((client_id, session_id, resume_token, pane_area)),
+        } => {
+            if pane_area.is_none() {
+                tracing::debug!("the session echoed no pane area in its attach answer");
+            }
+            Ok((client_id, session_id, resume_token))
+        }
         IpcResult::Error(refusal) => Err(talk::refused(&refusal)),
         other => Err(talk::SESSION.unexpected_reply(&other)),
     }
@@ -1838,8 +1817,7 @@ fn take_attached(
 
 /// Come back to a session that is replacing its own process image: wait for its
 /// new socket, connect to it, and join again as `client_id`. Returns the
-/// endpoint file, the open connection, and whether the session echoed pane area.
-/// The boolean is false for an older session that omits the field.
+/// endpoint file and the open connection.
 ///
 /// `token` is the token this client attached under; the wait watches it for a
 /// change.
@@ -1855,7 +1833,7 @@ fn rejoin(
     session_id: SessionId,
     client_id: ClientId,
     token: &ConnectionToken,
-) -> Option<(EndpointFile, Connection, bool)> {
+) -> Option<(EndpointFile, Connection)> {
     if token.expose().is_empty() {
         tracing::warn!(
             %session_id,
@@ -1871,12 +1849,9 @@ fn rejoin(
     let mut connection = ipc_client::connect(&endpoint, session_id)
         .inspect_err(|error| tracing::warn!(%error, "could not reach the restarted session"))
         .ok()?;
-    let (rejoined, _, _, pane_area_supported) =
-        join(&mut connection, &endpoint.token, Some(client_id))
-            .inspect_err(
-                |error| tracing::warn!(%error, "the restarted session refused this client"),
-            )
-            .ok()?;
+    let (rejoined, _, _) = join(&mut connection, &endpoint.token, Some(client_id))
+        .inspect_err(|error| tracing::warn!(%error, "the restarted session refused this client"))
+        .ok()?;
     if rejoined != client_id {
         tracing::warn!(
             %session_id,
@@ -1884,7 +1859,7 @@ fn rejoin(
         );
         return None;
     }
-    Some((endpoint, connection, pane_area_supported))
+    Some((endpoint, connection))
 }
 
 /// Wait for `session_id` to advertise a socket under a token other than

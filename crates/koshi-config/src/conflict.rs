@@ -145,8 +145,7 @@ pub fn keymap_layers(
 }
 
 /// Every built-in input mode's name.
-#[must_use]
-pub fn built_in_modes() -> BTreeSet<ModeName> {
+pub(crate) fn built_in_modes() -> BTreeSet<ModeName> {
     LockMode::ALL
         .iter()
         .map(|mode| ModeName::new(mode.name()))
@@ -498,9 +497,9 @@ impl ConflictReport {
 ///
 /// `leader`, `unlock_alternative`, and `max_chord_depth` come from the
 /// merged keybindings config; `registry` is the live action table each
-/// binding is resolved against for the liveness judgment; `known_modes`
-/// holds every registered mode name (built-in and plugin).
-/// The reserved unlock chord is `unlock_alternative` when set, otherwise
+/// binding is resolved against for the liveness judgment. A binding whose mode
+/// is not one of the [`LockMode`] names is skipped. The reserved unlock chord
+/// is `unlock_alternative` when set, otherwise
 /// [`KeybindingsConfig::RESERVED_UNLOCK`].
 #[must_use]
 pub fn detect_conflicts(
@@ -509,8 +508,8 @@ pub fn detect_conflicts(
     unlock_alternative: Option<KeyChord>,
     max_chord_depth: u8,
     registry: &ActionRegistry,
-    known_modes: &BTreeSet<ModeName>,
 ) -> ConflictReport {
+    let known_modes = &built_in_modes();
     let mut diagnostics = Vec::new();
     let reserved = unlock_alternative.unwrap_or(KeybindingsConfig::RESERVED_UNLOCK);
     let locked = ModeName::new("locked");

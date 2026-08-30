@@ -10,11 +10,11 @@
 //!
 //! [`ipc_server::IpcServer`] serves that session's control socket: it carries
 //! every other process's request to the same dispatcher, and an attached
-//! client's event stream back out. [`resume`] writes and reads the file a
-//! session server hands to the process image that replaces it.
+//! client's event stream back out. It sets each submitted command's source
+//! from the connection the command arrived on. [`resume`] writes and reads the
+//! file a session server hands to the process image that replaces it.
 
 pub mod ipc_server;
-pub mod placeholder;
 pub mod resume;
 pub mod runtime;
 pub mod server;

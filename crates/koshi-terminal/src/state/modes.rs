@@ -56,10 +56,10 @@ pub enum CursorShape {
 /// (`?9`/`?1000`/`?1002`/`?1003` and `?1005`/`?1006`/`?1015`), and
 /// alternate-scroll (`?1007`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TerminalModes {
+pub(crate) struct TerminalModes {
     /// `?2004` — bracketed paste: the input layer wraps pasted text in
     /// `ESC[200~`…`ESC[201~`.
-    pub bracketed_paste: bool,
+    pub(in crate::state) bracketed_paste: bool,
     /// Which mouse events are reported; see [`MouseTracking`].
     pub(in crate::state) mouse_tracking: MouseTracking,
     /// How mouse reports are encoded; see [`MouseEncoding`].

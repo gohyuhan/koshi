@@ -5,8 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-crossterm = "0.29.0"
-fs4 = "1.1.0"
+crossterm.workspace = true
+fs4.workspace = true
 koshi-beta = { version = "0.4.0-pr.1", path = "../koshi-beta" }
 koshi-config = { version = "0.4.0-pr.1", path = "../koshi-config" }
 koshi-core = { version = "0.4.0-pr.1", path = "../koshi-core" }
@@ -14,12 +14,10 @@ koshi-ipc = { version = "0.4.0-pr.1", path = "../koshi-ipc" }
 koshi-layout = { version = "0.4.0-pr.1", path = "../koshi-layout" }
 koshi-observability = { version = "0.4.0-pr.1", path = "../koshi-observability" }
 koshi-paths = { version = "0.4.0-pr.1", path = "../koshi-paths" }
-koshi-renderer = { version = "0.4.0-pr.1", path = "../koshi-renderer" }
 koshi-runtime = { version = "0.4.0-pr.1", path = "../koshi-runtime" }
-serde = "1.0.228"
-serde_json.workspace = true
-thiserror = "2.0.18"
-tracing = "0.1.44"
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]

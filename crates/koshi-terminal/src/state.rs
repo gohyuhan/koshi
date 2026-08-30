@@ -14,11 +14,11 @@
 //! answer bytes on the state, which the runtime drains back into the PTY.
 //!
 //! The state's component types live in sibling submodules — the active
-//! [`Screen`], the per-screen [`RenderState`] and its [`Charset`] slots, the
-//! [`Cursor`] and its [`SavedCursor`] snapshot, the [`TerminalModes`] flags with
-//! their [`MouseTracking`]/[`MouseEncoding`] levels, the [`ReportedCwd`], and the
-//! [`ClippedRow`] render view — and are re-exported here so the whole model is
-//! reachable as `koshi_terminal::state::*`.
+//! [`Screen`], the per-screen render state and its charset slots, the cursor
+//! and its saved snapshot, the mode flags with their
+//! [`MouseTracking`]/[`MouseEncoding`] levels, and the [`ReportedCwd`]. The
+//! ones a caller outside this crate can name are re-exported here, reachable
+//! as `koshi_terminal::state::*`.
 
 use std::cmp::min;
 use std::sync::Arc;
@@ -32,7 +32,6 @@ use crate::scrollback::{Scrollback, ScrollbackLimit};
 use crate::selection::TextView;
 use crate::style::Style;
 
-mod clipped_row;
 mod cursor;
 mod cwd;
 mod modes;
@@ -41,11 +40,11 @@ mod reflow;
 mod render;
 mod screen;
 
-pub use clipped_row::ClippedRow;
-pub use cursor::{Cursor, SavedCursor};
+pub(crate) use cursor::{Cursor, SavedCursor};
 pub use cwd::ReportedCwd;
-pub use modes::{CursorShape, MouseEncoding, MouseTracking, TerminalModes};
-pub use render::{Charset, RenderState};
+pub(crate) use modes::TerminalModes;
+pub use modes::{CursorShape, MouseEncoding, MouseTracking};
+pub(crate) use render::{Charset, RenderState};
 pub use screen::Screen;
 
 /// The shell lifecycle point last reported through OSC 133.
@@ -74,10 +73,8 @@ pub enum ShellIntegrationFact {
 pub struct TerminalState {
     /// The primary (normal, scrolling) screen buffer, including row metadata,
     /// reference-counted: a render snapshot shares it without copying, and a
-    /// write clones it once on demand (copy-on-write via [`Arc::make_mut`] in
-    /// [`active_grid_mut`]).
-    ///
-    /// [`active_grid_mut`]: Self::active_grid_mut
+    /// write clones it once on demand (copy-on-write via `Arc::make_mut` in
+    /// `active_grid_mut`).
     primary: Arc<Grid>,
     /// The alternate screen buffer used by full-screen apps, including row
     /// metadata; swapped in via DEC mode `?1049`/`?47` and never appended to the
@@ -132,8 +129,8 @@ pub struct TerminalState {
     cluster_base: Option<(u16, u16)>,
     /// Bytes queued for the running app in answer to its device queries
     /// (DA/DSR/DECRQM). The performer appends replies here; the runtime drains
-    /// them via [`take_replies`](Self::take_replies) and writes them back into
-    /// the pane's PTY. Device-global: one queue regardless of the active screen.
+    /// them via `take_replies` and writes them back into the pane's PTY.
+    /// Device-global: one queue regardless of the active screen.
     replies: Vec<u8>,
 }
 
@@ -216,15 +213,7 @@ impl TerminalState {
             .rows()
             .iter()
             .enumerate()
-            .map(|(row, cells)| {
-                (
-                    cells.clone(),
-                    RowMeta {
-                        end: self.alternate.row_end(row as u16),
-                        prompt: self.alternate.prompt_mark(row as u16),
-                    },
-                )
-            })
+            .map(|(row, cells)| (cells.clone(), self.alternate.row_meta(row as u16)))
             .collect();
         for (cells, _) in &mut rows {
             crop_columns(cells, size.cols, alternate_fill);
@@ -288,7 +277,7 @@ impl TerminalState {
     /// Mutable access to the active screen buffer, for writing cells. Clones the
     /// buffer once (copy-on-write) if a render snapshot still shares it; the
     /// snapshot keeps the pre-write contents.
-    pub fn active_grid_mut(&mut self) -> &mut Grid {
+    pub(crate) fn active_grid_mut(&mut self) -> &mut Grid {
         match self.active {
             Screen::Primary => Arc::make_mut(&mut self.primary),
             Screen::Alternate => Arc::make_mut(&mut self.alternate),
@@ -297,10 +286,8 @@ impl TerminalState {
 
     /// A reference-counted handle to the active screen buffer for the render
     /// snapshot: clones the `Arc`, not the grid. The next write to this screen
-    /// clones the buffer once ([`active_grid_mut`]), leaving this handle pointing
-    /// at the frozen contents.
-    ///
-    /// [`active_grid_mut`]: Self::active_grid_mut
+    /// clones the buffer once, leaving this handle pointing at the frozen
+    /// contents.
     pub fn active_grid_arc(&self) -> Arc<Grid> {
         match self.active {
             Screen::Primary => Arc::clone(&self.primary),
@@ -377,15 +364,12 @@ impl TerminalState {
             .iter()
             .skip(retained - scrolled)
             .map(|(cells, meta)| (cells.clone(), *meta))
-            .chain(grid.rows().iter().enumerate().map(|(row, cells)| {
-                (
-                    cells.clone(),
-                    RowMeta {
-                        end: grid.row_end(row as u16),
-                        prompt: grid.prompt_mark(row as u16),
-                    },
-                )
-            }))
+            .chain(
+                grid.rows()
+                    .iter()
+                    .enumerate()
+                    .map(|(row, cells)| (cells.clone(), grid.row_meta(row as u16))),
+            )
             .take(rows as usize)
             .collect();
         (
@@ -486,7 +470,7 @@ impl TerminalState {
     /// the queue empty. The caller writes the returned bytes back into the
     /// pane's PTY.
     #[must_use = "undelivered replies hang the querying app"]
-    pub fn take_replies(&mut self) -> Vec<u8> {
+    pub(crate) fn take_replies(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.replies)
     }
 
@@ -501,7 +485,7 @@ impl TerminalState {
     }
 
     /// Mutable access to the scroll region for the active screen.
-    pub fn scroll_region_mut(&mut self) -> &mut Option<(u16, u16)> {
+    pub(crate) fn scroll_region_mut(&mut self) -> &mut Option<(u16, u16)> {
         match self.active {
             Screen::Primary => &mut self.primary_scroll_region,
             Screen::Alternate => &mut self.alternate_scroll_region,
@@ -542,33 +526,6 @@ impl TerminalState {
         match self.active {
             Screen::Primary => &mut self.primary_render,
             Screen::Alternate => &mut self.alternate_render,
-        }
-    }
-
-    /// Trim the active screen's `row` to the first `inner_width` columns for
-    /// rendering, guarding the right edge against a half-drawn wide glyph.
-    ///
-    /// Returns the visible cells plus a `right_pad` flag. When the last visible
-    /// column holds the left half of a wide glyph (its continuation falls
-    /// outside the inner rect), that base is dropped from the returned cells and
-    /// `right_pad` is set; the renderer blanks the freed column. An
-    /// out-of-range `row`, a zero `inner_width`, or an empty row yields no
-    /// cells and no pad. `inner_width` is clamped to the row length.
-    pub fn clip_row(&self, row: u16, inner_width: u16) -> ClippedRow<'_> {
-        let rows = self.active_grid().rows();
-        let Some(cells) = rows.get(row as usize) else {
-            return ClippedRow {
-                cells: &[],
-                right_pad: false,
-            };
-        };
-
-        let visible = min(inner_width as usize, cells.len());
-        let right_pad = visible > 0 && cells[visible - 1].width() > 1;
-        let shown = if right_pad { visible - 1 } else { visible };
-        ClippedRow {
-            cells: &cells[..shown],
-            right_pad,
         }
     }
 }

@@ -475,7 +475,7 @@ fn a_duplicate_update_section_is_a_validation_error() {
         "update {\n    auto-check #true\n}\nupdate {\n    auto-check #false\n}",
     )
     .expect_err("two update sections");
-    assert_validation(error, "update", "duplicate `update` section");
+    assert_validation(error, "update", "`update` is declared more than once");
 }
 
 #[test]
@@ -507,7 +507,7 @@ fn a_duplicate_version_is_a_hard_error() {
         "version 1\nversion 999\npane {\n    min-cols 5\n}",
     )
     .expect_err("duplicate version rejected");
-    assert_validation(error, "version", "duplicate `version` section");
+    assert_validation(error, "version", "`version` is declared more than once");
 }
 
 #[test]
@@ -911,14 +911,22 @@ fn a_negative_scroll_lines_is_skipped_not_clamped() {
 fn a_garbage_version_value_is_a_validation_error() {
     let error = parse_app_config(Path::new("koshi.kdl"), "version \"abc\"")
         .expect_err("string is not a version integer");
-    assert_validation(error, "version", "expected an integer");
+    assert_validation(
+        error,
+        "version",
+        "`version` must be an integer from 1 to 4294967295",
+    );
 }
 
 #[test]
 fn a_negative_version_is_a_validation_error() {
     let error = parse_app_config(Path::new("koshi.kdl"), "version -1")
         .expect_err("a negative version does not fit u32");
-    assert_validation(error, "version", "must be between 0 and 4294967295");
+    assert_validation(
+        error,
+        "version",
+        "`version` must be an integer from 1 to 4294967295",
+    );
 }
 
 #[test]
@@ -1096,7 +1104,11 @@ fn a_version_with_a_named_property_is_a_validation_error() {
     // `version v=1` carries a named property where one plain value is required.
     let error = parse_app_config(Path::new("koshi.kdl"), "version v=1")
         .expect_err("a property is not a plain value");
-    assert_validation(error, "version", "expected exactly one value");
+    assert_validation(
+        error,
+        "version",
+        "`version` takes exactly one integer argument",
+    );
 }
 
 #[test]

@@ -11,15 +11,14 @@
 //! |---|---|---|---|
 //! | [`config_dir`] | `~/.config/koshi` | `~/Library/Application Support/koshi` | `%APPDATA%\koshi\config` |
 //! | [`data_dir`] | `~/.local/share/koshi` | `~/Library/Application Support/koshi` | `%APPDATA%\koshi\data` |
-//! | [`cache_dir`] | `~/.cache/koshi` | `~/Library/Caches/koshi` | `%LOCALAPPDATA%\koshi\cache` |
 //! | [`state_dir`] | `~/.local/state/koshi` | `~/Library/Application Support/koshi` | `%LOCALAPPDATA%\koshi\data` |
 //! | [`runtime_dir`] | `/tmp/koshi-<uid>` | `/tmp/koshi-<uid>` | `<data_dir>\run` |
 //! | [`shared_sessions_dir`] | `/tmp/koshi` | `/tmp/koshi` | `%ProgramData%\koshi` |
 //!
-//! The [`directories`] crate resolves [`config_dir`], [`data_dir`],
-//! [`cache_dir`] and [`state_dir`]. The Linux column shows their XDG
-//! defaults. An absolute `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME`
-//! or `XDG_STATE_HOME` replaces the matching base; a relative one is ignored.
+//! The [`directories`] crate resolves [`config_dir`], [`data_dir`] and
+//! [`state_dir`]. The Linux column shows their XDG defaults. An absolute
+//! `XDG_CONFIG_HOME`, `XDG_DATA_HOME` or `XDG_STATE_HOME` replaces the
+//! matching base; a relative one is ignored.
 //! [`runtime_dir`] reads no `XDG_*` variable. On Linux and macOS
 //! [`shared_sessions_dir`] is a fixed path that no variable moves.
 //!
@@ -27,7 +26,8 @@
 //! for the current user. On Linux and macOS that is `HOME` unset or empty and
 //! no home directory in the passwd database. On Windows it is `%APPDATA%` or
 //! `%LOCALAPPDATA%` that cannot be resolved. `None` from
-//! [`shared_sessions_dir`] means Windows reports no `ProgramData` location.
+//! [`shared_sessions_dir`] means Windows has `%ProgramData%` unset, or holding
+//! a path that is not absolute.
 //!
 //! The resolvers touch no filesystem and create nothing. Startup creates the
 //! directories it needs through [`ensure_dir`], [`ensure_private_dir`],
@@ -73,13 +73,6 @@ pub fn config_dir() -> Option<PathBuf> {
 #[must_use]
 pub fn data_dir() -> Option<PathBuf> {
     project_dirs().map(|d| d.data_dir().to_path_buf())
-}
-
-/// The directory for re-creatable caches. On macOS this is
-/// `~/Library/Caches/koshi`; see the [module table](self).
-#[must_use]
-pub fn cache_dir() -> Option<PathBuf> {
-    project_dirs().map(|d| d.cache_dir().to_path_buf())
 }
 
 /// The directory for machine-local mutable state — the log file lives here.

@@ -29,6 +29,12 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
+      # rustdoc reads RUSTDOCFLAGS, not the workflow-level RUSTFLAGS.
+      - name: Rustdoc
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --all-features --locked
+
   dep-guard:
     name: dependency guard
     runs-on: ubuntu-latest

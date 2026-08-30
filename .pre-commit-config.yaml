@@ -36,6 +36,13 @@ repos:
         always_run: true
         pass_filenames: false
 
+      - id: doc
+        name: cargo doc
+        entry: env RUSTDOCFLAGS=-Dwarnings cargo doc --workspace --no-deps --all-features
+        language: system
+        always_run: true
+        pass_filenames: false
+
       - id: dep-guard
         name: cargo xtask dep-guard
         entry: cargo xtask dep-guard

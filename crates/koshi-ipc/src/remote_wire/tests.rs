@@ -3,7 +3,7 @@
 //! bytes a caller nobody has admitted yet sent.
 //!
 //! The decoder checks the length prefix before it makes the payload buffer,
-//! and every envelope refuses a field it does not know. The mutation tests
+//! and every frame ignores a field it does not know. The mutation tests
 //! read a fixed, repeatable stream of corrupted frames and check three
 //! properties on each one: no panic, no payload buffer made for a length past
 //! the cap, and a stream still sitting on a frame boundary after a payload
@@ -116,14 +116,14 @@ fn every_frame_a_client_opens_with_reads_back_as_itself() {
 }
 
 #[test]
-fn a_field_the_envelope_does_not_know_is_a_malformed_frame() {
+fn a_payload_on_a_variant_that_carries_none_is_a_malformed_frame() {
     let payload = br#"{"List":{"extra":1}}"#;
     let mut bytes = (payload.len() as u32).to_be_bytes().to_vec();
     bytes.extend_from_slice(payload);
 
     let (outcome, consumed) = read_one(bytes.clone());
-    let IpcError::MalformedFrame { .. } = outcome.expect_err("an unknown field is refused") else {
-        panic!("an unknown field is a malformed frame");
+    let IpcError::MalformedFrame { .. } = outcome.expect_err("a payload on List is refused") else {
+        panic!("a payload on a variant that carries none is a malformed frame");
     };
     assert_eq!(consumed, bytes.len() as u64);
 }
@@ -378,14 +378,29 @@ fn every_server_frame_travels_as_these_exact_bytes() {
 }
 
 #[test]
-fn a_field_a_struct_variant_does_not_know_is_a_malformed_frame() {
+fn a_field_a_struct_variant_does_not_know_is_ignored() {
     let payload = br#"{"Attach":{"session":{"Name":"quiet-lake"},"extra":1}}"#;
 
     let (outcome, consumed) = read_one(prefixed(payload));
 
     assert_eq!(
+        outcome.expect("a field this build does not know is ignored"),
+        RemoteClientFrame::Attach {
+            session: SessionSelector::Name("quiet-lake".to_string()),
+        }
+    );
+    assert_eq!(consumed, payload.len() as u64 + 4);
+}
+
+#[test]
+fn a_misspelled_field_name_is_the_missing_field_it_displaced() {
+    let payload = br#"{"Attach":{"sesion":{"Name":"quiet-lake"}}}"#;
+
+    let (outcome, consumed) = read_one(prefixed(payload));
+
+    assert_eq!(
         malformed_detail(outcome),
-        "unknown field `extra`, expected `session` at line 1 column 50"
+        "missing field `session` at line 1 column 42"
     );
     assert_eq!(consumed, payload.len() as u64 + 4);
 }
@@ -404,22 +419,25 @@ fn a_hello_missing_its_secret_is_a_malformed_frame() {
 }
 
 #[test]
-fn a_server_frame_or_row_carrying_an_unknown_field_does_not_decode() {
+fn a_server_frame_or_row_carrying_an_unknown_field_still_decodes() {
     let welcome =
         serde_json::from_str::<RemoteServerFrame>(r#"{"Welcome":{"remote_version":1,"extra":1}}"#)
-            .expect_err("an unknown field on a server frame is refused");
-    assert_eq!(
-        welcome.to_string(),
-        "unknown field `extra`, expected `remote_version` at line 1 column 38"
-    );
+            .expect("an unknown field on a server frame is ignored");
+    assert_eq!(welcome, RemoteServerFrame::Welcome { remote_version: 1 });
 
     let row = serde_json::from_str::<RemoteSessionRow>(
         r#"{"id":"00000000-0000-0000-0000-000000000001","name":"quiet-lake","extra":1}"#,
     )
-    .expect_err("an unknown field on a row is refused");
+    .expect("an unknown field on a row is ignored");
+    assert_eq!(row.name, "quiet-lake");
+
+    let missing = serde_json::from_str::<RemoteSessionRow>(
+        r#"{"id":"00000000-0000-0000-0000-000000000001","nme":"quiet-lake"}"#,
+    )
+    .expect_err("a misspelled name leaves the field it displaced missing");
     assert_eq!(
-        row.to_string(),
-        "unknown field `extra`, expected `id` or `name` at line 1 column 72"
+        missing.to_string(),
+        "missing field `name` at line 1 column 64"
     );
 }
 

@@ -24,9 +24,6 @@ use crate::types::SCHEMA_VERSION;
 /// recoverable: Koshi falls back to defaults and surfaces the issue to the user.
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    /// No config file was found at the expected path.
-    #[error("config file not found: {path}")]
-    NotFound { path: String },
     /// The config file could not be parsed.
     #[error("config parse error in {path}: {detail}")]
     Parse { path: String, detail: String },

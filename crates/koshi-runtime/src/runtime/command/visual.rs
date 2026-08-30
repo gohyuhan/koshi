@@ -169,6 +169,9 @@ impl Server {
     /// Dropping the highlight releases the hold it had on the view, so a view at
     /// the live bottom follows new output again. A view that had also been
     /// scrolled up stays held by the offset.
+    ///
+    /// A pane that does not exist in the client's session is
+    /// [`RejectReason::TargetGone`].
     pub(super) fn handle_clear_selection(
         &mut self,
         command_id: CommandId,
@@ -176,6 +179,7 @@ impl Server {
         args: &ClearSelectionArgs,
     ) -> Result<CommandResult, Rejection> {
         let client_id = Self::issuing_client(source)?;
+        self.require_pane(client_id, args.pane)?;
         let client = self
             .client_mut(client_id)
             .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))?;

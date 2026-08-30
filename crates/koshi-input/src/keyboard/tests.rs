@@ -979,6 +979,18 @@ fn function_key_zero_is_not_a_key_the_model_names() {
 }
 
 #[test]
+#[should_panic(expected = "bound F to 1..=24")]
+fn encoding_function_key_zero_panics() {
+    let _ = bytes(ModFlags::NONE, Key::Named(NamedKey::F(0)));
+}
+
+#[test]
+#[should_panic(expected = "bound F to 1..=24")]
+fn encoding_a_function_key_above_the_run_panics() {
+    let _ = bytes(ModFlags::NONE, Key::Named(NamedKey::F(25)));
+}
+
+#[test]
 fn the_control_fold_covers_its_run_and_stops_at_both_ends() {
     // Control clears the top bits over `@`..`_`: `@` opens the run at NUL and
     // `_` closes it at 0x1f. A letter is its capital's version of that fold, so

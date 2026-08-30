@@ -6,7 +6,7 @@ use super::render::RenderState;
 
 /// A cursor position and the render state captured by DECSC, restored by DECRC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SavedCursor {
+pub(crate) struct SavedCursor {
     /// Saved zero-based row within the grid.
     pub(in crate::state) row: u16,
     /// Saved zero-based column within the grid.
@@ -14,7 +14,7 @@ pub struct SavedCursor {
     /// The deferred-wrap latch at save time, restored with the position: a
     /// glyph parked at the last column still wraps after a save/restore.
     pub(in crate::state) pending_wrap: bool,
-    /// Snapshot of the active screen's [`RenderState`] (pen, charsets, GL slot)
+    /// Snapshot of the active screen's `RenderState` (pen, charsets, GL slot)
     /// at save time, restored with the position. An app that changes the pen
     /// or a designation, saves, changes it again, then restores gets the
     /// original back.
@@ -23,7 +23,7 @@ pub struct SavedCursor {
 
 /// The text cursor: position, visibility, and the deferred-wrap latch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Cursor {
+pub(crate) struct Cursor {
     /// Zero-based row within the active grid. ANSI addressing is 1-based;
     /// the stored value is one less.
     pub(in crate::state) row: u16,

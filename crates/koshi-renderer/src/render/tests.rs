@@ -309,7 +309,7 @@ fn render_regions_with_hints(
     buf
 }
 
-/// One `Ctrl + l` → `Lock` hint, the row the hint bar draws when it has one.
+/// One `Ctrl + l` → `Lock` hint, the row the statusline draws when it has one.
 fn one_hint() -> KeymapHints {
     KeymapHints {
         entries: Arc::new(vec![crate::snapshot::HintBinding {
@@ -408,8 +408,8 @@ fn committed_regions_keep_panes_and_cursor_inside_a_side_region() {
 }
 
 #[test]
-fn a_region_solve_with_one_region_paints_no_hint_bar() {
-    // The hint bar draws in the solve's second region. A solve that names only
+fn a_region_solve_with_one_region_paints_no_statusline() {
+    // The statusline draws in the solve's second region. A solve that names only
     // the tabline leaves the bottom row to the pane area, and the hints the
     // caller passes are drawn nowhere.
     let pane = PaneId::new();
@@ -449,7 +449,7 @@ fn a_region_solve_with_one_region_paints_no_hint_bar() {
 #[test]
 fn an_empty_region_solve_paints_neither_chrome_row() {
     // No regions at all: the pane rectangle is the whole viewport, and both the
-    // tabline and the hint bar are skipped.
+    // tabline and the statusline are skipped.
     let pane = PaneId::new();
     let snap = build(
         "sess",
@@ -570,7 +570,7 @@ fn renders_tabline_pane_border_and_reserved_hint_bar() {
     assert_eq!(buf[(1, 1)].symbol(), "─");
     assert_eq!(buf[(0, 2)].symbol(), "│");
 
-    // Bottom row (row 7): the keybind-hint bar row is koshi-owned chrome. This
+    // Bottom row (row 7): the statusline row is koshi-owned chrome. This
     // snapshot carries no hint data, and every cell of the row is a space.
     assert_eq!(row_text(&buf, 7), " ".repeat(cols as usize));
 }
@@ -661,7 +661,7 @@ fn tabline_lists_tabs_with_active_marker() {
     // Where each tab landed, read from the same solve the paint used, so the
     // badge's width never has to be spelled out here.
     let tabs = tabline_layout(
-        snap.layout(ViewerChrome::default()).navigator(),
+        snap.layout(ViewerChrome::default()).tabline(),
         RatatuiRect {
             x: 0,
             y: 0,
@@ -1885,7 +1885,7 @@ fn too_small_overlay_replaces_tabline_and_panes() {
     let buf = render(&snap, 60, 10);
 
     // The overlay owns row 5 alone. Every other row is blank: no tabline, no
-    // hint bar, and no pane border anywhere.
+    // statusline, and no pane border anywhere.
     for y in (0..10).filter(|y| *y != 5) {
         assert_eq!(row_text(&buf, y), " ".repeat(60), "row {y}");
     }
@@ -2840,4 +2840,42 @@ fn mode_indicator_puts_the_reconnecting_tag_first_and_replaces_base() {
         mode_tags(snap.client.lock_mode, snap.client.mouse_select, dialing,),
         "RECONNECTING (attempt 3, retry in 8s) · LOCK · SELECT"
     );
+}
+
+#[test]
+fn text_width_counts_display_cells_not_bytes_or_chars() {
+    // Chrome text is placed in terminal cells, so measuring uses display
+    // width. "漢字" is 2 chars and 6 bytes but occupies 4 cells; an emoji is
+    // 1 char and 4 bytes but occupies 2; a combining mark adds none.
+    assert_eq!(text_width("漢字"), 4);
+    assert_eq!(text_width("🦀"), 2);
+    assert_eq!(
+        text_width("e\u{0301}"),
+        1,
+        "e + combining acute is one cell"
+    );
+    assert_eq!(text_width(""), 0);
+
+    // Past `u16::MAX` cells the count is held there, which every width
+    // comparison reads as wider than the row.
+    let huge = "x".repeat(usize::from(u16::MAX) + 64);
+    assert_eq!(text_width(&huge), u16::MAX);
+}
+
+#[test]
+fn line_width_sums_span_display_cells_and_saturates() {
+    // Spans add up in display cells, and styles never change the count.
+    let line = Line::from(vec![
+        Span::styled("漢字", Style::default().fg(Color::Red)),
+        Span::raw("🦀"),
+        Span::raw("e\u{0301}"),
+    ]);
+    assert_eq!(line_width(&line), 7);
+    assert_eq!(line_width(&Line::from("")), 0);
+
+    // Two spans that together pass `u16::MAX` cells are held at `u16::MAX`,
+    // never wrapped to a small number that would read as fitting.
+    let half = "x".repeat(usize::from(u16::MAX));
+    let huge = Line::from(vec![Span::raw(half.clone()), Span::raw(half)]);
+    assert_eq!(line_width(&huge), u16::MAX);
 }

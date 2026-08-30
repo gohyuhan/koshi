@@ -34,9 +34,7 @@ impl Server {
     /// `clients` lists every attached client either way, narrowed or not.
     #[must_use]
     pub fn build_session_layout(&self, tab: Option<TabId>) -> Option<SessionLayout> {
-        // One process serves one session: genesis seeds exactly one and no
-        // command creates another in-process.
-        let session = self.sessions.values().next()?;
+        let session = self.sole_session()?;
         let sizing = self.pane_sizing();
 
         let mut wanted_tabs: Vec<&Tab> = session

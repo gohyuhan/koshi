@@ -217,12 +217,17 @@ impl Grid {
         Grid { rows, row_meta }
     }
 
+    /// Everything recorded about `row` apart from its cells; out of bounds
+    /// reads as [`RowMeta::default`] — a [`RowEnd::Hard`] end and no prompt
+    /// mark.
+    pub fn row_meta(&self, row: u16) -> RowMeta {
+        self.row_meta.get(row as usize).copied().unwrap_or_default()
+    }
+
     /// How `row` ends relative to the row below it; out of bounds reads as
     /// [`RowEnd::Hard`].
     pub fn row_end(&self, row: u16) -> RowEnd {
-        self.row_meta
-            .get(row as usize)
-            .map_or(RowEnd::Hard, |meta| meta.end)
+        self.row_meta(row).end
     }
 
     /// Record how `row` ends relative to the row below it. Out of bounds is a
@@ -235,9 +240,7 @@ impl Grid {
 
     /// Whether a shell reported a prompt on `row`; out of bounds reads false.
     pub fn prompt_mark(&self, row: u16) -> bool {
-        self.row_meta
-            .get(row as usize)
-            .is_some_and(|meta| meta.prompt)
+        self.row_meta(row).prompt
     }
 
     /// Set whether a shell reported a prompt on `row`. Out of bounds is a

@@ -1,17 +1,19 @@
-//! Layout invariant assertions for pure-layout tests.
+//! Layout invariant checks for pure-layout tests.
 //!
 //! The layout engine maps a layout tree over a tab rect to placed pane
 //! rectangles. Each helper here checks one geometric invariant against a slice
 //! of placed panes: the live panes tile the whole tab area, no two panes
 //! overlap, nothing spills outside the tab, and every live pane respects the
-//! minimum cell size. A broken invariant returns a
-//! [`layout_assert::LayoutAssertionError`] that names the panes involved.
+//! minimum cell size. Every helper returns `Result`: a broken invariant is an
+//! [`layout_assert::LayoutAssertionError`] that names the panes involved, and
+//! the caller decides whether that ends the test.
 //!
 //! Exact tiling holds when three checks all pass:
-//! [`layout_assert::assert_all_space_occupied`] (the summed pane area equals
-//! the tab area), [`layout_assert::assert_no_overlap`] (no cell is counted
-//! twice), and [`layout_assert::assert_no_outside`] (no cell lies beyond the
+//! [`layout_assert::check_all_space_occupied`] (the summed pane area equals
+//! the tab area), [`layout_assert::check_no_overlap`] (no cell is counted
+//! twice), and [`layout_assert::check_no_outside`] (no cell lies beyond the
 //! tab). Each check alone passes some layouts that are not exact tilings.
+//! [`layout_assert::check_exact_tiling`] runs all three in that order.
 //!
 //! ## Suppressed panes
 //!
@@ -23,7 +25,7 @@
 //!
 //! ## Live pane references
 //!
-//! [`layout_assert::assert_live_pane_refs`] checks that every layout-tree
+//! [`layout_assert::check_live_pane_refs`] checks that every layout-tree
 //! leaf references a live pane. It takes the extracted leaf pane ids and the
 //! set of live pane ids. The layout crate's tests pass `tree.leaf_panes()` and
 //! their live set straight in.
@@ -99,18 +101,18 @@ fn area(rect: Rect) -> u64 {
     u64::from(rect.size.cols) * u64::from(rect.size.rows)
 }
 
-/// Assert the live panes occupy exactly the tab area, by cell count.
+/// Check that the live panes occupy exactly the tab area, by cell count.
 ///
 /// Sums `cols * rows` over every pane and compares the sum with the tab's.
 /// Suppressed (empty) panes add zero. Passes when the sums are equal even if
-/// the panes overlap or lie outside the tab; [`assert_no_overlap`] and
-/// [`assert_no_outside`] catch those.
+/// the panes overlap or lie outside the tab; [`check_no_overlap`] and
+/// [`check_no_outside`] catch those.
 ///
 /// # Errors
 ///
 /// [`LayoutAssertionError::SpaceNotFullyOccupied`] if the summed pane area does
 /// not equal the tab area.
-pub fn assert_all_space_occupied(
+pub fn check_all_space_occupied(
     panes: &[PlacedPane],
     tab_rect: Rect,
 ) -> Result<(), LayoutAssertionError> {
@@ -126,7 +128,7 @@ pub fn assert_all_space_occupied(
     }
 }
 
-/// Assert no two live panes share a cell.
+/// Check that no two live panes share a cell.
 ///
 /// An empty (suppressed) pane intersects nothing and is never reported. Panes
 /// that only touch along an edge or at a corner do not overlap. Reports the
@@ -136,7 +138,7 @@ pub fn assert_all_space_occupied(
 /// # Errors
 ///
 /// [`LayoutAssertionError::Overlap`] naming both panes and the shared region.
-pub fn assert_no_overlap(panes: &[PlacedPane]) -> Result<(), LayoutAssertionError> {
+pub fn check_no_overlap(panes: &[PlacedPane]) -> Result<(), LayoutAssertionError> {
     for (i, &(a, a_rect)) in panes.iter().enumerate() {
         for &(b, b_rect) in &panes[i + 1..] {
             if let Some(overlap) = a_rect.intersection(b_rect) {
@@ -153,7 +155,7 @@ pub fn assert_no_overlap(panes: &[PlacedPane]) -> Result<(), LayoutAssertionErro
     Ok(())
 }
 
-/// Assert every live pane lies fully within the tab rect.
+/// Check that every live pane lies fully within the tab rect.
 ///
 /// A pane is inside when its origin is at or past the tab's origin and its
 /// right and bottom edges, computed in `u32`, do not pass the tab's. Empty
@@ -162,7 +164,7 @@ pub fn assert_no_overlap(panes: &[PlacedPane]) -> Result<(), LayoutAssertionErro
 /// # Errors
 ///
 /// [`LayoutAssertionError::OutsideTab`] for the first pane that spills out.
-pub fn assert_no_outside(panes: &[PlacedPane], tab_rect: Rect) -> Result<(), LayoutAssertionError> {
+pub fn check_no_outside(panes: &[PlacedPane], tab_rect: Rect) -> Result<(), LayoutAssertionError> {
     let tab_right = u32::from(tab_rect.origin.x) + u32::from(tab_rect.size.cols);
     let tab_bottom = u32::from(tab_rect.origin.y) + u32::from(tab_rect.size.rows);
     for &(pane, rect) in panes {
@@ -186,14 +188,31 @@ pub fn assert_no_outside(panes: &[PlacedPane], tab_rect: Rect) -> Result<(), Lay
     Ok(())
 }
 
-/// Assert every live pane is at least `min.cols` wide and `min.rows` tall.
+/// Check that the live panes tile `tab_rect` exactly.
+///
+/// Runs [`check_all_space_occupied`], then [`check_no_overlap`], then
+/// [`check_no_outside`], and stops at the first that fails.
+///
+/// # Errors
+///
+/// The error of the first failing check, in that order.
+pub fn check_exact_tiling(
+    panes: &[PlacedPane],
+    tab_rect: Rect,
+) -> Result<(), LayoutAssertionError> {
+    check_all_space_occupied(panes, tab_rect)?;
+    check_no_overlap(panes)?;
+    check_no_outside(panes, tab_rect)
+}
+
+/// Check that every live pane is at least `min.cols` wide and `min.rows` tall.
 ///
 /// Empty (suppressed) panes are exempt.
 ///
 /// # Errors
 ///
 /// [`LayoutAssertionError::MinSizeViolated`] for the first undersized pane.
-pub fn assert_min_size_respected(
+pub fn check_min_size_respected(
     panes: &[PlacedPane],
     min: Size,
 ) -> Result<(), LayoutAssertionError> {
@@ -212,7 +231,7 @@ pub fn assert_min_size_respected(
     Ok(())
 }
 
-/// Assert every layout leaf references a live pane.
+/// Check that every layout leaf references a live pane.
 ///
 /// Takes the extracted leaf pane ids, not a concrete tree type. Callers pass
 /// `tree.leaf_panes()` and their live set in. An empty `layout_leaf_panes`
@@ -222,7 +241,7 @@ pub fn assert_min_size_respected(
 ///
 /// [`LayoutAssertionError::DeadPaneReference`] for the first pane id, in slice
 /// order, not present in `live_panes`.
-pub fn assert_live_pane_refs(
+pub fn check_live_pane_refs(
     layout_leaf_panes: &[PaneId],
     live_panes: &HashSet<PaneId>,
 ) -> Result<(), LayoutAssertionError> {

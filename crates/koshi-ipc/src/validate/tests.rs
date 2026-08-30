@@ -139,6 +139,57 @@ fn a_missing_runtime_dir_is_untrusted() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn a_regular_file_standing_in_for_the_runtime_dir_is_untrusted() {
+    let file = std::env::temp_dir().join(format!("koshi-validate-dir-{}-file", std::process::id()));
+    std::fs::write(&file, b"not a directory").expect("write file");
+    set_mode(&file, 0o700);
+    let addr = file.join("session.sock").to_string_lossy().into_owned();
+
+    let err = validate_socket_addr(&addr, &file).unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        format!("untrusted socket address {addr}: runtime directory is not a directory")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symbolic_link_standing_in_for_the_runtime_dir_is_untrusted() {
+    // The link points at a directory that passes every other check; the link
+    // itself is refused, so another user who plants it at the runtime path
+    // before koshi first runs cannot place this session's socket inside a
+    // directory the user never chose.
+    let target = private_dir("linktarget");
+    let link = std::env::temp_dir().join(format!("koshi-validate-dir-{}-link", std::process::id()));
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(&target, &link).expect("symlink");
+    let addr = link.join("session.sock").to_string_lossy().into_owned();
+
+    let err = validate_socket_addr(&addr, &link).unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        format!("untrusted socket address {addr}: runtime directory is a symbolic link")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_runtime_dir_this_user_owns_passes_the_owner_check() {
+    let dir = private_dir("owner");
+    let addr = dir.join("session.sock").to_string_lossy().into_owned();
+    let owner = {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::symlink_metadata(&dir).expect("stat").uid()
+    };
+
+    assert_eq!(owner, unsafe { libc::geteuid() });
+    validate_socket_addr(&addr, &dir).expect("validate");
+}
+
 // --- validate_shared_socket_addr, Unix: location + shape ---
 
 /// A fresh directory with mode `0755`, standing in for this user's own

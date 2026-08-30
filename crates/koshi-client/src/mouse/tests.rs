@@ -12,8 +12,6 @@
 
 use super::*;
 
-use std::sync::mpsc;
-
 use koshi_config::layer::{PartialKoshiConfig, PartialMouseConfig};
 use koshi_config::types::WheelScroll;
 use koshi_core::event::{Event, MouseSelectChanged};
@@ -24,28 +22,23 @@ use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseButton, MouseTracking};
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::regions::{solve, Edge, RegionGeometry};
-use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_renderer::snapshot::{
     ClientSnapshot, CommittedRegions, Delivery, MousePane, PaneSlot, SessionSnapshot, TabMeta,
     TabSnapshot,
 };
 
+use crate::tests::VIEWPORT;
 use crate::Client;
-
-/// The frame size every fixture below is built at.
-const VIEWPORT: Size = Size { cols: 80, rows: 24 };
 
 /// A viewer on the stock settings — `scroll_lines` 3, `wheel` scroll-scrollback.
 fn viewer() -> Client {
-    let (_tx, rx) = mpsc::sync_channel(8);
-    Client::new(ClientId::new(), VIEWPORT, rx, TerminalCleanupGuard::new())
+    crate::tests::new_client().0
 }
 
 /// A viewer whose mouse-select mode the session turned on, reported the way
 /// the running binary reports it — through the viewer's own subscription.
 fn viewer_grabbing_the_mouse() -> Client {
-    let (tx, rx) = mpsc::sync_channel(8);
-    let mut viewer = Client::new(ClientId::new(), VIEWPORT, rx, TerminalCleanupGuard::new());
+    let (mut viewer, tx) = crate::tests::new_client();
     tx.send(Delivery::Event(Event::MouseSelectChanged(
         MouseSelectChanged {
             client_id: viewer.id(),

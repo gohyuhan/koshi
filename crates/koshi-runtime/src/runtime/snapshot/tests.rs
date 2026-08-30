@@ -11,7 +11,7 @@ use koshi_core::geometry::{PaneArea, Point, Rect, Size, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::process::PtySize;
-use koshi_layout::tree::{LayoutChild, LayoutNode, SplitNode};
+use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pane::pane::lifecycle::PaneLifecycleEvent;
 use koshi_pane::pane::state::PaneRecord;
 use koshi_pty::backend::state::PtyBackend;
@@ -22,22 +22,13 @@ use koshi_terminal::engine::TerminalEngine;
 use koshi_terminal::state::CursorShape;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
-use crate::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
 use crate::runtime::event::RuntimeEvent;
 use crate::server::Server;
 
 fn new_runtime() -> Server {
     let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::new());
-    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
-    let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (tx, inbox_rx) = mpsc::channel::<RuntimeEvent>();
-    Server::new(
-        pty_backend,
-        snapshot_provider,
-        storage,
-        inbox_rx,
-        tx.clone(),
-    )
+    Server::new(pty_backend, inbox_rx, tx.clone())
 }
 
 /// A session with one tab (single-pane layout), the pane registered, and one
@@ -354,10 +345,7 @@ fn build_snapshot_for_a_starving_sole_viewer_suppresses_every_pane() {
         .expect("tab")
         .update_layout(LayoutNode::Split(SplitNode::with_equal_weights(
             SplitDirection::Horizontal,
-            vec![
-                LayoutChild::new(LayoutNode::Pane(pane_id)),
-                LayoutChild::new(LayoutNode::Pane(second_pane)),
-            ],
+            vec![LayoutNode::Pane(pane_id), LayoutNode::Pane(second_pane)],
         )));
     rt.sessions.insert(session_id, session);
     rt.terminal_engines

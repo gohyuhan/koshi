@@ -114,30 +114,6 @@ fn endpoint_file_write_display_names_the_path_and_detail() {
 }
 
 #[test]
-fn token_store_unreadable_display_names_the_path_and_detail() {
-    let err = IpcError::TokenStoreUnreadable {
-        path: "/var/lib/koshi/remote/tokens".to_string(),
-        detail: "format 2 is not the 1 this build reads".to_string(),
-    };
-    assert_eq!(
-        err.to_string(),
-        "token store /var/lib/koshi/remote/tokens is unreadable: format 2 is not the 1 this build reads"
-    );
-}
-
-#[test]
-fn token_store_write_display_names_the_path_and_detail() {
-    let err = IpcError::TokenStoreWrite {
-        path: "/var/lib/koshi/remote/tokens".to_string(),
-        detail: "permission denied".to_string(),
-    };
-    assert_eq!(
-        err.to_string(),
-        "token store /var/lib/koshi/remote/tokens could not be written: permission denied"
-    );
-}
-
-#[test]
 fn connect_refused_display_names_the_address_and_the_way_out() {
     let err = IpcError::ConnectRefused {
         address: "laptop.local:7654".to_string(),
@@ -186,11 +162,15 @@ fn each_remote_file_displays_as_its_own_name() {
         RemoteFile::RemoteAccessMark.to_string(),
         "remote access record"
     );
+    assert_eq!(
+        RemoteFile::TokenStore.to_string(),
+        "remote access token store"
+    );
 }
 
 #[test]
 fn a_remote_file_names_which_file_it_is_as_well_as_its_path() {
-    // Each of the three reads as its own thing, so a saved-servers failure on
+    // Each of the four reads as its own thing, so a saved-servers failure on
     // the dialling machine never reads as a token store failure on the
     // serving one.
     assert_eq!(
@@ -221,6 +201,26 @@ fn a_remote_file_names_which_file_it_is_as_well_as_its_path() {
         }
         .to_string(),
         "the remote access record at /var/lib/koshi/remote/enabled could not be written: \
+         permission denied"
+    );
+    assert_eq!(
+        IpcError::RemoteFileUnreadable {
+            file: RemoteFile::TokenStore,
+            path: "/var/lib/koshi/remote/tokens".to_string(),
+            detail: "format 2 is not the 1 this build reads".to_string(),
+        }
+        .to_string(),
+        "the remote access token store at /var/lib/koshi/remote/tokens is unreadable: \
+         format 2 is not the 1 this build reads"
+    );
+    assert_eq!(
+        IpcError::RemoteFileWrite {
+            file: RemoteFile::TokenStore,
+            path: "/var/lib/koshi/remote/tokens".to_string(),
+            detail: "permission denied".to_string(),
+        }
+        .to_string(),
+        "the remote access token store at /var/lib/koshi/remote/tokens could not be written: \
          permission denied"
     );
 }
@@ -338,15 +338,8 @@ fn every_ipc_error_is_in_the_ipc_domain() {
         DomainCategory::Ipc
     );
     assert_eq!(
-        IpcError::TokenStoreUnreadable {
-            path: String::new(),
-            detail: String::new()
-        }
-        .category(),
-        DomainCategory::Ipc
-    );
-    assert_eq!(
-        IpcError::TokenStoreWrite {
+        IpcError::RemoteFileUnreadable {
+            file: RemoteFile::TokenStore,
             path: String::new(),
             detail: String::new()
         }
@@ -374,26 +367,6 @@ fn every_ipc_error_is_in_the_ipc_domain() {
         }
         .category(),
         DomainCategory::Ipc
-    );
-}
-
-#[test]
-fn token_store_failures_are_client_fatal() {
-    assert_eq!(
-        IpcError::TokenStoreUnreadable {
-            path: String::new(),
-            detail: String::new()
-        }
-        .severity(),
-        Severity::ClientFatal
-    );
-    assert_eq!(
-        IpcError::TokenStoreWrite {
-            path: String::new(),
-            detail: String::new()
-        }
-        .severity(),
-        Severity::ClientFatal
     );
 }
 
@@ -499,7 +472,16 @@ fn socket_address_check_failures_are_client_fatal() {
 #[test]
 fn remote_access_failures_are_client_fatal() {
     // A remote access file that will not read or write stops the command that
-    // needed it, the same as the token store beside it.
+    // needed it.
+    assert_eq!(
+        IpcError::RemoteFileUnreadable {
+            file: RemoteFile::TokenStore,
+            path: String::new(),
+            detail: String::new()
+        }
+        .severity(),
+        Severity::ClientFatal
+    );
     assert_eq!(
         IpcError::RemoteFileUnreadable {
             file: RemoteFile::SavedServers,

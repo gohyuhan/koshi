@@ -52,6 +52,11 @@ fn returns_unit(otherwise: &Expr) -> bool {
 /// warning that names the function and the setting. The other blocked calls of
 /// that function log nothing.
 ///
+/// The warning names the function by its module path and its identifier, joined
+/// by `::`. A gated `attach` in module `session` is named `session::attach`. An
+/// `impl` block adds nothing to the path: `Server::attach` in `session` is also
+/// named `session::attach`.
+///
 /// The gate reads the setting where the body would start. An ordinary function
 /// reads it at the call. An `async fn` reads it at the first poll. A future
 /// that nobody polls reads nothing and logs nothing.
@@ -79,6 +84,9 @@ pub fn beta_feature(args: TokenStream, item: TokenStream) -> TokenStream {
     let mut function = parse_macro_input!(item as ItemFn);
 
     let name = function.sig.ident.to_string();
+    // `module_path!` expands where the attribute is written: a gated `attach`
+    // in module `session` gives the literal `session::attach`.
+    let path = quote!(::core::concat!(::core::module_path!(), "::", #name));
     let body = std::mem::take(&mut function.block.stmts);
     let give_up = if returns_unit(&otherwise) {
         quote!(return;)
@@ -90,7 +98,7 @@ pub fn beta_feature(args: TokenStream, item: TokenStream) -> TokenStream {
     *function.block = syn::parse_quote!({
         if !::koshi_beta::allowed() {
             static BETA_WARNED: ::std::sync::Once = ::std::sync::Once::new();
-            BETA_WARNED.call_once(|| ::koshi_beta::log_blocked(#name));
+            BETA_WARNED.call_once(|| ::koshi_beta::log_blocked(#path));
             #give_up
         }
         #(#body)*

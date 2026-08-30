@@ -15,11 +15,12 @@
 //! context and the resulting [`PrivacyTier`] together, and every non-public
 //! variant is unit-shaped with no content field.
 
-use crate::command::{CopyTarget, Selection};
 use crate::geometry::{PaneArea, Point, Size};
 use crate::ids::{ClientId, CommandId, PaneId, PluginId, SessionId, SubscriberId, TabId};
+use crate::lock::LockMode;
 use crate::mouse::{MouseButton, ScrollDirection};
 use crate::process::PtySize;
+use crate::selection::{CopyTarget, Selection};
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 
@@ -362,20 +363,6 @@ pub struct ConfigReloaded {
 // Input modes and keybindings
 // ============================================================================
 
-/// The input mode a client is in.
-///
-/// Visual mode is not one of these: a highlight changes nothing about how a key
-/// is interpreted. A key bound to a koshi shortcut still fires it; a key that
-/// reaches the pane's program clears that pane's highlight on the way. The
-/// highlight itself is reported by [`Event::SelectionChanged`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum InputMode {
-    /// Normal keybinding interpretation.
-    Normal,
-    /// Locked: input passed through to the pane verbatim.
-    Locked,
-}
-
 /// Payload for [`Event::InputModeChanged`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InputModeChanged {
@@ -383,7 +370,12 @@ pub struct InputModeChanged {
     /// clients sharing a session hold independent modes.
     pub client_id: ClientId,
     /// The mode now in effect.
-    pub mode: InputMode,
+    ///
+    /// Visual mode is not one of these: a highlight changes nothing about how a
+    /// key is interpreted. A key bound to a koshi shortcut still fires it; a key
+    /// that reaches the pane's program clears that pane's highlight on the way.
+    /// The highlight itself is reported by [`Event::SelectionChanged`].
+    pub mode: LockMode,
 }
 
 /// Payload for [`Event::MouseSelectChanged`].
@@ -409,11 +401,11 @@ pub struct KeybindingMatched {
 // Input privacy: typed characters and submitted lines
 // ============================================================================
 
-/// The privacy tier the runtime computes for an input event before delivery.
+/// How much of an input event's content its payload carries.
 ///
-/// Tier wins over plugin capability: a capability can only narrow what a
-/// subscriber sees, never widen past the tier. [`SensitiveBlocked`] is a unit
-/// variant and carries no content.
+/// Every [`TypedPayload`] and [`SubmittedLinePayload`] variant maps to exactly
+/// one tier, read with `tier()`. [`SensitiveBlocked`] is a unit variant and
+/// carries no content.
 ///
 /// [`SensitiveBlocked`]: PrivacyTier::SensitiveBlocked
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -454,8 +446,7 @@ pub enum TypedPayload {
 }
 
 impl TypedPayload {
-    /// The [`PrivacyTier`] this payload encodes. Delivery and filtering read it
-    /// from here.
+    /// The [`PrivacyTier`] this payload encodes.
     #[must_use]
     pub const fn tier(&self) -> PrivacyTier {
         match self {

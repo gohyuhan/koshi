@@ -28,20 +28,13 @@ use koshi_client::input::KeyOutcome;
 use koshi_client::Client as ViewerClient;
 use koshi_observability::cleanup::TerminalCleanupGuard;
 
-use crate::placeholder::{NullSnapshotProvider, NullStorage};
 use crate::runtime::bus::EventFilter;
 use crate::server::Server;
 
 fn runtime() -> (Server, Arc<FakePtyBackend>, ClientId, ViewerClient) {
     let fake = Arc::new(FakePtyBackend::new());
     let (tx, rx) = mpsc::channel();
-    let mut runtime = Server::new(
-        fake.clone(),
-        Arc::new(NullSnapshotProvider),
-        Arc::new(NullStorage),
-        rx,
-        tx,
-    );
+    let mut runtime = Server::new(fake.clone(), rx, tx);
     let client = runtime
         .bootstrap_local(
             SessionId::new(),
@@ -1018,7 +1011,7 @@ fn a_key_writes_nothing_when_the_focused_pane_is_a_plugin_pane() {
     // so only the pane's KIND can explain a missing write.
     let session_id = runtime.session_for_client(client).expect("session").id;
     let session = runtime.sessions.get_mut(&session_id).expect("session");
-    let created_at = session.panes.get(pane).expect("pane record").created_at;
+    let created_at = session.panes.get(pane).expect("pane record").created_at();
     session.panes.remove(pane);
     session
         .panes

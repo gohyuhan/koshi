@@ -56,7 +56,6 @@ fn plugin_metadata(plugin: PluginId) -> ActionMetadata {
         description: "Open the plugin's status panel".to_string(),
         scope_class: ActionScope::Global,
         target_compat: vec![TargetKind::Session],
-        args_schema: None,
         handler: ActionHandlerRef::PluginHostCall(plugin),
         status: ActionStatus::Available,
         continuous: false,
@@ -719,4 +718,46 @@ fn registry_error_is_a_recoverable_plugin_failure() {
 
     assert_eq!(error.category(), DomainCategory::Plugin);
     assert_eq!(error.severity(), Severity::Recoverable);
+}
+
+#[test]
+fn register_strips_control_and_bidi_characters_from_the_plugin_text() {
+    let plugin = plugin_id(9);
+    let action = ActionRef::plugin(plugin, "status").expect("valid");
+    let mut metadata = plugin_metadata(plugin);
+    metadata.display_name = "Open\u{7f} Status".to_string();
+    metadata.description = "\u{202e}gpj.exe".to_string();
+    let mut registry = ActionRegistry::new();
+
+    registry
+        .register(plugin, action.clone(), metadata)
+        .expect("registered");
+
+    let held = registry.lookup(&action).expect("registered");
+    assert_eq!(held.display_name, "Open Status");
+    assert_eq!(held.description, "gpj.exe");
+}
+
+#[test]
+fn register_cuts_the_plugin_text_to_the_reported_text_cap() {
+    let plugin = plugin_id(10);
+    let action = ActionRef::plugin(plugin, "status").expect("valid");
+    let mut metadata = plugin_metadata(plugin);
+    metadata.display_name = "a".repeat(crate::text::MAX_REPORTED_TEXT_BYTES + 100);
+    metadata.description = "b".repeat(crate::text::MAX_REPORTED_TEXT_BYTES + 1);
+    let mut registry = ActionRegistry::new();
+
+    registry
+        .register(plugin, action.clone(), metadata)
+        .expect("registered");
+
+    let held = registry.lookup(&action).expect("registered");
+    assert_eq!(
+        held.display_name,
+        "a".repeat(crate::text::MAX_REPORTED_TEXT_BYTES)
+    );
+    assert_eq!(
+        held.description,
+        "b".repeat(crate::text::MAX_REPORTED_TEXT_BYTES)
+    );
 }

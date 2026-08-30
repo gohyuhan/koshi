@@ -571,7 +571,7 @@ impl Server {
         source: &CommandSource,
         session: Option<&Session>,
         sizing: PaneSizing,
-    ) -> Result<FocusPaneTarget, Rejection> {
+    ) -> Result<ClientPaneTarget, Rejection> {
         let session = Self::require_session(session)?;
         let client_id = Self::resolve_view_client(args.client, source, session)?;
         let pane_id = match args.target {
@@ -583,7 +583,7 @@ impl Server {
         };
         Self::require_pane_in_active_tab(session, client_id, pane_id)?;
         let tab_id = Self::require_client(session, client_id)?.active_tab();
-        Ok(FocusPaneTarget {
+        Ok(ClientPaneTarget {
             session_id: session.id,
             client_id,
             tab_id,
@@ -796,14 +796,14 @@ impl Server {
         &self,
         source: &CommandSource,
         session: Option<&Session>,
-    ) -> Result<FullscreenTarget, Rejection> {
+    ) -> Result<ClientPaneTarget, Rejection> {
         let target = self.resolve_pane_target(None, source, session)?;
         let client_id = Self::resolve_view_client(
             source.target_client(),
             source,
             Self::require_session(session)?,
         )?;
-        Ok(FullscreenTarget {
+        Ok(ClientPaneTarget {
             session_id: target.session_id,
             client_id,
             tab_id: target.tab_id,

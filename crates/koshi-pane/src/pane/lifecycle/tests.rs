@@ -1,7 +1,7 @@
 //! Tests for the pane lifecycle state machine, covering all valid and invalid
 //! transitions between states (Spawning, Running, Exited, Closing, Removed) and
 //! the events that drive them (ProcessStarted, ProcessExited, CloseRequested,
-//! Cleaned, Respawn).
+//! Cleaned).
 
 use std::time::{Duration, SystemTime};
 
@@ -33,7 +33,7 @@ fn all_states() -> [PaneLifecycle; 5] {
 /// One instance of each lifecycle event. The payloads differ from the ones in
 /// `all_states()`: `ProcessExited` carries `code: Some(3)` at
 /// `UNIX_EPOCH + 10s`, and `CloseRequested` carries `since: UNIX_EPOCH + 20s`.
-fn all_events() -> [PaneLifecycleEvent; 5] {
+fn all_events() -> [PaneLifecycleEvent; 4] {
     [
         PaneLifecycleEvent::ProcessStarted,
         PaneLifecycleEvent::ProcessExited {
@@ -44,7 +44,6 @@ fn all_events() -> [PaneLifecycleEvent; 5] {
             since: SystemTime::UNIX_EPOCH + Duration::from_secs(20),
         },
         PaneLifecycleEvent::Cleaned,
-        PaneLifecycleEvent::Respawn,
     ]
 }
 
@@ -61,9 +60,6 @@ fn expected_next(from: PaneLifecycle, event: PaneLifecycleEvent) -> Option<PaneL
         ) => Some(PaneLifecycle::Closing { since }),
         (PaneLifecycle::Running, PaneLifecycleEvent::ProcessExited { code, at }) => {
             Some(PaneLifecycle::Exited { code, at })
-        }
-        (PaneLifecycle::Exited { .. }, PaneLifecycleEvent::Respawn) => {
-            Some(PaneLifecycle::Spawning)
         }
         (PaneLifecycle::Closing { .. }, PaneLifecycleEvent::Cleaned) => {
             Some(PaneLifecycle::Removed)
@@ -146,33 +142,23 @@ fn a_closing_pane_is_removed_once_cleaned() {
 }
 
 #[test]
-fn a_dead_pane_respawns_back_to_spawning() {
+fn a_dead_pane_never_returns_to_a_live_state() {
     let exited = PaneLifecycle::Exited {
         code: Some(1),
         at: SystemTime::UNIX_EPOCH,
     };
 
-    // `Spawning` carries no payload: the exit code and time are gone.
+    // `CloseRequested` is the only way out of `Exited`. Restarting the child in
+    // place is rejected, so the exit code and time stay readable until the
+    // close.
     assert_eq!(
-        exited.transition(PaneLifecycleEvent::Respawn, PaneKind::Terminal),
-        Ok(PaneLifecycle::Spawning)
+        exited.transition(PaneLifecycleEvent::ProcessStarted, PaneKind::Terminal),
+        Err(InvalidTransition {
+            from: exited,
+            event: PaneLifecycleEvent::ProcessStarted,
+            kind: PaneKind::Terminal,
+        })
     );
-}
-
-#[test]
-fn a_respawned_pane_runs_through_the_normal_start_path() {
-    let exited = PaneLifecycle::Exited {
-        code: Some(1),
-        at: SystemTime::UNIX_EPOCH,
-    };
-
-    // Respawn lands in `Spawning`; `ProcessStarted` then moves it to `Running`.
-    let spawning = exited
-        .transition(PaneLifecycleEvent::Respawn, PaneKind::Terminal)
-        .unwrap();
-    let running = spawning.transition(PaneLifecycleEvent::ProcessStarted, PaneKind::Terminal);
-
-    assert_eq!(running, Ok(PaneLifecycle::Running));
 }
 
 #[test]
@@ -234,18 +220,6 @@ fn a_running_pane_rejects_a_second_process_start() {
         Err(InvalidTransition {
             from: PaneLifecycle::Running,
             event: PaneLifecycleEvent::ProcessStarted,
-            kind: PaneKind::Terminal,
-        })
-    );
-}
-
-#[test]
-fn a_running_pane_cannot_respawn() {
-    assert_eq!(
-        PaneLifecycle::Running.transition(PaneLifecycleEvent::Respawn, PaneKind::Terminal),
-        Err(InvalidTransition {
-            from: PaneLifecycle::Running,
-            event: PaneLifecycleEvent::Respawn,
             kind: PaneKind::Terminal,
         })
     );
@@ -345,14 +319,14 @@ fn only_the_specified_transitions_are_accepted() {
 }
 
 #[test]
-fn exactly_seven_transitions_are_legal() {
+fn exactly_six_transitions_are_legal() {
     let accepted = all_states()
         .into_iter()
         .flat_map(|from| all_events().into_iter().map(move |event| (from, event)))
         .filter(|&(from, event)| from.transition(event, PaneKind::Terminal).is_ok())
         .count();
 
-    assert_eq!(accepted, 7);
+    assert_eq!(accepted, 6);
 }
 
 #[test]
@@ -476,10 +450,6 @@ fn unit_lifecycle_events_serialize_as_their_variant_names() {
     assert_eq!(
         serde_json::to_string(&PaneLifecycleEvent::Cleaned).expect("serialize"),
         r#""Cleaned""#
-    );
-    assert_eq!(
-        serde_json::to_string(&PaneLifecycleEvent::Respawn).expect("serialize"),
-        r#""Respawn""#
     );
 }
 

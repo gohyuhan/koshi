@@ -73,15 +73,6 @@ pub struct Rect {
     pub size: Size,
 }
 
-/// The two layout axes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Axis {
-    /// X-axis (left-right).
-    Horizontal,
-    /// Y-axis (top-bottom).
-    Vertical,
-}
-
 /// A cardinal direction, e.g. for focus movement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Direction {
@@ -170,13 +161,6 @@ impl Rect {
             && u32::from(point.y) < self.bottom()
     }
 
-    /// `true` when the two rects share at least one cell. Rects that merely
-    /// touch along an edge do not intersect.
-    #[must_use]
-    pub fn intersects(&self, other: Rect) -> bool {
-        self.intersection(other).is_some()
-    }
-
     /// The region of cells inside both `self` and `other`, or `None` when they
     /// share no cell.
     ///
@@ -219,7 +203,7 @@ impl Rect {
     /// `2 * border_cells` (saturating at `0`). Never panics.
     /// Origin `(2, 2)` size `10×8`, `inset(1)` → origin `(3, 3)` size `8×6`.
     #[must_use]
-    pub fn inset(&self, border_cells: u16) -> Rect {
+    fn inset(&self, border_cells: u16) -> Rect {
         let both = border_cells.saturating_mul(2);
         Rect {
             origin: Point {

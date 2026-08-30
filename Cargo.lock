@@ -905,32 +905,25 @@ version = "0.4.0-pr.1"
 dependencies = [
  "clap",
  "flate2",
- "fs4",
- "koshi-beta",
  "koshi-client",
  "koshi-config",
  "koshi-core",
  "koshi-daemon",
- "koshi-input",
  "koshi-ipc",
  "koshi-layout",
  "koshi-link",
  "koshi-observability",
  "koshi-paths",
  "koshi-pty",
- "koshi-renderer",
  "koshi-runtime",
  "koshi-storage",
- "koshi-terminal",
  "koshi-test-support",
  "libc",
- "ratatui",
  "semver",
  "serde",
  "serde_json",
  "tar",
  "tempfile",
- "thiserror 2.0.20",
  "tracing",
  "ureq",
  "uuid",
@@ -965,7 +958,6 @@ dependencies = [
  "koshi-test-support",
  "ratatui",
  "serde_json",
- "tempfile",
  "tracing",
  "uuid",
 ]
@@ -1016,23 +1008,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tracing",
- "uuid",
-]
-
-[[package]]
-name = "koshi-error"
-version = "0.4.0-pr.1"
-dependencies = [
- "koshi-config",
- "koshi-core",
- "koshi-ipc",
- "koshi-layout",
- "koshi-link",
- "koshi-plugin-host",
- "koshi-pty",
- "koshi-storage",
- "koshi-terminal",
- "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -1093,11 +1068,9 @@ dependencies = [
  "koshi-layout",
  "koshi-observability",
  "koshi-paths",
- "koshi-renderer",
  "koshi-runtime",
  "koshi-test-support",
  "serde",
- "serde_json",
  "tempfile",
  "thiserror 2.0.20",
  "tracing",
@@ -1118,7 +1091,6 @@ version = "0.4.0-pr.1"
 dependencies = [
  "koshi-core",
  "koshi-paths",
- "miette",
  "thiserror 2.0.20",
  "tracing",
  "tracing-subscriber",
@@ -1205,7 +1177,6 @@ dependencies = [
  "koshi-storage",
  "koshi-terminal",
  "koshi-test-support",
- "ratatui",
  "serde",
  "serde_json",
  "subtle",

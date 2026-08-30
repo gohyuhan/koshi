@@ -69,9 +69,7 @@ impl Server {
         attached_at: SystemTime,
         remote: bool,
     ) -> Option<AttachAccepted> {
-        // One process serves one session: genesis seeds exactly one and no
-        // command creates another in-process.
-        let session = self.sessions.values().next()?;
+        let session = self.sole_session()?;
         let session_id = session.id;
         let first_tab = session.tabs.values().min_by_key(|tab| tab.index())?.id();
 
@@ -154,6 +152,11 @@ impl Server {
     /// bottom and holds the view no longer. A restored zoom
     /// changes the size the tab's panes solve to, so the tab reflows and one
     /// [`Event::PtyResized`] is returned for each pane whose PTY size changed.
+    ///
+    /// A restored focus that moves `active_tab`'s focused pane off the one the
+    /// attach put it on returns one [`Event::PaneFocused`] naming the restored
+    /// pane, so the event stream names the pane the client actually views.
+    ///
     /// Returns no event when the session or the client is gone.
     fn restore_saved_view(
         &mut self,
@@ -166,6 +169,9 @@ impl Server {
         // needs no `&self` across the mutation.
         let backend = Arc::clone(self.pty_backend());
         let mut events = Vec::new();
+        // The restored pane and the one it replaces, set when the focus pass
+        // moves `active_tab` off the pane the attach focused.
+        let mut focus_move = None;
 
         {
             let Some(session) = self.sessions.get_mut(&session_id) else {
@@ -176,10 +182,17 @@ impl Server {
             let Some(client) = session.clients.get_mut(client_id) else {
                 return events;
             };
+            let prior_pane = client.focused_pane(active_tab);
             for (&tab_id, &pane_id) in &view.focus_by_tab {
                 if tabs.contains_key(&tab_id) && panes.get(pane_id).is_some() {
                     client.update_focused_pane(tab_id, pane_id);
                 }
+            }
+            if let Some(pane_id) = client
+                .focused_pane(active_tab)
+                .filter(|&restored| Some(restored) != prior_pane)
+            {
+                focus_move = Some((pane_id, prior_pane));
             }
             for (&tab_id, &pane_id) in &view.zoom_by_tab {
                 if tabs.contains_key(&tab_id) && panes.get(pane_id).is_some() {
@@ -198,8 +211,15 @@ impl Server {
         }
 
         self.reflow_tab_if_viewed(backend.as_ref(), session_id, active_tab, &mut events);
-        self.render_scheduler
-            .invalidate(InvalidationReason::LayoutChanged);
+        if let Some((pane_id, prior_pane)) = focus_move {
+            events.push(Event::PaneFocused(PaneFocused {
+                client_id,
+                tab_id: active_tab,
+                pane_id,
+                prior_pane,
+            }));
+        }
+        self.render_scheduler.invalidate();
 
         events
     }
@@ -234,9 +254,8 @@ impl Server {
     /// [`PaneArea::Starving`] contributes none), so a smaller client shrinks a
     /// tab and a departing one lets it grow: the tab's live panes reflow to the
     /// new size, one [`Event::PtyResized`] each. A tab with no effective size
-    /// keeps its sizes. The attach always invalidates
-    /// [`InvalidationReason::LayoutChanged`] so every client repaints from the
-    /// reconciled snapshot. An attach naming an unknown session, or a tab the
+    /// keeps its sizes. The attach always marks the
+    /// screen stale so every client repaints from the reconciled snapshot. An attach naming an unknown session, or a tab the
     /// session does not hold, is dropped. `attached_at` is supplied by the
     /// producer; the handler never reads the clock itself.
     // Carries the whole of one attach: where it lands (`session_id`,
@@ -341,7 +360,7 @@ impl Server {
                 client.update_lock_mode(LockMode::Locked);
                 events.push(Event::InputModeChanged(InputModeChanged {
                     client_id,
-                    mode: InputMode::Locked,
+                    mode: LockMode::Locked,
                 }));
             }
             session.attach_client(client);
@@ -376,8 +395,7 @@ impl Server {
             }
         }
 
-        self.render_scheduler
-            .invalidate(InvalidationReason::LayoutChanged);
+        self.render_scheduler.invalidate();
 
         events
     }
@@ -411,8 +429,7 @@ impl Server {
 
         let mut events = Vec::new();
         self.reflow_tab_if_viewed(backend.as_ref(), session_id, active_tab, &mut events);
-        self.render_scheduler
-            .invalidate(InvalidationReason::TerminalResize);
+        self.render_scheduler.invalidate();
         events
     }
 
@@ -462,9 +479,9 @@ impl Server {
     /// tab's effective size, so if larger viewers remain the tab grows back: its
     /// live panes reflow to the new [`Session::tab_viewport`], one
     /// [`Event::PtyResized`] each. When it was the last viewer the tab has no
-    /// viewport and keeps its sizes. The detach always invalidates
-    /// [`InvalidationReason::LayoutChanged`] so the remaining clients repaint. A
-    /// detach for a client this runtime does not hold is dropped.
+    /// viewport and keeps its sizes. The detach always marks the screen stale so
+    /// the remaining clients repaint. A detach for a client this runtime does
+    /// not hold is dropped.
     ///
     /// Every subscription registered as viewing this client is dropped with the
     /// record, closing the sending end of each one's queue.
@@ -512,8 +529,7 @@ impl Server {
             self.reflow_tab_if_viewed(backend.as_ref(), session_id, active_tab, &mut events);
         }
 
-        self.render_scheduler
-            .invalidate(InvalidationReason::LayoutChanged);
+        self.render_scheduler.invalidate();
 
         // `auto-close-session` ends the session when its last client leaves.
         // Each pane's child is asked to stop and given the graceful window
@@ -620,7 +636,7 @@ impl Server {
             client.update_lock_mode(next);
             scope.emit(Event::InputModeChanged(InputModeChanged {
                 client_id,
-                mode: Self::input_mode(next),
+                mode: next,
             }));
         }
         Ok(scope.commit(command_id, &mut self.event_bus))
@@ -672,16 +688,5 @@ impl Server {
             on,
         }));
         Ok(scope.commit(command_id, &mut self.event_bus))
-    }
-
-    /// Map a [`LockMode`] to the wire-facing [`InputMode`] carried on
-    /// [`Event::InputModeChanged`]. The lock commands only ever produce
-    /// [`LockMode::Normal`] or [`LockMode::Locked`]; the modal layers report as
-    /// [`InputMode::Normal`].
-    fn input_mode(mode: LockMode) -> InputMode {
-        match mode {
-            LockMode::Locked => InputMode::Locked,
-            _ => InputMode::Normal,
-        }
     }
 }
