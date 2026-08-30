@@ -952,7 +952,7 @@ fn removing_an_unknown_pane_emits_nothing() {
 /// registry record is dropped and the cascade stops there, so the tab that
 /// really holds the pane keeps a leaf with no record behind it.
 #[test]
-fn removing_a_pane_under_an_unknown_tab_drops_the_record_and_emits_nothing() {
+fn removing_a_pane_under_an_unknown_tab_changes_nothing_and_emits_nothing() {
     let tab_id = TabId::new();
     let (kept, target) = (PaneId::new(), PaneId::new());
     let mut session = session_with(
@@ -976,11 +976,12 @@ fn removing_a_pane_under_an_unknown_tab_drops_the_record_and_emits_nothing() {
     );
 
     assert_eq!(events, Vec::new());
-    assert_eq!(session.panes.get(target).map(PaneRecord::id), None);
+    assert_eq!(session.panes.get(target).map(PaneRecord::id), Some(target));
     assert_eq!(
         session.tabs[&tab_id].layout().leaf_panes(),
         vec![kept, target]
     );
+    assert_eq!(session.validate(), Ok(()));
 }
 
 #[test]

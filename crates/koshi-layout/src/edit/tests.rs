@@ -981,3 +981,23 @@ fn removing_a_pane_reflows_the_survivors_with_one_gap_between_them() {
         ]
     );
 }
+
+#[test]
+fn removing_the_last_pane_beside_an_empty_split_is_rejected() {
+    // The empty split survives the removal, so the walk never reports the root
+    // as emptied; the tree it would leave behind holds no pane at all.
+    let a = PaneId::new();
+    let empty = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Vertical,
+        Vec::new(),
+    ));
+    let tree = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![leaf(a), LayoutChild::new(empty)],
+    ));
+
+    let error = remove_pane(&tree, tab(), a, PaneSizing::default())
+        .expect_err("the tree holds no other pane");
+
+    assert_eq!(error, RemoveError::LastPane { pane: a });
+}

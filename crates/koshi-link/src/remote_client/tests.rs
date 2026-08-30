@@ -64,6 +64,18 @@ fn a_saved_name_shaped_like_an_address_is_refused() {
 }
 
 #[test]
+fn an_empty_saved_name_is_refused() {
+    // `--save-as ""` reaches here: clap takes the empty string, and a record
+    // named with it lists blank.
+    let refusal = check_name_shape("").expect_err("an empty name is refused");
+
+    let CliError::InvalidArgs { detail } = refusal else {
+        panic!("a name that cannot be saved is a bad argument, not a runtime failure");
+    };
+    assert_eq!(detail, "a saved name must not be empty. Pick a plain name.");
+}
+
+#[test]
 fn a_plain_saved_name_is_taken() {
     check_name_shape("work").expect("a plain name is fine");
     check_name_shape("desk").expect("a plain name is fine");
@@ -331,23 +343,38 @@ fn any_other_refusal_keeps_the_servers_own_sentence_and_names_the_server() {
 
 #[test]
 fn a_certificate_that_changed_carries_an_ipc_failure_and_never_a_runtime_one() {
-    // `probe` sends a `CliError::Runtime` to `Reach::Refused` and everything
-    // else to `Reach::Unreachable`.
-    let changed = DialError::Refused(talk_failed(IpcError::CertificateChanged {
+    // `probe` reads a refused dial carrying `CliError::IpcUnavailable` as the
+    // pinned-certificate check and answers `Reach::CertificateChanged`; every
+    // refusal `check_answer` builds carries `CliError::Runtime` instead.
+    let changed = dial_failed(IpcError::CertificateChanged {
         address: "desk.local:7654".to_string(),
         pinned: "aa".repeat(32),
         presented: "bb".repeat(32),
-    }));
+    });
 
+    let DialError::Refused(CliError::IpcUnavailable { detail }) = changed else {
+        panic!("a changed certificate is the shape `probe` reads");
+    };
     assert_eq!(
-        CliError::from(changed).to_string(),
+        detail,
         format!(
-            "IPC unavailable: the certificate of desk.local:7654 changed: pinned {}, \
+            "the certificate of desk.local:7654 changed: pinned {}, \
              presented {}. if the server was reinstalled on purpose, run \
              `koshi remote forget desk.local:7654` and connect again.",
             "aa".repeat(32),
             "bb".repeat(32)
         )
+    );
+}
+
+#[test]
+fn a_sweep_answer_names_its_server_whatever_it_says() {
+    assert_eq!(
+        server_of(&Reach::CertificateChanged {
+            server: "desk".to_string(),
+            detail: "the certificate of desk.local:7654 changed".to_string(),
+        }),
+        "desk"
     );
 }
 
@@ -912,4 +939,18 @@ fn this_layer_never_alters_what_a_peer_reported() {
         !source.contains("sanitize_reported_text"),
         "remote_client.rs filters reported text; that belongs in the display rows"
     );
+}
+
+#[test]
+fn a_bare_ipv6_literal_is_not_an_address() {
+    // The last colon of `fe80::1` separates nothing: the host still holds a
+    // colon, so the bracketed form is the only IPv6 address shape.
+    assert!(!looks_like_address("::1"));
+    assert!(!looks_like_address("fe80::1"));
+    assert!(!looks_like_address("desk.local:+7654"), "a port is digits");
+    assert!(!looks_like_address("desk.local:"), "a port is not empty");
+    assert!(looks_like_address("[::1]:7654"));
+    assert!(looks_like_address("laptop.local:7654"));
+    assert!(!looks_like_address("laptop.local"));
+    assert!(!looks_like_address("laptop.local:door"));
 }

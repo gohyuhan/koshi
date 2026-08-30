@@ -714,6 +714,102 @@ fn output_and_exit_events_reach_the_sink_in_the_order_they_arrive() {
     assert_eq!(sink.exits(), vec![(pane, ExitStatus::ExitCode(0))]);
 }
 
+/// A sink that refuses every chunk of `refused` and records the rest.
+struct RefusingSink {
+    /// The pane whose chunks are refused.
+    refused: PaneId,
+    /// Every chunk taken, oldest first, with the pane that printed it.
+    chunks: Mutex<Vec<(PaneId, Vec<u8>)>>,
+    /// Every exit taken, oldest first, with the pane that ended.
+    exits: Mutex<Vec<(PaneId, ExitStatus)>>,
+}
+
+impl RefusingSink {
+    fn new(refused: PaneId) -> Arc<Self> {
+        Arc::new(RefusingSink {
+            refused,
+            chunks: Mutex::new(Vec::new()),
+            exits: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn chunks(&self) -> Vec<(PaneId, Vec<u8>)> {
+        self.chunks.lock().expect("refusing sink").clone()
+    }
+
+    fn exits(&self) -> Vec<(PaneId, ExitStatus)> {
+        self.exits.lock().expect("refusing sink").clone()
+    }
+}
+
+impl PtySink for RefusingSink {
+    fn output(&self, pane: PaneId, bytes: Vec<u8>) -> bool {
+        if pane == self.refused {
+            return false;
+        }
+        self.chunks
+            .lock()
+            .expect("refusing sink")
+            .push((pane, bytes));
+        true
+    }
+
+    fn exit(&self, pane: PaneId, status: ExitStatus) {
+        self.exits
+            .lock()
+            .expect("refusing sink")
+            .push((pane, status));
+    }
+}
+
+#[test]
+fn a_pane_the_sink_refused_stops_while_every_other_pane_keeps_being_delivered() {
+    // `PtySink::output` returning false means the consumer is done with that
+    // one pane, exit included. The link keeps carrying the rest.
+    let refused = PaneId::new();
+    let live = PaneId::new();
+    let peer = FakeSupervisor::start(
+        opening_answers(Vec::new()),
+        vec![
+            SupervisorEvent::Output {
+                pane_id: refused,
+                bytes: b"dropped".to_vec(),
+            },
+            SupervisorEvent::Output {
+                pane_id: live,
+                bytes: b"kept".to_vec(),
+            },
+            SupervisorEvent::Output {
+                pane_id: refused,
+                bytes: b"dropped again".to_vec(),
+            },
+            SupervisorEvent::Exited {
+                pane_id: refused,
+                status: ExitStatus::ExitCode(1),
+            },
+            SupervisorEvent::Exited {
+                pane_id: live,
+                status: ExitStatus::ExitCode(0),
+            },
+        ],
+    );
+    let sink = RefusingSink::new(refused);
+    let _backend = SupervisorPtyBackend::connect(
+        &peer.addr,
+        ConnectionToken::new("k7QxSecret"),
+        Arc::clone(&sink) as Arc<dyn PtySink>,
+        &[],
+    )
+    .expect("the backend opens the link");
+
+    wait_until("the live pane's exit reached the sink", || {
+        !sink.exits().is_empty()
+    });
+
+    assert_eq!(sink.chunks(), vec![(live, b"kept".to_vec())]);
+    assert_eq!(sink.exits(), vec![(live, ExitStatus::ExitCode(0))]);
+}
+
 #[test]
 fn holding_the_readers_still_asks_the_supervisor_to_hold_its_pane_output() {
     // The hold reaches the supervisor over the link. The answer is the last

@@ -14,8 +14,10 @@ use crate::pane::{
 /// Why the pane registry rejected an operation.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PaneRegistryError {
-    /// An insert used an id that the registry already holds.
-    #[error("pane {id} is already registered")]
+    /// An insert used an id that the registry already holds. `PaneId` displays
+    /// as `pane-<uuid>`, so the message reads `pane-<uuid> is already
+    /// registered`.
+    #[error("{id} is already registered")]
     DuplicateId {
         /// The id that is already registered.
         id: PaneId,

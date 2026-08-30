@@ -117,10 +117,9 @@ pub fn advert_path(shared_dir: &Path, session: SessionId) -> PathBuf {
 /// Write the marker at `path` as an empty file, replacing whatever is there.
 ///
 /// # Errors
-/// A marker that cannot be written is [`IpcError::EndpointFileWrite`] naming
-/// `path`.
+/// A marker that cannot be written is [`IpcError::AdvertWrite`] naming `path`.
 pub fn write_advert(path: &Path) -> Result<(), IpcError> {
-    std::fs::write(path, b"").map_err(|error| IpcError::EndpointFileWrite {
+    std::fs::write(path, b"").map_err(|error| IpcError::AdvertWrite {
         path: path.display().to_string(),
         detail: error.to_string(),
     })

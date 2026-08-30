@@ -1233,3 +1233,42 @@ fn every_violation_is_collected_in_one_pass() {
         ])
     );
 }
+
+#[test]
+fn validate_reports_two_orphan_records_in_id_order() {
+    // The registry walks in id order, so two faults of one kind always come
+    // out the same way round.
+    let mut session = empty_session();
+    let a = register_live_pane(&mut session);
+    let b = register_live_pane(&mut session);
+    let (first, second) = if a < b { (a, b) } else { (b, a) };
+
+    assert_eq!(
+        session.validate(),
+        Err(vec![
+            SessionConsistencyError::OrphanedPaneRecord {
+                pane: first,
+                lifecycle: PaneLifecycle::Running,
+            },
+            SessionConsistencyError::OrphanedPaneRecord {
+                pane: second,
+                lifecycle: PaneLifecycle::Running,
+            },
+        ])
+    );
+}
+
+#[test]
+fn a_restored_focus_history_longer_than_the_cap_still_evicts() {
+    // The length is compared in `usize`: a history of 65 536 entries is over
+    // the cap, not `0` entries with the low sixteen bits read alone.
+    let tab = Tab::new(TabId::new(), "code".to_owned(), 0, PaneId::new());
+    let mut value = serde_json::to_value(&tab).expect("a tab serializes");
+    let oversized: Vec<PaneId> = (0..65_536).map(|_| PaneId::new()).collect();
+    value["focus_mru"] = serde_json::to_value(&oversized).expect("the history serializes");
+    let mut restored: Tab = serde_json::from_value(value).expect("the tab deserializes");
+
+    restored.record_focus_mru(PaneId::new());
+
+    assert_eq!(restored.focus_mru().len(), usize::from(MAX_TAB_FOCUS_MRU));
+}

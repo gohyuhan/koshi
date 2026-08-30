@@ -659,7 +659,7 @@ fn a_crash_report_whose_file_path_is_a_directory_writes_nothing() {
 // `a_crash_report_whose_file_path_is_a_directory_writes_nothing`.
 #[cfg(unix)]
 #[test]
-fn a_crash_report_into_a_read_only_directory_writes_nothing() {
+fn a_read_only_crash_directory_this_user_owns_is_made_private_and_takes_the_report() {
     use std::os::unix::fs::PermissionsExt;
 
     let dir = crash_dir("read-only");
@@ -667,26 +667,38 @@ fn a_crash_report_into_a_read_only_directory_writes_nothing() {
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500))
         .expect("make the directory read-only");
 
-    // A user who overrides directory permissions (root) can still write
-    // here, so probe first and only assert once the permission holds.
-    let probe = dir.join("probe");
-    let enforced = std::fs::write(&probe, b"x").is_err();
-    let _ = std::fs::remove_file(&probe);
+    fixed_report().write(&dir);
 
-    if enforced {
-        fixed_report().write(&dir);
-        assert_eq!(
-            std::fs::read_dir(&dir)
-                .expect("the directory is readable")
-                .count(),
-            0,
-            "a read-only directory takes no report"
-        );
-    }
+    assert_eq!(
+        std::fs::metadata(&dir)
+            .expect("the crash directory exists")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700,
+        "the directory this user owns is set to owner-only"
+    );
+    assert_eq!(only_crash_report(&dir), fixed_report().text());
 
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
-        .expect("restore the directory so it can be removed");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_crash_directory_this_user_cannot_make_private_takes_no_report() {
+    // The path names a file, so no directory can be created there.
+    let dir = crash_dir("not-a-directory");
+    std::fs::create_dir_all(dir.parent().expect("a parent")).expect("the parent exists");
+    std::fs::write(&dir, b"x").expect("plant a file where the directory would go");
+
+    fixed_report().write(&dir);
+
+    assert_eq!(
+        std::fs::read(&dir).expect("the planted file is still there"),
+        b"x"
+    );
+
+    let _ = std::fs::remove_file(&dir);
 }
 
 #[test]
@@ -946,4 +958,31 @@ fn a_crash_report_that_cannot_be_written_still_restores_the_terminal() {
     );
 
     let _ = std::fs::remove_dir_all(&base);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_crash_report_is_readable_only_by_its_owner() {
+    // The report holds the panic message, the place and the stack; no other
+    // local user reads it.
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = crash_dir("owner-only");
+    fixed_report().write(&dir);
+
+    let mode = |path: &Path| {
+        std::fs::metadata(path)
+            .expect("the path exists")
+            .permissions()
+            .mode()
+            & 0o777
+    };
+    assert_eq!(mode(&dir), 0o700, "the crash directory is owner-only");
+    assert_eq!(
+        mode(&dir.join("crash-1700000000.txt")),
+        0o600,
+        "the crash report is owner-only"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

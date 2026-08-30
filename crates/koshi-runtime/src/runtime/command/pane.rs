@@ -273,14 +273,7 @@ impl Server {
             &mut events,
         );
 
-        // Kill the child off-thread: a graceful kill can sleep out its grace
-        // window, and the dispatcher must keep draining. The kill also purges
-        // the backend's own entry for the pane, even when the child already
-        // exited.
-        let pane_id = target.pane_id;
-        let _ = thread::spawn(move || {
-            let _ = backend.kill(pane_id, kill_policy);
-        });
+        super::kill_off_thread(&backend, target.pane_id, kill_policy);
 
         Ok(Self::commit_events(&mut self.event_bus, command_id, events))
     }

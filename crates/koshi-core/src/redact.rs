@@ -113,8 +113,8 @@ pub fn redact_argv(argv: &[String]) -> Vec<String> {
 
 /// Replace every occurrence of each marker's literal with `***`. Occurrences
 /// that overlap or touch collapse into one `***`: `"abcd"` with markers `ab`
-/// and `cd` results in `"***"`. Occurrences of one marker are found
-/// left-to-right without overlap. An empty marker matches nothing.
+/// and `cd` results in `"***"`, and `"ababab"` with the marker `abab` results
+/// in `"***"`. An empty marker matches nothing.
 pub fn redact_string(input: &str, markers: &[Marker]) -> String {
     // 1. Find every byte range of `input` a secret covers.
     let mut spans: Vec<Range<usize>> = Vec::new();
@@ -123,8 +123,14 @@ pub fn redact_string(input: &str, markers: &[Marker]) -> String {
         if secret.is_empty() {
             continue;
         }
-        for (start, found) in input.match_indices(secret) {
-            spans.push(start..start + found.len());
+        // Each occurrence is searched for from one character past the last
+        // one's start, so a secret whose own prefix repeats inside it is
+        // covered whole.
+        let mut from = 0;
+        while let Some(offset) = input[from..].find(secret) {
+            let start = from + offset;
+            spans.push(start..start + secret.len());
+            from = start + input[start..].chars().next().map_or(1, char::len_utf8);
         }
     }
 

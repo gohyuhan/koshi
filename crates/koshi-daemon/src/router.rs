@@ -72,6 +72,7 @@ use koshi_ipc::tls;
 use koshi_ipc::transport::{self, Connection, Listener};
 use koshi_ipc::validate::{reclaim_stale_socket, validate_socket_addr};
 
+use koshi_link::error::CliError;
 use koshi_link::ipc_client;
 use koshi_link::router_client::{ROUTER_SUBCOMMAND, RUNTIME_DIR_FLAG};
 use koshi_runtime::server::binary_is_runnable;
@@ -320,7 +321,15 @@ pub fn run_router(
 
     let (events_tx, events_rx) = mpsc::channel();
     let shutting_down = Arc::new(AtomicBool::new(false));
-    let accept_thread = start_accept_thread(listener, token, events_tx.clone(), &shutting_down)?;
+    let accept_thread =
+        match start_accept_thread(listener, token, events_tx.clone(), &shutting_down) {
+            Ok(handle) => handle,
+            Err(error) => {
+                let _ = std::fs::remove_file(&endpoint_path);
+                remove_socket_file(&addr);
+                return Err(error.into());
+            }
+        };
 
     let mut remote = RemoteState {
         address: merge_server(
@@ -1219,17 +1228,31 @@ fn attach_lookup(
     }
 }
 
+/// Whether a failed description says the session is gone.
+///
+/// [`CliError::SessionNotFound`] is the only failure that means nothing is
+/// listening on the session's socket. Every other failure —
+/// [`CliError::IpcUnavailable`] for a settled protocol version outside this
+/// build's range, a refusal, or an endpoint file this build cannot read — comes
+/// from a session that is still bound and serving.
+fn describes_a_session_that_is_gone(error: &CliError) -> bool {
+    matches!(error, CliError::SessionNotFound { .. })
+}
+
 /// Describe every running session, in name then id order.
 ///
-/// Each entry is asked to describe itself. An entry whose description fails for
-/// any reason is removed by [`unregister`] and left out of the answer.
+/// Each entry is asked to describe itself. An entry that nothing listens for is
+/// removed by [`unregister`] and left out of the answer. An entry that is
+/// listening but could not answer keeps its files and its place in the list,
+/// and is left out of this answer only.
 fn list_sessions(runtime_dir: &Path, registry: &mut Registry) -> RouterResult {
     let mut rows = Vec::new();
     let mut gone = Vec::new();
     for id in registry.keys().copied() {
         match ipc_client::fetch_overview(runtime_dir, id) {
             Ok(overview) => rows.push(overview.session),
-            Err(_) => gone.push(id),
+            Err(error) if describes_a_session_that_is_gone(&error) => gone.push(id),
+            Err(_) => {}
         }
     }
     for id in gone {
@@ -1243,9 +1266,11 @@ fn list_sessions(runtime_dir: &Path, registry: &mut Registry) -> RouterResult {
 ///
 /// Every advertised session is read for its address and process id and asked
 /// to describe itself. One that answers both is registered — a session server
-/// that outlived an earlier router is picked up here. One that fails either is
-/// removed by [`unregister`]: its endpoint file, its resume file, and on Unix
-/// its socket file go.
+/// that outlived an earlier router is picked up here. One whose endpoint file
+/// cannot be read, and one that nothing listens for, is removed by
+/// [`unregister`]: its endpoint file, its resume file, and on Unix its socket
+/// file go. One that is listening but could not answer keeps its files and is
+/// left out of the list.
 ///
 /// The walk is over endpoint files, which exist on every platform, so a
 /// Windows pipe with no directory entry of its own is still found.
@@ -1276,6 +1301,7 @@ fn sweep(runtime_dir: &Path, shared_base: Option<&Path>) -> Registry {
                     },
                 );
             }
+            (Ok(_), Err(error)) if !describes_a_session_that_is_gone(&error) => {}
             _ => unregister(runtime_dir, &mut registry, id),
         }
     }

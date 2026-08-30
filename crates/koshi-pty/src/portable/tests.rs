@@ -2430,6 +2430,28 @@ fn through_the_stripping_reader(chunks: &[&[u8]]) -> Vec<u8> {
 }
 
 #[test]
+fn an_empty_destination_buffer_does_not_end_the_request_watch() {
+    // A read into no room reads no bytes; the request is still taken out of
+    // the output that follows.
+    let mut reader = RemovesCursorRequest::new(ChunkedTerminal::new(&[CURSOR_REQUEST, b"hello"]));
+
+    assert_eq!(reader.read(&mut []).expect("no room reads nothing"), 0);
+
+    let mut delivered = Vec::new();
+    let mut buf = [0u8; 64];
+    loop {
+        match reader
+            .read(&mut buf)
+            .expect("the terminal hands back its bytes")
+        {
+            0 => break,
+            read => delivered.extend_from_slice(&buf[..read]),
+        }
+    }
+    assert_eq!(delivered, b"hello");
+}
+
+#[test]
 fn the_terminals_opening_question_is_taken_out_of_the_output() {
     assert_eq!(
         through_the_stripping_reader(&[CURSOR_REQUEST, b"hello"]),
@@ -2874,4 +2896,31 @@ fn a_pane_taken_back_after_its_child_was_signalled_reports_the_signal() {
         ExitStatus::Signaled(9),
         "a child killed by SIGKILL must be reported as signalled, with that signal's number"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn spawning_a_pane_id_the_backend_already_holds_is_refused() {
+    // The live entry keeps its terminal and its threads: replacing it would
+    // detach them and leave the first child with nothing that can kill it.
+    let sink = CountingSink::new();
+    let (backend, pane) = backend_running(sink.clone(), "sleep 30");
+
+    let refused = {
+        let _gate = PTY_GATE.lock().expect("pty gate");
+        backend
+            .spawn(pane, shell_spec("sleep 30"), PANE_SIZE)
+            .expect_err("the id is already open")
+    };
+
+    assert_eq!(
+        refused.to_string(),
+        format!("failed to spawn pty: pane {pane} is already open")
+    );
+    backend
+        .resize(pane, PANE_SIZE)
+        .expect("the first pane is still held");
+    backend
+        .kill(pane, KillPolicy::Tree)
+        .expect("close the pane");
 }

@@ -208,6 +208,7 @@ impl Walker<'_> {
         let mut tabs = Vec::new();
         let mut focused_tab: Option<usize> = None;
         let mut locked = false;
+        let mut lock_seen = false;
         for node in doc.nodes() {
             match node.name().value() {
                 "version" => {
@@ -234,10 +235,11 @@ impl Walker<'_> {
                 }
                 "lock" => {
                     let is_bare = self.marker(node, "lock");
-                    if locked {
+                    if lock_seen {
                         self.error(node.span(), "`lock` is declared more than once");
-                    } else if is_bare {
-                        locked = true;
+                    } else {
+                        lock_seen = true;
+                        locked = is_bare;
                     }
                 }
                 other => {

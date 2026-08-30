@@ -16,18 +16,34 @@ use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags};
 
 use crate::key::{err, parse_chord, KeyParseError, KeyParseErrorKind, Leader};
 
-/// True when `word` is written in the dash form the grammar rejects, such as
-/// `Ctrl-g`: a word with no angle bracket holding a `-` between two
-/// alphanumeric characters. A bare `-` chord next to others stays legal when
-/// whitespace-separated (`a - b`) or at a word's edge (`g-`).
-fn is_dash_form(word: &str) -> bool {
-    if word.contains('<') {
-        return false;
-    }
-    let chars: Vec<char> = word.chars().collect();
+/// True when `run` holds a `-` between two alphanumeric characters.
+fn holds_dash_form(run: &str) -> bool {
+    let chars: Vec<char> = run.chars().collect();
     chars
         .windows(3)
         .any(|w| w[0].is_alphanumeric() && w[1] == '-' && w[2].is_alphanumeric())
+}
+
+/// True when `word` is written in the dash form the grammar rejects, such as
+/// `Ctrl-g`: a `-` between two alphanumeric characters, outside every
+/// angle-bracketed run. A bare `-` chord next to others stays legal when
+/// whitespace-separated (`a - b`) or at a word's edge (`g-`).
+///
+/// Each `<…>` run is stepped over, so `<C-p>` is not a dash form and
+/// `<leader>Ctrl-g` is. A `<` that never closes ends the walk: the unclosed
+/// bracket is reported by [`split_token`] instead.
+fn is_dash_form(word: &str) -> bool {
+    let mut rest = word;
+    while let Some(open) = rest.find('<') {
+        if holds_dash_form(&rest[..open]) {
+            return true;
+        }
+        let Some(close) = rest[open..].find('>') else {
+            return false;
+        };
+        rest = &rest[open + close + 1..];
+    }
+    holds_dash_form(rest)
 }
 
 /// Splits the next token off `rest`: a `<...>` run through its first closing
@@ -121,9 +137,10 @@ pub fn parse_sequence(
                 Ok(chord) => chord,
                 // `<C->>`: the key is `>` itself, and the first `>` closes
                 // nothing. Extend the token through the next `>` and parse
-                // again.
+                // again. `<>` names no modifier run, so `<>>` is not extended.
                 Err(e)
                     if matches!(e.kind, KeyParseErrorKind::MissingKey)
+                        && token != "<>"
                         && after.starts_with('>') =>
                 {
                     token = &rest[..token.len() + 1];

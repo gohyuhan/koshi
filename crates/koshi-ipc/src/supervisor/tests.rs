@@ -11,6 +11,27 @@ use koshi_core::process::ShellKind;
 use super::*;
 use crate::protocol::IpcErrorCode;
 
+#[cfg(unix)]
+#[test]
+fn a_working_directory_that_is_not_valid_utf8_has_no_encoding_on_this_wire() {
+    // Encoding such a path fails, and a failed encode breaks the link rather
+    // than one answer, so the supervisor answers `Cwd(None)` for it.
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = PathBuf::from(std::ffi::OsStr::from_bytes(b"/tmp/\xff"));
+    let refused = serde_json::to_string(&SupervisorResult::Cwd(Some(path)))
+        .expect_err("a path that is not valid UTF-8 does not encode");
+
+    assert_eq!(
+        refused.to_string(),
+        "path contains invalid UTF-8 characters"
+    );
+    assert_eq!(
+        serde_json::to_string(&SupervisorResult::Cwd(None)).expect("no directory encodes"),
+        r#"{"Cwd":null}"#
+    );
+}
+
 /// The one UUID every fixed id below uses.
 fn fixed_uuid() -> uuid::Uuid {
     uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("literal UUID parses")

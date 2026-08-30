@@ -140,6 +140,37 @@ mod unix {
         let status = child.wait().expect("reap child");
         assert_eq!(status.signal(), Some(9));
     }
+
+    #[test]
+    fn a_pid_that_names_no_child_process_is_never_signalled() {
+        // Pid 0 names the caller's own process group, and a pid above
+        // `i32::MAX` wraps to a negative id naming an arbitrary group. Both
+        // would signal the test runner, so both are refused before any call.
+        for pid in [0, 2_147_483_648, u32::MAX] {
+            let control = PtyChildKillControl::new(pid);
+
+            assert_eq!(control.request_stop(), StopRequest::NotDelivered, "{pid}");
+            assert_eq!(
+                control.request_stop_tree(),
+                StopRequest::NotDelivered,
+                "{pid}"
+            );
+            assert_eq!(
+                control
+                    .force()
+                    .expect_err("nothing is signalled")
+                    .to_string(),
+                format!("pty signal error: pid {pid} names no child process")
+            );
+            assert_eq!(
+                control
+                    .tree()
+                    .expect_err("nothing is signalled")
+                    .to_string(),
+                format!("pty signal error: pid {pid} names no child process")
+            );
+        }
+    }
 }
 
 #[cfg(windows)]

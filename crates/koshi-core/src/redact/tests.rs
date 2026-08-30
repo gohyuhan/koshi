@@ -311,3 +311,11 @@ fn redact_string_hides_a_marker_holding_a_newline() {
     let out = redact_string("x\ny z", &[Marker::literal("x\ny")]);
     assert_eq!(out, "*** z");
 }
+
+#[test]
+fn redact_string_hides_a_self_overlapping_marker_fully() {
+    // The second occurrence of `abab` starts inside the first, so a scan that
+    // only found non-overlapping matches left its last two bytes readable.
+    assert_eq!(redact_string("ababab", &[Marker::literal("abab")]), "***");
+    assert_eq!(redact_string("aaaa", &[Marker::literal("aa")]), "***");
+}

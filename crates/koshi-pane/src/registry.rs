@@ -3,7 +3,7 @@
 //! A layout tree holds bare `PaneId` leaves. The registry holds everything else
 //! about a pane: its command, its working directory and its lifecycle state.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use koshi_core::ids::PaneId;
 use serde::{Deserialize, Serialize};
@@ -11,10 +11,11 @@ use serde::{Deserialize, Serialize};
 use crate::{error::PaneRegistryError, pane::state::PaneRecord};
 
 /// Owns the [`PaneRecord`] of every pane in one session, keyed by id. The map
-/// is private. Records go in and out only through the methods below.
+/// is private. Records go in and out only through the methods below, and it
+/// walks in id order.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PaneRegistry {
-    records: HashMap<PaneId, PaneRecord>,
+    records: BTreeMap<PaneId, PaneRecord>,
 }
 
 impl PaneRegistry {
@@ -62,8 +63,7 @@ impl PaneRegistry {
         self.records.get_mut(&pane_id)
     }
 
-    /// Returns an iterator over every registered pane record. The order is not
-    /// defined.
+    /// Returns an iterator over every registered pane record, in id order.
     pub fn list(&self) -> impl Iterator<Item = &PaneRecord> {
         self.records.values()
     }

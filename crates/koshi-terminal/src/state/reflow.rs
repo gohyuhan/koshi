@@ -118,13 +118,13 @@ impl TerminalState {
         }
 
         // Drop trailing rows below the cursor that end hard and hold only
-        // default blanks, down to the screen height. A styled blank row
-        // counts as content and stays.
+        // default blanks, down to the screen height. A styled blank row and a
+        // blank row carrying a prompt mark each count as content and stay.
         while rewrapped.len() > size.rows as usize
             && rewrapped.len() > new_cursor_physical + 1
-            && rewrapped
-                .last()
-                .is_some_and(|(row, meta)| meta.end == RowEnd::Hard && content_len(row) == 0)
+            && rewrapped.last().is_some_and(|(row, meta)| {
+                meta.end == RowEnd::Hard && !meta.prompt && content_len(row) == 0
+            })
         {
             rewrapped.pop();
         }

@@ -56,8 +56,8 @@ use crate::session::tab_ops::close_and_refocus_tab;
 /// `tab_rect` is the viewport the tab is solved against, needed to rank focus
 /// candidates geometrically. `sizing` carries the per-pane content minimum and
 /// the gap between split children. Returns the events for the caller to emit.
-/// An unknown pane changes nothing and emits no events; an unknown tab emits no
-/// events after the pane's registry record is dropped.
+/// An unknown pane, and a tab id the session does not hold, each change nothing
+/// and emit no events.
 #[must_use]
 pub fn remove_pane_cascade(
     session: &mut Session,
@@ -67,15 +67,15 @@ pub fn remove_pane_cascade(
     sizing: PaneSizing,
     empty_tab_policy: EmptyTabPolicy,
 ) -> Vec<Event> {
-    // An unknown pane id changes nothing and emits no events.
-    if session.panes.remove(pane_id).is_none() {
+    // Both checks run before anything is removed, so an unknown pane and an
+    // unknown tab each leave the session as it was.
+    if !session.tabs.contains_key(&tab_id) || session.panes.remove(pane_id).is_none() {
         return Vec::new();
     }
-    // A tab id the session does not hold ends the cascade here, with no events;
-    // the pane's registry record is already gone.
-    let Some(tab) = session.tabs.get_mut(&tab_id) else {
-        return Vec::new();
-    };
+    let tab = session
+        .tabs
+        .get_mut(&tab_id)
+        .expect("the tab was checked above");
 
     let mut events = vec![
         Event::PaneClosing(PaneClosing { pane_id }),

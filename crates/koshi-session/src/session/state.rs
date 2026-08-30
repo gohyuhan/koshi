@@ -1,7 +1,7 @@
 //! Session state model: the aggregate root a server process owns for each
 //! running session.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use koshi_core::{
@@ -92,13 +92,15 @@ impl Tab {
     }
 
     /// Records `pane` as the most-recently focused: moves it to the front,
-    /// keeping one entry per pane, and drops the oldest once the cap is hit.
+    /// keeping one entry per pane, then cuts the history back to
+    /// [`MAX_TAB_FOCUS_MRU`] entries, dropping the oldest.
+    ///
+    /// A history restored longer than the cap — a session file this process did
+    /// not write — is cut to the cap by this one call, not by one entry.
     pub fn record_focus_mru(&mut self, pane: PaneId) {
         self.focus_mru.retain(|&p| p != pane);
         self.focus_mru.insert(0, pane);
-        if self.focus_mru.len() as u16 > MAX_TAB_FOCUS_MRU {
-            self.focus_mru.pop();
-        }
+        self.focus_mru.truncate(usize::from(MAX_TAB_FOCUS_MRU));
     }
 
     /// The panes this tab has focused, most-recent first.
@@ -297,14 +299,18 @@ impl Session {
     /// against the pane registry and every registry record against the layout
     /// trees; and each attached client's session id, active tab, focus and
     /// zoom. See [`SessionConsistencyError`] for the individual checks. The
-    /// returned violations arrive in no defined order.
+    /// returned violations arrive in a fixed order: the checks run in the order
+    /// listed above, and each one walks its own subjects by id or by bar index,
+    /// so one session always reports the same list.
     pub fn validate(&self) -> Result<(), Vec<SessionConsistencyError>> {
         let mut violations = vec![];
         // Pane id -> the tabs whose layout holds it as a leaf. Built once here,
-        // then reused to check the leaf/registry relationship in both directions.
-        let mut panes_in_layout_nodes: HashMap<PaneId, Vec<TabId>> = HashMap::new();
+        // then reused to check the leaf/registry relationship in both
+        // directions. Sorted, so two violations from one walk always come out
+        // in the same order.
+        let mut panes_in_layout_nodes: BTreeMap<PaneId, Vec<TabId>> = BTreeMap::new();
         // Bar position -> how many tabs claim it, to catch collisions.
-        let mut tab_index_counts: HashMap<usize, usize> = HashMap::new();
+        let mut tab_index_counts: BTreeMap<usize, usize> = BTreeMap::new();
 
         for (tab_id, tab) in self.tabs.iter() {
             // Every tab is keyed under its own id.

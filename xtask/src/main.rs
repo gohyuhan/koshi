@@ -5,14 +5,21 @@
 //! edges. Arguments after the command are ignored. Any other command, for
 //! example `foo`, prints ``xtask: unknown command `foo` `` and then the usage
 //! text on stderr and exits with a failure code. No argument at all prints
-//! the usage text alone and exits with a failure code.
+//! the usage text alone and exits with a failure code. An argument that is not
+//! valid Unicode is read with each bad byte replaced by `U+FFFD` and reported
+//! as an unknown command.
 
 use std::process::ExitCode;
 
 mod dep_guard;
 
 fn main() -> ExitCode {
-    match std::env::args().nth(1).as_deref() {
+    let command = std::env::args_os().nth(1);
+    match command
+        .as_deref()
+        .map(|arg| arg.to_string_lossy())
+        .as_deref()
+    {
         Some("dep-guard") => dep_guard::run(),
         Some(other) => {
             eprintln!("xtask: unknown command `{other}`");

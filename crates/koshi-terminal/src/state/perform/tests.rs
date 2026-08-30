@@ -661,6 +661,19 @@ fn sgr_truecolor_colon_form_with_empty_colorspace_id() {
 }
 
 #[test]
+fn sgr_truecolor_colon_form_reads_the_channels_after_the_colorspace_slot() {
+    // The full ITU direct-colour form:
+    // `2:<colorspace>:<r>:<g>:<b>:<unused>:<tolerance>`. The channels are the
+    // three after the colorspace slot, never the last three.
+    let mut state = state(5, 2);
+    advance(&mut state, b"\x1b[38:2:1:255:0:0:0:5m");
+    assert_eq!(
+        state.active_render().style,
+        styled(|s| s.set_fg(Color::Rgb(255, 0, 0)))
+    );
+}
+
+#[test]
 fn sgr_combines_multiple_codes_in_one_sequence() {
     let mut state = state(5, 2);
     advance(&mut state, b"\x1b[1;4;38;5;200;48;2;1;2;3m");
@@ -5536,4 +5549,17 @@ fn dec_1049_entry_while_already_on_the_alternate_changes_nothing() {
     assert_eq!(state.active_cursor_position(), (0, 3)); // not re-seeded
     assert_eq!(state.primary_cursor.saved, None); // primary cursor not stashed
     assert_eq!(state.alternate_cursor.saved, None);
+}
+
+#[test]
+fn a_wrap_on_the_last_row_below_the_region_leaves_the_row_hard() {
+    // The cursor is on the last grid row and outside the scroll region, so the
+    // line feed neither moves it nor scrolls: no row follows this one, so the
+    // row is not marked as continuing into one.
+    let mut state = state(3, 4);
+    advance(&mut state, b"\x1b[1;2r\x1b[4;1H");
+    print_str(&mut state, "abcd");
+
+    assert_eq!(state.active_cursor_position(), (3, 1));
+    assert_eq!(state.active_grid().row_end(3), RowEnd::Hard);
 }

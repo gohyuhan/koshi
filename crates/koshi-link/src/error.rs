@@ -1,6 +1,6 @@
 //! CLI binary error and its exit-code mapping.
 //!
-//! [`CliError`](crate::error::CliError) enumerates the failure classes the
+//! [`CliError`] enumerates the failure classes the
 //! `koshi` binary terminates on. The `From<&CliError> for CliExitCode` impl
 //! below is the single error-to-exit-code table. Success is exit 0.
 

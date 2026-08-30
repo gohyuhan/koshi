@@ -1305,3 +1305,62 @@ mod bridge_round_trip {
         );
     }
 }
+
+/// A writer that records what it was given and the deadline it was handed.
+struct DeadlineWriter {
+    /// Every byte written, in order.
+    bytes: Vec<u8>,
+    /// The deadline last set on this writer.
+    deadline: Option<Instant>,
+}
+
+impl Write for DeadlineWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Deadlined for DeadlineWriter {
+    fn set_deadline(&mut self, at: Option<Instant>) {
+        self.deadline = at;
+    }
+}
+
+#[test]
+fn a_refusal_written_before_admission_never_outlives_the_admission_window() {
+    // The caller still holds its admission place while the refusal is written,
+    // so that write cannot be given a window of its own past the deadline.
+    let admission_ends = Instant::now() + Duration::from_millis(1);
+    let mut writer = DeadlineWriter {
+        bytes: Vec::new(),
+        deadline: Some(admission_ends),
+    };
+
+    refuse_by(&mut writer, refusal_deadline(admission_ends));
+
+    assert_eq!(
+        writer.deadline.expect("a refusal is given a deadline"),
+        admission_ends
+    );
+    assert!(!writer.bytes.is_empty(), "the refusal frame is written");
+}
+
+#[test]
+fn a_refusal_after_admission_gets_the_whole_refusal_window() {
+    let mut writer = DeadlineWriter {
+        bytes: Vec::new(),
+        deadline: None,
+    };
+    let before = Instant::now();
+
+    refuse(&mut writer);
+
+    let given = writer.deadline.expect("a refusal is given a deadline");
+    assert!(given >= before + REFUSAL_WINDOW);
+    assert!(given <= Instant::now() + REFUSAL_WINDOW);
+}

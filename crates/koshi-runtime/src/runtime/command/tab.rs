@@ -228,15 +228,10 @@ impl Server {
             self.reflow_tab_if_viewed(backend.as_ref(), session_id, destination, &mut events);
         }
 
-        // Kill the children off-thread; a graceful kill can sleep out its
-        // grace window and the dispatcher keeps draining. One thread per pane:
-        // every child receives its stop request immediately, and each kill
-        // also purges the backend's own entry for its pane.
+        // One thread per pane, so every child receives its stop request
+        // immediately.
         for (pane_id, kill_policy) in kills {
-            let backend = Arc::clone(&backend);
-            let _ = thread::spawn(move || {
-                let _ = backend.kill(pane_id, kill_policy);
-            });
+            super::kill_off_thread(&backend, pane_id, kill_policy);
         }
 
         Ok(Self::commit_events(&mut self.event_bus, command_id, events))

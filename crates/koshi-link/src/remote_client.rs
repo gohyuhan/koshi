@@ -3,24 +3,24 @@
 //!
 //! A user names a server either by the address it listens on, `host:port`, or
 //! by the name they gave it when they first connected.
-//! [`resolve_server`](crate::remote_client::resolve_server) turns what they
+//! [`resolve_server`] turns what they
 //! typed into one of the two, reading the saved-server store on this machine.
 //!
 //! The secret from a grant never arrives as a command-line argument.
-//! [`secret_for`](crate::remote_client::secret_for) reads it from
+//! [`secret_for`] reads it from
 //! `KOSHI_REMOTE_SECRET`, or asks for it at the terminal without printing
 //! what is typed.
 //!
-//! [`connect`](crate::remote_client::connect) opens the TLS stream, presents
+//! [`connect`] opens the TLS stream, presents
 //! the secret, and hands back a
-//! [`RemoteLink`](crate::remote_client::RemoteLink) once the server answers
-//! `Welcome`. [`connect_saved`](crate::remote_client::connect_saved) wraps
+//! [`RemoteLink`] once the server answers
+//! `Welcome`. [`connect_saved`] wraps
 //! that with the store: a server reached for the first time is saved with the
 //! fingerprint it presented, and a saved one has its last-used time stamped.
 //!
 //! From an open link a caller lists the sessions the secret reaches, attaches
 //! to one, submits one command to one, or asks one to describe itself.
-//! [`reach_all`](crate::remote_client::reach_all) asks every saved server at
+//! [`reach_all`] asks every saved server at
 //! once and returns inside one deadline, whatever the servers do.
 //!
 //! Every TLS and remote-frame detail stays inside this module. Callers name
@@ -177,9 +177,16 @@ pub enum Reach {
         /// The server's name when it has one, else its address.
         server: String,
     },
+    /// The server answered and presented a certificate other than the one
+    /// pinned for it.
+    CertificateChanged {
+        /// The server's name when it has one, else its address.
+        server: String,
+        /// The sentence naming the pinned and the presented certificate.
+        detail: String,
+    },
     /// The server could not be reached, was still unanswered at the deadline,
-    /// presented a certificate other than the one pinned for it, or answered a
-    /// frame the request cannot produce.
+    /// or answered a frame the request cannot produce.
     Unreachable {
         /// The server's name when it has one, else its address.
         server: String,
@@ -363,24 +370,37 @@ fn server_from(found: Lookup<'_>, arg: &str) -> Result<ServerArg, CliError> {
     }
 }
 
-/// Whether `arg` has the `host:port` shape: text before the last colon, and a
-/// port number after it.
+/// Whether `arg` has the `host:port` shape: a host before the last colon, and
+/// a port of decimal digits after it.
+///
+/// A host holding a colon of its own must be bracketed, so a bare IPv6 literal
+/// is not an address. The port is digits alone: no sign and no spaces.
 ///
 /// Example — `laptop.local:7654` and `[::1]:22` are addresses; `work`,
-/// `laptop.local` and `laptop.local:door` are not.
+/// `laptop.local`, `laptop.local:door`, `fe80::1` and `desk.local:+7654` are
+/// not.
 #[must_use]
 pub fn looks_like_address(arg: &str) -> bool {
-    match arg.rsplit_once(':') {
-        Some((host, port)) => !host.is_empty() && port.parse::<u16>().is_ok(),
-        None => false,
+    let Some((host, port)) = arg.rsplit_once(':') else {
+        return false;
+    };
+    if host.is_empty() || port.is_empty() {
+        return false;
     }
+    let host_is_shaped = !host.contains(':') || (host.starts_with('[') && host.ends_with(']'));
+    host_is_shaped && port.bytes().all(|b| b.is_ascii_digit()) && port.parse::<u16>().is_ok()
 }
 
-/// Refuse a saved name that has the `host:port` shape.
+/// Refuse a saved name that is empty or has the `host:port` shape.
 ///
 /// # Errors
-/// [`CliError::InvalidArgs`] naming the shape.
+/// [`CliError::InvalidArgs`] naming the shape, and for an empty name.
 pub fn check_name_shape(name: &str) -> Result<(), CliError> {
+    if name.is_empty() {
+        return Err(CliError::InvalidArgs {
+            detail: "a saved name must not be empty. Pick a plain name.".to_string(),
+        });
+    }
     if looks_like_address(name) {
         return Err(CliError::InvalidArgs {
             detail: format!(
@@ -408,7 +428,7 @@ pub fn check_save_as(name: &str, address: &str) -> Result<(), CliError> {
         let taken = store
             .records
             .iter()
-            .find(|record| record.name.as_deref() == Some(name))
+            .find(|record| record.name.as_deref() == Some(name) || record.address == name)
             .map(|record| record.address.clone())
             .unwrap_or_default();
         return Err(CliError::InvalidArgs {
@@ -963,6 +983,7 @@ fn server_of(reach: &Reach) -> &str {
     match reach {
         Reach::Reached { server, .. }
         | Reach::Refused { server }
+        | Reach::CertificateChanged { server, .. }
         | Reach::Unreachable { server }
         | Reach::Unchecked { server } => server,
     }
@@ -994,8 +1015,11 @@ fn complete_sweep(mut heard: Vec<Reach>, mut asked: Vec<String>) -> Vec<Reach> {
 /// A record pinning no certificate is [`Reach::Unchecked`] and is not dialled.
 ///
 /// A failure carrying [`CliError::Runtime`] — every refusal the server sent —
-/// is [`Reach::Refused`]. Every other failure, the changed certificate among
-/// them, is [`Reach::Unreachable`].
+/// is [`Reach::Refused`]. A dial refused with [`CliError::IpcUnavailable`] is
+/// the pinned-certificate check and is [`Reach::CertificateChanged`]:
+/// [`dial_failed`] is the only place that builds one, and every refusal
+/// [`check_answer`] builds carries [`CliError::Runtime`]. Every other failure
+/// is [`Reach::Unreachable`].
 ///
 /// The time left until `deadline` is given to the dial and again to the reply,
 /// so this returns up to twice that after `deadline` passes. Writes no file.
@@ -1013,6 +1037,9 @@ fn probe(record: &SavedServer, deadline: Instant) -> Reach {
         Some(left),
     ) {
         Ok(link) => link,
+        Err(DialError::Refused(CliError::IpcUnavailable { detail })) => {
+            return Reach::CertificateChanged { server, detail }
+        }
         Err(error) => match CliError::from(error) {
             CliError::Runtime { .. } => return Reach::Refused { server },
             _ => return Reach::Unreachable { server },

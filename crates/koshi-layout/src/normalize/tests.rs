@@ -312,6 +312,54 @@ fn merge_is_skipped_when_inner_flex_weights_would_overflow_their_sum() {
     assert_eq!(normalized.leaf_panes(), [a, b, c]);
 }
 
+/// Four horizontal child splits whose inner weight sums each reach
+/// `u32::MAX`, so the product of the four factors fills most of a `u128`.
+/// `extra` names the plain sibling placed before them, or `None` for no
+/// sibling.
+fn near_u128_product_tree(extra: Option<(PaneId, Weight)>) -> (LayoutNode, Vec<PaneId>) {
+    let mut children = Vec::new();
+    let mut weights = Vec::new();
+    let mut panes = Vec::new();
+    if let Some((pane, share)) = extra {
+        panes.push(pane);
+        children.push(leaf(pane));
+        weights.push(flex(share));
+    }
+    for _ in 0..4 {
+        let (x, y) = (PaneId::new(), PaneId::new());
+        panes.extend([x, y]);
+        let mut inner =
+            SplitNode::with_equal_weights(SplitDirection::Horizontal, vec![leaf(x), leaf(y)]);
+        inner.weights = vec![flex(u32::MAX - 1), flex(1)];
+        children.push(LayoutChild::new(LayoutNode::Split(inner)));
+        weights.push(flex(u32::MAX));
+    }
+    (row(children, weights), panes)
+}
+
+#[test]
+fn merge_is_skipped_when_a_rescaled_inner_share_overflows_u128() {
+    // The four factors multiply to (u32::MAX)^4, which fits u128, but an
+    // inner share rescaled by its slot weight and that product does not.
+    let (tree, panes) = near_u128_product_tree(None);
+
+    let normalized = normalize(&tree, &live(&panes)).unwrap();
+
+    assert_eq!(normalized, tree, "the split stays nested");
+}
+
+#[test]
+fn merge_is_skipped_when_a_kept_siblings_rescale_overflows_u128() {
+    // The kept sibling's own share is multiplied by the whole product, which
+    // is already past u128::MAX / 2.
+    let a = PaneId::new();
+    let (tree, panes) = near_u128_product_tree(Some((a, 2)));
+
+    let normalized = normalize(&tree, &live(&panes)).unwrap();
+
+    assert_eq!(normalized, tree, "the split stays nested");
+}
+
 #[test]
 fn merge_is_skipped_when_the_slot_weight_carries_a_min_overlay() {
     // The nested split's own weights are plain flex, but the slot that

@@ -945,7 +945,12 @@ fn partial_tail(haystack: &[u8], needle: &[u8]) -> usize {
 
 #[cfg(any(windows, test))]
 impl<R: Read> Read for RemovesCursorRequest<R> {
+    /// An empty `buf` reads `0` bytes, holds whatever is pending, and reads
+    /// nothing from the inner reader.
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
         loop {
             if !self.pending.is_empty() {
                 return Ok(self.drain_pending(buf));
@@ -1982,7 +1987,9 @@ impl PtyBackend for PortablePtyBackend {
     ///
     /// # Errors
     /// Returns [`PtyError::Spawn`] if the PTY can't be opened, the command can't
-    /// be launched, or the master's reader/writer can't be taken.
+    /// be launched, the master's reader/writer can't be taken, or the backend
+    /// already holds `pane_id` — `pane <id> is already open`. A refused
+    /// respawn kills the child it launched and leaves the live pane untouched.
     fn spawn(
         &self,
         pane_id: PaneId,
@@ -2157,25 +2164,26 @@ impl PtyBackend for PortablePtyBackend {
         let exited = Arc::new(AtomicBool::new(false));
         let exit_seen = Arc::new(OnceLock::new());
 
-        // Every fallible step is past: the watcher thread below owns the child
-        // and reaps it. Disarm the guard.
-        let child = child.disarm();
-
-        // 7. Take the pane map now and hold it until this pane is in it. Every
-        //    fallible step is behind us: nothing below returns early holding
-        //    the lock. A short-lived child can be reaped and its exit handed
-        //    to the consumer before this call returns; a `kill` from inside
-        //    that call blocks here until the insert lands, and then finds the
-        //    pane. None of the threads started below touch this map.
+        // 7. Take the pane map now and hold it until this pane is in it. A
+        //    short-lived child can be reaped and its exit handed to the
+        //    consumer before this call returns; a `kill` from inside that call
+        //    blocks here until the insert lands, and then finds the pane. None
+        //    of the threads started below touch this map.
         //
-        //    The caller owns the id and must not reuse a live one: spawning
-        //    over a live entry drops its terminal and I/O threads on the
-        //    floor.
+        //    An id the backend already holds is refused here, with the map
+        //    locked. The entry it would replace keeps its terminal and its I/O
+        //    threads, and the guard is still armed, so it kills the child
+        //    launched above.
         let mut panes = self.panes.lock().unwrap();
-        debug_assert!(
-            !panes.contains_key(&pane_id),
-            "spawn into an already-live pane id {pane_id}; kill it before respawning"
-        );
+        if panes.contains_key(&pane_id) {
+            return Err(PtyError::Spawn {
+                detail: format!("pane {pane_id} is already open"),
+            });
+        }
+
+        // That refusal is the last step that returns early: the watcher thread
+        // below owns the child and reaps it. Disarm the guard.
+        let child = child.disarm();
 
         // 8. Writer thread: drain the input channel onto the terminal. A write
         //    to a child that has stopped reading blocks only that thread,

@@ -370,7 +370,8 @@ impl Grid {
     /// Insert `n` blank lines within the band `[first, last]` (both inclusive),
     /// shifting lines downward; lines pushed below the band are dropped. Blank
     /// lines are filled in `fill` style (background-color erase). Coordinates
-    /// outside the grid are no-ops.
+    /// outside the grid are no-ops, and an `n` of `0` leaves every row and
+    /// every row end as it was.
     pub fn insert_lines(&mut self, first: u16, last: u16, n: u16, fill: Style) {
         let (rows, cols) = self.dimensions();
         if first >= rows || last >= rows || first > last {
@@ -393,10 +394,12 @@ impl Grid {
         }
         // The row above the band and the band's bottom row both end hard:
         // each precedes a row it never wrapped into.
-        if first > 0 {
-            self.set_row_end(first - 1, RowEnd::Hard);
+        if insert_count > 0 {
+            if first > 0 {
+                self.set_row_end(first - 1, RowEnd::Hard);
+            }
+            self.set_row_end(last, RowEnd::Hard);
         }
-        self.set_row_end(last, RowEnd::Hard);
     }
 }
 
@@ -425,6 +428,10 @@ impl<'de> Deserialize<'de> for Grid {
         };
         if row_meta.len() != fields.rows.len() {
             return Err(de::Error::custom("grid row metadata does not match rows"));
+        }
+        let cols = fields.rows.first().map_or(0, Vec::len);
+        if fields.rows.iter().any(|row| row.len() != cols) {
+            return Err(de::Error::custom("grid rows differ in length"));
         }
         Ok(Grid {
             rows: fields.rows,

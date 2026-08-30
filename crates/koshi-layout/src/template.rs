@@ -106,16 +106,19 @@ impl TemplateNode {
     /// `horizontal(stack(a, b expanded), c)` yields `1` — leaf `b`, not the
     /// collapsed `a`.
     ///
-    /// A split with no children, or a stacked split whose `active` is past
-    /// its last child, contributes `0`: the result is the number of leaves
-    /// before that subtree.
+    /// A split with no children contributes `0`: the result is the number of
+    /// leaves before that subtree. A stacked split whose `active` is past its
+    /// last child expands its last child, the same clamp the solver applies
+    /// once the template is instantiated.
     #[must_use]
     pub fn first_visible_leaf(&self) -> usize {
         match self {
             Self::Leaf(_) => 0,
             Self::Split(split) => {
                 let pick = match split.direction {
-                    SplitDirection::Stacked => split.active,
+                    SplitDirection::Stacked => {
+                        split.active.min(split.children.len().saturating_sub(1))
+                    }
                     SplitDirection::Horizontal | SplitDirection::Vertical => 0,
                 };
                 let Some(child) = split.children.get(pick) else {

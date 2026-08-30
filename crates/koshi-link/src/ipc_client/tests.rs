@@ -832,6 +832,31 @@ fn a_session_whose_build_has_no_restart_request_reads_as_too_old() {
 }
 
 #[test]
+fn a_session_that_cannot_read_the_restart_request_reads_as_too_old() {
+    // A session older than the tolerant wire cannot decode the request at all,
+    // which says the same thing as naming the kind it lacks.
+    let runtime_dir = test_runtime_dir("restart-unreadable");
+    let session = SessionId::new();
+    let (server, _asked) = fake_answering_session(
+        &runtime_dir,
+        session,
+        IpcResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::MalformedRequest,
+            message: "the bytes received are not a request this build can read".to_string(),
+        }),
+    );
+
+    assert_eq!(
+        restart_running_session(&runtime_dir, session)
+            .expect("a session that cannot read the request is not an error"),
+        SessionRestart::TooOld
+    );
+
+    server.join().expect("fake session exits");
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+#[test]
 fn a_refused_restart_that_is_not_an_unknown_kind_carries_the_sessions_sentence() {
     let runtime_dir = test_runtime_dir("restart-refused");
     let session = SessionId::new();

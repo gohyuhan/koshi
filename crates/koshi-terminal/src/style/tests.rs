@@ -450,3 +450,25 @@ fn style_round_trips_through_serde() {
     let restored: Style = serde_json::from_value(value).expect("style deserializes");
     assert_eq!(restored, style);
 }
+
+#[test]
+fn a_word_read_back_keeps_only_the_bits_the_getters_read() {
+    // A spare bit and an undefined underline code both read as the default
+    // through every getter, so a word carrying them equals the default.
+    for word in [1u16 << 11, 1 << 15, 6 << 8, 7 << 8, 0xF800 | (7 << 8)] {
+        let attrs: AttrFlags =
+            serde_json::from_value(serde_json::json!(word)).expect("deserializes");
+        assert_eq!(all(attrs), all(AttrFlags::default()), "word {word}");
+        assert_eq!(attrs, AttrFlags::default(), "word {word}");
+    }
+
+    // A defined word is kept whole: bold plus a single underline.
+    let mut style = Style::default();
+    style.set_bold(true);
+    style.set_underline(UnderlineStyle::Single);
+    let defined = style.attrs();
+    let read_back: AttrFlags =
+        serde_json::from_value(serde_json::to_value(defined).expect("serializes"))
+            .expect("deserializes");
+    assert_eq!(read_back, defined);
+}

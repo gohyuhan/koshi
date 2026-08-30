@@ -335,7 +335,7 @@ pub fn client_rows(overviews: &[SessionOverview]) -> Vec<ClientRow> {
             overview.clients.iter().map(|client| ClientRow {
                 id: client.id,
                 session: overview.session.id,
-                session_name: overview.session.name.clone(),
+                session_name: sanitize_reported_text(&overview.session.name),
             })
         })
         .collect()

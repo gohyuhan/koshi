@@ -296,7 +296,8 @@ pub enum SessionRestart {
     /// Nothing advertises that session, or nothing listens behind the address
     /// it advertises, so nothing restarted.
     NotRunning,
-    /// The session runs a koshi build that has no restart request.
+    /// The session runs a koshi build that has no restart request: it named
+    /// the kind it lacks, or it could not read the request's bytes at all.
     TooOld,
 }
 
@@ -308,9 +309,10 @@ pub enum SessionRestart {
 ///
 /// A session that refuses the request gives [`CliError::IpcUnavailable`]
 /// carrying the sentence the session sent. A session whose build has no such
-/// request answers
-/// [`UnsupportedKind`](IpcErrorCode::UnsupportedKind), which reads as
-/// [`SessionRestart::TooOld`].
+/// request reads as [`SessionRestart::TooOld`]: one from this build or newer
+/// names the kind it lacks ([`UnsupportedKind`](IpcErrorCode::UnsupportedKind)),
+/// and one older than the tolerant wire cannot read the request at all
+/// ([`MalformedRequest`](IpcErrorCode::MalformedRequest)).
 pub fn restart_running_session(
     runtime_dir: &Path,
     session_id: SessionId,
@@ -326,7 +328,7 @@ pub fn restart_running_session(
     };
     match exchange(&endpoint, session_id, request, None) {
         Ok(IpcResult::Restarting) => Ok(SessionRestart::Restarting),
-        Ok(IpcResult::Error(refusal)) if refusal.code == IpcErrorCode::UnsupportedKind => {
+        Ok(IpcResult::Error(refusal)) if session_has_no_such_request(refusal.code) => {
             Ok(SessionRestart::TooOld)
         }
         Ok(IpcResult::Error(refusal)) => Err(refused(&refusal)),

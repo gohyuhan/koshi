@@ -253,12 +253,15 @@ enum SerializedLine {
     Legacy((Vec<Cell>, RowEnd)),
 }
 
+/// The stored form of a [`Scrollback`], as [`Deserialize`] reads it.
+///
+/// `byte_total` is not read: it is derived from `lines` instead, so a stored
+/// total that does not match the rows cannot underflow the first eviction.
 #[derive(Deserialize)]
 struct ScrollbackFields {
     lines: VecDeque<SerializedLine>,
     max_lines: usize,
     max_bytes: usize,
-    byte_total: usize,
     total_pushed: u64,
     dropped_lines: u64,
     dropped_bytes: u64,
@@ -278,15 +281,21 @@ impl<'de> Deserialize<'de> for Scrollback {
                 SerializedLine::Legacy((cells, end)) => (cells, RowMeta { end, prompt: false }),
             })
             .collect();
-        Ok(Scrollback {
+        let mut scrollback = Scrollback {
             lines,
             max_lines: fields.max_lines,
             max_bytes: fields.max_bytes,
-            byte_total: fields.byte_total,
+            byte_total: 0,
             total_pushed: fields.total_pushed,
             dropped_lines: fields.dropped_lines,
             dropped_bytes: fields.dropped_bytes,
-        })
+        };
+        scrollback.byte_total = scrollback
+            .lines
+            .iter()
+            .map(|(cells, _)| scrollback.line_bytes(cells))
+            .sum();
+        Ok(scrollback)
     }
 }
 

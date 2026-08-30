@@ -1138,6 +1138,40 @@ fn one_write_takes_at_most_sixty_four_kib_and_write_all_delivers_the_rest() {
     assert_eq!(server.join().expect("the server thread finished"), sent);
 }
 
+#[test]
+fn a_write_after_a_write_that_ran_out_of_time_still_takes_bytes() {
+    // The timed-out write leaves 64 KiB of encrypted bytes queued. The next
+    // write drains them first, so it has room for its own plaintext.
+    let (config, _cert) = fresh_server();
+    let (address, server) = serve_after_handshake(config, |conn, sock| {
+        let (mut reader, _writer) = split_tls(conn, sock).expect("split the loopback stream");
+        let mut received = Vec::new();
+        let _ = reader.read_to_end(&mut received);
+        received.len()
+    });
+
+    let (reader, mut writer, _presented) =
+        dial(&address, None, LOOPBACK_WAIT).expect("the dial opens");
+    writer.set_deadline(Some(Instant::now()));
+    let held = writer
+        .write(&[0u8; ONE_WRITE_TAKES])
+        .expect_err("no time left ends the write");
+    assert_eq!(held.kind(), io::ErrorKind::TimedOut);
+
+    writer.set_deadline(None);
+    assert_eq!(
+        writer.write(b"after").expect("with time again it is taken"),
+        5
+    );
+
+    drop(writer);
+    drop(reader);
+    assert_eq!(
+        server.join().expect("the server thread finished"),
+        ONE_WRITE_TAKES + 5
+    );
+}
+
 /// How many bytes the blocked-write test sends: far past what the loopback
 /// socket buffers of any platform hold, so the write blocks on a peer that
 /// does not read.

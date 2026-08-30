@@ -196,6 +196,29 @@ fn a_protocol_refusal_carries_the_sentence_the_peer_sent() {
 }
 
 #[test]
+fn peer_text_reaches_the_message_filtered() {
+    assert_eq!(
+        detail(SESSION.unexpected_name("\u{1b}[2J\u{1b}[HRe\u{202e}homed")),
+        "the session answered with an unexpected [2J[HRehomed reply"
+    );
+
+    let refusal = IpcErrorPayload {
+        code: IpcErrorCode::Unknown,
+        message: "\u{1b}]0;pwned\u{7}refused".to_string(),
+    };
+    assert_eq!(detail(refused(&refusal)), "]0;pwnedrefused");
+
+    let long = IpcErrorPayload {
+        code: IpcErrorCode::Unknown,
+        message: "a".repeat(100_000),
+    };
+    assert_eq!(
+        detail(refused(&long)).len(),
+        koshi_core::text::MAX_REPORTED_TEXT_BYTES
+    );
+}
+
+#[test]
 fn each_peer_reads_its_range_from_the_versioned_surface_table() {
     assert_eq!(SESSION.surface, koshi_core::compat::SESSION_PROTOCOL);
     assert_eq!(ROUTER.surface, koshi_core::compat::CONTROL_PROTOCOL);
@@ -409,5 +432,23 @@ fn the_client_refusal_names_the_flag_whatever_floor_it_is_given() {
         detail(refusal),
         "this session speaks protocol 0; --client needs a session started by koshi 0.4.0 or \
          later"
+    );
+}
+
+#[test]
+fn a_transport_failure_carrying_peer_bytes_is_filtered() {
+    // `MalformedFrame` carries the decoder's message, which quotes the name
+    // the peer sent.
+    let hostile = format!("unknown variant `{}Rehomed`", "\u{1b}[2J");
+
+    assert_eq!(
+        detail(talk_failed(IpcError::MalformedFrame {
+            detail: hostile.clone(),
+        })),
+        "ipc frame is not a readable message: unknown variant `[2JRehomed`"
+    );
+    assert!(
+        !detail(talk_failed(IpcError::MalformedFrame { detail: hostile })).contains('\u{1b}'),
+        "no escape byte reaches the sentence"
     );
 }

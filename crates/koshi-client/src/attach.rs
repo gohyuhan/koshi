@@ -705,8 +705,9 @@ fn attach_picked(runtime_dir: PathBuf) -> Result<(), CliError> {
 /// beside the name of the server serving it.
 ///
 /// A refused secret prints one stderr line naming the command that replaces
-/// it. A server not heard from, and a server pinning no certificate yet, each
-/// print one stderr line and contribute no rows.
+/// it. A server whose certificate changed, a server not heard from, and a
+/// server pinning no certificate yet, each print one stderr line and
+/// contribute no rows.
 fn reachable_rows() -> Vec<(String, RemoteSessionRow)> {
     let mut offered = Vec::new();
     for reach in remote_client::reach_all(REACH_WAIT) {
@@ -718,6 +719,9 @@ fn reachable_rows() -> Vec<(String, RemoteSessionRow)> {
                 "{server}: the saved secret was refused; \
                  run `koshi remote set-secret {server}`"
             ),
+            Reach::CertificateChanged { server, detail } => {
+                eprintln!("koshi: {server}: {detail} its sessions are not listed");
+            }
             Reach::Unreachable { server } => {
                 eprintln!("koshi: {server} did not answer; its sessions are not listed");
             }
@@ -904,6 +908,13 @@ fn attach_once(home: &Home, target: &SessionSelector) -> Result<Option<SessionId
     // `load` collects its warnings instead of logging them, so they are
     // replayed here.
     let (loaded, config_warnings) = koshi_link::config::load();
+    // The subscriber this client writes its own log through. `koshi attach`
+    // installs none before this point; a bare `koshi` already has one, and
+    // this call answers `AlreadyInitialized` for it.
+    let _ = koshi_observability::logging::init_tracing(koshi_link::config::logging_params(
+        loaded.app.as_ref(),
+        session_id,
+    ));
     for warning in &config_warnings {
         tracing::warn!("{warning}");
     }

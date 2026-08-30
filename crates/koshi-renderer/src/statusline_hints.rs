@@ -80,13 +80,13 @@ pub fn draw_hint_bar(dto: &StatuslineDto<'_>, area: RatatuiRect, buf: &mut Buffe
             };
             let line = chord_ribbon(theme, *chord, label.as_deref());
             if !paint_whole(buf, &mut x, area.y, right_edge, &line) {
-                draw_overflow_marker(buf, theme, x, area.y, right_edge);
+                draw_overflow_marker(buf, theme, x, area.y, area.x, right_edge);
                 return;
             }
         }
         let arrow = Line::from(Span::styled(" ▶ ", breadcrumb_arrow_style(theme)));
         if !paint_whole(buf, &mut x, area.y, right_edge, &arrow) {
-            draw_overflow_marker(buf, theme, x, area.y, right_edge);
+            draw_overflow_marker(buf, theme, x, area.y, area.x, right_edge);
             return;
         }
     }
@@ -109,11 +109,11 @@ pub fn draw_hint_bar(dto: &StatuslineDto<'_>, area: RatatuiRect, buf: &mut Buffe
             ))
         });
         let first_width = group.entries.first().map_or(0, |entry| {
-            entry_ribbon(entry, key_style, label_style).width() as u16
+            ribbon_width(&entry_ribbon(entry, key_style, label_style))
         });
-        let header_width = header.as_ref().map_or(0, |line| line.width() as u16);
+        let header_width = header.as_ref().map_or(0, ribbon_width);
         if x.saturating_add(header_width).saturating_add(first_width) > right_edge {
-            draw_overflow_marker(buf, theme, x, area.y, right_edge);
+            draw_overflow_marker(buf, theme, x, area.y, area.x, right_edge);
             return;
         }
         if let Some(header) = header {
@@ -122,7 +122,7 @@ pub fn draw_hint_bar(dto: &StatuslineDto<'_>, area: RatatuiRect, buf: &mut Buffe
         for entry in group.entries {
             let line = entry_ribbon(&entry, key_style, label_style);
             if !paint_whole(buf, &mut x, area.y, right_edge, &line) {
-                draw_overflow_marker(buf, theme, x, area.y, right_edge);
+                draw_overflow_marker(buf, theme, x, area.y, area.x, right_edge);
                 return;
             }
         }
@@ -131,8 +131,19 @@ pub fn draw_hint_bar(dto: &StatuslineDto<'_>, area: RatatuiRect, buf: &mut Buffe
 
 /// Mark dropped trailing hints with `…`. Painted at the current cursor, or
 /// over the row's last cell when the hints consumed the full width.
-fn draw_overflow_marker(buf: &mut Buffer, theme: &Theme, x: u16, y: u16, right_edge: u16) {
-    let x = x.min(right_edge.saturating_sub(1));
+///
+/// The column is held inside `left_edge..right_edge`: a `right_edge` the
+/// revert marker pulled down to `left_edge` paints on `left_edge`, never one
+/// column left of it.
+fn draw_overflow_marker(
+    buf: &mut Buffer,
+    theme: &Theme,
+    x: u16,
+    y: u16,
+    left_edge: u16,
+    right_edge: u16,
+) {
+    let x = x.min(right_edge.saturating_sub(1)).max(left_edge);
     let marker = Line::from(Span::styled("…", overflow_style(theme)));
     set_line_clipped(buf, x, y, &marker, 1);
 }
@@ -374,8 +385,15 @@ fn key_rank(key: Key) -> (u8, String) {
     (direction, human_key(key))
 }
 
+/// The cell width of `line`, held at `u16::MAX` for a line wider than that.
+///
+/// A width that wrapped would read as a line that fits.
+fn ribbon_width(line: &Line<'_>) -> u16 {
+    u16::try_from(line.width()).unwrap_or(u16::MAX)
+}
+
 fn paint_whole(buf: &mut Buffer, x: &mut u16, y: u16, right_edge: u16, line: &Line<'_>) -> bool {
-    let width = line.width() as u16;
+    let width = ribbon_width(line);
     if x.saturating_add(width) > right_edge {
         return false;
     }

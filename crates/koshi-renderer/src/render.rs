@@ -162,7 +162,8 @@ pub fn render_frame(
 ///
 /// Returns `None` when the client has no focused pane; that pane has no placed
 /// slot or no content snapshot; it is not visible or has no content area
-/// (suppressed, hidden, or a collapsed stack member); it has no terminal grid
+/// (suppressed, hidden, a collapsed stack member, or a slot of two or fewer
+/// columns or rows, whose content rect holds no cells); it has no terminal grid
 /// (a plugin pane, or a slot showing nothing this frame); its view is scrolled
 /// back into history (no hardware cursor is placed while scrolled); or the
 /// application has hidden its cursor.
@@ -186,6 +187,9 @@ pub fn cursor_position(
         return None;
     }
     let inner = slot.inner_rect?;
+    if inner.size.cols == 0 || inner.size.rows == 0 {
+        return None;
+    }
 
     let pane = find_pane(snapshot, focused)?;
     // A pane with no grid — a plugin pane — places no cursor.
@@ -637,11 +641,15 @@ pub(crate) fn content_rect(pane_area: RatatuiRect, effective: Size) -> RatatuiRe
 /// `content` rect — with a dim backdrop. Does nothing when the content fills the
 /// whole area.
 ///
-/// The margin is the four bands around `content`. Each band is restyled in
+/// The margin is the four bands around `content` once `content` is cut to
+/// `area`: a `content` solved for a larger viewport than `area` — a terminal
+/// shrink between the last committed solve and this paint — reaches past
+/// `area`, and the part outside it is not a band. Each band is restyled in
 /// place, never blanked: [`render_frame`] clears every cell of `area` before
 /// this runs. [`Buffer::set_style`] clips to the buffer, so an `area` larger
 /// than `buf` writes only inside `buf`.
 fn draw_letterbox(area: RatatuiRect, content: RatatuiRect, theme: &Theme, buf: &mut Buffer) {
+    let content = area.intersection(content);
     if content == area {
         return;
     }
@@ -659,7 +667,7 @@ fn draw_letterbox(area: RatatuiRect, content: RatatuiRect, theme: &Theme, buf: &
             x: area.x,
             y: content.bottom(),
             width: area.width,
-            height: area.bottom() - content.bottom(),
+            height: area.bottom().saturating_sub(content.bottom()),
         },
         // Left of the content, its own height.
         RatatuiRect {
@@ -672,7 +680,7 @@ fn draw_letterbox(area: RatatuiRect, content: RatatuiRect, theme: &Theme, buf: &
         RatatuiRect {
             x: content.right(),
             y: content.y,
-            width: area.right() - content.right(),
+            width: area.right().saturating_sub(content.right()),
             height: content.height,
         },
     ];

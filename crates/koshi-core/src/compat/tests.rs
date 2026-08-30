@@ -301,3 +301,15 @@ fn the_problem_message_carries_the_surface_name() {
         )
     );
 }
+
+#[test]
+fn a_released_value_at_the_top_of_the_range_is_held_without_overflow() {
+    let maxed = Surface {
+        name: "sample",
+        min: u32::MAX,
+        max: u32::MAX,
+        released: Some(u32::MAX),
+    };
+
+    assert_eq!(maxed.version_problem(), None);
+}

@@ -39,8 +39,10 @@ mod tests;
 
 /// Writes `data` to `dst`, replacing any existing file atomically.
 ///
-/// Joins a relative `dst` to the current directory once, at entry. Stages
-/// `data` in a private temp beside `dst`. On Unix the temp takes `dst`'s mode
+/// Joins a relative `dst` to the current directory once, at entry. An empty
+/// `dst` is [`StorageError::Io`] carrying `resolve cwd for : cannot make an
+/// empty path absolute`, and nothing is staged. Stages `data` in a private
+/// temp beside `dst`. On Unix the temp takes `dst`'s mode
 /// when `dst` is an existing regular file; a new file keeps the private `0600`
 /// default. Fsyncs the temp, renames it over `dst`, then fsyncs the directory
 /// on Unix. If any step up to and including the rename fails, removes the temp
@@ -64,6 +66,11 @@ pub fn write_atomic(dst: &Path, data: &[u8]) -> Result<(), StorageError> {
     // Joins a relative path to the current directory once. The temp and the
     // rename below use this path; a change of the working directory mid-call
     // moves neither of them.
+    if dst.as_os_str().is_empty() {
+        return Err(io_err(
+            "resolve cwd for : cannot make an empty path absolute".to_string(),
+        ));
+    }
     let anchored;
     let dst = if dst.is_absolute() {
         dst
@@ -110,11 +117,11 @@ fn persist_over(tmp: NamedTempFile, dst: &Path) -> Result<(), StorageError> {
 
 /// Renames the staged temp over `dst`, retrying up to 25 times. An attempt
 /// that fails with `ERROR_ACCESS_DENIED` (5) or `ERROR_SHARING_VIOLATION` (32)
-/// while `dst` is not a directory is retried after a sleep of `attempt * 4`
-/// milliseconds (4 ms after the first attempt, 96 ms after the 24th). Any
-/// other error, a directory at `dst`, or a failed 25th attempt is reported at
-/// once as [`StorageError::Io`]. A failed persist drops the temp, which removes
-/// it; `dst` is untouched.
+/// while `dst` is neither a directory nor a read-only file is retried after a
+/// sleep of `attempt * 4` milliseconds (4 ms after the first attempt, 96 ms
+/// after the 24th). Any other error, a directory or a read-only file at `dst`,
+/// or a failed 25th attempt is reported at once as [`StorageError::Io`]. A
+/// failed persist drops the temp, which removes it; `dst` is untouched.
 #[cfg(windows)]
 fn persist_over(mut tmp: NamedTempFile, dst: &Path) -> Result<(), StorageError> {
     const MAX_ATTEMPTS: u32 = 25;
@@ -126,8 +133,12 @@ fn persist_over(mut tmp: NamedTempFile, dst: &Path) -> Result<(), StorageError> 
                 e.error
             }
         };
-        // 5 = ERROR_ACCESS_DENIED, 32 = ERROR_SHARING_VIOLATION.
-        let transient = matches!(err.raw_os_error(), Some(5) | Some(32)) && !dst.is_dir();
+        // 5 = ERROR_ACCESS_DENIED, 32 = ERROR_SHARING_VIOLATION. A directory
+        // and a read-only file at `dst` refuse the rename however often it is
+        // tried.
+        let read_only = fs::metadata(dst).is_ok_and(|meta| meta.permissions().readonly());
+        let transient =
+            matches!(err.raw_os_error(), Some(5) | Some(32)) && !dst.is_dir() && !read_only;
         if attempt == MAX_ATTEMPTS || !transient {
             return Err(io_err(format!("replace {}: {err}", dst.display())));
         }

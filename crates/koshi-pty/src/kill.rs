@@ -69,11 +69,28 @@ impl PtyChildKillControl {
         PtyChildKillControl { pid }
     }
 
+    /// The process this control signals, or `None` when the pid names no child.
+    ///
+    /// `0` names the caller's own process group, and a pid above `i32::MAX`
+    /// wraps to a negative id naming an arbitrary process group. Neither is a
+    /// child, so neither is signalled.
+    fn target(&self) -> Option<Pid> {
+        let pid = i32::try_from(self.pid).ok()?;
+        (pid > 0).then(|| Pid::from_raw(pid))
+    }
+
     /// Send `signal` to the child (`kill`) or, when `whole_group`, to its whole
     /// process group (`killpg`). Any error maps to [`PtyError::Signal`]
     /// carrying the errno's name and description (`ESRCH: No such process`).
+    ///
+    /// A pid of `0`, and one above `i32::MAX`, is [`PtyError::Signal`] carrying
+    /// `pid <n> names no child process`, and nothing is signalled.
     fn signal(&self, whole_group: bool, signal: Signal) -> Result<(), PtyError> {
-        let pid = Pid::from_raw(self.pid as i32);
+        let Some(pid) = self.target() else {
+            return Err(PtyError::Signal {
+                detail: format!("pid {} names no child process", self.pid),
+            });
+        };
         let sent = if whole_group {
             killpg(pid, signal)
         } else {
@@ -106,9 +123,14 @@ impl PtyChildKillControl {
     /// SIGTERM the child, asking it to exit on its own.
     ///
     /// Any error answers [`StopRequest::NotDelivered`]: `ESRCH` when the
-    /// child is already gone, `EPERM` when this process may not signal it.
+    /// child is already gone, `EPERM` when this process may not signal it. A
+    /// pid of `0`, and one above `i32::MAX`, answers
+    /// [`StopRequest::NotDelivered`] with nothing signalled.
     pub fn request_stop(&self) -> StopRequest {
-        match kill(Pid::from_raw(self.pid as i32), Signal::SIGTERM) {
+        let Some(pid) = self.target() else {
+            return StopRequest::NotDelivered;
+        };
+        match kill(pid, Signal::SIGTERM) {
             Ok(()) => StopRequest::Delivered,
             Err(_) => StopRequest::NotDelivered,
         }
@@ -120,9 +142,13 @@ impl PtyChildKillControl {
     /// `EPERM` answers [`StopRequest::Unknown`]: it reports that at least one
     /// member could not be signalled, and the remaining members may still
     /// have received the signal. Any other error (`ESRCH` when no group
-    /// carries the child's PID) answers [`StopRequest::NotDelivered`].
+    /// carries the child's PID) answers [`StopRequest::NotDelivered`], and so
+    /// does a pid of `0` or one above `i32::MAX`, with nothing signalled.
     pub fn request_stop_tree(&self) -> StopRequest {
-        match killpg(Pid::from_raw(self.pid as i32), Signal::SIGTERM) {
+        let Some(pid) = self.target() else {
+            return StopRequest::NotDelivered;
+        };
+        match killpg(pid, Signal::SIGTERM) {
             Ok(()) => StopRequest::Delivered,
             Err(Errno::EPERM) => StopRequest::Unknown,
             Err(_) => StopRequest::NotDelivered,

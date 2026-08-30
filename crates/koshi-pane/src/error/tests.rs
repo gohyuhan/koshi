@@ -23,7 +23,7 @@ fn a_duplicate_id_error_names_the_pane_in_its_message() {
 
     assert_eq!(
         error.to_string(),
-        format!("pane pane-{} is already registered", id.as_uuid())
+        format!("pane-{} is already registered", id.as_uuid())
     );
 }
 

@@ -114,9 +114,11 @@ fn lerp(a: u8, b: u8, num: usize, den: usize) -> u8 {
     if den == 0 {
         return a;
     }
-    let a = i32::from(a);
-    let b = i32::from(b);
-    let mixed = a + (b - a) * (num as i32) / (den as i32);
+    let a = i128::from(a);
+    let b = i128::from(b);
+    // `i128` holds every `usize` on every target this builds for, so a long
+    // run never wraps its denominator negative and flips the interpolation.
+    let mixed = a + (b - a) * (num as i128) / (den as i128);
     mixed.clamp(0, 255) as u8
 }
 

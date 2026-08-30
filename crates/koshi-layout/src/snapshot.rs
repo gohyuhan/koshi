@@ -19,7 +19,10 @@ pub struct StackSnapshot {
     /// Index of the expanded member.
     pub active: usize,
     /// Per-member collapsed flags, parallel to `members`, exactly as
-    /// captured. [`StackSnapshot::restore`] applies them as stored.
+    /// captured. [`StackSnapshot::restore`] applies them as stored. A stored
+    /// shape without the field reads as an empty list, and `restore` then
+    /// derives every flag from `active`.
+    #[serde(default)]
     pub collapsed_states: Vec<bool>,
 }
 

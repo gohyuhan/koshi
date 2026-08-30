@@ -63,10 +63,31 @@ fn osc133_rejects_unrelated_and_malformed_payloads() {
     assert_invalid(&[b"7", b"A"]);
     assert_invalid(&[b"133"]);
     assert_invalid(&[b"133", b"E"]);
-    assert_invalid(&[b"133", b"A", b"extra"]);
-    assert_invalid(&[b"133", b"D", b""]);
     assert_invalid(&[b"133", b"D", b"not-a-number"]);
-    assert_invalid(&[b"133", b"D", b"0", b"extra"]);
+}
+
+#[test]
+fn osc133_markers_carrying_shell_options_are_still_recognized() {
+    // A shell integration appends `key=value` options after the marker, and
+    // after the exit code on `D`.
+    assert_eq!(
+        parse_osc133(&[b"133", b"A", b"cl=m", b"aid=1"]),
+        Some(Osc133::Prompt)
+    );
+    assert_eq!(parse_osc133(&[b"133", b"B", b"aid=1"]), Some(Osc133::Input));
+    assert_eq!(
+        parse_osc133(&[b"133", b"C", b""]),
+        Some(Osc133::CommandStart)
+    );
+    assert_eq!(
+        parse_osc133(&[b"133", b"D", b"0", b"aid=1"]),
+        Some(Osc133::CommandFinished(Some(0)))
+    );
+    assert_eq!(
+        parse_osc133(&[b"133", b"D", b""]),
+        Some(Osc133::CommandFinished(None)),
+        "an empty first parameter carries no code"
+    );
 }
 
 #[test]
@@ -78,8 +99,6 @@ fn osc133_rejects_a_malformed_command_number_or_marker() {
     assert_invalid(&[b"0133", b"A"]);
     assert_invalid(&[b"1330", b"A"]);
     assert_invalid(&[b"", b"A"]);
-    assert_invalid(&[b"133", b"A", b""]);
-    assert_invalid(&[b"133", b"D", b"0", b""]);
 }
 
 fn assert_invalid(params: &[&[u8]]) {

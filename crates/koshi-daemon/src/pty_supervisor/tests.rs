@@ -1724,10 +1724,11 @@ fn a_send_parked_for_a_pane_being_closed_gives_up_and_leaves_the_others_parked()
 }
 
 #[test]
-fn a_send_for_a_pane_being_closed_gives_up_without_waiting_and_waits_again_once_it_is_closed() {
-    // A pane is let go, closed, then forgotten. A send arriving while it is
-    // being closed must answer at once rather than park; the list holds only
-    // the panes being closed right now, so a send after that parks as usual.
+fn a_send_for_a_closed_pane_gives_up_without_waiting_before_and_after_it_is_forgotten() {
+    // A pane is let go, closed, then forgotten. Every send for it answers at
+    // once rather than parking, both while it is being closed and afterwards:
+    // a reader that wakes late must not write a chunk to a link after the Kill
+    // that closed the pane was answered.
     let sink = LinkSink::new();
     let pane = PaneId::new();
 
@@ -1738,15 +1739,19 @@ fn a_send_for_a_pane_being_closed_gives_up_without_waiting_and_waits_again_once_
     );
 
     sink.forget(pane);
+    assert!(
+        !sink.output(pane, b"late".to_vec()),
+        "a chunk for a pane that is already closed is refused too"
+    );
+
+    // A pane the supervisor never closed still parks for a link.
+    let other = PaneId::new();
     let parked = {
         let sink = Arc::clone(&sink);
-        thread::spawn(move || sink.output(pane, b"parked".to_vec()))
+        thread::spawn(move || sink.output(other, b"parked".to_vec()))
     };
     thread::sleep(TEST_IDLE_EXIT);
-    assert!(
-        !parked.is_finished(),
-        "a pane the supervisor is no longer closing waits for a link again"
-    );
+    assert!(!parked.is_finished(), "a live pane waits for a link");
 
     sink.close();
     wait_until("the parked send gave up", || parked.is_finished());

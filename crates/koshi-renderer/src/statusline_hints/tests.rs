@@ -926,3 +926,54 @@ fn a_custom_theme_recolors_the_bar() {
         .expect("continuation key drawn");
     assert_eq!(buf[(n_x, 0)].fg, Color::Rgb(0xff, 0x00, 0x00));
 }
+
+#[test]
+fn the_overflow_marker_never_paints_left_of_the_area() {
+    // The revert marker fills the bar and pulls the right edge down to the
+    // area's own left edge, so the overflow marker has nowhere inside to go.
+    let keymap = KeymapHints {
+        reverted: true,
+        ..pane_fixture(false)
+    };
+    let mut buf = Buffer::empty(RatatuiRect {
+        x: 0,
+        y: 0,
+        width: 20,
+        height: 1,
+    });
+    buf.set_string(0, 0, "X".repeat(20), Style::default());
+
+    paint_bar(
+        &keymap,
+        &Theme::default(),
+        None,
+        RatatuiRect {
+            x: 5,
+            y: 0,
+            width: 6,
+            height: 1,
+        },
+        &mut buf,
+    );
+
+    let outside: String = (0..5).map(|x| buf[(x, 0)].symbol().to_string()).collect();
+    assert_eq!(outside, "XXXXX", "columns 0 to 4 belong to the caller");
+}
+
+#[test]
+fn a_hint_wider_than_the_cell_counter_is_dropped_behind_the_overflow_marker() {
+    // A ribbon of 65 536 cells reads as 65 535, which never fits, instead of
+    // wrapping to 0 and painting nothing where the marker belongs.
+    let long = "L".repeat(65_536 - 5);
+    let keymap = hints(
+        vec![
+            binding(seq(&[plain('a')]), &long, false, false),
+            binding(seq(&[plain('b')]), "Second", false, false),
+        ],
+        &[],
+        Vec::new(),
+        false,
+    );
+
+    assert_eq!(row_text(&draw(&keymap, 40)), "…");
+}

@@ -474,3 +474,18 @@ fn write_atomic_through_a_symlinked_parent_directory_lands_in_the_real_directory
     entries.sort();
     assert_eq!(entries, vec!["link".to_string(), "real".to_string()]);
 }
+
+#[test]
+fn an_empty_path_is_refused_before_a_temp_is_staged() {
+    // An empty path joined to the current directory names the directory
+    // itself, whose parent is where the temp would be staged.
+    let error = write_atomic(Path::new(""), b"x").expect_err("an empty path names no file");
+
+    let StorageError::Io { detail } = error else {
+        panic!("expected an Io error, got {error:?}");
+    };
+    assert_eq!(
+        detail,
+        "resolve cwd for : cannot make an empty path absolute"
+    );
+}

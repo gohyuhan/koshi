@@ -2037,6 +2037,34 @@ fn cursor_shifts_into_centered_content() {
 }
 
 #[test]
+fn a_pane_whose_content_rect_holds_no_cells_places_no_cursor() {
+    // A pane box of two columns insets to a zero-width content rect and is
+    // still marked visible: there is no cell inside it to put the cursor on.
+    let pane = PaneId::new();
+    let mut snap = build(
+        "sess",
+        &[("shell", true)],
+        &[(pane, rect(4, 5, 2, 1), true)],
+        Some(pane),
+        LockMode::Normal,
+        Size { cols: 40, rows: 10 },
+    );
+    snap.panes[0].grid_view = Some(GridView {
+        grid: Arc::new(Grid::blank(4, 1, TermStyle::default())),
+        view_offset: 0,
+    });
+    assert_eq!(
+        snap.session.active_tab.layout_solved[0]
+            .inner_rect
+            .expect("the slot is visible")
+            .size,
+        Size { cols: 0, rows: 0 }
+    );
+
+    assert_eq!(legacy_cursor(&snap), None);
+}
+
+#[test]
 fn letterbox_clips_to_a_buffer_smaller_than_the_area() {
     // A resize race can hand render_frame an `area` larger than the buffer. The
     // letterbox fill must clip to the buffer, not index out of bounds.
@@ -2072,6 +2100,42 @@ fn letterbox_clips_to_a_buffer_smaller_than_the_area() {
     // No panic, and a margin cell inside the smaller buffer still got the
     // fill (row 0 is the tabline's, so probe the margin band below it).
     assert_eq!(buf[(0, 1)].bg, Color::Rgb(0x58, 0x58, 0x58));
+}
+
+#[test]
+fn an_area_smaller_than_the_committed_regions_letterboxes_nothing_below_it() {
+    // A terminal shrink between the session's last viewport report and this
+    // paint: the committed solve is for 60x12, the render area only 30x6, so
+    // the centered content rect reaches past the area's bottom and right.
+    let pane = PaneId::new();
+    let snap = letterbox_snap(
+        pane,
+        Size { cols: 60, rows: 12 },
+        Size { cols: 40, rows: 8 },
+    );
+    let area = RatatuiRect {
+        x: 0,
+        y: 0,
+        width: 30,
+        height: 6,
+    };
+    let mut buf = Buffer::empty(area);
+    let regions = core_regions(60, 12);
+    render_frame(
+        &snap,
+        &regions,
+        &Theme::default(),
+        &KeymapHints::default(),
+        None,
+        ViewerChrome::default(),
+        area,
+        &mut buf,
+    );
+
+    // The content rect starts at column 10, row 2, so the band left of it
+    // carries the fill and the cells inside it do not.
+    assert_eq!(buf[(9, 5)].bg, Color::Rgb(0x58, 0x58, 0x58));
+    assert_eq!(buf[(10, 5)].bg, Color::Reset);
 }
 
 #[test]

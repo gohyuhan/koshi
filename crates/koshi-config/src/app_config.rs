@@ -38,7 +38,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use kdl::KdlNode;
+use kdl::{KdlDocument, KdlNode};
 use koshi_core::geometry::Direction;
 use koshi_core::log::{LogFormat, LogLevel};
 
@@ -212,6 +212,22 @@ fn set_top_level<T>(
     }
 }
 
+/// The `{ … }` block of a section node, warning about a value written on the
+/// section line, which no section reads.
+///
+/// `scrollback 5000` gives `None` and the warning ``ignored `scrollback`
+/// value: a section takes a `{ … }` block``. `scrollback { max-lines 5000 }`
+/// gives the block and no warning.
+fn section_block<'a>(node: &'a KdlNode, warnings: &mut Vec<String>) -> Option<&'a KdlDocument> {
+    if !node.entries().is_empty() {
+        warnings.push(format!(
+            "ignored `{}` value: a section takes a `{{ … }}` block",
+            node.name().value()
+        ));
+    }
+    node.children()
+}
+
 /// Reads the strict `update { … }` block. A field whose value is the wrong
 /// kind fails the whole parse; an unknown field is dropped with a warning.
 fn parse_update(
@@ -219,7 +235,7 @@ fn parse_update(
     warnings: &mut Vec<String>,
 ) -> Result<PartialUpdateConfig, ConfigError> {
     let mut update = PartialUpdateConfig::default();
-    let Some(children) = node.children() else {
+    let Some(children) = section_block(node, warnings) else {
         return Ok(update);
     };
     for child in children.nodes() {
@@ -249,7 +265,7 @@ fn parse_update(
 /// Reads the `pane { … }` block.
 fn parse_pane(node: &KdlNode, warnings: &mut Vec<String>) -> PartialPaneConfig {
     let mut cfg = PartialPaneConfig::default();
-    let Some(children) = node.children() else {
+    let Some(children) = section_block(node, warnings) else {
         return cfg;
     };
     for child in children.nodes() {
@@ -273,7 +289,7 @@ fn parse_pane(node: &KdlNode, warnings: &mut Vec<String>) -> PartialPaneConfig {
 /// Reads the `scrollback { … }` block.
 fn parse_scrollback(node: &KdlNode, warnings: &mut Vec<String>) -> PartialScrollbackConfig {
     let mut cfg = PartialScrollbackConfig::default();
-    let Some(children) = node.children() else {
+    let Some(children) = section_block(node, warnings) else {
         return cfg;
     };
     for child in children.nodes() {
@@ -319,7 +335,7 @@ fn parse_scrollback(node: &KdlNode, warnings: &mut Vec<String>) -> PartialScroll
 /// Reads the `layout { … }` block of default-layout settings.
 fn parse_layout_defaults(node: &KdlNode, warnings: &mut Vec<String>) -> PartialLayoutDefaults {
     let mut cfg = PartialLayoutDefaults::default();
-    let Some(children) = node.children() else {
+    let Some(children) = section_block(node, warnings) else {
         return cfg;
     };
     for child in children.nodes() {
@@ -344,7 +360,7 @@ fn parse_layout_defaults(node: &KdlNode, warnings: &mut Vec<String>) -> PartialL
 /// Reads the `mouse { … }` block.
 fn parse_mouse(node: &KdlNode, warnings: &mut Vec<String>) -> PartialMouseConfig {
     let mut cfg = PartialMouseConfig::default();
-    let Some(children) = node.children() else {
+    let Some(children) = section_block(node, warnings) else {
         return cfg;
     };
     for child in children.nodes() {
@@ -380,7 +396,7 @@ fn parse_mouse(node: &KdlNode, warnings: &mut Vec<String>) -> PartialMouseConfig
 /// Reads the `copy { … }` block.
 fn parse_copy(node: &KdlNode, warnings: &mut Vec<String>) -> PartialCopyConfig {
     let mut cfg = PartialCopyConfig::default();
-    let Some(children) = node.children() else {
+    let Some(children) = section_block(node, warnings) else {
         return cfg;
     };
     for child in children.nodes() {
@@ -405,7 +421,7 @@ fn parse_copy(node: &KdlNode, warnings: &mut Vec<String>) -> PartialCopyConfig {
 /// Reads the `terminal { … }` block.
 fn parse_terminal(node: &KdlNode, warnings: &mut Vec<String>) -> PartialTerminalConfig {
     let mut cfg = PartialTerminalConfig::default();
-    let Some(children) = node.children() else {
+    let Some(children) = section_block(node, warnings) else {
         return cfg;
     };
     for child in children.nodes() {
@@ -456,7 +472,7 @@ fn parse_terminal(node: &KdlNode, warnings: &mut Vec<String>) -> PartialTerminal
 /// Reads the `logging { … }` block.
 fn parse_logging(node: &KdlNode, warnings: &mut Vec<String>) -> PartialLoggingConfig {
     let mut cfg = PartialLoggingConfig::default();
-    let Some(children) = node.children() else {
+    let Some(children) = section_block(node, warnings) else {
         return cfg;
     };
     for child in children.nodes() {

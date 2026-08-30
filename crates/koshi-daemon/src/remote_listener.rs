@@ -68,9 +68,10 @@ use koshi_ipc::transport::{
 use crate::router::RouterEvent;
 
 /// How long the connection's thread spends on the TLS handshake, on reading
-/// the frame the caller opens with, and on writing the refusal that names both
-/// version ranges, counted from the moment that thread starts. [`refuse`]
-/// replaces this deadline with [`REFUSAL_WINDOW`].
+/// the frame the caller opens with, and on writing every refusal it answers
+/// before admission, counted from the moment that thread starts. A caller that
+/// is not admitted holds its thread and its admission place for no longer than
+/// this.
 const ADMISSION_WINDOW: Duration = Duration::from_secs(10);
 
 /// How long one address's connection attempts are counted over.
@@ -99,8 +100,15 @@ const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
 pub(crate) const LOG_WINDOW: Duration = Duration::from_secs(60);
 
 /// How long a refusal has to reach the caller it answers, counted from the
-/// write.
+/// write. A refusal written before admission is cut short at the admission
+/// deadline instead.
 const REFUSAL_WINDOW: Duration = Duration::from_secs(10);
+
+/// When a refusal written inside the admission window must be on the socket:
+/// [`REFUSAL_WINDOW`] from now, or `deadline`, whichever comes first.
+fn refusal_deadline(deadline: Instant) -> Instant {
+    deadline.min(Instant::now() + REFUSAL_WINDOW)
+}
 
 /// One question a connection thread puts to the router's dispatcher.
 pub(crate) enum AdmissionAsk {
@@ -472,7 +480,7 @@ fn serve_remote(
                 token,
             ),
             Opening::Frame(_) | Opening::Unreadable => {
-                refuse(&mut writer);
+                refuse_by(&mut writer, refusal_deadline(deadline));
                 return;
             }
             Opening::Closed => return,
@@ -504,7 +512,7 @@ fn serve_remote(
         reply,
     });
     let Some(Some(admitted)) = admitted else {
-        refuse(&mut writer);
+        refuse_by(&mut writer, refusal_deadline(deadline));
         return;
     };
 
@@ -777,18 +785,28 @@ fn ask<T>(
     answer.recv().ok()
 }
 
-/// Write one [`REMOTE_REFUSED`] frame, replacing whatever deadline `writer`
-/// holds with [`REFUSAL_WINDOW`] counted from now.
+/// Write one [`REMOTE_REFUSED`] frame, giving the write until `until`.
 ///
-/// A write that fails is dropped.
-fn refuse(writer: &mut (impl Write + Deadlined)) {
-    writer.set_deadline(Some(Instant::now() + REFUSAL_WINDOW));
+/// A write that fails is dropped, and so is one whose `until` has already
+/// passed.
+fn refuse_by(writer: &mut (impl Write + Deadlined), until: Instant) {
+    writer.set_deadline(Some(until));
     let _ = send_frame(
         writer,
         &RemoteServerFrame::Refused {
             message: REMOTE_REFUSED.to_string(),
         },
     );
+}
+
+/// Write one [`REMOTE_REFUSED`] frame, replacing whatever deadline `writer`
+/// holds with [`REFUSAL_WINDOW`] counted from now.
+///
+/// For a caller that is already admitted, whose halves carry no deadline. A
+/// caller still inside the admission window is refused with [`refuse_by`],
+/// which cannot hold a thread past that window.
+fn refuse(writer: &mut (impl Write + Deadlined)) {
+    refuse_by(writer, Instant::now() + REFUSAL_WINDOW);
 }
 
 /// Read one frame: a 4-byte big-endian length, then that many bytes of JSON.

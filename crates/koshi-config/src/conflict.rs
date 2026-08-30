@@ -349,10 +349,11 @@ impl fmt::Display for ConflictDiagnostic {
                     write!(f, " by {origin} to `{}`", bound.action)?;
                 }
                 // Claims that all name one action differ only in their
-                // arguments.
-                let same_action = claims
-                    .windows(2)
-                    .all(|pair| pair[0].1.action == pair[1].1.action);
+                // arguments. Fewer than two claims name no difference.
+                let same_action = claims.len() >= 2
+                    && claims
+                        .windows(2)
+                        .all(|pair| pair[0].1.action == pair[1].1.action);
                 if same_action {
                     f.write_str(" with different arguments")?;
                 }

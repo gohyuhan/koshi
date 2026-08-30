@@ -82,3 +82,25 @@ fn an_unknown_charset_name_fails_to_deserialize() {
         "unknown variant `Latin1`, expected one of `Ascii`, `DecLineDrawing`, `Uk`"
     );
 }
+
+#[test]
+fn a_gl_slot_past_g3_is_refused() {
+    // `gl` indexes the four charset slots, so a fourth slot has no charset to
+    // read and would panic on the first printed byte.
+    let mut value = serde_json::to_value(RenderState::fresh()).expect("render state serializes");
+    value["gl"] = serde_json::json!(4);
+
+    let error = serde_json::from_value::<RenderState>(value).unwrap_err();
+
+    assert_eq!(error.to_string(), "GL slot must be 0-3");
+    assert_eq!(
+        serde_json::from_value::<RenderState>(serde_json::json!({
+            "style": serde_json::to_value(Style::default()).unwrap(),
+            "charsets": ["Ascii", "Ascii", "Ascii", "Ascii"],
+            "gl": 3,
+        }))
+        .expect("the last slot reads back")
+        .gl,
+        3
+    );
+}

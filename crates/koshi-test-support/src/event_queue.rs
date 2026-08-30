@@ -73,13 +73,15 @@ impl RecordedEvents {
     ///
     /// If the next `expected.len()` events are not exactly `expected`, or if
     /// fewer than `expected.len()` events remain. The panic message holds an
-    /// index-aligned diff of `expected` against every remaining event. A
-    /// failed assertion consumes nothing.
+    /// index-aligned diff of `expected` against the first `expected.len()`
+    /// events; events past them are not in it. A failed assertion consumes
+    /// nothing.
     pub fn assert_prefix(&mut self, expected: &[Event]) {
         if self.inner.len() < expected.len() || self.inner[..expected.len()] != *expected {
+            let compared = self.inner.len().min(expected.len());
             panic!(
                 "event prefix mismatch:\n{}",
-                format_diff(expected, &self.inner)
+                format_diff(expected, &self.inner[..compared])
             );
         }
         self.inner.drain(..expected.len());

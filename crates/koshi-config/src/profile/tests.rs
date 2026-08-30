@@ -1321,11 +1321,14 @@ fn a_second_lock_marker_is_reported() {
 }
 
 #[test]
-fn a_malformed_first_lock_leaves_the_second_one_free_to_stand() {
-    // The first `lock` is rejected for its shape and sets nothing. The second
-    // one is the first usable marker and draws no duplicate report.
+fn a_malformed_first_lock_still_reports_the_duplicate() {
+    // The second `lock` is a duplicate whether or not the first one parsed,
+    // so both faults reach the user in one run.
     assert_eq!(
         messages("version 1\nlock #true\nlock\ntab { pane }"),
-        ["`lock` is a bare marker and takes no values or children"]
+        [
+            "`lock` is a bare marker and takes no values or children",
+            "`lock` is declared more than once",
+        ]
     );
 }

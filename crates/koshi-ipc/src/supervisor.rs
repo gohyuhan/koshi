@@ -239,7 +239,11 @@ pub enum SupervisorResult {
     /// supervisor holds.
     Panes(Vec<SupervisorPane>),
     /// Answers [`SupervisorRequestKind::LiveCwd`]: the child's working
-    /// directory, and `None` when the operating system cannot answer.
+    /// directory, and `None` when the operating system cannot answer or the
+    /// directory's name is not valid UTF-8.
+    ///
+    /// A `PathBuf` that is not valid UTF-8 has no encoding on this wire, so a
+    /// path such as `/tmp/\xff` travels as `None`.
     Cwd(Option<PathBuf>),
     /// Answers [`Resize`](SupervisorRequestKind::Resize),
     /// [`Write`](SupervisorRequestKind::Write),

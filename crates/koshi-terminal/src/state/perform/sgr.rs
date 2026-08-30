@@ -116,15 +116,14 @@ fn extended_color<'a>(first: &[u16], iter: &mut impl Iterator<Item = &'a [u16]>)
             // 255, yields `None`.
             5 if first.len() >= 3 => Some(Color::Indexed(u8::try_from(*first.last()?).ok()?)),
             2 => {
-                // `38:2:r:g:b`, or `38:2::r:g:b` with a leading colorspace slot
-                // (stored as `0`): the channels are the last three
-                // subparameters. A channel over 255 yields `None`.
+                // `38:2:r:g:b`: the three channels are the subparameters after
+                // the selector. Four or more subparameters carry a colorspace
+                // slot first — `38:2::r:g:b`, `38:2:1:255:0:0:0:5` — and the
+                // channels are the three after it; anything past them
+                // (tolerance and its colorspace) is skipped. A channel over 255
+                // yields `None`.
                 let vals = &first[2..];
-                let rgb = if vals.len() >= 4 {
-                    &vals[vals.len() - 3..]
-                } else {
-                    vals
-                };
+                let rgb = if vals.len() >= 4 { &vals[1..4] } else { vals };
                 Some(Color::Rgb(
                     u8::try_from(*rgb.first()?).ok()?,
                     u8::try_from(*rgb.get(1)?).ok()?,

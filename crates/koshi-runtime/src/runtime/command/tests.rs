@@ -12534,13 +12534,18 @@ fn a_loopback_reported_host_counts_as_this_machine() {
     for local in [
         None,
         Some("localhost"),
+        Some("LOCALHOST"),
         Some("127.0.0.1"),
+        Some("127.0.0.2"),
+        Some("[127.0.0.1]"),
         Some("::1"),
         Some("[::1]"),
+        Some("0:0:0:0:0:0:0:1"),
     ] {
         assert!(is_local_host(local), "{local:?} must count as local");
     }
     assert!(!is_local_host(Some("build-server")));
+    assert!(!is_local_host(Some("10.0.0.1")));
 }
 
 #[test]

@@ -149,3 +149,12 @@ fn custom_endpoints_drive_the_ramp() {
     // Midpoint by integer lerp: red truncates toward zero (255 - 255/2 = 128).
     assert_eq!(theme.ramp(1, 3), Color::Rgb(0x80, 0x00, 0x7f));
 }
+
+#[test]
+fn a_run_longer_than_the_signed_32_bit_range_still_lands_inside_the_gradient() {
+    // The denominator is widened to i64, so it never wraps negative and flips
+    // the interpolation past either end of the ramp.
+    let theme = Theme::default();
+
+    assert_eq!(theme.ramp(1, usize::MAX), theme.ramp(0, usize::MAX));
+}

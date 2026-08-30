@@ -628,23 +628,41 @@ fn take_panes_back(
     Ok((panes, handles))
 }
 
-/// Refuse a carried state that names one pane more than once.
+/// Refuse a carried state that names one pane more than once, or gives two
+/// panes one child process id.
 ///
 /// Every pane is taken back onto its own entry, keyed by pane id, so each id
-/// appears once.
+/// appears once. Every pane's child is waited on by that pane's own watcher, so
+/// each process id appears once as well. A process id of `0` names no child and
+/// may repeat.
 ///
 /// Before → after: a header naming panes `A`, `B` → each is taken back. A
-/// header naming `A`, `A` → the sentence naming `A`, and no pane is touched.
+/// header naming `A`, `A` → the sentence naming `A`, and no pane is touched. A
+/// header naming `A(pid 4821)`, `B(pid 4821)` → the sentence naming `B` and
+/// `A`, and no pane is touched.
 ///
 /// # Errors
-/// Returns the sentence naming the pane the carried state names twice.
+/// Returns the sentence naming the pane the carried state names twice, or the
+/// pane whose process id an earlier pane already carries.
 fn header_names_each_pane_once(header: &ResumeHeader) -> Result<(), Box<dyn std::error::Error>> {
     let mut named = HashSet::new();
+    let mut children: HashMap<u32, PaneId> = HashMap::new();
     for pane in &header.panes {
         if !named.insert(pane.pane_id) {
             return Err(format!(
                 "pane {} is named twice by the carried state, so it cannot be taken back",
                 pane.pane_id
+            )
+            .into());
+        }
+        if pane.pid == 0 {
+            continue;
+        }
+        if let Some(earlier) = children.insert(pane.pid, pane.pane_id) {
+            return Err(format!(
+                "pane {} carries process id {}, which pane {earlier} already carries, so it \
+                 cannot be taken back",
+                pane.pane_id, pane.pid
             )
             .into());
         }
@@ -728,12 +746,25 @@ fn take_one_pane_back(
 /// and the number stays as the swap left it until this process ends. An
 /// `untouched` of `0` is a failure before any pane was taken back, so every
 /// terminal the header names is closed here.
+///
+/// Each descriptor number is closed at most once, and a number a pane before
+/// `untouched` also carries is not closed here at all.
+///
+/// Before → after: a header naming `A(fd 7)`, `B(fd 9)`, `C(fd 7)` with
+/// `untouched` `2` → descriptor 7 stays open, since `A` holds it.
 #[cfg(unix)]
 fn end_panes_after_failure(header: &ResumeHeader, untouched: usize) {
     for pane in &header.panes {
         let _ = end_carried_child(pane.pid);
     }
+    let mut closed: HashSet<i32> = header.panes[..untouched]
+        .iter()
+        .filter_map(|pane| pane.terminal_fd)
+        .collect();
     for pane in &header.panes[untouched..] {
+        if pane.terminal_fd.is_some_and(|raw| !closed.insert(raw)) {
+            continue;
+        }
         close_carried_terminal(pane);
     }
 }

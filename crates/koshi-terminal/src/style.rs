@@ -5,7 +5,7 @@
 
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// The visual style of a single cell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -138,8 +138,25 @@ pub enum Color {
 /// spare bits. `ESC[1;3m` (bold and italic) gives `0b11`; `ESC[4;9m` (single
 /// underline and strikethrough) gives `1 << 6 | 1 << 8` = 320. A new boolean
 /// attribute takes one of the spare bits. Serializes as the bare `u16`.
+///
+/// Reading one back keeps only what the getters read: the five spare bits are
+/// dropped, and an underline code of `6` or `7` — which names no style —
+/// becomes `0`. Two words that every getter reads the same way are equal.
 #[derive(Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct AttrFlags(u16);
+pub struct AttrFlags(#[serde(deserialize_with = "defined_bits")] u16);
+
+/// Read an attribute word, keeping only the bits the getters read.
+///
+/// `1 << 15` becomes `0`; `0b110 << 8` (underline code `6`) becomes `0`;
+/// `0b001 << 8 | 1` (single underline and bold) is kept whole.
+fn defined_bits<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u16, D::Error> {
+    let word = u16::deserialize(deserializer)? & AttrFlags::DEFINED_MASK;
+    let code = (word & AttrFlags::UNDERLINE_MASK) >> AttrFlags::UNDERLINE_SHIFT;
+    if UnderlineStyle::from_code(code) == UnderlineStyle::None {
+        return Ok(word & !AttrFlags::UNDERLINE_MASK);
+    }
+    Ok(word)
+}
 
 impl AttrFlags {
     /// Bold / increased intensity (SGR 1).
@@ -162,6 +179,9 @@ impl AttrFlags {
     const UNDERLINE_SHIFT: u16 = 8;
     /// The three bits the underline code occupies, in place.
     const UNDERLINE_MASK: u16 = 0b111 << Self::UNDERLINE_SHIFT;
+    /// The eleven bits the getters read: the eight boolean attributes and the
+    /// underline code. The five above them are spare.
+    const DEFINED_MASK: u16 = 0x07FF;
 
     /// Whether the single-bit `bit` is set.
     fn has(self, bit: u16) -> bool {

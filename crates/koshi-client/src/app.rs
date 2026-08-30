@@ -10,7 +10,7 @@ use std::thread;
 
 use ratatui::backend::Backend;
 use ratatui::buffer::Buffer;
-use ratatui::crossterm::cursor::SetCursorStyle;
+use ratatui::crossterm::cursor::{SetCursorStyle, Show};
 use ratatui::crossterm::event::{self, DisableBracketedPaste, DisableMouseCapture, Event};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{disable_raw_mode, LeaveAlternateScreen, SetTitle};
@@ -70,11 +70,15 @@ impl Widget for SnapshotWidget<'_> {
 }
 
 /// Register the hook that puts the outer terminal back the way koshi found
-/// it: raw mode off, default cursor shape, mouse capture and bracketed paste
-/// off, alternate screen left. It runs on any exit — normal, error, or panic.
+/// it: raw mode off, cursor shown and back to its default shape, mouse capture
+/// and bracketed paste off, alternate screen left. It runs on any exit —
+/// normal, error, or panic.
 pub(crate) fn register_terminal_restore(cleanup: &TerminalCleanupGuard) {
     cleanup.register_cleanup(Box::new(|| {
         let _ = disable_raw_mode();
+        // Writes `ESC[?25h`. A frame that placed no cursor hid it, and leaving
+        // the alternate screen does not bring it back.
+        let _ = execute!(io::stdout(), Show);
         // Drops the cursor style koshi last copied out of a pane and puts the
         // cursor back to the shape the user's own terminal is set to.
         let _ = execute!(io::stdout(), SetCursorStyle::DefaultUserShape);
@@ -92,7 +96,6 @@ pub(crate) fn register_terminal_restore(cleanup: &TerminalCleanupGuard) {
 /// `profile` is handed to the router. A profile that will not launch falls
 /// back to one shell inside the session server.
 pub fn run(profile: Option<&str>) -> Result<(), CliError> {
-    ensure_koshi_dirs();
     let runtime_dir = koshi_link::ipc_client::runtime_dir()?;
     // `koshi.kdl`'s `logging` section sets whether a log file is opened at
     // all, and at what level and format.
@@ -102,6 +105,10 @@ pub fn run(profile: Option<&str>) -> Result<(), CliError> {
     // `--allow-other-users` flag.
     let session_id = koshi_link::router_client::request_new_session(&runtime_dir, profile, None)?;
     let _ = init_tracing(koshi_link::config::logging_params(app.as_ref(), session_id));
+    // Runs after the subscriber is installed, so its lines reach the log.
+    // Creating the directory adds no `koshi.kdl`, so the layer read above sees
+    // the same files either way.
+    ensure_koshi_dirs();
     crate::attach::attach_session(&runtime_dir, session_id)
 }
 
@@ -142,7 +149,9 @@ pub(crate) fn viewer(
 /// Create the config directory at the fixed per-platform path
 /// `koshi_paths::config_dir` gives.
 ///
-/// No home directory, or a create that fails, emits a warning and returns.
+/// The caller installs the tracing subscriber before this runs, so every line
+/// below reaches the log. No home directory, and a create that fails, each
+/// warn; a directory that is ready logs at info.
 fn ensure_koshi_dirs() {
     let Some(config) = koshi_paths::config_dir() else {
         tracing::warn!("no home directory found; skipping config directory setup");

@@ -7,7 +7,7 @@
 //! one error the CLI reports. Those steps are here once.
 //!
 //! What differs between the two peers is only what they are called and which
-//! versions they speak, which is what [`PeerWords`](crate::talk::PeerWords)
+//! versions they speak, which is what [`PeerWords`]
 //! carries. A settled version of 4 is outside both ranges: the session refuses
 //! it with `the session settled on protocol version 4, …` and the router with
 //! `the router settled on control-plane protocol version 4, …` — the same
@@ -16,6 +16,7 @@
 //! What a request means, and what its answer is worth, stays with the caller.
 
 use koshi_core::compat::Surface;
+use koshi_core::text::sanitize_reported_text;
 use koshi_ipc::error::IpcError;
 use koshi_ipc::protocol::{IncomingResponse, IpcErrorPayload, IpcResult};
 use koshi_ipc::router::{IncomingRouterResponse, RouterResult};
@@ -91,35 +92,43 @@ impl PeerWords {
         self.unexpected_name(result.wire_name())
     }
 
-    /// The same failure named by `name` alone, as the peer spelled it — for a
-    /// reply this build has no variant for.
+    /// The same failure named by `name` alone, filtered by
+    /// [`sanitize_reported_text`] — for a reply this build has no variant for.
     ///
     /// `SESSION` with `name` `"Rehomed"` gives [`CliError::IpcUnavailable`]
     /// carrying `the session answered with an unexpected Rehomed reply`.
+    /// `name` `"\u{1b}[2JRehomed"` gives the same sentence.
     pub fn unexpected_name(&self, name: &str) -> CliError {
         CliError::IpcUnavailable {
-            detail: format!("the {} answered with an unexpected {name} reply", self.peer),
+            detail: format!(
+                "the {} answered with an unexpected {} reply",
+                self.peer,
+                sanitize_reported_text(name)
+            ),
         }
     }
 }
 
 /// A failure to talk to a peer, in the words the fault itself used:
-/// [`CliError::IpcUnavailable`] carrying `error.to_string()`.
+/// [`CliError::IpcUnavailable`] carrying `error.to_string()` filtered by
+/// [`sanitize_reported_text`].
 ///
 /// The same sentence for either peer — it names the fault, not who was on the
-/// other end.
+/// other end. [`IpcError::MalformedFrame`] carries the decoder's own message,
+/// which quotes the field or variant name the peer sent.
 pub fn talk_failed(error: IpcError) -> CliError {
     CliError::IpcUnavailable {
-        detail: error.to_string(),
+        detail: sanitize_reported_text(&error.to_string()),
     }
 }
 
 /// A refusal the peer sent at the protocol level — a bad token, a version
 /// mismatch, or a request it could not read — as
-/// [`CliError::IpcUnavailable`] carrying `refusal.message` unchanged.
+/// [`CliError::IpcUnavailable`] carrying `refusal.message` filtered by
+/// [`sanitize_reported_text`].
 pub fn refused(refusal: &IpcErrorPayload) -> CliError {
     CliError::IpcUnavailable {
-        detail: refusal.message.clone(),
+        detail: sanitize_reported_text(&refusal.message),
     }
 }
 

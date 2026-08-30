@@ -27,8 +27,9 @@ use thiserror::Error;
 /// [`RemoteFileWrite`](IpcError::RemoteFileWrite)).
 ///
 /// Session-fatal: a failed endpoint-file write
-/// ([`EndpointFileWrite`](IpcError::EndpointFileWrite)). It happens during the
-/// session's own startup. No caller reaches a session whose endpoint file
+/// ([`EndpointFileWrite`](IpcError::EndpointFileWrite)) and a failed advert
+/// marker write ([`AdvertWrite`](IpcError::AdvertWrite)). Both happen during
+/// the session's own startup. No caller reaches a session whose endpoint file
 /// never lands.
 ///
 /// Recoverable: a frame that arrived whole yet does not decode
@@ -78,11 +79,13 @@ pub enum IpcError {
     #[error("endpoint file {path} is unreadable: {detail}")]
     EndpointFileUnreadable { path: String, detail: String },
     /// Writing the endpoint file failed during session startup. No caller
-    /// finds this session's socket. Also reported when
-    /// [`write_advert`](crate::endpoint::write_advert) cannot write its empty
-    /// marker file; `path` then names the marker.
+    /// finds this session's socket.
     #[error("endpoint file {path} could not be written: {detail}")]
     EndpointFileWrite { path: String, detail: String },
+    /// Writing the advert marker failed during session startup. No other user
+    /// of this machine finds this session. `path` names the marker.
+    #[error("advert marker {path} could not be written: {detail}")]
+    AdvertWrite { path: String, detail: String },
     /// A remote access token store that exists but could not be used:
     /// reading it failed, its bytes are not a readable store, or its format
     /// number is not the one this build reads.
@@ -189,7 +192,9 @@ impl DomainError for IpcError {
             | IpcError::ConnectTimedOut { .. }
             | IpcError::TlsHandshakeFailed { .. }
             | IpcError::CertificateChanged { .. } => Severity::ClientFatal,
-            IpcError::EndpointFileWrite { .. } => Severity::SessionFatal,
+            IpcError::EndpointFileWrite { .. } | IpcError::AdvertWrite { .. } => {
+                Severity::SessionFatal
+            }
             IpcError::MalformedFrame { .. } => Severity::Recoverable,
         }
     }

@@ -79,17 +79,36 @@ impl CrashReport {
         )
     }
 
-    /// Write the report to `<dir>/crash-<timestamp>.txt`. A directory that
-    /// cannot be created and a write that fails both leave no file and report
-    /// nothing.
+    /// Write the report to `<dir>/crash-<timestamp>.txt`.
+    ///
+    /// On Unix the directory is created and verified as `0700` and the file is
+    /// created as `0600`, so no other local user reads the panic message, the
+    /// place, or the stack. A directory that cannot be created or verified, and
+    /// a write that fails, both leave no file and report nothing.
     fn write(&self, dir: &Path) {
-        if koshi_paths::ensure_dir(dir).is_err() {
+        if koshi_paths::ensure_private_dir(dir).is_err() {
             return;
         }
-        let _ = std::fs::write(
-            dir.join(format!("crash-{}.txt", self.timestamp)),
-            self.text(),
-        );
+        let path = dir.join(format!("crash-{}.txt", self.timestamp));
+        #[cfg(unix)]
+        {
+            use std::io::Write as _;
+            use std::os::unix::fs::OpenOptionsExt as _;
+
+            let opened = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .mode(0o600)
+                .open(&path);
+            if let Ok(mut file) = opened {
+                let _ = file.write_all(self.text().as_bytes());
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = std::fs::write(&path, self.text());
+        }
     }
 }
 

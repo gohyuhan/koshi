@@ -578,17 +578,47 @@ fn a_word_holding_a_bracketed_token_is_exempt_from_the_dash_form_rule() {
 }
 
 #[test]
-fn a_bracket_anywhere_in_the_word_exempts_the_dash_before_it() {
-    // The exemption reads the whole word, not the part before the bracket:
-    // `a-b<C-p>` is four chords, `a` `-` `b` `<C-p>`.
+fn a_dash_form_outside_a_bracketed_run_is_refused_wherever_it_sits() {
+    // The scan steps over each `<…>` run and reads what is left: `a-b` before
+    // a bracket and `Ctrl-g` after one are both the dash form.
     assert_eq!(
         parse_sequence("a-b<C-p>", ctrl_leader(), 4),
+        Err(KeyParseError {
+            token: "a-b<C-p>".to_string(),
+            kind: KeyParseErrorKind::UnbracketedMultiChar,
+        })
+    );
+    assert_eq!(
+        parse_sequence("<leader>Ctrl-g", ctrl_leader(), 8),
+        Err(KeyParseError {
+            token: "<leader>Ctrl-g".to_string(),
+            kind: KeyParseErrorKind::UnbracketedMultiChar,
+        })
+    );
+}
+
+#[test]
+fn a_bracketed_run_is_never_read_as_the_dash_form() {
+    // `<C-p>` holds a dash between two alphanumerics, and it is bracketed.
+    assert_eq!(
+        parse_sequence("<C-p><S-a>", ctrl_leader(), 4),
         Ok(seq(&[
-            chord(ModFlags::NONE, Key::Char('a')),
-            chord(ModFlags::NONE, Key::Char('-')),
-            chord(ModFlags::NONE, Key::Char('b')),
             chord(ModFlags::CTRL, Key::Char('p')),
+            chord(ModFlags::SHIFT, Key::Char('a')),
         ]))
+    );
+}
+
+#[test]
+fn an_empty_bracket_before_a_close_is_still_refused() {
+    // `<>` names no modifier run, so the `<C->>` recovery does not extend it
+    // through the next `>`.
+    assert_eq!(
+        parse_sequence("<>>", ctrl_leader(), 4),
+        Err(KeyParseError {
+            token: "<>".to_string(),
+            kind: KeyParseErrorKind::MissingKey,
+        })
     );
 }
 

@@ -822,3 +822,35 @@ fn legacy_grid_data_whose_row_end_count_differs_from_its_rows_is_rejected() {
 
     assert_eq!(error.to_string(), "grid row metadata does not match rows");
 }
+
+#[test]
+fn grid_data_whose_rows_differ_in_length_is_rejected() {
+    // Every row carries the same number of cells.
+    let grid = Grid::blank(2, 3, Style::default());
+    let mut value = serde_json::to_value(&grid).expect("grid serializes");
+    value["rows"][1]
+        .as_array_mut()
+        .expect("the second row is an array")
+        .truncate(1);
+
+    let error = serde_json::from_value::<Grid>(value).expect_err("ragged rows are refused");
+
+    assert_eq!(error.to_string(), "grid rows differ in length");
+}
+
+#[test]
+fn insert_lines_with_a_zero_count_moves_nothing_and_keeps_row_ends() {
+    // Nothing slides, so no row starts preceding a row it never wrapped into.
+    let mut grid = default_grid(3, 2);
+    write_row(&mut grid, 0, "AA");
+    write_row(&mut grid, 1, "BB");
+    write_row(&mut grid, 2, "CC");
+    grid.set_row_end(0, RowEnd::Soft);
+    grid.set_row_end(2, RowEnd::Soft);
+
+    grid.insert_lines(1, 2, 0, Style::default());
+
+    assert_eq!(row_text(&grid, 1), "BB");
+    assert_eq!(grid.row_end(0), RowEnd::Soft);
+    assert_eq!(grid.row_end(2), RowEnd::Soft);
+}

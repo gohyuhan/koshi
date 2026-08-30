@@ -725,6 +725,95 @@ fn a_lookup_finding_nothing_listening_drops_the_session_and_its_files() {
     assert!(!endpoint_path.exists(), "the endpoint file is removed");
 }
 
+/// A stand-in session server at `addr` that is bound and answering, and
+/// settles the Hello on `PROTOCOL_VERSION + 1` — a version outside the range
+/// this build asks for, which fails the exchange without the session being
+/// gone.
+fn version_mismatched_session_server(addr: &str) -> JoinHandle<()> {
+    let listener = Listener::bind(addr).expect("bind the live session");
+    std::thread::spawn(move || {
+        let mut connection = listener.accept().expect("accept the router");
+        let hello: IpcRequest = connection.recv().expect("read hello");
+        let _query: IpcRequest = connection.recv().expect("read discovery request");
+        let _ = connection.send(&IpcResponse {
+            request_id: Some(hello.request_id),
+            result: IpcResult::Hello {
+                protocol_version: PROTOCOL_VERSION + 1,
+                version: env!("CARGO_PKG_VERSION").to_string(),
+            },
+        });
+    })
+}
+
+#[test]
+fn a_listing_keeps_a_session_that_answers_with_a_version_this_build_does_not_read() {
+    let live = SessionId::new();
+    let runtime_dir = test_runtime_dir();
+    let socket = socket_addr(runtime_dir.path(), live);
+    let endpoint_path = EndpointFile::path(runtime_dir.path(), live);
+    EndpointFile {
+        socket: socket.clone(),
+        token: ConnectionToken::new("e".repeat(64)),
+        pid: 4242,
+    }
+    .write(&endpoint_path)
+    .expect("the endpoint file is written");
+    let server = version_mismatched_session_server(&socket);
+
+    let mut registry = registry_of(&[(live, "S-quiet-lake")]);
+    registry
+        .get_mut(&live)
+        .expect("the session is listed")
+        .socket
+        .clone_from(&socket);
+
+    let answer = list_sessions(runtime_dir.path(), &mut registry);
+    server.join().expect("the stand-in session ended");
+
+    assert_eq!(
+        answer,
+        RouterResult::Sessions(Vec::new()),
+        "a session that could not describe itself is left out of the answer"
+    );
+    assert!(
+        registry.contains_key(&live),
+        "a session that is still bound stays in the list"
+    );
+    assert!(
+        endpoint_path.exists(),
+        "a session that is still bound keeps its endpoint file"
+    );
+}
+
+#[test]
+fn the_rebuild_keeps_the_files_of_a_session_it_cannot_read_a_version_from() {
+    let live = SessionId::new();
+    let runtime_dir = test_runtime_dir();
+    let socket = socket_addr(runtime_dir.path(), live);
+    let endpoint_path = EndpointFile::path(runtime_dir.path(), live);
+    EndpointFile {
+        socket: socket.clone(),
+        token: ConnectionToken::new("f".repeat(64)),
+        pid: 4242,
+    }
+    .write(&endpoint_path)
+    .expect("the endpoint file is written");
+    let server = version_mismatched_session_server(&socket);
+
+    let registry = sweep(runtime_dir.path(), None);
+    server.join().expect("the stand-in session ended");
+
+    assert_eq!(
+        registry,
+        Registry::new(),
+        "a session that could not describe itself is not listed"
+    );
+    assert!(
+        endpoint_path.exists(),
+        "a session that is still bound keeps its endpoint file"
+    );
+}
+
 /// A stand-in session server at `addr` that accepts one connection and ends.
 /// A lookup's probe sends nothing and closes, so that is all it needs.
 fn probe_answering_server(addr: &str) -> JoinHandle<()> {

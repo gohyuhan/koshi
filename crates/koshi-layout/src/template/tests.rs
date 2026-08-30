@@ -292,15 +292,16 @@ fn first_visible_leaf_of_an_empty_split_is_zero() {
 }
 
 #[test]
-fn first_visible_leaf_with_out_of_range_active_falls_back_to_zero() {
-    // A stacked template whose active index is past its last member: the
-    // walk does not clamp it and yields zero.
+fn first_visible_leaf_with_out_of_range_active_names_the_last_member() {
+    // A stacked template whose active index is past its last member: the walk
+    // clamps it to the last child, the same member the solver expands once the
+    // template is instantiated.
     let stack = split(
         SplitDirection::Stacked,
         vec![expanded(shell_leaf()), collapsed(command_leaf("htop"))],
         9,
     );
-    assert_eq!(stack.first_visible_leaf(), 0);
+    assert_eq!(stack.first_visible_leaf(), 1);
 }
 
 #[test]

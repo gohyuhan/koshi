@@ -835,20 +835,53 @@ impl Server {
     }
 }
 
+/// End `pane_id`'s child under `kill_policy` on a thread of its own.
+///
+/// A graceful kill sleeps out its grace window, so the dispatcher keeps
+/// draining while the kill runs. The kill also purges the backend's own entry
+/// for the pane, even when the child already exited.
+///
+/// A thread the operating system will not start — the process is at its thread
+/// limit — runs the kill on this thread instead, which blocks the dispatcher
+/// for the grace window rather than ending the process.
+pub(super) fn kill_off_thread(
+    backend: &Arc<dyn PtyBackend>,
+    pane_id: PaneId,
+    kill_policy: KillPolicy,
+) {
+    let off_thread = Arc::clone(backend);
+    let started = thread::Builder::new()
+        .spawn(move || {
+            let _ = off_thread.kill(pane_id, kill_policy);
+        })
+        .is_ok();
+    if !started {
+        let _ = backend.kill(pane_id, kill_policy);
+    }
+}
+
 /// Whether an OSC 7 report's host names this machine: no authority (`None`,
-/// which `file:///path` gives), `localhost` in any case, `127.0.0.1`, `::1`,
-/// `[::1]`, or the machine's own hostname in any case. Every other host is
+/// which `file:///path` gives), `localhost` in any case, any loopback IP
+/// address, or the machine's own hostname in any case. Every other host is
 /// `false`.
+///
+/// A loopback address counts however it is written: `127.0.0.1`, any other
+/// address of `127.0.0.0/8`, `::1`, and `0:0:0:0:0:0:0:1`, each bare or
+/// bracketed as the URI form writes it (`file://[::1]/…`).
 fn is_local_host(host: Option<&str>) -> bool {
     let Some(host) = host else {
         return true;
     };
-    // An IPv6 loopback literal matches both bracketed, as the URI form writes
-    // it (`file://[::1]/…`), and bare.
-    if host.eq_ignore_ascii_case("localhost")
-        || host == "127.0.0.1"
-        || host == "::1"
-        || host == "[::1]"
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    let bare = host
+        .strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .unwrap_or(host);
+    if bare
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|address| address.is_loopback())
     {
         return true;
     }

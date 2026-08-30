@@ -124,6 +124,8 @@ impl SupervisorPtyBackend {
     /// Returns [`PtyError::Io`] when the link cannot be opened, when the
     /// supervisor does not answer within the answer wait, when it refuses the
     /// Hello or the pane list, or when it answers either with something else.
+    /// Any of those closes the link's read direction, so the reader thread
+    /// ends and the supervisor is free to serve the next link.
     ///
     /// # Panics
     /// Panics when the operating system cannot start the link's reader thread.
@@ -136,6 +138,7 @@ impl SupervisorPtyBackend {
         let connection = Connection::connect(addr).map_err(|error| PtyError::Io {
             detail: format!("the supervisor at {addr} could not be reached: {error}"),
         })?;
+        let closer = connection.read_closer().ok();
         let (reader, writer) = connection.split();
         let (answers_tx, answers) = channel();
         start_link_reader(reader, answers_tx, Arc::clone(&sink));
@@ -150,11 +153,34 @@ impl SupervisorPtyBackend {
             sink,
         };
 
-        match backend.ask(SupervisorRequestKind::hello(token))? {
+        match backend.settle(token, panes) {
+            Ok(()) => Ok(backend),
+            Err(error) => {
+                if let Some(closer) = closer {
+                    closer.close();
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Present `token`, read the pane list, and settle it against `panes`, the
+    /// panes the caller believes are running.
+    ///
+    /// A pane the supervisor holds that `panes` does not name is killed with
+    /// [`KillPolicy::Tree`]; a pane `panes` names that the supervisor does not
+    /// hold is reported to the sink as ended. Every remaining pane is written
+    /// into this backend's pane map.
+    ///
+    /// # Errors
+    /// Returns [`PtyError::Io`] when the supervisor refuses the Hello or the
+    /// pane list, answers either with something else, or does not answer.
+    fn settle(&self, token: ConnectionToken, panes: &[PaneId]) -> Result<(), PtyError> {
+        match self.ask(SupervisorRequestKind::hello(token))? {
             SupervisorResult::Hello { .. } => {}
             other => return Err(unexpected_answer("Hello", &other)),
         }
-        let held = match backend.ask(SupervisorRequestKind::ListPanes)? {
+        let held = match self.ask(SupervisorRequestKind::ListPanes)? {
             SupervisorResult::Panes(held) => held,
             other => return Err(unexpected_answer("ListPanes", &other)),
         };
@@ -163,7 +189,7 @@ impl SupervisorPtyBackend {
         let wanted: HashSet<PaneId> = panes.iter().copied().collect();
         for pane in &held {
             if !wanted.contains(&pane.pane_id) {
-                let _ = backend.ask(SupervisorRequestKind::Kill {
+                let _ = self.ask(SupervisorRequestKind::Kill {
                     pane_id: pane.pane_id,
                     kill_policy: KillPolicy::Tree,
                 });
@@ -183,11 +209,11 @@ impl SupervisorPtyBackend {
             })
             .collect();
         for pane in panes.iter().filter(|pane| !kept.contains_key(pane)) {
-            backend.sink.exit(*pane, UNOBSERVED_EXIT);
+            self.sink.exit(*pane, UNOBSERVED_EXIT);
         }
-        *backend.panes.lock().expect("supervisor panes") = kept;
+        *self.panes.lock().expect("supervisor panes") = kept;
 
-        Ok(backend)
+        Ok(())
     }
 
     /// Hold every pane's reader still: nothing is read from a terminal without
@@ -278,8 +304,9 @@ impl SupervisorPtyBackend {
     }
 
     /// Send one request and wait for the answer to that request, for at most
-    /// the window [`answer_wait`] gives that request. The window starts when
-    /// this is called, before the link lock is taken.
+    /// the window [`answer_wait`] gives that request. The window starts once
+    /// the link lock is taken, so time spent waiting behind another caller's
+    /// exchange is not charged against it.
     ///
     /// The link lock is held for the whole exchange: two callers never read
     /// each other's answers. An answer carrying the id of an earlier request of
@@ -295,8 +322,8 @@ impl SupervisorPtyBackend {
     fn ask(&self, kind: SupervisorRequestKind) -> Result<SupervisorResult, PtyError> {
         let name = kind.name();
         let wait = answer_wait(&kind);
-        let deadline = Instant::now() + wait;
         let mut link = self.link.lock().expect("supervisor link");
+        let deadline = Instant::now() + wait;
         let request_id = link.next_request_id;
         link.next_request_id += 1;
         link.writer
@@ -533,11 +560,13 @@ fn unexpected_answer(request: &str, answer: &SupervisorResult) -> PtyError {
 /// Start the thread that reads the link: it hands each answer to whoever is
 /// waiting on [`Link::answers`] and each event to `sink`.
 ///
-/// The thread ends when the link breaks, when a frame does not decode, when
-/// no one holds the receiving end of `answers`, or when `sink` refuses a
-/// chunk. Ending drops `answers`: a caller waiting for an answer reads the
-/// link as closed. An event this build has no name for is passed over, and the
-/// link keeps carrying the rest.
+/// The thread ends when the link breaks, when a frame does not decode, or when
+/// no one holds the receiving end of `answers`. Ending drops `answers`: a
+/// caller waiting for an answer reads the link as closed. An event this build
+/// has no name for is passed over, and the link keeps carrying the rest.
+///
+/// A pane whose chunk `sink` refused takes nothing more, its exit included;
+/// every other pane keeps being delivered.
 ///
 /// # Panics
 /// Panics when the operating system cannot start the thread.
@@ -549,6 +578,10 @@ fn start_link_reader(
     let _ = thread::Builder::new()
         .name("koshi-pty-link".to_string())
         .spawn(move || {
+            // A pane whose chunk the consumer refused. Nothing more of that
+            // pane is delivered, its exit included; every other pane keeps
+            // being delivered.
+            let mut refused: HashSet<PaneId> = HashSet::new();
             while let Ok(message) = reader.recv::<IncomingSupervisorMessage>() {
                 match message {
                     SupervisorMessage::Response(response) => {
@@ -560,16 +593,18 @@ fn start_link_reader(
                         pane_id,
                         bytes,
                     })) => {
-                        // A refused chunk ends the thread: nothing more is
-                        // delivered for any pane.
-                        if !sink.output(pane_id, bytes) {
-                            return;
+                        if !refused.contains(&pane_id) && !sink.output(pane_id, bytes) {
+                            refused.insert(pane_id);
                         }
                     }
                     SupervisorMessage::Event(MaybeKnown::Known(SupervisorEvent::Exited {
                         pane_id,
                         status,
-                    })) => sink.exit(pane_id, status),
+                    })) => {
+                        if !refused.contains(&pane_id) {
+                            sink.exit(pane_id, status);
+                        }
+                    }
                     SupervisorMessage::Event(MaybeKnown::Unknown { .. }) => {}
                 }
             }

@@ -156,7 +156,8 @@ pub fn runtime_dir() -> Option<PathBuf> {
 /// The machine-wide directory holding what koshi shares between local users:
 /// the shared session sockets, and on Windows the marker files that name the
 /// sessions listening on a pipe. On Unix this is `/tmp/koshi`. On Windows it
-/// is `koshi` under `%ProgramData%`, and `None` means that variable is unset.
+/// is `koshi` under `%ProgramData%`, and `None` means that variable is unset
+/// or does not hold an absolute path.
 ///
 /// Create it with [`ensure_shared_base`], then take this user's subdirectory
 /// from [`ensure_shared_user_dir`]. A `shared-sessions-dir` in `koshi.kdl`
@@ -169,7 +170,10 @@ pub fn shared_sessions_dir() -> Option<PathBuf> {
     }
     #[cfg(windows)]
     {
-        std::env::var_os("ProgramData").map(|base| PathBuf::from(base).join("koshi"))
+        std::env::var_os("ProgramData")
+            .map(PathBuf::from)
+            .filter(|base| base.is_absolute())
+            .map(|base| base.join("koshi"))
     }
 }
 

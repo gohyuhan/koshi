@@ -279,8 +279,8 @@ impl Write for TlsWriter {
     /// rustls applies to one plaintext write. `write_all` delivers the rest.
     ///
     /// Encrypted bytes a write that ran out of time did not put on the socket
-    /// stay queued and go out first on the next write. They count against the
-    /// 64 KiB: a queue of 64 KiB or more makes the next write take `0` bytes.
+    /// stay queued. The next write drains that queue before it offers its own
+    /// plaintext, so a full queue does not make that write take `0` bytes.
     ///
     /// With a deadline set, each socket write is given the time left until
     /// that deadline. No time left before a socket write ends the call with
@@ -289,6 +289,9 @@ impl Write for TlsWriter {
     /// on every platform.
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         let mut conn = self.conn.lock().expect("tls connection");
+        // Encrypted bytes an earlier write left queued go out first. They fill
+        // the same 64 KiB rustls takes one plaintext write into.
+        send_pending(&mut conn, &mut self.sock, self.deadline)?;
         let taken = conn.writer().write(bytes)?;
         send_pending(&mut conn, &mut self.sock, self.deadline)?;
         Ok(taken)
@@ -505,8 +508,9 @@ impl ServerCertVerifier for PinVerifier {
 ///
 /// # Errors
 /// [`IpcError::ConnectRefused`] when nothing accepts the connection,
-/// [`IpcError::ConnectTimedOut`] when no time is left after the lookup or
-/// the connect is unanswered at the deadline, and
+/// [`IpcError::ConnectTimedOut`] when `timeout` names an instant the clock
+/// cannot reach, when no time is left after the lookup, or when the connect is
+/// unanswered at the deadline, and
 /// [`IpcError::TlsHandshakeFailed`] when the handshake on an open connection
 /// does not finish, carrying [`handshake`]'s own words. A fingerprint that
 /// does not match the pinned one is [`IpcError::CertificateChanged`].
@@ -519,7 +523,12 @@ pub fn dial(
     expected_fingerprint: Option<&str>,
     timeout: Duration,
 ) -> Result<(TlsReader, TlsWriter, String), IpcError> {
-    let deadline = Instant::now() + timeout;
+    let deadline =
+        Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| IpcError::ConnectTimedOut {
+                address: address.to_string(),
+            })?;
     let resolved = address
         .to_socket_addrs()
         .map_err(|error| failed(format!("{address} could not be looked up: {error}")))?

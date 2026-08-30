@@ -181,7 +181,8 @@ pub struct RemovalInfo {
 /// # Errors
 ///
 /// - [`RemoveError::PaneNotFound`] when `pane` has no leaf in `tree`.
-/// - [`RemoveError::LastPane`] when `pane` is the only pane left.
+/// - [`RemoveError::LastPane`] when `pane` is the only pane left, including
+///   when the tree's other children are splits holding no leaf.
 ///
 /// The caller's tree is unchanged in both cases.
 pub fn remove_pane(
@@ -201,6 +202,11 @@ pub fn remove_pane(
         Removal::NotHere => return Err(RemoveError::PaneNotFound { pane }),
         Removal::NodeEmptied => return Err(RemoveError::LastPane { pane }),
         Removal::Done => {}
+    }
+    // A tree whose only remaining children are empty splits holds no pane, so
+    // `pane` was the last one however many nodes survive.
+    if result.leaf_panes().is_empty() {
+        return Err(RemoveError::LastPane { pane });
     }
 
     // Solve again after the edit and collect every surviving, visible pane

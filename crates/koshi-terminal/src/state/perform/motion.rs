@@ -63,16 +63,21 @@ impl TerminalState {
         }
     }
 
-    /// Record `end` on the cursor row, then [`linefeed`](Self::linefeed). When
-    /// the line feed scrolled the region, the row directly above the cursor
-    /// gets `end` (`delete_lines` reset it to [`RowEnd::Hard`]); a marked row
-    /// that left the top carries `end` and its prompt mark into scrollback.
-    /// When the cursor neither moved nor scrolled (last grid row outside the
-    /// region), the cursor row keeps `end`.
+    /// Record `end` on the row the line feed leaves behind, then
+    /// [`linefeed`](Self::linefeed).
+    ///
+    /// The cursor moved down: its old row gets `end`. The region scrolled: the
+    /// cursor row is marked before the scroll, so a row leaving the top carries
+    /// `end` and its prompt mark into scrollback, and the row directly above
+    /// the cursor gets `end` afterwards (`delete_lines` reset it to
+    /// [`RowEnd::Hard`]). The cursor neither moved nor scrolled (last grid row
+    /// outside the region): no row is marked, since no row continues it.
     pub(super) fn wrap_linefeed(&mut self, end: RowEnd) {
         let before = self.active_cursor().row;
         let at_scroll_bottom = before == self.region_bounds().1;
-        self.active_grid_mut().set_row_end(before, end);
+        if at_scroll_bottom {
+            self.active_grid_mut().set_row_end(before, end);
+        }
         self.linefeed();
 
         let after = self.active_cursor().row;

@@ -849,3 +849,27 @@ fn height_shrink_with_the_cursor_above_scrolled_content_clamps_it_to_the_top_row
     assert_eq!(row_text(&e, 0), "c");
     assert_eq!(cursor(&e), (0, 0));
 }
+
+#[test]
+fn a_blank_prompt_marked_row_below_the_cursor_enters_history_on_a_height_shrink() {
+    // A prompt mark is content: the row it sits on is not trailing padding,
+    // however few cells it holds.
+    let mut engine = engine(6, 4);
+    feed(&mut engine, "a\r\n\x1b]133;A\x07\x1b[H");
+    assert!(engine.state().active_grid().prompt_mark(1));
+    assert_eq!(cursor(&engine), (0, 0));
+
+    resize(&mut engine, 6, 1);
+
+    // The marked row is kept, so the row above it is the one that overflows
+    // into history and the mark stays on the one screen row.
+    let history: Vec<bool> = engine
+        .state()
+        .scrollback()
+        .lines()
+        .iter()
+        .map(|(_, meta)| meta.prompt)
+        .collect();
+    assert_eq!(history, vec![false]);
+    assert!(engine.state().active_grid().prompt_mark(0));
+}

@@ -1963,3 +1963,26 @@ fn remove_in_an_unregistered_mode_is_inert() {
     );
     assert_eq!(report.verdict(), KeymapVerdict::Apply);
 }
+
+#[test]
+fn a_collision_naming_one_claim_does_not_say_the_arguments_differ() {
+    // `detect_conflicts` never builds this, but the variant and its fields are
+    // public: one claim names no second action to differ from.
+    let one_claim = ConflictDiagnostic::KeyCollision {
+        mode: ModeName::new("normal"),
+        key: KeySequence::from(KeyChord::new(ModFlags::CTRL, Key::Char('y'))),
+        claims: vec![(
+            LayerOrigin::User,
+            BoundAction {
+                action: ActionRef::core("lock").expect("a core action"),
+                args: ActionArgs::None,
+            },
+        )],
+    };
+
+    assert_eq!(
+        one_claim.to_string(),
+        "key `<C-y>` in mode `normal` is bound by user to `core:lock`; \
+         all user keybindings revert to defaults"
+    );
+}

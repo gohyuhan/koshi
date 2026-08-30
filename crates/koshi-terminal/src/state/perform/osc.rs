@@ -21,10 +21,14 @@ pub(super) enum Osc133 {
 
 /// Parse an OSC 133 payload, split on `;` by `vte`, into its marker.
 ///
-/// Accepts exactly `133;A`, `133;B`, `133;C`, `133;D`, and `133;D;<code>`
-/// where `<code>` parses as an `i32` (`0`, `137`, `-1`, `+3`). Anything else —
-/// another command number, a marker other than `A`–`D`, an extra parameter, a
-/// `D` code that is empty or not a decimal `i32` — yields `None`.
+/// Accepts `133;A`, `133;B`, `133;C`, `133;D`, and `133;D;<code>` where
+/// `<code>` parses as an `i32` (`0`, `137`, `-1`, `+3`).
+///
+/// Parameters after the marker are options the shell adds (`cl=m`, `aid=1`)
+/// and are skipped: `133;A;cl=m;aid=1` is the prompt mark and `133;D;0;aid=1`
+/// is the finish carrying `0`. A `D` whose first following parameter is empty
+/// carries no code. Anything else — another command number, a marker other
+/// than `A`–`D`, a `D` code that is not a decimal `i32` — yields `None`.
 pub(super) fn parse_osc133(params: &[&[u8]]) -> Option<Osc133> {
     let [command, marker, rest @ ..] = params else {
         return None;
@@ -33,14 +37,14 @@ pub(super) fn parse_osc133(params: &[&[u8]]) -> Option<Osc133> {
         return None;
     }
     match (*marker, rest) {
-        (b"A", []) => Some(Osc133::Prompt),
-        (b"B", []) => Some(Osc133::Input),
-        (b"C", []) => Some(Osc133::CommandStart),
-        (b"D", []) => Some(Osc133::CommandFinished(None)),
-        (b"D", [exit_code]) => {
+        (b"A", _) => Some(Osc133::Prompt),
+        (b"B", _) => Some(Osc133::Input),
+        (b"C", _) => Some(Osc133::CommandStart),
+        (b"D", [exit_code, ..]) if !exit_code.is_empty() => {
             let exit_code = std::str::from_utf8(exit_code).ok()?.parse().ok()?;
             Some(Osc133::CommandFinished(Some(exit_code)))
         }
+        (b"D", _) => Some(Osc133::CommandFinished(None)),
         _ => None,
     }
 }

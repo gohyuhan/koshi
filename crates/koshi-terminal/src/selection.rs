@@ -164,7 +164,7 @@ impl<'a> TextView<'a> {
             // the live screen's top row.
             let history = self.history?;
             let from_top = self.top - row;
-            let index = history.len().checked_sub(from_top as usize)?;
+            let index = history.len().checked_sub(usize::try_from(from_top).ok()?)?;
             let (cells, meta) = history.get(index)?;
             Some((cells.as_slice(), meta.end))
         } else {
@@ -285,7 +285,7 @@ impl<'a> TextView<'a> {
     fn next_cell(&self, row: u64, col: u16) -> Option<(u64, u16)> {
         let (mut row, mut col) = (row, col);
         loop {
-            if col + 1 < self.cols() {
+            if col < self.cols().saturating_sub(1) {
                 col += 1;
             } else if row < self.last_row() && self.wraps(row) {
                 row += 1;
@@ -302,11 +302,17 @@ impl<'a> TextView<'a> {
     /// The separator character at `row`/`col`, or `None` when the cell holds
     /// part of a word, is the width-0 half of a wide glyph (the glyph's own
     /// cell is the text there), or holds nothing.
+    ///
+    /// A gone row and a column past the screen width read as `Some(' ')`, the
+    /// same answer [`is_separator`](Self::is_separator) gives them.
     fn separator_char(&self, row: u64, col: u16) -> Option<char> {
-        self.cell(row, col)
-            .filter(|cell| cell.width() != 0)
-            .map(|cell| cell.ch())
-            .filter(|ch| WORD_SEPARATORS.contains(*ch))
+        let Some(cell) = self.cell(row, col) else {
+            return Some(' ');
+        };
+        if cell.width() == 0 {
+            return None;
+        }
+        WORD_SEPARATORS.contains(cell.ch()).then(|| cell.ch())
     }
 
     /// Whether stepping onto `row`/`col` leaves the word being grown.

@@ -408,10 +408,12 @@ impl IpcServer {
     /// the one this server accepts either way, so the endpoint file then
     /// advertises a token no connection is served under.
     pub fn rotate_token(&self) -> Result<(), IpcError> {
-        self.intake.reopen();
         let fresh = ConnectionToken::generate();
-        // Accepted before it is advertised.
+        // Stored before the intake takes connections again, so no connection is
+        // accepted under the token this replaces. Accepted before it is
+        // advertised.
         *self.token.write().expect("token") = fresh.clone();
+        self.intake.reopen();
         let endpoint = EndpointFile {
             socket: self.addr.clone(),
             token: fresh,
@@ -672,6 +674,10 @@ fn serve_connection(
                 let Some(Some(accepted)) = answer else {
                     return;
                 };
+                // Counted before the answer is written and dropped once the
+                // stream below ends, so a caller that reads its `Attached`
+                // frame never sees this connection uncounted.
+                let _counted = served.intake.attached();
                 let attached = IpcResponse {
                     request_id,
                     result: IpcResult::Attached {
@@ -820,10 +826,13 @@ fn serve_connection(
 /// started the session. It is read before each frame that client sends is
 /// acted on, so turning the setting off detaches them at their next input.
 ///
+/// This connection's place in the intake's attached count is held by the
+/// caller: taken before the `Attached` frame is written, dropped once this
+/// returns.
+///
 /// `served` is this connection's entry in the [`Intake`]: the intake holds this
-/// connection's read direction through it, and counts this connection while the
-/// reading half runs. The client's record stays as it is, so the image swap that
-/// cut the connection carries it across.
+/// connection's read direction through it. The client's record stays as it is,
+/// so the image swap that cut the connection carries it across.
 fn stream_events(
     connection: Connection,
     client_id: ClientId,
@@ -833,9 +842,6 @@ fn stream_events(
     live_setting: Option<OtherUsersSetting>,
     served: &ServedConnection,
 ) {
-    // Counted from here until this function returns, so the count covers
-    // exactly the connections whose input can still reach the session.
-    let _attached = served.intake.attached();
     let (mut reader, mut writer) = connection.split();
     let writer_inbox = inbox_tx.clone();
     let writer_intake = Arc::clone(&served.intake);

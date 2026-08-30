@@ -362,3 +362,21 @@ fn a_cloned_recorder_is_independent_of_the_original() {
     assert_eq!(rec.len(), 1);
     rec.assert_exact(&[a]);
 }
+
+#[test]
+fn a_prefix_mismatch_diff_leaves_out_the_events_past_the_prefix() {
+    // Trailing events are what `assert_prefix` leaves for the next assertion,
+    // so naming them EXTRA points the reader at a count problem it never had.
+    let mut recorder = RecordedEvents::new();
+    recorder.push(created());
+    recorder.push(focused());
+    recorder.push(closed());
+
+    let err = catch_unwind(std::panic::AssertUnwindSafe(|| {
+        recorder.assert_prefix(&[created(), closed()]);
+    }));
+
+    let msg = message(err);
+    assert!(!msg.contains("EXTRA"), "{msg}");
+    assert!(msg.contains("length: expected 2, actual 2"), "{msg}");
+}

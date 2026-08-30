@@ -7,8 +7,9 @@ use kdl::{KdlDocument, KdlNode};
 use miette::{Diagnostic, SourceSpan};
 
 use super::{
-    parse_kdl, set, single_value, unknown_key, value_bool, value_integer, value_nonempty_string,
-    value_string, value_u16, value_u32,
+    first_brace_past_the_depth_limit, parse_kdl, past_string, set, single_value, unknown_key,
+    value_bool, value_integer, value_nonempty_string, value_string, value_u16, value_u32,
+    MAX_BLOCK_DEPTH,
 };
 use crate::error::ConfigError;
 
@@ -400,4 +401,83 @@ fn unknown_key_matches_a_key_that_is_itself_allowed() {
 #[should_panic(expected = "every config key set is non-empty")]
 fn unknown_key_panics_on_an_empty_allowed_list() {
     let _ = unknown_key("version", &[]);
+}
+
+#[test]
+fn a_block_nested_past_the_limit_is_a_parse_error_not_a_stack_overflow() {
+    let deep = format!(
+        "{}{}",
+        "a {".repeat(MAX_BLOCK_DEPTH + 1),
+        "}".repeat(MAX_BLOCK_DEPTH + 1)
+    );
+
+    let error: ConfigError = parse_kdl(Path::new("koshi.kdl"), &deep)
+        .expect_err("nesting past the limit is refused")
+        .into();
+
+    match error {
+        ConfigError::Parse { path, detail } => {
+            assert_eq!(path, "koshi.kdl");
+            assert_eq!(
+                detail,
+                format!("blocks nest more than {MAX_BLOCK_DEPTH} levels deep")
+            );
+        }
+        other => panic!("expected a parse error, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_block_nested_exactly_to_the_limit_still_parses() {
+    let deepest = format!(
+        "{}{}",
+        "a {".repeat(MAX_BLOCK_DEPTH),
+        "}".repeat(MAX_BLOCK_DEPTH)
+    );
+
+    assert!(parse_kdl(Path::new("koshi.kdl"), &deepest).is_ok());
+}
+
+#[test]
+fn braces_inside_comments_and_strings_open_no_level() {
+    // Each source below carries far more `{` than the limit, and not one of
+    // them opens a block.
+    let opener = "{".repeat(MAX_BLOCK_DEPTH + 1);
+    for source in [
+        format!("// {opener}\nkey 1"),
+        format!("/* {opener} */\nkey 1"),
+        format!("/* /* {opener} */ */\nkey 1"),
+        format!("key \"{opener}\""),
+        format!("key \"a\\\"{opener}\""),
+        format!("key #\"{opener}\"#"),
+        format!("key ##\"{opener}\"#\"##"),
+        format!("key #true // {opener}"),
+    ] {
+        assert_eq!(
+            first_brace_past_the_depth_limit(&source),
+            None,
+            "source: {source:?}"
+        );
+    }
+}
+
+#[test]
+fn the_scan_names_the_brace_that_opens_the_first_level_past_the_limit() {
+    let source = format!("{}x", "a {".repeat(MAX_BLOCK_DEPTH + 1));
+
+    // Each level is the three bytes `a {`, so the offending `{` sits two
+    // bytes into the last one.
+    assert_eq!(
+        first_brace_past_the_depth_limit(&source),
+        Some(MAX_BLOCK_DEPTH * 3 + 2)
+    );
+}
+
+#[test]
+fn a_string_run_ends_where_its_closing_quote_does() {
+    assert_eq!(past_string(br#""a\"b" rest"#, 0), 6);
+    assert_eq!(past_string(br###"##"a"#b"## rest"###, 0), 10);
+    assert_eq!(past_string(b"#true", 0), 1);
+    assert_eq!(past_string(b"\"never closed", 0), 13);
+    assert_eq!(past_string(b"#\"never closed", 0), 14);
 }

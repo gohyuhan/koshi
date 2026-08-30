@@ -290,16 +290,22 @@ fn an_empty_file_is_unreadable() {
 }
 
 #[test]
-fn writing_the_advert_marker_into_a_missing_directory_is_endpoint_file_write() {
+fn writing_the_advert_marker_into_a_missing_directory_names_the_marker() {
     let dir = TempDir::new().expect("create temp dir");
     let path = advert_path(&dir.path().join("no-such-subdir"), SessionId::new());
 
-    match write_advert(&path) {
-        Err(IpcError::EndpointFileWrite { path: reported, .. }) => {
-            assert_eq!(reported, path.display().to_string());
+    let error = write_advert(&path).expect_err("a missing directory refuses the write");
+
+    match &error {
+        IpcError::AdvertWrite { path: reported, .. } => {
+            assert_eq!(*reported, path.display().to_string());
         }
-        other => panic!("expected EndpointFileWrite, got {other:?}"),
+        other => panic!("expected AdvertWrite, got {other:?}"),
     }
+    assert!(
+        error.to_string().starts_with("advert marker "),
+        "the message names the marker, not an endpoint file: {error}"
+    );
 }
 
 #[test]

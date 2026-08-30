@@ -280,7 +280,7 @@ fn one_session_refusing_still_leaves_every_other_session_asked() {
             refuses,
             SessionScript {
                 restart: IpcResult::Error(IpcErrorPayload {
-                    code: IpcErrorCode::MalformedRequest,
+                    code: IpcErrorCode::Unknown,
                     message: "a pane is mid-write".to_string(),
                 }),
                 version: "3.3.3".to_string(),

@@ -861,6 +861,9 @@ fn display_rows_filter_names_while_the_overview_keeps_them_raw() {
     assert_eq!(panes[0].name.as_deref(), Some("title"));
     assert_eq!(panes[0].tab_name, "tab");
     assert_eq!(panes[0].session_name, "websrv");
+
+    let clients = client_rows(std::slice::from_ref(&raw));
+    assert_eq!(clients[0].session_name, "websrv");
 }
 
 #[test]
@@ -873,6 +876,12 @@ fn a_display_row_name_is_bounded() {
     );
     assert_eq!(
         session_rows(std::slice::from_ref(&raw))[0].name.len(),
+        koshi_core::text::MAX_REPORTED_TEXT_BYTES
+    );
+    assert_eq!(
+        client_rows(std::slice::from_ref(&raw))[0]
+            .session_name
+            .len(),
         koshi_core::text::MAX_REPORTED_TEXT_BYTES
     );
 }

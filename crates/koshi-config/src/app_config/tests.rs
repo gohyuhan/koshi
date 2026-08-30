@@ -7,7 +7,9 @@ use koshi_core::geometry::Direction;
 use koshi_core::log::{LogFormat, LogLevel};
 
 use crate::error::ConfigError;
-use crate::layer::{PartialKoshiConfig, PartialPaneConfig, PartialUpdateConfig};
+use crate::layer::{
+    PartialKoshiConfig, PartialPaneConfig, PartialScrollbackConfig, PartialUpdateConfig,
+};
 use crate::types::{ClientConfig, WheelScroll};
 
 use super::{parse_app_config, AppConfigFile};
@@ -1330,4 +1332,34 @@ fn an_unknown_field_in_each_section_suggests_its_nearest_key() {
         let (_, warnings) = parse_with_warnings(source);
         assert_eq!(warnings, vec![expected.to_string()], "source {source:?}");
     }
+}
+
+#[test]
+fn a_section_written_with_a_value_instead_of_a_block_is_named_in_the_warnings() {
+    // `scrollback 5000` reads as a section with no block, so nothing of it is
+    // applied. The warning says so rather than leaving the user guessing.
+    let (layer, warnings) = parse_with_warnings("scrollback 5000");
+
+    assert_eq!(layer.scrollback, Some(PartialScrollbackConfig::default()));
+    assert_eq!(
+        warnings,
+        vec!["ignored `scrollback` value: a section takes a `{ … }` block".to_string()]
+    );
+}
+
+#[test]
+fn a_section_carrying_both_a_value_and_a_block_reads_the_block_and_names_the_value() {
+    let (layer, warnings) = parse_with_warnings("pane 7 { min-cols 12 }");
+
+    assert_eq!(
+        layer.pane,
+        Some(PartialPaneConfig {
+            min_cols: Some(12),
+            ..PartialPaneConfig::default()
+        })
+    );
+    assert_eq!(
+        warnings,
+        vec!["ignored `pane` value: a section takes a `{ … }` block".to_string()]
+    );
 }

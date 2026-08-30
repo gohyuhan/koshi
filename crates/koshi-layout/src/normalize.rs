@@ -169,9 +169,8 @@ fn merge_same_direction(direction: SplitDirection, entries: Vec<Entry>) -> Vec<E
 
 /// The weights an entry contributes after merging: its own rescaled share
 /// when kept (`factor == 1`), or one rescaled share per inner child when
-/// inlined. `None` when a rescaled share exceeds `Weight::MAX` or a kept
-/// entry's weight is not a plain flex share. The `u128` products are not
-/// overflow-checked.
+/// inlined. `None` when a rescaled share overflows `u128` or exceeds
+/// `Weight::MAX`, or a kept entry's weight is not a plain flex share.
 fn planned_weights(entry: &Entry, factor: u128, scale: u128) -> Option<Vec<SizeWeight>> {
     if factor == 1 {
         return scaled_flex(&entry.weight, scale).map(|weight| vec![weight]);
@@ -185,7 +184,9 @@ fn planned_weights(entry: &Entry, factor: u128, scale: u128) -> Option<Vec<SizeW
         .iter()
         .map(|weight| {
             let inner_share = plain_flex(weight).expect("checked by mergeable_weight_sum");
-            let rescaled = u128::from(inner_share) * u128::from(slot_share) * scale;
+            let rescaled = u128::from(inner_share)
+                .checked_mul(u128::from(slot_share))?
+                .checked_mul(scale)?;
             Weight::try_from(rescaled)
                 .ok()
                 .map(|share| SizeWeight::new(SizeConstraint::Flex(share)))
@@ -225,11 +226,11 @@ fn plain_flex(weight: &SizeWeight) -> Option<Weight> {
 }
 
 /// A plain flex weight holding `weight`'s share multiplied by `scale`.
-/// `None` when `weight` is not a plain flex share or the product exceeds
-/// `Weight::MAX`. The `u128` product is not overflow-checked.
+/// `None` when `weight` is not a plain flex share, the product overflows
+/// `u128`, or the product exceeds `Weight::MAX`.
 fn scaled_flex(weight: &SizeWeight, scale: u128) -> Option<SizeWeight> {
     let share = plain_flex(weight)?;
-    let rescaled = Weight::try_from(u128::from(share) * scale).ok()?;
+    let rescaled = Weight::try_from(u128::from(share).checked_mul(scale)?).ok()?;
     Some(SizeWeight::new(SizeConstraint::Flex(rescaled)))
 }
 

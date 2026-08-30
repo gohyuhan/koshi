@@ -858,6 +858,77 @@ fn carried_panes_that_cannot_be_read_are_ended_and_their_terminals_closed() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn ending_the_panes_after_a_failure_leaves_a_number_an_earlier_pane_holds_open() {
+    // A header naming one descriptor for two panes, with the duplicate after
+    // `untouched`: the backend holds the number for the first pane, so closing
+    // it here would close it twice.
+    let shared = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
+    assert!(shared >= 0, "the pseudoterminal master opens");
+    let named = terminal_master_name(shared).expect("the master names its terminal");
+    let record = |terminal_fd| koshi_runtime::resume::CarriedPane {
+        pane_id: PaneId::new(),
+        pid: 0,
+        rows: 24,
+        cols: 80,
+        terminal_fd: Some(terminal_fd),
+        terminal_name: None,
+        exit: None,
+    };
+    let header = header_naming(vec![record(shared), record(shared)]);
+
+    end_panes_after_failure(&header, 1);
+
+    assert_eq!(
+        terminal_master_name(shared),
+        Some(named),
+        "the number the first pane was taken back on stays open"
+    );
+    assert_eq!(
+        unsafe { libc::close(shared) },
+        0,
+        "the test still owns the master left open"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn ending_the_panes_after_a_failure_closes_each_number_once() {
+    // Two untouched panes naming one descriptor: the number is closed once,
+    // and the second pane's turn is a no-op rather than a second close.
+    let shared = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
+    assert!(shared >= 0, "the pseudoterminal master opens");
+    let named = terminal_master_name(shared).expect("the master names its terminal");
+    // A second number on the same terminal, held to the end of the test, so no
+    // other test can be handed this terminal under the number closed below.
+    let held = unsafe { libc::dup(shared) };
+    assert!(held >= 0, "the master opens under a second number");
+    let record = |terminal_fd| koshi_runtime::resume::CarriedPane {
+        pane_id: PaneId::new(),
+        pid: 0,
+        rows: 24,
+        cols: 80,
+        terminal_fd: Some(terminal_fd),
+        terminal_name: None,
+        exit: None,
+    };
+    let header = header_naming(vec![record(shared), record(shared)]);
+
+    end_panes_after_failure(&header, 0);
+
+    assert_ne!(
+        terminal_master_name(shared),
+        Some(named),
+        "the number nobody took over is closed"
+    );
+    assert_eq!(
+        unsafe { libc::close(held) },
+        0,
+        "the test still owns the second number it opened"
+    );
+}
+
 #[test]
 #[cfg(unix)]
 fn a_swap_that_did_not_happen_leaves_every_terminal_closed_on_exec_again() {
@@ -1926,9 +1997,11 @@ fn two_carried_panes_naming_one_descriptor_are_refused_rather_than_owned_twice()
     let named = terminal_master_name(master).expect("the master names its terminal");
     let first = PaneId::new();
     let second = PaneId::new();
-    let record = |pane_id| koshi_runtime::resume::CarriedPane {
+    // Two process ids, so the descriptor is the only thing the two panes
+    // share: one id for two panes is refused before the descriptor is read.
+    let record = |pane_id, pid| koshi_runtime::resume::CarriedPane {
         pane_id,
-        pid: NO_SUCH_PROCESS,
+        pid,
         rows: 24,
         cols: 80,
         terminal_fd: Some(master),
@@ -1939,7 +2012,10 @@ fn two_carried_panes_naming_one_descriptor_are_refused_rather_than_owned_twice()
         format: RESUME_FORMAT,
         session_id: start.session_id,
         session_name: start.session_name.clone(),
-        panes: vec![record(first), record(second)],
+        panes: vec![
+            record(first, NO_SUCH_PROCESS),
+            record(second, NO_SUCH_PROCESS - 1),
+        ],
     };
 
     let taken = take_panes_back(&header, Arc::new(InboxSink::new(mpsc::channel().0)), &start);
@@ -2381,4 +2457,39 @@ fn a_resume_file_whose_header_does_not_read_is_refused_and_taken_off_the_disk() 
         !resume_file.exists(),
         "the file goes, because no later build reads it either"
     );
+}
+
+#[test]
+fn a_carried_state_naming_one_process_id_for_two_panes_is_refused() {
+    // Each pane's watcher waits on that pane's child. Two watchers on one
+    // process id leave the second finding nothing and reporting a live pane as
+    // ended.
+    let first = PaneId::new();
+    let second = PaneId::new();
+    let mut a = carried_record(first);
+    a.pid = 4821;
+    let mut b = carried_record(second);
+    b.pid = 4821;
+
+    let refused = header_names_each_pane_once(&header_naming(vec![a, b]))
+        .expect_err("one process id cannot answer for two panes");
+
+    assert_eq!(
+        refused.to_string(),
+        format!(
+            "pane {second} carries process id 4821, which pane {first} already carries, \
+             so it cannot be taken back"
+        )
+    );
+}
+
+#[test]
+fn a_carried_state_naming_no_child_for_two_panes_is_taken_back() {
+    // A process id of zero names no child, so it may repeat.
+    let header = header_naming(vec![
+        carried_record(PaneId::new()),
+        carried_record(PaneId::new()),
+    ]);
+
+    header_names_each_pane_once(&header).expect("two panes with no child are taken back");
 }

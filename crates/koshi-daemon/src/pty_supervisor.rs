@@ -28,7 +28,7 @@ use std::path::Path;
 use std::process::Stdio;
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use koshi_core::ids::{PaneId, SessionId};
 use koshi_core::process::{ExitStatus, KillPolicy};
@@ -98,9 +98,13 @@ struct LinkState {
     /// [`ResumeOutput`](SupervisorRequestKind::ResumeOutput) and the next link
     /// clear it.
     paused: bool,
-    /// The panes being closed right now. A send parked for one of these gives
-    /// up, so the pane's reader reaches the end of its terminal and the close
-    /// can finish.
+    /// Every pane this supervisor has started closing. A send for one of these
+    /// gives up, so the pane's reader reaches the end of its terminal and the
+    /// close can finish, and no chunk of a closed pane reaches a link after the
+    /// [`Kill`](SupervisorRequestKind::Kill) that closed it was answered.
+    ///
+    /// A pane id is never reused, so this only grows: one entry per pane the
+    /// supervisor closes.
     letting_go: HashSet<PaneId>,
     /// The panes whose exit has been written to a link and whose entry the
     /// backend still holds. A pane leaves the backend on a
@@ -174,8 +178,9 @@ impl LinkSink {
     /// Let `pane` go: a send parked for it gives up at once, and so does the
     /// next one.
     ///
-    /// Called before a pane is closed. Closing a pane's terminal waits for its
-    /// reader to carry that terminal to the end.
+    /// Called before a pane is closed, and never undone: every later send for
+    /// that pane gives up too. Closing a pane's terminal waits for its reader
+    /// to carry that terminal to the end.
     fn let_go(&self, pane: PaneId) {
         let mut state = self.state.lock().expect("supervisor link");
         state.letting_go.insert(pane);
@@ -183,12 +188,14 @@ impl LinkSink {
         self.changed.notify_all();
     }
 
-    /// Forget a pane that is now closed: the panes being closed are only the
-    /// ones being closed right now, and a pane the backend no longer holds has
+    /// Forget a pane that is now closed: a pane the backend no longer holds has
     /// no entry left to close.
+    ///
+    /// The pane stays in `letting_go`, so a reader still parked in
+    /// [`forward`](Self::forward) gives its chunk up when it wakes rather than
+    /// writing it to a link after the close was answered.
     fn forget(&self, pane: PaneId) {
         let mut state = self.state.lock().expect("supervisor link");
-        state.letting_go.remove(&pane);
         state.ended.remove(&pane);
     }
 
@@ -235,8 +242,8 @@ impl LinkSink {
     /// Send one pane's event, waiting when no link is open and while the linked
     /// session server holds the output.
     ///
-    /// `false` means nobody will ever want it: the pane is being closed, or
-    /// the supervisor is ending.
+    /// `false` means nobody will ever want it: the pane is closed or being
+    /// closed, or the supervisor is ending.
     fn forward(&self, pane: PaneId, event: SupervisorEvent) -> bool {
         let frame = SupervisorMessage::<SupervisorResult, _>::Event(event);
         let mut state = self.state.lock().expect("supervisor link");
@@ -380,12 +387,23 @@ fn start_accept_thread(listener: Listener, links_tx: Sender<Connection>) {
         });
 }
 
+/// How long one link has to present the Hello that opens its gate, counted
+/// from the moment the link is served.
+///
+/// The supervisor serves one link at a time, so a peer that connects and sends
+/// nothing holds every later link out for no longer than this.
+const HANDSHAKE_WINDOW: Duration = Duration::from_secs(10);
+
 /// Serve one link until its peer hangs up, a fault closes it, or the session
 /// server asks the supervisor to end.
 ///
 /// A [`SupervisorHandshake`] gates every request. A malformed-but-aligned frame
 /// is answered with [`IpcErrorCode::MalformedRequest`], and a request kind this
 /// build does not have is refused by name; the link keeps serving after either.
+///
+/// Reads before the gate opens end at [`HANDSHAKE_WINDOW`]; a link that
+/// presents no accepted Hello inside it is [`LinkOutcome::Broken`], and the
+/// next link is served. Reads after the gate opens have no deadline.
 fn serve_link(
     mut reader: FrameReader,
     sink: &LinkSink,
@@ -393,6 +411,7 @@ fn serve_link(
     token: &ConnectionToken,
 ) -> LinkOutcome {
     let mut gate = SupervisorHandshake::new(token.clone());
+    reader.set_deadline(Some(Instant::now() + HANDSHAKE_WINDOW));
     loop {
         let request: IncomingSupervisorRequest = match reader.recv() {
             Ok(request) => request,
@@ -440,9 +459,11 @@ fn serve_link(
             Err(refusal) => SupervisorResult::Error(refusal),
             Ok(()) => {
                 // An accepted Hello lets this link carry pane output. No output
-                // reaches a peer that never presented the token.
+                // reaches a peer that never presented the token, and the
+                // handshake deadline comes off once it did.
                 if opening {
                     sink.open();
+                    reader.set_deadline(None);
                 }
                 serve_request(sink, backend, &gate, kind)
             }
@@ -494,9 +515,11 @@ fn serve_request(
             pane_id,
             kill_policy,
         } => done_or_refused(close_pane(sink, backend, pane_id, kill_policy)),
-        SupervisorRequestKind::LiveCwd { pane_id } => {
-            SupervisorResult::Cwd(backend.live_cwd(pane_id))
-        }
+        SupervisorRequestKind::LiveCwd { pane_id } => SupervisorResult::Cwd(
+            backend
+                .live_cwd(pane_id)
+                .filter(|path| path.to_str().is_some()),
+        ),
         SupervisorRequestKind::ListPanes => {
             close_panes_that_ended(sink, backend);
             SupervisorResult::Panes(

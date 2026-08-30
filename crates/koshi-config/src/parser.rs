@@ -8,12 +8,138 @@
 
 use std::path::Path;
 
-use kdl::{KdlDocument, KdlNode, KdlValue};
+use kdl::{KdlDiagnostic, KdlDocument, KdlError, KdlNode, KdlValue};
 
 use crate::error::ConfigParseDiagnostic;
 
 #[cfg(test)]
 mod tests;
+
+/// The deepest `{ … }` nesting [`parse_kdl`] reads.
+///
+/// The KDL parser recurses once per level and uses about 34 KiB of stack for
+/// each, so 24 levels fit inside a 1 MiB thread stack. Koshi's own files nest
+/// at most three levels deep.
+pub(crate) const MAX_BLOCK_DEPTH: usize = 24;
+
+/// The byte offset in `source` of the `{` that opens level
+/// `MAX_BLOCK_DEPTH + 1`, or `None` when nothing nests that deep.
+///
+/// A `{` inside a line comment, a block comment, a quoted string or a raw
+/// string opens no level. A `}` with no open level is ignored.
+fn first_brace_past_the_depth_limit(source: &str) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut depth: usize = 0;
+    let mut block_comments: usize = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        let next = bytes.get(index + 1).copied();
+        if block_comments > 0 {
+            match (byte, next) {
+                (b'*', Some(b'/')) => {
+                    block_comments -= 1;
+                    index += 2;
+                }
+                (b'/', Some(b'*')) => {
+                    block_comments += 1;
+                    index += 2;
+                }
+                _ => index += 1,
+            }
+            continue;
+        }
+        match byte {
+            b'/' if next == Some(b'/') => {
+                index += 2;
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+            }
+            b'/' if next == Some(b'*') => {
+                block_comments = 1;
+                index += 2;
+            }
+            b'#' | b'"' => index = past_string(bytes, index),
+            b'{' => {
+                depth += 1;
+                if depth > MAX_BLOCK_DEPTH {
+                    return Some(index);
+                }
+                index += 1;
+            }
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+/// The byte offset just past the string that starts at `start`, where
+/// `bytes[start]` is `"` or `#`.
+///
+/// `#` runs that no `"` follows — `#true`, `#null` — are not strings, and the
+/// answer is `start + 1`. A string that never closes ends at `bytes.len()`.
+///
+/// - `"a\"b" rest` from offset 0 → 6, the offset of the space
+/// - `##"a"#b"## rest` from offset 0 → 10
+/// - `#true` from offset 0 → 1
+fn past_string(bytes: &[u8], start: usize) -> usize {
+    let mut index = start;
+    while bytes.get(index) == Some(&b'#') {
+        index += 1;
+    }
+    let hashes = index - start;
+    if bytes.get(index) != Some(&b'"') {
+        return start + 1;
+    }
+    index += 1;
+    if hashes == 0 {
+        while index < bytes.len() {
+            match bytes[index] {
+                b'\\' => index += 2,
+                b'"' => return index + 1,
+                _ => index += 1,
+            }
+        }
+        return bytes.len();
+    }
+    while index < bytes.len() {
+        if bytes[index] == b'"' && bytes[index + 1..].iter().take(hashes).all(|b| *b == b'#') {
+            let closed = index + 1 + hashes;
+            if closed <= bytes.len() {
+                return closed;
+            }
+        }
+        index += 1;
+    }
+    bytes.len()
+}
+
+/// The refusal for a `source` that nests past [`MAX_BLOCK_DEPTH`], pointing at
+/// the `{` at byte `offset`.
+fn nested_too_deep(path: &Path, source: &str, offset: usize) -> ConfigParseDiagnostic {
+    let input = std::sync::Arc::new(source.to_string());
+    ConfigParseDiagnostic::new(
+        path,
+        KdlError {
+            input: input.clone(),
+            diagnostics: vec![KdlDiagnostic {
+                input,
+                span: (offset, 1).into(),
+                message: Some(format!(
+                    "blocks nest more than {MAX_BLOCK_DEPTH} levels deep"
+                )),
+                label: Some(format!("this block opens level {}", MAX_BLOCK_DEPTH + 1)),
+                help: Some("flatten the nesting".to_string()),
+                severity: miette::Severity::Error,
+            }],
+        },
+    )
+}
 
 /// Parses `source` — the already-read contents of the config file at `path` —
 /// into a [`KdlDocument`]. Does no file I/O: discovery and reading happen in
@@ -21,8 +147,12 @@ mod tests;
 ///
 /// # Errors
 /// Returns a [`ConfigParseDiagnostic`] carrying `path` and the span-tagged
-/// KDL error for pretty rendering when `source` is not valid KDL syntax.
+/// KDL error for pretty rendering when `source` is not valid KDL syntax, or
+/// when a block nests more than 24 levels deep.
 pub fn parse_kdl(path: &Path, source: &str) -> Result<KdlDocument, ConfigParseDiagnostic> {
+    if let Some(offset) = first_brace_past_the_depth_limit(source) {
+        return Err(nested_too_deep(path, source, offset));
+    }
     source
         .parse::<KdlDocument>()
         .map_err(|err| ConfigParseDiagnostic::new(path, err))

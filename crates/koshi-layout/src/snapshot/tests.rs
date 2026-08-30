@@ -288,3 +288,21 @@ fn a_stack_beside_a_pane_suppresses_as_a_unit_while_the_sibling_survives() {
     assert_eq!(result.stack_headers, Vec::new());
     assert!(!result.all_suppressed);
 }
+
+#[test]
+fn a_stored_shape_without_the_collapsed_flags_still_restores() {
+    // `restore` already derives a missing flag from `active`, so the field's
+    // absence reads as an empty list rather than refusing the whole shape.
+    let member = PaneId::new();
+    let json = format!(
+        r#"{{"members":[{}],"active":0}}"#,
+        serde_json::to_string(&member).expect("a pane id serializes")
+    );
+
+    let snapshot: StackSnapshot = serde_json::from_str(&json).expect("the shape reads back");
+
+    assert_eq!(snapshot.collapsed_states, Vec::<bool>::new());
+    let stack = snapshot.restore();
+    assert_eq!(stack.active, 0);
+    assert!(!stack.children[0].collapsed);
+}

@@ -656,3 +656,21 @@ fn an_empty_buffer_round_trips_through_serde() {
     let restored: Scrollback = serde_json::from_value(value).expect("scrollback deserializes");
     assert_eq!(restored, sb);
 }
+
+#[test]
+fn a_stored_byte_total_that_does_not_match_the_rows_is_recomputed() {
+    // The byte total is derived from the rows on the way in, so a stored total
+    // below their real size cannot underflow the first eviction.
+    let mut scrollback = bounded(1, 1_000_000);
+    scrollback.push_row(&line("abc"), RowEnd::Hard);
+    let mut value = serde_json::to_value(&scrollback).expect("scrollback serializes");
+    value["byte_total"] = serde_json::json!(0);
+
+    let mut restored: Scrollback = serde_json::from_value(value).expect("scrollback deserializes");
+    assert_eq!(restored.byte_total, 3);
+
+    restored.push_row(&line("d"), RowEnd::Hard);
+
+    assert_eq!(restored.byte_total, 1);
+    assert_eq!(retained(&restored), vec!["d"]);
+}

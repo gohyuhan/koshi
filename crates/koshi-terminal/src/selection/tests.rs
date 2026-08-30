@@ -1076,3 +1076,27 @@ fn a_wide_wrap_spacer_is_skipped_with_trimming_on_and_marks_only_its_own_cell() 
     };
     assert_eq!(selection_text(&view, &selection, true), "de世");
 }
+
+#[test]
+fn a_word_lookup_at_the_last_representable_column_stays_put() {
+    // Stepping right of u16::MAX has no cell to step to, so the walk stops
+    // where it started instead of wrapping the column back to 0.
+    let scrollback = scrollback_of(&[], 100);
+    let grid = grid_of(&["cargo build"], 11);
+    let view = TextView::new(&scrollback, &grid);
+
+    assert_eq!(view.word_end(0, u16::MAX), (0, u16::MAX));
+    assert_eq!(view.word_start(0, u16::MAX), (0, u16::MAX));
+}
+
+#[test]
+fn a_word_end_lookup_past_the_width_of_a_wrapped_row_stays_put() {
+    // Column 50 of a six-column row holds nothing, which reads as a blank —
+    // a separator — so the run is blanks and it ends at the `d` below.
+    let scrollback = scrollback_of(&[], 100);
+    let mut grid = grid_of(&["abc", "def gh"], 6);
+    grid.set_row_end(0, RowEnd::Soft);
+    let view = TextView::new(&scrollback, &grid);
+
+    assert_eq!(view.word_end(0, 50), (0, 50));
+}

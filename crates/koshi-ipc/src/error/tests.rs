@@ -455,6 +455,22 @@ fn a_failed_endpoint_file_write_is_session_fatal() {
 }
 
 #[test]
+fn a_failed_advert_marker_write_is_session_fatal_and_names_the_marker() {
+    let error = IpcError::AdvertWrite {
+        path: "/tmp/koshi/501/session-1".to_string(),
+        detail: "No such file or directory (os error 2)".to_string(),
+    };
+
+    assert_eq!(error.severity(), Severity::SessionFatal);
+    assert_eq!(error.category(), DomainCategory::Ipc);
+    assert_eq!(
+        error.to_string(),
+        "advert marker /tmp/koshi/501/session-1 could not be written: \
+         No such file or directory (os error 2)"
+    );
+}
+
+#[test]
 fn socket_address_check_failures_are_client_fatal() {
     assert_eq!(
         IpcError::UntrustedSocket {

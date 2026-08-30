@@ -202,7 +202,7 @@ impl Surface {
                 self.name, self.max, released
             ));
         }
-        if self.max > released + 1 {
+        if self.max - released > 1 {
             return Some(format!(
                 "the {} speaks {}, which is more than one step above the {} the last release spoke",
                 self.name, self.max, released
