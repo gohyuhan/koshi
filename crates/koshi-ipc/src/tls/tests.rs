@@ -939,7 +939,7 @@ fn split_without_handshake() -> (TlsReader, TlsWriter, TcpStream) {
 
 #[test]
 fn giving_a_half_a_deadline_stores_it_and_leaves_the_socket_timeouts_alone() {
-    let (mut reader, writer, _peer) = split_without_handshake();
+    let (mut reader, _writer, _peer) = split_without_handshake();
     reader
         .sock
         .set_read_timeout(Some(Duration::from_secs(7)))
@@ -953,22 +953,17 @@ fn giving_a_half_a_deadline_stores_it_and_leaves_the_socket_timeouts_alone() {
         reader.sock.read_timeout().expect("read the timeout"),
         Some(Duration::from_secs(7))
     );
-    // Both handles name one socket.
-    assert_eq!(
-        writer.sock.read_timeout().expect("read the timeout"),
-        Some(Duration::from_secs(7))
-    );
 }
 
 #[test]
-fn taking_the_deadline_away_clears_the_socket_timeouts_both_halves_share() {
-    let (mut reader, writer, _peer) = split_without_handshake();
+fn taking_the_deadline_away_clears_both_timeouts_on_that_halfs_handle() {
+    let (mut reader, _writer, _peer) = split_without_handshake();
     reader.set_deadline(Some(Instant::now() + Duration::from_secs(60)));
-    writer
+    reader
         .sock
         .set_read_timeout(Some(Duration::from_secs(7)))
         .expect("set a read timeout");
-    writer
+    reader
         .sock
         .set_write_timeout(Some(Duration::from_secs(9)))
         .expect("set a write timeout");
@@ -976,8 +971,8 @@ fn taking_the_deadline_away_clears_the_socket_timeouts_both_halves_share() {
     reader.set_deadline(None);
 
     assert_eq!(reader.deadline, None);
-    assert_eq!(writer.sock.read_timeout().expect("read the timeout"), None);
-    assert_eq!(writer.sock.write_timeout().expect("read the timeout"), None);
+    assert_eq!(reader.sock.read_timeout().expect("read the timeout"), None);
+    assert_eq!(reader.sock.write_timeout().expect("read the timeout"), None);
 }
 
 #[test]
@@ -1143,10 +1138,15 @@ fn a_write_after_a_write_that_ran_out_of_time_still_takes_bytes() {
     // The timed-out write leaves 64 KiB of encrypted bytes queued. The next
     // write drains them first, so it has room for its own plaintext.
     let (config, _cert) = fresh_server();
+    // The server reads the exact byte count the client writes, so it finishes
+    // without waiting for end of stream and the client holds the connection
+    // open until it has.
     let (address, server) = serve_after_handshake(config, |conn, sock| {
         let (mut reader, _writer) = split_tls(conn, sock).expect("split the loopback stream");
-        let mut received = Vec::new();
-        let _ = reader.read_to_end(&mut received);
+        let mut received = vec![0u8; ONE_WRITE_TAKES + 5];
+        reader
+            .read_exact(&mut received)
+            .expect("every byte the client wrote arrives");
         received.len()
     });
 
@@ -1164,12 +1164,12 @@ fn a_write_after_a_write_that_ran_out_of_time_still_takes_bytes() {
         5
     );
 
-    drop(writer);
-    drop(reader);
     assert_eq!(
         server.join().expect("the server thread finished"),
         ONE_WRITE_TAKES + 5
     );
+    drop(writer);
+    drop(reader);
 }
 
 /// How many bytes the blocked-write test sends: far past what the loopback

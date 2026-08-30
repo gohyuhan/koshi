@@ -19,6 +19,10 @@ use koshi_config::types::{
 /// The KDL text of the fenced block under the `## Full example` heading of
 /// `config-docs/<page>` — the complete example the docs tell a user to copy.
 ///
+/// Every `\r\n` in the page becomes `\n` before the headings and fences are
+/// looked for, so a checkout that stores the page with Windows line endings
+/// reads the same as one that stores it with Unix line endings.
+///
 /// # Panics
 /// Panics when the page cannot be read, carries no `## Full example` heading,
 /// or has no closed ```` ```kdl ```` block after that heading.
@@ -27,7 +31,8 @@ fn full_example(page: &str) -> String {
         .join("../../config-docs")
         .join(page);
     let markdown = std::fs::read_to_string(&path)
-        .unwrap_or_else(|err| panic!("{} is readable: {err}", path.display()));
+        .unwrap_or_else(|err| panic!("{} is readable: {err}", path.display()))
+        .replace("\r\n", "\n");
     let after_heading = markdown
         .split_once("\n## Full example\n")
         .unwrap_or_else(|| panic!("{page} has a `## Full example` heading"))

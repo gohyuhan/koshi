@@ -107,14 +107,19 @@ fn send_pending(
 /// the socket does not stop the other. Both halves share one
 /// [`rustls::Connection`] behind a mutex.
 ///
-/// A socket timeout belongs to the socket, not to a handle. A half with a
-/// deadline sets both socket timeouts before each of its socket calls; a half
-/// with no deadline sets nothing and runs under whatever timeouts the other
-/// half set last.
+/// A half with a deadline sets both timeouts on its own handle before each of
+/// its socket calls. A half with no deadline sets nothing and runs under the
+/// timeouts its own handle carries.
 ///
-/// Neither half starts with a deadline. The socket keeps the timeouts
-/// [`handshake`] left on it until [`TlsReader::set_deadline`] or
-/// [`TlsWriter::set_deadline`] sets or clears them.
+/// A timeout one half sets reaches the other only on Unix, where the two
+/// handles are one duplicated descriptor onto one socket. On Windows each
+/// handle is its own socket descriptor and carries its own timeouts. Give each
+/// half the deadline it is to run under.
+///
+/// Neither half starts with a deadline. Each handle keeps the timeouts
+/// [`handshake`] left on the socket it was cloned from until
+/// [`TlsReader::set_deadline`] or [`TlsWriter::set_deadline`] sets or clears
+/// that half's own.
 ///
 /// # Errors
 /// Returns the failure of duplicating the socket handle.
@@ -138,8 +143,8 @@ pub fn split_tls(conn: rustls::Connection, sock: TcpStream) -> io::Result<(TlsRe
     ))
 }
 
-/// Store `deadline` in `slot`. When it is `None`, clear both timeouts on
-/// `sock` as well; a failure to clear one is ignored.
+/// Store `deadline` in `slot`. When it is `None`, clear the read and the write
+/// timeout on `sock` as well; a failure to clear one is ignored.
 fn store_deadline(sock: &TcpStream, slot: &mut Option<Instant>, deadline: Option<Instant>) {
     *slot = deadline;
     if deadline.is_none() {
@@ -185,9 +190,8 @@ impl TlsReader {
     ///
     /// Every socket read this half makes ends by `deadline`, however many
     /// reads it takes to produce one helping of plaintext. `None` clears both
-    /// timeouts on the socket; a read after it blocks for as long as it takes
-    /// until the writing half sets the socket timeouts for a write of its
-    /// own.
+    /// timeouts on this half's handle; a read after it blocks for as long as
+    /// it takes.
     pub fn set_deadline(&mut self, deadline: Option<Instant>) {
         store_deadline(&self.sock, &mut self.deadline, deadline);
     }
@@ -265,9 +269,8 @@ impl TlsWriter {
     ///
     /// Every socket write this half makes ends by `deadline`, however many
     /// writes it takes to put one helping of plaintext on the socket. `None`
-    /// clears both timeouts on the socket; a write after it blocks for as
-    /// long as it takes until the reading half sets the socket timeouts for a
-    /// read of its own.
+    /// clears both timeouts on this half's handle; a write after it blocks for
+    /// as long as it takes.
     pub fn set_deadline(&mut self, deadline: Option<Instant>) {
         store_deadline(&self.sock, &mut self.deadline, deadline);
     }

@@ -813,13 +813,17 @@ fn the_rebuild_keeps_the_files_of_a_session_it_cannot_read_a_version_from() {
     );
 }
 
-/// A stand-in session server at `addr` that accepts one connection and ends.
-/// A lookup's probe sends nothing and closes, so that is all it needs.
-fn probe_answering_server(addr: &str) -> JoinHandle<()> {
-    let listener = Listener::bind(addr).expect("bind the stand-in session");
-    std::thread::spawn(move || {
-        let _ = listener.accept();
-    })
+/// A stand-in session server bound at `addr`, never accepted from.
+///
+/// A lookup's probe connects and closes at once. The listener holds one bound
+/// instance from the moment it binds, which the probe connects to, so reaching
+/// the address needs no `accept`. On Windows a probe that closes before an
+/// `accept` leaves that instance holding a connection with nothing behind it,
+/// and the `accept` clearing it then blocks for a caller that never comes.
+///
+/// The caller keeps the returned listener bound for as long as the lookup runs.
+fn a_bound_session(addr: &str) -> Listener {
+    Listener::bind(addr).expect("bind the stand-in session")
 }
 
 #[test]
@@ -830,7 +834,7 @@ fn a_lookup_for_a_session_that_answers_hands_back_where_it_listens() {
     let live = SessionId::new();
     let runtime_dir = test_runtime_dir();
     let socket = socket_addr(runtime_dir.path(), live);
-    let server = probe_answering_server(&socket);
+    let server = a_bound_session(&socket);
     let mut registry = registry_of(&[(live, "S-quiet-lake")]);
     registry
         .get_mut(&live)
@@ -866,7 +870,7 @@ fn a_lookup_for_a_session_that_answers_hands_back_where_it_listens() {
         "a session that answered stays in the list"
     );
 
-    server.join().expect("the stand-in session ended");
+    drop(server);
 }
 
 #[test]
@@ -1321,20 +1325,12 @@ fn the_watcher_over_a_session_this_process_did_not_start_reports_nothing() {
 }
 
 /// The router hands its place over on Windows by starting the new binary with
-/// these two creation flags and this argument. `std::process::Command` reports
-/// neither back, so the values are checked here; the argument is the one
-/// [`crate::cli`] parses into `wait_for_lock`.
+/// this argument, the one [`crate::cli`] parses into `wait_for_lock`. The two
+/// creation flags the handover carries are checked beside them, in
+/// [`crate::process`].
 #[cfg(windows)]
 #[test]
-fn the_handover_carries_the_win32_flags_and_the_argument_that_waits() {
-    assert_eq!(
-        DETACHED_PROCESS, 0x0000_0008,
-        "DETACHED_PROCESS is 8; another value is another flag"
-    );
-    assert_eq!(
-        CREATE_NEW_PROCESS_GROUP, 0x0000_0200,
-        "CREATE_NEW_PROCESS_GROUP is 512; another value is another flag"
-    );
+fn the_handover_carries_the_argument_that_waits() {
     assert_eq!(WAIT_FOR_LOCK_FLAG, "--wait-for-lock");
 }
 

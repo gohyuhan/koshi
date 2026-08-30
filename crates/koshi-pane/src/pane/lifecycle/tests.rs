@@ -425,7 +425,7 @@ fn unit_lifecycle_states_serialize_as_their_variant_names() {
 fn payload_lifecycle_states_serialize_their_fields_with_times_as_seconds_and_nanos() {
     let exited = PaneLifecycle::Exited {
         code: None,
-        at: SystemTime::UNIX_EPOCH + Duration::new(5, 40),
+        at: SystemTime::UNIX_EPOCH + Duration::new(5, 400),
     };
     let closing = PaneLifecycle::Closing {
         since: SystemTime::UNIX_EPOCH,
@@ -433,7 +433,7 @@ fn payload_lifecycle_states_serialize_their_fields_with_times_as_seconds_and_nan
 
     assert_eq!(
         serde_json::to_string(&exited).expect("serialize"),
-        r#"{"Exited":{"code":null,"at":{"secs_since_epoch":5,"nanos_since_epoch":40}}}"#
+        r#"{"Exited":{"code":null,"at":{"secs_since_epoch":5,"nanos_since_epoch":400}}}"#
     );
     assert_eq!(
         serde_json::to_string(&closing).expect("serialize"),
