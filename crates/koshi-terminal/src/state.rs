@@ -7,7 +7,7 @@
 //! One [`TerminalState`] backs a single terminal pane; panes never share
 //! buffers. The state travels inside a per-pane
 //! [`TerminalEngine`](crate::engine::TerminalEngine) — the runtime owns the
-//! `PaneId → TerminalEngine` map — so the state itself carries no identity.
+//! `PaneId → TerminalEngine` map — and carries no identity of its own.
 //! The VTE performer (see the `perform` submodule) mutates this model as PTY
 //! output arrives; device queries in that output (DA/DSR/DECRQM — Device
 //! Attributes, Device Status Report, and Request Mode queries) queue their
@@ -73,7 +73,7 @@ pub enum ShellIntegrationFact {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalState {
     /// The primary (normal, scrolling) screen buffer, including row metadata,
-    /// reference-counted so a render snapshot can share it without copying; a
+    /// reference-counted: a render snapshot shares it without copying, and a
     /// write clones it once on demand (copy-on-write via [`Arc::make_mut`] in
     /// [`active_grid_mut`]).
     ///
@@ -104,8 +104,8 @@ pub struct TerminalState {
     /// The window/tab title set via OSC 0/1/2; `None` until the app sets one.
     title: Option<String>,
     /// The working directory last reported by the shell via OSC 7 (host +
-    /// decoded path), or `None` until the shell reports one. Consumed by cwd
-    /// inheritance so a newly split pane can open in the same directory.
+    /// decoded path), or `None` until the shell reports one. Read by cwd
+    /// inheritance when a new pane spawns.
     reported_cwd: Option<ReportedCwd>,
     /// The shell lifecycle point last reported through OSC 133.
     #[serde(default)]
@@ -116,9 +116,8 @@ pub struct TerminalState {
     /// Lines that have scrolled off the top of the primary screen.
     scrollback: Scrollback,
     /// Primary screen's DECSTBM scroll-region margins, 0-based inclusive
-    /// `(top, bottom)`; `None` scrolls the whole screen. Kept per screen (not
-    /// shared) so an alt-screen app's margins do not leak onto the primary
-    /// after it exits.
+    /// `(top, bottom)`; `None` scrolls the whole screen. Kept per screen: an
+    /// alt-screen app's margins never reach the primary.
     primary_scroll_region: Option<(u16, u16)>,
     /// Alternate screen's scroll-region margins; see `primary_scroll_region`.
     alternate_scroll_region: Option<(u16, u16)>,
@@ -145,11 +144,10 @@ impl TerminalState {
         Self::with_scrollback(size, ScrollbackLimit::default())
     }
 
-    /// Like [`new`](Self::new), but with an explicit scrollback limit so a
-    /// caller can honor the user's configured `scrollback` caps.
+    /// Like [`new`](Self::new), but with an explicit scrollback limit.
     pub fn with_scrollback(size: PtySize, limit: ScrollbackLimit) -> Self {
-        let terminal_size = Grid::blank(size.rows, size.cols, Style::default());
-        let terminal_cursor = Cursor {
+        let blank_screen = Grid::blank(size.rows, size.cols, Style::default());
+        let home_cursor = Cursor {
             row: 0,
             col: 0,
             is_visible: true,
@@ -157,11 +155,11 @@ impl TerminalState {
             saved: None,
         };
         TerminalState {
-            primary: Arc::new(terminal_size.clone()),
-            alternate: Arc::new(terminal_size),
+            primary: Arc::new(blank_screen.clone()),
+            alternate: Arc::new(blank_screen),
             active: Screen::Primary,
-            primary_cursor: terminal_cursor,
-            alternate_cursor: terminal_cursor,
+            primary_cursor: home_cursor,
+            alternate_cursor: home_cursor,
             primary_render: RenderState::fresh(),
             alternate_render: RenderState::fresh(),
             modes: TerminalModes::default(),
@@ -192,19 +190,19 @@ impl TerminalState {
     /// The primary screen REFLOWS: soft-wrapped rows re-join into logical
     /// lines ([`RowEnd`](crate::grid::state::RowEnd)) and re-wrap to the new
     /// width, while prompt marks stay with their rows. Text wider than the new
-    /// width wraps onto continuation rows instead of being cut off, and
-    /// widening re-joins what an earlier narrow width wrapped. Rows past the
-    /// new height scroll into history (trailing blank padding rows drop
-    /// instead), a taller screen pulls history back in, and the cursor stays on
-    /// its logical line at its content offset. Cursor-line tracking holds for heights of one row or
+    /// width wraps onto continuation rows, and widening re-joins what an
+    /// earlier narrow width wrapped. Rows past the new height scroll into
+    /// history (trailing blank padding rows drop instead), a taller screen
+    /// pulls history back in, and the cursor stays on its logical line at its
+    /// content offset. Cursor-line tracking holds for heights of one row or
     /// more; a zero-row resize parks every row in history without panicking,
-    /// and after regrowing the cursor restarts on the first logical line
-    /// (real terminals are never zero-sized — koshi's PTY floor is 2×1).
-    /// The alternate screen has no history and its apps
-    /// repaint on resize: each row crops on the right or pads with the
-    /// screen's own background (a wide glyph whose right half is cut off is
-    /// blanked), and a height shrink crops off the top. Scroll margins index
-    /// the old geometry and are dropped until the app issues DECSTBM again.
+    /// and after regrowing the cursor restarts on the first logical line.
+    /// The alternate screen has no history: each row crops on the right or
+    /// pads with the screen's own background (a wide glyph whose right half is
+    /// cut off is blanked), and a height shrink crops off the top. Both
+    /// screens' scroll margins are dropped until the app issues DECSTBM again.
+    /// Both cursors are clamped into the new bounds with their wrap latch
+    /// cleared, and an in-progress grapheme cluster is dropped.
     pub fn resize(&mut self, size: PtySize) {
         let alternate_fill = self.alternate_render.style.bg_fill();
 
@@ -255,13 +253,13 @@ impl TerminalState {
         self.alternate_cursor.col = min(self.alternate_cursor.col, size.cols.saturating_sub(1));
         self.alternate_cursor.pending_wrap = false;
 
-        // Margins index the old geometry; drop the region so the resized screen
-        // scrolls in full until the app issues DECSTBM again.
+        // Both scroll regions are dropped: the resized screen scrolls in full
+        // until the app issues DECSTBM again.
         self.primary_scroll_region = None;
         self.alternate_scroll_region = None;
 
-        // The surviving cells moved rows and columns, so any in-progress
-        // cluster's recorded base position is stale; drop the run.
+        // An in-progress cluster is dropped: its recorded base position indexes
+        // the old geometry.
         self.cluster.clear();
         self.cluster_base = None;
     }
@@ -288,7 +286,7 @@ impl TerminalState {
     }
 
     /// Mutable access to the active screen buffer, for writing cells. Clones the
-    /// buffer once (copy-on-write) if a render snapshot still shares it, so the
+    /// buffer once (copy-on-write) if a render snapshot still shares it; the
     /// snapshot keeps the pre-write contents.
     pub fn active_grid_mut(&mut self) -> &mut Grid {
         match self.active {
@@ -314,10 +312,9 @@ impl TerminalState {
     /// retained history plus the live screen on the primary, and the screen
     /// alone on the alternate, which keeps no history of its own.
     ///
-    /// **The screen decides which.** The scrollback belongs to the primary and
-    /// is still there while the alternate is up, so the alternate's view holds
-    /// its grid alone: a word or line grown from the alternate's top row stops
-    /// at that row.
+    /// The scrollback belongs to the primary and stays while the alternate is
+    /// up; the alternate's view holds its grid alone. A word or line grown from
+    /// the alternate's top row stops at that row.
     pub fn text_view(&self) -> TextView<'_> {
         match self.active {
             Screen::Primary => TextView::new(&self.scrollback, self.active_grid()),
@@ -335,7 +332,7 @@ impl TerminalState {
     /// indicator, cursor suppression, and the row a selection resolves to all
     /// read it.
     pub fn effective_view_offset(&self, offset: usize) -> usize {
-        if !matches!(self.active, Screen::Primary) {
+        if !self.on_primary_screen() {
             return 0;
         }
         offset.min(self.scrollback.len())
@@ -349,20 +346,19 @@ impl TerminalState {
     /// scrolled: it is `0` (and the buffer travels by reference, no copy) when
     /// `offset` is `0`, on the alternate screen (which keeps no scrollback), or
     /// with empty history. In every other case it is `offset` clamped to the
-    /// retained line count, so an over-scrolled or stale value stops at the
-    /// oldest line and never indexes past it. The composed grid, the scroll
-    /// indicator, and cursor suppression all read the returned value.
+    /// retained line count: an over-scrolled or stale value stops at the oldest
+    /// line. The composed grid, the scroll indicator, and cursor suppression all
+    /// read the returned value.
     ///
     /// A non-zero effective offset composes a fresh window `rows` tall from the
     /// primary screen: its top rows are the newest scrollback lines, its lower
-    /// rows the top of the live grid, so a view scrolled that many lines up shows
+    /// rows the top of the live grid. A view scrolled that many lines up shows
     /// that much history with the rest of the live screen below.
     ///
-    /// History stores a row's text without the default blanks padding it out to
-    /// the screen width, so composing the window pads each row back out with
-    /// exactly those blanks — the ones that were dropped, not the running
-    /// program's current background. Live rows already span the full width, so
-    /// the fill only ever applies to history.
+    /// History stores a row's text without the default blanks that padded it out
+    /// to the screen width; composing the window pads each history row back out
+    /// with default blanks, not the running program's current background. Live
+    /// rows already span the full width.
     pub fn scrolled_view(&self, offset: usize) -> (Arc<Grid>, usize) {
         let scrolled = self.effective_view_offset(offset);
         if scrolled == 0 {
@@ -375,8 +371,8 @@ impl TerminalState {
         let retained = history.len();
 
         // The visible window: the `scrolled` newest history rows, then the live
-        // rows, capped at the screen height. The live grid alone is `rows` tall,
-        // so the chain always yields a full window and keeps row metadata.
+        // rows, capped at the screen height. The live grid alone is `rows` tall;
+        // the chain always yields a full window and keeps row metadata.
         let window: Vec<(Vec<Cell>, RowMeta)> = history
             .iter()
             .skip(retained - scrolled)
@@ -405,10 +401,9 @@ impl TerminalState {
     }
 
     /// The working directory last reported by the shell via OSC 7 (its host and
-    /// decoded path), or `None` if none has been reported. Used by cwd
-    /// inheritance when spawning a new pane: the spawn layer compares the host
-    /// to the local machine before inheriting the path, so a directory reported
-    /// from a remote host (e.g. over SSH) is not opened locally.
+    /// decoded path), or `None` if none has been reported. The pane-spawn layer
+    /// compares the host to the local machine before inheriting the path; a
+    /// directory reported from a remote host (over SSH) is not opened locally.
     pub fn current_cwd(&self) -> Option<&ReportedCwd> {
         self.reported_cwd.as_ref()
     }
@@ -469,8 +464,8 @@ impl TerminalState {
 
     /// The shape the cursor is drawn as (DECSCUSR), or `None` while the pane has
     /// asked for no shape — the renderer reads this to pick the outer terminal's
-    /// cursor style, so vim's insert-mode bar shows as a bar, and a pane that
-    /// never asked leaves the user's own cursor alone.
+    /// cursor style: vim's insert-mode bar shows as a bar, and a pane that never
+    /// asked leaves the user's own cursor alone.
     pub fn cursor_shape(&self) -> Option<CursorShape> {
         self.modes.cursor_shape
     }
@@ -489,7 +484,7 @@ impl TerminalState {
 
     /// Drain the queued device-query replies (DA/DSR/DECRQM answers), leaving
     /// the queue empty. The caller writes the returned bytes back into the
-    /// pane's PTY so the querying app receives its answer.
+    /// pane's PTY.
     #[must_use = "undelivered replies hang the querying app"]
     pub fn take_replies(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.replies)
@@ -556,31 +551,24 @@ impl TerminalState {
     /// Returns the visible cells plus a `right_pad` flag. When the last visible
     /// column holds the left half of a wide glyph (its continuation falls
     /// outside the inner rect), that base is dropped from the returned cells and
-    /// `right_pad` is set, telling the renderer to blank the freed column
-    /// so it never draws a half glyph. An out-of-range `row`, a zero
-    /// `inner_width`, or an empty row yields no cells and no pad. `inner_width`
-    /// is clamped to the row length, so a width past the grid is harmless.
+    /// `right_pad` is set; the renderer blanks the freed column. An
+    /// out-of-range `row`, a zero `inner_width`, or an empty row yields no
+    /// cells and no pad. `inner_width` is clamped to the row length.
     pub fn clip_row(&self, row: u16, inner_width: u16) -> ClippedRow<'_> {
         let rows = self.active_grid().rows();
-        let Some(r) = rows.get(row as usize) else {
+        let Some(cells) = rows.get(row as usize) else {
             return ClippedRow {
                 cells: &[],
                 right_pad: false,
             };
         };
 
-        let w = min(inner_width as usize, r.len());
-
-        if w > 0 && r[w - 1].width() > 1 {
-            ClippedRow {
-                cells: &r[..w - 1],
-                right_pad: true,
-            }
-        } else {
-            ClippedRow {
-                cells: &r[..w],
-                right_pad: false,
-            }
+        let visible = min(inner_width as usize, cells.len());
+        let right_pad = visible > 0 && cells[visible - 1].width() > 1;
+        let shown = if right_pad { visible - 1 } else { visible };
+        ClippedRow {
+            cells: &cells[..shown],
+            right_pad,
         }
     }
 }
@@ -603,8 +591,7 @@ fn rebuilt_with_width(cell: &Cell, width: u8) -> Cell {
 
 /// Normalize `row` to exactly `cols` cells: truncate on the right or pad with
 /// blanks in `fill`. A wide glyph whose right (width-0) half falls past the new
-/// edge leaves its base as the last cell; that dangling base is blanked so no
-/// half glyph survives the crop.
+/// edge leaves its base as the last cell; that dangling base is blanked.
 fn crop_columns(row: &mut Vec<Cell>, cols: u16, fill: Style) {
     row.resize(cols as usize, Cell::blank_with(fill));
     if let Some(last) = row.last_mut() {

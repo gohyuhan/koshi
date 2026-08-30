@@ -2,8 +2,8 @@
 //!
 //! Verifies that `repair_focus` walks the recovery hierarchy in order: focus history (MRU),
 //! spatial neighbor, absorbed pane, and finally the first visible pane in layout order.
-//! Also validates that every pane except those in the `Removed` state is eligible for focus
-//! (live, dead, and closing panes all qualify), and that suppressed (hidden) panes are skipped.
+//! Also validates the eligibility rule — a pane must sit in the visible layout order and
+//! hold a registry record in any state but `Removed` — and the two no-pane verdicts.
 
 use std::time::SystemTime;
 
@@ -334,6 +334,86 @@ fn a_history_pane_absent_from_the_registry_is_skipped() {
 }
 
 #[test]
+fn a_spawning_pane_is_eligible_for_focus() {
+    // A pane whose process has not started yet is still a visible placeholder.
+    let spawning = PaneId::new();
+    let mut tab = tab_with_root(spawning);
+    tab.record_focus_mru(spawning);
+    let registry = registry_with(vec![record(spawning, PaneLifecycle::Spawning)]);
+
+    let result = repair_focus(
+        &tab,
+        &registry,
+        candidates(None, None, vec![spawning]),
+        EmptyTabPolicy::CloseTab,
+    );
+
+    assert_eq!(result, FocusRepairResult::Focused(spawning));
+}
+
+#[test]
+fn a_spatial_neighbor_outside_the_visible_layout_order_is_skipped() {
+    // The ranked candidates are gated on the visible layout order too, not
+    // only the focus history: a live pane the layout order omits is skipped.
+    let (hidden, visible) = (PaneId::new(), PaneId::new());
+    let tab = tab_with_root(visible); // no focus history recorded
+    let registry = registry_with(vec![
+        record(hidden, PaneLifecycle::Running),
+        record(visible, PaneLifecycle::Running),
+    ]);
+
+    let result = repair_focus(
+        &tab,
+        &registry,
+        candidates(Some(hidden), Some(hidden), vec![visible]),
+        EmptyTabPolicy::CloseTab,
+    );
+
+    assert_eq!(result, FocusRepairResult::Focused(visible));
+}
+
+#[test]
+fn visible_panes_all_missing_from_the_registry_report_terminal_too_small() {
+    // The tab's layout still names a pane and the layout order lists it, but
+    // no record backs it, so nothing is eligible and the tab is not empty.
+    let ghost = PaneId::new();
+    let tab = tab_with_root(ghost);
+    let registry = PaneRegistry::new();
+
+    let result = repair_focus(
+        &tab,
+        &registry,
+        candidates(None, None, vec![ghost]),
+        EmptyTabPolicy::CloseTab,
+    );
+
+    assert_eq!(result, FocusRepairResult::TerminalTooSmall);
+}
+
+#[test]
+fn every_visible_pane_removed_reports_terminal_too_small() {
+    // Both panes are in the visible layout order and both hold a record, but
+    // both records are `Removed`, so nothing is eligible while the tab's layout
+    // still holds a leaf.
+    let (first, second) = (PaneId::new(), PaneId::new());
+    let mut tab = tab_with_root(first);
+    tab.record_focus_mru(second);
+    let registry = registry_with(vec![
+        record(first, PaneLifecycle::Removed),
+        record(second, PaneLifecycle::Removed),
+    ]);
+
+    let result = repair_focus(
+        &tab,
+        &registry,
+        candidates(Some(first), Some(second), vec![first, second]),
+        EmptyTabPolicy::CloseTab,
+    );
+
+    assert_eq!(result, FocusRepairResult::TerminalTooSmall);
+}
+
+#[test]
 fn all_panes_suppressed_reports_terminal_too_small() {
     // The tab still has a leaf, but nothing is visible: the window is too small.
     let only = PaneId::new();
@@ -395,14 +475,20 @@ fn ineligible_spatial_and_absorbed_candidates_fall_through_to_layout_order() {
     assert_eq!(result, FocusRepairResult::Focused(live));
 }
 
-#[test]
-fn an_empty_tab_reports_the_empty_tab_policy() {
-    // A tab with no leaves at all falls to its empty-tab policy, carried out.
+/// A tab whose layout holds no leaf at all.
+fn empty_tab() -> Tab {
     let mut tab = tab_with_root(PaneId::new());
     tab.update_layout(LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
         Vec::new(),
     )));
+    tab
+}
+
+#[test]
+fn an_empty_tab_reports_the_empty_tab_policy() {
+    // A tab with no leaves at all falls to its empty-tab policy, carried out.
+    let tab = empty_tab();
     let registry = PaneRegistry::new();
 
     let result = repair_focus(
@@ -415,5 +501,47 @@ fn an_empty_tab_reports_the_empty_tab_policy() {
     assert_eq!(
         result,
         FocusRepairResult::EmptyTab(EmptyTabPolicy::RespawnShell)
+    );
+}
+
+#[test]
+fn an_empty_tab_carries_the_close_tab_policy_back_unchanged() {
+    // The policy is passed straight through, so the other variant comes back
+    // just as `RespawnShell` does.
+    let tab = empty_tab();
+    let registry = PaneRegistry::new();
+
+    let result = repair_focus(
+        &tab,
+        &registry,
+        candidates(None, None, Vec::new()),
+        EmptyTabPolicy::CloseTab,
+    );
+
+    assert_eq!(
+        result,
+        FocusRepairResult::EmptyTab(EmptyTabPolicy::CloseTab)
+    );
+}
+
+#[test]
+fn an_empty_tab_ignores_focus_history_left_behind() {
+    // History naming panes that no longer exist must not resurrect a verdict:
+    // none is in the layout order, so the empty-tab policy still wins.
+    let stale = PaneId::new();
+    let mut tab = empty_tab();
+    tab.record_focus_mru(stale);
+    let registry = registry_with(vec![record(stale, PaneLifecycle::Running)]);
+
+    let result = repair_focus(
+        &tab,
+        &registry,
+        candidates(Some(stale), Some(stale), Vec::new()),
+        EmptyTabPolicy::CloseTab,
+    );
+
+    assert_eq!(
+        result,
+        FocusRepairResult::EmptyTab(EmptyTabPolicy::CloseTab)
     );
 }

@@ -79,7 +79,7 @@ use crate::runtime::event::{EndingNotice, RuntimeEvent, SessionEnding};
 
 /// How long the accept loop sleeps after a failed accept before it accepts
 /// again. A persistent accept error — say, the process is out of file
-/// descriptors — retries at this interval rather than spinning.
+/// descriptors — retries once per interval.
 const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 /// The version of the binary this session server is, reported in its Hello
@@ -260,8 +260,8 @@ pub struct IpcServer {
     token: Arc<RwLock<ConnectionToken>>,
     /// What the socket takes in, shared with every serving thread.
     intake: Arc<Intake>,
-    /// The accept loop, joined at shutdown. `Option` so shutdown can take it
-    /// out of the otherwise-borrowed struct.
+    /// The accept loop, joined at shutdown. `None` once
+    /// [`stop`](Self::stop) has taken it out to join it.
     accept_thread: Option<JoinHandle<()>>,
 }
 
@@ -334,24 +334,19 @@ impl IpcServer {
             token: token.clone(),
             pid: std::process::id(),
         };
-        if let Err(error) = endpoint.write(&endpoint_path) {
-            // Dropping the listener releases the address (and unlinks the
-            // socket file on Unix), so the failed start leaves nothing. The
-            // write is atomic, so what may remain at `endpoint_path` is an
-            // older run's file naming the socket just removed — taken away
-            // with it.
+        let advertised = endpoint.write(&endpoint_path).and_then(|()| match &advert {
+            None => Ok(()),
+            Some(advert) => write_advert(advert),
+        });
+        if let Err(error) = advertised {
+            // Dropping the listener releases the address and unlinks the socket
+            // file on Unix, so a failed start leaves nothing behind. The
+            // endpoint write is atomic, so a file left at `endpoint_path` is an
+            // older run's, naming the socket removed here.
             let _ = std::fs::remove_file(&endpoint_path);
             drop(listener);
             remove_socket_file(&addr);
             return Err(error);
-        }
-        if let Some(advert) = &advert {
-            if let Err(error) = write_advert(advert) {
-                let _ = std::fs::remove_file(&endpoint_path);
-                drop(listener);
-                remove_socket_file(&addr);
-                return Err(error);
-            }
         }
 
         let still_on = other_users.map(|other_users| other_users.still_on);
@@ -452,7 +447,6 @@ impl IpcServer {
     /// reaches an explicit shutdown — a panic unwinding the server — still
     /// withdraws the files.
     pub fn shutdown(self) {
-        // Teardown lives in `Drop`, so consuming `self` is the whole job.
         drop(self);
     }
 
@@ -462,14 +456,13 @@ impl IpcServer {
     fn stop(&mut self) {
         self.shutting_down.store(true, Ordering::SeqCst);
         if let Some(handle) = self.accept_thread.take() {
-            // The accept loop sits blocked in `accept`; a bare connect wakes it
-            // so it observes the flag. Hold that connection open across the join:
+            // The accept loop sits blocked in `accept`. A bare connect wakes it
+            // and it reads the flag. That connection stays open across the join:
             // on Windows a connect that drops before `accept` runs can leave
-            // nothing for `accept` to return, so the pending client must outlive
-            // the join. A failed connect — say, the process is out of file
-            // descriptors — leaves the loop blocked, so the join is skipped
-            // rather than waiting forever: the thread dies with the process, and
-            // the files below are removed either way.
+            // nothing for `accept` to return. A failed connect — say, the
+            // process is out of file descriptors — leaves the loop blocked and
+            // skips the join; that thread ends with the process, and the files
+            // below are removed either way.
             if let Ok(wake) = Connection::connect(&self.addr) {
                 let _ = handle.join();
                 drop(wake);
@@ -585,7 +578,8 @@ fn accept_loop(
 /// have, and the Hello — and reads `live_setting` before any of its answers go
 /// out. What is left is this session's own vocabulary: `SubmitCommand`,
 /// `Attach`, `Discovery`, `Layout` and `Restart` cross to the dispatcher over
-/// the inbox and answer with its reply.
+/// the inbox and answer with its reply. `RecentEvents` is answered on this
+/// thread, from the process-wide log ring, and reaches no dispatcher.
 ///
 /// A `Restart` the dispatcher refuses is answered with
 /// [`IpcErrorCode::MalformedRequest`] carrying the sentence naming what is
@@ -617,9 +611,8 @@ fn serve_connection(
 ) {
     let mut gate = Handshake::new(token, peer);
     // The setting can change while this connection is open, so it is read
-    // again for each request rather than trusted from the accept that let the
-    // peer in. `None` is a connection from the user who started the session,
-    // whose admission cannot be withdrawn.
+    // again for each request. `None` is a connection from the user who started
+    // the session, whose admission cannot be withdrawn.
     let admission = live_setting.clone();
     let admitted = move || match &admission {
         None => true,
@@ -647,12 +640,12 @@ fn serve_connection(
                     envelope: *envelope,
                     reply,
                 });
-                match answer {
-                    Some(result) => IpcResponse {
-                        request_id,
-                        result: IpcResult::CommandResult(result),
-                    },
-                    None => return,
+                let Some(result) = answer else {
+                    return;
+                };
+                IpcResponse {
+                    request_id,
+                    result: IpcResult::CommandResult(result),
                 }
             }
             IpcRequestKind::Attach {
@@ -725,28 +718,28 @@ fn serve_connection(
                 let answer = ask_dispatcher(&served.intake, inbox_tx, |reply| {
                     RuntimeEvent::IpcDiscovery { reply }
                 });
-                match answer {
-                    Some(Some(overview)) => IpcResponse {
-                        request_id,
-                        result: IpcResult::Overview(overview),
-                    },
-                    // No running session: the process is past its last
-                    // session, so the socket is as good as gone.
-                    Some(None) | None => return,
+                // No running session: the process is past its last session, so
+                // the socket is as good as gone.
+                let Some(Some(overview)) = answer else {
+                    return;
+                };
+                IpcResponse {
+                    request_id,
+                    result: IpcResult::Overview(overview),
                 }
             }
             IpcRequestKind::Layout { tab } => {
                 let answer = ask_dispatcher(&served.intake, inbox_tx, |reply| {
                     RuntimeEvent::IpcLayout { tab, reply }
                 });
-                match answer {
-                    Some(Some(layout)) => IpcResponse {
-                        request_id,
-                        result: IpcResult::Layout(layout),
-                    },
-                    // No running session: the process is past its last
-                    // session, so the socket is as good as gone.
-                    Some(None) | None => return,
+                // No running session: the process is past its last session, so
+                // the socket is as good as gone.
+                let Some(Some(layout)) = answer else {
+                    return;
+                };
+                IpcResponse {
+                    request_id,
+                    result: IpcResult::Layout(layout),
                 }
             }
             IpcRequestKind::RecentEvents => IpcResponse {
@@ -907,7 +900,7 @@ fn stream_events(
 
     while let Ok(request) = reader.recv::<IncomingRequest>() {
         // The setting can change while this client is attached, so it is read
-        // again rather than trusted from the accept that let the peer in.
+        // again for each frame that client sends.
         if live_setting.as_ref().is_some_and(|still_on| !still_on()) {
             break;
         }
@@ -938,9 +931,9 @@ fn stream_events(
                 actions,
             },
             IpcRequestKind::SubmitCommand(envelope) => {
-                // The result is answered by the next painted frame, so the
-                // reply channel's receiving end goes straight away and the
-                // dispatcher's send into it fails harmlessly.
+                // The result is answered by the next painted frame. The reply
+                // channel's receiving end drops here, and the dispatcher's send
+                // into it fails.
                 let (reply, _) = mpsc::channel();
                 RuntimeEvent::Ipc {
                     envelope: *envelope,

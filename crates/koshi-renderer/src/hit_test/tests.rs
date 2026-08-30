@@ -2,9 +2,13 @@
 //! to the pane content, its border side, a stack header, or a tab, a border
 //! corner reads as its vertical side, the layout is centered and the letterbox
 //! margin hits nothing, a pane's content rect and the cell inside it — counted
-//! from one, or clamped from zero — follow that centering, the tab strip reports
-//! the window it draws, two clients of different sizes hit-test independently,
-//! and degenerate frames are safe.
+//! from one, or clamped from zero — follow that centering, a committed left
+//! region moves all of that right, a commit holding no region leaves every row
+//! to the panes, the gap between two panes and a pane that is not drawn hit
+//! nothing, a pane with no content cells clamps to its own origin, a stack
+//! header wins the cells it covers, the tab strip reports the window it draws,
+//! two clients of different sizes hit-test independently, and degenerate frames
+//! are safe.
 
 use super::*;
 
@@ -273,6 +277,248 @@ fn mouse_hit_testing_stays_on_the_painted_region_revision() {
     assert_eq!(painted.committed_regions.input_revision, 4);
 }
 
+/// A left region moves the pane area right: the pane box, its content rect and
+/// the cell inside it all follow the committed solve, and the region's own cells
+/// belong to no pane.
+#[test]
+fn a_left_region_shifts_the_pane_area_right() {
+    let pane = PaneId::new();
+    let viewport = Size {
+        cols: 120,
+        rows: 40,
+    };
+    let effective = Size {
+        cols: 100,
+        rows: 38,
+    };
+    let snapshot = snap(
+        viewport,
+        effective,
+        &[(pane, rect(0, 0, effective.cols, effective.rows), true)],
+        &[],
+        &[],
+    );
+    let painted = MouseFrame::with_regions(
+        snapshot,
+        CommittedRegions::new(
+            viewport,
+            solve(
+                viewport,
+                &[
+                    RegionGeometry {
+                        edge: Edge::Top,
+                        extent: 1,
+                    },
+                    RegionGeometry {
+                        edge: Edge::Bottom,
+                        extent: 1,
+                    },
+                    RegionGeometry {
+                        edge: Edge::Left,
+                        extent: 20,
+                    },
+                ],
+            ),
+            9,
+        ),
+    );
+    let hit = |x, y| hit_test(painted.layout(chrome()), at(x, y));
+
+    // The pane rectangle left by the solve starts at (20, 1).
+    assert_eq!(
+        hit(20, 1),
+        HitRegion::PaneBorder {
+            pane_id: pane,
+            side: Direction::Left
+        }
+    );
+    assert_eq!(hit(21, 2), HitRegion::PaneContent { pane_id: pane });
+    // The left region's own cells.
+    assert_eq!(hit(19, 20), HitRegion::None);
+    // Both chrome rows still span the whole width.
+    assert_eq!(hit(0, 0), HitRegion::Tabline);
+    assert_eq!(hit(0, 39), HitRegion::Statusline);
+
+    assert_eq!(
+        pane_content_rect(painted.layout(chrome()), pane),
+        Some(rect(21, 2, 98, 36))
+    );
+    assert_eq!(
+        pane_local_cell(painted.layout(chrome()), pane, at(21, 2)),
+        Some((1, 1))
+    );
+    assert_eq!(
+        pane_cell_clamped(painted.layout(chrome()), pane, at(0, 0)),
+        Some((0, 0))
+    );
+}
+
+/// The blank column between two panes belongs to neither of them.
+#[test]
+fn the_gap_between_two_panes_hits_nothing() {
+    let left = PaneId::new();
+    let right = PaneId::new();
+    let s = snap(
+        Size { cols: 40, rows: 10 },
+        Size { cols: 40, rows: 10 },
+        &[
+            (left, rect(0, 0, 19, 10), true),
+            (right, rect(21, 0, 19, 10), true),
+        ],
+        &[],
+        &[],
+    );
+    let hit = |x, y| hit_test(s.layout(chrome()), at(x, y));
+
+    assert_eq!(hit(10, 5), HitRegion::PaneContent { pane_id: left });
+    assert_eq!(hit(30, 5), HitRegion::PaneContent { pane_id: right });
+    // Column 20 lies between the two boxes.
+    assert_eq!(hit(20, 5), HitRegion::None);
+}
+
+/// A committed solve holding no region at all leaves every row to the panes:
+/// nothing is chrome, and the tab strip reports no window.
+#[test]
+fn a_committed_solve_with_no_regions_leaves_every_row_to_the_panes() {
+    let pane = PaneId::new();
+    let viewport = Size { cols: 40, rows: 10 };
+    let snapshot = snap(
+        viewport,
+        viewport,
+        &[(pane, rect(0, 0, 40, 10), true)],
+        &[],
+        &[],
+    );
+    let painted = MouseFrame::with_regions(
+        snapshot,
+        CommittedRegions::new(viewport, solve(viewport, &[]), 3),
+    );
+    let hit = |x, y| hit_test(painted.layout(chrome()), at(x, y));
+
+    // The rows the tabline and the hint bar would own are the pane's own top
+    // and bottom border rows.
+    assert_eq!(
+        hit(20, 0),
+        HitRegion::PaneBorder {
+            pane_id: pane,
+            side: Direction::Up
+        }
+    );
+    assert_eq!(
+        hit(20, 9),
+        HitRegion::PaneBorder {
+            pane_id: pane,
+            side: Direction::Down
+        }
+    );
+    assert_eq!(hit(20, 5), HitRegion::PaneContent { pane_id: pane });
+    assert_eq!(tabline_first_visible(painted.layout(chrome())), None);
+}
+
+/// A pane box two columns wide and one row tall insets to a content area of no
+/// cells: it names no cell of its own, every clamped cell is its `(0, 0)`, and
+/// both its columns hit-test as border.
+#[test]
+fn a_pane_with_a_zero_cell_content_area_clamps_every_cell_to_its_origin() {
+    let pane = PaneId::new();
+    let s = snap(
+        Size { cols: 40, rows: 10 },
+        Size { cols: 40, rows: 10 },
+        &[(pane, rect(0, 5, 2, 1), true)],
+        &[],
+        &[],
+    );
+    let layout = || s.layout(chrome());
+
+    // The outer box spans (0, 5)-(1, 5); the inset content is empty at (1, 6).
+    assert_eq!(
+        pane_content_rect(layout(), pane),
+        Some(rect(1, 6, 0, 0)),
+        "an empty content rect keeps the inset origin"
+    );
+    assert_eq!(pane_local_cell(layout(), pane, at(1, 6)), None);
+    assert_eq!(pane_cell_clamped(layout(), pane, at(1, 6)), Some((0, 0)));
+    assert_eq!(pane_cell_clamped(layout(), pane, at(39, 9)), Some((0, 0)));
+    assert_eq!(
+        hit_test(layout(), at(0, 5)),
+        HitRegion::PaneBorder {
+            pane_id: pane,
+            side: Direction::Left
+        }
+    );
+    assert_eq!(
+        hit_test(layout(), at(1, 5)),
+        HitRegion::PaneBorder {
+            pane_id: pane,
+            side: Direction::Right
+        }
+    );
+}
+
+/// A pane that is not drawn is skipped even when its rectangle covers the cell,
+/// and the visible pane behind it answers.
+#[test]
+fn a_hidden_pane_does_not_swallow_a_click_on_the_pane_behind_it() {
+    let hidden = PaneId::new();
+    let shown = PaneId::new();
+    let s = snap(
+        Size { cols: 40, rows: 10 },
+        Size { cols: 40, rows: 10 },
+        &[
+            (hidden, rect(0, 0, 40, 10), false),
+            (shown, rect(0, 0, 40, 10), true),
+        ],
+        &[],
+        &[],
+    );
+
+    assert_eq!(
+        hit_test(s.layout(chrome()), at(20, 5)),
+        HitRegion::PaneContent { pane_id: shown }
+    );
+}
+
+/// A stack header strip drawn over a pane wins the cells it covers.
+#[test]
+fn a_stack_header_wins_a_cell_over_the_pane_under_it() {
+    let pane = PaneId::new();
+    let member = PaneId::new();
+    let s = snap(
+        Size { cols: 40, rows: 10 },
+        Size { cols: 40, rows: 10 },
+        &[(pane, rect(0, 0, 40, 10), true)],
+        &[header(member, rect(1, 5, 38, 1))],
+        &[],
+    );
+    let hit = |x, y| hit_test(s.layout(chrome()), at(x, y));
+
+    assert_eq!(hit(20, 5), HitRegion::StackHeader { pane_id: member });
+    // One row above the strip is the pane's own content again.
+    assert_eq!(hit(20, 4), HitRegion::PaneContent { pane_id: pane });
+}
+
+/// A one-row viewport is all tabline: no hint bar row exists, and a cell past
+/// the single row hits nothing.
+#[test]
+fn a_one_row_viewport_is_all_tabline() {
+    let tab = TabId::new();
+    let s = snap(
+        Size { cols: 40, rows: 1 },
+        Size { cols: 40, rows: 1 },
+        &[],
+        &[],
+        &[(tab, "t")],
+    );
+    let hit = |x, y| hit_test(s.layout(chrome()), at(x, y));
+
+    // The session block on the left and the mode tag on the right.
+    assert_eq!(hit(0, 0), HitRegion::Tabline);
+    assert_eq!(hit(39, 0), HitRegion::Tabline);
+    // There is no second row to hit.
+    assert_eq!(hit(20, 1), HitRegion::None);
+    assert_eq!(tabline_first_visible(s.layout(chrome())), Some(0));
+}
+
 /// A collapsed stack member's strip hit-tests to its pane.
 #[test]
 fn stack_header_hits_its_pane() {
@@ -520,6 +766,11 @@ fn a_pane_local_cell_counts_from_one_and_refuses_a_cell_outside_the_pane() {
     assert_eq!(local(40, 11), None);
     assert_eq!(local(2, 3), None);
     assert_eq!(local(3, 2), None);
+    // A pane that is not drawn this frame names no cell at all.
+    assert_eq!(
+        pane_local_cell(s.layout(chrome()), PaneId::new(), at(20, 7)),
+        None
+    );
 }
 
 /// A cell outside a pane's content is pulled to the nearest edge cell of it,

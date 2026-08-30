@@ -1592,9 +1592,10 @@ fn choose(runtime_dir: &Path, remote: Vec<SessionRow>) -> Result<Picked, CliErro
     }
     let local = rows.len();
     rows.extend(remote);
-    let at = if rows.is_empty() {
+    if rows.is_empty() {
         return Err(CliError::NoSessions);
-    } else if settles_unasked(rows.len(), local) {
+    }
+    let at = if settles_unasked(rows.len(), local) {
         0
     } else {
         pick(&rows, &ask(&rows)?)?
@@ -2131,9 +2132,9 @@ fn hold(pending: &mut Vec<MouseAction>, actions: Vec<MouseAction>) {
     *pending = coalesce(take(pending));
     let mut over = pending.len().saturating_sub(MAX_PENDING_MOUSE);
     pending.retain(|action| {
-        let drop = over > 0 && matches!(action, MouseAction::Scroll { .. });
-        over -= usize::from(drop);
-        !drop
+        let dropped = over > 0 && matches!(action, MouseAction::Scroll { .. });
+        over -= usize::from(dropped);
+        !dropped
     });
 }
 

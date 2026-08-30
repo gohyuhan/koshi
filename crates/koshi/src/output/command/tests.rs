@@ -45,6 +45,11 @@ fn unrelated_events_print_nothing() {
 }
 
 #[test]
+fn no_events_print_nothing() {
+    assert_eq!(render_created_events(&[]), "");
+}
+
+#[test]
 fn created_ids_keep_their_event_order() {
     let tab_id = TabId::from_uuid(id());
     let pane_id = PaneId::from_uuid(id());

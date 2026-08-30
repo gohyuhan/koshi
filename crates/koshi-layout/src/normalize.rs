@@ -1,21 +1,19 @@
-//! Layout normalization: bring a tree back to canonical shape after edits.
+//! Layout normalization: bring a tree back to canonical shape.
 //!
-//! Edits leave debris: removal keeps unary splits, splitting nests
-//! same-direction splits. Normalization is the one pass that cleans all of it
-//! up:
+//! One pass does all of it:
 //!
 //! - leaves referencing dead panes are dropped,
 //! - emptied splits are pruned,
 //! - splits with a single child collapse into that child (a stack reduced
 //!   to one pane becomes a plain leaf),
-//! - same-direction directional splits merge into their parent when the
-//!   merge cannot change the solved layout,
+//! - same-direction directional splits merge into their parent when every
+//!   weight involved is a plain flex share,
 //! - weight values are clamped into their valid ranges, weight lists are
-//!   re-paired with children, and stacks keep exactly one expanded child.
+//!   re-paired with children, directional splits carry `active` as `0` with
+//!   no collapsed child, and stacks keep exactly one expanded child.
 //!
 //! The pass is idempotent: normalizing a normalized tree returns it
-//! unchanged. Callers run it after removals and on restored snapshots, not
-//! on every solve.
+//! unchanged.
 
 use std::collections::HashSet;
 
@@ -25,18 +23,13 @@ use koshi_core::ids::PaneId;
 use crate::size::{SizeConstraint, SizeWeight, Weight};
 use crate::tree::{LayoutChild, LayoutNode, SplitNode};
 
-/// Normalize `tree` against the set of panes that are still alive.
+/// Normalize `tree` against `live_panes`, the set of panes still alive.
 ///
-/// `live_panes` is the source of truth: any leaf not in it is dropped no
-/// matter where it sits in the tree. A pane held open after its process
-/// exits is still a live pane (it has a visible placeholder), so it
-/// survives here; dropping it is the caller's explicit removal, not
-/// normalization's.
+/// A leaf not in `live_panes` is dropped wherever it sits in the tree. A
+/// leaf in it is kept, including a pane held open after its process exited.
 ///
-/// Returns `None` when no live pane remains — there is no layout left and
-/// the caller closes the tab. The pass is idempotent, so callers run it
-/// after removals and on restored snapshots without tracking whether the
-/// tree was already canonical.
+/// Returns `None` when no live pane remains. Normalizing the returned tree
+/// again returns it unchanged.
 #[must_use]
 pub fn normalize(tree: &LayoutNode, live_panes: &HashSet<PaneId>) -> Option<LayoutNode> {
     let split = match tree {
@@ -46,8 +39,8 @@ pub fn normalize(tree: &LayoutNode, live_panes: &HashSet<PaneId>) -> Option<Layo
         LayoutNode::Split(split) => split,
     };
 
-    // Every child is normalized before the fixes below run. Weights are
-    // re-paired by index here; a missing weight becomes the default share.
+    // Each child is normalized first. Weights are re-paired by index: a
+    // missing weight becomes the default share, an extra one is dropped.
     let mut entries: Vec<Entry> = Vec::with_capacity(split.children.len());
     for (index, child) in split.children.iter().enumerate() {
         let Some(node) = normalize(&child.node, live_panes) else {
@@ -64,8 +57,8 @@ pub fn normalize(tree: &LayoutNode, live_panes: &HashSet<PaneId>) -> Option<Layo
         return None;
     }
 
-    // For stacks, recompute the active child index to account for removed children.
-    // This index determines which child is expanded when the split is rebuilt.
+    // A stack expands the first surviving child at or after the old active
+    // index, or the last survivor when none remains there.
     let stacked = split.direction == SplitDirection::Stacked;
     let active = if stacked {
         entries
@@ -112,16 +105,16 @@ struct Entry {
     old_index: usize,
 }
 
-/// Inline children of same-direction child splits into their parent, when
-/// doing so provably cannot change the solved layout.
+/// Inline the children of same-direction child splits into their parent.
 ///
-/// A merge is safe only when the child split's slot and all of its inner
-/// weights are plain flex shares (no floors, targets, or resize offsets).
-/// Exactness then comes from rescaling: with `m` the inner weight sum of
-/// each merged child (1 for the rest) and `P` their product, a kept child's
-/// weight becomes `w·P/m_self`, and an inlined child's `u·w_slot·P/m_slot`.
-/// Every share keeps its exact proportion. If any rescaled weight would
-/// overflow, nothing merges and the split stays nested.
+/// The merge runs only when every weight involved is a plain flex share: each
+/// kept sibling's weight, each merged child's slot weight, and every weight
+/// inside a merged child. A floor, target, or resize offset anywhere returns
+/// `entries` unchanged. With `m` the inner weight sum of each merged child
+/// (1 for a kept sibling) and `P` the product of every `m`, a kept sibling's
+/// share becomes `w·P` and an inlined child's `u·w_slot·P/m_slot`. Every
+/// share keeps its exact proportion. If `P` overflows `u128` or a rescaled
+/// share exceeds `Weight::MAX`, `entries` is returned unchanged.
 fn merge_same_direction(direction: SplitDirection, entries: Vec<Entry>) -> Vec<Entry> {
     let factors: Vec<u128> = entries
         .iter()
@@ -130,7 +123,7 @@ fn merge_same_direction(direction: SplitDirection, entries: Vec<Entry>) -> Vec<E
     if factors.iter().all(|&factor| factor == 1) {
         return entries;
     }
-    // On overflow the merge is skipped and the split stays nested.
+    // A product past `u128::MAX` keeps the split nested.
     let product = factors
         .iter()
         .try_fold(1u128, |acc, &factor| acc.checked_mul(factor));
@@ -138,16 +131,16 @@ fn merge_same_direction(direction: SplitDirection, entries: Vec<Entry>) -> Vec<E
         return entries;
     };
 
-    // Plan every rescaled weight before touching the tree, so an overflow
-    // anywhere aborts the merge with the entries untouched.
-    let mut planned: Vec<Vec<SizeWeight>> = Vec::with_capacity(entries.len());
-    for index in 0..entries.len() {
-        let scale = product / factors[index];
-        let Some(weights) = planned_weights(&entries[index], factors[index], scale) else {
-            return entries;
-        };
-        planned.push(weights);
-    }
+    // Every rescaled weight is computed first; a share past `Weight::MAX`
+    // anywhere returns the entries unchanged.
+    let planned: Option<Vec<Vec<SizeWeight>>> = entries
+        .iter()
+        .zip(&factors)
+        .map(|(entry, &factor)| planned_weights(entry, factor, product / factor))
+        .collect();
+    let Some(planned) = planned else {
+        return entries;
+    };
 
     let mut merged: Vec<Entry> = Vec::with_capacity(entries.len());
     for (index, (entry, weights)) in entries.into_iter().zip(planned).enumerate() {
@@ -175,8 +168,10 @@ fn merge_same_direction(direction: SplitDirection, entries: Vec<Entry>) -> Vec<E
 }
 
 /// The weights an entry contributes after merging: its own rescaled share
-/// when kept, or one rescaled share per inner child when inlined. `None`
-/// when any rescale overflows.
+/// when kept (`factor == 1`), or one rescaled share per inner child when
+/// inlined. `None` when a rescaled share exceeds `Weight::MAX` or a kept
+/// entry's weight is not a plain flex share. The `u128` products are not
+/// overflow-checked.
 fn planned_weights(entry: &Entry, factor: u128, scale: u128) -> Option<Vec<SizeWeight>> {
     if factor == 1 {
         return scaled_flex(&entry.weight, scale).map(|weight| vec![weight]);
@@ -198,8 +193,9 @@ fn planned_weights(entry: &Entry, factor: u128, scale: u128) -> Option<Vec<SizeW
         .collect()
 }
 
-/// When this entry is a safely mergeable same-direction split, the sum of
-/// its inner flex weights; `None` otherwise.
+/// The sum of the inner flex weights when `entry` is a split of `direction`
+/// whose slot weight and inner weights are all plain flex shares and whose
+/// sum fits `u32`. `None` in every other case.
 fn mergeable_weight_sum(direction: SplitDirection, entry: &Entry) -> Option<u32> {
     let LayoutNode::Split(inner) = &entry.node else {
         return None;
@@ -215,7 +211,8 @@ fn mergeable_weight_sum(direction: SplitDirection, entry: &Entry) -> Option<u32>
     (sum > 0).then_some(sum)
 }
 
-/// The flex share of a weight that is nothing but a flex share.
+/// The flex share of `weight` when its primary is `Flex` with no `min`, no
+/// `preferred`, and a zero `resize_delta`. `None` in every other case.
 fn plain_flex(weight: &SizeWeight) -> Option<Weight> {
     match weight.primary {
         SizeConstraint::Flex(share)
@@ -227,16 +224,19 @@ fn plain_flex(weight: &SizeWeight) -> Option<Weight> {
     }
 }
 
-/// Multiply a plain flex weight's share by `scale`, refusing on overflow or
-/// when the weight is not plain flex (those entries block merging instead).
+/// A plain flex weight holding `weight`'s share multiplied by `scale`.
+/// `None` when `weight` is not a plain flex share or the product exceeds
+/// `Weight::MAX`. The `u128` product is not overflow-checked.
 fn scaled_flex(weight: &SizeWeight, scale: u128) -> Option<SizeWeight> {
     let share = plain_flex(weight)?;
     let rescaled = Weight::try_from(u128::from(share) * scale).ok()?;
     Some(SizeWeight::new(SizeConstraint::Flex(rescaled)))
 }
 
-/// Clamp a weight's values into the ranges the validated constructors
-/// enforce, so a tree from an untrusted snapshot solves like a built one.
+/// Clamp a weight into the ranges the validated constructors enforce:
+/// `Flex(0)`, `Fixed(0)`, `Min(0)`, and `Preferred(0)` become `1`,
+/// `Percent` clamps to 1–100, and a zero `min` or `preferred` overlay
+/// becomes `None`. `resize_delta` passes through.
 fn canonical_weight(weight: SizeWeight) -> SizeWeight {
     let primary = match weight.primary {
         SizeConstraint::Flex(0) => SizeConstraint::Flex(1),

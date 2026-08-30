@@ -1,6 +1,9 @@
-//! Tests for config version checking and its diagnostic.
+//! Tests for config domain errors: the version check and its diagnostic,
+//! the parse-diagnostic conversion, error messages, and classification.
 
 use super::*;
+
+use std::sync::Arc;
 
 use miette::Diagnostic;
 
@@ -8,7 +11,7 @@ use crate::types::SCHEMA_VERSION;
 
 #[test]
 fn current_version_is_accepted() {
-    assert!(check_version(SCHEMA_VERSION).is_ok());
+    check_version(SCHEMA_VERSION).expect("the current schema version is accepted");
 }
 
 #[test]
@@ -41,6 +44,13 @@ fn version_diagnostic_message_and_code() {
             SCHEMA_VERSION
         )
     );
+    let code = err.code().expect("diagnostic has a code").to_string();
+    assert_eq!(code, "koshi::config::version");
+}
+
+#[test]
+fn too_old_diagnostic_carries_the_version_code() {
+    let err = check_version(0).expect_err("zero version must fail");
     let code = err.code().expect("diagnostic has a code").to_string();
     assert_eq!(code, "koshi::config::version");
 }
@@ -85,6 +95,30 @@ fn validation_error_quotes_the_key() {
         err.to_string(),
         "invalid config key `scrollback`: must be a positive integer"
     );
+}
+
+#[test]
+fn validation_builds_the_named_key_and_detail() {
+    let err = validation("scrollback", "must be a positive integer");
+    let ConfigError::Validation { key, detail } = err else {
+        panic!("expected ConfigError::Validation, got {err:?}");
+    };
+    assert_eq!(key, "scrollback");
+    assert_eq!(detail, "must be a positive integer");
+}
+
+#[test]
+fn parse_conversion_without_sub_diagnostics_uses_the_kdl_display() {
+    let raw = KdlError {
+        input: Arc::new(String::new()),
+        diagnostics: Vec::new(),
+    };
+    let diag = ConfigParseDiagnostic::new(Path::new("koshi.kdl"), raw);
+    let ConfigError::Parse { path, detail } = ConfigError::from(diag) else {
+        panic!("expected ConfigError::Parse");
+    };
+    assert_eq!(path, "koshi.kdl");
+    assert_eq!(detail, "Failed to parse KDL document");
 }
 
 #[test]

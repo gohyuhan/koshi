@@ -1,10 +1,10 @@
 //! Config layering: fold ordered override layers onto the built-in defaults.
 //!
-//! Koshi builds its effective config from ordered layers —
-//! `built-in defaults → user → session → CLI flags` — where a later
-//! layer overrides an earlier one field by field. Each override layer is a
-//! [`PartialKoshiConfig`]: a mirror of the whole file whose every field is
-//! wrapped in [`Option`], so a layer carries only the fields it sets.
+//! Koshi builds its effective config from the built-in defaults plus ordered
+//! override layers, where a later layer overrides an earlier one field by
+//! field. Each override layer is a [`PartialKoshiConfig`]: a mirror of the
+//! whole file whose every field is wrapped in [`Option`], so a layer carries
+//! only the fields it sets.
 //!
 //! One file parses into one layer, and the two sides fold that same layer
 //! separately: [`merge_server`] reads the sections a session owns and
@@ -91,10 +91,9 @@ impl ConfigLayers {
     /// contributes an empty layer, leaving the lower layers untouched.
     ///
     /// `theme` and `keybindings` each go into their own layer holding that
-    /// section alone, and `app`'s theme and keybinding sections are dropped, so
-    /// a color or a binding always comes from the file that owns it. Parsing
-    /// `koshi.kdl` cannot fill either section, so the drop bites only on a
-    /// hand-built value.
+    /// section alone. `app`'s `theme` and `keybindings` sections are set to
+    /// `None`; [`parse_app_config`](crate::app_config::parse_app_config) never
+    /// fills either one, and only a hand-built `app` value can carry them.
     #[must_use]
     pub fn from_files(
         app: Option<PartialKoshiConfig>,
@@ -120,8 +119,8 @@ impl ConfigLayers {
     /// Fold the stored layers onto the built-in defaults, keeping the sections
     /// one viewer owns.
     ///
-    /// The dedicated theme and keybinding layers fold after the app layer, so
-    /// their sections win over a same-named section in the app file.
+    /// Fold order: the app layer, then the theme layer, then the keybinding
+    /// layer.
     #[must_use]
     pub fn effective_client(&self) -> ClientConfig {
         merge_client(
@@ -136,7 +135,7 @@ impl ConfigLayers {
 }
 
 /// Overwrites `field` with `value` when the layer set one, leaving it
-/// untouched otherwise — the field-level merge grain every section below uses.
+/// untouched otherwise.
 fn merge_field<T>(field: &mut T, value: Option<T>) {
     if let Some(value) = value {
         *field = value;

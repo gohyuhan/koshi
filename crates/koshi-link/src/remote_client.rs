@@ -170,13 +170,16 @@ pub enum Reach {
         /// The sessions, in the order the server holds them.
         rows: Vec<RemoteSessionRow>,
     },
-    /// The server answered, and did not admit the saved secret.
+    /// The server answered with a refusal: it did not admit the saved secret,
+    /// it settled on a doorway version outside the range this build speaks, or
+    /// it refused the listing.
     Refused {
         /// The server's name when it has one, else its address.
         server: String,
     },
-    /// The server could not be reached, or was still unanswered at the
-    /// deadline.
+    /// The server could not be reached, was still unanswered at the deadline,
+    /// presented a certificate other than the one pinned for it, or answered a
+    /// frame the request cannot produce.
     Unreachable {
         /// The server's name when it has one, else its address.
         server: String,
@@ -247,9 +250,9 @@ pub fn update_store<T>(
 /// directory holding it when they are missing.
 ///
 /// Both are restricted to the owning user on Unix: mode `0700` on the
-/// directory and `0600` on a lock file this call creates, the modes
-/// [`ServerStore::write`] keeps on the store beside it. On Windows both take
-/// the data directory's owner-scoped ACLs.
+/// directory, set whether or not this call made it, and mode `0600` on a lock
+/// file this call creates. On Windows both take the data directory's
+/// owner-scoped ACLs.
 ///
 /// The attempt is repeated every [`STORE_LOCK_POLL`] for up to `wait`.
 /// Dropping the returned file releases the lock, and so does the operating
@@ -420,9 +423,9 @@ pub fn check_save_as(name: &str, address: &str) -> Result<(), CliError> {
 
 /// The secret to present to the server at `address`.
 ///
-/// [`SECRET_VARIABLE`] is read first. With it unset, the terminal is asked for
-/// the secret and what is typed is not printed. Surrounding whitespace is
-/// trimmed.
+/// [`SECRET_VARIABLE`] is read first. With it unset, or holding bytes that are
+/// not UTF-8, the terminal is asked for the secret and what is typed is not
+/// printed. Surrounding whitespace is trimmed.
 ///
 /// # Errors
 /// [`CliError::InvalidArgs`] when nothing was given, and when the terminal
@@ -685,12 +688,11 @@ pub fn connect_saved(
                     ),
                 }));
             }
-            let pinned = match &record.fingerprint {
-                Some(fingerprint) => Some(fingerprint.clone()),
-                None => read_store()
+            let pinned = record.fingerprint.clone().or_else(|| {
+                read_store()
                     .ok()
-                    .and_then(|(_, store)| pinned_in(&store, &record.address)),
-            };
+                    .and_then(|(_, store)| pinned_in(&store, &record.address))
+            });
             let link = connect(
                 &record.address,
                 &record.secret,
@@ -752,7 +754,7 @@ fn pinned_in(store: &ServerStore, address: &str) -> Option<String> {
 }
 
 /// The sessions this connection's secret reaches, in the order the server
-/// holds them. Control characters in a session name are removed.
+/// holds them, each name carrying the bytes the server sent.
 ///
 /// # Errors
 /// [`CliError::Runtime`] when the server refused the request, and
@@ -767,13 +769,7 @@ pub fn list_remote_sessions(link: &mut RemoteLink) -> Result<Vec<RemoteSessionRo
         .recv::<RemoteServerFrame>()
         .map_err(talk_failed)?
     {
-        RemoteServerFrame::Sessions { rows } => Ok(rows
-            .into_iter()
-            .map(|row| RemoteSessionRow {
-                id: row.id,
-                name: row.name,
-            })
-            .collect()),
+        RemoteServerFrame::Sessions { rows } => Ok(rows),
         RemoteServerFrame::Refused { message } => Err(CliError::Runtime { detail: message }),
         RemoteServerFrame::Welcome { .. } => Err(unexpected_answer("the server")),
     }
@@ -847,8 +843,8 @@ pub fn submit_remote(
 /// full: tabs, panes, and attached clients.
 ///
 /// Sends [`IpcRequestKind::Discovery`] over one remote connection of its own.
-/// Control characters in the session name, the tab names, and the pane titles
-/// are removed.
+/// The session name, the tab names and the pane titles carry the bytes the
+/// session sent.
 ///
 /// # Errors
 /// Whatever [`connect_saved`] reports, and [`CliError::IpcUnavailable`] when
@@ -906,11 +902,11 @@ fn one_request(
 /// A record pinning no certificate is [`Reach::Unchecked`], and no secret is
 /// presented to it.
 ///
-/// A server that answered and did not admit the saved secret is
-/// [`Reach::Refused`]. A server that could not be reached, or was still
-/// unanswered at the deadline, is [`Reach::Unreachable`]. Every record comes
-/// back as exactly one entry, sorted by server name. A store that cannot be
-/// read reads as no saved servers.
+/// A server that answered with a refusal is [`Reach::Refused`]. A server that
+/// could not be reached, was still unanswered at the deadline, or presented a
+/// certificate other than the pinned one is [`Reach::Unreachable`]. Every
+/// record comes back as exactly one entry, sorted by server name. A store that
+/// cannot be read reads as no saved servers.
 #[must_use]
 pub fn reach_all(timeout: Duration) -> Vec<Reach> {
     let deadline = Instant::now() + timeout;
@@ -996,6 +992,10 @@ fn complete_sweep(mut heard: Vec<Reach>, mut asked: Vec<String>) -> Vec<Reach> {
 /// Ask one saved server for its sessions.
 ///
 /// A record pinning no certificate is [`Reach::Unchecked`] and is not dialled.
+///
+/// A failure carrying [`CliError::Runtime`] — every refusal the server sent —
+/// is [`Reach::Refused`]. Every other failure, the changed certificate among
+/// them, is [`Reach::Unreachable`].
 ///
 /// The time left until `deadline` is given to the dial and again to the reply,
 /// so this returns up to twice that after `deadline` passes. Writes no file.

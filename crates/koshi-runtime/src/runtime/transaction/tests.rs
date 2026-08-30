@@ -46,6 +46,22 @@ fn emit_appends_in_call_order() {
 }
 
 #[test]
+fn emit_keeps_a_repeated_event_as_its_own_entry() {
+    let tab = TabId::new();
+    let mut scope = TransactionScope::new();
+    scope.emit(Event::TabCreated(TabCreated { tab_id: tab }));
+    scope.emit(Event::TabCreated(TabCreated { tab_id: tab }));
+
+    assert_eq!(
+        scope.events(),
+        &[
+            Event::TabCreated(TabCreated { tab_id: tab }),
+            Event::TabCreated(TabCreated { tab_id: tab }),
+        ]
+    );
+}
+
+#[test]
 fn commit_returns_every_event_in_order_keyed_to_the_command() {
     let command_id = CommandId::new();
     let tab = TabId::new();
@@ -105,6 +121,63 @@ fn commit_delivers_the_batch_to_a_subscriber_in_emission_order() {
             Delivery::Event(Event::TabCreated(TabCreated { tab_id: tab })),
             Delivery::Event(Event::LayoutChanged(LayoutChanged { tab_id: tab })),
         ]
+    );
+}
+
+#[test]
+fn commit_delivers_the_batch_to_every_subscriber() {
+    let command_id = CommandId::new();
+    let tab = TabId::new();
+    let mut bus = EventBus::new();
+    let (_first_id, first_rx) = bus.subscribe(EventFilter::All);
+    let (_second_id, second_rx) = bus.subscribe(EventFilter::All);
+    let mut scope = TransactionScope::new();
+    scope.emit(Event::TabCreated(TabCreated { tab_id: tab }));
+
+    let _ = scope.commit(command_id, &mut bus);
+
+    assert_eq!(
+        first_rx.try_iter().collect::<Vec<_>>(),
+        vec![Delivery::Event(Event::TabCreated(TabCreated {
+            tab_id: tab
+        }))]
+    );
+    assert_eq!(
+        second_rx.try_iter().collect::<Vec<_>>(),
+        vec![Delivery::Event(Event::TabCreated(TabCreated {
+            tab_id: tab
+        }))]
+    );
+}
+
+#[test]
+fn commit_still_applies_when_a_subscribers_receiver_is_gone() {
+    let command_id = CommandId::new();
+    let tab = TabId::new();
+    let mut bus = EventBus::new();
+    let (_gone_id, gone_rx) = bus.subscribe(EventFilter::All);
+    let (_live_id, live_rx) = bus.subscribe(EventFilter::All);
+    drop(gone_rx);
+    let mut scope = TransactionScope::new();
+    scope.emit(Event::TabCreated(TabCreated { tab_id: tab }));
+
+    let result = scope.commit(command_id, &mut bus);
+
+    assert_eq!(
+        result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![Event::TabCreated(TabCreated { tab_id: tab })],
+        }
+    );
+    // The bus dropped the subscriber whose receiver is gone, and the other one
+    // still got the batch.
+    assert_eq!(bus.subscriber_count(), 1);
+    assert_eq!(
+        live_rx.try_iter().collect::<Vec<_>>(),
+        vec![Delivery::Event(Event::TabCreated(TabCreated {
+            tab_id: tab
+        }))]
     );
 }
 

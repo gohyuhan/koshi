@@ -1,6 +1,7 @@
 //! Tests for keymap merging: per-key later-wins folding, the user-set vs
 //! surviving-defaults split, default steal and removal bookkeeping, dead
-//! bindings staying transparent, and the reserved-chord reachability rule.
+//! bindings staying transparent, the reserved-chord reachability rule, and
+//! which modes reach the merged map.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -94,6 +95,62 @@ fn default_fullscreen_key() -> KeySequence {
 }
 
 #[test]
+fn no_layers_yield_an_empty_merged_map() {
+    assert_eq!(merge(&[]), MergedKeyMap::default());
+}
+
+#[test]
+fn an_empty_known_mode_set_skips_every_layer() {
+    let merged = merge_keymaps(
+        &[defaults()],
+        None,
+        DEPTH,
+        &ActionRegistry::new(),
+        &BTreeSet::new(),
+    );
+    assert_eq!(merged, MergedKeyMap::default());
+}
+
+#[test]
+fn a_registered_mode_no_layer_binds_is_absent_from_the_merged_map() {
+    // `known_modes` names the modes a layer MAY bind in; it never seeds an
+    // entry of its own. The shipped defaults bind `normal` and `locked` only.
+    let merged = merge_keymaps(
+        &[defaults()],
+        None,
+        DEPTH,
+        &ActionRegistry::new(),
+        &BTreeSet::from([mode("normal"), mode("locked"), mode("resize")]),
+    );
+    assert_eq!(
+        merged.modes.keys().cloned().collect::<Vec<_>>(),
+        vec![mode("locked"), mode("normal")]
+    );
+}
+
+#[test]
+fn a_mode_a_layer_names_with_no_entries_still_reaches_the_merged_map() {
+    // A `mode "normal" { }` block binds and removes nothing. The mode still
+    // gets an entry, and that entry is empty.
+    let merged = merge(&[layer(LayerOrigin::User, "normal", Vec::new())]);
+
+    assert_eq!(
+        merged.modes.keys().cloned().collect::<Vec<_>>(),
+        vec![mode("normal")]
+    );
+    assert_eq!(merged.modes[&mode("normal")], MergedModeMap::default());
+}
+
+#[test]
+fn a_zero_chord_depth_cap_leaves_every_map_empty() {
+    // Every sequence holds at least one chord. A cap of zero admits none:
+    // the mode entries exist and hold nothing.
+    let merged = merge_keymaps(&[defaults()], None, 0, &ActionRegistry::new(), &known());
+    assert_eq!(merged.modes[&mode("normal")], MergedModeMap::default());
+    assert_eq!(merged.modes[&mode("locked")], MergedModeMap::default());
+}
+
+#[test]
 fn defaults_alone_fill_the_defaults_map_and_nothing_else() {
     let merged = merge(&[defaults()]);
     let normal = &merged.modes[&mode("normal")];
@@ -123,9 +180,9 @@ fn defaults_alone_fill_the_defaults_map_and_nothing_else() {
 
 #[test]
 fn dead_default_is_absent_not_unbound() {
-    // `core:copy-selection` is ComingSoon: the resolver refuses it, so a
-    // defaults-layer binding to it enters no map — the key falls through to
-    // the pane, and it is not "unbound" since the user displaced nothing.
+    // `core:copy-selection` is ComingSoon: the resolver refuses it. A
+    // defaults-layer binding to it enters neither `defaults` nor
+    // `unbound_defaults`.
     let dead_key = seq(ModFlags::ALT, 'c');
     let merged = merge(&[
         defaults(),
@@ -162,7 +219,68 @@ fn user_binding_on_a_fresh_key_adds_without_touching_defaults() {
         }
     );
     assert_eq!(normal.defaults.len(), 22);
+    assert_eq!(
+        normal.defaults[&default_fullscreen_key()],
+        bound("toggle-pane-fullscreen")
+    );
+    assert_eq!(normal.removed_keys, BTreeSet::new());
     assert_eq!(normal.unbound_defaults, BTreeMap::new());
+}
+
+#[test]
+fn a_layout_layer_is_user_authored_and_carries_its_own_attribution() {
+    let key = seq(ModFlags::ALT, 'w');
+    let merged = merge(&[
+        defaults(),
+        layer(
+            LayerOrigin::Layout,
+            "normal",
+            vec![(key.clone(), bound("lock"))],
+        ),
+    ]);
+    let normal = &merged.modes[&mode("normal")];
+
+    assert_eq!(
+        normal.user_set[&key],
+        MergedBinding {
+            bound: bound("lock"),
+            source: LayerOrigin::Layout,
+        }
+    );
+    assert_eq!(normal.defaults.len(), 22);
+}
+
+#[test]
+fn one_key_bound_in_two_modes_merges_independently() {
+    let key = seq(ModFlags::ALT, 'w');
+    let merged = merge(&[
+        defaults(),
+        layer(
+            LayerOrigin::User,
+            "normal",
+            vec![(key.clone(), bound("lock"))],
+        ),
+        layer(
+            LayerOrigin::User,
+            "locked",
+            vec![(key.clone(), bound("quit"))],
+        ),
+    ]);
+
+    assert_eq!(
+        merged.modes[&mode("normal")].user_set[&key],
+        MergedBinding {
+            bound: bound("lock"),
+            source: LayerOrigin::User,
+        }
+    );
+    assert_eq!(
+        merged.modes[&mode("locked")].user_set[&key],
+        MergedBinding {
+            bound: bound("quit"),
+            source: LayerOrigin::User,
+        }
+    );
 }
 
 #[test]
@@ -297,6 +415,96 @@ fn remove_below_does_not_void_a_higher_binding() {
             source: LayerOrigin::Session,
         }
     );
+    assert_eq!(normal.removed_keys, BTreeSet::from([key]));
+    assert_eq!(normal.unbound_defaults, BTreeMap::new());
+}
+
+#[test]
+fn remove_and_rebind_of_a_defaulted_key_in_one_layer_records_both_sides() {
+    // `<A-f>` is a shipped default. One user layer clears it and takes it:
+    // the user entry wins the key, and the displaced default surfaces as
+    // unbound.
+    let key = default_fullscreen_key();
+    let merged = merge(&[
+        defaults(),
+        layer_with_removed(
+            LayerOrigin::User,
+            "normal",
+            vec![(key.clone(), bound("lock"))],
+            vec![key.clone()],
+        ),
+    ]);
+    let normal = &merged.modes[&mode("normal")];
+
+    assert_eq!(
+        normal.user_set[&key],
+        MergedBinding {
+            bound: bound("lock"),
+            source: LayerOrigin::User,
+        }
+    );
+    assert_eq!(normal.defaults.get(&key), None);
+    assert_eq!(
+        normal.unbound_defaults[&key],
+        bound("toggle-pane-fullscreen")
+    );
+    assert_eq!(normal.removed_keys, BTreeSet::from([key]));
+}
+
+#[test]
+fn removed_keys_accumulate_across_layers() {
+    let from_user = seq(ModFlags::ALT, 'x');
+    let from_session = seq(ModFlags::ALT, 'y');
+    let merged = merge(&[
+        defaults(),
+        layer_with_removed(
+            LayerOrigin::User,
+            "normal",
+            Vec::new(),
+            vec![from_user.clone()],
+        ),
+        layer_with_removed(
+            LayerOrigin::Session,
+            "normal",
+            Vec::new(),
+            vec![from_session.clone()],
+        ),
+    ]);
+
+    assert_eq!(
+        merged.modes[&mode("normal")].removed_keys,
+        BTreeSet::from([from_user, from_session])
+    );
+}
+
+#[test]
+fn a_removal_from_the_defaults_layer_is_recorded_too() {
+    // `removed_keys` collects from every layer, not just the user-authored
+    // ones.
+    let key = seq(ModFlags::ALT, 'x');
+    let merged = merge(&[layer_with_removed(
+        LayerOrigin::Defaults,
+        "normal",
+        Vec::new(),
+        vec![key.clone()],
+    )]);
+
+    assert_eq!(
+        merged.modes[&mode("normal")].removed_keys,
+        BTreeSet::from([key])
+    );
+}
+
+#[test]
+fn a_removal_in_an_unregistered_mode_is_skipped() {
+    let key = seq(ModFlags::ALT, 'x');
+    let merged = merge(&[
+        defaults(),
+        layer_with_removed(LayerOrigin::User, "git", Vec::new(), vec![key]),
+    ]);
+
+    assert_eq!(merged.modes.get(&mode("git")), None);
+    assert_eq!(merged.modes[&mode("normal")].removed_keys, BTreeSet::new());
 }
 
 #[test]
@@ -316,8 +524,8 @@ fn remove_of_an_unheld_key_is_recorded_and_nothing_more() {
 
 #[test]
 fn removed_user_binding_vanishes_silently() {
-    // A user entry voided by a higher layer's remove is the user's own
-    // authored intent: absent from the merged map, nothing unbound.
+    // A user entry a higher layer removes is absent from every map, and
+    // nothing lands in `unbound_defaults`.
     let key = seq(ModFlags::CTRL, 'y');
     let merged = merge(&[
         defaults(),
@@ -361,6 +569,96 @@ fn dead_user_binding_leaves_the_default_beneath_live() {
 }
 
 #[test]
+fn a_dead_user_binding_above_a_live_one_leaves_the_lower_layer_winning() {
+    // The session layer names an unregistered action on a key the user layer
+    // already took. The dead entry claims nothing, so attribution stays with
+    // the user layer.
+    let key = seq(ModFlags::ALT, 'w');
+    let merged = merge(&[
+        defaults(),
+        layer(
+            LayerOrigin::User,
+            "normal",
+            vec![(key.clone(), bound("lock"))],
+        ),
+        layer(
+            LayerOrigin::Session,
+            "normal",
+            vec![(key.clone(), bound("does-not-exist"))],
+        ),
+    ]);
+    let normal = &merged.modes[&mode("normal")];
+
+    assert_eq!(
+        normal.user_set[&key],
+        MergedBinding {
+            bound: bound("lock"),
+            source: LayerOrigin::User,
+        }
+    );
+}
+
+#[test]
+fn a_later_defaults_layer_replaces_an_earlier_defaults_entry() {
+    let key = seq(ModFlags::ALT, 'w');
+    let merged = merge(&[
+        layer(
+            LayerOrigin::Defaults,
+            "normal",
+            vec![(key.clone(), bound("new-tab"))],
+        ),
+        layer(
+            LayerOrigin::Defaults,
+            "normal",
+            vec![(key.clone(), bound("lock"))],
+        ),
+    ]);
+    let normal = &merged.modes[&mode("normal")];
+
+    assert_eq!(normal.defaults[&key], bound("lock"));
+    assert_eq!(normal.defaults.len(), 1);
+    assert_eq!(normal.unbound_defaults, BTreeMap::new());
+}
+
+#[test]
+fn one_layer_binding_two_modes_keeps_only_the_registered_one() {
+    let registered = seq(ModFlags::ALT, 'w');
+    let unregistered = seq(ModFlags::ALT, 'g');
+    let mixed = KeyMapLayer {
+        origin: LayerOrigin::User,
+        modes: BTreeMap::from([
+            (
+                mode("normal"),
+                crate::types::ModeBindings {
+                    keys: BTreeMap::from([(registered.clone(), bound("lock"))]),
+                    removed: BTreeSet::new(),
+                },
+            ),
+            (
+                mode("git"),
+                crate::types::ModeBindings {
+                    keys: BTreeMap::from([(unregistered, bound("lock"))]),
+                    removed: BTreeSet::new(),
+                },
+            ),
+        ]),
+    };
+    let merged = merge(&[mixed]);
+
+    assert_eq!(
+        merged.modes.keys().cloned().collect::<Vec<_>>(),
+        vec![mode("normal")]
+    );
+    assert_eq!(
+        merged.modes[&mode("normal")].user_set[&registered],
+        MergedBinding {
+            bound: bound("lock"),
+            source: LayerOrigin::User,
+        }
+    );
+}
+
+#[test]
 fn reserved_led_locked_sequence_is_transparent() {
     // In locked mode the reserved chord resolves instantly, so a longer
     // sequence opening with it can never fire and wins no key.
@@ -388,10 +686,8 @@ fn reserved_led_locked_sequence_is_transparent() {
 #[test]
 fn a_locked_sequence_holding_the_reserved_chord_later_is_transparent_too() {
     // `<C-x> <C-l>` does not open with the reserved chord, but the unlock
-    // resolves wherever it is pressed — so the sequence can never fire and
-    // must win no key. Admitting it would make `<C-x>` a live prefix in the
-    // merged map, and the hint bar would offer a `<C-l>` continuation that
-    // silently unlocks instead of firing `new-tab`.
+    // resolves wherever in the sequence it is pressed. The sequence never
+    // fires, so it wins no key.
     let key = seq2(
         KeyChord::new(ModFlags::CTRL, Key::Char('x')),
         KeybindingsConfig::RESERVED_UNLOCK,
@@ -412,6 +708,34 @@ fn a_locked_sequence_holding_the_reserved_chord_later_is_transparent_too() {
         locked.defaults[&KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK)],
         bound("unlock")
     );
+}
+
+#[test]
+fn a_reserved_led_sequence_outside_locked_mode_fires() {
+    // The reserved-chord rule is locked mode only. In `normal` the same
+    // two-chord sequence is an ordinary binding.
+    let key = seq2(
+        KeybindingsConfig::RESERVED_UNLOCK,
+        KeyChord::new(ModFlags::NONE, Key::Char('x')),
+    );
+    let merged = merge(&[
+        defaults(),
+        layer(
+            LayerOrigin::User,
+            "normal",
+            vec![(key.clone(), bound("lock"))],
+        ),
+    ]);
+    let normal = &merged.modes[&mode("normal")];
+
+    assert_eq!(
+        normal.user_set[&key],
+        MergedBinding {
+            bound: bound("lock"),
+            source: LayerOrigin::User,
+        }
+    );
+    assert_eq!(normal.unbound_defaults, BTreeMap::new());
 }
 
 #[test]
@@ -460,6 +784,10 @@ fn unregistered_mode_is_skipped() {
     ]);
 
     assert_eq!(merged.modes.get(&mode("git")), None);
+    assert_eq!(
+        merged.modes.keys().cloned().collect::<Vec<_>>(),
+        vec![mode("locked"), mode("normal")]
+    );
 }
 
 #[test]

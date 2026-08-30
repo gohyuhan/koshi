@@ -47,9 +47,9 @@ pub enum Command {
     ToggleLockMode(ToggleLockModeArgs),
     /// Set the lock mode explicitly.
     SetLockMode(LockModeArgs),
-    /// Toggle whether the acting client grabs the mouse for text selection,
-    /// so a drag highlights in koshi even over a program that asked for the
-    /// mouse.
+    /// Toggle whether the acting client grabs the mouse for text selection.
+    /// While on, a drag highlights in koshi even over a program that asked
+    /// for the mouse.
     ToggleMouseSelect,
     /// Spawn a command in a new pane.
     RunCommandPane(RunCommandPaneArgs),
@@ -197,9 +197,9 @@ pub struct ClosePaneArgs {
     pub pane: Option<PaneId>,
     /// Kill the pane's child immediately, overriding its close policy.
     pub force: bool,
-    /// Widen the kill to the child's whole process group, so every
-    /// descendant it spawned stops with it. Changes kill scope only; a
-    /// `ConfirmIfBusy` pane still rejects the close while busy.
+    /// Kill the child's whole process group: every descendant it spawned
+    /// stops with it. Changes kill scope only; a `ConfirmIfBusy` pane still
+    /// rejects the close while busy.
     #[serde(default)]
     pub tree: bool,
 }
@@ -256,9 +256,9 @@ pub struct CloseTabArgs {
     pub tab: Option<TabId>,
     /// Kill every pane's child immediately, overriding each close policy.
     pub force: bool,
-    /// Widen every kill to its child's whole process group, so every
-    /// descendant stops with its pane. Changes kill scope only; a
-    /// `ConfirmIfBusy` pane still rejects the close while busy.
+    /// Kill each child's whole process group: every descendant stops with
+    /// its pane. Changes kill scope only; a `ConfirmIfBusy` pane still
+    /// rejects the close while busy.
     #[serde(default)]
     pub tree: bool,
 }
@@ -373,12 +373,10 @@ pub struct SwitchSessionArgs {
 
 /// Selection and copy commands — the commands of visual mode.
 ///
-/// A client is in visual mode while text is highlighted, and it is never
-/// entered by hand: a mouse drag over a pane's content starts a selection, and
-/// a click or any input that reaches the pane's program drops it. Setting a
-/// selection and clearing it are the whole lifecycle — a selection appearing is
-/// entering visual mode, it clearing is leaving — so there is no `Enter`/`Exit`
-/// variant.
+/// A client is in visual mode while text is highlighted. A mouse drag over a
+/// pane's content starts a selection, and a click or any input that reaches
+/// the pane's program drops it. There is no `Enter`/`Exit` variant: a
+/// selection appearing enters visual mode, and it clearing leaves.
 ///
 /// There is no copy cursor: selecting is the mouse's alone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -394,7 +392,7 @@ pub enum VisualCommand {
 
 /// Arguments for [`VisualCommand::SetSelection`].
 ///
-/// The pane is named, never inferred: each pane keeps its own highlight, so
+/// The pane is named, never inferred: each pane keeps its own highlight, and
 /// one client can have several up at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetSelectionArgs {
@@ -419,7 +417,7 @@ pub struct ClearSelectionArgs {
 /// [`Word`](Self::Word), a triple-click drag [`Line`](Self::Line), and holding
 /// `Alt` while dragging [`Block`](Self::Block).
 ///
-/// The kind is fixed when the drag starts and holds for the whole drag, so
+/// The kind is fixed when the drag starts and holds for the whole drag:
 /// extending a double-click drag keeps snapping to whole words.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SelectionKind {
@@ -502,25 +500,24 @@ pub enum CopyTarget {
     /// OSC 52 (a terminal escape sequence for setting the clipboard) to the
     /// outer terminal — the default, dependency-free option.
     Osc52,
-    /// The native operating-system clipboard. Koshi builds no backend for it,
-    /// so a copy to this target writes nothing.
+    /// The native operating-system clipboard. Koshi has no backend for it; a
+    /// copy to this target writes nothing.
     Native,
 }
 
 /// Arguments for [`VisualCommand::Copy`].
 ///
 /// The pane is named, never inferred, as in [`SetSelectionArgs`]: a client can
-/// have a highlight up in several panes at once, so the copy says which one it
-/// means.
+/// have a highlight up in several panes at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CopyArgs {
     /// The pane whose highlight is copied.
     pub pane: PaneId,
-    /// Where the copied text should go.
+    /// Where the copied text goes.
     pub target: CopyTarget,
     /// Whether blanks at the end of each copied row are dropped.
     ///
-    /// A terminal row is padded to the pane's full width with blank cells, so a
+    /// A terminal row is padded to the pane's full width with blank cells: a
     /// highlight over `hello` in an 80-column pane covers 75 trailing blanks.
     /// `true` copies `hello`; `false` copies `hello` followed by those blanks.
     pub trim_trailing_whitespace: bool,
@@ -754,11 +751,10 @@ impl std::error::Error for CommandEnvelopeError {}
 
 /// One command crossing a boundary, with its identity, origin, and timestamp.
 ///
-/// `client_id` is redundant with the client named by `source`; the two must
-/// agree. Deserialization is routed through `CommandEnvelopeWire`, which
-/// rejects any envelope where they disagree. In-process construction should use
-/// [`CommandEnvelope::new`], which derives the field, or pass a hand-built
-/// value through [`CommandEnvelope::validate`].
+/// `client_id` mirrors the client named by `source`; the two must agree.
+/// Deserialization is routed through `CommandEnvelopeWire`, which rejects any
+/// envelope where they disagree. [`CommandEnvelope::new`] derives the field;
+/// [`CommandEnvelope::validate`] checks a hand-built value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "CommandEnvelopeWire")]
 pub struct CommandEnvelope {
@@ -798,8 +794,8 @@ impl CommandEnvelope {
     }
 
     /// Check that `client_id` matches the client named by `source`, returning
-    /// the envelope unchanged when it does. Every deserialized or hand-built
-    /// envelope passes through here before the runtime trusts its attribution.
+    /// the envelope unchanged when it does. Deserialization runs this check on
+    /// every envelope.
     ///
     /// # Errors
     /// Returns [`CommandEnvelopeError::ClientIdMismatch`] if the two disagree.
@@ -894,8 +890,8 @@ impl CliExitCode {
 
     /// Maps a [`CommandResult`] to an exit code: [`CommandResult::Ok`] gives
     /// [`Success`](Self::Success), [`CommandResult::Rejected`] gives
-    /// [`RuntimeAction`](Self::RuntimeAction). The CLI layer supplies the
-    /// narrower codes, which the result alone cannot tell apart.
+    /// [`RuntimeAction`](Self::RuntimeAction). The CLI layer maps its own
+    /// errors to the narrower codes.
     #[must_use]
     pub const fn for_result(result: &CommandResult) -> Self {
         match result {

@@ -126,7 +126,7 @@ impl Server {
         // request itself when a command was given, so the record can't disagree
         // with the process about where or what it started.
         let launch_cwd = spawn_spec.cwd.clone();
-        let recorded_command = args.command.as_ref().map(|_| spawn_spec.clone());
+        let recorded_command = args.command.is_some().then(|| spawn_spec.clone());
         // The in-session identity vars join the launched spec only, after the
         // record above is taken; the record keeps the caller's own env.
         spawn_spec.env.extend(koshi_env(
@@ -245,10 +245,11 @@ impl Server {
         // drops the zoom of anyone zoomed on the pane being removed, which has
         // nothing left to show. A pane closing on its own — a shell exiting, no
         // client acting — disturbs nobody else's zoom.
-        if let Some(client_id) = source.client_id() {
-            if let Some(client) = session.clients.get_mut(client_id) {
-                client.clear_zoom(target.tab_id);
-            }
+        if let Some(client) = source
+            .client_id()
+            .and_then(|client_id| session.clients.get_mut(client_id))
+        {
+            client.clear_zoom(target.tab_id);
         }
 
         // Commit the state removal: registry drop, layout collapse, per-client
@@ -295,16 +296,16 @@ impl Server {
         tree: bool,
         busy_hint: &str,
     ) -> Result<KillPolicy, Rejection> {
+        if !force
+            && matches!(record.close_policy, PaneClosePolicy::ConfirmIfBusy)
+            && !matches!(record.lifecycle(), PaneLifecycle::Exited { .. })
+        {
+            return Err(Rejection::new(RejectReason::InvalidState, busy_hint));
+        }
         let kill_policy = if force {
             KillPolicy::Force
         } else {
-            match record.close_policy {
-                PaneClosePolicy::ConfirmIfBusy => match record.lifecycle() {
-                    PaneLifecycle::Exited { .. } => record.close_policy.kill_policy(),
-                    _ => return Err(Rejection::new(RejectReason::InvalidState, busy_hint)),
-                },
-                policy => policy.kill_policy(),
-            }
+            record.close_policy.kill_policy()
         };
         Ok(if tree {
             kill_policy.tree_scoped()
@@ -314,11 +315,10 @@ impl Server {
     }
 
     /// Drop every per-pane record a removed pane leaves behind: its PTY handle,
-    /// size cache, terminal engine, each client's scroll offset for it (so the
-    /// per-view map holds no dead entries over the session's life), any client
-    /// highlight that was in it, and any drag that was selecting in it. The one
-    /// release point for pane bookkeeping — every path that removes a pane
-    /// funnels through here.
+    /// size cache, terminal engine, and — for every attached client — that
+    /// client's scroll offset for the pane and the highlight it holds there,
+    /// so no per-view map keeps a dead entry. The one release point for pane
+    /// bookkeeping — every path that removes a pane funnels through here.
     pub(super) fn release_pane_bookkeeping(&mut self, session_id: SessionId, pane_id: PaneId) {
         self.pty_handles.remove(&pane_id);
         self.pty_sizes.remove(&pane_id);
@@ -540,10 +540,11 @@ impl Server {
         // moved it returns to the tiled view to see it. Another client zoomed on
         // a pane of this tab keeps its zoom — its pane still exists, and one
         // client resizing does not disturb another client's view.
-        if let Some(client_id) = source.client_id() {
-            if let Some(client) = session.clients.get_mut(client_id) {
-                client.clear_zoom(target.tab_id);
-            }
+        if let Some(client) = source
+            .client_id()
+            .and_then(|client_id| session.clients.get_mut(client_id))
+        {
+            client.clear_zoom(target.tab_id);
         }
 
         // The border moved: re-solve the tab and resize each live PTY whose

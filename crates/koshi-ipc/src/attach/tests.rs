@@ -1,6 +1,7 @@
 //! Tests for the attach structure's wire form: it survives an encode/decode
 //! round trip with every field intact, including each stacked child's collapsed
-//! flag, and a field this build does not know is ignored.
+//! flag, a field this build does not know is ignored, and a field this build
+//! needs is refused when absent.
 
 use koshi_core::geometry::SplitDirection;
 use koshi_core::ids::{PaneId, PluginId, SessionId, TabId};
@@ -159,4 +160,75 @@ fn a_directional_split_arrives_with_its_direction_and_child_order() {
             .collect::<Vec<LayoutNode>>(),
         vec![LayoutNode::Pane(left), LayoutNode::Pane(right)]
     );
+}
+
+#[test]
+fn a_session_with_no_tabs_and_no_panes_survives_a_round_trip() {
+    let sent = AttachedSessionStructureSnapshot {
+        id: SessionId::new(),
+        name: String::new(),
+        tabs: Vec::new(),
+        panes: Vec::new(),
+    };
+
+    let encoded = serde_json::to_string(&sent).expect("encodes");
+    let received: AttachedSessionStructureSnapshot =
+        serde_json::from_str(&encoded).expect("decodes");
+
+    assert_eq!(received, sent);
+}
+
+#[test]
+fn a_tab_that_has_focused_nothing_yet_arrives_with_an_empty_focus_list() {
+    let pane = PaneId::new();
+    let sent = AttachedSessionStructureSnapshot {
+        id: SessionId::new(),
+        name: "s".to_string(),
+        tabs: vec![TabStructure {
+            id: TabId::new(),
+            name: "fresh".to_string(),
+            index: 0,
+            layout: LayoutNode::Pane(pane),
+            focus_mru: Vec::new(),
+        }],
+        panes: vec![PaneStructure {
+            id: pane,
+            kind: PaneKind::Terminal,
+        }],
+    };
+
+    let encoded = serde_json::to_string(&sent).expect("encodes");
+    let received: AttachedSessionStructureSnapshot =
+        serde_json::from_str(&encoded).expect("decodes");
+
+    assert_eq!(received.tabs[0].focus_mru, Vec::<PaneId>::new());
+    assert_eq!(received, sent);
+}
+
+#[test]
+fn a_tab_missing_its_focus_list_is_refused() {
+    let mut encoded = serde_json::to_value(structure()).expect("encodes");
+    encoded["tabs"][0]
+        .as_object_mut()
+        .expect("a tab encodes as an object")
+        .remove("focus_mru");
+
+    let error = serde_json::from_value::<AttachedSessionStructureSnapshot>(encoded)
+        .expect_err("a tab without its focus list decoded instead of failing");
+
+    assert_eq!(error.to_string(), "missing field `focus_mru`");
+}
+
+#[test]
+fn a_pane_missing_its_kind_is_refused() {
+    let mut encoded = serde_json::to_value(structure()).expect("encodes");
+    encoded["panes"][0]
+        .as_object_mut()
+        .expect("a pane encodes as an object")
+        .remove("kind");
+
+    let error = serde_json::from_value::<AttachedSessionStructureSnapshot>(encoded)
+        .expect_err("a pane without its kind decoded instead of failing");
+
+    assert_eq!(error.to_string(), "missing field `kind`");
 }

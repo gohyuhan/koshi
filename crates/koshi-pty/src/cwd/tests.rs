@@ -18,6 +18,43 @@ fn the_lookup_answers_this_process_own_directory() {
     );
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn the_lookup_answers_a_child_own_directory_not_this_process_one() {
+    let dir = tempfile::tempdir().expect("create a temp dir");
+    let mut child = std::process::Command::new("sleep")
+        .arg("30")
+        .current_dir(dir.path())
+        .spawn()
+        .expect("spawn sleep child");
+
+    let answered = process_cwd(child.id());
+
+    child.kill().expect("kill the child");
+    child.wait().expect("reap child");
+    let answered = answered.expect("the OS answers for a live child");
+    assert_eq!(
+        answered.canonicalize().expect("canonicalize the answer"),
+        dir.path()
+            .canonicalize()
+            .expect("canonicalize the temp dir"),
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_reaped_child_answers_nothing() {
+    let mut child = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("spawn sleep child");
+    let pid = child.id();
+    child.kill().expect("kill the child");
+    child.wait().expect("reap child");
+
+    assert_eq!(process_cwd(pid), None);
+}
+
 #[test]
 fn a_process_that_cannot_exist_answers_nothing() {
     // `u32::MAX` is no valid PID on any supported OS.

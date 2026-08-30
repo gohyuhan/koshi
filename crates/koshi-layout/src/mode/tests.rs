@@ -67,6 +67,40 @@ fn tiled_mode_matches_the_plain_solve() {
 }
 
 #[test]
+fn fullscreen_of_the_only_pane_matches_the_tiled_solve() {
+    let a = PaneId::new();
+    let tree = LayoutNode::Pane(a);
+
+    let result = solve_with_mode(&tree, LayoutMode::Fullscreen { focused: a }, tab());
+    assert_eq!(result, solve(&tree, tab()));
+    assert_eq!(result.panes, [(a, tab())]);
+}
+
+#[test]
+fn layout_mode_serializes_as_an_externally_tagged_enum() {
+    let focused = PaneId::new();
+    let focused_json = serde_json::to_value(focused).unwrap();
+
+    assert_eq!(
+        serde_json::to_value(LayoutMode::Tiled).unwrap(),
+        serde_json::json!("Tiled")
+    );
+    assert_eq!(
+        serde_json::to_value(LayoutMode::Fullscreen { focused }).unwrap(),
+        serde_json::json!({ "Fullscreen": { "focused": focused_json } })
+    );
+}
+
+#[test]
+fn layout_mode_round_trips_through_serde() {
+    let focused = PaneId::new();
+    for mode in [LayoutMode::Tiled, LayoutMode::Fullscreen { focused }] {
+        let json = serde_json::to_string(&mode).unwrap();
+        assert_eq!(serde_json::from_str::<LayoutMode>(&json).unwrap(), mode);
+    }
+}
+
+#[test]
 fn stale_fullscreen_focus_falls_back_to_tiled() {
     let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
     let tree = nested(a, b, c);

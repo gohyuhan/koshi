@@ -2,11 +2,10 @@
 //!
 //! The event loop calls [`Server::shutdown`] once it exits. A quit with no
 //! issuing client — `kill-session` — group-kills immediately; every other
-//! ending keeps graceful teardown.
-//! Stages 1–5 run here; stages 6 (restore
-//! the outer terminal) and 7 (flush logs) run after this returns, as the
-//! binary's cleanup guard and tracing guard drop in that order. The panic path
-//! does not come here — it takes the abrupt [`Server::kill_all_panes`].
+//! ending group-kills gracefully. Stages 1–5 run here; stages 6 (restore the
+//! outer terminal) and 7 (flush logs) run after this returns, as the binary's
+//! cleanup guard and tracing guard drop in that order. The panic path does not
+//! come here — it takes the abrupt [`Server::kill_all_panes`].
 
 use std::sync::Arc;
 use std::thread;
@@ -33,8 +32,8 @@ impl Server {
         // exited, so no further IPC or plugin command reaches dispatch.
         self.draining = true;
 
-        // Stage 2 — stop answering the control socket and remove the socket
-        // and endpoint file, so nothing advertises a session that is ending.
+        // Stage 2 — stop answering the control socket, then remove the socket
+        // file, the endpoint file and the advert that name this session.
         if let Some(ipc_server) = self.ipc_server.take() {
             ipc_server.shutdown();
         }
@@ -51,26 +50,23 @@ impl Server {
         }
 
         // Stage 5 — session-snapshot persistence: a no-op, the storage service
-        // is the NullStorage stand-in. Ordered after the kill, where the final
-        // session state exists to record.
-
-        // Stages 6 (restore terminal) and 7 (flush logs) run after this returns,
-        // as the caller's cleanup guard and tracing guard drop in that order.
+        // is the NullStorage stand-in.
     }
 
-    /// Graceful-then-group-kill every live pane's child, in parallel. Each pane
-    /// gets its own thread so every pane's group receives the stop request at
-    /// once; joining them holds the process open until the children are reaped
-    /// (or group-killed at the deadline), bounding the total wait to ~one
-    /// window.
+    /// Graceful-then-group-kill every live pane's child
+    /// ([`KillPolicy::GracefulTree`] with [`GRACEFUL_TIMEOUT_DURATION`]), one
+    /// thread per pane, so every pane's group receives the stop request at
+    /// once. Joins every thread, which holds the process open until the
+    /// children are reaped or group-killed at the deadline; the total wait is
+    /// one such window. A pane whose kill fails is skipped and the rest still
+    /// run.
     fn graceful_kill_all_panes(&self) {
-        let backend = Arc::clone(self.pty_backend());
         let handles: Vec<_> = self
             .pty_handles
             .keys()
             .copied()
             .map(|pane_id| {
-                let backend = Arc::clone(&backend);
+                let backend = Arc::clone(self.pty_backend());
                 thread::spawn(move || {
                     let _ = backend.kill(
                         pane_id,

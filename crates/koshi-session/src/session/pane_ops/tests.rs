@@ -4,13 +4,12 @@
 //! split candidate with [`split_leaf`] (as the runtime does), and applies it
 //! with [`commit_new_pane`], asserting the emitted events, the post-split
 //! layout tree, the registered pane, and the client's focus. Fit preflight and
-//! source resolution belong to the runtime (which builds the candidate and
-//! spawns before committing), so they are covered by the runtime's tests, not
-//! here.
+//! source resolution live in the runtime and are covered by the runtime's
+//! tests.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use koshi_core::event::{Event, LayoutChanged, PaneCreated, PaneFocused, TabFocused};
 use koshi_core::geometry::{Direction, Size, SplitDirection};
@@ -101,7 +100,12 @@ fn commit_with_an_unknown_tab_registers_nothing_and_emits_nothing() {
 
     assert_eq!(previous, None);
     assert_eq!(events, Vec::new());
-    assert!(session.panes.get(new_id).is_none());
+    assert_eq!(session.panes.get(new_id).map(PaneRecord::id), None);
+    assert_eq!(session.panes.len(), 1);
+    assert_eq!(
+        session.tabs.get(&tab).expect("tab").layout(),
+        &LayoutNode::Pane(source)
+    );
     assert_eq!(session.validate(), Ok(()));
 }
 
@@ -148,8 +152,8 @@ fn commit_emits_events_swaps_the_tree_and_focuses_the_new_pane() {
         ))
     );
 
-    // The new pane is registered `Running` (its process is already live),
-    // focused, and at the front of MRU.
+    // The new pane is registered `Running`, focused, and at the front of the
+    // tab's focus history.
     assert_eq!(session.panes.len(), 2);
     assert_eq!(
         *session.panes.get(new_id).expect("record").lifecycle(),
@@ -228,9 +232,9 @@ fn commit_switches_a_client_from_another_tab_and_reports_the_previous() {
         SystemTime::UNIX_EPOCH,
     );
 
-    // The client wasn't viewing tab B, so it is switched there (its old tab A is
-    // reported for the caller to reflow) and focuses the new pane; TabFocused is
-    // emitted first, before the pane appears.
+    // The client was not viewing tab B, so it is switched there, tab A comes
+    // back as the previous tab, and the client focuses the new pane.
+    // `TabFocused` is emitted ahead of `PaneCreated`.
     assert_eq!(previous, Some(tab_a));
     assert_eq!(
         session.clients.get(client_id).expect("client").active_tab(),
@@ -297,6 +301,163 @@ fn commit_without_a_focus_client_emits_no_focus_event() {
 }
 
 #[test]
+fn commit_leaves_the_session_consistent() {
+    let (mut session, tab, source, client) = session_one_pane();
+    let (new_id, candidate) = prepared(&session, tab, source, Direction::Right);
+
+    let (_previous, _events) = commit_new_pane(
+        &mut session,
+        new_id,
+        tab,
+        candidate,
+        Some(client),
+        NewPaneSpec::default(),
+        SystemTime::UNIX_EPOCH,
+    );
+
+    assert_eq!(session.validate(), Ok(()));
+}
+
+#[test]
+fn commit_stamps_the_supplied_created_at_on_the_new_pane_record() {
+    let (mut session, tab, source, client) = session_one_pane();
+    let (new_id, candidate) = prepared(&session, tab, source, Direction::Right);
+    let created_at = SystemTime::UNIX_EPOCH + Duration::from_secs(4321);
+
+    let (_previous, _events) = commit_new_pane(
+        &mut session,
+        new_id,
+        tab,
+        candidate,
+        Some(client),
+        NewPaneSpec::default(),
+        created_at,
+    );
+
+    assert_eq!(
+        session.panes.get(new_id).expect("record").created_at,
+        created_at
+    );
+}
+
+#[test]
+fn commit_with_the_default_spec_leaves_the_new_pane_without_a_cwd_or_command() {
+    let (mut session, tab, source, client) = session_one_pane();
+    let (new_id, candidate) = prepared(&session, tab, source, Direction::Right);
+
+    let (_previous, _events) = commit_new_pane(
+        &mut session,
+        new_id,
+        tab,
+        candidate,
+        Some(client),
+        NewPaneSpec::default(),
+        SystemTime::UNIX_EPOCH,
+    );
+
+    let record = session.panes.get(new_id).expect("record");
+    assert_eq!(record.cwd, None);
+    assert_eq!(record.command, None);
+}
+
+#[test]
+fn commit_puts_the_new_pane_ahead_of_the_existing_focus_history() {
+    let (mut session, tab, source, client) = session_one_pane();
+    session
+        .tabs
+        .get_mut(&tab)
+        .expect("tab")
+        .record_focus_mru(source);
+    let (new_id, candidate) = prepared(&session, tab, source, Direction::Right);
+
+    let (_previous, _events) = commit_new_pane(
+        &mut session,
+        new_id,
+        tab,
+        candidate,
+        Some(client),
+        NewPaneSpec::default(),
+        SystemTime::UNIX_EPOCH,
+    );
+
+    assert_eq!(
+        session.tabs.get(&tab).expect("tab").focus_mru(),
+        [new_id, source].as_slice()
+    );
+}
+
+/// With no acting client, every attached client's zoom of the split tab drops,
+/// including the zoom of a client that is watching a different tab.
+#[test]
+fn commit_with_no_acting_client_drops_the_tabs_zoom_for_a_client_on_another_tab() {
+    let (mut session, tab, source, _client) = session_one_pane();
+    let other_tab = TabId::new();
+    let other_pane = PaneId::new();
+    session.tabs.insert(
+        other_tab,
+        Tab::new(other_tab, "other".to_owned(), 1, other_pane),
+    );
+    let _ = session
+        .panes
+        .insert(PaneRecord::new(other_pane, SystemTime::UNIX_EPOCH));
+
+    let onlooker_id = ClientId::new();
+    let mut onlooker = Client::new(
+        onlooker_id,
+        session.id,
+        SystemTime::UNIX_EPOCH,
+        VIEWPORT,
+        None,
+        other_tab,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
+    );
+    onlooker.update_focused_pane(other_tab, other_pane);
+    onlooker.zoom_pane(tab, source);
+    session.attach_client(onlooker);
+
+    let (new_id, candidate) = prepared(&session, tab, source, Direction::Right);
+
+    let (_previous, _events) = commit_new_pane(
+        &mut session,
+        new_id,
+        tab,
+        candidate,
+        None,
+        NewPaneSpec::default(),
+        SystemTime::UNIX_EPOCH,
+    );
+
+    assert_eq!(
+        session
+            .clients
+            .get(onlooker_id)
+            .expect("onlooker")
+            .layout_mode(tab),
+        LayoutMode::Tiled
+    );
+    // The onlooker keeps the tab it was watching and the focus it had there.
+    assert_eq!(
+        session
+            .clients
+            .get(onlooker_id)
+            .expect("onlooker")
+            .active_tab(),
+        other_tab
+    );
+    assert_eq!(
+        session
+            .clients
+            .get(onlooker_id)
+            .expect("onlooker")
+            .focused_pane(other_tab),
+        Some(other_pane)
+    );
+    assert_eq!(session.validate(), Ok(()));
+}
+
+#[test]
 fn commit_records_name_cwd_and_command_on_the_new_pane() {
     let (mut session, tab, source, client) = session_one_pane();
     let (new_id, candidate) = prepared(&session, tab, source, Direction::Right);
@@ -357,10 +518,8 @@ fn commit_with_a_stale_focus_client_claims_no_focus() {
     assert!(session.tabs.get(&tab).expect("tab").focus_mru().is_empty());
 }
 
-/// A split nobody owns — an external caller naming a tab, with no client to act
-/// for — drops every zoom of that tab, so the new pane is actually seen. Leaving
-/// the zooms up would add the pane underneath them: a zoomed viewer would never
-/// see it, and with no acting client nothing focuses it either.
+/// A commit that names no acting client drops every attached client's zoom of
+/// the split tab.
 #[test]
 fn commit_with_no_acting_client_drops_every_zoom_of_the_tab() {
     let (mut session, tab, source, client) = session_one_pane();
@@ -372,8 +531,6 @@ fn commit_with_no_acting_client_drops_every_zoom_of_the_tab() {
 
     let (new_id, candidate) = prepared(&session, tab, source, Direction::Right);
 
-    // `focus: None` — the caller designated no client (an already-viewed tab
-    // needs no adoption, so the runtime passes none through).
     let (_previous, _events) = commit_new_pane(
         &mut session,
         new_id,
@@ -395,10 +552,8 @@ fn commit_with_no_acting_client_drops_every_zoom_of_the_tab() {
     );
 }
 
-/// Splitting drops the zoom of the client that split — and only that client's.
-/// The new pane lands in the tiled view it was sized against, and the splitter
-/// sees it; a second client zoomed on a pane of the same tab is untouched,
-/// because one client splitting is not a reason to change another's view.
+/// Splitting drops the zoom of the client that split, and only that client's. A
+/// second client zoomed on a pane of the same tab keeps its zoom.
 #[test]
 fn commit_drops_the_splitting_clients_zoom_and_no_others() {
     let (mut session, tab, source, client) = session_one_pane();
@@ -458,8 +613,6 @@ fn commit_drops_the_splitting_clients_zoom_and_no_others() {
 
 /// Committing under a pane id the registry already holds keeps the existing
 /// record: its cwd and command stay as they were, and no second record appears.
-/// The live pane's spawn request is what a later restore or respawn reads back,
-/// so overwriting it would relaunch that pane in the wrong place.
 #[test]
 fn committing_a_pane_id_already_registered_keeps_the_original_record() {
     let (mut session, tab, source, client) = session_one_pane();
@@ -525,5 +678,200 @@ fn commit_reports_no_previous_tab_when_the_client_already_views_the_tab() {
     assert_eq!(
         session.clients.get(client).expect("client").active_tab(),
         tab
+    );
+}
+
+/// Add a second tab holding a single leaf, register that leaf's record, and zoom
+/// `client` on it. Returns the new tab and pane ids.
+fn second_tab_zoomed_by(session: &mut Session, client: ClientId) -> (TabId, PaneId) {
+    let other_tab = TabId::new();
+    let other_pane = PaneId::new();
+    session.tabs.insert(
+        other_tab,
+        Tab::new(other_tab, "other".to_owned(), 1, other_pane),
+    );
+    let _ = session
+        .panes
+        .insert(PaneRecord::new(other_pane, SystemTime::UNIX_EPOCH));
+    session
+        .clients
+        .get_mut(client)
+        .expect("client")
+        .zoom_pane(other_tab, other_pane);
+    (other_tab, other_pane)
+}
+
+/// The splitting client's zoom drops for the split tab only; its zoom of a
+/// different tab stays up.
+#[test]
+fn commit_leaves_the_splitting_clients_zoom_of_another_tab_alone() {
+    let (mut session, tab, source, client) = session_one_pane();
+    let (other_tab, other_pane) = second_tab_zoomed_by(&mut session, client);
+    session
+        .clients
+        .get_mut(client)
+        .expect("client")
+        .zoom_pane(tab, source);
+
+    let (new_id, candidate) = prepared(&session, tab, source, Direction::Right);
+
+    let (_previous, _events) = commit_new_pane(
+        &mut session,
+        new_id,
+        tab,
+        candidate,
+        Some(client),
+        NewPaneSpec::default(),
+        SystemTime::UNIX_EPOCH,
+    );
+
+    assert_eq!(
+        session
+            .clients
+            .get(client)
+            .expect("client")
+            .layout_mode(tab),
+        LayoutMode::Tiled
+    );
+    assert_eq!(
+        session
+            .clients
+            .get(client)
+            .expect("client")
+            .layout_mode(other_tab),
+        LayoutMode::Fullscreen {
+            focused: other_pane
+        }
+    );
+    assert_eq!(session.validate(), Ok(()));
+}
+
+/// With no acting client the zoom drop is still scoped to the split tab; a zoom
+/// of a different tab stays up.
+#[test]
+fn commit_with_no_acting_client_leaves_a_zoom_of_another_tab_alone() {
+    let (mut session, tab, source, client) = session_one_pane();
+    let (other_tab, other_pane) = second_tab_zoomed_by(&mut session, client);
+    session
+        .clients
+        .get_mut(client)
+        .expect("client")
+        .zoom_pane(tab, source);
+
+    let (new_id, candidate) = prepared(&session, tab, source, Direction::Right);
+
+    let (_previous, _events) = commit_new_pane(
+        &mut session,
+        new_id,
+        tab,
+        candidate,
+        None,
+        NewPaneSpec::default(),
+        SystemTime::UNIX_EPOCH,
+    );
+
+    assert_eq!(
+        session
+            .clients
+            .get(client)
+            .expect("client")
+            .layout_mode(tab),
+        LayoutMode::Tiled
+    );
+    assert_eq!(
+        session
+            .clients
+            .get(client)
+            .expect("client")
+            .layout_mode(other_tab),
+        LayoutMode::Fullscreen {
+            focused: other_pane
+        }
+    );
+    assert_eq!(session.validate(), Ok(()));
+}
+
+/// Splitting twice in the same tab registers both panes and leaves the focus
+/// history newest first. The split source never enters the history: only the
+/// pane each commit creates does.
+#[test]
+fn a_second_commit_puts_the_newest_pane_at_the_front_of_the_history() {
+    let (mut session, tab, source, client) = session_one_pane();
+
+    let (first_new, first_candidate) = prepared(&session, tab, source, Direction::Right);
+    let (_previous, _events) = commit_new_pane(
+        &mut session,
+        first_new,
+        tab,
+        first_candidate,
+        Some(client),
+        NewPaneSpec::default(),
+        SystemTime::UNIX_EPOCH,
+    );
+
+    let (second_new, second_candidate) = prepared(&session, tab, first_new, Direction::Down);
+    let (_previous, _events) = commit_new_pane(
+        &mut session,
+        second_new,
+        tab,
+        second_candidate,
+        Some(client),
+        NewPaneSpec::default(),
+        SystemTime::UNIX_EPOCH,
+    );
+
+    assert_eq!(session.panes.len(), 3);
+    assert_eq!(
+        session.tabs.get(&tab).expect("tab").focus_mru(),
+        [second_new, first_new].as_slice()
+    );
+    assert_eq!(
+        session
+            .clients
+            .get(client)
+            .expect("client")
+            .focused_pane(tab),
+        Some(second_new)
+    );
+    assert_eq!(session.validate(), Ok(()));
+}
+
+/// A client holding no focus in the tab gets `prior_pane: None` on the
+/// [`Event::PaneFocused`] the commit emits.
+#[test]
+fn commit_reports_no_prior_pane_when_the_client_focused_nothing_in_the_tab() {
+    let (mut session, tab, source, client) = session_one_pane();
+    session
+        .clients
+        .get_mut(client)
+        .expect("client")
+        .remove_focused_pane(tab);
+    let (new_id, candidate) = prepared(&session, tab, source, Direction::Right);
+
+    let (_previous, events) = commit_new_pane(
+        &mut session,
+        new_id,
+        tab,
+        candidate,
+        Some(client),
+        NewPaneSpec::default(),
+        SystemTime::UNIX_EPOCH,
+    );
+
+    assert_eq!(
+        events,
+        vec![
+            Event::PaneCreated(PaneCreated {
+                pane_id: new_id,
+                tab_id: tab,
+            }),
+            Event::LayoutChanged(LayoutChanged { tab_id: tab }),
+            Event::PaneFocused(PaneFocused {
+                client_id: client,
+                tab_id: tab,
+                pane_id: new_id,
+                prior_pane: None,
+            }),
+        ]
     );
 }

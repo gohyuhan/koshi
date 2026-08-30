@@ -1,9 +1,9 @@
-//! Tests for PTY resizing: size clamping, batch application, and error handling.
+//! Tests for PTY resizing: size flooring, batch application, and error handling.
 //!
-//! [`compute_pty_size`] floors layout dimensions to PTY minima (2 cols, 1 row).
-//! [`resize_for_layout_change`] applies PTY resizes in order best-effort (a
-//! backend error on one pane never stops the rest) and tracks which panes kept
-//! their last valid size (for invisible/hidden panes).
+//! [`compute_pty_size`] floors layout dimensions to the PTY minimum (2 cols,
+//! 1 row). [`resize_for_layout_change`] applies PTY resizes in input order, a
+//! backend error on one pane never stops the rest, and a pane with no content
+//! is reported as keeping its last size.
 
 use std::sync::Mutex;
 
@@ -14,20 +14,22 @@ use super::*;
 use crate::backend::state::PtyHandle;
 use crate::error::PtyError;
 
-/// A content rect at the origin — only the size matters to resize.
+/// A content rect at the origin with the given size.
 fn rect(cols: u16, rows: u16) -> Rect {
     Rect::at_origin(Size { cols, rows })
 }
 
-/// A [`PtyBackend`] that records every `resize` and can be told to fail one
-/// pane, so the tests can assert exact sizes, call order, and abort behavior.
+/// A [`PtyBackend`] that records every `resize` it accepts and refuses every
+/// `resize` naming `fail_on`.
 struct RecordingBackend {
+    /// Every accepted resize, oldest first.
     resizes: Mutex<Vec<(PaneId, PtySize)>>,
+    /// The pane whose resizes are refused with [`PtyError::UnknownPane`].
     fail_on: Option<PaneId>,
 }
 
 impl RecordingBackend {
-    /// Create a backend that records resize calls without errors.
+    /// A backend that accepts every resize.
     fn new() -> Self {
         Self {
             resizes: Mutex::new(Vec::new()),
@@ -35,7 +37,8 @@ impl RecordingBackend {
         }
     }
 
-    /// Create a backend that rejects resize calls for a specific pane with `UnknownPane` error.
+    /// A backend that refuses every resize of `pane` with
+    /// [`PtyError::UnknownPane`] and accepts every other one.
     fn failing_on(pane: PaneId) -> Self {
         Self {
             resizes: Mutex::new(Vec::new()),
@@ -43,7 +46,7 @@ impl RecordingBackend {
         }
     }
 
-    /// Return a copy of all resize calls recorded on this backend in order.
+    /// Every accepted resize, oldest first.
     fn calls(&self) -> Vec<(PaneId, PtySize)> {
         self.resizes.lock().expect("resize log lock").clone()
     }
@@ -107,13 +110,24 @@ fn compute_pty_size_leaves_the_exact_minimum_unchanged() {
 }
 
 #[test]
+fn compute_pty_size_passes_the_largest_rect_through_unchanged() {
+    assert_eq!(
+        compute_pty_size(rect(u16::MAX, u16::MAX)),
+        PtySize {
+            cols: u16::MAX,
+            rows: u16::MAX,
+        }
+    );
+}
+
+#[test]
 fn an_empty_batch_yields_no_results_and_no_backend_calls() {
     let backend = RecordingBackend::new();
 
     let results = resize_for_layout_change(&backend, Vec::<(PaneId, Option<Rect>)>::new());
 
     assert_eq!(results, Vec::new());
-    assert!(backend.calls().is_empty());
+    assert_eq!(backend.calls(), Vec::new());
 }
 
 #[test]
@@ -131,7 +145,7 @@ fn a_none_pane_is_skipped_without_a_backend_call() {
             kept_last_valid: true,
         }]
     );
-    assert!(backend.calls().is_empty());
+    assert_eq!(backend.calls(), Vec::new());
 }
 
 #[test]
@@ -159,7 +173,14 @@ fn a_tiny_visible_pane_is_floored_before_resizing() {
 
     let results = resize_for_layout_change(&backend, vec![(pane, Some(rect(0, 0)))]);
 
-    assert_eq!(results[0].applied, Some(PtySize { cols: 2, rows: 1 }));
+    assert_eq!(
+        results,
+        vec![ResizeResult {
+            pane_id: pane,
+            applied: Some(PtySize { cols: 2, rows: 1 }),
+            kept_last_valid: false,
+        }]
+    );
     assert_eq!(backend.calls(), vec![(pane, PtySize { cols: 2, rows: 1 })]);
 }
 
@@ -255,4 +276,110 @@ fn a_backend_error_on_one_pane_does_not_stop_the_rest() {
             (after, PtySize { cols: 20, rows: 8 }),
         ]
     );
+}
+
+#[test]
+fn a_failing_pane_alone_yields_one_failed_result_and_no_backend_record() {
+    let failing = PaneId::new();
+    let backend = RecordingBackend::failing_on(failing);
+
+    let results = resize_for_layout_change(&backend, vec![(failing, Some(rect(10, 5)))]);
+
+    assert_eq!(
+        results,
+        vec![ResizeResult {
+            pane_id: failing,
+            applied: None,
+            kept_last_valid: false,
+        }]
+    );
+    assert_eq!(backend.calls(), Vec::new());
+}
+
+#[test]
+fn a_failed_resize_and_a_no_content_skip_are_told_apart() {
+    // Both carry `applied: None`; only the skip carries `kept_last_valid`.
+    let failing = PaneId::new();
+    let hidden = PaneId::new();
+    let backend = RecordingBackend::failing_on(failing);
+
+    let results =
+        resize_for_layout_change(&backend, vec![(failing, Some(rect(10, 5))), (hidden, None)]);
+
+    assert_eq!(
+        results,
+        vec![
+            ResizeResult {
+                pane_id: failing,
+                applied: None,
+                kept_last_valid: false,
+            },
+            ResizeResult {
+                pane_id: hidden,
+                applied: None,
+                kept_last_valid: true,
+            },
+        ]
+    );
+    assert_eq!(backend.calls(), Vec::new());
+}
+
+#[test]
+fn a_pane_listed_twice_is_resized_twice_in_input_order() {
+    let backend = RecordingBackend::new();
+    let pane = PaneId::new();
+
+    let results = resize_for_layout_change(
+        &backend,
+        vec![(pane, Some(rect(10, 5))), (pane, Some(rect(20, 8)))],
+    );
+
+    assert_eq!(
+        results,
+        vec![
+            ResizeResult {
+                pane_id: pane,
+                applied: Some(PtySize { cols: 10, rows: 5 }),
+                kept_last_valid: false,
+            },
+            ResizeResult {
+                pane_id: pane,
+                applied: Some(PtySize { cols: 20, rows: 8 }),
+                kept_last_valid: false,
+            },
+        ]
+    );
+    assert_eq!(
+        backend.calls(),
+        vec![
+            (pane, PtySize { cols: 10, rows: 5 }),
+            (pane, PtySize { cols: 20, rows: 8 }),
+        ]
+    );
+}
+
+#[test]
+fn a_batch_of_only_hidden_panes_touches_the_backend_for_none_of_them() {
+    let backend = RecordingBackend::new();
+    let first = PaneId::new();
+    let second = PaneId::new();
+
+    let results = resize_for_layout_change(&backend, vec![(first, None), (second, None)]);
+
+    assert_eq!(
+        results,
+        vec![
+            ResizeResult {
+                pane_id: first,
+                applied: None,
+                kept_last_valid: true,
+            },
+            ResizeResult {
+                pane_id: second,
+                applied: None,
+                kept_last_valid: true,
+            },
+        ]
+    );
+    assert_eq!(backend.calls(), Vec::new());
 }

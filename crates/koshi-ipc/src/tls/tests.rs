@@ -1,13 +1,17 @@
 //! Tests for the TLS stream: the certificate fingerprint, what the pinning
-//! verifier accepts and refuses, the key exchange group a handshake settles
-//! on, the frames that cross a real loopback stream, the cause a failed dial
-//! carries and the words it prints, and the deadline a handshake, an opening
-//! exchange and a read finish inside, against a peer that answers nothing and
-//! against one that sends a byte at a time.
+//! verifier accepts and refuses, the key exchange groups the provider offers
+//! and the one a handshake settles on, the frames that cross a real loopback
+//! stream, the cause a failed dial carries and the words it prints, the
+//! deadline a handshake, an opening exchange, a read and a write finish
+//! inside, against a peer that answers nothing and against one that sends a
+//! byte at a time, how a read ends when the peer closes the stream, cuts it
+//! or sends bytes that do not decrypt, how much of one write is taken, and
+//! the socket timeouts a deadline sets and takes away.
 //!
 //! The loopback tests bind `127.0.0.1:0`, so the operating system picks a free
 //! port and two runs of the suite never meet on one address.
 
+use std::io;
 use std::net::TcpListener;
 
 use koshi_core::ids::SessionId;
@@ -20,7 +24,7 @@ use crate::remote_wire::{
     open, RemoteClientFrame, RemoteServerFrame, RemoteSessionRow, MIN_REMOTE_PROTOCOL_VERSION,
     REMOTE_PROTOCOL_VERSION,
 };
-use crate::transport::frame_halves;
+use crate::transport::{frame_halves, Deadlined};
 
 /// How long a loopback handshake and the frames after it have to finish. Well
 /// past what a loopback stream needs, so a slow machine does not fail the run.
@@ -102,8 +106,8 @@ fn the_fingerprint_is_the_sha256_as_sixty_four_lowercase_hex_characters() {
 #[test]
 fn a_first_connection_takes_the_certificate_and_records_its_fingerprint() {
     let verifier = PinVerifier::new(None);
-    assert!(verifier.seen().is_none());
-    assert!(present(&verifier, b"a certificate").is_ok());
+    assert_eq!(verifier.seen(), None);
+    present(&verifier, b"a certificate").expect("a first connection takes any certificate");
     assert_eq!(verifier.seen(), Some(fingerprint(b"a certificate")));
 }
 
@@ -111,7 +115,8 @@ fn a_first_connection_takes_the_certificate_and_records_its_fingerprint() {
 fn the_pinned_fingerprint_is_taken_and_every_other_one_is_refused() {
     let pinned = fingerprint(b"the first certificate");
     let verifier = PinVerifier::new(Some(&pinned));
-    assert!(present(&verifier, b"the first certificate").is_ok());
+    present(&verifier, b"the first certificate").expect("the pinned certificate is taken");
+    assert_eq!(verifier.seen(), Some(pinned.clone()));
 
     let verifier = PinVerifier::new(Some(&pinned));
     let refused = present(&verifier, b"another certificate").expect_err("a changed certificate");
@@ -445,7 +450,7 @@ fn a_peer_that_drips_after_the_handshake_ends_a_read_at_the_readers_deadline() {
 
 #[test]
 fn a_second_connection_presenting_another_certificate_is_refused_by_the_pinned_fingerprint() {
-    let (config, _) = fresh_server();
+    let (config, cert_der) = fresh_server();
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
     let address = listener.local_addr().expect("read the bound address");
 
@@ -475,8 +480,7 @@ fn a_second_connection_presenting_another_certificate_is_refused_by_the_pinned_f
     };
     assert_eq!(named, address.to_string());
     assert_eq!(was, pinned);
-    assert_eq!(presented.len(), 64);
-    assert_ne!(presented, pinned);
+    assert_eq!(presented, fingerprint(&cert_der));
     let _ = server.join();
 }
 
@@ -642,10 +646,9 @@ fn a_caller_that_asked_for_a_bounded_wait_stops_reading_at_it() {
         waited < PAUSE_AFTER_THE_ANSWER * 3,
         "the read ended on the bound it was given, taking {waited:?}"
     );
-    assert!(
-        !matches!(failure, IpcError::MalformedFrame { .. }),
-        "the read ran out of time, and did not misread a frame: {failure}"
-    );
+    let IpcError::Transport { .. } = failure else {
+        panic!("the read ran out of time, and did not misread a frame or lose the peer: {failure}");
+    };
 
     let _ = server.join();
 }
@@ -701,9 +704,12 @@ fn a_framed_half_keeps_the_deadline_it_was_dialled_with_and_can_be_told_to_drop_
 
     // The deadline came through the box: the server is still pausing, so this
     // read gives up rather than waiting it out.
-    incoming
+    let held = incoming
         .recv::<RemoteServerFrame>()
         .expect_err("the dialled deadline holds through the boxed half");
+    let IpcError::Transport { .. } = held else {
+        panic!("a read that ran out of time is a transport failure, not a lost peer: {held}");
+    };
 
     // And it can be taken off through the box: the same server, the same
     // pause, and now the frame is waited for.
@@ -752,4 +758,602 @@ fn a_burst_larger_than_one_socket_read_arrives_whole() {
     assert_eq!(received, sent, "the burst arrived changed");
 
     server.join().expect("the server thread finished");
+}
+
+#[test]
+fn the_fingerprint_of_three_bytes_is_their_sha256() {
+    assert_eq!(
+        fingerprint(b"abc"),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+}
+
+#[test]
+fn the_provider_offers_the_hybrid_group_first_and_the_classical_ones_after() {
+    let offered: Vec<NamedGroup> = crypto_provider()
+        .kx_groups
+        .iter()
+        .map(|group| group.name())
+        .collect();
+
+    assert_eq!(
+        offered,
+        [
+            NamedGroup::X25519MLKEM768,
+            NamedGroup::X25519,
+            NamedGroup::secp256r1,
+            NamedGroup::secp384r1,
+        ]
+    );
+}
+
+#[test]
+fn an_address_with_no_port_is_a_lookup_failure_and_no_connection_is_made() {
+    let failure = dial("127.0.0.1", None, LOOPBACK_WAIT)
+        .expect_err("an address with no port names nothing to dial");
+
+    let printed = failure.to_string();
+    let IpcError::Transport { detail } = failure else {
+        panic!("a failed lookup is a transport failure: {failure}");
+    };
+    assert_eq!(
+        detail,
+        "127.0.0.1 could not be looked up: invalid socket address"
+    );
+    assert_eq!(
+        printed,
+        "ipc transport error: 127.0.0.1 could not be looked up: invalid socket address"
+    );
+}
+
+#[test]
+fn an_address_whose_port_is_not_a_number_is_a_lookup_failure() {
+    let failure = dial("127.0.0.1:seven", None, LOOPBACK_WAIT)
+        .expect_err("a port that is not a number names nothing to dial");
+
+    let IpcError::Transport { detail } = failure else {
+        panic!("a failed lookup is a transport failure: {failure}");
+    };
+    assert_eq!(
+        detail,
+        "127.0.0.1:seven could not be looked up: invalid port value"
+    );
+}
+
+#[test]
+fn a_server_that_hangs_up_during_the_handshake_is_a_handshake_failure() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let address = listener.local_addr().expect("read the bound address");
+
+    let server = std::thread::spawn(move || {
+        // Accepted, and dropped before a byte is answered.
+        let _ = listener.accept();
+    });
+
+    let failure = dial(&address.to_string(), None, LOOPBACK_WAIT)
+        .expect_err("a server that hangs up never finishes the handshake");
+
+    let IpcError::TlsHandshakeFailed {
+        address: named,
+        detail,
+    } = failure
+    else {
+        panic!("a peer gone mid-handshake is a handshake failure, not a transport failure");
+    };
+    assert_eq!(named, address.to_string());
+    // The words are the operating system's: end of file on one platform, a
+    // reset connection on another.
+    assert_ne!(detail, "the TLS handshake did not finish in time");
+    let _ = server.join();
+}
+
+/// A connected loopback socket pair: the dialling end and the accepted end.
+fn loopback_pair() -> (TcpStream, TcpStream) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let address = listener.local_addr().expect("read the bound address");
+    let dialled = TcpStream::connect(address).expect("connect to loopback");
+    let (accepted, _) = listener.accept().expect("accept the dial");
+    (dialled, accepted)
+}
+
+#[test]
+fn no_deadline_leaves_the_socket_timeouts_as_they_are() {
+    let (sock, _peer) = loopback_pair();
+    sock.set_read_timeout(Some(Duration::from_secs(7)))
+        .expect("set a read timeout");
+    sock.set_write_timeout(Some(Duration::from_secs(9)))
+        .expect("set a write timeout");
+
+    set_timeouts_until(&sock, None).expect("no deadline is not a failure");
+
+    assert_eq!(
+        sock.read_timeout().expect("read the timeout"),
+        Some(Duration::from_secs(7))
+    );
+    assert_eq!(
+        sock.write_timeout().expect("read the timeout"),
+        Some(Duration::from_secs(9))
+    );
+}
+
+#[test]
+fn a_deadline_already_reached_is_timed_out_and_the_socket_timeouts_stay_unset() {
+    let (sock, _peer) = loopback_pair();
+
+    let failure =
+        set_timeouts_until(&sock, Some(Instant::now())).expect_err("no time left is a failure");
+
+    assert_eq!(failure.kind(), io::ErrorKind::TimedOut);
+    assert_eq!(failure.to_string(), "this step ran out of time");
+    assert_eq!(sock.read_timeout().expect("read the timeout"), None);
+    assert_eq!(sock.write_timeout().expect("read the timeout"), None);
+}
+
+#[test]
+fn a_deadline_ahead_sets_both_socket_timeouts_to_the_time_left() {
+    let (sock, _peer) = loopback_pair();
+
+    set_timeouts_until(&sock, Some(Instant::now() + Duration::from_secs(60)))
+        .expect("time left is not a failure");
+
+    let read = sock
+        .read_timeout()
+        .expect("read the timeout")
+        .expect("a read timeout is set");
+    let write = sock
+        .write_timeout()
+        .expect("read the timeout")
+        .expect("a write timeout is set");
+    // The time left shrinks between the call and this look at it.
+    assert!(
+        read > Duration::from_secs(59) && read <= Duration::from_secs(60),
+        "the read timeout is the time left: {read:?}"
+    );
+    assert!(
+        write > Duration::from_secs(59) && write <= Duration::from_secs(60),
+        "the write timeout is the time left: {write:?}"
+    );
+}
+
+/// The client configuration [`dial`] builds, with a verifier that takes any
+/// certificate.
+fn client_config() -> ClientConfig {
+    ClientConfig::builder_with_provider(crypto_provider())
+        .with_safe_default_protocol_versions()
+        .expect("aws-lc-rs supports every default protocol version")
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(PinVerifier::new(None)))
+        .with_no_client_auth()
+}
+
+/// A TLS stream over a loopback socket pair with no handshake run: the
+/// dialling end split into its halves, and the accepted end.
+fn split_without_handshake() -> (TlsReader, TlsWriter, TcpStream) {
+    let (dialled, accepted) = loopback_pair();
+    let client =
+        ClientConnection::new(Arc::new(client_config()), any_name()).expect("a client connection");
+    let (reader, writer) =
+        split_tls(rustls::Connection::Client(client), dialled).expect("split the stream");
+    (reader, writer, accepted)
+}
+
+#[test]
+fn giving_a_half_a_deadline_stores_it_and_leaves_the_socket_timeouts_alone() {
+    let (mut reader, writer, _peer) = split_without_handshake();
+    reader
+        .sock
+        .set_read_timeout(Some(Duration::from_secs(7)))
+        .expect("set a read timeout");
+    let at = Instant::now() + Duration::from_secs(60);
+
+    reader.set_deadline(Some(at));
+
+    assert_eq!(reader.deadline, Some(at));
+    assert_eq!(
+        reader.sock.read_timeout().expect("read the timeout"),
+        Some(Duration::from_secs(7))
+    );
+    // Both handles name one socket.
+    assert_eq!(
+        writer.sock.read_timeout().expect("read the timeout"),
+        Some(Duration::from_secs(7))
+    );
+}
+
+#[test]
+fn taking_the_deadline_away_clears_the_socket_timeouts_both_halves_share() {
+    let (mut reader, writer, _peer) = split_without_handshake();
+    reader.set_deadline(Some(Instant::now() + Duration::from_secs(60)));
+    writer
+        .sock
+        .set_read_timeout(Some(Duration::from_secs(7)))
+        .expect("set a read timeout");
+    writer
+        .sock
+        .set_write_timeout(Some(Duration::from_secs(9)))
+        .expect("set a write timeout");
+
+    reader.set_deadline(None);
+
+    assert_eq!(reader.deadline, None);
+    assert_eq!(writer.sock.read_timeout().expect("read the timeout"), None);
+    assert_eq!(writer.sock.write_timeout().expect("read the timeout"), None);
+}
+
+#[test]
+fn a_reader_prints_its_socket_and_deadline_and_none_of_its_buffer() {
+    let (reader, _writer, _peer) = split_without_handshake();
+
+    let printed = format!("{reader:?}");
+
+    assert!(
+        printed.starts_with("TlsReader { sock: TcpStream {"),
+        "{printed}"
+    );
+    assert!(printed.ends_with(", deadline: None, .. }"), "{printed}");
+}
+
+#[test]
+fn a_handshake_whose_deadline_has_passed_is_timed_out_before_the_socket_is_touched() {
+    let (mut dialled, peer) = loopback_pair();
+    let client =
+        ClientConnection::new(Arc::new(client_config()), any_name()).expect("a client connection");
+    let mut conn = rustls::Connection::Client(client);
+
+    let failure = handshake(&mut conn, &mut dialled, Instant::now())
+        .expect_err("a deadline already reached ends the handshake");
+
+    assert_eq!(failure.kind(), io::ErrorKind::TimedOut);
+    assert_eq!(
+        failure.to_string(),
+        "the TLS handshake did not finish in time"
+    );
+    // Nothing was written: the peer's read finds no byte and ends on its own
+    // timeout.
+    peer.set_read_timeout(Some(Duration::from_millis(100)))
+        .expect("set a read timeout");
+    let mut byte = [0u8; 1];
+    let nothing = (&peer)
+        .read(&mut byte)
+        .expect_err("no byte reached the peer");
+    assert!(
+        waited_out(&nothing),
+        "the peer's read ended on its timeout, not on bytes: {nothing:?}"
+    );
+}
+
+/// Serve `config` on a loopback port and run the handshake on the connection
+/// that arrives, then hand the finished stream to `after`. Returns the
+/// address to dial and the thread.
+fn serve_after_handshake<T: Send + 'static>(
+    config: ServerConfig,
+    after: impl FnOnce(rustls::Connection, TcpStream) -> T + Send + 'static,
+) -> (String, std::thread::JoinHandle<T>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let address = listener.local_addr().expect("read the bound address");
+    let server = std::thread::spawn(move || {
+        let (mut sock, _) = listener.accept().expect("accept the client");
+        let conn = ServerConnection::new(Arc::new(config)).expect("a server connection");
+        let mut conn = rustls::Connection::Server(conn);
+        handshake(&mut conn, &mut sock, Instant::now() + LOOPBACK_WAIT)
+            .expect("the loopback handshake finishes");
+        after(conn, sock)
+    });
+    (address.to_string(), server)
+}
+
+#[test]
+fn a_peer_that_closes_the_stream_cleanly_reads_as_end_of_stream_every_time() {
+    let (config, _cert) = fresh_server();
+    let (address, server) = serve_after_handshake(config, |mut conn, mut sock| {
+        conn.send_close_notify();
+        while conn.wants_write() {
+            conn.write_tls(&mut sock).expect("the close is written");
+        }
+    });
+
+    let (mut reader, _writer, _presented) =
+        dial(&address, None, LOOPBACK_WAIT).expect("the dial opens");
+    let mut byte = [0u8; 1];
+
+    assert_eq!(
+        reader
+            .read(&mut byte)
+            .expect("a clean close is end of stream"),
+        0
+    );
+    assert_eq!(reader.read(&mut byte).expect("and stays end of stream"), 0);
+    server.join().expect("the server thread finished");
+}
+
+#[test]
+fn a_peer_that_drops_the_socket_without_closing_the_stream_is_an_unexpected_eof_every_time() {
+    let (config, _cert) = fresh_server();
+    let (address, server) = serve_after_handshake(config, |_conn, sock| drop(sock));
+
+    let (mut reader, _writer, _presented) =
+        dial(&address, None, LOOPBACK_WAIT).expect("the dial opens");
+    let mut byte = [0u8; 1];
+
+    let cut = reader
+        .read(&mut byte)
+        .expect_err("a cut stream is not end of stream");
+    assert_eq!(cut.kind(), io::ErrorKind::UnexpectedEof);
+    let again = reader.read(&mut byte).expect_err("and stays cut");
+    assert_eq!(again.kind(), io::ErrorKind::UnexpectedEof);
+    server.join().expect("the server thread finished");
+}
+
+#[test]
+fn bytes_that_do_not_decrypt_end_the_read_with_invalid_data() {
+    let (config, _cert) = fresh_server();
+    let (address, server) = serve_after_handshake(config, |_conn, mut sock| {
+        // A record of application data whose 32 bytes were never encrypted.
+        let mut record = vec![0x17, 0x03, 0x03, 0x00, 0x20];
+        record.extend_from_slice(&[0u8; 32]);
+        sock.write_all(&record).expect("the record is written");
+    });
+
+    let (mut reader, _writer, _presented) =
+        dial(&address, None, LOOPBACK_WAIT).expect("the dial opens");
+    let mut byte = [0u8; 1];
+
+    let failure = reader
+        .read(&mut byte)
+        .expect_err("bytes that do not decrypt are not plaintext");
+    assert_eq!(failure.kind(), io::ErrorKind::InvalidData);
+    server.join().expect("the server thread finished");
+}
+
+/// How many bytes one plaintext write hands to rustls at most: its send
+/// buffer limit, 64 KiB.
+const ONE_WRITE_TAKES: usize = 64 * 1024;
+
+#[test]
+fn one_write_takes_at_most_sixty_four_kib_and_write_all_delivers_the_rest() {
+    let (config, _cert) = fresh_server();
+    let sent: Vec<u8> = (0..ONE_WRITE_TAKES + 1000)
+        .map(|i| (i % 251) as u8)
+        .collect();
+    let expected_len = sent.len();
+    let (address, server) = serve_after_handshake(config, move |conn, sock| {
+        let (mut reader, _writer) = split_tls(conn, sock).expect("split the loopback stream");
+        let mut received = vec![0u8; expected_len];
+        reader
+            .read_exact(&mut received)
+            .expect("every byte arrives");
+        received
+    });
+
+    let (_reader, mut writer, _presented) =
+        dial(&address, None, LOOPBACK_WAIT).expect("the dial opens");
+    let taken = writer
+        .write(&sent)
+        .expect("the first write is taken in part");
+    assert_eq!(taken, ONE_WRITE_TAKES);
+    writer
+        .write_all(&sent[taken..])
+        .expect("the rest is written");
+
+    assert_eq!(server.join().expect("the server thread finished"), sent);
+}
+
+/// How many bytes the blocked-write test sends: far past what the loopback
+/// socket buffers of any platform hold, so the write blocks on a peer that
+/// does not read.
+const UNREAD_BYTES: usize = 32 * 1024 * 1024;
+
+#[test]
+fn a_write_to_a_peer_that_does_not_read_ends_at_the_writers_deadline() {
+    let (config, _cert) = fresh_server();
+    let (given_up_tx, given_up_rx) = std::sync::mpsc::channel::<()>();
+    let (address, server) = serve_after_handshake(config, move |_conn, sock| {
+        // Reads nothing, and holds the socket open until the write gave up.
+        let _ = given_up_rx.recv_timeout(LOOPBACK_WAIT * 3);
+        drop(sock);
+    });
+
+    let (_reader, mut writer, _presented) =
+        dial(&address, None, LOOPBACK_WAIT).expect("the dial opens");
+    writer.set_deadline(Some(Instant::now() + SHORT_TIMEOUT));
+
+    let started = Instant::now();
+    let failure = writer
+        .write_all(&vec![0u8; UNREAD_BYTES])
+        .expect_err("a peer that does not read never takes the bytes");
+    let waited = started.elapsed();
+    let _ = given_up_tx.send(());
+
+    assert!(
+        waited_out(&failure),
+        "the write ended on the deadline, not on the bytes: {failure:?}"
+    );
+    assert!(
+        waited < SHORT_TIMEOUT + SLACK,
+        "the write returned {waited:?} after it started, inside its {SHORT_TIMEOUT:?} deadline"
+    );
+    server.join().expect("the server thread finished");
+}
+
+#[test]
+fn less_than_a_millisecond_left_counts_as_no_time_left() {
+    let (sock, _peer) = loopback_pair();
+
+    let failure = set_timeouts_until(&sock, Some(Instant::now() + Duration::from_micros(500)))
+        .expect_err("less than a millisecond is no time left");
+
+    assert_eq!(failure.kind(), io::ErrorKind::TimedOut);
+    assert_eq!(failure.to_string(), "this step ran out of time");
+    assert_eq!(sock.read_timeout().expect("read the timeout"), None);
+    assert_eq!(sock.write_timeout().expect("read the timeout"), None);
+}
+
+#[test]
+fn an_empty_buffer_reads_as_zero_bytes_before_the_socket_is_touched() {
+    let (mut reader, _writer, _peer) = split_without_handshake();
+    // A read that reached the socket would wait for bytes that never come
+    // and end on this deadline instead of returning `0`.
+    reader.set_deadline(Some(Instant::now() + Duration::from_millis(100)));
+
+    assert_eq!(
+        reader
+            .read(&mut [])
+            .expect("an empty buffer is not a failure"),
+        0
+    );
+}
+
+#[test]
+fn a_read_with_no_time_left_is_timed_out_before_the_socket_is_touched() {
+    let (mut reader, _writer, peer) = split_without_handshake();
+    reader.set_deadline(Some(Instant::now()));
+    let mut byte = [0u8; 1];
+
+    let failure = reader
+        .read(&mut byte)
+        .expect_err("no time left ends the read");
+
+    assert_eq!(failure.kind(), io::ErrorKind::TimedOut);
+    assert_eq!(failure.to_string(), "this step ran out of time");
+    peer.set_read_timeout(Some(Duration::from_millis(100)))
+        .expect("set a read timeout");
+    let nothing = (&peer)
+        .read(&mut byte)
+        .expect_err("no byte reached the peer");
+    assert!(
+        waited_out(&nothing),
+        "the peer's read ended on its timeout, not on bytes: {nothing:?}"
+    );
+}
+
+#[test]
+fn a_write_with_no_time_left_is_timed_out_before_the_socket_is_touched() {
+    let (_reader, mut writer, peer) = split_without_handshake();
+    writer.set_deadline(Some(Instant::now()));
+
+    let failure = writer
+        .write(b"never sent")
+        .expect_err("no time left ends the write");
+
+    assert_eq!(failure.kind(), io::ErrorKind::TimedOut);
+    assert_eq!(failure.to_string(), "this step ran out of time");
+    peer.set_read_timeout(Some(Duration::from_millis(100)))
+        .expect("set a read timeout");
+    let mut byte = [0u8; 1];
+    let nothing = (&peer)
+        .read(&mut byte)
+        .expect_err("no byte reached the peer");
+    assert!(
+        waited_out(&nothing),
+        "the peer's read ended on its timeout, not on bytes: {nothing:?}"
+    );
+}
+
+#[test]
+fn an_empty_write_takes_zero_bytes() {
+    let (_reader, mut writer, _peer) = split_without_handshake();
+
+    assert_eq!(
+        writer.write(b"").expect("an empty write is not a failure"),
+        0
+    );
+}
+
+#[test]
+fn the_deadline_trait_reaches_the_halves_own_deadline() {
+    let (mut reader, mut writer, _peer) = split_without_handshake();
+    let at = Instant::now() + Duration::from_secs(60);
+    writer
+        .sock
+        .set_write_timeout(Some(Duration::from_secs(9)))
+        .expect("set a write timeout");
+
+    Deadlined::set_deadline(&mut reader, Some(at));
+    Deadlined::set_deadline(&mut writer, None);
+
+    assert_eq!(reader.deadline, Some(at));
+    assert_eq!(writer.deadline, None);
+    assert_eq!(writer.sock.write_timeout().expect("read the timeout"), None);
+}
+
+#[test]
+fn a_peer_whose_bytes_are_not_a_handshake_ends_it_with_invalid_data() {
+    let (mut dialled, mut peer) = loopback_pair();
+    let client =
+        ClientConnection::new(Arc::new(client_config()), any_name()).expect("a client connection");
+    let mut conn = rustls::Connection::Client(client);
+    peer.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n")
+        .expect("the peer's bytes are written");
+
+    let failure = handshake(&mut conn, &mut dialled, Instant::now() + LOOPBACK_WAIT)
+        .expect_err("bytes that are not a handshake end it");
+
+    assert_eq!(failure.kind(), io::ErrorKind::InvalidData);
+    assert_eq!(
+        failure.to_string(),
+        "received corrupt message of type InvalidContentType"
+    );
+}
+
+#[test]
+fn a_server_whose_bytes_are_not_a_handshake_is_a_handshake_failure_carrying_its_words() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let address = listener.local_addr().expect("read the bound address");
+
+    let server = std::thread::spawn(move || {
+        let Ok((mut sock, _)) = listener.accept() else {
+            return;
+        };
+        let _ = sock.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n");
+        // Held open until the client has read the answer and hung up.
+        let mut rest = Vec::new();
+        let _ = sock.read_to_end(&mut rest);
+    });
+
+    let failure = dial(&address.to_string(), None, LOOPBACK_WAIT)
+        .expect_err("a server that does not speak TLS never finishes the handshake");
+
+    let IpcError::TlsHandshakeFailed {
+        address: named,
+        detail,
+    } = failure
+    else {
+        panic!("bytes that are not a handshake are a handshake failure: {failure}");
+    };
+    assert_eq!(named, address.to_string());
+    assert_eq!(
+        detail,
+        "received corrupt message of type InvalidContentType"
+    );
+    let _ = server.join();
+}
+
+#[test]
+fn the_pinned_fingerprint_is_compared_byte_for_byte() {
+    let lowercase = fingerprint(b"the first certificate");
+    let uppercase = lowercase.to_uppercase();
+    let verifier = PinVerifier::new(Some(&uppercase));
+
+    let refused = present(&verifier, b"the first certificate")
+        .expect_err("an uppercase pin does not match the lowercase fingerprint");
+
+    assert_eq!(
+        refused,
+        rustls::Error::General(format!(
+            "the pinned certificate is {uppercase}, the server presented {lowercase}"
+        ))
+    );
+    assert_eq!(verifier.seen(), Some(lowercase));
+}
+
+#[test]
+fn a_verifier_remembers_the_last_certificate_it_was_shown() {
+    let verifier = PinVerifier::new(None);
+    present(&verifier, b"the first certificate").expect("a first connection takes any certificate");
+    present(&verifier, b"the second certificate").expect("and the next one too");
+
+    assert_eq!(
+        verifier.seen(),
+        Some(fingerprint(b"the second certificate"))
+    );
 }

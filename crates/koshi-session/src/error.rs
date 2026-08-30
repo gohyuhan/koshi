@@ -27,10 +27,11 @@ impl DomainError for InvalidTransition {
     }
 }
 
-/// A way a session's layout, pane registry, client focus, and pane lifecycles
-/// can disagree with one another. [`Session::validate`](crate::session::state::Session::validate)
-/// returns every violation it finds in one pass. Each variant names the
-/// offending pane, tab, or client.
+/// A way a session's tabs, layout trees, pane registry, pane and tab
+/// lifecycles, and client focus and zoom can disagree with one another.
+/// [`Session::validate`](crate::session::state::Session::validate) returns
+/// every violation it finds in one pass. Each variant names what it found: the
+/// offending pane, tab or client, or the bar index two tabs claim.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum SessionConsistencyError {
     /// A layout leaf references a pane with no record in the registry.
@@ -42,8 +43,9 @@ pub enum SessionConsistencyError {
     #[error("tab {tab:?} layout still holds removed pane {pane:?}")]
     RemovedPaneInLayout { tab: TabId, pane: PaneId },
 
-    /// A live or `Exited` record is not a leaf in any tab's layout — an orphan
-    /// the layout forgot or never placed.
+    /// A registry record in any state but `Removed` — `Spawning`, `Running`,
+    /// `Exited` or `Closing` — is not a leaf in any tab's layout. `lifecycle`
+    /// is the state the record holds.
     #[error("pane {pane:?} is {lifecycle:?} but absent from every layout")]
     OrphanedPaneRecord {
         pane: PaneId,
@@ -64,8 +66,9 @@ pub enum SessionConsistencyError {
     #[error("client {client:?} remembers focus in tab {tab:?} that is not in the session")]
     FocusTabMissing { client: ClientId, tab: TabId },
 
-    /// A client focuses a pane that exists, in a tab that exists, but the pane
-    /// is not a leaf in that tab's layout.
+    /// A client's remembered focus names a pane that is not a leaf in that
+    /// tab's layout. The tab is in the session; the pane may or may not have a
+    /// registry record.
     #[error("client {client:?} focuses pane {pane:?} absent from tab {tab:?} layout")]
     FocusTargetMissing {
         client: ClientId,

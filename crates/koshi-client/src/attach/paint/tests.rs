@@ -283,3 +283,112 @@ fn adopting_a_frame_takes_the_viewer_state_the_session_decided() {
     assert_eq!(frame.client.active_tab, active_tab);
     assert_eq!(frame.client.focused_pane, focused_pane);
 }
+
+/// Each underline style has its own wire spelling, so a variant read back as
+/// another one shows up here. The cell also carries a default foreground, which
+/// is the one color whose wire spelling names no value.
+#[test]
+fn every_underline_style_reads_back_as_itself() {
+    for underline in [
+        UnderlineStyle::None,
+        UnderlineStyle::Single,
+        UnderlineStyle::Double,
+        UnderlineStyle::Curly,
+        UnderlineStyle::Dotted,
+        UnderlineStyle::Dashed,
+    ] {
+        let mut cell_style = Style::default();
+        cell_style.set_fg(Color::Default);
+        cell_style.set_underline(underline);
+        let grid = Grid::from_rows(
+            vec![vec![Cell::new('x', 1, cell_style)]],
+            1,
+            Style::default(),
+        );
+        let mut pane = content_pane(PaneId::new());
+        pane.grid_view = Some(GridView {
+            grid: Arc::new(grid),
+            view_offset: 0,
+        });
+        let sent = snapshot(vec![pane, empty_pane(PaneId::new())]);
+
+        let read_back = to_snapshot(&wire_frame(&sent));
+
+        let arrived = read_back.panes[0]
+            .grid_view
+            .as_ref()
+            .expect("the pane carries a grid");
+        let cell = arrived
+            .grid
+            .cell(0, 0)
+            .expect("the grid has a cell at (0, 0)");
+        assert_eq!(cell.style().attrs().underline(), underline);
+        assert_eq!(cell.style().fg(), Color::Default);
+        assert_eq!(read_back, sent);
+    }
+}
+
+/// Each cursor shape has its own wire spelling, and a pane that named none
+/// reads back naming none.
+#[test]
+fn every_cursor_shape_reads_back_as_itself() {
+    for shape in [
+        Some(CursorShape::Block),
+        Some(CursorShape::Underline),
+        Some(CursorShape::Bar),
+        None,
+    ] {
+        let mut pane = content_pane(PaneId::new());
+        pane.cursor.shape = shape;
+        let sent = snapshot(vec![pane, empty_pane(PaneId::new())]);
+
+        let read_back = to_snapshot(&wire_frame(&sent));
+
+        assert_eq!(read_back.panes[0].cursor.shape, shape);
+        assert_eq!(read_back, sent);
+    }
+}
+
+/// A run stands for every cell it covers, so a blank 80-column row travels as
+/// one run of 80 and rebuilds into 80 cells.
+#[test]
+fn a_blank_eighty_column_row_travels_as_one_run_and_rebuilds_eighty_cells() {
+    let mut pane = content_pane(PaneId::new());
+    pane.grid_view = Some(GridView {
+        grid: Arc::new(Grid::blank(1, 80, Style::default())),
+        view_offset: 0,
+    });
+    let sent = snapshot(vec![pane, empty_pane(PaneId::new())]);
+
+    let wire = wire_frame(&sent);
+    let window = wire.panes[0]
+        .window
+        .as_ref()
+        .expect("the pane carries a window");
+    assert_eq!(window.cols, 80);
+    assert_eq!(window.rows.len(), 1);
+    assert_eq!(window.rows[0].runs.len(), 1);
+    assert_eq!(window.rows[0].runs[0].count, 80);
+
+    let read_back = to_snapshot(&wire);
+    let arrived = read_back.panes[0]
+        .grid_view
+        .as_ref()
+        .expect("the pane carries a grid");
+    assert_eq!(arrived.grid.dimensions(), (1, 80));
+    assert_eq!(arrived.grid.rows()[0].len(), 80);
+    assert_eq!(read_back, sent);
+}
+
+/// A frame whose panes all closed carries no panes, and reads back carrying
+/// none.
+#[test]
+fn a_frame_carrying_no_panes_reads_back_with_no_panes() {
+    let mut sent = snapshot(vec![content_pane(PaneId::new()), empty_pane(PaneId::new())]);
+    sent.panes = Vec::new();
+
+    let read_back = to_snapshot(&wire_frame(&sent));
+
+    assert_eq!(read_back.panes, Vec::<PaneSnapshot>::new());
+    assert_eq!(read_back, sent);
+}

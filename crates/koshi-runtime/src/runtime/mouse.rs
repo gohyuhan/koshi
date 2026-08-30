@@ -12,8 +12,8 @@
 //!   the program in one pane as a mouse report;
 //! - [`write_alt_scroll_arrows`](Server::write_alt_scroll_arrows) sends cursor
 //!   arrows for the alternate-scroll translation of a wheel tick;
-//! - [`drag_resize`](Server::drag_resize) moves one pane border a cell at a
-//!   time and reports how far it got.
+//! - [`drag_resize`](Server::drag_resize) moves one pane border a number of
+//!   cells and reports how many it took.
 //!
 //! Focus and every selection change arrive as ordinary commands through
 //! [`Server::submit_command`], validated like any command typed at the CLI.
@@ -21,9 +21,9 @@
 //! An out-of-process viewer sends a whole round of these at once, which
 //! [`run_client_mouse`](Server::run_client_mouse) runs in order and answers.
 //!
-//! **Each call re-reads the live state it needs at the moment it acts**, so a
-//! program that changed a mouse mode, switched screens, or hit its minimum size
-//! since the frame the viewer decided from is still answered correctly.
+//! **Each call re-reads the live state it needs at the moment it acts**: the
+//! pane's mouse mode, its active screen and its minimum size are taken as they
+//! stand at the call, not as the frame the viewer decided from had them.
 
 use koshi_core::command::{
     Command, CommandEnvelope, CommandResult, CommandSource, ResizePaneArgs, VisualCommand,
@@ -59,16 +59,16 @@ impl Server {
         self.dispatch_reporting_spare(envelope)
     }
 
-    /// Dispatch a selection command attributed to `client_id`'s mouse. The
-    /// selection layer's route into the command pipeline, so a highlight lands
-    /// through the same dispatch every other mutation does.
+    /// Dispatch a selection command attributed to `client_id`'s mouse, through
+    /// the same dispatch every other mutation takes. The result is dropped.
     pub(crate) fn dispatch_visual(&mut self, client_id: ClientId, command: VisualCommand) {
         let _ = self.dispatch_mouse_command(client_id, Command::Visual(command));
     }
 
     /// Ask for `pane`'s `side` border to move `cells` cells in `step`'s
-    /// direction. `Err` carries the cells the donating pane can still give,
-    /// which is `0` when it is already at its minimum size.
+    /// direction. `Err` carries the cells the donating pane can still give: `0`
+    /// when it is already at its minimum size, and `0` for every rejection that
+    /// is not a minimum-size refusal.
     fn ask_border_move(
         &mut self,
         client_id: ClientId,
@@ -92,17 +92,19 @@ impl Server {
     }
 
     /// Move `pane`'s `side` border `count` cells and report how many were
-    /// actually taken.
+    /// actually taken. `step` is the direction: `1` grows `pane`, `-1` shrinks
+    /// it.
     ///
-    /// The whole distance travels in one [`Command::ResizePane`]. A refusal at
-    /// a pane minimum names the cells the donating pane can still give, and the
-    /// next round asks for exactly those, so a drag fills right up to the
-    /// minimum. The layout re-measures that spare from the freshly solved rects
-    /// on every call, so the rounds keep going until one takes the whole
-    /// remainder or the layout offers nothing.
+    /// The whole distance travels in one [`Command::ResizePane`], which is
+    /// asked for `step * cells`. A refusal at a pane minimum names the cells
+    /// the donating pane can still give, and the next round asks for exactly
+    /// those. The layout re-measures that spare from the freshly solved rects
+    /// on every call. The rounds stop when one takes the whole remainder, or
+    /// when a refusal names a spare that is not below what that round asked
+    /// for.
     ///
-    /// Each round either takes cells or lowers what the next round asks for, so
-    /// the walk ends and `applied` never passes `count`.
+    /// Each round either takes cells or lowers what the next round asks for.
+    /// `applied` never passes `count`.
     ///
     /// A drag of 5 cells into a neighbor with room for 2 returns `2`.
     pub fn drag_resize(
@@ -136,16 +138,13 @@ impl Server {
     /// history or back down toward live output, and report the line its top row
     /// now shows.
     ///
-    /// Koshi scrollback exists only on the primary screen, so a pane on the
-    /// alternate screen scrolls nothing: the alternate screen keeps no history,
-    /// and storing an offset there would surface as an unexpectedly scrolled-back
-    /// shell once the full-screen program exits back to the primary. The screen
-    /// is read here, at the moment of the move, so a pane that switched screens
-    /// since the frame the viewer decided from is still answered correctly.
+    /// Koshi scrollback exists only on the primary screen: a pane on the
+    /// alternate screen scrolls nothing, and the alternate screen keeps no
+    /// history. The screen is read here, at the moment of the move, not as the
+    /// frame the viewer decided from had it.
     ///
     /// The returned line is the same number [`PaneSnapshot::view_top_row`] would
-    /// carry for the next frame, so a caller can tell a view that moved from one
-    /// already at its limit. `None` names a pane with no terminal.
+    /// carry for the next frame. `None` names a pane with no terminal.
     ///
     /// [`PaneSnapshot::view_top_row`]: koshi_renderer::snapshot::PaneSnapshot::view_top_row
     pub fn scroll_pane_view(
@@ -200,8 +199,9 @@ impl Server {
     /// chrome (a border, the status line) or left the pane mid-drag still
     /// reaches it at the nearest edge.
     ///
-    /// An event that is written also drops this client's highlight in that pane:
-    /// input reaching the pane's child leaves visual mode.
+    /// An event that reaches the pane's writer also drops this client's
+    /// highlight in that pane, whether the write succeeds or fails. A wheel
+    /// tick leaves the highlight standing.
     ///
     /// Returns whether a report was handed to the pane's writer. It is `false`
     /// when the pane is gone, when its live tracking no longer asks for this
@@ -215,10 +215,8 @@ impl Server {
         mouse: MouseInput,
     ) -> bool {
         let Some((tracking, encoding)) = self.terminal_engines.get(&pane_id).map(|engine| {
-            (
-                engine.state().mouse_tracking(),
-                engine.state().mouse_encoding(),
-            )
+            let state = engine.state();
+            (state.mouse_tracking(), state.mouse_encoding())
         }) else {
             return false;
         };
@@ -255,11 +253,12 @@ impl Server {
     /// The pane must still be on the alternate screen with alternate scroll on,
     /// read here at the moment of the write: a pane whose program left the
     /// alternate screen since the frame the viewer decided from receives
-    /// nothing, so the arrows cannot reach the shell underneath and recall its
-    /// history.
+    /// nothing.
     ///
     /// The byte form follows the program's cursor-key mode (DECCKM), read at the
     /// same moment: `ESC O A` under application keys, `ESC [ A` otherwise.
+    ///
+    /// A `count` of `0` writes nothing.
     pub fn write_alt_scroll_arrows(&mut self, pane_id: PaneId, up: bool, count: usize) {
         let letter = if up { b'A' } else { b'B' };
         let Some(app_keys) = self.terminal_engines.get(&pane_id).and_then(|engine| {
@@ -284,14 +283,14 @@ impl Server {
     /// order it decided them, then answer the round.
     ///
     /// The session hit-tests nothing here: every action names its own target,
-    /// so this walks the list and calls the door each one names.
+    /// and each one runs against the target it names.
     ///
-    /// One answer is queued for the round, always, carrying `request_id`. It
-    /// holds one entry per action that had something to report — a scroll and a
-    /// border move — in the order those actions ran, and is empty when none
-    /// did. Each entry names the pane it is about, and a border move's entry
-    /// also names the side and direction it was asked in, so several moves in
-    /// one round stay told apart.
+    /// One answer per round goes to the subscriber that views `client_id`,
+    /// carrying `request_id`. It holds one entry per action that had
+    /// something to report — a scroll and a border move — in the order those
+    /// actions ran, and is empty when none did. Each entry names the pane it is
+    /// about, and a border move's entry also names the side and direction it
+    /// was asked in.
     pub fn run_client_mouse(
         &mut self,
         client_id: ClientId,
@@ -336,8 +335,9 @@ impl Server {
     /// Put `answers` on the queue of the subscriber that views `client_id`, as
     /// the answer to mouse round `request_id`.
     ///
-    /// A client with no subscription is no attached viewer, so it is waiting on
-    /// nothing and nothing is queued.
+    /// A client with no subscription has nothing queued. A subscriber whose
+    /// queue is full, which is paused, or whose receiver is gone loses the
+    /// answer.
     fn answer_mouse_round(
         &mut self,
         client_id: ClientId,

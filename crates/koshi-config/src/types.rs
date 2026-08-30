@@ -29,9 +29,9 @@ use crate::error::ColorParseError;
 use crate::key::Leader;
 use crate::key_sequence::parse_sequence;
 
-/// The config schema version written to and read from disk. Bumped when the
-/// on-disk shape changes, so an older file can be recognized by its version
-/// number and migrated forward to the current shape.
+/// The config schema version written to and read from disk, bumped when the
+/// on-disk shape changes. A file declaring an older version is migrated
+/// forward to this shape; a file declaring a newer one is refused.
 ///
 /// The value and the rule it follows live in
 /// [`koshi_core::compat::CONFIG_SCHEMA`].
@@ -107,7 +107,7 @@ pub struct ClientConfig {
     pub version: u32,
     /// Keybinding timing, chord depth, leader prefix, and per-mode bindings.
     pub keybindings: KeybindingsConfig,
-    /// Defaults applied when creating layouts.
+    /// Defaults applied when creating panes and layouts.
     pub layout: LayoutDefaults,
     /// Per-plugin activation and keymap opt-in preferences.
     pub plugins: PluginActivationConfig,
@@ -222,9 +222,9 @@ impl Default for ScrollbackLimits {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScrollbackView {
     /// Whether input you send to a pane snaps its view back to the newest line
-    /// when you had scrolled up into history. On for a live feel: type or paste
-    /// and the view jumps to the prompt. Off to stay parked in history while the
-    /// input still goes through. Only the primary screen follows; the alternate
+    /// when you had scrolled up into history. On: type or paste and the view
+    /// jumps to the prompt. Off: the view stays in history and the input still
+    /// goes through. Only the primary screen follows; the alternate
     /// screen's scroll position belongs to the full-screen program on it.
     pub scroll_on_input: bool,
 }
@@ -304,12 +304,11 @@ impl ModeName {
 /// The action a key sequence triggers: the action reference plus the
 /// arguments bound at the binding site.
 ///
-/// Bindings carry no arguments in practice: an action choice with a fixed
-/// set of values lives in the action name (`new-pane-left`,
+/// A user keybinding file binds a key to an action reference alone, so every
+/// binding it produces carries [`ActionArgs::None`]: an action choice with a
+/// fixed set of values lives in the action name (`new-pane-left`,
 /// `close-pane-tree`), and open-range values are reachable only through CLI
-/// commands. The `args` field remains for system-authored presets — plugin
-/// manifests may pair their own actions with arguments; user keybinding
-/// surfaces bind a key to an action reference only.
+/// commands. Plugin manifests may pair their own actions with arguments.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundAction {
     /// The action to resolve when the sequence fires.
@@ -321,12 +320,11 @@ pub struct BoundAction {
 /// The bindings for one input mode, keyed by the key sequence pressed.
 ///
 /// The map key is the sequence, so one sequence resolves to exactly one
-/// action by construction — the hard binding invariant. The reverse is open:
-/// several sequences in one mode may name the same action, though no shipped
-/// default does — within a mode every default action has exactly one key
-/// (`core:focus-pane-left` is reachable only as `<C-p> <Left>`). An action
-/// bound in two modes is two entries in two maps: `core:quit` is `<C-q>` in
-/// both `normal` and `locked`.
+/// action. The reverse is open: several sequences in one mode may name the
+/// same action, though no shipped default does — within a mode every default
+/// action has exactly one key (`core:focus-pane-left` is reachable only as
+/// `<C-p> <Left>`). An action bound in two modes is two entries in two maps:
+/// `core:quit` is `<C-q>` in both `normal` and `locked`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ModeBindings {
     /// Key sequence → the action it triggers.
@@ -334,18 +332,22 @@ pub struct ModeBindings {
     /// Key sequences this surface clears: a removed key voids whatever any
     /// lower-precedence layer bound on it, leaving the key free for this or
     /// a higher layer to rebind. Authored as `remove "<C-x>"` in a mode
-    /// block. The built-in defaults carry none — no layer sits below them.
+    /// block. The built-in defaults carry none.
     pub removed: BTreeSet<KeySequence>,
 }
 
 /// The built-in default binding table: the `normal`-mode set plus the
 /// reserved unlock, quit, and mouse-select in `locked` mode.
 ///
-/// Every sequence OPENS with a non-typeable chord (Ctrl or Alt held), with one
-/// exception: the bare `Tab`/`Shift+Tab` tab-switching pair. Outside locked
-/// mode the keymap owns Tab, and a shell sees a literal Tab only while the
-/// client is locked. A later chord in a sequence
-/// may be a plain key, since it is only read while the pending sequence is
+/// Sequences written with `<leader>` resolve against `leader`, so rebinding
+/// the leader moves them. Explicit chords — `<A-f>`, the reserved unlock, and
+/// the `Tab`/`Shift+Tab` pair — are written literally and never move.
+///
+/// Under the default `C-` leader every sequence OPENS with a non-typeable
+/// chord (Ctrl or Alt held), with one exception: the bare `Tab`/`Shift+Tab`
+/// tab-switching pair. Outside locked mode the keymap owns Tab, and a shell
+/// sees a literal Tab only while the client is locked. A later chord in a
+/// sequence may be a plain key; it is read only while the pending sequence is
 /// live. No opening chord uses `<C-i>`, `<C-m>`, `<C-[>`, or `<C-h>`, which
 /// unix terminals without the kitty keyboard protocol cannot tell apart from
 /// Tab, Enter, Esc, and Backspace. Pane operations — lifecycle, directional
@@ -354,13 +356,7 @@ pub struct ModeBindings {
 /// action choice with a fixed set of values is part of the action name
 /// (`new-pane-left`, `close-pane-tree`), so any key here can be rebound from
 /// `keybinding.kdl`.
-/// Action names here are compile-time constants known to satisfy the
-/// action-name grammar; an invalid one is a bug in this table and is caught
-/// by its tests.
 pub fn default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBindings> {
-    // Leader-relative bindings are written with `<leader>` and resolved against
-    // `leader`, so rebinding the leader moves them; explicit chords (`<A-f>`,
-    // the reserved unlock, the Tab pair) are written literally and never move.
     let seq = |text: &str| {
         parse_sequence(text, leader, u8::MAX).expect("a built-in default binding must parse")
     };
@@ -447,16 +443,16 @@ pub fn default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBindings>
 /// The display labels for the default binding table's prefix chords, keyed by
 /// the opening chord of the multi-chord sequences it groups.
 ///
+/// Returns three entries — `PANE`, `RESIZE`, `TAB` — when `leader` gives
+/// `<leader>p`, `<leader>s`, and `<leader>t` three distinct opening chords,
+/// and an empty map when it does not.
+///
 /// The hint bar shows a prefix's label (`<C-p> PANE`) only while every binding
 /// under that prefix still comes from the untouched defaults; once any user
 /// surface overrides, adds, or removes a binding under it, the group falls
-/// back to a derived `+N` marker, since the shipped label no longer describes
-/// the set. Lives beside the default binding table so the labels and the
-/// sequences they describe change together.
+/// back to a derived `+N` marker.
 #[must_use]
 pub fn default_prefix_labels(leader: Leader) -> BTreeMap<KeyChord, String> {
-    // Key by the opening chord of each prefix, resolved against the leader, so
-    // the label follows the prefix when the leader is rebound.
     let opening = |text: &str| {
         *parse_sequence(text, leader, u8::MAX)
             .expect("a built-in prefix must parse")
@@ -469,12 +465,9 @@ pub fn default_prefix_labels(leader: Leader) -> BTreeMap<KeyChord, String> {
         ("<leader>s", "RESIZE"),
         ("<leader>t", "TAB"),
     ];
-    // Keying by opening chord is also the ambiguity check. A modifier-run
-    // leader gives each group its own chord, so all three survive: `C-` yields
-    // `<C-p> PANE`, `<C-s> RESIZE`, `<C-t> TAB`. A chord leader opens every
-    // group at the leader itself, so they collapse onto one key: `<Space>`
-    // yields a single entry. Fewer entries than groups means no label names
-    // one group, so drop them all and let the hint bar show its `+N` count.
+    // `C-` gives each group its own opening chord: `<C-p> PANE`,
+    // `<C-s> RESIZE`, `<C-t> TAB`. A chord leader opens every group at the
+    // leader itself, so `<Space>` collapses all three onto one entry.
     let labels: BTreeMap<KeyChord, String> = groups
         .iter()
         .map(|(prefix, label)| (opening(prefix), (*label).to_string()))
@@ -595,8 +588,8 @@ pub enum WheelScroll {
 /// Selection and clipboard behavior.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CopyConfig {
-    /// Whether completing a selection copies it immediately. Kept internal
-    /// until copy actions and user keybindings can provide another copy path.
+    /// Whether completing a selection copies it immediately. No `koshi.kdl`
+    /// key sets it, so it always holds its default.
     pub copy_on_select: bool,
     /// Whether trailing whitespace is trimmed from copied text.
     pub trim_trailing_whitespace: bool,
@@ -614,9 +607,8 @@ impl Default for CopyConfig {
     }
 }
 
-/// The clipboard backend copied text is written to. OSC 52 is the only backend
-/// koshi builds today; a native operating-system backend adds its own variant
-/// here without reshaping the copy flow.
+/// The clipboard backend copied text is written to. OSC 52 is the only
+/// backend koshi builds.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ClipboardBackend {
     /// Write to the outer terminal's clipboard via OSC 52.

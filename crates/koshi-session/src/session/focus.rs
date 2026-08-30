@@ -6,12 +6,9 @@
 //! layout's ranked survivors, it walks a fixed recovery order and returns the
 //! pane to focus, or a defined fallback when nothing is focusable.
 //!
-//! It chooses, it does not mutate. The caller applies the verdict, and the
-//! caller is also the gate: `repair_focus` assumes the removed pane *was* the
-//! client's focus. Removing a pane the client was not looking at leaves focus
-//! untouched and never reaches here — that check belongs to the removal
-//! pipeline, which knows each client's focus and runs recovery only for the
-//! clients whose focused pane actually vanished.
+//! It chooses, it does not mutate; the caller applies the verdict. The removed
+//! pane must have been the client's focus: the removal pipeline runs it only
+//! for the clients whose focused pane vanished.
 
 use koshi_core::ids::PaneId;
 use koshi_layout::focus::FocusCandidates;
@@ -27,14 +24,13 @@ pub enum FocusRepairResult {
     /// order (focus history, then spatial neighbor, absorbed space, and finally
     /// the first eligible pane in layout order).
     Focused(PaneId),
-    /// The tab still holds panes but every one is suppressed (zero-area, too
-    /// little room to draw). No pane can take focus: the caller shows the
-    /// terminal-too-small overlay and blocks pane input until the window grows
-    /// back enough to un-suppress a pane.
+    /// The tab's layout still holds panes, but none is eligible: every pane is
+    /// suppressed (zero-area, too little room to draw), or every visible pane
+    /// is [`PaneLifecycle::Removed`] or missing from the registry. The caller
+    /// shows the terminal-too-small overlay.
     TerminalTooSmall,
-    /// The tab has no panes left at all. There is nothing to focus, so the
-    /// caller carries out the tab's empty-tab policy — close the tab or respawn
-    /// a shell.
+    /// The tab's layout holds no panes at all. Carries `empty_tab_policy` for
+    /// the caller to apply — close the tab or respawn a shell.
     EmptyTab(EmptyTabPolicy),
 }
 
@@ -48,16 +44,16 @@ pub enum FocusRepairResult {
 ///
 /// `candidate` is the layout's ranked survivors after the removal (from
 /// `koshi_layout::focus::focus_candidates`); its `layout_order` is exactly the
-/// visible panes, so suppressed panes are already excluded and a pane is
-/// *eligible* when it appears there and is not [`PaneLifecycle::Removed`]. A
-/// dead (`Exited`) pane stays eligible: it is a visible, focusable placeholder,
-/// so focus may rest on it until it is removed.
+/// visible panes, so suppressed panes are already excluded. A pane is
+/// *eligible* when it appears in `layout_order`, has a record in
+/// `pane_registry`, and that record is not [`PaneLifecycle::Removed`]. A
+/// `Spawning`, `Running`, dead (`Exited`) or `Closing` pane all stay eligible:
+/// each is a visible, focusable placeholder until it is removed.
 ///
-/// When no pane is eligible, the result distinguishes the two empty cases by
-/// the tab's layout: panes still present but all suppressed yield
-/// [`FocusRepairResult::TerminalTooSmall`]; a tab with no panes left yields
-/// [`FocusRepairResult::EmptyTab`] carrying `empty_tab_policy` for the caller to
-/// apply.
+/// When no pane is eligible, the tab's layout picks the verdict: a layout that
+/// still holds panes yields [`FocusRepairResult::TerminalTooSmall`]; a layout
+/// with no panes left yields [`FocusRepairResult::EmptyTab`] carrying
+/// `empty_tab_policy`.
 #[must_use]
 pub fn repair_focus(
     tab: &Tab,
@@ -72,8 +68,7 @@ pub fn repair_focus(
                 .is_some_and(|pane| *pane.lifecycle() != PaneLifecycle::Removed)
     };
 
-    // The recovery order in one pass: focus history newest-first, the spatial
-    // neighbor, the pane that absorbed the space, then layout order.
+    // The recovery order in one pass, focus history newest-first.
     let inheritor = tab
         .focus_mru()
         .iter()

@@ -68,7 +68,7 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
     // pair that does not. The version moves once per release cycle, not once
     // per change, so a shape edit inside an unreleased cycle leaves it alone.
     //
-    // Shape as of control-plane protocol version 3. Round-trip tests cannot
+    // Shape as of control-plane protocol version 2. Round-trip tests cannot
     // catch this: one build encoding and decoding its own structs always
     // agrees with itself.
     assert_eq!(
@@ -294,6 +294,105 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
 }
 
 #[test]
+fn an_attach_lookup_by_name_carries_the_name() {
+    assert_eq!(
+        encode(&RouterRequest {
+            request_id: 3,
+            kind: RouterRequestKind::AttachLookup {
+                selector: SessionSelector::Name("quiet-lake".to_string()),
+            },
+        }),
+        r#"{"request_id":3,"kind":{"AttachLookup":{"selector":{"Name":"quiet-lake"}}}}"#
+    );
+}
+
+#[test]
+fn the_remote_access_requests_travel_as_bare_names() {
+    assert_eq!(
+        encode(&RouterRequest {
+            request_id: 9,
+            kind: RouterRequestKind::RemoteStatus,
+        }),
+        r#"{"request_id":9,"kind":"RemoteStatus"}"#
+    );
+    assert_eq!(
+        encode(&RouterRequest {
+            request_id: 10,
+            kind: RouterRequestKind::EnableRemote,
+        }),
+        r#"{"request_id":10,"kind":"EnableRemote"}"#
+    );
+}
+
+#[test]
+fn the_remote_access_answers_keep_their_wire_bytes() {
+    assert_eq!(
+        encode(&RouterResponse {
+            request_id: Some(9),
+            result: RouterResult::RemoteStatus {
+                address: Some("0.0.0.0:7654".to_string()),
+                enabled: true,
+                listening: false,
+                fingerprint: Some("ab".repeat(32)),
+                remote_connections: Some(2),
+            },
+        }),
+        format!(
+            r#"{{"request_id":9,"result":{{"RemoteStatus":{{"address":"0.0.0.0:7654","enabled":true,"listening":false,"fingerprint":"{}","remote_connections":2}}}}}}"#,
+            "ab".repeat(32)
+        )
+    );
+    assert_eq!(
+        encode(&RouterResponse {
+            request_id: Some(9),
+            result: RouterResult::RemoteStatus {
+                address: None,
+                enabled: false,
+                listening: false,
+                fingerprint: None,
+                remote_connections: None,
+            },
+        }),
+        r#"{"request_id":9,"result":{"RemoteStatus":{"address":null,"enabled":false,"listening":false,"fingerprint":null,"remote_connections":null}}}"#
+    );
+    assert_eq!(
+        encode(&RouterResponse {
+            request_id: Some(10),
+            result: RouterResult::RemoteEnabled {
+                address: "0.0.0.0:7654".to_string(),
+                fingerprint: "ab".repeat(32),
+            },
+        }),
+        format!(
+            r#"{{"request_id":10,"result":{{"RemoteEnabled":{{"address":"0.0.0.0:7654","fingerprint":"{}"}}}}}}"#,
+            "ab".repeat(32)
+        )
+    );
+}
+
+#[test]
+fn a_remote_status_without_a_connection_count_decodes_with_none() {
+    let response: RouterResponse = serde_json::from_str(
+        r#"{"request_id":9,"result":{"RemoteStatus":{"address":null,"enabled":false,"listening":false,"fingerprint":null}}}"#,
+    )
+    .expect("a status without a count decodes");
+
+    assert_eq!(
+        response,
+        RouterResponse {
+            request_id: Some(9),
+            result: RouterResult::RemoteStatus {
+                address: None,
+                enabled: false,
+                listening: false,
+                fingerprint: None,
+                remote_connections: None,
+            },
+        }
+    );
+}
+
+#[test]
 fn this_build_speaks_control_plane_versions_one_to_two() {
     // Version 2 is this build's own: a session the router does not have is
     // refused with NotFound, where version 1 sent MalformedRequest. The floor
@@ -352,6 +451,8 @@ fn every_request_kind_names_itself_without_its_payload() {
         RouterRequestKind::ListTokens { scope: None }.name(),
         "ListTokens"
     );
+    assert_eq!(RouterRequestKind::RemoteStatus.name(), "RemoteStatus");
+    assert_eq!(RouterRequestKind::EnableRemote.name(), "EnableRemote");
 }
 
 /// Every answer this build writes names itself, and both wire lists hold one
@@ -437,22 +538,19 @@ fn every_answer_names_itself_and_both_wire_lists_are_complete() {
     ];
 
     for kind in &kinds {
-        let name = kind.wire_name();
-        assert!(
-            RouterRequestKind::VARIANTS.contains(&name),
-            "{name} is written but missing from VARIANTS"
-        );
+        assert_eq!(kind.wire_name(), kind.name());
     }
-    assert_eq!(RouterRequestKind::VARIANTS.len(), kinds.len());
+    let kind_names: Vec<&str> = kinds.iter().map(RouterRequestKind::wire_name).collect();
+    assert_eq!(kind_names, RouterRequestKind::VARIANTS);
 
     for (result, name) in &results {
         assert_eq!(result.wire_name(), *name);
-        assert!(
-            RouterResult::VARIANTS.contains(name),
-            "{name} is written but missing from VARIANTS"
-        );
     }
-    assert_eq!(RouterResult::VARIANTS.len(), results.len());
+    let result_names: Vec<&str> = results
+        .iter()
+        .map(|(result, _)| result.wire_name())
+        .collect();
+    assert_eq!(result_names, RouterResult::VARIANTS);
 }
 
 #[test]
@@ -473,6 +571,111 @@ fn a_request_kind_this_build_lacks_reads_as_unknown_carrying_its_name() {
 }
 
 #[test]
+fn an_unknown_kind_sent_as_a_bare_name_reads_as_unknown_carrying_its_name() {
+    let decoded: IncomingRouterRequest =
+        serde_json::from_str(r#"{"request_id":9,"kind":"RehomeToken"}"#)
+            .expect("a kind this build does not have still reads");
+
+    assert_eq!(
+        decoded,
+        RouterRequest {
+            request_id: 9,
+            kind: MaybeKnown::Unknown {
+                name: "RehomeToken".to_string(),
+            },
+        }
+    );
+}
+
+#[test]
+fn a_kind_this_build_has_with_a_payload_it_cannot_read_keeps_the_decoding_error() {
+    let decoded: Result<IncomingRouterRequest, _> =
+        serde_json::from_str(r#"{"request_id":3,"kind":{"AttachLookup":{"selector":7}}}"#);
+
+    assert_eq!(
+        decoded
+            .expect_err("a selector that names no session is not this version's shape")
+            .to_string(),
+        "expected value at line 1 column 29"
+    );
+}
+
+#[test]
+fn an_answer_this_build_does_not_have_reads_as_unknown_carrying_its_name() {
+    let decoded: IncomingRouterResponse =
+        serde_json::from_str(r#"{"request_id":9,"result":{"Rehomed":{"identity":"build-box"}}}"#)
+            .expect("an answer this build does not have still reads");
+
+    assert_eq!(
+        decoded,
+        RouterResponse {
+            request_id: Some(9),
+            result: MaybeKnown::Unknown {
+                name: "Rehomed".to_string(),
+            },
+        }
+    );
+}
+
+#[test]
+fn a_request_missing_its_id_is_refused() {
+    let decoded: Result<RouterRequest, _> = serde_json::from_str(r#"{"kind":"ListSessions"}"#);
+
+    assert_eq!(
+        decoded
+            .expect_err("a request without an id is not this version's shape")
+            .to_string(),
+        "missing field `request_id` at line 1 column 23"
+    );
+}
+
+#[test]
+fn a_request_kind_carrying_a_field_this_build_does_not_know_still_reads() {
+    let decoded: RouterRequest = serde_json::from_str(
+        r#"{"request_id":2,"kind":{"CreateSession":{"profile":null,"cwd":null,"allow_other_users":null,"tab_count":3}}}"#,
+    )
+    .expect("a field this build lacks is passed over");
+
+    assert_eq!(
+        decoded,
+        RouterRequest {
+            request_id: 2,
+            kind: RouterRequestKind::CreateSession {
+                profile: None,
+                cwd: None,
+                allow_other_users: None,
+            },
+        }
+    );
+}
+
+#[test]
+fn a_session_address_carrying_a_field_this_build_does_not_know_still_reads() {
+    let decoded: SessionAddress = serde_json::from_str(
+        r#"{"id":"00000000-0000-0000-0000-000000000001","name":"quiet-lake","socket":"/run/koshi/session.sock","pid":4242,"uptime":7}"#,
+    )
+    .expect("a field this build lacks is passed over");
+
+    assert_eq!(decoded, address());
+}
+
+#[test]
+fn a_ready_line_carrying_a_field_this_build_does_not_know_still_reads() {
+    let decoded: SessionServerReady = serde_json::from_str(
+        r#"{"protocol_version":1,"socket":"/run/koshi/session.sock","pid":4242}"#,
+    )
+    .expect("a field this build lacks is passed over");
+
+    assert_eq!(
+        decoded,
+        SessionServerReady {
+            protocol_version: 1,
+            socket: "/run/koshi/session.sock".to_string(),
+        }
+    );
+}
+
+#[test]
 fn printing_a_granted_answer_reveals_no_secret() {
     let printed = format!(
         "{:?}",
@@ -482,13 +685,9 @@ fn printing_a_granted_answer_reveals_no_secret() {
         }
     );
 
-    assert!(
-        printed.contains("***"),
-        "the printed answer redacts the secret, got: {printed}"
-    );
-    assert!(
-        !printed.contains("k7QxSecret"),
-        "the printed answer carries no secret, got: {printed}"
+    assert_eq!(
+        printed,
+        "Granted { token: ConnectionToken(***), replaced: false }"
     );
 }
 
@@ -620,6 +819,19 @@ fn a_hello_with_the_right_version_and_token_is_accepted() {
         }),
         Ok(())
     );
+    assert_eq!(gate.agreed(), Some(ROUTER_PROTOCOL_VERSION));
+}
+
+#[test]
+fn a_hello_built_here_names_this_builds_range() {
+    assert_eq!(
+        RouterRequestKind::hello(token()),
+        RouterRequestKind::Hello {
+            min_protocol_version: 1,
+            max_protocol_version: 2,
+            token: token(),
+        }
+    );
 }
 
 #[test]
@@ -727,6 +939,7 @@ fn an_out_of_range_hello_with_a_wrong_token_is_refused_for_the_version() {
             ),
         })
     );
+    assert_eq!(gate.agreed(), None, "a refused Hello settles nothing");
 }
 
 #[test]
@@ -744,6 +957,126 @@ fn a_hello_with_a_wrong_token_is_refused_as_bad_token() {
             message: "the token presented does not match the router's".to_string(),
         })
     );
+    assert_eq!(gate.agreed(), None, "a refused Hello settles nothing");
+}
+
+#[test]
+fn a_caller_speaking_only_below_this_router_is_refused_naming_both_ranges() {
+    let mut gate = RouterHandshake::new(token());
+    let below = MIN_ROUTER_PROTOCOL_VERSION - 1;
+
+    assert_eq!(
+        gate.check(&RouterRequestKind::Hello {
+            min_protocol_version: below,
+            max_protocol_version: below,
+            token: token(),
+        }),
+        Err(IpcErrorPayload {
+            code: IpcErrorCode::UnsupportedVersion,
+            message: format!(
+                "the caller speaks control-plane protocol versions {below} to {below}, \
+                 this router speaks {MIN_ROUTER_PROTOCOL_VERSION} to {ROUTER_PROTOCOL_VERSION}"
+            ),
+        })
+    );
+    assert_eq!(gate.agreed(), None, "a refused Hello settles nothing");
+}
+
+#[test]
+fn a_caller_speaking_only_the_floor_settles_on_the_floor() {
+    let mut gate = RouterHandshake::new(token());
+
+    assert_eq!(
+        gate.check(&RouterRequestKind::Hello {
+            min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+            max_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+            token: token(),
+        }),
+        Ok(())
+    );
+    assert_eq!(gate.agreed(), Some(MIN_ROUTER_PROTOCOL_VERSION));
+}
+
+#[test]
+fn a_second_hello_with_a_narrower_range_settles_the_version_again_from_that_range() {
+    let mut gate = RouterHandshake::new(token());
+    gate.check(&RouterRequestKind::hello(token()))
+        .expect("the first Hello is accepted");
+    assert_eq!(gate.agreed(), Some(ROUTER_PROTOCOL_VERSION));
+
+    assert_eq!(
+        gate.check(&RouterRequestKind::Hello {
+            min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+            max_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+            token: token(),
+        }),
+        Ok(())
+    );
+    assert_eq!(gate.agreed(), Some(MIN_ROUTER_PROTOCOL_VERSION));
+    assert_eq!(gate.check(&RouterRequestKind::ListSessions), Ok(()));
+}
+
+#[test]
+fn every_other_kind_is_refused_by_name_before_a_hello_and_served_after_one() {
+    let kinds = [
+        (
+            RouterRequestKind::CreateSession {
+                profile: None,
+                cwd: None,
+                allow_other_users: None,
+            },
+            "CreateSession",
+        ),
+        (
+            RouterRequestKind::AttachLookup {
+                selector: SessionSelector::Name("quiet-lake".to_string()),
+            },
+            "AttachLookup",
+        ),
+        (RouterRequestKind::ListSessions, "ListSessions"),
+        (RouterRequestKind::Restart, "Restart"),
+        (
+            RouterRequestKind::GrantToken {
+                identity: "build-box".to_string(),
+                scope: TokenScope::HostWide,
+                expires_in: None,
+            },
+            "GrantToken",
+        ),
+        (
+            RouterRequestKind::RevokeToken {
+                identity: "build-box".to_string(),
+                scope: None,
+            },
+            "RevokeToken",
+        ),
+        (RouterRequestKind::ListTokens { scope: None }, "ListTokens"),
+        (RouterRequestKind::RemoteStatus, "RemoteStatus"),
+        (RouterRequestKind::EnableRemote, "EnableRemote"),
+    ];
+    let mut gate = RouterHandshake::new(token());
+
+    for (kind, name) in &kinds {
+        assert_eq!(
+            gate.check(kind),
+            Err(IpcErrorPayload {
+                code: IpcErrorCode::HelloRequired,
+                message: format!("{name} arrived before a Hello opened the connection"),
+            })
+        );
+    }
+    assert_eq!(gate.agreed(), None, "a refused kind opens nothing");
+
+    gate.check(&RouterRequestKind::hello(token()))
+        .expect("the Hello is accepted");
+
+    for (kind, name) in &kinds {
+        assert_eq!(
+            gate.check(kind),
+            Ok(()),
+            "{name} is served on an open connection"
+        );
+    }
 }
 
 #[test]

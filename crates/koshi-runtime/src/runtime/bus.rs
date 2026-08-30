@@ -19,7 +19,10 @@
 //! events it misses, until `EventBus::try_resync` puts a fresh
 //! [`RenderSnapshot`] on its queue and returns it to live delivery. The
 //! snapshot rides the same queue as events, so the subscriber reads the
-//! backlog it already had, then the snapshot, then live events again.
+//! backlog it already had, then the snapshot, then live events again. An
+//! answer, host write, or switch that does not fit marks the subscriber
+//! desynced the same way; a frame that does not fit is dropped and the
+//! subscriber stays live.
 //!
 //! [`Event::Quit`] and [`Event::Restarting`] are the exception: each is the
 //! stream's last frame, so it reaches a desynced subscriber as well as a live
@@ -47,8 +50,8 @@ use koshi_renderer::snapshot::{Delivery, RenderSnapshot};
 use crate::runtime::event::{EndingNotice, SessionEnding};
 use crate::runtime::frame::wire_frame;
 
-/// How many undelivered events one subscriber's queue holds. An event
-/// published while the queue is full is dropped for that subscriber.
+/// How many undelivered items one subscriber's queue holds. Anything put on a
+/// full queue is dropped for that subscriber.
 pub(crate) const SUBSCRIBER_QUEUE_CAPACITY: usize = 1024;
 
 /// Which published events a subscriber receives.
@@ -86,8 +89,8 @@ enum DeliveryState {
     /// A critical event did not fit the queue; nothing is delivered until a
     /// snapshot lands, apart from the event that ends the stream.
     Desynced {
-        /// How many critical events the subscriber has missed, counting the one
-        /// that caused the pause.
+        /// How many deliveries the subscriber has missed: the one that paused
+        /// it, plus every [`EventClass::Critical`] event published since.
         dropped: u64,
     },
 }
@@ -151,8 +154,8 @@ impl EventBus {
 
     /// Register a subscriber for the events `filter` selects and hand back its
     /// id plus the receiving end of its queue. The subscriber starts live.
-    /// Dropping the receiver ends the subscription; the bus notices on the next
-    /// publish.
+    /// Dropping the receiver ends the subscription; the bus removes it on the
+    /// next publish or delivery to it.
     pub(crate) fn subscribe(&mut self, filter: EventFilter) -> (SubscriberId, Receiver<Delivery>) {
         let (tx, rx) = sync_channel(SUBSCRIBER_QUEUE_CAPACITY);
         let id = SubscriberId::new();
@@ -279,7 +282,7 @@ impl EventBus {
     }
 
     /// Put `snapshot` on desynced subscriber `id`'s queue and return it to live
-    /// delivery, reporting how many critical events it missed.
+    /// delivery, reporting how many deliveries it missed.
     ///
     /// Returns `true` once the snapshot is queued. Returns `false` when `id` is
     /// unknown, when it is already live, or when its queue is still full — the
@@ -449,7 +452,7 @@ impl EventBus {
     }
 
     /// How many subscribers are registered. Counts subscribers whose receiver
-    /// is already gone but whose removal awaits the next publish.
+    /// is already gone but whose removal awaits the next publish or delivery.
     #[cfg(test)]
     #[must_use]
     pub(crate) fn subscriber_count(&self) -> usize {

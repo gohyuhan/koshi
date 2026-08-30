@@ -4,15 +4,14 @@
 //! The runtime owns the live, mutating state (sessions, tabs, panes, terminal
 //! grids, cursor, focus, layout). The renderer only draws. The runtime freezes
 //! the current instant into a [`RenderSnapshot`] and passes it over; the
-//! renderer reads the snapshot and nothing else, so it cannot reach or change
-//! the engine.
+//! renderer reads the snapshot and nothing else.
 //!
 //! Everything here is a plain data package: scalar copies of the live state,
 //! plus the screen [`Grid`] behind an [`Arc`] so cloning a built snapshot
 //! shares the buffer by reference. The snapshot is built and read in the same
-//! process (the terminal `Grid`/`Cursor` types are not serializable); a client
-//! in another process is served the same frame as a [`Delivery::Frame`], which
-//! its connection thread turns into koshi-ipc's wire form.
+//! process; a client in another process is served the same frame as a
+//! [`Delivery::Frame`], which its connection thread turns into koshi-ipc's
+//! wire form.
 //!
 //! This module defines the *shape*. The runtime-side builder fills it from
 //! live state and renderer modules draw from it. This DTO is their contract.
@@ -42,13 +41,12 @@ use koshi_terminal::state::CursorShape;
 
 use crate::region::{core_region_solve, NavigatorLayout};
 
-/// The hint-bar data types live with the keymap that produces them; the
-/// renderer only draws them, and re-exports them here so a caller painting a
-/// frame resolves them from one place.
+/// The hint-bar data the renderer draws, re-exported from the keymap crate
+/// that produces it: `koshi_config::hints`.
 pub use koshi_config::hints::{HintBinding, KeymapHints};
 
-/// What a pane runs, as [`PaneSlot::kind`] reports it. Re-exported so a caller
-/// reading a frame resolves it from here.
+/// What a pane runs, as [`PaneSlot::kind`] reports it. Re-exported from
+/// `koshi_pane::pane::state`.
 pub use koshi_pane::pane::state::PaneKind;
 
 /// One frozen frame: the full read-only view the renderer draws from.
@@ -111,7 +109,8 @@ impl CommittedRegions {
         }
     }
 
-    /// Build the compiled-in navigator and statusline solve.
+    /// Build a committed region value whose solve is the compiled-in navigator
+    /// and statusline solve for `viewport`, tagged with `input_revision`.
     #[must_use]
     pub fn core(viewport: Size, input_revision: u64) -> Self {
         Self::new(viewport, core_region_solve(viewport), input_revision)
@@ -123,9 +122,8 @@ impl CommittedRegions {
 /// overflowed, the answers to one round of mouse actions, bytes for the
 /// subscriber's own terminal, or the session its client moves to.
 ///
-/// All of them ride the same queue in order, so a subscriber that missed events
-/// reads the backlog it already had, then the frame, then live events again. A
-/// frame is boxed to keep this type close to the size of an [`Event`].
+/// All of them ride the same queue in order: a subscriber that missed events
+/// reads the backlog it already had, then the frame, then live events again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Delivery {
     /// A live event, as published.
@@ -208,14 +206,14 @@ pub struct Reconnecting {
 /// from this value. The `navigator` method returns the session name, tabs, lock
 /// mode, mouse-selection state, reconnect state, and tab offset used by the
 /// tabline solve. Hit-testing and tabline solving use cell coordinates. This
-/// value has no theme; renderers apply colors when they draw cells. A
-/// client-side layout carries the committed region solve that placed the pane
-/// area; a server layout uses the default whole-area compatibility geometry.
+/// value has no theme; renderers apply colors when they draw cells.
 ///
 /// A caller that already holds a [`RenderSnapshot`] borrows one out of it with
-/// [`RenderSnapshot::layout`]. A client-side [`MouseFrame`] adds its committed
-/// regions before hit-testing. A server layout view has no client commit and
-/// uses the built-in whole-area compatibility geometry.
+/// [`RenderSnapshot::layout`], and an [`OwnedFrameLayout`] with
+/// [`OwnedFrameLayout::layout`]; both leave the committed region solve unset,
+/// and hit-testing then works from the built-in geometry. A [`MouseFrame`]
+/// fills the solve in with the one that placed the pane area when the frame was
+/// painted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameLayout<'a> {
     /// The session being viewed, including its solved active tab.
@@ -224,8 +222,9 @@ pub struct FrameLayout<'a> {
     pub client: &'a ClientSnapshot,
     /// The viewer's pointer, tab-strip, and link state.
     pub viewer: ViewerChrome,
-    /// The region solve committed with the painted frame, when this layout is
-    /// the client-side view of a painted frame.
+    /// The region solve committed with the painted frame. `None` leaves
+    /// hit-testing on the built-in geometry: the pane area is the whole area,
+    /// the tabline its top row, the statusline its bottom row.
     pub(crate) committed_regions: Option<&'a CommittedRegions>,
 }
 
@@ -319,7 +318,8 @@ impl MouseFrame {
 }
 
 impl From<RenderSnapshot> for MouseFrame {
-    /// Takes the frame by value and uses the compiled-in region solve.
+    /// Takes the frame by value and uses the compiled-in region solve for the
+    /// client's viewport, at input revision `0`.
     fn from(snapshot: RenderSnapshot) -> Self {
         let committed_regions = CommittedRegions::core(snapshot.client.viewport, 0);
         Self::with_regions(snapshot, committed_regions)
@@ -645,21 +645,21 @@ pub struct PluginUiSnapshot {
     pub overlays: Vec<OverlayView>,
 }
 
-/// A plugin-contributed statusline or tabline segment. Placeholder shape.
+/// A plugin-contributed statusline or tabline segment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Segment {
     /// The segment's rendered text.
     pub text: String,
 }
 
-/// A plugin-contributed notification. Placeholder shape.
+/// A plugin-contributed notification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotificationView {
     /// The notification's rendered text.
     pub text: String,
 }
 
-/// A plugin-contributed floating overlay. Placeholder shape.
+/// A plugin-contributed floating overlay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OverlayView {
     /// The overlay's rendered text.

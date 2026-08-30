@@ -31,7 +31,11 @@ fn is_dash_form(word: &str) -> bool {
 }
 
 /// Splits the next token off `rest`: a `<...>` run through its first closing
-/// `>`, or a single bare character. `rest` must not be empty.
+/// `>`, or a single bare character. Returns the token and what follows it.
+///
+/// `rest` must not be empty; an empty `rest` panics. A `<` with no `>` after
+/// it returns [`KeyParseErrorKind::UnclosedBracket`] carrying `rest` as the
+/// token.
 fn split_token(rest: &str) -> Result<(&str, &str), KeyParseError> {
     if let Some(after_open) = rest.strip_prefix('<') {
         match after_open.find('>') {
@@ -54,8 +58,8 @@ fn is_leader_token(token: &str) -> bool {
 }
 
 /// Merges a modifier-run leader into the chord that follows it. Rejects a
-/// merge that lands `SHIFT` on a character with no capital form, the same
-/// canonical-form rule the chord parser enforces.
+/// merge that lands `SHIFT` on a [`Key::Char`] that is not lowercase; a named
+/// key takes `SHIFT` unchanged.
 fn merge_leader_mods(
     token: &str,
     leader_mods: ModFlags,
@@ -80,9 +84,10 @@ fn merge_leader_mods(
 /// # Errors
 /// Returns a [`KeyParseError`] carrying the failing token: an empty sequence,
 /// a bare word in the dash form (`Ctrl-g` — modified keys are bracketed, as
-/// in `<C-g>`), any token [`parse_chord`] rejects, `<leader>` past the first
-/// position, a modifier-run leader with no chord after it, a merge landing
-/// `S-` on a non-letter character, or more chords than `max_chord_depth`.
+/// in `<C-g>`), a `<` that never closes, any token [`parse_chord`] rejects,
+/// `<leader>` past the first position, a modifier-run leader with no chord
+/// after it, a merge landing `S-` on a non-letter character, or more chords
+/// than `max_chord_depth`.
 pub fn parse_sequence(
     s: &str,
     leader: Leader,
@@ -114,9 +119,9 @@ pub fn parse_sequence(
         } else {
             let mut chord = match parse_chord(token) {
                 Ok(chord) => chord,
-                // `<C->>`: the key is `>` itself, so the first `>` closed
-                // nothing. Extend the token through the real closer and
-                // parse again.
+                // `<C->>`: the key is `>` itself, and the first `>` closes
+                // nothing. Extend the token through the next `>` and parse
+                // again.
                 Err(e)
                     if matches!(e.kind, KeyParseErrorKind::MissingKey)
                         && after.starts_with('>') =>

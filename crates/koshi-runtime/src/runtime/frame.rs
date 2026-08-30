@@ -142,13 +142,18 @@ fn wire_window(view: &GridView) -> FrameWindow {
 /// neighbours, with how the row ends its logical line. A cell the grid does not
 /// hold travels as a blank, so the row keeps its width.
 fn wire_row(grid: &Grid, row: u16, cols: u16) -> FrameRow {
+    let row_cells = grid
+        .rows()
+        .get(row as usize)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
     debug_assert_eq!(
-        grid.rows().get(row as usize).map_or(0, Vec::len),
+        row_cells.len(),
         cols as usize,
         "every grid row is the grid's width"
     );
     let blank = Cell::blank();
-    let cells = (0..cols).map(|col| wire_cell(grid.cell(row, col).unwrap_or(&blank)));
+    let cells = (0..cols).map(|col| wire_cell(row_cells.get(col as usize).unwrap_or(&blank)));
     FrameRow::from_cells(cells, wire_row_end(grid.row_end(row)))
 }
 

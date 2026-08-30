@@ -4,9 +4,9 @@
 //! `#[serde(with = "crate::bytes")]` travels as a JSON string: base64 as RFC
 //! 4648 section 4 spells it, over the alphabet `A`-`Z`, `a`-`z`, `0`-`9`, `+`
 //! and `/`, padded with `=` to a multiple of four characters. Decoding refuses
-//! anything else — wrong padding, a character the alphabet does not allow
-//! where it stands, or a last character carrying unused bits that are not
-//! zero.
+//! anything else — a last group of one character, wrong padding, a character
+//! the alphabet does not allow where it stands, or a last character carrying
+//! unused bits that are not zero.
 //!
 //! Example — the two bytes `[104, 105]`:
 //!
@@ -14,9 +14,9 @@
 //! "bytes":"aGk="
 //! ```
 //!
-//! **Hex, for a secret and for a fingerprint.** [`hex()`](crate::bytes::hex) writes bytes as
-//! lowercase hex, which is what every secret, hash and certificate
-//! fingerprint koshi holds is written as. Example — the two bytes
+//! **Hex, for a secret and for a fingerprint.** [`hex()`](crate::bytes::hex)
+//! writes bytes as lowercase hex. Every secret, hash and certificate
+//! fingerprint koshi holds is written this way. Example — the two bytes
 //! `[104, 105]` become `"6869"`.
 
 use std::fmt;
@@ -55,7 +55,9 @@ where
 ///
 /// # Errors
 /// Returns a decoding error when the value is not a string, and one naming
-/// the fault when the string is not base64.
+/// the fault when the string is not base64: a last group of one character,
+/// wrong padding, a last character carrying unused bits that are not zero,
+/// or a character the alphabet does not allow where it stands.
 pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
 where
     D: Deserializer<'de>,
@@ -86,7 +88,9 @@ fn encode(bytes: &[u8]) -> String {
     STANDARD.encode(bytes)
 }
 
-/// The bytes `text` holds, or the reason it is not base64.
+/// The bytes `text` holds, or the reason it is not base64: a last group of
+/// one character, wrong padding, a last character carrying unused bits that
+/// are not zero, or a character the alphabet does not allow where it stands.
 fn decode(text: &str) -> Result<Vec<u8>, &'static str> {
     STANDARD.decode(text).map_err(|error| match error {
         DecodeError::InvalidLength(_) => "the base64 text length is not a multiple of four",

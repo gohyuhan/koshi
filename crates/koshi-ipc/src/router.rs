@@ -3,7 +3,7 @@
 //!
 //! The router is one process per user. It owns the list of running sessions
 //! and nothing else: a caller asks it for a session's control-socket address,
-//! then connects to that session directly, so no pane traffic passes through
+//! then connects to that session directly. No pane traffic passes through
 //! the router. An exchange is one
 //! [`RouterRequest`](crate::router::RouterRequest) and the
 //! [`RouterResponse`](crate::router::RouterResponse) answering it, framed by
@@ -80,8 +80,7 @@ pub type IncomingRouterRequest = RouterRequest<MaybeKnown<RouterRequestKind>>;
 
 /// What a control-plane request asks for.
 ///
-/// A field this build does not know is ignored, so a peer that adds one still
-/// decodes here.
+/// A field this build does not know is ignored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RouterRequestKind {
     /// Opens the connection: names the control-plane protocol versions the
@@ -91,9 +90,9 @@ pub enum RouterRequestKind {
     /// The two versions are a range, lowest and highest. The router answers
     /// with the one both sides use, or refuses when the ranges do not overlap.
     ///
-    /// Sending it again on an open connection is allowed and changes nothing:
-    /// the versions and token are checked again and the same answer comes
-    /// back, since checking them alters no state.
+    /// Sending it again on an open connection is allowed: the versions and
+    /// token are checked again, an accepted one settles the version again
+    /// from its own range, and a refused one leaves the gate as it was.
     Hello {
         /// The lowest control-plane protocol version the caller speaks.
         min_protocol_version: u32,
@@ -126,7 +125,7 @@ pub enum RouterRequestKind {
     ListSessions,
     /// Restart the router: it sends its answer, then restarts into the binary
     /// at the path it started from. The session list is rebuilt from the
-    /// endpoint files, so every running session stays registered.
+    /// endpoint files; every running session stays registered.
     Restart,
     /// Hand `identity` a fresh remote access secret on `scope`. A grant that
     /// identity already holds on that same scope stops working.
@@ -182,9 +181,8 @@ impl RouterRequestKind {
         }
     }
 
-    /// The kind's name, e.g. `"CreateSession"`. Carries no payload, so it is
-    /// safe on a log line even though a payload can hold the connection
-    /// token.
+    /// The kind's name, e.g. `"CreateSession"`, with none of its payload: a
+    /// Hello's token does not appear in it.
     #[must_use]
     pub fn name(&self) -> &'static str {
         match self {
@@ -219,8 +217,7 @@ pub type IncomingRouterResponse = RouterResponse<MaybeKnown<RouterResult>>;
 
 /// Where one running session can be reached.
 ///
-/// A field this build does not know is ignored, so a record from a newer
-/// router still reads.
+/// A field this build does not know is ignored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionAddress {
     /// The session's stable id.
@@ -237,8 +234,7 @@ pub struct SessionAddress {
 
 /// The answer to a control-plane request.
 ///
-/// A field this build does not know is ignored, so a peer that adds one still
-/// decodes here.
+/// A field this build does not know is ignored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RouterResult {
     /// Answers [`RouterRequestKind::Hello`]: the ranges overlap and the token
@@ -317,8 +313,7 @@ pub enum RouterResult {
 /// The one JSON line a session server prints on standard output once its
 /// control socket is bound and the router may hand callers its address.
 ///
-/// A field this build does not know is ignored, so a line from a newer session
-/// server still reads.
+/// A field this build does not know is ignored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionServerReady {
     /// The control-plane protocol version the session server speaks.
@@ -359,8 +354,8 @@ impl RouterHandshake {
     /// The control-plane protocol version this connection settled on, or
     /// `None` while no Hello has been accepted.
     ///
-    /// The router puts it in [`RouterResult::Hello`], so the caller learns
-    /// which version the two of them use.
+    /// The router puts it in [`RouterResult::Hello`]; the caller uses that
+    /// version from then on.
     #[must_use]
     pub fn agreed(&self) -> Option<u32> {
         self.0.agreed()
@@ -418,9 +413,9 @@ impl RouterHandshake {
 ///
 /// On Unix this is `router.sock` directly inside `runtime_dir` — the location
 /// [`validate_socket_addr`](crate::validate::validate_socket_addr) accepts.
-/// On Windows a pipe has no filesystem path, so the name carries the
-/// directory instead: `koshi-router-<hash of runtime_dir>`, inside the
-/// `koshi-` namespace that same check requires.
+/// On Windows it is the pipe name `koshi-router-<hash>`, where `<hash>` is
+/// the standard library's default hash of `runtime_dir` as 16 lowercase hex
+/// characters, inside the `koshi-` namespace that same check requires.
 ///
 /// Callers resolve `runtime_dir` through `koshi_paths::runtime_dir()`.
 #[must_use]
@@ -461,9 +456,9 @@ pub fn router_lock_path(runtime_dir: &Path) -> PathBuf {
 }
 
 impl WireVariants for RouterRequestKind {
-    /// Every control-plane request kind this build has. A kind added to
-    /// [`RouterRequestKind`] is added here and to
-    /// [`RouterRequestKind::name`] in the same change.
+    /// Every control-plane request kind this build has: one entry per
+    /// variant of [`RouterRequestKind`], spelled as
+    /// [`RouterRequestKind::name`] spells it.
     const VARIANTS: &'static [&'static str] = &[
         "Hello",
         "CreateSession",
@@ -485,8 +480,8 @@ impl WireName for RouterRequestKind {
 }
 
 impl WireVariants for RouterResult {
-    /// Every control-plane answer this build has. A variant added to
-    /// [`RouterResult`] is added here in the same change.
+    /// Every control-plane answer this build has: one entry per variant of
+    /// [`RouterResult`], spelled as its `wire_name` spells it.
     const VARIANTS: &'static [&'static str] = &[
         "Hello",
         "Created",

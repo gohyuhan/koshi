@@ -25,8 +25,7 @@ use koshi_ipc::endpoint::socket_addr;
 /// (`session-<uuid>`, `client-<uuid>`, `pane-<uuid>`).
 ///
 /// The values are fixed at spawn: a client that detaches later leaves the
-/// variable holding the spawn-time id, and the runtime re-validates every id
-/// against live state when a CLI presents them.
+/// variable holding the spawn-time id.
 pub(crate) fn koshi_env(
     session_id: SessionId,
     client_id: Option<ClientId>,

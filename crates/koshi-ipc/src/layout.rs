@@ -4,11 +4,10 @@
 //! arranges its panes right now: each tab's split tree, and the rectangles
 //! that tree solves to.
 //!
-//! Trees travel unsolved, as they do on attach. Solving one needs a size, and
-//! that size comes from the clients viewing the tab. Each tab carries one
-//! [`SolvedTab`](crate::layout::SolvedTab) per client viewing it; the layout
-//! mode is per client. A tab no client is viewing carries its tree and
-//! no solved entry.
+//! Trees travel unsolved, as on attach. Each tab carries one
+//! [`SolvedTab`](crate::layout::SolvedTab) per client viewing it, solved
+//! against the size those clients share and that client's own layout mode. A
+//! tab no client is viewing carries its tree and no solved entry.
 //!
 //! Nothing here describes pane content: no grid, no cursor, no scrollback, no
 //! colors.
@@ -23,8 +22,8 @@ use serde::{Deserialize, Serialize};
 /// One session's layout: every tab it holds, and where each attached client
 /// is looking.
 ///
-/// A field this build does not know is ignored, in this record and every one
-/// under it, so a layout from a newer koshi still reads.
+/// Decoding ignores a field this build does not know, in this record and in
+/// every record under it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionLayout {
     /// The session's stable id.
@@ -66,11 +65,16 @@ pub struct SolvedTab {
     pub viewport: Size,
     /// Whether this client sees the tab tiled or sees one pane fullscreen.
     pub mode: LayoutMode,
-    /// Every leaf pane exactly once, in layout order, with its rectangle.
+    /// Every leaf pane exactly once, in layout order, with its rectangle. A
+    /// collapsed stack member's rectangle is its one-row header strip. A
+    /// zero-area rectangle is a pane that is not visible.
     pub panes: Vec<SolvedPane>,
-    /// The panes with no room: the solve clipped each to zero area.
+    /// The panes clipped to zero area when the layout does not fit. A pane
+    /// that is zero-area for another reason is not listed: one behind a
+    /// fullscreen pane, or a leaf under a collapsed stack member's header.
     pub suppressed: Vec<PaneId>,
-    /// Whether no pane at all has room.
+    /// `true` when `suppressed` is not empty and every rectangle in `panes`
+    /// is zero-area.
     pub all_suppressed: bool,
     /// One header strip per collapsed stack member, in layout order.
     pub stack_headers: Vec<StackHeader>,
@@ -81,7 +85,7 @@ pub struct SolvedTab {
 pub struct SolvedPane {
     /// The pane this rectangle places.
     pub id: PaneId,
-    /// The pane box, including the 1-cell border gutter.
+    /// The pane's rectangle, including its 1-cell border on each side.
     pub rect: Rect,
 }
 

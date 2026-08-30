@@ -21,12 +21,13 @@ impl Server {
     /// `resume` names the client record a caller asks to come back as, after
     /// the session replaced its own process image. The record is handed back
     /// when the session still holds it, the tab it was viewing still exists,
-    /// and no connection is streaming for it: the arriving viewport replaces
-    /// the record's, and its per-tab focus, zoom, scrollback offsets,
-    /// selections, lock mode, label and colour all stay. That is the whole of
-    /// the `resume` path — no `resume`, an id the session does not hold, an id
-    /// whose tab is gone, an id a connection is already streaming for all mint
-    /// a fresh client instead, so an attach never fails over `resume`.
+    /// and no connection is streaming for it: the arriving viewport, pane area
+    /// and origin replace the record's, and its per-tab focus, zoom, scrollback
+    /// offsets, selections, lock mode, label and colour all stay. That is the
+    /// whole of the `resume` path — no `resume`, an id the session does not
+    /// hold, an id whose tab is gone, an id a connection is already streaming
+    /// for all mint a fresh client instead, so an attach never fails over
+    /// `resume`.
     ///
     /// `resume_token` names the view a caller asks to have back, filed when
     /// that caller's last client detached. It is read on the fresh-client path
@@ -263,15 +264,14 @@ impl Server {
         let mut events = Vec::new();
 
         // Validate the target: an attach naming an unknown session, or a tab the
-        // session does not hold, is dropped so no client views a tab the renderer
-        // cannot solve.
+        // session does not hold, is dropped.
         match self.sessions.get(&session_id) {
             Some(session) if session.tabs.contains_key(&active_tab) => {}
             _ => return Vec::new(),
         }
 
-        // If the id already lives in a different session, detach it there first —
-        // reflowing the tab it leaves — so it is never held in two registries.
+        // If the id already lives in a different session, detach it there first
+        // and reflow the tab it leaves. One id is never held in two registries.
         if let Some(old_session_id) = self.session_for_client(client_id).map(|session| session.id) {
             if old_session_id != session_id {
                 let old_session = self
@@ -321,7 +321,8 @@ impl Server {
                         .list_attached()
                         .any(|client| client.colour() == *candidate)
                 })
-                // Every palette index is in use, so this client shares one.
+                // Every palette index is in use: this client takes index 0,
+                // which another client already holds.
                 .unwrap_or(0);
             let mut client = Client::new(
                 client_id,
@@ -349,9 +350,7 @@ impl Server {
 
         // A client with no focus in the tab it now views starts on that tab's
         // most recent pane, which a session records when the tab is created. A
-        // client that already focused a pane here keeps it. Without this a
-        // client attaching to a session created with nothing attached has no
-        // focused pane, and every key it types reaches no shell.
+        // client that already focused a pane here keeps it.
         let landed_on = session
             .tabs
             .get(&active_tab)
@@ -489,9 +488,7 @@ impl Server {
         // needs no `&self` across the mutation.
         let backend = Arc::clone(self.pty_backend());
 
-        // Find the session holding the client, then take it by key so the reflow
-        // keeps its disjoint field borrows. A detach for a client already gone is
-        // dropped.
+        // A detach for a client no session holds is dropped.
         let Some(session_id) = self.session_for_client(client_id).map(|session| session.id) else {
             return Vec::new();
         };
@@ -504,8 +501,7 @@ impl Server {
         // whose effective size may now grow.
         let removed = session.detach_client(client_id);
         let active_tab = removed.as_ref().map(|client| client.active_tab());
-        // Read while the session is still borrowed: a client did leave, and none
-        // is left attached.
+        // A client did leave, and none is left attached.
         let session_emptied = removed.is_some() && session.clients.is_empty();
         self.unsubscribe_client(client_id);
 

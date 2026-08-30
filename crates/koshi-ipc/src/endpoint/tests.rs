@@ -137,9 +137,10 @@ fn the_file_on_disk_carries_the_real_secret() {
 
 #[test]
 fn debug_prints_the_token_redacted() {
-    let rendered = format!("{:?}", endpoint());
-    assert!(!rendered.contains("k7QxSecret"), "{rendered}");
-    assert!(rendered.contains("ConnectionToken(***)"), "{rendered}");
+    assert_eq!(
+        format!("{:?}", endpoint()),
+        r#"EndpointFile { socket: "/run/koshi/session-abc.sock", token: ConnectionToken(***), pid: 4242 }"#
+    );
 }
 
 #[test]
@@ -198,6 +199,24 @@ fn reading_junk_bytes_is_endpoint_file_unreadable() {
     std::fs::write(&path, b"not json").expect("write junk");
 
     match EndpointFile::read(&path) {
+        Err(IpcError::EndpointFileUnreadable {
+            path: reported,
+            detail,
+        }) => {
+            assert_eq!(reported, path.display().to_string());
+            assert_eq!(detail, "expected ident at line 1 column 2");
+        }
+        other => panic!("expected EndpointFileUnreadable, got {other:?}"),
+    }
+}
+
+#[test]
+fn reading_a_directory_is_endpoint_file_unreadable_not_missing() {
+    let dir = TempDir::new().expect("create temp dir");
+    let path = dir.path().join("session-dir.json");
+    std::fs::create_dir(&path).expect("create a directory at the path");
+
+    match EndpointFile::read(&path) {
         Err(IpcError::EndpointFileUnreadable { path: reported, .. }) => {
             assert_eq!(reported, path.display().to_string());
         }
@@ -216,7 +235,16 @@ fn a_file_with_an_unknown_field_is_unreadable() {
     .expect("write file");
 
     match EndpointFile::read(&path) {
-        Err(IpcError::EndpointFileUnreadable { .. }) => {}
+        Err(IpcError::EndpointFileUnreadable {
+            path: reported,
+            detail,
+        }) => {
+            assert_eq!(reported, path.display().to_string());
+            assert_eq!(
+                detail,
+                "unknown field `extra`, expected one of `socket`, `token`, `pid` at line 1 column 79"
+            );
+        }
         other => panic!("expected EndpointFileUnreadable, got {other:?}"),
     }
 }
@@ -232,9 +260,57 @@ fn a_file_missing_a_field_is_unreadable() {
     .expect("write file");
 
     match EndpointFile::read(&path) {
-        Err(IpcError::EndpointFileUnreadable { .. }) => {}
+        Err(IpcError::EndpointFileUnreadable {
+            path: reported,
+            detail,
+        }) => {
+            assert_eq!(reported, path.display().to_string());
+            assert_eq!(detail, "missing field `token` at line 1 column 51");
+        }
         other => panic!("expected EndpointFileUnreadable, got {other:?}"),
     }
+}
+
+#[test]
+fn an_empty_file_is_unreadable() {
+    let dir = TempDir::new().expect("create temp dir");
+    let path = dir.path().join("session-empty.json");
+    std::fs::write(&path, b"").expect("write empty file");
+
+    match EndpointFile::read(&path) {
+        Err(IpcError::EndpointFileUnreadable {
+            path: reported,
+            detail,
+        }) => {
+            assert_eq!(reported, path.display().to_string());
+            assert_eq!(detail, "EOF while parsing a value at line 1 column 0");
+        }
+        other => panic!("expected EndpointFileUnreadable, got {other:?}"),
+    }
+}
+
+#[test]
+fn writing_the_advert_marker_into_a_missing_directory_is_endpoint_file_write() {
+    let dir = TempDir::new().expect("create temp dir");
+    let path = advert_path(&dir.path().join("no-such-subdir"), SessionId::new());
+
+    match write_advert(&path) {
+        Err(IpcError::EndpointFileWrite { path: reported, .. }) => {
+            assert_eq!(reported, path.display().to_string());
+        }
+        other => panic!("expected EndpointFileWrite, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_shared_socket_addr_is_the_socket_addr_inside_the_shared_user_dir() {
+    let dir = TempDir::new().expect("create temp dir");
+    let session = SessionId::new();
+
+    assert_eq!(
+        shared_socket_addr(dir.path(), session),
+        socket_addr(dir.path(), session)
+    );
 }
 
 #[test]

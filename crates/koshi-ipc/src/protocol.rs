@@ -1,17 +1,19 @@
 //! Wire messages for the control socket.
 //!
-//! An exchange is one [`IpcRequest`] and the [`IpcResponse`] answering it. The
-//! response repeats the request's `request_id` so a caller can match the two,
-//! and names no request at all when the bytes it received could not be read.
+//! An exchange is one [`IpcRequest`](crate::protocol::IpcRequest) and the
+//! [`IpcResponse`](crate::protocol::IpcResponse) answering it. The response
+//! repeats the request's `request_id`. A response to bytes that could not be
+//! read as a request carries no `request_id`.
 //!
-//! Every connection opens with [`IpcRequestKind::Hello`]. It settles the two
-//! facts that hold for the whole connection — the protocol version both sides
-//! speak, and the [`ConnectionToken`] the caller presents — so no later
-//! request repeats them.
+//! Every connection opens with
+//! [`IpcRequestKind::Hello`](crate::protocol::IpcRequestKind::Hello). It
+//! settles the two facts that hold for the whole connection: the protocol
+//! version both sides use, and the
+//! [`ConnectionToken`](crate::protocol::ConnectionToken) the caller presents.
+//! No request after it repeats them.
 //!
-//! This module is the vocabulary only: framing and sockets belong to the
-//! transport layer, and the Hello checks to
-//! [`handshake`](crate::handshake).
+//! This module is the vocabulary only. Framing and sockets belong to the
+//! transport layer. The Hello checks belong to [`handshake`](crate::handshake).
 
 use std::fmt;
 
@@ -68,17 +70,19 @@ pub fn agreed_version(
 ///
 /// Each running Koshi generates one and writes it to its
 /// [endpoint file](crate::endpoint::EndpointFile) in the private runtime
-/// directory, so being able to read the value is itself the proof.
+/// directory.
 ///
-/// Two ways out of this type, and only two:
+/// The secret leaves this type in two ways, and only two:
 ///
 /// - `Serialize` and [`expose`](Self::expose) write the **real secret**, for
-///   the endpoint file and the socket. `serde_json::to_string(&hello)` yields
-///   `{"protocol_version":2, "token":"k7Qx…"}`, secret included.
-/// - `Debug` and `Display` write `***`, so a token that reaches a log line, a
+///   the endpoint file and the socket. `serde_json::to_string(&hello)` on the
+///   Hello [`hello`](IpcRequestKind::hello) builds yields
+///   `{"Hello":{"min_protocol_version":2,"max_protocol_version":3,
+///   "token":"k7Qx…","remote":false}}`, secret included.
+/// - `Debug` and `Display` write `***`. A token that reaches a log line, a
 ///   trace, or an error dump reveals nothing.
 ///
-/// Anything describing a request in a log takes the second form, or
+/// Anything describing a request in a log uses the second form, or
 /// [`IpcRequestKind::name`], which carries no payload at all.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -94,6 +98,8 @@ impl ConnectionToken {
     /// Generate a fresh secret: 32 bytes from the operating system's
     /// cryptographic random source, written as 64 lowercase hex characters.
     /// Every generated token has this one length.
+    ///
+    /// Panics if the operating system's random source fails.
     #[must_use]
     pub fn generate() -> Self {
         let mut bytes = [0u8; 32];
@@ -102,7 +108,7 @@ impl ConnectionToken {
         ConnectionToken(crate::bytes::hex(&bytes))
     }
 
-    /// The secret itself, for writing it to the endpoint file.
+    /// The secret itself, as plain text.
     #[must_use]
     pub fn expose(&self) -> &str {
         &self.0
@@ -139,7 +145,7 @@ impl fmt::Display for ConnectionToken {
 /// One message from a caller to a running Koshi.
 ///
 /// The envelope's own fields are fixed: decoding rejects any field it does not
-/// know, so a misspelled `request_id` is an error.
+/// know. A misspelled `request_id` is an error.
 ///
 /// `K` is the request kind. A sender uses `IpcRequest`, where `K` is
 /// [`IpcRequestKind`]. A server uses [`IncomingRequest`], where a kind this
@@ -155,14 +161,15 @@ pub type IncomingRequest = IpcRequest<MaybeKnown<IpcRequestKind>>;
 /// On a connection already serving an attached client's event stream,
 /// [`KeyPress`](Self::KeyPress), [`Resize`](Self::Resize),
 /// [`Paste`](Self::Paste) and [`SubmitCommand`](Self::SubmitCommand) are
-/// answered by the next painted frame rather than by an [`IpcResponse`].
+/// answered by the next painted frame, not by an [`IpcResponse`].
 ///
 /// [`Mouse`](Self::Mouse) is answered by exactly one
 /// [`SessionEvent::MouseAnswer`](crate::event::SessionEvent::MouseAnswer)
 /// carrying that request's `request_id`, always — including when the round
-/// produced nothing to report, where the answer's list is empty. That answer
-/// is what moves the viewer's drag anchor over the cells the session took.
-/// A field this build does not know is ignored, so a peer that adds one still
+/// produced nothing to report, where the answer's list is empty. The viewer
+/// moves its drag anchor over the cells the session took from that answer.
+///
+/// A field this build does not know is ignored. A peer that adds one still
 /// decodes here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IpcRequestKind {
@@ -170,11 +177,12 @@ pub enum IpcRequestKind {
     /// presents the token. Sent before any other kind.
     ///
     /// The two versions are a range, lowest and highest. The server answers
-    /// with the one both sides use, or refuses when the ranges do not overlap.
+    /// with the highest version both sides speak, or refuses when the ranges
+    /// do not overlap.
     ///
-    /// Sending it again on an open connection is allowed and changes nothing:
-    /// the versions and token are checked again and the same answer comes
-    /// back, since checking them alters no state.
+    /// A second Hello on an open connection is checked and answered the same
+    /// way. It settles the connection's version again from its own range, and
+    /// a `remote` of `true` stays set from then on.
     Hello {
         /// The lowest protocol version the caller speaks.
         min_protocol_version: u32,
@@ -184,8 +192,9 @@ pub enum IpcRequestKind {
         token: ConnectionToken,
         /// Whether the connection this Hello opens carries a caller on
         /// another machine. The router sets it on the local connection it
-        /// opens for a remote caller. Absent means `false`. A connection this
-        /// marks reaches no more than one it does not.
+        /// opens for a remote caller. Absent means `false`. It changes nothing
+        /// about whether the Hello is accepted. The server records it as the
+        /// origin of every client attached on this connection.
         #[serde(default)]
         remote: bool,
     },
@@ -205,8 +214,8 @@ pub enum IpcRequestKind {
         /// after the session replaced its own process image. The server hands
         /// that record back when it still holds it, the tab that record was
         /// viewing still exists, and no connection is streaming for it, and
-        /// mints a fresh client otherwise. Absent on a first attach, and from
-        /// a caller that predates this field.
+        /// mints a fresh client in every other case. Absent on a first attach,
+        /// and from a caller that predates this field.
         #[serde(default)]
         resume: Option<ClientId>,
         /// The token the session handed this caller at its last attach,
@@ -240,15 +249,14 @@ pub enum IpcRequestKind {
         pane_area: Option<PaneArea>,
     },
     /// Text the attached client's outer terminal pasted, for the pane it is
-    /// typing into. Carried whole, so no character of it can fire a
-    /// keybinding.
+    /// typing into. Carried whole: no character of it fires a keybinding.
     Paste {
         /// The pasted text, exactly as the client's terminal delivered it.
         text: String,
     },
     /// One round of mouse actions the attached client decided, in the order
     /// the session must run them. A round is what the viewer accumulated for
-    /// one host mouse event, so it carries one `request_id` and receives one
+    /// one host mouse event. It carries one `request_id` and receives one
     /// answer.
     Mouse(Vec<WireMouseAction>),
     /// Dispatch a command against the session.
@@ -268,8 +276,8 @@ pub enum IpcRequestKind {
     RecentEvents,
     /// Restart the session server: it sends its answer, then replaces its own
     /// process image with the binary at the path it started from. Every pane,
-    /// its child process, its terminal and its scrollback stay as they are, so
-    /// each attached client attaches again and finds the session it left.
+    /// its child process, its terminal and its scrollback stay as they are.
+    /// Each attached client attaches again and finds the session it left.
     Restart,
     /// The caller sends nothing more on this connection. The session serves
     /// every request that arrived before it, then closes the connection. No
@@ -295,9 +303,8 @@ impl IpcRequestKind {
         }
     }
 
-    /// The kind's name, e.g. `"SubmitCommand"`. Carries no payload, so it is
-    /// safe on a log line even though a payload can hold the connection token
-    /// or text the user typed.
+    /// The kind's name, e.g. `"SubmitCommand"`. Carries no payload: not the
+    /// connection token, not the text the user typed. Safe on a log line.
     #[must_use]
     pub fn name(&self) -> &'static str {
         match self {
@@ -320,13 +327,12 @@ impl IpcRequestKind {
 /// One thing an attached client asks the session to do for a mouse event.
 ///
 /// The wire spelling of the viewer's own `MouseAction`, variant for variant.
-/// Every variant names its target explicitly, so the session hit-tests
-/// nothing.
+/// Every variant names its target. The session hit-tests nothing.
 ///
-/// [`Command`](Self::Command) is here rather than on
-/// [`IpcRequestKind::SubmitCommand`] so a command the mouse issued arrives
-/// inside its round, in its place among the other actions.
-/// A field this build does not know is ignored, so a peer that adds one still
+/// [`Command`](Self::Command) carries a command the mouse issued inside its
+/// round, in its place among the other actions.
+///
+/// A field this build does not know is ignored. A peer that adds one still
 /// decodes here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WireMouseAction {
@@ -388,7 +394,7 @@ pub enum EventFilterSpec {
 /// One message answering an [`IpcRequest`].
 ///
 /// The envelope's own fields are fixed: decoding rejects any field it does not
-/// know. An absent `request_id` means the request could not be read, so a
+/// know. An absent `request_id` means the request could not be read. A
 /// misspelled one is an error.
 ///
 /// `R` is the answer. A server uses `IpcResponse`, where `R` is
@@ -402,7 +408,7 @@ pub type IncomingResponse = IpcResponse<MaybeKnown<IpcResult>>;
 
 /// The answer to a request.
 ///
-/// A field this build does not know is ignored, so a peer that adds one still
+/// A field this build does not know is ignored. A peer that adds one still
 /// decodes here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IpcResult {
@@ -422,7 +428,7 @@ pub enum IpcResult {
     /// this frame is the last one written before the event stream starts.
     Attached {
         /// The id the server minted for this client. A second attach mints a
-        /// new one.
+        /// new one, unless its `resume` named a record the server handed back.
         client_id: ClientId,
         /// The session the client joined.
         session_id: SessionId,
@@ -457,8 +463,7 @@ pub enum IpcResult {
 /// Why a request was refused.
 ///
 /// A field this build does not know is ignored, and so is a
-/// [`code`](Self::code) it has no name for. A refusal is the one message a
-/// newer koshi is most likely to have added to, and it always carries a
+/// [`code`](Self::code) it has no name for. Every refusal carries a
 /// [`message`](Self::message) a person can read.
 ///
 /// Example — a build with no `rate_limited` code reads
@@ -527,9 +532,8 @@ impl crate::plane::Plane for SessionPlane {
 }
 
 impl WireVariants for IpcRequestKind {
-    /// Every request kind this build has. A kind added to
-    /// [`IpcRequestKind`] is added here and to
-    /// [`IpcRequestKind::name`] in the same change.
+    /// Every request kind this build has: one entry per variant of
+    /// [`IpcRequestKind`], spelled as [`IpcRequestKind::name`] spells it.
     const VARIANTS: &'static [&'static str] = &[
         "Hello",
         "Attach",
@@ -553,8 +557,8 @@ impl WireName for IpcRequestKind {
 }
 
 impl WireVariants for IpcResult {
-    /// Every answer this build has. A variant added to [`IpcResult`] is added
-    /// here in the same change.
+    /// Every answer this build has: one entry per variant of [`IpcResult`],
+    /// spelled as [`WireName::wire_name`] spells it.
     const VARIANTS: &'static [&'static str] = &[
         "Hello",
         "Attached",

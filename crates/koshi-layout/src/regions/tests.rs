@@ -215,3 +215,14 @@ fn repeated_solves_are_identical() {
 
     assert_eq!(solve(Size { cols: 12, rows: 9 }, &geometries), first);
 }
+
+#[test]
+fn an_extent_equal_to_the_remaining_edge_takes_all_of_it() {
+    let result = solve(
+        Size { cols: 80, rows: 24 },
+        &[geometry(Edge::Top, 24), geometry(Edge::Left, 80)],
+    );
+
+    assert_eq!(result.regions, [rect(0, 0, 80, 24), rect(0, 24, 80, 0)]);
+    assert_eq!(result.pane_rect, rect(80, 24, 0, 0));
+}

@@ -1,17 +1,16 @@
 //! Getting a pane's child output and exit into the runtime event inbox.
 //!
-//! Both routes end the same way — [`RuntimeEvent::PtyOutput`] and
-//! [`RuntimeEvent::ChildExit`] land in the single inbox, so a child's I/O
-//! reaches the dispatcher exactly like every other event.
+//! Both routes send [`RuntimeEvent::PtyOutput`] and [`RuntimeEvent::ChildExit`]
+//! into the one inbox.
 //!
 //! [`InboxSink`] is the route the running binary takes: the PTY backend calls
-//! it from the pane's own reader thread, and no other thread is started.
+//! it from the pane's own reader thread, and starts no other thread.
 //!
-//! The other route is for a backend that hands back a [`PtyHandle`] carrying
-//! channels instead — the fake backend the tests drive, for one. Those
-//! receivers block, so the pane gets a forwarder thread to block on them.
-//! Parking a pane picks the route from the handle it was given: a handle with
-//! no receivers was already wired to a sink.
+//! The other route serves a backend that hands back a [`PtyHandle`] carrying
+//! channels, such as the fake backend the tests drive. Those receivers block;
+//! the pane gets a forwarder thread that blocks on them. Parking a pane picks
+//! the route from the handle it was given: a handle with no receivers is
+//! already wired to a sink.
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
 use std::time::SystemTime;
@@ -31,8 +30,8 @@ use crate::server::Server;
 /// A backend holding this sink starts no per-pane forwarder thread: the
 /// pane's reader thread builds the event and sends it itself.
 pub struct InboxSink {
-    /// The inbox every event is sent on. Cloned from the server's own sender,
-    /// so these events queue with all the others in arrival order.
+    /// The inbox every event is sent on. A clone of the server's own sender:
+    /// these events queue with all the others in arrival order.
     inbox_tx: Sender<RuntimeEvent>,
 }
 
@@ -45,18 +44,18 @@ impl InboxSink {
 }
 
 impl PtySink for InboxSink {
-    /// Queue one chunk of child output. A closed inbox means the runtime is
-    /// gone, which is reported back as "stop reading this pane".
+    /// Queue one chunk of child output as [`RuntimeEvent::PtyOutput`]. Returns
+    /// `true` when it is queued, `false` when the inbox is closed, which tells
+    /// the reader to stop reading this pane.
     fn output(&self, pane_id: PaneId, bytes: Vec<u8>) -> bool {
         self.inbox_tx
             .send(RuntimeEvent::PtyOutput { pane_id, bytes })
             .is_ok()
     }
 
-    /// Queue the child's exit, stamped with the time it was observed. The
-    /// backend calls this after the pane's last output, so the user sees
-    /// everything the child printed before the pane closes, and stops reading
-    /// the pane afterwards, so nothing arrives for a pane already removed.
+    /// Queue the child's exit as [`RuntimeEvent::ChildExit`], stamped with
+    /// `SystemTime::now()`. The backend calls this after the pane's last
+    /// output, and reads the pane no further. A closed inbox drops the event.
     fn exit(&self, pane_id: PaneId, status: ExitStatus) {
         let _ = self.inbox_tx.send(RuntimeEvent::ChildExit {
             pane_id,
@@ -67,38 +66,41 @@ impl PtySink for InboxSink {
 }
 
 impl Server {
-    /// Register a freshly spawned pane's PTY: make sure its output is on its
-    /// way to the inbox, then record its handle (as the live-pane token), its
-    /// size, and a new terminal engine. Every spawn path funnels through here
-    /// so output forwarding is wired identically wherever a pane is born.
+    /// Register a freshly spawned pane's PTY: start its output on the way to
+    /// the inbox, then record its handle (the live-pane token), `size`, and a
+    /// new terminal engine of `size` capped by the config's
+    /// `scrollback.max_lines` and `scrollback.max_bytes`. Every spawn path
+    /// calls this. A record already held for `pane_id` is replaced.
     ///
-    /// A handle with receivers came from a backend with no sink, so the pane
-    /// gets a forwarder thread to drain them; a handle without receivers is
-    /// already delivering through [`InboxSink`] and needs no thread.
+    /// A handle carrying receivers gets a forwarder thread that drains them; a
+    /// handle without receivers already delivers through [`InboxSink`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when the operating system refuses to start the forwarder thread.
     pub(crate) fn park_pane_pty(&mut self, pane_id: PaneId, mut handle: PtyHandle, size: PtySize) {
         if let Some((output_rx, exit_rx)) = handle.take_receivers() {
             Self::spawn_pty_forwarder(&self.inbox_tx, pane_id, output_rx, exit_rx);
         }
         self.pty_handles.insert(pane_id, handle);
         self.pty_sizes.insert(pane_id, size);
-        // Honor the user's configured scrollback caps for every pane created
-        // after the config loaded (genesis, new panes, profile panes).
         let scrollback = &self.config.scrollback;
         let limit = ScrollbackLimit::new(scrollback.max_lines, scrollback.max_bytes);
         self.terminal_engines
             .insert(pane_id, TerminalEngine::with_scrollback(size, limit));
     }
 
-    /// Spawn the single relay thread for one pane. It forwards every output
-    /// chunk, then — once the output channel closes (the child's PTY reached
-    /// EOF, end of file, so all output is drained) — forwards the exit,
-    /// stamping the time it observed it. Draining output before the exit
-    /// preserves the order the user sees: all of the child's output, then the
-    /// pane closes. The thread stops when the inbox drops (shutdown).
+    /// Start the one relay thread for `pane_id`. It forwards every chunk from
+    /// `output_rx` in arrival order, then, once `output_rx` closes (the child's
+    /// PTY reached end of file and all output is drained), forwards the one
+    /// status from `exit_rx`. It builds both events through [`InboxSink`].
     ///
-    /// The events themselves are built by [`InboxSink`], the same way the
-    /// backend builds them when it delivers to a sink directly, so a pane
-    /// reaches the dispatcher identically whichever route carried it.
+    /// The thread ends without forwarding the exit when the inbox closes, and
+    /// ends when `exit_rx` closes with no status on it.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the operating system refuses to start the thread.
     fn spawn_pty_forwarder(
         inbox_tx: &Sender<RuntimeEvent>,
         pane_id: PaneId,

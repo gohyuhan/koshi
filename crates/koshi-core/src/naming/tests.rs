@@ -138,9 +138,9 @@ fn random_start_generates_a_well_formed_free_name() {
 
 #[test]
 fn the_one_free_name_next_to_the_start_is_found_in_the_same_round() {
-    // Combination 1 sits one place after the start, which the stride reaches
-    // only because it is coprime with the combination count. A stride that
-    // walks a smaller orbit skips it and wraps to a `-2` name instead.
+    // Combination 1 sits one place after the start; the coprime stride reaches
+    // it within the first round. A stride that walks a smaller orbit skips it
+    // and wraps to a `-2` name instead.
     let only_free = generate_name_from(NameKind::Tab, |_| false, 1);
     let found = generate_name_from(NameKind::Tab, |name| name != only_free, 0);
     assert_eq!(found, only_free);
@@ -159,4 +159,57 @@ fn the_one_free_name_on_the_last_step_of_a_round_is_found_before_the_wrap() {
         2,
         "{found} carries no wrap number"
     );
+}
+
+#[test]
+fn stride_is_coprime_with_the_combination_count() {
+    let mut a = STRIDE;
+    let mut b = COMBOS;
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    assert_eq!(a, 1, "gcd({STRIDE}, {COMBOS})");
+}
+
+#[test]
+fn client_kind_tags_the_same_combination_with_c() {
+    assert_eq!(
+        generate_name_from(NameKind::Client, |_| false, 0),
+        "C-swift-otter"
+    );
+}
+
+#[test]
+fn the_last_index_yields_the_last_traditional_chinese_combination() {
+    // Index 7499: language 7499 % 3 == 2, pair 2499 == adjective 49 / noun 49.
+    let name = generate_name_from(NameKind::Tab, |_| false, COMBOS - 1);
+    assert_eq!(name, "T-自在-茶館");
+}
+
+#[test]
+fn a_start_equal_to_the_combination_count_wraps_to_the_first_combination() {
+    let name = generate_name_from(NameKind::Tab, |_| false, COMBOS);
+    assert_eq!(name, "T-swift-otter");
+}
+
+#[test]
+fn a_taken_name_in_the_wrap_round_is_skipped_for_the_next_stride_candidate() {
+    // Every plain name is taken, and so is the first `-2` candidate; the walk
+    // moves one stride step inside the wrap round.
+    let is_taken = |name: &str| name.matches('-').count() == 2 || name == "T-swift-otter-2";
+    let name = generate_name_from(NameKind::Tab, is_taken, 0);
+    assert_eq!(name, "T-しずか-りす-2");
+}
+
+#[test]
+fn a_random_index_with_bound_one_is_zero() {
+    assert_eq!(random_index(1), 0);
+}
+
+#[test]
+fn a_random_index_stays_below_its_bound() {
+    for _ in 0..1_000 {
+        let index = random_index(7);
+        assert!(index < 7, "{index}");
+    }
 }

@@ -1,11 +1,11 @@
 //! Parser for a theme file, one of the `themes/<name>.kdl` color themes.
 //!
 //! Turns the file into a [`PartialThemeConfig`] override layer. Like the app
-//! config it is **field-partial**: a color whose value is not a `#RRGGBB` hex
-//! string is skipped — its default role color stands — and every other color
-//! still applies, so one bad swatch never drops the whole theme. Each skipped
-//! field is named in the returned warnings for the loader to log. Does no file
-//! I/O: the caller reads the file and hands the text in.
+//! config it is **field-partial**: a color whose value is not six hex digits,
+//! with or without a leading `#`, is skipped — its default role color stands —
+//! and every other color still applies. Each skipped field is named in the
+//! returned warnings for the loader to log. Does no file I/O: the caller reads
+//! the file and hands the text in.
 //!
 //! The theme's name is its file name, so the file itself carries no name: the
 //! loader fills [`PartialThemeConfig::name`] in from the stem of the path it
@@ -32,15 +32,37 @@ use crate::layer::{PartialColorPalette, PartialThemeConfig};
 use crate::parser::{parse_kdl, set, unknown_key, value_string, value_u32};
 use crate::types::RgbColor;
 
+/// The node names allowed inside `colors`, each already carrying the
+/// `colors.` prefix an unknown key is matched against for the `did you mean`
+/// hint. Same order as the arms of [`parse_colors`].
+const COLOR_KEYS: &[&str] = &[
+    "colors.ramp-start",
+    "colors.ramp-end",
+    "colors.on-ramp",
+    "colors.on-ramp-dim",
+    "colors.accent",
+    "colors.on-accent",
+    "colors.border-focused",
+    "colors.border-unfocused",
+    "colors.border-hover",
+    "colors.stack-header-fg",
+    "colors.stack-header-bg",
+    "colors.letterbox",
+    "colors.bar-bg",
+];
+
 /// Parses a theme file's `source` into a [`PartialThemeConfig`] override layer
-/// and the warning for every color that was skipped. The returned layer's
+/// and one warning per skipped color, unknown key, and repeated `colors`
+/// block, in file order. The returned layer's
 /// [`name`](PartialThemeConfig::name) is left unset: the theme is named by its
 /// file, which the caller knows and this parser does not.
 ///
 /// # Errors
-/// Returns [`ConfigError::Parse`] when `source` is not valid KDL, and
-/// [`ConfigError::Validation`] when its schema version is missing, duplicate,
-/// zero, or newer than this build understands.
+/// Returns [`ConfigError::Parse`] when `source` is not valid KDL.
+///
+/// Returns [`ConfigError::Validation`] with key `version` when `version` is
+/// missing, declared twice, carries a `{ … }` block, is not a single integer
+/// from `0` to `4294967295`, is `0`, or is newer than this build supports.
 pub fn parse_theme(
     path: &Path,
     source: &str,
@@ -87,7 +109,9 @@ pub fn parse_theme(
     Ok((theme, warnings))
 }
 
-/// Reads the `colors { … }` block into per-role overrides.
+/// Reads the `colors { … }` block into per-role overrides. A role whose value
+/// is unreadable, and a name outside [`COLOR_KEYS`], are left unset and pushed
+/// onto `warnings`. A `colors` node with no `{ … }` block sets no role.
 fn parse_colors(node: &KdlNode, warnings: &mut Vec<String>) -> PartialColorPalette {
     let mut palette = PartialColorPalette::default();
     let Some(children) = node.children() else {
@@ -112,24 +136,7 @@ fn parse_colors(node: &KdlNode, warnings: &mut Vec<String>) -> PartialColorPalet
             other => {
                 warnings.push(format!(
                     "ignored {}",
-                    unknown_key(
-                        &format!("colors.{other}"),
-                        &[
-                            "colors.ramp-start",
-                            "colors.ramp-end",
-                            "colors.on-ramp",
-                            "colors.on-ramp-dim",
-                            "colors.accent",
-                            "colors.on-accent",
-                            "colors.border-focused",
-                            "colors.border-unfocused",
-                            "colors.border-hover",
-                            "colors.stack-header-fg",
-                            "colors.stack-header-bg",
-                            "colors.letterbox",
-                            "colors.bar-bg",
-                        ],
-                    )
+                    unknown_key(&format!("colors.{other}"), COLOR_KEYS)
                 ));
                 continue;
             }
@@ -139,7 +146,9 @@ fn parse_colors(node: &KdlNode, warnings: &mut Vec<String>) -> PartialColorPalet
     palette
 }
 
-/// Reads the node's single value as a `#RRGGBB` color.
+/// Reads the node's single value as a color of six hex digits, with or
+/// without a leading `#`: `"#a78bfa"` and `"a78bfa"` both give
+/// `RgbColor::new(0xa7, 0x8b, 0xfa)`.
 fn value_color(node: &KdlNode) -> Result<RgbColor, String> {
     RgbColor::from_hex(value_string(node)?).map_err(|err| err.to_string())
 }

@@ -8,14 +8,12 @@ use serde::{Deserialize, Serialize};
 use crate::style::Style;
 
 /// The part of a cell that almost no cell has: the continuation code points
-/// layered over its base character.
-///
-/// It is a type of its own so a [`Cell`] can hold it behind a *thin* pointer —
-/// eight bytes, and null unless the cell actually has continuations.
+/// layered over its base character. A [`Cell`] holds it behind one pointer,
+/// eight bytes on a 64-bit target, null unless the cell has continuations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct CellExtra {
     /// The continuation code points in arrival order. Never empty: the box is
-    /// allocated only when the first one arrives.
+    /// allocated when the first one arrives.
     combining: Vec<char>,
 }
 
@@ -34,13 +32,10 @@ pub struct Cell {
     /// selectors, and the joined parts of a multi-codepoint emoji (ZWJ-joined
     /// glyphs, skin-tone modifiers, the second half of a flag). `None` for a
     /// plain cell; the renderer draws `ch` followed by these as one glyph.
-    /// Named for the common case (combining marks) though it also carries
-    /// non-zero-width emoji continuations.
     ///
     /// [`push_combining`](Cell::push_combining) is the only writer and always
-    /// leaves at least one code point behind, so a present [`CellExtra`] is
-    /// never empty and `None` is the single representation of "no
-    /// continuations" — which is what makes the derived equality exact.
+    /// leaves at least one code point behind: a present [`CellExtra`] is never
+    /// empty, and `None` is the single representation of "no continuations".
     combining: Option<Box<CellExtra>>,
     /// Display width in cells: 0 (continuation half of a wide glyph), 1
     /// (narrow), or 2 (wide, e.g. CJK).
@@ -55,15 +50,12 @@ pub struct Cell {
 /// keeps: an 80×24 pane is 1 920 grid cells, and its scrollback adds up to
 /// 10 000 rows on top of that.
 ///
-/// **When it fires, the answer is usually [`CellExtra`], not a bigger number.**
-/// That is what `combining` does: a plain cell holds eight bytes of null
-/// pointer instead of a `Vec` inline. Rare per-cell data goes there, and a new
-/// boolean attribute goes in one of
-/// [`AttrFlags`](crate::style::AttrFlags)'s spare bits. Raising the figure
-/// obligates raising it in the [`Cell`] doc in the same edit.
+/// Rare per-cell data goes behind [`CellExtra`]; a new boolean attribute goes
+/// in one of [`AttrFlags`](crate::style::AttrFlags)'s spare bits. Raising the
+/// figure obligates raising it in the [`Cell`] doc in the same edit.
 ///
-/// A 32-bit target holds that pointer in four bytes rather than eight, so this
-/// is a 64-bit figure.
+/// A 32-bit target holds the [`CellExtra`] pointer in four bytes; the check
+/// runs on 64-bit targets only.
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(
     std::mem::size_of::<Cell>() == 32,
@@ -76,10 +68,10 @@ impl Cell {
         Cell::blank_with(Style::default())
     }
 
-    /// A blank cell — a single space — in the given `style`. Used to carry the
-    /// current background into erased and scrolled cells (background-color
-    /// erase); `style` is typically just the pen's background — the pen is
-    /// the color/attribute state applied to newly written text.
+    /// A blank cell — a single space — in the given `style`. Erased and
+    /// scrolled cells are built this way with the pen's background
+    /// (background-color erase); the pen is the color and attribute state
+    /// applied to newly written text.
     pub fn blank_with(style: Style) -> Self {
         Cell {
             ch: ' ',
@@ -117,7 +109,7 @@ impl Cell {
     /// Layer one continuation code point (combining mark, ZWJ, variation
     /// selector, joined emoji part, …) onto this cell, keeping the base
     /// character and width unchanged. The first mark allocates the backing
-    /// vector; a plain cell never pays for one.
+    /// vector.
     pub fn push_combining(&mut self, mark: char) {
         self.combining
             .get_or_insert_with(|| {
@@ -151,10 +143,9 @@ pub enum RowEnd {
     /// The row soft-wrapped under autowrap: the next row continues this
     /// row's logical line, and a resize reflow re-joins them.
     Soft,
-    /// The row soft-wrapped because a wide glyph did not fit its last
-    /// column: the final cell is a blank spacer, dropped when a reflow
-    /// re-joins the line, so the wide glyph rejoins the text with no
-    /// phantom space.
+    /// The row soft-wrapped when a wide glyph did not fit its last column:
+    /// the final cell is a blank spacer, dropped when a reflow re-joins the
+    /// line.
     SoftWide,
 }
 
@@ -170,12 +161,11 @@ pub struct RowMeta {
 /// The number of content cells in a hard-ended row: its length with the
 /// trailing run of fully-default blanks (the padding every row is filled
 /// with) excluded. A styled blank — e.g. a background-colored prompt
-/// segment — counts as content, so its color survives.
+/// segment — counts as content.
 ///
 /// Only meaningful for a [`RowEnd::Hard`] row. A [`RowEnd::Soft`] row is full
-/// of content by definition, and a [`RowEnd::SoftWide`] row's final blank is a
-/// spacer standing in for the wide glyph on the next row, so neither may be
-/// measured this way.
+/// of content, and a [`RowEnd::SoftWide`] row's final blank is a spacer
+/// standing in for the wide glyph on the next row.
 pub(crate) fn content_len(row: &[Cell]) -> usize {
     let blank = Cell::blank();
     row.iter()
@@ -204,8 +194,7 @@ impl Grid {
 
     /// Build a grid from ready-made `rows`, normalizing each to exactly `cols`
     /// cells: a longer row is truncated, a shorter one padded with blank spaces
-    /// in `fill` (both via [`Vec::resize`]). Every row starts with default
-    /// metadata. Used to assemble a fresh screen or test grid.
+    /// in `fill`. Every row starts with default metadata.
     pub fn from_rows(rows: Vec<Vec<Cell>>, cols: u16, fill: Style) -> Self {
         let rows = rows
             .into_iter()
@@ -273,22 +262,22 @@ impl Grid {
     }
 
     /// A mutable reference to the cell at (`row`, `col`), or `None` if out of
-    /// bounds — the write path used by the VTE performer.
+    /// bounds.
     pub fn cell_mut(&mut self, row: u16, col: u16) -> Option<&mut Cell> {
         self.rows.get_mut(row as usize)?.get_mut(col as usize)
     }
 
-    /// All rows, row-major, for read-only iteration by the renderer.
+    /// All rows, row-major.
     pub fn rows(&self) -> &[Vec<Cell>] {
         &self.rows
     }
 
     /// Blank columns `from..to` (half-open, `to` exclusive) in `row`, resetting
-    /// each to a blank space in `fill`. An erase that reaches the row's last
-    /// column breaks the row's continuation into the next row, so its end
-    /// resets to [`RowEnd::Hard`]. The span is clipped to the row, so an
-    /// oversized span, an inverted range (`from >= to`), or an empty grid never
-    /// panics — it is simply a no-op.
+    /// each to a blank space in `fill`. When the span reaches the row's last
+    /// column (`from < cols` and `to >= cols`), the row's end resets to
+    /// [`RowEnd::Hard`]. The span is clipped to the row: an oversized span
+    /// blanks to the last column, and an inverted range (`from >= to`), an
+    /// out-of-bounds `row`, or an empty grid changes nothing.
     pub fn clear_line(&mut self, row: u16, from: u16, to: u16, fill: Style) {
         if let Some(cells) = self.rows.get_mut(row as usize) {
             let end = (to as usize).min(cells.len());
@@ -305,7 +294,8 @@ impl Grid {
     /// Insert `n` blank cells at column `col` of `row`, shifting existing cells
     /// to the right; cells pushed past the right edge are dropped. If `row` or
     /// `col` are out of bounds, this is a no-op. The inserted cells are blanks
-    /// in `fill` style (background-color erase).
+    /// in `fill` style (background-color erase). The row's end resets to
+    /// [`RowEnd::Hard`].
     pub fn insert_cells(&mut self, row: u16, col: u16, n: u16, fill: Style) {
         let (rows, cols) = self.dimensions();
         if row >= rows || col >= cols {
@@ -313,21 +303,20 @@ impl Grid {
         }
 
         let r = &mut self.rows[row as usize];
+        let inserted = min(cols - col, n);
 
+        r.truncate((cols - inserted) as usize);
         r.splice(
             col as usize..col as usize,
-            std::iter::repeat_n(Cell::blank_with(fill), n as usize),
+            std::iter::repeat_n(Cell::blank_with(fill), inserted as usize),
         );
-        r.truncate(cols as usize);
-        // The shift replaced the row's tail, so any continuation into the
-        // next row is broken.
         self.set_row_end(row, RowEnd::Hard);
     }
 
     /// Delete `n` cells starting at column `col` of `row`, shifting existing
     /// cells to the left; the freed space on the right is filled with blank cells
     /// in `fill` style (background-color erase). If `row` or `col` are out of
-    /// bounds, this is a no-op.
+    /// bounds, this is a no-op. The row's end resets to [`RowEnd::Hard`].
     pub fn delete_cells(&mut self, row: u16, col: u16, n: u16, fill: Style) {
         let (rows, cols) = self.dimensions();
         if row >= rows || col >= cols {
@@ -339,8 +328,6 @@ impl Grid {
 
         r.drain(col as usize..(col + del) as usize);
         r.resize(cols as usize, Cell::blank_with(fill));
-        // The shift replaced the row's tail, so any continuation into the
-        // next row is broken.
         self.set_row_end(row, RowEnd::Hard);
     }
 
@@ -354,15 +341,12 @@ impl Grid {
             return;
         }
 
-        // Never remove more lines than the band actually holds.
+        // Never remove more lines than the band holds.
         let remove_count = min(n, last - first + 1);
 
         // Each iteration removes the band's top line — the lines below it slide
-        // up to fill the gap — blanks that line to `cols` cells in place, and
-        // re-inserts it at the band's bottom, so the band keeps its original
-        // height after every step and reuses the departing row's cell buffer.
-        // Row metadata travels with each row, so a soft-wrapped row scrolled
-        // off the top keeps its continuation state and prompt mark.
+        // up — blanks that line to `cols` cells in place, and re-inserts it at
+        // the band's bottom. Row metadata travels with each row.
         for _ in 0..remove_count as usize {
             let mut recycled = self.rows.remove(first as usize);
             recycled.clear();
@@ -372,9 +356,8 @@ impl Grid {
             self.row_meta.insert(last as usize, RowMeta::default());
         }
         if remove_count > 0 {
-            // The removed rows broke two continuations: the row above the
-            // band lost the neighbor it wrapped into, and the row that slid
-            // into the band's bottom now precedes a row it never wrapped into.
+            // The row above the band and the row at `last - remove_count` both
+            // end hard: each precedes a row it never wrapped into.
             if first > 0 {
                 self.set_row_end(first - 1, RowEnd::Hard);
             }
@@ -399,9 +382,7 @@ impl Grid {
 
         // Each iteration removes the band's bottom line, blanks it to `cols`
         // cells in place, and re-inserts it at the band's top — the lines
-        // between slide down — so the band keeps its original height after
-        // every step and reuses the departing row's cell buffer. Row metadata
-        // travels with each row.
+        // between slide down. Row metadata travels with each row.
         for _ in 0..insert_count as usize {
             let mut recycled = self.rows.remove(last as usize);
             recycled.clear();
@@ -410,9 +391,8 @@ impl Grid {
             self.row_meta.remove(last as usize);
             self.row_meta.insert(first as usize, RowMeta::default());
         }
-        // The inserted blanks broke two continuations: the row above the band
-        // now precedes a blank row, and the row that slid into the band's
-        // bottom now precedes a row it never wrapped into.
+        // The row above the band and the band's bottom row both end hard:
+        // each precedes a row it never wrapped into.
         if first > 0 {
             self.set_row_end(first - 1, RowEnd::Hard);
         }

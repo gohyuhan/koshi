@@ -32,10 +32,11 @@ pub fn parse_kdl(path: &Path, source: &str) -> Result<KdlDocument, ConfigParseDi
 // takes one field node (`key value`) and returns the value, or a plain-words
 // reason it could not be read.
 
-/// The node's single unnamed argument, or a plain-words reason it is missing.
-/// A node carrying a `{ … }` child block is refused: every scalar field takes
-/// a value alone, so `theme "midnight" { foo }` is an error, not a silently
-/// dropped block.
+/// The node's single unnamed argument.
+///
+/// Returns `takes no children` when the node carries a `{ … }` child block:
+/// `theme "midnight" { foo }` is an error. Returns `expected exactly one
+/// value` when the node holds anything other than one unnamed argument.
 pub(crate) fn single_value(node: &KdlNode) -> Result<&KdlValue, String> {
     if node.children().is_some() {
         return Err("takes no children".to_string());
@@ -46,14 +47,16 @@ pub(crate) fn single_value(node: &KdlNode) -> Result<&KdlValue, String> {
     }
 }
 
-/// Reads the node's single value as a boolean.
+/// Reads the node's single value as a boolean, or
+/// `expected a boolean (#true or #false)`.
 pub(crate) fn value_bool(node: &KdlNode) -> Result<bool, String> {
     single_value(node)?
         .as_bool()
         .ok_or_else(|| "expected a boolean (#true or #false)".to_string())
 }
 
-/// Reads the node's single value as a string, borrowed from the node.
+/// Reads the node's single value as a string, borrowed from the node, or
+/// `expected a string`.
 pub(crate) fn value_string(node: &KdlNode) -> Result<&str, String> {
     single_value(node)?
         .as_string()
@@ -75,19 +78,21 @@ pub(crate) fn value_nonempty_string(node: &KdlNode) -> Result<String, String> {
     }
 }
 
-/// Reads the node's single value as an integer.
+/// Reads the node's single value as an integer, or `expected an integer`.
 pub(crate) fn value_integer(node: &KdlNode) -> Result<i128, String> {
     single_value(node)?
         .as_integer()
         .ok_or_else(|| "expected an integer".to_string())
 }
 
-/// Reads the node's single value as a `u16`.
+/// Reads the node's single value as a `u16`. A value outside `0..=65535`
+/// gives `must be between 0 and 65535`.
 pub(crate) fn value_u16(node: &KdlNode) -> Result<u16, String> {
     u16::try_from(value_integer(node)?).map_err(|_| "must be between 0 and 65535".to_string())
 }
 
-/// Reads the node's single value as a `u32`.
+/// Reads the node's single value as a `u32`. A value outside `0..=4294967295`
+/// gives `must be between 0 and 4294967295`.
 pub(crate) fn value_u32(node: &KdlNode) -> Result<u32, String> {
     u32::try_from(value_integer(node)?).map_err(|_| "must be between 0 and 4294967295".to_string())
 }
@@ -111,7 +116,15 @@ pub(crate) fn set<T>(
     }
 }
 
-/// Names the nearest allowed key for an unknown config key.
+/// Names the nearest allowed key for an unknown config key, measured by
+/// Levenshtein edit distance in characters. A tie goes to the earliest entry
+/// in `allowed`.
+///
+/// `unknown_key("pane.min-col", &["pane.min-cols", "pane.min-rows"])` gives
+/// ``unknown key `pane.min-col`; did you mean `pane.min-cols`?``.
+///
+/// # Panics
+/// Panics when `allowed` is empty.
 #[must_use]
 pub fn unknown_key(key: &str, allowed: &[&str]) -> String {
     let nearest = allowed

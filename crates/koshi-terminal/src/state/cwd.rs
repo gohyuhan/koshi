@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// The parser stores the report verbatim and makes no local/remote decision.
 /// The pane-spawn layer compares `host` to the local machine and refuses to
-/// inherit a directory a remote host reported — a shell over SSH reports
+/// inherit a directory a remote host reported; a shell over SSH reports
 /// `file://remote/…`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReportedCwd {

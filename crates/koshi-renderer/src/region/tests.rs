@@ -1,5 +1,6 @@
 //! Tests for the two chrome-row inputs: assembling either one twice borrows
-//! the same data both times, and copies nothing behind it.
+//! the same data both times and copies nothing behind it, and the compiled-in
+//! region solve keeps one rectangle per region down to a zero-size viewport.
 
 use super::*;
 
@@ -88,6 +89,44 @@ fn core_regions_commit_exact_chrome_rectangles_and_revision() {
         committed.solve.pane_rect,
         Rect::new(Point { x: 0, y: 1 }, Size { cols: 80, rows: 22 })
     );
+}
+
+#[test]
+fn core_region_solve_keeps_a_rectangle_per_region_on_short_viewports() {
+    // Two rows: the tab row takes the first, the hint row the second, and no row
+    // is left for panes.
+    let two = core_region_solve(Size { cols: 80, rows: 2 });
+    assert_eq!(
+        two.regions,
+        vec![
+            Rect::new(Point { x: 0, y: 0 }, Size { cols: 80, rows: 1 }),
+            Rect::new(Point { x: 0, y: 1 }, Size { cols: 80, rows: 1 }),
+        ]
+    );
+    assert_eq!(
+        two.pane_rect,
+        Rect::new(Point { x: 0, y: 1 }, Size { cols: 80, rows: 0 })
+    );
+
+    // One row: the tab row takes it and the hint row keeps a zero-height
+    // rectangle at the row after it.
+    let one = core_region_solve(Size { cols: 80, rows: 1 });
+    assert_eq!(
+        one.regions,
+        vec![
+            Rect::new(Point { x: 0, y: 0 }, Size { cols: 80, rows: 1 }),
+            Rect::new(Point { x: 0, y: 1 }, Size { cols: 80, rows: 0 }),
+        ]
+    );
+    assert_eq!(
+        one.pane_rect,
+        Rect::new(Point { x: 0, y: 1 }, Size { cols: 80, rows: 0 })
+    );
+
+    // A zero-size viewport: both rectangles are empty at the origin.
+    let zero = core_region_solve(Size { cols: 0, rows: 0 });
+    assert_eq!(zero.regions, vec![Rect::zero(), Rect::zero()]);
+    assert_eq!(zero.pane_rect, Rect::zero());
 }
 
 #[test]
@@ -184,6 +223,27 @@ fn assembling_the_tab_row_input_twice_borrows_each_shared_field() {
     assert_eq!(first.tabline_offset, second.tabline_offset);
     assert!(std::ptr::eq(first.theme, second.theme), "theme was copied");
 
+    // `inputs` carries every shared field across, value for value.
+    let inputs = first.inputs();
+    assert_eq!(inputs.session_name, "one");
+    assert_eq!(inputs.tabs.len(), 1);
+    assert_eq!(inputs.tabs[0].name, "first");
+    assert_eq!(inputs.lock_mode, LockMode::Locked);
+    assert!(inputs.mouse_select);
+    assert_eq!(
+        inputs.reconnecting,
+        Some(Reconnecting {
+            attempt: 3,
+            retry_in_seconds: 8,
+        })
+    );
+    assert_eq!(inputs.tabline_offset, Some(2));
+    assert!(
+        std::ptr::eq(inputs.session_name, first.session_name),
+        "session name was copied"
+    );
+    assert!(std::ptr::eq(inputs.tabs, first.tabs), "tabs were copied");
+
     let layout = snapshot.layout(viewer);
-    assert_eq!(first.inputs(), layout.navigator());
+    assert_eq!(inputs, layout.navigator());
 }

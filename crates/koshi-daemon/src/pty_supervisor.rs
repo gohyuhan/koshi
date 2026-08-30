@@ -56,12 +56,10 @@ pub const PTY_SUPERVISOR_SUBCOMMAND: &str = "serve-pty-supervisor";
 /// closes every pane it holds and ends the process.
 ///
 /// Longer than the wait a session server coming up from carried state spends
-/// on the link, so a supervisor never gives up on an image still trying to
-/// reach it.
+/// on the link.
 pub const SUPERVISOR_IDLE_EXIT: Duration = Duration::from_secs(30);
 
-/// How long the accept loop pauses after a failed accept before trying again,
-/// so a persistent accept error cannot spin a core.
+/// How long the accept loop pauses after a failed accept before trying again.
 const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 /// Where one pane's output and exit go: out over the link, one frame each.
@@ -131,8 +129,7 @@ impl LinkSink {
 
     /// Take `writer` as the link every answer now goes out on. Events keep
     /// waiting until [`open`](Self::open) reports an accepted Hello, and a hold
-    /// the link before this one asked for is lifted: a hold belongs to the link
-    /// that asked for it.
+    /// the link before this one asked for is lifted.
     fn link_up(&self, writer: FrameWriter) {
         let mut state = self.state.lock().expect("supervisor link");
         state.writer = Some(writer);
@@ -178,8 +175,7 @@ impl LinkSink {
     /// next one.
     ///
     /// Called before a pane is closed. Closing a pane's terminal waits for its
-    /// reader to carry that terminal to the end, so a reader parked in a send is
-    /// released first.
+    /// reader to carry that terminal to the end.
     fn let_go(&self, pane: PaneId) {
         let mut state = self.state.lock().expect("supervisor link");
         state.letting_go.insert(pane);
@@ -221,8 +217,8 @@ impl LinkSink {
     /// Send one answer on the link. `false` means the link broke, which the
     /// caller reads as the end of that link.
     ///
-    /// An answer belongs to the link its request arrived on, so this never
-    /// parks.
+    /// This never parks. An answer that finds no link is dropped, not held for
+    /// the next one.
     fn answer(&self, response: SupervisorResponse) -> bool {
         let frame = SupervisorMessage::<_, SupervisorEvent>::Response(response);
         let mut state = self.state.lock().expect("supervisor link");
@@ -269,8 +265,7 @@ impl PtySink for LinkSink {
     /// Send one pane's exit, and record the pane once that frame is on a link.
     ///
     /// [`close_panes_that_ended`] reads that record to close the pane's entry. A
-    /// pane is recorded only after its exit is written, so letting it go never
-    /// cancels a send still waiting for a link.
+    /// pane is recorded only after its exit is written.
     fn exit(&self, pane_id: PaneId, status: ExitStatus) {
         if self.forward(pane_id, SupervisorEvent::Exited { pane_id, status }) {
             self.state
@@ -348,13 +343,12 @@ fn hold_panes(listener: Listener, token: &ConnectionToken, idle_exit: Duration) 
     close_every_pane(&sink, &backend);
 }
 
-/// Close every pane the supervisor still holds, so no child and no terminal is
+/// Close every pane the supervisor still holds: no child and no terminal is
 /// left behind.
 ///
-/// Every send is ended first: closing a pane's terminal waits for its reader to
-/// carry that terminal to the end, so a reader parked in a send is released
-/// before the close can finish.
-fn close_every_pane(sink: &Arc<LinkSink>, backend: &PortablePtyBackend) {
+/// Every send is ended first. Closing a pane's terminal waits for its reader to
+/// carry that terminal to the end.
+fn close_every_pane(sink: &LinkSink, backend: &PortablePtyBackend) {
     sink.close();
     for pane in backend.carried_panes() {
         let _ = backend.kill(pane.pane_id, KillPolicy::Tree);
@@ -363,17 +357,17 @@ fn close_every_pane(sink: &Arc<LinkSink>, backend: &PortablePtyBackend) {
 
 /// Start the thread that accepts links.
 ///
-/// A failed accept pauses briefly and retries. The thread ends when the main
-/// loop drops its receiver, which is the supervisor exiting.
+/// A failed accept pauses for [`ACCEPT_RETRY_DELAY`] and retries. The thread
+/// ends when the main loop drops its receiver, which is the supervisor exiting.
 fn start_accept_thread(listener: Listener, links_tx: Sender<Connection>) {
     let _ = std::thread::Builder::new()
         .name("koshi-pty-accept".to_string())
         .spawn(move || loop {
             match listener.accept() {
                 Ok(connection) => {
-                    // The operating system reports which user opened the link,
-                    // so a peer cannot claim to be another one. Only the user
-                    // who started this supervisor may drive its panes.
+                    // Only the user who started this supervisor may drive its
+                    // panes. The operating system reports which user opened the
+                    // link; a peer cannot claim to be another one.
                     if !matches!(connection.peer_is_same_user(), Ok(true)) {
                         continue;
                     }
@@ -394,7 +388,7 @@ fn start_accept_thread(listener: Listener, links_tx: Sender<Connection>) {
 /// build does not have is refused by name; the link keeps serving after either.
 fn serve_link(
     mut reader: FrameReader,
-    sink: &Arc<LinkSink>,
+    sink: &LinkSink,
     backend: &PortablePtyBackend,
     token: &ConnectionToken,
 ) -> LinkOutcome {
@@ -403,7 +397,7 @@ fn serve_link(
         let request: IncomingSupervisorRequest = match reader.recv() {
             Ok(request) => request,
             Err(IpcError::MalformedFrame { .. }) => {
-                // The frame was read whole, so the stream is still aligned;
+                // The frame was read whole: the stream is still aligned and
                 // only its bytes were unreadable. `request_id: None` tells the
                 // peer the answer belongs to no request of its own.
                 let refusal = SupervisorResponse {
@@ -419,9 +413,9 @@ fn serve_link(
                 }
                 return LinkOutcome::Broken;
             }
-            // An oversize frame's payload was never read, so the stream's
-            // framing is lost; disconnects and transport faults have no stream
-            // left. All close this one link.
+            // An oversize frame's payload was never read: the stream's framing
+            // is lost. Disconnects and transport faults have no stream left.
+            // All close this one link.
             Err(_) => return LinkOutcome::Broken,
         };
 
@@ -445,8 +439,8 @@ fn serve_link(
         let result = match gate.check(&kind) {
             Err(refusal) => SupervisorResult::Error(refusal),
             Ok(()) => {
-                // An accepted Hello is what lets this link carry pane output, so
-                // no output reaches a peer that never presented the token.
+                // An accepted Hello lets this link carry pane output. No output
+                // reaches a peer that never presented the token.
                 if opening {
                     sink.open();
                 }
@@ -466,7 +460,7 @@ fn serve_link(
 
 /// Carry out one request the gate accepted, and build the answer to send back.
 fn serve_request(
-    sink: &Arc<LinkSink>,
+    sink: &LinkSink,
     backend: &PortablePtyBackend,
     gate: &SupervisorHandshake,
     kind: SupervisorRequestKind,
@@ -490,21 +484,16 @@ fn serve_request(
             },
             Err(error) => refused(error.to_string()),
         },
-        SupervisorRequestKind::Resize { pane_id, size } => match backend.resize(pane_id, size) {
-            Ok(()) => SupervisorResult::Done,
-            Err(error) => refused(error.to_string()),
-        },
-        SupervisorRequestKind::Write { pane_id, bytes } => match backend.write(pane_id, &bytes) {
-            Ok(()) => SupervisorResult::Done,
-            Err(error) => refused(error.to_string()),
-        },
+        SupervisorRequestKind::Resize { pane_id, size } => {
+            done_or_refused(backend.resize(pane_id, size))
+        }
+        SupervisorRequestKind::Write { pane_id, bytes } => {
+            done_or_refused(backend.write(pane_id, &bytes))
+        }
         SupervisorRequestKind::Kill {
             pane_id,
             kill_policy,
-        } => match close_pane(sink, backend, pane_id, kill_policy) {
-            Ok(()) => SupervisorResult::Done,
-            Err(error) => refused(error.to_string()),
-        },
+        } => done_or_refused(close_pane(sink, backend, pane_id, kill_policy)),
         SupervisorRequestKind::LiveCwd { pane_id } => {
             SupervisorResult::Cwd(backend.live_cwd(pane_id))
         }
@@ -545,9 +534,9 @@ fn serve_request(
 ///
 /// Every send for the pane is let go first, exactly as one
 /// [`Kill`](SupervisorRequestKind::Kill) does.
-fn close_panes_that_ended(sink: &Arc<LinkSink>, backend: &PortablePtyBackend) {
+fn close_panes_that_ended(sink: &LinkSink, backend: &PortablePtyBackend) {
     for pane in sink.ended_panes() {
-        // The child already exited, so `Force` signals nothing: the close drops
+        // The child already exited: `Force` signals nothing. The close drops
         // the pane's writer, joins its finished watcher, and frees its terminal.
         let _ = close_pane(sink, backend, pane, KillPolicy::Force);
     }
@@ -562,7 +551,7 @@ fn close_panes_that_ended(sink: &Arc<LinkSink>, backend: &PortablePtyBackend) {
 /// # Errors
 /// Returns the failure of a pane the backend could not close.
 fn close_pane(
-    sink: &Arc<LinkSink>,
+    sink: &LinkSink,
     backend: &PortablePtyBackend,
     pane: PaneId,
     kill_policy: KillPolicy,
@@ -580,6 +569,15 @@ fn refused(message: String) -> SupervisorResult {
         code: IpcErrorCode::Unknown,
         message,
     })
+}
+
+/// [`Done`](SupervisorResult::Done) for a pane call that worked, and
+/// [`refused`] carrying that call's failure otherwise.
+fn done_or_refused(outcome: Result<(), koshi_pty::error::PtyError>) -> SupervisorResult {
+    match outcome {
+        Ok(()) => SupervisorResult::Done,
+        Err(error) => refused(error.to_string()),
+    }
 }
 
 /// Start the supervisor that will hold `session_id`'s panes, and hand back its

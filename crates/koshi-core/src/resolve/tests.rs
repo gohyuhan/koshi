@@ -507,8 +507,8 @@ fn plugin_action_routes_to_its_own_host_call() {
 #[test]
 fn cli_only_actions_are_refused_with_and_without_arguments() {
     // `run` joins the CLI-only set for the argless half: a bare `core:run`
-    // names no program, so it rejects `None` like the others; unlike them it
-    // does accept its own `Run` arguments (covered by the available table).
+    // names no program and rejects `None` like the others. It accepts its own
+    // `Run` arguments, covered by the available table.
     let registry = ActionRegistry::new();
     let some_args = ActionArgs::Run {
         program: run_program(),
@@ -746,9 +746,8 @@ fn resolve_error_is_a_recoverable_config_error() {
 #[test]
 fn coming_soon_status_is_checked_before_args_mismatch() {
     // `copy-selection` is seeded `ComingSoon` and takes `ActionArgs::None`.
-    // The status check runs before the handler is even matched on, so a
-    // shape that would otherwise be an `ArgsMismatch` still reports
-    // `ComingSoon` first.
+    // The status check runs before the handler match: an argument shape
+    // `resolve_core` refuses as `ArgsMismatch` reports `ComingSoon`.
     let registry = ActionRegistry::new();
     let action = core("copy-selection");
     let wrong_args = ActionArgs::Run {
@@ -862,5 +861,227 @@ fn command_kind_alone_cannot_pick_the_command() {
     assert_ne!(
         resolve_action(&core("lock"), &ActionArgs::None, &registry, CLIENT_SPLIT),
         resolve_action(&core("unlock"), &ActionArgs::None, &registry, CLIENT_SPLIT),
+    );
+}
+
+#[test]
+fn run_without_a_direction_splits_toward_the_client_setting() {
+    let registry = ActionRegistry::new();
+    let args = ActionArgs::Run {
+        program: run_program(),
+        args: vec![],
+        direction: None,
+        stacked: false,
+    };
+
+    assert_eq!(
+        resolve_action(&core("run"), &args, &registry, CLIENT_SPLIT),
+        Ok(DispatchPlan::Command(Command::RunCommandPane(
+            RunCommandPaneArgs {
+                command: SpawnSpec {
+                    program: run_program(),
+                    args: vec![],
+                    cwd: None,
+                    env: BTreeMap::new(),
+                    shell_kind: ShellKind::Other("lazygit".to_string()),
+                },
+                cwd: None,
+                source: None,
+                tab: None,
+                direction: CLIENT_SPLIT,
+                stacked: false,
+                client: None,
+            }
+        )))
+    );
+}
+
+#[test]
+fn run_stacked_builds_a_stacked_pane_and_still_carries_the_direction() {
+    let registry = ActionRegistry::new();
+    let args = ActionArgs::Run {
+        program: run_program(),
+        args: vec![],
+        direction: Some(Direction::Left),
+        stacked: true,
+    };
+
+    let Ok(DispatchPlan::Command(Command::RunCommandPane(built))) =
+        resolve_action(&core("run"), &args, &registry, CLIENT_SPLIT)
+    else {
+        panic!("core:run must resolve to a run-command-pane command");
+    };
+
+    assert!(built.stacked);
+    assert_eq!(built.direction, Direction::Left);
+}
+
+#[test]
+fn run_classifies_a_known_shell_from_its_program() {
+    let registry = ActionRegistry::new();
+    let args = ActionArgs::Run {
+        program: PathBuf::from("/bin/zsh"),
+        args: vec!["-l".to_string()],
+        direction: None,
+        stacked: false,
+    };
+
+    let Ok(DispatchPlan::Command(Command::RunCommandPane(built))) =
+        resolve_action(&core("run"), &args, &registry, CLIENT_SPLIT)
+    else {
+        panic!("core:run must resolve to a run-command-pane command");
+    };
+
+    assert_eq!(built.command.program, PathBuf::from("/bin/zsh"));
+    assert_eq!(built.command.args, vec!["-l".to_string()]);
+    assert_eq!(built.command.shell_kind, ShellKind::Zsh);
+}
+
+#[test]
+fn a_sequence_step_naming_a_plugin_action_routes_to_its_host_call_with_no_arguments() {
+    let owner = plugin_id(1);
+    let plugin_action = ActionRef::plugin(owner, "open-status").expect("valid name");
+    let mut registry =
+        registry_with_macro("lock-and-open", vec![core("lock"), plugin_action.clone()]);
+    registry
+        .register(owner, plugin_action.clone(), plugin_metadata(owner))
+        .expect("plugin registers its own action");
+
+    assert_eq!(
+        resolve_action(
+            &user("lock-and-open"),
+            &ActionArgs::None,
+            &registry,
+            CLIENT_SPLIT
+        ),
+        Ok(DispatchPlan::Sequence(vec![
+            DispatchPlan::Command(Command::SetLockMode(LockModeArgs {
+                locked: true,
+                client: None
+            })),
+            DispatchPlan::PluginHostCall {
+                plugin: owner,
+                action: plugin_action,
+                args: ActionArgs::None,
+            },
+        ]))
+    );
+}
+
+#[test]
+fn a_sequence_naming_an_unregistered_step_reports_that_step() {
+    let missing = ActionRef::plugin(plugin_id(1), "open-status").expect("valid name");
+    let registry = registry_with_macro("lock-and-open", vec![core("lock"), missing.clone()]);
+
+    assert_eq!(
+        resolve_action(
+            &user("lock-and-open"),
+            &ActionArgs::None,
+            &registry,
+            CLIENT_SPLIT
+        ),
+        Err(ResolveError::Unregistered { action: missing })
+    );
+}
+
+#[test]
+fn a_sequence_step_naming_run_is_refused_for_lack_of_arguments() {
+    // Every step resolves with `ActionArgs::None`, and `core:run` rejects it.
+    let registry = registry_with_macro("run-it", vec![core("run")]);
+
+    assert_eq!(
+        resolve_action(&user("run-it"), &ActionArgs::None, &registry, CLIENT_SPLIT),
+        Err(ResolveError::ArgsMismatch {
+            action: core("run")
+        })
+    );
+}
+
+#[test]
+fn a_macro_inside_a_macro_resolves_to_a_nested_plan_in_step_order() {
+    let mut registry = registry_with_macro("inner", vec![core("lock"), core("unlock")]);
+    insert_unchecked(
+        &mut registry,
+        user("outer"),
+        macro_metadata(vec![core("new-pane"), user("inner"), core("quit")]),
+    );
+
+    assert_eq!(
+        resolve_action(&user("outer"), &ActionArgs::None, &registry, CLIENT_SPLIT),
+        Ok(DispatchPlan::Sequence(vec![
+            DispatchPlan::Command(Command::NewPane(new_pane_args())),
+            DispatchPlan::Sequence(vec![
+                DispatchPlan::Command(Command::SetLockMode(LockModeArgs {
+                    locked: true,
+                    client: None
+                })),
+                DispatchPlan::Command(Command::SetLockMode(LockModeArgs {
+                    locked: false,
+                    client: None
+                })),
+            ]),
+            DispatchPlan::Command(Command::Quit),
+        ]))
+    );
+}
+
+#[test]
+fn two_macros_naming_each_other_exhaust_the_depth_budget() {
+    // `ping` → `pong` → `ping` → … : depth 0 is `ping`, depth 1 is `pong`, and
+    // every even depth is `ping` again. `MAX_SEQUENCE_DEPTH` is even, so the
+    // macro refused at that depth is `ping`.
+    let mut registry = registry_with_macro("ping", vec![user("pong")]);
+    insert_unchecked(
+        &mut registry,
+        user("pong"),
+        macro_metadata(vec![user("ping")]),
+    );
+
+    assert_eq!(MAX_SEQUENCE_DEPTH % 2, 0);
+    assert_eq!(
+        resolve_action(&user("ping"), &ActionArgs::None, &registry, CLIENT_SPLIT),
+        Err(ResolveError::SequenceTooDeep {
+            action: user("ping")
+        })
+    );
+}
+
+#[test]
+fn action_args_serialize_to_their_wire_form() {
+    assert_eq!(
+        serde_json::to_string(&ActionArgs::None).expect("serializes"),
+        r#""None""#
+    );
+    assert_eq!(
+        serde_json::from_str::<ActionArgs>(r#""None""#).expect("deserializes"),
+        ActionArgs::None
+    );
+
+    let run = ActionArgs::Run {
+        program: PathBuf::from("/usr/bin/lazygit"),
+        args: vec!["--all".to_string()],
+        direction: Some(Direction::Down),
+        stacked: false,
+    };
+    let wire = r#"{"Run":{"program":"/usr/bin/lazygit","args":["--all"],"direction":"Down","stacked":false}}"#;
+    assert_eq!(serde_json::to_string(&run).expect("serializes"), wire);
+    assert_eq!(
+        serde_json::from_str::<ActionArgs>(wire).expect("deserializes"),
+        run
+    );
+}
+
+#[test]
+fn action_args_run_deserializes_a_null_direction() {
+    let wire = r#"{"Run":{"program":"/bin/zsh","args":[],"direction":null,"stacked":true}}"#;
+
+    assert_eq!(
+        serde_json::from_str::<ActionArgs>(wire).expect("deserializes"),
+        ActionArgs::Run {
+            program: PathBuf::from("/bin/zsh"),
+            args: vec![],
+            direction: None,
+            stacked: true,
+        }
     );
 }

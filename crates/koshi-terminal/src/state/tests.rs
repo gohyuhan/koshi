@@ -5,8 +5,8 @@ use crate::grid::state::{Cell, Grid, RowEnd};
 use crate::style::{Color, Style};
 
 /// Overwrite the cell at (`row`, `col`) of the active grid with `ch` of the
-/// given display `width`, in the default style — used to plant wide glyphs
-/// (base `width == 2` + a `width == 0` continuation) for the `clip_row` tests.
+/// given display `width`, in the default style. Plants wide glyphs (base
+/// `width == 2` + a `width == 0` continuation) for the `clip_row` tests.
 fn put(state: &mut TerminalState, row: u16, col: u16, ch: char, width: u8) {
     *state.active_grid_mut().cell_mut(row, col).unwrap() = Cell::new(ch, width, Style::default());
 }
@@ -293,7 +293,7 @@ fn clip_row_passes_a_narrow_row_through_untouched() {
     }
     let clipped = state.clip_row(0, 5);
     assert!(!clipped.right_pad());
-    assert_eq!(clipped.cells().len(), 5);
+    assert_eq!(clipped.cells(), line("aaaaa").as_slice());
 }
 
 #[test]
@@ -310,9 +310,7 @@ fn clip_row_pads_when_a_wide_base_is_the_last_visible_column() {
     let clipped = state.clip_row(0, 3);
     assert!(clipped.right_pad());
     // The wide base is dropped; only the two narrow cells before it remain.
-    assert_eq!(clipped.cells().len(), 2);
-    assert_eq!(clipped.cells()[0].ch(), 'a');
-    assert_eq!(clipped.cells()[1].ch(), 'a');
+    assert_eq!(clipped.cells(), line("aa").as_slice());
 }
 
 #[test]
@@ -327,10 +325,15 @@ fn clip_row_keeps_a_whole_wide_glyph_when_both_halves_fit() {
 
     let clipped = state.clip_row(0, 4);
     assert!(!clipped.right_pad());
-    assert_eq!(clipped.cells().len(), 4);
-    assert_eq!(clipped.cells()[2].ch(), '世');
-    assert_eq!(clipped.cells()[2].width(), 2);
-    assert_eq!(clipped.cells()[3].width(), 0);
+    assert_eq!(
+        clipped.cells(),
+        &[
+            Cell::new('a', 1, Style::default()),
+            Cell::new('a', 1, Style::default()),
+            Cell::new('世', 2, Style::default()),
+            Cell::new(' ', 0, Style::default()),
+        ]
+    );
 }
 
 #[test]
@@ -349,7 +352,7 @@ fn clip_row_clamps_an_inner_width_past_the_row_length() {
     }
     let clipped = state.clip_row(0, 10);
     assert!(!clipped.right_pad());
-    assert_eq!(clipped.cells().len(), 4);
+    assert_eq!(clipped.cells(), line("aaaa").as_slice());
 }
 
 #[test]

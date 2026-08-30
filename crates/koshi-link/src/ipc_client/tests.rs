@@ -1,14 +1,16 @@
 //! Tests for the CLI side of the control socket, against a scripted
 //! stand-in session serving a real socket.
 
+use std::collections::BTreeMap;
 use std::sync::mpsc::{self, Receiver};
 use std::thread::JoinHandle;
 use std::time::UNIX_EPOCH;
 
-use koshi_core::command::{NewPaneArgs, NewTabArgs, ToggleLockModeArgs};
+use koshi_core::command::{NewPaneArgs, NewTabArgs, RunCommandPaneArgs, ToggleLockModeArgs};
 use koshi_core::discovery::SessionInfo;
 use koshi_core::geometry::Direction;
 use koshi_core::ids::{PaneId, SessionId};
+use koshi_core::process::SpawnSpec;
 use koshi_ipc::layout::TabLayout;
 use koshi_ipc::protocol::{ConnectionToken, IpcErrorCode, IpcResponse};
 use koshi_ipc::transport::Listener;
@@ -63,8 +65,13 @@ enum Script {
 }
 
 /// Serve one scripted connection for `session` at `runtime_dir`: write the
-/// endpoint file, accept one caller, and answer per `script`.
-fn fake_session(runtime_dir: &Path, session: SessionId, script: Script) -> JoinHandle<()> {
+/// endpoint file, accept one caller, and answer per `script`. The returned
+/// receiver carries the envelope the caller submitted.
+fn fake_session(
+    runtime_dir: &Path,
+    session: SessionId,
+    script: Script,
+) -> (JoinHandle<()>, Receiver<CommandEnvelope>) {
     let addr = koshi_ipc::endpoint::socket_addr(runtime_dir, session);
     let token = ConnectionToken::generate();
     let listener = Listener::bind(&addr).expect("bind fake session");
@@ -76,7 +83,8 @@ fn fake_session(runtime_dir: &Path, session: SessionId, script: Script) -> JoinH
     .write(&EndpointFile::path(runtime_dir, session))
     .expect("write endpoint file");
 
-    std::thread::spawn(move || {
+    let (submitted_tx, submitted_rx) = mpsc::channel();
+    let handle = std::thread::spawn(move || {
         let mut connection = listener.accept().expect("accept the CLI");
         let hello: IpcRequest = connection.recv().expect("read hello");
         let submit: IpcRequest = connection.recv().expect("read submit");
@@ -90,6 +98,9 @@ fn fake_session(runtime_dir: &Path, session: SessionId, script: Script) -> JoinH
             panic!("expected a Hello first");
         };
         assert_eq!(presented, &token, "the CLI presents the endpoint's token");
+        submitted_tx
+            .send((**envelope).clone())
+            .expect("report the envelope submitted");
 
         match script {
             Script::AcceptAndApply => {
@@ -149,7 +160,8 @@ fn fake_session(runtime_dir: &Path, session: SessionId, script: Script) -> JoinH
                 );
             }
         }
-    })
+    });
+    (handle, submitted_rx)
 }
 
 /// Answer `request_id` with `result` on `connection`, requiring it to arrive.
@@ -162,14 +174,12 @@ fn send(connection: &mut Connection, request_id: u64, result: IpcResult) {
         .expect("send scripted reply");
 }
 
-/// Answer `request_id` with `result`, allowing the client to have hung up.
+/// Answer `request_id` with `result`, ignoring a send that fails.
 ///
-/// A refused hello is the CLI's cue to stop, so it closes the connection
-/// without reading the rest of the script. Whether a later reply still lands
-/// depends on whether the connection's buffer takes it before that close
-/// arrives — a coin flip the CLI's behaviour does not depend on, and one that
-/// tore this test down at random on Windows, where connections close faster.
-/// Only for replies nothing is left to read.
+/// The CLI closes the connection once the Hello is refused, without reading
+/// the rest of the script, and whether a later reply still lands in the
+/// connection's buffer before that close arrives varies. Only for replies
+/// nothing is left to read.
 fn send_best_effort(connection: &mut Connection, request_id: u64, result: IpcResult) {
     let _ = connection.send(&IpcResponse {
         request_id: Some(request_id),
@@ -181,17 +191,39 @@ fn send_best_effort(connection: &mut Connection, request_id: u64, result: IpcRes
 fn a_submitted_command_comes_back_applied() {
     let runtime_dir = test_runtime_dir("apply");
     let session = SessionId::new();
-    let server = fake_session(&runtime_dir, session, Script::AcceptAndApply);
+    let context = context(session);
+    let (server, submitted) = fake_session(&runtime_dir, session, Script::AcceptAndApply);
 
     let result = submit_via_runtime_dir(
         &runtime_dir,
-        &context(session),
+        &context,
         Command::ToggleLockMode(ToggleLockModeArgs::default()),
     )
     .expect("the exchange succeeds");
-    assert!(matches!(result, CommandResult::Ok { .. }));
 
     server.join().expect("fake session exits");
+    let envelope = submitted.recv().expect("the session read one command");
+    assert_eq!(
+        result,
+        CommandResult::Ok {
+            command_id: envelope.id,
+            emitted_events: Vec::new(),
+        },
+    );
+    assert_eq!(
+        envelope.command,
+        Command::ToggleLockMode(ToggleLockModeArgs::default()),
+    );
+    assert_eq!(
+        envelope.source,
+        CommandSource::in_session_cli(
+            session,
+            None,
+            context.pane_id,
+            PathBuf::from(koshi_ipc::endpoint::socket_addr(&runtime_dir, session)),
+        ),
+    );
+
     let _ = std::fs::remove_dir_all(&runtime_dir);
 }
 
@@ -199,7 +231,7 @@ fn a_submitted_command_comes_back_applied() {
 fn a_rejected_command_comes_back_with_reason_and_help() {
     let runtime_dir = test_runtime_dir("reject");
     let session = SessionId::new();
-    let server = fake_session(&runtime_dir, session, Script::RejectCommand);
+    let (server, _submitted) = fake_session(&runtime_dir, session, Script::RejectCommand);
 
     let result = submit_via_runtime_dir(
         &runtime_dir,
@@ -231,10 +263,10 @@ fn a_missing_endpoint_file_reports_the_session_not_running() {
         Command::ToggleLockMode(ToggleLockModeArgs::default()),
     )
     .expect_err("no endpoint file exists");
-    assert!(
-        matches!(&error, CliError::SessionNotFound { session: named } if *named == session.to_string()),
-        "expected SessionNotFound, got {error:?}",
-    );
+    let CliError::SessionNotFound { session: named } = error else {
+        panic!("expected SessionNotFound, got {error:?}");
+    };
+    assert_eq!(named, session.to_string());
 
     let _ = std::fs::remove_dir_all(&runtime_dir);
 }
@@ -257,10 +289,28 @@ fn an_endpoint_nothing_listens_behind_reports_the_session_not_running() {
         Command::ToggleLockMode(ToggleLockModeArgs::default()),
     )
     .expect_err("nothing listens behind the endpoint");
-    assert!(
-        matches!(&error, CliError::SessionNotFound { session: named } if *named == session.to_string()),
-        "expected SessionNotFound, got {error:?}",
-    );
+    let CliError::SessionNotFound { session: named } = error else {
+        panic!("expected SessionNotFound, got {error:?}");
+    };
+    assert_eq!(named, session.to_string());
+
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+#[test]
+fn an_endpoint_file_that_holds_no_endpoint_reports_ipc_unavailable() {
+    let runtime_dir = test_runtime_dir("endpoint-unreadable");
+    let session = SessionId::new();
+    let path = EndpointFile::path(&runtime_dir, session);
+    std::fs::write(&path, b"not an endpoint file").expect("write the unreadable endpoint file");
+    let unreadable = EndpointFile::read(&path).expect_err("the bytes hold no endpoint file");
+
+    let error = read_endpoint(&runtime_dir, session).expect_err("the endpoint file cannot be read");
+
+    let CliError::IpcUnavailable { detail } = error else {
+        panic!("expected IpcUnavailable, got {error:?}");
+    };
+    assert_eq!(detail, unreadable.to_string());
 
     let _ = std::fs::remove_dir_all(&runtime_dir);
 }
@@ -269,7 +319,7 @@ fn an_endpoint_nothing_listens_behind_reports_the_session_not_running() {
 fn a_refused_hello_reports_ipc_unavailable() {
     let runtime_dir = test_runtime_dir("refused");
     let session = SessionId::new();
-    let server = fake_session(&runtime_dir, session, Script::RefuseHello);
+    let (server, _submitted) = fake_session(&runtime_dir, session, Script::RefuseHello);
 
     let error = submit_via_runtime_dir(
         &runtime_dir,
@@ -277,12 +327,67 @@ fn a_refused_hello_reports_ipc_unavailable() {
         Command::ToggleLockMode(ToggleLockModeArgs::default()),
     )
     .expect_err("the hello is refused");
-    assert!(
-        matches!(
-            &error,
-            CliError::IpcUnavailable { detail } if detail == "the token presented does not match this Koshi's"
-        ),
-        "expected IpcUnavailable with the refusal message, got {error:?}",
+    let CliError::IpcUnavailable { detail } = error else {
+        panic!("expected IpcUnavailable, got {error:?}");
+    };
+    assert_eq!(detail, "the token presented does not match this Koshi's");
+
+    server.join().expect("fake session exits");
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+#[test]
+fn a_refused_command_carries_the_sessions_sentence() {
+    let runtime_dir = test_runtime_dir("submit-refused");
+    let session = SessionId::new();
+    let (server, asked) = fake_answering_session(
+        &runtime_dir,
+        session,
+        IpcResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::NotFound,
+            message: "this session holds no pane by that id".to_string(),
+        }),
+    );
+
+    let error = submit_via_runtime_dir(
+        &runtime_dir,
+        &context(session),
+        Command::ToggleLockMode(ToggleLockModeArgs::default()),
+    )
+    .expect_err("the session refuses the command");
+
+    let CliError::IpcUnavailable { detail } = error else {
+        panic!("expected IpcUnavailable, got {error:?}");
+    };
+    assert_eq!(detail, "this session holds no pane by that id");
+    assert_eq!(
+        asked.recv().expect("the session read one request").name(),
+        "SubmitCommand",
+    );
+
+    server.join().expect("fake session exits");
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+#[test]
+fn a_command_answered_with_another_reply_kind_names_that_kind() {
+    let runtime_dir = test_runtime_dir("submit-wrong-kind");
+    let session = SessionId::new();
+    let (server, _asked) = fake_answering_session(&runtime_dir, session, IpcResult::Restarting);
+
+    let error = submit_via_runtime_dir(
+        &runtime_dir,
+        &context(session),
+        Command::ToggleLockMode(ToggleLockModeArgs::default()),
+    )
+    .expect_err("a Restarting does not answer a submitted command");
+
+    let CliError::IpcUnavailable { detail } = error else {
+        panic!("expected IpcUnavailable naming the reply kind, got {error:?}");
+    };
+    assert_eq!(
+        detail,
+        "the session answered with an unexpected Restarting reply",
     );
 
     server.join().expect("fake session exits");
@@ -291,11 +396,11 @@ fn a_refused_hello_reports_ipc_unavailable() {
 
 // --- Asking a session for its layout ----------------------------------------
 
-/// A stand-in koshi serving one layout exchange at `runtime_dir`: write the
-/// endpoint file, accept one caller, answer the Hello, then answer the layout
-/// request with `answer`. The returned receiver carries the request the caller
-/// actually sent.
-fn fake_layout_session(
+/// A stand-in koshi serving one exchange at `runtime_dir`: write the endpoint
+/// file, accept one caller, read the Hello and the request behind it, answer
+/// the Hello, then answer that request with `answer`. The returned receiver
+/// carries the request the caller actually sent.
+fn fake_answering_session(
     runtime_dir: &Path,
     session: SessionId,
     answer: IpcResult,
@@ -314,7 +419,9 @@ fn fake_layout_session(
     let handle = std::thread::spawn(move || {
         let mut connection = listener.accept().expect("accept the CLI");
         let hello: IpcRequest = connection.recv().expect("read hello");
-        let query: IpcRequest = connection.recv().expect("read layout request");
+        let query: IpcRequest = connection
+            .recv()
+            .expect("read the request behind the Hello");
         asked_tx.send(query.kind).expect("report what was asked");
         send(
             &mut connection,
@@ -360,7 +467,7 @@ fn fetching_a_layout_returns_it_and_asks_for_the_tab_named() {
     let tab = TabId::new();
     let answer = layout_holding("workspace", session, tab);
     let (server, asked) =
-        fake_layout_session(&runtime_dir, session, IpcResult::Layout(answer.clone()));
+        fake_answering_session(&runtime_dir, session, IpcResult::Layout(answer.clone()));
 
     let layout = fetch_layout(&runtime_dir, session, Some(tab)).expect("the session answers");
 
@@ -378,7 +485,7 @@ fn fetching_a_layout_returns_it_and_asks_for_the_tab_named() {
 fn fetching_the_whole_layout_asks_for_no_tab() {
     let runtime_dir = test_runtime_dir("layout-every-tab");
     let session = SessionId::new();
-    let (server, asked) = fake_layout_session(
+    let (server, asked) = fake_answering_session(
         &runtime_dir,
         session,
         IpcResult::Layout(layout_named("workspace", session)),
@@ -408,7 +515,7 @@ fn fetching_recent_events_returns_them_in_the_order_the_session_sent() {
         ),
         koshi_core::recent_event::record(&koshi_core::event::Event::Quit, SystemTime::UNIX_EPOCH),
     ];
-    let (server, asked) = fake_layout_session(
+    let (server, asked) = fake_answering_session(
         &runtime_dir,
         session,
         IpcResult::RecentEvents(answer.clone()),
@@ -430,7 +537,7 @@ fn fetching_recent_events_returns_them_in_the_order_the_session_sent() {
 fn a_recent_events_request_a_session_has_no_name_for_reports_it_as_too_old() {
     let runtime_dir = test_runtime_dir("events-too-old");
     let session = SessionId::new();
-    let (server, _asked) = fake_layout_session(
+    let (server, _asked) = fake_answering_session(
         &runtime_dir,
         session,
         IpcResult::Error(IpcErrorPayload {
@@ -459,7 +566,7 @@ fn a_recent_events_request_a_session_has_no_name_for_reports_it_as_too_old() {
 fn a_recent_events_refusal_that_is_not_about_reading_carries_its_own_message() {
     let runtime_dir = test_runtime_dir("events-refused");
     let session = SessionId::new();
-    let (server, _asked) = fake_layout_session(
+    let (server, _asked) = fake_answering_session(
         &runtime_dir,
         session,
         IpcResult::Error(IpcErrorPayload {
@@ -504,7 +611,7 @@ fn fetching_a_layout_with_no_endpoint_file_reports_the_session_not_running() {
 fn a_layout_request_a_session_cannot_read_reports_the_session_as_too_old() {
     let runtime_dir = test_runtime_dir("layout-too-old");
     let session = SessionId::new();
-    let (server, _asked) = fake_layout_session(
+    let (server, _asked) = fake_answering_session(
         &runtime_dir,
         session,
         IpcResult::Error(IpcErrorPayload {
@@ -534,7 +641,7 @@ fn a_layout_request_a_session_cannot_read_reports_the_session_as_too_old() {
 fn a_layout_refusal_that_is_not_about_reading_carries_its_own_message() {
     let runtime_dir = test_runtime_dir("layout-refused");
     let session = SessionId::new();
-    let (server, _asked) = fake_layout_session(
+    let (server, _asked) = fake_answering_session(
         &runtime_dir,
         session,
         IpcResult::Error(IpcErrorPayload {
@@ -564,7 +671,7 @@ fn a_layout_for_a_tab_the_session_no_longer_holds_reports_the_tab_missing() {
     let runtime_dir = test_runtime_dir("layout-tab-gone");
     let session = SessionId::new();
     let tab = TabId::new();
-    let (server, _asked) = fake_layout_session(
+    let (server, _asked) = fake_answering_session(
         &runtime_dir,
         session,
         IpcResult::Layout(layout_named("workspace", session)),
@@ -590,7 +697,7 @@ fn a_layout_for_a_tab_the_session_no_longer_holds_reports_the_tab_missing() {
 fn a_layout_request_answered_with_another_reply_kind_names_that_kind() {
     let runtime_dir = test_runtime_dir("layout-wrong-kind");
     let session = SessionId::new();
-    let (server, _asked) = fake_layout_session(
+    let (server, _asked) = fake_answering_session(
         &runtime_dir,
         session,
         IpcResult::Hello {
@@ -602,13 +709,79 @@ fn a_layout_request_answered_with_another_reply_kind_names_that_kind() {
     let error = fetch_layout(&runtime_dir, session, None)
         .expect_err("a Hello does not answer a layout request");
 
-    assert!(
-        matches!(
-            &error,
-            CliError::IpcUnavailable { detail }
-                if detail == "the session answered with an unexpected Hello reply"
-        ),
-        "expected IpcUnavailable naming the reply kind, got {error:?}",
+    let CliError::IpcUnavailable { detail } = error else {
+        panic!("expected IpcUnavailable naming the reply kind, got {error:?}");
+    };
+    assert_eq!(
+        detail,
+        "the session answered with an unexpected Hello reply"
+    );
+
+    server.join().expect("fake session exits");
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+// --- Asking a session to describe itself ------------------------------------
+
+#[test]
+fn fetching_an_overview_returns_it_and_asks_for_a_discovery() {
+    let runtime_dir = test_runtime_dir("overview-round-trip");
+    let session = SessionId::new();
+    let answer = overview_named("S-quiet-lake", session);
+    let (server, asked) =
+        fake_answering_session(&runtime_dir, session, IpcResult::Overview(answer.clone()));
+
+    let overview = fetch_overview(&runtime_dir, session).expect("the session answers");
+
+    assert_eq!(overview, answer);
+    assert_eq!(
+        asked.recv().expect("the session read one request"),
+        IpcRequestKind::Discovery,
+    );
+
+    server.join().expect("fake session exits");
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+#[test]
+fn a_refused_overview_carries_the_sessions_sentence() {
+    let runtime_dir = test_runtime_dir("overview-refused");
+    let session = SessionId::new();
+    let (server, _asked) = fake_answering_session(
+        &runtime_dir,
+        session,
+        IpcResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::BadToken,
+            message: "the token presented does not match this Koshi's".to_string(),
+        }),
+    );
+
+    let error = fetch_overview(&runtime_dir, session).expect_err("the request is refused");
+
+    let CliError::IpcUnavailable { detail } = error else {
+        panic!("expected IpcUnavailable, got {error:?}");
+    };
+    assert_eq!(detail, "the token presented does not match this Koshi's");
+
+    server.join().expect("fake session exits");
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+#[test]
+fn an_overview_request_answered_with_another_reply_kind_names_that_kind() {
+    let runtime_dir = test_runtime_dir("overview-wrong-kind");
+    let session = SessionId::new();
+    let (server, _asked) = fake_answering_session(&runtime_dir, session, IpcResult::Restarting);
+
+    let error = fetch_overview(&runtime_dir, session)
+        .expect_err("a Restarting does not describe a session");
+
+    let CliError::IpcUnavailable { detail } = error else {
+        panic!("expected IpcUnavailable naming the reply kind, got {error:?}");
+    };
+    assert_eq!(
+        detail,
+        "the session answered with an unexpected Restarting reply",
     );
 
     server.join().expect("fake session exits");
@@ -621,7 +794,7 @@ fn a_layout_request_answered_with_another_reply_kind_names_that_kind() {
 fn a_restarting_reply_reports_the_session_restarting_and_asked_for_a_restart() {
     let runtime_dir = test_runtime_dir("restart-ok");
     let session = SessionId::new();
-    let (server, asked) = fake_layout_session(&runtime_dir, session, IpcResult::Restarting);
+    let (server, asked) = fake_answering_session(&runtime_dir, session, IpcResult::Restarting);
 
     assert_eq!(
         restart_running_session(&runtime_dir, session).expect("the exchange succeeds"),
@@ -640,7 +813,7 @@ fn a_restarting_reply_reports_the_session_restarting_and_asked_for_a_restart() {
 fn a_session_whose_build_has_no_restart_request_reads_as_too_old() {
     let runtime_dir = test_runtime_dir("restart-too-old");
     let session = SessionId::new();
-    let (server, _asked) = fake_layout_session(
+    let (server, _asked) = fake_answering_session(
         &runtime_dir,
         session,
         IpcResult::Error(IpcErrorPayload {
@@ -662,7 +835,7 @@ fn a_session_whose_build_has_no_restart_request_reads_as_too_old() {
 fn a_refused_restart_that_is_not_an_unknown_kind_carries_the_sessions_sentence() {
     let runtime_dir = test_runtime_dir("restart-refused");
     let session = SessionId::new();
-    let (server, _asked) = fake_layout_session(
+    let (server, _asked) = fake_answering_session(
         &runtime_dir,
         session,
         IpcResult::Error(IpcErrorPayload {
@@ -676,6 +849,31 @@ fn a_refused_restart_that_is_not_an_unknown_kind_carries_the_sessions_sentence()
     assert_eq!(
         error.to_string(),
         "IPC unavailable: the token presented does not match this Koshi's"
+    );
+
+    server.join().expect("fake session exits");
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+#[test]
+fn a_restart_answered_with_another_reply_kind_names_that_kind() {
+    let runtime_dir = test_runtime_dir("restart-wrong-kind");
+    let session = SessionId::new();
+    let (server, _asked) = fake_answering_session(
+        &runtime_dir,
+        session,
+        IpcResult::Overview(overview_named("workspace", session)),
+    );
+
+    let error = restart_running_session(&runtime_dir, session)
+        .expect_err("an Overview does not answer a restart");
+
+    let CliError::IpcUnavailable { detail } = error else {
+        panic!("expected IpcUnavailable naming the reply kind, got {error:?}");
+    };
+    assert_eq!(
+        detail,
+        "the session answered with an unexpected Overview reply",
     );
 
     server.join().expect("fake session exits");
@@ -716,6 +914,31 @@ fn asking_a_session_nothing_listens_behind_to_restart_restarts_nothing() {
 }
 
 // --- Reading a running session's build --------------------------------------
+
+#[test]
+fn a_running_session_reports_the_build_its_hello_named() {
+    let runtime_dir = test_runtime_dir("version-hello");
+    let session = SessionId::new();
+    let (server, read) = fake_settled_session(&runtime_dir, session, 2, HelloTiming::AtOnce);
+
+    assert_eq!(
+        running_session_version(&runtime_dir, session).expect("the session answers its Hello"),
+        Some(env!("CARGO_PKG_VERSION").to_string()),
+    );
+
+    server.join().expect("fake session exits");
+    assert_eq!(
+        read.recv().expect("the session read the Hello").kind.name(),
+        "Hello",
+    );
+    assert_eq!(
+        read.recv(),
+        Err(mpsc::RecvError),
+        "reading the build sends nothing besides the Hello",
+    );
+
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
 
 #[test]
 fn a_session_with_no_endpoint_file_reports_no_build() {
@@ -1163,6 +1386,20 @@ fn a_pane_creating_command_gets_this_process_directory_at_send_time() {
         panic!("the variant must not change");
     };
     assert_eq!(args.cwd, std::env::current_dir().ok());
+
+    let captured = capture_cwd(Command::RunCommandPane(RunCommandPaneArgs {
+        command: SpawnSpec::default_shell(None, BTreeMap::new()),
+        cwd: None,
+        source: None,
+        tab: None,
+        direction: Direction::Right,
+        stacked: false,
+        client: None,
+    }));
+    let Command::RunCommandPane(args) = captured else {
+        panic!("the variant must not change");
+    };
+    assert_eq!(args.cwd, std::env::current_dir().ok());
 }
 
 #[test]
@@ -1287,8 +1524,9 @@ fn a_named_client_refuses_a_session_that_speaks_two() {
         read.recv().expect("the session read the Hello").kind.name(),
         "Hello",
     );
-    assert!(
-        read.recv().is_err(),
+    assert_eq!(
+        read.recv(),
+        Err(mpsc::RecvError),
         "the refusal stand-in reported only the Hello",
     );
 
@@ -1309,7 +1547,6 @@ fn a_named_client_reaches_a_session_that_speaks_three() {
         Command::TogglePaneFullscreen,
     )
     .expect("a session speaking 3 reads the target client");
-    assert!(matches!(result, CommandResult::Ok { .. }));
 
     server.join().expect("fake session exits");
     assert_eq!(
@@ -1320,6 +1557,13 @@ fn a_named_client_reaches_a_session_that_speaks_three() {
     let IpcRequestKind::SubmitCommand(envelope) = submitted.kind else {
         panic!("expected a SubmitCommand after the Hello, got {submitted:?}");
     };
+    assert_eq!(
+        result,
+        CommandResult::Ok {
+            command_id: envelope.id,
+            emitted_events: Vec::new(),
+        },
+    );
     assert_eq!(
         envelope.source,
         CommandSource::external_cli(Some(session), Some(client)),
@@ -1339,20 +1583,28 @@ fn no_named_client_still_costs_one_round_trip() {
     let result =
         submit_external_via_runtime_dir(&runtime_dir, session, None, Command::TogglePaneFullscreen)
             .expect("a session speaking 2 answers a command naming no client");
-    assert!(matches!(result, CommandResult::Ok { .. }));
 
     server.join().expect("fake session exits");
     assert_eq!(
         read.recv().expect("the session read the Hello").kind.name(),
         "Hello",
     );
+    let submitted = read.recv().expect("the session read the SubmitCommand");
+    let IpcRequestKind::SubmitCommand(envelope) = submitted.kind else {
+        panic!("expected a SubmitCommand after the Hello, got {submitted:?}");
+    };
     assert_eq!(
-        read.recv()
-            .expect("the session read the SubmitCommand")
-            .kind
-            .name(),
-        "SubmitCommand",
+        result,
+        CommandResult::Ok {
+            command_id: envelope.id,
+            emitted_events: Vec::new(),
+        },
     );
+    assert_eq!(
+        envelope.source,
+        CommandSource::external_cli(Some(session), None),
+    );
+    assert_eq!(envelope.command, Command::TogglePaneFullscreen);
 
     let _ = std::fs::remove_dir_all(&runtime_dir);
 }

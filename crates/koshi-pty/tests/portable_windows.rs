@@ -14,9 +14,7 @@
 //! round trip, which `portable-pty` builds on flags and a handle order
 //! Microsoft's reference does not sanction — see the `koshi_pty::portable`
 //! module documentation. Nothing in this file answers the pseudoconsole's
-//! cursor-position query, which it waits on before letting its child print;
-//! `spawn` queues the answer as the pane opens, and the pane's reader takes
-//! the query itself out of the output.
+//! cursor-position query; see [`CURSOR_QUERY`].
 #![cfg(windows)]
 
 use std::collections::BTreeMap;
@@ -61,11 +59,12 @@ fn wait_exit(handle: &PtyHandle, timeout: Duration) -> Option<ExitStatus> {
 
 /// The cursor-position query (DSR, `CSI 6 n`) the pseudoconsole sends before it
 /// lets its child print. `spawn` queues the answer on the pane's input, and the
-/// pane's reader removes the query from the output.
+/// pane's reader removes the query from the output. A pane whose query goes
+/// unanswered prints nothing.
 const CURSOR_QUERY: &[u8] = b"\x1b[6n";
 
 /// Read the pane's output until `needle` appears or `timeout` runs out, and
-/// hand back everything read. Answers nothing.
+/// hand back everything read. Writes nothing to the pane.
 fn read_until(handle: &PtyHandle, needle: &str, timeout: Duration) -> String {
     let deadline = Instant::now() + timeout;
     let mut read: Vec<u8> = Vec::new();
@@ -88,15 +87,14 @@ fn read_until(handle: &PtyHandle, needle: &str, timeout: Duration) -> String {
 /// child's own exit code.
 ///
 /// The two halves are proved apart. `cmd.exe` prints its own banner naming
-/// Windows before it reads a byte, so that banner shows only that the console
+/// Windows before it reads a byte, and that banner shows only that the console
 /// renders. `set /a 6*7` then proves the input landed: the console echoes the
 /// typed line, which holds `6*7` and not `42`, so only a child that ran the
 /// command can produce `42`. `exit 7` ends the child with 7, which arrives once
 /// the console is closed and the reader has read it out.
 ///
-/// Nothing here answers the pseudoconsole's cursor-position query; `spawn`
-/// queues the answer as the pane opens. A pane whose query goes unanswered
-/// prints nothing, so the banner below fails first.
+/// Nothing here answers the pseudoconsole's cursor-position query
+/// ([`CURSOR_QUERY`]); an unanswered query makes the banner check fail first.
 #[test]
 fn a_pane_takes_input_and_prints_the_child_output() {
     let backend = PortablePtyBackend::new();
@@ -142,7 +140,7 @@ fn a_pane_takes_input_and_prints_the_child_output() {
 /// is still opening.
 ///
 /// `set /p` reads a line, which is what a client writing bytes to a pane
-/// produces. `pause` takes a key event instead and is not a test of this path.
+/// produces.
 #[test]
 fn a_line_typed_before_the_pane_is_read_still_reaches_the_child() {
     let backend = PortablePtyBackend::new();

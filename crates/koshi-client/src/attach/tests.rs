@@ -15,7 +15,8 @@
 //! viewer whose link broke: the pause each redial waits, that dialing again
 //! moves what the viewer paints, what the drain of the stretch with no link
 //! keeps and what it drops, and what a viewer that stopped dialing prints and
-//! exits with.
+//! exits with. It also covers the commands a fired binding's plan flattens
+//! into, and how a typed value reads as a session id or as a display name.
 
 use std::io;
 use std::sync::{Arc, Mutex};
@@ -25,15 +26,17 @@ use ratatui::backend::{Backend, ClearType, TestBackend, WindowSize};
 use ratatui::buffer::Cell;
 use ratatui::layout::{Position, Size as RatatuiSize};
 
+use koshi_core::action::ActionRef;
 use koshi_core::command::{
     ClearSelectionArgs, CliExitCode, GridPos, Selection, SelectionKind, SetSelectionArgs,
     VisualCommand,
 };
 use koshi_core::geometry::{Direction, PaneArea, Point, Rect};
-use koshi_core::ids::{ClientId, PaneId, TabId};
+use koshi_core::ids::{ClientId, PaneId, PluginId, TabId};
 use koshi_core::key::{Key, KeyChord, ModFlags};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseAnswer, MouseButton, MouseTracking, ScrollDirection};
+use koshi_core::resolve::ActionArgs;
 use koshi_ipc::attach::AttachedSessionStructureSnapshot;
 use koshi_ipc::endpoint::{socket_addr, EndpointFile};
 use koshi_ipc::frame::{FrameClient, FrameSession, FrameTab, PaintedFrame};
@@ -3510,5 +3513,134 @@ fn a_frame_this_build_has_no_name_for_is_stepped_over_and_the_next_one_arrives()
         frame.expect("the frame after the unknown one decoded"),
         closed,
         "the frame after the one this build cannot name is the first the loop is handed",
+    );
+}
+
+/// A session to switch to, as the command a plan carries.
+fn switch_command() -> Command {
+    Command::SwitchSession(SwitchSessionArgs {
+        client: None,
+        session: SessionId::new(),
+    })
+}
+
+/// A plan that hands an action to a plugin. `core:lock` is only the name it
+/// carries; nothing here runs it.
+fn plugin_call() -> DispatchPlan {
+    DispatchPlan::PluginHostCall {
+        plugin: PluginId::new(),
+        action: ActionRef::core("lock").expect("`lock` is a legal core action name"),
+        args: ActionArgs::None,
+    }
+}
+
+#[test]
+fn a_sequence_plan_flattens_into_its_commands_in_the_order_they_run() {
+    let first = switch_command();
+    let second = switch_command();
+    let third = switch_command();
+    let plan = DispatchPlan::Sequence(vec![
+        DispatchPlan::Command(first.clone()),
+        DispatchPlan::Sequence(vec![
+            DispatchPlan::Command(second.clone()),
+            DispatchPlan::Command(third.clone()),
+        ]),
+    ]);
+
+    assert_eq!(commands(plan), vec![first, second, third]);
+}
+
+#[test]
+fn a_plugin_host_call_sends_no_command_from_this_side() {
+    // The plugin host runs on the session, so this side has nothing to send.
+    assert_eq!(commands(plugin_call()), Vec::<Command>::new());
+}
+
+#[test]
+fn a_sequence_holding_a_plugin_call_sends_only_the_commands_around_it() {
+    let before = switch_command();
+    let after = switch_command();
+    let plan = DispatchPlan::Sequence(vec![
+        DispatchPlan::Command(before.clone()),
+        plugin_call(),
+        DispatchPlan::Command(after.clone()),
+    ]);
+
+    assert_eq!(commands(plan), vec![before, after]);
+}
+
+#[test]
+fn an_empty_sequence_plan_sends_nothing() {
+    assert_eq!(
+        commands(DispatchPlan::Sequence(Vec::new())),
+        Vec::<Command>::new()
+    );
+}
+
+#[test]
+fn a_session_id_reads_as_an_id_and_every_other_value_as_a_display_name() {
+    let session_id = SessionId::new();
+
+    assert_eq!(
+        selector_of(&session_id.to_string()),
+        SessionSelector::Id(session_id),
+        "a `session-<uuid>` value names the id"
+    );
+    assert_eq!(
+        selector_of(&session_id.as_uuid().to_string()),
+        SessionSelector::Id(session_id),
+        "a bare UUID names the same id"
+    );
+    assert_eq!(
+        selector_of("quiet-lake"),
+        SessionSelector::Name(String::from("quiet-lake"))
+    );
+    assert_eq!(
+        selector_of(""),
+        SessionSelector::Name(String::new()),
+        "an empty value is a display name the far side matches nothing against"
+    );
+    assert_eq!(
+        selector_of("session-not-a-uuid"),
+        SessionSelector::Name(String::from("session-not-a-uuid")),
+        "the `session-` prefix alone does not make a value an id"
+    );
+}
+
+#[test]
+fn a_selector_reads_in_a_message_as_its_id_or_its_display_name() {
+    let session_id = SessionId::new();
+
+    assert_eq!(
+        target_name(&SessionSelector::Id(session_id)),
+        session_id.to_string()
+    );
+    assert_eq!(
+        target_name(&SessionSelector::Name(String::from("quiet-lake"))),
+        "quiet-lake"
+    );
+}
+
+#[test]
+fn a_number_too_large_to_parse_is_refused_like_any_other_line() {
+    let rows = vec![session_row("a")];
+    let error = pick(&rows, "99999999999999999999999999")
+        .expect_err("a number past the end of `usize` names no listed row");
+
+    assert_eq!(
+        error.to_string(),
+        "invalid arguments: `99999999999999999999999999` is not one of the listed \
+         sessions; expected a number 1 to 1"
+    );
+    assert_eq!(CliExitCode::from(&error), CliExitCode::UsageOrConfig);
+}
+
+#[test]
+fn spaces_around_the_typed_number_still_pick_that_row() {
+    let rows = vec![session_row("a"), session_row("b")];
+
+    assert_eq!(
+        pick(&rows, "  2  \n").expect("the trimmed line names row 2"),
+        1
     );
 }

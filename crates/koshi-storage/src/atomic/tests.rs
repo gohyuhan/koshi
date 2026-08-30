@@ -55,7 +55,13 @@ fn write_atomic_cleans_temp_and_keeps_target_when_rename_fails() {
 
     let err = write_atomic(&dst, b"x").unwrap_err();
 
-    assert!(matches!(err, StorageError::Io { .. }));
+    let StorageError::Io { detail } = err else {
+        panic!("expected an Io error, got {err:?}");
+    };
+    assert!(
+        detail.starts_with(&format!("replace {}: ", dst.display())),
+        "unexpected error detail: {detail}"
+    );
     assert_eq!(dir_entries(dir.path()), vec!["target".to_string()]);
     assert!(dst.is_dir(), "target must be left untouched");
 }
@@ -68,9 +74,19 @@ fn write_atomic_reports_io_error_when_temp_dir_is_missing() {
 
     let err = write_atomic(&dst, b"x").unwrap_err();
 
-    assert!(matches!(err, StorageError::Io { .. }));
+    let StorageError::Io { detail } = err else {
+        panic!("expected an Io error, got {err:?}");
+    };
     assert!(
-        dir_entries(dir.path()).is_empty(),
+        detail.starts_with(&format!(
+            "create temp in {}: ",
+            dir.path().join("missing").display()
+        )),
+        "unexpected error detail: {detail}"
+    );
+    assert_eq!(
+        dir_entries(dir.path()),
+        Vec::<String>::new(),
         "nothing must be created"
     );
 }
@@ -224,7 +240,7 @@ fn write_atomic_reports_io_error_when_a_path_component_is_a_file() {
         panic!("expected an Io error, got {err:?}");
     };
     assert!(
-        detail.starts_with("stat "),
+        detail.starts_with(&format!("stat {}: ", dst.display())),
         "unexpected error detail: {detail}"
     );
     // The blocker file is untouched and no temp was staged beside it.
@@ -316,4 +332,145 @@ fn write_atomic_replaces_a_read_only_file_and_keeps_its_mode() {
     assert_eq!(meta.permissions().mode() & 0o777, 0o400);
     assert_eq!(std::fs::read(&dst).unwrap(), b"new");
     assert_eq!(dir_entries(dir.path()), vec!["cfg.kdl".to_string()]);
+}
+
+#[test]
+fn write_atomic_replaces_a_longer_file_with_empty_data() {
+    let dir = TempDir::new().unwrap();
+    let dst = dir.path().join("cfg.kdl");
+    std::fs::write(&dst, b"a=1\nb=2\n").unwrap();
+
+    write_atomic(&dst, b"").unwrap();
+
+    assert_eq!(std::fs::read(&dst).unwrap(), b"");
+    assert_eq!(dir_entries(dir.path()), vec!["cfg.kdl".to_string()]);
+}
+
+#[test]
+fn write_atomic_writes_binary_bytes_verbatim() {
+    let dir = TempDir::new().unwrap();
+    let dst = dir.path().join("state.bin");
+    let data = [0u8, 0xff, b'\n', b'\r', 0x1b, 0x00, 0x7f];
+
+    write_atomic(&dst, &data).unwrap();
+
+    assert_eq!(std::fs::read(&dst).unwrap(), data);
+}
+
+#[test]
+fn write_atomic_writes_a_one_mebibyte_buffer_whole() {
+    let dir = TempDir::new().unwrap();
+    let dst = dir.path().join("big.bin");
+    let data: Vec<u8> = (0u8..=250).cycle().take(1024 * 1024).collect();
+
+    write_atomic(&dst, &data).unwrap();
+
+    assert_eq!(std::fs::read(&dst).unwrap(), data);
+    assert_eq!(dir_entries(dir.path()), vec!["big.bin".to_string()]);
+}
+
+#[test]
+fn write_atomic_accepts_a_non_ascii_file_name() {
+    let dir = TempDir::new().unwrap();
+    let dst = dir.path().join("設定✓.kdl");
+
+    write_atomic(&dst, b"a=1\n").unwrap();
+
+    assert_eq!(std::fs::read(&dst).unwrap(), b"a=1\n");
+    assert_eq!(dir_entries(dir.path()), vec!["設定✓.kdl".to_string()]);
+}
+
+#[test]
+fn write_atomic_twice_leaves_only_the_last_bytes_and_no_temp() {
+    let dir = TempDir::new().unwrap();
+    let dst = dir.path().join("cfg.kdl");
+
+    write_atomic(&dst, b"first").unwrap();
+    write_atomic(&dst, b"second").unwrap();
+
+    assert_eq!(std::fs::read(&dst).unwrap(), b"second");
+    assert_eq!(dir_entries(dir.path()), vec!["cfg.kdl".to_string()]);
+}
+
+#[test]
+fn write_atomic_succeeds_beside_a_target_that_blocked_an_earlier_replace() {
+    let dir = TempDir::new().unwrap();
+    // A directory at `blocked` fails the replace. The next write to a sibling
+    // path in the same directory lands, and the failed attempt leaves no temp.
+    let blocked = dir.path().join("blocked");
+    std::fs::create_dir(&blocked).unwrap();
+    let dst = dir.path().join("cfg.kdl");
+
+    write_atomic(&blocked, b"x").unwrap_err();
+    write_atomic(&dst, b"a=1\n").unwrap();
+
+    assert_eq!(std::fs::read(&dst).unwrap(), b"a=1\n");
+    let mut entries = dir_entries(dir.path());
+    entries.sort();
+    assert_eq!(entries, vec!["blocked".to_string(), "cfg.kdl".to_string()]);
+}
+
+#[cfg(unix)]
+#[test]
+fn write_atomic_copies_a_mode_wider_than_the_umask() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = TempDir::new().unwrap();
+    let dst = dir.path().join("cfg.kdl");
+    std::fs::write(&dst, b"old").unwrap();
+    // A 022 umask narrows a newly created file to 0644. The mode copy uses
+    // chmod and lands 0666 unchanged.
+    std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o666)).unwrap();
+
+    write_atomic(&dst, b"new").unwrap();
+
+    let mode = std::fs::metadata(&dst).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o666);
+    assert_eq!(std::fs::read(&dst).unwrap(), b"new");
+}
+
+#[cfg(unix)]
+#[test]
+fn write_atomic_replaces_a_symlink_to_a_directory_with_a_private_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = TempDir::new().unwrap();
+    let referent = dir.path().join("shared");
+    std::fs::create_dir(&referent).unwrap();
+    std::fs::write(referent.join("inner.txt"), b"other").unwrap();
+    let link = dir.path().join("cfg.kdl");
+    std::os::unix::fs::symlink(&referent, &link).unwrap();
+
+    write_atomic(&link, b"secret").unwrap();
+
+    // The link is gone, replaced by a private regular file; the directory it
+    // pointed at keeps its own entry untouched.
+    let meta = std::fs::symlink_metadata(&link).unwrap();
+    assert!(
+        meta.file_type().is_file(),
+        "symlink must become a regular file"
+    );
+    assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+    assert_eq!(std::fs::read(&link).unwrap(), b"secret");
+    assert_eq!(dir_entries(&referent), vec!["inner.txt".to_string()]);
+    assert_eq!(std::fs::read(referent.join("inner.txt")).unwrap(), b"other");
+}
+
+#[cfg(unix)]
+#[test]
+fn write_atomic_through_a_symlinked_parent_directory_lands_in_the_real_directory() {
+    let dir = TempDir::new().unwrap();
+    let real = dir.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    let link = dir.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let dst = link.join("cfg.kdl");
+
+    write_atomic(&dst, b"a=1\n").unwrap();
+
+    assert_eq!(std::fs::read(real.join("cfg.kdl")).unwrap(), b"a=1\n");
+    assert_eq!(dir_entries(&real), vec!["cfg.kdl".to_string()]);
+    let mut entries = dir_entries(dir.path());
+    entries.sort();
+    assert_eq!(entries, vec!["link".to_string(), "real".to_string()]);
 }

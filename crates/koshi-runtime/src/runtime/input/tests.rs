@@ -1,6 +1,6 @@
-//! End-to-end default-keymap tests: passthrough, lock escape, prefix display,
-//! multi-chord dispatch, timeout fallback, open-sequence capture, and pane
-//! resize.
+//! End-to-end input tests through the viewer's keymap: passthrough, lock
+//! escape, open-sequence capture, multi-chord dispatch, timeout fallback,
+//! which pane a press may reach, host paste, and pane resize.
 
 use super::*;
 
@@ -15,6 +15,7 @@ use koshi_core::command::{Command, CommandResult, FocusPaneArgs, FocusTarget, Ne
 use koshi_core::geometry::{Direction, PaneArea, Size};
 use koshi_core::ids::{PluginId, SessionId};
 use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags, NamedKey};
+use koshi_core::lock::LockMode;
 use koshi_core::resolve::ActionArgs;
 use koshi_layout::edit::split_leaf;
 use koshi_layout::tree::{LayoutNode, SplitNode};
@@ -465,7 +466,10 @@ fn prefix_pending_never_expires() {
     assert_eq!(viewer.next_key_wakeup(now), None);
     expire(&mut runtime, &mut viewer, now + Duration::from_secs(3600));
     assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
-    assert!(viewer.pending_sequence().cloned().is_some());
+    assert_eq!(
+        viewer.pending_sequence().cloned(),
+        Some(KeySequence::from(chord(ModFlags::CTRL, 'p')))
+    );
 }
 
 #[test]
@@ -1383,7 +1387,10 @@ fn the_unlock_chord_escapes_a_locked_client_from_inside_an_open_sequence() {
     press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'l'), now);
     assert_eq!(lock_mode(&runtime, client), LockMode::Locked);
     press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'x'), now);
-    assert!(viewer.pending_sequence().cloned().is_some());
+    assert_eq!(
+        viewer.pending_sequence().cloned(),
+        Some(KeySequence::from(chord(ModFlags::CTRL, 'x')))
+    );
 
     // The unlock chord resolves ahead of the keymap and ahead of the open
     // sequence: the client unlocks, the held `<C-x>` is dropped rather than
@@ -1668,4 +1675,107 @@ fn pasting_snaps_a_scrolled_up_view_back_to_live_output() {
 
     runtime.handle_host_paste(client, "ls\n");
     assert_eq!(scroll_offset(&runtime, client, pane), 0);
+}
+
+#[test]
+fn an_empty_host_paste_writes_nothing() {
+    let (mut runtime, fake, client, _viewer) = runtime();
+    let pane = only_pane(&runtime);
+
+    // Selecting nothing and hitting the OS paste key hands the session an
+    // empty string; no empty write reaches the shell.
+    runtime.handle_host_paste(client, "");
+
+    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
+}
+
+#[test]
+fn a_host_paste_from_an_unknown_client_writes_nothing() {
+    let (mut runtime, fake, _client, _viewer) = runtime();
+    let pane = only_pane(&runtime);
+
+    // A paste arriving for a client the session does not know has no lock mode
+    // to read, so nothing is written rather than landing on someone else's pane.
+    runtime.handle_host_paste(ClientId::new(), "ls");
+
+    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
+}
+
+#[test]
+fn a_host_paste_still_reaches_the_pane_while_the_client_is_locked() {
+    let (mut runtime, fake, client, mut viewer) = runtime();
+    let pane = only_pane(&runtime);
+    press(
+        &mut runtime,
+        &mut viewer,
+        chord(ModFlags::CTRL, 'l'),
+        Instant::now(),
+    );
+    assert_eq!(lock_mode(&runtime, client), LockMode::Locked);
+
+    runtime.handle_host_paste(client, "ls");
+
+    // Locked mode passes what it does not bind, and it binds no paste.
+    assert_eq!(fake.writes(pane).expect("writes"), vec![b"ls".to_vec()]);
+}
+
+#[test]
+fn a_host_paste_writes_nothing_when_the_focused_pane_is_suppressed() {
+    let (mut runtime, fake, client, _viewer) = runtime();
+    let pane = only_pane(&runtime);
+
+    // 3x3 leaves less than MIN_PANE_SIZE plus the pane's one-cell border, so
+    // the sole pane draws no content and a paste is aimed at nothing.
+    runtime.handle_client_resize(client, Size { cols: 3, rows: 3 }, None);
+    assert!(
+        runtime
+            .build_snapshot(client)
+            .expect("snapshot")
+            .session
+            .active_tab
+            .all_suppressed,
+        "test setup: the sole pane must be suppressed at this size"
+    );
+
+    runtime.handle_host_paste(client, "ls");
+
+    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
+}
+
+#[test]
+fn a_bound_action_the_session_does_not_know_dispatches_nothing() {
+    let (mut runtime, fake, client, _viewer) = runtime();
+    let pane = only_pane(&runtime);
+    let tabs_before = runtime
+        .sessions()
+        .values()
+        .next()
+        .expect("session")
+        .tabs
+        .len();
+
+    // A viewer keymap naming an action this session's registry has no entry
+    // for: the action resolves to no plan, so no command is dispatched and the
+    // chord is not written to the pane either.
+    runtime.handle_bound_action(
+        client,
+        BoundAction {
+            action: ActionRef::core("no-such-action").expect("valid core action name"),
+            args: ActionArgs::None,
+        },
+        Direction::Right,
+    );
+
+    assert_eq!(
+        runtime
+            .sessions()
+            .values()
+            .next()
+            .expect("session")
+            .tabs
+            .len(),
+        tabs_before
+    );
+    assert_eq!(runtime.pty_handles.len(), 1);
+    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
 }

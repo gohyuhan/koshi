@@ -47,18 +47,22 @@ fn returns_unit(otherwise: &Expr) -> bool {
 /// Runs the function's body only when `koshi.kdl`'s top-level
 /// `allow-beta-features` is on.
 ///
-/// If the setting is off, the body does not run. The call gives back the
-/// `otherwise` expression. The first blocked call at that site logs a warning.
-/// The warning names the function and the setting.
+/// If the setting is off, the body does not run and the call gives back the
+/// `otherwise` expression. The first blocked call of each gated function logs a
+/// warning that names the function and the setting. The other blocked calls of
+/// that function log nothing.
 ///
 /// The gate reads the setting where the body would start. An ordinary function
 /// reads it at the call. An `async fn` reads it at the first poll. A future
 /// that nobody polls reads nothing and logs nothing.
 ///
-/// The warning travels through `tracing`. It appears only where a subscriber is
+/// The warning travels through `tracing` and appears only where a subscriber is
 /// installed, such as an interactive session with `logging { enabled #true }`. A
-/// `koshi <verb>` command installs no subscriber, so a call blocked there gives
-/// back `otherwise` silently.
+/// `koshi <verb>` command installs no subscriber: a call blocked there gives back
+/// `otherwise` and shows no warning.
+///
+/// The attribute takes exactly one argument, `otherwise = <expression>`. A
+/// missing, misnamed, or extra argument is a compile error.
 ///
 /// The generated code calls `koshi_beta::allowed` and `koshi_beta::log_blocked`.
 /// The gated function's crate depends on `koshi-beta`.

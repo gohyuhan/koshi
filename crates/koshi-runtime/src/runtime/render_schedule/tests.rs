@@ -31,6 +31,21 @@ fn fresh_scheduler_has_nothing_pending() {
 }
 
 #[test]
+fn the_default_scheduler_starts_like_a_new_one() {
+    let t0 = Instant::now();
+    let mut s = RenderScheduler::default();
+    assert!(!s.poll(t0));
+    assert_eq!(s.next_wakeup(t0), None);
+}
+
+#[test]
+fn every_reason_owns_a_distinct_bit_of_the_pending_mask() {
+    let bits: Vec<u8> = ALL_REASONS.iter().map(|reason| reason.bit()).collect();
+    assert_eq!(bits, vec![1, 2, 4, 8, 16, 32, 64, 128]);
+    assert_eq!(BLINK_BIT, 128);
+}
+
+#[test]
 fn every_reason_renders_immediately_on_first_invalidation() {
     let t0 = Instant::now();
     for reason in ALL_REASONS {
@@ -106,6 +121,33 @@ fn a_real_reason_alongside_blink_uses_the_fast_cadence() {
         s.poll(at(t0, 8)),
         "a real reason forces the 8 ms gate even with blink pending"
     );
+}
+
+#[test]
+fn a_real_reason_added_to_a_waiting_blink_switches_to_the_fast_cadence() {
+    let t0 = Instant::now();
+    let mut s = RenderScheduler::new();
+    s.invalidate(InvalidationReason::BlinkTick);
+    assert!(s.poll(t0));
+
+    s.invalidate(InvalidationReason::BlinkTick);
+    assert!(!s.poll(at(t0, 8)), "blink alone waits for 250 ms");
+
+    s.invalidate(InvalidationReason::LayoutChanged);
+    assert_eq!(s.next_wakeup(at(t0, 8)), Some(Duration::ZERO));
+    assert!(s.poll(at(t0, 8)), "the real reason drops the gate to 8 ms");
+}
+
+#[test]
+fn a_poll_earlier_than_the_last_render_is_not_due() {
+    let t0 = Instant::now();
+    let mut s = RenderScheduler::new();
+    s.invalidate(InvalidationReason::PtyOutput);
+    assert!(s.poll(at(t0, 100)));
+
+    s.invalidate(InvalidationReason::PtyOutput);
+    assert!(!s.poll(t0));
+    assert_eq!(s.next_wakeup(t0), Some(FRAME_INTERVAL));
 }
 
 #[test]

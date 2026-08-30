@@ -9,11 +9,10 @@
 //!
 //! ## Pulling events from a channel
 //!
-//! The runtime's event bus delivers events over a bounded channel.
-//! [`drain_from`](event_queue::RecordedEvents::drain_from) takes a
-//! `FnMut() -> Option<koshi_core::event::Event>` puller, so it works with any
-//! channel type. A test passes `|| rx.try_recv().ok()` for a
-//! `std::sync::mpsc` receiver.
+//! [`drain_from`](event_queue::RecordedEvents::drain_from) takes any
+//! `FnMut() -> Option<koshi_core::event::Event>` puller and appends each
+//! event it returns until it returns `None`. A test passes
+//! `|| rx.try_recv().ok()` for a `std::sync::mpsc` receiver.
 
 use koshi_core::event::Event;
 
@@ -74,7 +73,8 @@ impl RecordedEvents {
     ///
     /// If the next `expected.len()` events are not exactly `expected`, or if
     /// fewer than `expected.len()` events remain. The panic message holds an
-    /// index-aligned diff.
+    /// index-aligned diff of `expected` against every remaining event. A
+    /// failed assertion consumes nothing.
     pub fn assert_prefix(&mut self, expected: &[Event]) {
         if self.inner.len() < expected.len() || self.inner[..expected.len()] != *expected {
             panic!(
@@ -87,13 +87,14 @@ impl RecordedEvents {
 
     /// Assert the remaining events are *exactly* `expected`, then consume them.
     ///
-    /// Matches [`assert_prefix`](Self::assert_prefix) followed by
-    /// [`assert_no_more`](Self::assert_no_more).
+    /// Passes in the same cases as [`assert_prefix`](Self::assert_prefix)
+    /// followed by [`assert_no_more`](Self::assert_no_more).
     ///
     /// # Panics
     ///
     /// If the remaining events differ from `expected` in length or content. The
-    /// panic message holds one index-aligned diff covering both.
+    /// panic message holds one index-aligned diff covering both. A failed
+    /// assertion consumes nothing.
     pub fn assert_exact(&mut self, expected: &[Event]) {
         if self.inner != *expected {
             panic!(

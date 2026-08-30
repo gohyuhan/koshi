@@ -17,10 +17,12 @@
 //! [`MAX_LIVE_REMOTE`](crate::router::MAX_LIVE_REMOTE) registrations and
 //! refuses the connections that arrive over that count.
 //!
-//! Every blocking step before the Welcome finishes inside `ADMISSION_WINDOW`,
-//! counted from the moment the connection's thread starts. Each single read and
-//! write inside those steps is given the time left on that deadline when it
-//! starts. After the Welcome both halves lose their deadline.
+//! The TLS handshake, the frame the caller opens with, and the refusal naming
+//! both version ranges finish inside `ADMISSION_WINDOW`, counted from the
+//! moment the connection's thread starts. Each single read and write inside
+//! them is given the time left on that deadline when it starts. Every other
+//! refusal replaces that deadline with `REFUSAL_WINDOW`. After the Welcome both
+//! halves lose their deadline.
 //!
 //! Every refusal is
 //! [`REMOTE_REFUSED`](koshi_ipc::remote_wire::REMOTE_REFUSED) and closes the
@@ -65,9 +67,10 @@ use koshi_ipc::transport::{
 
 use crate::router::RouterEvent;
 
-/// The total time a caller that has not been admitted may hold a connection
-/// thread: the TLS handshake, the frame it opens with, and any refusal
-/// written back all finish inside it.
+/// How long the connection's thread spends on the TLS handshake, on reading
+/// the frame the caller opens with, and on writing the refusal that names both
+/// version ranges, counted from the moment that thread starts. [`refuse`]
+/// replaces this deadline with [`REFUSAL_WINDOW`].
 const ADMISSION_WINDOW: Duration = Duration::from_secs(10);
 
 /// How long one address's connection attempts are counted over.
@@ -236,8 +239,10 @@ impl Occasional {
 }
 
 /// Accept connections and give each its own thread, dropping the ones from an
-/// address that has opened too many. A failed accept is reported, pauses
-/// briefly, and retries.
+/// address that has opened more than [`MAX_ATTEMPTS`] inside [`RATE_WINDOW`]
+/// and the ones that arrive while [`MAX_IN_ADMISSION`] connections are already
+/// waiting to present a secret. A failed accept is reported at most once inside
+/// [`LOG_WINDOW`], waits [`ACCEPT_RETRY_DELAY`], and retries.
 fn accept_loop(listener: &TcpListener, tls: &Arc<ServerConfig>, admissions: &Sender<RouterEvent>) {
     let mut attempts = RateTable::new();
     let in_admission = Arc::new(AtomicUsize::new(0));
@@ -412,9 +417,11 @@ enum Opening {
 /// Serve one remote connection: the TLS handshake, the secret, and then either
 /// the sessions that secret reaches or a bridge to one of them.
 ///
-/// Every step up to the Welcome finishes inside [`ADMISSION_WINDOW`], counted
-/// from the moment this thread starts. Once the caller is admitted the socket
-/// timeouts are cleared, since an admitted client may sit as long as it likes.
+/// The TLS handshake and the frame the caller opens with finish inside
+/// [`ADMISSION_WINDOW`], counted from the moment this thread starts. A refusal
+/// written by [`refuse`] gets [`REFUSAL_WINDOW`] instead. Once the caller is
+/// admitted both halves and the socket lose their deadlines and block for as
+/// long as it takes.
 ///
 /// Admission registers the connection with the router, attached or not. The
 /// registration is dropped when the connection finishes, whichever step it
@@ -555,7 +562,7 @@ fn serve_admitted(
 /// and then attach. `Some` is the endpoint file of the session an admitted
 /// attach reached; the bytes after that attach belong to that session's server.
 /// `None` means the connection is finished: it hung up, it sent something this
-/// loop does not serve, or its attach was refused.
+/// loop does not serve, its attach was refused, or the dispatcher is gone.
 fn admitted_frames(
     reader: &mut impl Read,
     writer: &mut (impl Write + Deadlined),
@@ -645,7 +652,9 @@ fn open_session_bridge(
 ///
 /// The router sends the session-plane Hello carrying the session's endpoint
 /// token and the client's version range. The session server's answer to that
-/// Hello, and everything after it, travels back through the bridge unread.
+/// Hello, and everything after it, travels back through the bridge unread. A
+/// session that cannot be opened is refused, and the connection is reported
+/// ended with nothing bridged.
 ///
 /// Two threads carry the two directions. Whichever ends first shuts the TCP
 /// socket in both directions, ending the thread reading the TLS stream at once,
@@ -789,15 +798,15 @@ fn refuse(writer: &mut (impl Write + Deadlined)) {
 /// [`MAX_FRAME_LEN`] after it. A length over `max_len` is [`Opening::Closed`]
 /// and reads no payload.
 fn read_client_frame<R: Read>(reader: &mut R, max_len: u32) -> Opening {
-    let mut length = [0u8; 4];
-    if reader.read_exact(&mut length).is_err() {
+    let mut length_bytes = [0u8; 4];
+    if reader.read_exact(&mut length_bytes).is_err() {
         return Opening::Closed;
     }
-    let len = u32::from_be_bytes(length);
-    if len > max_len {
+    let payload_len = u32::from_be_bytes(length_bytes);
+    if payload_len > max_len {
         return Opening::Closed;
     }
-    let mut payload = vec![0u8; len as usize];
+    let mut payload = vec![0u8; payload_len as usize];
     if reader.read_exact(&mut payload).is_err() {
         return Opening::Closed;
     }
@@ -808,6 +817,10 @@ fn read_client_frame<R: Read>(reader: &mut R, max_len: u32) -> Opening {
 }
 
 /// Write one frame: a 4-byte big-endian length, then the JSON, in one write.
+///
+/// # Errors
+/// The JSON encoder's own failure, `the answer is larger than a frame can
+/// carry` for a payload past `u32::MAX` bytes, and whatever the writer reports.
 fn send_frame<W: Write>(writer: &mut W, frame: &RemoteServerFrame) -> io::Result<()> {
     let payload = serde_json::to_vec(frame)?;
     let length = u32::try_from(payload.len())

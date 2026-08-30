@@ -12,7 +12,7 @@ use std::time::SystemTime;
 
 use ratatui::backend::TestBackend;
 
-use koshi_config::layer::{PartialColorPalette, PartialThemeConfig};
+use koshi_config::layer::{PartialColorPalette, PartialKeybindingsConfig, PartialThemeConfig};
 use koshi_config::types::RgbColor;
 use koshi_core::command::{Command, CommandEnvelope, CommandSource};
 use koshi_core::ids::{CommandId, PaneId, SessionId};
@@ -79,6 +79,23 @@ fn an_old_session_sets_the_viewer_compatibility_state() {
     assert!(!client.pane_area_supported);
 }
 
+#[test]
+fn a_current_session_sets_the_viewer_compatibility_state() {
+    // The flag is forwarded, not hardcoded: a viewer built for a session that
+    // echoed the pane-area field must record that it did.
+    let (_events_tx, events_rx) = mpsc::channel();
+    let client = viewer(
+        ClientId::new(),
+        VIEWPORT,
+        events_rx,
+        TerminalCleanupGuard::new(),
+        true,
+        LoadedConfig::default(),
+    );
+
+    assert!(client.pane_area_supported);
+}
+
 /// The whole rendered screen flattened to a string, for substring assertions.
 fn screen_text(terminal: &Terminal<TestBackend>) -> String {
     terminal
@@ -124,6 +141,30 @@ fn the_launch_hands_the_viewer_the_config_files_it_read() {
         client.theme().border_focused,
         ratatui::style::Color::Rgb(0xff, 0, 0)
     );
+}
+
+#[test]
+fn the_launch_hands_the_viewer_the_keymap_file_it_read() {
+    // A keymap layer that validates replaces the built-in keybinding settings.
+    // A launch that dropped `loaded.keybindings` would leave the stock 500 ms
+    // chord timeout in place.
+    let fake = Arc::new(FakePtyBackend::new());
+    let (mut server, client_id, _pane) = boot(&fake);
+
+    let client = test_client_with(
+        &mut server,
+        client_id,
+        LoadedConfig {
+            app: None,
+            theme: None,
+            keybindings: Some(PartialKeybindingsConfig {
+                chord_timeout_ms: Some(1234),
+                ..PartialKeybindingsConfig::default()
+            }),
+        },
+    );
+
+    assert_eq!(client.config().keybindings.chord_timeout_ms, 1234);
 }
 
 #[test]
@@ -248,6 +289,99 @@ fn painting_emits_a_changed_cursor_style_and_records_it() {
 }
 
 #[test]
+fn painting_a_frame_that_names_no_cursor_style_records_none() {
+    // A frame with no focused pane leaves `cursor_style` with nothing to
+    // report. The record still follows the frame: a later frame that does name
+    // a style counts as a change and is sent again.
+    let fake = Arc::new(FakePtyBackend::new());
+    let (mut server, client_id, _pane_id) = boot(&fake);
+    let client = test_client(&mut server, client_id);
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+    let mut snapshot = frame(&server, client_id);
+    snapshot.client.focused_pane = None;
+    let mut last_cursor = Some(CursorStyle::Shaped {
+        shape: CursorShape::Block,
+        blink: true,
+    });
+
+    paint_frame(
+        &mut terminal,
+        &client,
+        &snapshot,
+        &regions(VIEWPORT),
+        &ViewerPaint::from_frame(&client, &snapshot),
+        &mut String::new(),
+        &mut last_cursor,
+    )
+    .expect("paint");
+
+    assert_eq!(last_cursor, None);
+}
+
+#[test]
+fn painting_records_the_window_title_it_sent() {
+    let fake = Arc::new(FakePtyBackend::new());
+    let (mut server, client_id, pane_id) = boot(&fake);
+    let client = test_client(&mut server, client_id);
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+    let mut snapshot = frame(&server, client_id);
+    snapshot.session.name = "quiet-lake".to_string();
+    snapshot.client.focused_pane = Some(pane_id);
+    snapshot.panes[0].id = pane_id;
+    snapshot.panes[0].title = Some("htop".to_string());
+    let mut last_title = String::new();
+
+    paint_frame(
+        &mut terminal,
+        &client,
+        &snapshot,
+        &regions(VIEWPORT),
+        &ViewerPaint::from_frame(&client, &snapshot),
+        &mut last_title,
+        &mut None,
+    )
+    .expect("paint");
+
+    assert_eq!(last_title, "quiet-lake | htop");
+}
+
+#[test]
+fn a_paint_after_a_title_change_records_the_new_title() {
+    // The record decides whether `SetTitle` is written at all. It tracks every
+    // frame, not only the first one.
+    let fake = Arc::new(FakePtyBackend::new());
+    let (mut server, client_id, _pane_id) = boot(&fake);
+    let client = test_client(&mut server, client_id);
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+    let mut snapshot = frame(&server, client_id);
+    snapshot.session.name = "quiet-lake".to_string();
+    snapshot.client.focused_pane = None;
+    let mut last_title = String::new();
+    let paint = |terminal: &mut Terminal<TestBackend>,
+                 snapshot: &RenderSnapshot,
+                 last_title: &mut String| {
+        paint_frame(
+            terminal,
+            &client,
+            snapshot,
+            &regions(VIEWPORT),
+            &ViewerPaint::from_frame(&client, snapshot),
+            last_title,
+            &mut None,
+        )
+        .expect("paint");
+    };
+
+    paint(&mut terminal, &snapshot, &mut last_title);
+    assert_eq!(last_title, "quiet-lake");
+
+    snapshot.session.name = "loud-hill".to_string();
+    paint(&mut terminal, &snapshot, &mut last_title);
+
+    assert_eq!(last_title, "loud-hill");
+}
+
+#[test]
 fn each_pane_cursor_style_maps_to_the_crossterm_command_that_re_emits_it() {
     // koshi copies the focused pane's DECSCUSR style out to the terminal it is
     // itself running in, and crossterm writes these commands as the very same
@@ -308,6 +442,52 @@ fn window_title_with_a_titled_focused_pane_joins_session_and_title() {
     snapshot.panes[0].title = Some("htop".to_string());
 
     assert_eq!(window_title(&snapshot), "quiet-lake | htop");
+}
+
+#[test]
+fn window_title_reads_the_focused_pane_not_the_first_one_listed() {
+    // The lookup matches on the pane id. Every other title test lists a single
+    // pane; a lookup that took the first entry would pass all of them.
+    let fake = Arc::new(FakePtyBackend::new());
+    let (server, client_id, pane_id) = boot(&fake);
+    let mut snapshot = frame(&server, client_id);
+    snapshot.session.name = "quiet-lake".to_string();
+    let focused = PaneId::new();
+    let mut second = snapshot.panes[0].clone();
+    second.id = focused;
+    second.title = Some("htop".to_string());
+    snapshot.panes[0].id = pane_id;
+    snapshot.panes[0].title = Some("bash".to_string());
+    snapshot.panes.push(second);
+    snapshot.client.focused_pane = Some(focused);
+
+    assert_eq!(window_title(&snapshot), "quiet-lake | htop");
+}
+
+#[test]
+fn window_title_with_an_untitled_focused_pane_falls_back_to_the_session_name() {
+    let fake = Arc::new(FakePtyBackend::new());
+    let (server, client_id, pane_id) = boot(&fake);
+    let mut snapshot = frame(&server, client_id);
+    snapshot.session.name = "quiet-lake".to_string();
+    snapshot.client.focused_pane = Some(pane_id);
+    snapshot.panes[0].id = pane_id;
+    snapshot.panes[0].title = None;
+
+    assert_eq!(window_title(&snapshot), "quiet-lake");
+}
+
+#[test]
+fn window_title_keeps_a_non_ascii_pane_title_whole() {
+    let fake = Arc::new(FakePtyBackend::new());
+    let (server, client_id, pane_id) = boot(&fake);
+    let mut snapshot = frame(&server, client_id);
+    snapshot.session.name = "quiet-lake".to_string();
+    snapshot.client.focused_pane = Some(pane_id);
+    snapshot.panes[0].id = pane_id;
+    snapshot.panes[0].title = Some("日本語 🙂".to_string());
+
+    assert_eq!(window_title(&snapshot), "quiet-lake | 日本語 🙂");
 }
 
 #[test]

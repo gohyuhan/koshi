@@ -12,6 +12,7 @@ use koshi_core::event::{Event, PaneCommandFinished, PaneCommandStarted};
 use koshi_core::ids::ClientId;
 use koshi_core::process::{PtySize, ShellKind, SpawnSpec};
 use koshi_pty::backend::state::PtyBackend;
+use koshi_pty::error::PtyError;
 use koshi_renderer::snapshot::Delivery;
 use koshi_terminal::engine::TerminalEngine;
 use koshi_terminal::style::{Color, Style};
@@ -185,7 +186,7 @@ fn an_unmatched_finish_and_plain_output_publish_no_command_events() {
 
     rt.handle_pty_output(pane, b"\x1b]133;D;1\x07plain output");
 
-    assert!(deliveries.try_iter().next().is_none());
+    assert_eq!(deliveries.try_iter().collect::<Vec<_>>(), Vec::new());
 }
 
 #[test]
@@ -271,7 +272,10 @@ fn a_failed_reply_write_is_dropped_and_output_still_lands() {
     // write left no record.
     assert_eq!(ch(&rt, pane, 0, 0), 'x');
     assert!(rt.render_scheduler.poll(Instant::now()));
-    assert!(fake.writes(pane).is_err());
+    assert_eq!(
+        fake.writes(pane).unwrap_err(),
+        PtyError::UnknownPane { pane }
+    );
 }
 
 #[test]
@@ -282,7 +286,66 @@ fn bytes_for_a_pane_with_no_engine_are_ignored() {
 
     rt.handle_pty_output(gone, b"\x1b[31mboom");
 
-    // No engine changed and no render was scheduled.
+    // No engine changed, no engine was created, and no render was scheduled.
     assert_eq!(ch(&rt, live, 0, 0), ' ');
+    assert_eq!(rt.terminal_engines().len(), 1);
     assert!(!rt.render_scheduler.poll(Instant::now()));
+}
+
+#[test]
+fn an_empty_chunk_schedules_a_render_and_leaves_the_grid_alone() {
+    let (mut rt, _fake, _tx) = new_runtime();
+    let pane = add_engine(&mut rt);
+
+    rt.handle_pty_output(pane, b"");
+
+    assert_eq!(ch(&rt, pane, 0, 0), ' ');
+    assert_eq!(
+        rt.terminal_engines()[&pane]
+            .state()
+            .active_cursor_position(),
+        (0, 0)
+    );
+    assert!(rt.render_scheduler.poll(Instant::now()));
+}
+
+#[test]
+fn lines_scrolled_off_the_top_enter_the_panes_scrollback() {
+    let (mut rt, _fake, _tx) = new_runtime();
+    let pane = add_engine(&mut rt);
+
+    // Five lines on a three-row grid: the first two scroll off the top.
+    rt.handle_pty_output(pane, b"a\r\nb\r\nc\r\nd\r\ne");
+
+    let scrollback = rt.terminal_engines()[&pane].state().scrollback();
+    assert_eq!(scrollback.total_pushed(), 2);
+    assert_eq!(scrollback.len(), 2);
+}
+
+#[test]
+fn erasing_the_scrollback_empties_it_and_keeps_the_push_count() {
+    let (mut rt, _fake, _tx) = new_runtime();
+    let pane = add_engine(&mut rt);
+    rt.handle_pty_output(pane, b"a\r\nb\r\nc\r\nd\r\ne");
+
+    // CSI 3 J drops every retained line.
+    rt.handle_pty_output(pane, b"\x1b[3J");
+
+    let scrollback = rt.terminal_engines()[&pane].state().scrollback();
+    assert_eq!(scrollback.len(), 0);
+    assert_eq!(scrollback.total_pushed(), 2);
+}
+
+#[test]
+fn entering_the_alternate_screen_keeps_the_primary_scrollback() {
+    let (mut rt, _fake, _tx) = new_runtime();
+    let pane = add_engine(&mut rt);
+    rt.handle_pty_output(pane, b"a\r\nb\r\nc\r\nd\r\ne");
+
+    rt.handle_pty_output(pane, b"\x1b[?1049h");
+
+    let state = rt.terminal_engines()[&pane].state();
+    assert!(!state.on_primary_screen());
+    assert_eq!(state.scrollback().len(), 2);
+    assert_eq!(state.active_grid().cell(0, 0).expect("cell").ch(), ' ');
 }

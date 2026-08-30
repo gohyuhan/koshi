@@ -53,9 +53,8 @@ fn the_store_path_is_remote_servers_under_the_data_dir() {
     );
 }
 
-/// The lock guards the store rather than sitting on it: the store file is
-/// replaced by a rename, so a lock held on that path would guard a file no
-/// later reader opens.
+/// The lock sits beside the store, not on it. The store file is replaced by a
+/// rename; a lock held on the store path guards the file the rename removed.
 #[test]
 fn the_lock_path_sits_beside_the_store_and_is_not_the_store() {
     let data_dir = Path::new("/home/ada/.local/share/koshi");
@@ -133,7 +132,7 @@ fn a_server_is_found_by_its_name_and_by_its_address() {
         saved_by(&store, "laptop.local:7654").map(|server| server.address.as_str()),
         Some("laptop.local:7654")
     );
-    assert!(saved_by(&store, "desk").is_none());
+    assert_eq!(store.find("desk"), Lookup::NotSaved);
 }
 
 #[test]
@@ -214,18 +213,23 @@ fn a_record_carries_the_four_fields_a_listing_reports_and_the_secret_it_leaves_b
     let encoded = serde_json::to_value(&record).expect("a record encodes");
     let fields = encoded.as_object().expect("a record encodes as an object");
 
-    for field in ["name", "address", "fingerprint", "last_used_at"] {
-        assert!(fields.contains_key(field), "a record carries {field}");
-    }
+    let mut names: Vec<&str> = fields.keys().map(String::as_str).collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        [
+            "added_at",
+            "address",
+            "fingerprint",
+            "last_used_at",
+            "name",
+            "secret"
+        ]
+    );
     assert_eq!(
         fields["secret"],
         serde_json::Value::String("a secret".to_string()),
         "the secret travels in the file, so the next connection presents it"
-    );
-    assert_eq!(
-        fields.len(),
-        6,
-        "a record carries these six fields: {fields:?}"
     );
 }
 
@@ -297,15 +301,17 @@ fn a_selector_naming_one_record_and_addressing_another_names_neither() {
         last_used_at: None,
     });
 
-    assert!(
-        saved_by(&store, "target.example:7654").is_none(),
+    assert_eq!(
+        store.find("target.example:7654"),
+        Lookup::Ambiguous,
         "the selector answers for two different records, so it answers for neither"
     );
-    assert!(store.forget("target.example:7654").is_none());
+    assert_eq!(store.forget("target.example:7654"), None);
     assert_eq!(store.records.len(), 2, "and it removed nothing");
-    assert!(store
-        .set_secret("target.example:7654", ConnectionToken::generate())
-        .is_none());
+    assert_eq!(
+        store.set_secret("target.example:7654", ConnectionToken::generate()),
+        None
+    );
 }
 
 #[test]
@@ -497,17 +503,20 @@ fn a_selector_matching_two_records_matches_neither_however_they_match() {
     store.records.push(saved(Some("work"), "desk.local:7654"));
     store.records.push(saved(Some("work"), "laptop.local:7654"));
 
-    assert!(saved_by(&store, "work").is_none(), "two names, no answer");
-    assert!(store.forget("work").is_none());
+    assert_eq!(
+        store.find("work"),
+        Lookup::Ambiguous,
+        "two names, no answer"
+    );
+    assert_eq!(store.forget("work"), None);
     assert_eq!(store.records.len(), 2, "and nothing was removed");
-    assert!(store
-        .set_secret("work", ConnectionToken::generate())
-        .is_none());
+    assert_eq!(store.set_secret("work", ConnectionToken::generate()), None);
     store.touch("work", SystemTime::now());
-    assert!(
-        store.records.iter().all(|r| r.last_used_at.is_none()),
+    assert_eq!(
+        store.records[0].last_used_at, None,
         "and nothing was stamped"
     );
+    assert_eq!(store.records[1].last_used_at, None);
 }
 
 #[test]
@@ -547,7 +556,10 @@ fn an_ambiguous_selector_says_so_and_never_reads_as_nothing_saved() {
 
     assert_eq!(store.find("laptop.local:7654"), Lookup::Ambiguous);
     assert_eq!(store.find("nothing-is-saved-here"), Lookup::NotSaved);
-    assert!(matches!(store.find("desk.local:7654"), Lookup::Saved(_)));
+    assert_eq!(
+        store.find("desk.local:7654"),
+        Lookup::Saved(&store.records[0])
+    );
 }
 
 #[test]
@@ -587,4 +599,282 @@ fn a_record_with_no_pinned_fingerprint_survives_the_file_it_is_written_to() {
     store.write(&path).expect("write the store");
 
     assert_eq!(ServerStore::read(&path).expect("read it back"), store);
+}
+
+#[test]
+fn an_empty_store_answers_to_nothing_and_forgets_nothing() {
+    let mut store = ServerStore::new();
+
+    assert_eq!(store.find("work"), Lookup::NotSaved);
+    assert_eq!(store.find(""), Lookup::NotSaved);
+    assert_eq!(store.forget("work"), None);
+    assert_eq!(store.set_secret("work", ConnectionToken::new("x")), None);
+    assert_eq!(store.records, Vec::new());
+}
+
+#[test]
+fn a_store_holding_one_record_is_written_as_these_exact_bytes() {
+    let dir = TempDir::new().expect("make a temp dir");
+    let path = store_path(dir.path());
+    one_server().write(&path).expect("write the store");
+
+    let written = std::fs::read_to_string(&path).expect("read the file");
+    assert_eq!(
+        written,
+        format!(
+            r#"{{"format":{SERVER_STORE_FORMAT},"records":[{{"name":"work","address":"laptop.local:7654","secret":"a secret","fingerprint":"{}","added_at":{{"secs_since_epoch":100,"nanos_since_epoch":0}},"last_used_at":null}}]}}"#,
+            "ab".repeat(32)
+        )
+    );
+}
+
+#[test]
+fn junk_bytes_are_an_unreadable_saved_servers_file() {
+    let dir = TempDir::new().expect("make a temp dir");
+    let path = store_path(dir.path());
+    std::fs::create_dir_all(path.parent().expect("the remote directory")).expect("make it");
+    std::fs::write(&path, b"not a store").expect("write junk");
+
+    let failure = ServerStore::read(&path).expect_err("junk is refused");
+    let detail = serde_json::from_slice::<ServerStore>(b"not a store")
+        .expect_err("junk does not decode")
+        .to_string();
+    assert_eq!(
+        failure.to_string(),
+        format!(
+            "the saved servers file at {} is unreadable: {detail}",
+            path.display()
+        )
+    );
+}
+
+#[test]
+fn a_store_whose_bytes_stop_part_way_is_unreadable() {
+    let dir = TempDir::new().expect("make a temp dir");
+    let path = store_path(dir.path());
+    one_server().write(&path).expect("write the store");
+    let whole = std::fs::read(&path).expect("read the file");
+    let cut = &whole[..whole.len() / 2];
+    std::fs::write(&path, cut).expect("write the first half");
+
+    let failure = ServerStore::read(&path).expect_err("a cut file is refused");
+    let detail = serde_json::from_slice::<ServerStore>(cut)
+        .expect_err("half a store does not decode")
+        .to_string();
+    assert_eq!(
+        failure.to_string(),
+        format!(
+            "the saved servers file at {} is unreadable: {detail}",
+            path.display()
+        )
+    );
+}
+
+#[test]
+fn a_record_carrying_an_unknown_field_makes_the_store_unreadable() {
+    let dir = TempDir::new().expect("make a temp dir");
+    let path = store_path(dir.path());
+    let bytes = format!(
+        r#"{{"format":{SERVER_STORE_FORMAT},"records":[{{"name":"work","address":"laptop.local:7654","secret":"a secret","colour":"red","added_at":{{"secs_since_epoch":100,"nanos_since_epoch":0}},"last_used_at":null}}]}}"#
+    );
+    std::fs::create_dir_all(path.parent().expect("the remote directory")).expect("make it");
+    std::fs::write(&path, &bytes).expect("write the store by hand");
+
+    let failure = ServerStore::read(&path).expect_err("an unknown field is refused");
+    let detail = serde_json::from_str::<ServerStore>(&bytes)
+        .expect_err("an unknown field does not decode")
+        .to_string();
+    assert_eq!(
+        failure.to_string(),
+        format!(
+            "the saved servers file at {} is unreadable: {detail}",
+            path.display()
+        )
+    );
+}
+
+#[test]
+fn a_store_carrying_an_unknown_top_level_field_is_unreadable() {
+    let bytes = format!(r#"{{"owner":"ada","format":{SERVER_STORE_FORMAT},"records":[]}}"#);
+
+    let failure = serde_json::from_str::<ServerStore>(&bytes).expect_err("refused");
+    assert_eq!(
+        failure.to_string(),
+        "unknown field `owner`, expected `format` or `records` at line 1 column 8"
+    );
+}
+
+#[test]
+fn a_fingerprint_written_as_null_reads_back_as_none() {
+    let shape = serde_json::json!({
+        "name": "work",
+        "address": "laptop.local:7654",
+        "secret": "a secret",
+        "fingerprint": null,
+        "added_at": SystemTime::UNIX_EPOCH,
+        "last_used_at": null,
+    });
+
+    let decoded: SavedServer = serde_json::from_value(shape).expect("null reads");
+    assert_eq!(decoded.fingerprint, None);
+}
+
+#[test]
+fn a_directory_where_the_store_belongs_is_refused_rather_than_read_as_empty() {
+    let dir = TempDir::new().expect("make a temp dir");
+    let path = store_path(dir.path());
+    std::fs::create_dir_all(&path).expect("make a directory at the store path");
+
+    let failure = ServerStore::read(&path).expect_err("a directory is not a store");
+    let IpcError::RemoteFileUnreadable {
+        file, path: named, ..
+    } = failure
+    else {
+        panic!("a directory at the store path names the saved servers file: {failure}");
+    };
+    assert_eq!(file, RemoteFile::SavedServers);
+    assert_eq!(named, path.display().to_string());
+}
+
+#[test]
+fn writing_where_the_directory_cannot_exist_is_a_saved_servers_write_failure() {
+    let dir = TempDir::new().expect("make a temp dir");
+    std::fs::write(dir.path().join("remote"), b"a file, not a directory").expect("write it");
+    let path = store_path(dir.path());
+
+    let failure = one_server()
+        .write(&path)
+        .expect_err("a file in the directory's place stops the write");
+    let IpcError::RemoteFileWrite {
+        file, path: named, ..
+    } = failure
+    else {
+        panic!("a failed write names the saved servers file: {failure}");
+    };
+    assert_eq!(file, RemoteFile::SavedServers);
+    assert_eq!(named, path.display().to_string());
+    assert!(
+        !path.exists(),
+        "and nothing was written at {}",
+        path.display()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_store_file_that_was_group_readable_is_private_after_the_write() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = TempDir::new().expect("make a temp dir");
+    let path = store_path(dir.path());
+    one_server().write(&path).expect("write the store");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+        .expect("open the file up");
+
+    one_server().write(&path).expect("write the store again");
+
+    let mode = std::fs::metadata(&path)
+        .expect("stat the store")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600);
+}
+
+#[test]
+fn saving_an_address_again_moves_its_record_to_the_end() {
+    let mut store = ServerStore::new();
+    store
+        .save(saved(Some("work"), "desk.local:7654"))
+        .expect("save the first");
+    store
+        .save(saved(Some("home"), "laptop.local:7654"))
+        .expect("save the second");
+
+    let mut again = saved(Some("work"), "desk.local:7654");
+    again.secret = ConnectionToken::new("a rotated secret");
+    store
+        .save(again.clone())
+        .expect("the same machine saves again");
+
+    assert_eq!(
+        store.records,
+        vec![saved(Some("home"), "laptop.local:7654"), again]
+    );
+}
+
+#[test]
+fn a_server_may_be_named_by_its_own_address() {
+    let mut store = ServerStore::new();
+    store
+        .save(saved(Some("desk.local:7654"), "desk.local:7654"))
+        .expect("a record may answer to one word both ways");
+
+    assert_eq!(
+        store.find("desk.local:7654"),
+        Lookup::Saved(&store.records[0])
+    );
+    assert!(store.name_free_for("desk.local:7654", "desk.local:7654"));
+}
+
+#[test]
+fn a_name_several_records_hold_is_refused_naming_the_first_holder() {
+    // A hand-written file can hold what `save` refuses under rule 2.
+    let mut store = ServerStore::new();
+    store.records.push(saved(Some("work"), "desk.local:7654"));
+    store.records.push(saved(Some("work"), "laptop.local:7654"));
+
+    let refusal = store
+        .save(saved(Some("work"), "phone.local:7654"))
+        .expect_err("the name is held");
+
+    assert_eq!(refusal.name, "work");
+    assert_eq!(refusal.address, "desk.local:7654");
+    assert_eq!(store.records.len(), 2, "and nothing was added");
+}
+
+#[test]
+fn forgetting_one_of_two_servers_leaves_the_other_where_it_was() {
+    let mut store = ServerStore::new();
+    store
+        .save(saved(Some("work"), "desk.local:7654"))
+        .expect("save the first");
+    store
+        .save(saved(Some("home"), "laptop.local:7654"))
+        .expect("save the second");
+
+    assert_eq!(
+        store.forget("desk.local:7654"),
+        Some("desk.local:7654".to_string())
+    );
+
+    assert_eq!(
+        store.records,
+        vec![saved(Some("home"), "laptop.local:7654")]
+    );
+    assert_eq!(store.find("work"), Lookup::NotSaved);
+    assert_eq!(store.find("home"), Lookup::Saved(&store.records[0]));
+}
+
+#[test]
+fn a_refusal_over_an_address_held_as_a_name_says_how_to_free_it() {
+    let mut store = ServerStore::new();
+    store
+        .save(saved(Some("laptop.local:7654"), "desk.local:7654"))
+        .expect("the first save");
+
+    let refusal = store
+        .save(saved(None, "laptop.local:7654"))
+        .expect_err("the address is another record's name");
+
+    assert_eq!(
+        refusal.to_string(),
+        "the name laptop.local:7654 already belongs to desk.local:7654; run \
+         `koshi remote forget laptop.local:7654` first, or pick another name"
+    );
+    assert_eq!(
+        store.forget("laptop.local:7654"),
+        Some("desk.local:7654".to_string()),
+        "the forget the message names drops the holder"
+    );
 }

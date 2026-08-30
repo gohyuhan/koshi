@@ -1,11 +1,17 @@
-//! Tests for the server half: construction defaults, the held service
-//! handles, the wired event inbox, a session with one tab and one pane, and
-//! the two doors — commands in via `submit_command`, events out via
-//! `subscribe` — including the identity every attached client carries, that
-//! detaching a client leaves the server healthy with its panes alive, that a
-//! subscriber paused by a dropped critical event is handed a fresh frame or
-//! dropped, and that a due render hands every client its own frame, behind any
-//! bytes queued for that client's own terminal.
+//! Tests for the server half.
+//!
+//! Construction defaults, the held service handles, and the wired event inbox.
+//! A session with one tab and one pane. The two doors — commands in via
+//! `submit_command`, events out via `subscribe` — with the identity every
+//! attached client carries, and a detach that leaves the server healthy with
+//! its panes alive. Frame delivery: a subscriber paused by a dropped critical
+//! event is handed a fresh frame or dropped, and a due render hands every
+//! client its own frame behind any bytes queued for that client's own
+//! terminal. The restart checks, an accepted or refused restart request, and
+//! the announcements that wait for every client to hold the session's last
+//! frame. The state that crosses an image swap: what `carry_out` writes and
+//! what `resume` puts back. The view a client leaves behind, taken back by the
+//! token the next attach presents.
 
 use std::sync::mpsc;
 use std::time::{Instant, SystemTime};
@@ -109,7 +115,7 @@ fn accessors_return_the_constructed_services() {
     assert_eq!(Arc::strong_count(rt.pty_backend()), 1);
     assert_eq!(Arc::strong_count(rt.snapshot_provider()), 1);
     assert_eq!(Arc::strong_count(rt.storage()), 1);
-    let _ = rt.event_bus();
+    assert_eq!(rt.event_bus().subscriber_count(), 0);
 }
 
 #[test]
@@ -257,7 +263,10 @@ fn detaching_a_client_leaves_the_server_healthy_with_panes_alive() {
     assert_eq!(server.sessions()[&session_id].panes.len(), 1);
     assert!(server.has_active_panes());
     assert_eq!(server.terminal_engines().len(), 1);
-    assert!(server.build_snapshot(first).is_some());
+    assert_eq!(
+        server.build_snapshot(first).expect("frame").client.id,
+        first
+    );
     assert!(server.build_snapshot(second).is_none());
 
     // Even the first client detaching removes only the view: the session and
@@ -389,8 +398,8 @@ fn resyncing_hands_a_paused_subscriber_a_frame_of_the_client_it_views() {
     let (subscriber_id, _) = server.subscriptions[0];
     pause_subscribers(&mut server);
     assert_eq!(server.event_bus.desynced(), vec![subscriber_id]);
-    // Make room, so the frame fits on the next pass. The pre-gap backlog's
-    // contents are the bus's own concern.
+    // Make room, so the frame fits on the next pass. What the queue already
+    // holds is the bus's own concern.
     let _backlog: Vec<Delivery> = rx.try_iter().collect();
     let expected = server.build_snapshot(client_id).expect("frame");
 
@@ -2219,4 +2228,232 @@ fn a_carried_client_that_never_came_back_is_detached_even_after_its_tab_was_clos
 
     assert_eq!(server.sessions[&session_id].clients.len(), 0);
     assert!(server.awaiting_reconnect.is_empty());
+}
+
+#[test]
+fn marking_the_chrome_stale_makes_the_next_poll_repaint() {
+    let (mut server, _tx) = new_server();
+    let now = Instant::now();
+    assert_eq!(server.render_scheduler.next_wakeup(now), None);
+
+    server.invalidate_status();
+
+    assert_eq!(
+        server.render_scheduler.next_wakeup(now),
+        Some(Duration::ZERO)
+    );
+    assert!(server.render_scheduler.poll(now));
+    assert_eq!(server.render_scheduler.next_wakeup(now), None);
+}
+
+#[test]
+fn a_session_switch_reaches_every_subscriber_that_views_the_client() {
+    let (mut server, client_id) = booted_server();
+    let first = server.subscribe(client_id, EventFilter::All);
+    let second = server.subscribe(client_id, EventFilter::All);
+    let onlooker = server.subscribe(ClientId::new(), EventFilter::All);
+    let target = SessionId::new();
+
+    assert!(server.send_switch(client_id, target));
+
+    assert_eq!(
+        first.try_iter().collect::<Vec<_>>(),
+        vec![Delivery::SwitchTo(target)]
+    );
+    assert_eq!(
+        second.try_iter().collect::<Vec<_>>(),
+        vec![Delivery::SwitchTo(target)]
+    );
+    assert_eq!(
+        onlooker.try_iter().collect::<Vec<_>>(),
+        Vec::<Delivery>::new()
+    );
+}
+
+#[test]
+fn a_session_switch_for_a_client_no_subscriber_views_is_held_by_nobody() {
+    let (mut server, client_id) = booted_server();
+    let rx = server.subscribe(client_id, EventFilter::All);
+
+    assert!(!server.send_switch(ClientId::new(), SessionId::new()));
+
+    assert_eq!(rx.try_iter().collect::<Vec<_>>(), Vec::<Delivery>::new());
+}
+
+#[test]
+fn a_session_switch_offered_to_a_paused_subscriber_is_held_by_nobody() {
+    let (mut server, client_id) = booted_server();
+    let rx = server.subscribe(client_id, EventFilter::All);
+    let (subscriber_id, _) = server.subscriptions[0];
+    pause_subscribers(&mut server);
+    let _backlog: Vec<Delivery> = rx.try_iter().collect();
+
+    assert!(!server.send_switch(client_id, SessionId::new()));
+
+    assert_eq!(rx.try_iter().collect::<Vec<_>>(), Vec::<Delivery>::new());
+    assert_eq!(server.event_bus.desynced(), vec![subscriber_id]);
+}
+
+#[test]
+fn queued_host_bytes_go_behind_whatever_is_already_queued() {
+    let (mut server, client_id) = booted_server();
+
+    // Two OSC 52 copies, "one" then "two".
+    server.queue_host_write(client_id, b"\x1b]52;c;b25l\x07");
+    server.queue_host_write(client_id, b"\x1b]52;c;dHdv\x07");
+
+    assert_eq!(
+        server.take_host_writes(client_id),
+        Some(b"\x1b]52;c;b25l\x07\x1b]52;c;dHdv\x07".to_vec())
+    );
+    assert_eq!(server.take_host_writes(client_id), None);
+}
+
+#[test]
+fn handing_the_inbox_over_keeps_the_receiver_the_panes_deliver_into() {
+    let (server, tx) = new_server();
+    tx.send(RuntimeEvent::Timer).expect("send before the swap");
+
+    let inbox_rx = server.into_inbox_rx();
+
+    tx.send(RuntimeEvent::Timer).expect("send after the swap");
+    assert!(matches!(inbox_rx.try_recv(), Ok(RuntimeEvent::Timer)));
+    assert!(matches!(inbox_rx.try_recv(), Ok(RuntimeEvent::Timer)));
+    assert!(matches!(
+        inbox_rx.try_recv(),
+        Err(mpsc::TryRecvError::Empty)
+    ));
+}
+
+/// One live pane as the PTY backend reports it: no terminal descriptor, so no
+/// terminal name is read for it.
+fn carried_pty_pane(pane_id: PaneId, size: PtySize) -> CarriedPtyPane {
+    CarriedPtyPane {
+        pane_id,
+        #[cfg(unix)]
+        terminal_fd: None,
+        pid: 51234,
+        size,
+        exit: None,
+    }
+}
+
+#[test]
+fn carrying_out_sizes_each_pane_by_this_servers_record_and_the_backend_otherwise() {
+    let (mut server, client_id) = booted_server();
+    let (session_id, _tab_id, root) = booted_parts(&server, client_id);
+    // 80x24 less the tabline and hint rows is 80x22, less the one-cell border
+    // on each side is 78x20.
+    assert_eq!(server.pty_sizes[&root], PtySize { cols: 78, rows: 20 });
+    let unrecorded = PaneId::new();
+    let panes = [
+        carried_pty_pane(root, PtySize { cols: 1, rows: 1 }),
+        carried_pty_pane(unrecorded, PtySize { cols: 40, rows: 12 }),
+    ];
+
+    let (header, body) = server.carry_out(session_id, "quiet-lake".to_string(), &panes);
+
+    assert_eq!(header.format, RESUME_FORMAT);
+    assert_eq!(header.session_id, session_id);
+    assert_eq!(header.session_name, "quiet-lake");
+    assert_eq!(
+        header.panes,
+        vec![
+            CarriedPane {
+                pane_id: root,
+                pid: 51234,
+                rows: 20,
+                cols: 78,
+                terminal_fd: None,
+                terminal_name: None,
+                exit: None,
+            },
+            CarriedPane {
+                pane_id: unrecorded,
+                pid: 51234,
+                rows: 12,
+                cols: 40,
+                terminal_fd: None,
+                terminal_name: None,
+                exit: None,
+            },
+        ]
+    );
+    // The state moved out of the server and into the body.
+    assert_eq!(body.sessions.len(), 1);
+    assert_eq!(body.engines.len(), 1);
+    assert!(server.sessions().is_empty());
+    assert!(server.terminal_engines().is_empty());
+}
+
+#[test]
+fn a_resumed_server_puts_every_carried_engine_back_with_its_undecoded_bytes() {
+    let (mut server, client_id) = booted_server();
+    let (session_id, _tab_id, root) = booted_parts(&server, client_id);
+    // "hi" is printed; `ESC [` opens a control sequence that has no final byte
+    // yet, so the parser stops there and holds those two bytes.
+    server.handle_pty_output(root, b"hi\x1b[");
+    assert_eq!(server.terminal_engines[&root].undecoded(), b"\x1b[");
+    let carried_size = server.pty_sizes[&root];
+
+    let (_header, body) = server.carry_out(session_id, "quiet-lake".to_string(), &[]);
+    assert_eq!(
+        body.undecoded,
+        HashMap::from([(root, b"\x1b[".to_vec())]),
+        "only a pane holding bytes has an entry"
+    );
+    let carried_state = body.engines[&root].clone();
+    let (tx, inbox_rx) = mpsc::channel();
+
+    let resumed = Server::resume(
+        Arc::new(FakePtyBackend::new()),
+        inbox_rx,
+        tx,
+        body,
+        HashMap::from([(root, PtyHandle::detached(root))]),
+        HashMap::from([(root, carried_size)]),
+    );
+
+    assert_eq!(resumed.terminal_engines.len(), 1);
+    assert_eq!(resumed.terminal_engines[&root].state(), &carried_state);
+    assert_eq!(resumed.terminal_engines[&root].undecoded(), b"\x1b[");
+    assert_eq!(resumed.pty_sizes, HashMap::from([(root, carried_size)]));
+    assert_eq!(
+        resumed.pty_handles[&root].pane_id(),
+        root,
+        "the handle the caller built is the one the pane keeps"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_pane_check_names_the_first_pane_with_no_terminal_descriptor() {
+    let first = PaneId::new();
+    let second = PaneId::new();
+    let panes = [
+        carried_pty_pane(first, PtySize { cols: 80, rows: 24 }),
+        carried_pty_pane(second, PtySize { cols: 80, rows: 24 }),
+    ];
+
+    assert_eq!(
+        panes_can_be_carried(&panes),
+        Err(format!(
+            "pane {first} has no terminal descriptor, so its terminal cannot cross the swap"
+        ))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_binary_only_others_may_execute_passes_the_binary_check() {
+    let dir = std::env::temp_dir().join(format!("koshi-restart-otherexec-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("the directory is created");
+    let exe = dir.join("koshi");
+    // The check tests `mode & 0o111`, so one execute bit anywhere in the mode
+    // is enough.
+    write_binary(&exe, 0o001);
+
+    assert_eq!(binary_is_runnable(&exe), Ok(()));
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

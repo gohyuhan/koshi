@@ -90,6 +90,39 @@ fn explain_answers_for_the_top_level_auto_close_knob() {
 }
 
 #[test]
+fn explain_answers_for_a_theme_color() {
+    let output = explain("theme.colors.border-hover").unwrap();
+
+    assert_eq!(
+        output,
+        "theme.colors.border-hover\nfile: themes/<name>.kdl\ndefault: \"#af5fff\"\n\
+         Pane border under the pointer.\n"
+    );
+}
+
+#[test]
+fn explain_answers_for_a_keybinding_setting() {
+    let output = explain("keybinding.chord-timeout-ms").unwrap();
+
+    assert_eq!(
+        output,
+        "keybinding.chord-timeout-ms\nfile: keybinding.kdl\ndefault: 500\n\
+         Wait for the next key in a sequence.\n"
+    );
+}
+
+#[test]
+fn explain_answers_for_the_profile_version() {
+    let output = explain("profile.version").unwrap();
+
+    assert_eq!(
+        output,
+        "profile.version\nfile: profile/<name>.kdl\ndefault: 1\n\
+         Config schema version.\n"
+    );
+}
+
+#[test]
 fn explain_unknown_key_suggests_the_nearest_key() {
     let error = explain("koshi.pane.min-col").unwrap_err();
 
@@ -405,4 +438,247 @@ fn a_themes_entry_that_is_not_kdl_is_left_out_of_the_scan() {
         output,
         format!("no config files found in {}\n", dir.path().display())
     );
+}
+
+#[test]
+fn run_in_dir_routes_explain_to_the_field_table() {
+    let dir = TempDir::new().unwrap();
+
+    let output = run_in_dir(
+        &ConfigCommand::Explain {
+            key: "koshi.pane.gap".to_string(),
+        },
+        dir.path(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        output,
+        "koshi.pane.gap\nfile: koshi.kdl\ndefault: 0\n\
+         Blank cells between two panes that meet along a split.\n"
+    );
+}
+
+#[test]
+fn run_in_dir_routes_check_to_the_directory_scan() {
+    let dir = TempDir::new().unwrap();
+    let app = dir.path().join("koshi.kdl");
+    fs::write(&app, "version 1\n").unwrap();
+
+    let output = run_in_dir(&ConfigCommand::Check, dir.path()).unwrap();
+
+    assert_eq!(output, format!("{}: valid (version 1)\n", app.display()));
+}
+
+/// `migrate` through the real migration table: version 1 is this build's
+/// schema, so the file is reported as current and left byte for byte as it is.
+#[test]
+fn run_in_dir_migrate_leaves_a_file_already_on_this_schema_untouched() {
+    let dir = TempDir::new().unwrap();
+    let app = dir.path().join("koshi.kdl");
+    fs::write(&app, "version 1\n").unwrap();
+
+    let output = run_in_dir(&ConfigCommand::Migrate, dir.path()).unwrap();
+
+    assert_eq!(output, format!("{}: current (version 1)\n", app.display()));
+    assert_eq!(fs::read_to_string(&app).unwrap(), "version 1\n");
+}
+
+#[test]
+fn check_sorts_two_theme_files_by_path() {
+    let dir = TempDir::new().unwrap();
+    let themes = dir.path().join("themes");
+    fs::create_dir(&themes).unwrap();
+    fs::write(themes.join("z.kdl"), "version 1\ncolors {}\n").unwrap();
+    fs::write(themes.join("a.kdl"), "version 1\ncolors {}\n").unwrap();
+
+    let output = check(dir.path()).unwrap();
+
+    assert_eq!(
+        output,
+        format!(
+            "{}: valid (version 1)\n{}: valid (version 1)\n",
+            themes.join("a.kdl").display(),
+            themes.join("z.kdl").display(),
+        )
+    );
+}
+
+#[test]
+fn check_reports_a_themes_path_that_is_not_a_directory() {
+    let dir = TempDir::new().unwrap();
+    let themes = dir.path().join("themes");
+    fs::write(&themes, "not a directory").unwrap();
+    let io_error = fs::read_dir(&themes).unwrap_err();
+
+    let error = check(dir.path()).unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        format!("config failed: read {}: {io_error}", themes.display())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn check_validates_a_config_symlink_through_its_target() {
+    use std::os::unix::fs::symlink;
+
+    let dir = TempDir::new().unwrap();
+    let target = dir.path().join("stored-koshi.kdl");
+    let app = dir.path().join("koshi.kdl");
+    fs::write(&target, "version 1\n").unwrap();
+    symlink(&target, &app).unwrap();
+
+    let output = check(dir.path()).unwrap();
+
+    assert_eq!(output, format!("{}: valid (version 1)\n", app.display()));
+}
+
+#[cfg(unix)]
+#[test]
+fn check_reports_a_config_symlink_that_points_nowhere() {
+    use std::os::unix::fs::symlink;
+
+    let dir = TempDir::new().unwrap();
+    let app = dir.path().join("koshi.kdl");
+    symlink(dir.path().join("missing.kdl"), &app).unwrap();
+    let io_error = fs::canonicalize(&app).unwrap_err();
+
+    let error = check(dir.path()).unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        format!("config failed: read {}: {io_error}", app.display())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn check_rejects_a_config_symlink_that_points_at_a_directory() {
+    use std::os::unix::fs::symlink;
+
+    let dir = TempDir::new().unwrap();
+    let target = dir.path().join("target-dir");
+    let app = dir.path().join("koshi.kdl");
+    fs::create_dir(&target).unwrap();
+    symlink(&target, &app).unwrap();
+
+    let error = check(dir.path()).unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "config failed: read {}: expected a regular file",
+            app.display()
+        )
+    );
+}
+
+#[test]
+fn migrate_writes_nothing_when_a_config_directory_cannot_be_read() {
+    let dir = TempDir::new().unwrap();
+    let themes = dir.path().join("themes");
+    let app = dir.path().join("koshi.kdl");
+    fs::write(&themes, "not a directory").unwrap();
+    fs::write(&app, "version 1\n").unwrap();
+    let io_error = fs::read_dir(&themes).unwrap_err();
+    let mut written: Vec<PathBuf> = Vec::new();
+
+    let error = migrate_in_dir_with(dir.path(), fake_migrate, |path, _| {
+        written.push(path.to_path_buf());
+        Ok(())
+    })
+    .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "config failed: migration stopped before writing any file:\nread {}: {io_error}",
+            themes.display()
+        )
+    );
+    assert_eq!(written, Vec::<PathBuf>::new());
+    assert_eq!(fs::read_to_string(app).unwrap(), "version 1\n");
+}
+
+/// Migrates `koshi.kdl` from version 1 to 2 and reports every other file as
+/// already on version 2.
+fn migrate_only_the_app_file(
+    kind: ConfigFileKind,
+    _path: &Path,
+    source: &str,
+) -> Result<MigratedConfig, MigrationError> {
+    if kind == ConfigFileKind::App {
+        return Ok(MigratedConfig {
+            from: 1,
+            to: 2,
+            source: source.to_string() + "migrated #true\n",
+            changed: true,
+        });
+    }
+    Ok(MigratedConfig {
+        from: 2,
+        to: 2,
+        source: source.to_string(),
+        changed: false,
+    })
+}
+
+#[test]
+fn migrate_writes_only_the_files_that_changed() {
+    let dir = TempDir::new().unwrap();
+    let keybinding = dir.path().join("keybinding.kdl");
+    let app = dir.path().join("koshi.kdl");
+    fs::write(&keybinding, "version 1\n").unwrap();
+    fs::write(&app, "version 1\n").unwrap();
+    let mut written: Vec<PathBuf> = Vec::new();
+
+    let output = migrate_in_dir_with(dir.path(), migrate_only_the_app_file, |path, data| {
+        written.push(path.to_path_buf());
+        write_atomic(path, data)
+    })
+    .unwrap();
+
+    assert_eq!(
+        output,
+        format!(
+            "{}: current (version 2)\n{}: migrated version 1 to 2\n",
+            keybinding.display(),
+            app.display()
+        )
+    );
+    assert_eq!(written, vec![app.clone()]);
+    assert_eq!(fs::read_to_string(keybinding).unwrap(), "version 1\n");
+    assert_eq!(
+        fs::read_to_string(app).unwrap(),
+        "version 1\nmigrated #true\n"
+    );
+}
+
+#[test]
+fn migrate_write_failure_leaves_an_unchanged_file_out_of_the_already_migrated_list() {
+    let dir = TempDir::new().unwrap();
+    let keybinding = dir.path().join("keybinding.kdl");
+    let app = dir.path().join("koshi.kdl");
+    fs::write(&keybinding, "version 1\n").unwrap();
+    fs::write(&app, "version 1\n").unwrap();
+
+    let error = migrate_in_dir_with(dir.path(), migrate_only_the_app_file, |_, _| {
+        Err(StorageError::Io {
+            detail: "injected failure".to_string(),
+        })
+    })
+    .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "config failed: migration write failed for {}: storage io error: injected failure\n{} may already contain migrated data; check it before retrying",
+            app.display(),
+            app.display(),
+        )
+    );
+    assert_eq!(fs::read_to_string(keybinding).unwrap(), "version 1\n");
+    assert_eq!(fs::read_to_string(app).unwrap(), "version 1\n");
 }

@@ -463,13 +463,14 @@ fn several_sessions_need_a_name() {
     )
     .expect_err("several sessions need a name");
 
-    assert!(matches!(
-        error,
-        CliError::CommandRejected {
-            reason: RejectReason::TargetAmbiguous,
-            ..
-        }
-    ));
+    let CliError::CommandRejected { reason, help } = error else {
+        panic!("expected a rejected command");
+    };
+    assert_eq!(reason, RejectReason::TargetAmbiguous);
+    assert_eq!(
+        help,
+        Some("several sessions are running; name one: koshi kill-session <name>".to_string())
+    );
 }
 
 #[test]
@@ -477,7 +478,13 @@ fn an_incomplete_census_cannot_prove_a_name_is_unique() {
     let error = select_kill_session(&partial(vec![overview("quiet-lake")]), Some("quiet-lake"))
         .expect_err("another session may share the name");
 
-    assert!(matches!(error, CliError::IpcUnavailable { .. }));
+    let CliError::IpcUnavailable { detail } = error else {
+        panic!("expected IpcUnavailable, got {error:?}");
+    };
+    assert_eq!(
+        detail,
+        "cannot tell whether `quiet-lake` is unique (1 running session did not answer)"
+    );
 }
 
 #[test]
@@ -485,7 +492,14 @@ fn an_incomplete_census_cannot_apply_the_count_rule() {
     let error = select_kill_session(&partial(vec![overview("quiet-lake")]), None)
         .expect_err("another session may be running");
 
-    assert!(matches!(error, CliError::IpcUnavailable { .. }));
+    let CliError::IpcUnavailable { detail } = error else {
+        panic!("expected IpcUnavailable, got {error:?}");
+    };
+    assert_eq!(
+        detail,
+        "cannot tell which session to kill; name one: koshi kill-session <name> \
+         (1 running session did not answer)"
+    );
 }
 
 #[test]

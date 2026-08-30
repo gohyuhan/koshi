@@ -15,9 +15,7 @@
 //!
 //! Validation is all-or-nothing per file: every problem is collected as a
 //! span-tagged [`ProfileDiagnostic`] and a file with any problem yields no
-//! template. A profile instantiates real processes, so a half-applied file
-//! (the editor pane silently dropped, its neighbors spawned anyway) would
-//! be worse than a clean error and fallback.
+//! template.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -46,7 +44,7 @@ pub enum ProfileError {
     #[diagnostic(transparent)]
     Syntax(#[from] ConfigParseDiagnostic),
     /// The file is valid KDL but violates the profile schema. Carries every
-    /// problem found, so one read of the report fixes the whole file.
+    /// problem found.
     #[error("invalid profile file {path}")]
     #[diagnostic(code(koshi::config::profile))]
     Invalid {
@@ -139,8 +137,9 @@ struct Sizing {
 }
 
 impl Sizing {
-    /// The weight this sizing describes; an untouched sizing is the default
-    /// equal share, matching what runtime pane insertion assigns.
+    /// The weight this sizing describes. An untouched sizing yields
+    /// `SizeConstraint::Flex(1)` with no `min`, no `preferred`, and a zero
+    /// resize offset.
     fn weight(&self) -> SizeWeight {
         SizeWeight {
             primary: self
@@ -207,7 +206,7 @@ impl Walker<'_> {
     fn document(&mut self, doc: &KdlDocument) -> Option<ProfileTemplate> {
         let mut version_seen = false;
         let mut tabs = Vec::new();
-        let mut focused_tab: Option<(usize, SourceSpan)> = None;
+        let mut focused_tab: Option<usize> = None;
         let mut locked = false;
         for node in doc.nodes() {
             match node.name().value() {
@@ -225,7 +224,7 @@ impl Walker<'_> {
                     tabs.push(tab);
                     if focused {
                         match focused_tab {
-                            None => focused_tab = Some((index, node.span())),
+                            None => focused_tab = Some(index),
                             Some(_) => self.error(
                                 node.span(),
                                 "another tab already carries `focus`; only one tab starts focused",
@@ -255,7 +254,7 @@ impl Walker<'_> {
         }
         Some(ProfileTemplate {
             tabs,
-            focused_tab: focused_tab.map_or(0, |(index, _)| index),
+            focused_tab: focused_tab.unwrap_or(0),
             locked,
         })
     }
@@ -289,8 +288,9 @@ impl Walker<'_> {
 
     /// Parses one `tab`: exactly one structural root plus an optional bare
     /// `focus` marker. Returns the tab and whether it starts focused. A tab
-    /// with problems is still returned (over a placeholder root when none
-    /// parsed), so its own diagnostic is the only one reported.
+    /// with problems is still returned, over a placeholder shell root when
+    /// no structural node parsed. With no leaf marked `focus`, the tab
+    /// focuses its root's [`TemplateNode::first_visible_leaf`].
     fn tab(&mut self, node: &KdlNode) -> (TabTemplate, bool) {
         if !node.entries().is_empty() {
             self.error(
@@ -302,20 +302,15 @@ impl Walker<'_> {
         self.tab_focus = Vec::new();
         let mut root: Option<Slot> = None;
         let mut focused = false;
-        let mut focus_span: Option<SourceSpan> = None;
         if let Some(children) = node.children() {
             for child in children.nodes() {
                 match child.name().value() {
                     "focus" => {
                         if self.marker(child, "focus") {
-                            match focus_span {
-                                None => {
-                                    focused = true;
-                                    focus_span = Some(child.span());
-                                }
-                                Some(_) => {
-                                    self.error(child.span(), "`focus` is declared more than once")
-                                }
+                            if focused {
+                                self.error(child.span(), "`focus` is declared more than once");
+                            } else {
+                                focused = true;
                             }
                         }
                     }
@@ -355,8 +350,6 @@ impl Walker<'_> {
                     "`tab` needs one layout node (`pane`, `plugin`, `horizontal`, \
                      `vertical`, or `stack`)",
                 );
-                // Placeholder so the tab still exists; the diagnostic above
-                // already rejects the file.
                 Slot {
                     node: TemplateNode::Leaf(LeafTemplate::Terminal(TerminalTemplate::default())),
                     sizing: Sizing::default(),
@@ -373,9 +366,6 @@ impl Walker<'_> {
         for span in extra_focus {
             self.error(span, "this tab already focuses another pane");
         }
-        // Default focus is the first visible leaf — at a stacked node only
-        // the active member is visible, so initial focus always lands on a
-        // pane the user can see.
         let focused_leaf = self
             .tab_focus
             .first()
@@ -389,10 +379,10 @@ impl Walker<'_> {
         )
     }
 
-    /// Dispatches one structural node by name. Callers guarantee the name
-    /// passed [`is_structural`]. Always yields a slot — a node with problems
-    /// is diagnosed and returned in degraded form, never dropped, so parents
-    /// report no follow-on errors for it.
+    /// Dispatches one structural node by name. `node`'s name must pass
+    /// [`is_structural`]; any other name panics. Always yields a slot: a node
+    /// with problems is diagnosed and returned in degraded form, never
+    /// dropped.
     fn structural(&mut self, node: &KdlNode, context: Context) -> Slot {
         match node.name().value() {
             "pane" => self.pane(node, context),
@@ -414,8 +404,8 @@ impl Walker<'_> {
                  children block",
             );
         }
-        let mut command: Option<(CommandTemplate, SourceSpan)> = None;
-        let mut cwd: Option<(PathBuf, SourceSpan)> = None;
+        let mut command: Option<CommandTemplate> = None;
+        let mut cwd: Option<PathBuf> = None;
         let mut env: BTreeMap<String, String> = BTreeMap::new();
         let mut leaf = LeafSlot::default();
         if let Some(children) = node.children() {
@@ -425,14 +415,14 @@ impl Walker<'_> {
                         if command.is_some() {
                             self.error(child.span(), "`command` is declared more than once");
                         } else if let Some(parsed) = self.command(child) {
-                            command = Some((parsed, child.span()));
+                            command = Some(parsed);
                         }
                     }
                     "cwd" => {
                         if cwd.is_some() {
                             self.error(child.span(), "`cwd` is declared more than once");
                         } else if let Some(parsed) = self.single_string(child, "cwd") {
-                            cwd = Some((PathBuf::from(parsed), child.span()));
+                            cwd = Some(PathBuf::from(parsed));
                         }
                     }
                     "env" => self.env(child, &mut env),
@@ -464,8 +454,8 @@ impl Walker<'_> {
         self.finish_leaf(&leaf);
         Slot {
             node: TemplateNode::Leaf(LeafTemplate::Terminal(TerminalTemplate {
-                command: command.map(|(parsed, _)| parsed),
-                cwd: cwd.map(|(path, _)| path),
+                command,
+                cwd,
                 env,
             })),
             sizing: leaf.sizing,
@@ -474,7 +464,8 @@ impl Walker<'_> {
     }
 
     /// Parses a `plugin "name"` leaf: the name as its one argument, plus
-    /// optional sizing, `focus`, and (in a stack) `expanded` children.
+    /// optional sizing, `focus`, and (in a stack) `expanded` children. A name
+    /// that cannot be read is reported and becomes an empty string.
     fn plugin(&mut self, node: &KdlNode, context: Context) -> Slot {
         let name = match node.entries() {
             [entry] if entry.name().is_none() => match entry.value().as_string() {
@@ -515,8 +506,6 @@ impl Walker<'_> {
             }
         }
         self.finish_leaf(&leaf);
-        // A bad name was already diagnosed; the empty placeholder never
-        // escapes because the file is rejected.
         let name = name.unwrap_or_default();
         Slot {
             node: TemplateNode::Leaf(LeafTemplate::Plugin(PluginTemplate { name })),
@@ -599,9 +588,8 @@ impl Walker<'_> {
         }
         let mut sizing = Sizing::default();
         let mut members: Vec<Slot> = Vec::new();
-        // One entry per member: the leaf index of a genuine leaf member, or
-        // `None` for an invalid-subtree placeholder, which the focus check
-        // below must not judge.
+        // One entry per member: the leaf index of a leaf member, or `None`
+        // for an invalid-subtree placeholder.
         let mut member_leaves: Vec<Option<usize>> = Vec::new();
         if let Some(children) = node.children() {
             for child in children.nodes() {
@@ -619,8 +607,8 @@ impl Walker<'_> {
                              `pane` or `plugin`"
                         ),
                     );
-                    // Placeholder member so the invalid node is the only
-                    // diagnostic; the file is already rejected.
+                    // Parsed as a directional child: sizing on it and on its
+                    // own children is accepted.
                     members.push(self.structural(child, Context::Directional));
                     member_leaves.push(None);
                 } else if !self.sizing_config(child, &mut sizing) {
@@ -698,8 +686,8 @@ impl Walker<'_> {
     }
 
     /// Handles a config child shared by both leaf kinds: sizing, `focus`,
-    /// `expanded`. Returns `false` when the node is none of them, so the
-    /// caller reports it with its own allowed-node list.
+    /// `expanded`. Sizing outside a `Directional` slot is reported and
+    /// discarded. Returns `false` when the node is none of the three.
     fn leaf_config(&mut self, child: &KdlNode, context: Context, leaf: &mut LeafSlot) -> bool {
         match child.name().value() {
             "focus" => {
@@ -874,8 +862,11 @@ impl Walker<'_> {
         Some(cells)
     }
 
-    /// Parses one integer argument in `1..=max` — the shared shape of
-    /// `weight`, `min`, and `preferred` values.
+    /// Parses one integer argument in `0..=max` — the shared shape of
+    /// `weight`, `min`, and `preferred` values. A non-integer, a negative
+    /// value, or a value above `max` is reported as `must be an integer
+    /// between 1 and <max>` and returns `None`. Zero passes; each caller
+    /// rejects it with its own message.
     fn cells(&mut self, node: &KdlNode, name: &str, max: u32) -> Option<u32> {
         let entry = self.single_argument(node, name)?;
         match entry
@@ -895,8 +886,7 @@ impl Walker<'_> {
     }
 
     /// Parses a `command` node: the program plus its arguments, all strings.
-    /// The program must be non-empty (an empty program has nothing to
-    /// execute); arguments may be empty strings.
+    /// The program must be non-empty; arguments may be empty strings.
     fn command(&mut self, node: &KdlNode) -> Option<CommandTemplate> {
         if node.children().is_some() {
             self.error(node.span(), "`command` takes no children");
@@ -933,12 +923,9 @@ impl Walker<'_> {
     }
 
     /// Parses an `env "NAME" "value"` node into `env`. The name must be
-    /// spawnable: non-empty, no `=` (environment blocks encode entries as
-    /// `NAME=value`, so `env "A=B" "x"` would reach the child as variable
-    /// `A` with value `B=x`), no NUL in name or value, and set once —
-    /// names compare case-insensitively, since Windows folds environment
-    /// keys by case at spawn and one of two case variants would silently
-    /// win there.
+    /// non-empty, hold no `=`, hold no NUL, and be set once; the value must
+    /// hold no NUL. Names compare case-insensitively over ASCII:
+    /// `env "Path" "/b"` after `env "PATH" "/a"` is a duplicate.
     fn env(&mut self, node: &KdlNode, env: &mut BTreeMap<String, String>) {
         if node.children().is_some() {
             self.error(node.span(), "`env` takes no children");
@@ -988,7 +975,8 @@ impl Walker<'_> {
         env.insert((*name).to_string(), (*value).to_string());
     }
 
-    /// Parses a single-string-argument node (`cwd`).
+    /// Parses a single-string-argument node (`cwd`). An empty string is
+    /// reported and yields `None`.
     fn single_string(&mut self, node: &KdlNode, name: &str) -> Option<String> {
         let entry = self.single_argument(node, name)?;
         match entry.value().as_string() {

@@ -1,13 +1,13 @@
 //! Tests for the `#[beta_feature]` attribute.
 //!
-//! The attribute reads a process-wide flag, so every case lives in one test:
-//! separate tests would run in parallel and race each other over it.
+//! The attribute reads one process-wide flag. Every case lives in one test and
+//! runs in sequence on that flag.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use koshi_beta::beta_feature;
 
-/// Counts how many times a gated body actually ran.
+/// Counts how many times a gated body ran.
 static RUNS: AtomicU32 = AtomicU32::new(0);
 
 /// A gated entry point written as ordinary code: nothing in the signature or
@@ -18,16 +18,23 @@ fn double(value: u32) -> Result<u32, &'static str> {
     Ok(value * 2)
 }
 
-/// A second site, to show the fallback is per site rather than one shape.
+/// A second site with its own `otherwise`.
 #[beta_feature(otherwise = 0)]
 fn count_runs() -> u32 {
     RUNS.load(Ordering::Relaxed)
 }
 
-/// Its own site, so the `Once` it spends is nobody else's.
+/// A site called only by the warn-once check. Its first blocked call is the
+/// one that warns.
 #[beta_feature(otherwise = 0)]
 fn warns_once() -> u32 {
     1
+}
+
+/// Returns the captured log lines whose `function` field is `function`.
+fn warnings_for<'a>(lines: &'a [String], function: &str) -> Vec<&'a String> {
+    let field = format!(r#""function":"{function}""#);
+    lines.iter().filter(|line| line.contains(&field)).collect()
 }
 
 #[test]
@@ -53,35 +60,35 @@ fn a_gated_body_runs_only_when_beta_features_are_allowed() {
     assert_eq!(count_runs(), 0);
     assert_eq!(RUNS.load(Ordering::Relaxed), 1);
 
-    // A blocked site warns once however often it is called, so a gated entry
-    // point on a hot path cannot flood the log.
+    // A blocked site warns on its first blocked call and never again.
     for _ in 0..3 {
         assert_eq!(warns_once(), 0);
     }
     let lines = logs.lines();
-    let warnings: Vec<&String> = lines
-        .iter()
-        .filter(|line| line.contains("warns_once"))
-        .collect();
+    let warnings = warnings_for(&lines, "warns_once");
     assert_eq!(
         warnings.len(),
         1,
         "three blocked calls must warn once, got {warnings:?}"
     );
-    // The line names the function that did nothing and gives the exact line to
-    // add. Asserted whole, down to the KDL the user has to paste.
+    // The record is at `WARN` level, comes from `koshi_beta`, and carries the
+    // whole message beside the `function` field.
+    assert!(warnings[0].contains(r#""level":"WARN""#), "{warnings:?}");
+    assert!(
+        warnings[0].contains(r#""target":"koshi_beta""#),
+        "{warnings:?}"
+    );
     assert!(
         warnings[0].contains(
-            "`warns_once` is a beta feature and did nothing; \
-             add a top-level `allow-beta-features #true` line to koshi.kdl to run it"
+            r#""message":"`warns_once` is a beta feature and did nothing; add a top-level `allow-beta-features #true` line to koshi.kdl to run it""#
         ),
         "{warnings:?}"
     );
-    // Warning level, which survives the `logging { level "warning" }` a user
-    // can set. A machine-readable `function` field sits beside the prose.
-    assert!(warnings[0].contains(r#""level":"WARN""#), "{warnings:?}");
-    assert!(
-        warnings[0].contains(r#""function":"warns_once""#),
-        "{warnings:?}"
-    );
+
+    // The limit is per site. `double` and `count_runs` were each blocked twice
+    // with an allowed call in between; each warned once. Allowed calls log
+    // nothing: the three warnings are the whole log.
+    assert_eq!(warnings_for(&lines, "double").len(), 1, "{lines:?}");
+    assert_eq!(warnings_for(&lines, "count_runs").len(), 1, "{lines:?}");
+    assert_eq!(lines.len(), 3, "{lines:?}");
 }

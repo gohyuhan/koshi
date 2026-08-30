@@ -12,22 +12,11 @@
 //! when the new version is what one side must see before it may send a field
 //! the other would ignore. The first such change after a release sets the
 //! number to the released value plus one, and the number then holds until the
-//! next release — so one release cycle moves a surface at most one step,
-//! however many changes it takes.
-//!
-//! Example — the control plane spoke 1 in `v0.2.0`. Two later changes each
-//! bumped it, reaching 3, and neither was a meaning change. Folding those two
-//! non-qualifying bumps put it back at 2: the released anchor of 1, plus the
-//! one change that did qualify.
+//! next release: one release cycle moves a surface at most one step, however
+//! many changes it takes.
 //!
 //! [`Surface::version_problem`] checks that rule, and a test walks the whole
 //! table through it.
-//!
-//! # What is here and what is not
-//!
-//! The table names each surface and the versions this build speaks. *Why* a
-//! number last moved stays in the doc comment of the constant that exports it,
-//! next to the code the number describes.
 
 /// One versioned surface: what two builds must agree on, and the versions this
 /// build speaks of it.
@@ -43,10 +32,10 @@ pub struct Surface {
     /// speaks it too.
     pub max: u32,
     /// The version the last released koshi spoke of this surface, or `None`
-    /// when no release has carried it yet.
+    /// when no release has carried it.
     ///
-    /// `None` means the rule has nothing to anchor to: the surface may hold any
-    /// value until it ships.
+    /// With `None`, [`Surface::version_problem`] checks only that `min` does
+    /// not exceed `max`; `max` may hold any value.
     pub released: Option<u32>,
 }
 
@@ -54,8 +43,7 @@ pub struct Surface {
 /// over that session's control socket.
 ///
 /// `v0.1.0` spoke 1, `v0.2.0` and `v0.3.0` speak 2, and this build speaks 3.
-/// The floor is 2. Version 1 has no attach and puts nothing user-visible on
-/// the socket.
+/// The floor is 2.
 ///
 /// A `koshi` command that names a target client sends that client only to a
 /// peer that settled on 3. A peer that settled on 2 ignores the field, and a
@@ -70,8 +58,7 @@ pub const SESSION_PROTOCOL: Surface = Surface {
 /// The control plane: what a caller and the router speak over the router's
 /// socket.
 ///
-/// The router is born in `v0.2.0`, which speaks 1, so the floor is 1 and no
-/// earlier build has a router to talk to.
+/// `v0.2.0` speaks 1, and this build speaks 2. The floor is 1.
 pub const CONTROL_PROTOCOL: Surface = Surface {
     name: "control plane",
     min: 1,
@@ -82,9 +69,8 @@ pub const CONTROL_PROTOCOL: Surface = Surface {
 /// The supervisor link: what a session server and the process holding its panes
 /// speak.
 ///
-/// Born after `v0.2.0` and not yet in a release, so it has no anchor. A
-/// supervisor keeps running the image it started from, so an updated session
-/// server can be newer than the supervisor it reconnects to.
+/// No release carries it. The supervisor end can be older than the session
+/// server end that reconnects to it.
 pub const SUPERVISOR_PROTOCOL: Surface = Surface {
     name: "supervisor link",
     min: 1,
@@ -94,7 +80,7 @@ pub const SUPERVISOR_PROTOCOL: Surface = Surface {
 
 /// The remote access token store: the file this machine keeps its grants in.
 ///
-/// Born after `v0.2.0` and not yet in a release, so it has no anchor.
+/// No release carries it.
 pub const TOKEN_STORE_FORMAT: Surface = Surface {
     name: "token store format",
     min: 1,
@@ -105,10 +91,9 @@ pub const TOKEN_STORE_FORMAT: Surface = Surface {
 /// The remote doorway: what a client on another machine and this machine's TLS
 /// listener speak before any session is reached.
 ///
-/// Born after `v0.2.0` and not yet in a release, so it has no anchor. Its two
-/// ends are different machines, which upgrade on their own schedules. The
-/// session protocol they settle after the door opens is a separate agreement
-/// with a separate number.
+/// No release carries it. Its two ends are different machines. The session
+/// protocol the two ends settle after the door opens is a separate surface,
+/// [`SESSION_PROTOCOL`].
 pub const REMOTE_PROTOCOL: Surface = Surface {
     name: "remote doorway",
     min: 1,
@@ -119,9 +104,8 @@ pub const REMOTE_PROTOCOL: Surface = Surface {
 /// The saved server file: the servers a dialling machine has connected to,
 /// with the secret and the pinned certificate fingerprint for each.
 ///
-/// Born after `v0.2.0` and not yet in a release, so it has no anchor. It sits
-/// on the dialling machine, so an upgraded koshi reads what an older one
-/// saved.
+/// No release carries it. The file sits on the dialling machine; a newer koshi
+/// reads what an older one saved.
 pub const SAVED_SERVER_FORMAT: Surface = Surface {
     name: "saved server file format",
     min: 1,
@@ -132,8 +116,8 @@ pub const SAVED_SERVER_FORMAT: Surface = Surface {
 /// The remote certificate file: the certificate and private key this machine
 /// generated for its remote listener.
 ///
-/// Born after `v0.2.0` and not yet in a release, so it has no anchor. The
-/// certificate outlives the build that made it, so a later build reads it.
+/// No release carries it. A newer build reads a certificate an older build
+/// generated.
 pub const REMOTE_CERTIFICATE_FORMAT: Surface = Surface {
     name: "remote certificate file format",
     min: 1,
@@ -144,9 +128,8 @@ pub const REMOTE_CERTIFICATE_FORMAT: Surface = Surface {
 /// The remote access record: the file saying the operator switched remote
 /// access on for this machine.
 ///
-/// Born after `v0.2.0` and not yet in a release, so it has no anchor. The
-/// record outlives the build that wrote it, so a later build reads it and
-/// keeps the port open.
+/// No release carries it. A newer build reads a record an older build wrote
+/// and keeps the port open.
 pub const REMOTE_ACCESS_MARK_FORMAT: Surface = Surface {
     name: "remote access record format",
     min: 1,
@@ -157,10 +140,9 @@ pub const REMOTE_ACCESS_MARK_FORMAT: Surface = Surface {
 /// The resume file: the state a session server writes before it replaces its
 /// own process image, and the next image reads back.
 ///
-/// Born after `v0.2.0` and not yet in a release, so it has no anchor. Format
-/// 3 carries prompt metadata with every terminal row. The build being
-/// installed states which formats it reads before the running server commits
-/// to the swap.
+/// No release carries it. Format 3 carries prompt metadata with every terminal
+/// row. The build being installed states which formats it reads before the
+/// running server commits to the swap.
 pub const RESUME_FORMAT: Surface = Surface {
     name: "resume file format",
     min: 1,
@@ -179,10 +161,8 @@ pub const CONFIG_SCHEMA: Surface = Surface {
     released: Some(1),
 };
 
-/// Every versioned surface this build carries.
-///
-/// A new surface is added here in the same change that gives it a number, or
-/// the check does not see it.
+/// Every versioned surface this build carries. A surface absent from this list
+/// is not checked against the cadence rule.
 pub const SURFACES: &[Surface] = &[
     SESSION_PROTOCOL,
     CONTROL_PROTOCOL,
@@ -197,13 +177,12 @@ pub const SURFACES: &[Surface] = &[
 ];
 
 impl Surface {
-    /// Why this surface's numbers break the rule above, or `None` when they
+    /// Why this surface's numbers break the cadence rule, or `None` when they
     /// follow it.
     ///
-    /// Two rules, both checked: the floor never rises above the ceiling, and a
-    /// surface that has shipped sits either at its released value or one step
-    /// above it. A surface no release has carried is checked on the first rule
-    /// only.
+    /// Two checks, in this order: `min` does not exceed `max`, and `max` is
+    /// `released` or `released + 1`. A surface with `released: None` is checked
+    /// on the first only. When both fail, the message names the first.
     ///
     /// Example — a surface released at 2 that reads `max: 4` is reported as
     /// `"the control plane speaks 4, which is more than one step above the 2

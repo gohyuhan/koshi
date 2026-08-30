@@ -221,6 +221,10 @@ enum ServeOutcome {
 /// caller reading standard output sees end of stream and knows the session
 /// never started.
 ///
+/// `profile` names the profile the session opens its tabs and panes from.
+/// `None`, a name no profile file answers to, and a profile that will not
+/// launch each open one shell instead.
+///
 /// `allow_other_users_override` is the `--allow-other-users` flag the router
 /// passes on: `Some(true)` serves the other users of this machine whatever
 /// `koshi.kdl` says, and `None` leaves that answer to the file.
@@ -860,7 +864,9 @@ fn refresh_carried_exits(header: &mut ResumeHeader, panes: &[koshi_pty::portable
 /// comes back. `pid = 0` or `pid = 3_000_000_000` → nothing is signalled and
 /// `false` comes back.
 ///
-/// Hands back whether the signal was sent.
+/// Hands back whether `killpg` was called on `pid`. A `killpg` that failed —
+/// the group is already gone, or a member may not be signalled — still hands
+/// back `true`.
 #[cfg(unix)]
 fn end_carried_child(pid: u32) -> bool {
     if pid == 0 || i32::try_from(pid).is_err() {

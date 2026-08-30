@@ -1,5 +1,4 @@
-//! Shared tuning constants — fixed numeric bounds the model enforces, kept in
-//! `koshi-core` so every crate that references one agrees on a single value.
+//! Numeric bounds that more than one crate reads.
 
 use std::time::Duration;
 
@@ -8,6 +7,6 @@ use std::time::Duration;
 /// recording another drops the oldest.
 pub const MAX_TAB_FOCUS_MRU: u16 = 16;
 
-/// Default grace period for a `Graceful` close: how long the model waits for a
-/// child to exit on its own before a caller escalates to a forced kill.
-pub const GRACEFUL_TIMEOUT_DURATION: Duration = Duration::new(3, 0);
+/// Default timeout of a `Graceful` close: the time a child gets to exit on its
+/// own before the close escalates to a forced kill.
+pub const GRACEFUL_TIMEOUT_DURATION: Duration = Duration::from_secs(3);

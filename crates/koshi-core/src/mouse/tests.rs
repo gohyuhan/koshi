@@ -327,3 +327,32 @@ fn the_answer_is_the_same_for_every_button_and_every_scroll_direction() {
         assert!(reports(MouseTracking::Normal, MouseKind::Scroll(direction)));
     }
 }
+
+#[test]
+fn mouse_tracking_default_is_off() {
+    assert_eq!(MouseTracking::default(), MouseTracking::Off);
+}
+
+#[test]
+fn decoding_refuses_a_mouse_kind_no_variant_names() {
+    let refused = serde_json::from_str::<MouseKind>("\"Hover\"").expect_err("no such kind");
+    assert_eq!(
+        refused.to_string(),
+        "unknown variant `Hover`, expected one of `Press`, `Release`, `Drag`, `Scroll`, `Motion` \
+         at line 1 column 7"
+    );
+}
+
+#[test]
+fn a_scrolled_answer_missing_its_top_line_decodes_as_none() {
+    let decoded: MouseAnswer =
+        serde_json::from_str("{\"Scrolled\":{\"pane\":\"00000000-0000-0000-0000-000000000000\"}}")
+            .expect("a missing `top` reads as `None`");
+    assert_eq!(
+        decoded,
+        MouseAnswer::Scrolled {
+            pane: PaneId::from_uuid(Uuid::nil()),
+            top: None
+        }
+    );
+}

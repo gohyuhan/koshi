@@ -206,6 +206,7 @@ fn migration_runs_every_adjacent_step_in_order() {
 
     assert_eq!(result.from, 1);
     assert_eq!(result.to, 3);
+    assert!(result.changed);
     assert_eq!(result.source, "version 3\nstep-one #true\nstep-two #true\n");
 }
 
@@ -387,6 +388,117 @@ fn future_version_is_rejected() {
         MigrationError::Version {
             path: "koshi.kdl".to_string(),
             detail: "schema version 2 is newer than this koshi supports (1)".to_string(),
+        }
+    );
+}
+
+#[test]
+fn an_empty_file_declares_no_version() {
+    assert_eq!(version_reason(""), "file must declare `version`");
+}
+
+#[test]
+fn a_valid_app_file_reports_the_version_it_declares() {
+    let validated =
+        validate_config(ConfigFileKind::App, Path::new("koshi.kdl"), "version 1\n").unwrap();
+
+    assert_eq!(
+        validated,
+        ValidatedConfig {
+            version: 1,
+            current: true,
+        }
+    );
+}
+
+#[test]
+fn a_valid_keybinding_file_reports_the_version_it_declares() {
+    let validated = validate_config(
+        ConfigFileKind::Keybinding,
+        Path::new("keybinding.kdl"),
+        "version 1\nmode \"normal\" { bind \"<C-y>\" \"core:new-tab\" }\n",
+    )
+    .unwrap();
+
+    assert_eq!(
+        validated,
+        ValidatedConfig {
+            version: 1,
+            current: true,
+        }
+    );
+}
+
+#[test]
+fn every_keybinding_schema_problem_lands_in_one_invalid_error() {
+    let error = validate_config(
+        ConfigFileKind::Keybinding,
+        Path::new("keybinding.kdl"),
+        "version 1\nkeybindings { }\nmode \"normal\" { unbind \"<Tab>\" }\n",
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error,
+        MigrationError::Invalid {
+            path: "keybinding.kdl".to_string(),
+            details: "unknown key `keybindings`; did you mean `version`?; \
+                      unknown key `unbind`; did you mean `bind`?"
+                .to_string(),
+        }
+    );
+}
+
+#[test]
+fn a_valid_profile_file_reports_the_version_it_declares() {
+    let validated = validate_config(
+        ConfigFileKind::Profile,
+        Path::new("profile/dev.kdl"),
+        "version 1\ntab { pane }\n",
+    )
+    .unwrap();
+
+    assert_eq!(
+        validated,
+        ValidatedConfig {
+            version: 1,
+            current: true,
+        }
+    );
+}
+
+#[test]
+fn a_profile_schema_problem_becomes_an_invalid_error() {
+    let error = validate_config(
+        ConfigFileKind::Profile,
+        Path::new("profile/dev.kdl"),
+        "version 1\n",
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error,
+        MigrationError::Invalid {
+            path: "profile/dev.kdl".to_string(),
+            details: "profile file must define at least one `tab`".to_string(),
+        }
+    );
+}
+
+#[test]
+fn a_theme_warning_is_a_validation_error_for_migration() {
+    let error = validate_config(
+        ConfigFileKind::Theme,
+        Path::new("themes/plain.kdl"),
+        "version 1\ncolors { accent \"#ffffff\" }\ncolors { }\n",
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error,
+        MigrationError::Invalid {
+            path: "themes/plain.kdl".to_string(),
+            details: "ignored duplicate `colors` section".to_string(),
         }
     );
 }

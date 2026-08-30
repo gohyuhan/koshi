@@ -689,4 +689,9 @@ fn highest_version_picks_semver_order_not_list_order() {
         highest_version(Vec::new()).unwrap_err(),
         "no releases found"
     );
+    // A list where no tag is a version reads the same as an empty one.
+    assert_eq!(
+        highest_version(releases(&["nightly", "edge"])).unwrap_err(),
+        "no releases found"
+    );
 }

@@ -5,9 +5,8 @@ use tempfile::TempDir;
 /// A fresh temporary directory standing in for the koshi runtime directory,
 /// removed when the returned handle drops.
 ///
-/// On Unix the directory is made under `/tmp`, whose short paths keep a
-/// socket path inside the platform's socket-address length cap; on Windows
-/// it is made under the user's temporary directory.
+/// On Unix the directory is made under `/tmp`. On Windows it is made under
+/// [`std::env::temp_dir`].
 ///
 /// # Panics
 /// Panics when the directory cannot be created.

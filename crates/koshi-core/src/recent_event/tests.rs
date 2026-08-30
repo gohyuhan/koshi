@@ -9,11 +9,14 @@ use std::time::Duration;
 use crate::command::CopyTarget;
 use crate::event::tests::event_cases;
 use crate::event::{
-    CommandRejected, Copied, EventClass, PaneCreated, PaneEnterPressed, PaneFocused, PaneTyped,
-    PluginBroken, PluginDisabled, PluginDoctorCompleted, PluginEnabled, PluginInstalled,
-    PluginLoadFailed, PluginReloaded, PluginUninstalled, PluginUnloaded, PluginUpdated,
-    RejectReason, SubmittedLinePayload, SubscriberLagged, TypedPayload,
+    CommandRejected, ConfigReloaded, Copied, EventClass, KeybindingMatched, MouseDragged,
+    MousePressed, MouseReleased, MouseScrolled, PaneCommandFinished, PaneCreated, PaneEnterPressed,
+    PaneFocused, PaneTyped, PluginBroken, PluginDisabled, PluginDoctorCompleted, PluginEnabled,
+    PluginInstalled, PluginLoadFailed, PluginReloaded, PluginUninstalled, PluginUnloaded,
+    PluginUpdated, RejectReason, SubmittedLinePayload, SubscriberLagged, TabFocused, TypedPayload,
 };
+use crate::geometry::Point;
+use crate::mouse::{MouseButton, ScrollDirection};
 
 /// A fixed instant, so an assertion never races the clock.
 fn at() -> SystemTime {
@@ -209,17 +212,180 @@ fn a_mouse_press_outside_every_pane_records_no_pane() {
     let client_id = ClientId::new();
 
     let recorded = record(
-        &Event::MousePressed(crate::event::MousePressed {
+        &Event::MousePressed(MousePressed {
             client_id,
             pane: None,
-            position: crate::geometry::Point { x: 0, y: 0 },
-            button: crate::mouse::MouseButton::Left,
+            position: Point { x: 0, y: 0 },
+            button: MouseButton::Left,
         }),
         at(),
     );
 
     assert_eq!(recorded.client, Some(client_id));
     assert_eq!(recorded.pane, None);
+}
+
+#[test]
+fn every_mouse_event_inside_a_pane_records_that_pane_and_its_client_and_nothing_else() {
+    let client_id = ClientId::new();
+    let pane_id = PaneId::new();
+    let position = Point { x: 3, y: 4 };
+    let events = [
+        Event::MousePressed(MousePressed {
+            client_id,
+            pane: Some(pane_id),
+            position,
+            button: MouseButton::Left,
+        }),
+        Event::MouseReleased(MouseReleased {
+            client_id,
+            pane: Some(pane_id),
+            position,
+            button: MouseButton::Right,
+        }),
+        Event::MouseDragged(MouseDragged {
+            client_id,
+            pane: Some(pane_id),
+            position,
+            button: MouseButton::Middle,
+        }),
+        Event::MouseScrolled(MouseScrolled {
+            client_id,
+            pane: Some(pane_id),
+            position,
+            direction: ScrollDirection::Down,
+        }),
+    ];
+
+    for event in &events {
+        let recorded = record(event, at());
+        assert_eq!(
+            recorded,
+            RecentEvent {
+                at: at(),
+                name: Cow::Borrowed(event.name()),
+                session: None,
+                client: Some(client_id),
+                tab: None,
+                pane: Some(pane_id),
+                plugin: None,
+                command: None,
+                subscriber: None,
+            },
+            "{}",
+            event.name()
+        );
+    }
+}
+
+#[test]
+fn a_tab_focused_records_its_client_and_tab_but_not_the_tab_it_left() {
+    let client_id = ClientId::new();
+    let tab_id = TabId::new();
+    let prior_tab = TabId::new();
+
+    let recorded = record(
+        &Event::TabFocused(TabFocused {
+            client_id,
+            tab_id,
+            prior_tab,
+        }),
+        at(),
+    );
+
+    assert_eq!(
+        recorded,
+        RecentEvent {
+            at: at(),
+            name: Cow::Borrowed("TabFocused"),
+            session: None,
+            client: Some(client_id),
+            tab: Some(tab_id),
+            pane: None,
+            plugin: None,
+            command: None,
+            subscriber: None,
+        }
+    );
+}
+
+#[test]
+fn a_keybinding_match_records_its_client_and_command() {
+    let client_id = ClientId::new();
+    let command_id = CommandId::new();
+
+    let recorded = record(
+        &Event::KeybindingMatched(KeybindingMatched {
+            client_id,
+            command_id,
+        }),
+        at(),
+    );
+
+    assert_eq!(
+        recorded,
+        RecentEvent {
+            at: at(),
+            name: Cow::Borrowed("KeybindingMatched"),
+            session: None,
+            client: Some(client_id),
+            tab: None,
+            pane: None,
+            plugin: None,
+            command: Some(command_id),
+            subscriber: None,
+        }
+    );
+}
+
+#[test]
+fn a_finished_command_records_its_pane_and_no_exit_code() {
+    let pane_id = PaneId::new();
+
+    let recorded = record(
+        &Event::PaneCommandFinished(PaneCommandFinished {
+            pane_id,
+            exit_code: Some(127),
+        }),
+        at(),
+    );
+
+    assert_eq!(
+        recorded,
+        RecentEvent {
+            at: at(),
+            name: Cow::Borrowed("PaneCommandFinished"),
+            session: None,
+            client: None,
+            tab: None,
+            pane: Some(pane_id),
+            plugin: None,
+            command: None,
+            subscriber: None,
+        }
+    );
+}
+
+#[test]
+fn a_config_reload_records_its_session() {
+    let session_id = SessionId::new();
+
+    let recorded = record(&Event::ConfigReloaded(ConfigReloaded { session_id }), at());
+
+    assert_eq!(
+        recorded,
+        RecentEvent {
+            at: at(),
+            name: Cow::Borrowed("ConfigReloaded"),
+            session: Some(session_id),
+            client: None,
+            tab: None,
+            pane: None,
+            plugin: None,
+            command: None,
+            subscriber: None,
+        }
+    );
 }
 
 #[test]
@@ -285,9 +451,20 @@ fn a_copy_records_the_client_and_pane_but_no_byte_count() {
         at(),
     );
 
-    assert_eq!(recorded.client, Some(client_id));
-    assert_eq!(recorded.pane, Some(pane_id));
-    assert!(!serde_json::to_string(&recorded).unwrap().contains("4096"));
+    assert_eq!(
+        recorded,
+        RecentEvent {
+            at: at(),
+            name: Cow::Borrowed("Copied"),
+            session: None,
+            client: Some(client_id),
+            tab: None,
+            pane: Some(pane_id),
+            plugin: None,
+            command: None,
+            subscriber: None,
+        }
+    );
 }
 
 #[test]
@@ -472,4 +649,33 @@ fn a_record_whose_name_is_not_an_event_this_build_has_still_reads() {
     let decoded: RecentEvent = serde_json::from_str(encoded).expect("an unknown name still reads");
 
     assert_eq!(decoded.name, "PaneOpenedSideways");
+}
+
+#[test]
+fn a_record_serializes_with_its_field_names_in_order() {
+    let recorded = record(&Event::Quit, at());
+
+    assert_eq!(
+        serde_json::to_string(&recorded).unwrap(),
+        r#"{"at":{"secs_since_epoch":1700000000,"nanos_since_epoch":0},"name":"Quit","session":null,"client":null,"tab":null,"pane":null,"plugin":null,"command":null,"subscriber":null}"#
+    );
+}
+
+#[test]
+fn a_record_whose_name_is_null_is_refused() {
+    let encoded = r#"{
+        "at": {"secs_since_epoch": 1700000000, "nanos_since_epoch": 0},
+        "name": null,
+        "session": null,
+        "client": null,
+        "tab": null,
+        "pane": null,
+        "plugin": null,
+        "command": null,
+        "subscriber": null
+    }"#;
+
+    let refusal = serde_json::from_str::<RecentEvent>(encoded).expect_err("a null name is refused");
+
+    assert!(refusal.to_string().contains("null"), "{refusal}");
 }

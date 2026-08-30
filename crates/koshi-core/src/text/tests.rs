@@ -1,12 +1,10 @@
-//! Tests for pane-title sanitizing.
+//! Tests for `sanitize_reported_text` and `MAX_REPORTED_TEXT_BYTES`.
 //!
-//! Every refused character is named by its own literal. A loop over the
-//! constant under test asserts nothing: deleting an entry deletes its
-//! assertion with it.
+//! Every refused character is asserted from a literal in the test.
 
 use super::*;
 
-/// Assert that `c` is removed from the middle of a title.
+/// Asserts that `sanitize_reported_text("a{c}b")` is `"ab"`.
 #[track_caller]
 fn refused(c: char) {
     let title = format!("a{c}b");
@@ -18,7 +16,7 @@ fn refused(c: char) {
     );
 }
 
-/// Assert that `c` is kept in the middle of a title.
+/// Asserts that `sanitize_reported_text("a{c}b")` is `"a{c}b"`.
 #[track_caller]
 fn kept(c: char) {
     let title = format!("a{c}b");
@@ -95,7 +93,8 @@ fn tag_characters_are_removed() {
     refused('\u{E0020}');
     refused('\u{E0072}');
     refused('\u{E007F}');
-    // A tag sequence spells readable text in zero display columns.
+    // `hidden` is `rm -rf /` spelled in tag characters: readable text that
+    // takes zero display columns.
     let hidden: String = "rm -rf /"
         .chars()
         .map(|c| char::from_u32(0xE0000 + c as u32).expect("tag is a scalar value"))
@@ -113,48 +112,93 @@ fn joiners_marks_and_variation_selectors_are_kept() {
 }
 
 #[test]
+fn the_character_on_each_side_of_every_refused_range_is_kept() {
+    kept('\u{0020}'); // SPACE, after C0
+    kept('\u{007E}'); // TILDE, before DEL
+    kept('\u{00A0}'); // NO-BREAK SPACE, after C1
+    kept('\u{061B}'); // ARABIC SEMICOLON, before ARABIC LETTER MARK
+    kept('\u{061D}'); // ARABIC END OF TEXT MARK, after ARABIC LETTER MARK
+    kept('\u{200D}'); // ZERO WIDTH JOINER, before the implicit marks
+    kept('\u{2010}'); // HYPHEN, after the implicit marks
+    kept('\u{2027}'); // HYPHENATION POINT, before the separators
+    kept('\u{202F}'); // NARROW NO-BREAK SPACE, after the embeddings
+    kept('\u{2065}'); // unassigned, before the isolates
+    kept('\u{206A}'); // INHIBIT SYMMETRIC SWAPPING, after the isolates
+    kept('\u{FFF8}'); // unassigned, before the annotation marks
+    kept('\u{FFFC}'); // OBJECT REPLACEMENT CHARACTER, after the annotation marks
+    kept('\u{FFFD}'); // REPLACEMENT CHARACTER, before U+FFFE
+    kept('\u{10000}'); // LINEAR B SYLLABLE B008 A, after U+FFFF
+    kept('\u{DFFFF}'); // unassigned, before the tags
+    kept('\u{E0080}'); // unassigned, after the tags
+    kept('\u{E0100}'); // VARIATION SELECTOR-17
+    kept('\u{10FFFF}'); // the last scalar value
+}
+
+#[test]
+fn right_to_left_letters_are_kept_and_only_the_control_is_removed() {
+    assert_eq!(sanitize_reported_text("שלום"), "שלום");
+    // HEBREW LETTER ALEF, ARABIC LETTER MARK, ARABIC LETTER ALEF.
+    assert_eq!(
+        sanitize_reported_text("\u{05D0}\u{061C}\u{0627}"),
+        "\u{05D0}\u{0627}"
+    );
+}
+
+#[test]
+fn an_escape_sequence_loses_only_its_escape_byte() {
+    assert_eq!(
+        sanitize_reported_text("\u{1b}[31mred\u{1b}[0m"),
+        "[31mred[0m"
+    );
+}
+
+#[test]
 fn the_cap_is_exactly_max_pane_title_bytes() {
     assert_eq!(MAX_REPORTED_TEXT_BYTES, 512);
     // One byte under, exactly at, and one over.
-    assert_eq!(sanitize_reported_text(&"a".repeat(511)).len(), 511);
-    assert_eq!(sanitize_reported_text(&"a".repeat(512)).len(), 512);
-    assert_eq!(sanitize_reported_text(&"a".repeat(513)).len(), 512);
+    assert_eq!(sanitize_reported_text(&"a".repeat(511)), "a".repeat(511));
+    assert_eq!(sanitize_reported_text(&"a".repeat(512)), "a".repeat(512));
+    assert_eq!(sanitize_reported_text(&"a".repeat(513)), "a".repeat(512));
 }
 
 #[test]
 fn a_long_title_is_cut_to_the_byte_cap() {
-    let cut = sanitize_reported_text(&"a".repeat(5_000_000));
-    assert_eq!(cut.len(), MAX_REPORTED_TEXT_BYTES);
-    assert!(cut.chars().all(|c| c == 'a'));
+    assert_eq!(
+        sanitize_reported_text(&"a".repeat(5_000_000)),
+        "a".repeat(MAX_REPORTED_TEXT_BYTES)
+    );
 }
 
 #[test]
 fn the_cut_keeps_the_start_and_not_the_end() {
-    // Which end survives is user-visible and must not drift.
-    let cut = sanitize_reported_text(&format!("head{}", "x".repeat(1_000)));
-    assert!(
-        cut.starts_with("head"),
-        "the cut kept the wrong end: {cut:?}"
+    assert_eq!(
+        sanitize_reported_text(&format!("head{}", "x".repeat(1_000))),
+        format!("head{}", "x".repeat(508))
     );
-    assert_eq!(cut.len(), MAX_REPORTED_TEXT_BYTES);
 }
 
 #[test]
 fn the_cut_never_splits_a_character() {
-    // Three bytes: 512 is not a multiple, so the cut lands short of the cap.
-    let three = sanitize_reported_text(&"日".repeat(1_000));
-    assert_eq!(three.len(), 510);
-    assert_eq!(three.chars().count(), 170);
-    assert!(three.chars().all(|c| c == '日'));
+    // Three bytes each: 170 fit in 510 bytes, the 171st does not.
+    assert_eq!(
+        sanitize_reported_text(&"日".repeat(1_000)),
+        "日".repeat(170)
+    );
+    // Four bytes each: 128 fill 512 bytes exactly.
+    assert_eq!(
+        sanitize_reported_text(&"🙂".repeat(1_000)),
+        "🙂".repeat(128)
+    );
+    // Two bytes each: 256 fill 512 bytes exactly.
+    assert_eq!(sanitize_reported_text(&"é".repeat(1_000)), "é".repeat(256));
+}
 
-    // Four bytes: 512 IS a multiple, so the cut lands exactly on the cap.
-    let four = sanitize_reported_text(&"🙂".repeat(1_000));
-    assert_eq!(four.len(), MAX_REPORTED_TEXT_BYTES);
-    assert_eq!(four.chars().count(), 128);
-
-    // Two bytes: divides evenly as well.
-    let two = sanitize_reported_text(&"é".repeat(1_000));
-    assert_eq!(two.len(), MAX_REPORTED_TEXT_BYTES);
+#[test]
+fn the_cut_stops_at_the_first_character_that_does_not_fit() {
+    // 510 bytes, then a four-byte character that does not fit, then a
+    // one-byte character that would fit.
+    let text = format!("{}🙂b", "a".repeat(510));
+    assert_eq!(sanitize_reported_text(&text), "a".repeat(510));
 }
 
 #[test]
@@ -173,8 +217,6 @@ fn a_title_of_only_refused_characters_becomes_empty() {
 
 #[test]
 fn a_sanitized_title_is_stable_under_a_second_pass() {
-    // Applying at ingest must not differ from applying twice, or a caller that
-    // sanitizes again changes the value.
     for raw in [
         "~/Projects/koshi",
         "a\u{7f}b",

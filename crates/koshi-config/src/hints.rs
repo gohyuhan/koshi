@@ -41,8 +41,7 @@ pub struct KeymapHints {
     /// a user removal under it, ignores this and shows a `+N` marker instead.
     pub prefix_labels: Arc<BTreeMap<KeyChord, String>>,
     /// Every key a user surface removed in the current mode. A removal under
-    /// a labeled prefix voids the label: the shipped name no longer describes
-    /// the group.
+    /// a labeled prefix voids that label.
     pub removed: Arc<BTreeSet<KeySequence>>,
     /// True when the user keymap was reverted to defaults over a key
     /// collision: the bar shows a conflict marker, and the hints listed are
@@ -69,7 +68,8 @@ pub struct HintBinding {
 /// Per-mode hint-bar data: every mode's bindings joined to display names,
 /// shared by reference with each frame's snapshot.
 ///
-/// Cloning is cheap — every collection travels behind an [`Arc`].
+/// A clone copies the two per-mode maps. The merged keymap, each binding
+/// list, each removal set, and the prefix labels travel behind [`Arc`]s.
 #[derive(Clone)]
 pub struct KeymapHintCatalog {
     /// Liveness-filtered lookup table shared by hints and keyboard resolution.
@@ -103,13 +103,17 @@ impl KeymapHintCatalog {
     }
 
     /// Resolve the hint catalog from `layers` and the effective keybinding
-    /// config, whose timing fields and unlock alternative carry into lookups.
+    /// config. Reads `chord_timeout_ms`, `unlock_alternative`,
+    /// `max_chord_depth` and `leader`; `modes` is not read, `layers` carries
+    /// the bindings.
     ///
-    /// Folds the layers with [`merge_keymaps`]: a binding whose action the
-    /// resolver refuses (unregistered, or not yet implemented) yields no
-    /// hint. In locked mode every entry firing `core:unlock` is flagged
-    /// pinned; the hint bar sorts pinned hints before unpinned ones in the
-    /// same modifier group.
+    /// Folds the layers with [`merge_keymaps`]: a binding that does not fire
+    /// yields no hint — its action unregistered or registered without an
+    /// implementation in this build, a locked-mode sequence of two or more
+    /// chords holding the unlock chord, or a sequence longer than
+    /// `max_chord_depth`. In locked mode every entry firing `core:unlock` is
+    /// flagged pinned; the hint bar sorts pinned hints before unpinned ones
+    /// in the same modifier group.
     pub fn from_parts(
         layers: &[KeyMapLayer],
         config: &KeybindingsConfig,
@@ -164,6 +168,12 @@ impl KeymapHintCatalog {
     }
 
     /// Resolve one pending sequence in a built-in mode.
+    ///
+    /// [`KeyMatch::exact`] holds the binding `sequence` fires, the
+    /// user-authored entry ahead of the surviving default.
+    /// [`KeyMatch::prefix`] is true when some binding in the mode is longer
+    /// than `sequence` and opens with it. A mode with no bindings answers
+    /// `KeyMatch::default()`: `exact` is `None` and `prefix` is false.
     pub fn match_sequence(&self, mode: LockMode, sequence: &KeySequence) -> KeyMatch {
         let name = ModeName::new(mode.name());
         let Some(mode_map) = self.merged.modes.get(&name) else {
@@ -185,6 +195,8 @@ impl KeymapHintCatalog {
         KeyMatch { exact, prefix }
     }
 
+    /// How long an ambiguous sequence — one that both fires and opens a
+    /// longer binding — waits for its next chord, from `chord_timeout_ms`.
     pub fn chord_timeout(&self) -> Duration {
         self.chord_timeout
     }
@@ -192,7 +204,7 @@ impl KeymapHintCatalog {
     /// The chord that unlocks a locked client: the configured
     /// `unlock_alternative` when the user named one, else the reserved
     /// `<C-l>`. Conflict detection refuses a config whose locked mode does
-    /// not fire `core:unlock` from it, so this chord always escapes.
+    /// not fire `core:unlock` from this chord.
     pub fn unlock_chord(&self) -> KeyChord {
         self.unlock_chord
     }
@@ -213,16 +225,17 @@ impl KeymapHintCatalog {
 /// Exact and longer-prefix results for one sequence lookup.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KeyMatch {
+    /// The binding the sequence fires, or `None` when nothing binds it.
     pub exact: Option<BoundAction>,
+    /// True when a longer binding in the same mode opens with the sequence.
     pub prefix: bool,
 }
 
 /// One mode's merged bindings joined to display names, sorted by sequence.
 ///
-/// Walks the mode's user-set entries and surviving defaults (steal already
-/// resolved by the merge, so the two never hold the same key), reads each
-/// action's display name from the registry, and flags every locked-mode
-/// binding firing `unlock` pinned.
+/// Walks the mode's user-set entries and surviving defaults — the merge
+/// leaves no key in both — reads each action's display name from the
+/// registry, and flags every locked-mode binding firing `unlock` pinned.
 fn mode_entries(
     merged: &MergedModeMap,
     registry: &ActionRegistry,
@@ -243,8 +256,8 @@ fn mode_entries(
         .map(|(sequence, bound, user_set)| {
             let label = registry
                 .lookup(&bound.action)
-                // The merge admits firing bindings only, and firing requires
-                // a registry entry, so the same registry resolves every one.
+                // `merge_keymaps` admits only bindings whose action resolves
+                // in this same registry.
                 .expect("a merged binding's action is registered")
                 .display_name
                 .clone();

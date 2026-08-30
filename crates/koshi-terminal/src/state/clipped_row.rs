@@ -7,11 +7,10 @@ use crate::grid::state::Cell;
 /// wide glyph clipped at the right edge.
 ///
 /// Produced by [`TerminalState::clip_row`](crate::state::TerminalState::clip_row).
-/// Borrows the live grid row, so it lives only as long as that borrow. A wide
-/// glyph (CJK, emoji) occupies two columns; when the inner rect ends between its
-/// halves, drawing only the left half would show a broken glyph. `clip_row`
-/// instead drops that base from `cells` and sets `right_pad`, telling the
-/// renderer to fill the freed column with a blank.
+/// Borrows the live grid row and lives only as long as that borrow. A wide
+/// glyph (CJK, emoji) occupies two columns; when the inner rect ends between
+/// its halves, `clip_row` drops that base from `cells` and sets `right_pad`,
+/// and the renderer fills the freed column with a blank.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClippedRow<'a> {
     /// The visible cells, left to right. When `right_pad` is set this stops one
@@ -25,7 +24,7 @@ pub struct ClippedRow<'a> {
 impl<'a> ClippedRow<'a> {
     /// The visible cells, left to right. The renderer draws these, then one
     /// blank pad cell when `right_pad` is set. The slice borrows the underlying
-    /// grid row, so it outlives this `ClippedRow`.
+    /// grid row and outlives this `ClippedRow`.
     pub fn cells(&self) -> &'a [Cell] {
         self.cells
     }

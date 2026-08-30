@@ -101,9 +101,7 @@ fn headless_takes_the_other_users_flag_beside_it() {
 
 #[test]
 fn the_other_users_flag_without_headless_is_a_usage_error() {
-    // The flag only reaches a session this command creates, and only
-    // `--headless` creates one here, so a bare `koshi --allow-other-users`
-    // would silently do nothing.
+    // `--allow-other-users` is declared `requires = "headless"`.
     let error = parse_err(&["koshi", "--allow-other-users"]);
 
     assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
@@ -162,8 +160,7 @@ fn attach_takes_a_server_and_the_name_to_save_it_under() {
 
 #[test]
 fn a_name_to_save_a_server_under_without_a_server_is_a_usage_error() {
-    // The name only ever labels a server `--remote` reached, so there is
-    // nothing for it to label on its own.
+    // `--save-as` is declared `requires = "remote"`.
     let error = parse_err(&["koshi", "attach", "--save-as", "work"]);
 
     assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
@@ -179,8 +176,7 @@ fn the_server_flag_reaches_the_action_verbs_and_the_bare_invocation() {
         parse(&["koshi", "close-pane", "--remote", "work"]).remote,
         Some("work".to_string())
     );
-    // A bare invocation parses here and is refused at dispatch, which has
-    // nothing to run on the named machine.
+    // A bare invocation parses here; dispatch refuses it.
     let bare = parse(&["koshi", "--remote", "work"]);
     assert_eq!(bare.remote, Some("work".to_string()));
     assert_eq!(bare.command, None);
@@ -979,8 +975,6 @@ fn the_command_tree_lists_exactly_the_declared_subcommands() {
 
 #[test]
 fn serve_router_takes_the_wait_for_lock_flag() {
-    // The flag is what a router handing its place over passes to the router
-    // it starts, so the new one waits instead of yielding to the old one.
     assert_eq!(
         parse(&["koshi", "serve-router", "--runtime-dir", "X"]).command,
         Some(CliCommand::ServeRouter {
@@ -1008,6 +1002,158 @@ fn serve_router_takes_the_wait_for_lock_flag() {
             runtime_dir: None,
             wait_for_lock: false,
         })
+    );
+}
+
+#[test]
+fn serve_session_parses_its_two_positionals_and_every_flag() {
+    let session = format!("session-{}", fixed_uuid());
+    assert_eq!(
+        command(&["koshi", "serve-session", &session, "amber-fox"]),
+        CliCommand::ServeSession {
+            session_id: SessionId::from_uuid(fixed_uuid()),
+            session_name: "amber-fox".to_string(),
+            runtime_dir: None,
+            profile: None,
+            allow_other_users: false,
+            resume: None,
+            supervisor_token: None,
+            supervisor_pid: None,
+        }
+    );
+    assert_eq!(
+        command(&[
+            "koshi",
+            "serve-session",
+            &session,
+            "amber-fox",
+            "--runtime-dir",
+            "R",
+            "--profile",
+            "dev",
+            "--allow-other-users",
+            "--resume",
+            "image.bin",
+            "--supervisor-token",
+            "secret",
+            "--supervisor-pid",
+            "4321",
+        ]),
+        CliCommand::ServeSession {
+            session_id: SessionId::from_uuid(fixed_uuid()),
+            session_name: "amber-fox".to_string(),
+            runtime_dir: Some(PathBuf::from("R")),
+            profile: Some("dev".to_string()),
+            allow_other_users: true,
+            resume: Some(PathBuf::from("image.bin")),
+            supervisor_token: Some("secret".to_string()),
+            supervisor_pid: Some(4321),
+        }
+    );
+}
+
+#[test]
+fn serve_session_requires_both_positionals_and_a_session_id() {
+    let session = format!("session-{}", fixed_uuid());
+    assert_eq!(
+        parse_err(&["koshi", "serve-session"]).kind(),
+        ErrorKind::MissingRequiredArgument
+    );
+    assert_eq!(
+        parse_err(&["koshi", "serve-session", &session]).kind(),
+        ErrorKind::MissingRequiredArgument
+    );
+    let tab = format!("tab-{}", fixed_uuid());
+    assert_eq!(
+        parse_err(&["koshi", "serve-session", &tab, "amber-fox"]).kind(),
+        ErrorKind::ValueValidation
+    );
+}
+
+#[test]
+fn serve_session_supervisor_pid_takes_the_u32_range_and_nothing_past_it() {
+    let session = format!("session-{}", fixed_uuid());
+    assert_eq!(
+        command(&[
+            "koshi",
+            "serve-session",
+            &session,
+            "amber-fox",
+            "--supervisor-pid",
+            "4294967295",
+        ]),
+        CliCommand::ServeSession {
+            session_id: SessionId::from_uuid(fixed_uuid()),
+            session_name: "amber-fox".to_string(),
+            runtime_dir: None,
+            profile: None,
+            allow_other_users: false,
+            resume: None,
+            supervisor_token: None,
+            supervisor_pid: Some(u32::MAX),
+        }
+    );
+    assert_eq!(
+        parse_err(&[
+            "koshi",
+            "serve-session",
+            &session,
+            "amber-fox",
+            "--supervisor-pid",
+            "4294967296",
+        ])
+        .kind(),
+        ErrorKind::ValueValidation
+    );
+}
+
+#[test]
+fn serve_pty_supervisor_parses_its_session_token_and_runtime_dir() {
+    let session = format!("session-{}", fixed_uuid());
+    assert_eq!(
+        command(&["koshi", "serve-pty-supervisor", &session, "secret"]),
+        CliCommand::ServePtySupervisor {
+            session_id: SessionId::from_uuid(fixed_uuid()),
+            token: "secret".to_string(),
+            runtime_dir: None,
+        }
+    );
+    assert_eq!(
+        command(&[
+            "koshi",
+            "serve-pty-supervisor",
+            &session,
+            "secret",
+            "--runtime-dir",
+            "R",
+        ]),
+        CliCommand::ServePtySupervisor {
+            session_id: SessionId::from_uuid(fixed_uuid()),
+            token: "secret".to_string(),
+            runtime_dir: Some(PathBuf::from("R")),
+        }
+    );
+    assert_eq!(
+        parse_err(&["koshi", "serve-pty-supervisor", &session]).kind(),
+        ErrorKind::MissingRequiredArgument
+    );
+}
+
+#[test]
+fn the_argument_free_verbs_take_no_arguments() {
+    assert_eq!(
+        command(&["koshi", "resume-support"]),
+        CliCommand::ResumeSupport
+    );
+    assert_eq!(command(&["koshi", "update"]), CliCommand::Update);
+    assert_eq!(command(&["koshi", "plugin"]), CliCommand::Plugin);
+    assert_eq!(
+        parse_err(&["koshi", "resume-support", "extra"]).kind(),
+        ErrorKind::UnknownArgument
+    );
+    assert_eq!(
+        parse_err(&["koshi", "update", "--now"]).kind(),
+        ErrorKind::UnknownArgument
     );
 }
 
@@ -1098,8 +1244,7 @@ fn an_invalid_direction_prints_every_direction_it_accepts() {
     );
 }
 
-/// `lock` acts on a client, so `--session` is not one of its flags: the
-/// argument grammar refuses it before any session is reached.
+/// `lock` has no `--session` flag; the parser refuses it.
 #[test]
 fn a_session_target_on_lock_prints_the_flag_and_the_lock_usage_line() {
     assert_eq!(
@@ -1191,9 +1336,9 @@ fn new_pane_direction_and_stacked_conflict() {
     assert_eq!(err.exit_code(), 2);
 }
 
-/// The CLI is a client: with no `--direction` it opens the pane the way this
-/// machine's `koshi.kdl` says, through the real `koshi.kdl` parser and the
-/// real client fold. A CLI that ignored the file would split `Right` here.
+/// With no `--direction`, `new-pane` splits toward the direction this
+/// machine's `koshi.kdl` names, read by the real parser and the real client
+/// fold.
 #[test]
 fn new_pane_without_a_direction_flag_follows_the_config_file() {
     let file = parse_app_config(
@@ -1282,8 +1427,8 @@ fn new_pane_parses_session_tab_and_client_targets() {
 
 #[test]
 fn new_pane_tab_given_as_an_id_reaches_the_command_without_a_lookup() {
-    // A `--tab` id needs no session lookup: `to_action` with no resolved
-    // targets still carries it into the command's `tab` field.
+    // With no resolved targets, a `--tab` id still reaches the command's
+    // `tab` field.
     let tab_flag = format!("tab-{}", fixed_uuid());
     let (_, mapped) = action_of(&["koshi", "new-pane", "--tab", &tab_flag]);
     assert_eq!(
@@ -1654,10 +1799,8 @@ fn input_parses_its_text_target_and_enter_flag() {
     );
 }
 
-/// Text that starts with `-` is text, not a flag: a script piping arbitrary
-/// lines into a pane cannot control whether one begins with a dash, and
-/// `koshi input "-la"` must type `-la` rather than fail as an unknown flag.
-/// The real flags keep working on both sides of it.
+/// Text that starts with `-` is text, not a flag: `koshi input "-la"` types
+/// `-la`. A real flag still parses as a flag on either side of the text.
 #[test]
 fn input_takes_text_that_starts_with_a_dash() {
     assert_eq!(
@@ -1686,8 +1829,8 @@ fn input_requires_its_text() {
     assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
 }
 
-/// The text is sent as typed, and Enter — the carriage return a shell reads as
-/// "run this line" — is appended unless `--no-enter` holds it back.
+/// The text travels as typed. A carriage return — the byte the Enter key
+/// sends — follows it unless `--no-enter` is given.
 #[test]
 fn input_appends_enter_unless_no_enter_is_given() {
     let pane_flag = format!("pane-{}", fixed_uuid());
@@ -1985,6 +2128,192 @@ fn a_malformed_id_is_a_usage_error() {
     assert_eq!(err.exit_code(), 2);
 }
 
+// --- Value parsers, called directly ---
+
+#[test]
+fn each_id_parser_takes_its_own_prefix_a_bare_uuid_and_nothing_else() {
+    let uuid = fixed_uuid();
+    assert_eq!(
+        parse_pane_id(&format!("pane-{uuid}")),
+        Ok(PaneId::from_uuid(uuid))
+    );
+    assert_eq!(
+        parse_pane_id(&uuid.to_string()),
+        Ok(PaneId::from_uuid(uuid))
+    );
+    assert_eq!(
+        parse_pane_id(&format!("tab-{uuid}")),
+        Err("expected `pane-<uuid>` or a bare UUID".to_string())
+    );
+
+    assert_eq!(
+        parse_client_id(&format!("client-{uuid}")),
+        Ok(ClientId::from_uuid(uuid))
+    );
+    assert_eq!(
+        parse_client_id("amber-fox"),
+        Err("expected `client-<uuid>` or a bare UUID".to_string())
+    );
+
+    assert_eq!(
+        parse_session_id(&format!("session-{uuid}")),
+        Ok(SessionId::from_uuid(uuid))
+    );
+    assert_eq!(
+        parse_session_id(""),
+        Err("expected `session-<uuid>` or a bare UUID".to_string())
+    );
+}
+
+/// The prefix is stripped once, so a value carrying it twice is neither a
+/// prefixed id nor a bare UUID.
+#[test]
+fn a_doubled_id_prefix_is_refused() {
+    let doubled = format!("pane-pane-{}", fixed_uuid());
+    assert_eq!(
+        parse_pane_id(&doubled),
+        Err("expected `pane-<uuid>` or a bare UUID".to_string())
+    );
+}
+
+#[test]
+fn parse_session_ref_reads_an_id_a_name_and_refuses_an_empty_value() {
+    let uuid = fixed_uuid();
+    assert_eq!(
+        parse_session_ref(&format!("session-{uuid}")),
+        Ok(SessionRef::Id(SessionId::from_uuid(uuid)))
+    );
+    assert_eq!(
+        parse_session_ref(&uuid.to_string()),
+        Ok(SessionRef::Id(SessionId::from_uuid(uuid)))
+    );
+    assert_eq!(
+        parse_session_ref("work"),
+        Ok(SessionRef::Name("work".to_string()))
+    );
+    // Another kind's id does not read as a session id, so it is kept whole as
+    // a name.
+    let tab_id = format!("tab-{uuid}");
+    assert_eq!(
+        parse_session_ref(&tab_id),
+        Ok(SessionRef::Name(tab_id.clone()))
+    );
+    assert_eq!(
+        parse_session_ref(""),
+        Err("expected a session id or name".to_string())
+    );
+}
+
+#[test]
+fn parse_tab_ref_reads_an_id_a_name_and_refuses_an_empty_value() {
+    let uuid = fixed_uuid();
+    assert_eq!(
+        parse_tab_ref(&format!("tab-{uuid}")),
+        Ok(TabRef::Id(TabId::from_uuid(uuid)))
+    );
+    assert_eq!(
+        parse_tab_ref(&uuid.to_string()),
+        Ok(TabRef::Id(TabId::from_uuid(uuid)))
+    );
+    assert_eq!(parse_tab_ref("logs"), Ok(TabRef::Name("logs".to_string())));
+    let pane_id = format!("pane-{uuid}");
+    assert_eq!(parse_tab_ref(&pane_id), Ok(TabRef::Name(pane_id.clone())));
+    assert_eq!(
+        parse_tab_ref(""),
+        Err("expected a tab id or name".to_string())
+    );
+}
+
+#[test]
+fn parse_event_filter_keeps_any_text_and_refuses_an_empty_value() {
+    assert_eq!(parse_event_filter("pane"), Ok("pane".to_string()));
+    assert_eq!(parse_event_filter("TabMoved"), Ok("TabMoved".to_string()));
+    assert_eq!(parse_event_filter(" "), Ok(" ".to_string()));
+    assert_eq!(parse_event_filter("☕"), Ok("☕".to_string()));
+    assert_eq!(
+        parse_event_filter(""),
+        Err("expected part of an event name, such as pane or TabMoved".to_string())
+    );
+}
+
+#[test]
+fn parse_since_reads_a_count_and_one_unit_character() {
+    const EXPECTED: &str = "expected a length such as 30s, 15m, 24h or 7d";
+
+    assert_eq!(parse_since("45s"), Ok(Duration::from_secs(45)));
+    assert_eq!(parse_since("5m"), Ok(Duration::from_secs(300)));
+    assert_eq!(parse_since("2h"), Ok(Duration::from_secs(7_200)));
+    assert_eq!(parse_since("7d"), Ok(Duration::from_secs(604_800)));
+    assert_eq!(parse_since("0s"), Ok(Duration::ZERO));
+    assert_eq!(parse_since("007h"), Ok(Duration::from_secs(25_200)));
+
+    for refused in ["", "5", "s", "5w", "5S", "5 s", "-5s", "never", "五s"] {
+        assert_eq!(
+            parse_since(refused),
+            Err(EXPECTED.to_string()),
+            "for {refused:?}"
+        );
+    }
+    // u64::MAX days: the count parses, the multiply by 86400 does not.
+    assert_eq!(
+        parse_since("18446744073709551615d"),
+        Err(EXPECTED.to_string())
+    );
+    // Seconds need no multiply, so the same count is taken.
+    assert_eq!(
+        parse_since("18446744073709551615s"),
+        Ok(Duration::from_secs(u64::MAX))
+    );
+}
+
+#[test]
+fn tab_ref_id_yields_an_id_only_when_the_flag_carried_one() {
+    let tab = TabId::from_uuid(fixed_uuid());
+    assert_eq!(tab_ref_id(&Some(TabRef::Id(tab))), Some(tab));
+    assert_eq!(tab_ref_id(&Some(TabRef::Name("logs".to_string()))), None);
+    assert_eq!(tab_ref_id(&None), None);
+}
+
+#[test]
+fn spawn_spec_from_argv_takes_the_first_token_as_the_program() {
+    assert_eq!(
+        spawn_spec_from_argv(&["htop".to_string(), "-d".to_string(), "5".to_string()]),
+        SpawnSpec {
+            program: PathBuf::from("htop"),
+            args: vec!["-d".to_string(), "5".to_string()],
+            cwd: None,
+            env: BTreeMap::new(),
+            shell_kind: ShellKind::Other("htop".to_string()),
+        }
+    );
+    // The shell kind is the program path's file stem, lowercased.
+    assert_eq!(
+        spawn_spec_from_argv(&["/bin/BASH".to_string()]).shell_kind,
+        ShellKind::Bash
+    );
+    assert_eq!(
+        spawn_spec_from_argv(&["./scripts/deploy.sh".to_string()]).shell_kind,
+        ShellKind::Other("deploy".to_string())
+    );
+}
+
+#[test]
+#[should_panic(expected = "index out of bounds")]
+fn spawn_spec_from_argv_panics_on_an_empty_argv() {
+    spawn_spec_from_argv(&[]);
+}
+
+#[test]
+fn a_session_reference_prints_as_the_user_named_it() {
+    let uuid = fixed_uuid();
+    assert_eq!(
+        SessionRef::Id(SessionId::from_uuid(uuid)).to_string(),
+        format!("session-{uuid}")
+    );
+    assert_eq!(SessionRef::Name("work".to_string()).to_string(), "work");
+    assert_eq!(SessionRef::Name(String::new()).to_string(), "");
+}
+
 // --- Action mapping ---
 
 #[test]
@@ -2170,9 +2499,9 @@ fn action_subcommands_map_to_their_exact_commands() {
 
 #[test]
 fn every_mapped_action_matches_its_seeded_command_kind() {
-    // Each argv below exercises one CLI action surface; its mapping must
-    // agree with the seed table on both the action's existence and the
-    // command it dispatches, so the two surfaces cannot drift apart.
+    // Each argv exercises one CLI action surface. Its mapping agrees with the
+    // seed table on the action's existence and on the command kind it
+    // dispatches.
     let seeds = core_action_seeds();
     let argvs: &[&[&str]] = &[
         &["koshi", "new-pane"],
@@ -2241,14 +2570,260 @@ fn non_action_subcommands_map_to_none() {
     }
 }
 
+#[test]
+fn the_self_run_and_store_verbs_map_to_no_action() {
+    let session = format!("session-{}", fixed_uuid());
+    let argvs: Vec<Vec<&str>> = vec![
+        vec!["koshi", "update"],
+        vec!["koshi", "resume-support"],
+        vec!["koshi", "serve-router"],
+        vec!["koshi", "serve-session", &session, "amber-fox"],
+        vec!["koshi", "serve-pty-supervisor", &session, "token"],
+        vec!["koshi", "share", "list"],
+        vec!["koshi", "remote", "list"],
+    ];
+    for argv in &argvs {
+        assert_eq!(
+            command(argv).to_action(&ResolvedTargets::default(), Direction::Right),
+            None,
+            "for {argv:?}"
+        );
+    }
+}
+
+// --- Routing targets ---
+
+#[test]
+fn target_session_names_the_session_of_every_verb_that_takes_one() {
+    let argvs: Vec<Vec<&str>> = vec![
+        vec!["koshi", "new-pane", "--session", "work"],
+        vec!["koshi", "run", "--session", "work", "--", "htop"],
+        vec!["koshi", "new-tab", "--session", "work"],
+        vec!["koshi", "close-tab", "--session", "work"],
+    ];
+    for argv in &argvs {
+        assert_eq!(
+            command(argv).target_session(),
+            Some(&SessionRef::Name("work".to_string())),
+            "for {argv:?}"
+        );
+    }
+    // A listing's `--session` is a discovery scope, not a routing target.
+    assert_eq!(
+        command(&["koshi", "list-tabs", "--session", "work"]).target_session(),
+        None
+    );
+    assert_eq!(
+        command(&["koshi", "kill-session", "work"]).target_session(),
+        None
+    );
+    assert_eq!(command(&["koshi", "new-pane"]).target_session(), None);
+}
+
+#[test]
+fn target_tab_names_the_tab_of_every_verb_that_takes_one() {
+    let argvs: Vec<Vec<&str>> = vec![
+        vec!["koshi", "new-pane", "--tab", "logs"],
+        vec!["koshi", "run", "--tab", "logs", "--", "htop"],
+        vec!["koshi", "close-tab", "--tab", "logs"],
+        vec!["koshi", "move-tab", "--index", "0", "--tab", "logs"],
+        vec!["koshi", "focus-tab", "--tab", "logs"],
+    ];
+    for argv in &argvs {
+        assert_eq!(
+            command(argv).target_tab(),
+            Some(&TabRef::Name("logs".to_string())),
+            "for {argv:?}"
+        );
+    }
+    // `debug dump-layout` takes a `--tab` that narrows the dump, not a route.
+    assert_eq!(
+        command(&["koshi", "debug", "dump-layout", "--tab", "logs"]).target_tab(),
+        None
+    );
+    assert_eq!(command(&["koshi", "new-pane"]).target_tab(), None);
+}
+
+#[test]
+fn target_pane_names_the_pane_of_every_verb_that_takes_one() {
+    let pane = PaneId::from_uuid(fixed_uuid());
+    let pane_flag = format!("pane-{}", fixed_uuid());
+    let with_pane: Vec<Vec<&str>> = vec![
+        vec!["koshi", "new-pane", "--pane", &pane_flag],
+        vec!["koshi", "run", "--pane", &pane_flag, "--", "htop"],
+        vec!["koshi", "close-pane", "--pane", &pane_flag],
+        vec![
+            "koshi",
+            "resize-pane",
+            "--direction",
+            "up",
+            "--pane",
+            &pane_flag,
+        ],
+        vec!["koshi", "input", "--pane", &pane_flag, "ls"],
+        vec!["koshi", "focus-pane", "--pane", &pane_flag],
+    ];
+    for argv in &with_pane {
+        assert_eq!(command(argv).target_pane(), Some(pane), "for {argv:?}");
+    }
+
+    let without_pane: Vec<Vec<&str>> = vec![
+        vec!["koshi", "new-pane"],
+        vec!["koshi", "close-pane"],
+        vec!["koshi", "input", "ls"],
+        vec!["koshi", "new-tab"],
+        vec!["koshi", "lock"],
+        vec!["koshi", "list-panes"],
+    ];
+    for argv in &without_pane {
+        assert_eq!(command(argv).target_pane(), None, "for {argv:?}");
+    }
+}
+
+#[test]
+fn target_client_names_the_client_of_every_verb_that_takes_one() {
+    let client = ClientId::from_uuid(fixed_uuid());
+    let client_flag = format!("client-{}", fixed_uuid());
+    let pane_flag = format!("pane-{}", fixed_uuid());
+    let argvs: Vec<Vec<&str>> = vec![
+        vec!["koshi", "new-pane", "--client", &client_flag],
+        vec!["koshi", "run", "--client", &client_flag, "--", "htop"],
+        vec!["koshi", "new-tab", "--client", &client_flag],
+        vec!["koshi", "next-tab", "--client", &client_flag],
+        vec!["koshi", "previous-tab", "--client", &client_flag],
+        vec![
+            "koshi",
+            "focus-tab",
+            "--index",
+            "0",
+            "--client",
+            &client_flag,
+        ],
+        vec![
+            "koshi",
+            "focus-pane",
+            "--pane",
+            &pane_flag,
+            "--client",
+            &client_flag,
+        ],
+        vec!["koshi", "lock", "--client", &client_flag],
+        vec!["koshi", "unlock", "--client", &client_flag],
+        vec!["koshi", "toggle-lock", "--client", &client_flag],
+        vec!["koshi", "toggle-pane-fullscreen", "--client", &client_flag],
+    ];
+    for argv in &argvs {
+        assert_eq!(command(argv).target_client(), Some(client), "for {argv:?}");
+    }
+
+    assert_eq!(command(&["koshi", "close-pane"]).target_client(), None);
+    assert_eq!(
+        command(&["koshi", "move-tab", "--index", "0"]).target_client(),
+        None
+    );
+}
+
+/// A `--tab` the routing layer resolved wins over the same flag given
+/// directly as an id.
+#[test]
+fn a_resolved_tab_target_wins_over_a_tab_flag_given_as_an_id() {
+    let flag_tab = TabId::from_uuid(fixed_uuid());
+    let resolved_tab = TabId::new();
+    assert_ne!(flag_tab, resolved_tab);
+    let tab_flag = flag_tab.to_string();
+    let targets = ResolvedTargets {
+        session: None,
+        tab: Some(resolved_tab),
+    };
+
+    let (_, mapped) = command(&["koshi", "close-tab", "--tab", &tab_flag])
+        .to_action(&targets, Direction::Right)
+        .expect("close-tab is an action");
+    assert_eq!(
+        mapped,
+        Command::CloseTab(CloseTabArgs {
+            tab: Some(resolved_tab),
+            force: false,
+            tree: false,
+        })
+    );
+
+    let (_, mapped) = command(&["koshi", "new-pane", "--tab", &tab_flag])
+        .to_action(&targets, Direction::Right)
+        .expect("new-pane is an action");
+    assert_eq!(
+        mapped,
+        Command::NewPane(NewPaneArgs {
+            source: None,
+            tab: Some(resolved_tab),
+            direction: Direction::Right,
+            stacked: false,
+            cwd: None,
+            command: None,
+            client: None,
+        })
+    );
+}
+
+// --- Discovery scope ---
+
+#[test]
+fn every_inspect_form_is_a_discovery_query() {
+    let pane = format!("pane-{}", fixed_uuid());
+    let client = format!("client-{}", fixed_uuid());
+    assert!(command(&["koshi", "inspect", "tab", "logs"]).is_discovery());
+    assert!(command(&["koshi", "inspect", "pane", &pane]).is_discovery());
+    assert!(command(&["koshi", "inspect", "client", &client]).is_discovery());
+
+    for argv in [
+        vec!["koshi", "new-pane"],
+        vec!["koshi", "close-pane"],
+        vec!["koshi", "lock"],
+        vec!["koshi", "attach"],
+        vec!["koshi", "doctor"],
+        vec!["koshi", "keys", "list"],
+        vec!["koshi", "debug", "dump-state"],
+    ] {
+        assert!(!command(&argv).is_discovery(), "for {argv:?}");
+    }
+}
+
+#[test]
+fn only_a_listing_flag_or_an_inspected_session_names_a_discovery_session() {
+    let pane = format!("pane-{}", fixed_uuid());
+    let client = format!("client-{}", fixed_uuid());
+    for argv in [
+        vec!["koshi", "list-tabs", "--session", "main"],
+        vec!["koshi", "list-panes", "--session", "main"],
+        vec!["koshi", "list-clients", "--session", "main"],
+        vec!["koshi", "inspect", "session", "main"],
+    ] {
+        assert_eq!(
+            command(&argv).discovery_session(),
+            Some(&SessionRef::Name("main".to_string())),
+            "for {argv:?}"
+        );
+    }
+
+    for argv in [
+        vec!["koshi", "list-sessions"],
+        vec!["koshi", "list-panes"],
+        vec!["koshi", "list-clients"],
+        vec!["koshi", "inspect", "tab", "logs"],
+        vec!["koshi", "inspect", "pane", &pane],
+        vec!["koshi", "inspect", "client", &client],
+        vec!["koshi", "new-pane", "--session", "main"],
+    ] {
+        assert_eq!(command(&argv).discovery_session(), None, "for {argv:?}");
+    }
+}
+
 // --- Adversarial: duplicate flags, boundaries, and unicode ---
 
 #[test]
 fn a_repeated_single_valued_flag_is_a_usage_error_not_a_last_wins() {
-    // clap's derived args do not override themselves by default: giving the
-    // same single-valued flag twice is a hard usage error, not "the last one
-    // wins" — true for a root flag (`--profile`) and a subcommand flag
-    // (`--format`) alike.
+    // A single-valued flag given twice is a usage error, for a root flag
+    // (`--profile`) and a subcommand flag (`--format`) alike.
     let profile_twice = parse_err(&["koshi", "--profile", "first", "--profile", "second"]);
     assert_eq!(profile_twice.kind(), ErrorKind::ArgumentConflict);
     assert_eq!(profile_twice.exit_code(), 2);
@@ -2266,8 +2841,7 @@ fn a_repeated_single_valued_flag_is_a_usage_error_not_a_last_wins() {
 
 #[test]
 fn attach_accepts_an_empty_session_id() {
-    // `attach` stores the raw string untyped; validation is a runtime concern,
-    // not a parse concern, so an empty value still parses.
+    // `attach` keeps its positional as typed, with no value parser on it.
     assert_eq!(
         parse(&["koshi", "attach", ""]).command,
         Some(CliCommand::Attach {
@@ -2284,6 +2858,66 @@ fn attach_accepts_a_unicode_session_id() {
         Some(CliCommand::Attach {
             session: Some("café-上海".to_string()),
             save_as: None,
+        })
+    );
+}
+
+/// A session or tab argument runs a value parser that refuses an empty value,
+/// so clap reports it before the verb runs.
+#[test]
+fn an_empty_session_or_tab_argument_is_a_usage_error() {
+    for argv in [
+        vec!["koshi", "kill-session", ""],
+        vec!["koshi", "list-tabs", "--session", ""],
+        vec!["koshi", "new-tab", "--session", ""],
+        vec!["koshi", "inspect", "session", ""],
+        vec!["koshi", "close-tab", "--tab", ""],
+        vec!["koshi", "inspect", "tab", ""],
+        vec!["koshi", "debug", "dump-layout", "--tab", ""],
+    ] {
+        let err = parse_err(&argv);
+        assert_eq!(err.kind(), ErrorKind::ValueValidation, "for {argv:?}");
+        assert_eq!(err.exit_code(), 2, "for {argv:?}");
+    }
+}
+
+/// The text reaches the pane as its own UTF-8 bytes, empty text included.
+#[test]
+fn input_sends_the_text_bytes_as_typed() {
+    let (_, mapped) = action_of(&["koshi", "input", ""]);
+    assert_eq!(
+        mapped,
+        Command::WriteToPane(WriteToPaneArgs {
+            pane: None,
+            data: b"\r".to_vec(),
+        })
+    );
+
+    let (_, mapped) = action_of(&["koshi", "input", "--no-enter", ""]);
+    assert_eq!(
+        mapped,
+        Command::WriteToPane(WriteToPaneArgs {
+            pane: None,
+            data: Vec::new(),
+        })
+    );
+
+    let (_, mapped) = action_of(&["koshi", "input", "echo ☕"]);
+    assert_eq!(
+        mapped,
+        Command::WriteToPane(WriteToPaneArgs {
+            pane: None,
+            data: "echo ☕\r".as_bytes().to_vec(),
+        })
+    );
+
+    // A newline inside the text is kept, and Enter still follows it.
+    let (_, mapped) = action_of(&["koshi", "input", "a\nb"]);
+    assert_eq!(
+        mapped,
+        Command::WriteToPane(WriteToPaneArgs {
+            pane: None,
+            data: b"a\nb\r".to_vec(),
         })
     );
 }
@@ -2373,9 +3007,9 @@ fn a_prefix_collision_without_a_separating_dash_is_rejected() {
 
 #[test]
 fn a_session_value_that_is_not_an_id_parses_as_a_name() {
-    // `--session` takes a name or an id, so a value that does not read as an
-    // id — here a mistyped "sessions-" prefix — is kept whole as a name; it
-    // then fails at routing when no session bears it, not at parse time.
+    // `--session` takes a name or an id. A value that does not read as an id
+    // — here a "sessions-" prefix — is kept whole as a name, and routing
+    // refuses it later when no session bears it.
     let value = format!("sessions-{}", fixed_uuid());
     assert_eq!(
         command(&["koshi", "new-tab", "--session", &value]),
@@ -2388,11 +3022,15 @@ fn a_session_value_that_is_not_an_id_parses_as_a_name() {
 
 #[test]
 fn id_parse_error_message_names_the_expected_forms() {
-    let err = parse_err(&["koshi", "close-pane", "--pane", "not-a-uuid"]);
-    assert!(
-        err.to_string()
-            .contains("expected `pane-<uuid>` or a bare UUID"),
-        "unexpected message: {err}"
+    assert_eq!(
+        parse_pane_id("not-a-uuid"),
+        Err("expected `pane-<uuid>` or a bare UUID".to_string())
+    );
+    assert_eq!(
+        parse_err(&["koshi", "close-pane", "--pane", "not-a-uuid"]).to_string(),
+        "error: invalid value 'not-a-uuid' for '--pane <PANE_ID>': \
+         expected `pane-<uuid>` or a bare UUID\n\n\
+         For more information, try '--help'.\n"
     );
 }
 
@@ -2663,8 +3301,8 @@ fn neither_version_verb_is_an_action_the_socket_serves() {
     );
 }
 
-/// `koshi --remote work` names another machine, so it is not the bare
-/// invocation that paints a terminal here.
+/// `koshi --remote work` names another machine and is not the interactive
+/// launch.
 #[test]
 fn a_bare_invocation_naming_a_server_is_not_the_interactive_launch() {
     let cli = parse(&["koshi", "--remote", "work"]);
@@ -2686,8 +3324,6 @@ fn a_bare_invocation_naming_a_server_is_not_the_interactive_launch() {
 /// discovery query, and an action verb is not.
 #[test]
 fn discovery_queries_are_the_listings_and_inspects() {
-    let command = |argv: &[&str]| parse(argv).command.expect("a subcommand was given");
-
     assert!(command(&["koshi", "list-sessions"]).is_discovery());
     assert!(command(&["koshi", "list-tabs"]).is_discovery());
     assert!(command(&["koshi", "list-panes"]).is_discovery());
@@ -2701,8 +3337,6 @@ fn discovery_queries_are_the_listings_and_inspects() {
 /// otherwise.
 #[test]
 fn a_discovery_query_names_its_session_scope() {
-    let command = |argv: &[&str]| parse(argv).command.expect("a subcommand was given");
-
     assert_eq!(
         command(&["koshi", "list-tabs", "--session", "main"]).discovery_session(),
         Some(&SessionRef::Name("main".to_string()))
@@ -2718,14 +3352,11 @@ fn a_discovery_query_names_its_session_scope() {
     );
 }
 
-/// Every action name `to_action` builds is a registered core action: a CLI
-/// verb naming an action the registry does not hold would resolve to nothing
-/// at dispatch, invisibly.
+/// Every action name `to_action` builds is a registered core action, and the
+/// sixteen action verbs name sixteen different actions.
 #[test]
 fn every_to_action_name_is_a_registered_core_action() {
     use std::collections::BTreeSet;
-
-    use koshi_core::action::core_action_seeds;
 
     let registered: BTreeSet<String> = core_action_seeds()
         .iter()
@@ -2755,8 +3386,7 @@ fn every_to_action_name_is_a_registered_core_action() {
 
     let mut named = BTreeSet::new();
     for argv in &action_verbs {
-        let command = parse(argv).command.expect("an action verb parses");
-        let (action, _) = command
+        let (action, _) = command(argv)
             .to_action(&ResolvedTargets::default(), Direction::Right)
             .unwrap_or_else(|| panic!("{argv:?} maps to an action"));
         assert!(
@@ -2765,5 +3395,26 @@ fn every_to_action_name_is_a_registered_core_action() {
         );
         named.insert(action.to_string());
     }
-    assert_eq!(named.len(), 16, "each verb names its own action");
+    let expected: BTreeSet<String> = [
+        "core:close-pane",
+        "core:close-tab",
+        "core:focus-pane",
+        "core:focus-tab",
+        "core:lock",
+        "core:move-tab",
+        "core:new-pane",
+        "core:new-tab",
+        "core:next-tab",
+        "core:previous-tab",
+        "core:resize-pane",
+        "core:run",
+        "core:toggle-lock",
+        "core:toggle-pane-fullscreen",
+        "core:unlock",
+        "core:write-to-pane",
+    ]
+    .map(String::from)
+    .into_iter()
+    .collect();
+    assert_eq!(named, expected);
 }

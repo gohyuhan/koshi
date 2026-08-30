@@ -37,9 +37,8 @@ use koshi_terminal::state::CursorShape;
 use koshi_input::keyboard::decode_key;
 use koshi_link::error::CliError;
 
-/// Paints a render snapshot into ratatui's frame buffer via the widget trait —
-/// the only way to reach the frame's buffer, and exactly the shape
-/// [`render_frame`] expects.
+/// Paints a render snapshot into ratatui's frame buffer. Every field is handed
+/// straight to [`render_frame`].
 pub(crate) struct SnapshotWidget<'a> {
     /// The frame the session handed out.
     pub(crate) snapshot: &'a RenderSnapshot,
@@ -95,11 +94,12 @@ pub(crate) fn register_terminal_restore(cleanup: &TerminalCleanupGuard) {
 pub fn run(profile: Option<&str>) -> Result<(), CliError> {
     ensure_koshi_dirs();
     let runtime_dir = koshi_link::ipc_client::runtime_dir()?;
-    // Read before a session id exists, so the `logging` section can decide
-    // whether a log file is opened at all, and at what level and format.
+    // `koshi.kdl`'s `logging` section sets whether a log file is opened at
+    // all, and at what level and format.
     let app = koshi_link::config::load_app_layer();
-    // The interactive launch has no `--allow-other-users` to force, so the new
-    // session's own `koshi.kdl` decides who may reach it.
+    // A `None` forced switch leaves who may reach the new session to that
+    // session's own `koshi.kdl`; the interactive launch has no
+    // `--allow-other-users` flag.
     let session_id = koshi_link::router_client::request_new_session(&runtime_dir, profile, None)?;
     let _ = init_tracing(koshi_link::config::logging_params(app.as_ref(), session_id));
     crate::attach::attach_session(&runtime_dir, session_id)
@@ -107,16 +107,18 @@ pub fn run(profile: Option<&str>) -> Result<(), CliError> {
 
 /// Build the viewer half and apply `loaded`'s viewer-owned files, in one step.
 ///
-/// It folds its own settings, resolves its chrome colors, and validates its own
-/// keymap, so the palette a frame is painted in and the keys it answers are
-/// this terminal's. `keybinding.kdl` is the one file that can be read and then
-/// refused, so it is the one whose outcome is logged; app settings and the
-/// theme are typed values that always apply. `pane_area_supported` records
-/// whether the attached session echoed the pane-area field. The current
-/// renderer uses the fixed two-row layout when it is false.
+/// `client_id` is the id this viewer's input events and commands carry.
+/// `viewport` is this terminal's size in cells. `events` is the frame feed; a
+/// client owns no session, so the receiver it is handed has no sender and its
+/// frames arrive over the connection instead. `cleanup` is the guard that
+/// restores the outer terminal. `pane_area_supported` is stored on the client
+/// as whether the attached session echoed the pane-area field.
 ///
-/// The client owns no session, so the receiver it is handed has no sender: its
-/// frames arrive over the connection instead.
+/// `loaded.app` and `loaded.theme` fold into the viewer's settings and chrome
+/// colors and always apply. `loaded.keybindings` is validated: a verdict other
+/// than [`Apply`](koshi_config::conflict::KeymapVerdict::Apply) logs a warning
+/// naming `koshi keys conflicts`, an `Apply` logs `"keybinding.kdl applied"`,
+/// and a `None` keymap layer logs nothing.
 pub(crate) fn viewer(
     client_id: ClientId,
     viewport: Size,
@@ -137,26 +139,40 @@ pub(crate) fn viewer(
     client
 }
 
-/// Create koshi's on-disk home for this run: the config directory, at its
-/// fixed per-platform location (resolved through `koshi-paths`). Failures are
-/// logged and the session still starts: a terminal works without a config
-/// directory.
+/// Create the config directory at the fixed per-platform path
+/// `koshi_paths::config_dir` gives.
+///
+/// No home directory, or a create that fails, emits a warning and returns.
 fn ensure_koshi_dirs() {
-    match koshi_paths::config_dir() {
-        Some(config) => match koshi_paths::ensure_dir(&config) {
-            Ok(()) => tracing::info!(path = %config.display(), "config directory ready"),
-            Err(error) => {
-                tracing::warn!(path = %config.display(), %error, "could not create config directory");
-            }
-        },
-        None => tracing::warn!("no home directory found; skipping config directory setup"),
+    let Some(config) = koshi_paths::config_dir() else {
+        tracing::warn!("no home directory found; skipping config directory setup");
+        return;
+    };
+    match koshi_paths::ensure_dir(&config) {
+        Ok(()) => tracing::info!(path = %config.display(), "config directory ready"),
+        Err(error) => {
+            tracing::warn!(path = %config.display(), %error, "could not create config directory");
+        }
     }
 }
 
-/// Block on crossterm events and send decoded keys, mouse events, pastes and
-/// every terminal resize down `inbox_tx`. A resize carries the pane area left
-/// by the built-in two-row UI. Read failure means terminal hangup and quits.
-/// The caller relays what comes out of the channel up its connection.
+/// Spawn the `koshi-input` thread: it blocks on crossterm events and sends
+/// each one down `inbox_tx`, tagged with `client_id`. The caller relays what
+/// comes out of the channel up its connection.
+///
+/// A key becomes [`RuntimeEvent::KeyInput`]; a key [`decode_key`] returns
+/// `None` for is dropped. A terminal resize becomes [`RuntimeEvent::Resize`]
+/// carrying the pane area the built-in two-row UI leaves for the new size. A
+/// mouse event becomes [`RuntimeEvent::MouseInput`]. A bracketed paste arrives
+/// whole as [`RuntimeEvent::HostPaste`]. Every other event is dropped. A read
+/// error sends [`RuntimeEvent::Quit`].
+///
+/// The thread ends after it sends `Quit`, and when `inbox_tx`'s receiver is
+/// gone.
+///
+/// # Panics
+///
+/// Panics when the thread cannot be spawned.
 pub(crate) fn spawn_input_thread(inbox_tx: mpsc::Sender<RuntimeEvent>, client_id: ClientId) {
     let _ = thread::Builder::new()
         .name("koshi-input".to_string())
@@ -180,8 +196,6 @@ pub(crate) fn spawn_input_thread(inbox_tx: mpsc::Sender<RuntimeEvent>, client_id
                     client_id,
                     mouse: decode_mouse(mouse),
                 }),
-                // The outer terminal pasted (the OS paste key): the text arrives
-                // whole, so no character of it can fire a keybinding.
                 Ok(Event::Paste(text)) => Some(RuntimeEvent::HostPaste { client_id, text }),
                 Ok(_) => None,
                 Err(_) => Some(RuntimeEvent::Quit),
@@ -199,16 +213,24 @@ pub(crate) fn spawn_input_thread(inbox_tx: mpsc::Sender<RuntimeEvent>, client_id
 /// Draw `snapshot` into `terminal`, keeping the outer terminal's window title
 /// and cursor style in step with the focused pane.
 ///
-/// `last_title` and `last_cursor` record the title and cursor style committed
-/// with the last successful frame paint. A changed value is sent and recorded
-/// after the buffer paint succeeds. The style belongs to the outer terminal,
-/// not to the frame.
-///
-/// The theme, the hovered pane and the tab strip's position come from `client`.
-/// `frame_paint` describes the state shown by this paint. The hint bar uses
-/// that state, so a failed paint does not change the viewer state.
+/// The theme comes from `client`, and so does the hint bar, built for
+/// `frame_paint.mode` and `frame_paint.mouse_select`. The hovered pane, the
+/// tab strip's position and the open key sequence come from `frame_paint`.
 /// `committed_regions` is the geometry shared by the painter and cursor
 /// placement for this frame.
+///
+/// `last_title` and `last_cursor` record the title and cursor style committed
+/// with the last successful frame paint; the style belongs to the outer
+/// terminal, not to the frame. Both are read before the buffer paint and
+/// written after it succeeds: a changed title goes out as `SetTitle`, a
+/// changed cursor style as `SetCursorStyle`. A frame that [`cursor_style`]
+/// names no style for records `None` and sends nothing.
+///
+/// # Errors
+///
+/// Returns the backend's error when the buffer paint fails, leaving
+/// `last_title` and `last_cursor` as they were. A failed title or cursor-style
+/// write is ignored.
 pub(crate) fn paint_frame<B: Backend>(
     terminal: &mut Terminal<B>,
     client: &Client,
@@ -223,7 +245,6 @@ pub(crate) fn paint_frame<B: Backend>(
     let cursor = cursor_style(snapshot);
     let cursor_changed = cursor != *last_cursor;
     let hints = client.frame_hints_for(frame_paint.mode, frame_paint.mouse_select);
-    let viewer = frame_paint.chrome;
     terminal.draw(|frame| {
         let area = frame.area();
         frame.render_widget(
@@ -232,7 +253,7 @@ pub(crate) fn paint_frame<B: Backend>(
                 theme: client.theme(),
                 hints: &hints,
                 pending: frame_paint.pending.as_ref(),
-                viewer,
+                viewer: frame_paint.chrome,
                 committed_regions,
             },
             area,
@@ -254,12 +275,15 @@ pub(crate) fn paint_frame<B: Backend>(
     Ok(())
 }
 
-/// The crossterm command for one pane's cursor style. Crossterm's six shaped
-/// variants are the same six styles a pane can ask for via DECSCUSR, so each
-/// maps to exactly one: a blinking [`Bar`](CursorShape::Bar) is vim's
-/// insert-mode cursor. A pane that asked for nothing maps to `DefaultUserShape`,
-/// which hands the cursor back to whatever the user configured in their own
-/// terminal.
+/// The crossterm command for one pane's cursor style.
+///
+/// Each [`Shaped`](CursorStyle::Shaped) shape-and-blink pair maps to the one
+/// crossterm variant that re-emits the same DECSCUSR sequence:
+/// `Shaped { shape: Bar, blink: true }` results in
+/// [`BlinkingBar`](SetCursorStyle::BlinkingBar).
+/// [`UserDefault`](CursorStyle::UserDefault) maps to
+/// [`DefaultUserShape`](SetCursorStyle::DefaultUserShape), which hands the
+/// cursor back to whatever the user configured in their own terminal.
 pub(crate) fn set_cursor_style(style: CursorStyle) -> SetCursorStyle {
     let CursorStyle::Shaped { shape, blink } = style else {
         return SetCursorStyle::DefaultUserShape;
@@ -275,7 +299,13 @@ pub(crate) fn set_cursor_style(style: CursorStyle) -> SetCursorStyle {
 }
 
 /// The outer emulator's window title for one frame: the session name, plus
-/// the focused pane's resolved title when it has one.
+/// `" | "` and the focused pane's resolved title when that pane is in
+/// `snapshot.panes` and its title is a non-empty string.
+///
+/// Session `"quiet-lake"` with the focused pane titled `"htop"` results in
+/// `"quiet-lake | htop"`. No focused pane, a focused pane missing from
+/// `snapshot.panes`, no title, or an empty title all result in
+/// `"quiet-lake"`.
 pub(crate) fn window_title(snapshot: &RenderSnapshot) -> String {
     let focused_title = snapshot
         .client

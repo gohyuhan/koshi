@@ -12,8 +12,8 @@
 //!   the user's state directory (see [`logging::session_log_path`]). The file is
 //!   created on the *first* line written and re-created if it is removed while
 //!   koshi runs. Two processes write one session's file — the session server
-//!   and the client attached to it — and every line is one open-append-close,
-//!   so the two processes' lines interleave whole.
+//!   and the client attached to it — and every line is one open-append-close;
+//!   the two processes' lines interleave whole.
 //! - **What passes the bar?** [`logging::LoggingParams::level`] — the lowest severity
 //!   that gets written; a line below it is dropped before it reaches the file.
 //!
@@ -41,18 +41,17 @@
 //!   fallback to take. koshi or the client is going down. Entering raw mode
 //!   fails and there is no way to draw anything at all.
 //!
-//! So a runtime [`koshi_core::event::Event`] is never an `error`: every variant
-//! of it is a fact koshi modelled in advance. Errors are written at the startup
-//! and teardown steps that have nowhere to fall back to. Events are classified
-//! in [`logging::event_log`].
+//! A runtime [`koshi_core::event::Event`] is never an `error`. Errors are
+//! written at the startup and teardown steps that have no fallback. Events are
+//! classified in [`logging::event_log`].
 //!
-//! Logs never go to stdout, which is Koshi's render surface.
+//! Logs never go to stdout.
 //!
-//! Anything derived from the environment must pass through
-//! [`logging::redacted_env_field`] before it becomes a log value, so a secret
-//! such as `KOSHI_CONTEXT_TOKEN` cannot reach the output. The scrubbing itself
-//! lives in [`koshi_core::redact`]; this module only routes env maps through it
-//! on the way to a log line.
+//! Anything derived from the environment passes through
+//! [`logging::redacted_env_field`] before it becomes a log value; a secret such
+//! as `KOSHI_CONTEXT_TOKEN` renders as `***`. The scrubbing itself lives in
+//! [`koshi_core::redact`]; this module only routes env maps through it on the
+//! way to a log line.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -139,7 +138,7 @@ pub enum TracingError {
 /// a subscriber that writes the per-session file lazily on the first line.
 ///
 /// Returns [`TracingError::AlreadyInitialized`] if a subscriber is already
-/// installed, since a process has a single global subscriber.
+/// installed.
 pub fn init_tracing(params: LoggingParams) -> Result<(), TracingError> {
     if !params.enabled {
         return Ok(());
@@ -151,8 +150,8 @@ pub fn init_tracing(params: LoggingParams) -> Result<(), TracingError> {
     )
 }
 
-/// Install a subscriber writing to `path`, bypassing the state-directory
-/// resolver [`init_tracing`] uses, so a test can point it at a temp directory.
+/// Install a subscriber writing to `path`. [`init_tracing`] resolves the path
+/// from the session id; this takes the path as given.
 pub fn init_to_path(path: &Path, level: LogLevel, format: LogFormat) -> Result<(), TracingError> {
     let writer = SessionLogMaker {
         path: path.to_path_buf(),
@@ -181,13 +180,12 @@ fn max_level(level: LogLevel) -> Level {
 }
 
 /// A [`MakeWriter`] that appends each formatted event to a per-session log
-/// file, creating the file — and, when the open fails, its `logs/` parent —
-/// on each write, so a file or directory removed while koshi runs comes back
-/// on the next line.
+/// file. Each write creates the file when it is missing and, when the open
+/// fails, its parent directory; a file or directory removed while koshi runs
+/// comes back on the next line.
 ///
-/// Every line is one open-append-close, which is what lets a log file deleted
-/// mid-session come back on the next line. On a local disk that costs about
-/// 25µs per line. The write runs on the runtime's dispatch thread, so a command
+/// Every line is one open-append-close. On a local disk that costs about
+/// 25µs per line. The write runs on the runtime's dispatch thread; a command
 /// committing several events pays it once per event before dispatch returns.
 // ponytail: reopen-per-line buys surviving `rm` of the log file for the ~25µs
 // above. Hold the handle, reopening when a write fails, if dispatch latency
@@ -207,8 +205,8 @@ impl<'a> MakeWriter<'a> for SessionLogMaker {
 }
 
 /// The `io::Write` half of [`SessionLogMaker`]: opens the file in
-/// create-and-append mode for one event's bytes, then drops it (which flushes
-/// and closes it), so every written line is on disk before the next event.
+/// create-and-append mode for one event's bytes, writes them, and closes it.
+/// Every line is written out before the next event.
 struct SessionLogWriter {
     path: PathBuf,
 }
@@ -217,8 +215,8 @@ impl io::Write for SessionLogWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         if append_to(&self.path, buf).is_err() {
             // A `logs/` directory removed mid-session makes the open fail;
-            // one recreate-and-retry brings the file back. A failure that a
-            // recreate cannot cure reports from the retry.
+            // creating the parent and appending again brings the file back.
+            // An error from either step is returned.
             if let Some(parent) = self.path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
@@ -233,8 +231,8 @@ impl io::Write for SessionLogWriter {
 }
 
 /// Append `buf` to the file at `path` in create-and-append mode, then close
-/// it, so the line is on disk when this returns.
-fn append_to(path: &std::path::Path, buf: &[u8]) -> io::Result<()> {
+/// it.
+fn append_to(path: &Path, buf: &[u8]) -> io::Result<()> {
     use io::Write as _;
 
     std::fs::OpenOptions::new()
@@ -252,9 +250,8 @@ pub struct CapturedLogs {
 }
 
 impl CapturedLogs {
-    /// All captured output as a single string. Recovers a poisoned lock instead
-    /// of panicking, so bytes written before a writer thread panicked are still
-    /// readable.
+    /// All captured output as a single string. A poisoned lock is recovered;
+    /// the bytes written before the poisoning are returned.
     pub fn contents(&self) -> String {
         let bytes = self
             .buffer
@@ -300,9 +297,9 @@ impl<'a> MakeWriter<'a> for CapturedLogs {
 
 /// Install a JSON subscriber scoped to the current thread and capture its output.
 ///
-/// The returned guard scopes the subscriber to the calling thread, so tests stay
-/// isolated from one another and from any global subscriber. Drop the guard to
-/// restore the previous subscriber; read the [`CapturedLogs`] to assert on output.
+/// The subscriber is the calling thread's default; other threads and the
+/// global subscriber are untouched. Drop the guard to restore the previous
+/// subscriber; read the [`CapturedLogs`] to assert on output.
 ///
 /// The first call registers a process-wide anchor dispatcher
 /// (`register_interest_anchor`) that keeps captures visible to call sites
@@ -322,10 +319,9 @@ pub fn with_test_writer() -> (tracing::subscriber::DefaultGuard, CapturedLogs) {
 /// Register one TRACE-level dispatcher in tracing's dispatcher registry for
 /// the life of the process, without making it a thread or global default.
 ///
-/// With it registered, tracing computes every call site's cached interest
-/// across the registry, so an event reaches a [`with_test_writer`] capture
-/// even when its call site first fires on a thread with no subscriber. The
-/// anchor never formats an event; its writer is unused.
+/// With it registered, an event reaches a [`with_test_writer`] capture even
+/// when its call site first fired on a thread with no subscriber. The anchor
+/// never formats an event; its writer is unused.
 fn register_interest_anchor() {
     static ANCHOR: std::sync::Once = std::sync::Once::new();
     ANCHOR.call_once(|| {

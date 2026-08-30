@@ -101,8 +101,10 @@ pub enum RuntimeEvent {
     },
     /// A periodic tick for time-driven refreshes such as cursor blink.
     Timer,
-    /// A request to stop the event loop and shut the process down. Produced by
-    /// the quit keybinding or by outer-input reaching end of stream.
+    /// A request to stop the event loop and shut the process down. Produced
+    /// when reading a client's outer terminal fails, which is that terminal
+    /// reaching end of stream. Explicit quit travels through the `core:quit`
+    /// command instead.
     Quit,
     /// One decoded outer-terminal key awaiting keybinding resolution. Carries
     /// the chord alone: the bytes a fallthrough writes are encoded from it

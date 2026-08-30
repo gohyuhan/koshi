@@ -1,14 +1,15 @@
 //! Tests for the session-server loop, driven headlessly: a fake PTY backend
 //! stands in for real children, so the real inbox loop runs without spawning a
-//! process or binding a socket. Binding the socket and printing the ready line
-//! need a whole process, so they are covered by the integration tests instead.
+//! pane. The tests that rebuild a session bind a real control socket inside a
+//! temporary runtime directory. Printing the ready line needs a whole process,
+//! so it is covered by the integration tests instead.
 //!
 //! The image swap is split the same way. What the session server decides — when
 //! the loop ends into a swap, what a restart is refused for, which arguments the
 //! new image is started with, what the carried state restores, and when the
-//! router leaves a resuming session alone — is decided here. Taking a pane back
-//! from a descriptor and replacing the process image need real children and real
-//! processes, so they are covered by the integration tests.
+//! router leaves a resuming session alone — is pinned here, over pseudoterminal
+//! masters this test binary opens itself. Replacing the process image needs a
+//! real install, so it is covered by the integration tests.
 
 use super::*;
 
@@ -18,6 +19,8 @@ use koshi_core::command::{
 };
 use koshi_core::ids::{ClientId, CommandId};
 use koshi_core::process::ExitStatus;
+#[cfg(unix)]
+use koshi_ipc::endpoint::EndpointFile;
 use koshi_renderer::snapshot::Delivery;
 use koshi_runtime::placeholder::{SnapshotProvider, Storage};
 use koshi_runtime::runtime::bus::EventFilter;
@@ -344,13 +347,16 @@ fn a_restart_naming_a_binary_that_cannot_be_read_is_refused_and_the_session_keep
 
     let outcome = serve(&mut server);
 
-    let refusal = reply
-        .try_recv()
-        .expect("the loop answered the request")
-        .expect_err("a binary that is not there is refused");
-    assert!(
-        refusal.contains(&missing.display().to_string()),
-        "the refusal must name the path, got {refusal}"
+    let unreadable = std::fs::metadata(&missing).expect_err("nothing is at that path");
+    assert_eq!(
+        reply
+            .try_recv()
+            .expect("the loop answered the request")
+            .expect_err("a binary that is not there is refused"),
+        format!(
+            "the binary at {} could not be read: {unreadable}",
+            missing.display()
+        )
     );
     assert!(!server.restart_requested());
     assert_eq!(outcome, ServeOutcome::Ended);
@@ -359,6 +365,38 @@ fn a_restart_naming_a_binary_that_cannot_be_read_is_refused_and_the_session_keep
         .expect("the loop answered the discovery request")
         .expect("a session is running");
     assert_eq!(overview.session.pane_count, 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn the_check_installed_on_the_server_refuses_a_restart_naming_a_binary_that_is_not_there() {
+    // Every restart the socket answers runs the check `install_restart_check`
+    // built, and the first thing that check runs is `binary_is_runnable`. A
+    // session wired to a check that never ran would tear itself down for a
+    // binary that cannot be started.
+    let dir = TempDir::new().expect("create temp dir");
+    let missing = dir.path().join("koshi");
+    let (mut server, tx) = test_server(Arc::new(FakePtyBackend::new()));
+    seed(&mut server);
+    let panes = Arc::new(PortablePtyBackend::new());
+
+    install_restart_check(&mut server, &panes, &missing);
+
+    let reply = ask_to_restart(&tx);
+    tx.send(RuntimeEvent::Quit).expect("the hangup is queued");
+
+    let outcome = serve(&mut server);
+
+    let unreadable = std::fs::metadata(&missing).expect_err("nothing is at that path");
+    assert_eq!(
+        reply.try_recv().expect("the loop answered the request"),
+        Err(format!(
+            "the binary at {} could not be read: {unreadable}",
+            missing.display()
+        ))
+    );
+    assert!(!server.restart_requested());
+    assert_eq!(outcome, ServeOutcome::Ended);
 }
 
 #[test]
@@ -466,9 +504,11 @@ fn a_quit_applied_while_the_swap_runs_ends_the_session_instead_of_serving_it_aga
     .expect("the discovery request is queued");
 
     assert_eq!(serve(&mut server), ServeOutcome::Ended);
-    assert!(
-        matches!(discovery_rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
-        "a session that was asked to quit answers nothing else"
+    assert_eq!(
+        discovery_rx
+            .try_recv()
+            .expect_err("a session that was asked to quit answers nothing else"),
+        mpsc::TryRecvError::Empty
     );
 }
 
@@ -595,8 +635,9 @@ fn the_carried_state_reads_back_with_every_tab_pane_and_screen() {
             SystemTime::UNIX_EPOCH,
         )
         .expect("the session is seeded");
+    let open_second_tab = CommandId::new();
     let envelope = CommandEnvelope::new(
-        CommandId::new(),
+        open_second_tab,
         CommandSource::key_binding(client_id),
         SystemTime::UNIX_EPOCH,
         Command::NewTab(koshi_core::command::NewTabArgs {
@@ -604,10 +645,10 @@ fn the_carried_state_reads_back_with_every_tab_pane_and_screen() {
             client: Some(client_id),
         }),
     );
-    assert!(
-        matches!(server.submit_command(envelope), CommandResult::Ok { .. }),
-        "the second tab must open"
-    );
+    match server.submit_command(envelope) {
+        CommandResult::Ok { command_id, .. } => assert_eq!(command_id, open_second_tab),
+        rejected => panic!("the second tab must open, got {rejected:?}"),
+    }
     // Distinct output per pane, so a screen that came back under the wrong pane
     // is caught.
     let panes: Vec<PaneId> = server.terminal_engines().keys().copied().collect();
@@ -675,10 +716,28 @@ fn the_carried_state_reads_back_with_every_tab_pane_and_screen() {
             "the screen of pane {pane}"
         );
     }
+    let sizes = carried_sizes(&read_back);
+    let mut named: Vec<PaneId> = sizes.keys().copied().collect();
+    named.sort();
+    let mut held = panes.clone();
+    held.sort();
+    assert_eq!(named, held, "every pane the session held names a size");
     assert_eq!(
-        carried_sizes(&read_back).len(),
-        2,
-        "each carried pane names a size"
+        sizes,
+        read_back
+            .panes
+            .iter()
+            .map(|pane| {
+                (
+                    pane.pane_id,
+                    PtySize {
+                        rows: pane.rows,
+                        cols: pane.cols,
+                    },
+                )
+            })
+            .collect::<HashMap<PaneId, PtySize>>(),
+        "each pane names the size its own record holds"
     );
 }
 
@@ -761,6 +820,11 @@ fn carried_panes_that_cannot_be_read_are_ended_and_their_terminals_closed() {
     let master = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
     assert!(master >= 0, "the pseudoterminal master opens");
     let named = terminal_master_name(master).expect("the master names its terminal");
+    // A second number on the same pseudoterminal, held to the end of the test.
+    // The terminal stays allocated while it is open, so no other test can be
+    // handed this terminal again under the number released below.
+    let held = unsafe { libc::dup(master) };
+    assert!(held >= 0, "the master opens under a second number");
     let dir = TempDir::new().expect("create temp dir");
     let start = test_start(dir.path(), false);
     let header = ResumeHeader {
@@ -786,6 +850,11 @@ fn carried_panes_that_cannot_be_read_are_ended_and_their_terminals_closed() {
         terminal_master_name(master),
         Some(named),
         "the terminal must be closed"
+    );
+    assert_eq!(
+        unsafe { libc::close(held) },
+        0,
+        "the test still owns the second number it opened"
     );
 }
 
@@ -823,6 +892,48 @@ fn a_swap_that_did_not_happen_leaves_every_terminal_closed_on_exec_again() {
 
     assert_eq!(cleared & libc::FD_CLOEXEC, 0);
     assert_eq!(restored & libc::FD_CLOEXEC, libc::FD_CLOEXEC);
+}
+
+#[test]
+#[cfg(unix)]
+fn a_terminal_this_process_does_not_hold_stops_the_flags_being_cleared_for_the_swap() {
+    // Clearing the flags runs over plain numbers the carried state holds,
+    // before anything about the image changes. A number this process does not
+    // hold comes back as a failure, which is what leaves the session serving
+    // here instead of replacing its image.
+    let dir = TempDir::new().expect("create temp dir");
+    let start = test_start(dir.path(), false);
+    let unheld = ResumeHeader {
+        format: RESUME_FORMAT,
+        session_id: start.session_id,
+        session_name: start.session_name.clone(),
+        panes: vec![koshi_runtime::resume::CarriedPane {
+            pane_id: PaneId::new(),
+            pid: NO_SUCH_PROCESS,
+            rows: 24,
+            cols: 80,
+            terminal_fd: Some(NEVER_OPENED),
+            terminal_name: None,
+            exit: None,
+        }],
+    };
+
+    let refused = keep_terminals_across_exec(&unheld)
+        .expect_err("a descriptor this process does not hold has no flags to clear");
+
+    assert_eq!(refused.raw_os_error(), Some(libc::EBADF));
+
+    // A record naming no descriptor is passed over, so a header holding one
+    // never stops the swap.
+    let no_descriptor = ResumeHeader {
+        panes: vec![koshi_runtime::resume::CarriedPane {
+            terminal_fd: None,
+            ..unheld.panes[0].clone()
+        }],
+        ..unheld.clone()
+    };
+    keep_terminals_across_exec(&no_descriptor)
+        .expect("a record naming no descriptor leaves nothing to clear");
 }
 
 #[test]
@@ -894,10 +1005,9 @@ fn the_line_a_build_prints_names_the_formats_it_reads() {
         serde_json::to_string(&ResumeSupport::of_this_build()).expect("the range encodes"),
         format!("{{\"min\":{RESUME_FORMAT_MIN},\"max\":{RESUME_FORMAT}}}")
     );
-    let refusal = parse_resume_support("koshi 0.2.0").expect_err("a version line is not a range");
-    assert!(
-        refusal.contains("does not say which resume formats it reads"),
-        "the refusal must say what was missing, got {refusal}"
+    assert_eq!(
+        parse_resume_support("koshi 0.2.0").expect_err("a version line is not a range"),
+        "does not say which resume formats it reads: expected value at line 1 column 1"
     );
 }
 
@@ -1251,6 +1361,11 @@ fn a_session_with_a_fresh_resume_file_is_left_alone_and_a_stale_one_is_not() {
 #[cfg(unix)]
 const NO_SUCH_PROCESS: u32 = 2_147_483_646;
 
+/// A descriptor number this process never opened. It sits far above every
+/// descriptor a test run holds, so nothing takes it while the tests run.
+#[cfg(unix)]
+const NEVER_OPENED: i32 = 1_000_000;
+
 /// How long a test keeps trying to run a file the operating system reports as
 /// held open for writing.
 #[cfg(unix)]
@@ -1269,6 +1384,7 @@ fn a_child_that_ends_after_the_header_is_built_still_carries_its_real_status() {
     let settled = PaneId::new();
     let still_running = PaneId::new();
     let already_known = PaneId::new();
+    let gone_from_the_backend = PaneId::new();
     let closed_before_the_swap = PaneId::new();
 
     // The refresh pairs records by pane id, so the process id below is never
@@ -1292,6 +1408,7 @@ fn a_child_that_ends_after_the_header_is_built_still_carries_its_real_status() {
             carried(settled, None),
             carried(still_running, None),
             carried(already_known, Some(ExitStatus::ExitCode(3))),
+            carried(gone_from_the_backend, None),
         ],
     };
 
@@ -1326,6 +1443,9 @@ fn a_child_that_ends_after_the_header_is_built_still_carries_its_real_status() {
     // A status the header already carried is the one this image reaped first,
     // so the later read never writes over it.
     assert_eq!(exit_of(already_known), Some(ExitStatus::ExitCode(3)));
+    // The live read walks the panes the backend still holds. A header record
+    // that read names no more is left as the header carried it.
+    assert_eq!(exit_of(gone_from_the_backend), None);
     // The header names which panes the next image takes back. A pane the live
     // read reports but the header never named is left out of it.
     assert_eq!(
@@ -1334,17 +1454,13 @@ fn a_child_that_ends_after_the_header_is_built_still_carries_its_real_status() {
             .iter()
             .map(|pane| pane.pane_id)
             .collect::<Vec<PaneId>>(),
-        vec![settled, still_running, already_known]
+        vec![settled, still_running, already_known, gone_from_the_backend]
     );
 }
 
 #[cfg(unix)]
 #[test]
 fn a_pane_naming_a_descriptor_this_process_does_not_hold_is_refused() {
-    // A number this process never opened. It sits far above every descriptor a
-    // test run holds, so nothing can take it while the test runs.
-    const NEVER_OPENED: i32 = 1_000_000;
-
     let dir = TempDir::new().expect("create temp dir");
     let start = test_start(dir.path(), false);
 
@@ -1417,6 +1533,26 @@ fn short_runtime_dir() -> TempDir {
         .expect("a temporary runtime directory")
 }
 
+/// The state a swap carried out of a session holding no pane: a header naming
+/// none, under the identity `start` was started with, and a body holding no
+/// session, no engine, no undecoded bytes and no quit.
+#[cfg(unix)]
+fn carried_nothing(start: &SessionStart) -> (ResumeHeader, ResumeBody) {
+    let header = ResumeHeader {
+        format: RESUME_FORMAT,
+        session_id: start.session_id,
+        session_name: start.session_name.clone(),
+        panes: Vec::new(),
+    };
+    let body = ResumeBody {
+        sessions: HashMap::new(),
+        engines: HashMap::new(),
+        undecoded: HashMap::new(),
+        quit: None,
+    };
+    (header, body)
+}
+
 #[cfg(unix)]
 #[test]
 fn a_rebuild_that_cannot_bind_its_socket_leaves_no_resume_file_behind() {
@@ -1432,39 +1568,145 @@ fn a_rebuild_that_cannot_bind_its_socket_leaves_no_resume_file_behind() {
 
     // The address the rebuild must bind, already held, so the rebuild's own
     // bind is refused.
-    let other_users =
-        koshi_link::config::other_users_policy(koshi_link::config::load_app_layer().as_ref(), None);
-    let _holding_the_address = IpcServer::start(
-        &start.runtime_dir,
-        start.session_id,
-        inbox_tx.clone(),
-        other_users,
-    )
-    .expect("the address binds once");
+    let holding_the_address = bind_socket(&start, &inbox_tx).expect("the address binds once");
 
     // The file the swap wrote before it withdrew the socket.
     let resume_file = resume_path(&start.runtime_dir, start.session_id);
     std::fs::write(&resume_file, b"{}").expect("the resume file is written");
 
-    let header = ResumeHeader {
-        format: RESUME_FORMAT,
-        session_id: start.session_id,
-        session_name: start.session_name.clone(),
-        panes: Vec::new(),
-    };
-    let body = ResumeBody {
-        sessions: HashMap::new(),
-        engines: HashMap::new(),
-        undecoded: HashMap::new(),
-        quit: None,
+    let (header, body) = carried_nothing(&start);
+
+    let refused = match resume_readers_and_rebuild(server, &panes, &header, body, &start, &inbox_tx)
+    {
+        Err(refused) => refused,
+        Ok(_) => panic!("an address another server already holds cannot be bound"),
     };
 
-    let rebuilt = resume_readers_and_rebuild(server, &panes, &header, body, &start, &inbox_tx);
-    assert!(
-        rebuilt.is_err(),
-        "an address another server already holds cannot be bound"
+    assert_eq!(
+        refused.to_string(),
+        format!(
+            "another process is already listening at {}",
+            holding_the_address.addr()
+        )
     );
+    assert!(
+        !resume_file.exists(),
+        "the resume file must not be left on the disk"
+    );
+}
 
+#[cfg(unix)]
+#[test]
+fn a_rebuild_binds_the_address_again_and_takes_the_resume_file_away() {
+    // The caller withdrew the socket for an image that then did not start, so
+    // the rebuild is what puts the session back on the air. The endpoint file
+    // is what a client reads to find it, and the resume file has done its work.
+    let dir = short_runtime_dir();
+    let start = test_start(dir.path(), false);
+    let (server, inbox_tx) = test_server(Arc::new(FakePtyBackend::new()));
+    let panes = Arc::new(PortablePtyBackend::with_sink(Arc::new(InboxSink::new(
+        inbox_tx.clone(),
+    ))));
+
+    // The file the swap wrote before it withdrew the socket.
+    let resume_file = resume_path(&start.runtime_dir, start.session_id);
+    std::fs::write(&resume_file, b"{}").expect("the resume file is written");
+
+    let (header, body) = carried_nothing(&start);
+
+    let (rebuilt, socket) =
+        resume_readers_and_rebuild(server, &panes, &header, body, &start, &inbox_tx)
+            .expect("nothing holds the address, so the rebuild binds it");
+
+    let advertised = EndpointFile::read(&EndpointFile::path(&start.runtime_dir, start.session_id))
+        .expect("the rebound socket is advertised");
+    assert_eq!(advertised.socket, socket.addr());
+    assert_eq!(advertised.pid, std::process::id());
+    assert_eq!(
+        rebuilt.sessions().len(),
+        0,
+        "a body naming no session comes back holding none"
+    );
+    assert!(
+        !resume_file.exists(),
+        "the resume file must not be left on the disk"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_session_that_keeps_its_socket_serves_the_same_address_under_a_fresh_token() {
+    // Every client was told the session is restarting, and a fresh connection
+    // token is what each of them watches for. The address does not change, so a
+    // client that was told comes back to the socket it left.
+    let dir = short_runtime_dir();
+    let start = test_start(dir.path(), false);
+    let (server, inbox_tx) = test_server(Arc::new(FakePtyBackend::new()));
+    let panes = Arc::new(PortablePtyBackend::with_sink(Arc::new(InboxSink::new(
+        inbox_tx.clone(),
+    ))));
+    let socket = bind_socket(&start, &inbox_tx).expect("the address binds");
+    let endpoint_path = EndpointFile::path(&start.runtime_dir, start.session_id);
+    let before = EndpointFile::read(&endpoint_path).expect("the socket is advertised");
+
+    let resume_file = resume_path(&start.runtime_dir, start.session_id);
+    std::fs::write(&resume_file, b"{}").expect("the resume file is written");
+
+    let (header, body) = carried_nothing(&start);
+
+    let (_rebuilt, kept) =
+        resume_readers_and_keep_socket(server, socket, &panes, &header, body, &start, &inbox_tx)
+            .expect("the fresh token is advertised");
+
+    let after = EndpointFile::read(&endpoint_path).expect("the socket is still advertised");
+    assert_eq!(kept.addr(), before.socket, "the address does not change");
+    assert_eq!(after.socket, before.socket);
+    assert_ne!(
+        after.token, before.token,
+        "a client that was told watches for a fresh token"
+    );
+    assert!(
+        !resume_file.exists(),
+        "the resume file must not be left on the disk"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_swap_whose_new_image_never_starts_hands_the_session_back_on_a_rebound_socket() {
+    // The whole swap, run over a path with nothing at it, so starting the new
+    // image is the step that fails. The session must come back in this process
+    // with the tabs and panes it had, serving on a socket a client can find,
+    // and the carried state must be gone from the disk.
+    let dir = short_runtime_dir();
+    let mut start = test_start(dir.path(), false);
+    start.exe = dir.path().join("koshi-that-is-not-there");
+    let (mut server, inbox_tx) = test_server(Arc::new(FakePtyBackend::new()));
+    seed(&mut server);
+    let session_id = *server
+        .sessions()
+        .keys()
+        .next()
+        .expect("the session is seeded");
+    let tabs = server.sessions()[&session_id].tabs.clone();
+    let panes = Arc::new(PortablePtyBackend::with_sink(Arc::new(InboxSink::new(
+        inbox_tx.clone(),
+    ))));
+    let socket = bind_socket(&start, &inbox_tx).expect("the address binds");
+    let resume_file = resume_path(&start.runtime_dir, start.session_id);
+
+    let (rebuilt, rebound) = swap(server, socket, &panes, &start, &inbox_tx)
+        .expect("a swap that could not start puts the session back")
+        .expect("the session runs in this process, not another one");
+
+    assert_eq!(
+        rebuilt.sessions()[&session_id].tabs,
+        tabs,
+        "every tab comes back"
+    );
+    let advertised = EndpointFile::read(&EndpointFile::path(&start.runtime_dir, start.session_id))
+        .expect("the rebound socket is advertised");
+    assert_eq!(advertised.socket, rebound.addr());
     assert!(
         !resume_file.exists(),
         "the resume file must not be left on the disk"
@@ -1522,6 +1764,68 @@ fn releasing_carried_panes_leaves_a_descriptor_that_is_no_terminal_master_open()
         .read_to_string(&mut read)
         .expect("the ordinary file still reads");
     assert_eq!(read, "koshi");
+}
+
+#[cfg(unix)]
+#[test]
+fn ending_the_panes_after_a_failure_closes_the_terminals_from_the_untouched_pane_on() {
+    // `untouched` names the first pane this process never took over. Every pane
+    // before it belongs to the backend, which closes its terminal as it is
+    // dropped, so closing those here would close each of them twice.
+    let taken_back = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
+    let never_taken = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
+    assert!(taken_back >= 0, "the first pseudoterminal master opens");
+    assert!(never_taken >= 0, "the second pseudoterminal master opens");
+    let named_taken_back =
+        terminal_master_name(taken_back).expect("the first master names its terminal");
+    let named_never_taken =
+        terminal_master_name(never_taken).expect("the second master names its terminal");
+    // A second number on the second pseudoterminal, held to the end of the
+    // test. The terminal stays allocated while it is open, so no other test can
+    // be handed this terminal again under the number closed below.
+    let held = unsafe { libc::dup(never_taken) };
+    assert!(held >= 0, "the second master opens under a second number");
+    let dir = TempDir::new().expect("create temp dir");
+    let start = test_start(dir.path(), false);
+    // A process id of zero names no pane child, so nothing is signalled.
+    let record = |terminal_fd| koshi_runtime::resume::CarriedPane {
+        pane_id: PaneId::new(),
+        pid: 0,
+        rows: 24,
+        cols: 80,
+        terminal_fd: Some(terminal_fd),
+        terminal_name: None,
+        exit: None,
+    };
+    let header = ResumeHeader {
+        format: RESUME_FORMAT,
+        session_id: start.session_id,
+        session_name: start.session_name.clone(),
+        panes: vec![record(taken_back), record(never_taken)],
+    };
+
+    end_panes_after_failure(&header, 1);
+
+    assert_eq!(
+        terminal_master_name(taken_back),
+        Some(named_taken_back),
+        "the terminal of a pane the backend already holds stays open"
+    );
+    assert_ne!(
+        terminal_master_name(never_taken),
+        Some(named_never_taken),
+        "the terminal of a pane nobody took over is closed"
+    );
+    assert_eq!(
+        unsafe { libc::close(taken_back) },
+        0,
+        "the test still owns the master left open"
+    );
+    assert_eq!(
+        unsafe { libc::close(held) },
+        0,
+        "the test still owns the second number it opened"
+    );
 }
 
 #[cfg(unix)]

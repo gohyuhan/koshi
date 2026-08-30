@@ -1,10 +1,13 @@
 //! Tests for the display text, the category and the severity of every wrapped
-//! domain error.
+//! domain error, plus the `Debug` text, the `source` and the boxed form of the
+//! wrapper.
 //!
-//! The first tests check each domain error on its own. The later tests wrap an
-//! error in `KoshiError` and check that all three still match the inner error.
+//! The first tests check each domain error on its own. The tests below them
+//! wrap an error in `KoshiError` and check that all three still match the inner
+//! error.
 
 use super::*;
+use koshi_core::event::RejectReason;
 use std::error::Error as StdError;
 
 #[test]
@@ -85,6 +88,8 @@ fn storage_severity_varies_by_variant() {
     let io = StorageError::Io {
         detail: "disk full".into(),
     };
+    assert_eq!(io.to_string(), "storage io error: disk full");
+    assert_eq!(io.category(), DomainCategory::Storage);
     assert_eq!(io.severity(), Severity::Recoverable);
 
     let corrupt = StorageError::Corrupt {
@@ -107,13 +112,17 @@ fn aggregate_delegates_and_is_transparent() {
     assert_eq!(err.category(), DomainCategory::Pty);
     assert_eq!(err.severity(), Severity::Recoverable);
 
-    let corrupt: KoshiError = StorageError::Corrupt { detail: "x".into() }.into();
+    let corrupt_inner = StorageError::Corrupt { detail: "x".into() };
+    let corrupt_want = corrupt_inner.to_string();
+    let corrupt: KoshiError = corrupt_inner.into();
+    assert_eq!(corrupt.to_string(), corrupt_want);
+    assert_eq!(corrupt.category(), DomainCategory::Storage);
     assert_eq!(corrupt.severity(), Severity::SessionFatal);
 }
 
-// The tests above wrap only 2 of the 8 `#[from]` variants (Pty, Storage). The
-// tests below cover the rest. Each one checks that `.into()` gives the same
-// `to_string()`, `category()` and `severity()` as the unwrapped inner error.
+// Each test below wraps one `#[from]` variant and checks that `.into()` gives
+// the same `to_string()`, `category()` and `severity()` as the unwrapped inner
+// error.
 
 #[test]
 fn aggregate_wraps_and_delegates_config_error() {
@@ -137,6 +146,36 @@ fn aggregate_wraps_and_delegates_ipc_error() {
     assert_eq!(err.to_string(), want);
     assert_eq!(err.category(), DomainCategory::Ipc);
     assert_eq!(err.severity(), Severity::ClientFatal);
+}
+
+// `IpcError::severity()` varies per variant: most variants are
+// `Severity::ClientFatal`, `EndpointFileWrite` is `Severity::SessionFatal` and
+// `MalformedFrame` is `Severity::Recoverable`. The two tests below wrap the two
+// variants that differ from the rest.
+
+#[test]
+fn aggregate_wraps_ipc_endpoint_file_write_as_session_fatal() {
+    let inner = IpcError::EndpointFileWrite {
+        path: "/run/koshi/endpoint.json".into(),
+        detail: "read-only file system".into(),
+    };
+    let want = inner.to_string();
+    let err: KoshiError = inner.into();
+    assert_eq!(err.to_string(), want);
+    assert_eq!(err.category(), DomainCategory::Ipc);
+    assert_eq!(err.severity(), Severity::SessionFatal);
+}
+
+#[test]
+fn aggregate_wraps_ipc_malformed_frame_as_recoverable() {
+    let inner = IpcError::MalformedFrame {
+        detail: "truncated header".into(),
+    };
+    let want = inner.to_string();
+    let err: KoshiError = inner.into();
+    assert_eq!(err.to_string(), want);
+    assert_eq!(err.category(), DomainCategory::Ipc);
+    assert_eq!(err.severity(), Severity::Recoverable);
 }
 
 #[test]
@@ -179,8 +218,7 @@ fn aggregate_wraps_and_delegates_plugin_error() {
 #[test]
 fn aggregate_wraps_storage_io_variant_as_recoverable() {
     // `StorageError::severity()` varies per variant: `Io` is
-    // `Severity::Recoverable` and `Corrupt` is `Severity::SessionFatal`. The
-    // aggregate test above wraps only `Corrupt`, so this test wraps `Io`.
+    // `Severity::Recoverable` and `Corrupt` is `Severity::SessionFatal`.
     let inner = StorageError::Io {
         detail: "disk full".into(),
     };
@@ -191,19 +229,21 @@ fn aggregate_wraps_storage_io_variant_as_recoverable() {
     assert_eq!(err.severity(), Severity::Recoverable);
 }
 
-// `CliError::category()` varies per variant. `UnknownCommand`, `UnknownAction`
-// and `InvalidArgs` report `DomainCategory::Cli`. `IpcUnavailable` reports
-// `DomainCategory::Ipc`, and `Runtime` reports `DomainCategory::Session`. All
-// of them sit inside `KoshiError::Cli(..)`, so the tests below check the
-// category through the wrapper, one test per variant.
+// `CliError::category()` maps its variants onto three categories:
+// `DomainCategory::Cli`, `DomainCategory::Ipc` and `DomainCategory::Session`.
+// All of them sit inside `KoshiError::Cli(..)`. Each test below wraps one
+// variant and checks the category the wrapper reports.
 
 #[test]
 fn aggregate_cli_unknown_command_classifies_as_cli() {
-    let err: KoshiError = CliError::UnknownCommand {
+    let inner = CliError::UnknownCommand {
         name: "frobnicate".into(),
-    }
-    .into();
+    };
+    let want = inner.to_string();
+    let err: KoshiError = inner.into();
+    assert_eq!(err.to_string(), want);
     assert_eq!(err.category(), DomainCategory::Cli);
+    assert_eq!(err.severity(), Severity::Recoverable);
 }
 
 #[test]
@@ -254,12 +294,86 @@ fn aggregate_cli_runtime_classifies_as_session_not_cli() {
     assert_eq!(err.severity(), Severity::Recoverable);
 }
 
+// Each test below wraps a payload holding braces, non-ASCII text, an empty
+// string, a newline, or an integer field at its maximum, and checks the
+// wrapper prints it byte for byte.
+
+#[test]
+fn aggregate_display_keeps_braces_and_non_ascii_in_a_detail() {
+    let inner = PtyError::Io {
+        detail: "権限がありません {0} {}".into(),
+    };
+    let err: KoshiError = inner.into();
+    assert_eq!(err.to_string(), "pty io error: 権限がありません {0} {}");
+    assert_eq!(err.category(), DomainCategory::Pty);
+    assert_eq!(err.severity(), Severity::Recoverable);
+}
+
+#[test]
+fn aggregate_display_keeps_an_empty_detail() {
+    let inner = TerminalError::Parse {
+        detail: String::new(),
+    };
+    let err: KoshiError = inner.into();
+    assert_eq!(err.to_string(), "terminal parse error: ");
+    assert_eq!(err.category(), DomainCategory::Terminal);
+    assert_eq!(err.severity(), Severity::Recoverable);
+}
+
+#[test]
+fn aggregate_display_keeps_the_two_line_rejected_command_message() {
+    let inner = CliError::CommandRejected {
+        reason: RejectReason::Unauthorized,
+        help: Some("attach first".into()),
+    };
+    let err: KoshiError = inner.into();
+    assert_eq!(err.to_string(), "command not permitted\n  attach first");
+    assert_eq!(err.category(), DomainCategory::Session);
+    assert_eq!(err.severity(), Severity::Recoverable);
+}
+
+#[test]
+fn aggregate_display_keeps_integer_fields_at_their_maximum() {
+    let inner = IpcError::FrameTooLarge {
+        len: u64::MAX,
+        max: u32::MAX,
+    };
+    let err: KoshiError = inner.into();
+    assert_eq!(
+        err.to_string(),
+        "ipc frame of 18446744073709551615 bytes exceeds the 4294967295-byte limit"
+    );
+    assert_eq!(err.category(), DomainCategory::Ipc);
+    assert_eq!(err.severity(), Severity::ClientFatal);
+}
+
+#[test]
+fn aggregate_boxes_into_a_send_sync_std_error_and_keeps_its_display() {
+    let boxed: Box<dyn StdError + Send + Sync + 'static> =
+        Box::new(KoshiError::from(StorageError::Corrupt {
+            detail: "bad checksum".into(),
+        }));
+    assert_eq!(boxed.to_string(), "corrupt stored state: bad checksum");
+}
+
+#[test]
+fn aggregate_debug_names_the_wrapping_variant_while_display_does_not() {
+    let err: KoshiError = PtyError::Spawn {
+        detail: "no such shell".into(),
+    }
+    .into();
+    assert_eq!(
+        format!("{err:?}"),
+        "Pty(Spawn { detail: \"no such shell\" })"
+    );
+    assert_eq!(err.to_string(), "failed to spawn pty: no such shell");
+}
+
 #[test]
 fn aggregate_source_is_none_for_a_transparent_variant_with_no_sourced_inner() {
     // `#[error(transparent)]` forwards `source()` to the wrapped error's own
-    // `source()`. No wrapped enum marks a field `#[source]` or `#[from]` inside
-    // its own variants, so `PtyError::Spawn { .. }.source()` is `None`, and
-    // `KoshiError::from(PtyError::Spawn { .. }).source()` is `None` too.
+    // `source()`. No wrapped enum marks a field `#[source]` or `#[from]` in its
+    // variants, so every wrapped error's `source()` is `None`.
     let err: KoshiError = PtyError::Spawn {
         detail: "no such shell".into(),
     }

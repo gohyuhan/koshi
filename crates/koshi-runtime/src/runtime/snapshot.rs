@@ -4,15 +4,17 @@
 //! [`Server::build_snapshot`] takes a `client_id` and produces the world the
 //! way that one client sees it: its viewed tab solved into pane rectangles, and
 //! each of that tab's panes' terminal grids, cursors, and scrollback tallies
-//! copied out. The grid itself travels by reference — a per-pane
-//! [`Arc<Grid>`](koshi_terminal::grid::state::Grid) handle from
-//! [`TerminalState::active_grid_arc`](koshi_terminal::state::TerminalState::active_grid_arc),
-//! so freezing a frame does not copy any cells; the next write to a pane clones
-//! its buffer once (copy-on-write) instead.
+//! copied out. A pane the client follows live travels by reference — the
+//! per-pane [`Arc<Grid>`](koshi_terminal::grid::state::Grid) handle from
+//! [`TerminalState::active_grid_arc`](koshi_terminal::state::TerminalState::active_grid_arc)
+//! — and copies no cells; the next write to that pane clones its buffer once
+//! (copy-on-write). A pane the client has scrolled back in carries a grid
+//! composed for that window instead.
 //!
 //! The snapshot is per-client, not session-global: `session.active_tab` holds
-//! *this* client's viewed tab (the renderer asserts the two agree), while
-//! `session.name`/`tabs_metadata` are the true session-wide data.
+//! *this* client's viewed tab, and always names the same tab as
+//! `client.active_tab`, while `session.name`/`tabs_metadata` are the true
+//! session-wide data.
 //!
 //! `Server::build_layout` is the same work stopping short of the panes: it
 //! yields the [`OwnedFrameLayout`] that says where every surface sits, with no
@@ -20,7 +22,7 @@
 //! much.
 //!
 //! A snapshot carries no hint-bar data: the viewer draws that bar from its own
-//! keymap, so nothing here resolves hints.
+//! keymap.
 
 use std::collections::HashSet;
 use std::sync::OnceLock;
@@ -63,8 +65,7 @@ impl Server {
         let session = self.session_for_client(client_id)?;
         let client = session.clients.get(client_id)?;
 
-        // Content for each of the active tab's panes, joined to the slots by id.
-        // The slots are in solve order, so the panes come out in it too.
+        // One content snapshot per solved slot, in slot order.
         let panes: Vec<PaneSnapshot> = layout
             .session
             .active_tab
@@ -119,13 +120,9 @@ impl Server {
         let solve = solve_tab(tab, layout_mode, effective_size, sizing);
         let content = content_rects(&solve);
 
-        // One `PaneSlot` per leaf: outer rect from the solve, inner (content) rect
-        // from `content_rects` — both in the same solve order, so they zip.
-        //
-        // `suppressed` is indexed once before the walk, so each pane's lookup
-        // is a single hash probe. A tab with no room suppresses every pane it
-        // holds, and this path runs for every painted frame and for every
-        // mouse event forwarded to a pane that asked for the mouse.
+        // One `PaneSlot` per leaf: outer rect from the solve, inner (content)
+        // rect from `content_rects`, both in the same solve order. A tab with
+        // no room suppresses every pane it holds.
         let suppressed: HashSet<PaneId> = solve.suppressed.iter().copied().collect();
         let layout_solved: Vec<PaneSlot> = solve
             .panes
@@ -244,10 +241,9 @@ impl Server {
         // screen), so the composed grid, the indicator, and cursor suppression
         // all agree on how far the view is scrolled.
         let (grid, view_offset) = state.scrolled_view(view_offset);
-        // On the alternate screen a full-screen app is running: its OSC 0/1/2
-        // title names the pane. On the primary screen the shell's OSC 7 cwd
-        // (`~`-shortened) is the more useful name, with the OSC title as the
-        // fallback.
+        // On the alternate screen the pane's name is the app's OSC 0/1/2 title.
+        // On the primary screen it is the shell's OSC 7 working directory,
+        // `~`-shortened, falling back to the OSC title when none was reported.
         let title = match state.active_screen() {
             Screen::Alternate => state.title().map(str::to_owned),
             Screen::Primary => state
@@ -303,7 +299,7 @@ impl Server {
 
     /// The session that owns `pane_id`, or `None` if no session's registry holds
     /// that pane. The single pane→session lookup, shared by pane-target
-    /// resolution, child-exit routing, and the scroll re-anchor.
+    /// resolution and child-exit routing.
     pub(crate) fn session_for_pane(&self, pane_id: PaneId) -> Option<&Session> {
         self.sessions()
             .values()
@@ -311,7 +307,8 @@ impl Server {
     }
 
     /// Mutable twin of [`session_for_pane`](Self::session_for_pane), for callers
-    /// that edit the owning session's state.
+    /// that edit the owning session's state — the scroll re-anchor and the
+    /// selection handlers.
     pub(crate) fn session_for_pane_mut(&mut self, pane_id: PaneId) -> Option<&mut Session> {
         self.sessions
             .values_mut()

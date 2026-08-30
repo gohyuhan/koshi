@@ -2,14 +2,12 @@
 //! a session move through from creation to teardown.
 //!
 //! Each lifecycle is a small enum naming the stages a tab or a session can be
-//! in: a tab is `Creating`, `Active` once its root pane is live, then `Closing`
-//! and `Closed`; a session starts `Starting`, reaches `Running` on its first
-//! tab, drops to `Detaching` while no client is attached, and ends `Stopping`
-//! then `Stopped`. An illegal move — reviving a closed tab, stopping an
-//! already-stopped session — is rejected at the transition.
+//! in: a tab is `Creating`, `Active`, `Inactive`, `Closing`, or `Closed`; a
+//! session starts `Starting`, reaches `Running` on its first tab, drops to
+//! `Detaching` while no client is attached, and ends `Stopping` then `Stopped`.
 //!
 //! [`SessionLifecycle::transition`] is the only transition function defined
-//! here, and it polices the session's legal moves — see its rules below. A
+//! here; it accepts seven state-and-event pairs and rejects every other. A
 //! [`Tab`](crate::session::state::Tab) starts at `TabLifecycle::Creating` and
 //! nothing in this crate advances it to `Active`, `Inactive`, `Closing`, or
 //! `Closed`: a tab that closes is dropped from the session outright.
@@ -47,10 +45,10 @@ pub enum SessionLifecycle {
 }
 
 impl SessionLifecycle {
-    /// Apply `event`, returning the next state, or [`InvalidTransition`] if the
-    /// move is illegal from the current state. `Stopped` is terminal and
-    /// rejects every event. The returned `Result` must be used — the next state
-    /// is the transition's only effect, so the caller assigns it back.
+    /// Apply `event`, returning the next state, or [`InvalidTransition`]
+    /// carrying `self` and `event` if the move is illegal from the current
+    /// state. `Stopped` is terminal and rejects every event. `self` is left as
+    /// it was; the next state exists only in the returned value.
     pub fn transition(self, event: SessionLifecycleEvent) -> Result<Self, InvalidTransition> {
         match (self, event) {
             (SessionLifecycle::Starting, SessionLifecycleEvent::FirstTabCreated) => {
@@ -62,17 +60,14 @@ impl SessionLifecycle {
             (SessionLifecycle::Detaching, SessionLifecycleEvent::ClientAttached) => {
                 Ok(SessionLifecycle::Running)
             }
-            (SessionLifecycle::Running, SessionLifecycleEvent::StopRequested) => {
-                Ok(SessionLifecycle::Stopping)
-            }
+            (
+                SessionLifecycle::Starting
+                | SessionLifecycle::Running
+                | SessionLifecycle::Detaching,
+                SessionLifecycleEvent::StopRequested,
+            ) => Ok(SessionLifecycle::Stopping),
             (SessionLifecycle::Stopping, SessionLifecycleEvent::StopCompleted) => {
                 Ok(SessionLifecycle::Stopped)
-            }
-            (SessionLifecycle::Detaching, SessionLifecycleEvent::StopRequested) => {
-                Ok(SessionLifecycle::Stopping)
-            }
-            (SessionLifecycle::Starting, SessionLifecycleEvent::StopRequested) => {
-                Ok(SessionLifecycle::Stopping)
             }
             _ => Err(InvalidTransition { from: self, event }),
         }

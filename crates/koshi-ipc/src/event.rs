@@ -38,10 +38,10 @@ pub type IncomingEvent = MaybeKnown<SessionEvent>;
 
 /// One frame on an attached client's event stream.
 ///
-/// A field this build does not know is ignored, so a frame from a newer koshi
-/// still reads. A whole frame this build has no name for arrives as
-/// [`MaybeKnown::Unknown`] through
-/// [`IncomingEvent`], and the client skips it and keeps reading.
+/// A field this build does not know is ignored: a frame from a newer koshi
+/// reads. A whole frame this build has no name for arrives as
+/// [`MaybeKnown::Unknown`] through [`IncomingEvent`], and the client skips it
+/// and keeps reading. A frame missing a field this build needs is refused.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionEvent {
     /// The picture the session composed for this client, drawn whole.
@@ -165,9 +165,8 @@ pub enum SessionEvent {
 }
 
 impl SessionEvent {
-    /// The frame's name, e.g. `"Painted"`. Carries no payload, so it is safe
-    /// on a log line even though a payload can hold pane content or bytes a
-    /// pane wrote.
+    /// The frame's name, e.g. `"Painted"`, with none of its payload. Written
+    /// on log lines.
     #[must_use]
     pub fn name(&self) -> &'static str {
         match self {

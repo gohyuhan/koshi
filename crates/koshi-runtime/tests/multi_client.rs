@@ -72,17 +72,15 @@ const SHORT: Size = Size {
     rows: 24,
 };
 
-/// The display name the seeded session carries, so a reply can be checked
-/// against a known value rather than a generated one.
+/// The display name the seeded session carries.
 const SESSION_NAME: &str = "workspace";
 
 /// How long a test waits on work it cannot make happen itself — a detach the
 /// serving thread has yet to notice, an event frame in flight — before failing.
 const PATIENCE: Duration = Duration::from_secs(5);
 
-/// Stops the dispatcher when the exchange thread ends, on the way out of a
-/// failed assertion as well as a clean return, so a broken test reports
-/// instead of leaving the dispatcher blocked on its inbox.
+/// Sends [`RuntimeEvent::Quit`] when the exchange thread ends, on the way out
+/// of a failed assertion as well as a clean return.
 struct StopDispatcher(Sender<RuntimeEvent>);
 
 impl Drop for StopDispatcher {
@@ -342,7 +340,8 @@ fn submit(
 
 /// Read `connection`'s event stream until `wanted` accepts a frame, on a thread
 /// this one can give up waiting on. Returns every frame read, the accepted one
-/// last, and the connection so it stays open.
+/// last, and the connection so it stays open. Panics once [`PATIENCE`] has
+/// passed with no accepted frame.
 fn read_frames_until(
     mut connection: Connection,
     wanted: impl Fn(&SessionEvent) -> bool + Send + 'static,
@@ -379,7 +378,8 @@ fn last_painted(frames: &[SessionEvent]) -> &PaintedFrame {
     }
 }
 
-/// The tab and the pane the [`Command::NewTab`] in `emitted` created.
+/// The tab and the pane the [`Command::NewTab`] in `emitted` created. Panics
+/// unless `emitted` holds an [`Event::PaneCreated`].
 fn created_tab_and_pane(emitted: &[Event]) -> (TabId, PaneId) {
     emitted
         .iter()
@@ -489,6 +489,33 @@ fn a_starving_client_attaching_first_leaves_the_seeded_size_until_a_sized_client
         // only viewer contributing no pane area.
         let mut caller = open(&dir, session_id);
         wait_for_client_count(&mut caller, 1, 3);
+
+        // The tab has no viewer that sizes it, so it solves at 0x0 and the
+        // starving client's own frames carry its pane suppressed.
+        let (starving, frames) = read_frames_until(starving, |frame| {
+            matches!(frame, SessionEvent::Painted { .. })
+        });
+        let painted = last_painted(&frames);
+        assert_eq!(
+            painted.session.active_tab.effective_size,
+            Size { cols: 0, rows: 0 },
+        );
+        assert!(painted.session.active_tab.all_suppressed);
+        assert_eq!(
+            painted.session.active_tab.slots,
+            vec![FrameSlot {
+                pane_id,
+                rect: Rect {
+                    origin: Point { x: 0, y: 0 },
+                    size: Size { cols: 0, rows: 0 },
+                },
+                inner_rect: None,
+                kind: PaneKind::Terminal,
+                visible: false,
+                suppressed: true,
+                dead: false,
+            }],
+        );
 
         let mut big = open(&dir, session_id);
         attach_reporting(&mut big, 2, BIG, None);
@@ -767,6 +794,49 @@ fn locking_one_client_leaves_the_other_clients_lock_state_unchanged() {
     });
 }
 
+/// Setting the lock mode a client already holds applies and emits nothing;
+/// setting the other mode emits the change.
+#[test]
+fn setting_the_lock_mode_a_client_already_holds_emits_nothing() {
+    let (_server, _fake, ()) = served("repeat-lock", |dir, session_id, _fake| {
+        let mut viewer = open(&dir, session_id);
+        let (viewer_client, _, _) = attach_sized(&mut viewer, 2, BIG);
+
+        let mut caller = open(&dir, session_id);
+        let set_locked = |locked| {
+            Command::SetLockMode(LockModeArgs {
+                locked,
+                client: Some(viewer_client),
+            })
+        };
+
+        assert_eq!(
+            submit(&mut caller, session_id, set_locked(true), 3),
+            vec![Event::InputModeChanged(InputModeChanged {
+                client_id: viewer_client,
+                mode: InputMode::Locked,
+            })],
+        );
+        assert_eq!(
+            submit(&mut caller, session_id, set_locked(true), 4),
+            Vec::<Event>::new(),
+        );
+        assert_eq!(
+            submit(&mut caller, session_id, set_locked(false), 5),
+            vec![Event::InputModeChanged(InputModeChanged {
+                client_id: viewer_client,
+                mode: InputMode::Normal,
+            })],
+        );
+        assert_eq!(
+            submit(&mut caller, session_id, set_locked(false), 6),
+            Vec::<Event>::new(),
+        );
+
+        (vec![caller, viewer], ())
+    });
+}
+
 /// Turn normal mouse tracking with SGR encoding on in `pane`, the way the
 /// program running there does, and read `connection`'s stream until a painted
 /// frame shows the pane asking for reports — the point from which a forwarded
@@ -860,6 +930,28 @@ fn a_mouse_click_is_answered_against_the_clicking_clients_own_view() {
             b"\x1b[<0;1;1M".to_vec(),
             b"\x1b[<0;78;26M".to_vec(),
         ],
+    );
+}
+
+/// A press forwarded to a pane whose program has not asked for mouse reports
+/// writes nothing to that pane's PTY. The round is still answered.
+#[test]
+fn a_mouse_press_before_the_pane_asks_for_reports_writes_nothing() {
+    let (_server, fake, pane_id) = served("mouse-before-tracking", |dir, session_id, _fake| {
+        let mut viewer = open(&dir, session_id);
+        let (_, _, structure) = attach_sized(&mut viewer, 2, BIG);
+        let pane_id = structure.panes[0].id;
+
+        // The tab's only viewer, so its content starts at column 1, row 2 of
+        // its own terminal: one tabline row, then the pane's 1-cell border.
+        let viewer = press_pane(viewer, pane_id, Point { x: 1, y: 2 }, 3);
+
+        (vec![viewer], pane_id)
+    });
+
+    assert_eq!(
+        fake.writes(pane_id).expect("the pane was spawned"),
+        Vec::<Vec<u8>>::new(),
     );
 }
 
@@ -1022,10 +1114,9 @@ const QUIT_PATIENCE: Duration = Duration::from_secs(2);
 /// modelled on the per-session server binary's, minus the wait for clients
 /// carried across an image swap, which no server here has: the quit request is
 /// read after every event, and the inbox's own quit hangup is applied like any
-/// other event. The
-/// serving thread queues a dropped connection's detach, and the exchange thread
-/// queues the hangup, so the loop keeps reading until the quit request is set
-/// or [`QUIT_PATIENCE`] has passed.
+/// other event. The serving thread queues a dropped connection's detach, and
+/// the exchange thread queues the hangup, so the loop keeps reading until the
+/// quit request is set or [`QUIT_PATIENCE`] has passed.
 ///
 /// Returns the server once the quit request is set, or once [`QUIT_PATIENCE`]
 /// has passed, so a test can read whether the session asked to close.

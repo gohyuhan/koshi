@@ -391,9 +391,9 @@ fn is_newer(tag: &str) -> bool {
 // Download, extract, install
 // ---------------------------------------------------------------------------
 
-/// Checks for a newer release, downloads its archive, unpacks the binary, and
-/// swaps it for the running executable. Both temp files are securely created
-/// and auto-removed when their [`TempPath`] drops at the end of this function,
+/// Downloads the release archive `tag` names, unpacks the binary, and swaps it
+/// for the running executable. Both temp files are securely created and
+/// auto-removed when their [`TempPath`] drops at the end of this function,
 /// whichever way it ends.
 fn install_release(tag: &str) -> Result<(), String> {
     let url = binary_url(tag).ok_or_else(|| {

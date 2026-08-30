@@ -2,8 +2,10 @@
 //! a populated server drained into a resume file and rebuilt from it, what the
 //! drain leaves behind, a sequence the swap cut in half finishing in the next
 //! image, what the header still yields when the body cannot be read, what a
-//! body format this build does not know is answered with, and what a body
-//! written in the older client format reads back as.
+//! body format this build does not know is answered with, what a body written
+//! in the older client format reads back as, what a pane record's size, exit
+//! status and applied quit read back as, and what a write over an existing
+//! file and a write into a directory that is not there each do.
 
 use std::path::Path;
 use std::sync::{mpsc, Arc};
@@ -235,6 +237,27 @@ fn carried_pty_panes(server: &Server, session_id: SessionId) -> Vec<CarriedPtyPa
             exit: None,
         })
         .collect()
+}
+
+/// A header for `session_id` named `carried`, in the format this build writes,
+/// naming `panes`.
+fn header_for(session_id: SessionId, panes: Vec<CarriedPane>) -> ResumeHeader {
+    ResumeHeader {
+        format: RESUME_FORMAT,
+        session_id,
+        session_name: "carried".to_string(),
+        panes,
+    }
+}
+
+/// A body holding no session, no screen and no held bytes, carrying `quit`.
+fn body_carrying_only(quit: Option<CarriedQuit>) -> ResumeBody {
+    ResumeBody {
+        sessions: HashMap::new(),
+        engines: HashMap::new(),
+        undecoded: HashMap::new(),
+        quit,
+    }
 }
 
 /// Rebuild a server from `body`, over detached handles for every pane the
@@ -549,9 +572,9 @@ fn an_unreadable_body_still_leaves_every_pane_descriptor_and_process_id() {
     }
     match read_body(read_header.format, &raw_body) {
         Err(StorageError::Corrupt { detail }) => {
-            assert!(
-                detail.starts_with("resume body is unreadable: "),
-                "the failure must say the body is unreadable, got {detail}"
+            assert_eq!(
+                detail,
+                "resume body is unreadable: invalid type: string \"not-a-map\", expected a map at line 1 column 23"
             );
         }
         other => panic!("expected a corrupt body, got {other:?}"),
@@ -700,12 +723,12 @@ fn reading_bytes_that_are_not_a_resume_file_is_a_corrupt_failure() {
 
     match read_header(&path) {
         Err(StorageError::Corrupt { detail }) => {
-            assert!(
-                detail.starts_with(&format!(
-                    "resume state at {} is unreadable: ",
+            assert_eq!(
+                detail,
+                format!(
+                    "resume state at {} is unreadable: expected ident at line 1 column 2",
                     path.display()
-                )),
-                "the failure must name the path, got {detail}"
+                )
             );
         }
         other => panic!("expected a corrupt failure, got {other:?}"),
@@ -1139,4 +1162,149 @@ fn a_carried_file_written_before_this_change_still_reads() {
     assert_eq!(client.colour(), 3);
     assert_eq!(client.active_tab(), tab_id);
     assert_eq!(client.viewport(), Size { cols: 80, rows: 24 });
+}
+
+#[test]
+fn a_carried_pane_reports_the_size_its_rows_and_cols_name() {
+    let pane = CarriedPane {
+        pane_id: PaneId::new(),
+        pid: 4242,
+        rows: 20,
+        cols: 78,
+        terminal_fd: Some(9),
+        terminal_name: Some("/dev/ttys009".to_string()),
+        exit: None,
+    };
+
+    assert_eq!(pane.size(), PtySize { rows: 20, cols: 78 });
+}
+
+#[test]
+fn an_applied_quit_crosses_the_file_with_the_kind_it_was_asked_for() {
+    for kind in [CarriedQuit::Graceful, CarriedQuit::Immediate] {
+        let dir = TempDir::new().expect("create temp dir");
+        let path = dir.path().join("quit.resume");
+        let header = header_for(SessionId::new(), Vec::new());
+        let body = body_carrying_only(Some(kind));
+        write(&path, &header, &body).expect("write the resume file");
+
+        let (read_back, raw_body) = read_header(&path).expect("read the header back");
+        let read_body = read_body(read_back.format, &raw_body).expect("read the body back");
+
+        assert_eq!(read_body.quit, Some(kind));
+    }
+}
+
+#[test]
+fn a_body_written_without_a_quit_reads_back_with_none() {
+    let dir = TempDir::new().expect("create temp dir");
+    let path = dir.path().join("session.resume");
+    let mut populated = populated_server();
+    let session_id = populated.session_id;
+    let panes = carried_pty_panes(&populated.server, session_id);
+    let (header, body) = populated
+        .server
+        .carry_out(session_id, "carried".to_string(), &panes);
+    write(&path, &header, &body).expect("write the resume file");
+
+    // The body with its quit key taken out of the JSON.
+    let mut on_disk: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("read the file")).expect("valid json");
+    on_disk["body"]
+        .as_object_mut()
+        .expect("the body is a map")
+        .remove("quit");
+    std::fs::write(&path, serde_json::to_vec(&on_disk).expect("encode")).expect("rewrite the file");
+
+    let (read_back, raw_body) = read_header(&path).expect("read the header back");
+    let read_body = read_body(read_back.format, &raw_body).expect("read the body back");
+
+    assert_eq!(read_body.quit, None);
+    assert_eq!(read_body.engines.len(), 4, "every screen still reads back");
+}
+
+#[test]
+fn a_pane_whose_child_was_reaped_carries_that_exit_status_across_the_file() {
+    let dir = TempDir::new().expect("create temp dir");
+    let path = dir.path().join("reaped.resume");
+    let header = header_for(
+        SessionId::new(),
+        vec![
+            CarriedPane {
+                pane_id: PaneId::new(),
+                pid: 4242,
+                rows: 20,
+                cols: 78,
+                terminal_fd: Some(9),
+                terminal_name: Some("/dev/ttys009".to_string()),
+                exit: Some(ExitStatus::ExitCode(3)),
+            },
+            CarriedPane {
+                pane_id: PaneId::new(),
+                pid: 4243,
+                rows: 20,
+                cols: 78,
+                terminal_fd: Some(10),
+                terminal_name: Some("/dev/ttys010".to_string()),
+                exit: Some(ExitStatus::Signaled(9)),
+            },
+        ],
+    );
+    write(&path, &header, &body_carrying_only(None)).expect("write the resume file");
+
+    let (read_back, _raw_body) = read_header(&path).expect("read the header back");
+
+    assert_eq!(read_back, header);
+    assert_eq!(
+        read_back
+            .panes
+            .iter()
+            .map(|pane| pane.exit)
+            .collect::<Vec<Option<ExitStatus>>>(),
+        vec![Some(ExitStatus::ExitCode(3)), Some(ExitStatus::Signaled(9))]
+    );
+}
+
+#[test]
+fn writing_a_resume_file_replaces_the_bytes_already_there() {
+    let dir = TempDir::new().expect("create temp dir");
+    let path = dir.path().join("session.resume");
+    std::fs::write(&path, b"the bytes of an older write").expect("write the old file");
+    let header = header_for(
+        SessionId::new(),
+        vec![CarriedPane {
+            pane_id: PaneId::new(),
+            pid: 4242,
+            rows: 20,
+            cols: 78,
+            terminal_fd: Some(9),
+            terminal_name: Some("/dev/ttys009".to_string()),
+            exit: None,
+        }],
+    );
+
+    write(&path, &header, &body_carrying_only(None)).expect("write the resume file");
+
+    let (read_back, raw_body) = read_header(&path).expect("read the header back");
+    assert_eq!(read_back, header);
+    let read_body = read_body(read_back.format, &raw_body).expect("read the body back");
+    assert_eq!(read_body.sessions.len(), 0);
+    assert_eq!(read_body.engines.len(), 0);
+}
+
+#[test]
+fn writing_into_a_directory_that_is_not_there_is_an_io_failure_naming_it() {
+    let dir = TempDir::new().expect("create temp dir");
+    let missing = dir.path().join("gone");
+    let path = missing.join("session.resume");
+    let header = header_for(SessionId::new(), Vec::new());
+
+    match write(&path, &header, &body_carrying_only(None)) {
+        Err(StorageError::Io { detail }) => assert!(
+            detail.starts_with(&format!("create temp in {}: ", missing.display())),
+            "the failure must name the directory, got {detail}"
+        ),
+        other => panic!("expected an io failure, got {other:?}"),
+    }
+    assert!(!missing.exists(), "and the directory must not be created");
 }

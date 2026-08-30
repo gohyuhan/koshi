@@ -1,9 +1,8 @@
 //! Tests for turning a committed runtime event into a log line.
 //!
 //! Coverage: the level each outcome gets, the ids and values a line carries,
-//! the promise that a display name never reaches the file, the promise that no
-//! event is ever an error, and one case per reason an event is left out of the
-//! file.
+//! the order lines come out in, the promise that no event is ever an error,
+//! and one case per reason an event is left out of the file.
 
 use super::*;
 
@@ -37,8 +36,7 @@ fn captured(events: &[Event]) -> String {
     logs.contents()
 }
 
-/// A `PaneTyped` carrying a printable character, the shape that would leak what
-/// the user typed if the event were ever written.
+/// A `PaneTyped` carrying the printable character `'x'`.
 fn typed_a_character() -> Event {
     Event::PaneTyped(PaneTyped {
         pane_id: PaneId::new(),
@@ -50,8 +48,6 @@ fn typed_a_character() -> Event {
     })
 }
 
-// A pane opening is a fact that landed, so it is one info line, and it carries
-// both ids needed to tie it back to the tab it happened in.
 #[test]
 fn pane_created_is_one_info_line_carrying_its_pane_and_tab_ids() {
     let pane_id = PaneId::new();
@@ -66,25 +62,53 @@ fn pane_created_is_one_info_line_carrying_its_pane_and_tab_ids() {
     assert!(out.contains(&format!(r#""tab_id":"{tab_id}""#)), "{out}");
 }
 
-// A reload that applied is info; one that was refused is a warning, because the
-// running config is the fallback koshi keeps using. Both name their session.
+// Two events committed together write two lines, in the order they were
+// committed.
+#[test]
+fn a_new_pane_writes_its_created_line_before_its_focused_line() {
+    let pane_id = PaneId::new();
+    let tab_id = TabId::new();
+
+    let out = captured(&[
+        Event::PaneCreated(PaneCreated { pane_id, tab_id }),
+        Event::PaneFocused(PaneFocused {
+            client_id: ClientId::new(),
+            tab_id,
+            pane_id,
+            prior_pane: None,
+        }),
+    ]);
+
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 2, "expected exactly two lines: {out}");
+    assert!(lines[0].contains(r#""message":"pane created""#), "{out}");
+    assert!(lines[1].contains(r#""message":"pane focused""#), "{out}");
+}
+
 #[test]
 fn config_reload_is_logged_at_info_naming_its_session() {
     let session_id = SessionId::new();
 
     let applied = captured(&[Event::ConfigReloaded(ConfigReloaded { session_id })]);
 
+    assert_eq!(
+        applied.lines().count(),
+        1,
+        "expected exactly one line: {applied}"
+    );
     assert!(applied.contains(r#""level":"INFO""#), "{applied}");
     assert!(
         applied.contains(r#""message":"config reloaded""#),
         "{applied}"
     );
-    assert!(applied.contains(&session_id.to_string()), "{applied}");
+    assert!(
+        applied.contains(&format!(r#""session_id":"{session_id}""#)),
+        "{applied}"
+    );
 }
 
-// A rejection is written where the rejection is built, which every rejected
-// command goes through. Writing it again from the event would put the same
-// rejection in the file twice, so the event itself writes nothing.
+// The rejection line is written where the rejection is built, in
+// `koshi-runtime`; the event writes nothing.
 #[test]
 fn command_rejected_writes_nothing_because_the_rejection_itself_is_logged() {
     let out = captured(&[Event::CommandRejected(CommandRejected {
@@ -95,8 +119,6 @@ fn command_rejected_writes_nothing_because_the_rejection_itself_is_logged() {
     assert_eq!(out, "", "the rejection would be logged twice: {out}");
 }
 
-// A subscriber whose bounded queue overflowed is a warning: dropping is the
-// answer koshi already has for a slow subscriber, and it kept running.
 #[test]
 fn subscriber_lag_is_a_warning_carrying_the_drop_count() {
     let subscriber_id = SubscriberId::new();
@@ -107,16 +129,20 @@ fn subscriber_lag_is_a_warning_carrying_the_drop_count() {
         event_class: EventClass::Lossy,
     })]);
 
+    assert_eq!(out.lines().count(), 1, "expected exactly one line: {out}");
     assert!(out.contains(r#""level":"WARN""#), "{out}");
     assert!(
         out.contains(r#""message":"subscriber queue overflowed; events dropped""#),
         "{out}"
     );
+    assert!(
+        out.contains(&format!(r#""subscriber_id":"{subscriber_id}""#)),
+        "{out}"
+    );
     assert!(out.contains(r#""dropped_count":12"#), "{out}");
+    assert!(out.contains(r#""event_class":"Lossy""#), "{out}");
 }
 
-// A plugin that installed is info; one that would not load is a warning, since
-// the session runs on without it.
 #[test]
 fn plugin_install_is_info_and_a_failed_load_is_a_warning() {
     let plugin_id = PluginId::new();
@@ -124,9 +150,18 @@ fn plugin_install_is_info_and_a_failed_load_is_a_warning() {
     let installed = captured(&[Event::Plugin(PluginEvent::Installed(PluginInstalled {
         plugin_id,
     }))]);
+    assert_eq!(
+        installed.lines().count(),
+        1,
+        "expected exactly one line: {installed}"
+    );
     assert!(installed.contains(r#""level":"INFO""#), "{installed}");
     assert!(
         installed.contains(r#""message":"plugin installed""#),
+        "{installed}"
+    );
+    assert!(
+        installed.contains(&format!(r#""plugin_id":"{plugin_id}""#)),
         "{installed}"
     );
 
@@ -134,59 +169,90 @@ fn plugin_install_is_info_and_a_failed_load_is_a_warning() {
         plugin_id,
         reason: "wasm module has no `koshi` export".to_string(),
     }))]);
+    assert_eq!(
+        failed.lines().count(),
+        1,
+        "expected exactly one line: {failed}"
+    );
     assert!(failed.contains(r#""level":"WARN""#), "{failed}");
     assert!(
         failed.contains(r#""message":"plugin failed to load; continuing without it""#),
         "{failed}"
     );
+    assert!(
+        failed.contains(&format!(r#""plugin_id":"{plugin_id}""#)),
+        "{failed}"
+    );
+    assert!(
+        failed.contains(r#""reason":"wasm module has no `koshi` export""#),
+        "{failed}"
+    );
 }
 
-// The copy line records how much was copied and where to, never the text.
+// The line carries the byte count and the target, never the copied text.
 #[test]
 fn copied_records_the_byte_count_and_target_only() {
+    let client_id = ClientId::new();
+    let pane_id = PaneId::new();
+
     let out = captured(&[Event::Copied(Copied {
-        client_id: ClientId::new(),
-        pane_id: PaneId::new(),
+        client_id,
+        pane_id,
         target: CopyTarget::Osc52,
         byte_len: 41,
     })]);
 
+    assert_eq!(out.lines().count(), 1, "expected exactly one line: {out}");
     assert!(out.contains(r#""level":"INFO""#), "{out}");
     assert!(out.contains(r#""message":"copied""#), "{out}");
+    assert!(
+        out.contains(&format!(r#""client_id":"{client_id}""#)),
+        "{out}"
+    );
+    assert!(out.contains(&format!(r#""pane_id":"{pane_id}""#)), "{out}");
     assert!(out.contains(r#""byte_len":41"#), "{out}");
     assert!(out.contains(r#""target":"Osc52""#), "{out}");
 }
 
-// Lock mode decides whether a key reaches koshi at all, so the switch is worth
-// a line and the line says which mode is now in effect.
 #[test]
 fn input_mode_change_is_info_naming_the_mode_now_in_effect() {
+    let client_id = ClientId::new();
+
     let out = captured(&[Event::InputModeChanged(InputModeChanged {
-        client_id: ClientId::new(),
+        client_id,
         mode: InputMode::Locked,
     })]);
 
+    assert_eq!(out.lines().count(), 1, "expected exactly one line: {out}");
     assert!(out.contains(r#""level":"INFO""#), "{out}");
     assert!(out.contains(r#""message":"input mode changed""#), "{out}");
+    assert!(
+        out.contains(&format!(r#""client_id":"{client_id}""#)),
+        "{out}"
+    );
     assert!(out.contains(r#""mode":"Locked""#), "{out}");
 }
 
-// Mouse select decides whether a click reaches the program in the pane, so the
-// switch is worth a line and the line says which way it went.
 #[test]
 fn mouse_select_change_is_info_naming_the_state_now_in_effect() {
+    let client_id = ClientId::new();
+
     let out = captured(&[Event::MouseSelectChanged(MouseSelectChanged {
-        client_id: ClientId::new(),
+        client_id,
         on: true,
     })]);
 
+    assert_eq!(out.lines().count(), 1, "expected exactly one line: {out}");
     assert!(out.contains(r#""level":"INFO""#), "{out}");
     assert!(out.contains(r#""message":"mouse select changed""#), "{out}");
+    assert!(
+        out.contains(&format!(r#""client_id":"{client_id}""#)),
+        "{out}"
+    );
     assert!(out.contains(r#""on":true"#), "{out}");
 }
 
-// The model rule, held as a test: an event is a fact koshi anticipated, so it
-// always has a defined outcome and is never reported as an error.
+// Every written event is `info` or `warn`. `CommandRejected` writes nothing.
 #[test]
 fn no_event_is_ever_logged_as_an_error() {
     let out = captured(&[
@@ -214,18 +280,18 @@ fn no_event_is_ever_logged_as_an_error() {
         Event::Restarting,
     ]);
 
+    assert_eq!(out.lines().count(), 6, "expected six lines: {out}");
     assert!(
         !out.contains(r#""level":"ERROR""#),
         "an event was logged as an error: {out}"
     );
 }
 
-// A session that keeps running under a new process image gets its own line: it
-// is what explains a jump in the log's process id.
 #[test]
 fn restarting_is_info_saying_the_session_swaps_its_image() {
     let out = captured(&[Event::Restarting]);
 
+    assert_eq!(out.lines().count(), 1, "expected exactly one line: {out}");
     assert!(out.contains(r#""level":"INFO""#), "{out}");
     assert!(
         out.contains(r#""message":"session restarting into the binary on disk""#),
@@ -233,9 +299,7 @@ fn restarting_is_info_saying_the_session_swaps_its_image() {
     );
 }
 
-// One case per reason an event is kept out of the file. Together they must
-// write nothing at all: a session of shell output, typing, and mouse motion
-// must not put a single line in the log.
+// One event per reason the file leaves it out; together they write nothing.
 #[test]
 fn events_that_fire_faster_than_a_person_acts_write_nothing() {
     let out = captured(&[
@@ -274,8 +338,6 @@ fn events_that_fire_faster_than_a_person_acts_write_nothing() {
     );
 }
 
-// The pane a close removes still gets its own line — the fact that completed is
-// the one that is written, so a close is recorded exactly once.
 #[test]
 fn a_closed_pane_is_recorded_once_by_the_removal_not_the_announcement() {
     let pane_id = PaneId::new();
@@ -287,35 +349,65 @@ fn a_closed_pane_is_recorded_once_by_the_removal_not_the_announcement() {
     ]);
 
     assert_eq!(out.lines().count(), 1, "expected exactly one line: {out}");
+    assert!(out.contains(r#""level":"INFO""#), "{out}");
     assert!(out.contains(r#""message":"pane removed""#), "{out}");
+    assert!(out.contains(&format!(r#""pane_id":"{pane_id}""#)), "{out}");
+    assert!(out.contains(&format!(r#""tab_id":"{tab_id}""#)), "{out}");
 }
 
-// An exit code the child reported is written as a number, and a child killed by
-// a signal reports none — the field is then left off the line rather than
-// written as a null, so a reader never has to tell "exited 0" from "no code".
+// `exit_code: None` leaves the field off the line; it is not written as
+// `null`.
 #[test]
 fn a_pane_exit_writes_its_code_as_a_number_and_omits_an_absent_one() {
+    let pane_id = PaneId::new();
+
     let with_code = captured(&[Event::PaneProcessExited(PaneProcessExited {
-        pane_id: PaneId::new(),
+        pane_id,
         exit_code: Some(0),
     })]);
+    assert_eq!(
+        with_code.lines().count(),
+        1,
+        "expected exactly one line: {with_code}"
+    );
+    assert!(with_code.contains(r#""level":"INFO""#), "{with_code}");
+    assert!(
+        with_code.contains(r#""message":"pane process exited""#),
+        "{with_code}"
+    );
+    assert!(
+        with_code.contains(&format!(r#""pane_id":"{pane_id}""#)),
+        "{with_code}"
+    );
     assert!(with_code.contains(r#""exit_code":0"#), "{with_code}");
 
+    let negative = captured(&[Event::PaneProcessExited(PaneProcessExited {
+        pane_id,
+        exit_code: Some(-1),
+    })]);
+    assert!(negative.contains(r#""exit_code":-1"#), "{negative}");
+
     let signalled = captured(&[Event::PaneProcessExited(PaneProcessExited {
-        pane_id: PaneId::new(),
+        pane_id,
         exit_code: None,
     })]);
+    assert_eq!(
+        signalled.lines().count(),
+        1,
+        "expected exactly one line: {signalled}"
+    );
     assert!(
         signalled.contains(r#""message":"pane process exited""#),
+        "{signalled}"
+    );
+    assert!(
+        signalled.contains(&format!(r#""pane_id":"{pane_id}""#)),
         "{signalled}"
     );
     assert!(!signalled.contains("exit_code"), "{signalled}");
 }
 
-// Focus and tab lifecycle: each fact a person can point at gets its own message
-// and carries the ids that tie it back to where it happened. The "what it was
-// before" fields exist on the events but are not written — a line records the
-// state that now holds, not the one it replaced.
+// `prior_pane` and `prior_tab` are on the events and are not written.
 #[test]
 fn each_focus_and_tab_lifecycle_fact_writes_its_own_message_and_ids() {
     let client_id = ClientId::new();
@@ -330,6 +422,11 @@ fn each_focus_and_tab_lifecycle_fact_writes_its_own_message_and_ids() {
         pane_id,
         prior_pane: Some(prior_pane),
     })]);
+    assert_eq!(
+        focused_pane.lines().count(),
+        1,
+        "expected exactly one line: {focused_pane}"
+    );
     assert!(focused_pane.contains(r#""level":"INFO""#), "{focused_pane}");
     assert!(
         focused_pane.contains(r#""message":"pane focused""#),
@@ -353,6 +450,11 @@ fn each_focus_and_tab_lifecycle_fact_writes_its_own_message_and_ids() {
     );
 
     let created_tab = captured(&[Event::TabCreated(TabCreated { tab_id })]);
+    assert_eq!(
+        created_tab.lines().count(),
+        1,
+        "expected exactly one line: {created_tab}"
+    );
     assert!(created_tab.contains(r#""level":"INFO""#), "{created_tab}");
     assert!(
         created_tab.contains(r#""message":"tab created""#),
@@ -364,6 +466,11 @@ fn each_focus_and_tab_lifecycle_fact_writes_its_own_message_and_ids() {
     );
 
     let closed_tab = captured(&[Event::TabClosed(TabClosed { tab_id })]);
+    assert_eq!(
+        closed_tab.lines().count(),
+        1,
+        "expected exactly one line: {closed_tab}"
+    );
     assert!(closed_tab.contains(r#""level":"INFO""#), "{closed_tab}");
     assert!(
         closed_tab.contains(r#""message":"tab closed""#),
@@ -379,6 +486,11 @@ fn each_focus_and_tab_lifecycle_fact_writes_its_own_message_and_ids() {
         tab_id,
         prior_tab,
     })]);
+    assert_eq!(
+        focused_tab.lines().count(),
+        1,
+        "expected exactly one line: {focused_tab}"
+    );
     assert!(focused_tab.contains(r#""level":"INFO""#), "{focused_tab}");
     assert!(
         focused_tab.contains(r#""message":"tab focused""#),
@@ -398,8 +510,7 @@ fn each_focus_and_tab_lifecycle_fact_writes_its_own_message_and_ids() {
     );
 }
 
-// A move is only readable with both ends of it, and the two must not be
-// swapped: a tab dragged from slot 0 to slot 3 reads `old_index` 0, not 3.
+// A tab dragged from slot 0 to slot 3 writes `old_index` 0 and `new_index` 3.
 #[test]
 fn a_tab_move_records_the_slot_it_left_and_the_slot_it_landed_on() {
     let tab_id = TabId::new();
@@ -410,6 +521,7 @@ fn a_tab_move_records_the_slot_it_left_and_the_slot_it_landed_on() {
         new_index: 3,
     })]);
 
+    assert_eq!(out.lines().count(), 1, "expected exactly one line: {out}");
     assert!(out.contains(r#""level":"INFO""#), "{out}");
     assert!(out.contains(r#""message":"tab moved""#), "{out}");
     assert!(out.contains(r#""old_index":0"#), "{out}");
@@ -417,7 +529,8 @@ fn a_tab_move_records_the_slot_it_left_and_the_slot_it_landed_on() {
     assert!(out.contains(&format!(r#""tab_id":"{tab_id}""#)), "{out}");
 }
 
-// The too-small event records the affected viewport, pane area, and cause.
+// Entering writes the size, the pane area and the cause; leaving writes the
+// size. An absent pane area is written as the string `None`.
 #[test]
 fn the_too_small_pair_says_which_way_it_went_and_the_size_it_happened_at() {
     let client_id = ClientId::new();
@@ -428,6 +541,11 @@ fn the_too_small_pair_says_which_way_it_went_and_the_size_it_happened_at() {
         pane_area: Some(PaneArea::Starving),
         cause: TerminalTooSmallCause::Regions,
     })]);
+    assert_eq!(
+        entered.lines().count(),
+        1,
+        "expected exactly one line: {entered}"
+    );
     assert!(entered.contains(r#""level":"INFO""#), "{entered}");
     assert!(
         entered.contains(r#""message":"terminal too small; panes hidden""#),
@@ -445,10 +563,27 @@ fn the_too_small_pair_says_which_way_it_went_and_the_size_it_happened_at() {
         "{entered}"
     );
 
+    let entered_without_area =
+        captured(&[Event::TerminalTooSmallEntered(TerminalTooSmallEntered {
+            client_id,
+            size: Size { cols: 10, rows: 3 },
+            pane_area: None,
+            cause: TerminalTooSmallCause::Regions,
+        })]);
+    assert!(
+        entered_without_area.contains(r#""pane_area":"None""#),
+        "{entered_without_area}"
+    );
+
     let exited = captured(&[Event::TerminalTooSmallExited(TerminalTooSmallExited {
         client_id,
         size: Size { cols: 80, rows: 24 },
     })]);
+    assert_eq!(
+        exited.lines().count(),
+        1,
+        "expected exactly one line: {exited}"
+    );
     assert!(exited.contains(r#""level":"INFO""#), "{exited}");
     assert!(
         exited.contains(r#""message":"terminal big enough again; panes shown""#),
@@ -456,9 +591,12 @@ fn the_too_small_pair_says_which_way_it_went_and_the_size_it_happened_at() {
     );
     assert!(exited.contains(r#""cols":80"#), "{exited}");
     assert!(exited.contains(r#""rows":24"#), "{exited}");
+    assert!(
+        exited.contains(&format!(r#""client_id":"{client_id}""#)),
+        "{exited}"
+    );
 }
 
-// The end of a session is the line that explains why the file stops.
 #[test]
 fn quitting_writes_one_info_line_saying_the_session_is_ending() {
     let out = captured(&[Event::Quit]);
@@ -468,9 +606,8 @@ fn quitting_writes_one_info_line_saying_the_session_is_ending() {
     assert!(out.contains(r#""message":"session quitting""#), "{out}");
 }
 
-// Every plugin lifecycle fact is a deliberate act, so each gets its own line,
-// and no two of them read the same. The two that report a plugin koshi could
-// not run are warnings; the rest are info.
+// Each plugin event writes its own message. `LoadFailed` and `Broken` are
+// warnings; the rest are info.
 #[test]
 fn each_plugin_lifecycle_fact_writes_its_own_message_at_its_own_level() {
     let plugin_id = PluginId::new();
@@ -539,18 +676,21 @@ fn each_plugin_lifecycle_fact_writes_its_own_message_at_its_own_level() {
         );
     }
 
-    // The one that names why it failed writes that reason on the line.
+    // `Broken` writes its `reason` on the line.
     let broken = captured(&[Event::Plugin(PluginEvent::Broken(PluginBroken {
         plugin_id,
         reason: "manifest names no entry point".to_string(),
     }))]);
-    assert!(broken.contains("manifest names no entry point"), "{broken}");
+    assert!(
+        broken.contains(r#""reason":"manifest names no entry point""#),
+        "{broken}"
+    );
 }
 
-// The rest of the events kept out of the file, one per reason. Together with
-// `events_that_fire_faster_than_a_person_acts_write_nothing` this covers every
-// silent variant, so a session of dragging, clicking, scrolling and printing
-// must not put a single line in the log.
+// The remaining silent variants. With
+// `events_that_fire_faster_than_a_person_acts_write_nothing` and
+// `command_rejected_writes_nothing_because_the_rejection_itself_is_logged`,
+// every silent arm of `log_event` is covered.
 #[test]
 fn the_remaining_silent_events_write_nothing() {
     let out = captured(&[

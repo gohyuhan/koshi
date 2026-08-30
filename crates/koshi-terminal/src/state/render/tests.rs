@@ -51,3 +51,34 @@ fn render_states_differing_only_by_the_pen_are_not_equal() {
     colored_pen.style = style;
     assert_ne!(default_pen, colored_pen);
 }
+
+#[test]
+fn render_state_serializes_charsets_by_name_and_gl_as_a_number() {
+    let mut render = RenderState::fresh();
+    render.charsets[1] = Charset::DecLineDrawing;
+    render.charsets[2] = Charset::Uk;
+    render.gl = 1;
+
+    let value = serde_json::to_value(render).expect("render state serializes");
+    assert_eq!(
+        value["charsets"],
+        serde_json::json!(["Ascii", "DecLineDrawing", "Uk", "Ascii"])
+    );
+    assert_eq!(value["gl"], serde_json::json!(1));
+    assert_eq!(
+        value["style"],
+        serde_json::to_value(Style::default()).unwrap()
+    );
+
+    let restored: RenderState = serde_json::from_value(value).expect("render state deserializes");
+    assert_eq!(restored, render);
+}
+
+#[test]
+fn an_unknown_charset_name_fails_to_deserialize() {
+    let error = serde_json::from_value::<Charset>(serde_json::json!("Latin1")).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "unknown variant `Latin1`, expected one of `Ascii`, `DecLineDrawing`, `Uk`"
+    );
+}

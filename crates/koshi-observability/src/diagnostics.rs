@@ -2,12 +2,8 @@
 //!
 //! These builders turn an internal failure into a [`miette::Diagnostic`] that
 //! tells the user what failed, where, and how to fix it. Each carries a stable
-//! `code`, a one-line message, and a `help` suggestion. The binary enables
-//! miette's `fancy` feature to render them; libraries only construct them.
-
-// miette-derive's generated impls re-bind each message field, tripping
-// `unused_assignments` in code we don't own; silence it for this module only.
-#![allow(unused_assignments)]
+//! `code`, a one-line message, and a `help` suggestion. This module only
+//! constructs them.
 
 use miette::Diagnostic;
 use thiserror::Error;

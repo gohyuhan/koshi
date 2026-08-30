@@ -4,14 +4,18 @@ use std::sync::Arc;
 
 use crate::grid::state::Grid;
 use crate::state::{
-    Cursor, RenderState, Screen, ShellIntegrationState, TerminalModes, TerminalState,
+    default_tab_stops, Cursor, RenderState, Screen, ShellIntegrationState, TerminalModes,
+    TerminalState,
 };
 use crate::style::Style;
 
-use super::super::default_tab_stops;
-
 impl TerminalState {
-    /// Reset the active screen's DEC state while keeping its cells and cursor position.
+    /// DECSTR (`CSI ! p`). On the active screen: shows the cursor, clears the
+    /// deferred-wrap latch, drops the saved cursor, resets the pen, charsets, and
+    /// GL slot, and clears the scroll region. Turns off application cursor keys
+    /// (`?1`) and autowrap (`?7`). Ends the in-progress grapheme cluster. Cells,
+    /// the cursor position, tab stops, the title, the reported cwd, scrollback,
+    /// and every other mode stay.
     pub(super) fn soft_reset(&mut self) {
         let cursor = self.active_cursor_mut();
         cursor.is_visible = true;
@@ -25,7 +29,13 @@ impl TerminalState {
         self.reset_cluster();
     }
 
-    /// Restore terminal display state and the current shell marker state to their initial values.
+    /// RIS (`ESC c`). Blanks both screens at their current size with the default
+    /// style, makes the primary screen active, clears scrollback, homes and
+    /// shows both cursors with no wrap latch and no saved cursor, resets both
+    /// render states, every mode, both scroll regions, the tab stops (every
+    /// eighth column), the title, and the OSC 133 shell state, and ends the
+    /// in-progress grapheme cluster. The reported cwd, queued device replies,
+    /// queued shell-integration facts, and the scrollback tallies stay.
     pub(super) fn hard_reset(&mut self) {
         let (rows, columns) = self.primary.dimensions();
         debug_assert_eq!(self.alternate.dimensions(), (rows, columns));

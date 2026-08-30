@@ -7,10 +7,11 @@
 //! one error the CLI reports. Those steps are here once.
 //!
 //! What differs between the two peers is only what they are called and which
-//! versions they speak, which is what [`PeerWords`](crate::talk::PeerWords) carries. The session's
-//! refusal reads `the session settled on protocol version 3, …` and the
-//! router's reads `the router settled on control-plane protocol version 3, …`
-//! — the same sentence, each in its own peer's terms.
+//! versions they speak, which is what [`PeerWords`](crate::talk::PeerWords)
+//! carries. A settled version of 4 is outside both ranges: the session refuses
+//! it with `the session settled on protocol version 4, …` and the router with
+//! `the router settled on control-plane protocol version 4, …` — the same
+//! sentence, each in its own peer's terms.
 //!
 //! What a request means, and what its answer is worth, stays with the caller.
 
@@ -24,9 +25,6 @@ use crate::error::CliError;
 
 /// What one peer is called, and which versions of its protocol this build
 /// speaks.
-///
-/// The two values a message needs, so a refusal from either peer reads in that
-/// peer's own terms.
 #[derive(Debug, Clone, Copy)]
 pub struct PeerWords {
     /// The far side, written as "the {peer}", e.g. `"session"`, `"router"`.
@@ -78,6 +76,8 @@ impl PeerWords {
 
     /// The answer inside a response. A result kind this build has no name for
     /// fails the verb with [`CliError::IpcUnavailable`].
+    ///
+    /// `response.request_id` is not read.
     pub fn take_result<R>(&self, response: Answer<MaybeKnown<R>>) -> Result<R, CliError> {
         match response.result {
             MaybeKnown::Known(result) => Ok(result),
@@ -85,13 +85,17 @@ impl PeerWords {
         }
     }
 
-    /// The peer answered with a result kind the request cannot produce.
+    /// The failure for a reply of a kind the request cannot produce, named by
+    /// `result`'s wire name.
     pub fn unexpected_reply<R: WireName>(&self, result: &R) -> CliError {
         self.unexpected_name(result.wire_name())
     }
 
-    /// The same failure, named by the reply's wire name alone — for a reply
-    /// this build has no variant for.
+    /// The same failure named by `name` alone, as the peer spelled it — for a
+    /// reply this build has no variant for.
+    ///
+    /// `SESSION` with `name` `"Rehomed"` gives [`CliError::IpcUnavailable`]
+    /// carrying `the session answered with an unexpected Rehomed reply`.
     pub fn unexpected_name(&self, name: &str) -> CliError {
         CliError::IpcUnavailable {
             detail: format!("the {} answered with an unexpected {name} reply", self.peer),
@@ -99,10 +103,10 @@ impl PeerWords {
     }
 }
 
-/// A transport failure mid-exchange: the peer was reachable but the
-/// conversation could not finish.
+/// A failure to talk to a peer, in the words the fault itself used:
+/// [`CliError::IpcUnavailable`] carrying `error.to_string()`.
 ///
-/// The same sentence for either peer: it names the fault, not who was on the
+/// The same sentence for either peer — it names the fault, not who was on the
 /// other end.
 pub fn talk_failed(error: IpcError) -> CliError {
     CliError::IpcUnavailable {
@@ -110,8 +114,9 @@ pub fn talk_failed(error: IpcError) -> CliError {
     }
 }
 
-/// The peer refused a request at the protocol level — a bad token, a version
-/// mismatch, or a request it could not read.
+/// A refusal the peer sent at the protocol level — a bad token, a version
+/// mismatch, or a request it could not read — as
+/// [`CliError::IpcUnavailable`] carrying `refusal.message` unchanged.
 pub fn refused(refusal: &IpcErrorPayload) -> CliError {
     CliError::IpcUnavailable {
         detail: refusal.message.clone(),
@@ -172,7 +177,8 @@ pub(crate) const TARGET_CLIENT_PROTOCOL: u32 = 3;
 /// # Errors
 /// [`CliError::IpcUnavailable`] when `least` is `Some(v)` and `settled` is
 /// below `v`. For `settled == 2` the sentence reads `this session speaks
-/// protocol 2; --client needs a session started by koshi 0.4.0 or later`.
+/// protocol 2; --client needs a session started by koshi 0.4.0 or later`. It
+/// names `--client` and koshi 0.4.0 whatever `least` holds.
 pub(crate) fn require_settled_version(settled: u32, least: Option<u32>) -> Result<(), CliError> {
     match least {
         Some(least) if settled < least => Err(CliError::IpcUnavailable {

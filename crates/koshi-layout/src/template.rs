@@ -1,18 +1,17 @@
 //! Layout templates: a pane arrangement described before any pane exists.
 //!
-//! A layout file describes tabs, splits, and the panes to spawn in them —
-//! but a [`crate::tree::LayoutNode`] leaf is a live [`PaneId`], and no panes
-//! exist while a file is being read. A template is the same tree with the
-//! ids abstracted away: interior nodes mirror [`SplitNode`] field for field
+//! A profile file describes tabs, splits, and the panes to spawn in them. A
+//! template is a [`crate::tree::LayoutNode`] tree with the pane ids
+//! abstracted away: interior nodes mirror [`SplitNode`] field for field
 //! (direction, ordered children, parallel weights, active member), and each
 //! leaf carries *what to put there* — a terminal command or a plugin name —
 //! instead of *which pane is there*.
 //!
-//! Instantiation closes the gap: create one pane per leaf, then call
-//! [`TemplateNode::to_layout_node`] with the new ids in layout order to get
-//! the live tree. Example: a template `horizontal(pane "nvim", pane)` plus
-//! ids `[7, 8]` yields `Split(Horizontal, [Pane(7), Pane(8)])`, the same tree a
-//! runtime split of pane 7 produces.
+//! To instantiate a template, create one pane per leaf, then call
+//! [`TemplateNode::to_layout_node`] with the new ids in layout order.
+//! Example: a template `horizontal(pane "nvim", pane)` plus ids `[7, 8]`
+//! yields `Split(Horizontal, [Pane(7), Pane(8)])`, the same tree a runtime
+//! split of pane 7 produces.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -32,7 +31,7 @@ mod tests;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProfileTemplate {
     /// The tabs in file order. Never empty: a profile without tabs is a
-    /// parse error, not a representable template.
+    /// parse error.
     pub tabs: Vec<TabTemplate>,
     /// Index into `tabs` of the tab selected when the profile opens.
     pub focused_tab: usize,
@@ -64,9 +63,10 @@ pub enum TemplateNode {
 }
 
 impl TemplateNode {
-    /// All leaves in layout order: depth-first, children in order — the
-    /// same order [`LayoutNode::leaf_panes`] yields for the instantiated
-    /// tree, so index `i` here matches pane id `i` there.
+    /// All leaves in layout order: depth-first, children in order. This is
+    /// the order [`LayoutNode::leaf_panes`] yields for the instantiated
+    /// tree: leaf `i` here is the slot `ids[i]` fills in
+    /// [`TemplateNode::to_layout_node`].
     #[must_use]
     pub fn leaves(&self) -> Vec<&LeafTemplate> {
         let mut leaves = Vec::new();
@@ -100,14 +100,15 @@ impl TemplateNode {
     }
 
     /// Index (in [`TemplateNode::leaves`] order) of the first leaf a user
-    /// actually sees: at a stacked node only the active member is visible,
-    /// so collapsed members are skipped; at a directional split the first
-    /// child wins. Example: `horizontal(stack(a, b expanded), c)` yields
-    /// `1` — leaf `b`, not the collapsed `a`. This is the leaf initial
-    /// focus falls on when a layout names none.
+    /// sees. At a stacked node the walk descends into the child at `active`,
+    /// skipping the leaves of the collapsed members before it; at a
+    /// directional split it descends into the first child. Example:
+    /// `horizontal(stack(a, b expanded), c)` yields `1` — leaf `b`, not the
+    /// collapsed `a`.
     ///
-    /// A split with no children (representable only in degraded trees that
-    /// never instantiate) yields `0`.
+    /// A split with no children, or a stacked split whose `active` is past
+    /// its last child, contributes `0`: the result is the number of leaves
+    /// before that subtree.
     #[must_use]
     pub fn first_visible_leaf(&self) -> usize {
         match self {
@@ -193,8 +194,8 @@ pub enum LeafTemplate {
 pub struct TerminalTemplate {
     /// The command to run. `None` runs the user's default shell.
     pub command: Option<CommandTemplate>,
-    /// Working directory, verbatim from the file; expansion (`~`) and
-    /// resolution happen at spawn time, not here.
+    /// Working directory as written in the file: no `~` expansion and no
+    /// path resolution.
     pub cwd: Option<PathBuf>,
     /// Extra environment variables set for the spawned process.
     pub env: BTreeMap<String, String>,

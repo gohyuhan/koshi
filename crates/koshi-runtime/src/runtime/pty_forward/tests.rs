@@ -19,9 +19,8 @@ use super::*;
 
 const PANE_SIZE: PtySize = PtySize { cols: 80, rows: 24 };
 
-/// A generous deadline for a value that must arrive from the forwarder thread.
-/// It is a failure cutoff, not a synchronization delay — the value is expected
-/// well before it elapses.
+/// The cutoff for a value that must arrive from the forwarder thread. A test
+/// fails once it elapses.
 const DEADLINE: Duration = Duration::from_secs(5);
 
 /// Receive one inbox event within the deadline and assert it is exactly
@@ -76,9 +75,61 @@ fn parking_a_pane_records_its_handle_size_and_a_terminal_engine() {
 
     rt.park_pane_pty(pane, handle, PANE_SIZE);
 
-    assert!(rt.pty_handles.contains_key(&pane));
+    assert_eq!(rt.pty_handles[&pane].pane_id(), pane);
     assert_eq!(rt.pty_sizes.get(&pane), Some(&PANE_SIZE));
-    assert!(rt.terminal_engines.contains_key(&pane));
+    assert_eq!(
+        rt.terminal_engines[&pane]
+            .state()
+            .active_grid()
+            .dimensions(),
+        (PANE_SIZE.rows, PANE_SIZE.cols)
+    );
+}
+
+#[test]
+fn parking_records_the_size_it_is_given_not_the_spawn_size() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let pane = PaneId::new();
+    let handle = spawn_handle(&fake, pane);
+    let parked = PtySize {
+        cols: 100,
+        rows: 40,
+    };
+
+    rt.park_pane_pty(pane, handle, parked);
+
+    assert_eq!(rt.pty_sizes.get(&pane), Some(&parked));
+    assert_eq!(
+        rt.terminal_engines[&pane]
+            .state()
+            .active_grid()
+            .dimensions(),
+        (parked.rows, parked.cols)
+    );
+}
+
+#[test]
+fn parking_the_same_pane_again_replaces_its_size_and_engine() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let pane = PaneId::new();
+    let handle = spawn_handle(&fake, pane);
+    rt.park_pane_pty(pane, handle, PANE_SIZE);
+
+    let bigger = PtySize {
+        cols: 120,
+        rows: 50,
+    };
+    rt.park_pane_pty(pane, PtyHandle::detached(pane), bigger);
+
+    assert_eq!(rt.pty_handles.len(), 1);
+    assert_eq!(rt.pty_sizes.get(&pane), Some(&bigger));
+    assert_eq!(
+        rt.terminal_engines[&pane]
+            .state()
+            .active_grid()
+            .dimensions(),
+        (bigger.rows, bigger.cols)
+    );
 }
 
 #[test]
@@ -188,14 +239,34 @@ fn parking_a_drained_handle_records_the_pane_but_spawns_no_forwarder() {
 
     rt.park_pane_pty(pane, handle, PANE_SIZE);
 
-    assert!(rt.pty_handles.contains_key(&pane));
+    assert_eq!(rt.pty_handles[&pane].pane_id(), pane);
     assert_eq!(rt.pty_sizes.get(&pane), Some(&PANE_SIZE));
-    assert!(rt.terminal_engines.contains_key(&pane));
+    assert_eq!(
+        rt.terminal_engines[&pane]
+            .state()
+            .active_grid()
+            .dimensions(),
+        (PANE_SIZE.rows, PANE_SIZE.cols)
+    );
 
     // With no forwarder consuming the backend's output, nothing reaches the
     // inbox.
     fake.push_output(pane, b"ignored".to_vec()).expect("push");
-    assert!(matches!(rt.inbox_rx().try_recv(), Err(TryRecvError::Empty)));
+    assert_eq!(rt.inbox_rx().try_recv().unwrap_err(), TryRecvError::Empty);
+}
+
+#[test]
+fn parking_a_detached_handle_records_the_pane_and_spawns_no_forwarder() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let pane = PaneId::new();
+    let _spawned = spawn_handle(&fake, pane);
+
+    rt.park_pane_pty(pane, PtyHandle::detached(pane), PANE_SIZE);
+
+    assert_eq!(rt.pty_handles[&pane].pane_id(), pane);
+    assert_eq!(rt.pty_sizes.get(&pane), Some(&PANE_SIZE));
+    fake.push_output(pane, b"ignored".to_vec()).expect("push");
+    assert_eq!(rt.inbox_rx().try_recv().unwrap_err(), TryRecvError::Empty);
 }
 
 #[test]
@@ -209,6 +280,17 @@ fn a_sink_queues_child_output_on_the_inbox_as_it_arrives() {
 
     expect_pty_output(&rx, pane, b"first");
     expect_pty_output(&rx, pane, b"second");
+}
+
+#[test]
+fn a_sink_queues_an_empty_chunk_unchanged() {
+    let (tx, rx) = mpsc::channel::<RuntimeEvent>();
+    let sink = InboxSink::new(tx);
+    let pane = PaneId::new();
+
+    assert!(sink.output(pane, Vec::new()));
+
+    expect_pty_output(&rx, pane, b"");
 }
 
 #[test]
@@ -251,15 +333,13 @@ fn a_sink_stamps_the_childs_exit_and_queues_it() {
 #[test]
 fn a_sink_reports_a_closed_inbox_so_the_reader_can_stop() {
     // The reader thread stops reading a pane the moment `output` answers
-    // `false`, so a runtime that has gone away must produce exactly that —
-    // otherwise a child outliving the runtime keeps its reader thread alive.
+    // `false`. A runtime that has gone away answers exactly that.
     let (tx, rx) = mpsc::channel::<RuntimeEvent>();
     let sink = InboxSink::new(tx);
     let pane = PaneId::new();
     drop(rx);
 
     assert!(!sink.output(pane, b"nobody home".to_vec()));
-    // The exit half has no way to report the same, so it must simply not
-    // panic: it runs on the teardown path of every pane.
+    // The exit half has no way to report a closed inbox. It does not panic.
     sink.exit(pane, ExitStatus::ExitCode(0));
 }

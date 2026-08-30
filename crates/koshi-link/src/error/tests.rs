@@ -176,9 +176,6 @@ fn category_classifies_by_variant() {
 
 #[test]
 fn severity_is_recoverable_for_every_variant() {
-    // `severity` is an unconditional constant today; assert it per variant so
-    // a future per-variant split (e.g. a fatal class) fails this test instead
-    // of shipping silently.
     assert_eq!(
         CliError::UnknownCommand { name: "x".into() }.severity(),
         Severity::Recoverable
@@ -324,8 +321,8 @@ fn the_key_keymap_no_sessions_and_update_messages_are_exact() {
 
 #[test]
 fn messages_render_an_empty_or_unicode_field_verbatim() {
-    // Boundary (empty string) and encoding (multi-byte) cases: the message
-    // formats the field exactly as given, with no escaping or substitution.
+    // The message formats the field exactly as given, with no escaping and no
+    // substitution.
     assert_eq!(
         CliError::UnknownCommand {
             name: String::new()
@@ -339,5 +336,178 @@ fn messages_render_an_empty_or_unicode_field_verbatim() {
         }
         .to_string(),
         "unknown action: 日本語"
+    );
+}
+
+#[test]
+fn a_missing_session_and_a_rejected_command_are_session_domain() {
+    assert_eq!(
+        CliError::SessionNotFound {
+            session: "session-x".into()
+        }
+        .category(),
+        DomainCategory::Session
+    );
+    assert_eq!(
+        CliError::CommandRejected {
+            reason: RejectReason::Unauthorized,
+            help: None
+        }
+        .category(),
+        DomainCategory::Session
+    );
+}
+
+#[test]
+fn severity_is_recoverable_for_the_key_session_and_update_variants() {
+    assert_eq!(
+        CliError::UnboundKey {
+            sequence: "<C-t> g".into()
+        }
+        .severity(),
+        Severity::Recoverable
+    );
+    assert_eq!(
+        CliError::InvalidKeymapFile {
+            path: "keybinding.kdl".into()
+        }
+        .severity(),
+        Severity::Recoverable
+    );
+    assert_eq!(
+        CliError::SessionNotFound {
+            session: "session-x".into()
+        }
+        .severity(),
+        Severity::Recoverable
+    );
+    assert_eq!(CliError::NoSessions.severity(), Severity::Recoverable);
+    assert_eq!(
+        CliError::CommandRejected {
+            reason: RejectReason::MinSize,
+            help: None
+        }
+        .severity(),
+        Severity::Recoverable
+    );
+    assert_eq!(
+        CliError::Update { detail: "x".into() }.severity(),
+        Severity::Recoverable
+    );
+}
+
+#[test]
+fn a_broken_in_session_environment_renders_its_detail() {
+    assert_eq!(
+        CliError::InSessionEnv {
+            detail: "`KOSHI` is set but `KOSHI_SESSION_ID` is missing".into()
+        }
+        .to_string(),
+        "broken in-session environment: `KOSHI` is set but `KOSHI_SESSION_ID` is missing"
+    );
+    assert_eq!(
+        CliExitCode::from(&CliError::InSessionEnv { detail: "x".into() }).code(),
+        2
+    );
+}
+
+#[test]
+fn every_rejection_reason_renders_its_own_sentence() {
+    for (reason, sentence) in [
+        (RejectReason::TargetGone, "target no longer exists"),
+        (
+            RejectReason::TargetAmbiguous,
+            "target matched more than one; specify an explicit id",
+        ),
+        (RejectReason::TargetNotFound, "no target matched"),
+        (
+            RejectReason::SourceClientStale,
+            "source client has detached",
+        ),
+        (RejectReason::Unauthorized, "command not permitted"),
+        (RejectReason::InvalidState, "invalid in the current state"),
+        (RejectReason::MinSize, "below minimum size"),
+    ] {
+        assert_eq!(
+            CliError::CommandRejected { reason, help: None }.to_string(),
+            sentence
+        );
+    }
+}
+
+#[test]
+fn an_empty_help_hint_still_renders_its_own_line() {
+    assert_eq!(
+        CliError::CommandRejected {
+            reason: RejectReason::Unauthorized,
+            help: Some(String::new()),
+        }
+        .to_string(),
+        "command not permitted\n  "
+    );
+}
+
+#[test]
+fn every_error_class_exits_with_its_documented_number() {
+    for (error, code) in [
+        (CliError::UnknownCommand { name: "x".into() }, 2),
+        (CliError::UnknownAction { name: "x".into() }, 2),
+        (CliError::InvalidArgs { detail: "x".into() }, 2),
+        (
+            CliError::UnboundKey {
+                sequence: "<C-t> g".into(),
+            },
+            2,
+        ),
+        (
+            CliError::InvalidKeymapFile {
+                path: "keybinding.kdl".into(),
+            },
+            2,
+        ),
+        (CliError::Config { detail: "x".into() }, 2),
+        (CliError::InSessionEnv { detail: "x".into() }, 2),
+        (CliError::IpcUnavailable { detail: "x".into() }, 4),
+        (
+            CliError::SessionNotFound {
+                session: "session-x".into(),
+            },
+            3,
+        ),
+        (CliError::NoSessions, 3),
+        (
+            CliError::CommandRejected {
+                reason: RejectReason::Unauthorized,
+                help: None,
+            },
+            1,
+        ),
+        (CliError::Runtime { detail: "x".into() }, 1),
+        (CliError::Update { detail: "x".into() }, 1),
+    ] {
+        assert_eq!(CliExitCode::from(&error).code(), code, "{error}");
+    }
+}
+
+#[test]
+fn a_runtime_error_with_an_empty_detail_renders_an_empty_message() {
+    assert_eq!(
+        CliError::Runtime {
+            detail: String::new()
+        }
+        .to_string(),
+        ""
+    );
+}
+
+#[test]
+fn a_help_hint_of_several_lines_indents_only_its_first_line() {
+    assert_eq!(
+        CliError::CommandRejected {
+            reason: RejectReason::TargetNotFound,
+            help: Some("no running session has tab tab-1\ncheck `koshi list`".into()),
+        }
+        .to_string(),
+        "no target matched\n  no running session has tab tab-1\ncheck `koshi list`"
     );
 }

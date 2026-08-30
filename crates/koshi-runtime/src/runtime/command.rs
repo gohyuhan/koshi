@@ -73,7 +73,7 @@ use koshi_session::session::{
 
 /// The PTY size for a tab's sole root pane filling `viewport`: solve the
 /// single-pane layout, take the root's content rect, and clamp it to a PTY size.
-/// Shared by the new-tab path and genesis so both size the root pane identically.
+/// Shared by the new-tab path and genesis.
 ///
 /// A pane the solve gives no content rect falls back to the whole `viewport`
 /// rect.
@@ -94,7 +94,7 @@ pub(crate) fn size_root_pane(pane_id: PaneId, viewport: Size, sizing: PaneSizing
 /// order. A multi-pane tab's panes each spawn at their tiled slice this way,
 /// not the whole tab. A pane the solve suppressed for lack of space has no
 /// content rect and falls back to the full tab rect — the same floor
-/// [`size_root_pane`] uses — so its child still starts at a usable size.
+/// [`size_root_pane`] uses.
 pub(crate) fn pane_spawn_sizes(
     layout: &LayoutNode,
     viewport: Size,
@@ -236,8 +236,8 @@ impl Server {
     /// validated first (target resolution, source policy); a command that
     /// passes validation but has no handler yet is rejected with
     /// [`RejectReason::InvalidState`]. A command that reaches its handler
-    /// schedules a repaint, so a mutation shows regardless of which entry
-    /// point — key binding, IPC, or plugin — delivered it.
+    /// schedules a repaint, whichever entry point — key binding, IPC, or
+    /// plugin — delivered it.
     pub(crate) fn dispatch(&mut self, envelope: CommandEnvelope) -> CommandResult {
         self.dispatch_reporting_spare(envelope).0
     }
@@ -365,8 +365,7 @@ impl Server {
     /// Every rejection a handler or validation produces is built here, and
     /// logged here at `warn`: the command did not apply, state is untouched,
     /// and the session carries on. A border move refused at a pane minimum —
-    /// the rejection carrying `spare` — is not logged, since a border stopping
-    /// at the neighbor's floor is the layout working as specified.
+    /// the rejection carrying `spare` — is not logged.
     fn rejected(command_id: CommandId, rejection: Rejection) -> CommandResult {
         if rejection.spare.is_none() {
             tracing::warn!(
@@ -417,8 +416,8 @@ impl Server {
 
     /// Add koshi's configured terminal identity — `TERM` and `COLORTERM` from
     /// the `terminal` config section — to a spawned child's environment overlay,
-    /// filling each only when the pane's own env has not already set it, so an
-    /// explicit per-pane value (a profile pane's `env`) still wins.
+    /// filling each only when the pane's own env has not already set it: an
+    /// explicit per-pane value (a profile pane's `env`) is kept.
     pub(crate) fn terminal_identity_env(
         &self,
         mut env: BTreeMap<String, String>,
@@ -449,9 +448,9 @@ impl Server {
     /// Map [`Command::RunCommandPane`] onto the [`NewPaneArgs`] that realize it:
     /// its command is required (never the default shell), and its source
     /// pane, placement — split direction or stacking — and working directory
-    /// carry through to the new-pane transaction. Shared by
-    /// [`Self::dispatch`] and [`Self::resolve_target`] so the validate
-    /// pre-check and the handler resolve the same anchor pane.
+    /// carry through to the new-pane transaction. [`Self::dispatch`] and
+    /// [`Self::resolve_target`] both call it, so the validate pre-check and
+    /// the handler read the same anchor pane.
     fn run_command_new_pane_args(args: &RunCommandPaneArgs) -> NewPaneArgs {
         NewPaneArgs {
             source: args.source,
@@ -469,7 +468,7 @@ impl Server {
     /// for the child process, then the directory the pane was spawned in.
     /// `None` when nothing knows — a spawn using this then inherits koshi's
     /// own directory. Every answer is already at hand or one non-blocking
-    /// OS call, so asking never delays the spawn.
+    /// OS call.
     pub(super) fn pane_live_cwd(&self, session_id: SessionId, pane: PaneId) -> Option<PathBuf> {
         if let Some(reported) = self
             .terminal_engines
@@ -722,25 +721,25 @@ impl Server {
         // Merge by pane id: a pane's smallest rect across the viewers that draw
         // it. The merge keys on the id alone, so it holds however each solve
         // orders its panes.
-        let mut smallest: HashMap<PaneId, Option<Rect>> = HashMap::new();
+        let mut smallest: HashMap<PaneId, Option<Rect>> = HashMap::with_capacity(first.len());
         for viewer in &per_viewer {
             for &(pane_id, content) in viewer {
+                let entry = smallest.entry(pane_id).or_insert(None);
                 let Some(rect) = content else {
-                    // This viewer draws no content for the pane, so it asks
+                    // This viewer draws no content for the pane, and asks
                     // nothing of its size.
-                    smallest.entry(pane_id).or_insert(None);
                     continue;
                 };
-                let entry = smallest.entry(pane_id).or_insert(Some(rect));
-                *entry = Some(match *entry {
-                    Some(current) => Rect::new(current.origin, current.size.min_axes(rect.size)),
-                    None => rect,
-                });
+                *entry = match *entry {
+                    Some(current) => {
+                        Some(Rect::new(current.origin, current.size.min_axes(rect.size)))
+                    }
+                    None => Some(rect),
+                };
             }
         }
 
-        // Emit in the first viewer's solve order, so the result keeps the stable
-        // pane order every consumer of this function already sees.
+        // Emit in the first viewer's solve order.
         first
             .iter()
             .map(|&(pane_id, _)| (pane_id, smallest.get(&pane_id).copied().flatten()))
@@ -796,12 +795,13 @@ impl Server {
     /// batch through the shared [`resize_for_layout_change`] executor and pushing
     /// one [`Event::PtyResized`] per pane it resized.
     ///
-    /// A pane is passed to the executor only when it has a live handle, is not
-    /// `skip` (the freshly-spawned pane is sized separately), and its new
-    /// [`compute_pty_size`] differs from `pty_sizes` — so an unchanged pane is
-    /// left alone. The executor is stateless; this owns the last-set-size cache
-    /// and the terminal-engine map, updating the cache and resizing the pane's
-    /// engine grid for every pane it resizes, so engine and PTY agree on size.
+    /// A pane is passed to the executor only when it has a content rect, has a
+    /// live handle, is not `skip` (the freshly-spawned pane is sized
+    /// separately), and its new [`compute_pty_size`] differs from `pty_sizes`.
+    /// A pane with no content rect, and a pane whose size is unchanged, is left
+    /// alone. The executor is stateless; this owns the last-set-size cache
+    /// and the terminal-engine map, and for every pane it resizes it updates
+    /// the cache and resizes that pane's engine grid to the same size.
     fn reflow_changed(
         &mut self,
         backend: &dyn PtyBackend,
@@ -811,13 +811,13 @@ impl Server {
     ) {
         let items: Vec<(PaneId, Option<Rect>)> = rects
             .into_iter()
-            .filter(|(pane_id, content)| {
-                Some(*pane_id) != skip
-                    && self.pty_handles.contains_key(pane_id)
-                    && match content {
-                        Some(rect) => self.pty_sizes.get(pane_id) != Some(&compute_pty_size(*rect)),
-                        None => false,
-                    }
+            .filter(|&(pane_id, content)| {
+                let Some(rect) = content else {
+                    return false;
+                };
+                Some(pane_id) != skip
+                    && self.pty_handles.contains_key(&pane_id)
+                    && self.pty_sizes.get(&pane_id) != Some(&compute_pty_size(rect))
             })
             .collect();
         for result in resize_for_layout_change(backend, items) {
@@ -835,10 +835,10 @@ impl Server {
     }
 }
 
-/// Whether an OSC 7 report's host names this machine: an empty authority,
-/// `localhost`, a loopback address, or the machine's own hostname. A report
-/// from any other host came from a shell running elsewhere (over SSH), and
-/// its directory does not exist here.
+/// Whether an OSC 7 report's host names this machine: no authority (`None`,
+/// which `file:///path` gives), `localhost` in any case, `127.0.0.1`, `::1`,
+/// `[::1]`, or the machine's own hostname in any case. Every other host is
+/// `false`.
 fn is_local_host(host: Option<&str>) -> bool {
     let Some(host) = host else {
         return true;

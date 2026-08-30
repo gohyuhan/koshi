@@ -1,13 +1,14 @@
 //! Genesis: seed the first session, tab, root pane, and client in code.
 //!
-//! The command layer can't bootstrap from nothing — `NewTab`/`NewPane` reject
-//! unless a client is already attached, and a client can't be built without a
-//! tab id. So the single-process local start assembles the first session with
-//! one tab holding one shell pane, viewed by one client, directly through the
+//! The single-process local start assembles the first session with one tab
+//! holding one shell pane, viewed by one client, directly through the
 //! session-layer ops, then hands the pane's PTY to a forwarder like any other.
 //!
 //! The per-session server process seeds the same session and tab with no
 //! client at all; the first attach adds one.
+//!
+//! A `--profile` start seeds one session holding every tab the profile file
+//! defines, each with its own tree of panes.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -153,6 +154,12 @@ impl Server {
     /// commits nothing and kills whatever it already spawned — the caller then
     /// falls back to a plain single-pane start. A profile that asks for a plugin
     /// pane cannot launch: there is no plugin host to fill it yet.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `template` holds no tab, or when one of its tabs holds no
+    /// leaf. [`parse_profile`](koshi_config::profile::parse_profile) rejects
+    /// both.
     pub fn bootstrap_profile(
         &mut self,
         session_id: SessionId,
@@ -169,6 +176,12 @@ impl Server {
     /// [`bootstrap_profile`](Self::bootstrap_profile) under a caller-chosen
     /// display name, for a session server whose name was picked by the router
     /// that started it.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `template` holds no tab, or when one of its tabs holds no
+    /// leaf. [`parse_profile`](koshi_config::profile::parse_profile) rejects
+    /// both.
     pub fn bootstrap_profile_named(
         &mut self,
         session_id: SessionId,
@@ -285,8 +298,9 @@ impl Server {
             self.park_pane_pty(pane_id, handle, size);
         }
 
-        // Size the focused tab's panes to their solved rects; other tabs reflow
-        // the first time they are viewed.
+        // Resize the focused tab's panes to the rects a client viewing it
+        // solves; a tab no client views keeps the sizes its panes spawned at.
+        // The resize events are dropped.
         let mut events = Vec::new();
         self.reflow_tab_if_viewed(backend.as_ref(), session_id, focused_tab_id, &mut events);
         self.render_scheduler
@@ -298,8 +312,8 @@ impl Server {
 
 /// Attach `client_id` to a freshly seeded `session` as its only client,
 /// viewing `tab_id`, sized to `viewport`, stamped `now`, with a generated
-/// client label and origin [`ClientOrigin::Local`]. A `None` `client_id`
-/// attaches nobody and leaves `session` untouched.
+/// client label, colour `0`, and origin [`ClientOrigin::Local`]. A `None`
+/// `client_id` attaches nobody and leaves `session` untouched.
 ///
 /// The client is recorded with no pane area report; its pane area resolves to
 /// the viewport minus two rows.

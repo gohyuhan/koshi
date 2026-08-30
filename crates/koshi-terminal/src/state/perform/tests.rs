@@ -1,6 +1,8 @@
-//! Unit tests for the VTE performer: printing, display width (wide glyphs,
-//! combining marks, ambiguous width), deferred wrap, scrolling, and the C0
-//! control bytes.
+//! Unit tests for the VTE performer: printing and display width (wide glyphs,
+//! grapheme clusters, ambiguous width), the deferred wrap, C0/C1 control bytes,
+//! CSI cursor / erase / line / cell sequences, SGR, the alternate screen and
+//! DEC private modes, OSC title / cwd / shell markers, charset designation,
+//! DECSCUSR, the soft and hard resets, and malformed or hostile input.
 
 use super::glyph::MAX_GRAPHEME_CONTINUATIONS;
 use super::*;
@@ -104,10 +106,16 @@ fn newline_moves_down_and_leaves_the_column() {
 #[test]
 fn vertical_tab_and_form_feed_behave_like_newline() {
     for byte in [0x0Bu8, 0x0C] {
-        let mut state = state(5, 3);
+        let mut state = state(2, 3);
+        print_str(&mut state, "ab"); // parks at (0, 1) with the wrap latch armed
         state.execute(byte);
         let cur = state.active_cursor();
-        assert_eq!(cur.row, 1, "byte {byte:#x} should line-feed");
+        assert_eq!(
+            (cur.row, cur.col),
+            (1, 1),
+            "byte {byte:#x} should line-feed"
+        );
+        assert!(!cur.pending_wrap, "byte {byte:#x} should clear the latch");
     }
 }
 
@@ -203,8 +211,7 @@ fn a_cursor_move_clears_the_pending_wrap_latch() {
 #[test]
 fn driven_through_the_parser_plain_text_lands_in_the_grid() {
     let mut state = state(10, 2);
-    let mut parser = vte::Parser::new();
-    parser.advance(&mut state, b"h\xc3\xa9llo"); // "héllo" — é is multi-byte UTF-8
+    advance(&mut state, b"h\xc3\xa9llo"); // "héllo" — é is multi-byte UTF-8
     assert_eq!(glyph(&state, 0, 0), Some('h'));
     assert_eq!(glyph(&state, 0, 1), Some('é'));
     assert_eq!(glyph(&state, 0, 2), Some('l'));
@@ -215,8 +222,7 @@ fn driven_through_the_parser_plain_text_lands_in_the_grid() {
 #[test]
 fn driven_through_the_parser_newline_and_carriage_return() {
     let mut state = state(10, 3);
-    let mut parser = vte::Parser::new();
-    parser.advance(&mut state, b"ab\r\ncd");
+    advance(&mut state, b"ab\r\ncd");
     assert_eq!(glyph(&state, 0, 0), Some('a'));
     assert_eq!(glyph(&state, 0, 1), Some('b'));
     assert_eq!(glyph(&state, 1, 0), Some('c'));
@@ -225,8 +231,7 @@ fn driven_through_the_parser_newline_and_carriage_return() {
     assert_eq!((cur.row, cur.col), (1, 2));
 }
 
-// --- CSI cursor + erase (driven through the parser, the only way to build
-// `vte::Params`) ---
+// --- CSI cursor + erase (driven through the parser) ---
 
 /// Feed `bytes` through a fresh parser into `state`.
 fn advance(state: &mut TerminalState, bytes: &[u8]) {
@@ -358,11 +363,9 @@ fn el_0_erases_from_the_cursor_to_the_end_of_the_line() {
 
 #[test]
 fn el_0_erases_the_parked_last_column_glyph_and_clears_the_wrap_latch() {
-    // The cursor is a concrete grid column: filling the last column parks the
-    // cursor there with a wrap pending. EL 0 (cursor-to-end) erases from that
-    // concrete column — clearing the parked glyph — and clears the wrap latch,
-    // since the cell that armed the wrap is gone. The next print overwrites
-    // at the last column.
+    // Filling the last column parks the cursor there with a wrap pending. EL 0
+    // (cursor-to-end) erases from that column — the parked glyph included — and
+    // clears the wrap latch. The next print overwrites at the last column.
     let mut state = state(5, 2);
     print_str(&mut state, "abcde"); // 'e' lands at col 4 with the wrap pending
     assert!(state.active_cursor().pending_wrap);
@@ -376,8 +379,8 @@ fn el_0_erases_the_parked_last_column_glyph_and_clears_the_wrap_latch() {
 
 #[test]
 fn el_0_erases_the_last_column_when_autowrap_is_off() {
-    // With autowrap off, the cursor sits concretely on the last column. EL 0
-    // erases from that column (including it), since the cursor occupies that cell.
+    // With autowrap off, the cursor sits on the last column. EL 0 erases from
+    // that column, the cursor's own cell included.
     let mut state = state(5, 2);
     advance(&mut state, b"\x1b[?7l"); // autowrap off
     print_str(&mut state, "abcde"); // fills the row; cursor parked on col 4
@@ -477,7 +480,7 @@ fn ed_3_leaves_the_visible_screen_untouched() {
 #[test]
 fn ed_3_clears_the_retained_scrollback() {
     let mut state = state(3, 2); // two rows
-    state.active_cursor_mut().row = 1; // sit at the bottom so line feeds scroll
+    state.active_cursor_mut().row = 1; // bottom row: each line feed scrolls
     state.linefeed();
     state.linefeed();
     assert_eq!(state.scrollback().len(), 2); // history populated
@@ -488,8 +491,8 @@ fn ed_3_clears_the_retained_scrollback() {
 
 #[test]
 fn ed_3_on_the_alternate_screen_leaves_primary_scrollback_intact() {
-    // Scrollback is the primary screen's history; a full-screen app on the
-    // alternate screen must not erase it with CSI 3 J.
+    // Scrollback is the primary screen's history. ED 3 on the alternate screen
+    // leaves it intact.
     let mut state = state(3, 2);
     state.active_cursor_mut().row = 1; // bottom row, on the primary screen
     state.linefeed();
@@ -503,8 +506,7 @@ fn ed_3_on_the_alternate_screen_leaves_primary_scrollback_intact() {
 
 // --- SGR: set graphic rendition (pen colors + text attributes) ---
 
-/// The default pen with the setters in `f` applied — the expected pen for an
-/// SGR assertion, built the same way the performer mutates `self.style`.
+/// The default pen with the setters in `f` applied.
 fn styled(f: impl FnOnce(&mut Style)) -> Style {
     let mut style = Style::default();
     f(&mut style);
@@ -628,10 +630,8 @@ fn sgr_256_color_colon_form() {
 
 #[test]
 fn sgr_256_color_colon_form_with_empty_colorspace_id() {
-    // `38:5::196` — a stray empty colorspace slot before the index (stored by vte
-    // as a leading `0`). The index is read from the final subparameter, so the
-    // slot is skipped and the palette index is honored (symmetric with the RGB
-    // colon form above).
+    // `38:5::196` — an empty colorspace slot before the index (vte stores it as
+    // a `0`). The index is read from the final subparameter; the slot is skipped.
     let mut state = state(5, 2);
     advance(&mut state, b"\x1b[38:5::196m");
     assert_eq!(
@@ -793,7 +793,7 @@ fn sgr_new_attribute_off_codes_clear_each_attribute() {
 #[test]
 fn sgr_normal_intensity_clears_both_bold_and_faint() {
     let mut state = state(5, 2);
-    advance(&mut state, b"\x1b[1;2m"); // bold AND faint — orthogonal, both held
+    advance(&mut state, b"\x1b[1;2m"); // bold AND faint — both held
     assert_eq!(
         state.active_render().style,
         styled(|s| {
@@ -970,8 +970,8 @@ fn sgr_out_of_range_truecolor_drains_its_channels_not_leaking_to_later_codes() {
     advance(&mut state, b"\x1b[38;2;999;31;32m");
     assert_eq!(state.active_render().style, Style::default()); // no leak
 
-    // Exactly three channels (999, 1, 2) are drained, then a genuine trailing
-    // `1` is applied as SGR bold — proving we consume three and no more.
+    // Exactly three channels (999, 1, 2) are drained, then the trailing `1` is
+    // applied as SGR bold.
     advance(&mut state, b"\x1b[38;2;999;1;2;1m");
     assert_eq!(state.active_render().style, styled(|s| s.set_bold(true)));
 }
@@ -991,7 +991,7 @@ fn sgr_preserves_the_pending_wrap_latch() {
     print_str(&mut state, "ab"); // parked on the last column
     assert!(state.active_cursor().pending_wrap);
     advance(&mut state, b"\x1b[1m"); // SGR is not a cursor move
-    assert!(state.active_cursor().pending_wrap); // latch survives, unlike a cursor move
+    assert!(state.active_cursor().pending_wrap); // latch survives
 }
 
 // --- BCE: erase / scroll fill with the current background (not default) ---
@@ -1175,12 +1175,9 @@ fn decstbm_with_an_invalid_range_is_ignored() {
 
 #[test]
 fn decstbm_top_equal_bottom_is_ignored() {
-    // A degenerate single-row request (`top == bottom`) is adjacent to, but
-    // distinct from, the already-covered `top > bottom` case: the region
-    // setter requires a strict `top < bottom`, so this boundary must be
-    // rejected too, and — since the whole `if top < bottom` block (region
-    // update AND cursor home) is skipped — the cursor must be left exactly
-    // where it was, not homed.
+    // A single-row request (`top == bottom`) is rejected: the region needs a
+    // strict `top < bottom`. The region stays as it was and the cursor is not
+    // homed.
     let mut state = state(5, 5);
     advance(&mut state, b"\x1b[2;4r"); // valid region (1, 3)
     advance(&mut state, b"\x1b[3;3H"); // move the cursor away from home
@@ -1576,7 +1573,7 @@ fn osc_7_preserves_the_host_component() {
     advance(&mut state, b"\x1b]7;file://myhost/home/u\x07");
     let cwd = state.current_cwd().expect("cwd set");
     assert_eq!(cwd.path(), Path::new("/home/u"));
-    assert_eq!(cwd.host(), Some("myhost")); // host kept for the spawn-layer check
+    assert_eq!(cwd.host(), Some("myhost")); // host kept
 }
 
 #[test]
@@ -1650,7 +1647,7 @@ fn osc_7_ignores_a_uri_with_no_path() {
 
 #[test]
 fn osc_7_ignores_an_empty_payload() {
-    // `ESC ] 7 ST` → params = ["7"], so the `params.len() > 1` guard skips it.
+    // `ESC ] 7 ST` → params = ["7"]: no payload, nothing is parsed.
     let mut state = state(5, 3);
     advance(&mut state, b"\x1b]7\x07");
     assert!(state.current_cwd().is_none());
@@ -1696,8 +1693,8 @@ fn osc_7_a_later_valid_report_updates_the_cwd() {
 
 #[test]
 fn osc_7_rejects_a_path_with_a_nul_byte() {
-    // `%00` decodes to a NUL, which cannot occur in a real path; the report is
-    // rejected and the previous good cwd is left intact.
+    // `%00` decodes to a NUL: the report is rejected and the previous good cwd
+    // is left intact.
     let mut state = state(5, 3);
     advance(&mut state, b"\x1b]7;file:///good\x07");
     advance(&mut state, b"\x1b]7;file:///a%00b\x07");
@@ -1709,8 +1706,7 @@ fn osc_7_rejects_a_path_with_a_nul_byte() {
 
 #[test]
 fn osc_7_cwd_survives_a_screen_switch() {
-    // The reported cwd belongs to the shell, not a screen buffer, so entering
-    // the alternate screen must not clear it.
+    // Entering the alternate screen keeps the reported cwd.
     let mut state = state(5, 3);
     advance(&mut state, b"\x1b]7;file:///work\x07");
     advance(&mut state, b"\x1b[?1049h"); // enter the alternate screen
@@ -1729,8 +1725,8 @@ fn osc_7_reports_the_root_directory() {
 
 #[test]
 fn osc_7_decodes_an_encoded_slash_after_splitting_the_host() {
-    // The host/path split is on the first *raw* slash, so a `%2F` survives the
-    // split and only then decodes to `/` — yielding two path components.
+    // The host/path split is on the first raw slash. A `%2F` survives the split
+    // and decodes to `/` afterward, giving two path components.
     let mut state = state(5, 3);
     advance(&mut state, b"\x1b]7;file://host/a%2Fb\x07");
     let cwd = state.current_cwd().expect("cwd set");
@@ -1873,10 +1869,9 @@ fn dec_47_before_1049_in_one_decset_clears_the_stale_alternate() {
 
 #[test]
 fn dec_47_l_before_1049_l_leaves_the_alternate_uncleared() {
-    // `?47 l` switches to the primary first (without clearing); a following
-    // `?1049 l` then sees the primary as the live buffer, so its clear is a no-op
-    // (only the unconditional DECRC runs), matching alacritty's whichBuf guard.
-    // The alternate keeps its contents.
+    // `?47 l` switches to the primary first, without clearing. The following
+    // `?1049 l` runs on the primary: its clear is a no-op and only the DECRC
+    // runs. The alternate keeps its contents.
     let mut state = state(5, 3);
     advance(&mut state, b"\x1b[?1047h"); // enter the alternate
     advance(&mut state, b"xyz"); // alternate row 0 = "xyz"
@@ -1888,10 +1883,10 @@ fn dec_47_l_before_1049_l_leaves_the_alternate_uncleared() {
 
 #[test]
 fn dec_1049_l_then_1047_l_clears_the_alternate_only_once() {
-    // `?1049 l` clears the alternate (with the alternate's pen), switches to the
-    // primary, and restores the primary SGR. A trailing `?1047 l` is then on the
-    // primary, so its clear must be a no-op — re-clearing would blank with the
-    // primary's pen, leaving the wrong background for a later re-entry.
+    // `?1049 l` clears the alternate with the alternate's pen, switches to the
+    // primary, and restores the primary SGR. The trailing `?1047 l` runs on the
+    // primary and clears nothing: the alternate keeps the first clear's blue
+    // background.
     let mut state = state(5, 3);
     advance(&mut state, b"\x1b[?1049h"); // enter the alternate
     advance(&mut state, b"\x1b[44m"); // alternate pen bg = blue (Indexed 4)
@@ -1924,10 +1919,9 @@ fn dec_1049_then_47_in_one_decset_saves_the_primary_and_seeds_the_alternate_once
 
 #[test]
 fn verify_params_iter_yields_correct_param_groups() {
-    // Empirical verification of vte 0.15's Params::iter() behavior.
-    // Each item yielded is &[u16] — a slice containing the top-level param
-    // and any colon-separated subparams. For simple DEC modes (no subparams),
-    // it's a slice with one element.
+    // `vte::Params::iter()` yields one `&[u16]` per parameter: the top-level
+    // value followed by its colon-separated subparameters. A DEC mode with no
+    // subparameters is a one-element slice.
     use vte::{Parser, Perform};
 
     struct Inspector {
@@ -2084,10 +2078,11 @@ fn a_fresh_1049_entry_drops_a_stale_alternate_saved_cursor() {
     let mut state = state(10, 5);
     advance(&mut state, b"\x1b[?1049h"); // app A enters
     advance(&mut state, b"\x1b[3;3H\x1b7"); // app A: move to (2, 2), DECSC (stashes the alt cursor)
-    assert!(state.alternate_cursor.saved.is_some());
+    let stashed = state.alternate_cursor.saved.expect("alternate DECSC stash");
+    assert_eq!((stashed.row, stashed.col), (2, 2));
     advance(&mut state, b"\x1b[?47l"); // non-clearing exit (leaves the alt cursor + its stash)
     advance(&mut state, b"\x1b[?1049h"); // app B enters fresh
-    assert!(state.alternate_cursor.saved.is_none()); // app A's DECSC stash dropped
+    assert_eq!(state.alternate_cursor.saved, None); // app A's DECSC stash dropped
     advance(&mut state, b"\x1b[5;5H\x1b8"); // app B DECRC with no prior DECSC -> home, not (2, 2)
     let cur = state.active_cursor();
     assert_eq!((cur.row, cur.col), (0, 0));
@@ -2217,16 +2212,15 @@ fn cursor_visibility_is_independent_per_screen() {
     advance(&mut state, b"\x1b[?25l"); // hide the cursor on primary
     assert!(!state.cursor_visible());
     advance(&mut state, b"\x1b[?1049h"); // enter alternate
-    assert!(state.cursor_visible()); // alternate keeps its own (visible) state — per-screen, deliberate xterm deviation
+    assert!(state.cursor_visible()); // the alternate's own visibility: still shown
     advance(&mut state, b"\x1b[?1049l"); // back to primary
     assert!(!state.cursor_visible()); // primary still hidden
 }
 
 #[test]
 fn dec_47_round_trip_leaves_the_primary_cursor_untouched() {
-    // `?47`/`?1047` neither save nor restore the cursor, so the primary cursor
-    // returning to its pre-switch spot proves the live cursor is per-screen
-    // (a shared cursor would carry the alternate's motion back).
+    // `?47`/`?1047` neither save nor restore the cursor. Each screen has its own
+    // live cursor: the primary cursor is back at its pre-switch spot.
     let mut state = state(5, 5);
     advance(&mut state, b"\x1b[3;3H"); // primary cursor at (2, 2)
     advance(&mut state, b"\x1b[?47h"); // enter the alternate (no save, no seed)
@@ -2468,7 +2462,7 @@ fn a_wide_write_splitting_an_adjacent_wide_clears_its_far_half() {
     state.print('中'); // wide write over cols 0,1 — splits the old glyph
     assert_eq!(glyph(&state, 0, 0), Some('中'));
     assert_eq!(state.active_grid().cell(0, 1).map(Cell::width), Some(0)); // new continuation
-                                                                          // The old glyph's far continuation at col 2 is now orphaned → blanked.
+                                                                          // The old glyph's far continuation at col 2 is orphaned → blanked.
     let far = state.active_grid().cell(0, 2).expect("in bounds");
     assert_eq!(far.ch(), ' ');
     assert_eq!(far.width(), 1);
@@ -2513,8 +2507,7 @@ fn backspacing_over_a_wide_glyph_and_blanking_it_leaves_no_orphan_half() {
     assert_eq!(state.active_cursor().col, 0);
 
     // The two spaces a shell erases a wide glyph with. The first one lands on
-    // the base and takes the far half with it, so no continuation is left
-    // pointing at a base that is gone.
+    // the base and blanks the continuation with it.
     state.print(' ');
     let orphan = state.active_grid().cell(0, 1).expect("in bounds");
     assert_eq!(orphan.ch(), ' ');
@@ -2585,7 +2578,7 @@ fn ich_truncating_a_wide_continuation_off_the_edge_clears_the_orphan_base() {
     state.print('中'); // col 2 base, col 3 continuation
     advance(&mut state, b"\x1b[1;1H"); // home
     advance(&mut state, b"\x1b[@"); // insert pushes the pair right; continuation falls off
-                                    // base now at the last column with no continuation → blanked.
+                                    // the base sits at the last column with no continuation → blanked.
     assert_eq!(state.active_grid().cell(0, 3).map(Cell::width), Some(1));
     assert_eq!(glyph(&state, 0, 3), Some(' '));
 }
@@ -2639,7 +2632,7 @@ fn zwj_emoji_sequence_folds_into_one_wide_cell() {
     );
     assert_eq!(base.width(), 2);
     assert_eq!(state.active_grid().cell(0, 1).map(Cell::width), Some(0));
-    assert_eq!(state.active_cursor().col, 2); // one glyph, not three (would be 6)
+    assert_eq!(state.active_cursor().col, 2); // one wide glyph, not three
 }
 
 #[test]
@@ -2687,7 +2680,7 @@ fn a_control_byte_breaks_a_cluster_run() {
     let mut state = state(6, 2);
     state.print('\u{2764}'); // heart, width 1
     advance(&mut state, b"\n"); // LF ends the run
-    state.print('\u{FE0F}'); // VS16 now has no cluster to join → dropped
+    state.print('\u{FE0F}'); // VS16 has no cluster to join → dropped
     let heart = state.active_grid().cell(0, 0).expect("in bounds");
     assert_eq!(heart.ch(), '\u{2764}');
     assert_eq!(heart.width(), 1); // NOT promoted across the control byte
@@ -2732,7 +2725,7 @@ fn a_cursor_move_breaks_a_cluster_run() {
     let mut state = state(6, 2);
     state.print('\u{2764}'); // heart, width 1
     advance(&mut state, b"\x1b[1;1H"); // CUP — any CSI ends the run
-    state.print('\u{FE0F}'); // VS16 now has no cluster to join → dropped
+    state.print('\u{FE0F}'); // VS16 has no cluster to join → dropped
     let heart = state.active_grid().cell(0, 0).expect("in bounds");
     assert_eq!(heart.width(), 1); // not promoted across the cursor move
     assert!(heart.combining().is_empty());
@@ -2815,12 +2808,11 @@ fn an_sgr_preserved_cluster_does_not_fold_a_later_mark_onto_the_old_base() {
 
 #[test]
 fn an_overlong_ignored_sgr_shaped_csi_breaks_a_cluster_run() {
+    // A CSI with more parameters than vte keeps (32) is flagged `ignore` and
+    // dropped. It ends in `m` but is not an applied SGR: it breaks the cluster
+    // like every other non-printing CSI.
     let mut state = state(6, 2);
     state.print('e'); // base
-                      // A CSI with more parameters than vte keeps (MAX_PARAMS = 32) is flagged
-                      // `ignore` and dropped. It ends in `m` but is NOT a real applied SGR, so it
-                      // must break the cluster like any other non-printing CSI — the SGR-preserve
-                      // exception only applies to a well-formed (`!ignore`) style-only SGR.
     let mut seq = Vec::from(&b"\x1b["[..]);
     for _ in 0..40 {
         seq.extend_from_slice(b"0;"); // 40 params overflow vte's 32-param buffer
@@ -2843,8 +2835,8 @@ fn a_wrapped_vs16_promotion_clears_a_wide_glyph_it_lands_on() {
     state.print('\u{2764}'); // heart width 1 parks at (0, 3)
     assert!(state.active_cursor().pending_wrap);
     state.print('\u{FE0F}'); // VS16 promotes -> no room at the edge -> wrap the cluster to row 1
-                             // The promoted pair overwrites (1,0)+(1,1); 中's base at col 1 is gone,
-                             // so its old continuation at col 2 must be cleared, not left orphaned.
+                             // The promoted pair overwrites (1,0)+(1,1), taking 中's base at col 1;
+                             // 中's old continuation at col 2 is cleared with it.
     let base = state.active_grid().cell(1, 0).expect("in bounds");
     assert_eq!(base.ch(), '\u{2764}');
     assert_eq!(base.width(), 2);
@@ -2862,8 +2854,8 @@ fn an_in_place_vs16_promotion_clears_a_wide_glyph_it_claims() {
     advance(&mut state, b"\x1b[1;1H"); // home (0, 0)
     state.print('\u{2764}'); // heart width 1 at col 0; 中 left intact at 1-2
     state.print('\u{FE0F}'); // VS16 promotes the heart in place, claiming col 1
-                             // The promotion overwrites 中's base at col 1, so 中's
-                             // old continuation at col 2 must be cleared, not orphaned.
+                             // The promotion overwrites 中's base at col 1; 中's old
+                             // continuation at col 2 is cleared with it.
     let base = state.active_grid().cell(0, 0).expect("in bounds");
     assert_eq!(base.ch(), '\u{2764}');
     assert_eq!(base.width(), 2);
@@ -2885,7 +2877,7 @@ fn a_wide_glyph_in_a_one_column_pane_degrades_to_a_narrow_cell() {
 #[test]
 fn wide_glyphs_in_a_one_column_pane_do_not_scroll_thrash() {
     let mut state = state(1, 3); // 1 column, 3 rows
-    state.print('中'); // stored narrow at (0, 0), no wasteful wrap
+    state.print('中'); // stored narrow at (0, 0), no wrap
     state.print('文'); // advances one line; must not scroll the first glyph away
     assert_eq!(glyph(&state, 0, 0), Some('中')); // first glyph still on row 0
     assert_eq!(glyph(&state, 1, 0), Some('文'));
@@ -2897,9 +2889,9 @@ fn wide_glyphs_in_a_one_column_pane_do_not_scroll_thrash() {
 fn a_vs16_promotion_in_a_one_column_pane_never_orphans_a_wide_base() {
     let mut state = state(1, 3); // 1 column
     state.print('\u{2764}'); // heart width 1 at (0, 0)
-    state.print('\u{FE0F}'); // VS16 would promote to width 2 — but there is no room
-                             // No cell anywhere may be left a width-2 base: in a
-                             // 1-column pane it could never carry a continuation.
+    state.print('\u{FE0F}'); // VS16 asks for width 2; a 1-column pane has no room
+                             // No cell is left a width-2 base: a 1-column pane holds
+                             // no continuation.
     for row in 0..3 {
         assert_ne!(
             state.active_grid().cell(row, 0).map(Cell::width),
@@ -3003,7 +2995,7 @@ fn linefeed_pushes_the_top_primary_line_into_scrollback() {
 #[test]
 fn linefeed_on_the_alternate_screen_does_not_feed_scrollback() {
     let mut state = state(4, 2);
-    state.active = Screen::Alternate; // full-screen apps never pollute history
+    state.active = Screen::Alternate; // the alternate never feeds history
     state.linefeed(); // alt cursor 0 -> 1
     state.linefeed(); // at the bottom: the alternate scrolls, but feeds nothing
     assert!(state.scrollback().is_empty());
@@ -3039,10 +3031,8 @@ fn successive_bottom_linefeeds_accumulate_scrollback() {
 
 #[test]
 fn linefeed_on_a_full_height_single_row_screen_always_scrolls() {
-    // rows == 1: region_bounds() always resolves to (0, 0) -- a degenerate
-    // top == bottom, full-height region reachable purely by construction,
-    // with no DECSTBM needed. Every linefeed must scroll, never treat the
-    // one row as "not yet at the bottom".
+    // rows == 1: region_bounds() resolves to (0, 0) with no DECSTBM. Every
+    // linefeed scrolls the one row.
     let mut state = state(2, 1);
     print_str(&mut state, "aa"); // fills the only row; cursor parks (pending wrap)
     state.execute(b'\n');
@@ -3064,11 +3054,9 @@ fn linefeed_on_a_full_height_single_row_screen_always_scrolls() {
 
 #[test]
 fn ordinary_linefeeds_evict_the_oldest_scrollback_row_at_the_line_cap() {
-    // A 1-row screen scrolls on every linefeed, so three linefeeds push
-    // three rows through scrollback via the normal print/linefeed path (not
-    // a resize reflow) -- a cap of 1 must keep only the newest and tally the
-    // rest as dropped, the same as the Scrollback unit tests verify in
-    // isolation, but exercised here through the real dispatch path.
+    // A 1-row screen scrolls on every linefeed: three linefeeds push three
+    // rows into scrollback through the print/linefeed path. A cap of 1 keeps
+    // only the newest row and counts the other two as dropped.
     let mut state = state(2, 1);
     state.scrollback = Scrollback::new(ScrollbackLimit::new(1, 100_000));
     for row in ["aa", "bb", "cc"] {
@@ -3141,8 +3129,7 @@ fn su_on_the_alternate_screen_does_not_feed() {
 
 #[test]
 fn dl_with_the_cursor_on_row_0_feeds_scrollback() {
-    // DL routes through the same scroll-off-top path: deleting at row 0 scrolls
-    // the top line off, so it joins history (matching alacritty's origin == 0).
+    // DL at row 0 scrolls the top line off the screen and into history.
     let mut state = state(3, 2);
     print_str(&mut state, "ab"); // row 0 = "ab ", cursor stays on row 0
     advance(&mut state, b"\x1b[M"); // DL by 1 at the cursor row (0)
@@ -3227,8 +3214,8 @@ fn disabling_a_non_active_tracking_mode_leaves_the_active_one() {
 
 #[test]
 fn disabling_the_active_tracking_mode_after_a_replace_turns_it_off() {
-    // After a replace (`?1000h` then `?1003h` -> AnyMotion), resetting the now-
-    // active mode (`?1003l`) turns reporting off — the superseded `?1000` is gone.
+    // After a replace (`?1000h` then `?1003h` -> AnyMotion), resetting the active
+    // mode (`?1003l`) turns reporting off; the superseded `?1000` is gone.
     let mut state = state(5, 3);
     advance(&mut state, b"\x1b[?1000h"); // Normal
     advance(&mut state, b"\x1b[?1003h"); // AnyMotion supersedes
@@ -3261,8 +3248,8 @@ fn disabling_a_non_active_encoding_leaves_the_active_one() {
 
 #[test]
 fn disabling_the_active_encoding_after_a_replace_returns_to_default() {
-    // After a replace (`?1005h` then `?1006h` -> Sgr), resetting the now-active
-    // encoding (`?1006l`) returns to Default — the superseded Utf8 is gone.
+    // After a replace (`?1005h` then `?1006h` -> Sgr), resetting the active
+    // encoding (`?1006l`) returns to Default; the superseded Utf8 is gone.
     let mut state = state(5, 3);
     advance(&mut state, b"\x1b[?1005h"); // Utf8
     advance(&mut state, b"\x1b[?1006h"); // Sgr supersedes
@@ -3272,8 +3259,7 @@ fn disabling_the_active_encoding_after_a_replace_returns_to_default() {
 
 #[test]
 fn mouse_tracking_and_encoding_are_independent() {
-    // The orthogonal axes the two-enum model exists for: enabling SGR encoding
-    // must not clear the tracking level, and vice versa.
+    // Enabling SGR encoding leaves the tracking level set, and vice versa.
     let mut state = state(5, 3);
     advance(&mut state, b"\x1b[?1000h"); // tracking: Normal
     advance(&mut state, b"\x1b[?1006h"); // encoding: SGR
@@ -3283,7 +3269,7 @@ fn mouse_tracking_and_encoding_are_independent() {
 
 #[test]
 fn one_decset_list_sets_tracking_and_encoding_together() {
-    // The common real handshake — tracking and encoding in a single sequence.
+    // Tracking and encoding in a single DECSET list.
     let mut state = state(5, 3);
     advance(&mut state, b"\x1b[?1000;1006h");
     assert_eq!(state.mouse_tracking(), MouseTracking::Normal);
@@ -3547,9 +3533,8 @@ fn ech_fills_with_the_current_background_only() {
 
 #[test]
 fn ech_erases_the_parked_glyph_and_clears_the_wrap_latch() {
-    // ECH erases from the concrete cursor column, clearing the parked last-column
-    // glyph and the wrap latch — the latch is tied to that cell, so erasing the
-    // cell erases the latch. The next print overwrites in place.
+    // ECH erases from the cursor column: the parked last-column glyph goes and
+    // the wrap latch clears. The next print overwrites in place.
     let mut state = state(3, 2);
     print_str(&mut state, "abc"); // parks at column 2 with the latch
     assert!(state.active_cursor().pending_wrap);
@@ -3580,7 +3565,7 @@ fn ech_starting_on_a_wide_continuation_repairs_the_base() {
     state.print('中'); // wide base at column 0, continuation at column 1
     advance(&mut state, b"\x1b[2G"); // column 1 (the continuation)
     advance(&mut state, b"\x1b[X"); // erase the continuation
-                                    // The now-orphaned wide base is repaired to a blank narrow cell.
+                                    // The orphaned wide base is repaired to a blank narrow cell.
     assert_eq!(glyph(&state, 0, 0), Some(' '));
     assert_eq!(state.active_grid().cell(0, 0).map(Cell::width), Some(1));
     assert_eq!(glyph(&state, 0, 1), Some(' '));
@@ -3765,16 +3750,16 @@ fn g2_and_g3_are_designated_but_not_selectable() {
     advance(&mut state, b"\x1b+0"); // designate G3 = DEC line drawing
     assert_eq!(state.active_render().charsets[2], Charset::DecLineDrawing);
     assert_eq!(state.active_render().charsets[3], Charset::DecLineDrawing);
-    // No LS2/LS3, so GL stays on G0 (ASCII): printing is unaffected.
+    // There is no LS2/LS3: GL stays on G0 (ASCII) and printing is unchanged.
     state.print('q');
     assert_eq!(glyph(&state, 0, 0), Some('q'));
 }
 
 #[test]
 fn charset_is_carried_into_the_alternate_screen() {
-    // Designations are shared global rendering state (like the pen and GL slot),
-    // so entering the alternate by ANY route keeps them: a child that did
-    // `ESC ( 0` keeps drawing line-drawing glyphs after `?47h`.
+    // Entering the alternate clones the primary's render state, charset
+    // designations included: a child that did `ESC ( 0` keeps drawing
+    // line-drawing glyphs after `?47h`.
     let mut state = state(8, 3);
     advance(&mut state, b"\x1b(0"); // G0 = DEC line drawing
     advance(&mut state, b"\x1b[?47h"); // switch to the alternate
@@ -3810,9 +3795,9 @@ fn decrc_without_a_save_resets_the_charset_to_ascii() {
 
 #[test]
 fn dec_1049_entry_inherits_the_primary_charset() {
-    // Charset designations are global rendering state (like the pen): entering
-    // the alternate via `?1049h` inherits the primary's, so an app that did
-    // `ESC ( 0` then entered keeps drawing line-drawing glyphs, not ASCII.
+    // `?1049h` clones the primary's render state into the alternate, charset
+    // designations included: an app that did `ESC ( 0` then entered keeps
+    // drawing line-drawing glyphs.
     let mut state = state(8, 3);
     advance(&mut state, b"\x1b(0"); // primary G0 = DEC line drawing
     advance(&mut state, b"\x1b[?1049h"); // enter alt: inherit the primary's designations
@@ -3822,8 +3807,8 @@ fn dec_1049_entry_inherits_the_primary_charset() {
 
 #[test]
 fn dec_1049_entry_does_not_leak_a_prior_alternate_charset() {
-    // Seeding from the *primary* overwrites any designations a previous
-    // alternate session left, so re-entry never resurrects stale charset state.
+    // The clone from the primary overwrites the designations a previous
+    // alternate session left.
     let mut state = state(8, 3);
     // Primary stays ASCII throughout.
     advance(&mut state, b"\x1b[?1049h"); // enter alt (inherits ASCII)
@@ -3838,8 +3823,8 @@ fn dec_1049_entry_does_not_leak_a_prior_alternate_charset() {
 
 #[test]
 fn an_alternate_designation_does_not_leak_to_the_primary() {
-    // Render state is per-screen: a designation a full-screen app makes on the
-    // alternate must NOT corrupt the user's shell on the primary after it exits.
+    // Render state is per-screen: a designation made on the alternate leaves
+    // the primary's untouched after exit.
     let mut state = state(8, 3);
     advance(&mut state, b"\x1b[?1047h"); // enter the alternate (clones primary's ASCII)
     advance(&mut state, b"\x1b(0"); // alt designates G0 = DEC line drawing
@@ -3852,9 +3837,9 @@ fn an_alternate_designation_does_not_leak_to_the_primary() {
 
 #[test]
 fn dec_1049_exit_restores_the_charset_via_decrc() {
-    // `?1049 l` restores the cursor as in DECRC, which carries the saved charset
-    // back — so a designation made on the alternate is undone on exit, leaving
-    // the primary's set in effect (here ASCII).
+    // `?1049 l` restores the cursor as in DECRC, saved charset included: a
+    // designation made on the alternate is undone on exit and the primary's
+    // set (here ASCII) is in effect.
     let mut state = state(8, 3);
     advance(&mut state, b"\x1b[?1049h"); // save primary (ASCII), enter alt
     advance(&mut state, b"\x1b(0"); // alt designates G0 = DEC
@@ -3868,9 +3853,9 @@ fn dec_1049_exit_restores_the_charset_via_decrc() {
 
 #[test]
 fn the_alternate_render_is_recloned_from_primary_on_each_entry() {
-    // Every alternate entry clones the primary's render state, so a designation
-    // the alternate made in a prior session is discarded on re-entry (the
-    // alternate resumes its BUFFER, but its render is re-inherited from primary).
+    // Every alternate entry clones the primary's render state. A designation
+    // the alternate made in a prior session is discarded on re-entry; the
+    // alternate resumes its buffer with the primary's render state.
     let mut state = state(8, 3);
     advance(&mut state, b"\x1b[?47h"); // enter (clone primary's ASCII)
     advance(&mut state, b"\x1b(0"); // alt G0 = DEC line drawing
@@ -3882,8 +3867,8 @@ fn the_alternate_render_is_recloned_from_primary_on_each_entry() {
 
 #[test]
 fn decsc_and_decrc_save_and_restore_the_active_gl_slot() {
-    // xterm stores `curgl` in its SavedCursor, so a save/restore must carry
-    // *which* set is invoked into GL, not only the G0-G3 table contents.
+    // A save/restore carries which set is invoked into GL, not only the G0-G3
+    // table contents.
     let mut state = state(8, 2);
     advance(&mut state, b"\x1b)0"); // designate G1 = DEC line drawing
     advance(&mut state, b"\x0e"); // SO -> GL = G1
@@ -3918,8 +3903,8 @@ fn decrc_without_a_save_resets_the_gl_slot_to_g0() {
 
 #[test]
 fn the_gl_slot_is_carried_into_the_alternate() {
-    // The GL selection is part of the render state, so a `?47` entry clones the
-    // primary's into the alternate (the alternate inherits GL = G1).
+    // The GL selection is part of the render state a `?47` entry clones into
+    // the alternate: the alternate inherits GL = G1.
     let mut state = state(8, 3);
     advance(&mut state, b"\x0e"); // SO -> GL = G1 on the primary
     advance(&mut state, b"\x1b[?47h"); // enter the alternate (clones the primary's render)
@@ -3930,9 +3915,8 @@ fn the_gl_slot_is_carried_into_the_alternate() {
 
 #[test]
 fn an_alternate_pen_change_does_not_leak_to_the_primary() {
-    // The pen is per-screen render state too: colors set by a full-screen app on
-    // the alternate must not bleed onto the primary shell after it exits — but
-    // the alternate does inherit the primary's pen on entry.
+    // The pen is per-screen render state: the alternate inherits the primary's
+    // pen on entry, and a color set on the alternate stays there after exit.
     let mut state = state(8, 3);
     advance(&mut state, b"\x1b[31m"); // primary pen: red fg
     advance(&mut state, b"\x1b[?1047h"); // enter the alternate (inherits red)
@@ -3973,8 +3957,8 @@ fn dec_1049_round_trip_restores_the_gl_slot() {
 
 #[test]
 fn mixed_mode_47_then_1049_keeps_the_charset() {
-    // `CSI ? 47 ; 1049 h`: neither mode touches the shared charset, so the
-    // designation survives the mixed-mode entry regardless of the buffer flips.
+    // `CSI ? 47 ; 1049 h`: each entry clones the primary's designations. The
+    // designation survives the mixed-mode entry.
     let mut state = state(8, 3);
     advance(&mut state, b"\x1b(0"); // G0 = DEC line drawing
     advance(&mut state, b"\x1b[?47;1049h"); // ?47h flips active, ?1049h saves/switches/clears cells
@@ -4054,8 +4038,8 @@ fn resize_preserves_per_screen_charsets() {
 
 #[test]
 fn setting_mouse_modes_does_not_touch_the_render_state() {
-    // Mode toggles (mouse tracking/encoding, alt-scroll, bracketed paste) are
-    // orthogonal to the pen and charset — enabling them changes neither.
+    // Enabling mouse tracking/encoding, alt-scroll, and bracketed paste changes
+    // neither the pen nor the charset.
     let mut state = state(8, 2);
     advance(&mut state, b"\x1b(0"); // G0 = DEC line drawing
     advance(&mut state, b"\x1b[1;31m"); // pen: bold + red
@@ -4074,8 +4058,8 @@ fn setting_mouse_modes_does_not_touch_the_render_state() {
 
 #[test]
 fn charset_survives_a_region_scroll() {
-    // Scrolling a region is a grid operation; the charset lives in render state
-    // and is unaffected, so glyphs printed after a scroll are still mapped.
+    // Scrolling a region leaves the charset in place: glyphs printed after the
+    // scroll are still mapped.
     let mut state = state(8, 4);
     advance(&mut state, b"\x1b[1;3r"); // DECSTBM: region rows 1-3 (1-based)
     advance(&mut state, b"\x1b(0"); // G0 = DEC line drawing
@@ -4100,7 +4084,7 @@ fn decsc_decrc_round_trips_the_charset_on_the_alternate_screen() {
 
 #[test]
 fn dec_1048_saves_and_restores_the_charset() {
-    // `?1048` is "save/restore cursor as in DECSC/DECRC" — it must carry charsets.
+    // `?1048` saves/restores the cursor as DECSC/DECRC do, charsets included.
     let mut state = state(8, 2);
     advance(&mut state, b"\x1b(0"); // G0 = DEC
     advance(&mut state, b"\x1b[?1048h"); // save cursor (incl charsets)
@@ -4112,8 +4096,8 @@ fn dec_1048_saves_and_restores_the_charset() {
 
 #[test]
 fn dec_line_drawing_survives_a_deferred_wrap() {
-    // The remap runs at the top of `print`, before the wrap/width logic, so a
-    // line-drawing row wraps exactly like an ASCII one (every glyph is narrow).
+    // The charset remap runs before the wrap/width logic: a line-drawing row
+    // wraps exactly like an ASCII one (every glyph is narrow).
     let mut state = state(3, 2);
     advance(&mut state, b"\x1b(0"); // GL = DEC line drawing
     advance(&mut state, b"qqq"); // fills row 0 with ───, parks at the last column
@@ -4218,10 +4202,9 @@ fn disabling_autowrap_after_parking_does_not_wrap() {
 #[test]
 fn a_last_column_write_under_autowrap_off_arms_no_wrap_when_re_enabled() {
     // The deferred-wrap latch is armed only when a glyph lands on the last column
-    // while autowrap is ON. Writing the last column under ?7l arms nothing, so
-    // re-enabling ?7h must NOT retroactively wrap: the next glyph overwrites the
-    // last column, and only THAT write (now under autowrap) arms a wrap for the
-    // glyph after it.
+    // while autowrap is on. Writing the last column under ?7l arms nothing.
+    // After ?7h the next glyph overwrites the last column; that write, under
+    // autowrap, arms a wrap for the glyph after it.
     let mut state = state(5, 3);
     advance(&mut state, b"\x1b[?7l");
     print_str(&mut state, "abcde"); // 'e' lands on col 4 under autowrap-off → no latch
@@ -4234,7 +4217,7 @@ fn a_last_column_write_under_autowrap_off_arms_no_wrap_when_re_enabled() {
         (state.active_cursor().row, state.active_cursor().col),
         (0, 4)
     );
-    state.print('g'); // now wrapping is armed → this glyph wraps
+    state.print('g'); // the latch is armed → this glyph wraps
     assert_eq!(glyph(&state, 1, 0), Some('g'));
     assert_eq!(state.active_cursor().row, 1);
 }
@@ -4273,10 +4256,9 @@ fn a_wide_glyph_at_the_last_column_wraps_when_autowrap_on() {
 
 #[test]
 fn enabling_autowrap_after_a_dropped_wide_glyph_overwrites_not_wraps() {
-    // A wide glyph dropped at the last column under ?7l arms NO wrap — autowrap
-    // was off, and the deferred-wrap latch is purely an autowrap mechanism.
-    // Re-enabling ?7h does not retroactively wrap: the next glyph overwrites at
-    // the last column, and only then is wrapping armed for a following glyph.
+    // A wide glyph dropped at the last column under ?7l arms no wrap. After
+    // ?7h the next glyph overwrites at the last column; that write arms the
+    // wrap for the following glyph.
     let mut state = state(4, 2);
     advance(&mut state, b"\x1b[?7l");
     print_str(&mut state, "abc"); // cursor at col 3 (the last column)
@@ -4305,9 +4287,9 @@ fn a_dropped_wide_glyph_does_not_capture_a_following_combining_mark() {
 
 #[test]
 fn a_vs16_promotion_at_the_last_column_does_not_wrap_when_autowrap_off() {
-    // A narrow text-presentation glyph in the last column, promoted toward its
-    // wide emoji form by VS16, cannot widen (no room). Under ?7l there is no wrap
-    // to make room, so it stays in place — nothing scrolls onto the next row.
+    // A narrow text-presentation glyph in the last column has no room to widen
+    // when VS16 asks for the wide emoji form. Under ?7l it stays in place;
+    // nothing moves onto the next row.
     let mut state = state(3, 2);
     advance(&mut state, b"\x1b[?7l");
     print_str(&mut state, "ab"); // cursor at col 2 (last column)
@@ -4361,8 +4343,8 @@ fn cursor_blink_toggles() {
 
 #[test]
 fn a_fresh_pane_has_asked_for_no_cursor_shape() {
-    // Not "a block" — NOTHING. A pane that never sends DECSCUSR must not
-    // override the cursor the user configured in their own terminal.
+    // A pane that never sends DECSCUSR asks for no shape: the user's own
+    // configured cursor stands.
     let state = state(5, 3);
     assert_eq!(state.cursor_shape(), None);
     assert!(!state.cursor_blink());
@@ -4390,10 +4372,9 @@ fn decscusr_sets_every_style_it_names() {
 
 #[test]
 fn decscusr_zero_gives_the_cursor_back_to_the_user() {
-    // `CSI 0 SP q` (and the same sequence with the parameter omitted) is what a
-    // program sends to undo its own cursor on the way out. It returns the pane
-    // to asking for nothing, so the user's own configured cursor stands again —
-    // it does not impose a blinking block on them.
+    // `CSI 0 SP q`, and the same sequence with the parameter omitted, return the
+    // pane to asking for no shape and no blink: the user's own configured cursor
+    // stands again.
     for bytes in [&b"\x1b[0 q"[..], &b"\x1b[ q"[..]] {
         let mut state = state(5, 3);
         advance(&mut state, b"\x1b[5 q"); // vim's insert-mode blinking bar
@@ -4407,7 +4388,7 @@ fn decscusr_zero_gives_the_cursor_back_to_the_user() {
 
 #[test]
 fn an_unknown_decscusr_value_changes_nothing() {
-    // `CSI 9 SP q` names no style, so it leaves the one already set alone.
+    // `CSI 9 SP q` names no style and leaves the one already set alone.
     let mut state = state(5, 3);
     advance(&mut state, b"\x1b[5 q"); // blinking bar
     advance(&mut state, b"\x1b[9 q");
@@ -4417,8 +4398,8 @@ fn an_unknown_decscusr_value_changes_nothing() {
 
 #[test]
 fn a_steady_style_stops_a_blink_that_mode_12_started() {
-    // Blinking is ONE piece of state with two writers. `?12 h` starts a blink;
-    // a following "steady block" must stop it, or "steady" would be a lie.
+    // `?12 h` and DECSCUSR write the same blink state. `?12 h` starts a blink;
+    // a following "steady block" stops it.
     let mut state = state(5, 3);
     advance(&mut state, b"\x1b[?12h");
     assert!(state.cursor_blink());
@@ -4429,8 +4410,8 @@ fn a_steady_style_stops_a_blink_that_mode_12_started() {
 
 #[test]
 fn mode_12_blinks_the_shape_decscusr_chose() {
-    // The other writer, in the other order: `?12` says whether the cursor
-    // blinks and says nothing about its shape, so the bar stays a bar.
+    // `?12` sets whether the cursor blinks and leaves its shape alone: the bar
+    // stays a bar.
     let mut state = state(5, 3);
     advance(&mut state, b"\x1b[6 q"); // steady bar
     advance(&mut state, b"\x1b[?12h");
@@ -4443,9 +4424,8 @@ fn mode_12_blinks_the_shape_decscusr_chose() {
 
 #[test]
 fn a_decrqm_query_for_mode_12_answers_what_decscusr_left_behind() {
-    // `?12` is queryable, so the one blink state must read back consistently
-    // however it was written: after a blinking bar, an app asking "is the
-    // cursor blinking?" is told yes.
+    // DECRQM `?12` reads the blink state DECSCUSR wrote: after a blinking bar
+    // the reply says set (1); after a steady block it says reset (2).
     let mut state = state(5, 3);
     advance(&mut state, b"\x1b[5 q"); // blinking bar
     advance(&mut state, b"\x1b[?12$p");
@@ -4471,8 +4451,8 @@ fn a_cursor_style_survives_the_alternate_screen() {
 
 #[test]
 fn unsupported_dec_modes_are_ignored() {
-    // ?2 (VT52), ?3 (132-column), ?8 (auto-repeat): traced no-ops. They must not
-    // panic or disturb other mode state, and printing still works afterward.
+    // ?2 (VT52), ?3 (132-column), ?8 (auto-repeat) are ignored: no panic, other
+    // mode state untouched, printing still works afterward.
     let mut state = state(5, 3);
     advance(&mut state, b"\x1b[?2h");
     advance(&mut state, b"\x1b[?3h");
@@ -4488,9 +4468,8 @@ fn unsupported_dec_modes_are_ignored() {
 
 #[test]
 fn csi_param_saturates_at_u16_max_and_clamps_to_the_grid() {
-    // vte collects a parameter with saturating arithmetic, so a value past
-    // u16::MAX becomes 65535, then koshi's saturating cursor math clamps it to
-    // the grid — an absurd count never wraps around to a small move.
+    // vte collects a parameter with saturating arithmetic: a value past u16::MAX
+    // becomes 65535. koshi's saturating cursor math then clamps it to the grid.
     let mut state = state(10, 5); // last row 4, last col 9
     advance(&mut state, b"\x1b[5;5H"); // (4, 4)
     advance(&mut state, b"\x1b[99999999A"); // CUU by a saturated 65535 -> row 0
@@ -4501,9 +4480,8 @@ fn csi_param_saturates_at_u16_max_and_clamps_to_the_grid() {
 
 #[test]
 fn a_csi_with_too_many_parameters_is_dropped() {
-    // vte holds at most 32 parameters; the parameter that would overflow flags
-    // the whole sequence `ignore`, and koshi drops an ignored CSI. The cursor
-    // move never happens.
+    // vte holds at most 32 parameters; a 33rd flags the whole sequence
+    // `ignore`, and koshi drops an ignored CSI. The cursor move never happens.
     let mut state = state(10, 5);
     advance(&mut state, b"\x1b[3;3H"); // (2, 2)
     let mut seq = Vec::from(&b"\x1b["[..]);
@@ -4515,7 +4493,7 @@ fn a_csi_with_too_many_parameters_is_dropped() {
 
 #[test]
 fn a_csi_at_the_max_parameter_count_still_dispatches() {
-    // Exactly 32 parameters fit, so the sequence is NOT flagged ignore and its
+    // Exactly 32 parameters fit: the sequence is not flagged ignore and its
     // SGR applies. Thirty-two `1`s all mean bold.
     let mut state = state(5, 2);
     let mut seq = Vec::from(&b"\x1b["[..]);
@@ -4528,9 +4506,9 @@ fn a_csi_at_the_max_parameter_count_still_dispatches() {
 
 #[test]
 fn a_carriage_return_inside_a_csi_executes_then_the_move_completes() {
-    // A C0 control byte mid-CSI is executed in place, then parameter collection
-    // resumes and the final byte still dispatches. The CR homes the column, then
-    // CUD moves down — both effects are observable.
+    // A C0 control byte mid-CSI is executed in place; parameter collection then
+    // resumes and the final byte dispatches. The CR homes the column, then CUD
+    // moves down.
     let mut state = state(10, 3); // last row 2
     advance(&mut state, b"\x1b[3;5H"); // (2, 4)
     advance(&mut state, b"\x1b[2\x0dB"); // CR (col -> 0), then CUD 2 (clamped to row 2)
@@ -4540,8 +4518,8 @@ fn a_carriage_return_inside_a_csi_executes_then_the_move_completes() {
 #[test]
 fn an_escape_inside_a_csi_cancels_the_pending_sequence() {
     // An ESC mid-CSI abandons the half-built sequence and starts a fresh escape.
-    // The trailing `B` is then a plain ESC final koshi ignores, so the CUD never
-    // runs and the cursor stays put.
+    // The trailing `B` is a plain ESC final koshi ignores: the CUD never runs
+    // and the cursor stays put.
     let mut state = state(10, 5);
     advance(&mut state, b"\x1b[3;3H"); // (2, 2)
     advance(&mut state, b"\x1b[5\x1bB"); // CSI 5 abandoned by ESC; ESC B ignored
@@ -4908,9 +4886,9 @@ fn ris_restores_display_state_but_keeps_session_metadata() {
 #[test]
 fn an_ignored_private_marker_csi_does_not_break_a_cluster() {
     // A private marker after a parameter (`CSI 1 < m`) routes vte straight to
-    // ground with NO Perform callback, so it neither moves the cursor nor resets
-    // the cluster. A combining mark printed afterward still folds onto the
-    // preceding glyph — the documented, accepted edge.
+    // ground with no Perform callback: it neither moves the cursor nor resets
+    // the cluster. A combining mark printed afterward folds onto the preceding
+    // glyph.
     let mut state = state(5, 3);
     state.print('e');
     advance(&mut state, b"\x1b[1<m"); // swallowed with no dispatch
@@ -4943,7 +4921,7 @@ fn a_lone_invalid_high_byte_prints_the_replacement_char() {
 
 #[test]
 fn an_unterminated_osc_sets_no_title() {
-    // An OSC with no string terminator never reaches `osc_dispatch`, so no title
+    // An OSC with no string terminator never reaches `osc_dispatch`; no title
     // is recorded.
     let mut state = state(5, 3);
     advance(&mut state, b"\x1b]0;hello"); // no BEL / ST
@@ -4958,9 +4936,13 @@ fn a_very_long_osc_title_is_cut_to_the_cap_and_recovers() {
     seq.extend(std::iter::repeat_n(b'A', 2000));
     seq.push(0x07); // BEL terminator
     advance(&mut state, &seq);
-    let title = state.title().expect("the title is set");
-    assert_eq!(title.len(), koshi_core::text::MAX_REPORTED_TEXT_BYTES);
-    assert!(title.chars().all(|c| c == 'A'));
+    assert_eq!(
+        state.title(),
+        Some(
+            "A".repeat(koshi_core::text::MAX_REPORTED_TEXT_BYTES)
+                .as_str()
+        )
+    );
     // The parser recovered: a following sequence and glyph land normally.
     advance(&mut state, b"\x1b[2J");
     state.print('z');
@@ -4989,8 +4971,7 @@ fn printing_into_a_one_by_one_grid_scrolls_each_glyph_into_history() {
 
 #[test]
 fn a_one_by_one_grid_with_autowrap_off_overwrites_in_place() {
-    // With autowrap off there is no line to wrap onto, so each glyph overwrites
-    // the sole cell and nothing ever scrolls.
+    // With autowrap off each glyph overwrites the sole cell; nothing scrolls.
     let mut state = state(1, 1);
     advance(&mut state, b"\x1b[?7l"); // autowrap off
     state.print('a');
@@ -5003,8 +4984,8 @@ fn a_one_by_one_grid_with_autowrap_off_overwrites_in_place() {
 
 #[test]
 fn decstbm_clamps_a_bottom_margin_past_the_grid() {
-    // A bottom margin past the last row is clamped to it; the region is still
-    // set because the top margin is above the clamped bottom.
+    // A bottom margin past the last row is clamped to it. The top margin is
+    // above the clamped bottom, and the region is set.
     let mut state = state(5, 5); // last row 4
     advance(&mut state, b"\x1b[2;99r"); // top 2 (1-based), bottom clamped to 4
     assert_eq!(state.primary_scroll_region, Some((1, 4)));
@@ -5013,9 +4994,9 @@ fn decstbm_clamps_a_bottom_margin_past_the_grid() {
 
 #[test]
 fn decstbm_with_a_top_past_the_last_row_is_ignored() {
-    // Clamping a huge top margin lands it on the last row, equal to the clamped
-    // bottom; an equal top and bottom is an invalid range, so the request is
-    // dropped and the prior region stands.
+    // A huge top margin clamps to the last row, equal to the clamped bottom.
+    // An equal top and bottom is an invalid range: the request is dropped and
+    // the prior region stands.
     let mut state = state(5, 5);
     advance(&mut state, b"\x1b[2;4r"); // establish (1, 3)
     advance(&mut state, b"\x1b[99;5r"); // top and bottom both clamp to row 4 -> ignored
@@ -5036,9 +5017,9 @@ fn cursor_moves_on_a_single_row_grid_stay_on_row_zero() {
 
 #[test]
 fn a_resize_breaks_a_cluster_run() {
-    // A resize moves surviving cells to new rows and columns, so the recorded
-    // base of an in-progress cluster no longer names that cell. The run ends: a
-    // combining mark printed after the resize has no base and is dropped.
+    // A resize moves cells to new rows and columns and ends the in-progress
+    // cluster run: a combining mark printed after the resize has no base and is
+    // dropped.
     let mut state = state(5, 2);
     print_str(&mut state, "e");
     state.resize(PtySize { cols: 5, rows: 2 });
@@ -5059,8 +5040,13 @@ fn an_enormous_osc_title_cannot_grow_the_stored_title() {
     seq.extend(std::iter::repeat_n(b'A', 5_000_000));
     seq.push(0x07);
     advance(&mut state, &seq);
-    let title = state.title().expect("the title is set");
-    assert_eq!(title.len(), koshi_core::text::MAX_REPORTED_TEXT_BYTES);
+    assert_eq!(
+        state.title(),
+        Some(
+            "A".repeat(koshi_core::text::MAX_REPORTED_TEXT_BYTES)
+                .as_str()
+        )
+    );
 }
 
 #[test]
@@ -5109,9 +5095,10 @@ fn a_wide_glyph_title_is_never_cut_inside_a_character() {
     seq.extend("\u{65e5}".repeat(1_000).as_bytes());
     seq.push(0x07);
     advance(&mut state, &seq);
-    let title = state.title().expect("the title is set");
-    assert!(title.len() <= koshi_core::text::MAX_REPORTED_TEXT_BYTES);
-    assert!(title.chars().all(|c| c == '\u{65e5}'));
+    // Each character is three bytes: the cap keeps `MAX_REPORTED_TEXT_BYTES / 3`
+    // whole characters and cuts the next one whole.
+    let kept = koshi_core::text::MAX_REPORTED_TEXT_BYTES / 3;
+    assert_eq!(state.title(), Some("\u{65e5}".repeat(kept).as_str()));
 }
 
 #[test]
@@ -5195,8 +5182,8 @@ fn a_title_at_the_limit_is_kept_whole_and_one_past_it_is_cut() {
 
 #[test]
 fn an_osc_7_host_of_only_refused_characters_is_not_a_local_host() {
-    // The authority filters to an empty string, which is a value an empty
-    // authority never produces: that yields no host at all.
+    // A host of only refused characters filters to `Some("")`. An empty
+    // authority (`file:///tmp`) gives `None`. The two differ.
     let mut filtered = state(5, 3);
     advance(
         &mut filtered,
@@ -5210,4 +5197,343 @@ fn an_osc_7_host_of_only_refused_characters_is_not_a_local_host() {
         empty_authority.current_cwd().and_then(|cwd| cwd.host()),
         None
     );
+}
+
+// --- Control bytes and the pending-wrap latch ---
+
+#[test]
+fn every_cursor_moving_control_byte_clears_the_pending_wrap_latch() {
+    // LF, VT, FF, IND, NEL, CR, BS, HT, RI.
+    for byte in [0x0Au8, 0x0B, 0x0C, 0x84, 0x85, 0x0D, 0x08, 0x09, 0x8D] {
+        let mut state = state(3, 3);
+        advance(&mut state, b"\x1b[2;1H"); // row 1, off both margins
+        print_str(&mut state, "abc"); // parks at (1, 2) with the latch armed
+        assert!(state.active_cursor().pending_wrap, "byte {byte:#x}");
+        state.execute(byte);
+        assert!(!state.active_cursor().pending_wrap, "byte {byte:#x}");
+    }
+}
+
+#[test]
+fn shift_bell_hts_and_unknown_control_bytes_preserve_the_pending_wrap_latch() {
+    // SO, SI, BEL, HTS, SOH: none moves the cursor or clears the latch.
+    for byte in [0x0Eu8, 0x0F, 0x07, 0x88, 0x01] {
+        let mut state = state(3, 2);
+        print_str(&mut state, "abc"); // parks at (0, 2) with the latch armed
+        state.execute(byte);
+        assert_eq!(state.active_cursor_position(), (0, 2), "byte {byte:#x}");
+        assert!(state.active_cursor().pending_wrap, "byte {byte:#x}");
+    }
+}
+
+#[test]
+fn a_control_char_reaching_print_breaks_the_cluster_run() {
+    let mut state = state(5, 3);
+    state.print('e'); // base
+    state.print('\u{0}'); // NUL: no display width, dropped, ends the run
+    state.print('\u{301}'); // combining acute has no base → dropped
+    let cell = state.active_grid().cell(0, 0).expect("in bounds");
+    assert_eq!(cell.ch(), 'e');
+    assert_eq!(cell.combining(), [] as [char; 0]);
+    assert_eq!(state.active_cursor_position(), (0, 1));
+}
+
+// --- Line feed / reverse index outside the scroll region ---
+
+#[test]
+fn line_feed_below_the_region_descends_without_scrolling() {
+    let mut state = state(3, 4); // 4 rows
+    advance(&mut state, b"AAA\r\nBBB\r\nCCC\r\nDDD");
+    advance(&mut state, b"\x1b[1;2r"); // region rows 1..2 -> (0, 1); homes the cursor
+    advance(&mut state, b"\x1b[3;1H"); // row 2, below the region
+    state.execute(b'\n'); // descends to the last grid row, nothing scrolls
+    assert_eq!(state.active_cursor_position(), (3, 0));
+    state.execute(b'\n'); // on the last grid row: stays, still nothing scrolls
+    assert_eq!(state.active_cursor_position(), (3, 0));
+    assert_eq!(row_text(&state, 0), "AAA");
+    assert_eq!(row_text(&state, 1), "BBB");
+    assert_eq!(row_text(&state, 2), "CCC");
+    assert_eq!(row_text(&state, 3), "DDD");
+    assert!(state.scrollback().is_empty());
+}
+
+#[test]
+fn reverse_index_below_the_region_moves_up_without_scrolling() {
+    let mut state = state(3, 4);
+    advance(&mut state, b"AAA\r\nBBB\r\nCCC\r\nDDD");
+    advance(&mut state, b"\x1b[1;2r"); // region (0, 1)
+    advance(&mut state, b"\x1b[4;1H"); // row 3, below the region
+    advance(&mut state, b"\x1bM"); // RI: row 3 -> 2, nothing scrolls
+    assert_eq!(state.active_cursor_position(), (2, 0));
+    assert_eq!(row_text(&state, 0), "AAA");
+    assert_eq!(row_text(&state, 1), "BBB");
+    assert_eq!(row_text(&state, 2), "CCC");
+    assert_eq!(row_text(&state, 3), "DDD");
+}
+
+#[test]
+fn reverse_index_on_row_zero_above_the_region_stays_put() {
+    let mut state = state(3, 3);
+    fill_3x3(&mut state);
+    advance(&mut state, b"\x1b[2;3r"); // region rows 2..3 -> (1, 2); homes the cursor
+    advance(&mut state, b"\x1bM"); // RI on row 0, above the region top
+    assert_eq!(state.active_cursor_position(), (0, 0));
+    assert_eq!(row_text(&state, 0), "abc");
+    assert_eq!(row_text(&state, 1), "def");
+    assert_eq!(row_text(&state, 2), "ghi");
+}
+
+// --- Line and cell operations with an oversized count ---
+
+#[test]
+fn dl_outside_the_region_is_ignored() {
+    let mut state = state(3, 4);
+    advance(&mut state, b"AAA\r\nBBB\r\nCCC\r\nDDD");
+    advance(&mut state, b"\x1b[2;3r"); // region rows 2..3 -> (1, 2)
+    advance(&mut state, b"\x1b[4;2H"); // (3, 1), below the region
+    advance(&mut state, b"\x1b[M"); // DL ignored outside the region
+    assert_eq!(row_text(&state, 0), "AAA");
+    assert_eq!(row_text(&state, 1), "BBB");
+    assert_eq!(row_text(&state, 2), "CCC");
+    assert_eq!(row_text(&state, 3), "DDD");
+    assert_eq!(state.active_cursor_position(), (3, 1)); // cursor untouched
+    assert!(state.scrollback().is_empty());
+}
+
+#[test]
+fn su_past_the_region_height_blanks_the_region_and_feeds_every_row() {
+    let mut state = state(3, 3);
+    fill_3x3(&mut state); // abc / def / ghi
+    advance(&mut state, b"\x1b[2;2H"); // cursor -> (1, 1)
+    advance(&mut state, b"\x1b[99S"); // SU 99 on a 3-row region: all three rows leave
+    assert_eq!(row_text(&state, 0), "   ");
+    assert_eq!(row_text(&state, 1), "   ");
+    assert_eq!(row_text(&state, 2), "   ");
+    assert_eq!(state.active_cursor_position(), (1, 1)); // cursor unmoved
+    let history: Vec<String> = state
+        .scrollback()
+        .lines()
+        .iter()
+        .map(|(row, _)| row.iter().map(Cell::ch).collect())
+        .collect();
+    assert_eq!(history, vec!["abc", "def", "ghi"]); // oldest (top) first
+}
+
+#[test]
+fn sd_past_the_region_height_blanks_the_region() {
+    let mut state = state(3, 3);
+    fill_3x3(&mut state); // abc / def / ghi; cursor parked at (2, 2)
+    advance(&mut state, b"\x1b[99T"); // SD 99 on a 3-row region: every row pushed off
+    assert_eq!(row_text(&state, 0), "   ");
+    assert_eq!(row_text(&state, 1), "   ");
+    assert_eq!(row_text(&state, 2), "   ");
+    assert_eq!(state.active_cursor_position(), (2, 2)); // cursor unmoved
+    assert!(state.scrollback().is_empty()); // nothing left through the top
+}
+
+#[test]
+fn il_past_the_region_height_blanks_the_region_from_the_cursor_row() {
+    let mut state = state(3, 3);
+    fill_3x3(&mut state); // abc / def / ghi
+    advance(&mut state, b"\x1b[2;1H"); // cursor -> (1, 0)
+    advance(&mut state, b"\x1b[99L"); // IL 99: rows 1..=2 pushed off, blanks inserted
+    assert_eq!(row_text(&state, 0), "abc"); // above the cursor, untouched
+    assert_eq!(row_text(&state, 1), "   ");
+    assert_eq!(row_text(&state, 2), "   ");
+    assert_eq!(state.active_cursor_position(), (1, 0)); // cursor unmoved
+}
+
+#[test]
+fn ich_count_past_the_line_end_blanks_the_rest_of_the_line() {
+    let mut state = state(5, 1);
+    advance(&mut state, b"abcde");
+    advance(&mut state, b"\x1b[1;3H"); // cursor -> (0, 2) on 'c'
+    advance(&mut state, b"\x1b[99@"); // ICH 99: c, d, e all pushed off the edge
+    assert_eq!(row_text(&state, 0), "ab   ");
+    assert_eq!(state.active_cursor_position(), (0, 2));
+}
+
+#[test]
+fn dch_count_past_the_line_end_blanks_the_rest_of_the_line() {
+    let mut state = state(5, 1);
+    advance(&mut state, b"abcde");
+    advance(&mut state, b"\x1b[1;2H"); // cursor -> (0, 1) on 'b'
+    advance(&mut state, b"\x1b[99P"); // DCH 99: b..e removed, the tail padded
+    assert_eq!(row_text(&state, 0), "a    ");
+    assert_eq!(state.active_cursor_position(), (0, 1));
+}
+
+// --- DECSTBM / DECSCUSR parameter edges ---
+
+#[test]
+fn decstbm_bottom_zero_means_the_last_row() {
+    let mut state = state(5, 5); // last row 4
+    advance(&mut state, b"\x1b[3;3H"); // move away from home
+    advance(&mut state, b"\x1b[2;0r"); // top 2 (1-based), bottom 0 -> the last row
+    assert_eq!(state.primary_scroll_region, Some((1, 4)));
+    assert_eq!(state.active_cursor_position(), (0, 0)); // homed
+}
+
+#[test]
+fn decscusr_reads_only_its_first_parameter() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b[2;5 q"); // 2 = steady block; the 5 is ignored
+    assert_eq!(state.cursor_shape(), Some(CursorShape::Block));
+    assert!(!state.cursor_blink());
+}
+
+// --- OSC edges: unparseable commands, missing payloads, shell-marker facts ---
+
+#[test]
+fn an_osc_with_a_non_utf8_command_number_is_ignored() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b]2;keep\x07");
+    advance(&mut state, b"\x1b]\xff;x\x07"); // command byte 0xFF is not UTF-8
+    assert_eq!(state.title(), Some("keep"));
+    assert!(state.current_cwd().is_none());
+}
+
+#[test]
+fn an_osc_title_command_with_no_payload_leaves_the_title_alone() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b]2;keep\x07");
+    advance(&mut state, b"\x1b]2\x07"); // params = ["2"]: no payload
+    assert_eq!(state.title(), Some("keep"));
+}
+
+#[test]
+fn osc133_prompt_marks_the_cursor_row_not_row_zero() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b[2;1H"); // cursor -> (1, 0)
+    advance(&mut state, b"\x1b]133;A\x07");
+    assert!(state.active_grid().prompt_mark(1));
+    assert!(!state.active_grid().prompt_mark(0));
+    assert!(!state.active_grid().prompt_mark(2));
+}
+
+#[test]
+fn osc133_command_start_reports_one_started_fact_even_when_repeated() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b]133;C\x07\x1b]133;C\x07");
+    assert_eq!(
+        state.shell_integration_state,
+        ShellIntegrationState::Running
+    );
+    assert_eq!(
+        state.take_shell_integration_facts(),
+        vec![ShellIntegrationFact::CommandStarted]
+    );
+}
+
+#[test]
+fn osc133_finish_reports_the_exit_code() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b]133;C\x07\x1b]133;D;137\x07");
+    assert_eq!(state.shell_integration_state, ShellIntegrationState::Prompt);
+    assert_eq!(
+        state.take_shell_integration_facts(),
+        vec![
+            ShellIntegrationFact::CommandStarted,
+            ShellIntegrationFact::CommandFinished {
+                exit_code: Some(137)
+            },
+        ]
+    );
+}
+
+#[test]
+fn osc133_finish_without_an_exit_code_reports_none() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b]133;C\x07\x1b]133;D\x07");
+    assert_eq!(state.shell_integration_state, ShellIntegrationState::Prompt);
+    assert_eq!(
+        state.take_shell_integration_facts(),
+        vec![
+            ShellIntegrationFact::CommandStarted,
+            ShellIntegrationFact::CommandFinished { exit_code: None },
+        ]
+    );
+}
+
+#[test]
+fn osc133_finish_without_a_running_command_reports_nothing() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b]133;D;3\x07"); // no command started
+    assert_eq!(state.shell_integration_state, ShellIntegrationState::Prompt);
+    assert_eq!(state.take_shell_integration_facts(), vec![]);
+}
+
+// --- RIS and the shell marker state ---
+
+#[test]
+fn ris_returns_the_shell_marker_state_to_prompt_and_keeps_pending_facts() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b]133;C\x07"); // a command is running
+    advance(&mut state, b"\x1bc"); // RIS
+    assert_eq!(state.shell_integration_state, ShellIntegrationState::Prompt);
+    assert_eq!(
+        state.take_shell_integration_facts(),
+        vec![ShellIntegrationFact::CommandStarted]
+    );
+    advance(&mut state, b"\x1b]133;D;0\x07"); // the reset forgot the running command
+    assert_eq!(state.shell_integration_state, ShellIntegrationState::Prompt);
+    assert_eq!(state.take_shell_integration_facts(), vec![]);
+}
+
+// --- ESC / DCS edges ---
+
+#[test]
+fn decaln_is_ignored() {
+    let mut state = state(3, 2);
+    print_str(&mut state, "ab");
+    advance(&mut state, b"\x1b#8"); // DECALN: an ESC with an unhandled intermediate
+    assert_eq!(row_text(&state, 0), "ab ");
+    assert_eq!(row_text(&state, 1), "   ");
+    assert_eq!(state.active_cursor_position(), (0, 2));
+}
+
+#[test]
+fn an_ignored_esc_intermediate_breaks_a_cluster_run() {
+    let mut state = state(5, 2);
+    state.print('e'); // base
+    advance(&mut state, b"\x1b#8"); // ignored, but ends the run
+    state.print('\u{301}'); // combining acute has no base → dropped
+    let cell = state.active_grid().cell(0, 0).expect("in bounds");
+    assert_eq!(cell.ch(), 'e');
+    assert_eq!(cell.combining(), [] as [char; 0]);
+}
+
+#[test]
+fn a_dcs_payload_prints_nothing() {
+    let mut state = state(5, 2);
+    state.print('a');
+    advance(&mut state, b"\x1bPqhello\x1b\\"); // DCS q "hello" ST
+    assert_eq!(row_text(&state, 0), "a    ");
+    assert_eq!(state.active_cursor_position(), (0, 1));
+}
+
+#[test]
+fn an_overlong_sgr_is_dropped_without_touching_the_pen() {
+    let mut state = state(5, 2);
+    let mut seq = Vec::from(&b"\x1b["[..]);
+    seq.extend(std::iter::repeat_n(&b"1;"[..], 40).flatten().copied());
+    seq.push(b'm'); // 40 bold codes: past vte's 32-parameter cap, flagged ignore
+    advance(&mut state, &seq);
+    assert_eq!(state.active_render().style, Style::default());
+}
+
+// --- Alternate screen: a `?1049` entry while already on the alternate ---
+
+#[test]
+fn dec_1049_entry_while_already_on_the_alternate_changes_nothing() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b[3;4H"); // primary cursor -> (2, 3)
+    advance(&mut state, b"\x1b[?47h"); // enter without saving or clearing
+    advance(&mut state, b"xyz"); // alternate row 0 = "xyz", cursor (0, 3)
+    advance(&mut state, b"\x1b[?1049h"); // already on the alternate
+    assert_eq!(state.active, Screen::Alternate);
+    assert_eq!(row_text(&state, 0), "xyz  "); // not cleared
+    assert_eq!(state.active_cursor_position(), (0, 3)); // not re-seeded
+    assert_eq!(state.primary_cursor.saved, None); // primary cursor not stashed
+    assert_eq!(state.alternate_cursor.saved, None);
 }

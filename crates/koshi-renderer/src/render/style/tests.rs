@@ -1,10 +1,10 @@
-//! Tests for the chrome style helpers: each one turns the default theme into an
-//! exact ratatui `Style`, and the tab styles invert between the active and
-//! inactive tab.
+//! Tests for the chrome style helpers: each one turns a theme into an exact
+//! ratatui `Style`, the tab styles invert between the active and inactive tab,
+//! and a run position past the last stop clamps to it.
 
 use super::*;
 
-/// The stock theme every case below reads its colors from.
+/// The stock theme most cases below read their colors from.
 fn theme() -> Theme {
     Theme::default()
 }
@@ -58,11 +58,84 @@ fn a_middle_tab_stop_reads_the_blended_ramp_color() {
 }
 
 #[test]
+fn the_last_tab_stop_is_the_ramp_far_end() {
+    // Tab 2 of 3 is the run's last element, so it takes `ramp_end` whole.
+    let got = tab_index_style(&theme(), true, 2, 3);
+    let want = Style::default()
+        .fg(Color::Rgb(0x7d, 0xbc, 0xff))
+        .add_modifier(Modifier::BOLD);
+    assert_eq!(got, want);
+}
+
+#[test]
+fn a_tab_stop_past_the_end_of_the_run_clamps_to_the_last() {
+    // Index 5 in a run of 3 reads the same stop as index 2.
+    let got = tab_index_style(&theme(), true, 5, 3);
+    let want = Style::default()
+        .fg(Color::Rgb(0x7d, 0xbc, 0xff))
+        .add_modifier(Modifier::BOLD);
+    assert_eq!(got, want);
+}
+
+#[test]
+fn an_empty_run_reads_the_ramp_start_end() {
+    // A count of 0 has no last stop; the run sits at `ramp_start`.
+    let got = tab_index_style(&theme(), true, 0, 0);
+    let want = Style::default()
+        .fg(Color::Rgb(0xd0, 0xa5, 0xff))
+        .add_modifier(Modifier::BOLD);
+    assert_eq!(got, want);
+}
+
+#[test]
+fn an_inactive_last_tab_sits_on_the_dimmed_far_end() {
+    // The dimmed stop is the far end pulled 45% toward black.
+    let got = tab_name_style(&theme(), false, 2, 3);
+    let want = Style::default()
+        .fg(Color::Rgb(0xf0, 0xec, 0xfa))
+        .bg(Color::Rgb(0x44, 0x67, 0x8c));
+    assert_eq!(got, want);
+}
+
+#[test]
+fn a_custom_ramp_recolors_the_active_tab() {
+    // The stops come from the theme's own endpoints, not from fixed colors.
+    let custom = Theme {
+        ramp_start: (0x10, 0x20, 0x30),
+        ramp_end: (0x40, 0x50, 0x60),
+        ..Theme::default()
+    };
+    let got = tab_index_style(&custom, true, 1, 2);
+    let want = Style::default()
+        .fg(Color::Rgb(0x40, 0x50, 0x60))
+        .add_modifier(Modifier::BOLD);
+    assert_eq!(got, want);
+}
+
+#[test]
+fn a_custom_bar_background_recolors_the_bar_fill() {
+    let custom = Theme {
+        bar_bg: Color::Rgb(0x01, 0x02, 0x03),
+        ..Theme::default()
+    };
+    let got = bar_style(&custom);
+    let want = Style::default().bg(Color::Rgb(0x01, 0x02, 0x03));
+    assert_eq!(got, want);
+}
+
+#[test]
 fn session_block_is_the_ramp_start_end_as_bold_text() {
     let got = session_style(&theme());
     let want = Style::default()
         .fg(Color::Rgb(0xd0, 0xa5, 0xff))
         .add_modifier(Modifier::BOLD);
+    assert_eq!(got, want);
+}
+
+#[test]
+fn version_badge_is_the_ramp_start_end_without_bold() {
+    let got = version_style(&theme());
+    let want = Style::default().fg(Color::Rgb(0xd0, 0xa5, 0xff));
     assert_eq!(got, want);
 }
 

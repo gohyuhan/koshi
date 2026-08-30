@@ -1,11 +1,9 @@
 //! Size constraints for split children.
 //!
-//! Each child slot of a split carries a [`SizeWeight`]: how the solver should
-//! size that slot along the split axis. The tree never stores solved cell
-//! rectangles — only these relative constraints — so the same tree re-solves
-//! cleanly at any terminal size.
-//!
-//! All sizing is discrete cell math; nothing is stored as a bare percentage.
+//! Each child slot of a split carries a [`SizeWeight`]: how the solver sizes
+//! that slot along the split axis. The tree stores these relative
+//! constraints and no solved cell rectangles. Every constraint solves to
+//! whole cells.
 
 use koshi_core::error::{DomainCategory, DomainError, Severity};
 use serde::{Deserialize, Serialize};
@@ -34,24 +32,22 @@ pub enum SizeConstraint {
     Preferred(u16),
 }
 
-/// A rejected constraint value. Construction is the validation boundary:
-/// values from config or commands go through the constructors below, so every
-/// constraint that exists is solvable.
+/// A constraint value the validated constructors reject.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum ConstraintError {
-    /// A flex weight of zero would claim no share at all.
+    /// The flex weight is `0`.
     #[error("flex weight must be at least 1")]
     ZeroFlexWeight,
-    /// Percentages outside 1–100 cannot describe a share of the axis.
+    /// The percentage is outside 1–100; `got` is the rejected value.
     #[error("percent must be between 1 and 100, got {got}")]
     PercentOutOfRange { got: u8 },
-    /// A fixed size of zero cells is not a visible pane.
+    /// The fixed size is `0` cells.
     #[error("fixed size must be at least one cell")]
     ZeroFixed,
-    /// A minimum of zero cells is no floor at all.
+    /// The minimum is `0` cells.
     #[error("minimum size must be at least one cell")]
     ZeroMin,
-    /// A preferred size of zero cells is not a usable target.
+    /// The preferred size is `0` cells.
     #[error("preferred size must be at least one cell")]
     ZeroPreferred,
 }
@@ -136,10 +132,9 @@ impl SizeConstraint {
 /// The complete sizing instruction for one split child.
 ///
 /// `primary` picks the distribution strategy; `min` and `preferred` overlay a
-/// floor and a target on top of any primary; `resize_delta` records explicit
-/// user resizes as exact cell offsets applied after the primary distribution.
-/// The resize is stored as a delta, not a final size, so a terminal resize
-/// re-applies it on top of a fresh distribution at the new size.
+/// floor and a target on top of any primary; `resize_delta` is the
+/// accumulated user resize in cells, applied after the primary distribution
+/// on every solve, at any terminal size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SizeWeight {
     /// The distribution strategy for this child.
@@ -158,7 +153,6 @@ pub struct SizeWeight {
 
 impl SizeWeight {
     /// A weight using `primary` with no overlays and no resize offset.
-    /// `primary` carries its own validation, so this cannot fail.
     #[must_use]
     pub fn new(primary: SizeConstraint) -> Self {
         Self {
@@ -197,8 +191,7 @@ impl SizeWeight {
 }
 
 impl Default for SizeWeight {
-    /// An equal share: `Flex(1)` with no overrides and no resize offset.
-    /// This is the weight new panes receive on insertion.
+    /// An equal share: `Flex(1)` with no overlays and no resize offset.
     fn default() -> Self {
         Self {
             primary: SizeConstraint::Flex(1),

@@ -4,8 +4,7 @@
 //! A grant hands out one secret and keeps one
 //! [`TokenRecord`](crate::remote_tokens::TokenRecord). The record carries the
 //! sha256 of that secret and never the secret itself. No stored field opens a
-//! connection. sha256 is the 256-bit hash
-//! function from the SHA-2 family;
+//! connection. sha256 is the 256-bit hash function from the SHA-2 family;
 //! [`hash_token`](crate::remote_tokens::hash_token) writes its 32 result
 //! bytes as 64 lowercase hex characters.
 //!
@@ -19,7 +18,7 @@
 //! koshi data directory. The file carries the format number
 //! [`TOKEN_STORE_FORMAT`](crate::remote_tokens::TOKEN_STORE_FORMAT), and a
 //! file carrying any other number is refused. Writes go through
-//! [`koshi_storage::atomic::write_atomic`], so a reader finds the old content
+//! [`koshi_storage::atomic::write_atomic`]: a reader finds the old content
 //! or the new, never a half-written middle.
 
 use std::path::{Path, PathBuf};
@@ -39,14 +38,13 @@ use crate::remote_state::write_owner_only;
 /// reads back.
 ///
 /// The value and the rule it follows live in
-/// [`koshi_core::compat::TOKEN_STORE_FORMAT`]. Named by
-/// its full path here, since this constant carries the same name.
+/// [`koshi_core::compat::TOKEN_STORE_FORMAT`].
 pub const TOKEN_STORE_FORMAT: u32 = koshi_core::compat::TOKEN_STORE_FORMAT.max;
 
 /// How far one grant reaches.
 ///
-/// Decoding rejects a variant this build does not know, so a scope from a
-/// newer build is an error.
+/// Decoding rejects a variant this build does not know; a scope from a newer
+/// build is an error.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum TokenScope {
     /// Every session on this machine, including sessions started after the
@@ -69,7 +67,7 @@ impl TokenScope {
 
 /// What the store keeps about one grant.
 ///
-/// Decoding rejects any field it does not know, so a misspelled name is an
+/// Decoding rejects any field it does not know; a misspelled field name is an
 /// error.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -131,8 +129,8 @@ impl TokenRecord {
 /// One grant as a caller may see it: every field of a [`TokenRecord`] except
 /// the hash.
 ///
-/// A field this build does not know is ignored, so a record from a newer
-/// router still reads.
+/// A field this build does not know is ignored; a record from a newer router
+/// still reads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenEntry {
     /// Who the grant was handed to.
@@ -172,7 +170,7 @@ pub enum Resolution {
 
 /// Every grant this machine has made.
 ///
-/// Decoding rejects any field it does not know, so a misspelled name is an
+/// Decoding rejects any field it does not know; a misspelled field name is an
 /// error.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -232,7 +230,7 @@ impl TokenStore {
     /// the directory holding it when it is missing.
     ///
     /// The file is restricted to the owning user: mode `0600` on Unix, set on
-    /// an existing file before the replace so the new file carries it too. On
+    /// an existing file before the replace; the new file carries it too. On
     /// Windows the file takes the data directory's owner-scoped ACLs. The
     /// directory itself gets mode `0700` on Unix.
     ///
@@ -251,9 +249,9 @@ impl TokenStore {
     /// was already revoked or already expired is replaced with the rest, and
     /// reports `false`: nothing that still worked stopped working.
     ///
-    /// One record per identity and scope, so the new grant takes the place of
-    /// whatever that identity held on that scope. The store is not written;
-    /// the caller does that.
+    /// One record per identity and scope: every record `identity` held on
+    /// `scope` is dropped, and the new record goes at the end. The store is
+    /// not written; the caller does that.
     pub fn grant(
         &mut self,
         identity: String,
@@ -296,7 +294,7 @@ impl TokenStore {
             if record.identity != identity || record.revoked_at.is_some() {
                 continue;
             }
-            if scope.is_some_and(|scope| *scope != record.scope) {
+            if scope.is_some_and(|wanted| *wanted != record.scope) {
                 continue;
             }
             record.revoked_at = Some(now);
@@ -310,7 +308,9 @@ impl TokenStore {
     /// record does.
     ///
     /// Every record is walked, in order, and each hash compared through its
-    /// last byte. The walk runs to the end and reads no record out of a map.
+    /// last byte; a hash whose length differs from `presented` is unequal at
+    /// once, with no byte compared. The walk runs to the end and reads no
+    /// record out of a map.
     fn last_match(
         &self,
         presented: &str,
@@ -331,10 +331,11 @@ impl TokenStore {
     ///
     /// The presented secret is hashed once, then every record is walked and
     /// each hash compared through its last byte. The answer is
-    /// [`Resolution::Admitted`] when a record
-    /// holds that hash, still stands at `now`, and covers `session`; every
-    /// other case is [`Resolution::Refused`]. Admitting stamps that record's
-    /// last-used time with `now`, so the caller writes the store back.
+    /// [`Resolution::Admitted`] when a record holds that hash, still stands at
+    /// `now`, and covers `session`; every other case is
+    /// [`Resolution::Refused`]. Admitting stamps the last such record's
+    /// last-used time with `now`. The store is not written; the caller does
+    /// that.
     pub fn resolve(
         &mut self,
         token: &ConnectionToken,
@@ -357,8 +358,8 @@ impl TokenStore {
     /// each hash compared through its last byte. The walk runs to the end and
     /// reads no record out of a map. Returns the scope of the last live record
     /// holding that hash, and `None` when no record does. Admitting stamps
-    /// that record's last-used time with `now`, so the caller writes the
-    /// store back.
+    /// that record's last-used time with `now`. The store is not written; the
+    /// caller does that.
     ///
     /// The caller checks the scope against the session it wants with
     /// [`TokenScope::covers`].
@@ -372,7 +373,7 @@ impl TokenStore {
     /// Every grant without its hash, narrowed to the grants that reach one
     /// scope when `scope` is given.
     ///
-    /// A session scope lists every grant that reaches that session, so a
+    /// A session scope lists every grant that reaches that session: a
     /// host-wide grant is listed beside the grants scoped to the session
     /// itself. A host-wide scope lists the host-wide grants alone.
     ///

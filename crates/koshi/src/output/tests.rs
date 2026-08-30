@@ -956,7 +956,27 @@ fn keys_describe_reports_unbound_and_malformed_sequences() {
         render_keys_describe(&view, "<C-z>", FormatArg::Table),
         Ok(None)
     );
-    assert!(render_keys_describe(&view, "Ctrl-g", FormatArg::Table).is_err());
+    assert_eq!(
+        render_keys_describe(&view, "Ctrl-g", FormatArg::Table),
+        Err(
+            "invalid key `Ctrl-g`: a multi-character key must be bracketed, as in `<Tab>`"
+                .to_string()
+        )
+    );
+}
+
+#[test]
+fn keys_describe_reports_the_user_entry_alone_when_it_displaced_a_default() {
+    let view = view_with_binding("<A-f>", "core:close-pane");
+    let rendered = render_keys_describe(&view, "<A-f>", FormatArg::Json)
+        .expect("sequence parses")
+        .expect("bound in normal mode");
+    let value: serde_json::Value = serde_json::from_str(&rendered).expect("valid JSON");
+    let details = value.as_array().expect("a JSON array");
+
+    assert_eq!(details.len(), 1);
+    assert_eq!(details[0]["action"], serde_json::json!("core:close-pane"));
+    assert_eq!(details[0]["source"], serde_json::json!("user"));
 }
 
 #[test]

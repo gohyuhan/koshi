@@ -7,7 +7,7 @@
 //! grid, cursor, and modes — writes the engine's device-query replies
 //! (answers to DA/DSR/DECRQM: escape sequences the child sends to ask "what
 //! terminal are you" / "what's your status" / "is this mode on") back into
-//! the pane's PTY, and marks the screen stale so the event loop schedules a
+//! the pane's PTY, and marks the screen stale for the event loop to schedule a
 //! repaint. Shell-integration events are published in marker order. Bytes for
 //! a pane with no engine (one closed while the event sat in the inbox) are
 //! dropped without touching any state.
@@ -24,42 +24,40 @@ impl Server {
     /// and mark the screen stale with [`InvalidationReason::PtyOutput`].
     ///
     /// A `pane_id` with no engine — the pane closed while the chunk waited in
-    /// the inbox — is ignored: no engine is touched and nothing is
-    /// invalidated. A reply write that fails is dropped: the pane's PTY is
-    /// already gone, and its exit is on the way through the inbox.
+    /// the inbox — is ignored: no engine is touched, nothing is published, and
+    /// nothing is invalidated. A reply write that fails is logged at error
+    /// level and dropped; the querying child gets no answer.
     ///
-    /// Lines this chunk scrolls off the top feed the scrollback; every client
-    /// whose view of this pane is held is then re-anchored by that many lines so
-    /// it keeps showing the same text while live output accumulates below. A
-    /// highlight whose every line this chunk erased (`CSI 3 J`) or evicted past
-    /// the scrollback cap is dropped before that re-anchor, so it holds no
-    /// client's view.
+    /// Lines this chunk scrolls off the top feed the scrollback. Every client
+    /// whose view of this pane is held is then re-anchored by that many lines,
+    /// clamped to the lines still retained, and keeps showing the same text
+    /// while live output accumulates below. A highlight whose every line this
+    /// chunk erased (`CSI 3 J`) or evicted past the scrollback cap is dropped
+    /// before that re-anchor.
     ///
-    /// A chunk that switches the pane between its primary and alternate screens
-    /// drops every client's highlight in it: a highlight names a line by how many
-    /// the pane had pushed into scrollback, and the alternate screen keeps no
-    /// scrollback and shares no lines, so the name means nothing there.
+    /// A chunk that leaves the pane on a different screen (primary or
+    /// alternate) than it started on drops every client's highlight in it.
     ///
     /// Shell-integration facts become command lifecycle events in marker order.
     pub fn handle_pty_output(&mut self, pane_id: PaneId, bytes: &[u8]) {
         let Some(engine) = self.terminal_engines.get_mut(&pane_id) else {
             return;
         };
-        // Count lines that entered scrollback across the chunk by diffing the
-        // buffer's monotonic push counter — `clear` (`CSI 3 J`) never resets it,
-        // so the delta is exact even when the chunk erases or truncates history.
-        let before = engine.state().scrollback();
-        let pushed_before = before.total_pushed();
-        let len_before = before.len();
+        // The lines this chunk pushed into scrollback are the rise in the
+        // buffer's push counter. That counter only grows: `clear` (`CSI 3 J`)
+        // and eviction past the cap leave it as it is. The rise stays exact for
+        // a chunk that erases or truncates history.
+        let scrollback_before = engine.state().scrollback();
+        let pushed_before = scrollback_before.total_pushed();
+        let len_before = scrollback_before.len();
         let screen_before = engine.state().active_screen();
         let (replies, shell_facts) = engine.advance_with_shell_integration(bytes);
-        let after = engine.state().scrollback();
-        let len_after = after.len();
-        let pushed = (after.total_pushed() - pushed_before) as usize;
+        let scrollback_after = engine.state().scrollback();
+        let len_after = scrollback_after.len();
+        let pushed = (scrollback_after.total_pushed() - pushed_before) as usize;
         let screen_after = engine.state().active_screen();
 
         if !replies.is_empty() {
-            // A failed write leaves the child waiting for its answer.
             if let Err(error) = self.pty_backend().write(pane_id, &replies) {
                 tracing::error!(
                     %pane_id,
@@ -72,10 +70,10 @@ impl Server {
         if screen_before != screen_after {
             self.clear_pane_selections(pane_id);
         }
-        // Held views move only when history gained lines (offsets rise) or shrank
-        // under an erase (offsets reclamp); a chunk that touches no history skips
-        // the client walk. A highlight whose every line the chunk erased or
-        // evicted is dropped before the walk.
+        // Held views move only when history gained lines (offsets rise) or
+        // shrank under an erase (offsets reclamp). A chunk that touches no
+        // history skips the client walk. A highlight whose every line the chunk
+        // erased or evicted is dropped before the walk.
         if pushed > 0 || len_after < len_before {
             self.drop_evicted_selections(pane_id);
             self.anchor_held_views(pane_id, pushed, len_after);

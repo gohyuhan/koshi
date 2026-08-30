@@ -73,6 +73,29 @@ fn an_exited_pane_can_respawn_back_to_spawning() {
 }
 
 #[test]
+fn a_pane_can_respawn_more_than_once() {
+    let mut record = PaneRecord::new(PaneId::new(), SystemTime::UNIX_EPOCH);
+
+    for round in 1..=3u64 {
+        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(round);
+        record
+            .update_lifecycle(PaneLifecycleEvent::ProcessStarted)
+            .expect("ProcessStarted is legal from Spawning");
+        record
+            .update_lifecycle(PaneLifecycleEvent::ProcessExited { code: Some(1), at })
+            .expect("ProcessExited is legal from Running");
+        assert_eq!(
+            record.lifecycle(),
+            &PaneLifecycle::Exited { code: Some(1), at }
+        );
+        record
+            .update_lifecycle(PaneLifecycleEvent::Respawn)
+            .expect("Respawn is legal from Exited");
+        assert_eq!(record.lifecycle(), &PaneLifecycle::Spawning);
+    }
+}
+
+#[test]
 fn a_pane_can_be_closed_before_its_process_ever_starts() {
     let since = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
     let mut record = PaneRecord::new(PaneId::new(), SystemTime::UNIX_EPOCH);

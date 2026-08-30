@@ -1,10 +1,10 @@
 //! Integration cover for attaching over a real control socket: what one
 //! attach registers, what the reply carries and when it is written, what a
-//! second attach sees, what strict decoding refuses, what a client's key
-//! presses and resizes reach, what a client's mouse rounds do to its panes and
-//! what the one answer each round is given carries, what a detach leaves behind
-//! for the clients that stay and for the panes, and what a dropped connection
-//! leaves behind.
+//! second attach sees, what an attach naming a field this build does not know
+//! still sets, what a client's key presses and resizes reach, what a client's
+//! mouse rounds do to its panes and what the one answer each round is given
+//! carries, what a detach leaves behind for the clients that stay and for the
+//! panes, and what a dropped connection leaves behind.
 //!
 //! Each test runs the shape the per-session server process runs in: a headless
 //! session seeded with no client, its inbox drained and its frames pushed on
@@ -47,11 +47,11 @@ use koshi_runtime::server::Server;
 use koshi_session::client::{pane_viewport, ClientOrigin};
 use koshi_test_support::fake_pty::FakePtyBackend;
 
-/// The terminal size every attaching client in these tests reports.
+/// The terminal size [`attach`] reports, and the size the seeded session is
+/// bootstrapped at.
 const VIEWPORT: Size = Size { cols: 80, rows: 24 };
 
-/// The display name the seeded session carries, so a reply can be checked
-/// against a known value rather than a generated one.
+/// The display name the seeded session carries.
 const SESSION_NAME: &str = "workspace";
 
 /// How long a test waits on work it cannot make happen itself — a disconnect
@@ -59,9 +59,9 @@ const SESSION_NAME: &str = "workspace";
 /// failing.
 const PATIENCE: Duration = Duration::from_secs(5);
 
-/// Stops the dispatcher when the exchange thread ends, on the way out of a
-/// failed assertion as well as a clean return, so a broken test reports
-/// instead of leaving the dispatcher blocked on its inbox.
+/// Sends [`RuntimeEvent::Quit`] when the exchange thread ends, on the way out
+/// of a failed assertion as well as a clean return, which stops the
+/// dispatcher.
 struct StopDispatcher(Sender<RuntimeEvent>);
 
 impl Drop for StopDispatcher {
@@ -82,8 +82,8 @@ impl Drop for StopDispatcher {
 /// socket, and the fake backend, which is how it makes a pane's program write
 /// output while the session is running.
 ///
-/// It hands back the connections it wants left open alongside its own value:
-/// a connection dropped while the dispatcher is still draining detaches its
+/// It hands back the connections it wants left open alongside its own value.
+/// A connection dropped while the dispatcher is still running detaches its
 /// client, so a test reading the registry keeps its connections here until the
 /// dispatcher has stopped.
 fn served<T: Send + 'static>(
@@ -264,33 +264,11 @@ fn attach_with_token(
 
 /// Add one tab to the running session over `connection`, and return its id.
 fn new_tab(connection: &mut Connection, session_id: SessionId, request_id: u64) -> TabId {
-    let envelope = CommandEnvelope::new(
-        CommandId::new(),
-        CommandSource::ExternalCli {
-            session_id: Some(session_id),
-            target_client: None,
-        },
-        SystemTime::UNIX_EPOCH,
-        Command::NewTab(NewTabArgs {
-            cwd: None,
-            client: None,
-        }),
-    );
-    connection
-        .send(&IpcRequest {
-            request_id,
-            kind: IpcRequestKind::SubmitCommand(Box::new(envelope)),
-        })
-        .expect("send new-tab");
-    let reply: IpcResponse = connection.recv().expect("new-tab reply");
-    let IpcResult::CommandResult(CommandResult::Ok {
-        command_id: _,
-        emitted_events,
-    }) = reply.result
-    else {
-        panic!("expected the new tab to apply, got {:?}", reply.result);
-    };
-    emitted_events
+    let command = Command::NewTab(NewTabArgs {
+        cwd: None,
+        client: None,
+    });
+    submit(connection, session_id, command, request_id)
         .iter()
         .find_map(|event| match event {
             Event::TabCreated(payload) => Some(payload.tab_id),
@@ -373,12 +351,12 @@ fn submit(
 }
 
 /// Read `connection`'s event stream until `wanted` accepts a frame, on a thread
-/// this one can give up waiting on. Returns every frame read, the accepted one
-/// last, and the connection so it stays open.
+/// this one can give up waiting on. Returns the connection, still open, and
+/// every frame read, the accepted one last.
 ///
 /// Each frame is decoded as a [`SessionEvent`], so a response frame written on
-/// an attached client's connection fails the read: an [`IpcResponse`] is a
-/// two-field record where a `SessionEvent` is a single-variant one.
+/// an attached client's connection fails the read: an [`IpcResponse`] encodes
+/// as a two-field record, a `SessionEvent` as a one-field one.
 fn read_frames_until(
     mut connection: Connection,
     wanted: impl Fn(&SessionEvent) -> bool + Send + 'static,
@@ -401,8 +379,8 @@ fn read_frames_until(
         .expect("the awaited frame reaches the viewer")
 }
 
-/// [`read_frames_until`] stopping at the goodbye frame.
-fn read_to_goodbye(connection: Connection) -> (Connection, Vec<SessionEvent>) {
+/// [`read_frames_until`] stopping at [`SessionEvent::Detached`].
+fn read_to_detached(connection: Connection) -> (Connection, Vec<SessionEvent>) {
     read_frames_until(connection, |frame| *frame == SessionEvent::Detached)
 }
 
@@ -575,33 +553,12 @@ fn a_second_attach_mints_a_fresh_client_and_sees_the_tab_added_since_the_first()
 /// Close `tab` in the running session over `connection`, killing its panes
 /// outright. Closing the last tab quits the session.
 fn close_tab(connection: &mut Connection, session_id: SessionId, tab: TabId, request_id: u64) {
-    let envelope = CommandEnvelope::new(
-        CommandId::new(),
-        CommandSource::ExternalCli {
-            session_id: Some(session_id),
-            target_client: None,
-        },
-        SystemTime::UNIX_EPOCH,
-        Command::CloseTab(CloseTabArgs {
-            tab: Some(tab),
-            force: true,
-            tree: false,
-        }),
-    );
-    connection
-        .send(&IpcRequest {
-            request_id,
-            kind: IpcRequestKind::SubmitCommand(Box::new(envelope)),
-        })
-        .expect("send close-tab");
-    let reply: IpcResponse = connection.recv().expect("close-tab reply");
-    let IpcResult::CommandResult(CommandResult::Ok {
-        command_id: _,
-        emitted_events,
-    }) = reply.result
-    else {
-        panic!("expected the close to apply, got {:?}", reply.result);
-    };
+    let command = Command::CloseTab(CloseTabArgs {
+        tab: Some(tab),
+        force: true,
+        tree: false,
+    });
+    let emitted_events = submit(connection, session_id, command, request_id);
     assert!(
         emitted_events
             .iter()
@@ -819,8 +776,8 @@ fn detaching_one_client_leaves_every_other_stream_running() {
             // held keeps its size and the detach emits nothing.
             assert_eq!(emitted, Vec::new());
 
-            // The goodbye is the last frame the first viewer's stream carries.
-            let (first, frames) = read_to_goodbye(first);
+            // The detached frame is the last one the first viewer's stream carries.
+            let (first, frames) = read_to_detached(first);
             assert_eq!(frames.last(), Some(&SessionEvent::Detached));
             wait_for_client_count(&mut caller, 1, 5);
 
@@ -860,24 +817,20 @@ fn detaching_one_client_leaves_every_other_stream_running() {
 fn detach_all_takes_every_client_and_leaves_the_session_whole() {
     let (server, _fake, (session_id, first_client, second_client, tab_id, pane_id)) =
         served("detach-all", |dir, session_id, _fake| {
-            let first = {
-                let mut connection = open(&dir, session_id);
-                let (client_id, _, structure, _) = attach(&mut connection, 2);
-                (connection, client_id, structure)
-            };
+            let mut first = open(&dir, session_id);
+            let (first_client, _, structure, _) = attach(&mut first, 2);
             let mut second = open(&dir, session_id);
             let (second_client, _, _, _) = attach(&mut second, 2);
 
             let mut caller = open(&dir, session_id);
             assert_eq!(attached_client_count(&mut caller, 3), 2);
 
-            let (first, first_client, structure) = first;
             let emitted = submit(&mut caller, session_id, Command::DetachAll, 4);
             assert_eq!(emitted, Vec::new());
 
-            // Every attached client's stream ends with the same goodbye.
-            let (first, first_frames) = read_to_goodbye(first);
-            let (second, second_frames) = read_to_goodbye(second);
+            // Every attached client's stream ends with the same detached frame.
+            let (first, first_frames) = read_to_detached(first);
+            let (second, second_frames) = read_to_detached(second);
             assert_eq!(first_frames.last(), Some(&SessionEvent::Detached));
             assert_eq!(second_frames.last(), Some(&SessionEvent::Detached));
             wait_for_client_count(&mut caller, 0, 5);
@@ -923,7 +876,8 @@ fn detach_all_takes_every_client_and_leaves_the_session_whole() {
 
 #[test]
 fn detaching_the_smaller_client_grows_the_tabs_pty_back() {
-    // Half the columns of [`VIEWPORT`], which the session's pane spawned at.
+    // Half the columns of [`VIEWPORT`], the size the seeded session was
+    // bootstrapped at.
     const NARROW: Size = Size { cols: 40, rows: 24 };
 
     let (_server, fake, pane_id) = served("detach-reflow", |dir, session_id, _fake| {
@@ -950,7 +904,7 @@ fn detaching_the_smaller_client_grows_the_tabs_pty_back() {
             }),
             4,
         );
-        let (narrow, frames) = read_to_goodbye(narrow);
+        let (narrow, frames) = read_to_detached(narrow);
         assert_eq!(frames.last(), Some(&SessionEvent::Detached));
         wait_for_client_count(&mut caller, 1, 5);
 
@@ -977,7 +931,8 @@ fn detaching_the_smaller_client_grows_the_tabs_pty_back() {
 
 #[test]
 fn dropping_a_smaller_client_connection_grows_the_tabs_pty_back() {
-    // Half the columns of [`VIEWPORT`], which the session's pane spawned at.
+    // Half the columns of [`VIEWPORT`], the size the seeded session was
+    // bootstrapped at.
     const NARROW: Size = Size { cols: 40, rows: 24 };
 
     let (_server, fake, pane_id) = served("drop-reflow", |dir, session_id, _fake| {
@@ -1103,7 +1058,7 @@ fn an_attached_client_types_into_its_pane_and_resizes_the_tab_it_views() {
             pane_viewport(RESIZED),
         );
 
-        // The stream still ends with the goodbye once the client is detached.
+        // The stream still ends with the detached frame once the client is detached.
         submit(
             &mut caller,
             session_id,
@@ -1112,7 +1067,7 @@ fn an_attached_client_types_into_its_pane_and_resizes_the_tab_it_views() {
             }),
             6,
         );
-        let (viewer, frames) = read_to_goodbye(viewer);
+        let (viewer, frames) = read_to_detached(viewer);
         assert_eq!(frames.last(), Some(&SessionEvent::Detached));
         assert_eq!(
             frames
@@ -1265,9 +1220,8 @@ fn an_attached_client_forwards_a_mouse_press_into_its_pane() {
 
 #[test]
 fn the_answer_to_a_round_that_reports_nothing_still_reaches_the_viewer() {
-    // The answer is what releases the viewer's gate: without this frame the
-    // viewer's mouse uplink never sends again, since it holds every later round
-    // back until the round in flight is answered.
+    // The viewer holds every following round back until the round in flight is
+    // answered, so without this frame it sends no mouse round again.
     let (_server, _fake, ()) = served("mouse-answer", |dir, session_id, fake| {
         let mut viewer = open(&dir, session_id);
         let (_, _, structure, _) = attach(&mut viewer, 2);
@@ -1486,8 +1440,8 @@ fn one_round_runs_every_action_it_holds_and_is_answered_once() {
             )
         });
 
-    // The command the round carried went through the session's command door:
-    // the focus the split had moved away is back on the round's pane.
+    // The session applied the command the round carried: the focus the split
+    // had moved away is back on the round's pane.
     let session = server.sessions().get(&session_id).expect("session running");
     let client = session.clients.get(client_id).expect("the viewing client");
     assert_eq!(client.focused_pane(tab_id), Some(pane_id));

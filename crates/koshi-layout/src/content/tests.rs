@@ -63,8 +63,8 @@ fn a_hidden_zero_area_pane_yields_none() {
 
 #[test]
 fn a_collapsed_stack_member_yields_none_despite_a_nonempty_strip() {
-    // A collapsed stack member's rect is the header strip (non-empty), but
-    // it yields None because the header is layout furniture, not pane content.
+    // A collapsed stack member's rect is its header strip (non-empty); the
+    // header list, not the rect, decides that it yields None.
     let pane = PaneId::new();
     let solve = solve_result(vec![(pane, rect(0, 0, 10, 1))], vec![], vec![header(pane)]);
 
@@ -83,6 +83,40 @@ fn a_tiny_visible_pane_stays_some_with_a_zero_area_content_rect() {
     assert_eq!(result, vec![(pane, Some(rect(6, 6, 0, 0)))]);
     assert!(result[0].1.is_some());
     assert!(result[0].1.unwrap().is_empty());
+}
+
+#[test]
+fn a_three_by_three_pane_insets_to_one_content_cell() {
+    let pane = PaneId::new();
+    let solve = solve_result(vec![(pane, rect(4, 2, 3, 3))], vec![], vec![]);
+
+    assert_eq!(content_rects(&solve), vec![(pane, Some(rect(5, 3, 1, 1)))]);
+}
+
+#[test]
+fn a_pane_with_columns_but_no_rows_yields_none() {
+    let pane = PaneId::new();
+    let solve = solve_result(vec![(pane, rect(0, 0, 10, 0))], vec![], vec![]);
+
+    assert_eq!(content_rects(&solve), vec![(pane, None)]);
+}
+
+#[test]
+fn a_pane_at_the_coordinate_limit_insets_without_overflow() {
+    let pane = PaneId::new();
+    let solve = solve_result(vec![(pane, rect(u16::MAX, u16::MAX, 1, 1))], vec![], vec![]);
+
+    assert_eq!(
+        content_rects(&solve),
+        vec![(pane, Some(rect(u16::MAX, u16::MAX, 0, 0)))]
+    );
+}
+
+#[test]
+fn an_empty_solve_yields_no_entries() {
+    let solve = solve_result(vec![], vec![], vec![]);
+
+    assert_eq!(content_rects(&solve), Vec::<(PaneId, Option<Rect>)>::new());
 }
 
 #[test]

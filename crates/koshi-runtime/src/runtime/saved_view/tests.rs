@@ -1,8 +1,8 @@
 //! Tests for the saved-view store: what a minted token takes back, that it
 //! takes it back once, what an unminted token finds, when a filed view stops
 //! standing, what happens past the record count, what a second save for one
-//! client files, what `forget` leaves behind, and how an untouched view
-//! round-trips.
+//! client files, what `forget` leaves behind, how an untouched view
+//! round-trips, and which records a save drops.
 
 use koshi_core::geometry::Size;
 use koshi_core::ids::SessionId;
@@ -231,5 +231,38 @@ fn a_client_that_touched_nothing_takes_back_its_tab_and_three_empty_maps() {
             zoom_by_tab: HashMap::new(),
             scroll_by_pane: HashMap::new(),
         })
+    );
+}
+
+#[test]
+fn a_view_taken_at_the_exact_second_it_stops_standing_takes_back_nothing() {
+    let client = client(ClientId::new(), TabId::new());
+    let mut store = SavedViewStore::default();
+    let token = store.mint(client.id());
+    store.save(&client, moment(100));
+
+    assert_eq!(store.take(&token, moment(220)), None);
+    assert_eq!(store.records.len(), 0);
+}
+
+#[test]
+fn filing_a_view_drops_the_records_that_stopped_standing() {
+    let stale = client(ClientId::new(), TabId::new());
+    let fresh_tab = TabId::new();
+    let fresh = client(ClientId::new(), fresh_tab);
+    let mut store = SavedViewStore::default();
+
+    let stale_token = store.mint(stale.id());
+    store.save(&stale, moment(100));
+    let fresh_token = store.mint(fresh.id());
+    store.save(&fresh, moment(300));
+
+    assert_eq!(store.records.len(), 1);
+    assert_eq!(store.take(&stale_token, moment(300)), None);
+    assert_eq!(
+        store
+            .take(&fresh_token, moment(300))
+            .map(|view| view.active_tab),
+        Some(fresh_tab)
     );
 }

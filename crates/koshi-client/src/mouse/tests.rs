@@ -1,5 +1,10 @@
-//! Tests for the viewer's wheel decision: the precedence over one pane, which
-//! pane a tick targets, and the ticks that decide nothing.
+//! Tests for what the viewer decides a mouse event means: the wheel's
+//! precedence over one pane, which pane a tick targets, and the ticks that
+//! decide nothing; what a press, a drag and a release do over each region —
+//! focusing a tab or a pane, peeking the tab strip, moving a border, and
+//! highlighting text; the run of clicks that picks a highlight's shape; the
+//! capture that keeps a gesture with the pane its press landed on; the edge
+//! scroll a held drag drives on the clock; and the gestures a new frame ends.
 //!
 //! Each test builds a frame by hand — one tab, one or two panes, no chrome
 //! beyond the tabline and hint bar — so a case can be set up that a live
@@ -1248,8 +1253,16 @@ fn a_pane_swapping_to_the_alternate_screen_ends_the_selection_drag() {
     let now = Instant::now();
 
     viewer.handle_mouse(press(at), &primary, now);
-    assert!(
-        set_selection(&viewer.handle_mouse(drag(to), &primary, later(now, 1))).is_some(),
+    assert_eq!(
+        set_selection(&viewer.handle_mouse(drag(to), &primary, later(now, 1))),
+        Some(SetSelectionArgs {
+            pane,
+            selection: Selection {
+                kind: SelectionKind::Character,
+                anchor: GridPos { row: 1, col: 1 },
+                cursor: GridPos { row: 1, col: 5 },
+            },
+        }),
         "the drag extends while the pane stays on the screen the press landed on"
     );
 
@@ -1868,4 +1881,117 @@ fn a_neighbor_below_the_gap_counts_as_adjacent() {
         "a 1-cell distance is not the tab's gap"
     );
     assert!(!border_has_neighbor(&frame, bottom, Direction::Up));
+}
+
+#[test]
+fn ending_the_selection_leaves_the_other_three_gestures_alone() {
+    // A key that reaches the pane's program ends the highlight gesture only.
+    // The border drag, the strip peek-drag and the captured pane are all still
+    // under way.
+    let first = PaneId::new();
+    let second = PaneId::new();
+    let frame = frame(
+        &[plain_pane(first), plain_pane(second)],
+        Some(first),
+        PaneKind::Terminal,
+    );
+    let at = content_cell(&frame, 0);
+    let divider = Point {
+        x: 10,
+        y: frame.session.active_tab.layout_solved[1].rect.origin.y + 1,
+    };
+    let strip = Point { x: 40, y: 0 };
+    let now = Instant::now();
+    let mut viewer = viewer();
+
+    viewer.handle_mouse(press(at), &frame, now);
+    viewer.handle_mouse(press(divider), &frame, later(now, 1));
+    viewer.handle_mouse(press(strip), &frame, later(now, 2));
+    viewer.note_press_forwarded(second, MouseButton::Left);
+
+    viewer.end_mouse_selection();
+
+    assert_eq!(viewer.selection_drag, None);
+    assert_eq!(viewer.resize_drag.map(|drag| drag.pane), Some(second));
+    assert_eq!(viewer.tabline_drag.map(|drag| drag.anchor_x), Some(strip.x));
+    assert_eq!(viewer.mouse_capture, Some((second, MouseButton::Left)));
+}
+
+#[test]
+fn a_horizontal_wheel_over_the_tab_strip_steps_it_the_same_way() {
+    // Left steps toward the first tab, right toward the last — the same two
+    // steps up and down make over the strip.
+    let frame = one_pane_frame(plain_pane(PaneId::new()));
+    let tab = frame.client.active_tab;
+    let strip = Point { x: 40, y: 0 };
+    let mut viewer = viewer();
+
+    let decision = viewer
+        .handle_mouse_wheel(wheel(ScrollDirection::Right, strip), &frame)
+        .expect("a wheel tick decides");
+
+    assert_eq!(
+        decision,
+        WheelDecision {
+            hovered: None,
+            action: None,
+        },
+        "the strip is this viewer's own; nothing goes to the session"
+    );
+    assert_eq!(viewer.chrome(tab).tabline_offset, Some(1));
+
+    viewer
+        .handle_mouse_wheel(wheel(ScrollDirection::Left, strip), &frame)
+        .expect("a wheel tick decides");
+
+    assert_eq!(viewer.chrome(tab).tabline_offset, Some(0));
+
+    viewer
+        .handle_mouse_wheel(wheel(ScrollDirection::Left, strip), &frame)
+        .expect("a wheel tick decides");
+
+    assert_eq!(
+        viewer.chrome(tab).tabline_offset,
+        Some(0),
+        "the first tab is as far left as the strip goes"
+    );
+}
+
+#[test]
+fn the_wheel_decision_answers_nothing_for_an_event_that_is_not_a_wheel_tick() {
+    let frame = one_pane_frame(plain_pane(PaneId::new()));
+    let at = content_cell(&frame, 0);
+    let mut viewer = viewer();
+
+    assert_eq!(viewer.handle_mouse_wheel(press(at), &frame), None);
+    assert_eq!(viewer.handle_mouse_wheel(drag(at), &frame), None);
+    assert_eq!(viewer.handle_mouse_wheel(release(at), &frame), None);
+    assert_eq!(viewer.handle_mouse_wheel(motion(at), &frame), None);
+}
+
+#[test]
+fn a_viewer_with_no_selection_drag_asks_the_loop_for_no_wakeup() {
+    let viewer = viewer();
+
+    assert_eq!(viewer.next_mouse_wakeup(Instant::now()), None);
+}
+
+#[test]
+fn a_scroll_step_already_due_asks_the_loop_to_wake_at_once() {
+    let pane = PaneId::new();
+    let frame = one_pane_frame(plain_pane(pane));
+    let at = content_cell(&frame, 0);
+    // One row above the pane's content, which is where the edge scroll arms.
+    let above = Point { x: at.x, y: 0 };
+    let now = Instant::now();
+    let mut viewer = viewer();
+
+    viewer.handle_mouse(press(at), &frame, now);
+    viewer.handle_mouse(drag(above), &frame, now);
+
+    assert_eq!(
+        viewer.next_mouse_wakeup(now + Duration::from_secs(1)),
+        Some(Duration::ZERO),
+        "a step already behind the clock asks for no further wait"
+    );
 }

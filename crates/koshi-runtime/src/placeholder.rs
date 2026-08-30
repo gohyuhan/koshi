@@ -1,5 +1,5 @@
-//! Stand-ins the runtime holds where a subsystem has no concrete type wired
-//! yet. Each trait here carries no methods, so nothing calls through them.
+//! Stand-ins the runtime holds where a subsystem has no concrete type wired.
+//! Each trait here carries no methods, so nothing calls through them.
 
 /// Source of render snapshots for attach.
 pub trait SnapshotProvider {}

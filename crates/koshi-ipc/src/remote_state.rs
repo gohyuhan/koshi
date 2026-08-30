@@ -6,16 +6,16 @@
 //! generated itself, with its private key. There is no operator-supplied
 //! certificate.
 //!
-//! [`EnabledFile`](crate::remote_state::EnabledFile) is the durable record of
-//! the operator's one yes. A listen address in `koshi.kdl` sets the address; it
-//! does not open the port. The port opens the first time the operator answers
-//! yes to the offer, and on every start after that. The router is this file's
-//! only writer, as it is the token store's.
+//! [`EnabledFile`](crate::remote_state::EnabledFile) records that the operator
+//! answered yes to opening the port. A listen address in `koshi.kdl` sets the
+//! address and does not open the port. The port opens the first time the
+//! operator answers yes, and on every start after that. The router is the only
+//! writer of this file and of the token store.
 //!
 //! Both files sit inside the private koshi data directory, are restricted to
 //! the owning user, and are replaced through
 //! [`koshi_storage::atomic::write_atomic`]. The token store and the
-//! saved-server store are written the same way, through the same
+//! saved-server store are written the same way, through the
 //! `write_owner_only` this module holds.
 
 use std::path::{Path, PathBuf};
@@ -43,7 +43,7 @@ pub const ENABLED_FILE_FORMAT: u32 = koshi_core::compat::REMOTE_ACCESS_MARK_FORM
 /// The certificate this machine presents to remote clients, and its private
 /// key.
 ///
-/// Decoding rejects any field it does not know, so a misspelled name is an
+/// Decoding rejects any field it does not know; a misspelled field name is an
 /// error.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -96,7 +96,7 @@ impl CertFile {
 
 /// The record that the operator switched remote access on.
 ///
-/// Decoding rejects any field it does not know, so a misspelled name is an
+/// Decoding rejects any field it does not know; a misspelled field name is an
 /// error.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -161,8 +161,9 @@ fn unreadable(file: RemoteFile, path: &Path, detail: String) -> IpcError {
     }
 }
 
-/// Read and decode the JSON file at `path`. A path with no file is an error:
-/// each of these files means something by existing.
+/// Read and decode the JSON file at `path`. A path with no file is
+/// [`IpcError::RemoteFileUnreadable`] on `file`, as is a file that cannot be
+/// read or decoded.
 fn read_private<T: DeserializeOwned>(file: RemoteFile, path: &Path) -> Result<T, IpcError> {
     let data = std::fs::read(path).map_err(|error| unreadable(file, path, error.to_string()))?;
     serde_json::from_slice(&data).map_err(|error| unreadable(file, path, error.to_string()))
@@ -182,9 +183,10 @@ fn write_private<T: Serialize>(file: RemoteFile, path: &Path, value: &T) -> Resu
 /// create the directory holding it when it is missing.
 ///
 /// The file is restricted to the owning user: mode `0600` on Unix, set on an
-/// existing file before the replace so the new file carries it too. On Windows
+/// existing file before the replace; the new file carries it too. On Windows
 /// the file takes the data directory's owner-scoped ACLs. The directory itself
-/// gets mode `0700` on Unix.
+/// gets mode `0700` on Unix. A `path` with no directory part creates no
+/// directory.
 ///
 /// # Errors
 /// The text of the first step that failed: creating the directory, setting a

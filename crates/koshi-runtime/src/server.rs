@@ -73,8 +73,8 @@ const CLIENTS_TOLD_POLL: Duration = Duration::from_millis(2);
 /// restart.
 pub type RestartCheck = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
 
-/// Whether the binary at `exe` is one this machine could run: it can be read,
-/// and on Unix it carries an execute bit.
+/// Whether the binary at `exe` is one this machine could run: its metadata can
+/// be read, and on Unix it carries an execute bit.
 ///
 /// # Errors
 /// Returns the sentence naming the path and what is wrong with it.
@@ -99,8 +99,8 @@ pub fn binary_is_runnable(exe: &Path) -> Result<(), String> {
 }
 
 /// Whether every pane in `panes` could cross an image swap: on Unix a pane's
-/// terminal must expose a descriptor, since the descriptor is what the next
-/// image takes the pane back by.
+/// terminal must expose a descriptor. The next image takes the pane back by
+/// that descriptor.
 ///
 /// # Errors
 /// Returns the sentence naming the first pane whose terminal exposes no

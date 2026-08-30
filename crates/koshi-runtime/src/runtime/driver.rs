@@ -3,8 +3,7 @@
 //! repaint, tell whether any pane is still live, and group-kill every child
 //! when the loop panics (the normal quit path takes the staged
 //! [`Server::shutdown`]). They wrap the render scheduler, PTY maps, and
-//! handlers, which are crate-private, so the loop can live outside this
-//! crate. Explicit quit marks zero-grace teardown before the loop exits.
+//! handlers, which are crate-private; the loop lives outside this crate.
 
 use std::ops::ControlFlow;
 use std::sync::Arc;
@@ -19,8 +18,8 @@ impl Server {
     /// Route one inbox event to its handler, publishing whatever events the
     /// handler emits. Returns [`ControlFlow::Break`] when the event is a quit
     /// request, which each loop reads on its own terms. A [`RuntimeEvent::Quit`]
-    /// is a terminal hangup — explicit quit travels through the `core:quit`
-    /// command — so it breaks the loop and leaves teardown on the graceful path.
+    /// is a terminal hangup: it breaks the loop and leaves teardown on the
+    /// graceful path. Explicit quit travels through the `core:quit` command.
     pub fn handle_runtime_event(&mut self, event: RuntimeEvent) -> ControlFlow<()> {
         match event {
             RuntimeEvent::Quit => return ControlFlow::Break(()),
@@ -74,8 +73,7 @@ impl Server {
                 active_tab,
                 attached_at,
             } => {
-                // The in-process attach path. Every client it registers is on
-                // this machine.
+                // Every client this arm registers is on this machine.
                 let events = self.handle_client_attach(
                     session_id,
                     client_id,
@@ -163,6 +161,7 @@ impl Server {
         }
         ControlFlow::Continue(())
     }
+
     /// How long the loop may block before the next render is due: `None` to
     /// sleep until an event, `Some(ZERO)` to render now, else the time left on
     /// the current cadence.

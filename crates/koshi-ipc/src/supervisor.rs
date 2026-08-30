@@ -1,12 +1,11 @@
 //! The pane-supervisor protocol: how a session server drives the panes held by
 //! a separate process.
 //!
-//! On Windows a pseudoconsole cannot be handed to another process, so the
-//! process that opens one must never exit. A session server that replaces its
-//! own image therefore keeps its panes in a helper process — the supervisor —
-//! that outlives the swap. The session server asks the supervisor to spawn,
-//! resize, write to and kill panes; the supervisor sends back every byte those
-//! panes print and every exit.
+//! A session server keeps its panes in a helper process — the supervisor —
+//! that keeps running while the session server replaces its own image. The
+//! session server asks the supervisor to spawn, resize, write to and kill
+//! panes; the supervisor sends back every byte those panes print and every
+//! exit.
 //!
 //! One link carries both directions. A message from the session server is a
 //! [`SupervisorRequest`](crate::supervisor::SupervisorRequest); a message from
@@ -29,10 +28,9 @@
 //! control-plane protocol's
 //! [`ROUTER_PROTOCOL_VERSION`](crate::router::ROUTER_PROTOCOL_VERSION).
 //!
-//! A supervisor keeps running the binary image it started from, so an updated
-//! session server can be newer than the supervisor it reconnects to. A request
-//! kind the supervisor does not have is refused by name and the link stays
-//! open.
+//! A supervisor keeps running the binary image it started from; the session
+//! server that reconnects to it can be a newer build. A request kind the
+//! supervisor does not have is refused by name and the link stays open.
 
 use std::path::{Path, PathBuf};
 
@@ -51,23 +49,21 @@ use crate::wire::{Answer, Envelope, MaybeKnown, WireName, WireVariants};
 /// The value and the rule it follows live in
 /// [`koshi_core::compat::SUPERVISOR_PROTOCOL`].
 ///
-/// Version 1 is the first one: the link is born with the supervisor, after the
-/// last release, so no released build speaks it yet.
+/// Version 1 is the first version of the link.
 pub const SUPERVISOR_PROTOCOL_VERSION: u32 = SUPERVISOR_PROTOCOL.max;
 
 /// The lowest supervisor-link protocol version this build speaks. A peer whose
 /// highest is below this one is refused with
 /// [`UnsupportedVersion`](crate::protocol::IpcErrorCode::UnsupportedVersion).
 ///
-/// The floor is 1, the version the link is born speaking. Raising it drops
-/// support for every build below it, so it moves only on a stated decision to
-/// end that support.
+/// The floor is 1, the first version of the link. Raising it drops support
+/// for every build below it.
 pub const MIN_SUPERVISOR_PROTOCOL_VERSION: u32 = SUPERVISOR_PROTOCOL.min;
 
 /// One message from a session server to its supervisor.
 ///
 /// The envelope's own fields are fixed: decoding rejects any field it does not
-/// know, so a misspelled `request_id` is an error.
+/// know; a misspelled `request_id` is an error.
 ///
 /// `K` is the request kind. A sender uses `SupervisorRequest`, where `K` is
 /// [`SupervisorRequestKind`]. The supervisor uses
@@ -81,16 +77,16 @@ pub type IncomingSupervisorRequest = SupervisorRequest<MaybeKnown<SupervisorRequ
 
 /// What a supervisor request asks for.
 ///
-/// A field this build does not know is ignored, so a peer that adds one still
-/// decodes here.
+/// A field this build does not know is ignored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SupervisorRequestKind {
     /// Opens the link: names the range of supervisor-link protocol versions the
     /// session server speaks and presents the token that server started the
     /// supervisor with. Sent before any other kind.
     ///
-    /// Sending it again on an open link is allowed and changes nothing: the
-    /// versions and token are checked again and the same answer comes back.
+    /// Sending it again on an open link is allowed: the versions and token are
+    /// checked again, an accepted one settles the version again from its own
+    /// range, and a refused one leaves the gate as it was.
     Hello {
         /// The lowest supervisor-link protocol version the session server
         /// speaks.
@@ -177,8 +173,8 @@ impl SupervisorRequestKind {
         }
     }
 
-    /// The kind's name, e.g. `"Spawn"`. Carries no payload, so a log line
-    /// holding it leaks neither the link token nor a child's input.
+    /// The kind's name, e.g. `"Spawn"`, with none of its payload: a Hello's
+    /// token and a Write's bytes do not appear in it.
     #[must_use]
     pub fn name(&self) -> &'static str {
         match self {
@@ -199,7 +195,7 @@ impl SupervisorRequestKind {
 /// One message answering a [`SupervisorRequest`].
 ///
 /// The envelope's own fields are fixed: decoding rejects any field it does not
-/// know, so a misspelled `request_id` is an error rather than an absent one.
+/// know; a misspelled `request_id` is an error, not an absent one.
 ///
 /// `R` is the answer. The supervisor uses `SupervisorResponse`, where `R` is
 /// [`SupervisorResult`]. A session server reads it inside
@@ -210,8 +206,7 @@ pub type SupervisorResponse<R = SupervisorResult> = Answer<R>;
 /// One pane the supervisor holds, as [`ListPanes`](SupervisorRequestKind::ListPanes)
 /// reports it.
 ///
-/// A field this build does not know is ignored, so a record from a newer
-/// supervisor still reads.
+/// A field this build does not know is ignored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SupervisorPane {
     /// The pane this record is for.
@@ -224,8 +219,7 @@ pub struct SupervisorPane {
 
 /// The answer to a supervisor request.
 ///
-/// A field this build does not know is ignored, so a peer that adds one still
-/// decodes here.
+/// A field this build does not know is ignored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SupervisorResult {
     /// Answers [`SupervisorRequestKind::Hello`]: the link is open, the ranges
@@ -261,8 +255,7 @@ pub enum SupervisorResult {
 
 /// Something one pane did that no request asked about.
 ///
-/// A field this build does not know is ignored, so a peer that adds one still
-/// decodes here.
+/// A field this build does not know is ignored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SupervisorEvent {
     /// One chunk of a pane's child output, in the order the pane produced it.
@@ -275,8 +268,7 @@ pub enum SupervisorEvent {
         bytes: Vec<u8>,
     },
     /// A pane's child ended. It comes after the last
-    /// [`Output`](SupervisorEvent::Output) for that pane, so the session
-    /// server sees everything the child printed before it sees the child end.
+    /// [`Output`](SupervisorEvent::Output) for that pane.
     Exited {
         /// The pane whose child ended.
         pane_id: PaneId,
@@ -286,8 +278,8 @@ pub enum SupervisorEvent {
 }
 
 impl SupervisorEvent {
-    /// The event's name, e.g. `"Output"`. Carries no payload, so a log line
-    /// holding it leaks no child output.
+    /// The event's name, e.g. `"Output"`, with none of its payload: an
+    /// Output's bytes do not appear in it.
     #[must_use]
     pub fn name(&self) -> &'static str {
         match self {
@@ -300,8 +292,7 @@ impl SupervisorEvent {
 /// One message from a supervisor to its session server: the answer to a
 /// request, or an event that answers none.
 ///
-/// Both directions share one link, so every frame the supervisor sends is one
-/// of these two.
+/// Every frame the supervisor sends is one of these two.
 ///
 /// `R` and `E` are the answer and the event. The supervisor uses
 /// `SupervisorMessage`, where they are [`SupervisorResult`] and
@@ -352,8 +343,7 @@ impl SupervisorHandshake {
     /// The link protocol version this link settled on, or `None` while no
     /// Hello has been accepted.
     ///
-    /// The supervisor puts it in [`SupervisorResult::Hello`], so the session
-    /// server learns which version the two of them use.
+    /// The supervisor puts it in [`SupervisorResult::Hello`].
     #[must_use]
     pub fn agreed(&self) -> Option<u32> {
         self.0.agreed()
@@ -406,14 +396,13 @@ impl SupervisorHandshake {
 /// [`Connection::connect`](crate::transport::Connection::connect) takes.
 ///
 /// `supervisor_pid` is the process id of that supervisor and is part of the
-/// address, so a supervisor being replaced and the one replacing it never
-/// listen at the same address.
+/// address: two supervisors of one session with different process ids listen
+/// at different addresses.
 ///
 /// On Unix this is a socket-file path, `session-<uuid>-pty-<pid>.sock` directly
 /// inside `runtime_dir`. On Windows it is the pipe name
-/// `koshi-pty-session-<uuid>-<pid>`; a pipe has no filesystem path, so
-/// `runtime_dir` goes unused there. Callers resolve `runtime_dir` through
-/// `koshi_paths::runtime_dir()`.
+/// `koshi-pty-session-<uuid>-<pid>`, and `runtime_dir` goes unused. Callers
+/// resolve `runtime_dir` through `koshi_paths::runtime_dir()`.
 #[must_use]
 pub fn supervisor_socket_addr(
     runtime_dir: &Path,
@@ -435,9 +424,9 @@ pub fn supervisor_socket_addr(
 }
 
 impl WireVariants for SupervisorRequestKind {
-    /// Every supervisor request kind this build has. A kind added to
-    /// [`SupervisorRequestKind`] is added here and to
-    /// [`SupervisorRequestKind::name`] in the same change.
+    /// Every supervisor request kind this build has: one entry per variant of
+    /// [`SupervisorRequestKind`], spelled as [`SupervisorRequestKind::name`]
+    /// spells it.
     const VARIANTS: &'static [&'static str] = &[
         "Hello",
         "Spawn",
@@ -459,8 +448,8 @@ impl WireName for SupervisorRequestKind {
 }
 
 impl WireVariants for SupervisorResult {
-    /// Every supervisor answer this build has. A variant added to
-    /// [`SupervisorResult`] is added here in the same change.
+    /// Every supervisor answer this build has: one entry per variant of
+    /// [`SupervisorResult`], spelled as its `wire_name` spells it.
     const VARIANTS: &'static [&'static str] =
         &["Hello", "Spawned", "Panes", "Cwd", "Done", "Error"];
 }
@@ -479,9 +468,8 @@ impl WireName for SupervisorResult {
 }
 
 impl WireVariants for SupervisorEvent {
-    /// Every supervisor event this build has. A variant added to
-    /// [`SupervisorEvent`] is added here and to [`SupervisorEvent::name`] in
-    /// the same change.
+    /// Every supervisor event this build has: one entry per variant of
+    /// [`SupervisorEvent`], spelled as [`SupervisorEvent::name`] spells it.
     const VARIANTS: &'static [&'static str] = &["Output", "Exited"];
 }
 

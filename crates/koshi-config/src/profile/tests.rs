@@ -351,11 +351,12 @@ fn unicode_plugin_name_is_accepted() {
     let TemplateNode::Split(split) = &template.tabs[0].root else {
         panic!("expected split root");
     };
-    assert!(matches!(
-        &split.children[0].node,
-        TemplateNode::Leaf(LeafTemplate::Plugin(PluginTemplate { name }))
-            if name == "\u{1f389}"
-    ));
+    assert_eq!(
+        split.children[0].node,
+        TemplateNode::Leaf(LeafTemplate::Plugin(PluginTemplate {
+            name: "\u{1f389}".to_string(),
+        }))
+    );
 }
 
 #[test]
@@ -399,11 +400,20 @@ tab {
         panic!("expected stack root");
     };
     assert_eq!(split.active, 1);
-    assert!(matches!(
-        &split.children[1].node,
-        TemplateNode::Leaf(LeafTemplate::Plugin(PluginTemplate { name }))
-            if name == "session-manager"
-    ));
+    assert_eq!(
+        split.children[1].node,
+        TemplateNode::Leaf(LeafTemplate::Plugin(PluginTemplate {
+            name: "session-manager".to_string(),
+        }))
+    );
+    assert_eq!(
+        split
+            .children
+            .iter()
+            .map(|child| child.collapsed)
+            .collect::<Vec<bool>>(),
+        [true, false]
+    );
 }
 
 #[test]
@@ -429,7 +439,14 @@ fn a_profile_without_the_lock_marker_starts_unlocked() {
 #[test]
 fn syntax_error_is_the_syntax_variant() {
     let err = parse("tab {").unwrap_err();
-    assert!(matches!(err, ProfileError::Syntax(_)));
+
+    let ProfileError::Syntax(diagnostic) = err else {
+        panic!("expected a syntax error, got {err:?}");
+    };
+    assert_eq!(
+        diagnostic.to_string(),
+        "config parse error in profile/dev.kdl"
+    );
 }
 
 #[test]
@@ -495,6 +512,24 @@ fn version_as_property_is_reported() {
 }
 
 #[test]
+fn version_with_two_arguments_is_reported() {
+    assert_eq!(
+        messages("version 1 2\ntab { pane }"),
+        ["`version` takes exactly one integer argument"]
+    );
+}
+
+#[test]
+fn version_above_the_u32_ceiling_is_reported() {
+    // 4294967296 is one past `u32::MAX`. The conversion fails before any
+    // schema comparison runs.
+    assert_eq!(
+        messages("version 4294967296\ntab { pane }"),
+        ["`version` must be a non-negative integer"]
+    );
+}
+
+#[test]
 fn missing_tabs_is_reported() {
     assert_eq!(
         messages("version 1"),
@@ -514,6 +549,16 @@ fn unknown_top_level_node_is_reported() {
 fn empty_tab_is_reported() {
     assert_eq!(
         messages("version 1\ntab { }"),
+        ["`tab` needs one layout node (`pane`, `plugin`, `horizontal`, `vertical`, or `stack`)"]
+    );
+}
+
+#[test]
+fn a_tab_without_a_children_block_is_reported() {
+    // A bare `tab` carries no children block at all, where `tab { }` carries an
+    // empty one; both reach the same missing-root report.
+    assert_eq!(
+        messages("version 1\ntab"),
         ["`tab` needs one layout node (`pane`, `plugin`, `horizontal`, `vertical`, or `stack`)"]
     );
 }
@@ -705,6 +750,40 @@ fn sizing_on_tab_root_is_reported() {
 }
 
 #[test]
+fn sizing_on_a_split_at_the_tab_root_is_reported() {
+    // A split carries sizing for its own slot in a parent split. The tab root
+    // sits in no parent split.
+    assert_eq!(
+        messages("version 1\ntab { horizontal { size 30; pane; pane } }"),
+        ["sizing applies only to children of `horizontal` or `vertical`"]
+    );
+}
+
+#[test]
+fn sizing_on_a_stack_at_the_tab_root_is_reported() {
+    assert_eq!(
+        messages("version 1\ntab { stack { weight 2; pane; pane } }"),
+        ["sizing applies only to children of `horizontal` or `vertical`"]
+    );
+}
+
+#[test]
+fn expanded_on_the_tab_root_is_reported() {
+    assert_eq!(
+        messages("version 1\ntab { pane { expanded } }"),
+        ["`expanded` applies only to members of a `stack`"]
+    );
+}
+
+#[test]
+fn expanded_with_a_value_is_reported() {
+    assert_eq!(
+        messages("version 1\ntab { stack { pane { expanded #true }; pane } }"),
+        ["`expanded` is a bare marker and takes no values or children"]
+    );
+}
+
+#[test]
 fn size_and_weight_together_are_reported() {
     assert_eq!(
         messages("version 1\ntab { horizontal { pane { size 30; weight 2 }; pane } }"),
@@ -733,6 +812,16 @@ fn over_hundred_percent_size_is_reported() {
     assert_eq!(
         messages("version 1\ntab { horizontal { pane { size \"101%\" }; pane } }"),
         ["percent must be between 1 and 100, got 101"]
+    );
+}
+
+#[test]
+fn a_percent_over_255_reports_the_shape_not_the_range() {
+    // The percent digits are read as a `u8`. 256 does not fit one, and the
+    // value reports as an unreadable `size` rather than an out-of-range percent.
+    assert_eq!(
+        messages("version 1\ntab { horizontal { pane { size \"256%\" }; pane } }"),
+        ["`size` is a cell count like `size 30` or a percentage like `size \"60%\"`"]
     );
 }
 
@@ -797,6 +886,31 @@ fn negative_min_is_reported() {
     assert_eq!(
         messages("version 1\ntab { horizontal { pane { min -3 }; pane } }"),
         ["`min` must be an integer between 1 and 65535"]
+    );
+}
+
+#[test]
+fn min_above_the_cell_ceiling_is_reported() {
+    // 65536 is one past `u16::MAX`, the largest cell count a min may name.
+    assert_eq!(
+        messages("version 1\ntab { horizontal { pane { min 65536 }; pane } }"),
+        ["`min` must be an integer between 1 and 65535"]
+    );
+}
+
+#[test]
+fn non_integer_preferred_is_reported() {
+    assert_eq!(
+        messages("version 1\ntab { horizontal { pane { preferred \"5\" }; pane } }"),
+        ["`preferred` must be an integer between 1 and 65535"]
+    );
+}
+
+#[test]
+fn weight_above_the_u32_ceiling_is_reported() {
+    assert_eq!(
+        messages("version 1\ntab { horizontal { pane { weight 4294967296 }; pane } }"),
+        ["`weight` must be an integer between 1 and 4294967295"]
     );
 }
 
@@ -1023,6 +1137,30 @@ fn empty_env_name_is_reported() {
 }
 
 #[test]
+fn env_given_as_properties_is_reported() {
+    // Properties are not positional arguments. Both are filtered out, and the
+    // name/value pair never forms.
+    assert_eq!(
+        messages("version 1\ntab { pane { env name=\"A\" value=\"1\" } }"),
+        ["`env` takes a name and a value, both strings, like `env \"RUST_LOG\" \"debug\"`"]
+    );
+}
+
+#[test]
+fn an_empty_env_value_is_allowed() {
+    // Only the name must be non-empty. `""` sets the variable to the empty
+    // string.
+    let template = parse("version 1\ntab { pane { env \"A\" \"\" } }").unwrap();
+    let TemplateNode::Leaf(LeafTemplate::Terminal(terminal)) = &template.tabs[0].root else {
+        panic!("expected terminal leaf root");
+    };
+    assert_eq!(
+        terminal.env,
+        BTreeMap::from([("A".to_string(), String::new())])
+    );
+}
+
+#[test]
 fn cwd_arity_is_reported() {
     assert_eq!(
         messages("version 1\ntab { pane { cwd \"a\" \"b\" } }"),
@@ -1055,6 +1193,14 @@ fn empty_cwd_is_reported() {
 }
 
 #[test]
+fn cwd_with_children_is_reported() {
+    assert_eq!(
+        messages("version 1\ntab { pane { cwd \"a\" { } } }"),
+        ["`cwd` takes no children"]
+    );
+}
+
+#[test]
 fn unknown_pane_config_is_reported() {
     assert_eq!(
         messages("version 1\ntab { pane { colour \"red\" } }"),
@@ -1082,6 +1228,24 @@ fn empty_plugin_name_is_reported() {
 fn plugin_with_extra_arguments_is_reported() {
     assert_eq!(
         messages("version 1\ntab { horizontal { plugin \"files\" \"tree\"; pane } }"),
+        ["`plugin` takes exactly one name string, like `plugin \"session-manager\"`"]
+    );
+}
+
+#[test]
+fn non_string_plugin_name_is_reported() {
+    // One positional argument of the wrong kind. The arity is right, and the
+    // report names the value rather than the count.
+    assert_eq!(
+        messages("version 1\ntab { horizontal { plugin 42; pane } }"),
+        ["`plugin` takes one non-empty name string"]
+    );
+}
+
+#[test]
+fn plugin_name_as_a_property_is_reported() {
+    assert_eq!(
+        messages("version 1\ntab { horizontal { plugin name=\"files\"; pane } }"),
         ["`plugin` takes exactly one name string, like `plugin \"session-manager\"`"]
     );
 }
@@ -1153,5 +1317,15 @@ fn a_second_lock_marker_is_reported() {
     assert_eq!(
         messages("version 1\nlock\nlock\ntab { pane }"),
         ["`lock` is declared more than once"]
+    );
+}
+
+#[test]
+fn a_malformed_first_lock_leaves_the_second_one_free_to_stand() {
+    // The first `lock` is rejected for its shape and sets nothing. The second
+    // one is the first usable marker and draws no duplicate report.
+    assert_eq!(
+        messages("version 1\nlock #true\nlock\ntab { pane }"),
+        ["`lock` is a bare marker and takes no values or children"]
     );
 }

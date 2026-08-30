@@ -100,12 +100,8 @@ fn submit_via_runtime_dir(
 
 /// [`submit_external`] against an explicit runtime directory: the whole
 /// exchange, with the endpoint lookup rooted where the caller says.
-///
-/// `client_id` is the client the command acts for, and rides on the source.
-/// Naming one costs a second round trip: the session's Hello answer is read
-/// before the command is written, and a session that settled below protocol
-/// version 3 is refused with [`CliError::IpcUnavailable`]. `None` names no
-/// client and keeps the exchange at one round trip.
+/// `client_id` rides on the source and costs the second round trip
+/// [`submit_external`] describes.
 pub fn submit_external_via_runtime_dir(
     runtime_dir: &Path,
     session_id: SessionId,
@@ -216,7 +212,7 @@ fn overview_of(
 ///
 /// A session whose build has no layout request refuses it two ways, and both
 /// are reported as the version gap they are, naming what to do instead. A
-/// session from this build or later names the kind it lacks
+/// session from this build or newer names the kind it lacks
 /// ([`UnsupportedKind`](IpcErrorCode::UnsupportedKind)); one older than the
 /// tolerant wire cannot read the request at all
 /// ([`MalformedRequest`](IpcErrorCode::MalformedRequest)).
@@ -238,12 +234,7 @@ pub fn fetch_layout(
             }),
             _ => Ok(layout),
         },
-        IpcResult::Error(refusal)
-            if matches!(
-                refusal.code,
-                IpcErrorCode::UnsupportedKind | IpcErrorCode::MalformedRequest
-            ) =>
-        {
+        IpcResult::Error(refusal) if session_has_no_such_request(refusal.code) => {
             Err(CliError::IpcUnavailable {
                 detail: "this session was started by an older koshi that cannot report its \
                          layout; restart the session to use `debug dump-layout`, or run \
@@ -273,12 +264,7 @@ pub fn fetch_recent_events(
     };
     match exchange(&endpoint, session_id, request, None)? {
         IpcResult::RecentEvents(events) => Ok(events),
-        IpcResult::Error(refusal)
-            if matches!(
-                refusal.code,
-                IpcErrorCode::UnsupportedKind | IpcErrorCode::MalformedRequest
-            ) =>
-        {
+        IpcResult::Error(refusal) if session_has_no_such_request(refusal.code) => {
             Err(CliError::IpcUnavailable {
                 detail: "this session was started by an older koshi that keeps no recent-events \
                          buffer; restart the session to use `debug events`"
@@ -288,6 +274,18 @@ pub fn fetch_recent_events(
         IpcResult::Error(refusal) => Err(refused(&refusal)),
         other => Err(talk::SESSION.unexpected_reply(&other)),
     }
+}
+
+/// True when `code` says the session's build has no such request kind: the
+/// session named the kind as one it lacks
+/// ([`UnsupportedKind`](IpcErrorCode::UnsupportedKind)), or it could not read
+/// the request's bytes at all
+/// ([`MalformedRequest`](IpcErrorCode::MalformedRequest)).
+fn session_has_no_such_request(code: IpcErrorCode) -> bool {
+    matches!(
+        code,
+        IpcErrorCode::UnsupportedKind | IpcErrorCode::MalformedRequest
+    )
 }
 
 /// The result of asking a running session to restart.

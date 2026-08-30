@@ -13,7 +13,7 @@
 //!
 //! Three asks never start one: restarting the running router, reading its
 //! build version, and counting the connections it holds from another machine.
-//! Each sends a single exchange, and reports back when no router was running.
+//! Each opens one connection, and reports back when no router was running.
 
 use std::path::Path;
 use std::process::Stdio;
@@ -66,7 +66,7 @@ const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 ///
 /// Tries the exchange once. With no router running it starts one detached and
 /// retries every 100 milliseconds until the router answers or 5 seconds pass.
-/// Nothing is sent on an attempt that finds no router, so a retried request
+/// Nothing is sent on an attempt that finds no router: a retried request
 /// reaches a router exactly once.
 ///
 /// The answer is the router's own result for `kind`, including a
@@ -101,8 +101,9 @@ pub fn router_request(
 /// Sends exactly one Restart exchange and never starts a router. `Ok(false)`
 /// means no router was running, so nothing restarted.
 ///
-/// A router that refuses the request is [`CliError::IpcUnavailable`]. A router
-/// whose build has no such kind refuses it that way, by name.
+/// A router that refuses the request is [`CliError::IpcUnavailable`] carrying
+/// the sentence the router sent. A router whose build has no Restart kind
+/// refuses it, and that sentence names both builds.
 pub fn restart_running_router(runtime_dir: &Path) -> Result<bool, CliError> {
     match exchange(runtime_dir, &RouterRequestKind::Restart)? {
         None => Ok(false),
@@ -129,7 +130,9 @@ pub enum RemoteConnections {
     OlderBuild,
     /// A router is listening and did not answer the question.
     NoAnswer {
-        /// The failure, in the words the control-plane client used.
+        /// Why there is no count: the sentence the router refused with, the
+        /// sentence naming a reply that answers nothing this asked, or the
+        /// sentence naming a failure to talk.
         detail: String,
     },
 }

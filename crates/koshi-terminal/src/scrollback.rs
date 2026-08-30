@@ -1,11 +1,10 @@
 //! Per-pane scrollback history: a bounded buffer of lines that have scrolled
 //! off the top of the primary screen.
 //!
-//! The buffer is capped on two axes — a maximum line count and a maximum byte
-//! count — so a long-lived background pane cannot grow memory without bound.
-//! When a push exceeds either cap the oldest lines are dropped from the front;
-//! the count and byte size of everything dropped are tallied (never the content
-//! itself) so the runtime can report truncation via
+//! The buffer is capped on two axes: a maximum line count and a maximum byte
+//! count. When a push exceeds either cap the oldest lines are dropped from the
+//! front. The count and byte size of everything dropped are tallied (never the
+//! content itself); the runtime reports them through
 //! [`PaneScrollbackTruncated`](koshi_core::event::PaneScrollbackTruncated).
 
 use std::collections::VecDeque;
@@ -20,35 +19,24 @@ const DEFAULT_MAX_LINES: usize = 10_000;
 /// Default scrollback byte cap: 32 MiB of retained text per pane.
 const DEFAULT_MAX_BYTES: usize = 32 * 1024 * 1024;
 
-/// Drop the trailing run of fully-default blanks a row is padded out to the
-/// screen width with, so history holds a line's text rather than a whole row
-/// of cells. A 200-column row reading `README.md` keeps 9 cells instead of 200.
+/// The cells history keeps of `row`: a [`RowEnd::Hard`] row without the
+/// trailing run of fully-default blanks, every other row whole.
 ///
-/// Only a [`RowEnd::Hard`] row is trimmed. A [`RowEnd::Soft`] row wrapped
-/// because it filled the width, so every cell is content; a
-/// [`RowEnd::SoftWide`] row's final blank is the spacer standing in for the
-/// wide glyph that begins the next row. Both keep every cell, so their length
-/// still marks where a reflow re-joins the logical line.
-///
-/// A styled blank — a background-colored prompt segment, say — is not a
-/// default blank and is kept, so its color survives.
-///
-/// Returns a slice, so the caller allocates once at the size actually kept.
+/// A 200-column hard row reading `README.md` keeps 9 cells. A styled blank —
+/// a background-colored prompt segment — is not a default blank and is kept.
+/// A [`RowEnd::Soft`] row keeps every cell. A [`RowEnd::SoftWide`] row keeps
+/// every cell, including the final blank spacer that stands in for the wide
+/// glyph on the next row.
 fn kept(row: &[Cell], end: RowEnd) -> &[Cell] {
-    if matches!(end, RowEnd::Hard) {
+    if end == RowEnd::Hard {
         &row[..content_len(row)]
     } else {
         row
     }
 }
 
-/// Shorten an owned `row` to what history keeps of it, then hand back the
-/// memory the dropped blanks held.
-///
-/// The counterpart of [`kept`] for a row already owned. It moves the cells it
-/// keeps rather than cloning them, so a cell carrying combining marks does not
-/// allocate a fresh copy of them, and a row that keeps every cell costs
-/// nothing at all.
+/// Truncate an owned `row` to what [`kept`] keeps of it and release the spare
+/// capacity.
 fn keep_in_place(row: &mut Vec<Cell>, end: RowEnd) {
     row.truncate(kept(row, end).len());
     row.shrink_to_fit();
@@ -72,8 +60,7 @@ impl ScrollbackLimit {
 }
 
 impl Default for ScrollbackLimit {
-    /// The built-in caps applied when no configured limits are supplied: 10 000
-    /// lines and 32 MiB of retained text.
+    /// 10 000 lines and 32 MiB of retained text.
     fn default() -> Self {
         ScrollbackLimit {
             max_lines: DEFAULT_MAX_LINES,
@@ -87,12 +74,8 @@ impl Default for ScrollbackLimit {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Scrollback {
     /// Retained rows, oldest at the front and newest at the back, each paired
-    /// with its row metadata so a resize reflow can re-join soft-wrapped rows
-    /// and carry prompt marks across the history/screen boundary.
-    ///
-    /// A row holds its text, not a whole screen line: the default blanks that
-    /// padded it out to the screen width are dropped on the way in (see
-    /// [`kept`]), so a row is as long as its content and reads as blank right
+    /// with its row metadata. A row holds what [`kept`] keeps of it: a
+    /// hard-ended row stops at its last content cell and reads as blank right
     /// of that.
     lines: VecDeque<(Vec<Cell>, RowMeta)>,
     /// Maximum rows retained before the oldest are dropped.
@@ -100,17 +83,15 @@ pub struct Scrollback {
     /// Maximum total bytes (UTF-8 text payload) retained before the oldest rows
     /// are dropped.
     max_bytes: usize,
-    /// Running sum of every retained row's byte size, kept incrementally so an
-    /// overflow check is an O(1) comparison against this field.
+    /// The sum of [`line_bytes`](Self::line_bytes) over every retained row,
+    /// updated on every push, replacement, eviction and clear.
     byte_total: usize,
-    /// Cumulative count of rows ever pushed into the buffer; monotonic — a
-    /// [`clear`](Self::clear) does not reset it. The runtime diffs it across a
-    /// chunk to learn how many lines entered scrollback, re-anchoring
-    /// scrolled-back views by exactly that many.
+    /// Count of rows ever pushed into the buffer. It only grows:
+    /// [`clear`](Self::clear) does not reset it.
     total_pushed: u64,
-    /// Cumulative count of rows ever dropped to honor the caps; monotonic.
+    /// Count of rows dropped to honor the caps. It only grows.
     dropped_lines: u64,
-    /// Cumulative bytes ever dropped to honor the caps; monotonic.
+    /// Bytes dropped to honor the caps. It only grows.
     dropped_bytes: u64,
 }
 
@@ -128,13 +109,12 @@ impl Scrollback {
         }
     }
 
-    /// The byte size of one row: every cell's base character plus its combining
-    /// continuations, summed as UTF-8 lengths. This is the metric the byte cap
-    /// is measured against.
+    /// The byte size of one row: the UTF-8 length of every cell's base
+    /// character plus its combining marks, summed over the cells whose width
+    /// is not `0`. The byte cap is measured in this unit.
     ///
-    /// Width-0 cells are skipped: they are the placeholder right halves of wide
-    /// (CJK/emoji) glyphs, which carry only a blank space. The glyph's real text
-    /// lives entirely in its width-2 base cell, character plus combining marks.
+    /// A width-0 cell is the placeholder right half of a wide glyph and adds
+    /// nothing; the glyph's text is counted in its width-2 base cell.
     pub fn line_bytes(&self, line: &[Cell]) -> usize {
         line.iter()
             .filter(|cell| cell.width() != 0)
@@ -149,26 +129,20 @@ impl Scrollback {
             .sum()
     }
 
-    /// Append `row` as the newest line — recording how it ended, so a reflow
-    /// can re-join a soft-wrapped row with the screen row below it — then drop
-    /// oldest rows from the front until both caps hold, tallying each drop.
-    /// The byte cap never drops the sole remaining row (`lines.len() > 1`
-    /// guard): a single row larger than `max_bytes` is still retained on
-    /// arrival. The line cap has no such guard — the row count is always
-    /// brought back under `max_lines`.
+    /// Append `row` as the newest line with `end` and `prompt: false`, then
+    /// drop the oldest rows from the front until both caps hold, tallying each
+    /// drop. The byte cap never drops the sole remaining row: a single row
+    /// larger than `max_bytes` is retained on arrival. The line cap has no
+    /// such guard; the row count always ends at or under `max_lines`.
     ///
-    /// A hard-ended row is stored without the trailing default blanks that pad
-    /// it out to the screen width, so a 200-column row reading `README.md`
-    /// keeps 9 cells. A soft-wrapped row keeps every cell. This method stores
-    /// `prompt: false`; terminal output uses the metadata form when it has a
-    /// prompt mark. Taking the row borrowed makes one allocation, at the stored
-    /// size.
+    /// A hard-ended row is stored without its trailing run of fully-default
+    /// blanks: a 200-column row reading `README.md` keeps 9 cells. A
+    /// soft-wrapped row keeps every cell. One allocation, at the stored size.
     pub fn push_row(&mut self, row: &[Cell], end: RowEnd) {
         self.push_row_with_meta(row, RowMeta { end, prompt: false });
     }
 
-    /// Append `row` with its complete metadata. The terminal performer uses
-    /// this when a row leaves the live grid.
+    /// [`push_row`](Self::push_row) with the complete `meta` of the row.
     pub(crate) fn push_row_with_meta(&mut self, row: &[Cell], meta: RowMeta) {
         let line = kept(row, meta.end).to_vec();
         let new_bytes = self.line_bytes(&line);
@@ -178,18 +152,14 @@ impl Scrollback {
         self.evict_to_caps();
     }
 
-    /// Replace every retained row with `lines`, re-applying both caps — the
-    /// resize reflow rebuilds history wholesale from the re-wrapped logical
-    /// lines. Rows evicted by the caps are tallied as truncation like any
-    /// other cap-driven drop. [`total_pushed`](Self::total_pushed) grows by
-    /// the net increase in retained rows (rows the screen handed into
-    /// history) and never decreases, staying monotonic.
+    /// Replace every retained row with `lines`, each stored with
+    /// `prompt: false`, then apply both caps. Rows the caps evict are tallied
+    /// as dropped. [`total_pushed`](Self::total_pushed) grows by the increase
+    /// in retained rows (counted after eviction) and never decreases.
     ///
-    /// Each row is stored the same way [`push_row`](Self::push_row) stores
-    /// one: a hard-ended row without its trailing default blanks, a
-    /// soft-wrapped row whole. This method stores `prompt: false` for every
-    /// row; terminal reflow uses the metadata form when it has prompt marks.
-    /// Rows arrive owned, so they are shortened in place rather than copied.
+    /// Each row is stored the way [`push_row`](Self::push_row) stores one,
+    /// shortened in place: a hard-ended row without its trailing default
+    /// blanks, a soft-wrapped row whole.
     pub fn replace_lines(&mut self, lines: Vec<(Vec<Cell>, RowEnd)>) {
         self.replace_lines_with_meta(
             lines
@@ -199,7 +169,8 @@ impl Scrollback {
         );
     }
 
-    /// Replace retained rows with their complete metadata.
+    /// [`replace_lines`](Self::replace_lines) with the complete metadata of
+    /// each row.
     pub(crate) fn replace_lines_with_meta(&mut self, lines: Vec<(Vec<Cell>, RowMeta)>) {
         let before = self.lines.len() as u64;
         self.lines = lines
@@ -219,9 +190,9 @@ impl Scrollback {
         self.total_pushed += after.saturating_sub(before);
     }
 
-    /// Evict oldest rows one at a time, updating the running byte total and
-    /// the truncation tallies, until both caps hold (or only one row is
-    /// left, which the byte cap alone cannot evict).
+    /// Drop the oldest row, update `byte_total` and the dropped tallies, and
+    /// repeat while the row count exceeds `max_lines`, or while `byte_total`
+    /// exceeds `max_bytes` and more than one row remains.
     fn evict_to_caps(&mut self) {
         while self.lines.len() > self.max_lines
             || (self.byte_total > self.max_bytes && self.lines.len() > 1)
@@ -235,10 +206,9 @@ impl Scrollback {
         }
     }
 
-    /// Drop every retained row (xterm `CSI 3 J`, "erase saved lines"). The
-    /// cumulative tallies are left intact — an explicit erase is not a
-    /// cap-driven truncation — and [`total_pushed`](Self::total_pushed) stays
-    /// monotonic across it.
+    /// Drop every retained row (xterm `CSI 3 J`, "erase saved lines") and zero
+    /// `byte_total`. The dropped tallies and
+    /// [`total_pushed`](Self::total_pushed) keep their values.
     pub fn clear(&mut self) {
         self.lines.clear();
         self.byte_total = 0;
@@ -254,27 +224,23 @@ impl Scrollback {
         self.lines.is_empty()
     }
 
-    /// The retained rows with their metadata, oldest at the front. The
-    /// terminal crate uses this to compose views and reflow wrapped lines.
+    /// The retained rows with their metadata, oldest at the front.
     pub fn lines(&self) -> &VecDeque<(Vec<Cell>, RowMeta)> {
         &self.lines
     }
 
-    /// Cumulative count of rows ever pushed into the buffer; monotonic — never
-    /// reset, not even by [`clear`](Self::clear). Diffing it across a chunk gives
-    /// the exact number of lines that entered scrollback in that chunk.
+    /// Count of rows ever pushed into the buffer. It never decreases;
+    /// [`clear`](Self::clear) does not reset it.
     pub fn total_pushed(&self) -> u64 {
         self.total_pushed
     }
 
-    /// Cumulative count of rows dropped to honor the caps, for the runtime's
-    /// [`PaneScrollbackTruncated`](koshi_core::event::PaneScrollbackTruncated)
-    /// reporting.
+    /// Count of rows dropped to honor the caps.
     pub fn dropped_lines(&self) -> u64 {
         self.dropped_lines
     }
 
-    /// Cumulative bytes dropped to honor the caps.
+    /// Bytes dropped to honor the caps.
     pub fn dropped_bytes(&self) -> u64 {
         self.dropped_bytes
     }

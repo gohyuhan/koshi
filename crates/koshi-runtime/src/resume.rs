@@ -71,9 +71,8 @@ pub struct CarriedPane {
     #[serde(default)]
     pub terminal_name: Option<String>,
     /// How the pane's child ended, when the writing process reaped it before it
-    /// wrote this file. A reaping process takes the status out of the kernel
-    /// with it, so the next image reports this instead of waiting on the
-    /// process id.
+    /// wrote this file. The next image reports this status and does not wait on
+    /// the process id.
     ///
     /// `None` says the child was still running and the next image waits on it
     /// itself. It is also what a header written by a build that recorded no
@@ -135,9 +134,8 @@ pub struct ResumeBody {
     ///
     /// A `core:quit` can land after the clients have been told the session is
     /// restarting and are already waiting for its next socket. The swap runs to
-    /// the end so they find that socket, and the next image carries the quit
-    /// out once every carried client is back or its window has closed — so each
-    /// one reads a real quit rather than a session that stopped answering.
+    /// the end, and the next image carries the quit out once every carried
+    /// client is back or its window has closed.
     ///
     /// The kind travels with it: a caller that asked for a zero-grace teardown
     /// gets one from the next image too.
@@ -158,8 +156,9 @@ pub enum CarriedQuit {
 }
 
 /// The file as it is read: the header decoded, the body left as the raw JSON
-/// text it was written as, so an unreadable body never costs the caller the
-/// header. [`read_body`] decodes that text once.
+/// text it was written as. A body whose text is valid JSON of a shape this
+/// build cannot decode costs the caller no part of the header.
+/// [`read_body`] decodes that text once.
 #[derive(Debug, Deserialize)]
 struct ResumeFile {
     header: ResumeHeader,
@@ -176,7 +175,7 @@ struct ResumeFileRef<'a> {
 
 /// Write `header` and `body` to `path`, replacing whatever is there.
 ///
-/// The bytes land through [`koshi_storage::atomic::write_atomic`], so a reader
+/// The bytes land through [`koshi_storage::atomic::write_atomic`]: a reader
 /// finds the whole old file or the whole new one, never a half-written middle.
 ///
 /// # Errors

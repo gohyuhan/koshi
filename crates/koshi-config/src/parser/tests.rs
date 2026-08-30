@@ -4,10 +4,10 @@
 use std::path::Path;
 
 use kdl::{KdlDocument, KdlNode};
-use miette::Diagnostic;
+use miette::{Diagnostic, SourceSpan};
 
 use super::{
-    parse_kdl, single_value, unknown_key, value_bool, value_integer, value_nonempty_string,
+    parse_kdl, set, single_value, unknown_key, value_bool, value_integer, value_nonempty_string,
     value_string, value_u16, value_u32,
 };
 use crate::error::ConfigError;
@@ -39,6 +39,25 @@ fn whitespace_only_is_ok() {
 }
 
 #[test]
+fn nested_children_survive_the_parse() {
+    let doc = parse_kdl(
+        Path::new("cfg.kdl"),
+        "pane {\n  min-cols 20\n}\ntheme \"midnight\"\n",
+    )
+    .unwrap();
+    let names: Vec<&str> = doc.nodes().iter().map(|n| n.name().value()).collect();
+    assert_eq!(names, vec!["pane", "theme"]);
+    let inner: Vec<&str> = doc.nodes()[0]
+        .children()
+        .expect("`pane` keeps its child block")
+        .nodes()
+        .iter()
+        .map(|n| n.name().value())
+        .collect();
+    assert_eq!(inner, vec!["min-cols"]);
+}
+
+#[test]
 fn invalid_syntax_returns_diagnostic_with_path() {
     let err = parse_kdl(Path::new("bad.kdl"), "pane { width").unwrap_err();
     assert_eq!(err.to_string(), "config parse error in bad.kdl");
@@ -60,7 +79,17 @@ fn diagnostic_preserves_spans_from_kdl() {
         "kdl should report at least one sub-diagnostic"
     );
     assert_eq!(diag_related, raw_related);
-    assert!(diag.source_code().is_some());
+
+    let source = diag
+        .source_code()
+        .expect("parse diagnostic carries the source text");
+    let contents = source
+        .read_span(&SourceSpan::from(0..bad.len()), 0, 0)
+        .expect("the span covers the whole source");
+    assert_eq!(
+        std::str::from_utf8(contents.data()).unwrap(),
+        "pane { width"
+    );
 }
 
 #[test]
@@ -145,6 +174,15 @@ fn value_bool_rejects_a_non_boolean() {
 }
 
 #[test]
+fn value_bool_rejects_a_quoted_true() {
+    // `#true` is the KDL boolean; `"true"` is a string.
+    assert_eq!(
+        value_bool(&node("x \"true\"")).unwrap_err(),
+        "expected a boolean (#true or #false)"
+    );
+}
+
+#[test]
 fn value_string_reads_a_quoted_string() {
     assert_eq!(value_string(&node("x \"hi\"")).unwrap(), "hi");
 }
@@ -172,8 +210,21 @@ fn value_nonempty_string_rejects_empty_and_whitespace() {
 }
 
 #[test]
+fn value_nonempty_string_trims_surrounding_whitespace() {
+    assert_eq!(
+        value_nonempty_string(&node("x \"  xterm-256color \t\"")).unwrap(),
+        "xterm-256color"
+    );
+}
+
+#[test]
 fn value_integer_reads_a_bare_integer() {
     assert_eq!(value_integer(&node("x 42")).unwrap(), 42);
+}
+
+#[test]
+fn value_integer_reads_a_negative_integer() {
+    assert_eq!(value_integer(&node("x -7")).unwrap(), -7);
 }
 
 #[test]
@@ -202,8 +253,28 @@ fn value_u16_rejects_out_of_range_values() {
 }
 
 #[test]
+fn value_u16_accepts_both_ends_of_its_range() {
+    assert_eq!(value_u16(&node("x 0")).unwrap(), 0);
+    assert_eq!(value_u16(&node("x 65535")).unwrap(), u16::MAX);
+}
+
+#[test]
+fn value_u16_reports_the_integer_reason_for_a_non_integer() {
+    assert_eq!(
+        value_u16(&node("x \"80\"")).unwrap_err(),
+        "expected an integer"
+    );
+}
+
+#[test]
 fn value_u32_reads_an_in_range_number() {
     assert_eq!(value_u32(&node("x 100")).unwrap(), 100);
+}
+
+#[test]
+fn value_u32_accepts_both_ends_of_its_range() {
+    assert_eq!(value_u32(&node("x 0")).unwrap(), 0);
+    assert_eq!(value_u32(&node("x 4294967295")).unwrap(), u32::MAX);
 }
 
 #[test]
@@ -211,6 +282,55 @@ fn value_u32_rejects_an_out_of_range_value() {
     assert_eq!(
         value_u32(&node("x 5000000000")).unwrap_err(),
         "must be between 0 and 4294967295"
+    );
+    assert_eq!(
+        value_u32(&node("x -1")).unwrap_err(),
+        "must be between 0 and 4294967295"
+    );
+}
+
+#[test]
+fn set_stores_an_ok_value_and_adds_no_warning() {
+    let mut slot: Option<u16> = None;
+    let mut warnings: Vec<String> = Vec::new();
+    set(&mut slot, Ok(20), "pane", "min-cols", &mut warnings);
+    assert_eq!(slot, Some(20));
+    assert_eq!(warnings, Vec::<String>::new());
+}
+
+#[test]
+fn set_leaves_the_slot_empty_and_names_the_field_on_err() {
+    let mut slot: Option<u16> = None;
+    let mut warnings: Vec<String> = Vec::new();
+    set(
+        &mut slot,
+        Err("expected an integer".to_string()),
+        "pane",
+        "min-cols",
+        &mut warnings,
+    );
+    assert_eq!(slot, None);
+    assert_eq!(warnings, ["ignored `pane.min-cols`: expected an integer"]);
+}
+
+#[test]
+fn set_keeps_an_earlier_value_when_the_next_one_fails() {
+    let mut slot: Option<u16> = Some(20);
+    let mut warnings: Vec<String> = vec!["earlier warning".to_string()];
+    set(
+        &mut slot,
+        Err("must be between 0 and 65535".to_string()),
+        "pane",
+        "gap",
+        &mut warnings,
+    );
+    assert_eq!(slot, Some(20));
+    assert_eq!(
+        warnings,
+        [
+            "earlier warning",
+            "ignored `pane.gap`: must be between 0 and 65535",
+        ]
     );
 }
 
@@ -266,4 +386,18 @@ fn unknown_key_handles_an_empty_key() {
         unknown_key("", &["colors", "version"]),
         "unknown key ``; did you mean `colors`?"
     );
+}
+
+#[test]
+fn unknown_key_matches_a_key_that_is_itself_allowed() {
+    assert_eq!(
+        unknown_key("version", &["tab", "version"]),
+        "unknown key `version`; did you mean `version`?"
+    );
+}
+
+#[test]
+#[should_panic(expected = "every config key set is non-empty")]
+fn unknown_key_panics_on_an_empty_allowed_list() {
+    let _ = unknown_key("version", &[]);
 }

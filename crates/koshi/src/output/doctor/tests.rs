@@ -59,6 +59,15 @@ fn the_json_form_is_one_object_per_row() {
     );
 }
 
+#[test]
+fn no_rows_render_the_header_alone_and_an_empty_json_array() {
+    assert_eq!(
+        render_doctor(&[], FormatArg::Table),
+        "check  verdict  reason  help\n"
+    );
+    assert_eq!(render_doctor(&[], FormatArg::Json), "[]\n");
+}
+
 /// One row whose `reason` is short and whose `detail` holds the whole text.
 fn shortened() -> Vec<CheckRow> {
     vec![CheckRow {

@@ -3,15 +3,17 @@
 //! [`Server::build_session_layout`] answers an IPC `Layout` request. It walks
 //! this process's session — tabs in bar order, and for each tab every client
 //! viewing it — and packs the split trees, the rectangles those trees solve
-//! to, and each client's focus into one [`SessionLayout`]. The dispatcher
-//! thread builds it, from the same state a command reads.
+//! to, and every attached client's focus into one [`SessionLayout`].
 //!
 //! A tab solves once per viewing client, against that client's own layout
 //! mode. Two clients on one tab, one tiled and one with a pane fullscreen,
 //! give that tab two sets of rectangles in the same turn. The size is shared
-//! across those clients — the smallest viewing terminal on each axis, minus
-//! the two chrome rows — so an 80x24 and a 120x40 client both solve against
-//! 80x22.
+//! across those clients: the per-axis smallest pane area among the clients
+//! viewing the tab. A client that reported no pane area contributes its own
+//! terminal minus the two chrome rows; a client that reported
+//! [`PaneArea::Starving`](koshi_core::geometry::PaneArea::Starving)
+//! contributes none. An 80x24 and a 120x40 client, neither reporting a pane
+//! area, both solve against 80x22.
 
 use koshi_core::ids::TabId;
 use koshi_ipc::layout::{ClientFocus, SessionLayout, SolvedPane, SolvedTab, TabLayout};
@@ -27,7 +29,9 @@ impl Server {
     /// [`SessionLayout`]. `None` when no session is running — the window
     /// between the last session ending and the process exiting.
     ///
-    /// `tab` narrows the answer to one tab; absent, every tab is described.
+    /// `tab` narrows the described tabs to that one; absent, every tab is
+    /// described. A `tab` the session does not hold leaves `tabs` empty.
+    /// `clients` lists every attached client either way, narrowed or not.
     #[must_use]
     pub fn build_session_layout(&self, tab: Option<TabId>) -> Option<SessionLayout> {
         // One process serves one session: genesis seeds exactly one and no
@@ -47,8 +51,8 @@ impl Server {
             .map(|tab| {
                 // One size per tab, not per client: `tab_viewport` is the
                 // smallest pane area on each axis among the clients viewing
-                // the tab that report one, and it is `None` when no such
-                // client views the tab.
+                // the tab that have one, and it is `None` when no such client
+                // views the tab.
                 let solved = match session.tab_viewport(tab.id()) {
                     None => Vec::new(),
                     Some(viewport) => session

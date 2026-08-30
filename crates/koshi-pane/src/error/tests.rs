@@ -21,10 +21,9 @@ fn a_duplicate_id_error_names_the_pane_in_its_message() {
         kind: PaneKind::Terminal,
     };
 
-    // The id renders through its own `Display` (`pane-<uuid>`).
     assert_eq!(
         error.to_string(),
-        format!("pane {id} is already registered")
+        format!("pane pane-{} is already registered", id.as_uuid())
     );
 }
 
@@ -67,6 +66,57 @@ fn two_duplicate_id_errors_are_equal_only_when_id_and_kind_match() {
         PaneRegistryError::DuplicateId {
             id: PaneId::new(),
             kind: PaneKind::Terminal,
+        }
+    );
+    assert_ne!(
+        base,
+        PaneRegistryError::DuplicateId {
+            id,
+            kind: PaneKind::Plugin {
+                plugin_id: PluginId::new(),
+            },
+        }
+    );
+}
+
+#[test]
+fn two_invalid_transitions_are_equal_only_when_state_event_and_kind_match() {
+    let at = SystemTime::UNIX_EPOCH;
+    let base = InvalidTransition {
+        from: PaneLifecycle::Running,
+        event: PaneLifecycleEvent::ProcessExited { code: Some(1), at },
+        kind: PaneKind::Terminal,
+    };
+
+    assert_eq!(
+        base,
+        InvalidTransition {
+            from: PaneLifecycle::Running,
+            event: PaneLifecycleEvent::ProcessExited { code: Some(1), at },
+            kind: PaneKind::Terminal,
+        }
+    );
+    assert_ne!(
+        base,
+        InvalidTransition {
+            from: PaneLifecycle::Spawning,
+            ..base
+        }
+    );
+    assert_ne!(
+        base,
+        InvalidTransition {
+            event: PaneLifecycleEvent::ProcessExited { code: Some(2), at },
+            ..base
+        }
+    );
+    assert_ne!(
+        base,
+        InvalidTransition {
+            kind: PaneKind::Plugin {
+                plugin_id: PluginId::new(),
+            },
+            ..base
         }
     );
 }

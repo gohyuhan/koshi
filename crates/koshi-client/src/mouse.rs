@@ -338,8 +338,10 @@ impl Client {
     /// the line the scroll just revealed, and only the session knows whether
     /// there was one.
     ///
-    /// Nothing due, or a pointer no longer outside the pane, yields no actions
-    /// and disarms; the next drag event arms it again.
+    /// A step that is not due yet yields no actions and leaves the timer where
+    /// it is. A pointer no longer outside the pane, and a pane the frame no
+    /// longer carries, yield no actions and disarm; the next drag event arms it
+    /// again.
     pub fn expire_mouse_scroll(&mut self, now: Instant, frame: &MouseFrame) -> Vec<MouseAction> {
         let Some(drag) = self.selection_drag else {
             return Vec::new();
@@ -548,8 +550,8 @@ impl Client {
                 Vec::new()
             }
             HitRegion::Tabline => {
-                // `Tabline` is only hit on a frame that draws one, so the
-                // window index is present.
+                // A frame carrying no first visible tab index begins no
+                // peek-drag.
                 if let Some(first_visible) = tabline_first_visible(self.frame_layout(frame)) {
                     self.tabline_drag = Some(TablineDrag {
                         anchor_x: mouse.at.x,

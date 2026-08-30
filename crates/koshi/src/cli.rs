@@ -111,38 +111,6 @@ pub enum SessionRef {
     Name(String),
 }
 
-impl CliCommand {
-    /// Whether this is a discovery query: a `list-*` verb or an `inspect`
-    /// form.
-    #[must_use]
-    pub fn is_discovery(&self) -> bool {
-        matches!(
-            self,
-            CliCommand::ListSessions { .. }
-                | CliCommand::ListTabs { .. }
-                | CliCommand::ListPanes { .. }
-                | CliCommand::ListClients { .. }
-                | CliCommand::Inspect { .. }
-        )
-    }
-
-    /// The one session a discovery query is scoped to, by id or name: a
-    /// listing's `--session` flag, or the session an `inspect session` names.
-    /// Every other query spans all running sessions.
-    #[must_use]
-    pub fn discovery_session(&self) -> Option<&SessionRef> {
-        match self {
-            CliCommand::ListTabs { session, .. }
-            | CliCommand::ListPanes { session, .. }
-            | CliCommand::ListClients { session, .. } => session.as_ref(),
-            CliCommand::Inspect {
-                target: InspectTarget::Session { session, .. },
-            } => Some(session),
-            _ => None,
-        }
-    }
-}
-
 impl fmt::Display for SessionRef {
     /// Writes the reference as the user named it: the session id for `Id`,
     /// the display name for `Name`.
@@ -227,8 +195,7 @@ fn parse_since(value: &str) -> Result<Duration, String> {
 }
 
 /// Parse a `--filter` flag value: any text an event name may contain. An empty
-/// value is `Err("expected part of an event name, such as pane or TabMoved")`,
-/// since every name contains the empty string.
+/// value is `Err("expected part of an event name, such as pane or TabMoved")`.
 fn parse_event_filter(value: &str) -> Result<String, String> {
     if value.is_empty() {
         return Err("expected part of an event name, such as pane or TabMoved".to_string());
@@ -254,7 +221,7 @@ fn parse_tab_ref(value: &str) -> Result<TabRef, String> {
 /// `default()`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ResolvedTargets {
-    /// The resolved `--session` value, for the verbs whose command carries it.
+    /// The resolved `--session` value.
     pub session: Option<SessionId>,
     /// The resolved `--tab` value.
     pub tab: Option<TabId>,
@@ -1227,19 +1194,49 @@ impl CliCommand {
         }
     }
 
-    /// The client this invocation names that no [`Command`] carries, so it
-    /// rides on the command's source instead
+    /// The client this invocation names that no [`Command`] carries; it rides
+    /// on the command's source instead
     /// ([`CommandSource::external_cli`](koshi_core::command::CommandSource::external_cli)).
-    /// Only `toggle-pane-fullscreen` has one: every other client-taking verb
-    /// puts its client in the command's own arguments, which travel on both
-    /// routes.
+    /// Only `toggle-pane-fullscreen` answers `Some`: every other client-taking
+    /// verb puts its client in the command's own arguments, which travel on
+    /// both routes.
     /// [`CommandSource::InSessionCli`](koshi_core::command::CommandSource::InSessionCli)
-    /// has no field to carry this one, so a command with one here never takes
-    /// the in-session route ([`crate::targeting::route`]).
+    /// carries no client, and a command with one here never takes the
+    /// in-session route ([`crate::targeting::route`]).
     #[must_use]
     pub fn source_client(&self) -> Option<ClientId> {
         match self {
             CliCommand::TogglePaneFullscreen { client } => *client,
+            _ => None,
+        }
+    }
+
+    /// Whether this is a discovery query: a `list-*` verb or an `inspect`
+    /// form.
+    #[must_use]
+    pub fn is_discovery(&self) -> bool {
+        matches!(
+            self,
+            CliCommand::ListSessions { .. }
+                | CliCommand::ListTabs { .. }
+                | CliCommand::ListPanes { .. }
+                | CliCommand::ListClients { .. }
+                | CliCommand::Inspect { .. }
+        )
+    }
+
+    /// The one session a discovery query is scoped to, by id or name: a
+    /// listing's `--session` flag, or the session an `inspect session` names.
+    /// Every other query spans all running sessions.
+    #[must_use]
+    pub fn discovery_session(&self) -> Option<&SessionRef> {
+        match self {
+            CliCommand::ListTabs { session, .. }
+            | CliCommand::ListPanes { session, .. }
+            | CliCommand::ListClients { session, .. } => session.as_ref(),
+            CliCommand::Inspect {
+                target: InspectTarget::Session { session, .. },
+            } => Some(session),
             _ => None,
         }
     }

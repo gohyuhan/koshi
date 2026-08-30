@@ -1,15 +1,25 @@
 //! Tests for the tracing subscriber bootstrap and redaction machinery.
 //!
 //! Coverage: the session log path, per-session lazy file creation, the level
-//! cutoff, single global install, the disabled no-op, and environment-map
-//! redaction.
+//! cutoff, single global install, the disabled no-op, the per-session file
+//! writer, the capture writer, and environment-map redaction.
 
 use super::*;
 
-use koshi_core::ids::SessionId;
+/// Install a JSON subscriber on this thread with the cutoff `level` gives, and
+/// capture its output.
+fn captured_at(level: LogLevel) -> (tracing::subscriber::DefaultGuard, CapturedLogs) {
+    let logs = CapturedLogs::default();
+    let subscriber = fmt()
+        .with_max_level(max_level(level))
+        .json()
+        .with_writer(logs.clone())
+        .finish();
+    (tracing::subscriber::set_default(subscriber), logs)
+}
 
-// A sample event must carry the canonical join fields, and any env-derived value
-// must arrive already scrubbed — the token must never appear in raw output.
+// The sample line carries every canonical field. The env value reaches the
+// line scrubbed: the token renders as `***`, `HOME` passes through.
 #[test]
 fn sample_event_has_canonical_fields_and_redacts_token() {
     let (_guard, logs) = with_test_writer();
@@ -34,9 +44,16 @@ fn sample_event_has_canonical_fields_and_redacts_token() {
     );
 
     let out = logs.contents();
+    assert_eq!(out.lines().count(), 1, "{out}");
     for field in CANONICAL_FIELDS {
         assert!(out.contains(field), "missing canonical field `{field}`");
     }
+    assert!(out.contains(r#""session_id":"sess-1""#), "{out}");
+    assert!(out.contains(r#""subscriber_id":"sub-1""#), "{out}");
+    assert!(
+        out.contains(r#""env":"HOME=/home/dev KOSHI_CONTEXT_TOKEN=***""#),
+        "{out}"
+    );
     assert!(
         !out.contains("super-secret"),
         "token leaked into log output"
@@ -45,6 +62,22 @@ fn sample_event_has_canonical_fields_and_redacts_token() {
     assert!(
         out.contains("/home/dev"),
         "non-sensitive value should pass through"
+    );
+}
+
+#[test]
+fn canonical_fields_are_the_seven_correlation_ids() {
+    assert_eq!(
+        CANONICAL_FIELDS,
+        [
+            "session_id",
+            "client_id",
+            "tab_id",
+            "pane_id",
+            "command_id",
+            "plugin_id",
+            "subscriber_id",
+        ]
     );
 }
 
@@ -66,14 +99,26 @@ fn redacted_env_field_of_empty_map_is_empty_string() {
     assert_eq!(redacted_env_field(&env), "");
 }
 
+// Keys come out in byte order, uppercase before lowercase. A visible value is
+// written as it is, spaces and `=` included.
+#[test]
+fn redacted_env_field_orders_keys_bytewise_and_keeps_visible_values_verbatim() {
+    let mut env = BTreeMap::new();
+    env.insert("zeta".to_string(), "last".to_string());
+    env.insert("Beta".to_string(), "b=c d".to_string());
+    env.insert("api_key".to_string(), "hidden".to_string());
+
+    assert_eq!(redacted_env_field(&env), "Beta=b=c d api_key=*** zeta=last");
+}
+
 #[test]
 fn session_log_path_is_the_named_file_in_the_logs_folder() {
     let session = SessionId::new();
     let path = session_log_path(session);
     let file = format!("koshi-log-{}.log", session.as_uuid());
 
-    // The state dir's own tail differs per OS, so pin the `logs/<file>` tail
-    // plus the state-dir prefix instead of a full literal path.
+    // Pins the `logs/<file>` tail on every OS, then the full path when the
+    // state directory resolves.
     assert!(
         path.ends_with(format!("logs/{file}")),
         "unexpected log path: {}",
@@ -91,10 +136,9 @@ fn two_sessions_get_two_distinct_log_files() {
     assert_ne!(a, b, "each session must name its own log file");
 }
 
-// Enabled + a line at the configured level: the file (and its `logs/` parent)
-// is created lazily on that first write, and a second install fails since a
-// process has one global subscriber. This is the only test that claims the
-// global slot, so it is deterministic regardless of test order.
+// The file and its `logs/` parent are created on the first write, not at
+// install. A second install fails. This is the only test in the binary that
+// installs the global subscriber.
 #[test]
 fn init_to_path_creates_the_file_lazily_and_installs_once() {
     let dir = std::env::temp_dir().join(format!("koshi-log-test-{}", std::process::id()));
@@ -103,8 +147,7 @@ fn init_to_path_creates_the_file_lazily_and_installs_once() {
 
     init_to_path(&path, LogLevel::Warning, LogFormat::Json).expect("first install succeeds");
 
-    // Nothing written yet: no subscriber event has fired, so the file must not
-    // exist — creation is on the first line, not at install.
+    // No line has been written yet: the file does not exist.
     assert!(
         !path.exists(),
         "the file must not exist before the first log line"
@@ -112,78 +155,104 @@ fn init_to_path_creates_the_file_lazily_and_installs_once() {
 
     tracing::warn!(session_id = "sess-file", "file sink event");
 
-    // A second install fails: a process has a single global subscriber.
+    // A process has one global subscriber; the second install fails.
     let second = init_to_path(&path, LogLevel::Warning, LogFormat::Json);
     assert!(matches!(second, Err(TracingError::AlreadyInitialized)));
 
     let contents = std::fs::read_to_string(&path).expect("log file was created on first write");
-    assert!(contents.contains("session_id"), "missing canonical field");
-    assert!(contents.contains("file sink event"), "missing log message");
+    assert_eq!(contents.lines().count(), 1, "{contents}");
+    assert!(contents.contains(r#""level":"WARN""#), "{contents}");
+    assert!(
+        contents.contains(r#""session_id":"sess-file""#),
+        "missing canonical field: {contents}"
+    );
+    assert!(
+        contents.contains(r#""message":"file sink event""#),
+        "missing log message: {contents}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// Disabled installs no subscriber: both calls succeed in any test order, and
+// no file is created for the session.
 #[test]
 fn init_tracing_disabled_writes_no_file_and_is_a_noop() {
-    // Disabled installs no global subscriber, so it never conflicts with the
-    // one global install and is safely idempotent — both calls succeed
-    // regardless of test order, and neither touches disk.
-    let params = || LoggingParams {
+    let params = LoggingParams {
         enabled: false,
         level: LogLevel::Warning,
         format: LogFormat::Pretty,
         session_id: SessionId::new(),
     };
-    let path = session_log_path(params().session_id);
-    assert!(init_tracing(params()).is_ok());
-    assert!(init_tracing(params()).is_ok());
+    let path = session_log_path(params.session_id);
+    init_tracing(params.clone()).expect("disabled logging installs nothing");
+    init_tracing(params).expect("a second disabled install also installs nothing");
     assert!(!path.exists(), "disabled logging must create no file");
 }
 
+#[test]
+fn max_level_maps_each_configured_level_to_its_tracing_level() {
+    assert_eq!(max_level(LogLevel::Info), Level::INFO);
+    assert_eq!(max_level(LogLevel::Warning), Level::WARN);
+    assert_eq!(max_level(LogLevel::Error), Level::ERROR);
+}
+
 // The level cutoff drops a line below it before it reaches the writer: with
-// `error`, a warning must not be written. Uses the thread-local test writer so
-// it never races the one global install above.
+// `error`, a warning is not written. Uses a thread-local subscriber; the global
+// slot stays untouched.
 #[test]
 fn a_line_below_the_configured_level_is_dropped() {
-    let logs = CapturedLogs::default();
-    let subscriber = fmt()
-        .with_max_level(max_level(LogLevel::Error))
-        .json()
-        .with_writer(logs.clone())
-        .finish();
-    let _guard = tracing::subscriber::set_default(subscriber);
+    let (_guard, logs) = captured_at(LogLevel::Error);
 
     tracing::warn!("a warning below the error cutoff");
     tracing::error!("an error at the cutoff");
 
     let out = logs.contents();
+    assert_eq!(out.lines().count(), 1, "{out}");
     assert!(
         !out.contains("below the error cutoff"),
         "warning must be dropped at level error"
     );
+    assert!(out.contains(r#""level":"ERROR""#), "{out}");
     assert!(
-        out.contains("at the cutoff"),
+        out.contains(r#""message":"an error at the cutoff""#),
         "error must be written at level error"
     );
 }
 
-// The most verbose configured level, `info`, admits an info line — the arm the
-// other cutoff tests never reach (they configure `warning`/`error`). Uses the
-// thread-local test writer so it never races the one global install above.
+// With `warning`, an info line is dropped and a warning is written.
+#[test]
+fn an_info_line_is_dropped_when_the_cutoff_is_warning() {
+    let (_guard, logs) = captured_at(LogLevel::Warning);
+
+    tracing::info!("an info line below the warning cutoff");
+    tracing::warn!("a warning at the warning cutoff");
+
+    let out = logs.contents();
+    assert_eq!(out.lines().count(), 1, "{out}");
+    assert!(
+        !out.contains("below the warning cutoff"),
+        "info must be dropped at level warning"
+    );
+    assert!(out.contains(r#""level":"WARN""#), "{out}");
+    assert!(
+        out.contains(r#""message":"a warning at the warning cutoff""#),
+        "warning must be written at level warning"
+    );
+}
+
+// The most verbose configured level, `info`, admits an info line.
 #[test]
 fn a_line_at_info_level_is_written_when_the_cutoff_is_info() {
-    let logs = CapturedLogs::default();
-    let subscriber = fmt()
-        .with_max_level(max_level(LogLevel::Info))
-        .json()
-        .with_writer(logs.clone())
-        .finish();
-    let _guard = tracing::subscriber::set_default(subscriber);
+    let (_guard, logs) = captured_at(LogLevel::Info);
 
     tracing::info!("an info line at the info cutoff");
 
+    let out = logs.contents();
+    assert_eq!(out.lines().count(), 1, "{out}");
+    assert!(out.contains(r#""level":"INFO""#), "{out}");
     assert!(
-        logs.contents().contains("an info line at the info cutoff"),
+        out.contains(r#""message":"an info line at the info cutoff""#),
         "info must be written at level info"
     );
 }
@@ -239,6 +308,63 @@ fn session_log_writer_recreates_a_logs_directory_removed_mid_session() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// A log file removed between writes comes back on the next line, holding only
+// the lines written after the removal.
+#[test]
+fn session_log_writer_recreates_a_log_file_removed_mid_session() {
+    use std::io::Write as _;
+
+    let dir = std::env::temp_dir().join(format!("koshi-writer-refile-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let path = dir.join("logs").join("koshi-log-writer.log");
+
+    let mut writer = SessionLogWriter { path: path.clone() };
+    let first = writer
+        .write(b"line one\n")
+        .expect("first write creates the file");
+    std::fs::remove_file(&path).expect("remove the log file");
+    let second = writer
+        .write(b"line two\n")
+        .expect("the write after the removal recreates the file");
+    assert_eq!(first, 9, "write reports the byte count it accepted");
+    assert_eq!(second, 9);
+
+    assert_eq!(std::fs::read(&path).unwrap(), b"line two\n");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// A regular file where the `logs/` directory must go: the open fails, the
+// recreate fails with `AlreadyExists`, and the write reports that error and
+// creates nothing. With the file gone, the next write succeeds.
+#[test]
+fn session_log_writer_reports_the_error_when_its_parent_is_a_regular_file() {
+    use std::io::Write as _;
+
+    let dir = std::env::temp_dir().join(format!("koshi-writer-blocked-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create the test directory");
+    let blocker = dir.join("logs");
+    std::fs::write(&blocker, b"not a directory").expect("create the blocking file");
+    let path = blocker.join("koshi-log-writer.log");
+
+    let mut writer = SessionLogWriter { path: path.clone() };
+    let error = writer
+        .write(b"line one\n")
+        .expect_err("a file where the directory must go fails the write");
+    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+    assert!(!path.exists(), "nothing is created under a regular file");
+
+    std::fs::remove_file(&blocker).expect("remove the blocking file");
+    let written = writer
+        .write(b"line two\n")
+        .expect("the write after the removal creates the directory and the file");
+    assert_eq!(written, 9);
+    assert_eq!(std::fs::read(&path).unwrap(), b"line two\n");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // The capture writer records raw bytes, `contents` returns them verbatim, and
 // `lines` splits on newlines; flush reports success without touching the buffer.
 #[test]
@@ -261,6 +387,84 @@ fn captured_writer_records_bytes_and_lines_split_on_newlines() {
 }
 
 #[test]
+fn a_fresh_capture_holds_no_bytes_and_no_lines() {
+    let logs = CapturedLogs::default();
+
+    assert_eq!(logs.contents(), "");
+    assert_eq!(logs.lines(), Vec::<String>::new());
+}
+
+#[test]
+fn captured_lines_keep_a_last_line_that_has_no_newline() {
+    use std::io::Write as _;
+
+    let logs = CapturedLogs::default();
+    logs.make_writer()
+        .write_all(b"first\nsecond")
+        .expect("capture write always succeeds");
+
+    assert_eq!(
+        logs.lines(),
+        vec!["first".to_string(), "second".to_string()]
+    );
+}
+
+#[test]
+fn two_capture_writers_append_to_one_buffer_in_write_order() {
+    use std::io::Write as _;
+
+    let logs = CapturedLogs::default();
+    let mut first = logs.make_writer();
+    let mut second = logs.make_writer();
+    first
+        .write_all(b"one\n")
+        .expect("capture write always succeeds");
+    second
+        .write_all(b"two\n")
+        .expect("capture write always succeeds");
+    first
+        .write_all(b"three\n")
+        .expect("capture write always succeeds");
+
+    assert_eq!(logs.contents(), "one\ntwo\nthree\n");
+}
+
+// A thread that dies while holding the capture buffer poisons its lock.
+// `contents`, `lines` and the next write all recover it.
+#[test]
+fn a_capture_answers_after_a_writer_thread_died_holding_its_buffer() {
+    use std::io::Write as _;
+
+    let logs = CapturedLogs::default();
+    logs.make_writer()
+        .write_all(b"before\n")
+        .expect("capture write always succeeds");
+
+    // `resume_unwind` skips the panic hook; the guard dropped while unwinding
+    // poisons the lock.
+    let buffer = Arc::clone(&logs.buffer);
+    let died = std::thread::spawn(move || {
+        let _held = buffer.lock().expect("the buffer is not poisoned yet");
+        std::panic::resume_unwind(Box::new("the thread holding the buffer died"));
+    })
+    .join();
+    assert_eq!(
+        died.unwrap_err().downcast_ref::<&str>(),
+        Some(&"the thread holding the buffer died")
+    );
+    assert!(logs.buffer.is_poisoned(), "the lock must be poisoned");
+
+    assert_eq!(logs.contents(), "before\n");
+    logs.make_writer()
+        .write_all(b"after\n")
+        .expect("a write after the poison succeeds");
+    assert_eq!(
+        logs.lines(),
+        vec!["before".to_string(), "after".to_string()]
+    );
+}
+
+#[test]
 fn tracing_error_display_names_the_already_initialized_cause() {
     assert_eq!(
         TracingError::AlreadyInitialized.to_string(),
@@ -273,20 +477,28 @@ fn probe_warning() {
     tracing::warn!("probe fired");
 }
 
-// tracing caches per-call-site interest process-wide. A capture must still see
-// an event whose call site was first executed by a thread with no subscriber.
+// tracing caches per-call-site interest process-wide. A capture still sees an
+// event whose call site was first executed by a thread with no subscriber, and
+// the event that thread fired stays out of the capture.
 #[test]
 fn a_capture_sees_a_call_site_first_fired_from_an_uncaptured_thread() {
     let (_guard, logs) = with_test_writer();
 
-    // First execution of the call site happens on a thread with no subscriber.
-    std::thread::spawn(probe_warning)
-        .join()
-        .expect("probe thread runs to completion");
+    // The call site's first execution is on a thread whose subscriber is
+    // `Dispatch::none()`, whatever the global slot holds.
+    std::thread::spawn(|| {
+        tracing::dispatcher::with_default(&tracing::Dispatch::none(), probe_warning);
+    })
+    .join()
+    .expect("probe thread runs to completion");
 
-    // Same call site, now on the thread that holds the capture.
+    // Same call site, on the thread that holds the capture.
     probe_warning();
 
     let out = logs.contents();
-    assert!(out.contains("probe fired"), "capture is empty: {out:?}");
+    assert_eq!(out.lines().count(), 1, "{out}");
+    assert!(
+        out.contains(r#""message":"probe fired""#),
+        "capture is empty: {out:?}"
+    );
 }

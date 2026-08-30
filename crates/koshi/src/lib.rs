@@ -7,7 +7,7 @@
 //! - [`koshi_link`] reads the config files, finds a running koshi, and talks
 //!   to it. Shared with every other koshi program.
 //! - [`koshi_daemon`] holds the three processes that run with no terminal —
-//!   the router, a session server, and a pane supervisor. the binary starts one
+//!   the router, a session server, and a pane supervisor. The binary starts one
 //!   of them when it is given that subcommand, and never otherwise.
 //! - [`koshi_client`] holds the viewer: one attached terminal's own state, the
 //!   loop that drives it, and the terminal I/O under it.

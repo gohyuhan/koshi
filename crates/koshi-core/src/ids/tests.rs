@@ -139,9 +139,81 @@ fn an_id_reads_in_both_spellings_koshi_accepts() {
         .strip_prefix("session-")
         .expect("a session id prints with its prefix");
 
+    assert_eq!(parse_prefixed_uuid(&printed, "session"), Ok(*id.as_uuid()));
+    assert_eq!(parse_prefixed_uuid(bare, "session"), Ok(*id.as_uuid()));
+}
+
+#[test]
+fn a_uuid_written_without_hyphens_reads_in_both_spellings() {
     assert_eq!(
-        parse_prefixed_uuid(&printed, "session").expect("the prefixed spelling reads"),
-        parse_prefixed_uuid(bare, "session").expect("the bare spelling reads")
+        parse_prefixed_uuid("00000000000000000000000000000000", "session"),
+        Ok(Uuid::nil())
+    );
+    assert_eq!(
+        parse_prefixed_uuid("session-00000000000000000000000000000000", "session"),
+        Ok(Uuid::nil())
+    );
+}
+
+#[test]
+fn empty_text_names_both_spellings() {
+    assert_eq!(
+        parse_prefixed_uuid("", "session"),
+        Err("expected `session-<uuid>` or a bare UUID".to_string())
+    );
+}
+
+#[test]
+fn a_prefix_with_no_uuid_after_it_names_both_spellings() {
+    assert_eq!(
+        parse_prefixed_uuid("session-", "session"),
+        Err("expected `session-<uuid>` or a bare UUID".to_string())
+    );
+    assert_eq!(
+        parse_prefixed_uuid("session", "session"),
+        Err("expected `session-<uuid>` or a bare UUID".to_string())
+    );
+}
+
+#[test]
+fn a_prefix_missing_its_hyphen_names_both_spellings() {
+    assert_eq!(
+        parse_prefixed_uuid("session00000000-0000-0000-0000-000000000000", "session"),
+        Err("expected `session-<uuid>` or a bare UUID".to_string())
+    );
+}
+
+#[test]
+fn the_prefix_is_matched_case_sensitively() {
+    assert_eq!(
+        parse_prefixed_uuid("SESSION-00000000-0000-0000-0000-000000000000", "session"),
+        Err("expected `session-<uuid>` or a bare UUID".to_string())
+    );
+}
+
+#[test]
+fn ids_minted_one_after_another_sort_by_creation() {
+    let first = PaneId::new();
+    let second = PaneId::new();
+    assert!(first < second);
+}
+
+#[test]
+fn deserializing_text_that_is_no_uuid_is_refused() {
+    let refused = serde_json::from_str::<PaneId>("\"quiet-lake\"").expect_err("not a uuid");
+    assert_eq!(
+        refused.to_string(),
+        "UUID parsing failed: invalid character: found `q` at 0 at line 1 column 12"
+    );
+}
+
+#[test]
+fn deserializing_the_prefixed_display_form_is_refused() {
+    let refused = serde_json::from_str::<PaneId>("\"pane-00000000-0000-0000-0000-000000000000\"")
+        .expect_err("the wire form is the bare uuid");
+    assert_eq!(
+        refused.to_string(),
+        "UUID parsing failed: invalid character: found `p` at 0 at line 1 column 43"
     );
 }
 

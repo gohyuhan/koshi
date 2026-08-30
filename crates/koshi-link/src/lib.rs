@@ -5,17 +5,14 @@
 //! Both kinds of koshi program sit on this crate. The command-line program
 //! reads a config, finds the session a verb is aimed at, and submits it. A
 //! server process reads the same config at startup and asks the router where
-//! its neighbours are. Neither owns this ground, so it sits under both.
-//!
-//! It sits *over* the runtime, not under it: reading a config file means
-//! producing the override layers and the admission policy `koshi-runtime`
-//! takes, so this crate names those types rather than the other way round.
+//! its neighbours are.
 //!
 //! Two halves, and nothing else:
 //!
 //! - **The files.** [`config`] reads `koshi.kdl`, the theme, the keybindings
-//!   and the profiles off disk into the override layers the runtime takes.
-//!   Parsing them is [`koshi_config`]'s job; this half is the reading.
+//!   and the profiles off disk into the override layers and the admission
+//!   policy `koshi-runtime` takes. Parsing them is [`koshi_config`]'s job;
+//!   this half is the reading.
 //! - **The sockets.** [`ipc_client`] talks to one session on its own control
 //!   socket, [`router_client`] talks to the router on the router's, and
 //!   [`talk`] holds the parts of an exchange that are the same for either

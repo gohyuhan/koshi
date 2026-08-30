@@ -3,7 +3,7 @@
 //! the events that drive them (ProcessStarted, ProcessExited, CloseRequested,
 //! Cleaned, Respawn).
 
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use koshi_core::error::{DomainCategory, DomainError, Severity};
 use koshi_core::ids::PluginId;
@@ -12,68 +12,64 @@ use super::{PaneLifecycle, PaneLifecycleEvent};
 use crate::error::InvalidTransition;
 use crate::pane::state::PaneKind;
 
-/// Returns one instance of each lifecycle state, with concrete payloads fixed
-/// (exit code 0, times set to UNIX_EPOCH) so tests can exhaustively check all
-/// state × event combinations.
+/// One instance of each lifecycle state. The payloads differ from the ones in
+/// `all_events()`: `Exited` carries `code: Some(7)` at `UNIX_EPOCH + 1s`, and
+/// `Closing` carries `since: UNIX_EPOCH + 2s`.
 fn all_states() -> [PaneLifecycle; 5] {
     [
         PaneLifecycle::Spawning,
         PaneLifecycle::Running,
         PaneLifecycle::Exited {
-            code: Some(0),
-            at: SystemTime::UNIX_EPOCH,
+            code: Some(7),
+            at: SystemTime::UNIX_EPOCH + Duration::from_secs(1),
         },
         PaneLifecycle::Closing {
-            since: SystemTime::UNIX_EPOCH,
+            since: SystemTime::UNIX_EPOCH + Duration::from_secs(2),
         },
         PaneLifecycle::Removed,
     ]
 }
 
-/// Returns one instance of each lifecycle event, with concrete payloads fixed
-/// (exit code 0, times set to UNIX_EPOCH) to pair with `all_states()` for
-/// exhaustive state × event coverage.
+/// One instance of each lifecycle event. The payloads differ from the ones in
+/// `all_states()`: `ProcessExited` carries `code: Some(3)` at
+/// `UNIX_EPOCH + 10s`, and `CloseRequested` carries `since: UNIX_EPOCH + 20s`.
 fn all_events() -> [PaneLifecycleEvent; 5] {
     [
         PaneLifecycleEvent::ProcessStarted,
         PaneLifecycleEvent::ProcessExited {
-            code: Some(0),
-            at: SystemTime::UNIX_EPOCH,
+            code: Some(3),
+            at: SystemTime::UNIX_EPOCH + Duration::from_secs(10),
         },
         PaneLifecycleEvent::CloseRequested {
-            since: SystemTime::UNIX_EPOCH,
+            since: SystemTime::UNIX_EPOCH + Duration::from_secs(20),
         },
         PaneLifecycleEvent::Cleaned,
         PaneLifecycleEvent::Respawn,
     ]
 }
 
-/// Checks whether a state × event combination is a valid transition according
-/// to the spec. Used by exhaustive tests to verify the `transition` method
-/// accepts exactly this set and rejects all others.
-fn is_allowed(from: PaneLifecycle, event: PaneLifecycleEvent) -> bool {
-    matches!(
-        (from, event),
-        (PaneLifecycle::Spawning, PaneLifecycleEvent::ProcessStarted)
-            | (
-                PaneLifecycle::Spawning,
-                PaneLifecycleEvent::CloseRequested { .. }
-            )
-            | (
-                PaneLifecycle::Running,
-                PaneLifecycleEvent::ProcessExited { .. }
-            )
-            | (
-                PaneLifecycle::Running,
-                PaneLifecycleEvent::CloseRequested { .. }
-            )
-            | (
-                PaneLifecycle::Exited { .. },
-                PaneLifecycleEvent::CloseRequested { .. }
-            )
-            | (PaneLifecycle::Closing { .. }, PaneLifecycleEvent::Cleaned)
-            | (PaneLifecycle::Exited { .. }, PaneLifecycleEvent::Respawn)
-    )
+/// The state that a legal `from` × `event` pair reaches, with the payload
+/// taken from `event`. `None` for every illegal pair.
+fn expected_next(from: PaneLifecycle, event: PaneLifecycleEvent) -> Option<PaneLifecycle> {
+    match (from, event) {
+        (PaneLifecycle::Spawning, PaneLifecycleEvent::ProcessStarted) => {
+            Some(PaneLifecycle::Running)
+        }
+        (
+            PaneLifecycle::Spawning | PaneLifecycle::Running | PaneLifecycle::Exited { .. },
+            PaneLifecycleEvent::CloseRequested { since },
+        ) => Some(PaneLifecycle::Closing { since }),
+        (PaneLifecycle::Running, PaneLifecycleEvent::ProcessExited { code, at }) => {
+            Some(PaneLifecycle::Exited { code, at })
+        }
+        (PaneLifecycle::Exited { .. }, PaneLifecycleEvent::Respawn) => {
+            Some(PaneLifecycle::Spawning)
+        }
+        (PaneLifecycle::Closing { .. }, PaneLifecycleEvent::Cleaned) => {
+            Some(PaneLifecycle::Removed)
+        }
+        _ => None,
+    }
 }
 
 #[test]
@@ -93,7 +89,6 @@ fn a_spawning_pane_can_be_closed_before_it_runs() {
         PaneKind::Terminal,
     );
 
-    // A close can arrive before the child reports started and is processed immediately.
     assert_eq!(next, Ok(PaneLifecycle::Closing { since }));
 }
 
@@ -127,14 +122,14 @@ fn a_held_exited_pane_can_later_be_closed() {
         code: Some(0),
         at: SystemTime::UNIX_EPOCH,
     };
-    let since = SystemTime::UNIX_EPOCH;
+    let since = SystemTime::UNIX_EPOCH + Duration::from_secs(4);
 
     let next = exited.transition(
         PaneLifecycleEvent::CloseRequested { since },
         PaneKind::Terminal,
     );
 
-    // The close discards the stale exit payload and adopts the request's time.
+    // `Closing` carries the request time, not the exit time.
     assert_eq!(next, Ok(PaneLifecycle::Closing { since }));
 }
 
@@ -157,8 +152,7 @@ fn a_dead_pane_respawns_back_to_spawning() {
         at: SystemTime::UNIX_EPOCH,
     };
 
-    // Respawn moves an exited pane back to Spawning, ready to spawn a new PTY
-    // and child process, with the prior exit payload discarded.
+    // `Spawning` carries no payload: the exit code and time are gone.
     assert_eq!(
         exited.transition(PaneLifecycleEvent::Respawn, PaneKind::Terminal),
         Ok(PaneLifecycle::Spawning)
@@ -172,7 +166,7 @@ fn a_respawned_pane_runs_through_the_normal_start_path() {
         at: SystemTime::UNIX_EPOCH,
     };
 
-    // Respawn follows the ordinary Spawning -> Running edge; it does not jump directly to Running.
+    // Respawn lands in `Spawning`; `ProcessStarted` then moves it to `Running`.
     let spawning = exited
         .transition(PaneLifecycleEvent::Respawn, PaneKind::Terminal)
         .unwrap();
@@ -183,10 +177,7 @@ fn a_respawned_pane_runs_through_the_normal_start_path() {
 
 #[test]
 fn a_close_during_spawn_wins_over_a_late_child_exit() {
-    // Race: the pane is closed while Spawning, then the child that was starting
-    // exits anyway. The close moves it to Closing; ProcessExited is not a legal
-    // transition from Closing, so the late exit is rejected and the state remains
-    // unchanged.
+    // The pane is closed while `Spawning`; the child then exits anyway.
     let since = SystemTime::UNIX_EPOCH;
     let closing = PaneLifecycle::Spawning
         .transition(
@@ -196,19 +187,67 @@ fn a_close_during_spawn_wins_over_a_late_child_exit() {
         .unwrap();
     assert_eq!(closing, PaneLifecycle::Closing { since });
 
-    let late_exit = closing.transition(
-        PaneLifecycleEvent::ProcessExited {
-            code: Some(0),
-            at: since,
-        },
-        PaneKind::Terminal,
+    // The late exit is rejected; the state stays `Closing`.
+    let late_exit = PaneLifecycleEvent::ProcessExited {
+        code: Some(0),
+        at: since,
+    };
+    assert_eq!(
+        closing.transition(late_exit, PaneKind::Terminal),
+        Err(InvalidTransition {
+            from: closing,
+            event: late_exit,
+            kind: PaneKind::Terminal,
+        })
     );
-    assert!(late_exit.is_err());
 
-    // The close still completes normally to Removed.
+    // The close still completes to `Removed`.
     assert_eq!(
         closing.transition(PaneLifecycleEvent::Cleaned, PaneKind::Terminal),
         Ok(PaneLifecycle::Removed)
+    );
+}
+
+#[test]
+fn a_second_close_request_while_closing_is_rejected() {
+    let closing = PaneLifecycle::Closing {
+        since: SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+    };
+    let event = PaneLifecycleEvent::CloseRequested {
+        since: SystemTime::UNIX_EPOCH + Duration::from_secs(2),
+    };
+
+    assert_eq!(
+        closing.transition(event, PaneKind::Terminal),
+        Err(InvalidTransition {
+            from: closing,
+            event,
+            kind: PaneKind::Terminal,
+        })
+    );
+}
+
+#[test]
+fn a_running_pane_rejects_a_second_process_start() {
+    assert_eq!(
+        PaneLifecycle::Running.transition(PaneLifecycleEvent::ProcessStarted, PaneKind::Terminal),
+        Err(InvalidTransition {
+            from: PaneLifecycle::Running,
+            event: PaneLifecycleEvent::ProcessStarted,
+            kind: PaneKind::Terminal,
+        })
+    );
+}
+
+#[test]
+fn a_running_pane_cannot_respawn() {
+    assert_eq!(
+        PaneLifecycle::Running.transition(PaneLifecycleEvent::Respawn, PaneKind::Terminal),
+        Err(InvalidTransition {
+            from: PaneLifecycle::Running,
+            event: PaneLifecycleEvent::Respawn,
+            kind: PaneKind::Terminal,
+        })
     );
 }
 
@@ -253,8 +292,7 @@ fn an_exited_pane_cannot_skip_the_close_transaction() {
         code: Some(0),
         at: SystemTime::UNIX_EPOCH,
     };
-    // `Cleaned` transitions Closing to Removed; from Exited it does not apply,
-    // so removal requires closing first.
+    // `Cleaned` is legal only from `Closing`.
     let event = PaneLifecycleEvent::Cleaned;
 
     assert_eq!(
@@ -274,8 +312,8 @@ fn an_exited_pane_is_never_silently_removed() {
         at: SystemTime::UNIX_EPOCH,
     };
 
-    // Verify Exited is a retained state: no single event transitions it directly
-    // to Removed; the path is Exited -> (CloseRequested) -> Closing -> (Cleaned) -> Removed.
+    // No single event moves `Exited` to `Removed`. The path is
+    // `Exited` -> `CloseRequested` -> `Closing` -> `Cleaned` -> `Removed`.
     for event in all_events() {
         assert_ne!(
             from.transition(event, PaneKind::Terminal),
@@ -288,21 +326,20 @@ fn an_exited_pane_is_never_silently_removed() {
 fn only_the_specified_transitions_are_accepted() {
     for from in all_states() {
         for event in all_events() {
-            let result = from.transition(event, PaneKind::Terminal);
+            let expected = match expected_next(from, event) {
+                Some(next) => Ok(next),
+                None => Err(InvalidTransition {
+                    from,
+                    event,
+                    kind: PaneKind::Terminal,
+                }),
+            };
 
-            if is_allowed(from, event) {
-                assert!(result.is_ok(), "{from:?} on {event:?} should be allowed");
-            } else {
-                assert_eq!(
-                    result,
-                    Err(InvalidTransition {
-                        from,
-                        event,
-                        kind: PaneKind::Terminal
-                    }),
-                    "{from:?} on {event:?} should be rejected"
-                );
-            }
+            assert_eq!(
+                from.transition(event, PaneKind::Terminal),
+                expected,
+                "{from:?} on {event:?}"
+            );
         }
     }
 }
@@ -319,9 +356,30 @@ fn exactly_seven_transitions_are_legal() {
 }
 
 #[test]
+fn an_exit_code_passes_through_unchanged_at_the_i32_bounds() {
+    let at = SystemTime::UNIX_EPOCH;
+
+    for code in [i32::MIN, -1, 0, 1, i32::MAX] {
+        assert_eq!(
+            PaneLifecycle::Running.transition(
+                PaneLifecycleEvent::ProcessExited {
+                    code: Some(code),
+                    at
+                },
+                PaneKind::Terminal,
+            ),
+            Ok(PaneLifecycle::Exited {
+                code: Some(code),
+                at
+            }),
+            "exit code {code}"
+        );
+    }
+}
+
+#[test]
 fn an_invalid_transition_is_recoverable_and_classified_by_pane_kind() {
-    // The error's domain follows the pane's kind, so a plugin pane's failure is
-    // never mislabelled as a terminal-emulator failure.
+    // The error's domain follows the pane's kind.
     let terminal = PaneLifecycle::Removed
         .transition(PaneLifecycleEvent::ProcessStarted, PaneKind::Terminal)
         .unwrap_err();
@@ -349,8 +407,7 @@ fn a_signal_killed_pane_exits_with_no_code() {
         PaneKind::Terminal,
     );
 
-    // A signal leaves no exit code behind. The missing code stays missing: the
-    // state never stands in a `0` that would read as a clean exit.
+    // `code` stays `None`; the state does not stand in a `0`.
     assert_eq!(next, Ok(PaneLifecycle::Exited { code: None, at }));
 }
 
@@ -362,4 +419,84 @@ fn lifecycle_events_survive_a_serde_round_trip() {
 
         assert_eq!(event, restored);
     }
+}
+
+#[test]
+fn lifecycle_states_survive_a_serde_round_trip() {
+    for state in all_states() {
+        let json = serde_json::to_string(&state).expect("serialize");
+        let restored: PaneLifecycle = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(state, restored);
+    }
+}
+
+#[test]
+fn unit_lifecycle_states_serialize_as_their_variant_names() {
+    assert_eq!(
+        serde_json::to_string(&PaneLifecycle::Spawning).expect("serialize"),
+        r#""Spawning""#
+    );
+    assert_eq!(
+        serde_json::to_string(&PaneLifecycle::Running).expect("serialize"),
+        r#""Running""#
+    );
+    assert_eq!(
+        serde_json::to_string(&PaneLifecycle::Removed).expect("serialize"),
+        r#""Removed""#
+    );
+}
+
+#[test]
+fn payload_lifecycle_states_serialize_their_fields_with_times_as_seconds_and_nanos() {
+    let exited = PaneLifecycle::Exited {
+        code: None,
+        at: SystemTime::UNIX_EPOCH + Duration::new(5, 40),
+    };
+    let closing = PaneLifecycle::Closing {
+        since: SystemTime::UNIX_EPOCH,
+    };
+
+    assert_eq!(
+        serde_json::to_string(&exited).expect("serialize"),
+        r#"{"Exited":{"code":null,"at":{"secs_since_epoch":5,"nanos_since_epoch":40}}}"#
+    );
+    assert_eq!(
+        serde_json::to_string(&closing).expect("serialize"),
+        r#"{"Closing":{"since":{"secs_since_epoch":0,"nanos_since_epoch":0}}}"#
+    );
+}
+
+#[test]
+fn unit_lifecycle_events_serialize_as_their_variant_names() {
+    assert_eq!(
+        serde_json::to_string(&PaneLifecycleEvent::ProcessStarted).expect("serialize"),
+        r#""ProcessStarted""#
+    );
+    assert_eq!(
+        serde_json::to_string(&PaneLifecycleEvent::Cleaned).expect("serialize"),
+        r#""Cleaned""#
+    );
+    assert_eq!(
+        serde_json::to_string(&PaneLifecycleEvent::Respawn).expect("serialize"),
+        r#""Respawn""#
+    );
+}
+
+#[test]
+fn an_unknown_lifecycle_state_fails_to_deserialize() {
+    let error = serde_json::from_str::<PaneLifecycle>(r#""Zombie""#).expect_err("unknown variant");
+
+    assert_eq!(
+        error.to_string(),
+        "unknown variant `Zombie`, expected one of `Spawning`, `Running`, `Exited`, `Closing`, `Removed` at line 1 column 8"
+    );
+}
+
+#[test]
+fn an_exited_state_without_a_time_fails_to_deserialize() {
+    let error = serde_json::from_str::<PaneLifecycle>(r#"{"Exited":{"code":0}}"#)
+        .expect_err("missing field");
+
+    assert_eq!(error.to_string(), "missing field `at` at line 1 column 20");
 }

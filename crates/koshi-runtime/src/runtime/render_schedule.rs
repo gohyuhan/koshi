@@ -5,7 +5,7 @@
 //! screen is stale with [`RenderScheduler::invalidate`], then asks
 //! [`RenderScheduler::poll`] whether it is time to render. The scheduler
 //! **coalesces** a burst of invalidations into a single repaint and **gates**
-//! how often that repaint may happen, so a chatty child produces one frame per
+//! how often that repaint may happen: a chatty child produces one frame per
 //! tick instead of one per write, and an idle koshi burns ~0% CPU.
 //!
 //! # Two cadences
@@ -19,7 +19,7 @@
 //! # Time is injected, never read
 //!
 //! The scheduler never calls `Instant::now()`. The event loop passes the
-//! current [`Instant`] into every decision, so the gate is a pure function of
+//! current [`Instant`] into every decision, and the gate is a pure function of
 //! its inputs. An [`Instant`] is monotonic: it only ever moves forward, and a
 //! wall-clock jump from a clock-sync correction (NTP, Network Time Protocol)
 //! or a daylight-saving change (DST) does not move it. A test drives the gate
@@ -31,8 +31,8 @@ use std::time::{Duration, Instant};
 /// Fastest cadence for a real (non-blink) change: ~one frame per 8 ms tick.
 pub const FRAME_INTERVAL: Duration = Duration::from_millis(8);
 
-/// Cadence when only the cursor blink is pending: slow enough that an idle
-/// session stays near 0% CPU.
+/// Cadence when only the cursor blink is pending: one frame per 250 ms. An
+/// idle session stays near 0% CPU at this rate.
 pub const BLINK_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Why the rendered frame is stale.

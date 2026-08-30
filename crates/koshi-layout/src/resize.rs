@@ -2,7 +2,6 @@
 //!
 //! A resize permanently shifts cells between two siblings by updating their
 //! weights' `resize_delta`, then lets the solver re-derive geometry.
-//! Keybindings and mouse border drags both go through this one function.
 //!
 //! The size is signed and names the border by direction: `resize(pane,
 //! Right, 5)` moves the pane's right border outward (the pane grows,
@@ -51,15 +50,15 @@ impl DomainError for ResizeError {
 /// Move `pane`'s border on the `direction` side by `size` cells: positive
 /// moves it outward (the pane grows and the adjacent sibling on that side
 /// donates the cells), negative moves it inward (the pane donates and that
-/// sibling gains them). Zero moves nothing and returns the tree unchanged.
+/// sibling gains them). A `size` of `0` runs the same lookups and checks
+/// and moves no cells.
 ///
-/// The border that moves is the nearest one to the pane: walking up the
-/// pane's ancestors, the first split that runs on the matching axis
-/// (horizontal for left/right, vertical for up/down) *and* has a sibling on
-/// the `direction` side owns it. So if the pane touches its inner split's
-/// edge, the border that moves is the enclosing split's — the line the user
-/// sees next to the pane. `tab_rect` is the rect the tree currently solves
-/// into; the donating side's solved size bounds how much it can give.
+/// The border that moves belongs to the deepest ancestor split that runs on
+/// the matching axis (horizontal for left/right, vertical for up/down) and
+/// has a sibling on the `direction` side. A pane on its inner split's edge
+/// moves the enclosing split's border. Splits below a collapsed stack
+/// member are skipped. `tab_rect` is the rect the tree solves into; the
+/// donor's solved size above its floor bounds the move.
 ///
 /// # Errors
 ///
@@ -78,10 +77,10 @@ pub fn resize(
     resize_with_min(tree, tab_rect, pane, direction, size, PaneSizing::default())
 }
 
-/// Like [`resize`] but with an explicit per-pane content minimum — the
-/// configured pane minimum, floored at [`crate::solver::MIN_PANE_SIZE`] by the caller — so
-/// the donating side's spare is measured against that floor. The donor's
-/// solved size excludes the [`PaneSizing::gap`] beside it.
+/// Like [`resize`] with an explicit [`PaneSizing`]: `sizing.min` is the
+/// per-pane content floor the donor's spare is measured against, and the
+/// donor's solved size excludes the [`PaneSizing::gap`] beside it.
+/// [`resize`] passes [`PaneSizing::default`].
 pub fn resize_with_min(
     tree: &LayoutNode,
     tab_rect: Rect,
@@ -90,18 +89,17 @@ pub fn resize_with_min(
     size: i16,
     sizing: PaneSizing,
 ) -> Result<LayoutNode, ResizeError> {
-    let Some(path) = tree.path_to(pane) else {
-        return Err(ResizeError::PaneNotFound { pane });
-    };
+    let path = tree
+        .path_to(pane)
+        .ok_or(ResizeError::PaneNotFound { pane })?;
 
     let wanted = split_axis(direction);
     let horizontal = wanted == SplitDirection::Horizontal;
 
-    // Deepest ancestor split on the right axis with a neighbor on the
-    // resize side — that split owns the border being moved.
-    let Some((depth, pane_slot, neighbor)) = find_border(tree, &path, wanted, direction) else {
-        return Err(ResizeError::NoAdjacentBorder { pane, direction });
-    };
+    // The deepest ancestor split on the wanted axis with a neighbor on the
+    // resize side owns the border being moved.
+    let (depth, pane_slot, neighbor) = find_border(tree, &path, wanted, direction)
+        .ok_or(ResizeError::NoAdjacentBorder { pane, direction })?;
 
     // The sign picks who donates the cells across the border: on a grow the
     // neighbor gives them to the pane, on a shrink the pane gives them to
@@ -132,8 +130,8 @@ pub fn resize_with_min(
 
     let mut result = tree.clone();
     let split = result.split_at_mut(&path[..depth]);
-    // A deserialized split may carry fewer weights than children; pad the
-    // missing ones with the default share before indexing into them.
+    // Missing weights are padded with the default share up to the child
+    // count.
     if split.weights.len() < split.children.len() {
         split
             .weights
@@ -148,15 +146,11 @@ pub fn resize_with_min(
     Ok(result)
 }
 
-/// Whether `pane` has a real adjacent border to resize against on `direction` —
-/// the border a [`resize`] would move — rather than sitting against the tab edge
-/// (or a collapsed stack header, which is not a resizable neighbor) on that side.
-///
-/// For a pane in the tree this is the exact condition under which [`resize`]
-/// does *not* return [`ResizeError::NoAdjacentBorder`] (a pane not in the tree
-/// is also `false` here; [`resize`] reports that as
-/// [`ResizeError::PaneNotFound`]), so a caller can decide whether a border is
-/// draggable without attempting the resize.
+/// `true` when [`resize`] on `pane` toward `direction` finds a border to
+/// move: the pane is in the tree and an ancestor split on the matching axis,
+/// above any collapsed stack member, has a sibling on that side. `false`
+/// for a pane not in the tree, for a side on the tab edge, and for the
+/// boundary against a collapsed stack header.
 #[must_use]
 pub fn has_adjacent_border(tree: &LayoutNode, pane: PaneId, direction: Direction) -> bool {
     let Some(path) = tree.path_to(pane) else {
@@ -165,18 +159,18 @@ pub fn has_adjacent_border(tree: &LayoutNode, pane: PaneId, direction: Direction
     find_border(tree, &path, split_axis(direction), direction).is_some()
 }
 
-/// Find the deepest ancestor split with `wanted` direction where the path's
-/// child has a sibling on the `direction` side. Returns the split's depth in
-/// the path plus the receiver (the path child) and donor (the sibling).
+/// The deepest ancestor split of direction `wanted`, above any collapsed
+/// stack member on `path`, whose path child has a sibling on the `direction`
+/// side: its depth in `path`, the path child's index, and the sibling's
+/// index. `None` when no such split exists.
 fn find_border(
     tree: &LayoutNode,
     path: &[usize],
     wanted: SplitDirection,
     direction: Direction,
 ) -> Option<(usize, usize, usize)> {
-    // Splits inside a collapsed stack member are invisible: only borders
-    // above the first collapsed crossing are candidates, so the search
-    // bubbles up to the outer levels.
+    // Only splits above the first stacked split whose path child is
+    // collapsed are candidates.
     let mut visible = path.len();
     let mut node = tree;
     for (depth, &index) in path.iter().enumerate() {
@@ -191,9 +185,7 @@ fn find_border(
     }
 
     for depth in (0..visible).rev() {
-        let LayoutNode::Split(split) = tree.node_at(&path[..depth]) else {
-            continue;
-        };
+        let split = tree.split_at(&path[..depth]);
         if split.direction != wanted {
             continue;
         }
@@ -213,10 +205,11 @@ fn find_border(
 
 /// The rect the node at `path` solves into, starting from `tab_rect`.
 ///
-/// Descends the same geometry the solver derives: directional levels slice
-/// with the shared child-rect computation; a stacked level carves one
-/// header row per collapsed member out of the active child's rect, shifted
-/// below the headers above it, and passes zero to collapsed ones.
+/// A directional level takes the child rect [`directional_child_rects`]
+/// derives. A stacked level gives the active member the stack rect minus
+/// one header row per other member, shifted down by the headers above it;
+/// a collapsed member, or every member of a stack whose rect is smaller
+/// than [`stack_min_size`], gets a zero rect.
 fn rect_at(tree: &LayoutNode, tab_rect: Rect, path: &[usize], sizing: PaneSizing) -> Rect {
     let mut node = tree;
     let mut rect = tab_rect;
@@ -229,11 +222,6 @@ fn rect_at(tree: &LayoutNode, tab_rect: Rect, path: &[usize], sizing: PaneSizing
                 directional_child_rects(split, rect, sizing)[index]
             }
             SplitDirection::Stacked => {
-                // Mirror `solve_stacked`: a rect that cannot hold every
-                // header plus the active member at minimum size suppresses
-                // the whole stack to zero area; otherwise one header row per
-                // other member is carved out of the active rect, headers
-                // above the active member shifting it down.
                 let needed = stack_min_size(split, sizing);
                 if rect.size.rows < needed.rows || rect.size.cols < needed.cols {
                     Rect::zero()

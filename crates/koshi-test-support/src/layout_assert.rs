@@ -7,27 +7,26 @@
 //! minimum cell size. A broken invariant returns a
 //! [`layout_assert::LayoutAssertionError`] that names the panes involved.
 //!
-//! Exact tiling is the conjunction of three checks:
-//! [`layout_assert::assert_all_space_occupied`] (area is fully accounted for),
-//! [`layout_assert::assert_no_overlap`] (no cell is double-counted), and
-//! [`layout_assert::assert_no_outside`] (no cell lies beyond the tab). Equal
-//! area alone does not prove a gap-free cover, so call all three.
+//! Exact tiling holds when three checks all pass:
+//! [`layout_assert::assert_all_space_occupied`] (the summed pane area equals
+//! the tab area), [`layout_assert::assert_no_overlap`] (no cell is counted
+//! twice), and [`layout_assert::assert_no_outside`] (no cell lies beyond the
+//! tab). Each check alone passes some layouts that are not exact tilings.
 //!
 //! ## Suppressed panes
 //!
-//! When the terminal shrinks below the fittable threshold the solver clips
-//! trailing panes to a zero-area rect and marks them suppressed. A suppressed
-//! pane occupies no cells, so these helpers treat any empty rect as suppressed.
-//! An empty rect adds zero area and intersects nothing, so the occupancy and
-//! overlap checks need no special case. The outside and minimum-size checks
-//! skip empty rects.
+//! The solver clips a pane it cannot fit to a zero-area rect and marks it
+//! suppressed. These helpers treat every empty rect (zero `cols` or zero
+//! `rows`) as suppressed, wherever its origin lies. The occupancy check counts
+//! it as zero area. The overlap check never reports it. The outside and
+//! minimum-size checks skip it.
 //!
 //! ## Live pane references
 //!
-//! Layout normalization also requires that every layout-tree leaf references a
-//! live pane. [`layout_assert::assert_live_pane_refs`] takes the extracted leaf
-//! pane ids and the set of live pane ids. The layout crate's tests pass
-//! `tree.leaf_panes()` and their live set straight in.
+//! [`layout_assert::assert_live_pane_refs`] checks that every layout-tree
+//! leaf references a live pane. It takes the extracted leaf pane ids and the
+//! set of live pane ids. The layout crate's tests pass `tree.leaf_panes()` and
+//! their live set straight in.
 
 use std::collections::HashSet;
 
@@ -95,16 +94,17 @@ impl std::fmt::Display for LayoutAssertionError {
 
 impl std::error::Error for LayoutAssertionError {}
 
-/// Total cells a rect covers, widened so sums across many panes cannot overflow.
+/// Total cells a rect covers, `cols * rows`, computed in `u64`.
 fn area(rect: Rect) -> u64 {
     u64::from(rect.size.cols) * u64::from(rect.size.rows)
 }
 
 /// Assert the live panes occupy exactly the tab area, by cell count.
 ///
-/// Suppressed (empty) panes contribute nothing. Equal area alone does not prove
-/// a gap-free tiling, so pair this with [`assert_no_overlap`] and
-/// [`assert_no_outside`].
+/// Sums `cols * rows` over every pane and compares the sum with the tab's.
+/// Suppressed (empty) panes add zero. Passes when the sums are equal even if
+/// the panes overlap or lie outside the tab; [`assert_no_overlap`] and
+/// [`assert_no_outside`] catch those.
 ///
 /// # Errors
 ///
@@ -128,8 +128,10 @@ pub fn assert_all_space_occupied(
 
 /// Assert no two live panes share a cell.
 ///
-/// Empty (suppressed) panes never intersect, so they are skipped implicitly.
-/// Reports the first overlapping pair found in iteration order.
+/// An empty (suppressed) pane intersects nothing and is never reported. Panes
+/// that only touch along an edge or at a corner do not overlap. Reports the
+/// first overlapping pair in iteration order: pane `0` is compared against
+/// every pane after it, then pane `1`, and so on.
 ///
 /// # Errors
 ///
@@ -153,7 +155,9 @@ pub fn assert_no_overlap(panes: &[PlacedPane]) -> Result<(), LayoutAssertionErro
 
 /// Assert every live pane lies fully within the tab rect.
 ///
-/// Empty (suppressed) panes cover no cells and are skipped.
+/// A pane is inside when its origin is at or past the tab's origin and its
+/// right and bottom edges, computed in `u32`, do not pass the tab's. Empty
+/// (suppressed) panes are skipped, wherever their origin lies.
 ///
 /// # Errors
 ///
@@ -182,7 +186,7 @@ pub fn assert_no_outside(panes: &[PlacedPane], tab_rect: Rect) -> Result<(), Lay
     Ok(())
 }
 
-/// Assert every live pane is at least `min` cells in each dimension.
+/// Assert every live pane is at least `min.cols` wide and `min.rows` tall.
 ///
 /// Empty (suppressed) panes are exempt.
 ///
@@ -211,12 +215,13 @@ pub fn assert_min_size_respected(
 /// Assert every layout leaf references a live pane.
 ///
 /// Takes the extracted leaf pane ids, not a concrete tree type. Callers pass
-/// `tree.leaf_panes()` and their live set in.
+/// `tree.leaf_panes()` and their live set in. An empty `layout_leaf_panes`
+/// passes.
 ///
 /// # Errors
 ///
-/// [`LayoutAssertionError::DeadPaneReference`] for the first pane id not present
-/// in `live_panes`.
+/// [`LayoutAssertionError::DeadPaneReference`] for the first pane id, in slice
+/// order, not present in `live_panes`.
 pub fn assert_live_pane_refs(
     layout_leaf_panes: &[PaneId],
     live_panes: &HashSet<PaneId>,

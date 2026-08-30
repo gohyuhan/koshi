@@ -3,14 +3,14 @@
 //! output pushes lines into scrollback.
 //!
 //! The offset is per-client view state ([`Client::scroll_offset`]), so two
-//! clients scroll a shared pane independently. Every public entry point clamps
-//! the offset to `[0, scrollback len]` and marks the frame stale when the offset
-//! actually moves.
+//! clients scroll a shared pane independently. Every public entry point keeps
+//! the offset inside `[0, scrollback len]` and marks the frame stale when the
+//! offset moves.
 //!
 //! Scrolling moves a view; it never decides whether the view is *held* against
 //! live output. That is [`Client::is_view_held`], derived from the offset and
-//! the client's highlight — so scrolling back to the bottom follows live again
-//! only when no highlight is holding the view there.
+//! the client's highlight: scrolling back to the bottom follows live again only
+//! when no highlight is holding the view there.
 
 use koshi_core::ids::{ClientId, PaneId};
 use koshi_session::client::Client;
@@ -19,8 +19,10 @@ use crate::{runtime::render_schedule::InvalidationReason, server::Server};
 
 impl Server {
     /// Scroll `client_id`'s view of `pane_id` up by `lines` into scrollback,
-    /// clamped to the pane's retained history. An unknown client, a gone pane,
-    /// or a view already at the clamp moves nothing and schedules no repaint.
+    /// clamped to the pane's retained history. An unknown client, or a view
+    /// already at the clamp, moves nothing and schedules no repaint. A pane
+    /// with no terminal engine retains nothing, so a view scrolled up in it
+    /// clamps back to the newest line.
     pub fn scroll_up(&mut self, client_id: ClientId, pane_id: PaneId, lines: usize) {
         let retained = self
             .terminal_engines

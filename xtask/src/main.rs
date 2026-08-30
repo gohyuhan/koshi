@@ -2,8 +2,10 @@
 //! `cargo xtask <command>` and never shipped.
 //!
 //! The one command is `dep-guard`, which checks the allowed crate-dependency
-//! edges. Any other argument, and no argument at all, prints the usage text on
-//! stderr and exits with a failure code.
+//! edges. Arguments after the command are ignored. Any other command, for
+//! example `foo`, prints ``xtask: unknown command `foo` `` and then the usage
+//! text on stderr and exits with a failure code. No argument at all prints
+//! the usage text alone and exits with a failure code.
 
 use std::process::ExitCode;
 

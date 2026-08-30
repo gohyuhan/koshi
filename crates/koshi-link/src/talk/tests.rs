@@ -2,18 +2,15 @@
 //! check at the Hello, unwrapping an answer that may name a result this build
 //! does not have, and the two failures that read the same for either peer.
 //!
-//! Each peer's own wording is pinned here, because those sentences are what a
-//! person reads when a verb fails.
+//! Each peer's own wording is pinned here word for word.
 
 use super::*;
 
 use koshi_core::command::CliExitCode;
 use koshi_ipc::protocol::{IpcErrorCode, IpcResult};
 
-/// The sentence a failure carries, for asserting on it exactly.
-///
-/// Every failure in this module is [`CliError::IpcUnavailable`]; any other
-/// variant is the test's own failure, not a wording mismatch.
+/// The sentence a failure carries, for asserting on it exactly. Panics on any
+/// [`CliError`] variant other than [`CliError::IpcUnavailable`].
 fn detail(error: CliError) -> String {
     match error {
         CliError::IpcUnavailable { detail } => detail,
@@ -23,10 +20,12 @@ fn detail(error: CliError) -> String {
 
 #[test]
 fn a_version_inside_the_range_this_build_sent_is_accepted() {
-    assert!(SESSION.settled_version(2).is_ok());
-    assert!(SESSION.settled_version(3).is_ok());
-    assert!(ROUTER.settled_version(1).is_ok());
-    assert!(ROUTER.settled_version(2).is_ok());
+    SESSION.settled_version(2).expect("2 is the session floor");
+    SESSION
+        .settled_version(3)
+        .expect("3 is the session ceiling");
+    ROUTER.settled_version(1).expect("1 is the router floor");
+    ROUTER.settled_version(2).expect("2 is the router ceiling");
 }
 
 #[test]
@@ -69,9 +68,48 @@ fn a_version_below_the_floor_is_refused_the_same_way() {
 }
 
 #[test]
+fn a_router_version_below_the_floor_names_the_control_plane_range() {
+    let refusal = ROUTER
+        .settled_version(0)
+        .expect_err("0 is below the router floor of 1");
+
+    assert_eq!(
+        detail(refusal),
+        "the router settled on control-plane protocol version 0, which is outside the 1 to 2 \
+         this koshi asked for"
+    );
+}
+
+#[test]
+fn the_largest_version_a_peer_can_name_is_outside_the_range() {
+    let refusal = SESSION
+        .settled_version(u32::MAX)
+        .expect_err("4294967295 is outside the 2 to 3 this build speaks");
+
+    assert_eq!(
+        detail(refusal),
+        "the session settled on protocol version 4294967295, which is outside the 2 to 3 this \
+         koshi asked for"
+    );
+}
+
+#[test]
 fn a_known_result_comes_back_as_itself() {
     let response: Answer<MaybeKnown<IpcResult>> = Answer {
         request_id: Some(7),
+        result: MaybeKnown::Known(IpcResult::Restarting),
+    };
+
+    assert_eq!(
+        SESSION.take_result(response).expect("a known result"),
+        IpcResult::Restarting
+    );
+}
+
+#[test]
+fn an_answer_that_names_no_request_still_hands_back_its_result() {
+    let response: Answer<MaybeKnown<IpcResult>> = Answer {
+        request_id: None,
         result: MaybeKnown::Known(IpcResult::Restarting),
     };
 
@@ -159,8 +197,6 @@ fn a_protocol_refusal_carries_the_sentence_the_peer_sent() {
 
 #[test]
 fn each_peer_reads_its_range_from_the_versioned_surface_table() {
-    // The two ranges are the table's, not a second copy that could drift from
-    // it.
     assert_eq!(SESSION.surface, koshi_core::compat::SESSION_PROTOCOL);
     assert_eq!(ROUTER.surface, koshi_core::compat::CONTROL_PROTOCOL);
 }
@@ -193,6 +229,19 @@ fn a_session_hello_hands_back_the_build_the_session_named() {
     assert_eq!(
         session_hello_version(reply).expect("2 is inside the 2 to 3 this build speaks"),
         (2, "0.9.9".to_string())
+    );
+}
+
+#[test]
+fn a_session_hello_at_the_top_of_the_range_hands_back_that_version() {
+    let reply = session_answer(IpcResult::Hello {
+        protocol_version: 3,
+        version: "0.9.9".to_string(),
+    });
+
+    assert_eq!(
+        session_hello_version(reply).expect("3 is the top of the 2 to 3 this build speaks"),
+        (3, "0.9.9".to_string())
     );
 }
 
@@ -249,6 +298,23 @@ fn a_session_answering_no_hello_at_all_names_the_reply_that_arrived() {
     assert_eq!(
         detail(refusal),
         "the session answered with an unexpected Restarting reply"
+    );
+}
+
+#[test]
+fn a_hello_answer_this_build_cannot_name_stops_the_exchange() {
+    let reply: IncomingResponse = Answer {
+        request_id: Some(1),
+        result: MaybeKnown::Unknown {
+            name: "Rehomed".to_string(),
+        },
+    };
+
+    let refusal = session_hello_version(reply).expect_err("this build has no Rehomed variant");
+
+    assert_eq!(
+        detail(refusal),
+        "the session answered with an unexpected Rehomed reply"
     );
 }
 
@@ -332,4 +398,16 @@ fn a_settled_version_at_or_above_the_least_is_accepted_and_no_least_accepts_any(
     // A `None` floor takes every settled version, including one below 3.
     require_settled_version(2, None).expect("no floor takes 2");
     require_settled_version(0, None).expect("no floor takes 0");
+}
+
+#[test]
+fn the_client_refusal_names_the_flag_whatever_floor_it_is_given() {
+    let refusal =
+        require_settled_version(0, Some(1)).expect_err("a session settled on 0 is below 1");
+
+    assert_eq!(
+        detail(refusal),
+        "this session speaks protocol 0; --client needs a session started by koshi 0.4.0 or \
+         later"
+    );
 }

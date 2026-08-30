@@ -36,6 +36,9 @@ pub mod layout;
 /// What every server does the same way, on whichever protocol it speaks: the
 /// framing faults, the unknown request kind, and the Hello.
 pub mod plane;
+/// Wire messages between a client and a session server: the requests, the
+/// answer that repeats a request's `request_id`, and the Hello that opens a
+/// connection.
 pub mod protocol;
 /// The servers a dialling user has connected to: the address, the secret, the
 /// pinned certificate fingerprint, and the name the user chose for each.

@@ -1,9 +1,10 @@
-//! Tests for profile genesis: a `--profile` template opening its tabs and
-//! panes, focusing the pane the profile marks, starting its first client
-//! locked, and refusing a plugin pane.
+//! Tests for genesis: the first session seeded with one shell pane under a
+//! caller-chosen id, and a `--profile` template opening its tabs and panes,
+//! focusing the pane the profile marks, starting its first client locked, and
+//! refusing a plugin pane.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
 use std::time::SystemTime;
 
@@ -13,9 +14,11 @@ use koshi_core::event::{Event, InputMode, InputModeChanged};
 use koshi_core::geometry::{Direction, Size, SplitDirection};
 use koshi_core::ids::{ClientId, SessionId};
 use koshi_core::lock::LockMode;
+use koshi_core::process::PtySize;
 use koshi_layout::template::{ProfileTemplate, TemplateError};
 use koshi_layout::tree::LayoutNode;
 use koshi_pty::error::PtyError;
+use koshi_session::client::ClientOrigin;
 use koshi_session::session::lifecycle::SessionLifecycle;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
@@ -178,9 +181,9 @@ fn a_profile_with_a_plugin_pane_is_refused_and_commits_nothing() {
 
 #[test]
 fn a_profile_sizes_its_focused_tab_panes_to_the_split() {
-    // One pane fills the region; two side by side each get less than that, which
-    // only holds if the focused tab was reflowed to its solved layout at genesis
-    // (the panes spawn at the full-region placeholder size first).
+    // One pane fills the pane region of an 80x24 viewport — 80x22 once the two
+    // chrome rows are removed, 78x20 of content inside its border. Two side by
+    // side take 40 columns each, 38 of them content.
     let (mut single, _fake) = runtime();
     single
         .bootstrap_profile(
@@ -191,7 +194,8 @@ fn a_profile_sizes_its_focused_tab_panes_to_the_split() {
             Some(ClientId::new()),
         )
         .expect("single-pane profile launches");
-    let full = single.pty_sizes.values().next().expect("one pane").cols;
+    let full = *single.pty_sizes.values().next().expect("one pane");
+    assert_eq!(full, PtySize { cols: 78, rows: 20 });
 
     let (mut split, _fake) = runtime();
     split
@@ -203,11 +207,20 @@ fn a_profile_sizes_its_focused_tab_panes_to_the_split() {
             Some(ClientId::new()),
         )
         .expect("two-pane profile launches");
-    let widths: Vec<u16> = split.pty_sizes.values().map(|size| size.cols).collect();
-    assert_eq!(widths.len(), 2);
-    assert!(
-        widths.iter().all(|&w| w < full),
-        "split panes {widths:?} should each be narrower than one full pane ({full})"
+    let session = split.sessions.values().next().expect("one session");
+    let tab = session.tabs.values().next().expect("one tab");
+    let sizes: Vec<PtySize> = tab
+        .layout()
+        .leaf_panes()
+        .iter()
+        .map(|pane| split.pty_sizes[pane])
+        .collect();
+    assert_eq!(
+        sizes,
+        vec![
+            PtySize { cols: 38, rows: 20 },
+            PtySize { cols: 38, rows: 20 }
+        ]
     );
 }
 
@@ -402,10 +415,13 @@ fn a_profile_records_focus_for_every_tab() {
 
     let session = rt.sessions.values().next().expect("one session");
     let client_ref = session.clients.get(client).expect("client attached");
-    for tab_id in session.tabs.keys() {
-        assert!(
-            client_ref.focused_pane(*tab_id).is_some(),
-            "tab {tab_id:?} has no focused pane recorded"
+    for (tab_id, tab) in &session.tabs {
+        let panes = tab.layout().leaf_panes();
+        assert_eq!(panes.len(), 1, "tab {tab_id:?} holds one pane");
+        assert_eq!(
+            client_ref.focused_pane(*tab_id),
+            Some(panes[0]),
+            "tab {tab_id:?} focuses its own pane"
         );
     }
 }
@@ -652,6 +668,186 @@ fn a_locked_client_reattaching_keeps_its_mode_and_takes_no_second_lock() {
         LockMode::Locked
     );
     assert_eq!(mode_changes(&events), vec![]);
+}
+
+#[test]
+fn bootstrap_local_attaches_its_client_to_the_seeded_tab_and_root_pane() {
+    let (mut rt, _fake) = runtime();
+    let client = rt
+        .bootstrap_local(SessionId::new(), viewport(), SystemTime::UNIX_EPOCH)
+        .expect("bootstrap");
+
+    let session = rt.sessions.values().next().expect("one session");
+    let (tab_id, tab) = session.tabs.iter().next().expect("one tab");
+    let root = tab.layout().leaf_panes()[0];
+    assert_eq!(session.clients.len(), 1, "the genesis client alone");
+    let attached = session.clients.get(client).expect("the genesis client");
+    assert_eq!(attached.active_tab(), *tab_id);
+    assert_eq!(attached.focused_pane(*tab_id), Some(root));
+    assert_eq!(attached.origin(), ClientOrigin::Local);
+    assert_eq!(attached.colour(), 0);
+    assert_eq!(attached.lock_mode(), LockMode::Normal);
+    assert_eq!(attached.viewport(), viewport());
+}
+
+#[test]
+fn bootstrap_local_sizes_the_root_pane_to_the_pane_region() {
+    // The chrome takes one row above and one below the pane region, and the
+    // pane's border one cell on each side, so an 80x24 viewport gives the root
+    // pane 78x20 of content. Genesis resizes it no further.
+    let (mut rt, fake) = runtime();
+    let _client = rt
+        .bootstrap_local(SessionId::new(), viewport(), SystemTime::UNIX_EPOCH)
+        .expect("bootstrap");
+
+    let session = rt.sessions.values().next().expect("one session");
+    let tab = session.tabs.values().next().expect("one tab");
+    let root = tab.layout().leaf_panes()[0];
+    assert_eq!(rt.pty_sizes[&root], PtySize { cols: 78, rows: 20 });
+    assert_eq!(
+        fake.resizes(root).expect("the root pane was spawned"),
+        vec![PtySize { cols: 78, rows: 20 }]
+    );
+}
+
+#[test]
+fn a_one_row_viewport_seeds_the_root_pane_at_the_minimum_row_count() {
+    // The pane region of a one-row viewport saturates to zero rows, and the PTY
+    // size floors each axis at 2x1.
+    let (mut rt, _fake) = runtime();
+    let _client = rt
+        .bootstrap_local(
+            SessionId::new(),
+            Size { cols: 80, rows: 1 },
+            SystemTime::UNIX_EPOCH,
+        )
+        .expect("bootstrap");
+
+    let size = *rt.pty_sizes.values().next().expect("one pane");
+    assert_eq!(size, PtySize { cols: 80, rows: 1 });
+}
+
+#[test]
+fn a_genesis_shell_that_fails_to_spawn_commits_nothing_and_surfaces_the_error() {
+    let (mut rt, fake) = runtime();
+    fake.fail_spawns_with(PtyError::Spawn {
+        detail: "no shell".to_string(),
+    });
+
+    let err = rt
+        .bootstrap_local(SessionId::new(), viewport(), SystemTime::UNIX_EPOCH)
+        .expect_err("a failed spawn aborts genesis");
+
+    assert_eq!(
+        err,
+        PtyError::Spawn {
+            detail: "no shell".to_string()
+        }
+    );
+    assert!(rt.sessions.is_empty(), "no session committed");
+    assert!(rt.pty_handles.is_empty(), "no PTY parked");
+    assert!(rt.pty_sizes.is_empty(), "no PTY size recorded");
+}
+
+#[test]
+fn a_profile_pane_cannot_replace_the_identity_env_it_is_given() {
+    let (mut rt, fake) = runtime();
+    let tmpl = template(
+        "version 1\ntab {\n    pane {\n        env \"KOSHI\" \"0\"\n        \
+         env \"KOSHI_SESSION_ID\" \"session-someone-elses\"\n    }\n}",
+    );
+    let sid = SessionId::new();
+    let client = ClientId::new();
+    let () = rt
+        .bootstrap_profile(sid, tmpl, viewport(), SystemTime::UNIX_EPOCH, Some(client))
+        .expect("profile launches");
+
+    // The identity overlay is merged last, so koshi's own values win over the
+    // ones the profile file names.
+    let session = rt.sessions.values().next().expect("one session");
+    let tab = session.tabs.values().next().expect("one tab");
+    let pane = tab.layout().leaf_panes()[0];
+    let spec = fake.spawn_spec(pane).expect("pane was spawned");
+    assert_eq!(spec.env.get("KOSHI"), Some(&"1".to_string()));
+    assert_eq!(spec.env.get("KOSHI_SESSION_ID"), Some(&sid.to_string()));
+    assert_eq!(spec.env.get("KOSHI_CLIENT_ID"), Some(&client.to_string()));
+    assert_eq!(spec.env.get("KOSHI_PANE_ID"), Some(&pane.to_string()));
+}
+
+#[test]
+fn a_profile_pane_keeps_its_own_terminal_identity_over_the_configured_one() {
+    let (mut rt, fake) = runtime();
+    rt.config.terminal.term = "xterm-kitty".to_string();
+    rt.config.terminal.colorterm = "24bit".to_string();
+    let tmpl = template(
+        "version 1\ntab {\n    pane {\n        env \"TERM\" \"screen-256color\"\n    }\n}",
+    );
+    let () = rt
+        .bootstrap_profile(
+            SessionId::new(),
+            tmpl,
+            viewport(),
+            SystemTime::UNIX_EPOCH,
+            Some(ClientId::new()),
+        )
+        .expect("profile launches");
+
+    let session = rt.sessions.values().next().expect("one session");
+    let tab = session.tabs.values().next().expect("one tab");
+    let pane = tab.layout().leaf_panes()[0];
+    let spec = fake.spawn_spec(pane).expect("pane was spawned");
+    assert_eq!(spec.env.get("TERM"), Some(&"screen-256color".to_string()));
+    assert_eq!(spec.env.get("COLORTERM"), Some(&"24bit".to_string()));
+}
+
+#[test]
+fn a_profile_command_pane_records_the_command_and_cwd_it_declares() {
+    let (mut rt, _fake) = runtime();
+    let tmpl = template(
+        "version 1\ntab {\n    pane {\n        command \"htop\" \"-d\" \"5\"\n        \
+         cwd \"/tmp\"\n    }\n}",
+    );
+    let () = rt
+        .bootstrap_profile(
+            SessionId::new(),
+            tmpl,
+            viewport(),
+            SystemTime::UNIX_EPOCH,
+            Some(ClientId::new()),
+        )
+        .expect("profile launches");
+
+    let session = rt.sessions.values().next().expect("one session");
+    let tab = session.tabs.values().next().expect("one tab");
+    let pane = tab.layout().leaf_panes()[0];
+    let record = session.panes.get(pane).expect("the pane record");
+    assert_eq!(record.cwd, Some(PathBuf::from("/tmp")));
+    let command = record.command.as_ref().expect("the command is recorded");
+    assert_eq!(command.program, PathBuf::from("htop"));
+    assert_eq!(command.args, vec!["-d".to_string(), "5".to_string()]);
+    assert_eq!(command.cwd, Some(PathBuf::from("/tmp")));
+}
+
+#[test]
+fn a_profile_default_shell_pane_records_no_command() {
+    let (mut rt, _fake) = runtime();
+    let tmpl = template("version 1\ntab {\n    pane {\n        cwd \"/tmp\"\n    }\n}");
+    let () = rt
+        .bootstrap_profile(
+            SessionId::new(),
+            tmpl,
+            viewport(),
+            SystemTime::UNIX_EPOCH,
+            Some(ClientId::new()),
+        )
+        .expect("profile launches");
+
+    let session = rt.sessions.values().next().expect("one session");
+    let tab = session.tabs.values().next().expect("one tab");
+    let pane = tab.layout().leaf_panes()[0];
+    let record = session.panes.get(pane).expect("the pane record");
+    assert_eq!(record.cwd, Some(PathBuf::from("/tmp")));
+    assert_eq!(record.command, None, "the default shell is not a command");
 }
 
 /// Every [`Event::InputModeChanged`] in `events`, in order.

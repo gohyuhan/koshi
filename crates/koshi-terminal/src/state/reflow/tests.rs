@@ -327,19 +327,23 @@ fn reflow_respects_the_scrollback_caps_and_stays_monotonic() {
     state.scrollback = Scrollback::new(ScrollbackLimit::new(2, 100_000));
     let mut engine = vte::Parser::new();
     engine.advance(&mut state, b"abcdefgh12345678\r\nx");
-    let pushed_before = state.scrollback.total_pushed();
+    // The first row scrolled into history as the line feed arrived.
+    assert_eq!(state.scrollback.total_pushed(), 1);
+    assert_eq!(state.scrollback.dropped_lines(), 0);
 
     // At width 4 the 16-cell line needs 4 rows; 3 overflow the 2-row screen
-    // but only 2 fit the cap — the oldest drops and is tallied.
+    // but only 2 fit the cap — the oldest drops and is tallied. The retained
+    // count grew by one, so the monotonic counter grows by one.
     state.resize(PtySize { cols: 4, rows: 2 });
     assert_eq!(state.scrollback.len(), 2);
-    assert!(state.scrollback.dropped_lines() > 0);
-    assert!(state.scrollback.total_pushed() >= pushed_before);
+    assert_eq!(state.scrollback.dropped_lines(), 1);
+    assert_eq!(state.scrollback.total_pushed(), 2);
 
-    // A second reflow still never decreases the monotonic counter.
-    let pushed_mid = state.scrollback.total_pushed();
+    // Widening pulls one row back onto the screen: history shrinks, the
+    // monotonic counter stays put.
     state.resize(PtySize { cols: 8, rows: 2 });
-    assert!(state.scrollback.total_pushed() >= pushed_mid);
+    assert_eq!(state.scrollback.len(), 1);
+    assert_eq!(state.scrollback.total_pushed(), 2);
 }
 
 #[test]
@@ -349,20 +353,31 @@ fn rewrap_line_splits_exactly_and_marks_ends() {
         .map(|c| Cell::new(c, 1, Style::default()))
         .collect();
     let rows = rewrap_line(&cells, 4, Style::default());
-    assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].0.len(), 4);
-    assert_eq!(rows[0].1.end, RowEnd::Soft);
-    assert_eq!(rows[1].0.len(), 2);
-    assert_eq!(rows[1].1.end, RowEnd::Hard);
+    assert_eq!(
+        rows,
+        vec![
+            (
+                cells[..4].to_vec(),
+                RowMeta {
+                    end: RowEnd::Soft,
+                    prompt: false,
+                }
+            ),
+            (
+                cells[4..].to_vec(),
+                RowMeta {
+                    end: RowEnd::Hard,
+                    prompt: false,
+                }
+            ),
+        ]
+    );
 }
 
 #[test]
 fn rewrap_line_of_empty_content_is_one_hard_row() {
     let rows = rewrap_line(&[], 4, Style::default());
-    assert_eq!(rows.len(), 1);
-    assert!(rows[0].0.is_empty());
-    assert_eq!(rows[0].1.end, RowEnd::Hard);
-    assert!(!rows[0].1.prompt);
+    assert_eq!(rows, vec![(Vec::new(), RowMeta::default())]);
 }
 
 #[test]
@@ -558,4 +573,279 @@ fn a_linefeed_scroll_still_ends_its_row_hard() {
         .map(|(_, meta)| meta.end)
         .collect();
     assert_eq!(history, vec![RowEnd::Hard]);
+}
+
+/// One default-styled narrow cell per char of `text`.
+fn cells(text: &str) -> Vec<Cell> {
+    text.chars()
+        .map(|c| Cell::new(c, 1, Style::default()))
+        .collect()
+}
+
+/// A wide glyph as stored in the grid: the width-2 base and its width-0
+/// continuation cell.
+fn wide(ch: char) -> [Cell; 2] {
+    [
+        Cell::new(ch, 2, Style::default()),
+        Cell::new(' ', 0, Style::default()),
+    ]
+}
+
+/// The prompt mark of every screen row, top to bottom.
+fn prompt_marks(state: &TerminalState) -> Vec<bool> {
+    let (rows, _) = state.primary.dimensions();
+    (0..rows)
+        .map(|row| state.primary.prompt_mark(row))
+        .collect()
+}
+
+#[test]
+fn rewrap_line_at_zero_columns_wraps_at_one_column() {
+    let content = cells("abc");
+    let rows = rewrap_line(&content, 0, Style::default());
+    let soft = RowMeta {
+        end: RowEnd::Soft,
+        prompt: false,
+    };
+    assert_eq!(
+        rows,
+        vec![
+            (cells("a"), soft),
+            (cells("b"), soft),
+            (cells("c"), RowMeta::default()),
+        ]
+    );
+}
+
+#[test]
+fn rewrap_line_leaves_a_spacer_in_the_fill_before_a_wide_glyph_at_the_last_column() {
+    let mut red = Style::default();
+    red.set_bg(Color::Indexed(1));
+    let mut content = cells("abc");
+    content.extend(wide('\u{6f22}'));
+
+    let rows = rewrap_line(&content, 4, red);
+
+    let mut first = cells("abc");
+    first.push(Cell::blank_with(red));
+    assert_eq!(
+        rows,
+        vec![
+            (
+                first,
+                RowMeta {
+                    end: RowEnd::SoftWide,
+                    prompt: false,
+                }
+            ),
+            (wide('\u{6f22}').to_vec(), RowMeta::default()),
+        ]
+    );
+}
+
+#[test]
+fn rewrap_line_at_one_column_stores_a_wide_glyph_narrow_and_skips_its_continuation() {
+    let mut content = wide('\u{6f22}').to_vec();
+    content.extend(wide('\u{5b57}'));
+
+    let rows = rewrap_line(&content, 1, Style::default());
+
+    assert_eq!(
+        rows,
+        vec![
+            (
+                vec![Cell::new('\u{6f22}', 1, Style::default())],
+                RowMeta {
+                    end: RowEnd::Soft,
+                    prompt: false,
+                }
+            ),
+            (
+                vec![Cell::new('\u{5b57}', 1, Style::default())],
+                RowMeta::default()
+            ),
+        ]
+    );
+}
+
+#[test]
+fn locate_offset_skips_a_soft_wide_spacer() {
+    let mut first = cells("abc");
+    first.push(Cell::blank());
+    let mut second = wide('\u{6f22}').to_vec();
+    second.extend(cells("c"));
+    let rows = vec![
+        (
+            first,
+            RowMeta {
+                end: RowEnd::SoftWide,
+                prompt: false,
+            },
+        ),
+        (second, RowMeta::default()),
+    ];
+    // Offsets 0-2 are `abc`; the spacer holds none, so offset 3 is the wide
+    // glyph at the start of the next row and offset 5 is the `c` after it.
+    assert_eq!(locate_offset(&rows, 2), (0, 2));
+    assert_eq!(locate_offset(&rows, 3), (1, 0));
+    assert_eq!(locate_offset(&rows, 5), (1, 2));
+}
+
+#[test]
+fn prompt_mark_follows_its_row_when_the_line_above_wraps() {
+    let mut state = TerminalState::new(PtySize { cols: 8, rows: 4 });
+    let mut parser = vte::Parser::new();
+    parser.advance(&mut state, b"abcdefg\r\n\x1b]133;A\x07$ ");
+    assert_eq!(prompt_marks(&state), vec![false, true, false, false]);
+
+    // `abcdefg` needs two rows at width 4, pushing the prompt row down one.
+    state.resize(PtySize { cols: 4, rows: 4 });
+    assert_eq!(prompt_marks(&state), vec![false, false, true, false]);
+    assert_eq!(state.primary.rows()[2][0].ch(), '$');
+
+    state.resize(PtySize { cols: 8, rows: 4 });
+    assert_eq!(prompt_marks(&state), vec![false, true, false, false]);
+}
+
+#[test]
+fn a_prompt_mark_on_a_wrapped_line_stays_on_its_first_row() {
+    let mut state = TerminalState::new(PtySize { cols: 4, rows: 4 });
+    let mut parser = vte::Parser::new();
+    parser.advance(&mut state, b"\x1b]133;A\x07abcdefgh");
+    assert_eq!(prompt_marks(&state), vec![true, false, false, false]);
+
+    state.resize(PtySize { cols: 2, rows: 4 });
+    assert_eq!(prompt_marks(&state), vec![true, false, false, false]);
+
+    state.resize(PtySize { cols: 8, rows: 4 });
+    assert_eq!(prompt_marks(&state), vec![true, false, false, false]);
+}
+
+#[test]
+fn a_prompt_mark_on_a_continuation_row_moves_to_the_lines_first_row() {
+    let mut state = TerminalState::new(PtySize { cols: 8, rows: 4 });
+    let mut parser = vte::Parser::new();
+    parser.advance(&mut state, b"abcdefghij");
+    // Row 1 holds `ij`, the continuation of row 0's line.
+    state.active_grid_mut().set_prompt_mark(1, true);
+
+    // The whole line fits one row: the mark lands on that row.
+    state.resize(PtySize { cols: 12, rows: 4 });
+    assert_eq!(prompt_marks(&state), vec![true, false, false, false]);
+
+    // Wrapping again keeps the mark on the line's first row.
+    state.resize(PtySize { cols: 8, rows: 4 });
+    assert_eq!(prompt_marks(&state), vec![true, false, false, false]);
+}
+
+#[test]
+fn cursor_parked_past_the_text_keeps_its_column_when_the_width_holds_it() {
+    let mut e = engine(8, 2);
+    feed(&mut e, "ab\x1b[1;7H"); // cursor to column 6, four cells past `ab`
+    assert_eq!(cursor(&e), (0, 6));
+
+    resize(&mut e, 12, 2);
+    assert_eq!(cursor(&e), (0, 6));
+
+    // Width 4 cannot hold column 6: the cursor clamps to the last column.
+    resize(&mut e, 4, 2);
+    assert_eq!(cursor(&e), (0, 3));
+
+    // The clamp is what the next reflow starts from.
+    resize(&mut e, 12, 2);
+    assert_eq!(cursor(&e), (0, 3));
+}
+
+#[test]
+fn cursor_on_a_soft_wide_spacer_lands_on_the_wide_glyph_after_widening() {
+    let mut e = engine(4, 3);
+    feed(&mut e, "abc\u{6f22}\x1b[1;4H"); // cursor onto row 0's spacer
+    assert_eq!(cursor(&e), (0, 3));
+    assert_eq!(row_end(&e, 0), RowEnd::SoftWide);
+
+    resize(&mut e, 8, 3);
+    assert_eq!(cursor(&e), (0, 3));
+    assert_eq!(e.state().active_grid().cell(0, 3).unwrap().ch(), '\u{6f22}');
+}
+
+#[test]
+fn resizing_to_the_same_size_changes_nothing() {
+    let mut e = engine(8, 4);
+    feed(&mut e, "abcdefghij\r\nxy");
+    let before = (
+        logical_lines(&e),
+        (0..4).map(|row| row_end(&e, row)).collect::<Vec<_>>(),
+        cursor(&e),
+    );
+    assert_eq!(
+        before.1,
+        vec![RowEnd::Soft, RowEnd::Hard, RowEnd::Hard, RowEnd::Hard]
+    );
+    assert_eq!(before.2, (2, 2));
+
+    resize(&mut e, 8, 4);
+    assert_eq!(
+        (
+            logical_lines(&e),
+            (0..4).map(|row| row_end(&e, row)).collect::<Vec<_>>(),
+            cursor(&e),
+        ),
+        before
+    );
+    assert_eq!(e.state().scrollback().len(), 0);
+}
+
+#[test]
+fn a_trailing_soft_history_row_becomes_a_hard_line_on_regrow() {
+    let mut state = TerminalState::new(PtySize { cols: 4, rows: 0 });
+    state.scrollback.push_row_with_meta(
+        &cells("ab"),
+        RowMeta {
+            end: RowEnd::Soft,
+            prompt: false,
+        },
+    );
+
+    state.resize(PtySize { cols: 4, rows: 2 });
+
+    let mut expected = cells("ab");
+    expected.extend([Cell::blank(), Cell::blank()]);
+    assert_eq!(state.primary.rows()[0], expected);
+    assert_eq!(state.primary.row_end(0), RowEnd::Hard);
+    assert_eq!(state.scrollback.len(), 0);
+    assert_eq!((state.primary_cursor.row, state.primary_cursor.col), (0, 0));
+}
+
+#[test]
+fn a_prompt_mark_on_an_empty_trailing_soft_row_survives_regrow() {
+    let mut state = TerminalState::new(PtySize { cols: 4, rows: 0 });
+    state.scrollback.push_row_with_meta(
+        &[],
+        RowMeta {
+            end: RowEnd::Soft,
+            prompt: true,
+        },
+    );
+
+    state.resize(PtySize { cols: 4, rows: 2 });
+
+    assert_eq!(state.primary.rows()[0], vec![Cell::blank(); 4]);
+    assert_eq!(state.primary.row_end(0), RowEnd::Hard);
+    assert_eq!(prompt_marks(&state), vec![true, false]);
+    assert_eq!(state.scrollback.len(), 0);
+}
+
+#[test]
+fn height_shrink_with_the_cursor_above_scrolled_content_clamps_it_to_the_top_row() {
+    let mut e = engine(4, 3);
+    feed(&mut e, "a\r\nb\r\nc\x1b[H");
+    assert_eq!(cursor(&e), (0, 0));
+
+    // Rows `a` and `b` are content, so they scroll into history rather than
+    // dropping; the cursor's own row goes with them and the cursor clamps to
+    // the top row, which now holds `c`.
+    resize(&mut e, 4, 1);
+    assert_eq!(history_text(&e), vec!["a", "b"]);
+    assert_eq!(row_text(&e, 0), "c");
+    assert_eq!(cursor(&e), (0, 0));
 }

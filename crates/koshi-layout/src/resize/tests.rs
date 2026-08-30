@@ -565,3 +565,124 @@ fn the_spare_across_a_gap_comes_from_the_donor_rect_the_gap_left() {
         }
     );
 }
+
+#[test]
+fn a_minimum_signed_shrink_reports_its_full_magnitude() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = pair(SplitDirection::Horizontal, a, b);
+
+    // On a shrink a is the donor: 40 columns above its floor of 4 leave 36.
+    let err = resize(&tree, tab(), a, Direction::Right, i16::MIN).unwrap_err();
+    assert_eq!(
+        err,
+        ResizeError::MinSize {
+            requested: 32_768,
+            spare: 36,
+        }
+    );
+}
+
+#[test]
+fn a_zero_resize_still_reports_a_missing_pane_or_border() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = pair(SplitDirection::Horizontal, a, b);
+    let missing = PaneId::new();
+
+    let err = resize(&tree, tab(), missing, Direction::Right, 0).unwrap_err();
+    assert_eq!(err, ResizeError::PaneNotFound { pane: missing });
+    let err = resize(&tree, tab(), a, Direction::Left, 0).unwrap_err();
+    assert_eq!(
+        err,
+        ResizeError::NoAdjacentBorder {
+            pane: a,
+            direction: Direction::Left,
+        }
+    );
+}
+
+#[test]
+fn has_adjacent_border_is_false_for_a_pane_not_in_the_tree() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = pair(SplitDirection::Horizontal, a, b);
+
+    assert!(!has_adjacent_border(&tree, PaneId::new(), Direction::Right));
+}
+
+#[test]
+fn has_adjacent_border_bubbles_out_of_a_collapsed_member() {
+    // a | [x active / (u | v) collapsed]: the divider between u and v sits
+    // under the header, but the stack's left border beside a is real.
+    let (a, x, u, v) = (PaneId::new(), PaneId::new(), PaneId::new(), PaneId::new());
+    let mut stack = SplitNode::stack(vec![x, u], 0);
+    stack.children[1].node = pair(SplitDirection::Horizontal, u, v);
+    let tree = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![leaf(a), LayoutChild::new(LayoutNode::Split(stack))],
+    ));
+
+    assert!(!has_adjacent_border(&tree, u, Direction::Right));
+    assert!(has_adjacent_border(&tree, v, Direction::Left));
+    assert!(!has_adjacent_border(&tree, v, Direction::Right));
+}
+
+#[test]
+fn a_suppressed_donor_has_no_spare_cells() {
+    // Three columns in nine cells: a and b keep their four-cell floors and
+    // c is suppressed. Growing b rightward asks c, which holds nothing.
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let tree = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![leaf(a), leaf(b), leaf(c)],
+    ));
+    let narrow = Rect::at_origin(Size { cols: 9, rows: 24 });
+
+    assert_eq!(solve(&tree, narrow).suppressed, [c]);
+    let err = resize(&tree, narrow, b, Direction::Right, 1).unwrap_err();
+    assert_eq!(
+        err,
+        ResizeError::MinSize {
+            requested: 1,
+            spare: 0,
+        }
+    );
+}
+
+#[test]
+fn a_collapsed_member_of_a_root_stack_has_no_border() {
+    let (b, c) = (PaneId::new(), PaneId::new());
+    let tree = LayoutNode::Split(SplitNode::stack(vec![b, c], 0));
+
+    let err = resize(&tree, tab(), c, Direction::Left, 1).unwrap_err();
+    assert_eq!(
+        err,
+        ResizeError::NoAdjacentBorder {
+            pane: c,
+            direction: Direction::Left,
+        }
+    );
+    assert!(!has_adjacent_border(&tree, b, Direction::Down));
+}
+
+#[test]
+fn a_larger_content_minimum_raises_the_donor_floor() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = pair(SplitDirection::Horizontal, a, b);
+    let sizing = PaneSizing {
+        min: Size { cols: 10, rows: 5 },
+        gap: 0,
+    };
+
+    // b holds 40 columns and floors at twelve, its ten-column content
+    // minimum plus the two border columns: 28 are spare.
+    let err = resize_with_min(&tree, tab(), a, Direction::Right, 29, sizing).unwrap_err();
+    assert_eq!(
+        err,
+        ResizeError::MinSize {
+            requested: 29,
+            spare: 28,
+        }
+    );
+
+    let allowed = resize_with_min(&tree, tab(), a, Direction::Right, 28, sizing).unwrap();
+    assert_eq!(solved_rect(&allowed, tab(), sizing, b), rect(68, 0, 12, 24));
+}

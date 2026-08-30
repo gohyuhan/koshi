@@ -1,12 +1,11 @@
 //! Resize reflow for the primary screen.
 //!
-//! A resize re-wraps the primary screen instead of cropping it: scrollback
-//! and screen rows are unwound into logical lines using each row's
-//! [`RowEnd`], prompt marks are attached to row offsets, every logical line is
+//! A resize re-wraps the primary screen: scrollback and screen rows are
+//! unwound into logical lines using each row's [`RowEnd`], prompt marks are
+//! attached to content offsets in those lines, every logical line is
 //! re-wrapped to the new width, and the result is split back into history and
-//! screen. Text that soft-wrapped at
-//! the old width re-joins at a wider one, and text wider than the new width
-//! wraps onto continuation rows instead of being cut off — printing
+//! screen. Text that soft-wrapped at the old width re-joins at a wider one,
+//! and text wider than the new width wraps onto continuation rows: printing
 //! `abcdef` at width 6, resizing to width 4, then back to 6 shows `abcd` /
 //! `ef` and then `abcdef` again. Hard-ended rows never merge: a line that
 //! exactly fills the width and ends with a line feed stays its own line.
@@ -24,11 +23,11 @@ use super::{rebuilt_with_width, TerminalState};
 impl TerminalState {
     /// Rebuild the primary screen and its scrollback for `size` by re-wrapping
     /// every logical line to the new width. The cursor stays on its logical
-    /// line at its content offset; rows past the new height scroll into
-    /// history and trailing blank padding rows are dropped instead. Cursor
-    /// tracking needs at least one row: a zero-row size parks every row in
-    /// history (the cursor has no row to sit on), and the next non-zero
-    /// reflow restarts the cursor on the first logical line.
+    /// line at its content offset, clamped to the new screen. Rows past the
+    /// new height scroll into history; trailing rows below the cursor that
+    /// end hard and hold only default blanks are dropped first. A zero-row
+    /// size parks every row in history, and the next non-zero reflow puts the
+    /// cursor on the first logical line.
     pub(super) fn reflow_primary(&mut self, size: PtySize) {
         let fill = self.primary_render.style.bg_fill();
 
@@ -71,9 +70,9 @@ impl TerminalState {
             }
             if index == cursor_physical {
                 cursor_line = lines.len();
-                // On a line's final row the cursor may rest in the padding
-                // past the text; keep that offset so the position survives
-                // when the new width still holds it.
+                // On a hard-ended row the cursor's column counts in full,
+                // padding included; on a soft row it is capped at the row's
+                // content.
                 cursor_offset = current.len()
                     + if meta.end == RowEnd::Hard {
                         cursor_col
@@ -89,8 +88,8 @@ impl TerminalState {
                 ));
             }
         }
-        // A trailing soft-wrapped row with no hard end below it (possible in
-        // history after heavy eviction) still forms a line.
+        // A trailing soft-wrapped row with no hard end below it still forms a
+        // line, as does a prompt mark left on an empty tail.
         if !current.is_empty() || !prompt_offsets.is_empty() {
             lines.push((current, prompt_offsets));
         }
@@ -118,10 +117,9 @@ impl TerminalState {
             rewrapped.push((Vec::new(), RowMeta::default()));
         }
 
-        // Trailing blank rows below the cursor are padding the screen can
-        // re-create; drop them rather than pushing real history further out.
-        // Content is judged by the same rule the unwind used, so a styled
-        // blank row counts as content and survives.
+        // Drop trailing rows below the cursor that end hard and hold only
+        // default blanks, down to the screen height. A styled blank row
+        // counts as content and stays.
         while rewrapped.len() > size.rows as usize
             && rewrapped.len() > new_cursor_physical + 1
             && rewrapped
@@ -153,13 +151,15 @@ impl TerminalState {
     }
 }
 
-/// Re-wrap one logical line's content into `cols`-wide rows.
+/// Re-wrap one logical line's content into `cols`-wide rows. `cols` of `0`
+/// wraps at one column. Empty content gives one empty [`RowEnd::Hard`] row.
+/// Every row's `prompt` is `false`.
 ///
 /// `abcdef` at `cols = 4` → `abcd` ([`RowEnd::Soft`]) then `ef`
 /// ([`RowEnd::Hard`]). A wide glyph whose base would land in a row's last
-/// column gets a blank spacer there and starts the next row whole
-/// ([`RowEnd::SoftWide`]) — the same rule as the live print path — and in a
-/// one-column screen a wide glyph stores narrow, matching `place_glyph`.
+/// column leaves a blank spacer in `fill` there and starts the next row whole
+/// ([`RowEnd::SoftWide`]). At one column a wide glyph is stored narrow and its
+/// width-0 continuation cell is skipped.
 fn rewrap_line(content: &[Cell], cols: u16, fill: Style) -> Vec<(Vec<Cell>, RowMeta)> {
     let cols = cols.max(1) as usize;
     let mut rows: Vec<(Vec<Cell>, RowMeta)> = Vec::new();
@@ -178,8 +178,7 @@ fn rewrap_line(content: &[Cell], cols: u16, fill: Style) -> Vec<(Vec<Cell>, RowM
         }
         if cell.width() == 2 {
             if cols == 1 {
-                // A wide pair can never fit one column; keep the base narrow
-                // (the same rule as place_glyph) and skip its continuation.
+                // Store the base narrow and skip its width-0 continuation.
                 row.push(rebuilt_with_width(cell, 1));
                 index += 1;
                 if content.get(index).is_some_and(|next| next.width() == 0) {
@@ -188,8 +187,9 @@ fn rewrap_line(content: &[Cell], cols: u16, fill: Style) -> Vec<(Vec<Cell>, RowM
                 continue;
             }
             if row.len() + 1 == cols {
-                // The base would land in the last column, splitting the
-                // pair: leave a spacer and retry the glyph on the next row.
+                // The base would land in the last column: fill it with a
+                // spacer, end the row `SoftWide`, and retry the glyph on the
+                // next row.
                 row.push(Cell::blank_with(fill));
                 rows.push((
                     std::mem::take(&mut row),
@@ -215,8 +215,10 @@ fn rewrap_line(content: &[Cell], cols: u16, fill: Style) -> Vec<(Vec<Cell>, RowM
 }
 
 /// The (row-within-line, column) where content offset `offset` lands among a
-/// re-wrapped line's rows. An offset past the content parks in the final
-/// row's padding; the caller clamps the column to the screen width.
+/// re-wrapped line's rows. A [`RowEnd::SoftWide`] row's spacer holds no
+/// offset. An offset past the content lands in the final row at a column
+/// past its cells, not clamped to the screen width. Empty `rows` gives
+/// `(0, 0)`.
 fn locate_offset(rows: &[(Vec<Cell>, RowMeta)], offset: usize) -> (usize, usize) {
     let mut remaining = offset;
     for (index, (row, meta)) in rows.iter().enumerate() {

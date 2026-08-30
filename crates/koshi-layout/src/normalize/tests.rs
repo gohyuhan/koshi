@@ -15,6 +15,21 @@ fn live(panes: &[PaneId]) -> HashSet<PaneId> {
     panes.iter().copied().collect()
 }
 
+/// A plain flex weight of `share` with no overlays and no resize offset.
+fn flex(share: Weight) -> SizeWeight {
+    SizeWeight::new(SizeConstraint::Flex(share))
+}
+
+/// A horizontal split of `children` with the given `weights`.
+fn row(children: Vec<LayoutChild>, weights: Vec<SizeWeight>) -> LayoutNode {
+    LayoutNode::Split(SplitNode {
+        direction: SplitDirection::Horizontal,
+        children,
+        weights,
+        active: 0,
+    })
+}
+
 /// Returns a standard 80×24 tab rectangle for test layouts.
 fn tab() -> Rect {
     Rect::at_origin(Size { cols: 80, rows: 24 })
@@ -70,6 +85,14 @@ fn same_direction_splits_merge_and_preserve_solved_shares() {
     };
     assert_eq!(flat.children.len(), 3);
     assert_eq!(normalized.leaf_panes(), [a, b, c]);
+    // a keeps its half; b and c each keep a quarter.
+    assert_eq!(
+        normalized,
+        row(
+            vec![leaf(a), leaf(b), leaf(c)],
+            vec![flex(2), flex(1), flex(1)]
+        )
+    );
 }
 
 #[test]
@@ -89,7 +112,7 @@ fn merge_is_skipped_when_a_resize_offset_is_present() {
     };
     // The presence of resize_delta prevents merging; the nested split survives with its offset.
     assert_eq!(outer.children.len(), 2);
-    assert!(matches!(outer.children[1].node, LayoutNode::Split(_)));
+    assert_eq!(normalized, tree);
 }
 
 #[test]
@@ -131,6 +154,13 @@ fn collapsing_a_unary_split_exposes_a_mergeable_child() {
         panic!("expected a split");
     };
     assert_eq!(flat.children.len(), 3);
+    assert_eq!(
+        normalized,
+        row(
+            vec![leaf(a), leaf(b), leaf(c)],
+            vec![flex(2), flex(1), flex(1)]
+        )
+    );
 }
 
 #[test]
@@ -147,7 +177,7 @@ fn dead_members_before_the_active_one_shift_its_index_down() {
     let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
     let tree = LayoutNode::Split(SplitNode::stack(vec![a, b, c], 2));
 
-    // a dies; c is still the expanded member but now sits at index 1.
+    // a dies; c stays the expanded member and sits at index 1.
     let normalized = normalize(&tree, &live(&[b, c])).unwrap();
     let LayoutNode::Split(stack) = &normalized else {
         panic!("stack must survive");
@@ -171,6 +201,7 @@ fn dead_active_stack_child_hands_off_to_the_next_member() {
     assert_eq!(stack.active, 1);
     let collapsed: Vec<bool> = stack.children.iter().map(|child| child.collapsed).collect();
     assert_eq!(collapsed, [true, false]);
+    assert_eq!(normalized.leaf_panes(), [a, c]);
 }
 
 #[test]
@@ -209,8 +240,10 @@ fn missing_weights_are_refilled_with_defaults() {
     let LayoutNode::Split(split) = &normalized else {
         panic!("expected a split");
     };
-    assert_eq!(split.weights.len(), 2);
-    assert_eq!(split.weights[1], SizeWeight::default());
+    assert_eq!(
+        split.weights,
+        [SizeWeight::default(), SizeWeight::default()]
+    );
 }
 
 #[test]
@@ -275,7 +308,7 @@ fn merge_is_skipped_when_inner_flex_weights_would_overflow_their_sum() {
         panic!("expected a split");
     };
     assert_eq!(outer.children.len(), 2);
-    assert!(matches!(outer.children[1].node, LayoutNode::Split(_)));
+    assert_eq!(normalized, tree);
     assert_eq!(normalized.leaf_panes(), [a, b, c]);
 }
 
@@ -301,7 +334,7 @@ fn merge_is_skipped_when_the_slot_weight_carries_a_min_overlay() {
         panic!("expected a split");
     };
     assert_eq!(result.children.len(), 2);
-    assert!(matches!(result.children[1].node, LayoutNode::Split(_)));
+    assert_eq!(normalized, tree);
 }
 
 #[test]
@@ -358,4 +391,249 @@ fn a_dead_last_active_stack_member_hands_off_to_the_new_last_member() {
     let collapsed: Vec<bool> = stack.children.iter().map(|child| child.collapsed).collect();
     assert_eq!(collapsed, [true, false]);
     assert_eq!(normalized.leaf_panes(), [a, b]);
+}
+
+#[test]
+fn a_live_lone_pane_is_returned_as_is() {
+    let a = PaneId::new();
+    assert_eq!(
+        normalize(&LayoutNode::Pane(a), &live(&[a])),
+        Some(LayoutNode::Pane(a))
+    );
+}
+
+#[test]
+fn a_dead_lone_pane_normalizes_to_nothing() {
+    let a = PaneId::new();
+    assert_eq!(normalize(&LayoutNode::Pane(a), &HashSet::new()), None);
+}
+
+#[test]
+fn a_stack_with_every_member_collapsed_re_expands_its_active_member() {
+    // Hand-built: every member collapsed, the active one included.
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let mut stack = SplitNode::stack(vec![a, b, c], 1);
+    for child in &mut stack.children {
+        child.collapsed = true;
+    }
+    let tree = LayoutNode::Split(stack);
+
+    let normalized = normalize(&tree, &live(&[a, b, c])).unwrap();
+    assert_eq!(
+        normalized,
+        LayoutNode::Split(SplitNode::stack(vec![a, b, c], 1))
+    );
+}
+
+#[test]
+fn a_stack_with_two_expanded_members_keeps_only_the_active_one_expanded() {
+    // Hand-built: member c is expanded next to the active member b.
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let mut stack = SplitNode::stack(vec![a, b, c], 1);
+    stack.children[2].collapsed = false;
+    let tree = LayoutNode::Split(stack);
+
+    let normalized = normalize(&tree, &live(&[a, b, c])).unwrap();
+    assert_eq!(
+        normalized,
+        LayoutNode::Split(SplitNode::stack(vec![a, b, c], 1))
+    );
+}
+
+#[test]
+fn an_out_of_range_stack_active_index_expands_the_last_member() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let mut stack = SplitNode::stack(vec![a, b], 0);
+    stack.active = 9;
+    let tree = LayoutNode::Split(stack);
+
+    let normalized = normalize(&tree, &live(&[a, b])).unwrap();
+    assert_eq!(
+        normalized,
+        LayoutNode::Split(SplitNode::stack(vec![a, b], 1))
+    );
+}
+
+#[test]
+fn extra_weights_past_the_children_are_dropped() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let mut split =
+        SplitNode::with_equal_weights(SplitDirection::Horizontal, vec![leaf(a), leaf(b)]);
+    split.weights.push(flex(7));
+    let tree = LayoutNode::Split(split);
+
+    let normalized = normalize(&tree, &live(&[a, b])).unwrap();
+    assert_eq!(
+        normalized,
+        LayoutNode::Split(SplitNode::with_equal_weights(
+            SplitDirection::Horizontal,
+            vec![leaf(a), leaf(b)],
+        ))
+    );
+}
+
+#[test]
+fn a_directional_split_resets_its_active_index_and_collapsed_flags() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let mut split = SplitNode::with_equal_weights(SplitDirection::Vertical, vec![leaf(a), leaf(b)]);
+    split.active = 1;
+    split.children[0].collapsed = true;
+    let tree = LayoutNode::Split(split);
+
+    let normalized = normalize(&tree, &live(&[a, b])).unwrap();
+    assert_eq!(
+        normalized,
+        LayoutNode::Split(SplitNode::with_equal_weights(
+            SplitDirection::Vertical,
+            vec![leaf(a), leaf(b)],
+        ))
+    );
+}
+
+#[test]
+fn three_nested_same_direction_splits_flatten_into_one() {
+    // h(a, h(b, h(c, d))) flattens to h(a:4, b:2, c:1, d:1): a keeps its
+    // half, b its quarter, c and d their eighth each.
+    let (a, b, c, d) = (PaneId::new(), PaneId::new(), PaneId::new(), PaneId::new());
+    let innermost = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![leaf(c), leaf(d)],
+    ));
+    let middle = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![leaf(b), LayoutChild::new(innermost)],
+    ));
+    let tree = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![leaf(a), LayoutChild::new(middle)],
+    ));
+
+    let before = solve(&tree, tab());
+    let normalized = normalize(&tree, &live(&[a, b, c, d])).unwrap();
+    assert_eq!(solve(&normalized, tab()).panes, before.panes);
+    assert_eq!(
+        normalized,
+        row(
+            vec![leaf(a), leaf(b), leaf(c), leaf(d)],
+            vec![flex(4), flex(2), flex(1), flex(1)]
+        )
+    );
+}
+
+#[test]
+fn merged_shares_keep_unequal_proportions() {
+    // h(a:1, h(b:3, c:1):2) flattens to h(a:4, b:6, c:2): a keeps a third,
+    // b a half, c a sixth. Over 96 columns that is 32, 48 and 16.
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let inner = row(vec![leaf(b), leaf(c)], vec![flex(3), flex(1)]);
+    let tree = row(
+        vec![leaf(a), LayoutChild::new(inner)],
+        vec![flex(1), flex(2)],
+    );
+    let wide = Rect::at_origin(Size { cols: 96, rows: 24 });
+
+    let before = solve(&tree, wide);
+    let normalized = normalize(&tree, &live(&[a, b, c])).unwrap();
+    assert_eq!(solve(&normalized, wide).panes, before.panes);
+    assert_eq!(
+        normalized,
+        row(
+            vec![leaf(a), leaf(b), leaf(c)],
+            vec![flex(4), flex(6), flex(2)]
+        )
+    );
+}
+
+#[test]
+fn merge_is_skipped_when_a_kept_sibling_is_not_a_plain_flex_share() {
+    // The nested pair is plain flex, but sibling a claims a percentage.
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let inner = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![leaf(b), leaf(c)],
+    ));
+    let tree = row(
+        vec![leaf(a), LayoutChild::new(inner)],
+        vec![SizeWeight::new(SizeConstraint::Percent(50)), flex(1)],
+    );
+
+    let normalized = normalize(&tree, &live(&[a, b, c])).unwrap();
+    assert_eq!(normalized, tree);
+}
+
+#[test]
+fn merge_is_skipped_when_a_rescaled_share_would_exceed_the_weight_maximum() {
+    // a's share of u32::MAX doubled by the inner pair's factor of 2 does
+    // not fit a weight, so the pair stays nested.
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let inner = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![leaf(b), leaf(c)],
+    ));
+    let tree = row(
+        vec![leaf(a), LayoutChild::new(inner)],
+        vec![flex(u32::MAX), flex(1)],
+    );
+
+    let normalized = normalize(&tree, &live(&[a, b, c])).unwrap();
+    assert_eq!(normalized, tree);
+}
+
+#[test]
+fn a_dead_leaf_inside_a_nested_split_collapses_it_into_the_parent() {
+    // h(a, h(b, c)) with c dead: the inner pair collapses to b, and b takes
+    // the pair's slot weight.
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let inner = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![leaf(b), leaf(c)],
+    ));
+    let tree = row(
+        vec![leaf(a), LayoutChild::new(inner)],
+        vec![flex(1), flex(3)],
+    );
+
+    let normalized = normalize(&tree, &live(&[a, b])).unwrap();
+    assert_eq!(
+        normalized,
+        row(vec![leaf(a), leaf(b)], vec![flex(1), flex(3)])
+    );
+}
+
+#[test]
+fn a_stack_inside_a_directional_split_stays_nested() {
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let stack = LayoutNode::Split(SplitNode::stack(vec![b, c], 1));
+    let tree = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![leaf(a), LayoutChild::new(stack)],
+    ));
+
+    let normalized = normalize(&tree, &live(&[a, b, c])).unwrap();
+    assert_eq!(normalized, tree);
+}
+
+#[test]
+fn valid_overlays_and_the_resize_offset_pass_through_unchanged() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = row(
+        vec![leaf(a), leaf(b)],
+        vec![
+            SizeWeight {
+                primary: SizeConstraint::Percent(100),
+                min: Some(5),
+                preferred: Some(7),
+                resize_delta: -3,
+            },
+            SizeWeight {
+                primary: SizeConstraint::Fixed(u16::MAX),
+                min: None,
+                preferred: None,
+                resize_delta: i32::MAX,
+            },
+        ],
+    );
+
+    let normalized = normalize(&tree, &live(&[a, b])).unwrap();
+    assert_eq!(normalized, tree);
 }

@@ -1,13 +1,9 @@
 //! Persistence data types for layout state that outlives a process: plain
-//! structs meant to be serialized to disk and read back, as opposed to the
-//! live tree types the solver works on.
+//! structs serialized to disk and read back, separate from the live tree
+//! types the solver works on.
 //!
-//! A stack's identity is its membership, its active member, and which members
-//! are collapsed. That survives a detach/attach or a daemon restart; a pane's
-//! live PTY (the pseudo-terminal process feeding its content) does not. The
-//! snapshot stores pane ids and flags only. It carries no weights: collapsed
-//! members have no independent size, and the active member takes whatever the
-//! stack gets.
+//! A stack's persisted shape is its member pane ids, its active member, and
+//! the collapsed flag of each member. It stores no weights.
 
 use koshi_core::geometry::SplitDirection;
 use koshi_core::ids::PaneId;
@@ -22,19 +18,17 @@ pub struct StackSnapshot {
     pub members: Vec<PaneId>,
     /// Index of the expanded member.
     pub active: usize,
-    /// Per-member collapsed flags, parallel to `members`. This is the exact
-    /// set of flags captured at snapshot time, so restoring reproduces them
-    /// as-is rather than recomputing them from `active`.
+    /// Per-member collapsed flags, parallel to `members`, exactly as
+    /// captured. [`StackSnapshot::restore`] applies them as stored.
     pub collapsed_states: Vec<bool>,
 }
 
 impl StackSnapshot {
-    /// Capture a stack's persisted shape. `None` when `node` is not a
-    /// stack. A member that is itself a subtree is represented by its
-    /// first pane — a shape the edits never produce. A member without any
-    /// pane is dropped, and the active index follows its member through
-    /// that filtering; when the active member itself is dropped, the last
-    /// member stands in.
+    /// Capture a stack's persisted shape. `None` when `stack` is not a
+    /// stack. A member that is itself a subtree is represented by its first
+    /// pane. A member without any pane is dropped, and the active index
+    /// follows its member through that filtering; when the active member
+    /// itself is dropped, the last member stands in.
     #[must_use]
     pub fn capture(stack: &SplitNode) -> Option<Self> {
         if stack.direction != SplitDirection::Stacked {
@@ -63,16 +57,14 @@ impl StackSnapshot {
     }
 
     /// Rebuild the stack this snapshot describes. The active index is
-    /// clamped into bounds and the collapsed flags are re-paired with the
-    /// members, so a snapshot from an older or damaged store still restores
-    /// to a usable stack.
+    /// clamped into bounds by [`SplitNode::stack`]. `collapsed_states` is
+    /// applied by index: a member past its end keeps the flag derived from
+    /// `active`, and flags past the member count are ignored.
     #[must_use]
     pub fn restore(&self) -> SplitNode {
         let mut stack = SplitNode::stack(self.members.clone(), self.active);
-        for (index, child) in stack.children.iter_mut().enumerate() {
-            if let Some(&collapsed) = self.collapsed_states.get(index) {
-                child.collapsed = collapsed;
-            }
+        for (child, &collapsed) in stack.children.iter_mut().zip(&self.collapsed_states) {
+            child.collapsed = collapsed;
         }
         stack
     }

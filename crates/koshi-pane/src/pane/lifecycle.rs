@@ -37,8 +37,8 @@ pub enum PaneLifecycle {
     Spawning,
     /// The child process is running.
     Running,
-    /// The child process ended. `code` is `None` when a signal killed the
-    /// child. `code` is also `None` when the exit status was not available.
+    /// The child process ended at `at`. `code` is `None` when a signal killed
+    /// the child or when no exit status was available.
     Exited { code: Option<i32>, at: SystemTime },
     /// The pane is shutting down. `since` is the time of the close request.
     Closing { since: SystemTime },
@@ -94,16 +94,16 @@ impl PaneLifecycle {
 pub enum PaneLifecycleEvent {
     /// The child process became live.
     ProcessStarted,
-    /// The child process ended. `code` is `None` when a signal killed the
-    /// child. `code` is also `None` when the exit status was not available.
+    /// The child process ended at `at`. `code` is `None` when a signal killed
+    /// the child or when no exit status was available.
     ProcessExited { code: Option<i32>, at: SystemTime },
     /// A user or a policy asked the pane to close. `since` is the time of the
     /// request.
     CloseRequested { since: SystemTime },
     /// The close finished its cleanup.
     Cleaned,
-    /// The `RespawnShell` policy restarts an exited pane in place. The pane
-    /// returns to `Spawning` and creates a new PTY and child process.
+    /// The `RespawnShell` exit policy restarts an exited pane in place. The pane
+    /// returns to `Spawning` and drops its exit code and time.
     Respawn,
 }
 

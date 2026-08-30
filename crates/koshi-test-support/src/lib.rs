@@ -23,8 +23,9 @@ pub mod fixtures;
 
 /// Layout invariant assertions for pure-layout tests.
 ///
-/// Validates that placed panes maintain geometric invariants: exact tiling of
+/// Checks that placed panes hold the geometric invariants: exact tiling of
 /// the tab area, no overlaps, no spills, and respect for minimum cell sizes.
+/// Also checks that every layout leaf references a live pane.
 pub mod layout_assert;
 
 /// Rate-bounded byte pump for tests that need a slow link.

@@ -28,6 +28,9 @@ fn a_spawned_pane_forwards_output_reports_active_and_is_killed_on_graceful_shutd
     let (tx, inbox_rx) = mpsc::channel();
     let mut rt = Server::new(pty_backend, snapshot_provider, storage, inbox_rx, tx);
 
+    assert!(!rt.has_active_panes(), "a fresh server parks no pane");
+    assert!(!rt.is_draining(), "a fresh server is serving");
+
     let pane = PaneId::new();
     let handle = fake
         .spawn(

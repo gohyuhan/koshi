@@ -57,7 +57,7 @@ pub struct Outcome {
 }
 
 impl Outcome {
-    /// An [`Verdict::Ok`] answer carrying `reason`, no help and no detail.
+    /// A [`Verdict::Ok`] answer carrying `reason`, no help and no detail.
     fn ok(reason: String) -> Outcome {
         Outcome {
             verdict: Verdict::Ok,
@@ -176,8 +176,9 @@ pub struct Context {
     /// The rule that produced [`Context::runtime_dir`], or `None` when this
     /// machine reports no home directory.
     pub runtime_dir_rule: Option<RuntimeDirRule>,
-    /// The runtime directory's permission bits, `None` on Windows and when
-    /// the directory could not be read.
+    /// The runtime directory's permission bits, `None` on Windows, when this
+    /// machine reports no home directory, and when the directory could not be
+    /// read.
     pub runtime_mode: Option<u32>,
     /// The directory koshi writes its log files in, or `None` when this
     /// machine reports no home directory.
@@ -185,8 +186,9 @@ pub struct Context {
     /// `plugins` under the config directory, or `None` when this machine
     /// reports no home directory.
     pub plugins_dir: Option<PathBuf>,
-    /// The machine-wide directory the shared session sockets live in, or
-    /// `None` when this platform names none.
+    /// The machine-wide directory the shared session sockets live in:
+    /// `koshi.kdl`'s `shared-sessions-dir` when it names one, else this
+    /// platform's own. `None` when neither names one.
     pub shared_dir: Option<PathBuf>,
     /// The program a new pane runs.
     pub shell: PathBuf,
@@ -547,9 +549,10 @@ fn check_remote_connections(context: &Context) -> Outcome {
 /// What state the runtime directory `dir` is in, with `mode` its permission
 /// bits and `None` where they are not known.
 ///
-/// Ok when `dir` holds mode 700, and when `dir` is not there yet and koshi can
-/// create it. Fail when `dir` cannot be read, when `mode` is anything other
-/// than 700, and when `dir` is not there and koshi cannot create it.
+/// Ok when `dir` holds mode 700, when `mode` is `None`, and when `dir` is not
+/// there yet and koshi can create it. Fail when `dir` cannot be read, when
+/// `mode` is anything other than 700, and when `dir` is not there and koshi
+/// cannot create it.
 fn runtime_dir_state(dir: &Path, mode: Option<u32>) -> Outcome {
     let path = dir.display();
     if !dir.exists() {

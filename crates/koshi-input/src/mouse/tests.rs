@@ -16,8 +16,8 @@ fn ev(kind: MouseEventKind, column: u16, row: u16, modifiers: KeyModifiers) -> M
     }
 }
 
-/// The event at column 10, row 3 with nothing held — the fixed cell the kind
-/// tests reuse, so each case shows only the kind that changed.
+/// The event at column 10, row 3 with nothing held; the kind tests reuse this
+/// fixed cell.
 fn at_10_3(kind: MouseEventKind) -> MouseInput {
     decode_mouse(ev(kind, 10, 3, KeyModifiers::NONE))
 }
@@ -162,6 +162,19 @@ fn meta_maps_to_super_like_the_keyboard_boundary() {
 }
 
 #[test]
+fn hyper_is_dropped_like_the_keyboard_boundary() {
+    let kind = MouseEventKind::Down(HostButton::Left);
+    assert_eq!(
+        decode_mouse(ev(kind, 1, 1, KeyModifiers::HYPER)).mods,
+        ModFlags::NONE
+    );
+    assert_eq!(
+        decode_mouse(ev(kind, 1, 1, KeyModifiers::HYPER | KeyModifiers::SHIFT)).mods,
+        ModFlags::SHIFT
+    );
+}
+
+#[test]
 fn combined_modifiers_all_land() {
     let mods = KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT;
     assert_eq!(
@@ -213,8 +226,8 @@ fn drag_carries_every_button() {
 
 #[test]
 fn a_scroll_carries_the_modifiers_held_with_it() {
-    // Ctrl+wheel is a common zoom gesture; the modifier must survive decode
-    // alongside the direction.
+    // A scroll keeps the modifier held with it, beside the direction and the
+    // cell.
     let scrolled = decode_mouse(ev(MouseEventKind::ScrollUp, 4, 2, KeyModifiers::CONTROL));
     assert_eq!(scrolled.kind, MouseKind::Scroll(ScrollDirection::Up));
     assert_eq!(scrolled.mods, ModFlags::CTRL);
@@ -252,8 +265,8 @@ fn coordinates_pass_through_at_the_edges_of_the_range() {
 
 #[test]
 fn the_two_axes_are_carried_independently() {
-    // A max column with a zero row must not swap or clamp: x and y are copied
-    // separately.
+    // x and y are copied separately: a max column with a zero row stays as
+    // given.
     assert_eq!(
         decode_mouse(ev(MouseEventKind::Moved, u16::MAX, 0, KeyModifiers::NONE)).at,
         Point { x: u16::MAX, y: 0 }

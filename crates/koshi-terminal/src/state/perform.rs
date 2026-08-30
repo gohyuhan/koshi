@@ -1,7 +1,7 @@
 //! [`vte::Perform`] implementation that drives [`TerminalState`] from parsed
 //! PTY output: printable glyphs land in the active grid at the cursor, and
 //! control sequences move the cursor, style text, and switch modes. `vte`
-//! decodes UTF-8 upstream, so `print` receives a ready `char`.
+//! decodes UTF-8 upstream; `print` receives a `char`.
 //!
 //! What each callback does:
 //!
@@ -71,10 +71,9 @@ impl vte::Perform for TerminalState {
     /// (narrow single-column or wide CJK/emoji two-column), and respects
     /// autowrap at the line end.
     fn print(&mut self, c: char) {
-        // Translate through the active GL charset first (DEC line-drawing, UK),
-        // so the cell stores the resolved glyph and width is computed on it. The
-        // result is always a narrow, non-combining char, so every path below is
-        // unaffected by the remap.
+        // Translate through the active GL charset (DEC line drawing, UK). The
+        // cell stores the remapped glyph and width is computed on it; the
+        // result is always a narrow, non-combining char.
         let c = self.map_charset(c);
 
         // A continuation (combining mark, ZWJ-joined emoji part, variation
@@ -88,29 +87,30 @@ impl vte::Perform for TerminalState {
         // `c` starts a new grapheme. A control char that slipped past `execute`
         // has no display width (`None`) → ignore it. A zero-width char with no
         // cluster to join (e.g. a combining mark at the very start of a line)
-        // has no base to attach to → drop it. Otherwise the glyph is narrow (1)
+        // has no base to attach to → drop it. Every other glyph is narrow (1)
         // or wide (2, e.g. CJK / emoji); `unicode-width` treats ambiguous-width
         // characters as narrow.
         let Some(raw_width) = c.width() else {
-            // The reset ends the text run, so a following continuation cannot
-            // attach across the dropped char.
+            // The reset ends the text run: a continuation that follows starts
+            // fresh.
             self.reset_cluster();
             return;
         };
         if raw_width == 0 {
-            // A zero-width char that did NOT continue the cluster is a grapheme
-            // boundary (e.g. ZWSP U+200B). The reset ends the text run, so a
-            // following combining mark / VS16 cannot attach across the break.
+            // A zero-width char that did not continue the cluster is a grapheme
+            // boundary (e.g. ZWSP `U+200B`). The reset ends the text run: a
+            // combining mark or VS16 that follows starts fresh.
             self.reset_cluster();
             return;
         }
         let glyph_width: u16 = if raw_width >= 2 { 2 } else { 1 };
 
         // Deferred wrap: a prior print parked on the last column. Under autowrap
-        // (DECAWM `?7`, the default) wrap to the next line before placing this
-        // glyph, so a row that exactly fills the width is not scrolled early. With
-        // autowrap off the cursor stays pinned at the last column and this glyph
-        // overwrites in place; either way the parked latch is cleared.
+        // (DECAWM `?7`, the default) the cursor wraps to the next line before
+        // this glyph is placed (a row that exactly fills the width scrolls only
+        // when the next glyph arrives). With autowrap off the cursor stays on
+        // the last column and this glyph overwrites in place. Either way the
+        // latch clears.
         if self.active_cursor().pending_wrap {
             if self.modes.autowrap {
                 // The row the cursor leaves soft-wraps into the next, including
@@ -125,32 +125,28 @@ impl vte::Perform for TerminalState {
         let last_col = cols.saturating_sub(1);
         let style = self.active_render().style;
 
-        // A wide glyph needs two columns; when only the last column is free it
-        // cannot fit. Blank that lone column and wrap, so the glyph begins the
-        // next line as one whole cell, not split across the edge. Skipped in a
-        // 1-column pane (`last_col == 0`), where wrapping cannot help —
-        // `place_glyph` then stores the glyph narrow in place there.
+        // A wide glyph at the last column of a multi-column pane: blank that
+        // column and wrap, and the glyph begins the next line as one whole
+        // cell. In a 1-column pane (`last_col == 0`) this is skipped and
+        // `place_glyph` stores the glyph narrow in place.
         if glyph_width == 2 && self.active_cursor().col == last_col && last_col > 0 {
-            // A 2-cell glyph cannot fit in the lone last column. With autowrap off
-            // there is no next line to move it onto, so drop it; the cursor rests
-            // on the last column and the next glyph overwrites there (no wrap is
-            // armed under autowrap-off). The dropped glyph is its own new grapheme,
-            // so reset the cluster: a following combining mark must not fold onto
-            // the previous cell.
+            // With autowrap off the glyph is dropped: the cursor rests on the
+            // last column with no wrap armed, and the next glyph overwrites
+            // there. The cluster resets: a combining mark that follows does not
+            // fold onto the previous cell.
             if !self.modes.autowrap {
                 self.reset_cluster();
                 return;
             }
             let row = self.active_cursor().row;
-            // If the last column is the continuation of an existing wide glyph,
-            // blanking it alone would orphan that glyph's base one column to the
-            // left; clear the pair before blanking the freed column.
+            // When the last column is the continuation of a wide glyph, its base
+            // one column to the left is cleared too.
             self.clear_wide_at(row, last_col);
             if let Some(cell) = self.active_grid_mut().cell_mut(row, last_col) {
                 *cell = Cell::blank_with(style.bg_fill());
             }
-            // The freed last column is a wide-glyph spacer, not text: record
-            // the wrap so a reflow re-joins the rows AND drops the spacer.
+            // The freed last column is a wide-glyph spacer; `SoftWide` marks the
+            // row so a reflow re-joins the rows and drops the spacer.
             self.wrap_linefeed(RowEnd::SoftWide);
             self.active_cursor_mut().col = 0;
             self.clear_wrap_latch();
@@ -163,15 +159,15 @@ impl vte::Perform for TerminalState {
         // wide pair the write would split — see `place_glyph`.
         self.place_glyph(row, col, Cell::new(c, glyph_width as u8, style));
 
-        // Anchor a new cluster at this base so any continuations that follow
+        // Anchor a new cluster at this base; continuations that follow
         // (combining marks, ZWJ emoji parts, …) fold onto it.
         self.cluster.clear();
         self.cluster.push(c);
         self.cluster_base = Some((row, col));
 
-        // Advance past the glyph. If it reached the last column, park there (and,
-        // under autowrap, arm the wrap latch so the next glyph wraps); otherwise
-        // step to the first free column after it.
+        // Advance past the glyph: park on the last column when the glyph reached
+        // it (under autowrap with the wrap latch armed), else step to the first
+        // free column after it.
         let end_col = col + glyph_width - 1;
         if end_col >= last_col {
             self.arm_wrap_latch(last_col);
@@ -225,9 +221,7 @@ impl vte::Perform for TerminalState {
             0x0E => self.active_render_mut().gl = 1,
             // SI (shift in): select G0 into the GL range for printing.
             0x0F => self.active_render_mut().gl = 0,
-            // BEL: discarded.
-            0x07 => {}
-            // Any other control byte: ignored, never raw-rendered.
+            // BEL (0x07) and any other control byte: discarded, never rendered.
             _ => {}
         }
     }
@@ -247,33 +241,28 @@ impl vte::Perform for TerminalState {
         ignore: bool,
         action: char,
     ) {
-        // Most CSI sequences end a text run, so no following glyph folds into
-        // it. A style-only SGR (`CSI Pm m`) is the exception: it changes the pen
-        // but neither moves the cursor nor edits the grid, so a combining mark or
-        // variation selector that follows must still fold onto the preceding base
-        // (e.g. `e \x1b[31m \u{0301}` → an accented `e`), matching xterm/alacritty.
-        // The exception must mirror EXACTLY what the dispatch below treats as a
-        // real, applied SGR: empty intermediates (a private/intermediate `m` is
-        // not SGR) AND `!ignore` — an overlong CSI that vte flags `ignore` is
-        // malformed and dropped (see the early return), so even one ending in `m`
-        // must break the cluster like every other non-printing CSI. Every other
-        // CSI moves the cursor or mutates cells, so it breaks the cluster too.
-        if !(action == 'm' && intermediates.is_empty() && !ignore) {
+        // Every CSI but a style-only SGR ends the text run. A style-only SGR
+        // (`CSI Pm m`: no intermediates, not flagged `ignore` — the same
+        // condition the SGR arm below applies) changes only the pen: a combining
+        // mark or variation selector after it still folds onto the preceding
+        // base (`e \x1b[31m \u{0301}` → an accented `e`). An overlong CSI
+        // flagged `ignore` breaks the cluster even when it ends in `m`.
+        let style_only_sgr = action == 'm' && intermediates.is_empty() && !ignore;
+        if !style_only_sgr {
             self.reset_cluster();
         }
-        // `ignore` flags a sequence with too many params/intermediates to have
-        // been kept intact — drop it.
+        // `ignore` flags a sequence with more params or intermediates than vte
+        // keeps; it is dropped.
         if ignore {
             return;
         }
 
-        // Device queries (DA1/DA2/DA3, DSR, DECRQM/RQM): each queues its
-        // response bytes on the reply queue for the runtime to write back into
-        // the PTY. Dispatched on the exact (intermediates, action) pair, before
-        // the DEC private-mode block below: that block also matches on the `?`
-        // intermediate, so the device-query forms (`CSI ? Ps n`, `CSI ? Ps $ p`)
-        // must be caught here first. `CSI ! p` continues to the soft-reset
-        // dispatch below.
+        // Device queries (DA1/DA2/DA3, DSR, DECRQM/RQM) and DECSCUSR, matched on
+        // the exact (intermediates, action) pair. Each query queues its reply
+        // bytes for the runtime to write back into the PTY. This match runs
+        // first: the `?` private-mode block below also matches the `?`
+        // intermediate of `CSI ? Ps n` and `CSI ? Ps $ p`. `CSI ! p` falls
+        // through to the soft-reset check.
         match (intermediates, action) {
             // DA1 — primary device attributes.
             (b"", 'c') => return self.device_attributes_primary(params),
@@ -307,24 +296,20 @@ impl vte::Perform for TerminalState {
             return;
         }
 
-        // DEC private modes carry a `?` private marker, which vte collects into
-        // `intermediates`. DECSET/DECRST take a parameter list (`CSI ? Pm h/l`),
-        // so apply every mode in the sequence; a mode with no arm below
-        // changes nothing.
+        // DEC private modes: vte collects the `?` marker into `intermediates`.
+        // DECSET/DECRST take a parameter list (`CSI ? Pm h/l`); every mode in
+        // the list is applied, and a mode with no arm changes nothing.
         if intermediates == b"?" {
-            // Modes in one DECSET/DECRST list are applied left-to-right, each
-            // taking effect immediately (as in xterm), so per-screen state like
-            // `?25` visibility lands on whichever screen is active at that point
-            // in the list. Switches are guarded on the **live** `self.active`, so a
-            // second swap-mode in the same list is a no-op once the first has
-            // flipped buffers — a trailing `?1047 l` after `?1049 l` does not
-            // re-clear. The one exception is `?1049 h` entry, guarded on the
-            // screen active at the *start* of the list (`screen_at_start`): it
-            // still saves the primary cursor and freshens the alternate when the
-            // list began on the primary, even if an earlier `?47` already
-            // swapped within the same list. Entry re-firing is idempotent (no
-            // SGR can change the pen mid-`?`-list), so it needs no live guard;
-            // exit re-firing is not, so it keeps one.
+            // Modes in one list apply left to right, each taking effect at once:
+            // per-screen state like `?25` visibility lands on whichever screen
+            // is active at that point in the list. Screen switches read the
+            // live `self.active`: a second swap in the same list is a no-op once
+            // the first has flipped — a trailing `?1047 l` after `?1049 l` does
+            // not re-clear. `?1049 h` entry reads `screen_at_start` instead: it
+            // saves the primary cursor and freshens the alternate whenever the
+            // list began on the primary, even after an earlier `?47` in the
+            // same list already swapped. A repeated `?1049 h` in one list
+            // re-runs the entry with the same result.
             let screen_at_start = self.active;
             for param in params.iter() {
                 let mode = param.first().copied().unwrap_or(0);
@@ -459,26 +444,20 @@ impl vte::Perform for TerminalState {
                         }
                     }
                     // Erase scrollback only (xterm "erase saved lines"): drop
-                    // the retained history, leaving the visible screen untouched.
-                    // Scrollback belongs to the primary screen (the alternate
-                    // never feeds it), so an ED 3 from a full-screen app on the
-                    // alternate screen must not wipe the user's shell history;
-                    // guard to the primary, matching alacritty (whose alternate
-                    // grid has zero history, making the clear a no-op there). An
-                    // ED 3 on the alternate screen falls through to the `_` arm.
+                    // the retained history and leave the visible screen as it
+                    // is. Primary screen only: on the alternate screen ED 3
+                    // falls through to the `_` arm and changes nothing.
                     3 if self.active == Screen::Primary => self.scrollback.clear(),
                     // Unknown ED mode: ignored.
                     _ => {}
                 }
-                // ED 0/1/2 wipe the cursor's cell (un-filling its line), so clear
-                // the parked wrap latch — the cursor is a concrete column and its
-                // armed glyph is gone. ED 3 (scrollback only) and unknown modes
-                // leave the visible grid and the latch untouched.
+                // ED 0/1/2 erase the cursor's cell and clear the wrap latch. ED 3
+                // and unknown modes leave the grid and the latch as they are.
                 if matches!(mode, 0..=2) {
                     self.clear_wrap_latch();
                 }
-                // Only the cursor row is partially cleared (the others are whole
-                // rows, which cannot split a pair); repair it.
+                // Only the cursor row can be partially cleared; repair its wide
+                // pairs.
                 self.normalize_wide_pairs(r);
             }
             // EL — erase in line (cursor unmoved; an erasing mode clears the wrap
@@ -499,23 +478,18 @@ impl vte::Perform for TerminalState {
                     // Unknown EL mode: ignored.
                     _ => {}
                 }
-                // Every EL mode (0/1/2) wipes the cursor's cell, un-filling the
-                // line, so clear the parked wrap latch — the cursor is a concrete
-                // column and its armed glyph is gone, so the next print overwrites
-                // that cell directly with no wrap pending. An unknown mode erases
-                // nothing and leaves the latch armed.
+                // EL 0/1/2 erase the cursor's cell and clear the wrap latch; the
+                // next print writes that cell with no wrap pending. An unknown
+                // mode erases nothing and leaves the latch as it is.
                 if matches!(mode, 0..=2) {
                     self.clear_wrap_latch();
                 }
                 self.normalize_wide_pairs(r);
             }
             // ECH — erase n cells in place from the cursor (BCE, background color
-            // erase: the vacated cells fill with the pen's current background
-            // color, not a fixed default), no shift of the rest of the line, then
-            // repair any wide-glyph pair the erase split. The cursor is a concrete
-            // column, so erasing from it clears the parked last-column glyph and
-            // clears the wrap latch — the cell that armed the wrap is gone, so no
-            // wrap remains pending.
+            // erase: the vacated cells take the pen's current background), no
+            // shift of the rest of the line, then repair any wide-glyph pair the
+            // erase split. Clears the wrap latch.
             'X' => {
                 let n = move_count(params);
                 let fill = self.active_render().style.bg_fill();
@@ -553,11 +527,8 @@ impl vte::Perform for TerminalState {
             // SCORC — restore cursor (ANSI.SYS), companion to DECRC.
             'u' => self.restore_cursor(),
             // IL — insert n blank lines at the cursor row, scrolling the rest of
-            // the region down. Ignored when the cursor is outside the region; the
-            // cursor position (row, column, and wrap latch) is left unchanged,
-            // matching the DEC/xterm lineage that TUIs (text user interfaces —
-            // terminal apps like editors and file managers that draw with
-            // characters) target.
+            // the region down. Ignored when the cursor is outside the region.
+            // The cursor (row, column, wrap latch) is left unchanged.
             'L' => {
                 let (top, bottom) = self.region_bounds();
                 if (top..=bottom).contains(&self.active_cursor().row) {
@@ -586,9 +557,8 @@ impl vte::Perform for TerminalState {
                 self.delete_lines_into_scrollback(top, bottom, n, fill);
             }
             // SD — scroll the region down by n; the cursor stays put. `CSI Ps T`
-            // is the common form, but `CSI <5 params> T` is xterm highlight mouse
-            // tracking, so only T's 0/1-param form scrolls; `CSI Ps ^` is the
-            // unambiguous ECMA-48 form and always scrolls.
+            // scrolls only with 0 or 1 parameter (`CSI <5 params> T` is xterm
+            // highlight mouse tracking); `CSI Ps ^` (ECMA-48) always scrolls.
             'T' | '^' => {
                 if action == '^' || params.len() <= 1 {
                     let n = move_count(params);
@@ -605,8 +575,7 @@ impl vte::Perform for TerminalState {
                 let top = coord_param(params, 0).min(last_row);
                 let bottom = nth_param(params, 1)
                     .filter(|&v| v != 0)
-                    .map(|v| v - 1)
-                    .unwrap_or(last_row)
+                    .map_or(last_row, |v| v - 1)
                     .min(last_row);
                 if top < bottom {
                     let region = if top == 0 && bottom == last_row {
@@ -638,8 +607,8 @@ impl vte::Perform for TerminalState {
         }
         // Charset designation: `ESC (`/`)`/`*`/`+` Fc designates G0/G1/G2/G3.
         // vte collects the `(`/`)`/`*`/`+` into `intermediates`; the final `byte`
-        // names the set. Handled before the plain-ESC match below, since that
-        // match only fires for a byte with no intermediate.
+        // names the set. The plain-ESC match below runs only with no
+        // intermediate.
         match intermediates {
             b"(" => return self.designate_charset(0, byte),
             b")" => return self.designate_charset(1, byte),
@@ -701,7 +670,7 @@ impl vte::Perform for TerminalState {
                     }
                 }
                 Osc133::CommandFinished(exit_code) => {
-                    if matches!(self.shell_integration_state, ShellIntegrationState::Running) {
+                    if self.shell_integration_state == ShellIntegrationState::Running {
                         self.shell_integration_state = ShellIntegrationState::Prompt;
                         self.shell_integration_facts
                             .push(ShellIntegrationFact::CommandFinished { exit_code });
@@ -711,23 +680,22 @@ impl vte::Perform for TerminalState {
             return;
         }
         // `params[0]` is the command number. vte splits the payload on every
-        // `;`, but only the first `;` is the command/payload separator, so each
-        // arm rejoins `params[1..]` with `;` to keep a payload that itself
-        // contains one.
+        // `;`; each arm rejoins `params[1..]` with `;`, and a payload that
+        // itself holds a `;` stays whole.
         let Some(&command) = params.first() else {
             return;
         };
         match std::str::from_utf8(command) {
-            // OSC 0/1/2 — set the window/icon title. Decodes lossily, so a
-            // non-UTF-8 title still shows, then bounds and filters it.
+            // OSC 0/1/2 — set the window/icon title: lossy UTF-8 decode (a
+            // non-UTF-8 title keeps replacement characters), then bounded and
+            // filtered by `sanitize_reported_text`.
             Ok("0" | "1" | "2") if params.len() > 1 => {
                 let title = params[1..].join(&b';');
                 let title = String::from_utf8_lossy(&title);
                 self.title = Some(sanitize_reported_text(&title));
             }
             // OSC 7 — the shell's working directory as a `file://host/path`
-            // URI. An unparseable URI leaves the last cwd unchanged so a bad
-            // emit does not erase a good value.
+            // URI. An unparseable URI leaves the last cwd unchanged.
             Ok("7") if params.len() > 1 => {
                 let uri = params[1..].join(&b';');
                 if let Some(cwd) = parse_osc7_cwd(&uri) {
@@ -740,19 +708,17 @@ impl vte::Perform for TerminalState {
     }
 
     /// Begin a device control string (DCS, `ESC P … ST`): clear any
-    /// in-progress grapheme cluster, since a non-printing control sequence ends
-    /// the text run. A combining mark or variation selector after the DCS
-    /// therefore does not fold onto the glyph before it. Clearing at DCS entry
-    /// covers the whole string: the body bytes arrive through `put`, which
-    /// never prints. The DCS payload changes nothing.
+    /// in-progress grapheme cluster. A combining mark or variation selector
+    /// after the DCS does not fold onto the glyph before it. The body bytes
+    /// arrive through `put` and print nothing; the DCS payload changes
+    /// nothing.
     fn hook(&mut self, _params: &vte::Params, _intermediates: &[u8], _ignore: bool, _action: char) {
         self.reset_cluster();
     }
 
-    /// End a device control string (DCS) and clear any in-progress grapheme
-    /// cluster. Redundant with `hook` for a well-formed string. A DCS closed by
-    /// the 8-bit C1 ST (`0x9C`) reaches no other callback — neither
-    /// `esc_dispatch` nor `execute` — so this method clears its cluster.
+    /// End a device control string (DCS): clear any in-progress grapheme
+    /// cluster. A DCS closed by the 8-bit C1 ST (`0x9C`) reaches no other
+    /// callback — neither `esc_dispatch` nor `execute`.
     fn unhook(&mut self) {
         self.reset_cluster();
     }
@@ -761,36 +727,35 @@ impl vte::Perform for TerminalState {
 impl TerminalState {
     /// Apply one DEC private mode from a DECSET (`h`) / DECRST (`l`) list — the
     /// `25` in `CSI ? 25 h`, for instance. `screen_at_start` is the screen that
-    /// was active when the list began: `?1049` entry is guarded on it so an
-    /// earlier `?47` in the same list cannot suppress the save/reset, while
-    /// every other switch reads the live `self.active`. An unrecognized mode
-    /// changes nothing.
+    /// was active when the list began: `?1049` entry runs when it is not the
+    /// alternate, even after an earlier `?47` in the same list swapped; every
+    /// other switch reads the live `self.active`. An unrecognized mode changes
+    /// nothing.
     ///
     /// `apply_dec_private_mode('h', 25, Primary)` shows the cursor on the active
     /// screen; `apply_dec_private_mode('l', 1000, _)` turns Normal mouse
-    /// tracking off only when Normal is the level currently set, and is a no-op
-    /// otherwise.
+    /// tracking off only when Normal is the level currently set, and changes
+    /// nothing when another level is set.
     fn apply_dec_private_mode(&mut self, action: char, mode: u16, screen_at_start: Screen) {
         match (action, mode) {
             // DECSET `?47`/`?1047` — switch to the alternate buffer, leaving
-            // its cells and cursor untouched. Clone the primary's render
-            // state (pen, charsets, GL slot) into the alternate when
-            // crossing from the primary, so the alternate inherits it.
+            // its cells and cursor untouched. Crossing from the primary clones
+            // the primary's render state (pen, charsets, GL slot) into the
+            // alternate.
             ('h', 47 | 1047) => {
                 if self.active == Screen::Primary {
                     self.alternate_render = self.primary_render;
                 }
                 self.active = Screen::Alternate;
             }
-            // DECSET `?1049` — DECSC the primary cursor, reset the alternate
-            // to a brand-new buffer, re-seed its cursor position from the
-            // primary, then switch. Guarded on the *start* screen so an
-            // earlier `?47` in the same list cannot suppress any of this;
-            // the save targets the primary buffer explicitly so that
-            // earlier switch cannot redirect it onto the alternate cursor.
-            // `?1049` always starts a fresh session, so it inherits no
-            // cells, cursor, wrap latch, saved cursor, or scroll region
-            // from the previous one (unlike the preserving `?47`/`?1047`).
+            // DECSET `?1049` — DECSC the primary cursor (the primary fields
+            // directly, whichever screen is live), clone the primary's render
+            // state into the alternate, reset the alternate to a fresh buffer,
+            // seed its cursor position from the primary, then switch. Runs
+            // when the list began off the alternate, even after an earlier
+            // `?47` in the same list swapped. The alternate inherits no cells,
+            // cursor, wrap latch, saved cursor, or scroll region from a
+            // previous session.
             ('h', 1049) => {
                 if screen_at_start != Screen::Alternate {
                     self.save_primary_cursor();
@@ -803,31 +768,26 @@ impl TerminalState {
             }
             // DECSET `?1048` — save the active screen's cursor only.
             ('h', 1048) => self.save_cursor(),
-            // DECSET `?25` (DECTCEM) — show the cursor. Visibility is
-            // tracked per screen (a deliberate deviation from xterm's
-            // global DECTCEM), so this toggles only the active screen.
+            // DECSET `?25` (DECTCEM) — show the cursor. Visibility is per
+            // screen: this sets only the active screen's.
             ('h', 25) => self.active_cursor_mut().is_visible = true,
-            // DECRST `?47` — switch back to the primary buffer.
-            ('l', 47) => {
-                if self.active == Screen::Alternate {
-                    self.active = Screen::Primary;
-                }
-            }
+            // DECRST `?47` — switch back to the primary buffer, leaving the
+            // alternate's cells and cursor as they are.
+            ('l', 47) => self.active = Screen::Primary,
             // DECRST `?1047` — reset the alternate buffer (clear cells +
-            // scroll region + cursor), then switch back to the primary.
-            // Guarded on the **live** screen: once an earlier exit in the
-            // same list already left the alternate, this is a no-op.
+            // scroll region + cursor), then switch back to the primary. Only
+            // while the alternate is live: after an earlier exit in the same
+            // list, a no-op.
             ('l', 1047) => {
                 if self.active == Screen::Alternate {
                     self.reset_alternate_buffer();
                     self.active = Screen::Primary;
                 }
             }
-            // DECRST `?1049` — xterm/alacritty define `?1049 l` as `?1047 l`
-            // + `?1048 l`: the clear + switch-to-primary apply only while
-            // still on the alternate (live screen guard, so a second
-            // clearing exit is a no-op), but the DECRC cursor restore (the
-            // `?1048 l` part) runs unconditionally.
+            // DECRST `?1049` — `?1047 l` then `?1048 l`: the clear and the
+            // switch to the primary run only while the alternate is live (a
+            // second clearing exit is a no-op); the DECRC cursor restore
+            // always runs, on the screen that is live after the switch.
             ('l', 1049) => {
                 if self.active == Screen::Alternate {
                     self.reset_alternate_buffer();
@@ -839,17 +799,15 @@ impl TerminalState {
             ('l', 1048) => self.restore_cursor(),
             // DECRST `?25` (DECTCEM) — hide the cursor.
             ('l', 25) => self.active_cursor_mut().is_visible = false,
-            // `?2004` — bracketed paste: wrap pasted text in
-            // `ESC[200~`…`ESC[201~` so the app distinguishes typing.
+            // `?2004` — bracketed paste: the input layer wraps pasted text in
+            // `ESC[200~`…`ESC[201~`.
             ('h', 2004) => self.modes.bracketed_paste = true,
             ('l', 2004) => self.modes.bracketed_paste = false,
-            // Mouse tracking level (`?9`/`?1000`/`?1002`/`?1003`). The
-            // four levels are mutually exclusive, so each enable replaces
-            // the prior one (matching alacritty, whose set arm clears the
-            // other mouse bits before setting its own). A reset disables
-            // reporting only when it names the *active* level; resetting a
-            // mode that is not active is a no-op (falls through to `_`),
-            // since alacritty's unset clears only that mode's own bit.
+            // Mouse tracking level (`?9`/`?1000`/`?1002`/`?1003`): the four
+            // levels are mutually exclusive, and each enable replaces the
+            // prior one. A reset turns reporting off only when it names the
+            // active level; a reset naming another level falls through to `_`
+            // and changes nothing.
             ('h', 9) => self.modes.mouse_tracking = MouseTracking::X10,
             ('h', 1000) => self.modes.mouse_tracking = MouseTracking::Normal,
             ('h', 1002) => self.modes.mouse_tracking = MouseTracking::ButtonMotion,
@@ -866,14 +824,11 @@ impl TerminalState {
             ('l', 1003) if self.modes.mouse_tracking == MouseTracking::AnyMotion => {
                 self.modes.mouse_tracking = MouseTracking::Off;
             }
-            // Mouse report encoding (`?1005`/`?1006`/`?1015`), orthogonal
-            // to the tracking level and mutually exclusive among
-            // themselves (each enable replaces the prior — matching
-            // alacritty, whose set arm removes the other encoding bit
-            // before setting its own). A reset returns to the default
-            // encoding only when it names the *active* encoding; resetting
-            // an encoding that is not active is a no-op (falls through to
-            // `_`), since alacritty's unset clears only that bit.
+            // Mouse report encoding (`?1005`/`?1006`/`?1015`), independent of
+            // the tracking level and mutually exclusive among themselves: each
+            // enable replaces the prior one. A reset returns to the default
+            // encoding only when it names the active encoding; a reset naming
+            // another encoding falls through to `_` and changes nothing.
             ('h', 1005) => self.modes.mouse_encoding = MouseEncoding::Utf8,
             ('h', 1006) => self.modes.mouse_encoding = MouseEncoding::Sgr,
             ('h', 1015) => self.modes.mouse_encoding = MouseEncoding::Urxvt,
@@ -919,20 +874,18 @@ impl TerminalState {
     /// the cursor's look as it changes mode: vim sends `CSI 2 SP q` (steady
     /// block) for normal mode and `CSI 5 SP q` (blinking bar) for insert.
     ///
-    /// One value carries both halves of the look: the shape, and whether it
-    /// blinks. Values `1`–`6` name a style, the odd ones blinking and the even
-    /// ones steady. The blink half is written into
+    /// One value carries both the shape and whether it blinks. Values `1`–`6`
+    /// name a style: the odd ones blink, the even ones are steady. The blink
+    /// half is written into
     /// [`cursor_blink`](crate::state::TerminalState::cursor_blink), the same
-    /// field `?12` writes, so `CSI 2 SP q` ("steady block") stops a blink an
+    /// field `?12` writes: `CSI 2 SP q` ("steady block") stops a blink an
     /// earlier `CSI ? 12 h` started.
     ///
-    /// `0` gives the cursor back: the pane returns to asking for no style, and
-    /// the user's own configured cursor stands again. This is what an editor
-    /// relies on when it writes `CSI 0 SP q` on exit. (xterm's reference reads
-    /// `0` as blinking block; koshi follows the mainstream terminals.)
+    /// `0` clears the shape to `None` and blink to off: the pane asks for no
+    /// style, and the renderer keeps the user's own configured cursor.
     ///
-    /// An unknown value changes nothing: `CSI 9 SP q` names no style, so there
-    /// is nothing to apply, and the style already set stands.
+    /// An unknown value (`CSI 9 SP q`) changes nothing; the style already set
+    /// stands.
     fn set_cursor_style(&mut self, params: &vte::Params) {
         let (shape, blink) = match first_param(params).unwrap_or(0) {
             0 => (None, false),

@@ -10,26 +10,30 @@ use thiserror::Error;
 /// [`Disconnected`](IpcError::Disconnected)), a remote dial that fails
 /// ([`ConnectRefused`](IpcError::ConnectRefused),
 /// [`ConnectTimedOut`](IpcError::ConnectTimedOut),
-/// [`TlsHandshakeFailed`](IpcError::TlsHandshakeFailed)), a refused frame
+/// [`TlsHandshakeFailed`](IpcError::TlsHandshakeFailed),
+/// [`CertificateChanged`](IpcError::CertificateChanged)), a refused frame
 /// ([`FrameTooLarge`](IpcError::FrameTooLarge)), a socket address that fails
 /// its trust or liveness checks
 /// ([`UntrustedSocket`](IpcError::UntrustedSocket),
 /// [`NoListener`](IpcError::NoListener), [`SocketBusy`](IpcError::SocketBusy)),
 /// an endpoint file the caller cannot read
 /// ([`EndpointFileMissing`](IpcError::EndpointFileMissing),
-/// [`EndpointFileUnreadable`](IpcError::EndpointFileUnreadable)), and a
-/// remote access token store the caller cannot read or write
+/// [`EndpointFileUnreadable`](IpcError::EndpointFileUnreadable)), a remote
+/// access token store the caller cannot read or write
 /// ([`TokenStoreUnreadable`](IpcError::TokenStoreUnreadable),
-/// [`TokenStoreWrite`](IpcError::TokenStoreWrite)).
+/// [`TokenStoreWrite`](IpcError::TokenStoreWrite)), and a remote access file
+/// the caller cannot read or write
+/// ([`RemoteFileUnreadable`](IpcError::RemoteFileUnreadable),
+/// [`RemoteFileWrite`](IpcError::RemoteFileWrite)).
 ///
 /// Session-fatal: a failed endpoint-file write
 /// ([`EndpointFileWrite`](IpcError::EndpointFileWrite)). It happens during the
-/// session's own startup, and a session whose endpoint file never lands is one
-/// no caller can reach.
+/// session's own startup. No caller reaches a session whose endpoint file
+/// never lands.
 ///
 /// Recoverable: a frame that arrived whole yet does not decode
 /// ([`MalformedFrame`](IpcError::MalformedFrame)). The stream is still aligned
-/// on frame boundaries, so the connection can answer and keep going.
+/// on frame boundaries, and the connection answers and keeps going.
 #[derive(Debug, Error)]
 pub enum IpcError {
     /// The underlying transport failed.
@@ -41,11 +45,11 @@ pub enum IpcError {
     /// A frame longer than
     /// [`MAX_FRAME_LEN`](crate::transport::MAX_FRAME_LEN). On receive, the
     /// length prefix named more bytes than the limit and the payload is left
-    /// unread, so the stream is off frame boundaries and the connection must
-    /// close; `len` is the length the prefix named. On send, encoding stopped
-    /// at the byte that crossed the limit and nothing was written; `len` is
-    /// the payload size the refused write reached, which for a message
-    /// encoded in one piece is its full size.
+    /// unread: the stream is off frame boundaries and the connection closes;
+    /// `len` is the length the prefix named. On send, encoding stopped at the
+    /// byte that crossed the limit and nothing was written; `len` is the
+    /// payload size the refused write reached, which for a message encoded in
+    /// one piece is its full size.
     #[error("ipc frame of {len} bytes exceeds the {max}-byte limit")]
     FrameTooLarge { len: u64, max: u32 },
     /// A frame whose bytes are not a readable message: the payload arrived
@@ -73,8 +77,10 @@ pub enum IpcError {
     /// failed, or its bytes are not a readable endpoint file.
     #[error("endpoint file {path} is unreadable: {detail}")]
     EndpointFileUnreadable { path: String, detail: String },
-    /// Writing the endpoint file failed during session startup, so no
-    /// caller will ever find this session's socket.
+    /// Writing the endpoint file failed during session startup. No caller
+    /// finds this session's socket. Also reported when
+    /// [`write_advert`](crate::endpoint::write_advert) cannot write its empty
+    /// marker file; `path` then names the marker.
     #[error("endpoint file {path} could not be written: {detail}")]
     EndpointFileWrite { path: String, detail: String },
     /// A remote access token store that exists but could not be used:
@@ -82,7 +88,7 @@ pub enum IpcError {
     /// number is not the one this build reads.
     #[error("token store {path} is unreadable: {detail}")]
     TokenStoreUnreadable { path: String, detail: String },
-    /// Writing the remote access token store failed, so the grant or the
+    /// Writing the remote access token store failed. The grant or the
     /// revocation the caller made never reached the disk.
     #[error("token store {path} could not be written: {detail}")]
     TokenStoreWrite { path: String, detail: String },
@@ -95,7 +101,7 @@ pub enum IpcError {
         path: String,
         detail: String,
     },
-    /// Writing a remote access file failed, so what the caller changed never
+    /// Writing a remote access file failed. What the caller changed never
     /// reached the disk.
     #[error("the {file} at {path} could not be written: {detail}")]
     RemoteFileWrite {
@@ -137,7 +143,8 @@ pub enum IpcError {
 }
 
 /// Which remote access file an [`IpcError::RemoteFileUnreadable`] or
-/// [`IpcError::RemoteFileWrite`] names.
+/// [`IpcError::RemoteFileWrite`] names. `Display` writes `saved servers
+/// file`, `remote access certificate` or `remote access record`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemoteFile {
     /// The servers this user has dialled and saved, on the dialling machine.

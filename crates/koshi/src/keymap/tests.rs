@@ -231,3 +231,60 @@ fn validate_file_reports_parse_failures_and_clean_files() {
         ValidationOutcome::Checked { .. } => panic!("expected a parse failure"),
     }
 }
+
+#[test]
+fn validate_file_returns_not_found_for_a_path_that_is_not_there() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let missing = dir.path().join("absent.kdl");
+
+    match validate_file(&missing) {
+        Err(err) => assert_eq!(err.kind(), std::io::ErrorKind::NotFound),
+        Ok(_) => panic!("expected a read error"),
+    }
+}
+
+#[test]
+fn a_refused_user_layer_drops_its_folded_scalar_fields_too() {
+    // The file sets a chord timeout and removes the locked-mode reserved
+    // unlock. The removal is fatal, so the whole section reverts and the
+    // timeout goes back to the built-in value.
+    let mut removed = BTreeSet::new();
+    removed.insert(seq("<C-l>"));
+    let mut modes = BTreeMap::new();
+    modes.insert(
+        ModeName::new("locked"),
+        ModeBindings {
+            keys: BTreeMap::new(),
+            removed,
+        },
+    );
+
+    let view = view_from_partial(
+        Some(PartialKeybindingsConfig {
+            chord_timeout_ms: Some(750),
+            modes: Some(modes),
+            ..PartialKeybindingsConfig::default()
+        }),
+        None,
+        None,
+    );
+
+    assert!(view.reverted);
+    assert_eq!(view.config, KeybindingsConfig::default());
+}
+
+#[test]
+fn two_invalid_binds_render_as_two_lines_that_render_joins_with_a_semicolon() {
+    let err = parse_keybindings(
+        Path::new("keybinding.kdl"),
+        "version 1\nmode \"normal\" {\n    bind \"<C-\" \"core:new-tab\"\n    bind \"<A-\" \"core:quit\"\n}\n",
+    )
+    .expect_err("both key strings are invalid");
+
+    let lines = parse_error_lines(&err);
+    assert_eq!(lines.len(), 2);
+    assert_eq!(
+        render_parse_error(&err),
+        format!("{}; {}", lines[0], lines[1])
+    );
+}

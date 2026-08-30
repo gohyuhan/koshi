@@ -98,10 +98,9 @@ fn detect(layers: &[KeyMapLayer]) -> ConflictReport {
 
 #[test]
 fn user_layer_args_are_stripped_to_the_action_mapping() {
-    // Even if a user file somehow smuggles arguments into a binding
-    // ("run, program htop"), only the key → action mapping survives: the
-    // binding runs bare, and a bare `run` names no program, so it can never
-    // fire with the smuggled value.
+    // A user binding carrying arguments ("run, program htop") comes out
+    // bare: only the key → action mapping survives, and a bare `run` names
+    // no program.
     let key = seq(ModFlags::ALT, 'n');
     let smuggled = BoundAction {
         action: core("run"),
@@ -118,12 +117,30 @@ fn user_layer_args_are_stripped_to_the_action_mapping() {
 }
 
 #[test]
+fn session_and_layout_layer_args_are_stripped_too() {
+    // Stripping covers every user-authored origin, not the user file alone.
+    let key = seq(ModFlags::ALT, 'n');
+    let smuggled = BoundAction {
+        action: core("run"),
+        args: ActionArgs::Run {
+            program: PathBuf::from("/usr/bin/htop"),
+            args: vec![],
+            direction: None,
+            stacked: false,
+        },
+    };
+    for origin in [LayerOrigin::Session, LayerOrigin::Layout] {
+        let stripped = layer(origin, "normal", vec![(key.clone(), smuggled.clone())])
+            .with_user_args_stripped();
+        assert_eq!(stripped.modes[&mode("normal")].keys[&key], bound("run"));
+    }
+}
+
+#[test]
 fn keymap_layers_strips_arguments_off_the_user_layer() {
-    // The stripping guard is only worth anything if the layer builder applies
-    // it, so this pins the wiring rather than the method: a user file that
-    // smuggles `run, program /usr/bin/htop` onto a key must come out of
-    // `keymap_layers` as a bare `run`, which names no program and so can never
-    // launch one.
+    // `keymap_layers` applies the stripping to the user layer: a user
+    // binding `run, program /usr/bin/htop` comes out as a bare `run`, which
+    // names no program.
     let key = seq(ModFlags::ALT, 'n');
     let smuggled = BoundAction {
         action: core("run"),
@@ -154,9 +171,8 @@ fn keymap_layers_strips_arguments_off_the_user_layer() {
 
 #[test]
 fn keymap_layers_leaves_the_defaults_layer_untouched() {
-    // The defaults layer's arguments are the system's own presets, so the
-    // builder must not strip them: `resize-pane` keeps the amount it ships
-    // with.
+    // The defaults layer keeps its arguments: `resize-pane` keeps the
+    // amount it ships with.
     let layers = keymap_layers(None, Leader::default());
 
     assert_eq!(layers.len(), 1, "no user modes means the defaults alone");
@@ -170,9 +186,31 @@ fn keymap_layers_leaves_the_defaults_layer_untouched() {
 
 #[test]
 fn stripping_leaves_the_defaults_layer_alone() {
-    // Stripping is a user-surface guard only; the defaults layer passes
-    // through untouched.
+    // `with_user_args_stripped` returns the defaults layer untouched.
     assert_eq!(defaults().with_user_args_stripped(), defaults());
+}
+
+#[test]
+fn only_the_defaults_origin_is_not_user_authored() {
+    assert!(!LayerOrigin::Defaults.is_user_authored());
+    assert!(LayerOrigin::User.is_user_authored());
+    assert!(LayerOrigin::Session.is_user_authored());
+    assert!(LayerOrigin::Layout.is_user_authored());
+}
+
+#[test]
+fn layer_origin_display_is_exact() {
+    assert_eq!(LayerOrigin::Defaults.to_string(), "defaults");
+    assert_eq!(LayerOrigin::User.to_string(), "user");
+    assert_eq!(LayerOrigin::Session.to_string(), "session");
+    assert_eq!(LayerOrigin::Layout.to_string(), "layout");
+}
+
+#[test]
+fn built_in_modes_names_every_lock_mode() {
+    let expected =
+        BTreeSet::from(["normal", "locked", "resize", "pane", "tab", "scroll"].map(mode));
+    assert_eq!(built_in_modes(), expected);
 }
 
 #[test]
@@ -220,8 +258,8 @@ fn user_vs_session_same_key_different_action_collides() {
 
 #[test]
 fn three_layers_with_three_distinct_actions_all_appear_in_the_collision() {
-    // Two claimants is the minimum for a collision; a third distinct
-    // claimant must still be listed, not silently dropped after the pair.
+    // A collision lists every distinct claimant: three layers binding three
+    // distinct actions give three claims.
     let key = seq(ModFlags::CTRL, 'y');
     let report = detect(&[
         defaults(),
@@ -258,10 +296,9 @@ fn three_layers_with_three_distinct_actions_all_appear_in_the_collision() {
 
 #[test]
 fn a_repeated_claim_across_nonadjacent_layers_dedups_against_a_third_distinct_one() {
-    // User and Layout bind the identical action (restating one intent);
-    // Session's differing claim sits between them. Dedup must compare
-    // against every earlier distinct claim, not just the immediately
-    // preceding one, so the result is exactly two distinct claims.
+    // User and Layout bind the identical action; Session's differing claim
+    // sits between them. Dedup compares against every earlier distinct
+    // claim: the result is exactly two distinct claims.
     let key = seq(ModFlags::CTRL, 'y');
     let report = detect(&[
         defaults(),
@@ -333,7 +370,7 @@ fn identical_bound_action_in_two_user_layers_passes() {
 #[test]
 fn same_action_with_different_args_collides() {
     // Unrepresentable from user files (their args are stripped), but the
-    // type still allows it for system-authored layers, so the collision is
+    // type still allows it for system-authored layers. The collision is
     // judged on the whole bound value, args included.
     let key = seq(ModFlags::CTRL, 'e');
     let run_with = |program: &str| BoundAction {
@@ -493,9 +530,8 @@ fn coming_soon_binding_warns_without_revert() {
 
 #[test]
 fn coming_soon_claims_do_not_collide() {
-    // Neither binding can fire in this build, so nothing is unreachable;
-    // the collision surfaces at the first load of the build that
-    // implements the actions.
+    // Neither binding can fire in this build; the collision surfaces at
+    // the first load of a build that implements the actions.
     let key = seq(ModFlags::CTRL, 'y');
     let report = detect(&[
         defaults(),
@@ -532,9 +568,9 @@ fn coming_soon_claims_do_not_collide() {
 
 #[test]
 fn unresolvable_args_binding_warns_and_does_not_collide() {
-    // The user layer's binding carries arguments `core:lock` cannot take,
-    // so it can never fire; it must not escalate the session layer's
-    // working binding into the all-or-nothing revert.
+    // The user layer's binding carries arguments `core:lock` cannot take
+    // and never fires; the session layer's working binding applies with no
+    // revert.
     let key = seq(ModFlags::CTRL, 'y');
     let broken = BoundAction {
         action: core("lock"),
@@ -591,9 +627,9 @@ fn rebinding_the_reserved_unlock_is_fatal() {
 
 #[test]
 fn unlock_with_wrong_arguments_is_dead_not_a_shadow() {
-    // `core:unlock` fires only with no arguments, so this binding can never
-    // fire — it is transparent, the default unlock beneath it still wins
-    // the reserved chord, and the escape stays intact.
+    // `core:unlock` fires only with no arguments: this binding never
+    // fires, it is transparent, and the default unlock beneath it wins the
+    // reserved chord.
     let key = KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK);
     let report = detect(&[
         defaults(),
@@ -629,8 +665,8 @@ fn unlock_with_wrong_arguments_is_dead_not_a_shadow() {
 #[test]
 fn reserved_led_claims_do_not_collide() {
     // Both layers bind a locked-mode sequence the reserved chord swallows;
-    // neither can ever fire, so they must not trigger the revert. Each is
-    // warned dead instead.
+    // neither can ever fire. Each is warned dead, with no collision and no
+    // revert.
     let key = seq2(
         KeybindingsConfig::RESERVED_UNLOCK,
         chord(ModFlags::NONE, 'x'),
@@ -668,12 +704,10 @@ fn reserved_led_claims_do_not_collide() {
 
 #[test]
 fn a_locked_sequence_holding_the_reserved_chord_anywhere_is_dead() {
-    // `<C-x> <C-l>` does not OPEN with the reserved chord, so it looks live —
-    // but the input path resolves the unlock the instant it is pressed, open
-    // sequence or not, so the `<C-l>` unlocks and `core:new-tab` never runs.
-    // Position is irrelevant: a locked sequence holding the chord at all is
-    // dead, and must be warned rather than admitted as a firing binding that
-    // steals its key and offers a hint-bar continuation that silently unlocks.
+    // `<C-x> <C-l>` does not OPEN with the reserved chord. The input path
+    // resolves the unlock the instant it is pressed, open sequence or not:
+    // the `<C-l>` unlocks and `core:new-tab` never runs. A locked sequence
+    // holding the chord at any position is warned dead.
     let key = seq2(
         chord(ModFlags::CTRL, 'x'),
         KeybindingsConfig::RESERVED_UNLOCK,
@@ -699,9 +733,9 @@ fn a_locked_sequence_holding_the_reserved_chord_anywhere_is_dead() {
 
 #[test]
 fn the_one_chord_unlock_binding_itself_stays_live() {
-    // The rule kills sequences that HOLD the reserved chord — never the
-    // one-chord binding that IS the unlock. Locked mode's own `<C-l>` →
-    // `core:unlock` must keep firing, or the escape guarantee dies with it.
+    // The dead judgment covers only sequences of two or more chords that
+    // hold the reserved chord. Locked mode's own one-chord `<C-l>` →
+    // `core:unlock` fires and draws no warning.
     let report = detect(&[defaults()]);
     assert_eq!(report.diagnostics, Vec::new());
     assert_eq!(report.verdict(), KeymapVerdict::Apply);
@@ -709,8 +743,8 @@ fn the_one_chord_unlock_binding_itself_stays_live() {
 
 #[test]
 fn reserved_led_sequences_do_not_pair_as_prefixes() {
-    // `<C-g> x` is a strict prefix of `<C-g> x y`, but both are swallowed
-    // by the reserved chord: two dead warnings, no ambiguous-prefix pair.
+    // `<C-l> x` is a strict prefix of `<C-l> x y`, but both hold the
+    // reserved chord: two dead warnings, no ambiguous-prefix pair.
     let short = seq2(
         KeybindingsConfig::RESERVED_UNLOCK,
         chord(ModFlags::NONE, 'x'),
@@ -962,7 +996,7 @@ fn user_prefix_of_default_sequences_warns_without_revert() {
 #[test]
 fn a_three_deep_prefix_chain_reports_every_pair() {
     // `<C-y>`, `<C-y> n`, and `<C-y> n o` are each a prefix of the ones
-    // longer than it: three pairs total, not just the two adjacent ones.
+    // longer than it: three pairs total.
     let short = seq(ModFlags::CTRL, 'y');
     let mid = seq2(chord(ModFlags::CTRL, 'y'), chord(ModFlags::NONE, 'n'));
     let long = KeySequence::new(
@@ -1011,6 +1045,36 @@ fn a_three_deep_prefix_chain_reports_every_pair() {
 }
 
 #[test]
+fn prefix_pairs_do_not_cross_modes() {
+    // `<C-y>` bound in normal and `<C-y> x` bound in locked do not pair:
+    // prefixes are judged within one mode.
+    let short = seq(ModFlags::CTRL, 'y');
+    let long = seq2(chord(ModFlags::CTRL, 'y'), chord(ModFlags::NONE, 'x'));
+    let user = KeyMapLayer {
+        origin: LayerOrigin::User,
+        modes: BTreeMap::from([
+            (
+                mode("normal"),
+                ModeBindings {
+                    keys: [(short, bound("lock"))].into_iter().collect(),
+                    removed: BTreeSet::new(),
+                },
+            ),
+            (
+                mode("locked"),
+                ModeBindings {
+                    keys: [(long, bound("new-tab"))].into_iter().collect(),
+                    removed: BTreeSet::new(),
+                },
+            ),
+        ]),
+    };
+    let report = detect(&[defaults(), user]);
+    assert_eq!(report.diagnostics, Vec::new());
+    assert_eq!(report.verdict(), KeymapVerdict::Apply);
+}
+
+#[test]
 fn the_reserved_chord_opening_a_normal_mode_sequence_is_an_ordinary_prefix_pair() {
     // The reserved chord is only swallowed in LOCKED mode; the identical
     // chord opening a longer sequence in NORMAL mode is an ordinary
@@ -1043,17 +1107,14 @@ fn the_reserved_chord_opening_a_normal_mode_sequence_is_an_ordinary_prefix_pair(
 
 #[test]
 fn a_later_redundant_remove_voids_a_rebind_that_an_earlier_remove_would_not() {
-    // Two layers remove the same key; only the LAST (highest-index) remove
-    // determines what index a claim must beat. Removal is positional, not
-    // per-origin, so a stack may hold several layers of one origin. User
-    // removes the key (index 1, no bind), Session rebinds it without
-    // removing (index 2), a first layout layer redundantly removes it again
-    // (index 3, no bind), a second layout layer rebinds with a different
-    // action (index 4). If `removal_index` recorded the first remove (index
-    // 1) instead of the last (index 3), Session's rebind at index 2 would
-    // wrongly survive (1 is not > 2) and collide with the top claim;
-    // recording the last remove correctly voids it, leaving the top claim
-    // alone.
+    // Two layers remove the same key; the LAST (highest-index) remove sets
+    // the index a claim must beat. Removal is positional, not per-origin: a
+    // stack may hold several layers of one origin. User removes the key
+    // (index 1, no bind), Session rebinds it without removing (index 2), a
+    // first layout layer removes it again (index 3, no bind), a second
+    // layout layer rebinds with a different action (index 4). The remove at
+    // index 3 voids Session's rebind at index 2, leaving the top claim
+    // alone and nothing to collide with.
     let key = seq(ModFlags::CTRL, 'y');
     let report = detect(&[
         defaults(),
@@ -1254,7 +1315,11 @@ fn a_fatal_finding_outranks_a_collision() {
             "normal",
             vec![(key.clone(), bound("new-tab"))],
         ),
-        layer(LayerOrigin::Session, "normal", vec![(key, bound("lock"))]),
+        layer(
+            LayerOrigin::Session,
+            "normal",
+            vec![(key.clone(), bound("lock"))],
+        ),
         layer(
             LayerOrigin::Layout,
             "locked",
@@ -1264,15 +1329,24 @@ fn a_fatal_finding_outranks_a_collision() {
             )],
         ),
     ]);
+    assert_eq!(
+        report.diagnostics,
+        vec![
+            ConflictDiagnostic::KeyCollision {
+                mode: mode("normal"),
+                key,
+                claims: vec![
+                    (LayerOrigin::User, bound("new-tab")),
+                    (LayerOrigin::Session, bound("lock")),
+                ],
+            },
+            ConflictDiagnostic::ReservedUnlockShadowed {
+                origin: LayerOrigin::Layout,
+                action: core("lock"),
+            },
+        ]
+    );
     assert_eq!(report.verdict(), KeymapVerdict::Reject);
-    assert!(report
-        .diagnostics
-        .iter()
-        .any(|d| d.severity() == ConflictSeverity::Collision));
-    assert!(report
-        .diagnostics
-        .iter()
-        .any(|d| d.severity() == ConflictSeverity::Fatal));
 }
 
 #[test]
@@ -1636,9 +1710,8 @@ fn remove_below_both_claims_does_not_stop_their_collision() {
 
 #[test]
 fn remove_above_both_claims_voids_the_collision() {
-    // The user disabled the key wholesale in a higher layer; two voided
-    // claims cannot collide, and no warning fires — the removal is the
-    // user's own authored intent.
+    // A remove above both claims voids both: no collision, and no warning
+    // fires.
     let key = seq(ModFlags::CTRL, 'y');
     let report = detect(&[
         defaults(),
@@ -1683,9 +1756,8 @@ fn removing_the_locked_unlock_binding_is_fatal() {
 #[test]
 fn removed_binding_draws_no_per_binding_warns() {
     // The user layer binds an orphan action on a typeable key; session
-    // removes the key. Removal silences both warns the binding would
-    // otherwise draw: disabling it is the user's own authored intent, not a
-    // surprise.
+    // removes the key. The removed binding draws neither the orphan warning
+    // nor the typeable warning.
     let key = seq(ModFlags::NONE, 'g');
     let report = detect(&[
         defaults(),
@@ -1720,9 +1792,9 @@ fn removed_prefix_binding_does_not_pair_as_a_prefix() {
 
 #[test]
 fn binding_past_the_chord_depth_cap_warns_and_applies() {
-    // At a cap of 1, a two-chord user binding can never be reached — the
-    // input path flushes the pending sequence before lookup — so it warns
-    // and stays transparent; the keymap still applies.
+    // At a cap of 1, a two-chord user binding is never reached: the input
+    // path flushes the pending sequence before lookup. It warns, stays
+    // transparent, and the keymap applies.
     let long = seq2(chord(ModFlags::CTRL, 'y'), chord(ModFlags::NONE, 'x'));
     let report = detect_conflicts(
         &[
@@ -1755,6 +1827,95 @@ fn binding_past_the_chord_depth_cap_warns_and_applies() {
         "`<C-y> x` in mode `normal` (user, `core:new-tab`) is 2 chords, over the \
          `max_chord_depth` cap of 1; the binding can never fire"
     );
+}
+
+#[test]
+fn binding_with_exactly_max_chord_depth_chords_fires() {
+    // At a cap of 1, a one-chord user binding sits exactly at the cap,
+    // fires, and draws no warning.
+    let report = detect_conflicts(
+        &[
+            defaults(),
+            layer(
+                LayerOrigin::User,
+                "normal",
+                vec![(seq(ModFlags::CTRL, 'y'), bound("new-tab"))],
+            ),
+        ],
+        Leader::default(),
+        None,
+        1,
+        &ActionRegistry::new(),
+        &known(),
+    );
+    assert_eq!(report.diagnostics, Vec::new());
+    assert_eq!(report.verdict(), KeymapVerdict::Apply);
+}
+
+#[test]
+fn a_reserved_led_sequence_past_the_cap_warns_dead_not_depth() {
+    // A locked two-chord sequence holding the reserved chord while over a
+    // cap of 1 draws one warning, the reserved-chord one.
+    let key = seq2(
+        chord(ModFlags::CTRL, 'x'),
+        KeybindingsConfig::RESERVED_UNLOCK,
+    );
+    let report = detect_conflicts(
+        &[
+            defaults(),
+            layer(
+                LayerOrigin::User,
+                "locked",
+                vec![(key.clone(), bound("new-tab"))],
+            ),
+        ],
+        Leader::default(),
+        None,
+        1,
+        &ActionRegistry::new(),
+        &known(),
+    );
+    assert_eq!(
+        report.diagnostics,
+        vec![ConflictDiagnostic::DeadUnderReservedUnlock {
+            origin: LayerOrigin::User,
+            key,
+            action: core("new-tab"),
+        }]
+    );
+    assert_eq!(report.verdict(), KeymapVerdict::Apply);
+}
+
+#[test]
+fn an_orphan_action_on_a_reserved_led_sequence_warns_orphan_not_dead() {
+    // A locked sequence holding the reserved chord that also names an
+    // unregistered action draws one warning, the resolver's refusal.
+    let key = seq2(
+        KeybindingsConfig::RESERVED_UNLOCK,
+        chord(ModFlags::NONE, 'x'),
+    );
+    let ghost = BoundAction {
+        action: ActionRef::user("ghost").expect("valid user action name"),
+        args: ActionArgs::None,
+    };
+    let report = detect(&[
+        defaults(),
+        layer(
+            LayerOrigin::User,
+            "locked",
+            vec![(key.clone(), ghost.clone())],
+        ),
+    ]);
+    assert_eq!(
+        report.diagnostics,
+        vec![ConflictDiagnostic::OrphanAction {
+            origin: LayerOrigin::User,
+            mode: mode("locked"),
+            key,
+            action: ghost.action,
+        }]
+    );
+    assert_eq!(report.verdict(), KeymapVerdict::Apply);
 }
 
 #[test]

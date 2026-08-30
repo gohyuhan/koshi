@@ -40,7 +40,8 @@ const REVERT_MARKER: &str = " keys! ";
 ///    was reverted. The marker holds that edge, and every hint below stops
 ///    short of it.
 /// 3. Draws one accent ribbon per already-pressed chord of `pending`, left to
-///    right, then a ` ▶ ` arrow.
+///    right, then a ` ▶ ` arrow. Only the first chord's ribbon carries that
+///    chord's prefix label, and only when bindings sit under it.
 /// 4. Draws each modifier group left to right: its ` Ctrl + ` header, then one
 ///    two-block ribbon per action.
 /// 5. Draws a `…` marker where the row ran out of room, and stops there.
@@ -72,8 +73,12 @@ pub fn draw_hint_bar(dto: &StatuslineDto<'_>, area: RatatuiRect, buf: &mut Buffe
     let mut x = area.x;
     if !pending.is_empty() {
         for (index, chord) in pending.iter().enumerate() {
-            let prefix_text = (index == 0).then(|| prefix_text(hints, *chord)).flatten();
-            let line = chord_ribbon(theme, *chord, prefix_text.as_deref());
+            let label = if index == 0 {
+                prefix_text(hints, *chord)
+            } else {
+                None
+            };
+            let line = chord_ribbon(theme, *chord, label.as_deref());
             if !paint_whole(buf, &mut x, area.y, right_edge, &line) {
                 draw_overflow_marker(buf, theme, x, area.y, right_edge);
                 return;
@@ -89,9 +94,8 @@ pub fn draw_hint_bar(dto: &StatuslineDto<'_>, area: RatatuiRect, buf: &mut Buffe
     let groups = display_groups(hint_items(hints, pending));
     let count = groups.len();
     for (group_index, group) in groups.into_iter().enumerate() {
-        // A modifier-less binding has no header: its key is the sequence's
-        // first key, so it wears the header's plain-text style. `Tab` reads
-        // as its own opener.
+        // A modifier-less group has no header: its key takes the header's
+        // plain-text style instead of a key block.
         let key_style = if group.mods.is_empty() {
             ramp_header_style(theme, group_index, count)
         } else {
@@ -125,9 +129,8 @@ pub fn draw_hint_bar(dto: &StatuslineDto<'_>, area: RatatuiRect, buf: &mut Buffe
     }
 }
 
-/// Mark dropped trailing hints with `…` so truncation is visible. Painted at
-/// the current cursor, or over the row's last cell when the hints consumed
-/// the full width.
+/// Mark dropped trailing hints with `…`. Painted at the current cursor, or
+/// over the row's last cell when the hints consumed the full width.
 fn draw_overflow_marker(buf: &mut Buffer, theme: &Theme, x: u16, y: u16, right_edge: u16) {
     let x = x.min(right_edge.saturating_sub(1));
     let marker = Line::from(Span::styled("…", overflow_style(theme)));
@@ -410,8 +413,7 @@ fn breadcrumb_modifier_style(theme: &Theme) -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
-/// The pressed-prefix breadcrumb's key/label blocks: dark text on the
-/// accent, brighter than any ramp stop, so the in-progress chords stand out.
+/// The pressed-prefix breadcrumb's key/label blocks: dark text on the accent.
 fn breadcrumb_key_style(theme: &Theme) -> Style {
     Style::default()
         .fg(theme.on_accent)

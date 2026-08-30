@@ -54,18 +54,14 @@ impl TransactionScope {
     /// [`CommandResult::Ok`] keyed to `command_id`.
     #[must_use]
     pub(crate) fn commit(self, command_id: CommandId, bus: &mut EventBus) -> CommandResult {
-        let emitted_events = self
-            .events
-            .into_iter()
-            .inspect(|event| {
-                log_event(event);
-                recent_events::record(event);
-                bus.publish(event);
-            })
-            .collect();
+        for event in &self.events {
+            log_event(event);
+            recent_events::record(event);
+            bus.publish(event);
+        }
         CommandResult::Ok {
             command_id,
-            emitted_events,
+            emitted_events: self.events,
         }
     }
 }

@@ -93,8 +93,8 @@ fn parse_optional(
         .transpose()
 }
 
-/// Parse one variable's value as a `<prefix>-<uuid>` id, reporting the
-/// variable name and offending value on failure.
+/// Parse one variable's value as a `<prefix>-<uuid>` id or a bare UUID,
+/// reporting the variable name and the offending value on failure.
 fn parse_value(name: &str, value: &str, prefix: &str) -> Result<Uuid, CliError> {
     parse_prefixed_uuid(value, prefix).map_err(|expected| CliError::InSessionEnv {
         detail: format!("`{name}` is `{value}`: {expected}"),

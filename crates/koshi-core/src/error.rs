@@ -4,8 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The domain a failure originated from. One variant per typed-error domain;
-/// this is classification only and carries no payload.
+/// The domain a failure comes from. Carries no payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DomainCategory {
     /// Configuration or settings error.
@@ -44,8 +43,8 @@ impl std::fmt::Display for DomainCategory {
     }
 }
 
-/// How far a failure propagates. Ordered from least to most fatal, so a caller
-/// can compare — `severity >= Severity::SessionFatal` — to decide containment.
+/// How far a failure propagates. Ordered from least to most fatal:
+/// `Recoverable < ClientFatal < SessionFatal < ProcessFatal`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Severity {
     /// Contained; the session keeps running (pane failed, plugin failed,

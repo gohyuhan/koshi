@@ -9,7 +9,8 @@ use koshi_layout::regions::{solve, Edge, RegionGeometry, RegionSolve};
 use crate::snapshot::{KeymapHints, Reconnecting, TabMeta};
 use crate::theme::Theme;
 
-/// The compiled-in navigator and statusline inputs.
+/// The compiled-in region geometry, in solve order: a one-row navigator on the
+/// top edge, then a one-row statusline on the bottom edge.
 const CORE_REGION_GEOMETRIES: [RegionGeometry; 2] = [
     RegionGeometry {
         edge: Edge::Top,

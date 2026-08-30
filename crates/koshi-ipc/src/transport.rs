@@ -16,8 +16,8 @@
 //!
 //! A received length prefix is checked against
 //! [`MAX_FRAME_LEN`](crate::transport::MAX_FRAME_LEN) before the payload
-//! buffer is allocated, so a peer naming a huge length is refused at the cost
-//! of reading four bytes.
+//! buffer is allocated: a length over it is refused after four bytes are
+//! read.
 //!
 //! [`Connection::read_closer`](crate::transport::Connection::read_closer)
 //! hands out a [`ReadCloser`](crate::transport::ReadCloser): the handle another
@@ -60,19 +60,19 @@ use windows_sys::Win32::System::Threading::{
 
 use crate::error::IpcError;
 
-/// The largest frame either side sends or accepts: 16 MiB. Every current
-/// message is far smaller; the cap bounds what a length prefix can make the
-/// reader allocate.
+/// The largest frame either side sends or accepts: 16 MiB. A received length
+/// over it is refused before the payload is allocated; a message that encodes
+/// past it is refused with nothing written.
 pub const MAX_FRAME_LEN: u32 = 16 * 1024 * 1024;
 
 /// What the shared control pipe grants, in Windows' [security descriptor
 /// string format][sddl]: the Authenticated Users group — every user logged in
 /// to this machine — may open the pipe for reading and writing.
 ///
-/// `0x0012019f` is `FILE_GENERIC_READ | FILE_GENERIC_WRITE` spelled out, which
-/// is what the `GENERIC_READ | GENERIC_WRITE` a caller opens the pipe with maps
-/// to. `FILE_APPEND_DATA` (`0x4`) inside that set is also
-/// `FILE_CREATE_PIPE_INSTANCE`, which the server needs to create the pipe
+/// `0x0012019f` is `FILE_GENERIC_READ | FILE_GENERIC_WRITE` spelled out: the
+/// rights `GENERIC_READ | GENERIC_WRITE`, which a caller opens the pipe with,
+/// map to. `FILE_APPEND_DATA` (`0x4`) inside that set is also
+/// `FILE_CREATE_PIPE_INSTANCE`: the right the server uses to create the pipe
 /// instance that serves the next caller.
 ///
 /// [sddl]: https://learn.microsoft.com/en-us/windows/win32/secauthz/security-descriptor-string-format
@@ -121,11 +121,10 @@ impl Listener {
     /// Bind `addr` and start listening, with the other local users of this
     /// machine able to open it.
     ///
-    /// On Windows the pipe is created carrying a security descriptor that
-    /// grants the Authenticated Users group read and write, which is what opens
-    /// it to those users. On Unix this binds exactly as [`bind`](Self::bind)
-    /// does: the socket file arrives at the mode the process umask leaves, and
-    /// the caller widens it afterwards.
+    /// On Windows the pipe is created with a security descriptor that grants
+    /// the Authenticated Users group read and write. On Unix this binds
+    /// exactly as [`bind`](Self::bind) does: the socket file arrives at the
+    /// mode the process umask leaves, and the caller widens it afterwards.
     pub fn bind_shared(addr: &str) -> Result<Listener, IpcError> {
         #[cfg(unix)]
         {
@@ -150,16 +149,18 @@ impl Listener {
     /// Block until a caller connects, then hand back that connection.
     ///
     /// On Windows a caller that connects and gives up occupies the pipe until
-    /// the next `accept` clears it, so a server calls this in a loop.
+    /// the next `accept` clears it.
     pub fn accept(&self) -> Result<Connection, IpcError> {
         let stream = self.inner.accept().map_err(io_failure)?;
         Ok(Connection::new(stream))
     }
 }
 
-/// How long [`Connection::connect`] waits for the listener to accept. On
-/// Windows a named pipe whose instances all sit unaccepted holds a connect
-/// open without limit; the bound turns that state into a timed-out error.
+/// How long [`Connection::connect`] waits for the connect to complete: 2
+/// seconds. On Unix the connect completes once the OS has queued it for the
+/// listener. On Windows a named pipe whose instances all sit unaccepted holds
+/// a connect open until the listener accepts; after this long the connect
+/// ends with a timed-out error.
 pub const CONNECT_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// One open control-socket connection. Both ends hold one: a caller's comes
@@ -182,10 +183,10 @@ impl Connection {
     }
 
     /// Connect to the listener at `addr`, waiting at most [`CONNECT_WAIT`]
-    /// for the listener to accept. No listener behind the address — a
+    /// for the connect to complete. No listener behind the address — a
     /// leftover file whose process is gone, or nothing there at all — is
-    /// [`IpcError::NoListener`]; a wait that runs out is an
-    /// [`io::ErrorKind::TimedOut`] error.
+    /// [`IpcError::NoListener`]; a wait that runs out is
+    /// [`IpcError::Transport`] carrying the timed-out error's words.
     pub fn connect(addr: &str) -> Result<Connection, IpcError> {
         let name = socket_name(addr).map_err(io_failure)?;
         let stream = ConnectOptions::new()
@@ -223,9 +224,9 @@ impl Connection {
     /// Take the handle on this connection's read direction, for another thread
     /// to close with while this one reads.
     ///
-    /// The socket is duplicated, so the handle stays usable after the
-    /// connection is split, moved to another thread or dropped. One connection
-    /// may hand out several; each closes the same read direction.
+    /// The socket is duplicated; the handle stays usable after the connection
+    /// is split, moved to another thread or dropped. One connection may hand
+    /// out several; each closes the same read direction.
     ///
     /// # Errors
     /// Returns the failure of duplicating the socket.
@@ -239,8 +240,8 @@ impl Connection {
 
     /// Report whether the peer process runs as the same OS user as this
     /// process: on Unix its effective user id, on Windows the user in its
-    /// process token. The OS reports the peer's identity through the socket,
-    /// so a peer cannot forge it.
+    /// process token. The OS reports the peer's identity through the socket;
+    /// a peer cannot forge it.
     ///
     /// Failing to learn the peer's identity is an error.
     pub fn peer_is_same_user(&self) -> Result<bool, IpcError> {
@@ -268,7 +269,7 @@ impl Connection {
         }
     }
 
-    /// Split the connection into its reading and its writing half, so one
+    /// Split the connection into its reading and its writing half; one
     /// thread reads frames while another writes them. Both halves speak the
     /// same frame shape the whole connection did.
     ///
@@ -302,8 +303,7 @@ impl Connection {
 
 /// A stream half that can be told when its reads and writes must give up.
 ///
-/// A half with no clock of its own — a local socket, whose peer is a process
-/// on this machine — takes the deadline and ignores it.
+/// A local socket half takes the deadline and ignores it.
 pub trait Deadlined: Send {
     /// Every read and write after this finishes by `at`, or blocks for as long
     /// as it takes when `at` is `None`.
@@ -330,8 +330,8 @@ impl<T: Read + Deadlined> DeadlinedRead for T {}
 pub trait DeadlinedWrite: Write + Deadlined {}
 impl<T: Write + Deadlined> DeadlinedWrite for T {}
 
-/// Wrap a byte-stream pair as the two halves of a framed connection, so a
-/// stream that is not a local socket speaks the same frame shape a
+/// Wrap a byte-stream pair as the two halves of a framed connection; a
+/// stream that is not a local socket then speaks the same frame shape a
 /// [`Connection`] does.
 ///
 /// The reader starts open: no [`ReadCloser`] reaches these halves.
@@ -402,8 +402,8 @@ impl FrameReader {
 pub struct ReadCloser {
     /// Shared with the connection this handle came from.
     closed: Arc<AtomicBool>,
-    /// The connection's socket, duplicated. Both descriptors name one socket,
-    /// so shutting this one's read direction shuts the connection's.
+    /// The connection's socket, duplicated. Both descriptors name one socket;
+    /// shutting this one's read direction shuts the connection's.
     #[cfg(unix)]
     socket: UnixStream,
 }
@@ -411,13 +411,12 @@ pub struct ReadCloser {
 impl ReadCloser {
     /// Close the connection's read direction: every [`Connection::recv`] and
     /// [`FrameReader::recv`] from here reports [`IpcError::Disconnected`]. The
-    /// writing direction stays open, so a reply the connection still owes its
-    /// peer goes out.
+    /// writing direction stays open; a reply written after this goes out.
     ///
     /// On Unix a read the reader is already blocked in ends as well: the
-    /// socket's read direction is shut. A Windows named pipe has no half-close,
-    /// so a read already waiting on the pipe ends when its peer sends the next
-    /// frame or hangs up; every read after that one reports end of stream.
+    /// socket's read direction is shut. A Windows named pipe has no half-close:
+    /// a read already waiting on the pipe ends when its peer sends the next
+    /// frame or hangs up, and every read after that one reports end of stream.
     ///
     /// Closing an already-closed read direction changes nothing.
     pub fn close(&self) {
@@ -489,9 +488,9 @@ impl Write for RawWriter {
 }
 
 /// Buffer for one outgoing frame: 4 placeholder length bytes, then the JSON
-/// payload as encoding produces it. Refuses the payload byte that crosses
-/// [`MAX_FRAME_LEN`], stopping the encoder mid-message, so building a frame
-/// never allocates past the cap.
+/// payload as encoding produces it. Refuses the write that crosses
+/// [`MAX_FRAME_LEN`], stopping the encoder mid-message; the buffer never
+/// grows past the cap.
 struct FrameBuffer {
     /// The frame being built: 4 placeholder bytes, then the payload so far.
     bytes: Vec<u8>,
@@ -564,8 +563,8 @@ pub(crate) fn read_message<T: DeserializeOwned>(reader: &mut impl Read) -> Resul
 
 /// Read the user of `process`'s token: the bytes `GetTokenInformation`
 /// writes, which start with a [`TOKEN_USER`] whose `Sid` points into the rest
-/// of the same buffer. The buffer is `u64` so it carries the alignment
-/// [`TOKEN_USER`] needs.
+/// of the same buffer. The buffer is `u64`: [`TOKEN_USER`] needs 8-byte
+/// alignment.
 #[cfg(windows)]
 fn token_user(process: HANDLE) -> Result<Vec<u64>, IpcError> {
     let mut token: HANDLE = std::ptr::null_mut();
@@ -610,7 +609,7 @@ fn sid_of(buffer: &[u64]) -> PSID {
 /// Accept connections on `listener` until `shutting_down` is set, handing
 /// each accepted connection to `serve`. A failed accept sleeps `retry_delay`
 /// and the loop continues. The flag is read between the accept and the
-/// dispatch, so the wake-up connection a shutdown makes is dropped, not
+/// dispatch: the connection accepted after the flag is set is dropped, not
 /// served.
 pub fn accept_until_shutdown(
     listener: &Listener,
@@ -644,9 +643,8 @@ pub fn waited_out(error: &io::Error) -> bool {
 /// True for the connect failures that mean "nothing answers at this
 /// address": the connection was refused (a socket file with no listener
 /// behind it), nothing exists at the address, or (Unix) the file at the
-/// address is not a socket. The errno spellings differ per OS — Linux
-/// refuses a non-socket file with `ECONNREFUSED`, macOS with `ENOTSOCK` —
-/// so both are checked.
+/// address is not a socket. Linux refuses a non-socket file with
+/// `ECONNREFUSED`, macOS with `ENOTSOCK`; both are checked.
 fn no_listener_error(error: &io::Error) -> bool {
     if matches!(
         error.kind(),

@@ -155,6 +155,57 @@ fn a_command_pane_reports_its_argv_program_first() {
 }
 
 #[test]
+fn a_pane_reports_the_title_its_child_set_and_no_argv_for_a_shell() {
+    let (mut runtime, _tx) = new_runtime();
+    let session_id = SessionId::new();
+    runtime
+        .bootstrap_local(session_id, VIEWPORT, SystemTime::UNIX_EPOCH)
+        .expect("bootstrap");
+    let pane = runtime.sessions()[&session_id]
+        .tabs
+        .values()
+        .next()
+        .expect("one tab")
+        .layout()
+        .leaf_panes()[0];
+    let before = runtime.build_overview().expect("one session is running");
+    assert_eq!(before.panes[0].title, None);
+
+    // OSC 2 sets the window title, ended here by BEL.
+    runtime.handle_pty_output(pane, b"\x1b]2;build watch\x07");
+
+    let after = runtime.build_overview().expect("one session is running");
+    assert_eq!(after.panes[0].title, Some("build watch".to_string()));
+    assert_eq!(after.panes[0].command, None);
+}
+
+#[test]
+fn a_pane_lists_every_client_focused_on_it_in_client_id_order() {
+    let (mut runtime, _tx) = new_runtime();
+    let session_id = SessionId::new();
+    let now = SystemTime::UNIX_EPOCH;
+    let seeded = runtime
+        .bootstrap_local(session_id, VIEWPORT, now)
+        .expect("bootstrap");
+    let tab = runtime.sessions()[&session_id]
+        .tabs
+        .keys()
+        .next()
+        .copied()
+        .expect("the genesis tab");
+    let joining = ClientId::new();
+    runtime.handle_client_attach(session_id, joining, VIEWPORT, None, tab, now, false);
+
+    let overview = runtime.build_overview().expect("one session is running");
+
+    let mut both = vec![seeded, joining];
+    both.sort();
+    assert_eq!(overview.panes.len(), 1);
+    assert_eq!(overview.panes[0].focused_by_clients, both);
+    assert_eq!(overview.session.attached_clients, both);
+}
+
+#[test]
 fn the_overview_reports_where_each_client_connected_from() {
     let (mut runtime, _tx) = new_runtime();
     let session_id = SessionId::new();
@@ -303,6 +354,55 @@ fn tabs_and_their_panes_come_back_in_tab_bar_order_not_in_id_order() {
 }
 
 #[test]
+fn a_registered_pane_no_tab_layout_holds_gets_no_row_but_is_still_counted() {
+    let session_id = SessionId::new();
+    let mut session = empty_session(session_id);
+    let held = add_tab_with_pane(&mut session, TabId::from_uuid(uuid_ending(1)), "only", 0);
+    let loose = PaneId::new();
+    session
+        .panes
+        .insert(PaneRecord::new(loose, SystemTime::UNIX_EPOCH))
+        .expect("a fresh pane id");
+    let (mut runtime, _tx) = new_runtime();
+    runtime.sessions.insert(session_id, session);
+
+    let overview = runtime.build_overview().expect("one session is running");
+
+    let rows: Vec<PaneId> = overview.panes.iter().map(|pane| pane.id).collect();
+    assert_eq!(rows, vec![held]);
+    assert_eq!(overview.session.pane_count, 2);
+}
+
+#[test]
+fn a_layout_leaf_the_registry_does_not_hold_gets_no_row_but_is_still_counted() {
+    let session_id = SessionId::new();
+    let mut session = empty_session(session_id);
+    let registered = add_tab_with_pane(&mut session, TabId::from_uuid(uuid_ending(1)), "first", 0);
+    let stray_tab = TabId::from_uuid(uuid_ending(2));
+    let stray = PaneId::new();
+    session.tabs.insert(
+        stray_tab,
+        Tab::new(stray_tab, "second".to_string(), 1, stray),
+    );
+    let (mut runtime, _tx) = new_runtime();
+    runtime.sessions.insert(session_id, session);
+
+    let overview = runtime.build_overview().expect("one session is running");
+
+    let rows: Vec<PaneId> = overview.panes.iter().map(|pane| pane.id).collect();
+    assert_eq!(rows, vec![registered]);
+    assert_eq!(
+        overview
+            .tabs
+            .iter()
+            .find(|tab| tab.id == stray_tab)
+            .map(|tab| tab.pane_count),
+        Some(1)
+    );
+    assert_eq!(overview.session.pane_count, 1);
+}
+
+#[test]
 fn each_lifecycle_becomes_its_reported_state_and_a_removed_pane_gets_no_row() {
     let session_id = SessionId::new();
     let mut session = empty_session(session_id);
@@ -359,11 +459,11 @@ fn each_lifecycle_becomes_its_reported_state_and_a_removed_pane_gets_no_row() {
             (exited, PaneState::Exited { code: Some(3) }),
             (closing, PaneState::Closing),
         ],
-        "a removed pane has left every layout tree, so it produces no row"
+        "a pane whose lifecycle is Removed produces no row"
     );
 
-    // The registry still holds the removed record, and its tab still counts the
-    // layout leaf, so both counts include it.
+    // The registry still holds the removed record, and its tab still holds the
+    // layout leaf. Both counts include it.
     assert_eq!(overview.session.pane_count, 4);
     assert_eq!(
         overview

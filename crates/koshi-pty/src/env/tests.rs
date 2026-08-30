@@ -168,6 +168,68 @@ fn spec_env_key_containing_equals_sign_is_kept_as_a_distinct_key() {
     let mut overrides = BTreeMap::new();
     overrides.insert("A=B".to_string(), "value".to_string());
     let env = build_env(&spec(ShellKind::Bash, overrides));
-    assert_eq!(env.get("A=B").map(String::as_str), Some("value"));
-    assert_eq!(env.len(), 3, "TERM + COLORTERM + the one A=B override");
+    let mut expected = BTreeMap::new();
+    expected.insert("TERM".to_string(), "xterm-256color".to_string());
+    expected.insert("COLORTERM".to_string(), "truecolor".to_string());
+    expected.insert("A=B".to_string(), "value".to_string());
+    assert_eq!(env, expected);
+}
+
+#[test]
+fn every_non_zsh_shell_overlay_is_exactly_the_two_universal_keys() {
+    let mut expected = BTreeMap::new();
+    expected.insert("TERM".to_string(), "xterm-256color".to_string());
+    expected.insert("COLORTERM".to_string(), "truecolor".to_string());
+    for kind in [
+        ShellKind::Bash,
+        ShellKind::Fish,
+        ShellKind::PowerShell,
+        ShellKind::Nu,
+        ShellKind::Other("elvish".to_string()),
+        ShellKind::Other(String::new()),
+    ] {
+        let env = build_env(&spec(kind.clone(), BTreeMap::new()));
+        assert_eq!(env, expected, "overlay for {kind:?}");
+    }
+}
+
+#[test]
+fn full_snapshot_zsh_with_overrides() {
+    let mut overrides = BTreeMap::new();
+    overrides.insert("TERM".to_string(), "tmux-256color".to_string());
+    overrides.insert("PROMPT_EOL_MARK".to_string(), "%".to_string());
+    overrides.insert("EDITOR".to_string(), "vi".to_string());
+
+    let env = build_env(&spec(ShellKind::Zsh, overrides));
+
+    let mut expected = BTreeMap::new();
+    expected.insert("TERM".to_string(), "tmux-256color".to_string());
+    expected.insert("COLORTERM".to_string(), "truecolor".to_string());
+    expected.insert("PROMPT_EOL_MARK".to_string(), "%".to_string());
+    expected.insert("EDITOR".to_string(), "vi".to_string());
+    assert_eq!(env, expected);
+}
+
+#[test]
+fn spec_env_can_blank_a_koshi_default() {
+    let mut overrides = BTreeMap::new();
+    overrides.insert("COLORTERM".to_string(), String::new());
+    let env = build_env(&spec(ShellKind::Bash, overrides));
+    assert_eq!(env.get("COLORTERM").map(String::as_str), Some(""));
+}
+
+#[test]
+fn an_empty_key_is_kept_as_a_key() {
+    let mut overrides = BTreeMap::new();
+    overrides.insert(String::new(), "value".to_string());
+    let env = build_env(&spec(ShellKind::Bash, overrides));
+    assert_eq!(env.get("").map(String::as_str), Some("value"));
+}
+
+#[test]
+fn non_ascii_key_and_value_pass_through_unmodified() {
+    let mut overrides = BTreeMap::new();
+    overrides.insert("ÜBER_変数".to_string(), "値 🐚".to_string());
+    let env = build_env(&spec(ShellKind::Bash, overrides));
+    assert_eq!(env.get("ÜBER_変数").map(String::as_str), Some("値 🐚"));
 }

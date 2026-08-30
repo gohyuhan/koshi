@@ -464,9 +464,9 @@ fn open_remote_listener(remote: &mut RemoteState, events_tx: &Sender<RouterEvent
 /// This machine's certificate and its fingerprint, generating one when there is
 /// none to read.
 ///
-/// The certificate koshi generates names `koshi`. What that name says does not
-/// matter: a dialling client pins the fingerprint of the certificate it was
-/// shown and checks nothing else about it.
+/// The certificate koshi generates names `koshi`. A dialling client pins the
+/// fingerprint of the certificate it was shown and checks nothing else about
+/// it.
 ///
 /// # Errors
 /// [`IpcError::TokenStoreWrite`] naming what failed, for a certificate that
@@ -684,11 +684,11 @@ fn dispatch(
 ) -> RouterExit {
     loop {
         let received = if registry.is_empty() {
-            events_rx.recv_timeout(idle_exit).map_err(|_| ())
+            events_rx.recv_timeout(idle_exit).ok()
         } else {
-            events_rx.recv().map_err(|_| ())
+            events_rx.recv().ok()
         };
-        let Ok(event) = received else {
+        let Some(event) = received else {
             return RouterExit::Idle;
         };
         match event {
@@ -938,9 +938,6 @@ fn enable_remote(remote: &mut RemoteState, events_tx: &Sender<RouterEvent>) -> R
         Err(error) => return refused(error.to_string()),
     };
 
-    // The port is taken before the answer is written down, so an address this
-    // machine cannot take leaves nothing behind: the next start finds no
-    // record and opens nothing, which is what the operator was just told.
     let bound = if remote.listening {
         None
     } else {
@@ -1224,8 +1221,8 @@ fn attach_lookup(
 
 /// Describe every running session, in name then id order.
 ///
-/// Each entry is asked to describe itself; one that does not answer is gone,
-/// so it is removed and left out of the answer.
+/// Each entry is asked to describe itself. An entry whose description fails for
+/// any reason is removed by [`unregister`] and left out of the answer.
 fn list_sessions(runtime_dir: &Path, registry: &mut Registry) -> RouterResult {
     let mut rows = Vec::new();
     let mut gone = Vec::new();
@@ -1246,8 +1243,9 @@ fn list_sessions(runtime_dir: &Path, registry: &mut Registry) -> RouterResult {
 ///
 /// Every advertised session is read for its address and process id and asked
 /// to describe itself. One that answers both is registered — a session server
-/// that outlived an earlier router is picked up here. One that fails either
-/// is gone, so its endpoint file and socket are removed.
+/// that outlived an earlier router is picked up here. One that fails either is
+/// removed by [`unregister`]: its endpoint file, its resume file, and on Unix
+/// its socket file go.
 ///
 /// The walk is over endpoint files, which exist on every platform, so a
 /// Windows pipe with no directory entry of its own is still found.

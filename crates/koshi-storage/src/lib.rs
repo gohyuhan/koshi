@@ -1,5 +1,5 @@
-//! `koshi-storage` — atomic file replacement: a write lands whole or not at
-//! all, so a reader finds the old file or the new one, never a torn middle.
+//! `koshi-storage` — atomic file replacement. A reader finds the whole old
+//! file or the whole new one, never a torn middle.
 //! [`error::StorageError`] carries every failure the crate reports.
 
 pub mod atomic;

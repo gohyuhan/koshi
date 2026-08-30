@@ -1,10 +1,10 @@
 //! Keybinding conflict detection over ordered keymap layers.
 //!
-//! Bindings arrive in layers — the built-in defaults, then the user's own
-//! surfaces (user file, session, layout), lowest
-//! first. Before the keymap-merge pass folds them into the
-//! runtime lookup map, [`detect_conflicts`] inspects the layers and reports
-//! every finding as a typed [`ConflictDiagnostic`]. The report's
+//! Bindings arrive in layers, lowest precedence first: the built-in
+//! defaults, then the user's own surfaces (user file, session, layout).
+//! [`detect_conflicts`] inspects the layers before the keymap-merge pass
+//! folds them into the runtime lookup map, and reports every finding as a
+//! typed [`ConflictDiagnostic`]. The report's
 //! [`verdict`](ConflictReport::verdict) tells the caller what to do with the
 //! user keymap as a whole:
 //!
@@ -12,33 +12,29 @@
 //!   not-yet-implemented action, arguments the action cannot take, typeable
 //!   keys, a binding shadowed by the reserved unlock, a sequence past the
 //!   chord-depth cap) inform; the keymap applies.
-//! - **A key collision** — the same key sequence claimed for different
-//!   actions by two user-authored layers in one mode — makes one of those
-//!   features unreachable, so the whole user keymap reverts to the built-in
-//!   defaults ([`KeymapVerdict::RevertToDefaults`]). Non-keybinding config is
-//!   unaffected. A user binding whose key is held only by the defaults layer
-//!   is a *steal*, not a collision: the user's binding takes the key and the
-//!   displaced default action becomes unbound.
+//! - **A key collision** — the same key sequence bound to different actions
+//!   by two user-authored layers in one mode — reverts the whole user keymap
+//!   to the built-in defaults ([`KeymapVerdict::RevertToDefaults`]).
+//!   Non-keybinding config is unaffected. A user binding whose key is held
+//!   only by the defaults layer is a *steal*, not a collision: the user's
+//!   binding takes the key and the displaced default action becomes unbound.
 //! - **A fatal finding** — the locked-mode unlock escape shadowed, missing,
-//!   or typeable — refuses the keymap outright
-//!   ([`KeymapVerdict::Reject`]): a config that can trap the user in locked
-//!   mode never applies.
+//!   or typeable — refuses the keymap outright ([`KeymapVerdict::Reject`]).
 //!
 //! Every judgment above runs on **firing bindings only**. A binding fires
-//! when the resolver accepts it as written AND a keypress can actually reach
-//! it — it is dead when its sequence contains the reserved unlock chord
-//! (which resolves instantly, so the rest is unreachable), when it is longer
-//! than `max_chord_depth`, or when a higher layer `remove`s its key. A dead
-//! binding is warned once per layer with the most specific reason, and is
-//! otherwise invisible: it claims no key in the collision scan and steals
-//! nothing. Exception: a binding voided by a `remove` gets no warning — the
-//! removal is the user's own intent, and remove-then-rebind-above is the
-//! supported way to move a key between layers without a collision. A dead
-//! binding is re-judged whenever its reason could have changed: on every
-//! config load/reload and on every plugin load or unload.
+//! when the resolver accepts it as written AND a keypress can reach it. It
+//! is dead when its sequence contains the reserved unlock chord (the chord
+//! resolves the instant it is pressed, and the rest of the sequence is
+//! unreachable), when it is longer than `max_chord_depth`, or when a higher
+//! layer `remove`s its key. A dead binding is warned once per layer with the
+//! most specific reason, claims no key in the collision scan, and steals
+//! nothing. A binding voided by a `remove` gets no warning: removing a key
+//! in one layer and rebinding it in a higher layer moves the key between
+//! layers without a collision. A dead binding is judged again on every
+//! config load or reload and on every plugin load or unload.
 //!
-//! Detection is pure — it reads the layers and writes nothing. Applying the
-//! verdict is the caller's step.
+//! Detection reads the layers and writes nothing. Applying the verdict is
+//! the caller's step.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -99,13 +95,12 @@ pub struct KeyMapLayer {
 }
 
 impl KeyMapLayer {
-    /// Keeps only what a user-authored surface may express: the key → action
-    /// mapping. Every binding's arguments are replaced with
-    /// [`ActionArgs::None`] — arguments in bindings are system-authored
-    /// presets, so anything a user file smuggles in (an unexpected KDL
-    /// property, a hand-edited node) is dropped rather than honored. The
-    /// defaults layer is returned untouched; its presets are the system's.
-    /// Loaders building user layers route them through this before use.
+    /// On a user-authored layer, replaces every binding's arguments with
+    /// [`ActionArgs::None`], keeping only the key → action mapping. Any
+    /// argument a user file carries (an unexpected KDL property, a
+    /// hand-edited node) is dropped. The defaults layer is returned
+    /// untouched, arguments included. [`keymap_layers`] applies this to the
+    /// user layer.
     #[must_use]
     pub fn with_user_args_stripped(mut self) -> Self {
         if !self.origin.is_user_authored() {
@@ -123,11 +118,11 @@ impl KeyMapLayer {
 /// The ordered keymap layers: the built-in default binding table, plus the
 /// user's `keybinding.kdl` modes when present.
 ///
-/// The default table is built against `leader`, so rebinding the leader moves
-/// every leader-relative default with it — a user file setting `leader "alt"`
-/// turns the `<C-p>` pane prefix into `<A-p>`. The user layer passes through
-/// [`KeyMapLayer::with_user_args_stripped`], so binding arguments in a user
-/// file are dropped rather than honored.
+/// The default table is built against `leader`: every leader-relative default
+/// moves with it, and a user file setting `leader "alt"` turns the `<C-p>`
+/// pane prefix into `<A-p>`. The user layer passes through
+/// [`KeyMapLayer::with_user_args_stripped`], which drops the binding
+/// arguments a user file carries.
 #[must_use]
 pub fn keymap_layers(
     user_modes: Option<BTreeMap<ModeName, ModeBindings>>,
@@ -170,10 +165,6 @@ pub enum ConflictSeverity {
 }
 
 /// What the caller does with the user keymap, decided by the worst finding.
-///
-/// This is the load / new-session decision. A live reload that fails keeps
-/// the running keymap instead; that policy belongs to the reload
-/// transaction, which reads the same report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeymapVerdict {
     /// No collision and nothing fatal: apply every layer.
@@ -228,16 +219,15 @@ pub enum ConflictDiagnostic {
         /// The chord that must map to `core:unlock`.
         reserved: KeyChord,
     },
-    /// `unlock_alternative` names a chord plain typing produces, which the
-    /// unlock escape must never sit on.
+    /// `unlock_alternative` names a chord plain typing produces.
     UnlockAlternativeTypeable {
         /// The configured alternative chord.
         chord: KeyChord,
     },
-    /// A locked-mode sequence holds the reserved unlock chord. The chord
-    /// resolves the instant it is pressed — ahead of the keymap, and whether
-    /// or not a sequence is open — so it can never be part of one, and the
-    /// sequence cannot fire. `<C-x> <C-l>` unlocks at the `<C-l>`.
+    /// A locked-mode sequence of two or more chords holds the reserved unlock
+    /// chord. The chord resolves the instant it is pressed, ahead of the
+    /// keymap and whether or not a sequence is open, and the sequence never
+    /// fires. `<C-x> <C-l>` unlocks at the `<C-l>`.
     DeadUnderReservedUnlock {
         /// The layer that authored the dead binding.
         origin: LayerOrigin,
@@ -246,9 +236,8 @@ pub enum ConflictDiagnostic {
         /// The action it would have triggered.
         action: ActionRef,
     },
-    /// A binding's sequence is longer than the `max_chord_depth` cap, so no
-    /// pending sequence ever grows long enough to reach it and it can never
-    /// fire.
+    /// A binding's sequence is longer than the `max_chord_depth` cap. No
+    /// pending sequence grows long enough to reach it, and it never fires.
     ExceedsChordDepth {
         /// The layer holding the binding.
         origin: LayerOrigin,
@@ -261,8 +250,8 @@ pub enum ConflictDiagnostic {
         /// The configured cap the sequence exceeds.
         max_chord_depth: u8,
     },
-    /// A binding names a registered action the runtime does not implement
-    /// yet, so the binding cannot fire in this build.
+    /// A binding names a registered action the runtime does not implement in
+    /// this build. The binding cannot fire.
     ComingSoonAction {
         /// The layer holding the binding.
         origin: LayerOrigin,
@@ -273,8 +262,8 @@ pub enum ConflictDiagnostic {
         /// The not-yet-implemented action.
         action: ActionRef,
     },
-    /// A binding carries arguments its action cannot take (or a macro the
-    /// resolver refuses), so the binding can never fire as written.
+    /// A binding carries arguments its action cannot take, or names a macro
+    /// the resolver refuses. The binding never fires as written.
     UnresolvableArgs {
         /// The layer holding the binding.
         origin: LayerOrigin,
@@ -318,8 +307,8 @@ pub enum ConflictDiagnostic {
         /// The action it triggers.
         action: ActionRef,
     },
-    /// The configured leader is reachable by plain typing, so every
-    /// leader-opened binding steals a typeable key from the pane.
+    /// The configured leader is reachable by plain typing. Every binding that
+    /// starts with it steals a typeable key from the pane.
     TypeableLeader {
         /// The configured leader.
         leader: Leader,
@@ -359,9 +348,8 @@ impl fmt::Display for ConflictDiagnostic {
                     }
                     write!(f, " by {origin} to `{}`", bound.action)?;
                 }
-                // Claims naming one action differ only in their arguments;
-                // without saying so the message reads as the same binding
-                // twice.
+                // Claims that all name one action differ only in their
+                // arguments.
                 let same_action = claims
                     .windows(2)
                     .all(|pair| pair[0].1.action == pair[1].1.action);
@@ -546,7 +534,7 @@ pub fn detect_conflicts(
     for (index, layer) in layers
         .iter()
         .enumerate()
-        .filter(|(_, l)| l.origin.is_user_authored())
+        .filter(|(_, layer)| layer.origin.is_user_authored())
     {
         scan_layer(
             layer,
@@ -567,14 +555,14 @@ pub fn detect_conflicts(
     ConflictReport { diagnostics }
 }
 
-/// Whether one binding can fire right now, judged by handing it to action
-/// resolution — the same code path a keypress takes.
+/// Whether one binding can fire, judged by handing it to action resolution,
+/// the same code path a keypress takes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BindingState {
     /// Resolution accepts the binding as written; it fires.
     Live,
-    /// The action is not registered; the binding self-heals when its owner
-    /// registers it (detection re-runs on plugin lifecycle).
+    /// The action is not registered. Detection runs again on every plugin
+    /// load or unload, and the binding fires once its action is registered.
     Orphan,
     /// The action is registered but not implemented in this build.
     ComingSoon,
@@ -585,9 +573,9 @@ enum BindingState {
 /// For every `(mode, key)` some layer removes, the index of the
 /// highest-precedence layer removing it. A binding at layer index `i` is
 /// voided when a removal for its key exists at an index greater than `i`
-/// ([`removed_above`]); a layer's own remove never voids its own binding,
-/// so removing and rebinding a key in one layer keeps the rebind.
-/// Unregistered modes are skipped, matching every other scan.
+/// ([`removed_above`]). A layer's own remove never voids its own binding:
+/// removing and rebinding a key in one layer keeps the rebind. Removals in
+/// unregistered modes are skipped.
 pub(crate) fn removal_index<'a>(
     layers: &'a [KeyMapLayer],
     known_modes: &BTreeSet<ModeName>,
@@ -617,11 +605,10 @@ pub(crate) fn removed_above(
     removals.get(&(mode, key)).is_some_and(|&at| at > index)
 }
 
-/// Classifies one binding by asking the real resolver, so detection and the
-/// keypress path can never disagree about what fires.
+/// Classifies one binding with [`resolve_action`], the call a keypress makes.
 fn classify(bound: &BoundAction, registry: &ActionRegistry) -> BindingState {
-    // Only whether the action resolves is read; the command itself is dropped,
-    // so the split direction handed in never reaches anything.
+    // Only whether the action resolves is read. The plan is dropped, and the
+    // `Direction::Right` handed in reaches nothing.
     match resolve_action(&bound.action, &bound.args, registry, Direction::Right) {
         Ok(_) => BindingState::Live,
         Err(ResolveError::Unregistered { .. }) => BindingState::Orphan,
@@ -632,15 +619,14 @@ fn classify(bound: &BoundAction, registry: &ActionRegistry) -> BindingState {
     }
 }
 
-/// True when, in locked mode, a multi-chord `key` holds the reserved unlock
-/// chord anywhere in it: the input path resolves that chord the instant it is
-/// pressed — ahead of the keymap, and whether or not a sequence is already
-/// open — so it can never be a chord *of* a sequence, and a sequence holding
-/// it can never fire.
+/// True when `mode` is locked mode and `key` has two or more chords, one of
+/// which is the reserved unlock chord. The input path resolves that chord the
+/// instant it is pressed, ahead of the keymap and whether or not a sequence
+/// is open, and a sequence holding it never fires.
 ///
 /// Position does not matter. `<C-l> x` unlocks at the first chord; `<C-x>
-/// <C-l>` opens fine and then unlocks at the second, so whatever it binds never
-/// runs. A one-chord `<C-l>` is the unlock binding itself and stays live.
+/// <C-l>` opens and then unlocks at the second. A one-chord `<C-l>` is the
+/// unlock binding itself and stays live.
 fn holds_reserved_unlock(
     mode: &ModeName,
     key: &KeySequence,
@@ -664,13 +650,12 @@ pub(crate) struct FiringRules<'a> {
     pub(crate) max_chord_depth: u8,
 }
 
-/// True when the binding participates in firing: the resolver accepts it as
-/// written, no reserved-chord bypass swallows it, and its sequence fits the
-/// chord-depth cap. Only firing bindings claim keys in the collision scan
-/// or enter the effective map. Removal by a higher layer also voids a
-/// binding; that check is positional, so it lives with the callers
-/// ([`removed_above`]). The keymap-merge pass reads the same predicate, so
-/// merge and detection can never disagree about what fires.
+/// True when the binding fires: the resolver accepts it as written, its
+/// sequence does not hold the reserved unlock chord in locked mode, and its
+/// sequence fits the chord-depth cap. Only firing bindings claim keys in the
+/// collision scan or enter the effective map. Removal by a higher layer is a
+/// separate check the callers make with [`removed_above`]. The keymap-merge
+/// pass reads this same predicate.
 pub(crate) fn is_firing(
     mode: &ModeName,
     key: &KeySequence,
@@ -682,11 +667,10 @@ pub(crate) fn is_firing(
         && !exceeds_chord_depth(key, rules.max_chord_depth)
 }
 
-/// True when the sequence is longer than the `max_chord_depth` cap. Dropping
-/// such a binding here is what enforces the cap: the input path grows a
-/// pending sequence only while a longer *live* binding still starts with it,
-/// so once no live binding is deeper than the cap, no pending sequence can be
-/// either — and a binding past it can never be reached.
+/// True when the sequence holds more than `max_chord_depth` chords. The input
+/// path grows a pending sequence only while a longer live binding starts with
+/// it; with no live binding past the cap, no pending sequence grows past it,
+/// and a binding past the cap is never reached.
 fn exceeds_chord_depth(key: &KeySequence, max_chord_depth: u8) -> bool {
     key.chords().len() > usize::from(max_chord_depth)
 }
@@ -702,13 +686,12 @@ fn leader_is_typeable(leader: Leader) -> bool {
 }
 
 /// Per-layer warnings for one user-authored layer. An unregistered mode
-/// warns once and its bindings are skipped — the whole overlay is inactive
-/// until the mode registers. A binding a higher layer removes is skipped
-/// silently: the removal is the user's own authored intent. Each remaining
-/// binding gets at most one cannot-fire warning, most specific reason first:
-/// the resolver's refusal, then the reserved-chord bypass, then the chord-depth
-/// cap. Only a binding that participates in firing is checked for a typeable
-/// opening chord, since a dead binding steals nothing.
+/// warns once ([`ConflictDiagnostic::OrphanMode`]) and its bindings are
+/// skipped. A binding a higher layer removes is skipped with no warning.
+/// Each remaining binding gets at most one cannot-fire warning, most specific
+/// reason first: the resolver's refusal, then the reserved unlock chord, then
+/// the chord-depth cap. Only a firing binding is checked for a typeable
+/// opening chord.
 fn scan_layer(
     layer: &KeyMapLayer,
     index: usize,
@@ -791,18 +774,16 @@ fn scan_layer(
 
 /// Cross-layer key collisions: the same `(mode, key)` bound to different
 /// [`BoundAction`]s by two or more user-authored layers. Identical bound
-/// actions in several layers restate one intent and pass. The defaults
-/// layer never collides — a user binding on a defaulted key is a steal.
+/// actions in several layers pass. The defaults layer never collides: a
+/// user binding on a defaulted key is a steal.
 ///
-/// Only firing claims count (see [`is_firing`]): a binding that cannot fire
-/// is warned by [`scan_layer`] and claims no key, so a dead binding can
-/// never escalate a working neighbor into the revert. The collision
-/// re-surfaces on the detection run where the binding turns live — at
-/// plugin registration for orphans, at the first load of the implementing
-/// build for the build-fixed classes. A claim a higher layer removes is
-/// voided the same way — removing a key and rebinding it above is how a
-/// user-authored layer takes a key another user-authored layer holds
-/// without colliding.
+/// Only firing claims count ([`is_firing`]): a binding that cannot fire
+/// claims no key, and [`scan_layer`] warns it instead. The collision appears
+/// on the detection run where the binding turns live: at plugin registration
+/// for an orphan action, at the first load of a build that implements a
+/// coming-soon action. A claim a higher layer removes claims no key either:
+/// removing a key and rebinding it in a higher layer takes the key without a
+/// collision.
 fn scan_collisions(
     layers: &[KeyMapLayer],
     removals: &BTreeMap<(&ModeName, &KeySequence), usize>,
@@ -815,7 +796,7 @@ fn scan_collisions(
     for (index, layer) in layers
         .iter()
         .enumerate()
-        .filter(|(_, l)| l.origin.is_user_authored())
+        .filter(|(_, layer)| layer.origin.is_user_authored())
     {
         for (mode, bindings) in &layer.modes {
             if !known_modes.contains(mode) {
@@ -826,25 +807,19 @@ fn scan_collisions(
                 {
                     continue;
                 }
-                claims
-                    .entry((mode, key))
-                    .or_default()
-                    .push((layer.origin, bound));
+                let claimants = claims.entry((mode, key)).or_default();
+                if !claimants.iter().any(|(_, held)| *held == bound) {
+                    claimants.push((layer.origin, bound));
+                }
             }
         }
     }
     for ((mode, key), claimants) in claims {
-        let mut distinct: Vec<(LayerOrigin, &BoundAction)> = Vec::new();
-        for (origin, bound) in claimants {
-            if !distinct.iter().any(|(_, held)| *held == bound) {
-                distinct.push((origin, bound));
-            }
-        }
-        if distinct.len() >= 2 {
+        if claimants.len() >= 2 {
             out.push(ConflictDiagnostic::KeyCollision {
                 mode: mode.clone(),
                 key: key.clone(),
-                claims: distinct
+                claims: claimants
                     .into_iter()
                     .map(|(origin, bound)| (origin, bound.clone()))
                     .collect(),
@@ -854,12 +829,12 @@ fn scan_collisions(
 }
 
 /// The winning **firing** binding per `(mode, key)` after folding the
-/// layers in order: a later layer's firing entry replaces a lower layer's
-/// on the same key. A binding that cannot fire is transparent — the firing
-/// binding beneath it shows through — a binding a higher layer removes is
-/// voided, unregistered modes are omitted, and locked-mode sequences the
-/// reserved chord swallows and sequences past the chord-depth cap never
-/// enter, so this map is what a keypress actually reaches.
+/// layers in order: a higher layer's firing entry replaces a lower layer's
+/// on the same key. A binding that cannot fire is transparent, and the firing
+/// binding beneath it shows through. A binding a higher layer removes,
+/// bindings in unregistered modes, locked-mode sequences holding the
+/// reserved unlock chord, and sequences past the chord-depth cap never
+/// enter. The map holds what a keypress reaches.
 fn effective_bindings<'a>(
     layers: &'a [KeyMapLayer],
     removals: &BTreeMap<(&'a ModeName, &'a KeySequence), usize>,
@@ -888,10 +863,9 @@ fn effective_bindings<'a>(
 
 /// Ambiguous-prefix warnings over the winning firing bindings: within one
 /// mode, a bound sequence that is a strict prefix of another bound sequence
-/// fires only on the chord timeout. Locked-mode sequences the reserved
-/// chord swallows never enter the effective map, so no pair involving the
-/// reserved unlock can appear here — those sequences are warned as dead by
-/// the per-layer scan instead.
+/// fires only on the chord timeout. One warning per prefix pair. Locked-mode
+/// sequences holding the reserved unlock chord are absent from the effective
+/// map and never pair here; [`scan_layer`] warns them as dead.
 fn scan_prefixes(
     effective: &BTreeMap<&ModeName, BTreeMap<&KeySequence, (LayerOrigin, &BoundAction)>>,
     out: &mut Vec<ConflictDiagnostic>,
@@ -915,13 +889,13 @@ fn scan_prefixes(
     }
 }
 
-/// The locked-mode unlock guarantee, checked on the winning firing
-/// bindings: what actually fires on the reserved chord must be
-/// `core:unlock` (shadowed or missing is fatal). A dead binding sitting on
-/// the reserved chord is transparent and cannot shadow the escape — it is
-/// already warned per layer. Comparing the action alone is exact here: the
-/// map holds firing bindings, and `core:unlock` resolves only in its
-/// argument-free form.
+/// The locked-mode unlock check on the winning firing bindings. The firing
+/// binding on the reserved chord in locked mode must name `core:unlock`:
+/// another action is [`ConflictDiagnostic::ReservedUnlockShadowed`], and no
+/// firing binding is [`ConflictDiagnostic::ReservedUnlockMissing`]. A dead
+/// binding on the reserved chord is transparent and cannot shadow the
+/// escape. The action alone is compared: the map holds firing bindings only,
+/// and `core:unlock` resolves only with [`ActionArgs::None`].
 fn check_reserved_unlock(
     effective: &BTreeMap<&ModeName, BTreeMap<&KeySequence, (LayerOrigin, &BoundAction)>>,
     reserved: KeyChord,

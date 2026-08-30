@@ -1,27 +1,25 @@
 //! What every server does the same way, on whichever protocol it speaks.
 //!
-//! koshi runs more than one request protocol over the same framing: a session
-//! server answers its session's control socket, and the router answers the
-//! control socket. Four decisions are the same on both:
+//! The session server and the router run different request protocols over
+//! the same framing. Four decisions are the same on both:
 //!
 //! 1. A frame that arrives whole but cannot be read is answered with
-//!    [`MalformedRequest`](crate::protocol::IpcErrorCode::MalformedRequest), and the connection
-//!    keeps serving — the stream is still on a frame boundary.
-//! 2. A frame whose payload could not even be read leaves the stream off its
-//!    boundaries, and that one connection closes. Disconnects and transport
-//!    faults land here too, since they leave no stream at all.
-//! 3. A request kind this build does not have comes from a newer koshi. It is
-//!    refused by name and the connection keeps serving, so one unfamiliar verb
-//!    does not cost the caller its other verbs.
-//! 4. A Hello is answered with the version the two sides settled on; every
-//!    other kind is refused until one has opened the gate.
+//!    [`MalformedRequest`](crate::protocol::IpcErrorCode::MalformedRequest),
+//!    and the connection keeps serving: the stream is still on a frame
+//!    boundary.
+//! 2. A frame whose payload was not read leaves the stream off its frame
+//!    boundaries, and that one connection closes. A disconnect and a
+//!    transport fault close it the same way.
+//! 3. A request kind this build does not have is refused by name, and the
+//!    connection keeps serving.
+//! 4. A Hello is answered with the version the two sides settled on. Every
+//!    other kind is refused until a Hello has opened the gate.
 //!
-//! The [`next_request`](crate::plane::next_request) function makes those four decisions and hands back what is left:
-//! either a checked request for the caller's own dispatch, or the news that
-//! this connection is finished. What a request *means* stays with the caller,
-//! which is where the two servers genuinely differ — the router reports a
-//! delivered `Restarting`, and the session server hands an answered `Attach`
-//! to its event stream.
+//! [`next_request`](crate::plane::next_request) makes those four decisions
+//! and hands back what is left: a checked request for the caller's own
+//! dispatch, or the news that this connection is finished. What a request
+//! means stays with the caller: the router reports a delivered `Restarting`,
+//! and the session server hands an answered `Attach` to its event stream.
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -31,10 +29,10 @@ use crate::protocol::{IpcErrorCode, IpcErrorPayload};
 use crate::transport::Connection;
 use crate::wire::{Answer, Envelope, MaybeKnown, WireVariants};
 
-/// One connection's handshake gate, whichever protocol it is for.
+/// One connection's handshake gate, on any protocol: what a serve loop asks
+/// it.
 ///
-/// The rule itself is one shared version gate; this names the three questions
-/// a serve loop asks it, so one loop can drive any protocol's gate.
+/// A `check` that accepts a Hello leaves `agreed` as `Some`.
 pub trait Gate {
     /// The request kind this protocol carries.
     type Kind;
@@ -52,10 +50,8 @@ pub trait Gate {
     /// refusal to send back, and the gate keeps the state it had.
     fn check(&mut self, kind: &Self::Kind) -> Result<(), IpcErrorPayload>;
 
-    /// Whether `kind` is the Hello that opens a connection.
-    ///
-    /// The serve loop answers a Hello itself, since the answer is the settled
-    /// version and nothing else.
+    /// Whether `kind` is the Hello that opens a connection. [`next_request`]
+    /// answers a Hello itself, with the settled version.
     fn is_hello(kind: &Self::Kind) -> bool;
 }
 
@@ -72,12 +68,9 @@ pub trait Plane {
     /// The refusal `payload` travels back as.
     fn refusal(payload: IpcErrorPayload) -> Self::Result;
 
-    /// The answer to an accepted Hello: the version both sides settled on,
-    /// and `build` — the answering program's own version, e.g. `"0.3.0"`.
-    ///
-    /// `build` comes from the server rather than from here, so each server
-    /// reports the version of the binary it is, not the version of this
-    /// crate. A protocol whose Hello carries no build version ignores it.
+    /// The answer to an accepted Hello. `agreed` is the version both sides
+    /// settled on. `build` is the answering program's own version, e.g.
+    /// `"0.3.0"`; a protocol whose Hello carries no build version ignores it.
     fn hello(agreed: u32, build: &str) -> Self::Result;
 }
 
@@ -96,22 +89,31 @@ pub enum Next<K> {
         kind: K,
     },
     /// This connection is finished: the peer hung up, the stream lost its
-    /// frame boundaries, or a write failed. The caller returns.
+    /// frame boundaries, a write failed, or `admitted` answered `false`. The
+    /// caller returns.
     Stop,
 }
 
 /// Read one request, make every decision that is the same on every protocol,
 /// and hand back what is left.
 ///
-/// The four decisions are the ones the module doc lists. Anything this
-/// function answers itself is [`Next::Answered`]; anything it cannot decide
-/// is [`Next::Dispatch`]; anything that ends the connection is [`Next::Stop`].
+/// The four decisions are the ones the module doc lists. What this function
+/// answers itself is [`Next::Answered`]; what it cannot decide is
+/// [`Next::Dispatch`]; what ends the connection is [`Next::Stop`].
 ///
-/// `admitted` is asked once a request has arrived and before any answer goes
-/// out: `false` ends the connection with nothing written. A server whose peer
-/// may lose access while its connection sits open reads that access here, so
-/// the answer reflects the setting as it stands now. A server whose peers
-/// cannot lose access passes [`always_admitted`].
+/// `admitted` is asked after a request decodes and before its answer is
+/// written: `false` ends the connection with nothing written for that
+/// request. A malformed frame is answered before `admitted` is asked. The
+/// session server passes the live read of `allow-other-users` for a
+/// connection from another local user; a server whose peers cannot lose
+/// access passes [`always_admitted`].
+///
+/// `build` is the answering program's own version, repeated in the Hello
+/// answer.
+///
+/// # Panics
+///
+/// When the gate accepts a Hello and [`Gate::agreed`] still returns `None`.
 ///
 /// Example — a caller that sends `{"request_id":4,"kind":"Discovery"}` on an
 /// open connection gets `Next::Dispatch { request_id: 4, kind: Discovery }`,
@@ -136,8 +138,8 @@ pub fn next_request<P: Plane>(
             return answer::<P>(connection, None, refusal);
         }
         // An oversize frame leaves its payload unread and the stream off its
-        // frame boundaries; a disconnect and a transport fault leave no stream
-        // at all. All three close this one connection.
+        // frame boundaries; a disconnect and a transport fault leave no
+        // stream. All three close this connection.
         Err(_) => return Next::Stop,
     };
 
@@ -170,11 +172,9 @@ pub fn next_request<P: Plane>(
     Next::Dispatch { request_id, kind }
 }
 
-/// The admission answer for a server whose peers cannot lose access while
-/// their connection is open: everyone who got in stays in.
-///
-/// Pass it as [`next_request`]'s `admitted` argument. The router uses it —
-/// only the user who started the router can reach its socket at all.
+/// Always `true`: the `admitted` argument to [`next_request`] for a server
+/// whose peers cannot lose access while their connection is open. The router
+/// passes it.
 #[must_use]
 pub fn always_admitted() -> bool {
     true

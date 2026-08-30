@@ -14,8 +14,7 @@ use super::*;
 /// A protocol version above every version this build speaks.
 const ABOVE_RANGE: u32 = PROTOCOL_VERSION + 1;
 
-/// A protocol version below every version this build speaks. Saturating, so
-/// this stays a version rather than an overflow if the floor ever reaches 0.
+/// One below the lowest version this build speaks. Saturates at `0`.
 const BELOW_RANGE: u32 = MIN_PROTOCOL_VERSION.saturating_sub(1);
 
 /// The token this Koshi expects, as the gate under test holds it.
@@ -60,6 +59,15 @@ fn other_users_refusal() -> IpcErrorPayload {
                   set `allow-other-users #true` in koshi.kdl to let \
                   the other users of this machine in"
             .to_string(),
+    }
+}
+
+/// The refusal a Hello presenting a token other than [`expected`] earns,
+/// spelled out.
+fn bad_token_refusal() -> IpcErrorPayload {
+    IpcErrorPayload {
+        code: IpcErrorCode::BadToken,
+        message: "the token presented does not match this Koshi's".to_string(),
     }
 }
 
@@ -170,23 +178,14 @@ fn an_accepted_hello_opens_the_gate_for_other_requests() {
 
 #[test]
 fn a_hello_with_a_wrong_token_is_refused_as_bad_token() {
-    assert_eq!(
-        gate().check(&wrong_token_hello()),
-        Err(IpcErrorPayload {
-            code: IpcErrorCode::BadToken,
-            message: "the token presented does not match this Koshi's".to_string(),
-        })
-    );
+    assert_eq!(gate().check(&wrong_token_hello()), Err(bad_token_refusal()));
 }
 
 #[test]
 fn a_hello_from_another_machine_with_a_wrong_token_is_refused_as_bad_token() {
     assert_eq!(
         remote_gate().check(&wrong_token_hello()),
-        Err(IpcErrorPayload {
-            code: IpcErrorCode::BadToken,
-            message: "the token presented does not match this Koshi's".to_string(),
-        })
+        Err(bad_token_refusal())
     );
 }
 
@@ -219,8 +218,8 @@ fn an_allowed_other_user_opens_the_gate_without_a_token() {
 
 #[test]
 fn the_starting_user_still_presents_the_token_while_other_users_are_allowed() {
-    // Turning the setting on widens who may reach the socket, never what the
-    // user who started the session has to present on it.
+    // With the setting on, the user who started the session still presents
+    // the token.
     let mut gate = Handshake::new(
         expected(),
         Peer::Local {
@@ -229,21 +228,14 @@ fn the_starting_user_still_presents_the_token_while_other_users_are_allowed() {
         },
     );
 
-    assert_eq!(
-        gate.check(&wrong_token_hello()),
-        Err(IpcErrorPayload {
-            code: IpcErrorCode::BadToken,
-            message: "the token presented does not match this Koshi's".to_string(),
-        })
-    );
+    assert_eq!(gate.check(&wrong_token_hello()), Err(bad_token_refusal()));
     assert_eq!(gate.agreed(), None);
     assert_eq!(gate.check(&good_hello()), Ok(()));
 }
 
 #[test]
 fn an_allowed_other_user_is_admitted_whatever_token_it_presents() {
-    // The token proves a caller read the session's endpoint file, which
-    // another user cannot; their Hello is not judged on the field they fill.
+    // An allowed other user's Hello is not judged on its token.
     let mut gate = other_user_gate(true);
 
     assert_eq!(gate.check(&wrong_token_hello()), Ok(()));
@@ -252,8 +244,8 @@ fn an_allowed_other_user_is_admitted_whatever_token_it_presents() {
 
 #[test]
 fn a_hello_from_another_machine_presenting_no_token_is_refused_as_bad_token() {
-    // The empty token is what an admitted local user sends. Arriving from
-    // another machine it earns the same refusal as any other wrong one.
+    // An empty token from another machine is refused like any other wrong
+    // token.
     let hello = IpcRequestKind::Hello {
         min_protocol_version: MIN_PROTOCOL_VERSION,
         max_protocol_version: PROTOCOL_VERSION,
@@ -261,13 +253,7 @@ fn a_hello_from_another_machine_presenting_no_token_is_refused_as_bad_token() {
         remote: false,
     };
 
-    assert_eq!(
-        remote_gate().check(&hello),
-        Err(IpcErrorPayload {
-            code: IpcErrorCode::BadToken,
-            message: "the token presented does not match this Koshi's".to_string(),
-        })
-    );
+    assert_eq!(remote_gate().check(&hello), Err(bad_token_refusal()));
 }
 
 #[test]
@@ -348,6 +334,26 @@ fn a_caller_speaking_only_below_this_build_is_refused_naming_both_ranges() {
         gate().check(&hello_speaking(BELOW_RANGE, BELOW_RANGE)),
         Err(version_refusal(BELOW_RANGE, BELOW_RANGE))
     );
+}
+
+#[test]
+fn a_hello_whose_range_is_inverted_is_refused_for_the_version() {
+    let mut gate = gate();
+
+    assert_eq!(
+        gate.check(&hello_speaking(ABOVE_RANGE, BELOW_RANGE)),
+        Err(version_refusal(ABOVE_RANGE, BELOW_RANGE)),
+        "a range whose low end is above its high end shares no version"
+    );
+    assert_eq!(gate.agreed(), None);
+}
+
+#[test]
+fn a_caller_speaking_every_version_settles_on_this_builds_highest() {
+    let mut gate = gate();
+
+    assert_eq!(gate.check(&hello_speaking(0, u32::MAX)), Ok(()));
+    assert_eq!(gate.agreed(), Some(PROTOCOL_VERSION));
 }
 
 #[test]
@@ -511,6 +517,25 @@ fn the_agreed_version_is_the_highest_both_sides_speak() {
 }
 
 #[test]
+fn the_agreed_version_holds_at_the_ends_of_u32() {
+    assert_eq!(
+        agreed_version(0, u32::MAX, 0, u32::MAX),
+        Some(u32::MAX),
+        "two full ranges settle on the highest version there is"
+    );
+    assert_eq!(
+        agreed_version(u32::MAX, 0, 2, 5),
+        None,
+        "a caller range whose low end is above its high end shares nothing"
+    );
+    assert_eq!(
+        agreed_version(2, 5, u32::MAX, 0),
+        None,
+        "a build range whose low end is above its high end shares nothing"
+    );
+}
+
+#[test]
 fn a_hello_that_says_nothing_leaves_the_connection_local() {
     let mut gate = gate();
 
@@ -561,7 +586,7 @@ fn a_refused_hello_saying_remote_does_not_mark_the_connection() {
         remote: true,
     };
 
-    assert!(gate.check(&refused).is_err());
+    assert_eq!(gate.check(&refused), Err(bad_token_refusal()));
 
     assert!(!gate.remote_caller());
     assert_eq!(gate.check(&good_hello()), Ok(()));
@@ -581,7 +606,59 @@ fn a_refused_hello_saying_remote_leaves_the_gate_closed() {
         remote: true,
     };
 
-    assert!(gate.check(&refused).is_err());
+    assert_eq!(gate.check(&refused), Err(bad_token_refusal()));
 
     assert_eq!(gate.agreed(), None);
+}
+
+#[test]
+fn a_remote_hello_from_another_machine_marks_the_connection() {
+    let mut gate = remote_gate();
+
+    assert_eq!(gate.check(&remote_hello()), Ok(()));
+
+    assert!(gate.remote_caller());
+    assert_eq!(gate.agreed(), Some(PROTOCOL_VERSION));
+}
+
+#[test]
+fn an_allowed_other_users_hello_saying_remote_marks_the_connection() {
+    let mut gate = other_user_gate(true);
+    let hello = IpcRequestKind::Hello {
+        min_protocol_version: MIN_PROTOCOL_VERSION,
+        max_protocol_version: PROTOCOL_VERSION,
+        token: ConnectionToken::new(""),
+        remote: true,
+    };
+
+    assert_eq!(gate.check(&hello), Ok(()));
+
+    assert!(gate.remote_caller());
+    assert_eq!(gate.agreed(), Some(PROTOCOL_VERSION));
+}
+
+#[test]
+fn a_refused_other_users_hello_saying_remote_does_not_mark_the_connection() {
+    let mut gate = other_user_gate(false);
+    let refused = IpcRequestKind::Hello {
+        min_protocol_version: MIN_PROTOCOL_VERSION,
+        max_protocol_version: PROTOCOL_VERSION,
+        token: expected(),
+        remote: true,
+    };
+
+    assert_eq!(gate.check(&refused), Err(other_users_refusal()));
+
+    assert!(!gate.remote_caller());
+    assert_eq!(gate.agreed(), None);
+}
+
+#[test]
+fn the_gate_trait_names_only_a_hello_as_the_hello() {
+    use crate::plane::Gate as _;
+
+    assert!(Handshake::is_hello(&good_hello()));
+    assert!(Handshake::is_hello(&wrong_token_hello()));
+    assert!(!Handshake::is_hello(&IpcRequestKind::Discovery));
+    assert!(!Handshake::is_hello(&submit_command()));
 }

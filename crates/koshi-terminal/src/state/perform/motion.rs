@@ -14,22 +14,15 @@ impl TerminalState {
         self.scroll_region().unwrap_or((0, last_row))
     }
 
-    /// Delete `n` lines starting at `first` (scrolling the band `first..=bottom`
-    /// up), first preserving all metadata for rows that leave the *top* of the
-    /// primary screen.
+    /// Delete `n` lines starting at `first`, scrolling the band `first..=bottom`
+    /// up and filling the vacated bottom rows with `fill`.
     ///
-    /// Rows leave the top only when `first == 0` on the primary screen — i.e. a
-    /// line feed at a top-anchored region's bottom margin, an SU whose region
-    /// starts at row 0, or a DL with the cursor on row 0. The alternate screen
-    /// never feeds history, and an interior delete (`first > 0`, e.g. DL below
-    /// the top or a scroll region whose top margin is below row 0) discards its
-    /// removed lines without retaining them. This matches xterm/alacritty,
-    /// where history is fed only when the scrolled region begins at row 0.
-    ///
-    /// The departing rows — `rows[0..min(n, bottom + 1)]`, exactly the rows
-    /// `delete_lines` removes — are pushed oldest-first so the topmost lands
-    /// deepest in history. Capture happens before the delete, which overwrites
-    /// their cells and metadata.
+    /// When `first == 0` on the primary screen — a line feed at the bottom
+    /// margin of a region starting at row 0, an SU whose region starts at row
+    /// 0, a DL with the cursor on row 0 — the departing rows `0..min(n, bottom + 1)`
+    /// go into scrollback first, oldest first, each with its row end and prompt
+    /// mark. The alternate screen, and a delete with `first > 0`, feed nothing:
+    /// the removed lines are discarded.
     pub(super) fn delete_lines_into_scrollback(
         &mut self,
         first: u16,
@@ -38,7 +31,8 @@ impl TerminalState {
         fill: Style,
     ) {
         if self.active == Screen::Primary && first == 0 {
-            let removed = n.min(bottom.saturating_sub(first).saturating_add(1));
+            let band_height = bottom.saturating_add(1);
+            let removed = n.min(band_height);
             for row in 0..removed {
                 if let Some(scrolled_off) = self.primary.rows().get(row as usize) {
                     let meta = RowMeta {
@@ -53,14 +47,13 @@ impl TerminalState {
     }
 
     /// Move the cursor down one line. At the scroll region's bottom margin the
-    /// cursor does not advance — the region scrolls up so the bottom line stays
-    /// on screen; below the margin the cursor just descends to the last grid
-    /// row. The column is left unchanged (LNM is off, so a line feed is a pure
-    /// vertical move).
+    /// cursor stays and the region scrolls up one line; on any other row the
+    /// cursor moves down, stopping at the last grid row. The column does not
+    /// change.
     pub(super) fn linefeed(&mut self) {
-        let fill = self.active_render().style.bg_fill();
         let (top, bottom) = self.region_bounds();
         if self.active_cursor().row == bottom {
+            let fill = self.active_render().style.bg_fill();
             self.delete_lines_into_scrollback(top, bottom, 1, fill);
         } else {
             let last_row = self.active_grid().dimensions().0.saturating_sub(1);
@@ -70,10 +63,12 @@ impl TerminalState {
         }
     }
 
-    /// Soft-wrap the cursor row into the next line, preserving row metadata
-    /// across a scroll at the bottom margin. The departing row carries its
-    /// prompt mark into scrollback, and the row shifted above the new blank
-    /// bottom keeps the same link to the glyph written there next.
+    /// Record `end` on the cursor row, then [`linefeed`](Self::linefeed). When
+    /// the line feed scrolled the region, the row directly above the cursor
+    /// gets `end` (`delete_lines` reset it to [`RowEnd::Hard`]); a marked row
+    /// that left the top carries `end` and its prompt mark into scrollback.
+    /// When the cursor neither moved nor scrolled (last grid row outside the
+    /// region), the cursor row keeps `end`.
     pub(super) fn wrap_linefeed(&mut self, end: RowEnd) {
         let before = self.active_cursor().row;
         let at_scroll_bottom = before == self.region_bounds().1;
@@ -94,11 +89,12 @@ impl TerminalState {
     }
 
     /// Reverse index (RI): move the cursor up one line. At the scroll region's
-    /// top margin the region scrolls down instead.
+    /// top margin the cursor stays and the region scrolls down one line; on row
+    /// 0 outside a region the cursor stays. Clears the deferred-wrap latch.
     pub(super) fn reverse_index(&mut self) {
-        let fill = self.active_render().style.bg_fill();
         let (top, bottom) = self.region_bounds();
         if self.active_cursor().row == top {
+            let fill = self.active_render().style.bg_fill();
             self.active_grid_mut().insert_lines(top, bottom, 1, fill);
         } else if self.active_cursor().row > 0 {
             self.active_cursor_mut().row -= 1;
@@ -106,9 +102,9 @@ impl TerminalState {
         self.clear_wrap_latch();
     }
 
-    /// Save the cursor position and the active screen's render state (DECSC /
-    /// SCOSC) into the active screen's cursor, so the primary and alternate
-    /// screens snapshot separately.
+    /// Save the cursor position, wrap latch, and the active screen's render
+    /// state (DECSC / SCOSC) into the active screen's cursor. Each screen keeps
+    /// its own snapshot.
     pub(super) fn save_cursor(&mut self) {
         let cursor = *self.active_cursor();
         let render = *self.active_render();
@@ -120,24 +116,26 @@ impl TerminalState {
         });
     }
 
-    /// Restore the cursor position and pen style saved by `save_cursor` (DECRC /
-    /// SCORC). With no prior save, xterm homes the cursor and resets the pen to
-    /// defaults; the restored position is clamped into the current grid in case
-    /// it shrank since the save.
+    /// Restore the cursor position, wrap latch, and render state saved by
+    /// [`save_cursor`](Self::save_cursor) (DECRC / SCORC), clamping the position
+    /// into the current grid. With no saved cursor: home the cursor, clear the
+    /// wrap latch, and reset the render state to
+    /// [`RenderState::fresh`]. The saved snapshot stays.
     pub(super) fn restore_cursor(&mut self) {
-        let (rows, cols) = self.active_grid().dimensions();
-        let (last_row, last_col) = (rows.saturating_sub(1), cols.saturating_sub(1));
         match self.active_cursor().saved {
             Some(saved) => {
-                self.active_cursor_mut().row = saved.row.min(last_row);
-                self.active_cursor_mut().col = saved.col.min(last_col);
-                self.active_cursor_mut().pending_wrap = saved.pending_wrap;
+                let (rows, cols) = self.active_grid().dimensions();
+                let cursor = self.active_cursor_mut();
+                cursor.row = saved.row.min(rows.saturating_sub(1));
+                cursor.col = saved.col.min(cols.saturating_sub(1));
+                cursor.pending_wrap = saved.pending_wrap;
                 *self.active_render_mut() = saved.render;
             }
             None => {
-                self.active_cursor_mut().row = 0;
-                self.active_cursor_mut().col = 0;
-                self.clear_wrap_latch();
+                let cursor = self.active_cursor_mut();
+                cursor.row = 0;
+                cursor.col = 0;
+                cursor.pending_wrap = false;
                 *self.active_render_mut() = RenderState::fresh();
             }
         }
@@ -154,13 +152,11 @@ impl TerminalState {
         cursor.pending_wrap = false;
     }
 
-    /// Park the cursor on `last_col` and arm the deferred-wrap latch — but ONLY
-    /// when autowrap (DECAWM `?7`) is on. The latch is purely an autowrap
-    /// mechanism: with autowrap off, a glyph landing on the last column leaves the
-    /// cursor resting there with no wrap pending, so the next glyph overwrites in
-    /// place (DEC: a character at the right margin replaces when autowrap is
-    /// reset). Re-enabling autowrap afterward does not retroactively arm a wrap.
-    /// Every site where a glyph lands on the last column funnels through here.
+    /// Park the cursor on `last_col`. With autowrap (DECAWM `?7`) on, arm the
+    /// deferred-wrap latch: the next glyph wraps before printing. With autowrap
+    /// off, clear the latch: the next glyph overwrites `last_col` in place,
+    /// and turning autowrap on afterward does not arm the latch. Every
+    /// site where a glyph lands on the last column funnels through here.
     pub(super) fn arm_wrap_latch(&mut self, last_col: u16) {
         let armed = self.modes.autowrap;
         let cursor = self.active_cursor_mut();
@@ -175,7 +171,8 @@ impl TerminalState {
         self.active_cursor_mut().pending_wrap = false;
     }
 
-    /// Set a horizontal tab stop at the active cursor column.
+    /// Set a horizontal tab stop at the active cursor column. A column past the
+    /// tab-stop table is a no-op.
     pub(super) fn set_tab_stop(&mut self) {
         let col = self.active_cursor().col;
         if let Some(stop) = self.tab_stops.get_mut(col as usize) {
@@ -183,7 +180,8 @@ impl TerminalState {
         }
     }
 
-    /// Clear the horizontal tab stop at the active cursor column.
+    /// Clear the horizontal tab stop at the active cursor column. A column past
+    /// the tab-stop table is a no-op.
     pub(super) fn clear_tab_stop(&mut self) {
         let col = self.active_cursor().col;
         if let Some(stop) = self.tab_stops.get_mut(col as usize) {
@@ -197,7 +195,8 @@ impl TerminalState {
     }
 }
 
-/// Find the first tab stop strictly after `col`, or return `last_col`.
+/// The first tab stop strictly after `col`, or `last_col` when there is none
+/// or `col >= last_col`. A column past the end of `tab_stops` holds no stop.
 pub(super) fn next_tab_stop(tab_stops: &[bool], col: u16, last_col: u16) -> u16 {
     if col >= last_col {
         return last_col;
@@ -207,7 +206,8 @@ pub(super) fn next_tab_stop(tab_stops: &[bool], col: u16, last_col: u16) -> u16 
         .unwrap_or(last_col)
 }
 
-/// Find the first tab stop strictly before `col`, or return column zero.
+/// The first tab stop strictly before `col`, or column `0` when there is none.
+/// A column past the end of `tab_stops` holds no stop.
 pub(super) fn prev_tab_stop(tab_stops: &[bool], col: u16) -> u16 {
     (0..col)
         .rev()

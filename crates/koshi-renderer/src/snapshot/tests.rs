@@ -1,6 +1,8 @@
 //! Tests for the render-snapshot DTOs: build a full snapshot from fixture
 //! pieces, check exact field values, confirm it is `Send + Sync`, confirm
-//! cloning shares the grid by reference (no cell copy), and confirm equality.
+//! cloning shares the grid by reference (no cell copy), confirm equality, and
+//! check the mouse-frame projection, the borrowed layout views, and the
+//! selection row lookup.
 
 use super::*;
 
@@ -218,6 +220,243 @@ fn a_mouse_frame_keeps_every_field_a_mouse_event_is_answered_from() {
         frame.committed_regions,
         CommittedRegions::core(Size { cols: 80, rows: 24 }, 0)
     );
+}
+
+#[test]
+fn a_mouse_frame_keeps_one_entry_per_pane_in_frame_order() {
+    let mut snap = fixture(fixture_grid());
+    let first = snap.panes[0].clone();
+    let mut second = first.clone();
+    second.id = PaneId::new();
+    second.view_top_row = 7;
+    let mut third = first.clone();
+    third.id = PaneId::new();
+    third.view_top_row = 9;
+    snap.panes = vec![first.clone(), second.clone(), third.clone()];
+
+    let frame = MouseFrame::from(snap);
+
+    assert_eq!(
+        frame
+            .panes
+            .iter()
+            .map(|pane| (pane.id, pane.view_top_row))
+            .collect::<Vec<_>>(),
+        vec![(first.id, 0), (second.id, 7), (third.id, 9)]
+    );
+}
+
+#[test]
+fn a_mouse_frame_solves_its_regions_from_the_client_viewport() {
+    let mut snap = fixture(fixture_grid());
+    // The client sees more than the tab was solved for, so a builder reading
+    // the tab's effective size instead of the client viewport lands elsewhere.
+    snap.client.viewport = Size {
+        cols: 100,
+        rows: 30,
+    };
+    assert_eq!(
+        snap.session.active_tab.effective_size,
+        Size { cols: 80, rows: 24 }
+    );
+
+    let frame = MouseFrame::from(snap);
+
+    assert_eq!(
+        frame.committed_regions,
+        CommittedRegions::core(
+            Size {
+                cols: 100,
+                rows: 30
+            },
+            0
+        )
+    );
+    assert_eq!(
+        frame.committed_regions.viewport,
+        Size {
+            cols: 100,
+            rows: 30
+        }
+    );
+}
+
+#[test]
+fn a_mouse_frame_from_a_paneless_snapshot_carries_no_pane_entries() {
+    let mut snap = fixture(fixture_grid());
+    snap.panes.clear();
+
+    let frame = MouseFrame::from(snap);
+
+    assert_eq!(frame.panes, Vec::new());
+    assert_eq!(
+        frame.committed_regions,
+        CommittedRegions::core(Size { cols: 80, rows: 24 }, 0)
+    );
+}
+
+#[test]
+fn with_regions_keeps_the_solve_it_is_given() {
+    let snap = fixture(fixture_grid());
+    // A viewport and revision that differ from the client's own, so a builder
+    // that re-derived the solve instead of carrying it lands elsewhere.
+    let committed = CommittedRegions::core(Size { cols: 40, rows: 10 }, 12);
+
+    let frame = MouseFrame::with_regions(snap, committed.clone());
+
+    assert_eq!(frame.committed_regions, committed);
+    assert_eq!(
+        frame.committed_regions.viewport,
+        Size { cols: 40, rows: 10 }
+    );
+    assert_eq!(frame.committed_regions.input_revision, 12);
+}
+
+#[test]
+fn committed_regions_carries_the_exact_solve_it_was_built_from() {
+    let solve = core_region_solve(Size { cols: 80, rows: 24 });
+    let committed = CommittedRegions::new(Size { cols: 80, rows: 24 }, solve.clone(), 5);
+
+    assert_eq!(committed.viewport, Size { cols: 80, rows: 24 });
+    assert_eq!(committed.solve, solve);
+    assert_eq!(committed.input_revision, 5);
+    assert_eq!(
+        committed,
+        CommittedRegions::core(Size { cols: 80, rows: 24 }, 5)
+    );
+}
+
+#[test]
+fn viewer_chrome_defaults_to_no_pointer_no_tab_offset_and_no_reconnect() {
+    assert_eq!(
+        ViewerChrome::default(),
+        ViewerChrome {
+            hovered_pane: None,
+            tabline_offset: None,
+            reconnecting: None,
+        }
+    );
+}
+
+#[test]
+fn a_snapshot_layout_borrows_the_frame_and_holds_no_committed_regions() {
+    let snap = fixture(fixture_grid());
+    let viewer = ViewerChrome {
+        hovered_pane: Some(snap.panes[0].id),
+        tabline_offset: Some(3),
+        reconnecting: Some(Reconnecting {
+            attempt: 4,
+            retry_in_seconds: 8,
+        }),
+    };
+
+    let layout = snap.layout(viewer);
+
+    assert_eq!(*layout.session, snap.session);
+    assert_eq!(*layout.client, snap.client);
+    assert_eq!(layout.viewer, viewer);
+    assert_eq!(layout.committed_regions, None);
+}
+
+#[test]
+fn an_owned_frame_layout_borrows_its_session_and_client() {
+    let snap = fixture(fixture_grid());
+    let owned = OwnedFrameLayout {
+        session: snap.session.clone(),
+        client: snap.client.clone(),
+    };
+
+    let layout = owned.layout(ViewerChrome::default());
+
+    assert_eq!(*layout.session, snap.session);
+    assert_eq!(*layout.client, snap.client);
+    assert_eq!(layout.viewer, ViewerChrome::default());
+    assert_eq!(layout.committed_regions, None);
+}
+
+#[test]
+fn a_mouse_frame_layout_carries_the_regions_that_were_painted() {
+    let snap = fixture(fixture_grid());
+    let committed = CommittedRegions::core(Size { cols: 80, rows: 24 }, 3);
+    let frame = MouseFrame::with_regions(snap, committed.clone());
+
+    let layout = frame.layout(ViewerChrome::default());
+
+    assert_eq!(layout.committed_regions, Some(&committed));
+}
+
+#[test]
+fn the_navigator_view_takes_its_fields_from_the_session_client_and_viewer() {
+    let mut snap = fixture(fixture_grid());
+    snap.client.lock_mode = LockMode::Locked;
+    snap.client.mouse_select = true;
+    let reconnecting = Reconnecting {
+        attempt: 4,
+        retry_in_seconds: 8,
+    };
+    let viewer = ViewerChrome {
+        hovered_pane: None,
+        tabline_offset: Some(2),
+        reconnecting: Some(reconnecting),
+    };
+
+    let layout = snap.layout(viewer);
+    let navigator = layout.navigator();
+
+    assert_eq!(navigator.session_name, "sess");
+    assert_eq!(navigator.tabs, snap.session.tabs_metadata.as_slice());
+    assert_eq!(navigator.lock_mode, LockMode::Locked);
+    assert!(navigator.mouse_select);
+    assert_eq!(navigator.reconnecting, Some(reconnecting));
+    assert_eq!(navigator.tabline_offset, Some(2));
+}
+
+#[test]
+fn row_span_returns_the_inclusive_columns_of_a_highlighted_row() {
+    let spans = SelectionSpans {
+        rows: vec![(4, 12, 79), (5, 0, 79), (6, 0, 33)],
+    };
+
+    assert_eq!(spans.row_span(4), Some((12, 79)));
+    assert_eq!(spans.row_span(5), Some((0, 79)));
+    assert_eq!(spans.row_span(6), Some((0, 33)));
+}
+
+#[test]
+fn row_span_is_none_for_a_row_the_highlight_does_not_touch() {
+    let spans = SelectionSpans {
+        rows: vec![(4, 12, 79), (6, 0, 33)],
+    };
+
+    assert_eq!(spans.row_span(3), None);
+    assert_eq!(spans.row_span(5), None);
+    assert_eq!(spans.row_span(7), None);
+    assert_eq!(spans.row_span(u16::MAX), None);
+}
+
+#[test]
+fn row_span_of_an_empty_highlight_is_none() {
+    let spans = SelectionSpans { rows: Vec::new() };
+
+    assert_eq!(spans.row_span(0), None);
+}
+
+#[test]
+fn row_span_answers_a_single_cell_highlight_with_that_one_column() {
+    let spans = SelectionSpans {
+        rows: vec![(0, 7, 7)],
+    };
+
+    assert_eq!(spans.row_span(0), Some((7, 7)));
+}
+
+#[test]
+fn row_span_takes_the_first_entry_when_a_row_is_listed_twice() {
+    let spans = SelectionSpans {
+        rows: vec![(2, 0, 5), (2, 10, 20)],
+    };
+
+    assert_eq!(spans.row_span(2), Some((0, 5)));
 }
 
 #[test]

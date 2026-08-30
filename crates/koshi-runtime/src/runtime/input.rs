@@ -1,31 +1,28 @@
 //! The session's half of keyboard input: running a binding the viewer already
 //! resolved, and writing a press the viewer did not bind.
 //!
-//! **What a key means is decided by the viewer that received it** — it holds
-//! the keymap, the input mode and any sequence being typed (`koshi-client`).
-//! It hands the session one of two things: a [`BoundAction`] to run — with the
-//! split direction its own settings hold, since a `new-pane` action carries no
-//! side of its own — or a chord to write. So nothing here consults a keymap,
-//! and a raw chord arriving at the session belongs to no attached viewer and
-//! is dropped.
+//! **What a key means is decided by the viewer that received it.** The viewer
+//! (`koshi-client`) holds the keymap, the input mode and any sequence being
+//! typed. It hands the session one of two things: a [`BoundAction`] to run,
+//! carrying the split direction the viewer's own settings hold, or a chord to
+//! write. Nothing here consults a keymap. A raw chord that reaches the session
+//! belongs to no attached viewer and is dropped before this module sees it.
 //!
 //! Text the outer terminal pastes routes here too
-//! ([`Server::handle_host_paste`]) — it is input for the same pane, delivered
-//! as one block so none of it can fire a binding.
+//! ([`Server::handle_host_paste`]): input for the same pane, delivered as one
+//! block, and no character of it fires a binding.
 //!
 //! **A chord becomes bytes here, not at the viewer.** Which bytes a pane
-//! expects depends on the cursor-key mode that pane is in, and that mode lives
-//! with the pane's terminal engine. Reading it at the instant of the write is
-//! what stops the encoding going stale: a program that turns
-//! application-cursor-keys on gets `ESC O A` for the very next `<Up>`, with no
-//! frame in between for the answer to drift.
+//! expects depends on the cursor-key mode that pane's terminal engine is in,
+//! read at the instant of the write: a program that turns
+//! application-cursor-keys on gets `ESC O A` for the very next `<Up>`.
 //!
 //! **A press reaches only a pane the client can see, and only a terminal.** A
 //! focused pane the tab draws no content for — suppressed for want of space,
 //! hidden behind a fullscreen pane, collapsed to a stack header — takes
-//! nothing, and neither does a plugin pane, which has no PTY to write to. The
-//! pane a press may reach is the one `Server::typed_pane` names; when it names
-//! none, the press is dropped.
+//! nothing, and neither does a plugin pane, which has no PTY. The pane a press
+//! may reach is the one `Server::typed_pane` names; when it names none, the
+//! press is dropped.
 
 use std::time::SystemTime;
 
@@ -34,7 +31,6 @@ use koshi_core::command::{CommandEnvelope, CommandSource};
 use koshi_core::geometry::Direction;
 use koshi_core::ids::{ClientId, CommandId, PaneId};
 use koshi_core::key::KeyChord;
-use koshi_core::lock::LockMode;
 use koshi_core::resolve::{resolve_action, DispatchPlan};
 use koshi_input::keyboard::encode;
 use koshi_layout::content::content_rects;
@@ -46,20 +42,24 @@ use crate::server::Server;
 
 impl Server {
     /// React to input reaching `pane_id`'s child from `client_id`: drop the
-    /// client's highlight there — input replaces a selection, the way typing
-    /// over one does — and follow the client's view back to live output. Every
-    /// path that delivers input to a pane's child routes through here:
-    /// keystrokes, pasted text, and `core:write-to-pane` writes.
+    /// client's highlight in that pane, then return the client's view to live
+    /// output.
+    ///
+    /// Three paths call it: a keystroke ([`Server::handle_key_press`]), pasted
+    /// text ([`Server::handle_host_paste`]), and a `core:write-to-pane` write.
+    /// A forwarded mouse report drops the highlight itself and does not call
+    /// this.
     pub(crate) fn on_input_reached_pane(&mut self, client_id: ClientId, pane_id: PaneId) {
         self.clear_selection_on_pane_input(client_id, pane_id);
         self.snap_view_to_bottom_on_input(client_id, pane_id);
     }
 
-    /// Return this client's scrollback view of `pane_id` to the newest line when
-    /// the `scroll-on-input` setting is on. A no-op when the view already
-    /// follows live output. The alternate screen keeps no scrollback of Koshi's,
-    /// so its scroll position is left to the full-screen program that owns it —
-    /// the snap only fires on the primary screen.
+    /// Return this client's scrollback view of `pane_id` to the newest line.
+    ///
+    /// Moves the view only when the `scroll-on-input` setting is on and
+    /// `pane_id`'s terminal engine is on the primary screen. A pane on the
+    /// alternate screen, a pane with no terminal engine, and a view already at
+    /// the newest line all move nothing.
     fn snap_view_to_bottom_on_input(&mut self, client_id: ClientId, pane_id: PaneId) {
         if self.client_config.scrollback.scroll_on_input
             && self
@@ -73,24 +73,26 @@ impl Server {
 
     /// Write text the client's outer terminal pasted into the pane the client
     /// is typing into — the OS paste key, arriving as one block instead of a
-    /// burst of keys, so no character of it can fire a keybinding (a pasted
-    /// `Tab` lands in the shell instead of switching tabs).
+    /// burst of keys. No character of it fires a keybinding: a pasted `Tab`
+    /// lands in the shell instead of switching tabs.
     ///
     /// The pane reads it the way a terminal pastes: wrapped in bracketed-paste
     /// markers when the pane turned that mode on, raw bytes otherwise, line
-    /// breaks as the byte the Enter key sends. Like a keystroke, it goes only
-    /// to a visible terminal pane in a mode that passes input through, and —
-    /// input reaching the pane's child — it clears the client's highlight
-    /// there.
+    /// breaks as the byte the Enter key sends.
+    ///
+    /// Nothing is written when `text` is empty, when the client's lock mode
+    /// does not pass input to the pane (`LockMode::passes_to_pane`), or when
+    /// `Server::typed_pane` names no pane. A write clears the client's
+    /// highlight in that pane and returns the client's view to live output.
     pub fn handle_host_paste(&mut self, client_id: ClientId, text: &str) {
         if text.is_empty() {
             return;
         }
-        let mode = self
+        let passes_to_pane = self
             .session_for_client(client_id)
             .and_then(|session| session.clients.get(client_id))
-            .map(koshi_session::client::Client::lock_mode);
-        if !mode.is_some_and(LockMode::passes_to_pane) {
+            .is_some_and(|client| client.lock_mode().passes_to_pane());
+        if !passes_to_pane {
             return;
         }
         let Some(pane_id) = self.typed_pane(client_id) else {
@@ -108,25 +110,23 @@ impl Server {
     /// The pane a keystroke from `client_id` types into: the pane it has focused
     /// in its active tab, when that pane can take a keystroke at all.
     ///
-    /// Two focused panes take none, and both yield `None`:
+    /// Yields `None` for an unknown client, an active tab with no focused pane,
+    /// a focused pane the session no longer holds, a missing tab, and a tab with
+    /// no viewport. Two kinds of focused pane also yield `None`:
     ///
     /// - **A pane this client draws no content for** — suppressed for want of
     ///   space, hidden behind a pane this client has zoomed, or collapsed to a
-    ///   stack header. A keystroke is aimed at what the client can see, so a
-    ///   pane it cannot see receives nothing: shrink the terminal until the
-    ///   focused pane is suppressed, type `l`, and the shell inside it stays
-    ///   untouched. The question is asked with [`content_rects`], the same
-    ///   function the renderer asks, so what a client can type into and what it
-    ///   can see cannot drift apart. It is asked in THIS client's layout mode —
-    ///   zoom is per-client, so another client's zoom never silences this
-    ///   client's keys.
-    /// - **A plugin pane**, which has no PTY behind it. The bytes a chord
-    ///   encodes are a terminal's to read; a plugin surface reads its input
-    ///   through the plugin host.
+    ///   stack header. Shrink the terminal until the focused pane is
+    ///   suppressed, type `l`, and the shell inside it stays untouched. The
+    ///   question is asked with [`content_rects`], the same function the
+    ///   renderer asks, in THIS client's layout mode: another client's zoom
+    ///   never silences this client's keys.
+    /// - **A pane that is not a [`PaneKind::Terminal`]** — a plugin pane, which
+    ///   has no PTY behind it.
     ///
-    /// The tab is solved against [`Session::tab_viewport`] — the size every
-    /// client viewing it shares — so all its viewers agree on which panes are
-    /// drawn, exactly as they agree on the frame.
+    /// The tab is solved against [`Session::tab_viewport`], the size every
+    /// client viewing it shares: every viewer of the tab agrees on which panes
+    /// are drawn, exactly as they agree on the frame.
     ///
     /// [`Session::tab_viewport`]: koshi_session::session::state::Session::tab_viewport
     pub(crate) fn typed_pane(&self, client_id: ClientId) -> Option<PaneId> {
@@ -152,14 +152,21 @@ impl Server {
         .then_some(pane_id)
     }
 
-    /// Run the action a viewer's keypress resolved to: look the name up in the
-    /// action table, turn it into commands, and dispatch them. The viewer
-    /// decided which binding fired; the session decides what that binding does.
+    /// Run the action a viewer's keypress resolved to: look `bound.action` up
+    /// in the action table, turn it into commands, dispatch them, and mark the
+    /// status line stale. The viewer decided which binding fired; the session
+    /// decides what that binding does.
+    ///
+    /// An action that does not resolve — unregistered, not yet implemented,
+    /// given arguments it does not accept, or nested past
+    /// [`MAX_SEQUENCE_DEPTH`] — dispatches nothing and marks nothing stale.
     ///
     /// `new_pane_direction` is the viewer's own `layout.new-pane-direction`
     /// setting, handed in with the action: a pane-opening action that names no
     /// direction splits toward it. The session keeps no split direction of its
-    /// own, so two viewers of one session each open panes their own way.
+    /// own, and two viewers of one session each open panes their own way.
+    ///
+    /// [`MAX_SEQUENCE_DEPTH`]: koshi_core::resolve::MAX_SEQUENCE_DEPTH
     pub fn handle_bound_action(
         &mut self,
         client_id: ClientId,
@@ -181,6 +188,11 @@ impl Server {
 
     /// Write one key the viewer did not bind to the pane it is typing into,
     /// encoded for that pane's cursor-key mode at this instant.
+    ///
+    /// Nothing is written when `Server::typed_pane` names no pane. A pane with
+    /// no terminal engine encodes with application cursor keys off. A write
+    /// clears the client's highlight in that pane and returns the client's view
+    /// to live output.
     pub fn handle_key_press(&mut self, client_id: ClientId, chord: KeyChord) {
         let Some(pane_id) = self.typed_pane(client_id) else {
             return;
@@ -194,6 +206,9 @@ impl Server {
         self.on_input_reached_pane(client_id, pane_id);
     }
 
+    /// Dispatch every command `plan` names, in order, attributed to
+    /// `client_id`'s keybinding. A command the dispatcher rejects does not stop
+    /// the ones after it. A [`DispatchPlan::PluginHostCall`] runs nothing.
     fn dispatch_plan(&mut self, client_id: ClientId, plan: DispatchPlan) {
         match plan {
             DispatchPlan::Command(command) => {

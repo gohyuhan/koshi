@@ -1,20 +1,18 @@
 //! The resolved chrome theme: every color the renderer paints koshi-owned
-//! surfaces with, carried on each frame's snapshot.
+//! surfaces with. The viewer passes it to the renderer next to the frame
+//! snapshot; the snapshot itself carries no colors.
 //!
 //! Chrome elements that come in runs — the tab list, the hint bar's modifier
-//! groups — each take one stop on a gradient by their position, so a frame
-//! reads as one gradient rather than a scatter of colors. [`Theme::ramp`]
-//! gives a run element its stop; [`Theme::ramp_dim`] is the same stop pulled
-//! toward black, used as the quiet half of a two-block ribbon (label next to
-//! key, for example). The single accent for in-progress state (the
-//! pending-sequence breadcrumb) is [`Theme::accent`]. Both koshi-owned rows —
-//! the tab bar and the key-hint bar — are filled with [`Theme::bar_bg`] before
-//! anything is painted over them, so chrome text reads against a known
-//! background rather than whatever the terminal's own is. [`Theme::default`] is
-//! the stock koshi look — a light-purple → light-blue ramp with a pink accent
-//! over black bars;
-//! the runtime builds a non-default `Theme` from the config theme's palette,
-//! so `ramp_start "#ff0000"` in a theme turns the first tab's ribbon red.
+//! groups — each take one stop on a gradient by their position.
+//! [`Theme::ramp`] gives a run element its stop; [`Theme::ramp_dim`] is the
+//! same stop pulled toward black, used as the quiet half of a two-block ribbon
+//! (label next to key, for example). The single accent for in-progress state
+//! (the pending-sequence breadcrumb) is [`Theme::accent`]. Both koshi-owned
+//! rows — the tab bar and the key-hint bar — are filled with [`Theme::bar_bg`]
+//! before anything is painted over them. [`Theme::default`] is the stock koshi
+//! look — a light-purple → light-blue ramp with a pink accent over black bars;
+//! the viewing client builds a non-default `Theme` from the config theme's
+//! palette, where `ramp_start "#ff0000"` turns the first tab's ribbon red.
 
 use ratatui::style::Color;
 
@@ -58,9 +56,9 @@ pub struct Theme {
 
 impl Default for Theme {
     /// The stock koshi chrome: a light-purple → light-blue ramp with a pink
-    /// accent over black bars. Field-for-field the same colors as the config
-    /// crate's default palette, so an unthemed frame and a default-config
-    /// frame paint identically.
+    /// accent over black bars. Field-for-field the same colors as
+    /// `koshi_config::types::ColorPalette::default`: an unthemed frame and a
+    /// default-config frame paint identically.
     fn default() -> Self {
         Self {
             ramp_start: (0xd0, 0xa5, 0xff),

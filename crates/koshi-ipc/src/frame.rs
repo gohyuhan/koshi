@@ -4,9 +4,9 @@
 //! The session solves the client's active tab, cuts each pane's visible window
 //! out of its grid, and resolves that client's highlight, then sends the result
 //! as a [`PaintedFrame`](crate::frame::PaintedFrame). The client draws what
-//! arrives. Every attached client
-//! gets its own frame, so a client on an 80×24 terminal and one on a 200×50
-//! terminal receive different frames of the same session in the same instant.
+//! arrives. Every attached client gets its own frame: a client on an 80×24
+//! terminal and one on a 200×50 terminal receive different frames of the same
+//! session in the same instant.
 //!
 //! Scrollback rows never travel here. A pane sends the rows its window shows
 //! this frame and nothing else, plus the two numbers the scroll indicator is
@@ -18,20 +18,23 @@
 //! Rows are run-length encoded.
 //! [`FrameRow::from_cells`](crate::frame::FrameRow::from_cells) folds each
 //! stretch of equal neighbouring cells into one
-//! [`FrameRun`](crate::frame::FrameRun), so a blank 80-column row travels as a
+//! [`FrameRun`](crate::frame::FrameRun): a blank 80-column row travels as a
 //! single run with `count == 80`, and
 //! [`FrameRow::cells`](crate::frame::FrameRow::cells) expands the runs back
 //! into the same 80 cells.
 //!
 //! A field this build does not know is ignored, in this record and every one
-//! under it, so a frame from a newer koshi still draws. The four value enums —
+//! under it: a frame from a newer koshi still draws. The four value enums —
 //! [`FrameCursorShape`](crate::frame::FrameCursorShape),
 //! [`FrameRowEnd`](crate::frame::FrameRowEnd),
 //! [`FrameColor`](crate::frame::FrameColor) and
 //! [`FrameUnderline`](crate::frame::FrameUnderline) — fall back to their
 //! plainest value when this build has no name for what arrives. A cell whose
 //! underline arrives as `"Dotted2"` draws with no underline; every other cell
-//! in the frame is unaffected.
+//! in the frame is unaffected. The fields that fall back borrow their raw
+//! text from the input: a frame decodes through `serde_json::from_str` and
+//! `serde_json::from_slice`, and fails through `serde_json::from_value` and
+//! `serde_json::from_reader`.
 
 use koshi_core::geometry::{Rect, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
@@ -94,15 +97,16 @@ pub struct FrameTab {
     /// stack member shows in place of its content.
     pub stack_headers: Vec<StackHeader>,
     /// Whether this client sees the tab tiled, or sees a single pane zoomed to
-    /// fill it. Zoom is per client, so another client viewing the same tab in
+    /// fill it. Zoom is per client: another client viewing the same tab in
     /// the same instant can carry a different value here.
     pub layout_mode: LayoutMode,
-    /// True when every pane is suppressed because the tab has no room to draw;
+    /// True when the tab has no room to draw and every pane is suppressed;
     /// the client fills the whole frame with the "terminal too small" overlay.
     pub all_suppressed: bool,
     /// Blank cells between two panes that meet along a horizontal or
     /// vertical split, in the [`slots`](Self::slots) space. A frame from a
-    /// server without this field reads as `0`.
+    /// server without this field reads as `0`, and so does a value that is
+    /// not a cell count.
     #[serde(default, deserialize_with = "crate::wire::or_default")]
     pub gap: u16,
 }
@@ -200,7 +204,7 @@ pub struct FramePane {
     /// wheel tick becomes cursor arrow keys.
     pub alt_scroll: bool,
     /// Whether the pane is showing the alternate screen. The alternate screen
-    /// keeps no scrollback, so there is no view to scroll there.
+    /// keeps no scrollback and has no view to scroll.
     pub on_alt_screen: bool,
     /// The absolute line number of the top row this frame shows for the pane,
     /// counting every line the pane has ever pushed into scrollback. A press on
@@ -301,8 +305,8 @@ pub struct FrameRow {
 /// How a row ends: the wire form of the terminal's per-row line-continuation
 /// state.
 ///
-/// A viewer that cannot tell a wrapped line from an ended one breaks the line
-/// when its text is copied out, so this travels with every row.
+/// [`Hard`](Self::Hard) is left off the wire and read back as the default;
+/// the two wrapped endings travel with their row.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FrameRowEnd {
     /// The row ends its logical line: the next row starts a new one.
@@ -311,8 +315,8 @@ pub enum FrameRowEnd {
     /// The row soft-wrapped under autowrap: the next row continues this row's
     /// logical line.
     Soft,
-    /// The row soft-wrapped because a wide glyph did not fit its last column,
-    /// so the final cell is a blank spacer.
+    /// The row soft-wrapped when a wide glyph did not fit its last column;
+    /// that last cell is a blank spacer.
     SoftWide,
 }
 
@@ -455,8 +459,7 @@ pub enum FrameColor {
     Rgb(u8, u8, u8),
 }
 
-/// The underline style of a cell — one rendition aspect with mutually exclusive
-/// values, so a cell draws at most one underline. Mirrors
+/// The underline style of a cell: a cell draws at most one underline. Mirrors
 /// `koshi_terminal::style::UnderlineStyle`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum FrameUnderline {

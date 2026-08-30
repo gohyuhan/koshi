@@ -4,9 +4,18 @@ use super::*;
 
 impl Server {
     /// Resolve a tab-addressed command ([`Command::CloseTab`],
-    /// [`Command::MoveTab`]): the explicit `tab` argument, else the
-    /// source's active tab, together with the owning session borrowed
+    /// [`Command::MoveTab`]) to its tab and the owning session, borrowed
     /// mutably.
+    ///
+    /// The tab is [`Self::resolve_tab_or_active`]: the explicit `tab`
+    /// argument, else the tab holding the issuing pane for an in-session CLI,
+    /// else the acting client's active tab.
+    ///
+    /// Rejects with [`RejectReason::TargetNotFound`] when the source names no
+    /// live session, the issuing pane is gone, or the tab is gone;
+    /// [`RejectReason::SourceClientStale`] when the source's client is no
+    /// longer attached; [`RejectReason::TargetAmbiguous`] when several clients
+    /// are attached and none is named.
     fn acting_tab_session(
         &mut self,
         tab: Option<TabId>,
@@ -40,9 +49,10 @@ impl Server {
     /// ([`Self::pane_live_cwd`]). After the
     /// commit, the tab the client left reflows to its remaining viewers'
     /// viewport; a tab left with no viewer keeps its sizes. A designated
-    /// client reporting [`PaneArea::Starving`] is rejected with
-    /// [`RejectReason::MinSize`]. A launch failure commits nothing and
-    /// rejects, so a tab never exists without its process.
+    /// client reporting [`PaneArea::Starving`], and a pane area too small to
+    /// hold one pane, are both rejected with [`RejectReason::MinSize`] and
+    /// the hint `"not enough space for a new tab"`. A launch failure commits
+    /// nothing and rejects, so a tab never exists without its process.
     pub(super) fn handle_new_tab(
         &mut self,
         command_id: CommandId,
@@ -52,13 +62,12 @@ impl Server {
     ) -> Result<CommandResult, Rejection> {
         let acting = self.acting_session(source)?;
         let target = Self::resolve_new_tab_target(args, source, acting)?;
-        // Clone the shared backend before borrowing a session: spawn then
-        // needs no `&self` borrow, so it coexists with `&mut Session`.
+        // An owned handle on the shared backend. The spawn below uses it while
+        // the session is borrowed mutably.
         let backend = Arc::clone(self.pty_backend());
         let sizing = self.pane_sizing();
         // The root pane runs the default shell in the requested directory.
-        // Built before the session is borrowed so it can read the terminal
-        // config off `self`.
+        // Built before the session is borrowed, reading `self.config.terminal`.
         let mut spawn_spec = self.default_shell_spec(args.cwd.clone(), BTreeMap::new());
         // No directory was asked for: the tab opens where the designated
         // client's focused pane currently is ([`Self::pane_live_cwd`]).
@@ -85,9 +94,8 @@ impl Server {
         let viewport = client.pane_area().ok_or_else(no_room)?;
         let new_pane_id = PaneId::new();
         let new_tab_id = TabId::new();
-        let candidate = LayoutNode::Pane(new_pane_id);
         let tab_rect = Rect::at_origin(viewport);
-        if !fits(&candidate, tab_rect, sizing) {
+        if !fits(&LayoutNode::Pane(new_pane_id), tab_rect, sizing) {
             return Err(no_room());
         }
         let spawn_size = size_root_pane(new_pane_id, viewport, sizing);
@@ -106,9 +114,8 @@ impl Server {
             koshi_paths::runtime_dir().as_deref(),
         ));
 
-        // Launch the child BEFORE committing any state. On failure nothing
-        // was registered and no view moved, so the command rejects as if it
-        // never ran.
+        // Launch the child BEFORE committing any state. A failure returns
+        // here with nothing registered and no view moved.
         let handle = Self::spawn_child(backend.as_ref(), new_pane_id, spawn_spec, spawn_size)?;
 
         // The child is live — commit all session state through the pure op:
@@ -129,8 +136,8 @@ impl Server {
             issued_at,
         );
 
-        // Park the handle so a forwarder relays its output/exit, and record its
-        // size so later reflows can tell whether a resize is a real change. The
+        // Park the handle: a forwarder relays its output and exit, the spawn
+        // size lands in the size cache later reflows compare against, and the
         // terminal engine gives the child's output a grid to land in.
         self.park_pane_pty(new_pane_id, handle, spawn_size);
         // Announce the new pane's size — PaneCreated carries none.
@@ -157,12 +164,14 @@ impl Server {
     /// Close policies gate the whole tab up front, all-or-nothing: without
     /// `--force`, one `ConfirmIfBusy` pane whose child has not provably
     /// exited rejects the close before anything mutates, with a hint at
-    /// `--force`. `--force` force-kills every pane regardless of policy. The
+    /// `--force`. `--force` force-kills every pane regardless of policy.
+    /// `--tree` widens each picked kill to the child's whole process group,
+    /// and still lets a busy `ConfirmIfBusy` pane reject the close. The
     /// removal itself is [`tab_ops::close_tab`]: pane records drop, the tab
     /// goes, viewers move to the nearest surviving tab, and closing the last
     /// tab quits the session. The kills run on one detached thread per pane —
-    /// a graceful kill can sleep out its grace window, so every child gets its
-    /// stop request immediately and the dispatcher never stalls.
+    /// a graceful kill can sleep out its grace window, every child gets its
+    /// stop request immediately, and the dispatcher keeps draining.
     ///
     /// After the removal, the tab the displaced viewers landed on reflows to
     /// its new viewport (it now counts the movers). A destination with no
@@ -173,9 +182,8 @@ impl Server {
         source: &CommandSource,
         args: &CloseTabArgs,
     ) -> Result<CommandResult, Rejection> {
-        // Clone the shared backend before borrowing a session: the kill
-        // thread takes its own handle, so no `&self` borrow crosses the
-        // commit.
+        // An owned handle on the shared backend. Each kill thread takes its own
+        // clone of it, and no `&self` borrow crosses the commit below.
         let backend = Arc::clone(self.pty_backend());
 
         let (tab_id, session) = self.acting_tab_session(args.tab, source)?;
@@ -214,16 +222,15 @@ impl Server {
         }
 
         // Displaced viewers landed on the nearest surviving tab (the
-        // cascade's `TabFocused`); its viewport now counts them, so it
+        // cascade's `TabFocused`); its viewport now counts them, and it
         // reflows. A destination with no viewport keeps its sizes.
-        let destination = tab_focused_in(&events);
-        if let Some(destination) = destination {
+        if let Some(destination) = tab_focused_in(&events) {
             self.reflow_tab_if_viewed(backend.as_ref(), session_id, destination, &mut events);
         }
 
-        // Kill the children off-thread: a graceful kill can sleep out its
-        // grace window, and the dispatcher must keep draining. One thread per pane
-        // so every child receives its stop request immediately; each kill
+        // Kill the children off-thread; a graceful kill can sleep out its
+        // grace window and the dispatcher keeps draining. One thread per pane:
+        // every child receives its stop request immediately, and each kill
         // also purges the backend's own entry for its pane.
         for (pane_id, kill_policy) in kills {
             let backend = Arc::clone(&backend);

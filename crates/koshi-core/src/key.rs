@@ -24,8 +24,8 @@ use std::time::Instant;
 
 /// The modifier keys held down as part of a chord, packed one per bit.
 ///
-/// Decoding refuses a bit no modifier names, so a value that arrived over the
-/// wire holds only the four below.
+/// Decoding refuses a bit that names no modifier; a decoded value holds only
+/// the four below.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]
@@ -232,32 +232,27 @@ impl fmt::Display for Key {
 }
 
 /// Folds an uppercase letter into the `lowercase + Shift` form every
-/// [`Key::Char`] chord is stored in — the one rule shared by the config
-/// parser and the input decoder.
+/// [`Key::Char`] chord is stored in.
 ///
-/// A letter folds only when uppercasing its lowercase form gives the original
-/// character back. A chord is all the input layer keeps of a key press: when no
-/// binding consumes the key, it rebuilds the typed character from
-/// `lowercase + Shift` and sends that to the pane.
+/// Returns the character to store and whether Shift is part of the key. A
+/// letter folds only when its lowercase form is exactly one character and
+/// that character uppercases back to exactly the original.
 ///
-/// - `'A'` → `('a', true)` — the `true` means "Shift is part of this key";
-///   `'a'` uppercases back to `'A'`, so the fold is safe.
-/// - `'a'`, `'!'`, `'1'` → unchanged, `false` — nothing to fold.
-/// - `'İ'` → `('İ', false)` — Unicode lowercasing can produce MORE than one
-///   character (`'İ'` lowercases to `'i'` plus a combining dot), and a
-///   [`Key::Char`] holds exactly one, so such a letter cannot be modeled as
-///   `Shift + one lowercase char` and stands as it is.
-/// - `'ẞ'` → `('ẞ', false)` — capital sharp S lowercases to the single char
-///   `'ß'`, but `'ß'` uppercases to `"SS"`, so the capital cannot be rebuilt
-///   from `Shift + 'ß'`. Folding it would send the pane `'ß'` for a typed
-///   `'ẞ'`, so it stands as it is instead.
+/// - `'A'` → `('a', true)`.
+/// - `'a'`, `'!'`, `'1'` → unchanged, `false`.
+/// - `'İ'` → `('İ', false)`: its lowercase form is two characters (`'i'` plus
+///   a combining dot), and a [`Key::Char`] holds exactly one.
+/// - `'ẞ'` → `('ẞ', false)`: it lowercases to `'ß'`, and `'ß'` uppercases to
+///   `"SS"`, not back to `'ẞ'`.
+/// - `'\u{212A}'` (the Kelvin sign) → unchanged, `false`: it lowercases to
+///   `'k'`, and `'k'` uppercases to the Latin `'K'`, a different character.
 #[must_use]
 pub fn fold_uppercase(c: char) -> (char, bool) {
     if !c.is_uppercase() {
         return (c, false);
     }
-    // `to_lowercase()` is an iterator because a lowercase mapping may be
-    // several chars; `(Some(l), None)` = the mapping is exactly one char.
+    // `to_lowercase()` yields one or more chars; `(Some(l), None)` is exactly
+    // one.
     let mut lower = c.to_lowercase();
     let (Some(lowered), None) = (lower.next(), lower.next()) else {
         return (c, false);
@@ -291,12 +286,6 @@ impl KeyChord {
     /// True when this chord is something ordinary typing produces: no
     /// Control, Alt, or Super is held. Characters, Enter, arrows, editing
     /// keys, and function keys all count, with or without Shift.
-    ///
-    /// This classifies, it does not forbid. Outside lock mode a key goes to
-    /// the keymap before the pane, so any binding — a typeable one included —
-    /// takes its key away from the pane until the client locks. The keybinding
-    /// layer reads this to keep shipped defaults and the lock-mode unlock chord
-    /// off keys plain typing would hit.
     pub fn is_typeable(&self) -> bool {
         self.mods.is_typing()
     }
@@ -307,9 +296,8 @@ impl fmt::Display for KeyChord {
     ///
     /// Wraps the chord in `<...>` whenever a modifier is held, the key is a
     /// named key (e.g. `Tab`, `Left`), or the key is the literal `<`
-    /// character — bracketing a lone `<` keeps it from being misread as the
-    /// start of a bracketed chord. Anything else (a plain lowercase letter or
-    /// other character with no modifiers) is written unbracketed.
+    /// character (`<<>`). Any other character with no modifiers is written
+    /// bare: `n`, `-`, `>`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let bracketed = !self.mods.is_empty() || matches!(self.key, Key::Named(_) | Key::Char('<'));
         if bracketed {
@@ -369,10 +357,9 @@ impl fmt::Display for KeySequence {
 /// One incomplete multi-chord keybinding: the chords typed into it so far, and
 /// the instant an ambiguous one resolves.
 ///
-/// The chords are Koshi's, not the pane's. A chord held here is never written
-/// to a pane: it fires a binding, or it is dropped when the sequence is left.
-/// The pane a chord was typed into, and the byte form it would have taken
-/// there, are not kept.
+/// A chord held here is never written to a pane: it fires a binding, or it is
+/// dropped when the sequence is left. The pane a chord was typed into, and the
+/// byte form it would have taken there, are not kept.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingKeySequence {
     /// Canonical chords pressed so far.

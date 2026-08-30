@@ -95,3 +95,25 @@ fn a_cursor_holding_a_saved_snapshot_differs_from_one_without() {
     };
     assert_ne!(bare, with_saved);
 }
+
+#[test]
+fn a_cursor_with_a_saved_snapshot_survives_a_serde_round_trip() {
+    let mut other_render = RenderState::fresh();
+    other_render.gl = 1;
+    let cursor = Cursor {
+        row: 3,
+        col: 8,
+        is_visible: false,
+        pending_wrap: true,
+        saved: Some(SavedCursor {
+            row: 1,
+            col: 2,
+            pending_wrap: true,
+            render: other_render,
+        }),
+    };
+
+    let json = serde_json::to_string(&cursor).expect("a cursor serializes");
+    let restored: Cursor = serde_json::from_str(&json).expect("the same JSON deserializes");
+    assert_eq!(restored, cursor);
+}

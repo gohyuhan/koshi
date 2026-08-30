@@ -35,7 +35,7 @@ fn each_close_policy_maps_to_its_kill_policy() {
         }
     );
     assert_eq!(PaneClosePolicy::Force.kill_policy(), KillPolicy::Force);
-    // The confirm is a UI step; once confirmed, the close is graceful (3s).
+    // `ConfirmIfBusy` maps to a graceful close with the default 3s timeout.
     assert_eq!(
         PaneClosePolicy::ConfirmIfBusy.kill_policy(),
         KillPolicy::Graceful {
@@ -43,6 +43,19 @@ fn each_close_policy_maps_to_its_kill_policy() {
         }
     );
     // No close policy ever escalates to a whole-tree kill.
+}
+
+#[test]
+fn a_zero_graceful_timeout_passes_through_as_zero() {
+    assert_eq!(
+        PaneClosePolicy::Graceful {
+            timeout: Duration::ZERO
+        }
+        .kill_policy(),
+        KillPolicy::Graceful {
+            timeout: Duration::ZERO
+        }
+    );
 }
 
 #[test]
@@ -66,10 +79,78 @@ fn a_graceful_timeout_serializes_as_whole_seconds_matching_kill_policy() {
     let close = serde_json::to_string(&PaneClosePolicy::Graceful { timeout }).expect("serialize");
     let kill = serde_json::to_string(&KillPolicy::Graceful { timeout }).expect("serialize");
 
-    // `duration_secs` encodes the timeout as a plain integer, so the on-disk
-    // form is a whole second and identical to `KillPolicy`'s.
+    // `duration_secs` writes the timeout as a whole number of seconds, the same
+    // form `KillPolicy` uses.
     assert_eq!(close, r#"{"Graceful":{"timeout":3}}"#);
     assert_eq!(close, kill);
+}
+
+#[test]
+fn a_sub_second_graceful_timeout_loses_its_fraction_in_serde() {
+    let policy = PaneClosePolicy::Graceful {
+        timeout: Duration::from_millis(1500),
+    };
+
+    let json = serde_json::to_string(&policy).expect("serialize");
+    let restored: PaneClosePolicy = serde_json::from_str(&json).expect("deserialize");
+
+    assert_eq!(json, r#"{"Graceful":{"timeout":1}}"#);
+    assert_eq!(
+        restored,
+        PaneClosePolicy::Graceful {
+            timeout: Duration::from_secs(1)
+        }
+    );
+}
+
+#[test]
+fn the_largest_graceful_timeout_serializes_as_u64_max_seconds() {
+    let policy = PaneClosePolicy::Graceful {
+        timeout: Duration::MAX,
+    };
+
+    let json = serde_json::to_string(&policy).expect("serialize");
+    let restored: PaneClosePolicy = serde_json::from_str(&json).expect("deserialize");
+
+    assert_eq!(json, r#"{"Graceful":{"timeout":18446744073709551615}}"#);
+    assert_eq!(
+        restored,
+        PaneClosePolicy::Graceful {
+            timeout: Duration::from_secs(u64::MAX)
+        }
+    );
+}
+
+#[test]
+fn a_negative_graceful_timeout_fails_to_deserialize() {
+    let error = serde_json::from_str::<PaneClosePolicy>(r#"{"Graceful":{"timeout":-1}}"#)
+        .expect_err("negative seconds");
+
+    assert_eq!(
+        error.to_string(),
+        "invalid value: integer `-1`, expected u64 at line 1 column 25"
+    );
+}
+
+#[test]
+fn a_fractional_graceful_timeout_fails_to_deserialize() {
+    let error = serde_json::from_str::<PaneClosePolicy>(r#"{"Graceful":{"timeout":1.5}}"#)
+        .expect_err("fractional seconds");
+
+    assert_eq!(
+        error.to_string(),
+        "invalid type: floating point `1.5`, expected u64 at line 1 column 26"
+    );
+}
+
+#[test]
+fn an_unknown_close_policy_fails_to_deserialize() {
+    let error = serde_json::from_str::<PaneClosePolicy>(r#""Kill""#).expect_err("unknown variant");
+
+    assert_eq!(
+        error.to_string(),
+        "unknown variant `Kill`, expected one of `Graceful`, `Force`, `ConfirmIfBusy` at line 1 column 6"
+    );
 }
 
 #[test]
@@ -102,5 +183,16 @@ fn the_exit_policies_serialize_as_their_variant_names() {
     assert_eq!(
         serde_json::to_string(&PaneExitPolicy::RespawnShell).expect("serialize"),
         r#""RespawnShell""#
+    );
+}
+
+#[test]
+fn an_unknown_exit_policy_fails_to_deserialize() {
+    let error =
+        serde_json::from_str::<PaneExitPolicy>(r#""KeepOpen""#).expect_err("unknown variant");
+
+    assert_eq!(
+        error.to_string(),
+        "unknown variant `KeepOpen`, expected `CloseOnExit` or `RespawnShell` at line 1 column 10"
     );
 }

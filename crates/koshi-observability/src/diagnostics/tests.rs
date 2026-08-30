@@ -7,14 +7,14 @@ use miette::Diagnostic;
 // Snapshot each diagnostic variant by its message, stable code, and help line —
 // the three parts a user reads: what/where failed and how to fix it.
 
-/// Extract a diagnostic's stable error code, or an empty string if absent.
-fn code_of(d: &impl Diagnostic) -> String {
-    d.code().map(|c| c.to_string()).unwrap_or_default()
+/// A diagnostic's stable error code, or `None` when it has none.
+fn code_of(d: &impl Diagnostic) -> Option<String> {
+    d.code().map(|c| c.to_string())
 }
 
-/// Extract a diagnostic's help message, or an empty string if absent.
-fn help_of(d: &impl Diagnostic) -> String {
-    d.help().map(|h| h.to_string()).unwrap_or_default()
+/// A diagnostic's help message, or `None` when it has none.
+fn help_of(d: &impl Diagnostic) -> Option<String> {
+    d.help().map(|h| h.to_string())
 }
 
 #[test]
@@ -29,16 +29,53 @@ fn config_diagnostic_reports_path_key_and_help() {
         d.to_string(),
         "invalid config at ~/.config/koshi/config.kdl: key `layout` unknown value `grid`"
     );
-    assert_eq!(code_of(&d), "koshi::config");
-    assert_eq!(help_of(&d), "use one of: tiled, stacked");
+    assert_eq!(code_of(&d).as_deref(), Some("koshi::config"));
+    assert_eq!(help_of(&d).as_deref(), Some("use one of: tiled, stacked"));
+}
+
+#[test]
+fn config_diagnostic_with_empty_parts_keeps_the_template_around_them() {
+    let d = config_diagnostic("", "", "", "");
+    assert_eq!(d.to_string(), "invalid config at : key `` ");
+    assert_eq!(help_of(&d).as_deref(), Some(""));
+}
+
+// Values land in the message and the help exactly as given: `{}` and `{key}`
+// inside a value are text, not format placeholders.
+#[test]
+fn config_diagnostic_renders_braces_in_its_values_literally() {
+    let d = config_diagnostic("{path}", "{0}", "unknown value `{}`", "use {a} or {b}");
+    assert_eq!(
+        d.to_string(),
+        "invalid config at {path}: key `{0}` unknown value `{}`"
+    );
+    assert_eq!(help_of(&d).as_deref(), Some("use {a} or {b}"));
+}
+
+#[test]
+fn command_reject_diagnostic_renders_braces_in_its_context_literally() {
+    let d = command_reject_diagnostic(RejectReason::TargetGone, "close pane {id}");
+    assert_eq!(
+        d.to_string(),
+        "cannot close pane {id}: target no longer exists"
+    );
 }
 
 #[test]
 fn command_reject_diagnostic_reports_context_reason_and_help() {
     let d = command_reject_diagnostic(RejectReason::TargetNotFound, "focus pane");
     assert_eq!(d.to_string(), "cannot focus pane: no target matched");
-    assert_eq!(code_of(&d), "koshi::command");
-    assert_eq!(help_of(&d), "check the target id and try again");
+    assert_eq!(code_of(&d).as_deref(), Some("koshi::command"));
+    assert_eq!(
+        help_of(&d).as_deref(),
+        Some("check the target id and try again")
+    );
+}
+
+#[test]
+fn command_reject_diagnostic_with_an_empty_context_keeps_the_template() {
+    let d = command_reject_diagnostic(RejectReason::InvalidState, "");
+    assert_eq!(d.to_string(), "cannot : invalid in the current state");
 }
 
 #[test]
@@ -48,10 +85,19 @@ fn resize_min_size_diagnostic_reports_direction_and_sizes() {
         d.to_string(),
         "cannot resize pane left: would drop a pane below minimum size 2 (current 3)"
     );
-    assert_eq!(code_of(&d), "koshi::resize");
+    assert_eq!(code_of(&d).as_deref(), Some("koshi::resize"));
     assert_eq!(
-        help_of(&d),
-        "free space by resizing or closing a neighboring pane"
+        help_of(&d).as_deref(),
+        Some("free space by resizing or closing a neighboring pane")
+    );
+}
+
+#[test]
+fn resize_min_size_diagnostic_renders_the_ends_of_the_u16_range() {
+    let d = resize_min_size_diagnostic(Direction::Up, 0, u16::MAX);
+    assert_eq!(
+        d.to_string(),
+        "cannot resize pane up: would drop a pane below minimum size 65535 (current 0)"
     );
 }
 
@@ -61,6 +107,23 @@ fn reject_reason_converts_to_report_without_context() {
     assert_eq!(
         report.to_string(),
         "cannot complete command: no target matched"
+    );
+}
+
+#[test]
+fn reject_report_carries_the_command_code_and_the_reasons_help() {
+    let report = reject_report(RejectReason::Unauthorized);
+    assert_eq!(
+        report.to_string(),
+        "cannot complete command: command not permitted"
+    );
+    assert_eq!(
+        report.code().map(|c| c.to_string()).as_deref(),
+        Some("koshi::command")
+    );
+    assert_eq!(
+        report.help().map(|h| h.to_string()).as_deref(),
+        Some("this command requires additional capability")
     );
 }
 
@@ -124,7 +187,7 @@ fn command_reject_diagnostic_reports_exact_message_and_help_for_every_reason() {
     for (reason, message, help) in cases {
         let d = command_reject_diagnostic(reason, "close pane");
         assert_eq!(d.to_string(), message, "{reason:?}");
-        assert_eq!(help_of(&d), help, "{reason:?}");
+        assert_eq!(help_of(&d).as_deref(), Some(help), "{reason:?}");
     }
 }
 

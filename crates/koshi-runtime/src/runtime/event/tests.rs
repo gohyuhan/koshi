@@ -1,4 +1,6 @@
-//! Construction coverage for every [`RuntimeEvent`] variant.
+//! Tests for the runtime inbox: what a [`RuntimeEvent`] variant carries, and
+//! how an [`EndingNotice`] holds the session's last frame and counts the
+//! client writing threads.
 
 use super::*;
 use koshi_core::command::{Command, CommandSource, ToggleLockModeArgs};
@@ -157,6 +159,49 @@ fn an_ending_notice_starts_empty_and_holds_the_ending_it_was_raised_with() {
         notice.raise(ending);
         assert_eq!(notice.raised(), Some(ending));
     }
+}
+
+#[test]
+fn an_ending_notice_keeps_the_first_ending_when_a_second_one_is_raised() {
+    let notice = EndingNotice::default();
+
+    notice.raise(SessionEnding::Restarting);
+    notice.raise(SessionEnding::Quit);
+
+    assert_eq!(notice.raised(), Some(SessionEnding::Restarting));
+}
+
+#[test]
+fn an_ending_notice_counts_every_writing_thread_from_start_to_end() {
+    let notice = EndingNotice::default();
+    assert_eq!(notice.writers_running(), 0);
+
+    notice.writer_started();
+    notice.writer_started();
+    assert_eq!(notice.writers_running(), 2);
+
+    notice.writer_ended();
+    assert_eq!(notice.writers_running(), 1);
+
+    notice.writer_ended();
+    assert_eq!(notice.writers_running(), 0);
+}
+
+#[test]
+fn writing_threads_sharing_one_ending_notice_all_count_into_it() {
+    let notice = Arc::new(EndingNotice::default());
+
+    let threads: Vec<_> = (0..8)
+        .map(|_| {
+            let notice = Arc::clone(&notice);
+            std::thread::spawn(move || notice.writer_started())
+        })
+        .collect();
+    for thread in threads {
+        thread.join().expect("the counting thread finished");
+    }
+
+    assert_eq!(notice.writers_running(), 8);
 }
 
 #[test]

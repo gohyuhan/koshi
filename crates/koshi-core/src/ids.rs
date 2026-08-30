@@ -1,12 +1,12 @@
 //! Typed identifiers.
 //!
-//! Newtype wrappers around UUIDv7, giving each domain entity a distinct,
-//! non-interchangeable identifier type. UUIDv7 is time-ordered, so freshly
-//! minted IDs sort by creation order. Every ID is `Copy`, hashable, ordered
-//! (usable as a `BTreeMap` key), and `serde`-serializable; `Display` renders
-//! a human-readable prefixed form
-//! (e.g. `pane-0192f0c1-…`). No `From<&str>` parsing is provided — IDs are
-//! either generated (`new`) or wrapped from an existing UUID (`from_uuid`).
+//! One newtype around a UUIDv7 per entity; the types are not interchangeable.
+//! Ids minted in one process sort by creation order. Every id is `Copy`,
+//! hashable, ordered (usable as a `BTreeMap` key), and `serde`-serializable.
+//! The wire form is the bare uuid; `Display` renders the prefixed form
+//! (e.g. `pane-0192f0c1-…`). An id is generated (`new`), wrapped from an
+//! existing UUID (`from_uuid`), or read from typed text with
+//! [`parse_prefixed_uuid`] followed by `from_uuid`.
 //!
 //! The seven types below share the same shape: a wrapped [`Uuid`], a `new`
 //! constructor that mints a fresh id, a `from_uuid` constructor that wraps an
@@ -269,11 +269,13 @@ impl fmt::Display for SubscriberId {
     }
 }
 
-/// Read an id a person typed, in either spelling koshi accepts: the prefixed
-/// form an id prints as, or the bare uuid inside it.
+/// Reads an id a person typed, in either spelling koshi accepts: the prefixed
+/// form an id prints as, or the uuid on its own.
 ///
-/// `prefix` is the word before the hyphen, e.g. `"session"`. The error names
-/// both spellings, so a mistyped id says what was expected.
+/// `prefix` is the word before the hyphen, e.g. `"session"`, matched
+/// case-sensitively. The uuid part is read by [`Uuid::parse_str`], which
+/// accepts the hyphenated form, 32 hex digits with no hyphens, the
+/// `urn:uuid:` form, and the braced form.
 ///
 /// Example — `parse_prefixed_uuid("session-01a0…", "session")` and
 /// `parse_prefixed_uuid("01a0…", "session")` both read the same uuid, and

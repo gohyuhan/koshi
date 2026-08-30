@@ -285,7 +285,8 @@ pub(super) fn opt_cell<T: std::fmt::Display>(value: Option<&T>) -> String {
     }
 }
 
-/// A timestamp as a cell: whole seconds since the Unix epoch.
+/// A timestamp as a cell: whole seconds since the Unix epoch, or `-` for a
+/// moment before that epoch.
 pub(super) fn time_cell(time: SystemTime) -> String {
     match time.duration_since(SystemTime::UNIX_EPOCH) {
         Ok(elapsed) => elapsed.as_secs().to_string(),

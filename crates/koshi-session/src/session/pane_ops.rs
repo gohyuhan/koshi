@@ -4,8 +4,7 @@
 //! Like [`crate::session::tab_ops`], this layer edits state and drafts events
 //! only — it never spawns a process or touches a terminal. The runtime builds
 //! and validates the split, spawns the pane's process, and only then calls
-//! [`commit_new_pane`] to apply it — so a failed spawn never mutates the
-//! session, and the pane exists only once its process is live.
+//! [`commit_new_pane`] to apply it.
 
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -19,15 +18,15 @@ use koshi_pane::pane::state::PaneRecord;
 
 use crate::session::state::Session;
 
-/// What to record on a freshly created pane: the spawn request (working
-/// directory and command) the PTY (pseudo-terminal — the OS handle a shell
-/// process runs its input/output through) layer later honors. The new pane's
-/// record carries both; a restore or respawn reads the same request back.
+/// What to record on a freshly created pane: the working directory it launched
+/// in and the spawn request behind it. Both land on the new pane's
+/// [`PaneRecord`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NewPaneSpec {
-    /// Working directory; `None` inherits.
+    /// The directory the pane launched in. `None` when none was resolved.
     pub cwd: Option<PathBuf>,
-    /// Command to run; `None` launches the default shell.
+    /// The spawn request the pane launched with. `None` when the caller named
+    /// no command and the default shell ran.
     pub command: Option<SpawnSpec>,
 }
 
@@ -54,20 +53,18 @@ pub(crate) fn register_running_pane(
 /// pane for `focus_client` when one is given and still attached.
 ///
 /// Whose zoom drops depends on who made the split: with a `focus_client`, only
-/// that client's; with none, every zoom of the tab, since no client owns the
-/// edit.
+/// that client's zoom of `tab_id`; with none, every attached client's zoom of
+/// `tab_id`. A `focus_client` that is no longer attached counts as none.
 ///
 /// The caller (the runtime) has minted `new_pane_id`, built `candidate` with
 /// [`koshi_layout::edit::split_leaf`] or [`koshi_layout::edit::add_to_stack`],
 /// preflighted its fit against the sizing viewport, and spawned the child under
-/// `new_pane_id` — so this only commits state and registers the pane
-/// `Running`, the child already being live.
+/// `new_pane_id`.
 ///
 /// This is the single place a new pane's session state is committed: no session
 /// field is written for `NewPane` outside this op. `spec` carries the cwd and
-/// command recorded on the new pane, which a later restore or respawn reads
-/// back; `created_at` is the caller's timestamp, never read from the clock
-/// here.
+/// command recorded on the new pane; `created_at` is the caller's timestamp,
+/// never read from the clock here.
 ///
 /// Returns the focused client's *previous* tab when this op switched it onto
 /// `tab_id` (so the caller can reflow the tab it left), and the events to emit —
@@ -87,21 +84,18 @@ pub fn commit_new_pane(
     spec: NewPaneSpec,
     created_at: SystemTime,
 ) -> (Option<TabId>, Vec<Event>) {
-    // An unknown tab is a no-op: registering the pane or emitting events
-    // against a tab the session does not hold would leave an orphaned record.
     if !session.tabs.contains_key(&tab_id) {
         return (None, Vec::new());
     }
 
-    // Only a still-attached client can be focused. Resolving it once here keeps
-    // the tab switch, focus-MRU record, and `PaneFocused` event in agreement: a
-    // stale id focuses nothing, exactly like `None`.
+    // A `focus_client` that is not attached resolves to `None`: no tab switch,
+    // no focus-MRU record, and no `PaneFocused` event.
     let focus = focus_client.filter(|client_id| session.clients.get(*client_id).is_some());
 
     let mut events = Vec::new();
 
     // Switch the focused client onto the tab when it is not already viewing it,
-    // so it sees the new pane; remember the tab it left for the caller to reflow.
+    // and record the tab it left.
     let mut previous_tab = None;
     if let Some(client_id) = focus {
         if let Some(client) = session.clients.get_mut(client_id) {
@@ -118,10 +112,10 @@ pub fn commit_new_pane(
         }
     }
 
-    // Register the new pane as `Running`, carrying its spawn request.
     register_running_pane(session, new_pane_id, spec, created_at);
 
-    // Swap in the pre-built tree and record focus history.
+    // Swap in the pre-built tree; record the new pane in the tab's focus
+    // history when a client focuses it.
     if let Some(tab) = session.tabs.get_mut(&tab_id) {
         tab.update_layout(candidate);
         if focus.is_some() {
@@ -131,12 +125,10 @@ pub fn commit_new_pane(
 
     // Drop the zoom that would hide the new pane, then focus it:
     //
-    // - **A client made the split** (a keybinding, the in-session CLI, or an
-    //   explicit `--client`): that client's zoom drops and it focuses the new
-    //   pane. Every other client keeps its zoom and its focus.
-    // - **No client made it** (an external caller naming only a tab): every zoom
-    //   of this tab drops, so the new pane sits in the tiled layout every viewer
-    //   sees, and no client's focus moves.
+    // - **With a `focus_client`**: that client's zoom of `tab_id` drops and it
+    //   focuses the new pane. Every other client keeps its zoom and its focus.
+    // - **With none**: every attached client's zoom of `tab_id` drops, and no
+    //   client's focus moves.
     let mut prior_pane = None;
     match focus {
         Some(client_id) => {

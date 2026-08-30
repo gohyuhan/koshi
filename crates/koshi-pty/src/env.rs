@@ -10,13 +10,12 @@ use koshi_core::process::{ShellKind, SpawnSpec};
 
 /// Build koshi's environment *overlay* for a spawned child: the universal
 /// terminal identity and a shell-specific bootstrap, with the caller's explicit
-/// `spec.env` overrides layered on top.
+/// `specs.env` overrides layered on top.
 ///
-/// This is only the overlay, not the full environment — the caller applies it
-/// over the inherited parent env (which `CommandBuilder` keeps), so parent vars
-/// survive and each overlay key overwrites its inherited counterpart. On Windows
-/// `portable-pty` folds names case-insensitively, so an override replaces a
-/// differently-cased inherited key.
+/// The map is only the overlay, not the full environment. The caller applies
+/// it over the inherited parent environment; each overlay key replaces the
+/// inherited key of the same name, and on Windows `portable-pty` matches the
+/// names case-insensitively.
 pub fn build_env(specs: &SpawnSpec) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
 
@@ -27,9 +26,9 @@ pub fn build_env(specs: &SpawnSpec) -> BTreeMap<String, String> {
     env.insert("COLORTERM".to_string(), "truecolor".to_string());
 
     // Shell-specific bootstrap. zsh alone gets one: an empty `PROMPT_EOL_MARK`
-    // stops the inverse `%` that zsh's on-by-default `PROMPT_CR`/`PROMPT_SP`
+    // turns off the inverse `%` that zsh's on-by-default `PROMPT_CR`/`PROMPT_SP`
     // options print after output with no trailing newline. Every other shell
-    // gets no bootstrap key. The match lists every `ShellKind`.
+    // gets no bootstrap key.
     match specs.shell_kind {
         ShellKind::Zsh => {
             env.insert("PROMPT_EOL_MARK".to_string(), String::new());
@@ -41,11 +40,9 @@ pub fn build_env(specs: &SpawnSpec) -> BTreeMap<String, String> {
         | ShellKind::Other(_) => {}
     }
 
-    // `spec.env` is applied last, so each of its keys overwrites the koshi
+    // `specs.env` is applied last; each of its keys overwrites the koshi
     // default of the same name above.
-    for (key, value) in &specs.env {
-        env.insert(key.to_string(), value.to_string());
-    }
+    env.extend(specs.env.clone());
     env
 }
 

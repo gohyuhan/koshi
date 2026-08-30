@@ -6,11 +6,10 @@
 //! delivery, backpressure, and privacy gating all live in higher layers; this
 //! module only names *what* has happened.
 //!
-//! Events are append-only facts, never hidden commands — nothing here requests
-//! a mutation. Events cross process boundaries (IPC watchers, plugin host,
-//! storage), so every variant and payload holds only serde-friendly types that
-//! mean the same thing in another process. No `Instant` — timestamps use
-//! `SystemTime`. No raw OS handles and no `&mut` references.
+//! Events are append-only facts; none requests a mutation. Every variant and
+//! payload holds only serde-friendly types that mean the same thing in another
+//! process (IPC watchers, plugin host, storage). Timestamps are `SystemTime`,
+//! never `Instant`. No raw OS handles and no `&mut` references.
 //!
 //! Privacy is structural: each input payload variant encodes the classified
 //! context and the resulting [`PrivacyTier`] together, and every non-public
@@ -57,15 +56,15 @@ pub enum Event {
     TabFocused(TabFocused),
     /// A tab moved to a new index.
     TabMoved(TabMoved),
-    /// A pane became invisible because the terminal is too small.
+    /// A pane became invisible: the terminal is too small to show it.
     PaneSuppressed(PaneSuppressed),
     /// A suppressed pane became visible again after a resize.
     PaneResumed(PaneResumed),
-    /// All panes are suppressed; runtime should show the too-small overlay.
+    /// A client has no visible pane: every pane in its tab is suppressed.
     TerminalTooSmallEntered(TerminalTooSmallEntered),
-    /// At least one pane regained visible area because the terminal grew
-    /// back; runtime can leave the too-small overlay. Visibility changes
-    /// from mode toggles (e.g. leaving fullscreen) do not emit this.
+    /// At least one of the client's panes regained visible area after the
+    /// terminal grew. A visibility change from a mode toggle (e.g. leaving
+    /// fullscreen) does not emit this.
     TerminalTooSmallExited(TerminalTooSmallExited),
     /// Configuration reload succeeded and was atomically swapped in.
     ConfigReloaded(ConfigReloaded),
@@ -114,10 +113,9 @@ pub enum Event {
     CommandRejected(CommandRejected),
 
     // Selection and copy.
-    /// The active selection changed (or was cleared).
-    ///
-    /// There is no separate entered/exited event: a selection appearing is
-    /// entering visual mode, and it clearing is leaving.
+    /// The active selection changed or was cleared. A selection appearing
+    /// enters visual mode; a selection clearing leaves it. No other event
+    /// reports entering or leaving visual mode.
     SelectionChanged(SelectionChanged),
     /// A selection was copied to a clipboard target.
     Copied(Copied),
@@ -138,8 +136,8 @@ pub enum Event {
 }
 
 impl Event {
-    /// The variant's name, e.g. `"PaneCreated"`. Carries no payload, so it is
-    /// safe on a log line even for events whose payload holds user text.
+    /// The variant's name, e.g. `"PaneCreated"`. Contains nothing from the
+    /// payload, including user text.
     #[must_use]
     pub fn name(&self) -> &'static str {
         match self {
@@ -275,8 +273,8 @@ pub struct TabClosed {
 
 /// Payload for [`Event::TabFocused`].
 ///
-/// A client's active tab is per-client state, so the payload names the client
-/// whose view switched.
+/// The active tab is per-client state; `client_id` names the client whose
+/// view switched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TabFocused {
     /// The client whose active tab changed.
@@ -420,7 +418,9 @@ pub struct KeybindingMatched {
 /// [`SensitiveBlocked`]: PrivacyTier::SensitiveBlocked
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PrivacyTier {
-    /// Safe `Character`/`Line` content may be delivered.
+    /// Safe content may be delivered: the character in
+    /// [`TypedPayload::SafePublic`] or the line in
+    /// [`SubmittedLinePayload::SafePublic`].
     Public,
     /// Shape/timing only; no content.
     MetadataOnly,
@@ -620,7 +620,7 @@ pub struct PluginMouseInput {
 
 /// Payload for [`Event::PaneCommandStarted`].
 ///
-/// Emitted when a shell reports it just ran a command via OSC 133;C, a
+/// Emitted when a shell reports that a command started, via OSC 133;C — a
 /// terminal escape sequence shells emit around each command for prompt
 /// integration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -668,44 +668,44 @@ pub enum EventClass {
 /// not silently disappear.
 pub fn classify(event: &Event) -> EventClass {
     match event {
-        Event::PaneCreated(_) => EventClass::Critical,
-        Event::PaneProcessExited(_) => EventClass::Critical,
-        Event::PaneClosing(_) => EventClass::Critical,
-        Event::PaneRemoved(_) => EventClass::Critical,
-        Event::PaneFocused(_) => EventClass::Critical,
-        Event::PtyResized(_) => EventClass::Critical,
-        Event::PaneOutputUpdated(_) => EventClass::Lossy,
-        Event::LayoutChanged(_) => EventClass::Critical,
-        Event::TabCreated(_) => EventClass::Critical,
-        Event::TabClosed(_) => EventClass::Critical,
-        Event::TabFocused(_) => EventClass::Critical,
-        Event::TabMoved(_) => EventClass::Critical,
-        Event::PaneSuppressed(_) => EventClass::Critical,
-        Event::PaneResumed(_) => EventClass::Critical,
-        Event::TerminalTooSmallEntered(_) => EventClass::Critical,
-        Event::TerminalTooSmallExited(_) => EventClass::Critical,
-        Event::ConfigReloaded(_) => EventClass::Critical,
-        Event::InputModeChanged(_) => EventClass::Critical,
-        Event::MouseSelectChanged(_) => EventClass::Critical,
-        Event::KeybindingMatched(_) => EventClass::Critical,
-        Event::PaneTyped(_) => EventClass::Lossy,
-        Event::PaneEnterPressed(_) => EventClass::Critical,
-        Event::MousePressed(_) => EventClass::Critical,
-        Event::MouseReleased(_) => EventClass::Critical,
-        Event::MouseDragged(_) => EventClass::Lossy,
-        Event::MouseScrolled(_) => EventClass::Lossy,
-        Event::PaneMouseForwarded(_) => EventClass::Lossy,
-        Event::PluginMouseInput(_) => EventClass::Lossy,
-        Event::PaneCommandStarted(_) => EventClass::Critical,
-        Event::PaneCommandFinished(_) => EventClass::Critical,
-        Event::PaneScrollbackTruncated(_) => EventClass::Lossy,
-        Event::SubscriberLagged(_) => EventClass::Critical,
-        Event::CommandRejected(_) => EventClass::Critical,
-        Event::SelectionChanged(_) => EventClass::Critical,
-        Event::Copied(_) => EventClass::Critical,
-        Event::Plugin(_) => EventClass::Critical,
-        Event::Quit => EventClass::Critical,
-        Event::Restarting => EventClass::Critical,
+        Event::PaneOutputUpdated(_)
+        | Event::PaneTyped(_)
+        | Event::MouseDragged(_)
+        | Event::MouseScrolled(_)
+        | Event::PaneMouseForwarded(_)
+        | Event::PluginMouseInput(_)
+        | Event::PaneScrollbackTruncated(_) => EventClass::Lossy,
+        Event::PaneCreated(_)
+        | Event::PaneProcessExited(_)
+        | Event::PaneClosing(_)
+        | Event::PaneRemoved(_)
+        | Event::PaneFocused(_)
+        | Event::PtyResized(_)
+        | Event::LayoutChanged(_)
+        | Event::TabCreated(_)
+        | Event::TabClosed(_)
+        | Event::TabFocused(_)
+        | Event::TabMoved(_)
+        | Event::PaneSuppressed(_)
+        | Event::PaneResumed(_)
+        | Event::TerminalTooSmallEntered(_)
+        | Event::TerminalTooSmallExited(_)
+        | Event::ConfigReloaded(_)
+        | Event::InputModeChanged(_)
+        | Event::MouseSelectChanged(_)
+        | Event::KeybindingMatched(_)
+        | Event::PaneEnterPressed(_)
+        | Event::MousePressed(_)
+        | Event::MouseReleased(_)
+        | Event::PaneCommandStarted(_)
+        | Event::PaneCommandFinished(_)
+        | Event::SubscriberLagged(_)
+        | Event::CommandRejected(_)
+        | Event::SelectionChanged(_)
+        | Event::Copied(_)
+        | Event::Plugin(_)
+        | Event::Quit
+        | Event::Restarting => EventClass::Critical,
     }
 }
 

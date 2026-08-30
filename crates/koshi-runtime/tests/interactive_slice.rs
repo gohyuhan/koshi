@@ -23,8 +23,8 @@ use koshi_test_support::fake_pty::FakePtyBackend;
 
 const VIEWPORT: Size = Size { cols: 80, rows: 24 };
 
-/// A server driven by `fake`, holding its own inbox with a forwarder-facing
-/// sender clone — the shape the binary constructs.
+/// A server driven by `fake`, holding its own inbox receiver and a sender
+/// clone for the pane forwarders.
 fn server_with(fake: Arc<FakePtyBackend>) -> Server {
     let backend: Arc<dyn PtyBackend> = fake;
     let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
@@ -33,9 +33,8 @@ fn server_with(fake: Arc<FakePtyBackend>) -> Server {
     Server::new(backend, snapshot_provider, storage, rx, tx)
 }
 
-/// Receive the next event of the wanted shape, ignoring any earlier ones, or
-/// panic on timeout. The single relay forwards a pane's output before its exit,
-/// so a `ChildExit` is preceded by any trailing output.
+/// Receive the first inbox event `want` accepts, dropping the ones before it.
+/// Panics once 2 seconds have passed with no accepted event.
 fn recv_matching(rt: &Server, mut want: impl FnMut(&RuntimeEvent) -> bool) -> RuntimeEvent {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
@@ -202,12 +201,11 @@ fn trailing_output_is_forwarded_before_the_exit() {
         .expect("bootstrap");
     let pane_id = fake.spawned_panes()[0];
 
-    // The child writes, its PTY EOFs, then it exits. The single relay must
-    // deliver the output before the exit — never the reverse, which would drop
-    // the final output once the engine is torn down.
+    // The child writes, its PTY reaches end of file, then it exits. The single
+    // relay delivers the output before the exit.
     fake.push_output(pane_id, b"bye".to_vec()).expect("push");
     fake.close_output(pane_id).expect("close output");
-    fake.trigger_child_exit(pane_id, ExitStatus::ExitCode(0))
+    fake.trigger_child_exit(pane_id, ExitStatus::ExitCode(3))
         .expect("exit");
 
     let first = rt
@@ -228,7 +226,17 @@ fn trailing_output_is_forwarded_before_the_exit() {
         .inbox_rx()
         .recv_timeout(Duration::from_secs(2))
         .expect("second event");
-    assert!(matches!(second, RuntimeEvent::ChildExit { .. }));
+    match second {
+        RuntimeEvent::ChildExit {
+            pane_id: exited,
+            status,
+            exited_at: _,
+        } => {
+            assert_eq!(exited, pane_id);
+            assert_eq!(status, ExitStatus::ExitCode(3));
+        }
+        other => panic!("expected ChildExit, got {other:?}"),
+    }
 }
 
 #[test]
@@ -239,7 +247,8 @@ fn kill_all_panes_group_kills_the_shell() {
         .expect("bootstrap");
     let pane_id = fake.spawned_panes()[0];
 
-    // The panic-path teardown group-kills so no descendant is orphaned.
+    // The panic-path teardown group-kills every pane's child, reaping its
+    // descendants.
     rt.kill_all_panes();
 
     assert_eq!(fake.kills(pane_id).expect("kills"), vec![KillPolicy::Tree]);

@@ -1,15 +1,14 @@
 //! Focus candidates after a pane disappears.
 //!
 //! This module answers the geometric part only: given where the removed pane
-//! was and where the survivors now sit, which panes are sensible focus
-//! targets? It returns those candidates, ranked three ways, and chooses
-//! nothing. The session owns focus history and per-client state.
+//! was and where the survivors now sit, it returns the candidate panes ranked
+//! three ways, and chooses nothing. The session owns focus history and
+//! per-client state.
 //!
-//! Two kinds of panes are never candidates. Zero-area panes — suppressed
-//! or hidden by a fullscreen overlay — have no visible cells to focus.
-//! Collapsed stack members hold a visible rect, their one-row header strip,
-//! but that strip is Koshi-owned chrome. Reaching one of those goes through
-//! an explicit activation, not through focus repair.
+//! Two kinds of panes are never candidates: zero-area panes (suppressed, or
+//! hidden under a fullscreen pane), and collapsed stack members, whose only
+//! visible rect is their one-row header strip. A collapsed member expands
+//! through [`stack_activate`], not through focus repair.
 
 use koshi_core::geometry::{Rect, SplitDirection};
 use koshi_core::ids::PaneId;
@@ -27,7 +26,8 @@ pub struct FocusCandidates {
     /// The visible pane that took over the largest share of the removed
     /// pane's cells. `None` when nothing overlaps the old rect.
     pub absorbed_space: Option<PaneId>,
-    /// Every visible pane, in layout order — the last-resort fallback.
+    /// Every visible pane, in layout order; the caller's last-resort
+    /// fallback.
     pub layout_order: Vec<PaneId>,
 }
 
@@ -36,9 +36,9 @@ pub struct FocusCandidates {
 ///
 /// `surviving_panes` is the solved placement of the layout after the
 /// removal, in layout order, and `stack_headers` the collapsed members of
-/// that same solve (exactly what the solver returns). Panes listed in
-/// `stack_headers` are excluded: their non-empty rect is the header strip,
-/// not focusable content.
+/// that same solve (exactly what the solver returns). A pane with a
+/// zero-area rect, or one listed in `stack_headers`, is not visible and is
+/// excluded from every ranking.
 #[must_use]
 pub fn focus_candidates(
     removed_rect: Rect,
@@ -127,11 +127,13 @@ pub fn stack_focus_prev(stack: &mut SplitNode) -> Option<StackFocusChange> {
     stack_focus_step(stack, -1)
 }
 
-/// Expand the stack member holding `pane` (a collapsed member is a valid
-/// target — that is exactly what header clicks and remote focus do).
+/// Expand the stack member holding `pane`. A collapsed member is a valid
+/// target. The member may be a subtree; [`StackFocusChange::newly_active`]
+/// is then its first leaf, which can differ from `pane`.
 ///
-/// Returns `None` when `pane` is not in this stack or is already the
-/// active member; the stack is unchanged in that case.
+/// Returns `None` when `stack` is not a stack, when `pane` is not in it, or
+/// when the member holding `pane` is already the active member; the stack is
+/// unchanged in that case.
 pub fn stack_activate(stack: &mut SplitNode, pane: PaneId) -> Option<StackFocusChange> {
     if stack.direction != SplitDirection::Stacked {
         return None;
@@ -146,24 +148,24 @@ pub fn stack_activate(stack: &mut SplitNode, pane: PaneId) -> Option<StackFocusC
     Some(set_active(stack, target))
 }
 
-/// The pane to focus when a client enters this stack from outside.
-/// Returns the first pane in the member that occupies the active slot.
+/// The pane to focus when a client enters this stack from outside: the
+/// first leaf of the member in the active slot. `None` when the stack has
+/// no members or that member holds no pane.
 #[must_use]
 pub fn stack_entry_target(stack: &SplitNode) -> Option<PaneId> {
     let child = stack.children.get(stack.active_index())?;
     child.node.first_leaf()
 }
 
-/// Walk `step` through the members (wrapping) to the first one that holds a
-/// pane, and expand it.
+/// Walk `step` (`1` forward, `-1` backward, wrapping) through the members to
+/// the first one that holds a pane, and expand it. `None` when `stack` is
+/// not a stack, has fewer than two members, or no other member holds a pane.
 fn stack_focus_step(stack: &mut SplitNode, step: i64) -> Option<StackFocusChange> {
     if stack.direction != SplitDirection::Stacked || stack.children.len() < 2 {
         return None;
     }
     let count = stack.children.len() as i64;
     let active = stack.active_index() as i64;
-    // Try each member one step further away (wrapping with rem_euclid),
-    // skipping any that hold no pane, and stop at the first real one.
     for offset in 1..count {
         let candidate = (active + step * offset).rem_euclid(count) as usize;
         if stack.children[candidate].node.first_leaf().is_some() {
@@ -173,8 +175,9 @@ fn stack_focus_step(stack: &mut SplitNode, step: i64) -> Option<StackFocusChange
     None
 }
 
-/// Set the stack's active member to `target`: give it full height, hide the
-/// others as collapsed headers.
+/// Set the stack's active member to `target` and mark every other member
+/// collapsed. `deactivated` is the first leaf of the member that was in the
+/// active slot. Panics when the member at `target` holds no pane.
 fn set_active(stack: &mut SplitNode, target: usize) -> StackFocusChange {
     let deactivated = stack
         .children

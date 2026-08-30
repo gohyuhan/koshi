@@ -16,7 +16,12 @@ use crate::pane::{
 pub enum PaneRegistryError {
     /// An insert used an id that the registry already holds.
     #[error("pane {id} is already registered")]
-    DuplicateId { id: PaneId, kind: PaneKind },
+    DuplicateId {
+        /// The id that is already registered.
+        id: PaneId,
+        /// The kind of the record that the insert rejected.
+        kind: PaneKind,
+    },
 }
 
 impl DomainError for PaneRegistryError {

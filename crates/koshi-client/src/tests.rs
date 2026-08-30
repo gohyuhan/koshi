@@ -278,7 +278,7 @@ fn loading_no_files_at_all_leaves_the_built_in_settings() {
 
     let report = client.load_startup_config(None, None, None);
 
-    assert!(report.is_none(), "no keybinding file means no report");
+    assert_eq!(report, None, "no keybinding file means no report");
     assert_eq!(*client.theme(), before);
     assert_eq!(*client.config(), ClientConfig::default());
 }
@@ -333,7 +333,13 @@ fn an_applied_keybinding_file_swaps_the_keymap_and_drops_an_open_sequence() {
         KeyChord::new(ModFlags::CTRL, Key::Char('p')),
         std::time::Instant::now(),
     );
-    assert!(client.pending_sequence().is_some());
+    assert_eq!(
+        client.pending_sequence(),
+        Some(&KeySequence::from(KeyChord::new(
+            ModFlags::CTRL,
+            Key::Char('p')
+        )))
+    );
 
     let report = client.load_startup_config(None, None, Some(binds_ctrl_y()));
 
@@ -351,8 +357,9 @@ fn an_applied_keybinding_file_swaps_the_keymap_and_drops_an_open_sequence() {
             args: ActionArgs::None,
         })
     );
-    assert!(
-        client.pending_sequence().is_none(),
+    assert_eq!(
+        client.pending_sequence(),
+        None,
         "held chords reached for bindings the new keymap may not have"
     );
 }
@@ -588,11 +595,16 @@ fn a_second_keybinding_file_fully_replaces_the_firsts_bindings() {
     let ctrl_y = KeySequence::from(KeyChord::new(ModFlags::CTRL, Key::Char('y')));
 
     client.load_startup_config(None, None, Some(binds_ctrl_y()));
-    assert!(client
-        .keymap
-        .match_sequence(LockMode::Normal, &ctrl_y)
-        .exact
-        .is_some());
+    assert_eq!(
+        client
+            .keymap
+            .match_sequence(LockMode::Normal, &ctrl_y)
+            .exact,
+        Some(BoundAction {
+            action: ActionRef::core("new-tab").expect("valid core action name"),
+            args: ActionArgs::None,
+        })
+    );
 
     client.load_startup_config(None, None, Some(PartialKeybindingsConfig::default()));
 
@@ -627,7 +639,7 @@ fn a_second_startup_load_with_no_keybinding_file_resets_the_keymap_to_the_built_
 
     let report = client.load_startup_config(None, None, None);
 
-    assert!(report.is_none(), "no keybinding file means no report");
+    assert_eq!(report, None, "no keybinding file means no report");
     assert_eq!(
         client
             .keymap
@@ -712,16 +724,18 @@ fn a_low_chord_depth_drops_every_binding_longer_than_it() {
 fn a_keybinding_file_removes_a_default_binding_only_in_the_mode_that_declares_it() {
     let (mut client, _tx) = new_client();
     let quit = KeySequence::from(KeyChord::new(ModFlags::CTRL, Key::Char('q')));
-    assert!(client
-        .keymap
-        .match_sequence(LockMode::Normal, &quit)
-        .exact
-        .is_some());
-    assert!(client
-        .keymap
-        .match_sequence(LockMode::Locked, &quit)
-        .exact
-        .is_some());
+    let quit_action = BoundAction {
+        action: ActionRef::core("quit").expect("valid core action name"),
+        args: ActionArgs::None,
+    };
+    assert_eq!(
+        client.keymap.match_sequence(LockMode::Normal, &quit).exact,
+        Some(quit_action.clone())
+    );
+    assert_eq!(
+        client.keymap.match_sequence(LockMode::Locked, &quit).exact,
+        Some(quit_action.clone())
+    );
 
     let mut removed = BTreeSet::new();
     removed.insert(quit.clone());
@@ -753,11 +767,19 @@ fn a_keybinding_file_removes_a_default_binding_only_in_the_mode_that_declares_it
     assert!(client.keymap_hints().removed.contains(&quit));
     // Locked mode's own quit binding is untouched: removal is scoped to the
     // mode that declares it.
-    assert!(client
-        .keymap
-        .match_sequence(LockMode::Locked, &quit)
-        .exact
-        .is_some());
+    assert_eq!(
+        client.keymap.match_sequence(LockMode::Locked, &quit).exact,
+        Some(quit_action)
+    );
+}
+
+/// How many entries in `hints` carry `label`.
+fn label_count(hints: &KeymapHints, label: &str) -> usize {
+    hints
+        .entries
+        .iter()
+        .filter(|entry| entry.label == label)
+        .count()
 }
 
 #[test]
@@ -767,22 +789,10 @@ fn frame_hints_flip_the_mouse_select_label_only_while_it_is_on() {
     let off = client.frame_hints(false);
     let on = client.frame_hints(true);
 
-    assert!(off
-        .entries
-        .iter()
-        .any(|entry| entry.label == MOUSE_SELECT_HINT));
-    assert!(!off
-        .entries
-        .iter()
-        .any(|entry| entry.label == MOUSE_UNSELECT_HINT));
-    assert!(on
-        .entries
-        .iter()
-        .any(|entry| entry.label == MOUSE_UNSELECT_HINT));
-    assert!(!on
-        .entries
-        .iter()
-        .any(|entry| entry.label == MOUSE_SELECT_HINT));
+    assert_eq!(label_count(&off, MOUSE_SELECT_HINT), 1);
+    assert_eq!(label_count(&off, MOUSE_UNSELECT_HINT), 0);
+    assert_eq!(label_count(&on, MOUSE_UNSELECT_HINT), 1);
+    assert_eq!(label_count(&on, MOUSE_SELECT_HINT), 0);
     // Only that one entry changes: everything else is the same list.
     assert_eq!(off.entries.len(), on.entries.len());
     assert_eq!(off.removed, on.removed);
@@ -1093,4 +1103,23 @@ fn taking_a_new_client_id_moves_the_id_the_viewers_commands_carry() {
     client.set_id(minted);
 
     assert_eq!(client.id(), minted);
+}
+
+#[test]
+fn terminal_bytes_are_counted_and_move_nothing_in_the_viewer() {
+    // Bytes a pane aimed at a terminal belong to the attached viewer that owns
+    // that terminal, and reach it over its own connection.
+    let (mut client, tx) = new_client();
+    client.set_lock_mode(LockMode::Locked);
+    let id = client.id();
+    let viewport = client.viewport();
+
+    tx.send(Delivery::HostWrite(vec![0x1b, b']', b'5', b'2']))
+        .expect("the viewer's queue has room");
+
+    assert_eq!(client.apply_events(), 1, "the write was seen");
+    assert_eq!(client.lock_mode(), LockMode::Locked);
+    assert!(!client.mouse_select());
+    assert_eq!(client.viewport(), viewport);
+    assert_eq!(client.id(), id);
 }

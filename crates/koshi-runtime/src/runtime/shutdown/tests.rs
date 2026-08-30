@@ -1,15 +1,20 @@
-//! Tests for the staged quit teardown: draining is entered, an explicit quit
-//! group-kills immediately, a natural ending group-kills gracefully, and only
-//! parked panes are killed.
+//! Tests for the staged quit teardown: draining is entered, the control socket
+//! is stopped, an explicit quit group-kills immediately, a natural ending
+//! group-kills gracefully, only parked panes are killed, and one pane's failed
+//! kill leaves the rest killed.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::mpsc;
 
-use koshi_core::ids::PaneId;
+use koshi_core::ids::{PaneId, SessionId};
 use koshi_core::process::{PtySize, SpawnSpec};
-use koshi_pty::backend::state::PtyBackend;
+use koshi_ipc::endpoint::EndpointFile;
+use koshi_pty::backend::state::{PtyBackend, PtyHandle};
+use koshi_pty::error::PtyError;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
+use crate::ipc_server::IpcServer;
 use crate::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
 use crate::runtime::event::RuntimeEvent;
 
@@ -46,6 +51,17 @@ fn spawn_and_park(rt: &mut Server, fake: &FakePtyBackend, pane: PaneId) {
         )
         .expect("spawn");
     rt.park_pane_pty(pane, handle, PANE_SIZE);
+}
+
+/// A fresh directory to stand in for the runtime dir, under a short base so the
+/// Unix socket path stays inside the OS path-length cap.
+/// [`IpcServer::start`] creates it private itself.
+fn test_runtime_dir(tag: &str) -> PathBuf {
+    #[cfg(unix)]
+    let base = PathBuf::from("/tmp");
+    #[cfg(windows)]
+    let base = std::env::temp_dir();
+    base.join(format!("koshi-quit-{}-{tag}", std::process::id()))
 }
 
 #[test]
@@ -113,4 +129,47 @@ fn calling_shutdown_again_requests_another_group_kill() {
         fake.kills(pane).expect("pane"),
         vec![KillPolicy::Tree, KillPolicy::Tree]
     );
+}
+
+#[test]
+fn a_pane_the_backend_cannot_kill_leaves_every_other_pane_killed() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let live = PaneId::new();
+    let unknown = PaneId::new();
+    spawn_and_park(&mut rt, &fake, live);
+    // A handle parked for a pane the backend never spawned: its kill answers
+    // `PtyError::UnknownPane`, the kill the graceful stage drops.
+    rt.park_pane_pty(unknown, PtyHandle::detached(unknown), PANE_SIZE);
+
+    rt.shutdown();
+
+    assert!(rt.is_draining());
+    assert_eq!(
+        fake.kills(live).expect("live pane"),
+        vec![KillPolicy::GracefulTree {
+            timeout: GRACEFUL_TIMEOUT_DURATION,
+        }]
+    );
+    assert_eq!(
+        fake.kills(unknown),
+        Err(PtyError::UnknownPane { pane: unknown })
+    );
+}
+
+#[test]
+fn shutdown_stops_the_attached_control_socket_and_removes_its_endpoint_file() {
+    let (mut rt, _fake, tx) = new_runtime_with_fake();
+    let session = SessionId::new();
+    let runtime_dir = test_runtime_dir("socket");
+    let ipc_server = IpcServer::start(&runtime_dir, session, tx.clone(), None).expect("serving");
+    let endpoint_path = EndpointFile::path(&runtime_dir, session);
+    assert!(endpoint_path.exists(), "the session is advertised");
+    rt.attach_ipc_server(ipc_server);
+
+    rt.shutdown();
+
+    assert!(rt.is_draining());
+    assert!(rt.ipc_server().is_none());
+    assert!(!endpoint_path.exists());
+    let _ = std::fs::remove_dir_all(&runtime_dir);
 }

@@ -211,3 +211,103 @@ fn two_secrets_with_one_character_between_them_are_hidden_separately() {
     let out = redact_string("ab-cd", &[Marker::literal("ab"), Marker::literal("cd")]);
     assert_eq!(out, "***-***");
 }
+
+#[test]
+fn visible_debug_prints_the_quoted_value() {
+    let visible = RedactedValue::Visible("plain".into());
+    assert_eq!(format!("{visible:?}"), "\"plain\"");
+}
+
+#[test]
+fn a_key_that_merely_contains_a_fragment_is_hidden() {
+    // Matching is by substring: `KEYBOARD` holds `KEY`, `AUTHOR` holds `AUTH`.
+    for key in ["KEYBOARD", "AUTHOR", "TOKENS_LEFT", "secrets_dir"] {
+        let out = redact_env_map(&env(&[(key, "value")]));
+        assert_eq!(out[key], RedactedValue::Hidden, "`{key}` must redact");
+    }
+}
+
+#[test]
+fn a_key_holding_only_part_of_a_fragment_is_visible() {
+    for key in ["TOKE", "PASS", "KE_Y", "AUT"] {
+        let out = redact_env_map(&env(&[(key, "value")]));
+        assert_eq!(
+            out[key],
+            RedactedValue::Visible("value".into()),
+            "`{key}` must pass through"
+        );
+    }
+}
+
+#[test]
+fn an_empty_key_is_visible_and_kept() {
+    let out = redact_env_map(&env(&[("", "value")]));
+    assert_eq!(out[""], RedactedValue::Visible("value".into()));
+    assert_eq!(out.len(), 1);
+}
+
+#[test]
+fn redact_env_map_of_an_empty_map_is_empty() {
+    assert_eq!(redact_env_map(&BTreeMap::new()), BTreeMap::new());
+}
+
+#[test]
+fn redact_env_map_keeps_every_key_and_hides_an_empty_sensitive_value() {
+    let out = redact_env_map(&env(&[("API_KEY", ""), ("PATH", "/usr/bin")]));
+    assert_eq!(
+        out,
+        BTreeMap::from([
+            ("API_KEY".to_string(), RedactedValue::Hidden),
+            (
+                "PATH".to_string(),
+                RedactedValue::Visible("/usr/bin".into())
+            ),
+        ])
+    );
+}
+
+#[test]
+fn redact_string_treats_the_marker_as_a_literal_not_a_pattern() {
+    let markers = [Marker::literal("a.b")];
+    assert_eq!(redact_string("axb", &markers), "axb");
+    assert_eq!(redact_string("a.b", &markers), "***");
+}
+
+#[test]
+fn redact_string_hides_a_marker_that_is_the_whole_input() {
+    assert_eq!(redact_string("secret", &[Marker::literal("secret")]), "***");
+}
+
+#[test]
+fn redact_string_hides_a_marker_at_the_start_and_at_the_end() {
+    let out = redact_string("sec middle sec", &[Marker::literal("sec")]);
+    assert_eq!(out, "*** middle ***");
+}
+
+#[test]
+fn redact_string_hides_a_marker_nested_inside_a_longer_marker_listed_first() {
+    // The longer marker is listed first; the shorter one lies inside its span.
+    let out = redact_string("abcd", &[Marker::literal("abcd"), Marker::literal("bc")]);
+    assert_eq!(out, "***");
+}
+
+#[test]
+fn redact_string_hides_back_to_back_occurrences_of_one_marker_as_one() {
+    assert_eq!(redact_string("abab", &[Marker::literal("ab")]), "***");
+}
+
+#[test]
+fn redact_string_keeps_text_between_two_occurrences_of_one_marker() {
+    assert_eq!(redact_string("ab ab", &[Marker::literal("ab")]), "*** ***");
+}
+
+#[test]
+fn redact_string_ignores_a_marker_longer_than_the_input() {
+    assert_eq!(redact_string("ab", &[Marker::literal("abc")]), "ab");
+}
+
+#[test]
+fn redact_string_hides_a_marker_holding_a_newline() {
+    let out = redact_string("x\ny z", &[Marker::literal("x\ny")]);
+    assert_eq!(out, "*** z");
+}

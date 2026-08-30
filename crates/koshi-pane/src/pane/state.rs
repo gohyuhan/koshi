@@ -27,7 +27,10 @@ pub enum PaneKind {
     /// A terminal pane backed by a PTY and emulated terminal.
     Terminal,
     /// A plugin pane rendered by an external plugin.
-    Plugin { plugin_id: PluginId },
+    Plugin {
+        /// The plugin that renders the pane.
+        plugin_id: PluginId,
+    },
 }
 
 impl PaneKind {

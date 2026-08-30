@@ -1,26 +1,25 @@
-//! Driving PTY resizes from a solved layout.
+//! Resizing PTYs to match a solved layout.
 //!
-//! The layout crate has already removed the 1-cell pane border and decided
-//! which panes show content, handing out `(PaneId, Option<Rect>)` content
-//! rects (`None` ⇔ no content shown). This module is the thin, border-agnostic
-//! executor: it floors each visible rect to a PTY-legal size and calls
-//! [`crate::backend::state::PtyBackend::resize`], reporting per pane what it did. It does **no**
-//! border math and does not depend on `koshi-layout` (the two are siblings).
+//! The input is the layout crate's `(PaneId, Option<Rect>)` content rects: the
+//! pane border is already removed, and `None` means the pane shows no content.
+//! This module floors each `Some` rect to a PTY-legal size, calls
+//! [`crate::backend::state::PtyBackend::resize`], and reports per pane what it
+//! did. It does no border math.
 
 use koshi_core::{geometry::Rect, ids::PaneId, process::PtySize};
 
 use crate::backend::state::PtyBackend;
 
-/// Smallest PTY a child is ever sized to: 2 columns by 1 row.
+/// The smallest size a PTY is set to: 2 columns by 1 row.
 ///
-/// Distinct from the layout crate's outer `MIN_PANE_SIZE`; this is the
-/// PTY-validity floor applied to the *content* rect after the border is gone.
+/// Applied to the content rect, after the border is removed.
 const MIN_PTY_SIZE: PtySize = PtySize { cols: 2, rows: 1 };
 
 /// Floor a content rect to a PTY-legal [`PtySize`].
 ///
-/// The rect is already the inner content area (border removed upstream), so
-/// this only clamps each dimension up to the 2×1 PTY minimum — no border math.
+/// Each dimension is raised to the 2×1 minimum on its own: `1×24` becomes
+/// `2×24`, `80×0` becomes `80×1`, and `80×24` is returned unchanged. `content`
+/// is the inner content area, with the border already removed.
 #[must_use]
 pub fn compute_pty_size(content: Rect) -> PtySize {
     PtySize {
@@ -31,35 +30,37 @@ pub fn compute_pty_size(content: Rect) -> PtySize {
 
 /// What [`resize_for_layout_change`] did for a single pane.
 ///
-/// Transient runtime metadata (never persisted or sent over IPC — the
-/// `PtyResized` event carries the wire form), so it is `Copy` and not `serde`.
+/// Lives in this process only: it is never persisted or sent over IPC. The
+/// `PtyResized` event carries the wire form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResizeResult {
     /// The pane this result describes.
     pub pane_id: PaneId,
-    /// The size the PTY was resized to, or `None` if the pane was skipped.
+    /// The size the PTY was resized to. `None` when the pane was skipped or
+    /// the backend refused the resize.
     pub applied: Option<PtySize>,
     /// `true` when the pane was skipped (no content) and kept its last size.
+    /// `false` for a pane the backend refused.
     pub kept_last_valid: bool,
 }
 
-/// Resize every pane's PTY to match a freshly solved layout, best-effort.
+/// Resize every pane's PTY to match a freshly solved layout.
 ///
 /// Walks `pane_items` (the `(PaneId, Option<Rect>)` output of the layout
-/// crate's `content_rects`) in order. A `None` rect means the pane shows no
-/// content: it is skipped with `kept_last_valid` set and no backend call. A
-/// `Some` rect is floored via [`compute_pty_size`] and applied through
-/// [`crate::backend::state::PtyBackend::resize`].
+/// crate's `content_rects`) in order:
 ///
-/// Each pane is independent: a backend error on one pane records that pane with
-/// `applied: None` (and `kept_last_valid: false`, distinguishing it from a
-/// no-content skip) and does not stop the rest, so one failing pane never drops
-/// the others' resizes. Callers that need to know a pane's new size (to update
-/// their own size cache or emit an event) read `applied`. The caller decides
-/// *which* panes to pass — e.g. only those whose size actually changed — so this
-/// executor holds no per-pane size state of its own.
+/// - A `None` rect is a pane showing no content: no backend call, and the
+///   result carries `applied: None` and `kept_last_valid: true`.
+/// - A `Some` rect is floored by [`compute_pty_size`] and applied through
+///   [`crate::backend::state::PtyBackend::resize`]. The result carries the
+///   floored size in `applied` and `kept_last_valid: false`.
+/// - A backend error on a pane is dropped: the result carries `applied: None`
+///   and `kept_last_valid: false`, and the walk continues with the next pane.
 ///
-/// Returns one [`ResizeResult`] per input pane, in order.
+/// Holds no per-pane state: the caller picks which panes to pass, and reads
+/// `applied` to learn each pane's new size.
+///
+/// Returns one [`ResizeResult`] per input pane, in input order.
 #[must_use]
 pub fn resize_for_layout_change(
     backend: &dyn PtyBackend,
@@ -77,7 +78,10 @@ pub fn resize_for_layout_change(
                 let computed = compute_pty_size(rect);
                 ResizeResult {
                     pane_id,
-                    applied: backend.resize(pane_id, computed).ok().map(|()| computed),
+                    applied: backend
+                        .resize(pane_id, computed)
+                        .is_ok()
+                        .then_some(computed),
                     kept_last_valid: false,
                 }
             }

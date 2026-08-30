@@ -95,6 +95,18 @@ fn build_snapshot_for_an_unknown_client_is_none() {
 }
 
 #[test]
+fn build_snapshot_is_none_when_the_clients_viewed_tab_is_gone() {
+    let mut rt = new_runtime();
+    let (mut session, session_id, tab_id, _pane_id, client_id) =
+        session_with_client(Size { cols: 80, rows: 24 });
+    // The client still names the tab it was viewing; the tab itself is gone.
+    session.tabs.remove(&tab_id);
+    rt.sessions.insert(session_id, session);
+
+    assert_eq!(rt.build_snapshot(client_id), None);
+}
+
+#[test]
 fn build_snapshot_maps_session_tab_and_client() {
     let mut rt = new_runtime();
     let (session, session_id, tab_id, pane_id, client_id) =
@@ -112,7 +124,7 @@ fn build_snapshot_maps_session_tab_and_client() {
     assert_eq!(snap.client.viewport, Size { cols: 80, rows: 24 });
     assert_eq!(snap.client.focused_pane, Some(pane_id));
 
-    // The load-bearing per-client invariant the renderer asserts.
+    // The load-bearing per-client invariant: both name the same tab.
     assert_eq!(snap.client.active_tab, tab_id);
     assert_eq!(snap.session.active_tab.id, tab_id);
 
@@ -472,6 +484,93 @@ fn tabs_metadata_covers_every_tab_in_index_order_with_the_viewed_tab_active() {
 }
 
 #[test]
+fn tabs_metadata_is_ordered_by_index_not_by_tab_id() {
+    let mut rt = new_runtime();
+    let (mut session, session_id, tab0, _pane0, client_id) =
+        session_with_client(Size { cols: 80, rows: 24 });
+
+    // Two more tabs, added with the higher index first. `session.tabs` is keyed
+    // by tab id, so map order says nothing about bar order.
+    let add_tab = |session: &mut Session, index: usize| {
+        let tab_id = TabId::new();
+        let pane_id = PaneId::new();
+        session
+            .panes
+            .insert(PaneRecord::new(pane_id, SystemTime::now()))
+            .expect("unique pane id");
+        session.tabs.insert(
+            tab_id,
+            Tab::new(tab_id, format!("t{index}"), index, pane_id),
+        );
+        tab_id
+    };
+    let tab3 = add_tab(&mut session, 3);
+    let tab1 = add_tab(&mut session, 1);
+    rt.sessions.insert(session_id, session);
+
+    let snap = rt.build_snapshot(client_id).expect("snapshot");
+
+    let bar: Vec<(TabId, usize, bool)> = snap
+        .session
+        .tabs_metadata
+        .iter()
+        .map(|meta| (meta.id, meta.index, meta.active))
+        .collect();
+    assert_eq!(
+        bar,
+        vec![(tab0, 0, true), (tab1, 1, false), (tab3, 3, false)]
+    );
+}
+
+#[test]
+fn session_lookups_return_none_for_ids_no_session_holds() {
+    let mut rt = new_runtime();
+    let (session, session_id, _tab, _pane, _client) =
+        session_with_client(Size { cols: 80, rows: 24 });
+    rt.sessions.insert(session_id, session);
+
+    assert_eq!(rt.session_for_client(ClientId::new()).map(|s| s.id), None);
+    assert_eq!(rt.session_for_pane(PaneId::new()).map(|s| s.id), None);
+    assert_eq!(
+        rt.session_for_client_mut(ClientId::new()).map(|s| s.id),
+        None
+    );
+    assert_eq!(rt.session_for_pane_mut(PaneId::new()).map(|s| s.id), None);
+}
+
+#[test]
+fn session_lookups_pick_the_owner_when_the_server_holds_several_sessions() {
+    let mut rt = new_runtime();
+    let (first, first_id, _tab_a, pane_a, client_a) =
+        session_with_client(Size { cols: 80, rows: 24 });
+    let (second, second_id, _tab_b, pane_b, client_b) =
+        session_with_client(Size { cols: 80, rows: 24 });
+    rt.sessions.insert(first_id, first);
+    rt.sessions.insert(second_id, second);
+
+    assert_eq!(
+        rt.session_for_client(client_a).map(|s| s.id),
+        Some(first_id)
+    );
+    assert_eq!(
+        rt.session_for_client(client_b).map(|s| s.id),
+        Some(second_id)
+    );
+    assert_eq!(rt.session_for_pane(pane_a).map(|s| s.id), Some(first_id));
+    assert_eq!(rt.session_for_pane(pane_b).map(|s| s.id), Some(second_id));
+
+    // The mutable twins resolve the same way.
+    assert_eq!(
+        rt.session_for_client_mut(client_b).map(|s| s.id),
+        Some(second_id)
+    );
+    assert_eq!(
+        rt.session_for_pane_mut(pane_a).map(|s| s.id),
+        Some(first_id)
+    );
+}
+
+#[test]
 fn snapshot_follows_live_output_when_the_client_has_not_scrolled() {
     let mut rt = new_runtime();
     let (session, session_id, _tab, pane_id, client_id) =
@@ -656,6 +755,57 @@ fn a_highlight_ending_on_a_wide_glyph_covers_its_whole_cell() {
 }
 
 #[test]
+fn word_and_line_highlights_run_with_the_text_like_a_character_one() {
+    for kind in [SelectionKind::Word, SelectionKind::Line] {
+        let (mut rt, pane, client) = runtime_with_text(b"a\r\nb\r\nc\r\nd");
+        rt.client_mut(client).expect("client").set_selection(
+            pane,
+            Selection {
+                kind,
+                anchor: GridPos { row: 1, col: 12 },
+                cursor: GridPos { row: 3, col: 33 },
+            },
+        );
+
+        assert_eq!(
+            spans(&rt, client),
+            Some(vec![(1, 12, 79), (2, 0, 79), (3, 0, 33)]),
+            "{kind:?} resolves to the same rows as a character highlight"
+        );
+    }
+}
+
+#[test]
+fn a_highlight_below_the_bottom_of_the_view_is_not_drawn() {
+    // Five characters through a 24-row screen: nothing has scrolled off, so the
+    // frame shows absolute lines 0..=23. Line 30 is below all of them.
+    let (mut rt, pane, client) = runtime_with_text(b"hello");
+    rt.client_mut(client).expect("client").set_selection(
+        pane,
+        character(GridPos { row: 30, col: 0 }, GridPos { row: 30, col: 4 }),
+    );
+
+    assert_eq!(spans(&rt, client), None, "nothing of it is on screen");
+    assert!(
+        rt.build_snapshot(client).expect("snapshot").panes[0].has_selection,
+        "the client still holds a highlight in the pane"
+    );
+}
+
+#[test]
+fn a_highlight_starting_past_the_last_column_draws_no_row() {
+    // The pane is 80 columns wide, so columns 90..=95 are off the right edge
+    // and the row they name carries no span at all.
+    let (mut rt, pane, client) = runtime_with_text(b"hello");
+    rt.client_mut(client).expect("client").set_selection(
+        pane,
+        character(GridPos { row: 0, col: 90 }, GridPos { row: 0, col: 95 }),
+    );
+
+    assert_eq!(spans(&rt, client), None);
+}
+
+#[test]
 fn a_highlight_the_view_has_scrolled_past_is_not_drawn() {
     // 30 lines through a 24-row screen: rows 0..=6 are in history, and the view
     // follows live output, so a highlight back at row 1 is off screen.
@@ -725,6 +875,54 @@ fn a_highlight_running_off_the_top_of_the_view_starts_at_the_first_visible_row()
         Some((2, 0, 5)),
         "and ends where it ends"
     );
+}
+
+// ============================================================================
+// Pane titles: the reported working directory, the OSC title, and the screen
+// that decides between them
+// ============================================================================
+
+/// The title the frame carries for the client's only pane.
+fn title(rt: &Server, client: ClientId) -> Option<String> {
+    rt.build_snapshot(client).expect("snapshot").panes[0]
+        .title
+        .clone()
+}
+
+#[test]
+fn the_pane_title_is_the_shells_reported_directory_on_the_primary_screen() {
+    // OSC 2 names the window, OSC 7 reports the working directory. On the
+    // primary screen the directory wins.
+    let (rt, _pane, client) =
+        runtime_with_text(b"\x1b]2;window title\x07\x1b]7;file://localhost/tmp\x07");
+
+    assert_eq!(title(&rt, client), Some("/tmp".to_string()));
+}
+
+#[test]
+fn the_pane_title_falls_back_to_the_osc_title_when_no_directory_was_reported() {
+    let (rt, _pane, client) = runtime_with_text(b"\x1b]2;window title\x07");
+
+    assert_eq!(title(&rt, client), Some("window title".to_string()));
+}
+
+#[test]
+fn the_pane_title_on_the_alternate_screen_is_the_apps_osc_title() {
+    // `CSI ?1049h` enters the alternate screen; the reported directory no
+    // longer names the pane there.
+    let (rt, _pane, client) =
+        runtime_with_text(b"\x1b]2;window title\x07\x1b]7;file://localhost/tmp\x07\x1b[?1049h");
+
+    let snap = rt.build_snapshot(client).expect("snapshot");
+    assert!(snap.panes[0].on_alt_screen);
+    assert_eq!(snap.panes[0].title.as_deref(), Some("window title"));
+}
+
+#[test]
+fn a_pane_on_the_alternate_screen_with_no_osc_title_has_none() {
+    let (rt, _pane, client) = runtime_with_text(b"\x1b]7;file://localhost/tmp\x07\x1b[?1049h");
+
+    assert_eq!(title(&rt, client), None);
 }
 
 #[test]

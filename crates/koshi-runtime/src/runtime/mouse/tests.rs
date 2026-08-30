@@ -745,9 +745,10 @@ fn a_fast_over_drag_fills_to_the_wall_then_reverses_at_once() {
         drag(outward_edge_x(side, viewport_cols), cell.y),
     );
     let grown = pane_cols(&runtime, client, pane);
-    assert!(
-        grown > before,
-        "the jump grew the pane toward the neighbor's minimum ({before} -> {grown})"
+    assert_eq!(before, 40, "the split starts even, 40 columns each");
+    assert_eq!(
+        grown, 76,
+        "the jump grew the pane by every column the neighbor could donate"
     );
 
     // Pointer still further out: the neighbor is already at its minimum, so the
@@ -927,6 +928,7 @@ fn grabbing_the_frame_of_a_fullscreen_pane_starts_no_resize() {
     );
     let _ = runtime.dispatch(envelope);
     let active_tab = runtime.client_mut(client).unwrap().active_tab();
+    let zoomed = runtime.typed_pane(client).expect("a focused pane");
 
     // Grab the zoomed pane's right frame edge and drag inward: no divider is
     // visible under a zoom, so no resize begins, the zoom stands, and the
@@ -935,11 +937,9 @@ fn grabbing_the_frame_of_a_fullscreen_pane_starts_no_resize() {
     mouse(&mut runtime, &mut viewer, press(cell.x, cell.y));
 
     mouse(&mut runtime, &mut viewer, drag(cell.x - 3, cell.y));
-    assert!(
-        matches!(
-            runtime.client_mut(client).unwrap().layout_mode(active_tab),
-            LayoutMode::Fullscreen { .. }
-        ),
+    assert_eq!(
+        runtime.client_mut(client).unwrap().layout_mode(active_tab),
+        LayoutMode::Fullscreen { focused: zoomed },
         "no resize was dispatched, so the client's zoom stands"
     );
 
@@ -1845,7 +1845,7 @@ fn the_write_doors_do_nothing_for_a_pane_that_is_gone() {
     let live = only_pane(&runtime);
     let gone = PaneId::new();
 
-    runtime.scroll_pane_view(client, gone, true, 3);
+    let top = runtime.scroll_pane_view(client, gone, true, 3);
     let forwarded = runtime.forward_mouse_to_pane(
         client,
         gone,
@@ -1854,10 +1854,12 @@ fn the_write_doors_do_nothing_for_a_pane_that_is_gone() {
     runtime.write_alt_scroll_arrows(gone, true, 3);
     let applied = runtime.drag_resize(client, gone, Direction::Right, 1, 3);
 
-    assert!(
-        fake.writes(gone).is_err(),
+    assert_eq!(
+        fake.writes(gone).expect_err("no write log"),
+        PtyError::UnknownPane { pane: gone },
         "a gone pane was never opened, so it has no write log at all"
     );
+    assert_eq!(top, None, "a gone pane reports no top row");
     assert_eq!(
         fake.writes(live).expect("writes"),
         Vec::<Vec<u8>>::new(),
@@ -1885,6 +1887,61 @@ fn a_zero_line_notch_sends_no_arrow_keys() {
         fake.writes(pane).expect("writes"),
         Vec::<Vec<u8>>::new(),
         "a zero-line notch sends no arrows at all"
+    );
+}
+
+#[test]
+fn a_one_line_notch_sends_one_arrow() {
+    let (mut runtime, fake, _client) = runtime_with_fake();
+    let pane = only_pane(&runtime);
+    runtime.handle_pty_output(pane, b"\x1b[?1049h\x1b[?1007h");
+
+    runtime.write_alt_scroll_arrows(pane, false, 1);
+
+    assert_eq!(
+        fake.writes(pane).expect("writes"),
+        vec![b"\x1b[B".to_vec()],
+        "a one-line notch sends exactly one down-arrow"
+    );
+}
+
+#[test]
+fn a_scroll_of_a_pane_on_the_alternate_screen_stores_no_offset() {
+    let (mut runtime, _fake, client) = runtime_with_fake();
+    let pane = only_pane(&runtime);
+    feed_scrollback(&mut runtime, pane, 40);
+    // Enter the alternate screen; the door is called straight, with no viewer
+    // deciding anything first.
+    runtime.handle_pty_output(pane, b"\x1b[?1049h");
+
+    let top = runtime.scroll_pane_view(client, pane, true, 5);
+
+    assert_eq!(
+        scroll_offset(&runtime, client, pane),
+        0,
+        "a pane on the alternate screen stores no offset"
+    );
+    // 40 lines through a 20-row pane push 21 into history, so the primary
+    // screen's live view starts at line 21.
+    assert_eq!(top, Some(21), "the answer is the live top row");
+}
+
+#[test]
+fn a_scroll_for_a_client_the_session_does_not_hold_moves_nothing() {
+    let (mut runtime, _fake, client) = runtime_with_fake();
+    let pane = only_pane(&runtime);
+    feed_scrollback(&mut runtime, pane, 40);
+    let stranger = ClientId::new();
+
+    let top = runtime.scroll_pane_view(stranger, pane, true, 5);
+
+    // A client with no record has no stored offset, so it reads the live top
+    // row: 40 lines through a 20-row pane push 21 into history.
+    assert_eq!(top, Some(21), "the stranger is answered the live top row");
+    assert_eq!(
+        scroll_offset(&runtime, client, pane),
+        0,
+        "and the session's own client's view did not move"
     );
 }
 
@@ -1946,16 +2003,15 @@ fn a_wheel_over_chrome_reaches_the_focused_mouse_app() {
         wheel(ScrollDirection::Up, chrome),
     );
 
-    let writes = fake.writes(pane).expect("writes");
     assert_eq!(
-        writes.len(),
-        1,
-        "the wheel reached the focused pane: {writes:?}"
+        chrome,
+        Point { x: 0, y: 1 },
+        "the first chrome cell is the pane's own left border"
     );
-    assert!(
-        writes[0].starts_with(b"\x1b[<64;"),
-        "an SGR wheel-up report (button 64): {:?}",
-        writes[0]
+    assert_eq!(
+        fake.writes(pane).expect("writes"),
+        vec![b"\x1b[<64;1;1M".to_vec()],
+        "an SGR wheel-up report (button 64), clamped to the pane's first cell"
     );
 }
 
@@ -2011,24 +2067,23 @@ fn stack_onto_focused(runtime: &mut Server, client: ClientId) {
 }
 
 /// A border cell of a drawn pane that sits right against a collapsed stack
-/// member's header strip, with the pane and the side it is on. Panics if the
-/// frame has no such cell.
-fn find_border_against_a_header(runtime: &Server, client: ClientId) -> (Point, PaneId) {
+/// member's header strip. Panics if the frame has no such cell.
+fn find_border_against_a_header(runtime: &Server, client: ClientId) -> Point {
     let snapshot = runtime.build_snapshot(client).expect("snapshot");
     let viewport = snapshot.client.viewport;
     let region = |at: Point| hit_test(snapshot.layout(ViewerChrome::default()), at);
     let x = viewport.cols / 2;
     for y in 1..viewport.rows - 1 {
-        let HitRegion::PaneBorder { pane_id, side } = region(Point { x, y }) else {
+        let HitRegion::PaneBorder { side, .. } = region(Point { x, y }) else {
             continue;
         };
         let touching = match side {
-            Direction::Up if y > 0 => region(Point { x, y: y - 1 }),
+            Direction::Up => region(Point { x, y: y - 1 }),
             Direction::Down => region(Point { x, y: y + 1 }),
             _ => continue,
         };
         if matches!(touching, HitRegion::StackHeader { .. }) {
-            return (Point { x, y }, pane_id);
+            return Point { x, y };
         }
     }
     panic!("no pane border against a stack header");
@@ -2044,7 +2099,7 @@ fn grabbing_the_border_against_a_collapsed_stack_member_starts_no_resize() {
     let mut viewer = viewer_for(&mut runtime, client);
     stack_onto_focused(&mut runtime, client);
 
-    let (cell, _) = find_border_against_a_header(&runtime, client);
+    let cell = find_border_against_a_header(&runtime, client);
     let frame = MouseFrame::from(runtime.build_snapshot(client).expect("snapshot"));
 
     let pressed = viewer.handle_mouse(press(cell.x, cell.y), &frame, far_apart());
@@ -2281,6 +2336,19 @@ fn a_round_that_reports_nothing_is_still_answered() {
 }
 
 #[test]
+fn a_round_with_no_actions_is_still_answered() {
+    let (mut runtime, _fake, client, queue) = runtime_with_queue();
+
+    runtime.run_client_mouse(client, 15, Vec::new());
+
+    assert_eq!(
+        answers(&queue),
+        vec![(15, Vec::new())],
+        "an empty round is answered with an empty list"
+    );
+}
+
+#[test]
 fn the_answers_follow_the_order_of_the_actions_that_reported() {
     let (mut runtime, fake, client, queue) = runtime_with_queue();
     let pane = only_pane(&runtime);
@@ -2397,5 +2465,64 @@ fn a_two_cell_drag_moves_the_border_as_far_as_two_one_cell_drags_do() {
         heights(&stacked_panes(&runtime, client)),
         vec![19, 9, 3, 3, 4],
         "the border landed where two one-cell drags put it"
+    );
+}
+
+#[test]
+fn a_border_drag_of_zero_cells_moves_nothing_and_reports_zero() {
+    let (mut runtime, _fake, client) = runtime_with_fake();
+    let pane = only_pane(&runtime);
+    split_focused(&mut runtime, client);
+    let before = pane_cols(&runtime, client, pane);
+
+    let applied = runtime.drag_resize(client, pane, Direction::Right, 1, 0);
+
+    assert_eq!(applied, 0, "a drag of no cells takes none");
+    assert_eq!(
+        pane_cols(&runtime, client, pane),
+        before,
+        "and the border did not move"
+    );
+}
+
+#[test]
+fn a_negative_step_moves_the_border_the_other_way() {
+    let (mut runtime, _fake, client) = runtime_with_fake();
+    let pane = only_pane(&runtime);
+    split_focused(&mut runtime, client);
+    let before = pane_cols(&runtime, client, pane);
+
+    let applied = runtime.drag_resize(client, pane, Direction::Right, -1, 4);
+
+    assert_eq!(applied, 4, "all four cells of the shrink were taken");
+    assert_eq!(
+        pane_cols(&runtime, client, pane),
+        before - 4,
+        "a step of -1 shrinks the grabbed pane"
+    );
+}
+
+#[test]
+fn a_border_drag_into_a_neighbor_at_its_minimum_reports_no_cells_taken() {
+    let (mut runtime, _fake, client) = runtime_with_fake();
+    let pane = only_pane(&runtime);
+    split_focused(&mut runtime, client);
+
+    // Ask for far more than the neighbor can donate: the drag fills right up to
+    // the neighbor's minimum size and reports the cells it really took.
+    let filled = runtime.drag_resize(client, pane, Direction::Right, 1, 200);
+    assert_eq!(
+        filled, 36,
+        "the neighbor gave every column above its minimum"
+    );
+    assert_eq!(pane_cols(&runtime, client, pane), 76, "40 columns plus 36");
+
+    let applied = runtime.drag_resize(client, pane, Direction::Right, 1, 5);
+
+    assert_eq!(applied, 0, "a neighbor at its minimum donates nothing");
+    assert_eq!(
+        pane_cols(&runtime, client, pane),
+        76,
+        "and the border stayed at the wall"
     );
 }

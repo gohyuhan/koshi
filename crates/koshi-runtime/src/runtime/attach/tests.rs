@@ -316,6 +316,74 @@ fn a_plugin_pane_reports_its_plugin_id() {
 }
 
 #[test]
+fn a_pane_no_tab_layout_names_is_still_carried() {
+    let mut session = session("s");
+    let in_layout = add_pane(&mut session);
+    let outside_every_layout = add_pane(&mut session);
+    let tab_id = TabId::new();
+    session
+        .tabs
+        .insert(tab_id, Tab::new(tab_id, "edit".to_string(), 0, in_layout));
+
+    let structure = session_structure(&session);
+
+    let mut both = vec![in_layout, outside_every_layout];
+    both.sort();
+    assert_eq!(
+        structure
+            .panes
+            .iter()
+            .map(|pane| pane.id)
+            .collect::<Vec<PaneId>>(),
+        both
+    );
+    assert_eq!(structure.tabs[0].layout, LayoutNode::Pane(in_layout));
+}
+
+#[test]
+fn focus_history_carries_an_id_the_pane_list_no_longer_holds() {
+    let mut session = session("s");
+    let kept = add_pane(&mut session);
+    let unregistered = add_pane(&mut session);
+    let tab_id = TabId::new();
+    let mut tab = Tab::new(tab_id, "edit".to_string(), 0, kept);
+    tab.record_focus_mru(kept);
+    tab.record_focus_mru(unregistered);
+    session.tabs.insert(tab_id, tab);
+    session
+        .panes
+        .remove(unregistered)
+        .expect("the pane was registered");
+
+    let structure = session_structure(&session);
+
+    assert_eq!(structure.tabs[0].focus_mru, vec![unregistered, kept]);
+    assert_eq!(
+        structure.panes,
+        vec![PaneStructure {
+            id: kept,
+            kind: PaneKind::Terminal,
+        }]
+    );
+}
+
+#[test]
+fn the_session_and_tab_names_are_carried_byte_for_byte() {
+    let mut session = session("");
+    let pane_id = add_pane(&mut session);
+    let tab_id = TabId::new();
+    session.tabs.insert(
+        tab_id,
+        Tab::new(tab_id, "編集 \u{1f5c2}\u{200b}".to_string(), 0, pane_id),
+    );
+
+    let structure = session_structure(&session);
+
+    assert_eq!(structure.name, "");
+    assert_eq!(structure.tabs[0].name, "編集 \u{1f5c2}\u{200b}");
+}
+
+#[test]
 fn focus_history_is_carried_most_recent_first() {
     let mut session = session("s");
     let first = add_pane(&mut session);
