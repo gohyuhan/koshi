@@ -352,7 +352,7 @@ fn rewrap_line_splits_exactly_and_marks_ends() {
         .chars()
         .map(|c| Cell::new(c, 1, Style::default()))
         .collect();
-    let rows = rewrap_line(&cells, 4, Style::default());
+    let rows = rewrap_line(cells.clone(), 4, Style::default());
     assert_eq!(
         rows,
         vec![
@@ -376,7 +376,7 @@ fn rewrap_line_splits_exactly_and_marks_ends() {
 
 #[test]
 fn rewrap_line_of_empty_content_is_one_hard_row() {
-    let rows = rewrap_line(&[], 4, Style::default());
+    let rows = rewrap_line(Vec::new(), 4, Style::default());
     assert_eq!(rows, vec![(Vec::new(), RowMeta::default())]);
 }
 
@@ -602,7 +602,7 @@ fn prompt_marks(state: &TerminalState) -> Vec<bool> {
 #[test]
 fn rewrap_line_at_zero_columns_wraps_at_one_column() {
     let content = cells("abc");
-    let rows = rewrap_line(&content, 0, Style::default());
+    let rows = rewrap_line(content, 0, Style::default());
     let soft = RowMeta {
         end: RowEnd::Soft,
         prompt: false,
@@ -624,7 +624,7 @@ fn rewrap_line_leaves_a_spacer_in_the_fill_before_a_wide_glyph_at_the_last_colum
     let mut content = cells("abc");
     content.extend(wide('\u{6f22}'));
 
-    let rows = rewrap_line(&content, 4, red);
+    let rows = rewrap_line(content, 4, red);
 
     let mut first = cells("abc");
     first.push(Cell::blank_with(red));
@@ -648,7 +648,7 @@ fn rewrap_line_at_one_column_stores_a_wide_glyph_narrow_and_skips_its_continuati
     let mut content = wide('\u{6f22}').to_vec();
     content.extend(wide('\u{5b57}'));
 
-    let rows = rewrap_line(&content, 1, Style::default());
+    let rows = rewrap_line(content, 1, Style::default());
 
     assert_eq!(
         rows,

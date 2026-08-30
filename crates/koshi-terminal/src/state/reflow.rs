@@ -31,10 +31,10 @@ impl TerminalState {
     pub(super) fn reflow_primary(&mut self, size: PtySize) {
         let fill = self.primary_render.style.bg_fill();
 
-        // Every physical row: history first (oldest at the front), then the
-        // live screen, each with its row metadata.
-        let mut physical: Vec<(Vec<Cell>, RowMeta)> =
-            self.scrollback.lines().iter().cloned().collect();
+        // Every physical row: history first (oldest at the front, taken out
+        // of the scrollback buffer), then the live screen, each with its row
+        // metadata.
+        let mut physical: Vec<(Vec<Cell>, RowMeta)> = Vec::from(self.scrollback.take_lines());
         let history_len = physical.len();
         for (index, row) in self.primary.rows().iter().enumerate() {
             physical.push((row.clone(), self.primary.row_meta(index as u16)));
@@ -93,7 +93,7 @@ impl TerminalState {
         let mut rewrapped: Vec<(Vec<Cell>, RowMeta)> = Vec::new();
         let mut new_cursor_physical = 0_usize;
         let mut new_cursor_col = 0_usize;
-        for (index, (content, prompt_offsets)) in lines.iter().enumerate() {
+        for (index, (content, prompt_offsets)) in lines.into_iter().enumerate() {
             let start = rewrapped.len();
             let mut rows = rewrap_line(content, size.cols, fill);
             if index == cursor_line {
@@ -102,7 +102,7 @@ impl TerminalState {
                 new_cursor_col = col;
             }
             for offset in prompt_offsets {
-                let (row_in_line, _) = locate_offset(&rows, *offset);
+                let (row_in_line, _) = locate_offset(&rows, offset);
                 rows[row_in_line].1.prompt = true;
             }
             rewrapped.extend(rows);
@@ -127,7 +127,7 @@ impl TerminalState {
         // the rest — padded with blanks at the bottom — is the new screen.
         let overflow = rewrapped.len().saturating_sub(size.rows as usize);
         let history: Vec<(Vec<Cell>, RowMeta)> = rewrapped.drain(..overflow).collect();
-        self.scrollback.replace_lines(history);
+        self.scrollback.replace_lines(history, history_len as u64);
 
         while rewrapped.len() < size.rows as usize {
             rewrapped.push((
@@ -154,16 +154,16 @@ impl TerminalState {
 /// column leaves a blank spacer in `fill` there and starts the next row whole
 /// ([`RowEnd::SoftWide`]). At one column a wide glyph is stored narrow and its
 /// width-0 continuation cell is skipped.
-fn rewrap_line(content: &[Cell], cols: u16, fill: Style) -> Vec<(Vec<Cell>, RowMeta)> {
+fn rewrap_line(content: Vec<Cell>, cols: u16, fill: Style) -> Vec<(Vec<Cell>, RowMeta)> {
     let cols = cols.max(1) as usize;
     let mut rows: Vec<(Vec<Cell>, RowMeta)> = Vec::new();
-    let mut row: Vec<Cell> = Vec::new();
-    let mut index = 0;
-    while index < content.len() {
-        let cell = &content[index];
+    let mut row: Vec<Cell> = Vec::with_capacity(cols.min(content.len()));
+    let mut cells = content.into_iter().peekable();
+    while let Some(cell) = cells.next() {
         if row.len() == cols {
+            let full = std::mem::replace(&mut row, Vec::with_capacity(cols.min(cells.len() + 1)));
             rows.push((
-                std::mem::take(&mut row),
+                full,
                 RowMeta {
                     end: RowEnd::Soft,
                     prompt: false,
@@ -173,30 +173,29 @@ fn rewrap_line(content: &[Cell], cols: u16, fill: Style) -> Vec<(Vec<Cell>, RowM
         if cell.width() == 2 {
             if cols == 1 {
                 // Store the base narrow and skip its width-0 continuation.
-                row.push(rebuilt_with_width(cell, 1));
-                index += 1;
-                if content.get(index).is_some_and(|next| next.width() == 0) {
-                    index += 1;
+                row.push(rebuilt_with_width(&cell, 1));
+                if cells.peek().is_some_and(|next| next.width() == 0) {
+                    cells.next();
                 }
                 continue;
             }
             if row.len() + 1 == cols {
                 // The base would land in the last column: fill it with a
-                // spacer, end the row `SoftWide`, and retry the glyph on the
-                // next row.
+                // spacer, end the row `SoftWide`, and start the next row
+                // with the glyph.
                 row.push(Cell::blank_with(fill));
+                let full =
+                    std::mem::replace(&mut row, Vec::with_capacity(cols.min(cells.len() + 1)));
                 rows.push((
-                    std::mem::take(&mut row),
+                    full,
                     RowMeta {
                         end: RowEnd::SoftWide,
                         prompt: false,
                     },
                 ));
-                continue;
             }
         }
-        row.push(cell.clone());
-        index += 1;
+        row.push(cell);
     }
     rows.push((
         row,

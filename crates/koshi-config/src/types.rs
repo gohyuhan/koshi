@@ -15,6 +15,7 @@
 //! [`migration`](crate::migration) validates versioned files and moves them
 //! through adjacent schemas. Disk discovery and reading live in the binary.
 
+use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -294,6 +295,12 @@ impl ModeName {
 
     /// The mode name as a string slice.
     pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Borrow<str> for ModeName {
+    fn borrow(&self) -> &str {
         &self.0
     }
 }

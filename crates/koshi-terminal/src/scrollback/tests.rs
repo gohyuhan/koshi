@@ -19,6 +19,13 @@ fn bounded(max_lines: usize, max_bytes: usize) -> Scrollback {
     })
 }
 
+/// Call [`Scrollback::replace_lines`] with the buffer's current retained
+/// count as `retained_before`.
+fn replace(sb: &mut Scrollback, lines: Vec<(Vec<Cell>, RowMeta)>) {
+    let retained_before = sb.len() as u64;
+    sb.replace_lines(lines, retained_before);
+}
+
 /// The base characters of every retained row, front (oldest) to back.
 fn retained(sb: &Scrollback) -> Vec<String> {
     sb.lines()
@@ -310,16 +317,19 @@ fn a_row_of_nothing_but_padding_stores_no_cells() {
 fn a_reflow_rebuild_trims_the_same_way_a_push_does() {
     // A replacement trims a hard row the same way a push does.
     let mut sb = bounded(10, 1_000_000);
-    sb.replace_lines(vec![
-        (padded("one", 200), RowMeta::default()),
-        (
-            padded("ab", 200),
-            RowMeta {
-                end: RowEnd::Soft,
-                prompt: false,
-            },
-        ),
-    ]);
+    replace(
+        &mut sb,
+        vec![
+            (padded("one", 200), RowMeta::default()),
+            (
+                padded("ab", 200),
+                RowMeta {
+                    end: RowEnd::Soft,
+                    prompt: false,
+                },
+            ),
+        ],
+    );
 
     let (hard, _) = &sb.lines()[0];
     let (soft, _) = &sb.lines()[1];
@@ -333,7 +343,7 @@ fn a_reflow_rebuild_releases_the_memory_the_padding_held() {
     // `Vec` never promises a capacity equal to the length: the check is a
     // bound, not an equality.
     let mut sb = bounded(10, 1_000_000);
-    sb.replace_lines(vec![(padded("hi", 200), RowMeta::default())]);
+    replace(&mut sb, vec![(padded("hi", 200), RowMeta::default())]);
 
     let (stored, _) = &sb.lines()[0];
     assert_eq!(stored.len(), 2);
@@ -360,22 +370,25 @@ fn trimming_lets_the_byte_cap_hold_the_text_it_was_set_for() {
 #[test]
 fn prompt_marks_stay_with_rows_through_history_replacement() {
     let mut sb = bounded(10, 1_000_000);
-    sb.replace_lines(vec![
-        (
-            line("prompt"),
-            RowMeta {
-                end: RowEnd::Hard,
-                prompt: true,
-            },
-        ),
-        (
-            line("output"),
-            RowMeta {
-                end: RowEnd::Hard,
-                prompt: false,
-            },
-        ),
-    ]);
+    replace(
+        &mut sb,
+        vec![
+            (
+                line("prompt"),
+                RowMeta {
+                    end: RowEnd::Hard,
+                    prompt: true,
+                },
+            ),
+            (
+                line("output"),
+                RowMeta {
+                    end: RowEnd::Hard,
+                    prompt: false,
+                },
+            ),
+        ],
+    );
 
     assert!(sb.lines()[0].1.prompt);
     assert!(!sb.lines()[1].1.prompt);
@@ -551,7 +564,7 @@ fn replacing_with_fewer_rows_leaves_total_pushed_unchanged() {
     for s in ["one", "two", "three"] {
         sb.push_row(&line(s), RowMeta::default());
     }
-    sb.replace_lines(vec![(line("only"), RowMeta::default())]);
+    replace(&mut sb, vec![(line("only"), RowMeta::default())]);
     assert_eq!(retained(&sb), vec!["only"]);
     assert_eq!(sb.byte_total, 4);
     assert_eq!(sb.total_pushed(), 3);
@@ -562,11 +575,14 @@ fn replacing_with_fewer_rows_leaves_total_pushed_unchanged() {
 fn replacing_with_more_rows_grows_total_pushed_by_the_difference() {
     let mut sb = bounded(10, 1_000_000);
     sb.push_row(&line("one"), RowMeta::default());
-    sb.replace_lines(vec![
-        (line("a"), RowMeta::default()),
-        (line("b"), RowMeta::default()),
-        (line("c"), RowMeta::default()),
-    ]);
+    replace(
+        &mut sb,
+        vec![
+            (line("a"), RowMeta::default()),
+            (line("b"), RowMeta::default()),
+            (line("c"), RowMeta::default()),
+        ],
+    );
     assert_eq!(retained(&sb), vec!["a", "b", "c"]);
     assert_eq!(sb.byte_total, 3);
     assert_eq!(sb.total_pushed(), 3);
@@ -575,12 +591,15 @@ fn replacing_with_more_rows_grows_total_pushed_by_the_difference() {
 #[test]
 fn replacing_past_the_line_cap_evicts_the_oldest_and_tallies_them() {
     let mut sb = bounded(2, 1_000_000);
-    sb.replace_lines(vec![
-        (line("aa"), RowMeta::default()),
-        (line("bbb"), RowMeta::default()),
-        (line("c"), RowMeta::default()),
-        (line("dd"), RowMeta::default()),
-    ]);
+    replace(
+        &mut sb,
+        vec![
+            (line("aa"), RowMeta::default()),
+            (line("bbb"), RowMeta::default()),
+            (line("c"), RowMeta::default()),
+            (line("dd"), RowMeta::default()),
+        ],
+    );
     assert_eq!(retained(&sb), vec!["c", "dd"]);
     assert_eq!(sb.byte_total, 3);
     assert_eq!(sb.dropped_lines(), 2);
@@ -592,11 +611,14 @@ fn replacing_past_the_line_cap_evicts_the_oldest_and_tallies_them() {
 #[test]
 fn replacing_past_the_byte_cap_keeps_the_newest_rows_within_budget() {
     let mut sb = bounded(100, 4);
-    sb.replace_lines(vec![
-        (line("aaa"), RowMeta::default()),
-        (line("bb"), RowMeta::default()),
-        (line("cc"), RowMeta::default()),
-    ]);
+    replace(
+        &mut sb,
+        vec![
+            (line("aaa"), RowMeta::default()),
+            (line("bb"), RowMeta::default()),
+            (line("cc"), RowMeta::default()),
+        ],
+    );
     assert_eq!(retained(&sb), vec!["bb", "cc"]);
     assert_eq!(sb.byte_total, 4);
     assert_eq!(sb.dropped_lines(), 1);
@@ -608,7 +630,7 @@ fn replacing_with_nothing_empties_the_buffer_and_keeps_the_counters() {
     let mut sb = bounded(1, 1_000_000);
     sb.push_row(&line("aa"), RowMeta::default());
     sb.push_row(&line("bb"), RowMeta::default()); // drops "aa"
-    sb.replace_lines(Vec::new());
+    replace(&mut sb, Vec::new());
     assert!(sb.is_empty());
     assert_eq!(sb.byte_total, 0);
     assert_eq!(sb.total_pushed(), 2);
@@ -619,13 +641,16 @@ fn replacing_with_nothing_empties_the_buffer_and_keeps_the_counters() {
 #[test]
 fn a_wide_glyph_wrap_row_keeps_its_spacer_through_replace_lines() {
     let mut sb = bounded(10, 1_000_000);
-    sb.replace_lines(vec![(
-        padded("ab", 6),
-        RowMeta {
-            end: RowEnd::SoftWide,
-            prompt: false,
-        },
-    )]);
+    replace(
+        &mut sb,
+        vec![(
+            padded("ab", 6),
+            RowMeta {
+                end: RowEnd::SoftWide,
+                prompt: false,
+            },
+        )],
+    );
 
     let (stored, meta) = &sb.lines()[0];
     assert_eq!(stored.len(), 6);
@@ -745,4 +770,40 @@ fn stored_rows_over_the_byte_cap_are_dropped_on_the_way_in() {
     assert_eq!(restored.byte_total, 6);
     assert_eq!(restored.dropped_lines(), 1);
     assert_eq!(restored.dropped_bytes(), 4);
+}
+
+#[test]
+fn take_lines_empties_the_buffer_and_keeps_the_tallies() {
+    let mut sb = bounded(10, 1000);
+    sb.push_row(&line("one"), RowMeta::default());
+    sb.push_row(&line("two"), RowMeta::default());
+
+    let taken = sb.take_lines();
+
+    let taken_text: Vec<String> = taken
+        .iter()
+        .map(|(row, _)| row.iter().map(Cell::ch).collect())
+        .collect();
+    assert_eq!(taken_text, vec!["one", "two"]);
+    assert!(sb.is_empty());
+    assert_eq!(sb.total_pushed(), 2);
+    assert_eq!(sb.dropped_lines(), 0);
+    assert_eq!(sb.dropped_bytes(), 0);
+
+    sb.replace_lines(Vec::from(taken), 2);
+    assert_eq!(sb.total_pushed(), 2);
+    assert_eq!(retained(&sb), vec!["one", "two"]);
+}
+
+#[test]
+fn pushes_after_take_lines_start_from_a_zero_byte_total() {
+    let mut sb = bounded(10, 10);
+    sb.push_row(&line("12345678"), RowMeta::default());
+
+    let _ = sb.take_lines();
+
+    sb.push_row(&line("1234"), RowMeta::default());
+    sb.push_row(&line("1234"), RowMeta::default());
+    assert_eq!(retained(&sb), vec!["1234", "1234"]);
+    assert_eq!(sb.dropped_lines(), 0);
 }

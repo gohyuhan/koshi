@@ -147,16 +147,26 @@ impl Scrollback {
         self.evict_to_caps();
     }
 
+    /// Remove and return every retained row with its metadata, oldest at the
+    /// front, leaving the buffer empty with a zero byte total. The caps, the
+    /// dropped tallies, and [`total_pushed`](Self::total_pushed) keep their
+    /// values. The caller passes the returned rows' count to
+    /// [`replace_lines`](Self::replace_lines) as `retained_before`.
+    pub(crate) fn take_lines(&mut self) -> VecDeque<(Vec<Cell>, RowMeta)> {
+        self.byte_total = 0;
+        std::mem::take(&mut self.lines)
+    }
+
     /// Replace every retained row with `lines`, each keeping its own metadata,
     /// then apply both caps. Rows the caps evict are tallied as dropped.
-    /// [`total_pushed`](Self::total_pushed) grows by the increase in retained
-    /// rows (counted after eviction) and never decreases.
+    /// [`total_pushed`](Self::total_pushed) grows by the count of retained
+    /// rows (counted after eviction) exceeding `retained_before` and never
+    /// decreases.
     ///
     /// Each row is stored the way [`push_row`](Self::push_row) stores one,
     /// shortened in place: a hard-ended row without its trailing default
     /// blanks, a soft-wrapped row whole.
-    pub(crate) fn replace_lines(&mut self, lines: Vec<(Vec<Cell>, RowMeta)>) {
-        let before = self.lines.len() as u64;
+    pub(crate) fn replace_lines(&mut self, lines: Vec<(Vec<Cell>, RowMeta)>, retained_before: u64) {
         self.lines = lines
             .into_iter()
             .map(|(mut cells, meta)| {
@@ -167,7 +177,7 @@ impl Scrollback {
         self.byte_total = self.lines.iter().map(|(cells, _)| line_bytes(cells)).sum();
         self.evict_to_caps();
         let after = self.lines.len() as u64;
-        self.total_pushed += after.saturating_sub(before);
+        self.total_pushed += after.saturating_sub(retained_before);
     }
 
     /// Drop the oldest row, update `byte_total` and the dropped tallies, and

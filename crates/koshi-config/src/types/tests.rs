@@ -310,6 +310,18 @@ fn mode_names_compare_by_exact_text() {
 }
 
 #[test]
+fn mode_name_maps_answer_str_lookups() {
+    // `ModeName` borrows as `str`, so a `BTreeMap<ModeName, _>` answers a
+    // `&str` key exactly as it answers the owned key.
+    let map = BTreeMap::from([(ModeName::new("locked"), 1), (ModeName::new("normal"), 2)]);
+    assert_eq!(map.get("locked"), Some(&1));
+    assert_eq!(map.get("normal"), Some(&2));
+    assert_eq!(map.get("Normal"), None);
+    assert_eq!(map.get("normal "), None);
+    assert_eq!(map.get(""), None);
+}
+
+#[test]
 fn the_default_modes_remove_no_sequences() {
     let modes = default_mode_bindings(Leader::default());
     for name in ["normal", "locked"] {

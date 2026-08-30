@@ -21,10 +21,9 @@ fn detail(error: CliError) -> String {
 
 #[test]
 fn a_version_inside_the_range_this_build_sent_is_accepted() {
-    SESSION.settled_version(2).expect("2 is the session floor");
     SESSION
         .settled_version(3)
-        .expect("3 is the session ceiling");
+        .expect("3 is the only session version");
     ROUTER.settled_version(1).expect("1 is the router floor");
     ROUTER.settled_version(2).expect("2 is the router ceiling");
 }
@@ -33,11 +32,11 @@ fn a_version_inside_the_range_this_build_sent_is_accepted() {
 fn a_session_version_above_the_range_names_both_the_version_and_the_range() {
     let refusal = SESSION
         .settled_version(4)
-        .expect_err("4 is outside the 2 to 3 this build speaks");
+        .expect_err("4 is outside the 3 to 3 this build speaks");
 
     assert_eq!(
         detail(refusal),
-        "the session settled on protocol version 4, which is outside the 2 to 3 this koshi \
+        "the session settled on protocol version 4, which is outside the 3 to 3 this koshi \
          asked for"
     );
 }
@@ -58,12 +57,12 @@ fn a_router_version_above_the_range_names_the_control_plane_in_its_own_words() {
 #[test]
 fn a_version_below_the_floor_is_refused_the_same_way() {
     let refusal = SESSION
-        .settled_version(1)
-        .expect_err("1 is below the floor of 2");
+        .settled_version(2)
+        .expect_err("2 is below the floor of 3");
 
     assert_eq!(
         detail(refusal),
-        "the session settled on protocol version 1, which is outside the 2 to 3 this koshi \
+        "the session settled on protocol version 2, which is outside the 3 to 3 this koshi \
          asked for"
     );
 }
@@ -85,11 +84,11 @@ fn a_router_version_below_the_floor_names_the_control_plane_range() {
 fn the_largest_version_a_peer_can_name_is_outside_the_range() {
     let refusal = SESSION
         .settled_version(u32::MAX)
-        .expect_err("4294967295 is outside the 2 to 3 this build speaks");
+        .expect_err("4294967295 is outside the 3 to 3 this build speaks");
 
     assert_eq!(
         detail(refusal),
-        "the session settled on protocol version 4294967295, which is outside the 2 to 3 this \
+        "the session settled on protocol version 4294967295, which is outside the 3 to 3 this \
          koshi asked for"
     );
 }
@@ -246,25 +245,12 @@ fn router_answer(result: RouterResult) -> IncomingRouterResponse {
 #[test]
 fn a_session_hello_hands_back_the_build_the_session_named() {
     let reply = session_answer(IpcResult::Hello {
-        protocol_version: 2,
-        version: "0.9.9".to_string(),
-    });
-
-    assert_eq!(
-        session_hello_version(reply).expect("2 is inside the 2 to 3 this build speaks"),
-        (2, "0.9.9".to_string())
-    );
-}
-
-#[test]
-fn a_session_hello_at_the_top_of_the_range_hands_back_that_version() {
-    let reply = session_answer(IpcResult::Hello {
         protocol_version: 3,
         version: "0.9.9".to_string(),
     });
 
     assert_eq!(
-        session_hello_version(reply).expect("3 is the top of the 2 to 3 this build speaks"),
+        session_hello_version(reply).expect("3 is the only version this build speaks"),
         (3, "0.9.9".to_string())
     );
 }
@@ -272,13 +258,13 @@ fn a_session_hello_at_the_top_of_the_range_hands_back_that_version() {
 #[test]
 fn a_session_predating_the_build_field_hands_back_an_empty_string() {
     let reply = session_answer(IpcResult::Hello {
-        protocol_version: 2,
+        protocol_version: 3,
         version: String::new(),
     });
 
     assert_eq!(
         session_hello_version(reply).expect("a build with no version field still opens"),
-        (2, String::new())
+        (3, String::new())
     );
 }
 
@@ -289,11 +275,11 @@ fn a_session_hello_naming_a_version_outside_the_range_stops_the_exchange() {
         version: "0.9.9".to_string(),
     });
 
-    let refusal = session_hello_version(reply).expect_err("4 is outside the 2 to 3");
+    let refusal = session_hello_version(reply).expect_err("4 is outside the 3 to 3");
 
     assert_eq!(
         detail(refusal),
-        "the session settled on protocol version 4, which is outside the 2 to 3 this koshi \
+        "the session settled on protocol version 4, which is outside the 3 to 3 this koshi \
          asked for"
     );
 }
@@ -490,7 +476,7 @@ fn a_session_hello_filters_the_build_it_named() {
     });
 
     assert_eq!(
-        session_hello_version(reply).expect("3 is the top of the 2 to 3 this build speaks"),
+        session_hello_version(reply).expect("3 is the only version this build speaks"),
         (3, "]0;pwned0.9.9".to_string())
     );
 }

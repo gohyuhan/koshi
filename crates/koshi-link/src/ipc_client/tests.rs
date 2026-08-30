@@ -948,7 +948,8 @@ fn asking_a_session_nothing_listens_behind_to_restart_restarts_nothing() {
 fn a_running_session_reports_the_build_its_hello_named() {
     let runtime_dir = test_runtime_dir("version-hello");
     let session = SessionId::new();
-    let (server, read) = fake_settled_session(&runtime_dir, session, 2, HelloTiming::AtOnce);
+    let (server, read) =
+        fake_settled_session(&runtime_dir, session, PROTOCOL_VERSION, HelloTiming::AtOnce);
 
     assert_eq!(
         running_session_version(&runtime_dir, session).expect("the session answers its Hello"),
@@ -1467,8 +1468,7 @@ enum HelloTiming {
 ///
 /// Answers the Hello per `timing`, then answers a `SubmitCommand` with
 /// [`CommandResult::Ok`]. Every request it reads goes down the returned
-/// receiver, in arrival order. An at-once answer below the target client
-/// protocol reports the Hello and exits without waiting for a request.
+/// receiver, in arrival order.
 fn fake_settled_session(
     runtime_dir: &Path,
     session: SessionId,
@@ -1496,12 +1496,6 @@ fn fake_settled_session(
         if matches!(timing, HelloTiming::AtOnce) {
             send(&mut connection, hello.request_id, hello_answer.clone());
         }
-        if matches!(timing, HelloTiming::AtOnce)
-            && protocol_version < crate::talk::TARGET_CLIENT_PROTOCOL
-        {
-            read_tx.send(hello).expect("report the Hello");
-            return;
-        }
         let next: Option<IpcRequest> = connection.recv().ok();
         if matches!(timing, HelloTiming::AfterTheNextRequest) {
             send(&mut connection, hello.request_id, hello_answer);
@@ -1525,7 +1519,7 @@ fn fake_settled_session(
 }
 
 #[test]
-fn a_named_client_refuses_a_session_that_speaks_two() {
+fn a_session_speaking_two_is_refused_before_the_command_is_written() {
     let runtime_dir = test_runtime_dir("client-protocol-two");
     let session = SessionId::new();
     let client = ClientId::new();
@@ -1537,15 +1531,15 @@ fn a_named_client_refuses_a_session_that_speaks_two() {
         Some(client),
         Command::TogglePaneFullscreen,
     )
-    .expect_err("a session speaking 2 ignores the target client");
+    .expect_err("a session speaking 2 is below this build's floor of 3");
 
     let CliError::IpcUnavailable { detail } = error else {
         panic!("expected IpcUnavailable, got {error:?}");
     };
     assert_eq!(
         detail,
-        "this session speaks protocol 2; --client needs a session started by koshi 0.4.0 or \
-         later"
+        "the session settled on protocol version 2, which is outside the 3 to 3 this koshi \
+         asked for"
     );
 
     server.join().expect("fake session exits");
@@ -1556,7 +1550,7 @@ fn a_named_client_refuses_a_session_that_speaks_two() {
     assert_eq!(
         read.recv(),
         Err(mpsc::RecvError),
-        "the refusal stand-in reported only the Hello",
+        "no command reached the session",
     );
 
     let _ = std::fs::remove_dir_all(&runtime_dir);
@@ -1606,12 +1600,16 @@ fn a_named_client_reaches_a_session_that_speaks_three() {
 fn no_named_client_still_costs_one_round_trip() {
     let runtime_dir = test_runtime_dir("client-none-pipelined");
     let session = SessionId::new();
-    let (server, read) =
-        fake_settled_session(&runtime_dir, session, 2, HelloTiming::AfterTheNextRequest);
+    let (server, read) = fake_settled_session(
+        &runtime_dir,
+        session,
+        PROTOCOL_VERSION,
+        HelloTiming::AfterTheNextRequest,
+    );
 
     let result =
         submit_external_via_runtime_dir(&runtime_dir, session, None, Command::TogglePaneFullscreen)
-            .expect("a session speaking 2 answers a command naming no client");
+            .expect("a session this build speaks to answers a command naming no client");
 
     server.join().expect("fake session exits");
     assert_eq!(

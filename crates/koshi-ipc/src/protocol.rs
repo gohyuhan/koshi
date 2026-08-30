@@ -44,8 +44,8 @@ pub const PROTOCOL_VERSION: u32 = SESSION_PROTOCOL.max;
 /// below this one is refused with
 /// [`IpcErrorCode::UnsupportedVersion`].
 ///
-/// The floor is 2, the version 0.2.0 speaks. Raising it drops support for
-/// every build below it.
+/// The floor is 3, the version this build speaks. Raising it drops support
+/// for every build below it.
 pub const MIN_PROTOCOL_VERSION: u32 = SESSION_PROTOCOL.min;
 
 /// The version two peers use, given the range each speaks: the highest both

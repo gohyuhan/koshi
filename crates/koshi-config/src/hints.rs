@@ -13,6 +13,7 @@
 //! re-exports both.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Bound;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -174,8 +175,7 @@ impl KeymapHintCatalog {
     /// than `sequence` and opens with it. A mode with no bindings answers
     /// `KeyMatch::default()`: `exact` is `None` and `prefix` is false.
     pub fn match_sequence(&self, mode: LockMode, sequence: &KeySequence) -> KeyMatch {
-        let name = ModeName::new(mode.name());
-        let Some(mode_map) = self.merged.modes.get(&name) else {
+        let Some(mode_map) = self.merged.modes.get(mode.name()) else {
             return KeyMatch::default();
         };
         let exact = mode_map
@@ -183,14 +183,7 @@ impl KeymapHintCatalog {
             .get(sequence)
             .map(|binding| binding.bound.clone())
             .or_else(|| mode_map.defaults.get(sequence).cloned());
-        let prefix = mode_map
-            .user_set
-            .keys()
-            .chain(mode_map.defaults.keys())
-            .any(|candidate| {
-                candidate.chords().len() > sequence.chords().len()
-                    && candidate.chords().starts_with(sequence.chords())
-            });
+        let prefix = extends(&mode_map.user_set, sequence) || extends(&mode_map.defaults, sequence);
         KeyMatch { exact, prefix }
     }
 
@@ -211,11 +204,11 @@ impl KeymapHintCatalog {
     /// The hint-bar data for one client's current mode: the mode's bindings
     /// and removals shared by reference, plus the labels and the revert flag.
     pub fn hints_for(&self, mode: LockMode) -> KeymapHints {
-        let name = ModeName::new(mode.name());
+        let name = mode.name();
         KeymapHints {
-            entries: self.entries.get(&name).map(Arc::clone).unwrap_or_default(),
+            entries: self.entries.get(name).map(Arc::clone).unwrap_or_default(),
             prefix_labels: Arc::clone(&self.prefix_labels),
-            removed: self.removed.get(&name).map(Arc::clone).unwrap_or_default(),
+            removed: self.removed.get(name).map(Arc::clone).unwrap_or_default(),
             reverted: self.reverted,
         }
     }
@@ -228,6 +221,17 @@ pub struct KeyMatch {
     pub exact: Option<BoundAction>,
     /// True when a longer binding in the same mode opens with the sequence.
     pub prefix: bool,
+}
+
+/// True when `map` holds a key longer than `sequence` that opens with it.
+///
+/// Reads only the first key after `sequence` in sort order: keys sort
+/// lexicographically by chord, and every longer key opening with `sequence`
+/// sorts directly after it.
+fn extends<V>(map: &BTreeMap<KeySequence, V>, sequence: &KeySequence) -> bool {
+    map.range((Bound::Excluded(sequence), Bound::Unbounded))
+        .next()
+        .is_some_and(|(candidate, _)| candidate.chords().starts_with(sequence.chords()))
 }
 
 /// One mode's merged bindings joined to display names, sorted by sequence.
