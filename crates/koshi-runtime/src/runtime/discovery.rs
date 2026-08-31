@@ -1,11 +1,11 @@
 //! Building the discovery overview from live session state.
 //!
 //! [`Server::build_overview`] answers an IPC `Discovery` request: it walks the
-//! process's session — tabs in bar order, every pane record, every attached
-//! client — and packs them into one [`SessionOverview`], the serializable
-//! answer the CLI filters for whichever listing or inspect query it was
-//! given. The dispatcher thread builds it, so every field reads the same
-//! state a command would.
+//! process's session — tabs in bar order, every pane a tab's layout holds,
+//! every attached client — and packs them into one [`SessionOverview`], the
+//! serializable answer the CLI filters for whichever listing or inspect query
+//! it was given. The dispatcher thread builds it, from the same state a
+//! command reads.
 
 use std::collections::HashMap;
 
@@ -25,11 +25,13 @@ impl Server {
     /// Describe this process's running session as one [`SessionOverview`],
     /// or `None` when no session is running (the window between the last
     /// session ending and the process exiting).
+    ///
+    /// `session.pane_count` counts every pane the session registry holds, and
+    /// each `tabs[i].pane_count` every leaf of that tab's layout. Both keep
+    /// counting a pane that `panes` gives no row.
     #[must_use]
     pub fn build_overview(&self) -> Option<SessionOverview> {
-        // One process serves one session: genesis seeds exactly one and no
-        // command creates another in-process.
-        let session = self.sessions.values().next()?;
+        let session = self.sole_session()?;
 
         let mut tabs: Vec<&Tab> = session.tabs.values().collect();
         tabs.sort_by_key(|tab| tab.index());
@@ -78,10 +80,11 @@ impl Server {
     }
 }
 
-/// One [`PaneInfo`] row per registered pane, in the tab-bar order of the tabs
-/// holding them and layout order within each tab. A pane whose lifecycle is
-/// `Removed` has already left every layout tree, so it produces no row. The
-/// title is the pane terminal's OSC 0/1/2 title, once the child has set one.
+/// One [`PaneInfo`] row per pane that a tab's layout holds and the session
+/// registry knows, in the tab-bar order of the tabs holding them and layout
+/// order within each tab. A pane whose lifecycle is `Removed` gets no row, and
+/// neither does a layout leaf the registry does not hold. The title is the pane
+/// terminal's OSC 0/1/2 title, once the child has set one.
 fn pane_infos(
     session: &Session,
     tabs: &[&Tab],

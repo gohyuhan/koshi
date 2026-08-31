@@ -14,7 +14,7 @@
 //! entity — creation time, working directory, argv, lock state — belongs to
 //! `inspect`, which renders the `koshi-core` structs themselves.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use koshi_core::discovery::{ClientInfo, PaneInfo, SessionOverview, TabInfo};
 use koshi_core::event::RejectReason;
@@ -101,8 +101,8 @@ pub struct ClientRow {
 ///
 /// With one running session unasked, the paths that would answer "no running
 /// session has pane X" or "there is exactly one session, so it is the default"
-/// report the unasked session instead. A session that is gone is not unasked:
-/// it answered by not being there.
+/// report the gap instead. A session that is gone is not unasked: it answered
+/// by not being there.
 #[derive(Debug, Default)]
 pub struct Discovered {
     /// The sessions that answered, sorted by name and then id so two runs of
@@ -187,15 +187,18 @@ impl Discovered {
     }
 
     /// A failure that names `detail` and how many running sessions went
-    /// unasked.
+    /// unasked. The count is singular only at exactly 1.
+    ///
+    /// `unanswered("this listing is incomplete")` with `unasked` 1 gives
+    /// `"this listing is incomplete (1 running session did not answer)"`.
     pub fn unanswered(&self, detail: &str) -> CliError {
-        let sessions = if self.unasked == 1 {
-            "1 running session did not answer".to_string()
+        let word = if self.unasked == 1 {
+            "session"
         } else {
-            format!("{} running sessions did not answer", self.unasked)
+            "sessions"
         };
         CliError::IpcUnavailable {
-            detail: format!("{detail} ({sessions})"),
+            detail: format!("{detail} ({} running {word} did not answer)", self.unasked),
         }
     }
 }
@@ -204,18 +207,17 @@ impl Discovered {
 /// and, while `allow-other-users` is on, every session the shared directory
 /// advertises for the other local users of this machine.
 ///
-/// A session that is gone contributes no rows and is not counted as unasked
-/// — [`fetch_one`] has already swept what it left behind. A session that is
-/// listening but cannot finish the exchange contributes no rows either, says
-/// so on stderr, and is counted.
+/// A session that is gone contributes no rows and is not counted as unasked.
+/// A session of this user's that is gone also loses its endpoint file and its
+/// socket file. A session that is listening but cannot finish the exchange
+/// contributes no rows either, says so on stderr, and is counted.
 #[must_use]
 pub fn fetch_all(runtime_dir: &Path) -> Discovered {
     let mut found = Discovered::default();
     for session_id in ipc_client::advertised_sessions(runtime_dir) {
         add_answer(&mut found, session_id, fetch_one(runtime_dir, session_id));
     }
-    // A session of another user's is never swept: what it left behind belongs
-    // to that user.
+    // A session of another user's is never swept.
     for (session_id, socket) in ipc_client::shared_base()
         .into_iter()
         .flat_map(|base| ipc_client::foreign_sessions(&base, runtime_dir))
@@ -273,7 +275,8 @@ fn sweep(runtime_dir: &Path, session_id: SessionId) {
     let _ = std::fs::remove_file(&path);
 }
 
-/// The `list-sessions` answer: one row per running session.
+/// The `list-sessions` answer: one row per running session. Every row's
+/// `server` is `None` — each session in `overviews` runs on this machine.
 #[must_use]
 pub fn session_rows(overviews: &[SessionOverview]) -> Vec<SessionRow> {
     overviews
@@ -302,8 +305,7 @@ pub fn tab_rows(overviews: &[SessionOverview]) -> Vec<TabRow> {
 /// The `list-panes` answer: every pane of every listed session, in the
 /// overview's own order — tab-bar order, then layout order within a tab.
 ///
-/// A pane whose tab is not in the overview's tab list has no tab name to print
-/// and is left out.
+/// A pane whose tab is not in the overview's tab list is left out.
 #[must_use]
 pub fn pane_rows(overviews: &[SessionOverview]) -> Vec<PaneRow> {
     overviews
@@ -333,10 +335,40 @@ pub fn client_rows(overviews: &[SessionOverview]) -> Vec<ClientRow> {
             overview.clients.iter().map(|client| ClientRow {
                 id: client.id,
                 session: overview.session.id,
-                session_name: overview.session.name.clone(),
+                session_name: sanitize_reported_text(&overview.session.name),
             })
         })
         .collect()
+}
+
+/// Filter every string `overview` took from the session that answered through
+/// [`sanitize_reported_text`]: the session name, each tab name, and each pane's
+/// title, working directory and argv. Ids, times, sizes and counts are left as
+/// they are.
+///
+/// Callers run this the moment an overview comes off a socket, so every reader
+/// of it — a listing row, an `inspect` record, a `--session <name>` lookup —
+/// sees the same filtered text.
+///
+/// A pane whose argv is `["sh", "-c", "\u{1b}[2J"]` reads back as
+/// `["sh", "-c", "[2J"]`.
+pub fn filter_reported_text(overview: &mut SessionOverview) {
+    overview.session.name = sanitize_reported_text(&overview.session.name);
+    for tab in &mut overview.tabs {
+        tab.name = sanitize_reported_text(&tab.name);
+    }
+    for pane in &mut overview.panes {
+        pane.title = pane.title.as_deref().map(sanitize_reported_text);
+        pane.cwd = pane
+            .cwd
+            .as_ref()
+            .map(|cwd| PathBuf::from(sanitize_reported_text(&cwd.to_string_lossy())));
+        if let Some(argv) = &mut pane.command {
+            for arg in argv.iter_mut() {
+                *arg = sanitize_reported_text(arg);
+            }
+        }
+    }
 }
 
 /// Hide the arguments of every pane's command across `overviews`, leaving
@@ -350,6 +382,9 @@ pub fn redact_pane_commands(overviews: &mut [SessionOverview]) {
 }
 
 /// The tab `tab_id` names, in full, wherever it is running.
+///
+/// No answering session holding it gives [`Discovered::missing`]'s failure for
+/// `"tab"`.
 pub fn find_tab(found: &Discovered, tab_id: TabId) -> Result<TabInfo, CliError> {
     found
         .sessions
@@ -361,6 +396,9 @@ pub fn find_tab(found: &Discovered, tab_id: TabId) -> Result<TabInfo, CliError> 
 }
 
 /// The pane `pane_id` names, in full, wherever it is running.
+///
+/// No answering session holding it gives [`Discovered::missing`]'s failure for
+/// `"pane"`.
 pub fn find_pane(found: &Discovered, pane_id: PaneId) -> Result<PaneInfo, CliError> {
     found
         .sessions
@@ -372,6 +410,9 @@ pub fn find_pane(found: &Discovered, pane_id: PaneId) -> Result<PaneInfo, CliErr
 }
 
 /// The client `client_id` names, in full, wherever it is attached.
+///
+/// No answering session holding it gives [`Discovered::missing`]'s failure for
+/// `"client"`.
 pub fn find_client(found: &Discovered, client_id: ClientId) -> Result<ClientInfo, CliError> {
     found
         .sessions

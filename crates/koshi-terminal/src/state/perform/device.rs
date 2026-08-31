@@ -4,19 +4,19 @@
 //! locator, macro space, checksum, data integrity, multi-session), and mode
 //! reports (DECRQM `CSI ? Ps $ p`, ANSI RQM `CSI Ps $ p`).
 //!
-//! Each handler builds the exact response bytes the querying app expects and
-//! appends them to the state's reply queue; the runtime drains the queue and
-//! writes it back into the pane's PTY. Response formats follow the xterm
-//! control-sequence reference (DECRPM values, the DA parameter lists, the
-//! page-less DECXCPR form, the DECRPTUI unit-id report) and, for the printer
-//! status, the DEC VT510 manual's "no printer" report.
+//! Each handler builds its reply bytes and appends them to the state's reply
+//! queue; the runtime drains the queue and writes it back into the pane's
+//! PTY. Reply formats follow the xterm control-sequence reference (DECRPM
+//! values, the DA parameter lists, the page-less DECXCPR form, the DECRPTUI
+//! unit-id report) and, for the printer status, the DEC VT510 manual's "no
+//! printer" report.
 
 use crate::state::{MouseEncoding, MouseTracking, Screen, TerminalState};
 
 use super::params::{first_param, nth_param};
 
-/// DECRPM's report value for a mode koshi stores: `1` when the mode is set,
-/// `2` when it is reset.
+/// DECRPM's value for a stored mode: `1` when the mode is set, `2` when it is
+/// reset.
 fn mode_flag(on: bool) -> u16 {
     if on {
         1
@@ -29,9 +29,8 @@ fn mode_flag(on: bool) -> u16 {
 /// decimal digits per component: `MAJOR * 10_000 + MINOR * 100 + PATCH`.
 /// A component that fails to parse counts as `0`.
 ///
-/// A prerelease or build suffix is cut before packing, so a prerelease reports
-/// the version it precedes. `MAJOR.MINOR.PATCH` holds only digits and dots, so
-/// the first `-` or `+` starts the suffix.
+/// The suffix from the first `-` or `+` on (prerelease or build metadata) is
+/// cut before packing: a prerelease packs as the version it precedes.
 ///
 /// `"1.16.2"` → `11602`; `"0.2.0-pr.1"` → `200`.
 fn version_number(version: &str) -> u32 {
@@ -60,10 +59,9 @@ impl TerminalState {
     }
 
     /// Reply to Secondary Device Attributes (DA2, `CSI > c` / `CSI > 0 c`):
-    /// queue `CSI > 1 ; Pv ; 0 c` — terminal type 1 ("VT220", matching DA1's
-    /// class), firmware version `Pv` packed from this crate's version by
-    /// [`version_number`], and ROM cartridge number 0. A nonzero parameter
-    /// gets no reply.
+    /// queue `CSI > 1 ; Pv ; 0 c` — terminal type 1 (VT220), firmware version
+    /// `Pv` packed from this crate's version by [`version_number`], and ROM
+    /// cartridge number 0. A nonzero parameter gets no reply.
     pub(super) fn device_attributes_secondary(&mut self, params: &vte::Params) {
         if first_param(params).unwrap_or(0) != 0 {
             return;
@@ -91,8 +89,7 @@ impl TerminalState {
 
     /// Reply to Tertiary Device Attributes (DA3, `CSI = c` / `CSI = 0 c`):
     /// queue the DECRPTUI unit-id report `DCS ! | 00000000 ST` — all-zero
-    /// site code and serial number, matching xterm. A nonzero parameter gets
-    /// no reply.
+    /// site code and serial number. A nonzero parameter gets no reply.
     pub(super) fn device_attributes_tertiary(&mut self, params: &vte::Params) {
         if first_param(params).unwrap_or(0) != 0 {
             return;
@@ -100,24 +97,18 @@ impl TerminalState {
         self.replies.extend_from_slice(b"\x1bP!|00000000\x1b\\");
     }
 
-    /// Reply to a DEC-form Device Status Report (`CSI ? Ps n`). Every request
-    /// in the family gets its report:
+    /// Reply to a DEC-form Device Status Report (`CSI ? Ps n`):
     ///
     /// - `6` (DECXCPR) — `CSI ? row ; col R`, the active cursor's 1-based
-    ///   position, no page parameter (xterm's page-less form).
-    /// - `15` (printer) — `CSI ? 13 n`, "no printer": koshi has no printer
-    ///   port (the DEC VT510 report for that state).
-    /// - `25` (UDK) — `CSI ? 21 n`, "locked": koshi has no user-defined keys,
-    ///   so their definitions cannot be changed.
-    /// - `26` (keyboard) — `CSI ? 27 ; 1 ; 0 ; 0 n`, North American / ready
-    ///   (xterm's report).
+    ///   position, no page parameter.
+    /// - `15` (printer) — `CSI ? 13 n`, "no printer".
+    /// - `25` (UDK) — `CSI ? 21 n`, "locked": no user-defined keys.
+    /// - `26` (keyboard) — `CSI ? 27 ; 1 ; 0 ; 0 n`, North American, ready.
     /// - `53`/`55` (locator status) — `CSI ? 53 n`, "no locator".
     /// - `56` (locator type) — `CSI ? 57 ; 0 n`, "cannot identify".
-    /// - `62` (DECMSR, macro space) — `CSI 0 * {`, zero space: koshi stores no
-    ///   macros.
-    /// - `63` (DECCKSR, memory checksum) — `DCS Pid ! ~ 0000 ST`, echoing the
-    ///   request id from the second parameter, checksum zero: no macro
-    ///   memory.
+    /// - `62` (DECMSR, macro space) — `CSI 0 * {`, zero space.
+    /// - `63` (DECCKSR, memory checksum) — `DCS Pid ! ~ 0000 ST`: `Pid` is
+    ///   the second parameter (`0` when absent), the checksum is zero.
     /// - `75` (data integrity) — `CSI ? 70 n`, ready, no errors.
     /// - `85` (multi-session) — `CSI ? 83 n`, not configured for
     ///   multiple-session operation.
@@ -158,7 +149,7 @@ impl TerminalState {
     }
 
     /// Reply to Request Mode, ANSI form (`CSI Ps $ p`): queue the report
-    /// `CSI Ps ; 0 $ y`. Koshi stores no ANSI (non-`?`) modes, so every query
+    /// `CSI Ps ; 0 $ y`. No ANSI (non-`?`) mode is stored, so every query
     /// reports `0`, "not recognized".
     pub(super) fn report_ansi_mode(&mut self, params: &vte::Params) {
         let mode = first_param(params).unwrap_or(0);
@@ -168,15 +159,15 @@ impl TerminalState {
 
     /// The DECRPM value for DEC private mode `mode`: `1` (set) or `2` (reset)
     /// read from the stored mode state, and `0` ("not recognized") for every
-    /// mode koshi does not store — including the ones `csi_dispatch` traces and
-    /// ignores (`?2`/`?3`/`?8`) and the save/restore action `?1048`, which
-    /// keeps no queryable state.
+    /// mode that is not stored — including the ignored `?2`/`?3`/`?8` and the
+    /// save/restore action `?1048`, which keeps no queryable state.
     ///
-    /// The mutually-exclusive families report per member: each mouse tracking
+    /// The mutually exclusive families report per member: each mouse tracking
     /// level (`?9`/`?1000`/`?1002`/`?1003`) and encoding (`?1005`/`?1006`/
     /// `?1015`) is set exactly when it is the active one, and the alternate
     /// screen modes (`?47`/`?1047`/`?1049`) are set exactly while the
-    /// alternate screen is active.
+    /// alternate screen is active. `?25` reports the active screen's cursor
+    /// visibility.
     fn dec_mode_state(&self, mode: u16) -> u16 {
         match mode {
             1 => mode_flag(self.modes.app_cursor_keys),

@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-base64 = "0.22.1"
+base64.workspace = true
 koshi-config = { version = "0.4.0-pr.1", path = "../koshi-config" }
 koshi-core = { version = "0.4.0-pr.1", path = "../koshi-core" }
 koshi-input = { version = "0.4.0-pr.1", path = "../koshi-input" }
@@ -19,16 +19,14 @@ koshi-renderer = { version = "0.4.0-pr.1", path = "../koshi-renderer" }
 koshi-session = { version = "0.4.0-pr.1", path = "../koshi-session" }
 koshi-storage = { version = "0.4.0-pr.1", path = "../koshi-storage" }
 koshi-terminal = { version = "0.4.0-pr.1", path = "../koshi-terminal" }
-ratatui = { version = "0.30.2", default-features = false }
-serde = { version = "1.0.228", features = ["derive"] }
+serde.workspace = true
 serde_json.workspace = true
-subtle = "2.6.1"
-tracing = "0.1.44"
+subtle.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
-# Tests only: the end-to-end key tests drive a real viewer, which resolves the
-# press before the session sees it. koshi-client does not depend on this crate,
-# so this adds no cycle.
+# Reached only from test targets: the end-to-end key tests drive a real viewer.
+# koshi-client depends on this crate, so the edge exists in test builds only.
 koshi-client = { version = "0.4.0-pr.1", path = "../koshi-client" }
 koshi-test-support = { version = "0.4.0-pr.1", path = "../koshi-test-support" }
 tempfile.workspace = true

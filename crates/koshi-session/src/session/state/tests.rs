@@ -6,7 +6,7 @@ use std::time::SystemTime;
 use koshi_core::command::{GridPos, Selection, SelectionKind};
 use koshi_core::geometry::{PaneArea, SplitDirection};
 use koshi_core::lock::LockMode;
-use koshi_layout::tree::{LayoutChild, SplitNode};
+use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pane::pane::state::PaneRecord;
 
 use crate::client::ClientOrigin;
@@ -111,8 +111,8 @@ fn tab_viewport_with_exactly_one_viewer_returns_its_own_reserved_size() {
 
     viewer(&mut session, tab, 100, 30);
 
-    // A single viewer's own size, minus the two chrome rows, wins outright —
-    // there is no second viewport to take a minimum against.
+    // With one viewer the result is that viewer's own size minus the two
+    // chrome rows.
     assert_eq!(
         session.tab_viewport(tab),
         Some(Size {
@@ -124,9 +124,8 @@ fn tab_viewport_with_exactly_one_viewer_returns_its_own_reserved_size() {
 
 #[test]
 fn tab_viewport_saturates_rather_than_panics_below_the_chrome_rows() {
-    // A viewport with fewer rows than the two reserved chrome rows must not
-    // underflow the `u16` row count; `1 - 2` would panic in debug builds
-    // under plain subtraction, so the contract is `0`, not a crash.
+    // A viewport with fewer rows than the two reserved chrome rows saturates
+    // the row count at `0`.
     let tab = TabId::new();
     let mut session = Session::new(
         SessionId::new(),
@@ -288,8 +287,8 @@ fn detaching_the_smallest_viewer_lets_tab_viewport_grow() {
 
 #[test]
 fn attach_client_returns_the_client_it_displaced_on_reattach() {
-    // A re-attach under the same id replaces in place; the caller needs the
-    // displaced record back (e.g. to tear down its old view state).
+    // A re-attach under the same id replaces the record in place and returns
+    // the one it displaced.
     let tab = TabId::new();
     let mut session = Session::new(
         SessionId::new(),
@@ -332,14 +331,13 @@ fn attach_client_returns_the_client_it_displaced_on_reattach() {
         session.clients.get(id).map(Client::viewport),
         Some(Size { cols: 40, rows: 10 })
     );
+    assert_eq!(session.clients.len(), 1);
 }
 
 #[test]
 fn attaching_a_client_before_any_tab_leaves_the_session_starting() {
-    // `ClientAttached` only revives a `Detaching` session; a session that
-    // has not created its first tab yet is `Starting`, and attaching there
-    // is not one of the legal moves out of `Starting` — the session stays
-    // `Starting` until its first tab arrives.
+    // `ClientAttached` moves only a `Detaching` session to `Running`. A session
+    // that has not created its first tab is `Starting` and rejects the event.
     let tab = TabId::new();
     let mut session = Session::new(
         SessionId::new(),
@@ -391,7 +389,8 @@ fn detach_client_returns_the_exact_record_it_removed() {
     let removed = session.detach_client(id);
 
     assert_eq!(removed.map(|c| c.id()), Some(id));
-    assert!(session.clients.get(id).is_none());
+    assert_eq!(session.clients.get(id).map(Client::id), None);
+    assert_eq!(session.clients.len(), 0);
 }
 
 #[test]
@@ -403,7 +402,7 @@ fn detach_client_on_an_unattached_id_returns_none() {
         ClientRegistry::new(),
     );
 
-    assert!(session.detach_client(ClientId::new()).is_none());
+    assert_eq!(session.detach_client(ClientId::new()).map(|c| c.id()), None);
 }
 
 #[test]
@@ -418,8 +417,8 @@ fn request_stop_is_idempotent_once_already_stopping() {
     session.request_stop();
     assert_eq!(*session.lifecycle(), SessionLifecycle::Stopping);
 
-    // A second request from `Stopping` is rejected by the state machine and
-    // silently ignored here; the session must not move or panic.
+    // `StopRequested` from `Stopping` is rejected; the session stays
+    // `Stopping`.
     session.request_stop();
     assert_eq!(*session.lifecycle(), SessionLifecycle::Stopping);
 }
@@ -442,9 +441,8 @@ fn complete_stop_before_a_stop_was_requested_is_a_noop() {
 
 #[test]
 fn detaching_the_last_client_of_a_stopping_session_does_not_revert_it() {
-    // A session already winding down (`Stopping`) that loses its last client
-    // must stay `Stopping`, never fall back to `Detaching` — that would be a
-    // step backward in the shutdown sequence.
+    // A `Stopping` session that loses its last client stays `Stopping`; it does
+    // not fall back to `Detaching`.
     let tab = TabId::new();
     let mut session = Session::new(
         SessionId::new(),
@@ -474,6 +472,164 @@ fn detaching_the_last_client_of_a_stopping_session_does_not_revert_it() {
     assert_eq!(*session.lifecycle(), SessionLifecycle::Stopping);
 }
 
+#[test]
+fn detaching_the_last_client_of_a_starting_session_leaves_it_starting() {
+    // `LastClientDetached` moves only a `Running` session to `Detaching`. A
+    // session that has not created its first tab is `Starting` and rejects it.
+    let tab = TabId::new();
+    let mut session = a_session();
+    let id = reporting_viewer(&mut session, tab, 80, 24, None);
+    assert_eq!(*session.lifecycle(), SessionLifecycle::Starting);
+
+    let removed = session.detach_client(id);
+
+    assert_eq!(removed.map(|c| c.id()), Some(id));
+    assert_eq!(session.clients.len(), 0);
+    assert_eq!(*session.lifecycle(), SessionLifecycle::Starting);
+}
+
+#[test]
+fn detaching_again_with_no_clients_left_keeps_the_session_detaching() {
+    let tab = TabId::new();
+    let mut session = a_session();
+    session
+        .update_lifecycle(SessionLifecycleEvent::FirstTabCreated)
+        .expect("a starting session accepts its first tab");
+    let id = reporting_viewer(&mut session, tab, 80, 24, None);
+
+    session.detach_client(id);
+    assert_eq!(*session.lifecycle(), SessionLifecycle::Detaching);
+
+    // The registry is already empty, so the second detach fires
+    // `LastClientDetached` again; `Detaching` rejects it and does not move.
+    let removed = session.detach_client(ClientId::new());
+
+    assert_eq!(removed.map(|c| c.id()), None);
+    assert_eq!(*session.lifecycle(), SessionLifecycle::Detaching);
+}
+
+#[test]
+fn completing_a_stop_twice_leaves_the_session_stopped() {
+    let mut session = a_session();
+    session.request_stop();
+    session.complete_stop();
+    assert_eq!(*session.lifecycle(), SessionLifecycle::Stopped);
+
+    // `Stopped` is terminal and rejects every event, including a repeat.
+    session.complete_stop();
+
+    assert_eq!(*session.lifecycle(), SessionLifecycle::Stopped);
+}
+
+/// Drive `session` to `Detaching`: create its first tab, attach one viewer of
+/// `tab`, then detach it.
+fn detached_session(tab: TabId) -> Session {
+    let mut session = a_session();
+    session
+        .update_lifecycle(SessionLifecycleEvent::FirstTabCreated)
+        .expect("a starting session accepts its first tab");
+    let id = reporting_viewer(&mut session, tab, 80, 24, None);
+    session.detach_client(id);
+    assert_eq!(*session.lifecycle(), SessionLifecycle::Detaching);
+    session
+}
+
+#[test]
+fn request_stop_moves_a_detaching_session_to_stopping() {
+    let mut session = detached_session(TabId::new());
+
+    session.request_stop();
+
+    assert_eq!(*session.lifecycle(), SessionLifecycle::Stopping);
+}
+
+#[test]
+fn complete_stop_on_a_detaching_session_leaves_it_detaching() {
+    // `StopCompleted` is legal only from `Stopping`; `Detaching` rejects it.
+    let mut session = detached_session(TabId::new());
+
+    session.complete_stop();
+
+    assert_eq!(*session.lifecycle(), SessionLifecycle::Detaching);
+}
+
+#[test]
+fn attaching_a_client_to_a_stopped_session_registers_it_without_reviving_it() {
+    let tab = TabId::new();
+    let mut session = a_session();
+    session.request_stop();
+    session.complete_stop();
+    assert_eq!(*session.lifecycle(), SessionLifecycle::Stopped);
+
+    let id = reporting_viewer(&mut session, tab, 80, 24, None);
+
+    assert_eq!(session.clients.len(), 1);
+    assert_eq!(session.clients.get(id).map(Client::id), Some(id));
+    assert_eq!(*session.lifecycle(), SessionLifecycle::Stopped);
+}
+
+#[test]
+fn tab_viewport_counts_a_client_only_once_it_switches_onto_the_tab() {
+    let tab = TabId::new();
+    let other_tab = TabId::new();
+    let mut session = a_session();
+    let id = reporting_viewer(&mut session, other_tab, 100, 30, None);
+    assert_eq!(session.tab_viewport(tab), None);
+
+    session
+        .clients
+        .get_mut(id)
+        .expect("the viewer is attached")
+        .update_active_tab(tab);
+
+    assert_eq!(
+        session.tab_viewport(tab),
+        Some(Size {
+            cols: 100,
+            rows: 28
+        })
+    );
+    assert_eq!(session.tab_viewport(other_tab), None);
+}
+
+#[test]
+fn tab_viewport_clamps_a_report_larger_than_the_viewport() {
+    let tab = TabId::new();
+    let mut session = a_session();
+
+    reporting_viewer(
+        &mut session,
+        tab,
+        80,
+        24,
+        Some(PaneArea::Reported(Size {
+            cols: u16::MAX,
+            rows: u16::MAX,
+        })),
+    );
+
+    // A report is clamped per axis to the viewport, and it replaces the
+    // two-chrome-row default outright: 80x24, not 80x22.
+    assert_eq!(session.tab_viewport(tab), Some(Size { cols: 80, rows: 24 }));
+}
+
+#[test]
+fn an_empty_session_survives_a_serde_round_trip() {
+    let session = a_session();
+
+    let written = serde_json::to_string(&session).expect("the session writes out");
+    let read_back: Session = serde_json::from_str(&written).expect("the session reads back");
+
+    assert_eq!(read_back.id, session.id);
+    assert_eq!(read_back.name, "s");
+    assert_eq!(read_back.created_at, SystemTime::UNIX_EPOCH);
+    assert_eq!(*read_back.lifecycle(), SessionLifecycle::Starting);
+    assert!(!read_back.start_locked);
+    assert_eq!(read_back.tabs.len(), 0);
+    assert_eq!(read_back.panes.len(), 0);
+    assert_eq!(read_back.clients.len(), 0);
+}
+
 /// A whole session must survive being written out and read back: its identity
 /// and lifecycle, its tabs with their nested layout trees, its pane registry,
 /// and the view state each attached client keeps to itself.
@@ -501,14 +657,11 @@ fn a_session_with_tabs_panes_and_clients_survives_a_serde_round_trip() {
     let tab_one_layout = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
         vec![
-            LayoutChild::new(LayoutNode::Pane(pane_one)),
-            LayoutChild::new(LayoutNode::Split(SplitNode::with_equal_weights(
+            LayoutNode::Pane(pane_one),
+            LayoutNode::Split(SplitNode::with_equal_weights(
                 SplitDirection::Vertical,
-                vec![
-                    LayoutChild::new(LayoutNode::Pane(pane_two)),
-                    LayoutChild::new(LayoutNode::Pane(pane_three)),
-                ],
-            ))),
+                vec![LayoutNode::Pane(pane_two), LayoutNode::Pane(pane_three)],
+            )),
         ],
     ));
     let mut first_tab = Tab::new(tab_one, "one".to_owned(), 0, pane_one);
@@ -583,8 +736,6 @@ fn a_session_with_tabs_panes_and_clients_survives_a_serde_round_trip() {
     assert_eq!(read_back.name, "carried");
     assert_eq!(read_back.created_at, SystemTime::UNIX_EPOCH);
     assert_eq!(*read_back.lifecycle(), SessionLifecycle::Running);
-    // The plugin runtime handle names a live process, so it is left out.
-    assert!(read_back.plugin_runtime_ref.is_none());
 
     assert_eq!(read_back.tabs.len(), 2);
     let recovered_one = read_back.tabs.get(&tab_one).expect("tab one is carried");
@@ -655,10 +806,38 @@ fn a_session_with_tabs_panes_and_clients_survives_a_serde_round_trip() {
 }
 
 #[test]
+fn a_stored_session_carrying_a_config_snapshot_key_still_reads() {
+    // `config_snapshot` is not a field of `Session`, so a stored session that
+    // names it reads back with the key ignored and every other field taken.
+    let session_id = SessionId::new();
+    let stored = serde_json::json!({
+        "id": session_id,
+        "name": "carried",
+        "created_at": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+        "tabs": {},
+        "panes": { "records": {} },
+        "clients": { "records": {} },
+        "config_snapshot": null,
+        "lifecycle": "Starting",
+    });
+
+    let read_back: Session = serde_json::from_value(stored).expect("the stored session reads back");
+
+    assert_eq!(read_back.id, session_id);
+    assert_eq!(read_back.name, "carried");
+    assert_eq!(read_back.created_at, SystemTime::UNIX_EPOCH);
+    assert_eq!(*read_back.lifecycle(), SessionLifecycle::Starting);
+    assert!(!read_back.start_locked);
+    assert!(read_back.tabs.is_empty());
+    assert!(read_back.panes.is_empty());
+    assert!(read_back.clients.is_empty());
+}
+
+#[test]
 fn attaching_a_client_to_a_stopping_session_registers_it_without_reviving_it() {
-    // `ClientAttached` revives a `Detaching` session only. A client that
-    // connects while the session winds down is still registered — the transport
-    // holds it — but the shutdown is not undone.
+    // `ClientAttached` moves only a `Detaching` session to `Running`. A client
+    // that attaches while the session is `Stopping` is still registered, and
+    // the lifecycle stays `Stopping`.
     let tab = TabId::new();
     let mut session = Session::new(
         SessionId::new(),

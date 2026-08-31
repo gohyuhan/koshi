@@ -4,8 +4,13 @@
 //! on its own, and that the table cannot grow past the count it is bounded at.
 //!
 //! Also [`Occasional`], which writes a repeated warning once per window,
-//! [`EndReport`], which reports a bridged connection ended once, and the two
-//! functions that read and write one frame.
+//! [`EndReport`], which reports a bridged connection ended once, the two
+//! functions that read and write one frame, the frames an admitted connection
+//! sends, and what [`bind`] refuses.
+//!
+//! [`serve_remote`] is served over real TLS on loopback in two places: the
+//! answers a caller reads before it is admitted, and one admitted client held
+//! open while its session keeps emitting events.
 
 use std::io::Cursor;
 use std::net::{IpAddr, Ipv4Addr};
@@ -13,10 +18,23 @@ use std::net::{IpAddr, Ipv4Addr};
 use super::*;
 
 use koshi_core::ids::SessionId;
+use koshi_ipc::remote_state::CERT_FILE_FORMAT;
 
 /// The address `10.0.0.<last>`, for naming distinct callers in a test.
 fn caller(last: u8) -> IpAddr {
     IpAddr::V4(Ipv4Addr::new(10, 0, 0, last))
+}
+
+/// A self-signed certificate naming `koshi`, generated fresh for one test
+/// listener.
+fn test_cert() -> CertFile {
+    let made = rcgen::generate_simple_self_signed(vec!["koshi".to_string()])
+        .expect("the test certificate generates");
+    CertFile {
+        format: CERT_FILE_FORMAT,
+        cert_der: made.cert.der().to_vec(),
+        key_der: made.signing_key.serialize_der(),
+    }
 }
 
 /// A moment `seconds` after `start`.
@@ -384,6 +402,22 @@ fn json_this_build_cannot_read_is_refused_and_a_stream_that_ends_early_is_not() 
 }
 
 #[test]
+fn a_frame_naming_no_payload_carries_no_frame_this_build_reads() {
+    // A length of zero is inside every cap. The four length bytes come off the
+    // stream and the empty payload is what fails to decode.
+    let mut empty = Cursor::new(0u32.to_be_bytes().to_vec());
+
+    assert!(
+        matches!(
+            read_client_frame(&mut empty, REMOTE_HELLO_MAX_LEN),
+            Opening::Unreadable
+        ),
+        "a frame naming no payload is refused rather than read"
+    );
+    assert_eq!(empty.position(), 4, "and its four length bytes were taken");
+}
+
+#[test]
 fn one_answer_goes_out_as_a_big_endian_length_and_then_its_json() {
     // The caller reads the length the same way round. A length written the
     // other way round names another number, and the caller waits for bytes
@@ -425,6 +459,73 @@ impl Write for RecordedWriter {
 
 impl Deadlined for RecordedWriter {
     fn set_deadline(&mut self, _at: Option<Instant>) {}
+}
+
+/// A writing half that takes one byte per call, standing in for a socket that
+/// accepts a little at a time.
+struct OneByteWriter(Vec<u8>);
+
+impl Write for OneByteWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match buf.first() {
+            Some(byte) => {
+                self.0.push(*byte);
+                Ok(1)
+            }
+            None => Ok(0),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A writing half that answers every write with [`io::ErrorKind::BrokenPipe`]
+/// and the text `the caller hung up`.
+struct BrokenWriter;
+
+impl Write for BrokenWriter {
+    fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+        Err(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "the caller hung up",
+        ))
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn one_answer_reaches_a_writer_that_takes_one_byte_at_a_time_whole() {
+    // Every byte of the frame goes out, however little the socket takes per
+    // call.
+    let frame = RemoteServerFrame::Welcome {
+        remote_version: REMOTE_PROTOCOL_VERSION,
+    };
+    let payload = serde_json::to_vec(&frame).expect("the frame encodes");
+    let length = u32::try_from(payload.len()).expect("the answer fits");
+    let mut expected = length.to_be_bytes().to_vec();
+    expected.extend_from_slice(&payload);
+
+    let mut written = OneByteWriter(Vec::new());
+    send_frame(&mut written, &frame).expect("the answer is written");
+
+    assert_eq!(written.0, expected);
+}
+
+#[test]
+fn an_answer_the_writer_refuses_reports_that_writers_failure() {
+    let frame = RemoteServerFrame::Refused {
+        message: REMOTE_REFUSED.to_string(),
+    };
+
+    let failed = send_frame(&mut BrokenWriter, &frame).expect_err("a refused write is reported");
+
+    assert_eq!(failed.kind(), io::ErrorKind::BrokenPipe);
+    assert_eq!(failed.to_string(), "the caller hung up");
 }
 
 /// The server frames `bytes` holds, each read as a 4-byte big-endian length
@@ -531,6 +632,112 @@ fn a_second_hello_on_an_admitted_connection_is_refused() {
 }
 
 #[test]
+fn an_attach_the_dispatcher_refuses_ends_the_connection_unattached() {
+    // A session that does not exist and a session the scope does not cover
+    // both reach this loop as the same `None`.
+    let session = SessionId::new();
+    let (admissions, asked) = mpsc::channel();
+    let dispatcher = std::thread::spawn(move || {
+        let Ok(RouterEvent::Admission(AdmissionAsk::Locate {
+            selector, reply, ..
+        })) = asked.recv()
+        else {
+            panic!("an attach asks the dispatcher where the session listens");
+        };
+        assert_eq!(selector, SessionSelector::Id(session));
+        let _ = reply.send(None);
+    });
+
+    let mut reader = Cursor::new(framed(&RemoteClientFrame::Attach {
+        session: SessionSelector::Id(session),
+    }));
+    let mut writer = RecordedWriter(Vec::new());
+    let admitted = Admitted {
+        scope: TokenScope::HostWide,
+        id: 11,
+    };
+
+    let attached = admitted_frames(&mut reader, &mut writer, &admitted, &admissions);
+
+    assert_eq!(attached, None);
+    assert_eq!(
+        server_frames(&writer.0),
+        vec![RemoteServerFrame::Refused {
+            message: REMOTE_REFUSED.to_string(),
+        }],
+    );
+    dispatcher.join().expect("the stand-in dispatcher ended");
+}
+
+#[test]
+fn bytes_an_admitted_connection_sends_that_are_not_a_frame_are_refused() {
+    // The cap is larger after admission, and JSON this build has no frame for
+    // still reads as a refusal rather than as a hang-up.
+    let junk = br#"{"Nonsense":1}"#.to_vec();
+    let mut request = u32::try_from(junk.len())
+        .expect("the junk fits")
+        .to_be_bytes()
+        .to_vec();
+    request.extend_from_slice(&junk);
+    let (admissions, _asked) = mpsc::channel();
+    let mut reader = Cursor::new(request);
+    let mut writer = RecordedWriter(Vec::new());
+    let admitted = Admitted {
+        scope: TokenScope::HostWide,
+        id: 5,
+    };
+
+    let attached = admitted_frames(&mut reader, &mut writer, &admitted, &admissions);
+
+    assert_eq!(attached, None);
+    assert_eq!(
+        server_frames(&writer.0),
+        vec![RemoteServerFrame::Refused {
+            message: REMOTE_REFUSED.to_string(),
+        }],
+    );
+}
+
+#[test]
+fn an_admitted_connection_that_hangs_up_is_answered_with_nothing() {
+    let (admissions, _asked) = mpsc::channel();
+    let mut reader = Cursor::new(Vec::new());
+    let mut writer = RecordedWriter(Vec::new());
+    let admitted = Admitted {
+        scope: TokenScope::HostWide,
+        id: 9,
+    };
+
+    let attached = admitted_frames(&mut reader, &mut writer, &admitted, &admissions);
+
+    assert_eq!(attached, None);
+    assert_eq!(
+        writer.0,
+        Vec::<u8>::new(),
+        "a caller that has left is written nothing"
+    );
+}
+
+#[test]
+fn an_admitted_connection_ends_unanswered_when_the_dispatcher_is_gone() {
+    // The dispatcher hung up before the list could be answered. The connection
+    // finishes with nothing written.
+    let (admissions, asked) = mpsc::channel::<RouterEvent>();
+    drop(asked);
+    let mut reader = Cursor::new(framed(&RemoteClientFrame::List));
+    let mut writer = RecordedWriter(Vec::new());
+    let admitted = Admitted {
+        scope: TokenScope::HostWide,
+        id: 4,
+    };
+
+    let attached = admitted_frames(&mut reader, &mut writer, &admitted, &admissions);
+
+    assert_eq!(attached, None);
+    assert_eq!(writer.0, Vec::<u8>::new());
+}
+
+#[test]
 fn the_hello_the_router_sends_for_a_remote_caller_says_so() {
     let hello = bridged_hello(ConnectionToken::new("endpointSecret"), (1, 4));
 
@@ -546,6 +753,195 @@ fn the_hello_the_router_sends_for_a_remote_caller_says_so() {
             },
         }
     );
+}
+
+#[test]
+fn a_certificate_no_tls_configuration_accepts_takes_no_port() {
+    let cert = CertFile {
+        format: CERT_FILE_FORMAT,
+        cert_der: vec![1, 2, 3],
+        key_der: vec![4, 5, 6],
+    };
+
+    let Err(failed) = bind("127.0.0.1:0".to_string(), &cert) else {
+        panic!("bytes that are not a certificate build no TLS configuration");
+    };
+
+    assert_eq!(failed.kind(), io::ErrorKind::Other);
+}
+
+#[test]
+fn an_address_that_names_no_socket_takes_no_port() {
+    let Err(failed) = bind("not-an-address".to_string(), &test_cert()) else {
+        panic!("a string that is not an address binds nothing");
+    };
+
+    assert_eq!(failed.kind(), io::ErrorKind::InvalidInput);
+}
+
+mod doorway {
+    //! What [`serve_remote`] answers a caller before it is admitted, read by a
+    //! real client over real TLS on loopback: a caller speaking no doorway
+    //! version this build speaks, a secret the dispatcher refuses, an opening
+    //! frame that is not a Hello, and a caller the dispatcher admits.
+
+    use super::*;
+
+    use koshi_ipc::protocol::{MIN_PROTOCOL_VERSION, PROTOCOL_VERSION};
+    use koshi_ipc::remote_wire;
+
+    /// How long the client gives the whole dial: the connect, the TLS
+    /// handshake, the opening frame and the one frame answering it.
+    const DIAL_WAIT: Duration = Duration::from_secs(10);
+
+    /// Serve exactly one TLS connection on loopback with the real
+    /// [`serve_remote`], answering its questions the way the router does.
+    ///
+    /// `admits` says what the stand-in dispatcher answers an
+    /// [`AdmissionAsk::Admit`] with: a host-wide scope numbered 7 when it is
+    /// true, and a refusal when it is false. Every locate is refused.
+    ///
+    /// Returns the address the client dials.
+    fn start_doorway(admits: bool) -> String {
+        let tls = Arc::new(server_config(&test_cert()).expect("the TLS config builds"));
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind the test listener");
+        let address = listener
+            .local_addr()
+            .expect("read the bound address")
+            .to_string();
+
+        let (admissions_tx, admissions_rx) = mpsc::channel::<RouterEvent>();
+        std::thread::spawn(move || {
+            while let Ok(RouterEvent::Admission(ask)) = admissions_rx.recv() {
+                match ask {
+                    AdmissionAsk::Admit { reply, .. } => {
+                        let _ = reply.send(admits.then_some(Admitted {
+                            scope: TokenScope::HostWide,
+                            id: 7,
+                        }));
+                    }
+                    AdmissionAsk::Rows { reply, .. } => {
+                        let _ = reply.send(Vec::new());
+                    }
+                    AdmissionAsk::Locate { reply, .. } => {
+                        let _ = reply.send(None);
+                    }
+                    AdmissionAsk::Ended { .. } => {}
+                }
+            }
+        });
+
+        std::thread::spawn(move || {
+            let (sock, _) = listener.accept().expect("the listener accepts the client");
+            let counted =
+                InAdmission::enter(&Arc::new(AtomicUsize::new(0))).expect("a fresh count admits");
+            serve_remote(sock, &tls, &admissions_tx, counted);
+        });
+
+        address
+    }
+
+    /// Dial the doorway at `address`, send `opening`, and hand back the one
+    /// frame it answers with. No certificate is pinned.
+    fn ask_doorway(address: &str, opening: &RemoteClientFrame) -> RemoteServerFrame {
+        let (_reader, _writer, _fingerprint, answer) =
+            remote_wire::open(address, None, opening, DIAL_WAIT, None)
+                .expect("the doorway answers the opening frame");
+        answer
+    }
+
+    /// A Hello naming the doorway versions `min_remote` to `max_remote`, the
+    /// session protocol versions this build speaks, and the secret `token`.
+    fn hello(min_remote: u32, max_remote: u32, token: &str) -> RemoteClientFrame {
+        RemoteClientFrame::Hello {
+            min_remote_version: min_remote,
+            max_remote_version: max_remote,
+            min_protocol_version: MIN_PROTOCOL_VERSION,
+            max_protocol_version: PROTOCOL_VERSION,
+            token: ConnectionToken::new(token),
+        }
+    }
+
+    #[test]
+    fn a_caller_speaking_no_doorway_version_this_build_speaks_is_told_both_ranges() {
+        // This dispatcher refuses every secret, and the answer still names the
+        // ranges: the version is settled before the secret is looked at.
+        let address = start_doorway(false);
+
+        let answer = ask_doorway(
+            &address,
+            &hello(
+                REMOTE_PROTOCOL_VERSION + 1,
+                REMOTE_PROTOCOL_VERSION + 2,
+                "neverReadSecret",
+            ),
+        );
+
+        assert_eq!(
+            answer,
+            RemoteServerFrame::Refused {
+                message: version_refusal(REMOTE_PROTOCOL_VERSION + 1, REMOTE_PROTOCOL_VERSION + 2),
+            }
+        );
+    }
+
+    #[test]
+    fn a_secret_the_dispatcher_refuses_reads_as_every_other_refusal_does() {
+        let address = start_doorway(false);
+
+        let answer = ask_doorway(
+            &address,
+            &hello(
+                MIN_REMOTE_PROTOCOL_VERSION,
+                REMOTE_PROTOCOL_VERSION,
+                "wrongSecret",
+            ),
+        );
+
+        assert_eq!(
+            answer,
+            RemoteServerFrame::Refused {
+                message: REMOTE_REFUSED.to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn an_opening_frame_that_is_not_a_hello_is_refused_with_no_secret_presented() {
+        // This dispatcher admits every secret; a List arriving first is still
+        // refused.
+        let address = start_doorway(true);
+
+        let answer = ask_doorway(&address, &RemoteClientFrame::List);
+
+        assert_eq!(
+            answer,
+            RemoteServerFrame::Refused {
+                message: REMOTE_REFUSED.to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn an_admitted_caller_is_welcomed_with_the_doorway_version_both_ends_speak() {
+        let address = start_doorway(true);
+
+        let answer = ask_doorway(
+            &address,
+            &hello(
+                MIN_REMOTE_PROTOCOL_VERSION,
+                REMOTE_PROTOCOL_VERSION,
+                "testSecret",
+            ),
+        );
+
+        assert_eq!(
+            answer,
+            RemoteServerFrame::Welcome {
+                remote_version: REMOTE_PROTOCOL_VERSION,
+            }
+        );
+    }
 }
 
 mod bridge_round_trip {
@@ -569,14 +965,10 @@ mod bridge_round_trip {
     use koshi_core::ids::CommandId;
     use koshi_ipc::event::SessionEvent;
     use koshi_ipc::protocol::{EventFilterSpec, IpcResponse, IpcResult};
-    use koshi_ipc::remote_state::CERT_FILE_FORMAT;
     use koshi_ipc::router::SessionSelector;
     use koshi_link::remote_client;
     use koshi_pty::backend::state::PtyBackend;
     use koshi_runtime::ipc_server::IpcServer;
-    use koshi_runtime::placeholder::{
-        NullSnapshotProvider, NullStorage, SnapshotProvider, Storage,
-    };
     use koshi_runtime::runtime::event::RuntimeEvent;
     use koshi_runtime::server::Server;
     use koshi_test_support::fake_pty::FakePtyBackend;
@@ -654,15 +1046,7 @@ mod bridge_round_trip {
         inbox_tx: mpsc::Sender<RuntimeEvent>,
     ) {
         let backend: Arc<dyn PtyBackend> = pty;
-        let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
-        let storage: Arc<dyn Storage> = Arc::new(NullStorage);
-        let mut server = Server::new(
-            backend,
-            snapshot_provider,
-            storage,
-            inbox_rx,
-            inbox_tx.clone(),
-        );
+        let mut server = Server::new(backend, inbox_rx, inbox_tx.clone());
         server.load_startup_config(None);
         server
             .bootstrap_session(
@@ -715,14 +1099,7 @@ mod bridge_round_trip {
     ///
     /// Returns the address the client dials.
     fn start_listener(endpoint_path: PathBuf) -> String {
-        let made = rcgen::generate_simple_self_signed(vec!["koshi".to_string()])
-            .expect("the test certificate generates");
-        let cert = CertFile {
-            format: CERT_FILE_FORMAT,
-            cert_der: made.cert.der().to_vec(),
-            key_der: made.signing_key.serialize_der(),
-        };
-        let tls = Arc::new(server_config(&cert).expect("the TLS config builds"));
+        let tls = Arc::new(server_config(&test_cert()).expect("the TLS config builds"));
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind the test listener");
         let address = listener
@@ -783,7 +1160,12 @@ mod bridge_round_trip {
             })
             .expect("the server reads the Hello");
         let hello: IpcResponse = connection.recv().expect("the server answers the Hello");
-        assert!(matches!(hello.result, IpcResult::Hello { .. }));
+        match hello.result {
+            IpcResult::Hello {
+                protocol_version, ..
+            } => assert_eq!(protocol_version, agreed_max()),
+            other => panic!("the Hello was answered with {other:?}"),
+        }
 
         let envelope = CommandEnvelope::new(
             CommandId::new(),
@@ -833,7 +1215,12 @@ mod bridge_round_trip {
 
         // The session server's own Hello answer arrives through the bridge.
         let hello: IpcResponse = reader.recv().expect("the session answers the Hello");
-        assert!(matches!(hello.result, IpcResult::Hello { .. }));
+        match hello.result {
+            IpcResult::Hello {
+                protocol_version, ..
+            } => assert_eq!(protocol_version, agreed_max()),
+            other => panic!("the Hello was answered with {other:?}"),
+        }
 
         writer
             .send(&IpcRequest {
@@ -906,4 +1293,63 @@ mod bridge_round_trip {
             "the hold made only {rounds} rounds; the link was not exercised"
         );
     }
+}
+
+/// A writer that records what it was given and the deadline it was handed.
+struct DeadlineWriter {
+    /// Every byte written, in order.
+    bytes: Vec<u8>,
+    /// The deadline last set on this writer.
+    deadline: Option<Instant>,
+}
+
+impl Write for DeadlineWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Deadlined for DeadlineWriter {
+    fn set_deadline(&mut self, at: Option<Instant>) {
+        self.deadline = at;
+    }
+}
+
+#[test]
+fn a_refusal_written_before_admission_never_outlives_the_admission_window() {
+    // The caller still holds its admission place while the refusal is written,
+    // so that write cannot be given a window of its own past the deadline.
+    let admission_ends = Instant::now() + Duration::from_millis(1);
+    let mut writer = DeadlineWriter {
+        bytes: Vec::new(),
+        deadline: Some(admission_ends),
+    };
+
+    refuse_by(&mut writer, refusal_deadline(admission_ends));
+
+    assert_eq!(
+        writer.deadline.expect("a refusal is given a deadline"),
+        admission_ends
+    );
+    assert!(!writer.bytes.is_empty(), "the refusal frame is written");
+}
+
+#[test]
+fn a_refusal_after_admission_gets_the_whole_refusal_window() {
+    let mut writer = DeadlineWriter {
+        bytes: Vec::new(),
+        deadline: None,
+    };
+    let before = Instant::now();
+
+    refuse(&mut writer);
+
+    let given = writer.deadline.expect("a refusal is given a deadline");
+    assert!(given >= before + REFUSAL_WINDOW);
+    assert!(given <= Instant::now() + REFUSAL_WINDOW);
 }

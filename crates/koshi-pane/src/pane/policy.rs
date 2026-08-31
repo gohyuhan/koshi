@@ -15,13 +15,15 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PaneClosePolicy {
     /// Close gracefully. `timeout` is how long the process has to clean up.
+    /// `timeout` serializes as whole seconds; the sub-second part is dropped.
     Graceful {
         #[serde(with = "koshi_core::process::duration_secs")]
         timeout: Duration,
     },
     /// Force-kill the process immediately.
     Force,
-    /// Prompt the user when the pane is busy, then close gracefully.
+    /// Reject a close unless the pane is `Exited`. An `Exited` pane closes
+    /// gracefully with the default timeout.
     ConfirmIfBusy,
 }
 
@@ -55,8 +57,6 @@ pub enum PaneExitPolicy {
     /// Close the pane when its child process ends.
     #[default]
     CloseOnExit,
-    /// Start a new shell in the pane when the child process ends.
-    RespawnShell,
 }
 
 #[cfg(test)]

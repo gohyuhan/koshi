@@ -6,8 +6,8 @@
 //! user typed, no submitted line, no selection, no pane title, no plugin
 //! failure message.
 //!
-//! [`record`] builds one. Its match takes no wildcard arm, so a new [`Event`]
-//! variant is a compile error there until it states which ids it records.
+//! [`record`] builds one. Its match has no wildcard arm: a new [`Event`]
+//! variant does not compile until [`record`] names the ids it holds.
 
 use std::borrow::Cow;
 use std::time::SystemTime;
@@ -60,8 +60,8 @@ pub struct RecentEvent {
 /// Build the record for `event`, stamped `at`.
 ///
 /// Reads the variant name and the ids its payload holds. Reads no payload
-/// field carrying text or a measurement. The match takes no wildcard arm, so a
-/// new [`Event`] variant is a compile error here until it names its ids.
+/// field carrying text or a measurement. The match has no wildcard arm: a new
+/// [`Event`] variant does not compile until it names its ids here.
 ///
 /// Example: `record(&Event::PaneCreated(PaneCreated { pane_id, tab_id }), at)`
 /// results in a record whose `name` is `"PaneCreated"`, whose `pane` and `tab`

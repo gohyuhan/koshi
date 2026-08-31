@@ -5,7 +5,7 @@
 
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// The visual style of a single cell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -16,14 +16,14 @@ pub struct Style {
     bg: Color,
     /// Boolean text attributes (bold, italic, …).
     attrs: AttrFlags,
-    /// Underline color (SGR 58). `None` follows the foreground color — the
-    /// default state restored by SGR 59.
+    /// Underline color (SGR `58`). `None`, the default restored by SGR `59`,
+    /// follows the foreground color.
     underline_color: Option<Color>,
 }
 
 impl Style {
-    /// Reset the pen to the terminal default — default colors and no attributes
-    /// (SGR `0`).
+    /// Reset the pen to the terminal default: default colors, no attributes,
+    /// no underline color (SGR `0`).
     pub fn reset(&mut self) {
         *self = Style::default()
     }
@@ -91,9 +91,8 @@ impl Style {
         self.underline_color = underline_color
     }
 
-    /// The background-color-erase fill style: this pen's background only, with
-    /// the foreground and all attributes reset to default. Used to fill cells
-    /// cleared by erase, scroll, and resize.
+    /// The background-color-erase fill style: this pen's background with the
+    /// foreground, every attribute, and the underline color at their defaults.
     pub fn bg_fill(&self) -> Self {
         Style {
             bg: self.bg,
@@ -134,19 +133,30 @@ pub enum Color {
     Rgb(u8, u8, u8),
 }
 
-/// Boolean SGR text attributes, packed into one 16-bit word.
+/// SGR text attributes packed into one 16-bit word: eight boolean attributes
+/// in bits 0-7, the underline style as a 3-bit code in bits 8-10, and five
+/// spare bits. `ESC[1;3m` (bold and italic) gives `0b11`; `ESC[4;9m` (single
+/// underline and strikethrough) gives `1 << 6 | 1 << 8` = 320. A new boolean
+/// attribute takes one of the spare bits. Serializes as the bare `u16`.
 ///
-/// Each boolean attribute owns one bit and the underline style a 3-bit code in
-/// bits 8-10 — eleven bits in all, five spare. `ESC[1;3m` (bold and italic)
-/// gives `0b11`; `ESC[4;9m` (single underline and strikethrough) gives
-/// `1 << 6 | 1 << 8` = 320.
-///
-/// One [`Style`] rides in every [`Cell`](crate::grid::state::Cell), and a cell
-/// exists per grid slot and per scrollback-row column, so these two bytes are
-/// paid hundreds of thousands of times over in a live session. Adding an
-/// attribute takes a spare bit, not another field.
+/// Reading one back keeps only what the getters read: the five spare bits are
+/// dropped, and an underline code of `6` or `7` — which names no style —
+/// becomes `0`. Two words that every getter reads the same way are equal.
 #[derive(Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct AttrFlags(u16);
+pub struct AttrFlags(#[serde(deserialize_with = "defined_bits")] u16);
+
+/// Read an attribute word, keeping only the bits the getters read.
+///
+/// `1 << 15` becomes `0`; `0b110 << 8` (underline code `6`) becomes `0`;
+/// `0b001 << 8 | 1` (single underline and bold) is kept whole.
+fn defined_bits<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u16, D::Error> {
+    let word = u16::deserialize(deserializer)? & AttrFlags::DEFINED_MASK;
+    let code = (word & AttrFlags::UNDERLINE_MASK) >> AttrFlags::UNDERLINE_SHIFT;
+    if UnderlineStyle::from_code(code) == UnderlineStyle::None {
+        return Ok(word & !AttrFlags::UNDERLINE_MASK);
+    }
+    Ok(word)
+}
 
 impl AttrFlags {
     /// Bold / increased intensity (SGR 1).
@@ -169,13 +179,16 @@ impl AttrFlags {
     const UNDERLINE_SHIFT: u16 = 8;
     /// The three bits the underline code occupies, in place.
     const UNDERLINE_MASK: u16 = 0b111 << Self::UNDERLINE_SHIFT;
+    /// The eleven bits the getters read: the eight boolean attributes and the
+    /// underline code. The five above them are spare.
+    const DEFINED_MASK: u16 = 0x07FF;
 
-    /// Whether `bit` is set. Called with the single-bit constants above.
+    /// Whether the single-bit `bit` is set.
     fn has(self, bit: u16) -> bool {
         self.0 & bit != 0
     }
 
-    /// Set `bit` when `on`, clear it otherwise.
+    /// Set `bit` when `on` is true; clear it when `on` is false.
     fn set(&mut self, bit: u16, on: bool) {
         if on {
             self.0 |= bit;
@@ -237,12 +250,10 @@ impl AttrFlags {
 }
 
 impl fmt::Debug for AttrFlags {
-    /// List the attributes that are on, so a failing assertion names them
-    /// rather than printing the packed word.
-    ///
-    /// Default flags print `AttrFlags(none)`; bold with a single underline
-    /// prints `AttrFlags(bold, underline)`; a curly underline alone prints
-    /// `AttrFlags(curly-underline)`.
+    /// Lists the attributes that are on, booleans first in declaration order,
+    /// then the underline style. Default flags print `AttrFlags(none)`; bold
+    /// with a single underline prints `AttrFlags(bold, underline)`; a curly
+    /// underline alone prints `AttrFlags(curly-underline)`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut set: Vec<&str> = [
             ("bold", Self::BOLD),
@@ -273,8 +284,7 @@ impl fmt::Debug for AttrFlags {
     }
 }
 
-/// The underline style of a cell — one rendition aspect with mutually exclusive
-/// values, so a cell draws at most one underline and applying a new style
+/// The underline style of a cell. A cell has exactly one; setting a new one
 /// replaces the previous one. Selected by SGR 4 / 21 / 24 and the extended
 /// `4:n` subparameter forms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -308,8 +318,8 @@ impl UnderlineStyle {
         }
     }
 
-    /// The style a 3-bit `code` names. [`code`](Self::code) is the only writer
-    /// of those bits, so 6 and 7 never appear and read as `None`.
+    /// The style a 3-bit `code` names: `1`-`5` give `Single` through `Dashed`;
+    /// `0`, `6`, and `7` give `None`.
     fn from_code(code: u16) -> Self {
         match code {
             1 => UnderlineStyle::Single,

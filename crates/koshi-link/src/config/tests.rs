@@ -2,13 +2,17 @@
 //! files (profiles, themes) and the per-file readers that take an explicit
 //! path.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 
 use koshi_beta::beta_feature;
 use koshi_config::layer::PartialLoggingConfig;
-use koshi_config::types::RgbColor;
+use koshi_config::types::{BoundAction, ModeBindings, ModeName, RgbColor};
+use koshi_core::action::ActionRef;
+use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags};
 use koshi_core::log::{LogFormat, LogLevel};
+use koshi_core::resolve::ActionArgs;
 use tempfile::TempDir;
 
 use super::*;
@@ -55,6 +59,16 @@ fn a_leading_or_embedded_dot_name_stays_plain() {
     assert!(is_plain_file_name("a..b"));
     assert!(is_plain_file_name("..config"));
     assert!(is_plain_file_name("config.."));
+}
+
+#[test]
+fn a_space_or_non_ascii_name_stays_plain() {
+    // Neither is a path separator on any platform, so each is one flat file
+    // name that joins to a `.kdl` directly under `profile/` or `themes/`.
+    assert!(is_plain_file_name(" "));
+    assert!(is_plain_file_name("my profile"));
+    assert!(is_plain_file_name("日本語"));
+    assert!(is_plain_file_name("thème"));
 }
 
 #[test]
@@ -106,6 +120,32 @@ fn reading_a_directory_as_a_file_warns_and_is_none() {
     );
 }
 
+#[test]
+fn reading_an_empty_file_returns_an_empty_string_without_a_warning() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("empty.kdl");
+    std::fs::write(&path, "").expect("write");
+    let mut warnings = Vec::new();
+    assert_eq!(read(&path, &mut warnings), Some(String::new()));
+    assert_eq!(warnings, Vec::<String>::new());
+}
+
+#[test]
+fn reading_a_file_that_is_not_utf8_warns_and_is_none() {
+    // `0x80` starts no UTF-8 sequence, so the read fails on every platform.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("invalid.kdl");
+    std::fs::write(&path, [0x76, 0x65, 0x80, 0x72]).expect("write");
+    let mut warnings = Vec::new();
+    assert_eq!(read(&path, &mut warnings), None);
+    assert_eq!(warnings.len(), 1);
+    assert!(
+        warnings[0].starts_with(&format!("could not read config file {}: ", path.display())),
+        "unexpected warning: {}",
+        warnings[0]
+    );
+}
+
 // --- load_app: clean, field-warning-free, and hard-error files ---
 
 #[test]
@@ -114,7 +154,10 @@ fn loading_a_clean_app_file_returns_a_layer_without_warnings() {
     let path = dir.path().join("koshi.kdl");
     std::fs::write(&path, "version 1\n").expect("write");
     let mut warnings = Vec::new();
-    assert!(load_app(&path, &mut warnings).is_some());
+    let file = load_app(&path, &mut warnings).expect("the file loads");
+    assert_eq!(file.layer, PartialKoshiConfig::default());
+    assert_eq!(file.theme, None);
+    assert_eq!(file.warnings, Vec::<String>::new());
     assert_eq!(warnings, Vec::<String>::new());
 }
 
@@ -143,6 +186,46 @@ fn an_app_file_with_an_unsupported_version_drops_to_defaults_with_a_warning() {
         warnings[0].ends_with("; using defaults"),
         "unexpected warning: {}",
         warnings[0]
+    );
+}
+
+#[test]
+fn an_empty_app_file_drops_to_defaults_with_a_warning() {
+    // An empty file names no `version`, which `parse_app_config` refuses.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("koshi.kdl");
+    std::fs::write(&path, "").expect("write");
+    let mut warnings = Vec::new();
+    assert_eq!(load_app(&path, &mut warnings), None);
+    assert_eq!(warnings.len(), 1);
+    assert!(
+        warnings[0].starts_with(&format!("koshi.kdl not applied ({}): ", path.display())),
+        "unexpected warning: {}",
+        warnings[0]
+    );
+    assert!(
+        warnings[0].ends_with("; using defaults"),
+        "unexpected warning: {}",
+        warnings[0]
+    );
+}
+
+#[test]
+fn an_unknown_app_field_is_kept_as_a_path_prefixed_skip_warning() {
+    // A `koshi.kdl` that parses but names an unknown key applies its other
+    // fields and records the skip, prefixed with the file it came from.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("koshi.kdl");
+    std::fs::write(&path, "version 1\nfrobnicate 1\ntheme \"midnight\"\n").expect("write");
+    let mut warnings = Vec::new();
+    let file = load_app(&path, &mut warnings).expect("the file loads");
+    assert_eq!(file.theme, Some("midnight".to_string()));
+    assert_eq!(
+        warnings,
+        vec![format!(
+            "{}: ignored unknown key `frobnicate`; did you mean `update`?",
+            path.display()
+        )]
     );
 }
 
@@ -232,6 +315,19 @@ fn a_path_traversing_theme_name_is_rejected_before_any_file_is_read() {
 }
 
 #[test]
+fn an_empty_theme_name_is_rejected_before_any_file_is_read() {
+    // `""` has no file name at all, so it never joins to a path under
+    // `themes/`.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut warnings = Vec::new();
+    assert_eq!(load_theme(dir.path(), "", &mut warnings), None);
+    assert_eq!(
+        warnings,
+        vec!["theme name `` must be a plain name; using the default theme".to_string()]
+    );
+}
+
+#[test]
 fn an_unknown_theme_field_is_kept_as_a_path_prefixed_skip_warning() {
     // A theme file that parses but names an unknown color role applies its
     // other fields and records the skip, prefixed with the file it came from.
@@ -242,7 +338,8 @@ fn an_unknown_theme_field_is_kept_as_a_path_prefixed_skip_warning() {
         "version 1\ncolors {\n    foreground \"#ffffff\"\n}\n",
     );
     let mut warnings = Vec::new();
-    assert!(load_theme(dir.path(), "midnight", &mut warnings).is_some());
+    let layer = load_theme(dir.path(), "midnight", &mut warnings).expect("the theme loads");
+    assert_eq!(layer.name, Some("midnight".to_string()));
     assert_eq!(
         warnings,
         vec![format!(
@@ -351,7 +448,28 @@ fn loading_a_valid_keybinding_file_returns_a_layer_without_warnings() {
     )
     .expect("write");
     let mut warnings = Vec::new();
-    assert!(load_keybindings(&path, &mut warnings).is_some());
+    let layer = load_keybindings(&path, &mut warnings).expect("the file loads");
+    assert_eq!(layer.chord_timeout_ms, None);
+    assert_eq!(layer.which_key_delay_ms, None);
+    assert_eq!(layer.max_chord_depth, None);
+    assert_eq!(layer.leader, None);
+    assert_eq!(layer.unlock_alternative, None);
+    assert_eq!(
+        layer.modes,
+        Some(BTreeMap::from([(
+            ModeName::new("normal"),
+            ModeBindings {
+                keys: BTreeMap::from([(
+                    KeySequence::from(KeyChord::new(ModFlags::CTRL, Key::Char('y'))),
+                    BoundAction {
+                        action: ActionRef::core("new-tab").expect("a core action name"),
+                        args: ActionArgs::None,
+                    },
+                )]),
+                removed: BTreeSet::new(),
+            },
+        )]))
+    );
     assert_eq!(warnings, Vec::<String>::new());
 }
 
@@ -499,6 +617,26 @@ fn logging_params_take_the_level_and_format_the_config_names() {
     assert_eq!(params.session_id, session_id);
 }
 
+#[test]
+fn logging_params_keep_the_defaults_for_every_field_the_config_leaves_out() {
+    let session_id = SessionId::new();
+    let app = PartialKoshiConfig {
+        logging: Some(PartialLoggingConfig {
+            enabled: Some(true),
+            level: None,
+            format: None,
+        }),
+        ..Default::default()
+    };
+
+    let params = logging_params(Some(&app), session_id);
+
+    assert!(params.enabled);
+    assert_eq!(params.level, LogLevel::Warning);
+    assert_eq!(params.format, LogFormat::Pretty);
+    assert_eq!(params.session_id, session_id);
+}
+
 // --- The direction a pane-opening verb uses with no `--direction` ---
 
 #[test]
@@ -516,6 +654,18 @@ fn a_pane_with_no_direction_named_takes_the_one_the_config_names() {
     };
 
     assert_eq!(new_pane_direction(Some(app)), Direction::Left);
+}
+
+#[test]
+fn a_layout_section_naming_no_direction_still_opens_rightward() {
+    let app = PartialKoshiConfig {
+        layout: Some(koshi_config::layer::PartialLayoutDefaults {
+            new_pane_direction: None,
+        }),
+        ..Default::default()
+    };
+
+    assert_eq!(new_pane_direction(Some(app)), Direction::Right);
 }
 
 // --- Who may reach a session's control socket ---
@@ -603,6 +753,14 @@ fn the_flag_shares_a_session_whose_config_says_no() {
     // says afterwards, so the live read answers the same every time.
     assert!((policy.still_on)());
     assert!((policy.still_on)());
+}
+
+#[test]
+fn the_flag_shares_a_session_that_has_no_config_file_at_all() {
+    assert_eq!(
+        shared_dir_of(other_users_policy(None, Some(true))),
+        koshi_paths::shared_sessions_dir()
+    );
 }
 
 #[test]

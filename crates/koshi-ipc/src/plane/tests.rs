@@ -4,13 +4,13 @@
 //! this crate does: a listener in the temp directory, one connected caller,
 //! and [`next_request`] driven on the server's end.
 //!
-//! The session plane stands in for all of them. What is under test is the
-//! shell, not any one protocol's vocabulary — the same four answers come back
-//! whichever plane is plugged in.
+//! Every test drives [`next_request`] with the session protocol's
+//! [`SessionPlane`]; the four decisions are the same on any plane.
 
 use super::*;
 
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
 
@@ -76,11 +76,10 @@ fn served(
 
 /// The same again, and it says when it has the connection.
 ///
-/// The receiver yields once, right after `accept` returns. A test that means
-/// to drop its caller without sending anything waits for that first: on
-/// Windows a caller that connects and gives up before it is accepted occupies
-/// the pipe until the next `accept` clears it, and this helper accepts once,
-/// so the drop has to land on a connection the server already holds.
+/// The receiver yields once, right after `accept` returns. On Windows a caller
+/// that connects and drops before it is accepted occupies the pipe until the
+/// next `accept`, and this helper accepts once: a test that drops its caller
+/// without sending anything waits for the receiver first.
 fn served_announcing(
     addr: &str,
     token: ConnectionToken,
@@ -112,14 +111,12 @@ fn served_announcing(
 /// broken.
 const ANSWER_WAIT: Duration = Duration::from_secs(10);
 
-/// Run one test's body on a worker thread and fail if it has not finished
-/// within [`ANSWER_WAIT`].
+/// Run one test's body on a worker thread. A body that has not finished
+/// within [`ANSWER_WAIT`] fails with a message naming the wait; a body that
+/// panics fails with its own message.
 ///
-/// [`Connection`] has no read deadline, so a regression that stops the server
-/// answering would block on a socket read for as long as the suite is allowed
-/// to run. This turns that into a named failure instead of a run that never
-/// finishes — verified by breaking the unknown-kind arm on purpose, which
-/// hangs without this and fails in ten seconds with it.
+/// [`Connection`] has no read deadline: a server that stops answering blocks
+/// the body on a socket read, and the deadline turns that into a failure.
 fn within_deadline(body: impl FnOnce() + Send + 'static) {
     let (done, finished) = mpsc::channel();
     let worker = thread::spawn(move || {
@@ -325,7 +322,61 @@ fn a_frame_read_whole_but_unreadable_is_refused_and_the_connection_keeps_serving
                 }),
             }
         );
-        assert_eq!(accepted.request_id, Some(2));
+        assert_eq!(
+            accepted,
+            IpcResponse {
+                request_id: Some(2),
+                result: IpcResult::Hello {
+                    protocol_version: PROTOCOL_VERSION,
+                    version: BUILD.to_string(),
+                },
+            }
+        );
+        assert_eq!(
+            server.join().expect("server ends"),
+            vec![Next::Answered, Next::Answered, Next::Stop]
+        );
+    });
+}
+
+#[test]
+fn a_kind_this_build_does_not_have_before_the_hello_is_refused_as_hello_required() {
+    within_deadline(|| {
+        let addr = test_addr("unknown-kind-gated");
+        let token = ConnectionToken::new("secret");
+        let server = outcomes(&addr, token.clone());
+
+        let mut caller = Connection::connect(&addr).expect("connect");
+        caller
+            .send(&serde_json::json!({"request_id": 1, "kind": {"Rehome": {"pane": 3}}}))
+            .expect("send an unfamiliar kind first");
+        let refusal: IpcResponse = caller.recv().expect("read the refusal");
+        caller.send(&hello(2, token)).expect("send hello");
+        let accepted: IpcResponse = caller.recv().expect("read the hello answer");
+        drop(caller);
+
+        // A closed gate answers an unknown kind with `HelloRequired`, the
+        // same as a known kind.
+        assert_eq!(
+            refusal,
+            IpcResponse {
+                request_id: Some(1),
+                result: IpcResult::Error(IpcErrorPayload {
+                    code: IpcErrorCode::HelloRequired,
+                    message: "Rehome arrived before a Hello opened the connection".to_string(),
+                }),
+            }
+        );
+        assert_eq!(
+            accepted,
+            IpcResponse {
+                request_id: Some(2),
+                result: IpcResult::Hello {
+                    protocol_version: PROTOCOL_VERSION,
+                    version: BUILD.to_string(),
+                },
+            }
+        );
         assert_eq!(
             server.join().expect("server ends"),
             vec![Next::Answered, Next::Answered, Next::Stop]
@@ -407,11 +458,53 @@ fn a_hello_presenting_the_wrong_token_is_refused_here() {
 }
 
 #[test]
+fn a_refused_hello_keeps_the_connection_serving_for_the_next_hello() {
+    within_deadline(|| {
+        let addr = test_addr("token-retry");
+        let token = ConnectionToken::new("the real secret");
+        let server = outcomes(&addr, token.clone());
+
+        let mut caller = Connection::connect(&addr).expect("connect");
+        caller
+            .send(&hello(1, ConnectionToken::new("a guess")))
+            .expect("send a wrong hello");
+        let refusal: IpcResponse = caller.recv().expect("read the refusal");
+        caller.send(&hello(2, token)).expect("send the right hello");
+        let accepted: IpcResponse = caller.recv().expect("read the hello answer");
+        drop(caller);
+
+        assert_eq!(
+            refusal,
+            IpcResponse {
+                request_id: Some(1),
+                result: IpcResult::Error(IpcErrorPayload {
+                    code: IpcErrorCode::BadToken,
+                    message: "the token presented does not match this Koshi's".to_string(),
+                }),
+            }
+        );
+        assert_eq!(
+            accepted,
+            IpcResponse {
+                request_id: Some(2),
+                result: IpcResult::Hello {
+                    protocol_version: PROTOCOL_VERSION,
+                    version: BUILD.to_string(),
+                },
+            }
+        );
+        assert_eq!(
+            server.join().expect("server ends"),
+            vec![Next::Answered, Next::Answered, Next::Stop]
+        );
+    });
+}
+
+#[test]
 fn a_peer_no_longer_admitted_is_answered_nothing_at_all() {
     within_deadline(|| {
-        // The setting is read once a request has arrived, so a peer whose access
-        // was withdrawn while its connection sat open is not served the Hello it
-        // just sent.
+        // `admitted` is read after the Hello arrives: a peer whose access was
+        // withdrawn while its connection sat open is not served that Hello.
         let addr = test_addr("withdrawn");
         let token = ConnectionToken::new("secret");
         let server = served(&addr, token.clone(), || false);
@@ -421,19 +514,62 @@ fn a_peer_no_longer_admitted_is_answered_nothing_at_all() {
         let answer: Result<IpcResponse, _> = caller.recv();
         drop(caller);
 
-        assert!(
-            answer.is_err(),
-            "a withdrawn peer reads no answer, got {answer:?}"
-        );
+        let Err(IpcError::Disconnected) = answer else {
+            panic!("a withdrawn peer reads no answer, got {answer:?}");
+        };
         assert_eq!(server.join().expect("server ends"), vec![Next::Stop]);
+    });
+}
+
+#[test]
+fn a_peer_whose_access_is_withdrawn_after_the_hello_is_answered_nothing_more() {
+    within_deadline(|| {
+        let addr = test_addr("withdrawn-after-hello");
+        let token = ConnectionToken::new("secret");
+        let still_on = Arc::new(AtomicBool::new(true));
+        let admitted = Arc::clone(&still_on);
+        let server = served(&addr, token.clone(), move || {
+            admitted.load(Ordering::SeqCst)
+        });
+
+        let mut caller = Connection::connect(&addr).expect("connect");
+        caller.send(&hello(1, token)).expect("send hello");
+        let accepted: IpcResponse = caller.recv().expect("read the hello answer");
+        // The setting turns off between one request and the next.
+        still_on.store(false, Ordering::SeqCst);
+        caller
+            .send(&IpcRequest {
+                request_id: 2,
+                kind: IpcRequestKind::Discovery,
+            })
+            .expect("send discovery");
+        let answer: Result<IpcResponse, _> = caller.recv();
+        drop(caller);
+
+        assert_eq!(
+            accepted,
+            IpcResponse {
+                request_id: Some(1),
+                result: IpcResult::Hello {
+                    protocol_version: PROTOCOL_VERSION,
+                    version: BUILD.to_string(),
+                },
+            }
+        );
+        let Err(IpcError::Disconnected) = answer else {
+            panic!("a withdrawn peer reads no answer, got {answer:?}");
+        };
+        assert_eq!(
+            server.join().expect("server ends"),
+            vec![Next::Answered, Next::Stop]
+        );
     });
 }
 
 #[test]
 fn a_malformed_frame_is_answered_even_while_the_peer_is_not_admitted() {
     within_deadline(|| {
-        // That answer names no session state, so it goes out before the setting is
-        // read — the same order the session server has always used.
+        // The malformed-frame answer goes out before `admitted` is read.
         let addr = test_addr("withdrawn-junk");
         let server = served(&addr, ConnectionToken::new("secret"), || false);
 
@@ -466,9 +602,8 @@ fn a_peer_that_hangs_up_ends_the_connection() {
         let (server, accepted) = served_announcing(&addr, ConnectionToken::new("secret"), || true);
 
         let caller = Connection::connect(&addr).expect("connect");
-        // Drop only once the server holds the connection, so this is a peer
-        // going away mid-serve rather than one that gave up before it was
-        // accepted — a case Windows treats differently.
+        // Dropped once the server holds the connection: a peer going away
+        // mid-serve.
         accepted.recv().expect("the server accepted the caller");
         drop(caller);
 
@@ -476,11 +611,42 @@ fn a_peer_that_hangs_up_ends_the_connection() {
     });
 }
 
+/// A length prefix past [`MAX_FRAME_LEN`] ends the connection with nothing
+/// written: the caller reads end of stream, and the server's payload is never
+/// read. The prefix is written on the raw socket; [`Connection::send`]
+/// refuses an oversize frame on the sending side.
+#[cfg(unix)]
+#[test]
+fn an_oversize_length_prefix_ends_the_connection_with_nothing_written() {
+    use std::io::{Read as _, Write as _};
+
+    use crate::transport::MAX_FRAME_LEN;
+
+    within_deadline(|| {
+        let addr = test_addr("oversize");
+        let (server, accepted) = served_announcing(&addr, ConnectionToken::new("secret"), || true);
+
+        let mut caller = std::os::unix::net::UnixStream::connect(&addr).expect("connect");
+        accepted.recv().expect("the server accepted the caller");
+        caller
+            .write_all(&(MAX_FRAME_LEN + 1).to_be_bytes())
+            .expect("write an oversize length prefix");
+
+        let mut answered = Vec::new();
+        caller
+            .read_to_end(&mut answered)
+            .expect("read until the server closes");
+        drop(caller);
+
+        assert_eq!(answered, Vec::<u8>::new());
+        assert_eq!(server.join().expect("server ends"), vec![Next::Stop]);
+    });
+}
+
 #[test]
 fn an_attach_carries_its_payload_through_to_the_callers_dispatch() {
     within_deadline(|| {
-        // The one request whose answer the caller keeps the connection for. The
-        // shell hands it over whole rather than answering it.
+        // `next_request` hands an Attach to dispatch whole, payload included.
         let addr = test_addr("attach");
         let token = ConnectionToken::new("secret");
         let server = outcomes(&addr, token.clone());

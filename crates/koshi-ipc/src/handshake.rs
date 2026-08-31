@@ -4,10 +4,10 @@
 //! [`IpcRequestKind::Hello`](crate::protocol::IpcRequestKind::Hello), which
 //! names the protocol versions the caller speaks and presents a
 //! [`ConnectionToken`](crate::protocol::ConnectionToken). This Koshi's token
-//! lives in its endpoint file in the private (`0700`) runtime directory, so
-//! holding it proves the caller is the user who started this
-//! Koshi. A [`Handshake`](crate::handshake::Handshake) holds that check for
-//! one connection: the server feeds it every incoming request kind, and it
+//! lives in its endpoint file in the private (`0700`) runtime directory;
+//! presenting it proves the caller is the user who started this Koshi. A
+//! [`Handshake`](crate::handshake::Handshake) holds that check for one
+//! connection: the server feeds it every incoming request kind, and it
 //! answers with "serve it" or with the exact refusal to send back.
 //!
 //! Which checks a Hello meets depends on where the connection came from,
@@ -20,8 +20,8 @@
 //! with the control-plane gate
 //! [`RouterHandshake`](crate::router::RouterHandshake) and the supervisor-link
 //! gate [`SupervisorHandshake`](crate::supervisor::SupervisorHandshake). Each
-//! protocol carries its own version range and its own words in `GateWords`, so
-//! the three refusals read in each protocol's own terms.
+//! protocol carries its own version range and its own words in `GateWords`,
+//! and each refusal reads in that protocol's own terms.
 
 use crate::protocol::{
     agreed_version, ConnectionToken, IpcErrorCode, IpcErrorPayload, IpcRequestKind,
@@ -166,10 +166,10 @@ impl VersionGate {
     /// The refusal for a request kind this build does not have, named `name`.
     ///
     /// A closed gate answers [`HelloRequired`](IpcErrorCode::HelloRequired),
-    /// the same as any other kind arriving before a Hello, so an unopened
-    /// connection learns nothing about which kinds exist. An open gate answers
-    /// [`UnsupportedKind`](IpcErrorCode::UnsupportedKind) naming it, and the
-    /// connection keeps serving.
+    /// the same as any other kind arriving before a Hello; an unopened
+    /// connection is told nothing about which kinds exist. An open gate
+    /// answers [`UnsupportedKind`](IpcErrorCode::UnsupportedKind) naming it,
+    /// and the connection keeps serving.
     pub(crate) fn refuse_unknown(&self, name: &str) -> IpcErrorPayload {
         if self.agreed.is_none() {
             return self.hello_required(name);
@@ -256,10 +256,10 @@ impl Handshake {
     /// The refusal for a request kind this build does not have, named `name`.
     ///
     /// A closed gate answers [`HelloRequired`](IpcErrorCode::HelloRequired),
-    /// the same as any other kind arriving before a Hello, so an unopened
-    /// connection learns nothing about which kinds exist. An open gate answers
-    /// [`UnsupportedKind`](IpcErrorCode::UnsupportedKind) naming it, and the
-    /// connection keeps serving.
+    /// the same as any other kind arriving before a Hello; an unopened
+    /// connection is told nothing about which kinds exist. An open gate
+    /// answers [`UnsupportedKind`](IpcErrorCode::UnsupportedKind) naming it,
+    /// and the connection keeps serving.
     #[must_use]
     pub fn refuse_unknown(&self, name: &str) -> IpcErrorPayload {
         self.gate.refuse_unknown(name)
@@ -284,9 +284,7 @@ impl Handshake {
     /// the gate. Any other kind is accepted while the gate is open and refused
     /// as [`HelloRequired`](IpcErrorCode::HelloRequired) while it is not.
     ///
-    /// A second Hello re-settles the version. Both Hellos come from the same
-    /// caller speaking the same range, so the answer is the one already
-    /// settled.
+    /// A second accepted Hello settles the version again from its own range.
     ///
     /// `Ok(())` means the caller serves the request — a Hello is answered
     /// with [`IpcResult::Hello`](crate::protocol::IpcResult::Hello) carrying
@@ -304,22 +302,24 @@ impl Handshake {
                     .gate
                     .version(*min_protocol_version, *max_protocol_version)?;
                 match self.peer {
-                    // Another user of this machine is asked for no token, so
-                    // the setting alone lets them in.
+                    // Another user of this machine is asked for no token; the
+                    // setting alone decides.
                     Peer::Local {
                         same_user: false,
-                        other_users_allowed,
+                        other_users_allowed: false,
                     } => {
-                        if !other_users_allowed {
-                            return Err(IpcErrorPayload {
-                                code: IpcErrorCode::OtherUsersOff,
-                                message: "this Koshi serves only the user who started it; \
-                                          set `allow-other-users #true` in koshi.kdl to let \
-                                          the other users of this machine in"
-                                    .to_string(),
-                            });
-                        }
+                        return Err(IpcErrorPayload {
+                            code: IpcErrorCode::OtherUsersOff,
+                            message: "this Koshi serves only the user who started it; \
+                                      set `allow-other-users #true` in koshi.kdl to let \
+                                      the other users of this machine in"
+                                .to_string(),
+                        });
                     }
+                    Peer::Local {
+                        same_user: false,
+                        other_users_allowed: true,
+                    } => {}
                     Peer::Local {
                         same_user: true, ..
                     }

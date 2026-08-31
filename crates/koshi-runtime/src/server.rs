@@ -30,15 +30,15 @@ use koshi_core::registry::ActionRegistry;
 use koshi_layout::solver::{PaneSizing, MIN_PANE_SIZE};
 use koshi_observability::logging::event_log::log_event;
 use koshi_observability::logging::recent_events;
+use koshi_pty::backend::state::CarriedPtyPane;
 use koshi_pty::backend::state::{PtyBackend, PtyHandle};
-use koshi_pty::portable::CarriedPtyPane;
 use koshi_renderer::snapshot::Delivery;
+use koshi_session::client::Client;
 use koshi_session::session::state::Session;
 use koshi_terminal::engine::TerminalEngine;
 
 use crate::{
     ipc_server::IpcServer,
-    placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage},
     resume::{CarriedPane, CarriedQuit, ResumeBody, ResumeHeader, RESUME_FORMAT},
     runtime::{
         bus::{EventBus, EventFilter},
@@ -73,8 +73,8 @@ const CLIENTS_TOLD_POLL: Duration = Duration::from_millis(2);
 /// restart.
 pub type RestartCheck = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
 
-/// Whether the binary at `exe` is one this machine could run: it can be read,
-/// and on Unix it carries an execute bit.
+/// Whether the binary at `exe` is one this machine could run: its metadata can
+/// be read, and on Unix it carries an execute bit.
 ///
 /// # Errors
 /// Returns the sentence naming the path and what is wrong with it.
@@ -99,8 +99,8 @@ pub fn binary_is_runnable(exe: &Path) -> Result<(), String> {
 }
 
 /// Whether every pane in `panes` could cross an image swap: on Unix a pane's
-/// terminal must expose a descriptor, since the descriptor is what the next
-/// image takes the pane back by.
+/// terminal must expose a descriptor. The next image takes the pane back by
+/// that descriptor.
 ///
 /// # Errors
 /// Returns the sentence naming the first pane whose terminal exposes no
@@ -164,10 +164,6 @@ pub struct Server {
     /// that same frame, and a mouse round's answer goes to the subscriber that
     /// views the client whose viewer sent the round.
     pub(crate) subscriptions: Vec<(SubscriberId, ClientId)>,
-    /// Source of render snapshots for attach.
-    snapshot_provider: Arc<dyn SnapshotProvider>,
-    /// Session persistence backend.
-    storage: Arc<dyn Storage>,
     /// Control-socket server, present once the session's socket is serving.
     /// Shutdown takes it to stop accepting and withdraw the endpoint file.
     pub(crate) ipc_server: Option<IpcServer>,
@@ -252,8 +248,6 @@ impl Server {
     /// and every `koshi.kdl` reload replace.
     pub fn new(
         pty_backend: Arc<dyn PtyBackend>,
-        snapshot_provider: Arc<dyn SnapshotProvider>,
-        storage: Arc<dyn Storage>,
         inbox_rx: Receiver<RuntimeEvent>,
         inbox_tx: Sender<RuntimeEvent>,
     ) -> Self {
@@ -268,8 +262,6 @@ impl Server {
             pty_sizes: HashMap::new(),
             event_bus: EventBus::new(),
             subscriptions: Vec::new(),
-            snapshot_provider,
-            storage,
             ipc_server: None,
             action_registry: ActionRegistry::new(),
             render_scheduler: RenderScheduler::new(),
@@ -294,10 +286,9 @@ impl Server {
     ///
     /// The event bus, the action registry, the render scheduler, the built-in
     /// config defaults, the subscribers and the control socket are all built
-    /// fresh here, on the stock [`NullSnapshotProvider`] and [`NullStorage`].
-    /// What comes from the swap is what [`ResumeBody`] carries, over `handles`
-    /// and `sizes`, plus the records of the clients that were told to attach
-    /// again.
+    /// fresh here. What comes from the swap is what [`ResumeBody`] carries, over
+    /// `handles` and `sizes`, plus the records of the clients that were told to
+    /// attach again.
     /// [`load_startup_config`](Self::load_startup_config) still runs afterwards,
     /// so the session comes back on the `koshi.kdl` that is on disk at that
     /// moment.
@@ -321,13 +312,7 @@ impl Server {
         handles: HashMap<PaneId, PtyHandle>,
         sizes: HashMap<PaneId, PtySize>,
     ) -> Self {
-        let mut server = Server::new(
-            pty_backend,
-            Arc::new(NullSnapshotProvider),
-            Arc::new(NullStorage),
-            inbox_rx,
-            inbox_tx,
-        );
+        let mut server = Server::new(pty_backend, inbox_rx, inbox_tx);
         server.awaiting_reconnect = body
             .sessions
             .values()
@@ -357,8 +342,14 @@ impl Server {
     }
 
     /// Drain this server into the two halves of its resume file: the header
-    /// naming `session_id`, `session_name` and every pane in `panes`, and the
+    /// naming the session this server holds and every pane in `panes`, and the
     /// body [`ResumeBody`] names.
+    ///
+    /// `None` when this server holds no session, leaving it untouched: there is
+    /// no session to name and nothing to carry.
+    ///
+    /// The header's `session_id` and `session_name` are read from the same
+    /// session the body carries, so the two halves name one session.
     ///
     /// The state moves out of the server, which is left with no sessions and no
     /// terminal engines, so no pane's grid or scrollback is copied on the way.
@@ -371,12 +362,10 @@ impl Server {
     /// no size for takes the size the backend reports. On Unix each record also
     /// names the terminal its descriptor is the master of. A pane whose child
     /// the backend already reaped carries that child's exit status.
-    pub fn carry_out(
-        &mut self,
-        session_id: SessionId,
-        session_name: String,
-        panes: &[CarriedPtyPane],
-    ) -> (ResumeHeader, ResumeBody) {
+    pub fn carry_out(&mut self, panes: &[CarriedPtyPane]) -> Option<(ResumeHeader, ResumeBody)> {
+        let session = self.sole_session()?;
+        let session_id = session.id;
+        let session_name = session.name.clone();
         let carried = panes
             .iter()
             .map(|pane| {
@@ -430,7 +419,7 @@ impl Server {
                 CarriedQuit::Graceful
             }),
         };
-        (header, body)
+        Some((header, body))
     }
 
     /// The client→server door: dispatch one command envelope against live
@@ -438,15 +427,6 @@ impl Server {
     /// requests a session/pane mutation.
     pub fn submit_command(&mut self, envelope: CommandEnvelope) -> CommandResult {
         self.dispatch(envelope)
-    }
-
-    /// Mark the chrome stale so the next poll repaints it. The viewer calls
-    /// this after a key changed something only it can see — an opened or
-    /// closed sequence, a mode switch — since the hint bar and mode tag are
-    /// drawn from the viewer's own state.
-    pub fn invalidate_status(&mut self) {
-        self.render_scheduler
-            .invalidate(crate::runtime::render_schedule::InvalidationReason::StatusChanged);
     }
 
     /// The server→client door: register a subscriber for the events `filter`
@@ -766,6 +746,60 @@ impl Server {
         &self.sessions
     }
 
+    /// The session that owns `client_id`, or `None` if no attached client has
+    /// that id. Shared with command dispatch's `acting_session`, which resolves
+    /// the same key-binding/mouse client to its session.
+    pub(crate) fn session_for_client(&self, client_id: ClientId) -> Option<&Session> {
+        self.sessions()
+            .values()
+            .find(|session| session.clients.get(client_id).is_some())
+    }
+
+    /// Mutable twin of [`session_for_client`](Self::session_for_client): the same
+    /// client→session lookup, for callers that edit the client's view state (e.g.
+    /// the scroll handlers).
+    pub(crate) fn session_for_client_mut(&mut self, client_id: ClientId) -> Option<&mut Session> {
+        self.sessions
+            .values_mut()
+            .find(|session| session.clients.get(client_id).is_some())
+    }
+
+    /// The session that owns `pane_id`, or `None` if no session's registry holds
+    /// that pane. The single pane→session lookup, shared by pane-target
+    /// resolution and child-exit routing.
+    pub(crate) fn session_for_pane(&self, pane_id: PaneId) -> Option<&Session> {
+        self.sessions()
+            .values()
+            .find(|session| session.panes.get(pane_id).is_some())
+    }
+
+    /// Mutable twin of [`session_for_pane`](Self::session_for_pane), for callers
+    /// that edit the owning session's state — the scroll re-anchor and the
+    /// selection handlers.
+    pub(crate) fn session_for_pane_mut(&mut self, pane_id: PaneId) -> Option<&mut Session> {
+        self.sessions
+            .values_mut()
+            .find(|session| session.panes.get(pane_id).is_some())
+    }
+
+    /// Mutable access to the client attached under `client_id` in any session, or
+    /// `None` if no attached client has that id. Resolves the owning session via
+    /// [`session_for_client_mut`](Self::session_for_client_mut), the shared
+    /// client→session lookup.
+    pub(crate) fn client_mut(&mut self, client_id: ClientId) -> Option<&mut Client> {
+        self.session_for_client_mut(client_id)?
+            .clients
+            .get_mut(client_id)
+    }
+
+    /// Borrow the one session this process serves, or `None` while it holds
+    /// none — before genesis, and between the last session ending and the
+    /// process exiting. Genesis seeds exactly one session and no command
+    /// creates another in this process.
+    pub(crate) fn sole_session(&self) -> Option<&Session> {
+        self.sessions.values().next()
+    }
+
     /// The per-pane sizing every layout solve in this server uses: the
     /// configured pane minimum floored at [`MIN_PANE_SIZE`], and the
     /// configured gap between split children.
@@ -792,14 +826,6 @@ impl Server {
     pub(crate) fn event_bus(&self) -> &EventBus {
         &self.event_bus
     }
-    /// Borrow the snapshot provider.
-    pub fn snapshot_provider(&self) -> &Arc<dyn SnapshotProvider> {
-        &self.snapshot_provider
-    }
-    /// Borrow the storage backend.
-    pub fn storage(&self) -> &Arc<dyn Storage> {
-        &self.storage
-    }
     /// Borrow the IPC server, if one is wired.
     pub fn ipc_server(&self) -> Option<&IpcServer> {
         self.ipc_server.as_ref()
@@ -808,10 +834,6 @@ impl Server {
     /// withdraws its endpoint file with the rest of teardown.
     pub fn attach_ipc_server(&mut self, ipc_server: IpcServer) {
         self.ipc_server = Some(ipc_server);
-    }
-    /// Borrow the action registry.
-    pub fn action_registry(&self) -> &ActionRegistry {
-        &self.action_registry
     }
     /// Borrow the runtime event inbox receiver.
     pub fn inbox_rx(&self) -> &Receiver<RuntimeEvent> {

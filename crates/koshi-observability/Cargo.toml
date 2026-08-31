@@ -5,9 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-miette = "7.6.0"
-thiserror = "2.0.18"
+thiserror.workspace = true
 koshi-core = { version = "0.4.0-pr.1", path = "../koshi-core" }
 koshi-paths = { version = "0.4.0-pr.1", path = "../koshi-paths" }
-tracing = "0.1.44"
+tracing.workspace = true
 tracing-subscriber = { version = "0.3.23", features = ["json"] }

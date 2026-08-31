@@ -9,13 +9,14 @@
 //! caller a session's control-socket address and steps out: pane traffic runs
 //! between the caller and that session server directly, never through here.
 //!
-//! One thread accepts connections and gives each its own serving thread; a
-//! serving thread only holds a channel sender, so the session list has a
-//! single owner — the dispatcher loop on the main thread. A session that dies
-//! leaves the list three ways: its reaper thread reports the child's exit, on
-//! Unix a watcher thread reports the exit of a session the rebuild picked up,
-//! or a lookup finds nothing listening at its address. All remove the entry
-//! and, for a session this user started, the files it left behind.
+//! One thread accepts connections, serves only this user's own, and gives each
+//! its own serving thread; a serving thread only holds a channel sender, so
+//! the session list has a single owner — the dispatcher loop on the main
+//! thread. A session that dies leaves the list three ways: its reaper thread
+//! reports the child's exit, on Unix a watcher thread reports the exit of a
+//! session the rebuild picked up, or a lookup finds nothing listening at its
+//! address. All remove the entry and, for a session this user started, the
+//! files it left behind.
 //!
 //! A restart request is answered first and acted on second: the router sends
 //! the `Restarting` reply, then restarts into the binary on disk. On Unix it
@@ -55,7 +56,7 @@ use koshi_config::types::ServerConfig;
 use koshi_core::ids::SessionId;
 use koshi_core::naming::{generate_name, NameKind};
 use koshi_ipc::endpoint::{remove_socket_file, resume_path, socket_addr, EndpointFile};
-use koshi_ipc::error::IpcError;
+use koshi_ipc::error::{IpcError, RemoteFile};
 use koshi_ipc::plane::{self, Next};
 use koshi_ipc::protocol::{ConnectionToken, IpcErrorCode, IpcErrorPayload};
 use koshi_ipc::remote_state::{
@@ -72,11 +73,14 @@ use koshi_ipc::tls;
 use koshi_ipc::transport::{self, Connection, Listener};
 use koshi_ipc::validate::{reclaim_stale_socket, validate_socket_addr};
 
+use koshi_link::error::CliError;
 use koshi_link::ipc_client;
 use koshi_link::router_client::{ROUTER_SUBCOMMAND, RUNTIME_DIR_FLAG};
 use koshi_runtime::server::binary_is_runnable;
 
+use crate::process;
 use crate::remote_listener::{self, AdmissionAsk, Admitted, Occasional};
+use crate::session_server::{ALLOW_OTHER_USERS_FLAG, SESSION_SERVER_SUBCOMMAND};
 
 #[cfg(test)]
 mod tests;
@@ -108,24 +112,9 @@ const LOCK_HANDOVER_POLL: Duration = Duration::from_millis(100);
 /// thread time to finish the reply it is writing.
 const DRAIN_GRACE: Duration = Duration::from_millis(100);
 
-/// The subcommand the router starts itself under to run one session server.
-/// The arguments after it are the session id, the session name,
-/// [`RUNTIME_DIR_FLAG`] with the directory this router serves,
-/// [`PROFILE_FLAG`] when the create named a profile, and
-/// [`ALLOW_OTHER_USERS_FLAG`] when the create asked for the other users of
-/// this machine. A session server replacing its own image starts the new one
-/// under the same subcommand.
-pub(crate) const SESSION_SERVER_SUBCOMMAND: &str = "serve-session";
-
 /// The flag carrying a `--profile` name to the session server the router
 /// starts, so the session opens that profile's tabs and panes.
 const PROFILE_FLAG: &str = "--profile";
-
-/// The flag telling the session server the router starts to let the other
-/// users of this machine reach the session, whatever its `koshi.kdl` says. A
-/// session server replacing its own image passes it on, so the rebound socket
-/// keeps that reach.
-pub(crate) const ALLOW_OTHER_USERS_FLAG: &str = "--allow-other-users";
 
 /// The flag this router passes to the router it starts, telling that one to
 /// wait for the router lock rather than yield to the router holding it.
@@ -136,16 +125,6 @@ const WAIT_FOR_LOCK_FLAG: &str = "--wait-for-lock";
 /// console with no window on screen.
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-/// The Win32 `DETACHED_PROCESS` creation flag: the started process gets no
-/// console and does not inherit the caller's.
-#[cfg(windows)]
-pub(crate) const DETACHED_PROCESS: u32 = 0x0000_0008;
-
-/// The Win32 `CREATE_NEW_PROCESS_GROUP` creation flag: the started process
-/// begins a process group of its own.
-#[cfg(windows)]
-pub(crate) const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 
 /// The running sessions, keyed by id. Owned by the dispatcher loop alone.
 type Registry = HashMap<SessionId, SessionEntry>;
@@ -162,8 +141,6 @@ struct SessionEntry {
     /// a session another local user started, whose process this router does
     /// not own.
     pid: u32,
-    /// When the session was created.
-    created_at: SystemTime,
 }
 
 /// One thing for the dispatcher to do.
@@ -320,7 +297,15 @@ pub fn run_router(
 
     let (events_tx, events_rx) = mpsc::channel();
     let shutting_down = Arc::new(AtomicBool::new(false));
-    let accept_thread = start_accept_thread(listener, token, events_tx.clone(), &shutting_down)?;
+    let accept_thread =
+        match start_accept_thread(listener, token, events_tx.clone(), &shutting_down) {
+            Ok(handle) => handle,
+            Err(error) => {
+                let _ = std::fs::remove_file(&endpoint_path);
+                remove_socket_file(&addr);
+                return Err(error.into());
+            }
+        };
 
     let mut remote = RemoteState {
         address: merge_server(
@@ -464,13 +449,14 @@ fn open_remote_listener(remote: &mut RemoteState, events_tx: &Sender<RouterEvent
 /// This machine's certificate and its fingerprint, generating one when there is
 /// none to read.
 ///
-/// The certificate koshi generates names `koshi`. What that name says does not
-/// matter: a dialling client pins the fingerprint of the certificate it was
-/// shown and checks nothing else about it.
+/// The certificate koshi generates names `koshi`. A dialling client pins the
+/// fingerprint of the certificate it was shown and checks nothing else about
+/// it.
 ///
 /// # Errors
-/// [`IpcError::TokenStoreWrite`] naming what failed, for a certificate that
-/// could not be generated or could not be written.
+/// [`IpcError::RemoteFileWrite`] naming [`RemoteFile::Certificate`] and what
+/// failed, for a certificate that could not be generated or could not be
+/// written.
 fn load_or_make_cert(data_dir: &Path) -> Result<(CertFile, String), IpcError> {
     let path = CertFile::path(data_dir);
     if let Ok(file) = CertFile::read(&path) {
@@ -478,7 +464,8 @@ fn load_or_make_cert(data_dir: &Path) -> Result<(CertFile, String), IpcError> {
         return Ok((file, fingerprint));
     }
     let made = rcgen::generate_simple_self_signed(vec!["koshi".to_string()]).map_err(|error| {
-        IpcError::TokenStoreWrite {
+        IpcError::RemoteFileWrite {
+            file: RemoteFile::Certificate,
             path: path.display().to_string(),
             detail: format!("the certificate could not be generated: {error}"),
         }
@@ -493,51 +480,24 @@ fn load_or_make_cert(data_dir: &Path) -> Result<(CertFile, String), IpcError> {
     Ok((file, fingerprint))
 }
 
-/// Block SIGPIPE on the calling thread's signal mask.
-///
-/// The blocked signal stays pending and is discarded when the thread ends; a
-/// write to a hung-up peer returns an `EPIPE` error under every process-wide
-/// disposition.
-#[cfg(unix)]
-pub(crate) fn block_sigpipe_on_this_thread() {
-    let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
-    unsafe {
-        libc::sigemptyset(&mut set);
-        libc::sigaddset(&mut set, libc::SIGPIPE);
-        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
-    }
-}
-
 /// Replace this process's running image with the binary at `exe`, serving the
 /// same runtime directory. The call returns only when the exec failed, and
-/// hands back that error.
+/// hands back that error, on the terms
+/// [`exec_and_keep_ignoring_sigpipe`](crate::process::exec_and_keep_ignoring_sigpipe)
+/// states.
 ///
-/// `exec` runs the command's setup steps and then, before calling `execvp`,
-/// resets SIGPIPE to `SIG_DFL` in this process. It does that even with no
-/// setup step configured on the command (the standard library's
-/// `sys/process/unix/unix.rs`, in `do_exec`). A failed exec therefore puts
-/// `SIG_IGN` back here before returning, so the resumed router keeps ignoring
-/// the signal a write to a hung-up client raises.
-///
-/// The SIGPIPE reset is the only change this function undoes, so a setup step
-/// added to the command must be undone here beside it.
-///
-/// A successful exec closes every descriptor the standard library opened
-/// close-on-exec, the lock file among them, at the instant the old image ends.
-/// The new image's [`run_router`] then takes the lock, reclaims the socket
-/// path, binds, writes a fresh endpoint file, and rebuilds the session list —
-/// under the same process id.
+/// A successful exec closes the router lock file with every other descriptor
+/// the standard library opened close-on-exec. The new image's [`run_router`]
+/// then takes the lock, reclaims the socket path, binds, writes a fresh
+/// endpoint file, and rebuilds the session list — under the same process id.
 #[cfg(unix)]
 fn restart_by_exec(exe: &Path, runtime_dir: &Path) -> std::io::Error {
-    use std::os::unix::process::CommandExt;
-
-    let error = std::process::Command::new(exe)
-        .arg(ROUTER_SUBCOMMAND)
-        .arg(RUNTIME_DIR_FLAG)
-        .arg(runtime_dir)
-        .exec();
-    let _ = unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
-    error
+    process::exec_and_keep_ignoring_sigpipe(
+        std::process::Command::new(exe)
+            .arg(ROUTER_SUBCOMMAND)
+            .arg(RUNTIME_DIR_FLAG)
+            .arg(runtime_dir),
+    )
 }
 
 /// Start the binary at `exe` as a new router over the same runtime directory,
@@ -547,19 +507,15 @@ fn restart_by_exec(exe: &Path, runtime_dir: &Path) -> std::io::Error {
 /// and its input and output go nowhere. An error means nothing was started.
 #[cfg(windows)]
 fn hand_over_to(exe: &Path, runtime_dir: &Path) -> std::io::Result<()> {
-    use std::os::windows::process::CommandExt;
-
-    std::process::Command::new(exe)
-        .arg(ROUTER_SUBCOMMAND)
-        .arg(RUNTIME_DIR_FLAG)
-        .arg(runtime_dir)
-        .arg(WAIT_FOR_LOCK_FLAG)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
-        .spawn()
-        .map(|_| ())
+    process::detached(
+        std::process::Command::new(exe)
+            .arg(ROUTER_SUBCOMMAND)
+            .arg(RUNTIME_DIR_FLAG)
+            .arg(runtime_dir)
+            .arg(WAIT_FOR_LOCK_FLAG),
+    )
+    .spawn()
+    .map(|_| ())
 }
 
 /// Start the thread that accepts router connections.
@@ -577,6 +533,9 @@ fn start_accept_thread(
 
 /// Accept connections until the shutdown flag is set, giving each its own
 /// serving thread.
+///
+/// Only this router's own user is served. A connection opened by another user,
+/// and one whose user cannot be read, is closed without being served.
 fn accept_loop(
     listener: &Listener,
     token: &ConnectionToken,
@@ -584,6 +543,11 @@ fn accept_loop(
     shutting_down: &AtomicBool,
 ) {
     transport::accept_until_shutdown(listener, shutting_down, ACCEPT_RETRY_DELAY, |connection| {
+        // The OS reports which user opened the connection, so a peer cannot
+        // claim to be another one.
+        if !matches!(connection.peer_is_same_user(), Ok(true)) {
+            return;
+        }
         let token = token.clone();
         let events_tx = events_tx.clone();
         std::thread::spawn(move || serve_connection(connection, token, &events_tx));
@@ -609,7 +573,7 @@ fn serve_connection(
     events_tx: &Sender<RouterEvent>,
 ) {
     #[cfg(unix)]
-    block_sigpipe_on_this_thread();
+    process::block_sigpipe_on_this_thread();
     let mut gate = RouterHandshake::new(token);
     loop {
         let (request_id, kind) = match plane::next_request::<ControlPlane>(
@@ -684,11 +648,11 @@ fn dispatch(
 ) -> RouterExit {
     loop {
         let received = if registry.is_empty() {
-            events_rx.recv_timeout(idle_exit).map_err(|_| ())
+            events_rx.recv_timeout(idle_exit).ok()
         } else {
-            events_rx.recv().map_err(|_| ())
+            events_rx.recv().ok()
         };
-        let Ok(event) = received else {
+        let Some(event) = received else {
             return RouterExit::Idle;
         };
         match event {
@@ -844,14 +808,28 @@ fn admit_token(
     Some(Admitted { scope, id })
 }
 
+/// Whether this router started the session `entry` describes.
+///
+/// A session another local user started carries `pid` `0`; a session this
+/// router started carries the process id of its session server, which is never
+/// `0`.
+///
+/// [`remote_rows`] and [`locate_remote`] both read this, so a remote caller is
+/// shown exactly the sessions it can be carried to.
+fn started_by_this_router(entry: &SessionEntry) -> bool {
+    entry.pid != 0
+}
+
 /// The sessions an admitted scope reaches, in name then id order.
 ///
-/// A host-wide scope reaches every session in the list; a session scope
-/// reaches that one session. Nothing outside the router's own list is read.
+/// A host-wide scope reaches every session this router started; a session scope
+/// reaches that one session. A session another local user started is left out,
+/// on the rule [`started_by_this_router`] states. Nothing outside the router's
+/// own list is read.
 fn remote_rows(registry: &Registry, scope: &TokenScope) -> Vec<RemoteSessionRow> {
     let mut rows: Vec<RemoteSessionRow> = registry
         .iter()
-        .filter(|(id, _)| scope.covers(**id))
+        .filter(|(id, entry)| scope.covers(**id) && started_by_this_router(entry))
         .map(|(id, entry)| RemoteSessionRow {
             id: *id,
             name: entry.name.clone(),
@@ -862,15 +840,18 @@ fn remote_rows(registry: &Registry, scope: &TokenScope) -> Vec<RemoteSessionRow>
 }
 
 /// The endpoint file of the session an admitted client asked for, when the
-/// connection numbered `id` still stands and its scope covers that session.
+/// connection numbered `id` still stands, its scope covers that session, and
+/// this router started it.
 ///
 /// Checks in this order, reading no caller-supplied name until the last step:
 /// the connection numbered `id` is still registered, `selector` names a session
-/// in the router's own in-memory list, and `scope` covers that session. No
-/// socket is opened, nothing is waited for, and no file is touched.
+/// in the router's own in-memory list, `scope` covers that session, and
+/// [`started_by_this_router`] holds for it. No socket is opened, nothing is
+/// waited for, and no file is touched.
 ///
-/// `None` for all three failures: a connection a revoke dropped, a selector
-/// naming no session, and a session the scope does not cover.
+/// `None` for all four failures: a connection a revoke dropped, a selector
+/// naming no session, a session the scope does not cover, and a session another
+/// local user started.
 fn locate_remote(
     runtime_dir: &Path,
     registry: &Registry,
@@ -884,6 +865,9 @@ fn locate_remote(
     }
     let session = resolve(registry, selector)?;
     if !scope.covers(session) {
+        return None;
+    }
+    if !started_by_this_router(&registry[&session]) {
         return None;
     }
     Some(EndpointFile::path(runtime_dir, session))
@@ -938,9 +922,6 @@ fn enable_remote(remote: &mut RemoteState, events_tx: &Sender<RouterEvent>) -> R
         Err(error) => return refused(error.to_string()),
     };
 
-    // The port is taken before the answer is written down, so an address this
-    // machine cannot take leaves nothing behind: the next start finds no
-    // record and opens nothing, which is what the operator was just told.
     let bound = if remote.listening {
         None
     } else {
@@ -1173,7 +1154,6 @@ fn create_session(
             name: name.clone(),
             socket: report.socket.clone(),
             pid,
-            created_at: SystemTime::now(),
         },
     );
     start_reaper_thread(child, id, events_tx.clone());
@@ -1222,17 +1202,31 @@ fn attach_lookup(
     }
 }
 
+/// Whether a failed description says the session is gone.
+///
+/// [`CliError::SessionNotFound`] is the only failure that means nothing is
+/// listening on the session's socket. Every other failure —
+/// [`CliError::IpcUnavailable`] for a settled protocol version outside this
+/// build's range, a refusal, or an endpoint file this build cannot read — comes
+/// from a session that is still bound and serving.
+fn describes_a_session_that_is_gone(error: &CliError) -> bool {
+    matches!(error, CliError::SessionNotFound { .. })
+}
+
 /// Describe every running session, in name then id order.
 ///
-/// Each entry is asked to describe itself; one that does not answer is gone,
-/// so it is removed and left out of the answer.
+/// Each entry is asked to describe itself. An entry that nothing listens for is
+/// removed by [`unregister`] and left out of the answer. An entry that is
+/// listening but could not answer keeps its files and its place in the list,
+/// and is left out of this answer only.
 fn list_sessions(runtime_dir: &Path, registry: &mut Registry) -> RouterResult {
     let mut rows = Vec::new();
     let mut gone = Vec::new();
     for id in registry.keys().copied() {
         match ipc_client::fetch_overview(runtime_dir, id) {
             Ok(overview) => rows.push(overview.session),
-            Err(_) => gone.push(id),
+            Err(error) if describes_a_session_that_is_gone(&error) => gone.push(id),
+            Err(_) => {}
         }
     }
     for id in gone {
@@ -1246,8 +1240,11 @@ fn list_sessions(runtime_dir: &Path, registry: &mut Registry) -> RouterResult {
 ///
 /// Every advertised session is read for its address and process id and asked
 /// to describe itself. One that answers both is registered — a session server
-/// that outlived an earlier router is picked up here. One that fails either
-/// is gone, so its endpoint file and socket are removed.
+/// that outlived an earlier router is picked up here. One whose endpoint file
+/// cannot be read, and one that nothing listens for, is removed by
+/// [`unregister`]: its endpoint file, its resume file, and on Unix its socket
+/// file go. One that is listening but could not answer keeps its files and is
+/// left out of the list.
 ///
 /// The walk is over endpoint files, which exist on every platform, so a
 /// Windows pipe with no directory entry of its own is still found.
@@ -1274,10 +1271,10 @@ fn sweep(runtime_dir: &Path, shared_base: Option<&Path>) -> Registry {
                         name: overview.session.name,
                         socket: endpoint.socket,
                         pid: endpoint.pid,
-                        created_at: overview.session.created_at,
                     },
                 );
             }
+            (Ok(_), Err(error)) if !describes_a_session_that_is_gone(&error) => {}
             _ => unregister(runtime_dir, &mut registry, id),
         }
     }
@@ -1292,7 +1289,6 @@ fn sweep(runtime_dir: &Path, shared_base: Option<&Path>) -> Registry {
                     name: overview.session.name,
                     socket,
                     pid: 0,
-                    created_at: overview.session.created_at,
                 },
             );
         }

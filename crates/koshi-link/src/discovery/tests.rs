@@ -261,6 +261,109 @@ fn client_rows_name_the_session_they_are_attached_to() {
 }
 
 #[test]
+fn client_rows_are_one_row_per_attached_client_across_sessions() {
+    let mut overviews = vec![
+        overview("quiet-lake", &[("editor", 1)]),
+        overview("amber-fox", &[("shell", 1)]),
+    ];
+    let second_client = ClientInfo {
+        id: ClientId::new(),
+        ..overviews[0].clients[0].clone()
+    };
+    overviews[0].clients.push(second_client.clone());
+
+    assert_eq!(
+        client_rows(&overviews),
+        vec![
+            ClientRow {
+                id: overviews[0].clients[0].id,
+                session: overviews[0].session.id,
+                session_name: "quiet-lake".to_string(),
+            },
+            ClientRow {
+                id: second_client.id,
+                session: overviews[0].session.id,
+                session_name: "quiet-lake".to_string(),
+            },
+            ClientRow {
+                id: overviews[1].clients[0].id,
+                session: overviews[1].session.id,
+                session_name: "amber-fox".to_string(),
+            },
+        ]
+    );
+}
+
+#[test]
+fn a_session_with_no_client_attached_contributes_no_client_row() {
+    let mut overviews = vec![overview("quiet-lake", &[("editor", 1)])];
+    overviews[0].clients.clear();
+    assert_eq!(client_rows(&overviews), Vec::new());
+}
+
+#[test]
+fn every_listing_over_no_sessions_is_empty() {
+    let none: [SessionOverview; 0] = [];
+    assert_eq!(session_rows(&none), Vec::new());
+    assert_eq!(tab_rows(&none), Vec::new());
+    assert_eq!(pane_rows(&none), Vec::new());
+    assert_eq!(client_rows(&none), Vec::new());
+}
+
+#[test]
+fn a_tab_holding_no_panes_is_listed_and_contributes_no_pane_row() {
+    let overviews = vec![overview("quiet-lake", &[("empty", 0)])];
+    assert_eq!(
+        tab_rows(&overviews),
+        vec![TabRow {
+            id: overviews[0].tabs[0].id,
+            name: "empty".to_string(),
+            session: overviews[0].session.id,
+            session_name: "quiet-lake".to_string(),
+        }]
+    );
+    assert_eq!(pane_rows(&overviews), Vec::new());
+}
+
+#[test]
+fn a_pane_whose_child_set_no_title_yields_a_row_with_no_name() {
+    let mut overviews = vec![overview("quiet-lake", &[("editor", 1)])];
+    overviews[0].panes[0].title = None;
+    assert_eq!(
+        pane_rows(&overviews),
+        vec![PaneRow {
+            id: overviews[0].panes[0].id,
+            name: None,
+            tab: overviews[0].tabs[0].id,
+            tab_name: "editor".to_string(),
+            session: overviews[0].session.id,
+            session_name: "quiet-lake".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn sorting_a_census_orders_by_name_then_id() {
+    let zulu = overview("zulu", &[]);
+    let first_alpha = overview("alpha", &[]);
+    let second_alpha = overview("alpha", &[]);
+    let mut alpha_ids = [first_alpha.session.id, second_alpha.session.id];
+    alpha_ids.sort();
+
+    let mut found = census(vec![zulu.clone(), first_alpha, second_alpha]);
+    found.sort_sessions();
+
+    assert_eq!(
+        found
+            .sessions
+            .iter()
+            .map(|overview| overview.session.id)
+            .collect::<Vec<_>>(),
+        vec![alpha_ids[0], alpha_ids[1], zulu.session.id]
+    );
+}
+
+#[test]
 fn inspect_finds_an_entity_in_the_second_session() {
     let found = census(vec![
         overview("quiet-lake", &[("editor", 1)]),
@@ -291,6 +394,49 @@ fn inspecting_an_unknown_pane_reports_the_target_as_not_found() {
             assert_eq!(reason, RejectReason::TargetNotFound);
             assert_eq!(help, Some(format!("no running session has pane {missing}")));
         }
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn inspecting_an_unknown_tab_or_client_reports_the_target_as_not_found() {
+    let found = census(vec![overview("quiet-lake", &[("editor", 1)])]);
+
+    let tab = TabId::new();
+    match find_tab(&found, tab).expect_err("no such tab") {
+        CliError::CommandRejected { reason, help } => {
+            assert_eq!(reason, RejectReason::TargetNotFound);
+            assert_eq!(help, Some(format!("no running session has tab {tab}")));
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+
+    let client = ClientId::new();
+    match find_client(&found, client).expect_err("no such client") {
+        CliError::CommandRejected { reason, help } => {
+            assert_eq!(reason, RejectReason::TargetNotFound);
+            assert_eq!(
+                help,
+                Some(format!("no running session has client {client}"))
+            );
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn two_sessions_unasked_are_counted_in_the_plural() {
+    let found = partial(vec![overview("quiet-lake", &[("editor", 1)])], 2);
+    let tab = TabId::new();
+
+    match find_tab(&found, tab).expect_err("the census is incomplete") {
+        CliError::IpcUnavailable { detail } => assert_eq!(
+            detail,
+            format!(
+                "tab {tab} is in none of the sessions that answered \
+                 (2 running sessions did not answer)"
+            )
+        ),
         other => panic!("unexpected error: {other}"),
     }
 }
@@ -376,9 +522,24 @@ fn a_listing_missing_a_session_reports_the_gap() {
 }
 
 #[test]
+fn an_unanswered_failure_over_a_complete_census_counts_zero_sessions() {
+    // `unanswered` is public and states the count it is given; only exactly 1
+    // reads as singular.
+    match census(Vec::new()).unanswered("nothing was asked") {
+        CliError::IpcUnavailable { detail } => assert_eq!(
+            detail,
+            "nothing was asked (0 running sessions did not answer)"
+        ),
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
 fn fetching_all_from_an_empty_runtime_dir_answers_no_sessions() {
     let dir = test_runtime_dir("empty");
-    assert!(fetch_all(&dir).sessions.is_empty());
+    let found = fetch_all(&dir);
+    assert_eq!(found.sessions, Vec::new());
+    assert_eq!(found.unasked, 0);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -389,7 +550,9 @@ fn an_endpoint_nobody_listens_behind_is_swept() {
     let socket = koshi_ipc::endpoint::socket_addr(&dir, session_id);
     let endpoint_path = advertise(&dir, session_id, socket.clone());
 
-    assert!(fetch_all(&dir).sessions.is_empty());
+    let found = fetch_all(&dir);
+    assert_eq!(found.sessions, Vec::new());
+    assert_eq!(found.unasked, 0, "a session that is gone is not unasked");
     assert!(
         !endpoint_path.exists(),
         "the endpoint file of a session that is gone is removed"
@@ -417,13 +580,49 @@ fn a_listening_endpoint_survives_a_failed_exchange() {
         let _ = listener.accept();
     });
 
-    assert!(fetch_all(&dir).sessions.is_empty());
+    let found = fetch_all(&dir);
+    assert_eq!(found.sessions, Vec::new());
+    assert_eq!(found.unasked, 1, "a session that is listening is unasked");
     serving
         .join()
         .expect("the stand-in session thread finishes");
     assert!(
         endpoint_path.exists(),
         "an endpoint something listens behind is kept"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_live_session_is_listed_while_a_stale_endpoint_beside_it_is_swept() {
+    // One sweep over a directory holding both kinds of endpoint: the answer
+    // carries the live session, and the endpoint of the one that is gone goes.
+    let dir = test_runtime_dir("live-and-stale");
+    let quiet = overview("quiet-lake", &[("editor", 1)]);
+    let quiet_id = quiet.session.id;
+    let serving = serve_overview(&dir, quiet);
+    let gone_id = SessionId::new();
+    let stale_path = advertise(
+        &dir,
+        gone_id,
+        koshi_ipc::endpoint::socket_addr(&dir, gone_id),
+    );
+
+    let found = fetch_all(&dir);
+    serving.join().expect("the stand-in session finishes");
+
+    assert_eq!(found.unasked, 0, "a session that is gone is not unasked");
+    assert_eq!(
+        found
+            .sessions
+            .iter()
+            .map(|overview| overview.session.id)
+            .collect::<Vec<_>>(),
+        vec![quiet_id]
+    );
+    assert!(
+        !stale_path.exists(),
+        "the endpoint file of the session that is gone is removed"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -618,6 +817,21 @@ fn redacting_pane_commands_changes_nothing_but_the_command() {
 }
 
 #[test]
+fn redacting_a_command_with_no_arguments_leaves_it_as_it_is() {
+    let mut overviews = vec![overview("quiet-lake", &[("editor", 2)])];
+    overviews[0].panes[0].command = Some(vec!["htop".to_string()]);
+    overviews[0].panes[1].command = Some(Vec::new());
+
+    redact_pane_commands(&mut overviews);
+
+    assert_eq!(
+        overviews[0].panes[0].command,
+        Some(vec!["htop".to_string()])
+    );
+    assert_eq!(overviews[0].panes[1].command, Some(Vec::new()));
+}
+
+#[test]
 fn redacting_pane_commands_across_no_sessions_is_a_noop() {
     let mut overviews: Vec<SessionOverview> = Vec::new();
 
@@ -647,6 +861,9 @@ fn display_rows_filter_names_while_the_overview_keeps_them_raw() {
     assert_eq!(panes[0].name.as_deref(), Some("title"));
     assert_eq!(panes[0].tab_name, "tab");
     assert_eq!(panes[0].session_name, "websrv");
+
+    let clients = client_rows(std::slice::from_ref(&raw));
+    assert_eq!(clients[0].session_name, "websrv");
 }
 
 #[test]
@@ -659,6 +876,12 @@ fn a_display_row_name_is_bounded() {
     );
     assert_eq!(
         session_rows(std::slice::from_ref(&raw))[0].name.len(),
+        koshi_core::text::MAX_REPORTED_TEXT_BYTES
+    );
+    assert_eq!(
+        client_rows(std::slice::from_ref(&raw))[0]
+            .session_name
+            .len(),
         koshi_core::text::MAX_REPORTED_TEXT_BYTES
     );
 }
@@ -679,4 +902,71 @@ fn a_session_row_filters_its_name_however_it_is_built() {
 
     let long = SessionRow::new(id, &"a".repeat(100_000), None);
     assert_eq!(long.name.len(), koshi_core::text::MAX_REPORTED_TEXT_BYTES);
+}
+
+#[test]
+fn a_session_row_name_of_nothing_but_filtered_characters_is_empty() {
+    let id = SessionId::new();
+    assert_eq!(SessionRow::new(id, "", None).name, "");
+    assert_eq!(SessionRow::new(id, "\u{7f}\u{202e}\u{200e}", None).name, "");
+}
+
+#[test]
+fn filter_reported_text_filters_every_string_the_answering_session_chose() {
+    let mut answered = overview("quiet\u{1b}lake", &[("edit\u{7f}or", 1)]);
+    answered.panes[0].title = Some("ssh \u{202e}gpj.exe".to_string());
+    answered.panes[0].cwd = Some(PathBuf::from("/tmp/a\u{1b}[2Jb"));
+    answered.panes[0].command = Some(vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        "\u{1b}]0;pwned\u{7}".to_string(),
+    ]);
+    let ids: Vec<PaneId> = answered.panes.iter().map(|pane| pane.id).collect();
+
+    filter_reported_text(&mut answered);
+
+    assert_eq!(answered.session.name, "quietlake");
+    assert_eq!(answered.tabs[0].name, "editor");
+    assert_eq!(answered.panes[0].title.as_deref(), Some("ssh gpj.exe"));
+    assert_eq!(answered.panes[0].cwd, Some(PathBuf::from("/tmp/a[2Jb")));
+    assert_eq!(
+        answered.panes[0].command.as_deref(),
+        Some(["sh".to_string(), "-c".to_string(), "]0;pwned".to_string()].as_slice())
+    );
+    assert_eq!(
+        answered
+            .panes
+            .iter()
+            .map(|pane| pane.id)
+            .collect::<Vec<_>>(),
+        ids,
+        "ids are carried, never altered"
+    );
+}
+
+#[test]
+fn a_session_that_answers_with_escapes_is_filtered_before_the_caller_sees_it() {
+    // The answering session is another process, so what it sends is not
+    // trusted. `inspect` and `debug dump-state` render these fields straight,
+    // and a filtered overview is what reaches them.
+    let dir = test_runtime_dir("hostile-answer");
+    let mut hostile = overview("quiet-lake", &[("editor", 1)]);
+    let session_id = hostile.session.id;
+    hostile.session.name = "quiet\u{1b}[2Jlake".to_string();
+    hostile.tabs[0].name = "edi\u{7f}tor".to_string();
+    hostile.panes[0].command = Some(vec!["\u{1b}]0;pwned\u{7}".to_string()]);
+    hostile.panes[0].cwd = Some(PathBuf::from("/tmp/\u{1b}[2J"));
+    let serving = serve_overview(&dir, hostile);
+
+    let fetched = fetch_one(&dir, session_id).expect("the session answers");
+    serving.join().expect("the stand-in session finishes");
+
+    assert_eq!(fetched.session.name, "quiet[2Jlake");
+    assert_eq!(fetched.tabs[0].name, "editor");
+    assert_eq!(
+        fetched.panes[0].command.as_deref(),
+        Some(["]0;pwned".to_string()].as_slice())
+    );
+    assert_eq!(fetched.panes[0].cwd, Some(PathBuf::from("/tmp/[2J")));
+    let _ = std::fs::remove_dir_all(&dir);
 }

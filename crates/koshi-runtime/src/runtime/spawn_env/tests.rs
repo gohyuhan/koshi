@@ -82,6 +82,26 @@ fn no_designated_client_omits_the_client_variable() {
 }
 
 #[test]
+fn no_client_and_no_runtime_dir_leaves_only_the_three_always_present_variables() {
+    let (session, _, pane) = ids();
+    let env = koshi_env(session, None, pane, None);
+
+    let expected: BTreeMap<String, String> = [
+        ("KOSHI", "1"),
+        ("KOSHI_PANE_ID", "pane-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
+        (
+            "KOSHI_SESSION_ID",
+            "session-0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b",
+        ),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.to_string(), value.to_string()))
+    .collect();
+
+    assert_eq!(env, expected);
+}
+
+#[test]
 fn no_runtime_dir_omits_the_socket_variable() {
     let (session, client, pane) = ids();
     let env = koshi_env(session, Some(client), pane, None);

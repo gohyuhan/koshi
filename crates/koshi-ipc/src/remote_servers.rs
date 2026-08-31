@@ -1,18 +1,18 @@
 //! The servers a user has connected to, saved on the dialling user's own
-//! machine, so nothing is retyped on the next connection.
+//! machine.
 //!
 //! One [`SavedServer`](crate::remote_servers::SavedServer) holds the address,
 //! the secret the operator handed out, the fingerprint of the certificate
 //! that server presented on the first connection — or none until a
-//! connection has opened — and an optional name the user chose. After the
-//! first connection the user types the name, not the address.
+//! connection has opened — and an optional name the user chose. The user
+//! types the name or the address.
 //!
 //! The whole set lives in one JSON file —
 //! [`store_path`](crate::remote_servers::store_path) — inside the private
 //! koshi data directory. The file carries the format number
 //! [`SERVER_STORE_FORMAT`](crate::remote_servers::SERVER_STORE_FORMAT), and a
 //! file carrying any other number is refused. Writes go through
-//! [`koshi_storage::atomic::write_atomic`], so a reader finds the old content
+//! [`koshi_storage::atomic::write_atomic`]: a reader finds the old content
 //! or the new, never a half-written middle.
 
 use std::path::{Path, PathBuf};
@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{IpcError, RemoteFile};
 use crate::protocol::ConnectionToken;
-use crate::remote_state::write_owner_only;
+use crate::remote_state::{format_mismatch, write_owner_only};
 
 /// The format number this build writes into every saved-server file, and the
 /// only one it reads back.
@@ -33,7 +33,7 @@ pub const SERVER_STORE_FORMAT: u32 = koshi_core::compat::SAVED_SERVER_FORMAT.max
 
 /// One server this machine has connected to.
 ///
-/// Decoding rejects any field it does not know, so a misspelled name is an
+/// Decoding rejects any field it does not know; a misspelled field name is an
 /// error.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -48,7 +48,7 @@ pub struct SavedServer {
     pub secret: ConnectionToken,
     /// The sha256 of the certificate this server presented on the first
     /// connection, as 64 lowercase hex characters, or `None` while no
-    /// connection to it has opened. A later connection that presents a
+    /// connection to it has opened. The next connection that presents a
     /// different certificate is refused; the first connection of a record
     /// holding `None` pins whatever certificate it meets. `None` leaves the
     /// file without this field.
@@ -63,14 +63,15 @@ pub struct SavedServer {
 
 /// Every server this machine has connected to.
 ///
-/// Decoding rejects any field it does not know, so a misspelled name is an
+/// Decoding rejects any field it does not know; a misspelled field name is an
 /// error.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerStore {
     /// The format number of the file these records came from or go to.
     pub format: u32,
-    /// One record per server, in the order they were first saved.
+    /// One record per server, in the order they were saved. Saving an address
+    /// again moves its record to the end.
     pub records: Vec<SavedServer>,
 }
 
@@ -111,11 +112,8 @@ impl ServerStore {
         };
         let store: ServerStore =
             serde_json::from_slice(&data).map_err(|error| unreadable(error.to_string()))?;
-        if store.format != SERVER_STORE_FORMAT {
-            return Err(unreadable(format!(
-                "format {} is not the {SERVER_STORE_FORMAT} this build reads",
-                store.format
-            )));
+        if let Some(detail) = format_mismatch(store.format, SERVER_STORE_FORMAT) {
+            return Err(unreadable(detail));
         }
         Ok(store)
     }
@@ -124,7 +122,7 @@ impl ServerStore {
     /// the directory holding it when it is missing.
     ///
     /// The file is restricted to the owning user: mode `0600` on Unix, set on
-    /// an existing file before the replace so the new file carries it too. On
+    /// an existing file before the replace; the new file carries it too. On
     /// Windows the file takes the data directory's owner-scoped ACLs. The
     /// directory itself gets mode `0700` on Unix.
     ///
@@ -150,11 +148,11 @@ impl ServerStore {
         }
     }
 
-    /// Save `server`, taking the place of whatever record already holds that
-    /// address.
+    /// Save `server` at the end of `records`, dropping whatever record already
+    /// holds that address.
     ///
-    /// One address is one machine, so saving an address again replaces its
-    /// record: the secret and the pinned fingerprint are the new ones.
+    /// Saving an address again replaces its record: the secret and the pinned
+    /// fingerprint are the new ones, and the record moves to the end.
     ///
     /// Keeps three rules:
     ///
@@ -239,8 +237,9 @@ impl ServerStore {
         let Match::One(index) = self.index_of(arg) else {
             return None;
         };
-        self.records[index].secret = secret;
-        Some(self.records[index].address.clone())
+        let record = &mut self.records[index];
+        record.secret = secret;
+        Some(record.address.clone())
     }
 
     /// Put `fingerprint` on the server `arg` names.

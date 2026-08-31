@@ -2,12 +2,23 @@
 //! continuation kinds and the [`Cell`] accessors reached through
 //! `crate::grid::state`.
 
-use super::state::{Cell, Grid, RowEnd};
+use super::state::{Cell, Grid, RowEnd, RowMeta};
 use crate::style::Style;
 
 #[test]
 fn row_end_defaults_to_hard() {
     assert_eq!(RowEnd::default(), RowEnd::Hard);
+}
+
+#[test]
+fn row_meta_defaults_to_a_hard_end_with_no_prompt_mark() {
+    assert_eq!(
+        RowMeta::default(),
+        RowMeta {
+            end: RowEnd::Hard,
+            prompt: false,
+        }
+    );
 }
 
 #[test]

@@ -2,12 +2,19 @@
 
 use std::io::{self, Write};
 
-/// Print `prompt` on standard output, flush it, and read one line from
-/// standard input.
+/// True for `y` and `yes` in any letter case, once `answer` is trimmed of
+/// surrounding whitespace. False for every other answer, an empty one
+/// included.
 ///
-/// True for exactly `y`, `Y`, `yes` or `Yes` once the line is trimmed of
-/// surrounding whitespace. False for every other line, and for standard input
-/// that cannot be read.
+/// Example — `" YES\n"` is true, and `"yep"` is false.
+pub(crate) fn is_yes(answer: &str) -> bool {
+    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+/// Print `prompt` on standard output, flush it, read one line from standard
+/// input, and answer it with [`is_yes`].
+///
+/// False for standard input that cannot be read.
 pub(crate) fn yes(prompt: &str) -> bool {
     print!("{prompt}");
     let _ = io::stdout().flush();
@@ -15,5 +22,8 @@ pub(crate) fn yes(prompt: &str) -> bool {
     if io::stdin().read_line(&mut line).is_err() {
         return false;
     }
-    matches!(line.trim(), "y" | "Y" | "yes" | "Yes")
+    is_yes(&line)
 }
+
+#[cfg(test)]
+mod tests;

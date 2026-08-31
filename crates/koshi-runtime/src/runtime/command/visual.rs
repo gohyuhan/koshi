@@ -5,11 +5,10 @@ use super::*;
 impl Server {
     /// Route a [`Command::Visual`] sub-command to its handler.
     ///
-    /// Every variant acts on the issuing client's own highlights — a highlight
-    /// belongs to one client, so there is no other client it could mean, and a
-    /// gone issuer takes its highlights with it rather than falling back to
-    /// another client ([`Self::issuing_client`]). [`Self::validate`] has
-    /// already confirmed the source names a client.
+    /// Every variant acts on the issuing client's own highlights: a highlight
+    /// belongs to one client, and a gone issuer takes its highlights with it
+    /// ([`Self::issuing_client`]). [`Self::validate`] has already confirmed the
+    /// source names a client.
     pub(super) fn handle_visual(
         &mut self,
         command_id: CommandId,
@@ -37,10 +36,9 @@ impl Server {
     /// ([`Client::is_view_held`]).
     ///
     /// **A word or line highlight is grown here, not by the caller.** The
-    /// pointer names two cells; whole words and whole lines are a property of
-    /// the text, which only the session holds. Both ends grow away from each
-    /// other, so the pair always covers the text between them however the drag
-    /// runs, and re-growing an already-grown pair changes nothing.
+    /// pointer names two cells. Both ends grow away from each other, so the
+    /// pair always covers the text between them however the drag runs, and
+    /// re-growing an already-grown pair changes nothing.
     ///
     /// `hello world` with a word drag from the `e` of `hello` to the `o` of
     /// `world`: the stored anchor falls back to the `h` and the stored cursor
@@ -49,7 +47,7 @@ impl Server {
     /// pointer named.
     ///
     /// A pane that does not exist in the client's session is
-    /// [`RejectReason::TargetGone`] — the drag that named it raced a close.
+    /// [`RejectReason::TargetGone`].
     pub(super) fn handle_set_selection(
         &mut self,
         command_id: CommandId,
@@ -134,8 +132,7 @@ impl Server {
     /// when it is not. `args.target` says which clipboard receives it.
     ///
     /// A pane with no highlight, or one whose highlight covers no text, copies
-    /// nothing and is not an error: a plain click ends a gesture that highlighted
-    /// nothing.
+    /// nothing and is not an error.
     pub(super) fn handle_copy(
         &mut self,
         command_id: CommandId,
@@ -167,13 +164,14 @@ impl Server {
     /// Handle [`VisualCommand::ClearSelection`]: drop the issuing client's
     /// highlight in `args.pane`, leaving visual mode for that pane.
     ///
-    /// Clearing a pane with no highlight changes nothing and is not an error:
-    /// the ways selection ends (a click, a key press) fire without first
-    /// checking whether one was up.
+    /// Clearing a pane with no highlight changes nothing and is not an error.
     ///
     /// Dropping the highlight releases the hold it had on the view, so a view at
     /// the live bottom follows new output again. A view that had also been
     /// scrolled up stays held by the offset.
+    ///
+    /// A pane that does not exist in the client's session is
+    /// [`RejectReason::TargetGone`].
     pub(super) fn handle_clear_selection(
         &mut self,
         command_id: CommandId,
@@ -181,6 +179,7 @@ impl Server {
         args: &ClearSelectionArgs,
     ) -> Result<CommandResult, Rejection> {
         let client_id = Self::issuing_client(source)?;
+        self.require_pane(client_id, args.pane)?;
         let client = self
             .client_mut(client_id)
             .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))?;

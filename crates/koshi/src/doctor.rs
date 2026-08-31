@@ -42,7 +42,7 @@ pub enum Verdict {
 }
 
 /// One check's answer.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Outcome {
     /// What the check concluded.
     pub verdict: Verdict,
@@ -57,7 +57,7 @@ pub struct Outcome {
 }
 
 impl Outcome {
-    /// An [`Verdict::Ok`] answer carrying `reason`, no help and no detail.
+    /// A [`Verdict::Ok`] answer carrying `reason`, no help and no detail.
     fn ok(reason: String) -> Outcome {
         Outcome {
             verdict: Verdict::Ok,
@@ -176,8 +176,9 @@ pub struct Context {
     /// The rule that produced [`Context::runtime_dir`], or `None` when this
     /// machine reports no home directory.
     pub runtime_dir_rule: Option<RuntimeDirRule>,
-    /// The runtime directory's permission bits, `None` on Windows and when
-    /// the directory could not be read.
+    /// The runtime directory's permission bits, `None` on Windows, when this
+    /// machine reports no home directory, and when the directory could not be
+    /// read.
     pub runtime_mode: Option<u32>,
     /// The directory koshi writes its log files in, or `None` when this
     /// machine reports no home directory.
@@ -185,8 +186,9 @@ pub struct Context {
     /// `plugins` under the config directory, or `None` when this machine
     /// reports no home directory.
     pub plugins_dir: Option<PathBuf>,
-    /// The machine-wide directory the shared session sockets live in, or
-    /// `None` when this platform names none.
+    /// The machine-wide directory the shared session sockets live in:
+    /// `koshi.kdl`'s `shared-sessions-dir` when it names one, else this
+    /// platform's own. `None` when neither names one.
     pub shared_dir: Option<PathBuf>,
     /// The program a new pane runs.
     pub shell: PathBuf,
@@ -278,16 +280,10 @@ impl Context {
 pub struct CheckRow {
     /// The check's name.
     pub name: &'static str,
-    /// What the check concluded.
-    pub verdict: Verdict,
-    /// The fact behind the verdict.
-    pub reason: String,
-    /// What to do about it, or `None` when there is nothing to do.
-    pub help: Option<String>,
-    /// The full text behind a shortened `reason`, or `None` when `reason`
-    /// already says the whole thing. `--format json` prints it and the table
-    /// leaves it out.
-    pub detail: Option<String>,
+    /// What the check concluded. `--format json` prints its fields beside
+    /// `name` in the same object.
+    #[serde(flatten)]
+    pub outcome: Outcome,
 }
 
 /// Run every check against `context`, in print order.
@@ -295,15 +291,9 @@ pub struct CheckRow {
 pub fn rows(context: &Context) -> Vec<CheckRow> {
     CHECKS
         .iter()
-        .map(|check| {
-            let outcome = (check.run)(context);
-            CheckRow {
-                name: check.name,
-                verdict: outcome.verdict,
-                reason: outcome.reason,
-                help: outcome.help,
-                detail: outcome.detail,
-            }
+        .map(|check| CheckRow {
+            name: check.name,
+            outcome: (check.run)(context),
         })
         .collect()
 }
@@ -325,7 +315,7 @@ pub fn run(format: FormatArg) -> Result<(), CliError> {
 fn failed(rows: &[CheckRow]) -> Option<CliError> {
     let count = rows
         .iter()
-        .filter(|row| row.verdict == Verdict::Fail)
+        .filter(|row| row.outcome.verdict == Verdict::Fail)
         .count();
     if count == 0 {
         return None;
@@ -410,7 +400,11 @@ fn check_runtime_dir(context: &Context) -> Outcome {
         return no_home_directory("runtime");
     };
     let mut outcome = runtime_dir_state(dir, context.runtime_mode);
-    outcome.reason = format!("{}; {}", outcome.reason, runtime_dir_rule_phrase(rule));
+    outcome.reason = one_line(format!(
+        "{}; {}",
+        outcome.reason,
+        runtime_dir_rule_phrase(rule)
+    ));
     outcome
 }
 
@@ -547,9 +541,10 @@ fn check_remote_connections(context: &Context) -> Outcome {
 /// What state the runtime directory `dir` is in, with `mode` its permission
 /// bits and `None` where they are not known.
 ///
-/// Ok when `dir` holds mode 700, and when `dir` is not there yet and koshi can
-/// create it. Fail when `dir` cannot be read, when `mode` is anything other
-/// than 700, and when `dir` is not there and koshi cannot create it.
+/// Ok when `dir` holds mode 700, when `mode` is `None`, and when `dir` is not
+/// there yet and koshi can create it. Fail when `dir` cannot be read, when
+/// `mode` is anything other than 700, and when `dir` is not there and koshi
+/// cannot create it.
 fn runtime_dir_state(dir: &Path, mode: Option<u32>) -> Outcome {
     let path = dir.display();
     if !dir.exists() {

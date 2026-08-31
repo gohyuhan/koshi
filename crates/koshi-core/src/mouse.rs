@@ -1,6 +1,5 @@
 //! Mouse vocabulary: the button, scroll direction, decoded-event, answer, and
-//! reporting-level types the rest of koshi reasons about — koshi's own terms,
-//! not the host library's.
+//! reporting-level types the rest of koshi reasons about.
 //!
 //! [`MouseButton`] and [`ScrollDirection`] are the primitive types; the bus
 //! events in [`crate::event`] (`MousePressed`, `MouseScrolled`, …) compose their
@@ -13,12 +12,11 @@
 //! them off live state to decide what to write.
 //!
 //! A [`MouseInput`] is the mouse peer of a [`KeyChord`](crate::key::KeyChord):
-//! the boundary that decodes a host event produces one of these and nothing
-//! host-specific escapes it. Its coordinate is a [`Point`] — a raw cell in the
-//! client's own screen. Which pane, border, or bar that cell falls in is
-//! hit-tested later against the client's render layout. The type carries no
-//! client identity; the caller attaches that when it hands the event to the
-//! hit-test.
+//! the boundary that decodes a host event produces one. Its coordinate is a
+//! [`Point`], a raw cell in the client's own screen; which pane, border, or
+//! bar that cell falls in is hit-tested against the client's render layout.
+//! The type carries no client identity; the caller attaches that when it
+//! hands the event to the hit-test.
 //!
 //! [`MouseAnswer`] runs the other way — the session says what an action it
 //! carried out did, and the client folds that into its gesture state.
@@ -30,9 +28,8 @@ use serde::{Deserialize, Serialize};
 
 /// A mouse button.
 ///
-/// Some terminals cannot tell koshi which button a release or drag used and
-/// report [`Left`](MouseButton::Left) as a stand-in; the value is whatever the
-/// host claimed, carried faithfully.
+/// The value is whatever the host reported. A terminal that cannot say which
+/// button a release or drag used reports [`Left`](MouseButton::Left).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MouseButton {
     /// The left button.
@@ -91,8 +88,8 @@ pub struct MouseInput {
 
 /// What the session reports back about a mouse action it carried out.
 ///
-/// An action that has nothing to report produces no `MouseAnswer` at all: there
-/// is no empty variant, and such an action simply contributes no entry.
+/// An action that has nothing to report produces no `MouseAnswer`: there is no
+/// empty variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MouseAnswer {
     /// Where `pane`'s view landed after a scroll: `top` is the line now on its
@@ -146,8 +143,7 @@ pub enum MouseTracking {
 /// Whether a program at `tracking` is told about a `kind` of event. The ladder:
 /// every level but `Off` reports a press, `Normal` and up add releases,
 /// `ButtonMotion` and up add drags, only `AnyMotion` adds buttonless motion. A
-/// wheel tick reports from `Normal` up — `X10` predates the wheel and reports
-/// only presses.
+/// wheel tick reports from `Normal` up; `X10` reports only presses.
 ///
 /// `reports(MouseTracking::Normal, MouseKind::Scroll(ScrollDirection::Up))` is
 /// `true`; `reports(MouseTracking::X10, MouseKind::Scroll(ScrollDirection::Up))`

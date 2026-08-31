@@ -8,8 +8,6 @@ use std::collections::HashSet;
 
 #[test]
 fn every_surface_follows_the_version_rule() {
-    // The rule this asserts used to live only in prose above six constants,
-    // and two of them carried a wrong number until a person re-read it.
     let problems: Vec<String> = SURFACES
         .iter()
         .filter_map(Surface::version_problem)
@@ -63,7 +61,7 @@ fn a_floor_above_the_ceiling_is_no_version_at_all() {
 #[test]
 fn a_surface_breaking_both_rules_is_reported_on_its_floor_first() {
     // The floor is above the ceiling AND the ceiling is two steps above the
-    // released value, so only the order of the two checks picks the message.
+    // released value; the floor check runs first and names the message.
     let doubly_broken = Surface {
         name: "sample",
         min: 5,
@@ -82,8 +80,6 @@ fn a_surface_breaking_both_rules_is_reported_on_its_floor_first() {
 
 #[test]
 fn two_steps_above_the_released_value_is_a_problem() {
-    // The real case this models: the control plane reached 3 on two bumps that
-    // the rule does not allow, against a released value of 1.
     let over_bumped = Surface {
         name: "sample",
         min: 1,
@@ -141,8 +137,8 @@ fn holding_at_the_released_value_is_allowed() {
 
 #[test]
 fn a_surface_no_release_carries_is_checked_on_the_floor_alone() {
-    // Nothing released can disagree with it, so any ceiling is allowed — but a
-    // floor above that ceiling is still no version at all.
+    // Any ceiling is allowed; a floor above that ceiling is still no version
+    // at all.
     let unreleased = Surface {
         name: "sample",
         min: 1,
@@ -169,43 +165,153 @@ fn a_surface_no_release_carries_is_checked_on_the_floor_alone() {
 
 #[test]
 fn the_session_protocol_speaks_three_and_accepts_nothing_older() {
-    // Version 1 is v0.1.0, which has no attach, so a version-1 peer has
-    // nothing to ask a session server for. This build speaks 3.
-    assert_eq!(SESSION_PROTOCOL.min, 2);
+    assert_eq!(SESSION_PROTOCOL.min, 3);
     assert_eq!(SESSION_PROTOCOL.max, 3);
     assert_eq!(SESSION_PROTOCOL.released, Some(2));
 }
 
 #[test]
-fn the_control_plane_speaks_two_and_still_serves_the_released_one() {
-    // 0.2.0 speaks 1 and is still served; 2 is this build's own, one step up
-    // for the refusal code a caller can branch on.
+fn the_control_plane_speaks_two_and_still_accepts_one() {
     assert_eq!(CONTROL_PROTOCOL.min, 1);
     assert_eq!(CONTROL_PROTOCOL.max, 2);
-    assert_eq!(CONTROL_PROTOCOL.released, Some(1));
+    assert_eq!(CONTROL_PROTOCOL.released, Some(2));
+}
+
+/// The `max` each surface reads in the `v0.3.0` tag, which is the last
+/// release. A surface that tag does not carry reads `None`.
+const WHAT_V0_3_0_SPEAKS: [(&str, Option<u32>); 10] = [
+    ("session protocol", Some(2)),
+    ("control plane", Some(2)),
+    ("supervisor link", Some(1)),
+    ("token store format", Some(1)),
+    ("remote doorway", Some(1)),
+    ("saved server file format", Some(1)),
+    ("remote certificate file format", Some(1)),
+    ("remote access record format", Some(1)),
+    ("resume file format", Some(2)),
+    ("config schema", Some(1)),
+];
+
+#[test]
+fn every_anchor_holds_the_version_the_v0_3_0_tag_speaks() {
+    let anchors: Vec<(&str, Option<u32>)> = SURFACES
+        .iter()
+        .map(|surface| (surface.name, surface.released))
+        .collect();
+
+    assert_eq!(anchors, WHAT_V0_3_0_SPEAKS);
 }
 
 #[test]
-fn every_surface_no_release_carries_is_one_born_after_the_last_tag() {
-    // Naming them one by one is the point: a surface added to the table lands
-    // here too, so somebody states in this list that the new one really has
-    // never shipped.
-    let unreleased: Vec<&str> = SURFACES
+fn the_table_pins_every_surface_by_name_and_numbers() {
+    let rows: Vec<(&str, u32, u32, Option<u32>)> = SURFACES
         .iter()
-        .filter(|surface| surface.released.is_none())
-        .map(|surface| surface.name)
+        .map(|surface| (surface.name, surface.min, surface.max, surface.released))
         .collect();
 
     assert_eq!(
-        unreleased,
+        rows,
         [
-            "supervisor link",
-            "token store format",
-            "remote doorway",
-            "saved server file format",
-            "remote certificate file format",
-            "remote access record format",
-            "resume file format"
+            ("session protocol", 3, 3, Some(2)),
+            ("control plane", 1, 2, Some(2)),
+            ("supervisor link", 1, 1, Some(1)),
+            ("token store format", 1, 1, Some(1)),
+            ("remote doorway", 1, 1, Some(1)),
+            ("saved server file format", 1, 1, Some(1)),
+            ("remote certificate file format", 1, 1, Some(1)),
+            ("remote access record format", 1, 1, Some(1)),
+            ("resume file format", 1, 3, Some(2)),
+            ("config schema", 1, 1, Some(1)),
         ]
     );
+}
+
+#[test]
+fn a_floor_raised_above_the_released_value_is_allowed() {
+    // Only the ceiling is held to the released value; the floor may move past it.
+    let floor_raised = Surface {
+        name: "sample",
+        min: 3,
+        max: 3,
+        released: Some(2),
+    };
+
+    assert_eq!(floor_raised.version_problem(), None);
+}
+
+#[test]
+fn a_floor_equal_to_the_ceiling_is_one_version() {
+    let single = Surface {
+        name: "sample",
+        min: 0,
+        max: 0,
+        released: Some(0),
+    };
+
+    assert_eq!(single.version_problem(), None);
+}
+
+#[test]
+fn two_steps_above_a_released_zero_is_a_problem() {
+    let over_bumped = Surface {
+        name: "sample",
+        min: 0,
+        max: 2,
+        released: Some(0),
+    };
+
+    assert_eq!(
+        over_bumped.version_problem(),
+        Some(
+            "the sample speaks 2, which is more than one step above the 0 the last release spoke"
+                .to_string()
+        )
+    );
+}
+
+#[test]
+fn a_ceiling_below_the_released_value_is_reported_before_an_over_bump_can_be() {
+    // `max` is below `released`, so the "below" check fires and the "more than
+    // one step above" check is never reached.
+    let regressed = Surface {
+        name: "sample",
+        min: 0,
+        max: 3,
+        released: Some(9),
+    };
+
+    assert_eq!(
+        regressed.version_problem(),
+        Some("the sample speaks 3, which is below the 9 the last release spoke".to_string())
+    );
+}
+
+#[test]
+fn the_problem_message_carries_the_surface_name() {
+    let inverted = Surface {
+        name: "remote doorway",
+        min: 2,
+        max: 1,
+        released: None,
+    };
+
+    assert_eq!(
+        inverted.version_problem(),
+        Some(
+            "the remote doorway accepts 2 at the lowest and 1 at the highest, which is no version at all"
+                .to_string()
+        )
+    );
+}
+
+#[test]
+fn a_released_value_at_the_top_of_the_range_is_held_without_overflow() {
+    let maxed = Surface {
+        name: "sample",
+        min: u32::MAX,
+        max: u32::MAX,
+        released: Some(u32::MAX),
+    };
+
+    assert_eq!(maxed.version_problem(), None);
 }

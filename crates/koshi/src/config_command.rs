@@ -387,8 +387,11 @@ fn explain(key: &str) -> Result<String, CliError> {
 
 /// What validating every config file in one directory produced.
 pub(crate) struct ConfigReport {
-    /// One line per file that validated, in read order, e.g.
-    /// `"/home/u/.config/koshi/koshi.kdl: valid (version 1)"`.
+    /// One line per file that validated, in path order:
+    /// `"/home/u/.config/koshi/koshi.kdl: valid (version 1)"` for a file on
+    /// this build's schema, and
+    /// `"/home/u/.config/koshi/koshi.kdl: valid (version 1; migrate to version 2)"`
+    /// for one on an older schema.
     pub(crate) lines: Vec<String>,
     /// One message per file that could not be read or did not validate.
     pub(crate) errors: Vec<String>,

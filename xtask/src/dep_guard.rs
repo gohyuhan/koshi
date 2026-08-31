@@ -11,24 +11,31 @@
 //! - Only `koshi-pty` depends on `portable-pty`.
 //!
 //! Each rule reads the dependencies a crate declares in its own manifest, of
-//! every kind: normal, dev, and build. A dependency reached through another
-//! crate is not an edge here, so `koshi-runtime` -> `koshi-plugin-host` ->
-//! `wasmtime` passes.
+//! every kind (normal, dev, build), including optional and target-specific
+//! ones. A renamed dependency counts under its package name, so
+//! `wt = { package = "wasmtime" }` is an edge to `wasmtime`. A dependency
+//! reached through another crate is not an edge here, so `koshi-runtime` ->
+//! `koshi-plugin-host` -> `wasmtime` passes.
 
 use std::collections::BTreeSet;
 use std::process::ExitCode;
 
 use cargo_metadata::{Metadata, MetadataCommand};
 
-/// One workspace crate and the names of its direct dependencies.
+/// A crate name paired with the names of its direct dependencies.
 type CrateDeps = (String, Vec<String>);
 
-/// Prints `dep-guard: ok (N crates checked)` on stdout and returns
-/// [`ExitCode::SUCCESS`] when no rule is broken.
+/// Runs `cargo metadata` from the current directory and checks every
+/// workspace crate against the rules in the module doc.
 ///
-/// Prints one `dep-guard: forbidden edge: ...` line per broken rule on stderr,
-/// then the violation count, and returns [`ExitCode::FAILURE`]. A `cargo
-/// metadata` run that fails prints its error on stderr and returns
+/// No rule broken: prints `dep-guard: ok (N crates checked)` on stdout, where
+/// `N` counts the workspace crates, and returns [`ExitCode::SUCCESS`].
+///
+/// Rules broken: prints one `dep-guard: forbidden edge: ...` line per
+/// forbidden edge on stderr, then `dep-guard: N violation(s)`, and returns
+/// [`ExitCode::FAILURE`].
+///
+/// A `cargo metadata` run that fails prints its error on stderr and returns
 /// [`ExitCode::FAILURE`] with no rule checked.
 pub fn run() -> ExitCode {
     let metadata = match MetadataCommand::new().exec() {
@@ -53,9 +60,9 @@ pub fn run() -> ExitCode {
     ExitCode::FAILURE
 }
 
-/// Every workspace crate paired with the dependency names its manifest
-/// declares. Crates are sorted by name; each dependency list is sorted and
-/// deduplicated.
+/// Returns every workspace crate paired with the names of the dependencies
+/// its manifest declares, of every kind. Crates are sorted by name; each
+/// dependency list is sorted and deduplicated.
 fn direct_deps(metadata: &Metadata) -> Vec<CrateDeps> {
     let mut graph: Vec<CrateDeps> = metadata
         .workspace_packages()
@@ -75,8 +82,8 @@ fn direct_deps(metadata: &Metadata) -> Vec<CrateDeps> {
     graph
 }
 
-/// Returns one message per forbidden edge, sorted and deduplicated. An empty
-/// vector means every edge in `graph` is allowed.
+/// Returns one message per edge that a rule in the module doc forbids, sorted
+/// and deduplicated. An empty vector means every edge in `graph` is allowed.
 pub fn check(graph: &[CrateDeps]) -> Vec<String> {
     let mut violations = BTreeSet::new();
 

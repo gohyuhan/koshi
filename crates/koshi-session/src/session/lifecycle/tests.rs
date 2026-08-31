@@ -2,12 +2,15 @@
 //!
 //! Verifies that [`SessionLifecycle::transition`] accepts exactly seven
 //! valid transitions and rejects all others. Tests enumerate the full
-//! state × event matrix and confirm that serialization round-trips
-//! preserve lifecycle states and events.
+//! state × event matrix with the exact outcome of every pair, walk one
+//! session from `Starting` to `Stopped`, and pin the stored form of every
+//! session state, session event and [`TabLifecycle`] state to its bare
+//! variant name.
 
 use koshi_core::error::{DomainCategory, DomainError, Severity};
 
-use super::{SessionLifecycle, SessionLifecycleEvent};
+use super::{SessionLifecycle, SessionLifecycleEvent, TabLifecycle};
+use crate::error::InvalidTransition;
 
 /// Every state and every event, for exhaustive sweeps.
 const STATES: [SessionLifecycle; 5] = [
@@ -95,10 +98,118 @@ fn exactly_seven_transitions_are_legal() {
 #[test]
 fn stopped_is_terminal() {
     for &event in &EVENTS {
-        assert!(
-            SessionLifecycle::Stopped.transition(event).is_err(),
+        assert_eq!(
+            SessionLifecycle::Stopped.transition(event),
+            Err(InvalidTransition {
+                from: SessionLifecycle::Stopped,
+                event,
+            }),
             "Stopped must reject {event:?}"
         );
+    }
+}
+
+/// Every `(state, event)` pair `transition` accepts, with the state it
+/// yields. A pair absent from this table is rejected.
+const LEGAL: [(SessionLifecycle, SessionLifecycleEvent, SessionLifecycle); 7] = [
+    (
+        SessionLifecycle::Starting,
+        SessionLifecycleEvent::FirstTabCreated,
+        SessionLifecycle::Running,
+    ),
+    (
+        SessionLifecycle::Running,
+        SessionLifecycleEvent::LastClientDetached,
+        SessionLifecycle::Detaching,
+    ),
+    (
+        SessionLifecycle::Detaching,
+        SessionLifecycleEvent::ClientAttached,
+        SessionLifecycle::Running,
+    ),
+    (
+        SessionLifecycle::Starting,
+        SessionLifecycleEvent::StopRequested,
+        SessionLifecycle::Stopping,
+    ),
+    (
+        SessionLifecycle::Running,
+        SessionLifecycleEvent::StopRequested,
+        SessionLifecycle::Stopping,
+    ),
+    (
+        SessionLifecycle::Detaching,
+        SessionLifecycleEvent::StopRequested,
+        SessionLifecycle::Stopping,
+    ),
+    (
+        SessionLifecycle::Stopping,
+        SessionLifecycleEvent::StopCompleted,
+        SessionLifecycle::Stopped,
+    ),
+];
+
+#[test]
+fn every_state_and_event_pair_has_a_fixed_outcome() {
+    for state in STATES {
+        for event in EVENTS {
+            let expected = match LEGAL
+                .iter()
+                .find(|(from, on, _)| *from == state && *on == event)
+            {
+                Some(&(_, _, next)) => Ok(next),
+                None => Err(InvalidTransition { from: state, event }),
+            };
+            assert_eq!(state.transition(event), expected, "{state:?} on {event:?}");
+        }
+    }
+}
+
+#[test]
+fn a_stop_request_is_rejected_once_the_session_is_already_stopping() {
+    let stopping = SessionLifecycle::Running
+        .transition(SessionLifecycleEvent::StopRequested)
+        .expect("a running session accepts a stop request");
+    assert_eq!(stopping, SessionLifecycle::Stopping);
+
+    assert_eq!(
+        stopping.transition(SessionLifecycleEvent::StopRequested),
+        Err(InvalidTransition {
+            from: SessionLifecycle::Stopping,
+            event: SessionLifecycleEvent::StopRequested,
+        })
+    );
+}
+
+#[test]
+fn a_session_walks_start_to_detach_to_revive_to_stop() {
+    let mut state = SessionLifecycle::Starting;
+    for (event, expected) in [
+        (
+            SessionLifecycleEvent::FirstTabCreated,
+            SessionLifecycle::Running,
+        ),
+        (
+            SessionLifecycleEvent::LastClientDetached,
+            SessionLifecycle::Detaching,
+        ),
+        (
+            SessionLifecycleEvent::ClientAttached,
+            SessionLifecycle::Running,
+        ),
+        (
+            SessionLifecycleEvent::StopRequested,
+            SessionLifecycle::Stopping,
+        ),
+        (
+            SessionLifecycleEvent::StopCompleted,
+            SessionLifecycle::Stopped,
+        ),
+    ] {
+        state = state
+            .transition(event)
+            .unwrap_or_else(|err| panic!("{err} is a legal step"));
+        assert_eq!(state, expected);
     }
 }
 
@@ -139,4 +250,73 @@ fn lifecycle_events_survive_a_serde_round_trip() {
         let restored: SessionLifecycleEvent = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(event, restored);
     }
+}
+
+#[test]
+fn a_lifecycle_state_is_stored_as_its_bare_variant_name() {
+    for (state, json) in [
+        (SessionLifecycle::Starting, "\"Starting\""),
+        (SessionLifecycle::Running, "\"Running\""),
+        (SessionLifecycle::Detaching, "\"Detaching\""),
+        (SessionLifecycle::Stopping, "\"Stopping\""),
+        (SessionLifecycle::Stopped, "\"Stopped\""),
+    ] {
+        assert_eq!(serde_json::to_string(&state).expect("serialize"), json);
+        assert_eq!(
+            serde_json::from_str::<SessionLifecycle>(json).expect("deserialize"),
+            state
+        );
+    }
+}
+
+#[test]
+fn a_lifecycle_event_is_stored_as_its_bare_variant_name() {
+    for (event, json) in [
+        (
+            SessionLifecycleEvent::FirstTabCreated,
+            "\"FirstTabCreated\"",
+        ),
+        (
+            SessionLifecycleEvent::LastClientDetached,
+            "\"LastClientDetached\"",
+        ),
+        (SessionLifecycleEvent::ClientAttached, "\"ClientAttached\""),
+        (SessionLifecycleEvent::StopRequested, "\"StopRequested\""),
+        (SessionLifecycleEvent::StopCompleted, "\"StopCompleted\""),
+    ] {
+        assert_eq!(serde_json::to_string(&event).expect("serialize"), json);
+        assert_eq!(
+            serde_json::from_str::<SessionLifecycleEvent>(json).expect("deserialize"),
+            event
+        );
+    }
+}
+
+#[test]
+fn a_tab_lifecycle_state_is_stored_as_its_bare_variant_name() {
+    for (state, json) in [
+        (TabLifecycle::Creating, "\"Creating\""),
+        (TabLifecycle::Active, "\"Active\""),
+        (TabLifecycle::Inactive, "\"Inactive\""),
+        (TabLifecycle::Closing, "\"Closing\""),
+        (TabLifecycle::Closed, "\"Closed\""),
+    ] {
+        assert_eq!(serde_json::to_string(&state).expect("serialize"), json);
+        assert_eq!(
+            serde_json::from_str::<TabLifecycle>(json).expect("deserialize"),
+            state
+        );
+    }
+}
+
+#[test]
+fn a_lifecycle_state_this_build_does_not_know_is_rejected() {
+    let error = serde_json::from_str::<SessionLifecycle>("\"Paused\"")
+        .expect_err("`Paused` is not a state this build knows");
+
+    assert_eq!(error.classify(), serde_json::error::Category::Data);
+    assert_eq!(
+        error.to_string(),
+        "unknown variant `Paused`, expected one of `Starting`, `Running`, `Detaching`, `Stopping`, `Stopped` at line 1 column 8"
+    );
 }

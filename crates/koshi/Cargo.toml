@@ -13,31 +13,21 @@ name = "koshi"
 path = "src/main.rs"
 
 [dependencies]
-ratatui = { version = "0.30.2", default-features = false, features = [
-  "crossterm",
-] }
-thiserror = "2.0.18"
-koshi-beta = { version = "0.4.0-pr.1", path = "../koshi-beta" }
 koshi-client = { version = "0.4.0-pr.1", path = "../koshi-client" }
 koshi-config = { version = "0.4.0-pr.1", path = "../koshi-config" }
 koshi-core = { version = "0.4.0-pr.1", path = "../koshi-core" }
 koshi-daemon = { version = "0.4.0-pr.1", path = "../koshi-daemon" }
 koshi-link = { version = "0.4.0-pr.1", path = "../koshi-link" }
-koshi-input = { version = "0.4.0-pr.1", path = "../koshi-input" }
 koshi-ipc = { version = "0.4.0-pr.1", path = "../koshi-ipc" }
 koshi-layout = { version = "0.4.0-pr.1", path = "../koshi-layout" }
 koshi-observability = { version = "0.4.0-pr.1", path = "../koshi-observability" }
 koshi-paths = { version = "0.4.0-pr.1", path = "../koshi-paths" }
-koshi-pty = { version = "0.4.0-pr.1", path = "../koshi-pty" }
-koshi-renderer = { version = "0.4.0-pr.1", path = "../koshi-renderer" }
-koshi-runtime = { version = "0.4.0-pr.1", path = "../koshi-runtime" }
 koshi-storage = { version = "0.4.0-pr.1", path = "../koshi-storage" }
-tracing = "0.1.44"
-clap = { version = "4.6.1", features = ["derive"] }
+tracing.workspace = true
+clap.workspace = true
 uuid.workspace = true
 serde_json.workspace = true
-serde = "1.0.228"
-koshi-terminal = { version = "0.4.0-pr.1", path = "../koshi-terminal" }
+serde.workspace = true
 ureq = { version = "3.3.0", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots", "gzip"] }
 semver = "1.0.28"
 flate2 = "1.1.9"
@@ -48,10 +38,11 @@ tar = "0.4.46"
 # already pulled for tar.gz.
 zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2"] }
 tempfile.workspace = true
-fs4 = "1.1.0"
 
 [target."cfg(unix)".dependencies]
-libc = "0.2.188"
+libc.workspace = true
 
 [dev-dependencies]
+koshi-pty = { version = "0.4.0-pr.1", path = "../koshi-pty" }
+koshi-runtime = { version = "0.4.0-pr.1", path = "../koshi-runtime" }
 koshi-test-support = { version = "0.4.0-pr.1", path = "../koshi-test-support" }

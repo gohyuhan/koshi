@@ -1,10 +1,18 @@
-//! Tests for the router's session list and its dispatcher loop, run in
-//! process against a hand-built list: no router is bound and no session
-//! server is started, so the name walk, selector resolution, removal, the
-//! idle-exit rule, the lock handover, the answer to a restart request, and the
-//! three remote access token requests are exercised on their own. Starting a
-//! real router and a real session server needs whole processes; that is
-//! covered by the integration tests instead.
+//! Tests for the router's session list, its dispatcher loop, and its remote
+//! access.
+//!
+//! Most run in process against a hand-built list: no real router is bound and
+//! no real session server is started, so the name walk, selector resolution,
+//! removal, the idle-exit rule, the lock handover, the answer to a restart
+//! request, the report a session server prints, and the three remote access
+//! token requests are exercised on their own. Starting a real router and a
+//! real session server needs whole processes; that is covered by the
+//! integration tests instead.
+//!
+//! Where the piece under test reads something real, a real thing stands in
+//! for it: a bound listener for a session the router probes or asks to
+//! describe itself, and a `/bin/sh` child for a process the router waits on
+//! or kills.
 //!
 //! The remote access cut goes further than that: it opens the real TLS
 //! listener on a loopback port, dials it with the real client, and stands one
@@ -28,6 +36,7 @@ use koshi_ipc::remote_wire::{
     self, RemoteClientFrame, RemoteServerFrame, MIN_REMOTE_PROTOCOL_VERSION,
     REMOTE_PROTOCOL_VERSION, REMOTE_REFUSED,
 };
+use koshi_ipc::router::RouterRequest;
 use koshi_link::remote_client::{self, DIAL_WAIT};
 use koshi_test_support::fixtures::test_runtime_dir;
 
@@ -42,7 +51,6 @@ fn registry_of(entries: &[(SessionId, &str)]) -> Registry {
                     name: (*name).to_string(),
                     socket: socket_addr(Path::new("/nowhere"), *id),
                     pid: 4242,
-                    created_at: UNIX_EPOCH,
                 },
             )
         })
@@ -272,6 +280,35 @@ fn removing_a_session_takes_its_resume_file_with_it() {
 }
 
 #[test]
+fn removing_a_session_that_is_replacing_its_image_leaves_it_and_its_files_alone() {
+    // A resume file younger than the window marks a swap in flight. The
+    // session keeps its place in the list and every file it advertised with:
+    // its new image rebinds the socket and rewrites the endpoint file.
+    let swapping = SessionId::new();
+    let runtime_dir = test_runtime_dir();
+    let endpoint_path = EndpointFile::path(runtime_dir.path(), swapping);
+    EndpointFile {
+        socket: socket_addr(runtime_dir.path(), swapping),
+        token: ConnectionToken::new("e".repeat(64)),
+        pid: 4242,
+    }
+    .write(&endpoint_path)
+    .expect("the endpoint file is written");
+    let resume_file = aged_resume_file(runtime_dir.path(), swapping, INSIDE_THE_WINDOW);
+
+    let mut registry = registry_of(&[(swapping, "S-quiet-lake")]);
+    unregister(runtime_dir.path(), &mut registry, swapping);
+
+    assert_eq!(
+        registry,
+        registry_of(&[(swapping, "S-quiet-lake")]),
+        "the session stays in the list across the swap"
+    );
+    assert!(endpoint_path.exists(), "the endpoint file is left in place");
+    assert!(resume_file.exists(), "the resume file is left in place");
+}
+
+#[test]
 fn the_rebuild_removes_a_resume_file_no_session_claims() {
     // A resume file older than the window, with no endpoint file beside it.
     let dead = SessionId::new();
@@ -406,7 +443,6 @@ fn the_rebuild_registers_a_session_another_local_user_started() {
                 name: "S-quiet-lake".to_string(),
                 socket: addr,
                 pid: 0,
-                created_at,
             },
         )]),
     );
@@ -686,6 +722,209 @@ fn a_lookup_finding_nothing_listening_drops_the_session_and_its_files() {
     );
     assert_eq!(registry, Registry::new());
     assert!(!endpoint_path.exists(), "the endpoint file is removed");
+}
+
+/// A stand-in session server at `addr` that is bound and answering, and
+/// settles the Hello on `PROTOCOL_VERSION + 1` — a version outside the range
+/// this build asks for, which fails the exchange without the session being
+/// gone.
+fn version_mismatched_session_server(addr: &str) -> JoinHandle<()> {
+    let listener = Listener::bind(addr).expect("bind the live session");
+    std::thread::spawn(move || {
+        let mut connection = listener.accept().expect("accept the router");
+        let hello: IpcRequest = connection.recv().expect("read hello");
+        let _query: IpcRequest = connection.recv().expect("read discovery request");
+        let _ = connection.send(&IpcResponse {
+            request_id: Some(hello.request_id),
+            result: IpcResult::Hello {
+                protocol_version: PROTOCOL_VERSION + 1,
+                version: env!("CARGO_PKG_VERSION").to_string(),
+            },
+        });
+    })
+}
+
+#[test]
+fn a_listing_keeps_a_session_that_answers_with_a_version_this_build_does_not_read() {
+    let live = SessionId::new();
+    let runtime_dir = test_runtime_dir();
+    let socket = socket_addr(runtime_dir.path(), live);
+    let endpoint_path = EndpointFile::path(runtime_dir.path(), live);
+    EndpointFile {
+        socket: socket.clone(),
+        token: ConnectionToken::new("e".repeat(64)),
+        pid: 4242,
+    }
+    .write(&endpoint_path)
+    .expect("the endpoint file is written");
+    let server = version_mismatched_session_server(&socket);
+
+    let mut registry = registry_of(&[(live, "S-quiet-lake")]);
+    registry
+        .get_mut(&live)
+        .expect("the session is listed")
+        .socket
+        .clone_from(&socket);
+
+    let answer = list_sessions(runtime_dir.path(), &mut registry);
+    server.join().expect("the stand-in session ended");
+
+    assert_eq!(
+        answer,
+        RouterResult::Sessions(Vec::new()),
+        "a session that could not describe itself is left out of the answer"
+    );
+    assert!(
+        registry.contains_key(&live),
+        "a session that is still bound stays in the list"
+    );
+    assert!(
+        endpoint_path.exists(),
+        "a session that is still bound keeps its endpoint file"
+    );
+}
+
+#[test]
+fn the_rebuild_keeps_the_files_of_a_session_it_cannot_read_a_version_from() {
+    let live = SessionId::new();
+    let runtime_dir = test_runtime_dir();
+    let socket = socket_addr(runtime_dir.path(), live);
+    let endpoint_path = EndpointFile::path(runtime_dir.path(), live);
+    EndpointFile {
+        socket: socket.clone(),
+        token: ConnectionToken::new("f".repeat(64)),
+        pid: 4242,
+    }
+    .write(&endpoint_path)
+    .expect("the endpoint file is written");
+    let server = version_mismatched_session_server(&socket);
+
+    let registry = sweep(runtime_dir.path(), None);
+    server.join().expect("the stand-in session ended");
+
+    assert_eq!(
+        registry,
+        Registry::new(),
+        "a session that could not describe itself is not listed"
+    );
+    assert!(
+        endpoint_path.exists(),
+        "a session that is still bound keeps its endpoint file"
+    );
+}
+
+/// A stand-in session server bound at `addr`, never accepted from.
+///
+/// A lookup's probe connects and closes at once. The listener holds one bound
+/// instance from the moment it binds, which the probe connects to, so reaching
+/// the address needs no `accept`. On Windows a probe that closes before an
+/// `accept` leaves that instance holding a connection with nothing behind it,
+/// and the `accept` clearing it then blocks for a caller that never comes.
+///
+/// The caller keeps the returned listener bound for as long as the lookup runs.
+fn a_bound_session(addr: &str) -> Listener {
+    Listener::bind(addr).expect("bind the stand-in session")
+}
+
+#[test]
+fn a_lookup_for_a_session_that_answers_hands_back_where_it_listens() {
+    // The lookup probes the address before it hands it out. A session that
+    // accepts the connection is answered with the name, address and process
+    // id the list holds for it.
+    let live = SessionId::new();
+    let runtime_dir = test_runtime_dir();
+    let socket = socket_addr(runtime_dir.path(), live);
+    let server = a_bound_session(&socket);
+    let mut registry = registry_of(&[(live, "S-quiet-lake")]);
+    registry
+        .get_mut(&live)
+        .expect("the session is listed")
+        .socket
+        .clone_from(&socket);
+
+    let answer = attach_lookup(
+        runtime_dir.path(),
+        &mut registry,
+        &SessionSelector::Name("S-quiet-lake".to_string()),
+    );
+
+    assert_eq!(
+        answer,
+        RouterResult::Found(SessionAddress {
+            id: live,
+            name: "S-quiet-lake".to_string(),
+            socket: socket.clone(),
+            pid: 4242,
+        })
+    );
+    assert_eq!(
+        registry,
+        Registry::from([(
+            live,
+            SessionEntry {
+                name: "S-quiet-lake".to_string(),
+                socket,
+                pid: 4242,
+            },
+        )]),
+        "a session that answered stays in the list"
+    );
+
+    drop(server);
+}
+
+#[test]
+fn a_listing_answers_the_sessions_that_describe_themselves_in_name_then_id_order() {
+    // The list is a map, so its own order is not the answer's. The answer is
+    // sorted by name, then by id.
+    let runtime_dir = test_runtime_dir();
+    let loud = SessionId::new();
+    let quiet = SessionId::new();
+    let created_at = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let mut servers = Vec::new();
+    for (id, name) in [(loud, "S-loud-river"), (quiet, "S-quiet-lake")] {
+        let socket = socket_addr(runtime_dir.path(), id);
+        servers.push(foreign_session_server(&socket, id, name, created_at));
+        EndpointFile {
+            socket,
+            token: ConnectionToken::new("f".repeat(64)),
+            pid: 4242,
+        }
+        .write(&EndpointFile::path(runtime_dir.path(), id))
+        .expect("the endpoint file is written");
+    }
+    let mut registry = registry_of(&[(quiet, "S-quiet-lake"), (loud, "S-loud-river")]);
+
+    let answer = list_sessions(runtime_dir.path(), &mut registry);
+
+    assert_eq!(
+        answer,
+        RouterResult::Sessions(vec![
+            SessionInfo {
+                id: loud,
+                name: "S-loud-river".to_string(),
+                created_at,
+                attached_clients: Vec::new(),
+                pane_count: 0,
+            },
+            SessionInfo {
+                id: quiet,
+                name: "S-quiet-lake".to_string(),
+                created_at,
+                attached_clients: Vec::new(),
+                pane_count: 0,
+            },
+        ])
+    );
+    assert_eq!(
+        registry,
+        registry_of(&[(quiet, "S-quiet-lake"), (loud, "S-loud-river")]),
+        "both sessions answered, so neither left the list"
+    );
+
+    for server in servers {
+        server.join().expect("the stand-in session ended");
+    }
 }
 
 #[test]
@@ -985,20 +1224,25 @@ fn a_restart_request_naming_a_non_executable_binary_is_refused() {
     );
 }
 
-/// A process this test is the parent of, which ends at once. The handle is
-/// dropped without waiting on it, so the exit is left for the watcher to
-/// collect.
+/// A process this test is the parent of, running `script` under `/bin/sh` with
+/// its three standard streams going nowhere. Dropping the handle waits on
+/// nothing; the caller collects the exit.
 #[cfg(unix)]
-fn short_lived_child() -> u32 {
+fn child_running(script: &str) -> Child {
     std::process::Command::new("/bin/sh")
         .arg("-c")
-        .arg("exit 0")
+        .arg(script)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .expect("the shell runs")
-        .id()
+}
+
+/// A process this test is the parent of, which ends at once.
+#[cfg(unix)]
+fn short_lived_child() -> Child {
+    child_running("exit 0")
 }
 
 /// After a restart in place, the sessions the previous image started are still
@@ -1012,13 +1256,56 @@ fn the_watcher_reports_the_exit_of_a_session_this_process_is_the_parent_of() {
     let id = SessionId::new();
     let (events_tx, events_rx) = mpsc::channel();
 
-    watch_session_exit(short_lived_child(), id, events_tx);
+    watch_session_exit(short_lived_child().id(), id, events_tx);
 
     match events_rx.recv() {
         Ok(RouterEvent::ChildExited(reported)) => assert_eq!(reported, id),
         Ok(_) => panic!("the watcher reported something other than the session's exit"),
         Err(mpsc::RecvError) => panic!("the watcher ended without reporting the exit"),
     }
+}
+
+/// The reaper waits on the session server the router started and reports its
+/// exit, which is what takes that session out of the list.
+///
+/// The reaper thread holds the only other sender, so an event or a closed
+/// channel ends the wait here: nothing waits on a clock.
+#[cfg(unix)]
+#[test]
+fn the_reaper_reports_the_exit_of_the_session_server_it_started() {
+    let id = SessionId::new();
+    let (events_tx, events_rx) = mpsc::channel();
+
+    start_reaper_thread(short_lived_child(), id, events_tx);
+
+    match events_rx.recv() {
+        Ok(RouterEvent::ChildExited(reported)) => assert_eq!(reported, id),
+        Ok(_) => panic!("the reaper reported something other than the session's exit"),
+        Err(mpsc::RecvError) => panic!("the reaper ended without reporting the exit"),
+    }
+}
+
+/// A create that never got its ready report kills the child and waits on it.
+/// The process ends and its status is collected, so nothing is left running
+/// and nothing is left unreaped.
+#[cfg(unix)]
+#[test]
+fn a_child_that_never_became_a_session_is_killed_and_collected() {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    let mut child = child_running("sleep 30");
+
+    kill_child(&mut child);
+
+    let status = child
+        .try_wait()
+        .expect("the child's status reads back")
+        .expect("the child was collected, so its status is known");
+    assert_eq!(
+        status.signal(),
+        Some(libc::SIGKILL),
+        "the child was killed rather than left running"
+    );
 }
 
 /// A session this router is not the parent of — one another user started, or
@@ -1038,20 +1325,12 @@ fn the_watcher_over_a_session_this_process_did_not_start_reports_nothing() {
 }
 
 /// The router hands its place over on Windows by starting the new binary with
-/// these two creation flags and this argument. `std::process::Command` reports
-/// neither back, so the values are checked here; the argument is the one
-/// [`crate::cli`] parses into `wait_for_lock`.
+/// this argument, the one [`crate::cli`] parses into `wait_for_lock`. The two
+/// creation flags the handover carries are checked beside them, in
+/// [`crate::process`].
 #[cfg(windows)]
 #[test]
-fn the_handover_carries_the_win32_flags_and_the_argument_that_waits() {
-    assert_eq!(
-        DETACHED_PROCESS, 0x0000_0008,
-        "DETACHED_PROCESS is 8; another value is another flag"
-    );
-    assert_eq!(
-        CREATE_NEW_PROCESS_GROUP, 0x0000_0200,
-        "CREATE_NEW_PROCESS_GROUP is 512; another value is another flag"
-    );
+fn the_handover_carries_the_argument_that_waits() {
     assert_eq!(WAIT_FOR_LOCK_FLAG, "--wait-for-lock");
 }
 
@@ -1081,24 +1360,61 @@ fn a_restart_that_cannot_exec_leaves_the_write_to_a_hung_up_client_ignored() {
     assert_eq!(prior, libc::SIG_IGN);
 }
 
-/// A serving thread's SIGPIPE block must hold while the process-wide
-/// disposition sits at its default, the state a running exec puts it in. The
-/// raise is thread-directed, like the signal a write to a hung-up peer
-/// raises; blocked, it stays pending, the thread runs on, and the pending
-/// signal dies with the thread.
-#[cfg(unix)]
+/// The accept loop gates every connection on the user the OS reports for it,
+/// so a connection this router's own user opens must still be served. This
+/// test's caller runs in the test process, under that same user; another
+/// user's connection needs a second OS account and is covered by neither this
+/// test nor any other.
 #[test]
-fn a_serving_threads_sigpipe_block_holds_under_the_default_disposition() {
-    let survived = std::thread::spawn(|| {
-        block_sigpipe_on_this_thread();
-        let prior = unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
-        let raised = unsafe { libc::raise(libc::SIGPIPE) };
-        unsafe { libc::signal(libc::SIGPIPE, prior) };
-        raised == 0
-    })
-    .join()
-    .expect("the thread survives the raised SIGPIPE");
-    assert!(survived, "the raise itself reported an error");
+fn the_accept_loop_serves_a_connection_this_user_opened() {
+    let runtime_dir = test_runtime_dir();
+    let addr = router_socket_addr(runtime_dir.path());
+    let listener = Listener::bind(&addr).expect("the router socket is bound");
+    let token = ConnectionToken::generate();
+    let (events_tx, events_rx) = mpsc::channel();
+    let shutting_down = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&shutting_down);
+    let accepted_token = token.clone();
+    let accepting = std::thread::spawn(move || {
+        accept_loop(&listener, &accepted_token, &events_tx, &flag);
+    });
+
+    let mut caller = Connection::connect(&addr).expect("the caller reaches the router");
+    caller
+        .send(&RouterRequest {
+            request_id: 1,
+            kind: RouterRequestKind::hello(token),
+        })
+        .expect("the hello is written");
+    let answered: RouterResponse = caller.recv().expect("the hello is answered");
+    assert_eq!(
+        answered,
+        RouterResponse {
+            request_id: Some(1),
+            result: RouterResult::Hello {
+                protocol_version: ROUTER_PROTOCOL_VERSION,
+                version: BUILD_VERSION.to_string(),
+            },
+        }
+    );
+    caller
+        .send(&RouterRequest {
+            request_id: 2,
+            kind: RouterRequestKind::ListSessions,
+        })
+        .expect("the listing request is written");
+    let reached = events_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the request reaches the dispatcher");
+    let RouterEvent::Request { kind, reply: _ } = reached else {
+        panic!("the accept loop passed on something other than a request");
+    };
+    assert_eq!(kind, RouterRequestKind::ListSessions);
+
+    shutting_down.store(true, Ordering::SeqCst);
+    drop(caller);
+    let _ = Connection::connect(&addr);
+    accepting.join().expect("the accept loop ends");
 }
 
 /// One token request answered the way the dispatcher answers it: against the
@@ -1542,6 +1858,62 @@ fn a_machine_with_no_data_directory_refuses_every_token_request() {
     }
 }
 
+/// What [`read_ready_line`] reads from a child that printed `printed` on its
+/// output. The bytes cross a real pipe, the way a session server's output
+/// reaches the router.
+#[cfg(unix)]
+fn ready_line_from(printed: &str) -> Option<SessionServerReady> {
+    let dir = test_runtime_dir();
+    let path = dir.path().join("printed");
+    std::fs::write(&path, printed).expect("the output is written");
+    let mut child = std::process::Command::new("/bin/cat")
+        .arg(&path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("cat runs");
+    let stdout = child.stdout.take().expect("the child's output is piped");
+    let read = read_ready_line(stdout);
+    let _ = child.wait();
+    read
+}
+
+#[cfg(unix)]
+#[test]
+fn the_line_a_session_server_prints_reads_back_as_its_report() {
+    let report = SessionServerReady {
+        protocol_version: ROUTER_PROTOCOL_VERSION,
+        socket: "/tmp/koshi-test.sock".to_string(),
+    };
+    let printed = serde_json::to_string(&report).expect("the report encodes");
+
+    assert_eq!(ready_line_from(&format!("{printed}\n")), Some(report));
+}
+
+/// Every way the one line the router reads off a child's output fails to be a
+/// report.
+#[cfg(unix)]
+#[test]
+fn output_that_is_not_a_ready_report_reads_as_nothing() {
+    assert_eq!(ready_line_from(""), None, "a child that printed nothing");
+    assert_eq!(
+        ready_line_from("not json\n"),
+        None,
+        "a line that is not a report"
+    );
+    assert_eq!(
+        ready_line_from("{\"protocol_version\":1}\n"),
+        None,
+        "a report naming no socket"
+    );
+    assert_eq!(
+        ready_line_from("{\"protocol_version\":\"one\",\"socket\":\"/tmp/s\"}\n"),
+        None,
+        "a report whose version is not a number"
+    );
+}
+
 #[test]
 fn a_session_server_on_this_build_is_served() {
     let report = SessionServerReady {
@@ -1660,6 +2032,20 @@ fn bridged_session_server(addr: &str, stop: Receiver<()>) -> JoinHandle<()> {
     })
 }
 
+/// Write a token store at `path` holding one host-wide grant for alice that
+/// never stops on its own, and hand back the secret it made.
+fn store_with_alices_grant(path: &Path) -> ConnectionToken {
+    let mut store = TokenStore::new();
+    let (secret, _) = store.grant(
+        "alice".to_string(),
+        TokenScope::HostWide,
+        SystemTime::now(),
+        None,
+    );
+    store.write(path).expect("the token store is written");
+    secret
+}
+
 /// Two ends of one loopback connection, for a test that needs a socket the
 /// router can shut down.
 fn loopback_pair() -> (TcpStream, TcpStream) {
@@ -1681,16 +2067,7 @@ fn a_revoke_ends_the_connection_it_admitted_attached_or_not() {
     let token_path = store_path(&data_dir);
     let session = SessionId::new();
 
-    let mut store = TokenStore::new();
-    let (secret, _) = store.grant(
-        "alice".to_string(),
-        TokenScope::HostWide,
-        SystemTime::now(),
-        None,
-    );
-    store
-        .write(&token_path)
-        .expect("the token store is written");
+    let secret = store_with_alices_grant(&token_path);
     let (cert, fingerprint) = load_or_make_cert(&data_dir).expect("this machine's certificate");
 
     let socket = socket_addr(runtime_dir.path(), session);
@@ -1882,9 +2259,20 @@ fn a_grant_cuts_only_the_standing_connection_of_its_identity_and_scope() {
         None,
     );
 
-    assert!(
-        matches!(result, RouterResult::Granted { replaced: true, .. }),
-        "the standing alice grant is reported replaced"
+    let RouterResult::Granted { token, replaced } = result else {
+        panic!("the grant was refused: {result:?}")
+    };
+    assert!(replaced, "the standing alice grant is reported replaced");
+    let written = TokenStore::read(&token_path).expect("the store reads back");
+    assert_eq!(
+        written
+            .records
+            .iter()
+            .filter(|record| record.identity == "alice" && record.scope == TokenScope::HostWide)
+            .map(|record| record.hash.clone())
+            .collect::<Vec<String>>(),
+        vec![hash_token(&token)],
+        "one alice record is left on the host-wide scope, holding the new secret"
     );
     let kept: Vec<String> = remote.live.iter().map(|live| live.hash.clone()).collect();
     assert_eq!(
@@ -2063,6 +2451,153 @@ fn an_attach_to_a_session_the_secret_does_not_reach_is_refused() {
 }
 
 #[test]
+fn an_attach_naming_a_session_this_machine_does_not_run_reaches_nothing() {
+    // The connection stands and a host-wide grant reaches every session on
+    // this machine. The selector is the one thing left that refuses the
+    // attach.
+    let running = SessionId::new();
+    let runtime_dir = test_runtime_dir();
+    let registry = registry_of(&[(running, "S-quiet-lake")]);
+    let mut remote = no_remote();
+    let (_caller, served) = loopback_pair();
+    remote.live.push(LiveRemote {
+        hash: "f".repeat(64),
+        stream: served,
+        id: 9,
+    });
+    let located = |selector: &SessionSelector| {
+        locate_remote(
+            runtime_dir.path(),
+            &registry,
+            &remote,
+            &TokenScope::HostWide,
+            9,
+            selector,
+        )
+    };
+
+    assert_eq!(
+        located(&SessionSelector::Name("S-loud-river".to_string())),
+        None,
+        "a name the list does not hold"
+    );
+    assert_eq!(
+        located(&SessionSelector::Name("S-quiet".to_string())),
+        None,
+        "a name that is only the start of one the list holds"
+    );
+    assert_eq!(
+        located(&SessionSelector::Id(SessionId::new())),
+        None,
+        "an id the list does not hold"
+    );
+    assert_eq!(
+        located(&SessionSelector::Id(running)),
+        Some(EndpointFile::path(runtime_dir.path(), running)),
+        "and the session that is running is still reached"
+    );
+}
+
+#[test]
+fn a_session_another_local_user_started_is_neither_listed_nor_reached_from_a_remote_connection() {
+    // The rebuild registers those sessions from the machine-wide shared
+    // directory, under `pid` 0, and the bridge reads the endpoint file under
+    // this router's own runtime directory, which holds none of them. Listing
+    // one would name a session every attach then refuses, and would carry
+    // another local user's session name and id out over the network.
+    let own = SessionId::new();
+    let foreign = SessionId::new();
+    let runtime_dir = test_runtime_dir();
+    let mut registry = registry_of(&[(own, "S-quiet-lake")]);
+    registry.insert(
+        foreign,
+        SessionEntry {
+            name: "S-loud-river".to_string(),
+            socket: socket_addr(Path::new("/nowhere"), foreign),
+            pid: 0,
+        },
+    );
+    let mut remote = no_remote();
+    let (_caller, served) = loopback_pair();
+    remote.live.push(LiveRemote {
+        hash: "a".repeat(64),
+        stream: served,
+        id: 5,
+    });
+    let located = |selector: &SessionSelector| {
+        locate_remote(
+            runtime_dir.path(),
+            &registry,
+            &remote,
+            &TokenScope::HostWide,
+            5,
+            selector,
+        )
+    };
+
+    assert_eq!(
+        remote_rows(&registry, &TokenScope::HostWide),
+        vec![RemoteSessionRow {
+            id: own,
+            name: "S-quiet-lake".to_string(),
+        }],
+        "a host-wide grant is shown the session this router started and no other"
+    );
+    assert_eq!(
+        remote_rows(&registry, &TokenScope::Session(foreign)),
+        Vec::<RemoteSessionRow>::new(),
+        "and a grant naming that session outright is shown nothing"
+    );
+    assert_eq!(
+        located(&SessionSelector::Id(foreign)),
+        None,
+        "an attach naming it by id reaches nothing"
+    );
+    assert_eq!(
+        located(&SessionSelector::Name("S-loud-river".to_string())),
+        None,
+        "and naming it reaches nothing either"
+    );
+    assert_eq!(
+        located(&SessionSelector::Id(own)),
+        Some(EndpointFile::path(runtime_dir.path(), own)),
+        "while the session this router started is still reached"
+    );
+}
+
+#[test]
+fn the_report_that_one_connection_ended_drops_that_registration_and_no_other() {
+    // The listener sends this when a remote connection closes. The place it
+    // frees lets the next caller in, and the numbers beside it have to
+    // survive: a later attach finds its connection by number.
+    let runtime_dir = test_runtime_dir();
+    let mut remote = no_remote();
+    let mut held = Vec::new();
+    for id in 0..3u64 {
+        let (near, far) = loopback_pair();
+        held.push(far);
+        remote.live.push(LiveRemote {
+            hash: "g".repeat(64),
+            stream: near,
+            id,
+        });
+    }
+
+    serve_admission(
+        runtime_dir.path(),
+        None,
+        &Registry::new(),
+        &mut remote,
+        AdmissionAsk::Ended { id: 1 },
+    );
+
+    assert_eq!(
+        remote.live.iter().map(|live| live.id).collect::<Vec<u64>>(),
+        vec![0, 2]
+    );
+}
+
+#[test]
 fn a_caller_speaking_no_doorway_version_this_build_has_is_told_both_ranges() {
     // The version is settled before the secret is looked at, so this needs no
     // grant and no dispatcher. This refusal names both ranges instead of
@@ -2111,16 +2646,7 @@ fn a_caller_whose_doorway_range_covers_this_build_settles_on_what_both_speak() {
     let data_dir = runtime_dir.path().join("data");
     let token_path = store_path(&data_dir);
 
-    let mut store = TokenStore::new();
-    let (secret, _) = store.grant(
-        "alice".to_string(),
-        TokenScope::HostWide,
-        SystemTime::now(),
-        None,
-    );
-    store
-        .write(&token_path)
-        .expect("the token store is written");
+    let secret = store_with_alices_grant(&token_path);
     let (cert, fingerprint) = load_or_make_cert(&data_dir).expect("this machine's certificate");
 
     let (events_tx, events_rx) = mpsc::channel();
@@ -2175,31 +2701,106 @@ fn a_caller_whose_doorway_range_covers_this_build_settles_on_what_both_speak() {
 }
 
 #[test]
+fn an_admitted_secret_is_registered_with_its_scope_and_stamped_in_the_store() {
+    // The registration is what a later attach and a later revoke both find the
+    // connection by, and the stamp is what `koshi share list` reads as the
+    // last time that grant was used.
+    let runtime_dir = test_runtime_dir();
+    let token_path = store_path(&runtime_dir.path().join("data"));
+    let secret = store_with_alices_grant(&token_path);
+    let mut remote = no_remote();
+    let (near, _far) = loopback_pair();
+
+    let before = SystemTime::now();
+    let admitted =
+        admit_token(Some(&token_path), &mut remote, &secret, near).expect("the secret is admitted");
+    let after = SystemTime::now();
+
+    assert_eq!(admitted.scope, TokenScope::HostWide);
+    assert_eq!(admitted.id, 0);
+    assert_eq!(remote.next_id, 1, "the next connection takes the number 1");
+    assert_eq!(remote.live.len(), 1);
+    assert_eq!(remote.live[0].id, 0);
+    assert_eq!(
+        remote.live[0].hash,
+        hash_token(&secret),
+        "the connection is registered against the hash of the secret that opened it"
+    );
+    let written = TokenStore::read(&token_path).expect("the store reads back");
+    assert_eq!(written.records.len(), 1);
+    let used = written.records[0]
+        .last_used_at
+        .expect("the admit stamped the record");
+    assert!(
+        used >= before && used <= after,
+        "the stamp is the clock reading the admit took"
+    );
+}
+
+#[test]
+fn a_secret_the_store_does_not_hold_admits_nothing_and_writes_nothing() {
+    // A wrong secret must leave no trace: nothing registered, and no write
+    // that would stamp a record nobody used.
+    let runtime_dir = test_runtime_dir();
+    let token_path = store_path(&runtime_dir.path().join("data"));
+    let _ = store_with_alices_grant(&token_path);
+    let before = spaced_out(&token_path);
+    let mut remote = no_remote();
+    let (near, _far) = loopback_pair();
+
+    assert!(
+        admit_token(
+            Some(&token_path),
+            &mut remote,
+            &ConnectionToken::generate(),
+            near
+        )
+        .is_none(),
+        "a secret no record holds reaches nothing"
+    );
+
+    assert!(remote.live.is_empty(), "nothing was registered for it");
+    assert_eq!(remote.next_id, 0, "and it took no number");
+    assert_eq!(
+        std::fs::read(&token_path).expect("the store file is still there"),
+        before,
+        "the refused secret wrote nothing"
+    );
+}
+
+#[test]
+fn a_machine_with_no_token_store_admits_no_remote_connection() {
+    // With no data directory there is no store to check a secret against, and
+    // every remote caller is refused.
+    let mut remote = no_remote();
+    let (near, _far) = loopback_pair();
+
+    assert!(admit_token(None, &mut remote, &ConnectionToken::generate(), near).is_none());
+
+    assert!(remote.live.is_empty(), "nothing was registered for it");
+    assert_eq!(remote.next_id, 0, "and it took no number");
+}
+
+#[test]
 fn a_full_list_of_admitted_connections_admits_nothing_more() {
     // One valid secret, admitted MAX_LIVE_REMOTE times, then refused.
     let runtime_dir = test_runtime_dir();
     let data_dir = runtime_dir.path().join("data");
     let token_path = store_path(&data_dir);
 
-    let mut store = TokenStore::new();
-    let (secret, _) = store.grant(
-        "alice".to_string(),
-        TokenScope::HostWide,
-        SystemTime::now(),
-        None,
-    );
-    store
-        .write(&token_path)
-        .expect("the token store is written");
+    let secret = store_with_alices_grant(&token_path);
 
     let mut remote = no_remote();
     let mut held = Vec::new();
     for place in 0..MAX_LIVE_REMOTE {
         let (near, far) = loopback_pair();
         held.push(far);
-        assert!(
-            admit_token(Some(&token_path), &mut remote, &secret, near).is_some(),
-            "place {place} of {MAX_LIVE_REMOTE} is free"
+        let admitted = admit_token(Some(&token_path), &mut remote, &secret, near)
+            .unwrap_or_else(|| panic!("place {place} of {MAX_LIVE_REMOTE} is free"));
+        assert_eq!(admitted.scope, TokenScope::HostWide);
+        assert_eq!(
+            admitted.id, place as u64,
+            "each admitted connection takes the next number"
         );
     }
     assert_eq!(remote.live.len(), MAX_LIVE_REMOTE);
@@ -2214,6 +2815,10 @@ fn a_full_list_of_admitted_connections_admits_nothing_more() {
         MAX_LIVE_REMOTE,
         "and nothing was registered for it"
     );
+    assert_eq!(
+        remote.next_id, MAX_LIVE_REMOTE as u64,
+        "and the refused connection took no number"
+    );
 }
 
 #[test]
@@ -2223,16 +2828,7 @@ fn a_connection_that_ends_makes_room_for_the_next_one() {
     let data_dir = runtime_dir.path().join("data");
     let token_path = store_path(&data_dir);
 
-    let mut store = TokenStore::new();
-    let (secret, _) = store.grant(
-        "alice".to_string(),
-        TokenScope::HostWide,
-        SystemTime::now(),
-        None,
-    );
-    store
-        .write(&token_path)
-        .expect("the token store is written");
+    let secret = store_with_alices_grant(&token_path);
 
     let mut remote = no_remote();
     let mut held = Vec::new();
@@ -2247,14 +2843,182 @@ fn a_connection_that_ends_makes_room_for_the_next_one() {
     let (near, _far) = loopback_pair();
     assert!(admit_token(Some(&token_path), &mut remote, &secret, near).is_none());
 
-    // What `AdmissionAsk::Ended` does to the list.
     let ended = first.expect("a full list has a first connection");
-    remote.live.retain(|live| live.id != ended);
+    serve_admission(
+        runtime_dir.path(),
+        Some(&token_path),
+        &Registry::new(),
+        &mut remote,
+        AdmissionAsk::Ended { id: ended },
+    );
+    assert_eq!(remote.live.len(), MAX_LIVE_REMOTE - 1);
 
     let (near, _far) = loopback_pair();
+    let admitted = admit_token(Some(&token_path), &mut remote, &secret, near)
+        .expect("the place it left is free");
+    assert_eq!(
+        admitted.id, MAX_LIVE_REMOTE as u64,
+        "the connection taking that place takes the next number, not the freed one"
+    );
+}
+
+#[test]
+fn switching_remote_access_on_with_no_listen_address_is_refused() {
+    // `koshi.kdl` names where the port would be. With no address the refusal
+    // names the line to add.
+    let (events_tx, _events_rx) = mpsc::channel();
+    let mut remote = no_remote();
+
+    let answer = enable_remote(&mut remote, &events_tx);
+
+    assert_eq!(
+        answer,
+        RouterResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::MalformedRequest,
+            message: "no remote listen address is set; add `remote-listen \"<host:port>\"` to \
+                      koshi.kdl"
+                .to_string(),
+        })
+    );
+    assert!(!remote.listening, "nothing was taken");
+}
+
+#[test]
+fn switching_remote_access_on_with_no_data_directory_is_refused() {
+    // The certificate and the record of the answer both live in the data
+    // directory. A machine with none holds neither.
+    let (events_tx, _events_rx) = mpsc::channel();
+    let mut remote = no_remote();
+    remote.address = Some("127.0.0.1:7654".to_string());
+
+    let answer = enable_remote(&mut remote, &events_tx);
+
+    assert_eq!(
+        answer,
+        RouterResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::MalformedRequest,
+            message: "this machine has no data directory, so remote access cannot be switched on"
+                .to_string(),
+        })
+    );
+    assert!(!remote.listening, "nothing was taken");
+}
+
+#[test]
+fn switching_remote_access_on_while_this_router_already_holds_the_port_keeps_serving_on_it() {
+    // The listener opened at start-up, and the bind is skipped. An address
+    // something else holds is not a refusal here.
+    let runtime_dir = test_runtime_dir();
+    let data_dir = runtime_dir.path().join("data");
+    let (_cert, fingerprint) = load_or_make_cert(&data_dir).expect("this machine's certificate");
+    let occupied = TcpListener::bind("127.0.0.1:0").expect("hold a loopback address");
+    let address = occupied
+        .local_addr()
+        .expect("read the held address")
+        .to_string();
+    let (events_tx, _events_rx) = mpsc::channel();
+    let mut remote = RemoteState {
+        address: Some(address.clone()),
+        data_dir: Some(data_dir.clone()),
+        listening: true,
+        live: Vec::new(),
+        next_id: 0,
+        said_full: Occasional::new(),
+    };
+
+    let answer = enable_remote(&mut remote, &events_tx);
+
+    assert_eq!(
+        answer,
+        RouterResult::RemoteEnabled {
+            address,
+            fingerprint,
+        }
+    );
+    assert!(remote.listening, "the port it already held stays open");
     assert!(
-        admit_token(Some(&token_path), &mut remote, &secret, near).is_some(),
-        "the place it left is free"
+        remote_enabled(&data_dir),
+        "the answer is written down, so the next start opens the port again"
+    );
+
+    drop(occupied);
+}
+
+#[test]
+fn the_start_up_open_with_no_listen_address_takes_no_port() {
+    let (events_tx, _events_rx) = mpsc::channel();
+    let mut remote = no_remote();
+
+    open_remote_listener(&mut remote, &events_tx);
+
+    assert!(!remote.listening, "no address, so no port");
+}
+
+#[test]
+fn the_start_up_open_takes_no_port_until_the_operator_has_said_yes() {
+    // An address alone opens nothing: the record beside the certificate is
+    // what a start reads as the operator's yes.
+    let runtime_dir = test_runtime_dir();
+    let data_dir = runtime_dir.path().join("data");
+    let (events_tx, _events_rx) = mpsc::channel();
+    let mut remote = RemoteState {
+        address: Some(free_loopback_address()),
+        data_dir: Some(data_dir.clone()),
+        listening: false,
+        live: Vec::new(),
+        next_id: 0,
+        said_full: Occasional::new(),
+    };
+
+    open_remote_listener(&mut remote, &events_tx);
+
+    assert!(!remote.listening, "no record of a yes, so no port");
+    assert!(
+        !CertFile::path(&data_dir).exists(),
+        "the open stopped before it made this machine's certificate"
+    );
+}
+
+#[test]
+fn the_start_up_open_takes_the_port_again_once_the_answer_is_written_down() {
+    // The record beside the certificate opens the port on every start after
+    // the one that wrote it, with nobody asked again.
+    let runtime_dir = test_runtime_dir();
+    let data_dir = runtime_dir.path().join("data");
+    EnabledFile {
+        format: ENABLED_FILE_FORMAT,
+        enabled_at: SystemTime::now(),
+    }
+    .write(&EnabledFile::path(&data_dir))
+    .expect("the answer is written");
+    let (events_tx, _events_rx) = mpsc::channel();
+    let mut remote = RemoteState {
+        address: None,
+        data_dir: Some(data_dir),
+        listening: false,
+        live: Vec::new(),
+        next_id: 0,
+        said_full: Occasional::new(),
+    };
+
+    for _ in 0..ADDRESS_TRIES {
+        remote.address = Some(free_loopback_address());
+        open_remote_listener(&mut remote, &events_tx);
+        if remote.listening {
+            break;
+        }
+    }
+
+    assert!(
+        remote.listening,
+        "no loopback port could be opened in {ADDRESS_TRIES} tries"
+    );
+    let address = remote.address.clone().expect("the address it took");
+    assert_eq!(
+        TcpListener::bind(&address)
+            .expect_err("the router is holding the address")
+            .kind(),
+        std::io::ErrorKind::AddrInUse
     );
 }
 
@@ -2281,11 +3045,15 @@ fn an_address_that_cannot_be_taken_writes_no_record_of_the_answer() {
         said_full: Occasional::new(),
     };
 
+    let held = TcpListener::bind(address).expect_err("the address is already held");
     let answer = enable_remote(&mut remote, &events_tx);
 
-    assert!(
-        matches!(answer, RouterResult::Error(_)),
-        "an address that cannot be taken is refused, and got {answer:?}"
+    assert_eq!(
+        answer,
+        RouterResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::MalformedRequest,
+            message: format!("the remote listener could not open {address}: {held}"),
+        })
     );
     assert!(
         !remote.listening,
@@ -2321,12 +3089,18 @@ fn taking_the_address_writes_the_record_and_serves_on_it() {
     let answer = enable_remote_on_a_free_port(&mut remote, &events_tx);
 
     let RouterResult::RemoteEnabled {
-        address: served, ..
+        address: served,
+        fingerprint,
     } = answer
     else {
         panic!("an address that can be taken is enabled, and got {answer:?}");
     };
     assert_eq!(served, remote.address.clone().expect("the address it took"));
+    let (_cert, on_disk) = load_or_make_cert(&data_dir).expect("this machine's certificate");
+    assert_eq!(
+        fingerprint, on_disk,
+        "the answer names the certificate this machine now presents"
+    );
     assert!(remote.listening, "the port is being served");
     assert!(
         remote_enabled(&data_dir),
@@ -2428,10 +3202,14 @@ fn a_listener_that_cannot_start_serving_writes_no_record_of_the_answer() {
         said_full: Occasional::new(),
     };
 
-    assert!(matches!(
+    let held = TcpListener::bind(address).expect_err("the address is already held");
+    assert_eq!(
         enable_remote(&mut remote, &events_tx),
-        RouterResult::Error(_)
-    ));
+        RouterResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::MalformedRequest,
+            message: format!("the remote listener could not open {address}: {held}"),
+        })
+    );
     assert!(!EnabledFile::path(&data_dir).exists());
     assert!(!remote.listening);
 

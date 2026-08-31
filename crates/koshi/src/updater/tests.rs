@@ -280,7 +280,7 @@ fn one_session_refusing_still_leaves_every_other_session_asked() {
             refuses,
             SessionScript {
                 restart: IpcResult::Error(IpcErrorPayload {
-                    code: IpcErrorCode::MalformedRequest,
+                    code: IpcErrorCode::Unknown,
                     message: "a pane is mid-write".to_string(),
                 }),
                 version: "3.3.3".to_string(),
@@ -687,6 +687,11 @@ fn highest_version_picks_semver_order_not_list_order() {
     );
     assert_eq!(
         highest_version(Vec::new()).unwrap_err(),
+        "no releases found"
+    );
+    // A list where no tag is a version reads the same as an empty one.
+    assert_eq!(
+        highest_version(releases(&["nightly", "edge"])).unwrap_err(),
         "no releases found"
     );
 }

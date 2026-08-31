@@ -287,9 +287,8 @@ impl Client {
     }
 
     /// Drop this client's highlight in `pane_id`, leaving visual mode for that
-    /// pane. Clearing a pane with no highlight changes nothing.
-    ///
-    /// Called when input reaches the pane's child, and when the pane is removed.
+    /// pane. Clearing a pane with no highlight changes nothing. Other panes'
+    /// highlights are untouched.
     pub fn clear_selection(&mut self, pane_id: PaneId) {
         self.selection_by_pane.remove(&pane_id);
     }
@@ -427,11 +426,12 @@ impl ClientRegistry {
     }
 
     /// Mutable access to one client for in-place edits to its view state —
-    /// active tab, per-tab focus, lock mode, viewport.
+    /// active tab, per-tab focus, lock mode, viewport. `None` if no client is
+    /// attached under `client_id`.
     ///
-    /// The client exposes its `id`, but **mutating `id` through this handle does
-    /// not move the map entry**: the client stays keyed under its old id.
-    /// Identity changes happen via detach + attach.
+    /// A client's id is read-only, so the entry stays keyed under `client_id`
+    /// for as long as it is attached. Changing a client's id means
+    /// [`detach`](Self::detach) then [`attach`](Self::attach).
     pub fn get_mut(&mut self, client_id: ClientId) -> Option<&mut Client> {
         self.records.get_mut(&client_id)
     }

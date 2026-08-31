@@ -10,8 +10,8 @@
 //! makes one request across the process boundary and keeps the rows its query
 //! asked for.
 //!
-//! Paths serialize as their lossy UTF-8 string, so a non-UTF-8 working
-//! directory never fails a render.
+//! [`PaneInfo::cwd`] serializes as the path's lossy UTF-8 string: bytes that
+//! are not valid UTF-8 become U+FFFD.
 
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -119,9 +119,8 @@ pub struct ClientInfo {
     pub focused_pane: Option<PaneId>,
     /// The client's modal input state.
     pub lock_state: LockMode,
-    /// Where the client connected from, or `None` from a session server built
-    /// before this field existed. `None` is not [`ClientOrigin::Local`]: that
-    /// server did not answer the question.
+    /// Where the client connected from. `None` when the row carries no
+    /// `origin` field; `None` is not [`ClientOrigin::Local`].
     #[serde(default)]
     pub origin: Option<ClientOrigin>,
     /// The pane region the client reported, exactly as it arrived, or `None`
@@ -148,8 +147,8 @@ pub struct SessionOverview {
     pub clients: Vec<ClientInfo>,
 }
 
-/// Serialize an optional path as its lossy UTF-8 string, so a path with
-/// non-UTF-8 bytes still serializes (invalid sequences become U+FFFD).
+/// Serializes `None` as none and `Some(path)` as the path's lossy UTF-8
+/// string: bytes that are not valid UTF-8 become U+FFFD.
 fn serialize_path_lossy<S>(path: &Option<PathBuf>, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,

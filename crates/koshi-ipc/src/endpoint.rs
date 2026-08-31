@@ -5,13 +5,12 @@
 //! session's control-socket address, names the process advertising it, and
 //! carries the [`ConnectionToken`](crate::protocol::ConnectionToken) a
 //! connection from the same user presents at
-//! [`Hello`](crate::protocol::IpcRequestKind::Hello). The directory is
-//! readable only by the user who started Koshi, so being able to read the
-//! file is itself the same-user proof.
+//! [`Hello`](crate::protocol::IpcRequestKind::Hello). Only the user who
+//! started Koshi can read the directory.
 //!
 //! The runtime writes the file when a session starts; the `koshi` CLI reads
 //! it to find the socket and the token before connecting. Writes go through
-//! [`koshi_storage::atomic::write_atomic`], so a reader finds the old content
+//! [`koshi_storage::atomic::write_atomic`]: a reader finds the old content
 //! or the new, never a half-written middle.
 //!
 //! The same module holds the address helpers every writer and reader shares:
@@ -44,12 +43,11 @@ use crate::protocol::ConnectionToken;
 /// On Unix this is a socket-file path, `session-<uuid>.sock` directly inside
 /// `runtime_dir` — the location [`validate_socket_addr`](crate::validate::validate_socket_addr)
 /// accepts. On Windows it is the pipe name `koshi-session-<uuid>`, inside the
-/// `koshi-` namespace that same check requires; a pipe has no filesystem
-/// path, so `runtime_dir` goes unused there.
+/// `koshi-` namespace that same check requires; `runtime_dir` goes unused
+/// there.
 ///
 /// Every consumer derives the address through here, including the
-/// `KOSHI_SOCKET` variable injected into spawned panes, so they all name the
-/// same place.
+/// `KOSHI_SOCKET` variable injected into spawned panes.
 #[must_use]
 pub fn socket_addr(runtime_dir: &Path, session: SessionId) -> String {
     #[cfg(unix)]
@@ -69,26 +67,15 @@ pub fn socket_addr(runtime_dir: &Path, session: SessionId) -> String {
 /// The control-socket address a running `session` listens on when other local
 /// users may reach it.
 ///
-/// On Unix this is a socket-file path, `session-<uuid>.sock` directly inside
+/// The same string [`socket_addr`] gives for `shared_user_dir`. On Unix this
+/// is a socket-file path, `session-<uuid>.sock` directly inside
 /// `shared_user_dir` — the location
 /// [`validate_shared_socket_addr`](crate::validate::validate_shared_socket_addr)
-/// accepts. On Windows it is the pipe name [`socket_addr`] gives,
-/// `koshi-session-<uuid>`: pipe names share one machine-wide namespace, so
-/// `shared_user_dir` goes unused there.
+/// accepts. On Windows it is the pipe name `koshi-session-<uuid>`: pipe names
+/// share one machine-wide namespace, and `shared_user_dir` goes unused there.
 #[must_use]
 pub fn shared_socket_addr(shared_user_dir: &Path, session: SessionId) -> String {
-    #[cfg(unix)]
-    {
-        shared_user_dir
-            .join(format!("{session}.sock"))
-            .display()
-            .to_string()
-    }
-    #[cfg(windows)]
-    {
-        let _ = shared_user_dir;
-        format!("koshi-{session}")
-    }
+    socket_addr(shared_user_dir, session)
 }
 
 /// What a resume file's name ends in, after the session id. Every reader that
@@ -119,17 +106,20 @@ pub fn resume_path(runtime_dir: &Path, session: SessionId) -> PathBuf {
 /// Where the marker advertising `session` machine-wide lives:
 /// `session-<uuid>`, with no extension, directly inside `shared_dir`.
 ///
-/// A Windows pipe has no filesystem location, so this marker is what tells a
-/// client which sessions listen on one. It carries no bytes: the pipe name
-/// follows from the session id the file is named after.
+/// On Windows, a client lists these markers to learn which sessions listen
+/// on a pipe. The marker carries no bytes: the pipe name follows from the
+/// session id the file is named after.
 #[must_use]
 pub fn advert_path(shared_dir: &Path, session: SessionId) -> PathBuf {
     shared_dir.join(session.to_string())
 }
 
 /// Write the marker at `path` as an empty file, replacing whatever is there.
+///
+/// # Errors
+/// A marker that cannot be written is [`IpcError::AdvertWrite`] naming `path`.
 pub fn write_advert(path: &Path) -> Result<(), IpcError> {
-    std::fs::write(path, b"").map_err(|error| IpcError::EndpointFileWrite {
+    std::fs::write(path, b"").map_err(|error| IpcError::AdvertWrite {
         path: path.display().to_string(),
         detail: error.to_string(),
     })
@@ -141,8 +131,8 @@ pub fn remove_advert(path: &Path) {
 }
 
 /// Unlink the socket file at `addr` on Unix, where the address is a
-/// filesystem path. On Windows the address is a pipe name that vanishes with
-/// its last handle, so there is nothing to remove.
+/// filesystem path. A path with nothing at it is left alone. On Windows the
+/// address is a pipe name, and nothing is removed.
 pub fn remove_socket_file(addr: &str) {
     #[cfg(unix)]
     {
@@ -156,9 +146,9 @@ pub fn remove_socket_file(addr: &str) {
 
 /// What the endpoint file holds.
 ///
-/// Decoding rejects any field it does not know, so a misspelled name is an
-/// error. The derived `Debug` prints the token as `***`; the real secret
-/// reaches only the file itself, through `Serialize`.
+/// Decoding rejects any field it does not know: a misspelled name is an
+/// error. The derived `Debug` prints the token as `ConnectionToken(***)`;
+/// the real secret reaches only the file itself, through `Serialize`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EndpointFile {
@@ -182,7 +172,12 @@ impl EndpointFile {
         runtime_dir.join(format!("{session}.json"))
     }
 
-    /// Write this endpoint file at `path`, replacing whatever is there.
+    /// Write this endpoint file at `path`, replacing whatever is there. A
+    /// fresh file is created with mode `0600` on Unix.
+    ///
+    /// # Errors
+    /// A file that cannot be encoded or written is
+    /// [`IpcError::EndpointFileWrite`] naming `path`.
     pub fn write(&self, path: &Path) -> Result<(), IpcError> {
         let write_failed = |detail: String| IpcError::EndpointFileWrite {
             path: path.display().to_string(),

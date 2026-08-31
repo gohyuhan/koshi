@@ -1,9 +1,9 @@
 //! Tests for [`IpcError`]: its `Display` wording and its [`DomainError`]
 //! classification — link, refused-frame, socket-address-check,
-//! endpoint-file-read and remote access file errors client-fatal, a failed
-//! endpoint-file write session-fatal, a malformed frame recoverable. The
-//! wording tests also cover which remote access file a failure names and the
-//! changed-certificate refusal.
+//! endpoint-file-read, token store, remote dial and remote access file errors
+//! client-fatal, a failed endpoint-file write session-fatal, a malformed frame
+//! recoverable. The wording tests also cover which remote access file a
+//! failure names and the changed-certificate refusal.
 
 use super::{IpcError, RemoteFile};
 use koshi_core::error::{DomainCategory, DomainError, Severity};
@@ -114,8 +114,63 @@ fn endpoint_file_write_display_names_the_path_and_detail() {
 }
 
 #[test]
+fn connect_refused_display_names_the_address_and_the_way_out() {
+    let err = IpcError::ConnectRefused {
+        address: "laptop.local:7654".to_string(),
+    };
+    assert_eq!(
+        err.to_string(),
+        "laptop.local:7654 refused the connection: nothing is listening on that port. \
+         if remote access is not enabled on that machine, run `koshi share grant` \
+         there and answer yes to the offer to open the port"
+    );
+}
+
+#[test]
+fn connect_timed_out_display_names_the_address_and_what_to_check() {
+    let err = IpcError::ConnectTimedOut {
+        address: "laptop.local:7654".to_string(),
+    };
+    assert_eq!(
+        err.to_string(),
+        "connecting to laptop.local:7654 timed out: nothing answered. check that the \
+         machine is up, the address and port are right, and the network path \
+         allows it"
+    );
+}
+
+#[test]
+fn tls_handshake_failed_display_names_the_address_and_detail() {
+    let err = IpcError::TlsHandshakeFailed {
+        address: "laptop.local:7654".to_string(),
+        detail: "received fatal alert: HandshakeFailure".to_string(),
+    };
+    assert_eq!(
+        err.to_string(),
+        "the TLS handshake with laptop.local:7654 failed: received fatal alert: HandshakeFailure"
+    );
+}
+
+#[test]
+fn each_remote_file_displays_as_its_own_name() {
+    assert_eq!(RemoteFile::SavedServers.to_string(), "saved servers file");
+    assert_eq!(
+        RemoteFile::Certificate.to_string(),
+        "remote access certificate"
+    );
+    assert_eq!(
+        RemoteFile::RemoteAccessMark.to_string(),
+        "remote access record"
+    );
+    assert_eq!(
+        RemoteFile::TokenStore.to_string(),
+        "remote access token store"
+    );
+}
+
+#[test]
 fn a_remote_file_names_which_file_it_is_as_well_as_its_path() {
-    // Each of the three reads as its own thing, so a saved-servers failure on
+    // Each of the four reads as its own thing, so a saved-servers failure on
     // the dialling machine never reads as a token store failure on the
     // serving one.
     assert_eq!(
@@ -146,6 +201,26 @@ fn a_remote_file_names_which_file_it_is_as_well_as_its_path() {
         }
         .to_string(),
         "the remote access record at /var/lib/koshi/remote/enabled could not be written: \
+         permission denied"
+    );
+    assert_eq!(
+        IpcError::RemoteFileUnreadable {
+            file: RemoteFile::TokenStore,
+            path: "/var/lib/koshi/remote/tokens".to_string(),
+            detail: "format 2 is not the 1 this build reads".to_string(),
+        }
+        .to_string(),
+        "the remote access token store at /var/lib/koshi/remote/tokens is unreadable: \
+         format 2 is not the 1 this build reads"
+    );
+    assert_eq!(
+        IpcError::RemoteFileWrite {
+            file: RemoteFile::TokenStore,
+            path: "/var/lib/koshi/remote/tokens".to_string(),
+            detail: "permission denied".to_string(),
+        }
+        .to_string(),
+        "the remote access token store at /var/lib/koshi/remote/tokens could not be written: \
          permission denied"
     );
 }
@@ -262,6 +337,63 @@ fn every_ipc_error_is_in_the_ipc_domain() {
         .category(),
         DomainCategory::Ipc
     );
+    assert_eq!(
+        IpcError::RemoteFileUnreadable {
+            file: RemoteFile::TokenStore,
+            path: String::new(),
+            detail: String::new()
+        }
+        .category(),
+        DomainCategory::Ipc
+    );
+    assert_eq!(
+        IpcError::ConnectRefused {
+            address: String::new()
+        }
+        .category(),
+        DomainCategory::Ipc
+    );
+    assert_eq!(
+        IpcError::ConnectTimedOut {
+            address: String::new()
+        }
+        .category(),
+        DomainCategory::Ipc
+    );
+    assert_eq!(
+        IpcError::TlsHandshakeFailed {
+            address: String::new(),
+            detail: String::new()
+        }
+        .category(),
+        DomainCategory::Ipc
+    );
+}
+
+#[test]
+fn remote_dial_failures_are_client_fatal() {
+    assert_eq!(
+        IpcError::ConnectRefused {
+            address: String::new()
+        }
+        .severity(),
+        Severity::ClientFatal
+    );
+    assert_eq!(
+        IpcError::ConnectTimedOut {
+            address: String::new()
+        }
+        .severity(),
+        Severity::ClientFatal
+    );
+    assert_eq!(
+        IpcError::TlsHandshakeFailed {
+            address: String::new(),
+            detail: String::new()
+        }
+        .severity(),
+        Severity::ClientFatal
+    );
 }
 
 #[test]
@@ -296,6 +428,22 @@ fn a_failed_endpoint_file_write_is_session_fatal() {
 }
 
 #[test]
+fn a_failed_advert_marker_write_is_session_fatal_and_names_the_marker() {
+    let error = IpcError::AdvertWrite {
+        path: "/tmp/koshi/501/session-1".to_string(),
+        detail: "No such file or directory (os error 2)".to_string(),
+    };
+
+    assert_eq!(error.severity(), Severity::SessionFatal);
+    assert_eq!(error.category(), DomainCategory::Ipc);
+    assert_eq!(
+        error.to_string(),
+        "advert marker /tmp/koshi/501/session-1 could not be written: \
+         No such file or directory (os error 2)"
+    );
+}
+
+#[test]
 fn socket_address_check_failures_are_client_fatal() {
     assert_eq!(
         IpcError::UntrustedSocket {
@@ -324,7 +472,16 @@ fn socket_address_check_failures_are_client_fatal() {
 #[test]
 fn remote_access_failures_are_client_fatal() {
     // A remote access file that will not read or write stops the command that
-    // needed it, the same as the token store beside it.
+    // needed it.
+    assert_eq!(
+        IpcError::RemoteFileUnreadable {
+            file: RemoteFile::TokenStore,
+            path: String::new(),
+            detail: String::new()
+        }
+        .severity(),
+        Severity::ClientFatal
+    );
     assert_eq!(
         IpcError::RemoteFileUnreadable {
             file: RemoteFile::SavedServers,

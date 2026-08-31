@@ -478,6 +478,24 @@ fn runtime_directory_with_mode_700_is_ok() {
 }
 
 #[test]
+fn runtime_directory_with_unknown_mode_is_ok() {
+    let temp = TempDir::new().unwrap();
+    let mut context = context(temp.path());
+    let dir = runtime_dir(&context);
+    context.runtime_mode = None;
+
+    assert_eq!(
+        check_runtime_dir(&context),
+        Outcome {
+            verdict: Verdict::Ok,
+            reason: format!("{} is ready; KOSHI_RUNTIME_DIR names it", dir.display()),
+            help: None,
+            detail: None,
+        }
+    );
+}
+
+#[test]
 fn runtime_directory_says_nothing_about_the_router() {
     let temp = TempDir::new().unwrap();
     let mut context = context(temp.path());
@@ -1315,10 +1333,12 @@ fn rows_run_every_check_in_print_order() {
 fn row(name: &'static str, verdict: Verdict) -> CheckRow {
     CheckRow {
         name,
-        verdict,
-        reason: "a fact".to_string(),
-        help: None,
-        detail: None,
+        outcome: Outcome {
+            verdict,
+            reason: "a fact".to_string(),
+            help: None,
+            detail: None,
+        },
     }
 }
 

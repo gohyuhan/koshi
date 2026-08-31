@@ -3,10 +3,10 @@
 //!
 //! A pane leaves for one of two reasons — its shell exited, or a client asked
 //! to close it — and both run the *same* removal routine. [`on_child_exit`] is
-//! the shell-exit entry: it consults the pane's [`PaneExitPolicy`] and, only
-//! when that policy says to remove, hands off to [`remove_pane_cascade`]. A
-//! user close enters [`remove_pane_cascade`] directly, so a self-exiting shell
-//! and an explicit close converge on identical behaviour.
+//! the shell-exit entry: it emits the exit event, consults the pane's
+//! [`PaneExitPolicy`], and hands off to [`remove_pane_cascade`]. A user close
+//! enters [`remove_pane_cascade`] directly, so a self-exiting shell and an
+//! explicit close converge on identical behaviour.
 //!
 //! [`remove_pane_cascade`] is the cascade proper: drop the pane, collapse the
 //! layout, repair each affected client's focus, and — if that empties the tab —
@@ -15,7 +15,6 @@
 //! the terminal or spawns a process.
 
 use std::collections::HashSet;
-use std::time::SystemTime;
 
 use koshi_core::event::{
     Event, LayoutChanged, PaneClosing, PaneFocused, PaneProcessExited, PaneRemoved,
@@ -28,7 +27,6 @@ use koshi_layout::focus::focus_candidates;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::normalize::normalize;
 use koshi_layout::solver::{solve_with_mode_min, PaneSizing};
-use koshi_pane::pane::lifecycle::PaneLifecycleEvent;
 use koshi_pane::pane::policy::PaneExitPolicy;
 
 use crate::client::pane_viewport;
@@ -43,18 +41,21 @@ use crate::session::tab_ops::close_and_refocus_tab;
 /// shell:
 /// 1. drop the pane from the registry and the tab's focus history;
 /// 2. collapse its leaf out of the layout — *before* focus repair, so the tree
-///    never names a gone pane while candidates are computed — and drop the
-///    tab's fullscreen when one was on, returning it to the tiled view;
-/// 3. for every client focused on it, pick the inheriting focus with
+///    never names a gone pane while candidates are computed;
+/// 3. drop the zoom of every client zoomed on the removed pane, returning
+///    those clients to their tiled view; a client zoomed on a surviving pane
+///    keeps its zoom;
+/// 4. for every client focused on it, pick the inheriting focus with
 ///    [`repair_focus`] and apply the verdict;
-/// 4. if the tab is now empty, apply `empty_tab_policy` —
+/// 5. if the tab is now empty, apply `empty_tab_policy` —
 ///    [`EmptyTabPolicy::CloseTab`] closes the tab, and closing the last tab
 ///    quits the session.
 ///
 /// `tab_rect` is the viewport the tab is solved against, needed to rank focus
 /// candidates geometrically. `sizing` carries the per-pane content minimum and
-/// the gap between split children. Returns the events for the caller to emit;
-/// an unknown pane or tab is a no-op with no events.
+/// the gap between split children. Returns the events for the caller to emit.
+/// An unknown pane, and a tab id the session does not hold, each change nothing
+/// and emit no events.
 #[must_use]
 pub fn remove_pane_cascade(
     session: &mut Session,
@@ -64,14 +65,15 @@ pub fn remove_pane_cascade(
     sizing: PaneSizing,
     empty_tab_policy: EmptyTabPolicy,
 ) -> Vec<Event> {
-    // An unknown pane id is a no-op: nothing was removed, so nothing happened.
-    if session.panes.remove(pane_id).is_none() {
+    // Both checks run before anything is removed, so an unknown pane and an
+    // unknown tab each leave the session as it was.
+    if !session.tabs.contains_key(&tab_id) || session.panes.remove(pane_id).is_none() {
         return Vec::new();
     }
-    // The tab must exist; same guard.
-    let Some(tab) = session.tabs.get_mut(&tab_id) else {
-        return Vec::new();
-    };
+    let tab = session
+        .tabs
+        .get_mut(&tab_id)
+        .expect("the tab was checked above");
 
     let mut events = vec![
         Event::PaneClosing(PaneClosing { pane_id }),
@@ -80,12 +82,12 @@ pub fn remove_pane_cascade(
 
     tab.remove_focus_mru(pane_id);
 
-    // Collapse the layout *before* repairing focus, so the tree never
-    // references the removed pane while candidates are computed. Removing the
-    // only pane yields `LastPane` — the signal that the tab is now empty. The
-    // removal edit leaves canonicalization to `normalize`, which collapses the
-    // unary split the removed leaf leaves behind; every surviving leaf is
-    // live, so the pass canonicalizes shape only and drops nothing.
+    // Collapses the layout *before* focus repair: the tree names no removed
+    // pane while candidates are computed. Removing the only pane yields
+    // `LastPane` — the signal that the tab is now empty. The removal edit
+    // leaves canonicalization to `normalize`, which collapses the unary split
+    // the removed leaf leaves behind; every surviving leaf is live, so the pass
+    // canonicalizes shape only and drops nothing.
     // `Some` carries the rect the pane vacated, which ranks the spatial focus
     // candidates; `None` means the tab is now empty.
     let removal = match remove_pane(tab.layout(), tab_rect, pane_id, sizing) {
@@ -93,8 +95,8 @@ pub fn remove_pane_cascade(
             let live: HashSet<PaneId> = new_tree.leaf_panes().into_iter().collect();
             let canonical = normalize(&new_tree, &live).unwrap_or(new_tree);
             tab.update_layout(canonical);
-            // The layout collapsed a leaf, so the tab's geometry changed —
-            // announce it before focus moves.
+            // The layout collapsed a leaf: the tab's geometry changed. This
+            // event lands ahead of every focus event.
             events.push(Event::LayoutChanged(LayoutChanged { tab_id }));
             Some(info.old_rect)
         }
@@ -106,10 +108,8 @@ pub fn remove_pane_cascade(
         Err(RemoveError::PaneNotFound { .. }) => Some(Rect::zero()),
     };
 
-    // A client zoomed on the removed pane has nothing left to show, so it drops
-    // back to its tiled view. A client zoomed on a pane that survives keeps its
-    // zoom: the pane it is looking at did not go anywhere, and one client
-    // closing a pane does not disturb another client's view.
+    // Every client zoomed on the removed pane returns to its tiled view. A
+    // client zoomed on a pane that survives keeps its zoom.
     for client in session.clients.list_attached_mut() {
         client.clear_zoom_of_pane(pane_id);
     }
@@ -120,15 +120,14 @@ pub fn remove_pane_cascade(
         Some(old_rect) => {
             let verdicts: Vec<(ClientId, FocusRepairResult)> = {
                 let tab = &session.tabs[&tab_id];
-                // Candidates are ranked in the tiled view. Every client repaired
-                // here was focused on the removed pane, and zoom follows focus,
-                // so any zoom of theirs was on that pane and has just been
-                // dropped: the layout they are about to see is the tiled one.
+                // Candidates are ranked against the tiled solve. Every client
+                // repaired here was focused on the removed pane; zoom follows
+                // focus, and the loop above dropped every zoom on that pane.
                 let solved = solve_with_mode_min(tab.layout(), LayoutMode::Tiled, tab_rect, sizing);
                 let candidates = focus_candidates(old_rect, &solved.panes, &solved.stack_headers);
-                // The verdict reads the tab, the registry and the candidates —
-                // nothing client-specific — so every repaired client inherits
-                // the same pane.
+                // The verdict reads the tab, the registry and the candidates,
+                // nothing client-specific: every repaired client inherits the
+                // same pane.
                 let verdict = repair_focus(tab, &session.panes, candidates, empty_tab_policy);
                 session
                     .clients
@@ -141,10 +140,10 @@ pub fn remove_pane_cascade(
             for (client_id, verdict) in verdicts {
                 match verdict {
                     FocusRepairResult::Focused(new_pane) => {
-                        let mut prior_pane = None;
-                        if let Some(client) = session.clients.get_mut(client_id) {
-                            prior_pane = client.update_focused_pane(tab_id, new_pane);
-                        }
+                        let prior_pane = session
+                            .clients
+                            .get_mut(client_id)
+                            .and_then(|client| client.update_focused_pane(tab_id, new_pane));
                         if let Some(tab) = session.tabs.get_mut(&tab_id) {
                             tab.record_focus_mru(new_pane);
                         }
@@ -177,10 +176,6 @@ pub fn remove_pane_cascade(
             EmptyTabPolicy::CloseTab => {
                 events.extend(close_and_refocus_tab(session, tab_id));
             }
-            // `RespawnShell` leaves the empty tab in place and emits no
-            // events. No caller selects it: the runtime passes the `CloseTab`
-            // default on every removal path.
-            EmptyTabPolicy::RespawnShell => {}
         },
     }
 
@@ -189,9 +184,14 @@ pub fn remove_pane_cascade(
 
 /// Classify why `client_id` has no visible pane area in `tab_id`.
 ///
-/// A reported area smaller than the built-in two-row area means this client's
-/// own regions caused the shortage. Otherwise, a smaller area from another
-/// viewer names that viewer. The remaining case is the terminal itself.
+/// Returns [`TerminalTooSmallCause::Regions`] when the client reported
+/// [`PaneArea::Starving`], or reported an area smaller on either axis than its
+/// viewport minus the two chrome rows. Returns
+/// [`TerminalTooSmallCause::OtherClient`] naming another viewer of `tab_id`
+/// whose own pane area sets the constraining axis of the tab's pane region.
+/// Returns [`TerminalTooSmallCause::Terminal`] in every other case, including
+/// an unattached `client_id`, a tab no client contributes a size to, and a
+/// `tab_rect` that differs from the tab's pane region.
 fn terminal_too_small_cause(
     session: &Session,
     tab_id: TabId,
@@ -247,29 +247,21 @@ fn terminal_too_small_cause(
 /// Handle a pane's child process exiting, applying its [`PaneExitPolicy`].
 ///
 /// Emits a process-exited event unconditionally — the exit is a fact whatever
-/// the policy — then:
-/// - [`PaneExitPolicy::RespawnShell`]: advance the pane `Exited` then back to
-///   `Spawning`; the runtime spawns the replacement process.
-/// - [`PaneExitPolicy::CloseOnExit`]: remove the pane through
-///   [`remove_pane_cascade`], so a self-exiting shell tears down exactly like an
-///   explicit close.
+/// the policy — then applies [`PaneExitPolicy::CloseOnExit`]: the pane is
+/// removed through [`remove_pane_cascade`], so a self-exiting shell tears down
+/// exactly like an explicit close.
 ///
-/// `exited_at` is supplied by the caller — the runtime that observed the exit —
-/// rather than read from the clock here, so the timestamp crosses the IPC
-/// boundary intact and tests stay deterministic. `sizing` carries the per-pane
-/// content minimum and the gap between split children. An unknown `pane_id`
-/// emits only the exit event.
+/// `sizing` carries the per-pane content minimum and the gap between split
+/// children. An unknown `pane_id` emits only the exit event.
 // Carries a child-exit's full context to the shared cascade: the exit fact
-// (`exit_code`, `exited_at`), the reflow geometry (`tab_rect`, `sizing`), and
-// the empty-tab policy.
-#[allow(clippy::too_many_arguments)]
+// (`exit_code`), the reflow geometry (`tab_rect`, `sizing`), and the empty-tab
+// policy.
 #[must_use]
 pub fn on_child_exit(
     session: &mut Session,
     tab_id: TabId,
     pane_id: PaneId,
     exit_code: Option<i32>,
-    exited_at: SystemTime,
     tab_rect: Rect,
     sizing: PaneSizing,
     empty_tab_policy: EmptyTabPolicy,
@@ -279,26 +271,11 @@ pub fn on_child_exit(
         exit_code,
     })];
 
-    // Read the policy, then drop the borrow before any `&mut` use.
-    let Some(pane) = session.panes.get(pane_id) else {
+    let Some(policy) = session.panes.get(pane_id).map(|pane| pane.exit_policy) else {
         return events;
     };
-    let policy = pane.exit_policy;
 
     match policy {
-        // Respawn in place: Running -> Exited -> Spawning. Only the lifecycle
-        // advances here; the runtime spawns the process. A pane that was not
-        // `Running` rejects the step and keeps the state it had, so the two
-        // events settle on the right state either way.
-        PaneExitPolicy::RespawnShell => {
-            if let Some(pane) = session.panes.get_mut(pane_id) {
-                let _ = pane.update_lifecycle(PaneLifecycleEvent::ProcessExited {
-                    code: exit_code,
-                    at: exited_at,
-                });
-                let _ = pane.update_lifecycle(PaneLifecycleEvent::Respawn);
-            }
-        }
         // A self-exiting shell removes its pane through the shared cascade.
         PaneExitPolicy::CloseOnExit => {
             events.extend(remove_pane_cascade(

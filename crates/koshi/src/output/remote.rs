@@ -105,9 +105,9 @@ fn remote_server_row(record: &SavedServer) -> RemoteServerRow {
 /// One [`RemoteServerRow`] as table cells, in [`REMOTE_HEADERS`] order.
 fn remote_row_cells(row: &RemoteServerRow) -> Vec<String> {
     vec![
-        row.name.clone().unwrap_or_else(|| "-".to_string()),
+        opt_cell(row.name.as_ref()),
         row.address.clone(),
-        row.fingerprint.clone().unwrap_or_else(|| "-".to_string()),
-        row.last_used.map_or_else(|| "-".to_string(), time_cell),
+        opt_cell(row.fingerprint.as_ref()),
+        optional_time_cell(row.last_used),
     ]
 }

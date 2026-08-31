@@ -1,24 +1,38 @@
 //! Tests for the doctor renderers: the aligned table and the JSON array.
 
 use super::*;
+use crate::doctor::Outcome;
+
+/// One row named `name`, carrying `verdict`, `reason`, `help` and `detail`.
+fn row(
+    name: &'static str,
+    verdict: Verdict,
+    reason: &str,
+    help: Option<&str>,
+    detail: Option<&str>,
+) -> CheckRow {
+    CheckRow {
+        name,
+        outcome: Outcome {
+            verdict,
+            reason: reason.to_string(),
+            help: help.map(str::to_string),
+            detail: detail.map(str::to_string),
+        },
+    }
+}
 
 /// Two rows: an ok row with no help, and a warn row with help.
 fn sample() -> Vec<CheckRow> {
     vec![
-        CheckRow {
-            name: "config",
-            verdict: Verdict::Ok,
-            reason: "1 config file validated".to_string(),
-            help: None,
-            detail: None,
-        },
-        CheckRow {
-            name: "terminal",
-            verdict: Verdict::Warn,
-            reason: "TERM is not set".to_string(),
-            help: Some("set TERM before running koshi".to_string()),
-            detail: None,
-        },
+        row("config", Verdict::Ok, "1 config file validated", None, None),
+        row(
+            "terminal",
+            Verdict::Warn,
+            "TERM is not set",
+            Some("set TERM before running koshi"),
+            None,
+        ),
     ]
 }
 
@@ -59,19 +73,27 @@ fn the_json_form_is_one_object_per_row() {
     );
 }
 
+#[test]
+fn no_rows_render_the_header_alone_and_an_empty_json_array() {
+    assert_eq!(
+        render_doctor(&[], FormatArg::Table),
+        "check  verdict  reason  help\n"
+    );
+    assert_eq!(render_doctor(&[], FormatArg::Json), "[]\n");
+}
+
 /// One row whose `reason` is short and whose `detail` holds the whole text.
 fn shortened() -> Vec<CheckRow> {
-    vec![CheckRow {
-        name: "router",
-        verdict: Verdict::Fail,
-        reason: "a router is listening and did not answer".to_string(),
-        help: Some("end every koshi process on this machine and start one again".to_string()),
-        detail: Some(
+    vec![row(
+        "router",
+        Verdict::Fail,
+        "a router is listening and did not answer",
+        Some("end every koshi process on this machine and start one again"),
+        Some(
             "this router has no request kind named RemoteStatus, and the running router is an \
-             older koshi that does not report its build"
-                .to_string(),
+             older koshi that does not report its build",
         ),
-    }]
+    )]
 }
 
 #[test]
@@ -105,13 +127,13 @@ fn the_json_form_carries_the_full_text() {
 
 #[test]
 fn a_failed_row_renders_the_fail_verdict() {
-    let rows = vec![CheckRow {
-        name: "shell",
-        verdict: Verdict::Fail,
-        reason: "a new pane would run /bin/nope, which is not on this machine".to_string(),
-        help: Some("set SHELL to a shell that exists".to_string()),
-        detail: None,
-    }];
+    let rows = vec![row(
+        "shell",
+        Verdict::Fail,
+        "a new pane would run /bin/nope, which is not on this machine",
+        Some("set SHELL to a shell that exists"),
+        None,
+    )];
 
     let rendered = render_doctor(&rows, FormatArg::Table);
 

@@ -19,7 +19,7 @@ pub enum MouseEncoding {
     Default,
     /// `?1005` UTF-8 extended coordinates.
     Utf8,
-    /// `?1006` SGR form (`CSI < … M`/`m`) — the encoding modern apps use.
+    /// `?1006` SGR form (`CSI < … M`/`m`).
     Sgr,
     /// `?1015` urxvt decimal form.
     Urxvt,
@@ -29,16 +29,15 @@ pub enum MouseEncoding {
 /// editor switches it to tell its modes apart: vim draws a [`Block`][Self::Block]
 /// while it is in normal mode and a [`Bar`][Self::Bar] while it is inserting.
 ///
-/// There is no `Default` variant, and the stored shape is an `Option`: a pane
-/// that has never sent DECSCUSR has asked for nothing, and only a pane that
-/// requested a shape overrides the cursor the user configured in their own
-/// terminal.
+/// There is no `Default` variant. The stored shape is an `Option<CursorShape>`:
+/// `None` while the pane has never sent DECSCUSR, and again after
+/// `CSI 0 SP q`. With `None`, the renderer keeps the cursor the user
+/// configured in their own terminal.
 ///
-/// Blinking is not part of this. DECSCUSR carries the shape and the blink
-/// together in one value (`2` = steady block, `1` = blinking block), but `?12`
-/// (att610) sets blinking on its own. Blinking is therefore one piece of state
-/// with two writers, read back through
+/// Blink is stored apart from the shape, in
 /// [`TerminalState::cursor_blink`](crate::state::TerminalState::cursor_blink).
+/// Two writers set it: DECSCUSR (`1` = blinking block, `2` = steady block)
+/// and `?12` (att610). The last one to arrive wins.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CursorShape {
     /// A box filling the whole cell.
@@ -57,34 +56,35 @@ pub enum CursorShape {
 /// (`?9`/`?1000`/`?1002`/`?1003` and `?1005`/`?1006`/`?1015`), and
 /// alternate-scroll (`?1007`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TerminalModes {
-    /// `?2004` — wrap pasted text in `ESC[200~`…`ESC[201~` so the app can tell
-    /// typed input from a paste.
-    pub bracketed_paste: bool,
+pub(crate) struct TerminalModes {
+    /// `?2004` — bracketed paste: the input layer wraps pasted text in
+    /// `ESC[200~`…`ESC[201~`.
+    pub(in crate::state) bracketed_paste: bool,
     /// Which mouse events are reported; see [`MouseTracking`].
     pub(in crate::state) mouse_tracking: MouseTracking,
     /// How mouse reports are encoded; see [`MouseEncoding`].
     pub(in crate::state) mouse_encoding: MouseEncoding,
-    /// `?1007` — on the alternate screen, translate wheel motion into cursor
-    /// arrow keys instead of emitting a mouse report.
+    /// `?1007` — alternate scroll: on the alternate screen, the mouse layer
+    /// sends cursor arrow keys for wheel motion.
     pub(in crate::state) alt_scroll: bool,
-    /// `?7` (DECAWM) — autowrap. When off, a glyph at the last column overwrites
-    /// in place instead of parking to wrap onto a new line. Default on.
+    /// `?7` (DECAWM) — autowrap. On (the default), a glyph printed into the
+    /// last column parks the cursor there and the next glyph wraps to a new
+    /// line. Off, the next glyph overwrites the last column in place.
     pub(in crate::state) autowrap: bool,
     /// `?1` (DECCKM) — application cursor keys: the input layer sends `ESC O A`
-    /// rather than `ESC [ A` for the arrow keys.
+    /// for the arrow keys; off, it sends `ESC [ A`.
     pub(in crate::state) app_cursor_keys: bool,
     /// `?5` (DECSCNM) — reverse video: the renderer swaps foreground and
     /// background across the whole screen.
     pub(in crate::state) reverse_video: bool,
     /// `?12` (att610) — cursor blink: the renderer blinks the cursor cell.
-    /// Written by `?12` AND by DECSCUSR, whose value says both shape and
+    /// Written by `?12` and by DECSCUSR, whose value carries both shape and
     /// blink; the last of the two to arrive wins.
     pub(in crate::state) cursor_blink: bool,
     /// DECSCUSR (`CSI Ps SP q`) — the shape the cursor is drawn as, or `None`
-    /// while the pane has asked for no shape at all (its state at startup, and
-    /// again after `CSI 0 SP q`). `None` leaves the user's own terminal cursor
-    /// untouched; see [`CursorShape`].
+    /// while the pane has asked for no shape (at startup, and again after
+    /// `CSI 0 SP q`). With `None`, the renderer keeps the user's own terminal
+    /// cursor; see [`CursorShape`].
     pub(in crate::state) cursor_shape: Option<CursorShape>,
 }
 

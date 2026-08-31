@@ -63,7 +63,7 @@ fn panic_runs_cleanup_once_then_drop_is_noop() {
         let _panic_guard = install_panic_hook(&guard, None);
 
         let result = panic::catch_unwind(AssertUnwindSafe(|| panic!("boom")));
-        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().downcast_ref::<&str>(), Some(&"boom"));
         assert_eq!(
             counter.load(Ordering::SeqCst),
             1,
@@ -133,7 +133,7 @@ fn a_panicking_hook_during_panic_handling_does_not_abort() {
         let _panic_guard = install_panic_hook(&guard, None);
 
         let result = panic::catch_unwind(AssertUnwindSafe(|| panic!("boom")));
-        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().downcast_ref::<&str>(), Some(&"boom"));
     }
 
     assert_eq!(
@@ -149,6 +149,20 @@ fn a_panicking_hook_during_panic_handling_does_not_abort() {
 fn drop_with_no_registered_hooks_is_a_noop() {
     let guard = TerminalCleanupGuard::new();
     drop(guard); // must not panic on an empty registry
+}
+
+#[test]
+fn a_default_guard_runs_its_hooks_on_drop() {
+    let ran = Arc::new(AtomicUsize::new(0));
+    {
+        let guard = TerminalCleanupGuard::default();
+        let counter = Arc::clone(&ran);
+        guard.register_cleanup(Box::new(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        }));
+    }
+
+    assert_eq!(ran.load(Ordering::SeqCst), 1);
 }
 
 // A thread that dies while it holds the registry poisons that lock. The
@@ -176,7 +190,11 @@ fn cleanup_still_runs_after_a_thread_died_holding_the_registry() {
         let _held = hooks.lock().expect("the registry is not poisoned yet");
         panic!("the thread holding the registry died");
     });
-    assert!(died.join().is_err(), "the spawned thread must have died");
+    let payload = died.join().expect_err("the spawned thread must have died");
+    assert_eq!(
+        payload.downcast_ref::<&str>(),
+        Some(&"the thread holding the registry died")
+    );
     panic::set_hook(saved);
 
     // Registering into the poisoned registry still works.
@@ -221,7 +239,7 @@ fn hooks_registered_after_a_panic_drain_still_run_on_drop() {
         let _panic_guard = install_panic_hook(&guard, None);
 
         let result = panic::catch_unwind(AssertUnwindSafe(|| panic!("boom")));
-        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().downcast_ref::<&str>(), Some(&"boom"));
         assert_eq!(
             before.load(Ordering::SeqCst),
             1,
@@ -270,7 +288,7 @@ fn dropping_panic_hook_guard_restores_previous_hook_so_cleanup_no_longer_chains(
     drop(panic_guard); // restores the silent no-op hook set above
 
     let result = panic::catch_unwind(AssertUnwindSafe(|| panic!("boom")));
-    assert!(result.is_err());
+    assert_eq!(result.unwrap_err().downcast_ref::<&str>(), Some(&"boom"));
     assert_eq!(
         counter.load(Ordering::SeqCst),
         0,
@@ -279,6 +297,224 @@ fn dropping_panic_hook_guard_restores_previous_hook_so_cleanup_no_longer_chains(
 
     panic::set_hook(saved);
     drop(guard);
+}
+
+// Two guards installed one inside the other. Dropping the inner one puts the
+// outer chained hook back; dropping the outer one puts the original hook back.
+#[test]
+fn nested_panic_hook_guards_dropped_last_in_first_out_restore_each_previous_hook() {
+    let _serial = panic_hook_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let original_calls = Arc::new(AtomicUsize::new(0));
+    let outer_cleanups = Arc::new(AtomicUsize::new(0));
+    let inner_cleanups = Arc::new(AtomicUsize::new(0));
+    let saved = panic::take_hook();
+    let original = Arc::clone(&original_calls);
+    panic::set_hook(Box::new(move |_| {
+        original.fetch_add(1, Ordering::SeqCst);
+    }));
+
+    let outer = TerminalCleanupGuard::new();
+    let inner = TerminalCleanupGuard::new();
+    let counter = Arc::clone(&outer_cleanups);
+    outer.register_cleanup(Box::new(move || {
+        counter.fetch_add(1, Ordering::SeqCst);
+    }));
+    let counter = Arc::clone(&inner_cleanups);
+    inner.register_cleanup(Box::new(move || {
+        counter.fetch_add(1, Ordering::SeqCst);
+    }));
+    let outer_hook = install_panic_hook(&outer, None);
+    let inner_hook = install_panic_hook(&inner, None);
+
+    drop(inner_hook);
+    let result = panic::catch_unwind(AssertUnwindSafe(|| panic!("boom")));
+    assert_eq!(result.unwrap_err().downcast_ref::<&str>(), Some(&"boom"));
+    assert_eq!(
+        inner_cleanups.load(Ordering::SeqCst),
+        0,
+        "inner is unchained"
+    );
+    assert_eq!(
+        outer_cleanups.load(Ordering::SeqCst),
+        1,
+        "outer is still chained"
+    );
+    assert_eq!(original_calls.load(Ordering::SeqCst), 1);
+
+    // A fresh outer hook shows whether outer is still chained after its guard drops.
+    let counter = Arc::clone(&outer_cleanups);
+    outer.register_cleanup(Box::new(move || {
+        counter.fetch_add(1, Ordering::SeqCst);
+    }));
+    drop(outer_hook);
+    let result = panic::catch_unwind(AssertUnwindSafe(|| panic!("again")));
+    assert_eq!(result.unwrap_err().downcast_ref::<&str>(), Some(&"again"));
+    assert_eq!(
+        outer_cleanups.load(Ordering::SeqCst),
+        1,
+        "outer is unchained"
+    );
+    assert_eq!(
+        original_calls.load(Ordering::SeqCst),
+        2,
+        "the original hook is back in place"
+    );
+
+    panic::set_hook(saved);
+    drop(inner);
+    drop(outer);
+}
+
+// The previously installed hook runs after the cleanup hooks: when it fires,
+// the cleanup hook has already counted.
+#[test]
+fn the_previous_panic_hook_runs_after_the_cleanup_hooks() {
+    let _serial = panic_hook_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let restored = Arc::new(AtomicUsize::new(0));
+    let seen_by_previous = Arc::new(Mutex::new(None));
+    let saved = panic::take_hook();
+    let watched = Arc::clone(&restored);
+    let seen = Arc::clone(&seen_by_previous);
+    panic::set_hook(Box::new(move |_| {
+        *seen.lock().unwrap() = Some(watched.load(Ordering::SeqCst));
+    }));
+
+    {
+        let guard = TerminalCleanupGuard::new();
+        let counter = Arc::clone(&restored);
+        guard.register_cleanup(Box::new(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        }));
+        let _panic_guard = install_panic_hook(&guard, None);
+        let result = panic::catch_unwind(AssertUnwindSafe(|| panic!("boom")));
+        assert_eq!(result.unwrap_err().downcast_ref::<&str>(), Some(&"boom"));
+    }
+
+    // Read the value out and put the original hook back before asserting: the
+    // installed hook takes this same lock, so a failing assertion that still
+    // held it would block instead of reporting.
+    let seen = *seen_by_previous.lock().unwrap();
+    panic::set_hook(saved);
+
+    assert_eq!(
+        seen,
+        Some(1),
+        "the previous hook ran once, after the cleanup hook"
+    );
+}
+
+// A `PanicHookGuard` dropped while its thread is unwinding restores nothing:
+// the chained hook stays installed, and the next panic still drains the
+// registry.
+#[test]
+fn a_panic_hook_guard_dropped_while_unwinding_leaves_the_chained_hook_installed() {
+    let _serial = panic_hook_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let ran = Arc::new(AtomicUsize::new(0));
+    let saved = panic::take_hook();
+    panic::set_hook(Box::new(|_| {}));
+
+    let guard = TerminalCleanupGuard::new();
+    let panic_guard = install_panic_hook(&guard, None);
+    let result = panic::catch_unwind(AssertUnwindSafe(|| {
+        let _dropped_while_unwinding = panic_guard;
+        panic!("boom")
+    }));
+    assert_eq!(result.unwrap_err().downcast_ref::<&str>(), Some(&"boom"));
+
+    let counter = Arc::clone(&ran);
+    guard.register_cleanup(Box::new(move || {
+        counter.fetch_add(1, Ordering::SeqCst);
+    }));
+    let result = panic::catch_unwind(AssertUnwindSafe(|| panic!("again")));
+    assert_eq!(result.unwrap_err().downcast_ref::<&str>(), Some(&"again"));
+    assert_eq!(
+        ran.load(Ordering::SeqCst),
+        1,
+        "the chained hook still drains the registry"
+    );
+
+    panic::set_hook(saved);
+    drop(guard);
+}
+
+// A guard dropped while its thread unwinds still runs its hooks, and runs them
+// on a fresh thread rather than on the unwinding one.
+#[test]
+fn a_guard_dropped_while_unwinding_runs_its_hooks_on_another_thread() {
+    let _serial = panic_hook_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let hook_thread = Arc::new(Mutex::new(None));
+    let saved = panic::take_hook();
+    panic::set_hook(Box::new(|_| {}));
+
+    let seen = Arc::clone(&hook_thread);
+    let result = panic::catch_unwind(AssertUnwindSafe(move || {
+        let guard = TerminalCleanupGuard::new();
+        guard.register_cleanup(Box::new(move || {
+            *seen.lock().unwrap() = Some(std::thread::current().id());
+        }));
+        panic!("boom")
+    }));
+    assert_eq!(result.unwrap_err().downcast_ref::<&str>(), Some(&"boom"));
+
+    panic::set_hook(saved);
+
+    let ran_on = hook_thread
+        .lock()
+        .unwrap()
+        .expect("the hook ran while the thread unwound");
+    assert_ne!(
+        ran_on,
+        std::thread::current().id(),
+        "the hook runs off the unwinding thread"
+    );
+}
+
+// A hook that registers another hook while it runs does not block on the
+// registry. The new hook is not part of the drain that is running; the next
+// drain runs it.
+#[test]
+fn a_hook_registered_by_a_running_hook_runs_on_the_next_drain() {
+    let _serial = panic_hook_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let ran = Arc::new(AtomicUsize::new(0));
+    let saved = panic::take_hook();
+    panic::set_hook(Box::new(|_| {}));
+
+    {
+        let guard = TerminalCleanupGuard::new();
+        let registry = Arc::clone(&guard.hooks);
+        let counter = Arc::clone(&ran);
+        guard.register_cleanup(Box::new(move || {
+            registry
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(Box::new(move || {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                }));
+        }));
+        let _panic_guard = install_panic_hook(&guard, None);
+
+        let result = panic::catch_unwind(AssertUnwindSafe(|| panic!("boom")));
+        assert_eq!(result.unwrap_err().downcast_ref::<&str>(), Some(&"boom"));
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            0,
+            "the hook registered during the drain is not part of it"
+        );
+    } // drop drains again: the hook the first hook registered runs now
+
+    assert_eq!(ran.load(Ordering::SeqCst), 1);
+
+    panic::set_hook(saved);
 }
 
 // --- The crash report ---
@@ -325,6 +561,28 @@ fn a_crash_report_writes_a_file_named_by_its_timestamp_holding_every_fact() {
         text,
         format!(
             "version: {}\nplatform: {} {}\ntimestamp: 1700000000\nmessage: boom\nlocation: src/main.rs:10:5\nbacktrace:\nframe one\nframe two\n",
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_second_report_with_the_same_timestamp_replaces_the_first() {
+    let dir = crash_dir("same-second");
+    let mut later = fixed_report();
+    later.message = "later".to_string();
+
+    fixed_report().write(&dir);
+    later.write(&dir);
+
+    assert_eq!(
+        only_crash_report(&dir),
+        format!(
+            "version: {}\nplatform: {} {}\ntimestamp: 1700000000\nmessage: later\nlocation: src/main.rs:10:5\nbacktrace:\nframe one\nframe two\n",
             env!("CARGO_PKG_VERSION"),
             std::env::consts::OS,
             std::env::consts::ARCH
@@ -401,7 +659,7 @@ fn a_crash_report_whose_file_path_is_a_directory_writes_nothing() {
 // `a_crash_report_whose_file_path_is_a_directory_writes_nothing`.
 #[cfg(unix)]
 #[test]
-fn a_crash_report_into_a_read_only_directory_writes_nothing() {
+fn a_read_only_crash_directory_this_user_owns_is_made_private_and_takes_the_report() {
     use std::os::unix::fs::PermissionsExt;
 
     let dir = crash_dir("read-only");
@@ -409,26 +667,38 @@ fn a_crash_report_into_a_read_only_directory_writes_nothing() {
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500))
         .expect("make the directory read-only");
 
-    // A user who overrides directory permissions (root) can still write
-    // here, so probe first and only assert once the permission holds.
-    let probe = dir.join("probe");
-    let enforced = std::fs::write(&probe, b"x").is_err();
-    let _ = std::fs::remove_file(&probe);
+    fixed_report().write(&dir);
 
-    if enforced {
-        fixed_report().write(&dir);
-        assert_eq!(
-            std::fs::read_dir(&dir)
-                .expect("the directory is readable")
-                .count(),
-            0,
-            "a read-only directory takes no report"
-        );
-    }
+    assert_eq!(
+        std::fs::metadata(&dir)
+            .expect("the crash directory exists")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700,
+        "the directory this user owns is set to owner-only"
+    );
+    assert_eq!(only_crash_report(&dir), fixed_report().text());
 
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
-        .expect("restore the directory so it can be removed");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_crash_directory_this_user_cannot_make_private_takes_no_report() {
+    // The path names a file, so no directory can be created there.
+    let dir = crash_dir("not-a-directory");
+    std::fs::create_dir_all(dir.parent().expect("a parent")).expect("the parent exists");
+    std::fs::write(&dir, b"x").expect("plant a file where the directory would go");
+
+    fixed_report().write(&dir);
+
+    assert_eq!(
+        std::fs::read(&dir).expect("the planted file is still there"),
+        b"x"
+    );
+
+    let _ = std::fs::remove_file(&dir);
 }
 
 #[test]
@@ -440,33 +710,49 @@ fn a_panic_writes_a_crash_report_naming_the_message_and_the_location() {
     let saved = panic::take_hook();
     panic::set_hook(Box::new(|_| {}));
 
+    let panic_line;
     {
         let guard = TerminalCleanupGuard::new();
         let _panic_guard = install_panic_hook(&guard, Some(dir.clone()));
+        panic_line = line!() + 1;
         let result = panic::catch_unwind(AssertUnwindSafe(|| panic!("boom")));
-        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().downcast_ref::<&str>(), Some(&"boom"));
     }
 
     panic::set_hook(saved);
 
     let text = only_crash_report(&dir);
-    assert!(
-        text.starts_with(&format!(
-            "version: {}\nplatform: {} {}\ntimestamp: ",
-            env!("CARGO_PKG_VERSION"),
-            std::env::consts::OS,
-            std::env::consts::ARCH
-        )),
-        "{text}"
-    );
-    assert!(text.contains("\nmessage: boom\n"), "{text}");
-    assert!(
-        text.contains(&format!("\nlocation: {}:", file!())),
-        "the location names this test file: {text}"
-    );
-    let (_, stack) = text
+    let (header, stack) = text
         .split_once("\nbacktrace:\n")
         .expect("the report ends with the stack");
+    let lines: Vec<&str> = header.lines().collect();
+    assert_eq!(lines.len(), 5, "{text}");
+    assert_eq!(lines[0], format!("version: {}", env!("CARGO_PKG_VERSION")));
+    assert_eq!(
+        lines[1],
+        format!(
+            "platform: {} {}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )
+    );
+    let timestamp = lines[2]
+        .strip_prefix("timestamp: ")
+        .expect("the third line is the timestamp");
+    let _: u64 = timestamp.parse().expect("the timestamp is whole seconds");
+    assert!(
+        dir.join(format!("crash-{timestamp}.txt")).is_file(),
+        "the file is named by the timestamp line: {text}"
+    );
+    assert_eq!(lines[3], "message: boom");
+    let position = lines[4]
+        .strip_prefix(&format!("location: {}:", file!()))
+        .expect("the location names this test file");
+    let (line, column) = position
+        .split_once(':')
+        .expect("the location ends with line:column");
+    assert_eq!(line, panic_line.to_string(), "the line of the `panic!`");
+    let _: u32 = column.parse().expect("the column is a number");
     assert!(!stack.trim().is_empty(), "the stack is not empty: {text}");
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -486,7 +772,7 @@ fn a_panic_with_no_message_writes_the_stand_in_text() {
         let _panic_guard = install_panic_hook(&guard, Some(dir.clone()));
         // A payload that is not a string carries no message to read.
         let result = panic::catch_unwind(AssertUnwindSafe(|| panic::panic_any(42u32)));
-        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().downcast_ref::<u32>(), Some(&42));
     }
 
     panic::set_hook(saved);
@@ -496,6 +782,36 @@ fn a_panic_with_no_message_writes_the_stand_in_text() {
         text.contains("\nmessage: a panic with no message\n"),
         "{text}"
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// A `panic!` with format arguments carries a `String` payload; the message is
+// written the same as a literal one.
+#[test]
+fn a_formatted_panic_message_is_written_in_full() {
+    let _serial = panic_hook_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let dir = crash_dir("panic-formatted");
+    let saved = panic::take_hook();
+    panic::set_hook(Box::new(|_| {}));
+
+    {
+        let guard = TerminalCleanupGuard::new();
+        let _panic_guard = install_panic_hook(&guard, Some(dir.clone()));
+        let pane = 7;
+        let result = panic::catch_unwind(AssertUnwindSafe(|| panic!("pane {pane} is gone")));
+        assert_eq!(
+            result.unwrap_err().downcast_ref::<String>(),
+            Some(&"pane 7 is gone".to_string())
+        );
+    }
+
+    panic::set_hook(saved);
+
+    let text = only_crash_report(&dir);
+    assert!(text.contains("\nmessage: pane 7 is gone\n"), "{text}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -515,7 +831,10 @@ fn a_panic_with_a_multi_line_message_keeps_every_line() {
         let result = panic::catch_unwind(AssertUnwindSafe(|| {
             panic!("first line\nsecond line\nthird")
         }));
-        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().downcast_ref::<&str>(),
+            Some(&"first line\nsecond line\nthird")
+        );
     }
 
     panic::set_hook(saved);
@@ -543,7 +862,7 @@ fn a_panic_with_no_crash_directory_writes_no_file() {
         let guard = TerminalCleanupGuard::new();
         let _panic_guard = install_panic_hook(&guard, None);
         let result = panic::catch_unwind(AssertUnwindSafe(|| panic!("boom")));
-        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().downcast_ref::<&str>(), Some(&"boom"));
     }
 
     panic::set_hook(saved);
@@ -580,7 +899,7 @@ fn the_cleanup_hooks_run_before_the_crash_report_is_written() {
         }));
         let _panic_guard = install_panic_hook(&guard, Some(dir.clone()));
         let result = panic::catch_unwind(AssertUnwindSafe(|| panic!("boom")));
-        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().downcast_ref::<&str>(), Some(&"boom"));
     }
 
     panic::set_hook(saved);
@@ -620,7 +939,7 @@ fn a_crash_report_that_cannot_be_written_still_restores_the_terminal() {
         }));
         let _panic_guard = install_panic_hook(&guard, Some(blocked.clone()));
         let result = panic::catch_unwind(AssertUnwindSafe(|| panic!("boom")));
-        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().downcast_ref::<&str>(), Some(&"boom"));
     }
 
     panic::set_hook(saved);
@@ -639,4 +958,31 @@ fn a_crash_report_that_cannot_be_written_still_restores_the_terminal() {
     );
 
     let _ = std::fs::remove_dir_all(&base);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_crash_report_is_readable_only_by_its_owner() {
+    // The report holds the panic message, the place and the stack; no other
+    // local user reads it.
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = crash_dir("owner-only");
+    fixed_report().write(&dir);
+
+    let mode = |path: &Path| {
+        std::fs::metadata(path)
+            .expect("the path exists")
+            .permissions()
+            .mode()
+            & 0o777
+    };
+    assert_eq!(mode(&dir), 0o700, "the crash directory is owner-only");
+    assert_eq!(
+        mode(&dir.join("crash-1700000000.txt")),
+        0o600,
+        "the crash report is owner-only"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

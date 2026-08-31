@@ -300,12 +300,18 @@ fn request(connection: &mut Connection, request_id: u64, kind: IpcRequestKind) -
     reply.result
 }
 
-/// Submit `command` on a control connection, attributed to `client_id`, and
-/// hand back the events it emitted. A rejected command fails the test.
-fn submit(connection: &mut Connection, client_id: ClientId, command: Command) -> Vec<Event> {
+/// Submit `command` on a control connection to `session_id`, targeting
+/// `client_id`, and hand back the events it emitted. A rejected command fails
+/// the test.
+fn submit(
+    connection: &mut Connection,
+    session_id: SessionId,
+    client_id: ClientId,
+    command: Command,
+) -> Vec<Event> {
     let envelope = CommandEnvelope::new(
         CommandId::new(),
-        CommandSource::key_binding(client_id),
+        CommandSource::external_cli(Some(session_id), Some(client_id)),
         SystemTime::now(),
         command,
     );
@@ -323,11 +329,13 @@ fn submit(connection: &mut Connection, client_id: ClientId, command: Command) ->
 /// back the pane the session created. `None` launches the platform shell.
 fn new_pane(
     connection: &mut Connection,
+    session_id: SessionId,
     client_id: ClientId,
     command: Option<SpawnSpec>,
 ) -> PaneId {
     let emitted = submit(
         connection,
+        session_id,
         client_id,
         Command::NewPane(NewPaneArgs {
             source: None,
@@ -350,11 +358,18 @@ fn new_pane(
 
 /// Type `line` into `pane`, ending it with the carriage return a terminal
 /// sends for the Enter key.
-fn type_line(connection: &mut Connection, client_id: ClientId, pane: PaneId, line: &str) {
+fn type_line(
+    connection: &mut Connection,
+    session_id: SessionId,
+    client_id: ClientId,
+    pane: PaneId,
+    line: &str,
+) {
     let mut data = line.as_bytes().to_vec();
     data.push(b'\r');
     submit(
         connection,
+        session_id,
         client_id,
         Command::WriteToPane(WriteToPaneArgs {
             pane: Some(pane),
@@ -823,11 +838,13 @@ fn a_restart_keeps_every_pane_its_child_its_screen_and_its_scrollback() {
     let seeded = seeded_pane(dir.path(), session_id);
     let left = new_pane(
         &mut control,
+        session_id,
         stream.client_id,
         Some(burst_child("left", 30)),
     );
     let right = new_pane(
         &mut control,
+        session_id,
         stream.client_id,
         Some(burst_child("right", 30)),
     );
@@ -935,6 +952,7 @@ fn output_written_across_the_swap_arrives_once_and_in_order() {
     let (mut control, _) = open(dir.path(), session_id);
     let pane = new_pane(
         &mut control,
+        session_id,
         stream.client_id,
         Some(paced_child("mark", 12)),
     );
@@ -972,7 +990,12 @@ fn input_sent_after_the_clients_are_told_still_reaches_its_pane() {
     let seeded = seeded_pane(dir.path(), session_id);
     // A child that ends the moment it reads one line, so the panes the session
     // holds after the swap say whether the line reached it.
-    let pane = new_pane(&mut control, stream.client_id, Some(key_then_exit_child()));
+    let pane = new_pane(
+        &mut control,
+        session_id,
+        stream.client_id,
+        Some(key_then_exit_child()),
+    );
     let mut open_panes = vec![(seeded, PaneState::Running), (pane, PaneState::Running)];
     open_panes.sort_by_key(|(id, _)| *id);
     assert_eq!(pane_states(dir.path(), session_id), open_panes);
@@ -1076,6 +1099,7 @@ fn a_pane_a_running_session_opened_prints_what_its_child_wrote() {
     // that line and nothing races it.
     let pane = new_pane(
         &mut control,
+        session_id,
         stream.client_id,
         Some(burst_child("printed", 1)),
     );
@@ -1104,7 +1128,12 @@ fn a_pane_whose_child_never_exits_does_not_hold_the_swap_up() {
     let seeded = seeded_pane(dir.path(), session_id);
     // A child that cannot exit and whose reader has nothing to read: ending
     // that reader and waiting for it would never return.
-    let pane = new_pane(&mut control, stream.client_id, Some(idle_child()));
+    let pane = new_pane(
+        &mut control,
+        session_id,
+        stream.client_id,
+        Some(idle_child()),
+    );
 
     assert_eq!(
         request(&mut control, 3, IpcRequestKind::Restart),
@@ -1133,12 +1162,18 @@ fn a_client_that_comes_back_keeps_its_id_its_focus_and_its_zoom() {
 
     let (stream, before) = Stream::join(dir.path(), session_id, TALL_VIEWPORT, None);
     let (mut control, _) = open(dir.path(), session_id);
-    let pane = new_pane(&mut control, stream.client_id, Some(idle_child()));
+    let pane = new_pane(
+        &mut control,
+        session_id,
+        stream.client_id,
+        Some(idle_child()),
+    );
 
     // A focus and a zoom this client alone holds, both distinct from what a
     // freshly minted client would come up with.
     submit(
         &mut control,
+        session_id,
         stream.client_id,
         Command::FocusPane(FocusPaneArgs {
             target: FocusTarget::Pane(pane),
@@ -1147,6 +1182,7 @@ fn a_client_that_comes_back_keeps_its_id_its_focus_and_its_zoom() {
     );
     submit(
         &mut control,
+        session_id,
         stream.client_id,
         Command::TogglePaneFullscreen,
     );
@@ -1209,10 +1245,16 @@ fn a_second_caller_naming_a_client_already_streaming_is_given_a_client_of_its_ow
 
     let (stream, before) = Stream::join(dir.path(), session_id, TALL_VIEWPORT, None);
     let (mut control, _) = open(dir.path(), session_id);
-    let pane = new_pane(&mut control, stream.client_id, Some(idle_child()));
+    let pane = new_pane(
+        &mut control,
+        session_id,
+        stream.client_id,
+        Some(idle_child()),
+    );
     let client_id = stream.client_id;
     submit(
         &mut control,
+        session_id,
         client_id,
         Command::FocusPane(FocusPaneArgs {
             target: FocusTarget::Pane(pane),
@@ -1331,7 +1373,12 @@ fn a_restart_into_a_binary_that_cannot_run_is_refused_and_the_session_keeps_serv
     let (stream, before) = Stream::join(dir.path(), session_id, TALL_VIEWPORT, None);
     let (mut control, _) = open(dir.path(), session_id);
     let seeded = seeded_pane(dir.path(), session_id);
-    let pane = new_pane(&mut control, stream.client_id, Some(idle_child()));
+    let pane = new_pane(
+        &mut control,
+        session_id,
+        stream.client_id,
+        Some(idle_child()),
+    );
 
     // A running program can be renamed on every supported platform, and on Unix
     // its mode can be changed under it; either one is what an update that
@@ -1391,7 +1438,7 @@ fn a_swap_that_cannot_write_its_state_leaves_the_session_serving_with_live_reade
     // Two shells, so each pane can be asked for output of its own after the
     // swap fails.
     let seeded = seeded_pane(dir.path(), session_id);
-    let opened = new_pane(&mut control, stream.client_id, None);
+    let opened = new_pane(&mut control, session_id, stream.client_id, None);
 
     // A directory where the carried state has to be written: every check the
     // restart makes passes, and the write that follows them cannot land.
@@ -1431,12 +1478,14 @@ fn a_swap_that_cannot_write_its_state_leaves_the_session_serving_with_live_reade
     let (mut control, _) = open(dir.path(), session_id);
     type_line(
         &mut control,
+        session_id,
         viewer.client_id,
         seeded,
         "echo koshi-seeded-back",
     );
     type_line(
         &mut control,
+        session_id,
         viewer.client_id,
         opened,
         "echo koshi-opened-back",
@@ -1458,13 +1507,18 @@ fn a_pane_child_that_exits_around_the_swap_is_reported_exactly_once() {
     let (stream, before) = Stream::join(dir.path(), session_id, TALL_VIEWPORT, None);
     let (mut control, _) = open(dir.path(), session_id);
     let seeded = seeded_pane(dir.path(), session_id);
-    let pane = new_pane(&mut control, stream.client_id, Some(key_then_exit_child()));
+    let pane = new_pane(
+        &mut control,
+        session_id,
+        stream.client_id,
+        Some(key_then_exit_child()),
+    );
 
     // The line the child is waiting for. Its exit closes the pane, so the swap
     // that follows carries a session the pane has just left. The line carries a
     // word rather than being a bare return, so nothing rests on how a line
     // reader treats an empty line.
-    type_line(&mut control, stream.client_id, pane, "typed");
+    type_line(&mut control, session_id, stream.client_id, pane, "typed");
     let mut reported = 0;
     let exited = stream.event_when(|event| {
         matches!(event, SessionEvent::PaneProcessExited { pane_id, .. } if *pane_id == pane)

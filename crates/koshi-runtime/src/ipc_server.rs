@@ -9,6 +9,11 @@
 //! with a reply channel; the dispatcher's answer comes back on it and leaves as
 //! the connection's response frame.
 //!
+//! A `SubmitCommand`'s [`CommandSource`] is set here, from the connection the
+//! request arrived on, over whatever source the peer wrote: a control
+//! connection carries a CLI source, and an attached client's connection
+//! carries [`CommandSource::KeyBinding`] naming that connection's own client.
+//!
 //! An `Attach` is the one request that keeps its connection: once the reply
 //! carrying the session's structure is written, the connection is split. The
 //! writing half carries that client's event stream, and the reading half
@@ -53,6 +58,7 @@ use std::sync::{Arc, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
 
+use koshi_core::command::{CommandEnvelope, CommandSource};
 use koshi_core::ids::{ClientId, SessionId};
 use koshi_ipc::endpoint::{
     advert_path, remove_advert, remove_socket_file, shared_socket_addr, socket_addr, write_advert,
@@ -79,7 +85,7 @@ use crate::runtime::event::{EndingNotice, RuntimeEvent, SessionEnding};
 
 /// How long the accept loop sleeps after a failed accept before it accepts
 /// again. A persistent accept error — say, the process is out of file
-/// descriptors — retries at this interval rather than spinning.
+/// descriptors — retries once per interval.
 const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 /// The version of the binary this session server is, reported in its Hello
@@ -260,8 +266,8 @@ pub struct IpcServer {
     token: Arc<RwLock<ConnectionToken>>,
     /// What the socket takes in, shared with every serving thread.
     intake: Arc<Intake>,
-    /// The accept loop, joined at shutdown. `Option` so shutdown can take it
-    /// out of the otherwise-borrowed struct.
+    /// The accept loop, joined at shutdown. `None` once
+    /// [`stop`](Self::stop) has taken it out to join it.
     accept_thread: Option<JoinHandle<()>>,
 }
 
@@ -334,24 +340,19 @@ impl IpcServer {
             token: token.clone(),
             pid: std::process::id(),
         };
-        if let Err(error) = endpoint.write(&endpoint_path) {
-            // Dropping the listener releases the address (and unlinks the
-            // socket file on Unix), so the failed start leaves nothing. The
-            // write is atomic, so what may remain at `endpoint_path` is an
-            // older run's file naming the socket just removed — taken away
-            // with it.
+        let advertised = endpoint.write(&endpoint_path).and_then(|()| match &advert {
+            None => Ok(()),
+            Some(advert) => write_advert(advert),
+        });
+        if let Err(error) = advertised {
+            // Dropping the listener releases the address and unlinks the socket
+            // file on Unix, so a failed start leaves nothing behind. The
+            // endpoint write is atomic, so a file left at `endpoint_path` is an
+            // older run's, naming the socket removed here.
             let _ = std::fs::remove_file(&endpoint_path);
             drop(listener);
             remove_socket_file(&addr);
             return Err(error);
-        }
-        if let Some(advert) = &advert {
-            if let Err(error) = write_advert(advert) {
-                let _ = std::fs::remove_file(&endpoint_path);
-                drop(listener);
-                remove_socket_file(&addr);
-                return Err(error);
-            }
         }
 
         let still_on = other_users.map(|other_users| other_users.still_on);
@@ -413,10 +414,12 @@ impl IpcServer {
     /// the one this server accepts either way, so the endpoint file then
     /// advertises a token no connection is served under.
     pub fn rotate_token(&self) -> Result<(), IpcError> {
-        self.intake.reopen();
         let fresh = ConnectionToken::generate();
-        // Accepted before it is advertised.
+        // Stored before the intake takes connections again, so no connection is
+        // accepted under the token this replaces. Accepted before it is
+        // advertised.
         *self.token.write().expect("token") = fresh.clone();
+        self.intake.reopen();
         let endpoint = EndpointFile {
             socket: self.addr.clone(),
             token: fresh,
@@ -452,7 +455,6 @@ impl IpcServer {
     /// reaches an explicit shutdown — a panic unwinding the server — still
     /// withdraws the files.
     pub fn shutdown(self) {
-        // Teardown lives in `Drop`, so consuming `self` is the whole job.
         drop(self);
     }
 
@@ -462,14 +464,13 @@ impl IpcServer {
     fn stop(&mut self) {
         self.shutting_down.store(true, Ordering::SeqCst);
         if let Some(handle) = self.accept_thread.take() {
-            // The accept loop sits blocked in `accept`; a bare connect wakes it
-            // so it observes the flag. Hold that connection open across the join:
+            // The accept loop sits blocked in `accept`. A bare connect wakes it
+            // and it reads the flag. That connection stays open across the join:
             // on Windows a connect that drops before `accept` runs can leave
-            // nothing for `accept` to return, so the pending client must outlive
-            // the join. A failed connect — say, the process is out of file
-            // descriptors — leaves the loop blocked, so the join is skipped
-            // rather than waiting forever: the thread dies with the process, and
-            // the files below are removed either way.
+            // nothing for `accept` to return. A failed connect — say, the
+            // process is out of file descriptors — leaves the loop blocked and
+            // skips the join; that thread ends with the process, and the files
+            // below are removed either way.
             if let Ok(wake) = Connection::connect(&self.addr) {
                 let _ = handle.join();
                 drop(wake);
@@ -585,7 +586,12 @@ fn accept_loop(
 /// have, and the Hello — and reads `live_setting` before any of its answers go
 /// out. What is left is this session's own vocabulary: `SubmitCommand`,
 /// `Attach`, `Discovery`, `Layout` and `Restart` cross to the dispatcher over
-/// the inbox and answer with its reply.
+/// the inbox and answer with its reply. `RecentEvents` is answered on this
+/// thread, from the process-wide log ring, and reaches no dispatcher.
+///
+/// A `SubmitCommand` on this connection has its source stamped by
+/// [`cli_source`] before it crosses to the dispatcher: this connection carries
+/// a `koshi` CLI invocation.
 ///
 /// A `Restart` the dispatcher refuses is answered with
 /// [`IpcErrorCode::MalformedRequest`] carrying the sentence naming what is
@@ -617,9 +623,8 @@ fn serve_connection(
 ) {
     let mut gate = Handshake::new(token, peer);
     // The setting can change while this connection is open, so it is read
-    // again for each request rather than trusted from the accept that let the
-    // peer in. `None` is a connection from the user who started the session,
-    // whose admission cannot be withdrawn.
+    // again for each request. `None` is a connection from the user who started
+    // the session, whose admission cannot be withdrawn.
     let admission = live_setting.clone();
     let admitted = move || match &admission {
         None => true,
@@ -643,16 +648,17 @@ fn serve_connection(
                 unreachable!("Hello is answered by the connection thread before dispatch")
             }
             IpcRequestKind::SubmitCommand(envelope) => {
+                let envelope = cli_source(*envelope);
                 let answer = ask_dispatcher(&served.intake, inbox_tx, |reply| RuntimeEvent::Ipc {
-                    envelope: *envelope,
+                    envelope,
                     reply,
                 });
-                match answer {
-                    Some(result) => IpcResponse {
-                        request_id,
-                        result: IpcResult::CommandResult(result),
-                    },
-                    None => return,
+                let Some(result) = answer else {
+                    return;
+                };
+                IpcResponse {
+                    request_id,
+                    result: IpcResult::CommandResult(result),
                 }
             }
             IpcRequestKind::Attach {
@@ -679,6 +685,10 @@ fn serve_connection(
                 let Some(Some(accepted)) = answer else {
                     return;
                 };
+                // Counted before the answer is written and dropped once the
+                // stream below ends, so a caller that reads its `Attached`
+                // frame never sees this connection uncounted.
+                let _counted = served.intake.attached();
                 let attached = IpcResponse {
                     request_id,
                     result: IpcResult::Attached {
@@ -725,28 +735,28 @@ fn serve_connection(
                 let answer = ask_dispatcher(&served.intake, inbox_tx, |reply| {
                     RuntimeEvent::IpcDiscovery { reply }
                 });
-                match answer {
-                    Some(Some(overview)) => IpcResponse {
-                        request_id,
-                        result: IpcResult::Overview(overview),
-                    },
-                    // No running session: the process is past its last
-                    // session, so the socket is as good as gone.
-                    Some(None) | None => return,
+                // No running session: the process is past its last session, so
+                // the socket is as good as gone.
+                let Some(Some(overview)) = answer else {
+                    return;
+                };
+                IpcResponse {
+                    request_id,
+                    result: IpcResult::Overview(overview),
                 }
             }
             IpcRequestKind::Layout { tab } => {
                 let answer = ask_dispatcher(&served.intake, inbox_tx, |reply| {
                     RuntimeEvent::IpcLayout { tab, reply }
                 });
-                match answer {
-                    Some(Some(layout)) => IpcResponse {
-                        request_id,
-                        result: IpcResult::Layout(layout),
-                    },
-                    // No running session: the process is past its last
-                    // session, so the socket is as good as gone.
-                    Some(None) | None => return,
+                // No running session: the process is past its last session, so
+                // the socket is as good as gone.
+                let Some(Some(layout)) = answer else {
+                    return;
+                };
+                IpcResponse {
+                    request_id,
+                    result: IpcResult::Layout(layout),
                 }
             }
             IpcRequestKind::RecentEvents => IpcResponse {
@@ -799,6 +809,10 @@ fn serve_connection(
 /// of any other kind, end of stream, a transport fault, or a dispatcher that is
 /// gone all end the reading loop.
 ///
+/// A `SubmitCommand` on this connection has its source stamped by
+/// [`client_source`], so it is attributed to `client_id` and to no other
+/// client.
+///
 /// Either half ending detaches the client, which removes its record and drops
 /// its subscription; the closed queue, or the terminal `Quit` or `Restarting`
 /// frame, then ends the writing thread. Both notify, so a write that fails
@@ -827,10 +841,13 @@ fn serve_connection(
 /// started the session. It is read before each frame that client sends is
 /// acted on, so turning the setting off detaches them at their next input.
 ///
+/// This connection's place in the intake's attached count is held by the
+/// caller: taken before the `Attached` frame is written, dropped once this
+/// returns.
+///
 /// `served` is this connection's entry in the [`Intake`]: the intake holds this
-/// connection's read direction through it, and counts this connection while the
-/// reading half runs. The client's record stays as it is, so the image swap that
-/// cut the connection carries it across.
+/// connection's read direction through it. The client's record stays as it is,
+/// so the image swap that cut the connection carries it across.
 fn stream_events(
     connection: Connection,
     client_id: ClientId,
@@ -840,9 +857,6 @@ fn stream_events(
     live_setting: Option<OtherUsersSetting>,
     served: &ServedConnection,
 ) {
-    // Counted from here until this function returns, so the count covers
-    // exactly the connections whose input can still reach the session.
-    let _attached = served.intake.attached();
     let (mut reader, mut writer) = connection.split();
     let writer_inbox = inbox_tx.clone();
     let writer_intake = Arc::clone(&served.intake);
@@ -907,7 +921,7 @@ fn stream_events(
 
     while let Ok(request) = reader.recv::<IncomingRequest>() {
         // The setting can change while this client is attached, so it is read
-        // again rather than trusted from the accept that let the peer in.
+        // again for each frame that client sends.
         if live_setting.as_ref().is_some_and(|still_on| !still_on()) {
             break;
         }
@@ -938,12 +952,12 @@ fn stream_events(
                 actions,
             },
             IpcRequestKind::SubmitCommand(envelope) => {
-                // The result is answered by the next painted frame, so the
-                // reply channel's receiving end goes straight away and the
-                // dispatcher's send into it fails harmlessly.
+                // The result is answered by the next painted frame. The reply
+                // channel's receiving end drops here, and the dispatcher's send
+                // into it fails.
                 let (reply, _) = mpsc::channel();
                 RuntimeEvent::Ipc {
-                    envelope: *envelope,
+                    envelope: client_source(*envelope, client_id),
                     reply,
                 }
             }
@@ -969,6 +983,51 @@ fn stream_events(
             streamed: true,
         },
     );
+}
+
+/// Rebuild `envelope` with the source a control connection carries, over
+/// whatever source its sender wrote.
+///
+/// A control connection carries a `koshi` CLI invocation. Its two sources,
+/// [`CommandSource::InSessionCli`] and [`CommandSource::ExternalCli`], are kept
+/// as they stand. Every other source becomes
+/// `ExternalCli { session_id: None, target_client: None }`, which names no
+/// session and no client.
+///
+/// The envelope's `client_id` is re-derived from the stamped source; the two
+/// always agree.
+///
+/// A sender that writes `CommandSource::Internal` and
+/// `Command::ToggleMouseSelect` reaches the dispatcher as
+/// `ExternalCli { session_id: None, target_client: None }` carrying
+/// `Command::ToggleMouseSelect`. The dispatcher's CLI-admission check refuses
+/// it: the CLI has no mouse-select verb.
+fn cli_source(envelope: CommandEnvelope) -> CommandEnvelope {
+    let source = match envelope.source {
+        source @ (CommandSource::InSessionCli { .. } | CommandSource::ExternalCli { .. }) => source,
+        CommandSource::KeyBinding { .. }
+        | CommandSource::Mouse { .. }
+        | CommandSource::Plugin { .. }
+        | CommandSource::Internal => CommandSource::external_cli(None, None),
+    };
+    CommandEnvelope::new(envelope.id, source, envelope.issued_at, envelope.command)
+}
+
+/// Rebuild `envelope` with [`CommandSource::KeyBinding`] naming `client_id`,
+/// over whatever source its sender wrote.
+///
+/// `client_id` is the client this connection attached as. A command this
+/// connection sends is attributed to that client and to no other.
+///
+/// The envelope's `client_id` is re-derived from the stamped source; the two
+/// always agree.
+fn client_source(envelope: CommandEnvelope, client_id: ClientId) -> CommandEnvelope {
+    CommandEnvelope::new(
+        envelope.id,
+        CommandSource::key_binding(client_id),
+        envelope.issued_at,
+        envelope.command,
+    )
 }
 
 /// Hand one request to the dispatcher thread and wait for its answer: build

@@ -285,12 +285,19 @@ pub(super) fn opt_cell<T: std::fmt::Display>(value: Option<&T>) -> String {
     }
 }
 
-/// A timestamp as a cell: whole seconds since the Unix epoch.
+/// A timestamp as a cell: whole seconds since the Unix epoch, or `-` for a
+/// moment before that epoch.
 pub(super) fn time_cell(time: SystemTime) -> String {
     match time.duration_since(SystemTime::UNIX_EPOCH) {
         Ok(elapsed) => elapsed.as_secs().to_string(),
         Err(_) => "-".to_string(),
     }
+}
+
+/// A timestamp that may be absent as a cell: [`time_cell`] when present, `-`
+/// when absent.
+pub(super) fn optional_time_cell(time: Option<SystemTime>) -> String {
+    time.map_or_else(|| "-".to_string(), time_cell)
 }
 
 /// A size as a cell: `<cols>x<rows>`.

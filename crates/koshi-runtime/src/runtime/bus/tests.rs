@@ -2,21 +2,23 @@
 //! events in order over their own queues, a dropped receiver ends its
 //! subscription, a lossy event that does not fit a full queue is dropped for
 //! that subscriber only, and a critical one that does not fit desyncs the
-//! subscriber until a snapshot resyncs it. The quit and the restart reach a
-//! desynced subscriber all the same, since each ends its stream, and each
-//! raises the bus's ending notice for the queues they do not fit. Then the
-//! painted frame: it lands on a live subscriber's queue and is refused by a
-//! desynced one. Then a round's mouse answers, which ride the same queue and
-//! desync the subscriber when they do not fit. Then bytes for the terminal a
-//! subscriber's client runs in and the session a subscriber's client moves to,
-//! which ride it the same way.
+//! subscriber until a snapshot resyncs it. The quit and the restart each end
+//! the stream: each reaches a desynced subscriber as well as a live one, and
+//! each raises the bus's ending notice for the queues they do not fit, which
+//! keeps the first ending raised. Then the painted frame: it lands on a live
+//! subscriber's queue, is refused by a desynced one, and on a full queue is
+//! refused while the subscriber stays live. Then a round's mouse answers, which
+//! ride the same queue and desync the subscriber when they do not fit. Then
+//! bytes for the terminal a subscriber's client runs in and the session a
+//! subscriber's client moves to, which ride it the same way, and which are each
+//! refused for an unknown subscriber and for a desynced one.
 //!
 //! Then the two wire conversions: the filter an attaching client sent becomes
 //! the bus's own, and one queue item becomes the frame that client is sent.
 
 use koshi_core::command::CopyTarget;
 use koshi_core::event::{
-    CommandRejected, ConfigReloaded, Copied, Event, InputMode, InputModeChanged, KeybindingMatched,
+    CommandRejected, ConfigReloaded, Copied, Event, InputModeChanged, KeybindingMatched,
     LayoutChanged, MouseDragged, MousePressed, MouseReleased, MouseScrolled, MouseSelectChanged,
     PaneClosing, PaneCommandFinished, PaneCommandStarted, PaneCreated, PaneEnterPressed,
     PaneFocused, PaneMouseForwarded, PaneOutputUpdated, PaneProcessExited, PaneRemoved,
@@ -79,6 +81,29 @@ fn fill_to_capacity(bus: &mut EventBus, tab: TabId) {
 fn a_new_bus_has_no_subscribers() {
     let bus = EventBus::new();
     assert_eq!(bus.subscriber_count(), 0);
+}
+
+#[test]
+fn a_new_bus_has_raised_no_ending() {
+    let bus = EventBus::new();
+    assert_eq!(bus.ending_notice().raised(), None);
+}
+
+#[test]
+fn the_default_filter_is_every_event() {
+    assert_eq!(EventFilter::default(), EventFilter::All);
+}
+
+#[test]
+fn publishing_to_a_bus_with_no_subscribers_removes_nobody() {
+    let tab = TabId::new();
+    let mut bus = EventBus::new();
+
+    let removed = bus.publish(&Event::TabCreated(TabCreated { tab_id: tab }));
+
+    assert_eq!(removed, Vec::new());
+    assert_eq!(bus.subscriber_count(), 0);
+    assert!(!bus.has_desynced());
 }
 
 #[test]
@@ -159,6 +184,29 @@ fn a_dropped_receiver_is_removed_on_the_next_publish() {
 }
 
 #[test]
+fn every_dropped_receiver_is_returned_in_subscription_order() {
+    let tab = TabId::new();
+    let mut bus = EventBus::new();
+    let (first_id, first) = bus.subscribe(EventFilter::All);
+    let (keep_id, keep) = bus.subscribe(EventFilter::All);
+    let (third_id, third) = bus.subscribe(EventFilter::All);
+    drop(first);
+    drop(third);
+
+    let removed = bus.publish(&Event::TabCreated(TabCreated { tab_id: tab }));
+
+    assert_eq!(removed, vec![first_id, third_id]);
+    assert!(bus.contains(keep_id));
+    assert_eq!(bus.subscriber_count(), 1);
+    assert_eq!(
+        keep.try_iter().collect::<Vec<_>>(),
+        vec![Delivery::Event(Event::TabCreated(TabCreated {
+            tab_id: tab
+        }))]
+    );
+}
+
+#[test]
 fn a_lossy_event_that_does_not_fit_is_dropped_and_the_subscriber_stays_live() {
     let tab = TabId::new();
     let pane = PaneId::new();
@@ -174,11 +222,12 @@ fn a_lossy_event_that_does_not_fit_is_dropped_and_the_subscriber_stays_live() {
     assert_eq!(bus.desynced(), Vec::new());
 
     // The queue holds exactly the earlier events; the overflowing one is gone.
-    let backlog: Vec<_> = rx.try_iter().collect();
-    assert_eq!(backlog.len(), SUBSCRIBER_QUEUE_CAPACITY);
     assert_eq!(
-        backlog[SUBSCRIBER_QUEUE_CAPACITY - 1],
-        Delivery::Event(Event::TabCreated(TabCreated { tab_id: tab }))
+        rx.try_iter().collect::<Vec<_>>(),
+        vec![
+            Delivery::Event(Event::TabCreated(TabCreated { tab_id: tab }));
+            SUBSCRIBER_QUEUE_CAPACITY
+        ]
     );
 
     // Delivery never paused: the next event lands on the drained queue.
@@ -218,8 +267,13 @@ fn a_critical_event_that_does_not_fit_desyncs_that_subscriber_only() {
 
     // Draining the desynced queue does not resume it: nothing further arrives,
     // critical or lossy, until a snapshot lands.
-    let backlog: Vec<_> = full.try_iter().collect();
-    assert_eq!(backlog.len(), SUBSCRIBER_QUEUE_CAPACITY);
+    assert_eq!(
+        full.try_iter().collect::<Vec<_>>(),
+        vec![
+            Delivery::Event(Event::TabCreated(TabCreated { tab_id: tab }));
+            SUBSCRIBER_QUEUE_CAPACITY
+        ]
+    );
     bus.publish(&Event::TabCreated(TabCreated { tab_id: tab }));
     bus.publish(&Event::PaneOutputUpdated(PaneOutputUpdated {
         pane_id: pane,
@@ -242,7 +296,13 @@ fn a_resync_onto_a_still_full_queue_fails_and_leaves_the_subscriber_desynced() {
 
     assert_eq!(bus.desynced(), vec![id]);
     // Nothing was queued: the backlog is still exactly the pre-gap events.
-    assert_eq!(rx.try_iter().count(), SUBSCRIBER_QUEUE_CAPACITY);
+    assert_eq!(
+        rx.try_iter().collect::<Vec<_>>(),
+        vec![
+            Delivery::Event(Event::TabCreated(TabCreated { tab_id: tab }));
+            SUBSCRIBER_QUEUE_CAPACITY
+        ]
+    );
 }
 
 #[test]
@@ -347,6 +407,45 @@ fn a_live_subscriber_whose_queue_is_full_misses_the_restart() {
             .all(|delivery| *delivery
                 == Delivery::Event(Event::TabCreated(TabCreated { tab_id: tab }))),
         "the queue must hold its backlog and nothing else"
+    );
+}
+
+#[test]
+fn publishing_the_quit_raises_the_ending_notice_and_delivers_it() {
+    let mut bus = EventBus::new();
+    let (id, rx) = bus.subscribe(EventFilter::All);
+
+    let removed = bus.publish(&Event::Quit);
+
+    assert_eq!(removed, Vec::new());
+    assert_eq!(bus.ending_notice().raised(), Some(SessionEnding::Quit));
+    assert_eq!(
+        rx.try_iter().collect::<Vec<_>>(),
+        vec![Delivery::Event(Event::Quit)]
+    );
+    assert_eq!(bus.desynced(), Vec::new());
+    assert!(bus.contains(id));
+}
+
+#[test]
+fn the_ending_notice_keeps_the_first_ending_it_was_raised_with() {
+    let mut bus = EventBus::new();
+    let (_id, rx) = bus.subscribe(EventFilter::All);
+
+    bus.publish(&Event::Restarting);
+    bus.publish(&Event::Quit);
+
+    assert_eq!(
+        bus.ending_notice().raised(),
+        Some(SessionEnding::Restarting)
+    );
+    // Both events still ride the queue; only the notice is set once.
+    assert_eq!(
+        rx.try_iter().collect::<Vec<_>>(),
+        vec![
+            Delivery::Event(Event::Restarting),
+            Delivery::Event(Event::Quit),
+        ]
     );
 }
 
@@ -579,6 +678,23 @@ fn unsubscribing_an_unknown_id_changes_nothing() {
 }
 
 #[test]
+fn unsubscribing_a_desynced_subscriber_clears_it_from_the_desynced_list() {
+    let tab = TabId::new();
+    let mut bus = EventBus::new();
+    let (id, _rx) = bus.subscribe(EventFilter::All);
+    fill_to_capacity(&mut bus, tab);
+    bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id: tab }));
+    assert_eq!(bus.desynced(), vec![id]);
+
+    bus.unsubscribe(id);
+
+    assert!(!bus.contains(id));
+    assert_eq!(bus.desynced(), Vec::new());
+    assert!(!bus.has_desynced());
+    assert_eq!(bus.subscriber_count(), 0);
+}
+
+#[test]
 fn unsubscribe_removes_that_subscriber_only() {
     let tab = TabId::new();
     let mut bus = EventBus::new();
@@ -643,6 +759,36 @@ fn a_frame_for_a_desynced_subscriber_is_refused_and_queues_nothing() {
     assert_eq!(rx.try_iter().collect::<Vec<_>>(), Vec::<Delivery>::new());
     assert_eq!(bus.desynced(), vec![id]);
     assert_eq!(bus.subscriber_count(), 1);
+}
+
+#[test]
+fn a_frame_that_does_not_fit_is_refused_and_leaves_the_subscriber_live() {
+    let tab = TabId::new();
+    let mut bus = EventBus::new();
+    let (id, rx) = bus.subscribe(EventFilter::All);
+    fill_to_capacity(&mut bus, tab);
+
+    assert!(!bus.try_send_frame(id, snapshot()));
+
+    // A refused frame is not a gap in the stream: the next frame supersedes it,
+    // so the subscriber keeps receiving instead of pausing for a snapshot.
+    assert!(!bus.has_desynced());
+    assert_eq!(bus.desynced(), Vec::new());
+    assert_eq!(bus.subscriber_count(), 1);
+    assert_eq!(
+        rx.try_iter().collect::<Vec<_>>(),
+        vec![
+            Delivery::Event(Event::TabCreated(TabCreated { tab_id: tab }));
+            SUBSCRIBER_QUEUE_CAPACITY
+        ]
+    );
+
+    let frame = snapshot();
+    assert!(bus.try_send_frame(id, frame.clone()));
+    assert_eq!(
+        rx.try_iter().collect::<Vec<_>>(),
+        vec![Delivery::Frame(frame)]
+    );
 }
 
 #[test]
@@ -850,6 +996,64 @@ fn a_full_queue_desyncs_the_subscriber_and_drops_the_host_write() {
 }
 
 #[test]
+fn an_empty_host_write_reaches_the_subscriber_as_empty_bytes() {
+    let mut bus = EventBus::new();
+    let (id, rx) = bus.subscribe(EventFilter::All);
+
+    assert!(bus.try_send_host_write(id, Vec::new()));
+
+    let queued: Vec<Delivery> = rx.try_iter().collect();
+    assert_eq!(queued, vec![Delivery::HostWrite(Vec::new())]);
+    assert_eq!(
+        wire_event(&queued[0]),
+        Some(SessionEvent::HostWrite { bytes: Vec::new() })
+    );
+}
+
+#[test]
+fn a_host_write_for_an_unknown_subscriber_is_refused() {
+    let mut bus = EventBus::new();
+    let (_id, rx) = bus.subscribe(EventFilter::All);
+
+    assert!(!bus.try_send_host_write(SubscriberId::new(), b"\x07".to_vec()));
+
+    assert_eq!(rx.try_iter().collect::<Vec<_>>(), Vec::<Delivery>::new());
+    assert_eq!(bus.subscriber_count(), 1);
+    assert_eq!(bus.desynced(), Vec::new());
+}
+
+#[test]
+fn a_host_write_for_a_desynced_subscriber_is_refused_and_queues_nothing() {
+    let tab = TabId::new();
+    let mut bus = EventBus::new();
+    let (id, rx) = bus.subscribe(EventFilter::All);
+    fill_to_capacity(&mut bus, tab);
+    bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id: tab }));
+    assert_eq!(bus.desynced(), vec![id]);
+    // Drained, so a refusal here cannot be a full queue.
+    assert_eq!(rx.try_iter().count(), SUBSCRIBER_QUEUE_CAPACITY);
+
+    assert!(!bus.try_send_host_write(id, b"\x1b]52;c;aGVsbG8=\x07".to_vec()));
+
+    assert_eq!(rx.try_iter().collect::<Vec<_>>(), Vec::<Delivery>::new());
+    assert_eq!(bus.desynced(), vec![id]);
+    assert_eq!(bus.subscriber_count(), 1);
+}
+
+#[test]
+fn a_subscriber_whose_receiver_is_gone_is_removed_by_the_host_write() {
+    let mut bus = EventBus::new();
+    let (id, rx) = bus.subscribe(EventFilter::All);
+    drop(rx);
+
+    assert!(!bus.try_send_host_write(id, b"\x1b]52;c;aGVsbG8=\x07".to_vec()));
+
+    assert!(!bus.contains(id));
+    assert_eq!(bus.subscriber_count(), 0);
+    assert_eq!(bus.desynced(), Vec::new());
+}
+
+#[test]
 fn a_switch_reaches_the_subscriber_as_the_session_it_names() {
     let session = SessionId::new();
     let mut bus = EventBus::new();
@@ -889,6 +1093,49 @@ fn a_full_queue_desyncs_the_subscriber_and_drops_the_switch() {
             SUBSCRIBER_QUEUE_CAPACITY
         ]
     );
+}
+
+#[test]
+fn a_switch_for_an_unknown_subscriber_is_refused() {
+    let mut bus = EventBus::new();
+    let (_id, rx) = bus.subscribe(EventFilter::All);
+
+    assert!(!bus.try_send_switch(SubscriberId::new(), SessionId::new()));
+
+    assert_eq!(rx.try_iter().collect::<Vec<_>>(), Vec::<Delivery>::new());
+    assert_eq!(bus.subscriber_count(), 1);
+    assert_eq!(bus.desynced(), Vec::new());
+}
+
+#[test]
+fn a_switch_for_a_desynced_subscriber_is_refused_and_queues_nothing() {
+    let tab = TabId::new();
+    let mut bus = EventBus::new();
+    let (id, rx) = bus.subscribe(EventFilter::All);
+    fill_to_capacity(&mut bus, tab);
+    bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id: tab }));
+    assert_eq!(bus.desynced(), vec![id]);
+    // Drained, so a refusal here cannot be a full queue.
+    assert_eq!(rx.try_iter().count(), SUBSCRIBER_QUEUE_CAPACITY);
+
+    assert!(!bus.try_send_switch(id, SessionId::new()));
+
+    assert_eq!(rx.try_iter().collect::<Vec<_>>(), Vec::<Delivery>::new());
+    assert_eq!(bus.desynced(), vec![id]);
+    assert_eq!(bus.subscriber_count(), 1);
+}
+
+#[test]
+fn a_subscriber_whose_receiver_is_gone_is_removed_by_the_switch() {
+    let mut bus = EventBus::new();
+    let (id, rx) = bus.subscribe(EventFilter::All);
+    drop(rx);
+
+    assert!(!bus.try_send_switch(id, SessionId::new()));
+
+    assert!(!bus.contains(id));
+    assert_eq!(bus.subscriber_count(), 0);
+    assert_eq!(bus.desynced(), Vec::new());
 }
 
 #[test]
@@ -1080,7 +1327,7 @@ fn every_event_with_no_wire_spelling_converts_to_nothing() {
         }),
         Event::InputModeChanged(InputModeChanged {
             client_id: client,
-            mode: InputMode::Locked,
+            mode: LockMode::Locked,
         }),
         Event::MouseSelectChanged(MouseSelectChanged {
             client_id: client,

@@ -115,6 +115,28 @@ fn a_multibyte_bare_character_is_one_chord() {
     );
 }
 
+#[test]
+fn adjacent_multibyte_characters_split_on_character_boundaries() {
+    assert_eq!(
+        parse_sequence("é☃", ctrl_leader(), 4),
+        Ok(seq(&[
+            chord(ModFlags::NONE, Key::Char('é')),
+            chord(ModFlags::NONE, Key::Char('☃')),
+        ]))
+    );
+}
+
+#[test]
+fn a_newline_separates_chords() {
+    assert_eq!(
+        parse_sequence("a\nb", ctrl_leader(), 4),
+        Ok(seq(&[
+            chord(ModFlags::NONE, Key::Char('a')),
+            chord(ModFlags::NONE, Key::Char('b')),
+        ]))
+    );
+}
+
 // -- the `>` key inside a sequence ----------------------------------------
 
 #[test]
@@ -223,6 +245,17 @@ fn merging_a_modifier_the_chord_already_holds_changes_nothing() {
 }
 
 #[test]
+fn a_modifier_run_leader_unions_with_the_chords_own_modifiers() {
+    assert_eq!(
+        parse_sequence("<leader><A-x>", ctrl_leader(), 4),
+        Ok(seq(&[chord(
+            ModFlags::CTRL | ModFlags::ALT,
+            Key::Char('x')
+        )]))
+    );
+}
+
+#[test]
 fn a_modifier_run_leader_merges_into_a_named_key() {
     assert_eq!(
         parse_sequence("<leader><Tab>", ctrl_leader(), 4),
@@ -295,6 +328,30 @@ fn a_modifier_run_leader_adds_no_chord_toward_the_cap() {
             chord(ModFlags::NONE, Key::Char('c')),
             chord(ModFlags::NONE, Key::Char('d')),
         ]))
+    );
+}
+
+#[test]
+fn a_chord_leader_filling_the_cap_exactly_parses() {
+    assert_eq!(
+        parse_sequence("<leader>abc", space_leader(), 4),
+        Ok(seq(&[
+            chord(ModFlags::NONE, Key::Named(NamedKey::Space)),
+            chord(ModFlags::NONE, Key::Char('a')),
+            chord(ModFlags::NONE, Key::Char('b')),
+            chord(ModFlags::NONE, Key::Char('c')),
+        ]))
+    );
+}
+
+#[test]
+fn a_chord_leader_plus_one_chord_is_past_a_cap_of_one() {
+    assert_eq!(
+        parse_sequence("<leader>a", space_leader(), 1),
+        Err(KeyParseError {
+            token: "<leader>a".to_string(),
+            kind: KeyParseErrorKind::SequenceTooLong { len: 2, max: 1 },
+        })
     );
 }
 
@@ -374,6 +431,43 @@ fn a_shift_only_leader_merging_into_a_non_letter_is_rejected() {
 }
 
 #[test]
+fn a_shift_only_leader_merging_into_a_modified_non_letter_is_rejected() {
+    // The merge check runs on the already-parsed chord. The failing token is
+    // the whole `<C-1>`, not the bare `1`.
+    assert_eq!(
+        parse_sequence("<leader><C-1>", Leader::Mods(ModFlags::SHIFT), 4),
+        Err(KeyParseError {
+            token: "<C-1>".to_string(),
+            kind: KeyParseErrorKind::ShiftOnNonLetter { ch: '1' },
+        })
+    );
+}
+
+#[test]
+fn a_bracketed_leader_name_carrying_modifiers_is_not_the_leader_token() {
+    assert_eq!(
+        parse_sequence("<C-leader>", ctrl_leader(), 4),
+        Err(KeyParseError {
+            token: "<C-leader>".to_string(),
+            kind: KeyParseErrorKind::UnknownNamedKey {
+                name: "leader".to_string(),
+            },
+        })
+    );
+}
+
+#[test]
+fn an_empty_bracketed_token_is_rejected() {
+    assert_eq!(
+        parse_sequence("<>", ctrl_leader(), 4),
+        Err(KeyParseError {
+            token: "<>".to_string(),
+            kind: KeyParseErrorKind::MissingKey,
+        })
+    );
+}
+
+#[test]
 fn an_unclosed_bracket_is_rejected_with_the_rest_of_the_text() {
     assert_eq!(
         parse_sequence("a <C-p", ctrl_leader(), 4),
@@ -422,6 +516,30 @@ fn a_bare_word_in_the_dash_form_is_rejected() {
 }
 
 #[test]
+fn the_first_dash_form_word_names_the_error() {
+    assert_eq!(
+        parse_sequence("a-b c-d", ctrl_leader(), 8),
+        Err(KeyParseError {
+            token: "a-b".to_string(),
+            kind: KeyParseErrorKind::UnbracketedMultiChar,
+        })
+    );
+}
+
+#[test]
+fn the_dash_form_check_runs_before_tokenizing() {
+    // `<C-p` never closes. The dash-form scan covers the whole text before
+    // tokenizing: the reported token is `a-b`, not `<C-p`.
+    assert_eq!(
+        parse_sequence("a-b <C-p", ctrl_leader(), 8),
+        Err(KeyParseError {
+            token: "a-b".to_string(),
+            kind: KeyParseErrorKind::UnbracketedMultiChar,
+        })
+    );
+}
+
+#[test]
 fn a_dash_chord_is_legal_when_separated_or_at_a_word_edge() {
     assert_eq!(
         parse_sequence("a - b", ctrl_leader(), 4),
@@ -459,6 +577,87 @@ fn a_word_holding_a_bracketed_token_is_exempt_from_the_dash_form_rule() {
     );
 }
 
+#[test]
+fn a_dash_form_outside_a_bracketed_run_is_refused_wherever_it_sits() {
+    // The scan steps over each `<…>` run and reads what is left: `a-b` before
+    // a bracket and `Ctrl-g` after one are both the dash form.
+    assert_eq!(
+        parse_sequence("a-b<C-p>", ctrl_leader(), 4),
+        Err(KeyParseError {
+            token: "a-b<C-p>".to_string(),
+            kind: KeyParseErrorKind::UnbracketedMultiChar,
+        })
+    );
+    assert_eq!(
+        parse_sequence("<leader>Ctrl-g", ctrl_leader(), 8),
+        Err(KeyParseError {
+            token: "<leader>Ctrl-g".to_string(),
+            kind: KeyParseErrorKind::UnbracketedMultiChar,
+        })
+    );
+}
+
+#[test]
+fn a_bracketed_run_is_never_read_as_the_dash_form() {
+    // `<C-p>` holds a dash between two alphanumerics, and it is bracketed.
+    assert_eq!(
+        parse_sequence("<C-p><S-a>", ctrl_leader(), 4),
+        Ok(seq(&[
+            chord(ModFlags::CTRL, Key::Char('p')),
+            chord(ModFlags::SHIFT, Key::Char('a')),
+        ]))
+    );
+}
+
+#[test]
+fn an_empty_bracket_before_a_close_is_still_refused() {
+    // `<>` names no modifier run, so the `<C->>` recovery does not extend it
+    // through the next `>`.
+    assert_eq!(
+        parse_sequence("<>>", ctrl_leader(), 4),
+        Err(KeyParseError {
+            token: "<>".to_string(),
+            kind: KeyParseErrorKind::MissingKey,
+        })
+    );
+}
+
+#[test]
+fn a_dash_form_word_of_non_ascii_letters_is_rejected() {
+    // The dash-form scan reads Unicode alphanumerics, not ASCII only.
+    assert_eq!(
+        parse_sequence("é-ü", ctrl_leader(), 4),
+        Err(KeyParseError {
+            token: "é-ü".to_string(),
+            kind: KeyParseErrorKind::UnbracketedMultiChar,
+        })
+    );
+}
+
+#[test]
+fn a_lone_open_bracket_is_an_unclosed_bracket() {
+    assert_eq!(
+        parse_sequence("<", ctrl_leader(), 4),
+        Err(KeyParseError {
+            token: "<".to_string(),
+            kind: KeyParseErrorKind::UnclosedBracket,
+        })
+    );
+}
+
+#[test]
+fn an_unclosed_bracket_swallows_the_words_after_it() {
+    // Nothing closes `<C-p`, so the reported token runs to the end of the
+    // text, the following ` a` included.
+    assert_eq!(
+        parse_sequence("<C-p a", ctrl_leader(), 4),
+        Err(KeyParseError {
+            token: "<C-p a".to_string(),
+            kind: KeyParseErrorKind::UnclosedBracket,
+        })
+    );
+}
+
 // -- round trips ----------------------------------------------------------
 
 #[test]
@@ -473,6 +672,38 @@ fn the_canonical_text_form_parses_back_to_an_equal_sequence() {
     }
 }
 
+#[test]
+fn the_canonical_text_form_of_awkward_keys_parses_back_to_an_equal_sequence() {
+    // The bracket characters, a bare `>`, and a full modifier run.
+    for text in [
+        "<C->>",
+        "<C-->",
+        "<<>",
+        "> a",
+        "<C-A-S-D-a>",
+        "<S-Tab> <F12>",
+    ] {
+        let parsed = parse_sequence(text, ctrl_leader(), 4).expect(text);
+        assert_eq!(
+            parse_sequence(&parsed.to_string(), ctrl_leader(), 4),
+            Ok(parsed),
+            "round trip of `{text}`"
+        );
+    }
+}
+
+#[test]
+fn a_leader_substituted_sequence_round_trips_through_its_text_form() {
+    // The canonical form carries no `<leader>`, so it re-parses to the same
+    // sequence under any leader: `<leader>wq` renders as `<C-w> q`.
+    let parsed = parse_sequence("<leader>wq", ctrl_leader(), 4).expect("leader merge parses");
+    assert_eq!(parsed.to_string(), "<C-w> q");
+    assert_eq!(
+        parse_sequence(&parsed.to_string(), space_leader(), 4),
+        Ok(parsed)
+    );
+}
+
 // -- adversarial: hostile length and bytes --------------------------------
 
 #[test]
@@ -481,6 +712,7 @@ fn an_absurdly_long_sequence_reports_its_length_without_panicking() {
     // of 255, is counted and reported once — not a panic, hang, or overflow.
     let text = "a ".repeat(1000);
     let err = parse_sequence(&text, ctrl_leader(), u8::MAX).unwrap_err();
+    assert_eq!(err.token, text);
     assert_eq!(
         err.kind,
         KeyParseErrorKind::SequenceTooLong {
@@ -493,6 +725,7 @@ fn an_absurdly_long_sequence_reports_its_length_without_panicking() {
 #[test]
 fn a_nul_byte_token_is_refused_as_a_control_character() {
     let err = parse_sequence("\0", ctrl_leader(), 4).unwrap_err();
+    assert_eq!(err.token, "\0");
     assert_eq!(
         err.kind,
         KeyParseErrorKind::RawWhitespaceOrControl { ch: '\0' }
@@ -516,6 +749,7 @@ fn a_cap_at_the_largest_byte_value_still_rejects_one_more() {
     // representable cap.
     let text = "a".repeat(256);
     let err = parse_sequence(&text, ctrl_leader(), u8::MAX).unwrap_err();
+    assert_eq!(err.token, text);
     assert_eq!(
         err.kind,
         KeyParseErrorKind::SequenceTooLong { len: 256, max: 255 }
@@ -525,8 +759,7 @@ fn a_cap_at_the_largest_byte_value_still_rejects_one_more() {
     assert_eq!(
         parse_sequence(&at_cap, ctrl_leader(), u8::MAX)
             .expect("255 chords fits the cap")
-            .chords()
-            .len(),
-        255
+            .chords(),
+        vec![chord(ModFlags::NONE, Key::Char('a')); 255].as_slice()
     );
 }

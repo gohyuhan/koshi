@@ -3,10 +3,10 @@
 use std::path::Path;
 
 use koshi_core::command::{Command, CommandResult, DetachArgs};
-use koshi_core::event::RejectReason;
 use koshi_core::ids::{ClientId, SessionId};
 
 use crate::cli::SessionRef;
+use crate::targeting;
 use koshi_core::ids::parse_prefixed_uuid;
 use koshi_link::discovery::{self, Discovered};
 use koshi_link::error::CliError;
@@ -64,51 +64,15 @@ fn resolve_session(
 
 /// Pick the named session, or apply the sole-running-session rule.
 fn select_kill_session(found: &Discovered, name: Option<&str>) -> Result<SessionId, CliError> {
-    let sessions = found.sessions.as_slice();
-    match name {
-        Some(name) => {
-            let matches: Vec<SessionId> = sessions
-                .iter()
-                .filter(|overview| overview.session.name == name)
-                .map(|overview| overview.session.id)
-                .collect();
-            match matches.as_slice() {
-                [] => Err(found.no_such_session(name)),
-                [only] if found.is_complete() => Ok(*only),
-                [_] => Err(found.unanswered(&format!("cannot tell whether `{name}` is unique"))),
-                several => {
-                    let ids = several
-                        .iter()
-                        .map(SessionId::to_string)
-                        .collect::<Vec<String>>()
-                        .join(", ");
-                    Err(CliError::CommandRejected {
-                        reason: RejectReason::TargetAmbiguous,
-                        help: Some(format!(
-                            "several sessions are named `{name}`: {ids}; use the session id"
-                        )),
-                    })
-                }
-            }
-        }
-        None => {
-            let mut running = sessions.iter();
-            match (running.next(), running.next()) {
-                (Some(_), Some(_)) => Err(CliError::CommandRejected {
-                    reason: RejectReason::TargetAmbiguous,
-                    help: Some(
-                        "several sessions are running; name one: koshi kill-session <name>"
-                            .to_string(),
-                    ),
-                }),
-                (Some(only), None) if found.is_complete() => Ok(only.session.id),
-                (None, _) if found.is_complete() => Err(CliError::NoSessions),
-                _ => Err(found.unanswered(
-                    "cannot tell which session to kill; name one: koshi kill-session <name>",
-                )),
-            }
-        }
-    }
+    let overview = match name {
+        Some(name) => targeting::session_named(found, name)?,
+        None => targeting::the_only_session(
+            found,
+            "several sessions are running; name one: koshi kill-session <name>",
+            "cannot tell which session to kill; name one: koshi kill-session <name>",
+        )?,
+    };
+    Ok(overview.session.id)
 }
 
 /// Detach the client the `koshi detach` argument names, leaving the session

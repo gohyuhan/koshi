@@ -1,5 +1,5 @@
-//! The session domain modules: state, lifecycle, tabs, panes, focus, and the
-//! removal cascade.
+//! The session domain modules: state, lifecycle, tabs, panes, focus, close
+//! policies, and the removal cascade.
 
 pub mod cascade;
 pub mod focus;

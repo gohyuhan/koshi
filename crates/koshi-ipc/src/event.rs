@@ -38,10 +38,10 @@ pub type IncomingEvent = MaybeKnown<SessionEvent>;
 
 /// One frame on an attached client's event stream.
 ///
-/// A field this build does not know is ignored, so a frame from a newer koshi
-/// still reads. A whole frame this build has no name for arrives as
-/// [`MaybeKnown::Unknown`] through
-/// [`IncomingEvent`], and the client skips it and keeps reading.
+/// A field this build does not know is ignored: a frame from a newer koshi
+/// reads. A whole frame this build has no name for arrives as
+/// [`MaybeKnown::Unknown`] through [`IncomingEvent`], and the client skips it
+/// and keeps reading. A frame missing a field this build needs is refused.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionEvent {
     /// The picture the session composed for this client, drawn whole.
@@ -153,7 +153,11 @@ pub enum SessionEvent {
     },
     /// Bytes for the terminal this client runs in, written to it verbatim.
     HostWrite {
-        /// The bytes to write, in the order the session queued them.
+        /// The bytes to write, in the order the session queued them. Written
+        /// as one base64 string: the two bytes `[104, 105]` are `"aGk="`. Read
+        /// from that string or from a list of numbers, the shape a session
+        /// server speaking session protocol 2 writes.
+        #[serde(with = "crate::bytes::base64_or_list")]
         bytes: Vec<u8>,
     },
     /// The client drops this session and attaches to the named one.
@@ -165,9 +169,8 @@ pub enum SessionEvent {
 }
 
 impl SessionEvent {
-    /// The frame's name, e.g. `"Painted"`. Carries no payload, so it is safe
-    /// on a log line even though a payload can hold pane content or bytes a
-    /// pane wrote.
+    /// The frame's name, e.g. `"Painted"`, with none of its payload. Written
+    /// on log lines.
     #[must_use]
     pub fn name(&self) -> &'static str {
         match self {

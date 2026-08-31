@@ -3,13 +3,14 @@
 //! read/write/resize, child termination, and exit detection. Panes held by
 //! another process are driven the same way over the supervisor link.
 //!
-//! A PTY (pseudo-terminal) is an OS-level pair of linked file handles that
-//! makes a spawned program (a shell, for example) behave as if it were
-//! talking to a real terminal, so interactive behavior like line editing and
-//! colors works when koshi runs it.
+//! A PTY (pseudo-terminal) is an OS-level pair of linked file handles. A
+//! spawned program (a shell, for example) attached to one behaves as if it
+//! were talking to a real terminal: line editing and colors work.
 
 /// OS lookups about working directories and the machine's own name.
 pub mod cwd;
+
+/// The environment overlay a spawned child starts with.
 mod env;
 
 /// Error types for PTY operations.

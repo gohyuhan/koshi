@@ -712,3 +712,183 @@ fn a_two_space_bracket_is_read_as_an_unknown_named_key() {
         })
     );
 }
+
+#[test]
+fn every_modifier_and_no_key_is_refused() {
+    assert_eq!(
+        parse_chord("<C-A-S-D->"),
+        Err(KeyParseError {
+            token: "<C-A-S-D->".to_string(),
+            kind: KeyParseErrorKind::MissingKey,
+        })
+    );
+}
+
+#[test]
+fn a_dash_where_a_modifier_letter_belongs_is_an_unknown_modifier() {
+    // `<-->` opens with the pair `--`, and `-` is not one of `C`, `A`, `S`, `D`.
+    assert_eq!(
+        parse_chord("<-->"),
+        Err(KeyParseError {
+            token: "<-->".to_string(),
+            kind: KeyParseErrorKind::UnknownModifier { modifier: '-' },
+        })
+    );
+}
+
+#[test]
+fn a_function_key_number_with_leading_zeros_names_the_same_key() {
+    assert_eq!(
+        parse_chord("<F01>"),
+        Ok(chord(ModFlags::NONE, Key::Named(NamedKey::F(1))))
+    );
+    assert_eq!(
+        parse_chord("<F0024>"),
+        Ok(chord(ModFlags::NONE, Key::Named(NamedKey::F(24))))
+    );
+}
+
+#[test]
+fn a_non_ascii_capital_folds_into_the_shift_bit() {
+    assert_eq!(parse_chord("È"), Ok(chord(ModFlags::SHIFT, Key::Char('è'))));
+    assert_eq!(
+        parse_chord("<A-È>"),
+        Ok(chord(ModFlags::ALT | ModFlags::SHIFT, Key::Char('è')))
+    );
+}
+
+#[test]
+fn a_repeated_modifier_in_a_leader_run_is_refused() {
+    assert_eq!(
+        parse_leader("C-C-"),
+        Err(KeyParseError {
+            token: "C-C-".to_string(),
+            kind: KeyParseErrorKind::DuplicateModifier { modifier: 'C' },
+        })
+    );
+}
+
+#[test]
+fn a_leader_that_never_closes_its_bracket_is_refused() {
+    assert_eq!(
+        parse_leader("<C-p"),
+        Err(KeyParseError {
+            token: "<C-p".to_string(),
+            kind: KeyParseErrorKind::UnclosedBracket,
+        })
+    );
+}
+
+#[test]
+fn a_lone_f_in_brackets_is_the_shifted_letter_not_a_function_key() {
+    // The function-key path needs at least one digit after the `F`, so a bare
+    // `F` takes the single-character path and folds into the Shift bit.
+    assert_eq!(
+        parse_chord("<F>"),
+        Ok(chord(ModFlags::SHIFT, Key::Char('f')))
+    );
+}
+
+#[test]
+fn a_bracketed_digit_run_with_no_f_is_an_unknown_key_name() {
+    assert_eq!(
+        parse_chord("<12>"),
+        Err(KeyParseError {
+            token: "<12>".to_string(),
+            kind: KeyParseErrorKind::UnknownNamedKey {
+                name: "12".to_string(),
+            },
+        })
+    );
+}
+
+#[test]
+fn an_explicit_shift_on_a_non_ascii_capital_folds_to_one_shift_bit() {
+    assert_eq!(
+        parse_chord("<S-È>"),
+        Ok(chord(ModFlags::SHIFT, Key::Char('è')))
+    );
+}
+
+#[test]
+fn a_capital_leader_folds_into_the_shift_bit() {
+    assert_eq!(
+        parse_leader("N"),
+        Ok(Leader::Chord(chord(ModFlags::SHIFT, Key::Char('n'))))
+    );
+}
+
+#[test]
+fn a_bracketed_leader_carries_the_chord_parsers_rejection_unchanged() {
+    assert_eq!(
+        parse_leader("<S-1>"),
+        parse_chord("<S-1>").map(Leader::Chord)
+    );
+    assert_eq!(
+        parse_leader("<S-1>"),
+        Err(KeyParseError {
+            token: "<S-1>".to_string(),
+            kind: KeyParseErrorKind::ShiftOnNonLetter { ch: '1' },
+        })
+    );
+}
+
+#[test]
+fn every_error_kind_renders_its_own_message() {
+    let cases = [
+        (KeyParseErrorKind::Empty, "empty key"),
+        (KeyParseErrorKind::UnclosedBracket, "missing closing `>`"),
+        (KeyParseErrorKind::MissingKey, "no key after the modifiers"),
+        (
+            KeyParseErrorKind::UnknownModifier { modifier: 'x' },
+            "unknown modifier `x-`; use `C-`, `A-`, `S-`, or `D-`",
+        ),
+        (
+            KeyParseErrorKind::DuplicateModifier { modifier: 'C' },
+            "modifier `C-` given twice",
+        ),
+        (
+            KeyParseErrorKind::UnknownNamedKey {
+                name: "Nope".to_string(),
+            },
+            "unknown key name `Nope`",
+        ),
+        (
+            KeyParseErrorKind::UnbracketedMultiChar,
+            "a multi-character key must be bracketed, as in `<Tab>`",
+        ),
+        (
+            KeyParseErrorKind::ShiftOnNonLetter { ch: '1' },
+            "`S-` applies to letters only, not `1`; write the shifted character itself",
+        ),
+        (
+            KeyParseErrorKind::FunctionKeyOutOfRange {
+                n: "25".to_string(),
+            },
+            "function keys run F1 to F24, got `F25`",
+        ),
+        (
+            KeyParseErrorKind::RawWhitespaceOrControl { ch: '\t' },
+            "the character '\\t' is written by its key name, such as `<Space>` or `<Tab>`",
+        ),
+        (
+            KeyParseErrorKind::LeaderNotAChord,
+            "`<leader>` stands for a prefix, not a chord",
+        ),
+        (
+            KeyParseErrorKind::LeaderNotFirst,
+            "`<leader>` may only open a sequence",
+        ),
+        (
+            KeyParseErrorKind::DanglingLeaderMods,
+            "the leader's modifiers need a key after them",
+        ),
+        (
+            KeyParseErrorKind::SequenceTooLong { len: 5, max: 4 },
+            "the sequence has 5 chords; the cap is 4",
+        ),
+    ];
+    for (kind, expected) in cases {
+        assert_eq!(kind.to_string(), expected);
+    }
+}

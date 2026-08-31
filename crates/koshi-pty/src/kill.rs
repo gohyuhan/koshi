@@ -1,11 +1,10 @@
 //! OS-specific child termination, kept behind one cross-platform type.
 //!
-//! [`crate::kill::PtyChildKillControl`] exposes the same four operations on every platform —
+//! [`crate::kill::PtyChildKillControl`] exposes the same four operations on every platform:
 //! [`force`](crate::kill::PtyChildKillControl::force), [`tree`](crate::kill::PtyChildKillControl::tree),
 //! [`request_stop`](crate::kill::PtyChildKillControl::request_stop), and
-//! [`request_stop_tree`](crate::kill::PtyChildKillControl::request_stop_tree) —
-//! so the backend's `kill` path stays platform-agnostic. The signal/Job-Object
-//! names that make them work are confined to this module.
+//! [`request_stop_tree`](crate::kill::PtyChildKillControl::request_stop_tree).
+//! The signal and Job-Object names behind them stay inside this module.
 //!
 //! `force` targets only the child process (`kill(pid)` / `TerminateProcess`);
 //! `tree` targets the whole group (`killpg` / `TerminateJobObject`). The stop
@@ -56,8 +55,8 @@ pub enum StopRequest {
 
 /// Terminates a spawned child by PID and process group.
 ///
-/// On Unix the child leads its own process group (`portable-pty` runs `setsid`),
-/// so `tree` group-kills via `killpg`; `force` signals only the leader PID.
+/// The child leads its own process group (`portable-pty` runs `setsid`):
+/// `tree` group-kills via `killpg`; `force` signals only the leader PID.
 #[cfg(unix)]
 pub struct PtyChildKillControl {
     pid: u32,
@@ -70,10 +69,28 @@ impl PtyChildKillControl {
         PtyChildKillControl { pid }
     }
 
+    /// The process this control signals, or `None` when the pid names no child.
+    ///
+    /// `0` names the caller's own process group, and a pid above `i32::MAX`
+    /// wraps to a negative id naming an arbitrary process group. Neither is a
+    /// child, so neither is signalled.
+    fn target(&self) -> Option<Pid> {
+        let pid = i32::try_from(self.pid).ok()?;
+        (pid > 0).then(|| Pid::from_raw(pid))
+    }
+
     /// Send `signal` to the child (`kill`) or, when `whole_group`, to its whole
-    /// process group (`killpg`). The shared delivery behind the four operations.
+    /// process group (`killpg`). Any error maps to [`PtyError::Signal`]
+    /// carrying the errno's name and description (`ESRCH: No such process`).
+    ///
+    /// A pid of `0`, and one above `i32::MAX`, is [`PtyError::Signal`] carrying
+    /// `pid <n> names no child process`, and nothing is signalled.
     fn signal(&self, whole_group: bool, signal: Signal) -> Result<(), PtyError> {
-        let pid = Pid::from_raw(self.pid as i32);
+        let Some(pid) = self.target() else {
+            return Err(PtyError::Signal {
+                detail: format!("pid {} names no child process", self.pid),
+            });
+        };
         let sent = if whole_group {
             killpg(pid, signal)
         } else {
@@ -85,21 +102,35 @@ impl PtyChildKillControl {
     }
 
     /// SIGKILL the child process (leader only).
+    ///
+    /// # Errors
+    /// Returns [`PtyError::Signal`] when `kill` fails: `ESRCH` when the child
+    /// is already gone, `EPERM` when this process may not signal it.
     pub fn force(&self) -> Result<(), PtyError> {
         self.signal(false, Signal::SIGKILL)
     }
 
     /// SIGKILL the child's whole process group, reaping any grandchildren.
+    ///
+    /// # Errors
+    /// Returns [`PtyError::Signal`] when `killpg` fails: `ESRCH` when no
+    /// group carries the child's PID, `EPERM` when a member may not be
+    /// signalled.
     pub fn tree(&self) -> Result<(), PtyError> {
         self.signal(true, Signal::SIGKILL)
     }
 
     /// SIGTERM the child, asking it to exit on its own.
     ///
-    /// Any error means the signal did not arrive: `ESRCH` when the child is
-    /// already gone, `EPERM` when this process may not signal it.
+    /// Any error answers [`StopRequest::NotDelivered`]: `ESRCH` when the
+    /// child is already gone, `EPERM` when this process may not signal it. A
+    /// pid of `0`, and one above `i32::MAX`, answers
+    /// [`StopRequest::NotDelivered`] with nothing signalled.
     pub fn request_stop(&self) -> StopRequest {
-        match kill(Pid::from_raw(self.pid as i32), Signal::SIGTERM) {
+        let Some(pid) = self.target() else {
+            return StopRequest::NotDelivered;
+        };
+        match kill(pid, Signal::SIGTERM) {
             Ok(()) => StopRequest::Delivered,
             Err(_) => StopRequest::NotDelivered,
         }
@@ -108,10 +139,16 @@ impl PtyChildKillControl {
     /// SIGTERM the child's whole process group, asking every member to exit on
     /// its own.
     ///
-    /// `EPERM` reports that at least one member could not be signalled, so the
-    /// remaining members may still have received the signal.
+    /// `EPERM` answers [`StopRequest::Unknown`]: it reports that at least one
+    /// member could not be signalled, and the remaining members may still
+    /// have received the signal. Any other error (`ESRCH` when no group
+    /// carries the child's PID) answers [`StopRequest::NotDelivered`], and so
+    /// does a pid of `0` or one above `i32::MAX`, with nothing signalled.
     pub fn request_stop_tree(&self) -> StopRequest {
-        match killpg(Pid::from_raw(self.pid as i32), Signal::SIGTERM) {
+        let Some(pid) = self.target() else {
+            return StopRequest::NotDelivered;
+        };
+        match killpg(pid, Signal::SIGTERM) {
             Ok(()) => StopRequest::Delivered,
             Err(Errno::EPERM) => StopRequest::Unknown,
             Err(_) => StopRequest::NotDelivered,
@@ -147,13 +184,11 @@ impl Drop for OwnedJob {
     }
 }
 
-// A raw `HANDLE` is `!Send`, but a job handle is safe to use from any thread and
-// the backend keeps `PaneEntry` behind a `Mutex` shared with the reader/watcher
-// threads, which requires `Send`. The shared job below is read from every
-// thread that opens a pane, which requires `Sync`.
+// SAFETY: a job handle may be used and closed from any thread.
 #[cfg(windows)]
 unsafe impl Send for OwnedJob {}
 
+// SAFETY: a job handle may be used from several threads at once.
 #[cfg(windows)]
 unsafe impl Sync for OwnedJob {}
 
@@ -203,9 +238,9 @@ fn panes_die_with_this_process() -> Option<HANDLE> {
 
 /// Owns a duplicated handle to the child process and closes it on drop.
 ///
-/// `force` terminates through this handle rather than reopening the PID. The
-/// handle names the exact process object, dead or alive, so a PID another
-/// process took over after the child exited is never terminated.
+/// `force` terminates through this handle. The handle names the exact process
+/// object, dead or alive; a PID another process took over after the child
+/// exited is never terminated.
 #[cfg(windows)]
 struct OwnedHandle(HANDLE);
 
@@ -218,14 +253,15 @@ impl Drop for OwnedHandle {
     }
 }
 
+// SAFETY: a process handle may be used and closed from any thread.
 #[cfg(windows)]
 unsafe impl Send for OwnedHandle {}
 
 /// Terminates a spawned child by process handle and Job Object.
 ///
-/// `force` terminates only the child process via a duplicated, reuse-safe handle;
-/// `tree` terminates every process in the job (`TerminateJobObject`), reaping the
-/// child's descendants — the Windows analogue of `kill(pid)` vs `killpg(pgid)`.
+/// `force` terminates only the child process through its duplicated handle;
+/// `tree` terminates every process in the job (`TerminateJobObject`), reaping
+/// the child's descendants.
 #[cfg(windows)]
 pub struct PtyChildKillControl {
     pid: u32,
@@ -235,17 +271,19 @@ pub struct PtyChildKillControl {
 
 #[cfg(windows)]
 impl PtyChildKillControl {
-    /// Join the child to the job that ends with this process, create a job of
-    /// its own and join it to that too; descendants join automatically, so
-    /// [`tree`](Self::tree) reaps the whole group when it is called.
+    /// Join the child to the job that ends with this process, then create a
+    /// job of its own and join it to that too. Descendants join the per-child
+    /// job automatically, and [`tree`](Self::tree) reaps the whole group.
     ///
-    /// The shared job is joined first: `AssignProcessToJobObject` takes a
-    /// process that already belongs to a job only into an empty one, and only
+    /// The shared job is joined first. `AssignProcessToJobObject` takes a
+    /// process that already belongs to a job only into an empty job, and only
     /// the freshly created per-child job is empty.
     ///
     /// # Errors
-    /// Returns [`PtyError::Signal`] when either job cannot be created or
-    /// joined, so a child that could outlive this process never opens a pane.
+    /// Returns [`PtyError::Signal`] when the shared job does not exist, when
+    /// the child cannot join either job, when the per-child job cannot be
+    /// created, or when the child's process handle cannot be duplicated. A
+    /// child that could outlive this process never opens a pane.
     pub fn new(pid: u32, child_handle: RawHandle) -> Result<Self, PtyError> {
         unsafe {
             let Some(shared) = panes_die_with_this_process() else {
@@ -277,10 +315,9 @@ impl PtyChildKillControl {
                 });
             }
 
-            // Duplicate the child handle into one we own, carrying only
-            // PROCESS_TERMINATE. `force` terminates through this rather than
-            // reopening `self.pid`, so it can never hit a process that recycled
-            // the PID after the child exited.
+            // Duplicate the child handle into one this control owns, carrying
+            // only PROCESS_TERMINATE. `force` terminates through it; a process
+            // that recycled the PID after the child exited is never hit.
             let mut process: HANDLE = std::ptr::null_mut();
             let current = GetCurrentProcess();
             if DuplicateHandle(
@@ -306,7 +343,11 @@ impl PtyChildKillControl {
         }
     }
 
-    /// Terminate only the child process; its descendants are left running.
+    /// Terminate only the child process with exit code 137; its descendants
+    /// are left running.
+    ///
+    /// # Errors
+    /// Returns [`PtyError::Signal`] when `TerminateProcess` fails.
     pub fn force(&self) -> Result<(), PtyError> {
         if unsafe { TerminateProcess(self.process.0, 137) } == 0 {
             return Err(PtyError::Signal {
@@ -316,7 +357,11 @@ impl PtyChildKillControl {
         Ok(())
     }
 
-    /// Terminate every process in the job, reaping the child's descendants.
+    /// Terminate every process in the job with exit code 137, reaping the
+    /// child's descendants.
+    ///
+    /// # Errors
+    /// Returns [`PtyError::Signal`] when `TerminateJobObject` fails.
     pub fn tree(&self) -> Result<(), PtyError> {
         if unsafe { TerminateJobObject(self.job.0, 137) } == 0 {
             return Err(PtyError::Signal {
@@ -326,16 +371,14 @@ impl PtyChildKillControl {
         Ok(())
     }
 
-    /// Sends nothing and always answers [`StopRequest::NotDelivered`]: the child
-    /// cannot be asked to exit on its own, so callers go straight to
-    /// [`force`](Self::force).
+    /// Sends nothing and always answers [`StopRequest::NotDelivered`]: a
+    /// Windows child cannot be asked to exit on its own.
     pub fn request_stop(&self) -> StopRequest {
         StopRequest::NotDelivered
     }
 
-    /// Sends nothing and always answers [`StopRequest::NotDelivered`]: the
-    /// child's process group cannot be asked to exit on its own, so callers go
-    /// straight to [`tree`](Self::tree).
+    /// Sends nothing and always answers [`StopRequest::NotDelivered`]: a
+    /// Windows job cannot be asked to exit on its own.
     pub fn request_stop_tree(&self) -> StopRequest {
         StopRequest::NotDelivered
     }

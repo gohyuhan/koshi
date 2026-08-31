@@ -3,7 +3,7 @@
 //! A layout tree holds bare `PaneId` leaves. The registry holds everything else
 //! about a pane: its command, its working directory and its lifecycle state.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use koshi_core::ids::PaneId;
 use serde::{Deserialize, Serialize};
@@ -11,10 +11,11 @@ use serde::{Deserialize, Serialize};
 use crate::{error::PaneRegistryError, pane::state::PaneRecord};
 
 /// Owns the [`PaneRecord`] of every pane in one session, keyed by id. The map
-/// is private. Records go in and out only through the methods below.
+/// is private. Records go in and out only through the methods below, and it
+/// walks in id order.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PaneRegistry {
-    records: HashMap<PaneId, PaneRecord>,
+    records: BTreeMap<PaneId, PaneRecord>,
 }
 
 impl PaneRegistry {
@@ -26,7 +27,8 @@ impl PaneRegistry {
 
     /// Inserts a pane record, keyed by its id. Returns
     /// [`PaneRegistryError::DuplicateId`] when the id is already registered.
-    /// The existing record stays untouched.
+    /// The error carries the id and the kind of the rejected record. The
+    /// existing record stays untouched.
     pub fn insert(&mut self, pane_record: PaneRecord) -> Result<(), PaneRegistryError> {
         if self.records.contains_key(&pane_record.id()) {
             return Err(PaneRegistryError::DuplicateId {
@@ -55,15 +57,13 @@ impl PaneRegistry {
     /// fields in place, such as the policies or the working directory. Returns
     /// `None` when the id is not registered.
     ///
-    /// The `id` field stays read-only, and [`PaneRecord::id`] reads it. To
-    /// change the id of a pane, remove the record under the old id, then insert
-    /// it under the new one.
+    /// The record keeps the id it was created with; [`PaneRecord::id`] reads
+    /// it.
     pub fn get_mut(&mut self, pane_id: PaneId) -> Option<&mut PaneRecord> {
         self.records.get_mut(&pane_id)
     }
 
-    /// Returns an iterator over every registered pane record. The order is not
-    /// defined.
+    /// Returns an iterator over every registered pane record, in id order.
     pub fn list(&self) -> impl Iterator<Item = &PaneRecord> {
         self.records.values()
     }

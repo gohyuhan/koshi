@@ -404,8 +404,247 @@ fn an_event_missing_a_field_this_version_needs_is_refused() {
     );
 
     let error = decoded.expect_err("a frame without its tab decoded instead of failing");
+    assert_eq!(
+        error.to_string(),
+        "missing field `tab_id` at line 1 column 65"
+    );
+}
+
+#[test]
+fn the_payload_frames_wire_shape_belongs_to_this_protocol_version() {
+    // The three frames `every_event` leaves out, pinned the same way: a
+    // change to any name or type below turns this red.
+    let id = "00000000-0000-0000-0000-000000000001";
+    let pane = PaneId::from_uuid(fixed_uuid());
+
+    assert_eq!(
+        serde_json::to_value(SessionEvent::Painted {
+            frame: Box::new(painted_frame()),
+        })
+        .expect("event encodes"),
+        json!({ "Painted": {
+            "frame": serde_json::to_value(painted_frame()).expect("frame encodes")
+        } })
+    );
+    assert_eq!(
+        serde_json::to_value(SessionEvent::MouseAnswer {
+            request_id: 9,
+            answers: vec![
+                MouseAnswer::Scrolled {
+                    pane,
+                    top: Some(938),
+                },
+                MouseAnswer::Resized {
+                    pane,
+                    side: Direction::Up,
+                    step: -1,
+                    applied: 0,
+                },
+            ],
+        })
+        .expect("event encodes"),
+        json!({ "MouseAnswer": {
+            "request_id": 9,
+            "answers": [
+                { "Scrolled": { "pane": id, "top": 938 } },
+                { "Resized": { "pane": id, "side": "Up", "step": -1, "applied": 0 } }
+            ]
+        } })
+    );
+    assert_eq!(
+        serde_json::to_value(SessionEvent::HostWrite {
+            bytes: vec![0x1b, b']', 0xc3, 0xa9],
+        })
+        .expect("event encodes"),
+        json!({ "HostWrite": { "bytes": "G13DqQ==" } })
+    );
+}
+
+#[test]
+fn a_host_write_travels_as_one_base64_string() {
+    let sent = SessionEvent::HostWrite {
+        bytes: vec![0x1b, b']', 0xc3, 0xa9],
+    };
+
+    let encoded = serde_json::to_string(&sent).expect("event encodes");
+
+    assert_eq!(encoded, r#"{"HostWrite":{"bytes":"G13DqQ=="}}"#);
+    let received: SessionEvent = serde_json::from_str(&encoded).expect("event decodes");
+    assert_eq!(received, sent);
+}
+
+#[test]
+fn every_byte_value_survives_a_host_write() {
+    let all: Vec<u8> = (0..=u8::MAX).collect();
+    let sent = SessionEvent::HostWrite { bytes: all.clone() };
+
+    let encoded = serde_json::to_value(&sent).expect("event encodes");
+
+    assert_eq!(
+        encoded,
+        json!({ "HostWrite": { "bytes": "\
+AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7\
+PD0+P0BBQkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWltcXV5fYGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3\
+eHl6e3x9fn+AgYKDhIWGh4iJiouMjY6PkJGSk5SVlpeYmZqbnJ2en6ChoqOkpaanqKmqq6ytrq+wsbKz\
+tLW2t7i5uru8vb6/wMHCw8TFxsfIycrLzM3Oz9DR0tPU1dbX2Nna29zd3t/g4eLj5OXm5+jp6uvs7e7v\
+8PHy8/T19vf4+fr7/P3+/w==" } })
+    );
+    let received: SessionEvent = serde_json::from_value(encoded).expect("event decodes");
+    assert_eq!(received, SessionEvent::HostWrite { bytes: all });
+}
+
+/// The shape a session server speaking session protocol 2 writes. A client
+/// that upgraded while such a session is still running reads it.
+#[test]
+fn a_host_write_carrying_a_list_of_numbers_still_reads() {
+    let decoded: SessionEvent =
+        serde_json::from_str(r#"{"HostWrite":{"bytes":[27,93,195,169]}}"#).expect("event decodes");
+
+    assert_eq!(
+        decoded,
+        SessionEvent::HostWrite {
+            bytes: vec![0x1b, b']', 0xc3, 0xa9],
+        }
+    );
+    // What it decoded to is written back as base64, never as the list it came
+    // from.
+    assert_eq!(
+        serde_json::to_string(&decoded).expect("event encodes"),
+        r#"{"HostWrite":{"bytes":"G13DqQ=="}}"#
+    );
+}
+
+#[test]
+fn an_empty_host_write_reads_from_either_shape() {
+    let from_list: SessionEvent =
+        serde_json::from_str(r#"{"HostWrite":{"bytes":[]}}"#).expect("event decodes");
+    let from_base64: SessionEvent =
+        serde_json::from_str(r#"{"HostWrite":{"bytes":""}}"#).expect("event decodes");
+
+    assert_eq!(from_list, SessionEvent::HostWrite { bytes: Vec::new() });
+    assert_eq!(from_base64, from_list);
+}
+
+#[test]
+fn a_host_write_list_entry_outside_a_byte_is_refused() {
+    let error = serde_json::from_str::<SessionEvent>(r#"{"HostWrite":{"bytes":[27,256]}}"#)
+        .expect_err("256 is not a byte");
+
     assert!(
-        error.to_string().contains("missing field `tab_id`"),
-        "unexpected error: {error}"
+        error.to_string().contains("invalid value"),
+        "unexpected refusal: {error}"
+    );
+}
+
+#[test]
+fn a_host_write_carrying_neither_shape_is_refused() {
+    let error = serde_json::from_str::<SessionEvent>(r#"{"HostWrite":{"bytes":27}}"#)
+        .expect_err("a number is neither shape");
+
+    assert!(
+        error
+            .to_string()
+            .contains("bytes as a base64 string or as a list of numbers"),
+        "unexpected refusal: {error}"
+    );
+}
+
+#[test]
+fn a_host_write_carrying_text_that_is_not_base64_is_refused() {
+    let error = serde_json::from_str::<SessionEvent>(r#"{"HostWrite":{"bytes":"a"}}"#)
+        .expect_err("one character is not a base64 group");
+
+    assert!(
+        error
+            .to_string()
+            .contains("the base64 text length is not a multiple of four"),
+        "unexpected refusal: {error}"
+    );
+}
+
+#[test]
+fn numeric_fields_round_trip_at_their_extremes() {
+    let pane_id = PaneId::from_uuid(fixed_uuid());
+    let sent = [
+        SessionEvent::PaneProcessExited {
+            pane_id,
+            exit_code: Some(i32::MIN),
+        },
+        SessionEvent::PaneProcessExited {
+            pane_id,
+            exit_code: Some(i32::MAX),
+        },
+        SessionEvent::TabMoved {
+            tab_id: TabId::from_uuid(fixed_uuid()),
+            old_index: usize::MAX,
+            new_index: 0,
+        },
+        SessionEvent::Resync {
+            dropped_count: u64::MAX,
+        },
+        SessionEvent::MouseAnswer {
+            request_id: u64::MAX,
+            answers: Vec::new(),
+        },
+        SessionEvent::HostWrite {
+            bytes: vec![0, 255],
+        },
+    ];
+
+    for event in sent {
+        let encoded = serde_json::to_string(&event).expect("event encodes");
+        let received: SessionEvent = serde_json::from_str(&encoded).expect("event decodes");
+
+        assert_eq!(received, event);
+    }
+}
+
+#[test]
+fn an_event_whose_count_is_negative_is_refused() {
+    let dropped: Result<SessionEvent, _> =
+        serde_json::from_str(r#"{"Resync":{"dropped_count":-4}}"#);
+    let index: Result<SessionEvent, _> = serde_json::from_str(
+        r#"{"TabMoved":{"tab_id":"00000000-0000-0000-0000-000000000001","old_index":-1,"new_index":0}}"#,
+    );
+
+    assert_eq!(
+        dropped
+            .expect_err("a negative dropped count decoded instead of failing")
+            .to_string(),
+        "invalid value: integer `-4`, expected u64 at line 1 column 29"
+    );
+    assert_eq!(
+        index
+            .expect_err("a negative index decoded instead of failing")
+            .to_string(),
+        "invalid value: integer `-1`, expected usize at line 1 column 75"
+    );
+}
+
+#[test]
+fn an_event_whose_id_is_not_a_uuid_is_refused() {
+    let decoded: Result<SessionEvent, _> =
+        serde_json::from_str(r#"{"PaneClosing":{"pane_id":"not-a-uuid"}}"#);
+
+    assert_eq!(
+        decoded
+            .expect_err("a pane id that is not a UUID decoded instead of failing")
+            .to_string(),
+        "UUID parsing failed: invalid character: found `n` at 0 at line 1 column 38"
+    );
+}
+
+/// A frame this build has reads as [`MaybeKnown::Known`] through
+/// [`IncomingEvent`], whether it carries fields or is a bare name.
+#[test]
+fn a_frame_this_build_has_reads_as_known() {
+    let bare: IncomingEvent = serde_json::from_str(r#""Quit""#).expect("a bare name decodes");
+    let with_fields: IncomingEvent =
+        serde_json::from_str(r#"{"Resync":{"dropped_count":4}}"#).expect("a frame decodes");
+
+    assert_eq!(bare, MaybeKnown::Known(SessionEvent::Quit));
+    assert_eq!(
+        with_fields,
+        MaybeKnown::Known(SessionEvent::Resync { dropped_count: 4 })
     );
 }

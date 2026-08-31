@@ -65,10 +65,9 @@ fn uppercase_host_forms_normalize_to_shift_plus_lowercase() {
 
 #[test]
 fn a_capital_that_cannot_be_rebuilt_is_never_folded() {
-    // `ẞ` (capital sharp S) lowercases to the single char `ß`, but `ß`
-    // uppercases to "SS" — so `Shift + ß` cannot rebuild it. Folding it would
-    // send the pane `ß` for a typed `ẞ`, silently altering the user's text, so
-    // it stands for itself instead, as `İ` already does.
+    // `ẞ` (capital sharp S) lowercases to the single char `ß`, and `ß`
+    // uppercases to "SS": `Shift + ß` does not rebuild `ẞ`. The chord keeps
+    // `ẞ` with no Shift, and the pane receives `ẞ`.
     assert_eq!(
         decode_key(press(KeyCode::Char('ẞ'), KeyModifiers::NONE)),
         chord(ModFlags::NONE, Key::Char('ẞ'))
@@ -85,9 +84,8 @@ fn a_capital_that_cannot_be_rebuilt_is_never_folded() {
 
 #[test]
 fn every_folded_capital_reaches_the_pane_as_the_character_typed() {
-    // The fold is only safe when it is reversible. Whatever the decoder folds
-    // to `lowercase + Shift`, the encoder must rebuild byte-for-byte — the
-    // chord is all the input layer keeps of the press.
+    // Every capital the decoder folds to `lowercase + Shift`, the encoder
+    // rebuilds byte-for-byte; a capital the decoder keeps goes out as itself.
     for typed in ['A', 'Z', 'É', 'Ø', 'ẞ', 'İ', 'Å'] {
         let chord = decode_key(press(KeyCode::Char(typed), KeyModifiers::NONE)).expect("decodes");
         assert_eq!(
@@ -230,8 +228,8 @@ fn characters_encode_to_their_bytes() {
 fn control_characters_fold_into_their_c0_byte() {
     assert_eq!(bytes(ModFlags::CTRL, Key::Char('a')), vec![0x01]);
     assert_eq!(bytes(ModFlags::CTRL, Key::Char('c')), vec![0x03]);
-    // Control plus Shift plus a letter is the same C0 byte: no terminal
-    // sequence tells them apart.
+    // Control plus Shift plus a letter sends the same C0 byte as Control plus
+    // the letter.
     assert_eq!(
         bytes(ModFlags::CTRL | ModFlags::SHIFT, Key::Char('a')),
         vec![0x01]
@@ -242,8 +240,7 @@ fn control_characters_fold_into_their_c0_byte() {
 
 #[test]
 fn control_plus_a_character_with_no_c0_byte_sends_the_character() {
-    // `<C-1>` is a bindable chord, but no control code stands for it and a
-    // terminal sends the digit alone — the key must still reach the pane.
+    // No control code stands for `<C-1>`: the digit goes out by itself.
     assert_eq!(bytes(ModFlags::CTRL, Key::Char('1')), vec![b'1']);
     assert_eq!(bytes(ModFlags::CTRL, Key::Char('9')), vec![b'9']);
     assert_eq!(bytes(ModFlags::CTRL, Key::Char(';')), vec![b';']);
@@ -280,11 +277,10 @@ fn the_control_digits_carry_the_codes_the_letter_run_cannot_reach() {
 
 #[test]
 fn the_two_spellings_of_one_control_code_send_the_same_byte() {
-    // A host reports the SAME key press differently: on unix crossterm decodes
-    // the terminal's `0x1c` back to `Char('4')`, so `Ctrl-\` arrives as
-    // `<C-4>`; on Windows the key's own character arrives, so it is `<C-\>`.
-    // Both must leave here as `0x1c`, or the chord reaches the pane as a
-    // literal `4` and a program watching for the control code never sees it.
+    // One key press has two host spellings: on unix crossterm decodes the
+    // terminal's `0x1c` to `Char('4')`, and `Ctrl-\` arrives as `<C-4>`; on
+    // Windows the key's own character arrives, and it is `<C-\>`. Both leave
+    // here as `0x1c`.
     for (digit, punctuation) in [('4', '\\'), ('5', ']'), ('6', '^'), ('7', '_')] {
         assert_eq!(
             bytes(ModFlags::CTRL, Key::Char(digit)),
@@ -310,8 +306,7 @@ fn alt_prefixes_escape_and_composes_with_control() {
 
 #[test]
 fn super_rides_the_parameter_but_has_no_c0_form() {
-    // A C0 byte has no field for Super, so the key arrives bare — what it
-    // sends in a terminal running no multiplexer.
+    // A C0 byte has no field for Super: the key arrives bare.
     assert_eq!(bytes(ModFlags::SUPER, Key::Char('a')), vec![b'a']);
     // A CSI key has the modifier parameter, and Super is its bit 8.
     assert_eq!(
@@ -410,7 +405,7 @@ fn cursor_keys_follow_the_panes_application_mode() {
 #[test]
 fn a_modified_cursor_key_is_a_csi_sequence_in_either_mode() {
     // `<C-Right>` is `ESC [ 1 ; 5 C` — 5 = 1 + 4 (Control). Application mode
-    // has no modified form of its own, so it sends the same bytes.
+    // sends the same bytes for a modified key.
     let expected = b"\x1b[1;5C".to_vec();
     assert_eq!(bytes(ModFlags::CTRL, Key::Named(NamedKey::Right)), expected);
     assert_eq!(
@@ -497,7 +492,7 @@ fn function_keys_match_the_terminfo_table() {
 
 #[test]
 fn a_modified_function_key_carries_its_parameter() {
-    // terminfo kf13 (Shift+F1) IS `ESC [ 1 ; 2 P`, and kf25 (Ctrl+F1) is
+    // terminfo kf13 (Shift+F1) is `ESC [ 1 ; 2 P`, and kf25 (Ctrl+F1) is
     // `ESC [ 1 ; 5 P`.
     assert_eq!(
         bytes(ModFlags::SHIFT, Key::Named(NamedKey::F(1))),
@@ -515,8 +510,8 @@ fn a_modified_function_key_carries_its_parameter() {
 
 #[test]
 fn the_high_function_keys_encode_as_the_shifted_low_ones() {
-    // No terminal gives F13–F24 sequences of their own: terminfo spends those
-    // slots on Shift plus F1–F12, and that is what a program reads back.
+    // terminfo lists F13–F24 as Shift plus F1–F12; a program reads those
+    // bytes back.
     assert_eq!(
         bytes(ModFlags::NONE, Key::Named(NamedKey::F(13))),
         bytes(ModFlags::SHIFT, Key::Named(NamedKey::F(1)))
@@ -573,8 +568,8 @@ fn a_bare_capital_folds_to_shift_plus_lowercase() {
 
 #[test]
 fn a_capital_with_shift_also_held_stays_one_shift() {
-    // A host that reports BOTH the capital and the Shift modifier must not
-    // produce a doubled flag — the bitmap is idempotent.
+    // A host that reports both the capital and the Shift modifier yields one
+    // Shift: the bitmap is idempotent.
     assert_eq!(
         decode_key(press(KeyCode::Char('A'), KeyModifiers::SHIFT)),
         chord(ModFlags::SHIFT, Key::Char('a'))
@@ -620,8 +615,7 @@ fn a_control_digit_keeps_its_control_on_decode() {
 #[test]
 fn a_held_shift_is_dropped_from_a_non_letter_character() {
     // Shift is a letter's case only. A host that reports `!` while Shift is
-    // still physically down must not leave Shift in the chord — `!` stands for
-    // itself, so `<C-!>` is the chord, not `<C-S-!>`.
+    // still held yields `<C-!>`, not `<C-S-!>`.
     assert_eq!(
         decode_key(press(
             KeyCode::Char('!'),
@@ -650,8 +644,7 @@ fn the_spacebar_carries_its_modifiers_as_a_named_key() {
 
 #[test]
 fn backtab_folds_shift_in_alongside_other_modifiers() {
-    // BackTab always means Shift+Tab; a Control held with it lands beside the
-    // Shift the code adds unconditionally.
+    // BackTab is Shift+Tab; a Control held with it lands beside that Shift.
     assert_eq!(
         decode_key(press(KeyCode::BackTab, KeyModifiers::CONTROL)),
         chord(ModFlags::CTRL | ModFlags::SHIFT, Key::Named(NamedKey::Tab))
@@ -660,7 +653,7 @@ fn backtab_folds_shift_in_alongside_other_modifiers() {
 
 #[test]
 fn backtab_with_shift_already_held_stays_one_shift() {
-    // Some hosts set the Shift modifier on BackTab too; the flag must not double.
+    // A host that sets the Shift modifier on BackTab too yields one Shift.
     assert_eq!(
         decode_key(press(KeyCode::BackTab, KeyModifiers::SHIFT)),
         chord(ModFlags::SHIFT, Key::Named(NamedKey::Tab))
@@ -687,13 +680,46 @@ fn a_modified_repeat_decodes_and_a_modified_release_does_not() {
     assert_eq!(decode_key(release), None);
 }
 
+#[test]
+fn hyper_is_dropped_on_decode() {
+    // The chord model has no Hyper: a held Hyper leaves nothing in the chord,
+    // and the other modifiers land as usual.
+    assert_eq!(
+        decode_key(press(KeyCode::Char('a'), KeyModifiers::HYPER)),
+        chord(ModFlags::NONE, Key::Char('a'))
+    );
+    assert_eq!(
+        decode_key(press(
+            KeyCode::Up,
+            KeyModifiers::HYPER | KeyModifiers::CONTROL
+        )),
+        chord(ModFlags::CTRL, Key::Named(NamedKey::Up))
+    );
+}
+
+#[test]
+fn a_release_of_a_named_key_is_not_input() {
+    let mut release = press(KeyCode::Up, KeyModifiers::NONE);
+    release.kind = KeyEventKind::Release;
+    assert_eq!(decode_key(release), None);
+}
+
+#[test]
+fn a_capital_with_control_folds_and_keeps_control() {
+    // The capital folds to lowercase plus Shift, and Control lands beside it.
+    assert_eq!(
+        decode_key(press(KeyCode::Char('A'), KeyModifiers::CONTROL)),
+        chord(ModFlags::CTRL | ModFlags::SHIFT, Key::Char('a'))
+    );
+}
+
 // --------------------------------------------- decode: hostile characters ----
 
 #[test]
 fn a_control_byte_arriving_as_a_character_decodes_without_panic() {
-    // A host could hand a raw C0 byte through as `Char`. These are not the
-    // named keys that own them, so they decode as the plain character and must
-    // not panic. NUL, DEL, and ESC as characters:
+    // A raw C0 byte handed through as `Char` decodes as the plain character,
+    // not as the named key that sends that byte. NUL, DEL, and ESC as
+    // characters:
     for c in ['\u{0}', '\u{7f}', '\u{1b}'] {
         assert_eq!(
             decode_key(press(KeyCode::Char(c), KeyModifiers::NONE)),
@@ -716,8 +742,8 @@ fn a_c1_range_character_decodes_to_itself() {
 
 #[test]
 fn the_top_of_the_character_range_decodes_without_panic() {
-    // `char::MAX` (U+10FFFF) is a legal `char` the host could deliver. It is
-    // not uppercase, so it folds nowhere, and decoding must not panic on it.
+    // `char::MAX` (U+10FFFF) is not uppercase: it folds nowhere and decodes as
+    // itself.
     assert_eq!(
         decode_key(press(KeyCode::Char(char::MAX), KeyModifiers::NONE)),
         chord(ModFlags::NONE, Key::Char(char::MAX))
@@ -728,8 +754,8 @@ fn the_top_of_the_character_range_decodes_without_panic() {
 
 #[test]
 fn a_control_character_with_no_c0_mapping_encodes_as_its_own_bytes() {
-    // NUL, DEL, and ESC as characters have no entry in the control table, so
-    // even with Control held they send their own byte, not a folded C0 code.
+    // NUL, DEL, and ESC as characters have no entry in the control table: with
+    // Control held they send their own byte.
     assert_eq!(bytes(ModFlags::NONE, Key::Char('\u{0}')), vec![0x00]);
     assert_eq!(bytes(ModFlags::CTRL, Key::Char('\u{0}')), vec![0x00]);
     assert_eq!(bytes(ModFlags::NONE, Key::Char('\u{7f}')), vec![0x7f]);
@@ -756,9 +782,8 @@ fn a_tab_character_and_the_tab_key_send_the_same_byte() {
 
 #[test]
 fn shift_is_dropped_when_the_capital_cannot_be_rebuilt() {
-    // `ß` uppercases to the two-char "SS", so Shift cannot restore a single
-    // capital. The encoder leaves the character as-is and Shift sends nothing
-    // extra — one press, one character.
+    // `ß` uppercases to the two-char "SS": Shift restores no single capital.
+    // The encoder sends `ß` and nothing for the Shift.
     assert_eq!(bytes(ModFlags::SHIFT, Key::Char('ß')), vec![0xc3, 0x9f]);
 }
 
@@ -766,8 +791,8 @@ fn shift_is_dropped_when_the_capital_cannot_be_rebuilt() {
 
 #[test]
 fn control_is_ignored_on_the_c0_keys_that_have_no_control_form() {
-    // Enter, Tab, and Esc carry only Alt in the byte stream; Control has no
-    // sequence of its own for them, so it sends the bare byte.
+    // Enter, Tab, and Esc carry only Alt in the byte stream; with Control held
+    // they send the bare byte.
     assert_eq!(
         bytes(ModFlags::CTRL, Key::Named(NamedKey::Enter)),
         vec![b'\r']
@@ -810,7 +835,7 @@ fn control_plus_alt_reshapes_the_byte_then_prefixes_escape() {
 
 #[test]
 fn super_and_alt_together_on_a_character_keep_only_the_escape_prefix() {
-    // A C0 character has no field for Super, so Alt's ESC is all that survives.
+    // A C0 character has no field for Super: Alt's ESC is all that goes out.
     assert_eq!(
         bytes(ModFlags::ALT | ModFlags::SUPER, Key::Char('a')),
         vec![ESC, b'a']
@@ -861,19 +886,78 @@ fn a_modified_high_function_key_adds_its_modifier_to_the_shift() {
 
 #[test]
 fn shift_on_a_high_function_key_does_not_double_the_shift() {
-    // F13 is Shift+F1; a Shift held on top of it must not become two Shifts.
+    // F13 is Shift+F1; a Shift held on top of it is still one Shift.
+    assert_eq!(
+        bytes(ModFlags::SHIFT, Key::Named(NamedKey::F(13))),
+        b"\x1b[1;2P".to_vec()
+    );
     assert_eq!(
         bytes(ModFlags::SHIFT, Key::Named(NamedKey::F(13))),
         bytes(ModFlags::NONE, Key::Named(NamedKey::F(13)))
     );
 }
 
+#[test]
+fn every_modifier_on_a_high_function_key_fills_the_parameter() {
+    // F24 is Shift+F12; Control, Alt and Super join that Shift:
+    // 1 + 1 + 2 + 4 + 8 = 16.
+    assert_eq!(
+        bytes(
+            ModFlags::CTRL | ModFlags::ALT | ModFlags::SUPER,
+            Key::Named(NamedKey::F(24))
+        ),
+        b"\x1b[24;16~".to_vec()
+    );
+}
+
+#[test]
+fn control_and_super_have_no_place_in_shift_tab() {
+    // `ESC [ Z` carries no modifier parameter: Shift+Tab sends it with Control
+    // or Super held too, and Alt keeps its `ESC` prefix.
+    assert_eq!(
+        bytes(ModFlags::CTRL | ModFlags::SHIFT, Key::Named(NamedKey::Tab)),
+        vec![ESC, b'[', b'Z']
+    );
+    assert_eq!(
+        bytes(ModFlags::SUPER | ModFlags::SHIFT, Key::Named(NamedKey::Tab)),
+        vec![ESC, b'[', b'Z']
+    );
+    assert_eq!(
+        bytes(
+            ModFlags::CTRL | ModFlags::ALT | ModFlags::SHIFT,
+            Key::Named(NamedKey::Tab)
+        ),
+        vec![ESC, ESC, b'[', b'Z']
+    );
+}
+
+#[test]
+fn application_mode_changes_only_the_cursor_keys() {
+    // DECCKM moves the cursor keys and Home/End between `ESC [` and `ESC O`.
+    // Every other chord sends the same bytes in both modes.
+    let cases: [(ModFlags, Key, &[u8]); 9] = [
+        (ModFlags::NONE, Key::Char('a'), b"a"),
+        (ModFlags::CTRL, Key::Char('a'), b"\x01"),
+        (ModFlags::NONE, Key::Named(NamedKey::Enter), b"\r"),
+        (ModFlags::NONE, Key::Named(NamedKey::Tab), b"\t"),
+        (ModFlags::SHIFT, Key::Named(NamedKey::Tab), b"\x1b[Z"),
+        (ModFlags::NONE, Key::Named(NamedKey::Insert), b"\x1b[2~"),
+        (ModFlags::CTRL, Key::Named(NamedKey::Delete), b"\x1b[3;5~"),
+        (ModFlags::NONE, Key::Named(NamedKey::F(1)), b"\x1bOP"),
+        (ModFlags::NONE, Key::Named(NamedKey::F(5)), b"\x1b[15~"),
+    ];
+    for (mods, key, expected) in cases {
+        assert_eq!(app_bytes(mods, key), expected.to_vec(), "{mods}{key}");
+        assert_eq!(bytes(mods, key), expected.to_vec(), "{mods}{key}");
+    }
+}
+
 // ------------------------------------------ round trip: hostile decode → encode ----
 
 #[test]
 fn hostile_and_edge_characters_round_trip_to_their_own_bytes() {
-    // Whatever the decoder keeps of an odd character, the encoder must send the
-    // character's own bytes back — the input layer holds only the chord.
+    // Whatever the decoder keeps of an odd character, the encoder sends the
+    // character's own bytes back.
     for typed in ['\u{0}', '\u{7f}', '\u{1b}', '\u{80}', '\t', char::MAX] {
         let chord = decode_key(press(KeyCode::Char(typed), KeyModifiers::NONE)).expect("decodes");
         assert_eq!(
@@ -889,10 +973,21 @@ fn hostile_and_edge_characters_round_trip_to_their_own_bytes() {
 
 #[test]
 fn function_key_zero_is_not_a_key_the_model_names() {
-    // `F(24)` is the top of the run and `F(25)` is already rejected; `F(0)` is
-    // the bottom of the same bound. The encoder has no sequence for it, so a
-    // chord must never carry it.
+    // `F(24)` is the top of the run and `F(25)` is rejected; `F(0)` is the
+    // bottom of the same bound and is rejected too.
     assert_eq!(decode_key(press(KeyCode::F(0), KeyModifiers::NONE)), None);
+}
+
+#[test]
+#[should_panic(expected = "bound F to 1..=24")]
+fn encoding_function_key_zero_panics() {
+    let _ = bytes(ModFlags::NONE, Key::Named(NamedKey::F(0)));
+}
+
+#[test]
+#[should_panic(expected = "bound F to 1..=24")]
+fn encoding_a_function_key_above_the_run_panics() {
+    let _ = bytes(ModFlags::NONE, Key::Named(NamedKey::F(25)));
 }
 
 #[test]
@@ -906,4 +1001,21 @@ fn the_control_fold_covers_its_run_and_stops_at_both_ends() {
     // The backtick sits between the two runs and belongs to neither: it sends
     // its own byte, not the NUL that `@` sends.
     assert_eq!(bytes(ModFlags::CTRL, Key::Char('`')), vec![b'`']);
+}
+
+#[test]
+fn push_decimal_writes_every_digit_of_the_value() {
+    let cases: [(u8, &[u8]); 6] = [
+        (0, b"0"),
+        (9, b"9"),
+        (10, b"10"),
+        (99, b"99"),
+        (100, b"100"),
+        (255, b"255"),
+    ];
+    for (value, expected) in cases {
+        let mut digits = Vec::new();
+        push_decimal(&mut digits, value);
+        assert_eq!(digits, expected.to_vec(), "{value}");
+    }
 }

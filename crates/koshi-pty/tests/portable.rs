@@ -1,9 +1,9 @@
 //! Integration tests for the real `portable-pty` backend.
 //!
-//! These spawn actual child processes inside kernel PTYs and exercise the full
-//! reader/watcher wiring: output streamed back over the handle's channel, exit
-//! status reported, and resize/write/kill against both live and unknown panes.
-//! Unix-only — the Windows backend is a separate target.
+//! Each test spawns a real child process inside a kernel PTY and drives it
+//! through the handle's channels: output streamed back, exit status reported,
+//! and resize/write/kill against both live and unknown panes. Unix only; the
+//! Windows backend is tested in `portable_windows.rs`.
 #![cfg(unix)]
 
 use std::collections::BTreeMap;
@@ -21,10 +21,13 @@ use koshi_pty::portable::PortablePtyBackend;
 /// Standard test window size: 80 columns × 24 rows.
 const SIZE: PtySize = PtySize { cols: 80, rows: 24 };
 
-/// Serializes PTY creation across the parallel test threads. macOS `openpty(3)`
-/// races under concurrent allocation (transient `-6`); koshi itself only ever
-/// spawns from its single runtime thread, so gating here matches production and
-/// keeps spawning deterministic without serializing the rest of each test.
+/// Upper bound on a `kill` whose child has already exited. Such a `kill` skips
+/// the grace window it was given, which is at least twice this long in every
+/// test that measures it.
+const KILL_BUDGET: Duration = Duration::from_secs(1);
+
+/// Serializes PTY creation across the parallel test threads. macOS
+/// `openpty(3)` fails with a transient `-6` under concurrent allocation.
 static PTY_GATE: Mutex<()> = Mutex::new(());
 
 /// Build a spawn spec for `program` with `args`, inheriting cwd and env.
@@ -42,12 +45,12 @@ fn spec(program: &str, args: &[&str]) -> SpawnSpec {
 fn spawn_pane(backend: &PortablePtyBackend, spec: SpawnSpec) -> PtyHandle {
     let _gate = PTY_GATE.lock().expect("pty gate");
     backend
-        .spawn(koshi_core::ids::PaneId::new(), spec, SIZE)
+        .spawn(PaneId::new(), spec, SIZE)
         .expect("spawn child")
 }
 
-/// Poll the handle's output channel until `needle` appears or `timeout` elapses,
-/// returning everything accumulated (lossy UTF-8) for the assertion/diagnostics.
+/// Poll the handle's output channel until `needle` appears or `timeout`
+/// elapses, and return everything read so far as lossy UTF-8.
 fn read_until(handle: &PtyHandle, needle: &str, timeout: Duration) -> String {
     let deadline = Instant::now() + timeout;
     let mut acc: Vec<u8> = Vec::new();
@@ -79,8 +82,7 @@ fn wait_exit(handle: &PtyHandle, timeout: Duration) -> Option<ExitStatus> {
     }
 }
 
-/// True while process `pid` is still around (`kill -0` succeeds). Used to assert
-/// a grandchild was reaped — shelling out keeps the test free of a libc dep.
+/// True while `kill -0 pid` succeeds.
 fn process_alive(pid: &str) -> bool {
     std::process::Command::new("kill")
         .args(["-0", pid])
@@ -88,6 +90,32 @@ fn process_alive(pid: &str) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+/// Every ASCII digit in `out`, concatenated: the pid a script printed.
+/// Panics when `out` holds no digit.
+fn pid_printed(out: &str) -> String {
+    let pid: String = out.chars().filter(char::is_ascii_digit).collect();
+    assert!(!pid.is_empty(), "expected a pid, got {out:?}");
+    pid
+}
+
+/// Poll until process `pid` is gone or `timeout` elapses. True when it is gone.
+fn wait_until_gone(pid: &str, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while process_alive(pid) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    !process_alive(pid)
+}
+
+/// Read the pane's output until `READY` appears, panicking when it never does.
+fn wait_ready(handle: &PtyHandle) {
+    let out = read_until(handle, "READY", Duration::from_secs(5));
+    assert!(
+        out.contains("READY"),
+        "the child never printed READY: {out:?}"
+    );
 }
 
 #[test]
@@ -121,11 +149,75 @@ fn spawn_without_cwd_inherits_koshis_current_directory() {
 }
 
 #[test]
+fn spawn_with_cwd_starts_the_child_there() {
+    let backend = PortablePtyBackend::new();
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut launch = spec("/bin/pwd", &[]);
+    launch.cwd = Some(dir.path().to_path_buf());
+    let handle = spawn_pane(&backend, launch);
+    let out = read_until(&handle, "\n", Duration::from_secs(5));
+    let child_cwd = PathBuf::from(out.trim())
+        .canonicalize()
+        .expect("child cwd exists");
+
+    assert_eq!(
+        child_cwd,
+        dir.path().canonicalize().expect("temp dir resolves"),
+        "a spawn with an explicit cwd must start the child there"
+    );
+}
+
+#[test]
+fn spawn_env_reaches_the_child() {
+    let backend = PortablePtyBackend::new();
+    let mut launch = spec("/bin/sh", &["-c", "echo \"$KOSHI_TEST_ENV\""]);
+    launch
+        .env
+        .insert("KOSHI_TEST_ENV".to_string(), "koshi-env-marker".to_string());
+    let handle = spawn_pane(&backend, launch);
+    let out = read_until(&handle, "koshi-env-marker", Duration::from_secs(5));
+    assert!(
+        out.contains("koshi-env-marker"),
+        "the spec's env never reached the child, got {out:?}"
+    );
+}
+
+#[test]
+fn the_koshi_env_overlay_reaches_the_child() {
+    // `${PROMPT_EOL_MARK+set}` prints `set` for a variable that exists, and
+    // nothing for one that does not: the zsh bootstrap key is empty, so its
+    // value alone cannot tell the two apart.
+    let backend = PortablePtyBackend::new();
+    let mut launch = spec(
+        "/bin/sh",
+        &[
+            "-c",
+            "echo \"T=$TERM C=$COLORTERM P=${PROMPT_EOL_MARK+set} end\"",
+        ],
+    );
+    launch.shell_kind = ShellKind::Zsh;
+    let handle = spawn_pane(&backend, launch);
+    let out = read_until(&handle, "end", Duration::from_secs(5));
+    assert!(
+        out.contains("T=xterm-256color C=truecolor P=set end"),
+        "koshi's terminal identity and the zsh bootstrap must reach the child, got {out:?}"
+    );
+}
+
+#[test]
 fn spawn_reports_clean_exit() {
     let backend = PortablePtyBackend::new();
     let handle = spawn_pane(&backend, spec("/bin/echo", &["bye"]));
     let status = wait_exit(&handle, Duration::from_secs(5));
     assert_eq!(status, Some(ExitStatus::ExitCode(0)));
+}
+
+#[test]
+fn spawn_reports_the_childs_exit_code() {
+    let backend = PortablePtyBackend::new();
+    let handle = spawn_pane(&backend, spec("/bin/sh", &["-c", "exit 42"]));
+    let status = wait_exit(&handle, Duration::from_secs(5));
+    assert_eq!(status, Some(ExitStatus::ExitCode(42)));
 }
 
 #[test]
@@ -177,6 +269,44 @@ fn resize_known_pane_is_ok() {
 }
 
 #[test]
+fn resize_changes_the_window_size_the_child_sees() {
+    let backend = PortablePtyBackend::new();
+    // `stty size` prints the terminal's `rows cols`. The first print shows the
+    // spawn size; the second, after `read` returns, shows the resized size.
+    let handle = spawn_pane(
+        &backend,
+        spec("/bin/sh", &["-c", "stty size; read x; stty size"]),
+    );
+    let out = read_until(&handle, "24 80", Duration::from_secs(5));
+    assert!(
+        out.contains("24 80"),
+        "the child did not see the spawn size 80x24, got {out:?}"
+    );
+
+    backend
+        .resize(
+            handle.pane_id(),
+            PtySize {
+                cols: 120,
+                rows: 40,
+            },
+        )
+        .expect("resize live pane");
+    backend
+        .write(handle.pane_id(), b"\n")
+        .expect("write to the pane");
+    let out = read_until(&handle, "40 120", Duration::from_secs(5));
+    assert!(
+        out.contains("40 120"),
+        "the child did not see the resized size 120x40, got {out:?}"
+    );
+    assert_eq!(
+        wait_exit(&handle, Duration::from_secs(5)),
+        Some(ExitStatus::ExitCode(0))
+    );
+}
+
+#[test]
 fn resize_unknown_pane_errs() {
     let backend = PortablePtyBackend::new();
     let ghost = PaneId::new();
@@ -207,6 +337,60 @@ fn kill_unknown_pane_errs() {
 }
 
 #[test]
+fn a_closed_pane_is_unknown_to_every_later_call() {
+    let backend = PortablePtyBackend::new();
+    let handle = spawn_pane(&backend, spec("/bin/cat", &[]));
+    let pane = handle.pane_id();
+    backend.kill(pane, KillPolicy::Force).expect("first kill");
+
+    assert_eq!(
+        backend.kill(pane, KillPolicy::Force),
+        Err(PtyError::UnknownPane { pane })
+    );
+    assert_eq!(
+        backend.write(pane, b"x"),
+        Err(PtyError::UnknownPane { pane })
+    );
+    assert_eq!(
+        backend.resize(pane, SIZE),
+        Err(PtyError::UnknownPane { pane })
+    );
+    assert_eq!(backend.live_cwd(pane), None);
+}
+
+#[test]
+fn live_cwd_reports_the_directory_the_child_runs_in() {
+    let backend = PortablePtyBackend::new();
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut launch = spec("/bin/sh", &["-c", "echo READY; read x"]);
+    launch.cwd = Some(dir.path().to_path_buf());
+    let handle = spawn_pane(&backend, launch);
+    // `READY` printed means the shell is running inside `dir`.
+    wait_ready(&handle);
+
+    assert_eq!(
+        backend
+            .live_cwd(handle.pane_id())
+            .map(|cwd| cwd.canonicalize().expect("child cwd exists")),
+        Some(dir.path().canonicalize().expect("temp dir resolves"))
+    );
+    backend
+        .kill(handle.pane_id(), KillPolicy::Force)
+        .expect("kill shell");
+}
+
+#[test]
+fn live_cwd_of_an_exited_child_is_none() {
+    let backend = PortablePtyBackend::new();
+    let handle = spawn_pane(&backend, spec("/bin/echo", &["gone"]));
+    assert_eq!(
+        wait_exit(&handle, Duration::from_secs(5)),
+        Some(ExitStatus::ExitCode(0))
+    );
+    assert_eq!(backend.live_cwd(handle.pane_id()), None);
+}
+
+#[test]
 fn kill_force_terminates_running_child() {
     let backend = PortablePtyBackend::new();
     // `cat` blocks reading stdin forever; only a signal ends it.
@@ -214,8 +398,8 @@ fn kill_force_terminates_running_child() {
     backend
         .kill(handle.pane_id(), KillPolicy::Force)
         .expect("force kill");
-    // kill() joins the watcher only after it publishes the exit, so the
-    // signal-based status is already waiting on the channel.
+    // `kill` joins the watcher, which publishes the exit before it ends, so
+    // the status is already on the channel.
     let status = wait_exit(&handle, Duration::from_secs(5));
     assert_eq!(
         status,
@@ -231,8 +415,8 @@ fn kill_graceful_lets_finished_child_exit_cleanly() {
     // Echo exits on its own; confirm that before issuing the graceful kill.
     let status = wait_exit(&handle, Duration::from_secs(5));
     assert_eq!(status, Some(ExitStatus::ExitCode(0)));
-    // Graceful sees the already-set `exited` flag and skips SIGKILL entirely,
-    // returning promptly without waiting out the timeout.
+    // The child is already gone: Graceful sends no signal and skips the wait.
+    let started = Instant::now();
     backend
         .kill(
             handle.pane_id(),
@@ -241,20 +425,20 @@ fn kill_graceful_lets_finished_child_exit_cleanly() {
             },
         )
         .expect("graceful kill");
+    let took = started.elapsed();
+    assert!(
+        took < KILL_BUDGET,
+        "a graceful kill of an exited child sat through the window; took {took:?}"
+    );
 }
 
 #[test]
 fn exit_status_reports_exact_signal_number() {
-    // The child signals *itself* with a known signal, so we can assert the
-    // exact number `map_status` recovers — not just "some signal". This is the
-    // real check on `sig_no`: portable-pty hands back `strsignal(3)` text that
-    // differs by platform ("Terminated" on Linux, "Terminated: 15" on macOS),
-    // and the previous `matches!(_, Signaled(_))` test passed even when the
-    // mapping produced 0.
-    // SIGUSR1/2 pin the greedy-parse regression: their strsignal text ends in a
-    // non-signal ordinal ("User defined signal 1"), and their numbers differ by
-    // OS (Linux 10/12, macOS/BSD 30/31), so a naive trailing-number parse would
-    // wrongly report 1/2 (SIGHUP/SIGINT).
+    // The child signals itself with a known signal, and the status carries
+    // that exact number. portable-pty hands back `strsignal(3)` text that
+    // differs by platform ("Terminated" on Linux, "Terminated: 15" on macOS).
+    // SIGUSR1/2 have text ending in a non-signal ordinal ("User defined
+    // signal 1") and numbers that differ by OS (Linux 10/12, macOS/BSD 30/31).
     let (usr1, usr2) = if cfg!(target_os = "linux") {
         (10, 12)
     } else {
@@ -283,14 +467,13 @@ fn exit_status_reports_exact_signal_number() {
 fn force_kills_a_sighup_ignoring_child() {
     let backend = PortablePtyBackend::new();
     // Ignores SIGHUP and blocks in the `read` builtin (no child to orphan).
-    // portable-pty's old killer only sent SIGHUP — which this traps — so reaching
-    // `Signaled(9)` proves `force` escalates to a real, untrappable SIGKILL.
+    // `Signaled(9)` proves `force` sends an untrappable SIGKILL.
     let handle = spawn_pane(
         &backend,
         spec("/bin/sh", &["-c", "trap '' HUP; echo READY; read x"]),
     );
-    // Wait until the trap is installed (printed after `trap`) before signalling.
-    read_until(&handle, "READY", Duration::from_secs(5));
+    // `READY` prints after `trap`, so the trap is installed before the kill.
+    wait_ready(&handle);
     backend
         .kill(handle.pane_id(), KillPolicy::Force)
         .expect("force kill");
@@ -304,14 +487,13 @@ fn force_kills_a_sighup_ignoring_child() {
 #[test]
 fn graceful_escalates_to_sigkill_when_sigterm_is_ignored() {
     let backend = PortablePtyBackend::new();
-    // SIGTERM is trapped, so the grace window lapses and `kill` must escalate.
+    // SIGTERM is trapped, so the grace window lapses and `kill` escalates.
     let handle = spawn_pane(
         &backend,
         spec("/bin/sh", &["-c", "trap '' TERM; echo READY; read x"]),
     );
-    // Without this the kill can race shell startup and land before the trap,
-    // killing the child with the default SIGTERM disposition instead.
-    read_until(&handle, "READY", Duration::from_secs(5));
+    // `READY` prints after `trap`, so the trap is installed before the kill.
+    wait_ready(&handle);
     backend
         .kill(
             handle.pane_id(),
@@ -330,10 +512,10 @@ fn graceful_escalates_to_sigkill_when_sigterm_is_ignored() {
 #[test]
 fn graceful_lets_a_cooperative_child_exit_on_sigterm() {
     let backend = PortablePtyBackend::new();
-    // No trap: the default SIGTERM disposition terminates it inside the window,
-    // so it dies of SIGTERM (15) and is never escalated to SIGKILL (9).
+    // No trap: the default SIGTERM disposition ends it inside the window, so
+    // it dies of SIGTERM (15) and is never escalated to SIGKILL (9).
     let handle = spawn_pane(&backend, spec("/bin/sh", &["-c", "echo READY; read x"]));
-    read_until(&handle, "READY", Duration::from_secs(5));
+    wait_ready(&handle);
     backend
         .kill(
             handle.pane_id(),
@@ -352,20 +534,16 @@ fn graceful_lets_a_cooperative_child_exit_on_sigterm() {
 #[test]
 fn tree_reaps_the_grandchild() {
     let backend = PortablePtyBackend::new();
-    // The shell backgrounds a long sleep (its child, same process group), prints
-    // that sleep's pid, then waits. `Tree` must killpg the whole group and take
-    // the sleep with it; `Force` (leader only) would leave it orphaned and alive.
+    // The shell backgrounds a long sleep (its child, same process group),
+    // prints that sleep's pid, then waits. `Tree` kills the whole group and
+    // takes the sleep with it; `Force` kills the leader only.
     let handle = spawn_pane(
         &backend,
         spec("/bin/sh", &["-c", "sleep 300 & echo $!; wait"]),
     );
 
     let out = read_until(&handle, "\n", Duration::from_secs(5));
-    let grandchild: String = out.chars().filter(char::is_ascii_digit).collect();
-    assert!(
-        !grandchild.is_empty(),
-        "expected the sleep pid, got {out:?}"
-    );
+    let grandchild = pid_printed(&out);
     assert!(
         process_alive(&grandchild),
         "sleep should run before the kill"
@@ -380,13 +558,9 @@ fn tree_reaps_the_grandchild() {
         "the shell leader should be SIGKILLed by the group kill"
     );
 
-    // Reparent-and-reap of the orphan is asynchronous; poll briefly for it to go.
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while process_alive(&grandchild) && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(20));
-    }
+    // The orphan is reparented and reaped asynchronously.
     assert!(
-        !process_alive(&grandchild),
+        wait_until_gone(&grandchild, Duration::from_secs(3)),
         "Tree must reap the grandchild sleep (pid {grandchild})"
     );
 }
@@ -394,14 +568,12 @@ fn tree_reaps_the_grandchild() {
 #[test]
 fn tree_reaps_a_descendant_even_after_the_leader_has_exited() {
     let backend = PortablePtyBackend::new();
-    // The leader sets SIGHUP to ignore, then backgrounds a `sleep` in its OWN
-    // process group: the child inherits that ignore across fork+exec, so it
-    // survives the SIGHUP the kernel sends the foreground group when the session
-    // leader exits. The leader prints the sleep's pid and EXITS (no `wait`), so by
-    // kill time the watcher has reaped the leader and set `exited`, yet the sleep
-    // lives on as a member of the now-leaderless-but-non-empty group. `Tree` must
-    // still `killpg` the group and reap it — gating `Tree` on the leader's
-    // `exited` flag (which tracks only the leader) would leak the descendant.
+    // The leader ignores SIGHUP, then backgrounds a `sleep` in its own process
+    // group: the sleep inherits the ignore across fork+exec and survives the
+    // SIGHUP the kernel sends the foreground group when the session leader
+    // exits. The leader prints the sleep's pid and exits (no `wait`), so at
+    // kill time the watcher has reaped the leader and set `exited`, and the
+    // sleep lives on in the leaderless group. `Tree` still sends `killpg`.
     let handle = spawn_pane(
         &backend,
         spec(
@@ -410,16 +582,13 @@ fn tree_reaps_a_descendant_even_after_the_leader_has_exited() {
         ),
     );
     let out = read_until(&handle, "READY", Duration::from_secs(5));
-    let descendant: String = out.chars().filter(char::is_ascii_digit).collect();
-    assert!(
-        !descendant.is_empty(),
-        "expected the child pid, got {out:?}"
-    );
+    let descendant = pid_printed(&out);
 
-    // The leader exits on its own → watcher reaps it → `exited` is set before kill.
+    // The leader exits on its own; the watcher reaps it and sets `exited`.
     let status = wait_exit(&handle, Duration::from_secs(5));
-    assert!(
-        status.is_some(),
+    assert_eq!(
+        status,
+        Some(ExitStatus::ExitCode(0)),
         "the leader should exit on its own, got {status:?}"
     );
     assert!(
@@ -431,27 +600,19 @@ fn tree_reaps_a_descendant_even_after_the_leader_has_exited() {
         .kill(handle.pane_id(), KillPolicy::Tree)
         .expect("tree kill");
 
-    // `killpg` reaps the surviving group member even though the leader is gone.
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while process_alive(&descendant) && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(20));
-    }
     assert!(
-        !process_alive(&descendant),
+        wait_until_gone(&descendant, Duration::from_secs(3)),
         "Tree must killpg the group and reap the descendant (pid {descendant}) \
          even after the leader exited"
     );
 }
 
-/// Run `kill` on a separate thread and assert it returns within `budget` — a hang
-/// fails the test instead of wedging the whole suite.
+/// Run `kill` on a separate thread and assert it returns `Ok(())` within
+/// `budget`. A hang fails the test instead of wedging the whole suite.
 ///
-/// The hang these guard against is **Linux** behaviour: a surviving descendant
-/// keeps the slave fd open, so the reader thread never sees EOF and a
-/// `reader.join()` would block forever. macOS/BSD `revoke()` the controlling
-/// terminal when the session leader exits, force-closing that fd in every
-/// process, so `kill` never hangs there — these tests pass on macOS and only
-/// bite on Linux/CI (where the regression actually manifests).
+/// On Linux a surviving descendant keeps the slave fd open, so the reader
+/// thread never sees EOF. macOS/BSD `revoke()` the controlling terminal when
+/// the session leader exits, which closes that fd in every process.
 fn assert_kill_returns(
     backend: PortablePtyBackend,
     pane: PaneId,
@@ -460,11 +621,11 @@ fn assert_kill_returns(
 ) {
     let (tx, rx) = std::sync::mpsc::channel();
     thread::spawn(move || {
-        let _ = backend.kill(pane, policy);
-        let _ = tx.send(());
+        let _ = tx.send(backend.kill(pane, policy));
     });
-    assert!(
-        rx.recv_timeout(budget).is_ok(),
+    assert_eq!(
+        rx.recv_timeout(budget),
+        Ok(Ok(())),
         "kill({policy:?}) hung while a descendant kept the pty open"
     );
 }
@@ -472,18 +633,15 @@ fn assert_kill_returns(
 #[test]
 fn force_does_not_hang_when_a_descendant_keeps_the_pty_open() {
     let backend = PortablePtyBackend::new();
-    // The leader backgrounds a HUP-ignoring child that blocks (holding the slave
-    // PTY open), then waits. `Force` kills only the leader; the kernel's
-    // session-leader-death SIGHUP — which would otherwise reap the foreground
-    // group — is trapped by the child, so it survives with the pty still open and
-    // the reader never sees EOF. kill() must NOT join the reader. The child traps
-    // HUP and stays alive in a keep-alive loop (it holds the slave via
-    // stdout/stderr; `&` points its stdin at /dev/null, which is fine).
+    // The leader backgrounds a HUP-ignoring child that blocks holding the slave
+    // PTY open (through stdout/stderr; `&` points its stdin at /dev/null), then
+    // waits. `Force` kills only the leader; the child traps the SIGHUP the
+    // kernel sends on session-leader death and keeps the pty open, so the
+    // reader never sees EOF. `kill` returns without joining the reader.
     //
-    // The child prints its own pid then `READY` on one line *after* installing
-    // the trap: parsing waits for `READY` (printed last), so the pid is already
-    // buffered — no race between two separate echoes, and the trap is proven up
-    // before the kill. (`$$` inside the backgrounded `sh -c` is that child's pid.)
+    // The child prints its own pid and `READY` on one line after installing
+    // the trap (`$$` inside the backgrounded `sh -c` is that child's pid), so
+    // reading up to `READY` finds the pid already buffered and the trap up.
     let handle = spawn_pane(
         &backend,
         spec(
@@ -495,11 +653,7 @@ fn force_does_not_hang_when_a_descendant_keeps_the_pty_open() {
         ),
     );
     let out = read_until(&handle, "READY", Duration::from_secs(5));
-    let descendant: String = out.chars().filter(char::is_ascii_digit).collect();
-    assert!(
-        !descendant.is_empty(),
-        "expected the child pid, got {out:?}"
-    );
+    let descendant = pid_printed(&out);
     assert!(
         process_alive(&descendant),
         "the descendant should hold the pty open"
@@ -512,7 +666,7 @@ fn force_does_not_hang_when_a_descendant_keeps_the_pty_open() {
         Duration::from_secs(10),
     );
 
-    // The leader-only kill leaves the descendant running by design; reap it.
+    // The leader-only kill leaves the descendant running; reap it.
     let _ = std::process::Command::new("kill")
         .args(["-9", &descendant])
         .status();
@@ -521,11 +675,11 @@ fn force_does_not_hang_when_a_descendant_keeps_the_pty_open() {
 #[test]
 fn graceful_escalation_does_not_hang_when_a_descendant_keeps_the_pty_open() {
     let backend = PortablePtyBackend::new();
-    // Leader ignores SIGTERM (so graceful escalates to SIGKILL) and backgrounds a
-    // HUP-ignoring child that blocks holding the slave open. Escalation kills only
-    // the leader, so the same detach-the-reader rule must apply or kill() blocks.
-    // The child prints its own pid then `READY` last, so parsing on `READY` finds
-    // the pid already buffered (no two-echo race) and proves the trap is up first.
+    // The leader ignores SIGTERM (so graceful escalates to SIGKILL) and
+    // backgrounds a HUP-ignoring child that blocks holding the slave open.
+    // Escalation kills only the leader, and `kill` returns without joining
+    // the reader. The child prints its pid and `READY` last, so reading up to
+    // `READY` finds the pid already buffered and the trap up.
     let handle = spawn_pane(
         &backend,
         spec(
@@ -537,11 +691,7 @@ fn graceful_escalation_does_not_hang_when_a_descendant_keeps_the_pty_open() {
         ),
     );
     let out = read_until(&handle, "READY", Duration::from_secs(5));
-    let descendant: String = out.chars().filter(char::is_ascii_digit).collect();
-    assert!(
-        !descendant.is_empty(),
-        "expected the child pid, got {out:?}"
-    );
+    let descendant = pid_printed(&out);
     assert!(
         process_alive(&descendant),
         "the descendant should hold the pty open"
@@ -565,11 +715,11 @@ fn graceful_escalation_does_not_hang_when_a_descendant_keeps_the_pty_open() {
 fn graceful_tree_reaps_a_descendant_after_the_leader_exits() {
     let backend = PortablePtyBackend::new();
     // Same shape as `tree_reaps_a_descendant_even_after_the_leader_has_exited`,
-    // but through `GracefulTree`: the leader traps SIGHUP, backgrounds a `sleep`
-    // that inherits the ignore, prints its pid, and exits (no `wait`), so by kill
-    // time the leader is already reaped yet the sleep lives on in the leaderless
-    // group. The leader's exit skips the grace phase; the closing group-kill
-    // still reaps the descendant.
+    // through `GracefulTree`: the leader traps SIGHUP, backgrounds a `sleep`
+    // that inherits the ignore, prints its pid, and exits (no `wait`). At kill
+    // time the leader is already reaped and the sleep lives on in the
+    // leaderless group. The leader's exit skips the grace phase; the closing
+    // group-kill reaps the descendant.
     let handle = spawn_pane(
         &backend,
         spec(
@@ -578,15 +728,12 @@ fn graceful_tree_reaps_a_descendant_after_the_leader_exits() {
         ),
     );
     let out = read_until(&handle, "READY", Duration::from_secs(5));
-    let descendant: String = out.chars().filter(char::is_ascii_digit).collect();
-    assert!(
-        !descendant.is_empty(),
-        "expected the child pid, got {out:?}"
-    );
+    let descendant = pid_printed(&out);
 
     let status = wait_exit(&handle, Duration::from_secs(5));
-    assert!(
-        status.is_some(),
+    assert_eq!(
+        status,
+        Some(ExitStatus::ExitCode(0)),
         "the leader should exit on its own, got {status:?}"
     );
     assert!(
@@ -603,13 +750,8 @@ fn graceful_tree_reaps_a_descendant_after_the_leader_exits() {
         )
         .expect("graceful-tree kill");
 
-    // Reparent-and-reap of the orphan is asynchronous; poll briefly for it to go.
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while process_alive(&descendant) && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(20));
-    }
     assert!(
-        !process_alive(&descendant),
+        wait_until_gone(&descendant, Duration::from_secs(3)),
         "GracefulTree must killpg the group and reap the descendant (pid {descendant})"
     );
 }
@@ -617,13 +759,13 @@ fn graceful_tree_reaps_a_descendant_after_the_leader_exits() {
 #[test]
 fn graceful_tree_stop_request_reaches_a_descendant_in_the_grace_window() {
     let backend = PortablePtyBackend::new();
-    // The stop request is group-wide: the `sleep` is backgrounded BEFORE the
+    // The stop request is group-wide. The `sleep` is backgrounded BEFORE the
     // leader traps SIGTERM (an ignore installed first would be inherited), so
-    // it keeps the default disposition while the leader turns TERM-immune and
-    // loops forever. `READY` prints after the trap, so by kill time the leader
-    // is proven immune and only the `sleep` can react to the stop request —
-    // it must die during the grace window, while the leader still holds the
-    // kill in its wait phase, before the closing group-kill can fire.
+    // it keeps the default disposition while the leader is TERM-immune and
+    // loops forever. `READY` prints after the trap, so at kill time the leader
+    // is immune and only the `sleep` reacts to the stop request: it dies
+    // during the grace window, while the leader still holds the kill in its
+    // wait phase and before the closing group-kill fires.
     let handle = spawn_pane(
         &backend,
         spec(
@@ -635,15 +777,11 @@ fn graceful_tree_stop_request_reaches_a_descendant_in_the_grace_window() {
         ),
     );
     let out = read_until(&handle, "READY", Duration::from_secs(5));
-    let descendant: String = out.chars().filter(char::is_ascii_digit).collect();
-    assert!(
-        !descendant.is_empty(),
-        "expected the child pid, got {out:?}"
-    );
+    let descendant = pid_printed(&out);
     assert!(process_alive(&descendant), "the sleep should be running");
 
-    // Kill on a helper thread: the graceful phase blocks for its full window
-    // because the leader never exits on its own.
+    // Kill on a helper thread: the leader never exits on its own, and the
+    // graceful phase blocks for its full window.
     let pane_id = handle.pane_id();
     let killer = thread::spawn(move || {
         backend.kill(
@@ -655,13 +793,9 @@ fn graceful_tree_stop_request_reaches_a_descendant_in_the_grace_window() {
     });
 
     // The descendant dies well inside the 3s window, while the leader still
-    // lives: at this point only the group-wide SIGTERM can have reached it.
-    let deadline = Instant::now() + Duration::from_millis(1500);
-    while process_alive(&descendant) && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(20));
-    }
+    // lives: only the group-wide SIGTERM can have reached it.
     assert!(
-        !process_alive(&descendant),
+        wait_until_gone(&descendant, Duration::from_millis(1500)),
         "the group-wide stop request must reach the descendant (pid {descendant})"
     );
 
@@ -678,8 +812,9 @@ fn graceful_tree_lets_a_finished_child_exit_cleanly() {
     // Echo exits on its own; confirm that before issuing the kill.
     let status = wait_exit(&handle, Duration::from_secs(5));
     assert_eq!(status, Some(ExitStatus::ExitCode(0)));
-    // The child is already gone: GracefulTree skips the wait and the group-kill
-    // is a harmless no-op on the empty group, returning promptly.
+    // The child is already gone: GracefulTree skips the wait, and the
+    // group-kill on the empty group is a no-op.
+    let started = Instant::now();
     backend
         .kill(
             handle.pane_id(),
@@ -688,17 +823,22 @@ fn graceful_tree_lets_a_finished_child_exit_cleanly() {
             },
         )
         .expect("graceful-tree kill");
+    let took = started.elapsed();
+    assert!(
+        took < KILL_BUDGET,
+        "a graceful-tree kill of an exited child sat through the window; took {took:?}"
+    );
 }
 
 #[test]
 fn graceful_tree_does_not_hang_when_a_descendant_keeps_the_pty_open() {
     let backend = PortablePtyBackend::new();
-    // Leader and descendant both ignore SIGTERM — the group-wide stop request
-    // leaves them running, so the graceful phase waits out its window — and the
-    // descendant also ignores SIGHUP and blocks holding the slave open. The
-    // final `killpg` reaps the whole group, but kill() must still detach the
-    // reader or it blocks while the descendant holds the pty. Prints pid then
-    // `READY` last, so parsing on `READY` finds the pid already buffered.
+    // Leader and descendant both ignore SIGTERM, so the group-wide stop
+    // request leaves them running and the graceful phase waits out its
+    // window. The descendant also ignores SIGHUP and blocks holding the slave
+    // open. The final `killpg` reaps the whole group, and `kill` returns
+    // without joining the reader. The child prints its pid and `READY` last,
+    // so reading up to `READY` finds the pid already buffered.
     let handle = spawn_pane(
         &backend,
         spec(
@@ -710,11 +850,7 @@ fn graceful_tree_does_not_hang_when_a_descendant_keeps_the_pty_open() {
         ),
     );
     let out = read_until(&handle, "READY", Duration::from_secs(5));
-    let descendant: String = out.chars().filter(char::is_ascii_digit).collect();
-    assert!(
-        !descendant.is_empty(),
-        "expected the child pid, got {out:?}"
-    );
+    let descendant = pid_printed(&out);
     assert!(
         process_alive(&descendant),
         "the descendant should hold the pty open"
@@ -729,7 +865,7 @@ fn graceful_tree_does_not_hang_when_a_descendant_keeps_the_pty_open() {
         Duration::from_secs(10),
     );
 
-    // The group-kill should already have reaped it; belt-and-braces cleanup.
+    // Kills the descendant if the group-kill left it.
     let _ = std::process::Command::new("kill")
         .args(["-9", &descendant])
         .status();

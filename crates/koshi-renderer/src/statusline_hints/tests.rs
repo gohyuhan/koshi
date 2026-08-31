@@ -1,8 +1,9 @@
-//! Tests for the keybinding hint bar: idle grouping (leaf hints, labeled
+//! Tests for the statusline: idle grouping (leaf hints, labeled
 //! default prefix groups, `+N` fallbacks once a user entry or removal touches
 //! a group), the pending-sequence face (breadcrumb plus continuations, nested
 //! groups), pinned-first ordering, whole-item truncation, the right-aligned
-//! keymap-revert marker, and the blanked row for a mode with nothing to hint.
+//! keymap-revert marker, the blanked row for a mode with nothing to hint, and
+//! the cells outside the given area that the bar leaves untouched.
 
 use super::*;
 
@@ -74,15 +75,7 @@ fn paint_bar(
     area: RatatuiRect,
     buf: &mut Buffer,
 ) {
-    draw_hint_bar(
-        &StatuslineDto {
-            hints,
-            theme,
-            pending,
-        },
-        area,
-        buf,
-    );
+    draw_statusline(StatuslineInputs { hints, pending }, theme, area, buf);
 }
 
 /// Draw in `theme`'s colors with an open sequence.
@@ -108,7 +101,7 @@ fn draw_pending(hints: &KeymapHints, pending: &KeySequence, width: u16) -> Buffe
     draw_themed_pending(hints, &Theme::default(), pending, width)
 }
 
-/// Paint the hint bar in `theme`'s colors, for the tests that check which
+/// Paint the statusline in `theme`'s colors, for the tests that check which
 /// color a piece of the bar takes.
 fn draw_themed(hints: &KeymapHints, theme: &Theme, width: u16) -> Buffer {
     let area = RatatuiRect {
@@ -498,6 +491,46 @@ fn pinned_hint_sorts_first_and_survives_truncation() {
 }
 
 #[test]
+fn a_pinned_hint_does_not_pull_its_modifier_group_ahead() {
+    // Pinned puts a hint first inside its own group; the groups themselves
+    // still read in modifier order, so `Ctrl` leads the pinned `Alt` hint.
+    let keymap = hints(
+        vec![
+            binding(seq(&[ctrl('l')]), "Lock", false, false),
+            binding(
+                seq(&[KeyChord::new(ModFlags::ALT, Key::Char('u'))]),
+                "Unlock",
+                false,
+                true,
+            ),
+        ],
+        &[],
+        Vec::new(),
+        false,
+    );
+    assert_eq!(
+        row_text(&draw(&keymap, 80)),
+        " Ctrl +  l  Lock  Alt +  u  Unlock"
+    );
+}
+
+#[test]
+fn a_pinned_and_an_unpinned_hint_with_one_label_stay_two_ribbons() {
+    // Folding keys into one ribbon needs the same label *and* the same pinned
+    // flag, so these two keep their own blocks with the pinned one first.
+    let keymap = hints(
+        vec![
+            binding(seq(&[ctrl('w')]), "Save", false, false),
+            binding(seq(&[ctrl('s')]), "Save", false, true),
+        ],
+        &[],
+        Vec::new(),
+        false,
+    );
+    assert_eq!(row_text(&draw(&keymap, 80)), " Ctrl +  s  Save  w  Save");
+}
+
+#[test]
 fn truncation_drops_whole_trailing_hints() {
     let bar = pane_fixture(false);
     // Shared `Ctrl +` header plus the first ribbon is 17 cells; the second
@@ -507,12 +540,178 @@ fn truncation_drops_whole_trailing_hints() {
 }
 
 #[test]
+fn a_group_header_is_never_painted_without_its_first_ribbon() {
+    let keymap = hints(
+        vec![
+            binding(seq(&[ctrl('l')]), "Lock", false, false),
+            binding(
+                seq(&[KeyChord::new(ModFlags::ALT, Key::Char('u'))]),
+                "Unlock",
+                false,
+                false,
+            ),
+        ],
+        &[],
+        Vec::new(),
+        false,
+    );
+    // The `Ctrl` group is 17 cells, the `Alt` group's ` Alt + ` header plus its
+    // first ribbon is 18 more. One cell short of both, the header is skipped
+    // whole rather than painted over an empty group.
+    assert_eq!(row_text(&draw(&keymap, 34)), " Ctrl +  l  Lock …");
+    assert_eq!(
+        row_text(&draw(&keymap, 35)),
+        " Ctrl +  l  Lock  Alt +  u  Unlock"
+    );
+}
+
+#[test]
+fn a_breadcrumb_with_no_room_for_the_arrow_ends_in_the_overflow_marker() {
+    let pending = seq(&[ctrl('p')]);
+    let bar = pane_fixture(false);
+    // The breadcrumb ` Ctrl +  p  PANE ` is 17 cells and the ` ▶ ` arrow 3
+    // more. At 17 the arrow is dropped and the `…` takes the breadcrumb's last
+    // cell; at 20 both fit and the `…` stands for the dropped hint groups.
+    assert_eq!(
+        row_text(&draw_pending(&bar, &pending, 17)),
+        " Ctrl +  p  PANE…"
+    );
+    assert_eq!(
+        row_text(&draw_pending(&bar, &pending, 20)),
+        " Ctrl +  p  PANE  ▶…"
+    );
+}
+
+#[test]
 fn an_overflow_marker_with_no_cell_left_takes_the_last_one() {
     let bar = pane_fixture(false);
     // The `Ctrl +` header plus the first ribbon fill all 17 cells exactly, so
     // the `…` standing for the dropped second ribbon has no cell of its own and
     // overwrites the last cell of the ribbon before it.
     assert_eq!(row_text(&draw(&bar, 17)), " Ctrl +  l  Lock…");
+}
+
+#[test]
+fn the_overflow_marker_is_bold_dim_ramp_text_on_the_bar_background() {
+    let buf = draw(&pane_fixture(false), 25);
+    // Column 17 is the first cell past the ` Ctrl +  l  Lock ` group, so the
+    // `…` there lands on bar background rather than on a ribbon.
+    assert_eq!(buf[(17, 0)].symbol(), "…");
+    assert_eq!(buf[(17, 0)].fg, Color::Rgb(0xf0, 0xec, 0xfa));
+    assert_eq!(buf[(17, 0)].bg, Color::Rgb(0x00, 0x00, 0x00));
+    assert!(buf[(17, 0)].modifier.contains(Modifier::BOLD));
+}
+
+#[test]
+fn the_revert_marker_is_bold_white_on_red() {
+    let keymap = KeymapHints {
+        reverted: true,
+        ..pane_fixture(false)
+    };
+    let buf = draw(&keymap, 30);
+    assert_eq!(buf[(24, 0)].symbol(), "k");
+    assert_eq!(buf[(24, 0)].fg, Color::White);
+    assert_eq!(buf[(24, 0)].bg, Color::Red);
+    assert!(buf[(24, 0)].modifier.contains(Modifier::BOLD));
+}
+
+#[test]
+fn a_named_key_with_no_symbol_reads_as_its_chord_spelling() {
+    let named = |key, label: &str| {
+        binding(
+            seq(&[KeyChord::new(ModFlags::NONE, Key::Named(key))]),
+            label,
+            false,
+            false,
+        )
+    };
+    let keymap = hints(
+        vec![
+            named(NamedKey::Home, "Top"),
+            named(NamedKey::End, "Bottom"),
+            named(NamedKey::PageUp, "Page Up"),
+            named(NamedKey::Delete, "Delete"),
+            named(NamedKey::F(1), "Help"),
+        ],
+        &[],
+        Vec::new(),
+        false,
+    );
+    assert_eq!(
+        row_text(&draw(&keymap, 80)),
+        " Del  Delete  End  Bottom  F1  Help  Home  Top  PageUp  Page Up"
+    );
+}
+
+#[test]
+fn the_bar_paints_only_the_cells_of_the_area_it_is_given() {
+    let keymap = hints(
+        vec![binding(seq(&[plain('q')]), "Go", false, false)],
+        &[],
+        Vec::new(),
+        false,
+    );
+    let buf_area = RatatuiRect {
+        x: 0,
+        y: 0,
+        width: 20,
+        height: 3,
+    };
+    let mut buf = Buffer::empty(buf_area);
+    for y in 0..3 {
+        buf.set_string(0, y, "X".repeat(20), Style::default());
+    }
+
+    paint_bar(
+        &keymap,
+        &Theme::default(),
+        None,
+        RatatuiRect {
+            x: 3,
+            y: 1,
+            width: 12,
+            height: 1,
+        },
+        &mut buf,
+    );
+
+    let row = |y: u16| -> String { (0..20).map(|x| buf[(x, y)].symbol().to_string()).collect() };
+    assert_eq!(row(0), "X".repeat(20));
+    assert_eq!(row(1), "XXX q  Go      XXXXX");
+    assert_eq!(row(2), "X".repeat(20));
+}
+
+#[test]
+fn a_removal_under_a_pending_prefix_swaps_every_label_it_touches_for_a_count() {
+    let entries = || {
+        vec![binding(
+            seq(&[ctrl('p'), plain('n'), plain('a')]),
+            "Deep A",
+            false,
+            false,
+        )]
+    };
+    let labels: &[(KeyChord, &str)] = &[(ctrl('p'), "PANE"), (plain('n'), "NESTED")];
+    let pending = seq(&[ctrl('p')]);
+
+    let untouched = hints(entries(), labels, Vec::new(), false);
+    assert_eq!(
+        row_text(&draw_pending(&untouched, &pending, 80)),
+        " Ctrl +  p  PANE  ▶  n  NESTED"
+    );
+
+    // `<C-p> n b` was removed. The removal sits under `<C-p>` and under
+    // `<C-p> n`, so both labels give way to their binding counts.
+    let with_removal = hints(
+        entries(),
+        labels,
+        vec![seq(&[ctrl('p'), plain('n'), plain('b')])],
+        false,
+    );
+    assert_eq!(
+        row_text(&draw_pending(&with_removal, &pending, 80)),
+        " Ctrl +  p  +1  ▶  n  +1"
+    );
 }
 
 #[test]
@@ -527,6 +726,130 @@ fn revert_marker_holds_right_edge_and_hints_stop_short() {
     assert_eq!(row, " Ctrl +  l  Lock …      keys!");
     // Marker text holds the right edge, with one background-padding cell.
     assert_eq!(buf[(28, 0)].symbol(), "!");
+}
+
+#[test]
+fn modifier_groups_read_ctrl_alt_ctrl_shift_shift_super_then_the_rest() {
+    let entry = |mods, key: char, label: &str| {
+        binding(
+            seq(&[KeyChord::new(mods, Key::Char(key))]),
+            label,
+            false,
+            false,
+        )
+    };
+    // Fed in reverse of the order they must come out in.
+    let keymap = hints(
+        vec![
+            entry(ModFlags::CTRL | ModFlags::ALT, 'f', "CtrlAlt"),
+            entry(ModFlags::NONE, 'g', "Bare"),
+            entry(ModFlags::SUPER, 'a', "Super"),
+            entry(ModFlags::SHIFT, 'b', "Shift"),
+            entry(ModFlags::CTRL | ModFlags::SHIFT, 'c', "CtrlShift"),
+            entry(ModFlags::ALT, 'd', "Alt"),
+            entry(ModFlags::CTRL, 'e', "Ctrl"),
+        ],
+        &[],
+        Vec::new(),
+        false,
+    );
+    assert_eq!(
+        row_text(&draw(&keymap, 200)),
+        concat!(
+            " Ctrl +  e  Ctrl  Alt +  d  Alt  Ctrl+Shift +  c  CtrlShift ",
+            " Shift +  b  Shift  Super +  a  Super  g  Bare  Ctrl+Alt +  f  CtrlAlt"
+        )
+    );
+}
+
+#[test]
+fn only_the_opening_chord_of_a_pending_sequence_shows_a_prefix_label() {
+    // `n` is a labeled top-level prefix in its own right, but here it is the
+    // second chord of the open sequence, so its `NESTED` label stays off the
+    // breadcrumb — only the chord that opened the sequence is labeled.
+    let keymap = hints(
+        vec![
+            binding(
+                seq(&[ctrl('p'), plain('n'), plain('a')]),
+                "Deep A",
+                false,
+                false,
+            ),
+            binding(seq(&[plain('n'), plain('z')]), "Other", false, false),
+        ],
+        &[(ctrl('p'), "PANE"), (plain('n'), "NESTED")],
+        Vec::new(),
+        false,
+    );
+    let pending = seq(&[ctrl('p'), plain('n')]);
+    assert_eq!(
+        row_text(&draw_pending(&keymap, &pending, 80)),
+        " Ctrl +  p  PANE  n  ▶  a  Deep A"
+    );
+}
+
+#[test]
+fn a_pending_sequence_that_is_itself_bound_lists_only_its_continuations() {
+    // `<C-p>` runs an action of its own and also opens deeper bindings. Once it
+    // is pending, its own entry is behind the viewer, so only `n` is listed.
+    let keymap = hints(
+        vec![
+            binding(seq(&[ctrl('p')]), "Pane Menu", false, false),
+            binding(seq(&[ctrl('p'), plain('n')]), "New Pane", false, false),
+        ],
+        &[(ctrl('p'), "PANE")],
+        Vec::new(),
+        false,
+    );
+    let pending = seq(&[ctrl('p')]);
+    assert_eq!(
+        row_text(&draw_pending(&keymap, &pending, 80)),
+        " Ctrl +  p  PANE  ▶  n  New Pane"
+    );
+}
+
+#[test]
+fn a_row_too_narrow_for_the_breadcrumb_shows_only_the_overflow_marker() {
+    // The breadcrumb ribbon ` Ctrl +  p  PANE ` needs 17 cells; at 10 nothing
+    // of it fits, so the row is just the `…`.
+    let pending = seq(&[ctrl('p')]);
+    let bar = pane_fixture(false);
+    assert_eq!(row_text(&draw_pending(&bar, &pending, 10)), "…");
+    assert_eq!(row_text(&draw_pending(&bar, &pending, 1)), "…");
+}
+
+#[test]
+fn the_revert_marker_and_the_overflow_marker_share_the_narrowest_row_that_fits_both() {
+    // ` keys! ` is 7 cells; at 8 the marker takes the right edge and the `…`
+    // for every dropped hint takes the one cell left of it.
+    let keymap = KeymapHints {
+        reverted: true,
+        ..pane_fixture(false)
+    };
+    let buf = draw(&keymap, 8);
+    assert_eq!(row_text(&buf), "… keys!");
+    assert_eq!(buf[(0, 0)].symbol(), "…");
+    assert_eq!(buf[(7, 0)].symbol(), " ");
+}
+
+#[test]
+fn a_zero_height_area_leaves_the_row_untouched() {
+    let bar = pane_fixture(false);
+    let area = RatatuiRect {
+        x: 0,
+        y: 0,
+        width: 10,
+        height: 0,
+    };
+    let mut buf = Buffer::empty(RatatuiRect {
+        x: 0,
+        y: 0,
+        width: 10,
+        height: 1,
+    });
+    buf.set_string(0, 0, "X".repeat(10), Style::default());
+    paint_bar(&bar, &Theme::default(), None, area, &mut buf);
+    assert_eq!(row_text(&buf), "XXXXXXXXXX");
 }
 
 #[test]
@@ -594,4 +917,55 @@ fn a_custom_theme_recolors_the_bar() {
         .find(|&x| buf[(x, 0)].symbol() == "n")
         .expect("continuation key drawn");
     assert_eq!(buf[(n_x, 0)].fg, Color::Rgb(0xff, 0x00, 0x00));
+}
+
+#[test]
+fn the_overflow_marker_never_paints_left_of_the_area() {
+    // The revert marker fills the bar and pulls the right edge down to the
+    // area's own left edge, so the overflow marker has nowhere inside to go.
+    let keymap = KeymapHints {
+        reverted: true,
+        ..pane_fixture(false)
+    };
+    let mut buf = Buffer::empty(RatatuiRect {
+        x: 0,
+        y: 0,
+        width: 20,
+        height: 1,
+    });
+    buf.set_string(0, 0, "X".repeat(20), Style::default());
+
+    paint_bar(
+        &keymap,
+        &Theme::default(),
+        None,
+        RatatuiRect {
+            x: 5,
+            y: 0,
+            width: 6,
+            height: 1,
+        },
+        &mut buf,
+    );
+
+    let outside: String = (0..5).map(|x| buf[(x, 0)].symbol().to_string()).collect();
+    assert_eq!(outside, "XXXXX", "columns 0 to 4 belong to the caller");
+}
+
+#[test]
+fn a_hint_wider_than_the_cell_counter_is_dropped_behind_the_overflow_marker() {
+    // A ribbon of 65 536 cells reads as 65 535, which never fits, instead of
+    // wrapping to 0 and painting nothing where the marker belongs.
+    let long = "L".repeat(65_536 - 5);
+    let keymap = hints(
+        vec![
+            binding(seq(&[plain('a')]), &long, false, false),
+            binding(seq(&[plain('b')]), "Second", false, false),
+        ],
+        &[],
+        Vec::new(),
+        false,
+    );
+
+    assert_eq!(row_text(&draw(&keymap, 40)), "…");
 }

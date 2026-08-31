@@ -55,9 +55,9 @@ fn advance_prints_text_into_the_grid_and_returns_no_replies() {
 fn split_osc133_is_completed_by_the_next_chunk() {
     let mut engine = engine();
 
-    assert!(engine.advance(b"\x1b]133;").is_empty());
+    assert_eq!(engine.advance(b"\x1b]133;"), b"");
     assert!(!engine.state().active_grid().prompt_mark(0));
-    assert!(engine.advance(b"A\x07").is_empty());
+    assert_eq!(engine.advance(b"A\x07"), b"");
 
     assert!(engine.state().active_grid().prompt_mark(0));
 }
@@ -69,7 +69,7 @@ fn advance_with_shell_integration_returns_command_facts_in_order() {
     let (replies, facts) =
         engine.advance_with_shell_integration(b"\x1b]133;C\x07\x1b]133;D;137\x07");
 
-    assert!(replies.is_empty());
+    assert_eq!(replies, b"");
     assert_eq!(
         facts,
         vec![
@@ -102,7 +102,29 @@ fn unmatched_shell_integration_finish_returns_no_fact() {
 
     let (_, facts) = engine.advance_with_shell_integration(b"\x1b]133;D;1\x07");
 
-    assert!(facts.is_empty());
+    assert_eq!(facts, Vec::<ShellIntegrationFact>::new());
+}
+
+#[test]
+fn advance_with_shell_integration_returns_replies_and_facts_from_one_chunk() {
+    let mut engine = engine();
+
+    let (replies, facts) = engine.advance_with_shell_integration(b"\x1b[5n\x1b]133;C\x07");
+
+    assert_eq!(replies, b"\x1b[0n");
+    assert_eq!(facts, vec![ShellIntegrationFact::CommandStarted]);
+}
+
+#[test]
+fn advance_drains_shell_facts_without_returning_them() {
+    let mut engine = engine();
+
+    assert_eq!(engine.advance(b"\x1b]133;C\x07"), b"");
+
+    let (replies, facts) = engine.advance_with_shell_integration(b"");
+
+    assert_eq!(replies, b"");
+    assert_eq!(facts, Vec::<ShellIntegrationFact>::new());
 }
 
 #[test]
@@ -834,13 +856,11 @@ fn a_control_sequence_with_endless_parameters_is_not_held_past_the_limit() {
     assert_eq!(engine.undecoded(), b"\x1b[");
 
     let digits = vec![b'1'; 2 * MAX_UNDECODED];
-    for chunk in digits.chunks(READ_CHUNK) {
+    for (round, chunk) in digits.chunks(READ_CHUNK).enumerate() {
         let _ = engine.advance(chunk);
-        assert!(
-            engine.undecoded().len() <= MAX_UNDECODED,
-            "the carry grew to {} bytes",
-            engine.undecoded().len(),
-        );
+        let held = 2 + (round + 1) * READ_CHUNK;
+        let expected = if held <= MAX_UNDECODED { held } else { 0 };
+        assert_eq!(engine.undecoded().len(), expected, "after chunk {round}");
     }
 
     assert_eq!(engine.undecoded(), b"");
@@ -852,6 +872,234 @@ fn a_control_sequence_with_endless_parameters_is_not_held_past_the_limit() {
     assert_eq!(engine.undecoded(), b"");
     assert_eq!(ch(&engine, 0, 0), 'Z');
     assert_eq!(engine.state().active_cursor_position(), (0, 1));
+}
+
+/// A sequence that passed the limit in the engine that was swapped out leaves
+/// the next parser on a sequence boundary: the rest of the body prints as
+/// text.
+#[test]
+fn a_swap_inside_a_sequence_past_the_limit_prints_the_rest_of_the_body() {
+    let mut engine = engine();
+
+    let _ = engine.advance(b"\x1b]52;c;");
+    let _ = engine.advance(&vec![b'A'; MAX_UNDECODED + 1]);
+    assert_eq!(engine.undecoded(), b"");
+
+    let mut next = swapped(engine);
+    let _ = next.advance(b"BC\x07Z");
+
+    assert_eq!(next.undecoded(), b"");
+    assert_eq!(ch(&next, 0, 0), 'B');
+    assert_eq!(ch(&next, 0, 1), 'C');
+    assert_eq!(ch(&next, 0, 2), 'Z');
+    assert_eq!(next.state().active_cursor_position(), (0, 3));
+}
+
+/// An empty chunk decodes nothing and leaves what the parser held in place:
+/// the first byte of a code point, or an open control sequence.
+#[test]
+fn an_empty_chunk_keeps_the_held_bytes() {
+    let mut engine = engine();
+
+    assert_eq!(engine.advance(b""), b"");
+    assert_eq!(engine.undecoded(), b"");
+
+    let _ = engine.advance(b"a\xc3");
+    assert_eq!(engine.advance(b""), b"");
+    assert_eq!(engine.undecoded(), b"\xc3");
+    assert_eq!(ch(&engine, 0, 0), 'a');
+    assert_eq!(engine.state().active_cursor_position(), (0, 1));
+
+    let _ = engine.advance(b"\xa9\x1b[3");
+    assert_eq!(engine.advance(b""), b"");
+    assert_eq!(engine.undecoded(), b"\x1b[3");
+    assert_eq!(ch(&engine, 0, 1), 'é');
+    assert_eq!(engine.state().active_cursor_position(), (0, 2));
+}
+
+/// A four-byte code point spread over three chunks is carried whole at each
+/// cut and prints once, as one wide glyph, when its last byte arrives.
+#[test]
+fn a_four_byte_code_point_split_over_three_chunks_is_carried_whole() {
+    let mut engine = engine();
+
+    // U+1F600 is 0xF0 0x9F 0x98 0x80.
+    let _ = engine.advance(b"\xf0\x9f");
+    assert_eq!(engine.undecoded(), b"\xf0\x9f");
+
+    let _ = engine.advance(b"\x98");
+    assert_eq!(engine.undecoded(), b"\xf0\x9f\x98");
+    assert_eq!(ch(&engine, 0, 0), ' ');
+
+    let mut next = swapped(engine);
+    let _ = next.advance(b"\x80");
+
+    assert_eq!(next.undecoded(), b"");
+    assert_eq!(ch(&next, 0, 0), '\u{1f600}');
+    assert_eq!(next.state().active_cursor_position(), (0, 2));
+}
+
+/// An escape byte that cuts a code point short prints one replacement
+/// character for the cut bytes, and the sequence it opens is held.
+#[test]
+fn a_code_point_cut_short_by_an_escape_prints_a_replacement_and_holds_the_sequence() {
+    let mut engine = engine();
+
+    let _ = engine.advance(b"\xc3");
+    assert_eq!(engine.undecoded(), b"\xc3");
+
+    let _ = engine.advance(b"\x1b[31");
+    assert_eq!(engine.undecoded(), b"\x1b[31");
+    assert_eq!(ch(&engine, 0, 0), '\u{fffd}');
+    assert_eq!(engine.state().active_cursor_position(), (0, 1));
+
+    let _ = engine.advance(b"mZ");
+    assert_eq!(engine.undecoded(), b"");
+
+    let cell = engine
+        .state()
+        .active_grid()
+        .cell(0, 1)
+        .expect("cell in bounds");
+    let mut red = Style::default();
+    red.set_fg(Color::Indexed(1));
+    assert_eq!(cell.ch(), 'Z');
+    assert_eq!(cell.style(), red);
+}
+
+/// `SUB` (`0x1a`) abandons the sequence it lands in, the same as `CAN`: the
+/// parser is back on a sequence boundary and nothing is carried.
+#[test]
+fn a_substituted_sequence_is_not_carried() {
+    let mut engine = engine();
+
+    let _ = engine.advance(b"\x1b[31\x1a");
+    assert_eq!(engine.undecoded(), b"");
+
+    let _ = engine.advance(b"Z");
+
+    assert_eq!(engine.undecoded(), b"");
+    assert_eq!(ch(&engine, 0, 0), 'Z');
+    assert_eq!(engine.state().active_cursor_position(), (0, 1));
+}
+
+/// A second escape byte restarts the sequence: one escape is held, and the
+/// bytes after it form the sequence.
+#[test]
+fn a_repeated_escape_byte_holds_one_escape() {
+    let mut engine = engine();
+
+    let _ = engine.advance(b"\x1b");
+    let _ = engine.advance(b"\x1b");
+    assert_eq!(engine.undecoded(), b"\x1b");
+
+    let _ = engine.advance(b"[31mZ");
+    assert_eq!(engine.undecoded(), b"");
+
+    let cell = engine
+        .state()
+        .active_grid()
+        .cell(0, 0)
+        .expect("cell in bounds");
+    let mut red = Style::default();
+    red.set_fg(Color::Indexed(1));
+    assert_eq!(cell.ch(), 'Z');
+    assert_eq!(cell.style(), red);
+}
+
+/// An operating system command closed by `ESC \` ends on a sequence boundary:
+/// the terminator's escape byte restarts the scan and its `\` finishes it.
+#[test]
+fn an_operating_system_command_closed_by_the_string_terminator_is_not_carried() {
+    let mut engine = engine();
+
+    let _ = engine.advance(b"\x1b]0;hi");
+    assert_eq!(engine.undecoded(), b"\x1b]0;hi");
+
+    let _ = engine.advance(b"\x1b\\Z");
+
+    assert_eq!(engine.undecoded(), b"");
+    assert_eq!(engine.state().title(), Some("hi"));
+    assert_eq!(ch(&engine, 0, 0), 'Z');
+    assert_eq!(engine.state().active_cursor_position(), (0, 1));
+}
+
+/// A chunk that ends on the escape byte of `ESC \` has already dispatched the
+/// operating system command; only that escape byte is carried, and the `\`
+/// after the swap closes it without printing.
+#[test]
+fn an_operating_system_command_cut_at_its_terminator_carries_only_the_escape() {
+    let mut engine = engine();
+
+    let _ = engine.advance(b"\x1b]0;hi\x1b");
+    assert_eq!(engine.state().title(), Some("hi"));
+    assert_eq!(engine.undecoded(), b"\x1b");
+
+    let mut next = swapped(engine);
+    let _ = next.advance(b"\\Z");
+
+    assert_eq!(next.undecoded(), b"");
+    assert_eq!(next.state().title(), Some("hi"));
+    assert_eq!(ch(&next, 0, 0), 'Z');
+    assert_eq!(next.state().active_cursor_position(), (0, 1));
+}
+
+/// A device control string cut before its final byte carries `ESC P`; once
+/// the final byte arrives, the carry is the three opening bytes and no more.
+#[test]
+fn a_device_control_string_cut_before_its_final_byte_carries_its_opening() {
+    let mut engine = engine();
+
+    let _ = engine.advance(b"\x1bP");
+    assert_eq!(engine.undecoded(), b"\x1bP");
+
+    let _ = engine.advance(b"q#0~~");
+    assert_eq!(engine.undecoded(), b"\x1bPq");
+
+    let mut next = swapped(engine);
+    let _ = next.advance(b"@@\x1b\\Z");
+
+    assert_eq!(next.undecoded(), b"");
+    assert_eq!(ch(&next, 0, 0), 'Z');
+    assert_eq!(next.state().active_cursor_position(), (0, 1));
+}
+
+/// A resize leaves the held bytes in place.
+#[test]
+fn a_resize_keeps_the_held_bytes() {
+    let mut engine = engine();
+
+    let _ = engine.advance(b"\x1b[3");
+    engine.resize(PtySize { cols: 4, rows: 2 });
+
+    assert_eq!(engine.undecoded(), b"\x1b[3");
+}
+
+/// A control sequence the parser ignores dispatches nothing: the scan holds
+/// it, and every control byte after it, until the next escape byte or printed
+/// character. Replaying it leaves the parser on a sequence boundary.
+#[test]
+fn an_ignored_control_sequence_is_held_until_the_next_escape_or_print() {
+    let mut engine = engine();
+
+    let _ = engine.advance(b"\x1b[3?m");
+    assert_eq!(engine.undecoded(), b"\x1b[3?m");
+
+    let _ = engine.advance(b"\n");
+    assert_eq!(engine.undecoded(), b"\x1b[3?m\n");
+    assert_eq!(engine.state().active_cursor_position(), (1, 0));
+
+    let mut next = swapped(engine);
+    assert_eq!(next.undecoded(), b"\x1b[3?m\n");
+    assert_eq!(next.state().active_cursor_position(), (1, 0));
+
+    let _ = next.advance(b"Z");
+    assert_eq!(next.undecoded(), b"");
+    assert_eq!(ch(&next, 1, 0), 'Z');
+    assert_eq!(next.state().active_cursor_position(), (1, 1));
+
+    let _ = next.advance(b"\x1b[3?m\x1b[3");
+    assert_eq!(next.undecoded(), b"\x1b[3");
 }
 
 /// The engine holds its OSC buffer inline, so its own size bounds how much one

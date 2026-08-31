@@ -23,8 +23,8 @@ pub enum LogLevel {
 /// How each written log line is rendered in the file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogFormat {
-    /// Human-readable, multi-line records for a person reading the file.
+    /// Human-readable, multi-line records.
     Pretty,
-    /// One JSON object per line, for a machine to parse.
+    /// One JSON object per line.
     Json,
 }

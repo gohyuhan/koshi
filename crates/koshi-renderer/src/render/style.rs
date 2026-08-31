@@ -6,9 +6,9 @@ use super::*;
 #[cfg(test)]
 mod tests;
 
-/// A tab's `#N` block. The active tab is inverted — its ramp stop as the
-/// TEXT color over the bar background; an inactive tab paints the dimmed stop
-/// as the block background with quiet text.
+/// A tab's `#N` block. The active tab takes its ramp stop as bold text and
+/// sets no background, so the bar background shows through; an inactive tab
+/// paints the dimmed stop as the block background with quiet text.
 pub(super) fn tab_index_style(theme: &Theme, active: bool, index: usize, count: usize) -> Style {
     if active {
         Style::default()
@@ -21,9 +21,9 @@ pub(super) fn tab_index_style(theme: &Theme, active: bool, index: usize, count: 
     }
 }
 
-/// A tab's name block: same inversion as the `#N` block — the active tab's
-/// name is its ramp stop as text over the bar background, an inactive tab's
-/// sits on the dimmed stop.
+/// A tab's name block: the same split as the `#N` block, without its bold.
+/// The active tab's name is its ramp stop as text over the bar background; an
+/// inactive tab's sits on the dimmed stop.
 pub(super) fn tab_name_style(theme: &Theme, active: bool, index: usize, count: usize) -> Style {
     if active {
         Style::default().fg(theme.ramp(index, count))
@@ -35,7 +35,7 @@ pub(super) fn tab_name_style(theme: &Theme, active: bool, index: usize, count: u
 }
 
 /// The session name anchoring the tabline's left edge: the ramp's start end
-/// as the text color over the bar background.
+/// as bold text over the bar background.
 pub(super) fn session_style(theme: &Theme) -> Style {
     Style::default()
         .fg(theme.ramp(0, 2))
@@ -48,7 +48,8 @@ pub(super) fn version_style(theme: &Theme) -> Style {
     Style::default().fg(theme.ramp(0, 2))
 }
 
-/// The `◀`/`▶` scroll arrows framing a scrolled tab strip.
+/// The `◀`/`▶` scroll arrows framing a scrolled tab strip: the dimmed-ramp
+/// text color, in bold.
 pub(super) fn scroll_arrow_style(theme: &Theme) -> Style {
     Style::default()
         .fg(theme.on_ramp_dim)
@@ -56,12 +57,13 @@ pub(super) fn scroll_arrow_style(theme: &Theme) -> Style {
 }
 
 /// The background filling a koshi-owned bar row whole — the tab bar and the
-/// key-hint bar — laid down before any text.
+/// statusline — laid down before any text.
 pub(crate) fn bar_style(theme: &Theme) -> Style {
     Style::default().bg(theme.bar_bg)
 }
 
-/// Filled strip style marking a collapsed stack member's koshi-owned header.
+/// The filled strip marking a collapsed stack member's koshi-owned header: the
+/// theme's stack-header text color on its stack-header background.
 pub(super) fn stack_header_style(theme: &Theme) -> Style {
     Style::default()
         .fg(theme.stack_header_fg)
@@ -69,7 +71,7 @@ pub(super) fn stack_header_style(theme: &Theme) -> Style {
 }
 
 /// The mode tag anchoring the tabline's right edge: the ramp's other end as
-/// the text color over the bar background.
+/// bold text over the bar background.
 pub(super) fn mode_style(theme: &Theme) -> Style {
     Style::default()
         .fg(theme.ramp(1, 2))
@@ -86,19 +88,20 @@ pub(super) fn letterbox_style(theme: &Theme) -> Style {
     Style::default().bg(theme.letterbox)
 }
 
-/// Highlighted border style for the focused pane.
+/// The focused pane's border: the theme's focused-border color, in bold.
 pub(super) fn border_focused_style(theme: &Theme) -> Style {
     Style::default()
         .fg(theme.border_focused)
         .add_modifier(Modifier::BOLD)
 }
 
-/// Dim border style for unfocused panes.
+/// An unfocused pane's border: the theme's unfocused-border color, no bold.
 pub(super) fn border_unfocused_style(theme: &Theme) -> Style {
     Style::default().fg(theme.border_unfocused)
 }
 
-/// Border style for the pane under the pointer — the wheel's target.
+/// The border of the pane under the pointer — the wheel's target: the theme's
+/// hover-border color, in bold.
 pub(super) fn border_hover_style(theme: &Theme) -> Style {
     Style::default()
         .fg(theme.border_hover)

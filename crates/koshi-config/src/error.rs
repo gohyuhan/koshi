@@ -4,10 +4,10 @@
 //! classifies into [`DomainCategory::Config`] when it joins koshi's
 //! crate-wide aggregate error type. [`ConfigParseDiagnostic`] is a richer
 //! parse error that keeps the original KDL source text and the byte span of
-//! the failure, so it can be pretty-printed with a caret pointing at the bad
-//! line; it flattens down into a plain [`ConfigError::Parse`] once it joins
-//! the aggregate. [`ConfigVersionDiagnostic`] reports zero or a schema version
-//! newer than this build understands.
+//! the failure; a rendered report points a caret at the bad line. It
+//! flattens down into a plain [`ConfigError::Parse`] once it joins the
+//! aggregate. [`ConfigVersionDiagnostic`] reports a declared schema version
+//! that is zero or newer than this build supports.
 //! [`ColorParseError`] reports a theme color value that is not valid
 //! `#RRGGBB` hex.
 
@@ -24,9 +24,6 @@ use crate::types::SCHEMA_VERSION;
 /// recoverable: Koshi falls back to defaults and surfaces the issue to the user.
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    /// No config file was found at the expected path.
-    #[error("config file not found: {path}")]
-    NotFound { path: String },
     /// The config file could not be parsed.
     #[error("config parse error in {path}: {detail}")]
     Parse { path: String, detail: String },
@@ -132,8 +129,8 @@ pub enum ConfigVersionDiagnostic {
     },
 }
 
-/// Checks a config's declared schema `version` against [`SCHEMA_VERSION`]. An
-/// older supported version is accepted, since migration upgrades it.
+/// Checks the declared schema version `found` against [`SCHEMA_VERSION`].
+/// Every version from 1 through [`SCHEMA_VERSION`] is accepted.
 ///
 /// # Errors
 /// Returns a [`ConfigVersionDiagnostic`] when `found` is zero or newer than
@@ -154,10 +151,10 @@ pub fn check_version(found: u32) -> Result<(), ConfigVersionDiagnostic> {
 /// A theme color value that is not a valid `#RRGGBB` hex string.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ColorParseError {
-    /// The value did not have exactly six hex digits.
+    /// The value did not have exactly six characters.
     #[error("color must be 6 hex digits (#RRGGBB), got {got}")]
     BadLength {
-        /// The number of digits supplied.
+        /// The number of characters supplied.
         got: usize,
     },
     /// The value contained a character that is not a hex digit.

@@ -1,7 +1,7 @@
 //! Session state model: the aggregate root a server process owns for each
 //! running session.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use koshi_core::{
@@ -22,8 +22,8 @@ use crate::{
 /// One tab: its name, bar position, layout tree, lifecycle, and the panes it
 /// focused, most-recent first.
 ///
-/// A tab holds no layout mode. Zoom is a client property. It lives on
-/// [`crate::client::Client`] as `zoom_by_tab`, so two clients on this tab can
+/// A tab holds no layout mode. Zoom is a client property: it lives on
+/// [`crate::client::Client`] as `zoom_by_tab`, and two clients on this tab can
 /// hold different zoom. The tab holds the tree that every client solves.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tab {
@@ -92,13 +92,15 @@ impl Tab {
     }
 
     /// Records `pane` as the most-recently focused: moves it to the front,
-    /// keeping one entry per pane, and drops the oldest once the cap is hit.
+    /// keeping one entry per pane, then cuts the history back to
+    /// [`MAX_TAB_FOCUS_MRU`] entries, dropping the oldest.
+    ///
+    /// A history restored longer than the cap — a session file this process did
+    /// not write — is cut to the cap by this one call, not by one entry.
     pub fn record_focus_mru(&mut self, pane: PaneId) {
         self.focus_mru.retain(|&p| p != pane);
         self.focus_mru.insert(0, pane);
-        if self.focus_mru.len() as u16 > MAX_TAB_FOCUS_MRU {
-            self.focus_mru.pop();
-        }
+        self.focus_mru.truncate(usize::from(MAX_TAB_FOCUS_MRU));
     }
 
     /// The panes this tab has focused, most-recent first.
@@ -117,24 +119,14 @@ impl Tab {
     }
 }
 
-/// The configuration a session captured when it started. A snapshot, not a
-/// live reference: a config reload builds a new snapshot for new sessions and
-/// leaves a running session's copy as it is. Carries no fields.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SessionConfig;
-
-/// Handle to a session's plugin runtime. Carries no fields.
-#[derive(Debug)]
-pub struct PluginRuntimeHandle;
-
 /// One running session: the aggregate root owning the tabs, the pane
 /// registry, and the attached-client registry.
 ///
 /// Anything one client may see differently from another — focus, viewport,
-/// input mode — lives on that client's entry in [`ClientRegistry`], never
-/// as a session-global field: two attached clients must be able to look at
-/// different tabs and panes at the same time. `start_locked` is the mode the
-/// session hands the first client to attach, not a mode the session is in.
+/// input mode — lives on that client's entry in [`ClientRegistry`], never as a
+/// session-global field. Two attached clients can look at different tabs and
+/// panes at the same time. `start_locked` is the mode the session hands the
+/// first client to attach, not a mode the session is in.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Session {
     /// Unique id, stable for the session's whole life.
@@ -142,24 +134,17 @@ pub struct Session {
     /// Human-facing name; attach and list address sessions by it.
     pub name: String,
     /// When the session was created. Supplied by the caller at the creation
-    /// boundary, not read from the clock here, so it stays controllable.
+    /// boundary, never read from the clock here.
     pub created_at: SystemTime,
-    /// The session's tabs, keyed by id. Display order is not the map
-    /// order — it lives on each tab, so reordering tabs never moves map
-    /// entries.
+    /// The session's tabs, keyed by id. Display order is not the map order: it
+    /// lives on each tab as [`Tab::index`], and reordering tabs moves no map
+    /// entry.
     pub tabs: BTreeMap<TabId, Tab>,
     /// Runtime metadata for every pane in every tab; layout trees hold
     /// only the ids.
     pub panes: PaneRegistry,
     /// The clients currently attached.
     pub clients: ClientRegistry,
-    /// The configuration this session started with.
-    pub config_snapshot: SessionConfig,
-    /// The session's plugin runtime, once one is running. A handle names a
-    /// live process, so a serialized session leaves it out and a deserialized
-    /// one reads back as `None`.
-    #[serde(skip)]
-    pub plugin_runtime_ref: Option<PluginRuntimeHandle>,
     /// True while the next client to attach must start in
     /// [`LockMode::Locked`](koshi_core::lock::LockMode::Locked). A profile
     /// carrying the `lock` marker sets it; [`Session::take_start_lock`] reads
@@ -173,9 +158,10 @@ pub struct Session {
 }
 
 impl Session {
-    /// A session with no tabs, no panes, and no plugin runtime yet, holding the
-    /// supplied client registry. `created_at` is supplied by the caller at the
-    /// creation boundary, not read from the clock here.
+    /// A session with no tabs and no panes, holding the supplied client
+    /// registry. Starts in `Starting` with `start_locked`
+    /// `false`. `created_at` is supplied by the caller at the creation
+    /// boundary, never read from the clock here.
     #[must_use]
     pub fn new(
         id: SessionId,
@@ -190,8 +176,6 @@ impl Session {
             tabs: BTreeMap::new(),
             panes: PaneRegistry::new(),
             clients: client_registry,
-            config_snapshot: SessionConfig,
-            plugin_runtime_ref: None,
             start_locked: false,
             lifecycle: SessionLifecycle::Starting,
         }
@@ -231,9 +215,10 @@ impl Session {
 
     /// Attach `client` and mark the session live, returning the record it
     /// displaced when that id was already attached (a re-attach replaces in
-    /// place), else `None`. `ClientAttached` only revives a `Detaching`
-    /// (no-client) session; attaching to an already-`Running` one leaves the
-    /// lifecycle unchanged.
+    /// place), else `None`. `ClientAttached` moves a `Detaching` (no-client)
+    /// session to `Running`; from `Starting`, `Running`, `Stopping` or
+    /// `Stopped` it is rejected and the lifecycle stays as it was. The client
+    /// is registered either way.
     pub fn attach_client(&mut self, client: Client) -> Option<Client> {
         let displaced = self.clients.attach(client);
         let _ = self.update_lifecycle(SessionLifecycleEvent::ClientAttached);
@@ -247,46 +232,37 @@ impl Session {
     pub fn detach_client(&mut self, client_id: ClientId) -> Option<Client> {
         let removed = self.clients.detach(client_id);
         if self.clients.is_empty() {
-            // A `Stopping` or `Stopped` session rejects the park and keeps the
-            // state it had.
+            // Only a `Running` session moves to `Detaching`. `Starting`,
+            // `Detaching`, `Stopping` and `Stopped` reject the event and keep
+            // the state they had.
             let _ = self.update_lifecycle(SessionLifecycleEvent::LastClientDetached);
         }
         removed
     }
 
     /// The pane region to size tab `tab_id` against: each viewing client's own
-    /// pane area, then the per-axis minimum (`cols` and `rows` independently).
+    /// pane area, reduced to the per-axis minimum (`cols` and `rows`
+    /// independently), which is the largest grid that fits inside *every*
+    /// viewer on *both* axes.
     ///
-    /// Each viewer contributes [`Client::pane_area`]; a viewer that reports
+    /// Every attached client whose [`Client::active_tab`] is `tab_id`
+    /// contributes its [`Client::pane_area`]; a viewer that reports
     /// [`PaneArea::Starving`](koshi_core::geometry::PaneArea::Starving)
     /// contributes nothing. Returns `None` when no viewer of `tab_id`
-    /// contributes a size.
-    ///
-    /// A single pane is one PTY (pseudo-terminal — the OS handle its shell
-    /// process runs through) of one cell grid, so every client viewing it
-    /// shares its dimensions. The per-axis minimum is the largest grid that
-    /// fits inside *every* viewer on *both* axes; larger viewers letterbox the
-    /// unused margin. It is independent of which client (if any) issued the
-    /// command.
-    ///
-    /// No client is handed a grid wider or taller than the pane rect it
-    /// draws. Every attach, detach, terminal resize and tab switch recomputes
-    /// this for each tab whose viewer set changed.
+    /// contributes a size. The result does not depend on which client (if any)
+    /// issued the command, nor on the order the viewers attached.
     #[must_use]
     pub fn tab_viewport(&self, tab_id: TabId) -> Option<Size> {
         self.clients
             .list_attached()
             .filter(|client| client.active_tab() == tab_id)
             .filter_map(Client::pane_area)
-            .reduce(|a, b| Size {
-                cols: a.cols.min(b.cols),
-                rows: a.rows.min(b.rows),
-            })
+            .reduce(Size::min_axes)
     }
 
-    /// Request shutdown: move a `Running` or `Detaching` session to `Stopping`.
-    /// State is retained — stopping destroys no tabs or panes — so a stopped
-    /// session can be persisted and restored later.
+    /// Request shutdown: move a `Starting`, `Running` or `Detaching` session to
+    /// `Stopping`. State is retained: stopping destroys no tabs, panes or
+    /// clients.
     pub fn request_stop(&mut self) {
         // Idempotent: requesting a stop on an already-`Stopping`/`Stopped`
         // session is rejected and changes nothing.
@@ -303,20 +279,25 @@ impl Session {
     /// Check every cross-store invariant and return *all* violations in one
     /// pass, or `Ok(())` when the session is internally consistent.
     ///
-    /// Checks the tabs and their layout trees, the pane registry, each attached
-    /// client's focus and zoom, and each tab's own identity against one
-    /// another. Callers run it before building a snapshot or a render from the
-    /// session. See [`SessionConsistencyError`] for the individual checks.
+    /// Checks each tab's map key, lifecycle and bar index; every layout leaf
+    /// against the pane registry and every registry record against the layout
+    /// trees; and each attached client's session id, active tab, focus and
+    /// zoom. See [`SessionConsistencyError`] for the individual checks. The
+    /// returned violations arrive in a fixed order: the checks run in the order
+    /// listed above, and each one walks its own subjects by id or by bar index,
+    /// so one session always reports the same list.
     pub fn validate(&self) -> Result<(), Vec<SessionConsistencyError>> {
         let mut violations = vec![];
         // Pane id -> the tabs whose layout holds it as a leaf. Built once here,
-        // then reused to check the leaf/registry relationship in both directions.
-        let mut panes_in_layout_nodes: HashMap<PaneId, Vec<TabId>> = HashMap::new();
+        // then reused to check the leaf/registry relationship in both
+        // directions. Sorted, so two violations from one walk always come out
+        // in the same order.
+        let mut panes_in_layout_nodes: BTreeMap<PaneId, Vec<TabId>> = BTreeMap::new();
         // Bar position -> how many tabs claim it, to catch collisions.
-        let mut tab_index_counts: HashMap<usize, usize> = HashMap::new();
+        let mut tab_index_counts: BTreeMap<usize, usize> = BTreeMap::new();
 
         for (tab_id, tab) in self.tabs.iter() {
-            // A tab keyed under anything but its own id breaks every by-id lookup.
+            // Every tab is keyed under its own id.
             if *tab_id != tab.id {
                 violations.push(SessionConsistencyError::TabKeyMismatch {
                     key: *tab_id,
@@ -337,7 +318,7 @@ impl Session {
                     .or_default()
                     .push(tab.id);
 
-                let Some(p) = self.panes.get(pane_id) else {
+                let Some(record) = self.panes.get(pane_id) else {
                     violations.push(SessionConsistencyError::PaneNotInRegistry {
                         tab: tab.id,
                         pane: pane_id,
@@ -345,7 +326,7 @@ impl Session {
                     continue;
                 };
                 // A `Removed` pane should be gone from both layout and registry.
-                if *p.lifecycle() == PaneLifecycle::Removed {
+                if *record.lifecycle() == PaneLifecycle::Removed {
                     violations.push(SessionConsistencyError::RemovedPaneInLayout {
                         tab: tab.id,
                         pane: pane_id,
@@ -394,11 +375,10 @@ impl Session {
                 });
             }
 
-            // The tab a client is currently showing must exist. The check is
-            // scoped to sessions that still have tabs: closing the last tab
-            // quits the session with no successor to point viewers at, so
-            // until the transport disconnects them every client's
-            // `active_tab` names the closed tab by definition.
+            // The tab a client is currently showing must exist. Checked only
+            // while the session still holds tabs: a session emptied by its last
+            // tab closing leaves every client's `active_tab` naming that closed
+            // tab until the transport disconnects them.
             if !self.tabs.is_empty() && !self.tabs.contains_key(&client.active_tab()) {
                 violations.push(SessionConsistencyError::ActiveTabMissing {
                     client: client.id(),
@@ -433,11 +413,9 @@ impl Session {
                 }
             }
 
-            // A zoom is the same kind of reference as a focus — one client, one
-            // tab, one pane — so it answers to the same rule: the pane it names
-            // must be a live leaf of the tab it is zoomed in. A zoom left behind
-            // on a removed pane would draw nothing, so it is dropped when the
-            // pane goes; this catches it if that ever stops happening.
+            // The pane a client is zoomed on must have a registry record and be
+            // a leaf of the tab it is zoomed in. Removing a pane drops every
+            // zoom on it.
             for (&tab_id, &zoomed_pane_id) in client.zoomed_panes() {
                 let live_leaf = self.panes.get(zoomed_pane_id).is_some()
                     && self

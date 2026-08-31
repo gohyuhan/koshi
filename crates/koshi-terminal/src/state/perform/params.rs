@@ -2,9 +2,10 @@
 //! [`vte::Params`], applying the VT defaults (a missing or zero argument means
 //! one; 1-based coordinates map to 0-based).
 
-/// The first CSI parameter's primary value, or `None` if empty.
+/// The first CSI parameter's primary value, or `None` when there are no
+/// parameters.
 pub(super) fn first_param(params: &vte::Params) -> Option<u16> {
-    params.iter().next().and_then(|p| p.first().copied())
+    nth_param(params, 0)
 }
 
 /// The `n`-th CSI parameter's primary value (0-based), or `None` when absent.

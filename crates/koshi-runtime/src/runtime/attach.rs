@@ -6,11 +6,8 @@
 //! against its own terminal size, and the attach handler decides whether a
 //! session is fit to attach to before it calls this.
 //!
-//! Both lists are sorted here: tabs in display order (`Tab::index`), panes by
-//! [`PaneId`](koshi_core::ids::PaneId).
-//! [`PaneRegistry`](koshi_pane::registry::PaneRegistry) holds its records in a
-//! [`HashMap`](std::collections::HashMap), whose iteration order varies between
-//! processes; the sort gives the payload one fixed order.
+//! Both lists are sorted here: tabs in display order (`Tab::index`), panes
+//! ascending by [`PaneId`](koshi_core::ids::PaneId).
 
 use koshi_ipc::attach::{AttachedSessionStructureSnapshot, PaneStructure, TabStructure};
 use koshi_session::session::state::Session;
@@ -35,7 +32,8 @@ pub fn session_structure(session: &Session) -> AttachedSessionStructureSnapshot 
         .collect();
     tabs.sort_by_key(|tab| tab.index);
 
-    let mut panes: Vec<PaneStructure> = session
+    // `PaneRegistry::list` walks in id order, so the snapshot is already sorted.
+    let panes: Vec<PaneStructure> = session
         .panes
         .list()
         .map(|record| PaneStructure {
@@ -43,7 +41,6 @@ pub fn session_structure(session: &Session) -> AttachedSessionStructureSnapshot 
             kind: *record.kind(),
         })
         .collect();
-    panes.sort_by_key(|pane| pane.id);
 
     AttachedSessionStructureSnapshot {
         id: session.id,

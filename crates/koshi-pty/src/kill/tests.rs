@@ -12,8 +12,16 @@
 mod unix {
     use crate::error::PtyError;
     use crate::kill::{PtyChildKillControl, StopRequest};
+    use nix::errno::Errno;
     use std::os::unix::process::ExitStatusExt;
     use std::process::Command;
+
+    /// The error `kill`/`killpg` on a PID or group that does not exist maps to.
+    fn no_such_process() -> PtyError {
+        PtyError::Signal {
+            detail: Errno::ESRCH.to_string(),
+        }
+    }
 
     /// A child that sleeps long enough that it never exits on its own before the
     /// test signals it.
@@ -57,6 +65,40 @@ mod unix {
     }
 
     #[test]
+    fn a_group_stop_request_to_a_reaped_child_reports_nothing_received_it() {
+        let mut child = spawn_sleeper();
+        let pid = child.id();
+        child.kill().expect("kill the child");
+        child.wait().expect("reap child");
+
+        // The pid is gone and never led a group, so `killpg` answers ESRCH.
+        let control = PtyChildKillControl::new(pid);
+        assert_eq!(control.request_stop_tree(), StopRequest::NotDelivered);
+    }
+
+    #[test]
+    fn force_on_a_reaped_child_reports_no_such_process() {
+        let mut child = spawn_sleeper();
+        let pid = child.id();
+        child.kill().expect("kill the child");
+        child.wait().expect("reap child");
+
+        let control = PtyChildKillControl::new(pid);
+        assert_eq!(control.force(), Err(no_such_process()));
+    }
+
+    #[test]
+    fn tree_on_a_reaped_child_reports_no_such_process() {
+        let mut child = spawn_sleeper();
+        let pid = child.id();
+        child.kill().expect("kill the child");
+        child.wait().expect("reap child");
+
+        let control = PtyChildKillControl::new(pid);
+        assert_eq!(control.tree(), Err(no_such_process()));
+    }
+
+    #[test]
     fn a_group_stop_request_that_finds_no_group_reports_nothing_received_it() {
         let mut child = spawn_sleeper();
         let control = PtyChildKillControl::new(child.id());
@@ -92,31 +134,62 @@ mod unix {
         // The child is not a process-group leader, so no group has its pid;
         // `killpg` finds nothing (ESRCH) and the failure maps to `Signal`. It
         // kills nothing, so the child is still alive to clean up below.
-        let result = control.tree();
-        match result {
-            Err(PtyError::Signal { detail }) => assert!(!detail.is_empty()),
-            other => panic!("expected a signal error, got {other:?}"),
-        }
+        assert_eq!(control.tree(), Err(no_such_process()));
 
         control.force().expect("clean up the still-live child");
         let status = child.wait().expect("reap child");
         assert_eq!(status.signal(), Some(9));
     }
+
+    #[test]
+    fn a_pid_that_names_no_child_process_is_never_signalled() {
+        // Pid 0 names the caller's own process group, and a pid above
+        // `i32::MAX` wraps to a negative id naming an arbitrary group. Both
+        // would signal the test runner, so both are refused before any call.
+        for pid in [0, 2_147_483_648, u32::MAX] {
+            let control = PtyChildKillControl::new(pid);
+
+            assert_eq!(control.request_stop(), StopRequest::NotDelivered, "{pid}");
+            assert_eq!(
+                control.request_stop_tree(),
+                StopRequest::NotDelivered,
+                "{pid}"
+            );
+            assert_eq!(
+                control
+                    .force()
+                    .expect_err("nothing is signalled")
+                    .to_string(),
+                format!("pty signal error: pid {pid} names no child process")
+            );
+            assert_eq!(
+                control
+                    .tree()
+                    .expect_err("nothing is signalled")
+                    .to_string(),
+                format!("pty signal error: pid {pid} names no child process")
+            );
+        }
+    }
 }
 
 #[cfg(windows)]
 mod windows {
-    use crate::kill::PtyChildKillControl;
+    use crate::kill::{PtyChildKillControl, StopRequest};
     use std::os::windows::io::AsRawHandle;
     use std::process::Command;
 
-    #[test]
-    fn new_reports_the_pid_and_force_terminates_the_child() {
-        // `ping -n 30` runs about 30 seconds; the test kills it at once.
-        let mut child = Command::new("ping")
+    /// A child that runs about 30 seconds; the test terminates it at once.
+    fn spawn_pinger() -> std::process::Child {
+        Command::new("ping")
             .args(["-n", "30", "127.0.0.1"])
             .spawn()
-            .expect("spawn ping child");
+            .expect("spawn ping child")
+    }
+
+    #[test]
+    fn new_reports_the_pid_and_force_terminates_the_child() {
+        let mut child = spawn_pinger();
         let pid = child.id();
 
         let control =
@@ -127,6 +200,22 @@ mod windows {
 
         let status = child.wait().expect("reap child");
         // `force` passes exit code 137 to `TerminateProcess`.
+        assert_eq!(status.code(), Some(137));
+    }
+
+    #[test]
+    fn stop_requests_send_nothing_and_answer_not_delivered() {
+        let mut child = spawn_pinger();
+        let control = PtyChildKillControl::new(child.id(), child.as_raw_handle())
+            .expect("construct kill control");
+
+        assert_eq!(control.request_stop(), StopRequest::NotDelivered);
+        assert_eq!(control.request_stop_tree(), StopRequest::NotDelivered);
+
+        // Neither request touched the child: it is still alive to terminate.
+        control.tree().expect("terminate the job");
+        let status = child.wait().expect("reap child");
+        // `tree` passes exit code 137 to `TerminateJobObject`.
         assert_eq!(status.code(), Some(137));
     }
 }

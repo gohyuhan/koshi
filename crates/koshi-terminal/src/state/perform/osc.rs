@@ -19,8 +19,16 @@ pub(super) enum Osc133 {
     CommandFinished(Option<i32>),
 }
 
-/// Parse an OSC 133 payload, or return `None` for a malformed or unrelated
-/// OSC payload.
+/// Parse an OSC 133 payload, split on `;` by `vte`, into its marker.
+///
+/// Accepts `133;A`, `133;B`, `133;C`, `133;D`, and `133;D;<code>` where
+/// `<code>` parses as an `i32` (`0`, `137`, `-1`, `+3`).
+///
+/// Parameters after the marker are options the shell adds (`cl=m`, `aid=1`)
+/// and are skipped: `133;A;cl=m;aid=1` is the prompt mark and `133;D;0;aid=1`
+/// is the finish carrying `0`. A `D` whose first following parameter is empty
+/// carries no code. Anything else — another command number, a marker other
+/// than `A`–`D`, a `D` code that is not a decimal `i32` — yields `None`.
 pub(super) fn parse_osc133(params: &[&[u8]]) -> Option<Osc133> {
     let [command, marker, rest @ ..] = params else {
         return None;
@@ -28,54 +36,45 @@ pub(super) fn parse_osc133(params: &[&[u8]]) -> Option<Osc133> {
     if *command != b"133" {
         return None;
     }
-    if rest.is_empty() {
-        if *marker == b"A" {
-            return Some(Osc133::Prompt);
+    match (*marker, rest) {
+        (b"A", _) => Some(Osc133::Prompt),
+        (b"B", _) => Some(Osc133::Input),
+        (b"C", _) => Some(Osc133::CommandStart),
+        (b"D", [exit_code, ..]) if !exit_code.is_empty() => {
+            let exit_code = std::str::from_utf8(exit_code).ok()?.parse().ok()?;
+            Some(Osc133::CommandFinished(Some(exit_code)))
         }
-        if *marker == b"B" {
-            return Some(Osc133::Input);
-        }
-        if *marker == b"C" {
-            return Some(Osc133::CommandStart);
-        }
-        if *marker == b"D" {
-            return Some(Osc133::CommandFinished(None));
-        }
-        return None;
+        (b"D", _) => Some(Osc133::CommandFinished(None)),
+        _ => None,
     }
-    if *marker != b"D" || rest.len() != 1 || rest[0].is_empty() {
-        return None;
-    }
-    let exit_code = std::str::from_utf8(rest[0]).ok()?.parse().ok()?;
-    Some(Osc133::CommandFinished(Some(exit_code)))
 }
 
 /// The longest OSC 7 URI [`parse_osc7_cwd`] accepts. A longer one yields
-/// `None`, leaving the last reported working directory in place.
+/// `None` and leaves the last reported working directory in place.
 pub(super) const MAX_OSC7_URI_BYTES: usize = 4 * 1024;
 
-/// The bytes an OSC 7 payload carries ahead of the URI: the command number
-/// `7` and the `;` separating it.
+/// The bytes an OSC 7 payload carries ahead of the URI on the wire: the command
+/// number `7` and the `;` after it.
 const OSC7_PAYLOAD_PREFIX: usize = 2;
 
-// A URI of exactly `MAX_OSC7_URI_BYTES` reaches this function whole, so a
-// truncated one is always longer than the limit and always yields `None`.
+// A URI of exactly `MAX_OSC7_URI_BYTES` fits the parser's OSC buffer whole. A
+// URI the parser cut short is longer than the limit and yields `None`.
 const _: () = assert!(MAX_OSC7_URI_BYTES + OSC7_PAYLOAD_PREFIX <= crate::engine::OSC_CAPACITY);
 
 /// Parse an OSC 7 cwd URI (`file://host/path`) into a [`ReportedCwd`], or
-/// `None` when it is not a `file://` URI, carries no path, or is longer than
-/// [`MAX_OSC7_URI_BYTES`].
+/// `None` when it is not a `file://` URI, carries no `/` after the authority,
+/// is longer than [`MAX_OSC7_URI_BYTES`], or decodes to a path holding a NUL
+/// byte.
 ///
-/// The `host` component (between `//` and the next `/`) lands on the result,
-/// filtered by [`sanitize_reported_text`](koshi_core::text::sanitize_reported_text).
-/// The spawn layer reads it to tell a local report from a remote one. An empty
-/// authority (`file:///path`) yields no host. The path keeps its leading `/`
-/// and is percent-decoded (`%20` → space, `%C3%A9` → `é`) before being turned
-/// into a [`PathBuf`] by [`bytes_to_path`]; a decoded NUL byte (which cannot
-/// occur in a real path) rejects the whole report.
+/// The scheme `file` compares case-insensitively (RFC 3986 §3.1); `://`
+/// compares exactly. The `host` is the authority between `//` and the
+/// first `/`, decoded lossily (a non-UTF-8 byte becomes U+FFFD) and filtered
+/// by [`sanitize_reported_text`](koshi_core::text::sanitize_reported_text);
+/// an empty authority (`file:///path`) gives `host: None`. The path keeps its
+/// leading `/`, is percent-decoded (`%20` → space, `%C3%A9` → `é`; a `%` not
+/// followed by two hex digits stays literal), and becomes a [`PathBuf`] via
+/// [`bytes_to_path`]. `?` and `#` are ordinary path bytes.
 pub(super) fn parse_osc7_cwd(uri: &[u8]) -> Option<ReportedCwd> {
-    // The `file` scheme is case-insensitive (RFC 3986 §3.1: schemes compare
-    // case-insensitively); the `//` authority separator and the path are not.
     if uri.len() < 7 || uri.len() > MAX_OSC7_URI_BYTES {
         return None;
     }
@@ -84,8 +83,6 @@ pub(super) fn parse_osc7_cwd(uri: &[u8]) -> Option<ReportedCwd> {
     }
     let rest = &uri[7..];
     let slash = rest.iter().position(|&b| b == b'/')?;
-    // The authority between `//` and the first `/` is the host; an empty
-    // authority means no host. Hosts are ASCII in practice, so decode lossily.
     let host = match &rest[..slash] {
         [] => None,
         bytes => Some(koshi_core::text::sanitize_reported_text(
@@ -93,7 +90,6 @@ pub(super) fn parse_osc7_cwd(uri: &[u8]) -> Option<ReportedCwd> {
         )),
     };
     let decoded = percent_decode(&rest[slash..]).collect::<Vec<u8>>();
-    // A NUL cannot appear in a real path; reject the whole report.
     if decoded.contains(&0) {
         return None;
     }
@@ -101,21 +97,19 @@ pub(super) fn parse_osc7_cwd(uri: &[u8]) -> Option<ReportedCwd> {
     Some(ReportedCwd { host, path })
 }
 
-/// Turn percent-decoded path bytes into a [`PathBuf`], honoring each platform's
-/// path encoding. On Unix the bytes become an `OsString` directly, so a path
-/// that is not valid UTF-8 survives intact. On Windows the bytes are required
-/// UTF-8 (invalid → `None`) and a `file:///C:/…` URI's leading slash before the
-/// drive letter is stripped so the resulting path is well-formed.
+/// Turn percent-decoded path bytes into a [`PathBuf`]. The bytes become an
+/// `OsString` unchanged; a path that is not valid UTF-8 survives intact.
 #[cfg(unix)]
 fn bytes_to_path(decoded: Vec<u8>) -> Option<PathBuf> {
     use std::os::unix::ffi::OsStringExt;
     Some(PathBuf::from(std::ffi::OsString::from_vec(decoded)))
 }
 
+/// Turn percent-decoded path bytes into a [`PathBuf`], or `None` when they are
+/// not valid UTF-8. A leading `/` before a drive letter is dropped:
+/// `/C:/Users` → `C:/Users`.
 #[cfg(windows)]
 fn bytes_to_path(mut decoded: Vec<u8>) -> Option<PathBuf> {
-    // `file:///C:/Users` gives path bytes `/C:/Users`; drop the leading slash
-    // before the drive letter so the drive-rooted path is well-formed.
     let drive_prefixed =
         matches!(decoded.as_slice(), [b'/', drive, b':', ..] if drive.is_ascii_alphabetic());
     if drive_prefixed {

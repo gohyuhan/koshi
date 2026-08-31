@@ -21,6 +21,11 @@
 //! finding a running koshi, talking to it — is [`koshi_link`], below this
 //! crate. What they serve on their sockets is [`koshi_ipc`].
 
+/// Starting and replacing this crate's own processes: the signal mask a
+/// serving thread runs under, replacing this image with another, and starting
+/// a process that outlives its parent.
+pub(crate) mod process;
+
 /// The process holding one session's panes: it opens and closes every pane's
 /// terminal, and outlives a session server that replaces its own image.
 pub mod pty_supervisor;

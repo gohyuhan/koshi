@@ -5,13 +5,13 @@
 //! `Stacked` split shares its rectangle instead: exactly one child is
 //! expanded and the rest collapse to one-row headers.
 //!
-//! The tree stores *intent* — structure and relative sizes — never solved
-//! geometry. The solver maps `tree + tab rect` to concrete pane rectangles on
-//! every solve, so one tree serves any terminal size without rewriting.
+//! The tree stores structure and relative sizes, never solved geometry. The
+//! solver maps a tree plus a tab rectangle to pane rectangles on every solve.
 //!
 //! Nodes are plain serializable data. Structural edits (split, remove,
-//! normalize) live in sibling modules and return new trees; nothing here
-//! mutates in place.
+//! normalize) live in sibling modules and return new trees. This module holds
+//! the node types, the read-only walks, and the accessors that hand out one
+//! node for an in-place edit.
 
 use koshi_core::geometry::{Direction, SplitDirection};
 use koshi_core::ids::PaneId;
@@ -39,10 +39,8 @@ pub enum LayoutNode {
 
 impl LayoutNode {
     /// All leaf pane ids in layout order: depth-first, children in order.
-    ///
-    /// This is the one stable order the engine uses whenever position in the
-    /// tree matters: suppression picks trailing panes from it, and focus
-    /// fallback walks it. The order is the same on every solve.
+    /// The same tree yields the same list on every call. The solver lists
+    /// solved and suppressed panes in this order.
     #[must_use]
     pub fn leaf_panes(&self) -> Vec<PaneId> {
         let mut panes = Vec::new();
@@ -56,7 +54,7 @@ impl LayoutNode {
             Self::Pane(id) => out.push(*id),
             Self::Split(split) => {
                 for child in &split.children {
-                    child.node.collect_leaf_panes(out);
+                    child.collect_leaf_panes(out);
                 }
             }
         }
@@ -67,10 +65,7 @@ impl LayoutNode {
     pub(crate) fn first_leaf(&self) -> Option<PaneId> {
         match self {
             Self::Pane(id) => Some(*id),
-            Self::Split(split) => split
-                .children
-                .iter()
-                .find_map(|child| child.node.first_leaf()),
+            Self::Split(split) => split.children.iter().find_map(|child| child.first_leaf()),
         }
     }
 
@@ -79,17 +74,12 @@ impl LayoutNode {
     pub fn contains_pane(&self, pane: PaneId) -> bool {
         match self {
             Self::Pane(id) => *id == pane,
-            Self::Split(split) => split
-                .children
-                .iter()
-                .any(|child| child.node.contains_pane(pane)),
+            Self::Split(split) => split.children.iter().any(|child| child.contains_pane(pane)),
         }
     }
 
     /// The innermost (deepest-nested) stack whose subtree holds `pane`, or
-    /// `None` when the pane is not inside any stack. Use it to reach the
-    /// stack a pane belongs to for stack-local operations: activating a
-    /// collapsed member, cycling stack focus, appending a new member.
+    /// `None` when the pane is not inside any stack.
     pub fn stack_containing_mut(&mut self, pane: PaneId) -> Option<&mut SplitNode> {
         let path = self.path_to(pane)?;
         let deepest = (0..path.len()).rev().find(|&depth| {
@@ -101,12 +91,11 @@ impl LayoutNode {
         Some(self.split_at_mut(&path[..deepest]))
     }
 
-    /// The child indices taken at each split from this node down to the
-    /// leaf holding `pane`, or `None` when the pane is not in this subtree.
+    /// The child index taken at each split from this node down to the leaf
+    /// holding `pane`, or `None` when the pane is not in this subtree. A
+    /// bare pane yields an empty path.
     ///
-    /// Paths are positional and ephemeral: they are only meaningful against
-    /// the exact tree they were computed from, so recompute after any edit
-    /// rather than carrying a path across mutations.
+    /// A path is valid only against the exact tree it was computed from.
     pub(crate) fn path_to(&self, pane: PaneId) -> Option<Vec<usize>> {
         fn descend(node: &LayoutNode, pane: PaneId, path: &mut Vec<usize>) -> bool {
             match node {
@@ -114,7 +103,7 @@ impl LayoutNode {
                 LayoutNode::Split(split) => {
                     for (index, child) in split.children.iter().enumerate() {
                         path.push(index);
-                        if descend(&child.node, pane, path) {
+                        if descend(child, pane, path) {
                             return true;
                         }
                         path.pop();
@@ -130,13 +119,14 @@ impl LayoutNode {
 
     /// The node reached by walking `path` child indices from this node.
     /// `path` must come from [`LayoutNode::path_to`] on this same tree.
+    /// Panics when `path` steps into a pane or past a split's last child.
     pub(crate) fn node_at(&self, path: &[usize]) -> &LayoutNode {
         let mut node = self;
         for &index in path {
             let LayoutNode::Split(split) = node else {
                 unreachable!("path was built over this tree");
             };
-            node = &split.children[index].node;
+            node = &split.children[index];
         }
         node
     }
@@ -148,12 +138,13 @@ impl LayoutNode {
             let LayoutNode::Split(split) = node else {
                 unreachable!("path was built over this tree");
             };
-            node = &mut split.children[index].node;
+            node = &mut split.children[index];
         }
         node
     }
 
     /// Like [`LayoutNode::node_at`], for paths known to end at a split.
+    /// Panics when the node at `path` is a pane.
     pub(crate) fn split_at(&self, path: &[usize]) -> &SplitNode {
         match self.node_at(path) {
             LayoutNode::Split(split) => split,
@@ -178,22 +169,24 @@ impl LayoutNode {
 pub struct SplitNode {
     /// How the children divide this node's rectangle.
     pub direction: SplitDirection,
-    /// The child slots, in layout order (left-to-right or top-to-bottom).
-    pub children: Vec<LayoutChild>,
+    /// The child subtrees, in layout order (left-to-right or top-to-bottom).
+    #[serde(deserialize_with = "children_from_wire")]
+    pub children: Vec<LayoutNode>,
     /// Per-child size constraints, parallel to `children`.
     pub weights: Vec<SizeWeight>,
     /// Index of the active child. Only meaningful for `Stacked` splits,
-    /// where it names the one expanded member (all others are collapsed).
-    /// Directional splits carry it as zero and never read it.
+    /// where it names the one expanded member; every other member is
+    /// collapsed to its one-row header. Directional splits carry `0` and
+    /// collapse no child.
     pub active: usize,
 }
 
 impl SplitNode {
-    /// A directional split sharing space evenly: one default weight per
-    /// child, first child active.
+    /// A split of `direction` over `children` sharing space evenly: one
+    /// default weight per child, `active` 0.
     #[must_use]
-    pub fn with_equal_weights(direction: SplitDirection, children: Vec<LayoutChild>) -> Self {
-        let weights = children.iter().map(|_| SizeWeight::default()).collect();
+    pub fn with_equal_weights(direction: SplitDirection, children: Vec<LayoutNode>) -> Self {
+        let weights = vec![SizeWeight::default(); children.len()];
         Self {
             direction,
             children,
@@ -202,24 +195,15 @@ impl SplitNode {
         }
     }
 
-    /// A stack of panes: the child at `active` is expanded, the rest are
-    /// collapsed to headers. `active` is clamped into bounds so a stack is
-    /// never constructed pointing past its last child.
-    ///
-    /// A single-pane stack is representable: it can exist before
-    /// normalization collapses it back to a plain leaf.
+    /// A stack of `panes`: the child at `active` is expanded, the rest are
+    /// collapsed to headers. `active` is clamped to the last child index.
+    /// One pane yields a one-member stack. No panes yield an empty stack
+    /// with `active` 0.
     #[must_use]
     pub fn stack(panes: Vec<PaneId>, active: usize) -> Self {
         let active = active.min(panes.len().saturating_sub(1));
-        let children = panes
-            .iter()
-            .enumerate()
-            .map(|(index, &pane)| LayoutChild {
-                node: LayoutNode::Pane(pane),
-                collapsed: index != active,
-            })
-            .collect();
-        let weights = panes.iter().map(|_| SizeWeight::default()).collect();
+        let weights = vec![SizeWeight::default(); panes.len()];
+        let children = panes.into_iter().map(LayoutNode::Pane).collect();
         Self {
             direction: SplitDirection::Stacked,
             children,
@@ -228,32 +212,59 @@ impl SplitNode {
         }
     }
 
-    /// The active child index, clamped to the last child. A deserialized
-    /// split can carry an index past its children; an empty split yields 0.
-    pub(crate) fn active_index(&self) -> usize {
+    /// `active` clamped to the last child index; `0` for an empty split.
+    #[must_use]
+    pub fn active_index(&self) -> usize {
         self.active.min(self.children.len().saturating_sub(1))
     }
-}
 
-/// One child slot of a split.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LayoutChild {
-    /// The subtree occupying this slot.
-    pub node: LayoutNode,
-    /// `true` when a stacked child is collapsed to its one-row header.
-    /// Directional splits never collapse children; this stays `false` there.
-    pub collapsed: bool,
-}
-
-impl LayoutChild {
-    /// An expanded child — the only state directional splits use.
+    /// `true` when the child at `index` is collapsed to its one-row header:
+    /// this split is `Stacked` and `index` is not [`SplitNode::active_index`].
+    /// Always `false` for a directional split, and `false` for an `index`
+    /// past the last child.
     #[must_use]
-    pub fn new(node: LayoutNode) -> Self {
-        Self {
-            node,
-            collapsed: false,
-        }
+    pub fn is_collapsed(&self, index: usize) -> bool {
+        self.direction == SplitDirection::Stacked
+            && index < self.children.len()
+            && index != self.active_index()
     }
+}
+
+/// One entry of [`SplitNode::children`] as it arrives: the node itself, or
+/// the `{"node": …}` record a koshi before this one wrote.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ChildOnWire {
+    /// The node written directly.
+    Bare(LayoutNode),
+    /// The node inside a one-field record.
+    Wrapped {
+        /// The subtree the record holds.
+        node: LayoutNode,
+    },
+}
+
+/// Read [`SplitNode::children`] from either shape: a list of nodes, or a list
+/// of `{"node": …}` records. Both yield the same nodes, in the same order.
+/// Writing always uses the first shape.
+///
+/// Example — `[{"Pane":1}]` and `[{"node":{"Pane":1}}]` both read back as one
+/// [`LayoutNode::Pane`] holding pane `1`.
+///
+/// # Errors
+/// Returns whatever `deserializer` reports for an entry matching neither
+/// shape.
+fn children_from_wire<'de, D>(deserializer: D) -> Result<Vec<LayoutNode>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let entries = Vec::<ChildOnWire>::deserialize(deserializer)?;
+    Ok(entries
+        .into_iter()
+        .map(|entry| match entry {
+            ChildOnWire::Bare(node) | ChildOnWire::Wrapped { node } => node,
+        })
+        .collect())
 }
 
 #[cfg(test)]

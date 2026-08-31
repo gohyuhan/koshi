@@ -2,9 +2,8 @@
 //!
 //! Discovers the config directory and reads the per-section files —
 //! `koshi.kdl` (app settings), the color theme `koshi.kdl` names,
-//! `keybinding.kdl` (key bindings) — parsing each into its override layer for
-//! the runtime to apply. This is the file I/O half the parsers leave out; the
-//! runtime's reload transactions own turning a parsed layer into live state.
+//! `keybinding.kdl` (key bindings) — parsing each into its override layer. The
+//! runtime's reload transactions turn a parsed layer into live state.
 //!
 //! Themes are a folder, not a file: each one is a `themes/<name>.kdl`, and
 //! `koshi.kdl`'s `theme "<name>"` line picks which. The name `default`, a
@@ -15,8 +14,8 @@
 //! the built-in defaults in place. `koshi.kdl` and the theme file are
 //! field-partial, so a single bad field is skipped and the rest of the file
 //! still applies; `keybinding.kdl` is all-or-nothing, so any parse error drops
-//! the whole file to defaults (a conflict in a file that *parses* is caught
-//! later, when the runtime applies it).
+//! the whole file to defaults. A conflict in a `keybinding.kdl` that *parses*
+//! is caught where the runtime applies it, not here.
 //!
 //! `load` writes no log line of its own. It runs before the tracing
 //! subscriber is installed, and returns each skip reason as a string the
@@ -24,7 +23,7 @@
 
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use koshi_config::app_config::{parse_app_config, AppConfigFile};
@@ -62,8 +61,10 @@ pub struct LoadedConfig {
 ///
 /// Returns the parsed layers together with a warning per skip, in file order
 /// (`koshi.kdl`, then the theme it names, then `keybinding.kdl`). The caller
-/// replays the warnings through the log once the tracing subscriber is up,
-/// since this runs before tracing is initialized.
+/// replays the warnings through the log once the tracing subscriber is up.
+///
+/// With no config directory every layer is `None` and the one warning is
+/// `"no config directory found; using built-in defaults"`.
 #[must_use]
 pub fn load() -> (LoadedConfig, Vec<String>) {
     let mut warnings = Vec::new();
@@ -119,7 +120,8 @@ pub fn logging_params(app: Option<&PartialKoshiConfig>, session_id: SessionId) -
 /// machine, or `None` when only the user who started the session may reach it.
 ///
 /// `forced_on` is the `--allow-other-users` flag: `Some(true)` serves them
-/// whatever `koshi.kdl` says, and `None` leaves the answer to that file's
+/// whatever `koshi.kdl` says, `Some(false)` serves only this user whatever
+/// that file says, and `None` leaves the answer to that file's
 /// `allow-other-users`.
 ///
 /// A forced switch stays on for the session's whole life. A switch left to the
@@ -139,9 +141,7 @@ pub fn other_users_policy(
     if !forced_on.unwrap_or(server.allow_other_users) {
         return None;
     }
-    let shared_dir = server
-        .shared_sessions_dir
-        .or_else(koshi_paths::shared_sessions_dir)?;
+    let shared_dir = shared_sessions_dir(&server)?;
     let still_on: OtherUsersSetting = if forced_on == Some(true) {
         Arc::new(|| true)
     } else {
@@ -151,6 +151,20 @@ pub fn other_users_policy(
         shared_dir,
         still_on,
     })
+}
+
+/// The machine-wide directory the sessions of one user are advertised in:
+/// `server`'s `shared-sessions-dir` when it names one, and the platform's own
+/// machine-wide location otherwise. `None` when neither names one — Windows
+/// reporting no `ProgramData`.
+///
+/// The session server creates its socket here, and a `koshi` command looks
+/// here for the sessions the other local users started.
+pub(crate) fn shared_sessions_dir(server: &ServerConfig) -> Option<PathBuf> {
+    server
+        .shared_sessions_dir
+        .clone()
+        .or_else(koshi_paths::shared_sessions_dir)
 }
 
 /// The `server` settings `koshi.kdl` carries right now. Reads and parses the
@@ -234,9 +248,6 @@ fn load_app(path: &Path, warnings: &mut Vec<String>) -> Option<AppConfigFile> {
 /// is [`DEFAULT_THEME`], is not a plain file name, or names a file that is
 /// absent, unreadable, or fails to parse. Every one of those but the first is
 /// recorded in `warnings`.
-///
-/// The theme file is opened directly and its absence reported, where a missing
-/// `koshi.kdl` or `keybinding.kdl` is silent — those two are optional.
 fn load_theme(dir: &Path, name: &str, warnings: &mut Vec<String>) -> Option<PartialThemeConfig> {
     if name == DEFAULT_THEME {
         return None;
@@ -273,8 +284,8 @@ fn load_theme(dir: &Path, name: &str, warnings: &mut Vec<String>) -> Option<Part
     match parse_theme(&path, &source) {
         Ok((mut layer, field_warnings)) => {
             push_field_warnings(&path, &field_warnings, warnings);
-            // The file carries no name of its own; it is the theme `name`
-            // asked for, so the layer is labelled with what was selected.
+            // The file carries no name of its own. The layer takes the `name`
+            // that selected it.
             layer.name = Some(name.to_string());
             Some(layer)
         }
@@ -355,9 +366,9 @@ pub fn load_profile(name: &str) -> Option<ProfileTemplate> {
 }
 
 /// Whether `name` is exactly its own file name — no separators, no root or
-/// prefix, no `.`/`..`, not empty — so a `<dir>/<name>.kdl` a config file names
-/// stays a flat file directly under `<dir>`, never a nested path or one that
-/// escapes it. A name whose final component differs from the whole string
+/// prefix, no `.`/`..`, not empty. A plain name joins to a `<dir>/<name>.kdl`
+/// directly under `<dir>`, never a nested path and never one that escapes
+/// `<dir>`. A name whose final component differs from the whole string
 /// (`../x`, `a/b`, `/etc/x`, `foo/`) is not a plain name.
 ///
 /// Both name-selected config files are held to this: the `--profile <name>`

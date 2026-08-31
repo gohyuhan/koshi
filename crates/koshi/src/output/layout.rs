@@ -118,8 +118,8 @@ fn write_tree(out: &mut String, node: &LayoutNode, depth: usize, collapsed: bool
     out.push('\n');
 
     if let LayoutNode::Split(split) = node {
-        for child in &split.children {
-            write_tree(out, &child.node, depth + 1, child.collapsed);
+        for (index, child) in split.children.iter().enumerate() {
+            write_tree(out, child, depth + 1, split.is_collapsed(index));
         }
     }
 }

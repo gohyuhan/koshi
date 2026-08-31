@@ -13,9 +13,10 @@ use std::time::Duration;
 ///
 /// `Graceful` asks the process to exit and waits up to `timeout` before the
 /// caller escalates; `Force` kills it immediately; `Tree` kills the whole
-/// process group/job so orphaned grandchildren do not linger; `GracefulTree`
-/// combines the last two — it asks the whole group to exit, waits up to
-/// `timeout`, then group-kills so no descendant is left orphaned.
+/// process group/job, grandchildren included; `GracefulTree` asks the whole
+/// group to exit, waits up to `timeout`, then kills the whole group.
+///
+/// `timeout` serializes as a whole number of seconds (see [`duration_secs`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KillPolicy {
     /// Request a clean shutdown, allowing up to `timeout` to comply.
@@ -29,8 +30,7 @@ pub enum KillPolicy {
     /// Kill the entire process tree (group/job), not just the leader.
     Tree,
     /// Request a clean shutdown of the whole process group, allowing up to
-    /// `timeout`, then group-kill (`killpg` / `TerminateJobObject`) so no
-    /// descendant is orphaned.
+    /// `timeout`, then kill the whole group (`killpg` / `TerminateJobObject`).
     GracefulTree {
         /// How long to wait for the process to exit on its own before the
         /// group-kill.
@@ -40,10 +40,10 @@ pub enum KillPolicy {
 }
 
 impl KillPolicy {
-    /// The same kill widened to group scope, so no descendant survives:
-    /// `Graceful` becomes [`GracefulTree`](Self::GracefulTree) with the same
-    /// timeout, `Force` becomes [`Tree`](Self::Tree); the group-scoped
-    /// policies are returned unchanged.
+    /// The same kill widened to group scope: `Graceful` becomes
+    /// [`GracefulTree`](Self::GracefulTree) with the same timeout, `Force`
+    /// becomes [`Tree`](Self::Tree); `Tree` and `GracefulTree` are returned
+    /// unchanged.
     #[must_use]
     pub fn tree_scoped(self) -> Self {
         match self {
@@ -54,9 +54,11 @@ impl KillPolicy {
     }
 }
 
-/// The known shells, used to pick shell-specific launch behaviour.
+/// The known shells, as [`from_program`](Self::from_program) classifies a
+/// program path. The PTY layer picks shell-specific launch behaviour by this
+/// kind.
 ///
-/// `Other` carries the raw program name for shells we do not special-case.
+/// `Other` carries the lowercased program stem of every other shell.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ShellKind {
     /// Z shell.
@@ -74,10 +76,12 @@ pub enum ShellKind {
 }
 
 impl ShellKind {
-    /// Classify a shell from its program path by inspecting the file stem
-    /// (case-insensitive). `file_stem` strips the `.exe` suffix on Windows, so
-    /// it plays no part. Unrecognised programs become [`ShellKind::Other`]
-    /// carrying the lowercased stem.
+    /// Classify a shell from its program path by its file stem, compared
+    /// ASCII-case-insensitively. The stem excludes the last extension on every
+    /// platform: `PowerShell.exe` and `pwsh` are both
+    /// [`ShellKind::PowerShell`]. Unrecognised programs become
+    /// [`ShellKind::Other`] carrying the lowercased stem; a path with no stem
+    /// (`""`) or a stem that is not valid UTF-8 yields `Other("")`.
     #[must_use]
     pub fn from_program(program: &Path) -> Self {
         let stem = program
@@ -116,9 +120,9 @@ impl SpawnSpec {
     ///
     /// The program is read from `$SHELL` on Unix and `%COMSPEC%` on Windows,
     /// falling back to `/bin/sh` and `cmd.exe` respectively. A variable that is
-    /// set but empty (`SHELL=`) is treated as unset and takes the fallback, so
-    /// the program is never an empty path. `cwd` and `env` pass straight through;
-    /// `args` is empty.
+    /// set but empty (`SHELL=`) takes the fallback; the program is never an
+    /// empty path. `cwd` and `env` pass straight through; `args` is empty;
+    /// `shell_kind` is [`ShellKind::from_program`] of the chosen program.
     #[must_use]
     pub fn default_shell(cwd: Option<PathBuf>, env: BTreeMap<String, String>) -> SpawnSpec {
         #[cfg(windows)]
@@ -130,8 +134,7 @@ impl SpawnSpec {
     }
 
     /// Build a spec that launches `program` as an interactive shell with no
-    /// arguments. `shell_kind` is derived from the program's file name, so
-    /// the pair can never disagree.
+    /// arguments. `shell_kind` is [`ShellKind::from_program`] of `program`.
     #[must_use]
     pub fn shell(
         program: PathBuf,
@@ -151,7 +154,7 @@ impl SpawnSpec {
 
 /// Pick the shell program path from an environment variable's value: the value
 /// when present and non-empty, else `fallback`. A set-but-empty variable
-/// (`SHELL=`) is treated as unset, so the returned path is never empty.
+/// (`SHELL=`) takes `fallback`.
 fn shell_program(env_value: Option<std::ffi::OsString>, fallback: &str) -> PathBuf {
     PathBuf::from(
         env_value
@@ -172,9 +175,9 @@ pub struct PtySize {
     pub rows: u16,
 }
 
-/// Serialize a [`Duration`] as a whole number of seconds.
-///
-/// The sub-second part is dropped, so the serialized form is a plain integer.
+/// Serialize a [`Duration`] as a whole number of seconds: a plain unsigned
+/// integer with the sub-second part dropped. Deserialization refuses a
+/// negative or fractional number.
 pub mod duration_secs {
     use serde::{Deserialize, Deserializer, Serializer};
     use std::time::Duration;

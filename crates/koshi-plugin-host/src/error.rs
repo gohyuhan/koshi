@@ -1,5 +1,5 @@
-//! Plugin domain error: [`crate::error::PluginError`]. Every variant
-//! classifies as [`koshi_core::error::DomainCategory::Plugin`].
+//! Plugin domain error: [`PluginError`]. Every variant classifies as
+//! [`DomainCategory::Plugin`].
 
 use koshi_core::error::{DomainCategory, DomainError, Severity};
 use thiserror::Error;

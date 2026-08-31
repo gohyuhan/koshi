@@ -1,169 +1,159 @@
-//! Guards that the full "complete default" examples shipped in `config-docs/`
-//! stay valid: each is fed through its real parser, so a schema change that
-//! breaks a documented config fails here. `koshi.kdl` and the theme file must
-//! parse with no field-partial warnings (every field is spelled correctly);
-//! `keybinding.kdl` and the profile must parse cleanly.
+//! Guards the `## Full example` block of every page in `config-docs/`. Each
+//! block is read straight out of the markdown, fed through its real parser, and
+//! checked against the built-in defaults the page says it documents. `koshi.kdl`
+//! and the theme file must parse with no warnings at all; a misspelled field
+//! name is reported as an `ignored ...` warning rather than an error.
 
 use std::path::Path;
 
 use koshi_config::app_config::parse_app_config;
+use koshi_config::key::Leader;
 use koshi_config::keybinding::parse_keybindings;
+use koshi_config::layer::{merge_client, merge_server};
 use koshi_config::profile::parse_profile;
 use koshi_config::theme::parse_theme;
+use koshi_config::types::{
+    default_mode_bindings, ClientConfig, ColorPalette, ServerConfig, DEFAULT_THEME,
+};
 
-const KOSHI: &str = r#"
-version 1
-theme "default"
-allow-beta-features #false
-allow-other-users #false
-// shared-sessions-dir "/var/run/koshi"  // optional override
-auto-close-session #false
-remote-reconnect #true
-pane { min-cols 2; min-rows 1 }
-scrollback { max-lines 10000; max-bytes 33554432; scroll-on-input #true }
-layout { new-pane-direction "right" }
-mouse { border-resize #true; scroll-lines 3; wheel "scroll-scrollback" }
-copy { trim-trailing-whitespace #true }
-terminal { term "xterm-256color"; colorterm "truecolor"; default-shell "/bin/zsh" }
-logging { enabled #false; level "warning"; format "pretty" }
-update { auto-check #true; check-interval-days 14; allow-prerelease #false }
-"#;
-
-const THEME: &str = r##"
-version 1
-colors {
-    ramp-start "#d0a5ff"
-    ramp-end "#7dbcff"
-    on-ramp "#12091f"
-    on-ramp-dim "#f0ecfa"
-    accent "#f5c2ff"
-    on-accent "#1e1033"
-    bar-bg "#000000"
-    border-focused "#00afd7"
-    border-unfocused "#585858"
-    border-hover "#af5fff"
-    stack-header-fg "#f4f1fa"
-    stack-header-bg "#300f4a"
-    letterbox "#585858"
+/// The KDL text of the fenced block under the `## Full example` heading of
+/// `config-docs/<page>` — the complete example the docs tell a user to copy.
+///
+/// Every `\r\n` in the page becomes `\n` before the headings and fences are
+/// looked for, so a checkout that stores the page with Windows line endings
+/// reads the same as one that stores it with Unix line endings.
+///
+/// # Panics
+/// Panics when the page cannot be read, carries no `## Full example` heading,
+/// or has no closed ```` ```kdl ```` block after that heading.
+fn full_example(page: &str) -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../config-docs")
+        .join(page);
+    let markdown = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("{} is readable: {err}", path.display()))
+        .replace("\r\n", "\n");
+    let after_heading = markdown
+        .split_once("\n## Full example\n")
+        .unwrap_or_else(|| panic!("{page} has a `## Full example` heading"))
+        .1;
+    let inside_fence = after_heading
+        .split_once("```kdl\n")
+        .unwrap_or_else(|| panic!("{page} opens a kdl block under `## Full example`"))
+        .1;
+    inside_fence
+        .split_once("\n```")
+        .unwrap_or_else(|| panic!("{page} closes its kdl block"))
+        .0
+        .to_string()
 }
-"##;
-
-const KEYBINDING: &str = r#"
-version 1
-chord-timeout-ms 500
-which-key-delay-ms 300
-max-chord-depth 4
-leader "C-"
-mode "normal" {
-    bind "<C-l>" "core:lock"
-    bind "<leader>q" "core:quit"
-    bind "<leader>g" "core:mouse-select"
-    bind "<leader>p n" "core:new-pane"
-    bind "<leader>p h" "core:new-pane-left"
-    bind "<leader>p j" "core:new-pane-down"
-    bind "<leader>p k" "core:new-pane-up"
-    bind "<leader>p l" "core:new-pane-right"
-    bind "<leader>p x" "core:close-pane-tree"
-    bind "<leader>p <Left>" "core:focus-pane-left"
-    bind "<leader>p <Down>" "core:focus-pane-down"
-    bind "<leader>p <Up>" "core:focus-pane-up"
-    bind "<leader>p <Right>" "core:focus-pane-right"
-    bind "<leader>s h" "core:resize-pane-left"
-    bind "<leader>s j" "core:resize-pane-down"
-    bind "<leader>s k" "core:resize-pane-up"
-    bind "<leader>s l" "core:resize-pane-right"
-    bind "<A-f>" "core:toggle-pane-fullscreen"
-    bind "<A-h>" "core:focus-pane-left"
-    bind "<A-j>" "core:focus-pane-down"
-    bind "<A-k>" "core:focus-pane-up"
-    bind "<A-l>" "core:focus-pane-right"
-    bind "<A-t>" "core:new-tab"
-    bind "<Tab>" "core:next-tab"
-    bind "<S-Tab>" "core:previous-tab"
-    remove "<C-b>"
-    bind "<leader>d" "core:close-pane-tree"
-}
-mode "locked" {
-    bind "<C-l>" "core:unlock"
-    bind "<leader>q" "core:quit"
-    bind "<leader>g" "core:mouse-select"
-}
-"#;
-
-const PROFILE: &str = r#"
-version 1
-tab {
-    horizontal {
-        pane {
-            command "nvim" "src/main.rs"
-            cwd "/home/me/proj"
-            env "RUST_LOG" "debug"
-            env "NO_COLOR" "1"
-            size "60%"
-            focus
-        }
-        vertical {
-            size "40%"
-            pane {
-                command "cargo" "watch" "-x" "test"
-                cwd "/home/me/proj"
-                weight 2
-                min 5
-                preferred 20
-            }
-            pane {
-                cwd "/home/me/proj"
-                weight 1
-            }
-        }
-    }
-}
-tab {
-    focus
-    stack {
-        pane { command "journalctl" "-f" }
-        pane { command "htop"; expanded }
-    }
-}
-"#;
 
 #[test]
 fn koshi_example_parses_without_warnings() {
-    let file = parse_app_config(Path::new("koshi.kdl"), KOSHI).expect("koshi.kdl parses");
+    let source = full_example("koshi.md");
+    let file = parse_app_config(Path::new("koshi.kdl"), &source).expect("koshi.kdl parses");
     assert!(
         file.warnings.is_empty(),
         "unexpected warnings: {:?}",
         file.warnings
     );
     // The documented example names the built-in theme.
-    assert_eq!(file.theme, Some("default".to_string()));
+    assert_eq!(file.theme, Some(DEFAULT_THEME.to_string()));
+    // Every value it spells out is the built-in default: folding its layer
+    // onto the defaults leaves both sides unchanged.
+    assert_eq!(
+        merge_server(ServerConfig::default(), vec![file.layer.clone()]),
+        ServerConfig::default()
+    );
+    assert_eq!(
+        merge_client(ClientConfig::default(), vec![file.layer]),
+        ClientConfig::default()
+    );
 }
 
 #[test]
 fn theme_example_parses_without_warnings() {
-    let (_, warnings) =
-        parse_theme(Path::new("themes/default.kdl"), THEME).expect("theme file parses");
+    let source = full_example("theme.md");
+    let (theme, warnings) =
+        parse_theme(Path::new("themes/default.kdl"), &source).expect("theme file parses");
     assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+
+    // The page documents every color at its default value.
+    let colors = theme.colors.expect("the example sets a `colors` block");
+    let stock = ColorPalette::default();
+    for (role, parsed, expected) in [
+        ("ramp-start", colors.ramp_start, stock.ramp_start),
+        ("ramp-end", colors.ramp_end, stock.ramp_end),
+        ("on-ramp", colors.on_ramp, stock.on_ramp),
+        ("on-ramp-dim", colors.on_ramp_dim, stock.on_ramp_dim),
+        ("accent", colors.accent, stock.accent),
+        ("on-accent", colors.on_accent, stock.on_accent),
+        ("bar-bg", colors.bar_bg, stock.bar_bg),
+        (
+            "border-focused",
+            colors.border_focused,
+            stock.border_focused,
+        ),
+        (
+            "border-unfocused",
+            colors.border_unfocused,
+            stock.border_unfocused,
+        ),
+        ("border-hover", colors.border_hover, stock.border_hover),
+        (
+            "stack-header-fg",
+            colors.stack_header_fg,
+            stock.stack_header_fg,
+        ),
+        (
+            "stack-header-bg",
+            colors.stack_header_bg,
+            stock.stack_header_bg,
+        ),
+        ("letterbox", colors.letterbox, stock.letterbox),
+    ] {
+        assert_eq!(parsed, Some(expected), "documented `{role}`");
+    }
 }
 
 #[test]
 fn keybinding_example_parses() {
-    parse_keybindings(Path::new("keybinding.kdl"), KEYBINDING).expect("keybinding.kdl parses");
+    let source = full_example("keybinding.md");
+    let layer =
+        parse_keybindings(Path::new("keybinding.kdl"), &source).expect("keybinding.kdl parses");
+
+    // The page documents the complete built-in keymap: the layer it parses to
+    // is the shipped default table, key for key.
+    assert_eq!(layer.chord_timeout_ms, Some(500));
+    assert_eq!(layer.which_key_delay_ms, Some(300));
+    assert_eq!(layer.max_chord_depth, Some(4));
+    assert_eq!(layer.leader, Some(Leader::default()));
+    assert_eq!(layer.unlock_alternative, None);
+    assert_eq!(layer.modes, Some(default_mode_bindings(Leader::default())));
 }
 
 #[test]
 fn profile_example_parses() {
-    parse_profile(Path::new("profile/dev.kdl"), PROFILE).expect("profile parses");
+    let source = full_example("profile.md");
+    let template = parse_profile(Path::new("profile/dev.kdl"), &source).expect("profile parses");
+
+    // Two tabs; the `focus` marker on the second one selects it at open.
+    assert_eq!(template.tabs.len(), 2);
+    assert_eq!(template.focused_tab, 1);
+    assert!(!template.locked);
+    // The editor pane carries `focus` and wins the first tab. The stack tab
+    // marks no pane `focus` and falls back to the first visible leaf — the
+    // `expanded` stack member, `htop`, at index 1.
+    assert_eq!(template.tabs[0].focused_leaf, 0);
+    assert_eq!(template.tabs[1].focused_leaf, 1);
 }
 
-/// Every ready-made theme shipped in `themes-example/` must parse cleanly and
-/// set all thirteen color roles.
+/// Every ready-made theme shipped in `themes-example/` must parse with no
+/// warnings and set all thirteen color roles.
 ///
-/// These files are meant to be copied straight into a config directory, so a
-/// typo'd role name — which the parser skips with a warning rather than
-/// rejecting — would ship a theme that silently draws one part of the chrome in
-/// koshi's default color. Requiring zero warnings turns that into a failure
-/// here instead.
+/// The parser skips an unknown role name with a warning instead of rejecting
+/// the file, and an unset role keeps that part of the chrome at koshi's default
+/// color.
 #[test]
 fn every_shipped_example_theme_is_complete_and_warning_free() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../themes-example");
@@ -182,7 +172,6 @@ fn every_shipped_example_theme_is_complete_and_warning_free() {
         let colors = theme
             .colors
             .unwrap_or_else(|| panic!("{name} has no `colors` block"));
-        // Named one by one so a failure says which role is missing.
         for (role, set) in [
             ("ramp-start", colors.ramp_start.is_some()),
             ("ramp-end", colors.ramp_end.is_some()),

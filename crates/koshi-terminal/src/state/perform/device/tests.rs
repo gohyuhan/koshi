@@ -326,3 +326,110 @@ fn a_query_flagged_ignore_by_the_parser_gets_no_reply() {
 fn plain_output_produces_no_replies() {
     assert_eq!(replies_for(b"hello \x1b[31mworld\x1b[0m\r\n"), b"");
 }
+
+#[test]
+fn version_number_packs_the_two_digit_boundary_and_saturates_past_u32() {
+    assert_eq!(version_number("99.99.99"), 999_999);
+    assert_eq!(version_number("4294967295.0.0"), u32::MAX);
+}
+
+#[test]
+fn version_number_with_a_leading_suffix_marker_packs_to_zero() {
+    assert_eq!(version_number("-1.2.3"), 0);
+    assert_eq!(version_number("+1.2.3"), 0);
+}
+
+#[test]
+fn da1_reads_the_first_parameters_primary_value_past_a_subparameter() {
+    // `CSI 0:1 c` — the primary value is 0, the `:1` subparameter is ignored.
+    assert_eq!(replies_for(b"\x1b[0:1c"), b"\x1b[?62;22c");
+}
+
+#[test]
+fn da2_with_an_explicit_zero_parameter_replies() {
+    let expected = format!("\x1b[>1;{};0c", version_number(env!("CARGO_PKG_VERSION")));
+    assert_eq!(replies_for(b"\x1b[>0c"), expected.as_bytes());
+}
+
+#[test]
+fn dsr_6_reports_the_parked_column_while_a_wrap_is_pending() {
+    // Eight glyphs fill the 8-column row: the cursor parks on column 8 with
+    // the wrap latch armed, and CPR reports that column.
+    assert_eq!(replies_for(b"abcdefgh\x1b[6n"), b"\x1b[1;8R");
+}
+
+#[test]
+fn dsr_6_reports_the_last_row_after_the_screen_scrolls() {
+    // Five line feeds on a 4-row screen: the cursor stays on row 4.
+    assert_eq!(replies_for(b"\n\n\n\n\n\x1b[6n"), b"\x1b[4;1R");
+}
+
+#[test]
+fn decxcpr_reports_the_alternate_screens_cursor_while_active() {
+    let mut state = state(8, 4);
+    feed(&mut state, b"\x1b[3;5H\x1b[?1049h\x1b[2;2H\x1b[?6n");
+    assert_eq!(state.take_replies(), b"\x1b[?2;2R");
+}
+
+#[test]
+fn dec_dsr_with_no_parameter_gets_no_reply() {
+    assert_eq!(replies_for(b"\x1b[?n"), b"");
+}
+
+#[test]
+fn dec_dsr_63_clamps_the_request_id_to_u16() {
+    assert_eq!(replies_for(b"\x1b[?63;65535n"), b"\x1bP65535!~0000\x1b\\");
+    // The parser saturates an oversized parameter at 65535.
+    assert_eq!(replies_for(b"\x1b[?63;70000n"), b"\x1bP65535!~0000\x1b\\");
+}
+
+#[test]
+fn decrqm_with_no_parameter_reports_mode_zero_as_not_recognized() {
+    assert_eq!(replies_for(b"\x1b[?$p"), b"\x1b[?0;0$y");
+}
+
+#[test]
+fn ansi_rqm_with_no_parameter_reports_mode_zero_as_not_recognized() {
+    assert_eq!(replies_for(b"\x1b[$p"), b"\x1b[0;0$y");
+}
+
+#[test]
+fn decrqm_reports_1048_as_not_recognized_even_after_a_save() {
+    assert_eq!(replies_for(b"\x1b[?1048h\x1b[?1048$p"), b"\x1b[?1048;0$y");
+}
+
+#[test]
+fn decrqm_reports_a_mode_from_the_first_parameter_only() {
+    // `?2004;7 $p` asks about 2004; the trailing 7 is ignored.
+    assert_eq!(replies_for(b"\x1b[?2004;7$p"), b"\x1b[?2004;2$y");
+}
+
+#[test]
+fn decrqm_reports_every_mouse_level_reset_after_tracking_is_turned_off() {
+    assert_eq!(
+        replies_for(b"\x1b[?1003h\x1b[?1003l\x1b[?9$p\x1b[?1000$p\x1b[?1002$p\x1b[?1003$p"),
+        b"\x1b[?9;2$y\x1b[?1000;2$y\x1b[?1002;2$y\x1b[?1003;2$y"
+    );
+}
+
+#[test]
+fn decrqm_reports_every_encoding_reset_after_the_active_one_is_turned_off() {
+    assert_eq!(
+        replies_for(b"\x1b[?1006h\x1b[?1006l\x1b[?1005$p\x1b[?1006$p\x1b[?1015$p"),
+        b"\x1b[?1005;2$y\x1b[?1006;2$y\x1b[?1015;2$y"
+    );
+}
+
+#[test]
+fn replies_queue_across_a_screen_switch_in_order() {
+    // One device-global queue: a query on the alternate screen and one after
+    // the exit drain together, in query order.
+    let mut state = state(8, 4);
+    feed(&mut state, b"\x1b[?1049h\x1b[5n\x1b[?1049l\x1b[c");
+    assert_eq!(state.take_replies(), b"\x1b[0n\x1b[?62;22c");
+}
+
+#[test]
+fn a_hard_reset_keeps_queued_replies() {
+    assert_eq!(replies_for(b"\x1b[5n\x1bc"), b"\x1b[0n");
+}

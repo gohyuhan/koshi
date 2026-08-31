@@ -1,10 +1,8 @@
 //! What the server sends a client when it attaches: the session's structure.
 //!
-//! A client runs in its own process and draws the session itself, so before it
-//! can paint anything it needs to know what the session contains — which tabs
-//! exist, how each tab's panes are arranged, and which pane each tab focused.
-//! [`crate::attach::AttachedSessionStructureSnapshot`] carries exactly that,
-//! once, in the handshake reply. Everything after it arrives as events.
+//! [`crate::attach::AttachedSessionStructureSnapshot`] names which tabs exist,
+//! how each tab's panes are arranged, and which pane each tab focused. It
+//! travels once, in the handshake reply. Everything after it arrives as events.
 //!
 //! Layout trees travel unsolved: each client solves the tree against its own
 //! terminal size. Two attached clients of different sizes place the same panes
@@ -22,11 +20,11 @@ use serde::{Deserialize, Serialize};
 
 /// One session's structure, as handed to a client on attach.
 ///
-/// Every tab in the session is present, so a client draws any tab it switches
-/// to from what it already holds.
+/// Every tab in the session is present. A client draws any tab it switches to
+/// from what it already holds.
 ///
 /// A field this build does not know is ignored, in this record and every one
-/// under it, so a snapshot from a newer koshi still attaches.
+/// under it. A snapshot from a newer koshi attaches.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttachedSessionStructureSnapshot {
     /// The session's stable id.
@@ -54,7 +52,7 @@ pub struct TabStructure {
     /// terminal size.
     pub layout: LayoutNode,
     /// Panes this tab has focused, most-recent first, across every client that
-    /// has viewed it. The head is the tab's most-recently-focused pane; focus
+    /// has viewed it. The head is the tab's most-recently-focused pane. Focus
     /// recovery walks the rest as panes close. Empty when nothing in the tab
     /// has been focused yet.
     pub focus_mru: Vec<PaneId>,

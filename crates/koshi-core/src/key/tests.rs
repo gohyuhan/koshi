@@ -1,6 +1,6 @@
 //! Tests for the key chord model: modifier bit operations, the canonical text
-//! form each type renders, the typeable predicate that guards transparent
-//! modes from swallowing input, and the serde wire form a chord travels in.
+//! form each type renders, the typeable predicate, uppercase folding, and the
+//! serde wire form a chord travels in.
 
 use super::*;
 
@@ -349,4 +349,82 @@ fn every_combination_of_non_text_modifiers_makes_a_chord_untypeable() {
             "{mods} should be untypeable"
         );
     }
+}
+
+#[test]
+fn mod_flags_default_is_none() {
+    assert_eq!(ModFlags::default(), ModFlags::NONE);
+}
+
+#[test]
+fn try_from_accepts_the_four_modifier_bits_and_refuses_every_other() {
+    assert_eq!(ModFlags::try_from(0), Ok(ModFlags::NONE));
+    assert_eq!(
+        ModFlags::try_from(15),
+        Ok(ModFlags::CTRL | ModFlags::ALT | ModFlags::SHIFT | ModFlags::SUPER)
+    );
+    assert_eq!(
+        ModFlags::try_from(16),
+        Err("modifier bits 0b00010000 name no modifier; the modifiers are 0b00001111".to_string())
+    );
+    assert_eq!(
+        ModFlags::try_from(255),
+        Err("modifier bits 0b11111111 name no modifier; the modifiers are 0b00001111".to_string())
+    );
+}
+
+#[test]
+fn mod_flags_serde_wire_form_is_the_bit_number() {
+    let ctrl_super = ModFlags::CTRL | ModFlags::SUPER;
+    assert_eq!(serde_json::to_string(&ctrl_super).expect("serialize"), "9");
+    assert_eq!(
+        serde_json::from_str::<ModFlags>("9").expect("deserialize"),
+        ctrl_super
+    );
+}
+
+#[test]
+fn decoding_refuses_a_negative_modifier_number() {
+    let refused = serde_json::from_str::<ModFlags>("-1").expect_err("a u8 is never negative");
+    assert_eq!(
+        refused.to_string(),
+        "invalid value: integer `-1`, expected u8 at line 1 column 2"
+    );
+}
+
+#[test]
+fn the_named_key_wire_form_is_the_variant_name_with_the_function_key_number() {
+    assert_eq!(
+        serde_json::to_string(&KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Space)))
+            .expect("serialize"),
+        r#"{"mods":0,"key":{"Named":"Space"}}"#
+    );
+    assert_eq!(
+        serde_json::to_string(&KeyChord::new(ModFlags::SHIFT, Key::Named(NamedKey::F(12))))
+            .expect("serialize"),
+        r#"{"mods":4,"key":{"Named":{"F":12}}}"#
+    );
+}
+
+#[test]
+fn key_sequence_with_no_rest_holds_only_the_first_chord() {
+    let chord = KeyChord::new(ModFlags::CTRL, Key::Char('x'));
+    assert_eq!(KeySequence::new(chord, Vec::new()).chords(), &[chord]);
+}
+
+#[test]
+fn fold_uppercase_leaves_a_capital_whose_lowercase_uppercases_to_another_capital() {
+    // The Kelvin sign lowercases to the Latin `k`, which uppercases to the
+    // Latin `K`, not back to the Kelvin sign.
+    assert_eq!(fold_uppercase('\u{212A}'), ('\u{212A}', false));
+    // The Ohm sign lowercases to `ω`, which uppercases to the Greek `Ω`.
+    assert_eq!(fold_uppercase('\u{2126}'), ('\u{2126}', false));
+}
+
+#[test]
+fn fold_uppercase_leaves_a_titlecase_letter_and_folds_its_uppercase_form() {
+    // `ǅ` is titlecase, not uppercase: it stands as it is.
+    assert_eq!(fold_uppercase('\u{01C5}'), ('\u{01C5}', false));
+    // `Ǆ` is uppercase and lowercases to the single `ǆ`, which uppercases back.
+    assert_eq!(fold_uppercase('\u{01C4}'), ('\u{01C6}', true));
 }

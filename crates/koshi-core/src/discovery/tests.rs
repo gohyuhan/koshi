@@ -200,3 +200,145 @@ fn pane_state_round_trips_through_json_for_every_variant() {
         assert_eq!(state, back, "{json}");
     }
 }
+
+#[test]
+fn a_non_utf8_cwd_decodes_as_its_lossy_path() {
+    let value = serde_json::to_value(pane_info(Some(non_utf8_path()))).expect("serializes");
+
+    let decoded: PaneInfo = serde_json::from_value(value).expect("deserializes");
+
+    assert_eq!(decoded.cwd, Some(PathBuf::from("/tmp/f\u{FFFD}oo")));
+}
+
+#[test]
+fn pane_info_round_trips_with_every_optional_field_set() {
+    let info = PaneInfo {
+        title: Some("vim".to_string()),
+        command: Some(vec!["htop".to_string(), "-d".to_string()]),
+        state: PaneState::Exited { code: Some(0) },
+        focused_by_clients: vec![ClientId::from_uuid(fixed_uuid())],
+        ..pane_info(Some(PathBuf::from("/home/user/project")))
+    };
+
+    let json = serde_json::to_string(&info).expect("serializes");
+    let back: PaneInfo = serde_json::from_str(&json).expect("deserializes");
+
+    assert_eq!(back, info);
+}
+
+#[test]
+fn tab_info_round_trips_through_json() {
+    let info = TabInfo {
+        id: TabId::from_uuid(fixed_uuid()),
+        session_id: SessionId::from_uuid(fixed_uuid()),
+        name: "amber-fox".to_string(),
+        index: 2,
+        active_pane: Some(PaneId::from_uuid(fixed_uuid())),
+        pane_count: 3,
+    };
+
+    let json = serde_json::to_string(&info).expect("serializes");
+    let back: TabInfo = serde_json::from_str(&json).expect("deserializes");
+
+    assert_eq!(back, info);
+}
+
+#[test]
+fn client_info_round_trips_with_every_optional_field_set() {
+    let info = ClientInfo {
+        focused_pane: Some(PaneId::from_uuid(fixed_uuid())),
+        lock_state: LockMode::Locked,
+        pane_area: Some(PaneArea::Reported(Size { cols: 80, rows: 22 })),
+        ..client_info(Some(ClientOrigin::Remote))
+    };
+
+    let json = serde_json::to_string(&info).expect("serializes");
+    let back: ClientInfo = serde_json::from_str(&json).expect("deserializes");
+
+    assert_eq!(back, info);
+}
+
+#[test]
+fn a_starving_pane_area_round_trips_through_json() {
+    let info = ClientInfo {
+        pane_area: Some(PaneArea::Starving),
+        ..client_info(None)
+    };
+
+    let json = serde_json::to_string(&info).expect("serializes");
+    let back: ClientInfo = serde_json::from_str(&json).expect("deserializes");
+
+    assert_eq!(back.pane_area, Some(PaneArea::Starving));
+    assert_eq!(back, info);
+}
+
+#[test]
+fn session_overview_round_trips_through_json() {
+    let overview = SessionOverview {
+        session: SessionInfo {
+            attached_clients: vec![ClientId::from_uuid(fixed_uuid())],
+            pane_count: 1,
+            ..session_info(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000))
+        },
+        tabs: vec![TabInfo {
+            id: TabId::from_uuid(fixed_uuid()),
+            session_id: SessionId::from_uuid(fixed_uuid()),
+            name: "amber-fox".to_string(),
+            index: 0,
+            active_pane: None,
+            pane_count: 1,
+        }],
+        panes: vec![pane_info(None)],
+        clients: vec![client_info(Some(ClientOrigin::Local))],
+    };
+
+    let json = serde_json::to_string(&overview).expect("serializes");
+    let back: SessionOverview = serde_json::from_str(&json).expect("deserializes");
+
+    assert_eq!(back, overview);
+}
+
+#[test]
+fn an_empty_session_overview_round_trips_through_json() {
+    let overview = SessionOverview {
+        session: session_info(SystemTime::UNIX_EPOCH),
+        tabs: Vec::new(),
+        panes: Vec::new(),
+        clients: Vec::new(),
+    };
+
+    let json = serde_json::to_string(&overview).expect("serializes");
+    let back: SessionOverview = serde_json::from_str(&json).expect("deserializes");
+
+    assert_eq!(back, overview);
+}
+
+#[test]
+fn an_unknown_pane_state_name_is_rejected() {
+    let err = serde_json::from_value::<PaneState>(json!("sleeping")).expect_err("rejects");
+
+    assert_eq!(
+        err.to_string(),
+        "unknown variant `sleeping`, expected one of `spawning`, `running`, `exited`, `closing`"
+    );
+}
+
+#[test]
+fn an_exited_state_without_its_code_field_decodes_with_no_code() {
+    let decoded: PaneState = serde_json::from_value(json!({"exited": {}})).expect("deserializes");
+
+    assert_eq!(decoded, PaneState::Exited { code: None });
+}
+
+#[test]
+fn a_client_row_missing_its_id_is_rejected() {
+    let mut wire = serde_json::to_value(client_info(None)).expect("serialize");
+    wire.as_object_mut()
+        .expect("a client row is a JSON object")
+        .remove("id")
+        .expect("the row carries an `id` field to remove");
+
+    let err = serde_json::from_value::<ClientInfo>(wire).expect_err("rejects");
+
+    assert_eq!(err.to_string(), "missing field `id`");
+}

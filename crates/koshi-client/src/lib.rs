@@ -11,7 +11,7 @@
 //! is focused*, and each viewer looks up what "focused" looks like in its own
 //! theme. Two viewers of one session can paint it two different ways at once.
 
-/// The bare `koshi` launch, and the terminal I/O every attached client uses.
+/// The bare `koshi` launch.
 pub mod app;
 
 /// The attached client: join a running session over its control socket and
@@ -24,21 +24,23 @@ pub mod attach;
 pub mod input;
 
 pub mod mouse;
+
+/// The outer terminal an attached client owns: its viewer, its input thread,
+/// and painting frames into it.
+pub(crate) mod terminal;
+
 pub mod theme;
 
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 
-use koshi_config::conflict::{
-    built_in_modes, detect_conflicts, keymap_layers, ConflictReport, KeymapVerdict,
-};
+use koshi_config::conflict::{detect_conflicts, keymap_layers, ConflictReport, KeymapVerdict};
 use koshi_config::hints::{HintBinding, KeymapHintCatalog, KeymapHints};
 use koshi_config::layer::{
     ConfigLayers, PartialKeybindingsConfig, PartialKoshiConfig, PartialThemeConfig,
 };
 use koshi_config::types::ClientConfig;
 use koshi_core::action::{MOUSE_SELECT_HINT, MOUSE_UNSELECT_HINT};
-use koshi_core::event::InputMode;
 use koshi_core::key::PendingKeySequence;
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::MouseButton;
@@ -80,12 +82,13 @@ pub struct Client {
     /// events and reported to the session, which reconciles tab sizes from
     /// every viewer's report; this copy is the client's alone.
     viewport: Size,
-    /// Whether the attached session echoed the pane-area field. The current
-    /// renderer uses the fixed two-row layout in either mode.
-    pane_area_supported: bool,
-    /// Receiving end of this client's event subscription, fed by the session's
-    /// bounded fan-out. It carries live events, and the fresh frame the session
-    /// sends after this subscriber's queue overflowed.
+    /// Receiving end of this client's event subscription, read by
+    /// [`apply_events`](Self::apply_events). A viewer subscribed to a session in
+    /// this process is fed by that session's bounded fan-out: live events, and
+    /// the fresh frame the session sends after this subscriber's queue
+    /// overflowed. A viewer attached over a connection is handed a receiver with
+    /// no sender — its frames arrive on the connection — so nothing is ever
+    /// delivered here.
     events: Receiver<Delivery>,
     /// This viewer's stored config overrides, one layer per config file, as
     /// [`load_startup_config`](Self::load_startup_config) last left them. A
@@ -156,8 +159,8 @@ pub struct Client {
     /// `Reconnecting { attempt: 4, retry_in_seconds: 8 }`.
     reconnecting: Option<Reconnecting>,
     /// Restores the outer terminal when the client ends or the process
-    /// panics.
-    cleanup_guard: TerminalCleanupGuard,
+    /// panics. Held to be dropped with the client; nothing reads it.
+    _cleanup_guard: TerminalCleanupGuard,
 }
 
 impl Client {
@@ -165,8 +168,8 @@ impl Client {
     /// the session handed out for it, and the outer-terminal cleanup guard.
     ///
     /// It starts on the built-in defaults: no stored config layers, the stock
-    /// palette, the shipped keymap, and pane-area support enabled. The files
-    /// the user wrote arrive through [`load_startup_config`](Self::load_startup_config).
+    /// palette, and the shipped keymap. The files the user wrote arrive
+    /// through [`load_startup_config`](Self::load_startup_config).
     #[must_use]
     pub fn new(
         id: ClientId,
@@ -182,7 +185,6 @@ impl Client {
         Client {
             id,
             viewport,
-            pane_area_supported: true,
             events,
             layers,
             config,
@@ -201,7 +203,7 @@ impl Client {
             scroll_from_top: None,
             hovered_pane: None,
             reconnecting: None,
-            cleanup_guard,
+            _cleanup_guard: cleanup_guard,
         }
     }
 
@@ -247,7 +249,6 @@ impl Client {
             tentative.keybindings.unlock_alternative,
             tentative.keybindings.max_chord_depth,
             &self.registry,
-            &built_in_modes(),
         );
         if report.verdict() != KeymapVerdict::Apply {
             // A collision reverts to the built-in defaults with the revert
@@ -300,17 +301,6 @@ impl Client {
         self.viewport = viewport;
     }
 
-    /// Record whether the attached session echoed the pane-area field.
-    /// Logs a debug message when `supported` is false.
-    pub(crate) fn set_pane_area_supported(&mut self, supported: bool) {
-        self.pane_area_supported = supported;
-        if !supported {
-            tracing::debug!(
-                "the session does not echo pane area; using the built-in two-row compatibility layout"
-            );
-        }
-    }
-
     /// The settings this viewer owns.
     #[must_use]
     pub fn config(&self) -> &ClientConfig {
@@ -341,24 +331,14 @@ impl Client {
         self.mouse_select = on;
     }
 
-    /// The hint-bar data for the viewer's current mode.
-    #[must_use]
-    pub fn keymap_hints(&self) -> KeymapHints {
-        self.keymap.hints_for(self.lock_mode)
-    }
-
     /// The hint-bar data one frame is painted from, using `mode` and the
     /// acting client's `mouse_select` state.
+    ///
+    /// The entry labelled [`MOUSE_SELECT_HINT`] reads [`MOUSE_UNSELECT_HINT`]
+    /// while `mouse_select` is true.
     #[must_use]
     pub(crate) fn frame_hints_for(&self, mode: LockMode, mouse_select: bool) -> KeymapHints {
         mouse_select_hints(self.keymap.hints_for(mode), mouse_select)
-    }
-
-    /// The hint-bar data for the viewer's current mode, with the mouse-select
-    /// entry's label following `mouse_select`.
-    #[must_use]
-    pub fn frame_hints(&self, mouse_select: bool) -> KeymapHints {
-        self.frame_hints_for(self.lock_mode, mouse_select)
     }
 
     /// Take everything the subscription has delivered and apply what the
@@ -374,9 +354,10 @@ impl Client {
     ///
     /// A fresh frame arrives when this subscriber's queue overflowed and the
     /// session dropped events it cannot replay. It carries the session's own
-    /// copies of both. The viewer takes them from the frame and logs how many
-    /// events were dropped. The frame names this viewer, checked by a debug
-    /// assertion.
+    /// copies of both, and the tab this viewer is on. The viewer takes all
+    /// three from the frame — a tab-strip peek made on another tab is thrown
+    /// away with the last of them — and logs how many events were dropped. The
+    /// frame names this viewer, checked by a debug assertion.
     ///
     /// A [`Delivery::Frame`] is the picture composed for a client in another
     /// process. It is counted, and nothing is taken from it. So is a
@@ -391,10 +372,7 @@ impl Client {
             match delivery {
                 Delivery::Event(event) => match &event {
                     Event::InputModeChanged(changed) if changed.client_id == self.id => {
-                        self.set_lock_mode(match changed.mode {
-                            InputMode::Locked => LockMode::Locked,
-                            InputMode::Normal => LockMode::Normal,
-                        });
+                        self.set_lock_mode(changed.mode);
                     }
                     Event::MouseSelectChanged(changed) if changed.client_id == self.id => {
                         self.mouse_select = changed.on;
@@ -418,17 +396,12 @@ impl Client {
                         "events were dropped; resuming from a fresh frame"
                     );
                     self.set_lock_mode(snapshot.client.lock_mode);
+                    self.note_active_tab(snapshot.client.active_tab);
                     self.mouse_select = snapshot.client.mouse_select;
                 }
             }
         }
         seen
-    }
-
-    /// Borrow the outer-terminal cleanup guard.
-    #[must_use]
-    pub fn cleanup_guard(&self) -> &TerminalCleanupGuard {
-        &self.cleanup_guard
     }
 }
 

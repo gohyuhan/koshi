@@ -10,31 +10,25 @@
 //! Several actions build the same command and differ only by a value fixed for
 //! that action: `lock` and `unlock` both build [`Command::SetLockMode`],
 //! `next-tab` and `previous-tab` both build [`Command::FocusTab`]. Those fixed
-//! values live in a table keyed on the action's NAME, not on its
-//! [`CommandKind`](crate::command::CommandKind), which cannot tell those
-//! actions apart.
+//! values live in a table keyed on the action's NAME. The entry's
+//! [`CommandKind`](crate::command::CommandKind) is not read.
 //!
 //! # What this module does not decide
 //!
 //! Every command it builds names its target as `None`, which each argument
-//! struct reads as "the focused one". Choosing the actual pane, tab, or client
-//! — and refusing a session with several attached clients and no named target —
-//! happens in the runtime's command handlers, which see the issuing
-//! [`CommandSource`](crate::command::CommandSource). Resolution is a pure
-//! function of the reference, its arguments, the registry, and the caller's own
-//! split direction.
-//!
-//! The split direction is a value, not a decision made here: the caller reads
-//! its own `layout.new-pane-direction` and passes it in, and a pane-opening
-//! action that names no side of its own is built with it.
+//! struct reads as "the focused one". Resolution is a pure function of the
+//! reference, its arguments, the registry, and the caller's own split
+//! direction: the caller passes in its `layout.new-pane-direction`, and a
+//! pane-opening action that names no side of its own is built with it.
 //!
 //! # Routes
 //!
-//! A registry entry's [`ActionHandlerRef`] picks one of three plans. A `core:`
-//! action builds a typed command. A `plugin:` action becomes a host call, which
-//! is the only door a plugin has into the runtime and the place its capability
-//! grants are checked. A `user:` macro fans out into the plans of the actions it
-//! names, in order, halting on the first failure and bounded by
+//! A registry entry's [`ActionHandlerRef`] picks one of three plans. A
+//! [`CoreCommand`](ActionHandlerRef::CoreCommand) builds a typed command. A
+//! [`PluginHostCall`](ActionHandlerRef::PluginHostCall) becomes a
+//! [`DispatchPlan::PluginHostCall`] carrying the arguments uninterpreted. A
+//! [`Sequence`](ActionHandlerRef::Sequence) fans out into the plans of the
+//! actions it names, in order, halting on the first failure and bounded by
 //! [`MAX_SEQUENCE_DEPTH`].
 
 use std::collections::BTreeMap;
@@ -58,27 +52,24 @@ use serde::{Deserialize, Serialize};
 /// The budget is spent on sequences, not on the actions they name: a chain of
 /// eight macros ending in a real action resolves, and a ninth macro inside it
 /// does not. A macro that names itself, directly or through a cycle of other
-/// macros, exhausts the budget instead of recursing forever.
+/// macros, exhausts the budget.
 pub const MAX_SEQUENCE_DEPTH: usize = 8;
 
 /// The arguments bound to an action at its call site — a keymap entry, or a step
 /// of a macro.
 ///
-/// Bindings themselves carry no arguments: a choice with a small fixed set of
-/// values lives in the action NAME (`core:new-pane-left`,
-/// `core:close-pane-tree`), and a value with an open range (a tab index, a
-/// program to run) is reachable only through a CLI command. A variant here is a
-/// SYSTEM-authored preset — nothing a user writes in `keybinding.kdl` produces
-/// one, and user-authored layers have their args stripped to
-/// [`ActionArgs::None`] on load.
+/// A choice with a small fixed set of values lives in the action NAME
+/// (`core:new-pane-left`, `core:close-pane-tree`). A variant here is a
+/// SYSTEM-authored preset: a user-authored keymap layer has every binding's
+/// arguments replaced with [`ActionArgs::None`] on load.
 ///
-/// A field the issuing boundary owns never appears in a variant: a pane's `cwd`
-/// and `env` are captured where the command is issued, so [`ActionArgs::Run`]
-/// names a program and its arguments rather than a whole [`SpawnSpec`].
+/// [`ActionArgs::Run`] names a program and its arguments, not a whole
+/// [`SpawnSpec`]: the command it builds carries no `cwd` and an empty `env`.
 ///
-/// [`ActionArgs::None`] means no arguments were given. Actions whose every field
-/// is optional accept it and fall back to their defaults; actions with a
-/// required field reject it.
+/// Every `core:` action except `core:run` accepts only [`ActionArgs::None`];
+/// `core:run` accepts only [`ActionArgs::Run`]. A plugin action forwards any
+/// value uninterpreted. A macro accepts only [`ActionArgs::None`], and every
+/// step of it resolves with [`ActionArgs::None`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ActionArgs {
     /// No arguments supplied.
@@ -97,12 +88,8 @@ pub enum ActionArgs {
     },
 }
 
-/// What running one action amounts to.
-///
-/// The caller submits a [`DispatchPlan::Command`] to the runtime inside a
-/// [`CommandEnvelope`](crate::command::CommandEnvelope), forwards a
-/// [`DispatchPlan::PluginHostCall`] to the plugin host, and walks a
-/// [`DispatchPlan::Sequence`] front to back.
+/// What running one action amounts to: one command, one plugin call, or a
+/// list of plans in the order they run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DispatchPlan {
     /// Dispatch one typed command.
@@ -123,16 +110,14 @@ pub enum DispatchPlan {
 /// Why an action could not be turned into a plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolveError {
-    /// The reference names no entry in the registry. A binding pointing at it is
-    /// an orphan, e.g. because its plugin unloaded.
+    /// The reference names no entry in the registry.
     Unregistered {
         /// The reference that was not found.
         action: ActionRef,
     },
-    /// The action is seeded for completeness but the runtime has no handler for
-    /// it yet.
+    /// The entry's status is [`ActionStatus::ComingSoon`].
     ComingSoon {
-        /// The reference that has no handler.
+        /// The reference whose status is `ComingSoon`.
         action: ActionRef,
     },
     /// The arguments do not fit the action.
@@ -183,12 +168,13 @@ impl DomainError for ResolveError {
 ///
 /// `new_pane_direction` is the caller's own `layout.new-pane-direction`
 /// setting. Actions that open a pane without naming a direction —
-/// `core:new-pane`, `core:run` without one — build their command with it, so
-/// the command that leaves the caller already says where the pane goes.
+/// `core:new-pane`, `core:new-pane-stacked`, and `core:run` with
+/// `direction: None` — build their command with it.
 ///
 /// # Errors
 /// - [`ResolveError::Unregistered`] if `action` names no entry in `registry`.
-/// - [`ResolveError::ComingSoon`] if the runtime has no handler for it yet.
+/// - [`ResolveError::ComingSoon`] if the entry's status is
+///   [`ActionStatus::ComingSoon`].
 /// - [`ResolveError::ArgsMismatch`] if `args` do not fit `action`.
 /// - [`ResolveError::SequenceTooDeep`] if a macro nests past
 ///   [`MAX_SEQUENCE_DEPTH`].
@@ -231,8 +217,8 @@ fn resolve_at_depth(
             args: args.clone(),
         }),
         // Every step resolves with `ActionArgs::None`. `depth` counts the
-        // sequences entered, not the actions reached, so a leaf action below
-        // the deepest allowed sequence still resolves.
+        // sequences entered, not the actions reached: a leaf action below the
+        // deepest allowed sequence resolves.
         ActionHandlerRef::Sequence(steps) => {
             if depth >= MAX_SEQUENCE_DEPTH {
                 return Err(ResolveError::SequenceTooDeep {
@@ -261,15 +247,10 @@ fn resolve_at_depth(
 
 /// Build the typed command one built-in action stands for.
 ///
-/// The name and the arguments are matched together, so an argument shape that
-/// belongs to a different action falls through to
-/// [`ResolveError::ArgsMismatch`]. Targets are left `None` for the runtime to
-/// resolve against the command's source. `new_pane_direction` fills the split
-/// direction of every pane-opening action that does not state one itself.
-///
-/// The action's [`CommandKind`](crate::command::CommandKind) is not read here:
-/// three actions carry `FocusTab` and two carry `SetLockMode`, so it cannot
-/// name one command. It stays on the metadata as the introspection surface.
+/// The name and the arguments are matched together; a pair not in the table
+/// is [`ResolveError::ArgsMismatch`]. Every target field is `None`.
+/// `new_pane_direction` fills the split direction of every pane-opening action
+/// that does not state one itself.
 fn resolve_core(
     action: &ActionRef,
     args: &ActionArgs,
@@ -339,8 +320,7 @@ fn resolve_core(
         ("mouse-select", ActionArgs::None) => Command::ToggleMouseSelect,
 
         // --- Run ---
-        // The spawn spec is built here with no `cwd` and an empty `env`; the
-        // boundary that issues the command fills both in.
+        // The spawn spec carries no `cwd` and an empty `env`.
         (
             "run",
             ActionArgs::Run {

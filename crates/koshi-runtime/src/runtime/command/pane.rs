@@ -126,7 +126,7 @@ impl Server {
         // request itself when a command was given, so the record can't disagree
         // with the process about where or what it started.
         let launch_cwd = spawn_spec.cwd.clone();
-        let recorded_command = args.command.as_ref().map(|_| spawn_spec.clone());
+        let recorded_command = args.command.is_some().then(|| spawn_spec.clone());
         // The in-session identity vars join the launched spec only, after the
         // record above is taken; the record keeps the caller's own env.
         spawn_spec.env.extend(koshi_env(
@@ -245,10 +245,11 @@ impl Server {
         // drops the zoom of anyone zoomed on the pane being removed, which has
         // nothing left to show. A pane closing on its own — a shell exiting, no
         // client acting — disturbs nobody else's zoom.
-        if let Some(client_id) = source.client_id() {
-            if let Some(client) = session.clients.get_mut(client_id) {
-                client.clear_zoom(target.tab_id);
-            }
+        if let Some(client) = source
+            .client_id()
+            .and_then(|client_id| session.clients.get_mut(client_id))
+        {
+            client.clear_zoom(target.tab_id);
         }
 
         // Commit the state removal: registry drop, layout collapse, per-client
@@ -272,14 +273,7 @@ impl Server {
             &mut events,
         );
 
-        // Kill the child off-thread: a graceful kill can sleep out its grace
-        // window, and the dispatcher must keep draining. The kill also purges
-        // the backend's own entry for the pane, even when the child already
-        // exited.
-        let pane_id = target.pane_id;
-        let _ = thread::spawn(move || {
-            let _ = backend.kill(pane_id, kill_policy);
-        });
+        super::kill_off_thread(&backend, target.pane_id, kill_policy);
 
         Ok(Self::commit_events(&mut self.event_bus, command_id, events))
     }
@@ -295,16 +289,16 @@ impl Server {
         tree: bool,
         busy_hint: &str,
     ) -> Result<KillPolicy, Rejection> {
+        if !force
+            && matches!(record.close_policy, PaneClosePolicy::ConfirmIfBusy)
+            && !matches!(record.lifecycle(), PaneLifecycle::Exited { .. })
+        {
+            return Err(Rejection::new(RejectReason::InvalidState, busy_hint));
+        }
         let kill_policy = if force {
             KillPolicy::Force
         } else {
-            match record.close_policy {
-                PaneClosePolicy::ConfirmIfBusy => match record.lifecycle() {
-                    PaneLifecycle::Exited { .. } => record.close_policy.kill_policy(),
-                    _ => return Err(Rejection::new(RejectReason::InvalidState, busy_hint)),
-                },
-                policy => policy.kill_policy(),
-            }
+            record.close_policy.kill_policy()
         };
         Ok(if tree {
             kill_policy.tree_scoped()
@@ -314,11 +308,10 @@ impl Server {
     }
 
     /// Drop every per-pane record a removed pane leaves behind: its PTY handle,
-    /// size cache, terminal engine, each client's scroll offset for it (so the
-    /// per-view map holds no dead entries over the session's life), any client
-    /// highlight that was in it, and any drag that was selecting in it. The one
-    /// release point for pane bookkeeping — every path that removes a pane
-    /// funnels through here.
+    /// size cache, terminal engine, and — for every attached client — that
+    /// client's scroll offset for the pane and the highlight it holds there,
+    /// so no per-view map keeps a dead entry. The one release point for pane
+    /// bookkeeping — every path that removes a pane funnels through here.
     pub(super) fn release_pane_bookkeeping(&mut self, session_id: SessionId, pane_id: PaneId) {
         self.pty_handles.remove(&pane_id);
         self.pty_sizes.remove(&pane_id);
@@ -376,26 +369,17 @@ impl Server {
     ///
     /// The child is already dead: the backend's watcher reaped it and set its
     /// `exited` flag before this exit became observable. [`on_child_exit`]
-    /// applies the pane's exit policy — a `CloseOnExit` pane is removed (its tab
-    /// may close and the last tab quit) and its runtime bookkeeping is released
-    /// while the survivors reflow; a `RespawnShell` pane keeps its slot and its
-    /// bookkeeping, its lifecycle advancing to `Spawning`. An exit for a pane
-    /// already gone — closed while the exit waited in the inbox — is dropped.
+    /// applies the pane's exit policy: the pane is removed — its tab may close
+    /// and the last tab quit — and its runtime bookkeeping is released while the
+    /// survivors reflow. An exit for a pane already gone — closed while the exit
+    /// waited in the inbox — is dropped.
     ///
     /// Releasing a removed pane's bookkeeping drops its PTY handle, size cache,
     /// terminal engine, and the backend's own PTY entry. The backend purge goes
     /// through `kill`, which drops the writer, joins the finished watcher, and
     /// frees the master fd; the `exited` flag the watcher set makes it send no
     /// signal to the dead child, so the purge is a bounded, inline call.
-    ///
-    /// `exited_at` is supplied by the producer that observed the exit; the
-    /// handler never reads the clock itself.
-    pub fn handle_child_exit(
-        &mut self,
-        pane_id: PaneId,
-        status: ExitStatus,
-        exited_at: SystemTime,
-    ) -> Vec<Event> {
+    pub fn handle_child_exit(&mut self, pane_id: PaneId, status: ExitStatus) -> Vec<Event> {
         // A signal-terminated child carries no numeric code; the session models
         // that as `None`.
         let exit_code = match status {
@@ -429,27 +413,19 @@ impl Server {
         // candidates geometrically even when no client currently views the tab.
         let tab_rect = Rect::at_origin(Self::close_viewport(session, tab_id));
 
-        // Apply the exit policy: `PaneProcessExited`, then either the removal
-        // cascade (`CloseOnExit`) or a lifecycle advance to `Spawning`
-        // (`RespawnShell`).
+        // Apply the exit policy: `PaneProcessExited`, then the removal cascade.
         let mut events = on_child_exit(
             session,
             tab_id,
             pane_id,
             exit_code,
-            exited_at,
             tab_rect,
             sizing,
             EmptyTabPolicy::default(),
         );
 
-        // A respawning pane keeps its slot and bookkeeping — nothing to release.
-        if session.panes.get(pane_id).is_some() {
-            return events;
-        }
-
-        // The policy removed the pane: drop its runtime bookkeeping and reflow
-        // the survivors into the space it freed.
+        // Drop the removed pane's runtime bookkeeping and reflow the survivors
+        // into the space it freed.
         self.release_pane_and_reflow(session_id, tab_id, pane_id, backend.as_ref(), &mut events);
 
         // Release the backend's own PTY entry. The child already exited, so the
@@ -457,8 +433,7 @@ impl Server {
         // joins the finished watcher, and frees the master fd.
         let _ = backend.kill(pane_id, KillPolicy::Force);
 
-        self.render_scheduler
-            .invalidate(InvalidationReason::LayoutChanged);
+        self.render_scheduler.invalidate();
 
         events
     }
@@ -540,10 +515,11 @@ impl Server {
         // moved it returns to the tiled view to see it. Another client zoomed on
         // a pane of this tab keeps its zoom — its pane still exists, and one
         // client resizing does not disturb another client's view.
-        if let Some(client_id) = source.client_id() {
-            if let Some(client) = session.clients.get_mut(client_id) {
-                client.clear_zoom(target.tab_id);
-            }
+        if let Some(client) = source
+            .client_id()
+            .and_then(|client_id| session.clients.get_mut(client_id))
+        {
+            client.clear_zoom(target.tab_id);
         }
 
         // The border moved: re-solve the tab and resize each live PTY whose
@@ -551,8 +527,12 @@ impl Server {
         let mut events = vec![Event::LayoutChanged(LayoutChanged {
             tab_id: target.tab_id,
         })];
-        let rects = Self::tab_content_rects(session, target.tab_id, viewport, sizing);
-        self.reflow_changed(backend.as_ref(), rects, None, &mut events);
+        self.reflow_tab_if_viewed(
+            backend.as_ref(),
+            target.session_id,
+            target.tab_id,
+            &mut events,
+        );
 
         Ok(Self::commit_events(&mut self.event_bus, command_id, events))
     }
@@ -674,8 +654,12 @@ impl Server {
             events.push(Event::LayoutChanged(LayoutChanged {
                 tab_id: target.tab_id,
             }));
-            let rects = Self::tab_content_rects(session, target.tab_id, viewport, sizing);
-            self.reflow_changed(backend.as_ref(), rects, None, &mut events);
+            self.reflow_tab_if_viewed(
+                backend.as_ref(),
+                target.session_id,
+                target.tab_id,
+                &mut events,
+            );
         }
 
         if prior_pane != Some(target.pane_id) {
@@ -791,8 +775,7 @@ impl Server {
         // This client's view changed: re-solve the tab and resize each live PTY
         // whose size changed.
         let mut events = vec![Event::LayoutChanged(LayoutChanged { tab_id })];
-        let rects = Self::tab_content_rects(session, tab_id, viewport, sizing);
-        self.reflow_changed(backend.as_ref(), rects, None, &mut events);
+        self.reflow_tab_if_viewed(backend.as_ref(), target.session_id, tab_id, &mut events);
 
         if focus_moved {
             events.push(Event::PaneFocused(PaneFocused {

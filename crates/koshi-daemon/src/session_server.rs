@@ -51,9 +51,8 @@ use koshi_ipc::endpoint::{resume_path, RESTART_WINDOW};
 use koshi_ipc::error::IpcError;
 use koshi_ipc::router::{SessionServerReady, ROUTER_PROTOCOL_VERSION};
 use koshi_observability::logging::init_tracing;
-use koshi_pty::backend::state::{PtyBackend, PtyHandle, PtySink};
+use koshi_pty::backend::state::{CarriedPtyPane, PtyBackend, PtyHandle, PtySink};
 use koshi_runtime::ipc_server::IpcServer;
-use koshi_runtime::placeholder::{NullSnapshotProvider, NullStorage};
 use koshi_runtime::resume::{self, ResumeBody, ResumeHeader, RESUME_FORMAT, RESUME_FORMAT_MIN};
 use koshi_runtime::runtime::event::RuntimeEvent;
 use koshi_runtime::runtime::pty_forward::InboxSink;
@@ -81,6 +80,20 @@ mod tests;
 /// The size the session's first pane starts at. No client is attached yet, so
 /// there is no terminal to read a size from; the first attach resizes it.
 const STARTING_VIEWPORT: Size = Size { cols: 80, rows: 24 };
+
+/// The subcommand `koshi` runs one session server under. The arguments after
+/// it are the session id, the session name, [`RUNTIME_DIR_FLAG`] with the
+/// directory the session serves, `--profile` when the create named a profile,
+/// and `--allow-other-users` when the create asked for the other users of this
+/// machine. The router starts a new session under it, and a session server
+/// replacing its own image starts the new one under it.
+pub const SESSION_SERVER_SUBCOMMAND: &str = "serve-session";
+
+/// The flag telling a session server to let the other users of this machine
+/// reach the session, whatever its `koshi.kdl` says. A session server
+/// replacing its own image passes it on, so the rebound socket keeps that
+/// reach.
+pub(crate) const ALLOW_OTHER_USERS_FLAG: &str = "--allow-other-users";
 
 /// The subcommand a session server runs the newly installed binary under to
 /// read which resume-file formats it can take back. It prints one JSON line and
@@ -220,6 +233,10 @@ enum ServeOutcome {
 /// bound. Any failure before that returns `Err` having printed nothing, so a
 /// caller reading standard output sees end of stream and knows the session
 /// never started.
+///
+/// `profile` names the profile the session opens its tabs and panes from.
+/// `None`, a name no profile file answers to, and a profile that will not
+/// launch each open one shell instead.
 ///
 /// `allow_other_users_override` is the `--allow-other-users` flag the router
 /// passes on: `Some(true)` serves the other users of this machine whatever
@@ -554,13 +571,7 @@ fn server_over_new_panes(
 ) -> Result<(Server, Arc<PtyOwner>), Box<dyn std::error::Error>> {
     let panes = open_panes(start, sink)?;
     let backend: Arc<dyn PtyBackend> = panes.clone();
-    let mut server = Server::new(
-        backend,
-        Arc::new(NullSnapshotProvider),
-        Arc::new(NullStorage),
-        inbox_rx,
-        inbox_tx.clone(),
-    );
+    let mut server = Server::new(backend, inbox_rx, inbox_tx.clone());
     server.load_startup_config(app);
     Ok((server, panes))
 }
@@ -624,23 +635,41 @@ fn take_panes_back(
     Ok((panes, handles))
 }
 
-/// Refuse a carried state that names one pane more than once.
+/// Refuse a carried state that names one pane more than once, or gives two
+/// panes one child process id.
 ///
 /// Every pane is taken back onto its own entry, keyed by pane id, so each id
-/// appears once.
+/// appears once. Every pane's child is waited on by that pane's own watcher, so
+/// each process id appears once as well. A process id of `0` names no child and
+/// may repeat.
 ///
 /// Before → after: a header naming panes `A`, `B` → each is taken back. A
-/// header naming `A`, `A` → the sentence naming `A`, and no pane is touched.
+/// header naming `A`, `A` → the sentence naming `A`, and no pane is touched. A
+/// header naming `A(pid 4821)`, `B(pid 4821)` → the sentence naming `B` and
+/// `A`, and no pane is touched.
 ///
 /// # Errors
-/// Returns the sentence naming the pane the carried state names twice.
+/// Returns the sentence naming the pane the carried state names twice, or the
+/// pane whose process id an earlier pane already carries.
 fn header_names_each_pane_once(header: &ResumeHeader) -> Result<(), Box<dyn std::error::Error>> {
     let mut named = HashSet::new();
+    let mut children: HashMap<u32, PaneId> = HashMap::new();
     for pane in &header.panes {
         if !named.insert(pane.pane_id) {
             return Err(format!(
                 "pane {} is named twice by the carried state, so it cannot be taken back",
                 pane.pane_id
+            )
+            .into());
+        }
+        if pane.pid == 0 {
+            continue;
+        }
+        if let Some(earlier) = children.insert(pane.pid, pane.pane_id) {
+            return Err(format!(
+                "pane {} carries process id {}, which pane {earlier} already carries, so it \
+                 cannot be taken back",
+                pane.pane_id, pane.pid
             )
             .into());
         }
@@ -724,12 +753,25 @@ fn take_one_pane_back(
 /// and the number stays as the swap left it until this process ends. An
 /// `untouched` of `0` is a failure before any pane was taken back, so every
 /// terminal the header names is closed here.
+///
+/// Each descriptor number is closed at most once, and a number a pane before
+/// `untouched` also carries is not closed here at all.
+///
+/// Before → after: a header naming `A(fd 7)`, `B(fd 9)`, `C(fd 7)` with
+/// `untouched` `2` → descriptor 7 stays open, since `A` holds it.
 #[cfg(unix)]
 fn end_panes_after_failure(header: &ResumeHeader, untouched: usize) {
     for pane in &header.panes {
         let _ = end_carried_child(pane.pid);
     }
+    let mut closed: HashSet<i32> = header.panes[..untouched]
+        .iter()
+        .filter_map(|pane| pane.terminal_fd)
+        .collect();
     for pane in &header.panes[untouched..] {
+        if pane.terminal_fd.is_some_and(|raw| !closed.insert(raw)) {
+            continue;
+        }
         close_carried_terminal(pane);
     }
 }
@@ -835,7 +877,7 @@ fn release_carried_panes(header: &ResumeHeader, _start: &SessionStart, _sink: Ar
 /// Before → after: pane 3's shell exits with code 7 after the header was built
 /// → the header carries `exit: Some(ExitCode(7))` instead of `None`, and the
 /// next image reports 7 rather than `-1`.
-fn refresh_carried_exits(header: &mut ResumeHeader, panes: &[koshi_pty::portable::CarriedPtyPane]) {
+fn refresh_carried_exits(header: &mut ResumeHeader, panes: &[CarriedPtyPane]) {
     for pane in panes {
         let Some(record) = header
             .panes
@@ -860,7 +902,9 @@ fn refresh_carried_exits(header: &mut ResumeHeader, panes: &[koshi_pty::portable
 /// comes back. `pid = 0` or `pid = 3_000_000_000` → nothing is signalled and
 /// `false` comes back.
 ///
-/// Hands back whether the signal was sent.
+/// Hands back whether `killpg` was called on `pid`. A `killpg` that failed —
+/// the group is already gone, or a member may not be signalled — still hands
+/// back `true`.
 #[cfg(unix)]
 fn end_carried_child(pid: u32) -> bool {
     if pid == 0 || i32::try_from(pid).is_err() {
@@ -1278,8 +1322,10 @@ fn swap(
     }
 
     let carried = panes.carried_panes();
-    let (mut header, body) =
-        server.carry_out(start.session_id, start.session_name.clone(), &carried);
+    let Some((mut header, body)) = server.carry_out(&carried) else {
+        tracing::error!("this process holds no session to carry; the session keeps serving");
+        return Ok(Some((keep_serving(server, panes), ipc_server)));
+    };
 
     let resume_file = resume_path(&start.runtime_dir, start.session_id);
 
@@ -1531,7 +1577,7 @@ fn finish_resume(rebuilt: &mut Server, inbox_tx: &Sender<RuntimeEvent>) {
 fn resume_command(start: &SessionStart, resume_file: &Path) -> std::process::Command {
     let mut command = std::process::Command::new(&start.exe);
     command
-        .arg(crate::router::SESSION_SERVER_SUBCOMMAND)
+        .arg(SESSION_SERVER_SUBCOMMAND)
         .arg(start.session_id.to_string())
         .arg(&start.session_name)
         .arg(RUNTIME_DIR_FLAG)
@@ -1539,7 +1585,7 @@ fn resume_command(start: &SessionStart, resume_file: &Path) -> std::process::Com
         .arg(RESUME_FLAG)
         .arg(resume_file);
     if start.allow_other_users {
-        command.arg(crate::router::ALLOW_OTHER_USERS_FLAG);
+        command.arg(ALLOW_OTHER_USERS_FLAG);
     }
     if let Some(token) = &start.supervisor_token {
         command.arg(SUPERVISOR_TOKEN_FLAG).arg(token);
@@ -1583,25 +1629,17 @@ fn put_close_on_exec_back(header: &ResumeHeader) {
 }
 
 /// Replace this process's running image with the binary the session was started
-/// from. The call returns only when the exec failed, and hands back that error.
+/// from. The call returns only when the exec failed, and hands back that error,
+/// on the terms
+/// [`exec_and_keep_ignoring_sigpipe`](crate::process::exec_and_keep_ignoring_sigpipe)
+/// states.
 ///
-/// `exec` resets SIGPIPE to `SIG_DFL` in this process before calling `execvp`,
-/// even with no setup step configured on the command (the standard library's
-/// `sys/process/unix/unix.rs`, in `do_exec`). A failed exec puts `SIG_IGN` back
-/// here, so a session that keeps serving keeps ignoring the signal a write to a
-/// client that hung up raises.
-///
-/// A successful exec closes every descriptor the standard library opened
-/// close-on-exec, and keeps every pane's terminal, whose flag was cleared just
-/// before. The process id does not change, so each pane's child keeps its
-/// parent and can still be waited on.
+/// A successful exec keeps every pane's terminal, whose close-on-exec flag was
+/// cleared just before. The process id does not change, so each pane's child
+/// keeps its parent and can still be waited on.
 #[cfg(unix)]
 fn restart_by_exec(start: &SessionStart, resume_file: &Path) -> std::io::Error {
-    use std::os::unix::process::CommandExt;
-
-    let error = resume_command(start, resume_file).exec();
-    let _ = unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
-    error
+    crate::process::exec_and_keep_ignoring_sigpipe(&mut resume_command(start, resume_file))
 }
 
 /// Start the binary the session was started from as the image replacing this
@@ -1611,13 +1649,7 @@ fn restart_by_exec(start: &SessionStart, resume_file: &Path) -> std::io::Error {
 /// and its input and output go nowhere. An error means nothing was started.
 #[cfg(windows)]
 fn hand_over_to_new_image(start: &SessionStart, resume_file: &Path) -> std::io::Result<()> {
-    use std::os::windows::process::CommandExt;
-
-    resume_command(start, resume_file)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .creation_flags(crate::router::DETACHED_PROCESS | crate::router::CREATE_NEW_PROCESS_GROUP)
+    crate::process::detached(&mut resume_command(start, resume_file))
         .spawn()
         .map(|_| ())
 }

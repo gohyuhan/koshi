@@ -43,7 +43,7 @@ pub enum ActionNameError {
         /// The offending leading character.
         ch: char,
     },
-    /// A later character was outside `[a-z0-9-]`.
+    /// A character after the first was outside `[a-z0-9-]`.
     InvalidChar {
         /// The offending character.
         ch: char,
@@ -74,9 +74,9 @@ impl std::error::Error for ActionNameError {}
 /// The local name of an action within its namespace, validated against
 /// `^[a-z][a-z0-9-]{0,30}$`.
 ///
-/// The grammar is enforced on construction and on deserialization (via
-/// [`TryFrom<String>`]), so a name decoded from a config file, the IPC socket,
-/// or a plugin is always valid.
+/// [`ActionName::new`] and deserialization (via [`TryFrom<String>`]) both run
+/// the grammar check: a name decoded from a config file, the IPC socket, or a
+/// plugin is always valid.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct ActionName(String);
@@ -89,13 +89,9 @@ impl ActionName {
     /// violates.
     pub fn new(name: &str) -> Result<Self, ActionNameError> {
         let mut chars = name.chars();
-        // The first character must be an ASCII lowercase letter.
-        match chars.next() {
-            None => return Err(ActionNameError::Empty),
-            Some(first) if !first.is_ascii_lowercase() => {
-                return Err(ActionNameError::InvalidStart { ch: first });
-            }
-            Some(_) => {}
+        let first = chars.next().ok_or(ActionNameError::Empty)?;
+        if !first.is_ascii_lowercase() {
+            return Err(ActionNameError::InvalidStart { ch: first });
         }
         // Every character after the first must be a lowercase letter, digit, or hyphen.
         for ch in chars {
@@ -139,8 +135,8 @@ impl fmt::Display for ActionName {
     }
 }
 
-/// Which family an action belongs to. Namespaces are typed, so a `core:` and a
-/// `plugin:` action can never collide even with identical local names.
+/// Which family an action belongs to. A `core:` and a `plugin:` action with
+/// the same local name are two different actions.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ActionNamespace {
     /// Built-in actions shipped by Koshi. Plugins may never register here.
@@ -155,10 +151,9 @@ pub enum ActionNamespace {
 ///
 /// `Display` renders the canonical wire form used everywhere an action is named
 /// by string — config files, CLI output, and plugin messages: `core:new-pane`,
-/// `plugin:<uuid>:open-status`, `user:my-macro`. Serde round-trips through that
-/// same string (not a `{namespace, name}` struct) via [`FromStr`], so a keymap
-/// like `"<C-p>n" action="core:new-pane"` decodes to exactly this type and the
-/// stable user-facing token is the wire format.
+/// `plugin:<uuid>:open-status`, `user:my-macro`. Serde reads and writes that
+/// same string (not a `{namespace, name}` struct) via [`FromStr`]: a keymap
+/// entry `"<C-p>n" action="core:new-pane"` decodes to exactly this type.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct ActionRef {
@@ -302,8 +297,8 @@ impl From<ActionRef> for String {
     }
 }
 
-/// How broad an action's effect is. Used to describe and group actions in
-/// `koshi keys`/`koshi actions` output and which-key hints.
+/// How broad an action's effect is. `koshi keys` and `koshi actions` output
+/// print it as a label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ActionScope {
     /// Acts on a pane within the current session.
@@ -316,8 +311,8 @@ pub enum ActionScope {
     Global,
 }
 
-/// A kind of entity an action can target. An action lists the targets it
-/// accepts so the resolver and CLI can validate an explicit `--pane`/`--tab`.
+/// A kind of entity an action can target. [`ActionMetadata::target_compat`]
+/// lists the kinds an action accepts; `koshi actions explain` prints them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TargetKind {
     /// The session.
@@ -330,23 +325,19 @@ pub enum TargetKind {
     Client,
 }
 
-/// Whether an action is usable today or still on the way.
+/// Whether the runtime implements an action. Serializes in kebab-case:
+/// `available`, `coming-soon`.
 ///
-/// The action vocabulary is seeded in full, but some actions have no runtime
-/// handler yet. Introspection hides `ComingSoon` actions.
+/// Introspection (`koshi actions list`/`explain`) hides `ComingSoon` actions,
+/// and resolving one is rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ActionStatus {
-    /// The runtime implements this action; it is safe to bind and invoke.
+    /// The runtime implements this action; binding and invoking it work.
     Available,
-    /// Seeded for completeness, but not yet implemented by the runtime.
+    /// The action is seeded but the runtime has no handler for it.
     ComingSoon,
 }
-
-/// Typed schema for an action's arguments. Carries no fields. Every entry in
-/// [`core_action_seeds`] leaves [`ActionMetadata::args_schema`] `None`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ActionArgsSchema {}
 
 /// How an action is dispatched once it fires.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -378,23 +369,20 @@ pub struct ActionMetadata {
     pub scope_class: ActionScope,
     /// Entity kinds the action can target.
     pub target_compat: Vec<TargetKind>,
-    /// Typed argument schema, when the action takes arguments.
-    pub args_schema: Option<ActionArgsSchema>,
     /// How the action is dispatched.
     pub handler: ActionHandlerRef,
-    /// Whether the runtime implements the action yet.
+    /// Whether the runtime implements the action.
     pub status: ActionStatus,
     /// Whether the action repeats from a held prefix: fired from a
-    /// multi-chord binding, the binding's prefix stays armed so the next
-    /// chord alone fires again (`<C-s> h h h` resizes three times).
-    /// System-declared per action — never authored in a binding.
+    /// multi-chord binding, the binding's prefix stays armed and the next
+    /// chord alone fires again (`<C-s> h h h` resizes three times). Declared
+    /// per action here, never in a binding. Absent on the wire means `false`.
     #[serde(default)]
     pub continuous: bool,
 }
 
 /// Build one `core:` seed entry, with `namespace` set to
-/// [`ActionNamespace::Core`], `args_schema` `None`, and `continuous` `false`.
-/// Each entry carries the `status` it is given, whatever its siblings carry.
+/// [`ActionNamespace::Core`] and `continuous` `false`.
 ///
 /// # Panics
 /// Panics if `name` violates the action-name grammar.
@@ -415,7 +403,6 @@ fn core_seed(
         description: description.to_string(),
         scope_class,
         target_compat,
-        args_schema: None,
         handler,
         status,
         continuous: false,
@@ -433,6 +420,7 @@ pub const MOUSE_SELECT_HINT: &str = "Mouse Select";
 pub const MOUSE_UNSELECT_HINT: &str = "Mouse Unselect";
 
 /// The built-in action table, loaded into the runtime registry at startup.
+/// `koshi actions list` prints the `Available` entries in this order.
 ///
 /// Every entry is in the `core:` namespace. Actions sharing a [`CommandKind`]
 /// differ only by the values their NAME bakes into the command the resolver
@@ -441,9 +429,9 @@ pub const MOUSE_UNSELECT_HINT: &str = "Mouse Unselect";
 /// command with the named direction; `next-tab`/`previous-tab`/`focus-tab`
 /// all build `FocusTab`.
 ///
-/// Each entry declares its own [`ActionStatus`]. The `copy-selection` and
-/// `plugin-*` actions have no runtime handler and are seeded `ComingSoon`, so
-/// introspection hides them; every other action is `Available`.
+/// The `copy-selection` and `plugin-*` actions are seeded `ComingSoon`; every
+/// other action is `Available`. The `resize-pane*` and `focus-pane*` actions
+/// are `continuous`; every other action is not.
 #[must_use]
 pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
     use ActionHandlerRef::CoreCommand;
@@ -752,11 +740,10 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
     // --- Copy the selection --- (PaneSession scope, Pane target, Visual command,
     // ComingSoon)
     //
-    // The only action of visual mode. Entering and leaving it are NOT actions:
-    // a mouse drag starts a selection, and a click or any input reaching the
-    // pane's program drops it, so there is no name for a user to bind. Setting
-    // and clearing the selection are not actions either — the mouse layer
-    // issues those commands directly.
+    // The only action of visual mode. Starting a selection (a mouse drag) and
+    // dropping it (a click, or any input reaching the pane's program) have no
+    // action name. The mouse layer issues `SetSelection` and `ClearSelection`
+    // directly.
     seeds.push(core_seed(
         "copy-selection",
         "Copy Selection",
@@ -809,9 +796,8 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
     }));
 
     // Repeat-from-prefix actions: fired from a multi-chord binding, the
-    // prefix stays armed so the next chord alone fires again (`<C-s> h h h`,
-    // `<C-p> ← ← ←`). A system property of the action, never authored in a
-    // binding.
+    // prefix stays armed and the next chord alone fires again (`<C-s> h h h`,
+    // `<C-p> ← ← ←`).
     for (action, metadata) in &mut seeds {
         if matches!(
             action.name.as_str(),

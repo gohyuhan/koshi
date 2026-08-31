@@ -475,11 +475,215 @@ fn a_cursor_shape_and_an_underline_colour_with_no_name_here_read_as_none() {
 /// and leaves the rest of the frame intact.
 #[test]
 fn a_frame_whose_gap_is_not_a_count_reads_as_zero() {
-    for hostile in [serde_json::json!(-1), serde_json::json!("2")] {
+    for hostile in [
+        serde_json::json!(-1),
+        serde_json::json!("2"),
+        serde_json::json!(null),
+        serde_json::json!(70_000),
+    ] {
         let mut encoded = serde_json::to_value(frame()).expect("frame encodes");
         encoded["session"]["active_tab"]["gap"] = hostile;
         let decoded: PaintedFrame =
             serde_json::from_str(&encoded.to_string()).expect("a frame with a bad gap decodes");
         assert_eq!(decoded, frame());
     }
+}
+
+#[test]
+fn a_run_of_exactly_the_cap_stays_one_run_and_one_more_cell_opens_a_second() {
+    let at_cap = FrameRow::from_cells(
+        std::iter::repeat_n(blank(), usize::from(u16::MAX)),
+        FrameRowEnd::Hard,
+    );
+    let past_cap = FrameRow::from_cells(
+        std::iter::repeat_n(blank(), usize::from(u16::MAX) + 1),
+        FrameRowEnd::Hard,
+    );
+
+    assert_eq!(
+        at_cap.runs,
+        vec![FrameRun {
+            count: u16::MAX,
+            cell: blank()
+        }]
+    );
+    assert_eq!(
+        past_cap.runs,
+        vec![
+            FrameRun {
+                count: u16::MAX,
+                cell: blank()
+            },
+            FrameRun {
+                count: 1,
+                cell: blank()
+            },
+        ]
+    );
+    assert_eq!(past_cap.cells().len(), usize::from(u16::MAX) + 1);
+}
+
+/// Two cells fold only when every field is equal: the same character with a
+/// different grapheme cluster or a different width opens its own run.
+#[test]
+fn cells_equal_in_character_but_not_in_cluster_or_width_do_not_fold() {
+    let plain = cell('e', FrameColor::Default);
+    let accented = FrameCell {
+        combining: vec!['\u{301}'],
+        ..cell('e', FrameColor::Default)
+    };
+    let wide = FrameCell {
+        width: 2,
+        ..cell('e', FrameColor::Default)
+    };
+    let cells = vec![plain.clone(), accented.clone(), wide.clone()];
+
+    let row = FrameRow::from_cells(cells.iter().cloned(), FrameRowEnd::Hard);
+
+    assert_eq!(
+        row.runs,
+        vec![
+            FrameRun {
+                count: 1,
+                cell: plain
+            },
+            FrameRun {
+                count: 1,
+                cell: accented
+            },
+            FrameRun {
+                count: 1,
+                cell: wide
+            },
+        ]
+    );
+    assert_eq!(row.cells(), cells);
+}
+
+#[test]
+fn hard_is_the_only_ending_that_is_hard() {
+    assert!(FrameRowEnd::Hard.is_hard());
+    assert!(!FrameRowEnd::Soft.is_hard());
+    assert!(!FrameRowEnd::SoftWide.is_hard());
+}
+
+/// A run with `count: 0` never comes out of `from_cells`, but the wire can
+/// carry one. It expands to no cells and leaves the other runs intact.
+#[test]
+fn a_run_whose_count_is_zero_expands_to_no_cells() {
+    let encoded = json!({
+        "runs": [
+            { "count": 0, "cell": cell('x', FrameColor::Default) },
+            { "count": 2, "cell": blank() }
+        ]
+    });
+
+    // Decoded from text, the way the transport does it.
+    let row: FrameRow =
+        serde_json::from_str(&encoded.to_string()).expect("a row with a zero-count run decodes");
+
+    assert_eq!(row.cells(), vec![blank(), blank()]);
+}
+
+/// Every value a cell can carry beyond the plain default, pinned on the wire:
+/// a grapheme cluster, a double width, palette and truecolor colors, an
+/// underline color, and the attributes that are set. An attribute that is
+/// not set is absent.
+#[test]
+fn a_dressed_cell_encodes_every_value_it_sets_and_nothing_it_does_not() {
+    let dressed = FrameCell {
+        ch: 'e',
+        combining: vec!['\u{301}'],
+        width: 2,
+        style: FrameStyle {
+            fg: FrameColor::Indexed(1),
+            bg: FrameColor::Rgb(0, 0, 255),
+            underline_color: Some(FrameColor::Indexed(3)),
+            attrs: FrameAttrs {
+                bold: true,
+                italic: false,
+                reverse: true,
+                faint: false,
+                blink: false,
+                conceal: false,
+                strike: true,
+                overline: false,
+                underline: FrameUnderline::Curly,
+            },
+        },
+    };
+
+    let encoded = serde_json::to_value(&dressed).expect("a cell encodes");
+
+    assert_eq!(
+        encoded,
+        json!({
+            "ch": "e",
+            "combining": ["\u{301}"],
+            "width": 2,
+            "style": {
+                "fg": { "Indexed": 1 },
+                "bg": { "Rgb": [0, 0, 255] },
+                "underline_color": { "Indexed": 3 },
+                "attrs": {
+                    "bold": true,
+                    "reverse": true,
+                    "strike": true,
+                    "underline": "Curly"
+                }
+            }
+        })
+    );
+    let decoded: FrameCell =
+        serde_json::from_str(&encoded.to_string()).expect("a dressed cell decodes");
+    assert_eq!(decoded, dressed);
+}
+
+/// An optional value that is `None` travels as `null`, never as an absent
+/// key: a pane with no title, no window and no highlight, a slot with no
+/// content rect, a cursor with no shape, and a client with no focused pane.
+#[test]
+fn absent_optional_values_encode_as_null() {
+    let mut bare = frame();
+    bare.session.active_tab.slots[0].inner_rect = None;
+    bare.panes[0].title = None;
+    bare.panes[0].cursor.shape = None;
+    bare.panes[0].window = None;
+    bare.panes[0].selection = None;
+    bare.client.focused_pane = None;
+
+    let encoded = serde_json::to_value(&bare).expect("frame encodes");
+
+    assert_eq!(
+        encoded["session"]["active_tab"]["slots"][0]["inner_rect"],
+        serde_json::Value::Null
+    );
+    assert_eq!(encoded["panes"][0]["title"], serde_json::Value::Null);
+    assert_eq!(
+        encoded["panes"][0]["cursor"]["shape"],
+        serde_json::Value::Null
+    );
+    assert_eq!(encoded["panes"][0]["window"], serde_json::Value::Null);
+    assert_eq!(encoded["panes"][0]["selection"], serde_json::Value::Null);
+    assert_eq!(encoded["client"]["focused_pane"], serde_json::Value::Null);
+    let decoded: PaintedFrame =
+        serde_json::from_str(&encoded.to_string()).expect("a bare frame decodes");
+    assert_eq!(decoded, bare);
+}
+
+/// A cursor from a server that sends no `shape` at all reads as `None`, the
+/// same as one that sends `null`.
+#[test]
+fn a_cursor_without_a_shape_key_reads_as_no_shape() {
+    let mut encoded = serde_json::to_value(frame()).expect("frame encodes");
+    encoded["panes"][0]["cursor"]
+        .as_object_mut()
+        .expect("a cursor encodes as an object")
+        .remove("shape")
+        .expect("the cursor encodes a shape");
+
+    let decoded: PaintedFrame =
+        serde_json::from_str(&encoded.to_string()).expect("a cursor with no shape key decodes");
+
+    assert_eq!(decoded.panes[0].cursor.shape, None);
 }

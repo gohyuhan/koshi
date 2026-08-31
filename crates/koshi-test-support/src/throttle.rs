@@ -3,12 +3,11 @@
 //! [`pump_throttled`](throttle::pump_throttled) copies bytes from one stream to
 //! another on its own thread, moving at most a fixed number of bytes per time
 //! slice. A test puts one pump in each direction between a client and a server
-//! to hold the client behind the server's output, which is what makes a
-//! bounded queue on the server overflow.
+//! to make the link between them slow.
 //!
 //! Example — `pump_throttled(reader, writer, 4096, Duration::from_millis(10),
 //! Instant::now() + Duration::from_secs(20))` moves at most 4096 bytes every
-//! 10 milliseconds, so about 400 kilobytes per second, and stops 20 seconds
+//! 10 milliseconds, about 400 kilobytes per second, and stops 20 seconds
 //! from now whatever the streams are doing.
 
 use koshi_ipc::transport::waited_out;
@@ -20,24 +19,28 @@ use std::time::{Duration, Instant};
 /// bytes per `slice`, and hand back that thread's handle.
 ///
 /// Each slice reads once into a `bytes_per_slice`-byte buffer, writes every
-/// byte it read with [`Write::write_all`], then sleeps until the slice's
-/// `slice`-long span is over. A slice whose read and write already took longer
-/// than `slice` does not sleep.
+/// byte it read with [`Write::write_all`], flushes `to`, then sleeps until the
+/// slice's `slice`-long span is over. A slice whose read, write and flush
+/// already took longer than `slice` does not sleep. A `bytes_per_slice` of
+/// `0` gives a zero-length buffer, which a stream answers with `Ok(0)`, and
+/// the thread ends with `0` copied.
 ///
 /// The thread ends, and the handle's value is the total number of bytes copied,
 /// on the first of:
 ///
 /// - `from` reporting end of stream (a read of `Ok(0)`),
-/// - any write error on `to`,
+/// - any write or flush error on `to`; the bytes of that slice are not
+///   counted, even when the write itself succeeded and only the flush failed,
 /// - a read error on `from` other than [`std::io::ErrorKind::WouldBlock`] or
 ///   [`std::io::ErrorKind::TimedOut`],
-/// - the clock reaching `deadline`, checked at the top of every slice.
+/// - the clock reaching `deadline`, checked at the top of every slice. A
+///   `deadline` already in the past ends the thread before the first read.
 ///
 /// A read that reports `WouldBlock` or `TimedOut` is a pause, not a failure:
 /// Unix reports a read timeout as `WouldBlock` and Windows as `TimedOut`. The
 /// slice ends with nothing copied and the next slice checks `deadline` again.
-/// Give `from` a read timeout shorter than the span to `deadline`, so a peer
-/// that sends nothing cannot hold the thread past `deadline`.
+/// A `from` with no read timeout blocks inside `read` until bytes arrive or
+/// the stream ends, past `deadline` if that takes longer.
 pub fn pump_throttled(
     mut from: impl Read + Send + 'static,
     mut to: impl Write + Send + 'static,
@@ -61,8 +64,8 @@ pub fn pump_throttled(
                     }
                     copied += read as u64;
                 }
-                // A read timeout: the next turn of the loop reads the clock
-                // again, and the `deadline` check ends the thread.
+                // A read timeout. The next turn of the loop checks `deadline`
+                // again.
                 Err(error) if waited_out(&error) => {}
                 Err(_) => return copied,
             }

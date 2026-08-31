@@ -1,11 +1,16 @@
 //! Tests for command dispatch: validation rejects ill-formed commands before
-//! the match, and a command that passes validation but has no handler yet
-//! routes to a clean labelled rejection.
+//! the match, a command that passes validation but has no handler yet routes
+//! to a clean labelled rejection, and every handler the match reaches is
+//! exercised — panes, tabs, clients, highlights, fullscreen, detach and the
+//! session switch — together with child exits, client attach and detach, and
+//! the working directory a new pane opens in.
 //!
 //! Rejection cases (no context) run against an empty runtime. Cases that need
 //! populated state — explicit/default/focused target resolution, in-session-CLI
 //! pane defaulting, and `InvalidState` session admission — build sessions with
-//! the helpers below and install them into the runtime's `sessions` map.
+//! the helpers below and install them into the runtime's `sessions` map. Cases
+//! that need a live child use [`new_runtime_with_fake`], which hands back the
+//! fake backend so spawns, resizes, writes and kills can be read back.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
@@ -26,7 +31,7 @@ use koshi_core::process::{ExitStatus, PtySize, ShellKind, SpawnSpec};
 use koshi_layout::edit::split_leaf;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::solver::PaneSizing;
-use koshi_layout::tree::{LayoutChild, SplitNode};
+use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pane::pane::lifecycle::{PaneLifecycle, PaneLifecycleEvent};
 use koshi_pane::pane::policy::PaneExitPolicy;
 use koshi_pane::pane::state::{PaneKind, PaneRecord};
@@ -38,7 +43,6 @@ use koshi_session::session::state::{Session, Tab};
 use koshi_session::session::tab_ops;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
-use crate::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
 use crate::runtime::bus::EventFilter;
 use crate::runtime::event::RuntimeEvent;
 use koshi_renderer::snapshot::Delivery;
@@ -63,16 +67,8 @@ fn new_pane_args() -> NewPaneArgs {
 /// the inbox stays open.
 fn new_runtime() -> (Server, mpsc::Sender<RuntimeEvent>) {
     let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::new());
-    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
-    let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (tx, inbox_rx) = mpsc::channel();
-    let runtime = Server::new(
-        pty_backend,
-        snapshot_provider,
-        storage,
-        inbox_rx,
-        tx.clone(),
-    );
+    let runtime = Server::new(pty_backend, inbox_rx, tx.clone());
     (runtime, tx)
 }
 
@@ -82,16 +78,8 @@ fn new_runtime() -> (Server, mpsc::Sender<RuntimeEvent>) {
 fn new_runtime_with_fake() -> (Server, Arc<FakePtyBackend>, mpsc::Sender<RuntimeEvent>) {
     let fake = Arc::new(FakePtyBackend::new());
     let pty_backend: Arc<dyn PtyBackend> = fake.clone();
-    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
-    let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (tx, inbox_rx) = mpsc::channel();
-    let runtime = Server::new(
-        pty_backend,
-        snapshot_provider,
-        storage,
-        inbox_rx,
-        tx.clone(),
-    );
+    let runtime = Server::new(pty_backend, inbox_rx, tx.clone());
     (runtime, fake, tx)
 }
 
@@ -456,14 +444,19 @@ fn command_for(kind: CommandKind, tab: TabId, pane: PaneId) -> Command {
     }
 }
 
+/// The variant name of each event in `events`, in order:
+/// `[PaneCreated(..), LayoutChanged(..)]` gives
+/// `["PaneCreated", "LayoutChanged"]`.
+fn event_names(events: &[Event]) -> Vec<&'static str> {
+    events.iter().map(Event::name).collect()
+}
+
 /// What a dispatch answered, with everything that differs between two runtimes
 /// taken out: the names of the emitted events in order when it applied, or the
 /// reason and help text when it was refused.
 fn outcome_of(result: &CommandResult) -> Result<Vec<&'static str>, (RejectReason, Option<&str>)> {
     match result {
-        CommandResult::Ok { emitted_events, .. } => {
-            Ok(emitted_events.iter().map(Event::name).collect())
-        }
+        CommandResult::Ok { emitted_events, .. } => Ok(event_names(emitted_events)),
         CommandResult::Rejected { reason, help, .. } => Err((*reason, help.as_deref())),
     }
 }
@@ -868,14 +861,9 @@ fn write_to_a_running_pane_delivers_the_bytes() {
     assert_eq!(fake.writes(pane_a).unwrap(), vec![vec![b'l', b's', b'\n']]);
 }
 
-/// A commanded write has NO visibility guard, unlike a typed key: the caller
-/// named this pane on purpose, and a pane the layout has no room to draw still
-/// holds a live shell. Shrinking the terminal must not silently swallow a
-/// scripted `koshi input --pane <id> "…"`.
-///
-/// This pins the asymmetry deliberately: `Server::typed_pane` refuses an
-/// undrawn pane because a person cannot type at what they cannot see, and this
-/// path must not inherit that rule.
+/// A commanded write has no visibility guard: the bytes reach the pane's child
+/// even when the layout has no room to draw the pane. `Server::typed_pane`
+/// refuses an undrawn pane; this path does not.
 #[test]
 fn write_to_a_suppressed_pane_still_reaches_its_shell() {
     let (mut rt, fake, _tx, _sid, client_id, _root, pane_a, _size_a) = resize_fixture();
@@ -912,9 +900,8 @@ fn client_scroll_offset(rt: &Server, client: ClientId, pane: PaneId) -> usize {
 }
 
 /// A client-sourced write snaps that client's scrolled-up view back to live
-/// output, exactly as typing the same bytes into the pane would. The bytes are
-/// documented as arriving "as if typed there," so the view follows to the
-/// prompt. An `Internal`-sourced write (no client) has no view to move.
+/// output, the same as typing the bytes into the pane. An `Internal`-sourced
+/// write names no client and moves no view.
 #[test]
 fn a_client_sourced_write_to_pane_snaps_that_client_view_to_live_output() {
     let (mut rt, _fake, _tx, _sid, client_id, _root, pane_a, _size_a) = resize_fixture();
@@ -933,10 +920,8 @@ fn a_client_sourced_write_to_pane_snaps_that_client_view_to_live_output() {
     assert_eq!(client_scroll_offset(&rt, client_id, pane_a), 0);
 }
 
-/// A client-sourced write also drops that client's highlight in the target
-/// pane, the way typing over a selection does. Without the clear the leftover
-/// highlight would hold the view and the child's next output would re-anchor it
-/// away from live, so the snap could not stick.
+/// A client-sourced write drops that client's highlight in the target pane,
+/// the same as typing over a selection, and leaves the view at live output.
 #[test]
 fn a_client_sourced_write_clears_the_clients_highlight_in_the_pane() {
     let (mut rt, _fake, _tx, _sid, client_id, _root, pane_a, _size_a) = resize_fixture();
@@ -997,7 +982,7 @@ fn write_to_a_plugin_pane_is_rejected_and_writes_nothing() {
     // Re-file `pane_a`'s record under `Plugin`, keeping its id and its place in
     // the layout.
     let session = rt.sessions.get_mut(&sid).expect("session");
-    let created_at = session.panes.get(pane_a).expect("pane record").created_at;
+    let created_at = session.panes.get(pane_a).expect("pane record").created_at();
     session.panes.remove(pane_a);
     session
         .panes
@@ -1383,7 +1368,10 @@ fn new_pane_defaults_to_the_focused_pane() {
             emitted_events,
         } => {
             assert_eq!(ok_id, command_id);
-            assert_eq!(emitted_events.len(), 4);
+            assert_eq!(
+                event_names(&emitted_events),
+                ["PaneCreated", "LayoutChanged", "PaneFocused", "PtyResized"]
+            );
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -1458,7 +1446,10 @@ fn new_pane_stacked_on_a_plain_leaf_creates_a_stack() {
             emitted_events,
         } => {
             assert_eq!(ok_id, command_id);
-            assert_eq!(emitted_events.len(), 4);
+            assert_eq!(
+                event_names(&emitted_events),
+                ["PaneCreated", "LayoutChanged", "PaneFocused", "PtyResized"]
+            );
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -1515,7 +1506,10 @@ fn new_pane_stacked_onto_a_stack_member_appends() {
             emitted_events,
         } => {
             assert_eq!(ok_id, command_id);
-            assert_eq!(emitted_events.len(), 4);
+            assert_eq!(
+                event_names(&emitted_events),
+                ["PaneCreated", "LayoutChanged", "PaneFocused", "PtyResized"]
+            );
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -1944,7 +1938,10 @@ fn in_session_cli_close_defaults_to_its_source_pane() {
             emitted_events,
         } => {
             assert_eq!(ok_id, command_id);
-            assert_eq!(emitted_events.len(), 4);
+            assert_eq!(
+                event_names(&emitted_events),
+                ["PaneClosing", "PaneRemoved", "LayoutChanged", "PaneFocused"]
+            );
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -2035,7 +2032,7 @@ fn toggle_lock_mode_locks_an_unlocked_client() {
             emitted_events,
         } => {
             assert_eq!(ok_id, command_id);
-            assert_eq!(emitted_events.len(), 1);
+            assert_eq!(event_names(&emitted_events), ["InputModeChanged"]);
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -2114,7 +2111,7 @@ fn toggle_lock_mode_unlocks_a_locked_client() {
             emitted_events,
         } => {
             assert_eq!(ok_id, command_id);
-            assert_eq!(emitted_events.len(), 1);
+            assert_eq!(event_names(&emitted_events), ["InputModeChanged"]);
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -2139,7 +2136,7 @@ fn set_lock_mode_locks_then_unlocks() {
             emitted_events,
         } => {
             assert_eq!(command_id, lock_id);
-            assert_eq!(emitted_events.len(), 1);
+            assert_eq!(event_names(&emitted_events), ["InputModeChanged"]);
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -2159,7 +2156,7 @@ fn set_lock_mode_locks_then_unlocks() {
             emitted_events,
         } => {
             assert_eq!(command_id, unlock_id);
-            assert_eq!(emitted_events.len(), 1);
+            assert_eq!(event_names(&emitted_events), ["InputModeChanged"]);
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -2185,7 +2182,7 @@ fn setting_the_current_lock_mode_emits_nothing() {
             emitted_events,
         } => {
             assert_eq!(ok_id, command_id);
-            assert_eq!(emitted_events.len(), 0);
+            assert_eq!(emitted_events, Vec::new());
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -2239,7 +2236,7 @@ fn lock_mode_toggles_without_a_focused_pane() {
             emitted_events,
         } => {
             assert_eq!(ok_id, command_id);
-            assert_eq!(emitted_events.len(), 1);
+            assert_eq!(event_names(&emitted_events), ["InputModeChanged"]);
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -2391,6 +2388,37 @@ fn clearing_a_pane_with_no_highlight_is_accepted_and_changes_nothing() {
 }
 
 #[test]
+fn clearing_a_highlight_in_a_pane_the_session_lost_is_target_gone() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let pane = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane);
+    add_tab(&mut session, tab, pane);
+    add_client(&mut session, client_id, tab, Some(pane));
+    rt.sessions.insert(session.id, session);
+
+    // Setting and clearing a highlight answer one pane the same way: a pane the
+    // session does not hold is gone for both.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::Visual(VisualCommand::ClearSelection(ClearSelectionArgs {
+            pane: PaneId::new(),
+        })),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::TargetGone,
+            help: None,
+        }
+    );
+}
+
+#[test]
 fn a_host_paste_lands_whole_in_the_focused_pane() {
     // The OS paste key pressed in the outer terminal: the text arrives as one
     // block and is written whole — a pasted Tab lands in the shell instead of
@@ -2493,7 +2521,7 @@ fn focus_pane_in_the_active_tab_resolves() {
             emitted_events,
         } => {
             assert_eq!(ok_id, command_id);
-            assert_eq!(emitted_events.len(), 0);
+            assert_eq!(emitted_events, Vec::new());
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -2621,10 +2649,7 @@ fn focus_pane_moves_focus_records_mru_and_emits_one_event() {
         .expect("tab")
         .update_layout(LayoutNode::Split(SplitNode::with_equal_weights(
             SplitDirection::Horizontal,
-            vec![
-                LayoutChild::new(LayoutNode::Pane(a)),
-                LayoutChild::new(LayoutNode::Pane(b)),
-            ],
+            vec![LayoutNode::Pane(a), LayoutNode::Pane(b)],
         )));
     add_client(&mut session, client_id, tab_id, Some(a));
     let sid = session.id;
@@ -2645,7 +2670,7 @@ fn focus_pane_moves_focus_records_mru_and_emits_one_event() {
         } => {
             assert_eq!(ok_id, command_id);
             // Exactly the focus fact: a plain move changes no layout and no PTY.
-            assert_eq!(emitted_events.len(), 1);
+            assert_eq!(event_names(&emitted_events), ["PaneFocused"]);
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -2677,10 +2702,7 @@ fn focus_suppressed_pane_is_rejected_and_mutates_nothing() {
         .expect("tab")
         .update_layout(LayoutNode::Split(SplitNode::with_equal_weights(
             SplitDirection::Vertical,
-            vec![
-                LayoutChild::new(LayoutNode::Pane(a)),
-                LayoutChild::new(LayoutNode::Pane(b)),
-            ],
+            vec![LayoutNode::Pane(a), LayoutNode::Pane(b)],
         )));
     // A 2x1 viewport is below every pane's border-inclusive floor, so the
     // solve suppresses the whole split — `b` cannot take focus.
@@ -2765,7 +2787,10 @@ fn focus_collapsed_stack_member_activates_the_stack() {
             assert_eq!(ok_id, command_id);
             // LayoutChanged (the stack swapped members) + PaneFocused. No
             // PtyResized: neither pane has a live PTY here.
-            assert_eq!(emitted_events.len(), 2);
+            assert_eq!(
+                event_names(&emitted_events),
+                ["LayoutChanged", "PaneFocused"]
+            );
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -2800,8 +2825,8 @@ fn focus_active_stack_member_changes_no_layout() {
     let layout = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
         vec![
-            LayoutChild::new(LayoutNode::Pane(a)),
-            LayoutChild::new(LayoutNode::Split(SplitNode::stack(vec![b, c], 0))),
+            LayoutNode::Pane(a),
+            LayoutNode::Split(SplitNode::stack(vec![b, c], 0)),
         ],
     ));
     session
@@ -2823,7 +2848,7 @@ fn focus_active_stack_member_changes_no_layout() {
     match rt.dispatch(env) {
         CommandResult::Ok { emitted_events, .. } => {
             // Only the focus fact — the tree is untouched.
-            assert_eq!(emitted_events.len(), 1);
+            assert_eq!(event_names(&emitted_events), ["PaneFocused"]);
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -2871,7 +2896,7 @@ fn focus_already_focused_collapsed_member_reactivates_without_a_focus_event() {
         CommandResult::Ok { emitted_events, .. } => {
             // LayoutChanged only: the stack expands `b`, but the focus did not
             // move, so no PaneFocused is emitted.
-            assert_eq!(emitted_events.len(), 1);
+            assert_eq!(event_names(&emitted_events), ["LayoutChanged"]);
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -2910,10 +2935,7 @@ fn focus_explicit_client_wins_over_the_issuer() {
         .expect("tab")
         .update_layout(LayoutNode::Split(SplitNode::with_equal_weights(
             SplitDirection::Horizontal,
-            vec![
-                LayoutChild::new(LayoutNode::Pane(q)),
-                LayoutChild::new(LayoutNode::Pane(r)),
-            ],
+            vec![LayoutNode::Pane(q), LayoutNode::Pane(r)],
         )));
     add_client(&mut session, issuer, tab_x, Some(p));
     add_client(&mut session, target, tab_y, Some(q));
@@ -2931,7 +2953,7 @@ fn focus_explicit_client_wins_over_the_issuer() {
     );
     match rt.dispatch(env) {
         CommandResult::Ok { emitted_events, .. } => {
-            assert_eq!(emitted_events.len(), 1);
+            assert_eq!(event_names(&emitted_events), ["PaneFocused"]);
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -3012,10 +3034,7 @@ fn focus_from_a_clientless_source_defaults_to_the_sole_client() {
         .expect("tab")
         .update_layout(LayoutNode::Split(SplitNode::with_equal_weights(
             SplitDirection::Horizontal,
-            vec![
-                LayoutChild::new(LayoutNode::Pane(a)),
-                LayoutChild::new(LayoutNode::Pane(b)),
-            ],
+            vec![LayoutNode::Pane(a), LayoutNode::Pane(b)],
         )));
     add_client(&mut session, client_id, tab_id, Some(a));
     let sid = session.id;
@@ -3033,7 +3052,7 @@ fn focus_from_a_clientless_source_defaults_to_the_sole_client() {
     );
     match rt.dispatch(env) {
         CommandResult::Ok { emitted_events, .. } => {
-            assert_eq!(emitted_events.len(), 1);
+            assert_eq!(event_names(&emitted_events), ["PaneFocused"]);
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -3129,10 +3148,7 @@ fn focus_an_exited_pane_succeeds() {
         .expect("tab")
         .update_layout(LayoutNode::Split(SplitNode::with_equal_weights(
             SplitDirection::Horizontal,
-            vec![
-                LayoutChild::new(LayoutNode::Pane(a)),
-                LayoutChild::new(LayoutNode::Pane(b)),
-            ],
+            vec![LayoutNode::Pane(a), LayoutNode::Pane(b)],
         )));
     // A dead pane is a visible, focusable placeholder until it is removed.
     let exited_at = SystemTime::now();
@@ -3164,7 +3180,7 @@ fn focus_an_exited_pane_succeeds() {
     );
     match rt.dispatch(env) {
         CommandResult::Ok { emitted_events, .. } => {
-            assert_eq!(emitted_events.len(), 1);
+            assert_eq!(event_names(&emitted_events), ["PaneFocused"]);
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -3238,7 +3254,10 @@ fn focus_activation_reflows_the_expanded_member_pty() {
         CommandResult::Ok { emitted_events, .. } => {
             // LayoutChanged + PtyResized(b) + PaneFocused. `c` collapses to a
             // header and keeps its last PTY size, so it is not resized.
-            assert_eq!(emitted_events.len(), 3);
+            assert_eq!(
+                event_names(&emitted_events),
+                ["LayoutChanged", "PtyResized", "PaneFocused"]
+            );
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -3248,8 +3267,8 @@ fn focus_activation_reflows_the_expanded_member_pty() {
         &LayoutNode::Split(SplitNode::with_equal_weights(
             SplitDirection::Horizontal,
             vec![
-                LayoutChild::new(LayoutNode::Pane(a)),
-                LayoutChild::new(LayoutNode::Split(SplitNode::stack(vec![b, c], 0))),
+                LayoutNode::Pane(a),
+                LayoutNode::Split(SplitNode::stack(vec![b, c], 0)),
             ],
         ))
     );
@@ -3338,7 +3357,10 @@ fn in_session_cli_pane_command_without_a_client_succeeds() {
             emitted_events,
         } => {
             assert_eq!(ok_id, command_id);
-            assert_eq!(emitted_events.len(), 4);
+            assert_eq!(
+                event_names(&emitted_events),
+                ["PaneClosing", "PaneRemoved", "LayoutChanged", "PaneFocused"]
+            );
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -3477,7 +3499,15 @@ fn in_session_cli_from_an_exited_pane_is_a_valid_source() {
             index: 0,
         }),
     );
-    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    let command_id = env.id;
+    // The tab already sits at slot 0, so the move applies with no events.
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Ok {
+            command_id,
+            emitted_events: Vec::new(),
+        }
+    );
 }
 
 #[test]
@@ -3492,6 +3522,27 @@ fn mouse_select_cannot_be_issued_from_the_cli() {
         PathBuf::from("/sock"),
     );
     let env = envelope_from(source, Command::ToggleMouseSelect);
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::Unauthorized,
+            help: Some("command cannot be issued from the CLI".to_string()),
+        }
+    );
+}
+
+#[test]
+fn mouse_select_is_refused_from_the_source_a_control_connection_stamps() {
+    // A control connection that presented `CommandSource::Internal` reaches
+    // dispatch as `ExternalCli { session_id: None, target_client: None }`, so
+    // the CLI-admission check refuses the verb the CLI has no word for.
+    let (mut rt, _tx) = new_runtime();
+    let env = envelope_from(
+        CommandSource::external_cli(None, None),
+        Command::ToggleMouseSelect,
+    );
     let command_id = env.id;
     assert_eq!(
         rt.dispatch(env),
@@ -3560,7 +3611,14 @@ fn quit_from_an_external_cli_is_accepted() {
     let (mut rt, _tx) = new_runtime();
     let source = CommandSource::external_cli(None, None);
     let env = envelope_from(source, Command::Quit);
-    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Ok {
+            command_id,
+            emitted_events: Vec::new(),
+        }
+    );
     assert!(rt.quit_requested());
     assert!(rt.immediate_shutdown);
 }
@@ -4249,7 +4307,16 @@ fn new_pane_on_a_background_tab_adopts_a_viewer() {
         .find(|id| *id != pane_front && *id != pane_back)
         .expect("the freshly split pane");
     match result {
-        CommandResult::Ok { emitted_events, .. } => assert_eq!(emitted_events.len(), 5),
+        CommandResult::Ok { emitted_events, .. } => assert_eq!(
+            event_names(&emitted_events),
+            [
+                "TabFocused",
+                "PaneCreated",
+                "LayoutChanged",
+                "PaneFocused",
+                "PtyResized"
+            ]
+        ),
         other => panic!("expected Ok, got {other:?}"),
     }
     let session = &rt.sessions[&sid];
@@ -4308,7 +4375,16 @@ fn new_pane_on_a_background_tab_adopts_the_issuing_client() {
     ));
     // TabFocused, PaneCreated, LayoutChanged, PaneFocused, PtyResized.
     match result {
-        CommandResult::Ok { emitted_events, .. } => assert_eq!(emitted_events.len(), 5),
+        CommandResult::Ok { emitted_events, .. } => assert_eq!(
+            event_names(&emitted_events),
+            [
+                "TabFocused",
+                "PaneCreated",
+                "LayoutChanged",
+                "PaneFocused",
+                "PtyResized"
+            ]
+        ),
         other => panic!("expected Ok, got {other:?}"),
     }
 
@@ -5141,7 +5217,10 @@ fn new_pane_reflows_existing_sibling_ptys() {
     // The second split reflows A exactly once more (spawn size + this reflow).
     assert_eq!(fake.resizes(pane_a).unwrap().len(), a_resizes_before + 1);
     // The root, having no PTY, was never resized — confirming it was skipped.
-    assert!(fake.resizes(root).is_err());
+    assert_eq!(
+        fake.resizes(root),
+        Err(PtyError::UnknownPane { pane: root })
+    );
 }
 
 #[test]
@@ -5318,7 +5397,10 @@ fn close_pane_defaults_to_the_focused_pane_and_kills_gracefully() {
             emitted_events,
         } => {
             assert_eq!(ok_id, command_id);
-            assert_eq!(emitted_events.len(), 4);
+            assert_eq!(
+                event_names(&emitted_events),
+                ["PaneClosing", "PaneRemoved", "LayoutChanged", "PaneFocused"]
+            );
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -5384,7 +5466,10 @@ fn close_pane_explicit_non_focused_target_keeps_focus() {
             emitted_events,
         } => {
             assert_eq!(ok_id, command_id);
-            assert_eq!(emitted_events.len(), 4);
+            assert_eq!(
+                event_names(&emitted_events),
+                ["PaneClosing", "PaneRemoved", "LayoutChanged", "PtyResized"]
+            );
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -5615,7 +5700,10 @@ fn close_pane_confirm_if_busy_exited_closes_gracefully() {
             emitted_events,
         } => {
             assert_eq!(ok_id, command_id);
-            assert_eq!(emitted_events.len(), 4);
+            assert_eq!(
+                event_names(&emitted_events),
+                ["PaneClosing", "PaneRemoved", "LayoutChanged", "PaneFocused"]
+            );
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -5694,7 +5782,10 @@ fn close_pane_last_pane_closes_the_tab_and_quits() {
             emitted_events,
         } => {
             assert_eq!(ok_id, command_id);
-            assert_eq!(emitted_events.len(), 4);
+            assert_eq!(
+                event_names(&emitted_events),
+                ["PaneClosing", "PaneRemoved", "TabClosed", "Quit"]
+            );
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -5744,7 +5835,16 @@ fn close_pane_last_pane_of_a_tab_moves_viewers_to_the_nearest_tab() {
             emitted_events,
         } => {
             assert_eq!(ok_id, command_id);
-            assert_eq!(emitted_events.len(), 4);
+            assert_eq!(
+                event_names(&emitted_events),
+                [
+                    "PaneClosing",
+                    "PaneRemoved",
+                    "TabClosed",
+                    "TabFocused",
+                    "PaneFocused"
+                ]
+            );
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -5827,7 +5927,10 @@ fn close_pane_unviewed_tab_repairs_stored_focus() {
             emitted_events,
         } => {
             assert_eq!(ok_id, command_id);
-            assert_eq!(emitted_events.len(), 4);
+            assert_eq!(
+                event_names(&emitted_events),
+                ["PaneClosing", "PaneRemoved", "LayoutChanged", "PaneFocused"]
+            );
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -5905,7 +6008,16 @@ fn close_pane_reflows_surviving_pty_sizes() {
             emitted_events,
         } => {
             assert_eq!(ok_id, command_id);
-            assert_eq!(emitted_events.len(), 5);
+            assert_eq!(
+                event_names(&emitted_events),
+                [
+                    "PaneClosing",
+                    "PaneRemoved",
+                    "LayoutChanged",
+                    "PaneFocused",
+                    "PtyResized"
+                ]
+            );
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -5964,7 +6076,10 @@ fn close_pane_reflow_skips_a_survivor_whose_rect_is_unchanged() {
             emitted_events,
         } => {
             assert_eq!(ok_id, command_id);
-            assert_eq!(emitted_events.len(), 4);
+            assert_eq!(
+                event_names(&emitted_events),
+                ["PaneClosing", "PaneRemoved", "LayoutChanged", "PaneFocused"]
+            );
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -6100,7 +6215,17 @@ fn close_last_pane_reflows_the_tab_its_viewers_move_to() {
             emitted_events,
         } => {
             assert_eq!(ok_id, command_id);
-            assert_eq!(emitted_events.len(), 5);
+            assert_eq!(
+                event_names(&emitted_events),
+                [
+                    "PaneClosing",
+                    "PaneRemoved",
+                    "TabClosed",
+                    "TabFocused",
+                    "PaneFocused",
+                    "PtyResized"
+                ]
+            );
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -6168,7 +6293,10 @@ fn close_last_pane_of_an_unviewed_tab_reflows_nothing() {
             emitted_events,
         } => {
             assert_eq!(ok_id, command_id);
-            assert_eq!(emitted_events.len(), 3);
+            assert_eq!(
+                event_names(&emitted_events),
+                ["PaneClosing", "PaneRemoved", "TabClosed"]
+            );
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -6232,7 +6360,10 @@ fn close_pane_reflow_skips_a_collapsed_stack_member() {
             emitted_events,
         } => {
             assert_eq!(ok_id, command_id);
-            assert_eq!(emitted_events.len(), 4);
+            assert_eq!(
+                event_names(&emitted_events),
+                ["PaneClosing", "PaneRemoved", "LayoutChanged", "PtyResized"]
+            );
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -6293,7 +6424,16 @@ fn close_pane_repairs_focus_for_every_client_focused_on_it() {
             emitted_events,
         } => {
             assert_eq!(ok_id, command_id);
-            assert_eq!(emitted_events.len(), 5);
+            assert_eq!(
+                event_names(&emitted_events),
+                [
+                    "PaneClosing",
+                    "PaneRemoved",
+                    "LayoutChanged",
+                    "PaneFocused",
+                    "PaneFocused"
+                ]
+            );
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -6465,7 +6605,10 @@ fn close_pane_stacked_member_collapses_the_stack() {
             emitted_events,
         } => {
             assert_eq!(ok_id, command_id);
-            assert_eq!(emitted_events.len(), 4);
+            assert_eq!(
+                event_names(&emitted_events),
+                ["PaneClosing", "PaneRemoved", "LayoutChanged", "PaneFocused"]
+            );
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -6518,7 +6661,10 @@ fn close_pane_with_no_attached_clients_succeeds() {
             emitted_events,
         } => {
             assert_eq!(ok_id, command_id);
-            assert_eq!(emitted_events.len(), 3);
+            assert_eq!(
+                event_names(&emitted_events),
+                ["PaneClosing", "PaneRemoved", "LayoutChanged"]
+            );
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -6620,7 +6766,10 @@ fn close_pane_explicit_target_in_another_session_closes_there() {
             emitted_events,
         } => {
             assert_eq!(ok_id, command_id);
-            assert_eq!(emitted_events.len(), 3);
+            assert_eq!(
+                event_names(&emitted_events),
+                ["PaneClosing", "PaneRemoved", "LayoutChanged"]
+            );
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -6650,10 +6799,7 @@ fn close_pane_explicit_target_in_another_session_closes_there() {
 fn side_by_side(left: PaneId, right: PaneId) -> LayoutNode {
     LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![
-            LayoutChild::new(LayoutNode::Pane(left)),
-            LayoutChild::new(LayoutNode::Pane(right)),
-        ],
+        vec![LayoutNode::Pane(left), LayoutNode::Pane(right)],
     ))
 }
 
@@ -6713,7 +6859,10 @@ fn resize_pane_grows_the_focused_pane_and_reflows_its_pty() {
             emitted_events,
         } => {
             assert_eq!(ok_id, command_id);
-            assert_eq!(emitted_events.len(), 2);
+            assert_eq!(
+                event_names(&emitted_events),
+                ["LayoutChanged", "PtyResized"]
+            );
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -6747,7 +6896,10 @@ fn resize_pane_negative_size_shrinks_the_focused_pane() {
             emitted_events,
         } => {
             assert_eq!(ok_id, command_id);
-            assert_eq!(emitted_events.len(), 2);
+            assert_eq!(
+                event_names(&emitted_events),
+                ["LayoutChanged", "PtyResized"]
+            );
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -6847,6 +6999,93 @@ fn resize_pane_min_size_rejection_reports_the_spare_and_mutates_nothing() {
     assert_eq!(rects_after, rects_before);
     assert_eq!(fake.resizes(pane_a).unwrap().len(), resizes_before);
     assert_eq!(rt.pty_sizes[&pane_a], size_a);
+}
+
+#[test]
+fn dispatch_reporting_spare_hands_back_the_donors_spare_cells() {
+    let (mut rt, _fake, _tx, _sid, client_id, _root, _pane_a, _size_a) = resize_fixture();
+
+    // The donor root holds 40 of the 80 columns and can give 36 before its own
+    // floor. Asking for 100 refuses and hands that 36 back beside the result.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::ResizePane(ResizePaneArgs {
+            pane: None,
+            direction: Direction::Left,
+            size: 100,
+        }),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch_reporting_spare(env),
+        (
+            CommandResult::Rejected {
+                command_id,
+                reason: RejectReason::MinSize,
+                help: Some("the donating pane has only 36 spare cells to give".to_string()),
+            },
+            Some(36)
+        )
+    );
+}
+
+#[test]
+fn dispatch_reporting_spare_reports_no_spare_for_an_applied_resize() {
+    let (mut rt, _fake, _tx, _sid, client_id, _root, _pane_a, _size_a) = resize_fixture();
+
+    // A resize the layout grants carries no spare: the second half is `None`
+    // for every outcome but a border refused at a pane minimum.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::ResizePane(ResizePaneArgs {
+            pane: None,
+            direction: Direction::Left,
+            size: 5,
+        }),
+    );
+    let command_id = env.id;
+    let (result, spare) = rt.dispatch_reporting_spare(env);
+    match result {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert_eq!(
+                event_names(&emitted_events),
+                ["LayoutChanged", "PtyResized"]
+            );
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    assert_eq!(spare, None);
+}
+
+#[test]
+fn a_border_refused_at_the_pane_minimum_writes_no_log_line() {
+    let (mut rt, _fake, _tx, _sid, client_id, _root, _pane_a, _size_a) = resize_fixture();
+    let (_guard, logs) = koshi_observability::logging::with_test_writer();
+
+    // A resize refused at a pane minimum is the one rejection that is not
+    // logged, so the capture stays empty.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::ResizePane(ResizePaneArgs {
+            pane: None,
+            direction: Direction::Left,
+            size: 100,
+        }),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::MinSize,
+            help: Some("the donating pane has only 36 spare cells to give".to_string()),
+        }
+    );
+    assert_eq!(logs.contents(), "");
 }
 
 #[test]
@@ -7090,7 +7329,10 @@ fn resize_pane_in_a_nested_split_moves_the_enclosing_border() {
         } => {
             assert_eq!(ok_id, command_id);
             // LayoutChanged + PtyResized for A and B (root has no PTY).
-            assert_eq!(emitted_events.len(), 3);
+            assert_eq!(
+                event_names(&emitted_events),
+                ["LayoutChanged", "PtyResized", "PtyResized"]
+            );
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -7139,7 +7381,16 @@ fn new_tab_spawns_creates_and_focuses_for_the_issuer() {
             assert_eq!(ok_id, command_id);
             // TabCreated, PaneCreated, TabFocused, PaneFocused, PtyResized;
             // the vacated tab has no viewer left, so nothing else reflows.
-            assert_eq!(emitted_events.len(), 5);
+            assert_eq!(
+                event_names(&emitted_events),
+                [
+                    "TabCreated",
+                    "PaneCreated",
+                    "TabFocused",
+                    "PaneFocused",
+                    "PtyResized"
+                ]
+            );
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -7513,7 +7764,17 @@ fn new_tab_reflows_the_vacated_tab_for_its_remaining_viewer() {
             // TabCreated, PaneCreated, TabFocused, PaneFocused, PtyResized
             // (spawn), then the vacated tab's one live PTY reflowed
             // (`pane_a` never spawned, so only the split pane resizes).
-            assert_eq!(emitted_events.len(), 6);
+            assert_eq!(
+                event_names(&emitted_events),
+                [
+                    "TabCreated",
+                    "PaneCreated",
+                    "TabFocused",
+                    "PaneFocused",
+                    "PtyResized",
+                    "PtyResized"
+                ]
+            );
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -7582,7 +7843,18 @@ fn close_tab_removes_state_kills_children_and_moves_viewers() {
             // PaneClosing+PaneRemoved for each of the two panes, TabClosed,
             // TabFocused (the viewer moves to tab_a; its pane has no PTY, so
             // nothing reflows).
-            assert_eq!(emitted_events.len(), 6);
+            assert_eq!(
+                event_names(&emitted_events),
+                [
+                    "PaneClosing",
+                    "PaneRemoved",
+                    "PaneClosing",
+                    "PaneRemoved",
+                    "TabClosed",
+                    "TabFocused",
+                    "PaneFocused"
+                ]
+            );
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -7645,16 +7917,8 @@ fn close_tab_kills_every_pane_concurrently() {
         inner: fake.clone(),
         barrier: Barrier::new(3),
     });
-    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
-    let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (tx, inbox_rx) = mpsc::channel();
-    let mut rt = Server::new(
-        pty_backend,
-        snapshot_provider,
-        storage,
-        inbox_rx,
-        tx.clone(),
-    );
+    let mut rt = Server::new(pty_backend, inbox_rx, tx.clone());
 
     let client_id = ClientId::new();
     let tab_a = TabId::new();
@@ -7912,7 +8176,10 @@ fn close_last_tab_quits_the_session() {
         } => {
             assert_eq!(ok_id, command_id);
             // PaneClosing, PaneRemoved, TabClosed, Quit.
-            assert_eq!(emitted_events.len(), 4);
+            assert_eq!(
+                event_names(&emitted_events),
+                ["PaneClosing", "PaneRemoved", "TabClosed", "Quit"]
+            );
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -8012,7 +8279,17 @@ fn close_tab_reflows_the_tab_its_viewers_move_to() {
     match result {
         CommandResult::Ok { emitted_events, .. } => {
             // PaneClosing, PaneRemoved, TabClosed, TabFocused, PtyResized.
-            assert_eq!(emitted_events.len(), 5);
+            assert_eq!(
+                event_names(&emitted_events),
+                [
+                    "PaneClosing",
+                    "PaneRemoved",
+                    "TabClosed",
+                    "TabFocused",
+                    "PaneFocused",
+                    "PtyResized"
+                ]
+            );
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -8062,7 +8339,7 @@ fn move_tab_reorders_and_emits() {
             emitted_events,
         } => {
             assert_eq!(ok_id, command_id);
-            assert_eq!(emitted_events.len(), 1);
+            assert_eq!(event_names(&emitted_events), ["TabMoved"]);
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -8101,7 +8378,9 @@ fn move_tab_defaults_to_the_issuers_active_tab() {
         }),
     ));
     match result {
-        CommandResult::Ok { emitted_events, .. } => assert_eq!(emitted_events.len(), 1),
+        CommandResult::Ok { emitted_events, .. } => {
+            assert_eq!(event_names(&emitted_events), ["TabMoved"])
+        }
         other => panic!("expected Ok, got {other:?}"),
     }
     let session = &rt.sessions[&sid];
@@ -8139,7 +8418,9 @@ fn move_tab_clamps_an_out_of_range_index() {
         }),
     ));
     match result {
-        CommandResult::Ok { emitted_events, .. } => assert_eq!(emitted_events.len(), 1),
+        CommandResult::Ok { emitted_events, .. } => {
+            assert_eq!(event_names(&emitted_events), ["TabMoved"])
+        }
         other => panic!("expected Ok, got {other:?}"),
     }
     let session = &rt.sessions[&sid];
@@ -8211,7 +8492,9 @@ fn in_session_cli_move_tab_defaults_to_the_source_pane_tab() {
         }),
     ));
     match result {
-        CommandResult::Ok { emitted_events, .. } => assert_eq!(emitted_events.len(), 1),
+        CommandResult::Ok { emitted_events, .. } => {
+            assert_eq!(event_names(&emitted_events), ["TabMoved"])
+        }
         other => panic!("expected Ok, got {other:?}"),
     }
     let session = &rt.sessions[&session_id];
@@ -8285,8 +8568,9 @@ fn focus_tab_switches_the_view_and_emits() {
             emitted_events,
         } => {
             assert_eq!(ok_id, command_id);
-            // TabFocused only: neither tab holds a live PTY to reflow.
-            assert_eq!(emitted_events.len(), 1);
+            // The client held no focus in the tab it switches to, so it lands
+            // on that tab's landing pane. Neither tab holds a live PTY to reflow.
+            assert_eq!(event_names(&emitted_events), ["TabFocused", "PaneFocused"]);
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -8702,7 +8986,10 @@ fn focus_tab_reflows_both_the_target_and_the_left_tab() {
     match result {
         CommandResult::Ok { emitted_events, .. } => {
             // TabFocused + the tightened PTY's resize (tab_a holds no PTY).
-            assert_eq!(emitted_events.len(), 2);
+            assert_eq!(
+                event_names(&emitted_events),
+                ["TabFocused", "PaneFocused", "PtyResized"]
+            );
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -8826,7 +9113,10 @@ fn toggle_fullscreen_promotes_the_focused_pane_and_reflows_its_pty() {
             assert_eq!(ok_id, command_id);
             // LayoutChanged plus the promoted pane's PtyResized; the hidden
             // root has no PTY and the focus was already on the pane.
-            assert_eq!(emitted_events.len(), 2);
+            assert_eq!(
+                event_names(&emitted_events),
+                ["LayoutChanged", "PtyResized"]
+            );
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -8856,7 +9146,10 @@ fn toggle_fullscreen_off_restores_the_exact_prior_layout_and_sizes() {
     match rt.dispatch(env) {
         CommandResult::Ok { emitted_events, .. } => {
             // LayoutChanged plus the pane shrinking back to its tiled rect.
-            assert_eq!(emitted_events.len(), 2);
+            assert_eq!(
+                event_names(&emitted_events),
+                ["LayoutChanged", "PtyResized"]
+            );
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -8881,7 +9174,10 @@ fn toggle_fullscreen_from_the_issuing_pane_moves_the_acting_focus() {
         CommandResult::Ok { emitted_events, .. } => {
             // LayoutChanged plus PaneFocused: root has no PTY to resize, and
             // the hidden pane keeps its last size eventlessly.
-            assert_eq!(emitted_events.len(), 2);
+            assert_eq!(
+                event_names(&emitted_events),
+                ["LayoutChanged", "PaneFocused"]
+            );
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -8995,7 +9291,10 @@ fn focus_pane_under_fullscreen_retargets_the_zoom() {
         CommandResult::Ok { emitted_events, .. } => {
             // LayoutChanged plus PaneFocused: root has no PTY, and the
             // newly hidden pane keeps its last size eventlessly.
-            assert_eq!(emitted_events.len(), 2);
+            assert_eq!(
+                event_names(&emitted_events),
+                ["LayoutChanged", "PaneFocused"]
+            );
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -9035,7 +9334,10 @@ fn focus_pane_retargeting_back_skips_the_unchanged_pty() {
     match rt.dispatch(focus(pane_a)) {
         CommandResult::Ok { emitted_events, .. } => {
             // LayoutChanged plus PaneFocused, no PtyResized.
-            assert_eq!(emitted_events.len(), 2);
+            assert_eq!(
+                event_names(&emitted_events),
+                ["LayoutChanged", "PaneFocused"]
+            );
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -9061,7 +9363,7 @@ fn focus_pane_on_the_promoted_pane_is_a_no_op() {
     );
     match rt.dispatch(env) {
         CommandResult::Ok { emitted_events, .. } => {
-            assert_eq!(emitted_events.len(), 0);
+            assert_eq!(emitted_events, Vec::new());
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -9133,7 +9435,7 @@ fn one_clients_zoom_leaves_another_clients_view_alone() {
     );
     match rt.dispatch(env) {
         CommandResult::Ok { emitted_events, .. } => {
-            assert_eq!(emitted_events.len(), 0);
+            assert_eq!(emitted_events, Vec::new());
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -9516,7 +9818,7 @@ fn child_exit_close_on_exit_removes_the_pane_and_reaps_it() {
     let new_pane = other_pane(&rt, sid, root);
 
     // The split pane's `CloseOnExit` child dies.
-    let events = rt.handle_child_exit(new_pane, ExitStatus::ExitCode(0), SystemTime::UNIX_EPOCH);
+    let events = rt.handle_child_exit(new_pane, ExitStatus::ExitCode(0));
 
     // The exit is reported first, carrying the pane and its code.
     match events.first() {
@@ -9557,12 +9859,21 @@ fn child_exit_of_the_last_pane_closes_the_tab_and_quits() {
     let sid = session.id;
     rt.sessions.insert(sid, session);
 
-    let events = rt.handle_child_exit(root, ExitStatus::ExitCode(0), SystemTime::UNIX_EPOCH);
+    let events = rt.handle_child_exit(root, ExitStatus::ExitCode(0));
 
     // Removing the last pane closes the tab, and closing the last tab quits.
     assert!(rt.sessions[&sid].panes.get(root).is_none());
     assert!(rt.sessions[&sid].tabs.is_empty());
-    assert!(events.iter().any(|event| matches!(event, Event::Quit)));
+    assert_eq!(
+        event_names(&events),
+        [
+            "PaneProcessExited",
+            "PaneClosing",
+            "PaneRemoved",
+            "TabClosed",
+            "Quit"
+        ]
+    );
 }
 
 #[test]
@@ -9584,12 +9895,22 @@ fn child_exit_empties_a_tab_and_moves_the_viewer_to_a_sibling() {
 
     // The sole pane of tab A exits: tab A closes, but tab B survives, so the
     // session does not quit and the viewer moves to tab B (which reflows).
-    let events = rt.handle_child_exit(pane_a, ExitStatus::ExitCode(0), SystemTime::UNIX_EPOCH);
+    let events = rt.handle_child_exit(pane_a, ExitStatus::ExitCode(0));
 
     assert!(rt.sessions[&sid].panes.get(pane_a).is_none());
     assert!(!rt.sessions[&sid].tabs.contains_key(&tab_a));
     assert!(rt.sessions[&sid].tabs.contains_key(&tab_b));
-    assert!(!events.iter().any(|event| matches!(event, Event::Quit)));
+    assert_eq!(
+        event_names(&events),
+        [
+            "PaneProcessExited",
+            "PaneClosing",
+            "PaneRemoved",
+            "TabClosed",
+            "TabFocused",
+            "PaneFocused"
+        ]
+    );
     assert_eq!(
         rt.sessions[&sid]
             .clients
@@ -9605,11 +9926,7 @@ fn child_exit_of_an_unknown_pane_is_dropped() {
     let (mut rt, _tx) = new_runtime();
 
     // No session owns the pane (closed while its exit waited in the inbox).
-    let events = rt.handle_child_exit(
-        PaneId::new(),
-        ExitStatus::ExitCode(0),
-        SystemTime::UNIX_EPOCH,
-    );
+    let events = rt.handle_child_exit(PaneId::new(), ExitStatus::ExitCode(0));
 
     assert!(events.is_empty());
 }
@@ -9634,72 +9951,13 @@ fn child_exit_by_signal_reports_no_exit_code() {
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
     let new_pane = other_pane(&rt, sid, root);
 
-    let events = rt.handle_child_exit(new_pane, ExitStatus::Signaled(9), SystemTime::UNIX_EPOCH);
+    let events = rt.handle_child_exit(new_pane, ExitStatus::Signaled(9));
 
     // A signal has no numeric code.
     match events.first() {
         Some(Event::PaneProcessExited(exited)) => assert_eq!(exited.exit_code, None),
         other => panic!("expected PaneProcessExited first, got {other:?}"),
     }
-}
-
-#[test]
-fn child_exit_respawn_shell_keeps_the_pane_and_its_bookkeeping() {
-    let (mut rt, fake, _tx) = new_runtime_with_fake();
-    let client_id = ClientId::new();
-    let tab = TabId::new();
-    let root = PaneId::new();
-    let mut session = bare_session(SessionId::new());
-    add_pane(&mut session, root);
-    add_tab(&mut session, tab, root);
-    add_client(&mut session, client_id, tab, Some(root));
-    let sid = session.id;
-    rt.sessions.insert(sid, session);
-
-    let env = envelope_from(
-        CommandSource::key_binding(client_id),
-        Command::NewPane(new_pane_args()),
-    );
-    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
-    let new_pane = other_pane(&rt, sid, root);
-
-    // Make the pane respawn on exit, with its child marked running.
-    {
-        let record = rt
-            .sessions
-            .get_mut(&sid)
-            .unwrap()
-            .panes
-            .get_mut(new_pane)
-            .unwrap();
-        record.exit_policy = PaneExitPolicy::RespawnShell;
-        let _ = record.update_lifecycle(PaneLifecycleEvent::ProcessStarted);
-    }
-
-    let events = rt.handle_child_exit(new_pane, ExitStatus::ExitCode(0), SystemTime::UNIX_EPOCH);
-
-    // Only the exit is reported — the pane is not removed.
-    assert_eq!(events.len(), 1);
-    match events.first() {
-        Some(Event::PaneProcessExited(exited)) => {
-            assert_eq!(exited.pane_id, new_pane);
-            assert_eq!(exited.exit_code, Some(0));
-        }
-        other => panic!("expected PaneProcessExited, got {other:?}"),
-    }
-    assert!(rt.sessions[&sid].panes.get(new_pane).is_some());
-
-    // The lifecycle advanced Running -> Exited -> Spawning: the respawn decision.
-    assert_eq!(
-        *rt.sessions[&sid].panes.get(new_pane).unwrap().lifecycle(),
-        PaneLifecycle::Spawning
-    );
-
-    // Bookkeeping is kept and the pane is never killed — it lives on.
-    assert!(rt.pty_handles.contains_key(&new_pane));
-    assert!(rt.pty_sizes.contains_key(&new_pane));
-    assert!(rt.terminal_engines.contains_key(&new_pane));
-    assert!(fake.kills(new_pane).unwrap().is_empty());
 }
 
 /// The `(session, tab, pane)` of a runtime `bootstrap_local` built: exactly one
@@ -10790,10 +11048,7 @@ fn pane_spawn_sizes_gives_each_pane_of_a_two_pane_tab_its_own_tile() {
     let (a, b) = (PaneId::new(), PaneId::new());
     let tree = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![
-            LayoutChild::new(LayoutNode::Pane(a)),
-            LayoutChild::new(LayoutNode::Pane(b)),
-        ],
+        vec![LayoutNode::Pane(a), LayoutNode::Pane(b)],
     ));
     let viewport = Size { cols: 80, rows: 24 };
 
@@ -10814,6 +11069,80 @@ fn pane_spawn_sizes_gives_each_pane_of_a_two_pane_tab_its_own_tile() {
         size_root_pane(a, viewport, PaneSizing::default()),
         PtySize { cols: 78, rows: 22 }
     );
+}
+
+#[test]
+fn size_root_pane_falls_back_to_the_whole_viewport_for_a_suppressed_pane() {
+    // A 3x3 viewport is below the pane's border-inclusive floor of 4 columns,
+    // so the solve gives the pane no content rect and the size is taken from
+    // the whole viewport rect instead.
+    assert_eq!(
+        size_root_pane(
+            PaneId::new(),
+            Size { cols: 3, rows: 3 },
+            PaneSizing::default()
+        ),
+        PtySize { cols: 3, rows: 3 }
+    );
+}
+
+#[test]
+fn pane_spawn_sizes_falls_back_to_the_tab_rect_for_a_suppressed_pane() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![LayoutNode::Pane(a), LayoutNode::Pane(b)],
+    ));
+
+    // Neither half fits in a 3x3 viewport, so both panes are suppressed and
+    // each falls back to the full 3x3 tab rect.
+    assert_eq!(
+        pane_spawn_sizes(&tree, Size { cols: 3, rows: 3 }, PaneSizing::default()),
+        vec![
+            (a, PtySize { cols: 3, rows: 3 }),
+            (b, PtySize { cols: 3, rows: 3 }),
+        ]
+    );
+}
+
+#[test]
+fn span_overlap_measures_only_the_length_two_spans_share() {
+    // `[0, 10)` and `[4, 10)` share `[4, 10)`: six cells.
+    assert_eq!(span_overlap(0, 10, 4, 6), 6);
+    // Full containment answers the inner span's whole length, either way round.
+    assert_eq!(span_overlap(0, 10, 2, 3), 3);
+    assert_eq!(span_overlap(2, 3, 0, 10), 3);
+    // Identical spans overlap along their whole length.
+    assert_eq!(span_overlap(5, 4, 5, 4), 4);
+    // `[0, 5)` and `[5, 10)` touch end to end and share no cell.
+    assert_eq!(span_overlap(0, 5, 5, 5), 0);
+    // Disjoint spans share nothing, in either order.
+    assert_eq!(span_overlap(0, 2, 7, 3), 0);
+    assert_eq!(span_overlap(7, 3, 0, 2), 0);
+    // A zero-length span shares nothing, even inside the other span.
+    assert_eq!(span_overlap(0, 10, 5, 0), 0);
+}
+
+#[test]
+fn tab_focused_in_reports_the_first_focused_tab() {
+    let (first, second) = (TabId::new(), TabId::new());
+    let client_id = ClientId::new();
+    let focused = |tab_id| {
+        Event::TabFocused(koshi_core::event::TabFocused {
+            client_id,
+            tab_id,
+            prior_tab: first,
+        })
+    };
+
+    // Two switches in one batch: the first entry names the answer.
+    assert_eq!(
+        tab_focused_in(&[focused(first), focused(second)]),
+        Some(first)
+    );
+    // A batch that holds no switch, and an empty batch, name none.
+    assert_eq!(tab_focused_in(&[Event::Quit, Event::Restarting]), None);
+    assert_eq!(tab_focused_in(&[]), None);
 }
 
 #[test]
@@ -10939,13 +11268,13 @@ fn a_second_child_exit_for_the_same_pane_is_dropped_and_the_survivor_is_untouche
         .expect("a third pane exists");
 
     // First exit removes pane_a.
-    let first = rt.handle_child_exit(pane_a, ExitStatus::ExitCode(0), SystemTime::UNIX_EPOCH);
+    let first = rt.handle_child_exit(pane_a, ExitStatus::ExitCode(0));
     assert!(matches!(first.first(), Some(Event::PaneProcessExited(_))));
     assert!(rt.sessions[&sid].panes.get(pane_a).is_none());
     let survivor_resizes = fake.resizes(pane_b).expect("pane_b spawned").len();
 
     // Second exit for the same gone pane: dropped whole.
-    let second = rt.handle_child_exit(pane_a, ExitStatus::ExitCode(0), SystemTime::UNIX_EPOCH);
+    let second = rt.handle_child_exit(pane_a, ExitStatus::ExitCode(0));
     assert!(second.is_empty(), "a duplicate exit emits nothing");
 
     // The survivor is untouched: still present, still holding all its bookkeeping,
@@ -10991,7 +11320,7 @@ fn output_arriving_after_a_child_exit_is_dropped_and_a_live_pane_still_updates()
     let (exited, live) = (engine_panes[0], engine_panes[1]);
 
     // The exit removes the pane and its engine.
-    let _ = rt.handle_child_exit(exited, ExitStatus::ExitCode(0), SystemTime::UNIX_EPOCH);
+    let _ = rt.handle_child_exit(exited, ExitStatus::ExitCode(0));
     assert!(!rt.terminal_engines().contains_key(&exited));
 
     // Late output for the now-engineless pane is a no-op.
@@ -11153,9 +11482,8 @@ fn an_applied_command_writes_one_info_line_per_event_it_committed() {
 // A command like `koshi lock` acts on one client's own view. The client it
 // means is the one that issued it, while that client is still attached. When
 // the issuer is gone — or the pane was spawned with no designated client and
-// names none — the session's sole attached client stands in, because with one
-// window attached there is only one window the command could mean. Several
-// attached, or none, has no single answer and is refused.
+// names none — the session's sole attached client stands in. Several attached,
+// or none, has no single answer and is refused.
 
 /// A session with one tab, one live pane, and no clients yet: the fixture the
 /// acting-client rules are exercised against. Returns the runtime, the keepalive
@@ -12160,13 +12488,18 @@ fn a_loopback_reported_host_counts_as_this_machine() {
     for local in [
         None,
         Some("localhost"),
+        Some("LOCALHOST"),
         Some("127.0.0.1"),
+        Some("127.0.0.2"),
+        Some("[127.0.0.1]"),
         Some("::1"),
         Some("[::1]"),
+        Some("0:0:0:0:0:0:0:1"),
     ] {
         assert!(is_local_host(local), "{local:?} must count as local");
     }
     assert!(!is_local_host(Some("build-server")));
+    assert!(!is_local_host(Some("10.0.0.1")));
 }
 
 #[test]
@@ -13187,7 +13520,10 @@ fn close_pane_for_a_starving_sole_viewer_refocuses_the_survivor() {
             emitted_events,
         } => {
             assert_eq!(ok_id, command_id);
-            assert_eq!(emitted_events.len(), 4);
+            assert_eq!(
+                event_names(&emitted_events),
+                ["PaneClosing", "PaneRemoved", "LayoutChanged", "PaneFocused"]
+            );
         }
         other => panic!("expected Ok, got {other:?}"),
     }

@@ -3,8 +3,9 @@
 //! [`RenderSnapshot`](koshi_renderer::snapshot::RenderSnapshot) this process
 //! paints.
 //!
-//! [`to_snapshot`] is the exact inverse of
-//! [`wire_frame`](koshi_runtime::runtime::frame::wire_frame). The session, tab,
+//! [`to_snapshot`] is the inverse of
+//! [`wire_frame`](koshi_runtime::runtime::frame::wire_frame), with the four
+//! names the answering session chose filtered on the way in. The session, tab,
 //! slot, tab-bar and client parts already hold shared types, so they copy
 //! straight back. Each pane's cells are rebuilt: every
 //! [`FrameRow`](koshi_ipc::frame::FrameRow) expands its runs back into cells,
@@ -16,11 +17,21 @@
 //! blank 80-column row arrives as one run with `count: 80` and rebuilds into 80
 //! blank cells.
 //!
+//! The session name, the active tab's name, every tab-bar entry's name and
+//! every pane title pass through
+//! [`sanitize_reported_text`](koshi_core::text::sanitize_reported_text). This
+//! process paints those four into its own terminal and puts two of them inside
+//! an `OSC 0` window-title sequence, so a control character in one of them
+//! would reach the terminal as a control character. A pane's cells are not
+//! filtered: they are the pane's screen, and every byte in them is already a
+//! grid cell.
+//!
 //! Plugin UI does not travel, so every frame read here carries the default
 //! [`PluginUiSnapshot`](koshi_renderer::snapshot::PluginUiSnapshot).
 
 use std::sync::Arc;
 
+use koshi_core::text::sanitize_reported_text;
 use koshi_ipc::frame::{
     FrameCell, FrameColor, FrameCursorShape, FramePane, FrameRow, FrameRowEnd, FrameSlot,
     FrameStyle, FrameTabMeta, FrameUnderline, FrameWindow, PaintedFrame,
@@ -38,16 +49,20 @@ mod tests;
 
 /// Turn one frame read off the event stream into the snapshot the renderer
 /// draws.
+///
+/// The session name, the active tab's name, every tab-bar entry's name and
+/// every pane title are filtered by [`sanitize_reported_text`]. A frame naming
+/// its session `"dev\u{7}"` reads back naming it `"dev"`.
 #[must_use]
 pub fn to_snapshot(frame: &PaintedFrame) -> RenderSnapshot {
     let tab = &frame.session.active_tab;
     RenderSnapshot {
         session: SessionSnapshot {
             id: frame.session.id,
-            name: frame.session.name.clone(),
+            name: sanitize_reported_text(&frame.session.name),
             active_tab: TabSnapshot {
                 id: tab.id,
-                name: tab.name.clone(),
+                name: sanitize_reported_text(&tab.name),
                 layout_solved: tab.slots.iter().map(to_slot).collect(),
                 effective_size: tab.effective_size,
                 stack_headers: tab.stack_headers.clone(),
@@ -83,22 +98,24 @@ fn to_slot(slot: &FrameSlot) -> PaneSlot {
     }
 }
 
-/// One tab-bar entry, as the renderer reads it.
+/// One tab-bar entry, as the renderer reads it. The name is filtered by
+/// [`sanitize_reported_text`].
 fn to_tab_meta(meta: &FrameTabMeta) -> TabMeta {
     TabMeta {
         id: meta.id,
-        name: meta.name.clone(),
+        name: sanitize_reported_text(&meta.name),
         index: meta.index,
         active: meta.active,
     }
 }
 
 /// One pane's content, as the renderer reads it. A pane that sent no window has
-/// no grid.
+/// no grid. The title is filtered by [`sanitize_reported_text`]; the cells are
+/// not.
 fn to_pane(pane: &FramePane) -> PaneSnapshot {
     PaneSnapshot {
         id: pane.id,
-        title: pane.title.clone(),
+        title: pane.title.as_deref().map(sanitize_reported_text),
         cursor: CursorSnapshot {
             row: pane.cursor.row,
             col: pane.cursor.col,

@@ -2,6 +2,7 @@
 //! error classification, and end-to-end exchanges over a real socket.
 
 use std::io::Cursor;
+use std::sync::Mutex;
 use std::thread;
 
 use super::*;
@@ -16,7 +17,8 @@ fn test_addr(tag: &str) -> String {
     let unique = format!("koshi-ipc-{}-{tag}", std::process::id());
     #[cfg(unix)]
     {
-        // Unix socket addresses have a bounded path length.
+        // A Unix socket path holds about 100 bytes at most; `/tmp` keeps the
+        // address short.
         std::path::Path::new("/tmp")
             .join(unique)
             .with_extension("sock")
@@ -48,6 +50,17 @@ fn frame_is_a_big_endian_length_prefix_then_the_json_bytes() {
     let mut written: Vec<u8> = Vec::new();
     write_message(&mut written, &"hi").expect("write");
     assert_eq!(written, [0, 0, 0, 4, b'"', b'h', b'i', b'"']);
+}
+
+/// The length prefix counts UTF-8 bytes: `"é"` is one character and four
+/// payload bytes.
+#[test]
+fn the_length_prefix_counts_utf8_bytes_not_characters() {
+    let mut written: Vec<u8> = Vec::new();
+    write_message(&mut written, &"é").expect("write");
+    assert_eq!(written, [0, 0, 0, 4, b'"', 0xC3, 0xA9, b'"']);
+    let read: String = read_message(&mut Cursor::new(written)).expect("read");
+    assert_eq!(read, "é");
 }
 
 #[test]
@@ -103,9 +116,49 @@ fn oversized_message_is_refused_with_nothing_written() {
     };
     // Encoding stops at the write that crosses the cap: the opening quote
     // byte was accepted, and the escape-free string body arrives as one
-    // refused write, so the size reached is 1 + the body.
+    // refused write. The size reached is 1 + the body.
     assert_eq!(len, u64::from(MAX_FRAME_LEN) + 1);
     assert_eq!(max, MAX_FRAME_LEN);
+    assert_eq!(written, Vec::<u8>::new());
+}
+
+/// `len` is the payload size the refused write reached, not the message's
+/// full size: here the first string and the punctuation around it are
+/// accepted, and the second string's body is the write that crosses the cap.
+#[test]
+fn the_refused_write_names_the_size_it_reached_not_the_whole_message() {
+    let first = "x".repeat(MAX_FRAME_LEN as usize - 10);
+    let second = "y".repeat(100);
+    let mut written: Vec<u8> = Vec::new();
+
+    let err = write_message(&mut written, &[first, second]).unwrap_err();
+    let IpcError::FrameTooLarge { len, max } = err else {
+        panic!("wrong error: {err}");
+    };
+    // `[`, `"`, the first body, `"`, `,` and `"` are MAX_FRAME_LEN - 5 bytes;
+    // the second body adds 100.
+    assert_eq!(len, u64::from(MAX_FRAME_LEN) + 95);
+    assert_eq!(max, MAX_FRAME_LEN);
+    assert_eq!(written, Vec::<u8>::new());
+}
+
+#[test]
+fn a_message_that_fails_to_encode_is_malformed_with_nothing_written() {
+    struct Unencodable;
+
+    impl Serialize for Unencodable {
+        fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+            Err(<S::Error as serde::ser::Error>::custom("cannot encode"))
+        }
+    }
+
+    let mut written: Vec<u8> = Vec::new();
+
+    let err = write_message(&mut written, &Unencodable).unwrap_err();
+    let IpcError::MalformedFrame { detail } = err else {
+        panic!("wrong error: {err}");
+    };
+    assert_eq!(detail, "cannot encode");
     assert_eq!(written, Vec::<u8>::new());
 }
 
@@ -120,13 +173,28 @@ fn message_encoding_to_exactly_the_limit_is_sent() {
     assert_eq!(written[..4], MAX_FRAME_LEN.to_be_bytes());
 }
 
+/// A prefix naming exactly the limit passes the size check; the read then
+/// runs out of bytes inside the payload.
+#[test]
+fn a_length_prefix_of_exactly_the_limit_passes_the_size_check() {
+    let mut reader = Cursor::new(MAX_FRAME_LEN.to_be_bytes().to_vec());
+
+    let err = read_message::<String>(&mut reader).unwrap_err();
+    let IpcError::Disconnected = err else {
+        panic!("wrong error: {err}");
+    };
+    assert_eq!(reader.position(), 4);
+}
+
 #[test]
 fn empty_frame_is_a_malformed_message() {
     let mut reader = Cursor::new(vec![0, 0, 0, 0]);
     let err = read_message::<String>(&mut reader).unwrap_err();
-    let IpcError::MalformedFrame { .. } = err else {
+    let IpcError::MalformedFrame { detail } = err else {
         panic!("wrong error: {err}");
     };
+    assert_eq!(detail, "EOF while parsing a value at line 1 column 0");
+    assert_eq!(reader.position(), 4);
 }
 
 #[test]
@@ -136,10 +204,42 @@ fn non_json_payload_is_malformed_and_the_whole_frame_is_consumed() {
     let mut reader = Cursor::new(bytes);
 
     let err = read_message::<String>(&mut reader).unwrap_err();
-    let IpcError::MalformedFrame { .. } = err else {
+    let IpcError::MalformedFrame { detail } = err else {
         panic!("wrong error: {err}");
     };
+    assert_eq!(detail, "expected value at line 1 column 1");
     assert_eq!(reader.position(), 7);
+}
+
+#[test]
+fn a_well_formed_payload_of_the_wrong_type_is_malformed_and_consumed() {
+    let mut bytes = 1u32.to_be_bytes().to_vec();
+    bytes.extend_from_slice(b"7");
+    let mut reader = Cursor::new(bytes);
+
+    let err = read_message::<String>(&mut reader).unwrap_err();
+    let IpcError::MalformedFrame { detail } = err else {
+        panic!("wrong error: {err}");
+    };
+    assert_eq!(
+        detail,
+        "invalid type: integer `7`, expected a string at line 1 column 1"
+    );
+    assert_eq!(reader.position(), 5);
+}
+
+#[test]
+fn bytes_after_the_json_inside_one_frame_are_malformed_and_consumed() {
+    let mut bytes = 5u32.to_be_bytes().to_vec();
+    bytes.extend_from_slice(b"\"hi\"x");
+    let mut reader = Cursor::new(bytes);
+
+    let err = read_message::<String>(&mut reader).unwrap_err();
+    let IpcError::MalformedFrame { detail } = err else {
+        panic!("wrong error: {err}");
+    };
+    assert_eq!(detail, "trailing characters at line 1 column 5");
+    assert_eq!(reader.position(), 9);
 }
 
 #[test]
@@ -168,13 +268,9 @@ fn end_of_stream_inside_a_payload_reads_as_disconnected() {
     };
 }
 
-/// Every IO kind that means the peer is gone reads as one error, so a caller
-/// reports one sentence whichever kind the operating system chose.
-///
-/// macOS answers a read from a socket whose peer has closed with `ENOTCONN`
-/// where Linux answers end of stream. Before `NotConnected` joined the set,
-/// the same peer going away read as `ipc peer disconnected` or as `Socket is
-/// not connected (os error 57)` depending on which side won the race.
+/// Every IO kind that means the peer is gone reads as one error, whichever
+/// kind the operating system chose: macOS answers a read from a socket whose
+/// peer has closed with `ENOTCONN`, where Linux answers end of stream.
 #[test]
 fn every_peer_is_gone_io_kind_reads_as_disconnected() {
     for kind in [
@@ -202,6 +298,119 @@ fn an_io_kind_that_is_not_the_peer_going_away_keeps_its_own_words() {
         panic!("wrong error: {err}");
     };
     assert_eq!(detail, "permission denied");
+}
+
+#[test]
+fn no_listener_error_is_true_for_a_refused_or_missing_address_only() {
+    for (kind, expected) in [
+        (io::ErrorKind::ConnectionRefused, true),
+        (io::ErrorKind::NotFound, true),
+        (io::ErrorKind::PermissionDenied, false),
+        (io::ErrorKind::TimedOut, false),
+        (io::ErrorKind::Other, false),
+    ] {
+        assert_eq!(
+            no_listener_error(&io::Error::new(kind, "probe")),
+            expected,
+            "{kind:?}"
+        );
+    }
+    #[cfg(unix)]
+    {
+        assert!(no_listener_error(&io::Error::from_raw_os_error(
+            libc::ENOTSOCK
+        )));
+        assert!(!no_listener_error(&io::Error::from_raw_os_error(
+            libc::EACCES
+        )));
+    }
+}
+
+#[test]
+fn waited_out_is_true_for_a_timeout_and_false_for_any_other_kind() {
+    for (kind, expected) in [
+        (io::ErrorKind::WouldBlock, true),
+        (io::ErrorKind::TimedOut, true),
+        (io::ErrorKind::Interrupted, false),
+        (io::ErrorKind::UnexpectedEof, false),
+        (io::ErrorKind::Other, false),
+    ] {
+        assert_eq!(
+            waited_out(&io::Error::new(kind, "probe")),
+            expected,
+            "{kind:?}"
+        );
+    }
+}
+
+// --- the frame shape on a stream that is not a local socket ---
+
+/// An in-memory stream half that records the last deadline it was given.
+struct Recorded {
+    input: Cursor<Vec<u8>>,
+    output: Arc<Mutex<Vec<u8>>>,
+    deadline: Arc<Mutex<Option<Instant>>>,
+}
+
+impl Read for Recorded {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.input.read(buffer)
+    }
+}
+
+impl Write for Recorded {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.output.lock().expect("output").extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Deadlined for Recorded {
+    fn set_deadline(&mut self, at: Option<Instant>) {
+        *self.deadline.lock().expect("deadline") = at;
+    }
+}
+
+#[test]
+fn frame_halves_speak_the_frame_shape_and_hand_each_deadline_to_its_half() {
+    let mut framed: Vec<u8> = Vec::new();
+    write_message(&mut framed, &hello_request(5)).expect("frame");
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let read_deadline = Arc::new(Mutex::new(None));
+    let write_deadline = Arc::new(Mutex::new(None));
+
+    let (mut reader, mut writer) = frame_halves(
+        Box::new(Recorded {
+            input: Cursor::new(framed),
+            output: Arc::clone(&output),
+            deadline: Arc::clone(&read_deadline),
+        }),
+        Box::new(Recorded {
+            input: Cursor::new(Vec::new()),
+            output: Arc::clone(&output),
+            deadline: Arc::clone(&write_deadline),
+        }),
+    );
+
+    assert_eq!(reader.recv::<IpcRequest>().expect("recv"), hello_request(5));
+    writer.send(&"hi").expect("send");
+    assert_eq!(
+        *output.lock().expect("output"),
+        [0, 0, 0, 4, b'"', b'h', b'i', b'"']
+    );
+
+    let at = Instant::now();
+    reader.set_deadline(Some(at));
+    assert_eq!(*read_deadline.lock().expect("deadline"), Some(at));
+    assert_eq!(*write_deadline.lock().expect("deadline"), None);
+    writer.set_deadline(Some(at));
+    assert_eq!(*write_deadline.lock().expect("deadline"), Some(at));
+    reader.set_deadline(None);
+    assert_eq!(*read_deadline.lock().expect("deadline"), None);
 }
 
 // --- address mapping ---
@@ -413,6 +622,97 @@ fn one_listener_serves_two_callers_in_turn() {
     assert_eq!(server.join().expect("server thread"), vec![10, 20]);
 }
 
+#[test]
+fn accept_until_shutdown_serves_each_caller_and_drops_the_wake_up_connection() {
+    let addr = test_addr("acceptloop");
+    let listener = Listener::bind(&addr).expect("bind");
+    let shutting_down = Arc::new(AtomicBool::new(false));
+    let (served_tx, served_rx) = std::sync::mpsc::channel();
+
+    let server = {
+        let shutting_down = Arc::clone(&shutting_down);
+        thread::spawn(move || {
+            let mut served = 0;
+            accept_until_shutdown(
+                &listener,
+                &shutting_down,
+                std::time::Duration::from_millis(1),
+                |connection| {
+                    served += 1;
+                    served_tx.send(()).expect("report the served connection");
+                    drop(connection);
+                },
+            );
+            served
+        })
+    };
+
+    for _ in 0..2 {
+        let _caller = Connection::connect(&addr).expect("connect");
+        served_rx.recv().expect("the connection was served");
+    }
+    shutting_down.store(true, Ordering::SeqCst);
+    let _wake_up = Connection::connect(&addr).expect("connect to wake the loop");
+
+    assert_eq!(server.join().expect("server thread"), 2);
+}
+
+#[test]
+fn a_read_after_the_peer_hangs_up_reports_disconnected() {
+    let addr = test_addr("peergone");
+    let listener = Listener::bind(&addr).expect("bind");
+
+    let server = thread::spawn(move || {
+        drop(listener.accept().expect("accept"));
+    });
+
+    let mut caller = Connection::connect(&addr).expect("connect");
+    server.join().expect("server thread");
+
+    let err = caller.recv::<IpcResponse>().unwrap_err();
+    let IpcError::Disconnected = err else {
+        panic!("wrong error: {err}");
+    };
+}
+
+#[cfg(unix)]
+#[test]
+fn binding_an_address_a_listener_already_holds_is_refused() {
+    let addr = test_addr("bindtwice");
+    let _first = Listener::bind(&addr).expect("bind");
+
+    let err = Listener::bind(&addr).unwrap_err();
+    let IpcError::Transport { detail } = err else {
+        panic!("wrong error: {err}");
+    };
+    assert_eq!(
+        detail,
+        io::Error::from_raw_os_error(libc::EADDRINUSE).to_string()
+    );
+}
+
+/// A Unix socket path longer than `sun_path` holds is refused before any
+/// bind, with the socket library's own words.
+#[cfg(unix)]
+#[test]
+fn binding_a_path_too_long_for_a_unix_socket_is_refused() {
+    let addr = format!(
+        "/tmp/koshi-ipc-{}-{}.sock",
+        std::process::id(),
+        "x".repeat(200)
+    );
+
+    let err = Listener::bind(&addr).unwrap_err();
+    let IpcError::Transport { detail } = err else {
+        panic!("wrong error: {err}");
+    };
+    assert_eq!(
+        detail,
+        "local socket name length exceeds capacity of sun_path of sockaddr_un"
+    );
+    assert!(!std::path::Path::new(&addr).exists());
+}
+
 // --- closing one connection's read direction ---
 
 #[test]
@@ -433,6 +733,48 @@ fn a_closed_read_direction_reports_end_of_stream_on_the_next_read() {
     let mut caller = Connection::connect(&addr).expect("connect");
     caller.send(&hello_request(1)).expect("client send");
     sent_tx.send(()).expect("the closer is told");
+
+    let err = server.join().expect("server thread").unwrap_err();
+    let IpcError::Disconnected = err else {
+        panic!("wrong error: {err}");
+    };
+}
+
+#[test]
+fn a_second_read_closer_closes_the_same_read_direction() {
+    let addr = test_addr("readclose-second");
+    let listener = Listener::bind(&addr).expect("bind");
+
+    let server = thread::spawn(move || {
+        let mut conn = listener.accept().expect("accept");
+        let _first = conn.read_closer().expect("take the first closer");
+        let second = conn.read_closer().expect("take the second closer");
+        second.close();
+        conn.recv::<IpcRequest>()
+    });
+
+    let _caller = Connection::connect(&addr).expect("connect");
+
+    let err = server.join().expect("server thread").unwrap_err();
+    let IpcError::Disconnected = err else {
+        panic!("wrong error: {err}");
+    };
+}
+
+#[test]
+fn closing_the_read_direction_twice_changes_nothing() {
+    let addr = test_addr("readclose-twice");
+    let listener = Listener::bind(&addr).expect("bind");
+
+    let server = thread::spawn(move || {
+        let mut conn = listener.accept().expect("accept");
+        let closer = conn.read_closer().expect("take the read closer");
+        closer.close();
+        closer.close();
+        conn.recv::<IpcRequest>()
+    });
+
+    let _caller = Connection::connect(&addr).expect("connect");
 
     let err = server.join().expect("server thread").unwrap_err();
     let IpcError::Disconnected = err else {
@@ -489,7 +831,7 @@ fn a_closed_read_direction_leaves_the_writing_direction_open() {
     server.join().expect("server thread");
 }
 
-/// Unix only: a Windows named pipe has no half-close, so a read already waiting
+/// Unix only. A Windows named pipe has no half-close: a read already waiting
 /// on the pipe ends when its peer sends the next frame or hangs up.
 #[cfg(unix)]
 #[test]
@@ -562,9 +904,8 @@ fn dropping_the_listener_unlinks_the_socket_file() {
     assert!(!std::path::Path::new(&addr).exists());
 }
 
-/// The raw halves carry somebody else's frames through, so nothing of koshi's
-/// own frame shape may be written around the bytes: five bytes handed in
-/// arrive as those same five bytes, not as a length prefix and a payload.
+/// The raw halves carry bytes with no frame shape around them: five bytes
+/// handed in arrive as those same five bytes.
 #[test]
 fn raw_halves_carry_the_bytes_as_given_with_no_frame_around_them() {
     let addr = test_addr("rawsplit");

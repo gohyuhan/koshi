@@ -88,9 +88,9 @@ fn a_peer_that_never_writes_ends_the_pump_at_its_deadline_with_nothing_copied() 
     assert_eq!(pump.join().expect("the pump thread ends"), 0);
 }
 
-/// A generous ceiling for the tests below. None of them assert on it: each one
-/// ends on the stream event it is about, and the deadline only stops a pump
-/// that would otherwise never end.
+/// A deadline far past the end of every scripted test below. Each test ends
+/// on the stream event it is about, long before this deadline; none asserts
+/// on it.
 const NO_DEADLINE_REACHED: Duration = Duration::from_secs(60);
 
 /// A slice short enough that the scripted tests below finish quickly.
@@ -124,12 +124,13 @@ impl Read for ScriptedReader {
     }
 }
 
-/// A writer that keeps every byte it takes, and fails once it has taken
-/// `fail_after` writes.
+/// A writer that keeps every byte it takes, fails once it has taken
+/// `fail_after` writes, and fails every flush when `fail_flush` is set.
 struct CountedWriter {
     taken: Arc<Mutex<Vec<u8>>>,
     writes: usize,
     fail_after: usize,
+    fail_flush: bool,
 }
 
 impl Write for CountedWriter {
@@ -143,6 +144,9 @@ impl Write for CountedWriter {
     }
 
     fn flush(&mut self) -> io::Result<()> {
+        if self.fail_flush {
+            return Err(io::Error::new(io::ErrorKind::BrokenPipe, "flush refused"));
+        }
         Ok(())
     }
 }
@@ -161,6 +165,7 @@ fn failing_writer(fail_after: usize) -> (CountedWriter, Arc<Mutex<Vec<u8>>>) {
             taken: Arc::clone(&taken),
             writes: 0,
             fail_after,
+            fail_flush: false,
         },
         taken,
     )
@@ -239,4 +244,129 @@ fn a_write_failure_ends_the_pump_and_the_failed_bytes_are_not_counted() {
     // Only the first write's bytes are counted; the refused write's are not.
     assert_eq!(copied, 5);
     assert_eq!(&*arrived.lock().unwrap(), b"first");
+}
+
+#[test]
+fn a_flush_failure_ends_the_pump_and_the_flushed_bytes_are_not_counted() {
+    let reader = ScriptedReader::new(vec![
+        Ok(b"written".to_vec()),
+        // The pump must never reach this step.
+        Ok(b"never".to_vec()),
+    ]);
+    let (mut writer, arrived) = collecting_writer();
+    writer.fail_flush = true;
+
+    let copied = pump_throttled(
+        reader,
+        writer,
+        SLICE_BYTES,
+        SHORT_SLICE,
+        Instant::now() + NO_DEADLINE_REACHED,
+    )
+    .join()
+    .expect("the pump thread ends");
+
+    // The write succeeded before the flush failed: the bytes reached the
+    // sink, and the count excludes them.
+    assert_eq!(copied, 0);
+    assert_eq!(&*arrived.lock().unwrap(), b"written");
+}
+
+#[test]
+fn a_deadline_already_passed_ends_the_pump_before_the_first_read() {
+    let reader = ScriptedReader::new(vec![Ok(b"unread".to_vec())]);
+    let (writer, arrived) = collecting_writer();
+
+    let copied = pump_throttled(
+        reader,
+        writer,
+        SLICE_BYTES,
+        SHORT_SLICE,
+        Instant::now() - Duration::from_secs(1),
+    )
+    .join()
+    .expect("the pump thread ends");
+
+    assert_eq!(copied, 0);
+    assert_eq!(&*arrived.lock().unwrap(), b"");
+}
+
+#[test]
+fn a_zero_byte_slice_ends_the_pump_at_once_with_nothing_copied() {
+    let source: &'static [u8] = b"never crosses";
+    let (writer, arrived) = collecting_writer();
+
+    let copied = pump_throttled(
+        source,
+        writer,
+        0,
+        SHORT_SLICE,
+        Instant::now() + NO_DEADLINE_REACHED,
+    )
+    .join()
+    .expect("the pump thread ends");
+
+    assert_eq!(copied, 0);
+    assert_eq!(&*arrived.lock().unwrap(), b"");
+}
+
+#[test]
+fn an_empty_source_ends_the_pump_with_nothing_copied() {
+    let (writer, arrived) = collecting_writer();
+
+    let copied = pump_throttled(
+        ScriptedReader::new(Vec::new()),
+        writer,
+        SLICE_BYTES,
+        SHORT_SLICE,
+        Instant::now() + NO_DEADLINE_REACHED,
+    )
+    .join()
+    .expect("the pump thread ends");
+
+    assert_eq!(copied, 0);
+    assert_eq!(&*arrived.lock().unwrap(), b"");
+}
+
+#[test]
+fn a_read_that_fills_the_whole_buffer_is_forwarded_whole() {
+    let chunk = vec![9_u8; SLICE_BYTES];
+    let reader = ScriptedReader::new(vec![Ok(chunk.clone())]);
+    let (writer, arrived) = collecting_writer();
+
+    let copied = pump_throttled(
+        reader,
+        writer,
+        SLICE_BYTES,
+        SHORT_SLICE,
+        Instant::now() + NO_DEADLINE_REACHED,
+    )
+    .join()
+    .expect("the pump thread ends");
+
+    assert_eq!(copied, SLICE_BYTES as u64);
+    assert_eq!(*arrived.lock().unwrap(), chunk);
+}
+
+#[test]
+fn only_timeouts_until_the_deadline_end_the_pump_with_nothing_copied() {
+    let reader = ScriptedReader::new(
+        std::iter::repeat_with(|| Err(io::Error::from(io::ErrorKind::WouldBlock)))
+            .take(1000)
+            .collect(),
+    );
+    let (writer, arrived) = collecting_writer();
+
+    let copied = pump_throttled(
+        reader,
+        writer,
+        SLICE_BYTES,
+        SHORT_SLICE,
+        Instant::now() + Duration::from_millis(20),
+    )
+    .join()
+    .expect("the pump thread ends");
+
+    assert_eq!(copied, 0);
+    assert_eq!(&*arrived.lock().unwrap(), b"");
 }

@@ -1,18 +1,17 @@
 //! CLI binary error and its exit-code mapping.
 //!
-//! [`CliError`](crate::error::CliError) enumerates the failure classes the
-//! `koshi` binary terminates on. The `From<&CliError> for CliExitCode` impl is
-//! the single error-to-exit-code table: usage → 2, session-not-found → 3,
-//! IPC-unavailable → 4, runtime or rejected command → 1. Success is exit 0.
+//! [`CliError`] enumerates the failure classes the
+//! `koshi` binary terminates on. The `From<&CliError> for CliExitCode` impl
+//! below is the single error-to-exit-code table. Success is exit 0.
 
 use koshi_core::command::CliExitCode;
 use koshi_core::error::{DomainCategory, DomainError, Severity};
 use koshi_core::event::RejectReason;
 use thiserror::Error;
 
-/// A failure the `koshi` binary terminates on: a usage problem, an unreachable
-/// runtime endpoint, or a runtime/action error. Each reports through a
-/// [`CliExitCode`] and exits without affecting session state.
+/// A failure the `koshi` binary terminates on. Each variant maps to the
+/// [`CliExitCode`] the process exits with through the `From<&CliError>` impl
+/// below.
 #[derive(Debug, Error)]
 pub enum CliError {
     /// The subcommand is not recognized.
@@ -64,8 +63,11 @@ pub enum CliError {
     Update { detail: String },
 }
 
-/// The stderr line for a rejected command: the rejection itself, then the
-/// session's help hint on its own line when one came back.
+/// The message for a rejected command: `reason`, then `help` on the next line
+/// indented by two spaces when the session sent one.
+///
+/// [`RejectReason::Unauthorized`] with `Some("attach first")` gives
+/// `"command not permitted\n  attach first"`.
 fn rejection_message(reason: RejectReason, help: Option<&str>) -> String {
     match help {
         Some(help) => format!("{reason}\n  {help}"),
@@ -98,9 +100,10 @@ impl DomainError for CliError {
 }
 
 /// The single error-to-exit-code table: every [`CliError`] class maps to the
-/// deterministic [`CliExitCode`] the binary reports to the OS. Usage errors
-/// exit 2, an unreachable IPC endpoint exits 4, and a runtime or action error
-/// exits 1.
+/// [`CliExitCode`] the binary reports to the OS. A usage or config problem
+/// exits 2, a session that is not running exits 3, an unreachable IPC endpoint
+/// exits 4, and a runtime error, a rejected command, or a failed update exits
+/// 1.
 impl From<&CliError> for CliExitCode {
     fn from(err: &CliError) -> Self {
         match err {

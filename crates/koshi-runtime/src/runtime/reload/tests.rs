@@ -16,8 +16,6 @@ use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, SessionId};
 use koshi_test_support::fake_pty::FakePtyBackend;
 
-use crate::placeholder::{NullSnapshotProvider, NullStorage};
-
 fn runtime() -> (Server, ClientId) {
     let mut runtime = runtime_with_no_sessions();
     let client = runtime
@@ -33,13 +31,7 @@ fn runtime() -> (Server, ClientId) {
 /// A runtime with no bootstrapped session — zero live clients to notify.
 fn runtime_with_no_sessions() -> Server {
     let (tx, rx) = mpsc::channel();
-    Server::new(
-        Arc::new(FakePtyBackend::new()),
-        Arc::new(NullSnapshotProvider),
-        Arc::new(NullStorage),
-        rx,
-        tx,
-    )
+    Server::new(Arc::new(FakePtyBackend::new()), rx, tx)
 }
 
 fn only_session_id(runtime: &Server) -> SessionId {
@@ -123,19 +115,52 @@ fn app_config_reload_drops_theme_and_keybinding_sections() {
         ..PartialKoshiConfig::default()
     });
 
-    // Both foreign sections were dropped: each side's effective config is
-    // exactly what it was, palette included.
+    // Both foreign sections were dropped: the stored layer holds neither, and
+    // each side's effective config is exactly what it was, palette included.
+    assert_eq!(runtime.app_layer.theme, None);
+    assert_eq!(runtime.app_layer.keybindings, None);
     assert_eq!(runtime.config, ServerConfig::default());
     assert_eq!(runtime.client_config, ClientConfig::default());
 }
 
 #[test]
+fn a_reload_notifies_every_live_session_in_session_id_order() {
+    let mut runtime = runtime_with_no_sessions();
+    let first = SessionId::new();
+    let second = SessionId::new();
+    for (session_id, name) in [(first, "alpha"), (second, "beta")] {
+        runtime
+            .bootstrap_local_named(
+                session_id,
+                name.to_owned(),
+                Size { cols: 80, rows: 24 },
+                SystemTime::UNIX_EPOCH,
+            )
+            .expect("bootstrap");
+    }
+
+    let events = runtime.reload_app_config(PartialKoshiConfig::default());
+
+    let mut ordered = [first, second];
+    ordered.sort_unstable();
+    assert_eq!(
+        events,
+        vec![
+            Event::ConfigReloaded(ConfigReloaded {
+                session_id: ordered[0],
+            }),
+            Event::ConfigReloaded(ConfigReloaded {
+                session_id: ordered[1],
+            }),
+        ]
+    );
+}
+
+#[test]
 fn app_config_reload_lands_the_session_owned_sections_on_the_server() {
-    // The other reload tests all assert the server config is *unchanged*, which
-    // stays true even if the fold never runs. This one pins the opposite
-    // direction: `koshi.kdl`'s session-owned sections must actually reach the
-    // session, or every pane would spawn the stock shell at the stock size
-    // while the suite stayed green.
+    // The other reload tests assert the server config is *unchanged*, which
+    // stays true even when the fold never runs. This one pins the opposite
+    // direction: `koshi.kdl`'s session-owned sections reach the session config.
     let (mut runtime, _client) = runtime();
     assert_eq!(runtime.config.pane.min_cols, 2, "the built-in floor");
     assert_eq!(runtime.config.terminal.term, "xterm-256color");
@@ -168,8 +193,8 @@ fn app_config_reload_lands_the_session_owned_sections_on_the_server() {
         Some("/bin/fish".to_owned())
     );
 
-    // The same file's viewer-owned section went to the transitional viewer
-    // config the session still folds.
+    // The same file's viewer-owned section went to the viewer config the
+    // session folds.
     assert!(!runtime.client_config.scrollback.scroll_on_input);
 }
 

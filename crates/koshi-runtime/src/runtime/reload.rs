@@ -4,9 +4,9 @@
 //! Config lives in separate files in the koshi config directory —
 //! `koshi.kdl` (app settings), a `themes/<name>.kdl` color theme,
 //! `keybinding.kdl` (key bindings) — and each file is read on its own.
-//! `koshi.kdl` is the only one carrying session-owned settings, so it is the
-//! only one the session stores; each viewer reads and validates the colors and
-//! the bindings for itself. A file arrives here already deserialized into its
+//! `koshi.kdl` is the only one carrying session-owned settings, and the only
+//! one the session stores. Each viewer reads and validates the colors and the
+//! bindings for itself. A file arrives here already deserialized into its
 //! partial config layer; discovering, reading, and deserializing the files is
 //! the config loader's job.
 //!
@@ -21,22 +21,24 @@ use koshi_core::ids::SessionId;
 use crate::server::Server;
 
 impl Server {
-    /// Swap in a reloaded `koshi.kdl`: replace the app-settings layer and
-    /// recompute both effective configs, so the next pane spawns with the new
-    /// shell, size floor, and scrollback limits.
+    /// Swap in a reloaded `koshi.kdl`: replace the app-settings layer with
+    /// `candidate` and recompute both effective configs from it, the session's
+    /// own and the viewer copy. `koshi.kdl` carries sections both sides own.
+    /// The next pane spawns with the new shell, size floor, and scrollback
+    /// limits.
     ///
-    /// The candidate's theme and keybinding sections are dropped; the colors
-    /// come from the theme file and the bindings from `keybinding.kdl`.
-    /// Parsing `koshi.kdl` cannot fill either section, so the drop bites only
-    /// on a hand-built candidate. The theme `koshi.kdl` *names* is resolved by
-    /// the config loader, which reads that file and hands it to the viewer.
+    /// `candidate.theme` and `candidate.keybindings` are set to `None` before
+    /// the swap: the colors come from the theme file and the bindings from
+    /// `keybinding.kdl`. Parsing `koshi.kdl` fills neither section; only a
+    /// hand-built candidate carries one. The config loader resolves the theme
+    /// `koshi.kdl` names and hands that file to the viewer.
     ///
-    /// Returns one [`Event::ConfigReloaded`] per live session.
+    /// Returns one [`Event::ConfigReloaded`] per live session, in session-id
+    /// order.
     pub fn reload_app_config(&mut self, mut candidate: PartialKoshiConfig) -> Vec<Event> {
         candidate.theme = None;
         candidate.keybindings = None;
         self.app_layer = candidate;
-        // `koshi.kdl` carries sections both sides own, so both are recomputed.
         self.config = fold_server(&self.app_layer);
         self.client_config = fold_client(&self.app_layer);
         self.config_reloaded_events()

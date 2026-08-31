@@ -18,6 +18,7 @@ use koshi_core::event::{EventClass, InputModeChanged, MouseSelectChanged, Subscr
 use koshi_core::geometry::Direction;
 use koshi_core::ids::{PaneId, SessionId, SubscriberId};
 use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags};
+use koshi_core::lock::LockMode;
 use koshi_core::mouse::MouseAnswer;
 use koshi_core::resolve::ActionArgs;
 use koshi_layout::mode::LayoutMode;
@@ -28,14 +29,17 @@ use koshi_renderer::snapshot::{
 
 use super::*;
 
-fn new_client() -> (Client, mpsc::SyncSender<Delivery>) {
+/// The terminal size every fixture in this crate's tests is built at.
+pub(crate) const VIEWPORT: Size = Size { cols: 80, rows: 24 };
+
+/// A viewer on the built-in defaults, and the sender of its subscription.
+///
+/// Every test module in this crate builds its clients from here. An attached
+/// client's frames arrive over its connection instead, so a test standing in
+/// for one drops the sender.
+pub(crate) fn new_client() -> (Client, mpsc::SyncSender<Delivery>) {
     let (tx, rx) = mpsc::sync_channel(8);
-    let client = Client::new(
-        ClientId::new(),
-        Size { cols: 80, rows: 24 },
-        rx,
-        TerminalCleanupGuard::new(),
-    );
+    let client = Client::new(ClientId::new(), VIEWPORT, rx, TerminalCleanupGuard::new());
     (client, tx)
 }
 
@@ -88,8 +92,13 @@ fn resync(
     mouse_select: bool,
     dropped_count: u64,
 ) -> Delivery {
+    resync_from(frame(client_id, lock_mode, mouse_select), dropped_count)
+}
+
+/// The same, resuming from `snapshot`, whose active tab the caller reads.
+fn resync_from(snapshot: Box<RenderSnapshot>, dropped_count: u64) -> Delivery {
     Delivery::Snapshot {
-        snapshot: frame(client_id, lock_mode, mouse_select),
+        snapshot,
         lagged: SubscriberLagged {
             subscriber_id: SubscriberId::new(),
             dropped_count,
@@ -134,10 +143,9 @@ fn binds_ctrl_y() -> PartialKeybindingsConfig {
 }
 
 #[test]
-fn a_new_client_holds_its_id_viewport_and_guard() {
+fn a_new_client_holds_the_viewport_it_was_built_at() {
     let (client, _tx) = new_client();
-    assert_eq!(client.viewport(), Size { cols: 80, rows: 24 });
-    let _ = client.cleanup_guard();
+    assert_eq!(client.viewport(), VIEWPORT);
 }
 
 #[test]
@@ -154,18 +162,6 @@ fn set_viewport_records_the_new_size() {
             rows: 40,
         }
     );
-}
-
-#[test]
-fn pane_area_support_is_recorded_for_the_attached_session() {
-    let (mut client, _tx) = new_client();
-    assert!(client.pane_area_supported);
-
-    client.set_pane_area_supported(false);
-    assert!(!client.pane_area_supported);
-
-    client.set_pane_area_supported(true);
-    assert!(client.pane_area_supported);
 }
 
 #[test]
@@ -278,7 +274,7 @@ fn loading_no_files_at_all_leaves_the_built_in_settings() {
 
     let report = client.load_startup_config(None, None, None);
 
-    assert!(report.is_none(), "no keybinding file means no report");
+    assert_eq!(report, None, "no keybinding file means no report");
     assert_eq!(*client.theme(), before);
     assert_eq!(*client.config(), ClientConfig::default());
 }
@@ -333,7 +329,13 @@ fn an_applied_keybinding_file_swaps_the_keymap_and_drops_an_open_sequence() {
         KeyChord::new(ModFlags::CTRL, Key::Char('p')),
         std::time::Instant::now(),
     );
-    assert!(client.pending_sequence().is_some());
+    assert_eq!(
+        client.pending_sequence(),
+        Some(&KeySequence::from(KeyChord::new(
+            ModFlags::CTRL,
+            Key::Char('p')
+        )))
+    );
 
     let report = client.load_startup_config(None, None, Some(binds_ctrl_y()));
 
@@ -351,8 +353,9 @@ fn an_applied_keybinding_file_swaps_the_keymap_and_drops_an_open_sequence() {
             args: ActionArgs::None,
         })
     );
-    assert!(
-        client.pending_sequence().is_none(),
+    assert_eq!(
+        client.pending_sequence(),
+        None,
         "held chords reached for bindings the new keymap may not have"
     );
 }
@@ -588,11 +591,16 @@ fn a_second_keybinding_file_fully_replaces_the_firsts_bindings() {
     let ctrl_y = KeySequence::from(KeyChord::new(ModFlags::CTRL, Key::Char('y')));
 
     client.load_startup_config(None, None, Some(binds_ctrl_y()));
-    assert!(client
-        .keymap
-        .match_sequence(LockMode::Normal, &ctrl_y)
-        .exact
-        .is_some());
+    assert_eq!(
+        client
+            .keymap
+            .match_sequence(LockMode::Normal, &ctrl_y)
+            .exact,
+        Some(BoundAction {
+            action: ActionRef::core("new-tab").expect("valid core action name"),
+            args: ActionArgs::None,
+        })
+    );
 
     client.load_startup_config(None, None, Some(PartialKeybindingsConfig::default()));
 
@@ -627,7 +635,7 @@ fn a_second_startup_load_with_no_keybinding_file_resets_the_keymap_to_the_built_
 
     let report = client.load_startup_config(None, None, None);
 
-    assert!(report.is_none(), "no keybinding file means no report");
+    assert_eq!(report, None, "no keybinding file means no report");
     assert_eq!(
         client
             .keymap
@@ -712,16 +720,18 @@ fn a_low_chord_depth_drops_every_binding_longer_than_it() {
 fn a_keybinding_file_removes_a_default_binding_only_in_the_mode_that_declares_it() {
     let (mut client, _tx) = new_client();
     let quit = KeySequence::from(KeyChord::new(ModFlags::CTRL, Key::Char('q')));
-    assert!(client
-        .keymap
-        .match_sequence(LockMode::Normal, &quit)
-        .exact
-        .is_some());
-    assert!(client
-        .keymap
-        .match_sequence(LockMode::Locked, &quit)
-        .exact
-        .is_some());
+    let quit_action = BoundAction {
+        action: ActionRef::core("quit").expect("valid core action name"),
+        args: ActionArgs::None,
+    };
+    assert_eq!(
+        client.keymap.match_sequence(LockMode::Normal, &quit).exact,
+        Some(quit_action.clone())
+    );
+    assert_eq!(
+        client.keymap.match_sequence(LockMode::Locked, &quit).exact,
+        Some(quit_action.clone())
+    );
 
     let mut removed = BTreeSet::new();
     removed.insert(quit.clone());
@@ -750,39 +760,38 @@ fn a_keybinding_file_removes_a_default_binding_only_in_the_mode_that_declares_it
         client.keymap.match_sequence(LockMode::Normal, &quit),
         KeyMatch::default()
     );
-    assert!(client.keymap_hints().removed.contains(&quit));
+    assert!(client
+        .frame_hints_for(client.lock_mode(), false)
+        .removed
+        .contains(&quit));
     // Locked mode's own quit binding is untouched: removal is scoped to the
     // mode that declares it.
-    assert!(client
-        .keymap
-        .match_sequence(LockMode::Locked, &quit)
-        .exact
-        .is_some());
+    assert_eq!(
+        client.keymap.match_sequence(LockMode::Locked, &quit).exact,
+        Some(quit_action)
+    );
+}
+
+/// How many entries in `hints` carry `label`.
+fn label_count(hints: &KeymapHints, label: &str) -> usize {
+    hints
+        .entries
+        .iter()
+        .filter(|entry| entry.label == label)
+        .count()
 }
 
 #[test]
 fn frame_hints_flip_the_mouse_select_label_only_while_it_is_on() {
     let (client, _tx) = new_client();
 
-    let off = client.frame_hints(false);
-    let on = client.frame_hints(true);
+    let off = client.frame_hints_for(client.lock_mode(), false);
+    let on = client.frame_hints_for(client.lock_mode(), true);
 
-    assert!(off
-        .entries
-        .iter()
-        .any(|entry| entry.label == MOUSE_SELECT_HINT));
-    assert!(!off
-        .entries
-        .iter()
-        .any(|entry| entry.label == MOUSE_UNSELECT_HINT));
-    assert!(on
-        .entries
-        .iter()
-        .any(|entry| entry.label == MOUSE_UNSELECT_HINT));
-    assert!(!on
-        .entries
-        .iter()
-        .any(|entry| entry.label == MOUSE_SELECT_HINT));
+    assert_eq!(label_count(&off, MOUSE_SELECT_HINT), 1);
+    assert_eq!(label_count(&off, MOUSE_UNSELECT_HINT), 0);
+    assert_eq!(label_count(&on, MOUSE_UNSELECT_HINT), 1);
+    assert_eq!(label_count(&on, MOUSE_SELECT_HINT), 0);
     // Only that one entry changes: everything else is the same list.
     assert_eq!(off.entries.len(), on.entries.len());
     assert_eq!(off.removed, on.removed);
@@ -792,9 +801,9 @@ fn frame_hints_flip_the_mouse_select_label_only_while_it_is_on() {
 #[test]
 fn frame_hints_follow_the_viewers_own_mode() {
     let (mut client, _tx) = new_client();
-    let normal = client.frame_hints(false);
+    let normal = client.frame_hints_for(client.lock_mode(), false);
     client.set_lock_mode(LockMode::Locked);
-    let locked = client.frame_hints(false);
+    let locked = client.frame_hints_for(client.lock_mode(), false);
 
     assert_eq!(normal.entries.len(), 22, "the shipped normal-mode bindings");
     // The reserved unlock (pinned) plus the quit and mouse-select chords.
@@ -864,7 +873,7 @@ fn a_lock_report_for_this_viewer_moves_its_own_mode_both_ways() {
 
     tx.send(Delivery::Event(Event::InputModeChanged(InputModeChanged {
         client_id: client.id(),
-        mode: InputMode::Locked,
+        mode: LockMode::Locked,
     })))
     .expect("the viewer's queue has room");
     assert_eq!(client.apply_events(), 1);
@@ -872,7 +881,7 @@ fn a_lock_report_for_this_viewer_moves_its_own_mode_both_ways() {
 
     tx.send(Delivery::Event(Event::InputModeChanged(InputModeChanged {
         client_id: client.id(),
-        mode: InputMode::Normal,
+        mode: LockMode::Normal,
     })))
     .expect("the viewer's queue has room");
     assert_eq!(client.apply_events(), 1);
@@ -887,7 +896,7 @@ fn a_lock_report_for_another_viewer_is_ignored() {
 
     tx.send(Delivery::Event(Event::InputModeChanged(InputModeChanged {
         client_id: ClientId::new(),
-        mode: InputMode::Locked,
+        mode: LockMode::Locked,
     })))
     .expect("the viewer's queue has room");
 
@@ -1054,13 +1063,48 @@ fn an_event_queued_after_a_resync_frame_applies_on_top_of_it() {
         .expect("the viewer's queue has room");
     tx.send(Delivery::Event(Event::InputModeChanged(InputModeChanged {
         client_id: client.id(),
-        mode: InputMode::Normal,
+        mode: LockMode::Normal,
     })))
     .expect("the viewer's queue has room");
 
     assert_eq!(client.apply_events(), 2, "the frame and the event");
     assert_eq!(client.lock_mode(), LockMode::Normal, "the event won");
     assert!(client.mouse_select(), "and the frame's own value stands");
+}
+
+#[test]
+fn a_resync_frame_throws_away_a_tab_strip_peek_made_on_another_tab() {
+    // The viewer learns a tab switch from the frames it sees, and a resync
+    // frame is one of them.
+    let (mut client, tx) = new_client();
+    let peeked = TabId::new();
+    client.tabline_peek = Some((peeked, 3));
+    tx.send(resync_from(frame(client.id(), LockMode::Normal, false), 4))
+        .expect("the viewer's queue has room");
+
+    assert_eq!(client.apply_events(), 1);
+
+    assert_eq!(client.tabline_peek, None);
+    assert_eq!(
+        client.chrome(peeked).tabline_offset,
+        None,
+        "switching back to the peeked tab starts the strip at its own first tab"
+    );
+}
+
+#[test]
+fn a_resync_frame_keeps_a_tab_strip_peek_made_on_the_tab_it_names() {
+    let (mut client, tx) = new_client();
+    let snapshot = frame(client.id(), LockMode::Normal, false);
+    let active = snapshot.client.active_tab;
+    client.tabline_peek = Some((active, 3));
+    tx.send(resync_from(snapshot, 4))
+        .expect("the viewer's queue has room");
+
+    assert_eq!(client.apply_events(), 1);
+
+    assert_eq!(client.tabline_peek, Some((active, 3)));
+    assert_eq!(client.chrome(active).tabline_offset, Some(3));
 }
 
 #[test]
@@ -1093,4 +1137,23 @@ fn taking_a_new_client_id_moves_the_id_the_viewers_commands_carry() {
     client.set_id(minted);
 
     assert_eq!(client.id(), minted);
+}
+
+#[test]
+fn terminal_bytes_are_counted_and_move_nothing_in_the_viewer() {
+    // Bytes a pane aimed at a terminal belong to the attached viewer that owns
+    // that terminal, and reach it over its own connection.
+    let (mut client, tx) = new_client();
+    client.set_lock_mode(LockMode::Locked);
+    let id = client.id();
+    let viewport = client.viewport();
+
+    tx.send(Delivery::HostWrite(vec![0x1b, b']', b'5', b'2']))
+        .expect("the viewer's queue has room");
+
+    assert_eq!(client.apply_events(), 1, "the write was seen");
+    assert_eq!(client.lock_mode(), LockMode::Locked);
+    assert!(!client.mouse_select());
+    assert_eq!(client.viewport(), viewport);
+    assert_eq!(client.id(), id);
 }

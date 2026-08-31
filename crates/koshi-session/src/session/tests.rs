@@ -8,13 +8,12 @@
 use std::time::SystemTime;
 
 use koshi_core::constant::MAX_TAB_FOCUS_MRU;
-use koshi_core::event::Event;
+use koshi_core::event::{Event, PaneClosing, PaneRemoved, TabClosed};
 use koshi_core::geometry::{Size, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
-use koshi_layout::tree::{LayoutChild, LayoutNode, SplitNode};
+use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pane::pane::lifecycle::{PaneLifecycle, PaneLifecycleEvent};
 use koshi_pane::pane::state::PaneRecord;
-use koshi_pane::registry::PaneRegistry;
 
 use super::lifecycle::{SessionLifecycle, TabLifecycle};
 use super::pane_ops::NewPaneSpec;
@@ -38,8 +37,8 @@ fn new_tab(session: &mut Session, name: String, created_at: SystemTime) -> Vec<E
     .1
 }
 
-/// A client viewing `active_tab`, with a fixed viewport and `UNIX_EPOCH` attach
-/// time so tests stay deterministic.
+/// A client viewing `active_tab`, with an 80x24 viewport, a fresh session id of
+/// its own, and `UNIX_EPOCH` as its attach time.
 fn client_viewing(active_tab: TabId) -> Client {
     Client::new(
         ClientId::new(),
@@ -78,10 +77,8 @@ fn a_new_session_starts_empty() {
     assert_eq!(session.id, id);
     assert_eq!(session.name, "main");
     assert!(session.tabs.is_empty());
-    assert!(session.plugin_runtime_ref.is_none());
-    // The registries are part of the public shape, reachable as fields.
-    let _: &PaneRegistry = &session.panes;
-    let _: &ClientRegistry = &session.clients;
+    assert!(session.panes.is_empty());
+    assert!(session.clients.is_empty());
 }
 
 #[test]
@@ -146,11 +143,10 @@ fn focus_mru_is_capped_dropping_the_oldest() {
         tab.record_focus_mru(pane);
     }
 
-    let mru = tab.focus_mru();
-    assert_eq!(mru.len(), cap);
-    // Newest sits at the front; the first-recorded pane is evicted.
-    assert_eq!(mru[0], *panes.last().unwrap());
-    assert!(!mru.contains(&panes[0]));
+    // Newest first, with the first-recorded pane evicted: every other pane keeps
+    // its place in recording order.
+    let surviving_newest_first: Vec<PaneId> = panes[1..].iter().rev().copied().collect();
+    assert_eq!(tab.focus_mru().to_vec(), surviving_newest_first);
 }
 
 #[test]
@@ -165,37 +161,42 @@ fn focus_mru_at_exactly_the_cap_evicts_nothing() {
         tab.record_focus_mru(pane);
     }
 
-    let mru = tab.focus_mru();
-    assert_eq!(mru.len(), cap);
-    for pane in &panes {
-        assert!(mru.contains(pane));
-    }
+    let newest_first: Vec<PaneId> = panes.iter().rev().copied().collect();
+    assert_eq!(tab.focus_mru().to_vec(), newest_first);
 }
 
 #[test]
 fn re_recording_an_existing_pane_at_the_cap_moves_it_front_without_evicting() {
-    // A full MRU that re-focuses one of its own entries must not first grow
-    // past the cap and then evict a *different* victim — `retain` drops the
-    // duplicate before the length check ever runs.
+    // Re-recording an entry a full history already holds evicts nothing: the
+    // duplicate is dropped before the length is checked.
     let mut tab = Tab::new(TabId::new(), "code".to_owned(), 0, PaneId::new());
     let cap = MAX_TAB_FOCUS_MRU as usize;
     let panes: Vec<PaneId> = (0..cap).map(|_| PaneId::new()).collect();
     for &pane in &panes {
         tab.record_focus_mru(pane);
     }
-    // Pick a pane from the *middle* of the history, not the back: re-recording
-    // the back element would coincidentally be popped by the cap eviction even
-    // without the dedup, so it would not actually prove `retain` ran.
+    // The re-recorded pane comes from the middle of the history. The back entry
+    // is the one the cap evicts on its own.
     let middle = panes[cap / 2];
 
     tab.record_focus_mru(middle);
 
-    let mru = tab.focus_mru();
-    assert_eq!(mru.len(), cap);
-    assert_eq!(mru[0], middle);
-    for pane in &panes {
-        assert!(mru.contains(pane));
-    }
+    // `middle` moves to the front and every other pane keeps its order behind it.
+    let mut expected: Vec<PaneId> = panes.iter().rev().copied().collect();
+    expected.retain(|&pane| pane != middle);
+    expected.insert(0, middle);
+    assert_eq!(tab.focus_mru().to_vec(), expected);
+}
+
+#[test]
+fn recording_the_same_pane_twice_keeps_one_entry() {
+    let mut tab = Tab::new(TabId::new(), "code".to_owned(), 0, PaneId::new());
+    let pane = PaneId::new();
+
+    tab.record_focus_mru(pane);
+    tab.record_focus_mru(pane);
+
+    assert_eq!(tab.focus_mru().to_vec(), vec![pane]);
 }
 
 #[test]
@@ -279,9 +280,8 @@ fn the_starting_lock_survives_a_serde_round_trip() {
 
 #[test]
 fn the_starting_lock_is_stored_as_a_plain_json_bool() {
-    // A session written by one build has to load in the next, so the key and
-    // its shape on disk are a file format. A round-trip test cannot see this:
-    // it reads back whatever it wrote.
+    // Pins the stored shape: the member is named `start_locked` and holds a
+    // JSON boolean.
     let mut session = Session::new(
         SessionId::new(),
         "work".to_owned(),
@@ -293,6 +293,30 @@ fn the_starting_lock_is_stored_as_a_plain_json_bool() {
     let value = serde_json::to_value(&session).expect("serialize");
 
     assert_eq!(value["start_locked"], serde_json::Value::Bool(true));
+}
+
+#[test]
+fn a_stored_session_without_the_lock_key_reads_back_unlocked() {
+    // A stored session with no `start_locked` member reads the field back as
+    // `false` through `#[serde(default)]`.
+    let session = Session::new(
+        SessionId::new(),
+        "work".to_owned(),
+        SystemTime::UNIX_EPOCH,
+        ClientRegistry::new(),
+    );
+    let mut value = serde_json::to_value(&session).expect("serialize");
+    value
+        .as_object_mut()
+        .expect("a session serializes to a JSON object")
+        .remove("start_locked")
+        .expect("the key is present before it is dropped");
+
+    let mut restored: Session =
+        serde_json::from_value(value).expect("a session without the key deserializes");
+
+    assert!(!restored.start_locked);
+    assert!(!restored.take_start_lock());
 }
 
 #[test]
@@ -309,11 +333,8 @@ fn a_tab_survives_a_serde_round_trip() {
 
 #[test]
 fn a_tabs_name_is_stored_as_a_plain_json_string() {
-    // A tab is part of the saved session, so its name's stored shape is a file
-    // format: a session written by one build has to load in the next. A
-    // round-trip test alone cannot see this — it passes just as well if the
-    // name starts writing itself as a nested object, because it reads back
-    // whatever it wrote. This pins the shape on disk instead.
+    // Pins the stored shape: the member is named `name` and holds a JSON
+    // string, not a nested object.
     let tab = Tab::new(TabId::new(), "code".to_owned(), 2, PaneId::new());
 
     let value = serde_json::to_value(&tab).expect("serialize");
@@ -360,6 +381,7 @@ fn detaching_the_last_client_parks_the_session_without_destroying_state() {
     );
     let events = new_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
     let tab = created_tab_id(&events);
+    let pane = created_pane_id(&events);
 
     let client = client_viewing(tab);
     let client_id = client.id();
@@ -369,9 +391,12 @@ fn detaching_the_last_client_parks_the_session_without_destroying_state() {
 
     session.detach_client(client_id);
     assert_eq!(*session.lifecycle(), SessionLifecycle::Detaching);
-    // Parking is not destruction: the tabs and panes stay alive.
-    assert!(!session.tabs.is_empty());
-    assert!(!session.panes.is_empty());
+    // Parking is not destruction: the tab and its pane stay alive.
+    assert_eq!(
+        session.tabs.keys().copied().collect::<Vec<TabId>>(),
+        vec![tab]
+    );
+    assert_eq!(session.panes.get(pane).expect("the pane stays").id(), pane);
 }
 
 #[test]
@@ -448,10 +473,23 @@ fn closing_the_last_tab_requests_a_stop() {
     );
     let events = new_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
     let tab = created_tab_id(&events);
+    let pane = created_pane_id(&events);
 
     let teardown = close_tab(&mut session, tab);
 
-    assert!(teardown.iter().any(|event| matches!(event, Event::Quit)));
+    // The tab's only pane is torn down, then the tab, then the session quits.
+    assert_eq!(
+        teardown,
+        vec![
+            Event::PaneClosing(PaneClosing { pane_id: pane }),
+            Event::PaneRemoved(PaneRemoved {
+                pane_id: pane,
+                tab_id: tab,
+            }),
+            Event::TabClosed(TabClosed { tab_id: tab }),
+            Event::Quit,
+        ]
+    );
     assert_eq!(*session.lifecycle(), SessionLifecycle::Stopping);
 }
 
@@ -499,6 +537,23 @@ fn register_removed_pane(session: &mut Session) -> PaneId {
     id
 }
 
+/// A `Closing` pane record registered in `session`, returned by id. It still
+/// holds a record and is still a legal layout leaf.
+fn register_closing_pane(session: &mut Session) -> PaneId {
+    let id = PaneId::new();
+    let mut record = PaneRecord::new(id, SystemTime::UNIX_EPOCH);
+    record
+        .update_lifecycle(PaneLifecycleEvent::CloseRequested {
+            since: SystemTime::UNIX_EPOCH,
+        })
+        .expect("Spawning -> Closing is a legal transition");
+    session
+        .panes
+        .insert(record)
+        .expect("a fresh pane id is unique");
+    id
+}
+
 /// The id of the pane a `new_tab` call just created, read off its `PaneCreated`.
 fn created_pane_id(events: &[Event]) -> PaneId {
     events
@@ -528,9 +583,10 @@ fn attach_viewing(session: &mut Session, active_tab: TabId) -> ClientId {
     client_id
 }
 
-/// A clone of `tab` with its (private) lifecycle forced via a serde round-trip.
-/// No tab-lifecycle driver exists yet, so this is the only way to construct a
-/// `Closed` tab to exercise the consistency guard for one.
+/// A clone of `tab` whose private `lifecycle` field is set to `lifecycle`,
+/// built by rewriting that member of the tab's JSON and reading it back.
+/// `lifecycle` is a [`TabLifecycle`] variant name, such as `"Closed"`. Panics
+/// when the name is not one of them.
 fn force_tab_lifecycle(tab: &Tab, lifecycle: &str) -> Tab {
     let mut value = serde_json::to_value(tab).expect("a tab serializes");
     value["lifecycle"] = serde_json::Value::String(lifecycle.to_owned());
@@ -561,15 +617,33 @@ fn a_layout_leaf_with_no_record_is_reported() {
     let mut session = empty_session();
     let ghost = PaneId::new();
     let tab = Tab::new(TabId::new(), "code".to_owned(), 0, ghost);
+    let tab_id = tab.id();
+    session.tabs.insert(tab_id, tab);
+
+    assert_eq!(
+        session.validate(),
+        Err(vec![SessionConsistencyError::PaneNotInRegistry {
+            tab: tab_id,
+            pane: ghost,
+        }])
+    );
+}
+
+#[test]
+fn a_session_with_no_tabs_panes_or_clients_is_consistent() {
+    assert_eq!(empty_session().validate(), Ok(()));
+}
+
+#[test]
+fn a_closing_pane_still_in_the_layout_is_consistent() {
+    // Only a `Removed` pane is an illegal leaf. A pane in `Closing` keeps both
+    // its leaf and its registry record, so neither side reports it.
+    let mut session = empty_session();
+    let closing = register_closing_pane(&mut session);
+    let tab = Tab::new(TabId::new(), "code".to_owned(), 0, closing);
     session.tabs.insert(tab.id(), tab);
 
-    let errors = session
-        .validate()
-        .expect_err("a leaf with no registry record is inconsistent");
-    assert!(errors.iter().any(|error| matches!(
-        error,
-        SessionConsistencyError::PaneNotInRegistry { pane, .. } if *pane == ghost
-    )));
+    assert_eq!(session.validate(), Ok(()));
 }
 
 #[test]
@@ -577,21 +651,18 @@ fn a_removed_pane_left_in_the_layout_is_reported() {
     let mut session = empty_session();
     let pane = register_removed_pane(&mut session);
     let tab = Tab::new(TabId::new(), "code".to_owned(), 0, pane);
-    session.tabs.insert(tab.id(), tab);
+    let tab_id = tab.id();
+    session.tabs.insert(tab_id, tab);
 
-    let errors = session
-        .validate()
-        .expect_err("a removed pane still in the layout is inconsistent");
     // A removed pane kept as a leaf breaks two invariants at once: it is an
     // illegal leaf *and* a record that should have been dropped.
-    assert!(errors.iter().any(|error| matches!(
-        error,
-        SessionConsistencyError::RemovedPaneInLayout { pane: p, .. } if *p == pane
-    )));
-    assert!(errors.iter().any(|error| matches!(
-        error,
-        SessionConsistencyError::LingeringRemovedRecord { pane: p } if *p == pane
-    )));
+    assert_eq!(
+        session.validate(),
+        Err(vec![
+            SessionConsistencyError::RemovedPaneInLayout { tab: tab_id, pane },
+            SessionConsistencyError::LingeringRemovedRecord { pane },
+        ])
+    );
 }
 
 #[test]
@@ -599,13 +670,13 @@ fn a_live_record_in_no_layout_is_reported() {
     let mut session = empty_session();
     let orphan = register_live_pane(&mut session);
 
-    let errors = session
-        .validate()
-        .expect_err("a live record that is not a leaf anywhere is inconsistent");
-    assert!(errors.iter().any(|error| matches!(
-        error,
-        SessionConsistencyError::OrphanedPaneRecord { pane, .. } if *pane == orphan
-    )));
+    assert_eq!(
+        session.validate(),
+        Err(vec![SessionConsistencyError::OrphanedPaneRecord {
+            pane: orphan,
+            lifecycle: PaneLifecycle::Running,
+        }])
+    );
 }
 
 #[test]
@@ -613,17 +684,13 @@ fn a_removed_record_with_no_layout_is_reported() {
     let mut session = empty_session();
     let pane = register_removed_pane(&mut session);
 
-    let errors = session
-        .validate()
-        .expect_err("a removed record lingering in the registry is inconsistent");
-    assert!(errors.iter().any(|error| matches!(
-        error,
-        SessionConsistencyError::LingeringRemovedRecord { pane: p } if *p == pane
-    )));
     // It is not a leaf, so the layout-side check does not also fire.
-    assert!(!errors
-        .iter()
-        .any(|error| matches!(error, SessionConsistencyError::RemovedPaneInLayout { .. })));
+    assert_eq!(
+        session.validate(),
+        Err(vec![SessionConsistencyError::LingeringRemovedRecord {
+            pane
+        }])
+    );
 }
 
 #[test]
@@ -632,17 +699,20 @@ fn a_pane_placed_in_two_tabs_is_reported() {
     let shared = register_live_pane(&mut session);
     let tab_a = Tab::new(TabId::new(), "a".to_owned(), 0, shared);
     let tab_b = Tab::new(TabId::new(), "b".to_owned(), 1, shared);
-    session.tabs.insert(tab_a.id(), tab_a);
-    session.tabs.insert(tab_b.id(), tab_b);
+    let (tab_a_id, tab_b_id) = (tab_a.id(), tab_b.id());
+    session.tabs.insert(tab_a_id, tab_a);
+    session.tabs.insert(tab_b_id, tab_b);
 
-    let errors = session
-        .validate()
-        .expect_err("a pane that is a leaf in two tabs is inconsistent");
-    assert!(errors.iter().any(|error| matches!(
-        error,
-        SessionConsistencyError::PaneInMultipleLayouts { pane, tabs }
-            if *pane == shared && tabs.len() == 2
-    )));
+    // The tabs are listed in the order `Session::tabs` walks them: ascending id.
+    let mut holding_tabs = vec![tab_a_id, tab_b_id];
+    holding_tabs.sort();
+    assert_eq!(
+        session.validate(),
+        Err(vec![SessionConsistencyError::PaneInMultipleLayouts {
+            pane: shared,
+            tabs: holding_tabs,
+        }])
+    );
 }
 
 #[test]
@@ -654,14 +724,13 @@ fn a_tab_stored_under_the_wrong_key_is_reported() {
     let wrong_key = TabId::new();
     session.tabs.insert(wrong_key, tab);
 
-    let errors = session
-        .validate()
-        .expect_err("a tab keyed under a foreign id is inconsistent");
-    assert!(errors.iter().any(|error| matches!(
-        error,
-        SessionConsistencyError::TabKeyMismatch { key, tab_id: id }
-            if *key == wrong_key && *id == tab_id
-    )));
+    assert_eq!(
+        session.validate(),
+        Err(vec![SessionConsistencyError::TabKeyMismatch {
+            key: wrong_key,
+            tab_id,
+        }])
+    );
 }
 
 #[test]
@@ -674,10 +743,12 @@ fn two_tabs_sharing_a_bar_index_are_reported() {
     session.tabs.insert(tab_a.id(), tab_a);
     session.tabs.insert(tab_b.id(), tab_b);
 
-    let errors = session
-        .validate()
-        .expect_err("two tabs at the same bar position is inconsistent");
-    assert!(errors.contains(&SessionConsistencyError::DuplicateTabIndex { index: 0 }));
+    assert_eq!(
+        session.validate(),
+        Err(vec![SessionConsistencyError::DuplicateTabIndex {
+            index: 0
+        }])
+    );
 }
 
 #[test]
@@ -698,16 +769,17 @@ fn a_client_belonging_to_another_session_is_reported() {
         "C-test-client".to_string(),
         0,
     );
+    let client_id = client.id();
     session.attach_client(client);
 
-    let errors = session
-        .validate()
-        .expect_err("a client of a different session is inconsistent");
-    // `found` must name the offending client's session, not this session's id.
-    assert!(errors.iter().any(|error| matches!(
-        error,
-        SessionConsistencyError::ClientSessionMismatch { found, .. } if *found == foreign
-    )));
+    // `found` names the offending client's session, not this session's id.
+    assert_eq!(
+        session.validate(),
+        Err(vec![SessionConsistencyError::ClientSessionMismatch {
+            client: client_id,
+            found: foreign,
+        }])
+    );
 }
 
 #[test]
@@ -718,14 +790,67 @@ fn a_client_active_tab_that_does_not_exist_is_reported() {
     let phantom = TabId::new();
     let client_id = attach_viewing(&mut session, phantom);
 
-    let errors = session
-        .validate()
-        .expect_err("a client viewing a tab that is gone is inconsistent");
-    assert!(errors.iter().any(|error| matches!(
-        error,
-        SessionConsistencyError::ActiveTabMissing { client, tab }
-            if *client == client_id && *tab == phantom
-    )));
+    assert_eq!(
+        session.validate(),
+        Err(vec![SessionConsistencyError::ActiveTabMissing {
+            client: client_id,
+            tab: phantom,
+        }])
+    );
+}
+
+#[test]
+fn every_client_with_a_missing_active_tab_is_reported() {
+    // The client walk covers each attached client, not only the first one that
+    // trips a check. Clients are reported in ascending id order, the order
+    // `ClientRegistry` iterates.
+    let mut session = empty_session();
+    let _ = new_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
+
+    let phantom = TabId::new();
+    let mut viewers = [
+        attach_viewing(&mut session, phantom),
+        attach_viewing(&mut session, phantom),
+    ];
+    viewers.sort();
+
+    assert_eq!(
+        session.validate(),
+        Err(vec![
+            SessionConsistencyError::ActiveTabMissing {
+                client: viewers[0],
+                tab: phantom,
+            },
+            SessionConsistencyError::ActiveTabMissing {
+                client: viewers[1],
+                tab: phantom,
+            },
+        ])
+    );
+}
+
+#[test]
+fn a_client_viewing_a_gone_tab_is_not_reported_once_the_session_has_no_tabs() {
+    // Closing the last tab quits the session with no successor tab to point
+    // viewers at, so every client's `active_tab` names the closed tab until the
+    // transport disconnects it. That state is not a violation.
+    let mut session = empty_session();
+    let events = new_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
+    let tab = created_tab_id(&events);
+    let client_id = attach_viewing(&mut session, tab);
+
+    let _ = close_tab(&mut session, tab);
+
+    assert!(session.tabs.is_empty());
+    assert_eq!(
+        session
+            .clients
+            .get(client_id)
+            .expect("the client stays attached")
+            .active_tab(),
+        tab
+    );
+    assert_eq!(session.validate(), Ok(()));
 }
 
 #[test]
@@ -742,13 +867,23 @@ fn a_client_focus_on_an_unknown_pane_is_reported() {
         .expect("the client was just attached")
         .update_focused_pane(tab, ghost);
 
-    let errors = session
-        .validate()
-        .expect_err("focus on a pane with no record is inconsistent");
-    assert!(errors.iter().any(|error| matches!(
-        error,
-        SessionConsistencyError::FocusPaneNotInRegistry { pane, .. } if *pane == ghost
-    )));
+    // The tab is real and the pane is not, so the registry check and the layout
+    // check both fire, in that order, and nothing else does.
+    assert_eq!(
+        session.validate(),
+        Err(vec![
+            SessionConsistencyError::FocusPaneNotInRegistry {
+                client: client_id,
+                tab,
+                pane: ghost,
+            },
+            SessionConsistencyError::FocusTargetMissing {
+                client: client_id,
+                tab,
+                pane: ghost,
+            },
+        ])
+    );
 }
 
 #[test]
@@ -767,18 +902,48 @@ fn a_client_focus_in_a_missing_tab_is_reported() {
         .expect("the client was just attached")
         .update_focused_pane(phantom_tab, pane);
 
-    let errors = session
-        .validate()
-        .expect_err("focus remembered in a missing tab is inconsistent");
-    assert!(errors.iter().any(|error| matches!(
-        error,
-        SessionConsistencyError::FocusTabMissing { tab: t, .. } if *t == phantom_tab
-    )));
     // The pane is real, so the registry-side focus check does not fire.
-    assert!(!errors.iter().any(|error| matches!(
-        error,
-        SessionConsistencyError::FocusPaneNotInRegistry { .. }
-    )));
+    assert_eq!(
+        session.validate(),
+        Err(vec![SessionConsistencyError::FocusTabMissing {
+            client: client_id,
+            tab: phantom_tab,
+        }])
+    );
+}
+
+#[test]
+fn a_focus_in_a_missing_tab_on_a_ghost_pane_reports_the_missing_record_and_the_missing_tab() {
+    // Focus naming a pane with no record, remembered under a tab the session no
+    // longer holds, trips the registry check and the tab check. The layout check
+    // needs a tab to look inside, so it does not also fire.
+    let mut session = empty_session();
+    let events = new_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
+    let real_tab = created_tab_id(&events);
+
+    let phantom_tab = TabId::new();
+    let ghost = PaneId::new();
+    let client_id = attach_viewing(&mut session, real_tab);
+    session
+        .clients
+        .get_mut(client_id)
+        .expect("the client was just attached")
+        .update_focused_pane(phantom_tab, ghost);
+
+    assert_eq!(
+        session.validate(),
+        Err(vec![
+            SessionConsistencyError::FocusPaneNotInRegistry {
+                client: client_id,
+                tab: phantom_tab,
+                pane: ghost,
+            },
+            SessionConsistencyError::FocusTabMissing {
+                client: client_id,
+                tab: phantom_tab,
+            },
+        ])
+    );
 }
 
 #[test]
@@ -798,25 +963,20 @@ fn a_client_focus_on_a_pane_outside_its_tab_is_reported() {
         .expect("the client was just attached")
         .update_focused_pane(tab_b, pane_a);
 
-    let errors = session
-        .validate()
-        .expect_err("focus on a pane outside its tab is inconsistent");
-    assert!(errors.iter().any(|error| matches!(
-        error,
-        SessionConsistencyError::FocusTargetMissing { tab, pane, .. }
-            if *tab == tab_b && *pane == pane_a
-    )));
     // The pane exists in the registry, so this is a target mismatch, not a
     // missing record.
-    assert!(!errors.iter().any(|error| matches!(
-        error,
-        SessionConsistencyError::FocusPaneNotInRegistry { .. }
-    )));
+    assert_eq!(
+        session.validate(),
+        Err(vec![SessionConsistencyError::FocusTargetMissing {
+            client: client_id,
+            tab: tab_b,
+            pane: pane_a,
+        }])
+    );
 }
 
 /// A zoom answers to the same rule as a focus: the pane it names must be a live
-/// leaf of the tab it is zoomed in. A zoom left behind on a pane that is not
-/// there would draw nothing, so a stale one is a real inconsistency.
+/// leaf of the tab it is zoomed in.
 #[test]
 fn a_client_zoom_on_a_pane_outside_its_tab_is_reported() {
     let mut session = empty_session();
@@ -835,18 +995,18 @@ fn a_client_zoom_on_a_pane_outside_its_tab_is_reported() {
     client.update_focused_pane(tab_b, pane_b);
     client.zoom_pane(tab_b, pane_a);
 
-    let errors = session
-        .validate()
-        .expect_err("a zoom on a pane outside its tab is inconsistent");
-    assert!(errors.iter().any(|error| matches!(
-        error,
-        SessionConsistencyError::ZoomTargetMissing { tab, pane, .. }
-            if *tab == tab_b && *pane == pane_a
-    )));
+    assert_eq!(
+        session.validate(),
+        Err(vec![SessionConsistencyError::ZoomTargetMissing {
+            client: client_id,
+            tab: tab_b,
+            pane: pane_a,
+        }])
+    );
 }
 
-/// The everyday state — zoomed on the pane this client has focused, in the tab it
-/// is viewing — is consistent, so the check above does not fire on a real zoom.
+/// Zoomed on the pane this client has focused, in the tab it is viewing, is a
+/// consistent state and reports nothing.
 #[test]
 fn a_zoom_on_the_focused_pane_is_consistent() {
     let mut session = empty_session();
@@ -874,16 +1034,17 @@ fn a_closed_tab_left_in_the_map_is_reported() {
     let closed = force_tab_lifecycle(&tab, "Closed");
     session.tabs.insert(tab_id, closed);
 
-    let errors = session
-        .validate()
-        .expect_err("a closed tab still in the map is inconsistent");
-    assert!(errors.contains(&SessionConsistencyError::LingeringClosedTab { tab: tab_id }));
+    assert_eq!(
+        session.validate(),
+        Err(vec![SessionConsistencyError::LingeringClosedTab {
+            tab: tab_id
+        }])
+    );
 }
 
-/// An `Exited` pane record registered in `session`, returned by id. Live enough
-/// to have a record — a dead placeholder whose child is gone — but not
-/// `Removed`, so the orphan check (not the lingering-removed one) is the guard
-/// that fires when it is a leaf nowhere.
+/// An `Exited` pane record registered in `session`, returned by id. It holds
+/// exit code `Some(0)` at `UNIX_EPOCH`. It is not `Removed`, so the orphan
+/// check is the one that fires when it is a leaf nowhere.
 fn register_exited_pane(session: &mut Session) -> PaneId {
     let id = PaneId::new();
     let mut record = PaneRecord::new(id, SystemTime::UNIX_EPOCH);
@@ -921,26 +1082,23 @@ fn a_focus_on_a_ghost_pane_in_a_real_tab_reports_both_missing_record_and_missing
         .expect("the client was just attached")
         .update_focused_pane(tab, ghost);
 
-    let errors = session
-        .validate()
-        .expect_err("a ghost focus in a real tab is inconsistent");
-    assert!(
-        errors.contains(&SessionConsistencyError::FocusPaneNotInRegistry {
-            client: client_id,
-            tab,
-            pane: ghost,
-        })
-    );
-    assert!(
-        errors.contains(&SessionConsistencyError::FocusTargetMissing {
-            client: client_id,
-            tab,
-            pane: ghost,
-        })
-    );
     // Exactly those two — the real tab, its real pane, and the session-matched
     // client add nothing else.
-    assert_eq!(errors.len(), 2);
+    assert_eq!(
+        session.validate(),
+        Err(vec![
+            SessionConsistencyError::FocusPaneNotInRegistry {
+                client: client_id,
+                tab,
+                pane: ghost,
+            },
+            SessionConsistencyError::FocusTargetMissing {
+                client: client_id,
+                tab,
+                pane: ghost,
+            },
+        ])
+    );
 }
 
 #[test]
@@ -1012,10 +1170,7 @@ fn a_pane_appearing_twice_in_one_tabs_tree_is_reported() {
     let mut tab = Tab::new(tab_id, "code".to_owned(), 0, doubled);
     tab.update_layout(LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![
-            LayoutChild::new(LayoutNode::Pane(doubled)),
-            LayoutChild::new(LayoutNode::Pane(doubled)),
-        ],
+        vec![LayoutNode::Pane(doubled), LayoutNode::Pane(doubled)],
     )));
     session.tabs.insert(tab_id, tab);
 
@@ -1054,21 +1209,62 @@ fn every_violation_is_collected_in_one_pass() {
     // A layout leaf with no record.
     let ghost = PaneId::new();
     let tab = Tab::new(TabId::new(), "code".to_owned(), 0, ghost);
-    session.tabs.insert(tab.id(), tab);
+    let tab_id = tab.id();
+    session.tabs.insert(tab_id, tab);
     // A live record that is a leaf nowhere.
     let orphan = register_live_pane(&mut session);
 
-    let errors = session
-        .validate()
-        .expect_err("a session with two faults is inconsistent");
     // Both faults surface from a single call rather than only the first.
-    assert!(errors.len() >= 2);
-    assert!(errors.iter().any(|error| matches!(
-        error,
-        SessionConsistencyError::PaneNotInRegistry { pane, .. } if *pane == ghost
-    )));
-    assert!(errors.iter().any(|error| matches!(
-        error,
-        SessionConsistencyError::OrphanedPaneRecord { pane, .. } if *pane == orphan
-    )));
+    assert_eq!(
+        session.validate(),
+        Err(vec![
+            SessionConsistencyError::PaneNotInRegistry {
+                tab: tab_id,
+                pane: ghost,
+            },
+            SessionConsistencyError::OrphanedPaneRecord {
+                pane: orphan,
+                lifecycle: PaneLifecycle::Running,
+            },
+        ])
+    );
+}
+
+#[test]
+fn validate_reports_two_orphan_records_in_id_order() {
+    // The registry walks in id order, so two faults of one kind always come
+    // out the same way round.
+    let mut session = empty_session();
+    let a = register_live_pane(&mut session);
+    let b = register_live_pane(&mut session);
+    let (first, second) = if a < b { (a, b) } else { (b, a) };
+
+    assert_eq!(
+        session.validate(),
+        Err(vec![
+            SessionConsistencyError::OrphanedPaneRecord {
+                pane: first,
+                lifecycle: PaneLifecycle::Running,
+            },
+            SessionConsistencyError::OrphanedPaneRecord {
+                pane: second,
+                lifecycle: PaneLifecycle::Running,
+            },
+        ])
+    );
+}
+
+#[test]
+fn a_restored_focus_history_longer_than_the_cap_still_evicts() {
+    // The length is compared in `usize`: a history of 65 536 entries is over
+    // the cap, not `0` entries with the low sixteen bits read alone.
+    let tab = Tab::new(TabId::new(), "code".to_owned(), 0, PaneId::new());
+    let mut value = serde_json::to_value(&tab).expect("a tab serializes");
+    let oversized: Vec<PaneId> = (0..65_536).map(|_| PaneId::new()).collect();
+    value["focus_mru"] = serde_json::to_value(&oversized).expect("the history serializes");
+    let mut restored: Tab = serde_json::from_value(value).expect("the tab deserializes");
+
+    restored.record_focus_mru(PaneId::new());
+
+    assert_eq!(restored.focus_mru().len(), usize::from(MAX_TAB_FOCUS_MRU));
 }

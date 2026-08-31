@@ -1,26 +1,24 @@
 //! Crossterm keyboard boundary: the two halves of one key press.
 //!
-//! [`decode_key`] turns one host key event into a canonical [`KeyChord`]. A
-//! chord is one key plus the modifiers held with it, such as `<C-a>`. The chord
-//! is the form the keymap matches keybindings against. [`encode`] turns a chord
-//! back into the bytes a program running inside a pane expects, for the keys no
-//! keybinding consumed.
+//! [`decode_key`] turns one host key event into a canonical [`KeyChord`]: one
+//! key plus the modifiers held with it, such as `<C-a>`, in the form the keymap
+//! matches keybindings against. [`encode`] turns a chord back into the bytes a
+//! program running inside a pane expects, for the keys no keybinding consumed.
 //!
-//! Encoding reads the chord *and* the receiving pane's mode. A bare Up arrow is
-//! `ESC [ A` to a shell but `ESC O A` to vim, which turned on
-//! application-cursor-keys mode (DECCKM, `ESC [ ? 1 h`). The chord `<Up>` is the
-//! same press in both cases; only the bytes differ.
+//! Encoding reads the chord and the receiving pane's application-cursor-keys
+//! mode (DECCKM, `ESC [ ? 1 h`). A bare Up arrow is `ESC [ A` with the mode off
+//! and `ESC O A` with it on; the chord `<Up>` is the same in both cases.
 //!
 //! # Byte forms
 //!
-//! The sequences follow the terminfo capabilities every terminal program reads
-//! (`kcuu1`, `kf1`, `kEND`, …), which is xterm's table:
+//! The sequences are xterm's, the ones terminfo lists for every terminal
+//! program (`kcuu1`, `kf1`, `kEND`, …):
 //!
-//! - Control characters carry their modifiers in the byte itself: `Ctrl-a` is
+//! - A control character carries its modifiers in the byte itself: `Ctrl-a` is
 //!   `0x01`, and Alt prefixes an `ESC` (`Alt-a` is `ESC a`).
-//! - Cursor and editing keys carry theirs in a CSI parameter: `Ctrl-Right` is
-//!   `ESC [ 1 ; 5 C`, where `5` = 1 + 4 (Control). Shift adds 1, Alt 2,
-//!   Control 4, Super 8.
+//! - A cursor, editing, or function key carries them in a CSI parameter:
+//!   `Ctrl-Right` is `ESC [ 1 ; 5 C`, where `5` = 1 + 4 (Control). Shift adds
+//!   1, Alt 2, Control 4, Super 8.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use koshi_core::key::{fold_uppercase, Key, KeyChord, ModFlags, NamedKey};
@@ -28,14 +26,17 @@ use koshi_core::key::{fold_uppercase, Key, KeyChord, ModFlags, NamedKey};
 /// The escape byte that opens every control sequence.
 const ESC: u8 = 0x1b;
 
-/// The value a modifier parameter takes when nothing is held: the parameter is
-/// a bitmap of the held modifiers offset by one.
+/// The modifier parameter with nothing held. The parameter is one plus a
+/// bitmap of the held modifiers.
 const UNMODIFIED: u8 = 1;
 
 /// Decode one press or repeat into its canonical chord.
 ///
-/// Returns `None` for a release, and for a key this model has no name for:
-/// media keys, `CapsLock`, `Menu`, `F(25)` and above.
+/// Returns `None` for a release, and for a code with no [`Key`] form: `F(0)`,
+/// `F(25)` and above, `Null`, `CapsLock`, `ScrollLock`, `NumLock`,
+/// `PrintScreen`, `Pause`, `Menu`, `KeypadBegin`, every `Media` key, and every
+/// `Modifier` key. `BackTab` decodes as Shift+Tab. Meta counts as Super;
+/// Hyper is dropped.
 #[must_use]
 pub fn decode_key(event: KeyEvent) -> Option<KeyChord> {
     if matches!(event.kind, KeyEventKind::Release) {
@@ -43,30 +44,32 @@ pub fn decode_key(event: KeyEvent) -> Option<KeyChord> {
     }
 
     let key = decode_code(event.code)?;
-    let mut mods = decode_mods(event.modifiers);
-    // `BackTab` takes Shift whether or not the host set the Shift modifier.
-    if matches!(event.code, KeyCode::BackTab) {
-        mods = mods.union(ModFlags::SHIFT);
-    }
-    let shift_held = event.modifiers.contains(KeyModifiers::SHIFT);
+    let mods = decode_mods(event.modifiers);
+    // `BackTab` is Shift+Tab whether or not the host set the Shift modifier.
+    let shift_held =
+        event.modifiers.contains(KeyModifiers::SHIFT) || event.code == KeyCode::BackTab;
     Some(normalize(key, mods, shift_held))
 }
 
 /// Encode a chord as the bytes the focused pane's program expects.
 ///
 /// `app_cursor_keys` is the receiving pane's application-cursor-keys state
-/// (DECCKM): an unmodified cursor key is `ESC O A` while it is on and
-/// `ESC [ A` while it is off. It changes no other key.
+/// (DECCKM). With it on, an unmodified cursor key or Home/End opens with
+/// `ESC O` in place of `ESC [`: `<Up>` is `ESC O A`. It changes no other key.
 ///
-/// Every chord encodes to something.
+/// Every chord encodes to at least one byte.
 ///
 /// Super rides along only where a sequence has room for it. A CSI key carries
 /// Super in the modifier parameter, the same slot Shift and Control use:
-/// `<D-Up>` → `ESC [ 1 ; 9 A`. A C0 key has room for Control and Alt only, so
+/// `<D-Up>` → `ESC [ 1 ; 9 A`. A C0 key has room for Control and Alt only:
 /// `<D-a>` reaches the pane as a plain `a`.
 ///
-/// Shift splits the same way. It folds into the character (`<S-a>` → `A`), and
-/// it rides the parameter on a named key.
+/// Shift splits the same way: it folds into the character (`<S-a>` → `A`),
+/// and it rides the parameter on a named key (`<S-Up>` → `ESC [ 1 ; 2 A`).
+///
+/// # Panics
+///
+/// Panics when `chord.key` is `NamedKey::F(n)` with `n` outside `1..=24`.
 #[must_use]
 pub fn encode(chord: KeyChord, app_cursor_keys: bool) -> Vec<u8> {
     match chord.key {
@@ -75,9 +78,8 @@ pub fn encode(chord: KeyChord, app_cursor_keys: bool) -> Vec<u8> {
     }
 }
 
-/// The chord's key, with its modifiers still to be applied. `BackTab` is the
-/// Tab key — [`decode_key`] adds the Shift that tells the two apart. Returns
-/// `None` for a code with no [`Key`] form.
+/// The [`Key`] a host code stands for, or `None` for a code with no `Key`
+/// form. `BackTab` maps to the Tab key; [`decode_key`] adds its Shift.
 fn decode_code(code: KeyCode) -> Option<Key> {
     let key = match code {
         KeyCode::Char(c) => Key::Char(c),
@@ -101,9 +103,9 @@ fn decode_code(code: KeyCode) -> Option<Key> {
     Some(key)
 }
 
-/// The host's Control, Alt and Super, as [`ModFlags`]. Meta counts as Super.
-/// Shift is left out: [`normalize`] adds it back for a key press, and
-/// [`crate::mouse`] adds it for a mouse event.
+/// The host's Control, Alt and Super as [`ModFlags`]. Meta counts as Super;
+/// Hyper is dropped. Shift is not carried: [`normalize`] adds it for a key
+/// press, and [`crate::mouse`] adds it for a mouse event.
 pub(crate) fn decode_mods(modifiers: KeyModifiers) -> ModFlags {
     let mut mods = ModFlags::NONE;
     if modifiers.contains(KeyModifiers::CONTROL) {
@@ -118,40 +120,29 @@ pub(crate) fn decode_mods(modifiers: KeyModifiers) -> ModFlags {
     mods
 }
 
-/// The canonical chord for one press, the same form the config parser produces.
-/// `shift_held` is the host's Shift state. `' '` becomes [`NamedKey::Space`]. A
-/// named key takes `shift_held` as a modifier. A capital letter folds to
-/// lowercase plus Shift.
+/// The canonical chord for one press, the form the config parser produces.
+/// `shift_held` is the host's Shift state. `' '` becomes [`NamedKey::Space`].
+/// A named key takes `shift_held` as a modifier. A capital that
+/// [`fold_uppercase`] folds becomes lowercase plus Shift; a lowercase letter
+/// takes `shift_held`; any other character drops it.
 fn normalize(key: Key, mods: ModFlags, shift_held: bool) -> KeyChord {
-    // The spacebar arrives as the character `' '` and becomes `<Space>`.
-    let key = match key {
-        Key::Char(' ') => Key::Named(NamedKey::Space),
-        other => other,
-    };
-
-    match key {
-        // A named key carries Shift like any other modifier: `<S-Tab>`.
-        Key::Named(named) => {
-            let mods = if shift_held {
-                mods.union(ModFlags::SHIFT)
-            } else {
-                mods
-            };
-            KeyChord::new(mods, Key::Named(named))
-        }
-        // An uppercase letter folds to lowercase plus Shift, and a held Shift
-        // is reported only on a letter key — a shifted `1` is `!`, which
-        // stands for itself.
+    let (key, shift) = match key {
+        Key::Char(' ') => (Key::Named(NamedKey::Space), shift_held),
+        Key::Named(_) => (key, shift_held),
+        // An uppercase letter folds to lowercase plus Shift. A held Shift
+        // counts only on a lowercase letter: a shifted `1` arrives as `!`.
         Key::Char(c) => {
             let (folded, shifted) = fold_uppercase(c);
-            let mods = if shifted || (folded.is_lowercase() && shift_held) {
-                mods.union(ModFlags::SHIFT)
-            } else {
-                mods
-            };
-            KeyChord::new(mods, Key::Char(folded))
+            let shift = shifted || (folded.is_lowercase() && shift_held);
+            (Key::Char(folded), shift)
         }
-    }
+    };
+    let mods = if shift {
+        mods.union(ModFlags::SHIFT)
+    } else {
+        mods
+    };
+    KeyChord::new(mods, key)
 }
 
 /// A character key: Shift restores the capital, Control folds the character
@@ -159,7 +150,7 @@ fn normalize(key: Key, mods: ModFlags, shift_held: bool) -> KeyChord {
 ///
 /// `<C-a>` → `0x01`. `<A-a>` → `ESC a`. `<A-C-a>` → `ESC 0x01`. `<S-a>` → `A`.
 /// `<C-4>` → `0x1c`, one of the control codes the digit row carries (see
-/// [`control_byte`]). `<C-1>` → `1`: no control code stands for it, so the
+/// [`control_byte`]). `<C-1>` → `1`: no control code stands for it, and the
 /// character goes as itself.
 fn encode_char(c: char, mods: ModFlags) -> Vec<u8> {
     let c = if mods.contains(ModFlags::SHIFT) {
@@ -172,9 +163,12 @@ fn encode_char(c: char, mods: ModFlags) -> Vec<u8> {
     if mods.contains(ModFlags::ALT) {
         bytes.push(ESC);
     }
-    // `filter` keeps the C0 byte only when Control is actually held: the
-    // character's own bytes stand for it otherwise.
-    match control_byte(c).filter(|_| mods.contains(ModFlags::CTRL)) {
+    let control = if mods.contains(ModFlags::CTRL) {
+        control_byte(c)
+    } else {
+        None
+    };
+    match control {
         Some(byte) => bytes.push(byte),
         None => {
             let mut buf = [0; 4];
@@ -196,9 +190,9 @@ fn encode_named(key: NamedKey, mods: ModFlags, app_cursor_keys: bool) -> Vec<u8>
         // Backspace sends DEL (`0x7f`), or BS (`0x08`) with Control held.
         NamedKey::Backspace => c0(if ctrl { 0x08 } else { 0x7f }, mods),
         NamedKey::Space => c0(if ctrl { 0x00 } else { b' ' }, mods),
-        // Shift+Tab is the one Tab form with a sequence of its own. Alt adds
-        // the `ESC` prefix that stands for it, the same as every other
-        // Alt-modified key: `<S-Tab>` → `ESC [ Z`, `<A-S-Tab>` → `ESC ESC [ Z`.
+        // Shift+Tab has a sequence of its own, with no modifier parameter:
+        // `<S-Tab>` → `ESC [ Z`, `<A-S-Tab>` → `ESC ESC [ Z`, `<C-S-Tab>` →
+        // `ESC [ Z`.
         NamedKey::Tab if mods.contains(ModFlags::SHIFT) => {
             if mods.contains(ModFlags::ALT) {
                 vec![ESC, ESC, b'[', b'Z']
@@ -221,9 +215,8 @@ fn encode_named(key: NamedKey, mods: ModFlags, app_cursor_keys: bool) -> Vec<u8>
     }
 }
 
-/// A C0 key's byte, with Alt written as the `ESC` prefix that stands for it.
-/// Control is already folded into `byte` by the caller, and Shift has no C0
-/// form.
+/// A C0 key's byte, with an `ESC` prefix when Alt is held. The caller folds
+/// Control into `byte`; Shift and Super are dropped.
 ///
 /// `Enter` → `\r`. `<A-CR>` → `ESC \r`.
 fn c0(byte: u8, mods: ModFlags) -> Vec<u8> {
@@ -284,7 +277,7 @@ fn tilde(code: u8, param: u8) -> Vec<u8> {
 /// Append a control sequence number — a key code or a modifier parameter — as
 /// its decimal digits.
 ///
-/// `3` appends one digit, `3`. `16` appends two, `1` then `6`.
+/// `3` appends `3`; `16` appends `1` then `6`; `100` appends `1`, `0`, `0`.
 fn push_decimal(bytes: &mut Vec<u8>, value: u8) {
     if value >= 100 {
         bytes.push(b'0' + value / 100);
@@ -346,11 +339,9 @@ fn modifier_param(mods: ModFlags) -> u8 {
     param
 }
 
-/// Restore the capital a chord's Shift stands for, undoing the fold every
-/// [`Key::Char`] is stored under.
-///
-/// `'a'` → `'A'`. A character whose uppercase mapping runs to more than one
-/// character (`'ß'` → `"SS"`) stands as it is.
+/// The capital a chord's Shift stands for: `'a'` → `'A'`. A character whose
+/// uppercase mapping is more than one character (`'ß'` → `"SS"`) stands as it
+/// is.
 fn unfold_shift(c: char) -> char {
     let mut upper = c.to_uppercase();
     match (upper.next(), upper.next()) {
@@ -359,28 +350,24 @@ fn unfold_shift(c: char) -> char {
     }
 }
 
-/// The C0 control byte Control plus this character sends, when one stands for
-/// it. `'a'` → `0x01`; `'['` → `0x1b`; `'4'` → `0x1c`; `'1'` has none.
+/// The C0 control byte Control plus this character sends, or `None` when no
+/// control code stands for it. `'a'` → `0x01`; `'['` → `0x1b`; `'4'` → `0x1c`;
+/// `'1'` → `None`.
 ///
-/// # The letter run, and the digits that finish it
+/// `@` through `_` clear their top bits: `'A' & 0x1f` is `0x01`, and the 32
+/// characters cover the 32 C0 codes. A lowercase letter sends its capital's
+/// byte. `?` sends DEL.
 ///
-/// Control clears the top bits of the character: `'A' & 0x1f` is `0x01`. That
-/// covers `@` through `_` — 32 characters for the 32 C0 codes — and a letter is
-/// just its capital's version of that.
-///
-/// The digit row carries the leftover control codes: `2` sends NUL, `3` sends
-/// ESC, `4`–`7` send `0x1c`–`0x1f`, and `8` sends DEL. The same byte therefore
-/// has two spellings — `<C-4>` and `<C-\>` both send `0x1c` — and which one
-/// arrives depends on the host:
+/// The digit row sends the codes the letters do not: `2` sends NUL, `3` sends
+/// ESC, `4`–`7` send `0x1c`–`0x1f`, and `8` sends DEL. One byte has two
+/// spellings — `<C-4>` and `<C-\>` both send `0x1c` — and which one arrives
+/// depends on the host:
 ///
 /// - On unix the terminal sends the byte, and crossterm decodes `0x1c`–`0x1f`
-///   back to `Char('4')`–`Char('7')` — so `Ctrl+\` reaches koshi as `<C-4>`.
-///   (`0x00`, `0x1b`, `0x7f` never reach the digit arm there: Space, Esc, and
-///   Backspace claim them first.)
-/// - On Windows there is no byte to decode; crossterm reports the key's own
-///   character, so `Ctrl+4` arrives as `<C-4>` and `Ctrl+\` as `<C-\>`.
-///
-/// Both spellings leave here as the same byte.
+///   to `Char('4')`–`Char('7')`: `Ctrl+\` reaches koshi as `<C-4>`. `0x00`,
+///   `0x1b`, and `0x7f` arrive as Ctrl+Space, Esc, and Backspace.
+/// - On Windows crossterm reports the key's own character: `Ctrl+4` arrives as
+///   `<C-4>` and `Ctrl+\` as `<C-\>`.
 fn control_byte(c: char) -> Option<u8> {
     match c {
         '@'..='_' => Some((c as u8) & 0x1f),

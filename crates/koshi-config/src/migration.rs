@@ -11,9 +11,9 @@ use kdl::KdlDocument;
 use thiserror::Error;
 
 use crate::app_config::parse_app_config;
-use crate::error::{ConfigError, ConfigParseDiagnostic};
+use crate::error::{ConfigError, ConfigParseDiagnostic, ConfigVersionDiagnostic};
 use crate::keybinding::{parse_keybindings, KeybindingParseError};
-use crate::parser::parse_kdl;
+use crate::parser::{parse_kdl, version_arg};
 use crate::profile::{parse_profile, ProfileError};
 use crate::theme::parse_theme;
 use crate::types::SCHEMA_VERSION;
@@ -220,28 +220,12 @@ fn version_from_document(path: &Path, doc: &KdlDocument) -> Result<u32, Migratio
     if versions.next().is_some() {
         return Err(version_error(path, "`version` is declared more than once"));
     }
-    if node.children().is_some() {
-        return Err(version_error(path, "`version` takes no children"));
-    }
-    let [entry] = node.entries() else {
-        return Err(version_error(
-            path,
-            "`version` takes exactly one integer argument",
-        ));
-    };
-    if entry.name().is_some() {
-        return Err(version_error(
-            path,
-            "`version` takes an argument, not a property",
-        ));
-    }
-    let Some(value) = entry.value().as_integer() else {
-        return Err(version_error(path, "`version` must be an integer"));
-    };
-    let version = u32::try_from(value)
-        .map_err(|_| version_error(path, "`version` must be between 1 and 4294967295"))?;
+    let version = version_arg(node).map_err(|(_, detail)| version_error(path, detail))?;
     if version == 0 {
-        return Err(version_error(path, "`version` must be at least 1"));
+        return Err(version_error(
+            path,
+            ConfigVersionDiagnostic::TooOld.to_string(),
+        ));
     }
     Ok(version)
 }
@@ -290,7 +274,7 @@ fn config_error(path: &Path, error: ConfigError) -> MigrationError {
         ConfigError::Parse { .. } => MigrationError::Parse {
             detail: error.to_string(),
         },
-        ConfigError::NotFound { .. } | ConfigError::Validation { .. } => MigrationError::Invalid {
+        ConfigError::Validation { .. } => MigrationError::Invalid {
             path: path.display().to_string(),
             details: error.to_string(),
         },

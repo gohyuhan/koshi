@@ -1,25 +1,23 @@
 //! The resolved chrome theme: every color the renderer paints koshi-owned
-//! surfaces with, carried on each frame's snapshot.
+//! surfaces with. The viewer passes it to the renderer next to the frame
+//! snapshot; the snapshot itself carries no colors.
 //!
-//! Chrome elements that come in runs — the tab list, the hint bar's modifier
-//! groups — each take one stop on a gradient by their position, so a frame
-//! reads as one gradient rather than a scatter of colors. [`Theme::ramp`]
-//! gives a run element its stop; [`Theme::ramp_dim`] is the same stop pulled
-//! toward black, used as the quiet half of a two-block ribbon (label next to
-//! key, for example). The single accent for in-progress state (the
-//! pending-sequence breadcrumb) is [`Theme::accent`]. Both koshi-owned rows —
-//! the tab bar and the key-hint bar — are filled with [`Theme::bar_bg`] before
-//! anything is painted over them, so chrome text reads against a known
-//! background rather than whatever the terminal's own is. [`Theme::default`] is
-//! the stock koshi look — a light-purple → light-blue ramp with a pink accent
-//! over black bars;
-//! the runtime builds a non-default `Theme` from the config theme's palette,
-//! so `ramp_start "#ff0000"` in a theme turns the first tab's ribbon red.
+//! Chrome elements that come in runs — the tab list, the statusline's modifier
+//! groups — each take one stop on a gradient by their position.
+//! [`Theme::ramp`] gives a run element its stop; [`Theme::ramp_dim`] is the
+//! same stop pulled toward black, used as the quiet half of a two-block ribbon
+//! (label next to key, for example). The single accent for in-progress state
+//! (the pending-sequence breadcrumb) is [`Theme::accent`]. Both koshi-owned
+//! rows — the tabline and the statusline — are filled with [`Theme::bar_bg`]
+//! before anything is painted over them. [`Theme::default`] is the stock koshi
+//! look — a light-purple → light-blue ramp with a pink accent over black bars;
+//! the viewing client builds a non-default `Theme` from the config theme's
+//! palette, where `ramp_start "#ff0000"` turns the first tab's ribbon red.
 
 use ratatui::style::Color;
 
 /// Every color the renderer's chrome styles draw with. The style helper
-/// functions in [`crate::render`] and [`crate::statusline_hints`] are the
+/// functions in [`crate::render`] and the statusline module are the
 /// only places chrome picks a color, and each reads its colors from here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Theme {
@@ -52,15 +50,15 @@ pub struct Theme {
     /// Backdrop of the letterbox margin around a centered layout.
     pub letterbox: Color,
     /// Background filling koshi's own two rows whole: the tab bar on top and
-    /// the key-hint bar on the bottom.
+    /// the statusline on the bottom.
     pub bar_bg: Color,
 }
 
 impl Default for Theme {
     /// The stock koshi chrome: a light-purple → light-blue ramp with a pink
-    /// accent over black bars. Field-for-field the same colors as the config
-    /// crate's default palette, so an unthemed frame and a default-config
-    /// frame paint identically.
+    /// accent over black bars. Field-for-field the same colors as
+    /// `koshi_config::types::ColorPalette::default`: an unthemed frame and a
+    /// default-config frame paint identically.
     fn default() -> Self {
         Self {
             ramp_start: (0xd0, 0xa5, 0xff),
@@ -116,9 +114,11 @@ fn lerp(a: u8, b: u8, num: usize, den: usize) -> u8 {
     if den == 0 {
         return a;
     }
-    let a = i32::from(a);
-    let b = i32::from(b);
-    let mixed = a + (b - a) * (num as i32) / (den as i32);
+    let a = i128::from(a);
+    let b = i128::from(b);
+    // `i128` holds every `usize` on every target this builds for, so a long
+    // run never wraps its denominator negative and flips the interpolation.
+    let mixed = a + (b - a) * (num as i128) / (den as i128);
     mixed.clamp(0, 255) as u8
 }
 

@@ -1,5 +1,6 @@
 //! Tests for the two chrome-row inputs: assembling either one twice borrows
-//! the same data both times, and copies nothing behind it.
+//! the same data both times and copies nothing behind it, and the compiled-in
+//! region solve keeps one rectangle per region down to a zero-size viewport.
 
 use super::*;
 
@@ -91,19 +92,54 @@ fn core_regions_commit_exact_chrome_rectangles_and_revision() {
 }
 
 #[test]
+fn core_region_solve_keeps_a_rectangle_per_region_on_short_viewports() {
+    // Two rows: the tab row takes the first, the hint row the second, and no row
+    // is left for panes.
+    let two = core_region_solve(Size { cols: 80, rows: 2 });
+    assert_eq!(
+        two.regions,
+        vec![
+            Rect::new(Point { x: 0, y: 0 }, Size { cols: 80, rows: 1 }),
+            Rect::new(Point { x: 0, y: 1 }, Size { cols: 80, rows: 1 }),
+        ]
+    );
+    assert_eq!(
+        two.pane_rect,
+        Rect::new(Point { x: 0, y: 1 }, Size { cols: 80, rows: 0 })
+    );
+
+    // One row: the tab row takes it and the hint row keeps a zero-height
+    // rectangle at the row after it.
+    let one = core_region_solve(Size { cols: 80, rows: 1 });
+    assert_eq!(
+        one.regions,
+        vec![
+            Rect::new(Point { x: 0, y: 0 }, Size { cols: 80, rows: 1 }),
+            Rect::new(Point { x: 0, y: 1 }, Size { cols: 80, rows: 0 }),
+        ]
+    );
+    assert_eq!(
+        one.pane_rect,
+        Rect::new(Point { x: 0, y: 1 }, Size { cols: 80, rows: 0 })
+    );
+
+    // A zero-size viewport: both rectangles are empty at the origin.
+    let zero = core_region_solve(Size { cols: 0, rows: 0 });
+    assert_eq!(zero.regions, vec![Rect::zero(), Rect::zero()]);
+    assert_eq!(zero.pane_rect, Rect::zero());
+}
+
+#[test]
 fn assembling_the_keybinding_row_input_twice_shares_every_allocation() {
     let hints = hints();
-    let theme = Theme::default();
     let pending = KeySequence::new(KeyChord::new(ModFlags::CTRL, Key::Char('p')), Vec::new());
 
-    let first = StatuslineDto {
+    let first = StatuslineInputs {
         hints: &hints,
-        theme: &theme,
         pending: Some(&pending),
     };
-    let second = StatuslineDto {
+    let second = StatuslineInputs {
         hints: &hints,
-        theme: &theme,
         pending: Some(&pending),
     };
 
@@ -120,7 +156,6 @@ fn assembling_the_keybinding_row_input_twice_shares_every_allocation() {
         "removed was copied"
     );
     assert!(std::ptr::eq(first.hints, second.hints), "hints was copied");
-    assert!(std::ptr::eq(first.theme, second.theme), "theme was copied");
     assert!(
         std::ptr::eq(first.pending.unwrap(), second.pending.unwrap()),
         "pending was copied"
@@ -132,7 +167,6 @@ fn assembling_the_tab_row_input_twice_borrows_each_shared_field() {
     let mut snapshot = snapshot();
     snapshot.client.lock_mode = LockMode::Locked;
     snapshot.client.mouse_select = true;
-    let theme = Theme::default();
     let viewer = ViewerChrome {
         reconnecting: Some(Reconnecting {
             attempt: 3,
@@ -142,23 +176,21 @@ fn assembling_the_tab_row_input_twice_borrows_each_shared_field() {
         ..ViewerChrome::default()
     };
 
-    let first = NavigatorDto {
+    let first = TablineInputs {
         session_name: &snapshot.session.name,
         tabs: &snapshot.session.tabs_metadata,
         lock_mode: snapshot.client.lock_mode,
         mouse_select: snapshot.client.mouse_select,
         reconnecting: viewer.reconnecting,
         tabline_offset: viewer.tabline_offset,
-        theme: &theme,
     };
-    let second = NavigatorDto {
+    let second = TablineInputs {
         session_name: &snapshot.session.name,
         tabs: &snapshot.session.tabs_metadata,
         lock_mode: snapshot.client.lock_mode,
         mouse_select: snapshot.client.mouse_select,
         reconnecting: viewer.reconnecting,
         tabline_offset: viewer.tabline_offset,
-        theme: &theme,
     };
 
     assert_eq!(first.session_name, "one");
@@ -182,8 +214,8 @@ fn assembling_the_tab_row_input_twice_borrows_each_shared_field() {
     assert_eq!(first.mouse_select, second.mouse_select);
     assert_eq!(first.reconnecting, second.reconnecting);
     assert_eq!(first.tabline_offset, second.tabline_offset);
-    assert!(std::ptr::eq(first.theme, second.theme), "theme was copied");
 
+    // The frame yields the same value, field for field.
     let layout = snapshot.layout(viewer);
-    assert_eq!(first.inputs(), layout.navigator());
+    assert_eq!(first, layout.tabline());
 }

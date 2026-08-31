@@ -3,13 +3,13 @@
 //!
 //! The client opens with
 //! [`Hello`](crate::remote_wire::RemoteClientFrame::Hello), which names the
-//! session protocol versions it speaks and presents the secret from a grant.
-//! Those version numbers are not this doorway's own: the server relays them,
-//! unread, into the session-plane Hello it sends on the client's behalf, so
-//! the two ends negotiate the session protocol exactly as a local client and a
-//! session server do, and a mismatch is refused there by name. The
-//! server answers
-//! [`Welcome`](crate::remote_wire::RemoteServerFrame::Welcome) or
+//! doorway versions it speaks, the session protocol versions it speaks, and
+//! the secret from a grant. The server settles the doorway version from the
+//! first pair: the highest both ends speak. The second pair it relays, unread,
+//! into the session-plane Hello it sends on the client's behalf; the session
+//! server refuses a mismatch there by name. The server answers
+//! [`Welcome`](crate::remote_wire::RemoteServerFrame::Welcome) carrying the
+//! settled doorway version, or
 //! [`Refused`](crate::remote_wire::RemoteServerFrame::Refused). After that the
 //! client either lists the sessions its secret reaches, or asks to attach to
 //! one. [`open`](crate::remote_wire::open) is the dialling side of that
@@ -51,9 +51,8 @@ pub const MIN_REMOTE_PROTOCOL_VERSION: u32 = koshi_core::compat::REMOTE_PROTOCOL
 
 /// The largest frame the server accepts before a Hello is admitted: 4 KiB.
 ///
-/// A Hello carries two version numbers and one secret, so it fits many times
-/// over. The cap bounds what an unauthenticated caller can make the server
-/// read.
+/// A Hello carries four version numbers and one secret. One carrying a
+/// generated secret fits inside the cap at every value the versions can hold.
 pub const REMOTE_HELLO_MAX_LEN: u32 = 4096;
 
 /// The one sentence every refusal carries: a wrong secret, a revoked one, an
@@ -80,18 +79,19 @@ pub fn version_refusal(caller_min: u32, caller_max: u32) -> String {
 
 /// One message from a remote client to the machine serving it.
 ///
-/// Decoding rejects any field it does not know, so a misspelled name is an
-/// error.
+/// A field this build does not know is ignored. A client that adds one still
+/// decodes here. Every field below is required: a misspelled name is the
+/// missing-field error for the name it displaced.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub enum RemoteClientFrame {
-    /// Opens the stream: names the session protocol versions the client
-    /// speaks and presents the secret from a grant. Sent before any other
-    /// frame.
+    /// Opens the stream: names the doorway versions and the session protocol
+    /// versions the client speaks, and presents the secret from a grant. Sent
+    /// before any other frame.
     ///
-    /// The two version numbers belong to the session protocol, not to these
-    /// frames. The server carries them into the session-plane Hello it sends
-    /// for this client, and never reads them itself.
+    /// The server settles the doorway version from `min_remote_version` and
+    /// `max_remote_version`. It carries `min_protocol_version` and
+    /// `max_protocol_version` into the session-plane Hello it sends for this
+    /// client, and never reads them itself.
     Hello {
         /// The lowest doorway version the client speaks.
         min_remote_version: u32,
@@ -115,10 +115,10 @@ pub enum RemoteClientFrame {
 
 /// One message from the machine serving a remote client back to it.
 ///
-/// Decoding rejects any field it does not know, so a misspelled name is an
-/// error.
+/// A field this build does not know is ignored. A server that adds one still
+/// decodes here. Every field below is required: a misspelled name is the
+/// missing-field error for the name it displaced.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub enum RemoteServerFrame {
     /// Answers [`RemoteClientFrame::Hello`]: the stream is open.
     Welcome {
@@ -128,7 +128,8 @@ pub enum RemoteServerFrame {
     },
     /// The stream is not open, or the frame is not served.
     Refused {
-        /// [`REMOTE_REFUSED`], whatever the case was.
+        /// [`REMOTE_REFUSED`], or the sentence [`version_refusal`] builds
+        /// when no doorway version suits both ends.
         message: String,
     },
     /// Answers [`RemoteClientFrame::List`]: one row per session this secret
@@ -146,11 +147,10 @@ pub enum RemoteServerFrame {
 /// the first connection to this server.
 ///
 /// `timeout` bounds everything after the name lookup: the connect, the TLS
-/// handshake, the Hello and the answer share one deadline, so a server that
-/// sends its answer one byte at a time cannot stretch the dial past it.
+/// handshake, the Hello and the answer share one deadline. A server that
+/// sends its answer one byte at a time is cut off at that deadline.
 ///
-/// `reply_wait` says how long the halves that come back may block, which is
-/// the caller's business and not this function's:
+/// `reply_wait` says how long the halves that come back may block:
 ///
 /// - `None` — they block for as long as it takes.
 /// - `Some(wait)` — every read and write on them finishes inside `wait`,
@@ -165,9 +165,11 @@ pub enum RemoteServerFrame {
 /// [`IpcError::TlsHandshakeFailed`] when the handshake fails, and
 /// [`IpcError::CertificateChanged`] when the presented certificate does not
 /// match the pinned fingerprint. [`IpcError::Transport`] naming what failed
-/// for the lookup and the stream split. [`IpcError::Disconnected`] when the
-/// server hung up, and [`IpcError::MalformedFrame`] when its answer does not
-/// decode.
+/// for the lookup, the stream split, and a Hello or answer that ran out of
+/// time. [`IpcError::Disconnected`] when the server hung up,
+/// [`IpcError::FrameTooLarge`] when its answer's length prefix is past
+/// [`MAX_FRAME_LEN`](crate::transport::MAX_FRAME_LEN), and
+/// [`IpcError::MalformedFrame`] when its answer does not decode.
 pub fn open(
     address: &str,
     pinned: Option<&str>,
@@ -176,22 +178,21 @@ pub fn open(
     reply_wait: Option<Duration>,
 ) -> Result<(FrameReader, FrameWriter, String, RemoteServerFrame), IpcError> {
     let (mut reader, mut writer, presented) = tls::dial(address, pinned, timeout)?;
-    let exchanged = write_message(&mut writer, hello)
-        .and_then(|()| read_message::<RemoteServerFrame>(&mut reader));
+    write_message(&mut writer, hello)?;
+    let answer = read_message::<RemoteServerFrame>(&mut reader)?;
     let after = reply_wait.map(|wait| Instant::now() + wait);
     reader.set_deadline(after);
     writer.set_deadline(after);
-    let answer = exchanged?;
     let (reader, writer) = frame_halves(Box::new(reader), Box::new(writer));
     Ok((reader, writer, presented, answer))
 }
 
 /// One session as a remote client may see it.
 ///
-/// Decoding rejects any field it does not know, so a misspelled name is an
-/// error.
+/// A field this build does not know is ignored. A server that adds one still
+/// decodes here. Both fields below are required: a misspelled name is the
+/// missing-field error for the name it displaced.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RemoteSessionRow {
     /// The session's stable id.
     pub id: SessionId,

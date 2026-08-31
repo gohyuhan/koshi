@@ -4,9 +4,9 @@
 //! [`Buffer`] as three stock zones: a **tabline** (session name, the running
 //! koshi version, and the tab list on the left, the right-aligned mode tag),
 //! the **pane area** (a bordered box per visible pane, the focused pane's
-//! border highlighted), and the **keybinding hint bar** — a koshi-owned row
-//! painted by [`crate::statusline_hints`] from the per-mode keybinding data the
-//! caller passes in. The committed region solve supplies all three zones.
+//! border highlighted), and the **statusline** — a koshi-owned keybinding row
+//! painted from the per-mode keybinding data the caller passes in. The
+//! committed region solve supplies all three zones.
 //!
 //! Collapsed members of a stacked pane group are drawn as one-row title strips
 //! in the pane area, and each visible terminal pane's cells are painted into its
@@ -32,12 +32,12 @@ use koshi_core::lock::LockMode;
 use koshi_terminal::grid::state::{Cell, Grid};
 use koshi_terminal::style::{Color as CellColor, Style as CellStyle, UnderlineStyle};
 
-use crate::region::{NavigatorDto, StatuslineDto};
+use crate::region::StatuslineInputs;
 use crate::snapshot::{
     CommittedRegions, CursorStyle, KeymapHints, PaneSnapshot, Reconnecting, RenderSnapshot,
     SelectionSpans, ViewerChrome,
 };
-use crate::statusline_hints::draw_hint_bar;
+use crate::statusline_hints::draw_statusline;
 use crate::theme::Theme;
 
 /// Paint `snapshot` into `buf` over `area` with the region solve committed with
@@ -55,19 +55,24 @@ use crate::theme::Theme;
 ///    its scroll position in the bottom border when it is scrolled back.
 /// 3. Draws each visible terminal pane's cells into its content rect.
 /// 4. Draws the one-row title strip for every collapsed stack member.
-/// 5. Fills the letterbox margin around the centered layout. The margin stays
-///    inside the pane rectangle left by `committed_regions`.
-/// 6. Draws the tabline in the first committed region.
-/// 7. Draws the keybinding hint bar in the second committed region.
+/// 5. Fills the letterbox margin: every cell of `area` outside the centered
+///    layout, the chrome rows included.
+/// 6. Draws the tabline in the first committed region, over that margin.
+/// 7. Draws the statusline in the second committed region, over that margin.
 ///
 /// `theme`, `hints`, `pending`, and `viewer` come from the viewer: the colors
-/// it paints koshi's chrome in, the hint-bar data for the mode it is in, the
+/// it paints koshi's chrome in, the statusline data for the mode it is in, the
 /// multi-chord sequence it has open, and the pane its pointer is over together
 /// with where its tab strip is scrolled and whether it is dialing the session
 /// again.
 /// The attached client passes the same [`CommittedRegions`] to this function
 /// and to [`cursor_position`]. For example, a left region of 20 columns on a
 /// `120x40` viewport leaves the pane rectangle at `x = 20`.
+///
+/// # Panics
+///
+/// In a debug build, when `snapshot.client.active_tab` is not
+/// `snapshot.session.active_tab.id`.
 #[allow(clippy::too_many_arguments)]
 pub fn render_frame(
     snapshot: &RenderSnapshot,
@@ -90,9 +95,9 @@ pub fn render_frame(
         "snapshot builder must solve the client's active tab into session.active_tab"
     );
 
-    // Blank the viewport first: ratatui reuses the previous frame's buffer, and
-    // this clears stale cells in the tabline gap, the reserved hint row, and any
-    // pane interior not painted this frame.
+    // Reset every cell of `area` first, so a buffer carried over from the
+    // previous frame keeps no cell in the tabline gap, the reserved statusline row,
+    // or a pane interior this frame does not paint.
     Clear.render(area, buf);
 
     // No room for any pane: the whole frame becomes the too-small overlay.
@@ -110,38 +115,24 @@ pub fn render_frame(
         pane_area(committed_regions, area),
         snapshot.session.active_tab.effective_size,
     );
-    let offset = Point {
-        x: content.x,
-        y: content.y,
-    };
+    let offset = origin(content);
 
     draw_panes(snapshot, theme, viewer.hovered_pane, offset, buf);
     draw_pane_contents(snapshot, offset, buf);
     draw_stack_headers(snapshot, theme, offset, buf);
 
-    // The margin fills first; the tabline and hint bar paint over it.
+    // The margin fills first; the tabline and statusline paint over it.
     draw_letterbox(area, content, theme, buf);
 
-    let navigator = NavigatorDto {
-        session_name: &snapshot.session.name,
-        tabs: &snapshot.session.tabs_metadata,
-        lock_mode: snapshot.client.lock_mode,
-        mouse_select: snapshot.client.mouse_select,
-        reconnecting: viewer.reconnecting,
-        tabline_offset: viewer.tabline_offset,
-        theme,
-    };
+    // The same tab-row facts hit-testing reads, so the tabline drawn is the
+    // tabline classified.
+    let tabline_inputs = snapshot.layout(viewer).tabline();
     if let Some(tabline) = region_area(committed_regions, 0, area) {
-        draw_tabline(&navigator, tabline, buf);
+        draw_tabline(tabline_inputs, theme, tabline, buf);
     }
 
-    if let Some(hint_bar) = region_area(committed_regions, 1, area) {
-        let statusline = StatuslineDto {
-            hints,
-            theme,
-            pending,
-        };
-        draw_hint_bar(&statusline, hint_bar, buf);
+    if let Some(statusline) = region_area(committed_regions, 1, area) {
+        draw_statusline(StatuslineInputs { hints, pending }, theme, statusline, buf);
     }
 }
 
@@ -153,13 +144,14 @@ pub fn render_frame(
 /// regions — and places the terminal's cursor at the returned [`Position`] (or
 /// hides it on `None`). The
 /// position is the focused pane's cursor cell — its row and column within the
-/// content area, shifted by the same letterbox offset `render_frame` centers the
-/// layout with and clamped inside the area — in the same absolute buffer
-/// coordinates the panes are drawn in.
+/// pane's content area, shifted by the same letterbox offset `render_frame`
+/// centers the layout with and clamped to that content area's last cell — in
+/// the same absolute buffer coordinates the panes are drawn in.
 ///
 /// Returns `None` when the client has no focused pane; that pane has no placed
 /// slot or no content snapshot; it is not visible or has no content area
-/// (suppressed, hidden, or a collapsed stack member); it has no terminal grid
+/// (suppressed, hidden, a collapsed stack member, or a slot of two or fewer
+/// columns or rows, whose content rect holds no cells); it has no terminal grid
 /// (a plugin pane, or a slot showing nothing this frame); its view is scrolled
 /// back into history (no hardware cursor is placed while scrolled); or the
 /// application has hidden its cursor.
@@ -183,9 +175,12 @@ pub fn cursor_position(
         return None;
     }
     let inner = slot.inner_rect?;
+    if inner.size.cols == 0 || inner.size.rows == 0 {
+        return None;
+    }
 
     let pane = find_pane(snapshot, focused)?;
-    // A plugin pane (no grid) gets a cursor only when the plugin asks for one.
+    // A pane with no grid — a plugin pane — places no cursor.
     let view = pane.grid_view.as_ref()?;
     // A view scrolled back into history shows no hardware cursor.
     if view.view_offset > 0 {
@@ -196,23 +191,17 @@ pub fn cursor_position(
     }
 
     // Map the pane-local cursor (col/row counted from the content area's own
-    // top-left) to a screen cell. `inner` is the content rect in effective-layout
-    // space; `place` shifts it by the same letterbox offset `render_frame` centers
-    // with, so the cursor lands on the cell the panes drew. Adding the local
-    // col/row to the placed origin gives the screen position; clamp inside the
-    // rect since a dead pane keeps a frozen cursor while its content rect can
-    // shrink, so the raw sum may fall past the edge.
+    // top-left) to a screen cell. `inner` is the content rect in
+    // effective-layout space; `place` shifts it by the same letterbox offset
+    // `render_frame` centers with. The placed origin plus the local col/row is
+    // the screen position, clamped to the rect's last cell: a dead pane keeps a
+    // frozen col/row while its content rect shrinks, so the sum can land past
+    // the edge.
     let content = content_rect(
         pane_area(committed_regions, area),
         snapshot.session.active_tab.effective_size,
     );
-    let inner = place(
-        inner,
-        Point {
-            x: content.x,
-            y: content.y,
-        },
-    );
+    let inner = place(inner, origin(content));
     let x = (inner.x + pane.cursor.col).min(inner.right().saturating_sub(1));
     let y = (inner.y + pane.cursor.row).min(inner.bottom().saturating_sub(1));
     Some(Position::new(x, y))
@@ -289,7 +278,8 @@ fn draw_panes(
         let pane = find_pane(snapshot, slot.pane_id);
 
         // The pane's title sits in the top border as ` title `, starting two
-        // cells in and clipped four cells short, so the corner glyphs survive.
+        // cells in and clipped four cells short of the box width, which leaves
+        // the corner glyphs.
         if let Some(title) = pane.and_then(|pane| pane.title.as_deref()) {
             if !title.is_empty() && rect.width > 4 {
                 let line = Line::from(Span::styled(format!(" {title} "), style));
@@ -302,7 +292,7 @@ fn draw_panes(
         // nothing. Each pane carries its own offset, so several can show at once.
         if let Some((up, total)) = pane.and_then(pane_scroll) {
             let text = format!(" {up}/{total} ");
-            let width = text.len() as u16;
+            let width = text_width(&text);
             if rect.width >= width + 2 {
                 let line = Line::from(Span::styled(text, style));
                 let x = rect.right() - 1 - width;
@@ -316,14 +306,13 @@ fn draw_panes(
 /// user to enlarge the window, shown when the tab has no room for any pane.
 ///
 /// Centered on the middle row of `area` and horizontally within it. A message
-/// wider than the viewport is clipped to the right edge, so nothing is written
-/// out of bounds on a very narrow screen.
+/// wider than `area` is clipped at its right edge.
 fn draw_too_small_overlay(area: RatatuiRect, buf: &mut Buffer) {
     let message = Line::from(Span::styled(
         "Terminal too small — enlarge window",
         too_small_style(),
     ));
-    let width = message.width() as u16;
+    let width = line_width(&message);
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height / 2;
     set_line_clipped(buf, x, y, &message, area.right().saturating_sub(x));
@@ -383,12 +372,11 @@ fn draw_grid(
     let (grid_rows, grid_cols) = grid.dimensions();
     let rows = grid_rows.min(area.height);
     let cols = grid_cols.min(area.width);
-    // Zipping against the grid's row slices resolves each row once, so the
-    // column walk indexes into that row's cells directly.
     for (row, cells) in (0..rows).zip(grid.rows()) {
-        // Once per row, not once per cell: a highlight is a column range on a
-        // row, so the row's range is looked up before walking its cells.
+        // A highlight is one column range per row, resolved before the row's
+        // cells are walked.
         let span = selection.and_then(|spans| spans.row_span(row));
+        let y = area.y + row;
         for col in 0..cols {
             let Some(cell) = cells.get(col as usize) else {
                 continue;
@@ -398,7 +386,6 @@ fn draw_grid(
                 continue;
             }
             let x = area.x + col;
-            let y = area.y + row;
             let selected = span.is_some_and(|(start, end)| col >= start && col <= end);
             let style = cell_style(cell.style(), reverse_video ^ selected);
             if width >= 2 && col + 1 >= cols {
@@ -486,18 +473,18 @@ fn draw_stack_headers(snapshot: &RenderSnapshot, theme: &Theme, offset: Point, b
             continue;
         }
 
-        // Fill the whole row first so the gap between the title and the
-        // indicator carries the strip background too.
+        // Fill the whole row first: the gap between the title and the indicator
+        // carries the strip background too.
         buf.set_style(rect, style);
 
         let title = header_title(snapshot, header.pane);
         let left = Line::from(format!("▸ {title}"));
         set_line_clipped(buf, rect.x, rect.y, &left, rect.width);
 
-        // Right-align `[N/total]`, clamped inside the strip so a stack narrower
-        // than the indicator never writes into a neighbouring pane.
+        // Right-align `[N/total]`, with its start column clamped to `rect.x`. A
+        // strip narrower than the indicator writes only inside the strip.
         let indicator = Line::from(format!("[{}/{}]", header.position + 1, header.total));
-        let width = indicator.width() as u16;
+        let width = line_width(&indicator);
         let x = rect.right().saturating_sub(width).max(rect.x);
         set_line_clipped(buf, x, rect.y, &indicator, rect.right() - x);
     }
@@ -571,10 +558,18 @@ fn pane_scroll(pane: &PaneSnapshot) -> Option<(usize, usize)> {
     (offset > 0).then_some((offset, pane.scrollback.retained_lines))
 }
 
+/// The top-left cell of a ratatui rect, as the offset [`place`] shifts by. An
+/// area at `x: 20, y: 1` gives `Point { x: 20, y: 1 }`.
+fn origin(area: RatatuiRect) -> Point {
+    Point {
+        x: area.x,
+        y: area.y,
+    }
+}
+
 /// Place a koshi-core cell rect into a ratatui area by shifting its origin.
 ///
-/// A region solve starts at `(0, 0)`, while a ratatui frame area can have a
-/// nonzero origin. The shift keeps both coordinate systems aligned.
+/// A region solve starts at `(0, 0)`; a ratatui frame area can start elsewhere.
 pub(crate) fn place(rect: Rect, offset: Point) -> RatatuiRect {
     RatatuiRect {
         x: rect.origin.x + offset.x,
@@ -594,35 +589,39 @@ pub(crate) fn region_area(
         .solve
         .regions
         .get(index)
-        .copied()
-        .map(|rect| {
-            place(
-                rect,
-                Point {
-                    x: area.x,
-                    y: area.y,
-                },
-            )
-        })
+        .map(|&rect| place(rect, origin(area)))
 }
 
 /// Return the pane rectangle left by the committed regions in frame coordinates.
 pub(crate) fn pane_area(committed_regions: &CommittedRegions, area: RatatuiRect) -> RatatuiRect {
-    place(
-        committed_regions.solve.pane_rect,
-        Point {
-            x: area.x,
-            y: area.y,
-        },
-    )
+    place(committed_regions.solve.pane_rect, origin(area))
 }
 
-/// Draw a line, skipping it when its row lies outside the buffer.
+/// The cells `text` occupies when drawn, counted as Unicode display width and
+/// never from its bytes or chars: `漢字` is 4, `🦀` is 2, `e` plus a combining
+/// acute is 1.
+///
+/// Text wider than `u16::MAX` cells gives `u16::MAX`, which every width
+/// comparison in this crate reads as wider than the row.
+pub(crate) fn text_width(text: &str) -> u16 {
+    u16::try_from(Span::raw(text).width()).unwrap_or(u16::MAX)
+}
+
+/// The cells `line` occupies when drawn, summed over its spans and never taken
+/// from their styles.
+///
+/// A line wider than `u16::MAX` cells gives `u16::MAX`, which every width
+/// comparison in this crate reads as wider than the row.
+pub(crate) fn line_width(line: &Line<'_>) -> u16 {
+    u16::try_from(line.width()).unwrap_or(u16::MAX)
+}
+
+/// Draw a line, writing nothing when `y` lies outside the buffer's rows.
 ///
 /// [`Buffer::set_line`] clips a line horizontally but writes its row with no
-/// vertical bound, so a row past the buffer's height panics. A resize can leave
-/// the buffer shorter than the laid-out frame (its rows solved for a taller
-/// size), which places chrome rows below the buffer; this guards that row.
+/// vertical bound: a row past the buffer's height panics. A buffer shorter than
+/// the laid-out frame — a resize left the frame's rows solved for a taller
+/// size — places chrome rows below it, and those rows are skipped.
 pub(crate) fn set_line_clipped(buf: &mut Buffer, x: u16, y: u16, line: &Line<'_>, max_width: u16) {
     if y < buf.area.top() || y >= buf.area.bottom() {
         return;
@@ -632,8 +631,8 @@ pub(crate) fn set_line_clipped(buf: &mut Buffer, x: u16, y: u16, line: &Line<'_>
 
 /// The centered rect of the effective (solved) size within the pane area.
 ///
-/// A client whose pane area is larger than `effective` gets a letterbox margin.
-/// The size is clamped to the pane area so it never exceeds the viewport.
+/// A pane area larger than `effective` leaves a letterbox margin around the
+/// rect. Each dimension is clamped to the pane area's own.
 pub(crate) fn content_rect(pane_area: RatatuiRect, effective: Size) -> RatatuiRect {
     let width = effective.cols.min(pane_area.width);
     let height = effective.rows.min(pane_area.height);
@@ -649,11 +648,15 @@ pub(crate) fn content_rect(pane_area: RatatuiRect, effective: Size) -> RatatuiRe
 /// `content` rect — with a dim backdrop. Does nothing when the content fills the
 /// whole area.
 ///
-/// The margin is the four bands around `content`; [`render_frame`] already
-/// blanked every cell with `Clear`, so restyling is enough. [`Buffer::set_style`]
-/// clips to the buffer, so an `area` larger than `buf` (a resize race can report
-/// a viewport bigger than the current buffer) never indexes out of bounds.
+/// The margin is the four bands around `content` once `content` is cut to
+/// `area`: a `content` solved for a larger viewport than `area` — a terminal
+/// shrink between the last committed solve and this paint — reaches past
+/// `area`, and the part outside it is not a band. Each band is restyled in
+/// place, never blanked: [`render_frame`] clears every cell of `area` before
+/// this runs. [`Buffer::set_style`] clips to the buffer, so an `area` larger
+/// than `buf` writes only inside `buf`.
 fn draw_letterbox(area: RatatuiRect, content: RatatuiRect, theme: &Theme, buf: &mut Buffer) {
+    let content = area.intersection(content);
     if content == area {
         return;
     }
@@ -671,7 +674,7 @@ fn draw_letterbox(area: RatatuiRect, content: RatatuiRect, theme: &Theme, buf: &
             x: area.x,
             y: content.bottom(),
             width: area.width,
-            height: area.bottom() - content.bottom(),
+            height: area.bottom().saturating_sub(content.bottom()),
         },
         // Left of the content, its own height.
         RatatuiRect {
@@ -684,7 +687,7 @@ fn draw_letterbox(area: RatatuiRect, content: RatatuiRect, theme: &Theme, buf: &
         RatatuiRect {
             x: content.right(),
             y: content.y,
-            width: area.right() - content.right(),
+            width: area.right().saturating_sub(content.right()),
             height: content.height,
         },
     ];
@@ -698,7 +701,7 @@ mod tabline;
 
 use style::*;
 use tabline::draw_tabline;
-// The hint bar fills its row with the same bar background as the tab bar.
+// The statusline fills its row with the same bar background as the tabline.
 pub(crate) use style::bar_style;
 pub(crate) use tabline::tabline_layout;
 // The badge text, reachable from the sibling test modules.

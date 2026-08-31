@@ -22,7 +22,7 @@ use koshi_ipc::protocol::ConnectionToken;
 use koshi_ipc::remote_servers::{Lookup, SavedServer, ServerStore};
 
 use crate::cli::RemoteCommand;
-use crate::output;
+use crate::{output, prompt};
 use koshi_link::error::CliError;
 use koshi_link::remote_client::{
     self, check_name_shape, looks_like_address, prompt_line, prompt_secret, read_store,
@@ -379,17 +379,14 @@ fn check_server(
     }
 }
 
-/// Ask `question` and answer whether the user said yes.
-///
-/// `y` and `yes`, in any letter case, are yes. Every other answer, an empty
-/// one included, is no.
+/// Ask `question` and answer it with [`prompt::is_yes`].
 ///
 /// # Errors
 /// [`CliError::InvalidArgs`] when the terminal could not be read, and when the
 /// input ended before an answer arrived.
 fn confirmed(question: &str) -> Result<bool, CliError> {
     let typed = prompt_line(&format!("{question} [y/N]: "))?;
-    Ok(matches!(typed.to_ascii_lowercase().as_str(), "y" | "yes"))
+    Ok(prompt::is_yes(&typed))
 }
 
 /// `Ok(())` when `name` is a word this store can give to a record.

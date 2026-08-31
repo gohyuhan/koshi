@@ -15,7 +15,6 @@ use koshi_core::key::{Key, KeyChord, ModFlags, NamedKey};
 use koshi_core::process::{ExitStatus, KillPolicy};
 use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_pty::backend::state::PtyBackend;
-use koshi_runtime::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
 use koshi_runtime::runtime::bus::EventFilter;
 use koshi_runtime::runtime::event::RuntimeEvent;
 use koshi_runtime::server::Server;
@@ -23,19 +22,16 @@ use koshi_test_support::fake_pty::FakePtyBackend;
 
 const VIEWPORT: Size = Size { cols: 80, rows: 24 };
 
-/// A server driven by `fake`, holding its own inbox with a forwarder-facing
-/// sender clone — the shape the binary constructs.
+/// A server driven by `fake`, holding its own inbox receiver and a sender
+/// clone for the pane forwarders.
 fn server_with(fake: Arc<FakePtyBackend>) -> Server {
     let backend: Arc<dyn PtyBackend> = fake;
-    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
-    let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (tx, rx) = mpsc::channel();
-    Server::new(backend, snapshot_provider, storage, rx, tx)
+    Server::new(backend, rx, tx)
 }
 
-/// Receive the next event of the wanted shape, ignoring any earlier ones, or
-/// panic on timeout. The single relay forwards a pane's output before its exit,
-/// so a `ChildExit` is preceded by any trailing output.
+/// Receive the first inbox event `want` accepts, dropping the ones before it.
+/// Panics once 2 seconds have passed with no accepted event.
 fn recv_matching(rt: &Server, mut want: impl FnMut(&RuntimeEvent) -> bool) -> RuntimeEvent {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
@@ -181,7 +177,6 @@ fn child_exit_is_forwarded_and_ends_the_last_pane() {
     let RuntimeEvent::ChildExit {
         pane_id: exited,
         status,
-        exited_at,
     } = event
     else {
         unreachable!("matched above")
@@ -190,7 +185,7 @@ fn child_exit_is_forwarded_and_ends_the_last_pane() {
     assert_eq!(status, ExitStatus::ExitCode(0));
 
     // Applying the exit removes the only pane, so the loop's exit condition trips.
-    let _ = rt.handle_child_exit(exited, status, exited_at);
+    let _ = rt.handle_child_exit(exited, status);
     assert!(!rt.has_active_panes());
 }
 
@@ -202,12 +197,11 @@ fn trailing_output_is_forwarded_before_the_exit() {
         .expect("bootstrap");
     let pane_id = fake.spawned_panes()[0];
 
-    // The child writes, its PTY EOFs, then it exits. The single relay must
-    // deliver the output before the exit — never the reverse, which would drop
-    // the final output once the engine is torn down.
+    // The child writes, its PTY reaches end of file, then it exits. The single
+    // relay delivers the output before the exit.
     fake.push_output(pane_id, b"bye".to_vec()).expect("push");
     fake.close_output(pane_id).expect("close output");
-    fake.trigger_child_exit(pane_id, ExitStatus::ExitCode(0))
+    fake.trigger_child_exit(pane_id, ExitStatus::ExitCode(3))
         .expect("exit");
 
     let first = rt
@@ -228,7 +222,16 @@ fn trailing_output_is_forwarded_before_the_exit() {
         .inbox_rx()
         .recv_timeout(Duration::from_secs(2))
         .expect("second event");
-    assert!(matches!(second, RuntimeEvent::ChildExit { .. }));
+    match second {
+        RuntimeEvent::ChildExit {
+            pane_id: exited,
+            status,
+        } => {
+            assert_eq!(exited, pane_id);
+            assert_eq!(status, ExitStatus::ExitCode(3));
+        }
+        other => panic!("expected ChildExit, got {other:?}"),
+    }
 }
 
 #[test]
@@ -239,7 +242,8 @@ fn kill_all_panes_group_kills_the_shell() {
         .expect("bootstrap");
     let pane_id = fake.spawned_panes()[0];
 
-    // The panic-path teardown group-kills so no descendant is orphaned.
+    // The panic-path teardown group-kills every pane's child, reaping its
+    // descendants.
     rt.kill_all_panes();
 
     assert_eq!(fake.kills(pane_id).expect("kills"), vec![KillPolicy::Tree]);

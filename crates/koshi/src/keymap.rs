@@ -14,9 +14,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use koshi_config::conflict::{
-    built_in_modes, detect_conflicts, keymap_layers, ConflictReport, KeymapVerdict,
-};
+use koshi_config::conflict::{detect_conflicts, keymap_layers, ConflictReport, KeymapVerdict};
 use koshi_config::keybinding::{parse_keybindings, KeybindingParseError};
 use koshi_config::keymap_merge::{merge_keymaps, MergedKeyMap};
 use koshi_config::layer::PartialKeybindingsConfig;
@@ -40,9 +38,9 @@ pub struct KeymapView {
     /// Every conflict-detection finding for the user layer, warnings
     /// included. Holds no findings when no user file exists.
     pub report: ConflictReport,
-    /// True when a user file exists but was not admitted — its conflict
-    /// verdict refused it, or it failed to parse — so the view shows the
-    /// built-in defaults.
+    /// True when the view holds the built-in defaults although a user file
+    /// exists: its conflict verdict refused it, or it could not be read or
+    /// parsed.
     pub reverted: bool,
     /// The user keybinding file the view read, when one exists.
     pub user_file: Option<PathBuf>,
@@ -72,9 +70,8 @@ pub fn load_keymap_view() -> KeymapView {
 }
 
 /// Build the view for one already-parsed user layer (`None` = defaults
-/// only). `user_file`/`file_error` pass through to the view. This is
-/// [`load_keymap_view`] minus the file I/O, for callers that already hold
-/// the parsed layer.
+/// only). `user_file`/`file_error` pass through to the view. Reads no file:
+/// this is [`load_keymap_view`] without the file I/O.
 #[must_use]
 pub fn view_from_partial(
     partial: Option<PartialKeybindingsConfig>,
@@ -108,7 +105,6 @@ pub fn view_from_partial(
         None => None,
     };
 
-    let modes = built_in_modes();
     let layers = keymap_layers(user_modes, config.leader);
     let report = detect_conflicts(
         &layers,
@@ -116,7 +112,6 @@ pub fn view_from_partial(
         config.unlock_alternative,
         config.max_chord_depth,
         &registry,
-        &modes,
     );
 
     // All-or-nothing: a refused user layer drops the whole section back to
@@ -133,7 +128,6 @@ pub fn view_from_partial(
         config.unlock_alternative,
         config.max_chord_depth,
         &registry,
-        &modes,
     );
     KeymapView {
         config,

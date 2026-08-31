@@ -1,11 +1,11 @@
 //! Tests for the layout answer's wire form: a populated layout survives a
 //! round trip, its encoded shape is pinned field by field, the same bytes
-//! decode back into the same values, and a field this build does not know is
-//! ignored.
+//! decode back into the same values, a field this build does not know is
+//! ignored, and a missing or malformed field is refused with its exact error.
 
 use koshi_core::geometry::{Point, SplitDirection};
 use koshi_layout::size::SizeWeight;
-use koshi_layout::tree::{LayoutChild, SplitNode};
+use koshi_layout::tree::{LayoutNode, SplitNode};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::json;
@@ -64,14 +64,8 @@ fn populated_layout() -> SessionLayout {
             tree: LayoutNode::Split(SplitNode {
                 direction: SplitDirection::Stacked,
                 children: vec![
-                    LayoutChild {
-                        node: LayoutNode::Pane(active_pane()),
-                        collapsed: false,
-                    },
-                    LayoutChild {
-                        node: LayoutNode::Pane(collapsed_pane()),
-                        collapsed: true,
-                    },
+                    LayoutNode::Pane(active_pane()),
+                    LayoutNode::Pane(collapsed_pane()),
                 ],
                 weights: vec![SizeWeight::default(), SizeWeight::default()],
                 active: 0,
@@ -123,14 +117,8 @@ fn populated_layout_json() -> serde_json::Value {
                 "Split": {
                     "direction": "Stacked",
                     "children": [
-                        {
-                            "node": { "Pane": "00000000-0000-0000-0000-000000000004" },
-                            "collapsed": false
-                        },
-                        {
-                            "node": { "Pane": "00000000-0000-0000-0000-000000000005" },
-                            "collapsed": true
-                        }
+                        { "Pane": "00000000-0000-0000-0000-000000000004" },
+                        { "Pane": "00000000-0000-0000-0000-000000000005" }
                     ],
                     "weights": [
                         {
@@ -306,9 +294,15 @@ fn a_layout_carrying_an_unknown_field_ignores_it() {
     )
     .expect("a field this build does not know is ignored");
 
-    assert_eq!(decoded.name, "quiet-lake");
-    assert!(decoded.tabs.is_empty());
-    assert!(decoded.clients.is_empty());
+    assert_eq!(
+        decoded,
+        SessionLayout {
+            id: session_id(),
+            name: "quiet-lake".to_string(),
+            tabs: Vec::new(),
+            clients: Vec::new(),
+        }
+    );
 }
 
 #[test]
@@ -318,9 +312,16 @@ fn a_tab_carrying_an_unknown_field_ignores_it() {
     )
     .expect("a field this build does not know is ignored");
 
-    assert_eq!(decoded.name, "editor");
-    assert_eq!(decoded.index, 0);
-    assert!(decoded.solved.is_empty());
+    assert_eq!(
+        decoded,
+        TabLayout {
+            id: tab_id(),
+            name: "editor".to_string(),
+            index: 0,
+            tree: LayoutNode::Pane(active_pane()),
+            solved: Vec::new(),
+        }
+    );
 }
 
 #[test]
@@ -330,9 +331,18 @@ fn a_solved_tab_carrying_an_unknown_field_ignores_it() {
     )
     .expect("a field this build does not know is ignored");
 
-    assert_eq!(decoded.viewport, Size { cols: 80, rows: 22 });
-    assert_eq!(decoded.mode, LayoutMode::Tiled);
-    assert!(!decoded.all_suppressed);
+    assert_eq!(
+        decoded,
+        SolvedTab {
+            client: client_id(),
+            viewport: Size { cols: 80, rows: 22 },
+            mode: LayoutMode::Tiled,
+            panes: Vec::new(),
+            suppressed: Vec::new(),
+            all_suppressed: false,
+            stack_headers: Vec::new(),
+        }
+    );
 }
 
 #[test]
@@ -342,7 +352,13 @@ fn a_solved_pane_carrying_an_unknown_field_ignores_it() {
     )
     .expect("a field this build does not know is ignored");
 
-    assert_eq!(decoded.rect.size, Size { cols: 80, rows: 22 });
+    assert_eq!(
+        decoded,
+        SolvedPane {
+            id: active_pane(),
+            rect: Rect::at_origin(Size { cols: 80, rows: 22 }),
+        }
+    );
 }
 
 #[test]
@@ -352,7 +368,31 @@ fn a_client_focus_carrying_an_unknown_field_ignores_it() {
     )
     .expect("a field this build does not know is ignored");
 
-    assert_eq!(decoded.focused_pane, None);
+    assert_eq!(
+        decoded,
+        ClientFocus {
+            id: client_id(),
+            active_tab: tab_id(),
+            focused_pane: None,
+        }
+    );
+}
+
+#[test]
+fn a_client_focus_with_no_focused_pane_key_reads_as_focusing_nothing() {
+    let decoded: ClientFocus = serde_json::from_str(
+        r#"{"id":"00000000-0000-0000-0000-000000000003","active_tab":"00000000-0000-0000-0000-000000000002"}"#,
+    )
+    .expect("a missing `focused_pane` reads as `None`");
+
+    assert_eq!(
+        decoded,
+        ClientFocus {
+            id: client_id(),
+            active_tab: tab_id(),
+            focused_pane: None,
+        }
+    );
 }
 
 #[test]
@@ -361,8 +401,50 @@ fn a_layout_with_a_misspelled_field_name_is_refused() {
         r#"{"id":"00000000-0000-0000-0000-000000000001","nmae":"quiet-lake","tabs":[],"clients":[]}"#,
     );
 
-    assert!(
-        decoded.is_err(),
-        "a misspelled field decoded instead of failing: {decoded:?}"
+    assert_eq!(
+        decoded
+            .expect_err("a misspelled field is refused")
+            .to_string(),
+        "missing field `name` at line 1 column 88"
+    );
+}
+
+#[test]
+fn a_tab_whose_index_is_below_zero_is_refused() {
+    let decoded: Result<TabLayout, _> = serde_json::from_str(
+        r#"{"id":"00000000-0000-0000-0000-000000000002","name":"editor","index":-1,"tree":{"Pane":"00000000-0000-0000-0000-000000000004"},"solved":[]}"#,
+    );
+
+    assert_eq!(
+        decoded
+            .expect_err("a negative index is refused")
+            .to_string(),
+        "invalid value: integer `-1`, expected usize at line 1 column 71"
+    );
+}
+
+#[test]
+fn a_solve_whose_mode_this_build_does_not_have_is_refused() {
+    let decoded: Result<SolvedTab, _> = serde_json::from_str(
+        r#"{"client":"00000000-0000-0000-0000-000000000003","viewport":{"cols":80,"rows":22},"mode":"Floating","panes":[],"suppressed":[],"all_suppressed":false,"stack_headers":[]}"#,
+    );
+
+    assert_eq!(
+        decoded
+            .expect_err("a mode this build does not have is refused")
+            .to_string(),
+        "unknown variant `Floating`, expected `Tiled` or `Fullscreen` at line 1 column 99"
+    );
+}
+
+#[test]
+fn a_layout_missing_its_clients_is_refused() {
+    let decoded: Result<SessionLayout, _> = serde_json::from_str(
+        r#"{"id":"00000000-0000-0000-0000-000000000001","name":"quiet-lake","tabs":[]}"#,
+    );
+
+    assert_eq!(
+        decoded.expect_err("a missing field is refused").to_string(),
+        "missing field `clients` at line 1 column 75"
     );
 }

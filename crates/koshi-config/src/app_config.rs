@@ -2,25 +2,22 @@
 //!
 //! Turns the top-level sections of `koshi.kdl` into a [`PartialKoshiConfig`]
 //! override layer that folds onto the built-in defaults. Does no file I/O: the
-//! caller reads the file and hands the text in, as the keybinding parser does.
+//! caller reads the file and hands the text in.
 //!
 //! # Field-partial, except `update`
 //!
 //! Every section but `update` is **field-partial**: a field whose value is the
-//! wrong kind is skipped — its default stands — and every other field in the
-//! file still applies, so a single typo never reverts a whole file to defaults.
-//! Each skipped field is named in the returned warnings for the loader to log.
+//! wrong kind is skipped, its default stands, and every other field in the
+//! file still applies. Each skipped field is named in the returned warnings.
 //!
-//! The `update` section is **strict**: a bad field there fails the whole parse.
-//! `update.auto-check` gates a network call, so an unreadable
-//! `auto-check #false` must fail closed rather than be skipped.
+//! The `update` section is **strict**: a field there whose value is the wrong
+//! kind fails the whole parse.
 //!
 //! # The `theme` line
 //!
 //! `theme "midnight"` names which color theme to use; the colors live in a
-//! separate `themes/midnight.kdl`. This parser only records the name, and
-//! hands it back beside the layer rather than inside it — the loader turns it
-//! into a path and reads that file. See [`AppConfigFile`].
+//! separate `themes/midnight.kdl`. This parser records only the name and
+//! returns it beside the layer, not inside it. See [`AppConfigFile`].
 //!
 //! # Example
 //! A `koshi.kdl` of
@@ -52,12 +49,13 @@ use crate::layer::{
     PartialUpdateConfig,
 };
 use crate::parser::{
-    parse_kdl, set, unknown_key, value_bool, value_integer, value_nonempty_string, value_string,
-    value_u16, value_u32,
+    parse_kdl, section_block, set, unknown_key, value_bool, value_integer, value_nonempty_string,
+    value_string, value_u16, value_u32, version_arg,
 };
 use crate::types::WheelScroll;
 
-/// The section names that may appear at most once, checked for duplicates.
+/// The top-level node names. Each may appear at most once; an unknown name is
+/// matched against these for the `did you mean` hint.
 const SECTIONS: &[&str] = &[
     "version",
     "update",
@@ -79,30 +77,32 @@ const SECTIONS: &[&str] = &[
 
 /// A parsed `koshi.kdl`.
 ///
-/// The theme it names is kept **out** of [`layer`](Self::layer). Every other
-/// setting in the file is an override that folds onto the defaults; the theme
-/// line is not a color, it is the name of another file to read. So merging the
-/// layer never produces a config claiming a theme whose colors were never
-/// loaded.
+/// The theme name is kept **out** of [`layer`](Self::layer): `layer.theme` is
+/// always `None`, and the name from the `theme` line is in
+/// [`theme`](Self::theme).
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct AppConfigFile {
     /// The settings this file overrides, to fold onto the built-in defaults.
     pub layer: PartialKoshiConfig,
-    /// The name from the `theme "<name>"` line — which `themes/<name>.kdl`
-    /// supplies the colors. `None` when the file names no theme.
+    /// The name from the `theme "<name>"` line, trimmed of surrounding
+    /// whitespace; `themes/<name>.kdl` supplies the colors. `None` when the
+    /// file names no theme.
     pub theme: Option<String>,
-    /// One entry per field-partial field that was skipped, for the loader to
-    /// log.
+    /// One entry per skipped field, skipped duplicate section, and unknown
+    /// key, in file order.
     pub warnings: Vec<String>,
 }
 
 /// Parses `koshi.kdl` `source` into its override layer, the theme it names, and
-/// the warning for every field-partial field that was skipped.
+/// one warning per skipped field, skipped duplicate section, and unknown key.
 ///
 /// # Errors
-/// Returns [`ConfigError::Parse`] when `source` is not valid KDL, and
-/// [`ConfigError::Validation`] for a missing, duplicate, zero, or newer schema
-/// version, a duplicate `update` section, or a bad strict-update value.
+/// Returns [`ConfigError::Parse`] when `source` is not valid KDL.
+///
+/// Returns [`ConfigError::Validation`] when `version` is missing, repeated,
+/// carries a `{ … }` block, is not a single integer from `0` to `4294967295`,
+/// is `0`, or is newer than this build supports; when `update` is repeated; or
+/// when an `update` field is not a single value of the right type and range.
 pub fn parse_app_config(path: &Path, source: &str) -> Result<AppConfigFile, ConfigError> {
     let doc = parse_kdl(path, source)?;
     let mut partial = PartialKoshiConfig::default();
@@ -112,34 +112,28 @@ pub fn parse_app_config(path: &Path, source: &str) -> Result<AppConfigFile, Conf
     for node in doc.nodes() {
         let name = node.name().value();
         // Each section may appear once. A repeated `version` or `update` is an
-        // error (both are strict — a duplicate must never bypass version's
-        // newer-schema check or update's fail-closed parse); a repeated
-        // field-partial section warns and keeps the first.
+        // error; a repeated field-partial section is dropped with a warning
+        // and the first stands.
         if SECTIONS.contains(&name) && !seen.insert(name) {
             if name == "version" || name == "update" {
-                return Err(validation(name, &format!("duplicate `{name}` section")));
+                return Err(validation(
+                    name,
+                    &format!("`{name}` is declared more than once"),
+                ));
             }
             warnings.push(format!("ignored duplicate `{name}` section"));
             continue;
         }
         match name {
             "version" => {
-                if node.children().is_some() {
-                    return Err(validation("version", "`version` takes no children"));
-                }
-                let found = read_u32(node, "version")?;
-                check_version(found).map_err(|diagnostic| ConfigError::Validation {
-                    key: "version".to_string(),
-                    detail: diagnostic.to_string(),
-                })?;
+                let found =
+                    version_arg(node).map_err(|(_, detail)| validation("version", detail))?;
+                check_version(found)
+                    .map_err(|diagnostic| validation("version", &diagnostic.to_string()))?;
             }
             // `theme` names which `themes/<name>.kdl` supplies the colors; the
-            // colors themselves are never spelled here. A blank name would
-            // point at no file, so it is skipped and the built-in theme stands.
-            "theme" => match value_nonempty_string(node) {
-                Ok(name) => theme = Some(name),
-                Err(detail) => warnings.push(format!("ignored `theme`: {detail}")),
-            },
+            // colors themselves are never spelled here.
+            "theme" => set_top_level(&mut theme, value_nonempty_string(node), name, &mut warnings),
             "update" => partial.update = Some(parse_update(node, &mut warnings)?),
             "pane" => partial.pane = Some(parse_pane(node, &mut warnings)),
             "scrollback" => partial.scrollback = Some(parse_scrollback(node, &mut warnings)),
@@ -148,51 +142,46 @@ pub fn parse_app_config(path: &Path, source: &str) -> Result<AppConfigFile, Conf
             "copy" => partial.copy = Some(parse_copy(node, &mut warnings)),
             "terminal" => partial.terminal = Some(parse_terminal(node, &mut warnings)),
             "logging" => partial.logging = Some(parse_logging(node, &mut warnings)),
-            "remote-reconnect" => match value_bool(node) {
-                Ok(dials_again) => partial.remote_reconnect = Some(dials_again),
-                Err(detail) => {
-                    warnings.push(format!("ignored `remote-reconnect`: {detail}"));
-                }
-            },
-            // Top-level like `theme`, so a bad value names the key alone —
-            // there is no `koshi` block to prefix it with.
-            "allow-beta-features" => match value_bool(node) {
-                Ok(allowed) => partial.allow_beta_features = Some(allowed),
-                Err(detail) => {
-                    warnings.push(format!("ignored `allow-beta-features`: {detail}"));
-                }
-            },
-            "allow-other-users" => match value_bool(node) {
-                Ok(allowed) => partial.allow_other_users = Some(allowed),
-                Err(detail) => {
-                    warnings.push(format!("ignored `allow-other-users`: {detail}"));
-                }
-            },
+            "remote-reconnect" => set_top_level(
+                &mut partial.remote_reconnect,
+                value_bool(node),
+                name,
+                &mut warnings,
+            ),
+            "allow-beta-features" => set_top_level(
+                &mut partial.allow_beta_features,
+                value_bool(node),
+                name,
+                &mut warnings,
+            ),
+            "allow-other-users" => set_top_level(
+                &mut partial.allow_other_users,
+                value_bool(node),
+                name,
+                &mut warnings,
+            ),
             // `remote-listen` is `Option<Option<String>>`: the outer layer
-            // marks the field set, the inner carries the address. A blank
-            // value names no address, so it is ignored with a warning.
-            "remote-listen" => match value_nonempty_string(node) {
-                Ok(address) => partial.remote_listen = Some(Some(address)),
-                Err(detail) => {
-                    warnings.push(format!("ignored `remote-listen`: {detail}"));
-                }
-            },
+            // marks the field set, the inner carries the address.
+            "remote-listen" => set_top_level(
+                &mut partial.remote_listen,
+                value_nonempty_string(node).map(Some),
+                name,
+                &mut warnings,
+            ),
             // `shared-sessions-dir` is `Option<Option<PathBuf>>`: the outer
-            // layer marks the field set, the inner carries the directory. A
-            // blank value is ignored with a warning, so the platform's
-            // machine-wide directory stands.
-            "shared-sessions-dir" => match value_nonempty_string(node) {
-                Ok(dir) => partial.shared_sessions_dir = Some(Some(PathBuf::from(dir))),
-                Err(detail) => {
-                    warnings.push(format!("ignored `shared-sessions-dir`: {detail}"));
-                }
-            },
-            "auto-close-session" => match value_bool(node) {
-                Ok(close) => partial.auto_close_session = Some(close),
-                Err(detail) => {
-                    warnings.push(format!("ignored `auto-close-session`: {detail}"));
-                }
-            },
+            // layer marks the field set, the inner carries the directory.
+            "shared-sessions-dir" => set_top_level(
+                &mut partial.shared_sessions_dir,
+                value_nonempty_string(node).map(|dir| Some(PathBuf::from(dir))),
+                name,
+                &mut warnings,
+            ),
+            "auto-close-session" => set_top_level(
+                &mut partial.auto_close_session,
+                value_bool(node),
+                name,
+                &mut warnings,
+            ),
             other => warnings.push(format!("ignored {}", unknown_key(other, SECTIONS))),
         }
     }
@@ -206,14 +195,32 @@ pub fn parse_app_config(path: &Path, source: &str) -> Result<AppConfigFile, Conf
     })
 }
 
-/// Reads the strict `update { … }` block: any bad field fails the whole parse
-/// so the update loader can fail closed. Unknown fields become warnings.
+/// Stores a parsed top-level field in `slot`. On `Err`, leaves `slot`
+/// untouched and pushes one warning naming the field and the reason.
+///
+/// `key` is the top-level node's name (`remote-listen`). A `parsed` of
+/// `Err("must not be empty")` pushes ``ignored `remote-listen`: must not be
+/// empty``.
+fn set_top_level<T>(
+    slot: &mut Option<T>,
+    parsed: Result<T, String>,
+    key: &str,
+    warnings: &mut Vec<String>,
+) {
+    match parsed {
+        Ok(value) => *slot = Some(value),
+        Err(detail) => warnings.push(format!("ignored `{key}`: {detail}")),
+    }
+}
+
+/// Reads the strict `update { … }` block. A field whose value is the wrong
+/// kind fails the whole parse; an unknown field is dropped with a warning.
 fn parse_update(
     node: &KdlNode,
     warnings: &mut Vec<String>,
 ) -> Result<PartialUpdateConfig, ConfigError> {
     let mut update = PartialUpdateConfig::default();
-    let Some(children) = node.children() else {
+    let Some(children) = section_block(node, warnings) else {
         return Ok(update);
     };
     for child in children.nodes() {
@@ -243,7 +250,7 @@ fn parse_update(
 /// Reads the `pane { … }` block.
 fn parse_pane(node: &KdlNode, warnings: &mut Vec<String>) -> PartialPaneConfig {
     let mut cfg = PartialPaneConfig::default();
-    let Some(children) = node.children() else {
+    let Some(children) = section_block(node, warnings) else {
         return cfg;
     };
     for child in children.nodes() {
@@ -267,7 +274,7 @@ fn parse_pane(node: &KdlNode, warnings: &mut Vec<String>) -> PartialPaneConfig {
 /// Reads the `scrollback { … }` block.
 fn parse_scrollback(node: &KdlNode, warnings: &mut Vec<String>) -> PartialScrollbackConfig {
     let mut cfg = PartialScrollbackConfig::default();
-    let Some(children) = node.children() else {
+    let Some(children) = section_block(node, warnings) else {
         return cfg;
     };
     for child in children.nodes() {
@@ -313,7 +320,7 @@ fn parse_scrollback(node: &KdlNode, warnings: &mut Vec<String>) -> PartialScroll
 /// Reads the `layout { … }` block of default-layout settings.
 fn parse_layout_defaults(node: &KdlNode, warnings: &mut Vec<String>) -> PartialLayoutDefaults {
     let mut cfg = PartialLayoutDefaults::default();
-    let Some(children) = node.children() else {
+    let Some(children) = section_block(node, warnings) else {
         return cfg;
     };
     for child in children.nodes() {
@@ -338,7 +345,7 @@ fn parse_layout_defaults(node: &KdlNode, warnings: &mut Vec<String>) -> PartialL
 /// Reads the `mouse { … }` block.
 fn parse_mouse(node: &KdlNode, warnings: &mut Vec<String>) -> PartialMouseConfig {
     let mut cfg = PartialMouseConfig::default();
-    let Some(children) = node.children() else {
+    let Some(children) = section_block(node, warnings) else {
         return cfg;
     };
     for child in children.nodes() {
@@ -374,7 +381,7 @@ fn parse_mouse(node: &KdlNode, warnings: &mut Vec<String>) -> PartialMouseConfig
 /// Reads the `copy { … }` block.
 fn parse_copy(node: &KdlNode, warnings: &mut Vec<String>) -> PartialCopyConfig {
     let mut cfg = PartialCopyConfig::default();
-    let Some(children) = node.children() else {
+    let Some(children) = section_block(node, warnings) else {
         return cfg;
     };
     for child in children.nodes() {
@@ -399,15 +406,14 @@ fn parse_copy(node: &KdlNode, warnings: &mut Vec<String>) -> PartialCopyConfig {
 /// Reads the `terminal { … }` block.
 fn parse_terminal(node: &KdlNode, warnings: &mut Vec<String>) -> PartialTerminalConfig {
     let mut cfg = PartialTerminalConfig::default();
-    let Some(children) = node.children() else {
+    let Some(children) = section_block(node, warnings) else {
         return cfg;
     };
     for child in children.nodes() {
         let key = child.name().value();
         match key {
-            // `term`/`colorterm` are exported to child programs; a blank value
-            // (`term ""`) would export an empty `TERM`, which disables terminfo,
-            // so it is rejected like any bad field and the default stands.
+            // A blank or whitespace-only `term`/`colorterm` is dropped with a
+            // warning.
             "term" => set(
                 &mut cfg.term,
                 value_nonempty_string(child),
@@ -423,9 +429,8 @@ fn parse_terminal(node: &KdlNode, warnings: &mut Vec<String>) -> PartialTerminal
                 warnings,
             ),
             // `default-shell` is `Option<Option<String>>`: the outer layer marks
-            // it set, the inner is the shell (there is no "unset it to $SHELL"
-            // spelling in the file, only "name a shell"). A blank value would
-            // spawn an empty program, so it is rejected and `$SHELL` stands.
+            // it set, the inner is the shell. The file can only name a shell;
+            // it cannot unset one. A blank value is dropped with a warning.
             "default-shell" => set(
                 &mut cfg.default_shell,
                 value_nonempty_string(child).map(Some),
@@ -452,7 +457,7 @@ fn parse_terminal(node: &KdlNode, warnings: &mut Vec<String>) -> PartialTerminal
 /// Reads the `logging { … }` block.
 fn parse_logging(node: &KdlNode, warnings: &mut Vec<String>) -> PartialLoggingConfig {
     let mut cfg = PartialLoggingConfig::default();
-    let Some(children) = node.children() else {
+    let Some(children) = section_block(node, warnings) else {
         return cfg;
     };
     for child in children.nodes() {
@@ -491,9 +496,8 @@ fn parse_logging(node: &KdlNode, warnings: &mut Vec<String>) -> PartialLoggingCo
     cfg
 }
 
-/// Reads a scrollback cap. A negative value is clamped to `0` — "no
-/// scrollback": the buffer keeps nothing and lines drop as they scroll off,
-/// rather than being rejected as a bad field.
+/// Reads a scrollback cap. A negative value becomes `0` (no scrollback); a
+/// value above `usize::MAX` becomes `usize::MAX`. `max-lines -5` yields `0`.
 fn value_scrollback(node: &KdlNode) -> Result<usize, String> {
     Ok(value_integer(node)?.clamp(0, usize::MAX as i128) as usize)
 }
@@ -509,8 +513,8 @@ fn value_direction(node: &KdlNode) -> Result<Direction, String> {
     }
 }
 
-/// Reads the node's single value as a [`LogLevel`] — the lowest severity that
-/// gets written to the log file.
+/// Reads the node's single value as a [`LogLevel`], the lowest severity that
+/// is written to the log file.
 fn value_log_level(node: &KdlNode) -> Result<LogLevel, String> {
     match value_string(node)? {
         "info" => Ok(LogLevel::Info),
@@ -520,8 +524,8 @@ fn value_log_level(node: &KdlNode) -> Result<LogLevel, String> {
     }
 }
 
-/// Reads the node's single value as a [`LogFormat`] — how each written line is
-/// rendered.
+/// Reads the node's single value as a [`LogFormat`], the shape of each written
+/// log line.
 fn value_log_format(node: &KdlNode) -> Result<LogFormat, String> {
     match value_string(node)? {
         "pretty" => Ok(LogFormat::Pretty),

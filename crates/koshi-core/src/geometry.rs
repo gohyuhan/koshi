@@ -4,8 +4,8 @@
 //! pixels. The origin `(0, 0)` is the top-left cell; `x` grows rightward
 //! (columns) and `y` grows downward (rows).
 //!
-//! A [`Rect`] spans the half-open ranges `[x, x + cols)` × `[y, y + rows)`,
-//! so its right and bottom edges are exclusive. Zero-size rects are valid and
+//! A [`Rect`] spans the half-open ranges `[x, x + cols)` × `[y, y + rows)`:
+//! its right and bottom edges are exclusive. Zero-size rects are valid and
 //! representable (used for suppressed panes); every helper handles them and
 //! the grid boundaries without panicking.
 
@@ -71,15 +71,6 @@ pub struct Rect {
     pub origin: Point,
     /// Width and height in cells.
     pub size: Size,
-}
-
-/// The two layout axes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Axis {
-    /// X-axis (left-right).
-    Horizontal,
-    /// Y-axis (top-bottom).
-    Vertical,
 }
 
 /// A cardinal direction, e.g. for focus movement.
@@ -148,13 +139,13 @@ impl Rect {
         self.size.cols == 0 || self.size.rows == 0
     }
 
-    /// Exclusive right edge (`x + cols`), widened to avoid `u16` overflow.
+    /// Exclusive right edge, `x + cols`, computed in `u32`.
     #[must_use]
     fn right(&self) -> u32 {
         u32::from(self.origin.x) + u32::from(self.size.cols)
     }
 
-    /// Exclusive bottom edge (`y + rows`), widened to avoid `u16` overflow.
+    /// Exclusive bottom edge, `y + rows`, computed in `u32`.
     #[must_use]
     fn bottom(&self) -> u32 {
         u32::from(self.origin.y) + u32::from(self.size.rows)
@@ -170,18 +161,12 @@ impl Rect {
             && u32::from(point.y) < self.bottom()
     }
 
-    /// `true` when the two rects share at least one cell. Rects that merely
-    /// touch along an edge do not intersect.
-    #[must_use]
-    pub fn intersects(&self, other: Rect) -> bool {
-        self.intersection(other).is_some()
-    }
-
-    /// Returns the overlapping region between `self` and `other`.
+    /// The region of cells inside both `self` and `other`, or `None` when they
+    /// share no cell.
     ///
-    /// Rectangles are half-open cell regions — `x` spans `[origin.x, right())`,
-    /// `y` spans `[origin.y, bottom())` — so two rectangles that only touch at
-    /// an edge or corner do not overlap.
+    /// Each rect is half-open: `x` spans `[origin.x, origin.x + cols)` and `y`
+    /// spans `[origin.y, origin.y + rows)`. Two rects that only touch at an
+    /// edge or a corner share no cell. An empty rect shares no cell.
     ///
     /// ```text
     /// self:
@@ -214,10 +199,11 @@ impl Rect {
     }
 
     /// Shrink the rect inward by `border_cells` on every side. The origin moves
-    /// in (saturating) and each dimension loses `2 * border_cells`, clamping to
-    /// zero so under-/overflow is impossible.
+    /// in by `border_cells` (saturating at `u16::MAX`) and each dimension loses
+    /// `2 * border_cells` (saturating at `0`). Never panics.
+    /// Origin `(2, 2)` size `10×8`, `inset(1)` → origin `(3, 3)` size `8×6`.
     #[must_use]
-    pub fn inset(&self, border_cells: u16) -> Rect {
+    fn inset(&self, border_cells: u16) -> Rect {
         let both = border_cells.saturating_mul(2);
         Rect {
             origin: Point {
@@ -231,7 +217,7 @@ impl Rect {
         }
     }
 
-    /// The content area inside a one-cell border. Convenience for `inset(1)`.
+    /// The content area inside a one-cell border: `inset(1)`.
     #[must_use]
     pub fn inner_with_border(&self) -> Rect {
         self.inset(1)

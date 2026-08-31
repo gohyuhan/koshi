@@ -49,4 +49,5 @@ pub mod recent_event;
 pub mod redact;
 pub mod registry;
 pub mod resolve;
+pub mod selection;
 pub mod text;

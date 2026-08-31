@@ -7,14 +7,17 @@
 //! one error the CLI reports. Those steps are here once.
 //!
 //! What differs between the two peers is only what they are called and which
-//! versions they speak, which is what [`PeerWords`](crate::talk::PeerWords) carries. The session's
-//! refusal reads `the session settled on protocol version 3, …` and the
-//! router's reads `the router settled on control-plane protocol version 3, …`
-//! — the same sentence, each in its own peer's terms.
+//! versions they speak, which is what [`PeerWords`]
+//! carries. A settled version of 4 is outside both ranges: the session refuses
+//! it with `the session settled on protocol version 4, …` and the router with
+//! `the router settled on control-plane protocol version 4, …` — the same
+//! sentence, each in its own peer's terms.
 //!
 //! What a request means, and what its answer is worth, stays with the caller.
 
+use koshi_core::command::CommandResult;
 use koshi_core::compat::Surface;
+use koshi_core::text::sanitize_reported_text;
 use koshi_ipc::error::IpcError;
 use koshi_ipc::protocol::{IncomingResponse, IpcErrorPayload, IpcResult};
 use koshi_ipc::router::{IncomingRouterResponse, RouterResult};
@@ -24,9 +27,6 @@ use crate::error::CliError;
 
 /// What one peer is called, and which versions of its protocol this build
 /// speaks.
-///
-/// The two values a message needs, so a refusal from either peer reads in that
-/// peer's own terms.
 #[derive(Debug, Clone, Copy)]
 pub struct PeerWords {
     /// The far side, written as "the {peer}", e.g. `"session"`, `"router"`.
@@ -59,9 +59,9 @@ impl PeerWords {
     /// The peer picks from the range the Hello named. A version outside that
     /// range stops the exchange.
     ///
-    /// Example — this build asks for 2 to 3 and the reply names 4, so the verb
+    /// Example — this build asks for 3 to 3 and the reply names 4, so the verb
     /// fails with `the session settled on protocol version 4, which is outside
-    /// the 2 to 3 this koshi asked for`.
+    /// the 3 to 3 this koshi asked for`.
     pub fn settled_version(&self, protocol_version: u32) -> Result<(), CliError> {
         let (min, max) = (self.surface.min, self.surface.max);
         if (min..=max).contains(&protocol_version) {
@@ -78,6 +78,8 @@ impl PeerWords {
 
     /// The answer inside a response. A result kind this build has no name for
     /// fails the verb with [`CliError::IpcUnavailable`].
+    ///
+    /// `response.request_id` is not read.
     pub fn take_result<R>(&self, response: Answer<MaybeKnown<R>>) -> Result<R, CliError> {
         match response.result {
             MaybeKnown::Known(result) => Ok(result),
@@ -85,42 +87,83 @@ impl PeerWords {
         }
     }
 
-    /// The peer answered with a result kind the request cannot produce.
+    /// The failure for a reply of a kind the request cannot produce, named by
+    /// `result`'s wire name.
     pub fn unexpected_reply<R: WireName>(&self, result: &R) -> CliError {
         self.unexpected_name(result.wire_name())
     }
 
-    /// The same failure, named by the reply's wire name alone — for a reply
-    /// this build has no variant for.
+    /// The same failure named by `name` alone, filtered by
+    /// [`sanitize_reported_text`] — for a reply this build has no variant for.
+    ///
+    /// `SESSION` with `name` `"Rehomed"` gives [`CliError::IpcUnavailable`]
+    /// carrying `the session answered with an unexpected Rehomed reply`.
+    /// `name` `"\u{1b}[2JRehomed"` gives the same sentence.
     pub fn unexpected_name(&self, name: &str) -> CliError {
         CliError::IpcUnavailable {
-            detail: format!("the {} answered with an unexpected {name} reply", self.peer),
+            detail: format!(
+                "the {} answered with an unexpected {} reply",
+                self.peer,
+                sanitize_reported_text(name)
+            ),
         }
     }
 }
 
-/// A transport failure mid-exchange: the peer was reachable but the
-/// conversation could not finish.
+/// A failure to talk to a peer, in the words the fault itself used:
+/// [`CliError::IpcUnavailable`] carrying `error.to_string()` filtered by
+/// [`sanitize_reported_text`].
 ///
-/// The same sentence for either peer: it names the fault, not who was on the
-/// other end.
+/// The same sentence for either peer — it names the fault, not who was on the
+/// other end. [`IpcError::MalformedFrame`] carries the decoder's own message,
+/// which quotes the field or variant name the peer sent.
 pub fn talk_failed(error: IpcError) -> CliError {
     CliError::IpcUnavailable {
-        detail: error.to_string(),
+        detail: sanitize_reported_text(&error.to_string()),
     }
 }
 
-/// The peer refused a request at the protocol level — a bad token, a version
-/// mismatch, or a request it could not read.
+/// `result` with a rejection's hint filtered by [`sanitize_reported_text`].
+/// An applied result is unchanged, and so is a rejection carrying no hint.
+///
+/// The hint is written by the session that answered, which is another user's
+/// process for a session reached through the shared directory and another
+/// machine's for one reached over TLS. A hint of `"\u{1b}[2Jattach first"`
+/// comes back as `"[2Jattach first"`.
+pub(crate) fn filter_rejection_hint(result: CommandResult) -> CommandResult {
+    match result {
+        CommandResult::Rejected {
+            command_id,
+            reason,
+            help,
+        } => CommandResult::Rejected {
+            command_id,
+            reason,
+            help: help.as_deref().map(sanitize_reported_text),
+        },
+        applied => applied,
+    }
+}
+
+/// A refusal the peer sent at the protocol level — a bad token, a version
+/// mismatch, or a request it could not read — as
+/// [`CliError::IpcUnavailable`] carrying `refusal.message` filtered by
+/// [`sanitize_reported_text`].
 pub fn refused(refusal: &IpcErrorPayload) -> CliError {
     CliError::IpcUnavailable {
-        detail: refusal.message.clone(),
+        detail: sanitize_reported_text(&refusal.message),
     }
 }
 
 /// The version a session settled on and the build it named in its Hello
 /// answer, once the version is checked against the range this build sent. An
 /// empty build string is a session that predates the version field.
+///
+/// The build string is written by the session that answered, which is another
+/// user's process for a session reached through the shared directory and
+/// another machine's for one reached over TLS, and `koshi server-version`
+/// prints it. It is filtered by [`sanitize_reported_text`], so a build of
+/// `"\u{1b}[2J0.3.0"` comes back as `"[2J0.3.0"`.
 ///
 /// # Errors
 /// [`CliError::IpcUnavailable`] when the session settled on a version outside
@@ -133,7 +176,7 @@ pub(crate) fn session_hello_version(reply: IncomingResponse) -> Result<(u32, Str
             version,
         } => {
             SESSION.settled_version(protocol_version)?;
-            Ok((protocol_version, version))
+            Ok((protocol_version, sanitize_reported_text(&version)))
         }
         IpcResult::Error(refusal) => Err(refused(&refusal)),
         other => Err(SESSION.unexpected_reply(&other)),
@@ -166,23 +209,25 @@ pub(crate) fn router_hello_version(reply: IncomingRouterResponse) -> Result<Stri
 /// command naming a client is refused before it is sent.
 pub(crate) const TARGET_CLIENT_PROTOCOL: u32 = 3;
 
-/// Check the version a session settled on against the lowest one this command
-/// needs. `least` `None` accepts every settled version.
+/// Check the version a session settled on against
+/// [`TARGET_CLIENT_PROTOCOL`], for a command that names a target client.
+/// `names_client` `false` accepts every settled version.
 ///
 /// # Errors
-/// [`CliError::IpcUnavailable`] when `least` is `Some(v)` and `settled` is
-/// below `v`. For `settled == 2` the sentence reads `this session speaks
-/// protocol 2; --client needs a session started by koshi 0.4.0 or later`.
-pub(crate) fn require_settled_version(settled: u32, least: Option<u32>) -> Result<(), CliError> {
-    match least {
-        Some(least) if settled < least => Err(CliError::IpcUnavailable {
+/// [`CliError::IpcUnavailable`] when `names_client` is `true` and `settled` is
+/// below [`TARGET_CLIENT_PROTOCOL`]. For `settled == 2` the sentence reads
+/// `this session speaks protocol 2; --client needs a session started by koshi
+/// 0.4.0 or later`.
+pub(crate) fn require_client_targeting(settled: u32, names_client: bool) -> Result<(), CliError> {
+    if names_client && settled < TARGET_CLIENT_PROTOCOL {
+        return Err(CliError::IpcUnavailable {
             detail: format!(
                 "this session speaks protocol {settled}; --client needs a session started by \
                  koshi 0.4.0 or later"
             ),
-        }),
-        _ => Ok(()),
+        });
     }
+    Ok(())
 }
 
 #[cfg(test)]

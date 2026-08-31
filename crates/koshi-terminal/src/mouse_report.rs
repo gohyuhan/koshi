@@ -1,26 +1,24 @@
 //! Encode a mouse event into the bytes the program in a pane expects.
 //!
-//! The reverse of decoding a host mouse event: once koshi decides a mouse event
-//! belongs to the program running in a pane (not to koshi's own chrome), it must
-//! hand that program a mouse *report* in the exact form the program asked for.
-//! [`encode_mouse`] produces those bytes, or [`None`] when the program's current
-//! [`MouseTracking`] level does not report this kind of event.
+//! [`encode_mouse`] produces the mouse report for one event, or [`None`] when
+//! the program's current [`MouseTracking`] level does not report this kind of
+//! event.
 //!
 //! Two independent settings shape a report (both tracked in
-//! [`TerminalModes`](crate::state::TerminalModes)):
+//! `TerminalModes`):
 //!
 //! - **Tracking level** ([`MouseTracking`]) — which events are reported at all.
 //!   The levels form a ladder: `X10` reports only presses, `Normal` adds
 //!   releases and wheel ticks, `ButtonMotion` adds drags, `AnyMotion` adds
 //!   buttonless motion.
 //! - **Encoding** ([`MouseEncoding`]) — how the button and the 1-based cell are
-//!   written: the modern `Sgr` form (`CSI < b ; x ; y M`), the legacy byte form
+//!   written: the `Sgr` form (`CSI < b ; x ; y M`), the legacy byte form
 //!   (`CSI M` + three `value+32` bytes), its `Utf8` and `Urxvt` variants.
 //!
 //! The button byte packs the button (left `0`, middle `1`, right `2`, wheel
 //! `64`/`65`/`66`/`67`), a `+32` motion bit for a drag or a bare move, and the
 //! modifier bits shift `4`, alt `8`, ctrl `16`. In every encoding but `Sgr` a
-//! release cannot say which button came up, so it reports button `3`; `Sgr`
+//! release reports button `3` in place of the button that came up; `Sgr`
 //! keeps the button and marks the release with a trailing `m` instead of `M`.
 
 use koshi_core::key::ModFlags;
@@ -56,17 +54,20 @@ pub fn encode_mouse(
         mod_bits(mods)
     };
     let released = matches!(kind, MouseKind::Release(_));
+    let release_loses_button = encoding != MouseEncoding::Sgr;
+    let cb = button_code(kind, release_loses_button) + modifiers;
     Some(match encoding {
-        MouseEncoding::Sgr => encode_sgr(button_code(kind, false) + modifiers, col, row, released),
-        MouseEncoding::Default => encode_legacy(button_code(kind, true) + modifiers, col, row),
-        MouseEncoding::Utf8 => encode_utf8(button_code(kind, true) + modifiers, col, row),
-        MouseEncoding::Urxvt => encode_urxvt(button_code(kind, true) + modifiers, col, row),
+        MouseEncoding::Sgr => encode_sgr(cb, col, row, released),
+        MouseEncoding::Default => encode_legacy(cb, col, row),
+        MouseEncoding::Utf8 => encode_utf8(cb, col, row),
+        MouseEncoding::Urxvt => encode_urxvt(cb, col, row),
     })
 }
 
-/// The button code before modifiers: the button number, plus `32` for a drag or
-/// a bare move, plus the wheel base for a scroll. A release loses the button
-/// (reports `3`) when `release_loses_button` — every encoding but `Sgr` loses it.
+/// The button code before modifiers: a press is its button number, a drag is
+/// its button number plus `32`, a bare move is `35`, a scroll is its wheel
+/// number, and a release is `3` when `release_loses_button` is true or its
+/// button number when false.
 fn button_code(kind: MouseKind, release_loses_button: bool) -> u16 {
     const MOTION: u16 = 32;
     match kind {
@@ -103,7 +104,7 @@ fn wheel_number(direction: ScrollDirection) -> u16 {
     }
 }
 
-/// Shift `4`, alt `8`, ctrl `16`, summed. Super has no place in the protocol.
+/// Shift `4`, alt `8`, ctrl `16`, summed. Super adds nothing.
 fn mod_bits(mods: ModFlags) -> u16 {
     let mut bits = 0;
     if mods.contains(ModFlags::SHIFT) {
@@ -124,8 +125,8 @@ fn encode_sgr(cb: u16, col: u16, row: u16, released: bool) -> Vec<u8> {
     format!("\x1b[<{cb};{col};{row}{terminator}").into_bytes()
 }
 
-/// `CSI M` then three `value+32` bytes, each capped at `255` since a byte cannot
-/// hold a larger cell.
+/// `CSI M` then `cb+32`, `col+32`, `row+32` as one byte each, saturating at
+/// `255`.
 fn encode_legacy(cb: u16, col: u16, row: u16) -> Vec<u8> {
     vec![
         0x1b,
@@ -137,8 +138,8 @@ fn encode_legacy(cb: u16, col: u16, row: u16) -> Vec<u8> {
     ]
 }
 
-/// Like the legacy form, but each `value+32` is a UTF-8 code point, so a cell
-/// past `223` still fits.
+/// `CSI M` then `cb+32`, `col+32`, `row+32`, each written as UTF-8: one byte
+/// below `128`, two bytes up to `2047`, three up to `65535`, four above.
 fn encode_utf8(cb: u16, col: u16, row: u16) -> Vec<u8> {
     let mut bytes = vec![0x1b, b'[', b'M'];
     for value in [cb, col, row] {
@@ -147,20 +148,18 @@ fn encode_utf8(cb: u16, col: u16, row: u16) -> Vec<u8> {
     bytes
 }
 
-/// `CSI (cb+32) ; col ; row M` — decimal, so no byte cap and no encoding of the
-/// cell.
+/// `CSI (cb+32) ; col ; row M`, every value in decimal.
 fn encode_urxvt(cb: u16, col: u16, row: u16) -> Vec<u8> {
     format!("\x1b[{};{col};{row}M", cb + 32).into_bytes()
 }
 
-/// `value + 32` as a byte, saturating at `255`. Widened to `u32` first so a
-/// coordinate near `u16::MAX` cannot overflow the addition.
+/// `value + 32`, summed in `u32`, capped at `255`, then narrowed to one byte.
 fn offset_byte(value: u16) -> u8 {
     (u32::from(value) + 32).min(255) as u8
 }
 
-/// Append `code_point` as UTF-8, falling back to `?` for a value that is not a
-/// valid `char` (unreachable for real cells).
+/// Append `code_point` as UTF-8. A `code_point` that is not a valid `char` — a
+/// surrogate in `0xD800..=0xDFFF`, or above `0x10FFFF` — is written as `?`.
 fn push_utf8(bytes: &mut Vec<u8>, code_point: u32) {
     let character = char::from_u32(code_point).unwrap_or('?');
     let mut buffer = [0; 4];

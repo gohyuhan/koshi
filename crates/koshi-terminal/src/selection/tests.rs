@@ -33,7 +33,7 @@ fn cells_of(line: &str) -> Vec<Cell> {
 fn scrollback_of(lines: &[&str], max_lines: usize) -> Scrollback {
     let mut scrollback = Scrollback::new(ScrollbackLimit::new(max_lines, usize::MAX));
     for line in lines {
-        scrollback.push_row(&cells_of(line), RowEnd::Hard);
+        scrollback.push_row(&cells_of(line), RowMeta::default());
     }
     scrollback
 }
@@ -75,8 +75,8 @@ fn a_row_number_still_names_the_same_line_after_more_output() {
     }
 
     // `live0` and `live1` scroll off into history; two fresh lines take their place.
-    scrollback.push_row(&cells_of("live0"), RowEnd::Hard);
-    scrollback.push_row(&cells_of("live1"), RowEnd::Hard);
+    scrollback.push_row(&cells_of("live0"), RowMeta::default());
+    scrollback.push_row(&cells_of("live1"), RowMeta::default());
     let grid = grid_of(&["new0", "new1"], 10);
     let view = TextView::new(&scrollback, &grid);
 
@@ -104,8 +104,8 @@ fn a_row_number_still_names_the_same_line_after_the_cap_drops_history() {
     assert_eq!(row_text(&view, 2), "old2", "row 2 still names old2");
     assert_eq!(row_text(&view, 3), "old3");
     assert_eq!(row_text(&view, 4), "live0");
-    assert!(view.row(1).is_none(), "a dropped row reads as gone");
-    assert!(view.row(0).is_none());
+    assert_eq!(view.row(1), None, "a dropped row reads as gone");
+    assert_eq!(view.row(0), None);
 }
 
 #[test]
@@ -115,7 +115,7 @@ fn erasing_saved_lines_leaves_surviving_rows_their_numbers() {
     // rely on that counter.
     let mut scrollback = scrollback_of(&["old0", "old1", "old2"], 100);
     scrollback.clear();
-    scrollback.push_row(&cells_of("after"), RowEnd::Hard);
+    scrollback.push_row(&cells_of("after"), RowMeta::default());
     let grid = grid_of(&["live0"], 10);
     let view = TextView::new(&scrollback, &grid);
 
@@ -132,7 +132,7 @@ fn erasing_saved_lines_leaves_surviving_rows_their_numbers() {
     );
     assert_eq!(row_text(&view, 3), "after");
     assert_eq!(row_text(&view, 4), "live0");
-    assert!(view.row(0).is_none(), "the erased lines are gone");
+    assert_eq!(view.row(0), None, "the erased lines are gone");
 }
 
 #[test]
@@ -142,8 +142,10 @@ fn a_row_past_the_bottom_of_the_screen_is_gone() {
     let view = TextView::new(&scrollback, &grid);
 
     assert_eq!(view.last_row(), 1);
-    assert!(view.row(1).is_some());
-    assert!(view.row(2).is_none());
+    let mut bottom = cells_of("b");
+    bottom.resize(10, Cell::blank());
+    assert_eq!(view.row(1), Some((bottom.as_slice(), RowEnd::Hard)));
+    assert_eq!(view.row(2), None);
 }
 
 #[test]
@@ -249,7 +251,13 @@ fn a_word_crosses_a_soft_wrap_out_of_history_onto_the_screen() {
     // The wrap runs across the history/screen boundary: the last history line
     // wrapped into the screen's top row, so the word spans both.
     let mut scrollback = Scrollback::new(ScrollbackLimit::new(100, usize::MAX));
-    scrollback.push_row(&cells_of("abc"), RowEnd::Soft);
+    scrollback.push_row(
+        &cells_of("abc"),
+        RowMeta {
+            end: RowEnd::Soft,
+            prompt: false,
+        },
+    );
     let grid = grid_of(&["def"], 3);
     let view = TextView::new(&scrollback, &grid);
 
@@ -379,8 +387,8 @@ fn a_screen_with_no_history_cannot_read_the_rows_below_it() {
     );
     assert_eq!(view.last_row(), 3);
     // ...but nothing below the screen is readable.
-    assert!(view.row(1).is_none(), "the primary's newest history row");
-    assert!(view.row(0).is_none(), "and the one before it");
+    assert_eq!(view.row(1), None, "the primary's newest history row");
+    assert_eq!(view.row(0), None, "and the one before it");
     assert_eq!(row_text(&view, 2), "alt0");
 }
 
@@ -390,7 +398,13 @@ fn a_word_on_a_screen_with_no_history_stops_at_its_top_row() {
     // SOFT, so a walk that could see history would step into it. With no
     // history there is nothing to step into.
     let mut scrollback = Scrollback::new(ScrollbackLimit::new(100, usize::MAX));
-    scrollback.push_row(&cells_of("abc"), RowEnd::Soft);
+    scrollback.push_row(
+        &cells_of("abc"),
+        RowMeta {
+            end: RowEnd::Soft,
+            prompt: false,
+        },
+    );
     let grid = grid_of(&["def"], 3);
 
     // Built for the primary, the word crosses the boundary — correct there.
@@ -414,9 +428,9 @@ fn a_word_on_a_screen_with_no_history_stops_at_its_top_row() {
 #[test]
 fn a_word_grows_the_same_from_either_half_of_a_wide_glyph() {
     // A wide glyph's right half is a width-0 blank, and a blank is a word
-    // separator — but landing on one still grows the whole word, because the
-    // separator test is applied to the NEIGHBOUR the walk steps to, and the walk
-    // skips width-0 cells. So a double click anywhere on `世界` selects both.
+    // separator. Landing on one still grows the whole word: the separator test
+    // is applied to the NEIGHBOUR the walk steps to, and the walk skips width-0
+    // cells. A double click anywhere on `世界` selects both.
     let cells = vec![vec![
         Cell::new('世', 2, Style::default()),
         Cell::new(' ', 0, Style::default()),
@@ -758,7 +772,7 @@ fn scrollback_padded(lines: &[&str], cols: u16, max_lines: usize) -> Scrollback 
     for line in lines {
         let mut row = cells_of(line);
         row.resize(cols as usize, Cell::blank());
-        scrollback.push_row(&row, RowEnd::Hard);
+        scrollback.push_row(&row, RowMeta::default());
     }
     scrollback
 }
@@ -766,8 +780,8 @@ fn scrollback_padded(lines: &[&str], cols: u16, max_lines: usize) -> Scrollback 
 #[test]
 fn a_column_right_of_a_history_lines_text_reads_as_the_blank_it_was() {
     // History stores `hi`, not `hi` plus eight blanks. Every column of the
-    // screen width must still answer, or a double-click in the empty area
-    // right of a line would find no cell where it used to find a space.
+    // screen width still answers: a double-click in the empty area right of a
+    // line finds a space there.
     let scrollback = scrollback_padded(&["hi"], 10, 100);
     let grid = grid_of(&["live"], 10);
     let view = TextView::new(&scrollback, &grid);
@@ -784,8 +798,8 @@ fn a_column_past_the_screen_width_still_reads_as_nothing() {
     let grid = grid_of(&["live"], 10);
     let view = TextView::new(&scrollback, &grid);
 
-    assert!(view.cell(0, 10).is_none());
-    assert!(view.cell(0, 99).is_none());
+    assert_eq!(view.cell(0, 10), None);
+    assert_eq!(view.cell(0, 99), None);
 }
 
 #[test]
@@ -796,8 +810,8 @@ fn a_dropped_row_still_reads_as_nothing_at_every_column() {
     let grid = grid_of(&["live"], 10);
     let view = TextView::new(&scrollback, &grid);
 
-    assert!(view.cell(0, 0).is_none()); // evicted by the one-line cap
-    assert!(view.cell(0, 5).is_none());
+    assert_eq!(view.cell(0, 0), None, "evicted by the one-line cap");
+    assert_eq!(view.cell(0, 5), None);
 }
 
 #[test]
@@ -862,4 +876,245 @@ fn a_word_selection_on_a_history_line_still_finds_the_text() {
         kind: SelectionKind::Word,
     };
     assert_eq!(selection_text(&view, &word, false), "/usr/local/bin");
+}
+
+#[test]
+fn ordering_two_equal_ends_keeps_the_anchor_first() {
+    let pos = GridPos { row: 2, col: 7 };
+
+    let ordered = order(pos, pos);
+    assert_eq!(
+        ordered,
+        Ordered {
+            start: pos,
+            end: pos
+        }
+    );
+}
+
+#[test]
+fn a_history_row_reports_how_it_ended() {
+    let mut scrollback = Scrollback::new(ScrollbackLimit::new(100, usize::MAX));
+    scrollback.push_row(
+        &cells_of("abc"),
+        RowMeta {
+            end: RowEnd::Soft,
+            prompt: false,
+        },
+    );
+    scrollback.push_row(&cells_of("de"), RowMeta::default());
+    let grid = grid_of(&["live"], 4);
+    let view = TextView::new(&scrollback, &grid);
+
+    assert_eq!(
+        view.row(0),
+        Some((cells_of("abc").as_slice(), RowEnd::Soft))
+    );
+    assert_eq!(view.row(1), Some((cells_of("de").as_slice(), RowEnd::Hard)));
+    assert!(view.wraps(0));
+    assert!(!view.wraps(1));
+}
+
+#[test]
+fn a_gone_row_neither_wraps_nor_holds_a_wrap_spacer() {
+    let scrollback = scrollback_of(&["a", "b"], 1);
+    let grid = grid_of(&["live"], 4);
+    let view = TextView::new(&scrollback, &grid);
+
+    assert_eq!(view.first_row(), 1, "row 0 was evicted");
+    assert!(!view.wraps(0), "a dropped history row");
+    assert!(!view.is_wide_wrap_spacer(0, 3));
+    assert!(!view.wraps(9), "a row past the bottom of the screen");
+    assert!(!view.is_wide_wrap_spacer(9, 3));
+}
+
+#[test]
+fn a_word_or_line_lookup_on_a_gone_row_stays_where_it_is() {
+    let scrollback = scrollback_of(&["abc def", "ghi"], 1);
+    let grid = grid_of(&["live"], 7);
+    let view = TextView::new(&scrollback, &grid);
+    assert_eq!(view.first_row(), 1, "row 0 was evicted");
+
+    assert_eq!(view.word_start(0, 5), (0, 5));
+    assert_eq!(view.word_end(0, 5), (0, 5));
+    assert_eq!(view.line_start(0), 0);
+    assert_eq!(view.line_end(0), 0);
+}
+
+#[test]
+fn a_line_lookup_past_the_newest_row_returns_the_row_unchanged() {
+    let scrollback = scrollback_of(&[], 100);
+    let mut grid = grid_of(&["abc", "def"], 3);
+    grid.set_row_end(0, RowEnd::Soft);
+    grid.set_row_end(1, RowEnd::Soft);
+    let view = TextView::new(&scrollback, &grid);
+    assert_eq!(view.last_row(), 1);
+
+    assert_eq!(view.line_start(5), 5);
+    assert_eq!(view.line_end(5), 5);
+}
+
+#[test]
+fn a_word_at_the_edges_of_a_hard_row_stops_at_the_edges() {
+    let scrollback = scrollback_of(&[], 100);
+    let grid = grid_of(&["abc"], 3);
+    let view = TextView::new(&scrollback, &grid);
+
+    assert_eq!(view.word_start(0, 0), (0, 0), "nothing left of column 0");
+    assert_eq!(
+        view.word_end(0, 2),
+        (0, 2),
+        "nothing right of the last column"
+    );
+    assert_eq!(view.word_start(0, 2), (0, 0));
+    assert_eq!(view.word_end(0, 0), (0, 2));
+}
+
+#[test]
+fn a_word_lookup_past_the_screen_width_of_a_hard_row_stays_put() {
+    let scrollback = scrollback_of(&[], 100);
+    let grid = grid_of(&["abc"], 3);
+    let view = TextView::new(&scrollback, &grid);
+
+    assert_eq!(view.word_start(0, 50), (0, 50));
+    assert_eq!(view.word_end(0, 50), (0, 50));
+}
+
+#[test]
+fn selection_text_reads_the_same_text_however_the_drag_ran() {
+    let scrollback = scrollback_of(&[], 100);
+    let grid = grid_of(&["abcde", "fghij"], 5);
+    let view = TextView::new(&scrollback, &grid);
+
+    let down = Selection {
+        kind: SelectionKind::Character,
+        anchor: GridPos { row: 0, col: 3 },
+        cursor: GridPos { row: 1, col: 1 },
+    };
+    let up = Selection {
+        anchor: down.cursor,
+        cursor: down.anchor,
+        ..down
+    };
+    assert_eq!(selection_text(&view, &down, true), "de\nfg");
+    assert_eq!(selection_text(&view, &up, true), "de\nfg");
+
+    // A block drag up and to the left: the column range is still 1..=3.
+    let block_up = Selection {
+        kind: SelectionKind::Block,
+        anchor: GridPos { row: 1, col: 3 },
+        cursor: GridPos { row: 0, col: 1 },
+    };
+    assert_eq!(selection_text(&view, &block_up, true), "bcd\nghi");
+}
+
+#[test]
+fn selection_text_of_one_cell_is_that_cells_character() {
+    let scrollback = scrollback_of(&[], 100);
+    let grid = grid_of(&["abc"], 3);
+    let view = TextView::new(&scrollback, &grid);
+    let selection = Selection {
+        kind: SelectionKind::Character,
+        anchor: GridPos { row: 0, col: 1 },
+        cursor: GridPos { row: 0, col: 1 },
+    };
+
+    assert_eq!(selection_text(&view, &selection, true), "b");
+}
+
+#[test]
+fn selection_text_on_a_screen_with_no_rows_is_empty() {
+    let scrollback = scrollback_of(&[], 100);
+    let grid = grid_of(&[], 0);
+    let view = TextView::new(&scrollback, &grid);
+    assert_eq!(view.cols(), 0);
+    assert_eq!(view.first_row(), 0);
+    assert_eq!(view.last_row(), 0);
+    assert_eq!(view.row(0), None);
+
+    let selection = Selection {
+        kind: SelectionKind::Character,
+        anchor: GridPos { row: 0, col: 0 },
+        cursor: GridPos { row: 0, col: 0 },
+    };
+    assert_eq!(selection_text(&view, &selection, true), "");
+    assert_eq!(selection_text(&view, &selection, false), "");
+}
+
+#[test]
+fn a_start_column_past_the_screen_width_reads_nothing_from_its_row() {
+    // Row 0 contributes no text, but it is still a selected row: the hard row
+    // end between it and row 1 still becomes a newline.
+    let scrollback = scrollback_of(&[], 100);
+    let grid = grid_of(&["abc", "def"], 3);
+    let view = TextView::new(&scrollback, &grid);
+    let selection = Selection {
+        kind: SelectionKind::Character,
+        anchor: GridPos { row: 0, col: 50 },
+        cursor: GridPos { row: 1, col: 2 },
+    };
+
+    assert_eq!(selection_text(&view, &selection, true), "\ndef");
+    assert_eq!(selection_text(&view, &selection, false), "\ndef");
+}
+
+#[test]
+fn a_block_reaching_past_the_screen_width_stops_at_the_edge() {
+    let scrollback = scrollback_of(&[], 100);
+    let grid = grid_of(&["abcde", "fghij"], 5);
+    let view = TextView::new(&scrollback, &grid);
+    let selection = Selection {
+        kind: SelectionKind::Block,
+        anchor: GridPos { row: 0, col: 1 },
+        cursor: GridPos { row: 1, col: 50 },
+    };
+
+    assert_eq!(selection_text(&view, &selection, false), "bcde\nghij");
+}
+
+#[test]
+fn a_wide_wrap_spacer_is_skipped_with_trimming_on_and_marks_only_its_own_cell() {
+    let mut engine = TerminalEngine::new(PtySize { cols: 3, rows: 2 });
+    let _ = engine.advance("abcde世".as_bytes());
+    let view = engine.state().text_view();
+
+    assert!(
+        view.is_wide_wrap_spacer(1, 2),
+        "the last column of the row `世` did not fit"
+    );
+    assert!(!view.is_wide_wrap_spacer(1, 1), "a column inside that row");
+    assert!(
+        !view.is_wide_wrap_spacer(0, 2),
+        "a plain soft wrap has no spacer"
+    );
+    let selection = Selection {
+        kind: SelectionKind::Character,
+        anchor: GridPos { row: 1, col: 0 },
+        cursor: GridPos { row: 2, col: 2 },
+    };
+    assert_eq!(selection_text(&view, &selection, true), "de世");
+}
+
+#[test]
+fn a_word_lookup_at_the_last_representable_column_stays_put() {
+    // Stepping right of u16::MAX has no cell to step to, so the walk stops
+    // where it started instead of wrapping the column back to 0.
+    let scrollback = scrollback_of(&[], 100);
+    let grid = grid_of(&["cargo build"], 11);
+    let view = TextView::new(&scrollback, &grid);
+
+    assert_eq!(view.word_end(0, u16::MAX), (0, u16::MAX));
+    assert_eq!(view.word_start(0, u16::MAX), (0, u16::MAX));
+}
+
+#[test]
+fn a_word_end_lookup_past_the_width_of_a_wrapped_row_stays_put() {
+    // Column 50 of a six-column row holds nothing, which reads as a blank —
+    // a separator — so the run is blanks and it ends at the `d` below.
+    let scrollback = scrollback_of(&[], 100);
+    let mut grid = grid_of(&["abc", "def gh"], 6);
+    grid.set_row_end(0, RowEnd::Soft);
+    let view = TextView::new(&scrollback, &grid);
+
+    assert_eq!(view.word_end(0, 50), (0, 50));
 }

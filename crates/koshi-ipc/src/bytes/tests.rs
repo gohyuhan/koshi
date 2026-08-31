@@ -1,6 +1,6 @@
 //! Tests for bytes carried as one base64 string: the text every byte length
 //! produces, the bytes every text reads back as, and the exact reason each
-//! malformed text is refused.
+//! malformed text is refused. Also the lowercase hex a byte slice writes as.
 
 use super::*;
 
@@ -124,4 +124,54 @@ fn a_value_that_is_not_a_string_is_refused() {
         error.to_string(),
         "invalid type: sequence, expected bytes as a base64 string at line 1 column 0"
     );
+}
+
+#[test]
+fn text_whose_last_group_is_one_character_is_refused() {
+    assert_eq!(
+        decode("a"),
+        Err("the base64 text length is not a multiple of four")
+    );
+    assert_eq!(
+        decode("aGkhC"),
+        Err("the base64 text length is not a multiple of four")
+    );
+}
+
+#[test]
+fn serializing_writes_one_base64_string() {
+    let mut out = Vec::new();
+    let mut writer = serde_json::Serializer::new(&mut out);
+
+    serialize(&[104, 105], &mut writer).expect("a string serializes");
+
+    assert_eq!(out, br#""aGk=""#);
+}
+
+#[test]
+fn serializing_no_bytes_writes_an_empty_string() {
+    let mut out = Vec::new();
+    let mut writer = serde_json::Serializer::new(&mut out);
+
+    serialize(&[], &mut writer).expect("a string serializes");
+
+    assert_eq!(out, br#""""#);
+}
+
+#[test]
+fn hex_writes_two_lowercase_characters_per_byte() {
+    assert_eq!(hex(&[]), "");
+    assert_eq!(hex(&[0]), "00");
+    assert_eq!(hex(&[104, 105]), "6869");
+    assert_eq!(hex(&[0, 15, 16, 171, 255]), "000f10abff");
+}
+
+#[test]
+fn hex_of_every_byte_value_is_the_byte_written_in_order() {
+    let bytes: Vec<u8> = (0..=255).collect();
+    let text = hex(&bytes);
+    assert_eq!(text.len(), 512);
+    assert_eq!(&text[..8], "00010203");
+    assert_eq!(&text[504..], "fcfdfeff");
+    assert_eq!(text.to_ascii_lowercase(), text);
 }

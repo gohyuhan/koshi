@@ -1,28 +1,28 @@
 //! Layout templates: a pane arrangement described before any pane exists.
 //!
-//! A layout file describes tabs, splits, and the panes to spawn in them —
-//! but a [`crate::tree::LayoutNode`] leaf is a live [`PaneId`], and no panes
-//! exist while a file is being read. A template is the same tree with the
-//! ids abstracted away: interior nodes mirror [`SplitNode`] field for field
+//! A profile file describes tabs, splits, and the panes to spawn in them. A
+//! template is a [`crate::tree::LayoutNode`] tree with the pane ids
+//! abstracted away: interior nodes mirror [`SplitNode`] field for field
 //! (direction, ordered children, parallel weights, active member), and each
 //! leaf carries *what to put there* — a terminal command or a plugin name —
 //! instead of *which pane is there*.
 //!
-//! Instantiation closes the gap: create one pane per leaf, then call
-//! [`TemplateNode::to_layout_node`] with the new ids in layout order to get
-//! the live tree. Example: a template `horizontal(pane "nvim", pane)` plus
-//! ids `[7, 8]` yields `Split(Horizontal, [Pane(7), Pane(8)])`, the same tree a
-//! runtime split of pane 7 produces.
+//! To instantiate a template, create one pane per leaf, then call
+//! [`TemplateNode::to_layout_node`] with the new ids in layout order.
+//! Example: a template `horizontal(pane "nvim", pane)` plus ids `[7, 8]`
+//! yields `Split(Horizontal, [Pane(7), Pane(8)])`, the same tree a runtime
+//! split of pane 7 produces.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use koshi_core::error::{DomainCategory, DomainError, Severity};
 use koshi_core::geometry::SplitDirection;
 use koshi_core::ids::PaneId;
 use thiserror::Error;
 
 use crate::size::SizeWeight;
-use crate::tree::{LayoutChild, LayoutNode, SplitNode};
+use crate::tree::{LayoutNode, SplitNode};
 
 #[cfg(test)]
 mod tests;
@@ -32,7 +32,7 @@ mod tests;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProfileTemplate {
     /// The tabs in file order. Never empty: a profile without tabs is a
-    /// parse error, not a representable template.
+    /// parse error.
     pub tabs: Vec<TabTemplate>,
     /// Index into `tabs` of the tab selected when the profile opens.
     pub focused_tab: usize,
@@ -64,9 +64,10 @@ pub enum TemplateNode {
 }
 
 impl TemplateNode {
-    /// All leaves in layout order: depth-first, children in order — the
-    /// same order [`LayoutNode::leaf_panes`] yields for the instantiated
-    /// tree, so index `i` here matches pane id `i` there.
+    /// All leaves in layout order: depth-first, children in order. This is
+    /// the order [`LayoutNode::leaf_panes`] yields for the instantiated
+    /// tree: leaf `i` here is the slot `ids[i]` fills in
+    /// [`TemplateNode::to_layout_node`].
     #[must_use]
     pub fn leaves(&self) -> Vec<&LeafTemplate> {
         let mut leaves = Vec::new();
@@ -79,11 +80,7 @@ impl TemplateNode {
     fn leaf_count(&self) -> usize {
         match self {
             Self::Leaf(_) => 1,
-            Self::Split(split) => split
-                .children
-                .iter()
-                .map(|child| child.node.leaf_count())
-                .sum(),
+            Self::Split(split) => split.children.iter().map(|child| child.leaf_count()).sum(),
         }
     }
 
@@ -93,28 +90,32 @@ impl TemplateNode {
             Self::Leaf(leaf) => out.push(leaf),
             Self::Split(split) => {
                 for child in &split.children {
-                    child.node.collect_leaves(out);
+                    child.collect_leaves(out);
                 }
             }
         }
     }
 
     /// Index (in [`TemplateNode::leaves`] order) of the first leaf a user
-    /// actually sees: at a stacked node only the active member is visible,
-    /// so collapsed members are skipped; at a directional split the first
-    /// child wins. Example: `horizontal(stack(a, b expanded), c)` yields
-    /// `1` — leaf `b`, not the collapsed `a`. This is the leaf initial
-    /// focus falls on when a layout names none.
+    /// sees. At a stacked node the walk descends into the child at `active`,
+    /// skipping the leaves of the collapsed members before it; at a
+    /// directional split it descends into the first child. Example:
+    /// `horizontal(stack(a, b expanded), c)` yields `1` — leaf `b`, not the
+    /// collapsed `a`.
     ///
-    /// A split with no children (representable only in degraded trees that
-    /// never instantiate) yields `0`.
+    /// A split with no children contributes `0`: the result is the number of
+    /// leaves before that subtree. A stacked split whose `active` is past its
+    /// last child expands its last child, the same clamp the solver applies
+    /// once the template is instantiated.
     #[must_use]
     pub fn first_visible_leaf(&self) -> usize {
         match self {
             Self::Leaf(_) => 0,
             Self::Split(split) => {
                 let pick = match split.direction {
-                    SplitDirection::Stacked => split.active,
+                    SplitDirection::Stacked => {
+                        split.active.min(split.children.len().saturating_sub(1))
+                    }
                     SplitDirection::Horizontal | SplitDirection::Vertical => 0,
                 };
                 let Some(child) = split.children.get(pick) else {
@@ -122,17 +123,17 @@ impl TemplateNode {
                 };
                 let skipped: usize = split.children[..pick]
                     .iter()
-                    .map(|earlier| earlier.node.leaf_count())
+                    .map(|earlier| earlier.leaf_count())
                     .sum();
-                skipped + child.node.first_visible_leaf()
+                skipped + child.first_visible_leaf()
             }
         }
     }
 
     /// Builds the live tree this template describes. `ids` supplies one
     /// [`PaneId`] per leaf, in layout order: `ids[i]` fills the `i`-th leaf
-    /// of [`TemplateNode::leaves`]. Structure, directions, weights, active
-    /// members, and collapsed flags carry over unchanged.
+    /// of [`TemplateNode::leaves`]. Structure, directions, weights, and
+    /// active members carry over unchanged.
     ///
     /// # Errors
     /// [`TemplateError::PaneCountMismatch`] when `ids` does not hold exactly
@@ -162,10 +163,7 @@ impl TemplateNode {
                 let children = split
                     .children
                     .iter()
-                    .map(|child| LayoutChild {
-                        node: child.node.build(ids, next),
-                        collapsed: child.collapsed,
-                    })
+                    .map(|child| child.build(ids, next))
                     .collect();
                 LayoutNode::Split(SplitNode {
                     direction: split.direction,
@@ -193,8 +191,8 @@ pub enum LeafTemplate {
 pub struct TerminalTemplate {
     /// The command to run. `None` runs the user's default shell.
     pub command: Option<CommandTemplate>,
-    /// Working directory, verbatim from the file; expansion (`~`) and
-    /// resolution happen at spawn time, not here.
+    /// Working directory as written in the file: no `~` expansion and no
+    /// path resolution.
     pub cwd: Option<PathBuf>,
     /// Extra environment variables set for the spawned process.
     pub env: BTreeMap<String, String>,
@@ -223,23 +221,13 @@ pub struct PluginTemplate {
 pub struct TemplateSplit {
     /// How the children divide this node's rectangle.
     pub direction: SplitDirection,
-    /// The child slots, in layout order.
-    pub children: Vec<TemplateChild>,
+    /// The child subtrees, in layout order.
+    pub children: Vec<TemplateNode>,
     /// Per-child size constraints, parallel to `children`.
     pub weights: Vec<SizeWeight>,
     /// Index of the active child. Only meaningful for `Stacked` nodes,
     /// where it names the one expanded member.
     pub active: usize,
-}
-
-/// One child slot of a template split, mirroring [`LayoutChild`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TemplateChild {
-    /// The subtree occupying this slot.
-    pub node: TemplateNode,
-    /// `true` when a stacked child starts collapsed to its one-row header.
-    /// Directional splits never collapse children; this stays `false` there.
-    pub collapsed: bool,
 }
 
 /// A failed template instantiation.
@@ -253,4 +241,14 @@ pub enum TemplateError {
         /// Length of the supplied id slice.
         got: usize,
     },
+}
+
+impl DomainError for TemplateError {
+    fn category(&self) -> DomainCategory {
+        DomainCategory::Layout
+    }
+
+    fn severity(&self) -> Severity {
+        Severity::Recoverable
+    }
 }

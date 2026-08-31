@@ -16,6 +16,7 @@ use crate::event::{Event, RejectReason};
 use crate::geometry::Direction;
 use crate::ids::{ClientId, CommandId, PaneId, PluginId, SessionId, TabId};
 use crate::process::SpawnSpec;
+pub use crate::selection::{CopyTarget, GridPos, Selection, SelectionKind};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -47,9 +48,9 @@ pub enum Command {
     ToggleLockMode(ToggleLockModeArgs),
     /// Set the lock mode explicitly.
     SetLockMode(LockModeArgs),
-    /// Toggle whether the acting client grabs the mouse for text selection,
-    /// so a drag highlights in koshi even over a program that asked for the
-    /// mouse.
+    /// Toggle whether the acting client grabs the mouse for text selection.
+    /// While on, a drag highlights in koshi even over a program that asked
+    /// for the mouse.
     ToggleMouseSelect,
     /// Spawn a command in a new pane.
     RunCommandPane(RunCommandPaneArgs),
@@ -197,9 +198,9 @@ pub struct ClosePaneArgs {
     pub pane: Option<PaneId>,
     /// Kill the pane's child immediately, overriding its close policy.
     pub force: bool,
-    /// Widen the kill to the child's whole process group, so every
-    /// descendant it spawned stops with it. Changes kill scope only; a
-    /// `ConfirmIfBusy` pane still rejects the close while busy.
+    /// Kill the child's whole process group: every descendant it spawned
+    /// stops with it. Changes kill scope only; a `ConfirmIfBusy` pane still
+    /// rejects the close while busy.
     #[serde(default)]
     pub tree: bool,
 }
@@ -256,9 +257,9 @@ pub struct CloseTabArgs {
     pub tab: Option<TabId>,
     /// Kill every pane's child immediately, overriding each close policy.
     pub force: bool,
-    /// Widen every kill to its child's whole process group, so every
-    /// descendant stops with its pane. Changes kill scope only; a
-    /// `ConfirmIfBusy` pane still rejects the close while busy.
+    /// Kill each child's whole process group: every descendant stops with
+    /// its pane. Changes kill scope only; a `ConfirmIfBusy` pane still
+    /// rejects the close while busy.
     #[serde(default)]
     pub tree: bool,
 }
@@ -373,12 +374,10 @@ pub struct SwitchSessionArgs {
 
 /// Selection and copy commands — the commands of visual mode.
 ///
-/// A client is in visual mode while text is highlighted, and it is never
-/// entered by hand: a mouse drag over a pane's content starts a selection, and
-/// a click or any input that reaches the pane's program drops it. Setting a
-/// selection and clearing it are the whole lifecycle — a selection appearing is
-/// entering visual mode, it clearing is leaving — so there is no `Enter`/`Exit`
-/// variant.
+/// A client is in visual mode while text is highlighted. A mouse drag over a
+/// pane's content starts a selection, and a click or any input that reaches
+/// the pane's program drops it. There is no `Enter`/`Exit` variant: a
+/// selection appearing enters visual mode, and it clearing leaves.
 ///
 /// There is no copy cursor: selecting is the mouse's alone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -394,7 +393,7 @@ pub enum VisualCommand {
 
 /// Arguments for [`VisualCommand::SetSelection`].
 ///
-/// The pane is named, never inferred: each pane keeps its own highlight, so
+/// The pane is named, never inferred: each pane keeps its own highlight, and
 /// one client can have several up at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetSelectionArgs {
@@ -414,113 +413,19 @@ pub struct ClearSelectionArgs {
     pub pane: PaneId,
 }
 
-/// The shape of a selection, and with it the gesture that made it: a plain drag
-/// selects [`Character`](Self::Character), a double-click drag
-/// [`Word`](Self::Word), a triple-click drag [`Line`](Self::Line), and holding
-/// `Alt` while dragging [`Block`](Self::Block).
-///
-/// The kind is fixed when the drag starts and holds for the whole drag, so
-/// extending a double-click drag keeps snapping to whole words.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SelectionKind {
-    /// A contiguous character range that follows the text across soft-wrapped
-    /// lines: the end of one row continues at the start of the next.
-    Character,
-    /// Both ends grown outward to whole words. Dragging from the middle of
-    /// `hello` to the middle of `world` selects `hello world` entire.
-    Word,
-    /// Whole logical lines, soft-wrap included: a line that wrapped over three
-    /// rows is selected as all three.
-    Line,
-    /// A rectangle — the same column range on every row the drag spans, which
-    /// is how one column is lifted out of tabular output.
-    Block,
-}
-
-/// A position in one pane's text, spanning its scrollback history and its live
-/// screen as one continuous space.
-///
-/// A position is a whole cell: the outer terminal reports the pointer as a
-/// column and a row and nothing finer. Both ends of a selection are inclusive,
-/// so the cell under the pointer is part of the highlight.
-///
-/// The row is an absolute line number — how many lines the pane had ever pushed
-/// into scrollback when this line was the top of the live screen. It counts
-/// every line the pane has ever produced and never changes meaning: new output
-/// does not renumber it, and neither does the scrollback dropping its oldest
-/// lines to stay under its cap. A dropped row is simply gone.
-///
-/// Example: a pane has pushed 1000 lines into history and its scrollback holds
-/// the newest 500 (lines 500..=999). The oldest line you can still scroll back
-/// to is row `500`; the top line of the live screen is row `1000`; the row
-/// below it is `1001`. Ten more lines of output arrive: the live screen's top
-/// line is now row `1010`, and the line that was row `1000` is still row
-/// `1000` — now the newest line in history. Cap eviction drops lines 500..=509;
-/// the oldest line you can reach is now row `510`, and every surviving line
-/// kept the number it had.
-///
-/// Both numbers come from the running total of lines a pane has pushed into
-/// its scrollback and the count it still retains, which the terminal engine
-/// tracks as `Scrollback::total_pushed` and `Scrollback::len`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct GridPos {
-    /// Absolute line number — see the type docs. Never renumbered.
-    pub row: u64,
-    /// Column in cells, 0-indexed from the left.
-    pub col: u16,
-}
-
-/// A selection: a highlighted range of text, always made with the mouse — a
-/// drag over a pane's content starts one, and a click or any input that reaches
-/// the pane's program drops it.
-///
-/// This one type is both what [`SetSelectionArgs`] carries and what
-/// [`SelectionChanged`](crate::event::SelectionChanged) reports.
-///
-/// Both ends are positions the mouse layer resolved from a drag, and either end
-/// may be the earlier one in the text: dragging up or leftward puts `cursor`
-/// before `anchor`. Readers that need the range in text order order the pair
-/// themselves.
-///
-/// The pane a selection is in is not a field here — the command
-/// ([`SetSelectionArgs::pane`]) and the event
-/// ([`SelectionChanged::pane_id`](crate::event::SelectionChanged::pane_id))
-/// each name it, and the client keys its highlights by it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Selection {
-    /// Selection shape.
-    pub kind: SelectionKind,
-    /// The end that stays put — where the drag started.
-    pub anchor: GridPos,
-    /// The end that follows the pointer.
-    pub cursor: GridPos,
-}
-
-/// Which clipboard a copy targets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum CopyTarget {
-    /// OSC 52 (a terminal escape sequence for setting the clipboard) to the
-    /// outer terminal — the default, dependency-free option.
-    Osc52,
-    /// The native operating-system clipboard. Koshi builds no backend for it,
-    /// so a copy to this target writes nothing.
-    Native,
-}
-
 /// Arguments for [`VisualCommand::Copy`].
 ///
 /// The pane is named, never inferred, as in [`SetSelectionArgs`]: a client can
-/// have a highlight up in several panes at once, so the copy says which one it
-/// means.
+/// have a highlight up in several panes at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CopyArgs {
     /// The pane whose highlight is copied.
     pub pane: PaneId,
-    /// Where the copied text should go.
+    /// Where the copied text goes.
     pub target: CopyTarget,
     /// Whether blanks at the end of each copied row are dropped.
     ///
-    /// A terminal row is padded to the pane's full width with blank cells, so a
+    /// A terminal row is padded to the pane's full width with blank cells: a
     /// highlight over `hello` in an 80-column pane covers 75 trailing blanks.
     /// `true` copies `hello`; `false` copies `hello` followed by those blanks.
     pub trim_trailing_whitespace: bool,
@@ -754,11 +659,10 @@ impl std::error::Error for CommandEnvelopeError {}
 
 /// One command crossing a boundary, with its identity, origin, and timestamp.
 ///
-/// `client_id` is redundant with the client named by `source`; the two must
-/// agree. Deserialization is routed through `CommandEnvelopeWire`, which
-/// rejects any envelope where they disagree. In-process construction should use
-/// [`CommandEnvelope::new`], which derives the field, or pass a hand-built
-/// value through [`CommandEnvelope::validate`].
+/// `client_id` mirrors the client named by `source`; the two must agree.
+/// Deserialization is routed through `CommandEnvelopeWire`, which rejects any
+/// envelope where they disagree. [`CommandEnvelope::new`] derives the field;
+/// [`CommandEnvelope::validate`] checks a hand-built value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "CommandEnvelopeWire")]
 pub struct CommandEnvelope {
@@ -798,8 +702,8 @@ impl CommandEnvelope {
     }
 
     /// Check that `client_id` matches the client named by `source`, returning
-    /// the envelope unchanged when it does. Every deserialized or hand-built
-    /// envelope passes through here before the runtime trusts its attribution.
+    /// the envelope unchanged when it does. Deserialization runs this check on
+    /// every envelope.
     ///
     /// # Errors
     /// Returns [`CommandEnvelopeError::ClientIdMismatch`] if the two disagree.
@@ -890,18 +794,6 @@ impl CliExitCode {
     #[must_use]
     pub const fn code(self) -> i32 {
         self as i32
-    }
-
-    /// Maps a [`CommandResult`] to an exit code: [`CommandResult::Ok`] gives
-    /// [`Success`](Self::Success), [`CommandResult::Rejected`] gives
-    /// [`RuntimeAction`](Self::RuntimeAction). The CLI layer supplies the
-    /// narrower codes, which the result alone cannot tell apart.
-    #[must_use]
-    pub const fn for_result(result: &CommandResult) -> Self {
-        match result {
-            CommandResult::Ok { .. } => CliExitCode::Success,
-            CommandResult::Rejected { .. } => CliExitCode::RuntimeAction,
-        }
     }
 }
 

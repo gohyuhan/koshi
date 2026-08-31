@@ -1,34 +1,33 @@
 //! Turning a committed runtime event into a log line.
 //!
 //! [`event_log::log_event`] runs once per event as a command's transaction is
-//! sealed, so a mutation that landed leaves a trail without any handler having
-//! to remember to log. The match is exhaustive: a new
-//! [`koshi_core::event::Event`] variant does not compile until it is classified
-//! here.
+//! sealed. The match is exhaustive: a new [`koshi_core::event::Event`] variant
+//! does not compile until it is classified here.
 //!
 //! Levels mean what [the logging domain](super#what-each-level-means) says they
-//! mean. Applied to events, that leaves `info` for a fact that landed and `warn`
-//! for one reporting a failure koshi had an answer for — and no `error` at all,
-//! since every variant is a fact koshi modelled in advance.
+//! mean: `info` for a fact that landed, `warn` for one reporting a failure
+//! koshi had an answer for, and no `error` at all.
 //!
 //! # Which events get a line
 //!
 //! Only the ones a person could point at: a pane opened, a tab closed, the
 //! config applied, the lock mode changed.
 //!
-//! Three kinds are left out.
+//! Four kinds are left out.
 //!
 //! - **Faster than a person acts** — terminal content ticking over, a mouse
 //!   moving, a key resolving to a command, a window edge being dragged. They go
 //!   to the recent-events buffer (`koshi debug events`) instead.
-//! - **Announcements** — an event whose completion has its own event, so one
-//!   user action stays one line. [`koshi_core::event::Event::PaneClosing`]
-//!   starts what [`koshi_core::event::Event::PaneRemoved`] finishes; only the
-//!   second is written.
-//! - **Content** — no line carries a display name. A pane title can be set by
-//!   the program running inside it, through the OSC 2 escape sequence a shell
-//!   uses to put the current directory in a title, so a name is content and the
-//!   [logging policy](super#logging-policy) admits ids only.
+//! - **Announcements** — an event whose completion has its own event.
+//!   [`koshi_core::event::Event::PaneClosing`] starts what
+//!   [`koshi_core::event::Event::PaneRemoved`] finishes; only the second is
+//!   written.
+//! - **Content** — no line carries a display name. A pane title is content: the
+//!   program in the pane can set it through the OSC 2 escape sequence. Lines
+//!   carry ids only, as the [logging policy](super#logging-policy) says.
+//! - **Not koshi's state** — [`koshi_core::event::Event::PaneCommandStarted`]
+//!   and [`koshi_core::event::Event::PaneCommandFinished`] report what the
+//!   shell inside a pane is doing.
 
 use koshi_core::event::{Event, PluginEvent};
 
@@ -47,13 +46,22 @@ pub fn log_event(event: &Event) {
             tracing::info!(pane_id = %payload.pane_id, tab_id = %payload.tab_id, "pane created");
         }
         Event::PaneProcessExited(payload) => {
-            // A signal-terminated child reports no code, and an absent `Option`
-            // field is left off the line entirely rather than written as a null.
-            tracing::info!(
-                pane_id = %payload.pane_id,
-                exit_code = payload.exit_code,
-                "pane process exited"
-            );
+            // `exit_code` is `None` for a signal-terminated child; the line
+            // then carries no `exit_code` field. An exit code of `0` logs at
+            // info; every other code, and a signal, logs at warn.
+            if payload.exit_code == Some(0) {
+                tracing::info!(
+                    pane_id = %payload.pane_id,
+                    exit_code = payload.exit_code,
+                    "pane process exited"
+                );
+            } else {
+                tracing::warn!(
+                    pane_id = %payload.pane_id,
+                    exit_code = payload.exit_code,
+                    "pane process exited"
+                );
+            }
         }
         Event::PaneRemoved(payload) => {
             tracing::info!(pane_id = %payload.pane_id, tab_id = %payload.tab_id, "pane removed");
@@ -88,8 +96,7 @@ pub fn log_event(event: &Event) {
             );
         }
 
-        // --- whole-screen visibility: edge-triggered, so at most a couple of
-        // lines as a terminal is dragged past the size that fits no pane.
+        // --- whole-screen visibility: one line on entering, one on leaving.
         Event::TerminalTooSmallEntered(payload) => {
             tracing::info!(
                 client_id = %payload.client_id,
@@ -114,8 +121,7 @@ pub fn log_event(event: &Event) {
             tracing::info!(session_id = %payload.session_id, "config reloaded");
         }
 
-        // --- input mode: lock mode decides whether a key reaches koshi at all,
-        // so a session that stops responding to bindings is explained here.
+        // --- input mode.
         Event::InputModeChanged(payload) => {
             tracing::info!(
                 client_id = %payload.client_id,
@@ -124,8 +130,7 @@ pub fn log_event(event: &Event) {
             );
         }
 
-        // --- mouse select: it decides whether a click reaches the program in
-        // the pane, so a session whose clicks stop working is explained here.
+        // --- mouse select.
         Event::MouseSelectChanged(payload) => {
             tracing::info!(
                 client_id = %payload.client_id,
@@ -158,28 +163,24 @@ pub fn log_event(event: &Event) {
         Event::Quit => tracing::info!("session quitting"),
 
         // --- image swap: the session keeps running under a new process image.
-        // This line explains a jump in the log's process id.
         Event::Restarting => tracing::info!("session restarting into the binary on disk"),
 
         Event::Plugin(plugin_event) => log_plugin_event(plugin_event),
 
-        // --- no line, for the reasons the module doc lists.
+        // --- no line. The module doc names the three kinds left out.
         //
-        // Faster than a person acts: `PaneOutputUpdated` ticks per burst of
+        // Faster than a person acts: `PaneOutputUpdated` fires per burst of
         // shell output; `PtyResized`, `LayoutChanged`, `PaneSuppressed` and
         // `PaneResumed` fire once per pane per frame of a window drag;
         // `PaneScrollbackTruncated` fires while a pane prints past its buffer;
         // `KeybindingMatched`, `PaneTyped`, `PaneEnterPressed`, the four mouse
         // events, `PaneMouseForwarded`, `PluginMouseInput` and
-        // `SelectionChanged` are one per keystroke or per mouse motion. The
-        // splits and closes behind a layout change already have their own lines,
-        // and the visible half of suppression is the `TerminalTooSmall` pair.
+        // `SelectionChanged` fire once per keystroke or per mouse motion.
         //
         // Content: the typed events carry what the user typed.
         //
-        // Announcements: `PaneClosing` starts the close `PaneRemoved` completes.
-        // `CommandRejected` restates a rejection already written where the
-        // rejection is built, the path every rejected command takes.
+        // Announcements: `PaneClosing` starts the close `PaneRemoved`
+        // completes. `CommandRejected` is written where the rejection is built.
         //
         // Not koshi's state: `PaneCommandStarted` and `PaneCommandFinished`
         // report what the shell inside a pane is doing.
@@ -206,10 +207,8 @@ pub fn log_event(event: &Event) {
     }
 }
 
-/// Write one log line for a plugin lifecycle fact. Every variant is
-/// person-paced — a plugin is installed or enabled by a deliberate act — so all
-/// of them are written. The two that report a plugin koshi could not run are
-/// `warn`: the plugin is left out and the session carries on without it.
+/// Write one log line for a plugin lifecycle fact. Every variant writes a
+/// line: `LoadFailed` and `Broken` are `warn`, the rest are `info`.
 fn log_plugin_event(event: &PluginEvent) {
     match event {
         PluginEvent::Installed(payload) => {

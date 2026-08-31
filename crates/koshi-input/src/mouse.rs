@@ -56,8 +56,9 @@ fn button(b: HostButton) -> MouseButton {
     }
 }
 
-/// The modifiers held during the event. All four pass straight through: the
-/// keyboard decoder supplies Control, Alt and Super, and Shift is added here.
+/// The modifiers held during the event: Control, Alt and Super from
+/// [`crate::keyboard::decode_mods`], plus Shift. Meta counts as Super; Hyper
+/// is dropped.
 fn decode_mods(modifiers: KeyModifiers) -> ModFlags {
     let mods = crate::keyboard::decode_mods(modifiers);
     if modifiers.contains(KeyModifiers::SHIFT) {

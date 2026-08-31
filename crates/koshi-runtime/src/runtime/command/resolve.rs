@@ -202,7 +202,11 @@ impl Server {
         source: &CommandSource,
     ) -> Result<Option<&Session>, Rejection> {
         match source {
-            CommandSource::InSessionCli { session_id, .. } => self
+            CommandSource::InSessionCli { session_id, .. }
+            | CommandSource::ExternalCli {
+                session_id: Some(session_id),
+                ..
+            } => self
                 .sessions()
                 .get(session_id)
                 .map(Some)
@@ -211,14 +215,6 @@ impl Server {
                 .session_for_client(*client_id)
                 .map(Some)
                 .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale)),
-            CommandSource::ExternalCli {
-                session_id: Some(session_id),
-                ..
-            } => self
-                .sessions()
-                .get(session_id)
-                .map(Some)
-                .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound)),
             CommandSource::ExternalCli {
                 session_id: None, ..
             }
@@ -472,11 +468,7 @@ impl Server {
                     _ => {
                         let client_id =
                             Self::resolve_view_client(source.target_client(), source, session)?;
-                        let tab_id = session
-                            .clients
-                            .get(client_id)
-                            .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))?
-                            .active_tab();
+                        let tab_id = Self::require_client(session, client_id)?.active_tab();
                         Ok(PaneTarget {
                             session_id: session.id,
                             tab_id,
@@ -545,10 +537,7 @@ impl Server {
         if session.panes.get(pane).is_none() {
             return Err(Rejection::bare(RejectReason::TargetNotFound));
         }
-        let client = session
-            .clients
-            .get(client_id)
-            .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))?;
+        let client = Self::require_client(session, client_id)?;
         let tab = session
             .tabs
             .get(&client.active_tab())
@@ -582,7 +571,7 @@ impl Server {
         source: &CommandSource,
         session: Option<&Session>,
         sizing: PaneSizing,
-    ) -> Result<FocusPaneTarget, Rejection> {
+    ) -> Result<ClientPaneTarget, Rejection> {
         let session = Self::require_session(session)?;
         let client_id = Self::resolve_view_client(args.client, source, session)?;
         let pane_id = match args.target {
@@ -593,12 +582,8 @@ impl Server {
             }
         };
         Self::require_pane_in_active_tab(session, client_id, pane_id)?;
-        let tab_id = session
-            .clients
-            .get(client_id)
-            .map(|client| client.active_tab())
-            .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))?;
-        Ok(FocusPaneTarget {
+        let tab_id = Self::require_client(session, client_id)?.active_tab();
+        Ok(ClientPaneTarget {
             session_id: session.id,
             client_id,
             tab_id,
@@ -623,10 +608,7 @@ impl Server {
         direction: Direction,
         sizing: PaneSizing,
     ) -> Result<PaneId, Rejection> {
-        let client = session
-            .clients
-            .get(client_id)
-            .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))?;
+        let client = Self::require_client(session, client_id)?;
         let tab_id = client.active_tab();
         let tab = session
             .tabs
@@ -683,13 +665,9 @@ impl Server {
             if overlap == 0 {
                 continue;
             }
-            let better = match best {
-                None => true,
-                Some((_, best_distance, best_overlap)) => {
-                    distance < best_distance
-                        || (distance == best_distance && overlap > best_overlap)
-                }
-            };
+            let better = best.is_none_or(|(_, best_distance, best_overlap)| {
+                distance < best_distance || (distance == best_distance && overlap > best_overlap)
+            });
             if better {
                 best = Some((pane_id, distance, overlap));
             }
@@ -706,10 +684,7 @@ impl Server {
         session: &Session,
         client_id: ClientId,
     ) -> Result<PaneId, Rejection> {
-        let client = session
-            .clients
-            .get(client_id)
-            .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))?;
+        let client = Self::require_client(session, client_id)?;
         let pane = client
             .focused_pane(client.active_tab())
             .ok_or_else(|| Rejection::new(RejectReason::TargetNotFound, "no focused pane"))?;
@@ -742,10 +717,7 @@ impl Server {
                     return Self::require_tab_containing_pane(session, *pane_id);
                 }
                 let client_id = Self::resolve_acting_client(source, session)?;
-                let client = session
-                    .clients
-                    .get(client_id)
-                    .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))?;
+                let client = Self::require_client(session, client_id)?;
                 let tab = client.active_tab();
                 Self::require_tab(session, tab)?;
                 Ok(tab)
@@ -824,14 +796,14 @@ impl Server {
         &self,
         source: &CommandSource,
         session: Option<&Session>,
-    ) -> Result<FullscreenTarget, Rejection> {
+    ) -> Result<ClientPaneTarget, Rejection> {
         let target = self.resolve_pane_target(None, source, session)?;
         let client_id = Self::resolve_view_client(
             source.target_client(),
             source,
             Self::require_session(session)?,
         )?;
-        Ok(FullscreenTarget {
+        Ok(ClientPaneTarget {
             session_id: target.session_id,
             client_id,
             tab_id: target.tab_id,
@@ -852,10 +824,7 @@ impl Server {
     ) -> Result<FocusTabTarget, Rejection> {
         let session = Self::require_session(session)?;
         let client_id = Self::resolve_view_client(args.client, source, session)?;
-        let client = session
-            .clients
-            .get(client_id)
-            .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))?;
+        let client = Self::require_client(session, client_id)?;
         let target = match args.target {
             TabTarget::Id(id) => tab_ops::TabTarget::Id(id),
             TabTarget::Index(index) => tab_ops::TabTarget::Index(index),
@@ -875,6 +844,19 @@ impl Server {
     /// session-scoped command has no session context to resolve within.
     pub(super) fn require_session(session: Option<&Session>) -> Result<&Session, Rejection> {
         session.ok_or_else(|| Rejection::new(RejectReason::TargetNotFound, "no session context"))
+    }
+
+    /// The client `client_id` names in `session`, or
+    /// [`RejectReason::SourceClientStale`] when no client of that id is
+    /// attached there.
+    pub(super) fn require_client(
+        session: &Session,
+        client_id: ClientId,
+    ) -> Result<&Client, Rejection> {
+        session
+            .clients
+            .get(client_id)
+            .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))
     }
 
     /// Confirm `tab` exists in `session`.

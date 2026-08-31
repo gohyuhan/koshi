@@ -665,8 +665,12 @@ fn a_session_server_outlives_its_last_client_by_default() {
     // It answers a fresh connection after the client that was attached is gone.
     let rejoined = open(&runtime_dir, session_id);
     drop(rejoined);
-    assert!(
-        matches!(session.0.try_wait(), Ok(None)),
+    assert_eq!(
+        session
+            .0
+            .try_wait()
+            .expect("the session server's state can be read"),
+        None,
         "the session server ended without being asked to"
     );
 }

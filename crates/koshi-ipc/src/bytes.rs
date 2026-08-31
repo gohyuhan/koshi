@@ -4,9 +4,9 @@
 //! `#[serde(with = "crate::bytes")]` travels as a JSON string: base64 as RFC
 //! 4648 section 4 spells it, over the alphabet `A`-`Z`, `a`-`z`, `0`-`9`, `+`
 //! and `/`, padded with `=` to a multiple of four characters. Decoding refuses
-//! anything else — wrong padding, a character the alphabet does not allow
-//! where it stands, or a last character carrying unused bits that are not
-//! zero.
+//! anything else — a last group of one character, wrong padding, a character
+//! the alphabet does not allow where it stands, or a last character carrying
+//! unused bits that are not zero.
 //!
 //! Example — the two bytes `[104, 105]`:
 //!
@@ -14,9 +14,14 @@
 //! "bytes":"aGk="
 //! ```
 //!
-//! **Hex, for a secret and for a fingerprint.** [`hex()`](crate::bytes::hex) writes bytes as
-//! lowercase hex, which is what every secret, hash and certificate
-//! fingerprint koshi holds is written as. Example — the two bytes
+//! **Base64 out, base64 or a list of numbers in.** A field marked
+//! `#[serde(with = "crate::bytes::base64_or_list")]` is written the same way
+//! and read from either shape, so a payload an older koshi wrote as
+//! `"bytes":[104,105]` still decodes.
+//!
+//! **Hex, for a secret and for a fingerprint.** [`hex()`](crate::bytes::hex)
+//! writes bytes as lowercase hex. Every secret, hash and certificate
+//! fingerprint koshi holds is written this way. Example — the two bytes
 //! `[104, 105]` become `"6869"`.
 
 use std::fmt;
@@ -55,7 +60,9 @@ where
 ///
 /// # Errors
 /// Returns a decoding error when the value is not a string, and one naming
-/// the fault when the string is not base64.
+/// the fault when the string is not base64: a last group of one character,
+/// wrong padding, a last character carrying unused bits that are not zero,
+/// or a character the alphabet does not allow where it stands.
 pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
 where
     D: Deserializer<'de>,
@@ -81,12 +88,75 @@ impl Visitor<'_> for Base64Visitor {
     }
 }
 
+/// A `Vec<u8>` field written as base64 and read from either base64 or a list
+/// of numbers.
+///
+/// [`serialize`] writes the base64 string and nothing else.
+/// [`base64_or_list::deserialize`] takes that string or a list of numbers `0`
+/// to `255`, so a payload an older koshi wrote as `"bytes":[104,105]` reads
+/// back as the same two bytes as `"bytes":"aGk="`.
+pub mod base64_or_list {
+    use std::fmt;
+
+    use serde::de::{Error, SeqAccess, Visitor};
+    use serde::Deserializer;
+
+    pub use super::serialize;
+
+    /// Read one base64 string, or one list of numbers `0` to `255`, into the
+    /// bytes it holds.
+    ///
+    /// # Errors
+    /// Returns a decoding error when the value is neither a string nor a list,
+    /// when a list entry is not a number `0` to `255`, and one naming the
+    /// fault when the string is not base64: a last group of one character,
+    /// wrong padding, a last character carrying unused bits that are not zero,
+    /// or a character the alphabet does not allow where it stands.
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(EitherVisitor)
+    }
+
+    /// Takes either shape [`deserialize`] accepts.
+    struct EitherVisitor;
+
+    impl<'de> Visitor<'de> for EitherVisitor {
+        type Value = Vec<u8>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("bytes as a base64 string or as a list of numbers")
+        }
+
+        fn visit_str<E>(self, text: &str) -> Result<Vec<u8>, E>
+        where
+            E: Error,
+        {
+            super::decode(text).map_err(E::custom)
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Vec<u8>, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut bytes = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+            while let Some(byte) = seq.next_element::<u8>()? {
+                bytes.push(byte);
+            }
+            Ok(bytes)
+        }
+    }
+}
+
 /// `bytes` as base64 text.
 fn encode(bytes: &[u8]) -> String {
     STANDARD.encode(bytes)
 }
 
-/// The bytes `text` holds, or the reason it is not base64.
+/// The bytes `text` holds, or the reason it is not base64: a last group of
+/// one character, wrong padding, a last character carrying unused bits that
+/// are not zero, or a character the alphabet does not allow where it stands.
 fn decode(text: &str) -> Result<Vec<u8>, &'static str> {
     STANDARD.decode(text).map_err(|error| match error {
         DecodeError::InvalidLength(_) => "the base64 text length is not a multiple of four",

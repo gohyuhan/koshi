@@ -53,7 +53,8 @@ pub fn runtime_dir() -> Result<PathBuf, CliError> {
 /// endpoint file or a socket nothing listens on reports the session as not
 /// running ([`CliError::SessionNotFound`]); every other failure to talk is
 /// [`CliError::IpcUnavailable`]. The result itself — applied or rejected —
-/// comes back for the caller to map to an exit code.
+/// comes back for the caller to map to an exit code, with a rejection's hint
+/// filtered by [`sanitize_reported_text`](koshi_core::text::sanitize_reported_text).
 pub fn submit_in_session(
     context: &InSessionContext,
     command: Command,
@@ -95,17 +96,13 @@ fn submit_via_runtime_dir(
         context.pane_id,
         PathBuf::from(&endpoint.socket),
     );
-    submit_envelope(&endpoint, context.session_id, source, command, None)
+    submit_envelope(&endpoint, context.session_id, source, command, false)
 }
 
 /// [`submit_external`] against an explicit runtime directory: the whole
 /// exchange, with the endpoint lookup rooted where the caller says.
-///
-/// `client_id` is the client the command acts for, and rides on the source.
-/// Naming one costs a second round trip: the session's Hello answer is read
-/// before the command is written, and a session that settled below protocol
-/// version 3 is refused with [`CliError::IpcUnavailable`]. `None` names no
-/// client and keeps the exchange at one round trip.
+/// `client_id` rides on the source and costs the second round trip
+/// [`submit_external`] describes.
 pub fn submit_external_via_runtime_dir(
     runtime_dir: &Path,
     session_id: SessionId,
@@ -114,13 +111,7 @@ pub fn submit_external_via_runtime_dir(
 ) -> Result<CommandResult, CliError> {
     let endpoint = read_endpoint(runtime_dir, session_id)?;
     let source = CommandSource::external_cli(Some(session_id), client_id);
-    submit_envelope(
-        &endpoint,
-        session_id,
-        source,
-        command,
-        client_id.is_some().then_some(talk::TARGET_CLIENT_PROTOCOL),
-    )
+    submit_envelope(&endpoint, session_id, source, command, client_id.is_some())
 }
 
 /// Fill a pane-creating command's unset working directory with this CLI
@@ -142,17 +133,20 @@ fn capture_cwd(mut command: Command) -> Command {
 
 /// One command submission over `endpoint`: connect, send the Hello and the
 /// enveloped command, and read the command's result. A pane-creating command
-/// with no directory of its own gets this process's ([`capture_cwd`]).
+/// with no directory of its own gets this process's ([`capture_cwd`]), and a
+/// rejection's hint is filtered by
+/// [`filter_rejection_hint`](crate::talk::filter_rejection_hint).
 ///
-/// `least_version` goes to [`exchange`] unchanged: `None` writes the Hello
-/// and the command back to back, and `Some(least)` refuses a session that
-/// settled below `least` before the command is written.
+/// `names_client` goes to [`exchange`] unchanged: `false` writes the Hello and
+/// the command back to back, and `true` refuses a session that settled below
+/// [`TARGET_CLIENT_PROTOCOL`](crate::talk::TARGET_CLIENT_PROTOCOL) before the
+/// command is written.
 fn submit_envelope(
     endpoint: &EndpointFile,
     session_id: SessionId,
     source: CommandSource,
     command: Command,
-    least_version: Option<u32>,
+    names_client: bool,
 ) -> Result<CommandResult, CliError> {
     let command = capture_cwd(command);
     let envelope = CommandEnvelope::new(CommandId::new(), source, SystemTime::now(), command);
@@ -160,8 +154,8 @@ fn submit_envelope(
         request_id: 2,
         kind: IpcRequestKind::SubmitCommand(Box::new(envelope)),
     };
-    match exchange(endpoint, session_id, request, least_version)? {
-        IpcResult::CommandResult(result) => Ok(result),
+    match exchange(endpoint, session_id, request, names_client)? {
+        IpcResult::CommandResult(result) => Ok(talk::filter_rejection_hint(result)),
         IpcResult::Error(refusal) => Err(refused(&refusal)),
         other => Err(talk::SESSION.unexpected_reply(&other)),
     }
@@ -189,6 +183,11 @@ pub fn fetch_foreign_overview(
 }
 
 /// One Discovery exchange over `endpoint`, for the session `session_id`.
+///
+/// The answer passes through
+/// [`filter_reported_text`](crate::discovery::filter_reported_text) before it
+/// is handed back, so every name, title, working directory and argv in it is
+/// filtered whichever session answered.
 fn overview_of(
     endpoint: &EndpointFile,
     session_id: SessionId,
@@ -197,8 +196,11 @@ fn overview_of(
         request_id: 2,
         kind: IpcRequestKind::Discovery,
     };
-    match exchange(endpoint, session_id, request, None)? {
-        IpcResult::Overview(overview) => Ok(overview),
+    match exchange(endpoint, session_id, request, false)? {
+        IpcResult::Overview(mut overview) => {
+            crate::discovery::filter_reported_text(&mut overview);
+            Ok(overview)
+        }
         IpcResult::Error(refusal) => Err(refused(&refusal)),
         other => Err(talk::SESSION.unexpected_reply(&other)),
     }
@@ -216,7 +218,7 @@ fn overview_of(
 ///
 /// A session whose build has no layout request refuses it two ways, and both
 /// are reported as the version gap they are, naming what to do instead. A
-/// session from this build or later names the kind it lacks
+/// session from this build or newer names the kind it lacks
 /// ([`UnsupportedKind`](IpcErrorCode::UnsupportedKind)); one older than the
 /// tolerant wire cannot read the request at all
 /// ([`MalformedRequest`](IpcErrorCode::MalformedRequest)).
@@ -230,7 +232,7 @@ pub fn fetch_layout(
         request_id: 2,
         kind: IpcRequestKind::Layout { tab },
     };
-    match exchange(&endpoint, session_id, request, None)? {
+    match exchange(&endpoint, session_id, request, false)? {
         IpcResult::Layout(layout) => match tab {
             Some(tab_id) if layout.tabs.is_empty() => Err(CliError::CommandRejected {
                 reason: RejectReason::TargetNotFound,
@@ -238,12 +240,7 @@ pub fn fetch_layout(
             }),
             _ => Ok(layout),
         },
-        IpcResult::Error(refusal)
-            if matches!(
-                refusal.code,
-                IpcErrorCode::UnsupportedKind | IpcErrorCode::MalformedRequest
-            ) =>
-        {
+        IpcResult::Error(refusal) if session_has_no_such_request(refusal.code) => {
             Err(CliError::IpcUnavailable {
                 detail: "this session was started by an older koshi that cannot report its \
                          layout; restart the session to use `debug dump-layout`, or run \
@@ -271,14 +268,9 @@ pub fn fetch_recent_events(
         request_id: 2,
         kind: IpcRequestKind::RecentEvents,
     };
-    match exchange(&endpoint, session_id, request, None)? {
+    match exchange(&endpoint, session_id, request, false)? {
         IpcResult::RecentEvents(events) => Ok(events),
-        IpcResult::Error(refusal)
-            if matches!(
-                refusal.code,
-                IpcErrorCode::UnsupportedKind | IpcErrorCode::MalformedRequest
-            ) =>
-        {
+        IpcResult::Error(refusal) if session_has_no_such_request(refusal.code) => {
             Err(CliError::IpcUnavailable {
                 detail: "this session was started by an older koshi that keeps no recent-events \
                          buffer; restart the session to use `debug events`"
@@ -290,6 +282,18 @@ pub fn fetch_recent_events(
     }
 }
 
+/// True when `code` says the session's build has no such request kind: the
+/// session named the kind as one it lacks
+/// ([`UnsupportedKind`](IpcErrorCode::UnsupportedKind)), or it could not read
+/// the request's bytes at all
+/// ([`MalformedRequest`](IpcErrorCode::MalformedRequest)).
+fn session_has_no_such_request(code: IpcErrorCode) -> bool {
+    matches!(
+        code,
+        IpcErrorCode::UnsupportedKind | IpcErrorCode::MalformedRequest
+    )
+}
+
 /// The result of asking a running session to restart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionRestart {
@@ -298,7 +302,8 @@ pub enum SessionRestart {
     /// Nothing advertises that session, or nothing listens behind the address
     /// it advertises, so nothing restarted.
     NotRunning,
-    /// The session runs a koshi build that has no restart request.
+    /// The session runs a koshi build that has no restart request: it named
+    /// the kind it lacks, or it could not read the request's bytes at all.
     TooOld,
 }
 
@@ -310,9 +315,10 @@ pub enum SessionRestart {
 ///
 /// A session that refuses the request gives [`CliError::IpcUnavailable`]
 /// carrying the sentence the session sent. A session whose build has no such
-/// request answers
-/// [`UnsupportedKind`](IpcErrorCode::UnsupportedKind), which reads as
-/// [`SessionRestart::TooOld`].
+/// request reads as [`SessionRestart::TooOld`]: one from this build or newer
+/// names the kind it lacks ([`UnsupportedKind`](IpcErrorCode::UnsupportedKind)),
+/// and one older than the tolerant wire cannot read the request at all
+/// ([`MalformedRequest`](IpcErrorCode::MalformedRequest)).
 pub fn restart_running_session(
     runtime_dir: &Path,
     session_id: SessionId,
@@ -326,9 +332,9 @@ pub fn restart_running_session(
         request_id: 2,
         kind: IpcRequestKind::Restart,
     };
-    match exchange(&endpoint, session_id, request, None) {
+    match exchange(&endpoint, session_id, request, false) {
         Ok(IpcResult::Restarting) => Ok(SessionRestart::Restarting),
-        Ok(IpcResult::Error(refusal)) if refusal.code == IpcErrorCode::UnsupportedKind => {
+        Ok(IpcResult::Error(refusal)) if session_has_no_such_request(refusal.code) => {
             Ok(SessionRestart::TooOld)
         }
         Ok(IpcResult::Error(refusal)) => Err(refused(&refusal)),
@@ -416,9 +422,7 @@ pub fn shared_base() -> Option<PathBuf> {
     if !server.allow_other_users {
         return None;
     }
-    server
-        .shared_sessions_dir
-        .or_else(koshi_paths::shared_sessions_dir)
+    crate::config::shared_sessions_dir(&server)
 }
 
 /// Every session another local user started that `shared_base` advertises, as
@@ -511,18 +515,19 @@ fn foreign_endpoint(socket: String) -> EndpointFile {
 /// Connect to `endpoint`, open with the Hello, and run `request` on the same
 /// connection. Returns `request`'s result; a failed Hello is an error.
 ///
-/// With `least_version` `None` the Hello and `request` go out back to back
+/// With `names_client` `false` the Hello and `request` go out back to back
 /// before either reply is read, and the server answers every request in
 /// order, so the exchange costs one round trip.
 ///
-/// With `Some(least)` the Hello answer is read first, and a session that
-/// settled below `least` is refused with [`CliError::IpcUnavailable`] before
-/// `request` is written, so it is never sent. That costs a second round trip.
+/// With `true` the Hello answer is read first, and a session that settled
+/// below [`TARGET_CLIENT_PROTOCOL`](crate::talk::TARGET_CLIENT_PROTOCOL) is
+/// refused with [`CliError::IpcUnavailable`] before `request` is written, so
+/// it is never sent. That costs a second round trip.
 fn exchange(
     endpoint: &EndpointFile,
     session_id: SessionId,
     request: IpcRequest,
-    least_version: Option<u32>,
+    names_client: bool,
 ) -> Result<IpcResult, CliError> {
     let mut connection = connect(endpoint, session_id)?;
     let hello = IpcRequest {
@@ -531,18 +536,15 @@ fn exchange(
     };
     connection.send(&hello).map_err(talk_failed)?;
 
-    match least_version {
-        None => {
-            connection.send(&request).map_err(talk_failed)?;
-            let hello_reply: IncomingResponse = connection.recv().map_err(talk_failed)?;
-            talk::session_hello_version(hello_reply)?;
-        }
-        Some(_) => {
-            let hello_reply: IncomingResponse = connection.recv().map_err(talk_failed)?;
-            let (settled, _) = talk::session_hello_version(hello_reply)?;
-            talk::require_settled_version(settled, least_version)?;
-            connection.send(&request).map_err(talk_failed)?;
-        }
+    if names_client {
+        let hello_reply: IncomingResponse = connection.recv().map_err(talk_failed)?;
+        let (settled, _) = talk::session_hello_version(hello_reply)?;
+        talk::require_client_targeting(settled, true)?;
+        connection.send(&request).map_err(talk_failed)?;
+    } else {
+        connection.send(&request).map_err(talk_failed)?;
+        let hello_reply: IncomingResponse = connection.recv().map_err(talk_failed)?;
+        talk::session_hello_version(hello_reply)?;
     }
 
     let reply: IncomingResponse = connection.recv().map_err(talk_failed)?;

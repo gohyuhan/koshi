@@ -24,9 +24,9 @@ const DOCTOR_HEADERS: &[&str] = &["check", "verdict", "reason", "help"];
 fn doctor_row_cells(row: &CheckRow) -> Vec<String> {
     vec![
         row.name.to_string(),
-        verdict_cell(row.verdict).to_string(),
-        row.reason.clone(),
-        row.help.clone().unwrap_or_else(|| "-".to_string()),
+        verdict_cell(row.outcome.verdict).to_string(),
+        row.outcome.reason.clone(),
+        opt_cell(row.outcome.help.as_ref()),
     ]
 }
 

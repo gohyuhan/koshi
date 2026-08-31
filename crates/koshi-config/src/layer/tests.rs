@@ -9,9 +9,7 @@ use koshi_core::geometry::Direction;
 use koshi_core::key::{Key, KeyChord, ModFlags};
 
 use super::*;
-use crate::types::{
-    ActivationAction, ActivationScope, KeymapOptIn, ModeBindings, ModeName, RgbColor,
-};
+use crate::types::{ModeBindings, ModeName, RgbColor};
 
 #[test]
 fn empty_layer_changes_nothing() {
@@ -473,7 +471,7 @@ fn modes_replaced_wholesale() {
     override_map.insert(ModeName::new("resize"), ModeBindings::default());
     let layer = PartialKoshiConfig {
         keybindings: Some(PartialKeybindingsConfig {
-            modes: Some(override_map),
+            modes: Some(override_map.clone()),
             ..Default::default()
         }),
         ..Default::default()
@@ -481,15 +479,7 @@ fn modes_replaced_wholesale() {
     let merged = merge_client(base, vec![layer]);
 
     // The whole map is replaced: the base's "normal" entry is gone.
-    assert_eq!(merged.keybindings.modes.len(), 1);
-    assert!(merged
-        .keybindings
-        .modes
-        .contains_key(&ModeName::new("resize")));
-    assert!(!merged
-        .keybindings
-        .modes
-        .contains_key(&ModeName::new("normal")));
+    assert_eq!(merged.keybindings.modes, override_map);
 }
 
 #[test]
@@ -539,25 +529,6 @@ fn keybindings_scalars_keep_untouched_siblings() {
     assert_eq!(merged.keybindings.leader, Leader::Mods(ModFlags::ALT));
     assert_eq!(merged.keybindings.chord_timeout_ms, 500); // default kept
     assert_eq!(merged.keybindings.max_chord_depth, 4); // default kept
-}
-
-#[test]
-fn plugin_entries_replaced_wholesale() {
-    let entry = PluginActivation {
-        name: "statusbar".to_string(),
-        action: ActivationAction::Enable,
-        scope: ActivationScope::Global,
-        keymaps: KeymapOptIn::Recommended,
-    };
-    let layer = PartialKoshiConfig {
-        plugins: Some(PartialPluginActivationConfig {
-            entries: Some(vec![entry.clone()]),
-        }),
-        ..Default::default()
-    };
-    let merged = merge_client(ClientConfig::default(), vec![layer]);
-
-    assert_eq!(merged.plugins.entries, vec![entry]);
 }
 
 #[test]
@@ -682,4 +653,214 @@ fn config_layers_let_the_theme_and_keybinding_files_win_over_the_app_layer() {
     assert_eq!(client.layout.new_pane_direction, Direction::Down);
     assert_eq!(client.theme.name, "ocean");
     assert_eq!(client.keybindings.max_chord_depth, 4);
+}
+
+#[test]
+fn update_overrides_fold_onto_the_viewer_side_only() {
+    let layer = PartialKoshiConfig {
+        update: Some(PartialUpdateConfig {
+            auto_check: Some(false),
+            check_interval_days: Some(30),
+            allow_prerelease: Some(true),
+        }),
+        ..Default::default()
+    };
+
+    // The viewer owns the section, so it is the side that changes.
+    let client = merge_client(ClientConfig::default(), vec![layer.clone()]);
+    assert!(!client.update.auto_check);
+    assert_eq!(client.update.check_interval_days, 30);
+    assert!(client.update.allow_prerelease);
+
+    // A session folds the same file and is untouched by it.
+    let server = merge_server(ServerConfig::default(), vec![layer]);
+    assert_eq!(server, ServerConfig::default());
+}
+
+#[test]
+fn an_update_layer_keeps_the_fields_it_leaves_unset() {
+    let layer = PartialKoshiConfig {
+        update: Some(PartialUpdateConfig {
+            check_interval_days: Some(1),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let merged = merge_client(ClientConfig::default(), vec![layer]);
+
+    assert_eq!(merged.update.check_interval_days, 1);
+    assert!(merged.update.auto_check); // default kept
+    assert!(!merged.update.allow_prerelease); // default kept
+}
+
+#[test]
+fn remote_reconnect_folds_onto_the_viewer_side_only() {
+    // The built-in default dials again, so a viewer with no `koshi.kdl`
+    // reconnects by itself.
+    assert!(ClientConfig::default().remote_reconnect);
+
+    let layer = PartialKoshiConfig {
+        remote_reconnect: Some(false),
+        ..Default::default()
+    };
+
+    let client = merge_client(ClientConfig::default(), vec![layer.clone()]);
+    assert_eq!(
+        client,
+        ClientConfig {
+            remote_reconnect: false,
+            ..ClientConfig::default()
+        }
+    );
+
+    // A session folds the same file and is untouched by it.
+    let server = merge_server(ServerConfig::default(), vec![layer]);
+    assert_eq!(server, ServerConfig::default());
+}
+
+#[test]
+fn mouse_overrides_fold_onto_the_viewer_side_only() {
+    let layer = PartialKoshiConfig {
+        mouse: Some(PartialMouseConfig {
+            border_resize: Some(false),
+            scroll_lines: Some(9),
+            wheel: Some(WheelScroll::Ignore),
+        }),
+        ..Default::default()
+    };
+
+    let client = merge_client(ClientConfig::default(), vec![layer.clone()]);
+    assert!(!client.mouse.border_resize);
+    assert_eq!(client.mouse.scroll_lines, 9);
+    assert_eq!(client.mouse.wheel, WheelScroll::Ignore);
+
+    // A session folds the same file and is untouched by it.
+    let server = merge_server(ServerConfig::default(), vec![layer]);
+    assert_eq!(server, ServerConfig::default());
+}
+
+#[test]
+fn keybinding_timing_overrides_leave_the_bindings_alone() {
+    let layer = PartialKoshiConfig {
+        keybindings: Some(PartialKeybindingsConfig {
+            chord_timeout_ms: Some(1_200),
+            which_key_delay_ms: Some(50),
+            max_chord_depth: Some(7),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let merged = merge_client(ClientConfig::default(), vec![layer]);
+
+    assert_eq!(merged.keybindings.chord_timeout_ms, 1_200);
+    assert_eq!(merged.keybindings.which_key_delay_ms, 50);
+    assert_eq!(merged.keybindings.max_chord_depth, 7);
+    assert_eq!(
+        merged.keybindings.modes,
+        ClientConfig::default().keybindings.modes
+    );
+    assert_eq!(
+        merged.keybindings.leader,
+        ClientConfig::default().keybindings.leader
+    );
+}
+
+#[test]
+fn every_color_role_can_be_overridden() {
+    let color = RgbColor::new(0x0a, 0x0b, 0x0c);
+    let layer = PartialKoshiConfig {
+        theme: Some(PartialThemeConfig {
+            name: None,
+            colors: Some(PartialColorPalette {
+                ramp_start: Some(color),
+                ramp_end: Some(color),
+                on_ramp: Some(color),
+                on_ramp_dim: Some(color),
+                accent: Some(color),
+                on_accent: Some(color),
+                border_focused: Some(color),
+                border_unfocused: Some(color),
+                border_hover: Some(color),
+                stack_header_fg: Some(color),
+                stack_header_bg: Some(color),
+                letterbox: Some(color),
+                bar_bg: Some(color),
+            }),
+        }),
+        ..Default::default()
+    };
+    let merged = merge_client(ClientConfig::default(), vec![layer]);
+
+    assert_eq!(
+        merged.theme.colors,
+        ColorPalette {
+            ramp_start: color,
+            ramp_end: color,
+            on_ramp: color,
+            on_ramp_dim: color,
+            accent: color,
+            on_accent: color,
+            border_focused: color,
+            border_unfocused: color,
+            border_hover: color,
+            stack_header_fg: color,
+            stack_header_bg: color,
+            letterbox: color,
+            bar_bg: color,
+        }
+    );
+}
+
+#[test]
+fn a_later_layer_can_clear_the_listen_address() {
+    let user = PartialKoshiConfig {
+        remote_listen: Some(Some("127.0.0.1:7654".to_string())),
+        ..Default::default()
+    };
+    let session = PartialKoshiConfig {
+        remote_listen: Some(None),
+        ..Default::default()
+    };
+
+    let server = merge_server(ServerConfig::default(), vec![user, session]);
+    assert_eq!(server.remote_listen, None);
+}
+
+#[test]
+fn a_later_layer_can_clear_the_shared_sessions_directory() {
+    let user = PartialKoshiConfig {
+        shared_sessions_dir: Some(Some(PathBuf::from("/var/run/koshi"))),
+        ..Default::default()
+    };
+    let session = PartialKoshiConfig {
+        shared_sessions_dir: Some(None),
+        ..Default::default()
+    };
+
+    let server = merge_server(ServerConfig::default(), vec![user, session]);
+    assert_eq!(server.shared_sessions_dir, None);
+}
+
+#[test]
+fn a_later_layer_can_clear_the_default_shell() {
+    let user = PartialKoshiConfig {
+        terminal: Some(PartialTerminalConfig {
+            term: None,
+            colorterm: None,
+            default_shell: Some(Some("/bin/zsh".to_string())),
+        }),
+        ..Default::default()
+    };
+    let session = PartialKoshiConfig {
+        terminal: Some(PartialTerminalConfig {
+            term: None,
+            colorterm: None,
+            default_shell: Some(None),
+        }),
+        ..Default::default()
+    };
+
+    let server = merge_server(ServerConfig::default(), vec![user, session]);
+    assert_eq!(server.terminal.default_shell, None);
+    assert_eq!(server.terminal.term, "xterm-256color"); // sibling untouched
 }

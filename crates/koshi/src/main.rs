@@ -444,6 +444,9 @@ fn run_discovery(command: &CliCommand, remote: Option<&str>) -> Result<(), CliEr
                         "koshi: {server}: the saved secret was refused; \
                          run `koshi remote set-secret {server}`"
                     ),
+                    Reach::CertificateChanged { server, detail } => {
+                        eprintln!("koshi: {server}: {detail} its sessions are not listed");
+                    }
                     Reach::Unreachable { server } => {
                         eprintln!("koshi: {server} did not answer; its sessions are not listed");
                     }

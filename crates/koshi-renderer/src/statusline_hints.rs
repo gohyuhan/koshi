@@ -1,4 +1,5 @@
-//! Bottom keybinding bar with Zellij-style modifier groups and action ribbons.
+//! The statusline: the bottom keybinding row, with Zellij-style modifier
+//! groups and action ribbons.
 //!
 //! Idle view groups every top-level hint under one human modifier header such
 //! as `Ctrl +` or `Alt +`; keys with the same action label fold into one ribbon.
@@ -21,17 +22,16 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Widget};
 
-use crate::region::StatuslineDto;
-use crate::render::{bar_style, set_line_clipped};
+use crate::region::StatuslineInputs;
+use crate::render::{bar_style, line_width, set_line_clipped};
 use crate::snapshot::KeymapHints;
 use crate::theme::Theme;
 
 const REVERT_MARKER: &str = " keys! ";
 
-/// Paint one chrome-owned hint row from `dto`.
-///
-/// `dto` holds everything the row draws — see [`StatuslineDto`]. `area` is the
-/// row to paint. `buf` is the buffer painted into.
+/// Paint the statusline from `inputs` — see [`StatuslineInputs`] — in
+/// `theme`'s colors. `area` is the row to paint. `buf` is the buffer painted
+/// into.
 ///
 /// Does nothing for a zero-size area. Otherwise paints in this order:
 ///
@@ -40,19 +40,21 @@ const REVERT_MARKER: &str = " keys! ";
 ///    was reverted. The marker holds that edge, and every hint below stops
 ///    short of it.
 /// 3. Draws one accent ribbon per already-pressed chord of `pending`, left to
-///    right, then a ` ▶ ` arrow.
+///    right, then a ` ▶ ` arrow. Only the first chord's ribbon carries that
+///    chord's prefix label, and only when bindings sit under it.
 /// 4. Draws each modifier group left to right: its ` Ctrl + ` header, then one
 ///    two-block ribbon per action.
 /// 5. Draws a `…` marker where the row ran out of room, and stops there.
-pub fn draw_hint_bar(dto: &StatuslineDto<'_>, area: RatatuiRect, buf: &mut Buffer) {
+pub(crate) fn draw_statusline(
+    inputs: StatuslineInputs<'_>,
+    theme: &Theme,
+    area: RatatuiRect,
+    buf: &mut Buffer,
+) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let StatuslineDto {
-        hints,
-        theme,
-        pending,
-    } = *dto;
+    let StatuslineInputs { hints, pending } = inputs;
     // Clear drops stale cells, then the bar background fills the row whole.
     // Ribbons painted after this set their own background; plain text such as
     // a `Ctrl +` header sets only a foreground and keeps this fill.
@@ -63,7 +65,7 @@ pub fn draw_hint_bar(dto: &StatuslineDto<'_>, area: RatatuiRect, buf: &mut Buffe
     let mut right_edge = area.right();
     if hints.reverted {
         let marker = Line::from(Span::styled(REVERT_MARKER, revert_style()));
-        let width = marker.width() as u16;
+        let width = line_width(&marker);
         let x = right_edge.saturating_sub(width).max(area.x);
         set_line_clipped(buf, x, area.y, &marker, right_edge - x);
         right_edge = x;
@@ -72,16 +74,20 @@ pub fn draw_hint_bar(dto: &StatuslineDto<'_>, area: RatatuiRect, buf: &mut Buffe
     let mut x = area.x;
     if !pending.is_empty() {
         for (index, chord) in pending.iter().enumerate() {
-            let prefix_text = (index == 0).then(|| prefix_text(hints, *chord)).flatten();
-            let line = chord_ribbon(theme, *chord, prefix_text.as_deref());
+            let label = if index == 0 {
+                prefix_text(hints, *chord)
+            } else {
+                None
+            };
+            let line = chord_ribbon(theme, *chord, label.as_deref());
             if !paint_whole(buf, &mut x, area.y, right_edge, &line) {
-                draw_overflow_marker(buf, theme, x, area.y, right_edge);
+                draw_overflow_marker(buf, theme, x, area.y, area.x, right_edge);
                 return;
             }
         }
         let arrow = Line::from(Span::styled(" ▶ ", breadcrumb_arrow_style(theme)));
         if !paint_whole(buf, &mut x, area.y, right_edge, &arrow) {
-            draw_overflow_marker(buf, theme, x, area.y, right_edge);
+            draw_overflow_marker(buf, theme, x, area.y, area.x, right_edge);
             return;
         }
     }
@@ -89,9 +95,8 @@ pub fn draw_hint_bar(dto: &StatuslineDto<'_>, area: RatatuiRect, buf: &mut Buffe
     let groups = display_groups(hint_items(hints, pending));
     let count = groups.len();
     for (group_index, group) in groups.into_iter().enumerate() {
-        // A modifier-less binding has no header: its key is the sequence's
-        // first key, so it wears the header's plain-text style. `Tab` reads
-        // as its own opener.
+        // A modifier-less group has no header: its key takes the header's
+        // plain-text style instead of a key block.
         let key_style = if group.mods.is_empty() {
             ramp_header_style(theme, group_index, count)
         } else {
@@ -105,11 +110,11 @@ pub fn draw_hint_bar(dto: &StatuslineDto<'_>, area: RatatuiRect, buf: &mut Buffe
             ))
         });
         let first_width = group.entries.first().map_or(0, |entry| {
-            entry_ribbon(entry, key_style, label_style).width() as u16
+            line_width(&entry_ribbon(entry, key_style, label_style))
         });
-        let header_width = header.as_ref().map_or(0, |line| line.width() as u16);
+        let header_width = header.as_ref().map_or(0, line_width);
         if x.saturating_add(header_width).saturating_add(first_width) > right_edge {
-            draw_overflow_marker(buf, theme, x, area.y, right_edge);
+            draw_overflow_marker(buf, theme, x, area.y, area.x, right_edge);
             return;
         }
         if let Some(header) = header {
@@ -118,18 +123,28 @@ pub fn draw_hint_bar(dto: &StatuslineDto<'_>, area: RatatuiRect, buf: &mut Buffe
         for entry in group.entries {
             let line = entry_ribbon(&entry, key_style, label_style);
             if !paint_whole(buf, &mut x, area.y, right_edge, &line) {
-                draw_overflow_marker(buf, theme, x, area.y, right_edge);
+                draw_overflow_marker(buf, theme, x, area.y, area.x, right_edge);
                 return;
             }
         }
     }
 }
 
-/// Mark dropped trailing hints with `…` so truncation is visible. Painted at
-/// the current cursor, or over the row's last cell when the hints consumed
-/// the full width.
-fn draw_overflow_marker(buf: &mut Buffer, theme: &Theme, x: u16, y: u16, right_edge: u16) {
-    let x = x.min(right_edge.saturating_sub(1));
+/// Mark dropped trailing hints with `…`. Painted at the current cursor, or
+/// over the row's last cell when the hints consumed the full width.
+///
+/// The column is held inside `left_edge..right_edge`: a `right_edge` the
+/// revert marker pulled down to `left_edge` paints on `left_edge`, never one
+/// column left of it.
+fn draw_overflow_marker(
+    buf: &mut Buffer,
+    theme: &Theme,
+    x: u16,
+    y: u16,
+    left_edge: u16,
+    right_edge: u16,
+) {
+    let x = x.min(right_edge.saturating_sub(1)).max(left_edge);
     let marker = Line::from(Span::styled("…", overflow_style(theme)));
     set_line_clipped(buf, x, y, &marker, 1);
 }
@@ -372,7 +387,7 @@ fn key_rank(key: Key) -> (u8, String) {
 }
 
 fn paint_whole(buf: &mut Buffer, x: &mut u16, y: u16, right_edge: u16, line: &Line<'_>) -> bool {
-    let width = line.width() as u16;
+    let width = line_width(line);
     if x.saturating_add(width) > right_edge {
         return false;
     }
@@ -410,8 +425,7 @@ fn breadcrumb_modifier_style(theme: &Theme) -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
-/// The pressed-prefix breadcrumb's key/label blocks: dark text on the
-/// accent, brighter than any ramp stop, so the in-progress chords stand out.
+/// The pressed-prefix breadcrumb's key/label blocks: dark text on the accent.
 fn breadcrumb_key_style(theme: &Theme) -> Style {
     Style::default()
         .fg(theme.on_accent)

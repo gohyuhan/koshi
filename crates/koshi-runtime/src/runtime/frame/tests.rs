@@ -1,8 +1,9 @@
 //! Tests for [`wire_frame`]: a cell travels with its character, its combining
 //! marks, its width and every style field; equal neighbouring cells fold into
-//! one run; a row travels the grid's full width; a pane with no terminal
-//! content sends no window; and the session, tab, slot, client and per-pane
-//! scalars come across unchanged.
+//! one run; a row travels the grid's full width and carries how its line ends;
+//! rows travel top to bottom; a pane with no terminal content sends no window;
+//! every color, underline style and cursor shape maps to its wire form; and the
+//! session, tab, slot, client and per-pane scalars come across unchanged.
 
 use std::sync::Arc;
 
@@ -12,6 +13,7 @@ use koshi_core::lock::LockMode;
 use koshi_core::mouse::MouseTracking;
 use koshi_ipc::frame::FrameRun;
 use koshi_layout::mode::LayoutMode;
+use koshi_layout::solver::StackHeader;
 use koshi_pane::pane::state::PaneKind;
 use koshi_renderer::snapshot::{
     ClientSnapshot, CursorSnapshot, GridView, PaneSlot, PaneSnapshot, PluginUiSnapshot,
@@ -21,7 +23,7 @@ use koshi_renderer::snapshot::{
 use super::*;
 
 /// The style the one written cell carries: every field set away from its
-/// default, so a field dropped on the way across shows up.
+/// default.
 fn style() -> Style {
     let mut style = Style::default();
     style.set_fg(Color::Indexed(4));
@@ -289,12 +291,151 @@ fn a_wire_row_is_as_wide_as_the_grid() {
 }
 
 #[test]
+fn a_wire_row_carries_how_its_line_ends() {
+    let mut grid = Grid::blank(3, 1, Style::default());
+    grid.set_row_end(0, RowEnd::Hard);
+    grid.set_row_end(1, RowEnd::Soft);
+    grid.set_row_end(2, RowEnd::SoftWide);
+
+    assert_eq!(wire_row(&grid, 0, 1).end, FrameRowEnd::Hard);
+    assert_eq!(wire_row(&grid, 1, 1).end, FrameRowEnd::Soft);
+    assert_eq!(wire_row(&grid, 2, 1).end, FrameRowEnd::SoftWide);
+}
+
+#[test]
+fn a_cell_travels_with_its_display_width() {
+    let mut grid = Grid::blank(1, 2, Style::default());
+    let cell = grid.cell_mut(0, 0).expect("the grid has a cell at (0, 0)");
+    *cell = Cell::new('世', 2, Style::default());
+
+    let cells = wire_row(&grid, 0, 2).cells();
+
+    assert_eq!(cells[0].ch, '世');
+    assert_eq!(cells[0].width, 2);
+    assert_eq!(cells[1], wire_blank_cell());
+}
+
+#[test]
+fn a_window_carries_every_grid_row_top_to_bottom() {
+    let mut grid = Grid::blank(2, 1, Style::default());
+    *grid.cell_mut(0, 0).expect("the grid has a cell at (0, 0)") =
+        Cell::new('a', 1, Style::default());
+    *grid.cell_mut(1, 0).expect("the grid has a cell at (1, 0)") =
+        Cell::new('b', 1, Style::default());
+    let view = GridView {
+        grid: Arc::new(grid),
+        view_offset: 4,
+    };
+
+    let window = wire_window(&view);
+
+    assert_eq!(window.cols, 1);
+    assert_eq!(window.view_offset, 4);
+    assert_eq!(window.rows.len(), 2);
+    assert_eq!(window.rows[0].cells()[0].ch, 'a');
+    assert_eq!(window.rows[1].cells()[0].ch, 'b');
+}
+
+#[test]
+fn a_grid_with_no_rows_travels_as_a_window_with_no_rows() {
+    let view = GridView {
+        grid: Arc::new(Grid::blank(0, 0, Style::default())),
+        view_offset: 0,
+    };
+
+    let window = wire_window(&view);
+
+    assert_eq!(window.cols, 0);
+    assert_eq!(window.rows, Vec::new());
+    assert_eq!(window.view_offset, 0);
+}
+
+#[test]
+fn every_color_travels_as_its_wire_form() {
+    assert_eq!(wire_color(Color::Default), FrameColor::Default);
+    assert_eq!(wire_color(Color::Indexed(0)), FrameColor::Indexed(0));
+    assert_eq!(wire_color(Color::Indexed(255)), FrameColor::Indexed(255));
+    assert_eq!(
+        wire_color(Color::Rgb(0, 128, 255)),
+        FrameColor::Rgb(0, 128, 255)
+    );
+}
+
+#[test]
+fn every_underline_style_travels_as_its_wire_form() {
+    assert_eq!(wire_underline(UnderlineStyle::None), FrameUnderline::None);
+    assert_eq!(
+        wire_underline(UnderlineStyle::Single),
+        FrameUnderline::Single
+    );
+    assert_eq!(
+        wire_underline(UnderlineStyle::Double),
+        FrameUnderline::Double
+    );
+    assert_eq!(wire_underline(UnderlineStyle::Curly), FrameUnderline::Curly);
+    assert_eq!(
+        wire_underline(UnderlineStyle::Dotted),
+        FrameUnderline::Dotted
+    );
+    assert_eq!(
+        wire_underline(UnderlineStyle::Dashed),
+        FrameUnderline::Dashed
+    );
+}
+
+#[test]
+fn every_cursor_shape_travels_as_its_wire_form() {
+    assert_eq!(
+        wire_cursor_shape(CursorShape::Block),
+        FrameCursorShape::Block
+    );
+    assert_eq!(
+        wire_cursor_shape(CursorShape::Underline),
+        FrameCursorShape::Underline
+    );
+    assert_eq!(wire_cursor_shape(CursorShape::Bar), FrameCursorShape::Bar);
+}
+
+#[test]
 fn a_pane_with_no_grid_travels_with_no_window() {
     let empty = PaneId::new();
     let frame = wire_frame(&snapshot(PaneId::new(), empty));
 
     assert_eq!(frame.panes[1].id, empty);
     assert_eq!(frame.panes[1].window, None);
+}
+
+#[test]
+fn a_pane_with_no_grid_travels_with_its_remaining_fields_at_rest() {
+    let empty = PaneId::new();
+    let frame = wire_frame(&snapshot(PaneId::new(), empty));
+
+    let pane = &frame.panes[1];
+    assert_eq!(pane.title, None);
+    assert_eq!(
+        pane.cursor,
+        FrameCursor {
+            row: 0,
+            col: 0,
+            visible: false,
+            blink: false,
+            shape: None,
+        }
+    );
+    assert_eq!(pane.mouse_tracking, MouseTracking::Off);
+    assert!(!pane.reverse_video);
+    assert!(!pane.alt_scroll);
+    assert!(!pane.on_alt_screen);
+    assert_eq!(pane.view_top_row, 0);
+    assert_eq!(pane.selection, None);
+    assert!(!pane.has_selection);
+    assert_eq!(
+        pane.scrollback,
+        FrameScrollback {
+            truncated: false,
+            retained_lines: 0,
+        }
+    );
 }
 
 #[test]
@@ -431,4 +572,27 @@ fn the_tab_gap_travels_with_the_frame() {
     let frame = wire_frame(&snapshot);
 
     assert_eq!(frame.session.active_tab.gap, 2);
+}
+
+#[test]
+fn the_tab_stack_headers_and_all_suppressed_flag_travel_with_the_frame() {
+    let content = PaneId::new();
+    let empty = PaneId::new();
+    let header = StackHeader {
+        pane: empty,
+        rect: Rect {
+            origin: Point { x: 5, y: 0 },
+            size: Size { cols: 5, rows: 1 },
+        },
+        position: 1,
+        total: 2,
+    };
+    let mut snapshot = snapshot(content, empty);
+    snapshot.session.active_tab.stack_headers = vec![header];
+    snapshot.session.active_tab.all_suppressed = true;
+
+    let frame = wire_frame(&snapshot);
+
+    assert_eq!(frame.session.active_tab.stack_headers, vec![header]);
+    assert!(frame.session.active_tab.all_suppressed);
 }

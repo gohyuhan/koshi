@@ -6,8 +6,8 @@
 //! A pane's screen content is not reported text and passes through untouched.
 
 /// The longest string [`sanitize_reported_text`] returns, in bytes. A longer
-/// one is cut at the last character boundary that fits. 512 bytes holds at
-/// most 340 display columns.
+/// one is cut at the last character boundary that fits. 512 bytes holds 512
+/// ASCII characters, or 170 three-byte characters such as `日`.
 pub const MAX_REPORTED_TEXT_BYTES: usize = 512;
 
 /// Whether [`sanitize_reported_text`] removes `c`.

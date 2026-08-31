@@ -1,23 +1,27 @@
 //! Tests for tab operations: creation, deletion, focus, and reordering.
 //!
-//! This module provides fixtures (helper functions) to construct test sessions,
-//! tabs, clients, and panes, and exercises the tab operation functions
-//! ([`commit_new_tab`], [`close_tab`], [`focus_tab`], [`move_tab`]) with
-//! various state configurations to verify correct event emission and state
-//! transitions.
+//! Holds fixtures that build test sessions, tabs, clients, and panes, and
+//! exercises [`commit_new_tab`], [`commit_profile_tab`], [`close_tab`],
+//! [`focus_tab`], [`resolve_tab_target`] and [`move_tab`] over the state
+//! configurations each one can be called in, asserting the events emitted and
+//! the state left behind.
 
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use koshi_core::event::Event;
+use koshi_core::event::{
+    Event, PaneClosing, PaneCreated, PaneFocused, PaneRemoved, TabClosed, TabCreated, TabFocused,
+    TabMoved,
+};
 use koshi_core::geometry::{Size, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
-use koshi_layout::tree::{LayoutChild, LayoutNode, SplitNode};
+use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pane::pane::lifecycle::PaneLifecycle;
 use koshi_pane::pane::state::PaneRecord;
 
 use super::{
-    close_tab, commit_new_tab, commit_profile_tab, focus_tab, move_tab, ProfileTab, TabTarget,
+    close_tab, commit_new_tab, commit_profile_tab, focus_tab, move_tab, resolve_tab_target,
+    ProfileTab, TabTarget,
 };
 use crate::client::{Client, ClientOrigin, ClientRegistry};
 use crate::error::SessionConsistencyError;
@@ -37,16 +41,14 @@ fn two_pane_tab(tab_id: TabId, left: PaneId, right: PaneId, index: usize) -> Tab
     let mut tab = Tab::new(tab_id, "code".to_owned(), index, left);
     tab.update_layout(LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![
-            LayoutChild::new(LayoutNode::Pane(left)),
-            LayoutChild::new(LayoutNode::Pane(right)),
-        ],
+        vec![LayoutNode::Pane(left), LayoutNode::Pane(right)],
     )));
     tab
 }
 
 /// A client of `session_id` viewing `tab_id`, no per-tab focus recorded yet.
-/// The client's session_id matches the session's own id, ensuring it passes [`Session::validate`] when attached.
+/// Its `session_id` is the one [`Session::validate`] demands of an attached
+/// client.
 fn client_on(session_id: SessionId, tab_id: TabId) -> Client {
     Client::new(
         ClientId::new(),
@@ -61,8 +63,7 @@ fn client_on(session_id: SessionId, tab_id: TabId) -> Client {
     )
 }
 
-/// A `Spawning` terminal-pane record. Timestamp uses `UNIX_EPOCH` so tests stay
-/// deterministic.
+/// A `Spawning` terminal-pane record stamped `UNIX_EPOCH`.
 fn pane_record(id: PaneId) -> PaneRecord {
     PaneRecord::new(id, SystemTime::UNIX_EPOCH)
 }
@@ -184,6 +185,64 @@ fn commit_new_tab_first_tab_transitions_the_session_to_running() {
 }
 
 #[test]
+fn commit_new_tab_after_the_first_leaves_the_session_running() {
+    let mut session = session_with(vec![], vec![]);
+    let _ = commit_new_tab(
+        &mut session,
+        TabId::new(),
+        PaneId::new(),
+        "first".to_owned(),
+        None,
+        NewPaneSpec::default(),
+        SystemTime::UNIX_EPOCH,
+    );
+    assert_eq!(*session.lifecycle(), SessionLifecycle::Running);
+
+    let _ = commit_new_tab(
+        &mut session,
+        TabId::new(),
+        PaneId::new(),
+        "second".to_owned(),
+        None,
+        NewPaneSpec::default(),
+        SystemTime::UNIX_EPOCH,
+    );
+
+    assert_eq!(*session.lifecycle(), SessionLifecycle::Running);
+}
+
+#[test]
+fn commit_new_tab_on_a_stopping_session_leaves_it_stopping() {
+    // `FirstTabCreated` is legal only from `Starting`. A session already
+    // winding down keeps `Stopping`, and the tab is still created.
+    let mut session = session_with(vec![], vec![]);
+    session.request_stop();
+    assert_eq!(*session.lifecycle(), SessionLifecycle::Stopping);
+    let (tab_id, pane_id) = (TabId::new(), PaneId::new());
+
+    let (prev, events) = commit_new_tab(
+        &mut session,
+        tab_id,
+        pane_id,
+        "logs".to_owned(),
+        None,
+        NewPaneSpec::default(),
+        SystemTime::UNIX_EPOCH,
+    );
+
+    assert_eq!(*session.lifecycle(), SessionLifecycle::Stopping);
+    assert_eq!(prev, None);
+    assert_eq!(
+        events,
+        vec![
+            Event::TabCreated(TabCreated { tab_id }),
+            Event::PaneCreated(PaneCreated { pane_id, tab_id }),
+        ]
+    );
+    assert_eq!(session.tabs[&tab_id].index(), 0);
+}
+
+#[test]
 fn commit_new_tab_appends_after_existing_tabs() {
     let existing = TabId::new();
     let pane = PaneId::new();
@@ -290,10 +349,12 @@ fn commit_new_tab_with_a_stale_focus_client_moves_no_view() {
     let client_id = client.id();
     session.attach_client(client);
 
+    let new_tab_id = TabId::new();
+    let new_pane_id = PaneId::new();
     let (prev, events) = commit_new_tab(
         &mut session,
-        TabId::new(),
-        PaneId::new(),
+        new_tab_id,
+        new_pane_id,
         "second".to_owned(),
         Some(ClientId::new()),
         NewPaneSpec::default(),
@@ -301,10 +362,27 @@ fn commit_new_tab_with_a_stale_focus_client_moves_no_view() {
     );
 
     assert_eq!(prev, None);
-    assert_eq!(events.len(), 2); // TabCreated + PaneCreated only
+    assert_eq!(
+        events,
+        vec![
+            Event::TabCreated(TabCreated { tab_id: new_tab_id }),
+            Event::PaneCreated(PaneCreated {
+                pane_id: new_pane_id,
+                tab_id: new_tab_id,
+            }),
+        ]
+    );
     assert_eq!(
         session.clients.get(client_id).unwrap().active_tab(),
         existing
+    );
+    assert_eq!(
+        session
+            .clients
+            .get(client_id)
+            .unwrap()
+            .focused_pane(new_tab_id),
+        None
     );
 }
 
@@ -345,25 +423,29 @@ fn close_tab_emits_a_close_remove_pair_per_pane_then_tab_closed() {
 
     let events = close_tab(&mut session, b);
 
-    assert!(session.panes.get(pb1).is_none());
-    assert!(session.panes.get(pb2).is_none());
+    assert_eq!(session.panes.get(pb1), None);
+    assert_eq!(session.panes.get(pb2), None);
+    assert_eq!(session.panes.len(), 1);
     assert!(!session.tabs.contains_key(&b));
 
-    let closing = events
-        .iter()
-        .filter(|e| matches!(e, Event::PaneClosing(_)))
-        .count();
-    let removed = events
-        .iter()
-        .filter(|e| matches!(e, Event::PaneRemoved(_)))
-        .count();
-    assert_eq!(closing, 2);
-    assert_eq!(removed, 2);
-    assert!(events
-        .iter()
-        .any(|e| matches!(e, Event::TabClosed(t) if t.tab_id == b)));
-    // tab `a` survives → no quit.
-    assert!(!events.iter().any(|e| matches!(e, Event::Quit)));
+    // One close/remove pair per pane in layout order, then the tab. Tab `a`
+    // survives, so no `Quit`.
+    assert_eq!(
+        events,
+        vec![
+            Event::PaneClosing(PaneClosing { pane_id: pb1 }),
+            Event::PaneRemoved(PaneRemoved {
+                pane_id: pb1,
+                tab_id: b,
+            }),
+            Event::PaneClosing(PaneClosing { pane_id: pb2 }),
+            Event::PaneRemoved(PaneRemoved {
+                pane_id: pb2,
+                tab_id: b,
+            }),
+            Event::TabClosed(TabClosed { tab_id: b }),
+        ]
+    );
 }
 
 #[test]
@@ -405,11 +487,78 @@ fn close_tab_moves_a_viewing_client_to_the_nearest_tab() {
 
     // nearest to index 1 is the previous tab (a, index 0).
     assert_eq!(session.clients.get(client_id).unwrap().active_tab(), a);
-    assert!(events.iter().any(|e| matches!(
-        e,
-        Event::TabFocused(t)
-            if t.tab_id == a && t.client_id == client_id && t.prior_tab == b
-    )));
+    assert_eq!(
+        events,
+        vec![
+            Event::PaneClosing(PaneClosing { pane_id: pb }),
+            Event::PaneRemoved(PaneRemoved {
+                pane_id: pb,
+                tab_id: b,
+            }),
+            Event::TabClosed(TabClosed { tab_id: b }),
+            Event::TabFocused(TabFocused {
+                client_id,
+                tab_id: a,
+                prior_tab: b,
+            }),
+            Event::PaneFocused(PaneFocused {
+                client_id,
+                tab_id: a,
+                pane_id: pa,
+                prior_pane: None,
+            }),
+        ]
+    );
+    assert_eq!(
+        session.clients.get(client_id).unwrap().focused_pane(a),
+        Some(pa)
+    );
+}
+
+#[test]
+fn close_tab_at_the_first_index_moves_viewers_to_the_next_tab() {
+    // Closing index 0 has no previous tab to fall back on, so
+    // `nearest_surviving_tab` takes the smallest index above it.
+    let (mut session, ids) = three_tab_session();
+    let client_id = attach_client_on(&mut session, ids[0]);
+    let closed_pane = only_pane(&session, ids[0]);
+    let landed = only_pane(&session, ids[1]);
+
+    let events = close_tab(&mut session, ids[0]);
+
+    assert_eq!(session.clients.get(client_id).unwrap().active_tab(), ids[1]);
+    assert_eq!(
+        events,
+        vec![
+            Event::PaneClosing(PaneClosing {
+                pane_id: closed_pane
+            }),
+            Event::PaneRemoved(PaneRemoved {
+                pane_id: closed_pane,
+                tab_id: ids[0],
+            }),
+            Event::TabClosed(TabClosed { tab_id: ids[0] }),
+            Event::TabFocused(TabFocused {
+                client_id,
+                tab_id: ids[1],
+                prior_tab: ids[0],
+            }),
+            Event::PaneFocused(PaneFocused {
+                client_id,
+                tab_id: ids[1],
+                pane_id: landed,
+                prior_pane: None,
+            }),
+        ]
+    );
+    assert_eq!(
+        session.clients.get(client_id).unwrap().focused_pane(ids[1]),
+        Some(landed)
+    );
+    // The survivors close ranks behind the gone first tab.
+    assert_eq!(session.tabs[&ids[1]].index(), 0);
+    assert_eq!(session.tabs[&ids[2]].index(), 1);
+    assert_eq!(session.validate(), Ok(()));
 }
 
 #[test]
@@ -427,7 +576,78 @@ fn close_tab_leaves_a_non_viewing_clients_active_tab() {
     let events = close_tab(&mut session, b);
 
     assert_eq!(session.clients.get(client_id).unwrap().active_tab(), a);
-    assert!(!events.iter().any(|e| matches!(e, Event::TabFocused(_))));
+    // No client was viewing `b`, so nothing is refocused.
+    assert_eq!(
+        events,
+        vec![
+            Event::PaneClosing(PaneClosing { pane_id: pb }),
+            Event::PaneRemoved(PaneRemoved {
+                pane_id: pb,
+                tab_id: b,
+            }),
+            Event::TabClosed(TabClosed { tab_id: b }),
+        ]
+    );
+}
+
+#[test]
+fn close_tab_drops_the_focus_and_zoom_a_non_viewing_client_held_in_it() {
+    // A client sitting on another tab still carries per-tab state for the tab
+    // that closes. Both entries go, so nothing points at the gone pane.
+    let (a, b) = (TabId::new(), TabId::new());
+    let (pa, pb) = (PaneId::new(), PaneId::new());
+    let mut session = session_with(
+        vec![single_pane_tab(a, pa, 0), single_pane_tab(b, pb, 1)],
+        vec![pa, pb],
+    );
+    let mut client = client_on(session.id, a);
+    client.update_focused_pane(b, pb);
+    client.zoom_pane(b, pb);
+    let client_id = client.id();
+    session.attach_client(client);
+    assert_eq!(session.validate(), Ok(()));
+
+    let _ = close_tab(&mut session, b);
+
+    let client = session.clients.get(client_id).unwrap();
+    assert_eq!(client.active_tab(), a);
+    assert_eq!(client.focused_pane(b), None);
+    assert_eq!(client.zoomed_pane(b), None);
+    assert_eq!(session.validate(), Ok(()));
+}
+
+#[test]
+fn close_tab_emits_pane_events_for_a_leaf_missing_from_the_registry() {
+    // A layout leaf with no registry record (a desync) still gets its
+    // close/remove pair, so the runtime tears down whatever it holds for it.
+    let (a, b) = (TabId::new(), TabId::new());
+    let (pa, pb1, pb2) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let mut session = session_with(
+        vec![single_pane_tab(a, pa, 0), two_pane_tab(b, pb1, pb2, 1)],
+        vec![pa, pb1], // pb2 is a leaf of `b` but was never registered
+    );
+
+    let events = close_tab(&mut session, b);
+
+    assert_eq!(
+        events,
+        vec![
+            Event::PaneClosing(PaneClosing { pane_id: pb1 }),
+            Event::PaneRemoved(PaneRemoved {
+                pane_id: pb1,
+                tab_id: b,
+            }),
+            Event::PaneClosing(PaneClosing { pane_id: pb2 }),
+            Event::PaneRemoved(PaneRemoved {
+                pane_id: pb2,
+                tab_id: b,
+            }),
+            Event::TabClosed(TabClosed { tab_id: b }),
+        ]
+    );
+    assert_eq!(session.panes.get(pb1), None);
+    assert_eq!(session.panes.len(), 1);
+    assert_eq!(session.validate(), Ok(()));
 }
 
 #[test]
@@ -439,7 +659,19 @@ fn closing_the_last_tab_quits() {
     let events = close_tab(&mut session, a);
 
     assert!(session.tabs.is_empty());
-    assert!(events.iter().any(|e| matches!(e, Event::Quit)));
+    assert_eq!(
+        events,
+        vec![
+            Event::PaneClosing(PaneClosing { pane_id: pa }),
+            Event::PaneRemoved(PaneRemoved {
+                pane_id: pa,
+                tab_id: a,
+            }),
+            Event::TabClosed(TabClosed { tab_id: a }),
+            Event::Quit,
+        ]
+    );
+    assert_eq!(*session.lifecycle(), SessionLifecycle::Stopping);
 }
 
 #[test]
@@ -450,6 +682,11 @@ fn closing_an_unknown_tab_is_a_noop() {
 }
 
 // --- focus_tab -------------------------------------------------------------
+
+/// The single pane of a single-pane tab.
+fn only_pane(session: &Session, tab: TabId) -> PaneId {
+    session.tabs[&tab].layout().leaf_panes()[0]
+}
 
 /// Attach a fresh client viewing `tab` and return its id.
 fn attach_client_on(session: &mut Session, tab: TabId) -> ClientId {
@@ -464,14 +701,30 @@ fn focus_tab_by_id_switches_active_and_emits() {
     let (mut session, ids) = three_tab_session();
     let client_id = attach_client_on(&mut session, ids[0]);
 
+    let landed = only_pane(&session, ids[2]);
     let events = focus_tab(&mut session, client_id, TabTarget::Id(ids[2]));
 
     assert_eq!(session.clients.get(client_id).unwrap().active_tab(), ids[2]);
-    assert!(matches!(
-        events.as_slice(),
-        [Event::TabFocused(t)]
-            if t.tab_id == ids[2] && t.client_id == client_id && t.prior_tab == ids[0]
-    ));
+    assert_eq!(
+        events,
+        vec![
+            Event::TabFocused(TabFocused {
+                client_id,
+                tab_id: ids[2],
+                prior_tab: ids[0],
+            }),
+            Event::PaneFocused(PaneFocused {
+                client_id,
+                tab_id: ids[2],
+                pane_id: landed,
+                prior_pane: None,
+            }),
+        ]
+    );
+    assert_eq!(
+        session.clients.get(client_id).unwrap().focused_pane(ids[2]),
+        Some(landed)
+    );
 }
 
 #[test]
@@ -479,14 +732,92 @@ fn focus_tab_by_index_switches_to_that_position() {
     let (mut session, ids) = three_tab_session();
     let client_id = attach_client_on(&mut session, ids[0]);
 
+    let landed = only_pane(&session, ids[1]);
     let events = focus_tab(&mut session, client_id, TabTarget::Index(1));
 
     assert_eq!(session.clients.get(client_id).unwrap().active_tab(), ids[1]);
-    assert!(matches!(
-        events.as_slice(),
-        [Event::TabFocused(t)]
-            if t.tab_id == ids[1] && t.client_id == client_id && t.prior_tab == ids[0]
-    ));
+    assert_eq!(
+        events,
+        vec![
+            Event::TabFocused(TabFocused {
+                client_id,
+                tab_id: ids[1],
+                prior_tab: ids[0],
+            }),
+            Event::PaneFocused(PaneFocused {
+                client_id,
+                tab_id: ids[1],
+                pane_id: landed,
+                prior_pane: None,
+            }),
+        ]
+    );
+    assert_eq!(
+        session.clients.get(client_id).unwrap().focused_pane(ids[1]),
+        Some(landed)
+    );
+}
+
+#[test]
+fn focus_next_steps_to_the_following_tab() {
+    let (mut session, ids) = three_tab_session();
+    let client_id = attach_client_on(&mut session, ids[0]);
+
+    let landed = only_pane(&session, ids[1]);
+    let events = focus_tab(&mut session, client_id, TabTarget::Next);
+
+    assert_eq!(session.clients.get(client_id).unwrap().active_tab(), ids[1]);
+    assert_eq!(
+        events,
+        vec![
+            Event::TabFocused(TabFocused {
+                client_id,
+                tab_id: ids[1],
+                prior_tab: ids[0],
+            }),
+            Event::PaneFocused(PaneFocused {
+                client_id,
+                tab_id: ids[1],
+                pane_id: landed,
+                prior_pane: None,
+            }),
+        ]
+    );
+    assert_eq!(
+        session.clients.get(client_id).unwrap().focused_pane(ids[1]),
+        Some(landed)
+    );
+}
+
+#[test]
+fn focus_prev_steps_to_the_preceding_tab() {
+    let (mut session, ids) = three_tab_session();
+    let client_id = attach_client_on(&mut session, ids[2]);
+
+    let landed = only_pane(&session, ids[1]);
+    let events = focus_tab(&mut session, client_id, TabTarget::Prev);
+
+    assert_eq!(session.clients.get(client_id).unwrap().active_tab(), ids[1]);
+    assert_eq!(
+        events,
+        vec![
+            Event::TabFocused(TabFocused {
+                client_id,
+                tab_id: ids[1],
+                prior_tab: ids[2],
+            }),
+            Event::PaneFocused(PaneFocused {
+                client_id,
+                tab_id: ids[1],
+                pane_id: landed,
+                prior_pane: None,
+            }),
+        ]
+    );
+    assert_eq!(
+        session.clients.get(client_id).unwrap().focused_pane(ids[1]),
+        Some(landed)
+    );
 }
 
 #[test]
@@ -494,9 +825,30 @@ fn focus_next_wraps_from_last_to_first() {
     let (mut session, ids) = three_tab_session();
     let client_id = attach_client_on(&mut session, ids[2]); // last
 
-    let _ = focus_tab(&mut session, client_id, TabTarget::Next);
+    let landed = only_pane(&session, ids[0]);
+    let events = focus_tab(&mut session, client_id, TabTarget::Next);
 
     assert_eq!(session.clients.get(client_id).unwrap().active_tab(), ids[0]);
+    assert_eq!(
+        events,
+        vec![
+            Event::TabFocused(TabFocused {
+                client_id,
+                tab_id: ids[0],
+                prior_tab: ids[2],
+            }),
+            Event::PaneFocused(PaneFocused {
+                client_id,
+                tab_id: ids[0],
+                pane_id: landed,
+                prior_pane: None,
+            }),
+        ]
+    );
+    assert_eq!(
+        session.clients.get(client_id).unwrap().focused_pane(ids[0]),
+        Some(landed)
+    );
 }
 
 #[test]
@@ -504,9 +856,30 @@ fn focus_prev_wraps_from_first_to_last() {
     let (mut session, ids) = three_tab_session();
     let client_id = attach_client_on(&mut session, ids[0]); // first
 
-    let _ = focus_tab(&mut session, client_id, TabTarget::Prev);
+    let landed = only_pane(&session, ids[2]);
+    let events = focus_tab(&mut session, client_id, TabTarget::Prev);
 
     assert_eq!(session.clients.get(client_id).unwrap().active_tab(), ids[2]);
+    assert_eq!(
+        events,
+        vec![
+            Event::TabFocused(TabFocused {
+                client_id,
+                tab_id: ids[2],
+                prior_tab: ids[0],
+            }),
+            Event::PaneFocused(PaneFocused {
+                client_id,
+                tab_id: ids[2],
+                pane_id: landed,
+                prior_pane: None,
+            }),
+        ]
+    );
+    assert_eq!(
+        session.clients.get(client_id).unwrap().focused_pane(ids[2]),
+        Some(landed)
+    );
 }
 
 #[test]
@@ -529,6 +902,68 @@ fn focusing_an_out_of_range_index_is_a_noop() {
 
     assert!(events.is_empty());
     assert_eq!(session.clients.get(client_id).unwrap().active_tab(), ids[0]);
+}
+
+#[test]
+fn focusing_the_index_one_past_the_last_tab_is_a_noop() {
+    // Three tabs fill 0..=2; index 3 is the first slot that does not exist.
+    let (mut session, ids) = three_tab_session();
+    let client_id = attach_client_on(&mut session, ids[0]);
+
+    let events = focus_tab(&mut session, client_id, TabTarget::Index(3));
+
+    assert!(events.is_empty());
+    assert_eq!(session.clients.get(client_id).unwrap().active_tab(), ids[0]);
+}
+
+#[test]
+fn focusing_the_last_index_switches_to_the_last_tab() {
+    let (mut session, ids) = three_tab_session();
+    let client_id = attach_client_on(&mut session, ids[0]);
+
+    let landed = only_pane(&session, ids[2]);
+    let events = focus_tab(&mut session, client_id, TabTarget::Index(2));
+
+    assert_eq!(session.clients.get(client_id).unwrap().active_tab(), ids[2]);
+    assert_eq!(
+        events,
+        vec![
+            Event::TabFocused(TabFocused {
+                client_id,
+                tab_id: ids[2],
+                prior_tab: ids[0],
+            }),
+            Event::PaneFocused(PaneFocused {
+                client_id,
+                tab_id: ids[2],
+                pane_id: landed,
+                prior_pane: None,
+            }),
+        ]
+    );
+    assert_eq!(
+        session.clients.get(client_id).unwrap().focused_pane(ids[2]),
+        Some(landed)
+    );
+}
+
+#[test]
+fn focus_tab_with_no_tabs_left_is_a_noop_not_a_panic() {
+    // Closing the last tab leaves the client's `active_tab` naming a tab that
+    // is gone and `session.tabs` empty. Next/Prev must not divide by the zero
+    // tab count, and Index/Id must find nothing.
+    let a = TabId::new();
+    let pa = PaneId::new();
+    let mut session = session_with(vec![single_pane_tab(a, pa, 0)], vec![pa]);
+    let client_id = attach_client_on(&mut session, a);
+    let _ = close_tab(&mut session, a);
+    assert!(session.tabs.is_empty());
+
+    assert!(focus_tab(&mut session, client_id, TabTarget::Next).is_empty());
+    assert!(focus_tab(&mut session, client_id, TabTarget::Prev).is_empty());
+    assert!(focus_tab(&mut session, client_id, TabTarget::Index(0)).is_empty());
+    assert!(focus_tab(&mut session, client_id, TabTarget::Id(a)).is_empty());
+    assert_eq!(session.clients.get(client_id).unwrap().active_tab(), a);
 }
 
 #[test]
@@ -564,12 +999,278 @@ fn focus_tab_preserves_per_tab_pane_focus() {
         .unwrap()
         .update_focused_pane(ids[2], focused_in_two);
 
-    let _ = focus_tab(&mut session, client_id, TabTarget::Id(ids[2]));
+    let events = focus_tab(&mut session, client_id, TabTarget::Id(ids[2]));
 
-    // Switching tabs leaves the recorded pane focus intact.
+    // Switching tabs leaves the recorded pane focus intact, and lands on no
+    // other pane, so only the tab switch is reported.
     assert_eq!(
         session.clients.get(client_id).unwrap().focused_pane(ids[2]),
         Some(focused_in_two)
+    );
+    assert_eq!(
+        events,
+        vec![Event::TabFocused(TabFocused {
+            client_id,
+            tab_id: ids[2],
+            prior_tab: ids[0],
+        })]
+    );
+}
+
+#[test]
+fn focus_tab_lands_on_the_tabs_most_recent_pane() {
+    // A client that never focused a pane in the tab it switches to lands on
+    // that tab's focus history head, not on the first leaf in layout order.
+    let (a, b) = (TabId::new(), TabId::new());
+    let (pa, left, right) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let mut session = session_with(
+        vec![single_pane_tab(a, pa, 0), two_pane_tab(b, left, right, 1)],
+        vec![pa, left, right],
+    );
+    session.tabs.get_mut(&b).unwrap().record_focus_mru(right);
+    let client_id = attach_client_on(&mut session, a);
+
+    let events = focus_tab(&mut session, client_id, TabTarget::Id(b));
+
+    assert_eq!(
+        session.clients.get(client_id).unwrap().focused_pane(b),
+        Some(right)
+    );
+    assert_eq!(
+        events,
+        vec![
+            Event::TabFocused(TabFocused {
+                client_id,
+                tab_id: b,
+                prior_tab: a,
+            }),
+            Event::PaneFocused(PaneFocused {
+                client_id,
+                tab_id: b,
+                pane_id: right,
+                prior_pane: None,
+            }),
+        ]
+    );
+    assert_eq!(session.validate(), Ok(()));
+}
+
+#[test]
+fn focus_tab_lands_on_the_first_leaf_without_a_focus_history() {
+    // With no focus history to read, the landing pane is the first leaf in
+    // layout order.
+    let (a, b) = (TabId::new(), TabId::new());
+    let (pa, left, right) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let mut session = session_with(
+        vec![single_pane_tab(a, pa, 0), two_pane_tab(b, left, right, 1)],
+        vec![pa, left, right],
+    );
+    let client_id = attach_client_on(&mut session, a);
+    assert!(session.tabs[&b].focus_mru().is_empty());
+
+    let _ = focus_tab(&mut session, client_id, TabTarget::Id(b));
+
+    assert_eq!(
+        session.clients.get(client_id).unwrap().focused_pane(b),
+        Some(left)
+    );
+    // The landing is recorded as the tab's most recent focus.
+    assert_eq!(session.tabs[&b].focus_mru(), &[left]);
+    assert_eq!(session.validate(), Ok(()));
+}
+
+#[test]
+fn focus_tab_skips_a_landing_candidate_with_no_registry_record() {
+    // `left` is a layout leaf the registry does not hold, so the landing walk
+    // passes over it and takes `right`.
+    let (a, b) = (TabId::new(), TabId::new());
+    let (pa, left, right) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let mut session = session_with(
+        vec![single_pane_tab(a, pa, 0), two_pane_tab(b, left, right, 1)],
+        vec![pa, right],
+    );
+    let client_id = attach_client_on(&mut session, a);
+
+    let _ = focus_tab(&mut session, client_id, TabTarget::Id(b));
+
+    assert_eq!(
+        session.clients.get(client_id).unwrap().focused_pane(b),
+        Some(right)
+    );
+}
+
+#[test]
+fn focus_tab_skips_a_history_entry_that_is_not_a_leaf() {
+    // A focus history entry naming a pane the tab's layout no longer holds is
+    // passed over, so the landing never focuses a pane outside the tab.
+    let (a, b) = (TabId::new(), TabId::new());
+    let (pa, pb, stale) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let mut session = session_with(
+        vec![single_pane_tab(a, pa, 0), single_pane_tab(b, pb, 1)],
+        vec![pa, pb],
+    );
+    let _ = session.panes.insert(pane_record(stale));
+    session.tabs.get_mut(&b).unwrap().record_focus_mru(stale);
+    let client_id = attach_client_on(&mut session, a);
+
+    let _ = focus_tab(&mut session, client_id, TabTarget::Id(b));
+
+    assert_eq!(
+        session.clients.get(client_id).unwrap().focused_pane(b),
+        Some(pb)
+    );
+}
+
+#[test]
+fn focus_tab_lands_on_nothing_when_no_leaf_has_a_record() {
+    // Every leaf of the target tab is missing from the registry: the switch
+    // still happens, and it reports the tab switch alone.
+    let (a, b) = (TabId::new(), TabId::new());
+    let (pa, pb) = (PaneId::new(), PaneId::new());
+    let mut session = session_with(
+        vec![single_pane_tab(a, pa, 0), single_pane_tab(b, pb, 1)],
+        vec![pa],
+    );
+    let client_id = attach_client_on(&mut session, a);
+
+    let events = focus_tab(&mut session, client_id, TabTarget::Id(b));
+
+    assert_eq!(
+        session.clients.get(client_id).unwrap().focused_pane(b),
+        None
+    );
+    assert_eq!(
+        events,
+        vec![Event::TabFocused(TabFocused {
+            client_id,
+            tab_id: b,
+            prior_tab: a,
+        })]
+    );
+}
+
+#[test]
+fn close_tab_lands_a_moved_client_on_the_surviving_tabs_recent_pane() {
+    // Closing the tab a client views moves it to the nearest survivor and
+    // gives it that tab's most recent pane, so the arriving client always has
+    // a pane to type into.
+    let (a, b) = (TabId::new(), TabId::new());
+    let (left, right, pb) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let mut session = session_with(
+        vec![two_pane_tab(a, left, right, 0), single_pane_tab(b, pb, 1)],
+        vec![left, right, pb],
+    );
+    session.tabs.get_mut(&a).unwrap().record_focus_mru(right);
+    let client_id = attach_client_on(&mut session, b);
+
+    let events = close_tab(&mut session, b);
+
+    assert_eq!(session.clients.get(client_id).unwrap().active_tab(), a);
+    assert_eq!(
+        session.clients.get(client_id).unwrap().focused_pane(a),
+        Some(right)
+    );
+    assert_eq!(
+        events,
+        vec![
+            Event::PaneClosing(PaneClosing { pane_id: pb }),
+            Event::PaneRemoved(PaneRemoved {
+                pane_id: pb,
+                tab_id: b,
+            }),
+            Event::TabClosed(TabClosed { tab_id: b }),
+            Event::TabFocused(TabFocused {
+                client_id,
+                tab_id: a,
+                prior_tab: b,
+            }),
+            Event::PaneFocused(PaneFocused {
+                client_id,
+                tab_id: a,
+                pane_id: right,
+                prior_pane: None,
+            }),
+        ]
+    );
+    assert_eq!(session.validate(), Ok(()));
+}
+
+// --- resolve_tab_target -----------------------------------------------------
+
+#[test]
+fn resolve_tab_target_reads_each_variant_against_the_display_order() {
+    let (session, ids) = three_tab_session(); // indices 0, 1, 2
+
+    assert_eq!(
+        resolve_tab_target(&session, ids[0], TabTarget::Id(ids[2])),
+        Some(ids[2])
+    );
+    assert_eq!(
+        resolve_tab_target(&session, ids[0], TabTarget::Id(TabId::new())),
+        None
+    );
+    assert_eq!(
+        resolve_tab_target(&session, ids[0], TabTarget::Index(1)),
+        Some(ids[1])
+    );
+    assert_eq!(
+        resolve_tab_target(&session, ids[0], TabTarget::Index(3)),
+        None
+    );
+    assert_eq!(
+        resolve_tab_target(&session, ids[0], TabTarget::Next),
+        Some(ids[1])
+    );
+    assert_eq!(
+        resolve_tab_target(&session, ids[2], TabTarget::Next),
+        Some(ids[0])
+    );
+    assert_eq!(
+        resolve_tab_target(&session, ids[2], TabTarget::Prev),
+        Some(ids[1])
+    );
+    assert_eq!(
+        resolve_tab_target(&session, ids[0], TabTarget::Prev),
+        Some(ids[2])
+    );
+}
+
+#[test]
+fn resolve_tab_target_steps_nowhere_from_an_active_tab_the_session_lost() {
+    // `Next` and `Prev` step from `active_tab`; an id the session does not
+    // hold has no position to step from. `Id` and `Index` never read
+    // `active_tab`, so they still resolve.
+    let (session, ids) = three_tab_session();
+    let gone = TabId::new();
+
+    assert_eq!(resolve_tab_target(&session, gone, TabTarget::Next), None);
+    assert_eq!(resolve_tab_target(&session, gone, TabTarget::Prev), None);
+    assert_eq!(
+        resolve_tab_target(&session, gone, TabTarget::Index(0)),
+        Some(ids[0])
+    );
+    assert_eq!(
+        resolve_tab_target(&session, gone, TabTarget::Id(ids[1])),
+        Some(ids[1])
+    );
+}
+
+#[test]
+fn resolve_tab_target_in_a_session_with_no_tabs_resolves_to_none() {
+    // Zero tabs: every variant resolves to `None`, and `Next`/`Prev` stop
+    // before taking the step modulo the tab count.
+    let session = session_with(vec![], vec![]);
+    let gone = TabId::new();
+
+    assert_eq!(resolve_tab_target(&session, gone, TabTarget::Next), None);
+    assert_eq!(resolve_tab_target(&session, gone, TabTarget::Prev), None);
+    assert_eq!(
+        resolve_tab_target(&session, gone, TabTarget::Index(0)),
+        None
+    );
+    assert_eq!(
+        resolve_tab_target(&session, gone, TabTarget::Id(gone)),
+        None
     );
 }
 
@@ -585,46 +1286,93 @@ fn move_tab_forward_shifts_the_span_back() {
     assert_eq!(session.tabs[&ids[2]].index(), 1); // c
     assert_eq!(session.tabs[&ids[3]].index(), 2); // d
     assert_eq!(session.tabs[&ids[1]].index(), 3); // b
-    assert!(matches!(
-        events.as_slice(),
-        [Event::TabMoved(m)] if m.tab_id == ids[1] && m.old_index == 1 && m.new_index == 3
-    ));
+    assert_eq!(
+        events,
+        vec![Event::TabMoved(TabMoved {
+            tab_id: ids[1],
+            old_index: 1,
+            new_index: 3,
+        })]
+    );
 }
 
 #[test]
 fn move_tab_backward_shifts_the_span_forward() {
     let (mut session, ids) = four_tab_session(); // a0 b1 c2 d3
 
-    let _ = move_tab(&mut session, ids[2], 0); // move c to the front
+    let events = move_tab(&mut session, ids[2], 0); // move c to the front
 
     assert_eq!(session.tabs[&ids[2]].index(), 0); // c
     assert_eq!(session.tabs[&ids[0]].index(), 1); // a
     assert_eq!(session.tabs[&ids[1]].index(), 2); // b
     assert_eq!(session.tabs[&ids[3]].index(), 3); // d
+    assert_eq!(
+        events,
+        vec![Event::TabMoved(TabMoved {
+            tab_id: ids[2],
+            old_index: 2,
+            new_index: 0,
+        })]
+    );
 }
 
 #[test]
 fn move_tab_clamps_an_out_of_bounds_index() {
     let (mut session, ids) = four_tab_session();
 
-    let events = move_tab(&mut session, ids[0], 99); // clamps to len-1 = 3
+    let events = move_tab(&mut session, ids[0], usize::MAX); // clamps to len-1 = 3
 
+    assert_eq!(session.tabs[&ids[1]].index(), 0);
+    assert_eq!(session.tabs[&ids[2]].index(), 1);
+    assert_eq!(session.tabs[&ids[3]].index(), 2);
     assert_eq!(session.tabs[&ids[0]].index(), 3);
-    assert!(matches!(events.as_slice(), [Event::TabMoved(m)] if m.new_index == 3));
+    assert_eq!(
+        events,
+        vec![Event::TabMoved(TabMoved {
+            tab_id: ids[0],
+            old_index: 0,
+            new_index: 3,
+        })]
+    );
+    assert_eq!(session.validate(), Ok(()));
 }
 
 #[test]
 fn moving_to_the_same_index_is_a_noop() {
     let (mut session, ids) = four_tab_session();
+
     let events = move_tab(&mut session, ids[2], 2);
+
     assert!(events.is_empty());
+    for (position, id) in ids.iter().enumerate() {
+        assert_eq!(session.tabs[id].index(), position);
+    }
 }
 
 #[test]
 fn moving_an_unknown_tab_is_a_noop() {
-    let (mut session, _ids) = four_tab_session();
+    let (mut session, ids) = four_tab_session();
+
     let events = move_tab(&mut session, TabId::new(), 0);
+
     assert!(events.is_empty());
+    assert_eq!(session.tabs.len(), 4);
+    for (position, id) in ids.iter().enumerate() {
+        assert_eq!(session.tabs[id].index(), position);
+    }
+}
+
+#[test]
+fn move_tab_in_a_single_tab_session_is_a_noop() {
+    // The clamp reads `len - 1`; with one tab that is 0, and every requested
+    // index lands back on the slot the tab already holds.
+    let a = TabId::new();
+    let pa = PaneId::new();
+    let mut session = session_with(vec![single_pane_tab(a, pa, 0)], vec![pa]);
+
+    assert!(move_tab(&mut session, a, 0).is_empty());
+    assert!(move_tab(&mut session, a, 7).is_empty());
+    assert_eq!(session.tabs[&a].index(), 0);
 }
 
 #[test]
@@ -643,10 +1391,14 @@ fn move_tab_with_only_two_tabs_swaps_them() {
 
     assert_eq!(session.tabs[&b].index(), 0);
     assert_eq!(session.tabs[&a].index(), 1);
-    assert!(matches!(
-        events.as_slice(),
-        [Event::TabMoved(m)] if m.tab_id == a && m.old_index == 0 && m.new_index == 1
-    ));
+    assert_eq!(
+        events,
+        vec![Event::TabMoved(TabMoved {
+            tab_id: a,
+            old_index: 0,
+            new_index: 1,
+        })]
+    );
 }
 
 #[test]
@@ -669,6 +1421,22 @@ fn move_tab_keeps_the_session_consistent_and_indices_dense() {
     assert_eq!(session.validate(), Ok(()));
 }
 
+#[test]
+fn move_tab_then_close_tab_keeps_indices_dense() {
+    // Two reorders back to back: the close renumbers the survivors from the
+    // order the move left, not from the order the fixture built.
+    let (mut session, ids) = four_tab_session(); // a0 b1 c2 d3
+
+    let _ = move_tab(&mut session, ids[3], 0); // d0 a1 b2 c3
+    let _ = close_tab(&mut session, ids[0]); // a leaves → d0 b1 c2
+
+    assert_eq!(session.tabs.len(), 3);
+    assert_eq!(session.tabs[&ids[3]].index(), 0);
+    assert_eq!(session.tabs[&ids[1]].index(), 1);
+    assert_eq!(session.tabs[&ids[2]].index(), 2);
+    assert_eq!(session.validate(), Ok(()));
+}
+
 // --- close_and_refocus_tab / focus_tab edge cases ---------------------------
 
 #[test]
@@ -681,7 +1449,17 @@ fn closing_an_already_closed_tab_is_a_noop_on_the_second_call() {
     );
 
     let first = close_tab(&mut session, b);
-    assert!(!first.is_empty());
+    assert_eq!(
+        first,
+        vec![
+            Event::PaneClosing(PaneClosing { pane_id: pb }),
+            Event::PaneRemoved(PaneRemoved {
+                pane_id: pb,
+                tab_id: b,
+            }),
+            Event::TabClosed(TabClosed { tab_id: b }),
+        ]
+    );
     assert!(!session.tabs.contains_key(&b));
 
     // Closing the same, now-unknown, id again must not disturb the survivor.
@@ -707,11 +1485,53 @@ fn close_tab_moves_every_client_that_was_viewing_it() {
 
     assert_eq!(session.clients.get(first).unwrap().active_tab(), a);
     assert_eq!(session.clients.get(second).unwrap().active_tab(), a);
-    let focused_count = events
-        .iter()
-        .filter(|e| matches!(e, Event::TabFocused(t) if t.tab_id == a))
-        .count();
-    assert_eq!(focused_count, 2);
+    // Clients are walked in id order, so the two refocus pairs follow it.
+    let (lower, higher) = if first < second {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    assert_eq!(
+        events,
+        vec![
+            Event::PaneClosing(PaneClosing { pane_id: pb }),
+            Event::PaneRemoved(PaneRemoved {
+                pane_id: pb,
+                tab_id: b,
+            }),
+            Event::TabClosed(TabClosed { tab_id: b }),
+            Event::TabFocused(TabFocused {
+                client_id: lower,
+                tab_id: a,
+                prior_tab: b,
+            }),
+            Event::PaneFocused(PaneFocused {
+                client_id: lower,
+                tab_id: a,
+                pane_id: pa,
+                prior_pane: None,
+            }),
+            Event::TabFocused(TabFocused {
+                client_id: higher,
+                tab_id: a,
+                prior_tab: b,
+            }),
+            Event::PaneFocused(PaneFocused {
+                client_id: higher,
+                tab_id: a,
+                pane_id: pa,
+                prior_pane: None,
+            }),
+        ]
+    );
+    assert_eq!(
+        session.clients.get(first).unwrap().focused_pane(a),
+        Some(pa)
+    );
+    assert_eq!(
+        session.clients.get(second).unwrap().focused_pane(a),
+        Some(pa)
+    );
 }
 
 #[test]
@@ -754,7 +1574,18 @@ fn closing_the_last_tab_leaves_a_viewing_clients_active_tab_pointing_at_it() {
     let events = close_tab(&mut session, a);
 
     assert!(session.tabs.is_empty());
-    assert!(events.iter().any(|e| matches!(e, Event::Quit)));
+    assert_eq!(
+        events,
+        vec![
+            Event::PaneClosing(PaneClosing { pane_id: pa }),
+            Event::PaneRemoved(PaneRemoved {
+                pane_id: pa,
+                tab_id: a,
+            }),
+            Event::TabClosed(TabClosed { tab_id: a }),
+            Event::Quit,
+        ]
+    );
     assert_eq!(session.clients.get(client_id).unwrap().active_tab(), a);
     assert_eq!(
         session.clients.get(client_id).unwrap().focused_pane(a),
@@ -837,10 +1668,7 @@ fn focus_next_and_prev_on_a_single_tab_session_is_a_noop() {
 fn two_leaf_layout(left: PaneId, right: PaneId) -> LayoutNode {
     LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![
-            LayoutChild::new(LayoutNode::Pane(left)),
-            LayoutChild::new(LayoutNode::Pane(right)),
-        ],
+        vec![LayoutNode::Pane(left), LayoutNode::Pane(right)],
     ))
 }
 
@@ -967,19 +1795,31 @@ fn commit_profile_tab_focuses_the_focus_leaf_and_switches_the_client() {
     assert_eq!(session.tabs[&tab_id].focus_mru(), &[p1]);
 
     // TabCreated, one PaneCreated per pane, then the focus pair naming the leaf.
-    match events.as_slice() {
-        [Event::TabCreated(_), Event::PaneCreated(_), Event::PaneCreated(_), Event::TabFocused(tf), Event::PaneFocused(pf)] =>
-        {
-            assert_eq!(tf.client_id, client_id);
-            assert_eq!(tf.tab_id, tab_id);
-            assert_eq!(tf.prior_tab, start_tab);
-            assert_eq!(pf.client_id, client_id);
-            assert_eq!(pf.tab_id, tab_id);
-            assert_eq!(pf.pane_id, p1);
-            assert_eq!(pf.prior_pane, None);
-        }
-        other => panic!("unexpected events: {other:?}"),
-    }
+    assert_eq!(
+        events,
+        vec![
+            Event::TabCreated(TabCreated { tab_id }),
+            Event::PaneCreated(PaneCreated {
+                pane_id: p0,
+                tab_id,
+            }),
+            Event::PaneCreated(PaneCreated {
+                pane_id: p1,
+                tab_id,
+            }),
+            Event::TabFocused(TabFocused {
+                client_id,
+                tab_id,
+                prior_tab: start_tab,
+            }),
+            Event::PaneFocused(PaneFocused {
+                client_id,
+                tab_id,
+                pane_id: p1,
+                prior_pane: None,
+            }),
+        ]
+    );
     assert_eq!(session.validate(), Ok(()));
 }
 
@@ -1027,9 +1867,8 @@ fn commit_profile_tab_out_of_range_focus_leaf_focuses_the_root_pane() {
 
 #[test]
 fn commit_profile_tab_inactive_records_focus_without_switching_the_view() {
-    // An inactive profile tab records the client's starting pane so a later
-    // switch resolves focus at once, but does not steal the client's view and
-    // emits no focus events.
+    // An inactive profile tab records the client's starting pane, leaves the
+    // client's view where it was, and emits no focus events.
     let mut session = session_with(vec![], vec![]);
     let tab0 = TabId::new();
     let _ = commit_new_tab(
@@ -1070,14 +1909,102 @@ fn commit_profile_tab_inactive_records_focus_without_switching_the_view() {
     assert_eq!(session.tabs[&tab1].focus_mru(), &[p0]);
     // No TabFocused/PaneFocused while inactive — only the creation events.
     assert_eq!(
-        events
-            .iter()
-            .filter(|e| matches!(e, Event::TabFocused(_) | Event::PaneFocused(_)))
-            .count(),
-        0
+        events,
+        vec![
+            Event::TabCreated(TabCreated { tab_id: tab1 }),
+            Event::PaneCreated(PaneCreated {
+                pane_id: p0,
+                tab_id: tab1,
+            }),
+            Event::PaneCreated(PaneCreated {
+                pane_id: p1,
+                tab_id: tab1,
+            }),
+        ]
     );
     assert_eq!(session.tabs[&tab1].index(), 1); // appended after tab0
     assert_eq!(session.validate(), Ok(()));
+}
+
+#[test]
+fn commit_profile_tab_with_a_stale_focus_client_emits_only_creation_events() {
+    // An id no client holds records no focus and moves no view, exactly like
+    // `None` — but the tab still records its own starting pane.
+    let mut session = session_with(vec![], vec![]);
+    let tab0 = TabId::new();
+    let _ = commit_new_tab(
+        &mut session,
+        tab0,
+        PaneId::new(),
+        "code".to_owned(),
+        None,
+        NewPaneSpec::default(),
+        SystemTime::UNIX_EPOCH,
+    );
+    let attached = attach_client_on(&mut session, tab0);
+
+    let tab1 = TabId::new();
+    let (p0, p1) = (PaneId::new(), PaneId::new());
+    let profile = ProfileTab {
+        pane_ids: vec![p0, p1],
+        layout: two_leaf_layout(p0, p1),
+        specs: vec![NewPaneSpec::default(), NewPaneSpec::default()],
+        focus_leaf: 1,
+    };
+
+    let events = commit_profile_tab(
+        &mut session,
+        tab1,
+        profile,
+        "dev".to_owned(),
+        Some(ClientId::new()),
+        true,
+        SystemTime::UNIX_EPOCH,
+    );
+
+    assert_eq!(
+        events,
+        vec![
+            Event::TabCreated(TabCreated { tab_id: tab1 }),
+            Event::PaneCreated(PaneCreated {
+                pane_id: p0,
+                tab_id: tab1,
+            }),
+            Event::PaneCreated(PaneCreated {
+                pane_id: p1,
+                tab_id: tab1,
+            }),
+        ]
+    );
+    let client = session.clients.get(attached).unwrap();
+    assert_eq!(client.active_tab(), tab0);
+    assert_eq!(client.focused_pane(tab1), None);
+    assert_eq!(session.tabs[&tab1].focus_mru(), &[p1]);
+    assert_eq!(session.validate(), Ok(()));
+}
+
+#[test]
+#[should_panic(expected = "index out of bounds")]
+fn commit_profile_tab_with_no_panes_panics() {
+    // The tab's root pane is `pane_ids[0]`, so an empty `pane_ids` panics
+    // there — the panic the function documents.
+    let mut session = session_with(vec![], vec![]);
+    let profile = ProfileTab {
+        pane_ids: vec![],
+        layout: LayoutNode::Pane(PaneId::new()),
+        specs: vec![],
+        focus_leaf: 0,
+    };
+
+    let _ = commit_profile_tab(
+        &mut session,
+        TabId::new(),
+        profile,
+        "dev".to_owned(),
+        None,
+        true,
+        SystemTime::UNIX_EPOCH,
+    );
 }
 
 #[test]

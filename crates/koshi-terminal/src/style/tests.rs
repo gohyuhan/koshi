@@ -71,17 +71,30 @@ fn style_default_is_default_colors_and_no_attrs() {
 fn set_fg_sets_only_the_foreground() {
     let mut style = Style::default();
     style.set_fg(Color::Indexed(5));
-    assert_eq!(style.fg, Color::Indexed(5));
-    assert_eq!(style.bg, Color::Default); // background untouched
-    assert_eq!(style.attrs, AttrFlags::default()); // attributes untouched
+    assert_eq!(
+        style,
+        Style {
+            fg: Color::Indexed(5),
+            bg: Color::Default,
+            attrs: AttrFlags::default(),
+            underline_color: None,
+        }
+    );
 }
 
 #[test]
 fn set_bg_sets_only_the_background() {
     let mut style = Style::default();
     style.set_bg(Color::Rgb(1, 2, 3));
-    assert_eq!(style.bg, Color::Rgb(1, 2, 3));
-    assert_eq!(style.fg, Color::Default);
+    assert_eq!(
+        style,
+        Style {
+            fg: Color::Default,
+            bg: Color::Rgb(1, 2, 3),
+            attrs: AttrFlags::default(),
+            underline_color: None,
+        }
+    );
 }
 
 #[test]
@@ -157,7 +170,10 @@ fn bg_fill_keeps_only_the_background() {
     style.set_fg(Color::Indexed(1));
     style.set_bg(Color::Indexed(4));
     style.set_bold(true);
-    // The erase-fill style carries the background only — fg + attrs reset.
+    style.set_underline(UnderlineStyle::Curly);
+    style.set_underline_color(Some(Color::Indexed(2)));
+    // The erase-fill style carries the background only — fg, attrs, and the
+    // underline color reset.
     assert_eq!(
         style.bg_fill(),
         Style {
@@ -179,7 +195,20 @@ fn style_getters_return_each_set_field() {
 
     assert_eq!(style.fg(), Color::Indexed(1));
     assert_eq!(style.bg(), Color::Indexed(2));
-    assert!(style.attrs().bold());
+    assert_eq!(
+        all(style.attrs()),
+        (
+            true,
+            false,
+            UnderlineStyle::None,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false
+        )
+    );
     assert_eq!(style.underline_color(), Some(Color::Rgb(7, 8, 9)));
 }
 
@@ -198,16 +227,20 @@ fn attr_flags_getters_return_each_set_flag() {
     style.set_strike(true);
     style.set_overline(false);
 
-    let attrs = style.attrs();
-    assert!(attrs.bold());
-    assert!(!attrs.italic());
-    assert_eq!(attrs.underline(), UnderlineStyle::Double);
-    assert!(attrs.reverse());
-    assert!(!attrs.faint());
-    assert!(attrs.blink());
-    assert!(!attrs.conceal());
-    assert!(attrs.strike());
-    assert!(!attrs.overline());
+    assert_eq!(
+        all(style.attrs()),
+        (
+            true,
+            false,
+            UnderlineStyle::Double,
+            true,
+            false,
+            true,
+            false,
+            true,
+            false
+        )
+    );
 }
 
 #[test]
@@ -225,16 +258,20 @@ fn every_flag_can_be_set_at_once() {
     style.set_strike(true);
     style.set_overline(true);
 
-    let attrs = style.attrs();
-    assert!(attrs.bold());
-    assert!(attrs.italic());
-    assert_eq!(attrs.underline(), UnderlineStyle::Dashed);
-    assert!(attrs.reverse());
-    assert!(attrs.faint());
-    assert!(attrs.blink());
-    assert!(attrs.conceal());
-    assert!(attrs.strike());
-    assert!(attrs.overline());
+    assert_eq!(
+        all(style.attrs()),
+        (
+            true,
+            true,
+            UnderlineStyle::Dashed,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true
+        )
+    );
 }
 
 #[test]
@@ -260,16 +297,11 @@ fn every_underline_style_survives_the_other_flags_being_set() {
         style.set_overline(true);
         style.set_underline(underline);
 
-        let attrs = style.attrs();
-        assert_eq!(attrs.underline(), underline);
-        assert!(attrs.bold());
-        assert!(attrs.italic());
-        assert!(attrs.reverse());
-        assert!(attrs.faint());
-        assert!(attrs.blink());
-        assert!(attrs.conceal());
-        assert!(attrs.strike());
-        assert!(attrs.overline());
+        assert_eq!(
+            all(style.attrs()),
+            (true, true, underline, true, true, true, true, true, true),
+            "{underline:?}"
+        );
     }
 }
 
@@ -294,8 +326,149 @@ fn clearing_one_flag_leaves_the_others_alone() {
     style.set_strike(true);
     style.set_bold(false);
 
+    assert_eq!(
+        all(style.attrs()),
+        (
+            false,
+            true,
+            UnderlineStyle::None,
+            false,
+            false,
+            false,
+            false,
+            true,
+            false
+        )
+    );
+}
+
+#[test]
+fn reset_clears_the_underline_style_and_color_too() {
+    let mut style = Style::default();
+    style.set_underline(UnderlineStyle::Dotted);
+    style.set_underline_color(Some(Color::Indexed(3)));
+    style.reset();
+    assert_eq!(style, Style::default());
+}
+
+#[test]
+fn set_underline_color_none_restores_the_default() {
+    let mut style = Style::default();
+    style.set_underline_color(Some(Color::Rgb(1, 2, 3)));
+    style.set_underline_color(None);
+    assert_eq!(style.underline_color(), None);
+    assert_eq!(style, Style::default());
+}
+
+#[test]
+fn setting_a_flag_twice_then_clearing_it_once_turns_it_off() {
+    let mut style = Style::default();
+    style.set_bold(true);
+    style.set_bold(true);
+    style.set_bold(false);
+    assert_eq!(style.attrs(), AttrFlags::default());
+}
+
+#[test]
+fn debug_lists_the_attributes_that_are_on() {
+    assert_eq!(format!("{:?}", AttrFlags::default()), "AttrFlags(none)");
+
+    let mut style = Style::default();
+    style.set_bold(true);
+    style.set_underline(UnderlineStyle::Single);
+    assert_eq!(format!("{:?}", style.attrs()), "AttrFlags(bold, underline)");
+
+    let mut style = Style::default();
+    style.set_underline(UnderlineStyle::Curly);
+    assert_eq!(format!("{:?}", style.attrs()), "AttrFlags(curly-underline)");
+
+    let mut style = Style::default();
+    style.set_overline(true);
+    style.set_italic(true);
+    style.set_underline(UnderlineStyle::Dashed);
+    assert_eq!(
+        format!("{:?}", style.attrs()),
+        "AttrFlags(italic, overline, dashed-underline)"
+    );
+}
+
+#[test]
+fn attr_flags_serialize_as_the_packed_word() {
+    // `ESC[4;9m`: single underline (code 1 in bits 8-10) and strikethrough
+    // (bit 6) — the 320 the type doc promises.
+    let mut style = Style::default();
+    style.set_underline(UnderlineStyle::Single);
+    style.set_strike(true);
     let attrs = style.attrs();
-    assert!(!attrs.bold());
-    assert!(attrs.italic());
-    assert!(attrs.strike());
+
+    let value = serde_json::to_value(attrs).expect("attrs serialize");
+    assert_eq!(value, serde_json::json!(320));
+    let restored: AttrFlags = serde_json::from_value(value).expect("attrs deserialize");
+    assert_eq!(restored, attrs);
+}
+
+#[test]
+fn an_undefined_underline_code_deserializes_as_no_underline() {
+    // Bits 8-10 hold 6: not a style `set_underline` ever writes. Every
+    // getter reads it as `None`.
+    let attrs: AttrFlags = serde_json::from_value(serde_json::json!(6 << 8)).expect("deserializes");
+    assert_eq!(
+        all(attrs),
+        (
+            false,
+            false,
+            UnderlineStyle::None,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false
+        )
+    );
+}
+
+#[test]
+fn style_round_trips_through_serde() {
+    let mut style = Style::default();
+    style.set_fg(Color::Rgb(10, 20, 30));
+    style.set_bg(Color::Indexed(200));
+    style.set_faint(true);
+    style.set_underline(UnderlineStyle::Double);
+    style.set_underline_color(Some(Color::Indexed(9)));
+
+    let value = serde_json::to_value(style).expect("style serializes");
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "fg": { "Rgb": [10, 20, 30] },
+            "bg": { "Indexed": 200 },
+            "attrs": (1 << 3) | (2 << 8),
+            "underline_color": { "Indexed": 9 },
+        })
+    );
+    let restored: Style = serde_json::from_value(value).expect("style deserializes");
+    assert_eq!(restored, style);
+}
+
+#[test]
+fn a_word_read_back_keeps_only_the_bits_the_getters_read() {
+    // A spare bit and an undefined underline code both read as the default
+    // through every getter, so a word carrying them equals the default.
+    for word in [1u16 << 11, 1 << 15, 6 << 8, 7 << 8, 0xF800 | (7 << 8)] {
+        let attrs: AttrFlags =
+            serde_json::from_value(serde_json::json!(word)).expect("deserializes");
+        assert_eq!(all(attrs), all(AttrFlags::default()), "word {word}");
+        assert_eq!(attrs, AttrFlags::default(), "word {word}");
+    }
+
+    // A defined word is kept whole: bold plus a single underline.
+    let mut style = Style::default();
+    style.set_bold(true);
+    style.set_underline(UnderlineStyle::Single);
+    let defined = style.attrs();
+    let read_back: AttrFlags =
+        serde_json::from_value(serde_json::to_value(defined).expect("serializes"))
+            .expect("deserializes");
+    assert_eq!(read_back, defined);
 }

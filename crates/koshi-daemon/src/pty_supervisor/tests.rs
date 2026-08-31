@@ -60,9 +60,7 @@ impl RunningSupervisor {
     /// Start a supervisor holding no pane, with `idle_exit` as its idle
     /// window.
     fn start(idle_exit: Duration) -> RunningSupervisor {
-        let runtime_dir = tempfile::tempdir().expect("a temporary directory is created");
-        let addr = link_addr(runtime_dir.path());
-        let listener = Listener::bind(&addr).expect("the supervisor binds its link");
+        let (runtime_dir, addr, listener) = bound_listener();
         let thread = thread::Builder::new()
             .name("supervisor-under-test".to_string())
             .spawn(move || hold_panes(listener, &token(), idle_exit))
@@ -95,8 +93,9 @@ impl RunningSupervisor {
     }
 }
 
-/// An address for one test's link. On Unix it is a socket file inside `dir`;
-/// on Windows it is a pipe name of its own, since a pipe has no directory.
+/// An address for one test's link, different on every call. On Unix it is a
+/// socket file inside `dir`; on Windows it is a pipe name that does not use
+/// `dir`, made of this process's id and a counter.
 fn link_addr(dir: &Path) -> String {
     #[cfg(unix)]
     {
@@ -105,14 +104,23 @@ fn link_addr(dir: &Path) -> String {
     #[cfg(windows)]
     {
         let _ = dir;
+        static NEXT_PIPE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         format!(
-            "koshi-pty-test-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("the clock is past the epoch")
-                .as_nanos()
+            "koshi-pty-test-{}-{}",
+            std::process::id(),
+            NEXT_PIPE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         )
     }
+}
+
+/// A listener bound to an address of its own, with that address and the
+/// directory it lives in. The directory is returned so it outlives the
+/// listener: dropping it removes a Unix socket file.
+fn bound_listener() -> (tempfile::TempDir, String, Listener) {
+    let runtime_dir = tempfile::tempdir().expect("a temporary directory is created");
+    let addr = link_addr(runtime_dir.path());
+    let listener = Listener::bind(&addr).expect("the link binds");
+    (runtime_dir, addr, listener)
 }
 
 /// One hand-written session server on the other end of a link.
@@ -130,13 +138,19 @@ struct TestLink {
 }
 
 impl TestLink {
-    /// Open a link to `addr` and send the Hello that opens it.
-    fn open(addr: &str) -> TestLink {
-        let mut link = TestLink {
+    /// Open a link to `addr` and present no token, so the supervisor's gate
+    /// stays closed.
+    fn connect(addr: &str) -> TestLink {
+        TestLink {
             connection: Connection::connect(addr).expect("the link opens"),
             next_request_id: 1,
             events: Vec::new(),
-        };
+        }
+    }
+
+    /// Open a link to `addr` and send the Hello that opens it.
+    fn open(addr: &str) -> TestLink {
+        let mut link = TestLink::connect(addr);
         assert_eq!(
             link.ask(SupervisorRequestKind::hello(token())),
             SupervisorResult::Hello {
@@ -277,9 +291,9 @@ const CURSOR_QUERY: &[u8] = b"\x1b[6n";
 /// child ran.
 const PRINTED_MARKER: &str = "koshi-printed";
 
-/// How long [`read_until_printed`] waits for a pane to print, which covers
-/// opening the terminal, launching the child and carrying its bytes over the
-/// link on a shared runner.
+/// How long the wait for a pane to print gives it, which covers opening the
+/// terminal, launching the child and carrying its bytes over the link on a
+/// shared runner.
 const PRINT_WAIT: Duration = Duration::from_secs(20);
 
 /// A spec whose child prints `marker` and then stays alive, under the
@@ -302,15 +316,14 @@ fn printing_spec(marker: &str) -> koshi_core::process::SpawnSpec {
     }
 }
 
-/// Wait until the consumer holds `needle` for `pane`, and hand back everything
-/// the consumer holds. Answers nothing; the supervisor answers its own panes'
-/// terminals.
+/// Wait up to `wait` until `sink` holds `needle` for `pane`, and hand back
+/// every byte it holds for that pane. Sends nothing to the supervisor.
 ///
-/// Fails the test once [`PRINT_WAIT`] has passed, naming what the consumer
-/// holds: nothing held means no byte crossed the link, and the query alone
+/// Fails the test once `wait` has passed, naming what the sink holds: nothing
+/// held means no byte crossed the link, and the cursor-position query alone
 /// means the pane's reader delivered it instead of removing it.
-fn read_until_printed(sink: &RecordingSink, pane: PaneId, needle: &[u8]) -> Vec<u8> {
-    let deadline = Instant::now() + PRINT_WAIT;
+fn read_sink_until(sink: &RecordingSink, pane: PaneId, needle: &[u8], wait: Duration) -> Vec<u8> {
+    let deadline = Instant::now() + wait;
     loop {
         let held = sink.bytes(pane);
         if held.windows(needle.len()).any(|window| window == needle) {
@@ -318,7 +331,7 @@ fn read_until_printed(sink: &RecordingSink, pane: PaneId, needle: &[u8]) -> Vec<
         }
         assert!(
             Instant::now() < deadline,
-            "the pane never printed {:?}; the consumer holds {:?}",
+            "the consumer was never handed {:?}; it holds {:?}",
             String::from_utf8_lossy(needle),
             String::from_utf8_lossy(&held),
         );
@@ -354,11 +367,7 @@ fn a_link_opens_on_a_hello_and_the_supervisor_starts_holding_no_pane() {
 #[test]
 fn a_request_before_a_hello_is_refused_and_the_link_keeps_serving() {
     let mut supervisor = RunningSupervisor::start(TEST_IDLE_EXIT);
-    let mut link = TestLink {
-        connection: Connection::connect(&supervisor.addr).expect("the link opens"),
-        next_request_id: 1,
-        events: Vec::new(),
-    };
+    let mut link = TestLink::connect(&supervisor.addr);
 
     assert_eq!(
         link.ask(SupervisorRequestKind::ListPanes),
@@ -388,11 +397,7 @@ fn a_request_before_a_hello_is_refused_and_the_link_keeps_serving() {
 #[test]
 fn a_hello_carrying_the_wrong_token_is_refused_and_the_link_keeps_serving() {
     let mut supervisor = RunningSupervisor::start(TEST_IDLE_EXIT);
-    let mut link = TestLink {
-        connection: Connection::connect(&supervisor.addr).expect("the link opens"),
-        next_request_id: 1,
-        events: Vec::new(),
-    };
+    let mut link = TestLink::connect(&supervisor.addr);
 
     assert_eq!(
         link.ask(SupervisorRequestKind::hello(ConnectionToken::new(
@@ -477,6 +482,209 @@ fn bytes_that_are_not_a_readable_request_are_refused_and_the_link_keeps_serving(
         link.ask(SupervisorRequestKind::ListPanes),
         SupervisorResult::Panes(Vec::new()),
         "an unreadable frame leaves the stream aligned"
+    );
+
+    assert_eq!(
+        link.ask(SupervisorRequestKind::Shutdown),
+        SupervisorResult::Done
+    );
+    supervisor.join();
+}
+
+#[test]
+fn a_request_kind_the_supervisor_does_not_have_is_refused_for_the_missing_hello_before_one_arrives()
+{
+    // A peer that has presented no token is told nothing about which kinds
+    // exist, not even that this one does not: the refusal names the missing
+    // Hello, the same as any other kind arriving before one.
+    let mut supervisor = RunningSupervisor::start(TEST_IDLE_EXIT);
+    let mut link = TestLink::connect(&supervisor.addr);
+
+    link.send_raw(r#"{"request_id":99,"kind":{"Rehome":{"pane_id":1}}}"#);
+    let SupervisorMessage::Response(response) = link.recv() else {
+        panic!("the refusal is an answer, not an event");
+    };
+    assert_eq!(
+        response,
+        SupervisorResponse {
+            request_id: Some(99),
+            result: SupervisorResult::Error(IpcErrorPayload {
+                code: IpcErrorCode::HelloRequired,
+                message: "Rehome arrived before a Hello opened the link".to_string(),
+            }),
+        }
+    );
+
+    assert_eq!(
+        link.ask(SupervisorRequestKind::hello(token())),
+        SupervisorResult::Hello {
+            protocol_version: SUPERVISOR_PROTOCOL_VERSION,
+        }
+    );
+    assert_eq!(
+        link.ask(SupervisorRequestKind::Shutdown),
+        SupervisorResult::Done
+    );
+    supervisor.join();
+}
+
+#[test]
+fn bytes_that_are_not_a_readable_request_before_a_hello_are_refused_and_the_link_keeps_serving() {
+    // An unreadable frame is answered without the gate being asked, so a peer
+    // that has presented no token still gets the aligned stream back.
+    let mut supervisor = RunningSupervisor::start(TEST_IDLE_EXIT);
+    let mut link = TestLink::connect(&supervisor.addr);
+
+    link.send_raw(r#"{"request_id":"not a number","kind":"ListPanes"}"#);
+    let SupervisorMessage::Response(response) = link.recv() else {
+        panic!("the refusal is an answer, not an event");
+    };
+    assert_eq!(
+        response,
+        SupervisorResponse {
+            request_id: None,
+            result: SupervisorResult::Error(IpcErrorPayload {
+                code: IpcErrorCode::MalformedRequest,
+                message: "the bytes received are not a request this build can read".to_string(),
+            }),
+        }
+    );
+
+    assert_eq!(
+        link.ask(SupervisorRequestKind::hello(token())),
+        SupervisorResult::Hello {
+            protocol_version: SUPERVISOR_PROTOCOL_VERSION,
+        },
+        "a Hello still opens the link after an unreadable frame"
+    );
+    assert_eq!(
+        link.ask(SupervisorRequestKind::ListPanes),
+        SupervisorResult::Panes(Vec::new())
+    );
+
+    assert_eq!(
+        link.ask(SupervisorRequestKind::Shutdown),
+        SupervisorResult::Done
+    );
+    supervisor.join();
+}
+
+#[test]
+fn a_second_hello_on_an_open_link_is_answered_again_and_leaves_it_open() {
+    // A session server that presents the token twice is answered twice. The
+    // second Hello settles the same version and the link keeps serving.
+    let mut supervisor = RunningSupervisor::start(TEST_IDLE_EXIT);
+    let mut link = TestLink::open(&supervisor.addr);
+
+    assert_eq!(
+        link.ask(SupervisorRequestKind::hello(token())),
+        SupervisorResult::Hello {
+            protocol_version: SUPERVISOR_PROTOCOL_VERSION,
+        }
+    );
+    assert_eq!(
+        link.ask(SupervisorRequestKind::ListPanes),
+        SupervisorResult::Panes(Vec::new())
+    );
+
+    assert_eq!(
+        link.ask(SupervisorRequestKind::Shutdown),
+        SupervisorResult::Done
+    );
+    supervisor.join();
+}
+
+#[test]
+fn a_hello_carrying_the_wrong_token_after_an_open_one_is_refused_and_leaves_the_link_open() {
+    // A refused Hello leaves the gate as it was, so a wrong token presented
+    // second cannot shut a link that a right one already opened.
+    let mut supervisor = RunningSupervisor::start(TEST_IDLE_EXIT);
+    let mut link = TestLink::open(&supervisor.addr);
+
+    assert_eq!(
+        link.ask(SupervisorRequestKind::hello(ConnectionToken::new(
+            "wrongToken"
+        ))),
+        SupervisorResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::BadToken,
+            message: "the token presented does not match the supervisor's".to_string(),
+        })
+    );
+    assert_eq!(
+        link.ask(SupervisorRequestKind::ListPanes),
+        SupervisorResult::Panes(Vec::new()),
+        "the link an accepted Hello opened stays open"
+    );
+
+    assert_eq!(
+        link.ask(SupervisorRequestKind::Shutdown),
+        SupervisorResult::Done
+    );
+    supervisor.join();
+}
+
+#[test]
+fn killing_a_pane_the_supervisor_does_not_hold_is_refused_by_name() {
+    let mut supervisor = RunningSupervisor::start(TEST_IDLE_EXIT);
+    let mut link = TestLink::open(&supervisor.addr);
+    let ghost = PaneId::new();
+
+    assert_eq!(
+        link.ask(SupervisorRequestKind::Kill {
+            pane_id: ghost,
+            kill_policy: KillPolicy::Force,
+        }),
+        SupervisorResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::Unknown,
+            message: format!("invalid pane: id - {ghost}"),
+        })
+    );
+    assert_eq!(
+        link.ask(SupervisorRequestKind::ListPanes),
+        SupervisorResult::Panes(Vec::new()),
+        "the link keeps serving after a refused kill"
+    );
+
+    assert_eq!(
+        link.ask(SupervisorRequestKind::Shutdown),
+        SupervisorResult::Done
+    );
+    supervisor.join();
+}
+
+#[test]
+fn a_pane_the_supervisor_does_not_hold_reports_no_live_working_directory() {
+    // Asking for a directory is answered rather than refused: the answer for a
+    // pane nothing holds is the same as for one the operating system cannot
+    // report on.
+    let mut supervisor = RunningSupervisor::start(TEST_IDLE_EXIT);
+    let mut link = TestLink::open(&supervisor.addr);
+    let ghost = PaneId::new();
+
+    assert_eq!(
+        link.ask(SupervisorRequestKind::LiveCwd { pane_id: ghost }),
+        SupervisorResult::Cwd(None)
+    );
+
+    assert_eq!(
+        link.ask(SupervisorRequestKind::Shutdown),
+        SupervisorResult::Done
+    );
+    supervisor.join();
+}
+
+#[test]
+fn lifting_a_hold_nobody_asked_for_is_answered_and_the_link_keeps_serving() {
+    let mut supervisor = RunningSupervisor::start(TEST_IDLE_EXIT);
+    let mut link = TestLink::open(&supervisor.addr);
+
+    assert_eq!(
+        link.ask(SupervisorRequestKind::ResumeOutput),
+        SupervisorResult::Done
+    );
+    assert_eq!(
+        link.ask(SupervisorRequestKind::ListPanes),
+        SupervisorResult::Panes(Vec::new())
     );
 
     assert_eq!(
@@ -1105,7 +1313,7 @@ impl RecordingSink {
             .expect("recording sink")
             .iter()
             .filter(|(taken, _)| *taken == pane)
-            .flat_map(|(_, bytes)| bytes.clone())
+            .flat_map(|(_, bytes)| bytes.iter().copied())
             .collect()
     }
 
@@ -1132,26 +1340,6 @@ impl PtySink for RecordingSink {
     }
 }
 
-/// Wait until `sink` holds `needle` for `pane`, and hand back everything it
-/// holds for it.
-#[cfg(unix)]
-fn read_sink_until(sink: &RecordingSink, pane: PaneId, needle: &[u8]) -> Vec<u8> {
-    let deadline = Instant::now() + HANG_GUARD;
-    loop {
-        let got = sink.bytes(pane);
-        if got.windows(needle.len()).any(|window| window == needle) {
-            return got;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the consumer was never handed {:?}; it holds {:?}",
-            String::from_utf8_lossy(needle),
-            String::from_utf8_lossy(&got)
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
-}
-
 #[test]
 fn a_panes_child_prints_through_the_link_once_its_terminal_is_answered() {
     // A real pane inside the supervisor, driven by the backend a session server
@@ -1172,7 +1360,7 @@ fn a_panes_child_prints_through_the_link_once_its_terminal_is_answered() {
     backend
         .spawn(pane, printing_spec(PRINTED_MARKER), PANE_SIZE)
         .expect("the supervisor opens the pane");
-    let held = read_until_printed(&sink, pane, PRINTED_MARKER.as_bytes());
+    let held = read_sink_until(&sink, pane, PRINTED_MARKER.as_bytes(), PRINT_WAIT);
 
     assert_eq!(
         count_queries(&held),
@@ -1211,11 +1399,11 @@ fn a_pane_driven_through_the_backend_prints_back_into_its_sink() {
     backend
         .spawn(pane, shell_spec("printf 'ready'; cat"), PANE_SIZE)
         .expect("the supervisor opens the pane");
-    read_sink_until(&sink, pane, b"ready");
+    read_sink_until(&sink, pane, b"ready", HANG_GUARD);
     backend
         .write(pane, b"echoed\n")
         .expect("the bytes reach the child");
-    let seen = read_sink_until(&sink, pane, b"echoed");
+    let seen = read_sink_until(&sink, pane, b"echoed", HANG_GUARD);
 
     assert_eq!(
         &seen[..b"ready".len()],
@@ -1251,7 +1439,7 @@ fn holding_the_readers_still_stops_a_live_pane_reaching_the_consumer() {
             PANE_SIZE,
         )
         .expect("the supervisor opens the pane");
-    read_sink_until(&sink, pane, b"ready");
+    read_sink_until(&sink, pane, b"ready", HANG_GUARD);
 
     backend.pause_readers().expect("the pause answers");
     let carried = backend.carried_panes();
@@ -1269,7 +1457,7 @@ fn holding_the_readers_still_stops_a_live_pane_reaching_the_consumer() {
     assert_eq!(carried[0].size, PANE_SIZE);
 
     backend.resume_readers();
-    let seen = read_sink_until(&sink, pane, b"held");
+    let seen = read_sink_until(&sink, pane, b"held", HANG_GUARD);
     assert_eq!(
         seen,
         b"readyheld".to_vec(),
@@ -1279,7 +1467,7 @@ fn holding_the_readers_still_stops_a_live_pane_reaching_the_consumer() {
     backend
         .write(pane, b"after\n")
         .expect("the bytes reach the child");
-    read_sink_until(&sink, pane, b"after");
+    read_sink_until(&sink, pane, b"after", HANG_GUARD);
 
     backend.shut_down().expect("the supervisor is told to end");
     supervisor.join();
@@ -1375,9 +1563,7 @@ fn a_pane_event_waits_until_a_hello_opens_the_link() {
     // The token is what makes a link this session's own. A peer that opens the
     // socket and never presents it must be handed no pane output, so the sink
     // holds its chunk until the Hello is accepted and hands it over then.
-    let runtime_dir = tempfile::tempdir().expect("a temporary directory is created");
-    let addr = link_addr(runtime_dir.path());
-    let listener = Listener::bind(&addr).expect("the link binds");
+    let (_runtime_dir, addr, listener) = bound_listener();
     let connecting = {
         let addr = addr.clone();
         thread::spawn(move || Connection::connect(&addr).expect("the peer connects"))
@@ -1434,9 +1620,7 @@ fn a_second_link_carries_no_pane_output_until_its_own_hello_opens_it() {
     // replaced its own image takes the link, and the peer that arrives next
     // has presented no token yet: it must be handed nothing until it does, the
     // same as the first one.
-    let runtime_dir = tempfile::tempdir().expect("a temporary directory is created");
-    let addr = link_addr(runtime_dir.path());
-    let listener = Listener::bind(&addr).expect("the link binds");
+    let (_runtime_dir, addr, listener) = bound_listener();
     let sink = LinkSink::new();
     let pane = PaneId::new();
 
@@ -1540,10 +1724,11 @@ fn a_send_parked_for_a_pane_being_closed_gives_up_and_leaves_the_others_parked()
 }
 
 #[test]
-fn a_send_for_a_pane_being_closed_gives_up_without_waiting_and_waits_again_once_it_is_closed() {
-    // A pane is let go, closed, then forgotten. A send arriving while it is
-    // being closed must answer at once rather than park; the list holds only
-    // the panes being closed right now, so a send after that parks as usual.
+fn a_send_for_a_closed_pane_gives_up_without_waiting_before_and_after_it_is_forgotten() {
+    // A pane is let go, closed, then forgotten. Every send for it answers at
+    // once rather than parking, both while it is being closed and afterwards:
+    // a reader that wakes late must not write a chunk to a link after the Kill
+    // that closed the pane was answered.
     let sink = LinkSink::new();
     let pane = PaneId::new();
 
@@ -1554,15 +1739,19 @@ fn a_send_for_a_pane_being_closed_gives_up_without_waiting_and_waits_again_once_
     );
 
     sink.forget(pane);
+    assert!(
+        !sink.output(pane, b"late".to_vec()),
+        "a chunk for a pane that is already closed is refused too"
+    );
+
+    // A pane the supervisor never closed still parks for a link.
+    let other = PaneId::new();
     let parked = {
         let sink = Arc::clone(&sink);
-        thread::spawn(move || sink.output(pane, b"parked".to_vec()))
+        thread::spawn(move || sink.output(other, b"parked".to_vec()))
     };
     thread::sleep(TEST_IDLE_EXIT);
-    assert!(
-        !parked.is_finished(),
-        "a pane the supervisor is no longer closing waits for a link again"
-    );
+    assert!(!parked.is_finished(), "a live pane waits for a link");
 
     sink.close();
     wait_until("the parked send gave up", || parked.is_finished());
@@ -1586,6 +1775,11 @@ fn every_send_after_the_supervisor_starts_ending_gives_up_at_once() {
     // An exit takes the same route and must not wait either; a wait here would
     // hold the supervisor's own teardown.
     sink.exit(pane, ExitStatus::ExitCode(0));
+    assert_eq!(
+        sink.ended_panes(),
+        Vec::<PaneId>::new(),
+        "an exit no link was handed leaves no pane whose entry is still to close"
+    );
     assert!(
         !sink.output(PaneId::new(), b"another pane".to_vec()),
         "and so is every other pane's"
@@ -1598,11 +1792,7 @@ fn a_shutdown_before_a_hello_is_refused_and_the_supervisor_keeps_running() {
     // gate: a peer that has not presented the token must not be able to close
     // the session's panes.
     let mut supervisor = RunningSupervisor::start(TEST_IDLE_EXIT * 10);
-    let mut stranger = TestLink {
-        connection: Connection::connect(&supervisor.addr).expect("the link opens"),
-        next_request_id: 1,
-        events: Vec::new(),
-    };
+    let mut stranger = TestLink::connect(&supervisor.addr);
 
     assert_eq!(
         stranger.ask(SupervisorRequestKind::Shutdown),
@@ -1635,7 +1825,7 @@ fn a_second_link_is_answered_only_once_the_first_one_ends() {
     // reaching it at once must not have the second one driving the panes while
     // the first still holds the link: the second waits, and it is served the
     // moment the first goes.
-    let mut supervisor = RunningSupervisor::start(Duration::from_secs(30));
+    let mut supervisor = RunningSupervisor::start(LONG_IDLE_EXIT);
     let mut first = TestLink::open(&supervisor.addr);
     assert_eq!(
         first.ask(SupervisorRequestKind::ListPanes),
@@ -1684,4 +1874,174 @@ fn a_second_link_is_answered_only_once_the_first_one_ends() {
         SupervisorResult::Done
     );
     supervisor.join();
+}
+
+#[test]
+fn an_answer_goes_out_on_a_link_that_no_hello_has_opened_and_that_is_holding_its_output() {
+    // An answer belongs to the link its request arrived on. Neither gate that
+    // parks a pane event may park an answer: a Hello is answered on a link no
+    // Hello has opened yet, and the answer to a hold is written under it.
+    let (_runtime_dir, addr, listener) = bound_listener();
+    let sink = LinkSink::new();
+    let (writer, mut peer) = linked_pair(&addr, &listener);
+    sink.link_up(writer);
+    sink.pause_output();
+
+    let answer = SupervisorResponse {
+        request_id: Some(7),
+        result: SupervisorResult::Panes(Vec::new()),
+    };
+    assert!(
+        sink.answer(answer.clone()),
+        "a link that is up takes the answer"
+    );
+    assert_eq!(
+        peer.recv::<SupervisorMessage>().expect("a frame arrives"),
+        SupervisorMessage::Response(answer)
+    );
+}
+
+#[test]
+fn an_answer_with_no_link_up_reports_the_link_is_gone() {
+    let sink = LinkSink::new();
+
+    assert!(
+        !sink.answer(SupervisorResponse {
+            request_id: Some(1),
+            result: SupervisorResult::Done,
+        }),
+        "an answer with nowhere to go reports the link ended"
+    );
+}
+
+#[test]
+fn a_hold_asked_for_on_one_link_does_not_carry_to_the_next_one() {
+    // A hold belongs to the link that asked for it. The session server that
+    // asked is gone, so the image linking next must be written the pane's
+    // output without lifting a hold it never asked for.
+    let (_runtime_dir, addr, listener) = bound_listener();
+    let sink = LinkSink::new();
+    let pane = PaneId::new();
+
+    let (first_writer, first_peer) = linked_pair(&addr, &listener);
+    sink.link_up(first_writer);
+    sink.open();
+    sink.pause_output();
+    sink.link_down();
+    drop(first_peer);
+
+    let (second_writer, mut second_peer) = linked_pair(&addr, &listener);
+    sink.link_up(second_writer);
+    sink.open();
+    let forwarding = {
+        let sink = Arc::clone(&sink);
+        thread::spawn(move || sink.output(pane, b"after the swap".to_vec()))
+    };
+
+    wait_until("the chunk went out on the next link", || {
+        forwarding.is_finished()
+    });
+    assert!(
+        forwarding.join().expect("the forwarding thread ended"),
+        "the next link takes the chunk"
+    );
+    assert_eq!(
+        second_peer
+            .recv::<SupervisorMessage>()
+            .expect("a frame arrives"),
+        SupervisorMessage::Event(SupervisorEvent::Output {
+            pane_id: pane,
+            bytes: b"after the swap".to_vec(),
+        })
+    );
+}
+
+#[test]
+fn two_holds_on_one_link_are_lifted_by_one_resume() {
+    let (_runtime_dir, addr, listener) = bound_listener();
+    let sink = LinkSink::new();
+    let pane = PaneId::new();
+    let (writer, mut peer) = linked_pair(&addr, &listener);
+    sink.link_up(writer);
+    sink.open();
+
+    sink.pause_output();
+    sink.pause_output();
+    let forwarding = {
+        let sink = Arc::clone(&sink);
+        thread::spawn(move || sink.output(pane, b"held".to_vec()))
+    };
+    thread::sleep(TEST_IDLE_EXIT);
+    assert!(
+        !forwarding.is_finished(),
+        "a link holding its output is handed nothing"
+    );
+
+    sink.resume_output();
+
+    wait_until("the held chunk went out", || forwarding.is_finished());
+    assert!(
+        forwarding.join().expect("the forwarding thread ended"),
+        "one resume lifts the hold, however many asked for it"
+    );
+    assert_eq!(
+        peer.recv::<SupervisorMessage>().expect("a frame arrives"),
+        SupervisorMessage::Event(SupervisorEvent::Output {
+            pane_id: pane,
+            bytes: b"held".to_vec(),
+        })
+    );
+}
+
+#[test]
+fn an_exit_written_to_a_link_leaves_the_pane_to_close_until_it_is_forgotten() {
+    // `close_panes_that_ended` closes exactly the panes this list names, so an
+    // exit that reached a link puts its pane on the list and closing the pane
+    // takes it off again.
+    let (_runtime_dir, addr, listener) = bound_listener();
+    let sink = LinkSink::new();
+    let pane = PaneId::new();
+    let (writer, mut peer) = linked_pair(&addr, &listener);
+    sink.link_up(writer);
+    sink.open();
+
+    sink.exit(pane, ExitStatus::ExitCode(3));
+
+    assert_eq!(
+        peer.recv::<SupervisorMessage>().expect("a frame arrives"),
+        SupervisorMessage::Event(SupervisorEvent::Exited {
+            pane_id: pane,
+            status: ExitStatus::ExitCode(3),
+        })
+    );
+    assert_eq!(
+        sink.ended_panes(),
+        vec![pane],
+        "the pane whose exit went out still has an entry to close"
+    );
+
+    sink.forget(pane);
+
+    assert_eq!(
+        sink.ended_panes(),
+        Vec::<PaneId>::new(),
+        "a pane that has been closed has no entry left to close"
+    );
+}
+
+#[test]
+fn an_exit_for_a_pane_being_closed_leaves_no_pane_to_close_again() {
+    // The pane is being closed already, so its exit reaches no link and the
+    // close under way is the only one.
+    let sink = LinkSink::new();
+    let pane = PaneId::new();
+
+    sink.let_go(pane);
+    sink.exit(pane, ExitStatus::ExitCode(0));
+
+    assert_eq!(
+        sink.ended_panes(),
+        Vec::<PaneId>::new(),
+        "an exit nobody was handed names no pane whose entry is still to close"
+    );
 }

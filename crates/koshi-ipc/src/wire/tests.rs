@@ -64,23 +64,74 @@ fn a_variant_this_build_lacks_and_that_carries_no_fields_decodes_as_unknown() {
     );
 }
 
+/// A variant with no fields also travels as a one-key object whose value is
+/// `null`.
+#[test]
+fn a_variant_with_no_fields_decodes_from_a_one_key_object_with_null() {
+    let decoded: MaybeKnown<Sample> = serde_json::from_str(r#"{"Bare":null}"#).unwrap();
+    assert_eq!(decoded, MaybeKnown::Known(Sample::Bare));
+}
+
+/// A name this build has, spelled as a bare string while its variant carries
+/// fields, keeps the decoder's refusal. That refusal carries no position.
+#[test]
+fn a_known_variant_spelled_without_its_fields_is_an_error() {
+    let decoded: Result<MaybeKnown<Sample>, _> = serde_json::from_str(r#""Keep""#);
+    let error = decoded.expect_err("a known name with the wrong shape is an error");
+    assert_eq!(
+        error.to_string(),
+        "invalid type: unit variant, expected struct variant"
+    );
+}
+
+#[test]
+fn whitespace_around_a_value_does_not_change_what_it_names() {
+    let known: MaybeKnown<Sample> =
+        serde_json::from_str(" { \"Keep\" : { \"value\" : 7 } } ").unwrap();
+    assert_eq!(known, MaybeKnown::Known(Sample::Keep { value: 7 }));
+
+    for text in [" \"Added\" ", " { \"Added\" : 1 } "] {
+        let unknown: MaybeKnown<Sample> = serde_json::from_str(text).unwrap();
+        assert_eq!(
+            unknown,
+            MaybeKnown::Unknown {
+                name: "Added".to_string()
+            },
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn a_non_ascii_name_is_kept_as_the_peer_spelled_it() {
+    let decoded: MaybeKnown<Sample> = serde_json::from_str(r#"{"Añadido":{"pane":3}}"#).unwrap();
+    assert_eq!(
+        decoded,
+        MaybeKnown::Unknown {
+            name: "Añadido".to_string()
+        }
+    );
+}
+
 #[test]
 fn a_variant_this_build_has_but_cannot_read_is_an_error_not_an_unknown() {
     let decoded: Result<MaybeKnown<Sample>, _> = serde_json::from_str(r#"{"Keep":{"value":"x"}}"#);
     let error = decoded.expect_err("a known variant with an unreadable payload is an error");
-    assert!(
-        error.to_string().contains("invalid type"),
-        "the error names the payload fault, got: {error}"
+    assert_eq!(
+        error.to_string(),
+        r#"invalid type: string "x", expected u32 at line 1 column 20"#
     );
 }
 
 #[test]
 fn a_value_that_names_no_variant_is_an_error() {
-    for text in [r#"{"Keep":1,"Bare":2}"#, "7", "[]", "null"] {
+    for text in [r#"{"Keep":1,"Bare":2}"#, "7", "[]", "null", "{}"] {
         let decoded: Result<MaybeKnown<Sample>, _> = serde_json::from_str(text);
-        assert!(
-            decoded.is_err(),
-            "{text} names no single variant, so it must not decode"
+        let error = decoded.expect_err(text);
+        assert_eq!(
+            error.to_string(),
+            "a wire value is a variant name, or a one-key object naming one",
+            "{text}"
         );
     }
 }
@@ -93,8 +144,8 @@ fn an_unknown_field_inside_a_known_variant_is_ignored() {
 }
 
 /// A variant travels as a one-key object. An object with a second key names no
-/// variant, whichever of its keys this build has, so it is refused rather than
-/// read as the key that happens to come first.
+/// variant, whichever of its keys this build has, and whichever key comes
+/// first.
 #[test]
 fn an_object_with_a_second_key_names_no_variant() {
     for text in [
@@ -103,16 +154,210 @@ fn an_object_with_a_second_key_names_no_variant() {
         r#"{"Added":1,"AlsoAdded":2}"#,
     ] {
         let decoded: Result<MaybeKnown<Sample>, _> = serde_json::from_str(text);
-        assert!(
-            decoded.is_err(),
-            "{text} carries two keys, so it names no variant"
+        let error = decoded.expect_err(text);
+        assert_eq!(
+            error.to_string(),
+            "a wire value is a variant name, or a one-key object naming one",
+            "{text}"
         );
     }
 }
 
-/// A payload is never decoded while the variant is being named, so an unknown
-/// variant carrying bytes this build could not read still reads as unknown
-/// rather than as an error.
+#[test]
+fn an_empty_name_is_unknown_with_an_empty_name() {
+    let decoded: MaybeKnown<Sample> = serde_json::from_str(r#""""#).unwrap();
+    assert_eq!(
+        decoded,
+        MaybeKnown::Unknown {
+            name: String::new()
+        }
+    );
+}
+
+/// The name is the decoded JSON string: an escape in the text is read as the
+/// character it stands for, as a bare name and as an object key.
+#[test]
+fn an_escaped_name_is_read_as_the_characters_it_stands_for() {
+    for text in [r#""\u0041dded""#, r#"{"\u0041dded":1}"#] {
+        let decoded: MaybeKnown<Sample> = serde_json::from_str(text).unwrap();
+        assert_eq!(
+            decoded,
+            MaybeKnown::Unknown {
+                name: "Added".to_string()
+            },
+            "{text}"
+        );
+    }
+}
+
+/// serde_json stops building a value 128 levels deep. Naming a variant walks
+/// the payload without building it and has no depth limit: an unknown name
+/// past the limit is still unknown, and a known name past it keeps the
+/// decoder's own refusal.
+#[test]
+fn a_payload_nested_past_the_decoders_depth_limit_still_names_its_variant() {
+    #[derive(Debug, PartialEq, Eq, Deserialize)]
+    enum Holder {
+        Tree(serde_json::Value),
+    }
+
+    impl WireVariants for Holder {
+        const VARIANTS: &'static [&'static str] = &["Tree"];
+    }
+
+    let deep = format!("{}{}", "[".repeat(200), "]".repeat(200));
+
+    let unknown: MaybeKnown<Holder> =
+        serde_json::from_str(&format!(r#"{{"Added":{deep}}}"#)).unwrap();
+    assert_eq!(
+        unknown,
+        MaybeKnown::Unknown {
+            name: "Added".to_string()
+        }
+    );
+
+    let known: Result<MaybeKnown<Holder>, _> =
+        serde_json::from_str(&format!(r#"{{"Tree":{deep}}}"#));
+    let error = known.expect_err("a known name keeps the decoder's refusal");
+    assert_eq!(
+        error.to_string(),
+        "recursion limit exceeded at line 1 column 135"
+    );
+}
+
+/// The raw text is borrowed from the input, and a reader lends nothing.
+#[test]
+fn decoding_from_a_reader_that_lends_no_bytes_is_an_error() {
+    let reader = std::io::Cursor::new(br#"{"Keep":{"value":7}}"#.to_vec());
+    let decoded: Result<MaybeKnown<Sample>, _> = serde_json::from_reader(reader);
+    let error = decoded.expect_err("a reader cannot lend its bytes to the raw text");
+    assert_eq!(
+        error.to_string(),
+        r#"invalid type: string "{\"Keep\":{\"value\":7}}", expected raw value"#
+    );
+}
+
+/// The refusal for an unreadable payload is positioned inside the kind's own
+/// text, not inside the whole envelope: column 20 here is the `"x"` counted
+/// from the start of `{"Keep":…}`, which sits at column 39 of the envelope.
+#[test]
+fn a_payload_fault_inside_an_envelope_keeps_the_kind_relative_position() {
+    let decoded: Result<Envelope<MaybeKnown<Sample>>, _> =
+        serde_json::from_str(r#"{"request_id":1,"kind":{"Keep":{"value":"x"}}}"#);
+    let error = decoded.expect_err("a known variant with an unreadable payload is an error");
+    assert_eq!(
+        error.to_string(),
+        r#"invalid type: string "x", expected u32 at line 1 column 20"#
+    );
+}
+
+#[test]
+fn an_envelope_carrying_a_kind_this_build_lacks_reads_as_unknown() {
+    let decoded: Envelope<MaybeKnown<Sample>> =
+        serde_json::from_str(r#"{"request_id":9,"kind":{"Added":{"pane":3}}}"#).unwrap();
+    assert_eq!(
+        decoded,
+        Envelope {
+            request_id: 9,
+            kind: MaybeKnown::Unknown {
+                name: "Added".to_string()
+            },
+        }
+    );
+}
+
+#[test]
+fn an_envelope_without_a_request_id_is_refused() {
+    let decoded: Result<Envelope<Sample>, _> = serde_json::from_str(r#"{"kind":"Bare"}"#);
+    let error = decoded.expect_err("the request id is not optional");
+    assert_eq!(
+        error.to_string(),
+        "missing field `request_id` at line 1 column 15"
+    );
+}
+
+#[test]
+fn an_envelope_with_a_field_it_does_not_know_is_refused() {
+    let decoded: Result<Envelope<Sample>, _> =
+        serde_json::from_str(r#"{"request_id":1,"kind":"Bare","extra":true}"#);
+    let error = decoded.expect_err("an envelope has exactly two fields");
+    assert_eq!(
+        error.to_string(),
+        "unknown field `extra`, expected `request_id` or `kind` at line 1 column 37"
+    );
+}
+
+#[test]
+fn an_answer_with_a_field_it_does_not_know_is_refused() {
+    let decoded: Result<Answer<Sample>, _> =
+        serde_json::from_str(r#"{"request_id":1,"result":"Bare","extra":true}"#);
+    let error = decoded.expect_err("an answer has exactly two fields");
+    assert_eq!(
+        error.to_string(),
+        "unknown field `extra`, expected `request_id` or `result` at line 1 column 39"
+    );
+}
+
+/// The JSON an envelope and an answer write: `request_id` first, then the
+/// payload, and an absent answer id written as `null`.
+#[test]
+fn an_envelope_and_an_answer_write_their_fields_in_order() {
+    let envelope = Envelope {
+        request_id: 7,
+        kind: Sample::Keep { value: 1 },
+    };
+    assert_eq!(
+        serde_json::to_string(&envelope).unwrap(),
+        r#"{"request_id":7,"kind":{"Keep":{"value":1}}}"#
+    );
+
+    let answer = Answer {
+        request_id: None,
+        result: Sample::Bare,
+    };
+    assert_eq!(
+        serde_json::to_string(&answer).unwrap(),
+        r#"{"request_id":null,"result":"Bare"}"#
+    );
+}
+
+#[test]
+fn an_answer_carrying_a_result_this_build_lacks_reads_as_unknown() {
+    let decoded: Answer<MaybeKnown<Sample>> =
+        serde_json::from_str(r#"{"request_id":9,"result":{"Added":{"pane":3}}}"#).unwrap();
+    assert_eq!(
+        decoded,
+        Answer {
+            request_id: Some(9),
+            result: MaybeKnown::Unknown {
+                name: "Added".to_string()
+            },
+        }
+    );
+}
+
+/// An answer's `request_id` reads as `None` both when the field is absent and
+/// when it is `null`.
+#[test]
+fn an_answer_with_no_request_id_reads_as_none() {
+    for text in [
+        r#"{"result":"Bare"}"#,
+        r#"{"request_id":null,"result":"Bare"}"#,
+    ] {
+        let decoded: Answer<Sample> = serde_json::from_str(text).unwrap();
+        assert_eq!(
+            decoded,
+            Answer {
+                request_id: None,
+                result: Sample::Bare,
+            },
+            "{text}"
+        );
+    }
+}
+
+/// The payload is not decoded while the variant is being named: an unknown
+/// variant carrying bytes this build could not read reads as unknown.
 #[test]
 fn naming_an_unknown_variant_never_reads_its_payload() {
     let decoded: MaybeKnown<Sample> =
@@ -125,7 +370,7 @@ fn naming_an_unknown_variant_never_reads_its_payload() {
     );
 }
 
-/// The decode runs first, and the name is read only when it fails, so a value
+/// The decode runs first, and the name is read only when it fails: a value
 /// that decodes never reaches the `VARIANTS` list.
 /// [`every_wire_enum_lists_the_variants_it_writes`] keeps the two in step for
 /// the real wire enums.
@@ -200,9 +445,49 @@ fn or_default_falls_back_for_a_value_this_build_cannot_read() {
     );
 }
 
-/// Every wire enum lists exactly the variants it can produce. A variant added
-/// without its `VARIANTS` entry would arrive as `Unknown` on the far side, so
-/// the two are pinned together here.
+/// `null` and a number the type cannot hold both fall back to the default.
+#[test]
+fn or_default_falls_back_for_null_and_for_a_number_outside_the_type() {
+    #[derive(Debug, Default, PartialEq, Eq, Deserialize)]
+    struct Holder {
+        #[serde(default, deserialize_with = "or_default")]
+        gap: u16,
+    }
+
+    for (text, expected) in [
+        (r#"{"gap":3}"#, 3),
+        (r#"{"gap":null}"#, 0),
+        (r#"{"gap":70000}"#, 0),
+        (r#"{"gap":-1}"#, 0),
+        (r#"{"gap":"3"}"#, 0),
+    ] {
+        let holder: Holder = serde_json::from_str(text).unwrap();
+        assert_eq!(holder.gap, expected, "{text}");
+    }
+}
+
+/// `or_default` borrows the raw text the same way `MaybeKnown` does, and a
+/// reader lends nothing.
+#[test]
+fn or_default_from_a_reader_that_lends_no_bytes_is_an_error() {
+    #[derive(Debug, Default, PartialEq, Eq, Deserialize)]
+    struct Holder {
+        #[serde(default, deserialize_with = "or_default")]
+        gap: u16,
+    }
+
+    let reader = std::io::Cursor::new(br#"{"gap":3}"#.to_vec());
+    let decoded: Result<Holder, _> = serde_json::from_reader(reader);
+    let error = decoded.expect_err("a reader cannot lend its bytes to the raw text");
+    assert_eq!(
+        error.to_string(),
+        r#"invalid type: string "3", expected raw value at line 1 column 9"#
+    );
+}
+
+/// Every wire enum lists exactly the variants it can produce: each sample
+/// value's name is in `VARIANTS`, the two lists have the same length, and the
+/// JSON the value writes names that same variant.
 #[test]
 fn every_wire_enum_lists_the_variants_it_writes() {
     fn assert_listed<T>(values: Vec<T>)
@@ -240,19 +525,13 @@ fn every_wire_enum_lists_the_variants_it_writes() {
     assert_listed(sample_supervisor_events());
 }
 
-/// Every wire enum's `VARIANTS` holds exactly the variants its type has.
+/// Every wire enum's `VARIANTS` holds exactly the variants its type has. The
+/// real list comes from the type's own decoder through [`variants_of`], and
+/// follows the enum without being maintained.
 ///
-/// [`every_wire_enum_lists_the_variants_it_writes`] weighs `VARIANTS` against a
-/// hand-written sample per variant, and a variant absent from both lists still
-/// passes it. The list here comes from the type's own decoder, so it follows the
-/// enum without being maintained.
-///
-/// A `VARIANTS` short of one name turns a payload of that name this build cannot
-/// read into [`MaybeKnown::Unknown`], which the caller answers and keeps reading,
-/// instead of the decoding error that ends the connection. A `VARIANTS` holding
-/// a name the enum dropped does the reverse, and
-/// `the_plane_a_remote_client_reaches_names_no_token_verb` reads
-/// `IpcRequestKind::VARIANTS` as the session plane's whole vocabulary.
+/// `the_plane_a_remote_client_reaches_names_no_token_verb` in the protocol
+/// tests reads `IpcRequestKind::VARIANTS` as the session plane's whole
+/// vocabulary.
 #[test]
 fn every_wire_enum_lists_exactly_the_variants_its_type_has() {
     fn assert_matches<T: DeserializeOwned + WireVariants>(type_name: &str) {
@@ -377,9 +656,7 @@ fn sample_supervisor_events() -> Vec<SupervisorEvent> {
     ]
 }
 
-/// One value per [`IpcRequestKind`] variant. The match in
-/// [`IpcRequestKind::name`] is exhaustive, so a new variant fails the build
-/// there; this list is what pins the count.
+/// One value per [`IpcRequestKind`] variant.
 fn sample_request_kinds() -> Vec<IpcRequestKind> {
     use koshi_core::geometry::Size;
 
@@ -653,4 +930,29 @@ fn painted_frame() -> crate::frame::PaintedFrame {
             mouse_select: false,
         },
     }
+}
+
+#[test]
+fn an_unknown_name_is_filtered_as_it_is_read() {
+    // The name is quoted back in a refusal and written on a log line, and the
+    // peer that chose it may be another local user or another machine.
+    let decoded: MaybeKnown<Sample> =
+        serde_json::from_str("{\"\\u001b[2JAdded\":{\"pane\":3}}").unwrap();
+    assert_eq!(
+        decoded,
+        MaybeKnown::Unknown {
+            name: "[2JAdded".to_string(),
+        }
+    );
+}
+
+#[test]
+fn an_unknown_name_is_cut_to_the_reported_text_cap() {
+    let long = "A".repeat(100_000);
+    let decoded: MaybeKnown<Sample> =
+        serde_json::from_str(&format!(r#"{{"{long}":{{"pane":3}}}}"#)).unwrap();
+    let MaybeKnown::Unknown { name } = decoded else {
+        panic!("a name this build does not have reads as unknown");
+    };
+    assert_eq!(name.len(), koshi_core::text::MAX_REPORTED_TEXT_BYTES);
 }

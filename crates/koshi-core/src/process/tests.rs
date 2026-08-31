@@ -208,3 +208,201 @@ fn the_default_shell_program_is_never_empty_and_its_kind_matches_that_program() 
     assert_eq!(spec.cwd, None);
     assert_eq!(spec.env, BTreeMap::new());
 }
+
+#[test]
+fn shell_kind_matching_ignores_ascii_case() {
+    assert_eq!(ShellKind::from_program(Path::new("ZSH")), ShellKind::Zsh);
+    assert_eq!(ShellKind::from_program(Path::new("Bash")), ShellKind::Bash);
+    assert_eq!(
+        ShellKind::from_program(Path::new("/usr/bin/FISH")),
+        ShellKind::Fish
+    );
+}
+
+#[test]
+fn shell_kind_of_a_versioned_program_name_is_other_with_the_stem_before_the_last_dot() {
+    // `file_stem` cuts at the last `.`, so `bash-5.2` leaves `bash-5`.
+    assert_eq!(
+        ShellKind::from_program(Path::new("/usr/bin/bash-5.2")),
+        ShellKind::Other("bash-5".to_string())
+    );
+}
+
+#[test]
+fn shell_kind_of_an_uppercase_unknown_program_is_other_with_the_lowercased_stem() {
+    assert_eq!(
+        ShellKind::from_program(Path::new("Elvish.EXE")),
+        ShellKind::Other("elvish".to_string())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn shell_kind_of_a_non_utf8_program_name_is_other_with_an_empty_name() {
+    use std::os::unix::ffi::OsStrExt;
+    let program = Path::new(std::ffi::OsStr::from_bytes(b"/bin/z\xffsh"));
+    assert_eq!(
+        ShellKind::from_program(program),
+        ShellKind::Other(String::new())
+    );
+}
+
+#[test]
+fn shell_kind_serializes_known_shells_as_bare_names_and_other_with_its_program() {
+    assert_eq!(
+        serde_json::to_string(&ShellKind::Zsh).expect("serialize"),
+        r#""Zsh""#
+    );
+    assert_eq!(
+        serde_json::to_string(&ShellKind::PowerShell).expect("serialize"),
+        r#""PowerShell""#
+    );
+    assert_eq!(
+        serde_json::to_string(&ShellKind::Other("elvish".to_string())).expect("serialize"),
+        r#"{"Other":"elvish"}"#
+    );
+}
+
+#[test]
+fn kill_policy_force_and_tree_serialize_as_bare_names() {
+    assert_eq!(
+        serde_json::to_string(&KillPolicy::Force).expect("serialize"),
+        r#""Force""#
+    );
+    assert_eq!(
+        serde_json::to_string(&KillPolicy::Tree).expect("serialize"),
+        r#""Tree""#
+    );
+}
+
+#[test]
+fn kill_policy_refuses_a_negative_timeout() {
+    let refusal = serde_json::from_str::<KillPolicy>(r#"{"Graceful":{"timeout":-1}}"#)
+        .expect_err("a negative second count is refused");
+    assert!(refusal.to_string().contains("u64"), "{refusal}");
+}
+
+#[test]
+fn kill_policy_refuses_a_fractional_timeout() {
+    let refusal = serde_json::from_str::<KillPolicy>(r#"{"GracefulTree":{"timeout":3.5}}"#)
+        .expect_err("a fractional second count is refused");
+    assert!(refusal.to_string().contains("u64"), "{refusal}");
+}
+
+#[test]
+fn kill_policy_zero_and_max_timeouts_roundtrip() {
+    for timeout in [Duration::ZERO, Duration::from_secs(u64::MAX)] {
+        let policy = KillPolicy::Graceful { timeout };
+        let json = serde_json::to_string(&policy).expect("serialize");
+        let back: KillPolicy = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, policy);
+    }
+    assert_eq!(
+        serde_json::to_string(&KillPolicy::Graceful {
+            timeout: Duration::ZERO
+        })
+        .expect("serialize"),
+        r#"{"Graceful":{"timeout":0}}"#
+    );
+}
+
+#[test]
+fn exit_status_serializes_as_a_tagged_integer() {
+    assert_eq!(
+        serde_json::to_string(&ExitStatus::ExitCode(0)).expect("serialize"),
+        r#"{"ExitCode":0}"#
+    );
+    assert_eq!(
+        serde_json::to_string(&ExitStatus::Signaled(9)).expect("serialize"),
+        r#"{"Signaled":9}"#
+    );
+}
+
+#[test]
+fn exit_status_keeps_a_negative_exit_code() {
+    let json = serde_json::to_string(&ExitStatus::ExitCode(-1)).expect("serialize");
+    assert_eq!(json, r#"{"ExitCode":-1}"#);
+    let back: ExitStatus = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(back, ExitStatus::ExitCode(-1));
+}
+
+#[test]
+fn pty_size_serializes_cols_then_rows() {
+    assert_eq!(
+        serde_json::to_string(&PtySize { cols: 80, rows: 24 }).expect("serialize"),
+        r#"{"cols":80,"rows":24}"#
+    );
+}
+
+#[test]
+fn pty_size_zero_and_max_roundtrip() {
+    for size in [
+        PtySize { cols: 0, rows: 0 },
+        PtySize {
+            cols: u16::MAX,
+            rows: u16::MAX,
+        },
+    ] {
+        let json = serde_json::to_string(&size).expect("serialize");
+        let back: PtySize = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, size);
+    }
+}
+
+#[test]
+fn pty_size_refuses_a_dimension_past_u16() {
+    let refusal = serde_json::from_str::<PtySize>(r#"{"cols":65536,"rows":24}"#)
+        .expect_err("a column count past u16 is refused");
+    assert!(refusal.to_string().contains("u16"), "{refusal}");
+}
+
+#[test]
+fn spawn_spec_serializes_with_its_field_names_and_sorted_env() {
+    let mut env = BTreeMap::new();
+    env.insert("TERM".to_string(), "xterm-256color".to_string());
+    env.insert("LANG".to_string(), "en_US.UTF-8".to_string());
+    let spec = SpawnSpec {
+        program: PathBuf::from("/bin/zsh"),
+        args: vec!["-l".to_string()],
+        cwd: Some(PathBuf::from("/home/u")),
+        env,
+        shell_kind: ShellKind::Zsh,
+    };
+    assert_eq!(
+        serde_json::to_string(&spec).expect("serialize"),
+        r#"{"program":"/bin/zsh","args":["-l"],"cwd":"/home/u","env":{"LANG":"en_US.UTF-8","TERM":"xterm-256color"},"shell_kind":"Zsh"}"#
+    );
+}
+
+#[test]
+fn spawn_spec_with_no_cwd_serializes_cwd_as_null() {
+    let spec = SpawnSpec::shell(PathBuf::from("/bin/sh"), None, BTreeMap::new());
+    assert_eq!(
+        serde_json::to_string(&spec).expect("serialize"),
+        r#"{"program":"/bin/sh","args":[],"cwd":null,"env":{},"shell_kind":{"Other":"sh"}}"#
+    );
+}
+
+#[test]
+fn spawn_spec_shell_derives_the_kind_from_the_program_and_takes_no_arguments() {
+    let cwd = PathBuf::from("/tmp/koshi-shell");
+    let mut env = BTreeMap::new();
+    env.insert("KOSHI_SESSION_ID".to_string(), "abc".to_string());
+
+    let spec = SpawnSpec::shell(
+        PathBuf::from("/usr/bin/fish"),
+        Some(cwd.clone()),
+        env.clone(),
+    );
+
+    assert_eq!(
+        spec,
+        SpawnSpec {
+            program: PathBuf::from("/usr/bin/fish"),
+            args: Vec::new(),
+            cwd: Some(cwd),
+            env,
+            shell_kind: ShellKind::Fish,
+        }
+    );
+}

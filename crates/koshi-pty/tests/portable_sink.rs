@@ -2,17 +2,15 @@
 //! [`PtySink`] instead of the handle's channels.
 //!
 //! This is the route the running binary takes: the pane's own reader thread
-//! delivers each chunk to the consumer, so no relay thread exists per pane.
-//! What has to hold is the order the consumer observes — every byte the child
-//! printed, and only then the child's exit — because that is what decides
-//! whether a pane closes before its last output is drawn.
+//! delivers each chunk to the consumer, and no relay thread exists per pane.
+//! Each test asserts the order the consumer observes: every byte the child
+//! printed, and only then the child's exit.
 //!
 //! Most tests here run on all three targets. The only platform difference is
-//! the shell each script is handed to and the words that script is written in;
-//! the behavior asserted is identical, because a pane on Windows has to order
-//! its output and exit exactly like a pane on Linux or macOS. The few that are
-//! Unix-gated say why above themselves, and each has an all-platform unit test
-//! in `portable::tests` covering the same claim without a child.
+//! the shell each script is handed to and the words that script is written
+//! in; the behavior asserted is identical. Each Unix-gated test states its
+//! own gate above itself, and each has an all-platform unit test in
+//! `portable::tests` covering the same claim without a child.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -22,7 +20,8 @@ use std::time::{Duration, Instant};
 
 use koshi_core::ids::PaneId;
 use koshi_core::process::{ExitStatus, KillPolicy, PtySize, ShellKind, SpawnSpec};
-use koshi_pty::backend::state::{PtyBackend, PtySink};
+use koshi_pty::backend::state::{PtyBackend, PtyHandle, PtySink};
+use koshi_pty::error::PtyError;
 use koshi_pty::portable::PortablePtyBackend;
 
 /// Standard test window size: 80 columns × 24 rows.
@@ -35,8 +34,8 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 /// How long the reader gets to stop once its consumer refuses a chunk.
 ///
 /// [`BLOCKS_AFTER_PRINTING`] keeps its child alive far longer than this on
-/// every platform, so the wait only completes if the reader really did give up
-/// early rather than sitting on the child's exit.
+/// every platform, so the wait completes only when the reader gave up early
+/// instead of sitting on the child's exit.
 const READER_STOP_DEADLINE: Duration = Duration::from_secs(5);
 
 /// How many holders of a pane's sink remain once its reader has let the sink
@@ -44,27 +43,26 @@ const READER_STOP_DEADLINE: Duration = Duration::from_secs(5);
 /// platform these tests run on, so the watcher keeps no hold of its own.
 ///
 /// Letting the sink go is not always the thread ending: on Windows the reader
-/// stays in `read` on a pane the consumer let go, because closing that pane's
+/// stays in `read` on a pane the consumer let go, and closing that pane's
 /// console waits for its output to be read out.
 const HOLDERS_WITHOUT_READER: usize = 2;
 
 /// How many holders of a closed pane's sink remain once its reader thread has
 /// stopped: the test itself and the backend. `kill` joins the watcher, so its
-/// hold is already gone by the time it returns.
+/// hold is already gone by the time `kill` returns.
 const HOLDERS_AFTER_CLOSE: usize = 2;
 
 /// The longest the watcher stands by, across every round. Mirrors
 /// `EXIT_PUBLISH_LIMIT` in the backend, which is private.
 const EXIT_PUBLISH_LIMIT: Duration = Duration::from_secs(1);
 
-/// The grace a closing pane gives its child to stop on its own. Long enough
-/// that the child goes on the stop request rather than being forced, which is
-/// what keeps `kill` polling for it — the window this test needs.
+/// The grace `kill` gives a child to exit on the stop request. The child in
+/// the test that uses it exits on the request inside this window, so `kill`
+/// polls for that exit instead of forcing it.
 const GRACEFUL_STOP: Duration = Duration::from_secs(5);
 
-/// Serializes PTY creation across the parallel test threads, for the same
-/// reason the channel-route tests do: macOS `openpty(3)` races under
-/// concurrent allocation.
+/// Serializes PTY creation across the parallel test threads. macOS
+/// `openpty(3)` fails with a transient `-6` under concurrent allocation.
 static PTY_GATE: Mutex<()> = Mutex::new(());
 
 /// The shell a test script is handed to.
@@ -102,18 +100,17 @@ const EXITS_0: &str = "exit 0";
 /// A script that leaves a background process holding the terminal open and
 /// then exits with code 5, so the child ends while the PTY reports no end.
 ///
-/// `trap '' HUP` is what makes the descendant outlive the shell at all: a
-/// session leader exiting sends `SIGHUP` to the foreground process group, and
-/// a plain `sleep 30 &` is in that group and dies with it — probed, not
-/// assumed. Ignoring the signal is inherited by the background job.
+/// `trap '' HUP` keeps the descendant alive past the shell: a session leader
+/// exiting sends `SIGHUP` to the foreground process group, and a plain
+/// `sleep 30 &` is in that group and dies with it. The background job inherits
+/// the ignored signal.
 ///
 /// The descendant surviving is not the same as the terminal staying readable.
 /// macOS revokes a controlling terminal when its session leader exits, which
-/// force-closes the descendant's end too, so the reader there reaches the end
-/// of the terminal anyway. Linux leaves the slave open, which is where the
-/// reader genuinely needs waking. The mechanism itself is covered on every
-/// platform by the `pump_waited` unit tests, which wait on a socket pair that
-/// never reports an end.
+/// closes the descendant's end too, so the reader there reaches the end of
+/// the terminal anyway. Linux leaves the slave open. The `pump_waited` unit
+/// tests cover the mechanism on every platform with a socket pair that never
+/// reports an end.
 #[cfg(windows)]
 const OUTLIVED_BY_A_DESCENDANT: &str = "start /b ping -n 100 127.0.0.1 >NUL& exit 5";
 #[cfg(not(windows))]
@@ -163,10 +160,11 @@ fn exit_among(delivered: &[Delivered]) -> Option<ExitStatus> {
     })
 }
 
-/// A sink that records every delivery so a test can assert on the sequence.
+/// A sink that records every delivery, tagged with the pane it was for, so a
+/// test can assert on the sequence.
 struct Recorder {
     /// Everything delivered so far, oldest first.
-    seen: Mutex<Vec<Delivered>>,
+    seen: Mutex<Vec<(PaneId, Delivered)>>,
 }
 
 impl Recorder {
@@ -176,9 +174,24 @@ impl Recorder {
         })
     }
 
-    /// A snapshot of what has been delivered so far.
+    /// A snapshot of what has been delivered so far, for every pane.
     fn snapshot(&self) -> Vec<Delivered> {
-        self.seen.lock().expect("recorder").clone()
+        self.seen
+            .lock()
+            .expect("recorder")
+            .iter()
+            .map(|(_, entry)| entry.clone())
+            .collect()
+    }
+
+    /// The pane each delivery so far was tagged with, oldest first.
+    fn panes_named(&self) -> Vec<PaneId> {
+        self.seen
+            .lock()
+            .expect("recorder")
+            .iter()
+            .map(|(pane, _)| *pane)
+            .collect()
     }
 
     /// Every output chunk so far, concatenated and read as lossy UTF-8.
@@ -195,9 +208,22 @@ impl Recorder {
         String::from_utf8_lossy(&joined).into_owned()
     }
 
-    /// The recorded exit status, if the child has been reported as ended.
+    /// The recorded exit status, if any child has been reported as ended.
     fn exit(&self) -> Option<ExitStatus> {
         exit_among(&self.snapshot())
+    }
+
+    /// The exit status recorded for `pane`, if its child has been reported as
+    /// ended.
+    fn exit_for(&self, pane: PaneId) -> Option<ExitStatus> {
+        self.seen
+            .lock()
+            .expect("recorder")
+            .iter()
+            .find_map(|(tagged, entry)| match entry {
+                Delivered::Exit(status) if *tagged == pane => Some(*status),
+                _ => None,
+            })
     }
 
     /// Block until an exit has been recorded, or `TIMEOUT` elapses.
@@ -216,71 +242,68 @@ impl Recorder {
 }
 
 impl PtySink for Recorder {
-    fn output(&self, _pane: PaneId, bytes: Vec<u8>) -> bool {
+    fn output(&self, pane: PaneId, bytes: Vec<u8>) -> bool {
         self.seen
             .lock()
             .expect("recorder")
-            .push(Delivered::Output(bytes));
+            .push((pane, Delivered::Output(bytes)));
         true
     }
 
-    fn exit(&self, _pane: PaneId, status: ExitStatus) {
+    fn exit(&self, pane: PaneId, status: ExitStatus) {
         self.seen
             .lock()
             .expect("recorder")
-            .push(Delivered::Exit(status));
+            .push((pane, Delivered::Exit(status)));
     }
 }
 
 /// A sink that closes the pane the moment it is told the child ended, which is
 /// what a consumer whose close-on-exit policy runs inline does.
 ///
-/// The exit can arrive on any of a pane's threads, and the call must return
+/// The exit can arrive on any of a pane's threads, and the call returns
 /// whichever one it is.
 struct ClosingSink {
     /// The backend to close the pane through, set once it exists.
     backend: Mutex<Option<Arc<PortablePtyBackend>>>,
-    /// Whether closing the pane returned rather than hanging.
-    closed: Mutex<bool>,
-    /// Everything the child printed, so the test can spot the console's
-    /// startup cursor query and answer it.
-    text: Mutex<String>,
+    /// What closing the pane returned. `None` until the close has returned.
+    closed: Mutex<Option<Result<(), PtyError>>>,
 }
 
 impl ClosingSink {
     fn new() -> Arc<Self> {
         Arc::new(ClosingSink {
             backend: Mutex::new(None),
-            closed: Mutex::new(false),
-            text: Mutex::new(String::new()),
+            closed: Mutex::new(None),
         })
+    }
+
+    /// What closing the pane returned. `None` until the close has returned.
+    fn closed(&self) -> Option<Result<(), PtyError>> {
+        self.closed.lock().expect("closing sink").clone()
     }
 }
 
 impl PtySink for ClosingSink {
-    fn output(&self, _pane: PaneId, bytes: Vec<u8>) -> bool {
-        self.text
-            .lock()
-            .expect("closing sink")
-            .push_str(&String::from_utf8_lossy(&bytes));
+    fn output(&self, _pane: PaneId, _bytes: Vec<u8>) -> bool {
         true
     }
 
     fn exit(&self, pane: PaneId, _status: ExitStatus) {
         let backend = self.backend.lock().expect("closing sink").clone();
         if let Some(backend) = backend {
-            let _ = backend.kill(pane, KillPolicy::Tree);
-            *self.closed.lock().expect("closing sink") = true;
+            let result = backend.kill(pane, KillPolicy::Tree);
+            *self.closed.lock().expect("closing sink") = Some(result);
         }
     }
 }
 
 /// A sink that refuses everything it is handed, standing in for a consumer
-/// that has gone away — a runtime whose inbox is closed.
+/// that has gone away: a runtime whose inbox is closed.
 struct RefusingSink {
     /// Set when a chunk was offered and refused.
     refused_output: Mutex<bool>,
-    /// Set if an exit was reported, which must not happen to a gone consumer.
+    /// Set if an exit was reported. A gone consumer is told no exit.
     saw_exit: Mutex<bool>,
 }
 
@@ -290,6 +313,16 @@ impl RefusingSink {
             refused_output: Mutex::new(false),
             saw_exit: Mutex::new(false),
         })
+    }
+
+    /// Whether a chunk was offered and refused.
+    fn refused_output(&self) -> bool {
+        *self.refused_output.lock().expect("refusing sink")
+    }
+
+    /// Whether an exit was reported.
+    fn saw_exit(&self) -> bool {
+        *self.saw_exit.lock().expect("refusing sink")
     }
 }
 
@@ -316,36 +349,37 @@ fn script(body: &str) -> SpawnSpec {
     }
 }
 
+/// Spawn `body` as `pane_id` through [`PTY_GATE`], panicking on failure.
+fn spawn_script(backend: &PortablePtyBackend, pane_id: PaneId, body: &str) -> PtyHandle {
+    let _gate = PTY_GATE.lock().expect("pty gate");
+    backend
+        .spawn(pane_id, script(body), SIZE)
+        .expect("spawn child")
+}
+
+/// Poll until `done` returns true or `TIMEOUT` elapses.
+fn wait_until(mut done: impl FnMut() -> bool) {
+    let deadline = Instant::now() + TIMEOUT;
+    while !done() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
 #[test]
 fn a_channel_backed_pane_reports_the_same_childs_exit() {
     // The control for every sink test here: the same child, ending the same
     // way, delivered through the handle's channels instead. The watcher
-    // observes the child's end and feeds both routes, so this separates the
-    // two halves — a failure here is the child's end not being observed at
-    // all, while this passing alongside a failing sink test puts the fault in
-    // the sink route.
+    // observes the child's end and feeds both routes. A failure here is the
+    // child's end not being observed at all; this passing alongside a failing
+    // sink test puts the fault in the sink route.
     let backend = PortablePtyBackend::new();
-    let pane_id = PaneId::new();
-    let handle = {
-        let _gate = PTY_GATE.lock().expect("pty gate");
-        backend
-            .spawn(pane_id, script(PRINTS_THEN_EXITS_3), SIZE)
-            .expect("spawn child")
-    };
+    let handle = spawn_script(&backend, PaneId::new(), PRINTS_THEN_EXITS_3);
 
-    let deadline = Instant::now() + TIMEOUT;
     let mut status = None;
-    let mut seen = Vec::new();
-    while status.is_none() && Instant::now() < deadline {
-        // Drain output too, so a full buffer can never be what stops the child.
-        while let Some(chunk) = handle.try_read_output() {
-            seen.extend(chunk);
-        }
+    wait_until(|| {
         status = handle.try_exit_status();
-        if status.is_none() {
-            thread::sleep(Duration::from_millis(5));
-        }
-    }
+        status.is_some()
+    });
     assert_eq!(
         status,
         Some(ExitStatus::ExitCode(3)),
@@ -358,12 +392,7 @@ fn a_sink_receives_the_childs_output_and_then_its_exit() {
     let recorder = Recorder::new();
     let backend = PortablePtyBackend::with_sink(recorder.clone());
     let pane_id = PaneId::new();
-    {
-        let _gate = PTY_GATE.lock().expect("pty gate");
-        backend
-            .spawn(pane_id, script(PRINTS_THEN_EXITS_3), SIZE)
-            .expect("spawn child");
-    }
+    spawn_script(&backend, pane_id, PRINTS_THEN_EXITS_3);
 
     assert_eq!(
         recorder.wait_for_exit(),
@@ -379,8 +408,7 @@ fn a_sink_receives_the_childs_output_and_then_its_exit() {
         recorder.text()
     );
 
-    // ...and the exit came last, after every chunk. A pane told its child
-    // ended while output is still arriving would close over unread text.
+    // ...and the exit came last, after every chunk.
     let seen = recorder.snapshot();
     let exit_index = seen
         .iter()
@@ -391,23 +419,49 @@ fn a_sink_receives_the_childs_output_and_then_its_exit() {
         seen.len() - 1,
         "exit was not the last delivery: {seen:?}"
     );
+
+    // Every delivery named the pane it was for.
+    let named = recorder.panes_named();
+    assert_eq!(
+        named,
+        vec![pane_id; named.len()],
+        "a delivery named a pane other than the one spawned"
+    );
+}
+
+#[test]
+fn two_panes_on_one_sink_each_report_under_their_own_id() {
+    let recorder = Recorder::new();
+    let backend = PortablePtyBackend::with_sink(recorder.clone());
+    let first = PaneId::new();
+    let second = PaneId::new();
+    spawn_script(&backend, first, PRINTS_THEN_EXITS_3);
+    spawn_script(&backend, second, EXITS_0);
+
+    wait_until(|| recorder.exit_for(first).is_some() && recorder.exit_for(second).is_some());
+    assert_eq!(
+        recorder.exit_for(first),
+        Some(ExitStatus::ExitCode(3)),
+        "the first pane's exit was not reported under its own id: {:?}",
+        recorder.snapshot()
+    );
+    assert_eq!(
+        recorder.exit_for(second),
+        Some(ExitStatus::ExitCode(0)),
+        "the second pane's exit was not reported under its own id: {:?}",
+        recorder.snapshot()
+    );
 }
 
 #[test]
 fn a_reader_stops_when_the_consumer_goes_away_even_while_the_child_lives_on() {
-    // The reader waits for the child's exit before reporting it, which is what
-    // orders output ahead of exit. That wait must be skipped once the consumer
-    // is gone, or a child that outlives its consumer pins the reader thread for
-    // as long as it keeps running.
+    // The reader waits for the child's exit before reporting it, which orders
+    // output ahead of exit. That wait is skipped once the consumer is gone, so
+    // a child that outlives its consumer does not pin the reader thread.
     let sink = RefusingSink::new();
     let backend = PortablePtyBackend::with_sink(sink.clone());
     let pane_id = PaneId::new();
-    {
-        let _gate = PTY_GATE.lock().expect("pty gate");
-        backend
-            .spawn(pane_id, script(BLOCKS_AFTER_PRINTING), SIZE)
-            .expect("spawn child");
-    }
+    spawn_script(&backend, pane_id, BLOCKS_AFTER_PRINTING);
 
     // The reader holds a reference to the sink until it gives up on the pane,
     // so the count falling to this test and the backend is the reader having
@@ -415,9 +469,9 @@ fn a_reader_stops_when_the_consumer_goes_away_even_while_the_child_lives_on() {
     // reference for as long as the child blocks, which is far past this
     // deadline.
     //
-    // On Windows the thread itself keeps running after that — it stays in
-    // `read` on the console, discarding, because closing that console waits
-    // for its output to be read out. What stops is everything the consumer can
+    // On Windows the thread itself keeps running after that: it stays in
+    // `read` on the console, discarding, and closing that console waits for
+    // its output to be read out. What stops is everything the consumer can
     // see, and that is what this counts.
     let deadline = Instant::now() + READER_STOP_DEADLINE;
     while Arc::strong_count(&sink) > HOLDERS_WITHOUT_READER && Instant::now() < deadline {
@@ -429,18 +483,16 @@ fn a_reader_stops_when_the_consumer_goes_away_even_while_the_child_lives_on() {
         "the reader was still holding the consumer while the child blocked"
     );
     assert!(
-        *sink.refused_output.lock().expect("refusing sink"),
+        sink.refused_output(),
         "the sink was never offered any output"
     );
     assert!(
-        !*sink.saw_exit.lock().expect("refusing sink"),
+        !sink.saw_exit(),
         "an exit was reported to a consumer that had already gone"
     );
 
-    // Reap the blocking child rather than leaving it behind. The group kill
-    // takes any process the script started with it — on Windows the script's
-    // `ping` is a child of `cmd.exe`, so killing the leader alone would orphan
-    // it.
+    // Reap the blocking child. The group kill takes any process the script
+    // started with it: on Windows the script's `ping` is a child of `cmd.exe`.
     backend.kill(pane_id, KillPolicy::Tree).expect("kill pane");
 }
 
@@ -448,25 +500,18 @@ fn a_reader_stops_when_the_consumer_goes_away_even_while_the_child_lives_on() {
 fn closing_a_pane_releases_its_reader_while_a_descendant_still_holds_the_terminal() {
     // The arrangement a shell leaves behind whenever a background job outlives
     // it: `sleep 5 & exit 5`. The child is gone, so the pane is told its child
-    // ended and the consumer closes it — but the descendant still holds the
-    // terminal, so no end-of-file will arrive for as long as it runs.
+    // ended and the consumer closes it, but the descendant still holds the
+    // terminal, so no end-of-file arrives for as long as it runs.
     //
-    // Closing must release the reader anyway. A reader left inside that `read`
-    // keeps a thread and a PTY descriptor for the descendant's whole life, and
-    // one accumulates for every pane closed this way.
+    // Closing releases the reader anyway. A reader left inside that `read`
+    // keeps a thread and a PTY descriptor for the descendant's whole life.
     //
-    // `Force` is the policy the runtime closes an exited pane with, and it is
-    // the one that makes this bite: the leader is already reaped, so it signals
-    // nothing and the descendant runs on untouched.
+    // `Force` is the policy the runtime closes an exited pane with: the leader
+    // is already reaped, so it signals nothing and the descendant runs on.
     let recorder = Recorder::new();
     let backend = PortablePtyBackend::with_sink(recorder.clone());
     let pane_id = PaneId::new();
-    {
-        let _gate = PTY_GATE.lock().expect("pty gate");
-        backend
-            .spawn(pane_id, script(OUTLIVED_BRIEFLY), SIZE)
-            .expect("spawn child");
-    }
+    spawn_script(&backend, pane_id, OUTLIVED_BRIEFLY);
 
     let started = Instant::now();
     assert_eq!(
@@ -475,13 +520,12 @@ fn closing_a_pane_releases_its_reader_while_a_descendant_still_holds_the_termina
         "the pane was never told its child ended"
     );
     // Where the reader can wait on its terminal it publishes here, one quiet
-    // round after being told the child has gone, and an exit that instead took
-    // the full limit is the reader never having been brought back from that
-    // wait — the descendant holds the terminal, so nothing else would.
+    // round after being told the child has gone. An exit that took the full
+    // limit is the watcher stepping in, with the reader never brought back
+    // from that wait.
     //
     // Windows has no descriptor to wait on, so its reader stays in `read` and
-    // the watcher publishes at the limit by design. Asserting promptness there
-    // would be asserting a guarantee the platform cannot offer.
+    // the watcher publishes at the limit.
     #[cfg(unix)]
     {
         let took = started.elapsed();
@@ -501,8 +545,8 @@ fn closing_a_pane_releases_its_reader_while_a_descendant_still_holds_the_termina
     // The reader holds a reference to the sink for as long as it runs, so the
     // count falling to the test and the backend is the reader having stopped.
     // `kill` joins the watcher, so its hold is already gone. The descendant
-    // holds the terminal open for seconds past this deadline, so a reader that
-    // could only be released by end-of-file would still be running here.
+    // holds the terminal open for seconds past this deadline, so a reader
+    // released only by end-of-file would still be running here.
     let deadline = Instant::now() + EXIT_PUBLISH_LIMIT;
     while Arc::strong_count(&recorder) > HOLDERS_AFTER_CLOSE && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(5));
@@ -518,38 +562,25 @@ fn closing_a_pane_releases_its_reader_while_a_descendant_still_holds_the_termina
 #[test]
 fn a_consumer_may_close_the_pane_from_inside_the_exit_it_is_handed() {
     // A consumer whose close-on-exit policy runs inline closes the pane from
-    // inside the `exit` call it was just handed. That call has to come back —
-    // it runs on one of the pane's own threads, and `kill` tears those threads
-    // down.
+    // inside the `exit` call it was just handed. That call returns: it runs on
+    // one of the pane's own threads, and `kill` tears those threads down.
     //
     // The script leaves a descendant holding the terminal, so no end-of-file
-    // arrives on its own: on Unix the reader is woken and publishes; on Windows
-    // the watcher closes the console and the reader publishes behind it.
-    //
-    // The wait loop answers the console's startup cursor query, the way every
-    // other test here does. Windows stalls the child until that reply arrives,
-    // so a loop that only polls would leave the child never running and this
-    // test waiting on an exit that cannot come.
+    // arrives on its own: on Unix the reader is woken and publishes; on
+    // Windows the watcher closes the console and the reader publishes behind
+    // it.
     let sink = ClosingSink::new();
     let backend = Arc::new(PortablePtyBackend::with_sink(sink.clone()));
     *sink.backend.lock().expect("closing sink") = Some(Arc::clone(&backend));
     let pane_id = PaneId::new();
-    {
-        let _gate = PTY_GATE.lock().expect("pty gate");
-        backend
-            .spawn(pane_id, script(OUTLIVED_BRIEFLY), SIZE)
-            .expect("spawn child");
-    }
+    spawn_script(&backend, pane_id, OUTLIVED_BRIEFLY);
 
-    // Waited for on this thread: a close that never returns would otherwise
-    // hang this test rather than fail it, and a hung test reports nothing about
-    // which guarantee broke.
-    let deadline = Instant::now() + TIMEOUT;
-    while !*sink.closed.lock().expect("closing sink") && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(10));
-    }
-    assert!(
-        *sink.closed.lock().expect("closing sink"),
+    // Waited for on this thread with a deadline: a close that never returns
+    // fails this test instead of hanging it.
+    wait_until(|| sink.closed().is_some());
+    assert_eq!(
+        sink.closed(),
+        Some(Ok(())),
         "closing the pane from inside the exit never returned"
     );
 }
@@ -557,22 +588,15 @@ fn a_consumer_may_close_the_pane_from_inside_the_exit_it_is_handed() {
 #[test]
 fn a_pane_reports_its_child_ending_even_when_the_pty_never_reports_an_end() {
     // The child exits while a descendant it started keeps the terminal open,
-    // so no end-of-file ever arrives and the reader stays blocked. The pane
-    // must still be told its child ended — a consumer waiting on that is how a
-    // pane closes, and waiting for the descendant would hold it open for as
-    // long as that descendant runs.
+    // so no end-of-file ever arrives and the reader stays blocked. The pane is
+    // still told its child ended, without waiting for the descendant.
     //
     // Windows reaches this path for every pane, not just this arrangement:
     // ConPTY keeps a pane's console readable after its child is gone.
     let recorder = Recorder::new();
     let backend = PortablePtyBackend::with_sink(recorder.clone());
     let pane_id = PaneId::new();
-    {
-        let _gate = PTY_GATE.lock().expect("pty gate");
-        backend
-            .spawn(pane_id, script(OUTLIVED_BY_A_DESCENDANT), SIZE)
-            .expect("spawn child");
-    }
+    spawn_script(&backend, pane_id, OUTLIVED_BY_A_DESCENDANT);
 
     assert_eq!(
         recorder.wait_for_exit(),
@@ -587,19 +611,13 @@ fn a_pane_reports_its_child_ending_even_when_the_pty_never_reports_an_end() {
 #[test]
 fn closing_a_pane_hands_its_consumer_no_exit_and_does_not_stand_by() {
     // Closing a pane is the consumer saying it is done with it, so no exit for
-    // that pane may reach the sink — from either helper thread, whichever
-    // reaches the child's end first. Closing must also not sit through the
-    // watcher's standby, which would stall the loop that closes panes one at a
-    // time.
+    // that pane reaches the sink from either helper thread, whichever reaches
+    // the child's end first. Closing also does not sit through the watcher's
+    // standby.
     let recorder = Recorder::new();
     let backend = PortablePtyBackend::with_sink(recorder.clone());
     let pane_id = PaneId::new();
-    {
-        let _gate = PTY_GATE.lock().expect("pty gate");
-        backend
-            .spawn(pane_id, script(BLOCKS_AFTER_PRINTING), SIZE)
-            .expect("spawn child");
-    }
+    spawn_script(&backend, pane_id, BLOCKS_AFTER_PRINTING);
 
     let started = Instant::now();
     backend.kill(pane_id, KillPolicy::Tree).expect("kill pane");
@@ -607,10 +625,9 @@ fn closing_a_pane_hands_its_consumer_no_exit_and_does_not_stand_by() {
 
     // The bound is half the whole standby, not one round of it. A close that
     // sat through the standby takes the full limit, which is twice this; a
-    // close that is woken takes the OS work alone — signalling the group and
-    // reaping the leader, which measures in tenths of a millisecond. The gap
-    // left for process teardown on a loaded host is what the round-sized bound
-    // this replaced did not leave.
+    // close that is woken takes the OS work alone, which measures in tenths
+    // of a millisecond. The gap is room for process teardown on a loaded
+    // host.
     let stood_by = EXIT_PUBLISH_LIMIT / 2;
     assert!(
         took < stood_by,
@@ -622,10 +639,7 @@ fn closing_a_pane_hands_its_consumer_no_exit_and_does_not_stand_by() {
     // The reader reaches the end of the PTY after the close and tries to
     // report the exit it was waiting for. Let it finish doing so: once it
     // drops its reference, only this test and the backend hold the sink.
-    let deadline = Instant::now() + TIMEOUT;
-    while Arc::strong_count(&recorder) > HOLDERS_AFTER_CLOSE && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(5));
-    }
+    wait_until(|| Arc::strong_count(&recorder) <= HOLDERS_AFTER_CLOSE);
     assert_eq!(
         recorder.exit(),
         None,
@@ -635,24 +649,19 @@ fn closing_a_pane_hands_its_consumer_no_exit_and_does_not_stand_by() {
 
 // Unix only: the script leaves a background process holding the terminal and
 // printing into it after the child is gone, which `cmd.exe` has no plain
-// equivalent for. The gate it exercises is platform-independent — the
+// equivalent for. The gate it exercises is platform-independent; the
 // `portable::tests` unit tests make the same claim without a child.
 #[cfg(unix)]
 #[test]
 fn a_settled_pane_forwards_no_more_of_a_descendants_output() {
     // The child exits while a descendant keeps the terminal open, so the
     // watcher publishes the exit and the consumer lets the pane go. What the
-    // descendant prints afterwards belongs to a pane that no longer exists, so
-    // the reader stops rather than forwarding it.
+    // descendant prints afterwards belongs to a pane that no longer exists,
+    // and the reader stops instead of forwarding it.
     let recorder = Recorder::new();
     let backend = PortablePtyBackend::with_sink(recorder.clone());
     let pane_id = PaneId::new();
-    {
-        let _gate = PTY_GATE.lock().expect("pty gate");
-        backend
-            .spawn(pane_id, script(PRINTS_AFTER_THE_CHILD_EXITS), SIZE)
-            .expect("spawn child");
-    }
+    spawn_script(&backend, pane_id, PRINTS_AFTER_THE_CHILD_EXITS);
 
     assert_eq!(
         recorder.wait_for_exit(),
@@ -678,16 +687,11 @@ fn a_settled_pane_forwards_no_more_of_a_descendants_output() {
 #[test]
 fn a_sink_backed_pane_hands_back_a_handle_with_no_channels() {
     // The handle carries no receivers, which is how the runtime knows this
-    // pane needs no forwarder thread — it is already delivering to the sink.
+    // pane needs no forwarder thread: it is already delivering to the sink.
     let recorder = Recorder::new();
     let backend = PortablePtyBackend::with_sink(recorder.clone());
     let pane_id = PaneId::new();
-    let mut handle = {
-        let _gate = PTY_GATE.lock().expect("pty gate");
-        backend
-            .spawn(pane_id, script(EXITS_0), SIZE)
-            .expect("spawn child")
-    };
+    let mut handle = spawn_script(&backend, pane_id, EXITS_0);
 
     assert_eq!(handle.pane_id(), pane_id);
     assert!(handle.take_receivers().is_none());
@@ -701,27 +705,26 @@ fn a_sink_backed_pane_hands_back_a_handle_with_no_channels() {
 #[test]
 fn a_gone_consumer_is_never_told_the_child_ended() {
     // A consumer that refuses a chunk is finished with the pane. The watcher
-    // stands by to report the exit itself when the PTY reports no end, so
-    // unless the reader takes charge of that exit on its way out, a child that
-    // ends promptly has its exit handed to a consumer that already said it was
-    // done. The refusing-sink test above cannot catch this: its child runs long
-    // enough that the watcher never reaches its standby window.
+    // stands by to report the exit itself when the PTY reports no end, and
+    // the reader takes charge of that exit on its way out, so a child that
+    // ends promptly has no exit handed to a consumer that already said it was
+    // done. The refusing-sink test above cannot catch this: its child runs
+    // long enough that the watcher never reaches its standby window.
     let sink = RefusingSink::new();
     let backend = PortablePtyBackend::with_sink(sink.clone());
     let pane_id = PaneId::new();
-    {
-        let _gate = PTY_GATE.lock().expect("pty gate");
-        backend
-            .spawn(pane_id, script(PRINTS_THEN_EXITS_3), SIZE)
-            .expect("spawn child");
-    }
+    spawn_script(&backend, pane_id, PRINTS_THEN_EXITS_3);
 
     // Well past the longest the watcher stands by, so an exit that was going
     // to be delivered has been by now.
     thread::sleep(EXIT_PUBLISH_LIMIT * 2);
 
     assert!(
-        !*sink.saw_exit.lock().expect("refusing sink"),
+        sink.refused_output(),
+        "the sink was never offered any output, so it never said it was done"
+    );
+    assert!(
+        !sink.saw_exit(),
         "an exit was reported to a consumer that had already gone"
     );
 
@@ -760,8 +763,8 @@ impl StalledSink {
         exit_among(&self.snapshot())
     }
 
-    /// How many exits have been delivered. More than one breaks the promise
-    /// that a consumer is told a child ended exactly once.
+    /// How many exits have been delivered. A consumer is told a child ended
+    /// exactly once.
     fn exits_delivered(&self) -> usize {
         self.snapshot()
             .iter()
@@ -799,26 +802,18 @@ impl PtySink for StalledSink {
 fn an_exit_waits_out_a_consumer_stalled_in_output() {
     // The consumer is holding a chunk: it went into `output` and has not come
     // back. An exit means "you have seen everything the child printed", so
-    // nothing may hand it one while that chunk is still in its hands, however
-    // long it holds on. Once it lets go, the exit follows — once, and behind
+    // nothing hands it one while that chunk is still in its hands, however
+    // long it holds on. Once it lets go, the exit follows: once, and behind
     // the output.
     let sink = StalledSink::new();
     let held = sink.gate.lock().expect("hold the reader");
     let backend = PortablePtyBackend::with_sink(sink.clone());
     let pane_id = PaneId::new();
-    {
-        let _gate = PTY_GATE.lock().expect("pty gate");
-        backend
-            .spawn(pane_id, script(PRINTS_THEN_EXITS_3), SIZE)
-            .expect("spawn child");
-    }
+    spawn_script(&backend, pane_id, PRINTS_THEN_EXITS_3);
 
     // One recorded output means the reader is inside `output`, on the gate this
     // test holds.
-    let deadline = Instant::now() + TIMEOUT;
-    while sink.snapshot().is_empty() && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(5));
-    }
+    wait_until(|| !sink.snapshot().is_empty());
     assert!(
         !sink.snapshot().is_empty(),
         "the sink was never offered any output, so no chunk is in its hands"
@@ -837,10 +832,7 @@ fn an_exit_waits_out_a_consumer_stalled_in_output() {
     // Let the chunk land. The reader reaches the end of the child's output and
     // reports the exit behind it.
     drop(held);
-    let deadline = Instant::now() + TIMEOUT;
-    while sink.exit_status().is_none() && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(5));
-    }
+    wait_until(|| sink.exit_status().is_some());
     assert_eq!(
         sink.exit_status(),
         Some(ExitStatus::ExitCode(3)),
@@ -849,10 +841,7 @@ fn an_exit_waits_out_a_consumer_stalled_in_output() {
 
     // Let the reader finish reacting: once it drops its reference, only this
     // test and the backend hold the sink.
-    let deadline = Instant::now() + TIMEOUT;
-    while Arc::strong_count(&sink) > HOLDERS_WITHOUT_READER && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(5));
-    }
+    wait_until(|| Arc::strong_count(&sink) <= HOLDERS_WITHOUT_READER);
     assert_eq!(
         sink.exits_delivered(),
         1,
@@ -877,23 +866,16 @@ fn an_exit_waits_out_a_consumer_stalled_in_output() {
 #[test]
 fn closing_a_pane_hands_no_exit_even_when_its_reader_gets_there_first() {
     // `kill` settles the pane's exit before it signals anything, so neither
-    // helper thread can hand the consumer an exit for a pane it is closing.
+    // helper thread hands the consumer an exit for a pane it is closing.
     //
     // The reader is the one that gets there first here. A graceful close polls
     // for the child to go before it wakes the watcher, and the reader reaches
-    // the end of the PTY during that poll — so it is holding the exit status
-    // and about to report it while `kill` is still running. Settling the exit
-    // up front is the only thing between that and a closed pane's consumer
-    // being told its child ended.
+    // the end of the PTY during that poll, so it is holding the exit status
+    // and about to report it while `kill` is still running.
     let recorder = Recorder::new();
     let backend = PortablePtyBackend::with_sink(recorder.clone());
     let pane_id = PaneId::new();
-    {
-        let _gate = PTY_GATE.lock().expect("pty gate");
-        backend
-            .spawn(pane_id, script(BLOCKS_AFTER_PRINTING), SIZE)
-            .expect("spawn child");
-    }
+    spawn_script(&backend, pane_id, BLOCKS_AFTER_PRINTING);
 
     backend
         .kill(
@@ -906,10 +888,7 @@ fn closing_a_pane_hands_no_exit_even_when_its_reader_gets_there_first() {
 
     // Let the reader finish reacting to the close before asking: once it drops
     // its reference, only this test and the backend hold the sink.
-    let deadline = Instant::now() + TIMEOUT;
-    while Arc::strong_count(&recorder) > HOLDERS_AFTER_CLOSE && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(5));
-    }
+    wait_until(|| Arc::strong_count(&recorder) <= HOLDERS_AFTER_CLOSE);
     assert_eq!(
         recorder.exit(),
         None,

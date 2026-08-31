@@ -1,20 +1,19 @@
 //! Generated names for sessions, tabs, and clients.
 //!
-//! Names are only ever system-generated — no command accepts caller text
-//! for one; a name is assigned at creation and never changes. The runtime
-//! asks this module for every name it assigns. A generated name is
+//! Every name is system-generated: no command accepts caller text for one,
+//! and a name is assigned at creation and never changes. The runtime asks
+//! this module for every name it assigns. A generated name is
 //! `<TYPE>-<adjective>-<noun>`, where `TYPE` is a one-letter kind tag (`S`,
 //! `T`, or `C`) and the adjective and noun come from the same language's
 //! 50-entry word lists — English, Japanese, or Traditional Chinese — e.g.
 //! `T-swift-otter`, `T-しずか-りす`, or `T-快樂-書房`. A name never mixes
 //! languages. Names render at the UI layer, never inside a PTY grid.
 //!
-//! The pick is random: each call starts at a random combination and walks the
-//! language x adjective x noun space in a coprime stride from there, returning
-//! the first name the caller does not already hold — so a taken name is
-//! skipped, never retried forever. Once every combination is taken, the walk
-//! repeats with a numeric wrap suffix (`T-swift-otter-2`, then `-3`, and so
-//! on), so a free name always exists.
+//! Each call starts at a random combination and walks the language x
+//! adjective x noun space in a coprime stride from there. It returns the
+//! first name the caller does not already hold; a taken name is skipped. Once
+//! every combination is taken, the walk repeats with a numeric wrap suffix
+//! (`T-swift-otter-2`, then `-3`, and so on). Every call returns a free name.
 
 use std::hash::{BuildHasher, Hasher, RandomState};
 
@@ -250,19 +249,18 @@ const WORDS_PER_LIST: usize = 50;
 const COMBOS: usize = LANGUAGES.len() * WORDS_PER_LIST * WORDS_PER_LIST;
 
 /// The step between consecutive candidates in the combination walk. Coprime
-/// with [`COMBOS`], so one round from any start visits every combination
-/// exactly once; `73 % 3 == 1` also moves the walk to the next language on
-/// every step.
+/// with [`COMBOS`]: one round from any start visits every combination exactly
+/// once. `73 % 3 == 1`: every step moves the walk to the next language.
 const STRIDE: usize = 73;
 
 /// Generate a random default name of `kind` that `is_taken` does not already
 /// claim.
 ///
-/// The random start lands on a random language as well as a random word pair
-/// — consecutive calls yield a mix of English, Japanese, and Traditional
-/// Chinese names. The walk from that start skips taken names and appends a
-/// wrap number once every combination is claimed — so the call always
-/// returns a free name.
+/// The random start lands on a random language as well as a random word pair;
+/// consecutive calls yield a mix of English, Japanese, and Traditional Chinese
+/// names. The walk from that start skips taken names and appends a wrap
+/// number once every combination is claimed. The call always returns a name
+/// `is_taken` reports free.
 #[must_use]
 pub fn generate_name(kind: NameKind, is_taken: impl Fn(&str) -> bool) -> String {
     generate_name_from(kind, is_taken, random_index(COMBOS))
@@ -275,22 +273,21 @@ pub fn generate_name(kind: NameKind, is_taken: impl Fn(&str) -> bool) -> String 
 /// [`STRIDE`] steps, returning the first `<TYPE>-<adjective>-<noun>` the
 /// caller reports free. When a full round finds every combination taken,
 /// subsequent rounds append a wrap number starting at `2`
-/// (`T-swift-otter-2`), so the walk always terminates. The same `start` and
-/// taken-set always yield the same name.
+/// (`T-swift-otter-2`). Returns only when `is_taken` reports a candidate
+/// free. `start` is taken modulo [`COMBOS`]. The same `start` and taken-set
+/// always yield the same name.
 fn generate_name_from(kind: NameKind, is_taken: impl Fn(&str) -> bool, start: usize) -> String {
     let mut round: usize = 0;
     loop {
         for step in 0..COMBOS {
             let index = (start + step * STRIDE) % COMBOS;
-            // The language is the index's low residue: the random start picks
-            // one at random, and each stride step moves to the next.
+            // The language is `index % 3`; each stride step moves to the next.
             let (adjectives, nouns) = LANGUAGES[index % LANGUAGES.len()];
             let pair = index / LANGUAGES.len();
             let adjective = adjectives[pair / WORDS_PER_LIST];
             let noun = nouns[pair % WORDS_PER_LIST];
-            // The first round tries the plain name; once a full round finds
-            // every combination taken, later rounds append a wrap number
-            // (round 1 appends "-2", round 2 appends "-3", and so on).
+            // Round 0 tries the plain name; round 1 appends "-2", round 2
+            // appends "-3", and so on.
             let candidate = if round == 0 {
                 format!("{}-{adjective}-{noun}", kind.prefix())
             } else {
@@ -300,7 +297,7 @@ fn generate_name_from(kind: NameKind, is_taken: impl Fn(&str) -> bool, start: us
                 return candidate;
             }
         }
-        // Every combination in this round was taken; walk the whole space
+        // Every combination in this round was taken: walk the whole space
         // again with the next wrap number.
         round += 1;
     }

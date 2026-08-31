@@ -5,8 +5,8 @@
 use koshi_core::error::{DomainCategory, DomainError, Severity};
 use thiserror::Error;
 
-/// A failure persisting or loading state. I/O failures are recoverable; a
-/// corrupt store leaves core state unusable and is session-fatal.
+/// A failure persisting or loading state. `Io` is [`Severity::Recoverable`];
+/// `Corrupt` is [`Severity::SessionFatal`].
 #[derive(Debug, Error)]
 pub enum StorageError {
     /// Reading or writing the store failed.

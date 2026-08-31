@@ -21,13 +21,11 @@ pub enum PtyError {
     #[error("invalid pane: id - {pane}")]
     UnknownPane { pane: PaneId },
     /// Delivering a termination signal (Unix) or a Job-Object/`TerminateProcess`
-    /// call (Windows) to the child failed.
+    /// call (Windows) to the child failed, or the child could not join its
+    /// Job Objects at spawn (Windows).
     #[error("pty signal error: {detail}")]
     Signal { detail: String },
 }
-
-/// Result of a [`PtyBackend`](crate::backend::state::PtyBackend) operation.
-pub type Result<T> = std::result::Result<T, PtyError>;
 
 impl DomainError for PtyError {
     fn category(&self) -> DomainCategory {
@@ -38,3 +36,6 @@ impl DomainError for PtyError {
         Severity::Recoverable
     }
 }
+
+#[cfg(test)]
+mod tests;

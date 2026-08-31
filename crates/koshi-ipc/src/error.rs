@@ -10,26 +10,28 @@ use thiserror::Error;
 /// [`Disconnected`](IpcError::Disconnected)), a remote dial that fails
 /// ([`ConnectRefused`](IpcError::ConnectRefused),
 /// [`ConnectTimedOut`](IpcError::ConnectTimedOut),
-/// [`TlsHandshakeFailed`](IpcError::TlsHandshakeFailed)), a refused frame
+/// [`TlsHandshakeFailed`](IpcError::TlsHandshakeFailed),
+/// [`CertificateChanged`](IpcError::CertificateChanged)), a refused frame
 /// ([`FrameTooLarge`](IpcError::FrameTooLarge)), a socket address that fails
 /// its trust or liveness checks
 /// ([`UntrustedSocket`](IpcError::UntrustedSocket),
 /// [`NoListener`](IpcError::NoListener), [`SocketBusy`](IpcError::SocketBusy)),
 /// an endpoint file the caller cannot read
 /// ([`EndpointFileMissing`](IpcError::EndpointFileMissing),
-/// [`EndpointFileUnreadable`](IpcError::EndpointFileUnreadable)), and a
-/// remote access token store the caller cannot read or write
-/// ([`TokenStoreUnreadable`](IpcError::TokenStoreUnreadable),
-/// [`TokenStoreWrite`](IpcError::TokenStoreWrite)).
+/// [`EndpointFileUnreadable`](IpcError::EndpointFileUnreadable)), and a remote
+/// access file the caller cannot read or write
+/// ([`RemoteFileUnreadable`](IpcError::RemoteFileUnreadable),
+/// [`RemoteFileWrite`](IpcError::RemoteFileWrite)).
 ///
 /// Session-fatal: a failed endpoint-file write
-/// ([`EndpointFileWrite`](IpcError::EndpointFileWrite)). It happens during the
-/// session's own startup, and a session whose endpoint file never lands is one
-/// no caller can reach.
+/// ([`EndpointFileWrite`](IpcError::EndpointFileWrite)) and a failed advert
+/// marker write ([`AdvertWrite`](IpcError::AdvertWrite)). Both happen during
+/// the session's own startup. No caller reaches a session whose endpoint file
+/// never lands.
 ///
 /// Recoverable: a frame that arrived whole yet does not decode
 /// ([`MalformedFrame`](IpcError::MalformedFrame)). The stream is still aligned
-/// on frame boundaries, so the connection can answer and keep going.
+/// on frame boundaries, and the connection answers and keeps going.
 #[derive(Debug, Error)]
 pub enum IpcError {
     /// The underlying transport failed.
@@ -41,11 +43,11 @@ pub enum IpcError {
     /// A frame longer than
     /// [`MAX_FRAME_LEN`](crate::transport::MAX_FRAME_LEN). On receive, the
     /// length prefix named more bytes than the limit and the payload is left
-    /// unread, so the stream is off frame boundaries and the connection must
-    /// close; `len` is the length the prefix named. On send, encoding stopped
-    /// at the byte that crossed the limit and nothing was written; `len` is
-    /// the payload size the refused write reached, which for a message
-    /// encoded in one piece is its full size.
+    /// unread: the stream is off frame boundaries and the connection closes;
+    /// `len` is the length the prefix named. On send, encoding stopped at the
+    /// byte that crossed the limit and nothing was written; `len` is the
+    /// payload size the refused write reached, which for a message encoded in
+    /// one piece is its full size.
     #[error("ipc frame of {len} bytes exceeds the {max}-byte limit")]
     FrameTooLarge { len: u64, max: u32 },
     /// A frame whose bytes are not a readable message: the payload arrived
@@ -53,9 +55,10 @@ pub enum IpcError {
     #[error("ipc frame is not a readable message: {detail}")]
     MalformedFrame { detail: String },
     /// A socket address that failed a trust check, named in `reason`: the
-    /// path is not directly inside the koshi runtime directory, that
-    /// directory is not private, or (Windows) the pipe name is outside the
-    /// `koshi-` namespace.
+    /// path is not directly inside the directory it must sit in, that
+    /// directory is a symbolic link, is not a directory, carries the wrong
+    /// mode, or belongs to another user, or (Windows) the pipe name is
+    /// outside the `koshi-` namespace.
     #[error("untrusted socket address {addr}: {reason}")]
     UntrustedSocket { addr: String, reason: String },
     /// Nothing listens at the address: what is there is a leftover from a
@@ -73,19 +76,14 @@ pub enum IpcError {
     /// failed, or its bytes are not a readable endpoint file.
     #[error("endpoint file {path} is unreadable: {detail}")]
     EndpointFileUnreadable { path: String, detail: String },
-    /// Writing the endpoint file failed during session startup, so no
-    /// caller will ever find this session's socket.
+    /// Writing the endpoint file failed during session startup. No caller
+    /// finds this session's socket.
     #[error("endpoint file {path} could not be written: {detail}")]
     EndpointFileWrite { path: String, detail: String },
-    /// A remote access token store that exists but could not be used:
-    /// reading it failed, its bytes are not a readable store, or its format
-    /// number is not the one this build reads.
-    #[error("token store {path} is unreadable: {detail}")]
-    TokenStoreUnreadable { path: String, detail: String },
-    /// Writing the remote access token store failed, so the grant or the
-    /// revocation the caller made never reached the disk.
-    #[error("token store {path} could not be written: {detail}")]
-    TokenStoreWrite { path: String, detail: String },
+    /// Writing the advert marker failed during session startup. No other user
+    /// of this machine finds this session. `path` names the marker.
+    #[error("advert marker {path} could not be written: {detail}")]
+    AdvertWrite { path: String, detail: String },
     /// A remote access file that exists but could not be used: reading it
     /// failed, its bytes are not readable, or its format number is not the
     /// one this build reads.
@@ -95,7 +93,7 @@ pub enum IpcError {
         path: String,
         detail: String,
     },
-    /// Writing a remote access file failed, so what the caller changed never
+    /// Writing a remote access file failed. What the caller changed never
     /// reached the disk.
     #[error("the {file} at {path} could not be written: {detail}")]
     RemoteFileWrite {
@@ -136,8 +134,10 @@ pub enum IpcError {
     },
 }
 
-/// Which remote access file an [`IpcError::RemoteFileUnreadable`] or
-/// [`IpcError::RemoteFileWrite`] names.
+/// Which of the four files under `remote/` an
+/// [`IpcError::RemoteFileUnreadable`] or [`IpcError::RemoteFileWrite`] names.
+/// `Display` writes `saved servers file`, `remote access certificate`,
+/// `remote access record` or `remote access token store`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemoteFile {
     /// The servers this user has dialled and saved, on the dialling machine.
@@ -146,6 +146,8 @@ pub enum RemoteFile {
     Certificate,
     /// The record that remote access was switched on for this machine.
     RemoteAccessMark,
+    /// The remote access grants this machine has handed out.
+    TokenStore,
 }
 
 impl std::fmt::Display for RemoteFile {
@@ -154,6 +156,7 @@ impl std::fmt::Display for RemoteFile {
             Self::SavedServers => "saved servers file",
             Self::Certificate => "remote access certificate",
             Self::RemoteAccessMark => "remote access record",
+            Self::TokenStore => "remote access token store",
         };
         f.write_str(name)
     }
@@ -174,15 +177,15 @@ impl DomainError for IpcError {
             | IpcError::SocketBusy { .. }
             | IpcError::EndpointFileMissing { .. }
             | IpcError::EndpointFileUnreadable { .. }
-            | IpcError::TokenStoreUnreadable { .. }
-            | IpcError::TokenStoreWrite { .. }
             | IpcError::RemoteFileUnreadable { .. }
             | IpcError::RemoteFileWrite { .. }
             | IpcError::ConnectRefused { .. }
             | IpcError::ConnectTimedOut { .. }
             | IpcError::TlsHandshakeFailed { .. }
             | IpcError::CertificateChanged { .. } => Severity::ClientFatal,
-            IpcError::EndpointFileWrite { .. } => Severity::SessionFatal,
+            IpcError::EndpointFileWrite { .. } | IpcError::AdvertWrite { .. } => {
+                Severity::SessionFatal
+            }
             IpcError::MalformedFrame { .. } => Severity::Recoverable,
         }
     }

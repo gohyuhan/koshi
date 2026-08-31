@@ -7,7 +7,7 @@ use std::time::SystemTime;
 
 use koshi_core::command::CliExitCode;
 use koshi_core::discovery::{SessionInfo, SessionOverview};
-use koshi_core::event::Event;
+use koshi_core::event::{Event, RejectReason};
 use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::protocol::{
     ConnectionToken, IpcErrorCode, IpcErrorPayload, IpcRequest, IpcRequestKind, IpcResponse,
@@ -380,7 +380,7 @@ fn an_answer_to_another_request_names_what_came_back() {
     let CliError::IpcUnavailable { detail } = error else {
         panic!("expected IpcUnavailable, got {error:?}");
     };
-    assert_eq!(detail, "the router answered a create session with Hello");
+    assert_eq!(detail, "the router answered with an unexpected Hello reply");
     let (hello_ok, request) = saw(&router);
     assert!(hello_ok, "the hello opens the gate");
     assert_eq!(request, Some(expected_create(None, None)));
@@ -463,13 +463,14 @@ fn several_sessions_need_a_name() {
     )
     .expect_err("several sessions need a name");
 
-    assert!(matches!(
-        error,
-        CliError::CommandRejected {
-            reason: RejectReason::TargetAmbiguous,
-            ..
-        }
-    ));
+    let CliError::CommandRejected { reason, help } = error else {
+        panic!("expected a rejected command");
+    };
+    assert_eq!(reason, RejectReason::TargetAmbiguous);
+    assert_eq!(
+        help,
+        Some("several sessions are running; name one: koshi kill-session <name>".to_string())
+    );
 }
 
 #[test]
@@ -477,7 +478,13 @@ fn an_incomplete_census_cannot_prove_a_name_is_unique() {
     let error = select_kill_session(&partial(vec![overview("quiet-lake")]), Some("quiet-lake"))
         .expect_err("another session may share the name");
 
-    assert!(matches!(error, CliError::IpcUnavailable { .. }));
+    let CliError::IpcUnavailable { detail } = error else {
+        panic!("expected IpcUnavailable, got {error:?}");
+    };
+    assert_eq!(
+        detail,
+        "cannot tell whether `quiet-lake` is unique (1 running session did not answer)"
+    );
 }
 
 #[test]
@@ -485,7 +492,14 @@ fn an_incomplete_census_cannot_apply_the_count_rule() {
     let error = select_kill_session(&partial(vec![overview("quiet-lake")]), None)
         .expect_err("another session may be running");
 
-    assert!(matches!(error, CliError::IpcUnavailable { .. }));
+    let CliError::IpcUnavailable { detail } = error else {
+        panic!("expected IpcUnavailable, got {error:?}");
+    };
+    assert_eq!(
+        detail,
+        "cannot tell which session to kill; name one: koshi kill-session <name> \
+         (1 running session did not answer)"
+    );
 }
 
 #[test]

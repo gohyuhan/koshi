@@ -11,6 +11,27 @@ use koshi_core::process::ShellKind;
 use super::*;
 use crate::protocol::IpcErrorCode;
 
+#[cfg(unix)]
+#[test]
+fn a_working_directory_that_is_not_valid_utf8_has_no_encoding_on_this_wire() {
+    // Encoding such a path fails, and a failed encode breaks the link rather
+    // than one answer, so the supervisor answers `Cwd(None)` for it.
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = PathBuf::from(std::ffi::OsStr::from_bytes(b"/tmp/\xff"));
+    let refused = serde_json::to_string(&SupervisorResult::Cwd(Some(path)))
+        .expect_err("a path that is not valid UTF-8 does not encode");
+
+    assert_eq!(
+        refused.to_string(),
+        "path contains invalid UTF-8 characters"
+    );
+    assert_eq!(
+        serde_json::to_string(&SupervisorResult::Cwd(None)).expect("no directory encodes"),
+        r#"{"Cwd":null}"#
+    );
+}
+
 /// The one UUID every fixed id below uses.
 fn fixed_uuid() -> uuid::Uuid {
     uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("literal UUID parses")
@@ -52,10 +73,9 @@ fn the_supervisor_link_wire_shape_belongs_to_this_protocol_version() {
     // Every request kind, every answer and every event, pinned byte for byte.
     //
     // A session server and the supervisor it reconnects to can be different
-    // builds, because a supervisor keeps running the image it started from.
-    // The version in the Hello is the only thing that catches a pair that does
-    // not agree on this shape. Round-trip tests cannot catch it: one build
-    // encoding and decoding its own structs always agrees with itself.
+    // builds. The version in the Hello is the only thing that catches a pair
+    // that does not agree on this shape. Round-trip tests cannot catch it: one
+    // build encoding and decoding its own structs always agrees with itself.
     assert_eq!(
         encode(&SupervisorRequest {
             request_id: 1,
@@ -215,6 +235,109 @@ fn the_supervisor_link_wire_shape_belongs_to_this_protocol_version() {
 }
 
 #[test]
+fn the_output_hold_requests_travel_as_bare_names() {
+    assert_eq!(
+        encode(&SupervisorRequest {
+            request_id: 9,
+            kind: SupervisorRequestKind::PauseOutput,
+        }),
+        r#"{"request_id":9,"kind":"PauseOutput"}"#
+    );
+    assert_eq!(
+        encode(&SupervisorRequest {
+            request_id: 10,
+            kind: SupervisorRequestKind::ResumeOutput,
+        }),
+        r#"{"request_id":10,"kind":"ResumeOutput"}"#
+    );
+}
+
+#[test]
+fn a_cwd_the_operating_system_cannot_answer_travels_as_null() {
+    assert_eq!(
+        encode(&SupervisorMessage::<_, SupervisorEvent>::Response(
+            SupervisorResponse {
+                request_id: Some(6),
+                result: SupervisorResult::Cwd(None),
+            }
+        )),
+        r#"{"Response":{"request_id":6,"result":{"Cwd":null}}}"#
+    );
+}
+
+#[test]
+fn an_empty_write_travels_as_an_empty_string_and_reads_back_empty() {
+    let request = SupervisorRequest {
+        request_id: 4,
+        kind: SupervisorRequestKind::Write {
+            pane_id: pane(),
+            bytes: Vec::new(),
+        },
+    };
+    let text = encode(&request);
+
+    assert_eq!(
+        text,
+        r#"{"request_id":4,"kind":{"Write":{"pane_id":"00000000-0000-0000-0000-000000000001","bytes":""}}}"#
+    );
+    let decoded: SupervisorRequest =
+        serde_json::from_str(&text).expect("an empty write reads back");
+    assert_eq!(decoded, request);
+}
+
+#[test]
+fn answers_and_events_read_back_from_their_wire_text() {
+    let hello: IncomingSupervisorMessage = serde_json::from_str(
+        r#"{"Response":{"request_id":1,"result":{"Hello":{"protocol_version":1}}}}"#,
+    )
+    .expect("a Hello answer is this version's shape");
+    let output: IncomingSupervisorMessage = serde_json::from_str(
+        r#"{"Event":{"Output":{"pane_id":"00000000-0000-0000-0000-000000000001","bytes":"aGk="}}}"#,
+    )
+    .expect("an Output event is this version's shape");
+    let exited: IncomingSupervisorMessage = serde_json::from_str(
+        r#"{"Event":{"Exited":{"pane_id":"00000000-0000-0000-0000-000000000001","status":{"Signaled":9}}}}"#,
+    )
+    .expect("an Exited event is this version's shape");
+
+    assert_eq!(
+        hello,
+        SupervisorMessage::Response(SupervisorResponse {
+            request_id: Some(1),
+            result: MaybeKnown::Known(SupervisorResult::Hello {
+                protocol_version: 1
+            }),
+        })
+    );
+    assert_eq!(
+        output,
+        SupervisorMessage::Event(MaybeKnown::Known(SupervisorEvent::Output {
+            pane_id: pane(),
+            bytes: vec![104, 105],
+        }))
+    );
+    assert_eq!(
+        exited,
+        SupervisorMessage::Event(MaybeKnown::Known(SupervisorEvent::Exited {
+            pane_id: pane(),
+            status: ExitStatus::Signaled(9),
+        }))
+    );
+}
+
+#[test]
+fn a_hello_built_here_names_this_builds_range() {
+    assert_eq!(
+        SupervisorRequestKind::hello(token()),
+        SupervisorRequestKind::Hello {
+            min_protocol_version: 1,
+            max_protocol_version: 1,
+            token: token(),
+        }
+    );
+}
+
+#[test]
 fn this_build_speaks_supervisor_link_version_one_only() {
     assert_eq!(SUPERVISOR_PROTOCOL_VERSION, 1);
     assert_eq!(MIN_SUPERVISOR_PROTOCOL_VERSION, 1);
@@ -319,6 +442,89 @@ fn every_request_kind_and_answer_is_listed_as_a_name_this_build_has() {
 }
 
 #[test]
+fn every_answer_names_itself_and_the_wire_list_holds_each_name_in_order() {
+    let results = [
+        (
+            SupervisorResult::Hello {
+                protocol_version: 1,
+            },
+            "Hello",
+        ),
+        (SupervisorResult::Spawned { pid: 4242 }, "Spawned"),
+        (SupervisorResult::Panes(Vec::new()), "Panes"),
+        (SupervisorResult::Cwd(None), "Cwd"),
+        (SupervisorResult::Done, "Done"),
+        (
+            SupervisorResult::Error(IpcErrorPayload {
+                code: IpcErrorCode::MalformedRequest,
+                message: "the request could not be read".to_string(),
+            }),
+            "Error",
+        ),
+    ];
+
+    for (result, name) in &results {
+        assert_eq!(result.wire_name(), *name);
+    }
+    let names: Vec<&str> = results
+        .iter()
+        .map(|(result, _)| result.wire_name())
+        .collect();
+    assert_eq!(names, SupervisorResult::VARIANTS);
+}
+
+#[test]
+fn every_request_kind_and_event_travels_under_the_name_it_reports() {
+    let kinds = [
+        SupervisorRequestKind::hello(token()),
+        SupervisorRequestKind::Spawn {
+            pane_id: pane(),
+            spec: spec(),
+            size: size(),
+        },
+        SupervisorRequestKind::Resize {
+            pane_id: pane(),
+            size: size(),
+        },
+        SupervisorRequestKind::Write {
+            pane_id: pane(),
+            bytes: vec![104],
+        },
+        SupervisorRequestKind::Kill {
+            pane_id: pane(),
+            kill_policy: KillPolicy::Force,
+        },
+        SupervisorRequestKind::LiveCwd { pane_id: pane() },
+        SupervisorRequestKind::ListPanes,
+        SupervisorRequestKind::PauseOutput,
+        SupervisorRequestKind::ResumeOutput,
+        SupervisorRequestKind::Shutdown,
+    ];
+    let events = [
+        SupervisorEvent::Output {
+            pane_id: pane(),
+            bytes: vec![104],
+        },
+        SupervisorEvent::Exited {
+            pane_id: pane(),
+            status: ExitStatus::ExitCode(0),
+        },
+    ];
+
+    for kind in &kinds {
+        assert_eq!(kind.wire_name(), kind.name());
+    }
+    let kind_names: Vec<&str> = kinds.iter().map(SupervisorRequestKind::wire_name).collect();
+    assert_eq!(kind_names, SupervisorRequestKind::VARIANTS);
+
+    for event in &events {
+        assert_eq!(event.wire_name(), event.name());
+    }
+    let event_names: Vec<&str> = events.iter().map(SupervisorEvent::wire_name).collect();
+    assert_eq!(event_names, SupervisorEvent::VARIANTS);
+}
+
+#[test]
 fn a_kind_this_build_does_not_have_reads_as_its_name_alone() {
     let request: IncomingSupervisorRequest =
         serde_json::from_str(r#"{"request_id":9,"kind":{"Rehome":{"pane_id":1}}}"#)
@@ -376,6 +582,117 @@ fn a_request_carrying_an_unknown_field_is_refused() {
             .expect_err("an unknown field is not this version's shape")
             .to_string(),
         "unknown field `junk`, expected `request_id` or `kind` at line 1 column 41"
+    );
+}
+
+#[test]
+fn a_request_missing_its_id_is_refused() {
+    let decoded: Result<SupervisorRequest, _> = serde_json::from_str(r#"{"kind":"ListPanes"}"#);
+
+    assert_eq!(
+        decoded
+            .expect_err("a request without an id is not this version's shape")
+            .to_string(),
+        "missing field `request_id` at line 1 column 20"
+    );
+}
+
+#[test]
+fn an_unknown_kind_sent_as_a_bare_name_reads_as_its_name_alone() {
+    let request: IncomingSupervisorRequest =
+        serde_json::from_str(r#"{"request_id":9,"kind":"Rehome"}"#)
+            .expect("a kind this build lacks still reads");
+
+    assert_eq!(
+        request,
+        SupervisorRequest {
+            request_id: 9,
+            kind: MaybeKnown::Unknown {
+                name: "Rehome".to_string(),
+            },
+        }
+    );
+}
+
+#[test]
+fn a_hello_sent_as_a_bare_name_keeps_the_decoding_error() {
+    let decoded: Result<IncomingSupervisorRequest, _> =
+        serde_json::from_str(r#"{"request_id":1,"kind":"Hello"}"#);
+
+    assert_eq!(
+        decoded
+            .expect_err("a Hello with no payload is not this version's shape")
+            .to_string(),
+        "invalid type: unit variant, expected struct variant at line 1 column 31"
+    );
+}
+
+#[test]
+fn a_write_whose_bytes_are_not_base64_keeps_the_decoding_error() {
+    let decoded: Result<IncomingSupervisorRequest, _> = serde_json::from_str(
+        r#"{"request_id":4,"kind":{"Write":{"pane_id":"00000000-0000-0000-0000-000000000001","bytes":"a"}}}"#,
+    );
+
+    assert_eq!(
+        decoded
+            .expect_err("bytes that are not base64 are not this version's shape")
+            .to_string(),
+        "the base64 text length is not a multiple of four at line 1 column 70"
+    );
+}
+
+#[test]
+fn a_request_kind_carrying_a_field_this_build_does_not_know_still_reads() {
+    let decoded: SupervisorRequest = serde_json::from_str(
+        r#"{"request_id":3,"kind":{"Resize":{"pane_id":"00000000-0000-0000-0000-000000000001","size":{"cols":80,"rows":24},"priority":3}}}"#,
+    )
+    .expect("a field this build lacks is passed over");
+
+    assert_eq!(
+        decoded,
+        SupervisorRequest {
+            request_id: 3,
+            kind: SupervisorRequestKind::Resize {
+                pane_id: pane(),
+                size: size(),
+            },
+        }
+    );
+}
+
+#[test]
+fn an_answer_carrying_a_field_this_build_does_not_know_still_reads() {
+    let decoded: SupervisorResponse = serde_json::from_str(
+        r#"{"request_id":7,"result":{"Panes":[{"pane_id":"00000000-0000-0000-0000-000000000001","pid":4242,"size":{"cols":80,"rows":24},"tty":"/dev/pts/3"}]}}"#,
+    )
+    .expect("a field this build lacks is passed over");
+
+    assert_eq!(
+        decoded,
+        SupervisorResponse {
+            request_id: Some(7),
+            result: SupervisorResult::Panes(vec![SupervisorPane {
+                pane_id: pane(),
+                pid: 4242,
+                size: size(),
+            }]),
+        }
+    );
+}
+
+#[test]
+fn an_event_carrying_a_field_this_build_does_not_know_still_reads() {
+    let decoded: SupervisorMessage = serde_json::from_str(
+        r#"{"Event":{"Exited":{"pane_id":"00000000-0000-0000-0000-000000000001","status":{"ExitCode":2},"seq":1}}}"#,
+    )
+    .expect("a field this build lacks is passed over");
+
+    assert_eq!(
+        decoded,
+        SupervisorMessage::Event(SupervisorEvent::Exited {
+            pane_id: pane(),
+            status: ExitStatus::ExitCode(2),
+        })
     );
 }
 
@@ -447,6 +764,68 @@ fn a_session_server_reaching_above_this_supervisor_settles_on_the_supervisors_hi
 }
 
 #[test]
+fn a_session_server_speaking_only_below_this_supervisor_is_refused_naming_both_ranges() {
+    let mut gate = SupervisorHandshake::new(token());
+    let below = MIN_SUPERVISOR_PROTOCOL_VERSION - 1;
+
+    assert_eq!(
+        gate.check(&SupervisorRequestKind::Hello {
+            min_protocol_version: below,
+            max_protocol_version: below,
+            token: token(),
+        }),
+        Err(IpcErrorPayload {
+            code: IpcErrorCode::UnsupportedVersion,
+            message: format!(
+                "the session server speaks supervisor-link protocol versions {below} to {below}, \
+                 this supervisor speaks {MIN_SUPERVISOR_PROTOCOL_VERSION} to \
+                 {SUPERVISOR_PROTOCOL_VERSION}"
+            ),
+        })
+    );
+    assert_eq!(gate.agreed(), None, "a refused Hello settles nothing");
+}
+
+#[test]
+fn a_session_server_reaching_below_and_above_this_supervisor_settles_on_the_supervisors_highest() {
+    let mut gate = SupervisorHandshake::new(token());
+
+    assert_eq!(
+        gate.check(&SupervisorRequestKind::Hello {
+            min_protocol_version: MIN_SUPERVISOR_PROTOCOL_VERSION - 1,
+            max_protocol_version: SUPERVISOR_PROTOCOL_VERSION + 3,
+            token: token(),
+        }),
+        Ok(())
+    );
+    assert_eq!(gate.agreed(), Some(SUPERVISOR_PROTOCOL_VERSION));
+}
+
+#[test]
+fn a_hello_whose_lowest_version_is_above_its_highest_is_refused_naming_both_ranges() {
+    let mut gate = SupervisorHandshake::new(token());
+    let lowest = SUPERVISOR_PROTOCOL_VERSION;
+    let highest = MIN_SUPERVISOR_PROTOCOL_VERSION - 1;
+
+    assert_eq!(
+        gate.check(&SupervisorRequestKind::Hello {
+            min_protocol_version: lowest,
+            max_protocol_version: highest,
+            token: token(),
+        }),
+        Err(IpcErrorPayload {
+            code: IpcErrorCode::UnsupportedVersion,
+            message: format!(
+                "the session server speaks supervisor-link protocol versions {lowest} to \
+                 {highest}, this supervisor speaks {MIN_SUPERVISOR_PROTOCOL_VERSION} to \
+                 {SUPERVISOR_PROTOCOL_VERSION}"
+            ),
+        })
+    );
+    assert_eq!(gate.agreed(), None, "a refused Hello settles nothing");
+}
+
+#[test]
 fn a_hello_with_a_wrong_token_is_refused_as_bad_token() {
     let mut gate = SupervisorHandshake::new(token());
 
@@ -466,8 +845,8 @@ fn a_hello_with_a_wrong_token_is_refused_as_bad_token() {
 
 #[test]
 fn an_out_of_range_hello_with_a_wrong_token_is_refused_for_the_version() {
-    // The gate settles the version before it looks at the token, so the two
-    // faults together earn the version's refusal.
+    // The gate checks the version before the token: the two faults together
+    // get the version's refusal.
     let mut gate = SupervisorHandshake::new(token());
     let above = SUPERVISOR_PROTOCOL_VERSION + 1;
 
@@ -491,9 +870,8 @@ fn an_out_of_range_hello_with_a_wrong_token_is_refused_for_the_version() {
 
 #[test]
 fn a_second_hello_on_an_open_link_settles_the_same_version_and_changes_nothing() {
-    // A session server may send its Hello again — a link it is unsure of, or a
-    // retry after a request it could not read. The link is already open, so the
-    // second one has to answer the same and leave the gate as it was.
+    // A second Hello on an open link is accepted, settles the version again
+    // from its own range, and leaves the gate open.
     let mut gate = SupervisorHandshake::new(token());
     let hello = SupervisorRequestKind::hello(token());
 
@@ -512,9 +890,8 @@ fn a_second_hello_on_an_open_link_settles_the_same_version_and_changes_nothing()
 
 #[test]
 fn a_wrong_token_arriving_on_an_open_link_is_refused_and_leaves_it_open() {
-    // The gate is one link's own, and a Hello it refuses changes nothing. A
-    // refusal that shut the gate would end the panes' only route out over a
-    // request that was already answered.
+    // A Hello refused on an open link changes nothing: the version stands and
+    // the link keeps serving.
     let mut gate = SupervisorHandshake::new(token());
     gate.check(&SupervisorRequestKind::hello(token()))
         .expect("the first Hello is accepted");
@@ -540,8 +917,8 @@ fn a_wrong_token_arriving_on_an_open_link_is_refused_and_leaves_it_open() {
 
 #[test]
 fn a_version_range_arriving_on_an_open_link_that_misses_this_one_leaves_it_open() {
-    // Same as a wrong token: the Hello is refused on its own, and the link the
-    // panes are already being driven over is untouched.
+    // Same as a wrong token: the Hello is refused, and the open link is
+    // untouched.
     let mut gate = SupervisorHandshake::new(token());
     gate.check(&SupervisorRequestKind::hello(token()))
         .expect("the first Hello is accepted");
@@ -577,6 +954,68 @@ fn a_request_before_any_hello_is_refused_as_hello_required() {
             message: "ListPanes arrived before a Hello opened the link".to_string(),
         })
     );
+}
+
+#[test]
+fn every_other_kind_is_refused_by_name_before_a_hello_and_served_after_one() {
+    let kinds = [
+        (
+            SupervisorRequestKind::Spawn {
+                pane_id: pane(),
+                spec: spec(),
+                size: size(),
+            },
+            "Spawn",
+        ),
+        (
+            SupervisorRequestKind::Resize {
+                pane_id: pane(),
+                size: size(),
+            },
+            "Resize",
+        ),
+        (
+            SupervisorRequestKind::Write {
+                pane_id: pane(),
+                bytes: vec![104],
+            },
+            "Write",
+        ),
+        (
+            SupervisorRequestKind::Kill {
+                pane_id: pane(),
+                kill_policy: KillPolicy::Force,
+            },
+            "Kill",
+        ),
+        (
+            SupervisorRequestKind::LiveCwd { pane_id: pane() },
+            "LiveCwd",
+        ),
+        (SupervisorRequestKind::ListPanes, "ListPanes"),
+        (SupervisorRequestKind::PauseOutput, "PauseOutput"),
+        (SupervisorRequestKind::ResumeOutput, "ResumeOutput"),
+        (SupervisorRequestKind::Shutdown, "Shutdown"),
+    ];
+    let mut gate = SupervisorHandshake::new(token());
+
+    for (kind, name) in &kinds {
+        assert_eq!(
+            gate.check(kind),
+            Err(IpcErrorPayload {
+                code: IpcErrorCode::HelloRequired,
+                message: format!("{name} arrived before a Hello opened the link"),
+            })
+        );
+    }
+    assert_eq!(gate.agreed(), None, "a refused kind opens nothing");
+
+    gate.check(&SupervisorRequestKind::hello(token()))
+        .expect("the Hello is accepted");
+
+    for (kind, name) in &kinds {
+        assert_eq!(gate.check(kind), Ok(()), "{name} is served on an open link");
+    }
 }
 
 #[test]
@@ -638,8 +1077,8 @@ fn the_supervisor_pipe_sits_in_the_koshi_namespace_beside_the_sessions_own_pipe(
     );
 }
 
-/// Two supervisors of one session never listen at the same address, so the one
-/// replacing the other never binds an address its predecessor still holds.
+/// Two supervisors of one session with different process ids listen at
+/// different addresses.
 #[test]
 fn two_supervisors_of_one_session_listen_at_different_addresses() {
     let session = SessionId::from_uuid(fixed_uuid());

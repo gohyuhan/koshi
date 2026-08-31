@@ -3,11 +3,14 @@
 //!
 //! Each case starts from a single pane and applies a short random sequence
 //! of public edits — directional splits, stacking, removals, resizes,
-//! normalization. After every step the solved layout must uphold:
+//! normalization — under a random gap between split children. After every
+//! step the solved layout must uphold:
 //!
 //! - no two panes overlap and nothing leaves the tab,
 //! - every visible pane meets the minimum size,
-//! - when the tree fits at minimum size, the panes tile the tab exactly,
+//! - at gap `0`, when the tree fits at minimum size, the panes tile the tab
+//!   exactly (a larger gap leaves blank cells between children, so the tiling
+//!   check runs only at gap `0`),
 //! - every layout leaf references a live pane,
 //! - solving is deterministic.
 //!
@@ -15,9 +18,7 @@
 //! under `proptest-regressions/` — check those files in when they appear.
 //!
 //! One fixed op sequence runs beside the random ones. It uses every op kind
-//! and asserts the exact tree and the exact solved rects it ends on, so those
-//! ops are covered on every run and not only when the random search picks
-//! them.
+//! and asserts the exact tree and the exact solved rects it ends on.
 
 use std::collections::HashSet;
 
@@ -25,25 +26,27 @@ use koshi_core::geometry::{Direction, Point, Rect, Size, SplitDirection};
 use koshi_core::ids::PaneId;
 use koshi_layout::edit::{add_to_stack, remove_pane, split_leaf};
 use koshi_layout::normalize::normalize;
-use koshi_layout::resize::resize;
-use koshi_layout::solver::{fits, solve, PaneSizing, StackHeader, MIN_PANE_SIZE};
-use koshi_layout::tree::LayoutNode;
+use koshi_layout::resize::resize_with_min;
+use koshi_layout::size::SizeWeight;
+use koshi_layout::solver::{
+    fits, solve, solve_with_min, PaneSizing, SolveResult, StackHeader, MIN_PANE_SIZE,
+};
+use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_test_support::layout_assert::{
-    assert_all_space_occupied, assert_live_pane_refs, assert_min_size_respected, assert_no_outside,
-    assert_no_overlap,
+    check_all_space_occupied, check_live_pane_refs, check_min_size_respected, check_no_outside,
+    check_no_overlap,
 };
 use proptest::prelude::*;
 use proptest::strategy::Union;
 use proptest::test_runner::{Config, TestRunner};
 
-/// One randomly chosen public edit. Targets are indices into the current
-/// leaf list (taken modulo its length), so every op stays applicable as the
-/// tree changes shape.
+/// One randomly chosen public edit. A target is an index into the current
+/// leaf list, taken modulo its length.
 #[derive(Debug, Clone)]
 enum Op {
     Split {
         target: usize,
-        direction: u8,
+        direction: Direction,
     },
     Stack {
         target: usize,
@@ -53,24 +56,34 @@ enum Op {
     },
     Resize {
         target: usize,
-        direction: u8,
+        direction: Direction,
         size: i16,
     },
     Normalize,
 }
 
-/// Returns a strategy that generates one random public edit operation.
-/// Each operation targets a leaf pane by index (wraps modulo leaf count to stay applicable as the tree changes).
+/// One of the four cardinal directions, each equally likely.
+fn direction_strategy() -> impl Strategy<Value = Direction> {
+    prop_oneof![
+        Just(Direction::Left),
+        Just(Direction::Right),
+        Just(Direction::Up),
+        Just(Direction::Down),
+    ]
+}
+
+/// One random [`Op`], each kind equally likely: targets are drawn from
+/// `0..16` and resize sizes from `-3..=3`.
 fn op_strategy() -> BoxedStrategy<Op> {
     Union::new(vec![
-        (0..16usize, 0..4u8)
+        (0..16usize, direction_strategy())
             .prop_map(|(target, direction)| Op::Split { target, direction })
             .boxed(),
         (0..16usize).prop_map(|target| Op::Stack { target }).boxed(),
         (0..16usize)
             .prop_map(|target| Op::Remove { target })
             .boxed(),
-        (0..16usize, 0..4u8, -3..4i16)
+        (0..16usize, direction_strategy(), -3..4i16)
             .prop_map(|(target, direction, size)| Op::Resize {
                 target,
                 direction,
@@ -82,14 +95,12 @@ fn op_strategy() -> BoxedStrategy<Op> {
     .boxed()
 }
 
-/// Maps a u8 code to a [`Direction`] by taking the code modulo 4.
-/// 0 → Left, 1 → Right, 2 → Up, 3 → Down.
-fn direction(code: u8) -> Direction {
-    match code % 4 {
-        0 => Direction::Left,
-        1 => Direction::Right,
-        2 => Direction::Up,
-        _ => Direction::Down,
+/// The sizing a case runs under: the default pane floor and `gap` blank
+/// cells between split children.
+fn sizing(gap: u16) -> PaneSizing {
+    PaneSizing {
+        gap,
+        ..PaneSizing::default()
     }
 }
 
@@ -104,46 +115,46 @@ fn random_edit_sequences_uphold_the_layout_invariants() {
         prop::collection::vec(op_strategy(), 1..12),
         4..=120u16,
         2..=40u16,
+        0..=2u16,
     );
 
     TestRunner::new(config)
-        .run(&strategy, |(ops, cols, rows)| {
-            check_sequence(&ops, cols, rows);
+        .run(&strategy, |(ops, cols, rows, gap)| {
+            check_sequence(&ops, cols, rows, gap);
             Ok(())
         })
         .unwrap();
 }
 
-/// Runs a sequence of random edits on a test tree and verifies that all layout invariants hold after each step.
-/// Starts with a single pane in a tab of the given dimensions, applies each operation, and checks
-/// that no panes overlap, no panes leave the tab, minimum sizes are met, space is fully occupied
-/// when the tree fits, all referenced panes are still live, and solving is deterministic.
-fn check_sequence(ops: &[Op], cols: u16, rows: u16) {
+/// Starts from one pane in a `cols` x `rows` tab with `gap` cells between
+/// split children, applies each op in turn, and checks the invariants before
+/// the first op and after every op. Returns the final tree and the set of
+/// live panes.
+fn check_sequence(ops: &[Op], cols: u16, rows: u16, gap: u16) -> (LayoutNode, HashSet<PaneId>) {
     let tab = Rect::at_origin(Size { cols, rows });
     let first = PaneId::new();
     let mut tree = LayoutNode::Pane(first);
     let mut live: HashSet<PaneId> = HashSet::from([first]);
 
-    assert_invariants(&tree, tab, &live);
+    assert_invariants(&tree, tab, &live, gap);
     for op in ops {
-        apply(op, &mut tree, tab, &mut live);
-        assert_invariants(&tree, tab, &live);
+        apply(op, &mut tree, tab, &mut live, gap);
+        assert_invariants(&tree, tab, &live, gap);
     }
+    (tree, live)
 }
 
-/// Applies one operation through the public edit API. If the operation is rejected by the API
-/// (e.g., no border to resize, attempting to remove the last pane), the tree remains unchanged.
-/// This no-op behavior on invalid edits is part of the API contract and is verified by the test.
-fn apply(op: &Op, tree: &mut LayoutNode, tab: Rect, live: &mut HashSet<PaneId>) {
+/// Applies one op through the public edit API under `gap`. A split or stack
+/// adds its new pane to `live`; a removal drops the victim from `live`. An
+/// edit the API rejects (no border to resize, a resize past the donor's
+/// floor, removing the last pane) leaves `tree` and `live` unchanged.
+fn apply(op: &Op, tree: &mut LayoutNode, tab: Rect, live: &mut HashSet<PaneId>, gap: u16) {
     let leaves = tree.leaf_panes();
     let pick = |target: usize| leaves[target % leaves.len()];
     match *op {
-        Op::Split {
-            target,
-            direction: d,
-        } => {
+        Op::Split { target, direction } => {
             let new = PaneId::new();
-            if let Ok(next) = split_leaf(tree, pick(target), new, direction(d)) {
+            if let Ok(next) = split_leaf(tree, pick(target), new, direction) {
                 *tree = next;
                 live.insert(new);
             }
@@ -157,17 +168,18 @@ fn apply(op: &Op, tree: &mut LayoutNode, tab: Rect, live: &mut HashSet<PaneId>) 
         }
         Op::Remove { target } => {
             let victim = pick(target);
-            if let Ok((next, _)) = remove_pane(tree, tab, victim, PaneSizing::default()) {
+            if let Ok((next, _)) = remove_pane(tree, tab, victim, sizing(gap)) {
                 *tree = next;
                 live.remove(&victim);
             }
         }
         Op::Resize {
             target,
-            direction: d,
+            direction,
             size,
         } => {
-            if let Ok(next) = resize(tree, tab, pick(target), direction(d), size) {
+            if let Ok(next) = resize_with_min(tree, tab, pick(target), direction, size, sizing(gap))
+            {
                 *tree = next;
             }
         }
@@ -179,32 +191,32 @@ fn apply(op: &Op, tree: &mut LayoutNode, tab: Rect, live: &mut HashSet<PaneId>) 
     }
 }
 
-/// Verifies the layout invariants after an edit.
-/// Checks that: panes do not overlap, panes stay within the tab bounds, all visible panes meet minimum size,
-/// when the tree fits at minimum size the panes exactly tile the tab with no gaps, all layout leaf references
-/// point to live panes, and solving the same tree twice produces identical results.
-fn assert_invariants(tree: &LayoutNode, tab: Rect, live: &HashSet<PaneId>) {
-    let result = solve(tree, tab);
-    assert_no_overlap(&result.panes).unwrap();
-    assert_no_outside(&result.panes, tab).unwrap();
-    assert_min_size_respected(&result.panes, MIN_PANE_SIZE).unwrap();
-    if fits(tree, tab, PaneSizing::default()) {
-        assert_all_space_occupied(&result.panes, tab).unwrap();
+/// Checks the layout invariants of `tree` solved over `tab` under `gap`: no
+/// two panes overlap, no pane leaves the tab, every visible pane meets
+/// [`MIN_PANE_SIZE`], every leaf names a pane in `live`, and a second solve
+/// equals the first. At gap `0`, the panes also tile the tab exactly whenever
+/// the tree fits at minimum size; a larger gap leaves blank cells between
+/// children, so that check does not apply.
+fn assert_invariants(tree: &LayoutNode, tab: Rect, live: &HashSet<PaneId>, gap: u16) {
+    let result = solve_with_min(tree, tab, sizing(gap));
+    check_no_overlap(&result.panes).unwrap();
+    check_no_outside(&result.panes, tab).unwrap();
+    check_min_size_respected(&result.panes, MIN_PANE_SIZE).unwrap();
+    if gap == 0 && fits(tree, tab, sizing(gap)) {
+        check_all_space_occupied(&result.panes, tab).unwrap();
     }
-    assert_live_pane_refs(&tree.leaf_panes(), live).unwrap();
-    // Solving is deterministic: solving the same tree and rect twice must produce the same placements.
-    assert_eq!(solve(tree, tab), result);
+    check_live_pane_refs(&tree.leaf_panes(), live).unwrap();
+    assert_eq!(solve_with_min(tree, tab, sizing(gap)), result);
 }
 
-/// Property: after any random edit sequence, normalizing the resulting tree
-/// is idempotent — normalizing a normalized tree returns it unchanged.
+/// After any random edit sequence, normalizing the resulting tree is
+/// idempotent: normalizing a normalized tree returns it unchanged.
 ///
-/// This does NOT assert that normalizing preserves the solved layout
-/// (`solve(tree) == solve(normalize(tree))`) — that stronger claim is
-/// false: normalize's same-direction merge can change which panes a
-/// too-small tab suppresses, by flattening a nested split's children into
-/// direct siblings of a pane that previously sat outside the nested
-/// split's own (failing) trailing-suppression run.
+/// Normalizing does not preserve the solved layout, and this test does not
+/// check it. A same-direction merge multiplies the nested weights into the
+/// parent, and the solver rounds the flat split differently from the nested
+/// one: `vertical(vertical(a, b), c)` over 34 rows solves to rows 8, 9, 17
+/// before normalization and 8, 8, 18 after.
 #[test]
 fn normalizing_after_any_random_edit_sequence_is_idempotent() {
     let config = Config {
@@ -216,18 +228,12 @@ fn normalizing_after_any_random_edit_sequence_is_idempotent() {
         prop::collection::vec(op_strategy(), 1..12),
         4..=120u16,
         2..=40u16,
+        0..=2u16,
     );
 
     TestRunner::new(config)
-        .run(&strategy, |(ops, cols, rows)| {
-            let tab = Rect::at_origin(Size { cols, rows });
-            let first = PaneId::new();
-            let mut tree = LayoutNode::Pane(first);
-            let mut live: HashSet<PaneId> = HashSet::from([first]);
-            for op in &ops {
-                apply(op, &mut tree, tab, &mut live);
-            }
-
+        .run(&strategy, |(ops, cols, rows, gap)| {
+            let (tree, live) = check_sequence(&ops, cols, rows, gap);
             let normalized =
                 normalize(&tree, &live).expect("at least one live pane always survives");
             prop_assert_eq!(normalize(&normalized, &live), Some(normalized));
@@ -245,16 +251,16 @@ fn normalizing_after_any_random_edit_sequence_is_idempotent() {
 const PINNED_OPS: [Op; 6] = [
     Op::Split {
         target: 0,
-        direction: 1,
+        direction: Direction::Right,
     },
     Op::Split {
         target: 1,
-        direction: 3,
+        direction: Direction::Down,
     },
     Op::Stack { target: 2 },
     Op::Resize {
         target: 0,
-        direction: 1,
+        direction: Direction::Right,
         size: 5,
     },
     Op::Remove { target: 1 },
@@ -265,59 +271,61 @@ const PINNED_OPS: [Op; 6] = [
 /// every step, and the run ends on one exact tree and one exact placement.
 #[test]
 fn a_fixed_op_sequence_lands_on_its_exact_layout() {
+    let (tree, live) = check_sequence(&PINNED_OPS, 80, 24, 0);
     let tab = Rect::at_origin(Size { cols: 80, rows: 24 });
-    let first = PaneId::new();
-    let mut tree = LayoutNode::Pane(first);
-    let mut live: HashSet<PaneId> = HashSet::from([first]);
 
-    assert_invariants(&tree, tab, &live);
-    for op in &PINNED_OPS {
-        apply(op, &mut tree, tab, &mut live);
-        assert_invariants(&tree, tab, &live);
-    }
-
-    // The removal left a column holding only the stack; normalization
-    // collapsed it, so the stack now hangs straight off the root.
-    let LayoutNode::Split(root) = &tree else {
-        panic!("the root must be a split");
-    };
-    assert_eq!(root.direction, SplitDirection::Horizontal);
-    assert_eq!(root.children.len(), 2);
-    let LayoutNode::Split(stack) = &root.children[1].node else {
-        panic!("the stack must sit directly under the root");
-    };
-    assert_eq!(stack.direction, SplitDirection::Stacked);
-    assert_eq!(stack.active, 1);
-
-    // Three panes survive: the resized one holds 45 of the 80 columns, and the
-    // stack's 35 split into one header row plus the active member's 23.
+    // Three panes survive, and the live set is exactly the tree's leaves.
     let leaves = tree.leaf_panes();
     assert_eq!(leaves.len(), 3);
-    assert_eq!(live.len(), 3);
-    let result = solve(&tree, tab);
+    assert_eq!(live, leaves.iter().copied().collect::<HashSet<_>>());
+
+    // The removal leaves a column holding only the stack, normalization
+    // collapses that column, and the stack hangs straight off the root. The
+    // resize moved five columns from the second root child to the first.
     assert_eq!(
-        result.panes,
-        [
-            (leaves[0], Rect::at_origin(Size { cols: 45, rows: 24 })),
-            (
-                leaves[1],
-                Rect::new(Point { x: 45, y: 0 }, Size { cols: 35, rows: 1 })
-            ),
-            (
-                leaves[2],
-                Rect::new(Point { x: 45, y: 1 }, Size { cols: 35, rows: 23 })
-            ),
-        ]
+        tree,
+        LayoutNode::Split(SplitNode {
+            direction: SplitDirection::Horizontal,
+            children: vec![
+                LayoutNode::Pane(leaves[0]),
+                LayoutNode::Split(SplitNode::stack(vec![leaves[1], leaves[2]], 1)),
+            ],
+            weights: vec![
+                SizeWeight {
+                    resize_delta: 5,
+                    ..SizeWeight::default()
+                },
+                SizeWeight {
+                    resize_delta: -5,
+                    ..SizeWeight::default()
+                },
+            ],
+            active: 0,
+        })
     );
-    assert!(result.suppressed.is_empty());
-    assert!(!result.all_suppressed);
+
+    // The resized pane holds 45 of the 80 columns, and the stack's 35 split
+    // into one header row plus the active member's 23.
+    let header = Rect::new(Point { x: 45, y: 0 }, Size { cols: 35, rows: 1 });
     assert_eq!(
-        result.stack_headers,
-        [StackHeader {
-            pane: leaves[1],
-            rect: Rect::new(Point { x: 45, y: 0 }, Size { cols: 35, rows: 1 }),
-            position: 0,
-            total: 2,
-        }]
+        solve(&tree, tab),
+        SolveResult {
+            panes: vec![
+                (leaves[0], Rect::at_origin(Size { cols: 45, rows: 24 })),
+                (leaves[1], header),
+                (
+                    leaves[2],
+                    Rect::new(Point { x: 45, y: 1 }, Size { cols: 35, rows: 23 })
+                ),
+            ],
+            suppressed: Vec::new(),
+            all_suppressed: false,
+            stack_headers: vec![StackHeader {
+                pane: leaves[1],
+                rect: header,
+                position: 0,
+                total: 2,
+            }],
+        }
     );
 }

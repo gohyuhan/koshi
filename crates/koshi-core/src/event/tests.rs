@@ -1,9 +1,10 @@
-//! Serialization roundtrip tests and invariant assertions for events.
+//! Tests for the event vocabulary.
 //!
-//! Verifies that all [`Event`] and [`PluginEvent`] variants:
-//! - survive JSON serialization and deserialization unchanged (canonical serde mapping),
-//! - have stable, canonical variant names (renames or additions break the test),
-//! - maintain privacy tier invariants (sensitive data is structurally unavoidable).
+//! Every [`Event`] and [`PluginEvent`] variant survives a JSON round trip
+//! unchanged, in the externally tagged shape, and reports its canonical
+//! variant name from `Debug`. Every [`Event`] variant also reports that name
+//! from [`Event::name`] and maps to its delivery class. Each input payload
+//! maps to its privacy tier, and no `SensitiveBlocked` variant holds content.
 
 use super::*;
 use crate::command::{GridPos, SelectionKind};
@@ -22,7 +23,7 @@ where
     assert_eq!(*value, back);
 }
 
-/// A fixed timestamp so serde roundtrips are deterministic.
+/// A fixed timestamp: `1_700_000_000` seconds after the Unix epoch.
 fn fixed_time() -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(1_700_000_000)
 }
@@ -57,7 +58,7 @@ fn lifecycle_events_roundtrip() {
     }));
     roundtrip(&Event::InputModeChanged(InputModeChanged {
         client_id: ClientId::new(),
-        mode: InputMode::Locked,
+        mode: LockMode::Locked,
     }));
     roundtrip(&Event::MouseSelectChanged(MouseSelectChanged {
         client_id: ClientId::new(),
@@ -221,12 +222,8 @@ fn plugin_events_roundtrip() {
     })));
 }
 
-/// The variant-name test below constructs one instance of every `Event`
-/// variant and checks its `Debug` repr, but `Debug` does not exercise serde —
-/// several variants (unit payloads, `Option` fields, enum-typed fields) are
-/// otherwise never round-tripped through JSON by any other test in this file.
-/// This closes that gap for every variant `lifecycle_events_roundtrip` and its
-/// siblings above do not already cover.
+/// Round-trips the variants the named round-trip tests above leave out, with
+/// both `Some` and `None` for `PaneFocused::prior_pane`.
 #[test]
 fn remaining_event_variants_survive_a_json_round_trip() {
     roundtrip(&Event::PaneClosing(PaneClosing {
@@ -281,12 +278,10 @@ fn remaining_event_variants_survive_a_json_round_trip() {
     roundtrip(&Event::Restarting);
 }
 
-/// The privacy guarantee is structural, not advisory. The tier of an input
-/// event is the payload variant itself — there is no independent `tier` field
-/// that could be set to `SensitiveBlocked` alongside a character or line of
-/// text. Every withholding case (`SensitiveBlocked` on the tier and on both
-/// input payloads) is unit-shaped: the absence of a `(` in its Debug repr
-/// proves it holds no data field, so adding one would fail this test.
+/// The tier of an input event is its payload variant; there is no separate
+/// `tier` field. Each `SensitiveBlocked` variant — on [`PrivacyTier`] and on
+/// both input payloads — is unit-shaped: its `Debug` output is the bare name
+/// with no `(`.
 #[test]
 fn sensitive_blocked_tier_carries_no_content() {
     let blocked = [
@@ -344,20 +339,16 @@ fn payload_tier_accessors_map_to_privacy_tier() {
     );
 }
 
-/// Extract the variant name from a value's Debug output.
-///
-/// For data variants like `PaneCreated(...)`, returns everything before the first `(`.
-/// For unit variants like `Quit`, returns the whole string.
-/// Used to verify variant names are stable: any enum rename changes the Debug output
-/// and breaks the matching assertions in the test.
+/// The variant name in a value's `Debug` output: the text before the first
+/// `(`, or the whole string for a unit variant.
+/// `PaneCreated(PaneCreated { .. })` → `"PaneCreated"`; `Quit` → `"Quit"`.
 fn variant_name<T: std::fmt::Debug>(value: &T) -> String {
     let repr = format!("{value:?}");
     repr.split('(').next().unwrap_or(&repr).to_string()
 }
 
-/// One instance per top-level `Event` variant, its canonical name, and class.
-/// The array's length forces every variant to appear, so a reader of this list
-/// sees the whole enum.
+/// One instance per top-level `Event` variant with its canonical name and
+/// delivery class. The array length is the variant count.
 pub(crate) fn event_cases() -> [(Event, &'static str, EventClass); 38] {
     [
         (
@@ -514,7 +505,7 @@ pub(crate) fn event_cases() -> [(Event, &'static str, EventClass); 38] {
         (
             Event::InputModeChanged(InputModeChanged {
                 client_id: ClientId::new(),
-                mode: InputMode::Normal,
+                mode: LockMode::Normal,
             }),
             "InputModeChanged",
             EventClass::Critical,
@@ -702,9 +693,10 @@ fn classify_maps_every_event_variant() {
     assert_eq!(critical, 31);
 }
 
-#[test]
-fn plugin_event_variant_names_are_canonical() {
-    let cases: Vec<(PluginEvent, &str)> = vec![
+/// One instance per [`PluginEvent`] variant with its canonical name. The array
+/// length is the variant count.
+fn plugin_event_cases() -> [(PluginEvent, &'static str); 10] {
+    [
         (
             PluginEvent::Installed(PluginInstalled {
                 plugin_id: PluginId::new(),
@@ -767,9 +759,141 @@ fn plugin_event_variant_names_are_canonical() {
             }),
             "DoctorCompleted",
         ),
-    ];
+    ]
+}
+
+#[test]
+fn plugin_event_variant_names_are_canonical() {
+    let cases = plugin_event_cases();
     assert_eq!(cases.len(), 10);
     for (value, name) in &cases {
         assert_eq!(&variant_name(value), name);
     }
+}
+
+#[test]
+fn every_plugin_event_survives_a_json_round_trip() {
+    for (plugin_event, name) in plugin_event_cases() {
+        let event = Event::Plugin(plugin_event);
+        let json = serde_json::to_string(&event).expect("serialize");
+        let back: Event = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, event, "{name}");
+    }
+}
+
+#[test]
+fn every_event_case_survives_a_json_round_trip() {
+    for (event, name, _class) in event_cases() {
+        let json = serde_json::to_string(&event).expect("serialize");
+        let back: Event = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, event, "{name}");
+    }
+}
+
+#[test]
+fn privacy_tiers_and_input_payloads_roundtrip() {
+    for tier in [
+        PrivacyTier::Public,
+        PrivacyTier::MetadataOnly,
+        PrivacyTier::Redacted,
+        PrivacyTier::SensitiveBlocked,
+    ] {
+        roundtrip(&tier);
+    }
+    for payload in [
+        TypedPayload::SafePublic('a'),
+        TypedPayload::SafePublic('🦀'),
+        TypedPayload::SafePublic('\u{0}'),
+        TypedPayload::SensitiveRedacted,
+        TypedPayload::AlternateScreenMetadataOnly,
+        TypedPayload::RawModeMetadataOnly,
+        TypedPayload::UnknownMetadataOnly,
+        TypedPayload::SensitiveBlocked,
+    ] {
+        roundtrip(&payload);
+    }
+    for line in [
+        SubmittedLinePayload::SafePublic(String::new()),
+        SubmittedLinePayload::SafePublic("echo \"日本語\" \\ \t \u{1b}[0m 🦀".to_string()),
+        SubmittedLinePayload::SensitiveRedacted,
+        SubmittedLinePayload::UnknownMetadataOnly,
+        SubmittedLinePayload::SensitiveBlocked,
+    ] {
+        roundtrip(&line);
+    }
+}
+
+#[test]
+fn events_encode_externally_tagged() {
+    assert_eq!(
+        serde_json::to_string(&Event::Quit).expect("serialize"),
+        r#""Quit""#
+    );
+    assert_eq!(
+        serde_json::to_string(&Event::Restarting).expect("serialize"),
+        r#""Restarting""#
+    );
+
+    let pane_id = PaneId::new();
+    let json =
+        serde_json::to_string(&Event::PaneClosing(PaneClosing { pane_id })).expect("serialize");
+    assert_eq!(
+        json,
+        format!(r#"{{"PaneClosing":{{"pane_id":"{}"}}}}"#, pane_id.as_uuid())
+    );
+
+    assert_eq!(
+        serde_json::to_string(&TypedPayload::SafePublic('a')).expect("serialize"),
+        r#"{"SafePublic":"a"}"#
+    );
+    assert_eq!(
+        serde_json::to_string(&TypedPayload::SensitiveBlocked).expect("serialize"),
+        r#""SensitiveBlocked""#
+    );
+
+    let other = ClientId::new();
+    assert_eq!(
+        serde_json::to_string(&TerminalTooSmallCause::OtherClient(other)).expect("serialize"),
+        format!(r#"{{"OtherClient":"{}"}}"#, other.as_uuid())
+    );
+}
+
+#[test]
+fn too_small_cause_defaults_to_terminal() {
+    assert_eq!(
+        TerminalTooSmallCause::default(),
+        TerminalTooSmallCause::Terminal
+    );
+}
+
+#[test]
+fn a_too_small_event_reads_an_explicit_null_pane_area_as_none() {
+    let client_id = ClientId::new();
+    let json = serde_json::json!({
+        "client_id": client_id,
+        "size": { "cols": 80, "rows": 24 },
+        "pane_area": null,
+        "cause": "Regions"
+    });
+
+    let event: TerminalTooSmallEntered = serde_json::from_value(json).expect("deserialize");
+    assert_eq!(event.client_id, client_id);
+    assert_eq!(event.size, Size { cols: 80, rows: 24 });
+    assert_eq!(event.pane_area, None);
+    assert_eq!(event.cause, TerminalTooSmallCause::Regions);
+}
+
+#[test]
+fn a_timestamp_before_the_unix_epoch_cannot_be_serialized() {
+    let event = Event::PaneTyped(PaneTyped {
+        pane_id: PaneId::new(),
+        tab_id: TabId::new(),
+        session_id: SessionId::new(),
+        client_id: ClientId::new(),
+        payload: TypedPayload::SensitiveBlocked,
+        timestamp: UNIX_EPOCH - Duration::from_secs(1),
+    });
+
+    let err = serde_json::to_string(&event).expect_err("pre-epoch timestamp");
+    assert_eq!(err.to_string(), "SystemTime must be later than UNIX_EPOCH");
 }

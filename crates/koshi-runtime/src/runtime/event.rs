@@ -57,9 +57,6 @@ pub enum RuntimeEvent {
         pane_id: PaneId,
         /// How the child ended: an exit code or a terminating signal.
         status: ExitStatus,
-        /// When the producer observed the exit, carried on the event so the
-        /// handler never reads the clock itself.
-        exited_at: SystemTime,
     },
     /// A client's outer terminal changed size.
     Resize {
@@ -70,22 +67,6 @@ pub enum RuntimeEvent {
         /// The pane region the client draws the tab's panes in at the new
         /// size; `None` replaces any earlier report.
         pane_area: Option<PaneArea>,
-    },
-    /// A client joined a session and began viewing one of its tabs.
-    ClientAttached {
-        /// Session the client attached to.
-        session_id: SessionId,
-        /// The arriving client.
-        client_id: ClientId,
-        /// The client's terminal size in cells.
-        viewport: Size,
-        /// The pane region the client reported, recorded on its record.
-        pane_area: Option<PaneArea>,
-        /// The tab the client begins viewing.
-        active_tab: TabId,
-        /// When the producer observed the attach, carried on the event so the
-        /// handler never reads the clock itself.
-        attached_at: SystemTime,
     },
     /// A client left, stopping its view of whatever tab it held.
     ClientDetached {
@@ -101,8 +82,10 @@ pub enum RuntimeEvent {
     },
     /// A periodic tick for time-driven refreshes such as cursor blink.
     Timer,
-    /// A request to stop the event loop and shut the process down. Produced by
-    /// the quit keybinding or by outer-input reaching end of stream.
+    /// A request to stop the event loop and shut the process down. Produced
+    /// when reading a client's outer terminal fails, which is that terminal
+    /// reaching end of stream. Explicit quit travels through the `core:quit`
+    /// command instead.
     Quit,
     /// One decoded outer-terminal key awaiting keybinding resolution. Carries
     /// the chord alone: the bytes a fallthrough writes are encoded from it

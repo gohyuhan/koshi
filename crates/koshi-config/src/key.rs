@@ -9,12 +9,11 @@
 //! `<leader>` is refused.
 //!
 //! Case folds into the Shift bit: `<A-H>` and `<A-S-h>` both parse to
-//! `ALT|SHIFT` plus `Char('h')`. `S-` is rejected on a non-letter character:
-//! "shift plus `1`" names no character without knowing the keyboard layout.
-//! Write `!` instead. A named key accepts `S-`: `<S-Tab>` is
-//! Shift+Tab. A raw whitespace or control character (a literal tab in the
-//! config text) is refused: those keys are written by name, keeping one
-//! representation per physical key.
+//! `ALT|SHIFT` plus `Char('h')`. `S-` is rejected on a character that is not
+//! lowercase: `<S-1>` fails, and the shifted character is written itself,
+//! `!`. A named key accepts `S-`: `<S-Tab>` is Shift+Tab. A raw whitespace or
+//! control character (a literal tab in the config text) is refused; those
+//! keys are written by name, `<Tab>`.
 
 use std::fmt;
 
@@ -75,7 +74,7 @@ pub enum KeyParseErrorKind {
     /// Several characters with no brackets, as in `Ctrl-g` or `Tab`.
     #[error("a multi-character key must be bracketed, as in `<Tab>`")]
     UnbracketedMultiChar,
-    /// `S-` applied to something with no capital form.
+    /// `S-` applied to a character that is not lowercase.
     #[error("`S-` applies to letters only, not `{ch}`; write the shifted character itself")]
     ShiftOnNonLetter {
         /// The key the shift was applied to.
@@ -133,9 +132,11 @@ fn mod_flag(c: char) -> Option<ModFlags> {
 }
 
 /// Consumes leading `X-` modifier pairs from `s`, returning the modifiers and
-/// the unconsumed remainder. A leading pair whose first character is not a
-/// modifier letter is an error; anything that is not a pair at all ends the run,
-/// which is what leaves `<Space>` and `<C-->` alone.
+/// the unconsumed remainder. `token` is the whole key token, carried into any
+/// error. A leading pair whose first character is not a modifier letter is an
+/// error. Anything that is not an `X-` pair ends the run: `Space` leaves the
+/// whole word (`S` is not followed by `-`), and `C--` yields
+/// [`ModFlags::CTRL`] with `-` left.
 fn split_mods<'a>(token: &str, s: &'a str) -> Result<(ModFlags, &'a str), KeyParseError> {
     let mut mods = ModFlags::NONE;
     let mut rest = s;
@@ -165,17 +166,15 @@ fn split_mods<'a>(token: &str, s: &'a str) -> Result<(ModFlags, &'a str), KeyPar
 }
 
 /// Folds a single-character key into canonical form: an uppercase letter becomes
-/// its lowercase plus [`ModFlags::SHIFT`]. Rejects a `SHIFT` that lands on a
-/// character with no capital form, and a whitespace or control character, whose
-/// key has a named spelling.
-fn finish_char(token: &str, mods: ModFlags, c: char) -> Result<KeyChord, KeyParseError> {
+/// its lowercase plus [`ModFlags::SHIFT`]. Rejects `SHIFT` on a character that
+/// is not lowercase (`<S-1>`), and rejects any whitespace or control character.
+fn finish_char(token: &str, mut mods: ModFlags, c: char) -> Result<KeyChord, KeyParseError> {
     if c.is_whitespace() || c.is_control() {
         return Err(err(
             token,
             KeyParseErrorKind::RawWhitespaceOrControl { ch: c },
         ));
     }
-    let mut mods = mods;
     let (key_char, shifted) = fold_uppercase(c);
     if shifted {
         mods = mods.union(ModFlags::SHIFT);
@@ -191,23 +190,24 @@ fn finish_char(token: &str, mods: ModFlags, c: char) -> Result<KeyChord, KeyPars
 
 /// Resolves a bracketed multi-character key name.
 fn named_key(token: &str, name: &str) -> Result<NamedKey, KeyParseError> {
-    let digits = name.strip_prefix('F').or_else(|| name.strip_prefix('f'));
-    if let Some(digits) = digits {
-        if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) {
-            return digits
-                .parse::<u8>()
-                .ok()
-                .filter(|n| (1..=24).contains(n))
-                .map(NamedKey::F)
-                .ok_or_else(|| {
-                    err(
-                        token,
-                        KeyParseErrorKind::FunctionKeyOutOfRange {
-                            n: digits.to_string(),
-                        },
-                    )
-                });
-        }
+    let function_key_digits = name
+        .strip_prefix('F')
+        .or_else(|| name.strip_prefix('f'))
+        .filter(|digits| !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()));
+    if let Some(digits) = function_key_digits {
+        return digits
+            .parse::<u8>()
+            .ok()
+            .filter(|n| (1..=24).contains(n))
+            .map(NamedKey::F)
+            .ok_or_else(|| {
+                err(
+                    token,
+                    KeyParseErrorKind::FunctionKeyOutOfRange {
+                        n: digits.to_string(),
+                    },
+                )
+            });
     }
     // ponytail: allocates a lowercase copy per name; this runs at config load.
     let key = match name.to_ascii_lowercase().as_str() {
@@ -247,16 +247,26 @@ fn named_key(token: &str, name: &str) -> Result<NamedKey, KeyParseError> {
 ///
 /// # Errors
 /// Returns a [`KeyParseError`] naming the [`KeyParseErrorKind`] the token
-/// violates: empty input, unbalanced angle brackets, an unknown modifier or
-/// key name, a duplicated modifier, `<leader>` used as a chord, or similar
-/// malformed input.
+/// violates: [`Empty`](KeyParseErrorKind::Empty) for `""`,
+/// [`UnclosedBracket`](KeyParseErrorKind::UnclosedBracket) for a `<` with no
+/// closing `>`, [`MissingKey`](KeyParseErrorKind::MissingKey) for `<>` and
+/// `<C->`, [`LeaderNotAChord`](KeyParseErrorKind::LeaderNotAChord) for
+/// `<leader>`, [`UnknownModifier`](KeyParseErrorKind::UnknownModifier) for
+/// `<x-a>`, [`DuplicateModifier`](KeyParseErrorKind::DuplicateModifier) for
+/// `<C-C-a>`, [`UnbracketedMultiChar`](KeyParseErrorKind::UnbracketedMultiChar)
+/// for `Ctrl-g`, [`UnknownNamedKey`](KeyParseErrorKind::UnknownNamedKey) for
+/// `<Nope>`, [`FunctionKeyOutOfRange`](KeyParseErrorKind::FunctionKeyOutOfRange)
+/// for `<F25>`, [`ShiftOnNonLetter`](KeyParseErrorKind::ShiftOnNonLetter) for
+/// `<S-1>`, and
+/// [`RawWhitespaceOrControl`](KeyParseErrorKind::RawWhitespaceOrControl) for a
+/// literal tab.
 pub fn parse_chord(s: &str) -> Result<KeyChord, KeyParseError> {
     if s.is_empty() {
         return Err(err(s, KeyParseErrorKind::Empty));
     }
 
     // No leading `<`: a single bare printable character.
-    let Some(open) = s.strip_prefix('<') else {
+    let Some(after_open) = s.strip_prefix('<') else {
         let mut chars = s.chars();
         let c = chars.next().expect("s is not empty");
         if chars.next().is_some() {
@@ -266,7 +276,7 @@ pub fn parse_chord(s: &str) -> Result<KeyChord, KeyParseError> {
     };
 
     // Bracketed form: must close with `>`.
-    let Some(inner) = open.strip_suffix('>') else {
+    let Some(inner) = after_open.strip_suffix('>') else {
         return Err(err(s, KeyParseErrorKind::UnclosedBracket));
     };
     if inner.is_empty() {
@@ -295,15 +305,16 @@ pub fn parse_chord(s: &str) -> Result<KeyChord, KeyParseError> {
 
 /// What `<leader>` in a binding stands for.
 ///
-/// A modifier run merges into the chord that follows it, so with [`Leader::Mods`]
+/// A modifier run merges into the chord that follows it: with [`Leader::Mods`]
 /// holding Control, `<leader>l` is one chord, `<C-l>`. A chord leader stands
-/// alone, so with [`Leader::Chord`] holding Space, `<leader>l` is two chords,
+/// alone: with [`Leader::Chord`] holding Space, `<leader>l` is two chords,
 /// Space then `l`.
 ///
-/// Every binding starts with the leader, so a leader on a key that
-/// [`KeyChord::is_typeable`] reports as typeable steals that key from the pane
-/// whenever the client is not locked. The default is a modifier run, which
-/// plain typing can never hit.
+/// A leader that [`KeyChord::is_typeable`] reports as typeable, or a modifier
+/// run that [`ModFlags::is_typing`] reports as typing, puts every
+/// leader-relative binding on a key plain typing produces, and those keys
+/// stop reaching the pane while the client is unlocked. The default is `C-`,
+/// which plain typing never produces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Leader {
     /// Modifiers that merge into the following chord, written `C-`.
@@ -331,8 +342,10 @@ impl fmt::Display for Leader {
 /// single chord such as `<Space>` or `,`.
 ///
 /// # Errors
-/// Returns a [`KeyParseError`] under the same conditions as [`parse_chord`]
-/// when the input is not a bare modifier run.
+/// Returns a [`KeyParseError`] for the empty string. A trailing-dash run
+/// holding an unknown or repeated modifier letter reports that modifier
+/// (`x-` gives [`KeyParseErrorKind::UnknownModifier`]). Any other input
+/// reports what [`parse_chord`] rejects it for.
 pub fn parse_leader(s: &str) -> Result<Leader, KeyParseError> {
     if s.is_empty() {
         return Err(err(s, KeyParseErrorKind::Empty));

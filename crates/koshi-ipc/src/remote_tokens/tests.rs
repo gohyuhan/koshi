@@ -65,8 +65,8 @@ fn a_written_store_reads_back_identical_including_its_format_number() {
     assert_eq!(read_back.format, TOKEN_STORE_FORMAT);
 }
 
-/// The store is what proves a presented secret, so it carries the hash. The
-/// secret itself reaches only the operator it was handed to.
+/// The store carries the hash. The secret itself reaches only the operator it
+/// was handed to.
 #[test]
 fn the_file_on_disk_holds_the_hash_and_not_the_secret() {
     let dir = TempDir::new().expect("create temp dir");
@@ -143,10 +143,15 @@ fn reading_junk_bytes_is_token_store_unreadable() {
     std::fs::write(&path, b"not json").expect("write junk");
 
     match TokenStore::read(&path) {
-        Err(IpcError::TokenStoreUnreadable { path: reported, .. }) => {
+        Err(IpcError::RemoteFileUnreadable {
+            file: RemoteFile::TokenStore,
+            path: reported,
+            detail,
+        }) => {
             assert_eq!(reported, path.display().to_string());
+            assert_eq!(detail, "expected ident at line 1 column 2");
         }
-        other => panic!("expected TokenStoreUnreadable, got {other:?}"),
+        other => panic!("expected a token store RemoteFileUnreadable, got {other:?}"),
     }
 }
 
@@ -157,10 +162,18 @@ fn a_file_with_an_unknown_field_is_unreadable() {
     std::fs::write(&path, r#"{"format":1,"records":[],"extra":1}"#).expect("write file");
 
     match TokenStore::read(&path) {
-        Err(IpcError::TokenStoreUnreadable { path: reported, .. }) => {
+        Err(IpcError::RemoteFileUnreadable {
+            file: RemoteFile::TokenStore,
+            path: reported,
+            detail,
+        }) => {
             assert_eq!(reported, path.display().to_string());
+            assert_eq!(
+                detail,
+                "unknown field `extra`, expected `format` or `records` at line 1 column 32"
+            );
         }
-        other => panic!("expected TokenStoreUnreadable, got {other:?}"),
+        other => panic!("expected a token store RemoteFileUnreadable, got {other:?}"),
     }
 }
 
@@ -171,19 +184,20 @@ fn a_file_whose_format_number_is_two_is_unreadable() {
     std::fs::write(&path, r#"{"format":2,"records":[]}"#).expect("write file");
 
     match TokenStore::read(&path) {
-        Err(IpcError::TokenStoreUnreadable {
+        Err(IpcError::RemoteFileUnreadable {
+            file: RemoteFile::TokenStore,
             path: reported,
             detail,
         }) => {
             assert_eq!(reported, path.display().to_string());
             assert_eq!(detail, "format 2 is not the 1 this build reads");
         }
-        other => panic!("expected TokenStoreUnreadable, got {other:?}"),
+        other => panic!("expected a token store RemoteFileUnreadable, got {other:?}"),
     }
 }
 
-/// The write creates the directory it needs, so an unwritable place is one
-/// where that directory cannot exist: a plain file already holds its name.
+/// The write creates the directory it needs. A plain file holding that
+/// directory's name makes the write fail.
 #[test]
 fn writing_where_the_directory_cannot_exist_is_token_store_write() {
     let dir = TempDir::new().expect("create temp dir");
@@ -191,10 +205,14 @@ fn writing_where_the_directory_cannot_exist_is_token_store_write() {
     let path = store_path(dir.path());
 
     match TokenStore::new().write(&path) {
-        Err(IpcError::TokenStoreWrite { path: reported, .. }) => {
+        Err(IpcError::RemoteFileWrite {
+            file: RemoteFile::TokenStore,
+            path: reported,
+            ..
+        }) => {
             assert_eq!(reported, path.display().to_string());
         }
-        other => panic!("expected TokenStoreWrite, got {other:?}"),
+        other => panic!("expected a token store RemoteFileWrite, got {other:?}"),
     }
 }
 
@@ -378,6 +396,8 @@ fn a_grant_on_a_different_scope_for_the_same_identity_keeps_both() {
 
     assert!(!replaced);
     assert_eq!(store.records.len(), 2);
+    assert_eq!(store.records[0].scope, TokenScope::HostWide);
+    assert_eq!(store.records[1].scope, TokenScope::Session(session));
 }
 
 #[test]
@@ -488,8 +508,8 @@ fn revoking_an_identity_holding_nothing_stops_nothing() {
 
 #[test]
 fn granting_after_a_revoke_reports_that_nothing_standing_stopped() {
-    // The operator already stopped ada's grant, so the new grant must not
-    // report that it stopped a token: the old one stopped at the revoke.
+    // Ada's grant was revoked before the new grant was made. The new grant
+    // reports that nothing standing stopped.
     let mut store = TokenStore::new();
     store.grant("ada".to_string(), TokenScope::HostWide, moment(100), None);
     store.revoke("ada", None, moment(200));
@@ -504,7 +524,7 @@ fn granting_after_a_revoke_reports_that_nothing_standing_stopped() {
 
 #[test]
 fn granting_after_an_expiry_reports_that_nothing_standing_stopped() {
-    // The old grant ran out before this one was made, so nothing that still
+    // The old grant ran out before this one was made. Nothing that still
     // worked stopped working.
     let mut store = TokenStore::new();
     store.grant(
@@ -549,10 +569,9 @@ fn revoking_an_already_stopped_grant_keeps_the_first_time() {
 
 #[test]
 fn a_grant_stops_working_at_the_moment_it_expires_and_not_a_moment_before() {
-    // The expiry is the first instant the grant no longer works, so the
-    // instant before it still admits. Windows counts a system time in
-    // 100-nanosecond ticks, so one tick is the smallest step every platform
-    // can hold.
+    // The expiry is the first instant the grant no longer works; the instant
+    // before it still admits. One tick is 100 nanoseconds, the smallest step
+    // a Windows system time holds.
     const TICK: Duration = Duration::from_nanos(100);
     let (mut store, token) = granted(TokenScope::HostWide, Some(moment(900)));
     let session = SessionId::new();
@@ -590,8 +609,8 @@ fn a_grant_made_with_an_expiry_already_past_never_admits() {
 
 #[test]
 fn a_grant_whose_expiry_is_the_moment_it_was_made_never_admits() {
-    // A zero-length expiry lands the expiry on the issue time, and a grant
-    // stops working at its expiry, so this one never works at all.
+    // A zero-length expiry lands the expiry on the issue time. A grant stops
+    // working at its expiry, and this one never works at all.
     let mut store = TokenStore::new();
     let (token, _) = store.grant(
         "ada".to_string(),
@@ -718,9 +737,17 @@ fn every_grant_being_revoked_still_lists_all_of_them() {
 
     let listed = store.entries(None);
 
-    assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].identity, "ada");
-    assert_eq!(listed[0].revoked_at, Some(moment(200)));
+    assert_eq!(
+        listed,
+        vec![TokenEntry {
+            identity: "ada".to_string(),
+            scope: TokenScope::HostWide,
+            issued_at: moment(100),
+            expires_at: None,
+            last_used_at: None,
+            revoked_at: Some(moment(200)),
+        }]
+    );
 }
 
 #[test]
@@ -732,29 +759,35 @@ fn a_store_whose_bytes_stop_part_way_is_refused_and_admits_nothing() {
 
     let error = TokenStore::read(&path).expect_err("a truncated store is refused");
 
-    let IpcError::TokenStoreUnreadable {
+    let IpcError::RemoteFileUnreadable {
+        file: RemoteFile::TokenStore,
         path: named,
         detail,
     } = error
     else {
-        panic!("expected TokenStoreUnreadable, got {error:?}");
+        panic!("expected a token store RemoteFileUnreadable, got {error:?}");
     };
     assert_eq!(named, path.display().to_string());
-    assert!(detail.contains("EOF"), "{detail}");
+    assert_eq!(detail, "EOF while parsing a string at line 1 column 38");
 }
 
 #[test]
 fn a_directory_where_the_store_belongs_is_refused_rather_than_read_as_empty() {
-    // A missing store reads as empty. A directory is not missing, so it must
-    // refuse instead of silently admitting the empty case.
+    // A missing store reads as empty. A directory is not missing, and it is
+    // refused.
     let dir = TempDir::new().expect("create temp dir");
     let path = dir.path().join("tokens");
     std::fs::create_dir(&path).expect("create a directory where the store belongs");
 
     let error = TokenStore::read(&path).expect_err("a directory is refused");
 
-    let IpcError::TokenStoreUnreadable { path: named, .. } = error else {
-        panic!("expected TokenStoreUnreadable, got {error:?}");
+    let IpcError::RemoteFileUnreadable {
+        file: RemoteFile::TokenStore,
+        path: named,
+        ..
+    } = error
+    else {
+        panic!("expected a token store RemoteFileUnreadable, got {error:?}");
     };
     assert_eq!(named, path.display().to_string());
 }
@@ -807,9 +840,8 @@ fn a_revoked_secret_and_an_expired_one_are_admitted_by_nothing() {
 
 #[test]
 fn this_build_writes_token_store_format_one() {
-    // The value lives in the versioned-surface table now, one crate away, so
-    // this pins what a store written today says. Changing it means every older
-    // koshi stops reading this machine's grants.
+    // A store written by this build carries format 1. A build that reads only
+    // another number refuses this machine's grants.
     assert_eq!(TOKEN_STORE_FORMAT, 1);
 }
 
@@ -879,9 +911,8 @@ fn a_listed_grant_stands_exactly_when_the_record_it_came_from_does() {
 }
 
 /// A file written by hand can hold two records on one hash. The walk runs to
-/// the end of the list rather than stopping at the first record it matches,
-/// so the last live record is the one that answers and the one that is
-/// stamped.
+/// the end of the list. The last live record holding the secret is the one
+/// that answers and the one that is stamped.
 #[test]
 fn the_last_live_record_holding_a_secret_is_the_one_that_answers() {
     let session = SessionId::from_uuid(uuid::Uuid::from_u128(1));
@@ -908,8 +939,8 @@ fn the_last_live_record_holding_a_secret_is_the_one_that_answers() {
 }
 
 /// The walk keeps only the records that still stand and reach the session
-/// asked for, so a later record that is revoked or scoped elsewhere leaves an
-/// earlier one answering instead of hiding it.
+/// asked for. A record after it that is revoked or scoped elsewhere leaves
+/// the earlier one answering.
 #[test]
 fn a_later_record_that_is_revoked_or_scoped_elsewhere_leaves_an_earlier_one_answering() {
     let wanted = SessionId::from_uuid(uuid::Uuid::from_u128(1));
@@ -973,5 +1004,249 @@ fn one_identity_holding_several_scopes_lists_host_wide_first_then_sessions_by_id
             TokenScope::Session(first),
             TokenScope::Session(second),
         ]
+    );
+}
+
+#[test]
+fn a_store_holding_one_record_with_every_field_set_is_written_as_these_exact_bytes() {
+    let dir = TempDir::new().expect("create temp dir");
+    let path = store_path(dir.path());
+    let store = TokenStore {
+        format: TOKEN_STORE_FORMAT,
+        records: vec![TokenRecord {
+            identity: "ada".to_string(),
+            hash: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".to_string(),
+            scope: TokenScope::Session(SessionId::from_uuid(uuid::Uuid::from_u128(1))),
+            issued_at: moment(100),
+            expires_at: Some(moment(900)),
+            last_used_at: Some(moment(200)),
+            revoked_at: Some(moment(300)),
+        }],
+    };
+
+    store.write(&path).expect("write token store");
+
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read file bytes"),
+        r#"{"format":1,"records":[{"identity":"ada","hash":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","scope":{"Session":"00000000-0000-0000-0000-000000000001"},"issued_at":{"secs_since_epoch":100,"nanos_since_epoch":0},"expires_at":{"secs_since_epoch":900,"nanos_since_epoch":0},"last_used_at":{"secs_since_epoch":200,"nanos_since_epoch":0},"revoked_at":{"secs_since_epoch":300,"nanos_since_epoch":0}}]}"#
+    );
+    assert_eq!(TokenStore::read(&path).expect("read token store"), store);
+}
+
+#[test]
+fn hashing_an_empty_secret_gives_the_published_sha256_vector() {
+    assert_eq!(
+        hash_token(&ConnectionToken::new("")),
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
+}
+
+#[test]
+fn a_scope_reads_back_from_its_two_shapes_and_refuses_a_third() {
+    assert_eq!(
+        serde_json::from_str::<TokenScope>(r#""HostWide""#).expect("a host-wide scope reads"),
+        TokenScope::HostWide
+    );
+    assert_eq!(
+        serde_json::from_str::<TokenScope>(r#"{"Session":"00000000-0000-0000-0000-000000000001"}"#)
+            .expect("a session scope reads"),
+        TokenScope::Session(SessionId::from_uuid(uuid::Uuid::from_u128(1)))
+    );
+
+    let refused = serde_json::from_str::<TokenScope>(r#""Everywhere""#)
+        .expect_err("a scope this build does not have is refused");
+
+    assert_eq!(
+        refused.to_string(),
+        "unknown variant `Everywhere`, expected `HostWide` or `Session` at line 1 column 12"
+    );
+}
+
+#[test]
+fn a_record_carrying_an_unknown_field_makes_the_store_unreadable() {
+    let dir = TempDir::new().expect("create temp dir");
+    let path = dir.path().join("tokens");
+    std::fs::write(
+        &path,
+        r#"{"format":1,"records":[{"identity":"ada","hash":"h","scope":"HostWide","issued_at":{"secs_since_epoch":100,"nanos_since_epoch":0},"expires_at":null,"last_used_at":null,"revoked_at":null,"extra":1}]}"#,
+    )
+    .expect("write file");
+
+    let error = TokenStore::read(&path).expect_err("an unknown record field is refused");
+
+    let IpcError::RemoteFileUnreadable {
+        file: RemoteFile::TokenStore,
+        path: named,
+        detail,
+    } = error
+    else {
+        panic!("expected a token store RemoteFileUnreadable, got {error:?}");
+    };
+    assert_eq!(named, path.display().to_string());
+    assert_eq!(
+        detail,
+        "unknown field `extra`, expected one of `identity`, `hash`, `scope`, `issued_at`, \
+         `expires_at`, `last_used_at`, `revoked_at` at line 1 column 193"
+    );
+}
+
+#[test]
+fn a_listed_grant_carrying_a_field_this_build_does_not_know_still_reads() {
+    let listed = serde_json::from_str::<TokenEntry>(
+        r#"{"identity":"ada","scope":"HostWide","issued_at":{"secs_since_epoch":100,"nanos_since_epoch":0},"expires_at":null,"last_used_at":null,"revoked_at":null,"extra":1}"#,
+    )
+    .expect("a listing row with an added field reads");
+
+    assert_eq!(
+        listed,
+        TokenEntry {
+            identity: "ada".to_string(),
+            scope: TokenScope::HostWide,
+            issued_at: moment(100),
+            expires_at: None,
+            last_used_at: None,
+            revoked_at: None,
+        }
+    );
+}
+
+#[test]
+fn a_file_missing_its_record_list_is_unreadable() {
+    let dir = TempDir::new().expect("create temp dir");
+    let path = dir.path().join("tokens");
+    std::fs::write(&path, r#"{"format":1}"#).expect("write file");
+
+    let error = TokenStore::read(&path).expect_err("a store without records is refused");
+
+    let IpcError::RemoteFileUnreadable {
+        file: RemoteFile::TokenStore,
+        path: named,
+        detail,
+    } = error
+    else {
+        panic!("expected a token store RemoteFileUnreadable, got {error:?}");
+    };
+    assert_eq!(named, path.display().to_string());
+    assert_eq!(detail, "missing field `records` at line 1 column 12");
+}
+
+#[test]
+fn a_file_whose_format_number_is_zero_is_unreadable() {
+    let dir = TempDir::new().expect("create temp dir");
+    let path = dir.path().join("tokens");
+    std::fs::write(&path, r#"{"format":0,"records":[]}"#).expect("write file");
+
+    let error = TokenStore::read(&path).expect_err("format 0 is refused");
+
+    let IpcError::RemoteFileUnreadable {
+        file: RemoteFile::TokenStore,
+        path: named,
+        detail,
+    } = error
+    else {
+        panic!("expected a token store RemoteFileUnreadable, got {error:?}");
+    };
+    assert_eq!(named, path.display().to_string());
+    assert_eq!(detail, "format 0 is not the 1 this build reads");
+}
+
+#[test]
+fn a_scoped_revoke_naming_a_scope_the_identity_does_not_hold_stops_nothing() {
+    let (mut store, token) = granted(TokenScope::HostWide, None);
+
+    assert_eq!(
+        store.revoke(
+            "ada",
+            Some(&TokenScope::Session(SessionId::new())),
+            moment(300)
+        ),
+        Vec::<TokenScope>::new()
+    );
+
+    assert_eq!(store.records[0].revoked_at, None);
+    assert_eq!(
+        store.resolve(&token, SessionId::new(), moment(400)),
+        Resolution::Admitted
+    );
+}
+
+#[test]
+fn a_bare_revoke_leaves_another_identitys_grants_standing() {
+    let mut store = TokenStore::new();
+    store.grant("ada".to_string(), TokenScope::HostWide, moment(100), None);
+    let (bobs, _) = store.grant("bob".to_string(), TokenScope::HostWide, moment(100), None);
+
+    assert_eq!(
+        store.revoke("ada", None, moment(300)),
+        vec![TokenScope::HostWide]
+    );
+
+    assert_eq!(store.records[0].revoked_at, Some(moment(300)));
+    assert_eq!(store.records[1].revoked_at, None);
+    assert_eq!(
+        store.resolve(&bobs, SessionId::new(), moment(400)),
+        Resolution::Admitted
+    );
+}
+
+#[test]
+fn narrowing_to_a_scope_no_grant_reaches_lists_nothing() {
+    let mut store = TokenStore::new();
+    store.grant(
+        "zoe".to_string(),
+        TokenScope::Session(SessionId::from_uuid(uuid::Uuid::from_u128(1))),
+        moment(100),
+        None,
+    );
+
+    assert_eq!(
+        store.entries(Some(&TokenScope::Session(SessionId::from_uuid(
+            uuid::Uuid::from_u128(2)
+        )))),
+        Vec::new()
+    );
+    assert_eq!(store.entries(Some(&TokenScope::HostWide)), Vec::new());
+}
+
+#[test]
+fn an_uppercase_identity_lists_before_a_lowercase_one() {
+    let mut store = TokenStore::new();
+    store.grant("ada".to_string(), TokenScope::HostWide, moment(100), None);
+    store.grant("Bob".to_string(), TokenScope::HostWide, moment(200), None);
+
+    let identities: Vec<String> = store
+        .entries(None)
+        .into_iter()
+        .map(|entry| entry.identity)
+        .collect();
+
+    assert_eq!(identities, vec!["Bob".to_string(), "ada".to_string()]);
+}
+
+#[test]
+fn a_fresh_grant_is_recorded_with_the_times_it_was_given_and_no_other() {
+    let session = SessionId::from_uuid(uuid::Uuid::from_u128(1));
+    let mut store = TokenStore::new();
+
+    let (token, replaced) = store.grant(
+        "ada".to_string(),
+        TokenScope::Session(session),
+        moment(100),
+        Some(moment(900)),
+    );
+
+    assert!(!replaced);
+    assert_eq!(store.records.len(), 1);
+    assert_eq!(store.records[0].hash, hash_token(&token));
+    assert_eq!(
+        store.records[0].entry(),
+        TokenEntry {
+            identity: "ada".to_string(),
+            scope: TokenScope::Session(session),
+            issued_at: moment(100),
+            expires_at: Some(moment(900)),
+            last_used_at: None,
+            revoked_at: None,
+        }
     );
 }

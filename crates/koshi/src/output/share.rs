@@ -191,8 +191,3 @@ fn scope_cell(scope: &TokenScope) -> String {
         TokenScope::Session(id) => id.to_string(),
     }
 }
-
-/// A time that may be absent as a cell, absent printing as `-`.
-fn optional_time_cell(time: Option<SystemTime>) -> String {
-    time.map_or_else(|| "-".to_string(), time_cell)
-}

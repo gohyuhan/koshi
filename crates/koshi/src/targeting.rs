@@ -236,6 +236,64 @@ fn resolve_targets(
     ))
 }
 
+/// The one running session named `name`, over the census `found`.
+///
+/// # Errors
+/// [`CliError::SessionNotFound`] when no session that answered carries the
+/// name; [`CliError::IpcUnavailable`] when exactly one carries it and a
+/// running session did not answer, so "exactly one" cannot be told;
+/// [`CliError::CommandRejected`] with [`RejectReason::TargetAmbiguous`],
+/// naming every matching id, when several carry it.
+pub(crate) fn session_named<'a>(
+    found: &'a Discovered,
+    name: &str,
+) -> Result<&'a SessionOverview, CliError> {
+    let matches: Vec<&SessionOverview> = found
+        .sessions
+        .iter()
+        .filter(|overview| overview.session.name == name)
+        .collect();
+    match matches.as_slice() {
+        [] => Err(found.no_such_session(name)),
+        [only] if found.is_complete() => Ok(only),
+        [_] => Err(found.unanswered(&format!("cannot tell whether `{name}` is unique"))),
+        several => {
+            let ids = several
+                .iter()
+                .map(|overview| overview.session.id.to_string())
+                .collect::<Vec<String>>()
+                .join(", ");
+            Err(rejected(
+                RejectReason::TargetAmbiguous,
+                format!("several sessions are named `{name}`: {ids}; use the session id"),
+            ))
+        }
+    }
+}
+
+/// The count rule over the census `found`: the sole running session, when
+/// every running session answered.
+///
+/// # Errors
+/// [`CliError::CommandRejected`] with [`RejectReason::TargetAmbiguous`]
+/// carrying `several` when more than one session answered;
+/// [`CliError::NoSessions`] when none is running;
+/// [`CliError::IpcUnavailable`] carrying `unanswered` when a running session
+/// did not answer, so "exactly one" cannot be told.
+pub(crate) fn the_only_session<'a>(
+    found: &'a Discovered,
+    several: &str,
+    unanswered: &str,
+) -> Result<&'a SessionOverview, CliError> {
+    let mut running = found.sessions.iter();
+    match (running.next(), running.next()) {
+        (Some(_), Some(_)) => Err(rejected(RejectReason::TargetAmbiguous, several.to_string())),
+        (Some(only), None) if found.is_complete() => Ok(only),
+        (None, _) if found.is_complete() => Err(CliError::NoSessions),
+        _ => Err(found.unanswered(unanswered)),
+    }
+}
+
 /// Pick the one running session an external command targets. Precedence:
 /// the explicit `--session`, else the owner of an explicit `--pane`/`--tab`/
 /// `--client`, else the count rule (one running session is the default).
@@ -260,34 +318,7 @@ fn pick_session<'a>(
                 .iter()
                 .find(|overview| overview.session.id == *id)
                 .ok_or_else(|| found.no_such_session(&id.to_string()))?,
-            SessionRef::Name(name) => {
-                let matches: Vec<&SessionOverview> = overviews
-                    .iter()
-                    .filter(|overview| overview.session.name == *name)
-                    .collect();
-                match matches.as_slice() {
-                    [only] if found.is_complete() => *only,
-                    [_] => {
-                        return Err(
-                            found.unanswered(&format!("cannot tell whether `{name}` is unique"))
-                        );
-                    }
-                    [] => return Err(found.no_such_session(name)),
-                    several => {
-                        let ids = several
-                            .iter()
-                            .map(|overview| overview.session.id.to_string())
-                            .collect::<Vec<String>>()
-                            .join(", ");
-                        return Err(rejected(
-                            RejectReason::TargetAmbiguous,
-                            format!(
-                                "several sessions are named `{name}`: {ids}; use the session id"
-                            ),
-                        ));
-                    }
-                }
-            }
+            SessionRef::Name(name) => session_named(found, name)?,
         }
     } else if let Some(pane_id) = pane {
         overviews
@@ -307,25 +338,11 @@ fn pick_session<'a>(
             })
             .ok_or_else(|| found.missing("client", &client_id.to_string()))?
     } else {
-        let mut running = overviews.iter();
-        match (running.next(), running.next()) {
-            (Some(_), Some(_)) => {
-                return Err(rejected(
-                    RejectReason::TargetAmbiguous,
-                    "several sessions are running; name one with --session <name-or-id>"
-                        .to_string(),
-                ))
-            }
-            // The count rule only holds over a complete census: one session
-            // answering while another stayed silent is not "exactly one".
-            (Some(only), None) if found.is_complete() => only,
-            (None, _) if found.is_complete() => return Err(CliError::NoSessions),
-            _ => {
-                return Err(found.unanswered(
-                    "cannot tell which session to target; name one with --session <name-or-id>",
-                ))
-            }
-        }
+        the_only_session(
+            found,
+            "several sessions are running; name one with --session <name-or-id>",
+            "cannot tell which session to target; name one with --session <name-or-id>",
+        )?
     };
 
     // An explicit pane or client must live in the picked session, whichever

@@ -6,19 +6,17 @@
 use crate::state::{Charset, TerminalState};
 
 impl TerminalState {
-    /// The charset currently selected into GL — the active screen's render
-    /// state's `G0`–`G3` slot named by its `gl` — used to translate each printed
-    /// byte.
+    /// The charset selected into GL: the active screen's `G0`–`G3` slot named
+    /// by its `gl`. Every printed byte is translated through it.
     fn active_charset(&self) -> Charset {
         let render = self.active_render();
         render.charsets[render.gl]
     }
 
-    /// Translate a printable `c` through the active GL charset before it is
-    /// placed. ASCII passes everything through; DEC line-drawing remaps the
-    /// `0x5F`–`0x7E` range to box-drawing/symbol glyphs; UK remaps only `#`.
-    /// Every output glyph is a single narrow, non-combining `char`, so the rest
-    /// of `print` (cluster folding, width) is unaffected.
+    /// Translate a printable `c` through the active GL charset. ASCII passes
+    /// every char through; DEC line drawing remaps `0x5F`–`0x7E` to box-drawing
+    /// and symbol glyphs; UK remaps only `#` (to `£`). Every output glyph is
+    /// one narrow, non-combining `char`.
     pub(super) fn map_charset(&self, c: char) -> char {
         match self.active_charset() {
             Charset::Ascii => c,
@@ -28,9 +26,9 @@ impl TerminalState {
         }
     }
 
-    /// Designate the `G0`–`G3` slot `index` (from the `ESC ( ) * +`
+    /// Designate the `G0`–`G3` slot `index` (`0`–`3`, from the `ESC ( ) * +`
     /// intermediate) to the charset named by the final `byte`: `0` = DEC line
-    /// drawing, `B` = ASCII, `A` = UK; any other final falls back to ASCII (a
+    /// drawing, `B` = ASCII, `A` = UK; any other final selects ASCII (a
     /// passthrough). Writes the active screen's render state.
     pub(super) fn designate_charset(&mut self, index: usize, byte: u8) {
         let charset = match byte {
@@ -43,12 +41,11 @@ impl TerminalState {
     }
 }
 
-/// Map a `char` through the DEC Special Character and Line Drawing set (`ESC (
-/// 0`): the bytes `0x5F`–`0x7E` (`'_'`–`'~'`) become box-drawing and symbol
-/// glyphs, so a TUI's `lqqqk` renders `┌───┐`. Every byte outside that range,
-/// and any unmapped byte within it, passes through unchanged. The table is the
-/// VT100 set as implemented by xterm/alacritty (`StandardCharset::map`); all
-/// outputs are single narrow, non-combining glyphs.
+/// Map `c` through the DEC Special Character and Line Drawing set (`ESC ( 0`):
+/// each of the 32 bytes `0x5F`–`0x7E` (`'_'`–`'~'`) becomes a box-drawing or
+/// symbol glyph, so a TUI's `lqqqk` renders `┌───┐`. Every char outside that
+/// range passes through unchanged. Every output is one narrow, non-combining
+/// glyph.
 fn map_dec_line_drawing(c: char) -> char {
     match c {
         '_' => ' ',

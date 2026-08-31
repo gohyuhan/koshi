@@ -50,12 +50,7 @@ fn server_version_row_cells(row: &ServerVersionRow) -> Vec<String> {
         ServerBuild::NotRunning => "not running".to_string(),
         ServerBuild::Unreachable { .. } => "unreachable".to_string(),
     };
-    vec![
-        kind.to_string(),
-        row.session
-            .map_or_else(|| "-".to_string(), |session| session.to_string()),
-        version,
-    ]
+    vec![kind.to_string(), opt_cell(row.session.as_ref()), version]
 }
 
 #[cfg(test)]
