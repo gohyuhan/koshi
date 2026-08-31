@@ -14,9 +14,9 @@
 //! [`Style`], [`Color`], [`UnderlineStyle`] and
 //! [`CursorShape`] are re-spelled in koshi-ipc's own enums.
 //!
-//! Rows are run-length encoded by [`FrameRow::from_cells`]: a 1×3 row holding a
-//! styled `e` then two default blanks travels as two runs — `count: 1` for the
-//! `e`, `count: 2` for the blanks.
+//! Rows are run-length encoded from source [`Cell`] values into [`FrameRun`]
+//! records: a 1×3 row holding a styled `e` then two default blanks travels as
+//! two runs — `count: 1` for the `e`, `count: 2` for the blanks.
 //!
 //! Plugin UI does not travel.
 //! [`build_snapshot`](crate::server::Server::build_snapshot) always sets the
@@ -24,8 +24,8 @@
 
 use koshi_ipc::frame::{
     FrameAttrs, FrameCell, FrameClient, FrameColor, FrameCursor, FrameCursorShape, FramePane,
-    FrameRow, FrameRowEnd, FrameScrollback, FrameSelection, FrameSession, FrameSlot, FrameStyle,
-    FrameTab, FrameTabMeta, FrameUnderline, FrameWindow, PaintedFrame,
+    FrameRow, FrameRowEnd, FrameRun, FrameScrollback, FrameSelection, FrameSession, FrameSlot,
+    FrameStyle, FrameTab, FrameTabMeta, FrameUnderline, FrameWindow, PaintedFrame,
 };
 use koshi_renderer::snapshot::{GridView, PaneSlot, PaneSnapshot, RenderSnapshot, TabMeta};
 use koshi_terminal::grid::state::{Cell, Grid, RowEnd};
@@ -153,8 +153,39 @@ fn wire_row(grid: &Grid, row: u16, cols: u16) -> FrameRow {
         "every grid row is the grid's width"
     );
     let blank = Cell::blank();
-    let cells = (0..cols).map(|col| wire_cell(row_cells.get(col as usize).unwrap_or(&blank)));
-    FrameRow::from_cells(cells, wire_row_end(grid.row_end(row)))
+    let mut runs: Vec<FrameRun> = Vec::new();
+    let mut source_run: Option<(&Cell, u16)> = None;
+    for cell in (0..cols).map(|col| row_cells.get(col as usize).unwrap_or(&blank)) {
+        match source_run {
+            Some((source, count))
+                if count < u16::MAX
+                    && source.ch() == cell.ch()
+                    && source.combining() == cell.combining()
+                    && source.width() == cell.width()
+                    && source.style() == cell.style() =>
+            {
+                source_run = Some((source, count + 1));
+            }
+            Some((source, count)) => {
+                runs.push(FrameRun {
+                    count,
+                    cell: wire_cell(source),
+                });
+                source_run = Some((cell, 1));
+            }
+            None => source_run = Some((cell, 1)),
+        }
+    }
+    if let Some((source, count)) = source_run {
+        runs.push(FrameRun {
+            count,
+            cell: wire_cell(source),
+        });
+    }
+    FrameRow {
+        runs,
+        end: wire_row_end(grid.row_end(row)),
+    }
 }
 
 /// The wire form of one row's line-continuation state.

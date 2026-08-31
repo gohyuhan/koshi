@@ -454,9 +454,9 @@ impl TerminalState {
         self.modes.cursor_shape
     }
 
-    /// The pane's scrollback history. The runtime reads its truncation tallies
-    /// to emit `PaneScrollbackTruncated`, and the renderer reads its lines to
-    /// compose a scrolled-back view.
+    /// The pane's scrollback history. A snapshot reads its truncation tally as
+    /// `ScrollbackMeta::truncated`, and the renderer reads its rows to compose
+    /// a scrolled-back view.
     pub fn scrollback(&self) -> &Scrollback {
         &self.scrollback
     }
