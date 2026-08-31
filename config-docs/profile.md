@@ -30,6 +30,7 @@ A profile is one or more `tab` blocks. A `version` line is required.
 | `horizontal { … }` | Split its children left to right. | ≥ 0.1.0 |
 | `vertical { … }` | Split its children top to bottom. | ≥ 0.1.0 |
 | `stack { … }` | Its children share one rectangle; one is expanded. | ≥ 0.1.0 |
+| `lock` | Bare marker. Start the session's first terminal with input locked. | ≥ 0.4.0 |
 
 A `plugin "<name>"` node parses and validates, and no koshi build launches it:
 a profile holding one starts one shell instead.
@@ -63,6 +64,30 @@ equally. `size` and `weight` are the same slot: give one of the two, once.
 
 Inside a `stack`, `expanded` marks the one member shown open; the rest collapse
 to a one-row header.
+
+## Starting locked
+
+A bare top-level `lock` node starts the session's first terminal in locked
+input mode: keys go straight to the program in the focused pane, and Koshi
+shortcuts do nothing until the lock is released. `koshi unlock` and
+`koshi toggle-lock` release it, and so does the `<C-l>` binding.
+
+`lock` takes no values and no children, and may appear once. A second `lock`,
+or a `lock` carrying a value, drops the whole profile.
+
+Terminals that attach later start unlocked: the node names the state the first
+terminal opens in, not a setting the session keeps.
+
+```kdl
+version 1
+lock
+
+tab {
+    pane {
+        command "htop"
+    }
+}
+```
 
 ## Focus
 

@@ -159,7 +159,7 @@ koshi: `koshi <command>` is a beta feature and did nothing; add a top-level
 Nothing crashes and nothing is lost; the command exits non-zero having done
 nothing.
 
-**0.3.0 marks no feature beta.** Every command in this release runs whether this
+**0.4.0 marks no feature beta.** Every command in this release runs whether this
 setting is on or off. `koshi`, `koshi attach` and `koshi --headless` were beta
 before 0.2.0 and are on for everyone since. The setting stays for the features
 that are marked beta next.
