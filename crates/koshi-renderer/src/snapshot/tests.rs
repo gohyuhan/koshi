@@ -223,6 +223,17 @@ fn a_mouse_frame_keeps_every_field_a_mouse_event_is_answered_from() {
 }
 
 #[test]
+fn a_borrowed_mouse_frame_matches_the_owned_constructor() {
+    let snapshot = fixture(fixture_grid());
+    let committed = CommittedRegions::core(Size { cols: 40, rows: 10 }, 12);
+
+    let borrowed = MouseFrame::from_snapshot(&snapshot, committed.clone());
+    let owned = MouseFrame::with_regions(snapshot, committed);
+
+    assert_eq!(borrowed, owned);
+}
+
+#[test]
 fn a_mouse_frame_keeps_one_entry_per_pane_in_frame_order() {
     let mut snap = fixture(fixture_grid());
     let first = snap.panes[0].clone();

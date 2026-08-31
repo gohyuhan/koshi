@@ -37,8 +37,7 @@ use koshi_core::event::{Event, PluginEvent};
 ///
 /// Example: a `new-pane` binding commits [`Event::PaneCreated`] and
 /// [`Event::PaneFocused`], which become two `info` lines carrying the pane and
-/// tab ids. Typing `ls` into that pane commits [`Event::PaneTyped`] twice and
-/// writes nothing.
+/// tab ids. An [`Event::PaneTyped`] writes nothing, whatever it carries.
 pub fn log_event(event: &Event) {
     match event {
         // --- pane and tab lifecycle: one line per fact a person can point at.

@@ -1,11 +1,11 @@
 //! Per-pane scrollback history: a bounded buffer of lines that have scrolled
 //! off the top of the primary screen.
 //!
-//! The buffer is capped on two axes: a maximum line count and a maximum byte
-//! count. When a push exceeds either cap the oldest lines are dropped from the
-//! front. The count and byte size of everything dropped are tallied (never the
-//! content itself); the runtime reports them through
-//! [`PaneScrollbackTruncated`](koshi_core::event::PaneScrollbackTruncated).
+//! The buffer is capped on two axes: a maximum row count and a maximum byte
+//! count. When a push exceeds either cap the oldest rows are dropped from the
+//! front. The count and byte size of everything dropped are tallied, never the
+//! content itself. A snapshot reads the row tally as one boolean:
+//! `dropped_lines() > 0` becomes `ScrollbackMeta::truncated`.
 
 use std::collections::VecDeque;
 

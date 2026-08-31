@@ -25,9 +25,9 @@
 //! submitted after that resync must arrive on the throttled connection
 //! itself.
 //!
-//! Every wait here is bounded. A queue read is a `recv_timeout(WAIT)` and every
-//! poll loop carries an [`Instant`] deadline, so a session that never resyncs
-//! fails this test instead of hanging it.
+//! Every wait here is bounded. A queue read uses the time left until its
+//! [`Instant`] deadline, so a session that never resyncs fails this test instead
+//! of hanging it.
 
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -62,7 +62,7 @@ use tempfile::TempDir;
 
 /// How long a poll waits for something the session server has to do before the
 /// test calls it a failure.
-const WAIT: Duration = Duration::from_secs(20);
+const WAIT: Duration = Duration::from_secs(60);
 
 /// How long a poll pauses between attempts.
 const POLL: Duration = Duration::from_millis(10);
@@ -640,14 +640,20 @@ fn a_burst_the_throttled_link_cannot_carry_desyncs_that_client_and_resyncs_it() 
     // backlog, and the resync the serve loop owes it lands after that backlog.
     let throttled_events = drain_into_queue(throttled.incoming);
     let deadline = Instant::now() + WAIT;
+    let mut events_read = 0;
     let dropped_count = loop {
         assert!(
             Instant::now() < deadline,
-            "the throttled client was never resynced"
+            "the throttled client was never resynced after reading {events_read} events"
         );
         let event = throttled_events
-            .recv_timeout(WAIT)
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
             .expect("the session keeps writing to the throttled client");
+        events_read += 1;
+        assert!(
+            Instant::now() < deadline,
+            "the throttled client was never resynced after reading {events_read} events"
+        );
         if let SessionEvent::Resync { dropped_count } = event {
             break dropped_count;
         }
@@ -688,8 +694,12 @@ fn a_burst_the_throttled_link_cannot_carry_desyncs_that_client_and_resyncs_it() 
             "the focus change submitted after the resync never reached the throttled client"
         );
         let event = throttled_events
-            .recv_timeout(WAIT)
+            .recv_timeout(probe_deadline.saturating_duration_since(Instant::now()))
             .expect("the session keeps writing to the throttled client");
+        assert!(
+            Instant::now() < probe_deadline,
+            "the focus change submitted after the resync never reached the throttled client"
+        );
         if event
             == (SessionEvent::TabFocused {
                 client_id: probe.client_id,

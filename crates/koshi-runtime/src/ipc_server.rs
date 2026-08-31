@@ -890,7 +890,9 @@ fn stream_events(
                 let _ = writer.send(&SessionEvent::Detached);
                 break;
             };
-            if let Some(event) = wire_event(&delivery) {
+            let event = wire_event(&delivery);
+            drop(delivery);
+            if let Some(event) = event {
                 match writer.send(&event) {
                     Ok(()) => {}
                     // A frame over the cap is refused with nothing written, so

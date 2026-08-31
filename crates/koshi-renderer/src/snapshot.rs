@@ -305,6 +305,20 @@ impl MouseFrame {
         }
     }
 
+    /// Build a mouse frame from a borrowed render snapshot and its painted regions.
+    ///
+    /// The mouse frame copies session, client, and per-pane input data. It does
+    /// not copy pane grids.
+    #[must_use]
+    pub fn from_snapshot(snapshot: &RenderSnapshot, committed_regions: CommittedRegions) -> Self {
+        Self {
+            panes: snapshot.panes.iter().map(MousePane::from).collect(),
+            session: snapshot.session.clone(),
+            client: snapshot.client.clone(),
+            committed_regions,
+        }
+    }
+
     /// Build the mouse frame with the exact region solve that was painted.
     #[must_use]
     pub fn with_regions(snapshot: RenderSnapshot, committed_regions: CommittedRegions) -> Self {

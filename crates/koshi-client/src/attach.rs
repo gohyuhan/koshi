@@ -294,8 +294,7 @@ struct Screen<B: Backend> {
     last_cursor: Option<CursorStyle>,
     /// The snapshot last drawn, kept so a viewer-only change can draw it
     /// again without re-reading the frame. Its grids travel behind `Arc`s, so
-    /// keeping and cloning it moves no cell data. `None` until the first
-    /// draw.
+    /// retaining it does not copy cell data. `None` until the first draw.
     last_snapshot: Option<RenderSnapshot>,
     /// The region solve and input revision committed with the frame on the
     /// screen. It starts with the compiled-in two-row solve.
@@ -326,8 +325,8 @@ impl<B: Backend> Screen<B> {
     /// locked hint bar without changing the viewer when the paint fails.
     ///
     /// The returned [`MouseFrame`] holds the committed region solve, where the
-    /// surfaces sit, and what the cells under them were. That is what the next
-    /// mouse event is answered from.
+    /// surfaces sit, and the per-pane scroll and mouse fields. That is what the
+    /// next mouse event is answered from.
     fn draw(&mut self, client: &mut Client, frame: Box<PaintedFrame>) -> Option<MouseFrame> {
         let snapshot = to_snapshot(&frame);
         let committed_regions = self.regions_for(snapshot.client.viewport);
@@ -346,8 +345,9 @@ impl<B: Backend> Screen<B> {
         adopt_frame(client, &snapshot);
         self.committed_regions = committed_regions.clone();
         self.shown = Some(frame_paint);
-        self.last_snapshot = Some(snapshot.clone());
-        Some(MouseFrame::with_regions(snapshot, committed_regions))
+        let mouse_frame = MouseFrame::from_snapshot(&snapshot, committed_regions);
+        self.last_snapshot = Some(snapshot);
+        Some(mouse_frame)
     }
 
     /// Draw the frame already on the screen again when the viewer has moved
@@ -369,13 +369,13 @@ impl<B: Backend> Screen<B> {
         if self.shown.as_ref() == Some(&current) {
             return;
         }
-        let Some(snapshot) = self.last_snapshot.clone() else {
+        let Some(snapshot) = self.last_snapshot.as_ref() else {
             return;
         };
         if paint(
             &mut self.terminal,
             client,
-            &snapshot,
+            snapshot,
             &self.committed_regions,
             &current,
             &mut self.last_title,
