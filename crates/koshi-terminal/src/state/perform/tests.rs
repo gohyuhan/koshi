@@ -510,8 +510,6 @@ fn image_placement_stays_separate_from_glyph_writes_and_cell_operations() {
         &b"\x1b[3;3H\x1b[1J"[..],
         &b"\x1b[3;3H\x1b[1@"[..],
         &b"\x1b[3;3H\x1b[1P"[..],
-        &b"\x1b[3;3H\x1b[L"[..],
-        &b"\x1b[3;3H\x1b[M"[..],
     ] {
         advance(&mut state, sequence);
         assert_eq!(
@@ -520,6 +518,104 @@ fn image_placement_stays_separate_from_glyph_writes_and_cell_operations() {
             "ordinary operation changed image metadata: {sequence:?}"
         );
     }
+}
+
+#[test]
+fn line_operations_move_or_drop_image_placements_with_their_rows() {
+    let mut state = state(8, 6);
+    let image = image_record((2, 2), 1, 1);
+    state
+        .apply_image_record(&image)
+        .expect("the image fits the grid");
+
+    advance(&mut state, b"\x1b[3;3H\x1b[L");
+    assert_eq!(state.image_placements()[0].anchor(), (3, 2));
+
+    advance(&mut state, b"\x1b[3;3H\x1b[M");
+    assert_eq!(state.image_placements()[0].anchor(), (2, 2));
+
+    let bottom_image = image_record((5, 2), 1, 1);
+    state
+        .apply_image_record(&bottom_image)
+        .expect("the second image fits the grid");
+    advance(&mut state, b"\x1b[3;3H\x1b[L");
+    assert_eq!(state.image_placements().len(), 1);
+    assert_eq!(state.image_placements()[0].anchor(), (3, 2));
+}
+
+#[test]
+fn reverse_index_moves_image_placements_with_inserted_rows() {
+    let mut state = state(8, 6);
+    let image = image_record((0, 2), 1, 1);
+    state
+        .apply_image_record(&image)
+        .expect("the image fits the grid");
+
+    advance(&mut state, b"\x1b[1;1H\x1bM");
+
+    assert_eq!(state.image_placements()[0].anchor(), (1, 2));
+}
+
+#[test]
+fn alternate_line_operations_move_or_drop_image_placements() {
+    let mut state = state(8, 6);
+    advance(&mut state, b"\x1b[?47h");
+    let image = image_record((2, 2), 1, 1);
+    state
+        .apply_image_record(&image)
+        .expect("the alternate image fits the grid");
+
+    advance(&mut state, b"\x1b[3;3H\x1b[L");
+    assert_eq!(state.image_placements()[0].anchor(), (3, 2));
+
+    advance(&mut state, b"\x1b[3;3H\x1b[M");
+    assert_eq!(state.image_placements()[0].anchor(), (2, 2));
+
+    let bottom_image = image_record((5, 2), 1, 1);
+    state
+        .apply_image_record(&bottom_image)
+        .expect("the second alternate image fits the grid");
+    advance(&mut state, b"\x1b[3;3H\x1b[L");
+    assert_eq!(state.image_placements().len(), 1);
+    assert_eq!(state.image_placements()[0].anchor(), (3, 2));
+
+    advance(&mut state, b"\x1b[?47l");
+    assert!(state.image_placements().is_empty());
+}
+
+#[test]
+fn line_operations_drop_images_when_a_one_row_screen_has_no_survivor() {
+    let mut insert_state = state(8, 1);
+    let image = image_record((0, 2), 1, 1);
+    insert_state
+        .apply_image_record(&image)
+        .expect("the image fits the one-row grid");
+    advance(&mut insert_state, b"\x1b[1;1H\x1b[L");
+    assert!(insert_state.image_placements().is_empty());
+
+    let mut delete_state = state(8, 1);
+    delete_state
+        .apply_image_record(&image)
+        .expect("the image fits the one-row grid");
+    advance(&mut delete_state, b"\x1b[1;1H\x1b[M");
+    assert!(delete_state.image_placements().is_empty());
+}
+
+#[test]
+fn deleting_the_last_u16_row_removes_the_shifted_row() {
+    assert_eq!(
+        super::motion::deleted_row(u16::MAX, u16::MAX, u16::MAX, 1),
+        None
+    );
+    assert_eq!(
+        super::motion::deleted_row(u16::MAX, u16::MAX - 1, u16::MAX, 1),
+        Some(u16::MAX - 1)
+    );
+    assert_eq!(super::motion::inserted_row(0, 0, 0, 1), None);
+    assert_eq!(
+        super::motion::inserted_row(u16::MAX - 1, u16::MAX - 1, u16::MAX, 1),
+        Some(u16::MAX)
+    );
 }
 
 #[test]

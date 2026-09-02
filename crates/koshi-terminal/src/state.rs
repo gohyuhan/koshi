@@ -96,8 +96,10 @@ pub struct TerminalState {
     /// The alternate screen's [`RenderState`], cloned from `primary_render` on
     /// each alternate-screen entry.
     alternate_render: RenderState,
-    /// Image placements anchored to the primary screen's cell grid.
+    /// Image placements whose anchors are currently on the primary live grid.
     primary_image_placements: Vec<ImagePlacement>,
+    /// Primary placements whose anchors currently begin in retained history.
+    primary_image_history: Vec<images::PrimaryHistoryImagePlacement>,
     /// Image placements anchored to the alternate screen's cell grid.
     alternate_image_placements: Vec<ImagePlacement>,
     /// The next terminal-local identity assigned to a new image placement.
@@ -153,6 +155,11 @@ struct TerminalStateFields {
     alternate_render: RenderState,
     #[serde(default, deserialize_with = "images::deserialize_image_placements")]
     primary_image_placements: Vec<ImagePlacement>,
+    #[serde(
+        default,
+        deserialize_with = "images::deserialize_primary_image_history"
+    )]
+    primary_image_history: Vec<images::PrimaryHistoryImagePlacement>,
     #[serde(default, deserialize_with = "images::deserialize_image_placements")]
     alternate_image_placements: Vec<ImagePlacement>,
     #[serde(default = "images::default_next_image_placement_id")]
@@ -179,14 +186,7 @@ impl<'de> Deserialize<'de> for TerminalState {
         D: serde::Deserializer<'de>,
     {
         let fields = TerminalStateFields::deserialize(deserializer)?;
-        images::validate_image_state(
-            &fields.primary_image_placements,
-            &fields.alternate_image_placements,
-            fields.next_image_placement_id,
-            fields.primary.dimensions(),
-            fields.alternate.dimensions(),
-        )
-        .map_err(serde::de::Error::custom)?;
+        images::validate_image_state(&fields).map_err(serde::de::Error::custom)?;
 
         Ok(TerminalState {
             primary: fields.primary,
@@ -197,6 +197,7 @@ impl<'de> Deserialize<'de> for TerminalState {
             primary_render: fields.primary_render,
             alternate_render: fields.alternate_render,
             primary_image_placements: fields.primary_image_placements,
+            primary_image_history: fields.primary_image_history,
             alternate_image_placements: fields.alternate_image_placements,
             next_image_placement_id: fields.next_image_placement_id,
             modes: fields.modes,
@@ -241,6 +242,7 @@ impl TerminalState {
             primary_render: RenderState::fresh(),
             alternate_render: RenderState::fresh(),
             primary_image_placements: Vec::new(),
+            primary_image_history: Vec::new(),
             alternate_image_placements: Vec::new(),
             next_image_placement_id: images::default_next_image_placement_id(),
             modes: TerminalModes::default(),
@@ -282,8 +284,10 @@ impl TerminalState {
     /// pads with the screen's own background (a wide glyph whose right half is
     /// cut off is blanked), and a height shrink crops off the top. Both
     /// screens' scroll margins are dropped until the app issues DECSTBM again.
-    /// Image placements are cleared because their cell anchors do not identify
-    /// the same text positions after a resize.
+    /// Primary image anchors follow their row's reflowed text and remain in the
+    /// primary history list when the complete rectangle stays addressable.
+    /// Alternate placements are cleared because the alternate screen is cropped
+    /// and has no row-history mapping.
     /// Both cursors are clamped into the new bounds with their wrap latch
     /// cleared, and an in-progress grapheme cluster is dropped.
     pub fn resize(&mut self, size: PtySize) {
@@ -319,8 +323,7 @@ impl TerminalState {
         );
         self.alternate = Arc::new(Grid::from_rows_with_meta(rows, size.cols, alternate_fill));
 
-        // Clear image anchors that belong to the old grid geometry.
-        self.clear_all_image_placements();
+        self.clear_alternate_image_placements();
 
         // Clamp both cursors to the new bounds.
         self.primary_cursor.row = min(self.primary_cursor.row, size.rows.saturating_sub(1));

@@ -20,6 +20,32 @@ use crate::style::Style;
 
 use super::{rebuilt_with_width, TerminalState};
 
+#[derive(Debug)]
+struct LogicalLine {
+    content: Vec<Cell>,
+    prompt_offsets: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SourceRow {
+    line_index: usize,
+    start_offset: usize,
+    contributed: usize,
+    end: RowEnd,
+}
+
+#[derive(Debug)]
+struct RewrappedLineShape {
+    start: usize,
+    rows: Vec<RewrappedRowShape>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RewrappedRowShape {
+    length: usize,
+    contributed: usize,
+}
+
 impl TerminalState {
     /// Rebuild the primary screen and its scrollback for `size` by re-wrapping
     /// every logical line to the new width. The cursor stays on its logical
@@ -30,6 +56,8 @@ impl TerminalState {
     /// cursor on the first logical line.
     pub(super) fn reflow_primary(&mut self, size: PtySize) {
         let fill = self.primary_render.style.bg_fill();
+        let old_total_pushed = self.scrollback.total_pushed();
+        let old_history_len = self.scrollback.len();
 
         // Every physical row: history first (oldest at the front, taken out
         // of the scrollback buffer), then the live screen, each with its row
@@ -44,9 +72,10 @@ impl TerminalState {
 
         // Unwind into logical lines, tracking which line holds the cursor and
         // where each prompt-marked row begins in that line.
-        let mut lines: Vec<(Vec<Cell>, Vec<usize>)> = Vec::new();
+        let mut lines: Vec<LogicalLine> = Vec::new();
         let mut current: Vec<Cell> = Vec::new();
         let mut prompt_offsets: Vec<usize> = Vec::new();
+        let mut source_rows: Vec<SourceRow> = Vec::new();
         let mut cursor_line = 0_usize;
         let mut cursor_offset = 0_usize;
         for (index, (row, meta)) in physical.into_iter().enumerate() {
@@ -59,6 +88,13 @@ impl TerminalState {
                 // Trailing fully-default blanks are padding, not text.
                 RowEnd::Hard => content_len(&row),
             };
+            let source = SourceRow {
+                line_index: lines.len(),
+                start_offset: current.len(),
+                contributed,
+                end: meta.end,
+            };
+            source_rows.push(source);
             if meta.prompt {
                 prompt_offsets.push(current.len());
             }
@@ -76,38 +112,52 @@ impl TerminalState {
             }
             current.extend(row.into_iter().take(contributed));
             if meta.end == RowEnd::Hard {
-                lines.push((
-                    std::mem::take(&mut current),
-                    std::mem::take(&mut prompt_offsets),
-                ));
+                lines.push(LogicalLine {
+                    content: std::mem::take(&mut current),
+                    prompt_offsets: std::mem::take(&mut prompt_offsets),
+                });
             }
         }
         // A trailing soft-wrapped row with no hard end below it still forms a
         // line, as does a prompt mark left on an empty tail.
         if !current.is_empty() || !prompt_offsets.is_empty() {
-            lines.push((current, prompt_offsets));
+            lines.push(LogicalLine {
+                content: current,
+                prompt_offsets,
+            });
         }
 
         // Re-wrap every logical line to the new width and move each prompt
         // mark to the new row containing the marked row's first content cell.
         let mut rewrapped: Vec<(Vec<Cell>, RowMeta)> = Vec::new();
+        let mut line_shapes: Vec<RewrappedLineShape> = Vec::new();
         let mut new_cursor_physical = 0_usize;
         let mut new_cursor_col = 0_usize;
-        for (index, (content, prompt_offsets)) in lines.into_iter().enumerate() {
+        for (index, line) in lines.into_iter().enumerate() {
             let start = rewrapped.len();
-            let mut rows = rewrap_line(content, size.cols, fill);
+            let mut rows = rewrap_line(line.content, size.cols, fill);
             if index == cursor_line {
                 let (row_in_line, col) = locate_offset(&rows, cursor_offset);
                 new_cursor_physical = start + row_in_line;
                 new_cursor_col = col;
             }
-            for offset in prompt_offsets {
+            for offset in line.prompt_offsets {
                 let (row_in_line, _) = locate_offset(&rows, offset);
                 rows[row_in_line].1.prompt = true;
             }
+            line_shapes.push(RewrappedLineShape {
+                start,
+                rows: rows
+                    .iter()
+                    .map(|(row, meta)| RewrappedRowShape {
+                        length: row.len(),
+                        contributed: rewrapped_row_content_len(row, *meta),
+                    })
+                    .collect(),
+            });
             rewrapped.extend(rows);
         }
-        if rewrapped.is_empty() {
+        if rewrapped.is_empty() && size.rows > 0 {
             rewrapped.push((Vec::new(), RowMeta::default()));
         }
 
@@ -136,6 +186,49 @@ impl TerminalState {
             ));
         }
         self.primary = Arc::new(Grid::from_rows_with_meta(rewrapped, size.cols, fill));
+
+        let retained_history_len = self.scrollback.len();
+        let retained_history_start = overflow.saturating_sub(retained_history_len);
+        let new_total_pushed = self.scrollback.total_pushed();
+        let new_combined_len = overflow.saturating_add(usize::from(size.rows));
+        let old_history_first = old_total_pushed.saturating_sub(old_history_len as u64);
+        let map_image_position = |old_row: u64, old_column: u16| {
+            let old_physical = if old_row < old_total_pushed {
+                usize::try_from(old_row.checked_sub(old_history_first)?).ok()?
+            } else {
+                let live_row = usize::try_from(old_row - old_total_pushed).ok()?;
+                old_history_len.checked_add(live_row)?
+            };
+            let source = source_rows.get(old_physical)?;
+            let line = line_shapes.get(source.line_index)?;
+            let old_offset = source.start_offset
+                + match source.end {
+                    RowEnd::Hard => usize::from(old_column),
+                    RowEnd::Soft | RowEnd::SoftWide => {
+                        usize::from(old_column).min(source.contributed)
+                    }
+                };
+            let (row_in_line, mut column) = locate_shape_offset(&line.rows, old_offset);
+            if source.end == RowEnd::Hard && usize::from(old_column) >= source.contributed {
+                column = usize::from(old_column);
+            }
+            let combined_row = line.start.checked_add(row_in_line)?;
+            if combined_row >= new_combined_len {
+                return None;
+            }
+            let new_row = if combined_row < overflow {
+                if combined_row < retained_history_start {
+                    return None;
+                }
+                new_total_pushed
+                    .checked_sub(retained_history_len as u64)?
+                    .checked_add((combined_row - retained_history_start) as u64)?
+            } else {
+                new_total_pushed.checked_add((combined_row - overflow) as u64)?
+            };
+            Some((new_row, u16::try_from(column).ok()?))
+        };
+        self.remap_primary_image_placements(old_total_pushed, map_image_position);
 
         self.primary_cursor.row = min(
             new_cursor_physical.saturating_sub(overflow),
@@ -224,6 +317,27 @@ fn locate_offset(rows: &[(Vec<Cell>, RowMeta)], offset: usize) -> (usize, usize)
             return (index, remaining);
         }
         remaining -= contributed;
+    }
+    (0, 0)
+}
+
+/// Return the content cells represented by one re-wrapped row. A soft-wide
+/// row's final blank is a spacer for the wide glyph on the next row.
+fn rewrapped_row_content_len(row: &[Cell], meta: RowMeta) -> usize {
+    match meta.end {
+        RowEnd::SoftWide => row.len().saturating_sub(1),
+        RowEnd::Soft | RowEnd::Hard => row.len(),
+    }
+}
+
+/// Locate a content offset in the compact shape of one re-wrapped line.
+fn locate_shape_offset(rows: &[RewrappedRowShape], offset: usize) -> (usize, usize) {
+    let mut remaining = offset;
+    for (index, row) in rows.iter().enumerate() {
+        if remaining < row.contributed || index + 1 == rows.len() {
+            return (index, remaining.min(row.length));
+        }
+        remaining -= row.contributed;
     }
     (0, 0)
 }

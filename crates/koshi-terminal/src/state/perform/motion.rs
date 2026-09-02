@@ -30,10 +30,17 @@ impl TerminalState {
         n: u16,
         fill: Style,
     ) {
-        if self.active == Screen::Primary && first == 0 {
-            let band_height = bottom.saturating_add(1);
-            let removed = n.min(band_height);
-            for row in 0..removed {
+        let (grid_rows, _) = self.active_grid().dimensions();
+        if grid_rows == 0 || first > bottom || first >= grid_rows {
+            return;
+        }
+        let bottom = bottom.min(grid_rows.saturating_sub(1));
+        let band_height = bottom.saturating_sub(first).saturating_add(1);
+        let shift = n.min(band_height);
+        let old_live_top = self.scrollback.total_pushed();
+        let feeds_history = self.active == Screen::Primary && first == 0;
+        if feeds_history {
+            for row in 0..shift {
                 if let Some(scrolled_off) = self.primary.rows().get(row as usize) {
                     let meta = self.primary.row_meta(row);
                     self.scrollback.push_row(scrolled_off, meta);
@@ -41,6 +48,74 @@ impl TerminalState {
             }
         }
         self.active_grid_mut().delete_lines(first, bottom, n, fill);
+
+        if shift == 0 {
+            return;
+        }
+        if feeds_history {
+            self.remap_primary_image_placements(old_live_top, |old_row, column| {
+                if old_row < old_live_top {
+                    return Some((old_row, column));
+                }
+                let row = old_row - old_live_top;
+                if row <= u64::from(bottom) {
+                    Some((old_row, column))
+                } else {
+                    Some((old_row.checked_add(u64::from(shift))?, column))
+                }
+            });
+        } else if self.active == Screen::Primary {
+            self.remap_primary_image_placements(old_live_top, |old_row, column| {
+                if old_row < old_live_top {
+                    return Some((old_row, column));
+                }
+                let row = u16::try_from(old_row - old_live_top).ok()?;
+                let mapped = deleted_row(row, first, bottom, shift)?;
+                Some((old_live_top + u64::from(mapped), column))
+            });
+        } else {
+            self.remap_alternate_image_placements(|row, column| {
+                Some((deleted_row(row, first, bottom, shift)?, column))
+            });
+        }
+    }
+
+    /// Insert `n` blank lines at `first`, shifting the rest of the region down.
+    /// Image rectangles move with rows that remain in the region.
+    pub(super) fn insert_lines_preserving_images(
+        &mut self,
+        first: u16,
+        bottom: u16,
+        n: u16,
+        fill: Style,
+    ) {
+        let (grid_rows, _) = self.active_grid().dimensions();
+        if grid_rows == 0 || first > bottom || first >= grid_rows {
+            return;
+        }
+        let bottom = bottom.min(grid_rows.saturating_sub(1));
+        let band_height = bottom.saturating_sub(first).saturating_add(1);
+        let shift = n.min(band_height);
+        let live_top = self.scrollback.total_pushed();
+        self.active_grid_mut().insert_lines(first, bottom, n, fill);
+
+        if shift == 0 {
+            return;
+        }
+        if self.active == Screen::Primary {
+            self.remap_primary_image_placements(live_top, |old_row, column| {
+                if old_row < live_top {
+                    return Some((old_row, column));
+                }
+                let row = u16::try_from(old_row - live_top).ok()?;
+                let mapped = inserted_row(row, first, bottom, shift)?;
+                Some((live_top + u64::from(mapped), column))
+            });
+        } else {
+            self.remap_alternate_image_placements(|row, column| {
+                Some((inserted_row(row, first, bottom, shift)?, column))
+            });
+        }
     }
 
     /// Move the cursor down one line. At the scroll region's bottom margin the
@@ -97,7 +172,7 @@ impl TerminalState {
         let (top, bottom) = self.region_bounds();
         if self.active_cursor().row == top {
             let fill = self.active_render().style.bg_fill();
-            self.active_grid_mut().insert_lines(top, bottom, 1, fill);
+            self.insert_lines_preserving_images(top, bottom, 1, fill);
         } else if self.active_cursor().row > 0 {
             self.active_cursor_mut().row -= 1;
         }
@@ -194,6 +269,28 @@ impl TerminalState {
     /// Clear every horizontal tab stop.
     pub(super) fn clear_all_tab_stops(&mut self) {
         self.tab_stops.fill(false);
+    }
+}
+
+pub(super) fn deleted_row(row: u16, first: u16, bottom: u16, shift: u16) -> Option<u16> {
+    if row < first || row > bottom {
+        return Some(row);
+    }
+    if u32::from(row - first) < u32::from(shift) {
+        None
+    } else {
+        Some(row - shift)
+    }
+}
+
+pub(super) fn inserted_row(row: u16, first: u16, bottom: u16, shift: u16) -> Option<u16> {
+    if row < first || row > bottom {
+        return Some(row);
+    }
+    if u32::from(bottom - row) < u32::from(shift) {
+        None
+    } else {
+        Some(row + shift)
     }
 }
 

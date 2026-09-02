@@ -5,6 +5,7 @@ use crate::graphics::{
     DecodedImage, GraphicsProtocol, ImageAction, ImageDimension, ImageDisplay, ImageRecord,
 };
 use crate::grid::state::{Cell, Grid, RowEnd, RowMeta};
+use crate::scrollback::ScrollbackLimit;
 use crate::state::images::{MAX_IMAGE_PLACEMENTS, MAX_IMAGE_STORAGE_BYTES};
 use crate::style::{Color, Style};
 
@@ -27,6 +28,11 @@ fn image_record(display: ImageDisplay, anchor: (u16, u16), columns: u32, rows: u
         display,
         anchor,
     }
+}
+
+fn advance(state: &mut TerminalState, bytes: &[u8]) {
+    let mut parser = vte::Parser::<{ crate::engine::OSC_CAPACITY }>::new_with_size();
+    parser.advance(state, bytes);
 }
 
 #[test]
@@ -80,6 +86,7 @@ fn state_without_image_fields_deserializes_with_empty_image_state() {
     let mut value = serde_json::to_value(&state).expect("state serializes");
     let object = value.as_object_mut().expect("state is an object");
     object.remove("primary_image_placements");
+    object.remove("primary_image_history");
     object.remove("alternate_image_placements");
     object.remove("next_image_placement_id");
 
@@ -667,7 +674,7 @@ fn kitty_replacement_does_not_count_non_kitty_records_with_the_same_id() {
 }
 
 #[test]
-fn image_placements_survive_serde_and_resize_clears_old_anchors() {
+fn image_placements_survive_serde_and_primary_reflow() {
     let mut state = TerminalState::new(PtySize { cols: 8, rows: 8 });
     let record = image_record(
         ImageDisplay {
@@ -688,7 +695,408 @@ fn image_placements_survive_serde_and_resize_clears_old_anchors() {
     assert_eq!(restored, state);
 
     state.resize(PtySize { cols: 4, rows: 4 });
+    assert_eq!(state.image_placements().len(), 1);
+    assert_eq!(state.image_placements()[0].anchor(), (1, 1));
+    assert_eq!(state.image_placements()[0].record(), &record);
+    assert_eq!(
+        serde_json::from_value::<TerminalState>(
+            serde_json::to_value(&state).expect("reflowed state serializes")
+        )
+        .expect("reflowed state deserializes"),
+        state
+    );
+}
+
+#[test]
+fn primary_image_placement_follows_rows_into_history_and_scrolled_views() {
+    let mut state =
+        TerminalState::with_scrollback(PtySize { cols: 4, rows: 2 }, ScrollbackLimit::new(8, 1024));
+    let record = image_record(
+        ImageDisplay {
+            cell_columns: Some(1),
+            cell_rows: Some(2),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (0, 0),
+        1,
+        2,
+    );
+    state.apply_image_record(&record).expect("the image fits");
+
+    advance(&mut state, b"\x1b[2;1H\n");
+    assert_eq!(state.scrollback().len(), 1);
     assert_eq!(state.image_placements(), &[]);
+    let first_view = state.image_placements_for_view(1);
+    assert_eq!(first_view.len(), 1);
+    assert_eq!(first_view[0].anchor(), (0, 0));
+    assert_eq!(first_view[0].dimensions(), (2, 1));
+
+    advance(&mut state, b"\x1b[2;1H\n");
+    assert_eq!(state.scrollback().len(), 2);
+    assert_eq!(state.image_placements(), &[]);
+    let second_view = state.image_placements_for_view(2);
+    assert_eq!(second_view.len(), 1);
+    assert_eq!(second_view[0].anchor(), (0, 0));
+    assert_eq!(second_view[0].record(), &record);
+    assert!(state.image_placements_for_view(0).is_empty());
+
+    let restored: TerminalState =
+        serde_json::from_value(serde_json::to_value(&state).expect("history state serializes"))
+            .expect("history state deserializes");
+    assert_eq!(restored, state);
+    assert_eq!(restored.image_placements_for_view(2), second_view);
+}
+
+#[test]
+fn serialized_primary_history_image_must_fit_the_primary_width() {
+    let mut state =
+        TerminalState::with_scrollback(PtySize { cols: 4, rows: 2 }, ScrollbackLimit::new(8, 1024));
+    let record = image_record(
+        ImageDisplay {
+            cell_columns: Some(1),
+            cell_rows: Some(1),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (0, 0),
+        1,
+        1,
+    );
+    state.apply_image_record(&record).expect("the image fits");
+    advance(&mut state, b"\x1b[2;1H\n");
+
+    let mut value = serde_json::to_value(&state).expect("history state serializes");
+    value["primary_image_history"][0]["anchor"] = serde_json::json!([0, 4]);
+
+    let error = serde_json::from_value::<TerminalState>(value)
+        .expect_err("a history image outside the primary width must be rejected");
+    assert_eq!(
+        error.to_string(),
+        "image placement at primary row 0, column 4 with 1 columns exceeds the 4-column primary grid"
+    );
+}
+
+#[test]
+fn serialized_primary_history_image_must_fit_the_retained_row_range() {
+    let mut state =
+        TerminalState::with_scrollback(PtySize { cols: 4, rows: 2 }, ScrollbackLimit::new(8, 1024));
+    let record = image_record(
+        ImageDisplay {
+            cell_columns: Some(1),
+            cell_rows: Some(1),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (0, 0),
+        1,
+        1,
+    );
+    state.apply_image_record(&record).expect("the image fits");
+    advance(&mut state, b"\x1b[2;1H\n");
+
+    let mut value = serde_json::to_value(&state).expect("history state serializes");
+    value["primary_image_history"][0]["anchor"] = serde_json::json!([2, 0]);
+
+    let error = serde_json::from_value::<TerminalState>(value)
+        .expect_err("a history image outside the retained rows must be rejected");
+    assert_eq!(
+        error.to_string(),
+        "image placement at primary row 2, column 0 with 1 columns by 1 rows exceeds retained primary rows 0 up to but not including 3"
+    );
+}
+
+#[test]
+fn serialized_primary_row_counter_must_leave_room_for_live_rows() {
+    let mut state = TerminalState::new(PtySize { cols: 4, rows: 2 });
+    let record = image_record(
+        ImageDisplay {
+            cell_columns: Some(1),
+            cell_rows: Some(1),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (0, 0),
+        1,
+        1,
+    );
+    state.apply_image_record(&record).expect("the image fits");
+
+    let mut value = serde_json::to_value(&state).expect("state serializes");
+    value["scrollback"]["total_pushed"] = serde_json::json!(u64::MAX);
+
+    let error = serde_json::from_value::<TerminalState>(value)
+        .expect_err("a live-row range that overflows u64 must be rejected");
+    assert_eq!(
+        error.to_string(),
+        "primary image row range at 18446744073709551615 with 2 live rows overflows u64"
+    );
+}
+
+#[test]
+fn serialized_scrollback_cannot_exceed_its_absolute_row_count() {
+    let mut state = TerminalState::new(PtySize { cols: 4, rows: 2 });
+    state
+        .scrollback
+        .push_row(&[Cell::blank()], RowMeta::default());
+
+    let mut value = serde_json::to_value(&state).expect("state serializes");
+    value["scrollback"]["total_pushed"] = serde_json::json!(0);
+
+    let error = serde_json::from_value::<TerminalState>(value)
+        .expect_err("retained rows must have nonnegative absolute row numbers");
+    assert_eq!(
+        error.to_string(),
+        "primary scrollback row count 1 exceeds total pushed count 0"
+    );
+}
+
+#[test]
+fn primary_image_placement_is_removed_as_one_rectangle_when_history_evicts_it() {
+    let mut state =
+        TerminalState::with_scrollback(PtySize { cols: 4, rows: 2 }, ScrollbackLimit::new(1, 1024));
+    let record = image_record(
+        ImageDisplay {
+            cell_columns: Some(1),
+            cell_rows: Some(1),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (0, 0),
+        1,
+        1,
+    );
+    state.apply_image_record(&record).expect("the image fits");
+
+    advance(&mut state, b"\x1b[2;1H\n\x1b[2;1H\n");
+    assert_eq!(state.scrollback().len(), 1);
+    assert!(state.image_placements().is_empty());
+    assert!(state.primary_image_history.is_empty());
+    assert!(state.image_placements_for_view(1).is_empty());
+}
+
+#[test]
+fn primary_image_placement_crossing_the_live_screen_is_cleared_by_ed_2() {
+    let mut state =
+        TerminalState::with_scrollback(PtySize { cols: 4, rows: 2 }, ScrollbackLimit::new(8, 1024));
+    let record = image_record(
+        ImageDisplay {
+            cell_columns: Some(1),
+            cell_rows: Some(2),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (0, 0),
+        1,
+        2,
+    );
+    state.apply_image_record(&record).expect("the image fits");
+
+    advance(&mut state, b"\x1b[2;1H\n");
+    assert!(state.image_placements().is_empty());
+    let crossing_view = state.image_placements_for_view(1);
+    assert_eq!(crossing_view.len(), 1);
+    assert_eq!(crossing_view[0].anchor(), (0, 0));
+
+    advance(&mut state, b"\x1b[2J");
+    assert!(state.image_placements().is_empty());
+    assert!(state.image_placements_for_view(1).is_empty());
+}
+
+#[test]
+fn ed_3_removes_primary_image_placements_from_cleared_history() {
+    let mut state =
+        TerminalState::with_scrollback(PtySize { cols: 4, rows: 2 }, ScrollbackLimit::new(8, 1024));
+    let record = image_record(
+        ImageDisplay {
+            image_id: Some(7),
+            placement_id: Some(3),
+            cell_columns: Some(1),
+            cell_rows: Some(1),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (0, 0),
+        1,
+        1,
+    );
+    state.apply_image_record(&record).expect("the image fits");
+
+    advance(&mut state, b"\x1b[2;1H\n");
+    assert_eq!(state.image_placements_for_view(1).len(), 1);
+
+    advance(&mut state, b"\x1b[3J");
+    assert!(state.scrollback().is_empty());
+    assert!(state.image_placements_for_view(1).is_empty());
+}
+
+#[test]
+fn kitty_replacement_replaces_a_primary_history_placement() {
+    let mut state =
+        TerminalState::with_scrollback(PtySize { cols: 4, rows: 2 }, ScrollbackLimit::new(8, 1024));
+    let first = image_record(
+        ImageDisplay {
+            image_id: Some(7),
+            placement_id: Some(3),
+            cell_columns: Some(1),
+            cell_rows: Some(1),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (0, 0),
+        1,
+        1,
+    );
+    state
+        .apply_image_record(&first)
+        .expect("the first image fits");
+    advance(&mut state, b"\x1b[2;1H\n");
+    assert_eq!(state.image_placements_for_view(1).len(), 1);
+
+    let other = image_record(
+        ImageDisplay {
+            cell_columns: Some(1),
+            cell_rows: Some(1),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (1, 2),
+        1,
+        1,
+    );
+    state
+        .apply_image_record(&other)
+        .expect("the other image fits");
+
+    let replacement = image_record(
+        ImageDisplay {
+            image_id: Some(7),
+            placement_id: Some(3),
+            cell_columns: Some(1),
+            cell_rows: Some(1),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (0, 1),
+        1,
+        1,
+    );
+    state
+        .apply_image_record(&replacement)
+        .expect("the replacement fits");
+
+    assert_eq!(state.image_placements().len(), 2);
+    assert_eq!(state.image_placements()[0].id(), 1);
+    assert_eq!(state.image_placements()[0].anchor(), (0, 1));
+    assert_eq!(state.image_placements()[0].record(), &replacement);
+    assert_eq!(state.image_placements()[1].id(), 2);
+    assert_eq!(state.image_placements()[1].anchor(), (1, 2));
+    let live_view = state.image_placements_for_view(0);
+    assert_eq!(live_view.len(), 2);
+    assert_eq!(live_view[0].anchor(), (0, 1));
+    assert_eq!(live_view[1].anchor(), (1, 2));
+    let scrolled_view = state.image_placements_for_view(1);
+    assert_eq!(scrolled_view.len(), 1);
+    assert_eq!(scrolled_view[0].anchor(), (1, 1));
+}
+
+#[test]
+fn primary_image_drops_when_reflow_width_has_no_columns() {
+    let mut state = TerminalState::new(PtySize { cols: 3, rows: 2 });
+    let record = image_record(
+        ImageDisplay {
+            cell_columns: Some(1),
+            cell_rows: Some(1),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (0, 0),
+        1,
+        1,
+    );
+    state.apply_image_record(&record).expect("the image fits");
+
+    state.resize(PtySize { cols: 0, rows: 2 });
+
+    assert!(state.image_placements().is_empty());
+    assert!(state.image_placements_for_view(0).is_empty());
+}
+
+#[test]
+fn primary_image_anchor_follows_text_through_width_reflow() {
+    let mut state = TerminalState::new(PtySize { cols: 6, rows: 3 });
+    advance(&mut state, b"abcdef");
+    let record = image_record(
+        ImageDisplay {
+            cell_columns: Some(1),
+            cell_rows: Some(1),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (0, 4),
+        1,
+        1,
+    );
+    state.apply_image_record(&record).expect("the image fits");
+
+    state.resize(PtySize { cols: 3, rows: 3 });
+
+    assert_eq!(state.image_placements().len(), 1);
+    assert_eq!(state.image_placements()[0].anchor(), (1, 1));
+    assert_eq!(state.image_placements()[0].record(), &record);
+}
+
+#[test]
+fn primary_image_rectangle_is_dropped_when_reflow_cannot_fit_it() {
+    let mut state = TerminalState::new(PtySize { cols: 3, rows: 3 });
+    advance(&mut state, b"abc");
+    let record = image_record(
+        ImageDisplay {
+            cell_columns: Some(2),
+            cell_rows: Some(1),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (0, 1),
+        2,
+        1,
+    );
+    state.apply_image_record(&record).expect("the image fits");
+
+    state.resize(PtySize { cols: 2, rows: 3 });
+
+    assert!(state.image_placements().is_empty());
+    assert!(state.image_placements_for_view(0).is_empty());
+}
+
+#[test]
+fn primary_multi_row_image_drops_when_reflow_changes_its_columns() {
+    let mut state = TerminalState::new(PtySize { cols: 4, rows: 3 });
+    for (column, ch) in "abcd".chars().enumerate() {
+        put(&mut state, 0, column as u16, ch, 1);
+    }
+    for (column, ch) in "ef".chars().enumerate() {
+        put(&mut state, 1, column as u16, ch, 1);
+    }
+    state.active_grid_mut().set_row_end(0, RowEnd::Soft);
+
+    let record = image_record(
+        ImageDisplay {
+            cell_columns: Some(1),
+            cell_rows: Some(2),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (0, 1),
+        1,
+        2,
+    );
+    state.apply_image_record(&record).expect("the image fits");
+
+    state.resize(PtySize { cols: 3, rows: 3 });
+
+    assert!(state.image_placements().is_empty());
+    assert!(state.image_placements_for_view(0).is_empty());
 }
 
 #[test]
@@ -1085,6 +1493,17 @@ fn resize_to_zero_rows_pushes_all_content_into_scrollback_without_panicking() {
     assert_eq!(state.primary.cell(1, 0).unwrap().ch(), 'b');
     assert_eq!(state.primary.cell(2, 0).unwrap().ch(), 'c');
     assert_eq!(state.scrollback.len(), 0);
+}
+
+#[test]
+fn empty_zero_row_resize_does_not_create_scrollback_history() {
+    let mut state = TerminalState::new(PtySize { cols: 4, rows: 0 });
+
+    state.resize(PtySize { cols: 4, rows: 0 });
+
+    assert_eq!(state.primary.dimensions(), (0, 0));
+    assert_eq!(state.scrollback.len(), 0);
+    assert_eq!(state.scrollback.total_pushed(), 0);
 }
 
 #[test]

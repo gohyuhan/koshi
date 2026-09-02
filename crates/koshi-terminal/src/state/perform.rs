@@ -451,10 +451,14 @@ impl vte::Perform for TerminalState {
                         self.clear_active_image_placements();
                     }
                     // Erase scrollback only (xterm "erase saved lines"): drop
-                    // the retained history and leave the visible screen as it
-                    // is. Primary screen only: on the alternate screen ED 3
-                    // falls through to the `_` arm and changes nothing.
-                    3 if self.active == Screen::Primary => self.scrollback.clear(),
+                    // the retained history and its primary image placements,
+                    // leaving the visible screen as it is. Primary screen
+                    // only: on the alternate screen ED 3 falls through to the
+                    // `_` arm and changes nothing.
+                    3 if self.active == Screen::Primary => {
+                        self.scrollback.clear();
+                        self.clear_primary_image_history();
+                    }
                     // Unknown ED mode: ignored.
                     _ => {}
                 }
@@ -547,7 +551,7 @@ impl vte::Perform for TerminalState {
                     let n = move_count(params);
                     let fill = self.active_render().style.bg_fill();
                     let r = self.active_cursor().row;
-                    self.active_grid_mut().insert_lines(r, bottom, n, fill);
+                    self.insert_lines_preserving_images(r, bottom, n, fill);
                 }
             }
             // DL — delete n lines at the cursor row, scrolling the rest of the
@@ -576,7 +580,7 @@ impl vte::Perform for TerminalState {
                     let n = move_count(params);
                     let fill = self.active_render().style.bg_fill();
                     let (top, bottom) = self.region_bounds();
-                    self.active_grid_mut().insert_lines(top, bottom, n, fill);
+                    self.insert_lines_preserving_images(top, bottom, n, fill);
                 }
             }
             // DECSTBM — set the top/bottom scroll margins (1-based; defaults are
