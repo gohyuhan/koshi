@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use koshi_core::process::PtySize;
 
+use crate::graphics::{DecodedImage, GraphicsProtocol, ImageAction, ImageDisplay};
 use crate::state::{Screen, ShellIntegrationFact, TerminalState};
 use crate::style::{Color, Style};
 
@@ -250,6 +251,104 @@ fn resize_resizes_the_state() {
     engine.resize(PtySize { cols: 4, rows: 2 });
 
     assert_eq!(engine.state().active_grid().dimensions(), (2, 4));
+}
+
+#[test]
+fn a_graphics_image_byte_limit_drops_the_next_image() {
+    let mut engine = engine();
+    engine.queue_graphics_event(Ok(ImageRecord {
+        protocol: GraphicsProtocol::Kitty,
+        image: DecodedImage {
+            width: 16_384,
+            height: 1_024,
+            rgba: vec![0; MAX_IMAGE_BYTES],
+        },
+        action: ImageAction::Transmit,
+        display: ImageDisplay::default(),
+        anchor: (0, 0),
+    }));
+
+    let _ = engine.advance(b"\x1bPq#1@\x1b\\");
+    let events = engine.take_graphics();
+
+    assert_eq!(events.len(), 2);
+    match &events[0] {
+        Ok(record) => {
+            assert_eq!(record.image.width, 16_384);
+            assert_eq!(record.image.height, 1_024);
+            assert_eq!(record.image.rgba.len(), MAX_IMAGE_BYTES);
+        }
+        Err(error) => panic!("the full image must stay queued, got {error:?}"),
+    }
+    assert_eq!(events[1], Err(GraphicsError::QueueFull { dropped: 1 }));
+}
+
+#[test]
+fn c1_graphics_bytes_do_not_change_terminal_state() {
+    let mut engine = engine();
+    let before = engine.state().clone();
+    let mut bytes = vec![0x9f];
+    bytes.extend_from_slice(b"Gf=32,s=1,v=1;/wAA/w==");
+    bytes.push(0x9c);
+
+    assert_eq!(engine.advance(&bytes), b"");
+    assert_eq!(engine.state(), &before);
+    assert_eq!(
+        engine.take_graphics(),
+        vec![Ok(ImageRecord {
+            protocol: GraphicsProtocol::Kitty,
+            image: DecodedImage {
+                width: 1,
+                height: 1,
+                rgba: vec![255, 0, 0, 255],
+            },
+            action: ImageAction::Transmit,
+            display: ImageDisplay::default(),
+            anchor: (0, 0),
+        })]
+    );
+}
+
+#[test]
+fn c1_osc_shell_marker_is_not_printed() {
+    let mut engine = engine();
+    let before = engine.state().clone();
+    let mut bytes = vec![0x9d];
+    bytes.extend_from_slice(b"133;C");
+    bytes.push(0x07);
+
+    let (_, facts) = engine.advance_with_shell_integration(&bytes);
+
+    assert_eq!(facts, vec![ShellIntegrationFact::CommandStarted]);
+    assert_eq!(engine.state().active_grid(), before.active_grid());
+    assert_eq!(engine.state().active_cursor_position(), (0, 0));
+}
+
+#[test]
+fn c1_string_openers_inside_osc_remain_osc_data() {
+    let mut engine = engine();
+
+    let mut bytes = b"\x1b]2;before".to_vec();
+    bytes.push(0x9f);
+    bytes.extend_from_slice(b"after\x07");
+
+    let _ = engine.advance(&bytes);
+
+    assert_eq!(engine.state().title(), Some("before�after"));
+    assert_eq!(engine.state().active_cursor_position(), (0, 0));
+}
+
+#[test]
+fn utf8_c1_st_inside_osc_remains_osc_data() {
+    let mut engine = engine();
+
+    let mut bytes = b"\x1b]2;before\xc2".to_vec();
+    bytes.extend_from_slice(b"\x9cafter\x07");
+
+    let _ = engine.advance(&bytes);
+
+    assert_eq!(engine.state().title(), Some("beforeafter"));
+    assert_eq!(engine.state().active_cursor_position(), (0, 0));
 }
 
 #[test]

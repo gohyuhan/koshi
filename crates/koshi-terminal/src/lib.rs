@@ -7,6 +7,7 @@
 
 pub mod engine;
 pub mod error;
+pub mod graphics;
 pub mod grid;
 pub mod mouse_report;
 pub mod scrollback;

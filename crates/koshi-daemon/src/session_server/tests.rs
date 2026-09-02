@@ -1615,6 +1615,13 @@ fn carried_nothing(start: &SessionStart) -> (ResumeHeader, ResumeBody) {
         sessions: HashMap::new(),
         engines: HashMap::new(),
         undecoded: HashMap::new(),
+        graphics_undecoded: HashMap::new(),
+        graphics_screen_continuation: HashMap::new(),
+        graphics_screen_wrapper_active: HashMap::new(),
+        graphics_tmux_continuation: HashMap::new(),
+        graphics_tmux_wrapper_active: HashMap::new(),
+        graphics_events: HashMap::new(),
+        graphics_transport: HashMap::new(),
         quit: None,
     };
     (header, body)

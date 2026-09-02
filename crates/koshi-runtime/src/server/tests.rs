@@ -28,6 +28,9 @@ use koshi_pane::pane::state::PaneRecord;
 use koshi_renderer::snapshot::Delivery;
 use koshi_session::client::{ClientOrigin, ClientRegistry};
 use koshi_session::session::state::Tab;
+use koshi_terminal::graphics::{
+    DecodedImage, GraphicsProtocol, ImageAction, ImageDisplay, ImageRecord,
+};
 use koshi_test_support::fake_pty::FakePtyBackend;
 
 use super::*;
@@ -2476,6 +2479,140 @@ fn a_resumed_server_puts_every_carried_engine_back_with_its_undecoded_bytes() {
         root,
         "the handle the caller built is the one the pane keeps"
     );
+}
+
+#[test]
+fn a_resumed_server_keeps_queued_graphics_events() {
+    let (mut server, client_id) = booted_server();
+    let (_session_id, _tab_id, root) = booted_parts(&server, client_id);
+    server.handle_pty_output(root, b"\x1b_Ga=T,f=32,s=1,v=1;/wAA/w==\x1b\\");
+
+    let (_header, body) = server.carry_out(&[]).expect("a session to carry");
+    assert_eq!(body.graphics_events[&root].len(), 1);
+
+    let (tx, inbox_rx) = mpsc::channel();
+    let mut resumed = Server::resume(
+        Arc::new(FakePtyBackend::new()),
+        inbox_rx,
+        tx,
+        body,
+        HashMap::from([(root, PtyHandle::detached(root))]),
+        HashMap::from([(root, PtySize { cols: 78, rows: 20 })]),
+    );
+
+    assert_eq!(
+        resumed
+            .terminal_engines
+            .get_mut(&root)
+            .expect("the engine")
+            .take_graphics(),
+        vec![Ok(ImageRecord {
+            protocol: GraphicsProtocol::Kitty,
+            image: DecodedImage {
+                width: 1,
+                height: 1,
+                rgba: vec![255, 0, 0, 255],
+            },
+            action: ImageAction::Display,
+            display: ImageDisplay::default(),
+            anchor: (0, 0),
+        })]
+    );
+}
+
+#[test]
+fn a_resumed_server_keeps_the_graphics_queue_overflow_report() {
+    let (mut server, client_id) = booted_server();
+    let (_session_id, _tab_id, root) = booted_parts(&server, client_id);
+    let mut bytes = Vec::new();
+    for _ in 0..66 {
+        bytes.extend_from_slice(b"\x1b_Ga=T,f=32,s=1,v=1;/wAA/w==\x1b\\");
+    }
+    server.handle_pty_output(root, &bytes);
+
+    let (_header, body) = server.carry_out(&[]).expect("a session to carry");
+    assert_eq!(
+        body.graphics_events[&root].len(),
+        koshi_terminal::engine::MAX_GRAPHICS_EVENT_BATCH
+    );
+
+    let (tx, inbox_rx) = mpsc::channel();
+    let mut resumed = Server::resume(
+        Arc::new(FakePtyBackend::new()),
+        inbox_rx,
+        tx,
+        body,
+        HashMap::from([(root, PtyHandle::detached(root))]),
+        HashMap::from([(root, PtySize { cols: 78, rows: 20 })]),
+    );
+    let events = resumed
+        .terminal_engines
+        .get_mut(&root)
+        .expect("the resumed engine")
+        .take_graphics();
+
+    assert_eq!(
+        events.len(),
+        koshi_terminal::engine::MAX_GRAPHICS_EVENT_BATCH
+    );
+    assert_eq!(
+        events.last(),
+        Some(&Err(koshi_terminal::graphics::GraphicsError::QueueFull {
+            dropped: 2
+        }))
+    );
+}
+
+#[test]
+fn a_resumed_server_keeps_graphics_inside_a_split_screen_wrapper() {
+    let (mut server, client_id) = booted_server();
+    let (_session_id, _tab_id, root) = booted_parts(&server, client_id);
+    let image = b"\x1b]1337;File=inline=1:iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=\x07";
+    let split = image.len() / 2;
+    let screen_wrap = |inner: &[u8]| {
+        let mut bytes = b"\x1bP".to_vec();
+        bytes.extend_from_slice(inner);
+        bytes.extend_from_slice(b"\x1b\\");
+        bytes
+    };
+
+    server.handle_pty_output(root, &screen_wrap(&image[..split]));
+    let (_header, body) = server.carry_out(&[]).expect("a session to carry");
+    let transport = body
+        .graphics_transport
+        .get(&root)
+        .expect("the split wrapper has transport state");
+    assert!(transport.screen_inner.is_some());
+
+    let (tx, inbox_rx) = mpsc::channel();
+    let mut resumed = Server::resume(
+        Arc::new(FakePtyBackend::new()),
+        inbox_rx,
+        tx,
+        body,
+        HashMap::from([(root, PtyHandle::detached(root))]),
+        HashMap::from([(root, PtySize { cols: 78, rows: 20 })]),
+    );
+    resumed.handle_pty_output(root, &screen_wrap(&image[split..]));
+
+    let events = resumed
+        .terminal_engines
+        .get_mut(&root)
+        .expect("the resumed engine")
+        .take_graphics();
+    assert_eq!(events.len(), 1);
+    let event = events
+        .into_iter()
+        .next()
+        .expect("the resumed image event")
+        .expect("the resumed image decodes");
+    assert_eq!(event.protocol, GraphicsProtocol::Iterm2);
+    assert_eq!(event.image.width, 1);
+    assert_eq!(event.image.height, 1);
+    assert_eq!(event.image.rgba, vec![0, 0, 0, 255]);
+    assert_eq!(event.action, ImageAction::Display);
+    assert_eq!(event.display, ImageDisplay::default());
+    assert_eq!(event.anchor, (0, 0));
 }
 
 #[cfg(unix)]
