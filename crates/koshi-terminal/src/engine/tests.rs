@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use koshi_core::process::PtySize;
 
-use crate::graphics::{DecodedImage, GraphicsProtocol, ImageAction, ImageDisplay};
-use crate::state::{Screen, ShellIntegrationFact, TerminalState};
+use crate::graphics::{DecodedGraphics, DecodedImage, GraphicsProtocol, ImageAction, ImageDisplay};
+use crate::state::{ImagePlacementError, Screen, ShellIntegrationFact, TerminalState};
 use crate::style::{Color, Style};
 
 use super::*;
@@ -268,7 +268,7 @@ fn a_graphics_image_byte_limit_drops_the_next_image() {
         anchor: (0, 0),
     }));
 
-    let _ = engine.advance(b"\x1bPq#1@\x1b\\");
+    let _ = engine.advance(b"\x1b_Ga=T,f=32,s=1,v=1,c=1,r=1,C=1;/wAA/w==\x1b\\");
     let events = engine.take_graphics();
 
     assert_eq!(events.len(), 2);
@@ -281,6 +281,44 @@ fn a_graphics_image_byte_limit_drops_the_next_image() {
         Err(error) => panic!("the full image must stay queued, got {error:?}"),
     }
     assert_eq!(events[1], Err(GraphicsError::QueueFull { dropped: 1 }));
+}
+
+#[test]
+fn rejected_graphics_placements_do_not_consume_the_image_byte_budget() {
+    let mut engine = engine();
+    let rejected = || DecodedGraphics {
+        protocol: GraphicsProtocol::Sixel,
+        image: DecodedImage {
+            width: 1,
+            height: 1,
+            rgba: vec![0; MAX_IMAGE_BYTES],
+        },
+        action: ImageAction::Display,
+        display: ImageDisplay::default(),
+    };
+
+    engine.queue_graphics(Ok(rejected()), (0, 0));
+    engine.queue_graphics(Ok(rejected()), (0, 0));
+
+    assert_eq!(
+        engine.take_graphics(),
+        vec![
+            Err(GraphicsError::PlacementRejected {
+                protocol: GraphicsProtocol::Sixel,
+                reason: ImagePlacementError::MissingCellDimensions {
+                    width: None,
+                    height: None,
+                },
+            }),
+            Err(GraphicsError::PlacementRejected {
+                protocol: GraphicsProtocol::Sixel,
+                reason: ImagePlacementError::MissingCellDimensions {
+                    width: None,
+                    height: None,
+                },
+            }),
+        ]
+    );
 }
 
 #[test]

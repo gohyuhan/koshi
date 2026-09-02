@@ -513,8 +513,8 @@ impl TerminalEngine {
     /// their protocol terminators reached the terminal parser. When the queue
     /// dropped records, one `QueueFull` report follows the held events.
     ///
-    /// A one-pixel red Sixel followed by malformed kitty data returns one
-    /// successful record and one typed error; neither sequence writes a cell.
+    /// A display record is applied to image state before it is made available
+    /// to the caller; a malformed or unplaceable record returns a typed error.
     pub fn take_graphics(&mut self) -> Vec<GraphicsEvent> {
         let mut events: Vec<GraphicsEvent> = self.graphics_events.drain(..).collect();
         self.graphics_event_bytes = 0;
@@ -638,14 +638,27 @@ impl TerminalEngine {
         result: Result<crate::graphics::DecodedGraphics, GraphicsError>,
         anchor: (u16, u16),
     ) {
-        let event = result.map(|decoded| ImageRecord {
-            protocol: decoded.protocol,
-            image: decoded.image,
-            action: decoded.action,
-            display: decoded.display,
-            anchor,
-        });
-        self.queue_graphics_event(event);
+        match result {
+            Ok(decoded) => {
+                let record = ImageRecord {
+                    protocol: decoded.protocol,
+                    image: decoded.image,
+                    action: decoded.action,
+                    display: decoded.display,
+                    anchor,
+                };
+                let bytes = record.image.rgba.len();
+                let protocol = record.protocol;
+                let event = self
+                    .state
+                    .apply_image_record(&record)
+                    .map(|()| record)
+                    .map_err(|reason| GraphicsError::PlacementRejected { protocol, reason });
+                let queued_bytes = if event.is_ok() { bytes } else { 0 };
+                self.queue_graphics_event_with_bytes(event, queued_bytes);
+            }
+            Err(error) => self.queue_graphics_event(Err(error)),
+        }
     }
 
     fn queue_graphics_event(&mut self, event: GraphicsEvent) {
@@ -653,6 +666,10 @@ impl TerminalEngine {
             Ok(record) => record.image.rgba.len(),
             Err(_) => 0,
         };
+        self.queue_graphics_event_with_bytes(event, bytes);
+    }
+
+    fn queue_graphics_event_with_bytes(&mut self, event: GraphicsEvent, bytes: usize) {
         if self.graphics_events.len() == MAX_GRAPHICS_EVENTS
             || self
                 .graphics_event_bytes

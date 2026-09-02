@@ -3,7 +3,7 @@
 //! The decoder accepts Sixel, kitty graphics, and iTerm2 inline image
 //! transfers. It turns each complete image into RGBA pixels and never writes
 //! to a terminal grid. The terminal engine adds the cursor position at which
-//! the sequence ended before it gives the record to its caller.
+//! the sequence ended, then applies display records to terminal image state.
 
 use std::io::{Cursor, Read};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -15,6 +15,8 @@ use koshi_core::error::{DomainCategory, DomainError, Severity};
 use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
+
+use crate::state::ImagePlacementError;
 
 /// The largest decoded image, measured in pixels.
 pub const MAX_IMAGE_PIXELS: usize = 16_777_216;
@@ -206,10 +208,12 @@ where
 /// The transfer action recorded with an image record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ImageAction {
-    /// Store the decoded image without a display request.
+    /// Transmit the decoded image without requesting display.
     Transmit,
-    /// Store the decoded image with a display request.
+    /// Place a decoded image without a Kitty image transfer.
     Display,
+    /// Transmit and place the decoded image in one operation.
+    TransmitAndDisplay,
 }
 
 /// A complete image transfer queued for the terminal caller.
@@ -219,7 +223,7 @@ pub struct ImageRecord {
     pub protocol: GraphicsProtocol,
     /// Validated pixel data.
     pub image: DecodedImage,
-    /// Whether the transfer stores the image only or also asks for display.
+    /// The state operation represented by the transfer.
     pub action: ImageAction,
     /// Display hints supplied by the protocol.
     pub display: ImageDisplay,
@@ -597,7 +601,7 @@ fn default_true() -> bool {
     true
 }
 
-/// A recoverable terminal-image decoding error.
+/// A recoverable terminal-image processing error.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum GraphicsError {
     /// A sequence ended without a complete image transfer.
@@ -635,6 +639,15 @@ pub enum GraphicsError {
     /// Width, height, or a byte-count multiplication is invalid.
     #[error("{protocol:?} image dimensions are invalid")]
     InvalidDimensions { protocol: GraphicsProtocol },
+    /// A decoded display record cannot become an active image placement.
+    #[error("{protocol:?} image placement was rejected: {reason}")]
+    PlacementRejected {
+        /// Protocol that supplied the rejected display record.
+        protocol: GraphicsProtocol,
+        /// The state validation failure that rejected the placement.
+        #[source]
+        reason: ImagePlacementError,
+    },
     /// A sender declared a byte count that does not match its payload.
     #[error("{protocol:?} image declared {expected} bytes but carried {actual} bytes")]
     DeclaredSizeMismatch {
@@ -674,7 +687,7 @@ pub(crate) struct DecodedGraphics {
     pub protocol: GraphicsProtocol,
     /// Validated image pixels.
     pub image: DecodedImage,
-    /// Whether the transfer stores the image only or also asks for display.
+    /// The state operation represented by the transfer.
     pub action: ImageAction,
     /// Display hints from the transfer.
     pub display: ImageDisplay,
@@ -2811,7 +2824,7 @@ fn parse_kitty_control(data: &[u8]) -> Result<KittyControl, GraphicsError> {
                 let action = as_ascii(value, GraphicsProtocol::Kitty)?;
                 control.action = match value {
                     b"t" => ImageAction::Transmit,
-                    b"T" => ImageAction::Display,
+                    b"T" => ImageAction::TransmitAndDisplay,
                     _ => {
                         return Err(GraphicsError::UnsupportedAction {
                             protocol: GraphicsProtocol::Kitty,

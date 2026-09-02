@@ -15,7 +15,8 @@
 //!   movement, tab-stop setup, and the `SI`/`SO` charset shifts.
 //! - `csi_dispatch` — CSI sequences (Control Sequence Introducer, `ESC [ …`):
 //!   cursor moves (relative, absolute, line-relative), tab stops, erase in
-//!   display/line and erase-char, SGR text attributes (Select Graphic
+//!   display/line and erase-char, including active image placement clearing
+//!   for whole-screen erase, SGR text attributes (Select Graphic
 //!   Rendition: color, bold, underline, …), insert/delete char and line,
 //!   scroll up/down, the DECSTBM scroll region, the DEC private modes
 //!   (alternate screen, cursor visibility, …), and the device queries
@@ -227,7 +228,8 @@ impl vte::Perform for TerminalState {
     }
 
     /// Handle a CSI sequence: cursor movement (CUU/CUD/CUF/CUB/CUP/HVP/HPA/VPA/
-    /// CNL/CPL/CHT/CBT), erase in display/line/character (ED/EL/ECH), graphics
+    /// CNL/CPL/CHT/CBT), erase in display/line/character (ED/EL/ECH), with
+    /// whole-screen erase also clearing active image placements, graphics
     /// rendition (SGR), cell/line operations (ICH/DCH/IL/DL), scroll (SU/SD),
     /// scroll region setup (DECSTBM), DEC private modes including alternate
     /// screen (`?47`/`?1047`/`?1049`), cursor visibility (`?25`/DECTCEM), mouse
@@ -446,6 +448,7 @@ impl vte::Perform for TerminalState {
                             grid.clear_line(row, 0, cols, fill);
                             grid.set_prompt_mark(row, false);
                         }
+                        self.clear_active_image_placements();
                     }
                     // Erase scrollback only (xterm "erase saved lines"): drop
                     // the retained history and leave the visible screen as it

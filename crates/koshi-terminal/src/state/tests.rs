@@ -1,7 +1,11 @@
 //! Unit tests for per-pane terminal state.
 
 use super::*;
+use crate::graphics::{
+    DecodedImage, GraphicsProtocol, ImageAction, ImageDimension, ImageDisplay, ImageRecord,
+};
 use crate::grid::state::{Cell, Grid, RowEnd, RowMeta};
+use crate::state::images::{MAX_IMAGE_PLACEMENTS, MAX_IMAGE_STORAGE_BYTES};
 use crate::style::{Color, Style};
 
 /// Overwrite the cell at (`row`, `col`) of the active grid with `ch` of the
@@ -9,6 +13,20 @@ use crate::style::{Color, Style};
 /// `width == 2` cell followed by a `width == 0` continuation.
 fn put(state: &mut TerminalState, row: u16, col: u16, ch: char, width: u8) {
     *state.active_grid_mut().cell_mut(row, col).unwrap() = Cell::new(ch, width, Style::default());
+}
+
+fn image_record(display: ImageDisplay, anchor: (u16, u16), columns: u32, rows: u32) -> ImageRecord {
+    ImageRecord {
+        protocol: GraphicsProtocol::Kitty,
+        image: DecodedImage {
+            width: columns,
+            height: rows,
+            rgba: vec![255; (columns * rows * 4) as usize],
+        },
+        action: ImageAction::Display,
+        display,
+        anchor,
+    }
 }
 
 #[test]
@@ -54,6 +72,825 @@ fn state_without_shell_metadata_deserializes_as_prompt() {
         restored.shell_integration_state,
         ShellIntegrationState::Prompt
     );
+}
+
+#[test]
+fn state_without_image_fields_deserializes_with_empty_image_state() {
+    let state = TerminalState::new(PtySize { cols: 5, rows: 3 });
+    let mut value = serde_json::to_value(&state).expect("state serializes");
+    let object = value.as_object_mut().expect("state is an object");
+    object.remove("primary_image_placements");
+    object.remove("alternate_image_placements");
+    object.remove("next_image_placement_id");
+
+    let restored: TerminalState = serde_json::from_value(value).expect("legacy state deserializes");
+
+    assert_eq!(restored.image_placements(), &[]);
+    assert_eq!(restored.next_image_placement_id, 1);
+}
+
+#[test]
+fn image_placement_records_its_identity_anchor_dimensions_and_cells() {
+    let mut state = TerminalState::new(PtySize { cols: 12, rows: 8 });
+    let record = image_record(
+        ImageDisplay {
+            image_id: Some(7),
+            placement_id: Some(3),
+            cell_columns: Some(3),
+            cell_rows: Some(2),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (4, 7),
+        3,
+        2,
+    );
+
+    state
+        .apply_image_record(&record)
+        .expect("the image fits the grid");
+
+    let placement = &state.image_placements()[0];
+    assert_eq!(placement.id(), 1);
+    assert_eq!(placement.record(), &record);
+    assert_eq!(placement.anchor(), (4, 7));
+    assert_eq!(placement.dimensions(), (2, 3));
+    assert_eq!(
+        placement.covered_cells().collect::<Vec<_>>(),
+        [(4, 7), (4, 8), (4, 9), (5, 7), (5, 8), (5, 9)]
+    );
+    assert!(placement.covers(4, 7));
+    assert!(placement.covers(5, 9));
+    assert!(!placement.covers(5, 10));
+}
+
+#[test]
+fn image_placements_allow_overlap_and_replace_the_same_kitty_identity() {
+    let mut state = TerminalState::new(PtySize { cols: 8, rows: 8 });
+    let first = image_record(
+        ImageDisplay {
+            image_id: Some(7),
+            placement_id: Some(3),
+            cell_columns: Some(2),
+            cell_rows: Some(2),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (1, 1),
+        2,
+        2,
+    );
+    let overlap = image_record(
+        ImageDisplay {
+            image_id: Some(8),
+            placement_id: Some(4),
+            cell_columns: Some(1),
+            cell_rows: Some(1),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (2, 2),
+        1,
+        1,
+    );
+    let replacement = image_record(
+        ImageDisplay {
+            image_id: Some(7),
+            placement_id: Some(3),
+            cell_columns: Some(2),
+            cell_rows: Some(2),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (4, 4),
+        2,
+        2,
+    );
+
+    state
+        .apply_image_record(&first)
+        .expect("the first image fits");
+    state
+        .apply_image_record(&overlap)
+        .expect("overlap is supported");
+    assert_eq!(state.image_placements().len(), 2);
+    assert!(state.image_placements()[0].covers(2, 2));
+    assert!(state.image_placements()[1].covers(2, 2));
+
+    state
+        .apply_image_record(&replacement)
+        .expect("the replacement fits");
+    assert_eq!(state.image_placements().len(), 2);
+    assert_eq!(state.image_placements()[0].anchor(), (4, 4));
+    assert_eq!(state.image_placements()[0].id(), 1);
+    assert_eq!(state.image_placements()[1].record(), &overlap);
+}
+
+#[test]
+fn kitty_transmit_and_display_replaces_all_old_placements_after_validation() {
+    let mut state = TerminalState::new(PtySize { cols: 8, rows: 8 });
+    let display = ImageDisplay {
+        image_id: Some(7),
+        placement_id: Some(3),
+        cell_columns: Some(1),
+        cell_rows: Some(1),
+        move_cursor: false,
+        ..ImageDisplay::default()
+    };
+    state
+        .apply_image_record(&image_record(display.clone(), (0, 0), 1, 1))
+        .expect("the primary image fits");
+    state.active = Screen::Alternate;
+    state
+        .apply_image_record(&image_record(display, (1, 1), 1, 1))
+        .expect("the alternate image fits");
+
+    let mut retransmit = image_record(
+        ImageDisplay {
+            image_id: Some(7),
+            placement_id: Some(5),
+            cell_columns: Some(2),
+            cell_rows: Some(2),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (2, 2),
+        2,
+        2,
+    );
+    retransmit.action = ImageAction::TransmitAndDisplay;
+    state
+        .apply_image_record(&retransmit)
+        .expect("the retransmitted image fits");
+
+    assert_eq!(state.image_placements().len(), 1);
+    assert_eq!(state.image_placements()[0].record(), &retransmit);
+    state.active = Screen::Primary;
+    assert_eq!(state.image_placements(), &[]);
+    let restored: TerminalState = serde_json::from_value(
+        serde_json::to_value(&state).expect("the retransmitted state serializes"),
+    )
+    .expect("the retransmitted state deserializes");
+    assert_eq!(restored, state);
+}
+
+#[test]
+fn failed_kitty_transmit_and_display_keeps_old_placements() {
+    let mut state = TerminalState::new(PtySize { cols: 8, rows: 8 });
+    let old = image_record(
+        ImageDisplay {
+            image_id: Some(7),
+            placement_id: Some(3),
+            cell_columns: Some(1),
+            cell_rows: Some(1),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (0, 0),
+        1,
+        1,
+    );
+    state.apply_image_record(&old).expect("the old image fits");
+    let before = state.clone();
+
+    let mut invalid = image_record(
+        ImageDisplay {
+            image_id: Some(7),
+            placement_id: Some(4),
+            cell_columns: Some(2),
+            cell_rows: Some(2),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (7, 7),
+        2,
+        2,
+    );
+    invalid.action = ImageAction::TransmitAndDisplay;
+
+    assert_eq!(
+        state.apply_image_record(&invalid),
+        Err(ImagePlacementError::OutOfBounds {
+            row: 7,
+            column: 7,
+            columns: 2,
+            rows: 2,
+            grid_rows: 8,
+            grid_columns: 8,
+        })
+    );
+    assert_eq!(state, before);
+}
+
+#[test]
+fn zero_kitty_image_id_does_not_create_a_placement_identity() {
+    let mut state = TerminalState::new(PtySize { cols: 8, rows: 8 });
+    let display = ImageDisplay {
+        image_id: Some(0),
+        placement_id: Some(3),
+        cell_columns: Some(1),
+        cell_rows: Some(1),
+        move_cursor: false,
+        ..ImageDisplay::default()
+    };
+    state
+        .apply_image_record(&image_record(display.clone(), (0, 0), 1, 1))
+        .expect("the first anonymous image fits");
+    state
+        .apply_image_record(&image_record(display, (1, 1), 1, 1))
+        .expect("the second anonymous image fits");
+
+    assert_eq!(state.image_placements().len(), 2);
+    assert_eq!(state.image_placements()[0].anchor(), (0, 0));
+    assert_eq!(state.image_placements()[1].anchor(), (1, 1));
+}
+
+#[test]
+fn rejected_image_placement_leaves_the_complete_state_unchanged() {
+    let mut state = TerminalState::new(PtySize { cols: 8, rows: 8 });
+    let valid = image_record(
+        ImageDisplay {
+            cell_columns: Some(2),
+            cell_rows: Some(2),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (1, 1),
+        2,
+        2,
+    );
+    state.apply_image_record(&valid).expect("the image fits");
+    let before = state.clone();
+
+    let zero = image_record(
+        ImageDisplay {
+            cell_columns: Some(0),
+            cell_rows: Some(2),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (0, 0),
+        1,
+        2,
+    );
+    assert_eq!(
+        state.apply_image_record(&zero),
+        Err(ImagePlacementError::ZeroSize {
+            columns: 0,
+            rows: 2,
+        })
+    );
+    assert_eq!(state, before);
+
+    let out_of_bounds = image_record(
+        ImageDisplay {
+            cell_columns: Some(2),
+            cell_rows: Some(2),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (7, 7),
+        2,
+        2,
+    );
+    assert_eq!(
+        state.apply_image_record(&out_of_bounds),
+        Err(ImagePlacementError::OutOfBounds {
+            row: 7,
+            column: 7,
+            columns: 2,
+            rows: 2,
+            grid_rows: 8,
+            grid_columns: 8,
+        })
+    );
+    assert_eq!(state, before);
+}
+
+#[test]
+fn image_placement_count_limit_leaves_state_unchanged() {
+    let mut state = TerminalState::new(PtySize { cols: 8, rows: 8 });
+    let record = image_record(
+        ImageDisplay {
+            cell_columns: Some(1),
+            cell_rows: Some(1),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (0, 0),
+        1,
+        1,
+    );
+    for _ in 0..MAX_IMAGE_PLACEMENTS {
+        state
+            .apply_image_record(&record)
+            .expect("the placement fits the count limit");
+    }
+    let before = state.clone();
+
+    assert_eq!(
+        state.apply_image_record(&record),
+        Err(ImagePlacementError::TooManyPlacements {
+            count: MAX_IMAGE_PLACEMENTS + 1,
+            limit: MAX_IMAGE_PLACEMENTS,
+        })
+    );
+    assert_eq!(state, before);
+}
+
+#[test]
+fn image_placement_storage_limit_leaves_state_unchanged() {
+    let mut state = TerminalState::new(PtySize { cols: 8, rows: 8 });
+    let display = ImageDisplay {
+        cell_columns: Some(1),
+        cell_rows: Some(1),
+        move_cursor: false,
+        ..ImageDisplay::default()
+    };
+    let full = image_record(
+        display.clone(),
+        (0, 0),
+        u32::try_from(MAX_IMAGE_STORAGE_BYTES / 4).expect("the storage limit fits in u32"),
+        1,
+    );
+    state
+        .apply_image_record(&full)
+        .expect("the image fits the byte limit");
+    let before = state.clone();
+    let extra = image_record(display, (0, 0), 1, 1);
+
+    assert_eq!(
+        state.apply_image_record(&extra),
+        Err(ImagePlacementError::StorageLimit {
+            used_bytes: MAX_IMAGE_STORAGE_BYTES,
+            requested_bytes: 4,
+            limit_bytes: MAX_IMAGE_STORAGE_BYTES,
+        })
+    );
+    assert_eq!(state, before);
+}
+
+#[test]
+fn same_kitty_identity_replacement_reuses_the_storage_budget() {
+    let mut state = TerminalState::new(PtySize { cols: 8, rows: 8 });
+    let full_display = ImageDisplay {
+        image_id: Some(7),
+        placement_id: Some(3),
+        cell_columns: Some(1),
+        cell_rows: Some(1),
+        move_cursor: false,
+        ..ImageDisplay::default()
+    };
+    let full = image_record(
+        full_display.clone(),
+        (0, 0),
+        u32::try_from(MAX_IMAGE_STORAGE_BYTES / 4).expect("the storage limit fits in u32"),
+        1,
+    );
+    state
+        .apply_image_record(&full)
+        .expect("the full image fits the byte limit");
+
+    let replacement = image_record(full_display, (1, 1), 1, 1);
+    state
+        .apply_image_record(&replacement)
+        .expect("the same identity may reuse the released bytes");
+
+    assert_eq!(state.image_placements().len(), 1);
+    assert_eq!(state.image_placements()[0].record(), &replacement);
+    assert_eq!(state.image_placements()[0].id(), 1);
+}
+
+#[test]
+fn image_dimensions_derive_one_kitty_axis_and_reject_pixel_only_sizes() {
+    let mut state = TerminalState::new(PtySize { cols: 12, rows: 8 });
+    let derived = image_record(
+        ImageDisplay {
+            image_id: Some(1),
+            cell_columns: Some(3),
+            width: Some(ImageDimension::Pixels(4)),
+            height: Some(ImageDimension::Pixels(6)),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (0, 0),
+        4,
+        6,
+    );
+    state
+        .apply_image_record(&derived)
+        .expect("the missing kitty row count is derived");
+    assert_eq!(state.image_placements()[0].dimensions(), (5, 3));
+
+    let pixel_only = image_record(
+        ImageDisplay {
+            width: Some(ImageDimension::Pixels(4)),
+            height: Some(ImageDimension::Pixels(6)),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (0, 0),
+        4,
+        6,
+    );
+    let before = state.clone();
+    assert_eq!(
+        state.apply_image_record(&pixel_only),
+        Err(ImagePlacementError::MissingCellDimensions {
+            width: Some(ImageDimension::Pixels(4)),
+            height: Some(ImageDimension::Pixels(6)),
+        })
+    );
+    assert_eq!(state, before);
+}
+
+#[test]
+fn image_placement_rejects_mixed_iterm_cell_and_pixel_units_without_mutation() {
+    let mut state = TerminalState::new(PtySize { cols: 8, rows: 8 });
+    let mut record = image_record(
+        ImageDisplay {
+            width: Some(ImageDimension::Pixels(4)),
+            height: Some(ImageDimension::Cells(2)),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (0, 0),
+        4,
+        2,
+    );
+    record.protocol = GraphicsProtocol::Iterm2;
+    let before = state.clone();
+
+    assert_eq!(
+        state.apply_image_record(&record),
+        Err(ImagePlacementError::UnsupportedCellDimensions {
+            width: Some(ImageDimension::Pixels(4)),
+            height: Some(ImageDimension::Cells(2)),
+        })
+    );
+    assert_eq!(state, before);
+}
+
+#[test]
+fn kitty_transmit_removes_matching_images_from_both_screens() {
+    let mut state = TerminalState::new(PtySize { cols: 8, rows: 8 });
+    let display = ImageDisplay {
+        image_id: Some(7),
+        placement_id: Some(3),
+        cell_columns: Some(1),
+        cell_rows: Some(1),
+        move_cursor: false,
+        ..ImageDisplay::default()
+    };
+    let primary = image_record(display.clone(), (0, 0), 1, 1);
+    state
+        .apply_image_record(&primary)
+        .expect("the primary image fits");
+
+    state.active = Screen::Alternate;
+    state
+        .apply_image_record(&image_record(display, (1, 1), 1, 1))
+        .expect("the alternate image fits");
+    let transmit = ImageRecord {
+        protocol: GraphicsProtocol::Kitty,
+        image: DecodedImage {
+            width: 1,
+            height: 1,
+            rgba: vec![255; 4],
+        },
+        action: ImageAction::Transmit,
+        display: ImageDisplay {
+            image_id: Some(7),
+            ..ImageDisplay::default()
+        },
+        anchor: (0, 0),
+    };
+
+    state
+        .apply_image_record(&transmit)
+        .expect("transmit cleanup is not a placement");
+    assert_eq!(state.image_placements(), &[]);
+    state.active = Screen::Primary;
+    assert_eq!(state.image_placements(), &[]);
+}
+
+#[test]
+fn kitty_transmit_does_not_remove_a_non_kitty_record_with_the_same_id() {
+    let mut state = TerminalState::new(PtySize { cols: 8, rows: 8 });
+    let mut iterm = image_record(
+        ImageDisplay {
+            width: Some(ImageDimension::Cells(1)),
+            height: Some(ImageDimension::Cells(1)),
+            image_id: Some(7),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (0, 0),
+        1,
+        1,
+    );
+    iterm.protocol = GraphicsProtocol::Iterm2;
+    state
+        .apply_image_record(&iterm)
+        .expect("the iTerm2 image fits");
+
+    let transmit = ImageRecord {
+        protocol: GraphicsProtocol::Kitty,
+        image: DecodedImage {
+            width: 1,
+            height: 1,
+            rgba: vec![255; 4],
+        },
+        action: ImageAction::Transmit,
+        display: ImageDisplay {
+            image_id: Some(7),
+            ..ImageDisplay::default()
+        },
+        anchor: (0, 0),
+    };
+    state
+        .apply_image_record(&transmit)
+        .expect("the Kitty transmit cleanup succeeds");
+
+    assert_eq!(state.image_placements().len(), 1);
+    assert_eq!(state.image_placements()[0].record(), &iterm);
+}
+
+#[test]
+fn kitty_replacement_does_not_count_non_kitty_records_with_the_same_id() {
+    let mut state = TerminalState::new(PtySize { cols: 8, rows: 8 });
+    let mut iterm = image_record(
+        ImageDisplay {
+            width: Some(ImageDimension::Cells(1)),
+            height: Some(ImageDimension::Cells(1)),
+            image_id: Some(7),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (0, 0),
+        1,
+        1,
+    );
+    iterm.protocol = GraphicsProtocol::Iterm2;
+    for _ in 0..MAX_IMAGE_PLACEMENTS {
+        state
+            .apply_image_record(&iterm)
+            .expect("the non-Kitty placement fits");
+    }
+
+    let retransmit = ImageRecord {
+        protocol: GraphicsProtocol::Kitty,
+        image: DecodedImage {
+            width: 1,
+            height: 1,
+            rgba: vec![255; 4],
+        },
+        action: ImageAction::TransmitAndDisplay,
+        display: ImageDisplay {
+            image_id: Some(7),
+            cell_columns: Some(1),
+            cell_rows: Some(1),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        anchor: (0, 0),
+    };
+
+    assert_eq!(
+        state.apply_image_record(&retransmit),
+        Err(ImagePlacementError::TooManyPlacements {
+            count: MAX_IMAGE_PLACEMENTS + 1,
+            limit: MAX_IMAGE_PLACEMENTS,
+        })
+    );
+    assert_eq!(state.image_placements().len(), MAX_IMAGE_PLACEMENTS);
+}
+
+#[test]
+fn image_placements_survive_serde_and_resize_clears_old_anchors() {
+    let mut state = TerminalState::new(PtySize { cols: 8, rows: 8 });
+    let record = image_record(
+        ImageDisplay {
+            cell_columns: Some(2),
+            cell_rows: Some(2),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (1, 1),
+        2,
+        2,
+    );
+    state.apply_image_record(&record).expect("the image fits");
+
+    let restored: TerminalState =
+        serde_json::from_value(serde_json::to_value(&state).expect("state serializes"))
+            .expect("state deserializes");
+    assert_eq!(restored, state);
+
+    state.resize(PtySize { cols: 4, rows: 4 });
+    assert_eq!(state.image_placements(), &[]);
+}
+
+#[test]
+fn malformed_serialized_image_placement_is_rejected_before_use() {
+    let mut state = TerminalState::new(PtySize { cols: 8, rows: 8 });
+    let record = image_record(
+        ImageDisplay {
+            cell_columns: Some(2),
+            cell_rows: Some(2),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (1, 1),
+        2,
+        2,
+    );
+    state.apply_image_record(&record).expect("the image fits");
+
+    let mut value = serde_json::to_value(&state).expect("state serializes");
+    let placement = value
+        .get_mut("primary_image_placements")
+        .and_then(serde_json::Value::as_array_mut)
+        .and_then(|placements| placements.first_mut())
+        .expect("the serialized placement exists");
+    placement["anchor"] = serde_json::json!([u16::MAX, 0]);
+    placement["record"]["anchor"] = serde_json::json!([u16::MAX, 0]);
+
+    let error = serde_json::from_value::<TerminalState>(value)
+        .expect_err("an overflowing placement must be rejected");
+    assert_eq!(
+        error.to_string(),
+        "image placement coordinate extent does not fit in u16"
+    );
+}
+
+#[test]
+fn serialized_image_placement_outside_grid_is_rejected() {
+    let mut state = TerminalState::new(PtySize { cols: 8, rows: 8 });
+    let record = image_record(
+        ImageDisplay {
+            cell_columns: Some(2),
+            cell_rows: Some(2),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (1, 1),
+        2,
+        2,
+    );
+    state.apply_image_record(&record).expect("the image fits");
+
+    let mut value = serde_json::to_value(&state).expect("state serializes");
+    let placement = value
+        .get_mut("primary_image_placements")
+        .and_then(serde_json::Value::as_array_mut)
+        .and_then(|placements| placements.first_mut())
+        .expect("the serialized placement exists");
+    placement["anchor"] = serde_json::json!([7, 7]);
+    placement["record"]["anchor"] = serde_json::json!([7, 7]);
+
+    let error = serde_json::from_value::<TerminalState>(value)
+        .expect_err("an out-of-grid placement must be rejected");
+    assert_eq!(
+        error.to_string(),
+        "image placement at row 7, column 7 with 2 columns by 2 rows exceeds the 8-row by 8-column grid"
+    );
+}
+
+#[test]
+fn duplicate_serialized_image_placement_identity_is_rejected() {
+    let mut state = TerminalState::new(PtySize { cols: 8, rows: 8 });
+    let record = image_record(
+        ImageDisplay {
+            image_id: Some(7),
+            placement_id: Some(3),
+            cell_columns: Some(1),
+            cell_rows: Some(1),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (0, 0),
+        1,
+        1,
+    );
+    state.apply_image_record(&record).expect("the image fits");
+
+    let mut value = serde_json::to_value(&state).expect("state serializes");
+    let placement = value["primary_image_placements"][0].clone();
+    value["primary_image_placements"] = serde_json::json!([placement.clone(), placement]);
+
+    let error = serde_json::from_value::<TerminalState>(value)
+        .expect_err("duplicate placement state must be rejected");
+    assert_eq!(
+        error.to_string(),
+        "image placement identities must be unique per screen"
+    );
+}
+
+#[test]
+fn serialized_image_placement_identity_cannot_repeat_across_screens() {
+    let mut state = TerminalState::new(PtySize { cols: 8, rows: 8 });
+    let record = image_record(
+        ImageDisplay {
+            cell_columns: Some(1),
+            cell_rows: Some(1),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (0, 0),
+        1,
+        1,
+    );
+    state.apply_image_record(&record).expect("the image fits");
+
+    let mut value = serde_json::to_value(&state).expect("state serializes");
+    let placement = value["primary_image_placements"][0].clone();
+    value["alternate_image_placements"] = serde_json::json!([placement]);
+
+    let error = serde_json::from_value::<TerminalState>(value)
+        .expect_err("a cross-screen identity collision must be rejected");
+    assert_eq!(
+        error.to_string(),
+        "image placement identities must be unique across screens"
+    );
+}
+
+#[test]
+fn serialized_image_placement_count_is_bounded_before_state_use() {
+    let mut state = TerminalState::new(PtySize { cols: 8, rows: 8 });
+    let record = image_record(
+        ImageDisplay {
+            cell_columns: Some(1),
+            cell_rows: Some(1),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (0, 0),
+        1,
+        1,
+    );
+    state.apply_image_record(&record).expect("the image fits");
+
+    let mut value = serde_json::to_value(&state).expect("state serializes");
+    let placement = value["primary_image_placements"][0].clone();
+    value["primary_image_placements"] = serde_json::Value::Array(
+        (1..=MAX_IMAGE_PLACEMENTS + 1)
+            .map(|id| {
+                let mut placement = placement.clone();
+                placement["id"] = serde_json::json!(id);
+                placement
+            })
+            .collect(),
+    );
+
+    let error = serde_json::from_value::<TerminalState>(value)
+        .expect_err("a placement-count overflow must be rejected");
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "image placement count {} exceeds the limit of {}",
+            MAX_IMAGE_PLACEMENTS + 1,
+            MAX_IMAGE_PLACEMENTS
+        )
+    );
+}
+
+#[test]
+fn serialized_image_placement_next_identity_must_be_nonzero() {
+    let state = TerminalState::new(PtySize { cols: 8, rows: 8 });
+    let mut value = serde_json::to_value(&state).expect("state serializes");
+    value["next_image_placement_id"] = serde_json::json!(0);
+
+    let error = serde_json::from_value::<TerminalState>(value)
+        .expect_err("a zero next identity must be rejected");
+    assert_eq!(
+        error.to_string(),
+        "next image placement identity must be nonzero"
+    );
+}
+
+#[test]
+fn image_placement_identity_exhaustion_leaves_state_unchanged() {
+    let mut state = TerminalState::new(PtySize { cols: 8, rows: 8 });
+    state.next_image_placement_id = ImagePlacementId::MAX;
+    let record = image_record(
+        ImageDisplay {
+            cell_columns: Some(1),
+            cell_rows: Some(1),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (0, 0),
+        1,
+        1,
+    );
+    let before = state.clone();
+
+    assert_eq!(
+        state.apply_image_record(&record),
+        Err(ImagePlacementError::IdentityExhausted)
+    );
+    assert_eq!(state, before);
 }
 
 #[test]

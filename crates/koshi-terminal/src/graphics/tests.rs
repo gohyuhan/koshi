@@ -3,6 +3,7 @@
 use super::*;
 
 use crate::engine::{GraphicsTransportState, TerminalEngine};
+use crate::state::ImagePlacementError;
 use koshi_core::process::PtySize;
 
 fn red_png() -> Vec<u8> {
@@ -193,6 +194,30 @@ fn kitty_c1_raw_rgba() -> Vec<u8> {
     bytes
 }
 
+fn kitty_display_cell_rgba(move_cursor: bool) -> Vec<u8> {
+    kitty_display_cell_rgba_size(1, 1, move_cursor)
+}
+
+fn kitty_display_cell_rgba_size(columns: u32, rows: u32, move_cursor: bool) -> Vec<u8> {
+    let payload = STANDARD.encode([255, 0, 0, 255].repeat((columns * rows) as usize));
+    let cursor = if move_cursor { 0 } else { 1 };
+    format!("\x1b_Ga=T,f=32,s={columns},v={rows},c={columns},r={rows},C={cursor};{payload}\x1b\\")
+        .into_bytes()
+}
+
+fn kitty_display_cell_rgba_identity(
+    image_id: u32,
+    placement_id: u32,
+    move_cursor: bool,
+) -> Vec<u8> {
+    let payload = STANDARD.encode([255, 0, 0, 255]);
+    let cursor = if move_cursor { 0 } else { 1 };
+    format!(
+        "\x1b_Ga=T,f=32,s=1,v=1,i={image_id},p={placement_id},c=1,r=1,C={cursor};{payload}\x1b\\"
+    )
+    .into_bytes()
+}
+
 fn one_sixel() -> Vec<u8> {
     b"\x1bPq\"1;1;1;1#1;2;100;0;0#1@\x1b\\".to_vec()
 }
@@ -201,6 +226,16 @@ fn iterm_file(bytes: &[u8]) -> Vec<u8> {
     let encoded = STANDARD.encode(bytes);
     format!(
         "\x1b]1337;File=inline=1;size={};width=1px;height=1px;preserveAspectRatio=0:{}\x07",
+        bytes.len(),
+        encoded
+    )
+    .into_bytes()
+}
+
+fn iterm_cell_file(bytes: &[u8]) -> Vec<u8> {
+    let encoded = STANDARD.encode(bytes);
+    format!(
+        "\x1b]1337;File=inline=1;size={};width=1;height=1;preserveAspectRatio=0:{}\x07",
         bytes.len(),
         encoded
     )
@@ -421,14 +456,14 @@ fn kitty_decodes_one_red_rgb_pixel() {
 }
 
 #[test]
-fn kitty_display_action_is_kept_with_the_image_record() {
+fn kitty_transmit_and_display_action_is_kept_with_the_image_record() {
     let payload = STANDARD.encode([255, 0, 0, 255]);
     let bytes = format!("\x1b_Ga=T,f=32,s=1,v=1;{payload}\x1b\\").into_bytes();
     let mut parser = GraphicsParser::default();
 
-    let result = only_event(&mut parser, &bytes).expect("kitty display action decodes");
+    let result = only_event(&mut parser, &bytes).expect("kitty transmit-and-display decodes");
 
-    assert_eq!(result.action, ImageAction::Display);
+    assert_eq!(result.action, ImageAction::TransmitAndDisplay);
 }
 
 #[test]
@@ -1327,14 +1362,37 @@ fn rejected_graphics_do_not_change_the_terminal_state() {
 }
 
 #[test]
-fn engine_records_the_cursor_anchor_and_leaves_cells_blank() {
+fn an_image_without_cell_dimensions_is_rejected_without_state_mutation() {
     let mut engine = TerminalEngine::new(PtySize { cols: 8, rows: 2 });
-    let _ = engine.advance(b"\x1b[2;3H");
     let before = engine.state().clone();
 
     let _ = engine.advance(&one_sixel());
 
     assert_eq!(engine.state(), &before);
+    assert_eq!(
+        engine.take_graphics(),
+        [Err(GraphicsError::PlacementRejected {
+            protocol: GraphicsProtocol::Sixel,
+            reason: ImagePlacementError::MissingCellDimensions {
+                width: None,
+                height: None,
+            },
+        })]
+    );
+}
+
+#[test]
+fn engine_places_a_cell_sized_image_at_the_cursor_anchor() {
+    let mut engine = TerminalEngine::new(PtySize { cols: 8, rows: 2 });
+    let _ = engine.advance(b"\x1b[2;3H");
+
+    let _ = engine.advance(&kitty_display_cell_rgba(false));
+
+    let placements = engine.state().image_placements();
+    assert_eq!(placements.len(), 1);
+    assert_eq!(placements[0].anchor(), (1, 2));
+    assert_eq!(placements[0].dimensions(), (1, 1));
+    assert_eq!(placements[0].covered_cells().collect::<Vec<_>>(), [(1, 2)]);
     let events = engine.take_graphics();
     assert_eq!(events.len(), 1);
     let record = events
@@ -1347,9 +1405,38 @@ fn engine_records_the_cursor_anchor_and_leaves_cells_blank() {
 }
 
 #[test]
+fn engine_moves_cursor_after_an_accepted_image_placement() {
+    let mut engine = TerminalEngine::new(PtySize { cols: 10, rows: 8 });
+    let _ = engine.advance(b"\x1b[3;4H");
+
+    let _ = engine.advance(&kitty_display_cell_rgba_size(3, 2, true));
+
+    assert_eq!(engine.state().active_cursor_position(), (4, 6));
+    let placement = &engine.state().image_placements()[0];
+    assert_eq!(placement.anchor(), (2, 3));
+    assert_eq!(placement.dimensions(), (2, 3));
+}
+
+#[test]
+fn engine_retransmitting_a_kitty_image_removes_old_placements() {
+    let mut engine = TerminalEngine::new(PtySize { cols: 8, rows: 4 });
+    let _ = engine.advance(&kitty_display_cell_rgba_identity(7, 3, false));
+    let _ = engine.advance(b"\x1b[2;2H");
+    let _ = engine.advance(&kitty_display_cell_rgba_identity(7, 4, false));
+    let _ = engine.advance(b"\x1b[3;3H");
+    let _ = engine.advance(&kitty_display_cell_rgba_identity(7, 3, false));
+
+    let placements = engine.state().image_placements();
+    assert_eq!(placements.len(), 1);
+    assert_eq!(placements[0].record().display.image_id, Some(7));
+    assert_eq!(placements[0].record().display.placement_id, Some(3));
+    assert_eq!(placements[0].anchor(), (2, 2));
+}
+
+#[test]
 fn engine_records_the_anchor_before_a_subsequent_cursor_move_in_one_chunk() {
     let mut engine = TerminalEngine::new(PtySize { cols: 8, rows: 2 });
-    let mut bytes = one_sixel();
+    let mut bytes = kitty_display_cell_rgba(false);
     bytes.extend_from_slice(b"\x1b[2;3H");
 
     let _ = engine.advance(&bytes);
@@ -1369,21 +1456,25 @@ fn graphics_queue_reports_dropped_events_at_its_bound() {
     let mut engine = TerminalEngine::new(PtySize { cols: 8, rows: 2 });
     let mut bytes = Vec::new();
     for _ in 0..65 {
-        bytes.extend_from_slice(&one_sixel());
+        bytes.extend_from_slice(&kitty_display_cell_rgba(false));
     }
 
     let _ = engine.advance(&bytes);
 
+    assert_eq!(engine.state().image_placements().len(), 65);
+
     let expected_record = Ok(ImageRecord {
-        protocol: GraphicsProtocol::Sixel,
+        protocol: GraphicsProtocol::Kitty,
         image: DecodedImage {
             width: 1,
             height: 1,
             rgba: vec![255, 0, 0, 255],
         },
-        action: ImageAction::Display,
+        action: ImageAction::TransmitAndDisplay,
         display: ImageDisplay {
-            sixel_background: Some(SixelBackground::Terminal),
+            cell_columns: Some(1),
+            cell_rows: Some(1),
+            move_cursor: false,
             ..ImageDisplay::default()
         },
         anchor: (0, 0),
@@ -1461,7 +1552,7 @@ fn a_three_chunk_kitty_transfer_keeps_each_chunk_once() {
 
     let result = only_event(&mut parser, &bytes).expect("the three chunks decode");
 
-    assert_eq!(result.action, ImageAction::Display);
+    assert_eq!(result.action, ImageAction::TransmitAndDisplay);
     assert_eq!(result.image.width, 1750);
     assert_eq!(result.image.height, 1);
     assert_eq!(result.image.rgba.len(), 1750 * 4);
@@ -1778,7 +1869,7 @@ fn an_iterm_multipart_transfer_survives_an_engine_swap() {
     let encoded = STANDARD.encode(&bytes);
     let split = encoded.len() / 2;
     let first = format!(
-        "\x1b]1337;MultipartFile=inline=1;size={}\x07\
+        "\x1b]1337;MultipartFile=inline=1;width=1;height=1;size={}\x07\
 \x1b]1337;FilePart={}\x07",
         bytes.len(),
         &encoded[..split],
@@ -1807,7 +1898,7 @@ fn an_iterm_multipart_transfer_survives_an_engine_swap() {
 
 #[test]
 fn a_screen_transfer_survives_an_engine_swap() {
-    let inner = iterm_file(&red_png());
+    let inner = iterm_cell_file(&red_png());
     let split = inner.len() / 2;
     let first = screen_wrap(&inner[..split]);
     let second = screen_wrap(&inner[split..]);
@@ -1839,7 +1930,7 @@ fn a_screen_transfer_survives_an_engine_swap() {
 
 #[test]
 fn a_c1_screen_wrapper_with_an_inner_transfer_survives_an_engine_swap() {
-    let inner = iterm_file(&red_png());
+    let inner = iterm_cell_file(&red_png());
     let split = inner.len() / 2;
     let first = screen_wrap(&inner[..split]);
     let mut engine = TerminalEngine::new(PtySize { cols: 8, rows: 2 });
@@ -1877,7 +1968,7 @@ fn a_c1_screen_wrapper_with_an_inner_transfer_survives_an_engine_swap() {
 
 #[test]
 fn a_tmux_transfer_survives_an_engine_swap() {
-    let inner = iterm_file(&red_png());
+    let inner = iterm_cell_file(&red_png());
     let split = inner.len() / 2;
     let first = tmux_wrap(&inner[..split]);
     let second = tmux_wrap(&inner[split..]);
@@ -1911,7 +2002,7 @@ fn a_tmux_transfer_survives_an_engine_swap() {
 
 #[test]
 fn a_c1_tmux_wrapper_with_an_inner_transfer_survives_an_engine_swap() {
-    let inner = iterm_file(&red_png());
+    let inner = iterm_cell_file(&red_png());
     let split = inner.len() / 2;
     let first = tmux_wrap(&inner[..split]);
     let mut engine = TerminalEngine::new(PtySize { cols: 8, rows: 2 });
@@ -1950,7 +2041,7 @@ fn a_c1_tmux_wrapper_with_an_inner_transfer_survives_an_engine_swap() {
 
 #[test]
 fn nested_passthrough_wrappers_survive_an_engine_swap() {
-    let inner = iterm_file(&red_png());
+    let inner = iterm_cell_file(&red_png());
     let split = inner.len() / 2;
     let first = tmux_wrap(&screen_wrap(&inner[..split]));
     let second = tmux_wrap(&screen_wrap(&inner[split..]));

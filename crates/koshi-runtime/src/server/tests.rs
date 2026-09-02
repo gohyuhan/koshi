@@ -2485,7 +2485,7 @@ fn a_resumed_server_puts_every_carried_engine_back_with_its_undecoded_bytes() {
 fn a_resumed_server_keeps_queued_graphics_events() {
     let (mut server, client_id) = booted_server();
     let (_session_id, _tab_id, root) = booted_parts(&server, client_id);
-    server.handle_pty_output(root, b"\x1b_Ga=T,f=32,s=1,v=1;/wAA/w==\x1b\\");
+    server.handle_pty_output(root, b"\x1b_Ga=T,f=32,s=1,v=1,c=1,r=1,C=1;/wAA/w==\x1b\\");
 
     let (_header, body) = server.carry_out(&[]).expect("a session to carry");
     assert_eq!(body.graphics_events[&root].len(), 1);
@@ -2500,12 +2500,11 @@ fn a_resumed_server_keeps_queued_graphics_events() {
         HashMap::from([(root, PtySize { cols: 78, rows: 20 })]),
     );
 
+    let engine = resumed.terminal_engines.get_mut(&root).expect("the engine");
+    assert_eq!(engine.state().image_placements().len(), 1);
+    assert_eq!(engine.state().image_placements()[0].anchor(), (0, 0));
     assert_eq!(
-        resumed
-            .terminal_engines
-            .get_mut(&root)
-            .expect("the engine")
-            .take_graphics(),
+        engine.take_graphics(),
         vec![Ok(ImageRecord {
             protocol: GraphicsProtocol::Kitty,
             image: DecodedImage {
@@ -2513,8 +2512,13 @@ fn a_resumed_server_keeps_queued_graphics_events() {
                 height: 1,
                 rgba: vec![255, 0, 0, 255],
             },
-            action: ImageAction::Display,
-            display: ImageDisplay::default(),
+            action: ImageAction::TransmitAndDisplay,
+            display: ImageDisplay {
+                cell_columns: Some(1),
+                cell_rows: Some(1),
+                move_cursor: false,
+                ..ImageDisplay::default()
+            },
             anchor: (0, 0),
         })]
     );
@@ -2526,7 +2530,7 @@ fn a_resumed_server_keeps_the_graphics_queue_overflow_report() {
     let (_session_id, _tab_id, root) = booted_parts(&server, client_id);
     let mut bytes = Vec::new();
     for _ in 0..66 {
-        bytes.extend_from_slice(b"\x1b_Ga=T,f=32,s=1,v=1;/wAA/w==\x1b\\");
+        bytes.extend_from_slice(b"\x1b_Ga=T,f=32,s=1,v=1,c=1,r=1,C=1;/wAA/w==\x1b\\");
     }
     server.handle_pty_output(root, &bytes);
 
@@ -2567,7 +2571,7 @@ fn a_resumed_server_keeps_the_graphics_queue_overflow_report() {
 fn a_resumed_server_keeps_graphics_inside_a_split_screen_wrapper() {
     let (mut server, client_id) = booted_server();
     let (_session_id, _tab_id, root) = booted_parts(&server, client_id);
-    let image = b"\x1b]1337;File=inline=1:iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=\x07";
+    let image = b"\x1b]1337;File=inline=1;width=1;height=1:iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=\x07";
     let split = image.len() / 2;
     let screen_wrap = |inner: &[u8]| {
         let mut bytes = b"\x1bP".to_vec();
@@ -2611,7 +2615,14 @@ fn a_resumed_server_keeps_graphics_inside_a_split_screen_wrapper() {
     assert_eq!(event.image.height, 1);
     assert_eq!(event.image.rgba, vec![0, 0, 0, 255]);
     assert_eq!(event.action, ImageAction::Display);
-    assert_eq!(event.display, ImageDisplay::default());
+    assert_eq!(
+        event.display,
+        ImageDisplay {
+            width: Some(koshi_terminal::graphics::ImageDimension::Cells(1)),
+            height: Some(koshi_terminal::graphics::ImageDimension::Cells(1)),
+            ..ImageDisplay::default()
+        }
+    );
     assert_eq!(event.anchor, (0, 0));
 }
 
