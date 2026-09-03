@@ -288,9 +288,9 @@ impl ViewerPaint {
 struct Screen<B: Backend> {
     /// The ratatui terminal the renderer paints into.
     terminal: Terminal<B>,
-    /// The window title committed with the last successful paint.
+    /// The window title used for the last title-write comparison.
     last_title: String,
-    /// The cursor style committed with the last successful paint.
+    /// The cursor style used for the last cursor-style-write comparison.
     last_cursor: Option<CursorStyle>,
     /// The snapshot last drawn, kept so a viewer-only change can draw it
     /// again without re-reading the frame. Its grids travel behind `Arc`s, so
@@ -302,11 +302,23 @@ struct Screen<B: Backend> {
     /// What the viewer contributed to the frame on the screen. `None` until the
     /// first draw.
     shown: Option<ViewerPaint>,
+    /// The image protocol capability of the outer terminal.
+    graphics: terminal::GraphicsSupport,
 }
 
 impl<B: Backend> Screen<B> {
     /// A screen that has drawn nothing yet.
+    #[cfg(test)]
     fn new(terminal: Terminal<B>, viewport: Size) -> Self {
+        Self::with_graphics(terminal, viewport, terminal::GraphicsSupport::Unsupported)
+    }
+
+    /// A screen that has drawn nothing yet, with its image protocol capability.
+    fn with_graphics(
+        terminal: Terminal<B>,
+        viewport: Size,
+        graphics: terminal::GraphicsSupport,
+    ) -> Self {
         Screen {
             terminal,
             last_title: String::new(),
@@ -314,6 +326,7 @@ impl<B: Backend> Screen<B> {
             last_snapshot: None,
             committed_regions: CommittedRegions::core(viewport, 0),
             shown: None,
+            graphics,
         }
     }
 
@@ -329,17 +342,28 @@ impl<B: Backend> Screen<B> {
     /// next mouse event is answered from.
     fn draw(&mut self, client: &mut Client, frame: Box<PaintedFrame>) -> Option<MouseFrame> {
         let snapshot = to_snapshot(&frame);
+        self.draw_snapshot(client, snapshot)
+    }
+
+    /// Draw a snapshot after its image transfers have been assembled.
+    fn draw_snapshot(
+        &mut self,
+        client: &mut Client,
+        snapshot: RenderSnapshot,
+    ) -> Option<MouseFrame> {
         let committed_regions = self.regions_for(snapshot.client.viewport);
         let frame_paint = ViewerPaint::from_frame(client, &snapshot);
-        if !paint(
+        if let Err(error) = paint_with_graphics(
             &mut self.terminal,
             client,
             &snapshot,
             &committed_regions,
             &frame_paint,
+            self.graphics,
             &mut self.last_title,
             &mut self.last_cursor,
         ) {
+            warn_paint_error(error);
             return None;
         }
         adopt_frame(client, &snapshot);
@@ -372,15 +396,18 @@ impl<B: Backend> Screen<B> {
         let Some(snapshot) = self.last_snapshot.as_ref() else {
             return;
         };
-        if paint(
+        if let Err(error) = paint_with_graphics(
             &mut self.terminal,
             client,
             snapshot,
             &self.committed_regions,
             &current,
+            self.graphics,
             &mut self.last_title,
             &mut self.last_cursor,
         ) {
+            warn_paint_error(error);
+        } else {
             self.shown = Some(current);
         }
     }
@@ -400,30 +427,37 @@ impl<B: Backend> Screen<B> {
     }
 }
 
-/// Paint one snapshot with its committed region solve and report whether the
-/// terminal accepted the frame.
-fn paint<B: Backend>(
+/// Paint one snapshot with a selected image protocol capability.
+#[allow(clippy::too_many_arguments)]
+fn paint_with_graphics<B: Backend>(
     terminal: &mut Terminal<B>,
     client: &Client,
     snapshot: &RenderSnapshot,
     committed_regions: &CommittedRegions,
     frame_paint: &ViewerPaint,
+    graphics: terminal::GraphicsSupport,
     last_title: &mut String,
     last_cursor: &mut Option<CursorStyle>,
-) -> bool {
-    match terminal::paint_frame(
+) -> Result<(), terminal::PaintError<B::Error>> {
+    terminal::paint_frame_with_images(
         terminal,
         client,
         snapshot,
         committed_regions,
         frame_paint,
+        graphics.image_mode(),
         last_title,
         last_cursor,
-    ) {
-        Ok(()) => true,
-        Err(error) => {
-            tracing::warn!(%error, "could not paint the frame");
-            false
+    )
+}
+
+fn warn_paint_error<E: std::fmt::Debug>(error: terminal::PaintError<E>) {
+    match error {
+        terminal::PaintError::Backend(error) => {
+            tracing::warn!(?error, "could not paint the frame")
+        }
+        terminal::PaintError::Image(error) => {
+            tracing::warn!(%error, "could not paint terminal images")
         }
     }
 }
@@ -921,7 +955,11 @@ fn attach_once(home: &Home, target: &SessionSelector) -> Result<Option<SessionId
         registry: ActionRegistry::new(),
         next_request_id: FIRST_LOOP_REQUEST_ID,
     };
-    let mut screen = Screen::new(terminal, client.viewport());
+    let mut screen = Screen::with_graphics(
+        terminal,
+        client.viewport(),
+        terminal::detect_graphics_support(),
+    );
 
     let ending = run_attachment(
         home,
@@ -992,6 +1030,8 @@ fn run_attachment<B: Backend>(
     // that does not carry this number.
     let mut current_connection: u64 = FIRST_CONNECTION;
     let mut last_frame: Option<MouseFrame> = None;
+    let mut image_assembly: Option<paint::ImageFrameAssembly> = None;
+    let mut chunk_base: Option<RenderSnapshot> = None;
     // What the viewer has decided and not yet written. The pass that decided it
     // ends by writing all of it, so this holds one pass's worth: the events that
     // arrived together. It is bounded by [`MAX_PENDING_MOUSE`], which every path
@@ -1040,14 +1080,66 @@ fn run_attachment<B: Backend>(
                     }
                     match frame {
                         Ok(SessionEvent::Painted { frame }) => {
+                            image_assembly = None;
+                            chunk_base = None;
                             if let Some(mouse_frame) = screen.draw(client, frame) {
                                 last_frame = Some(mouse_frame);
+                                chunk_base = screen.last_snapshot.clone();
+                            }
+                        }
+                        Ok(SessionEvent::PaintedImageStart { frame_id, images }) => {
+                            if let Some(mut assembly) = image_assembly.take() {
+                                if !assembly.matches_frame(frame_id) {
+                                    tracing::warn!(%frame_id, "image transfer names another frame");
+                                    continue;
+                                }
+                                if let Err(error) = assembly.add_transfers(images) {
+                                    tracing::warn!(%error, "could not extend an image transfer");
+                                } else {
+                                    image_assembly = Some(assembly);
+                                }
+                                continue;
+                            }
+                            let Some(base) = chunk_base.take() else {
+                                tracing::warn!(%frame_id, "image transfer has no painted base frame");
+                                continue;
+                            };
+                            image_assembly =
+                                match paint::ImageFrameAssembly::new(frame_id, base, images) {
+                                    Ok(assembly) => Some(assembly),
+                                    Err(error) => {
+                                        tracing::warn!(%error, "could not start an image transfer");
+                                        None
+                                    }
+                                };
+                        }
+                        Ok(SessionEvent::PaintedImageChunk { chunk }) => {
+                            let Some(mut assembly) = image_assembly.take() else {
+                                tracing::warn!(
+                                    frame_id = chunk.frame_id,
+                                    transfer_id = chunk.transfer_id,
+                                    "image chunk has no matching transfer"
+                                );
+                                continue;
+                            };
+                            match assembly.accept(chunk) {
+                                Ok(Some(frame)) => {
+                                    if let Some(mouse_frame) = screen.draw_snapshot(client, frame) {
+                                        last_frame = Some(mouse_frame);
+                                    }
+                                }
+                                Ok(None) => image_assembly = Some(assembly),
+                                Err(error) => {
+                                    tracing::warn!(%error, "could not accept an image chunk");
+                                }
                             }
                         }
                         Ok(SessionEvent::MouseAnswer {
                             request_id,
                             answers,
                         }) => {
+                            image_assembly = None;
+                            chunk_base = None;
                             if let Some(frame) = last_frame.as_ref() {
                                 apply_answer(
                                     client,
@@ -1066,10 +1158,16 @@ fn run_attachment<B: Backend>(
                         // good, so a resync forgets them all and the next move
                         // asks for its whole distance from the drag anchor.
                         // Nothing is released by this: no round ever waited.
-                        Ok(SessionEvent::Resync { .. }) => sent.clear(),
+                        Ok(SessionEvent::Resync { .. }) => {
+                            image_assembly = None;
+                            chunk_base = None;
+                            sent.clear();
+                        }
                         // Bytes a pane aimed at this terminal, such as an OSC 52
                         // clipboard write, go to it verbatim.
                         Ok(SessionEvent::HostWrite { bytes }) => {
+                            image_assembly = None;
+                            chunk_base = None;
                             let mut out = io::stdout();
                             let _ = out.write_all(&bytes);
                             let _ = out.flush();
@@ -1077,7 +1175,10 @@ fn run_attachment<B: Backend>(
                         // Every other frame reports a change to the session's
                         // structure, and the next painted frame carries that
                         // change whole, so only a painted frame is drawn.
-                        _ => {}
+                        _ => {
+                            image_assembly = None;
+                            chunk_base = None;
+                        }
                     }
                 }
                 // An input thread runs only for a terminal that had keys to
@@ -1161,6 +1262,8 @@ fn run_attachment<B: Backend>(
                 break ending;
             };
             current_connection += 1;
+            image_assembly = None;
+            chunk_base = None;
             spawn_frame_reader(reader, current_connection, incoming_tx.clone());
             // Dropping the queue the old connection's writer thread reads from
             // is what ends that thread.

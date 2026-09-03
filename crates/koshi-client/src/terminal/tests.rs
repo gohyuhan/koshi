@@ -7,10 +7,14 @@
 
 use super::*;
 
+use std::io::{self, Write};
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use ratatui::backend::TestBackend;
+use ratatui::layout::{Position, Rect};
 
 use koshi_config::layer::{PartialColorPalette, PartialKeybindingsConfig, PartialThemeConfig};
 use koshi_config::types::RgbColor;
@@ -18,6 +22,7 @@ use koshi_core::command::{Command, CommandEnvelope, CommandSource};
 use koshi_core::ids::{CommandId, PaneId, SessionId};
 use koshi_pty::backend::state::PtyBackend;
 use koshi_renderer::snapshot::{CommittedRegions, RenderSnapshot};
+use koshi_renderer::{ImagePaint, ImageSourceRect};
 use koshi_runtime::runtime::bus::EventFilter;
 use koshi_runtime::server::Server;
 use koshi_test_support::fake_pty::FakePtyBackend;
@@ -69,6 +74,67 @@ fn screen_text(terminal: &Terminal<TestBackend>) -> String {
         .iter()
         .map(|cell| cell.symbol())
         .collect()
+}
+
+struct FailingWriter;
+
+impl Write for FailingWriter {
+    fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
+        Err(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "test writer failed",
+        ))
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "test writer failed",
+        ))
+    }
+}
+
+struct FailOnWrite {
+    fail_at: usize,
+    writes: usize,
+    output: Vec<u8>,
+}
+
+impl Write for FailOnWrite {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let write_index = self.writes;
+        self.writes += 1;
+        if write_index == self.fail_at {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "test writer failed",
+            ));
+        }
+        self.output.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+struct FailingFlushWriter {
+    output: Vec<u8>,
+}
+
+impl Write for FailingFlushWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.output.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "test flush failed",
+        ))
+    }
 }
 
 /// The frame this client is owed, as the session composes it.
@@ -538,4 +604,343 @@ fn a_window_title_is_bounded_by_the_pane_title_cap() {
     let title = title_off_the_wire("dev", &"a".repeat(100_000));
 
     assert_eq!(title, format!("dev | {}", "a".repeat(cap)));
+}
+
+#[test]
+fn graphics_support_selects_kitty_only_from_kitty_environment() {
+    assert_eq!(
+        graphics_support_from_environment(Some("xterm-kitty"), false),
+        GraphicsSupport::Kitty
+    );
+    assert_eq!(
+        graphics_support_from_environment(Some("screen"), true),
+        GraphicsSupport::Kitty
+    );
+    assert_eq!(
+        graphics_support_from_environment(Some("xterm-256color"), false),
+        GraphicsSupport::Unsupported
+    );
+    assert_eq!(
+        graphics_support_from_environment(None, false),
+        GraphicsSupport::Unsupported
+    );
+}
+
+#[test]
+fn kitty_writer_emits_cropped_rgba_and_restores_cursor() {
+    let paint = ImagePaint::new(
+        PaneId::new(),
+        4,
+        Arc::new(koshi_terminal::graphics::ImageRecord {
+            protocol: koshi_terminal::graphics::GraphicsProtocol::Kitty,
+            image: koshi_terminal::graphics::DecodedImage {
+                width: 2,
+                height: 2,
+                rgba: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+            },
+            action: koshi_terminal::graphics::ImageAction::TransmitAndDisplay,
+            display: koshi_terminal::graphics::ImageDisplay::default(),
+            anchor: (0, 0),
+        }),
+        Rect {
+            x: 3,
+            y: 4,
+            width: 2,
+            height: 1,
+        },
+        ImageSourceRect {
+            x: 0,
+            y: 1,
+            width: 2,
+            height: 1,
+        },
+        -2,
+    );
+    let mut output = Vec::new();
+
+    write_kitty_frame(&mut output, &[paint], Some(Position::new(8, 9)))
+        .expect("Kitty output writes");
+
+    assert_eq!(
+        output,
+        b"\x1b_Ga=d,d=A,q=2\x1b\\\x1b[5;4H\x1b_Ga=T,f=32,s=2,v=1,c=2,r=1,C=1,z=-2,q=2,m=0;CQoLDA0ODxA=\x1b\\\x1b[10;9H"
+    );
+}
+
+#[test]
+fn kitty_writer_emits_first_cell_offsets_and_hides_an_absent_cursor() {
+    let paint = ImagePaint::new(
+        PaneId::new(),
+        4,
+        Arc::new(koshi_terminal::graphics::ImageRecord {
+            protocol: koshi_terminal::graphics::GraphicsProtocol::Kitty,
+            image: koshi_terminal::graphics::DecodedImage {
+                width: 1,
+                height: 1,
+                rgba: vec![1, 2, 3, 4],
+            },
+            action: koshi_terminal::graphics::ImageAction::TransmitAndDisplay,
+            display: koshi_terminal::graphics::ImageDisplay {
+                cell_offset_x: Some(4),
+                cell_offset_y: Some(5),
+                ..koshi_terminal::graphics::ImageDisplay::default()
+            },
+            anchor: (0, 0),
+        }),
+        Rect {
+            x: 1,
+            y: 2,
+            width: 1,
+            height: 1,
+        },
+        ImageSourceRect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        },
+        0,
+    );
+    let mut output = Vec::new();
+
+    write_kitty_frame(&mut output, &[paint], None).expect("Kitty output writes");
+
+    assert_eq!(
+        output,
+        b"\x1b_Ga=d,d=A,q=2\x1b\\\x1b[3;2H\x1b_Ga=T,f=32,s=1,v=1,X=4,Y=5,c=1,r=1,C=1,z=0,q=2,m=0;AQIDBA==\x1b\\\x1b[?25l"
+    );
+}
+
+#[test]
+fn native_image_write_failure_reaches_the_paint_caller() {
+    let fake = Arc::new(FakePtyBackend::new());
+    let (mut server, client_id, _pane_id) = boot(&fake);
+    let client = test_client(&mut server, client_id);
+    let snapshot = frame(&server, client_id);
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+    let mut writer = FailingWriter;
+
+    let error = paint_frame_with_writer(
+        &mut writer,
+        &mut terminal,
+        &client,
+        &snapshot,
+        &regions(VIEWPORT),
+        &ViewerPaint::from_frame(&client, &snapshot),
+        ImageRenderMode::Native,
+        &mut String::new(),
+        &mut None,
+    )
+    .expect_err("a failed native image writer rejects the frame");
+
+    match error {
+        PaintError::Image(error) => assert_eq!(error.kind(), io::ErrorKind::BrokenPipe),
+        PaintError::Backend(error) => panic!("unexpected backend error: {error:?}"),
+    }
+}
+
+#[test]
+fn kitty_writer_hides_an_absent_cursor_after_an_image_write_failure() {
+    let paint = ImagePaint::new(
+        PaneId::new(),
+        4,
+        Arc::new(koshi_terminal::graphics::ImageRecord {
+            protocol: koshi_terminal::graphics::GraphicsProtocol::Kitty,
+            image: koshi_terminal::graphics::DecodedImage {
+                width: 1,
+                height: 1,
+                rgba: vec![1, 2, 3, 4],
+            },
+            action: koshi_terminal::graphics::ImageAction::TransmitAndDisplay,
+            display: koshi_terminal::graphics::ImageDisplay::default(),
+            anchor: (0, 0),
+        }),
+        Rect {
+            x: 1,
+            y: 2,
+            width: 1,
+            height: 1,
+        },
+        ImageSourceRect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        },
+        0,
+    );
+    let mut writer = FailOnWrite {
+        fail_at: 1,
+        writes: 0,
+        output: Vec::new(),
+    };
+
+    let error = write_kitty_frame(&mut writer, &[paint], None)
+        .expect_err("a failed image write should reach the caller");
+
+    assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+    assert_eq!(writer.output, b"\x1b_Ga=d,d=A,q=2\x1b\\\x1b[?25l");
+}
+
+#[test]
+fn kitty_writer_flush_failure_reaches_the_paint_caller() {
+    let mut writer = FailingFlushWriter { output: Vec::new() };
+
+    let error = write_kitty_frame(&mut writer, &[], None).expect_err("flush failure");
+
+    assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+    assert_eq!(writer.output, b"\x1b_Ga=d,d=A,q=2\x1b\\\x1b[?25l");
+}
+
+#[test]
+fn kitty_writer_rejects_a_source_rectangle_outside_rgba_pixels() {
+    let paint = ImagePaint::new(
+        PaneId::new(),
+        4,
+        Arc::new(koshi_terminal::graphics::ImageRecord {
+            protocol: koshi_terminal::graphics::GraphicsProtocol::Kitty,
+            image: koshi_terminal::graphics::DecodedImage {
+                width: 1,
+                height: 1,
+                rgba: vec![255, 0, 0, 255],
+            },
+            action: koshi_terminal::graphics::ImageAction::TransmitAndDisplay,
+            display: koshi_terminal::graphics::ImageDisplay::default(),
+            anchor: (0, 0),
+        }),
+        Rect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        },
+        ImageSourceRect {
+            x: 1,
+            y: 0,
+            width: 1,
+            height: 1,
+        },
+        0,
+    );
+    let mut output = Vec::new();
+
+    let error = write_kitty_image(&mut output, &paint).expect_err("invalid source is rejected");
+
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert_eq!(output, Vec::<u8>::new());
+}
+
+#[test]
+fn kitty_writer_splits_rgba_at_the_protocol_chunk_limit() {
+    let paint = ImagePaint::new(
+        PaneId::new(),
+        4,
+        Arc::new(koshi_terminal::graphics::ImageRecord {
+            protocol: koshi_terminal::graphics::GraphicsProtocol::Kitty,
+            image: koshi_terminal::graphics::DecodedImage {
+                width: 1_024,
+                height: 1,
+                rgba: vec![0; 4_096],
+            },
+            action: koshi_terminal::graphics::ImageAction::TransmitAndDisplay,
+            display: koshi_terminal::graphics::ImageDisplay::default(),
+            anchor: (0, 0),
+        }),
+        Rect {
+            x: 0,
+            y: 0,
+            width: 1_024,
+            height: 1,
+        },
+        ImageSourceRect {
+            x: 0,
+            y: 0,
+            width: 1_024,
+            height: 1,
+        },
+        0,
+    );
+    let mut output = Vec::new();
+
+    write_kitty_frame(&mut output, &[paint], None).expect("Kitty output writes");
+
+    let first = STANDARD.encode(vec![0; KITTY_IMAGE_CHUNK_BYTES]);
+    let second = STANDARD.encode(vec![0; 4_096 - KITTY_IMAGE_CHUNK_BYTES]);
+    let expected = format!(
+        "\x1b_Ga=d,d=A,q=2\x1b\\\x1b[1;1H\x1b_Ga=T,f=32,s=1024,v=1,c=1024,r=1,C=1,z=0,q=2,m=1;{first}\x1b\\\x1b_Gm=0;{second}\x1b\\\x1b[?25l"
+    );
+    assert_eq!(output, expected.into_bytes());
+}
+
+#[test]
+fn kitty_writer_marks_an_exact_chunk_boundary_as_the_final_chunk() {
+    let paint = ImagePaint::new(
+        PaneId::new(),
+        4,
+        Arc::new(koshi_terminal::graphics::ImageRecord {
+            protocol: koshi_terminal::graphics::GraphicsProtocol::Kitty,
+            image: koshi_terminal::graphics::DecodedImage {
+                width: 768,
+                height: 1,
+                rgba: vec![0; KITTY_IMAGE_CHUNK_BYTES],
+            },
+            action: koshi_terminal::graphics::ImageAction::TransmitAndDisplay,
+            display: koshi_terminal::graphics::ImageDisplay::default(),
+            anchor: (0, 0),
+        }),
+        Rect {
+            x: 0,
+            y: 0,
+            width: 768,
+            height: 1,
+        },
+        ImageSourceRect {
+            x: 0,
+            y: 0,
+            width: 768,
+            height: 1,
+        },
+        0,
+    );
+    let mut output = Vec::new();
+
+    write_kitty_frame(&mut output, &[paint], None).expect("Kitty output writes");
+
+    let payload = STANDARD.encode(vec![0; KITTY_IMAGE_CHUNK_BYTES]);
+    let expected = format!(
+        "\x1b_Ga=d,d=A,q=2\x1b\\\x1b[1;1H\x1b_Ga=T,f=32,s=768,v=1,c=768,r=1,C=1,z=0,q=2,m=0;{payload}\x1b\\\x1b[?25l"
+    );
+    assert_eq!(output, expected.into_bytes());
+}
+
+#[test]
+fn unsupported_paint_writes_no_terminal_image_output() {
+    let fake = Arc::new(FakePtyBackend::new());
+    let (mut server, client_id, pane_id) = boot(&fake);
+    let _ = server.handle_runtime_event(RuntimeEvent::PtyOutput {
+        pane_id,
+        bytes: b"\x1b_Ga=T,f=32,s=1,v=1,c=1,r=1,C=1;/wAA/w==\x1b\\".to_vec(),
+    });
+    let client = test_client(&mut server, client_id);
+    let snapshot = frame(&server, client_id);
+    assert_eq!(snapshot.panes[0].image_placements.len(), 1);
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+    let mut output = Vec::new();
+    let mut last_title = window_title(&snapshot);
+    let mut last_cursor = cursor_style(&snapshot);
+
+    paint_frame_with_writer(
+        &mut output,
+        &mut terminal,
+        &client,
+        &snapshot,
+        &regions(VIEWPORT),
+        &ViewerPaint::from_frame(&client, &snapshot),
+        ImageRenderMode::Placeholder,
+        &mut last_title,
+        &mut last_cursor,
+    )
+    .expect("placeholder paint");
+
+    assert_eq!(output, Vec::<u8>::new());
 }

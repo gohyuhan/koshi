@@ -29,12 +29,12 @@
 //! [`FrameRowEnd`](crate::frame::FrameRowEnd),
 //! [`FrameColor`](crate::frame::FrameColor) and
 //! [`FrameUnderline`](crate::frame::FrameUnderline) — fall back to their
-//! plainest value when this build has no name for what arrives. A cell whose
-//! underline arrives as `"Dotted2"` draws with no underline; every other cell
-//! in the frame is unaffected. The fields that fall back borrow their raw
-//! text from the input: a frame decodes through `serde_json::from_str` and
-//! `serde_json::from_slice`, and fails through `serde_json::from_value` and
-//! `serde_json::from_reader`.
+//! plainest value when this build has no name for what arrives. Image
+//! presentation fields use the same rule: an unknown image protocol reads as
+//! Kitty, an unknown image action as `Display`, and an unknown optional image
+//! dimension or Sixel background reads as absent. A cell whose underline
+//! arrives as `"Dotted2"` draws with no underline; every other cell in the
+//! frame is unaffected.
 
 use koshi_core::geometry::{Rect, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
@@ -43,7 +43,31 @@ use koshi_core::mouse::MouseTracking;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::solver::StackHeader;
 use koshi_pane::pane::state::PaneKind;
+use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
+
+const MAX_FRAME_IMAGE_SIDE: u32 = 16_384;
+const MAX_FRAME_IMAGE_PIXELS: u64 = 16_777_216;
+
+/// The maximum total RGBA bytes a chunked painted frame may carry.
+pub const MAX_FRAME_IMAGE_TRANSFER_BYTES: u64 = 67_108_864;
+
+/// The largest raw image chunk carried by one session event.
+pub const MAX_FRAME_IMAGE_CHUNK_BYTES: usize = 1_048_576;
+
+/// The largest number of image transfers one painted frame may name.
+pub const MAX_FRAME_IMAGE_TRANSFERS: usize = 4_096;
+
+/// Decode an image presentation value through an owned JSON value so the
+/// fallback works for transport input and for owned deserialization callers.
+fn image_or_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned + Default,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(T::deserialize(value).unwrap_or_default())
+}
 
 /// One frame, as it travels to a client: the session's active tab, the content
 /// of every pane in it, and the viewing client's own state.
@@ -61,6 +85,26 @@ pub struct PaintedFrame {
     pub panes: Vec<FramePane>,
     /// The viewing client's own state (viewport, focus, lock mode).
     pub client: FrameClient,
+}
+
+impl PaintedFrame {
+    /// Clone the frame's ordinary content without cloning image records.
+    ///
+    /// The returned frame keeps every session, pane, cell, and client field.
+    /// Its image placement lists are empty so image bytes can travel in their
+    /// own bounded events.
+    #[must_use]
+    pub fn without_image_placements(&self) -> Self {
+        Self {
+            session: self.session.clone(),
+            panes: self
+                .panes
+                .iter()
+                .map(FramePane::without_image_placements)
+                .collect(),
+            client: self.client.clone(),
+        }
+    }
 }
 
 /// The session-scoped part of a frame: identity, the solved active tab, and the
@@ -156,6 +200,409 @@ pub struct FrameSlot {
     pub dead: bool,
 }
 
+/// One complete image placement carried with a pane's visible cells.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FrameImagePlacement {
+    /// The terminal-local placement identity.
+    pub id: u64,
+    /// The image pixels and protocol display metadata.
+    pub record: FrameImageRecord,
+    /// The zero-based row and column of the upper-left covered cell.
+    pub anchor: (u16, u16),
+    /// The number of covered columns.
+    pub columns: u16,
+    /// The number of covered rows.
+    pub rows: u16,
+}
+
+impl<'de> Deserialize<'de> for FrameImagePlacement {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Fields {
+            id: u64,
+            record: FrameImageRecord,
+            anchor: (u16, u16),
+            columns: u16,
+            rows: u16,
+        }
+
+        let fields = Fields::deserialize(deserializer)?;
+        if fields.id == 0 {
+            return Err(D::Error::custom(
+                "image placement identity must not be zero",
+            ));
+        }
+        if fields.columns == 0 || fields.rows == 0 {
+            return Err(D::Error::custom(
+                "image placement dimensions must not be zero",
+            ));
+        }
+        if fields.record.action == FrameImageAction::Transmit {
+            return Err(D::Error::custom(
+                "a transmitted-only image cannot be an image placement",
+            ));
+        }
+        Ok(Self {
+            id: fields.id,
+            record: fields.record,
+            anchor: fields.anchor,
+            columns: fields.columns,
+            rows: fields.rows,
+        })
+    }
+}
+
+/// The complete image record that produced one frame placement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FrameImageRecord {
+    /// Protocol that supplied the image. An unknown protocol reads as Kitty.
+    #[serde(default, deserialize_with = "image_or_default")]
+    pub protocol: FrameGraphicsProtocol,
+    /// Validated row-major RGBA pixels.
+    pub image: FrameDecodedImage,
+    /// The state operation represented by the transfer. An unknown action reads
+    /// as `Display`.
+    #[serde(default, deserialize_with = "image_or_default")]
+    pub action: FrameImageAction,
+    /// Display hints supplied by the protocol.
+    pub display: FrameImageDisplay,
+    /// Cursor position when the image sequence ended, as row and column.
+    pub anchor: (u16, u16),
+}
+
+/// Image metadata sent before its RGBA bytes arrive in chunks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FrameImageRecordHeader {
+    /// Protocol that supplied the image. An unknown protocol reads as Kitty.
+    #[serde(default, deserialize_with = "image_or_default")]
+    pub protocol: FrameGraphicsProtocol,
+    /// Image width in pixels.
+    pub width: u32,
+    /// Image height in pixels.
+    pub height: u32,
+    /// The state operation represented by the transfer. An unknown action reads
+    /// as `Display`.
+    #[serde(default, deserialize_with = "image_or_default")]
+    pub action: FrameImageAction,
+    /// Display hints supplied by the protocol.
+    pub display: FrameImageDisplay,
+    /// Cursor position when the image sequence ended, as row and column.
+    pub anchor: (u16, u16),
+}
+
+/// One image placement whose RGBA bytes travel in separate bounded events.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FrameImageTransfer {
+    /// The transfer identity within one painted frame.
+    pub id: u64,
+    /// The pane that owns the placement.
+    pub pane_id: PaneId,
+    /// The terminal-local placement identity.
+    pub placement_id: u64,
+    /// The image record metadata and its pixel dimensions.
+    pub record: FrameImageRecordHeader,
+    /// The zero-based row and column of the upper-left covered cell.
+    pub anchor: (u16, u16),
+    /// The number of covered columns.
+    pub columns: u16,
+    /// The number of covered rows.
+    pub rows: u16,
+    /// The exact number of RGBA bytes the chunks carry.
+    pub byte_len: u64,
+}
+
+impl<'de> Deserialize<'de> for FrameImageTransfer {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Fields {
+            id: u64,
+            pane_id: PaneId,
+            placement_id: u64,
+            record: FrameImageRecordHeader,
+            anchor: (u16, u16),
+            columns: u16,
+            rows: u16,
+            byte_len: u64,
+        }
+
+        let fields = Fields::deserialize(deserializer)?;
+        if fields.id == 0 {
+            return Err(D::Error::custom("image transfer identity must not be zero"));
+        }
+        if fields.placement_id == 0 {
+            return Err(D::Error::custom(
+                "image placement identity must not be zero",
+            ));
+        }
+        if fields.columns == 0 || fields.rows == 0 {
+            return Err(D::Error::custom(
+                "image placement dimensions must not be zero",
+            ));
+        }
+        if fields.record.action == FrameImageAction::Transmit {
+            return Err(D::Error::custom(
+                "a transmitted-only image cannot be an image placement",
+            ));
+        }
+        let expected_bytes = frame_image_byte_len(fields.record.width, fields.record.height)
+            .map_err(D::Error::custom)?;
+        if fields.byte_len != expected_bytes {
+            return Err(D::Error::custom(
+                "image transfer byte length does not match its dimensions",
+            ));
+        }
+        Ok(Self {
+            id: fields.id,
+            pane_id: fields.pane_id,
+            placement_id: fields.placement_id,
+            record: fields.record,
+            anchor: fields.anchor,
+            columns: fields.columns,
+            rows: fields.rows,
+            byte_len: fields.byte_len,
+        })
+    }
+}
+
+/// One bounded part of one chunked image transfer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FrameImageChunk {
+    /// The chunked painted-frame identity.
+    pub frame_id: u64,
+    /// The image-transfer identity named by the frame start.
+    pub transfer_id: u64,
+    /// The raw-byte offset of `bytes` in that image.
+    pub offset: u64,
+    /// Whether this chunk ends the transfer.
+    pub last: bool,
+    /// Raw RGBA bytes, encoded as base64 on the wire.
+    #[serde(with = "crate::bytes::base64_or_list")]
+    pub bytes: Vec<u8>,
+}
+
+impl<'de> Deserialize<'de> for FrameImageChunk {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Fields {
+            frame_id: u64,
+            transfer_id: u64,
+            offset: u64,
+            last: bool,
+            #[serde(with = "crate::bytes::base64_or_list")]
+            bytes: Vec<u8>,
+        }
+
+        let fields = Fields::deserialize(deserializer)?;
+        if fields.frame_id == 0 {
+            return Err(D::Error::custom("chunked frame identity must not be zero"));
+        }
+        if fields.transfer_id == 0 {
+            return Err(D::Error::custom("image transfer identity must not be zero"));
+        }
+        if fields.bytes.is_empty() {
+            return Err(D::Error::custom("image chunk must not be empty"));
+        }
+        if fields.bytes.len() > MAX_FRAME_IMAGE_CHUNK_BYTES {
+            return Err(D::Error::custom("image chunk exceeds its byte limit"));
+        }
+        Ok(Self {
+            frame_id: fields.frame_id,
+            transfer_id: fields.transfer_id,
+            offset: fields.offset,
+            last: fields.last,
+            bytes: fields.bytes,
+        })
+    }
+}
+
+/// A graphics protocol named in a frame.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FrameGraphicsProtocol {
+    /// DEC Sixel raster data.
+    Sixel,
+    /// Kitty graphics data.
+    #[default]
+    Kitty,
+    /// iTerm2 inline image data.
+    Iterm2,
+}
+
+/// A requested image dimension from a frame display field.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FrameImageDimension {
+    /// A number of terminal cells.
+    Cells(u32),
+    /// A number of device pixels.
+    Pixels(u32),
+    /// A percentage of the available terminal area.
+    Percent(u16),
+    /// Let the terminal choose the dimension.
+    #[default]
+    Auto,
+}
+
+/// The Sixel zero-bit background rule carried by a frame image.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FrameSixelBackground {
+    /// Use the terminal background for zero bits.
+    Terminal,
+    /// Keep zero bits transparent.
+    #[default]
+    Preserve,
+}
+
+/// Display hints carried by a frame image.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FrameImageDisplay {
+    /// The requested width, if the sender supplied one. An unknown dimension is
+    /// read as absent.
+    #[serde(deserialize_with = "image_or_default")]
+    pub width: Option<FrameImageDimension>,
+    /// The requested height, if the sender supplied one. An unknown dimension is
+    /// read as absent.
+    #[serde(deserialize_with = "image_or_default")]
+    pub height: Option<FrameImageDimension>,
+    /// Whether the sender requests aspect-ratio preservation.
+    pub preserve_aspect_ratio: bool,
+    /// The Sixel background rule, when the record came from Sixel. An unknown
+    /// rule is read as absent.
+    #[serde(deserialize_with = "image_or_default")]
+    pub sixel_background: Option<FrameSixelBackground>,
+    /// The Kitty image id, when one was supplied.
+    pub image_id: Option<u32>,
+    /// The Kitty image number, when one was supplied.
+    pub image_number: Option<u32>,
+    /// The Kitty placement id, when one was supplied.
+    pub placement_id: Option<u32>,
+    /// Usage flags supplied by Kitty.
+    pub usage_hints: u32,
+    /// Whether Kitty asks for a Unicode-placeholder placement.
+    pub unicode_placeholder: bool,
+    /// The Kitty image z-index.
+    pub z_index: i32,
+    /// The number of terminal columns requested by Kitty.
+    pub cell_columns: Option<u32>,
+    /// The number of terminal rows requested by Kitty.
+    pub cell_rows: Option<u32>,
+    /// The source image x offset requested by Kitty, in pixels.
+    pub source_offset_x: Option<u32>,
+    /// The source image y offset requested by Kitty, in pixels.
+    pub source_offset_y: Option<u32>,
+    /// The x offset inside the first terminal cell requested by Kitty.
+    pub cell_offset_x: Option<u32>,
+    /// The y offset inside the first terminal cell requested by Kitty.
+    pub cell_offset_y: Option<u32>,
+    /// Whether Kitty asks the placement to move the cursor after display.
+    pub move_cursor: bool,
+}
+
+impl Default for FrameImageDisplay {
+    fn default() -> Self {
+        Self {
+            width: None,
+            height: None,
+            preserve_aspect_ratio: true,
+            sixel_background: None,
+            image_id: None,
+            image_number: None,
+            placement_id: None,
+            usage_hints: 0,
+            unicode_placeholder: false,
+            z_index: 0,
+            cell_columns: None,
+            cell_rows: None,
+            source_offset_x: None,
+            source_offset_y: None,
+            cell_offset_x: None,
+            cell_offset_y: None,
+            move_cursor: true,
+        }
+    }
+}
+
+/// The transfer action recorded with a frame image.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FrameImageAction {
+    /// Transmit the decoded image without requesting display.
+    Transmit,
+    /// Place a decoded image without a Kitty image transfer.
+    #[default]
+    Display,
+    /// Transmit and place the decoded image in one operation.
+    TransmitAndDisplay,
+}
+
+/// A validated row-major RGBA image carried by a frame.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FrameDecodedImage {
+    /// Image width in pixels.
+    pub width: u32,
+    /// Image height in pixels.
+    pub height: u32,
+    /// Four bytes per pixel in red, green, blue, alpha order.
+    #[serde(with = "crate::bytes::base64_or_list")]
+    pub rgba: Vec<u8>,
+}
+
+impl<'de> Deserialize<'de> for FrameDecodedImage {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Fields {
+            width: u32,
+            height: u32,
+            #[serde(with = "crate::bytes::base64_or_list")]
+            rgba: Vec<u8>,
+        }
+
+        let fields = Fields::deserialize(deserializer)?;
+        let expected_bytes =
+            frame_image_byte_len(fields.width, fields.height).map_err(D::Error::custom)?;
+        let expected_bytes = usize::try_from(expected_bytes)
+            .map_err(|_| D::Error::custom("image byte count cannot fit this platform"))?;
+        if fields.rgba.len() != expected_bytes {
+            return Err(D::Error::custom(
+                "image RGBA length does not match its dimensions",
+            ));
+        }
+        Ok(Self {
+            width: fields.width,
+            height: fields.height,
+            rgba: fields.rgba,
+        })
+    }
+}
+
+/// Validate frame image dimensions and return the exact RGBA byte count.
+fn frame_image_byte_len(width: u32, height: u32) -> Result<u64, &'static str> {
+    let pixels = u64::from(width)
+        .checked_mul(u64::from(height))
+        .ok_or("image dimensions overflow")?;
+    let expected_bytes = pixels.checked_mul(4).ok_or("image byte count overflows")?;
+    if width == 0
+        || height == 0
+        || width > MAX_FRAME_IMAGE_SIDE
+        || height > MAX_FRAME_IMAGE_SIDE
+        || pixels > MAX_FRAME_IMAGE_PIXELS
+        || expected_bytes > MAX_FRAME_IMAGE_TRANSFER_BYTES
+    {
+        return Err("image dimensions exceed graphics limits");
+    }
+    Ok(expected_bytes)
+}
+
 /// The viewing client's own state: what this client sees and how it is moded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameClient {
@@ -193,6 +640,10 @@ pub struct FramePane {
     /// The visible terminal cells. `None` for a pane with no terminal content —
     /// a plugin pane, or a slot showing nothing this frame.
     pub window: Option<FrameWindow>,
+    /// The complete image placements whose rectangles fit inside this pane's
+    /// visible window. Empty when the pane has no image to draw.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub image_placements: Vec<FrameImagePlacement>,
     /// Whether the whole screen is in reverse video (DECSCNM): the client swaps
     /// the default foreground and background for every cell.
     pub reverse_video: bool,
@@ -220,6 +671,26 @@ pub struct FramePane {
     pub has_selection: bool,
     /// Scrollback state for the scroll-position indicator.
     pub scrollback: FrameScrollback,
+}
+
+impl FramePane {
+    fn without_image_placements(&self) -> Self {
+        Self {
+            id: self.id,
+            title: self.title.clone(),
+            cursor: self.cursor.clone(),
+            window: self.window.clone(),
+            image_placements: Vec::new(),
+            reverse_video: self.reverse_video,
+            mouse_tracking: self.mouse_tracking,
+            alt_scroll: self.alt_scroll,
+            on_alt_screen: self.on_alt_screen,
+            view_top_row: self.view_top_row,
+            selection: self.selection.clone(),
+            has_selection: self.has_selection,
+            scrollback: self.scrollback.clone(),
+        }
+    }
 }
 
 /// The cursor's position within the content area, and how it is drawn.

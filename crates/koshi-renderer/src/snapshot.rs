@@ -36,8 +36,11 @@ use koshi_core::mouse::MouseTracking;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::regions::RegionSolve;
 use koshi_layout::solver::StackHeader;
+use koshi_terminal::graphics::{
+    ImageAction, ImageRecord, MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS, MAX_IMAGE_SIDE,
+};
 use koshi_terminal::grid::state::Grid;
-use koshi_terminal::state::CursorShape;
+use koshi_terminal::state::{CursorShape, ImagePlacement, ImagePlacementId};
 
 use crate::region::{core_region_solve, TablineInputs};
 
@@ -494,6 +497,9 @@ pub struct PaneSnapshot {
     /// The visible terminal cells. `None` for a pane with no terminal content
     /// (a plugin pane, or a slot showing nothing this frame).
     pub grid_view: Option<GridView>,
+    /// The complete image placements whose rectangles fit inside this view.
+    /// Their anchors use the same pane-local rows and columns as `grid_view`.
+    pub image_placements: Vec<ImagePlacementSnapshot>,
     /// Whether the whole screen is in reverse video (DECSCNM): the renderer
     /// swaps the default foreground and background for every cell.
     pub reverse_video: bool,
@@ -607,6 +613,122 @@ pub struct GridView {
     /// Rows scrolled up from the live tail; `0` shows the live bottom of the
     /// buffer.
     pub view_offset: usize,
+}
+
+/// One validated terminal image placement carried in a read-only frame.
+///
+/// The image record is shared so a local snapshot does not copy RGBA pixels.
+/// A remote frame rebuilds the same record after its wire image has passed the
+/// wire decoder's bounds checks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImagePlacementSnapshot {
+    /// The terminal-local placement identity.
+    id: ImagePlacementId,
+    /// The decoded image and its display metadata.
+    record: Arc<ImageRecord>,
+    /// The zero-based row and column of the upper-left covered cell.
+    anchor: (u16, u16),
+    /// The number of covered columns.
+    columns: u16,
+    /// The number of covered rows.
+    rows: u16,
+}
+
+impl ImagePlacementSnapshot {
+    /// Build a frame placement from its fields.
+    #[must_use]
+    pub fn new(
+        id: ImagePlacementId,
+        record: Arc<ImageRecord>,
+        anchor: (u16, u16),
+        columns: u16,
+        rows: u16,
+    ) -> Option<Self> {
+        if id == 0
+            || columns == 0
+            || rows == 0
+            || u32::from(anchor.0) + u32::from(rows) > u32::from(u16::MAX) + 1
+            || u32::from(anchor.1) + u32::from(columns) > u32::from(u16::MAX) + 1
+            || record.action == ImageAction::Transmit
+            || record.source_rect().is_err()
+            || !valid_image_record(&record)
+        {
+            return None;
+        }
+        Some(Self {
+            id,
+            record,
+            anchor,
+            columns,
+            rows,
+        })
+    }
+
+    /// Return the terminal-local placement identity.
+    #[must_use]
+    pub fn id(&self) -> ImagePlacementId {
+        self.id
+    }
+
+    /// Return the complete image record.
+    #[must_use]
+    pub fn record(&self) -> &ImageRecord {
+        self.record.as_ref()
+    }
+
+    /// Return the shared complete image record.
+    #[must_use]
+    pub fn record_arc(&self) -> Arc<ImageRecord> {
+        Arc::clone(&self.record)
+    }
+
+    /// Return the zero-based row and column of the placement anchor.
+    #[must_use]
+    pub fn anchor(&self) -> (u16, u16) {
+        self.anchor
+    }
+
+    /// Return the placement dimensions as `(rows, columns)`.
+    #[must_use]
+    pub fn dimensions(&self) -> (u16, u16) {
+        (self.rows, self.columns)
+    }
+
+    /// Copy one terminal placement into the frame while sharing its record.
+    #[must_use]
+    pub fn from_placement(placement: &ImagePlacement) -> Self {
+        let (rows, columns) = placement.dimensions();
+        Self::new(
+            placement.id(),
+            placement.record_arc(),
+            placement.anchor(),
+            columns,
+            rows,
+        )
+        .expect("terminal image placement is valid")
+    }
+}
+
+fn valid_image_record(record: &ImageRecord) -> bool {
+    let Ok(width) = usize::try_from(record.image.width) else {
+        return false;
+    };
+    let Ok(height) = usize::try_from(record.image.height) else {
+        return false;
+    };
+    let Some(pixels) = width.checked_mul(height) else {
+        return false;
+    };
+    let Some(expected_bytes) = pixels.checked_mul(4) else {
+        return false;
+    };
+    width > 0
+        && height > 0
+        && width <= MAX_IMAGE_SIDE
+        && height <= MAX_IMAGE_SIDE
+        && pixels <= MAX_IMAGE_PIXELS
+        && expected_bytes <= MAX_IMAGE_BYTES
+        && record.image.rgba.len() == expected_bytes
 }
 
 /// A pane's scrollback state. The renderer draws

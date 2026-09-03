@@ -231,6 +231,47 @@ pub struct ImageRecord {
     pub anchor: (u16, u16),
 }
 
+impl ImageRecord {
+    /// Return the source rectangle used by a Kitty image placement.
+    ///
+    /// The tuple is `(x, y, width, height)` in decoded-image pixels. Kitty
+    /// `x` and `y` select the source origin; `w` and `h` are represented by
+    /// pixel dimensions in `display`. Other protocols use the complete image.
+    pub fn source_rect(&self) -> Result<(u32, u32, u32, u32), ImagePlacementError> {
+        if self.protocol != GraphicsProtocol::Kitty {
+            return Ok((0, 0, self.image.width, self.image.height));
+        }
+
+        let x = self.display.source_offset_x.unwrap_or(0);
+        let y = self.display.source_offset_y.unwrap_or(0);
+        let width = match self.display.width {
+            Some(ImageDimension::Pixels(value)) => value,
+            _ => self.image.width.saturating_sub(x),
+        };
+        let height = match self.display.height {
+            Some(ImageDimension::Pixels(value)) => value,
+            _ => self.image.height.saturating_sub(y),
+        };
+        let valid = width > 0
+            && height > 0
+            && x.checked_add(width)
+                .is_some_and(|end| end <= self.image.width)
+            && y.checked_add(height)
+                .is_some_and(|end| end <= self.image.height);
+        if !valid {
+            return Err(ImagePlacementError::SourceOutOfBounds {
+                x,
+                y,
+                width,
+                height,
+                image_width: self.image.width,
+                image_height: self.image.height,
+            });
+        }
+        Ok((x, y, width, height))
+    }
+}
+
 /// Why a graphics parser cannot rebuild all of its active bytes after a
 /// terminal-engine replacement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

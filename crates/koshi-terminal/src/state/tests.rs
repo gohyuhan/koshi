@@ -512,6 +512,38 @@ fn image_dimensions_derive_one_kitty_axis_and_reject_pixel_only_sizes() {
 }
 
 #[test]
+fn kitty_source_rectangle_is_validated_before_placement_mutation() {
+    let mut state = TerminalState::new(PtySize { cols: 8, rows: 8 });
+    let record = image_record(
+        ImageDisplay {
+            cell_columns: Some(1),
+            cell_rows: Some(1),
+            width: Some(ImageDimension::Pixels(2)),
+            source_offset_x: Some(2),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (0, 0),
+        3,
+        1,
+    );
+    let before = state.clone();
+
+    assert_eq!(
+        state.apply_image_record(&record),
+        Err(ImagePlacementError::SourceOutOfBounds {
+            x: 2,
+            y: 0,
+            width: 2,
+            height: 1,
+            image_width: 3,
+            image_height: 1,
+        })
+    );
+    assert_eq!(state, before);
+}
+
+#[test]
 fn image_placement_rejects_mixed_iterm_cell_and_pixel_units_without_mutation() {
     let mut state = TerminalState::new(PtySize { cols: 8, rows: 8 });
     let mut record = image_record(

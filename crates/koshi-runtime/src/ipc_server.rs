@@ -66,13 +66,14 @@ use koshi_ipc::endpoint::{
 };
 use koshi_ipc::error::IpcError;
 use koshi_ipc::event::SessionEvent;
+use koshi_ipc::frame::{FrameImageChunk, PaintedFrame};
 use koshi_ipc::handshake::{Handshake, Peer};
 use koshi_ipc::plane::{self, Next};
 use koshi_ipc::protocol::{
     ConnectionToken, IncomingRequest, IpcErrorCode, IpcErrorPayload, IpcRequestKind, IpcResponse,
     IpcResult, SessionPlane,
 };
-use koshi_ipc::transport::{self, Connection, Listener, ReadCloser};
+use koshi_ipc::transport::{self, Connection, FrameWriter, Listener, ReadCloser};
 use koshi_ipc::validate::{
     reclaim_stale_socket, validate_shared_socket_addr, validate_socket_addr,
 };
@@ -82,6 +83,9 @@ use koshi_renderer::snapshot::Delivery;
 
 use crate::runtime::bus::wire_event;
 use crate::runtime::event::{EndingNotice, RuntimeEvent, SessionEnding};
+use crate::runtime::frame::{
+    wire_chunked_frame_base, wire_chunked_frame_starts, wire_image_chunk_sources,
+};
 
 /// How long the accept loop sleeps after a failed accept before it accepts
 /// again. A persistent accept error — say, the process is out of file
@@ -862,6 +866,7 @@ fn stream_events(
     let writer_intake = Arc::clone(&served.intake);
     ending_notice.writer_started();
     std::thread::spawn(move || {
+        let mut next_chunked_frame_id = 1u64;
         loop {
             // The session is ending. This client is told at once and whatever
             // is still queued for it goes unwritten. A queue the server already
@@ -893,15 +898,31 @@ fn stream_events(
             let event = wire_event(&delivery);
             drop(delivery);
             if let Some(event) = event {
-                match writer.send(&event) {
-                    Ok(()) => {}
-                    // A frame over the cap is refused with nothing written, so
-                    // the connection is whole and the next frame carries the
-                    // session's picture again.
-                    Err(IpcError::FrameTooLarge { len, max }) => {
-                        tracing::warn!(%client_id, len, max, "frame over the cap was not sent");
-                    }
-                    Err(_) => break,
+                let write_failed = match &event {
+                    SessionEvent::Painted { frame } => match writer.send(&event) {
+                        Ok(()) => false,
+                        Err(IpcError::FrameTooLarge { len, max }) => {
+                            let frame_id = next_chunked_frame_id;
+                            next_chunked_frame_id = if frame_id == u64::MAX {
+                                1
+                            } else {
+                                frame_id + 1
+                            };
+                            send_chunked_frame(&mut writer, frame, frame_id, client_id, len, max)
+                        }
+                        Err(_) => true,
+                    },
+                    _ => match writer.send(&event) {
+                        Ok(()) => false,
+                        Err(IpcError::FrameTooLarge { len, max }) => {
+                            tracing::warn!(%client_id, len, max, "frame over the cap was not sent");
+                            false
+                        }
+                        Err(_) => true,
+                    },
+                };
+                if write_failed {
+                    break;
                 }
                 // `Quit` and `Restarting` are the stream's terminal frames; the
                 // loop ends on either without waiting for the queue to close.
@@ -985,6 +1006,66 @@ fn stream_events(
             streamed: true,
         },
     );
+}
+
+/// Send one oversized painted frame as a base frame followed by image chunks.
+fn send_chunked_frame(
+    writer: &mut FrameWriter,
+    frame: &PaintedFrame,
+    frame_id: u64,
+    client_id: ClientId,
+    original_len: u64,
+    original_max: u32,
+) -> bool {
+    let Some(starts) = wire_chunked_frame_starts(frame, frame_id) else {
+        tracing::warn!(
+            %client_id,
+            len = original_len,
+            max = original_max,
+            "frame over the cap has no image data to split"
+        );
+        return false;
+    };
+    let base = SessionEvent::Painted {
+        frame: Box::new(wire_chunked_frame_base(frame)),
+    };
+    if let Err(error) = writer.send(&base) {
+        return report_chunked_send_error(client_id, error, "the image base frame");
+    }
+    for start in starts {
+        if let Err(error) = writer.send(&start) {
+            return report_chunked_send_error(client_id, error, "an image transfer start");
+        }
+    }
+    for (transfer_id, offset, last, bytes) in wire_image_chunk_sources(frame) {
+        let event = SessionEvent::PaintedImageChunk {
+            chunk: FrameImageChunk {
+                frame_id,
+                transfer_id,
+                offset,
+                last,
+                bytes: bytes.to_vec(),
+            },
+        };
+        if let Err(error) = writer.send(&event) {
+            return report_chunked_send_error(client_id, error, "an image transfer chunk");
+        }
+    }
+    false
+}
+
+/// Report one chunked-frame write failure and say whether the connection stays usable.
+fn report_chunked_send_error(client_id: ClientId, error: IpcError, part: &str) -> bool {
+    match error {
+        IpcError::FrameTooLarge { len, max } => {
+            tracing::warn!(%client_id, %part, len, max, "image transfer part exceeded the frame cap");
+            false
+        }
+        error => {
+            tracing::warn!(%client_id, %part, %error, "image transfer write failed");
+            true
+        }
+    }
 }
 
 /// Rebuild `envelope` with the source a control connection carries, over

@@ -297,6 +297,30 @@ fn a_frozen_snapshot_keeps_its_grid_when_the_engine_writes_again() {
 }
 
 #[test]
+fn building_a_snapshot_leaves_terminal_image_state_unchanged() {
+    let mut rt = new_runtime();
+    let (session, session_id, _tab_id, pane_id, client_id) =
+        session_with_client(Size { cols: 80, rows: 24 });
+    rt.sessions.insert(session_id, session);
+
+    let mut engine = TerminalEngine::new(PtySize { cols: 80, rows: 24 });
+    let _ = engine.advance(b"\x1b_Ga=T,f=32,s=1,v=1,c=1,r=1,C=1;/wAA/w==\x1b\\");
+    let state_before = engine.state().clone();
+    rt.terminal_engines.insert(pane_id, engine);
+
+    let snapshot = rt.build_snapshot(client_id).expect("snapshot");
+    let state_after = rt.terminal_engines.get(&pane_id).expect("engine").state();
+
+    assert_eq!(state_after, &state_before);
+    assert_eq!(snapshot.panes[0].image_placements.len(), 1);
+    assert_eq!(snapshot.panes[0].image_placements[0].anchor(), (0, 0));
+    assert_eq!(
+        snapshot.panes[0].image_placements[0].record().image.rgba,
+        vec![255, 0, 0, 255]
+    );
+}
+
+#[test]
 fn effective_size_is_the_min_viewport_across_clients_not_the_requesters() {
     let mut rt = new_runtime();
     let (mut session, session_id, tab_id, pane_id, big_client) =

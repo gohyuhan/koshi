@@ -30,6 +30,24 @@ pub enum ImagePlacementError {
     /// The requested placement has no cells.
     #[error("image placement has zero cells: {columns} columns by {rows} rows")]
     ZeroSize { columns: u32, rows: u32 },
+    /// The Kitty source rectangle is outside the decoded image.
+    #[error(
+        "image source rectangle at ({x},{y}) with {width} pixels by {height} pixels exceeds the {image_width}-pixel by {image_height}-pixel image"
+    )]
+    SourceOutOfBounds {
+        /// The source rectangle's left edge in pixels.
+        x: u32,
+        /// The source rectangle's top edge in pixels.
+        y: u32,
+        /// The source rectangle width in pixels.
+        width: u32,
+        /// The source rectangle height in pixels.
+        height: u32,
+        /// The decoded image width in pixels.
+        image_width: u32,
+        /// The decoded image height in pixels.
+        image_height: u32,
+    },
     /// The requested cell dimensions cannot fit in the coordinate type.
     #[error("image placement is too large: {columns} columns by {rows} rows")]
     DimensionsTooLarge { columns: u32, rows: u32 },
@@ -214,6 +232,12 @@ impl ImagePlacement {
     #[must_use]
     pub fn record(&self) -> &ImageRecord {
         self.record.as_ref()
+    }
+
+    /// Return the shared complete image record retained by this placement.
+    #[must_use]
+    pub fn record_arc(&self) -> Arc<ImageRecord> {
+        Arc::clone(&self.record)
     }
 
     /// Return the zero-based row and column of the placement anchor.
@@ -923,6 +947,7 @@ impl TerminalState {
         record: &ImageRecord,
         retransmitted_image_id: Option<u32>,
     ) -> Result<(), ImagePlacementError> {
+        record.source_rect()?;
         let (columns, rows) = cell_dimensions(record)?;
         let columns = u16::try_from(columns)
             .map_err(|_| ImagePlacementError::DimensionsTooLarge { columns, rows })?;
@@ -1255,6 +1280,8 @@ fn kitty_cell_dimensions(record: &ImageRecord) -> Result<(u32, u32), ImagePlacem
         });
     }
 
+    let (_, _, source_width, source_height) = record.source_rect()?;
+
     let columns = record
         .display
         .cell_columns
@@ -1265,8 +1292,14 @@ fn kitty_cell_dimensions(record: &ImageRecord) -> Result<(u32, u32), ImagePlacem
         .or_else(|| cell_dimension(record.display.height));
     match (columns, rows) {
         (Some(columns), Some(rows)) => Ok((columns, rows)),
-        (Some(columns), None) => Ok((columns, scaled_dimension(columns, record, false)?)),
-        (None, Some(rows)) => Ok((scaled_dimension(rows, record, true)?, rows)),
+        (Some(columns), None) => Ok((
+            columns,
+            scaled_dimension(columns, source_width, source_height, false)?,
+        )),
+        (None, Some(rows)) => Ok((
+            scaled_dimension(rows, source_width, source_height, true)?,
+            rows,
+        )),
         (None, None) => Err(ImagePlacementError::MissingCellDimensions {
             width: record.display.width,
             height: record.display.height,
@@ -1320,17 +1353,10 @@ fn is_non_cell_dimension(dimension: ImageDimension) -> bool {
 
 fn scaled_dimension(
     fixed: u32,
-    record: &ImageRecord,
+    source_width: u32,
+    source_height: u32,
     width_from_height: bool,
 ) -> Result<u32, ImagePlacementError> {
-    let source_width = match record.display.width {
-        Some(ImageDimension::Pixels(value)) => value,
-        _ => record.image.width,
-    };
-    let source_height = match record.display.height {
-        Some(ImageDimension::Pixels(value)) => value,
-        _ => record.image.height,
-    };
     if fixed == 0 || source_width == 0 || source_height == 0 {
         return Err(ImagePlacementError::ZeroSize {
             columns: if width_from_height { 0 } else { fixed },

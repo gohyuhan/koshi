@@ -87,6 +87,7 @@ fn pane(pane_id: PaneId, grid_view: Option<GridView>, row: u16, col: u16) -> Pan
             shape: None,
         },
         grid_view,
+        image_placements: Vec::new(),
         reverse_video: false,
         mouse_tracking: MouseTracking::Off,
         alt_scroll: false,

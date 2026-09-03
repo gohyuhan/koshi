@@ -7,11 +7,60 @@ use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::MouseTracking;
+use koshi_ipc::event::SessionEvent;
+use koshi_ipc::frame::{
+    FrameImageChunk, FrameImageTransfer, MAX_FRAME_IMAGE_TRANSFERS, MAX_FRAME_IMAGE_TRANSFER_BYTES,
+};
 use koshi_layout::mode::LayoutMode;
 use koshi_renderer::snapshot::PaneKind;
-use koshi_runtime::runtime::frame::wire_frame;
+use koshi_runtime::runtime::frame::{
+    wire_chunked_frame_base, wire_chunked_frame_starts, wire_frame, wire_image_chunk_sources,
+};
+use koshi_terminal::graphics::{
+    DecodedImage, GraphicsProtocol, ImageAction, ImageDimension, ImageDisplay, ImageRecord,
+    SixelBackground,
+};
 
 use super::*;
+
+fn image_placement() -> ImagePlacementSnapshot {
+    ImagePlacementSnapshot::new(
+        41,
+        Arc::new(ImageRecord {
+            protocol: GraphicsProtocol::Kitty,
+            image: DecodedImage {
+                width: 2,
+                height: 1,
+                rgba: vec![255, 0, 0, 255, 0, 255, 0, 255],
+            },
+            action: ImageAction::TransmitAndDisplay,
+            display: ImageDisplay {
+                width: Some(ImageDimension::Cells(3)),
+                height: Some(ImageDimension::Pixels(1)),
+                preserve_aspect_ratio: false,
+                sixel_background: Some(SixelBackground::Preserve),
+                image_id: Some(7),
+                image_number: Some(8),
+                placement_id: Some(9),
+                usage_hints: 0x12,
+                unicode_placeholder: true,
+                z_index: -2,
+                cell_columns: Some(2),
+                cell_rows: Some(1),
+                source_offset_x: Some(1),
+                source_offset_y: Some(0),
+                cell_offset_x: Some(6),
+                cell_offset_y: Some(7),
+                move_cursor: false,
+            },
+            anchor: (0, 2),
+        }),
+        (0, 1),
+        2,
+        1,
+    )
+    .expect("test image placement is valid")
+}
 
 /// Every style field set away from its default, so a field lost on the way
 /// there or back shows up.
@@ -64,6 +113,7 @@ fn content_pane(id: PaneId) -> PaneSnapshot {
             grid: Arc::new(grid()),
             view_offset: 7,
         }),
+        image_placements: vec![image_placement()],
         reverse_video: true,
         mouse_tracking: MouseTracking::AnyMotion,
         alt_scroll: true,
@@ -94,6 +144,7 @@ fn empty_pane(id: PaneId) -> PaneSnapshot {
             shape: None,
         },
         grid_view: None,
+        image_placements: Vec::new(),
         reverse_video: false,
         mouse_tracking: MouseTracking::Off,
         alt_scroll: false,
@@ -188,6 +239,156 @@ fn snapshot(panes: Vec<PaneSnapshot>) -> RenderSnapshot {
 fn a_frame_that_travels_and_is_read_back_is_the_frame_that_was_sent() {
     let sent = snapshot(vec![content_pane(PaneId::new()), empty_pane(PaneId::new())]);
     assert_eq!(to_snapshot(&wire_frame(&sent)), sent);
+}
+
+#[test]
+fn an_image_placement_and_its_complete_record_survive_frame_round_trip() {
+    let sent = snapshot(vec![content_pane(PaneId::new()), empty_pane(PaneId::new())]);
+
+    let received = to_snapshot(&wire_frame(&sent));
+
+    assert_eq!(
+        received.panes[0].image_placements,
+        sent.panes[0].image_placements
+    );
+    assert_eq!(
+        received.panes[0].image_placements[0].record().image.rgba,
+        vec![255, 0, 0, 255, 0, 255, 0, 255]
+    );
+    assert_eq!(
+        received.panes[0].image_placements[0]
+            .record()
+            .display
+            .source_offset_y,
+        Some(0)
+    );
+}
+
+#[test]
+fn chunked_image_events_rebuild_the_original_painted_frame() {
+    let sent = snapshot(vec![content_pane(PaneId::new()), empty_pane(PaneId::new())]);
+    let wire = wire_frame(&sent);
+    let SessionEvent::PaintedImageStart { frame_id, images } = wire_chunked_frame_starts(&wire, 7)
+        .expect("the frame has an image")
+        .into_iter()
+        .next()
+        .expect("the frame has one image start")
+    else {
+        panic!("the image-start event has its declared shape");
+    };
+    let base = to_snapshot(&wire_chunked_frame_base(&wire));
+    let mut assembly = ImageFrameAssembly::new(frame_id, base, images).expect("the start reads");
+    let mut rebuilt = None;
+    for (transfer_id, offset, last, bytes) in wire_image_chunk_sources(&wire) {
+        rebuilt = assembly
+            .accept(FrameImageChunk {
+                frame_id,
+                transfer_id,
+                offset,
+                last,
+                bytes: bytes.to_vec(),
+            })
+            .expect("the image chunk continues the transfer");
+    }
+
+    let rebuilt = rebuilt.expect("the final chunk rebuilds the frame");
+    assert_eq!(rebuilt, sent);
+}
+
+#[test]
+fn an_image_chunk_with_a_wrong_offset_is_refused_exactly() {
+    let sent = snapshot(vec![content_pane(PaneId::new()), empty_pane(PaneId::new())]);
+    let wire = wire_frame(&sent);
+    let SessionEvent::PaintedImageStart { frame_id, images } = wire_chunked_frame_starts(&wire, 7)
+        .expect("the frame has an image")
+        .into_iter()
+        .next()
+        .expect("the frame has one image start")
+    else {
+        panic!("the image-start event has its declared shape");
+    };
+    let base = to_snapshot(&wire_chunked_frame_base(&wire));
+    let mut assembly = ImageFrameAssembly::new(frame_id, base, images).expect("the start reads");
+    let error = assembly
+        .accept(FrameImageChunk {
+            frame_id,
+            transfer_id: 1,
+            offset: 1,
+            last: true,
+            bytes: vec![255, 0, 0, 255, 0, 255, 0, 255],
+        })
+        .expect_err("the first chunk must start at offset zero");
+
+    assert_eq!(
+        error,
+        ImageAssemblyError::WrongOffset {
+            transfer_id: 1,
+            expected: 0,
+            actual: 1,
+        }
+    );
+}
+
+#[test]
+fn image_transfer_metadata_cannot_reserve_more_than_the_frame_limit() {
+    let sent = snapshot(vec![content_pane(PaneId::new()), empty_pane(PaneId::new())]);
+    let wire = wire_frame(&sent);
+    let base = to_snapshot(&wire_chunked_frame_base(&wire));
+    let mut transfers = wire_chunked_frame_starts(&wire, 7)
+        .expect("the frame has an image")
+        .into_iter()
+        .next()
+        .and_then(|event| match event {
+            SessionEvent::PaintedImageStart { images, .. } => images.into_iter().next(),
+            _ => None,
+        })
+        .map(|transfer| {
+            let mut oversized = transfer;
+            oversized.byte_len = MAX_FRAME_IMAGE_TRANSFER_BYTES;
+            oversized
+        })
+        .into_iter()
+        .collect::<Vec<_>>();
+    transfers.push(FrameImageTransfer {
+        id: 2,
+        byte_len: MAX_FRAME_IMAGE_TRANSFER_BYTES,
+        ..transfers[0].clone()
+    });
+
+    let error = match ImageFrameAssembly::new(7, base, transfers) {
+        Ok(_) => panic!("the total is over the limit"),
+        Err(error) => error,
+    };
+    assert_eq!(error, ImageAssemblyError::TransferBytesExceedFrame);
+}
+
+#[test]
+fn image_transfer_metadata_cannot_exceed_the_placement_count_limit() {
+    let sent = snapshot(vec![content_pane(PaneId::new()), empty_pane(PaneId::new())]);
+    let wire = wire_frame(&sent);
+    let base = to_snapshot(&wire_chunked_frame_base(&wire));
+    let template = wire_chunked_frame_starts(&wire, 7)
+        .expect("the frame has an image")
+        .into_iter()
+        .next()
+        .and_then(|event| match event {
+            SessionEvent::PaintedImageStart { images, .. } => images.into_iter().next(),
+            _ => None,
+        })
+        .expect("the frame has one image transfer");
+    let transfers = (0..=MAX_FRAME_IMAGE_TRANSFERS)
+        .map(|index| FrameImageTransfer {
+            id: u64::try_from(index + 1).expect("the transfer identity fits"),
+            placement_id: u64::try_from(index + 1).expect("the placement identity fits"),
+            ..template.clone()
+        })
+        .collect();
+
+    let error = match ImageFrameAssembly::new(7, base, transfers) {
+        Ok(_) => panic!("the transfer count is over the limit"),
+        Err(error) => error,
+    };
+    assert_eq!(error, ImageAssemblyError::TransferCountExceedsFrame);
 }
 
 #[test]

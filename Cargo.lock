@@ -1051,6 +1051,7 @@ dependencies = [
 name = "koshi-client"
 version = "0.4.0-pr.1"
 dependencies = [
+ "base64 0.23.1",
  "koshi-config",
  "koshi-core",
  "koshi-input",
@@ -1130,7 +1131,7 @@ dependencies = [
 name = "koshi-ipc"
 version = "0.4.0-pr.1"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "getrandom 0.4.3",
  "interprocess",
  "koshi-core",
@@ -1269,7 +1270,7 @@ dependencies = [
 name = "koshi-runtime"
 version = "0.4.0-pr.1"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "koshi-client",
  "koshi-config",
  "koshi-core",

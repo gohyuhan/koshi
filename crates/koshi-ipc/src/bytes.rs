@@ -163,7 +163,7 @@ fn decode(text: &str) -> Result<Vec<u8>, &'static str> {
         DecodeError::InvalidPadding => {
             "the base64 text is not padded to a multiple of four characters"
         }
-        DecodeError::InvalidLastSymbol(_, _) => {
+        DecodeError::InvalidLastSymbol { .. } => {
             "the base64 text ends with unused bits that are not zero"
         }
         DecodeError::InvalidByte(_, _) => {

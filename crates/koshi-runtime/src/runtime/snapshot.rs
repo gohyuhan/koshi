@@ -37,9 +37,9 @@ use koshi_layout::solver::{solve_with_mode_min, PaneSizing, SolveResult};
 use koshi_pane::pane::lifecycle::PaneLifecycle;
 use koshi_pane::pane::state::PaneKind;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, CursorSnapshot, GridView, OwnedFrameLayout, PaneSlot, PaneSnapshot,
-    PluginUiSnapshot, RenderSnapshot, ScrollbackMeta, SelectionSpans, SessionSnapshot, TabMeta,
-    TabSnapshot,
+    ClientSnapshot, CursorSnapshot, GridView, ImagePlacementSnapshot, OwnedFrameLayout, PaneSlot,
+    PaneSnapshot, PluginUiSnapshot, RenderSnapshot, ScrollbackMeta, SelectionSpans,
+    SessionSnapshot, TabMeta, TabSnapshot,
 };
 use koshi_session::session::state::Tab;
 use koshi_terminal::grid::state::Grid;
@@ -219,6 +219,7 @@ impl Server {
                     shape: None,
                 },
                 grid_view: None,
+                image_placements: Vec::new(),
                 reverse_video: false,
                 mouse_tracking: MouseTracking::Off,
                 alt_scroll: false,
@@ -241,6 +242,11 @@ impl Server {
         // screen), so the composed grid, the indicator, and cursor suppression
         // all agree on how far the view is scrolled.
         let (grid, view_offset) = state.scrolled_view(view_offset);
+        let image_placements = state
+            .image_placements_for_view(view_offset)
+            .iter()
+            .map(ImagePlacementSnapshot::from_placement)
+            .collect();
         // On the alternate screen the pane's name is the app's OSC 0/1/2 title.
         // On the primary screen it is the shell's OSC 7 working directory,
         // `~`-shortened, falling back to the OSC title when none was reported.
@@ -262,6 +268,7 @@ impl Server {
                 shape: state.cursor_shape(),
             },
             has_selection: selection.is_some(),
+            image_placements,
             selection: selection
                 .and_then(|selection| selection_spans(&selection, &grid, scrollback, view_offset)),
             // The same line number `selection_spans` resolves its rows against:

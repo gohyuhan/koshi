@@ -5,6 +5,7 @@
 //! rows, and mapping a mouse cell to the region drawn under it.
 
 pub mod hit_test;
+pub mod images;
 pub mod region;
 pub mod render;
 pub mod snapshot;
@@ -15,4 +16,7 @@ pub use hit_test::{
     hit_test, pane_cell_clamped, pane_content_rect, pane_local_cell, tabline_first_visible,
     HitRegion,
 };
-pub use render::{cursor_position, cursor_style, render_frame};
+pub use images::{
+    image_paints, ImagePaint, ImageRenderMode, ImageSourceRect, TERMINAL_IMAGE_UNAVAILABLE,
+};
+pub use render::{cursor_position, cursor_style, render_frame, render_frame_with_images};
