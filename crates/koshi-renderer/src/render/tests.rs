@@ -86,6 +86,7 @@ fn build(
                 shape: None,
             },
             grid_view: None,
+            image_placements: Vec::new(),
             reverse_video: false,
             mouse_tracking: MouseTracking::Off,
             alt_scroll: false,

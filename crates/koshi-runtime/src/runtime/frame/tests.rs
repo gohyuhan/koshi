@@ -11,13 +11,20 @@ use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::MouseTracking;
-use koshi_ipc::frame::FrameRun;
+use koshi_ipc::event::SessionEvent;
+use koshi_ipc::frame::{FrameDecodedImage, FrameRun, MAX_FRAME_IMAGE_CHUNK_BYTES};
+use koshi_ipc::transport::MAX_FRAME_LEN;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::solver::StackHeader;
 use koshi_pane::pane::state::PaneKind;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, CursorSnapshot, GridView, PaneSlot, PaneSnapshot, PluginUiSnapshot,
-    RenderSnapshot, ScrollbackMeta, SelectionSpans, SessionSnapshot, TabMeta, TabSnapshot,
+    ClientSnapshot, CursorSnapshot, GridView, ImagePlacementSnapshot, PaneSlot, PaneSnapshot,
+    PluginUiSnapshot, RenderSnapshot, ScrollbackMeta, SelectionSpans, SessionSnapshot, TabMeta,
+    TabSnapshot,
+};
+use koshi_terminal::graphics::{
+    DecodedImage, GraphicsProtocol, ImageAction, ImageDimension, ImageDisplay, ImageRecord,
+    SixelBackground,
 };
 
 use super::*;
@@ -101,6 +108,47 @@ fn wire_blank_cell() -> FrameCell {
     }
 }
 
+/// One 2×1 Kitty placement with pixels that make byte and field mistakes easy
+/// to see in the wire assertions.
+fn image_placement() -> ImagePlacementSnapshot {
+    ImagePlacementSnapshot::new(
+        41,
+        Arc::new(ImageRecord {
+            protocol: GraphicsProtocol::Kitty,
+            image: DecodedImage {
+                width: 2,
+                height: 1,
+                rgba: vec![255, 0, 0, 255, 0, 255, 0, 255],
+            },
+            action: ImageAction::TransmitAndDisplay,
+            display: ImageDisplay {
+                width: Some(ImageDimension::Cells(3)),
+                height: Some(ImageDimension::Pixels(1)),
+                preserve_aspect_ratio: false,
+                sixel_background: Some(SixelBackground::Preserve),
+                image_id: Some(7),
+                image_number: Some(8),
+                placement_id: Some(9),
+                usage_hints: 0x12,
+                unicode_placeholder: true,
+                cell_columns: Some(2),
+                cell_rows: Some(1),
+                z_index: -2,
+                source_offset_x: Some(1),
+                source_offset_y: Some(0),
+                cell_offset_x: Some(6),
+                cell_offset_y: Some(7),
+                move_cursor: false,
+            },
+            anchor: (0, 2),
+        }),
+        (0, 1),
+        2,
+        1,
+    )
+    .expect("test image placement is valid")
+}
+
 /// One pane holding [`grid`], scrolled 7 lines back, reporting any-motion mouse
 /// tracking and a truncated scrollback of 500 retained lines.
 fn pane(id: PaneId) -> PaneSnapshot {
@@ -118,6 +166,7 @@ fn pane(id: PaneId) -> PaneSnapshot {
             grid: Arc::new(grid()),
             view_offset: 7,
         }),
+        image_placements: vec![image_placement()],
         reverse_video: true,
         mouse_tracking: MouseTracking::AnyMotion,
         alt_scroll: true,
@@ -148,6 +197,7 @@ fn empty_pane(id: PaneId) -> PaneSnapshot {
             shape: None,
         },
         grid_view: None,
+        image_placements: Vec::new(),
         reverse_video: false,
         mouse_tracking: MouseTracking::Off,
         alt_scroll: false,
@@ -247,6 +297,92 @@ fn a_cell_travels_with_its_character_marks_width_and_every_style_field() {
         .as_ref()
         .expect("the pane carries a grid");
     assert_eq!(window.rows[0].cells()[0], wire_written_cell());
+}
+
+#[test]
+fn an_oversized_image_frame_splits_into_bounded_wire_events() {
+    let content = PaneId::new();
+    let mut frame = wire_frame(&snapshot(content, PaneId::new()));
+    frame.panes[0].image_placements[0].record.image = FrameDecodedImage {
+        width: 4_096,
+        height: 1_024,
+        rgba: vec![0x7f; 16 * 1024 * 1024],
+    };
+
+    let full = SessionEvent::Painted {
+        frame: Box::new(frame.clone()),
+    };
+    assert!(
+        serde_json::to_vec(&full)
+            .expect("the full frame encodes")
+            .len()
+            > MAX_FRAME_LEN as usize
+    );
+
+    let starts = wire_chunked_frame_starts(&frame, 9).expect("the image has a chunked start");
+    assert_eq!(starts.len(), 1);
+    let SessionEvent::PaintedImageStart { frame_id, images } = starts
+        .into_iter()
+        .next()
+        .expect("the image has one start event")
+    else {
+        panic!("the chunked start has the image-start shape");
+    };
+    let base = wire_chunked_frame_base(&frame);
+    assert_eq!(frame_id, 9);
+    assert_eq!(images.len(), 1);
+    assert_eq!(images[0].id, 1);
+    assert_eq!(images[0].byte_len, 16 * 1024 * 1024);
+    assert!(base
+        .panes
+        .iter()
+        .all(|pane| pane.image_placements.is_empty()));
+    assert_eq!(
+        base.panes[0]
+            .window
+            .as_ref()
+            .expect("the base keeps the pane window")
+            .rows[0]
+            .cells(),
+        frame.panes[0]
+            .window
+            .as_ref()
+            .expect("the source keeps the pane window")
+            .rows[0]
+            .cells()
+    );
+    assert!(
+        serde_json::to_vec(&SessionEvent::Painted {
+            frame: Box::new(base),
+        })
+        .expect("the base frame encodes")
+        .len()
+            <= MAX_FRAME_LEN as usize
+    );
+
+    let chunks: Vec<(u64, u64, bool, usize)> = wire_image_chunk_sources(&frame)
+        .map(|(transfer_id, offset, last, bytes)| (transfer_id, offset, last, bytes.len()))
+        .collect();
+    assert_eq!(chunks.len(), 16);
+    assert_eq!(chunks[0], (1, 0, false, MAX_FRAME_IMAGE_CHUNK_BYTES));
+    assert_eq!(
+        chunks[15],
+        (1, 15 * 1024 * 1024, true, MAX_FRAME_IMAGE_CHUNK_BYTES)
+    );
+    for (transfer_id, offset, last, length) in chunks {
+        let event = SessionEvent::PaintedImageChunk {
+            chunk: koshi_ipc::frame::FrameImageChunk {
+                frame_id: 9,
+                transfer_id,
+                offset,
+                last,
+                bytes: vec![0; length],
+            },
+        };
+        assert!(
+            serde_json::to_vec(&event).expect("the chunk encodes").len() <= MAX_FRAME_LEN as usize
+        );
+    }
 }
 
 #[test]
@@ -476,6 +612,56 @@ fn the_view_offset_mouse_mode_and_scrollback_scalars_come_through_unchanged() {
             shape: Some(FrameCursorShape::Bar),
         }
     );
+}
+
+#[test]
+fn an_image_placement_and_its_rgba_record_travel_with_the_pane() {
+    let content = PaneId::new();
+    let frame = wire_frame(&snapshot(content, PaneId::new()));
+    let placement = &frame.panes[0].image_placements[0];
+
+    assert_eq!(placement.id, 41);
+    assert_eq!(placement.anchor, (0, 1));
+    assert_eq!(placement.columns, 2);
+    assert_eq!(placement.rows, 1);
+    assert_eq!(placement.record.protocol, FrameGraphicsProtocol::Kitty);
+    assert_eq!(
+        placement.record.action,
+        FrameImageAction::TransmitAndDisplay
+    );
+    assert_eq!(placement.record.image.width, 2);
+    assert_eq!(placement.record.image.height, 1);
+    assert_eq!(
+        placement.record.image.rgba,
+        vec![255, 0, 0, 255, 0, 255, 0, 255]
+    );
+    assert_eq!(placement.record.display.image_id, Some(7));
+    assert_eq!(placement.record.display.image_number, Some(8));
+    assert_eq!(placement.record.display.placement_id, Some(9));
+    assert_eq!(
+        placement.record.display.width,
+        Some(FrameImageDimension::Cells(3))
+    );
+    assert_eq!(
+        placement.record.display.height,
+        Some(FrameImageDimension::Pixels(1))
+    );
+    assert!(!placement.record.display.preserve_aspect_ratio);
+    assert_eq!(
+        placement.record.display.sixel_background,
+        Some(FrameSixelBackground::Preserve)
+    );
+    assert_eq!(placement.record.display.usage_hints, 0x12);
+    assert!(placement.record.display.unicode_placeholder);
+    assert_eq!(placement.record.display.cell_columns, Some(2));
+    assert_eq!(placement.record.display.cell_rows, Some(1));
+    assert_eq!(placement.record.display.z_index, -2);
+    assert_eq!(placement.record.display.source_offset_x, Some(1));
+    assert_eq!(placement.record.display.source_offset_y, Some(0));
+    assert_eq!(placement.record.display.cell_offset_x, Some(6));
+    assert_eq!(placement.record.display.cell_offset_y, Some(7));
+    assert!(!placement.record.display.move_cursor);
+    assert_eq!(placement.record.anchor, (0, 2));
 }
 
 #[test]

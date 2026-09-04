@@ -5,6 +5,7 @@ use serde::Serialize;
 
 use super::*;
 use crate::event::SessionEvent;
+use crate::frame::FrameImageChunk;
 use crate::protocol::{ConnectionToken, IpcRequestKind, IpcResult};
 use crate::router::{RouterRequestKind, RouterResult};
 use crate::supervisor::{SupervisorEvent, SupervisorRequestKind, SupervisorResult};
@@ -769,6 +770,19 @@ fn sample_events() -> Vec<SessionEvent> {
     vec![
         SessionEvent::Painted {
             frame: Box::new(painted_frame()),
+        },
+        SessionEvent::PaintedImageStart {
+            frame_id: 1,
+            images: Vec::new(),
+        },
+        SessionEvent::PaintedImageChunk {
+            chunk: FrameImageChunk {
+                frame_id: 1,
+                transfer_id: 1,
+                offset: 0,
+                last: true,
+                bytes: vec![0],
+            },
         },
         SessionEvent::PaneCreated {
             pane_id: PaneId::new(),

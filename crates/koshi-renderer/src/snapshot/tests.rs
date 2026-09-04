@@ -73,6 +73,7 @@ fn fixture(grid: Arc<Grid>) -> RenderSnapshot {
             grid,
             view_offset: 0,
         }),
+        image_placements: Vec::new(),
         reverse_video: false,
         mouse_tracking: MouseTracking::Off,
         alt_scroll: false,

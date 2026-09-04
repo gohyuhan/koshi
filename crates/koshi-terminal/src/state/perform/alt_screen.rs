@@ -22,6 +22,7 @@ impl TerminalState {
     /// - prompt marks cleared,
     /// - scroll region (DECSTBM, the CSI sequence that sets the top/bottom
     ///   scroll margins) back to the full screen,
+    /// - image placements cleared,
     /// - cursor home, shown, no wrap latch, no DECSC stash.
     ///
     /// Leaves the alternate's [`RenderState`](crate::state::RenderState) as it
@@ -38,6 +39,7 @@ impl TerminalState {
             alternate.clear_line(row, 0, cols, fill);
             alternate.set_prompt_mark(row, false);
         }
+        self.clear_alternate_image_placements();
         self.alternate_scroll_region = None;
         self.alternate_cursor.row = 0;
         self.alternate_cursor.col = 0;

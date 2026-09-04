@@ -6,6 +6,7 @@
 
 use super::glyph::MAX_GRAPHEME_CONTINUATIONS;
 use super::*;
+use crate::graphics::{DecodedImage, GraphicsProtocol, ImageAction, ImageDisplay, ImageRecord};
 use crate::grid::state::RowMeta;
 use crate::scrollback::{Scrollback, ScrollbackLimit};
 use crate::state::{Charset, RenderState, TerminalModes};
@@ -31,6 +32,25 @@ fn print_str(state: &mut TerminalState, s: &str) {
 /// The character at `(row, col)` of the active grid.
 fn glyph(state: &TerminalState, row: u16, col: u16) -> Option<char> {
     state.active_grid().cell(row, col).map(Cell::ch)
+}
+
+fn image_record(anchor: (u16, u16), columns: u32, rows: u32) -> ImageRecord {
+    ImageRecord {
+        protocol: GraphicsProtocol::Kitty,
+        image: DecodedImage {
+            width: columns,
+            height: rows,
+            rgba: vec![255; (columns * rows * 4) as usize],
+        },
+        action: ImageAction::Display,
+        display: ImageDisplay {
+            cell_columns: Some(columns),
+            cell_rows: Some(rows),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        anchor,
+    }
 }
 
 #[test]
@@ -466,6 +486,222 @@ fn ed_2_erases_the_whole_screen() {
     assert_eq!(row_text(&state, 0), "   ");
     assert_eq!(row_text(&state, 1), "   ");
     assert_eq!(row_text(&state, 2), "   ");
+}
+
+#[test]
+fn image_placement_stays_separate_from_glyph_writes_and_cell_operations() {
+    let mut state = state(8, 6);
+    let image = image_record((2, 2), 2, 2);
+    state
+        .apply_image_record(&image)
+        .expect("the image fits the grid");
+    let expected_placements = state.image_placements().to_vec();
+
+    advance(&mut state, b"\x1b[1;1HA\x1b[3;3HB\x1b[5;5HC");
+    assert_eq!(glyph(&state, 0, 0), Some('A'));
+    assert_eq!(glyph(&state, 2, 2), Some('B'));
+    assert_eq!(glyph(&state, 4, 4), Some('C'));
+    assert_eq!(state.image_placements(), expected_placements.as_slice());
+
+    for sequence in [
+        &b"\x1b[6;8H"[..],
+        &b"\x1b[3;3H\x1b[K"[..],
+        &b"\x1b[3;3H\x1b[2X"[..],
+        &b"\x1b[3;3H\x1b[1J"[..],
+        &b"\x1b[3;3H\x1b[1@"[..],
+        &b"\x1b[3;3H\x1b[1P"[..],
+    ] {
+        advance(&mut state, sequence);
+        assert_eq!(
+            state.image_placements(),
+            expected_placements.as_slice(),
+            "ordinary operation changed image metadata: {sequence:?}"
+        );
+    }
+}
+
+#[test]
+fn line_operations_move_or_drop_image_placements_with_their_rows() {
+    let mut state = state(8, 6);
+    let image = image_record((2, 2), 1, 1);
+    state
+        .apply_image_record(&image)
+        .expect("the image fits the grid");
+
+    advance(&mut state, b"\x1b[3;3H\x1b[L");
+    assert_eq!(state.image_placements()[0].anchor(), (3, 2));
+
+    advance(&mut state, b"\x1b[3;3H\x1b[M");
+    assert_eq!(state.image_placements()[0].anchor(), (2, 2));
+
+    let bottom_image = image_record((5, 2), 1, 1);
+    state
+        .apply_image_record(&bottom_image)
+        .expect("the second image fits the grid");
+    advance(&mut state, b"\x1b[3;3H\x1b[L");
+    assert_eq!(state.image_placements().len(), 1);
+    assert_eq!(state.image_placements()[0].anchor(), (3, 2));
+}
+
+#[test]
+fn reverse_index_moves_image_placements_with_inserted_rows() {
+    let mut state = state(8, 6);
+    let image = image_record((0, 2), 1, 1);
+    state
+        .apply_image_record(&image)
+        .expect("the image fits the grid");
+
+    advance(&mut state, b"\x1b[1;1H\x1bM");
+
+    assert_eq!(state.image_placements()[0].anchor(), (1, 2));
+}
+
+#[test]
+fn alternate_line_operations_move_or_drop_image_placements() {
+    let mut state = state(8, 6);
+    advance(&mut state, b"\x1b[?47h");
+    let image = image_record((2, 2), 1, 1);
+    state
+        .apply_image_record(&image)
+        .expect("the alternate image fits the grid");
+
+    advance(&mut state, b"\x1b[3;3H\x1b[L");
+    assert_eq!(state.image_placements()[0].anchor(), (3, 2));
+
+    advance(&mut state, b"\x1b[3;3H\x1b[M");
+    assert_eq!(state.image_placements()[0].anchor(), (2, 2));
+
+    let bottom_image = image_record((5, 2), 1, 1);
+    state
+        .apply_image_record(&bottom_image)
+        .expect("the second alternate image fits the grid");
+    advance(&mut state, b"\x1b[3;3H\x1b[L");
+    assert_eq!(state.image_placements().len(), 1);
+    assert_eq!(state.image_placements()[0].anchor(), (3, 2));
+
+    advance(&mut state, b"\x1b[?47l");
+    assert!(state.image_placements().is_empty());
+}
+
+#[test]
+fn line_operations_drop_images_when_a_one_row_screen_has_no_survivor() {
+    let mut insert_state = state(8, 1);
+    let image = image_record((0, 2), 1, 1);
+    insert_state
+        .apply_image_record(&image)
+        .expect("the image fits the one-row grid");
+    advance(&mut insert_state, b"\x1b[1;1H\x1b[L");
+    assert!(insert_state.image_placements().is_empty());
+
+    let mut delete_state = state(8, 1);
+    delete_state
+        .apply_image_record(&image)
+        .expect("the image fits the one-row grid");
+    advance(&mut delete_state, b"\x1b[1;1H\x1b[M");
+    assert!(delete_state.image_placements().is_empty());
+}
+
+#[test]
+fn deleting_the_last_u16_row_removes_the_shifted_row() {
+    assert_eq!(
+        super::motion::deleted_row(u16::MAX, u16::MAX, u16::MAX, 1),
+        None
+    );
+    assert_eq!(
+        super::motion::deleted_row(u16::MAX, u16::MAX - 1, u16::MAX, 1),
+        Some(u16::MAX - 1)
+    );
+    assert_eq!(super::motion::inserted_row(0, 0, 0, 1), None);
+    assert_eq!(
+        super::motion::inserted_row(u16::MAX - 1, u16::MAX - 1, u16::MAX, 1),
+        Some(u16::MAX)
+    );
+}
+
+#[test]
+fn image_placement_cursor_motion_uses_accepted_cell_dimensions() {
+    let mut state = state(10, 8);
+    state.active_cursor_mut().row = 2;
+    state.active_cursor_mut().col = 3;
+    state.active_cursor_mut().pending_wrap = true;
+    let mut image = image_record((2, 3), 3, 2);
+    image.display.move_cursor = true;
+
+    state
+        .apply_image_record(&image)
+        .expect("the image fits the grid");
+
+    assert_eq!(state.active_cursor_position(), (4, 6));
+    assert!(!state.active_cursor().pending_wrap);
+}
+
+#[test]
+fn image_placement_screen_state_is_isolated_and_reset_with_its_screen() {
+    let mut state = state(8, 6);
+    let primary = image_record((0, 0), 1, 1);
+    let alternate = image_record((1, 1), 1, 1);
+    state
+        .apply_image_record(&primary)
+        .expect("the primary image fits");
+    let primary_placements = state.image_placements().to_vec();
+
+    advance(&mut state, b"\x1b[?47h");
+    assert_eq!(state.image_placements(), &[]);
+    state
+        .apply_image_record(&alternate)
+        .expect("the alternate image fits");
+    let alternate_placements = state.image_placements().to_vec();
+    advance(&mut state, b"\x1b[?47l");
+    assert_eq!(state.image_placements(), primary_placements.as_slice());
+
+    advance(&mut state, b"\x1b[?47h");
+    assert_eq!(state.image_placements(), alternate_placements.as_slice());
+    advance(&mut state, b"\x1b[?1047l");
+    assert_eq!(state.image_placements(), primary_placements.as_slice());
+
+    advance(&mut state, b"\x1b[?47h");
+    assert_eq!(state.image_placements(), &[]);
+    state
+        .apply_image_record(&alternate)
+        .expect("the alternate image fits after a reset");
+    advance(&mut state, b"\x1b[?47l");
+    advance(&mut state, b"\x1b[?1049h");
+    assert_eq!(state.image_placements(), &[]);
+    state
+        .apply_image_record(&alternate)
+        .expect("the alternate image fits after 1049 entry");
+    advance(&mut state, b"\x1b[?1049l");
+    assert_eq!(state.image_placements(), primary_placements.as_slice());
+
+    advance(&mut state, b"\x1b[?47h");
+    state
+        .apply_image_record(&alternate)
+        .expect("the alternate image fits before a hard reset");
+    advance(&mut state, b"\x1bc");
+    assert_eq!(state.image_placements(), &[]);
+    advance(&mut state, b"\x1b[?47h");
+    assert_eq!(state.image_placements(), &[]);
+}
+
+#[test]
+fn ed_2_clears_only_the_active_screen_images() {
+    let mut state = state(8, 6);
+    let primary = image_record((0, 0), 1, 1);
+    let alternate = image_record((1, 1), 1, 1);
+    state
+        .apply_image_record(&primary)
+        .expect("the primary image fits");
+    let primary_placements = state.image_placements().to_vec();
+
+    advance(&mut state, b"\x1b[?47h");
+    state
+        .apply_image_record(&alternate)
+        .expect("the alternate image fits");
+    advance(&mut state, b"\x1b[2J");
+    assert_eq!(state.image_placements(), &[]);
+
+    advance(&mut state, b"\x1b[?47l");
+    assert_eq!(state.image_placements(), primary_placements.as_slice());
 }
 
 #[test]
@@ -976,7 +1212,7 @@ fn decsc_restores_the_new_sgr_attributes() {
 }
 
 #[test]
-fn sgr_out_of_range_truecolor_drains_its_channels_not_leaking_to_later_codes() {
+fn sgr_out_of_range_truecolor_drains_its_channels_not_leaking_into_following_codes() {
     let mut state = state(5, 2);
     // r = 999 is out of range → the color is rejected, but 31 and 32 are its g/b
     // channels and must be CONSUMED, not reinterpreted as standalone SGR codes
@@ -1684,7 +1920,7 @@ fn osc_7_accepts_a_case_insensitive_scheme() {
 }
 
 #[test]
-fn osc_7_keeps_the_last_good_cwd_when_a_later_emit_is_invalid() {
+fn osc_7_keeps_the_last_good_cwd_when_a_new_emit_is_invalid() {
     let mut state = state(5, 3);
     advance(&mut state, b"\x1b]7;file:///good\x07");
     advance(&mut state, b"\x1b]7;garbage\x07"); // unparseable
@@ -1695,7 +1931,7 @@ fn osc_7_keeps_the_last_good_cwd_when_a_later_emit_is_invalid() {
 }
 
 #[test]
-fn osc_7_a_later_valid_report_updates_the_cwd() {
+fn osc_7_a_new_valid_report_updates_the_cwd() {
     let mut state = state(5, 3);
     advance(&mut state, b"\x1b]7;file:///first\x07");
     advance(&mut state, b"\x1b]7;file:///second\x07");
@@ -2808,7 +3044,7 @@ fn a_style_only_sgr_does_not_break_a_vs16_promotion() {
 }
 
 #[test]
-fn an_sgr_preserved_cluster_does_not_fold_a_later_mark_onto_the_old_base() {
+fn an_sgr_preserved_cluster_does_not_fold_a_new_mark_onto_the_old_base() {
     let mut state = state(6, 2);
     state.print('\u{2764}'); // heart at (0, 0), width 1
     advance(&mut state, b"\x1b[1m"); // SGR preserves the heart's cluster run
@@ -3209,7 +3445,7 @@ fn disabling_the_active_mouse_tracking_mode_turns_it_off() {
 }
 
 #[test]
-fn a_later_mouse_tracking_mode_replaces_the_earlier_one() {
+fn a_new_mouse_tracking_mode_replaces_the_previous_one() {
     let mut state = state(5, 3);
     advance(&mut state, b"\x1b[?1000h"); // Normal
     advance(&mut state, b"\x1b[?1003h"); // AnyMotion supersedes

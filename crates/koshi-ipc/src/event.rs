@@ -10,8 +10,14 @@
 //!
 //! Pane content travels in
 //! [`Painted`](crate::event::SessionEvent::Painted) alone, as a whole
-//! [`PaintedFrame`](crate::frame::PaintedFrame). No other frame here carries a
-//! grid, a cursor, scrollback, or colors.
+//! [`PaintedFrame`](crate::frame::PaintedFrame), except for an oversized image
+//! transfer. That transfer sends a base `Painted` frame, one or more
+//! [`PaintedImageStart`](crate::event::SessionEvent::PaintedImageStart)
+//! events, and its
+//! [`PaintedImageChunk`](crate::event::SessionEvent::PaintedImageChunk) events.
+//! The starts name the image metadata and follow the base `Painted` event on
+//! the same ordered stream. No other frame here carries a grid, a cursor,
+//! scrollback, or colors.
 //!
 //! Four frames here are not session facts.
 //! [`Resync`](crate::event::SessionEvent::Resync) is the first: the server
@@ -29,7 +35,7 @@
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use serde::{Deserialize, Serialize};
 
-use crate::frame::PaintedFrame;
+use crate::frame::{FrameImageChunk, FrameImageTransfer, PaintedFrame};
 use crate::wire::{MaybeKnown, WireName, WireVariants};
 
 /// An event as a client reads it: it may name a frame this build does not
@@ -48,6 +54,18 @@ pub enum SessionEvent {
     Painted {
         /// The frame to draw.
         frame: Box<PaintedFrame>,
+    },
+    /// Metadata for image transfers split across events.
+    PaintedImageStart {
+        /// The identity shared by the start and all following chunks.
+        frame_id: u64,
+        /// The image placement metadata whose pixels follow in chunks.
+        images: Vec<FrameImageTransfer>,
+    },
+    /// One bounded piece of an image transfer.
+    PaintedImageChunk {
+        /// The image bytes and their position in the transfer.
+        chunk: FrameImageChunk,
     },
     /// A pane was created and registered.
     PaneCreated {
@@ -175,6 +193,8 @@ impl SessionEvent {
     pub fn name(&self) -> &'static str {
         match self {
             SessionEvent::Painted { .. } => "Painted",
+            SessionEvent::PaintedImageStart { .. } => "PaintedImageStart",
+            SessionEvent::PaintedImageChunk { .. } => "PaintedImageChunk",
             SessionEvent::PaneCreated { .. } => "PaneCreated",
             SessionEvent::PaneProcessExited { .. } => "PaneProcessExited",
             SessionEvent::PaneClosing { .. } => "PaneClosing",
@@ -201,6 +221,8 @@ impl WireVariants for SessionEvent {
     /// added here and to [`SessionEvent::name`] in the same change.
     const VARIANTS: &'static [&'static str] = &[
         "Painted",
+        "PaintedImageStart",
+        "PaintedImageChunk",
         "PaneCreated",
         "PaneProcessExited",
         "PaneClosing",

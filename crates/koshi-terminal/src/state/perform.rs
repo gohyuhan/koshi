@@ -15,7 +15,8 @@
 //!   movement, tab-stop setup, and the `SI`/`SO` charset shifts.
 //! - `csi_dispatch` — CSI sequences (Control Sequence Introducer, `ESC [ …`):
 //!   cursor moves (relative, absolute, line-relative), tab stops, erase in
-//!   display/line and erase-char, SGR text attributes (Select Graphic
+//!   display/line and erase-char, including active image placement clearing
+//!   for whole-screen erase, SGR text attributes (Select Graphic
 //!   Rendition: color, bold, underline, …), insert/delete char and line,
 //!   scroll up/down, the DECSTBM scroll region, the DEC private modes
 //!   (alternate screen, cursor visibility, …), and the device queries
@@ -227,7 +228,8 @@ impl vte::Perform for TerminalState {
     }
 
     /// Handle a CSI sequence: cursor movement (CUU/CUD/CUF/CUB/CUP/HVP/HPA/VPA/
-    /// CNL/CPL/CHT/CBT), erase in display/line/character (ED/EL/ECH), graphics
+    /// CNL/CPL/CHT/CBT), erase in display/line/character (ED/EL/ECH), with
+    /// whole-screen erase also clearing active image placements, graphics
     /// rendition (SGR), cell/line operations (ICH/DCH/IL/DL), scroll (SU/SD),
     /// scroll region setup (DECSTBM), DEC private modes including alternate
     /// screen (`?47`/`?1047`/`?1049`), cursor visibility (`?25`/DECTCEM), mouse
@@ -446,12 +448,17 @@ impl vte::Perform for TerminalState {
                             grid.clear_line(row, 0, cols, fill);
                             grid.set_prompt_mark(row, false);
                         }
+                        self.clear_active_image_placements();
                     }
                     // Erase scrollback only (xterm "erase saved lines"): drop
-                    // the retained history and leave the visible screen as it
-                    // is. Primary screen only: on the alternate screen ED 3
-                    // falls through to the `_` arm and changes nothing.
-                    3 if self.active == Screen::Primary => self.scrollback.clear(),
+                    // the retained history and its primary image placements,
+                    // leaving the visible screen as it is. Primary screen
+                    // only: on the alternate screen ED 3 falls through to the
+                    // `_` arm and changes nothing.
+                    3 if self.active == Screen::Primary => {
+                        self.scrollback.clear();
+                        self.clear_primary_image_history();
+                    }
                     // Unknown ED mode: ignored.
                     _ => {}
                 }
@@ -544,7 +551,7 @@ impl vte::Perform for TerminalState {
                     let n = move_count(params);
                     let fill = self.active_render().style.bg_fill();
                     let r = self.active_cursor().row;
-                    self.active_grid_mut().insert_lines(r, bottom, n, fill);
+                    self.insert_lines_preserving_images(r, bottom, n, fill);
                 }
             }
             // DL — delete n lines at the cursor row, scrolling the rest of the
@@ -573,7 +580,7 @@ impl vte::Perform for TerminalState {
                     let n = move_count(params);
                     let fill = self.active_render().style.bg_fill();
                     let (top, bottom) = self.region_bounds();
-                    self.active_grid_mut().insert_lines(top, bottom, n, fill);
+                    self.insert_lines_preserving_images(top, bottom, n, fill);
                 }
             }
             // DECSTBM — set the top/bottom scroll margins (1-based; defaults are

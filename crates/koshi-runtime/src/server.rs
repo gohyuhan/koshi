@@ -35,7 +35,7 @@ use koshi_pty::backend::state::{PtyBackend, PtyHandle};
 use koshi_renderer::snapshot::Delivery;
 use koshi_session::client::Client;
 use koshi_session::session::state::Session;
-use koshi_terminal::engine::TerminalEngine;
+use koshi_terminal::engine::{GraphicsEvent, GraphicsTransportState, TerminalEngine};
 
 use crate::{
     ipc_server::IpcServer,
@@ -328,12 +328,55 @@ impl Server {
             server.immediate_shutdown = quit == CarriedQuit::Immediate;
         }
         let mut undecoded = body.undecoded;
+        let mut graphics_undecoded = body.graphics_undecoded;
+        let mut graphics_screen_continuation = body.graphics_screen_continuation;
+        let mut graphics_screen_wrapper_active = body.graphics_screen_wrapper_active;
+        let mut graphics_tmux_continuation = body.graphics_tmux_continuation;
+        let mut graphics_tmux_wrapper_active = body.graphics_tmux_wrapper_active;
+        let mut graphics_events = body.graphics_events;
+        let mut graphics_transport = body.graphics_transport;
         server.terminal_engines = body
             .engines
             .into_iter()
             .map(|(pane_id, state)| {
                 let held = undecoded.remove(&pane_id).unwrap_or_default();
-                (pane_id, TerminalEngine::from_state(state, &held))
+                let legacy_graphics_held = graphics_undecoded.remove(&pane_id).unwrap_or_default();
+                let screen_continuation = graphics_screen_continuation
+                    .remove(&pane_id)
+                    .unwrap_or(false);
+                let screen_wrapper_active = graphics_screen_wrapper_active
+                    .remove(&pane_id)
+                    .unwrap_or(false);
+                let tmux_continuation =
+                    graphics_tmux_continuation.remove(&pane_id).unwrap_or(false);
+                let tmux_wrapper_active = graphics_tmux_wrapper_active
+                    .remove(&pane_id)
+                    .unwrap_or(false);
+                let events = graphics_events.remove(&pane_id).unwrap_or_default();
+                let (graphics_held, transport) = match graphics_transport.remove(&pane_id) {
+                    Some(transport) => (transport.carry.clone(), transport),
+                    None => (
+                        legacy_graphics_held.clone(),
+                        GraphicsTransportState {
+                            carry: legacy_graphics_held,
+                            screen_continuation,
+                            screen_wrapper_active,
+                            tmux_continuation,
+                            tmux_wrapper_active,
+                            ..GraphicsTransportState::default()
+                        },
+                    ),
+                };
+                (
+                    pane_id,
+                    TerminalEngine::from_state_with_graphics_and_events_and_wrappers(
+                        state,
+                        &held,
+                        &graphics_held,
+                        &events,
+                        transport,
+                    ),
+                )
             })
             .collect();
         server.pty_handles = handles;
@@ -400,11 +443,40 @@ impl Server {
             panes: carried,
         };
         let mut undecoded = HashMap::new();
+        let mut graphics_undecoded = HashMap::new();
+        let mut graphics_screen_continuation = HashMap::new();
+        let mut graphics_screen_wrapper_active = HashMap::new();
+        let mut graphics_tmux_continuation = HashMap::new();
+        let mut graphics_tmux_wrapper_active = HashMap::new();
+        let mut graphics_events: HashMap<PaneId, Vec<GraphicsEvent>> = HashMap::new();
+        let mut graphics_transport = HashMap::new();
         let engines = std::mem::take(&mut self.terminal_engines)
             .into_iter()
-            .map(|(pane_id, engine)| {
+            .map(|(pane_id, mut engine)| {
                 if !engine.undecoded().is_empty() {
                     undecoded.insert(pane_id, engine.undecoded().to_vec());
+                }
+                if !engine.graphics_undecoded().is_empty() {
+                    graphics_undecoded.insert(pane_id, engine.graphics_undecoded().to_vec());
+                }
+                if engine.graphics_screen_continuation() {
+                    graphics_screen_continuation.insert(pane_id, true);
+                }
+                if engine.graphics_screen_wrapper_active() {
+                    graphics_screen_wrapper_active.insert(pane_id, true);
+                }
+                if engine.graphics_tmux_continuation() {
+                    graphics_tmux_continuation.insert(pane_id, true);
+                }
+                if engine.graphics_tmux_wrapper_active() {
+                    graphics_tmux_wrapper_active.insert(pane_id, true);
+                }
+                if let Some(transport) = engine.graphics_transport_state() {
+                    graphics_transport.insert(pane_id, transport);
+                }
+                let events = engine.take_graphics();
+                if !events.is_empty() {
+                    graphics_events.insert(pane_id, events);
                 }
                 (pane_id, engine.into_state())
             })
@@ -413,6 +485,13 @@ impl Server {
             sessions: std::mem::take(&mut self.sessions),
             engines,
             undecoded,
+            graphics_undecoded,
+            graphics_screen_continuation,
+            graphics_screen_wrapper_active,
+            graphics_tmux_continuation,
+            graphics_tmux_wrapper_active,
+            graphics_events,
+            graphics_transport,
             quit: self.quit_requested.then_some(if self.immediate_shutdown {
                 CarriedQuit::Immediate
             } else {

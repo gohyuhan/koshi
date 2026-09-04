@@ -12,8 +12,9 @@ use koshi_pane::pane::state::PaneKind;
 use serde_json::json;
 
 use crate::frame::{
-    FrameClient, FrameCursor, FrameCursorShape, FramePane, FrameScrollback, FrameSession,
-    FrameSlot, FrameTab, FrameTabMeta,
+    FrameClient, FrameCursor, FrameCursorShape, FrameGraphicsProtocol, FrameImageAction,
+    FrameImageChunk, FrameImageRecordHeader, FrameImageTransfer, FramePane, FrameScrollback,
+    FrameSession, FrameSlot, FrameTab, FrameTabMeta,
 };
 
 use super::*;
@@ -76,6 +77,7 @@ fn painted_frame() -> PaintedFrame {
                 shape: Some(FrameCursorShape::Bar),
             },
             window: None,
+            image_placements: Vec::new(),
             reverse_video: false,
             mouse_tracking: MouseTracking::Off,
             alt_scroll: false,
@@ -96,6 +98,27 @@ fn painted_frame() -> PaintedFrame {
             lock_mode: LockMode::Normal,
             mouse_select: false,
         },
+    }
+}
+
+/// One valid image transfer header for the fixed pane in [`painted_frame`].
+fn image_transfer() -> FrameImageTransfer {
+    FrameImageTransfer {
+        id: 1,
+        pane_id: PaneId::from_uuid(fixed_uuid()),
+        placement_id: 2,
+        record: FrameImageRecordHeader {
+            protocol: FrameGraphicsProtocol::Kitty,
+            width: 2,
+            height: 1,
+            action: FrameImageAction::Display,
+            display: crate::frame::FrameImageDisplay::default(),
+            anchor: (0, 0),
+        },
+        anchor: (0, 0),
+        columns: 2,
+        rows: 1,
+        byte_len: 8,
     }
 }
 
@@ -164,6 +187,32 @@ fn a_painted_frame_survives_a_round_trip_field_for_field() {
     let received: SessionEvent = serde_json::from_str(&encoded).expect("event decodes");
 
     assert_eq!(received, sent);
+}
+
+#[test]
+fn a_chunked_image_start_and_chunk_survive_a_round_trip() {
+    let sent = [
+        SessionEvent::PaintedImageStart {
+            frame_id: 7,
+            images: vec![image_transfer()],
+        },
+        SessionEvent::PaintedImageChunk {
+            chunk: FrameImageChunk {
+                frame_id: 7,
+                transfer_id: 1,
+                offset: 0,
+                last: true,
+                bytes: vec![0, 1, 2, 3, 4, 5, 6, 7],
+            },
+        },
+    ];
+
+    for event in sent {
+        let encoded = serde_json::to_string(&event).expect("the image event encodes");
+        let received: SessionEvent =
+            serde_json::from_str(&encoded).expect("the image event decodes");
+        assert_eq!(received, event);
+    }
 }
 
 #[test]

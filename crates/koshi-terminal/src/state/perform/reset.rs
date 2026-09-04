@@ -14,8 +14,8 @@ impl TerminalState {
     /// deferred-wrap latch, drops the saved cursor, resets the pen, charsets, and
     /// GL slot, and clears the scroll region. Turns off application cursor keys
     /// (`?1`) and autowrap (`?7`). Ends the in-progress grapheme cluster. Cells,
-    /// the cursor position, tab stops, the title, the reported cwd, scrollback,
-    /// and every other mode stay.
+    /// image placements, the cursor position, tab stops, the title, the
+    /// reported cwd, scrollback, and every other mode stay.
     pub(super) fn soft_reset(&mut self) {
         let cursor = self.active_cursor_mut();
         cursor.is_visible = true;
@@ -31,9 +31,10 @@ impl TerminalState {
 
     /// RIS (`ESC c`). Blanks both screens at their current size with the default
     /// style, makes the primary screen active, clears scrollback, homes and
-    /// shows both cursors with no wrap latch and no saved cursor, resets both
-    /// render states, every mode, both scroll regions, the tab stops (every
-    /// eighth column), the title, and the OSC 133 shell state, and ends the
+    /// shows both cursors with no wrap latch and no saved cursor, clears both
+    /// image-placement lists, resets both render states, every mode, both
+    /// scroll regions, the tab stops (every eighth column), the
+    /// title, and the OSC 133 shell state, and ends the
     /// in-progress grapheme cluster. The reported cwd, queued device replies,
     /// queued shell-integration facts, and the scrollback tallies stay.
     pub(super) fn hard_reset(&mut self) {
@@ -44,6 +45,7 @@ impl TerminalState {
         self.primary = Arc::new(grid.clone());
         self.alternate = Arc::new(grid);
         self.active = Screen::Primary;
+        self.clear_all_image_placements();
         self.scrollback.clear();
 
         let cursor = Cursor {

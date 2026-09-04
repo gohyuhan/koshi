@@ -4,10 +4,12 @@
 //! Every item here belongs to one attached terminal. The session it is joined
 //! to owns none of them.
 
-use std::io;
+use std::io::{self, Write};
 use std::sync::mpsc;
 use std::thread;
 
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use ratatui::backend::Backend;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::cursor::{SetCursorStyle, Show};
@@ -30,12 +32,15 @@ use koshi_renderer::snapshot::{
     CommittedRegions, CursorStyle, KeymapHints, RenderSnapshot, ViewerChrome,
 };
 use koshi_renderer::theme::Theme;
-use koshi_renderer::{cursor_position, cursor_style, render_frame};
+use koshi_renderer::{
+    cursor_position, cursor_style, image_paints, render_frame_with_images, ImagePaint,
+    ImageRenderMode,
+};
 use koshi_runtime::runtime::event::RuntimeEvent;
 use koshi_terminal::state::CursorShape;
 
 /// Paints a render snapshot into ratatui's frame buffer. Every field is handed
-/// straight to [`render_frame`].
+/// straight to [`render_frame_with_images`].
 pub(crate) struct SnapshotWidget<'a> {
     /// The frame the session handed out.
     pub(crate) snapshot: &'a RenderSnapshot,
@@ -49,20 +54,70 @@ pub(crate) struct SnapshotWidget<'a> {
     pub(crate) viewer: ViewerChrome,
     /// The region solve committed with the frame being painted.
     pub(crate) committed_regions: &'a CommittedRegions,
+    /// The image mode selected for this outer terminal.
+    pub(crate) image_mode: ImageRenderMode,
 }
 
 impl Widget for SnapshotWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        render_frame(
+        render_frame_with_images(
             self.snapshot,
             self.committed_regions,
             self.theme,
             self.hints,
             self.pending,
             self.viewer,
+            self.image_mode,
             area,
             buf,
         );
+    }
+}
+
+/// The graphics capability selected from the outer terminal environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GraphicsSupport {
+    /// Paint image coverage with the fixed unsupported-image text.
+    Unsupported,
+    /// Emit Kitty raw-RGBA image commands after the text buffer is painted.
+    Kitty,
+}
+
+/// A failure while painting a frame or emitting its native image data.
+#[derive(Debug)]
+pub(crate) enum PaintError<E> {
+    /// The ratatui backend did not accept the frame buffer.
+    Backend(E),
+    /// The native image writer did not accept its output.
+    Image(io::Error),
+}
+
+impl GraphicsSupport {
+    /// Map the terminal capability to the renderer's image mode.
+    pub(crate) fn image_mode(self) -> ImageRenderMode {
+        match self {
+            Self::Unsupported => ImageRenderMode::Placeholder,
+            Self::Kitty => ImageRenderMode::Native,
+        }
+    }
+}
+
+/// Detect the one native image protocol this client emits.
+pub(crate) fn detect_graphics_support() -> GraphicsSupport {
+    let term = std::env::var("TERM").ok();
+    let kitty_window_id = std::env::var_os("KITTY_WINDOW_ID").is_some();
+    graphics_support_from_environment(term.as_deref(), kitty_window_id)
+}
+
+/// Resolve graphics support from values supplied by a caller or test.
+pub(crate) fn graphics_support_from_environment(
+    term: Option<&str>,
+    kitty_window_id: bool,
+) -> GraphicsSupport {
+    if term == Some("xterm-kitty") || kitty_window_id {
+        GraphicsSupport::Kitty
+    } else {
+        GraphicsSupport::Unsupported
     }
 }
 
@@ -181,18 +236,18 @@ pub(crate) fn spawn_input_thread(inbox_tx: mpsc::Sender<RuntimeEvent>, client_id
 /// `committed_regions` is the geometry shared by the painter and cursor
 /// placement for this frame.
 ///
-/// `last_title` and `last_cursor` record the title and cursor style committed
-/// with the last successful frame paint; the style belongs to the outer
-/// terminal, not to the frame. Both are read before the buffer paint and
-/// written after it succeeds: a changed title goes out as `SetTitle`, a
-/// changed cursor style as `SetCursorStyle`. A frame that [`cursor_style`]
-/// names no style for records `None` and sends nothing.
+/// `last_title` and `last_cursor` store the title and cursor style used to
+/// decide whether the next frame needs a control write. Both are read before
+/// the buffer paint and updated after it succeeds: a changed title writes
+/// `SetTitle`, and a changed cursor style writes `SetCursorStyle`. A frame
+/// that [`cursor_style`] names no style stores `None` and writes no style
+/// command.
 ///
 /// # Errors
 ///
-/// Returns the backend's error when the buffer paint fails, leaving
-/// `last_title` and `last_cursor` as they were. A failed title or cursor-style
-/// write is ignored.
+/// Returns a backend or native-image error when the frame cannot be fully
+/// painted. A failed title or cursor-style write is ignored.
+#[cfg(test)]
 pub(crate) fn paint_frame<B: Backend>(
     terminal: &mut Terminal<B>,
     client: &Client,
@@ -201,40 +256,271 @@ pub(crate) fn paint_frame<B: Backend>(
     frame_paint: &ViewerPaint,
     last_title: &mut String,
     last_cursor: &mut Option<CursorStyle>,
-) -> Result<(), B::Error> {
+) -> Result<(), PaintError<B::Error>> {
+    paint_frame_with_images(
+        terminal,
+        client,
+        snapshot,
+        committed_regions,
+        frame_paint,
+        ImageRenderMode::Placeholder,
+        last_title,
+        last_cursor,
+    )
+}
+
+/// Paint one frame and emit native Kitty images when the outer terminal
+/// supports them.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paint_frame_with_images<B: Backend>(
+    terminal: &mut Terminal<B>,
+    client: &Client,
+    snapshot: &RenderSnapshot,
+    committed_regions: &CommittedRegions,
+    frame_paint: &ViewerPaint,
+    image_mode: ImageRenderMode,
+    last_title: &mut String,
+    last_cursor: &mut Option<CursorStyle>,
+) -> Result<(), PaintError<B::Error>> {
+    let mut stdout = io::stdout();
+    paint_frame_with_writer(
+        &mut stdout,
+        terminal,
+        client,
+        snapshot,
+        committed_regions,
+        frame_paint,
+        image_mode,
+        last_title,
+        last_cursor,
+    )
+}
+
+/// Paint one frame and send terminal-control output to `writer`.
+#[allow(clippy::too_many_arguments)]
+fn paint_frame_with_writer<B: Backend, W: Write>(
+    writer: &mut W,
+    terminal: &mut Terminal<B>,
+    client: &Client,
+    snapshot: &RenderSnapshot,
+    committed_regions: &CommittedRegions,
+    frame_paint: &ViewerPaint,
+    image_mode: ImageRenderMode,
+    last_title: &mut String,
+    last_cursor: &mut Option<CursorStyle>,
+) -> Result<(), PaintError<B::Error>> {
     let title = window_title(snapshot);
     let title_changed = title != *last_title;
     let cursor = cursor_style(snapshot);
     let cursor_changed = cursor != *last_cursor;
     let hints = client.frame_hints_for(frame_paint.mode, frame_paint.mouse_select);
-    terminal.draw(|frame| {
-        let area = frame.area();
-        frame.render_widget(
-            SnapshotWidget {
-                snapshot,
-                theme: client.theme(),
-                hints: &hints,
-                pending: frame_paint.pending.as_ref(),
-                viewer: frame_paint.chrome,
-                committed_regions,
-            },
-            area,
-        );
-        if let Some(position) = cursor_position(snapshot, committed_regions, area) {
-            frame.set_cursor_position(position);
-        }
-    })?;
+    let mut paint_area = Rect::default();
+    let mut hardware_cursor = None;
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            paint_area = area;
+            hardware_cursor = cursor_position(snapshot, committed_regions, area);
+            frame.render_widget(
+                SnapshotWidget {
+                    snapshot,
+                    theme: client.theme(),
+                    hints: &hints,
+                    pending: frame_paint.pending.as_ref(),
+                    viewer: frame_paint.chrome,
+                    committed_regions,
+                    image_mode,
+                },
+                area,
+            );
+            if let Some(position) = hardware_cursor {
+                frame.set_cursor_position(position);
+            }
+        })
+        .map_err(PaintError::Backend)?;
     if title_changed {
-        let _ = execute!(io::stdout(), SetTitle(&title));
+        let _ = execute!(writer, SetTitle(&title));
         *last_title = title;
     }
     if cursor_changed {
         if let Some(style) = cursor.map(set_cursor_style) {
-            let _ = execute!(io::stdout(), style);
+            let _ = execute!(writer, style);
         }
         *last_cursor = cursor;
     }
+    if image_mode == ImageRenderMode::Native {
+        let paints = image_paints(snapshot, committed_regions, paint_area);
+        write_kitty_frame(writer, &paints, hardware_cursor).map_err(PaintError::Image)?;
+    }
     Ok(())
+}
+
+const KITTY_IMAGE_CHUNK_BYTES: usize = 3_072;
+
+/// Write one complete Kitty image frame, remove the previous frame's images,
+/// and restore or hide the outer terminal cursor.
+fn write_kitty_frame<W: Write>(
+    writer: &mut W,
+    paints: &[ImagePaint],
+    cursor: Option<ratatui::layout::Position>,
+) -> io::Result<()> {
+    let frame_result = write_kitty_frame_body(writer, paints);
+    let cursor_result = restore_cursor_state(writer, cursor);
+    let flush_result = writer.flush();
+    match frame_result {
+        Err(error) => Err(error),
+        Ok(()) => cursor_result.and(flush_result),
+    }
+}
+
+fn write_kitty_frame_body<W: Write>(writer: &mut W, paints: &[ImagePaint]) -> io::Result<()> {
+    writer.write_all(b"\x1b_Ga=d,d=A,q=2\x1b\\")?;
+    for paint in paints {
+        write!(
+            writer,
+            "\x1b[{};{}H",
+            u32::from(paint.target.y) + 1,
+            u32::from(paint.target.x) + 1
+        )?;
+        write_kitty_image(writer, paint)?;
+    }
+    Ok(())
+}
+
+fn restore_cursor_state<W: Write>(
+    writer: &mut W,
+    cursor: Option<ratatui::layout::Position>,
+) -> io::Result<()> {
+    if let Some(cursor) = cursor {
+        write!(
+            writer,
+            "\x1b[{};{}H",
+            u32::from(cursor.y) + 1,
+            u32::from(cursor.x) + 1
+        )?;
+    } else {
+        writer.write_all(b"\x1b[?25l")?;
+    }
+    Ok(())
+}
+
+/// Stream one clipped RGBA image as Kitty raw data in bounded chunks.
+fn write_kitty_image<W: Write>(writer: &mut W, paint: &ImagePaint) -> io::Result<()> {
+    let source = paint.source;
+    let image = &paint.record.image;
+    let image_width = usize::try_from(image.width)
+        .map_err(|_| invalid_image_data("image width cannot fit this platform"))?;
+    let image_height = usize::try_from(image.height)
+        .map_err(|_| invalid_image_data("image height cannot fit this platform"))?;
+    let source_x = usize::try_from(source.x)
+        .map_err(|_| invalid_image_data("source x cannot fit this platform"))?;
+    let source_y = usize::try_from(source.y)
+        .map_err(|_| invalid_image_data("source y cannot fit this platform"))?;
+    let source_width = usize::try_from(source.width)
+        .map_err(|_| invalid_image_data("source width cannot fit this platform"))?;
+    let source_height = usize::try_from(source.height)
+        .map_err(|_| invalid_image_data("source height cannot fit this platform"))?;
+    let source_x_end = source_x
+        .checked_add(source_width)
+        .ok_or_else(|| invalid_image_data("source x range overflows"))?;
+    let source_y_end = source_y
+        .checked_add(source_height)
+        .ok_or_else(|| invalid_image_data("source y range overflows"))?;
+    if source_width == 0
+        || source_height == 0
+        || source_x_end > image_width
+        || source_y_end > image_height
+    {
+        return Err(invalid_image_data(
+            "source rectangle is outside image pixels",
+        ));
+    }
+    let row_stride = image_width
+        .checked_mul(4)
+        .ok_or_else(|| invalid_image_data("image row stride overflows"))?;
+    let source_row_bytes = source_width
+        .checked_mul(4)
+        .ok_or_else(|| invalid_image_data("source row size overflows"))?;
+    let source_byte_x = source_x
+        .checked_mul(4)
+        .ok_or_else(|| invalid_image_data("source x byte offset overflows"))?;
+    let source_bytes = source_row_bytes
+        .checked_mul(source_height)
+        .ok_or_else(|| invalid_image_data("source byte count overflows"))?;
+    let mut chunk = Vec::with_capacity(KITTY_IMAGE_CHUNK_BYTES);
+    let mut first = true;
+    let mut remaining_source_bytes = source_bytes;
+    for row in source_y..source_y_end {
+        let row_start = row
+            .checked_mul(row_stride)
+            .and_then(|value| value.checked_add(source_byte_x))
+            .ok_or_else(|| invalid_image_data("source row offset overflows"))?;
+        let row_end = row_start
+            .checked_add(source_row_bytes)
+            .ok_or_else(|| invalid_image_data("source row end overflows"))?;
+        let row_bytes = image
+            .rgba
+            .get(row_start..row_end)
+            .ok_or_else(|| invalid_image_data("source rectangle is outside RGBA pixels"))?;
+        let mut remaining = row_bytes;
+        while !remaining.is_empty() {
+            let room = KITTY_IMAGE_CHUNK_BYTES - chunk.len();
+            let take = room.min(remaining.len());
+            chunk.extend_from_slice(&remaining[..take]);
+            remaining = &remaining[take..];
+            remaining_source_bytes = remaining_source_bytes
+                .checked_sub(take)
+                .ok_or_else(|| invalid_image_data("source byte count underflows"))?;
+            if chunk.len() == KITTY_IMAGE_CHUNK_BYTES {
+                let final_chunk = remaining_source_bytes == 0;
+                write_kitty_chunk(writer, paint, &chunk, first, final_chunk)?;
+                first = false;
+                chunk.clear();
+                if final_chunk {
+                    return Ok(());
+                }
+            }
+        }
+    }
+    write_kitty_chunk(writer, paint, &chunk, first, true)
+}
+
+/// Write one Kitty base64 chunk and its APC terminator.
+fn write_kitty_chunk<W: Write>(
+    writer: &mut W,
+    paint: &ImagePaint,
+    bytes: &[u8],
+    first: bool,
+    final_chunk: bool,
+) -> io::Result<()> {
+    let more = if final_chunk { 0 } else { 1 };
+    if first {
+        write!(
+            writer,
+            "\x1b_Ga=T,f=32,s={},v={},{}{}c={},r={},C=1,z={},q=2,m={};",
+            paint.source.width,
+            paint.source.height,
+            paint
+                .cell_offset_x
+                .map_or(String::new(), |offset| format!("X={offset},")),
+            paint
+                .cell_offset_y
+                .map_or(String::new(), |offset| format!("Y={offset},")),
+            paint.target.width,
+            paint.target.height,
+            paint.z_index,
+            more
+        )?;
+    } else {
+        write!(writer, "\x1b_Gm={more};")?;
+    }
+    writer.write_all(STANDARD.encode(bytes).as_bytes())?;
+    writer.write_all(b"\x1b\\")
+}
+
+/// Build an I/O error for a malformed image source rectangle.
+fn invalid_image_data(message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
 /// The crossterm command for one pane's cursor style.

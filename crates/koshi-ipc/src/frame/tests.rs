@@ -108,6 +108,7 @@ fn frame() -> PaintedFrame {
                 )],
                 view_offset: 0,
             }),
+            image_placements: Vec::new(),
             reverse_video: false,
             mouse_tracking: MouseTracking::ButtonMotion,
             alt_scroll: false,
@@ -226,6 +227,135 @@ fn a_frame_survives_a_round_trip_field_for_field() {
         received.panes[0].mouse_tracking,
         MouseTracking::ButtonMotion
     );
+}
+
+#[test]
+fn an_image_rgba_uses_base64_on_wire_and_reads_old_number_lists() {
+    let image = FrameDecodedImage {
+        width: 2,
+        height: 1,
+        rgba: vec![0, 1, 2, 255, 4, 5, 6, 7],
+    };
+
+    assert_eq!(
+        serde_json::to_value(&image).expect("the image encodes"),
+        json!({
+            "width": 2,
+            "height": 1,
+            "rgba": "AAEC/wQFBgc="
+        })
+    );
+
+    let from_list: FrameDecodedImage = serde_json::from_value(json!({
+        "width": 2,
+        "height": 1,
+        "rgba": [0, 1, 2, 255, 4, 5, 6, 7]
+    }))
+    .expect("the number-list image decodes");
+
+    assert_eq!(from_list, image);
+    assert_eq!(
+        serde_json::to_value(from_list).expect("the decoded image re-encodes"),
+        json!({
+            "width": 2,
+            "height": 1,
+            "rgba": "AAEC/wQFBgc="
+        })
+    );
+}
+
+#[test]
+fn an_image_with_wrong_dimensions_or_rgba_length_is_refused() {
+    let wrong_length = serde_json::from_value::<FrameDecodedImage>(json!({
+        "width": 2,
+        "height": 1,
+        "rgba": [0, 1, 2, 3]
+    }))
+    .expect_err("the image has too few RGBA bytes");
+    assert_eq!(
+        wrong_length.to_string(),
+        "image RGBA length does not match its dimensions"
+    );
+
+    let zero_width = serde_json::from_value::<FrameDecodedImage>(json!({
+        "width": 0,
+        "height": 1,
+        "rgba": []
+    }))
+    .expect_err("a zero-width image is not drawable");
+    assert_eq!(
+        zero_width.to_string(),
+        "image dimensions exceed graphics limits"
+    );
+}
+
+#[test]
+fn an_image_value_this_build_does_not_know_falls_back_without_dropping_the_frame() {
+    let placement: FrameImagePlacement = serde_json::from_value(json!({
+        "id": 1,
+        "record": {
+            "protocol": "Vector",
+            "image": {
+                "width": 1,
+                "height": 1,
+                "rgba": "AAEC/w=="
+            },
+            "action": "Replace",
+            "display": {
+                "width": "AutoSize",
+                "sixel_background": "Opaque"
+            },
+            "anchor": [0, 0]
+        },
+        "anchor": [0, 0],
+        "columns": 1,
+        "rows": 1
+    }))
+    .expect("unknown image values use presentation defaults");
+
+    assert_eq!(placement.record.protocol, FrameGraphicsProtocol::Kitty);
+    assert_eq!(placement.record.action, FrameImageAction::Display);
+    assert_eq!(placement.record.display, FrameImageDisplay::default());
+}
+
+#[test]
+fn a_chunked_image_header_and_empty_chunk_are_refused_exactly() {
+    let transfer = FrameImageTransfer {
+        id: 1,
+        pane_id: PaneId::from_uuid(Uuid::from_u128(4)),
+        placement_id: 2,
+        record: FrameImageRecordHeader {
+            protocol: FrameGraphicsProtocol::Kitty,
+            width: 2,
+            height: 1,
+            action: FrameImageAction::Display,
+            display: FrameImageDisplay::default(),
+            anchor: (0, 0),
+        },
+        anchor: (0, 0),
+        columns: 2,
+        rows: 1,
+        byte_len: 8,
+    };
+    let mut wrong_length = serde_json::to_value(&transfer).expect("the transfer encodes");
+    wrong_length["byte_len"] = json!(4);
+    let error = serde_json::from_value::<FrameImageTransfer>(wrong_length)
+        .expect_err("a transfer with a wrong byte count is refused");
+    assert_eq!(
+        error.to_string(),
+        "image transfer byte length does not match its dimensions"
+    );
+
+    let empty_chunk = serde_json::json!({
+        "frame_id": 7,
+        "transfer_id": 1,
+        "offset": 0,
+        "last": true,
+        "bytes": ""
+    });
+    let error = serde_json::from_value::<FrameImageChunk>(empty_chunk)
+        .expect_err("an empty image chunk is refused");
+    assert_eq!(error.to_string(), "image chunk must not be empty");
 }
 
 #[test]

@@ -32,6 +32,7 @@ use koshi_core::lock::LockMode;
 use koshi_terminal::grid::state::{Cell, Grid};
 use koshi_terminal::style::{Color as CellColor, Style as CellStyle, UnderlineStyle};
 
+use crate::images::{clear_image_cells, draw_image_placeholders, image_paints, ImageRenderMode};
 use crate::region::StatuslineInputs;
 use crate::snapshot::{
     CommittedRegions, CursorStyle, KeymapHints, PaneSnapshot, Reconnecting, RenderSnapshot,
@@ -40,8 +41,7 @@ use crate::snapshot::{
 use crate::statusline_hints::draw_statusline;
 use crate::theme::Theme;
 
-/// Paint `snapshot` into `buf` over `area` with the region solve committed with
-/// the frame.
+/// Paint `snapshot` into `buf` over `area` with the selected image mode.
 ///
 /// It does nothing for a zero-size area. When the active tab has no room for any
 /// pane (`all_suppressed`), it blanks `area`, draws a centered too-small
@@ -54,11 +54,13 @@ use crate::theme::Theme;
 /// 2. Draws one bordered box per visible pane, its title in the top border and
 ///    its scroll position in the bottom border when it is scrolled back.
 /// 3. Draws each visible terminal pane's cells into its content rect.
-/// 4. Draws the one-row title strip for every collapsed stack member.
-/// 5. Fills the letterbox margin: every cell of `area` outside the centered
+/// 4. Clears image coverage for native output or writes the unsupported-image
+///    text over it.
+/// 5. Draws the one-row title strip for every collapsed stack member.
+/// 6. Fills the letterbox margin: every cell of `area` outside the centered
 ///    layout, the chrome rows included.
-/// 6. Draws the tabline in the first committed region, over that margin.
-/// 7. Draws the statusline in the second committed region, over that margin.
+/// 7. Draws the tabline in the first committed region, over that margin.
+/// 8. Draws the statusline in the second committed region, over that margin.
 ///
 /// `theme`, `hints`, `pending`, and `viewer` come from the viewer: the colors
 /// it paints koshi's chrome in, the statusline data for the mode it is in, the
@@ -81,6 +83,37 @@ pub fn render_frame(
     hints: &KeymapHints,
     pending: Option<&KeySequence>,
     viewer: ViewerChrome,
+    area: RatatuiRect,
+    buf: &mut Buffer,
+) {
+    render_frame_with_images(
+        snapshot,
+        committed_regions,
+        theme,
+        hints,
+        pending,
+        viewer,
+        ImageRenderMode::Placeholder,
+        area,
+        buf,
+    );
+}
+
+/// Paint `snapshot` into `buf` with a selected terminal-image mode.
+///
+/// `Placeholder` writes `terminal image unavailable` into visible image
+/// rectangles. `Native` clears those rectangles for the caller's Kitty
+/// protocol writer. A four-column image at `(12, 6)` in placeholder mode
+/// writes `term` across the first four covered cells.
+#[allow(clippy::too_many_arguments)]
+pub fn render_frame_with_images(
+    snapshot: &RenderSnapshot,
+    committed_regions: &CommittedRegions,
+    theme: &Theme,
+    hints: &KeymapHints,
+    pending: Option<&KeySequence>,
+    viewer: ViewerChrome,
+    image_mode: ImageRenderMode,
     area: RatatuiRect,
     buf: &mut Buffer,
 ) {
@@ -119,6 +152,11 @@ pub fn render_frame(
 
     draw_panes(snapshot, theme, viewer.hovered_pane, offset, buf);
     draw_pane_contents(snapshot, offset, buf);
+    let paints = image_paints(snapshot, committed_regions, area);
+    match image_mode {
+        ImageRenderMode::Placeholder => draw_image_placeholders(&paints, buf),
+        ImageRenderMode::Native => clear_image_cells(&paints, buf),
+    }
     draw_stack_headers(snapshot, theme, offset, buf);
 
     // The margin fills first; the tabline and statusline paint over it.
@@ -238,7 +276,7 @@ pub fn cursor_style(snapshot: &RenderSnapshot) -> Option<CursorStyle> {
 }
 
 /// Find the [`PaneSnapshot`] with the given id in this frame.
-fn find_pane(snapshot: &RenderSnapshot, id: PaneId) -> Option<&PaneSnapshot> {
+pub(crate) fn find_pane(snapshot: &RenderSnapshot, id: PaneId) -> Option<&PaneSnapshot> {
     snapshot.panes.iter().find(|pane| pane.id == id)
 }
 

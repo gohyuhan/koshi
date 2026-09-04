@@ -10,13 +10,19 @@
 //! write into the PTY.
 //!
 //! The engine also keeps the bytes that put another parser where this one
-//! stands — see [`undecoded`](TerminalEngine::undecoded). A process-image swap
-//! carries those bytes to the next image's parser, and a sequence the swap cut
-//! in half completes there. A sequence whose held bytes pass 64 KiB is not
-//! carried.
+//! stands — see [`undecoded`](TerminalEngine::undecoded) and
+//! [`graphics_undecoded`](TerminalEngine::graphics_undecoded). A process-image
+//! swap carries those bytes to the next image's parsers, and a sequence the
+//! swap cut in half completes there. Graphics wrapper nesting and a transfer
+//! that cannot be rebuilt within 64 KiB use the complete transport state.
+
+use std::borrow::Cow;
+use std::collections::VecDeque;
 
 use koshi_core::process::PtySize;
 
+pub use crate::graphics::GraphicsTransportState;
+use crate::graphics::{GraphicsError, GraphicsParser, ImageRecord, MAX_IMAGE_BYTES};
 use crate::scrollback::ScrollbackLimit;
 use crate::state::{ShellIntegrationFact, TerminalState};
 
@@ -48,7 +54,210 @@ const CODE_POINT_TAIL: usize = 3;
 /// The most bytes [`undecoded`](TerminalEngine::undecoded) holds, 64 KiB. The
 /// engine stops holding a sequence that passes this size and reports nothing
 /// until that sequence ends.
-const MAX_UNDECODED: usize = 64 * 1024;
+pub(crate) const MAX_UNDECODED: usize = 64 * 1024;
+
+/// The largest number of image events held before the caller drains them.
+pub const MAX_GRAPHICS_EVENTS: usize = 64;
+
+/// The largest batch returned by [`TerminalEngine::take_graphics`], including
+/// one queue-full report.
+pub const MAX_GRAPHICS_EVENT_BATCH: usize = MAX_GRAPHICS_EVENTS + 1;
+
+/// One ordered image event produced by the terminal decoder.
+pub type GraphicsEvent = Result<ImageRecord, GraphicsError>;
+
+#[derive(Clone, Copy)]
+enum C1StringKind {
+    Dcs,
+    Osc,
+    Dropped,
+}
+
+#[derive(Clone, Copy, Default)]
+enum C1InputState {
+    #[default]
+    Ground,
+    Escape,
+    EscapeIntermediate,
+    Csi,
+    String(C1StringKind),
+    StringEscape(C1StringKind),
+}
+
+#[derive(Default)]
+struct C1InputNormalizer {
+    state: C1InputState,
+    utf8_continuations: u8,
+}
+
+struct NormalizedInput<'a> {
+    bytes: Cow<'a, [u8]>,
+    raw_to_normalized: Option<Vec<usize>>,
+}
+
+struct NormalizedBuffer {
+    bytes: Vec<u8>,
+    raw_to_normalized: Vec<usize>,
+}
+
+impl<'a> NormalizedInput<'a> {
+    fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    fn end_offset(&self, raw_end: usize) -> usize {
+        self.raw_to_normalized
+            .as_ref()
+            .map_or(raw_end, |offsets| offsets[raw_end])
+    }
+}
+
+impl C1InputNormalizer {
+    fn normalize<'a>(&mut self, bytes: &'a [u8]) -> NormalizedInput<'a> {
+        let mut normalized: Option<NormalizedBuffer> = None;
+
+        for (index, &byte) in bytes.iter().enumerate() {
+            let replacement = self.replacement(byte);
+            if let Some(buffer) = normalized.as_mut() {
+                if let Some(replacement) = replacement {
+                    buffer.bytes.extend_from_slice(replacement);
+                } else {
+                    buffer.bytes.push(byte);
+                }
+                buffer.raw_to_normalized.push(buffer.bytes.len());
+            } else if let Some(replacement) = replacement {
+                let capacity = bytes.len().saturating_add(1);
+                let mut buffer = NormalizedBuffer {
+                    bytes: Vec::with_capacity(capacity),
+                    raw_to_normalized: Vec::with_capacity(capacity),
+                };
+                buffer.bytes.extend_from_slice(&bytes[..index]);
+                buffer.raw_to_normalized.extend(0..=index);
+                buffer.bytes.extend_from_slice(replacement);
+                buffer.raw_to_normalized.push(buffer.bytes.len());
+                normalized = Some(buffer);
+            }
+        }
+
+        match normalized {
+            Some(NormalizedBuffer {
+                bytes,
+                raw_to_normalized,
+            }) => NormalizedInput {
+                bytes: Cow::Owned(bytes),
+                raw_to_normalized: Some(raw_to_normalized),
+            },
+            None => NormalizedInput {
+                bytes: Cow::Borrowed(bytes),
+                raw_to_normalized: None,
+            },
+        }
+    }
+
+    fn replacement(&mut self, byte: u8) -> Option<&'static [u8]> {
+        if matches!(self.state, C1InputState::Ground | C1InputState::String(_)) {
+            if self.utf8_continuations != 0 {
+                if (byte & 0xc0) == 0x80 {
+                    self.utf8_continuations -= 1;
+                    return None;
+                }
+                self.utf8_continuations = 0;
+            }
+            self.utf8_continuations = match byte {
+                0xc2..=0xdf => 1,
+                0xe0..=0xef => 2,
+                0xf0..=0xf4 => 3,
+                _ => 0,
+            };
+            if self.utf8_continuations != 0 {
+                return None;
+            }
+        } else {
+            self.utf8_continuations = 0;
+        }
+
+        match byte {
+            0x90 if matches!(self.state, C1InputState::Ground) => {
+                self.state = C1InputState::String(C1StringKind::Dcs);
+                Some(b"\x1bP")
+            }
+            0x98 | 0x9e if matches!(self.state, C1InputState::Ground) => {
+                self.state = C1InputState::String(C1StringKind::Dropped);
+                Some(if byte == 0x98 { b"\x1bX" } else { b"\x1b^" })
+            }
+            0x9d if matches!(self.state, C1InputState::Ground) => {
+                self.state = C1InputState::String(C1StringKind::Osc);
+                Some(b"\x1b]")
+            }
+            0x9f if matches!(self.state, C1InputState::Ground) => {
+                self.state = C1InputState::String(C1StringKind::Dropped);
+                Some(b"\x1b_")
+            }
+            0x9c if matches!(self.state, C1InputState::String(_)) => {
+                self.state = C1InputState::Ground;
+                Some(b"\x1b\\")
+            }
+            _ => {
+                self.advance_state(byte);
+                None
+            }
+        }
+    }
+
+    fn advance_state(&mut self, byte: u8) {
+        self.state = match self.state {
+            C1InputState::Ground => match byte {
+                ESCAPE => C1InputState::Escape,
+                _ => C1InputState::Ground,
+            },
+            C1InputState::Escape => Self::advance_escape(byte),
+            C1InputState::EscapeIntermediate => match byte {
+                CANCEL | SUBSTITUTE => C1InputState::Ground,
+                ESCAPE => C1InputState::Escape,
+                0x20..=0x2f => C1InputState::EscapeIntermediate,
+                0x30..=0x7e => C1InputState::Ground,
+                _ => C1InputState::EscapeIntermediate,
+            },
+            C1InputState::Csi => match byte {
+                CANCEL | SUBSTITUTE => C1InputState::Ground,
+                ESCAPE => C1InputState::Escape,
+                0x40..=0x7e => C1InputState::Ground,
+                _ => C1InputState::Csi,
+            },
+            C1InputState::String(kind) => match byte {
+                CANCEL | SUBSTITUTE => C1InputState::Ground,
+                ESCAPE => C1InputState::StringEscape(kind),
+                0x07 if matches!(kind, C1StringKind::Osc) => C1InputState::Ground,
+                _ => C1InputState::String(kind),
+            },
+            C1InputState::StringEscape(kind) => match byte {
+                CANCEL | SUBSTITUTE => C1InputState::Ground,
+                ESCAPE => C1InputState::StringEscape(kind),
+                0x20..=0x2f => C1InputState::EscapeIntermediate,
+                0x50 => C1InputState::String(C1StringKind::Dcs),
+                0x58 | 0x5e | 0x5f => C1InputState::String(C1StringKind::Dropped),
+                0x5b => C1InputState::Csi,
+                0x5d => C1InputState::String(C1StringKind::Osc),
+                0x30..=0x7e => C1InputState::Ground,
+                _ => C1InputState::StringEscape(kind),
+            },
+        };
+    }
+
+    fn advance_escape(byte: u8) -> C1InputState {
+        match byte {
+            CANCEL | SUBSTITUTE => C1InputState::Ground,
+            ESCAPE => C1InputState::Escape,
+            0x20..=0x2f => C1InputState::EscapeIntermediate,
+            0x50 => C1InputState::String(C1StringKind::Dcs),
+            0x58 | 0x5e | 0x5f => C1InputState::String(C1StringKind::Dropped),
+            0x5b => C1InputState::Csi,
+            0x5d => C1InputState::String(C1StringKind::Osc),
+            0x30..=0x7e => C1InputState::Ground,
+            _ => C1InputState::Escape,
+        }
+    }
+}
 
 /// The most bytes one OSC sequence accumulates. The parser drops every byte
 /// past this and dispatches what it holds when the sequence ends.
@@ -62,9 +271,13 @@ pub struct TerminalEngine {
     parser: vte::Parser<OSC_CAPACITY>,
     /// The screen model the parser's decoded actions mutate.
     state: TerminalState,
-    /// The bytes that put another parser where `parser` stands, as
-    /// [`undecoded`](TerminalEngine::undecoded) describes them.
+    /// The canonical bytes that put another parser where `parser` stands, as
+    /// [`undecoded`](TerminalEngine::undecoded) describes them. Eight-bit
+    /// string controls use their seven-bit `ESC` forms so the VTE parser can
+    /// replay them.
     undecoded: Vec<u8>,
+    /// The raw bytes that put the graphics parser where it stands.
+    graphics_undecoded: Vec<u8>,
     /// A second parser fed the same bytes as `parser`, driving no screen. It
     /// reports where each sequence ends. One chunk costs one pass over that
     /// chunk, however long the sequence it continues.
@@ -78,6 +291,26 @@ pub struct TerminalEngine {
     /// passed [`MAX_UNDECODED`]. `undecoded` holds the opening bytes of the
     /// first four kinds and nothing of the fifth.
     in_string_body: bool,
+    /// The raw terminal-image parser that observes the same bytes as the VTE
+    /// parser without changing terminal state.
+    graphics_parser: GraphicsParser,
+    /// Complete image records and recoverable image errors waiting for the
+    /// terminal caller.
+    graphics_events: VecDeque<GraphicsEvent>,
+    /// Converts 8-bit string controls to the 7-bit forms supported by `vte`.
+    terminal_input: C1InputNormalizer,
+    /// RGBA bytes held by successful image events.
+    graphics_event_bytes: usize,
+    /// Number of events dropped after the bounded graphics queue filled.
+    graphics_events_dropped: usize,
+    /// Set when the next DCS is a GNU Screen continuation wrapper.
+    graphics_screen_continuation: bool,
+    /// Set when the carried bytes belong to an open GNU Screen wrapper.
+    graphics_screen_wrapper_active: bool,
+    /// Set when the next DCS is a tmux continuation wrapper.
+    graphics_tmux_continuation: bool,
+    /// Set when the carried bytes belong to an open tmux wrapper.
+    graphics_tmux_wrapper_active: bool,
 }
 
 impl TerminalEngine {
@@ -98,9 +331,19 @@ impl TerminalEngine {
             parser: vte::Parser::<OSC_CAPACITY>::new_with_size(),
             state,
             undecoded: Vec::new(),
+            graphics_undecoded: Vec::new(),
             tail_parser: vte::Parser::<OSC_CAPACITY>::new_with_size(),
             on_boundary: true,
             in_string_body: false,
+            graphics_parser: GraphicsParser::default(),
+            graphics_events: VecDeque::new(),
+            terminal_input: C1InputNormalizer::default(),
+            graphics_event_bytes: 0,
+            graphics_events_dropped: 0,
+            graphics_screen_continuation: false,
+            graphics_screen_wrapper_active: false,
+            graphics_tmux_continuation: false,
+            graphics_tmux_wrapper_active: false,
         }
     }
 
@@ -112,8 +355,8 @@ impl TerminalEngine {
     ///
     /// Chunks may split an escape sequence or a UTF-8 code point at any byte;
     /// the parser resumes the partial decode on the next call, and
-    /// [`undecoded`](Self::undecoded) is set to the bytes that put another
-    /// parser where this one now stands. This method drains shell-integration
+    /// [`undecoded`](Self::undecoded) is set to the canonical bytes that put
+    /// another parser where this one now stands. This method drains shell-integration
     /// facts without returning them; use
     /// [`Self::advance_with_shell_integration`] when the caller handles those facts.
     #[must_use = "undelivered replies hang the querying app"]
@@ -134,8 +377,26 @@ impl TerminalEngine {
         &mut self,
         bytes: &[u8],
     ) -> (Vec<u8>, Vec<ShellIntegrationFact>) {
-        self.parser.advance(&mut self.state, bytes);
-        self.hold_undecoded(bytes);
+        let graphics_events = self.graphics_parser.advance_with_offsets(bytes);
+        let normalized = self.terminal_input.normalize(bytes);
+        let terminal_bytes = normalized.bytes();
+        let mut parser_at = 0;
+        for (offset, result) in graphics_events {
+            let end = normalized.end_offset(offset + 1);
+            if end > parser_at {
+                self.parser
+                    .advance(&mut self.state, &terminal_bytes[parser_at..end]);
+                parser_at = end;
+            }
+            let anchor = self.state.active_cursor_position();
+            self.queue_graphics(result, anchor);
+        }
+        if parser_at < terminal_bytes.len() {
+            self.parser
+                .advance(&mut self.state, &terminal_bytes[parser_at..]);
+        }
+        self.hold_undecoded(terminal_bytes);
+        self.sync_graphics_undecoded();
         (
             self.state.take_replies(),
             self.state.take_shell_integration_facts(),
@@ -152,20 +413,139 @@ impl TerminalEngine {
     /// in half completes here. Pass an empty slice for a state that was not
     /// carried out of a running engine.
     pub fn from_state(state: TerminalState, undecoded: &[u8]) -> Self {
+        Self::from_state_with_graphics(state, undecoded, &[])
+    }
+
+    /// An engine around `state` with the VTE and graphics parser positions
+    /// carried from another engine.
+    pub fn from_state_with_graphics(
+        state: TerminalState,
+        undecoded: &[u8],
+        graphics_undecoded: &[u8],
+    ) -> Self {
+        Self::from_state_with_graphics_and_events(state, undecoded, graphics_undecoded, &[])
+    }
+
+    /// An engine around `state` with parser positions and queued graphics
+    /// events carried from another engine.
+    pub fn from_state_with_graphics_and_events(
+        state: TerminalState,
+        undecoded: &[u8],
+        graphics_undecoded: &[u8],
+        graphics_events: &[GraphicsEvent],
+    ) -> Self {
+        Self::from_state_with_graphics_and_events_and_screen(
+            state,
+            undecoded,
+            graphics_undecoded,
+            graphics_events,
+            false,
+            false,
+        )
+    }
+
+    /// An engine around state with parser positions, queued graphics events,
+    /// and GNU Screen continuation state carried from another engine. This is
+    /// the compatibility form for the two legacy wrapper flags; use
+    /// [`from_state_with_graphics_and_events_and_wrappers`](Self::from_state_with_graphics_and_events_and_wrappers)
+    /// when nested parser state or bounded-transfer abandonment is present.
+    pub fn from_state_with_graphics_and_events_and_screen(
+        state: TerminalState,
+        undecoded: &[u8],
+        graphics_undecoded: &[u8],
+        graphics_events: &[GraphicsEvent],
+        graphics_screen_continuation: bool,
+        graphics_screen_wrapper_active: bool,
+    ) -> Self {
+        Self::from_state_with_graphics_and_events_and_wrappers(
+            state,
+            undecoded,
+            graphics_undecoded,
+            graphics_events,
+            GraphicsTransportState {
+                screen_continuation: graphics_screen_continuation,
+                screen_wrapper_active: graphics_screen_wrapper_active,
+                ..GraphicsTransportState::default()
+            },
+        )
+    }
+
+    /// An engine around state with parser positions, queued graphics events,
+    /// and the complete graphics transport state carried from another engine.
+    /// A split Screen wrapper such as `ESC P ESC ] 1337;File=... ESC \` is
+    /// restored from its nested parser record before the next PTY bytes arrive.
+    pub fn from_state_with_graphics_and_events_and_wrappers(
+        state: TerminalState,
+        undecoded: &[u8],
+        graphics_undecoded: &[u8],
+        graphics_events: &[GraphicsEvent],
+        graphics_transport: GraphicsTransportState,
+    ) -> Self {
         let mut engine = Self::with_idle_parsers(state);
-        engine.parser.advance(&mut NoScreen, undecoded);
-        engine.hold_undecoded(undecoded);
+        engine
+            .graphics_parser
+            .restore_carry(graphics_undecoded, graphics_transport);
+        let normalized = engine.terminal_input.normalize(undecoded);
+        engine.parser.advance(&mut NoScreen, normalized.bytes());
+        engine.hold_undecoded(normalized.bytes());
+        engine.sync_graphics_undecoded();
+        for event in graphics_events {
+            if let Err(GraphicsError::QueueFull { dropped }) = event {
+                engine.graphics_events_dropped =
+                    engine.graphics_events_dropped.saturating_add(*dropped);
+            } else {
+                engine.queue_graphics_event(event.clone());
+            }
+        }
         engine
     }
 
     /// Take the engine apart and hand back its screen model, dropping the
-    /// parser. Read [`undecoded`](Self::undecoded) first to carry the parser's
-    /// position.
+    /// parser. Read [`undecoded`](Self::undecoded),
+    /// [`graphics_undecoded`](Self::graphics_undecoded), and
+    /// [`take_graphics`](Self::take_graphics) first to carry parser positions
+    /// and queued image events.
     pub fn into_state(self) -> TerminalState {
         self.state
     }
 
-    /// The bytes that put another parser where this one stands: one escape
+    /// Drain complete image records and recoverable image errors in the order
+    /// their protocol terminators reached the terminal parser. When the queue
+    /// dropped records, one `QueueFull` report follows the held events.
+    ///
+    /// A display record is applied to image state before it is made available
+    /// to the caller; a malformed or unplaceable record returns a typed error.
+    pub fn take_graphics(&mut self) -> Vec<GraphicsEvent> {
+        let mut events: Vec<GraphicsEvent> = self.graphics_events.drain(..).collect();
+        self.graphics_event_bytes = 0;
+        if self.graphics_events_dropped != 0 {
+            events.push(Err(GraphicsError::QueueFull {
+                dropped: self.graphics_events_dropped,
+            }));
+            self.graphics_events_dropped = 0;
+        }
+        events
+    }
+
+    /// Finish the graphics stream, report any incomplete transfer, and drain
+    /// all image events already queued by the engine.
+    ///
+    /// A stream ending after `ESC _ Gf=32,s=1,v=1;` returns one typed
+    /// `Truncated` error and leaves the terminal cells unchanged.
+    pub fn finish(&mut self) -> Vec<GraphicsEvent> {
+        let anchor = self.state.active_cursor_position();
+        for result in self.graphics_parser.finish() {
+            self.queue_graphics(result, anchor);
+        }
+        self.graphics_undecoded.clear();
+        self.graphics_screen_continuation = false;
+        self.graphics_screen_wrapper_active = false;
+        self.graphics_tmux_continuation = false;
+        self.graphics_tmux_wrapper_active = false;
+        self.take_graphics()
+    }
+
+    /// The canonical bytes that put another parser where this one stands: one escape
     /// sequence that has no final byte yet, the opening of a string whose body
     /// is still arriving, or the first bytes of a UTF-8 code point. Empty when
     /// the parser sits on a sequence boundary, with one exception: a control
@@ -175,7 +555,8 @@ impl TerminalEngine {
     /// leaves the parser on a sequence boundary.
     ///
     /// A caller carries these across a process-image swap and hands them to
-    /// [`from_state`](Self::from_state).
+    /// [`from_state`](Self::from_state). Eight-bit string controls are stored
+    /// in their seven-bit `ESC` forms.
     ///
     /// Example: the chunk ends with `ESC ] 7 ; file://host/Users/yuhan/Proj` →
     /// those bytes, and the pane's reported directory is still whatever the
@@ -200,6 +581,45 @@ impl TerminalEngine {
         &self.undecoded
     }
 
+    /// The raw bytes that put the graphics parser where it stands.
+    ///
+    /// A caller carrying a simple process-image swap passes these bytes to
+    /// [`from_state_with_graphics`](Self::from_state_with_graphics). A swap
+    /// that cuts a tmux or GNU Screen wrapper, or abandons a large transfer,
+    /// uses [`graphics_transport_state`](Self::graphics_transport_state).
+    /// Ordinary VTE parser bytes are returned by [`undecoded`](Self::undecoded).
+    pub fn graphics_undecoded(&self) -> &[u8] {
+        &self.graphics_undecoded
+    }
+
+    /// The complete graphics-parser state needed by a process-image swap.
+    ///
+    /// Example: a split Screen wrapper returns a state with `screen_inner`;
+    /// `graphics_undecoded` contains the raw bytes without wrapper state.
+    pub fn graphics_transport_state(&self) -> Option<GraphicsTransportState> {
+        self.graphics_parser.transport_state()
+    }
+
+    /// Whether the next DCS belongs to an unfinished GNU Screen wrapper.
+    pub fn graphics_screen_continuation(&self) -> bool {
+        self.graphics_screen_continuation
+    }
+
+    /// Whether a carried GNU Screen wrapper is still open.
+    pub fn graphics_screen_wrapper_active(&self) -> bool {
+        self.graphics_screen_wrapper_active
+    }
+
+    /// Whether the next DCS belongs to an unfinished tmux continuation.
+    pub fn graphics_tmux_continuation(&self) -> bool {
+        self.graphics_tmux_continuation
+    }
+
+    /// Whether a carried tmux wrapper is still open.
+    pub fn graphics_tmux_wrapper_active(&self) -> bool {
+        self.graphics_tmux_wrapper_active
+    }
+
     /// The screen model, for reads (rendering, cursor and mode queries).
     pub fn state(&self) -> &TerminalState {
         &self.state
@@ -211,6 +631,67 @@ impl TerminalEngine {
     /// resize still completes.
     pub fn resize(&mut self, size: PtySize) {
         self.state.resize(size);
+    }
+
+    fn queue_graphics(
+        &mut self,
+        result: Result<crate::graphics::DecodedGraphics, GraphicsError>,
+        anchor: (u16, u16),
+    ) {
+        match result {
+            Ok(decoded) => {
+                let record = ImageRecord {
+                    protocol: decoded.protocol,
+                    image: decoded.image,
+                    action: decoded.action,
+                    display: decoded.display,
+                    anchor,
+                };
+                let bytes = record.image.rgba.len();
+                let protocol = record.protocol;
+                let event = self
+                    .state
+                    .apply_image_record(&record)
+                    .map(|()| record)
+                    .map_err(|reason| GraphicsError::PlacementRejected { protocol, reason });
+                let queued_bytes = if event.is_ok() { bytes } else { 0 };
+                self.queue_graphics_event_with_bytes(event, queued_bytes);
+            }
+            Err(error) => self.queue_graphics_event(Err(error)),
+        }
+    }
+
+    fn queue_graphics_event(&mut self, event: GraphicsEvent) {
+        let bytes = match &event {
+            Ok(record) => record.image.rgba.len(),
+            Err(_) => 0,
+        };
+        self.queue_graphics_event_with_bytes(event, bytes);
+    }
+
+    fn queue_graphics_event_with_bytes(&mut self, event: GraphicsEvent, bytes: usize) {
+        if self.graphics_events.len() == MAX_GRAPHICS_EVENTS
+            || self
+                .graphics_event_bytes
+                .checked_add(bytes)
+                .is_none_or(|total| total > MAX_IMAGE_BYTES)
+        {
+            self.graphics_events_dropped = self.graphics_events_dropped.saturating_add(1);
+            return;
+        }
+        self.graphics_event_bytes += bytes;
+        self.graphics_events.push_back(event);
+    }
+
+    fn sync_graphics_undecoded(&mut self) {
+        self.graphics_undecoded.clear();
+        if let Some(carry) = self.graphics_parser.carry_bytes() {
+            self.graphics_undecoded.extend_from_slice(carry);
+        }
+        self.graphics_screen_continuation = self.graphics_parser.screen_continuation();
+        self.graphics_screen_wrapper_active = self.graphics_parser.screen_wrapper_active();
+        self.graphics_tmux_continuation = self.graphics_parser.tmux_continuation();
+        self.graphics_tmux_wrapper_active = self.graphics_parser.tmux_wrapper_active();
     }
 
     /// Move `tail_parser` over `chunk` and update

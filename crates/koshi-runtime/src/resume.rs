@@ -31,8 +31,13 @@ use koshi_core::ids::{PaneId, SessionId};
 use koshi_core::process::{ExitStatus, PtySize};
 use koshi_session::session::state::Session;
 use koshi_storage::error::StorageError;
+use koshi_terminal::engine::{
+    GraphicsEvent, GraphicsTransportState, MAX_GRAPHICS_EVENTS, MAX_GRAPHICS_EVENT_BATCH,
+};
+use koshi_terminal::graphics::{GraphicsError, MAX_GRAPHICS_CARRY_BYTES, MAX_IMAGE_BYTES};
 use koshi_terminal::state::TerminalState;
-use serde::{Deserialize, Serialize};
+use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::value::RawValue;
 
 /// The resume-file format this build writes.
@@ -129,6 +134,59 @@ pub struct ResumeBody {
     /// one.
     #[serde(default)]
     pub undecoded: HashMap<PaneId, Vec<u8>>,
+    /// The raw bytes that put each pane's graphics parser where the last one
+    /// stood, keyed by pane id. The next image uses this compatibility field
+    /// with [`TerminalEngine::from_state_with_graphics`](koshi_terminal::engine::TerminalEngine::from_state_with_graphics)
+    /// when no nested wrapper state is present.
+    /// A body whose JSON carries no map for this field reads back as an empty
+    /// one.
+    #[serde(default, deserialize_with = "deserialize_graphics_undecoded")]
+    pub graphics_undecoded: HashMap<PaneId, Vec<u8>>,
+    /// Whether each pane's graphics parser expects the next DCS to carry the
+    /// next GNU Screen passthrough fragment.
+    ///
+    /// A body whose JSON carries no map for this field reads back as an empty
+    /// one.
+    #[serde(default)]
+    pub graphics_screen_continuation: HashMap<PaneId, bool>,
+    /// Whether each pane's carried graphics bytes are inside a GNU Screen
+    /// passthrough DCS string.
+    ///
+    /// A body whose JSON carries no map for this field reads back as an empty
+    /// one.
+    #[serde(default)]
+    pub graphics_screen_wrapper_active: HashMap<PaneId, bool>,
+    /// Whether each pane's graphics parser expects the next DCS to carry the
+    /// next tmux passthrough fragment.
+    ///
+    /// A body whose JSON carries no map for this field reads back as an empty
+    /// one.
+    #[serde(default)]
+    pub graphics_tmux_continuation: HashMap<PaneId, bool>,
+    /// Whether each pane's carried graphics bytes are inside an open tmux
+    /// passthrough DCS string.
+    ///
+    /// A body whose JSON carries no map for this field reads back as an empty
+    /// one.
+    #[serde(default)]
+    pub graphics_tmux_wrapper_active: HashMap<PaneId, bool>,
+    /// Complete image records and recoverable image errors waiting for each
+    /// pane's terminal caller, keyed by pane id. The next image restores them
+    /// before it reads new PTY output.
+    ///
+    /// A body whose JSON carries no map for this field reads back as an empty
+    /// one.
+    #[serde(default, deserialize_with = "deserialize_graphics_events")]
+    pub graphics_events: HashMap<PaneId, Vec<GraphicsEvent>>,
+    /// The complete graphics-parser state for each pane, including parser
+    /// state nested inside a split tmux or GNU Screen wrapper. The next image
+    /// restores it before reading new PTY output. A Screen-wrapped iTerm2
+    /// command split after `File=` is represented by `screen_inner` here.
+    ///
+    /// A body whose JSON carries no map for this field reads back as an empty
+    /// one.
+    #[serde(default)]
+    pub graphics_transport: HashMap<PaneId, GraphicsTransportState>,
     /// A quit that was applied and not yet carried out, and how it must be
     /// carried out.
     ///
@@ -228,6 +286,207 @@ pub fn read_body(format: u32, body: &RawValue) -> Result<ResumeBody, StorageErro
     serde_json::from_str(body.get()).map_err(|error| StorageError::Corrupt {
         detail: format!("resume body is unreadable: {error}"),
     })
+}
+
+fn deserialize_graphics_events<'de, D>(
+    deserializer: D,
+) -> Result<HashMap<PaneId, Vec<GraphicsEvent>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserializer.deserialize_map(GraphicsEventsVisitor)
+}
+
+fn deserialize_graphics_undecoded<'de, D>(
+    deserializer: D,
+) -> Result<HashMap<PaneId, Vec<u8>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserializer.deserialize_map(GraphicsUndecodedVisitor)
+}
+
+struct GraphicsUndecodedVisitor;
+
+impl<'de> Visitor<'de> for GraphicsUndecodedVisitor {
+    type Value = HashMap<PaneId, Vec<u8>>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a map of pane ids to bounded graphics carry bytes")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut carries = HashMap::new();
+        while let Some(pane_id) = map.next_key::<PaneId>()? {
+            if carries.contains_key(&pane_id) {
+                return Err(de::Error::custom("duplicate graphics carry pane id"));
+            }
+            let carry = map.next_value_seed(GraphicsCarrySeed)?;
+            carries.insert(pane_id, carry);
+        }
+        Ok(carries)
+    }
+}
+
+struct GraphicsCarrySeed;
+
+impl<'de> DeserializeSeed<'de> for GraphicsCarrySeed {
+    type Value = Vec<u8>;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(GraphicsCarryVisitor)
+    }
+}
+
+struct GraphicsCarryVisitor;
+
+impl<'de> Visitor<'de> for GraphicsCarryVisitor {
+    type Value = Vec<u8>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("bounded graphics carry bytes")
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let size_hint = sequence.size_hint();
+        if size_hint.is_some_and(|size| size > MAX_GRAPHICS_CARRY_BYTES) {
+            return Err(de::Error::custom(format!(
+                "graphics carry exceeds {MAX_GRAPHICS_CARRY_BYTES} bytes"
+            )));
+        }
+        let mut bytes = Vec::with_capacity(size_hint.unwrap_or(0).min(MAX_GRAPHICS_CARRY_BYTES));
+        while let Some(byte) = sequence.next_element::<u8>()? {
+            if bytes.len() == MAX_GRAPHICS_CARRY_BYTES {
+                return Err(de::Error::custom(format!(
+                    "graphics carry exceeds {MAX_GRAPHICS_CARRY_BYTES} bytes"
+                )));
+            }
+            bytes.push(byte);
+        }
+        Ok(bytes)
+    }
+
+    fn visit_bytes<E>(self, bytes: &[u8]) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        if bytes.len() > MAX_GRAPHICS_CARRY_BYTES {
+            return Err(E::custom(format!(
+                "graphics carry exceeds {MAX_GRAPHICS_CARRY_BYTES} bytes"
+            )));
+        }
+        Ok(bytes.to_vec())
+    }
+
+    fn visit_byte_buf<E>(self, bytes: Vec<u8>) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        self.visit_bytes(&bytes)
+    }
+}
+
+struct GraphicsEventsVisitor;
+
+impl<'de> Visitor<'de> for GraphicsEventsVisitor {
+    type Value = HashMap<PaneId, Vec<GraphicsEvent>>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a map of pane ids to bounded graphics event lists")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut events = HashMap::new();
+        while let Some(pane_id) = map.next_key::<PaneId>()? {
+            if events.contains_key(&pane_id) {
+                return Err(de::Error::custom("duplicate graphics event pane id"));
+            }
+            let pane_events = map.next_value_seed(GraphicsEventListSeed)?;
+            events.insert(pane_id, pane_events);
+        }
+        Ok(events)
+    }
+}
+
+struct GraphicsEventListSeed;
+
+impl<'de> DeserializeSeed<'de> for GraphicsEventListSeed {
+    type Value = Vec<GraphicsEvent>;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(GraphicsEventListVisitor)
+    }
+}
+
+struct GraphicsEventListVisitor;
+
+impl<'de> Visitor<'de> for GraphicsEventListVisitor {
+    type Value = Vec<GraphicsEvent>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a bounded graphics event list")
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let size_hint = sequence.size_hint();
+        if size_hint.is_some_and(|size| size > MAX_GRAPHICS_EVENT_BATCH) {
+            return Err(de::Error::custom(format!(
+                "graphics event count exceeds {MAX_GRAPHICS_EVENTS}"
+            )));
+        }
+        let mut events = Vec::with_capacity(size_hint.unwrap_or(0).min(MAX_GRAPHICS_EVENT_BATCH));
+        let mut image_bytes = 0usize;
+        while let Some(event) = sequence.next_element::<GraphicsEvent>()? {
+            if events.len() == MAX_GRAPHICS_EVENT_BATCH {
+                return Err(de::Error::custom(format!(
+                    "graphics event count exceeds {MAX_GRAPHICS_EVENTS}"
+                )));
+            }
+            if let Err(GraphicsError::QueueFull { dropped }) = &event {
+                if *dropped == 0 || events.len() != MAX_GRAPHICS_EVENTS {
+                    return Err(de::Error::custom(
+                        "graphics queue-full report must follow the event limit",
+                    ));
+                }
+            } else if events.len() >= MAX_GRAPHICS_EVENTS {
+                return Err(de::Error::custom(format!(
+                    "graphics event count exceeds {MAX_GRAPHICS_EVENTS}"
+                )));
+            }
+            let event_bytes = match &event {
+                Ok(record) => record.image.rgba.len(),
+                Err(_) => 0,
+            };
+            image_bytes = image_bytes
+                .checked_add(event_bytes)
+                .ok_or_else(|| de::Error::custom("graphics image-byte count overflows"))?;
+            if image_bytes > MAX_IMAGE_BYTES {
+                return Err(de::Error::custom(format!(
+                    "graphics image bytes exceed {MAX_IMAGE_BYTES}"
+                )));
+            }
+            events.push(event);
+        }
+        Ok(events)
+    }
 }
 
 #[cfg(test)]

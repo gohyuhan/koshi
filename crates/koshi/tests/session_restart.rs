@@ -1623,6 +1623,13 @@ fn a_resume_run_that_cannot_bind_its_socket_leaves_no_resume_file_behind() {
             sessions: std::collections::HashMap::new(),
             engines: std::collections::HashMap::new(),
             undecoded: std::collections::HashMap::new(),
+            graphics_undecoded: std::collections::HashMap::new(),
+            graphics_screen_continuation: std::collections::HashMap::new(),
+            graphics_screen_wrapper_active: std::collections::HashMap::new(),
+            graphics_tmux_continuation: std::collections::HashMap::new(),
+            graphics_tmux_wrapper_active: std::collections::HashMap::new(),
+            graphics_events: std::collections::HashMap::new(),
+            graphics_transport: std::collections::HashMap::new(),
             quit: None,
         },
     )

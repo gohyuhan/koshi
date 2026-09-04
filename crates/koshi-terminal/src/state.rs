@@ -1,8 +1,8 @@
 //! Per-pane terminal state: screen buffers, cursor, pen style (the
 //! foreground/background color and attributes applied to newly written
 //! text), modes, horizontal tab stops, title, reported working directory,
-//! shell integration state and facts, prompt-row marks, scrollback, and the
-//! device-reply queue.
+//! shell integration state and facts, image placements, prompt-row marks,
+//! scrollback, and the device-reply queue.
 //!
 //! One [`TerminalState`] backs a single terminal pane; panes never share
 //! buffers. The state travels inside a per-pane
@@ -34,6 +34,7 @@ use crate::style::Style;
 
 mod cursor;
 mod cwd;
+mod images;
 mod modes;
 mod perform;
 mod reflow;
@@ -42,6 +43,7 @@ mod screen;
 
 pub(crate) use cursor::{Cursor, SavedCursor};
 pub use cwd::ReportedCwd;
+pub use images::{ImagePlacement, ImagePlacementError, ImagePlacementId};
 pub(crate) use modes::TerminalModes;
 pub use modes::{CursorShape, MouseEncoding, MouseTracking};
 pub(crate) use render::{Charset, RenderState};
@@ -69,7 +71,7 @@ pub enum ShellIntegrationFact {
 }
 
 /// The full emulation state of one terminal pane.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TerminalState {
     /// The primary (normal, scrolling) screen buffer, including row metadata,
     /// reference-counted: a render snapshot shares it without copying, and a
@@ -94,6 +96,14 @@ pub struct TerminalState {
     /// The alternate screen's [`RenderState`], cloned from `primary_render` on
     /// each alternate-screen entry.
     alternate_render: RenderState,
+    /// Image placements whose anchors are currently on the primary live grid.
+    primary_image_placements: Vec<ImagePlacement>,
+    /// Primary placements whose anchors currently begin in retained history.
+    primary_image_history: Vec<images::PrimaryHistoryImagePlacement>,
+    /// Image placements anchored to the alternate screen's cell grid.
+    alternate_image_placements: Vec<ImagePlacement>,
+    /// The next terminal-local identity assigned to a new image placement.
+    next_image_placement_id: ImagePlacementId,
     /// Active terminal modes (bracketed paste, mouse tracking, …).
     modes: TerminalModes,
     /// Horizontal tab stops indexed by zero-based grid column.
@@ -134,6 +144,78 @@ pub struct TerminalState {
     replies: Vec<u8>,
 }
 
+#[derive(Deserialize)]
+struct TerminalStateFields {
+    primary: Arc<Grid>,
+    alternate: Arc<Grid>,
+    active: Screen,
+    primary_cursor: Cursor,
+    alternate_cursor: Cursor,
+    primary_render: RenderState,
+    alternate_render: RenderState,
+    #[serde(default, deserialize_with = "images::deserialize_image_placements")]
+    primary_image_placements: Vec<ImagePlacement>,
+    #[serde(
+        default,
+        deserialize_with = "images::deserialize_primary_image_history"
+    )]
+    primary_image_history: Vec<images::PrimaryHistoryImagePlacement>,
+    #[serde(default, deserialize_with = "images::deserialize_image_placements")]
+    alternate_image_placements: Vec<ImagePlacement>,
+    #[serde(default = "images::default_next_image_placement_id")]
+    next_image_placement_id: ImagePlacementId,
+    modes: TerminalModes,
+    tab_stops: Vec<bool>,
+    title: Option<String>,
+    reported_cwd: Option<ReportedCwd>,
+    #[serde(default)]
+    shell_integration_state: ShellIntegrationState,
+    #[serde(default)]
+    shell_integration_facts: Vec<ShellIntegrationFact>,
+    scrollback: Scrollback,
+    primary_scroll_region: Option<(u16, u16)>,
+    alternate_scroll_region: Option<(u16, u16)>,
+    cluster: String,
+    cluster_base: Option<(u16, u16)>,
+    replies: Vec<u8>,
+}
+
+impl<'de> Deserialize<'de> for TerminalState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let fields = TerminalStateFields::deserialize(deserializer)?;
+        images::validate_image_state(&fields).map_err(serde::de::Error::custom)?;
+
+        Ok(TerminalState {
+            primary: fields.primary,
+            alternate: fields.alternate,
+            active: fields.active,
+            primary_cursor: fields.primary_cursor,
+            alternate_cursor: fields.alternate_cursor,
+            primary_render: fields.primary_render,
+            alternate_render: fields.alternate_render,
+            primary_image_placements: fields.primary_image_placements,
+            primary_image_history: fields.primary_image_history,
+            alternate_image_placements: fields.alternate_image_placements,
+            next_image_placement_id: fields.next_image_placement_id,
+            modes: fields.modes,
+            tab_stops: fields.tab_stops,
+            title: fields.title,
+            reported_cwd: fields.reported_cwd,
+            shell_integration_state: fields.shell_integration_state,
+            shell_integration_facts: fields.shell_integration_facts,
+            scrollback: fields.scrollback,
+            primary_scroll_region: fields.primary_scroll_region,
+            alternate_scroll_region: fields.alternate_scroll_region,
+            cluster: fields.cluster,
+            cluster_base: fields.cluster_base,
+            replies: fields.replies,
+        })
+    }
+}
+
 impl TerminalState {
     /// Create per-pane state for a terminal of `size`: both screen buffers
     /// blank, the cursor at the top-left and visible, default pen, no title.
@@ -159,6 +241,10 @@ impl TerminalState {
             alternate_cursor: home_cursor,
             primary_render: RenderState::fresh(),
             alternate_render: RenderState::fresh(),
+            primary_image_placements: Vec::new(),
+            primary_image_history: Vec::new(),
+            alternate_image_placements: Vec::new(),
+            next_image_placement_id: images::default_next_image_placement_id(),
             modes: TerminalModes::default(),
             tab_stops: default_tab_stops(size.cols),
             title: None,
@@ -198,6 +284,10 @@ impl TerminalState {
     /// pads with the screen's own background (a wide glyph whose right half is
     /// cut off is blanked), and a height shrink crops off the top. Both
     /// screens' scroll margins are dropped until the app issues DECSTBM again.
+    /// Primary image anchors follow their row's reflowed text and remain in the
+    /// primary history list when the complete rectangle stays addressable.
+    /// Alternate placements are cleared because the alternate screen is cropped
+    /// and has no row-history mapping.
     /// Both cursors are clamped into the new bounds with their wrap latch
     /// cleared, and an in-progress grapheme cluster is dropped.
     pub fn resize(&mut self, size: PtySize) {
@@ -232,6 +322,8 @@ impl TerminalState {
             ),
         );
         self.alternate = Arc::new(Grid::from_rows_with_meta(rows, size.cols, alternate_fill));
+
+        self.clear_alternate_image_placements();
 
         // Clamp both cursors to the new bounds.
         self.primary_cursor.row = min(self.primary_cursor.row, size.rows.saturating_sub(1));

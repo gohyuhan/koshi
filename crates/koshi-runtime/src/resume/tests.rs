@@ -21,6 +21,10 @@ use koshi_core::process::PtySize;
 use koshi_pty::backend::state::CarriedPtyPane;
 use koshi_pty::backend::state::{PtyBackend, PtyHandle};
 use koshi_session::client::{Client, ClientOrigin, ClientRegistry};
+use koshi_terminal::engine::GraphicsEvent;
+use koshi_terminal::graphics::{
+    DecodedImage, GraphicsProtocol, ImageAction, ImageDisplay, ImageRecord,
+};
 use koshi_terminal::grid::state::Cell;
 use koshi_test_support::fake_pty::FakePtyBackend;
 use tempfile::TempDir;
@@ -247,6 +251,13 @@ fn body_carrying_only(quit: Option<CarriedQuit>) -> ResumeBody {
         sessions: HashMap::new(),
         engines: HashMap::new(),
         undecoded: HashMap::new(),
+        graphics_undecoded: HashMap::new(),
+        graphics_screen_continuation: HashMap::new(),
+        graphics_screen_wrapper_active: HashMap::new(),
+        graphics_tmux_continuation: HashMap::new(),
+        graphics_tmux_wrapper_active: HashMap::new(),
+        graphics_events: HashMap::new(),
+        graphics_transport: HashMap::new(),
         quit,
     }
 }
@@ -597,6 +608,196 @@ fn a_body_format_this_build_does_not_know_is_refused_by_both_numbers() {
 }
 
 #[test]
+fn a_resume_body_rejects_graphics_transport_that_exceeds_wrapper_depth() {
+    let pane = PaneId::new();
+    let mut nested = serde_json::json!({ "carry": [] });
+    for _ in 0..9 {
+        nested = serde_json::json!({ "screen_inner": nested });
+    }
+    let body = serde_json::json!({
+        "sessions": {},
+        "engines": {},
+        "graphics_transport": { pane.as_uuid().to_string(): nested },
+    });
+    let raw = serde_json::value::RawValue::from_string(body.to_string()).expect("the body is json");
+
+    match read_body(RESUME_FORMAT, &raw) {
+        Err(StorageError::Corrupt { detail }) => assert_eq!(
+            detail.split(" at line ").next(),
+            Some("resume body is unreadable: graphics wrapper nesting exceeds the supported limit")
+        ),
+        other => panic!("expected an over-depth graphics body to be corrupt, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_resume_body_rejects_graphics_transport_with_too_many_carry_bytes() {
+    let pane = PaneId::new();
+    let oversized = vec![0u8; 64 * 1024 + 1];
+    let body = serde_json::json!({
+        "sessions": {},
+        "engines": {},
+        "graphics_transport": { pane.as_uuid().to_string(): { "carry": oversized } },
+    });
+    let raw = serde_json::value::RawValue::from_string(body.to_string()).expect("the body is json");
+
+    match read_body(RESUME_FORMAT, &raw) {
+        Err(StorageError::Corrupt { detail }) => assert_eq!(
+            detail.split(" at line ").next(),
+            Some("resume body is unreadable: graphics carry exceeds 65536 bytes")
+        ),
+        other => panic!("expected an oversized graphics carry to be corrupt, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_resume_body_rejects_legacy_graphics_carry_that_exceeds_the_limit() {
+    let pane = PaneId::new();
+    let oversized = vec![0u8; koshi_terminal::graphics::MAX_GRAPHICS_CARRY_BYTES + 1];
+    let body = serde_json::json!({
+        "sessions": {},
+        "engines": {},
+        "graphics_undecoded": { pane.as_uuid().to_string(): oversized },
+    });
+    let raw = serde_json::value::RawValue::from_string(body.to_string()).expect("the body is json");
+
+    match read_body(RESUME_FORMAT, &raw) {
+        Err(StorageError::Corrupt { detail }) => assert_eq!(
+            detail.split(" at line ").next(),
+            Some("resume body is unreadable: graphics carry exceeds 65536 bytes")
+        ),
+        other => panic!("expected oversized legacy graphics carry to be corrupt, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_resume_body_rejects_queued_image_bytes_that_do_not_match_dimensions() {
+    let pane = PaneId::new();
+    let event: GraphicsEvent = Ok(ImageRecord {
+        protocol: GraphicsProtocol::Kitty,
+        image: DecodedImage {
+            width: 1,
+            height: 1,
+            rgba: vec![255, 0, 0, 255],
+        },
+        action: ImageAction::Display,
+        display: ImageDisplay::default(),
+        anchor: (0, 0),
+    });
+    let mut event = serde_json::to_value(event).expect("the image event is json");
+    event["Ok"]["image"]["rgba"] = serde_json::json!([255, 0, 0]);
+    let body = serde_json::json!({
+        "sessions": {},
+        "engines": {},
+        "graphics_events": { pane.as_uuid().to_string(): [event] },
+    });
+    let raw = serde_json::value::RawValue::from_string(body.to_string()).expect("the body is json");
+
+    match read_body(RESUME_FORMAT, &raw) {
+        Err(StorageError::Corrupt { detail }) => assert_eq!(
+            detail.split(" at line ").next(),
+            Some("resume body is unreadable: decoded image RGBA length does not match its dimensions")
+        ),
+        other => panic!("expected an invalid queued image to be corrupt, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_resume_body_rejects_graphics_error_text_over_the_control_limit() {
+    let pane = PaneId::new();
+    let event: GraphicsEvent = Err(koshi_terminal::graphics::GraphicsError::UnsupportedAction {
+        protocol: GraphicsProtocol::Kitty,
+        action: String::new(),
+    });
+    let mut event = serde_json::to_value(event).expect("the graphics error is json");
+    event["Err"]["UnsupportedAction"]["action"] = serde_json::Value::String(
+        "x".repeat(koshi_terminal::graphics::MAX_GRAPHICS_CONTROL_BYTES + 1),
+    );
+    let body = serde_json::json!({
+        "sessions": {},
+        "engines": {},
+        "graphics_events": { pane.as_uuid().to_string(): [event] },
+    });
+    let raw = serde_json::value::RawValue::from_string(body.to_string()).expect("the body is json");
+
+    match read_body(RESUME_FORMAT, &raw) {
+        Err(StorageError::Corrupt { detail }) => assert_eq!(
+            detail.split(" at line ").next(),
+            Some("resume body is unreadable: graphics error text exceeds 8192 bytes")
+        ),
+        other => panic!("expected oversized graphics error text to be corrupt, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_resume_body_rejects_a_graphics_event_list_over_the_engine_limit() {
+    let pane = PaneId::new();
+    let event: GraphicsEvent = Ok(ImageRecord {
+        protocol: GraphicsProtocol::Kitty,
+        image: DecodedImage {
+            width: 1,
+            height: 1,
+            rgba: vec![255, 0, 0, 255],
+        },
+        action: ImageAction::Display,
+        display: ImageDisplay::default(),
+        anchor: (0, 0),
+    });
+    let event = serde_json::to_value(event).expect("the image event is json");
+    let events = vec![event; koshi_terminal::engine::MAX_GRAPHICS_EVENTS + 1];
+    let body = serde_json::json!({
+        "sessions": {},
+        "engines": {},
+        "graphics_events": { pane.as_uuid().to_string(): events },
+    });
+    let raw = serde_json::value::RawValue::from_string(body.to_string()).expect("the body is json");
+
+    match read_body(RESUME_FORMAT, &raw) {
+        Err(StorageError::Corrupt { detail }) => assert_eq!(
+            detail.split(" at line ").next(),
+            Some("resume body is unreadable: graphics event count exceeds 64")
+        ),
+        other => panic!("expected an oversized graphics event list to be corrupt, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_resume_body_accepts_the_queue_full_report_after_queued_events() {
+    let pane = PaneId::new();
+    let event: GraphicsEvent = Ok(ImageRecord {
+        protocol: GraphicsProtocol::Kitty,
+        image: DecodedImage {
+            width: 1,
+            height: 1,
+            rgba: vec![255, 0, 0, 255],
+        },
+        action: ImageAction::Display,
+        display: ImageDisplay::default(),
+        anchor: (0, 0),
+    });
+    let event = serde_json::to_value(event).expect("the image event is json");
+    let mut events = vec![event; koshi_terminal::engine::MAX_GRAPHICS_EVENTS];
+    events.push(serde_json::json!({
+        "Err": {
+            "QueueFull": { "dropped": 2 }
+        }
+    }));
+    let body = serde_json::json!({
+        "sessions": {},
+        "engines": {},
+        "graphics_events": { pane.as_uuid().to_string(): events },
+    });
+    let raw = serde_json::value::RawValue::from_string(body.to_string()).expect("the body is json");
+
+    let body = read_body(RESUME_FORMAT, &raw).expect("the valid queue batch reads");
+
+    assert_eq!(
+        body.graphics_events[&pane].len(),
+        koshi_terminal::engine::MAX_GRAPHICS_EVENT_BATCH
+    );
+}
+
+#[test]
 fn a_header_naming_an_unknown_format_still_reads_back_whole() {
     let dir = TempDir::new().expect("create temp dir");
     let path = dir.path().join("session.resume");
@@ -619,6 +820,13 @@ fn a_header_naming_an_unknown_format_still_reads_back_whole() {
         sessions: HashMap::new(),
         engines: HashMap::new(),
         undecoded: HashMap::new(),
+        graphics_undecoded: HashMap::new(),
+        graphics_screen_continuation: HashMap::new(),
+        graphics_screen_wrapper_active: HashMap::new(),
+        graphics_tmux_continuation: HashMap::new(),
+        graphics_tmux_wrapper_active: HashMap::new(),
+        graphics_events: HashMap::new(),
+        graphics_transport: HashMap::new(),
         quit: None,
     };
     write(&path, &header, &body).expect("write the resume file");
@@ -1069,6 +1277,13 @@ fn a_carried_session_with_its_client_comes_back_whole() {
             sessions: HashMap::from([(session_id, session)]),
             engines: HashMap::new(),
             undecoded: HashMap::new(),
+            graphics_undecoded: HashMap::new(),
+            graphics_screen_continuation: HashMap::new(),
+            graphics_screen_wrapper_active: HashMap::new(),
+            graphics_tmux_continuation: HashMap::new(),
+            graphics_tmux_wrapper_active: HashMap::new(),
+            graphics_events: HashMap::new(),
+            graphics_transport: HashMap::new(),
             quit: None,
         };
         write(&path, &header, &body).expect("write the resume file");
