@@ -5,6 +5,7 @@ use super::*;
 use crate::engine::{GraphicsTransportState, TerminalEngine};
 use crate::state::ImagePlacementError;
 use koshi_core::process::PtySize;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
 fn red_png() -> Vec<u8> {
     use image::ImageEncoder;
@@ -351,6 +352,44 @@ fn sixel_growth_keeps_a_valid_image_near_the_dimension_limit() {
 
     assert_eq!(result.image.width, 10_000);
     assert_eq!(result.image.height, 6);
+}
+
+#[test]
+fn sixel_growth_preserves_the_existing_canvas_when_fallback_would_shrink_it() {
+    let bytes = b"\x1bPq!3000~-~-~$!13000~\x1b\\";
+
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let mut parser = GraphicsParser::default();
+        only_event(&mut parser, bytes)
+    }))
+    .expect("Sixel growth must not panic");
+
+    let result = result.expect("the Sixel image remains within the final limits");
+    assert_eq!(result.image.width, 13_000);
+    assert_eq!(result.image.height, 18);
+    assert_eq!(result.image.rgba.len(), 13_000 * 18 * 4);
+    assert_eq!(&result.image.rgba[0..4], &[0, 0, 0, 255]);
+}
+
+#[test]
+fn sixel_growth_preserves_existing_width_when_fallback_would_shrink_it() {
+    let mut bytes = b"\x1bPq!1000~".to_vec();
+    for _ in 0..16 {
+        bytes.extend_from_slice(b"-~");
+    }
+    bytes.extend_from_slice(b"\x1b\\");
+
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let mut parser = GraphicsParser::default();
+        only_event(&mut parser, &bytes)
+    }))
+    .expect("Sixel growth must not panic");
+
+    let result = result.expect("the Sixel image remains within the final limits");
+    assert_eq!(result.image.width, 1_000);
+    assert_eq!(result.image.height, 102);
+    assert_eq!(result.image.rgba.len(), 1_000 * 102 * 4);
+    assert_eq!(&result.image.rgba[0..4], &[0, 0, 0, 255]);
 }
 
 #[test]

@@ -2497,7 +2497,7 @@ impl SixelCanvas {
         {
             (grown_width, grown_height)
         } else {
-            (width, height)
+            (width.max(self.width), height.max(self.height))
         };
         validate_dimensions(GraphicsProtocol::Sixel, new_width, new_height)?;
         let new_len = checked_rgba_len(GraphicsProtocol::Sixel, new_width, new_height)?;
