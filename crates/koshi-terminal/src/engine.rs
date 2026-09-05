@@ -18,6 +18,7 @@
 
 use std::borrow::Cow;
 use std::collections::VecDeque;
+use std::ops::Range;
 
 use koshi_core::process::PtySize;
 
@@ -112,11 +113,52 @@ impl<'a> NormalizedInput<'a> {
     }
 }
 
+fn without_terminal_inert<'a>(bytes: &'a [u8], ranges: &[Range<usize>]) -> Cow<'a, [u8]> {
+    if ranges.is_empty() {
+        return Cow::Borrowed(bytes);
+    }
+
+    let removed = ranges.iter().map(|range| range.len()).sum::<usize>();
+    let mut compacted = Vec::with_capacity(bytes.len() - removed);
+    let mut at = 0;
+    for range in ranges {
+        debug_assert!(at <= range.start && range.start <= range.end && range.end <= bytes.len());
+        compacted.extend_from_slice(&bytes[at..range.start]);
+        at = range.end;
+    }
+    compacted.extend_from_slice(&bytes[at..]);
+    Cow::Owned(compacted)
+}
+
+fn without_terminal_inert_offset(raw_end: usize, ranges: &[Range<usize>]) -> usize {
+    let removed = ranges
+        .iter()
+        .take_while(|range| range.start < raw_end)
+        .map(|range| range.end.min(raw_end) - range.start)
+        .sum::<usize>();
+    raw_end - removed
+}
+
 impl C1InputNormalizer {
     fn normalize<'a>(&mut self, bytes: &'a [u8]) -> NormalizedInput<'a> {
         let mut normalized: Option<NormalizedBuffer> = None;
+        let mut index = 0;
 
-        for (index, &byte) in bytes.iter().enumerate() {
+        while index < bytes.len() {
+            let plain = self.plain_run(&bytes[index..]);
+            if plain != 0 {
+                if let Some(buffer) = normalized.as_mut() {
+                    let output_start = buffer.bytes.len();
+                    buffer.bytes.extend_from_slice(&bytes[index..index + plain]);
+                    buffer
+                        .raw_to_normalized
+                        .extend(output_start + 1..=output_start + plain);
+                }
+                index += plain;
+                continue;
+            }
+
+            let byte = bytes[index];
             let replacement = self.replacement(byte);
             if let Some(buffer) = normalized.as_mut() {
                 if let Some(replacement) = replacement {
@@ -137,6 +179,7 @@ impl C1InputNormalizer {
                 buffer.raw_to_normalized.push(buffer.bytes.len());
                 normalized = Some(buffer);
             }
+            index += 1;
         }
 
         match normalized {
@@ -152,6 +195,29 @@ impl C1InputNormalizer {
                 raw_to_normalized: None,
             },
         }
+    }
+
+    /// Return the leading bytes that cannot change the normalizer state.
+    fn plain_run(&self, bytes: &[u8]) -> usize {
+        if self.utf8_continuations != 0 {
+            return 0;
+        }
+        let changes_state = |byte: u8| match self.state {
+            C1InputState::Ground => byte == ESCAPE || byte >= 0x80,
+            C1InputState::String(kind) => {
+                matches!(byte, CANCEL | SUBSTITUTE | ESCAPE)
+                    || byte >= 0x80
+                    || (byte == 0x07 && matches!(kind, C1StringKind::Osc))
+            }
+            C1InputState::Escape
+            | C1InputState::EscapeIntermediate
+            | C1InputState::Csi
+            | C1InputState::StringEscape(_) => true,
+        };
+        bytes
+            .iter()
+            .position(|byte| changes_state(*byte))
+            .unwrap_or(bytes.len())
     }
 
     fn replacement(&mut self, byte: u8) -> Option<&'static [u8]> {
@@ -377,12 +443,14 @@ impl TerminalEngine {
         &mut self,
         bytes: &[u8],
     ) -> (Vec<u8>, Vec<ShellIntegrationFact>) {
-        let graphics_events = self.graphics_parser.advance_with_offsets(bytes);
-        let normalized = self.terminal_input.normalize(bytes);
+        let graphics = self.graphics_parser.advance_with_offsets(bytes);
+        let terminal_input = without_terminal_inert(bytes, &graphics.terminal_inert);
+        let normalized = self.terminal_input.normalize(&terminal_input);
         let terminal_bytes = normalized.bytes();
         let mut parser_at = 0;
-        for (offset, result) in graphics_events {
-            let end = normalized.end_offset(offset + 1);
+        for (offset, result) in graphics.events {
+            let raw_end = without_terminal_inert_offset(offset + 1, &graphics.terminal_inert);
+            let end = normalized.end_offset(raw_end);
             if end > parser_at {
                 self.parser
                     .advance(&mut self.state, &terminal_bytes[parser_at..end]);

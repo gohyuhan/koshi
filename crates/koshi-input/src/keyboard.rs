@@ -1,4 +1,4 @@
-//! Crossterm keyboard boundary: the two halves of one key press.
+//! Host keyboard boundary: the two halves of one key press.
 //!
 //! [`decode_key`] turns one host key event into a canonical [`KeyChord`]: one
 //! key plus the modifiers held with it, such as `<C-a>`, in the form the keymap
@@ -20,7 +20,7 @@
 //!   `Ctrl-Right` is `ESC [ 1 ; 5 C`, where `5` = 1 + 4 (Control). Shift adds
 //!   1, Alt 2, Control 4, Super 8.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crate::host::{KeyCode as HostKey, KeyEvent, KeyEventKind, Modifiers};
 use koshi_core::key::{fold_uppercase, Key, KeyChord, ModFlags, NamedKey};
 
 /// The escape byte that opens every control sequence.
@@ -32,22 +32,20 @@ const UNMODIFIED: u8 = 1;
 
 /// Decode one press or repeat into its canonical chord.
 ///
-/// Returns `None` for a release, and for a code with no [`Key`] form: `F(0)`,
-/// `F(25)` and above, `Null`, `CapsLock`, `ScrollLock`, `NumLock`,
-/// `PrintScreen`, `Pause`, `Menu`, `KeypadBegin`, every `Media` key, and every
-/// `Modifier` key. `BackTab` decodes as Shift+Tab. Meta counts as Super;
-/// Hyper is dropped.
+/// Returns `None` for a release, for a function key above F24, and for a host
+/// key added after this boundary that has no [`Key`] form. `BackTab` supplies
+/// Shift even when the host flag is absent. Meta counts as Super; Hyper and
+/// lock-state flags are dropped.
 #[must_use]
 pub fn decode_key(event: KeyEvent) -> Option<KeyChord> {
-    if matches!(event.kind, KeyEventKind::Release) {
+    if event.kind == KeyEventKind::Release {
         return None;
     }
 
+    let modifiers = event.modifiers;
+    let shift_held = modifiers.contains(Modifiers::SHIFT) || event.code == HostKey::BackTab;
     let key = decode_code(event.code)?;
-    let mods = decode_mods(event.modifiers);
-    // `BackTab` is Shift+Tab whether or not the host set the Shift modifier.
-    let shift_held =
-        event.modifiers.contains(KeyModifiers::SHIFT) || event.code == KeyCode::BackTab;
+    let mods = decode_mods(modifiers);
     Some(normalize(key, mods, shift_held))
 }
 
@@ -78,27 +76,29 @@ pub fn encode(chord: KeyChord, app_cursor_keys: bool) -> Vec<u8> {
     }
 }
 
-/// The [`Key`] a host code stands for, or `None` for a code with no `Key`
-/// form. `BackTab` maps to the Tab key; [`decode_key`] adds its Shift.
-fn decode_code(code: KeyCode) -> Option<Key> {
+/// The [`Key`] a host code stands for, or `None` for a code with no
+/// [`Key`] form.
+fn decode_code(code: HostKey) -> Option<Key> {
     let key = match code {
-        KeyCode::Char(c) => Key::Char(c),
-        KeyCode::Enter => Key::Named(NamedKey::Enter),
-        KeyCode::Backspace => Key::Named(NamedKey::Backspace),
-        KeyCode::Tab | KeyCode::BackTab => Key::Named(NamedKey::Tab),
-        KeyCode::Esc => Key::Named(NamedKey::Esc),
-        KeyCode::Up => Key::Named(NamedKey::Up),
-        KeyCode::Down => Key::Named(NamedKey::Down),
-        KeyCode::Right => Key::Named(NamedKey::Right),
-        KeyCode::Left => Key::Named(NamedKey::Left),
-        KeyCode::Home => Key::Named(NamedKey::Home),
-        KeyCode::End => Key::Named(NamedKey::End),
-        KeyCode::Insert => Key::Named(NamedKey::Insert),
-        KeyCode::Delete => Key::Named(NamedKey::Delete),
-        KeyCode::PageUp => Key::Named(NamedKey::PageUp),
-        KeyCode::PageDown => Key::Named(NamedKey::PageDown),
-        KeyCode::F(n @ 1..=24) => Key::Named(NamedKey::F(n)),
-        _ => return None,
+        HostKey::Char(c) => Key::Char(c),
+        HostKey::Enter => Key::Named(NamedKey::Enter),
+        HostKey::Backspace => Key::Named(NamedKey::Backspace),
+        HostKey::Tab => Key::Named(NamedKey::Tab),
+        HostKey::Escape => Key::Named(NamedKey::Esc),
+        HostKey::Up => Key::Named(NamedKey::Up),
+        HostKey::Down => Key::Named(NamedKey::Down),
+        HostKey::Right => Key::Named(NamedKey::Right),
+        HostKey::Left => Key::Named(NamedKey::Left),
+        HostKey::Home => Key::Named(NamedKey::Home),
+        HostKey::End => Key::Named(NamedKey::End),
+        HostKey::Insert => Key::Named(NamedKey::Insert),
+        HostKey::Delete => Key::Named(NamedKey::Delete),
+        HostKey::PageUp => Key::Named(NamedKey::PageUp),
+        HostKey::PageDown => Key::Named(NamedKey::PageDown),
+        HostKey::BackTab => Key::Named(NamedKey::Tab),
+        HostKey::Function(n @ 1..=24) => Key::Named(NamedKey::F(n)),
+        HostKey::Function(_) => return None,
+        HostKey::Unsupported => return None,
     };
     Some(key)
 }
@@ -106,15 +106,15 @@ fn decode_code(code: KeyCode) -> Option<Key> {
 /// The host's Control, Alt and Super as [`ModFlags`]. Meta counts as Super;
 /// Hyper is dropped. Shift is not carried: [`normalize`] adds it for a key
 /// press, and [`crate::mouse`] adds it for a mouse event.
-pub(crate) fn decode_mods(modifiers: KeyModifiers) -> ModFlags {
+pub(crate) fn decode_mods(modifiers: Modifiers) -> ModFlags {
     let mut mods = ModFlags::NONE;
-    if modifiers.contains(KeyModifiers::CONTROL) {
+    if modifiers.contains(Modifiers::CONTROL) {
         mods = mods.union(ModFlags::CTRL);
     }
-    if modifiers.contains(KeyModifiers::ALT) {
+    if modifiers.contains(Modifiers::ALT) {
         mods = mods.union(ModFlags::ALT);
     }
-    if modifiers.contains(KeyModifiers::SUPER) || modifiers.contains(KeyModifiers::META) {
+    if modifiers.contains(Modifiers::SUPER) || modifiers.contains(Modifiers::META) {
         mods = mods.union(ModFlags::SUPER);
     }
     mods
@@ -363,10 +363,9 @@ fn unfold_shift(c: char) -> char {
 /// spellings — `<C-4>` and `<C-\>` both send `0x1c` — and which one arrives
 /// depends on the host:
 ///
-/// - On unix the terminal sends the byte, and crossterm decodes `0x1c`–`0x1f`
-///   to `Char('4')`–`Char('7')`: `Ctrl+\` reaches koshi as `<C-4>`. `0x00`,
-///   `0x1b`, and `0x7f` arrive as Ctrl+Space, Esc, and Backspace.
-/// - On Windows crossterm reports the key's own character: `Ctrl+4` arrives as
+/// - VT input maps `0x1c`–`0x1f` to `<C-4>` through `<C-7>`.
+///   `0x00`, `0x1b`, and `0x7f` become Ctrl+Space, Esc, and Backspace.
+/// - Enhanced keyboard input identifies the key directly: `Ctrl+4` arrives as
 ///   `<C-4>` and `Ctrl+\` as `<C-\>`.
 fn control_byte(c: char) -> Option<u8> {
     match c {

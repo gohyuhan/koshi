@@ -664,6 +664,7 @@ fn an_attach_carries_its_payload_through_to_the_callers_dispatch() {
                     resume: None,
                     resume_token: None,
                     pane_area: None,
+                    graphics: crate::protocol::GraphicsCapabilities::default(),
                 },
             })
             .expect("send attach");
@@ -681,6 +682,7 @@ fn an_attach_carries_its_payload_through_to_the_callers_dispatch() {
                         resume: None,
                         resume_token: None,
                         pane_area: None,
+                        graphics: crate::protocol::GraphicsCapabilities::default(),
                     },
                 },
                 Next::Stop,

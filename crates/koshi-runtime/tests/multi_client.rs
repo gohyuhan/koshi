@@ -239,6 +239,7 @@ fn attach_reporting(
                 resume: None,
                 resume_token: None,
                 pane_area,
+                graphics: koshi_ipc::protocol::GraphicsCapabilities::default(),
             },
         })
         .expect("send attach");

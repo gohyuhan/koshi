@@ -497,8 +497,9 @@ pub struct PaneSnapshot {
     /// The visible terminal cells. `None` for a pane with no terminal content
     /// (a plugin pane, or a slot showing nothing this frame).
     pub grid_view: Option<GridView>,
-    /// The complete image placements whose rectangles fit inside this view.
-    /// Their anchors use the same pane-local rows and columns as `grid_view`.
+    /// The image placements whose rectangles fit inside this view. A remote
+    /// viewer can hold the rectangle before its image record arrives. Their
+    /// anchors use the same pane-local rows and columns as `grid_view`.
     pub image_placements: Vec<ImagePlacementSnapshot>,
     /// Whether the whole screen is in reverse video (DECSCNM): the renderer
     /// swaps the default foreground and background for every cell.
@@ -618,14 +619,16 @@ pub struct GridView {
 /// One validated terminal image placement carried in a read-only frame.
 ///
 /// The image record is shared so a local snapshot does not copy RGBA pixels.
-/// A remote frame rebuilds the same record after its wire image has passed the
-/// wire decoder's bounds checks.
+/// A remote frame first carries the placement without a record, then rebuilds
+/// the record after its bounded content events pass the wire checks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImagePlacementSnapshot {
     /// The terminal-local placement identity.
     id: ImagePlacementId,
-    /// The decoded image and its display metadata.
-    record: Arc<ImageRecord>,
+    /// The connection-local identity of the image record.
+    content_id: u64,
+    /// The decoded image and its display metadata, when this viewer has it.
+    record: Option<Arc<ImageRecord>>,
     /// The zero-based row and column of the upper-left covered cell.
     anchor: (u16, u16),
     /// The number of covered columns.
@@ -644,11 +647,20 @@ impl ImagePlacementSnapshot {
         columns: u16,
         rows: u16,
     ) -> Option<Self> {
-        if id == 0
-            || columns == 0
-            || rows == 0
-            || u32::from(anchor.0) + u32::from(rows) > u32::from(u16::MAX) + 1
-            || u32::from(anchor.1) + u32::from(columns) > u32::from(u16::MAX) + 1
+        Self::with_content_id(id, id, record, anchor, columns, rows)
+    }
+
+    /// Build a frame placement with an explicit connection-local content id.
+    #[must_use]
+    pub fn with_content_id(
+        id: ImagePlacementId,
+        content_id: u64,
+        record: Arc<ImageRecord>,
+        anchor: (u16, u16),
+        columns: u16,
+        rows: u16,
+    ) -> Option<Self> {
+        if !valid_placement(id, content_id, anchor, columns, rows)
             || record.action == ImageAction::Transmit
             || record.source_rect().is_err()
             || !valid_image_record(&record)
@@ -657,7 +669,27 @@ impl ImagePlacementSnapshot {
         }
         Some(Self {
             id,
-            record,
+            content_id,
+            record: Some(record),
+            anchor,
+            columns,
+            rows,
+        })
+    }
+
+    /// Build a placement whose content was not sent to this viewer.
+    #[must_use]
+    pub fn unavailable(
+        id: ImagePlacementId,
+        content_id: u64,
+        anchor: (u16, u16),
+        columns: u16,
+        rows: u16,
+    ) -> Option<Self> {
+        valid_placement(id, content_id, anchor, columns, rows).then_some(Self {
+            id,
+            content_id,
+            record: None,
             anchor,
             columns,
             rows,
@@ -670,16 +702,22 @@ impl ImagePlacementSnapshot {
         self.id
     }
 
-    /// Return the complete image record.
+    /// Return the connection-local identity of the image record.
     #[must_use]
-    pub fn record(&self) -> &ImageRecord {
-        self.record.as_ref()
+    pub fn content_id(&self) -> u64 {
+        self.content_id
+    }
+
+    /// Return the complete image record when this viewer received it.
+    #[must_use]
+    pub fn record(&self) -> Option<&ImageRecord> {
+        self.record.as_deref()
     }
 
     /// Return the shared complete image record.
     #[must_use]
-    pub fn record_arc(&self) -> Arc<ImageRecord> {
-        Arc::clone(&self.record)
+    pub fn record_arc(&self) -> Option<Arc<ImageRecord>> {
+        self.record.as_ref().map(Arc::clone)
     }
 
     /// Return the zero-based row and column of the placement anchor.
@@ -707,6 +745,21 @@ impl ImagePlacementSnapshot {
         )
         .expect("terminal image placement is valid")
     }
+}
+
+fn valid_placement(
+    id: ImagePlacementId,
+    content_id: u64,
+    anchor: (u16, u16),
+    columns: u16,
+    rows: u16,
+) -> bool {
+    id != 0
+        && content_id != 0
+        && columns != 0
+        && rows != 0
+        && u32::from(anchor.0) + u32::from(rows) <= u32::from(u16::MAX) + 1
+        && u32::from(anchor.1) + u32::from(columns) <= u32::from(u16::MAX) + 1
 }
 
 fn valid_image_record(record: &ImageRecord) -> bool {

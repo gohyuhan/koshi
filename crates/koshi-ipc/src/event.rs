@@ -8,16 +8,13 @@
 //! change to which tabs exist, how each tab's panes are arranged, which pane a
 //! client focused, and which panes are alive.
 //!
-//! Pane content travels in
-//! [`Painted`](crate::event::SessionEvent::Painted) alone, as a whole
-//! [`PaintedFrame`](crate::frame::PaintedFrame), except for an oversized image
-//! transfer. That transfer sends a base `Painted` frame, one or more
-//! [`PaintedImageStart`](crate::event::SessionEvent::PaintedImageStart)
-//! events, and its
-//! [`PaintedImageChunk`](crate::event::SessionEvent::PaintedImageChunk) events.
-//! The starts name the image metadata and follow the base `Painted` event on
-//! the same ordered stream. No other frame here carries a grid, a cursor,
-//! scrollback, or colors.
+//! Pane content travels in [`Painted`](crate::event::SessionEvent::Painted).
+//! Image placements in that frame name connection-local records. A record the
+//! client has not received follows as one
+//! [`ImageContentStart`](crate::event::SessionEvent::ImageContentStart) and its
+//! [`ImageContentChunk`](crate::event::SessionEvent::ImageContentChunk)
+//! events. An unchanged record is referenced again without sending its RGBA
+//! bytes again.
 //!
 //! Four frames here are not session facts.
 //! [`Resync`](crate::event::SessionEvent::Resync) is the first: the server
@@ -55,15 +52,15 @@ pub enum SessionEvent {
         /// The frame to draw.
         frame: Box<PaintedFrame>,
     },
-    /// Metadata for image transfers split across events.
-    PaintedImageStart {
-        /// The identity shared by the start and all following chunks.
-        frame_id: u64,
-        /// The image placement metadata whose pixels follow in chunks.
-        images: Vec<FrameImageTransfer>,
+    /// Drop every connection-local image record before the next painted frame.
+    ImageCacheReset,
+    /// Metadata for one image record whose pixels follow in chunks.
+    ImageContentStart {
+        /// The image record and its exact RGBA byte count.
+        image: FrameImageTransfer,
     },
-    /// One bounded piece of an image transfer.
-    PaintedImageChunk {
+    /// One bounded piece of an image record.
+    ImageContentChunk {
         /// The image bytes and their position in the transfer.
         chunk: FrameImageChunk,
     },
@@ -193,8 +190,9 @@ impl SessionEvent {
     pub fn name(&self) -> &'static str {
         match self {
             SessionEvent::Painted { .. } => "Painted",
-            SessionEvent::PaintedImageStart { .. } => "PaintedImageStart",
-            SessionEvent::PaintedImageChunk { .. } => "PaintedImageChunk",
+            SessionEvent::ImageCacheReset => "ImageCacheReset",
+            SessionEvent::ImageContentStart { .. } => "ImageContentStart",
+            SessionEvent::ImageContentChunk { .. } => "ImageContentChunk",
             SessionEvent::PaneCreated { .. } => "PaneCreated",
             SessionEvent::PaneProcessExited { .. } => "PaneProcessExited",
             SessionEvent::PaneClosing { .. } => "PaneClosing",
@@ -221,8 +219,9 @@ impl WireVariants for SessionEvent {
     /// added here and to [`SessionEvent::name`] in the same change.
     const VARIANTS: &'static [&'static str] = &[
         "Painted",
-        "PaintedImageStart",
-        "PaintedImageChunk",
+        "ImageCacheReset",
+        "ImageContentStart",
+        "ImageContentChunk",
         "PaneCreated",
         "PaneProcessExited",
         "PaneClosing",

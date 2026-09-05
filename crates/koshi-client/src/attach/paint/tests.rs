@@ -7,15 +7,14 @@ use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::MouseTracking;
-use koshi_ipc::event::SessionEvent;
 use koshi_ipc::frame::{
-    FrameImageChunk, FrameImageTransfer, MAX_FRAME_IMAGE_TRANSFERS, MAX_FRAME_IMAGE_TRANSFER_BYTES,
+    FrameGraphicsProtocol, FrameImageAction, FrameImageChunk, FrameImageDisplay,
+    FrameImagePlacement, FrameImageRecordHeader, FrameImageTransfer, MAX_FRAME_IMAGE_TRANSFERS,
+    MAX_FRAME_IMAGE_TRANSFER_BYTES,
 };
 use koshi_layout::mode::LayoutMode;
 use koshi_renderer::snapshot::PaneKind;
-use koshi_runtime::runtime::frame::{
-    wire_chunked_frame_base, wire_chunked_frame_starts, wire_frame, wire_image_chunk_sources,
-};
+use koshi_runtime::runtime::frame::wire_frame;
 use koshi_terminal::graphics::{
     DecodedImage, GraphicsProtocol, ImageAction, ImageDimension, ImageDisplay, ImageRecord,
     SixelBackground,
@@ -24,8 +23,9 @@ use koshi_terminal::graphics::{
 use super::*;
 
 fn image_placement() -> ImagePlacementSnapshot {
-    ImagePlacementSnapshot::new(
+    ImagePlacementSnapshot::with_content_id(
         41,
+        1,
         Arc::new(ImageRecord {
             protocol: GraphicsProtocol::Kitty,
             image: DecodedImage {
@@ -60,6 +60,50 @@ fn image_placement() -> ImagePlacementSnapshot {
         1,
     )
     .expect("test image placement is valid")
+}
+
+/// The transfer metadata for [`image_placement`].
+fn image_transfer(id: u64) -> FrameImageTransfer {
+    FrameImageTransfer {
+        id,
+        record: FrameImageRecordHeader {
+            protocol: FrameGraphicsProtocol::Kitty,
+            width: 2,
+            height: 1,
+            action: FrameImageAction::TransmitAndDisplay,
+            display: FrameImageDisplay {
+                width: Some(FrameImageDimension::Cells(3)),
+                height: Some(FrameImageDimension::Pixels(1)),
+                preserve_aspect_ratio: false,
+                sixel_background: Some(FrameSixelBackground::Preserve),
+                image_id: Some(7),
+                image_number: Some(8),
+                placement_id: Some(9),
+                usage_hints: 0x12,
+                unicode_placeholder: true,
+                z_index: -2,
+                cell_columns: Some(2),
+                cell_rows: Some(1),
+                source_offset_x: Some(1),
+                source_offset_y: Some(0),
+                cell_offset_x: Some(6),
+                cell_offset_y: Some(7),
+                move_cursor: false,
+            },
+            anchor: (0, 2),
+        },
+        byte_len: 8,
+    }
+}
+
+/// All RGBA bytes for [`image_transfer`] in one final chunk.
+fn image_chunk(id: u64) -> FrameImageChunk {
+    FrameImageChunk {
+        transfer_id: id,
+        offset: 0,
+        last: true,
+        bytes: vec![255, 0, 0, 255, 0, 255, 0, 255],
+    }
 }
 
 /// Every style field set away from its default, so a field lost on the way
@@ -113,7 +157,7 @@ fn content_pane(id: PaneId) -> PaneSnapshot {
             grid: Arc::new(grid()),
             view_offset: 7,
         }),
-        image_placements: vec![image_placement()],
+        image_placements: Vec::new(),
         reverse_video: true,
         mouse_tracking: MouseTracking::AnyMotion,
         alt_scroll: true,
@@ -128,6 +172,13 @@ fn content_pane(id: PaneId) -> PaneSnapshot {
             retained_lines: 500,
         },
     }
+}
+
+/// The content pane with one image placement included.
+fn content_pane_with_image(id: PaneId) -> PaneSnapshot {
+    let mut pane = content_pane(id);
+    pane.image_placements.push(image_placement());
+    pane
 }
 
 /// A pane with no terminal content: no grid, a hidden and unshaped cursor,
@@ -242,22 +293,39 @@ fn a_frame_that_travels_and_is_read_back_is_the_frame_that_was_sent() {
 }
 
 #[test]
-fn an_image_placement_and_its_complete_record_survive_frame_round_trip() {
-    let sent = snapshot(vec![content_pane(PaneId::new()), empty_pane(PaneId::new())]);
+fn a_frame_draws_an_image_placeholder_then_draws_the_complete_record() {
+    let sent = snapshot(vec![
+        content_pane_with_image(PaneId::new()),
+        empty_pane(PaneId::new()),
+    ]);
+    let wire = wire_frame(&sent);
+    let mut cache = ImageCache::new();
 
-    let received = to_snapshot(&wire_frame(&sent));
+    let placeholder = cache
+        .begin_frame(Box::new(wire))
+        .expect("the placement frame reads");
+    assert_eq!(placeholder.panes[0].image_placements.len(), 1);
+    assert_eq!(placeholder.panes[0].image_placements[0].record(), None);
 
+    cache.start(image_transfer(1)).expect("the transfer starts");
+    let received = cache
+        .accept(image_chunk(1))
+        .expect("the complete chunk reads")
+        .expect("the last missing record produces a redraw");
+
+    assert_eq!(received, sent);
     assert_eq!(
-        received.panes[0].image_placements,
-        sent.panes[0].image_placements
-    );
-    assert_eq!(
-        received.panes[0].image_placements[0].record().image.rgba,
+        received.panes[0].image_placements[0]
+            .record()
+            .expect("the complete image has its record")
+            .image
+            .rgba,
         vec![255, 0, 0, 255, 0, 255, 0, 255]
     );
     assert_eq!(
         received.panes[0].image_placements[0]
             .record()
+            .expect("the complete image has its record")
             .display
             .source_offset_y,
         Some(0)
@@ -265,53 +333,245 @@ fn an_image_placement_and_its_complete_record_survive_frame_round_trip() {
 }
 
 #[test]
-fn chunked_image_events_rebuild_the_original_painted_frame() {
-    let sent = snapshot(vec![content_pane(PaneId::new()), empty_pane(PaneId::new())]);
+fn a_complete_cached_image_is_reused_by_the_next_frame() {
+    let sent = snapshot(vec![
+        content_pane_with_image(PaneId::new()),
+        empty_pane(PaneId::new()),
+    ]);
     let wire = wire_frame(&sent);
-    let SessionEvent::PaintedImageStart { frame_id, images } = wire_chunked_frame_starts(&wire, 7)
-        .expect("the frame has an image")
-        .into_iter()
-        .next()
-        .expect("the frame has one image start")
-    else {
-        panic!("the image-start event has its declared shape");
-    };
-    let base = to_snapshot(&wire_chunked_frame_base(&wire));
-    let mut assembly = ImageFrameAssembly::new(frame_id, base, images).expect("the start reads");
-    let mut rebuilt = None;
-    for (transfer_id, offset, last, bytes) in wire_image_chunk_sources(&wire) {
-        rebuilt = assembly
-            .accept(FrameImageChunk {
-                frame_id,
-                transfer_id,
-                offset,
-                last,
-                bytes: bytes.to_vec(),
-            })
-            .expect("the image chunk continues the transfer");
-    }
+    let mut cache = ImageCache::new();
+    cache
+        .begin_frame(Box::new(wire.clone()))
+        .expect("the first placement frame reads");
+    cache.start(image_transfer(1)).expect("the transfer starts");
+    cache
+        .accept(image_chunk(1))
+        .expect("the complete chunk reads")
+        .expect("the image produces a redraw");
 
-    let rebuilt = rebuilt.expect("the final chunk rebuilds the frame");
-    assert_eq!(rebuilt, sent);
+    let reused = cache
+        .begin_frame(Box::new(wire))
+        .expect("the repeated placement frame reads");
+
+    assert_eq!(reused, sent);
+    assert_eq!(cache.images.len(), 1);
+    assert!(cache.missing.is_empty());
+    assert_eq!(cache.pending.as_ref().map(|pending| pending.received), None);
+}
+
+#[test]
+fn a_cached_record_cannot_hide_an_invalid_new_placement() {
+    let sent = snapshot(vec![
+        content_pane_with_image(PaneId::new()),
+        empty_pane(PaneId::new()),
+    ]);
+    let mut wire = wire_frame(&sent);
+    let mut cache = ImageCache::new();
+    cache
+        .begin_frame(Box::new(wire.clone()))
+        .expect("the valid frame reads");
+    cache.start(image_transfer(1)).expect("the transfer starts");
+    cache
+        .accept(image_chunk(1))
+        .expect("the complete chunk reads")
+        .expect("the image produces a redraw");
+    wire.panes[0].image_placements[0].anchor = (u16::MAX, 0);
+    wire.panes[0].image_placements[0].rows = 2;
+
+    let error = cache
+        .begin_frame(Box::new(wire))
+        .expect_err("the cached record cannot make bad geometry valid");
+
+    assert_eq!(error, ImageAssemblyError::InvalidPlacement);
+    assert_eq!(cache.images.len(), 1);
+    assert_eq!(cache.retained_bytes, 8);
+}
+
+#[test]
+fn a_frame_redraws_only_after_every_missing_image_record_arrives() {
+    let sent = snapshot(vec![
+        content_pane_with_image(PaneId::new()),
+        empty_pane(PaneId::new()),
+    ]);
+    let mut wire = wire_frame(&sent);
+    wire.panes[0].image_placements.push(FrameImagePlacement {
+        id: 42,
+        content_id: 2,
+        available: true,
+        anchor: (0, 0),
+        columns: 1,
+        rows: 1,
+    });
+    let mut cache = ImageCache::new();
+    cache
+        .begin_frame(Box::new(wire))
+        .expect("the placement frame reads");
+
+    cache
+        .start(image_transfer(1))
+        .expect("the first transfer starts");
+    let after_first = cache
+        .accept(image_chunk(1))
+        .expect("the first complete record reads");
+    cache
+        .start(image_transfer(2))
+        .expect("the second transfer starts");
+    let after_second = cache
+        .accept(image_chunk(2))
+        .expect("the second complete record reads")
+        .expect("the last record produces one redraw");
+
+    assert_eq!(after_first, None);
+    assert_eq!(after_second.panes[0].image_placements.len(), 2);
+    assert_eq!(after_second.panes[0].image_placements[0].content_id(), 1);
+    assert_eq!(
+        after_second.panes[0].image_placements[0]
+            .record()
+            .map(|record| record.image.rgba.as_slice()),
+        Some([255, 0, 0, 255, 0, 255, 0, 255].as_slice())
+    );
+    assert_eq!(after_second.panes[0].image_placements[1].content_id(), 2);
+    assert_eq!(
+        after_second.panes[0].image_placements[1]
+            .record()
+            .map(|record| record.image.rgba.as_slice()),
+        Some([255, 0, 0, 255, 0, 255, 0, 255].as_slice())
+    );
+}
+
+#[test]
+fn a_frame_without_a_cached_placement_releases_its_rgba_bytes() {
+    let sent = snapshot(vec![
+        content_pane_with_image(PaneId::new()),
+        empty_pane(PaneId::new()),
+    ]);
+    let mut wire = wire_frame(&sent);
+    let mut cache = ImageCache::new();
+    cache
+        .begin_frame(Box::new(wire.clone()))
+        .expect("the placement frame reads");
+    cache.start(image_transfer(1)).expect("the transfer starts");
+    cache
+        .accept(image_chunk(1))
+        .expect("the image reads")
+        .expect("the image produces a redraw");
+    wire.panes[0].image_placements.clear();
+
+    let without_image = cache
+        .begin_frame(Box::new(wire))
+        .expect("the frame without the placement reads");
+
+    assert_eq!(without_image.panes[0].image_placements, Vec::new());
+    assert_eq!(cache.images.len(), 0);
+    assert_eq!(cache.retained_bytes, 0);
+    assert_eq!(cache.missing.len(), 0);
+}
+
+#[test]
+fn a_rejected_chunk_closes_its_transfer_and_allows_an_exact_restart() {
+    let sent = snapshot(vec![
+        content_pane_with_image(PaneId::new()),
+        empty_pane(PaneId::new()),
+    ]);
+    let mut cache = ImageCache::new();
+    cache
+        .begin_frame(Box::new(wire_frame(&sent)))
+        .expect("the placement frame reads");
+    cache
+        .start(image_transfer(1))
+        .expect("the first transfer starts");
+    let error = cache
+        .accept(FrameImageChunk {
+            transfer_id: 1,
+            offset: 1,
+            last: true,
+            bytes: vec![255, 0, 0, 255, 0, 255, 0, 255],
+        })
+        .expect_err("the wrong offset is refused");
+
+    assert_eq!(
+        error,
+        ImageAssemblyError::WrongOffset {
+            transfer_id: 1,
+            expected: 0,
+            actual: 1,
+        }
+    );
+    assert_eq!(cache.pending.as_ref().map(|pending| pending.received), None);
+
+    cache
+        .start(image_transfer(1))
+        .expect("the same transfer can restart");
+    let completed = cache
+        .accept(image_chunk(1))
+        .expect("the restarted transfer reads")
+        .expect("the restarted transfer produces a redraw");
+    assert_eq!(completed, sent);
+}
+
+#[test]
+fn one_pane_cannot_repeat_a_terminal_image_placement_identity() {
+    let sent = snapshot(vec![
+        content_pane_with_image(PaneId::new()),
+        empty_pane(PaneId::new()),
+    ]);
+    let mut wire = wire_frame(&sent);
+    let mut repeated = wire.panes[0].image_placements[0].clone();
+    repeated.content_id = 2;
+    wire.panes[0].image_placements.push(repeated);
+    let mut cache = ImageCache::new();
+
+    let error = cache
+        .begin_frame(Box::new(wire))
+        .expect_err("the repeated placement identity is refused");
+
+    assert_eq!(error, ImageAssemblyError::DuplicatePlacement);
+    assert_eq!(cache.images.len(), 0);
+    assert_eq!(cache.retained_bytes, 0);
+    assert_eq!(cache.frame, None);
+    assert_eq!(cache.missing.len(), 0);
+    assert_eq!(cache.pending.as_ref().map(|pending| pending.received), None);
+}
+
+#[test]
+fn an_image_cache_reset_discards_complete_and_incomplete_connection_state() {
+    let sent = snapshot(vec![
+        content_pane_with_image(PaneId::new()),
+        empty_pane(PaneId::new()),
+    ]);
+    let mut cache = ImageCache::new();
+    cache
+        .begin_frame(Box::new(wire_frame(&sent)))
+        .expect("the placement frame reads");
+    cache.start(image_transfer(1)).expect("the transfer starts");
+
+    cache.reset();
+
+    assert_eq!(cache.images.len(), 0);
+    assert_eq!(cache.retained_bytes, 0);
+    assert_eq!(cache.frame, None);
+    assert_eq!(cache.missing.len(), 0);
+    assert_eq!(cache.pending.as_ref().map(|pending| pending.received), None);
+    assert_eq!(
+        cache.start(image_transfer(1)),
+        Err(ImageAssemblyError::MissingBaseFrame)
+    );
 }
 
 #[test]
 fn an_image_chunk_with_a_wrong_offset_is_refused_exactly() {
-    let sent = snapshot(vec![content_pane(PaneId::new()), empty_pane(PaneId::new())]);
+    let sent = snapshot(vec![
+        content_pane_with_image(PaneId::new()),
+        empty_pane(PaneId::new()),
+    ]);
     let wire = wire_frame(&sent);
-    let SessionEvent::PaintedImageStart { frame_id, images } = wire_chunked_frame_starts(&wire, 7)
-        .expect("the frame has an image")
-        .into_iter()
-        .next()
-        .expect("the frame has one image start")
-    else {
-        panic!("the image-start event has its declared shape");
-    };
-    let base = to_snapshot(&wire_chunked_frame_base(&wire));
-    let mut assembly = ImageFrameAssembly::new(frame_id, base, images).expect("the start reads");
-    let error = assembly
+    let mut cache = ImageCache::new();
+    cache
+        .begin_frame(Box::new(wire))
+        .expect("the placement frame reads");
+    cache.start(image_transfer(1)).expect("the transfer starts");
+    let error = cache
         .accept(FrameImageChunk {
-            frame_id,
             transfer_id: 1,
             offset: 1,
             last: true,
@@ -331,64 +591,159 @@ fn an_image_chunk_with_a_wrong_offset_is_refused_exactly() {
 
 #[test]
 fn image_transfer_metadata_cannot_reserve_more_than_the_frame_limit() {
-    let sent = snapshot(vec![content_pane(PaneId::new()), empty_pane(PaneId::new())]);
-    let wire = wire_frame(&sent);
-    let base = to_snapshot(&wire_chunked_frame_base(&wire));
-    let mut transfers = wire_chunked_frame_starts(&wire, 7)
-        .expect("the frame has an image")
-        .into_iter()
-        .next()
-        .and_then(|event| match event {
-            SessionEvent::PaintedImageStart { images, .. } => images.into_iter().next(),
-            _ => None,
-        })
-        .map(|transfer| {
-            let mut oversized = transfer;
-            oversized.byte_len = MAX_FRAME_IMAGE_TRANSFER_BYTES;
-            oversized
-        })
-        .into_iter()
-        .collect::<Vec<_>>();
-    transfers.push(FrameImageTransfer {
-        id: 2,
-        byte_len: MAX_FRAME_IMAGE_TRANSFER_BYTES,
-        ..transfers[0].clone()
+    let sent = snapshot(vec![
+        content_pane_with_image(PaneId::new()),
+        empty_pane(PaneId::new()),
+    ]);
+    let mut wire = wire_frame(&sent);
+    let mut cache = ImageCache::new();
+    cache
+        .begin_frame(Box::new(wire.clone()))
+        .expect("the first placement frame reads");
+    cache
+        .start(image_transfer(1))
+        .expect("the first transfer starts");
+    cache
+        .accept(image_chunk(1))
+        .expect("the first image reads")
+        .expect("the first image produces a redraw");
+    wire.panes[0].image_placements.push(FrameImagePlacement {
+        id: 42,
+        content_id: 2,
+        available: true,
+        anchor: (0, 0),
+        columns: 1,
+        rows: 1,
     });
-
-    let error = match ImageFrameAssembly::new(7, base, transfers) {
-        Ok(_) => panic!("the total is over the limit"),
-        Err(error) => error,
+    cache
+        .begin_frame(Box::new(wire))
+        .expect("the two-placement frame reads");
+    let oversized = FrameImageTransfer {
+        id: 2,
+        record: FrameImageRecordHeader {
+            protocol: FrameGraphicsProtocol::Kitty,
+            width: 4_096,
+            height: 4_096,
+            action: FrameImageAction::Display,
+            display: FrameImageDisplay::default(),
+            anchor: (0, 0),
+        },
+        byte_len: MAX_FRAME_IMAGE_TRANSFER_BYTES,
     };
+
+    let error = cache
+        .start(oversized)
+        .expect_err("the retained and incoming records are over the limit");
     assert_eq!(error, ImageAssemblyError::TransferBytesExceedFrame);
 }
 
 #[test]
-fn image_transfer_metadata_cannot_exceed_the_placement_count_limit() {
-    let sent = snapshot(vec![content_pane(PaneId::new()), empty_pane(PaneId::new())]);
-    let wire = wire_frame(&sent);
-    let base = to_snapshot(&wire_chunked_frame_base(&wire));
-    let template = wire_chunked_frame_starts(&wire, 7)
-        .expect("the frame has an image")
-        .into_iter()
-        .next()
-        .and_then(|event| match event {
-            SessionEvent::PaintedImageStart { images, .. } => images.into_iter().next(),
-            _ => None,
-        })
-        .expect("the frame has one image transfer");
-    let transfers = (0..=MAX_FRAME_IMAGE_TRANSFERS)
-        .map(|index| FrameImageTransfer {
-            id: u64::try_from(index + 1).expect("the transfer identity fits"),
-            placement_id: u64::try_from(index + 1).expect("the placement identity fits"),
-            ..template.clone()
+fn image_placements_from_several_panes_do_not_share_one_pane_limit() {
+    let sent = snapshot(vec![
+        content_pane_with_image(PaneId::new()),
+        empty_pane(PaneId::new()),
+    ]);
+    let mut wire = wire_frame(&sent);
+    wire.panes[0].image_placements = (0..MAX_FRAME_IMAGE_TRANSFERS)
+        .map(|index| FrameImagePlacement {
+            id: u64::try_from(index + 1).expect("the placement identity fits"),
+            content_id: u64::try_from(index + 1).expect("the content identity fits"),
+            available: false,
+            anchor: (0, 0),
+            columns: 1,
+            rows: 1,
         })
         .collect();
+    wire.panes[1].image_placements.push(FrameImagePlacement {
+        id: 1,
+        content_id: u64::try_from(MAX_FRAME_IMAGE_TRANSFERS + 1)
+            .expect("the content identity fits"),
+        available: false,
+        anchor: (0, 0),
+        columns: 1,
+        rows: 1,
+    });
+    let mut cache = ImageCache::new();
 
-    let error = match ImageFrameAssembly::new(7, base, transfers) {
-        Ok(_) => panic!("the transfer count is over the limit"),
-        Err(error) => error,
-    };
+    let rebuilt = cache
+        .begin_frame(Box::new(wire))
+        .expect("placements in distinct panes are accepted");
+
+    assert_eq!(rebuilt.panes[0].image_placements.len(), 4_096);
+    assert_eq!(rebuilt.panes[1].image_placements.len(), 1);
+}
+
+#[test]
+fn one_painted_frame_accepts_at_most_4096_image_transfers() {
+    let sent = snapshot(vec![
+        content_pane_with_image(PaneId::new()),
+        empty_pane(PaneId::new()),
+    ]);
+    let mut wire = wire_frame(&sent);
+    wire.panes[0].image_placements.push(FrameImagePlacement {
+        id: 42,
+        content_id: 2,
+        available: true,
+        anchor: (0, 0),
+        columns: 1,
+        rows: 1,
+    });
+    let mut cache = ImageCache::new();
+    cache
+        .begin_frame(Box::new(wire))
+        .expect("the placement frame reads");
+    cache.transfer_count = MAX_FRAME_IMAGE_TRANSFERS - 1;
+    cache
+        .start(image_transfer(1))
+        .expect("transfer 4096 starts");
+    cache
+        .accept(image_chunk(1))
+        .expect("transfer 4096 completes");
+
+    let error = cache
+        .start(image_transfer(2))
+        .expect_err("transfer 4097 is rejected");
+
     assert_eq!(error, ImageAssemblyError::TransferCountExceedsFrame);
+}
+
+#[test]
+fn an_unavailable_placement_does_not_hold_back_an_available_image() {
+    let sent = snapshot(vec![
+        content_pane_with_image(PaneId::new()),
+        empty_pane(PaneId::new()),
+    ]);
+    let mut wire = wire_frame(&sent);
+    wire.panes[0].image_placements.push(FrameImagePlacement {
+        id: 42,
+        content_id: 2,
+        available: false,
+        anchor: (0, 0),
+        columns: 1,
+        rows: 1,
+    });
+    let mut cache = ImageCache::new();
+    cache
+        .begin_frame(Box::new(wire))
+        .expect("the mixed placement frame reads");
+    cache.start(image_transfer(1)).expect("the transfer starts");
+
+    let rebuilt = cache
+        .accept(image_chunk(1))
+        .expect("the available image completes")
+        .expect("the available image produces a redraw");
+    let transfer = image_transfer(1);
+    let expected = to_image_record(&transfer.record, image_chunk(1).bytes);
+
+    assert_eq!(
+        rebuilt.panes[0].image_placements[0].record(),
+        Some(&expected)
+    );
+    assert_eq!(rebuilt.panes[0].image_placements[1].record(), None);
+    assert_eq!(
+        cache.start(image_transfer(2)),
+        Err(ImageAssemblyError::UnknownTransfer(2))
+    );
 }
 
 #[test]

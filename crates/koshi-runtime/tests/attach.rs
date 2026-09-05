@@ -235,6 +235,7 @@ fn attach_with_token(
                 resume: None,
                 resume_token,
                 pane_area: None,
+                graphics: koshi_ipc::protocol::GraphicsCapabilities::default(),
             },
         })
         .expect("send attach");

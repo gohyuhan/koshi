@@ -4,7 +4,28 @@
 //! suppression, and application-cursor-keys mode.
 
 use super::*;
-use crossterm::event::{MediaKeyCode, ModifierKeyCode};
+use crate::host::KeyCode;
+
+#[derive(Clone, Copy)]
+struct KeyModifiers(Modifiers);
+
+impl KeyModifiers {
+    const NONE: Self = Self(Modifiers::empty());
+    const SHIFT: Self = Self(Modifiers::SHIFT);
+    const CONTROL: Self = Self(Modifiers::CONTROL);
+    const ALT: Self = Self(Modifiers::ALT);
+    const SUPER: Self = Self(Modifiers::SUPER);
+    const HYPER: Self = Self(Modifiers::HYPER);
+    const META: Self = Self(Modifiers::META);
+}
+
+impl std::ops::BitOr for KeyModifiers {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0.union(rhs.0))
+    }
+}
 
 /// The bytes this chord sends to a pane in the ordinary (non-application)
 /// cursor-key mode, which is every pane's state until a program changes it.
@@ -20,7 +41,7 @@ fn app_bytes(mods: ModFlags, key: Key) -> Vec<u8> {
 }
 
 fn press(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
-    KeyEvent::new(code, modifiers)
+    KeyEvent::new(code, modifiers.0)
 }
 
 fn chord(mods: ModFlags, key: Key) -> Option<KeyChord> {
@@ -124,7 +145,7 @@ fn named_keys_decode_exactly() {
         (KeyCode::Enter, NamedKey::Enter),
         (KeyCode::Backspace, NamedKey::Backspace),
         (KeyCode::Tab, NamedKey::Tab),
-        (KeyCode::Esc, NamedKey::Esc),
+        (KeyCode::Escape, NamedKey::Esc),
         (KeyCode::Up, NamedKey::Up),
         (KeyCode::Down, NamedKey::Down),
         (KeyCode::Left, NamedKey::Left),
@@ -135,8 +156,8 @@ fn named_keys_decode_exactly() {
         (KeyCode::Delete, NamedKey::Delete),
         (KeyCode::PageUp, NamedKey::PageUp),
         (KeyCode::PageDown, NamedKey::PageDown),
-        (KeyCode::F(1), NamedKey::F(1)),
-        (KeyCode::F(24), NamedKey::F(24)),
+        (KeyCode::Function(1), NamedKey::F(1)),
+        (KeyCode::Function(24), NamedKey::F(24)),
     ];
     for (code, named) in cases {
         assert_eq!(
@@ -191,19 +212,7 @@ fn repeat_decodes_and_release_does_not() {
 
 #[test]
 fn keys_the_chord_model_cannot_name_are_not_input() {
-    let cases = [
-        KeyCode::CapsLock,
-        KeyCode::ScrollLock,
-        KeyCode::NumLock,
-        KeyCode::PrintScreen,
-        KeyCode::Pause,
-        KeyCode::Menu,
-        KeyCode::KeypadBegin,
-        KeyCode::Null,
-        KeyCode::F(25),
-        KeyCode::Media(MediaKeyCode::Play),
-        KeyCode::Modifier(ModifierKeyCode::LeftControl),
-    ];
+    let cases = [KeyCode::Function(25), KeyCode::Unsupported];
     for code in cases {
         assert_eq!(
             decode_key(press(code, KeyModifiers::NONE)),
@@ -277,10 +286,9 @@ fn the_control_digits_carry_the_codes_the_letter_run_cannot_reach() {
 
 #[test]
 fn the_two_spellings_of_one_control_code_send_the_same_byte() {
-    // One key press has two host spellings: on unix crossterm decodes the
-    // terminal's `0x1c` to `Char('4')`, and `Ctrl-\` arrives as `<C-4>`; on
-    // Windows the key's own character arrives, and it is `<C-\>`. Both leave
-    // here as `0x1c`.
+    // One key press has two host spellings: VT input maps the terminal's
+    // `0x1c` to `<C-4>`, while enhanced input can report the key's own
+    // character as `<C-\>`. Both leave here as `0x1c`.
     for (digit, punctuation) in [('4', '\\'), ('5', ']'), ('6', '^'), ('7', '_')] {
         assert_eq!(
             bytes(ModFlags::CTRL, Key::Char(digit)),
@@ -534,9 +542,9 @@ fn a_decoded_key_round_trips_through_the_encoder() {
         press(KeyCode::Char('a'), KeyModifiers::NONE),
         press(KeyCode::Char('H'), KeyModifiers::ALT),
         press(KeyCode::Char('1'), KeyModifiers::CONTROL),
-        press(KeyCode::BackTab, KeyModifiers::NONE),
+        press(KeyCode::Tab, KeyModifiers::SHIFT),
         press(KeyCode::Right, KeyModifiers::CONTROL),
-        press(KeyCode::F(6), KeyModifiers::NONE),
+        press(KeyCode::Function(6), KeyModifiers::NONE),
     ];
     let expected: [&[u8]; 6] = [b"a", b"\x1bH", b"1", b"\x1b[Z", b"\x1b[1;5C", b"\x1b[17~"];
     for (event, expected) in events.into_iter().zip(expected) {
@@ -663,7 +671,7 @@ fn backtab_with_shift_already_held_stays_one_shift() {
 #[test]
 fn a_function_key_carries_its_modifier_on_decode() {
     assert_eq!(
-        decode_key(press(KeyCode::F(6), KeyModifiers::CONTROL)),
+        decode_key(press(KeyCode::Function(6), KeyModifiers::CONTROL)),
         chord(ModFlags::CTRL, Key::Named(NamedKey::F(6)))
     );
 }
@@ -975,7 +983,10 @@ fn hostile_and_edge_characters_round_trip_to_their_own_bytes() {
 fn function_key_zero_is_not_a_key_the_model_names() {
     // `F(24)` is the top of the run and `F(25)` is rejected; `F(0)` is the
     // bottom of the same bound and is rejected too.
-    assert_eq!(decode_key(press(KeyCode::F(0), KeyModifiers::NONE)), None);
+    assert_eq!(
+        decode_key(press(KeyCode::Function(0), KeyModifiers::NONE)),
+        None
+    );
 }
 
 #[test]

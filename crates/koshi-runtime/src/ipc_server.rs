@@ -50,7 +50,7 @@
 //! removes the endpoint file, the socket and any shared marker, so nothing
 //! advertises a session that is gone.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -59,19 +59,19 @@ use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
 
 use koshi_core::command::{CommandEnvelope, CommandSource};
-use koshi_core::ids::{ClientId, SessionId};
+use koshi_core::ids::{ClientId, PaneId, SessionId};
 use koshi_ipc::endpoint::{
     advert_path, remove_advert, remove_socket_file, shared_socket_addr, socket_addr, write_advert,
     EndpointFile,
 };
 use koshi_ipc::error::IpcError;
 use koshi_ipc::event::SessionEvent;
-use koshi_ipc::frame::{FrameImageChunk, PaintedFrame};
+use koshi_ipc::frame::{FrameImageChunk, PaintedFrame, MAX_FRAME_IMAGE_TRANSFERS};
 use koshi_ipc::handshake::{Handshake, Peer};
 use koshi_ipc::plane::{self, Next};
 use koshi_ipc::protocol::{
-    ConnectionToken, IncomingRequest, IpcErrorCode, IpcErrorPayload, IpcRequestKind, IpcResponse,
-    IpcResult, SessionPlane,
+    ConnectionToken, GraphicsCapabilities, IncomingRequest, IpcErrorCode, IpcErrorPayload,
+    IpcRequestKind, IpcResponse, IpcResult, SessionPlane,
 };
 use koshi_ipc::transport::{self, Connection, FrameWriter, Listener, ReadCloser};
 use koshi_ipc::validate::{
@@ -79,12 +79,13 @@ use koshi_ipc::validate::{
 };
 use koshi_ipc::wire::MaybeKnown;
 use koshi_observability::logging::recent_events;
-use koshi_renderer::snapshot::Delivery;
+use koshi_renderer::snapshot::{Delivery, ImagePlacementSnapshot, RenderSnapshot};
+use koshi_terminal::graphics::ImageRecord;
 
 use crate::runtime::bus::wire_event;
 use crate::runtime::event::{EndingNotice, RuntimeEvent, SessionEnding};
 use crate::runtime::frame::{
-    wire_chunked_frame_base, wire_chunked_frame_starts, wire_image_chunk_sources,
+    wire_frame, wire_frame_with_content_ids, wire_image_chunk_sources, wire_image_transfer,
 };
 
 /// How long the accept loop sleeps after a failed accept before it accepts
@@ -234,6 +235,18 @@ struct ServedConnection {
     intake: Arc<Intake>,
     /// The number this connection is filed under.
     number: u64,
+}
+
+/// The accepted client state consumed by one attached event stream.
+struct AttachedStream {
+    /// Client whose input and output use this stream.
+    client_id: ClientId,
+    /// Deliveries waiting to be written to the client.
+    events: Receiver<Delivery>,
+    /// Shared session-ending notice read by the writer.
+    ending_notice: Arc<EndingNotice>,
+    /// Graphics capabilities reported by this connection.
+    graphics: GraphicsCapabilities,
 }
 
 impl Drop for ServedConnection {
@@ -671,6 +684,7 @@ fn serve_connection(
                 resume,
                 resume_token,
                 pane_area,
+                graphics,
             } => {
                 let answer =
                     ask_dispatcher(&served.intake, inbox_tx, |reply| RuntimeEvent::IpcAttach {
@@ -718,9 +732,12 @@ fn serve_connection(
                 // the client's event stream and the client's own input.
                 stream_events(
                     connection,
-                    accepted.client_id,
-                    accepted.events,
-                    accepted.ending_notice,
+                    AttachedStream {
+                        client_id: accepted.client_id,
+                        events: accepted.events,
+                        ending_notice: accepted.ending_notice,
+                        graphics,
+                    },
                     inbox_tx,
                     live_setting,
                     served,
@@ -854,19 +871,23 @@ fn serve_connection(
 /// so the image swap that cut the connection carries it across.
 fn stream_events(
     connection: Connection,
-    client_id: ClientId,
-    events: Receiver<Delivery>,
-    ending_notice: Arc<EndingNotice>,
+    stream: AttachedStream,
     inbox_tx: &Sender<RuntimeEvent>,
     live_setting: Option<OtherUsersSetting>,
     served: &ServedConnection,
 ) {
+    let AttachedStream {
+        client_id,
+        events,
+        ending_notice,
+        graphics,
+    } = stream;
     let (mut reader, mut writer) = connection.split();
     let writer_inbox = inbox_tx.clone();
     let writer_intake = Arc::clone(&served.intake);
     ending_notice.writer_started();
     std::thread::spawn(move || {
-        let mut next_chunked_frame_id = 1u64;
+        let mut image_cache = ConnectionImageCache::new();
         loop {
             // The session is ending. This client is told at once and whatever
             // is still queued for it goes unwritten. A queue the server already
@@ -895,31 +916,27 @@ fn stream_events(
                 let _ = writer.send(&SessionEvent::Detached);
                 break;
             };
+            let write_failed = match &delivery {
+                Delivery::Frame(snapshot) => {
+                    send_painted_frame(&mut writer, &mut image_cache, snapshot, graphics, client_id)
+                }
+                _ => false,
+            };
+            if write_failed {
+                break;
+            }
+            if matches!(delivery, Delivery::Frame(_)) {
+                continue;
+            }
             let event = wire_event(&delivery);
-            drop(delivery);
             if let Some(event) = event {
-                let write_failed = match &event {
-                    SessionEvent::Painted { frame } => match writer.send(&event) {
-                        Ok(()) => false,
-                        Err(IpcError::FrameTooLarge { len, max }) => {
-                            let frame_id = next_chunked_frame_id;
-                            next_chunked_frame_id = if frame_id == u64::MAX {
-                                1
-                            } else {
-                                frame_id + 1
-                            };
-                            send_chunked_frame(&mut writer, frame, frame_id, client_id, len, max)
-                        }
-                        Err(_) => true,
-                    },
-                    _ => match writer.send(&event) {
-                        Ok(()) => false,
-                        Err(IpcError::FrameTooLarge { len, max }) => {
-                            tracing::warn!(%client_id, len, max, "frame over the cap was not sent");
-                            false
-                        }
-                        Err(_) => true,
-                    },
+                let write_failed = match writer.send(&event) {
+                    Ok(()) => false,
+                    Err(IpcError::FrameTooLarge { len, max }) => {
+                        tracing::warn!(%client_id, len, max, "frame over the cap was not sent");
+                        false
+                    }
+                    Err(_) => true,
                 };
                 if write_failed {
                     break;
@@ -1008,57 +1025,221 @@ fn stream_events(
     );
 }
 
-/// Send one oversized painted frame as a base frame followed by image chunks.
-fn send_chunked_frame(
-    writer: &mut FrameWriter,
-    frame: &PaintedFrame,
-    frame_id: u64,
-    client_id: ClientId,
-    original_len: u64,
-    original_max: u32,
-) -> bool {
-    let Some(starts) = wire_chunked_frame_starts(frame, frame_id) else {
-        tracing::warn!(
-            %client_id,
-            len = original_len,
-            max = original_max,
-            "frame over the cap has no image data to split"
-        );
-        return false;
-    };
-    let base = SessionEvent::Painted {
-        frame: Box::new(wire_chunked_frame_base(frame)),
-    };
-    if let Err(error) = writer.send(&base) {
-        return report_chunked_send_error(client_id, error, "the image base frame");
-    }
-    for start in starts {
-        if let Err(error) = writer.send(&start) {
-            return report_chunked_send_error(client_id, error, "an image transfer start");
+/// One image record retained while its placement remains in this connection's frame.
+#[derive(Clone)]
+struct CachedFrameImage {
+    /// Identity used by painted frames and image transfer events.
+    content_id: u64,
+    /// The record uploaded for this identity. `None` remains a placeholder.
+    record: Option<Arc<ImageRecord>>,
+}
+
+/// Image identities and records that belong to one attached connection.
+struct ConnectionImageCache {
+    /// Current records, keyed by pane and terminal-local placement identity.
+    images: HashMap<(PaneId, u64), CachedFrameImage>,
+    /// The next nonzero connection-local content identity.
+    next_content_id: u64,
+    /// Whether the next successful frame must invalidate the client's records.
+    reset_required: bool,
+}
+
+impl ConnectionImageCache {
+    /// Build an empty cache whose first image identity is 1.
+    fn new() -> Self {
+        Self {
+            images: HashMap::new(),
+            next_content_id: 1,
+            reset_required: false,
         }
     }
-    for (transfer_id, offset, last, bytes) in wire_image_chunk_sources(frame) {
-        let event = SessionEvent::PaintedImageChunk {
-            chunk: FrameImageChunk {
-                frame_id,
-                transfer_id,
-                offset,
-                last,
-                bytes: bytes.to_vec(),
-            },
+
+    /// Assign stable content identities and list records this connection has not received.
+    fn prepare(&mut self, snapshot: &RenderSnapshot) -> PreparedImageFrame {
+        let placements = snapshot.panes.iter().flat_map(|pane| {
+            pane.image_placements
+                .iter()
+                .map(move |placement| ((pane.id, placement.id()), placement))
+        });
+        let placements: Vec<((PaneId, u64), &ImagePlacementSnapshot)> = placements.collect();
+        let changed_count = placements
+            .iter()
+            .filter(|(key, placement)| {
+                self.images
+                    .get(key)
+                    .is_none_or(|cached| !same_record(cached.record.as_ref(), placement.record()))
+            })
+            .count();
+        let available = if self.next_content_id == 0 {
+            0
+        } else {
+            u64::MAX - self.next_content_id + 1
+        };
+        let reset = self.reset_required
+            || u64::try_from(changed_count).map_or(true, |count| count > available);
+        if reset {
+            self.images.clear();
+            self.next_content_id = 1;
+            self.reset_required = false;
+        }
+
+        let mut uploads = Vec::new();
+        let mut retained = HashSet::with_capacity(placements.len());
+        let mut content_by_record: HashMap<*const ImageRecord, u64> = self
+            .images
+            .values()
+            .filter_map(|cached| {
+                cached
+                    .record
+                    .as_ref()
+                    .map(|record| (Arc::as_ptr(record), cached.content_id))
+            })
+            .collect();
+        for (key, placement) in placements {
+            retained.insert(key);
+            let record = placement.record_arc();
+            let unchanged = self
+                .images
+                .get(&key)
+                .is_some_and(|cached| same_record(cached.record.as_ref(), record.as_deref()));
+            if unchanged {
+                continue;
+            }
+            let content_id = record
+                .as_ref()
+                .and_then(|record| content_by_record.get(&Arc::as_ptr(record)).copied())
+                .unwrap_or_else(|| {
+                    let content_id = self.next_content_id;
+                    self.next_content_id = self.next_content_id.checked_add(1).unwrap_or(0);
+                    if let Some(record) = record.as_ref() {
+                        content_by_record.insert(Arc::as_ptr(record), content_id);
+                        uploads.push((content_id, Arc::clone(record)));
+                    }
+                    content_id
+                });
+            self.images
+                .insert(key, CachedFrameImage { content_id, record });
+        }
+        self.images.retain(|key, _| retained.contains(key));
+
+        let frame = wire_frame_with_content_ids(snapshot, |pane_id, placement| {
+            self.images
+                .get(&(pane_id, placement.id()))
+                .map_or(placement.content_id(), |cached| cached.content_id)
+        });
+        PreparedImageFrame {
+            reset,
+            frame,
+            uploads,
+        }
+    }
+
+    /// Forget all connection-local image identities after a recoverable write failure.
+    fn clear(&mut self) {
+        self.images.clear();
+        self.next_content_id = 1;
+        self.reset_required = true;
+    }
+}
+
+/// A painted frame plus the image records its connection still needs.
+struct PreparedImageFrame {
+    /// Whether the client must discard every record before this frame.
+    reset: bool,
+    /// Placement geometry and connection-local content identities.
+    frame: PaintedFrame,
+    /// New content identities and the records uploaded under them.
+    uploads: Vec<(u64, Arc<ImageRecord>)>,
+}
+
+/// Report whether two cached record slots hold the same retained image record.
+fn same_record(cached: Option<&Arc<ImageRecord>>, incoming: Option<&ImageRecord>) -> bool {
+    match (cached, incoming) {
+        (Some(cached), Some(incoming)) => std::ptr::eq(cached.as_ref(), incoming),
+        (None, None) => true,
+        (Some(_), None) | (None, Some(_)) => false,
+    }
+}
+
+/// Send one painted frame and each new image record after it.
+fn send_painted_frame(
+    writer: &mut FrameWriter,
+    cache: &mut ConnectionImageCache,
+    snapshot: &RenderSnapshot,
+    graphics: GraphicsCapabilities,
+    client_id: ClientId,
+) -> bool {
+    if !graphics.kitty {
+        let event = SessionEvent::Painted {
+            frame: Box::new(wire_frame(snapshot)),
+        };
+        return match writer.send(&event) {
+            Ok(()) => false,
+            Err(error) => report_image_send_error(cache, client_id, error, "the painted frame"),
+        };
+    }
+    let prepared = cache.prepare(snapshot);
+    if prepared.reset {
+        if let Err(error) = writer.send(&SessionEvent::ImageCacheReset) {
+            return report_image_send_error(cache, client_id, error, "the image cache reset");
+        }
+    }
+    let repeated_frame =
+        (prepared.uploads.len() > MAX_FRAME_IMAGE_TRANSFERS).then(|| prepared.frame.clone());
+    let event = SessionEvent::Painted {
+        frame: Box::new(prepared.frame),
+    };
+    if let Err(error) = writer.send(&event) {
+        return report_image_send_error(cache, client_id, error, "the painted frame");
+    }
+    for (index, (content_id, record)) in prepared.uploads.into_iter().enumerate() {
+        if index != 0 && index % MAX_FRAME_IMAGE_TRANSFERS == 0 {
+            let event = SessionEvent::Painted {
+                frame: Box::new(
+                    repeated_frame
+                        .as_ref()
+                        .expect("a repeated image batch retained its painted frame")
+                        .clone(),
+                ),
+            };
+            if let Err(error) = writer.send(&event) {
+                return report_image_send_error(cache, client_id, error, "the painted frame");
+            }
+        }
+        let event = SessionEvent::ImageContentStart {
+            image: wire_image_transfer(content_id, &record),
         };
         if let Err(error) = writer.send(&event) {
-            return report_chunked_send_error(client_id, error, "an image transfer chunk");
+            return report_image_send_error(cache, client_id, error, "an image transfer start");
+        }
+        for (offset, last, bytes) in wire_image_chunk_sources(&record) {
+            let event = SessionEvent::ImageContentChunk {
+                chunk: FrameImageChunk {
+                    transfer_id: content_id,
+                    offset,
+                    last,
+                    bytes: bytes.to_vec(),
+                },
+            };
+            if let Err(error) = writer.send(&event) {
+                return report_image_send_error(cache, client_id, error, "an image transfer chunk");
+            }
         }
     }
     false
 }
 
-/// Report one chunked-frame write failure and say whether the connection stays usable.
-fn report_chunked_send_error(client_id: ClientId, error: IpcError, part: &str) -> bool {
+/// Report one image-stream write failure and say whether the connection stays usable.
+fn report_image_send_error(
+    cache: &mut ConnectionImageCache,
+    client_id: ClientId,
+    error: IpcError,
+    part: &str,
+) -> bool {
     match error {
         IpcError::FrameTooLarge { len, max } => {
             tracing::warn!(%client_id, %part, len, max, "image transfer part exceeded the frame cap");
+            cache.clear();
             false
         }
         error => {

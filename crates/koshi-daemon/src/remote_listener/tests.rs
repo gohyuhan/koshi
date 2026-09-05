@@ -1231,6 +1231,7 @@ mod bridge_round_trip {
                     resume: None,
                     resume_token: None,
                     pane_area: None,
+                    graphics: koshi_ipc::protocol::GraphicsCapabilities::default(),
                 },
             })
             .expect("the attach is written");

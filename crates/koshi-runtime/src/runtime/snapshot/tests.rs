@@ -315,7 +315,11 @@ fn building_a_snapshot_leaves_terminal_image_state_unchanged() {
     assert_eq!(snapshot.panes[0].image_placements.len(), 1);
     assert_eq!(snapshot.panes[0].image_placements[0].anchor(), (0, 0));
     assert_eq!(
-        snapshot.panes[0].image_placements[0].record().image.rgba,
+        snapshot.panes[0].image_placements[0]
+            .record()
+            .expect("the local snapshot carries image content")
+            .image
+            .rgba,
         vec![255, 0, 0, 255]
     );
 }

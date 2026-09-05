@@ -20,8 +20,17 @@ serde_json.workspace = true
 uuid.workspace = true
 tracing.workspace = true
 base64.workspace = true
+flate2 = { version = "1.1.9", default-features = false, features = ["rust_backend"] }
 
 [dev-dependencies]
 koshi-layout = { version = "0.4.0-pr.1", path = "../koshi-layout" }
 koshi-pty = { version = "0.4.0-pr.1", path = "../koshi-pty" }
 koshi-test-support = { version = "0.4.0-pr.1", path = "../koshi-test-support" }
+
+[target."cfg(unix)".dependencies]
+libc.workspace = true
+rustix = { version = "1", default-features = false, features = ["std", "stdio", "termios", "event"] }
+signal-hook = "0.3"
+
+[target."cfg(windows)".dependencies]
+windows-sys = { workspace = true, features = ["Win32_System_Console", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Threading", "Win32_Security"] }

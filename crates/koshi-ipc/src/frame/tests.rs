@@ -108,7 +108,14 @@ fn frame() -> PaintedFrame {
                 )],
                 view_offset: 0,
             }),
-            image_placements: Vec::new(),
+            image_placements: vec![FrameImagePlacement {
+                id: 7,
+                content_id: 11,
+                available: true,
+                anchor: (0, 1),
+                columns: 1,
+                rows: 1,
+            }],
             reverse_video: false,
             mouse_tracking: MouseTracking::ButtonMotion,
             alt_scroll: false,
@@ -230,100 +237,122 @@ fn a_frame_survives_a_round_trip_field_for_field() {
 }
 
 #[test]
-fn an_image_rgba_uses_base64_on_wire_and_reads_old_number_lists() {
-    let image = FrameDecodedImage {
-        width: 2,
-        height: 1,
-        rgba: vec![0, 1, 2, 255, 4, 5, 6, 7],
-    };
+fn an_image_placement_without_availability_expects_its_record() {
+    let mut encoded = serde_json::to_value(frame()).expect("the frame encodes");
+    encoded["panes"][0]["image_placements"][0]
+        .as_object_mut()
+        .expect("the image placement is an object")
+        .remove("available");
 
-    assert_eq!(
-        serde_json::to_value(&image).expect("the image encodes"),
-        json!({
-            "width": 2,
-            "height": 1,
-            "rgba": "AAEC/wQFBgc="
-        })
-    );
+    let received: PaintedFrame =
+        serde_json::from_str(&encoded.to_string()).expect("the frame decodes");
 
-    let from_list: FrameDecodedImage = serde_json::from_value(json!({
-        "width": 2,
-        "height": 1,
-        "rgba": [0, 1, 2, 255, 4, 5, 6, 7]
-    }))
-    .expect("the number-list image decodes");
-
-    assert_eq!(from_list, image);
-    assert_eq!(
-        serde_json::to_value(from_list).expect("the decoded image re-encodes"),
-        json!({
-            "width": 2,
-            "height": 1,
-            "rgba": "AAEC/wQFBgc="
-        })
-    );
+    assert!(received.panes[0].image_placements[0].available);
 }
 
 #[test]
-fn an_image_with_wrong_dimensions_or_rgba_length_is_refused() {
-    let wrong_length = serde_json::from_value::<FrameDecodedImage>(json!({
-        "width": 2,
-        "height": 1,
-        "rgba": [0, 1, 2, 3]
-    }))
-    .expect_err("the image has too few RGBA bytes");
+fn image_chunk_bytes_use_base64_on_wire_and_read_old_number_lists() {
+    let chunk = FrameImageChunk {
+        transfer_id: 1,
+        offset: 0,
+        last: true,
+        bytes: vec![0, 1, 2, 255, 4, 5, 6, 7],
+    };
+
     assert_eq!(
-        wrong_length.to_string(),
-        "image RGBA length does not match its dimensions"
+        serde_json::to_value(&chunk).expect("the image chunk encodes"),
+        json!({
+            "transfer_id": 1,
+            "offset": 0,
+            "last": true,
+            "bytes": "AAEC/wQFBgc="
+        })
     );
 
-    let zero_width = serde_json::from_value::<FrameDecodedImage>(json!({
-        "width": 0,
-        "height": 1,
-        "rgba": []
+    let from_list: FrameImageChunk = serde_json::from_value(json!({
+        "transfer_id": 1,
+        "offset": 0,
+        "last": true,
+        "bytes": [0, 1, 2, 255, 4, 5, 6, 7]
     }))
-    .expect_err("a zero-width image is not drawable");
+    .expect("the number-list image chunk decodes");
+
+    assert_eq!(from_list, chunk);
     assert_eq!(
-        zero_width.to_string(),
-        "image dimensions exceed graphics limits"
+        serde_json::to_value(from_list).expect("the decoded image chunk re-encodes"),
+        json!({
+            "transfer_id": 1,
+            "offset": 0,
+            "last": true,
+            "bytes": "AAEC/wQFBgc="
+        })
     );
 }
 
 #[test]
 fn an_image_value_this_build_does_not_know_falls_back_without_dropping_the_frame() {
-    let placement: FrameImagePlacement = serde_json::from_value(json!({
-        "id": 1,
-        "record": {
-            "protocol": "Vector",
-            "image": {
-                "width": 1,
-                "height": 1,
-                "rgba": "AAEC/w=="
-            },
-            "action": "Replace",
-            "display": {
-                "width": "AutoSize",
-                "sixel_background": "Opaque"
-            },
-            "anchor": [0, 0]
+    let record: FrameImageRecordHeader = serde_json::from_value(json!({
+        "protocol": "Vector",
+        "width": 1,
+        "height": 1,
+        "action": "Replace",
+        "display": {
+            "width": "AutoSize",
+            "sixel_background": "Opaque"
         },
-        "anchor": [0, 0],
-        "columns": 1,
-        "rows": 1
+        "anchor": [0, 0]
     }))
     .expect("unknown image values use presentation defaults");
 
-    assert_eq!(placement.record.protocol, FrameGraphicsProtocol::Kitty);
-    assert_eq!(placement.record.action, FrameImageAction::Display);
-    assert_eq!(placement.record.display, FrameImageDisplay::default());
+    assert_eq!(record.protocol, FrameGraphicsProtocol::Kitty);
+    assert_eq!(record.action, FrameImageAction::Display);
+    assert_eq!(record.display, FrameImageDisplay::default());
+}
+
+#[test]
+fn an_image_placement_cannot_cross_the_cell_coordinate_limit() {
+    let row_error = serde_json::from_value::<FrameImagePlacement>(json!({
+        "id": 1,
+        "content_id": 2,
+        "anchor": [65535, 0],
+        "columns": 1,
+        "rows": 2
+    }))
+    .expect_err("two rows cannot start at the last u16 row");
+    assert_eq!(
+        row_error.to_string(),
+        "image placement exceeds the cell coordinate range"
+    );
+
+    let column_error = serde_json::from_value::<FrameImagePlacement>(json!({
+        "id": 1,
+        "content_id": 2,
+        "anchor": [0, 65535],
+        "columns": 2,
+        "rows": 1
+    }))
+    .expect_err("two columns cannot start at the last u16 column");
+    assert_eq!(
+        column_error.to_string(),
+        "image placement exceeds the cell coordinate range"
+    );
+
+    let edge: FrameImagePlacement = serde_json::from_value(json!({
+        "id": 1,
+        "content_id": 2,
+        "anchor": [65535, 65535],
+        "columns": 1,
+        "rows": 1
+    }))
+    .expect("one cell may occupy the last row and column");
+    assert_eq!(edge.anchor, (u16::MAX, u16::MAX));
+    assert_eq!((edge.columns, edge.rows), (1, 1));
 }
 
 #[test]
 fn a_chunked_image_header_and_empty_chunk_are_refused_exactly() {
     let transfer = FrameImageTransfer {
         id: 1,
-        pane_id: PaneId::from_uuid(Uuid::from_u128(4)),
-        placement_id: 2,
         record: FrameImageRecordHeader {
             protocol: FrameGraphicsProtocol::Kitty,
             width: 2,
@@ -332,9 +361,6 @@ fn a_chunked_image_header_and_empty_chunk_are_refused_exactly() {
             display: FrameImageDisplay::default(),
             anchor: (0, 0),
         },
-        anchor: (0, 0),
-        columns: 2,
-        rows: 1,
         byte_len: 8,
     };
     let mut wrong_length = serde_json::to_value(&transfer).expect("the transfer encodes");
@@ -347,7 +373,6 @@ fn a_chunked_image_header_and_empty_chunk_are_refused_exactly() {
     );
 
     let empty_chunk = serde_json::json!({
-        "frame_id": 7,
         "transfer_id": 1,
         "offset": 0,
         "last": true,
@@ -435,6 +460,14 @@ fn a_frame_encodes_to_the_shape_a_client_decodes() {
                     }],
                     "view_offset": 0
                 },
+                "image_placements": [{
+                    "id": 7,
+                    "content_id": 11,
+                    "available": true,
+                    "anchor": [0, 1],
+                    "columns": 1,
+                    "rows": 1
+                }],
                 "reverse_video": false,
                 "mouse_tracking": "ButtonMotion",
                 "alt_scroll": false,

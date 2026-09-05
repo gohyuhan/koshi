@@ -1054,6 +1054,37 @@ fn every_byte_boundary_preserves_each_protocol_result() {
 }
 
 #[test]
+fn terminal_payload_compaction_preserves_every_engine_byte_boundary() {
+    let kitty = kitty_display_cell_rgba(false);
+    for image in [
+        kitty.clone(),
+        iterm_cell_file(&red_png()),
+        one_sixel(),
+        tmux_wrap(&kitty),
+        screen_wrap(&kitty),
+    ] {
+        let mut bytes = b"A".to_vec();
+        bytes.extend_from_slice(&image);
+        bytes.push(b'B');
+
+        let mut whole = TerminalEngine::new(PtySize { cols: 8, rows: 2 });
+        let whole_replies = whole.advance(&bytes);
+        let whole_state = whole.state().clone();
+        let whole_events = whole.take_graphics();
+
+        let mut split = TerminalEngine::new(PtySize { cols: 8, rows: 2 });
+        let mut split_replies = Vec::new();
+        for byte in bytes {
+            split_replies.extend(split.advance(&[byte]));
+        }
+
+        assert_eq!(split_replies, whole_replies);
+        assert_eq!(split.state(), &whole_state);
+        assert_eq!(split.take_graphics(), whole_events);
+    }
+}
+
+#[test]
 fn malformed_base64_returns_a_typed_error_and_consumes_the_string() {
     let mut parser = GraphicsParser::default();
     let bytes = b"\x1b_Gf=32,s=1,v=1;not-base64\x1b\\Z";
@@ -1079,6 +1110,73 @@ fn ordinary_apc_and_iterm_commands_do_not_create_graphics_events() {
 
     let result = only_event(&mut parser, &kitty_raw_rgba()).expect("the next kitty image decodes");
     assert_eq!(result.image.rgba, [255, 0, 0, 255]);
+}
+
+#[test]
+fn chunked_clipboard_data_is_consumed_as_complete_runs() {
+    const PAYLOAD: usize = 8 * 1024 * 1024;
+    const CHUNK: usize = 8192;
+
+    let mut parser = GraphicsParser::default();
+    let opening = parser.advance_with_offsets(b"\x1b]52;c;");
+    assert_eq!(opening.events, []);
+    assert_eq!(opening.terminal_inert, []);
+
+    let payload = vec![b'A'; PAYLOAD];
+    for chunk in payload.chunks(CHUNK) {
+        assert_eq!(parser.feed_discard_data(chunk), Some(chunk.len()));
+    }
+    assert_eq!(parser.sequence_bytes, b"\x1b]52;c;".len() + PAYLOAD);
+    assert_eq!(parser.carry_bytes(), Some([].as_slice()));
+    assert_eq!(parser.feed_discard_data(b"\x07"), None);
+
+    let terminator = parser.advance_with_offsets(b"\x07");
+    assert_eq!(terminator.events, []);
+    assert_eq!(terminator.terminal_inert, []);
+    assert_eq!(parser.carry_bytes(), None);
+}
+
+#[test]
+fn ordinary_control_string_data_is_consumed_as_complete_runs() {
+    const PAYLOAD: usize = 8192;
+
+    for (opening, terminator) in [
+        (b"\x1b_not-image".as_slice(), b"\x1b\\".as_slice()),
+        (b"\x1bPX".as_slice(), b"\x1b\\".as_slice()),
+        (b"\x1b]1337;SetMark=".as_slice(), b"\x07".as_slice()),
+    ] {
+        let mut parser = GraphicsParser::default();
+        let opening_scan = parser.advance_with_offsets(opening);
+        assert_eq!(opening_scan.events, []);
+        assert_eq!(opening_scan.terminal_inert, []);
+
+        if terminator != b"\x07" {
+            assert_eq!(parser.feed_discard_data(b"A\x07B"), Some(3));
+        }
+        assert_eq!(parser.feed_discard_data(&[b'A'; PAYLOAD]), Some(PAYLOAD));
+        assert_eq!(parser.feed_discard_data(terminator), None);
+
+        let terminator_scan = parser.advance_with_offsets(terminator);
+        assert_eq!(terminator_scan.events, []);
+        assert_eq!(terminator_scan.terminal_inert, []);
+        assert_eq!(parser.carry_bytes(), None);
+    }
+}
+
+#[test]
+fn discarded_string_bulk_scan_stays_silent_past_the_graphics_limit() {
+    let mut parser = GraphicsParser::default();
+    assert!(parser.advance(b"\x1b]52;c;").is_empty());
+    parser.sequence_bytes = MAX_GRAPHICS_TRANSFER_BYTES - 1;
+    parser.pending.clear();
+    parser.carryable = false;
+
+    assert_eq!(parser.feed_discard_data(b"AB"), Some(2));
+    let scan = parser.advance_with_offsets(b"\x07");
+
+    assert_eq!(scan.terminal_inert, []);
+    assert_eq!(scan.events, []);
+    assert_eq!(parser.carry_bytes(), None);
 }
 
 #[test]
@@ -1563,6 +1661,193 @@ fn a_kitty_chunked_transfer_decodes_only_after_the_final_chunk() {
     assert!(parser.advance(first.as_bytes()).is_empty());
     let result = only_event(&mut parser, second.as_bytes()).expect("the final chunk decodes");
     assert_eq!(result.image.rgba, [255, 0, 0, 255]);
+}
+
+#[test]
+fn kitty_scan_marks_only_the_base64_payload_as_terminal_inert() {
+    let bytes = kitty_raw_rgba();
+    let payload_start = bytes
+        .iter()
+        .position(|byte| *byte == b';')
+        .expect("the Kitty header has a separator")
+        + 1;
+    let payload_end = bytes.len() - 2;
+    let mut parser = GraphicsParser::default();
+
+    let scan = parser.advance_with_offsets(&bytes);
+
+    let expected_range = payload_start..payload_end;
+    assert_eq!(
+        scan.terminal_inert.as_slice(),
+        std::slice::from_ref(&expected_range)
+    );
+    assert_eq!(scan.events.len(), 1);
+    let (offset, event) = scan.events.into_iter().next().expect("one image event");
+    let image = event.expect("the image decodes");
+    assert_eq!(offset, bytes.len() - 1);
+    assert_eq!(image.protocol, GraphicsProtocol::Kitty);
+    assert_eq!(image.image.width, 1);
+    assert_eq!(image.image.height, 1);
+    assert_eq!(image.image.rgba, [255, 0, 0, 255]);
+}
+
+#[test]
+fn kitty_scan_keeps_non_base64_body_bytes_on_the_terminal_path() {
+    let bytes = b"\x1b_Gf=32,s=1,v=1;AAAA\nBBBB\x1b\\";
+    let payload_start = bytes
+        .iter()
+        .position(|byte| *byte == b';')
+        .expect("the Kitty header has a separator")
+        + 1;
+    let newline = bytes
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .expect("the body has a newline");
+    let mut parser = GraphicsParser::default();
+
+    let scan = parser.advance_with_offsets(bytes);
+
+    assert_eq!(
+        scan.terminal_inert,
+        [payload_start..newline, newline + 1..bytes.len() - 2]
+    );
+    assert_eq!(
+        scan.events,
+        [(
+            bytes.len() - 1,
+            Err(GraphicsError::InvalidBase64 {
+                protocol: GraphicsProtocol::Kitty,
+            }),
+        )]
+    );
+}
+
+#[test]
+fn iterm_scan_marks_only_the_base64_payload_as_terminal_inert() {
+    let bytes = iterm_file(&red_png());
+    let payload_start = bytes
+        .iter()
+        .position(|byte| *byte == b':')
+        .expect("the iTerm2 header has a separator")
+        + 1;
+    let payload_end = bytes.len() - 1;
+    let mut parser = GraphicsParser::default();
+
+    let scan = parser.advance_with_offsets(&bytes);
+
+    let expected_range = payload_start..payload_end;
+    assert_eq!(
+        scan.terminal_inert.as_slice(),
+        std::slice::from_ref(&expected_range)
+    );
+    assert_eq!(scan.events.len(), 1);
+    let (offset, event) = scan.events.into_iter().next().expect("one image event");
+    let image = event.expect("the image decodes");
+    assert_eq!(offset, bytes.len() - 1);
+    assert_eq!(image.protocol, GraphicsProtocol::Iterm2);
+    assert_eq!(image.image.width, 1);
+    assert_eq!(image.image.height, 1);
+    assert_eq!(image.image.rgba, [255, 0, 0, 255]);
+}
+
+#[test]
+fn iterm_scan_keeps_non_base64_body_bytes_on_the_terminal_path() {
+    let bytes = b"\x1b]1337;File=inline=1:AAAA\nBBBB\x07";
+    let payload_start = bytes
+        .iter()
+        .position(|byte| *byte == b':')
+        .expect("the iTerm2 header has a separator")
+        + 1;
+    let newline = bytes
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .expect("the body has a newline");
+    let mut parser = GraphicsParser::default();
+
+    let scan = parser.advance_with_offsets(bytes);
+
+    assert_eq!(
+        scan.terminal_inert,
+        [payload_start..newline, newline + 1..bytes.len() - 1]
+    );
+    assert_eq!(
+        scan.events,
+        [(
+            bytes.len() - 1,
+            Err(GraphicsError::InvalidBase64 {
+                protocol: GraphicsProtocol::Iterm2,
+            }),
+        )]
+    );
+}
+
+#[test]
+fn sixel_scan_marks_printable_body_bytes_as_terminal_inert() {
+    let bytes = one_sixel();
+    let payload_start = bytes
+        .iter()
+        .position(|byte| *byte == b'q')
+        .expect("the Sixel header has its final byte")
+        + 1;
+    let payload_end = bytes.len() - 2;
+    let mut parser = GraphicsParser::default();
+
+    let scan = parser.advance_with_offsets(&bytes);
+
+    let expected_range = payload_start..payload_end;
+    assert_eq!(
+        scan.terminal_inert.as_slice(),
+        std::slice::from_ref(&expected_range)
+    );
+    assert_eq!(scan.events.len(), 1);
+    let (offset, event) = scan.events.into_iter().next().expect("one image event");
+    let image = event.expect("the image decodes");
+    assert_eq!(offset, bytes.len() - 1);
+    assert_eq!(image.protocol, GraphicsProtocol::Sixel);
+    assert_eq!(image.image.width, 1);
+    assert_eq!(image.image.height, 1);
+    assert_eq!(image.image.rgba, [255, 0, 0, 255]);
+}
+
+#[test]
+fn sixel_scan_keeps_an_invalid_printable_body_byte_on_the_terminal_path() {
+    let bytes = b"\x1bPq<\x1b\\";
+    let mut parser = GraphicsParser::default();
+
+    let scan = parser.advance_with_offsets(bytes);
+
+    assert_eq!(scan.terminal_inert, []);
+    assert_eq!(
+        scan.events,
+        [(
+            bytes.len() - 1,
+            Err(GraphicsError::InvalidCommand {
+                protocol: GraphicsProtocol::Sixel,
+            }),
+        )]
+    );
+}
+
+#[test]
+fn wrapper_scans_mark_plain_body_runs_as_terminal_inert() {
+    let kitty = kitty_raw_rgba();
+    let tmux = tmux_wrap(&kitty);
+    let screen = screen_wrap(&kitty);
+    let mut tmux_parser = GraphicsParser::default();
+    let mut screen_parser = GraphicsParser::default();
+
+    let tmux_scan = tmux_parser.advance_with_offsets(&tmux);
+    let screen_scan = screen_parser.advance_with_offsets(&screen);
+
+    assert_eq!(
+        tmux_scan.terminal_inert,
+        [9..tmux.len() - 5, tmux.len() - 3..tmux.len() - 2]
+    );
+    let screen_range = 3..screen.len() - 4;
+    assert_eq!(
+        screen_scan.terminal_inert.as_slice(),
+        std::slice::from_ref(&screen_range)
+    );
 }
 
 #[test]

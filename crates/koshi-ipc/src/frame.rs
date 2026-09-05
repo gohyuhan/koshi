@@ -55,7 +55,7 @@ pub const MAX_FRAME_IMAGE_TRANSFER_BYTES: u64 = 67_108_864;
 /// The largest raw image chunk carried by one session event.
 pub const MAX_FRAME_IMAGE_CHUNK_BYTES: usize = 1_048_576;
 
-/// The largest number of image transfers one painted frame may name.
+/// The largest number of image transfers accepted after one painted frame.
 pub const MAX_FRAME_IMAGE_TRANSFERS: usize = 4_096;
 
 /// Decode an image presentation value through an owned JSON value so the
@@ -85,26 +85,6 @@ pub struct PaintedFrame {
     pub panes: Vec<FramePane>,
     /// The viewing client's own state (viewport, focus, lock mode).
     pub client: FrameClient,
-}
-
-impl PaintedFrame {
-    /// Clone the frame's ordinary content without cloning image records.
-    ///
-    /// The returned frame keeps every session, pane, cell, and client field.
-    /// Its image placement lists are empty so image bytes can travel in their
-    /// own bounded events.
-    #[must_use]
-    pub fn without_image_placements(&self) -> Self {
-        Self {
-            session: self.session.clone(),
-            panes: self
-                .panes
-                .iter()
-                .map(FramePane::without_image_placements)
-                .collect(),
-            client: self.client.clone(),
-        }
-    }
 }
 
 /// The session-scoped part of a frame: identity, the solved active tab, and the
@@ -200,13 +180,19 @@ pub struct FrameSlot {
     pub dead: bool,
 }
 
-/// One complete image placement carried with a pane's visible cells.
+/// One image placement carried with a pane's visible cells.
+///
+/// `content_id` names an image record uploaded on this connection. A client
+/// without that record still has the complete cell rectangle needed to draw
+/// the unavailable-image marker.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FrameImagePlacement {
     /// The terminal-local placement identity.
     pub id: u64,
-    /// The image pixels and protocol display metadata.
-    pub record: FrameImageRecord,
+    /// The connection-local image-record identity.
+    pub content_id: u64,
+    /// Whether the source snapshot has the named image record.
+    pub available: bool,
     /// The zero-based row and column of the upper-left covered cell.
     pub anchor: (u16, u16),
     /// The number of covered columns.
@@ -223,7 +209,9 @@ impl<'de> Deserialize<'de> for FrameImagePlacement {
         #[derive(Deserialize)]
         struct Fields {
             id: u64,
-            record: FrameImageRecord,
+            content_id: u64,
+            #[serde(default = "default_image_available")]
+            available: bool,
             anchor: (u16, u16),
             columns: u16,
             rows: u16,
@@ -235,19 +223,26 @@ impl<'de> Deserialize<'de> for FrameImagePlacement {
                 "image placement identity must not be zero",
             ));
         }
+        if fields.content_id == 0 {
+            return Err(D::Error::custom("image content identity must not be zero"));
+        }
         if fields.columns == 0 || fields.rows == 0 {
             return Err(D::Error::custom(
                 "image placement dimensions must not be zero",
             ));
         }
-        if fields.record.action == FrameImageAction::Transmit {
+        let coordinate_end = u32::from(u16::MAX) + 1;
+        if u32::from(fields.anchor.0) + u32::from(fields.rows) > coordinate_end
+            || u32::from(fields.anchor.1) + u32::from(fields.columns) > coordinate_end
+        {
             return Err(D::Error::custom(
-                "a transmitted-only image cannot be an image placement",
+                "image placement exceeds the cell coordinate range",
             ));
         }
         Ok(Self {
             id: fields.id,
-            record: fields.record,
+            content_id: fields.content_id,
+            available: fields.available,
             anchor: fields.anchor,
             columns: fields.columns,
             rows: fields.rows,
@@ -255,22 +250,8 @@ impl<'de> Deserialize<'de> for FrameImagePlacement {
     }
 }
 
-/// The complete image record that produced one frame placement.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FrameImageRecord {
-    /// Protocol that supplied the image. An unknown protocol reads as Kitty.
-    #[serde(default, deserialize_with = "image_or_default")]
-    pub protocol: FrameGraphicsProtocol,
-    /// Validated row-major RGBA pixels.
-    pub image: FrameDecodedImage,
-    /// The state operation represented by the transfer. An unknown action reads
-    /// as `Display`.
-    #[serde(default, deserialize_with = "image_or_default")]
-    pub action: FrameImageAction,
-    /// Display hints supplied by the protocol.
-    pub display: FrameImageDisplay,
-    /// Cursor position when the image sequence ended, as row and column.
-    pub anchor: (u16, u16),
+const fn default_image_available() -> bool {
+    true
 }
 
 /// Image metadata sent before its RGBA bytes arrive in chunks.
@@ -293,23 +274,13 @@ pub struct FrameImageRecordHeader {
     pub anchor: (u16, u16),
 }
 
-/// One image placement whose RGBA bytes travel in separate bounded events.
+/// One image record whose RGBA bytes travel in separate bounded events.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FrameImageTransfer {
-    /// The transfer identity within one painted frame.
+    /// The image-record identity on this connection.
     pub id: u64,
-    /// The pane that owns the placement.
-    pub pane_id: PaneId,
-    /// The terminal-local placement identity.
-    pub placement_id: u64,
     /// The image record metadata and its pixel dimensions.
     pub record: FrameImageRecordHeader,
-    /// The zero-based row and column of the upper-left covered cell.
-    pub anchor: (u16, u16),
-    /// The number of covered columns.
-    pub columns: u16,
-    /// The number of covered rows.
-    pub rows: u16,
     /// The exact number of RGBA bytes the chunks carry.
     pub byte_len: u64,
 }
@@ -322,28 +293,13 @@ impl<'de> Deserialize<'de> for FrameImageTransfer {
         #[derive(Deserialize)]
         struct Fields {
             id: u64,
-            pane_id: PaneId,
-            placement_id: u64,
             record: FrameImageRecordHeader,
-            anchor: (u16, u16),
-            columns: u16,
-            rows: u16,
             byte_len: u64,
         }
 
         let fields = Fields::deserialize(deserializer)?;
         if fields.id == 0 {
             return Err(D::Error::custom("image transfer identity must not be zero"));
-        }
-        if fields.placement_id == 0 {
-            return Err(D::Error::custom(
-                "image placement identity must not be zero",
-            ));
-        }
-        if fields.columns == 0 || fields.rows == 0 {
-            return Err(D::Error::custom(
-                "image placement dimensions must not be zero",
-            ));
         }
         if fields.record.action == FrameImageAction::Transmit {
             return Err(D::Error::custom(
@@ -359,12 +315,7 @@ impl<'de> Deserialize<'de> for FrameImageTransfer {
         }
         Ok(Self {
             id: fields.id,
-            pane_id: fields.pane_id,
-            placement_id: fields.placement_id,
             record: fields.record,
-            anchor: fields.anchor,
-            columns: fields.columns,
-            rows: fields.rows,
             byte_len: fields.byte_len,
         })
     }
@@ -373,9 +324,7 @@ impl<'de> Deserialize<'de> for FrameImageTransfer {
 /// One bounded part of one chunked image transfer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FrameImageChunk {
-    /// The chunked painted-frame identity.
-    pub frame_id: u64,
-    /// The image-transfer identity named by the frame start.
+    /// The image-record identity named by the transfer start.
     pub transfer_id: u64,
     /// The raw-byte offset of `bytes` in that image.
     pub offset: u64,
@@ -393,7 +342,6 @@ impl<'de> Deserialize<'de> for FrameImageChunk {
     {
         #[derive(Deserialize)]
         struct Fields {
-            frame_id: u64,
             transfer_id: u64,
             offset: u64,
             last: bool,
@@ -402,9 +350,6 @@ impl<'de> Deserialize<'de> for FrameImageChunk {
         }
 
         let fields = Fields::deserialize(deserializer)?;
-        if fields.frame_id == 0 {
-            return Err(D::Error::custom("chunked frame identity must not be zero"));
-        }
         if fields.transfer_id == 0 {
             return Err(D::Error::custom("image transfer identity must not be zero"));
         }
@@ -415,7 +360,6 @@ impl<'de> Deserialize<'de> for FrameImageChunk {
             return Err(D::Error::custom("image chunk exceeds its byte limit"));
         }
         Ok(Self {
-            frame_id: fields.frame_id,
             transfer_id: fields.transfer_id,
             offset: fields.offset,
             last: fields.last,
@@ -542,49 +486,6 @@ pub enum FrameImageAction {
     TransmitAndDisplay,
 }
 
-/// A validated row-major RGBA image carried by a frame.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct FrameDecodedImage {
-    /// Image width in pixels.
-    pub width: u32,
-    /// Image height in pixels.
-    pub height: u32,
-    /// Four bytes per pixel in red, green, blue, alpha order.
-    #[serde(with = "crate::bytes::base64_or_list")]
-    pub rgba: Vec<u8>,
-}
-
-impl<'de> Deserialize<'de> for FrameDecodedImage {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct Fields {
-            width: u32,
-            height: u32,
-            #[serde(with = "crate::bytes::base64_or_list")]
-            rgba: Vec<u8>,
-        }
-
-        let fields = Fields::deserialize(deserializer)?;
-        let expected_bytes =
-            frame_image_byte_len(fields.width, fields.height).map_err(D::Error::custom)?;
-        let expected_bytes = usize::try_from(expected_bytes)
-            .map_err(|_| D::Error::custom("image byte count cannot fit this platform"))?;
-        if fields.rgba.len() != expected_bytes {
-            return Err(D::Error::custom(
-                "image RGBA length does not match its dimensions",
-            ));
-        }
-        Ok(Self {
-            width: fields.width,
-            height: fields.height,
-            rgba: fields.rgba,
-        })
-    }
-}
-
 /// Validate frame image dimensions and return the exact RGBA byte count.
 fn frame_image_byte_len(width: u32, height: u32) -> Result<u64, &'static str> {
     let pixels = u64::from(width)
@@ -671,26 +572,6 @@ pub struct FramePane {
     pub has_selection: bool,
     /// Scrollback state for the scroll-position indicator.
     pub scrollback: FrameScrollback,
-}
-
-impl FramePane {
-    fn without_image_placements(&self) -> Self {
-        Self {
-            id: self.id,
-            title: self.title.clone(),
-            cursor: self.cursor.clone(),
-            window: self.window.clone(),
-            image_placements: Vec::new(),
-            reverse_video: self.reverse_video,
-            mouse_tracking: self.mouse_tracking,
-            alt_scroll: self.alt_scroll,
-            on_alt_screen: self.on_alt_screen,
-            view_top_row: self.view_top_row,
-            selection: self.selection.clone(),
-            has_selection: self.has_selection,
-            scrollback: self.scrollback.clone(),
-        }
-    }
 }
 
 /// The cursor's position within the content area, and how it is drawn.

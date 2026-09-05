@@ -261,6 +261,7 @@ fn every_request_kind() -> Vec<IpcRequestKind> {
             resume: None,
             resume_token: None,
             pane_area: None,
+            graphics: crate::protocol::GraphicsCapabilities::default(),
         },
         IpcRequestKind::KeyPress {
             chord: KeyChord::new(ModFlags::CTRL, Key::Char('c')),
@@ -577,6 +578,7 @@ fn the_attach_wire_shape_belongs_to_this_protocol_version() {
             resume: None,
             resume_token: None,
             pane_area: None,
+            graphics: crate::protocol::GraphicsCapabilities::default(),
         },
     };
 
@@ -635,6 +637,65 @@ fn the_attach_wire_shape_belongs_to_this_protocol_version() {
                 }
             }
         })
+    );
+}
+
+#[test]
+fn attach_reports_positive_kitty_support_and_defaults_an_absent_report_to_false() {
+    let supported = IpcRequest {
+        request_id: 4,
+        kind: IpcRequestKind::Attach {
+            viewport: Size { cols: 80, rows: 24 },
+            filter: EventFilterSpec::All,
+            resume: None,
+            resume_token: None,
+            pane_area: None,
+            graphics: crate::protocol::GraphicsCapabilities { kitty: true },
+        },
+    };
+    assert_eq!(
+        serde_json::to_value(&supported).expect("the capability report encodes"),
+        json!({
+            "request_id": 4,
+            "kind": {
+                "Attach": {
+                    "viewport": { "cols": 80, "rows": 24 },
+                    "filter": "All",
+                    "resume": null,
+                    "resume_token": null,
+                    "pane_area": null,
+                    "graphics": { "kitty": true }
+                }
+            }
+        })
+    );
+
+    let absent: IpcRequest = serde_json::from_value(json!({
+        "request_id": 4,
+        "kind": {
+            "Attach": {
+                "viewport": { "cols": 80, "rows": 24 },
+                "filter": "All",
+                "resume": null,
+                "resume_token": null,
+                "pane_area": null
+            }
+        }
+    }))
+    .expect("an attach without a graphics report decodes");
+    assert_eq!(
+        absent,
+        IpcRequest {
+            request_id: 4,
+            kind: IpcRequestKind::Attach {
+                viewport: Size { cols: 80, rows: 24 },
+                filter: EventFilterSpec::All,
+                resume: None,
+                resume_token: None,
+                pane_area: None,
+                graphics: crate::protocol::GraphicsCapabilities { kitty: false },
+            },
+        }
     );
 }
 
@@ -738,6 +799,7 @@ fn attach_request_round_trips() {
             resume: None,
             resume_token: None,
             pane_area: None,
+            graphics: crate::protocol::GraphicsCapabilities::default(),
         },
     };
 
@@ -754,6 +816,7 @@ fn an_attach_request_naming_a_client_to_come_back_as_round_trips() {
             resume: Some(ClientId::from_uuid(fixed_uuid())),
             resume_token: None,
             pane_area: None,
+            graphics: crate::protocol::GraphicsCapabilities::default(),
         },
     };
 
@@ -779,6 +842,7 @@ fn an_attach_request_written_without_the_resume_fields_decodes_as_no_claim() {
                 resume: None,
                 resume_token: None,
                 pane_area: None,
+                graphics: crate::protocol::GraphicsCapabilities::default(),
             },
         }
     );
@@ -794,6 +858,7 @@ fn an_attach_request_carrying_a_resume_token_keeps_the_secret_whole() {
             resume: Some(ClientId::from_uuid(fixed_uuid())),
             resume_token: Some(token()),
             pane_area: None,
+            graphics: crate::protocol::GraphicsCapabilities::default(),
         },
     };
 
@@ -827,6 +892,7 @@ fn an_attach_request_written_without_a_resume_token_beside_a_resume_decodes_as_n
                 resume: Some(ClientId::from_uuid(fixed_uuid())),
                 resume_token: None,
                 pane_area: None,
+                graphics: crate::protocol::GraphicsCapabilities::default(),
             },
         }
     );
@@ -853,6 +919,7 @@ fn an_attach_request_written_without_a_pane_area_decodes_as_none() {
                 resume: None,
                 resume_token: None,
                 pane_area: None,
+                graphics: crate::protocol::GraphicsCapabilities::default(),
             },
         }
     );
@@ -900,6 +967,7 @@ fn an_attach_request_reporting_a_pane_area_round_trips() {
                 cols: 100,
                 rows: 30,
             })),
+            graphics: crate::protocol::GraphicsCapabilities::default(),
         },
     };
 
@@ -931,6 +999,7 @@ fn an_attach_request_reporting_a_pane_area_round_trips() {
             resume: None,
             resume_token: None,
             pane_area: Some(PaneArea::Starving),
+            graphics: crate::protocol::GraphicsCapabilities::default(),
         },
     };
 
@@ -1124,6 +1193,7 @@ fn an_attach_naming_where_it_connected_from_carries_none_of_it() {
                 resume: None,
                 resume_token: None,
                 pane_area: None,
+                graphics: crate::protocol::GraphicsCapabilities::default(),
             },
         }
     );
@@ -1152,6 +1222,7 @@ fn an_attach_naming_its_own_authority_carries_none_of_it() {
             resume: None,
             resume_token: None,
             pane_area: None,
+            graphics: crate::protocol::GraphicsCapabilities::default(),
         },
     };
 
@@ -1741,6 +1812,7 @@ fn each_request_kind_is_tagged_with_its_own_name() {
                 resume: None,
                 resume_token: None,
                 pane_area: None,
+                graphics: crate::protocol::GraphicsCapabilities::default(),
             })
             .unwrap()
         ),
@@ -2104,6 +2176,7 @@ fn every_request_kind_names_itself_without_its_payload() {
             resume: None,
             resume_token: None,
             pane_area: None,
+            graphics: crate::protocol::GraphicsCapabilities::default(),
         }
         .name(),
         "Attach"

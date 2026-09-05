@@ -3,7 +3,7 @@
 //! stand-in dispatcher thread, and what an attached connection's reading half
 //! carries.
 
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
 use std::time::SystemTime;
 
@@ -14,10 +14,21 @@ use koshi_core::discovery::{SessionInfo, SessionOverview};
 use koshi_core::geometry::Size;
 use koshi_core::ids::{CommandId, PaneId, SessionId, TabId};
 use koshi_core::key::{Key, KeyChord, ModFlags};
+use koshi_core::lock::LockMode;
+use koshi_core::mouse::MouseTracking;
 use koshi_ipc::attach::AttachedSessionStructureSnapshot;
 use koshi_ipc::layout::SessionLayout;
 use koshi_ipc::protocol::{
-    EventFilterSpec, IpcRequest, WireMouseAction, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
+    EventFilterSpec, GraphicsCapabilities, IpcRequest, WireMouseAction, MIN_PROTOCOL_VERSION,
+    PROTOCOL_VERSION,
+};
+use koshi_layout::mode::LayoutMode;
+use koshi_renderer::snapshot::{
+    ClientSnapshot, CursorSnapshot, ImagePlacementSnapshot, PaneSnapshot, PluginUiSnapshot,
+    RenderSnapshot, ScrollbackMeta, SessionSnapshot, TabSnapshot,
+};
+use koshi_terminal::graphics::{
+    DecodedImage, GraphicsProtocol, ImageAction, ImageDisplay, ImageRecord,
 };
 
 use crate::runtime::event::{AttachAccepted, EndingNotice, SessionEnding};
@@ -93,6 +104,116 @@ fn attached_structure(session_id: SessionId) -> AttachedSessionStructureSnapshot
         tabs: Vec::new(),
         panes: Vec::new(),
     }
+}
+
+/// One image-bearing frame for an attached stream.
+fn image_snapshot(client_id: ClientId, record: Arc<ImageRecord>) -> RenderSnapshot {
+    let session_id = SessionId::new();
+    let tab_id = TabId::new();
+    let pane_id = PaneId::new();
+    RenderSnapshot {
+        session: SessionSnapshot {
+            id: session_id,
+            name: String::from("session"),
+            active_tab: TabSnapshot {
+                id: tab_id,
+                name: String::from("tab"),
+                layout_solved: Vec::new(),
+                effective_size: VIEWPORT,
+                stack_headers: Vec::new(),
+                layout_mode: LayoutMode::Tiled,
+                all_suppressed: false,
+                gap: 0,
+            },
+            tabs_metadata: Vec::new(),
+        },
+        panes: vec![PaneSnapshot {
+            id: pane_id,
+            title: None,
+            cursor: CursorSnapshot {
+                row: 0,
+                col: 0,
+                visible: false,
+                blink: false,
+                shape: None,
+            },
+            grid_view: None,
+            image_placements: vec![ImagePlacementSnapshot::with_content_id(
+                7,
+                1,
+                record,
+                (0, 0),
+                1,
+                1,
+            )
+            .expect("the test image placement is valid")],
+            reverse_video: false,
+            mouse_tracking: MouseTracking::Off,
+            alt_scroll: false,
+            on_alt_screen: false,
+            view_top_row: 0,
+            selection: None,
+            has_selection: false,
+            scrollback: ScrollbackMeta {
+                truncated: false,
+                retained_lines: 0,
+            },
+        }],
+        client: ClientSnapshot {
+            id: client_id,
+            viewport: VIEWPORT,
+            active_tab: tab_id,
+            focused_pane: Some(pane_id),
+            lock_mode: LockMode::Normal,
+            mouse_select: false,
+        },
+        plugin_ui: PluginUiSnapshot::default(),
+    }
+}
+
+/// One one-pixel image whose byte makes record changes visible.
+fn image_record(red: u8) -> Arc<ImageRecord> {
+    Arc::new(ImageRecord {
+        protocol: GraphicsProtocol::Kitty,
+        image: DecodedImage {
+            width: 1,
+            height: 1,
+            rgba: vec![red, 0, 0, 255],
+        },
+        action: ImageAction::Display,
+        display: ImageDisplay::default(),
+        anchor: (0, 0),
+    })
+}
+
+/// A dispatcher that accepts one attach and exposes its event queue sender.
+fn spawn_frame_dispatcher(
+    inbox_rx: Receiver<RuntimeEvent>,
+    client_id: ClientId,
+    session_id: SessionId,
+) -> (JoinHandle<()>, Sender<Delivery>) {
+    let (events_tx, events_rx) = mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let mut events = Some(events_rx);
+        let ending_notice = Arc::new(EndingNotice::default());
+        while let Ok(event) = inbox_rx.recv() {
+            if let RuntimeEvent::IpcAttach { reply, .. } = event {
+                let Some(events) = events.take() else {
+                    continue;
+                };
+                let _ = reply.send(Some(AttachAccepted {
+                    client_id,
+                    session_id,
+                    structure: attached_structure(session_id),
+                    events,
+                    ending_notice: Arc::clone(&ending_notice),
+                    resume_token: ConnectionToken::new(MINTED_TOKEN),
+                    pane_area: None,
+                }));
+            }
+        }
+    });
+    (handle, events_tx)
 }
 
 /// A stand-in dispatcher that accepts attaches: it answers every attach as
@@ -416,6 +537,21 @@ fn serve_attachable(
 /// Open a connection, say hello, attach on it, and read both replies back.
 /// The connection comes back carrying `client_id`'s stream.
 fn attach_to(runtime_dir: &Path, session: SessionId, client_id: ClientId) -> Connection {
+    attach_to_with_graphics(
+        runtime_dir,
+        session,
+        client_id,
+        GraphicsCapabilities::default(),
+    )
+}
+
+/// Open and attach one connection with the terminal graphics report supplied.
+fn attach_to_with_graphics(
+    runtime_dir: &Path,
+    session: SessionId,
+    client_id: ClientId,
+    graphics: GraphicsCapabilities,
+) -> Connection {
     let mut connection = connect_to(runtime_dir, session);
     connection
         .send(&hello_for(runtime_dir, session))
@@ -432,6 +568,7 @@ fn attach_to(runtime_dir: &Path, session: SessionId, client_id: ClientId) -> Con
                 resume: None,
                 resume_token: None,
                 pane_area: None,
+                graphics,
             },
         })
         .expect("send attach");
@@ -448,6 +585,341 @@ fn attach_to(runtime_dir: &Path, session: SessionId, client_id: ClientId) -> Con
         },
     );
     connection
+}
+
+#[test]
+fn an_unsupported_terminal_receives_placement_geometry_and_no_pixel_events() {
+    let runtime_dir = test_runtime_dir("unsupported-image-stream");
+    let session_id = SessionId::new();
+    let client_id = ClientId::new();
+    let (inbox_tx, inbox_rx) = mpsc::channel();
+    let (dispatcher, events) = spawn_frame_dispatcher(inbox_rx, client_id, session_id);
+    let server = IpcServer::start(&runtime_dir, session_id, inbox_tx, None).expect("start serving");
+    let mut connection = attach_to_with_graphics(
+        &runtime_dir,
+        session_id,
+        client_id,
+        GraphicsCapabilities::default(),
+    );
+    let snapshot = image_snapshot(client_id, image_record(1));
+    events
+        .send(Delivery::Frame(Box::new(snapshot.clone())))
+        .expect("send the image frame");
+    events
+        .send(Delivery::HostWrite(vec![9]))
+        .expect("send the event after the image frame");
+
+    assert_eq!(
+        connection.recv::<SessionEvent>().expect("read the frame"),
+        SessionEvent::Painted {
+            frame: Box::new(wire_frame(&snapshot)),
+        }
+    );
+    assert_eq!(
+        connection
+            .recv::<SessionEvent>()
+            .expect("read the next event"),
+        SessionEvent::HostWrite { bytes: vec![9] }
+    );
+
+    drop(connection);
+    drop(events);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_dir);
+}
+
+#[test]
+fn a_kitty_terminal_receives_pixels_once_then_placement_only_frames() {
+    let runtime_dir = test_runtime_dir("cached-image-stream");
+    let session_id = SessionId::new();
+    let client_id = ClientId::new();
+    let (inbox_tx, inbox_rx) = mpsc::channel();
+    let (dispatcher, events) = spawn_frame_dispatcher(inbox_rx, client_id, session_id);
+    let server = IpcServer::start(&runtime_dir, session_id, inbox_tx, None).expect("start serving");
+    let mut connection = attach_to_with_graphics(
+        &runtime_dir,
+        session_id,
+        client_id,
+        GraphicsCapabilities { kitty: true },
+    );
+    let record = image_record(1);
+    let snapshot = image_snapshot(client_id, Arc::clone(&record));
+    events
+        .send(Delivery::Frame(Box::new(snapshot.clone())))
+        .expect("send the first image frame");
+    events
+        .send(Delivery::Frame(Box::new(snapshot.clone())))
+        .expect("send the repeated image frame");
+    events
+        .send(Delivery::HostWrite(vec![9]))
+        .expect("send the event after both frames");
+
+    let painted = SessionEvent::Painted {
+        frame: Box::new(wire_frame(&snapshot)),
+    };
+    assert_eq!(
+        connection
+            .recv::<SessionEvent>()
+            .expect("read the first frame"),
+        painted
+    );
+    assert_eq!(
+        connection
+            .recv::<SessionEvent>()
+            .expect("read the image start"),
+        SessionEvent::ImageContentStart {
+            image: wire_image_transfer(1, &record),
+        }
+    );
+    assert_eq!(
+        connection
+            .recv::<SessionEvent>()
+            .expect("read the image bytes"),
+        SessionEvent::ImageContentChunk {
+            chunk: FrameImageChunk {
+                transfer_id: 1,
+                offset: 0,
+                last: true,
+                bytes: vec![1, 0, 0, 255],
+            },
+        }
+    );
+    assert_eq!(
+        connection
+            .recv::<SessionEvent>()
+            .expect("read the placement-only frame"),
+        painted
+    );
+    assert_eq!(
+        connection
+            .recv::<SessionEvent>()
+            .expect("read the next event"),
+        SessionEvent::HostWrite { bytes: vec![9] }
+    );
+
+    drop(connection);
+    drop(events);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_dir);
+}
+
+#[test]
+fn two_placements_of_one_record_share_one_content_transfer() {
+    let client_id = ClientId::new();
+    let record = image_record(1);
+    let mut snapshot = image_snapshot(client_id, Arc::clone(&record));
+    snapshot.panes[0].image_placements.push(
+        ImagePlacementSnapshot::with_content_id(8, 2, Arc::clone(&record), (0, 1), 1, 1)
+            .expect("the second placement is valid"),
+    );
+    let mut cache = ConnectionImageCache::new();
+
+    let prepared = cache.prepare(&snapshot);
+
+    assert_eq!(prepared.uploads.len(), 1);
+    assert_eq!(prepared.uploads[0].0, 1);
+    assert!(Arc::ptr_eq(&prepared.uploads[0].1, &record));
+    assert_eq!(prepared.frame.panes[0].image_placements[0].content_id, 1);
+    assert_eq!(prepared.frame.panes[0].image_placements[1].content_id, 1);
+}
+
+#[test]
+fn a_kitty_terminal_receives_more_than_4096_placements_in_bounded_batches() {
+    let runtime_dir = test_runtime_dir("bounded-image-batches");
+    let session_id = SessionId::new();
+    let client_id = ClientId::new();
+    let (inbox_tx, inbox_rx) = mpsc::channel();
+    let (dispatcher, events) = spawn_frame_dispatcher(inbox_rx, client_id, session_id);
+    let server = IpcServer::start(&runtime_dir, session_id, inbox_tx, None).expect("start serving");
+    let mut connection = attach_to_with_graphics(
+        &runtime_dir,
+        session_id,
+        client_id,
+        GraphicsCapabilities { kitty: true },
+    );
+    let mut snapshot = image_snapshot(client_id, image_record(1));
+    snapshot.panes[0].image_placements = (1..=MAX_FRAME_IMAGE_TRANSFERS)
+        .map(|id| {
+            let content_id = u64::try_from(id).expect("the content identity fits");
+            ImagePlacementSnapshot::with_content_id(
+                content_id,
+                content_id,
+                image_record((content_id % 251) as u8),
+                (0, 0),
+                1,
+                1,
+            )
+            .expect("the image placement is valid")
+        })
+        .collect();
+    let mut second_pane = snapshot.panes[0].clone();
+    second_pane.id = PaneId::new();
+    let last_id = u64::try_from(MAX_FRAME_IMAGE_TRANSFERS + 1).expect("the content identity fits");
+    second_pane.image_placements = vec![ImagePlacementSnapshot::with_content_id(
+        1,
+        last_id,
+        image_record((last_id % 251) as u8),
+        (0, 0),
+        1,
+        1,
+    )
+    .expect("the image placement is valid")];
+    snapshot.panes.push(second_pane);
+    events
+        .send(Delivery::Frame(Box::new(snapshot.clone())))
+        .expect("send the image frame");
+    events
+        .send(Delivery::HostWrite(vec![9]))
+        .expect("send the event after the image frame");
+    let painted = SessionEvent::Painted {
+        frame: Box::new(wire_frame(&snapshot)),
+    };
+
+    assert_eq!(
+        connection.recv::<SessionEvent>().expect("read batch one"),
+        painted
+    );
+    for id in 1..=MAX_FRAME_IMAGE_TRANSFERS {
+        let id = u64::try_from(id).expect("the content identity fits");
+        let red = (id % 251) as u8;
+        assert_eq!(
+            connection
+                .recv::<SessionEvent>()
+                .expect("read an image start"),
+            SessionEvent::ImageContentStart {
+                image: wire_image_transfer(id, &image_record(red)),
+            }
+        );
+        assert_eq!(
+            connection.recv::<SessionEvent>().expect("read image bytes"),
+            SessionEvent::ImageContentChunk {
+                chunk: FrameImageChunk {
+                    transfer_id: id,
+                    offset: 0,
+                    last: true,
+                    bytes: vec![red, 0, 0, 255],
+                },
+            }
+        );
+    }
+    assert_eq!(
+        connection.recv::<SessionEvent>().expect("read batch two"),
+        painted
+    );
+    let last_red = (last_id % 251) as u8;
+    assert_eq!(
+        connection
+            .recv::<SessionEvent>()
+            .expect("read the last image start"),
+        SessionEvent::ImageContentStart {
+            image: wire_image_transfer(last_id, &image_record(last_red)),
+        }
+    );
+    assert_eq!(
+        connection
+            .recv::<SessionEvent>()
+            .expect("read the last image bytes"),
+        SessionEvent::ImageContentChunk {
+            chunk: FrameImageChunk {
+                transfer_id: last_id,
+                offset: 0,
+                last: true,
+                bytes: vec![last_red, 0, 0, 255],
+            },
+        }
+    );
+    assert_eq!(
+        connection
+            .recv::<SessionEvent>()
+            .expect("read the next event"),
+        SessionEvent::HostWrite { bytes: vec![9] }
+    );
+
+    drop(connection);
+    drop(events);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_dir);
+}
+
+#[test]
+fn replacing_one_placement_record_assigns_a_new_content_identity() {
+    let client_id = ClientId::new();
+    let first_record = image_record(1);
+    let first = image_snapshot(client_id, Arc::clone(&first_record));
+    let mut second = first.clone();
+    let pane_id = second.panes[0].id;
+    let second_record = image_record(2);
+    second.panes[0].image_placements[0] =
+        ImagePlacementSnapshot::with_content_id(7, 1, Arc::clone(&second_record), (0, 0), 1, 1)
+            .expect("the replacement placement is valid");
+    let mut cache = ConnectionImageCache::new();
+
+    let first_prepared = cache.prepare(&first);
+    let second_prepared = cache.prepare(&second);
+
+    assert_eq!(
+        first_prepared.frame.panes[0].image_placements[0].content_id,
+        1
+    );
+    assert_eq!(first_prepared.uploads.len(), 1);
+    assert_eq!(first_prepared.uploads[0].0, 1);
+    assert!(Arc::ptr_eq(&first_prepared.uploads[0].1, &first_record));
+    assert_eq!(second_prepared.frame.panes[0].id, pane_id);
+    assert_eq!(
+        second_prepared.frame.panes[0].image_placements[0].content_id,
+        2
+    );
+    assert_eq!(second_prepared.uploads.len(), 1);
+    assert_eq!(second_prepared.uploads[0].0, 2);
+    assert!(Arc::ptr_eq(&second_prepared.uploads[0].1, &second_record));
+}
+
+#[test]
+fn exhausted_content_id_space_resets_the_connection_cache_before_reuse() {
+    let client_id = ClientId::new();
+    let first = image_snapshot(client_id, image_record(1));
+    let mut second = first.clone();
+    second.panes[0].image_placements[0] =
+        ImagePlacementSnapshot::with_content_id(7, 1, image_record(2), (0, 0), 1, 1)
+            .expect("the replacement placement is valid");
+    let mut cache = ConnectionImageCache::new();
+    cache.next_content_id = u64::MAX;
+
+    let before_reset = cache.prepare(&first);
+    let after_reset = cache.prepare(&second);
+
+    assert!(!before_reset.reset);
+    assert_eq!(
+        before_reset.frame.panes[0].image_placements[0].content_id,
+        u64::MAX
+    );
+    assert!(after_reset.reset);
+    assert_eq!(after_reset.frame.panes[0].image_placements[0].content_id, 1);
+    assert_eq!(cache.next_content_id, 2);
+}
+
+#[test]
+fn clearing_after_a_write_failure_resets_the_client_before_reusing_content_ids() {
+    let client_id = ClientId::new();
+    let snapshot = image_snapshot(client_id, image_record(1));
+    let mut cache = ConnectionImageCache::new();
+
+    let before_clear = cache.prepare(&snapshot);
+    cache.clear();
+    let after_clear = cache.prepare(&snapshot);
+
+    assert!(!before_clear.reset);
+    assert_eq!(
+        before_clear.frame.panes[0].image_placements[0].content_id,
+        1
+    );
+    assert!(after_clear.reset);
+    assert_eq!(after_clear.frame.panes[0].image_placements[0].content_id, 1);
+    assert_eq!(after_clear.uploads.len(), 1);
+    assert_eq!(after_clear.uploads[0].0, 1);
 }
 
 /// A served socket in a fresh runtime dir, with a stand-in dispatcher
@@ -2193,6 +2665,7 @@ fn an_attached_client_of_another_local_user_is_detached_when_the_setting_goes_of
                 resume: None,
                 resume_token: None,
                 pane_area: None,
+                graphics: koshi_ipc::protocol::GraphicsCapabilities::default(),
             },
         })
         .expect("send attach");
@@ -2864,6 +3337,7 @@ fn rotating_the_token_takes_connections_again_after_the_intake_closed() {
                 resume: None,
                 resume_token: None,
                 pane_area: None,
+                graphics: koshi_ipc::protocol::GraphicsCapabilities::default(),
             },
         })
         .expect("send attach");
@@ -3169,6 +3643,7 @@ fn attach_saying_remote(
                 resume: None,
                 resume_token: None,
                 pane_area: None,
+                graphics: koshi_ipc::protocol::GraphicsCapabilities::default(),
             },
         })
         .expect("send attach");

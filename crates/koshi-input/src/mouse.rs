@@ -1,4 +1,4 @@
-//! Crossterm mouse boundary: one host mouse event becomes one canonical
+//! Host mouse boundary: one host mouse event becomes one canonical
 //! [`MouseInput`].
 //!
 //! This is the mouse peer of [`decode_key`](crate::keyboard::decode_key). Every
@@ -9,14 +9,15 @@
 //! client's render layout, elsewhere, decides which pane, border, or bar it
 //! lands on.
 
-use crossterm::event::{KeyModifiers, MouseButton as HostButton, MouseEvent, MouseEventKind};
+use crate::host::{Modifiers, MouseButton as HostButton, MouseEvent, MouseEventKind};
 use koshi_core::geometry::Point;
 use koshi_core::key::ModFlags;
 use koshi_core::mouse::{MouseButton, MouseInput, MouseKind, ScrollDirection};
 
 /// Decode one host mouse event into its canonical [`MouseInput`].
 ///
-/// A left press at column 10, row 3 becomes
+/// The host parser converts SGR coordinates to zero-based cells, so a left press at
+/// protocol column 11, row 4 becomes
 /// `MouseInput { kind: Press(Left), at: Point { x: 10, y: 3 }, mods: NONE }`;
 /// a wheel tick towards the user becomes `Scroll(Down)` at the pointer cell.
 #[must_use]
@@ -32,13 +33,13 @@ pub fn decode_mouse(event: MouseEvent) -> MouseInput {
 }
 
 /// Map the host's event kind onto koshi's. Down/Up/Drag carry the button
-/// through [`button`]; the four scroll kinds carry a direction; a buttonless
+/// through [`decode_button`]; the four scroll kinds carry a direction; a buttonless
 /// move is [`MouseKind::Motion`].
 fn decode_kind(kind: MouseEventKind) -> MouseKind {
     match kind {
-        MouseEventKind::Down(b) => MouseKind::Press(button(b)),
-        MouseEventKind::Up(b) => MouseKind::Release(button(b)),
-        MouseEventKind::Drag(b) => MouseKind::Drag(button(b)),
+        MouseEventKind::Down(button) => MouseKind::Press(decode_button(button)),
+        MouseEventKind::Up(button) => MouseKind::Release(decode_button(button)),
+        MouseEventKind::Drag(button) => MouseKind::Drag(decode_button(button)),
         MouseEventKind::Moved => MouseKind::Motion,
         MouseEventKind::ScrollUp => MouseKind::Scroll(ScrollDirection::Up),
         MouseEventKind::ScrollDown => MouseKind::Scroll(ScrollDirection::Down),
@@ -48,8 +49,8 @@ fn decode_kind(kind: MouseEventKind) -> MouseKind {
 }
 
 /// Map the host button onto koshi's.
-fn button(b: HostButton) -> MouseButton {
-    match b {
+fn decode_button(button: HostButton) -> MouseButton {
+    match button {
         HostButton::Left => MouseButton::Left,
         HostButton::Middle => MouseButton::Middle,
         HostButton::Right => MouseButton::Right,
@@ -59,9 +60,9 @@ fn button(b: HostButton) -> MouseButton {
 /// The modifiers held during the event: Control, Alt and Super from
 /// [`crate::keyboard::decode_mods`], plus Shift. Meta counts as Super; Hyper
 /// is dropped.
-fn decode_mods(modifiers: KeyModifiers) -> ModFlags {
+fn decode_mods(modifiers: Modifiers) -> ModFlags {
     let mods = crate::keyboard::decode_mods(modifiers);
-    if modifiers.contains(KeyModifiers::SHIFT) {
+    if modifiers.contains(Modifiers::SHIFT) {
         mods.union(ModFlags::SHIFT)
     } else {
         mods
