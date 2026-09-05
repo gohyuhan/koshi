@@ -22,21 +22,19 @@
 //! [`build_snapshot`](crate::server::Server::build_snapshot) always sets the
 //! default, and [`PaintedFrame`] has no slot for it.
 
-use koshi_ipc::event::SessionEvent;
 use koshi_ipc::frame::{
     FrameAttrs, FrameCell, FrameClient, FrameColor, FrameCursor, FrameCursorShape,
-    FrameDecodedImage, FrameGraphicsProtocol, FrameImageAction, FrameImageDimension,
-    FrameImageDisplay, FrameImagePlacement, FrameImageRecord, FrameImageRecordHeader,
-    FrameImageTransfer, FramePane, FrameRow, FrameRowEnd, FrameRun, FrameScrollback,
-    FrameSelection, FrameSession, FrameSixelBackground, FrameSlot, FrameStyle, FrameTab,
-    FrameTabMeta, FrameUnderline, FrameWindow, PaintedFrame, MAX_FRAME_IMAGE_CHUNK_BYTES,
+    FrameGraphicsProtocol, FrameImageAction, FrameImageDimension, FrameImageDisplay,
+    FrameImagePlacement, FrameImageRecordHeader, FrameImageTransfer, FramePane, FrameRow,
+    FrameRowEnd, FrameRun, FrameScrollback, FrameSelection, FrameSession, FrameSixelBackground,
+    FrameSlot, FrameStyle, FrameTab, FrameTabMeta, FrameUnderline, FrameWindow, PaintedFrame,
+    MAX_FRAME_IMAGE_CHUNK_BYTES,
 };
 use koshi_renderer::snapshot::{
     GridView, ImagePlacementSnapshot, PaneSlot, PaneSnapshot, RenderSnapshot, TabMeta,
 };
 use koshi_terminal::graphics::{
-    DecodedImage, GraphicsProtocol, ImageAction, ImageDimension, ImageDisplay, ImageRecord,
-    SixelBackground,
+    GraphicsProtocol, ImageAction, ImageDimension, ImageDisplay, ImageRecord, SixelBackground,
 };
 use koshi_terminal::grid::state::{Cell, Grid, RowEnd};
 use koshi_terminal::state::CursorShape;
@@ -49,6 +47,20 @@ use koshi_terminal::style::{Color, Style, UnderlineStyle};
 /// UI.
 #[must_use]
 pub fn wire_frame(snapshot: &RenderSnapshot) -> PaintedFrame {
+    let mut next_content_id = 1u64;
+    wire_frame_with_content_ids(snapshot, |_, _| {
+        let id = next_content_id;
+        next_content_id = next_content_id.saturating_add(1);
+        id
+    })
+}
+
+/// Turn one painted frame into wire form with connection-selected image ids.
+#[must_use]
+pub(crate) fn wire_frame_with_content_ids(
+    snapshot: &RenderSnapshot,
+    mut content_id: impl FnMut(koshi_core::ids::PaneId, &ImagePlacementSnapshot) -> u64,
+) -> PaintedFrame {
     let tab = &snapshot.session.active_tab;
     PaintedFrame {
         session: FrameSession {
@@ -71,7 +83,11 @@ pub fn wire_frame(snapshot: &RenderSnapshot) -> PaintedFrame {
                 .map(wire_tab_meta)
                 .collect(),
         },
-        panes: snapshot.panes.iter().map(wire_pane).collect(),
+        panes: snapshot
+            .panes
+            .iter()
+            .map(|pane| wire_pane(pane, &mut content_id))
+            .collect(),
         client: FrameClient {
             id: snapshot.client.id,
             viewport: snapshot.client.viewport,
@@ -83,112 +99,46 @@ pub fn wire_frame(snapshot: &RenderSnapshot) -> PaintedFrame {
     }
 }
 
-/// Build one metadata event per image whose pixels need separate events.
+/// Build the metadata sent before one image record's RGBA chunks.
 #[must_use]
-pub fn wire_chunked_frame_starts(frame: &PaintedFrame, frame_id: u64) -> Option<Vec<SessionEvent>> {
-    if frame_id == 0 {
-        return None;
-    }
-    let images: Vec<FrameImageTransfer> = frame
-        .panes
-        .iter()
-        .flat_map(|pane| {
-            pane.image_placements
-                .iter()
-                .map(move |placement| (pane.id, placement))
-        })
-        .enumerate()
-        .map(|(index, (pane_id, placement))| {
-            wire_image_transfer(transfer_id(index), pane_id, placement)
-        })
-        .collect();
-    if images.is_empty() {
-        return None;
-    }
-
-    Some(
-        images
-            .into_iter()
-            .map(|image| SessionEvent::PaintedImageStart {
-                frame_id,
-                images: vec![image],
-            })
-            .collect(),
-    )
-}
-
-/// Build the ordinary frame that older clients paint before image chunks.
-#[must_use]
-pub fn wire_chunked_frame_base(frame: &PaintedFrame) -> PaintedFrame {
-    frame.without_image_placements()
-}
-
-/// Return the raw image chunks in the transfer order named by the start event.
-pub fn wire_image_chunk_sources<'a>(
-    frame: &'a PaintedFrame,
-) -> impl Iterator<Item = (u64, u64, bool, &'a [u8])> + 'a {
-    frame
-        .panes
-        .iter()
-        .flat_map(|pane| pane.image_placements.iter())
-        .enumerate()
-        .flat_map(|(index, placement)| {
-            let transfer_id = transfer_id(index);
-            let total = placement.record.image.rgba.len();
-            placement
-                .record
-                .image
-                .rgba
-                .chunks(MAX_FRAME_IMAGE_CHUNK_BYTES)
-                .enumerate()
-                .map(move |(chunk_index, bytes)| {
-                    let chunk_index = u64::try_from(chunk_index)
-                        .expect("an image chunk index fits in a frame identity");
-                    let chunk_size = u64::try_from(MAX_FRAME_IMAGE_CHUNK_BYTES)
-                        .expect("the image chunk size fits in a frame offset");
-                    let offset = chunk_index * chunk_size;
-                    let last = offset.checked_add(
-                        u64::try_from(bytes.len())
-                            .expect("an image chunk length fits in a frame offset"),
-                    ) == Some(
-                        u64::try_from(total).expect("an image byte count fits in a frame"),
-                    );
-                    (transfer_id, offset, last, bytes)
-                })
-        })
-}
-
-/// Turn one complete wire placement into the metadata a chunked transfer names.
-fn wire_image_transfer(
-    id: u64,
-    pane_id: koshi_core::ids::PaneId,
-    placement: &FrameImagePlacement,
-) -> FrameImageTransfer {
+pub(crate) fn wire_image_transfer(id: u64, record: &ImageRecord) -> FrameImageTransfer {
     FrameImageTransfer {
         id,
-        pane_id,
-        placement_id: placement.id,
         record: FrameImageRecordHeader {
-            protocol: placement.record.protocol,
-            width: placement.record.image.width,
-            height: placement.record.image.height,
-            action: placement.record.action,
-            display: placement.record.display.clone(),
-            anchor: placement.record.anchor,
+            protocol: wire_graphics_protocol(record.protocol),
+            width: record.image.width,
+            height: record.image.height,
+            action: wire_image_action(record.action),
+            display: wire_image_display(&record.display),
+            anchor: record.anchor,
         },
-        anchor: placement.anchor,
-        columns: placement.columns,
-        rows: placement.rows,
-        byte_len: u64::try_from(placement.record.image.rgba.len())
+        byte_len: u64::try_from(record.image.rgba.len())
             .expect("an image byte count fits in a frame transfer"),
     }
 }
 
-/// Number the image in its flattened pane-order position.
-fn transfer_id(index: usize) -> u64 {
-    u64::try_from(index)
-        .expect("an image placement index fits in a frame identity")
-        .saturating_add(1)
+/// Return bounded RGBA chunks for one connection-local image record.
+pub(crate) fn wire_image_chunk_sources(
+    record: &ImageRecord,
+) -> impl Iterator<Item = (u64, bool, &[u8])> {
+    let total = record.image.rgba.len();
+    record
+        .image
+        .rgba
+        .chunks(MAX_FRAME_IMAGE_CHUNK_BYTES)
+        .enumerate()
+        .map(move |(chunk_index, bytes)| {
+            let chunk_index =
+                u64::try_from(chunk_index).expect("an image chunk index fits in a transfer offset");
+            let chunk_size = u64::try_from(MAX_FRAME_IMAGE_CHUNK_BYTES)
+                .expect("the image chunk size fits in a transfer offset");
+            let offset = chunk_index * chunk_size;
+            let last =
+                offset.checked_add(
+                    u64::try_from(bytes.len()).expect("an image chunk length fits in an offset"),
+                ) == Some(u64::try_from(total).expect("an image byte count fits in a transfer"));
+            (offset, last, bytes)
+        })
 }
 
 /// One solved pane placement, as it travels.
@@ -216,7 +166,10 @@ fn wire_tab_meta(meta: &TabMeta) -> FrameTabMeta {
 
 /// One pane's content, as it travels. A pane with no terminal content sends no
 /// window.
-fn wire_pane(pane: &PaneSnapshot) -> FramePane {
+fn wire_pane(
+    pane: &PaneSnapshot,
+    content_id: &mut impl FnMut(koshi_core::ids::PaneId, &ImagePlacementSnapshot) -> u64,
+) -> FramePane {
     FramePane {
         id: pane.id,
         title: pane.title.clone(),
@@ -231,7 +184,7 @@ fn wire_pane(pane: &PaneSnapshot) -> FramePane {
         image_placements: pane
             .image_placements
             .iter()
-            .map(wire_image_placement)
+            .map(|placement| wire_image_placement(pane.id, placement, content_id))
             .collect(),
         reverse_video: pane.reverse_video,
         mouse_tracking: pane.mouse_tracking,
@@ -250,33 +203,18 @@ fn wire_pane(pane: &PaneSnapshot) -> FramePane {
 }
 
 /// One validated image placement, as it travels with its pane.
-fn wire_image_placement(placement: &ImagePlacementSnapshot) -> FrameImagePlacement {
+fn wire_image_placement(
+    pane_id: koshi_core::ids::PaneId,
+    placement: &ImagePlacementSnapshot,
+    content_id: &mut impl FnMut(koshi_core::ids::PaneId, &ImagePlacementSnapshot) -> u64,
+) -> FrameImagePlacement {
     FrameImagePlacement {
         id: placement.id(),
-        record: wire_image_record(placement.record()),
+        content_id: content_id(pane_id, placement),
+        available: placement.record().is_some(),
         anchor: placement.anchor(),
         columns: placement.dimensions().1,
         rows: placement.dimensions().0,
-    }
-}
-
-/// One complete image record, with terminal types re-spelled in wire enums.
-fn wire_image_record(record: &ImageRecord) -> FrameImageRecord {
-    FrameImageRecord {
-        protocol: wire_graphics_protocol(record.protocol),
-        image: wire_decoded_image(&record.image),
-        action: wire_image_action(record.action),
-        display: wire_image_display(&record.display),
-        anchor: record.anchor,
-    }
-}
-
-/// The validated RGBA image carried by a record.
-fn wire_decoded_image(image: &DecodedImage) -> FrameDecodedImage {
-    FrameDecodedImage {
-        width: image.width,
-        height: image.height,
-        rgba: image.rgba.clone(),
     }
 }
 

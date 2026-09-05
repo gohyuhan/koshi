@@ -32,7 +32,7 @@ use koshi_core::lock::LockMode;
 use koshi_terminal::grid::state::{Cell, Grid};
 use koshi_terminal::style::{Color as CellColor, Style as CellStyle, UnderlineStyle};
 
-use crate::images::{clear_image_cells, draw_image_placeholders, image_paints, ImageRenderMode};
+use crate::images::{draw_image_placeholders, image_placeholder_rects, ImageRenderMode};
 use crate::region::StatuslineInputs;
 use crate::snapshot::{
     CommittedRegions, CursorStyle, KeymapHints, PaneSnapshot, Reconnecting, RenderSnapshot,
@@ -54,8 +54,8 @@ use crate::theme::Theme;
 /// 2. Draws one bordered box per visible pane, its title in the top border and
 ///    its scroll position in the bottom border when it is scrolled back.
 /// 3. Draws each visible terminal pane's cells into its content rect.
-/// 4. Clears image coverage for native output or writes the unsupported-image
-///    text over it.
+/// 4. Keeps pane cells under native images or writes the unsupported-image
+///    text over unavailable coverage.
 /// 5. Draws the one-row title strip for every collapsed stack member.
 /// 6. Fills the letterbox margin: every cell of `area` outside the centered
 ///    layout, the chrome rows included.
@@ -102,9 +102,9 @@ pub fn render_frame(
 /// Paint `snapshot` into `buf` with a selected terminal-image mode.
 ///
 /// `Placeholder` writes `terminal image unavailable` into visible image
-/// rectangles. `Native` clears those rectangles for the caller's Kitty
-/// protocol writer. A four-column image at `(12, 6)` in placeholder mode
-/// writes `term` across the first four covered cells.
+/// rectangles. `Native` keeps the pane cells beneath available image pixels
+/// and writes the same marker while a record is missing. A four-column image
+/// at `(12, 6)` in placeholder mode writes `term` across the first four cells.
 #[allow(clippy::too_many_arguments)]
 pub fn render_frame_with_images(
     snapshot: &RenderSnapshot,
@@ -152,10 +152,15 @@ pub fn render_frame_with_images(
 
     draw_panes(snapshot, theme, viewer.hovered_pane, offset, buf);
     draw_pane_contents(snapshot, offset, buf);
-    let paints = image_paints(snapshot, committed_regions, area);
     match image_mode {
-        ImageRenderMode::Placeholder => draw_image_placeholders(&paints, buf),
-        ImageRenderMode::Native => clear_image_cells(&paints, buf),
+        ImageRenderMode::Placeholder => {
+            let rects = image_placeholder_rects(snapshot, committed_regions, area, false);
+            draw_image_placeholders(&rects, buf);
+        }
+        ImageRenderMode::Native => {
+            let rects = image_placeholder_rects(snapshot, committed_regions, area, true);
+            draw_image_placeholders(&rects, buf);
+        }
     }
     draw_stack_headers(snapshot, theme, offset, buf);
 

@@ -1,11 +1,12 @@
 //! Terminal-image geometry and the two client paint modes.
 //!
-//! The server snapshot carries a complete image record and a cell rectangle.
-//! This module maps that rectangle into the committed pane area, clips it to
-//! the pane and frame, and records the matching source-pixel rectangle. A
-//! client that cannot emit an image protocol paints the same rectangle with
-//! the fixed `terminal image unavailable` text. A native-image client clears
-//! the rectangle before its terminal writer emits the image pixels.
+//! A snapshot carries a cell rectangle and may carry its complete image
+//! record. This module maps that rectangle into the committed pane area, clips
+//! it to the pane and frame, and records the matching source-pixel rectangle.
+//! A client that cannot emit an image protocol paints every rectangle with the
+//! fixed `terminal image unavailable` text. A native-image client paints the
+//! same text while a record is arriving and keeps ordinary cells beneath a
+//! complete image so transparent and negative-z pixels compose correctly.
 
 use std::sync::Arc;
 
@@ -28,7 +29,7 @@ pub const TERMINAL_IMAGE_UNAVAILABLE: &str = "terminal image unavailable";
 pub enum ImageRenderMode {
     /// Paint image rectangles with the unsupported-image text.
     Placeholder,
-    /// Leave image rectangles available for a native Kitty protocol writer.
+    /// Keep ordinary cells beneath a native Kitty protocol writer.
     Native,
 }
 
@@ -52,6 +53,8 @@ pub struct ImagePaint {
     pub pane_id: PaneId,
     /// The terminal-local image placement identity.
     pub placement_id: ImagePlacementId,
+    /// The connection-local image-record identity.
+    pub content_id: u64,
     /// The complete image record, including row-major RGBA pixels.
     pub record: Arc<ImageRecord>,
     /// The destination cells after pane and frame clipping.
@@ -84,6 +87,7 @@ impl ImagePaint {
         Self {
             pane_id,
             placement_id,
+            content_id: placement_id,
             record,
             target,
             source,
@@ -142,7 +146,9 @@ pub fn image_paints(
         }
         let inner = place(inner, offset);
         for placement in &pane.image_placements {
-            let record = placement.record();
+            let Some(record) = placement.record_arc() else {
+                continue;
+            };
             let (rows, columns) = placement.dimensions();
             if columns == 0 || rows == 0 || record.image.width == 0 || record.image.height == 0 {
                 continue;
@@ -154,7 +160,7 @@ pub fn image_paints(
             if target.width == 0 || target.height == 0 {
                 continue;
             }
-            let Some(source) = source_rect(image_rect, target, placement) else {
+            let Some(source) = source_rect(image_rect, target, placement, &record) else {
                 continue;
             };
             if source.width == 0 || source.height == 0 {
@@ -167,19 +173,15 @@ pub fn image_paints(
             let cell_offset_y = (kitty && target.y == image_rect.y)
                 .then_some(record.display.cell_offset_y)
                 .flatten();
-            let mut paint = ImagePaint::new(
-                pane.id,
-                placement.id(),
-                placement.record_arc(),
-                target,
-                source,
-                record.display.z_index,
-            )
-            .with_order(
-                pane_order
-                    .saturating_mul(placement_order_limit())
-                    .saturating_add(order),
-            );
+            let z_index = record.display.z_index;
+            let mut paint =
+                ImagePaint::new(pane.id, placement.id(), record, target, source, z_index)
+                    .with_order(
+                        pane_order
+                            .saturating_mul(placement_order_limit())
+                            .saturating_add(order),
+                    );
+            paint.content_id = placement.content_id();
             paint.cell_offset_x = cell_offset_x;
             paint.cell_offset_y = cell_offset_y;
             paints.push(paint);
@@ -191,14 +193,68 @@ pub fn image_paints(
     paints
 }
 
+/// Return the visible cell rectangles of image placements.
+///
+/// With `only_unavailable`, a placement whose image record is present is
+/// omitted. This lets a native-image viewer mark a missing transfer while an
+/// unsupported viewer marks every image.
+pub(crate) fn image_placeholder_rects(
+    snapshot: &RenderSnapshot,
+    committed_regions: &CommittedRegions,
+    area: RatatuiRect,
+    only_unavailable: bool,
+) -> Vec<RatatuiRect> {
+    if area.width == 0 || area.height == 0 || snapshot.session.active_tab.all_suppressed {
+        return Vec::new();
+    }
+
+    let content = content_rect(
+        pane_area(committed_regions, area),
+        snapshot.session.active_tab.effective_size,
+    );
+    let offset = koshi_core::geometry::Point {
+        x: content.x,
+        y: content.y,
+    };
+    let mut rects = Vec::new();
+    for slot in &snapshot.session.active_tab.layout_solved {
+        if !slot.visible {
+            continue;
+        }
+        let Some(inner) = slot.inner_rect else {
+            continue;
+        };
+        let Some(pane) = find_pane(snapshot, slot.pane_id) else {
+            continue;
+        };
+        if pane.grid_view.is_none() {
+            continue;
+        }
+        let inner = place(inner, offset);
+        for placement in &pane.image_placements {
+            if only_unavailable && placement.record().is_some() {
+                continue;
+            }
+            let Some(image_rect) = placement_rect(inner, placement) else {
+                continue;
+            };
+            let target = image_rect.intersection(inner).intersection(area);
+            if target.width > 0 && target.height > 0 {
+                rects.push(target);
+            }
+        }
+    }
+    rects
+}
+
 /// Paint unsupported-image text over each image rectangle in draw order.
-pub(crate) fn draw_image_placeholders(paints: &[ImagePaint], buf: &mut Buffer) {
-    for paint in paints {
-        let target = paint.target.intersection(buf.area);
+pub(crate) fn draw_image_placeholders(rects: &[RatatuiRect], buf: &mut Buffer) {
+    for rect in rects {
+        let target = rect.intersection(buf.area);
         if target.width == 0 || target.height == 0 {
             continue;
         }
-        clear_image_cells(std::slice::from_ref(paint), buf);
+        clear_rect(target, buf);
         let mut message = TERMINAL_IMAGE_UNAVAILABLE.chars();
         'paint: for row in 0..target.height {
             for col in 0..target.width {
@@ -211,16 +267,12 @@ pub(crate) fn draw_image_placeholders(paints: &[ImagePaint], buf: &mut Buffer) {
     }
 }
 
-/// Clear each clipped image rectangle before native pixels are emitted.
-pub(crate) fn clear_image_cells(paints: &[ImagePaint], buf: &mut Buffer) {
-    for paint in paints {
-        let target = paint.target.intersection(buf.area);
-        for row in 0..target.height {
-            for col in 0..target.width {
-                buf[(target.x + col, target.y + row)]
-                    .set_char(' ')
-                    .set_style(Style::default());
-            }
+fn clear_rect(target: RatatuiRect, buf: &mut Buffer) {
+    for row in 0..target.height {
+        for col in 0..target.width {
+            buf[(target.x + col, target.y + row)]
+                .set_char(' ')
+                .set_style(Style::default());
         }
     }
 }
@@ -250,8 +302,8 @@ fn source_rect(
     image_rect: RatatuiRect,
     target: RatatuiRect,
     placement: &ImagePlacementSnapshot,
+    record: &ImageRecord,
 ) -> Option<ImageSourceRect> {
-    let record = placement.record();
     let (source_origin_x, source_origin_y, source_width, source_height) =
         record.source_rect().ok()?;
     let left = u32::from(target.x) - u32::from(image_rect.x);

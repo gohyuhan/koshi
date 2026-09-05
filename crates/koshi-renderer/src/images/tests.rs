@@ -446,7 +446,7 @@ fn image_placeholder_clips_all_four_buffer_edges() {
         height: 2,
     });
 
-    draw_image_placeholders(&[paint], &mut buffer);
+    draw_image_placeholders(&[paint.target], &mut buffer);
 
     assert_eq!(buffer[(1, 1)].symbol(), "t");
     assert_eq!(buffer[(2, 1)].symbol(), "e");
@@ -565,14 +565,15 @@ fn unsupported_image_text_fills_the_visible_coverage() {
         height: 8,
     });
 
-    draw_image_placeholders(&paints, &mut buffer);
+    let rects: Vec<RatatuiRect> = paints.iter().map(|paint| paint.target).collect();
+    draw_image_placeholders(&rects, &mut buffer);
 
     let text: String = (0..26).map(|col| buffer[(col, 0)].symbol()).collect();
     assert_eq!(text, TERMINAL_IMAGE_UNAVAILABLE);
 }
 
 #[test]
-fn native_mode_leaves_image_cells_clear_and_placeholder_mode_writes_the_label() {
+fn native_mode_keeps_image_cells_and_placeholder_mode_writes_the_label() {
     let pane_id = PaneId::new();
     let mut snapshot = snapshot(
         pane_id,
@@ -633,7 +634,7 @@ fn native_mode_leaves_image_cells_clear_and_placeholder_mode_writes_the_label() 
         &mut native,
     );
     let native_text: String = (1..5).map(|column| native[(column, 1)].symbol()).collect();
-    assert_eq!(native_text, "    ");
+    assert_eq!(native_text, "X   ");
     assert!(native
         .content()
         .iter()

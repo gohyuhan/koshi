@@ -1,54 +1,47 @@
-//! Mouse-boundary tests: the decode table (host event → canonical
-//! [`MouseInput`]), covering every event kind, each button, all four scroll
-//! directions, bare motion, coordinate pass-through, and every modifier.
+//! Mouse-boundary tests for host SGR events and Koshi cell coordinates.
 
 use super::*;
-use crossterm::event::{KeyModifiers, MouseButton as HostButton, MouseEvent, MouseEventKind};
+
+use crate::host::{Event, Parser};
 use koshi_core::geometry::Point;
 
-/// One host mouse event at a cell with the given modifiers.
-fn ev(kind: MouseEventKind, column: u16, row: u16, modifiers: KeyModifiers) -> MouseEvent {
-    MouseEvent {
-        kind,
-        column,
-        row,
-        modifiers,
-    }
+/// Decode one SGR mouse sequence through the host parser boundary.
+fn decode(bytes: &[u8]) -> Option<MouseInput> {
+    let mut parser = Parser::default();
+    parser.push(bytes);
+    parser.finish_pending();
+    let Some(Event::Mouse(event)) = parser.pop() else {
+        panic!("expected one mouse event from {bytes:?}");
+    };
+    assert_eq!(parser.pop(), None);
+    Some(decode_mouse(event))
 }
 
-/// The event at column 10, row 3 with nothing held; the kind tests reuse this
-/// fixed cell.
-fn at_10_3(kind: MouseEventKind) -> MouseInput {
-    decode_mouse(ev(kind, 10, 3, KeyModifiers::NONE))
-}
-
-fn input(kind: MouseKind, x: u16, y: u16, mods: ModFlags) -> MouseInput {
-    MouseInput {
+fn input(kind: MouseKind, x: u16, y: u16, mods: ModFlags) -> Option<MouseInput> {
+    Some(MouseInput {
         kind,
         at: Point { x, y },
         mods,
-    }
+    })
 }
 
-// ------------------------------------------------------------- buttons ----
-
 #[test]
-fn press_release_drag_carry_their_button() {
+fn press_release_and_drag_carry_their_button() {
     assert_eq!(
-        at_10_3(MouseEventKind::Down(HostButton::Left)),
+        decode(b"\x1b[<0;11;4M"),
         input(MouseKind::Press(MouseButton::Left), 10, 3, ModFlags::NONE)
     );
     assert_eq!(
-        at_10_3(MouseEventKind::Up(HostButton::Middle)),
+        decode(b"\x1b[<1;11;4m"),
         input(
             MouseKind::Release(MouseButton::Middle),
             10,
             3,
-            ModFlags::NONE
+            ModFlags::NONE,
         )
     );
     assert_eq!(
-        at_10_3(MouseEventKind::Drag(HostButton::Right)),
+        decode(b"\x1b[<34;11;4M"),
         input(MouseKind::Drag(MouseButton::Right), 10, 3, ModFlags::NONE)
     );
 }
@@ -56,219 +49,90 @@ fn press_release_drag_carry_their_button() {
 #[test]
 fn every_button_maps() {
     assert_eq!(
-        at_10_3(MouseEventKind::Down(HostButton::Left)).kind,
+        decode(b"\x1b[<0;2;2M").expect("left").kind,
         MouseKind::Press(MouseButton::Left)
     );
     assert_eq!(
-        at_10_3(MouseEventKind::Down(HostButton::Middle)).kind,
+        decode(b"\x1b[<1;2;2M").expect("middle").kind,
         MouseKind::Press(MouseButton::Middle)
     );
     assert_eq!(
-        at_10_3(MouseEventKind::Down(HostButton::Right)).kind,
+        decode(b"\x1b[<2;2;2M").expect("right").kind,
         MouseKind::Press(MouseButton::Right)
     );
 }
 
-// ------------------------------------------------------------- scroll -----
-
 #[test]
 fn every_scroll_direction_maps() {
-    assert_eq!(
-        at_10_3(MouseEventKind::ScrollUp).kind,
-        MouseKind::Scroll(ScrollDirection::Up)
-    );
-    assert_eq!(
-        at_10_3(MouseEventKind::ScrollDown).kind,
-        MouseKind::Scroll(ScrollDirection::Down)
-    );
-    assert_eq!(
-        at_10_3(MouseEventKind::ScrollLeft).kind,
-        MouseKind::Scroll(ScrollDirection::Left)
-    );
-    assert_eq!(
-        at_10_3(MouseEventKind::ScrollRight).kind,
-        MouseKind::Scroll(ScrollDirection::Right)
-    );
+    let cases = [
+        (64, ScrollDirection::Up),
+        (65, ScrollDirection::Down),
+        (66, ScrollDirection::Left),
+        (67, ScrollDirection::Right),
+    ];
+    for (code, direction) in cases {
+        let sequence = format!("\x1b[<{code};11;4M");
+        assert_eq!(
+            decode(sequence.as_bytes()).expect("scroll").kind,
+            MouseKind::Scroll(direction),
+            "button code {code}",
+        );
+    }
 }
-
-// ------------------------------------------------------------- motion -----
 
 #[test]
 fn buttonless_move_is_motion() {
-    assert_eq!(at_10_3(MouseEventKind::Moved).kind, MouseKind::Motion);
+    assert_eq!(
+        decode(b"\x1b[<35;11;4M").expect("motion").kind,
+        MouseKind::Motion
+    );
 }
 
-// -------------------------------------------------------- coordinates -----
-
 #[test]
-fn coordinates_pass_through_unchanged() {
+fn one_based_protocol_coordinates_become_zero_based_cells() {
     assert_eq!(
-        decode_mouse(ev(
-            MouseEventKind::Down(HostButton::Left),
-            0,
-            0,
-            KeyModifiers::NONE
-        ))
-        .at,
+        decode(b"\x1b[<0;1;1M").expect("origin").at,
         Point { x: 0, y: 0 }
     );
     assert_eq!(
-        decode_mouse(ev(
-            MouseEventKind::Down(HostButton::Left),
-            200,
-            65,
-            KeyModifiers::NONE
-        ))
-        .at,
+        decode(b"\x1b[<0;201;66M").expect("cell").at,
         Point { x: 200, y: 65 }
     );
 }
 
-// ----------------------------------------------------------- modifiers ----
-
 #[test]
-fn each_modifier_maps() {
-    let kind = MouseEventKind::Down(HostButton::Left);
+fn sgr_modifiers_map_individually_and_together() {
     assert_eq!(
-        decode_mouse(ev(kind, 1, 1, KeyModifiers::CONTROL)).mods,
+        decode(b"\x1b[<4;2;2M").expect("shift").mods,
+        ModFlags::SHIFT
+    );
+    assert_eq!(decode(b"\x1b[<8;2;2M").expect("alt").mods, ModFlags::ALT);
+    assert_eq!(
+        decode(b"\x1b[<16;2;2M").expect("control").mods,
         ModFlags::CTRL
     );
     assert_eq!(
-        decode_mouse(ev(kind, 1, 1, KeyModifiers::ALT)).mods,
-        ModFlags::ALT
-    );
-    assert_eq!(
-        decode_mouse(ev(kind, 1, 1, KeyModifiers::SHIFT)).mods,
-        ModFlags::SHIFT
-    );
-    assert_eq!(
-        decode_mouse(ev(kind, 1, 1, KeyModifiers::SUPER)).mods,
-        ModFlags::SUPER
+        decode(b"\x1b[<28;2;2M").expect("all").mods,
+        ModFlags::SHIFT.union(ModFlags::ALT).union(ModFlags::CTRL)
     );
 }
 
 #[test]
-fn meta_maps_to_super_like_the_keyboard_boundary() {
-    assert_eq!(
-        decode_mouse(ev(
-            MouseEventKind::Down(HostButton::Left),
-            1,
-            1,
-            KeyModifiers::META
-        ))
-        .mods,
-        ModFlags::SUPER
-    );
-}
-
-#[test]
-fn hyper_is_dropped_like_the_keyboard_boundary() {
-    let kind = MouseEventKind::Down(HostButton::Left);
-    assert_eq!(
-        decode_mouse(ev(kind, 1, 1, KeyModifiers::HYPER)).mods,
-        ModFlags::NONE
-    );
-    assert_eq!(
-        decode_mouse(ev(kind, 1, 1, KeyModifiers::HYPER | KeyModifiers::SHIFT)).mods,
-        ModFlags::SHIFT
-    );
-}
-
-#[test]
-fn combined_modifiers_all_land() {
-    let mods = KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT;
-    assert_eq!(
-        decode_mouse(ev(MouseEventKind::Drag(HostButton::Left), 5, 5, mods)).mods,
-        ModFlags::CTRL.union(ModFlags::ALT).union(ModFlags::SHIFT)
-    );
-}
-
-#[test]
-fn all_four_modifiers_land_on_one_event() {
-    let mods =
-        KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT | KeyModifiers::SUPER;
-    assert_eq!(
-        decode_mouse(ev(MouseEventKind::Down(HostButton::Left), 5, 5, mods)).mods,
-        ModFlags::CTRL
-            .union(ModFlags::ALT)
-            .union(ModFlags::SHIFT)
-            .union(ModFlags::SUPER)
-    );
-}
-
-// ------------------------------------------- buttons on release and drag ----
-
-#[test]
-fn release_carries_every_button() {
-    assert_eq!(
-        at_10_3(MouseEventKind::Up(HostButton::Left)).kind,
-        MouseKind::Release(MouseButton::Left)
-    );
-    assert_eq!(
-        at_10_3(MouseEventKind::Up(HostButton::Right)).kind,
-        MouseKind::Release(MouseButton::Right)
-    );
-}
-
-#[test]
-fn drag_carries_every_button() {
-    assert_eq!(
-        at_10_3(MouseEventKind::Drag(HostButton::Left)).kind,
-        MouseKind::Drag(MouseButton::Left)
-    );
-    assert_eq!(
-        at_10_3(MouseEventKind::Drag(HostButton::Middle)).kind,
-        MouseKind::Drag(MouseButton::Middle)
-    );
-}
-
-// ------------------------------------------- kind and modifiers together ----
-
-#[test]
-fn a_scroll_carries_the_modifiers_held_with_it() {
-    // A scroll keeps the modifier held with it, beside the direction and the
-    // cell.
-    let scrolled = decode_mouse(ev(MouseEventKind::ScrollUp, 4, 2, KeyModifiers::CONTROL));
+fn scroll_keeps_modifiers_and_position() {
+    let scrolled = decode(b"\x1b[<80;5;3M").expect("control scroll");
     assert_eq!(scrolled.kind, MouseKind::Scroll(ScrollDirection::Up));
     assert_eq!(scrolled.mods, ModFlags::CTRL);
     assert_eq!(scrolled.at, Point { x: 4, y: 2 });
 }
 
 #[test]
-fn a_bare_motion_carries_its_modifiers() {
-    let moved = decode_mouse(ev(MouseEventKind::Moved, 7, 8, KeyModifiers::ALT));
-    assert_eq!(moved.kind, MouseKind::Motion);
-    assert_eq!(moved.mods, ModFlags::ALT);
-}
-
-// -------------------------------------------------- coordinate extremes ----
-
-#[test]
-fn coordinates_pass_through_at_the_edges_of_the_range() {
-    // The legacy protocol capped a coordinate at 223; SGR mouse reporting runs
-    // to the full `u16`. The decoder copies whatever the host gives — 223, the
-    // cell just past it, and the top of the range all pass through unchanged.
-    for coord in [223u16, 224, u16::MAX] {
-        assert_eq!(
-            decode_mouse(ev(
-                MouseEventKind::Down(HostButton::Left),
-                coord,
-                coord,
-                KeyModifiers::NONE
-            ))
-            .at,
-            Point { x: coord, y: coord },
-            "coordinate {coord}"
-        );
-    }
-}
-
-#[test]
-fn the_two_axes_are_carried_independently() {
-    // x and y are copied separately: a max column with a zero row stays as
-    // given.
+fn full_u16_protocol_coordinates_rebase_without_overflow() {
+    let event = decode(b"\x1b[<0;65535;65535M").expect("maximum coordinate");
     assert_eq!(
-        decode_mouse(ev(MouseEventKind::Moved, u16::MAX, 0, KeyModifiers::NONE)).at,
-        Point { x: u16::MAX, y: 0 }
+        event.at,
+        Point {
+            x: u16::MAX - 1,
+            y: u16::MAX - 1,
+        }
     );
 }

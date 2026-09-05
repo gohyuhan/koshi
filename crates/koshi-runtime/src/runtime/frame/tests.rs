@@ -12,7 +12,7 @@ use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::MouseTracking;
 use koshi_ipc::event::SessionEvent;
-use koshi_ipc::frame::{FrameDecodedImage, FrameRun, MAX_FRAME_IMAGE_CHUNK_BYTES};
+use koshi_ipc::frame::{FrameImageChunk, FrameRun, MAX_FRAME_IMAGE_CHUNK_BYTES};
 use koshi_ipc::transport::MAX_FRAME_LEN;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::solver::StackHeader;
@@ -302,78 +302,56 @@ fn a_cell_travels_with_its_character_marks_width_and_every_style_field() {
 #[test]
 fn an_oversized_image_frame_splits_into_bounded_wire_events() {
     let content = PaneId::new();
-    let mut frame = wire_frame(&snapshot(content, PaneId::new()));
-    frame.panes[0].image_placements[0].record.image = FrameDecodedImage {
-        width: 4_096,
-        height: 1_024,
-        rgba: vec![0x7f; 16 * 1024 * 1024],
-    };
+    let mut source = snapshot(content, PaneId::new());
+    let record = Arc::new(ImageRecord {
+        protocol: GraphicsProtocol::Kitty,
+        image: DecodedImage {
+            width: 4_096,
+            height: 1_024,
+            rgba: vec![0x7f; 16 * 1024 * 1024],
+        },
+        action: ImageAction::Display,
+        display: ImageDisplay::default(),
+        anchor: (0, 0),
+    });
+    source.panes[0].image_placements[0] =
+        ImagePlacementSnapshot::new(41, Arc::clone(&record), (0, 0), 2, 1)
+            .expect("test image placement is valid");
+    let frame = wire_frame(&source);
 
-    let full = SessionEvent::Painted {
+    let painted = SessionEvent::Painted {
         frame: Box::new(frame.clone()),
     };
     assert!(
-        serde_json::to_vec(&full)
-            .expect("the full frame encodes")
+        serde_json::to_vec(&painted)
+            .expect("the placement frame encodes")
             .len()
-            > MAX_FRAME_LEN as usize
-    );
-
-    let starts = wire_chunked_frame_starts(&frame, 9).expect("the image has a chunked start");
-    assert_eq!(starts.len(), 1);
-    let SessionEvent::PaintedImageStart { frame_id, images } = starts
-        .into_iter()
-        .next()
-        .expect("the image has one start event")
-    else {
-        panic!("the chunked start has the image-start shape");
-    };
-    let base = wire_chunked_frame_base(&frame);
-    assert_eq!(frame_id, 9);
-    assert_eq!(images.len(), 1);
-    assert_eq!(images[0].id, 1);
-    assert_eq!(images[0].byte_len, 16 * 1024 * 1024);
-    assert!(base
-        .panes
-        .iter()
-        .all(|pane| pane.image_placements.is_empty()));
-    assert_eq!(
-        base.panes[0]
-            .window
-            .as_ref()
-            .expect("the base keeps the pane window")
-            .rows[0]
-            .cells(),
-        frame.panes[0]
-            .window
-            .as_ref()
-            .expect("the source keeps the pane window")
-            .rows[0]
-            .cells()
-    );
-    assert!(
-        serde_json::to_vec(&SessionEvent::Painted {
-            frame: Box::new(base),
-        })
-        .expect("the base frame encodes")
-        .len()
             <= MAX_FRAME_LEN as usize
     );
 
-    let chunks: Vec<(u64, u64, bool, usize)> = wire_image_chunk_sources(&frame)
-        .map(|(transfer_id, offset, last, bytes)| (transfer_id, offset, last, bytes.len()))
+    let transfer = wire_image_transfer(1, &record);
+    assert_eq!(transfer.id, 1);
+    assert_eq!(transfer.byte_len, 16 * 1024 * 1024);
+    assert!(
+        serde_json::to_vec(&SessionEvent::ImageContentStart { image: transfer })
+            .expect("the image start encodes")
+            .len()
+            <= MAX_FRAME_LEN as usize
+    );
+
+    let chunks: Vec<(u64, bool, usize)> = wire_image_chunk_sources(&record)
+        .map(|(offset, last, bytes)| (offset, last, bytes.len()))
         .collect();
     assert_eq!(chunks.len(), 16);
-    assert_eq!(chunks[0], (1, 0, false, MAX_FRAME_IMAGE_CHUNK_BYTES));
+    assert_eq!(chunks[0], (0, false, MAX_FRAME_IMAGE_CHUNK_BYTES));
     assert_eq!(
         chunks[15],
-        (1, 15 * 1024 * 1024, true, MAX_FRAME_IMAGE_CHUNK_BYTES)
+        (15 * 1024 * 1024, true, MAX_FRAME_IMAGE_CHUNK_BYTES)
     );
-    for (transfer_id, offset, last, length) in chunks {
-        let event = SessionEvent::PaintedImageChunk {
-            chunk: koshi_ipc::frame::FrameImageChunk {
-                frame_id: 9,
-                transfer_id,
+    for (offset, last, length) in chunks {
+        let event = SessionEvent::ImageContentChunk {
+            chunk: FrameImageChunk {
+                transfer_id: 1,
                 offset,
                 last,
                 bytes: vec![0; length],
@@ -615,53 +593,55 @@ fn the_view_offset_mouse_mode_and_scrollback_scalars_come_through_unchanged() {
 }
 
 #[test]
-fn an_image_placement_and_its_rgba_record_travel_with_the_pane() {
+fn an_image_placement_and_its_record_travel_in_separate_values() {
     let content = PaneId::new();
-    let frame = wire_frame(&snapshot(content, PaneId::new()));
+    let source = snapshot(content, PaneId::new());
+    let record = source.panes[0].image_placements[0]
+        .record()
+        .expect("the source placement has image content");
+    let frame = wire_frame(&source);
     let placement = &frame.panes[0].image_placements[0];
+    let transfer = wire_image_transfer(placement.content_id, record);
 
     assert_eq!(placement.id, 41);
+    assert_eq!(placement.content_id, 1);
     assert_eq!(placement.anchor, (0, 1));
     assert_eq!(placement.columns, 2);
     assert_eq!(placement.rows, 1);
-    assert_eq!(placement.record.protocol, FrameGraphicsProtocol::Kitty);
+    assert_eq!(transfer.id, 1);
+    assert_eq!(transfer.record.protocol, FrameGraphicsProtocol::Kitty);
+    assert_eq!(transfer.record.action, FrameImageAction::TransmitAndDisplay);
+    assert_eq!(transfer.record.width, 2);
+    assert_eq!(transfer.record.height, 1);
+    assert_eq!(transfer.byte_len, 8);
+    assert_eq!(record.image.rgba, vec![255, 0, 0, 255, 0, 255, 0, 255]);
+    assert_eq!(transfer.record.display.image_id, Some(7));
+    assert_eq!(transfer.record.display.image_number, Some(8));
+    assert_eq!(transfer.record.display.placement_id, Some(9));
     assert_eq!(
-        placement.record.action,
-        FrameImageAction::TransmitAndDisplay
-    );
-    assert_eq!(placement.record.image.width, 2);
-    assert_eq!(placement.record.image.height, 1);
-    assert_eq!(
-        placement.record.image.rgba,
-        vec![255, 0, 0, 255, 0, 255, 0, 255]
-    );
-    assert_eq!(placement.record.display.image_id, Some(7));
-    assert_eq!(placement.record.display.image_number, Some(8));
-    assert_eq!(placement.record.display.placement_id, Some(9));
-    assert_eq!(
-        placement.record.display.width,
+        transfer.record.display.width,
         Some(FrameImageDimension::Cells(3))
     );
     assert_eq!(
-        placement.record.display.height,
+        transfer.record.display.height,
         Some(FrameImageDimension::Pixels(1))
     );
-    assert!(!placement.record.display.preserve_aspect_ratio);
+    assert!(!transfer.record.display.preserve_aspect_ratio);
     assert_eq!(
-        placement.record.display.sixel_background,
+        transfer.record.display.sixel_background,
         Some(FrameSixelBackground::Preserve)
     );
-    assert_eq!(placement.record.display.usage_hints, 0x12);
-    assert!(placement.record.display.unicode_placeholder);
-    assert_eq!(placement.record.display.cell_columns, Some(2));
-    assert_eq!(placement.record.display.cell_rows, Some(1));
-    assert_eq!(placement.record.display.z_index, -2);
-    assert_eq!(placement.record.display.source_offset_x, Some(1));
-    assert_eq!(placement.record.display.source_offset_y, Some(0));
-    assert_eq!(placement.record.display.cell_offset_x, Some(6));
-    assert_eq!(placement.record.display.cell_offset_y, Some(7));
-    assert!(!placement.record.display.move_cursor);
-    assert_eq!(placement.record.anchor, (0, 2));
+    assert_eq!(transfer.record.display.usage_hints, 0x12);
+    assert!(transfer.record.display.unicode_placeholder);
+    assert_eq!(transfer.record.display.cell_columns, Some(2));
+    assert_eq!(transfer.record.display.cell_rows, Some(1));
+    assert_eq!(transfer.record.display.z_index, -2);
+    assert_eq!(transfer.record.display.source_offset_x, Some(1));
+    assert_eq!(transfer.record.display.source_offset_y, Some(0));
+    assert_eq!(transfer.record.display.cell_offset_x, Some(6));
+    assert_eq!(transfer.record.display.cell_offset_y, Some(7));
+    assert!(!transfer.record.display.move_cursor);
+    assert_eq!(transfer.record.anchor, (0, 2));
 }
 
 #[test]

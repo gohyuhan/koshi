@@ -799,7 +799,7 @@ fn an_attach_answer_is_taken_whether_or_not_it_echoes_a_pane_area() {
 }
 
 #[test]
-fn coming_back_after_a_restart_asks_for_the_client_record_this_terminal_holds() {
+fn coming_back_after_a_restart_keeps_the_client_record_and_graphics_capability() {
     let runtime_dir = test_runtime_dir();
     let session_id = SessionId::new();
     let client_id = ClientId::new();
@@ -812,6 +812,7 @@ fn coming_back_after_a_restart_asks_for_the_client_record_this_terminal_holds() 
         session_id,
         client_id,
         &ConnectionToken::new(OLD_TOKEN),
+        terminal::GraphicsSupport::Kitty,
     )
     .expect("the stand-in session handed the client record back");
     drop(connection);
@@ -825,8 +826,9 @@ fn coming_back_after_a_restart_asks_for_the_client_record_this_terminal_holds() 
             resume: Some(client_id),
             resume_token: None,
             pane_area: Some(core_pane_area(viewport())),
+            graphics: koshi_ipc::protocol::GraphicsCapabilities { kitty: true },
         }),
-        "the restart path claims the client record by its id and reports the built-in pane area"
+        "the restart path claims the client record and reports this terminal's capability"
     );
 }
 
@@ -846,6 +848,7 @@ fn a_restarted_session_that_refuses_the_join_leaves_nothing_to_come_back_to() {
         session_id,
         client_id,
         &ConnectionToken::new(OLD_TOKEN),
+        terminal::GraphicsSupport::Unsupported,
     );
     assert_eq!(attached.map(|(endpoint, _)| endpoint), None);
 }
@@ -861,6 +864,7 @@ fn a_restarted_session_that_mints_a_new_client_leaves_nothing_to_come_back_to() 
         session_id,
         ClientId::new(),
         &ConnectionToken::new(OLD_TOKEN),
+        terminal::GraphicsSupport::Unsupported,
     );
     assert_eq!(attached.map(|(endpoint, _)| endpoint), None);
 }
@@ -877,6 +881,7 @@ fn another_local_users_restarting_session_is_not_waited_for() {
         SessionId::new(),
         ClientId::new(),
         &ConnectionToken::new(""),
+        terminal::GraphicsSupport::Unsupported,
     );
 
     assert_eq!(attached.map(|(endpoint, _)| endpoint), None);
@@ -2999,6 +3004,15 @@ fn a_failed_paint_keeps_the_visible_frame_and_viewer_state_paired() {
 }
 
 #[test]
+fn an_image_output_failure_keeps_the_committed_text_frame() {
+    let error = io::Error::new(io::ErrorKind::BrokenPipe, "image output closed");
+    let result: Result<(), terminal::PaintError<io::Error>> =
+        Err(terminal::PaintError::Image(error));
+
+    assert!(text_frame_was_painted(result));
+}
+
+#[test]
 fn a_viewer_only_refresh_waits_for_a_frame_after_resize() {
     let mut screen = test_screen();
     let mut client = viewer();
@@ -3250,7 +3264,7 @@ fn every_event_from_the_blackout_is_dropped_and_the_hangup_still_reported() {
         cols: 100,
         rows: 40,
     };
-    let (incoming_tx, incoming_rx) = mpsc::channel();
+    let (incoming_tx, incoming_rx) = incoming_channel();
     incoming_tx
         .send(Incoming::Input(Box::new(RuntimeEvent::KeyInput {
             client_id: client.id(),
@@ -3293,6 +3307,213 @@ fn every_event_from_the_blackout_is_dropped_and_the_hangup_still_reported() {
         incoming_rx.try_recv().err(),
         Some(mpsc::TryRecvError::Empty),
         "the key, the resize and the stale frame were all taken off the channel"
+    );
+}
+
+#[test]
+fn incoming_batch_leaves_events_past_the_per_pass_limit_queued() {
+    let (incoming_tx, incoming_rx) = mpsc::channel();
+    for _ in 0..MAX_INCOMING_BATCH {
+        incoming_tx
+            .send(Incoming::Input(Box::new(RuntimeEvent::Quit)))
+            .expect("the test receiver is open");
+    }
+    let client_id = ClientId::new();
+    incoming_tx
+        .send(Incoming::Input(Box::new(RuntimeEvent::Resize {
+            client_id,
+            size: Size { cols: 90, rows: 30 },
+            pane_area: None,
+        })))
+        .expect("the test receiver is open");
+
+    let (batch, deferred) = incoming_batch(None, &incoming_rx);
+
+    assert_eq!(batch.len(), MAX_INCOMING_BATCH);
+    let None = deferred else {
+        panic!("a full event-count batch must leave the next event in the channel");
+    };
+    for event in batch {
+        let Incoming::Input(event) = event else {
+            panic!("the batch contained a session event");
+        };
+        match *event {
+            RuntimeEvent::Quit => {}
+            event => panic!("the batch contained {event:?}"),
+        }
+    }
+    let remaining = incoming_rx
+        .try_recv()
+        .expect("the event past the count limit remains queued");
+    let Incoming::Input(event) = remaining else {
+        panic!("the remaining event came from the session");
+    };
+    match *event {
+        RuntimeEvent::Resize {
+            client_id: actual_client_id,
+            size,
+            pane_area,
+        } => {
+            assert_eq!(actual_client_id, client_id);
+            assert_eq!(size, Size { cols: 90, rows: 30 });
+            assert_eq!(pane_area, None);
+        }
+        event => panic!("the remaining event was {event:?}"),
+    }
+    assert_eq!(
+        incoming_rx.try_recv().err(),
+        Some(mpsc::TryRecvError::Empty)
+    );
+}
+
+#[test]
+fn incoming_queue_stops_producers_at_its_fixed_capacity() {
+    assert_eq!(INCOMING_QUEUE_CAPACITY, 16);
+    let (incoming_tx, incoming_rx) = incoming_channel();
+    for _ in 0..INCOMING_QUEUE_CAPACITY {
+        incoming_tx
+            .try_send(Incoming::Input(Box::new(RuntimeEvent::Quit)))
+            .expect("an event inside the queue limit fits");
+    }
+    let client_id = ClientId::new();
+    let rejected = incoming_tx.try_send(Incoming::Input(Box::new(RuntimeEvent::Resize {
+        client_id,
+        size: Size { cols: 90, rows: 30 },
+        pane_area: None,
+    })));
+
+    let Err(mpsc::TrySendError::Full(Incoming::Input(event))) = rejected else {
+        panic!("the event past the queue limit was not returned as full");
+    };
+    let RuntimeEvent::Resize {
+        client_id: actual_client_id,
+        size,
+        pane_area,
+    } = *event
+    else {
+        panic!("the full queue returned another event");
+    };
+    assert_eq!(actual_client_id, client_id);
+    assert_eq!(size, Size { cols: 90, rows: 30 });
+    assert_eq!(pane_area, None);
+    for _ in 0..INCOMING_QUEUE_CAPACITY {
+        let Incoming::Input(event) = incoming_rx
+            .try_recv()
+            .expect("each accepted event remains queued")
+        else {
+            panic!("the queue contained a session event");
+        };
+        let RuntimeEvent::Quit = *event else {
+            panic!("the queue contained another input event");
+        };
+    }
+    assert_eq!(
+        incoming_rx.try_recv().err(),
+        Some(mpsc::TryRecvError::Empty)
+    );
+}
+
+#[test]
+fn terminal_input_queue_stops_the_reader_at_its_fixed_capacity() {
+    assert_eq!(INCOMING_QUEUE_CAPACITY, 16);
+    let (input_tx, input_rx) = input_channel();
+    for _ in 0..INCOMING_QUEUE_CAPACITY {
+        input_tx
+            .try_send(RuntimeEvent::Quit)
+            .expect("an input event inside the queue limit fits");
+    }
+    let client_id = ClientId::new();
+    let resized = Size { cols: 90, rows: 30 };
+    let rejected = input_tx.try_send(RuntimeEvent::Resize {
+        client_id,
+        size: resized,
+        pane_area: None,
+    });
+
+    let Err(mpsc::TrySendError::Full(RuntimeEvent::Resize {
+        client_id: actual_client_id,
+        size,
+        pane_area,
+    })) = rejected
+    else {
+        panic!("the input event past the queue limit was not returned as full");
+    };
+    assert_eq!(actual_client_id, client_id);
+    assert_eq!(size, resized);
+    assert_eq!(pane_area, None);
+    for _ in 0..INCOMING_QUEUE_CAPACITY {
+        let event = input_rx
+            .try_recv()
+            .expect("each accepted input remains queued");
+        let RuntimeEvent::Quit = event else {
+            panic!("the input queue contained another event");
+        };
+    }
+    assert_eq!(input_rx.try_recv().err(), Some(mpsc::TryRecvError::Empty));
+}
+
+#[test]
+fn incoming_batch_defers_an_image_chunk_past_the_byte_limit() {
+    let (incoming_tx, incoming_rx) = mpsc::channel();
+    let chunk_len = MAX_INCOMING_IMAGE_BYTES_PER_BATCH / 2 + 1;
+    let first_chunk = koshi_ipc::frame::FrameImageChunk {
+        transfer_id: 7,
+        offset: 0,
+        last: false,
+        bytes: vec![1; chunk_len],
+    };
+    let second_chunk = koshi_ipc::frame::FrameImageChunk {
+        transfer_id: 7,
+        offset: u64::try_from(chunk_len).expect("the chunk length fits an offset"),
+        last: true,
+        bytes: vec![2; chunk_len],
+    };
+    incoming_tx
+        .send(Incoming::Frame {
+            connection: 0,
+            frame: Ok(SessionEvent::ImageContentChunk {
+                chunk: first_chunk.clone(),
+            }),
+        })
+        .expect("the first image chunk is queued");
+    incoming_tx
+        .send(Incoming::Frame {
+            connection: 0,
+            frame: Ok(SessionEvent::ImageContentChunk {
+                chunk: second_chunk.clone(),
+            }),
+        })
+        .expect("the second image chunk is queued");
+    let first = incoming_rx
+        .try_recv()
+        .expect("the first image chunk is available");
+
+    let (batch, deferred) = incoming_batch(Some(first), &incoming_rx);
+
+    assert_eq!(batch.len(), 1);
+    let mut batch = batch.into_iter();
+    let Some(Incoming::Frame {
+        connection,
+        frame: Ok(SessionEvent::ImageContentChunk { chunk }),
+    }) = batch.next()
+    else {
+        panic!("the batch did not contain the first image chunk");
+    };
+    assert_eq!(connection, 0);
+    assert_eq!(chunk, first_chunk);
+    assert_eq!(batch.next().map(|_| ()), None);
+    let Some(Incoming::Frame {
+        connection,
+        frame: Ok(SessionEvent::ImageContentChunk { chunk }),
+    }) = deferred
+    else {
+        panic!("the second image chunk was not deferred");
+    };
+    assert_eq!(connection, 0);
+    assert_eq!(chunk, second_chunk);
+    assert_eq!(
+        incoming_rx.try_recv().err(),
+        Some(mpsc::TryRecvError::Empty)
     );
 }
 
@@ -3478,7 +3699,7 @@ fn a_frame_this_build_has_no_name_for_is_stepped_over_and_the_next_one_arrives()
     // read at the first one would drop the connection and report the session
     // dead, so the reader steps over it and forwards the frame after it.
     let (mut session, reader, _uplink) = event_stream();
-    let (incoming_tx, incoming_rx) = mpsc::channel();
+    let (incoming_tx, incoming_rx) = incoming_channel();
     spawn_frame_reader(reader, 4, incoming_tx);
 
     let closed = SessionEvent::TabClosed {

@@ -6,6 +6,7 @@
 //! the sequence ended, then applies display records to terminal image state.
 
 use std::io::{Cursor, Read};
+use std::ops::Range;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
@@ -272,8 +273,7 @@ impl ImageRecord {
     }
 }
 
-/// Why a graphics parser cannot rebuild all of its active bytes after a
-/// terminal-engine replacement.
+/// The graphics parser state that cannot be rebuilt after an engine replacement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GraphicsAbandonment {
     /// Consume the remainder of one open protocol string and report its limit.
@@ -753,6 +753,11 @@ pub(crate) struct GraphicsParser {
     iterm_transfer: Option<ItermTransfer>,
 }
 
+pub(crate) struct GraphicsAdvance {
+    pub(crate) events: Vec<(usize, Result<DecodedGraphics, GraphicsError>)>,
+    pub(crate) terminal_inert: Vec<Range<usize>>,
+}
+
 impl Default for GraphicsParser {
     fn default() -> Self {
         GraphicsParser {
@@ -826,25 +831,196 @@ struct DiscardParser {
 impl GraphicsParser {
     /// Feed bytes and return every image or error completed by this chunk.
     pub(crate) fn advance(&mut self, bytes: &[u8]) -> Vec<Result<DecodedGraphics, GraphicsError>> {
-        let mut events = Vec::new();
-        for &byte in bytes {
-            self.feed_byte(byte, &mut events);
-        }
-        events
+        self.advance_with_offsets(bytes)
+            .events
+            .into_iter()
+            .map(|(_, event)| event)
+            .collect()
     }
 
-    pub(crate) fn advance_with_offsets(
-        &mut self,
-        bytes: &[u8],
-    ) -> Vec<(usize, Result<DecodedGraphics, GraphicsError>)> {
+    pub(crate) fn advance_with_offsets(&mut self, bytes: &[u8]) -> GraphicsAdvance {
         let mut events = Vec::new();
+        let mut terminal_inert = Vec::new();
         let mut byte_events = Vec::new();
-        for (offset, &byte) in bytes.iter().enumerate() {
+        let mut offset = 0;
+        while offset < bytes.len() {
+            if let Some(consumed) = self.feed_discard_data(&bytes[offset..]) {
+                offset += consumed;
+                continue;
+            }
+            if let Some(consumed) = self
+                .feed_kitty_data(&bytes[offset..])
+                .or_else(|| self.feed_iterm_data(&bytes[offset..]))
+            {
+                terminal_inert.push(offset..offset + consumed);
+                offset += consumed;
+                continue;
+            }
+            if let Some(consumed) = self.feed_tmux_data(&bytes[offset..]) {
+                terminal_inert.push(offset..offset + consumed);
+                offset += consumed;
+                continue;
+            }
+            if let Some(consumed) = self.feed_screen_data(&bytes[offset..]) {
+                terminal_inert.push(offset..offset + consumed);
+                offset += consumed;
+                continue;
+            }
+            let sixel_data = matches!(
+                &self.state,
+                GraphicsState::Sixel(parser)
+                    if parser.phase == SixelPhase::Body
+                        && !parser.escaped
+                        && bytes[offset].is_ascii_graphic()
+            );
             byte_events.clear();
-            self.feed_byte(byte, &mut byte_events);
+            self.feed_byte(bytes[offset], &mut byte_events);
             events.extend(byte_events.drain(..).map(|event| (offset, event)));
+            if sixel_data && matches!(self.state, GraphicsState::Sixel(_)) {
+                extend_last_range(&mut terminal_inert, offset);
+            }
+            offset += 1;
         }
-        events
+        GraphicsAdvance {
+            events,
+            terminal_inert,
+        }
+    }
+
+    /// Advance one data run in a discarded control string.
+    fn feed_discard_data(&mut self, bytes: &[u8]) -> Option<usize> {
+        let kind = match &self.state {
+            GraphicsState::Discard(parser) if !parser.escaped => parser.kind,
+            _ => return None,
+        };
+        let consumed = bytes
+            .iter()
+            .position(|byte| {
+                matches!(*byte, 0x18 | 0x1a | 0x1b | 0x9c)
+                    || (kind == StringKind::Osc && *byte == 0x07)
+            })
+            .unwrap_or(bytes.len());
+        if consumed == 0 {
+            return None;
+        }
+
+        self.push_pending_bytes(&bytes[..consumed]);
+        self.sequence_bytes = self.sequence_bytes.saturating_add(consumed);
+        Some(consumed)
+    }
+
+    /// Copy one run of Kitty payload bytes that contains no string control.
+    fn feed_kitty_data(&mut self, bytes: &[u8]) -> Option<usize> {
+        let GraphicsState::Kitty(parser) = &self.state else {
+            return None;
+        };
+        if parser.ignored || parser.escaped || !parser.seen_header {
+            return None;
+        }
+
+        let data_room = MAX_KITTY_CHUNK_BYTES.saturating_sub(parser.data.len());
+        let sequence_room = MAX_GRAPHICS_TRANSFER_BYTES.saturating_sub(self.sequence_bytes);
+        let consumed = base64_run_len(bytes, data_room.min(sequence_room));
+        if consumed == 0 {
+            return None;
+        }
+
+        self.push_pending_bytes(&bytes[..consumed]);
+        self.sequence_bytes = self.sequence_bytes.saturating_add(consumed);
+        let GraphicsState::Kitty(parser) = &mut self.state else {
+            unreachable!("the Kitty parser state was checked above")
+        };
+        parser.data.extend_from_slice(&bytes[..consumed]);
+        Some(consumed)
+    }
+
+    /// Copy one run of iTerm2 payload bytes that contains no string control.
+    fn feed_iterm_data(&mut self, bytes: &[u8]) -> Option<usize> {
+        let GraphicsState::Iterm(parser) = &self.state else {
+            return None;
+        };
+        if parser.ignored
+            || parser.escaped
+            || !parser.prefix_done
+            || !iterm_payload_started(&parser.body)
+        {
+            return None;
+        }
+
+        let body_room = MAX_GRAPHICS_TRANSFER_BYTES.saturating_sub(parser.body.len());
+        let sequence_room = MAX_GRAPHICS_TRANSFER_BYTES.saturating_sub(self.sequence_bytes);
+        let consumed = base64_run_len(bytes, body_room.min(sequence_room));
+        if consumed == 0 {
+            return None;
+        }
+
+        self.push_pending_bytes(&bytes[..consumed]);
+        self.sequence_bytes = self.sequence_bytes.saturating_add(consumed);
+        let GraphicsState::Iterm(parser) = &mut self.state else {
+            unreachable!("the iTerm2 parser state was checked above")
+        };
+        parser.body.extend_from_slice(&bytes[..consumed]);
+        Some(consumed)
+    }
+
+    /// Copy one run of tmux wrapper bytes that contains no wrapper control.
+    fn feed_tmux_data(&mut self, bytes: &[u8]) -> Option<usize> {
+        let GraphicsState::Tmux(parser) = &self.state else {
+            return None;
+        };
+        if parser.prefix.len() < b"tmux;".len() || parser.escaped {
+            return None;
+        }
+
+        let data_room = MAX_GRAPHICS_TRANSFER_BYTES.saturating_sub(parser.data.len());
+        let sequence_room = MAX_GRAPHICS_TRANSFER_BYTES.saturating_sub(self.sequence_bytes);
+        let limit = bytes.len().min(data_room).min(sequence_room);
+        let consumed = bytes[..limit]
+            .iter()
+            .position(|byte| matches!(*byte, 0x18 | 0x1a | 0x1b | 0x9c))
+            .unwrap_or(limit);
+        if consumed == 0 {
+            return None;
+        }
+
+        self.push_pending_bytes(&bytes[..consumed]);
+        self.sequence_bytes = self.sequence_bytes.saturating_add(consumed);
+        let GraphicsState::Tmux(parser) = &mut self.state else {
+            unreachable!("the tmux parser state was checked above")
+        };
+        parser.data.extend_from_slice(&bytes[..consumed]);
+        Some(consumed)
+    }
+
+    /// Copy one run of GNU Screen wrapper bytes that contains no wrapper control.
+    fn feed_screen_data(&mut self, bytes: &[u8]) -> Option<usize> {
+        let GraphicsState::Screen(parser) = &self.state else {
+            return None;
+        };
+        if parser.escaped
+            || (parser.data.as_slice() == [0x1b] && bytes.first().copied() == Some(b'\\'))
+        {
+            return None;
+        }
+
+        let data_room = MAX_SCREEN_PASSTHROUGH_BYTES.saturating_sub(parser.data.len());
+        let sequence_room = MAX_GRAPHICS_TRANSFER_BYTES.saturating_sub(self.sequence_bytes);
+        let limit = bytes.len().min(data_room).min(sequence_room);
+        let consumed = bytes[..limit]
+            .iter()
+            .position(|byte| matches!(*byte, 0x18 | 0x1a | 0x1b | 0x9c))
+            .unwrap_or(limit);
+        if consumed == 0 {
+            return None;
+        }
+
+        self.push_pending_bytes(&bytes[..consumed]);
+        self.sequence_bytes = self.sequence_bytes.saturating_add(consumed);
+        let GraphicsState::Screen(parser) = &mut self.state else {
+            unreachable!("the GNU Screen parser state was checked above")
+        };
+        parser.data.extend_from_slice(&bytes[..consumed]);
+        Some(consumed)
     }
 
     /// Return bytes needed to rebuild an active graphics parser after a
@@ -1437,6 +1613,8 @@ impl GraphicsParser {
             self.finish_kitty(parser, events);
         } else if let Err(error) = parser.feed(byte) {
             self.discard(StringKind::Apc, error, byte);
+        } else if parser.ignored {
+            self.ignore_string(StringKind::Apc, byte);
         } else {
             self.state = GraphicsState::Kitty(parser);
         }
@@ -1476,6 +1654,8 @@ impl GraphicsParser {
             self.finish_iterm(parser, events);
         } else if let Err(error) = parser.feed(byte) {
             self.discard(StringKind::Osc, error, byte);
+        } else if parser.ignored || !iterm_command_can_be_graphics(&parser.body) {
+            self.ignore_string(StringKind::Osc, byte);
         } else {
             self.state = GraphicsState::Iterm(parser);
         }
@@ -1707,9 +1887,7 @@ impl GraphicsParser {
             .unwrap_or_default();
         inner.wrapper_depth = self.wrapper_depth.saturating_add(1);
         inner.screen_continuation = false;
-        for byte in data {
-            inner.feed_byte(byte, events);
-        }
+        events.extend(inner.advance(&data));
         let continuation = inner.has_pending_state();
         self.reset();
         self.screen_continuation = continuation;
@@ -1730,9 +1908,7 @@ impl GraphicsParser {
             .unwrap_or_default();
         inner.wrapper_depth = self.wrapper_depth.saturating_add(1);
         inner.tmux_continuation = false;
-        for byte in data {
-            inner.feed_byte(byte, events);
-        }
+        events.extend(inner.advance(&data));
         let continuation = inner.has_pending_state();
         self.reset();
         self.tmux_continuation = continuation;
@@ -2074,6 +2250,19 @@ impl GraphicsParser {
             self.carryable = false;
         } else {
             self.pending.push(byte);
+        }
+    }
+
+    fn push_pending_bytes(&mut self, bytes: &[u8]) {
+        if !self.carryable {
+            return;
+        }
+        let room = MAX_GRAPHICS_CARRY_BYTES.saturating_sub(self.pending.len());
+        if bytes.len() > room {
+            self.pending.clear();
+            self.carryable = false;
+        } else {
+            self.pending.extend_from_slice(bytes);
         }
     }
 
@@ -2546,6 +2735,26 @@ struct KittyParser {
     seen_header: bool,
     ignored: bool,
     escaped: bool,
+}
+
+fn is_base64_byte(byte: u8) -> bool {
+    matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'+' | b'/' | b'=')
+}
+
+fn base64_run_len(bytes: &[u8], limit: usize) -> usize {
+    let bytes = &bytes[..bytes.len().min(limit)];
+    bytes
+        .iter()
+        .position(|byte| !is_base64_byte(*byte))
+        .unwrap_or(bytes.len())
+}
+
+fn extend_last_range(ranges: &mut Vec<Range<usize>>, offset: usize) {
+    if let Some(range) = ranges.last_mut().filter(|range| range.end == offset) {
+        range.end += 1;
+    } else {
+        ranges.push(offset..offset + 1);
+    }
 }
 
 impl KittyParser {
@@ -3187,12 +3396,27 @@ fn iterm_command_name(body: &[u8]) -> Option<&[u8]> {
     (!body.is_empty()).then(|| split_at_byte(body, b'=').map_or(body, |(command, _)| command))
 }
 
+const ITERM_GRAPHICS_COMMANDS: [&[u8]; 4] = [b"File", b"MultipartFile", b"FilePart", b"FileEnd"];
+
 fn iterm_command_is_graphics(body: &[u8]) -> bool {
     match iterm_command_name(body) {
         None => true,
-        Some(b"File" | b"MultipartFile" | b"FilePart" | b"FileEnd") => true,
-        Some(_) => false,
+        Some(command) => ITERM_GRAPHICS_COMMANDS.contains(&command),
     }
+}
+
+fn iterm_command_can_be_graphics(body: &[u8]) -> bool {
+    let command = split_at_byte(body, b'=').map_or(body, |(command, _)| command);
+    ITERM_GRAPHICS_COMMANDS
+        .iter()
+        .any(|name| name.starts_with(command))
+}
+
+fn iterm_payload_started(body: &[u8]) -> bool {
+    if body.starts_with(b"FilePart=") {
+        return true;
+    }
+    matches!(iterm_command_name(body), Some(b"File" | b"MultipartFile")) && body.contains(&b':')
 }
 
 fn parse_iterm_command(

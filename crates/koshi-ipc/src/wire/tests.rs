@@ -5,7 +5,10 @@ use serde::Serialize;
 
 use super::*;
 use crate::event::SessionEvent;
-use crate::frame::FrameImageChunk;
+use crate::frame::{
+    FrameGraphicsProtocol, FrameImageAction, FrameImageChunk, FrameImageDisplay,
+    FrameImageRecordHeader, FrameImageTransfer,
+};
 use crate::protocol::{ConnectionToken, IpcRequestKind, IpcResult};
 use crate::router::{RouterRequestKind, RouterResult};
 use crate::supervisor::{SupervisorEvent, SupervisorRequestKind, SupervisorResult};
@@ -674,6 +677,7 @@ fn sample_request_kinds() -> Vec<IpcRequestKind> {
             resume: None,
             resume_token: None,
             pane_area: None,
+            graphics: crate::protocol::GraphicsCapabilities::default(),
         },
         IpcRequestKind::KeyPress {
             chord: koshi_core::key::KeyChord::new(
@@ -771,13 +775,23 @@ fn sample_events() -> Vec<SessionEvent> {
         SessionEvent::Painted {
             frame: Box::new(painted_frame()),
         },
-        SessionEvent::PaintedImageStart {
-            frame_id: 1,
-            images: Vec::new(),
+        SessionEvent::ImageCacheReset,
+        SessionEvent::ImageContentStart {
+            image: FrameImageTransfer {
+                id: 1,
+                record: FrameImageRecordHeader {
+                    protocol: FrameGraphicsProtocol::Kitty,
+                    width: 1,
+                    height: 1,
+                    action: FrameImageAction::Display,
+                    display: FrameImageDisplay::default(),
+                    anchor: (0, 0),
+                },
+                byte_len: 4,
+            },
         },
-        SessionEvent::PaintedImageChunk {
+        SessionEvent::ImageContentChunk {
             chunk: FrameImageChunk {
-                frame_id: 1,
                 transfer_id: 1,
                 offset: 0,
                 last: true,

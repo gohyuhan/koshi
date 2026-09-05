@@ -463,8 +463,10 @@ impl EventBus {
 /// The frame an attached client is sent for one item off its queue, or `None`
 /// when no [`SessionEvent`] spells that item.
 ///
-/// A [`Delivery::Frame`] becomes [`SessionEvent::Painted`] carrying the whole
-/// picture in koshi-ipc's wire spellings.
+/// A [`Delivery::Frame`] becomes [`SessionEvent::Painted`] carrying the text
+/// cells and image placements in koshi-ipc's wire spellings. A client that can
+/// paint images receives new RGBA records from its connection writer after
+/// this conversion.
 ///
 /// A [`Delivery::Snapshot`] becomes [`SessionEvent::Resync`] carrying the count
 /// of missed events. Its frame does not go on the wire: the client attaches

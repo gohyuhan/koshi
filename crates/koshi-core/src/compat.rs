@@ -51,8 +51,8 @@ pub struct Surface {
 /// `v0.1.0` spoke 1, `v0.2.0` and `v0.3.0` speak 2, and this build speaks 3.
 /// The floor is 3: a peer that speaks 2 is refused at the handshake.
 ///
-/// Three shapes differ between 2 and 3. This build writes 3's shape for each
-/// of them on every connection, whatever version the peer settled on:
+/// Four shapes differ between 2 and 3. This build writes version 3 on every
+/// session connection:
 ///
 /// - A command naming a target client carries `target_client`. A peer speaking
 ///   2 has no field for it.
@@ -61,11 +61,14 @@ pub struct Surface {
 /// - Each entry of a layout split's `children` is the child node itself. 2
 ///   wrapped it in a `{"node": …}` record. Layout trees travel in the attach
 ///   reply and in the layout report.
+/// - Painted image placements name connection-local content identities. Their
+///   RGBA records travel in bounded image-content events and remain cached
+///   across unchanged frames. Version 2 had no terminal-image wire shape.
 ///
-/// Both readers still take either shape: a `HostWrite` holding a list of
-/// numbers decodes, and so does a split child wrapped in a `{"node": …}`
-/// record. [`RESUME_FORMAT`] reads back to 1, and a resume file written by an
-/// earlier build carries the wrapped shape.
+/// The readers still accept the two legacy encodings that can occur in stored
+/// data: a `HostWrite` holding a list of numbers and a split child wrapped in a
+/// `{"node": …}` record both decode. [`RESUME_FORMAT`] reads back to 1, and a
+/// resume file written by an earlier build can carry the wrapped split shape.
 pub const SESSION_PROTOCOL: Surface = Surface {
     name: "session protocol",
     min: 3,

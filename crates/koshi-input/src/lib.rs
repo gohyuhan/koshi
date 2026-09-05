@@ -6,5 +6,6 @@
 //! [`mouse::decode_mouse`] turns one host mouse event into a canonical
 //! [`koshi_core::mouse::MouseInput`].
 
+pub mod host;
 pub mod keyboard;
 pub mod mouse;

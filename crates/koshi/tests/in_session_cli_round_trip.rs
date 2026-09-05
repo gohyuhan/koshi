@@ -274,6 +274,7 @@ fn attach(session: &RunningSession) -> AttachedClient {
             resume: None,
             resume_token: None,
             pane_area: None,
+            graphics: koshi_ipc::protocol::GraphicsCapabilities::default(),
         },
     };
     connection

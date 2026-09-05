@@ -492,6 +492,7 @@ impl Stream {
                 resume,
                 resume_token: None,
                 pane_area: None,
+                graphics: koshi_ipc::protocol::GraphicsCapabilities::default(),
             },
         };
         connection

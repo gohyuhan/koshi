@@ -156,6 +156,26 @@ pub type IpcRequest<K = IpcRequestKind> = Envelope<K>;
 /// not have.
 pub type IncomingRequest = IpcRequest<MaybeKnown<IpcRequestKind>>;
 
+/// Native image protocols the terminal attached to one client proved it can
+/// receive.
+///
+/// Each field defaults to `false`, so a client that does not report this
+/// record receives placement metadata without pixel transfers. New protocol
+/// fields can be added without changing the attach shape.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphicsCapabilities {
+    /// The terminal answered the Kitty graphics protocol query with `OK`.
+    #[serde(default)]
+    pub kitty: bool,
+}
+
+impl GraphicsCapabilities {
+    /// Return whether the terminal proved no native image protocol.
+    fn is_empty(&self) -> bool {
+        !self.kitty
+    }
+}
+
 /// What a request asks for.
 ///
 /// On a connection already serving an attached client's event stream,
@@ -232,6 +252,10 @@ pub enum IpcRequestKind {
         /// client as its viewport minus two rows.
         #[serde(default)]
         pane_area: Option<PaneArea>,
+        /// Native image protocols proved by this attached terminal. The
+        /// finding belongs to this connection and is not session state.
+        #[serde(default, skip_serializing_if = "GraphicsCapabilities::is_empty")]
+        graphics: GraphicsCapabilities,
     },
     /// One key press the attached client's keymap did not bind, for the pane
     /// it is typing into.

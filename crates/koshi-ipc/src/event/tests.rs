@@ -105,8 +105,6 @@ fn painted_frame() -> PaintedFrame {
 fn image_transfer() -> FrameImageTransfer {
     FrameImageTransfer {
         id: 1,
-        pane_id: PaneId::from_uuid(fixed_uuid()),
-        placement_id: 2,
         record: FrameImageRecordHeader {
             protocol: FrameGraphicsProtocol::Kitty,
             width: 2,
@@ -115,22 +113,20 @@ fn image_transfer() -> FrameImageTransfer {
             display: crate::frame::FrameImageDisplay::default(),
             anchor: (0, 0),
         },
-        anchor: (0, 0),
-        columns: 2,
-        rows: 1,
         byte_len: 8,
     }
 }
 
-/// Every structure frame the stream can carry, at fixed ids, in the order the
-/// enum declares them. `Painted` and `MouseAnswer` are left out: their payloads
-/// have their own tests below.
+/// Every small structure frame the stream can carry, at fixed ids, in the
+/// order the enum declares them. Frames with larger payloads have their own
+/// tests below.
 fn every_event() -> Vec<SessionEvent> {
     let client_id = ClientId::from_uuid(fixed_uuid());
     let pane_id = PaneId::from_uuid(fixed_uuid());
     let tab_id = TabId::from_uuid(fixed_uuid());
 
     vec![
+        SessionEvent::ImageCacheReset,
         SessionEvent::PaneCreated { pane_id, tab_id },
         SessionEvent::PaneProcessExited {
             pane_id,
@@ -190,15 +186,13 @@ fn a_painted_frame_survives_a_round_trip_field_for_field() {
 }
 
 #[test]
-fn a_chunked_image_start_and_chunk_survive_a_round_trip() {
+fn an_image_content_start_and_chunk_survive_a_round_trip() {
     let sent = [
-        SessionEvent::PaintedImageStart {
-            frame_id: 7,
-            images: vec![image_transfer()],
+        SessionEvent::ImageContentStart {
+            image: image_transfer(),
         },
-        SessionEvent::PaintedImageChunk {
+        SessionEvent::ImageContentChunk {
             chunk: FrameImageChunk {
-                frame_id: 7,
                 transfer_id: 1,
                 offset: 0,
                 last: true,
@@ -213,6 +207,71 @@ fn a_chunked_image_start_and_chunk_survive_a_round_trip() {
             serde_json::from_str(&encoded).expect("the image event decodes");
         assert_eq!(received, event);
     }
+}
+
+#[test]
+fn image_content_events_have_the_pinned_wire_shape() {
+    assert_eq!(
+        serde_json::to_value(SessionEvent::ImageContentStart {
+            image: image_transfer(),
+        })
+        .expect("the image start encodes"),
+        json!({
+            "ImageContentStart": {
+                "image": {
+                    "id": 1,
+                    "record": {
+                        "protocol": "Kitty",
+                        "width": 2,
+                        "height": 1,
+                        "action": "Display",
+                        "display": {
+                            "width": null,
+                            "height": null,
+                            "preserve_aspect_ratio": true,
+                            "sixel_background": null,
+                            "image_id": null,
+                            "image_number": null,
+                            "placement_id": null,
+                            "usage_hints": 0,
+                            "unicode_placeholder": false,
+                            "z_index": 0,
+                            "cell_columns": null,
+                            "cell_rows": null,
+                            "source_offset_x": null,
+                            "source_offset_y": null,
+                            "cell_offset_x": null,
+                            "cell_offset_y": null,
+                            "move_cursor": true
+                        },
+                        "anchor": [0, 0]
+                    },
+                    "byte_len": 8
+                }
+            }
+        })
+    );
+    assert_eq!(
+        serde_json::to_value(SessionEvent::ImageContentChunk {
+            chunk: FrameImageChunk {
+                transfer_id: 1,
+                offset: 0,
+                last: true,
+                bytes: vec![0, 1, 2, 3, 4, 5, 6, 7],
+            },
+        })
+        .expect("the image chunk encodes"),
+        json!({
+            "ImageContentChunk": {
+                "chunk": {
+                    "transfer_id": 1,
+                    "offset": 0,
+                    "last": true,
+                    "bytes": "AAECAwQFBgc="
+                }
+            }
+        })
+    );
 }
 
 #[test]
@@ -371,7 +430,7 @@ fn the_event_wire_shape_belongs_to_this_protocol_version() {
     // the same commit; adding a whole frame, which an older client skips as
     // unknown and keeps reading past, does not.
     //
-    // Shape as of protocol version 2. Round-trip tests cannot catch this: one
+    // Shape as of protocol version 3. Round-trip tests cannot catch this: one
     // build encoding and decoding its own structs always agrees with itself.
     let id = "00000000-0000-0000-0000-000000000001";
 
@@ -381,6 +440,7 @@ fn the_event_wire_shape_belongs_to_this_protocol_version() {
             .map(|event| serde_json::to_value(event).expect("event encodes"))
             .collect::<Vec<serde_json::Value>>(),
         vec![
+            json!("ImageCacheReset"),
             json!({ "PaneCreated": { "pane_id": id, "tab_id": id } }),
             json!({ "PaneProcessExited": { "pane_id": id, "exit_code": 130 } }),
             json!({ "PaneClosing": { "pane_id": id } }),
