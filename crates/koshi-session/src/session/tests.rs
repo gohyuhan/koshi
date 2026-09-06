@@ -53,6 +53,47 @@ fn client_viewing(active_tab: TabId) -> Client {
     )
 }
 
+#[test]
+fn tab_cell_size_uses_the_oldest_measured_viewer_and_changes_on_detach() {
+    use koshi_core::geometry::PixelCellSize;
+    let tab = TabId::new();
+    let other_tab = TabId::new();
+    let mut session = Session::new(
+        SessionId::new(),
+        "images".to_owned(),
+        SystemTime::UNIX_EPOCH,
+        ClientRegistry::new(),
+    );
+    let mut clients = [
+        client_viewing(tab),
+        client_viewing(tab),
+        client_viewing(other_tab),
+    ];
+    clients.sort_by_key(Client::id);
+    let first = clients[0].id();
+    let second = clients[1].id();
+    clients[0].update_active_tab(tab);
+    clients[1].update_active_tab(tab);
+    clients[2].update_active_tab(other_tab);
+    clients[1].update_cell_size(PixelCellSize::new(12, 24).expect("nonzero"));
+    clients[2].update_cell_size(PixelCellSize::new(8, 16).expect("nonzero"));
+    for client in clients {
+        session.clients.attach(client);
+    }
+    assert_eq!(session.tab_cell_size(tab), PixelCellSize::new(12, 24));
+    session
+        .clients
+        .get_mut(first)
+        .expect("client")
+        .update_cell_size(PixelCellSize::new(10, 20).expect("nonzero"));
+    assert_eq!(session.tab_cell_size(tab), PixelCellSize::new(10, 20));
+    session.clients.detach(first);
+    assert_eq!(session.tab_cell_size(tab), PixelCellSize::new(12, 24));
+    session.clients.detach(second);
+    assert_eq!(session.tab_cell_size(tab), None);
+    assert_eq!(session.tab_cell_size(other_tab), PixelCellSize::new(8, 16));
+}
+
 /// The id of the tab a `new_tab` call just created, read off its `TabCreated`.
 fn created_tab_id(events: &[Event]) -> TabId {
     events

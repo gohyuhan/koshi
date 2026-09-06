@@ -17,12 +17,146 @@ use ratatui::style::Style;
 use koshi_core::ids::PaneId;
 use koshi_terminal::graphics::{GraphicsProtocol, ImageRecord};
 use koshi_terminal::state::ImagePlacementId;
+use koshi_terminal::style::Style as CellStyle;
 
 use crate::render::{content_rect, find_pane, pane_area, place};
 use crate::snapshot::{CommittedRegions, ImagePlacementSnapshot, RenderSnapshot};
 
 /// The text a client paints when it cannot display terminal image pixels.
 pub const TERMINAL_IMAGE_UNAVAILABLE: &str = "terminal image unavailable";
+
+/// The largest shared cell snapshot used to classify image composition.
+pub const MAX_IMAGE_CELL_SNAPSHOT_CELLS: usize = 262_144;
+
+/// The identity of one image placement in a rendered pane.
+pub type ImagePlacementKey = (PaneId, ImagePlacementId);
+
+/// The cell facts needed to classify image composition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageCellState {
+    /// The base character in the cell.
+    pub ch: char,
+    /// The terminal display width of the cell.
+    pub width: u8,
+    /// Whether the cell has combining or joined code points.
+    pub has_combining: bool,
+    /// The terminal style applied to the cell.
+    pub style: CellStyle,
+}
+
+impl Default for ImageCellState {
+    fn default() -> Self {
+        Self {
+            ch: ' ',
+            width: 1,
+            has_combining: false,
+            style: CellStyle::default(),
+        }
+    }
+}
+
+/// One bounded row-major snapshot of rendered cell facts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageCellSnapshot {
+    /// The absolute frame area represented by `cells`.
+    pub area: RatatuiRect,
+    cells: Vec<ImageCellState>,
+}
+
+impl ImageCellSnapshot {
+    /// Build a row-major cell snapshot when the area and cell count match.
+    #[must_use]
+    pub fn from_cells(area: RatatuiRect, cells: Vec<ImageCellState>) -> Option<Self> {
+        let expected = usize::from(area.width).checked_mul(usize::from(area.height))?;
+        if expected > MAX_IMAGE_CELL_SNAPSHOT_CELLS || cells.len() != expected {
+            return None;
+        }
+        Some(Self { area, cells })
+    }
+
+    /// Return the cell at an absolute frame position.
+    #[must_use]
+    pub fn cell(&self, x: u16, y: u16) -> Option<ImageCellState> {
+        if x < self.area.x || y < self.area.y || x >= self.area.right() || y >= self.area.bottom() {
+            return None;
+        }
+        let row = usize::from(y - self.area.y);
+        let column = usize::from(x - self.area.x);
+        let index = row
+            .checked_mul(usize::from(self.area.width))?
+            .checked_add(column)?;
+        self.cells.get(index).copied()
+    }
+}
+
+/// Snapshot the rendered cell facts in one bounded frame area.
+pub fn image_cell_snapshot(
+    snapshot: &RenderSnapshot,
+    committed_regions: &CommittedRegions,
+    area: RatatuiRect,
+) -> Option<ImageCellSnapshot> {
+    let cells = usize::from(area.width).checked_mul(usize::from(area.height))?;
+    if cells > MAX_IMAGE_CELL_SNAPSHOT_CELLS {
+        return None;
+    }
+    let mut values = Vec::new();
+    values.try_reserve_exact(cells).ok()?;
+    values.resize(cells, ImageCellState::default());
+    if cells == 0 {
+        return Some(ImageCellSnapshot {
+            area,
+            cells: values,
+        });
+    }
+
+    let content = content_rect(
+        pane_area(committed_regions, area),
+        snapshot.session.active_tab.effective_size,
+    );
+    let offset = koshi_core::geometry::Point {
+        x: content.x,
+        y: content.y,
+    };
+    for slot in &snapshot.session.active_tab.layout_solved {
+        if !slot.visible {
+            continue;
+        }
+        let Some(inner) = slot.inner_rect else {
+            continue;
+        };
+        let Some(pane) = find_pane(snapshot, slot.pane_id) else {
+            continue;
+        };
+        let Some(view) = &pane.grid_view else {
+            continue;
+        };
+        let pane_area = place(inner, offset).intersection(area);
+        for row in 0..pane_area.height {
+            let y = pane_area.y + row;
+            let grid_row = y.saturating_sub(place(inner, offset).y);
+            for column in 0..pane_area.width {
+                let x = pane_area.x + column;
+                let grid_column = x.saturating_sub(place(inner, offset).x);
+                let Some(cell) = view.grid.cell(grid_row, grid_column) else {
+                    continue;
+                };
+                let index = usize::from(y - area.y)
+                    .checked_mul(usize::from(area.width))?
+                    .checked_add(usize::from(x - area.x))?;
+                values[index] = ImageCellState {
+                    ch: cell.ch(),
+                    width: cell.width(),
+                    has_combining: !cell.combining().is_empty(),
+                    style: cell.style(),
+                };
+            }
+        }
+    }
+    Some(ImageCellSnapshot {
+        area,
+        cells: values,
+    })
+}
 
 /// The image output capability selected for one attached terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,12 +301,14 @@ pub fn image_paints(
                 continue;
             }
             let kitty = record.protocol == GraphicsProtocol::Kitty;
-            let cell_offset_x = (kitty && target.x == image_rect.x)
-                .then_some(record.display.cell_offset_x)
-                .flatten();
-            let cell_offset_y = (kitty && target.y == image_rect.y)
-                .then_some(record.display.cell_offset_y)
-                .flatten();
+            let cell_offset_x =
+                (kitty && target.x == image_rect.x && placement.geometry().offset.x == 0)
+                    .then_some(record.display.cell_offset_x)
+                    .flatten();
+            let cell_offset_y =
+                (kitty && target.y == image_rect.y && placement.geometry().offset.y == 0)
+                    .then_some(record.display.cell_offset_y)
+                    .flatten();
             let z_index = record.display.z_index;
             let mut paint =
                 ImagePaint::new(pane.id, placement.id(), record, target, source, z_index)
@@ -189,7 +325,14 @@ pub fn image_paints(
         }
     }
 
-    paints.sort_by_key(|paint| (paint.z_index, paint.order));
+    paints.sort_by_key(|paint| {
+        (
+            paint.z_index,
+            paint.record.display.image_id.unwrap_or(0),
+            paint.record.display.placement_id.unwrap_or(0),
+            paint.order,
+        )
+    });
     paints
 }
 
@@ -233,6 +376,57 @@ pub(crate) fn image_placeholder_rects(
         let inner = place(inner, offset);
         for placement in &pane.image_placements {
             if only_unavailable && placement.record().is_some() {
+                continue;
+            }
+            let Some(image_rect) = placement_rect(inner, placement) else {
+                continue;
+            };
+            let target = image_rect.intersection(inner).intersection(area);
+            if target.width > 0 && target.height > 0 {
+                rects.push(target);
+            }
+        }
+    }
+    rects
+}
+
+/// Return image rectangles that still use the unavailable marker.
+pub(crate) fn image_placeholder_rects_selected(
+    snapshot: &RenderSnapshot,
+    committed_regions: &CommittedRegions,
+    area: RatatuiRect,
+    available: Option<&[ImagePlacementKey]>,
+) -> Vec<RatatuiRect> {
+    if area.width == 0 || area.height == 0 || snapshot.session.active_tab.all_suppressed {
+        return Vec::new();
+    }
+
+    let content = content_rect(
+        pane_area(committed_regions, area),
+        snapshot.session.active_tab.effective_size,
+    );
+    let offset = koshi_core::geometry::Point {
+        x: content.x,
+        y: content.y,
+    };
+    let mut rects = Vec::new();
+    for slot in &snapshot.session.active_tab.layout_solved {
+        if !slot.visible {
+            continue;
+        }
+        let Some(inner) = slot.inner_rect else {
+            continue;
+        };
+        let Some(pane) = find_pane(snapshot, slot.pane_id) else {
+            continue;
+        };
+        if pane.grid_view.is_none() {
+            continue;
+        }
+        let inner = place(inner, offset);
+        for placement in &pane.image_placements {
+            let selected = available.is_some_and(|keys| keys.contains(&(pane.id, placement.id())));
+            if placement.record().is_some() && selected {
                 continue;
             }
             let Some(image_rect) = placement_rect(inner, placement) else {
@@ -306,11 +500,13 @@ fn source_rect(
 ) -> Option<ImageSourceRect> {
     let (source_origin_x, source_origin_y, source_width, source_height) =
         record.source_rect().ok()?;
-    let left = u32::from(target.x) - u32::from(image_rect.x);
-    let top = u32::from(target.y) - u32::from(image_rect.y);
+    let geometry = placement.geometry();
+    let left = u32::from(target.x) - u32::from(image_rect.x) + u32::from(geometry.offset.x);
+    let top = u32::from(target.y) - u32::from(image_rect.y) + u32::from(geometry.offset.y);
     let right = left + u32::from(target.width);
     let bottom = top + u32::from(target.height);
-    let (rows, columns) = placement.dimensions();
+    let rows = geometry.full_size.rows;
+    let columns = geometry.full_size.cols;
     let (x, width) = source_span(left, right, u32::from(columns), source_width);
     let (y, height) = source_span(top, bottom, u32::from(rows), source_height);
     Some(ImageSourceRect {

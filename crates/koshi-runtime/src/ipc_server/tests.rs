@@ -11,7 +11,7 @@ use koshi_core::command::{
     Command, CommandEnvelope, CommandResult, CommandSource, ToggleLockModeArgs,
 };
 use koshi_core::discovery::{SessionInfo, SessionOverview};
-use koshi_core::geometry::Size;
+use koshi_core::geometry::{PixelCellSize, Size};
 use koshi_core::ids::{CommandId, PaneId, SessionId, TabId};
 use koshi_core::key::{Key, KeyChord, ModFlags};
 use koshi_core::lock::LockMode;
@@ -175,11 +175,13 @@ fn image_snapshot(client_id: ClientId, record: Arc<ImageRecord>) -> RenderSnapsh
 fn image_record(red: u8) -> Arc<ImageRecord> {
     Arc::new(ImageRecord {
         protocol: GraphicsProtocol::Kitty,
-        image: DecodedImage {
+        image: (DecodedImage {
             width: 1,
             height: 1,
             rgba: vec![red, 0, 0, 255],
-        },
+        })
+        .into(),
+        animation: None,
         action: ImageAction::Display,
         display: ImageDisplay::default(),
         anchor: (0, 0),
@@ -569,6 +571,7 @@ fn attach_to_with_graphics(
                 resume_token: None,
                 pane_area: None,
                 graphics,
+                cell_size: None,
             },
         })
         .expect("send attach");
@@ -585,6 +588,78 @@ fn attach_to_with_graphics(
         },
     );
     connection
+}
+
+#[test]
+fn an_attach_forwards_its_initial_cell_measurement_before_the_session_reply() {
+    let client = ClientId::new();
+    let session = SessionId::new();
+    let runtime_dir = test_runtime_dir("attach-cell-size");
+    let (inbox_tx, inbox_rx) = mpsc::channel();
+    let server = IpcServer::start(&runtime_dir, session, inbox_tx, None).expect("start serving");
+    let mut connection = connect_to(&runtime_dir, session);
+    connection
+        .send(&hello_for(&runtime_dir, session))
+        .expect("send hello");
+    let _: IpcResponse = connection.recv().expect("hello reply");
+    let measurement = PixelCellSize::new(10, 20).expect("positive cell dimensions");
+    connection
+        .send(&IpcRequest {
+            request_id: 2,
+            kind: IpcRequestKind::Attach {
+                viewport: VIEWPORT,
+                filter: EventFilterSpec::All,
+                resume: None,
+                resume_token: None,
+                pane_area: None,
+                graphics: GraphicsCapabilities::default(),
+                cell_size: Some(measurement),
+            },
+        })
+        .expect("send attach");
+
+    let RuntimeEvent::IpcAttach {
+        cell_size, reply, ..
+    } = inbox_rx.recv().expect("attach reaches the dispatcher")
+    else {
+        panic!("expected IpcAttach");
+    };
+    assert_eq!(cell_size, Some(measurement));
+    let (events_tx, events_rx) = mpsc::channel();
+    reply
+        .send(Some(AttachAccepted {
+            client_id: client,
+            session_id: session,
+            structure: attached_structure(session),
+            events: events_rx,
+            ending_notice: Arc::new(EndingNotice::default()),
+            resume_token: ConnectionToken::new(MINTED_TOKEN),
+            pane_area: None,
+        }))
+        .expect("the dispatcher receives the accepted attach");
+    let _: IpcResponse = connection.recv().expect("attach reply");
+
+    connection
+        .send(&IpcRequest {
+            request_id: 3,
+            kind: IpcRequestKind::Resize {
+                viewport: VIEWPORT,
+                pane_area: None,
+                cell_size: Some(measurement),
+            },
+        })
+        .expect("send resize");
+    let RuntimeEvent::Resize { cell_size, .. } =
+        inbox_rx.recv().expect("resize reaches the dispatcher")
+    else {
+        panic!("expected Resize");
+    };
+    assert_eq!(cell_size, Some(measurement));
+
+    drop(events_tx);
+    drop(connection);
+    server.shutdown();
+    cleanup(&runtime_dir);
 }
 
 #[test]
@@ -641,7 +716,11 @@ fn a_kitty_terminal_receives_pixels_once_then_placement_only_frames() {
         &runtime_dir,
         session_id,
         client_id,
-        GraphicsCapabilities { kitty: true },
+        GraphicsCapabilities {
+            kitty: true,
+            iterm: false,
+            sixel: false,
+        },
     );
     let record = image_record(1);
     let snapshot = image_snapshot(client_id, Arc::clone(&record));
@@ -706,6 +785,76 @@ fn a_kitty_terminal_receives_pixels_once_then_placement_only_frames() {
 }
 
 #[test]
+fn any_native_terminal_receives_image_content() {
+    for (tag, graphics) in [
+        (
+            "iterm-image-stream",
+            GraphicsCapabilities {
+                kitty: false,
+                iterm: true,
+                sixel: false,
+            },
+        ),
+        (
+            "sixel-image-stream",
+            GraphicsCapabilities {
+                kitty: false,
+                iterm: false,
+                sixel: true,
+            },
+        ),
+    ] {
+        let runtime_dir = test_runtime_dir(tag);
+        let session_id = SessionId::new();
+        let client_id = ClientId::new();
+        let (inbox_tx, inbox_rx) = mpsc::channel();
+        let (dispatcher, events) = spawn_frame_dispatcher(inbox_rx, client_id, session_id);
+        let server =
+            IpcServer::start(&runtime_dir, session_id, inbox_tx, None).expect("start serving");
+        let mut connection = attach_to_with_graphics(&runtime_dir, session_id, client_id, graphics);
+        let record = image_record(1);
+        let snapshot = image_snapshot(client_id, Arc::clone(&record));
+        events
+            .send(Delivery::Frame(Box::new(snapshot.clone())))
+            .expect("send the image frame");
+
+        assert_eq!(
+            connection.recv::<SessionEvent>().expect("read the frame"),
+            SessionEvent::Painted {
+                frame: Box::new(wire_frame(&snapshot)),
+            }
+        );
+        assert_eq!(
+            connection
+                .recv::<SessionEvent>()
+                .expect("read the image start"),
+            SessionEvent::ImageContentStart {
+                image: wire_image_transfer(1, &record),
+            }
+        );
+        assert_eq!(
+            connection
+                .recv::<SessionEvent>()
+                .expect("read the image bytes"),
+            SessionEvent::ImageContentChunk {
+                chunk: FrameImageChunk {
+                    transfer_id: 1,
+                    offset: 0,
+                    last: true,
+                    bytes: vec![1, 0, 0, 255],
+                },
+            }
+        );
+
+        drop(connection);
+        drop(events);
+        server.shutdown();
+        dispatcher.join().expect("dispatcher exits");
+        cleanup(&runtime_dir);
+    }
+}
+
+#[test]
 fn two_placements_of_one_record_share_one_content_transfer() {
     let client_id = ClientId::new();
     let record = image_record(1);
@@ -737,7 +886,11 @@ fn a_kitty_terminal_receives_more_than_4096_placements_in_bounded_batches() {
         &runtime_dir,
         session_id,
         client_id,
-        GraphicsCapabilities { kitty: true },
+        GraphicsCapabilities {
+            kitty: true,
+            iterm: false,
+            sixel: false,
+        },
     );
     let mut snapshot = image_snapshot(client_id, image_record(1));
     snapshot.panes[0].image_placements = (1..=MAX_FRAME_IMAGE_TRANSFERS)
@@ -1727,6 +1880,7 @@ fn an_attached_connection_forwards_input_unanswered_and_detaches_on_any_other_re
             kind: IpcRequestKind::Resize {
                 viewport: resized,
                 pane_area: None,
+                cell_size: None,
             },
         })
         .expect("send resize");
@@ -1734,6 +1888,7 @@ fn an_attached_connection_forwards_input_unanswered_and_detaches_on_any_other_re
         client_id,
         size,
         pane_area,
+        cell_size,
     } = seen.recv().expect("resize event")
     else {
         panic!("expected Resize");
@@ -1741,6 +1896,7 @@ fn an_attached_connection_forwards_input_unanswered_and_detaches_on_any_other_re
     assert_eq!(client_id, client);
     assert_eq!(size, resized);
     assert_eq!(pane_area, None);
+    assert_eq!(cell_size, None);
 
     connection
         .send(&IpcRequest {
@@ -2666,6 +2822,7 @@ fn an_attached_client_of_another_local_user_is_detached_when_the_setting_goes_of
                 resume_token: None,
                 pane_area: None,
                 graphics: koshi_ipc::protocol::GraphicsCapabilities::default(),
+                cell_size: None,
             },
         })
         .expect("send attach");
@@ -3338,6 +3495,7 @@ fn rotating_the_token_takes_connections_again_after_the_intake_closed() {
                 resume_token: None,
                 pane_area: None,
                 graphics: koshi_ipc::protocol::GraphicsCapabilities::default(),
+                cell_size: None,
             },
         })
         .expect("send attach");
@@ -3644,6 +3802,7 @@ fn attach_saying_remote(
                 resume_token: None,
                 pane_area: None,
                 graphics: koshi_ipc::protocol::GraphicsCapabilities::default(),
+                cell_size: None,
             },
         })
         .expect("send attach");

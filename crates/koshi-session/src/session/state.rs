@@ -260,6 +260,16 @@ impl Session {
             .reduce(Size::min_axes)
     }
 
+    /// Return the oldest measured viewer's cell dimensions for this tab.
+    #[must_use]
+    pub fn tab_cell_size(&self, tab_id: TabId) -> Option<koshi_core::geometry::PixelCellSize> {
+        self.clients
+            .list_attached()
+            .filter(|client| client.active_tab() == tab_id && client.cell_size().is_some())
+            .min_by_key(|client| (client.attached_at(), client.id()))
+            .and_then(Client::cell_size)
+    }
+
     /// Request shutdown: move a `Starting`, `Running` or `Detaching` session to
     /// `Stopping`. State is retained: stopping destroys no tabs, panes or
     /// clients.

@@ -677,7 +677,7 @@ fn exceeds_chord_depth(key: &KeySequence, max_chord_depth: u8) -> bool {
 
 /// True when the leader is reachable by plain typing: a chord leader that is
 /// itself typeable, or a modifier-run leader whose modifiers plain typing
-/// produces ([`ModFlags::is_typing`] — Shift alone merges into typed keys).
+/// produces ([`koshi_core::key::ModFlags::is_typing`] — Shift alone merges into typed keys).
 fn leader_is_typeable(leader: Leader) -> bool {
     match leader {
         Leader::Mods(mods) => mods.is_typing(),

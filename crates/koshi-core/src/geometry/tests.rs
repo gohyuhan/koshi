@@ -11,6 +11,48 @@ fn rect(x: u16, y: u16, cols: u16, rows: u16) -> Rect {
 }
 
 #[test]
+fn image_geometry_validates_the_visible_crop_without_overflow() {
+    let geometry = ImageCellGeometry {
+        full_size: Size { cols: 4, rows: 5 },
+        offset: Point { x: 1, y: 2 },
+    };
+    for (size, expected) in [
+        (Size { cols: 3, rows: 3 }, true),
+        (Size { cols: 4, rows: 3 }, false),
+        (Size { cols: 3, rows: 4 }, false),
+        (Size { cols: 0, rows: 3 }, false),
+        (Size { cols: 3, rows: 0 }, false),
+        (
+            Size {
+                cols: u16::MAX,
+                rows: u16::MAX,
+            },
+            false,
+        ),
+    ] {
+        assert_eq!(geometry.contains(size), expected, "{size:?}");
+    }
+}
+
+#[test]
+fn pixel_cell_dimensions_are_nonzero_and_round_trip_exactly() {
+    assert_eq!(PixelCellSize::new(0, 20), None);
+    assert_eq!(PixelCellSize::new(10, 0), None);
+    let size = PixelCellSize::new(10, 20).expect("nonzero");
+    assert_eq!((size.width(), size.height()), (10, 20));
+    let value = serde_json::to_value(size).expect("serialize");
+    assert_eq!(value, serde_json::json!({"width": 10, "height": 20}));
+    assert_eq!(
+        serde_json::from_value::<PixelCellSize>(value).expect("restore"),
+        size
+    );
+    assert!(
+        serde_json::from_value::<PixelCellSize>(serde_json::json!({"width": 0, "height": 20}))
+            .is_err()
+    );
+}
+
+#[test]
 fn zero_is_empty() {
     let z = Rect::zero();
     assert!(z.is_empty());

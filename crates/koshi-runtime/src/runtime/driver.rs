@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use koshi_core::process::KillPolicy;
+use koshi_terminal::engine::TerminalEngine;
 
 use crate::runtime::event::RuntimeEvent;
 use crate::server::Server;
@@ -80,9 +81,14 @@ impl Server {
                 client_id,
                 size,
                 pane_area,
+                cell_size,
             } => {
-                let events = self.handle_client_resize(client_id, size, pane_area);
+                let events =
+                    self.handle_client_resize_with_cell_size(client_id, size, pane_area, cell_size);
                 self.publish_events(&events);
+            }
+            RuntimeEvent::CellSize { client_id, size } => {
+                self.handle_client_cell_size(client_id, size)
             }
             // The loop's generic wake-up. The session holds no deadline of its
             // own: a key sequence expires on the viewer that opened it.
@@ -98,6 +104,7 @@ impl Server {
                 resume_token,
                 viewport,
                 pane_area,
+                cell_size,
                 filter,
                 attached_at,
                 remote,
@@ -106,11 +113,12 @@ impl Server {
                 // The client and its subscription are registered together here,
                 // so the structure in the answer and the queue's first event
                 // describe one continuous state.
-                let _ = reply.send(self.handle_ipc_attach(
+                let _ = reply.send(self.handle_ipc_attach_with_cell_size(
                     resume,
                     resume_token,
                     viewport,
                     pane_area,
+                    cell_size,
                     filter,
                     attached_at,
                     remote,
@@ -142,12 +150,32 @@ impl Server {
     /// sleep until an event, `Some(ZERO)` to render now, else the time left on
     /// the current cadence.
     pub fn next_render_wakeup(&self, now: Instant) -> Option<Duration> {
-        self.render_scheduler.next_wakeup(now)
+        let animation_wakeup = self
+            .terminal_engines
+            .values()
+            .filter_map(TerminalEngine::next_animation_delay)
+            .map(|delay| delay.saturating_sub(now.saturating_duration_since(self.animation_clock)))
+            .min();
+        match (self.render_scheduler.next_wakeup(now), animation_wakeup) {
+            (Some(render), Some(animation)) => Some(render.min(animation)),
+            (Some(render), None) => Some(render),
+            (None, Some(animation)) => Some(animation),
+            (None, None) => None,
+        }
     }
 
     /// Whether a render is due at `now`. When `true`, the scheduler records the
     /// render and clears its pending reasons, so the caller must repaint.
     pub fn poll_render(&mut self, now: Instant) -> bool {
+        let elapsed = now.saturating_duration_since(self.animation_clock);
+        self.animation_clock = now;
+        let animations_changed = self
+            .terminal_engines
+            .values_mut()
+            .any(|engine| engine.advance_animations(elapsed));
+        if animations_changed {
+            self.render_scheduler.invalidate();
+        }
         self.render_scheduler.poll(now)
     }
 

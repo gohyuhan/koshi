@@ -317,7 +317,7 @@ impl Server {
 ///
 /// The client takes the session's starting lock: a session seeded from a
 /// profile carrying `lock` attaches it in
-/// [`LockMode::Locked`](koshi_core::lock::LockMode::Locked), and the flag is
+/// [`LockMode::Locked`], and the flag is
 /// spent, so no later attach is locked. Emits no event; the first frame this
 /// client is painted into carries the mode.
 fn attach_first_client(

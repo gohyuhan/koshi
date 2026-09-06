@@ -187,6 +187,8 @@ pub struct Server {
     /// Decides when the dispatcher repaints: event handlers mark invalidation
     /// reasons on it, the event loop polls it for render timing.
     pub(crate) render_scheduler: RenderScheduler,
+    /// Monotonic time at which retained image animations were last advanced.
+    pub(crate) animation_clock: Instant,
     /// Receiving end of the single runtime event inbox; the loop drains it.
     inbox_rx: Receiver<RuntimeEvent>,
     /// Sending end of the inbox, cloned for each pane's PTY forwarder threads so
@@ -265,6 +267,7 @@ impl Server {
             ipc_server: None,
             action_registry: ActionRegistry::new(),
             render_scheduler: RenderScheduler::new(),
+            animation_clock: Instant::now(),
             inbox_rx,
             inbox_tx,
             draining: false,

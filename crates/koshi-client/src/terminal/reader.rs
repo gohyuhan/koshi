@@ -37,6 +37,14 @@ impl InputReader<PlatformEventSource> {
 }
 
 impl<S: EventSource> InputReader<S> {
+    #[cfg(test)]
+    pub(super) fn from_source(source: S) -> Self {
+        Self {
+            source,
+            buffered: VecDeque::with_capacity(32),
+        }
+    }
+
     /// Wait until an event accepted by `filter` is buffered.
     pub(super) fn poll(
         &mut self,

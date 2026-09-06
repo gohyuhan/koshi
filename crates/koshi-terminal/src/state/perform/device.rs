@@ -48,6 +48,35 @@ fn version_number(version: &str) -> u32 {
 }
 
 impl TerminalState {
+    /// Answer character and pixel size queries for the active pane.
+    pub(super) fn report_window_size(&mut self, params: &vte::Params) {
+        if params.len() != 1 {
+            return;
+        }
+        let (rows, columns) = self.active_grid().dimensions();
+        let reply = match first_param(params) {
+            Some(18) => format!("\x1b[8;{rows};{columns}t"),
+            Some(14) => {
+                let Some(size) = self.cell_size else {
+                    return;
+                };
+                format!(
+                    "\x1b[4;{};{}t",
+                    u32::from(rows) * u32::from(size.height()),
+                    u32::from(columns) * u32::from(size.width())
+                )
+            }
+            Some(16) => {
+                let Some(size) = self.cell_size else {
+                    return;
+                };
+                format!("\x1b[6;{};{}t", size.height(), size.width())
+            }
+            _ => return,
+        };
+        self.replies.extend_from_slice(reply.as_bytes());
+    }
+
     /// Reply to Primary Device Attributes (DA1, `CSI c` / `CSI 0 c`): queue
     /// `CSI ? 62 ; 22 c`, identifying a VT220-class terminal with the ANSI
     /// color extension (22). A nonzero parameter gets no reply.

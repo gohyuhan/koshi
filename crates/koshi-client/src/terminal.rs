@@ -10,11 +10,8 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, TryLockError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use base64::engine::general_purpose::STANDARD;
-use base64::Engine;
-use flate2::{Compress, Compression, FlushCompress, Status};
 use ratatui::backend::Backend;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::cursor::SetCursorStyle;
@@ -26,43 +23,49 @@ use ratatui::Terminal;
 
 use crate::attach::ViewerPaint;
 use crate::{core_pane_area, Client};
-use koshi_core::geometry::Size;
+use koshi_core::geometry::{PixelCellSize, Size};
 use koshi_core::ids::{ClientId, PaneId};
 use koshi_core::key::KeySequence;
 use koshi_input::host::{Event, WindowSize};
 use koshi_input::keyboard::decode_key;
 use koshi_input::mouse::decode_mouse;
+use koshi_ipc::protocol::GraphicsCapabilities;
+use koshi_iterm::{
+    iterm_feature_string_supports_file, iterm_feature_string_supports_sixel,
+    ITERM_CAPABILITIES_QUERY,
+};
+use koshi_kitty::{
+    write_kitty_abort, write_kitty_delete_all, write_kitty_image_delete, write_kitty_placement,
+    write_kitty_placement_delete, write_kitty_support_query, KittyOutputError,
+    KittyPlacement as KittyWirePlacement, KittyUpload as KittyCodecUpload, KITTY_QUERY_IMAGE_ID,
+};
 use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_renderer::snapshot::{
     CommittedRegions, CursorStyle, KeymapHints, RenderSnapshot, ViewerChrome,
 };
 use koshi_renderer::theme::Theme;
 use koshi_renderer::{
-    cursor_position, cursor_style, image_paints, render_frame_with_images, ImagePaint,
-    ImageRenderMode, ImageSourceRect,
+    cursor_position, cursor_style, image_cell_snapshot, image_paints,
+    render_frame_with_image_availability, ImagePaint, ImagePlacementKey, ImageRenderMode,
+    ImageSourceRect,
 };
 use koshi_runtime::runtime::event::RuntimeEvent;
+use koshi_sixel::{PRIMARY_DEVICE_ATTRIBUTES_QUERY, SIXEL_GEOMETRY_QUERY, SIXEL_PALETTE_QUERY};
 use koshi_terminal::state::CursorShape;
 
 use self::platform::{PlatformWaker, TerminalDevice};
 use self::reader::InputReader;
 
+mod image_output;
 mod platform;
 mod reader;
 
+pub(crate) use self::image_output::{ImageOutputKind, ImageOutputState};
+
 const TERMINAL_QUERY_TIMEOUT: Duration = Duration::from_millis(300);
 
-/// Image id reserved for the startup Kitty graphics query.
-const KITTY_QUERY_IMAGE_ID: u32 = u32::MAX;
-
-/// A one-pixel RGB Kitty query that stores no terminal-side image.
-const KITTY_SUPPORT_QUERY: &[u8] = b"\x1b_Gi=4294967295,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\";
-
-/// Delete all Kitty image data owned by the active terminal screen.
-const KITTY_DELETE_ALL: &[u8] = b"\x1b_Ga=d,d=A,q=2;\x1b\\";
-
-/// Request primary device attributes after the Kitty graphics query.
-const PRIMARY_DEVICE_ATTRIBUTES_QUERY: &[u8] = b"\x1b[c";
+/// Request a terminal's current cell dimensions in pixels.
+const CELL_SIZE_QUERY: &[u8] = b"\x1b[16t";
 
 /// Enter the alternate screen and enable keyboard, mouse, and paste reports.
 const APPLICATION_MODE_SETUP: &[u8] = b"\x1b[?1049h\x1b[>7u\x1b[?1003h\x1b[?1006h\x1b[?2004h";
@@ -72,7 +75,7 @@ const APPLICATION_MODE_CLEANUP: &[u8] =
     b"\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?1049l\x1b[?25h\x1b[0 q";
 
 /// Paints a render snapshot into ratatui's frame buffer. Every field is handed
-/// straight to [`render_frame_with_images`].
+/// straight to [`koshi_renderer::render_frame_with_images`].
 pub(crate) struct SnapshotWidget<'a> {
     /// The frame the session handed out.
     pub(crate) snapshot: &'a RenderSnapshot,
@@ -88,11 +91,13 @@ pub(crate) struct SnapshotWidget<'a> {
     pub(crate) committed_regions: &'a CommittedRegions,
     /// The image mode selected for this outer terminal.
     pub(crate) image_mode: ImageRenderMode,
+    /// The image placements whose native bytes are ready for this frame.
+    pub(crate) image_available: Option<&'a [ImagePlacementKey]>,
 }
 
 impl Widget for SnapshotWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        render_frame_with_images(
+        render_frame_with_image_availability(
             self.snapshot,
             self.committed_regions,
             self.theme,
@@ -100,6 +105,7 @@ impl Widget for SnapshotWidget<'_> {
             self.pending,
             self.viewer,
             self.image_mode,
+            self.image_available,
             area,
             buf,
         );
@@ -113,6 +119,17 @@ pub(crate) enum GraphicsSupport {
     Unsupported,
     /// Emit Kitty raw-RGBA image commands after the text buffer is painted.
     Kitty,
+    /// Advertise iTerm2 images for connection-local worker output.
+    Iterm,
+    /// Advertise Sixel images for connection-local worker output.
+    Sixel {
+        /// Number of colors available to the Sixel encoder.
+        palette_colors: usize,
+        /// Maximum Sixel width in pixels, or `None` when the host reports no limit.
+        max_width: Option<u32>,
+        /// Maximum Sixel height in pixels, or `None` when the host reports no limit.
+        max_height: Option<u32>,
+    },
 }
 
 /// Native Kitty image identities retained by one outer terminal connection.
@@ -131,6 +148,8 @@ pub(crate) struct KittyImageCache {
     upload: Option<KittyUpload>,
     /// Whether the terminal-side image cache must be cleared before reuse.
     needs_reset: bool,
+    /// Whether a failed Kitty write may have left an APC transfer open.
+    needs_abort: bool,
     /// The next nonzero Kitty image number.
     next_image_number: u32,
     /// The next nonzero Kitty placement identity.
@@ -196,26 +215,14 @@ impl KittyPlacement {
     }
 }
 
-/// One zlib-compressed Kitty upload advanced between attachment-loop passes.
+/// One Kitty upload advanced between attachment-loop passes.
 struct KittyUpload {
     /// Connection-local content identity received from the session.
     content_id: u64,
     /// Record retained while its compressed bytes are generated and sent.
     record: Arc<koshi_terminal::graphics::ImageRecord>,
-    /// Kitty image number assigned to this transmission.
-    image_number: u32,
-    /// Incremental zlib encoder for the RGBA bytes.
-    compressor: Compress,
-    /// Number of raw RGBA bytes consumed by `compressor`.
-    input_offset: usize,
-    /// Compressed bytes waiting to be sent.
-    compressed: Vec<u8>,
-    /// First unsent byte in `compressed`.
-    compressed_offset: usize,
-    /// Whether the zlib stream reached its end marker.
-    compression_complete: bool,
-    /// Whether at least one Kitty data chunk reached the writer.
-    transmission_started: bool,
+    /// The bounded Kitty upload encoder.
+    codec: KittyCodecUpload,
 }
 
 impl Default for KittyImageCache {
@@ -228,6 +235,7 @@ impl Default for KittyImageCache {
             cursor: None,
             upload: None,
             needs_reset: false,
+            needs_abort: false,
             next_image_number: 1,
             next_placement_id: 1,
         }
@@ -249,7 +257,138 @@ impl GraphicsSupport {
         match self {
             Self::Unsupported => ImageRenderMode::Placeholder,
             Self::Kitty => ImageRenderMode::Native,
+            Self::Iterm | Self::Sixel { .. } => ImageRenderMode::Native,
         }
+    }
+
+    /// Convert the selected connection-local protocol to its attach report.
+    pub(crate) const fn capabilities(self) -> GraphicsCapabilities {
+        match self {
+            Self::Unsupported => GraphicsCapabilities {
+                kitty: false,
+                iterm: false,
+                sixel: false,
+            },
+            Self::Kitty => GraphicsCapabilities {
+                kitty: true,
+                iterm: false,
+                sixel: false,
+            },
+            Self::Iterm => GraphicsCapabilities {
+                kitty: false,
+                iterm: true,
+                sixel: false,
+            },
+            Self::Sixel { .. } => GraphicsCapabilities {
+                kitty: false,
+                iterm: false,
+                sixel: true,
+            },
+        }
+    }
+}
+
+/// The values gathered by one bounded terminal capability probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TerminalProbe {
+    /// The preferred protocol proved by the terminal.
+    graphics: GraphicsSupport,
+    /// The cell dimensions reported by the terminal, if valid.
+    cell_size: Option<PixelCellSize>,
+    /// Whether the probe's CSI 16t request still awaits an outer-terminal reply.
+    cell_size_query_pending: bool,
+}
+
+impl TerminalProbe {
+    /// Build the result for a terminal that answered no capability query.
+    const fn unsupported() -> Self {
+        Self {
+            graphics: GraphicsSupport::Unsupported,
+            cell_size: None,
+            cell_size_query_pending: false,
+        }
+    }
+}
+
+/// Coordinates cell-size requests with resize reports on one terminal.
+#[derive(Debug)]
+pub(crate) struct CellSizeQuery {
+    /// The most recent measurement accepted for the current viewport.
+    current: Option<PixelCellSize>,
+    /// Whether a CSI 16t request has not received its reply.
+    pending: bool,
+    /// Whether the pending reply belongs to an older viewport.
+    discard_pending: bool,
+    /// Whether this attachment can write terminal queries.
+    enabled: bool,
+}
+
+impl CellSizeQuery {
+    /// Build a coordinator with the measurement captured before Attach and the
+    /// probe query's outstanding state.
+    pub(crate) fn new(current: Option<PixelCellSize>, enabled: bool, pending: bool) -> Self {
+        Self {
+            current,
+            pending: enabled && pending,
+            discard_pending: false,
+            enabled,
+        }
+    }
+
+    /// Return the measurement to place in the next Attach.
+    pub(crate) fn current(&self) -> Option<PixelCellSize> {
+        self.current
+    }
+
+    /// Invalidate or replace the measurement for a resized viewport.
+    ///
+    /// A pending reply is discarded because CSI 16t carries no request id. A
+    /// fresh request is needed only when the resize has no usable local metric.
+    pub(crate) fn resize(&mut self, current: Option<PixelCellSize>) -> bool {
+        self.current = current;
+        if self.pending {
+            self.discard_pending = true;
+            false
+        } else {
+            current.is_none()
+        }
+    }
+
+    /// Accept a reply, returning the value to send to the session and whether
+    /// a fresh query must be written after discarding an older reply.
+    pub(crate) fn accept(&mut self, size: PixelCellSize) -> (Option<PixelCellSize>, bool) {
+        if !self.pending {
+            return (None, false);
+        }
+        self.pending = false;
+        if self.discard_pending {
+            self.discard_pending = false;
+            return (None, self.current.is_none());
+        }
+        self.current = Some(size);
+        (Some(size), false)
+    }
+
+    /// Write one CSI 16t request at the attachment loop's output boundary.
+    pub(crate) fn request(&mut self) {
+        if !self.enabled || self.pending {
+            return;
+        }
+        let mut writer = io::stdout().lock();
+        if let Err(error) = self.request_to(&mut writer) {
+            tracing::warn!(%error, "could not request terminal cell dimensions");
+        }
+    }
+
+    /// Write one request through `writer`, retaining pending state after an
+    /// attempted write until a matching ordered reply is consumed.
+    fn request_to<W: Write>(&mut self, writer: &mut W) -> io::Result<()> {
+        if !self.enabled || self.pending || self.current.is_some() {
+            return Ok(());
+        }
+        self.pending = true;
+        writer.write_all(CELL_SIZE_QUERY)?;
+        writer.flush()
     }
 }
 
@@ -257,6 +396,10 @@ impl GraphicsSupport {
 pub(crate) struct TerminalOwner {
     /// Native graphics support proved by the terminal's protocol answer.
     graphics: GraphicsSupport,
+    /// Initial pixel dimensions of one terminal cell, if the probe reported them.
+    cell_size: Option<PixelCellSize>,
+    /// Whether the initial CSI 16t query still awaits the outer terminal.
+    cell_size_query_pending: bool,
     /// Whether standard output is the terminal receiving rendered frames.
     output_is_terminal: bool,
     /// Terminal handle used for protocol output and platform-mode restoration.
@@ -271,7 +414,7 @@ pub(crate) struct TerminalOwner {
     shutdown: Arc<AtomicBool>,
     /// Whether this attachment enabled application-level terminal modes.
     application_modes_active: Arc<AtomicBool>,
-    /// Ensures one path deletes this attachment's Kitty images before restore.
+    /// Ensures one path cancels Kitty transfers and deletes this attachment's images.
     image_cleanup_claimed: Arc<AtomicBool>,
     /// The input thread started after Attach succeeds.
     input_thread: Option<thread::JoinHandle<()>>,
@@ -286,28 +429,37 @@ impl TerminalOwner {
     pub(crate) fn start() -> Result<Self, String> {
         let input_is_terminal = io::stdin().is_terminal();
         let output_is_terminal = io::stdout().is_terminal();
-        let (graphics, terminal, reader, waker) =
+        let (graphics, cell_size, cell_size_query_pending, terminal, reader, waker) =
             if terminal_device_needed(input_is_terminal, output_is_terminal) {
                 let (mut terminal, source) = TerminalDevice::open()
                     .map_err(|error| format!("could not open the terminal: {error}"))?;
                 let mut reader = InputReader::new(source);
-                let graphics = graphics_support_for_output(output_is_terminal, || {
+                let probe = graphics_support_for_output(output_is_terminal, || {
                     with_raw_mode(
                         &mut terminal,
                         |terminal| terminal.enter_raw_mode(),
-                        |terminal| probe_kitty_graphics(terminal, &mut reader),
+                        |terminal| probe_terminal(terminal, &mut reader),
                         |terminal| terminal.enter_cooked_mode(),
                     )
                 })
                 .map_err(|error| format!("could not probe terminal graphics support: {error}"))?;
                 let waker = reader.waker();
-                (graphics, Some(terminal), Some(reader), Some(waker))
+                (
+                    probe.graphics,
+                    probe.cell_size,
+                    probe.cell_size_query_pending,
+                    Some(terminal),
+                    Some(reader),
+                    Some(waker),
+                )
             } else {
-                (GraphicsSupport::Unsupported, None, None, None)
+                (GraphicsSupport::Unsupported, None, false, None, None, None)
             };
         let image_cleanup_claimed = Arc::new(AtomicBool::new(false));
         Ok(Self {
             graphics,
+            cell_size,
+            cell_size_query_pending,
             output_is_terminal,
             terminal: Arc::new(Mutex::new(terminal)),
             reader,
@@ -323,6 +475,21 @@ impl TerminalOwner {
     /// Return the native graphics support proved by the terminal probe.
     pub(crate) fn graphics(&self) -> GraphicsSupport {
         self.graphics
+    }
+
+    /// Return the cell dimensions captured during the initial terminal probe.
+    #[allow(dead_code)]
+    pub(crate) fn cell_size(&self) -> Option<PixelCellSize> {
+        self.cell_size
+    }
+
+    /// Build the cell-size coordinator used after this terminal attaches.
+    pub(crate) fn cell_size_query(&self) -> CellSizeQuery {
+        CellSizeQuery::new(
+            self.cell_size,
+            self.output_is_terminal,
+            self.cell_size_query_pending,
+        )
     }
 
     /// Register panic-safe image cleanup and terminal restoration.
@@ -366,7 +533,7 @@ impl TerminalOwner {
                     .map_err(|error| format!("could not enter terminal raw mode: {error}"))?;
                 if self.output_is_terminal {
                     self.application_modes_active.store(true, Ordering::Release);
-                    enable_terminal_modes(terminal)
+                    enable_terminal_modes(terminal, self.graphics)
                         .map_err(|error| format!("could not enable terminal modes: {error}"))?;
                 }
             } else if self.output_is_terminal || read_input {
@@ -436,12 +603,12 @@ fn terminal_device_needed(input_is_terminal: bool, output_is_terminal: bool) -> 
 /// Probe only when standard output is the terminal that will receive images.
 fn graphics_support_for_output(
     output_is_terminal: bool,
-    probe: impl FnOnce() -> io::Result<GraphicsSupport>,
-) -> io::Result<GraphicsSupport> {
+    probe: impl FnOnce() -> io::Result<TerminalProbe>,
+) -> io::Result<TerminalProbe> {
     if output_is_terminal {
         probe()
     } else {
-        Ok(GraphicsSupport::Unsupported)
+        Ok(TerminalProbe::unsupported())
     }
 }
 
@@ -557,46 +724,155 @@ fn restore_application_modes<W: Write>(
     write_terminal_cleanup(writer, graphics, image_cleanup_claimed)
 }
 
-/// Claim the one image cleanup allowed for an attachment.
+/// Claim the one Kitty cleanup allowed for an attachment.
 fn claim_image_cleanup(claimed: &AtomicBool) -> bool {
     !claimed.swap(true, Ordering::AcqRel)
 }
 
-/// Send a bounded Kitty query and use DA1 as the unsupported-terminal fence.
-fn probe_kitty_graphics(
-    terminal: &mut TerminalDevice,
-    reader: &mut InputReader,
-) -> io::Result<GraphicsSupport> {
-    write_kitty_graphics_query(terminal)?;
-    if !reader.poll(Some(TERMINAL_QUERY_TIMEOUT), is_kitty_probe_event)? {
-        return Ok(GraphicsSupport::Unsupported);
+/// Gather every capability reply available before one shared deadline.
+fn probe_terminal<S: reader::EventSource, W: Write>(
+    writer: &mut W,
+    reader: &mut InputReader<S>,
+) -> io::Result<TerminalProbe> {
+    write_terminal_probe_queries(writer)?;
+    let deadline = Instant::now() + TERMINAL_QUERY_TIMEOUT;
+    let mut replies = ProbeReplies::default();
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if !reader.poll(Some(remaining), is_probe_event)? {
+            break;
+        }
+        let event = reader.read(is_probe_event)?;
+        replies.observe(event);
+        if Instant::now() >= deadline {
+            break;
+        }
     }
-    match reader.read(is_kitty_probe_event)? {
-        Event::KittyGraphicsReply(reply) => Ok(if reply.ok {
+    Ok(replies.finish())
+}
+
+/// Replies collected while capability queries share one deadline.
+#[derive(Default)]
+struct ProbeReplies {
+    kitty: bool,
+    iterm_file: bool,
+    iterm_sixel: bool,
+    da1_sixel: bool,
+    palette: Option<Result<u32, koshi_input::host::GraphicAttributeError>>,
+    geometry: Option<Result<(u32, u32), koshi_input::host::GraphicAttributeError>>,
+    cell_size: Option<PixelCellSize>,
+}
+
+impl ProbeReplies {
+    /// Retain one parsed event that belongs to the capability probe.
+    fn observe(&mut self, event: Event) {
+        match event {
+            Event::KittyGraphicsReply(reply) if reply.image_id == KITTY_QUERY_IMAGE_ID => {
+                self.kitty |= reply.ok;
+            }
+            Event::TerminalFeatures(features) => {
+                self.iterm_file |= iterm_feature_string_supports_file(&features);
+                self.iterm_sixel |= iterm_feature_string_supports_sixel(&features);
+            }
+            Event::PrimaryDeviceAttributes(attributes) => {
+                self.da1_sixel |= attributes
+                    .get(1..)
+                    .is_some_and(|features| features.contains(&4));
+            }
+            Event::SixelGraphicsAttributeReply(reply) => match reply {
+                koshi_input::host::GraphicAttributeReply::Palette(value) => {
+                    if self.palette.is_none() {
+                        self.palette = Some(value);
+                    }
+                }
+                koshi_input::host::GraphicAttributeReply::Geometry(value) => {
+                    if self.geometry.is_none() {
+                        self.geometry = Some(value);
+                    }
+                }
+            },
+            Event::CellSize(size) => {
+                if self.cell_size.is_none() {
+                    self.cell_size = Some(size);
+                }
+            }
+            Event::KittyGraphicsReply(_)
+            | Event::Key(_)
+            | Event::Mouse(_)
+            | Event::WindowResized(_)
+            | Event::Paste(_)
+            | Event::FocusIn
+            | Event::FocusOut => {}
+        }
+    }
+
+    /// Select the preferred protocol and retain the measured cell size.
+    fn finish(self) -> TerminalProbe {
+        let graphics = if self.kitty {
             GraphicsSupport::Kitty
+        } else if self.iterm_file {
+            GraphicsSupport::Iterm
         } else {
-            GraphicsSupport::Unsupported
-        }),
-        Event::PrimaryDeviceAttributes => Ok(GraphicsSupport::Unsupported),
-        _ => unreachable!("the probe filter accepts only Kitty and DA1 replies"),
+            self.sixel_support().unwrap_or(GraphicsSupport::Unsupported)
+        };
+        TerminalProbe {
+            graphics,
+            cell_size: self.cell_size,
+            cell_size_query_pending: self.cell_size.is_none(),
+        }
+    }
+
+    /// Build bounded Sixel support from the terminal's positive evidence.
+    fn sixel_support(&self) -> Option<GraphicsSupport> {
+        let advertised = self.da1_sixel || self.iterm_sixel || matches!(self.geometry, Some(Ok(_)));
+        if !advertised {
+            return None;
+        }
+        let palette_colors = match self.palette {
+            Some(Ok(value)) if value < 2 => return None,
+            Some(Ok(value)) => value.min(256) as usize,
+            Some(Err(_)) | None => 2,
+        };
+        let (max_width, max_height) = match self.geometry {
+            Some(Ok((width, height))) => (
+                (width != 0).then_some(width),
+                (height != 0).then_some(height),
+            ),
+            Some(Err(_)) | None => (None, None),
+        };
+        Some(GraphicsSupport::Sixel {
+            palette_colors,
+            max_width,
+            max_height,
+        })
     }
 }
 
-/// Write the Kitty query followed by the DA1 fence and flush both together.
-fn write_kitty_graphics_query<W: Write>(writer: &mut W) -> io::Result<()> {
-    writer.write_all(KITTY_SUPPORT_QUERY)?;
+/// Write every bounded capability query and flush them as one probe batch.
+fn write_terminal_probe_queries<W: Write>(writer: &mut W) -> io::Result<()> {
+    write_kitty_support_query(writer).map_err(kitty_output_error)?;
+    writer.write_all(ITERM_CAPABILITIES_QUERY)?;
     writer.write_all(PRIMARY_DEVICE_ATTRIBUTES_QUERY)?;
+    writer.write_all(SIXEL_PALETTE_QUERY)?;
+    writer.write_all(SIXEL_GEOMETRY_QUERY)?;
+    writer.write_all(CELL_SIZE_QUERY)?;
     writer.flush()
 }
 
-/// Return whether an event completes the Kitty graphics support probe.
-fn is_kitty_probe_event(event: &Event) -> bool {
+/// Return whether an event belongs to the capability probe.
+fn is_probe_event(event: &Event) -> bool {
     matches!(event, Event::KittyGraphicsReply(reply) if reply.image_id == KITTY_QUERY_IMAGE_ID)
-        || *event == Event::PrimaryDeviceAttributes
+        || matches!(event, Event::TerminalFeatures(_))
+        || matches!(event, Event::PrimaryDeviceAttributes(_))
+        || matches!(event, Event::SixelGraphicsAttributeReply(_))
+        || matches!(event, Event::CellSize(_))
 }
 
 /// Request the terminal modes used by the attached viewer.
-fn enable_terminal_modes<W: Write>(writer: &mut W) -> io::Result<()> {
+fn enable_terminal_modes<W: Write>(writer: &mut W, graphics: GraphicsSupport) -> io::Result<()> {
+    if matches!(graphics, GraphicsSupport::Sixel { .. }) {
+        writer.write_all(image_output::sixel_mode_save())?;
+    }
     writer.write_all(APPLICATION_MODE_SETUP)?;
     writer.flush()
 }
@@ -608,8 +884,22 @@ fn write_terminal_cleanup<W: Write>(
     image_cleanup_claimed: &AtomicBool,
 ) -> io::Result<()> {
     let mut first_error = None;
-    if graphics == GraphicsSupport::Kitty && claim_image_cleanup(image_cleanup_claimed) {
-        retain_first_io_error(&mut first_error, writer.write_all(KITTY_DELETE_ALL));
+    if matches!(graphics, GraphicsSupport::Kitty) && claim_image_cleanup(image_cleanup_claimed) {
+        retain_first_io_error(
+            &mut first_error,
+            write_kitty_abort(writer).map_err(kitty_output_error),
+        );
+        retain_first_io_error(
+            &mut first_error,
+            write_kitty_delete_all(writer).map_err(kitty_output_error),
+        );
+    }
+    if matches!(graphics, GraphicsSupport::Sixel { .. }) {
+        retain_first_io_error(&mut first_error, image_output::write_image_abort(writer));
+        retain_first_io_error(
+            &mut first_error,
+            writer.write_all(image_output::sixel_mode_restore()),
+        );
     }
     retain_first_io_error(&mut first_error, writer.write_all(APPLICATION_MODE_CLEANUP));
     retain_first_io_error(&mut first_error, writer.flush());
@@ -678,6 +968,7 @@ fn run_terminal_input(
 fn terminal_runtime_event(client_id: ClientId, event: Event) -> Option<RuntimeEvent> {
     match event {
         Event::Key(key) => decode_key(key).map(|chord| RuntimeEvent::KeyInput { client_id, chord }),
+        Event::CellSize(size) => Some(RuntimeEvent::CellSize { client_id, size }),
         Event::WindowResized(resize) => Some(resize_runtime_event(client_id, resize)),
         Event::Mouse(mouse) => Some(RuntimeEvent::MouseInput {
             client_id,
@@ -686,7 +977,9 @@ fn terminal_runtime_event(client_id: ClientId, event: Event) -> Option<RuntimeEv
         Event::Paste(text) => Some(RuntimeEvent::HostPaste { client_id, text }),
         Event::FocusIn
         | Event::FocusOut
-        | Event::PrimaryDeviceAttributes
+        | Event::PrimaryDeviceAttributes(_)
+        | Event::TerminalFeatures(_)
+        | Event::SixelGraphicsAttributeReply(_)
         | Event::KittyGraphicsReply(_) => None,
     }
 }
@@ -701,7 +994,23 @@ fn resize_runtime_event(client_id: ClientId, resize: WindowSize) -> RuntimeEvent
         client_id,
         size,
         pane_area: Some(core_pane_area(size)),
+        cell_size: pixel_cell_size_from_window(resize),
     }
+}
+
+/// Derive one cell's pixel dimensions from a Unix window report only when the
+/// complete pixel dimensions divide evenly across the reported grid.
+fn pixel_cell_size_from_window(resize: WindowSize) -> Option<PixelCellSize> {
+    let pixel_width = resize.pixel_width?;
+    let pixel_height = resize.pixel_height?;
+    if resize.cols == 0
+        || resize.rows == 0
+        || pixel_width % resize.cols != 0
+        || pixel_height % resize.rows != 0
+    {
+        return None;
+    }
+    PixelCellSize::new(pixel_width / resize.cols, pixel_height / resize.rows)
 }
 
 /// Build the viewer half and apply `loaded`'s viewer-owned files, in one step.
@@ -766,6 +1075,7 @@ pub(crate) fn paint_frame<B: Backend>(
     last_cursor: &mut Option<CursorStyle>,
 ) -> Result<(), PaintError<B::Error>> {
     let mut images = KittyImageCache::default();
+    let mut output = ImageOutputState::disabled();
     paint_frame_with_images(
         terminal,
         client,
@@ -774,6 +1084,8 @@ pub(crate) fn paint_frame<B: Backend>(
         frame_paint,
         ImageRenderMode::Placeholder,
         &mut images,
+        &mut output,
+        None,
         last_title,
         last_cursor,
     )
@@ -790,6 +1102,8 @@ pub(crate) fn paint_frame_with_images<B: Backend>(
     frame_paint: &ViewerPaint,
     image_mode: ImageRenderMode,
     images: &mut KittyImageCache,
+    output: &mut ImageOutputState,
+    cell_size: Option<PixelCellSize>,
     last_title: &mut String,
     last_cursor: &mut Option<CursorStyle>,
 ) -> Result<(), PaintError<B::Error>> {
@@ -803,6 +1117,8 @@ pub(crate) fn paint_frame_with_images<B: Backend>(
         frame_paint,
         image_mode,
         images,
+        output,
+        cell_size,
         last_title,
         last_cursor,
     )
@@ -819,6 +1135,8 @@ fn paint_frame_with_writer<B: Backend, W: Write>(
     frame_paint: &ViewerPaint,
     image_mode: ImageRenderMode,
     images: &mut KittyImageCache,
+    output: &mut ImageOutputState,
+    cell_size: Option<PixelCellSize>,
     last_title: &mut String,
     last_cursor: &mut Option<CursorStyle>,
 ) -> Result<(), PaintError<B::Error>> {
@@ -827,8 +1145,22 @@ fn paint_frame_with_writer<B: Backend, W: Write>(
     let cursor = cursor_style(snapshot);
     let cursor_changed = cursor != *last_cursor;
     let hints = client.frame_hints_for(frame_paint.mode, frame_paint.mouse_select);
-    let mut paint_area = Rect::default();
+    let size = terminal.size().map_err(PaintError::Backend)?;
+    let mut paint_area = Rect::new(0, 0, size.width, size.height);
     let mut hardware_cursor = None;
+    let native_output = output.kind().is_some();
+    let paints = image_paints(snapshot, committed_regions, paint_area);
+    let cells = native_output
+        .then(|| image_cell_snapshot(snapshot, committed_regions, paint_area).map(Arc::new))
+        .flatten();
+    if native_output {
+        output.submit_frame(&paints, cells, cell_size);
+        output.poll();
+        if output.screen_reset_needed() {
+            terminal.clear().map_err(PaintError::Backend)?;
+        }
+    }
+    let image_available = native_output.then(|| output.prepared_keys());
     terminal
         .draw(|frame| {
             let area = frame.area();
@@ -843,6 +1175,7 @@ fn paint_frame_with_writer<B: Backend, W: Write>(
                     viewer: frame_paint.chrome,
                     committed_regions,
                     image_mode,
+                    image_available,
                 },
                 area,
             );
@@ -851,6 +1184,7 @@ fn paint_frame_with_writer<B: Backend, W: Write>(
             }
         })
         .map_err(PaintError::Backend)?;
+    output.mark_base_painted();
     if title_changed {
         let _ = execute!(writer, SetTitle(&title));
         *last_title = title;
@@ -861,17 +1195,11 @@ fn paint_frame_with_writer<B: Backend, W: Write>(
         }
         *last_cursor = cursor;
     }
-    if image_mode == ImageRenderMode::Native {
-        let paints = image_paints(snapshot, committed_regions, paint_area);
+    if image_mode == ImageRenderMode::Native && !native_output {
         write_kitty_frame(writer, images, &paints, hardware_cursor).map_err(PaintError::Image)?;
     }
     Ok(())
 }
-
-const KITTY_IMAGE_CHUNK_BYTES: usize = 3_072;
-const KITTY_IMAGE_CHUNKS_PER_STEP: usize = 16;
-const KITTY_COMPRESSION_INPUT_BYTES_PER_STEP: usize = 262_144;
-const KITTY_COMPRESSION_OUTPUT_BYTES: usize = 65_536;
 
 /// Reconcile the newest Kitty image frame and start its first missing upload.
 fn write_kitty_frame<W: Write>(
@@ -888,7 +1216,7 @@ fn write_kitty_frame<W: Write>(
         .upload
         .as_ref()
         .filter(|upload| !upload_is_desired(upload, &images.desired))
-        .map(|upload| upload.transmission_started);
+        .map(|upload| upload.codec.started());
     match stale_upload {
         Some(true) => mark_kitty_cache_uncertain(images),
         Some(false) => images.upload = None,
@@ -903,7 +1231,7 @@ pub(crate) fn kitty_image_work_pending(images: &KittyImageCache) -> bool {
     images.upload.is_some()
 }
 
-/// Compress or transmit one bounded slice of the current Kitty upload.
+/// Advance one bounded slice of the current Kitty upload.
 pub(crate) fn advance_kitty_image<W: Write>(
     writer: &mut W,
     images: &mut KittyImageCache,
@@ -911,7 +1239,7 @@ pub(crate) fn advance_kitty_image<W: Write>(
     let Some(upload) = images.upload.as_ref() else {
         return Ok(());
     };
-    if !upload.transmission_started && !upload_is_desired(upload, &images.desired) {
+    if !upload.codec.started() && !upload_is_desired(upload, &images.desired) {
         images.upload = None;
         reconcile_kitty_frame(writer, images)?;
         return start_next_kitty_upload(images);
@@ -919,10 +1247,14 @@ pub(crate) fn advance_kitty_image<W: Write>(
 
     let result = advance_kitty_upload(writer, images.upload.as_mut().expect("upload exists"));
     if let Err(error) = result {
+        images.needs_abort = true;
         mark_kitty_cache_uncertain(images);
         return Err(error);
     }
-    let complete = images.upload.as_ref().is_some_and(kitty_upload_complete);
+    let complete = images
+        .upload
+        .as_ref()
+        .is_some_and(|upload| upload.codec.complete());
     if !complete {
         return Ok(());
     }
@@ -932,7 +1264,7 @@ pub(crate) fn advance_kitty_image<W: Write>(
         upload.content_id,
         KittyImage {
             record: upload.record,
-            image_number: upload.image_number,
+            image_number: upload.codec.image_number(),
         },
     );
     place_completed_kitty_image(writer, images, upload.content_id)?;
@@ -956,7 +1288,10 @@ fn reconcile_kitty_frame<W: Write>(writer: &mut W, images: &mut KittyImageCache)
             &images.desired,
         );
     if reset {
-        output.extend_from_slice(KITTY_DELETE_ALL);
+        if images.needs_abort {
+            write_kitty_abort(&mut output).map_err(kitty_output_error)?;
+        }
+        write_kitty_delete_all(&mut output).map_err(kitty_output_error)?;
         staged_images.clear();
         staged_placements.clear();
         next_image_number = 1;
@@ -983,7 +1318,7 @@ fn reconcile_kitty_frame<W: Write>(writer: &mut W, images: &mut KittyImageCache)
         .map(|(content_id, image)| (*content_id, image.image_number))
         .collect();
     for (content_id, image_number) in removed_images {
-        write_kitty_image_delete(&mut output, image_number)?;
+        write_kitty_image_delete(&mut output, image_number).map_err(kitty_output_error)?;
         staged_images.remove(&content_id);
     }
     let removed_placements: Vec<((PaneId, u64), KittyPlacement)> = staged_placements
@@ -997,7 +1332,8 @@ fn reconcile_kitty_frame<W: Write>(writer: &mut W, images: &mut KittyImageCache)
         .collect();
     for (key, placement) in removed_placements {
         if let Some(image) = staged_images.get(&placement.content_id) {
-            write_kitty_placement_delete(&mut output, image.image_number, placement.id)?;
+            write_kitty_placement_delete(&mut output, image.image_number, placement.id)
+                .map_err(kitty_output_error)?;
         }
         if !desired_by_key.contains_key(&key) {
             staged_placements.remove(&key);
@@ -1040,7 +1376,9 @@ fn reconcile_kitty_frame<W: Write>(writer: &mut W, images: &mut KittyImageCache)
             u32::from(paint.target.y) + 1,
             u32::from(paint.target.x) + 1
         )?;
-        write_kitty_placement(&mut output, image.image_number, placement_id, paint)?;
+        let placement = kitty_wire_placement(image.image_number, placement_id, paint);
+        write_kitty_placement(&mut output, &image.record.image, &placement)
+            .map_err(kitty_output_error)?;
         cursor_moved = true;
     }
 
@@ -1048,7 +1386,7 @@ fn reconcile_kitty_frame<W: Write>(writer: &mut W, images: &mut KittyImageCache)
         && images
             .upload
             .as_ref()
-            .is_some_and(|upload| upload.transmission_started);
+            .is_some_and(|upload| upload.codec.started());
     if abort_upload && !reset {
         let mut framed = Vec::with_capacity(output.len() + 40);
         write_kitty_image_delete(
@@ -1057,8 +1395,10 @@ fn reconcile_kitty_frame<W: Write>(writer: &mut W, images: &mut KittyImageCache)
                 .upload
                 .as_ref()
                 .expect("a started upload is present")
-                .image_number,
-        )?;
+                .codec
+                .image_number(),
+        )
+        .map_err(kitty_output_error)?;
         framed.extend_from_slice(&output);
         output = framed;
     }
@@ -1067,6 +1407,7 @@ fn reconcile_kitty_frame<W: Write>(writer: &mut W, images: &mut KittyImageCache)
             restore_cursor_state(&mut output, images.cursor)?;
         }
         if let Err(error) = writer.write_all(&output).and_then(|()| writer.flush()) {
+            images.needs_abort = true;
             mark_kitty_cache_uncertain(images);
             return Err(error);
         }
@@ -1077,6 +1418,7 @@ fn reconcile_kitty_frame<W: Write>(writer: &mut W, images: &mut KittyImageCache)
     images.next_image_number = next_image_number;
     images.next_placement_id = next_placement_id;
     images.needs_reset = false;
+    images.needs_abort = false;
     if reset || abort_upload {
         images.upload = None;
         images.next_upload_index = 0;
@@ -1113,7 +1455,9 @@ fn place_completed_kitty_image<W: Write>(
             u32::from(paint.target.y) + 1,
             u32::from(paint.target.x) + 1
         )?;
-        write_kitty_placement(&mut output, image.image_number, placement.id, paint)?;
+        let placement = kitty_wire_placement(image.image_number, placement.id, paint);
+        write_kitty_placement(&mut output, &image.record.image, &placement)
+            .map_err(kitty_output_error)?;
         placed = true;
     }
     if !placed {
@@ -1123,6 +1467,7 @@ fn place_completed_kitty_image<W: Write>(
     }
     restore_cursor_state(&mut output, images.cursor)?;
     if let Err(error) = writer.write_all(&output).and_then(|()| writer.flush()) {
+        images.needs_abort = true;
         mark_kitty_cache_uncertain(images);
         return Err(error);
     }
@@ -1152,24 +1497,26 @@ fn start_next_kitty_upload(images: &mut KittyImageCache) -> io::Result<()> {
         &mut images.next_image_number,
         "Kitty image numbers are exhausted",
     )?;
+    let codec = KittyCodecUpload::new(Arc::clone(&record.image), image_number)
+        .map_err(kitty_output_error)?;
     images.upload = Some(KittyUpload {
         content_id,
         record,
-        image_number,
-        compressor: Compress::new(Compression::fast(), true),
-        input_offset: 0,
-        compressed: Vec::with_capacity(KITTY_COMPRESSION_OUTPUT_BYTES),
-        compressed_offset: 0,
-        compression_complete: false,
-        transmission_started: false,
+        codec,
     });
     Ok(())
+}
+
+/// Advance the shared Kitty upload codec at the client I/O boundary.
+fn advance_kitty_upload<W: Write>(writer: &mut W, upload: &mut KittyUpload) -> io::Result<()> {
+    upload.codec.advance(writer).map_err(kitty_output_error)
 }
 
 /// Return whether an upload still belongs to the newest desired frame.
 fn upload_is_desired(upload: &KittyUpload, desired: &[ImagePaint]) -> bool {
     desired.iter().any(|paint| {
-        paint.content_id == upload.content_id && Arc::ptr_eq(&paint.record, &upload.record)
+        paint.content_id == upload.content_id
+            && Arc::ptr_eq(&paint.record.image, &upload.record.image)
     })
 }
 
@@ -1178,140 +1525,7 @@ fn kitty_image_matches(
     image: &KittyImage,
     record: &Arc<koshi_terminal::graphics::ImageRecord>,
 ) -> bool {
-    Arc::ptr_eq(&image.record, record)
-}
-
-/// Advance compression and write no more than one Kitty output budget.
-fn advance_kitty_upload<W: Write>(writer: &mut W, upload: &mut KittyUpload) -> io::Result<()> {
-    if !upload.compression_complete
-        && upload.compressed.len() - upload.compressed_offset <= KITTY_IMAGE_CHUNK_BYTES
-    {
-        compress_kitty_upload(upload)?;
-    }
-    write_kitty_upload_chunks(writer, upload)
-}
-
-/// Compress at most 256 KiB of RGBA while retaining a bounded send queue.
-fn compress_kitty_upload(upload: &mut KittyUpload) -> io::Result<()> {
-    if upload.compressed_offset != 0 {
-        upload.compressed.copy_within(upload.compressed_offset.., 0);
-        upload
-            .compressed
-            .truncate(upload.compressed.len() - upload.compressed_offset);
-        upload.compressed_offset = 0;
-    }
-    let rgba = &upload.record.image.rgba;
-    let input_end = upload
-        .input_offset
-        .saturating_add(KITTY_COMPRESSION_INPUT_BYTES_PER_STEP)
-        .min(rgba.len());
-    let flush = if input_end == rgba.len() {
-        FlushCompress::Finish
-    } else {
-        FlushCompress::None
-    };
-    let mut output = [0u8; KITTY_COMPRESSION_OUTPUT_BYTES];
-    loop {
-        let input_before = upload.compressor.total_in();
-        let output_before = upload.compressor.total_out();
-        let status = upload
-            .compressor
-            .compress(&rgba[upload.input_offset..input_end], &mut output, flush)
-            .map_err(|error| {
-                invalid_image_data_owned(format!("could not compress image: {error}"))
-            })?;
-        let consumed = usize::try_from(upload.compressor.total_in() - input_before)
-            .map_err(|_| invalid_image_data("compressed input count does not fit this process"))?;
-        let produced = usize::try_from(upload.compressor.total_out() - output_before)
-            .map_err(|_| invalid_image_data("compressed output count does not fit this process"))?;
-        upload.input_offset = upload
-            .input_offset
-            .checked_add(consumed)
-            .ok_or_else(|| invalid_image_data("compressed input count overflowed"))?;
-        upload
-            .compressed
-            .try_reserve(produced)
-            .map_err(|_| invalid_image_data("compressed image bytes cannot be allocated"))?;
-        upload.compressed.extend_from_slice(&output[..produced]);
-        if status == Status::StreamEnd {
-            upload.compression_complete = true;
-            return Ok(());
-        }
-        if upload.input_offset == input_end && input_end < rgba.len() {
-            return Ok(());
-        }
-        if consumed == 0 && produced == 0 {
-            return Err(invalid_image_data("image compression made no progress"));
-        }
-    }
-}
-
-/// Write up to sixteen 3,072-byte compressed Kitty chunks.
-fn write_kitty_upload_chunks<W: Write>(writer: &mut W, upload: &mut KittyUpload) -> io::Result<()> {
-    let mut output = Vec::with_capacity(KITTY_IMAGE_CHUNKS_PER_STEP * 4_160);
-    let mut next_offset = upload.compressed_offset;
-    let mut first = !upload.transmission_started;
-    let mut chunks = 0usize;
-    while chunks < KITTY_IMAGE_CHUNKS_PER_STEP {
-        let available = upload.compressed.len() - next_offset;
-        if available == 0 || (!upload.compression_complete && available <= KITTY_IMAGE_CHUNK_BYTES)
-        {
-            break;
-        }
-        let chunk_len = available.min(KITTY_IMAGE_CHUNK_BYTES);
-        let end = next_offset + chunk_len;
-        let more = u8::from(!upload.compression_complete || end < upload.compressed.len());
-        write_kitty_upload_chunk(
-            &mut output,
-            upload,
-            first,
-            more,
-            &upload.compressed[next_offset..end],
-        )?;
-        first = false;
-        next_offset = end;
-        chunks += 1;
-    }
-    if output.is_empty() {
-        return Ok(());
-    }
-    writer.write_all(&output)?;
-    writer.flush()?;
-    upload.compressed_offset = next_offset;
-    upload.transmission_started = true;
-    Ok(())
-}
-
-/// Write one first or continuation chunk from a zlib stream.
-fn write_kitty_upload_chunk<W: Write>(
-    writer: &mut W,
-    upload: &KittyUpload,
-    first: bool,
-    more: u8,
-    bytes: &[u8],
-) -> io::Result<()> {
-    if first {
-        write!(
-            writer,
-            "\x1b_Ga=t,f=32,s={},v={},I={},q=2,o=z,m={more};",
-            upload.record.image.width, upload.record.image.height, upload.image_number
-        )?;
-    } else {
-        write!(writer, "\x1b_Gq=2,m={more};")?;
-    }
-    let mut encoded = [0u8; 4_096];
-    let encoded_len = STANDARD
-        .encode_slice(bytes, &mut encoded)
-        .map_err(|_| invalid_image_data("base64 image chunk exceeded its output buffer"))?;
-    writer.write_all(&encoded[..encoded_len])?;
-    writer.write_all(b"\x1b\\")
-}
-
-/// Return whether compression and transmission both reached their exact ends.
-fn kitty_upload_complete(upload: &KittyUpload) -> bool {
-    upload.compression_complete
-        && upload.compressed_offset == upload.compressed.len()
-        && upload.transmission_started
+    Arc::ptr_eq(&image.record.image, &record.image)
 }
 
 /// Forget terminal-side identities after a partial or failed native write.
@@ -1338,7 +1552,7 @@ fn validate_image_paints(paints: &[ImagePaint]) -> io::Result<()> {
         }
         if contents
             .insert(paint.content_id, &paint.record)
-            .is_some_and(|record| !Arc::ptr_eq(record, &paint.record))
+            .is_some_and(|record| !Arc::ptr_eq(&record.image, &paint.record.image))
         {
             return Err(invalid_image_data(
                 "image content identity names different pixel records",
@@ -1430,51 +1644,33 @@ fn take_nonzero_id(next: &mut u32, exhausted: &'static str) -> io::Result<u32> {
     Ok(id)
 }
 
-/// Delete one image number and free its outer-terminal pixel data.
-fn write_kitty_image_delete<W: Write>(writer: &mut W, image_number: u32) -> io::Result<()> {
-    write!(writer, "\x1b_Ga=d,d=N,I={image_number},q=2;\x1b\\")
-}
-
-/// Delete one outer-terminal placement while retaining its shared pixel data.
-fn write_kitty_placement_delete<W: Write>(
-    writer: &mut W,
-    image_number: u32,
-    placement_id: u32,
-) -> io::Result<()> {
-    write!(
-        writer,
-        "\x1b_Ga=d,d=n,I={image_number},p={placement_id},q=2;\x1b\\"
-    )
-}
-
-/// Place one uploaded image with this frame's clip and destination geometry.
-fn write_kitty_placement<W: Write>(
-    writer: &mut W,
+/// Build protocol-only Kitty placement fields from one rendered paint.
+fn kitty_wire_placement(
     image_number: u32,
     placement_id: u32,
     paint: &ImagePaint,
-) -> io::Result<()> {
-    write!(
-        writer,
-        "\x1b_Ga=p,I={},p={},x={},y={},w={},h={},",
+) -> KittyWirePlacement {
+    KittyWirePlacement {
         image_number,
         placement_id,
-        paint.source.x,
-        paint.source.y,
-        paint.source.width,
-        paint.source.height,
-    )?;
-    if let Some(offset) = paint.cell_offset_x {
-        write!(writer, "X={offset},")?;
+        source_x: paint.source.x,
+        source_y: paint.source.y,
+        source_width: paint.source.width,
+        source_height: paint.source.height,
+        columns: u32::from(paint.target.width),
+        rows: u32::from(paint.target.height),
+        cell_offset_x: paint.cell_offset_x,
+        cell_offset_y: paint.cell_offset_y,
+        z_index: paint.z_index,
     }
-    if let Some(offset) = paint.cell_offset_y {
-        write!(writer, "Y={offset},")?;
+}
+
+/// Convert a Kitty output failure into the client's image I/O error type.
+fn kitty_output_error(error: KittyOutputError) -> io::Error {
+    match error {
+        KittyOutputError::Io(error) => error,
+        error => io::Error::new(io::ErrorKind::InvalidData, error),
     }
-    write!(
-        writer,
-        "c={},r={},C=1,z={},q=2;\x1b\\",
-        paint.target.width, paint.target.height, paint.z_index,
-    )
 }
 
 fn restore_cursor_state<W: Write>(
@@ -1496,11 +1692,6 @@ fn restore_cursor_state<W: Write>(
 
 /// Build an I/O error for a malformed image source rectangle.
 fn invalid_image_data(message: &'static str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, message)
-}
-
-/// Build an invalid-image error that includes a dependency failure.
-fn invalid_image_data_owned(message: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 

@@ -41,6 +41,9 @@ pub struct Client {
     session_id: SessionId,
     attached_at: SystemTime,
     viewport: Size,
+    /// The client's measured terminal cell size in pixels.
+    #[serde(default)]
+    cell_size: Option<koshi_core::geometry::PixelCellSize>,
     /// The pane region this client reported for the tab it views. `None`
     /// when the client reported none.
     #[serde(default)]
@@ -119,6 +122,7 @@ impl Client {
             session_id,
             attached_at,
             viewport,
+            cell_size: None,
             pane_area,
             active_tab,
             origin,
@@ -173,6 +177,23 @@ impl Client {
     #[must_use]
     pub fn viewport(&self) -> Size {
         self.viewport
+    }
+
+    /// Return this client's measured terminal cell size in pixels.
+    #[must_use]
+    pub fn cell_size(&self) -> Option<koshi_core::geometry::PixelCellSize> {
+        self.cell_size
+    }
+
+    /// Record the pixel dimensions measured by this client.
+    pub fn update_cell_size(&mut self, size: koshi_core::geometry::PixelCellSize) {
+        self.cell_size = Some(size);
+    }
+
+    /// Replace this client's measured terminal cell dimensions, clearing the
+    /// value when the terminal has changed size and has no new measurement.
+    pub fn replace_cell_size(&mut self, size: Option<koshi_core::geometry::PixelCellSize>) {
+        self.cell_size = size;
     }
 
     /// The tab this client is currently viewing. Once the session's last tab

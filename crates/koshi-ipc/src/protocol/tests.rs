@@ -262,6 +262,7 @@ fn every_request_kind() -> Vec<IpcRequestKind> {
             resume_token: None,
             pane_area: None,
             graphics: crate::protocol::GraphicsCapabilities::default(),
+            cell_size: None,
         },
         IpcRequestKind::KeyPress {
             chord: KeyChord::new(ModFlags::CTRL, Key::Char('c')),
@@ -272,6 +273,10 @@ fn every_request_kind() -> Vec<IpcRequestKind> {
                 rows: 40,
             },
             pane_area: None,
+            cell_size: None,
+        },
+        IpcRequestKind::CellSize {
+            size: koshi_core::geometry::PixelCellSize::new(10, 20).expect("nonzero cell size"),
         },
         IpcRequestKind::Paste {
             text: "hello\nworld".to_string(),
@@ -579,6 +584,7 @@ fn the_attach_wire_shape_belongs_to_this_protocol_version() {
             resume_token: None,
             pane_area: None,
             graphics: crate::protocol::GraphicsCapabilities::default(),
+            cell_size: None,
         },
     };
 
@@ -650,7 +656,12 @@ fn attach_reports_positive_kitty_support_and_defaults_an_absent_report_to_false(
             resume: None,
             resume_token: None,
             pane_area: None,
-            graphics: crate::protocol::GraphicsCapabilities { kitty: true },
+            graphics: crate::protocol::GraphicsCapabilities {
+                kitty: true,
+                iterm: false,
+                sixel: false,
+            },
+            cell_size: None,
         },
     };
     assert_eq!(
@@ -664,7 +675,7 @@ fn attach_reports_positive_kitty_support_and_defaults_an_absent_report_to_false(
                     "resume": null,
                     "resume_token": null,
                     "pane_area": null,
-                    "graphics": { "kitty": true }
+                    "graphics": { "kitty": true, "iterm": false, "sixel": false }
                 }
             }
         })
@@ -693,8 +704,54 @@ fn attach_reports_positive_kitty_support_and_defaults_an_absent_report_to_false(
                 resume: None,
                 resume_token: None,
                 pane_area: None,
-                graphics: crate::protocol::GraphicsCapabilities { kitty: false },
+                graphics: crate::protocol::GraphicsCapabilities {
+                    kitty: false,
+                    iterm: false,
+                    sixel: false,
+                },
+                cell_size: None,
             },
+        }
+    );
+}
+
+#[test]
+fn graphics_capabilities_default_and_native_detection_cover_each_protocol() {
+    assert!(!GraphicsCapabilities::default().has_native());
+    assert!(GraphicsCapabilities {
+        kitty: true,
+        iterm: false,
+        sixel: false,
+    }
+    .has_native());
+    assert!(GraphicsCapabilities {
+        kitty: false,
+        iterm: true,
+        sixel: false,
+    }
+    .has_native());
+    assert!(GraphicsCapabilities {
+        kitty: false,
+        iterm: false,
+        sixel: true,
+    }
+    .has_native());
+}
+
+#[test]
+fn graphics_capabilities_ignore_unknown_fields_and_default_new_fields() {
+    let decoded: GraphicsCapabilities = serde_json::from_value(json!({
+        "kitty": true,
+        "vendor_extension": "ignored"
+    }))
+    .expect("unknown capability fields are ignored");
+
+    assert_eq!(
+        decoded,
+        GraphicsCapabilities {
+            kitty: true,
+            iterm: false,
+            sixel: false,
         }
     );
 }
@@ -800,10 +857,82 @@ fn attach_request_round_trips() {
             resume_token: None,
             pane_area: None,
             graphics: crate::protocol::GraphicsCapabilities::default(),
+            cell_size: None,
         },
     };
 
     assert_eq!(round_trip(&request), request);
+}
+
+#[test]
+fn attach_and_resize_keep_cell_measurements_and_default_old_wire_frames() {
+    let cell_size =
+        koshi_core::geometry::PixelCellSize::new(10, 20).expect("positive cell dimensions");
+    let attach = IpcRequest {
+        request_id: 4,
+        kind: IpcRequestKind::Attach {
+            viewport: Size { cols: 80, rows: 24 },
+            filter: EventFilterSpec::All,
+            resume: None,
+            resume_token: None,
+            pane_area: None,
+            graphics: crate::protocol::GraphicsCapabilities::default(),
+            cell_size: Some(cell_size),
+        },
+    };
+    let resize = IpcRequest {
+        request_id: 6,
+        kind: IpcRequestKind::Resize {
+            viewport: Size {
+                cols: 120,
+                rows: 40,
+            },
+            pane_area: None,
+            cell_size: Some(cell_size),
+        },
+    };
+
+    assert_eq!(round_trip(&attach), attach);
+    assert_eq!(round_trip(&resize), resize);
+    assert_eq!(
+        serde_json::to_value(&attach).expect("attach encodes")["kind"]["Attach"]["cell_size"],
+        json!({ "width": 10, "height": 20 })
+    );
+    assert_eq!(
+        serde_json::from_str::<IpcRequest>(
+            r#"{"request_id":4,"kind":{"Attach":{"viewport":{"cols":80,"rows":24},"filter":"All"}}}"#,
+        )
+        .expect("legacy attach decodes"),
+        IpcRequest {
+            request_id: 4,
+            kind: IpcRequestKind::Attach {
+                viewport: Size { cols: 80, rows: 24 },
+                filter: EventFilterSpec::All,
+                resume: None,
+                resume_token: None,
+                pane_area: None,
+                graphics: crate::protocol::GraphicsCapabilities::default(),
+                cell_size: None,
+            },
+        }
+    );
+    assert_eq!(
+        serde_json::from_str::<IpcRequest>(
+            r#"{"request_id":6,"kind":{"Resize":{"viewport":{"cols":120,"rows":40}}}}"#,
+        )
+        .expect("legacy resize decodes"),
+        IpcRequest {
+            request_id: 6,
+            kind: IpcRequestKind::Resize {
+                viewport: Size {
+                    cols: 120,
+                    rows: 40,
+                },
+                pane_area: None,
+                cell_size: None,
+            },
+        }
+    );
 }
 
 #[test]
@@ -817,6 +946,7 @@ fn an_attach_request_naming_a_client_to_come_back_as_round_trips() {
             resume_token: None,
             pane_area: None,
             graphics: crate::protocol::GraphicsCapabilities::default(),
+            cell_size: None,
         },
     };
 
@@ -843,6 +973,7 @@ fn an_attach_request_written_without_the_resume_fields_decodes_as_no_claim() {
                 resume_token: None,
                 pane_area: None,
                 graphics: crate::protocol::GraphicsCapabilities::default(),
+                cell_size: None,
             },
         }
     );
@@ -859,6 +990,7 @@ fn an_attach_request_carrying_a_resume_token_keeps_the_secret_whole() {
             resume_token: Some(token()),
             pane_area: None,
             graphics: crate::protocol::GraphicsCapabilities::default(),
+            cell_size: None,
         },
     };
 
@@ -893,6 +1025,7 @@ fn an_attach_request_written_without_a_resume_token_beside_a_resume_decodes_as_n
                 resume_token: None,
                 pane_area: None,
                 graphics: crate::protocol::GraphicsCapabilities::default(),
+                cell_size: None,
             },
         }
     );
@@ -920,6 +1053,7 @@ fn an_attach_request_written_without_a_pane_area_decodes_as_none() {
                 resume_token: None,
                 pane_area: None,
                 graphics: crate::protocol::GraphicsCapabilities::default(),
+                cell_size: None,
             },
         }
     );
@@ -968,6 +1102,7 @@ fn an_attach_request_reporting_a_pane_area_round_trips() {
                 rows: 30,
             })),
             graphics: crate::protocol::GraphicsCapabilities::default(),
+            cell_size: None,
         },
     };
 
@@ -1000,6 +1135,7 @@ fn an_attach_request_reporting_a_pane_area_round_trips() {
             resume_token: None,
             pane_area: Some(PaneArea::Starving),
             graphics: crate::protocol::GraphicsCapabilities::default(),
+            cell_size: None,
         },
     };
 
@@ -1194,6 +1330,7 @@ fn an_attach_naming_where_it_connected_from_carries_none_of_it() {
                 resume_token: None,
                 pane_area: None,
                 graphics: crate::protocol::GraphicsCapabilities::default(),
+                cell_size: None,
             },
         }
     );
@@ -1223,6 +1360,7 @@ fn an_attach_naming_its_own_authority_carries_none_of_it() {
             resume_token: None,
             pane_area: None,
             graphics: crate::protocol::GraphicsCapabilities::default(),
+            cell_size: None,
         },
     };
 
@@ -1258,6 +1396,7 @@ fn resize_request_round_trips() {
                 rows: 40,
             },
             pane_area: None,
+            cell_size: None,
         },
     };
 
@@ -1271,6 +1410,7 @@ fn a_resize_request_reporting_a_starving_pane_area_round_trips() {
         kind: IpcRequestKind::Resize {
             viewport: Size { cols: 2, rows: 2 },
             pane_area: Some(PaneArea::Starving),
+            cell_size: None,
         },
     };
 
@@ -1304,6 +1444,7 @@ fn a_resize_request_written_without_a_pane_area_decodes_as_none() {
                     rows: 40,
                 },
                 pane_area: None,
+                cell_size: None,
             },
         }
     );
@@ -1813,6 +1954,7 @@ fn each_request_kind_is_tagged_with_its_own_name() {
                 resume_token: None,
                 pane_area: None,
                 graphics: crate::protocol::GraphicsCapabilities::default(),
+                cell_size: None,
             })
             .unwrap()
         ),
@@ -2177,6 +2319,7 @@ fn every_request_kind_names_itself_without_its_payload() {
             resume_token: None,
             pane_area: None,
             graphics: crate::protocol::GraphicsCapabilities::default(),
+            cell_size: None,
         }
         .name(),
         "Attach"
@@ -2195,6 +2338,7 @@ fn every_request_kind_names_itself_without_its_payload() {
                 rows: 40,
             },
             pane_area: None,
+            cell_size: None,
         }
         .name(),
         "Resize"

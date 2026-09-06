@@ -1051,12 +1051,13 @@ dependencies = [
 name = "koshi-client"
 version = "0.4.0-pr.1"
 dependencies = [
- "base64 0.23.1",
- "flate2",
  "koshi-config",
  "koshi-core",
+ "koshi-image",
  "koshi-input",
  "koshi-ipc",
+ "koshi-iterm",
+ "koshi-kitty",
  "koshi-layout",
  "koshi-link",
  "koshi-observability",
@@ -1064,6 +1065,7 @@ dependencies = [
  "koshi-pty",
  "koshi-renderer",
  "koshi-runtime",
+ "koshi-sixel",
  "koshi-terminal",
  "koshi-test-support",
  "libc",
@@ -1125,6 +1127,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "koshi-image"
+version = "0.4.0-pr.1"
+dependencies = [
+ "base64 0.23.1",
+ "flate2",
+ "image",
+ "koshi-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "koshi-input"
 version = "0.4.0-pr.1"
 dependencies = [
@@ -1154,6 +1169,26 @@ dependencies = [
  "uuid",
  "widestring",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "koshi-iterm"
+version = "0.4.0-pr.1"
+dependencies = [
+ "base64 0.23.1",
+ "image",
+ "koshi-image",
+]
+
+[[package]]
+name = "koshi-kitty"
+version = "0.4.0-pr.1"
+dependencies = [
+ "base64 0.23.1",
+ "flate2",
+ "image",
+ "koshi-image",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -1312,6 +1347,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "koshi-sixel"
+version = "0.4.0-pr.1"
+dependencies = [
+ "koshi-image",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "koshi-storage"
 version = "0.4.0-pr.1"
 dependencies = [
@@ -1328,6 +1373,10 @@ dependencies = [
  "flate2",
  "image",
  "koshi-core",
+ "koshi-image",
+ "koshi-iterm",
+ "koshi-kitty",
+ "koshi-sixel",
  "percent-encoding",
  "serde",
  "serde_json",

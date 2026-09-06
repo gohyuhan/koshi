@@ -5,273 +5,43 @@
 //! to a terminal grid. The terminal engine adds the cursor position at which
 //! the sequence ended, then applies display records to terminal image state.
 
-use std::io::{Cursor, Read};
+mod commands;
+pub(crate) use commands::{KittyCommand, KittyCommandKind, KittyDelete};
 use std::ops::Range;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 
-use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
+#[cfg(test)]
+use base64::engine::general_purpose::STANDARD;
+#[cfg(test)]
 use base64::Engine;
-use flate2::bufread::ZlibDecoder;
-use koshi_core::error::{DomainCategory, DomainError, Severity};
-use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
+use koshi_image::BoundedBytesSeed;
+use koshi_iterm::{
+    iterm_command_can_be_graphics, iterm_command_is_graphics, iterm_payload_started,
+    parse_iterm_command, ItermTransfer,
+};
+use koshi_kitty::{
+    parse_command, reply_display, start_animation_transfer, start_transfer, KittyAnimationChunk,
+    KittyAnimationTransfer, KittyAnimationTransferOutcome, KittyChunk, KittyParser, KittyTransfer,
+    KittyTransferOutcome, MAX_KITTY_CHUNK_BYTES,
+};
+use koshi_sixel::{
+    SixelGraphic, SixelParser as ProtocolSixelParser, SixelPhase as ProtocolSixelPhase,
+};
+use serde::de::{self, DeserializeSeed, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
-use thiserror::Error;
 
-use crate::state::ImagePlacementError;
-
-/// The largest decoded image, measured in pixels.
-pub const MAX_IMAGE_PIXELS: usize = 16_777_216;
-
-/// The largest decoded RGBA buffer, measured in bytes.
-pub const MAX_IMAGE_BYTES: usize = MAX_IMAGE_PIXELS * 4;
-
-/// The largest encoded transfer held by one graphics sequence.
-pub const MAX_GRAPHICS_TRANSFER_BYTES: usize = 32 * 1024 * 1024;
-
-/// The largest protocol header or command held while it is parsed.
-pub const MAX_GRAPHICS_CONTROL_BYTES: usize = 8 * 1024;
-
-/// The largest image side accepted by a decoder.
-pub const MAX_IMAGE_SIDE: usize = 16_384;
-
-/// The largest raw graphics prefix carried between parser instances.
-pub const MAX_GRAPHICS_CARRY_BYTES: usize = 64 * 1024;
+pub(crate) use koshi_image::checked_rgba_len;
+pub use koshi_image::{
+    DecodedAnimation, DecodedGraphics, DecodedImage, GraphicsError, GraphicsProtocol, ImageAction,
+    ImageDimension, ImageDisplay, ImagePlacementError, ImageRecord, SixelBackground,
+    MAX_GRAPHICS_CARRY_BYTES, MAX_GRAPHICS_CONTROL_BYTES, MAX_GRAPHICS_TRANSFER_BYTES,
+    MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS, MAX_IMAGE_SIDE,
+};
 
 /// The largest GNU Screen passthrough body accepted by this parser.
 const MAX_SCREEN_PASSTHROUGH_BYTES: usize = 768;
 
-/// The largest base64 chunk accepted by the kitty graphics protocol.
-const MAX_KITTY_CHUNK_BYTES: usize = 4096;
-
 /// The deepest tmux or GNU Screen wrapper accepted around one image stream.
 const MAX_GRAPHICS_WRAPPER_DEPTH: usize = 8;
-
-/// The terminal image protocol that produced a record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum GraphicsProtocol {
-    /// DEC Sixel raster data in a DCS string.
-    Sixel,
-    /// Kitty graphics data in an APC string.
-    Kitty,
-    /// iTerm2 OSC 1337 inline image data.
-    Iterm2,
-}
-
-/// A requested image dimension from a protocol display field.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ImageDimension {
-    /// A number of terminal cells.
-    Cells(u32),
-    /// A number of device pixels.
-    Pixels(u32),
-    /// A percentage of the available terminal area.
-    Percent(u16),
-    /// Let the terminal choose the dimension.
-    Auto,
-}
-
-/// The Sixel zero-bit background rule carried with an image record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SixelBackground {
-    /// Use the terminal background for zero bits.
-    Terminal,
-    /// Keep zero bits transparent.
-    Preserve,
-}
-
-/// Display hints carried by an image protocol.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ImageDisplay {
-    /// The requested width, if the sender supplied one.
-    pub width: Option<ImageDimension>,
-    /// The requested height, if the sender supplied one.
-    pub height: Option<ImageDimension>,
-    /// Whether the sender requests aspect-ratio preservation.
-    pub preserve_aspect_ratio: bool,
-    /// The Sixel background rule, when the record came from Sixel.
-    pub sixel_background: Option<SixelBackground>,
-    /// The kitty image id, when one was supplied.
-    pub image_id: Option<u32>,
-    /// The kitty image number, when one was supplied.
-    pub image_number: Option<u32>,
-    /// The kitty placement id, when one was supplied.
-    pub placement_id: Option<u32>,
-    /// Usage flags supplied by kitty.
-    pub usage_hints: u32,
-    /// Whether kitty asks for a Unicode-placeholder placement.
-    pub unicode_placeholder: bool,
-    /// The kitty image z-index.
-    pub z_index: i32,
-    /// The number of terminal columns requested by kitty.
-    pub cell_columns: Option<u32>,
-    /// The number of terminal rows requested by kitty.
-    pub cell_rows: Option<u32>,
-    /// The source image x offset requested by kitty, in pixels.
-    pub source_offset_x: Option<u32>,
-    /// The source image y offset requested by kitty, in pixels.
-    pub source_offset_y: Option<u32>,
-    /// The x offset inside the first terminal cell requested by kitty.
-    pub cell_offset_x: Option<u32>,
-    /// The y offset inside the first terminal cell requested by kitty.
-    pub cell_offset_y: Option<u32>,
-    /// Whether kitty asks the placement to move the cursor after display.
-    pub move_cursor: bool,
-}
-
-impl Default for ImageDisplay {
-    fn default() -> Self {
-        ImageDisplay {
-            width: None,
-            height: None,
-            preserve_aspect_ratio: true,
-            sixel_background: None,
-            image_id: None,
-            image_number: None,
-            placement_id: None,
-            usage_hints: 0,
-            unicode_placeholder: false,
-            z_index: 0,
-            cell_columns: None,
-            cell_rows: None,
-            source_offset_x: None,
-            source_offset_y: None,
-            cell_offset_x: None,
-            cell_offset_y: None,
-            move_cursor: true,
-        }
-    }
-}
-
-/// A validated row-major RGBA image.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct DecodedImage {
-    /// Image width in pixels.
-    pub width: u32,
-    /// Image height in pixels.
-    pub height: u32,
-    /// Four bytes per pixel in red, green, blue, alpha order.
-    pub rgba: Vec<u8>,
-}
-
-impl<'de> Deserialize<'de> for DecodedImage {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct DecodedImageFields {
-            width: u32,
-            height: u32,
-            #[serde(deserialize_with = "deserialize_rgba")]
-            rgba: Vec<u8>,
-        }
-
-        let fields = DecodedImageFields::deserialize(deserializer)?;
-        validate_decoded_image::<D::Error>(fields.width, fields.height, fields.rgba)
-    }
-}
-
-fn validate_decoded_image<E>(width: u32, height: u32, rgba: Vec<u8>) -> Result<DecodedImage, E>
-where
-    E: de::Error,
-{
-    let width_usize = usize::try_from(width)
-        .map_err(|_| E::custom("decoded image width cannot be represented by this platform"))?;
-    let height_usize = usize::try_from(height)
-        .map_err(|_| E::custom("decoded image height cannot be represented by this platform"))?;
-    let pixels = width_usize
-        .checked_mul(height_usize)
-        .ok_or_else(|| E::custom("decoded image dimensions overflow"))?;
-    let expected_bytes = pixels
-        .checked_mul(4)
-        .ok_or_else(|| E::custom("decoded image byte count overflows"))?;
-    if width_usize == 0
-        || height_usize == 0
-        || width_usize > MAX_IMAGE_SIDE
-        || height_usize > MAX_IMAGE_SIDE
-        || pixels > MAX_IMAGE_PIXELS
-        || expected_bytes > MAX_IMAGE_BYTES
-    {
-        return Err(E::custom("decoded image dimensions exceed graphics limits"));
-    }
-    if rgba.len() != expected_bytes {
-        return Err(E::custom(
-            "decoded image RGBA length does not match its dimensions",
-        ));
-    }
-    Ok(DecodedImage {
-        width,
-        height,
-        rgba,
-    })
-}
-
-/// The transfer action recorded with an image record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ImageAction {
-    /// Transmit the decoded image without requesting display.
-    Transmit,
-    /// Place a decoded image without a Kitty image transfer.
-    Display,
-    /// Transmit and place the decoded image in one operation.
-    TransmitAndDisplay,
-}
-
-/// A complete image transfer queued for the terminal caller.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ImageRecord {
-    /// Protocol that supplied the image.
-    pub protocol: GraphicsProtocol,
-    /// Validated pixel data.
-    pub image: DecodedImage,
-    /// The state operation represented by the transfer.
-    pub action: ImageAction,
-    /// Display hints supplied by the protocol.
-    pub display: ImageDisplay,
-    /// Cursor position when the image sequence ended, as row and column.
-    pub anchor: (u16, u16),
-}
-
-impl ImageRecord {
-    /// Return the source rectangle used by a Kitty image placement.
-    ///
-    /// The tuple is `(x, y, width, height)` in decoded-image pixels. Kitty
-    /// `x` and `y` select the source origin; `w` and `h` are represented by
-    /// pixel dimensions in `display`. Other protocols use the complete image.
-    pub fn source_rect(&self) -> Result<(u32, u32, u32, u32), ImagePlacementError> {
-        if self.protocol != GraphicsProtocol::Kitty {
-            return Ok((0, 0, self.image.width, self.image.height));
-        }
-
-        let x = self.display.source_offset_x.unwrap_or(0);
-        let y = self.display.source_offset_y.unwrap_or(0);
-        let width = match self.display.width {
-            Some(ImageDimension::Pixels(value)) => value,
-            _ => self.image.width.saturating_sub(x),
-        };
-        let height = match self.display.height {
-            Some(ImageDimension::Pixels(value)) => value,
-            _ => self.image.height.saturating_sub(y),
-        };
-        let valid = width > 0
-            && height > 0
-            && x.checked_add(width)
-                .is_some_and(|end| end <= self.image.width)
-            && y.checked_add(height)
-                .is_some_and(|end| end <= self.image.height);
-        if !valid {
-            return Err(ImagePlacementError::SourceOutOfBounds {
-                x,
-                y,
-                width,
-                height,
-                image_width: self.image.width,
-                image_height: self.image.height,
-            });
-        }
-        Ok((x, y, width, height))
-    }
-}
 
 /// The graphics parser state that cannot be rebuilt after an engine replacement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -384,10 +154,10 @@ impl<'de> Visitor<'de> for GraphicsTransportVisitor {
                     if carry.is_some() {
                         return Err(de::Error::duplicate_field("carry"));
                     }
-                    carry = Some(map.next_value_seed(BoundedBytesSeed {
-                        limit: MAX_GRAPHICS_CARRY_BYTES,
-                        name: "graphics carry",
-                    })?);
+                    carry = Some(map.next_value_seed(BoundedBytesSeed::new(
+                        MAX_GRAPHICS_CARRY_BYTES,
+                        "graphics carry",
+                    ))?);
                 }
                 "carryable" => {
                     if carryable.is_some() {
@@ -508,233 +278,23 @@ impl<'de> Visitor<'de> for GraphicsTransportOptionVisitor {
     }
 }
 
-struct BoundedBytesSeed {
-    limit: usize,
-    name: &'static str,
-}
-
-impl<'de> DeserializeSeed<'de> for BoundedBytesSeed {
-    type Value = Vec<u8>;
-
-    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_seq(BoundedBytesVisitor {
-            limit: self.limit,
-            name: self.name,
-        })
-    }
-}
-
-struct BoundedBytesVisitor {
-    limit: usize,
-    name: &'static str,
-}
-
-impl<'de> Visitor<'de> for BoundedBytesVisitor {
-    type Value = Vec<u8>;
-
-    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("a bounded byte sequence")
-    }
-
-    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
-    where
-        A: SeqAccess<'de>,
-    {
-        let mut bytes = Vec::with_capacity(sequence.size_hint().unwrap_or(0).min(self.limit));
-        while let Some(byte) = sequence.next_element::<u8>()? {
-            if bytes.len() == self.limit {
-                return Err(de::Error::custom(format!(
-                    "{name} exceeds {limit} bytes",
-                    name = self.name,
-                    limit = self.limit,
-                )));
-            }
-            bytes.push(byte);
-        }
-        Ok(bytes)
-    }
-
-    fn visit_bytes<E>(self, bytes: &[u8]) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        if bytes.len() > self.limit {
-            return Err(E::custom(format!(
-                "{name} exceeds {limit} bytes",
-                name = self.name,
-                limit = self.limit,
-            )));
-        }
-        Ok(bytes.to_vec())
-    }
-
-    fn visit_byte_buf<E>(self, bytes: Vec<u8>) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        if bytes.len() > self.limit {
-            return Err(E::custom(format!(
-                "{name} exceeds {limit} bytes",
-                name = self.name,
-                limit = self.limit,
-            )));
-        }
-        Ok(bytes)
-    }
-}
-
-fn deserialize_graphics_text<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    deserializer.deserialize_string(BoundedGraphicsTextVisitor)
-}
-
-struct BoundedGraphicsTextVisitor;
-
-impl<'de> Visitor<'de> for BoundedGraphicsTextVisitor {
-    type Value = String;
-
-    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("bounded graphics error text")
-    }
-
-    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        if value.len() > MAX_GRAPHICS_CONTROL_BYTES {
-            return Err(E::custom(format!(
-                "graphics error text exceeds {MAX_GRAPHICS_CONTROL_BYTES} bytes"
-            )));
-        }
-        Ok(value.to_owned())
-    }
-
-    fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        if value.len() > MAX_GRAPHICS_CONTROL_BYTES {
-            return Err(E::custom(format!(
-                "graphics error text exceeds {MAX_GRAPHICS_CONTROL_BYTES} bytes"
-            )));
-        }
-        Ok(value)
-    }
-}
-
-fn deserialize_rgba<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    BoundedBytesSeed {
-        limit: MAX_IMAGE_BYTES,
-        name: "decoded image RGBA data",
-    }
-    .deserialize(deserializer)
-}
-
 fn default_true() -> bool {
     true
 }
 
-/// A recoverable terminal-image processing error.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
-pub enum GraphicsError {
-    /// A sequence ended without a complete image transfer.
-    #[error("{protocol:?} image transfer is truncated")]
-    Truncated { protocol: GraphicsProtocol },
-    /// A protocol opening or header is not valid.
-    #[error("{protocol:?} image header is invalid")]
-    InvalidHeader { protocol: GraphicsProtocol },
-    /// A protocol command byte or command parameter is not valid.
-    #[error("{protocol:?} image command is invalid")]
-    InvalidCommand { protocol: GraphicsProtocol },
-    /// Base64 data contains a byte or padding that the protocol does not allow.
-    #[error("{protocol:?} image base64 data is invalid")]
-    InvalidBase64 { protocol: GraphicsProtocol },
-    /// An action such as kitty placement is outside the decoder contract.
-    #[error("{protocol:?} image action is unsupported: {action}")]
-    UnsupportedAction {
-        protocol: GraphicsProtocol,
-        #[serde(deserialize_with = "deserialize_graphics_text")]
-        action: String,
-    },
-    /// The encoded media type is not one of the supported raster formats.
-    #[error("{protocol:?} image media is unsupported: {format}")]
-    UnsupportedMedia {
-        protocol: GraphicsProtocol,
-        #[serde(deserialize_with = "deserialize_graphics_text")]
-        format: String,
-    },
-    /// A transfer exceeds the encoded-byte bound.
-    #[error("{protocol:?} image transfer is too large")]
-    TransferTooLarge { protocol: GraphicsProtocol },
-    /// A decoded image exceeds the dimension or pixel bound.
-    #[error("{protocol:?} image is too large")]
-    ImageTooLarge { protocol: GraphicsProtocol },
-    /// Width, height, or a byte-count multiplication is invalid.
-    #[error("{protocol:?} image dimensions are invalid")]
-    InvalidDimensions { protocol: GraphicsProtocol },
-    /// A decoded display record cannot become an active image placement.
-    #[error("{protocol:?} image placement was rejected: {reason}")]
-    PlacementRejected {
-        /// Protocol that supplied the rejected display record.
-        protocol: GraphicsProtocol,
-        /// The state validation failure that rejected the placement.
-        #[source]
-        reason: ImagePlacementError,
-    },
-    /// A sender declared a byte count that does not match its payload.
-    #[error("{protocol:?} image declared {expected} bytes but carried {actual} bytes")]
-    DeclaredSizeMismatch {
-        protocol: GraphicsProtocol,
-        expected: usize,
-        actual: usize,
-    },
-    /// A multipart iTerm2 command arrived in the wrong order.
-    #[error("iTerm2 multipart image state is invalid")]
-    MultipartState,
-    /// A decoder reported an error or panicked while reading the image.
-    #[error("{protocol:?} image data could not be decoded")]
-    DecodeFailure { protocol: GraphicsProtocol },
-    /// The caller exceeded the graphics event count or image-byte limit.
-    #[error(
-        "{dropped} graphics events were dropped because the graphics event count or image-byte limit was reached"
-    )]
-    QueueFull { dropped: usize },
-}
-
-impl DomainError for GraphicsError {
-    /// Image decode failures belong to terminal emulation.
-    fn category(&self) -> DomainCategory {
-        DomainCategory::Terminal
-    }
-
-    /// One rejected image does not stop the pane.
-    fn severity(&self) -> Severity {
-        Severity::Recoverable
-    }
-}
-
-/// The protocol-independent decoded result produced by the raw parser.
+/// One completed graphics operation in terminal byte order.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct DecodedGraphics {
-    /// Protocol that supplied the image.
-    pub protocol: GraphicsProtocol,
-    /// Validated image pixels.
-    pub image: DecodedImage,
-    /// The state operation represented by the transfer.
-    pub action: ImageAction,
-    /// Display hints from the transfer.
-    pub display: ImageDisplay,
+pub(crate) enum GraphicsOperation {
+    Failure {
+        display: ImageDisplay,
+        error: GraphicsError,
+    },
+    Image(DecodedGraphics),
+    Sixel(SixelGraphic),
+    Command(KittyCommand),
 }
 
-/// Raw protocol decoder owned by the terminal engine.
+/// Terminal graphics parser that frames protocol strings and queues operations.
 #[derive(Clone)]
 pub(crate) struct GraphicsParser {
     state: GraphicsState,
@@ -750,11 +310,12 @@ pub(crate) struct GraphicsParser {
     tmux_continuation: bool,
     tmux_inner: Option<Box<GraphicsParser>>,
     kitty_transfer: Option<KittyTransfer>,
+    kitty_animation_transfer: Option<KittyAnimationTransfer>,
     iterm_transfer: Option<ItermTransfer>,
 }
 
 pub(crate) struct GraphicsAdvance {
-    pub(crate) events: Vec<(usize, Result<DecodedGraphics, GraphicsError>)>,
+    pub(crate) events: Vec<(usize, Result<GraphicsOperation, GraphicsError>)>,
     pub(crate) terminal_inert: Vec<Range<usize>>,
 }
 
@@ -774,6 +335,7 @@ impl Default for GraphicsParser {
             tmux_continuation: false,
             tmux_inner: None,
             kitty_transfer: None,
+            kitty_animation_transfer: None,
             iterm_transfer: None,
         }
     }
@@ -785,7 +347,7 @@ enum GraphicsState {
     Ground,
     Escape,
     DcsIntro,
-    Sixel(Box<SixelParser>),
+    Sixel(Box<ProtocolSixelParser>),
     Kitty(KittyParser),
     Iterm(ItermParser),
     Tmux(TmuxParser),
@@ -810,13 +372,11 @@ impl StringKind {
     }
 }
 
-impl GraphicsProtocol {
-    fn string_kind(self) -> StringKind {
-        match self {
-            GraphicsProtocol::Sixel => StringKind::Dcs,
-            GraphicsProtocol::Kitty => StringKind::Apc,
-            GraphicsProtocol::Iterm2 => StringKind::Osc,
-        }
+fn string_kind(protocol: GraphicsProtocol) -> StringKind {
+    match protocol {
+        GraphicsProtocol::Sixel => StringKind::Dcs,
+        GraphicsProtocol::Kitty => StringKind::Apc,
+        GraphicsProtocol::Iterm2 => StringKind::Osc,
     }
 }
 
@@ -830,7 +390,10 @@ struct DiscardParser {
 
 impl GraphicsParser {
     /// Feed bytes and return every image or error completed by this chunk.
-    pub(crate) fn advance(&mut self, bytes: &[u8]) -> Vec<Result<DecodedGraphics, GraphicsError>> {
+    pub(crate) fn advance_operations(
+        &mut self,
+        bytes: &[u8],
+    ) -> Vec<Result<GraphicsOperation, GraphicsError>> {
         self.advance_with_offsets(bytes)
             .events
             .into_iter()
@@ -869,7 +432,7 @@ impl GraphicsParser {
             let sixel_data = matches!(
                 &self.state,
                 GraphicsState::Sixel(parser)
-                    if parser.phase == SixelPhase::Body
+                    if parser.phase == ProtocolSixelPhase::Body
                         && !parser.escaped
                         && bytes[offset].is_ascii_graphic()
             );
@@ -914,11 +477,11 @@ impl GraphicsParser {
         let GraphicsState::Kitty(parser) = &self.state else {
             return None;
         };
-        if parser.ignored || parser.escaped || !parser.seen_header {
+        if parser.is_ignored() || parser.is_escaped() || !parser.has_header() {
             return None;
         }
 
-        let data_room = MAX_KITTY_CHUNK_BYTES.saturating_sub(parser.data.len());
+        let data_room = MAX_KITTY_CHUNK_BYTES.saturating_sub(parser.payload_len());
         let sequence_room = MAX_GRAPHICS_TRANSFER_BYTES.saturating_sub(self.sequence_bytes);
         let consumed = base64_run_len(bytes, data_room.min(sequence_room));
         if consumed == 0 {
@@ -930,7 +493,9 @@ impl GraphicsParser {
         let GraphicsState::Kitty(parser) = &mut self.state else {
             unreachable!("the Kitty parser state was checked above")
         };
-        parser.data.extend_from_slice(&bytes[..consumed]);
+        parser
+            .append_payload(&bytes[..consumed])
+            .expect("the bounded Kitty payload run fits");
         Some(consumed)
     }
 
@@ -1087,6 +652,7 @@ impl GraphicsParser {
     /// protocol record.
     pub(crate) fn has_open_transfer(&self) -> bool {
         self.kitty_transfer.is_some()
+            || self.kitty_animation_transfer.is_some()
             || self.iterm_transfer.is_some()
             || self
                 .screen_inner
@@ -1099,7 +665,9 @@ impl GraphicsParser {
     }
 
     fn has_own_transfer(&self) -> bool {
-        self.kitty_transfer.is_some() || self.iterm_transfer.is_some()
+        self.kitty_transfer.is_some()
+            || self.kitty_animation_transfer.is_some()
+            || self.iterm_transfer.is_some()
     }
 
     fn state_protocol(&self) -> GraphicsProtocol {
@@ -1124,11 +692,12 @@ impl GraphicsParser {
             return None;
         }
         if self.has_own_transfer() {
-            let protocol = if self.kitty_transfer.is_some() {
-                GraphicsProtocol::Kitty
-            } else {
-                GraphicsProtocol::Iterm2
-            };
+            let protocol =
+                if self.kitty_transfer.is_some() || self.kitty_animation_transfer.is_some() {
+                    GraphicsProtocol::Kitty
+                } else {
+                    GraphicsProtocol::Iterm2
+                };
             Some(GraphicsAbandonment::Transfer(protocol))
         } else {
             let protocol = self.state_protocol();
@@ -1205,7 +774,7 @@ impl GraphicsParser {
 
         if let Some(GraphicsAbandonment::Sequence(protocol)) = transport.abandonment {
             self.state = GraphicsState::Discard(DiscardParser {
-                kind: protocol.string_kind(),
+                kind: string_kind(protocol),
                 error: GraphicsError::TransferTooLarge { protocol },
                 escaped: false,
                 report: true,
@@ -1217,7 +786,7 @@ impl GraphicsParser {
         }
         if let Some(GraphicsAbandonment::SilentSequence(protocol)) = transport.abandonment {
             self.state = GraphicsState::Discard(DiscardParser {
-                kind: protocol.string_kind(),
+                kind: string_kind(protocol),
                 error: GraphicsError::TransferTooLarge { protocol },
                 escaped: false,
                 report: false,
@@ -1240,7 +809,7 @@ impl GraphicsParser {
                 wrapper_depth: self.wrapper_depth.saturating_add(1),
                 ..GraphicsParser::default()
             };
-            let _ = inner.advance(provided_bytes);
+            let _ = inner.advance_operations(provided_bytes);
             self.screen_inner = Some(Box::new(inner));
             return;
         }
@@ -1253,7 +822,7 @@ impl GraphicsParser {
                 wrapper_depth: self.wrapper_depth.saturating_add(1),
                 ..GraphicsParser::default()
             };
-            let _ = inner.advance(provided_bytes);
+            let _ = inner.advance_operations(provided_bytes);
             self.tmux_inner = Some(Box::new(inner));
             return;
         }
@@ -1263,7 +832,7 @@ impl GraphicsParser {
             provided_bytes
         };
         if transport.carryable {
-            let _ = self.advance(bytes);
+            let _ = self.advance_operations(bytes);
         }
     }
 
@@ -1277,7 +846,7 @@ impl GraphicsParser {
     }
 
     /// Finish a stream and report any active sequence or multipart transfer.
-    pub(crate) fn finish(&mut self) -> Vec<Result<DecodedGraphics, GraphicsError>> {
+    pub(crate) fn finish(&mut self) -> Vec<Result<GraphicsOperation, GraphicsError>> {
         let mut events = Vec::new();
         let active_error = match &self.state {
             GraphicsState::Discard(parser) => Some(parser.error.clone()),
@@ -1303,6 +872,13 @@ impl GraphicsParser {
             self.reset();
         }
         if self.kitty_transfer.take().is_some() && active_protocol != Some(GraphicsProtocol::Kitty)
+        {
+            events.push(Err(GraphicsError::Truncated {
+                protocol: GraphicsProtocol::Kitty,
+            }));
+        }
+        if self.kitty_animation_transfer.take().is_some()
+            && active_protocol != Some(GraphicsProtocol::Kitty)
         {
             events.push(Err(GraphicsError::Truncated {
                 protocol: GraphicsProtocol::Kitty,
@@ -1336,14 +912,14 @@ impl GraphicsParser {
         match &self.state {
             GraphicsState::Ground | GraphicsState::Escape | GraphicsState::DcsIntro => false,
             GraphicsState::Kitty(parser) => {
-                !parser.ignored && parser.header.first().copied() == Some(b'G')
+                !parser.is_ignored() && parser.header().first().copied() == Some(b'G')
             }
             GraphicsState::Iterm(parser) => {
                 !parser.ignored
                     && (parser.prefix_done || parser.prefix.as_slice() == b"1337")
                     && iterm_command_is_graphics(&parser.body)
             }
-            GraphicsState::Sixel(parser) => parser.phase == SixelPhase::Body,
+            GraphicsState::Sixel(parser) => parser.phase == ProtocolSixelPhase::Body,
             GraphicsState::Tmux(parser) => {
                 parser.prefix.len() >= b"tmux;".len()
                     && self.wrapper_contains_graphics(self.tmux_inner.as_deref(), &parser.data)
@@ -1357,7 +933,7 @@ impl GraphicsParser {
 
     fn wrapper_contains_graphics(&self, inner: Option<&GraphicsParser>, data: &[u8]) -> bool {
         let mut parser = inner.cloned().unwrap_or_default();
-        let events = parser.advance(data);
+        let events = parser.advance_operations(data);
         !events.is_empty() || parser.has_graphics_state()
     }
 
@@ -1374,7 +950,7 @@ impl GraphicsParser {
                 .is_some_and(|inner| inner.has_graphics_state())
     }
 
-    fn feed_byte(&mut self, byte: u8, events: &mut Vec<Result<DecodedGraphics, GraphicsError>>) {
+    fn feed_byte(&mut self, byte: u8, events: &mut Vec<Result<GraphicsOperation, GraphicsError>>) {
         if !matches!(self.state, GraphicsState::Ground) {
             self.push_pending(byte);
             if self.sequence_bytes == MAX_GRAPHICS_TRANSFER_BYTES
@@ -1448,7 +1024,7 @@ impl GraphicsParser {
     fn feed_dcs_intro(
         &mut self,
         byte: u8,
-        events: &mut Vec<Result<DecodedGraphics, GraphicsError>>,
+        events: &mut Vec<Result<GraphicsOperation, GraphicsError>>,
     ) {
         if byte == 0x18 || byte == 0x1a {
             self.cancel_transfers();
@@ -1487,7 +1063,7 @@ impl GraphicsParser {
         }
         match byte {
             b'q' => {
-                let mut parser = SixelParser::new();
+                let mut parser = ProtocolSixelParser::new();
                 if parser.feed(b'q').is_err() {
                     self.reset();
                 } else {
@@ -1497,7 +1073,7 @@ impl GraphicsParser {
             b't' => self.state = GraphicsState::Tmux(TmuxParser::new()),
             0x1b => self.state = GraphicsState::Screen(ScreenParser::new()),
             b'0'..=b'9' | b';' => {
-                let mut parser = SixelParser::new();
+                let mut parser = ProtocolSixelParser::new();
                 if parser.feed(byte).is_err() {
                     self.reset();
                 } else {
@@ -1510,9 +1086,9 @@ impl GraphicsParser {
 
     fn feed_sixel(
         &mut self,
-        mut parser: Box<SixelParser>,
+        mut parser: Box<ProtocolSixelParser>,
         byte: u8,
-        events: &mut Vec<Result<DecodedGraphics, GraphicsError>>,
+        events: &mut Vec<Result<GraphicsOperation, GraphicsError>>,
     ) {
         if parser.escaped {
             if byte == 0x18 || byte == 0x1a {
@@ -1520,7 +1096,7 @@ impl GraphicsParser {
                 self.reset();
             } else if byte == b'\\' {
                 parser.escaped = false;
-                self.finish_state((*parser).finish(), events);
+                self.finish_sixel((*parser).finish(), events);
             } else {
                 self.discard(
                     StringKind::Dcs,
@@ -1539,9 +1115,9 @@ impl GraphicsParser {
             parser.escaped = true;
             self.state = GraphicsState::Sixel(parser);
         } else if byte == 0x9c {
-            self.finish_state(parser.finish(), events);
+            self.finish_sixel(parser.finish(), events);
         } else if let Err(error) = parser.feed(byte) {
-            if parser.phase == SixelPhase::Header
+            if parser.phase == ProtocolSixelPhase::Header
                 && byte != b'q'
                 && !matches!(error, GraphicsError::TransferTooLarge { .. })
             {
@@ -1554,29 +1130,48 @@ impl GraphicsParser {
         }
     }
 
+    fn finish_sixel(
+        &mut self,
+        result: Result<SixelGraphic, GraphicsError>,
+        events: &mut Vec<Result<GraphicsOperation, GraphicsError>>,
+    ) {
+        let failed = result.is_err();
+        self.reset();
+        match result {
+            Ok(graphic) => events.push(Ok(GraphicsOperation::Sixel(graphic))),
+            Err(error) => events.push(Err(error)),
+        }
+        if failed {
+            self.screen_continuation = false;
+            self.screen_inner = None;
+            self.tmux_continuation = false;
+            self.tmux_inner = None;
+        }
+    }
+
     fn feed_kitty(
         &mut self,
         mut parser: KittyParser,
         byte: u8,
-        events: &mut Vec<Result<DecodedGraphics, GraphicsError>>,
+        events: &mut Vec<Result<GraphicsOperation, GraphicsError>>,
     ) {
-        if parser.ignored {
-            if parser.escaped {
-                parser.escaped = false;
+        if parser.is_ignored() {
+            if parser.is_escaped() {
+                parser.set_escaped(false);
                 if byte == b'\\' {
                     self.reset();
                 } else if byte == 0x18 || byte == 0x1a {
                     self.cancel_transfers();
                     self.reset();
                 } else {
-                    parser.escaped = byte == 0x1b;
+                    parser.set_escaped(byte == 0x1b);
                     self.state = GraphicsState::Kitty(parser);
                 }
             } else if byte == 0x18 || byte == 0x1a {
                 self.cancel_transfers();
                 self.reset();
             } else if byte == 0x1b {
-                parser.escaped = true;
+                parser.set_escaped(true);
                 self.state = GraphicsState::Kitty(parser);
             } else if byte == 0x9c {
                 self.reset();
@@ -1585,12 +1180,12 @@ impl GraphicsParser {
             }
             return;
         }
-        if parser.escaped {
+        if parser.is_escaped() {
             if byte == 0x18 || byte == 0x1a {
                 self.cancel_transfers();
                 self.reset();
             } else if byte == b'\\' {
-                parser.escaped = false;
+                parser.set_escaped(false);
                 self.finish_kitty(parser, events);
             } else {
                 self.discard(
@@ -1607,13 +1202,13 @@ impl GraphicsParser {
             self.cancel_transfers();
             self.reset();
         } else if byte == 0x1b {
-            parser.escaped = true;
+            parser.set_escaped(true);
             self.state = GraphicsState::Kitty(parser);
         } else if byte == 0x9c {
             self.finish_kitty(parser, events);
         } else if let Err(error) = parser.feed(byte) {
             self.discard(StringKind::Apc, error, byte);
-        } else if parser.ignored {
+        } else if parser.is_ignored() {
             self.ignore_string(StringKind::Apc, byte);
         } else {
             self.state = GraphicsState::Kitty(parser);
@@ -1624,7 +1219,7 @@ impl GraphicsParser {
         &mut self,
         mut parser: ItermParser,
         byte: u8,
-        events: &mut Vec<Result<DecodedGraphics, GraphicsError>>,
+        events: &mut Vec<Result<GraphicsOperation, GraphicsError>>,
     ) {
         if parser.escaped {
             if byte == 0x18 || byte == 0x1a {
@@ -1665,7 +1260,7 @@ impl GraphicsParser {
         &mut self,
         mut parser: TmuxParser,
         byte: u8,
-        events: &mut Vec<Result<DecodedGraphics, GraphicsError>>,
+        events: &mut Vec<Result<GraphicsOperation, GraphicsError>>,
     ) {
         if parser.prefix.len() < b"tmux;".len() {
             if byte == 0x9c {
@@ -1758,7 +1353,7 @@ impl GraphicsParser {
         &mut self,
         mut parser: ScreenParser,
         byte: u8,
-        events: &mut Vec<Result<DecodedGraphics, GraphicsError>>,
+        events: &mut Vec<Result<GraphicsOperation, GraphicsError>>,
     ) {
         if byte == 0x9c {
             let inner_complete = if parser.inner_terminated {
@@ -1878,7 +1473,7 @@ impl GraphicsParser {
     fn finish_screen(
         &mut self,
         data: Vec<u8>,
-        events: &mut Vec<Result<DecodedGraphics, GraphicsError>>,
+        events: &mut Vec<Result<GraphicsOperation, GraphicsError>>,
     ) {
         let mut inner = self
             .screen_inner
@@ -1887,7 +1482,7 @@ impl GraphicsParser {
             .unwrap_or_default();
         inner.wrapper_depth = self.wrapper_depth.saturating_add(1);
         inner.screen_continuation = false;
-        events.extend(inner.advance(&data));
+        events.extend(inner.advance_operations(&data));
         let continuation = inner.has_pending_state();
         self.reset();
         self.screen_continuation = continuation;
@@ -1899,7 +1494,7 @@ impl GraphicsParser {
     fn finish_tmux(
         &mut self,
         data: Vec<u8>,
-        events: &mut Vec<Result<DecodedGraphics, GraphicsError>>,
+        events: &mut Vec<Result<GraphicsOperation, GraphicsError>>,
     ) {
         let mut inner = self
             .tmux_inner
@@ -1908,7 +1503,7 @@ impl GraphicsParser {
             .unwrap_or_default();
         inner.wrapper_depth = self.wrapper_depth.saturating_add(1);
         inner.tmux_continuation = false;
-        events.extend(inner.advance(&data));
+        events.extend(inner.advance_operations(&data));
         let continuation = inner.has_pending_state();
         self.reset();
         self.tmux_continuation = continuation;
@@ -1952,7 +1547,7 @@ impl GraphicsParser {
         terminator: &[u8],
     ) -> bool {
         let mut replay = inner.cloned().unwrap_or_default();
-        let _ = replay.advance(&parser.data[..parser.inner_data_start]);
+        let _ = replay.advance_operations(&parser.data[..parser.inner_data_start]);
         let mut candidate = parser.data[parser.inner_data_start..].to_vec();
         candidate.extend_from_slice(terminator);
         matches!(self.decode_wrapper(Some(&replay), &candidate), Ok(Some(_)))
@@ -1966,10 +1561,11 @@ impl GraphicsParser {
         &self,
         inner: Option<&GraphicsParser>,
         bytes: &[u8],
-    ) -> Result<Option<DecodedGraphics>, GraphicsError> {
+    ) -> Result<Option<GraphicsOperation>, GraphicsError> {
         let mut parser = inner.cloned().unwrap_or_default();
-        let events = parser.advance(bytes);
+        let events = parser.advance_operations(bytes);
         match events.as_slice() {
+            [Ok(GraphicsOperation::Failure { error, .. })] => Err(error.clone()),
             [event] => event.clone().map(Some),
             [] => Ok(None),
             _ => Err(GraphicsError::InvalidCommand {
@@ -1982,7 +1578,7 @@ impl GraphicsParser {
         &mut self,
         mut parser: DiscardParser,
         byte: u8,
-        events: &mut Vec<Result<DecodedGraphics, GraphicsError>>,
+        events: &mut Vec<Result<GraphicsOperation, GraphicsError>>,
     ) {
         if parser.escaped {
             parser.escaped = false;
@@ -2021,14 +1617,85 @@ impl GraphicsParser {
     fn finish_kitty(
         &mut self,
         parser: KittyParser,
-        events: &mut Vec<Result<DecodedGraphics, GraphicsError>>,
+        events: &mut Vec<Result<GraphicsOperation, GraphicsError>>,
     ) {
-        if parser.ignored {
+        let mut reply = reply_display(parser.header());
+        let continuation = parser.header().strip_prefix(b"G").is_some_and(|header| {
+            header
+                .split(|byte| *byte == b',')
+                .all(|field| field.starts_with(b"m=") || field.starts_with(b"q="))
+        });
+        if continuation {
+            if let Some(transfer) = &self.kitty_transfer {
+                let quiet = reply.quiet;
+                reply = transfer.display().clone();
+                if parser.header().windows(2).any(|pair| pair == b"q=") {
+                    reply.quiet = quiet;
+                }
+            } else if let Some(transfer) = &self.kitty_animation_transfer {
+                let quiet = reply.quiet;
+                reply = transfer.display();
+                if parser.header().windows(2).any(|pair| pair == b"q=") {
+                    reply.quiet = quiet;
+                }
+            }
+        }
+        let first_event = events.len();
+        if parser.is_ignored() {
             self.reset();
+        } else if self.kitty_animation_transfer.is_some()
+            || kitty_animation_transfer_header(parser.header())
+        {
+            let result = parser
+                .finish_animation_chunk()
+                .and_then(|chunk| {
+                    chunk.ok_or(GraphicsError::InvalidCommand {
+                        protocol: GraphicsProtocol::Kitty,
+                    })
+                })
+                .and_then(|chunk| self.accept_kitty_animation(chunk))
+                .map(|command| command.map(GraphicsOperation::Command));
+            let failed = result.is_err();
+            self.reset();
+            match result {
+                Ok(Some(command)) => events.push(Ok(command)),
+                Ok(None) => {}
+                Err(error) => events.push(Err(error)),
+            }
+            if failed || !self.has_own_transfer() {
+                self.kitty_transfer = None;
+                self.kitty_animation_transfer = None;
+                self.iterm_transfer = None;
+                self.transfer_carry.clear();
+                self.transfer_carryable = true;
+            }
+        } else if let Some(command) = parse_command(parser.header(), parser.payload()) {
+            if command
+                .as_ref()
+                .is_ok_and(|command| matches!(command.kind(), KittyCommandKind::Delete(_)))
+            {
+                self.kitty_transfer = None;
+                if self.abandoned_transfer == Some(GraphicsProtocol::Kitty) {
+                    self.abandoned_transfer = None;
+                }
+                self.transfer_carry.clear();
+                self.transfer_carryable = true;
+            } else if self.kitty_transfer.is_some() || self.abandoned_transfer.is_some() {
+                self.finish_state(
+                    Err(GraphicsError::InvalidCommand {
+                        protocol: GraphicsProtocol::Kitty,
+                    }),
+                    events,
+                );
+                commands::attach_error_replies(&mut events[first_event..], &reply);
+                return;
+            }
+            self.reset();
+            events.push(command.map(GraphicsOperation::Command));
         } else {
             if self.abandoned_transfer == Some(GraphicsProtocol::Kitty) {
                 match parser.finish() {
-                    Ok(chunk) if chunk.more => self.reset(),
+                    Ok(chunk) if chunk.more() => self.reset(),
                     Ok(_) => {
                         self.abandoned_transfer = None;
                         self.finish_state(
@@ -2045,30 +1712,38 @@ impl GraphicsParser {
                 self.finish_state(result, events);
             }
         }
+        commands::attach_error_replies(&mut events[first_event..], &reply);
     }
 
     fn finish_iterm(
         &mut self,
         parser: ItermParser,
-        events: &mut Vec<Result<DecodedGraphics, GraphicsError>>,
+        events: &mut Vec<Result<GraphicsOperation, GraphicsError>>,
     ) {
         if parser.ignored {
             self.reset();
         } else {
             match self.abandoned_transfer {
-                Some(GraphicsProtocol::Iterm2) => match iterm_command_name(&parser.body) {
-                    Some(b"FilePart") => self.reset(),
-                    Some(b"FileEnd") => {
-                        self.abandoned_transfer = None;
-                        self.finish_state(
-                            Err(GraphicsError::TransferTooLarge {
-                                protocol: GraphicsProtocol::Iterm2,
-                            }),
-                            events,
-                        );
+                Some(GraphicsProtocol::Iterm2) => {
+                    let command = parser
+                        .body
+                        .split(|byte| *byte == b'=')
+                        .next()
+                        .unwrap_or(&parser.body);
+                    match command {
+                        b"FilePart" => self.reset(),
+                        b"FileEnd" => {
+                            self.abandoned_transfer = None;
+                            self.finish_state(
+                                Err(GraphicsError::TransferTooLarge {
+                                    protocol: GraphicsProtocol::Iterm2,
+                                }),
+                                events,
+                            );
+                        }
+                        _ => self.reset(),
                     }
-                    _ => self.reset(),
-                },
+                }
                 _ => self.finish_iterm_command(parser, events),
             }
         }
@@ -2077,7 +1752,7 @@ impl GraphicsParser {
     fn finish_iterm_command(
         &mut self,
         parser: ItermParser,
-        events: &mut Vec<Result<DecodedGraphics, GraphicsError>>,
+        events: &mut Vec<Result<GraphicsOperation, GraphicsError>>,
     ) {
         let result = parse_iterm_command(&parser.body, &mut self.iterm_transfer);
         if self.iterm_transfer.is_some() {
@@ -2091,52 +1766,60 @@ impl GraphicsParser {
         chunk: Result<KittyChunk, GraphicsError>,
     ) -> Result<Option<DecodedGraphics>, GraphicsError> {
         let chunk = chunk?;
-        if let Some(mut transfer) = self.kitty_transfer.take() {
-            validate_kitty_continuation(&transfer, &chunk)?;
-            append_bounded(
-                &mut transfer.encoded,
-                &chunk.encoded,
-                GraphicsProtocol::Kitty,
-            )?;
-            if chunk.more {
+        let outcome = if let Some(transfer) = self.kitty_transfer.take() {
+            transfer.accept_chunk(chunk)?
+        } else {
+            start_transfer(chunk)?
+        };
+        match outcome {
+            KittyTransferOutcome::Pending(transfer) => {
                 self.kitty_transfer = Some(transfer);
                 self.remember_transfer_sequence();
                 Ok(None)
-            } else {
-                if let Some(expected) = chunk.declared_size {
-                    if transfer.declared_size.is_some() && transfer.declared_size != Some(expected)
-                    {
-                        return Err(GraphicsError::InvalidHeader {
-                            protocol: GraphicsProtocol::Kitty,
-                        });
-                    }
-                    transfer.declared_size = Some(expected);
-                }
-                Ok(Some(finish_kitty_transfer(transfer)?))
             }
-        } else if chunk.more {
-            self.kitty_transfer = Some(KittyTransfer::from_chunk(chunk)?);
-            self.remember_transfer_sequence();
-            Ok(None)
+            KittyTransferOutcome::Complete(image) => Ok(Some(image)),
+        }
+    }
+
+    fn accept_kitty_animation(
+        &mut self,
+        chunk: KittyAnimationChunk,
+    ) -> Result<Option<KittyCommand>, GraphicsError> {
+        if self.kitty_transfer.is_some() || self.abandoned_transfer.is_some() {
+            return Err(GraphicsError::InvalidCommand {
+                protocol: GraphicsProtocol::Kitty,
+            });
+        }
+        let outcome = if let Some(transfer) = self.kitty_animation_transfer.take() {
+            transfer.accept_chunk(chunk)?
         } else {
-            Ok(Some(finish_kitty_chunk(chunk)?))
+            start_animation_transfer(chunk)?
+        };
+        match outcome {
+            KittyAnimationTransferOutcome::Pending(transfer) => {
+                self.kitty_animation_transfer = Some(transfer);
+                self.remember_transfer_sequence();
+                Ok(None)
+            }
+            KittyAnimationTransferOutcome::Complete(command) => Ok(Some(*command)),
         }
     }
 
     fn finish_state(
         &mut self,
         result: Result<Option<DecodedGraphics>, GraphicsError>,
-        events: &mut Vec<Result<DecodedGraphics, GraphicsError>>,
+        events: &mut Vec<Result<GraphicsOperation, GraphicsError>>,
     ) {
         let failed = result.is_err();
         self.reset();
         match result {
-            Ok(Some(image)) => events.push(Ok(image)),
+            Ok(Some(image)) => events.push(Ok(GraphicsOperation::Image(image))),
             Ok(None) => {}
             Err(error) => events.push(Err(error)),
         }
         if failed || !self.has_own_transfer() {
             self.kitty_transfer = None;
+            self.kitty_animation_transfer = None;
             self.iterm_transfer = None;
             self.transfer_carry.clear();
             self.transfer_carryable = true;
@@ -2163,6 +1846,7 @@ impl GraphicsParser {
         if report {
             if kind == StringKind::Apc {
                 self.kitty_transfer = None;
+                self.kitty_animation_transfer = None;
             } else if kind == StringKind::Osc {
                 self.iterm_transfer = None;
             }
@@ -2275,6 +1959,7 @@ impl GraphicsParser {
 
     fn cancel_transfers(&mut self) {
         self.kitty_transfer = None;
+        self.kitty_animation_transfer = None;
         self.iterm_transfer = None;
         self.transfer_carry.clear();
         self.transfer_carryable = true;
@@ -2301,444 +1986,21 @@ impl GraphicsParser {
     }
 }
 
-#[derive(Clone)]
-struct SixelParser {
-    phase: SixelPhase,
-    header: Vec<u8>,
-    command: Option<SixelCommand>,
-    command_data: Vec<u8>,
-    canvas: SixelCanvas,
-    escaped: bool,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SixelPhase {
-    Header,
-    Body,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SixelCommand {
-    Repeat,
-    Raster,
-    Color,
-}
-
-impl SixelParser {
-    fn new() -> Self {
-        SixelParser {
-            phase: SixelPhase::Header,
-            header: Vec::new(),
-            command: None,
-            command_data: Vec::new(),
-            canvas: SixelCanvas::new(),
-            escaped: false,
-        }
-    }
-
-    fn feed(&mut self, byte: u8) -> Result<(), GraphicsError> {
-        if self.phase == SixelPhase::Header {
-            if byte == b'q' {
-                self.parse_header()?;
-                self.phase = SixelPhase::Body;
-            } else if byte.is_ascii_digit() || byte == b';' {
-                push_bounded(
-                    &mut self.header,
-                    byte,
-                    MAX_GRAPHICS_CONTROL_BYTES,
-                    GraphicsProtocol::Sixel,
-                )?;
-            } else {
-                return Err(GraphicsError::InvalidHeader {
-                    protocol: GraphicsProtocol::Sixel,
-                });
-            }
-            return Ok(());
-        }
-
-        if let Some(command) = self.command {
-            if byte.is_ascii_digit() || byte == b';' {
-                push_bounded(
-                    &mut self.command_data,
-                    byte,
-                    MAX_GRAPHICS_CONTROL_BYTES,
-                    GraphicsProtocol::Sixel,
-                )?;
-                return Ok(());
-            }
-            self.finish_command(command)?;
-        }
-
-        match byte {
-            b'!' => {
-                self.command = Some(SixelCommand::Repeat);
-                self.command_data.clear();
-            }
-            b'"' => {
-                self.command = Some(SixelCommand::Raster);
-                self.command_data.clear();
-            }
-            b'#' => {
-                self.command = Some(SixelCommand::Color);
-                self.command_data.clear();
-            }
-            b'$' => self.canvas.carriage_return(),
-            b'-' => self.canvas.new_line()?,
-            b'?'..=b'~' => self.canvas.paint(byte - b'?')?,
-            _ => {
-                return Err(GraphicsError::InvalidCommand {
-                    protocol: GraphicsProtocol::Sixel,
-                })
-            }
-        }
-        Ok(())
-    }
-
-    fn finish(mut self) -> Result<Option<DecodedGraphics>, GraphicsError> {
-        if let Some(command) = self.command.take() {
-            self.finish_command(command)?;
-            if command == SixelCommand::Repeat {
-                return Err(GraphicsError::InvalidCommand {
-                    protocol: GraphicsProtocol::Sixel,
-                });
-            }
-        }
-        if self.phase != SixelPhase::Body || !self.canvas.saw_sixel {
-            return Err(GraphicsError::InvalidCommand {
-                protocol: GraphicsProtocol::Sixel,
-            });
-        }
-        Ok(Some(DecodedGraphics {
-            protocol: GraphicsProtocol::Sixel,
-            image: self.canvas.finish()?,
-            action: ImageAction::Display,
-            display: ImageDisplay {
-                sixel_background: Some(self.canvas.background),
-                ..ImageDisplay::default()
-            },
-        }))
-    }
-
-    fn parse_header(&mut self) -> Result<(), GraphicsError> {
-        let params = parse_sixel_header_params(&self.header, 3)?;
-        if let Some(aspect) = params.first().copied() {
-            if aspect > 9 {
-                return Err(GraphicsError::InvalidCommand {
-                    protocol: GraphicsProtocol::Sixel,
-                });
-            }
-        }
-        match params.get(1).copied().unwrap_or(0) {
-            0 | 2 => self.canvas.set_background(SixelBackground::Terminal),
-            1 => self.canvas.set_background(SixelBackground::Preserve),
-            _ => {
-                return Err(GraphicsError::InvalidCommand {
-                    protocol: GraphicsProtocol::Sixel,
-                })
-            }
-        }
-        Ok(())
-    }
-
-    fn finish_command(&mut self, command: SixelCommand) -> Result<(), GraphicsError> {
-        let data = std::mem::take(&mut self.command_data);
-        self.command = None;
-        match command {
-            SixelCommand::Repeat => {
-                let count = parse_required_u32(&data, GraphicsProtocol::Sixel)?;
-                if count == 0 {
-                    return Err(GraphicsError::InvalidCommand {
-                        protocol: GraphicsProtocol::Sixel,
-                    });
-                }
-                self.canvas.repeat =
-                    usize::try_from(count).map_err(|_| GraphicsError::ImageTooLarge {
-                        protocol: GraphicsProtocol::Sixel,
-                    })?;
-            }
-            SixelCommand::Raster => {
-                let params = parse_sixel_params(&data, 4)?;
-                if params.len() != 4 || params[2] == 0 || params[3] == 0 {
-                    return Err(GraphicsError::InvalidDimensions {
-                        protocol: GraphicsProtocol::Sixel,
-                    });
-                }
-                self.canvas.set_raster(
-                    usize::try_from(params[2]).map_err(|_| GraphicsError::ImageTooLarge {
-                        protocol: GraphicsProtocol::Sixel,
-                    })?,
-                    usize::try_from(params[3]).map_err(|_| GraphicsError::ImageTooLarge {
-                        protocol: GraphicsProtocol::Sixel,
-                    })?,
-                )?;
-            }
-            SixelCommand::Color => self.canvas.set_color(&data)?,
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone)]
-struct SixelCanvas {
-    width: usize,
-    height: usize,
-    logical_width: usize,
-    logical_height: usize,
-    fixed_width: Option<usize>,
-    fixed_height: Option<usize>,
-    rgba: Vec<u8>,
-    background: SixelBackground,
-    palette: [[u8; 4]; 256],
-    color: usize,
-    x: usize,
-    y: usize,
-    repeat: usize,
-    saw_sixel: bool,
-}
-
-impl SixelCanvas {
-    fn new() -> Self {
-        let mut palette = [[0, 0, 0, 255]; 256];
-        let defaults = [
-            (0, 0, 0),
-            (20, 20, 80),
-            (80, 13, 13),
-            (20, 80, 20),
-            (80, 20, 80),
-            (20, 80, 80),
-            (80, 80, 20),
-            (53, 53, 53),
-            (26, 26, 26),
-            (33, 33, 60),
-            (60, 26, 26),
-            (33, 60, 33),
-            (60, 33, 60),
-            (33, 60, 60),
-            (60, 60, 33),
-            (80, 80, 80),
-        ];
-        for (index, (red, green, blue)) in defaults.into_iter().enumerate() {
-            palette[index] = [
-                percentage_to_byte(red),
-                percentage_to_byte(green),
-                percentage_to_byte(blue),
-                255,
-            ];
-        }
-        SixelCanvas {
-            width: 0,
-            height: 0,
-            logical_width: 0,
-            logical_height: 0,
-            fixed_width: None,
-            fixed_height: None,
-            rgba: Vec::new(),
-            background: SixelBackground::Terminal,
-            palette,
-            color: 0,
-            x: 0,
-            y: 0,
-            repeat: 1,
-            saw_sixel: false,
-        }
-    }
-
-    fn set_background(&mut self, background: SixelBackground) {
-        self.background = background;
-    }
-
-    fn set_raster(&mut self, width: usize, height: usize) -> Result<(), GraphicsError> {
-        if self.saw_sixel || self.fixed_width.is_some() {
-            return Err(GraphicsError::InvalidCommand {
-                protocol: GraphicsProtocol::Sixel,
-            });
-        }
-        validate_dimensions(GraphicsProtocol::Sixel, width, height)?;
-        self.fixed_width = Some(width);
-        self.fixed_height = Some(height);
-        self.width = width;
-        self.height = height;
-        self.logical_width = width;
-        self.logical_height = height;
-        self.rgba = filled_rgba(
-            [0, 0, 0, 0],
-            checked_rgba_len(GraphicsProtocol::Sixel, width, height)?,
-        );
-        Ok(())
-    }
-
-    fn set_color(&mut self, data: &[u8]) -> Result<(), GraphicsError> {
-        let params = parse_sixel_params(data, 5)?;
-        if params.is_empty() || params[0] > 255 {
-            return Err(GraphicsError::InvalidCommand {
-                protocol: GraphicsProtocol::Sixel,
-            });
-        }
-        let index = usize::try_from(params[0]).map_err(|_| GraphicsError::InvalidCommand {
-            protocol: GraphicsProtocol::Sixel,
-        })?;
-        if params.len() == 1 {
-            self.color = index;
-            return Ok(());
-        }
-        if params.len() != 5 {
-            return Err(GraphicsError::InvalidCommand {
-                protocol: GraphicsProtocol::Sixel,
-            });
-        }
-        self.palette[index] = match params[1] {
-            1 if params[2] <= 360 && params[3] <= 100 && params[4] <= 100 => {
-                hls_to_rgba(params[2], params[3], params[4])
-            }
-            2 if params[2] <= 100 && params[3] <= 100 && params[4] <= 100 => [
-                percentage_to_byte(params[2]),
-                percentage_to_byte(params[3]),
-                percentage_to_byte(params[4]),
-                255,
-            ],
-            _ => {
-                return Err(GraphicsError::InvalidCommand {
-                    protocol: GraphicsProtocol::Sixel,
-                })
-            }
-        };
-        self.color = index;
-        Ok(())
-    }
-
-    fn paint(&mut self, bits: u8) -> Result<(), GraphicsError> {
-        let repeat = self.repeat;
-        self.repeat = 1;
-        let end_x = self
-            .x
-            .checked_add(repeat)
-            .ok_or(GraphicsError::InvalidDimensions {
-                protocol: GraphicsProtocol::Sixel,
-            })?;
-        if end_x > MAX_IMAGE_SIDE {
-            return Err(GraphicsError::ImageTooLarge {
-                protocol: GraphicsProtocol::Sixel,
-            });
-        }
-        let end_y = self
-            .y
-            .checked_add(6)
-            .ok_or(GraphicsError::InvalidDimensions {
-                protocol: GraphicsProtocol::Sixel,
-            })?;
-        let needed_width = self.fixed_width.unwrap_or(end_x.max(self.logical_width));
-        let needed_height = self.fixed_height.unwrap_or(end_y);
-        if self.fixed_width.is_none() || self.fixed_height.is_none() {
-            self.ensure_size(needed_width, needed_height)?;
-        }
-        self.saw_sixel = true;
-        let draw_count = if let Some(fixed_width) = self.fixed_width {
-            repeat.min(fixed_width.saturating_sub(self.x))
-        } else {
-            repeat
-        };
-        for offset in 0..draw_count {
-            let x = self.x + offset;
-            for bit in 0..6 {
-                if bits & (1 << bit) == 0 {
-                    continue;
-                }
-                let y = self.y + bit;
-                if x < self.width && y < self.height {
-                    let at = (y * self.width + x) * 4;
-                    self.rgba[at..at + 4].copy_from_slice(&self.palette[self.color]);
-                }
-            }
-        }
-        self.logical_width = self.logical_width.max(end_x);
-        self.logical_height = self.logical_height.max(end_y);
-        self.x = end_x;
-        Ok(())
-    }
-
-    fn carriage_return(&mut self) {
-        self.x = 0;
-    }
-
-    fn new_line(&mut self) -> Result<(), GraphicsError> {
-        self.x = 0;
-        self.y = self
-            .y
-            .checked_add(6)
-            .ok_or(GraphicsError::InvalidDimensions {
-                protocol: GraphicsProtocol::Sixel,
-            })?;
-        Ok(())
-    }
-
-    fn ensure_size(&mut self, width: usize, height: usize) -> Result<(), GraphicsError> {
-        validate_dimensions(GraphicsProtocol::Sixel, width, height)?;
-        if width <= self.width && height <= self.height {
-            return Ok(());
-        }
-        let grown_width = width.max(self.width.saturating_mul(2)).max(1);
-        let grown_height = height.max(self.height.saturating_mul(2)).max(1);
-        let (new_width, new_height) = if grown_width <= MAX_IMAGE_SIDE
-            && grown_height <= MAX_IMAGE_SIDE
-            && grown_width
-                .checked_mul(grown_height)
-                .is_some_and(|pixels| pixels <= MAX_IMAGE_PIXELS)
-        {
-            (grown_width, grown_height)
-        } else {
-            (width.max(self.width), height.max(self.height))
-        };
-        validate_dimensions(GraphicsProtocol::Sixel, new_width, new_height)?;
-        let new_len = checked_rgba_len(GraphicsProtocol::Sixel, new_width, new_height)?;
-        let mut rgba = filled_rgba([0, 0, 0, 0], new_len);
-        for row in 0..self.height {
-            let old_start = row * self.width * 4;
-            let new_start = row * new_width * 4;
-            rgba[new_start..new_start + self.width * 4]
-                .copy_from_slice(&self.rgba[old_start..old_start + self.width * 4]);
-        }
-        self.width = new_width;
-        self.height = new_height;
-        self.rgba = rgba;
-        Ok(())
-    }
-
-    fn finish(&self) -> Result<DecodedImage, GraphicsError> {
-        let width = self.fixed_width.unwrap_or(self.logical_width);
-        let height = self.fixed_height.unwrap_or(self.logical_height);
-        validate_dimensions(GraphicsProtocol::Sixel, width, height)?;
-        let len = checked_rgba_len(GraphicsProtocol::Sixel, width, height)?;
-        let mut rgba = filled_rgba([0, 0, 0, 0], len);
-        let columns = width.min(self.width);
-        for row in 0..height.min(self.height) {
-            let source_start = row * self.width * 4;
-            let target_start = row * width * 4;
-            rgba[target_start..target_start + columns * 4]
-                .copy_from_slice(&self.rgba[source_start..source_start + columns * 4]);
-        }
-        Ok(DecodedImage {
-            width: u32::try_from(width).map_err(|_| GraphicsError::ImageTooLarge {
-                protocol: GraphicsProtocol::Sixel,
-            })?,
-            height: u32::try_from(height).map_err(|_| GraphicsError::ImageTooLarge {
-                protocol: GraphicsProtocol::Sixel,
-            })?,
-            rgba,
-        })
-    }
-}
-
-#[derive(Clone)]
-struct KittyParser {
-    header: Vec<u8>,
-    data: Vec<u8>,
-    seen_header: bool,
-    ignored: bool,
-    escaped: bool,
-}
-
 fn is_base64_byte(byte: u8) -> bool {
     matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'+' | b'/' | b'=')
+}
+
+fn kitty_animation_transfer_header(header: &[u8]) -> bool {
+    let Some(body) = header.strip_prefix(b"G") else {
+        return false;
+    };
+    let action = body
+        .split(|byte| *byte == b',')
+        .find_map(|field| field.strip_prefix(b"a="));
+    action == Some(b"f")
+        && body
+            .split(|byte| *byte == b',')
+            .any(|field| field == b"m=1")
 }
 
 fn base64_run_len(bytes: &[u8], limit: usize) -> usize {
@@ -2754,62 +2016,6 @@ fn extend_last_range(ranges: &mut Vec<Range<usize>>, offset: usize) {
         range.end += 1;
     } else {
         ranges.push(offset..offset + 1);
-    }
-}
-
-impl KittyParser {
-    fn new() -> Self {
-        KittyParser {
-            header: Vec::new(),
-            data: Vec::new(),
-            seen_header: false,
-            ignored: false,
-            escaped: false,
-        }
-    }
-
-    fn feed(&mut self, byte: u8) -> Result<(), GraphicsError> {
-        if self.ignored {
-            return Ok(());
-        }
-        if !self.seen_header {
-            if self.header.is_empty() && byte != b'G' {
-                self.ignored = true;
-                return Ok(());
-            }
-            if self.header.is_empty() {
-                self.header.push(byte);
-                return Ok(());
-            }
-            if byte == b';' {
-                self.seen_header = true;
-                return Ok(());
-            }
-            push_bounded(
-                &mut self.header,
-                byte,
-                MAX_GRAPHICS_CONTROL_BYTES,
-                GraphicsProtocol::Kitty,
-            )?;
-        } else {
-            push_bounded(
-                &mut self.data,
-                byte,
-                MAX_KITTY_CHUNK_BYTES,
-                GraphicsProtocol::Kitty,
-            )?;
-        }
-        Ok(())
-    }
-
-    fn finish(self) -> Result<KittyChunk, GraphicsError> {
-        if !self.seen_header || self.header.first().copied() != Some(b'G') {
-            return Err(GraphicsError::InvalidHeader {
-                protocol: GraphicsProtocol::Kitty,
-            });
-        }
-        let control = parse_kitty_control(&self.header[1..])?;
-        KittyChunk::from_control(control, self.data)
     }
 }
 
@@ -2911,1131 +2117,6 @@ impl ScreenParser {
     }
 }
 
-#[derive(Clone)]
-struct KittyTransfer {
-    id: Option<u32>,
-    action: ImageAction,
-    format: KittyFormat,
-    width: Option<u32>,
-    height: Option<u32>,
-    display: ImageDisplay,
-    encoded: Vec<u8>,
-    compression: bool,
-    declared_size: Option<usize>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum KittyFormat {
-    Rgb,
-    Rgba,
-    Png,
-}
-
-#[derive(Clone)]
-struct KittyChunk {
-    id: Option<u32>,
-    action: ImageAction,
-    more: bool,
-    more_specified: bool,
-    continuation_compatible: bool,
-    format: Option<KittyFormat>,
-    width: Option<u32>,
-    height: Option<u32>,
-    display: ImageDisplay,
-    encoded: Vec<u8>,
-    compression: Option<bool>,
-    declared_size: Option<usize>,
-}
-
-impl KittyChunk {
-    fn from_control(control: KittyControl, data: Vec<u8>) -> Result<Self, GraphicsError> {
-        if data.len() > MAX_KITTY_CHUNK_BYTES {
-            return Err(GraphicsError::TransferTooLarge {
-                protocol: GraphicsProtocol::Kitty,
-            });
-        }
-        if control.more && (!data.len().is_multiple_of(4) || data.contains(&b'=')) {
-            return Err(GraphicsError::InvalidBase64 {
-                protocol: GraphicsProtocol::Kitty,
-            });
-        }
-        if control.medium.unwrap_or(b'd') != b'd' {
-            return Err(GraphicsError::UnsupportedAction {
-                protocol: GraphicsProtocol::Kitty,
-                action: format!(
-                    "transfer medium {}",
-                    control.medium.unwrap_or_default() as char
-                ),
-            });
-        }
-        if control.format == Some(KittyFormat::Png)
-            && control.compression == Some(true)
-            && control.declared_size.is_none()
-        {
-            return Err(GraphicsError::InvalidHeader {
-                protocol: GraphicsProtocol::Kitty,
-            });
-        }
-        if matches!(control.format, Some(KittyFormat::Rgb | KittyFormat::Rgba))
-            && (control.width == Some(0) || control.height == Some(0))
-        {
-            return Err(GraphicsError::InvalidDimensions {
-                protocol: GraphicsProtocol::Kitty,
-            });
-        }
-        Ok(KittyChunk {
-            id: control.id,
-            action: control.action,
-            more: control.more,
-            more_specified: control.more_specified,
-            continuation_compatible: control.continuation_compatible,
-            format: control.format,
-            width: control.width,
-            height: control.height,
-            display: control.display,
-            encoded: data,
-            compression: control.compression,
-            declared_size: control.declared_size,
-        })
-    }
-}
-
-struct KittyControl {
-    id: Option<u32>,
-    action: ImageAction,
-    medium: Option<u8>,
-    format: Option<KittyFormat>,
-    width: Option<u32>,
-    height: Option<u32>,
-    more: bool,
-    more_specified: bool,
-    compression: Option<bool>,
-    declared_size: Option<usize>,
-    display: ImageDisplay,
-    continuation_compatible: bool,
-}
-
-impl Default for KittyControl {
-    fn default() -> Self {
-        KittyControl {
-            id: None,
-            action: ImageAction::Transmit,
-            medium: None,
-            format: None,
-            width: None,
-            height: None,
-            more: false,
-            more_specified: false,
-            compression: None,
-            declared_size: None,
-            display: ImageDisplay::default(),
-            continuation_compatible: true,
-        }
-    }
-}
-
-fn parse_kitty_control(data: &[u8]) -> Result<KittyControl, GraphicsError> {
-    let mut control = KittyControl::default();
-    let mut seen = [false; 256];
-    for field in data.split(|byte| *byte == b',') {
-        if field.is_empty() {
-            continue;
-        }
-        let (key, value) = split_at_byte(field, b'=').ok_or(GraphicsError::InvalidHeader {
-            protocol: GraphicsProtocol::Kitty,
-        })?;
-        if key.len() != 1 || value.is_empty() {
-            return Err(GraphicsError::InvalidHeader {
-                protocol: GraphicsProtocol::Kitty,
-            });
-        }
-        let key = key[0];
-        let slot = match key {
-            b'a' | b'C' | b'c' | b'd' | b'f' | b'h' | b'H' | b'i' | b'I' | b'm' | b'N' | b'o'
-            | b'O' | b'p' | b'P' | b'q' | b'Q' | b'r' | b's' | b'S' | b't' | b'U' | b'v' | b'V'
-            | b'w' | b'x' | b'X' | b'y' | b'Y' | b'z' => usize::from(key),
-            _ => {
-                return Err(GraphicsError::InvalidHeader {
-                    protocol: GraphicsProtocol::Kitty,
-                })
-            }
-        };
-        if seen[slot] {
-            return Err(GraphicsError::InvalidHeader {
-                protocol: GraphicsProtocol::Kitty,
-            });
-        }
-        seen[slot] = true;
-        if !matches!(key, b'm' | b'q') {
-            control.continuation_compatible = false;
-        }
-        match key {
-            b'a' => {
-                let action = as_ascii(value, GraphicsProtocol::Kitty)?;
-                control.action = match value {
-                    b"t" => ImageAction::Transmit,
-                    b"T" => ImageAction::TransmitAndDisplay,
-                    _ => {
-                        return Err(GraphicsError::UnsupportedAction {
-                            protocol: GraphicsProtocol::Kitty,
-                            action,
-                        })
-                    }
-                };
-            }
-            b'f' => {
-                control.format = Some(match parse_u32(value, GraphicsProtocol::Kitty)? {
-                    24 => KittyFormat::Rgb,
-                    32 => KittyFormat::Rgba,
-                    100 => KittyFormat::Png,
-                    _ => {
-                        return Err(GraphicsError::UnsupportedMedia {
-                            protocol: GraphicsProtocol::Kitty,
-                            format: String::from_utf8_lossy(value).into_owned(),
-                        })
-                    }
-                });
-            }
-            b'h' => {
-                let height = parse_u32(value, GraphicsProtocol::Kitty)?;
-                if height == 0 {
-                    return Err(GraphicsError::InvalidDimensions {
-                        protocol: GraphicsProtocol::Kitty,
-                    });
-                }
-                control.display.height = Some(ImageDimension::Pixels(height));
-            }
-            b'i' => {
-                if control.display.image_number.is_some() {
-                    return Err(GraphicsError::InvalidHeader {
-                        protocol: GraphicsProtocol::Kitty,
-                    });
-                }
-                let id = parse_u32(value, GraphicsProtocol::Kitty)?;
-                if id == 0 {
-                    return Err(GraphicsError::InvalidCommand {
-                        protocol: GraphicsProtocol::Kitty,
-                    });
-                }
-                control.id = Some(id);
-                control.display.image_id = Some(id);
-            }
-            b'I' => {
-                if control.id.is_some() {
-                    return Err(GraphicsError::InvalidHeader {
-                        protocol: GraphicsProtocol::Kitty,
-                    });
-                }
-                let id = parse_u32(value, GraphicsProtocol::Kitty)?;
-                if id == 0 {
-                    return Err(GraphicsError::InvalidCommand {
-                        protocol: GraphicsProtocol::Kitty,
-                    });
-                }
-                control.display.image_number = Some(id);
-            }
-            b'm' => match value {
-                b"0" => {
-                    control.more = false;
-                    control.more_specified = true;
-                }
-                b"1" => {
-                    control.more = true;
-                    control.more_specified = true;
-                }
-                _ => {
-                    return Err(GraphicsError::InvalidCommand {
-                        protocol: GraphicsProtocol::Kitty,
-                    })
-                }
-            },
-            b'o' => {
-                control.compression = Some(match value {
-                    b"z" => true,
-                    _ => {
-                        return Err(GraphicsError::UnsupportedMedia {
-                            protocol: GraphicsProtocol::Kitty,
-                            format: as_ascii(value, GraphicsProtocol::Kitty)?,
-                        })
-                    }
-                });
-            }
-            b's' => control.width = Some(parse_u32(value, GraphicsProtocol::Kitty)?),
-            b'v' => control.height = Some(parse_u32(value, GraphicsProtocol::Kitty)?),
-            b'p' => {
-                control.display.placement_id = Some(parse_u32(value, GraphicsProtocol::Kitty)?);
-            }
-            b'S' => control.declared_size = Some(parse_usize(value, GraphicsProtocol::Kitty)?),
-            b't' => {
-                if value.len() != 1 {
-                    return Err(GraphicsError::InvalidCommand {
-                        protocol: GraphicsProtocol::Kitty,
-                    });
-                }
-                control.medium = Some(value[0]);
-            }
-            b'c' => {
-                control.display.cell_columns =
-                    Some(parse_positive_u32(value, GraphicsProtocol::Kitty)?);
-            }
-            b'r' => {
-                control.display.cell_rows =
-                    Some(parse_positive_u32(value, GraphicsProtocol::Kitty)?);
-            }
-            b'w' => {
-                control.display.width = Some(ImageDimension::Pixels(parse_positive_u32(
-                    value,
-                    GraphicsProtocol::Kitty,
-                )?));
-            }
-            b'x' => {
-                control.display.source_offset_x = Some(parse_u32(value, GraphicsProtocol::Kitty)?);
-            }
-            b'y' => {
-                control.display.source_offset_y = Some(parse_u32(value, GraphicsProtocol::Kitty)?);
-            }
-            b'X' => {
-                control.display.cell_offset_x = Some(parse_u32(value, GraphicsProtocol::Kitty)?);
-            }
-            b'Y' => {
-                control.display.cell_offset_y = Some(parse_u32(value, GraphicsProtocol::Kitty)?);
-            }
-            b'C' => {
-                control.display.move_cursor = match parse_u32(value, GraphicsProtocol::Kitty)? {
-                    0 => true,
-                    1 => false,
-                    _ => {
-                        return Err(GraphicsError::InvalidCommand {
-                            protocol: GraphicsProtocol::Kitty,
-                        })
-                    }
-                };
-            }
-            b'N' => {
-                control.display.usage_hints = parse_u32(value, GraphicsProtocol::Kitty)?;
-            }
-            b'U' => {
-                control.display.unicode_placeholder =
-                    match parse_u32(value, GraphicsProtocol::Kitty)? {
-                        0 => false,
-                        1 => true,
-                        _ => {
-                            return Err(GraphicsError::InvalidCommand {
-                                protocol: GraphicsProtocol::Kitty,
-                            })
-                        }
-                    };
-            }
-            b'z' => {
-                control.display.z_index = parse_i32(value, GraphicsProtocol::Kitty)?;
-            }
-            b'q' => {
-                let quiet = parse_u32(value, GraphicsProtocol::Kitty)?;
-                if quiet > 2 {
-                    return Err(GraphicsError::InvalidCommand {
-                        protocol: GraphicsProtocol::Kitty,
-                    });
-                }
-            }
-            b'd' | b'H' | b'O' | b'P' | b'Q' | b'V' => {
-                return Err(GraphicsError::UnsupportedAction {
-                    protocol: GraphicsProtocol::Kitty,
-                    action: format!("control {}", key as char),
-                });
-            }
-            _ => unreachable!(),
-        }
-    }
-    Ok(control)
-}
-
-fn validate_kitty_continuation(
-    transfer: &KittyTransfer,
-    chunk: &KittyChunk,
-) -> Result<(), GraphicsError> {
-    if !chunk.more_specified || !chunk.continuation_compatible {
-        return Err(GraphicsError::InvalidHeader {
-            protocol: GraphicsProtocol::Kitty,
-        });
-    }
-    if let Some(id) = chunk.id {
-        if transfer.id != Some(id) {
-            return Err(GraphicsError::InvalidHeader {
-                protocol: GraphicsProtocol::Kitty,
-            });
-        }
-    }
-    if let Some(format) = chunk.format {
-        if format != transfer.format {
-            return Err(GraphicsError::InvalidHeader {
-                protocol: GraphicsProtocol::Kitty,
-            });
-        }
-    }
-    if let Some(width) = chunk.width {
-        if transfer.width != Some(width) {
-            return Err(GraphicsError::InvalidDimensions {
-                protocol: GraphicsProtocol::Kitty,
-            });
-        }
-    }
-    if let Some(height) = chunk.height {
-        if transfer.height != Some(height) {
-            return Err(GraphicsError::InvalidDimensions {
-                protocol: GraphicsProtocol::Kitty,
-            });
-        }
-    }
-    if let Some(compression) = chunk.compression {
-        if compression != transfer.compression {
-            return Err(GraphicsError::InvalidCommand {
-                protocol: GraphicsProtocol::Kitty,
-            });
-        }
-    }
-    if let Some(expected) = chunk.declared_size {
-        if transfer.declared_size.is_some() && transfer.declared_size != Some(expected) {
-            return Err(GraphicsError::InvalidHeader {
-                protocol: GraphicsProtocol::Kitty,
-            });
-        }
-    }
-    Ok(())
-}
-
-impl KittyTransfer {
-    fn from_chunk(chunk: KittyChunk) -> Result<Self, GraphicsError> {
-        let format = chunk.format.unwrap_or(KittyFormat::Rgba);
-        let width = chunk.width;
-        let height = chunk.height;
-        if matches!(format, KittyFormat::Rgb | KittyFormat::Rgba)
-            && (width.is_none() || height.is_none())
-        {
-            return Err(GraphicsError::InvalidDimensions {
-                protocol: GraphicsProtocol::Kitty,
-            });
-        }
-        if let (Some(width), Some(height)) = (width, height) {
-            validate_dimensions(
-                GraphicsProtocol::Kitty,
-                usize::try_from(width).map_err(|_| GraphicsError::ImageTooLarge {
-                    protocol: GraphicsProtocol::Kitty,
-                })?,
-                usize::try_from(height).map_err(|_| GraphicsError::ImageTooLarge {
-                    protocol: GraphicsProtocol::Kitty,
-                })?,
-            )?;
-        }
-        Ok(KittyTransfer {
-            id: chunk.id,
-            action: chunk.action,
-            format,
-            width,
-            height,
-            display: chunk.display,
-            encoded: chunk.encoded,
-            compression: chunk.compression.unwrap_or(false),
-            declared_size: chunk.declared_size,
-        })
-    }
-}
-
-fn finish_kitty_chunk(chunk: KittyChunk) -> Result<DecodedGraphics, GraphicsError> {
-    let transfer = KittyTransfer::from_chunk(chunk)?;
-    finish_kitty_transfer(transfer)
-}
-
-fn finish_kitty_transfer(transfer: KittyTransfer) -> Result<DecodedGraphics, GraphicsError> {
-    let bytes = decode_base64(GraphicsProtocol::Kitty, &transfer.encoded)?;
-    let bytes = if transfer.compression {
-        decompress_bounded(GraphicsProtocol::Kitty, &bytes)?
-    } else {
-        bytes
-    };
-    if let Some(expected) = transfer.declared_size {
-        if expected != bytes.len() {
-            return Err(GraphicsError::DeclaredSizeMismatch {
-                protocol: GraphicsProtocol::Kitty,
-                expected,
-                actual: bytes.len(),
-            });
-        }
-    }
-    let image = match transfer.format {
-        KittyFormat::Rgb => raw_rgb(
-            GraphicsProtocol::Kitty,
-            transfer.width.ok_or(GraphicsError::InvalidDimensions {
-                protocol: GraphicsProtocol::Kitty,
-            })?,
-            transfer.height.ok_or(GraphicsError::InvalidDimensions {
-                protocol: GraphicsProtocol::Kitty,
-            })?,
-            &bytes,
-        )?,
-        KittyFormat::Rgba => raw_rgba(
-            GraphicsProtocol::Kitty,
-            transfer.width.ok_or(GraphicsError::InvalidDimensions {
-                protocol: GraphicsProtocol::Kitty,
-            })?,
-            transfer.height.ok_or(GraphicsError::InvalidDimensions {
-                protocol: GraphicsProtocol::Kitty,
-            })?,
-            &bytes,
-        )?,
-        KittyFormat::Png => decode_raster(GraphicsProtocol::Kitty, &bytes)?,
-    };
-    Ok(DecodedGraphics {
-        protocol: GraphicsProtocol::Kitty,
-        image,
-        action: transfer.action,
-        display: transfer.display,
-    })
-}
-
-fn iterm_command_name(body: &[u8]) -> Option<&[u8]> {
-    (!body.is_empty()).then(|| split_at_byte(body, b'=').map_or(body, |(command, _)| command))
-}
-
-const ITERM_GRAPHICS_COMMANDS: [&[u8]; 4] = [b"File", b"MultipartFile", b"FilePart", b"FileEnd"];
-
-fn iterm_command_is_graphics(body: &[u8]) -> bool {
-    match iterm_command_name(body) {
-        None => true,
-        Some(command) => ITERM_GRAPHICS_COMMANDS.contains(&command),
-    }
-}
-
-fn iterm_command_can_be_graphics(body: &[u8]) -> bool {
-    let command = split_at_byte(body, b'=').map_or(body, |(command, _)| command);
-    ITERM_GRAPHICS_COMMANDS
-        .iter()
-        .any(|name| name.starts_with(command))
-}
-
-fn iterm_payload_started(body: &[u8]) -> bool {
-    if body.starts_with(b"FilePart=") {
-        return true;
-    }
-    matches!(iterm_command_name(body), Some(b"File" | b"MultipartFile")) && body.contains(&b':')
-}
-
-fn parse_iterm_command(
-    body: &[u8],
-    multipart: &mut Option<ItermTransfer>,
-) -> Result<Option<DecodedGraphics>, GraphicsError> {
-    if body.is_empty() {
-        return Err(GraphicsError::InvalidHeader {
-            protocol: GraphicsProtocol::Iterm2,
-        });
-    }
-    let (command, rest) = split_at_byte(body, b'=').unwrap_or((body, &[]));
-    match command {
-        b"File" => {
-            if multipart.is_some() {
-                return Err(GraphicsError::MultipartState);
-            }
-            let (params, encoded) =
-                split_at_byte(rest, b':').ok_or(GraphicsError::InvalidHeader {
-                    protocol: GraphicsProtocol::Iterm2,
-                })?;
-            if params.len() > MAX_GRAPHICS_CONTROL_BYTES {
-                return Err(GraphicsError::TransferTooLarge {
-                    protocol: GraphicsProtocol::Iterm2,
-                });
-            }
-            let meta = parse_iterm_meta(params, true)?;
-            let bytes = decode_base64(GraphicsProtocol::Iterm2, encoded)?;
-            check_declared_size(&meta, bytes.len())?;
-            Ok(Some(DecodedGraphics {
-                protocol: GraphicsProtocol::Iterm2,
-                image: decode_raster(GraphicsProtocol::Iterm2, &bytes)?,
-                action: ImageAction::Display,
-                display: meta.display,
-            }))
-        }
-        b"MultipartFile" => {
-            if multipart.is_some() {
-                return Err(GraphicsError::MultipartState);
-            }
-            let (params, encoded) = split_at_byte(rest, b':').unwrap_or((rest, &[]));
-            if params.len() > MAX_GRAPHICS_CONTROL_BYTES {
-                return Err(GraphicsError::TransferTooLarge {
-                    protocol: GraphicsProtocol::Iterm2,
-                });
-            }
-            let meta = parse_iterm_meta(params, true)?;
-            if encoded.len() > MAX_GRAPHICS_TRANSFER_BYTES {
-                return Err(GraphicsError::TransferTooLarge {
-                    protocol: GraphicsProtocol::Iterm2,
-                });
-            }
-            *multipart = Some(ItermTransfer {
-                meta,
-                encoded: encoded.to_vec(),
-            });
-            Ok(None)
-        }
-        b"FilePart" => {
-            let transfer = multipart.as_mut().ok_or(GraphicsError::MultipartState)?;
-            append_bounded(&mut transfer.encoded, rest, GraphicsProtocol::Iterm2)?;
-            Ok(None)
-        }
-        b"FileEnd" => {
-            if !rest.is_empty() {
-                return Err(GraphicsError::InvalidHeader {
-                    protocol: GraphicsProtocol::Iterm2,
-                });
-            }
-            let transfer = multipart.take().ok_or(GraphicsError::MultipartState)?;
-            let bytes = decode_base64(GraphicsProtocol::Iterm2, &transfer.encoded)?;
-            check_declared_size(&transfer.meta, bytes.len())?;
-            Ok(Some(DecodedGraphics {
-                protocol: GraphicsProtocol::Iterm2,
-                image: decode_raster(GraphicsProtocol::Iterm2, &bytes)?,
-                action: ImageAction::Display,
-                display: transfer.meta.display,
-            }))
-        }
-        _ => Ok(None),
-    }
-}
-
-#[derive(Clone)]
-struct ItermMeta {
-    display: ImageDisplay,
-    declared_size: Option<usize>,
-}
-
-#[derive(Clone)]
-struct ItermTransfer {
-    meta: ItermMeta,
-    encoded: Vec<u8>,
-}
-
-fn parse_iterm_meta(data: &[u8], require_inline: bool) -> Result<ItermMeta, GraphicsError> {
-    if data.len() > MAX_GRAPHICS_CONTROL_BYTES {
-        return Err(GraphicsError::TransferTooLarge {
-            protocol: GraphicsProtocol::Iterm2,
-        });
-    }
-    let mut display = ImageDisplay::default();
-    let mut declared_size = None;
-    let mut inline = false;
-    let mut seen: Vec<&[u8]> = Vec::new();
-    for field in data.split(|byte| *byte == b';') {
-        if field.is_empty() {
-            continue;
-        }
-        let (key, value) = split_at_byte(field, b'=').ok_or(GraphicsError::InvalidHeader {
-            protocol: GraphicsProtocol::Iterm2,
-        })?;
-        if seen.contains(&key) {
-            return Err(GraphicsError::InvalidHeader {
-                protocol: GraphicsProtocol::Iterm2,
-            });
-        }
-        seen.push(key);
-        match key {
-            b"inline" => match value {
-                b"1" => inline = true,
-                b"0" => inline = false,
-                _ => {
-                    return Err(GraphicsError::InvalidCommand {
-                        protocol: GraphicsProtocol::Iterm2,
-                    })
-                }
-            },
-            b"size" => declared_size = Some(parse_usize(value, GraphicsProtocol::Iterm2)?),
-            b"width" => display.width = Some(parse_iterm_dimension(value)?),
-            b"height" => display.height = Some(parse_iterm_dimension(value)?),
-            b"preserveAspectRatio" => match value {
-                b"1" => display.preserve_aspect_ratio = true,
-                b"0" => display.preserve_aspect_ratio = false,
-                _ => {
-                    return Err(GraphicsError::InvalidCommand {
-                        protocol: GraphicsProtocol::Iterm2,
-                    })
-                }
-            },
-            b"name" => {
-                if value.len() > MAX_GRAPHICS_CONTROL_BYTES {
-                    return Err(GraphicsError::TransferTooLarge {
-                        protocol: GraphicsProtocol::Iterm2,
-                    });
-                }
-            }
-            _ => {
-                if value.len() > MAX_GRAPHICS_CONTROL_BYTES {
-                    return Err(GraphicsError::TransferTooLarge {
-                        protocol: GraphicsProtocol::Iterm2,
-                    });
-                }
-            }
-        }
-    }
-    if require_inline && !inline {
-        return Err(GraphicsError::UnsupportedAction {
-            protocol: GraphicsProtocol::Iterm2,
-            action: "inline=0".to_string(),
-        });
-    }
-    if let Some(size) = declared_size {
-        if size > MAX_GRAPHICS_TRANSFER_BYTES {
-            return Err(GraphicsError::TransferTooLarge {
-                protocol: GraphicsProtocol::Iterm2,
-            });
-        }
-    }
-    Ok(ItermMeta {
-        display,
-        declared_size,
-    })
-}
-
-fn parse_iterm_dimension(value: &[u8]) -> Result<ImageDimension, GraphicsError> {
-    if value == b"auto" {
-        return Ok(ImageDimension::Auto);
-    }
-    if value.ends_with(b"px") {
-        let number = parse_u32(
-            &value[..value.len().saturating_sub(2)],
-            GraphicsProtocol::Iterm2,
-        )?;
-        if number == 0 {
-            return Err(GraphicsError::InvalidDimensions {
-                protocol: GraphicsProtocol::Iterm2,
-            });
-        }
-        return Ok(ImageDimension::Pixels(number));
-    }
-    if value.ends_with(b"%") {
-        let number = parse_u32(
-            &value[..value.len().saturating_sub(1)],
-            GraphicsProtocol::Iterm2,
-        )?;
-        if number == 0 || number > 100 {
-            return Err(GraphicsError::InvalidDimensions {
-                protocol: GraphicsProtocol::Iterm2,
-            });
-        }
-        return Ok(ImageDimension::Percent(u16::try_from(number).map_err(
-            |_| GraphicsError::InvalidDimensions {
-                protocol: GraphicsProtocol::Iterm2,
-            },
-        )?));
-    }
-    let number = parse_u32(value, GraphicsProtocol::Iterm2)?;
-    if number == 0 {
-        return Err(GraphicsError::InvalidDimensions {
-            protocol: GraphicsProtocol::Iterm2,
-        });
-    }
-    Ok(ImageDimension::Cells(number))
-}
-
-fn check_declared_size(meta: &ItermMeta, actual: usize) -> Result<(), GraphicsError> {
-    if let Some(expected) = meta.declared_size {
-        if expected != actual {
-            return Err(GraphicsError::DeclaredSizeMismatch {
-                protocol: GraphicsProtocol::Iterm2,
-                expected,
-                actual,
-            });
-        }
-    }
-    Ok(())
-}
-
-fn decode_base64(protocol: GraphicsProtocol, data: &[u8]) -> Result<Vec<u8>, GraphicsError> {
-    if data.len() > MAX_GRAPHICS_TRANSFER_BYTES {
-        return Err(GraphicsError::TransferTooLarge { protocol });
-    }
-    let decoded = STANDARD
-        .decode(data)
-        .or_else(|_| STANDARD_NO_PAD.decode(data))
-        .map_err(|_| GraphicsError::InvalidBase64 { protocol })?;
-    if decoded.len() > MAX_GRAPHICS_TRANSFER_BYTES {
-        return Err(GraphicsError::TransferTooLarge { protocol });
-    }
-    Ok(decoded)
-}
-
-fn decompress_bounded(protocol: GraphicsProtocol, data: &[u8]) -> Result<Vec<u8>, GraphicsError> {
-    let mut decoder = ZlibDecoder::new(Cursor::new(data));
-    let mut output = Vec::new();
-    decoder
-        .by_ref()
-        .take((MAX_IMAGE_BYTES + 1) as u64)
-        .read_to_end(&mut output)
-        .map_err(|_| GraphicsError::DecodeFailure { protocol })?;
-    if output.len() > MAX_IMAGE_BYTES {
-        return Err(GraphicsError::ImageTooLarge { protocol });
-    }
-    if decoder.into_inner().position() != data.len() as u64 {
-        return Err(GraphicsError::DecodeFailure { protocol });
-    }
-    Ok(output)
-}
-
-fn decode_raster(protocol: GraphicsProtocol, data: &[u8]) -> Result<DecodedImage, GraphicsError> {
-    if data.len() > MAX_IMAGE_BYTES {
-        return Err(GraphicsError::ImageTooLarge { protocol });
-    }
-    let format = image::guess_format(data).map_err(|_| GraphicsError::UnsupportedMedia {
-        protocol,
-        format: "unknown".to_string(),
-    })?;
-    let format_name = format!("{format:?}");
-    if !matches!(
-        format,
-        image::ImageFormat::Bmp
-            | image::ImageFormat::Gif
-            | image::ImageFormat::Jpeg
-            | image::ImageFormat::Png
-            | image::ImageFormat::Tiff
-            | image::ImageFormat::WebP
-    ) {
-        return Err(GraphicsError::UnsupportedMedia {
-            protocol,
-            format: format_name,
-        });
-    }
-    if let Some(format) = animated_raster_format(protocol, format, data)? {
-        return Err(GraphicsError::UnsupportedMedia {
-            protocol,
-            format: format.to_string(),
-        });
-    }
-    let decoded = catch_unwind(AssertUnwindSafe(|| {
-        let mut reader = image::ImageReader::new(Cursor::new(data))
-            .with_guessed_format()
-            .map_err(|_| GraphicsError::DecodeFailure { protocol })?;
-        reader.limits(raster_limits());
-        reader
-            .decode()
-            .map(|image| image.into_rgba8())
-            .map_err(|error| map_image_error(protocol, error))
-    }))
-    .map_err(|_| GraphicsError::DecodeFailure { protocol })??;
-    let (width, height) = decoded.dimensions();
-    let width = usize::try_from(width).map_err(|_| GraphicsError::ImageTooLarge { protocol })?;
-    let height = usize::try_from(height).map_err(|_| GraphicsError::ImageTooLarge { protocol })?;
-    validate_dimensions(protocol, width, height)?;
-    let rgba = decoded.into_raw();
-    let expected = checked_rgba_len(protocol, width, height)?;
-    if rgba.len() != expected {
-        return Err(GraphicsError::DecodeFailure { protocol });
-    }
-    Ok(DecodedImage {
-        width: u32::try_from(width).map_err(|_| GraphicsError::ImageTooLarge { protocol })?,
-        height: u32::try_from(height).map_err(|_| GraphicsError::ImageTooLarge { protocol })?,
-        rgba,
-    })
-}
-
-fn animated_raster_format(
-    protocol: GraphicsProtocol,
-    format: image::ImageFormat,
-    data: &[u8],
-) -> Result<Option<&'static str>, GraphicsError> {
-    match format {
-        image::ImageFormat::Gif => gif_has_multiple_frames(protocol, data)
-            .map(|animated| animated.then_some("animated GIF")),
-        image::ImageFormat::Png => {
-            png_is_animated(protocol, data).map(|animated| animated.then_some("animated PNG"))
-        }
-        image::ImageFormat::WebP => {
-            webp_is_animated(protocol, data).map(|animated| animated.then_some("animated WebP"))
-        }
-        _ => Ok(None),
-    }
-}
-
-fn png_is_animated(protocol: GraphicsProtocol, data: &[u8]) -> Result<bool, GraphicsError> {
-    catch_unwind(AssertUnwindSafe(|| {
-        let decoder =
-            image::codecs::png::PngDecoder::with_limits(Cursor::new(data), raster_limits())
-                .map_err(|error| map_image_error(protocol, error))?;
-        decoder
-            .is_apng()
-            .map_err(|error| map_image_error(protocol, error))
-    }))
-    .map_err(|_| GraphicsError::DecodeFailure { protocol })?
-}
-
-fn webp_is_animated(protocol: GraphicsProtocol, data: &[u8]) -> Result<bool, GraphicsError> {
-    use image::ImageDecoder;
-
-    catch_unwind(AssertUnwindSafe(|| {
-        let mut decoder = image::codecs::webp::WebPDecoder::new(Cursor::new(data))
-            .map_err(|error| map_image_error(protocol, error))?;
-        decoder
-            .set_limits(raster_limits())
-            .map_err(|error| map_image_error(protocol, error))?;
-        Ok(decoder.has_animation())
-    }))
-    .map_err(|_| GraphicsError::DecodeFailure { protocol })?
-}
-
-fn gif_has_multiple_frames(protocol: GraphicsProtocol, data: &[u8]) -> Result<bool, GraphicsError> {
-    use image::{AnimationDecoder, ImageDecoder};
-
-    catch_unwind(AssertUnwindSafe(|| {
-        let mut decoder = image::codecs::gif::GifDecoder::new(Cursor::new(data))
-            .map_err(|error| map_image_error(protocol, error))?;
-        decoder
-            .set_limits(raster_limits())
-            .map_err(|error| map_image_error(protocol, error))?;
-        let mut frames = decoder.into_frames();
-        frames
-            .next()
-            .transpose()
-            .map_err(|error| map_image_error(protocol, error))?
-            .ok_or(GraphicsError::DecodeFailure { protocol })?;
-        match frames.next() {
-            None => Ok(false),
-            Some(Ok(_)) => Ok(true),
-            Some(Err(error)) => Err(map_image_error(protocol, error)),
-        }
-    }))
-    .map_err(|_| GraphicsError::DecodeFailure { protocol })?
-}
-
-fn map_image_error(protocol: GraphicsProtocol, error: image::ImageError) -> GraphicsError {
-    match error {
-        image::ImageError::Limits(limit)
-            if matches!(
-                limit.kind(),
-                image::error::LimitErrorKind::DimensionError
-                    | image::error::LimitErrorKind::InsufficientMemory
-            ) =>
-        {
-            GraphicsError::ImageTooLarge { protocol }
-        }
-        _ => GraphicsError::DecodeFailure { protocol },
-    }
-}
-
-fn raster_limits() -> image::Limits {
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(MAX_IMAGE_SIDE as u32);
-    limits.max_image_height = Some(MAX_IMAGE_SIDE as u32);
-    limits.max_alloc = Some(MAX_IMAGE_BYTES as u64);
-    limits
-}
-
-fn raw_rgb(
-    protocol: GraphicsProtocol,
-    width: u32,
-    height: u32,
-    data: &[u8],
-) -> Result<DecodedImage, GraphicsError> {
-    let width = usize::try_from(width).map_err(|_| GraphicsError::ImageTooLarge { protocol })?;
-    let height = usize::try_from(height).map_err(|_| GraphicsError::ImageTooLarge { protocol })?;
-    validate_dimensions(protocol, width, height)?;
-    let expected = width
-        .checked_mul(height)
-        .and_then(|pixels| pixels.checked_mul(3))
-        .ok_or(GraphicsError::InvalidDimensions { protocol })?;
-    if data.len() != expected {
-        return Err(GraphicsError::DeclaredSizeMismatch {
-            protocol,
-            expected,
-            actual: data.len(),
-        });
-    }
-    let mut rgba = Vec::with_capacity(checked_rgba_len(protocol, width, height)?);
-    for pixel in data.chunks_exact(3) {
-        rgba.extend_from_slice(pixel);
-        rgba.push(255);
-    }
-    Ok(DecodedImage {
-        width: u32::try_from(width).map_err(|_| GraphicsError::ImageTooLarge { protocol })?,
-        height: u32::try_from(height).map_err(|_| GraphicsError::ImageTooLarge { protocol })?,
-        rgba,
-    })
-}
-
-fn raw_rgba(
-    protocol: GraphicsProtocol,
-    width: u32,
-    height: u32,
-    data: &[u8],
-) -> Result<DecodedImage, GraphicsError> {
-    let width = usize::try_from(width).map_err(|_| GraphicsError::ImageTooLarge { protocol })?;
-    let height = usize::try_from(height).map_err(|_| GraphicsError::ImageTooLarge { protocol })?;
-    validate_dimensions(protocol, width, height)?;
-    let expected = checked_rgba_len(protocol, width, height)?;
-    if data.len() != expected {
-        return Err(GraphicsError::DeclaredSizeMismatch {
-            protocol,
-            expected,
-            actual: data.len(),
-        });
-    }
-    Ok(DecodedImage {
-        width: u32::try_from(width).map_err(|_| GraphicsError::ImageTooLarge { protocol })?,
-        height: u32::try_from(height).map_err(|_| GraphicsError::ImageTooLarge { protocol })?,
-        rgba: data.to_vec(),
-    })
-}
-
-fn validate_dimensions(
-    protocol: GraphicsProtocol,
-    width: usize,
-    height: usize,
-) -> Result<(), GraphicsError> {
-    if width == 0 || height == 0 || width > MAX_IMAGE_SIDE || height > MAX_IMAGE_SIDE {
-        return Err(GraphicsError::ImageTooLarge { protocol });
-    }
-    let pixels = width
-        .checked_mul(height)
-        .ok_or(GraphicsError::InvalidDimensions { protocol })?;
-    if pixels > MAX_IMAGE_PIXELS {
-        return Err(GraphicsError::ImageTooLarge { protocol });
-    }
-    Ok(())
-}
-
-fn checked_rgba_len(
-    protocol: GraphicsProtocol,
-    width: usize,
-    height: usize,
-) -> Result<usize, GraphicsError> {
-    validate_dimensions(protocol, width, height)?;
-    width
-        .checked_mul(height)
-        .and_then(|pixels| pixels.checked_mul(4))
-        .filter(|length| *length <= MAX_IMAGE_BYTES)
-        .ok_or(GraphicsError::InvalidDimensions { protocol })
-}
-
-fn parse_sixel_params(data: &[u8], max: usize) -> Result<Vec<u32>, GraphicsError> {
-    if data.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut result = Vec::new();
-    for part in data.split(|byte| *byte == b';') {
-        if result.len() == max || part.is_empty() {
-            return Err(GraphicsError::InvalidCommand {
-                protocol: GraphicsProtocol::Sixel,
-            });
-        }
-        result.push(parse_u32(part, GraphicsProtocol::Sixel)?);
-    }
-    Ok(result)
-}
-
-fn parse_sixel_header_params(data: &[u8], max: usize) -> Result<Vec<u32>, GraphicsError> {
-    if data.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut result = Vec::new();
-    for part in data.split(|byte| *byte == b';') {
-        if result.len() == max {
-            return Err(GraphicsError::InvalidHeader {
-                protocol: GraphicsProtocol::Sixel,
-            });
-        }
-        result.push(if part.is_empty() {
-            0
-        } else {
-            parse_u32(part, GraphicsProtocol::Sixel)?
-        });
-    }
-    Ok(result)
-}
-
-fn parse_required_u32(data: &[u8], protocol: GraphicsProtocol) -> Result<u32, GraphicsError> {
-    if data.is_empty() {
-        return Err(GraphicsError::InvalidCommand { protocol });
-    }
-    parse_u32(data, protocol)
-}
-
-fn parse_u32(data: &[u8], protocol: GraphicsProtocol) -> Result<u32, GraphicsError> {
-    if data.is_empty() || !data.iter().all(u8::is_ascii_digit) {
-        return Err(GraphicsError::InvalidCommand { protocol });
-    }
-    let mut value = 0u32;
-    for &byte in data {
-        value = value
-            .checked_mul(10)
-            .and_then(|value| value.checked_add(u32::from(byte - b'0')))
-            .ok_or(GraphicsError::InvalidDimensions { protocol })?;
-    }
-    Ok(value)
-}
-
-fn parse_i32(data: &[u8], protocol: GraphicsProtocol) -> Result<i32, GraphicsError> {
-    if data.is_empty() {
-        return Err(GraphicsError::InvalidCommand { protocol });
-    }
-    let (negative, digits) = if data[0] == b'-' {
-        (true, &data[1..])
-    } else {
-        (false, data)
-    };
-    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
-        return Err(GraphicsError::InvalidCommand { protocol });
-    }
-    let mut magnitude = 0u32;
-    for &byte in digits {
-        magnitude = magnitude
-            .checked_mul(10)
-            .and_then(|value| value.checked_add(u32::from(byte - b'0')))
-            .ok_or(GraphicsError::InvalidCommand { protocol })?;
-    }
-    if negative {
-        if magnitude == 2_147_483_648 {
-            Ok(i32::MIN)
-        } else {
-            i32::try_from(magnitude)
-                .ok()
-                .and_then(|value| value.checked_neg())
-                .ok_or(GraphicsError::InvalidCommand { protocol })
-        }
-    } else {
-        i32::try_from(magnitude).map_err(|_| GraphicsError::InvalidCommand { protocol })
-    }
-}
-
-fn parse_positive_u32(data: &[u8], protocol: GraphicsProtocol) -> Result<u32, GraphicsError> {
-    let value = parse_u32(data, protocol)?;
-    if value == 0 {
-        return Err(GraphicsError::InvalidDimensions { protocol });
-    }
-    Ok(value)
-}
-
-fn parse_usize(data: &[u8], protocol: GraphicsProtocol) -> Result<usize, GraphicsError> {
-    let value = parse_u32(data, protocol)?;
-    usize::try_from(value).map_err(|_| GraphicsError::InvalidDimensions { protocol })
-}
-
-fn as_ascii(data: &[u8], protocol: GraphicsProtocol) -> Result<String, GraphicsError> {
-    if !data.is_ascii() {
-        return Err(GraphicsError::InvalidHeader { protocol });
-    }
-    Ok(String::from_utf8_lossy(data).into_owned())
-}
-
-fn append_bounded(
-    target: &mut Vec<u8>,
-    bytes: &[u8],
-    protocol: GraphicsProtocol,
-) -> Result<(), GraphicsError> {
-    let new_len = target
-        .len()
-        .checked_add(bytes.len())
-        .ok_or(GraphicsError::InvalidDimensions { protocol })?;
-    if new_len > MAX_GRAPHICS_TRANSFER_BYTES {
-        return Err(GraphicsError::TransferTooLarge { protocol });
-    }
-    target.extend_from_slice(bytes);
-    Ok(())
-}
-
 fn push_bounded(
     target: &mut Vec<u8>,
     byte: u8,
@@ -4047,67 +2128,6 @@ fn push_bounded(
     }
     target.push(byte);
     Ok(())
-}
-
-fn split_at_byte(data: &[u8], delimiter: u8) -> Option<(&[u8], &[u8])> {
-    let index = data.iter().position(|byte| *byte == delimiter)?;
-    Some((&data[..index], &data[index + 1..]))
-}
-
-fn filled_rgba(color: [u8; 4], length: usize) -> Vec<u8> {
-    debug_assert_eq!(length % 4, 0);
-    let mut rgba = vec![0; length];
-    for pixel in rgba.chunks_exact_mut(4) {
-        pixel.copy_from_slice(&color);
-    }
-    rgba
-}
-
-fn hls_to_rgba(hue: u32, lightness: u32, saturation: u32) -> [u8; 4] {
-    let lightness = f64::from(lightness) / 100.0;
-    if saturation == 0 {
-        let channel = float_to_byte(lightness);
-        return [channel, channel, channel, 255];
-    }
-    let saturation = f64::from(saturation) / 100.0;
-    let hue = f64::from((hue + 240) % 360) / 360.0;
-    let second = if lightness <= 0.5 {
-        lightness * (1.0 + saturation)
-    } else {
-        lightness + saturation - lightness * saturation
-    };
-    let first = 2.0 * lightness - second;
-    [
-        float_to_byte(hls_component(first, second, hue + 1.0 / 3.0)),
-        float_to_byte(hls_component(first, second, hue)),
-        float_to_byte(hls_component(first, second, hue - 1.0 / 3.0)),
-        255,
-    ]
-}
-
-fn hls_component(first: f64, second: f64, mut hue: f64) -> f64 {
-    if hue < 0.0 {
-        hue += 1.0;
-    } else if hue > 1.0 {
-        hue -= 1.0;
-    }
-    if hue * 6.0 < 1.0 {
-        first + (second - first) * hue * 6.0
-    } else if hue * 2.0 < 1.0 {
-        second
-    } else if hue * 3.0 < 2.0 {
-        first + (second - first) * (2.0 / 3.0 - hue) * 6.0
-    } else {
-        first
-    }
-}
-
-fn float_to_byte(value: f64) -> u8 {
-    (value.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
-}
-
-fn percentage_to_byte(value: u32) -> u8 {
-    ((value * 255 + 50) / 100) as u8
 }
 
 #[cfg(test)]

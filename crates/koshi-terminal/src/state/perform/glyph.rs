@@ -74,7 +74,11 @@ impl TerminalState {
         let new_width = UnicodeWidthStr::width(self.cluster.as_str());
 
         if let Some(cell) = self.active_grid_mut().cell_mut(row, col) {
-            cell.push_combining(c);
+            if cell.image_placeholder().is_some() {
+                cell.set_image_placeholder_diacritic(c);
+            } else {
+                cell.push_combining(c);
+            }
         }
         if old_width == 1 && new_width == 2 {
             self.promote_cluster_to_wide(row, col);
@@ -92,6 +96,7 @@ impl TerminalState {
     /// column (kept narrow there by a refused promotion), the cursor stays
     /// parked on it, with the wrap latch armed under autowrap.
     fn demote_cluster_to_narrow(&mut self, row: u16, col: u16) {
+        self.clear_images_at_cells(row, col, 2);
         if let Some(slot) = self.active_grid_mut().cell_mut(row, col) {
             *slot = rebuilt_with_width(slot, 1);
         }
@@ -158,6 +163,7 @@ impl TerminalState {
                 return;
             };
             let fill = self.active_render().style.bg_fill();
+            self.clear_images_at_cells(row, col, 1);
             if let Some(slot) = self.active_grid_mut().cell_mut(row, col) {
                 *slot = Cell::blank_with(fill);
             }
@@ -222,6 +228,7 @@ impl TerminalState {
     /// Cursor and cluster bookkeeping stay with the caller.
     pub(super) fn place_glyph(&mut self, row: u16, col: u16, base: Cell) {
         let (_, cols) = self.active_grid().dimensions();
+        let old_width = self.active_grid().cell(row, col).map_or(1, Cell::width);
         // A width-2 base is stored only with its continuation column in bounds;
         // in a 1-column pane it is stored narrow.
         let wide = base.width() == 2 && col + 1 < cols;
@@ -230,6 +237,10 @@ impl TerminalState {
         } else {
             base
         };
+        if old_width == 0 && col > 0 {
+            self.clear_images_at_cells(row, col - 1, 1);
+        }
+        self.clear_images_at_cells(row, col, if wide || old_width == 2 { 2 } else { 1 });
         let style = base.style();
         // Clear any wide pair this write would split, on every column it lands
         // on.

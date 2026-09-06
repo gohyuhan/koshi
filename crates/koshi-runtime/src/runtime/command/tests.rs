@@ -24,7 +24,7 @@ use koshi_core::command::{
     TabTarget, VisualCommand, WriteToPaneArgs,
 };
 use koshi_core::constant::GRACEFUL_TIMEOUT_DURATION;
-use koshi_core::geometry::{Direction, Size, SplitDirection};
+use koshi_core::geometry::{Direction, PixelCellSize, Size, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, PluginId, SessionId, TabId};
 use koshi_core::naming;
 use koshi_core::process::{ExitStatus, PtySize, ShellKind, SpawnSpec};
@@ -10010,6 +10010,71 @@ fn client_attach_reflows_the_shared_tab_to_the_smaller_effective_size() {
                 size: expected,
             })
         ]
+    );
+}
+
+#[test]
+fn attach_applies_cell_measurement_before_reflow_and_resize_can_clear_it() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let viewport = Size { cols: 80, rows: 24 };
+    let _client = rt
+        .bootstrap_local(SessionId::new(), viewport, SystemTime::now())
+        .expect("bootstrap the genesis client");
+    let (sid, tab, _pane) = only_slot(&rt);
+    let measurement = PixelCellSize::new(10, 20).expect("positive cell dimensions");
+    let measured_id = ClientId::new();
+
+    rt.handle_client_attach_with_cell_size(
+        sid,
+        measured_id,
+        viewport,
+        None,
+        tab,
+        Some(measurement),
+        SystemTime::now(),
+        false,
+    );
+    let measured_client = rt.sessions[&sid]
+        .clients
+        .list_attached()
+        .find(|candidate| candidate.id() == measured_id)
+        .expect("the measured client attached");
+    assert_eq!(measured_client.cell_size(), Some(measurement));
+    assert_eq!(rt.sessions[&sid].tab_cell_size(tab), Some(measurement));
+
+    rt.handle_client_resize_with_cell_size(measured_id, viewport, None, None);
+    assert_eq!(
+        rt.sessions[&sid]
+            .clients
+            .get(measured_id)
+            .expect("the measured client remains attached")
+            .cell_size(),
+        None
+    );
+    assert_eq!(
+        rt.sessions[&sid].tab_cell_size(tab),
+        None,
+        "clearing the only measured viewer leaves no shared measurement"
+    );
+}
+
+#[test]
+fn accepting_cell_measurement_invalidates_the_next_frame() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let viewport = Size { cols: 80, rows: 24 };
+    let client = rt
+        .bootstrap_local(SessionId::new(), viewport, SystemTime::now())
+        .expect("bootstrap the genesis client");
+    let (_sid, _tab, _pane) = only_slot(&rt);
+    let measurement = PixelCellSize::new(10, 20).expect("positive cell dimensions");
+
+    let rendered_at = Instant::now();
+    assert!(rt.render_scheduler.poll(rendered_at));
+    rt.handle_client_cell_size(client, measurement);
+
+    assert!(
+        rt.render_scheduler.next_wakeup(Instant::now()).is_some(),
+        "the accepted measurement schedules the next frame"
     );
 }
 

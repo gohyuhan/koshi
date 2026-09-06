@@ -236,6 +236,7 @@ fn attach_with_token(
                 resume_token,
                 pane_area: None,
                 graphics: koshi_ipc::protocol::GraphicsCapabilities::default(),
+                cell_size: None,
             },
         })
         .expect("send attach");
@@ -1028,6 +1029,7 @@ fn an_attached_client_types_into_its_pane_and_resizes_the_tab_it_views() {
                 kind: IpcRequestKind::Resize {
                     viewport: RESIZED,
                     pane_area: None,
+                    cell_size: None,
                 },
             })
             .expect("send resize");

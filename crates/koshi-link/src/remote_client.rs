@@ -611,7 +611,7 @@ pub fn connect(
 /// How one dial's transport failure classifies: a certificate that does not
 /// match the pinned one is [`DialError::Refused`], every other transport
 /// failure is [`DialError::Unreachable`]. The message is
-/// [`talk_failed`](crate::talk::talk_failed)'s either way.
+/// [`talk_failed`]'s either way.
 fn dial_failed(error: IpcError) -> DialError {
     match error {
         IpcError::CertificateChanged { .. } => DialError::Refused(talk_failed(error)),

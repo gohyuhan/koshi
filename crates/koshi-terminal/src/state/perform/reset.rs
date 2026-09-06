@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use koshi_sixel::SixelPalette;
+
 use crate::grid::state::Grid;
 use crate::state::{
     default_tab_stops, Cursor, RenderState, Screen, ShellIntegrationState, TerminalModes,
@@ -60,6 +62,7 @@ impl TerminalState {
         self.primary_render = RenderState::fresh();
         self.alternate_render = RenderState::fresh();
         self.modes = TerminalModes::default();
+        self.sixel_palette = SixelPalette::default();
         self.primary_scroll_region = None;
         self.alternate_scroll_region = None;
         self.tab_stops = default_tab_stops(columns);

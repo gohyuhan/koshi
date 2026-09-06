@@ -8,7 +8,7 @@
 //! offset moves.
 //!
 //! Scrolling moves a view; it never decides whether the view is *held* against
-//! live output. That is [`Client::is_view_held`](koshi_session::client::Client::is_view_held), derived from the offset and
+//! live output. That is [`koshi_session::client::Client::is_view_held`], derived from the offset and
 //! the client's highlight: scrolling back to the bottom follows live again only
 //! when no highlight is holding the view there.
 
@@ -74,7 +74,7 @@ impl Server {
     /// the oldest surviving line). A view that is not held follows live output
     /// and is left alone.
     ///
-    /// Held is [`Client::is_view_held`] — scrolled up, or a highlight up in this
+    /// Held is [`koshi_session::client::Client::is_view_held`] — scrolled up, or a highlight up in this
     /// pane. That covers a view held on the *newest* line, which an offset alone
     /// could not express: it rises with the text it holds instead of staying at
     /// the bottom and showing whatever arrives next.

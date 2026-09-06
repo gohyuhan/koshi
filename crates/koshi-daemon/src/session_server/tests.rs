@@ -108,6 +108,7 @@ fn attach(server: &mut Server) -> AttachAccepted {
         viewport: STARTING_VIEWPORT,
         pane_area: None,
         filter: EventFilter::All,
+        cell_size: None,
         attached_at: SystemTime::now(),
         remote: false,
         reply: reply_tx,

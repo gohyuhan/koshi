@@ -6,6 +6,7 @@
 use std::path::Path;
 use std::time::Instant;
 
+use koshi_core::geometry::PixelCellSize;
 use koshi_core::process::PtySize;
 
 use crate::graphics::{DecodedGraphics, DecodedImage, GraphicsProtocol, ImageAction, ImageDisplay};
@@ -273,11 +274,13 @@ fn a_graphics_image_byte_limit_drops_the_next_image() {
     let mut engine = engine();
     engine.queue_graphics_event(Ok(ImageRecord {
         protocol: GraphicsProtocol::Kitty,
-        image: DecodedImage {
+        image: (DecodedImage {
             width: 16_384,
             height: 1_024,
             rgba: vec![0; MAX_IMAGE_BYTES],
-        },
+        })
+        .into(),
+        animation: None,
         action: ImageAction::Transmit,
         display: ImageDisplay::default(),
         anchor: (0, 0),
@@ -302,18 +305,26 @@ fn a_graphics_image_byte_limit_drops_the_next_image() {
 fn rejected_graphics_placements_do_not_consume_the_image_byte_budget() {
     let mut engine = engine();
     let rejected = || DecodedGraphics {
+        query: false,
         protocol: GraphicsProtocol::Sixel,
         image: DecodedImage {
             width: 1,
             height: 1,
             rgba: vec![0; MAX_IMAGE_BYTES],
         },
+        animation: None,
         action: ImageAction::Display,
         display: ImageDisplay::default(),
     };
 
-    engine.queue_graphics(Ok(rejected()), (0, 0));
-    engine.queue_graphics(Ok(rejected()), (0, 0));
+    engine.queue_graphics(
+        Ok(crate::graphics::GraphicsOperation::Image(rejected())),
+        (0, 0),
+    );
+    engine.queue_graphics(
+        Ok(crate::graphics::GraphicsOperation::Image(rejected())),
+        (0, 0),
+    );
 
     assert_eq!(
         engine.take_graphics(),
@@ -336,6 +347,64 @@ fn rejected_graphics_placements_do_not_consume_the_image_byte_budget() {
     );
 }
 
+fn sixel_register_image(red: u16, green: u16, blue: u16) -> Vec<u8> {
+    format!("\x1bPq#1;2;{red};{green};{blue}#1@\x1b\\").into_bytes()
+}
+
+fn sixel_palette_only(red: u16, green: u16, blue: u16) -> Vec<u8> {
+    format!("\x1bPq#1;2;{red};{green};{blue}\x1b\\").into_bytes()
+}
+
+fn sixel_engine() -> TerminalEngine {
+    let mut engine = TerminalEngine::new(PtySize { cols: 4, rows: 4 });
+    engine.set_cell_size(PixelCellSize::new(1, 6).expect("nonzero cell size"));
+    engine
+}
+
+#[test]
+fn indexed_sixel_operations_resolve_at_their_terminal_byte_offsets() {
+    let mut engine = sixel_engine();
+    let mut bytes = b"\x1b[?1070l".to_vec();
+    bytes.extend(sixel_register_image(100, 0, 0));
+    bytes.extend_from_slice(b"\x1b[?1070h");
+    bytes.extend(sixel_register_image(0, 0, 100));
+
+    assert_eq!(engine.advance(&bytes), b"");
+    let placements = engine.state().image_placements();
+    assert_eq!(placements.len(), 2);
+    assert_eq!(&placements[0].record().image.rgba[..4], [255, 0, 0, 255]);
+    assert_eq!(&placements[1].record().image.rgba[..4], [0, 0, 255, 255]);
+}
+
+#[test]
+fn shared_sixel_palette_edits_repaint_existing_images_in_the_same_chunk() {
+    let mut engine = sixel_engine();
+    let mut bytes = b"\x1b[?1070l".to_vec();
+    bytes.extend(sixel_register_image(100, 0, 0));
+    bytes.extend(sixel_register_image(0, 100, 0));
+
+    assert_eq!(engine.advance(&bytes), b"");
+    let placements = engine.state().image_placements();
+    assert_eq!(placements.len(), 2);
+    assert_eq!(&placements[0].record().image.rgba[..4], [0, 255, 0, 255]);
+    assert_eq!(&placements[1].record().image.rgba[..4], [0, 255, 0, 255]);
+}
+
+#[test]
+fn a_shared_sixel_palette_only_operation_repaints_retained_images() {
+    let mut engine = sixel_engine();
+    let mut bytes = b"\x1b[?1070l".to_vec();
+    bytes.extend(sixel_register_image(100, 0, 0));
+    bytes.extend(sixel_palette_only(0, 100, 0));
+
+    assert_eq!(engine.advance(&bytes), b"");
+    assert_eq!(engine.state().image_placements().len(), 1);
+    assert_eq!(
+        &engine.state().image_placements()[0].record().image.rgba[..4],
+        [0, 255, 0, 255]
+    );
+}
+
 #[test]
 fn c1_graphics_bytes_do_not_change_terminal_state() {
     let mut engine = engine();
@@ -350,11 +419,13 @@ fn c1_graphics_bytes_do_not_change_terminal_state() {
         engine.take_graphics(),
         vec![Ok(ImageRecord {
             protocol: GraphicsProtocol::Kitty,
-            image: DecodedImage {
+            image: (DecodedImage {
                 width: 1,
                 height: 1,
                 rgba: vec![255, 0, 0, 255],
-            },
+            })
+            .into(),
+            animation: None,
             action: ImageAction::Transmit,
             display: ImageDisplay::default(),
             anchor: (0, 0),

@@ -13,6 +13,31 @@ use crate::runtime::event::AttachAccepted;
 use crate::runtime::saved_view::SavedView;
 
 impl Server {
+    pub(crate) fn handle_client_cell_size(
+        &mut self,
+        client_id: ClientId,
+        size: koshi_core::geometry::PixelCellSize,
+    ) {
+        let Some(session_id) = self.session_for_client(client_id).map(|session| session.id) else {
+            return;
+        };
+        let tab = self
+            .sessions
+            .get_mut(&session_id)
+            .and_then(|session| session.clients.get_mut(client_id))
+            .map(|client| {
+                client.update_cell_size(size);
+                client.active_tab()
+            });
+        if let Some(tab) = tab {
+            let backend = Arc::clone(self.pty_backend());
+            let mut events = Vec::new();
+            self.reflow_tab_if_viewed(backend.as_ref(), session_id, tab, &mut events);
+            self.render_scheduler.invalidate();
+            self.publish_events(&events);
+        }
+    }
+
     /// Serve one attach arriving over the control socket, in this single
     /// dispatcher turn: settle which client this is, register it on the tab it
     /// views, publish what the attach emitted, subscribe it to the events
@@ -58,6 +83,7 @@ impl Server {
     // Carries the whole of one attach request: what it claims back (`resume`,
     // `resume_token`), the view it arrives with (`viewport`, `pane_area`), and
     // how the connection is served (`filter`, `attached_at`, `remote`).
+    #[allow(dead_code)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn handle_ipc_attach(
         &mut self,
@@ -65,6 +91,31 @@ impl Server {
         resume_token: Option<ConnectionToken>,
         viewport: Size,
         pane_area: Option<PaneArea>,
+        filter: EventFilter,
+        attached_at: SystemTime,
+        remote: bool,
+    ) -> Option<AttachAccepted> {
+        self.handle_ipc_attach_with_cell_size(
+            resume,
+            resume_token,
+            viewport,
+            pane_area,
+            None,
+            filter,
+            attached_at,
+            remote,
+        )
+    }
+
+    /// Serve one attach with the terminal's initial cell measurement.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn handle_ipc_attach_with_cell_size(
+        &mut self,
+        resume: Option<ClientId>,
+        resume_token: Option<ConnectionToken>,
+        viewport: Size,
+        pane_area: Option<PaneArea>,
+        cell_size: Option<koshi_core::geometry::PixelCellSize>,
         filter: EventFilter,
         attached_at: SystemTime,
         remote: bool,
@@ -103,12 +154,13 @@ impl Server {
         };
         self.awaiting_reconnect.remove(&client_id);
 
-        let mut emitted = self.handle_client_attach(
+        let mut emitted = self.handle_client_attach_with_cell_size(
             session_id,
             client_id,
             viewport,
             pane_area,
             active_tab,
+            cell_size,
             attached_at,
             remote,
         );
@@ -272,6 +324,32 @@ impl Server {
         attached_at: SystemTime,
         remote: bool,
     ) -> Vec<Event> {
+        self.handle_client_attach_with_cell_size(
+            session_id,
+            client_id,
+            viewport,
+            pane_area,
+            active_tab,
+            None,
+            attached_at,
+            remote,
+        )
+    }
+
+    /// Register a client and apply the terminal's initial cell measurement
+    /// before the tab is reflowed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn handle_client_attach_with_cell_size(
+        &mut self,
+        session_id: SessionId,
+        client_id: ClientId,
+        viewport: Size,
+        pane_area: Option<PaneArea>,
+        active_tab: TabId,
+        cell_size: Option<koshi_core::geometry::PixelCellSize>,
+        attached_at: SystemTime,
+        remote: bool,
+    ) -> Vec<Event> {
         let origin = if remote {
             ClientOrigin::Remote
         } else {
@@ -324,6 +402,7 @@ impl Server {
             client.update_viewport(viewport);
             client.update_pane_area(pane_area);
             client.update_active_tab(active_tab);
+            client.replace_cell_size(cell_size);
             client.update_origin(origin);
             Some(prior)
         } else {
@@ -354,6 +433,7 @@ impl Server {
                 label,
                 colour,
             );
+            client.replace_cell_size(cell_size);
             // A profile carrying `lock` hands its starting mode to the first
             // client that attaches, and the flag is spent there.
             if session.take_start_lock() {
@@ -412,6 +492,17 @@ impl Server {
         viewport: Size,
         pane_area: Option<PaneArea>,
     ) -> Vec<Event> {
+        self.handle_client_resize_with_cell_size(client_id, viewport, pane_area, None)
+    }
+
+    /// Update one client's viewport and optional measured cell dimensions.
+    pub(crate) fn handle_client_resize_with_cell_size(
+        &mut self,
+        client_id: ClientId,
+        viewport: Size,
+        pane_area: Option<PaneArea>,
+        cell_size: Option<koshi_core::geometry::PixelCellSize>,
+    ) -> Vec<Event> {
         let backend = Arc::clone(self.pty_backend());
         let Some(session_id) = self.session_for_client(client_id).map(|session| session.id) else {
             return Vec::new();
@@ -426,6 +517,7 @@ impl Server {
         let active_tab = client.active_tab();
         client.update_viewport(viewport);
         client.update_pane_area(pane_area);
+        client.replace_cell_size(cell_size);
 
         let mut events = Vec::new();
         self.reflow_tab_if_viewed(backend.as_ref(), session_id, active_tab, &mut events);

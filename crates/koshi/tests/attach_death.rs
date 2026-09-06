@@ -156,6 +156,7 @@ fn attach(connection: &mut Connection, session_id: SessionId) {
             resume_token: None,
             pane_area: None,
             graphics: koshi_ipc::protocol::GraphicsCapabilities::default(),
+            cell_size: None,
         },
     };
     connection

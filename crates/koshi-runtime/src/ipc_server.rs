@@ -685,6 +685,7 @@ fn serve_connection(
                 resume_token,
                 pane_area,
                 graphics,
+                cell_size,
             } => {
                 let answer =
                     ask_dispatcher(&served.intake, inbox_tx, |reply| RuntimeEvent::IpcAttach {
@@ -692,6 +693,7 @@ fn serve_connection(
                         resume_token,
                         viewport,
                         pane_area,
+                        cell_size,
                         filter: filter.into(),
                         attached_at: SystemTime::now(),
                         remote: gate.remote_caller(),
@@ -750,6 +752,7 @@ fn serve_connection(
             // client, so they close the connection.
             IpcRequestKind::KeyPress { .. }
             | IpcRequestKind::Resize { .. }
+            | IpcRequestKind::CellSize { .. }
             | IpcRequestKind::Paste { .. }
             | IpcRequestKind::Mouse(_) => return,
             IpcRequestKind::Discovery => {
@@ -976,14 +979,17 @@ fn stream_events(
             }
         };
         let event = match kind {
+            IpcRequestKind::CellSize { size } => RuntimeEvent::CellSize { client_id, size },
             IpcRequestKind::KeyPress { chord } => RuntimeEvent::ClientKeyPress { client_id, chord },
             IpcRequestKind::Resize {
                 viewport,
                 pane_area,
+                cell_size,
             } => RuntimeEvent::Resize {
                 client_id,
                 size: viewport,
                 pane_area,
+                cell_size,
             },
             IpcRequestKind::Paste { text } => RuntimeEvent::HostPaste { client_id, text },
             IpcRequestKind::Mouse(actions) => RuntimeEvent::ClientMouse {
@@ -1085,16 +1091,16 @@ impl ConnectionImageCache {
 
         let mut uploads = Vec::new();
         let mut retained = HashSet::with_capacity(placements.len());
-        let mut content_by_record: HashMap<*const ImageRecord, u64> = self
+        let mut content_by_record = self
             .images
             .values()
             .filter_map(|cached| {
                 cached
                     .record
                     .as_ref()
-                    .map(|record| (Arc::as_ptr(record), cached.content_id))
+                    .map(|record| (Arc::as_ptr(&record.image), cached.content_id))
             })
-            .collect();
+            .collect::<HashMap<_, _>>();
         for (key, placement) in placements {
             retained.insert(key);
             let record = placement.record_arc();
@@ -1107,12 +1113,12 @@ impl ConnectionImageCache {
             }
             let content_id = record
                 .as_ref()
-                .and_then(|record| content_by_record.get(&Arc::as_ptr(record)).copied())
+                .and_then(|record| content_by_record.get(&Arc::as_ptr(&record.image)).copied())
                 .unwrap_or_else(|| {
                     let content_id = self.next_content_id;
                     self.next_content_id = self.next_content_id.checked_add(1).unwrap_or(0);
                     if let Some(record) = record.as_ref() {
-                        content_by_record.insert(Arc::as_ptr(record), content_id);
+                        content_by_record.insert(Arc::as_ptr(&record.image), content_id);
                         uploads.push((content_id, Arc::clone(record)));
                     }
                     content_id
@@ -1155,7 +1161,7 @@ struct PreparedImageFrame {
 /// Report whether two cached record slots hold the same retained image record.
 fn same_record(cached: Option<&Arc<ImageRecord>>, incoming: Option<&ImageRecord>) -> bool {
     match (cached, incoming) {
-        (Some(cached), Some(incoming)) => std::ptr::eq(cached.as_ref(), incoming),
+        (Some(cached), Some(incoming)) => Arc::ptr_eq(&cached.image, &incoming.image),
         (None, None) => true,
         (Some(_), None) | (None, Some(_)) => false,
     }
@@ -1169,7 +1175,7 @@ fn send_painted_frame(
     graphics: GraphicsCapabilities,
     client_id: ClientId,
 ) -> bool {
-    if !graphics.kitty {
+    if !graphics.has_native() {
         let event = SessionEvent::Painted {
             frame: Box::new(wire_frame(snapshot)),
         };

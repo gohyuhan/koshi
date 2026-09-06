@@ -67,6 +67,16 @@ pub enum RuntimeEvent {
         /// The pane region the client draws the tab's panes in at the new
         /// size; `None` replaces any earlier report.
         pane_area: Option<PaneArea>,
+        /// The cell dimensions measured for the new viewport, or `None` when
+        /// the previous measurement must be cleared.
+        cell_size: Option<koshi_core::geometry::PixelCellSize>,
+    },
+    /// A client measured the pixel dimensions of one terminal cell.
+    CellSize {
+        /// The client that supplied the measurement.
+        client_id: ClientId,
+        /// The nonzero pixel dimensions of one cell.
+        size: koshi_core::geometry::PixelCellSize,
     },
     /// A client left, stopping its view of whatever tab it held.
     ClientDetached {
@@ -173,6 +183,8 @@ pub enum RuntimeEvent {
         viewport: Size,
         /// The pane region the client reported, recorded on its record.
         pane_area: Option<PaneArea>,
+        /// The cell dimensions measured before this attach, if available.
+        cell_size: Option<koshi_core::geometry::PixelCellSize>,
         /// Which of the session's events the client receives.
         filter: EventFilter,
         /// When the producer received the request, carried on the event so the

@@ -53,11 +53,13 @@ fn resize_carries_its_client_and_size() {
         client_id: client,
         size: Size { cols: 80, rows: 24 },
         pane_area: None,
+        cell_size: None,
     };
     let RuntimeEvent::Resize {
         client_id,
         size,
         pane_area,
+        cell_size,
     } = &event
     else {
         panic!("expected Resize");
@@ -65,6 +67,7 @@ fn resize_carries_its_client_and_size() {
     assert_eq!(*client_id, client);
     assert_eq!(*size, Size { cols: 80, rows: 24 });
     assert_eq!(*pane_area, None);
+    assert_eq!(*cell_size, None);
 }
 
 #[test]
@@ -75,11 +78,13 @@ fn resize_carries_a_reported_pane_area() {
         client_id: client,
         size: Size { cols: 80, rows: 24 },
         pane_area: Some(reported),
+        cell_size: None,
     };
     let RuntimeEvent::Resize {
         client_id,
         size,
         pane_area,
+        cell_size,
     } = &event
     else {
         panic!("expected Resize");
@@ -87,6 +92,7 @@ fn resize_carries_a_reported_pane_area() {
     assert_eq!(*client_id, client);
     assert_eq!(*size, Size { cols: 80, rows: 24 });
     assert_eq!(*pane_area, Some(reported));
+    assert_eq!(*cell_size, None);
 }
 
 #[test]

@@ -101,7 +101,7 @@ use std::time::{Duration, Instant, SystemTime};
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::crossterm::terminal::size;
 use ratatui::crossterm::tty::IsTty;
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use ratatui::{Terminal, TerminalOptions, Viewport};
 use serde_json::value::RawValue;
 
@@ -112,7 +112,7 @@ use koshi_config::types::BoundAction;
 use koshi_core::command::{
     Command, CommandEnvelope, CommandResult, CommandSource, SwitchSessionArgs, VisualCommand,
 };
-use koshi_core::geometry::{Direction, Size};
+use koshi_core::geometry::{Direction, PixelCellSize, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::key::KeySequence;
 use koshi_core::lock::LockMode;
@@ -125,14 +125,15 @@ use koshi_ipc::event::{IncomingEvent, SessionEvent};
 #[cfg(test)]
 use koshi_ipc::frame::PaintedFrame;
 use koshi_ipc::protocol::{
-    ConnectionToken, EventFilterSpec, GraphicsCapabilities, IncomingResponse, IpcRequest,
-    IpcRequestKind, IpcResult, WireMouseAction,
+    ConnectionToken, EventFilterSpec, IncomingResponse, IpcRequest, IpcRequestKind, IpcResult,
+    WireMouseAction,
 };
 use koshi_ipc::remote_wire::{RemoteServerFrame, RemoteSessionRow};
 use koshi_ipc::router::{RouterRequestKind, RouterResult, SessionAddress, SessionSelector};
 use koshi_ipc::transport::{Connection, FrameReader, FrameWriter};
 use koshi_ipc::wire::{MaybeKnown, WireName};
 use koshi_observability::cleanup::{install_panic_hook, TerminalCleanupGuard};
+use koshi_renderer::cursor_position;
 use koshi_renderer::snapshot::{
     CommittedRegions, CursorStyle, MouseFrame, Reconnecting, RenderSnapshot, ViewerChrome,
 };
@@ -292,8 +293,8 @@ impl ViewerPaint {
 /// and what the viewer contributed to that frame.
 ///
 /// Every draw goes through here, so one place decides whether the screen is out
-/// of date. [`draw`](Self::draw) puts a frame the session sent on the screen and
-/// returns the mouse view for that paint. [`refresh`](Self::refresh) ends every
+/// of date. `draw` puts a frame the session sent on the screen and returns
+/// the mouse view for that paint. `refresh` ends every
 /// loop pass and draws the frame already there again when the viewer has moved
 /// under it — which is what shows a change no frame reports, such as an opened
 /// key sequence.
@@ -318,13 +319,24 @@ struct Screen<B: Backend> {
     graphics: terminal::GraphicsSupport,
     /// Images uploaded into this outer terminal connection.
     images: terminal::KittyImageCache,
+    /// Connection-local iTerm2 or Sixel output state.
+    outputs: terminal::ImageOutputState,
+    /// The cursor position from the most recent ordinary frame paint.
+    current_cursor: Option<Position>,
+    /// The cell dimensions reported by the outer terminal.
+    cell_size: Option<PixelCellSize>,
 }
 
 impl<B: Backend> Screen<B> {
     /// A screen that has drawn nothing yet.
     #[cfg(test)]
     fn new(terminal: Terminal<B>, viewport: Size) -> Self {
-        Self::with_graphics(terminal, viewport, terminal::GraphicsSupport::Unsupported)
+        Self::with_graphics(
+            terminal,
+            viewport,
+            terminal::GraphicsSupport::Unsupported,
+            None,
+        )
     }
 
     /// A screen that has drawn nothing yet, with its image protocol capability.
@@ -332,6 +344,7 @@ impl<B: Backend> Screen<B> {
         terminal: Terminal<B>,
         viewport: Size,
         graphics: terminal::GraphicsSupport,
+        cell_size: Option<PixelCellSize>,
     ) -> Self {
         Screen {
             terminal,
@@ -342,6 +355,11 @@ impl<B: Backend> Screen<B> {
             shown: None,
             graphics,
             images: terminal::KittyImageCache::default(),
+            outputs: terminal::ImageOutputState::new(terminal::ImageOutputKind::from_support(
+                graphics,
+            )),
+            current_cursor: None,
+            cell_size,
         }
     }
 
@@ -377,11 +395,18 @@ impl<B: Backend> Screen<B> {
             &frame_paint,
             self.graphics,
             &mut self.images,
+            &mut self.outputs,
+            self.cell_size,
             &mut self.last_title,
             &mut self.last_cursor,
         )) {
             return None;
         }
+        self.current_cursor = cursor_position(
+            &snapshot,
+            &committed_regions,
+            Rect::new(0, 0, client.viewport().cols, client.viewport().rows),
+        );
         adopt_frame(client, &snapshot);
         self.committed_regions = committed_regions.clone();
         self.shown = Some(frame_paint);
@@ -405,8 +430,12 @@ impl<B: Backend> Screen<B> {
         if client.viewport() != self.committed_regions.viewport {
             return;
         }
+        self.outputs.poll();
         let current = ViewerPaint::read(client, active_tab);
-        if self.shown.as_ref() == Some(&current) {
+        if self.shown.as_ref() == Some(&current)
+            && !self.outputs.base_repaint_needed()
+            && !self.outputs.screen_reset_needed()
+        {
             return;
         }
         let Some(snapshot) = self.last_snapshot.as_ref() else {
@@ -420,28 +449,60 @@ impl<B: Backend> Screen<B> {
             &current,
             self.graphics,
             &mut self.images,
+            &mut self.outputs,
+            self.cell_size,
             &mut self.last_title,
             &mut self.last_cursor,
         )) {
             return;
         }
+        self.current_cursor = cursor_position(
+            snapshot,
+            &self.committed_regions,
+            Rect::new(0, 0, client.viewport().cols, client.viewport().rows),
+        );
         self.shown = Some(current);
     }
 
     /// Return the short wakeup used while a native image upload has work.
     fn next_image_wakeup(&self) -> Option<Duration> {
-        terminal::kitty_image_work_pending(&self.images).then_some(IMAGE_OUTPUT_STEP_DELAY)
+        (terminal::kitty_image_work_pending(&self.images) || self.outputs.work_pending())
+            .then_some(IMAGE_OUTPUT_STEP_DELAY)
     }
 
     /// Advance one bounded native image slice without delaying the next input pass.
     fn advance_images(&mut self) {
-        if !terminal::kitty_image_work_pending(&self.images) {
+        let mut output = io::stdout();
+        if terminal::kitty_image_work_pending(&self.images) {
+            if let Err(error) = terminal::advance_kitty_image(&mut output, &mut self.images) {
+                tracing::warn!(%error, "could not continue terminal image output");
+            }
+        }
+        if self.outputs.work_pending() {
+            if let Err(error) = self.outputs.advance(&mut output, self.current_cursor) {
+                tracing::warn!(%error, "could not continue terminal image output");
+            }
+        }
+    }
+
+    /// Update the pixel dimensions used to scale Sixel output.
+    fn set_cell_size(&mut self, cell_size: Option<PixelCellSize>) {
+        if self.cell_size == cell_size {
             return;
         }
-        let mut output = io::stdout();
-        if let Err(error) = terminal::advance_kitty_image(&mut output, &mut self.images) {
-            tracing::warn!(%error, "could not continue terminal image output");
+        self.cell_size = cell_size;
+        if self
+            .outputs
+            .kind()
+            .is_some_and(terminal::ImageOutputKind::is_sixel)
+        {
+            self.outputs.reset_connection();
         }
+    }
+
+    /// Reset native output state after the connection changes.
+    fn reset_connection(&mut self) {
+        self.outputs.reset_connection();
     }
 
     /// Select the compiled-in region solve for a painted frame's viewport.
@@ -469,6 +530,8 @@ fn paint_with_graphics<B: Backend>(
     frame_paint: &ViewerPaint,
     graphics: terminal::GraphicsSupport,
     images: &mut terminal::KittyImageCache,
+    outputs: &mut terminal::ImageOutputState,
+    cell_size: Option<PixelCellSize>,
     last_title: &mut String,
     last_cursor: &mut Option<CursorStyle>,
 ) -> Result<(), terminal::PaintError<B::Error>> {
@@ -480,6 +543,8 @@ fn paint_with_graphics<B: Backend>(
         frame_paint,
         graphics.image_mode(),
         images,
+        outputs,
+        cell_size,
         last_title,
         last_cursor,
     )
@@ -913,6 +978,7 @@ fn attach_once(home: &Home, target: &SessionSelector) -> Result<Option<SessionId
     let mut terminal_owner =
         terminal::TerminalOwner::start().map_err(|detail| CliError::Runtime { detail })?;
     let graphics = terminal_owner.graphics();
+    let mut cell_size_query = terminal_owner.cell_size_query();
     let Joined {
         reader,
         writer,
@@ -920,7 +986,7 @@ fn attach_once(home: &Home, target: &SessionSelector) -> Result<Option<SessionId
         session_id,
         token,
         resume_token,
-    } = dial(home, target, graphics)?;
+    } = dial(home, target, graphics, cell_size_query.current())?;
 
     // The session accepted the client, so the terminal may change mode now.
     // The hooks undo every mode this function sets, and the panic hook shares
@@ -994,7 +1060,12 @@ fn attach_once(home: &Home, target: &SessionSelector) -> Result<Option<SessionId
         registry: ActionRegistry::new(),
         next_request_id: FIRST_LOOP_REQUEST_ID,
     };
-    let mut screen = Screen::with_graphics(terminal, client.viewport(), graphics);
+    let mut screen = Screen::with_graphics(
+        terminal,
+        client.viewport(),
+        graphics,
+        cell_size_query.current(),
+    );
 
     let ending = run_attachment(
         home,
@@ -1006,6 +1077,7 @@ fn attach_once(home: &Home, target: &SessionSelector) -> Result<Option<SessionId
         &mut screen,
         &mut uplink,
         graphics,
+        &mut cell_size_query,
         incoming_tx,
         incoming_rx,
     );
@@ -1060,6 +1132,7 @@ fn run_attachment<B: Backend>(
     screen: &mut Screen<B>,
     uplink: &mut Uplink,
     graphics: terminal::GraphicsSupport,
+    cell_size_query: &mut terminal::CellSizeQuery,
     incoming_tx: mpsc::SyncSender<Incoming>,
     incoming_rx: mpsc::Receiver<Incoming>,
 ) -> Ending {
@@ -1123,6 +1196,7 @@ fn run_attachment<B: Backend>(
                         Ok(SessionEvent::Painted { frame }) => {
                             match image_cache.begin_frame(frame) {
                                 Ok(snapshot) => {
+                                    screen.set_cell_size(cell_size_query.current());
                                     if let Some(mouse_frame) =
                                         screen.draw_snapshot(client, snapshot)
                                     {
@@ -1147,6 +1221,7 @@ fn run_attachment<B: Backend>(
                         Ok(SessionEvent::ImageContentChunk { chunk }) => {
                             match image_cache.accept(chunk) {
                                 Ok(Some(frame)) => {
+                                    screen.set_cell_size(cell_size_query.current());
                                     if let Some(mouse_frame) = screen.draw_snapshot(client, frame) {
                                         last_frame = Some(mouse_frame);
                                     }
@@ -1214,7 +1289,7 @@ fn run_attachment<B: Backend>(
                             handle_mouse_event(client, frame, mouse, &mut pending);
                         }
                     }
-                    event => handle_input(client, uplink, event),
+                    event => handle_input_with_cell_size(client, uplink, cell_size_query, event),
                 },
             }
         }
@@ -1236,6 +1311,7 @@ fn run_attachment<B: Backend>(
                         &mut token,
                         &mut resume_token,
                         graphics,
+                        cell_size_query.current(),
                     )
                 }
                 // The link broke. A viewer of a session on a server, with
@@ -1255,6 +1331,7 @@ fn run_attachment<B: Backend>(
                             screen,
                             last_frame.as_ref().map(|frame| frame.client.active_tab),
                             graphics,
+                            cell_size_query.current(),
                         ) {
                             Ok(joined) => {
                                 client_id = joined.client_id;
@@ -1266,7 +1343,7 @@ fn run_attachment<B: Backend>(
                                 // Mouse events wait for the new connection's
                                 // first frame to be placed against.
                                 last_frame = None;
-                                if drop_input_from_the_blackout(&incoming_rx) {
+                                if drop_input_from_the_blackout(&incoming_rx, cell_size_query) {
                                     break Ending::TerminalGone;
                                 }
                                 Some((joined.reader, joined.writer))
@@ -1292,11 +1369,12 @@ fn run_attachment<B: Backend>(
             // is what ends that thread.
             uplink.requests = spawn_uplink_writer(writer);
             uplink.next_request_id = FIRST_LOOP_REQUEST_ID;
-            report_terminal_size(client, uplink);
+            report_terminal_size_with_cell_size(client, uplink, cell_size_query);
             // The new connection numbers its rounds from the start, so no
             // answer to a border move written on the old one can arrive. The
             // next move asks for its whole distance from the drag anchor.
             sent.clear();
+            screen.reset_connection();
             continue;
         }
         fire_expired_key_sequence(client, uplink, Instant::now());
@@ -1311,6 +1389,7 @@ fn run_attachment<B: Backend>(
         }
         // Every pass ends here, whether or not it drew a frame: the events it
         // handled may have moved the viewer after that frame was drawn.
+        screen.set_cell_size(cell_size_query.current());
         screen.refresh(
             client,
             last_frame.as_ref().map(|frame| frame.client.active_tab),
@@ -1369,6 +1448,7 @@ fn dial(
     home: &Home,
     target: &SessionSelector,
     graphics: terminal::GraphicsSupport,
+    cell_size: Option<koshi_core::geometry::PixelCellSize>,
 ) -> Result<Joined, CliError> {
     match home {
         Home::Local { runtime_dir } => {
@@ -1382,7 +1462,7 @@ fn dial(
             let endpoint = ipc_client::read_endpoint(runtime_dir, session_id)?;
             let mut connection = ipc_client::connect(&endpoint, session_id)?;
             let (client_id, session_id, resume_token) =
-                join(&mut connection, &endpoint.token, None, graphics)?;
+                join(&mut connection, &endpoint.token, None, graphics, cell_size)?;
             let (reader, writer) = connection.split();
             Ok(Joined {
                 reader,
@@ -1394,7 +1474,7 @@ fn dial(
             })
         }
         Home::Remote { server } => {
-            dial_remote(server, target, None, None, graphics).map_err(CliError::from)
+            dial_remote(server, target, None, None, graphics, cell_size).map_err(CliError::from)
         }
     }
 }
@@ -1422,6 +1502,7 @@ fn dial_remote(
     resume: Option<ClientId>,
     resume_token: Option<&ConnectionToken>,
     graphics: terminal::GraphicsSupport,
+    cell_size: Option<koshi_core::geometry::PixelCellSize>,
 ) -> Result<Joined, DialError> {
     // The join is held to JOIN_WAIT; the clock comes off once it is joined.
     let (link, saved) = remote_client::connect_saved(server, None, Some(remote_client::JOIN_WAIT))?;
@@ -1429,7 +1510,7 @@ fn dial_remote(
         remote_client::attach_remote(link, target.clone()).map_err(DialError::Unreachable)?;
     settle_forwarded_hello(&mut reader, target)?;
     writer
-        .send(&attach_request(resume, resume_token, graphics))
+        .send(&attach_request(resume, resume_token, graphics, cell_size))
         .map_err(link_failed)?;
     let reply = reader.recv().map_err(link_failed)?;
     let (client_id, session_id, minted) = take_attached(reply).map_err(DialError::Refused)?;
@@ -1526,11 +1607,18 @@ fn come_back(
     token: &mut ConnectionToken,
     resume_token: &mut Option<ConnectionToken>,
     graphics: terminal::GraphicsSupport,
+    cell_size: Option<koshi_core::geometry::PixelCellSize>,
 ) -> Option<(FrameReader, FrameWriter)> {
     match home {
         Home::Local { runtime_dir } => {
-            let (endpoint, connection) =
-                rejoin(runtime_dir, session_id, client_id, token, graphics)?;
+            let (endpoint, connection) = rejoin(
+                runtime_dir,
+                session_id,
+                client_id,
+                token,
+                graphics,
+                cell_size,
+            )?;
             *token = endpoint.token;
             *resume_token = None;
             let (reader, writer) = connection.split();
@@ -1546,6 +1634,7 @@ fn come_back(
                     Some(client_id),
                     None,
                     graphics,
+                    cell_size,
                 )
                 .map_err(CliError::from)
                 {
@@ -1610,6 +1699,7 @@ fn come_back(
 /// # Errors
 /// The cause of the dial this gave up on: the refusal that ended it, or the last
 /// unreachable-path cause before the window closed.
+#[allow(clippy::too_many_arguments)]
 fn redial<B: Backend>(
     server: &ServerArg,
     session_id: SessionId,
@@ -1618,6 +1708,7 @@ fn redial<B: Backend>(
     screen: &mut Screen<B>,
     active_tab: Option<TabId>,
     graphics: terminal::GraphicsSupport,
+    cell_size: Option<koshi_core::geometry::PixelCellSize>,
 ) -> Result<Joined, Box<CliError>> {
     redial_with(
         || {
@@ -1627,6 +1718,7 @@ fn redial<B: Backend>(
                 None,
                 resume_token,
                 graphics,
+                cell_size,
             )
         },
         session_id,
@@ -1708,34 +1800,58 @@ fn next_redial_wait(wait: Duration) -> Duration {
 ///
 /// The `Resize` carries `Reported(viewport.rows - 2)`, with rows saturating at
 /// zero. An `80x24` terminal therefore reports an `80x22` pane area.
+#[cfg(test)]
 fn report_terminal_size(client: &mut Client, uplink: &mut Uplink) {
+    let mut cell_size_query = terminal::CellSizeQuery::new(None, false, false);
+    report_terminal_size_with_cell_size(client, uplink, &mut cell_size_query);
+}
+
+/// Read the terminal's size, clear its old cell measurement, and request a
+/// fresh CSI 16t reply after the resize report is queued.
+fn report_terminal_size_with_cell_size(
+    client: &mut Client,
+    uplink: &mut Uplink,
+    cell_size_query: &mut terminal::CellSizeQuery,
+) {
     let size = viewport();
     client.set_viewport(size);
     uplink.send(IpcRequestKind::Resize {
         viewport: size,
         pane_area: Some(core_pane_area(size)),
+        cell_size: None,
     });
+    if cell_size_query.resize(None) {
+        cell_size_query.request();
+    }
 }
 
 /// Take everything this terminal typed while the link was down off the loop's
 /// channel and answer whether the terminal went away.
 ///
 /// Every event on the channel is dropped, keys, pastes, mouse events and
-/// resizes alike, and none is sent. Frames read from the connection that broke
-/// are dropped too. The terminal's size is read again once the new connection
-/// is up.
+/// resizes alike, and none is sent. A pending outer-terminal cell-size reply is
+/// consumed by the query coordinator so its state remains ordered. Frames read
+/// from the connection that broke are dropped too. The terminal's size is read
+/// again once the new connection is up.
 ///
 /// `true` when a [`RuntimeEvent::Quit`] was among them, which is this terminal
 /// going away. The drain still runs to the end, so nothing typed before it is
 /// left on the channel.
-fn drop_input_from_the_blackout(incoming_rx: &mpsc::Receiver<Incoming>) -> bool {
+fn drop_input_from_the_blackout(
+    incoming_rx: &mpsc::Receiver<Incoming>,
+    cell_size_query: &mut terminal::CellSizeQuery,
+) -> bool {
     let mut terminal_gone = false;
     while let Ok(received) = incoming_rx.try_recv() {
         let Incoming::Input(event) = received else {
             continue;
         };
-        if matches!(*event, RuntimeEvent::Quit) {
-            terminal_gone = true;
+        match *event {
+            RuntimeEvent::CellSize { size, .. } => {
+                let _ = cell_size_query.accept(size);
+            }
+            RuntimeEvent::Quit => terminal_gone = true,
+            _ => {}
         }
     }
     terminal_gone
@@ -1926,6 +2042,7 @@ fn join(
     token: &ConnectionToken,
     resume: Option<ClientId>,
     graphics: terminal::GraphicsSupport,
+    cell_size: Option<koshi_core::geometry::PixelCellSize>,
 ) -> Result<(ClientId, SessionId, Option<ConnectionToken>), CliError> {
     let hello = IpcRequest {
         request_id: 1,
@@ -1933,7 +2050,7 @@ fn join(
     };
     connection.send(&hello).map_err(talk::talk_failed)?;
     connection
-        .send(&attach_request(resume, None, graphics))
+        .send(&attach_request(resume, None, graphics, cell_size))
         .map_err(talk::talk_failed)?;
 
     settle_version(connection.recv().map_err(talk::talk_failed)?)?;
@@ -1951,6 +2068,7 @@ fn attach_request(
     resume: Option<ClientId>,
     resume_token: Option<&ConnectionToken>,
     graphics: terminal::GraphicsSupport,
+    cell_size: Option<koshi_core::geometry::PixelCellSize>,
 ) -> IpcRequest {
     let viewport = viewport();
     IpcRequest {
@@ -1961,9 +2079,8 @@ fn attach_request(
             resume,
             resume_token: resume_token.cloned(),
             pane_area: Some(core_pane_area(viewport)),
-            graphics: GraphicsCapabilities {
-                kitty: graphics == terminal::GraphicsSupport::Kitty,
-            },
+            graphics: graphics.capabilities(),
+            cell_size,
         },
     }
 }
@@ -2025,6 +2142,7 @@ fn rejoin(
     client_id: ClientId,
     token: &ConnectionToken,
     graphics: terminal::GraphicsSupport,
+    cell_size: Option<koshi_core::geometry::PixelCellSize>,
 ) -> Option<(EndpointFile, Connection)> {
     if token.expose().is_empty() {
         tracing::warn!(
@@ -2041,9 +2159,15 @@ fn rejoin(
     let mut connection = ipc_client::connect(&endpoint, session_id)
         .inspect_err(|error| tracing::warn!(%error, "could not reach the restarted session"))
         .ok()?;
-    let (rejoined, _, _) = join(&mut connection, &endpoint.token, Some(client_id), graphics)
-        .inspect_err(|error| tracing::warn!(%error, "the restarted session refused this client"))
-        .ok()?;
+    let (rejoined, _, _) = join(
+        &mut connection,
+        &endpoint.token,
+        Some(client_id),
+        graphics,
+        cell_size,
+    )
+    .inspect_err(|error| tracing::warn!(%error, "the restarted session refused this client"))
+    .ok()?;
     if rejoined != client_id {
         tracing::warn!(
             %session_id,
@@ -2225,8 +2349,30 @@ fn input_channel() -> (mpsc::SyncSender<RuntimeEvent>, mpsc::Receiver<RuntimeEve
 /// [`Ending::TerminalGone`] and stops. An input thread runs only for a terminal
 /// that had keys to read, so a read failure from one is that terminal going
 /// away.
+#[cfg(test)]
 fn handle_input(client: &mut Client, uplink: &mut Uplink, event: RuntimeEvent) {
+    let mut cell_size_query = terminal::CellSizeQuery::new(None, false, false);
+    handle_input_with_cell_size(client, uplink, &mut cell_size_query, event);
+}
+
+/// Handle one input event while coordinating resize invalidation and cell-size
+/// replies with the attachment's terminal query state.
+fn handle_input_with_cell_size(
+    client: &mut Client,
+    uplink: &mut Uplink,
+    cell_size_query: &mut terminal::CellSizeQuery,
+    event: RuntimeEvent,
+) {
     match event {
+        RuntimeEvent::CellSize { size, .. } => {
+            let (accepted, request) = cell_size_query.accept(size);
+            if request {
+                cell_size_query.request();
+            }
+            if let Some(size) = accepted {
+                uplink.send(IpcRequestKind::CellSize { size });
+            }
+        }
         RuntimeEvent::KeyInput { chord, .. } => match client.resolve_key(chord, Instant::now()) {
             KeyOutcome::Fire(bound) => uplink.submit(client, bound),
             KeyOutcome::PassThrough(chord) => {
@@ -2241,14 +2387,21 @@ fn handle_input(client: &mut Client, uplink: &mut Uplink, event: RuntimeEvent) {
             KeyOutcome::Pending | KeyOutcome::Discard => {}
         },
         RuntimeEvent::Resize {
-            size, pane_area, ..
+            size,
+            pane_area,
+            cell_size,
+            ..
         } => {
             client.set_viewport(size);
             let pane_area = pane_area.unwrap_or_else(|| core_pane_area(size));
             uplink.send(IpcRequestKind::Resize {
                 viewport: size,
                 pane_area: Some(pane_area),
+                cell_size,
             });
+            if cell_size_query.resize(cell_size) {
+                cell_size_query.request();
+            }
         }
         RuntimeEvent::HostPaste { text, .. } => {
             // The text belongs to the program in the pane, so a selection

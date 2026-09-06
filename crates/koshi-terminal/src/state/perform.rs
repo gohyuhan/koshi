@@ -42,7 +42,7 @@
 
 use koshi_core::text::sanitize_reported_text;
 
-use crate::grid::state::{Cell, RowEnd};
+use crate::grid::state::{Cell, ImagePlaceholder, RowEnd};
 use crate::state::{
     CursorShape, MouseEncoding, MouseTracking, Screen, ShellIntegrationFact, ShellIntegrationState,
     TerminalState,
@@ -158,7 +158,15 @@ impl vte::Perform for TerminalState {
 
         // Install the base glyph (and, when wide, its continuation), clearing any
         // wide pair the write would split — see `place_glyph`.
-        self.place_glyph(row, col, Cell::new(c, glyph_width as u8, style));
+        let mut cell = Cell::new(
+            if c == '\u{10EEEE}' { ' ' } else { c },
+            glyph_width as u8,
+            style,
+        );
+        if c == '\u{10EEEE}' {
+            cell.set_image_placeholder(ImagePlaceholder::from_style(style));
+        }
+        self.place_glyph(row, col, cell);
 
         // Anchor a new cluster at this base; continuations that follow
         // (combining marks, ZWJ emoji parts, …) fold onto it.
@@ -518,6 +526,7 @@ impl vte::Perform for TerminalState {
             // SGR — set graphic rendition: update the pen colors and text
             // attributes applied to subsequently printed cells.
             'm' => apply_sgr(&mut self.active_render_mut().style, params),
+            't' => self.report_window_size(params),
             // ICH — insert n blank cells at the cursor, shifting the rest of the
             // line right; cells pushed past the right edge fall off.
             '@' => {
@@ -861,6 +870,19 @@ impl TerminalState {
             // cursor arrow keys on the alternate screen.
             ('h', 1007) => self.modes.alt_scroll = true,
             ('l', 1007) => self.modes.alt_scroll = false,
+            // `?80` — Sixel scrolling: a graphic may move the primary screen
+            // content into scrollback when it reaches the bottom.
+            ('h', 80) => self.modes.sixel_scrolling = false,
+            ('l', 80) => self.modes.sixel_scrolling = true,
+            // `?1070` — Sixel color registers: each graphic starts with
+            // private registers when enabled and uses shared registers when
+            // disabled.
+            ('h', 1070) => self.modes.sixel_private_color_registers = true,
+            ('l', 1070) => self.modes.sixel_private_color_registers = false,
+            // `?8452` — Sixel cursor movement: leave the cursor to the right
+            // of the graphic when enabled.
+            ('h', 8452) => self.modes.sixel_cursor_right = true,
+            ('l', 8452) => self.modes.sixel_cursor_right = false,
             // `?7` (DECAWM) — autowrap. On (the default): a glyph at the
             // last column parks there and the next glyph wraps to a new
             // line. Off: the cursor stays pinned and further glyphs

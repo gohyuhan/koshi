@@ -40,9 +40,19 @@ impl Server {
     ///
     /// Shell-integration facts become command lifecycle events in marker order.
     pub fn handle_pty_output(&mut self, pane_id: PaneId, bytes: &[u8]) {
+        let cell_size = self.sessions.values().find_map(|session| {
+            let tab = session
+                .tabs
+                .values()
+                .find(|tab| tab.layout().contains_pane(pane_id))?;
+            session.tab_cell_size(tab.id())
+        });
         let Some(engine) = self.terminal_engines.get_mut(&pane_id) else {
             return;
         };
+        if let Some(size) = cell_size {
+            engine.set_cell_size(size);
+        }
         // The lines this chunk pushed into scrollback are the rise in the
         // buffer's push counter. That counter only grows: `clear` (`CSI 3 J`)
         // and eviction past the cap leave it as it is. The rise stays exact for

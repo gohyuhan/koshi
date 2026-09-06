@@ -675,11 +675,13 @@ fn a_resume_body_rejects_queued_image_bytes_that_do_not_match_dimensions() {
     let pane = PaneId::new();
     let event: GraphicsEvent = Ok(ImageRecord {
         protocol: GraphicsProtocol::Kitty,
-        image: DecodedImage {
+        image: (DecodedImage {
             width: 1,
             height: 1,
             rgba: vec![255, 0, 0, 255],
-        },
+        })
+        .into(),
+        animation: None,
         action: ImageAction::Display,
         display: ImageDisplay::default(),
         anchor: (0, 0),
@@ -734,11 +736,13 @@ fn a_resume_body_rejects_a_graphics_event_list_over_the_engine_limit() {
     let pane = PaneId::new();
     let event: GraphicsEvent = Ok(ImageRecord {
         protocol: GraphicsProtocol::Kitty,
-        image: DecodedImage {
+        image: (DecodedImage {
             width: 1,
             height: 1,
             rgba: vec![255, 0, 0, 255],
-        },
+        })
+        .into(),
+        animation: None,
         action: ImageAction::Display,
         display: ImageDisplay::default(),
         anchor: (0, 0),
@@ -766,11 +770,13 @@ fn a_resume_body_accepts_the_queue_full_report_after_queued_events() {
     let pane = PaneId::new();
     let event: GraphicsEvent = Ok(ImageRecord {
         protocol: GraphicsProtocol::Kitty,
-        image: DecodedImage {
+        image: (DecodedImage {
             width: 1,
             height: 1,
             rgba: vec![255, 0, 0, 255],
-        },
+        })
+        .into(),
+        animation: None,
         action: ImageAction::Display,
         display: ImageDisplay::default(),
         anchor: (0, 0),

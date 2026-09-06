@@ -210,6 +210,10 @@ fn wire_image_placement(
 ) -> FrameImagePlacement {
     FrameImagePlacement {
         id: placement.id(),
+        geometry: Some(placement.geometry()),
+        record: placement
+            .record()
+            .map(|record| wire_image_transfer(1, record).record),
         content_id: content_id(pane_id, placement),
         available: placement.record().is_some(),
         anchor: placement.anchor(),
@@ -257,6 +261,7 @@ fn wire_sixel_background(background: SixelBackground) -> FrameSixelBackground {
 /// Display metadata in wire form.
 fn wire_image_display(display: &ImageDisplay) -> FrameImageDisplay {
     FrameImageDisplay {
+        quiet: display.quiet,
         width: display.width.map(wire_image_dimension),
         height: display.height.map(wire_image_dimension),
         preserve_aspect_ratio: display.preserve_aspect_ratio,
@@ -267,6 +272,10 @@ fn wire_image_display(display: &ImageDisplay) -> FrameImageDisplay {
         usage_hints: display.usage_hints,
         unicode_placeholder: display.unicode_placeholder,
         z_index: display.z_index,
+        relative_image_id: display.relative_image_id,
+        relative_placement_id: display.relative_placement_id,
+        relative_offset_x: display.relative_offset_x,
+        relative_offset_y: display.relative_offset_y,
         cell_columns: display.cell_columns,
         cell_rows: display.cell_rows,
         source_offset_x: display.source_offset_x,
@@ -353,7 +362,11 @@ fn wire_row_end(end: RowEnd) -> FrameRowEnd {
 fn wire_cell(cell: &Cell) -> FrameCell {
     FrameCell {
         ch: cell.ch(),
-        combining: cell.combining().to_vec(),
+        combining: if cell.has_image_placeholder() {
+            Vec::new()
+        } else {
+            cell.combining().to_vec()
+        },
         width: cell.width(),
         style: wire_style(cell.style()),
     }

@@ -19,6 +19,7 @@
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::ops::Range;
+use std::time::Duration;
 
 use koshi_core::process::PtySize;
 
@@ -693,6 +694,22 @@ impl TerminalEngine {
         &self.state
     }
 
+    /// Set the shared pixel-to-cell measurement for new image placements and queries.
+    pub fn set_cell_size(&mut self, size: koshi_core::geometry::PixelCellSize) {
+        self.state.set_cell_size(size);
+    }
+
+    /// Return the time until the next retained image animation frame is due.
+    #[must_use]
+    pub fn next_animation_delay(&self) -> Option<Duration> {
+        self.state.next_animation_delay()
+    }
+
+    /// Advance retained image animations and report whether visible pixels changed.
+    pub fn advance_animations(&mut self, elapsed: Duration) -> bool {
+        self.state.advance_animations(elapsed)
+    }
+
     /// Resize the screen model to `size` (see [`TerminalState::resize`]).
     ///
     /// The parser keeps any partial decode: a sequence split across the
@@ -703,27 +720,63 @@ impl TerminalEngine {
 
     fn queue_graphics(
         &mut self,
-        result: Result<crate::graphics::DecodedGraphics, GraphicsError>,
+        result: Result<crate::graphics::GraphicsOperation, GraphicsError>,
         anchor: (u16, u16),
     ) {
         match result {
-            Ok(decoded) => {
+            Ok(crate::graphics::GraphicsOperation::Failure { display, error }) => {
+                self.state.reply_kitty_failure(&display, &error);
+                self.queue_graphics_event(Err(error));
+            }
+            Ok(crate::graphics::GraphicsOperation::Command(command)) => {
+                if let Err(reason) = self.state.apply_kitty_command(&command) {
+                    self.queue_graphics_event(Err(GraphicsError::PlacementRejected {
+                        protocol: crate::graphics::GraphicsProtocol::Kitty,
+                        reason,
+                    }));
+                }
+            }
+            Ok(crate::graphics::GraphicsOperation::Image(decoded)) => {
+                if decoded.query {
+                    self.state.reply_kitty(&decoded.display, None, true);
+                    return;
+                }
                 let record = ImageRecord {
                     protocol: decoded.protocol,
-                    image: decoded.image,
+                    image: (decoded.image).into(),
+                    animation: decoded.animation.map(std::sync::Arc::new),
                     action: decoded.action,
                     display: decoded.display,
                     anchor,
                 };
                 let bytes = record.image.rgba.len();
                 let protocol = record.protocol;
-                let event = self
-                    .state
-                    .apply_image_record(&record)
+                let applied = self.state.apply_image_record(&record);
+                let display = if applied.is_ok() {
+                    self.state.kitty_reply_display(&record.display)
+                } else {
+                    record.display.clone()
+                };
+                self.state.reply_kitty(
+                    &display,
+                    applied.as_ref().err().copied(),
+                    protocol == crate::graphics::GraphicsProtocol::Kitty,
+                );
+                let event = applied
                     .map(|()| record)
                     .map_err(|reason| GraphicsError::PlacementRejected { protocol, reason });
                 let queued_bytes = if event.is_ok() { bytes } else { 0 };
                 self.queue_graphics_event_with_bytes(event, queued_bytes);
+            }
+            Ok(crate::graphics::GraphicsOperation::Sixel(graphic)) => {
+                match self.state.apply_sixel_graphic(graphic, anchor) {
+                    Ok(Some(record)) => {
+                        let bytes = record.image.rgba.len();
+                        self.queue_graphics_event_with_bytes(Ok(record), bytes);
+                    }
+                    Ok(None) => {}
+                    Err(error) => self.queue_graphics_event(Err(error)),
+                }
             }
             Err(error) => self.queue_graphics_event(Err(error)),
         }

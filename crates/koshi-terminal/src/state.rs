@@ -24,7 +24,9 @@ use std::cmp::min;
 use std::sync::Arc;
 
 use koshi_core::process::PtySize;
+use koshi_sixel::{SixelGraphic, SixelPalette};
 
+use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 
 use crate::grid::state::{Cell, Grid, RowMeta};
@@ -43,6 +45,7 @@ mod screen;
 
 pub(crate) use cursor::{Cursor, SavedCursor};
 pub use cwd::ReportedCwd;
+pub(crate) use images::SixelImageSource;
 pub use images::{ImagePlacement, ImagePlacementError, ImagePlacementId};
 pub(crate) use modes::TerminalModes;
 pub use modes::{CursorShape, MouseEncoding, MouseTracking};
@@ -71,8 +74,10 @@ pub enum ShellIntegrationFact {
 }
 
 /// The full emulation state of one terminal pane.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalState {
+    /// The shared pixel-to-cell measurement retained while no viewer is attached.
+    cell_size: Option<koshi_core::geometry::PixelCellSize>,
     /// The primary (normal, scrolling) screen buffer, including row metadata,
     /// reference-counted: a render snapshot shares it without copying, and a
     /// write clones it once on demand (copy-on-write via `Arc::make_mut` in
@@ -102,10 +107,16 @@ pub struct TerminalState {
     primary_image_history: Vec<images::PrimaryHistoryImagePlacement>,
     /// Image placements anchored to the alternate screen's cell grid.
     alternate_image_placements: Vec<ImagePlacement>,
+    /// Kitty uploads retained independently of their on-screen placements.
+    kitty_images: Vec<images::KittyImage>,
     /// The next terminal-local identity assigned to a new image placement.
     next_image_placement_id: ImagePlacementId,
+    /// The next terminal-local identity assigned to a canonical image source.
+    next_image_content_id: images::ImageContentId,
     /// Active terminal modes (bracketed paste, mouse tracking, …).
     modes: TerminalModes,
+    /// Shared Sixel color registers used by graphics whose private-register mode is off.
+    sixel_palette: SixelPalette,
     /// Horizontal tab stops indexed by zero-based grid column.
     tab_stops: Vec<bool>,
     /// The window/tab title set via OSC 0/1/2; `None` until the app sets one.
@@ -115,10 +126,8 @@ pub struct TerminalState {
     /// inheritance when a new pane spawns.
     reported_cwd: Option<ReportedCwd>,
     /// The shell lifecycle point last reported through OSC 133.
-    #[serde(default)]
     shell_integration_state: ShellIntegrationState,
     /// Shell-integration facts not yet taken by the terminal engine caller.
-    #[serde(default)]
     shell_integration_facts: Vec<ShellIntegrationFact>,
     /// Lines that have scrolled off the top of the primary screen.
     scrollback: Scrollback,
@@ -144,8 +153,105 @@ pub struct TerminalState {
     replies: Vec<u8>,
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize)]
+struct TerminalStateSerializeFields<'a> {
+    cell_size: Option<koshi_core::geometry::PixelCellSize>,
+    primary: &'a Arc<Grid>,
+    alternate: &'a Arc<Grid>,
+    active: Screen,
+    primary_cursor: &'a Cursor,
+    alternate_cursor: &'a Cursor,
+    primary_render: &'a RenderState,
+    alternate_render: &'a RenderState,
+    primary_image_placements: Vec<images::SerializedImagePlacement>,
+    primary_image_history: Vec<images::SerializedImagePlacement>,
+    alternate_image_placements: Vec<images::SerializedImagePlacement>,
+    kitty_images: Vec<images::SerializedKittyImage>,
+    image_contents: Vec<images::SerializedImageContent>,
+    next_image_content_id: images::ImageContentId,
+    next_image_placement_id: ImagePlacementId,
+    modes: &'a TerminalModes,
+    sixel_palette: &'a SixelPalette,
+    tab_stops: &'a Vec<bool>,
+    title: &'a Option<String>,
+    reported_cwd: &'a Option<ReportedCwd>,
+    shell_integration_state: ShellIntegrationState,
+    shell_integration_facts: &'a Vec<ShellIntegrationFact>,
+    scrollback: &'a Scrollback,
+    primary_scroll_region: &'a Option<(u16, u16)>,
+    alternate_scroll_region: &'a Option<(u16, u16)>,
+    cluster: &'a String,
+    cluster_base: &'a Option<(u16, u16)>,
+    replies: &'a Vec<u8>,
+}
+
+impl Serialize for TerminalState {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let primary_image_placements = self
+            .primary_image_placements
+            .iter()
+            .map(images::serialized_image_placement)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(serde::ser::Error::custom)?;
+        let primary_image_history = self
+            .primary_image_history
+            .iter()
+            .map(images::serialized_history_placement)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(serde::ser::Error::custom)?;
+        let alternate_image_placements = self
+            .alternate_image_placements
+            .iter()
+            .map(images::serialized_image_placement)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(serde::ser::Error::custom)?;
+        let kitty_images = self
+            .kitty_images
+            .iter()
+            .map(images::serialized_kitty_image)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(serde::ser::Error::custom)?;
+        let image_contents =
+            images::serialized_content_table(self).map_err(serde::ser::Error::custom)?;
+        TerminalStateSerializeFields {
+            cell_size: self.cell_size,
+            primary: &self.primary,
+            alternate: &self.alternate,
+            active: self.active,
+            primary_cursor: &self.primary_cursor,
+            alternate_cursor: &self.alternate_cursor,
+            primary_render: &self.primary_render,
+            alternate_render: &self.alternate_render,
+            primary_image_placements,
+            primary_image_history,
+            alternate_image_placements,
+            kitty_images,
+            image_contents,
+            next_image_content_id: self.next_image_content_id,
+            next_image_placement_id: self.next_image_placement_id,
+            modes: &self.modes,
+            sixel_palette: &self.sixel_palette,
+            tab_stops: &self.tab_stops,
+            title: &self.title,
+            reported_cwd: &self.reported_cwd,
+            shell_integration_state: self.shell_integration_state,
+            shell_integration_facts: &self.shell_integration_facts,
+            scrollback: &self.scrollback,
+            primary_scroll_region: &self.primary_scroll_region,
+            alternate_scroll_region: &self.alternate_scroll_region,
+            cluster: &self.cluster,
+            cluster_base: &self.cluster_base,
+            replies: &self.replies,
+        }
+        .serialize(serializer)
+    }
+}
+
 struct TerminalStateFields {
+    cell_size: Option<koshi_core::geometry::PixelCellSize>,
     primary: Arc<Grid>,
     alternate: Arc<Grid>,
     active: Screen,
@@ -153,24 +259,18 @@ struct TerminalStateFields {
     alternate_cursor: Cursor,
     primary_render: RenderState,
     alternate_render: RenderState,
-    #[serde(default, deserialize_with = "images::deserialize_image_placements")]
     primary_image_placements: Vec<ImagePlacement>,
-    #[serde(
-        default,
-        deserialize_with = "images::deserialize_primary_image_history"
-    )]
     primary_image_history: Vec<images::PrimaryHistoryImagePlacement>,
-    #[serde(default, deserialize_with = "images::deserialize_image_placements")]
     alternate_image_placements: Vec<ImagePlacement>,
-    #[serde(default = "images::default_next_image_placement_id")]
+    kitty_images: Vec<images::KittyImage>,
     next_image_placement_id: ImagePlacementId,
+    next_image_content_id: images::ImageContentId,
     modes: TerminalModes,
+    sixel_palette: SixelPalette,
     tab_stops: Vec<bool>,
     title: Option<String>,
     reported_cwd: Option<ReportedCwd>,
-    #[serde(default)]
     shell_integration_state: ShellIntegrationState,
-    #[serde(default)]
     shell_integration_facts: Vec<ShellIntegrationFact>,
     scrollback: Scrollback,
     primary_scroll_region: Option<(u16, u16)>,
@@ -178,6 +278,421 @@ struct TerminalStateFields {
     cluster: String,
     cluster_base: Option<(u16, u16)>,
     replies: Vec<u8>,
+}
+
+struct RawTerminalStateFields {
+    cell_size: Option<koshi_core::geometry::PixelCellSize>,
+    primary: Arc<Grid>,
+    alternate: Arc<Grid>,
+    active: Screen,
+    primary_cursor: Cursor,
+    alternate_cursor: Cursor,
+    primary_render: RenderState,
+    alternate_render: RenderState,
+    primary_image_placements: Vec<images::SerializedImagePlacement>,
+    primary_image_history: Vec<images::SerializedImagePlacement>,
+    alternate_image_placements: Vec<images::SerializedImagePlacement>,
+    kitty_images: Vec<images::SerializedKittyImage>,
+    image_contents: Option<Vec<images::SerializedImageContent>>,
+    next_image_content_id: Option<images::ImageContentId>,
+    next_image_placement_id: ImagePlacementId,
+    modes: TerminalModes,
+    sixel_palette: SixelPalette,
+    tab_stops: Vec<bool>,
+    title: Option<String>,
+    reported_cwd: Option<ReportedCwd>,
+    shell_integration_state: ShellIntegrationState,
+    shell_integration_facts: Vec<ShellIntegrationFact>,
+    scrollback: Scrollback,
+    primary_scroll_region: Option<(u16, u16)>,
+    alternate_scroll_region: Option<(u16, u16)>,
+    cluster: String,
+    cluster_base: Option<(u16, u16)>,
+    replies: Vec<u8>,
+}
+
+#[derive(Deserialize)]
+#[serde(field_identifier, rename_all = "snake_case")]
+enum RawTerminalStateField {
+    CellSize,
+    Primary,
+    Alternate,
+    Active,
+    PrimaryCursor,
+    AlternateCursor,
+    PrimaryRender,
+    AlternateRender,
+    PrimaryImagePlacements,
+    PrimaryImageHistory,
+    AlternateImagePlacements,
+    KittyImages,
+    ImageContents,
+    NextImageContentId,
+    NextImagePlacementId,
+    Modes,
+    SixelPalette,
+    TabStops,
+    Title,
+    ReportedCwd,
+    ShellIntegrationState,
+    ShellIntegrationFacts,
+    Scrollback,
+    PrimaryScrollRegion,
+    AlternateScrollRegion,
+    Cluster,
+    ClusterBase,
+    Replies,
+    #[serde(other)]
+    Other,
+}
+
+struct RawTerminalStateVisitor<'a> {
+    budget: &'a mut images::ImageStateBudget,
+}
+
+impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
+    type Value = RawTerminalStateFields;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a terminal state")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut cell_size = None;
+        let mut primary = None;
+        let mut alternate = None;
+        let mut active = None;
+        let mut primary_cursor = None;
+        let mut alternate_cursor = None;
+        let mut primary_render = None;
+        let mut alternate_render = None;
+        let mut primary_image_placements = None;
+        let mut primary_image_history = None;
+        let mut alternate_image_placements = None;
+        let mut kitty_images = None;
+        let mut image_contents = None;
+        let mut next_image_content_id = None;
+        let mut next_image_placement_id = None;
+        let mut modes = None;
+        let mut sixel_palette = None;
+        let mut tab_stops = None;
+        let mut title = None;
+        let mut reported_cwd = None;
+        let mut shell_integration_state = None;
+        let mut shell_integration_facts = None;
+        let mut scrollback = None;
+        let mut primary_scroll_region = None;
+        let mut alternate_scroll_region = None;
+        let mut cluster = None;
+        let mut cluster_base = None;
+        let mut replies = None;
+
+        while let Some(field) = map.next_key::<RawTerminalStateField>()? {
+            match field {
+                RawTerminalStateField::CellSize => {
+                    if cell_size.is_some() {
+                        return Err(serde::de::Error::duplicate_field("cell_size"));
+                    }
+                    cell_size = Some(map.next_value()?);
+                }
+                RawTerminalStateField::Primary => {
+                    if primary.is_some() {
+                        return Err(serde::de::Error::duplicate_field("primary"));
+                    }
+                    primary = Some(map.next_value()?);
+                }
+                RawTerminalStateField::Alternate => {
+                    if alternate.is_some() {
+                        return Err(serde::de::Error::duplicate_field("alternate"));
+                    }
+                    alternate = Some(map.next_value()?);
+                }
+                RawTerminalStateField::Active => {
+                    if active.is_some() {
+                        return Err(serde::de::Error::duplicate_field("active"));
+                    }
+                    active = Some(map.next_value()?);
+                }
+                RawTerminalStateField::PrimaryCursor => {
+                    if primary_cursor.is_some() {
+                        return Err(serde::de::Error::duplicate_field("primary_cursor"));
+                    }
+                    primary_cursor = Some(map.next_value()?);
+                }
+                RawTerminalStateField::AlternateCursor => {
+                    if alternate_cursor.is_some() {
+                        return Err(serde::de::Error::duplicate_field("alternate_cursor"));
+                    }
+                    alternate_cursor = Some(map.next_value()?);
+                }
+                RawTerminalStateField::PrimaryRender => {
+                    if primary_render.is_some() {
+                        return Err(serde::de::Error::duplicate_field("primary_render"));
+                    }
+                    primary_render = Some(map.next_value()?);
+                }
+                RawTerminalStateField::AlternateRender => {
+                    if alternate_render.is_some() {
+                        return Err(serde::de::Error::duplicate_field("alternate_render"));
+                    }
+                    alternate_render = Some(map.next_value()?);
+                }
+                RawTerminalStateField::PrimaryImagePlacements => {
+                    if primary_image_placements.is_some() {
+                        return Err(serde::de::Error::duplicate_field(
+                            "primary_image_placements",
+                        ));
+                    }
+                    primary_image_placements =
+                        Some(map.next_value_seed(images::SerializedPlacementsSeed {
+                            budget: self.budget,
+                        })?);
+                }
+                RawTerminalStateField::PrimaryImageHistory => {
+                    if primary_image_history.is_some() {
+                        return Err(serde::de::Error::duplicate_field("primary_image_history"));
+                    }
+                    primary_image_history =
+                        Some(map.next_value_seed(images::SerializedPlacementsSeed {
+                            budget: self.budget,
+                        })?);
+                }
+                RawTerminalStateField::AlternateImagePlacements => {
+                    if alternate_image_placements.is_some() {
+                        return Err(serde::de::Error::duplicate_field(
+                            "alternate_image_placements",
+                        ));
+                    }
+                    alternate_image_placements =
+                        Some(map.next_value_seed(images::SerializedPlacementsSeed {
+                            budget: self.budget,
+                        })?);
+                }
+                RawTerminalStateField::KittyImages => {
+                    if kitty_images.is_some() {
+                        return Err(serde::de::Error::duplicate_field("kitty_images"));
+                    }
+                    kitty_images =
+                        Some(map.next_value_seed(images::SerializedKittyImagesSeed {
+                            budget: self.budget,
+                        })?);
+                }
+                RawTerminalStateField::ImageContents => {
+                    if image_contents.is_some() {
+                        return Err(serde::de::Error::duplicate_field("image_contents"));
+                    }
+                    image_contents = Some(map.next_value_seed(images::OptionalContentsSeed {
+                        budget: self.budget,
+                    })?);
+                }
+                RawTerminalStateField::NextImageContentId => {
+                    if next_image_content_id.is_some() {
+                        return Err(serde::de::Error::duplicate_field("next_image_content_id"));
+                    }
+                    next_image_content_id = Some(map.next_value()?);
+                }
+                RawTerminalStateField::NextImagePlacementId => {
+                    if next_image_placement_id.is_some() {
+                        return Err(serde::de::Error::duplicate_field("next_image_placement_id"));
+                    }
+                    next_image_placement_id = Some(map.next_value()?);
+                }
+                RawTerminalStateField::Modes => {
+                    if modes.is_some() {
+                        return Err(serde::de::Error::duplicate_field("modes"));
+                    }
+                    modes = Some(map.next_value()?);
+                }
+                RawTerminalStateField::SixelPalette => {
+                    if sixel_palette.is_some() {
+                        return Err(serde::de::Error::duplicate_field("sixel_palette"));
+                    }
+                    sixel_palette = Some(map.next_value()?);
+                }
+                RawTerminalStateField::TabStops => {
+                    if tab_stops.is_some() {
+                        return Err(serde::de::Error::duplicate_field("tab_stops"));
+                    }
+                    tab_stops = Some(map.next_value()?);
+                }
+                RawTerminalStateField::Title => {
+                    if title.is_some() {
+                        return Err(serde::de::Error::duplicate_field("title"));
+                    }
+                    title = Some(map.next_value()?);
+                }
+                RawTerminalStateField::ReportedCwd => {
+                    if reported_cwd.is_some() {
+                        return Err(serde::de::Error::duplicate_field("reported_cwd"));
+                    }
+                    reported_cwd = Some(map.next_value()?);
+                }
+                RawTerminalStateField::ShellIntegrationState => {
+                    if shell_integration_state.is_some() {
+                        return Err(serde::de::Error::duplicate_field("shell_integration_state"));
+                    }
+                    shell_integration_state = Some(map.next_value()?);
+                }
+                RawTerminalStateField::ShellIntegrationFacts => {
+                    if shell_integration_facts.is_some() {
+                        return Err(serde::de::Error::duplicate_field("shell_integration_facts"));
+                    }
+                    shell_integration_facts = Some(map.next_value()?);
+                }
+                RawTerminalStateField::Scrollback => {
+                    if scrollback.is_some() {
+                        return Err(serde::de::Error::duplicate_field("scrollback"));
+                    }
+                    scrollback = Some(map.next_value()?);
+                }
+                RawTerminalStateField::PrimaryScrollRegion => {
+                    if primary_scroll_region.is_some() {
+                        return Err(serde::de::Error::duplicate_field("primary_scroll_region"));
+                    }
+                    primary_scroll_region = Some(map.next_value()?);
+                }
+                RawTerminalStateField::AlternateScrollRegion => {
+                    if alternate_scroll_region.is_some() {
+                        return Err(serde::de::Error::duplicate_field("alternate_scroll_region"));
+                    }
+                    alternate_scroll_region = Some(map.next_value()?);
+                }
+                RawTerminalStateField::Cluster => {
+                    if cluster.is_some() {
+                        return Err(serde::de::Error::duplicate_field("cluster"));
+                    }
+                    cluster = Some(map.next_value()?);
+                }
+                RawTerminalStateField::ClusterBase => {
+                    if cluster_base.is_some() {
+                        return Err(serde::de::Error::duplicate_field("cluster_base"));
+                    }
+                    cluster_base = Some(map.next_value()?);
+                }
+                RawTerminalStateField::Replies => {
+                    if replies.is_some() {
+                        return Err(serde::de::Error::duplicate_field("replies"));
+                    }
+                    replies = Some(map.next_value()?);
+                }
+                RawTerminalStateField::Other => {
+                    let _: serde::de::IgnoredAny = map.next_value()?;
+                }
+            }
+        }
+
+        Ok(RawTerminalStateFields {
+            cell_size: cell_size.unwrap_or_default(),
+            primary: primary.ok_or_else(|| serde::de::Error::missing_field("primary"))?,
+            alternate: alternate.ok_or_else(|| serde::de::Error::missing_field("alternate"))?,
+            active: active.ok_or_else(|| serde::de::Error::missing_field("active"))?,
+            primary_cursor: primary_cursor
+                .ok_or_else(|| serde::de::Error::missing_field("primary_cursor"))?,
+            alternate_cursor: alternate_cursor
+                .ok_or_else(|| serde::de::Error::missing_field("alternate_cursor"))?,
+            primary_render: primary_render
+                .ok_or_else(|| serde::de::Error::missing_field("primary_render"))?,
+            alternate_render: alternate_render
+                .ok_or_else(|| serde::de::Error::missing_field("alternate_render"))?,
+            primary_image_placements: primary_image_placements.unwrap_or_default(),
+            primary_image_history: primary_image_history.unwrap_or_default(),
+            alternate_image_placements: alternate_image_placements.unwrap_or_default(),
+            kitty_images: kitty_images.unwrap_or_default(),
+            image_contents: image_contents.unwrap_or_default(),
+            next_image_content_id: next_image_content_id.unwrap_or_default(),
+            next_image_placement_id: next_image_placement_id
+                .unwrap_or_else(images::default_next_image_placement_id),
+            modes: modes.ok_or_else(|| serde::de::Error::missing_field("modes"))?,
+            sixel_palette: sixel_palette.unwrap_or_default(),
+            tab_stops: tab_stops.ok_or_else(|| serde::de::Error::missing_field("tab_stops"))?,
+            title: title.ok_or_else(|| serde::de::Error::missing_field("title"))?,
+            reported_cwd: reported_cwd
+                .ok_or_else(|| serde::de::Error::missing_field("reported_cwd"))?,
+            shell_integration_state: shell_integration_state.unwrap_or_default(),
+            shell_integration_facts: shell_integration_facts.unwrap_or_default(),
+            scrollback: scrollback.ok_or_else(|| serde::de::Error::missing_field("scrollback"))?,
+            primary_scroll_region: primary_scroll_region
+                .ok_or_else(|| serde::de::Error::missing_field("primary_scroll_region"))?,
+            alternate_scroll_region: alternate_scroll_region
+                .ok_or_else(|| serde::de::Error::missing_field("alternate_scroll_region"))?,
+            cluster: cluster.ok_or_else(|| serde::de::Error::missing_field("cluster"))?,
+            cluster_base: cluster_base
+                .ok_or_else(|| serde::de::Error::missing_field("cluster_base"))?,
+            replies: replies.ok_or_else(|| serde::de::Error::missing_field("replies"))?,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for RawTerminalStateFields {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut budget = images::ImageStateBudget::new();
+        Self::deserialize_with_budget(deserializer, &mut budget)
+    }
+}
+
+impl RawTerminalStateFields {
+    fn deserialize_with_budget<'de, D>(
+        deserializer: D,
+        budget: &mut images::ImageStateBudget,
+    ) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_map(RawTerminalStateVisitor { budget })
+    }
+}
+
+impl<'de> Deserialize<'de> for TerminalStateFields {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawTerminalStateFields::deserialize(deserializer)?;
+        let images = images::restore_serialized_image_state(
+            raw.primary_image_placements,
+            raw.primary_image_history,
+            raw.alternate_image_placements,
+            raw.kitty_images,
+            raw.image_contents,
+            raw.next_image_content_id,
+        )
+        .map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            cell_size: raw.cell_size,
+            primary: raw.primary,
+            alternate: raw.alternate,
+            active: raw.active,
+            primary_cursor: raw.primary_cursor,
+            alternate_cursor: raw.alternate_cursor,
+            primary_render: raw.primary_render,
+            alternate_render: raw.alternate_render,
+            primary_image_placements: images.primary_image_placements,
+            primary_image_history: images.primary_image_history,
+            alternate_image_placements: images.alternate_image_placements,
+            kitty_images: images.kitty_images,
+            next_image_placement_id: raw.next_image_placement_id,
+            next_image_content_id: images.next_image_content_id,
+            modes: raw.modes,
+            sixel_palette: raw.sixel_palette,
+            tab_stops: raw.tab_stops,
+            title: raw.title,
+            reported_cwd: raw.reported_cwd,
+            shell_integration_state: raw.shell_integration_state,
+            shell_integration_facts: raw.shell_integration_facts,
+            scrollback: raw.scrollback,
+            primary_scroll_region: raw.primary_scroll_region,
+            alternate_scroll_region: raw.alternate_scroll_region,
+            cluster: raw.cluster,
+            cluster_base: raw.cluster_base,
+            replies: raw.replies,
+        })
+    }
 }
 
 impl<'de> Deserialize<'de> for TerminalState {
@@ -189,6 +704,7 @@ impl<'de> Deserialize<'de> for TerminalState {
         images::validate_image_state(&fields).map_err(serde::de::Error::custom)?;
 
         Ok(TerminalState {
+            cell_size: fields.cell_size,
             primary: fields.primary,
             alternate: fields.alternate,
             active: fields.active,
@@ -199,8 +715,11 @@ impl<'de> Deserialize<'de> for TerminalState {
             primary_image_placements: fields.primary_image_placements,
             primary_image_history: fields.primary_image_history,
             alternate_image_placements: fields.alternate_image_placements,
+            kitty_images: fields.kitty_images,
             next_image_placement_id: fields.next_image_placement_id,
+            next_image_content_id: fields.next_image_content_id,
             modes: fields.modes,
+            sixel_palette: fields.sixel_palette,
             tab_stops: fields.tab_stops,
             title: fields.title,
             reported_cwd: fields.reported_cwd,
@@ -217,6 +736,63 @@ impl<'de> Deserialize<'de> for TerminalState {
 }
 
 impl TerminalState {
+    /// Set the shared pixel measurement used by new images and size reports.
+    pub fn set_cell_size(&mut self, size: koshi_core::geometry::PixelCellSize) {
+        self.cell_size = Some(size);
+    }
+
+    /// Return the shared terminal cell measurement in pixels.
+    #[must_use]
+    pub fn cell_size(&self) -> Option<koshi_core::geometry::PixelCellSize> {
+        self.cell_size
+    }
+
+    pub(crate) fn apply_sixel_graphic(
+        &mut self,
+        graphic: SixelGraphic,
+        anchor: (u16, u16),
+    ) -> Result<Option<crate::graphics::ImageRecord>, crate::graphics::GraphicsError> {
+        let mut palette = if self.modes.sixel_private_color_registers {
+            SixelPalette::default()
+        } else {
+            self.sixel_palette.clone()
+        };
+        palette.apply_changes(graphic.palette_changes());
+        if !self.modes.sixel_private_color_registers {
+            self.sixel_palette = palette.clone();
+        }
+
+        let shared_palette = !self.modes.sixel_private_color_registers;
+        if shared_palette && !graphic.palette_changes().entries().is_empty() {
+            self.refresh_shared_sixel_images(&palette)?;
+        }
+
+        let Some(indexed) = graphic.image() else {
+            return Ok(None);
+        };
+        let source = SixelImageSource::new(indexed.clone(), palette.clone(), shared_palette);
+        let image = source.resolved(&palette)?;
+        let scrolling = self.modes.sixel_scrolling;
+        let record = crate::graphics::ImageRecord {
+            protocol: crate::graphics::GraphicsProtocol::Sixel,
+            image,
+            animation: None,
+            action: crate::graphics::ImageAction::Display,
+            display: crate::graphics::ImageDisplay {
+                move_cursor: scrolling,
+                sixel_background: Some(graphic.background()),
+                ..crate::graphics::ImageDisplay::default()
+            },
+            anchor: if scrolling { anchor } else { (0, 0) },
+        };
+        self.apply_sixel_image_record(&record, scrolling, self.modes.sixel_cursor_right, source)
+            .map_err(|reason| crate::graphics::GraphicsError::PlacementRejected {
+                protocol: crate::graphics::GraphicsProtocol::Sixel,
+                reason,
+            })?;
+        Ok(Some(record))
+    }
+
     /// Create per-pane state for a terminal of `size`: both screen buffers
     /// blank, the cursor at the top-left and visible, default pen, no title.
     pub fn new(size: PtySize) -> Self {
@@ -234,6 +810,7 @@ impl TerminalState {
             saved: None,
         };
         TerminalState {
+            cell_size: None,
             primary: Arc::new(blank_screen.clone()),
             alternate: Arc::new(blank_screen),
             active: Screen::Primary,
@@ -244,8 +821,11 @@ impl TerminalState {
             primary_image_placements: Vec::new(),
             primary_image_history: Vec::new(),
             alternate_image_placements: Vec::new(),
+            kitty_images: Vec::new(),
             next_image_placement_id: images::default_next_image_placement_id(),
+            next_image_content_id: images::default_next_image_content_id(),
             modes: TerminalModes::default(),
+            sixel_palette: SixelPalette::default(),
             tab_stops: default_tab_stops(size.cols),
             title: None,
             reported_cwd: None,
@@ -285,9 +865,8 @@ impl TerminalState {
     /// cut off is blanked), and a height shrink crops off the top. Both
     /// screens' scroll margins are dropped until the app issues DECSTBM again.
     /// Primary image anchors follow their row's reflowed text and remain in the
-    /// primary history list when the complete rectangle stays addressable.
-    /// Alternate placements are cleared because the alternate screen is cropped
-    /// and has no row-history mapping.
+    /// primary history list while any of their cells stay addressable.
+    /// Alternate placements follow the cropped rows and retain their image scale.
     /// Both cursors are clamped into the new bounds with their wrap latch
     /// cleared, and an in-progress grapheme cluster is dropped.
     pub fn resize(&mut self, size: PtySize) {
@@ -323,7 +902,9 @@ impl TerminalState {
         );
         self.alternate = Arc::new(Grid::from_rows_with_meta(rows, size.cols, alternate_fill));
 
-        self.clear_alternate_image_placements();
+        self.remap_alternate_image_placements(|row, column| {
+            Some((row.checked_sub(u16::try_from(cropped_top).ok()?)?, column))
+        });
 
         // Clamp both cursors to the new bounds.
         self.primary_cursor.row = min(self.primary_cursor.row, size.rows.saturating_sub(1));

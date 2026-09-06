@@ -813,6 +813,7 @@ fn coming_back_after_a_restart_keeps_the_client_record_and_graphics_capability()
         client_id,
         &ConnectionToken::new(OLD_TOKEN),
         terminal::GraphicsSupport::Kitty,
+        None,
     )
     .expect("the stand-in session handed the client record back");
     drop(connection);
@@ -826,9 +827,52 @@ fn coming_back_after_a_restart_keeps_the_client_record_and_graphics_capability()
             resume: Some(client_id),
             resume_token: None,
             pane_area: Some(core_pane_area(viewport())),
-            graphics: koshi_ipc::protocol::GraphicsCapabilities { kitty: true },
+            graphics: koshi_ipc::protocol::GraphicsCapabilities {
+                kitty: true,
+                iterm: false,
+                sixel: false,
+            },
+            cell_size: None,
         }),
         "the restart path claims the client record and reports this terminal's capability"
+    );
+}
+
+#[test]
+fn attach_advertises_the_selected_native_protocol() {
+    let iterm = attach_request(None, None, terminal::GraphicsSupport::Iterm, None);
+    let sixel = attach_request(
+        None,
+        None,
+        terminal::GraphicsSupport::Sixel {
+            palette_colors: 2,
+            max_width: None,
+            max_height: None,
+        },
+        None,
+    );
+
+    let IpcRequestKind::Attach { graphics, .. } = iterm.kind else {
+        panic!("expected an attach request");
+    };
+    assert_eq!(
+        graphics,
+        koshi_ipc::protocol::GraphicsCapabilities {
+            kitty: false,
+            iterm: true,
+            sixel: false,
+        }
+    );
+    let IpcRequestKind::Attach { graphics, .. } = sixel.kind else {
+        panic!("expected an attach request");
+    };
+    assert_eq!(
+        graphics,
+        koshi_ipc::protocol::GraphicsCapabilities {
+            kitty: false,
+            iterm: false,
+            sixel: true,
+        }
     );
 }
 
@@ -849,6 +893,7 @@ fn a_restarted_session_that_refuses_the_join_leaves_nothing_to_come_back_to() {
         client_id,
         &ConnectionToken::new(OLD_TOKEN),
         terminal::GraphicsSupport::Unsupported,
+        None,
     );
     assert_eq!(attached.map(|(endpoint, _)| endpoint), None);
 }
@@ -865,6 +910,7 @@ fn a_restarted_session_that_mints_a_new_client_leaves_nothing_to_come_back_to() 
         ClientId::new(),
         &ConnectionToken::new(OLD_TOKEN),
         terminal::GraphicsSupport::Unsupported,
+        None,
     );
     assert_eq!(attached.map(|(endpoint, _)| endpoint), None);
 }
@@ -882,6 +928,7 @@ fn another_local_users_restarting_session_is_not_waited_for() {
         ClientId::new(),
         &ConnectionToken::new(""),
         terminal::GraphicsSupport::Unsupported,
+        None,
     );
 
     assert_eq!(attached.map(|(endpoint, _)| endpoint), None);
@@ -2609,6 +2656,7 @@ fn a_terminal_resize_moves_the_viewers_own_size_and_tells_the_session() {
             client_id,
             size: bigger,
             pane_area: None,
+            cell_size: None,
         },
     );
 
@@ -2624,6 +2672,7 @@ fn a_terminal_resize_moves_the_viewers_own_size_and_tells_the_session() {
             kind: IpcRequestKind::Resize {
                 viewport: bigger,
                 pane_area: Some(core_pane_area(bigger)),
+                cell_size: None,
             },
         }
     );
@@ -3265,6 +3314,7 @@ fn every_event_from_the_blackout_is_dropped_and_the_hangup_still_reported() {
         rows: 40,
     };
     let (incoming_tx, incoming_rx) = incoming_channel();
+    let mut cell_size_query = terminal::CellSizeQuery::new(None, false, false);
     incoming_tx
         .send(Incoming::Input(Box::new(RuntimeEvent::KeyInput {
             client_id: client.id(),
@@ -3279,6 +3329,7 @@ fn every_event_from_the_blackout_is_dropped_and_the_hangup_still_reported() {
             client_id: client.id(),
             size: resized,
             pane_area: None,
+            cell_size: None,
         })))
         .expect("the loop's channel takes it");
     incoming_tx
@@ -3293,7 +3344,7 @@ fn every_event_from_the_blackout_is_dropped_and_the_hangup_still_reported() {
     let before = client.viewport();
 
     assert!(
-        drop_input_from_the_blackout(&incoming_rx),
+        drop_input_from_the_blackout(&incoming_rx, &mut cell_size_query),
         "the terminal hung up while the link was down"
     );
 
@@ -3311,6 +3362,31 @@ fn every_event_from_the_blackout_is_dropped_and_the_hangup_still_reported() {
 }
 
 #[test]
+fn a_cell_size_reply_in_the_blackout_is_consumed_by_the_outer_query() {
+    let measurement =
+        koshi_core::geometry::PixelCellSize::new(10, 20).expect("positive cell dimensions");
+    let client_id = ClientId::new();
+    let (incoming_tx, incoming_rx) = incoming_channel();
+    let mut cell_size_query = terminal::CellSizeQuery::new(None, true, true);
+    incoming_tx
+        .send(Incoming::Input(Box::new(RuntimeEvent::CellSize {
+            client_id,
+            size: measurement,
+        })))
+        .expect("the cell-size reply is queued");
+
+    assert!(!drop_input_from_the_blackout(
+        &incoming_rx,
+        &mut cell_size_query,
+    ));
+    assert_eq!(
+        cell_size_query.accept(measurement),
+        (None, false),
+        "the blackout consumed the reply instead of leaving it pending"
+    );
+}
+
+#[test]
 fn incoming_batch_leaves_events_past_the_per_pass_limit_queued() {
     let (incoming_tx, incoming_rx) = mpsc::channel();
     for _ in 0..MAX_INCOMING_BATCH {
@@ -3324,6 +3400,7 @@ fn incoming_batch_leaves_events_past_the_per_pass_limit_queued() {
             client_id,
             size: Size { cols: 90, rows: 30 },
             pane_area: None,
+            cell_size: None,
         })))
         .expect("the test receiver is open");
 
@@ -3353,10 +3430,12 @@ fn incoming_batch_leaves_events_past_the_per_pass_limit_queued() {
             client_id: actual_client_id,
             size,
             pane_area,
+            cell_size,
         } => {
             assert_eq!(actual_client_id, client_id);
             assert_eq!(size, Size { cols: 90, rows: 30 });
             assert_eq!(pane_area, None);
+            assert_eq!(cell_size, None);
         }
         event => panic!("the remaining event was {event:?}"),
     }
@@ -3380,6 +3459,7 @@ fn incoming_queue_stops_producers_at_its_fixed_capacity() {
         client_id,
         size: Size { cols: 90, rows: 30 },
         pane_area: None,
+        cell_size: None,
     })));
 
     let Err(mpsc::TrySendError::Full(Incoming::Input(event))) = rejected else {
@@ -3389,6 +3469,7 @@ fn incoming_queue_stops_producers_at_its_fixed_capacity() {
         client_id: actual_client_id,
         size,
         pane_area,
+        cell_size,
     } = *event
     else {
         panic!("the full queue returned another event");
@@ -3396,6 +3477,7 @@ fn incoming_queue_stops_producers_at_its_fixed_capacity() {
     assert_eq!(actual_client_id, client_id);
     assert_eq!(size, Size { cols: 90, rows: 30 });
     assert_eq!(pane_area, None);
+    assert_eq!(cell_size, None);
     for _ in 0..INCOMING_QUEUE_CAPACITY {
         let Incoming::Input(event) = incoming_rx
             .try_recv()
@@ -3428,12 +3510,14 @@ fn terminal_input_queue_stops_the_reader_at_its_fixed_capacity() {
         client_id,
         size: resized,
         pane_area: None,
+        cell_size: None,
     });
 
     let Err(mpsc::TrySendError::Full(RuntimeEvent::Resize {
         client_id: actual_client_id,
         size,
         pane_area,
+        cell_size,
     })) = rejected
     else {
         panic!("the input event past the queue limit was not returned as full");
@@ -3441,6 +3525,7 @@ fn terminal_input_queue_stops_the_reader_at_its_fixed_capacity() {
     assert_eq!(actual_client_id, client_id);
     assert_eq!(size, resized);
     assert_eq!(pane_area, None);
+    assert_eq!(cell_size, None);
     for _ in 0..INCOMING_QUEUE_CAPACITY {
         let event = input_rx
             .try_recv()
@@ -3534,6 +3619,7 @@ fn a_new_connection_is_told_the_size_the_terminal_is_now() {
     let IpcRequestKind::Resize {
         viewport,
         pane_area,
+        cell_size,
     } = request.kind
     else {
         panic!("expected a Resize, got {:?}", request.kind);
@@ -3548,6 +3634,7 @@ fn a_new_connection_is_told_the_size_the_terminal_is_now() {
         Some(core_pane_area(client.viewport())),
         "this client reports the pane area left by the built-in rows"
     );
+    assert_eq!(cell_size, None);
     assert_eq!(
         sent.try_recv().err(),
         Some(mpsc::TryRecvError::Empty),

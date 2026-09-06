@@ -2507,11 +2507,13 @@ fn a_resumed_server_keeps_queued_graphics_events() {
         engine.take_graphics(),
         vec![Ok(ImageRecord {
             protocol: GraphicsProtocol::Kitty,
-            image: DecodedImage {
+            image: (DecodedImage {
                 width: 1,
                 height: 1,
                 rgba: vec![255, 0, 0, 255],
-            },
+            })
+            .into(),
+            animation: None,
             action: ImageAction::TransmitAndDisplay,
             display: ImageDisplay {
                 cell_columns: Some(1),

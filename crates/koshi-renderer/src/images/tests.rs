@@ -32,13 +32,15 @@ fn record(width: u32, height: u32, z_index: i32) -> Arc<ImageRecord> {
     let pixel_count = usize::try_from(width * height).expect("test image fits usize");
     Arc::new(ImageRecord {
         protocol: GraphicsProtocol::Kitty,
-        image: DecodedImage {
+        image: (DecodedImage {
             width,
             height,
             rgba: (0..pixel_count * 4)
                 .map(|value| u8::try_from(value % 256).expect("test byte fits"))
                 .collect(),
-        },
+        })
+        .into(),
+        animation: None,
         action: ImageAction::TransmitAndDisplay,
         display: ImageDisplay {
             z_index,
@@ -139,6 +141,45 @@ fn regions() -> CommittedRegions {
         },
         0,
     )
+}
+
+#[test]
+fn a_scrolled_crop_keeps_the_full_image_scale() {
+    let pane_id = PaneId::new();
+    let placement = ImagePlacementSnapshot::new(7, record(8, 12, 0), (0, 0), 4, 4)
+        .expect("valid placement")
+        .with_geometry(koshi_core::geometry::ImageCellGeometry {
+            full_size: Size { cols: 4, rows: 6 },
+            offset: Point { x: 0, y: 2 },
+        })
+        .expect("visible crop");
+    let snapshot = snapshot(
+        pane_id,
+        Rect {
+            origin: Point { x: 1, y: 1 },
+            size: Size { cols: 8, rows: 5 },
+        },
+        vec![placement],
+        true,
+        true,
+        false,
+    );
+    let paints = image_paints(&snapshot, &regions(), RatatuiRect::new(0, 0, 40, 8));
+    assert_eq!(
+        paints
+            .iter()
+            .map(|paint| (paint.target, paint.source))
+            .collect::<Vec<_>>(),
+        [(
+            RatatuiRect::new(1, 1, 4, 4),
+            ImageSourceRect {
+                x: 0,
+                y: 4,
+                width: 8,
+                height: 8
+            }
+        )]
+    );
 }
 
 #[test]
@@ -320,11 +361,13 @@ fn image_paint_ignores_kitty_offsets_on_other_protocols() {
     let pane_id = PaneId::new();
     let record = Arc::new(ImageRecord {
         protocol: GraphicsProtocol::Iterm2,
-        image: DecodedImage {
+        image: (DecodedImage {
             width: 1,
             height: 1,
             rgba: vec![0, 0, 0, 255],
-        },
+        })
+        .into(),
+        animation: None,
         action: ImageAction::Display,
         display: ImageDisplay {
             cell_offset_x: Some(4),
@@ -385,11 +428,13 @@ fn image_placement_constructor_rejects_invalid_basic_state() {
 
     let invalid_record = Arc::new(ImageRecord {
         protocol: GraphicsProtocol::Kitty,
-        image: DecodedImage {
+        image: (DecodedImage {
             width: 1,
             height: 1,
             rgba: Vec::new(),
-        },
+        })
+        .into(),
+        animation: None,
         action: ImageAction::Transmit,
         display: ImageDisplay::default(),
         anchor: (0, 0),
@@ -401,11 +446,13 @@ fn image_placement_constructor_rejects_invalid_basic_state() {
 
     let invalid_source = Arc::new(ImageRecord {
         protocol: GraphicsProtocol::Kitty,
-        image: DecodedImage {
+        image: (DecodedImage {
             width: 1,
             height: 1,
             rgba: vec![0, 0, 0, 255],
-        },
+        })
+        .into(),
+        animation: None,
         action: ImageAction::TransmitAndDisplay,
         display: ImageDisplay {
             source_offset_x: Some(1),
