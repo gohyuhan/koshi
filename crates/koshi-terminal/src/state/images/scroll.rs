@@ -32,6 +32,10 @@ impl TerminalState {
         let mut mapped = placements
             .into_iter()
             .filter_map(|mut placement| {
+                if placement.record.display.relative_image_id.is_some() {
+                    placement.anchor.0 = new_live_top;
+                    return Some(placement);
+                }
                 if full_history_scroll || placement.anchor.0 < old_live_top {
                     return Some(placement);
                 }
@@ -75,7 +79,11 @@ impl TerminalState {
             self.alternate_image_placements = mapped
                 .into_iter()
                 .filter_map(|placement| {
-                    placement.clipped(0, u64::from(rows), columns)?.into_live(0)
+                    if placement.record.display.relative_image_id.is_some() {
+                        placement.into_live(0)
+                    } else {
+                        placement.clipped(0, u64::from(rows), columns)?.into_live(0)
+                    }
                 })
                 .collect();
         }

@@ -363,7 +363,7 @@ fn a_frame_that_travels_and_is_read_back_is_the_frame_that_was_sent() {
 }
 
 #[test]
-fn a_frame_draws_an_image_placeholder_then_draws_the_complete_record() {
+fn a_frame_waits_for_the_complete_image_record() {
     let sent = snapshot(vec![
         content_pane_with_image(PaneId::new()),
         empty_pane(PaneId::new()),
@@ -371,11 +371,10 @@ fn a_frame_draws_an_image_placeholder_then_draws_the_complete_record() {
     let wire = wire_frame(&sent);
     let mut cache = ImageCache::new();
 
-    let placeholder = cache
+    let pending = cache
         .begin_frame(Box::new(wire))
         .expect("the placement frame reads");
-    assert_eq!(placeholder.panes[0].image_placements.len(), 1);
-    assert_eq!(placeholder.panes[0].image_placements[0].record(), None);
+    assert_eq!(pending, None);
 
     cache.start(image_transfer(1)).expect("the transfer starts");
     let received = cache
@@ -423,7 +422,7 @@ fn a_complete_cached_image_is_reused_by_the_next_frame() {
         .begin_frame(Box::new(wire))
         .expect("the repeated placement frame reads");
 
-    assert_eq!(reused, sent);
+    assert_eq!(reused, Some(sent));
     assert_eq!(cache.images.len(), 1);
     assert!(cache.missing.is_empty());
     assert_eq!(cache.pending.as_ref().map(|pending| pending.received), None);
@@ -531,12 +530,77 @@ fn a_frame_without_a_cached_placement_releases_its_rgba_bytes() {
 
     let without_image = cache
         .begin_frame(Box::new(wire))
-        .expect("the frame without the placement reads");
+        .expect("the frame without the placement reads")
+        .expect("the frame without an image is complete");
 
     assert_eq!(without_image.panes[0].image_placements, Vec::new());
     assert_eq!(cache.images.len(), 0);
     assert_eq!(cache.retained_bytes, 0);
     assert_eq!(cache.missing.len(), 0);
+}
+
+#[test]
+fn a_returning_image_waits_for_its_new_connection_identity() {
+    let sent = snapshot(vec![
+        content_pane_with_image(PaneId::new()),
+        empty_pane(PaneId::new()),
+    ]);
+    let first = wire_frame(&sent);
+    let mut absent = first.clone();
+    absent.panes[0].image_placements.clear();
+    let mut returning = first.clone();
+    returning.panes[0].image_placements[0].content_id = 2;
+    let mut cache = ImageCache::new();
+
+    assert_eq!(
+        cache
+            .begin_frame(Box::new(first))
+            .expect("the first frame reads"),
+        None
+    );
+    cache
+        .start(image_transfer(1))
+        .expect("the first transfer starts");
+    cache
+        .accept(image_chunk(1))
+        .expect("the first transfer reads")
+        .expect("the first image completes the frame");
+    let without_image = cache
+        .begin_frame(Box::new(absent))
+        .expect("the frame without the image reads")
+        .expect("the frame without the image is complete");
+    assert_eq!(without_image.panes[0].image_placements, []);
+    assert_eq!(cache.images.len(), 0);
+
+    assert_eq!(
+        cache
+            .begin_frame(Box::new(returning))
+            .expect("the returning frame reads"),
+        None
+    );
+    assert_eq!(cache.images.len(), 0);
+    assert_eq!(cache.missing, HashSet::from([2]));
+    let mut transfer = image_transfer(2);
+    transfer.id = 2;
+    cache
+        .start(transfer)
+        .expect("the returning transfer starts");
+    let mut chunk = image_chunk(2);
+    chunk.transfer_id = 2;
+    let rebuilt = cache
+        .accept(chunk)
+        .expect("the returning transfer reads")
+        .expect("the returning image completes the frame");
+
+    assert_eq!(rebuilt.panes[0].image_placements[0].content_id(), 2);
+    assert_eq!(
+        rebuilt.panes[0].image_placements[0]
+            .record()
+            .expect("the returning image has pixels")
+            .image
+            .rgba,
+        [255, 0, 0, 255, 0, 255, 0, 255]
+    );
 }
 
 #[test]
@@ -745,7 +809,8 @@ fn image_placements_from_several_panes_do_not_share_one_pane_limit() {
 
     let rebuilt = cache
         .begin_frame(Box::new(wire))
-        .expect("placements in distinct panes are accepted");
+        .expect("placements in distinct panes are accepted")
+        .expect("unavailable placements need no image transfer");
 
     assert_eq!(rebuilt.panes[0].image_placements.len(), 4_096);
     assert_eq!(rebuilt.panes[1].image_placements.len(), 1);

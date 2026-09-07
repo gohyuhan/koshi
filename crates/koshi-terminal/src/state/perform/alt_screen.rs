@@ -33,13 +33,13 @@ impl TerminalState {
     /// the `?1049 h` entry and the `?1047 l`/`?1049 l` clearing exits.
     pub(super) fn reset_alternate_buffer(&mut self) {
         let fill = self.active_render().style.bg_fill();
+        self.clear_alternate_image_placements();
         let alternate = Arc::make_mut(&mut self.alternate);
         let (rows, cols) = alternate.dimensions();
         for row in 0..rows {
             alternate.clear_line(row, 0, cols, fill);
             alternate.set_prompt_mark(row, false);
         }
-        self.clear_alternate_image_placements();
         self.alternate_scroll_region = None;
         self.alternate_cursor.row = 0;
         self.alternate_cursor.col = 0;

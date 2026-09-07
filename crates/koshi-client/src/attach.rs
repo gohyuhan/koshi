@@ -193,7 +193,10 @@ const REDIAL_WINDOW: Duration = Duration::from_secs(120);
 /// The number the first connection of one attachment carries. Coming back after
 /// the session replaces its own process image counts up from here.
 const FIRST_CONNECTION: u64 = 0;
+/// Wakeup used for native output preparation and the first failed-frame retry.
 const IMAGE_OUTPUT_STEP_DELAY: Duration = Duration::from_millis(1);
+/// Maximum wakeup after repeated native output failures.
+const MAX_IMAGE_OUTPUT_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// Most queued terminal and session events handled before the loop yields to
 /// image output, key timeouts, and outbound requests.
@@ -315,12 +318,16 @@ struct Screen<B: Backend> {
     /// What the viewer contributed to the frame on the screen. `None` until the
     /// first draw.
     shown: Option<ViewerPaint>,
+    /// The newest complete snapshot waiting for native image preparation.
+    pending_snapshot: Option<RenderSnapshot>,
     /// The image protocol capability of the outer terminal.
     graphics: terminal::GraphicsSupport,
-    /// Images uploaded into this outer terminal connection.
-    images: terminal::KittyImageCache,
-    /// Connection-local iTerm2 or Sixel output state.
+    /// Connection-local native image output state.
     outputs: terminal::ImageOutputState,
+    /// The delay before retrying a failed native frame commit.
+    native_retry_delay: Duration,
+    /// The next time a failed native frame commit may run again.
+    native_retry_at: Option<Instant>,
     /// The cursor position from the most recent ordinary frame paint.
     current_cursor: Option<Position>,
     /// The cell dimensions reported by the outer terminal.
@@ -353,11 +360,13 @@ impl<B: Backend> Screen<B> {
             last_snapshot: None,
             committed_regions: CommittedRegions::core(viewport, 0),
             shown: None,
+            pending_snapshot: None,
             graphics,
-            images: terminal::KittyImageCache::default(),
             outputs: terminal::ImageOutputState::new(terminal::ImageOutputKind::from_support(
                 graphics,
             )),
+            native_retry_delay: IMAGE_OUTPUT_STEP_DELAY,
+            native_retry_at: None,
             current_cursor: None,
             cell_size,
         }
@@ -385,23 +394,53 @@ impl<B: Backend> Screen<B> {
         client: &mut Client,
         snapshot: RenderSnapshot,
     ) -> Option<MouseFrame> {
+        self.pending_snapshot = Some(snapshot);
+        self.commit_pending_snapshot(client, Instant::now())
+    }
+
+    fn commit_pending_snapshot(&mut self, client: &mut Client, now: Instant) -> Option<MouseFrame> {
+        let snapshot = self.pending_snapshot.as_ref()?;
+        let native_output = self.outputs.kind().is_some();
+        if native_output && self.native_retry_at.is_some_and(|retry_at| now < retry_at) {
+            return None;
+        }
         let committed_regions = self.regions_for(snapshot.client.viewport);
-        let frame_paint = ViewerPaint::from_frame(client, &snapshot);
-        if !text_frame_was_painted(paint_with_graphics(
+        let frame_paint = ViewerPaint::from_frame(client, snapshot);
+        match paint_with_graphics(
             &mut self.terminal,
             client,
-            &snapshot,
+            snapshot,
             &committed_regions,
             &frame_paint,
             self.graphics,
-            &mut self.images,
             &mut self.outputs,
             self.cell_size,
             &mut self.last_title,
             &mut self.last_cursor,
-        )) {
-            return None;
+        ) {
+            Ok(true) => {
+                if native_output {
+                    self.native_retry_delay = IMAGE_OUTPUT_STEP_DELAY;
+                    self.native_retry_at = None;
+                }
+            }
+            Ok(false) => return None,
+            Err(error) => {
+                warn_paint_error(error);
+                if native_output {
+                    self.native_retry_delay = self
+                        .native_retry_delay
+                        .saturating_mul(2)
+                        .min(MAX_IMAGE_OUTPUT_RETRY_DELAY);
+                    self.native_retry_at = Some(now + self.native_retry_delay);
+                }
+                return None;
+            }
         }
+        let snapshot = self
+            .pending_snapshot
+            .take()
+            .expect("the committed snapshot is pending");
         self.current_cursor = cursor_position(
             &snapshot,
             &committed_regions,
@@ -423,38 +462,42 @@ impl<B: Backend> Screen<B> {
     /// been drawn. A viewer that has not moved is left alone, so an idle pass
     /// draws nothing. A resize waits for the next session frame, so the painted
     /// frame and its committed region solve stay paired.
-    fn refresh(&mut self, client: &Client, active_tab: Option<TabId>) {
-        let Some(active_tab) = active_tab else {
-            return;
-        };
-        if client.viewport() != self.committed_regions.viewport {
-            return;
-        }
+    fn refresh(&mut self, client: &mut Client, active_tab: Option<TabId>) -> Option<MouseFrame> {
+        self.refresh_at(client, active_tab, Instant::now())
+    }
+
+    fn refresh_at(
+        &mut self,
+        client: &mut Client,
+        active_tab: Option<TabId>,
+        now: Instant,
+    ) -> Option<MouseFrame> {
         self.outputs.poll();
-        let current = ViewerPaint::read(client, active_tab);
-        if self.shown.as_ref() == Some(&current)
-            && !self.outputs.base_repaint_needed()
-            && !self.outputs.screen_reset_needed()
-        {
-            return;
+        if self.pending_snapshot.is_some() {
+            return self.commit_pending_snapshot(client, now);
         }
-        let Some(snapshot) = self.last_snapshot.as_ref() else {
-            return;
-        };
-        if !text_frame_was_painted(paint_with_graphics(
+        let active_tab = active_tab?;
+        if client.viewport() != self.committed_regions.viewport {
+            return None;
+        }
+        let current = ViewerPaint::read(client, active_tab);
+        if self.shown.as_ref() == Some(&current) {
+            return None;
+        }
+        let snapshot = self.last_snapshot.as_ref()?;
+        if !frame_was_committed(paint_with_graphics(
             &mut self.terminal,
             client,
             snapshot,
             &self.committed_regions,
             &current,
             self.graphics,
-            &mut self.images,
             &mut self.outputs,
             self.cell_size,
             &mut self.last_title,
             &mut self.last_cursor,
         )) {
-            return;
+            return None;
         }
         self.current_cursor = cursor_position(
             snapshot,
@@ -462,47 +505,52 @@ impl<B: Backend> Screen<B> {
             Rect::new(0, 0, client.viewport().cols, client.viewport().rows),
         );
         self.shown = Some(current);
+        None
     }
 
-    /// Return the short wakeup used while a native image upload has work.
+    /// Return the next wakeup while native image output has work or needs a retry.
+    #[cfg(test)]
     fn next_image_wakeup(&self) -> Option<Duration> {
-        (terminal::kitty_image_work_pending(&self.images) || self.outputs.work_pending())
-            .then_some(IMAGE_OUTPUT_STEP_DELAY)
+        self.next_image_wakeup_at(Instant::now())
     }
 
-    /// Advance one bounded native image slice without delaying the next input pass.
-    fn advance_images(&mut self) {
-        let mut output = io::stdout();
-        if terminal::kitty_image_work_pending(&self.images) {
-            if let Err(error) = terminal::advance_kitty_image(&mut output, &mut self.images) {
-                tracing::warn!(%error, "could not continue terminal image output");
-            }
-        }
+    fn next_image_wakeup_at(&self, now: Instant) -> Option<Duration> {
         if self.outputs.work_pending() {
-            if let Err(error) = self.outputs.advance(&mut output, self.current_cursor) {
-                tracing::warn!(%error, "could not continue terminal image output");
-            }
+            return Some(IMAGE_OUTPUT_STEP_DELAY);
         }
+        let native_frame_pending = self.pending_snapshot.is_some() && self.outputs.kind().is_some();
+        let retry_delay = self
+            .native_retry_at
+            .map_or(self.native_retry_delay, |retry_at| {
+                retry_at.saturating_duration_since(now)
+            });
+        native_frame_pending.then_some(retry_delay)
     }
 
-    /// Update the pixel dimensions used to scale Sixel output.
+    /// Update the pixel dimensions used to scale native image output.
     fn set_cell_size(&mut self, cell_size: Option<PixelCellSize>) {
         if self.cell_size == cell_size {
             return;
         }
         self.cell_size = cell_size;
-        if self
-            .outputs
-            .kind()
-            .is_some_and(terminal::ImageOutputKind::is_sixel)
-        {
+        if self.outputs.kind().is_some_and(|kind| {
+            matches!(kind, terminal::ImageOutputKind::Iterm)
+                || terminal::ImageOutputKind::is_sixel(kind)
+        }) {
             self.outputs.reset_connection();
+            self.native_retry_delay = IMAGE_OUTPUT_STEP_DELAY;
+            self.native_retry_at = None;
+            if self.pending_snapshot.is_none() {
+                self.pending_snapshot.clone_from(&self.last_snapshot);
+            }
         }
     }
 
-    /// Reset native output state after the connection changes.
+    /// Reset native output state after the session image cache or connection changes.
     fn reset_connection(&mut self) {
         self.outputs.reset_connection();
+        self.native_retry_delay = IMAGE_OUTPUT_STEP_DELAY;
+        self.native_retry_at = None;
     }
 
     /// Select the compiled-in region solve for a painted frame's viewport.
@@ -529,12 +577,11 @@ fn paint_with_graphics<B: Backend>(
     committed_regions: &CommittedRegions,
     frame_paint: &ViewerPaint,
     graphics: terminal::GraphicsSupport,
-    images: &mut terminal::KittyImageCache,
     outputs: &mut terminal::ImageOutputState,
     cell_size: Option<PixelCellSize>,
     last_title: &mut String,
     last_cursor: &mut Option<CursorStyle>,
-) -> Result<(), terminal::PaintError<B::Error>> {
+) -> Result<bool, terminal::PaintError<B::Error>> {
     terminal::paint_frame_with_images(
         terminal,
         client,
@@ -542,7 +589,6 @@ fn paint_with_graphics<B: Backend>(
         committed_regions,
         frame_paint,
         graphics.image_mode(),
-        images,
         outputs,
         cell_size,
         last_title,
@@ -561,16 +607,11 @@ fn warn_paint_error<E: std::fmt::Debug>(error: terminal::PaintError<E>) {
     }
 }
 
-/// Report a paint error and return whether Ratatui committed the text frame.
-/// Image-output errors return `true`; Ratatui backend errors return `false`.
-fn text_frame_was_painted<E: std::fmt::Debug>(result: Result<(), terminal::PaintError<E>>) -> bool {
+/// Report a paint error and return whether the complete frame was committed.
+fn frame_was_committed<E: std::fmt::Debug>(result: Result<bool, terminal::PaintError<E>>) -> bool {
     match result {
-        Ok(()) => true,
-        Err(error @ terminal::PaintError::Image(_)) => {
-            warn_paint_error(error);
-            true
-        }
-        Err(error @ terminal::PaintError::Backend(_)) => {
+        Ok(committed) => committed,
+        Err(error) => {
             warn_paint_error(error);
             false
         }
@@ -975,8 +1016,10 @@ fn attach_home(home: &Home, target: SessionSelector) -> Result<(), CliError> {
 /// and the terminal keeps every mode it is in, so nothing on the screen
 /// flickers.
 fn attach_once(home: &Home, target: &SessionSelector) -> Result<Option<SessionId>, CliError> {
-    let mut terminal_owner =
-        terminal::TerminalOwner::start().map_err(|detail| CliError::Runtime { detail })?;
+    let (loaded, config_warnings) = koshi_link::config::load();
+    let image_support = koshi_link::config::image_support(loaded.app.clone());
+    let mut terminal_owner = terminal::TerminalOwner::start(image_support)
+        .map_err(|detail| CliError::Runtime { detail })?;
     let graphics = terminal_owner.graphics();
     let mut cell_size_query = terminal_owner.cell_size_query();
     let Joined {
@@ -1040,9 +1083,6 @@ fn attach_once(home: &Home, target: &SessionSelector) -> Result<Option<SessionId
     // rather than over a session subscription, so the receiver it holds has no
     // sender. It also holds the cleanup guard, since the outer terminal that
     // guard restores is this viewer's.
-    // `load` collects its warnings instead of logging them, so they are
-    // replayed here.
-    let (loaded, config_warnings) = koshi_link::config::load();
     // The subscriber this client writes its own log through. `koshi attach`
     // installs none before this point; a bare `koshi` already has one, and
     // this call answers `AlreadyInitialized` for it.
@@ -1158,7 +1198,7 @@ fn run_attachment<B: Backend>(
         let now = Instant::now();
         let wakeup = earliest(
             earliest(client.next_key_wakeup(now), client.next_mouse_wakeup(now)),
-            screen.next_image_wakeup(),
+            screen.next_image_wakeup_at(now),
         );
         let received = match deferred_incoming.take() {
             Some(received) => Some(received),
@@ -1195,7 +1235,7 @@ fn run_attachment<B: Backend>(
                     match frame {
                         Ok(SessionEvent::Painted { frame }) => {
                             match image_cache.begin_frame(frame) {
-                                Ok(snapshot) => {
+                                Ok(Some(snapshot)) => {
                                     screen.set_cell_size(cell_size_query.current());
                                     if let Some(mouse_frame) =
                                         screen.draw_snapshot(client, snapshot)
@@ -1203,6 +1243,7 @@ fn run_attachment<B: Backend>(
                                         last_frame = Some(mouse_frame);
                                     }
                                 }
+                                Ok(None) => {}
                                 Err(error) => {
                                     tracing::warn!(%error, "could not accept a painted frame");
                                     ended = Some(Ending::Died);
@@ -1210,7 +1251,10 @@ fn run_attachment<B: Backend>(
                                 }
                             }
                         }
-                        Ok(SessionEvent::ImageCacheReset) => image_cache.reset(),
+                        Ok(SessionEvent::ImageCacheReset) => {
+                            image_cache.reset();
+                            screen.reset_connection();
+                        }
                         Ok(SessionEvent::ImageContentStart { image }) => {
                             if let Err(error) = image_cache.start(image) {
                                 tracing::warn!(%error, "could not start an image transfer");
@@ -1390,11 +1434,13 @@ fn run_attachment<B: Backend>(
         // Every pass ends here, whether or not it drew a frame: the events it
         // handled may have moved the viewer after that frame was drawn.
         screen.set_cell_size(cell_size_query.current());
-        screen.refresh(
+        if let Some(mouse_frame) = screen.refresh_at(
             client,
             last_frame.as_ref().map(|frame| frame.client.active_tab),
-        );
-        screen.advance_images();
+            Instant::now(),
+        ) {
+            last_frame = Some(mouse_frame);
+        }
         flush_round(uplink, &mut sent, &mut pending);
     }
 }

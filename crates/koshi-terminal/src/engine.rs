@@ -18,10 +18,13 @@
 
 use std::borrow::Cow;
 use std::collections::VecDeque;
+use std::mem;
 use std::ops::Range;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime};
 
 use koshi_core::process::PtySize;
+use serde::de::{self, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 
 pub use crate::graphics::GraphicsTransportState;
 use crate::graphics::{GraphicsError, GraphicsParser, ImageRecord, MAX_IMAGE_BYTES};
@@ -68,14 +71,306 @@ pub const MAX_GRAPHICS_EVENT_BATCH: usize = MAX_GRAPHICS_EVENTS + 1;
 /// One ordered image event produced by the terminal decoder.
 pub type GraphicsEvent = Result<ImageRecord, GraphicsError>;
 
-#[derive(Clone, Copy)]
+/// The maximum time an open synchronized-output update remains buffered.
+pub const SYNCHRONIZED_OUTPUT_TIMEOUT: Duration = Duration::from_millis(150);
+
+/// The most normalized terminal bytes held by one synchronized-output update.
+pub const MAX_SYNCHRONIZED_OUTPUT_BYTES: usize = 0x20_0000;
+
+const BEGIN_SYNCHRONIZED_OUTPUT: &[u8; 8] = b"\x1b[?2026h";
+const END_SYNCHRONIZED_OUTPUT: &[u8; 8] = b"\x1b[?2026l";
+
+/// Synchronized-output bytes and deadline carried across a process-image swap.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SynchronizedOutputTransport {
+    terminal_input: C1InputNormalizer,
+    bytes: Vec<u8>,
+    deadline: Option<SystemTime>,
+}
+
+impl SynchronizedOutputTransport {
+    /// The normalized bytes held inside the open synchronized update.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// The wall-clock deadline for releasing the open update.
+    pub fn deadline(&self) -> Option<SystemTime> {
+        self.deadline
+    }
+}
+
+impl<'de> Deserialize<'de> for SynchronizedOutputTransport {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Encoded {
+            terminal_input: C1InputNormalizer,
+            #[serde(deserialize_with = "deserialize_synchronized_output_bytes")]
+            bytes: Vec<u8>,
+            deadline: Option<SystemTime>,
+        }
+
+        let encoded = Encoded::deserialize(deserializer)?;
+        let terminal_input = encoded.terminal_input;
+        if terminal_input.utf8_continuations > 3 {
+            return Err(de::Error::custom(
+                "terminal-input UTF-8 continuation count is invalid",
+            ));
+        }
+        if terminal_input.tail_len > terminal_input.tail.len()
+            || terminal_input.tail_next >= terminal_input.tail.len()
+            || (terminal_input.tail_len < terminal_input.tail.len()
+                && terminal_input.tail_next != terminal_input.tail_len)
+        {
+            return Err(de::Error::custom("terminal-input scanner tail is invalid"));
+        }
+        if encoded.deadline.is_some() && encoded.bytes.is_empty() {
+            return Err(de::Error::custom(
+                "synchronized-output deadline has no bytes",
+            ));
+        }
+        if encoded.deadline.is_none() && !encoded.bytes.is_empty() {
+            return Err(de::Error::custom(
+                "synchronized-output bytes have no deadline",
+            ));
+        }
+        Ok(Self {
+            terminal_input,
+            bytes: encoded.bytes,
+            deadline: encoded.deadline,
+        })
+    }
+}
+
+fn deserialize_synchronized_output_bytes<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct BytesVisitor;
+
+    impl<'de> Visitor<'de> for BytesVisitor {
+        type Value = Vec<u8>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("at most 2097152 synchronized-output bytes")
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let capacity = sequence
+                .size_hint()
+                .unwrap_or(0)
+                .min(MAX_SYNCHRONIZED_OUTPUT_BYTES);
+            let mut bytes = Vec::with_capacity(capacity);
+            while let Some(byte) = sequence.next_element::<u8>()? {
+                if bytes.len() == MAX_SYNCHRONIZED_OUTPUT_BYTES {
+                    return Err(de::Error::custom(
+                        "synchronized-output bytes exceed 2097152",
+                    ));
+                }
+                bytes.push(byte);
+            }
+            Ok(bytes)
+        }
+    }
+
+    deserializer.deserialize_seq(BytesVisitor)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SynchronizedControl {
+    Begin,
+    End,
+}
+
+#[derive(Default)]
+struct SynchronizedOutput {
+    bytes: Vec<u8>,
+    deadline: Option<Instant>,
+}
+
+impl SynchronizedOutput {
+    fn advance<F>(
+        &mut self,
+        bytes: &[u8],
+        controls: &[(usize, SynchronizedControl)],
+        now: Instant,
+        mut release: F,
+    ) -> bool
+    where
+        F: FnMut(&[u8]),
+    {
+        let mut released = if self.deadline.is_some_and(|deadline| now >= deadline) {
+            self.release_all(&mut release)
+        } else {
+            false
+        };
+        let mut at = 0;
+        let mut control_at = 0;
+        while at < bytes.len() {
+            if self.deadline.is_none() {
+                let Some((index, end)) = controls[control_at..].iter().enumerate().find_map(
+                    |(index, (end, control))| {
+                        (*control == SynchronizedControl::Begin && *end > at)
+                            .then_some((control_at + index, *end))
+                    },
+                ) else {
+                    release(&bytes[at..]);
+                    return released || at < bytes.len();
+                };
+                let held = BEGIN_SYNCHRONIZED_OUTPUT.len().min(end - at);
+                let direct_end = end - held;
+                release(&bytes[at..direct_end]);
+                released |= at < direct_end;
+                if self.bytes.try_reserve(held).is_err() {
+                    release(&bytes[direct_end..end]);
+                    released = true;
+                } else {
+                    self.bytes.extend_from_slice(&bytes[direct_end..end]);
+                    self.deadline = Some(now + SYNCHRONIZED_OUTPUT_TIMEOUT);
+                }
+                at = end;
+                control_at = index + 1;
+                continue;
+            }
+
+            let available = MAX_SYNCHRONIZED_OUTPUT_BYTES - self.bytes.len();
+            let read = available.min(bytes.len() - at);
+            if self.bytes.try_reserve(read).is_err() {
+                released |= self.release_all(&mut release);
+                continue;
+            }
+            let buffered_before = self.bytes.len();
+            let end = at + read;
+            self.bytes.extend_from_slice(&bytes[at..end]);
+            let mut last_begin = None;
+            let mut last_end = None;
+            while let Some((control_end, control)) = controls.get(control_at).copied() {
+                if control_end > end {
+                    break;
+                }
+                if control_end > at {
+                    let start = (buffered_before + control_end - at)
+                        .checked_sub(BEGIN_SYNCHRONIZED_OUTPUT.len())
+                        .expect("a synchronized control starts in held bytes");
+                    match control {
+                        SynchronizedControl::Begin => last_begin = Some(start),
+                        SynchronizedControl::End => last_end = Some(start),
+                    }
+                }
+                control_at += 1;
+            }
+            self.apply_buffered_controls(last_begin, last_end, now, &mut release, &mut released);
+            at = end;
+
+            if self.deadline.is_some() && self.bytes.len() == MAX_SYNCHRONIZED_OUTPUT_BYTES {
+                released |= self.release_all(&mut release);
+            }
+        }
+        released
+    }
+
+    fn apply_buffered_controls<F>(
+        &mut self,
+        last_begin: Option<usize>,
+        last_end: Option<usize>,
+        now: Instant,
+        release: &mut F,
+        released: &mut bool,
+    ) where
+        F: FnMut(&[u8]),
+    {
+        let Some(end) = last_end else {
+            if last_begin.is_some() {
+                self.deadline = Some(now + SYNCHRONIZED_OUTPUT_TIMEOUT);
+            }
+            return;
+        };
+        if let Some(begin) = last_begin.filter(|begin| *begin > end) {
+            let retained = self.bytes.split_off(begin);
+            let complete = mem::replace(&mut self.bytes, retained);
+            release(&complete);
+            *released = true;
+            self.deadline = Some(now + SYNCHRONIZED_OUTPUT_TIMEOUT);
+        } else {
+            *released |= self.release_all(release);
+        }
+    }
+
+    fn release_all<F>(&mut self, release: &mut F) -> bool
+    where
+        F: FnMut(&[u8]),
+    {
+        self.deadline = None;
+        if self.bytes.is_empty() {
+            return false;
+        }
+        let complete = mem::take(&mut self.bytes);
+        release(&complete);
+        true
+    }
+
+    fn expire<F>(&mut self, now: Instant, mut release: F) -> bool
+    where
+        F: FnMut(&[u8]),
+    {
+        if self.deadline.is_none_or(|deadline| now < deadline) {
+            return false;
+        }
+        self.release_all(&mut release)
+    }
+
+    fn delay(&self, now: Instant) -> Option<Duration> {
+        self.deadline
+            .map(|deadline| deadline.saturating_duration_since(now))
+    }
+
+    fn transport(
+        &self,
+        now: Instant,
+        wall_now: SystemTime,
+        terminal_input: C1InputNormalizer,
+    ) -> Option<SynchronizedOutputTransport> {
+        if self.deadline.is_none() && !terminal_input.requires_transport() {
+            return None;
+        }
+        Some(SynchronizedOutputTransport {
+            terminal_input,
+            bytes: self.bytes.clone(),
+            deadline: self.delay(now).map(|delay| wall_now + delay),
+        })
+    }
+
+    fn restore(
+        &mut self,
+        transport: SynchronizedOutputTransport,
+        now: Instant,
+        wall_now: SystemTime,
+    ) {
+        self.bytes = transport.bytes;
+        self.deadline = transport.deadline.map(|deadline| {
+            let remaining = deadline
+                .duration_since(wall_now)
+                .unwrap_or(Duration::ZERO)
+                .min(SYNCHRONIZED_OUTPUT_TIMEOUT);
+            now + remaining
+        });
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum C1StringKind {
     Dcs,
     Osc,
     Dropped,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 enum C1InputState {
     #[default]
     Ground,
@@ -86,31 +381,23 @@ enum C1InputState {
     StringEscape(C1StringKind),
 }
 
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct C1InputNormalizer {
     state: C1InputState,
     utf8_continuations: u8,
+    tail: [u8; 8],
+    tail_len: usize,
+    tail_next: usize,
 }
 
 struct NormalizedInput<'a> {
     bytes: Cow<'a, [u8]>,
-    raw_to_normalized: Option<Vec<usize>>,
-}
-
-struct NormalizedBuffer {
-    bytes: Vec<u8>,
-    raw_to_normalized: Vec<usize>,
+    controls: Vec<(usize, SynchronizedControl)>,
 }
 
 impl<'a> NormalizedInput<'a> {
     fn bytes(&self) -> &[u8] {
         &self.bytes
-    }
-
-    fn end_offset(&self, raw_end: usize) -> usize {
-        self.raw_to_normalized
-            .as_ref()
-            .map_or(raw_end, |offsets| offsets[raw_end])
     }
 }
 
@@ -141,59 +428,57 @@ fn without_terminal_inert_offset(raw_end: usize, ranges: &[Range<usize>]) -> usi
 }
 
 impl C1InputNormalizer {
+    fn requires_transport(&self) -> bool {
+        self.state != C1InputState::Ground || self.utf8_continuations != 0
+    }
+
     fn normalize<'a>(&mut self, bytes: &'a [u8]) -> NormalizedInput<'a> {
-        let mut normalized: Option<NormalizedBuffer> = None;
+        let mut normalized: Option<Vec<u8>> = None;
+        let mut controls = Vec::new();
         let mut index = 0;
 
         while index < bytes.len() {
             let plain = self.plain_run(&bytes[index..]);
             if plain != 0 {
+                self.push_tail(&bytes[index..index + plain]);
                 if let Some(buffer) = normalized.as_mut() {
-                    let output_start = buffer.bytes.len();
-                    buffer.bytes.extend_from_slice(&bytes[index..index + plain]);
-                    buffer
-                        .raw_to_normalized
-                        .extend(output_start + 1..=output_start + plain);
+                    buffer.extend_from_slice(&bytes[index..index + plain]);
                 }
                 index += plain;
                 continue;
             }
 
             let byte = bytes[index];
-            let replacement = self.replacement(byte);
+            let (replacement, control) = self.replacement(byte);
             if let Some(buffer) = normalized.as_mut() {
                 if let Some(replacement) = replacement {
-                    buffer.bytes.extend_from_slice(replacement);
+                    buffer.extend_from_slice(replacement);
                 } else {
-                    buffer.bytes.push(byte);
+                    buffer.push(byte);
                 }
-                buffer.raw_to_normalized.push(buffer.bytes.len());
             } else if let Some(replacement) = replacement {
-                let capacity = bytes.len().saturating_add(1);
-                let mut buffer = NormalizedBuffer {
-                    bytes: Vec::with_capacity(capacity),
-                    raw_to_normalized: Vec::with_capacity(capacity),
-                };
-                buffer.bytes.extend_from_slice(&bytes[..index]);
-                buffer.raw_to_normalized.extend(0..=index);
-                buffer.bytes.extend_from_slice(replacement);
-                buffer.raw_to_normalized.push(buffer.bytes.len());
+                let mut buffer = Vec::with_capacity(bytes.len().saturating_add(1));
+                buffer.extend_from_slice(&bytes[..index]);
+                buffer.extend_from_slice(replacement);
                 normalized = Some(buffer);
+            }
+            let output = replacement.unwrap_or(std::slice::from_ref(&byte));
+            self.push_tail(output);
+            if let Some(control) = control.filter(|control| self.tail_matches(*control)) {
+                let end = normalized.as_ref().map_or(index + 1, |buffer| buffer.len());
+                controls.push((end, control));
             }
             index += 1;
         }
 
         match normalized {
-            Some(NormalizedBuffer {
-                bytes,
-                raw_to_normalized,
-            }) => NormalizedInput {
+            Some(bytes) => NormalizedInput {
                 bytes: Cow::Owned(bytes),
-                raw_to_normalized: Some(raw_to_normalized),
+                controls,
             },
             None => NormalizedInput {
                 bytes: Cow::Borrowed(bytes),
-                raw_to_normalized: None,
+                controls,
             },
         }
     }
@@ -221,12 +506,12 @@ impl C1InputNormalizer {
             .unwrap_or(bytes.len())
     }
 
-    fn replacement(&mut self, byte: u8) -> Option<&'static [u8]> {
+    fn replacement(&mut self, byte: u8) -> (Option<&'static [u8]>, Option<SynchronizedControl>) {
         if matches!(self.state, C1InputState::Ground | C1InputState::String(_)) {
             if self.utf8_continuations != 0 {
                 if (byte & 0xc0) == 0x80 {
                     self.utf8_continuations -= 1;
-                    return None;
+                    return (None, None);
                 }
                 self.utf8_continuations = 0;
             }
@@ -237,7 +522,7 @@ impl C1InputNormalizer {
                 _ => 0,
             };
             if self.utf8_continuations != 0 {
-                return None;
+                return (None, None);
             }
         } else {
             self.utf8_continuations = 0;
@@ -246,32 +531,38 @@ impl C1InputNormalizer {
         match byte {
             0x90 if matches!(self.state, C1InputState::Ground) => {
                 self.state = C1InputState::String(C1StringKind::Dcs);
-                Some(b"\x1bP")
+                (Some(b"\x1bP"), None)
             }
             0x98 | 0x9e if matches!(self.state, C1InputState::Ground) => {
                 self.state = C1InputState::String(C1StringKind::Dropped);
-                Some(if byte == 0x98 { b"\x1bX" } else { b"\x1b^" })
+                (Some(if byte == 0x98 { b"\x1bX" } else { b"\x1b^" }), None)
             }
             0x9d if matches!(self.state, C1InputState::Ground) => {
                 self.state = C1InputState::String(C1StringKind::Osc);
-                Some(b"\x1b]")
+                (Some(b"\x1b]"), None)
+            }
+            0x9b if matches!(self.state, C1InputState::Ground) => {
+                self.state = C1InputState::Csi;
+                (Some(b"\x1b["), None)
             }
             0x9f if matches!(self.state, C1InputState::Ground) => {
                 self.state = C1InputState::String(C1StringKind::Dropped);
-                Some(b"\x1b_")
+                (Some(b"\x1b_"), None)
             }
-            0x9c if matches!(self.state, C1InputState::String(_)) => {
+            0x9c if matches!(
+                self.state,
+                C1InputState::String(_) | C1InputState::StringEscape(_)
+            ) =>
+            {
                 self.state = C1InputState::Ground;
-                Some(b"\x1b\\")
+                (Some(b"\x1b\\"), None)
             }
-            _ => {
-                self.advance_state(byte);
-                None
-            }
+            _ => (None, self.advance_state(byte)),
         }
     }
 
-    fn advance_state(&mut self, byte: u8) {
+    fn advance_state(&mut self, byte: u8) -> Option<SynchronizedControl> {
+        let mut control = None;
         self.state = match self.state {
             C1InputState::Ground => match byte {
                 ESCAPE => C1InputState::Escape,
@@ -288,7 +579,14 @@ impl C1InputNormalizer {
             C1InputState::Csi => match byte {
                 CANCEL | SUBSTITUTE => C1InputState::Ground,
                 ESCAPE => C1InputState::Escape,
-                0x40..=0x7e => C1InputState::Ground,
+                0x40..=0x7e => {
+                    control = match byte {
+                        b'h' => Some(SynchronizedControl::Begin),
+                        b'l' => Some(SynchronizedControl::End),
+                        _ => None,
+                    };
+                    C1InputState::Ground
+                }
                 _ => C1InputState::Csi,
             },
             C1InputState::String(kind) => match byte {
@@ -300,15 +598,11 @@ impl C1InputNormalizer {
             C1InputState::StringEscape(kind) => match byte {
                 CANCEL | SUBSTITUTE => C1InputState::Ground,
                 ESCAPE => C1InputState::StringEscape(kind),
-                0x20..=0x2f => C1InputState::EscapeIntermediate,
-                0x50 => C1InputState::String(C1StringKind::Dcs),
-                0x58 | 0x5e | 0x5f => C1InputState::String(C1StringKind::Dropped),
-                0x5b => C1InputState::Csi,
-                0x5d => C1InputState::String(C1StringKind::Osc),
-                0x30..=0x7e => C1InputState::Ground,
-                _ => C1InputState::StringEscape(kind),
+                b'\\' => C1InputState::Ground,
+                _ => C1InputState::String(kind),
             },
         };
+        control
     }
 
     fn advance_escape(byte: u8) -> C1InputState {
@@ -323,6 +617,35 @@ impl C1InputNormalizer {
             0x30..=0x7e => C1InputState::Ground,
             _ => C1InputState::Escape,
         }
+    }
+
+    fn push_tail(&mut self, bytes: &[u8]) {
+        let tail_len = self.tail.len();
+        if bytes.len() >= tail_len {
+            self.tail.copy_from_slice(&bytes[bytes.len() - tail_len..]);
+            self.tail_len = tail_len;
+            self.tail_next = 0;
+            return;
+        }
+        for byte in bytes {
+            self.tail[self.tail_next] = *byte;
+            self.tail_next = (self.tail_next + 1) % tail_len;
+            self.tail_len = (self.tail_len + 1).min(tail_len);
+        }
+    }
+
+    fn tail_matches(&self, control: SynchronizedControl) -> bool {
+        if self.tail_len != self.tail.len() {
+            return false;
+        }
+        let expected = match control {
+            SynchronizedControl::Begin => BEGIN_SYNCHRONIZED_OUTPUT,
+            SynchronizedControl::End => END_SYNCHRONIZED_OUTPUT,
+        };
+        expected
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| self.tail[(self.tail_next + index) % self.tail.len()] == *byte)
     }
 }
 
@@ -366,6 +689,8 @@ pub struct TerminalEngine {
     graphics_events: VecDeque<GraphicsEvent>,
     /// Converts 8-bit string controls to the 7-bit forms supported by `vte`.
     terminal_input: C1InputNormalizer,
+    /// Holds complete top-level DEC synchronized-output groups before either parser sees them.
+    synchronized_output: SynchronizedOutput,
     /// RGBA bytes held by successful image events.
     graphics_event_bytes: usize,
     /// Number of events dropped after the bounded graphics queue filled.
@@ -405,6 +730,7 @@ impl TerminalEngine {
             graphics_parser: GraphicsParser::default(),
             graphics_events: VecDeque::new(),
             terminal_input: C1InputNormalizer::default(),
+            synchronized_output: SynchronizedOutput::default(),
             graphics_event_bytes: 0,
             graphics_events_dropped: 0,
             graphics_screen_continuation: false,
@@ -444,14 +770,38 @@ impl TerminalEngine {
         &mut self,
         bytes: &[u8],
     ) -> (Vec<u8>, Vec<ShellIntegrationFact>) {
+        let (replies, facts, _) = self.advance_with_shell_integration_at(bytes, Instant::now());
+        (replies, facts)
+    }
+
+    /// Feed one chunk at `now` and report whether bytes reached the terminal parsers.
+    #[must_use = "undelivered replies or shell facts are lost"]
+    pub fn advance_with_shell_integration_at(
+        &mut self,
+        bytes: &[u8],
+        now: Instant,
+    ) -> (Vec<u8>, Vec<ShellIntegrationFact>, bool) {
+        let normalized = self.terminal_input.normalize(bytes);
+        let mut synchronized_output = mem::take(&mut self.synchronized_output);
+        let advanced =
+            synchronized_output.advance(normalized.bytes(), &normalized.controls, now, |bytes| {
+                self.advance_normalized(bytes)
+            });
+        self.synchronized_output = synchronized_output;
+        (
+            self.state.take_replies(),
+            self.state.take_shell_integration_facts(),
+            advanced,
+        )
+    }
+
+    fn advance_normalized(&mut self, bytes: &[u8]) {
         let graphics = self.graphics_parser.advance_with_offsets(bytes);
         let terminal_input = without_terminal_inert(bytes, &graphics.terminal_inert);
-        let normalized = self.terminal_input.normalize(&terminal_input);
-        let terminal_bytes = normalized.bytes();
+        let terminal_bytes = terminal_input.as_ref();
         let mut parser_at = 0;
         for (offset, result) in graphics.events {
-            let raw_end = without_terminal_inert_offset(offset + 1, &graphics.terminal_inert);
-            let end = normalized.end_offset(raw_end);
+            let end = without_terminal_inert_offset(offset + 1, &graphics.terminal_inert);
             if end > parser_at {
                 self.parser
                     .advance(&mut self.state, &terminal_bytes[parser_at..end]);
@@ -466,10 +816,6 @@ impl TerminalEngine {
         }
         self.hold_undecoded(terminal_bytes);
         self.sync_graphics_undecoded();
-        (
-            self.state.take_replies(),
-            self.state.take_shell_integration_facts(),
-        )
     }
 
     /// An engine wrapped around an existing `state`, with a parser fed
@@ -550,13 +896,48 @@ impl TerminalEngine {
         graphics_events: &[GraphicsEvent],
         graphics_transport: GraphicsTransportState,
     ) -> Self {
+        Self::from_state_with_graphics_events_wrappers_and_synchronized_output(
+            state,
+            undecoded,
+            graphics_undecoded,
+            graphics_events,
+            graphics_transport,
+            None,
+            Instant::now(),
+            SystemTime::now(),
+        )
+    }
+
+    /// Restore parser, graphics, and synchronized-output transport state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_state_with_graphics_events_wrappers_and_synchronized_output(
+        state: TerminalState,
+        undecoded: &[u8],
+        graphics_undecoded: &[u8],
+        graphics_events: &[GraphicsEvent],
+        graphics_transport: GraphicsTransportState,
+        synchronized_output: Option<SynchronizedOutputTransport>,
+        now: Instant,
+        wall_now: SystemTime,
+    ) -> Self {
         let mut engine = Self::with_idle_parsers(state);
         engine
             .graphics_parser
             .restore_carry(graphics_undecoded, graphics_transport);
-        let normalized = engine.terminal_input.normalize(undecoded);
-        engine.parser.advance(&mut NoScreen, normalized.bytes());
-        engine.hold_undecoded(normalized.bytes());
+        let normalized = if synchronized_output.is_some() {
+            C1InputNormalizer::default()
+                .normalize(undecoded)
+                .bytes
+                .into_owned()
+        } else {
+            engine
+                .terminal_input
+                .normalize(undecoded)
+                .bytes
+                .into_owned()
+        };
+        engine.parser.advance(&mut NoScreen, &normalized);
+        engine.hold_undecoded(&normalized);
         engine.sync_graphics_undecoded();
         for event in graphics_events {
             if let Err(GraphicsError::QueueFull { dropped }) = event {
@@ -565,6 +946,10 @@ impl TerminalEngine {
             } else {
                 engine.queue_graphics_event(event.clone());
             }
+        }
+        if let Some(transport) = synchronized_output {
+            engine.terminal_input = transport.terminal_input;
+            engine.synchronized_output.restore(transport, now, wall_now);
         }
         engine
     }
@@ -602,6 +987,9 @@ impl TerminalEngine {
     /// A stream ending after `ESC _ Gf=32,s=1,v=1;` returns one typed
     /// `Truncated` error and leaves the terminal cells unchanged.
     pub fn finish(&mut self) -> Vec<GraphicsEvent> {
+        let mut synchronized_output = mem::take(&mut self.synchronized_output);
+        synchronized_output.release_all(&mut |bytes| self.advance_normalized(bytes));
+        self.synchronized_output = synchronized_output;
         let anchor = self.state.active_cursor_position();
         for result in self.graphics_parser.finish() {
             self.queue_graphics(result, anchor);
@@ -611,6 +999,7 @@ impl TerminalEngine {
         self.graphics_screen_wrapper_active = false;
         self.graphics_tmux_continuation = false;
         self.graphics_tmux_wrapper_active = false;
+        self.terminal_input = C1InputNormalizer::default();
         self.take_graphics()
     }
 
@@ -667,6 +1056,46 @@ impl TerminalEngine {
     /// `graphics_undecoded` contains the raw bytes without wrapper state.
     pub fn graphics_transport_state(&self) -> Option<GraphicsTransportState> {
         self.graphics_parser.transport_state()
+    }
+
+    /// Return the synchronized-output bytes and remaining deadline at `now`.
+    pub fn synchronized_output_transport(
+        &self,
+        now: Instant,
+    ) -> Option<SynchronizedOutputTransport> {
+        self.synchronized_output_transport_at(now, SystemTime::now())
+    }
+
+    fn synchronized_output_transport_at(
+        &self,
+        now: Instant,
+        wall_now: SystemTime,
+    ) -> Option<SynchronizedOutputTransport> {
+        self.synchronized_output
+            .transport(now, wall_now, self.terminal_input)
+    }
+
+    /// Return the time until an open synchronized-output group must be released.
+    #[must_use]
+    pub fn next_synchronized_output_delay(&self, now: Instant) -> Option<Duration> {
+        self.synchronized_output.delay(now)
+    }
+
+    /// Release an expired synchronized-output group through both terminal parsers.
+    #[must_use = "undelivered replies or shell facts are lost"]
+    pub fn expire_synchronized_output(
+        &mut self,
+        now: Instant,
+    ) -> Option<(Vec<u8>, Vec<ShellIntegrationFact>)> {
+        let mut synchronized_output = mem::take(&mut self.synchronized_output);
+        let advanced = synchronized_output.expire(now, |bytes| self.advance_normalized(bytes));
+        self.synchronized_output = synchronized_output;
+        advanced.then(|| {
+            (
+                self.state.take_replies(),
+                self.state.take_shell_integration_facts(),
+            )
+        })
     }
 
     /// Whether the next DCS belongs to an unfinished GNU Screen wrapper.
@@ -743,7 +1172,7 @@ impl TerminalEngine {
                 }
                 let record = ImageRecord {
                     protocol: decoded.protocol,
-                    image: (decoded.image).into(),
+                    image: self.state.shared_image_pixels(decoded.image.into()),
                     animation: decoded.animation.map(std::sync::Arc::new),
                     action: decoded.action,
                     display: decoded.display,

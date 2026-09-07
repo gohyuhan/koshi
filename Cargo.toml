@@ -62,5 +62,7 @@ uuid = { version = "1.24.0", features = ["v7", "serde"] }
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_Security",
+  "Win32_System_Memory",
+  "Win32_System_SystemInformation",
   "Win32_System_Threading",
 ] }

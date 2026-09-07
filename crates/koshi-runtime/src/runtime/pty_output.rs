@@ -3,7 +3,7 @@
 //! A [`RuntimeEvent::PtyOutput`](crate::runtime::event::RuntimeEvent::PtyOutput)
 //! carries the raw bytes one pane's child wrote, already keyed by pane id.
 //! [`Server::handle_pty_output`] routes them into that pane's
-//! [`TerminalEngine`](koshi_terminal::engine::TerminalEngine) — updating its
+//! [`TerminalEngine`] — updating its
 //! grid, cursor, and modes — writes the engine's device-query replies
 //! (answers to DA/DSR/DECRQM: escape sequences the child sends to ask "what
 //! terminal are you" / "what's your status" / "is this mode on") back into
@@ -12,11 +12,32 @@
 //! a pane with no engine (one closed while the event sat in the inbox) are
 //! dropped without touching any state.
 
+use std::time::Instant;
+
 use koshi_core::event::{Event, PaneCommandFinished, PaneCommandStarted};
 use koshi_core::ids::PaneId;
+use koshi_terminal::engine::TerminalEngine;
 use koshi_terminal::state::ShellIntegrationFact;
 
 use crate::server::Server;
+
+#[derive(Clone, Copy)]
+struct TerminalAdvanceBefore {
+    pushed: u64,
+    scrollback_len: usize,
+    screen: koshi_terminal::state::Screen,
+}
+
+impl TerminalAdvanceBefore {
+    fn capture(engine: &TerminalEngine) -> Self {
+        let scrollback = engine.state().scrollback();
+        Self {
+            pushed: scrollback.total_pushed(),
+            scrollback_len: scrollback.len(),
+            screen: engine.state().active_screen(),
+        }
+    }
+}
 
 impl Server {
     /// Feed one chunk of child output into `pane_id`'s terminal engine, write
@@ -53,18 +74,44 @@ impl Server {
         if let Some(size) = cell_size {
             engine.set_cell_size(size);
         }
-        // The lines this chunk pushed into scrollback are the rise in the
-        // buffer's push counter. That counter only grows: `clear` (`CSI 3 J`)
-        // and eviction past the cap leave it as it is. The rise stays exact for
-        // a chunk that erases or truncates history.
-        let scrollback_before = engine.state().scrollback();
-        let pushed_before = scrollback_before.total_pushed();
-        let len_before = scrollback_before.len();
-        let screen_before = engine.state().active_screen();
-        let (replies, shell_facts) = engine.advance_with_shell_integration(bytes);
+        let before = TerminalAdvanceBefore::capture(engine);
+        let (replies, shell_facts, advanced) =
+            engine.advance_with_shell_integration_at(bytes, Instant::now());
+        if !advanced && !bytes.is_empty() {
+            return;
+        }
+        self.finish_terminal_advance(pane_id, before, replies, shell_facts);
+    }
+
+    pub(in crate::runtime) fn expire_synchronized_output(
+        &mut self,
+        pane_id: PaneId,
+        now: Instant,
+    ) -> bool {
+        let Some(engine) = self.terminal_engines.get_mut(&pane_id) else {
+            return false;
+        };
+        let before = TerminalAdvanceBefore::capture(engine);
+        let Some((replies, shell_facts)) = engine.expire_synchronized_output(now) else {
+            return false;
+        };
+        self.finish_terminal_advance(pane_id, before, replies, shell_facts);
+        true
+    }
+
+    fn finish_terminal_advance(
+        &mut self,
+        pane_id: PaneId,
+        before: TerminalAdvanceBefore,
+        replies: Vec<u8>,
+        shell_facts: Vec<ShellIntegrationFact>,
+    ) {
+        let Some(engine) = self.terminal_engines.get(&pane_id) else {
+            return;
+        };
         let scrollback_after = engine.state().scrollback();
         let len_after = scrollback_after.len();
-        let pushed = (scrollback_after.total_pushed() - pushed_before) as usize;
+        let pushed = (scrollback_after.total_pushed() - before.pushed) as usize;
         let screen_after = engine.state().active_screen();
 
         if !replies.is_empty() {
@@ -77,14 +124,14 @@ impl Server {
                 );
             }
         }
-        if screen_before != screen_after {
+        if before.screen != screen_after {
             self.clear_pane_selections(pane_id);
         }
         // Held views move only when history gained lines (offsets rise) or
         // shrank under an erase (offsets reclamp). A chunk that touches no
         // history skips the client walk. A highlight whose every line the chunk
         // erased or evicted is dropped before the walk.
-        if pushed > 0 || len_after < len_before {
+        if pushed > 0 || len_after < before.scrollback_len {
             self.drop_evicted_selections(pane_id);
             self.anchor_held_views(pane_id, pushed, len_after);
         }

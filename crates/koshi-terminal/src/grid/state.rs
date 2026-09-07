@@ -3,9 +3,133 @@
 use std::cmp::min;
 
 use serde::de::{self, Deserializer};
+use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 
 use crate::style::{Color, Style};
+
+/// A cell-sized portion of one retained native image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ImageCellFragment {
+    pub(crate) source: u64,
+    pub(crate) row: u16,
+    pub(crate) column: u16,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+enum ImageFragments {
+    #[default]
+    Empty,
+    One(ImageCellFragment),
+    Many(Vec<ImageCellFragment>),
+}
+
+impl ImageFragments {
+    fn is_empty(&self) -> bool {
+        matches!(self, Self::Empty)
+    }
+
+    fn as_slice(&self) -> &[ImageCellFragment] {
+        match self {
+            Self::Empty => &[],
+            Self::One(fragment) => std::slice::from_ref(fragment),
+            Self::Many(fragments) => fragments,
+        }
+    }
+
+    fn replace_source(&mut self, fragment: ImageCellFragment) -> bool {
+        match self {
+            Self::One(existing) if existing.source == fragment.source => {
+                *existing = fragment;
+                true
+            }
+            Self::Many(fragments) => {
+                if let Some(existing) = fragments
+                    .iter_mut()
+                    .find(|existing| existing.source == fragment.source)
+                {
+                    *existing = fragment;
+                    return true;
+                }
+                false
+            }
+            Self::Empty | Self::One(_) => false,
+        }
+    }
+
+    fn push(&mut self, fragment: ImageCellFragment) {
+        match self {
+            Self::Empty => *self = Self::One(fragment),
+            Self::One(existing) => *self = Self::Many(vec![*existing, fragment]),
+            Self::Many(fragments) => fragments.push(fragment),
+        }
+    }
+
+    fn clear(&mut self) {
+        *self = Self::Empty;
+    }
+
+    fn storage_bytes(&self) -> usize {
+        match self {
+            Self::Many(fragments) => {
+                fragments.capacity() * std::mem::size_of::<ImageCellFragment>()
+            }
+            Self::Empty | Self::One(_) => 0,
+        }
+    }
+}
+
+impl Serialize for ImageFragments {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_seq(self.as_slice())
+    }
+}
+
+impl<'de> Deserialize<'de> for ImageFragments {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct Fragments;
+
+        impl<'de> de::Visitor<'de> for Fragments {
+            type Value = ImageFragments;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("bounded image cell fragments")
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: de::SeqAccess<'de>,
+            {
+                let mut fragments = Vec::new();
+                while let Some(fragment) = sequence.next_element::<ImageCellFragment>()? {
+                    if fragments.len() == crate::state::images::MAX_IMAGE_PLACEMENTS {
+                        return Err(de::Error::custom("too many image fragments in one cell"));
+                    }
+                    if fragments
+                        .iter()
+                        .any(|entry: &ImageCellFragment| entry.source == fragment.source)
+                    {
+                        return Err(de::Error::custom("duplicate image source in one cell"));
+                    }
+                    fragments.push(fragment);
+                }
+                match fragments.len() {
+                    0 => Ok(ImageFragments::Empty),
+                    1 => Ok(ImageFragments::One(fragments[0])),
+                    _ => Ok(ImageFragments::Many(fragments)),
+                }
+            }
+        }
+
+        deserializer.deserialize_seq(Fragments)
+    }
+}
 
 /// The part of a cell that almost no cell has: continuation code points or
 /// Kitty placeholder metadata. A [`Cell`] holds it behind one pointer, eight
@@ -17,6 +141,9 @@ struct CellExtra {
     /// Kitty Unicode-placeholder metadata, when the base cell is a placeholder.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     image_placeholder: Option<ImagePlaceholder>,
+    /// Native image portions attached to this cell, in paint order.
+    #[serde(default, skip_serializing_if = "ImageFragments::is_empty")]
+    image_fragments: ImageFragments,
 }
 
 /// The image identity and source cell encoded by a Kitty Unicode placeholder.
@@ -148,6 +275,67 @@ impl Cell {
         }
     }
 
+    /// Return native image portions in paint order.
+    pub(crate) fn image_fragments(&self) -> &[ImageCellFragment] {
+        self.combining
+            .as_ref()
+            .map_or(&[], |extra| extra.image_fragments.as_slice())
+    }
+
+    /// Attach a native image portion, replacing or overlaying existing portions.
+    pub(crate) fn set_image_fragment(&mut self, fragment: ImageCellFragment, overlay: bool) {
+        if !overlay {
+            *self = Self::blank_with(self.style);
+        } else if self
+            .combining
+            .as_mut()
+            .is_some_and(|extra| extra.image_fragments.replace_source(fragment))
+        {
+            return;
+        }
+        let extra = self.combining.get_or_insert_with(|| {
+            Box::new(CellExtra {
+                combining: Vec::new(),
+                image_placeholder: None,
+                image_fragments: ImageFragments::Empty,
+            })
+        });
+        extra.image_fragments.push(fragment);
+    }
+
+    /// Heap bytes occupied by native image metadata in this cell.
+    pub(crate) fn image_fragment_storage_bytes(&self) -> usize {
+        self.combining
+            .as_ref()
+            .filter(|extra| !extra.image_fragments.is_empty())
+            .map_or(0, |extra| {
+                usize::from(extra.combining.is_empty() && extra.image_placeholder.is_none())
+                    * std::mem::size_of::<CellExtra>()
+                    + extra.image_fragments.storage_bytes()
+            })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn image_fragment_capacity(&self) -> usize {
+        self.combining.as_ref().map_or(0, |extra| {
+            if let ImageFragments::Many(fragments) = &extra.image_fragments {
+                fragments.capacity()
+            } else {
+                0
+            }
+        })
+    }
+
+    /// Remove native image portions from this cell.
+    pub(crate) fn clear_image_fragments(&mut self) {
+        if let Some(extra) = self.combining.as_mut() {
+            extra.image_fragments.clear();
+            if extra.combining.is_empty() && extra.image_placeholder.is_none() {
+                self.combining = None;
+            }
+        }
+    }
+
     /// Return the Kitty Unicode-placeholder metadata carried by this cell.
     pub(crate) fn image_placeholder(&self) -> Option<ImagePlaceholder> {
         self.combining
@@ -169,6 +357,7 @@ impl Cell {
                 Box::new(CellExtra {
                     combining: Vec::new(),
                     image_placeholder: None,
+                    image_fragments: ImageFragments::Empty,
                 })
             })
             .image_placeholder = Some(placeholder);
@@ -205,6 +394,7 @@ impl Cell {
                 Box::new(CellExtra {
                     combining: Vec::new(),
                     image_placeholder: None,
+                    image_fragments: ImageFragments::Empty,
                 })
             })
             .combining
@@ -405,6 +595,20 @@ impl Grid {
     /// All rows, row-major.
     pub fn rows(&self) -> &[Vec<Cell>] {
         &self.rows
+    }
+
+    /// Blank the other half of a wide glyph overwritten at this cell.
+    pub(crate) fn clear_wide_at(&mut self, row: u16, column: u16, fill: Style) {
+        let other = match self.cell(row, column).map_or(1, Cell::width) {
+            2 => column.checked_add(1),
+            0 => column.checked_sub(1),
+            _ => None,
+        };
+        if let Some(other) = other {
+            if let Some(cell) = self.cell_mut(row, other) {
+                *cell = Cell::blank_with(fill);
+            }
+        }
     }
 
     /// Blank columns `from..to` (half-open, `to` exclusive) in `row`, resetting

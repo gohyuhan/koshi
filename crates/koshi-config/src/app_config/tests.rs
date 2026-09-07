@@ -577,6 +577,12 @@ fn remote_reconnect_records_what_it_is_set_to() {
 }
 
 #[test]
+fn image_support_defaults_to_enabled_and_accepts_false() {
+    assert!(ClientConfig::default().image_support);
+    assert_eq!(parse("image-support #false").image_support, Some(false));
+}
+
+#[test]
 fn an_absent_remote_reconnect_leaves_dialing_again_on() {
     // Absent leaves the field unset; the built-in `true` stands.
     assert_eq!(parse("").remote_reconnect, None);
@@ -1373,5 +1379,25 @@ fn a_section_carrying_both_a_value_and_a_block_reads_the_block_and_names_the_val
     assert_eq!(
         warnings,
         vec!["ignored `pane` value: a section takes a `{ … }` block".to_string()]
+    );
+}
+
+#[test]
+fn a_non_boolean_image_support_is_skipped_with_a_warning() {
+    let (layer, warnings) = parse_with_warnings("image-support \"yes\"");
+    assert_eq!(layer.image_support, None);
+    assert_eq!(
+        warnings,
+        vec!["ignored `image-support`: expected a boolean (#true or #false)".to_string()]
+    );
+}
+
+#[test]
+fn a_repeated_image_support_line_keeps_the_first_and_warns() {
+    let (layer, warnings) = parse_with_warnings("image-support #false\nimage-support #true");
+    assert_eq!(layer.image_support, Some(false));
+    assert_eq!(
+        warnings,
+        vec!["ignored duplicate `image-support` section".to_string()]
     );
 }

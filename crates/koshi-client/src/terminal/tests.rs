@@ -7,7 +7,7 @@
 
 use super::*;
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::{self, Write};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -21,9 +21,10 @@ use koshi_core::command::{Command, CommandEnvelope, CommandSource};
 use koshi_core::ids::{CommandId, PaneId, SessionId};
 use koshi_core::process::PtySize;
 use koshi_input::host::{GraphicAttributeError, GraphicAttributeReply, KeyCode};
+use koshi_ipc::protocol::WireMouseAction;
 use koshi_pty::backend::state::PtyBackend;
+use koshi_renderer::image_paints;
 use koshi_renderer::snapshot::{CommittedRegions, RenderSnapshot};
-use koshi_renderer::{ImagePaint, ImageSourceRect};
 use koshi_runtime::runtime::bus::EventFilter;
 use koshi_runtime::server::Server;
 use koshi_terminal::engine::TerminalEngine;
@@ -102,107 +103,6 @@ fn screen_text(terminal: &Terminal<TestBackend>) -> String {
         .collect()
 }
 
-/// Queue one Kitty frame and advance every bounded upload slice to completion.
-fn write_complete_kitty_frame<W: Write>(
-    writer: &mut W,
-    cache: &mut KittyImageCache,
-    paints: &[ImagePaint],
-    cursor: Option<Position>,
-) -> io::Result<()> {
-    write_kitty_frame(writer, cache, paints, cursor)?;
-    while kitty_image_work_pending(cache) {
-        advance_kitty_image(writer, cache)?;
-    }
-    Ok(())
-}
-
-/// Build one one-cell Kitty paint with the supplied identity, pixels, and target.
-fn one_cell_image_paint(
-    pane_id: PaneId,
-    placement_id: u64,
-    rgba: [u8; 4],
-    target: Rect,
-) -> ImagePaint {
-    ImagePaint::new(
-        pane_id,
-        placement_id,
-        Arc::new(koshi_terminal::graphics::ImageRecord {
-            protocol: koshi_terminal::graphics::GraphicsProtocol::Kitty,
-            image: (koshi_terminal::graphics::DecodedImage {
-                width: 1,
-                height: 1,
-                rgba: rgba.to_vec(),
-            })
-            .into(),
-            animation: None,
-            action: koshi_terminal::graphics::ImageAction::Display,
-            display: koshi_terminal::graphics::ImageDisplay::default(),
-            anchor: (0, 0),
-        }),
-        target,
-        ImageSourceRect {
-            x: 0,
-            y: 0,
-            width: 1,
-            height: 1,
-        },
-        0,
-    )
-}
-
-fn large_upload_image_paint(pane_id: PaneId, placement_id: u64, target: Rect) -> ImagePaint {
-    let mut state = 0x1234_5678u32;
-    let rgba = (0..262_144)
-        .map(|_| {
-            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            state.to_be_bytes()[0]
-        })
-        .collect();
-    ImagePaint::new(
-        pane_id,
-        placement_id,
-        Arc::new(koshi_terminal::graphics::ImageRecord {
-            protocol: koshi_terminal::graphics::GraphicsProtocol::Kitty,
-            image: (koshi_terminal::graphics::DecodedImage {
-                width: 16_384,
-                height: 4,
-                rgba,
-            })
-            .into(),
-            animation: None,
-            action: koshi_terminal::graphics::ImageAction::Display,
-            display: koshi_terminal::graphics::ImageDisplay::default(),
-            anchor: (0, 0),
-        }),
-        target,
-        ImageSourceRect {
-            x: 0,
-            y: 0,
-            width: 16_384,
-            height: 4,
-        },
-        0,
-    )
-}
-
-struct FailingWriter;
-
-impl Write for FailingWriter {
-    fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
-        Err(io::Error::new(
-            io::ErrorKind::BrokenPipe,
-            "test writer failed",
-        ))
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Err(io::Error::new(
-            io::ErrorKind::BrokenPipe,
-            "test writer failed",
-        ))
-    }
-}
-
 struct FailOnWrite {
     fail_at: usize,
     writes: usize,
@@ -228,78 +128,37 @@ impl Write for FailOnWrite {
     }
 }
 
-struct FailingFlushWriter {
+struct FailInsideSequence {
+    sequence: &'static [u8],
+    split: usize,
+    fail_next: bool,
+    failed: bool,
     output: Vec<u8>,
 }
 
-impl Write for FailingFlushWriter {
+impl Write for FailInsideSequence {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.output.extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Err(io::Error::new(
-            io::ErrorKind::BrokenPipe,
-            "test flush failed",
-        ))
-    }
-}
-
-struct FailAfter {
-    output: Vec<u8>,
-    limit: usize,
-}
-
-impl Write for FailAfter {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if self.output.len() >= self.limit {
+        if self.fail_next {
+            self.fail_next = false;
+            self.failed = true;
             return Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
-                "test writer failed",
+                "test writer failed inside a control sequence",
             ));
         }
-        let remaining = self.limit - self.output.len();
-        let count = remaining.min(bytes.len());
-        self.output.extend_from_slice(&bytes[..count]);
-        if count < bytes.len() {
-            Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "test writer failed",
-            ))
-        } else {
-            Ok(count)
+        if !self.failed {
+            if let Some(start) = bytes
+                .windows(self.sequence.len())
+                .position(|window| window == self.sequence)
+            {
+                let written = start + self.split;
+                self.output.extend_from_slice(&bytes[..written]);
+                self.fail_next = true;
+                return Ok(written);
+            }
         }
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-struct PartialThenAccept {
-    output: Vec<u8>,
-    limit: usize,
-    failed: bool,
-}
-
-impl Write for PartialThenAccept {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if self.failed {
-            self.output.extend_from_slice(bytes);
-            return Ok(bytes.len());
-        }
-        self.failed = true;
-        let count = self.limit.min(bytes.len());
-        self.output.extend_from_slice(&bytes[..count]);
-        if count < bytes.len() {
-            Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "test writer failed",
-            ))
-        } else {
-            Ok(count)
-        }
+        self.output.extend_from_slice(bytes);
+        Ok(bytes.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -310,6 +169,990 @@ impl Write for PartialThenAccept {
 /// The frame this client is owed, as the session composes it.
 fn frame(server: &Server, client_id: ClientId) -> RenderSnapshot {
     server.build_snapshot(client_id).expect("snapshot")
+}
+
+#[derive(Clone, Default)]
+struct ImageTraceWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+struct ImageTraceBackend(ratatui::backend::CrosstermBackend<ImageTraceWriter>);
+
+impl Backend for ImageTraceBackend {
+    type Error = io::Error;
+
+    fn draw<'a, I>(&mut self, content: I) -> io::Result<()>
+    where
+        I: Iterator<Item = (u16, u16, &'a ratatui::buffer::Cell)>,
+    {
+        self.0.draw(content)
+    }
+    fn hide_cursor(&mut self) -> io::Result<()> {
+        self.0.hide_cursor()
+    }
+    fn show_cursor(&mut self) -> io::Result<()> {
+        self.0.show_cursor()
+    }
+    fn get_cursor_position(&mut self) -> io::Result<Position> {
+        panic!("painting must not ask the host terminal for its cursor position");
+    }
+    fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> io::Result<()> {
+        self.0.set_cursor_position(position)
+    }
+    fn clear(&mut self) -> io::Result<()> {
+        panic!("painting must not clear through the backend");
+    }
+    fn clear_region(&mut self, region: ratatui::backend::ClearType) -> io::Result<()> {
+        self.0.clear_region(region)
+    }
+    fn size(&self) -> io::Result<ratatui::layout::Size> {
+        Ok(ratatui::layout::Size::new(80, 24))
+    }
+    fn window_size(&mut self) -> io::Result<ratatui::backend::WindowSize> {
+        Ok(ratatui::backend::WindowSize {
+            columns_rows: self.size()?,
+            pixels: self.size()?,
+        })
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Backend::flush(&mut self.0)
+    }
+}
+
+impl Write for ImageTraceWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.lock().expect("trace lock").extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn opaque_image_pixels() -> Vec<u8> {
+    [
+        [255, 0, 0, 255],
+        [0, 255, 0, 255],
+        [0, 0, 255, 255],
+        [255, 255, 255, 255],
+    ]
+    .into_iter()
+    .flat_map(|pixel| pixel.repeat(4))
+    .collect()
+}
+
+fn second_opaque_image_pixels() -> Vec<u8> {
+    [
+        [255, 255, 0, 255],
+        [0, 255, 255, 255],
+        [255, 0, 255, 255],
+        [0, 0, 0, 255],
+    ]
+    .into_iter()
+    .flat_map(|pixel| pixel.repeat(4))
+    .collect()
+}
+
+fn protocol_image_input(
+    protocol: koshi_terminal::graphics::GraphicsProtocol,
+    pixels: Vec<u8>,
+    image_id: u32,
+) -> Vec<u8> {
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+
+    let image = koshi_image::DecodedImage {
+        width: 4,
+        height: 4,
+        rgba: pixels,
+    };
+    match protocol {
+        koshi_terminal::graphics::GraphicsProtocol::Kitty => format!(
+            "\x1b_Ga=T,f=32,s=4,v=4,i={image_id},c=4,r=4,C=1,q=2;{}\x1b\\",
+            STANDARD.encode(image.rgba)
+        )
+        .into_bytes(),
+        koshi_terminal::graphics::GraphicsProtocol::Iterm2 => {
+            let mut encoder = koshi_iterm::Encoder::new(
+                &image,
+                koshi_iterm::OutputOptions::new(4, 4).expect("image dimensions"),
+            )
+            .expect("iTerm image encoding");
+            let mut bytes = Vec::new();
+            while let Some(packet) = encoder.next_packet() {
+                bytes.extend_from_slice(packet);
+            }
+            bytes
+        }
+        koshi_terminal::graphics::GraphicsProtocol::Sixel => {
+            let mut encoder = koshi_sixel::SixelEncoder::new(Arc::new(image), [0, 0, 0])
+                .expect("Sixel image encoding");
+            let mut bytes = b"\x1b[?80l".to_vec();
+            encoder.write_to(&mut bytes).expect("Sixel image output");
+            bytes
+        }
+    }
+}
+
+fn two_image_input(protocol: koshi_terminal::graphics::GraphicsProtocol) -> Vec<u8> {
+    let mut bytes = b"\x1b[22;1Hscroll-test\x1b[2;2H".to_vec();
+    bytes.extend_from_slice(&protocol_image_input(protocol, opaque_image_pixels(), 42));
+    bytes.extend_from_slice(b"\x1b[4;4H");
+    bytes.extend_from_slice(&protocol_image_input(
+        protocol,
+        second_opaque_image_pixels(),
+        43,
+    ));
+    bytes
+}
+
+fn source_image_map(snapshot: &RenderSnapshot) -> BTreeMap<(u16, u16), [u8; 4]> {
+    let mut map = BTreeMap::new();
+    for paint in image_paints(snapshot, &regions(VIEWPORT), Rect::new(0, 0, 80, 24)) {
+        for row in 0..paint.target.height {
+            for column in 0..paint.target.width {
+                let source_y = paint.source.y
+                    + u32::from(row) * paint.source.height / u32::from(paint.target.height);
+                let source_x = paint.source.x
+                    + u32::from(column) * paint.source.width / u32::from(paint.target.width);
+                let start = ((source_y * paint.record.image.width + source_x) * 4) as usize;
+                let pixel = paint.record.image.rgba[start..start + 4]
+                    .try_into()
+                    .expect("source pixel");
+                map.insert((paint.target.y + row, paint.target.x + column), pixel);
+            }
+        }
+    }
+    map
+}
+
+fn outer_image_map(outer: &TerminalEngine) -> BTreeMap<(u16, u16), [u8; 4]> {
+    let placements = outer.state().image_placements_for_view(0);
+    let mut map = BTreeMap::new();
+    for placement in &placements {
+        let record = placement.render_record_arc();
+        let (source_x, source_y, source_width, source_height) =
+            record.source_rect().expect("outer source rectangle");
+        let geometry = placement.geometry();
+        for row in 0..placement.dimensions().0 {
+            for column in 0..placement.dimensions().1 {
+                let image_y = source_y
+                    + u32::from(geometry.offset.y + row) * source_height
+                        / u32::from(geometry.full_size.rows);
+                let image_x = source_x
+                    + u32::from(geometry.offset.x + column) * source_width
+                        / u32::from(geometry.full_size.cols);
+                let start = ((image_y * record.image.width + image_x) * 4) as usize;
+                let pixel = record.image.rgba[start..start + 4]
+                    .try_into()
+                    .expect("outer pixel");
+                map.insert(
+                    (placement.anchor().0 + row, placement.anchor().1 + column),
+                    pixel,
+                );
+            }
+        }
+    }
+    map
+}
+
+fn opaque_image_input(protocol: koshi_terminal::graphics::GraphicsProtocol) -> Vec<u8> {
+    use koshi_terminal::graphics::GraphicsProtocol;
+    match protocol {
+        GraphicsProtocol::Kitty => b"\x1b_Ga=T,f=32,s=4,v=4,i=42,c=4,r=4,C=1,q=2;/wAA//8AAP//AAD//wAA/wD/AP8A/wD/AP8A/wD/AP8AAP//AAD//wAA//8AAP///////////////////////w==\x1b\\".to_vec(),
+        GraphicsProtocol::Sixel => b"\x1b[?80l\x1bP0;1q\"1;1;4;4#1;2;100;0;0#1@@@@$#2;2;0;100;0#2AAAA$#3;2;0;0;100#3CCCC$#4;2;100;100;100#4GGGG\x1b\\".to_vec(),
+        GraphicsProtocol::Iterm2 => {
+            let image = koshi_image::DecodedImage { width: 4, height: 4, rgba: opaque_image_pixels() };
+            let mut encoder = koshi_iterm::Encoder::new(&image, koshi_iterm::OutputOptions::new(4, 4).unwrap()).unwrap();
+            let mut bytes = Vec::new();
+            while let Some(packet) = encoder.next_packet() {
+                bytes.extend_from_slice(packet);
+            }
+            bytes
+        }
+    }
+}
+
+#[derive(Default)]
+struct ImageWireContentIds {
+    ids: HashMap<u64, (usize, u64)>,
+    next_id: u64,
+}
+
+impl ImageWireContentIds {
+    fn begin_frame(&mut self, snapshot: &RenderSnapshot) {
+        let visible = snapshot
+            .panes
+            .iter()
+            .flat_map(|pane| &pane.image_placements)
+            .filter_map(|placement| {
+                placement
+                    .record()
+                    .map(|record| (placement.content_id(), Arc::as_ptr(&record.image) as usize))
+            })
+            .collect::<HashMap<_, _>>();
+        self.ids
+            .retain(|canonical_id, (address, _)| visible.get(canonical_id) == Some(address));
+    }
+
+    fn id_for(&mut self, canonical_id: u64, image_address: usize) -> u64 {
+        if let Some(&(address, wire_id)) = self.ids.get(&canonical_id) {
+            assert_eq!(address, image_address);
+            return wire_id;
+        }
+        self.next_id = self.next_id.saturating_add(1);
+        let wire_id = self.next_id;
+        self.ids.insert(canonical_id, (image_address, wire_id));
+        wire_id
+    }
+}
+
+fn image_frame_through_wire(
+    snapshot: &RenderSnapshot,
+    cache: &mut crate::attach::paint::ImageCache,
+    content_ids: &mut ImageWireContentIds,
+) -> RenderSnapshot {
+    use koshi_ipc::frame::{FrameImageChunk, FrameImageTransfer, PaintedFrame};
+    content_ids.begin_frame(snapshot);
+    let mut wire = koshi_runtime::runtime::frame::wire_frame(snapshot);
+    for (source_pane, wire_pane) in snapshot.panes.iter().zip(&mut wire.panes) {
+        for (source, received) in source_pane
+            .image_placements
+            .iter()
+            .zip(&mut wire_pane.image_placements)
+        {
+            let image_address = source
+                .record()
+                .map_or(0, |record| Arc::as_ptr(&record.image) as usize);
+            received.content_id = content_ids.id_for(source.content_id(), image_address);
+        }
+    }
+    let wire: PaintedFrame = serde_json::from_slice(&serde_json::to_vec(&wire).unwrap()).unwrap();
+    let mut resolved = cache.begin_frame(Box::new(wire.clone())).unwrap();
+    let mut transferred = HashSet::new();
+    for (source, received) in snapshot.panes.iter().zip(&wire.panes) {
+        for (source, received) in source
+            .image_placements
+            .iter()
+            .zip(&received.image_placements)
+        {
+            if !transferred.insert(received.content_id) {
+                continue;
+            }
+            let record = source.record().expect("source pixels");
+            let transfer = FrameImageTransfer {
+                id: received.content_id,
+                record: received.record.clone().expect("wire metadata"),
+                byte_len: record.image.rgba.len() as u64,
+            };
+            match cache
+                .start(serde_json::from_slice(&serde_json::to_vec(&transfer).unwrap()).unwrap())
+            {
+                Ok(()) => {}
+                Err(crate::attach::paint::ImageAssemblyError::TransferAlreadyComplete(id)) => {
+                    assert_eq!(id, received.content_id);
+                    continue;
+                }
+                Err(error) => panic!("image transfer failed to start: {error}"),
+            }
+            let chunk = FrameImageChunk {
+                transfer_id: received.content_id,
+                offset: 0,
+                last: true,
+                bytes: record.image.rgba.clone(),
+            };
+            if let Some(frame) = cache
+                .accept(serde_json::from_slice(&serde_json::to_vec(&chunk).unwrap()).unwrap())
+                .unwrap()
+            {
+                resolved = Some(frame);
+            }
+        }
+    }
+    resolved.expect("all required image records were transferred")
+}
+
+#[test]
+fn all_input_and_output_protocols_preserve_opaque_pixels_through_scrolling() {
+    assert_opaque_protocol_matrix(true);
+}
+
+#[test]
+fn all_output_protocols_match_source_image_coverage_after_text_overwrite() {
+    use koshi_terminal::graphics::GraphicsProtocol;
+    for source in [
+        GraphicsProtocol::Kitty,
+        GraphicsProtocol::Iterm2,
+        GraphicsProtocol::Sixel,
+    ] {
+        let fake = Arc::new(FakePtyBackend::new());
+        let (mut server, client_id, pane_id) = boot(&fake);
+        let _ = server.handle_runtime_event(RuntimeEvent::CellSize {
+            client_id,
+            size: PixelCellSize::new(1, 1).unwrap(),
+        });
+        let mut bytes = b"A\x1b[1;1H".to_vec();
+        bytes.extend_from_slice(&opaque_image_input(source));
+        let _ = server.handle_runtime_event(RuntimeEvent::PtyOutput { pane_id, bytes });
+        let initial = frame(&server, client_id);
+        let _ = server.handle_runtime_event(RuntimeEvent::PtyOutput {
+            pane_id,
+            bytes: b"\x1b[1;1HB".to_vec(),
+        });
+        let changed = frame(&server, client_id);
+        let mut pixels = opaque_image_pixels();
+        if source != GraphicsProtocol::Kitty {
+            pixels[..4].fill(0);
+        }
+        let client = test_client(&mut server, client_id);
+        assert_image_trace_output(
+            &client,
+            source,
+            &[initial, changed],
+            &[(0, 4, opaque_image_pixels()), (0, 4, pixels)],
+            true,
+        );
+    }
+}
+
+#[test]
+fn a_text_repaint_under_an_image_rewrites_only_cell_bound_pixels() {
+    use koshi_terminal::graphics::GraphicsProtocol;
+
+    for source in [
+        GraphicsProtocol::Kitty,
+        GraphicsProtocol::Iterm2,
+        GraphicsProtocol::Sixel,
+    ] {
+        let fake = Arc::new(FakePtyBackend::new());
+        let (mut server, client_id, pane_id) = boot(&fake);
+        let _ = server.handle_runtime_event(RuntimeEvent::CellSize {
+            client_id,
+            size: PixelCellSize::new(1, 1).expect("test cell size"),
+        });
+        let mut image = b"\x1b[1;1H".to_vec();
+        image.extend_from_slice(&opaque_image_input(source));
+        let _ = server.handle_runtime_event(RuntimeEvent::PtyOutput {
+            pane_id,
+            bytes: image,
+        });
+        let initial = frame(&server, client_id);
+        let _ = server.handle_runtime_event(RuntimeEvent::PtyOutput {
+            pane_id,
+            bytes: b"\x1b[1;1HB".to_vec(),
+        });
+        let repainted = frame(&server, client_id);
+        let client = test_client(&mut server, client_id);
+
+        for graphics in [
+            GraphicsSupport::Kitty,
+            GraphicsSupport::Iterm,
+            GraphicsSupport::Sixel {
+                palette_colors: 256,
+                max_width: None,
+                max_height: None,
+            },
+        ] {
+            let mut writer = ImageTraceWriter::default();
+            let backend = ImageTraceBackend(ratatui::backend::CrosstermBackend::new(
+                ImageTraceWriter::default(),
+            ));
+            let mut terminal = Terminal::with_options(
+                backend,
+                ratatui::TerminalOptions {
+                    viewport: ratatui::Viewport::Fixed(Rect::new(0, 0, 80, 24)),
+                },
+            )
+            .expect("test terminal");
+            let mut output = ImageOutputState::new(ImageOutputKind::from_support(graphics));
+            let mut cache = crate::attach::paint::ImageCache::new();
+            let mut content_ids = ImageWireContentIds::default();
+
+            for (stage, source_snapshot) in [&initial, &repainted].into_iter().enumerate() {
+                let snapshot =
+                    image_frame_through_wire(source_snapshot, &mut cache, &mut content_ids);
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let mut bytes = Vec::new();
+                loop {
+                    let committed = paint_frame_with_writer(
+                        &mut writer,
+                        &mut terminal,
+                        &client,
+                        &snapshot,
+                        &regions(VIEWPORT),
+                        &ViewerPaint::from_frame(&client, &snapshot),
+                        graphics.image_mode(),
+                        &mut output,
+                        Some(PixelCellSize::new(1, 1).expect("test cell size")),
+                        &mut String::new(),
+                        &mut None,
+                    )
+                    .expect("native frame");
+                    bytes.extend_from_slice(&std::mem::take(
+                        &mut *writer.0.lock().expect("trace lock"),
+                    ));
+                    if committed && !output.work_pending() {
+                        break;
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "{source:?} -> {graphics:?}, stage {stage} did not settle"
+                    );
+                    std::thread::yield_now();
+                }
+
+                let contains = |marker: &[u8]| bytes.windows(marker.len()).any(|w| w == marker);
+                let shown = String::from_utf8_lossy(&bytes);
+                match graphics {
+                    // Kitty pixels transmit once. A Kitty-source image keeps
+                    // its cells under the text, so nothing is placed again. An
+                    // iTerm2 or Sixel source loses the overwritten cell, so its
+                    // placement geometry changes and is placed again.
+                    GraphicsSupport::Kitty => {
+                        assert_eq!(
+                            contains(b"\x1b_Ga=t"),
+                            stage == 0,
+                            "{source:?} -> Kitty, stage {stage} pixel transmit, bytes: {shown:?}"
+                        );
+                        assert_eq!(
+                            contains(b"\x1b_Ga=p"),
+                            stage == 0 || source != GraphicsProtocol::Kitty,
+                            "{source:?} -> Kitty, stage {stage} placement, bytes: {shown:?}"
+                        );
+                    }
+                    // iTerm2 and Sixel pixels live in the cells, so the text
+                    // repaint under the image writes the image again.
+                    GraphicsSupport::Iterm => assert!(
+                        contains(b"\x1b]1337;File="),
+                        "{source:?} -> Iterm, stage {stage} did not emit the image: {shown:?}"
+                    ),
+                    GraphicsSupport::Sixel { .. } => assert!(
+                        contains(b"\x1bP"),
+                        "{source:?} -> Sixel, stage {stage} did not emit the image: {shown:?}"
+                    ),
+                    GraphicsSupport::Unsupported => unreachable!(),
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn pi_auto_scrollbar_frames_preserve_pixels_in_every_output_protocol() {
+    assert_pi_scrollbar_output(true);
+}
+
+#[test]
+fn pi_hidden_scrollbar_frames_preserve_pixels_in_every_output_protocol() {
+    assert_pi_scrollbar_output(false);
+}
+
+fn assert_pi_scrollbar_output(scrollbar: bool) {
+    use koshi_terminal::graphics::GraphicsProtocol;
+    let fake = Arc::new(FakePtyBackend::new());
+    let (mut server, client_id, pane_id) = boot(&fake);
+    let _ = server.handle_runtime_event(RuntimeEvent::CellSize {
+        client_id,
+        size: PixelCellSize::new(1, 1).unwrap(),
+    });
+    let _ = server.handle_runtime_event(RuntimeEvent::PtyOutput {
+        pane_id,
+        bytes: b"\x1b[?1049h".to_vec(),
+    });
+    let upload = String::from_utf8(opaque_image_input(GraphicsProtocol::Kitty))
+        .unwrap()
+        .replace("c=4,r=4,C=1", "c=4,C=1,y=3,h=1,r=1");
+    let mut frames = Vec::new();
+    let stages: [(u16, u16, u16); 5] = [(1, 1, 3), (1, 3, 1), (2, 4, 0), (1, 3, 1), (1, 1, 3)];
+    let mut expected = Vec::new();
+    for (stage, (image_row, rows, source_y)) in stages.into_iter().enumerate() {
+        let mut bytes = String::from("\x1b[?2026h");
+        if stage != 0 {
+            bytes.push_str("\x1b_Ga=d,d=a,q=2\x1b\\");
+        }
+        for row in 1..=10 {
+            bytes.push_str(&format!("\x1b[{row};1H\x1b[2K"));
+            if row == image_row {
+                if stage == 0 {
+                    bytes.push_str(&upload);
+                } else if rows == 4 {
+                    bytes.push_str("\x1b_Ga=p,q=2,i=42,c=4,r=4,C=1\x1b\\");
+                } else {
+                    bytes.push_str(&format!(
+                        "\x1b_Ga=p,q=2,i=42,c=4,C=1,y={source_y},h={rows},r={rows}\x1b\\"
+                    ));
+                }
+            } else {
+                let text = if row < image_row {
+                    "before".to_owned()
+                } else if row < image_row + rows {
+                    String::new()
+                } else {
+                    format!("after{}", row - image_row - rows)
+                };
+                if scrollbar && rows != 1 {
+                    let bar = if row == 3 { '┃' } else { '│' };
+                    bytes.push_str(&format!("{text:19}\x1b[90m{bar}\x1b[39m"));
+                } else {
+                    bytes.push_str(&text);
+                }
+                bytes.push_str("\x1b[0m\x1b]8;;\x1b\\");
+            }
+        }
+        bytes.push_str("\x1b[?2026l");
+        let _ = server.handle_runtime_event(RuntimeEvent::PtyOutput {
+            pane_id,
+            bytes: bytes.into_bytes(),
+        });
+        frames.push(frame(&server, client_id));
+        expected.push((
+            image_row - 1,
+            rows,
+            opaque_image_pixels()[usize::from(source_y) * 16..].to_vec(),
+        ));
+    }
+    let client = test_client(&mut server, client_id);
+    assert_image_trace_output(&client, GraphicsProtocol::Kitty, &frames, &expected, true);
+}
+
+#[test]
+fn utf8_border_before_kitty_upload_preserves_pixels() {
+    for prefix in ["", "┐"] {
+        let mut terminal = TerminalEngine::new(PtySize { cols: 20, rows: 10 });
+        terminal.set_cell_size(PixelCellSize::new(1, 1).unwrap());
+        let mut input = prefix.as_bytes().to_vec();
+        input.extend_from_slice(b"\x1b[1;1H");
+        input.extend_from_slice(&opaque_image_input(
+            koshi_terminal::graphics::GraphicsProtocol::Kitty,
+        ));
+        let _ = terminal.advance(&input);
+        let pixels = terminal
+            .state()
+            .image_placements_for_view(0)
+            .into_iter()
+            .map(|placement| placement.record().image.rgba.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            pixels,
+            [opaque_image_pixels()],
+            "prefix {prefix:?}, events {:?}",
+            terminal.take_graphics()
+        );
+    }
+}
+
+#[test]
+fn native_graphics_without_text_preserve_opaque_pixels_through_scrolling() {
+    assert_opaque_protocol_matrix(false);
+}
+
+#[test]
+fn two_images_survive_partial_full_and_reverse_scrolling_for_every_protocol_pair() {
+    use koshi_terminal::graphics::GraphicsProtocol;
+
+    for source in [
+        GraphicsProtocol::Kitty,
+        GraphicsProtocol::Iterm2,
+        GraphicsProtocol::Sixel,
+    ] {
+        let fake = Arc::new(FakePtyBackend::new());
+        let (mut server, client_id, pane_id) = boot(&fake);
+        let _ = server.handle_runtime_event(RuntimeEvent::CellSize {
+            client_id,
+            size: PixelCellSize::new(1, 1).unwrap(),
+        });
+        let _ = server.handle_runtime_event(RuntimeEvent::PtyOutput {
+            pane_id,
+            bytes: two_image_input(source),
+        });
+        let mut frames = vec![frame(&server, client_id)];
+
+        let _ = server.handle_runtime_event(RuntimeEvent::PtyOutput {
+            pane_id,
+            bytes: b"\x1b[3S".to_vec(),
+        });
+        frames.push(frame(&server, client_id));
+
+        let _ = server.handle_runtime_event(RuntimeEvent::PtyOutput {
+            pane_id,
+            bytes: b"\x1b[5S".to_vec(),
+        });
+        frames.push(frame(&server, client_id));
+
+        let _ = server.handle_runtime_event(RuntimeEvent::ClientMouse {
+            client_id,
+            request_id: 1,
+            actions: vec![WireMouseAction::Scroll {
+                pane: pane_id,
+                up: true,
+                lines: 8,
+            }],
+        });
+        frames.push(frame(&server, client_id));
+
+        let _ = server.handle_runtime_event(RuntimeEvent::ClientMouse {
+            client_id,
+            request_id: 2,
+            actions: vec![WireMouseAction::Scroll {
+                pane: pane_id,
+                up: false,
+                lines: 8,
+            }],
+        });
+        frames.push(frame(&server, client_id));
+
+        let expected = frames.iter().map(source_image_map).collect::<Vec<_>>();
+        assert!(
+            image_paints(&frames[0], &regions(VIEWPORT), Rect::new(0, 0, 80, 24)).len() >= 2,
+            "source {source:?} must retain both image portions in the first frame"
+        );
+        assert!(
+            expected[0].values().any(|pixel| *pixel == [255, 0, 0, 255])
+                && expected[0]
+                    .values()
+                    .any(|pixel| *pixel == [255, 255, 0, 255]),
+            "source {source:?} must expose distinct pixels from both images"
+        );
+
+        let client = test_client(&mut server, client_id);
+        assert_two_image_trace_output(&client, source, &frames, &expected);
+    }
+}
+
+fn assert_two_image_trace_output(
+    client: &Client,
+    source: koshi_terminal::graphics::GraphicsProtocol,
+    frames: &[RenderSnapshot],
+    expected: &[BTreeMap<(u16, u16), [u8; 4]>],
+) {
+    for graphics in [
+        GraphicsSupport::Kitty,
+        GraphicsSupport::Iterm,
+        GraphicsSupport::Sixel {
+            palette_colors: 256,
+            max_width: None,
+            max_height: None,
+        },
+    ] {
+        let mut writer = ImageTraceWriter::default();
+        let backend = ImageTraceBackend(ratatui::backend::CrosstermBackend::new(writer.clone()));
+        let mut terminal = Terminal::with_options(
+            backend,
+            ratatui::TerminalOptions {
+                viewport: ratatui::Viewport::Fixed(Rect::new(0, 0, 80, 24)),
+            },
+        )
+        .unwrap();
+        let mut output = ImageOutputState::new(ImageOutputKind::from_support(graphics));
+        let mut cache = crate::attach::paint::ImageCache::new();
+        let mut content_ids = ImageWireContentIds::default();
+        let mut outer = TerminalEngine::new(PtySize { cols: 80, rows: 24 });
+        outer.set_cell_size(PixelCellSize::new(1, 1).unwrap());
+        let _ = outer.advance(b"\x1b[?1049h");
+
+        for (stage, (snapshot, expected)) in frames.iter().zip(expected).enumerate() {
+            let mut stage_bytes = Vec::new();
+            let snapshot = image_frame_through_wire(snapshot, &mut cache, &mut content_ids);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let committed = paint_frame_with_writer(
+                    &mut writer,
+                    &mut terminal,
+                    client,
+                    &snapshot,
+                    &regions(VIEWPORT),
+                    &ViewerPaint::from_frame(client, &snapshot),
+                    graphics.image_mode(),
+                    &mut output,
+                    Some(PixelCellSize::new(1, 1).unwrap()),
+                    &mut String::new(),
+                    &mut None,
+                )
+                .unwrap();
+                let bytes = std::mem::take(&mut *writer.0.lock().unwrap());
+                stage_bytes.extend_from_slice(&bytes);
+                let _ = outer.advance(&bytes);
+                if committed && !output.work_pending() {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "{source:?} -> {graphics:?}, stage {stage} did not settle"
+                );
+                std::thread::yield_now();
+            }
+
+            let terminal_text = outer
+                .state()
+                .active_grid()
+                .rows()
+                .iter()
+                .flat_map(|row| row.iter())
+                .map(|cell| cell.ch())
+                .collect::<String>();
+            assert!(
+                terminal_text.contains("scroll-test"),
+                "{source:?} -> {graphics:?}, stage {stage} lost the base-cell frame: {terminal_text:?}"
+            );
+            let actual = outer_image_map(&outer);
+            assert_eq!(
+                &actual,
+                expected,
+                "{source:?} -> {graphics:?}, stage {stage}, stream {:?}, events {:?}",
+                String::from_utf8_lossy(&stage_bytes),
+                outer.take_graphics()
+            );
+        }
+    }
+}
+
+fn assert_partial_native_frame_write_recovers(
+    graphics: GraphicsSupport,
+    sequence: &'static [u8],
+    split: usize,
+) {
+    let fake = Arc::new(FakePtyBackend::new());
+    let (mut server, client_id, pane_id) = boot(&fake);
+    let cell_size = PixelCellSize::new(1, 1).expect("test cell size");
+    let _ = server.handle_runtime_event(RuntimeEvent::CellSize {
+        client_id,
+        size: cell_size,
+    });
+    let _ = server.handle_runtime_event(RuntimeEvent::PtyOutput {
+        pane_id,
+        bytes: opaque_image_input(koshi_terminal::graphics::GraphicsProtocol::Kitty),
+    });
+    let snapshot = frame(&server, client_id);
+    let client = test_client(&mut server, client_id);
+    let committed = regions(VIEWPORT);
+    let area = Rect::new(0, 0, 80, 24);
+    let paints = image_paints(&snapshot, &committed, area);
+    let cells = image_cell_snapshot(&snapshot, &committed, area).map(Arc::new);
+    let mut output = ImageOutputState::new(ImageOutputKind::from_support(graphics));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !output.prepare_frame(&paints, cells.clone(), Some(cell_size)) {
+        assert!(
+            Instant::now() < deadline,
+            "{graphics:?} output did not prepare"
+        );
+        std::thread::yield_now();
+    }
+    assert!(output.native_commit_pending());
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+    let mut writer = FailInsideSequence {
+        sequence,
+        split,
+        fail_next: false,
+        failed: false,
+        output: Vec::new(),
+    };
+
+    let error = paint_frame_with_writer(
+        &mut writer,
+        &mut terminal,
+        &client,
+        &snapshot,
+        &committed,
+        &ViewerPaint::from_frame(&client, &snapshot),
+        graphics.image_mode(),
+        &mut output,
+        Some(cell_size),
+        &mut window_title(&snapshot),
+        &mut cursor_style(&snapshot),
+    )
+    .expect_err("the partial write is returned");
+
+    let PaintError::Image(error) = error;
+    assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+    assert_eq!(
+        error.to_string(),
+        "test writer failed inside a control sequence"
+    );
+    assert!(writer.failed);
+    assert!(writer.output.ends_with(b"\x18\x1b\\\x1b[?2026l"));
+    assert!(output.native_commit_pending());
+    assert_eq!(output.prepared_keys(), []);
+}
+
+#[test]
+fn partial_synchronized_begin_is_aborted_before_the_end_sequence() {
+    assert_partial_native_frame_write_recovers(
+        GraphicsSupport::Iterm,
+        b"\x1b[?2026h",
+        b"\x1b[?20".len(),
+    );
+}
+
+#[test]
+fn partial_native_packets_are_aborted_before_synchronized_output_ends() {
+    for (graphics, sequence, split) in [
+        (GraphicsSupport::Kitty, &b"\x1b_G"[..], 3),
+        (GraphicsSupport::Iterm, &b"\x1b]1337;"[..], 8),
+        (
+            GraphicsSupport::Sixel {
+                palette_colors: 256,
+                max_width: None,
+                max_height: None,
+            },
+            &b"\x1bP"[..],
+            2,
+        ),
+    ] {
+        assert_partial_native_frame_write_recovers(graphics, sequence, split);
+    }
+}
+
+fn assert_opaque_protocol_matrix(include_text: bool) {
+    use koshi_terminal::graphics::GraphicsProtocol;
+    for source in [
+        GraphicsProtocol::Kitty,
+        GraphicsProtocol::Iterm2,
+        GraphicsProtocol::Sixel,
+    ] {
+        let fake = Arc::new(FakePtyBackend::new());
+        let (mut server, client_id, pane_id) = boot(&fake);
+        let cell_size = PixelCellSize::new(1, 1).unwrap();
+        let _ = server.handle_runtime_event(RuntimeEvent::CellSize {
+            client_id,
+            size: cell_size,
+        });
+        let _ = server.handle_runtime_event(RuntimeEvent::PtyOutput {
+            pane_id,
+            bytes: opaque_image_input(source),
+        });
+        let initial = frame(&server, client_id);
+        let _ = server.handle_runtime_event(RuntimeEvent::PtyOutput {
+            pane_id,
+            bytes: b"\x1b[3S".to_vec(),
+        });
+        let cropped = frame(&server, client_id);
+        let _ = server.handle_runtime_event(RuntimeEvent::ClientMouse {
+            client_id,
+            request_id: 1,
+            actions: vec![WireMouseAction::Scroll {
+                pane: pane_id,
+                up: true,
+                lines: 3,
+            }],
+        });
+        let restored = frame(&server, client_id);
+        let client = test_client(&mut server, client_id);
+        assert_image_trace_output(
+            &client,
+            source,
+            &[initial, cropped, restored],
+            &[
+                (0, 4, opaque_image_pixels()),
+                (0, 1, vec![255; 16]),
+                (0, 4, opaque_image_pixels()),
+            ],
+            include_text,
+        );
+    }
+}
+
+fn assert_image_trace_output(
+    client: &Client,
+    source: koshi_terminal::graphics::GraphicsProtocol,
+    frames: &[RenderSnapshot],
+    expected: &[(u16, u16, Vec<u8>)],
+    include_text: bool,
+) {
+    for graphics in [
+        GraphicsSupport::Kitty,
+        GraphicsSupport::Iterm,
+        GraphicsSupport::Sixel {
+            palette_colors: 256,
+            max_width: None,
+            max_height: None,
+        },
+    ] {
+        let mut writer = ImageTraceWriter::default();
+        let backend = ImageTraceBackend(ratatui::backend::CrosstermBackend::new(if include_text {
+            writer.clone()
+        } else {
+            ImageTraceWriter::default()
+        }));
+        let mut terminal = Terminal::with_options(
+            backend,
+            ratatui::TerminalOptions {
+                viewport: ratatui::Viewport::Fixed(Rect::new(0, 0, 80, 24)),
+            },
+        )
+        .unwrap();
+        let mut output = ImageOutputState::new(ImageOutputKind::from_support(graphics));
+        let mut cache = crate::attach::paint::ImageCache::new();
+        let mut content_ids = ImageWireContentIds::default();
+        let mut outer = TerminalEngine::new(PtySize { cols: 80, rows: 24 });
+        outer.set_cell_size(PixelCellSize::new(1, 1).unwrap());
+        let _ = outer.advance(b"\x1b[?1049h");
+        for (stage, (snapshot, (row, height, pixels))) in frames.iter().zip(expected).enumerate() {
+            let mut stage_bytes = Vec::new();
+            let snapshot = image_frame_through_wire(snapshot, &mut cache, &mut content_ids);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let committed = paint_frame_with_writer(
+                    &mut writer,
+                    &mut terminal,
+                    client,
+                    &snapshot,
+                    &regions(VIEWPORT),
+                    &ViewerPaint::from_frame(client, &snapshot),
+                    graphics.image_mode(),
+                    &mut output,
+                    Some(PixelCellSize::new(1, 1).unwrap()),
+                    &mut String::new(),
+                    &mut None,
+                )
+                .unwrap();
+                let bytes = std::mem::take(&mut *writer.0.lock().unwrap());
+                stage_bytes.extend_from_slice(&bytes);
+                let _ = outer.advance(&bytes);
+                if committed && !output.work_pending() {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "{source:?} -> {graphics:?}, stage {stage} did not settle"
+                );
+                std::thread::yield_now();
+            }
+            let placements = outer.state().image_placements_for_view(0);
+            let mut actual = std::collections::BTreeMap::new();
+            for p in &placements {
+                let record = p.render_record_arc();
+                let (x, y, width, height) = record.source_rect().unwrap();
+                let geometry = p.geometry();
+                for row in 0..p.dimensions().0 {
+                    for column in 0..p.dimensions().1 {
+                        let source_y = y + u32::from(geometry.offset.y + row) * height
+                            / u32::from(geometry.full_size.rows);
+                        let source_x = x + u32::from(geometry.offset.x + column) * width
+                            / u32::from(geometry.full_size.cols);
+                        let start = ((source_y * record.image.width + source_x) * 4) as usize;
+                        let pixel: [u8; 4] =
+                            record.image.rgba[start..start + 4].try_into().unwrap();
+                        actual.insert((p.anchor().0 + row, p.anchor().1 + column), pixel);
+                    }
+                }
+            }
+            let expected = (0..*height)
+                .flat_map(|y| {
+                    (0..4).filter_map(move |x| {
+                        let start = (usize::from(y) * 4 + usize::from(x)) * 4;
+                        let pixel = <[u8; 4]>::try_from(&pixels[start..start + 4]).unwrap();
+                        (pixel[3] != 0).then_some(((*row + y + 2, x + 1), pixel))
+                    })
+                })
+                .collect::<std::collections::BTreeMap<_, _>>();
+            assert_eq!(
+                actual,
+                expected,
+                "{source:?} -> {graphics:?}, stage {stage}, stream {:?}, events {:?}",
+                String::from_utf8_lossy(&stage_bytes),
+                outer.take_graphics()
+            );
+        }
+    }
 }
 
 #[test]
@@ -1240,55 +2083,19 @@ fn terminal_cleanup_attempts_mode_resets_after_image_delete_fails() {
 
 #[test]
 fn terminal_cleanup_cancels_a_partial_kitty_apc_before_deleting_images() {
-    let paint = large_upload_image_paint(PaneId::new(), 4, Rect::new(0, 0, 1, 1));
-    let mut probe_cache = KittyImageCache::default();
-    write_kitty_frame(
-        &mut Vec::new(),
-        &mut probe_cache,
-        std::slice::from_ref(&paint),
-        None,
-    )
-    .expect("the probe upload is queued");
-    let mut expected = Vec::new();
-    advance_kitty_image(&mut expected, &mut probe_cache).expect("the probe upload advances");
-    let first_packet_end = expected
-        .windows(2)
-        .position(|bytes| bytes == b"\x1b\\")
-        .map(|index| index + 2)
-        .expect("the first Kitty packet has a string terminator");
-    let partial_len = first_packet_end
-        .checked_sub(1)
-        .expect("the packet is nonempty");
-
-    let mut cache = KittyImageCache::default();
-    write_kitty_frame(
-        &mut Vec::new(),
-        &mut cache,
-        std::slice::from_ref(&paint),
-        None,
-    )
-    .expect("the upload is queued");
-    let mut writer = PartialThenAccept {
-        output: Vec::new(),
-        limit: partial_len,
-        failed: false,
-    };
-    let error = advance_kitty_image(&mut writer, &mut cache)
-        .expect_err("the partial Kitty packet should fail");
-    assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
-    assert!(cache.needs_abort);
+    let partial = b"\x1b_Ga=t,f=32,s=1,v=1,I=1,q=2,o=z,m=1;AAAA";
+    let mut writer = partial.to_vec();
 
     let claimed = AtomicBool::new(false);
     write_terminal_cleanup(&mut writer, GraphicsSupport::Kitty, &claimed)
-        .expect("cleanup writes after the partial packet failure");
-    assert_eq!(&writer.output[..partial_len], &expected[..partial_len]);
+        .expect("cleanup writes after the partial packet");
     assert_eq!(
-        &writer.output[partial_len..],
+        &writer[partial.len()..],
         b"\x18\x1b\\\x1b_Ga=d,d=A,q=2;\x1b\\\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?1049l\x1b[?25h\x1b[0 q"
     );
 
     let mut engine = TerminalEngine::new(PtySize { cols: 80, rows: 24 });
-    assert!(engine.advance(&writer.output).is_empty());
+    assert!(engine.advance(&writer).is_empty());
     assert!(engine.take_graphics().is_empty());
     assert!(engine.finish().is_empty());
 }
@@ -1530,1265 +2337,6 @@ fn terminal_runtime_discards_capability_reply_events() {
 }
 
 #[test]
-fn kitty_writer_uploads_full_rgba_places_its_crop_and_restores_cursor() {
-    let paint = ImagePaint::new(
-        PaneId::new(),
-        4,
-        Arc::new(koshi_terminal::graphics::ImageRecord {
-            protocol: koshi_terminal::graphics::GraphicsProtocol::Kitty,
-            image: (koshi_terminal::graphics::DecodedImage {
-                width: 2,
-                height: 2,
-                rgba: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
-            })
-            .into(),
-            animation: None,
-            action: koshi_terminal::graphics::ImageAction::TransmitAndDisplay,
-            display: koshi_terminal::graphics::ImageDisplay::default(),
-            anchor: (0, 0),
-        }),
-        Rect {
-            x: 3,
-            y: 4,
-            width: 2,
-            height: 1,
-        },
-        ImageSourceRect {
-            x: 0,
-            y: 1,
-            width: 2,
-            height: 1,
-        },
-        -2,
-    );
-    let mut output = Vec::new();
-    let mut cache = KittyImageCache::default();
-
-    write_complete_kitty_frame(&mut output, &mut cache, &[paint], Some(Position::new(8, 9)))
-        .expect("Kitty output writes");
-
-    let payload = "eAFjZGJmYWVj5+Dk4ubh5eMXAAADQACJ";
-    assert_eq!(
-        output,
-        format!("\x1b_Ga=t,f=32,s=2,v=2,I=1,q=2,o=z,m=0;{payload}\x1b\\\x1b[5;4H\x1b_Ga=p,I=1,p=1,x=0,y=1,w=2,h=1,c=2,r=1,C=1,z=-2,q=2;\x1b\\\x1b[10;9H").into_bytes()
-    );
-}
-
-#[test]
-fn kitty_writer_emits_sixel_and_iterm_rgba_through_kitty() {
-    let payload = "eAFjZGJmAQAAGAAL";
-    let expected = format!(
-        "\x1b_Ga=t,f=32,s=1,v=1,I=1,q=2,o=z,m=0;{payload}\x1b\\\
-         \x1b[3;2H\x1b_Ga=p,I=1,p=1,x=0,y=0,w=1,h=1,c=1,r=1,C=1,z=0,q=2;\x1b\\\
-         \x1b[?25l"
-    )
-    .into_bytes();
-    for protocol in [
-        koshi_terminal::graphics::GraphicsProtocol::Sixel,
-        koshi_terminal::graphics::GraphicsProtocol::Iterm2,
-    ] {
-        let paint = ImagePaint::new(
-            PaneId::new(),
-            4,
-            Arc::new(koshi_terminal::graphics::ImageRecord {
-                protocol,
-                image: (koshi_terminal::graphics::DecodedImage {
-                    width: 1,
-                    height: 1,
-                    rgba: vec![1, 2, 3, 4],
-                })
-                .into(),
-                animation: None,
-                action: koshi_terminal::graphics::ImageAction::Display,
-                display: koshi_terminal::graphics::ImageDisplay::default(),
-                anchor: (0, 0),
-            }),
-            Rect::new(1, 2, 1, 1),
-            ImageSourceRect {
-                x: 0,
-                y: 0,
-                width: 1,
-                height: 1,
-            },
-            0,
-        );
-        let mut output = Vec::new();
-        let mut cache = KittyImageCache::default();
-
-        write_complete_kitty_frame(&mut output, &mut cache, &[paint], None)
-            .expect("decoded image output writes");
-
-        assert_eq!(output, expected, "{protocol:?}");
-    }
-}
-
-#[test]
-fn kitty_writer_reuses_an_unchanged_placement_without_output() {
-    let paint = ImagePaint::new(
-        PaneId::new(),
-        4,
-        Arc::new(koshi_terminal::graphics::ImageRecord {
-            protocol: koshi_terminal::graphics::GraphicsProtocol::Kitty,
-            image: (koshi_terminal::graphics::DecodedImage {
-                width: 1,
-                height: 1,
-                rgba: vec![1, 2, 3, 4],
-            })
-            .into(),
-            animation: None,
-            action: koshi_terminal::graphics::ImageAction::Display,
-            display: koshi_terminal::graphics::ImageDisplay::default(),
-            anchor: (0, 0),
-        }),
-        Rect {
-            x: 1,
-            y: 2,
-            width: 1,
-            height: 1,
-        },
-        ImageSourceRect {
-            x: 0,
-            y: 0,
-            width: 1,
-            height: 1,
-        },
-        0,
-    );
-    let mut cache = KittyImageCache::default();
-    let mut first = Vec::new();
-    write_complete_kitty_frame(&mut first, &mut cache, std::slice::from_ref(&paint), None)
-        .expect("the first Kitty frame writes");
-    let mut second = Vec::new();
-
-    write_kitty_frame(&mut second, &mut cache, &[paint], None)
-        .expect("the repeated Kitty frame writes");
-
-    assert_eq!(second, Vec::<u8>::new());
-}
-
-#[test]
-fn kitty_writer_places_each_image_once_as_one_frame_finishes_uploading() {
-    let pane_id = PaneId::new();
-    let record = Arc::new(koshi_terminal::graphics::ImageRecord {
-        protocol: koshi_terminal::graphics::GraphicsProtocol::Kitty,
-        image: (koshi_terminal::graphics::DecodedImage {
-            width: 1,
-            height: 1,
-            rgba: vec![1, 2, 3, 4],
-        })
-        .into(),
-        animation: None,
-        action: koshi_terminal::graphics::ImageAction::Display,
-        display: koshi_terminal::graphics::ImageDisplay::default(),
-        anchor: (0, 0),
-    });
-    let first = ImagePaint::new(
-        pane_id,
-        1,
-        Arc::clone(&record),
-        Rect::new(0, 0, 1, 1),
-        ImageSourceRect {
-            x: 0,
-            y: 0,
-            width: 1,
-            height: 1,
-        },
-        0,
-    );
-    let second = ImagePaint::new(
-        pane_id,
-        2,
-        record,
-        Rect::new(1, 0, 1, 1),
-        ImageSourceRect {
-            x: 0,
-            y: 0,
-            width: 1,
-            height: 1,
-        },
-        0,
-    );
-    let mut output = Vec::new();
-    let mut cache = KittyImageCache::default();
-
-    write_complete_kitty_frame(&mut output, &mut cache, &[first, second], None)
-        .expect("both Kitty images finish");
-
-    let payload = "eAFjZGJmAQAAGAAL";
-    assert_eq!(
-        output,
-        format!(
-            "\x1b_Ga=t,f=32,s=1,v=1,I=1,q=2,o=z,m=0;{payload}\x1b\\\
-             \x1b[1;1H\x1b_Ga=p,I=1,p=1,x=0,y=0,w=1,h=1,c=1,r=1,C=1,z=0,q=2;\x1b\\\
-             \x1b[?25l\
-             \x1b_Ga=t,f=32,s=1,v=1,I=2,q=2,o=z,m=0;{payload}\x1b\\\
-             \x1b[1;2H\x1b_Ga=p,I=2,p=2,x=0,y=0,w=1,h=1,c=1,r=1,C=1,z=0,q=2;\x1b\\\
-             \x1b[?25l"
-        )
-        .into_bytes()
-    );
-}
-
-#[test]
-fn kitty_writer_uploads_shared_content_once_for_two_placements() {
-    let pane_id = PaneId::new();
-    let record = Arc::new(koshi_terminal::graphics::ImageRecord {
-        protocol: koshi_terminal::graphics::GraphicsProtocol::Kitty,
-        image: (koshi_terminal::graphics::DecodedImage {
-            width: 1,
-            height: 1,
-            rgba: vec![1, 2, 3, 4],
-        })
-        .into(),
-        animation: None,
-        action: koshi_terminal::graphics::ImageAction::Display,
-        display: koshi_terminal::graphics::ImageDisplay::default(),
-        anchor: (0, 0),
-    });
-    let first = ImagePaint::new(
-        pane_id,
-        1,
-        Arc::clone(&record),
-        Rect::new(0, 0, 1, 1),
-        ImageSourceRect {
-            x: 0,
-            y: 0,
-            width: 1,
-            height: 1,
-        },
-        0,
-    );
-    let mut second = ImagePaint::new(
-        pane_id,
-        2,
-        record,
-        Rect::new(1, 0, 1, 1),
-        ImageSourceRect {
-            x: 0,
-            y: 0,
-            width: 1,
-            height: 1,
-        },
-        0,
-    );
-    second.content_id = first.content_id;
-    let mut output = Vec::new();
-    let mut cache = KittyImageCache::default();
-
-    write_complete_kitty_frame(&mut output, &mut cache, &[first, second], None)
-        .expect("both Kitty placements finish");
-
-    let payload = "eAFjZGJmAQAAGAAL";
-    assert_eq!(
-        output,
-        format!(
-            "\x1b_Ga=t,f=32,s=1,v=1,I=1,q=2,o=z,m=0;{payload}\x1b\\\
-             \x1b[1;1H\x1b_Ga=p,I=1,p=1,x=0,y=0,w=1,h=1,c=1,r=1,C=1,z=0,q=2;\x1b\\\
-             \x1b[1;2H\x1b_Ga=p,I=1,p=2,x=0,y=0,w=1,h=1,c=1,r=1,C=1,z=0,q=2;\x1b\\\
-             \x1b[?25l"
-        )
-        .into_bytes()
-    );
-    assert_eq!(cache.images.len(), 1);
-    assert_eq!(cache.placements.len(), 2);
-}
-
-#[test]
-fn kitty_writer_rejects_one_content_identity_for_different_records() {
-    let pane_id = PaneId::new();
-    let record = |rgba| {
-        Arc::new(koshi_terminal::graphics::ImageRecord {
-            protocol: koshi_terminal::graphics::GraphicsProtocol::Kitty,
-            image: (koshi_terminal::graphics::DecodedImage {
-                width: 1,
-                height: 1,
-                rgba,
-            })
-            .into(),
-            animation: None,
-            action: koshi_terminal::graphics::ImageAction::Display,
-            display: koshi_terminal::graphics::ImageDisplay::default(),
-            anchor: (0, 0),
-        })
-    };
-    let paint = |placement_id, rgba| {
-        ImagePaint::new(
-            pane_id,
-            placement_id,
-            record(rgba),
-            Rect::new(placement_id as u16 - 1, 0, 1, 1),
-            ImageSourceRect {
-                x: 0,
-                y: 0,
-                width: 1,
-                height: 1,
-            },
-            0,
-        )
-    };
-    let first = paint(1, vec![1, 2, 3, 4]);
-    let mut second = paint(2, vec![5, 6, 7, 8]);
-    second.content_id = first.content_id;
-    let mut output = Vec::new();
-    let mut cache = KittyImageCache::default();
-
-    let error = write_kitty_frame(&mut output, &mut cache, &[first, second], None)
-        .expect_err("one content identity cannot name different records");
-
-    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-    assert_eq!(
-        error.to_string(),
-        "image content identity names different pixel records"
-    );
-    assert_eq!(output, Vec::<u8>::new());
-    assert!(cache.images.is_empty());
-    assert!(cache.placements.is_empty());
-}
-
-#[test]
-fn kitty_writer_deletes_one_shared_placement_without_deleting_its_pixels() {
-    let pane_id = PaneId::new();
-    let record = Arc::new(koshi_terminal::graphics::ImageRecord {
-        protocol: koshi_terminal::graphics::GraphicsProtocol::Kitty,
-        image: (koshi_terminal::graphics::DecodedImage {
-            width: 1,
-            height: 1,
-            rgba: vec![1, 2, 3, 4],
-        })
-        .into(),
-        animation: None,
-        action: koshi_terminal::graphics::ImageAction::Display,
-        display: koshi_terminal::graphics::ImageDisplay::default(),
-        anchor: (0, 0),
-    });
-    let first = ImagePaint::new(
-        pane_id,
-        1,
-        Arc::clone(&record),
-        Rect::new(0, 0, 1, 1),
-        ImageSourceRect {
-            x: 0,
-            y: 0,
-            width: 1,
-            height: 1,
-        },
-        0,
-    );
-    let mut second = ImagePaint::new(
-        pane_id,
-        2,
-        record,
-        Rect::new(1, 0, 1, 1),
-        ImageSourceRect {
-            x: 0,
-            y: 0,
-            width: 1,
-            height: 1,
-        },
-        0,
-    );
-    second.content_id = first.content_id;
-    let mut cache = KittyImageCache::default();
-    write_complete_kitty_frame(&mut Vec::new(), &mut cache, &[first.clone(), second], None)
-        .expect("both placements finish");
-    let mut output = Vec::new();
-
-    write_kitty_frame(&mut output, &mut cache, &[first], None).expect("the smaller frame writes");
-
-    assert_eq!(output, b"\x1b_Ga=d,d=n,I=1,p=2,q=2;\x1b\\");
-    assert_eq!(cache.images.len(), 1);
-    assert_eq!(cache.placements.len(), 1);
-}
-
-#[test]
-fn kitty_writer_replaces_an_unsent_upload_with_the_newest_frame() {
-    let pane_id = PaneId::new();
-    let mut first = ImagePaint::new(
-        pane_id,
-        4,
-        Arc::new(koshi_terminal::graphics::ImageRecord {
-            protocol: koshi_terminal::graphics::GraphicsProtocol::Kitty,
-            image: (koshi_terminal::graphics::DecodedImage {
-                width: 1,
-                height: 1,
-                rgba: vec![1, 2, 3, 4],
-            })
-            .into(),
-            animation: None,
-            action: koshi_terminal::graphics::ImageAction::Display,
-            display: koshi_terminal::graphics::ImageDisplay::default(),
-            anchor: (0, 0),
-        }),
-        Rect::new(0, 0, 1, 1),
-        ImageSourceRect {
-            x: 0,
-            y: 0,
-            width: 1,
-            height: 1,
-        },
-        0,
-    );
-    first.content_id = 10;
-    let mut second = first.clone();
-    second.content_id = 11;
-    second.record = Arc::new(koshi_terminal::graphics::ImageRecord {
-        protocol: koshi_terminal::graphics::GraphicsProtocol::Kitty,
-        image: (koshi_terminal::graphics::DecodedImage {
-            width: 1,
-            height: 1,
-            rgba: vec![5, 6, 7, 8],
-        })
-        .into(),
-        animation: None,
-        action: koshi_terminal::graphics::ImageAction::Display,
-        display: koshi_terminal::graphics::ImageDisplay::default(),
-        anchor: (0, 0),
-    });
-    let mut cache = KittyImageCache::default();
-    let mut output = Vec::new();
-
-    write_kitty_frame(&mut output, &mut cache, std::slice::from_ref(&first), None)
-        .expect("the first upload is queued");
-    write_kitty_frame(&mut output, &mut cache, std::slice::from_ref(&second), None)
-        .expect("the newest upload replaces the unsent one");
-
-    assert_eq!(output, Vec::<u8>::new());
-    let upload = cache.upload.as_ref().expect("the newest upload is queued");
-    assert_eq!(upload.content_id, 11);
-    assert!(Arc::ptr_eq(&upload.record, &second.record));
-    assert_eq!(upload.codec.image_number(), 2);
-    assert!(!upload.codec.started());
-}
-
-#[test]
-fn kitty_writer_places_a_started_upload_at_the_newest_frame_position() {
-    let pane_id = PaneId::new();
-    let record = Arc::new(koshi_terminal::graphics::ImageRecord {
-        protocol: koshi_terminal::graphics::GraphicsProtocol::Kitty,
-        image: (koshi_terminal::graphics::DecodedImage {
-            width: 16_384,
-            height: 4,
-            rgba: {
-                let mut state = 0x1234_5678u32;
-                (0..262_144)
-                    .map(|_| {
-                        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-                        state.to_be_bytes()[0]
-                    })
-                    .collect()
-            },
-        })
-        .into(),
-        animation: None,
-        action: koshi_terminal::graphics::ImageAction::Display,
-        display: koshi_terminal::graphics::ImageDisplay::default(),
-        anchor: (0, 0),
-    });
-    let first = ImagePaint::new(
-        pane_id,
-        4,
-        Arc::clone(&record),
-        Rect::new(1, 2, 1, 1),
-        ImageSourceRect {
-            x: 0,
-            y: 0,
-            width: 16_384,
-            height: 4,
-        },
-        0,
-    );
-    let second = ImagePaint::new(
-        pane_id,
-        4,
-        record,
-        Rect::new(7, 8, 1, 1),
-        ImageSourceRect {
-            x: 0,
-            y: 0,
-            width: 16_384,
-            height: 4,
-        },
-        0,
-    );
-    let mut cache = KittyImageCache::default();
-    let mut discarded = Vec::new();
-    write_kitty_frame(&mut discarded, &mut cache, &[first], None)
-        .expect("the first frame queues its upload");
-    advance_kitty_image(&mut discarded, &mut cache).expect("the first upload starts");
-    assert!(cache
-        .upload
-        .as_ref()
-        .is_some_and(|upload| upload.codec.started()));
-    let mut output = Vec::new();
-
-    write_kitty_frame(&mut output, &mut cache, &[second], None)
-        .expect("the newer frame keeps the started upload");
-    while kitty_image_work_pending(&cache) {
-        advance_kitty_image(&mut output, &mut cache)
-            .expect("the started upload finishes at the newer position");
-    }
-
-    assert!(output
-        .windows(b"\x1b[9;8H".len())
-        .any(|bytes| bytes == b"\x1b[9;8H"));
-    assert!(output
-        .windows(b"\x1b_Ga=p,I=1,p=1,x=0,y=0,w=16384,h=4,c=1,r=1,C=1,z=0,q=2;\x1b\\".len())
-        .any(|bytes| {
-            bytes == b"\x1b_Ga=p,I=1,p=1,x=0,y=0,w=16384,h=4,c=1,r=1,C=1,z=0,q=2;\x1b\\"
-        }));
-    assert!(output.ends_with(b"\x1b[?25l"));
-    assert_eq!(cache.upload.as_ref().map(|upload| upload.content_id), None);
-}
-
-#[test]
-fn kitty_writer_removes_a_cached_image_during_another_upload() {
-    let pane_id = PaneId::new();
-    let cached = one_cell_image_paint(pane_id, 1, [1, 2, 3, 4], Rect::new(0, 0, 1, 1));
-    let uploading = large_upload_image_paint(pane_id, 2, Rect::new(1, 0, 1, 1));
-    let mut cache = KittyImageCache::default();
-    write_complete_kitty_frame(
-        &mut Vec::new(),
-        &mut cache,
-        std::slice::from_ref(&cached),
-        None,
-    )
-    .expect("the cached image finishes");
-    write_kitty_frame(
-        &mut Vec::new(),
-        &mut cache,
-        &[uploading.clone(), cached],
-        None,
-    )
-    .expect("the second image is queued");
-    advance_kitty_image(&mut Vec::new(), &mut cache).expect("the second image starts");
-    assert!(cache
-        .upload
-        .as_ref()
-        .is_some_and(|upload| upload.codec.started()));
-    let mut output = Vec::new();
-
-    write_kitty_frame(
-        &mut output,
-        &mut cache,
-        std::slice::from_ref(&uploading),
-        None,
-    )
-    .expect("the cached image is removed");
-
-    assert_eq!(
-        output,
-        b"\x1b_Ga=d,d=N,I=2,q=2;\x1b\\\x1b_Ga=d,d=N,I=1,q=2;\x1b\\"
-    );
-    let upload = cache.upload.as_ref().expect("the required image restarts");
-    assert_eq!(upload.content_id, uploading.content_id);
-    assert_eq!(upload.codec.image_number(), 3);
-    assert!(!upload.codec.started());
-}
-
-#[test]
-fn kitty_writer_moves_a_cached_image_during_another_upload() {
-    let pane_id = PaneId::new();
-    let cached = one_cell_image_paint(pane_id, 1, [1, 2, 3, 4], Rect::new(0, 0, 1, 1));
-    let uploading = large_upload_image_paint(pane_id, 2, Rect::new(1, 0, 1, 1));
-    let mut moved = cached.clone();
-    moved.target = Rect::new(7, 8, 1, 1);
-    let mut cache = KittyImageCache::default();
-    write_complete_kitty_frame(
-        &mut Vec::new(),
-        &mut cache,
-        std::slice::from_ref(&cached),
-        None,
-    )
-    .expect("the cached image finishes");
-    write_kitty_frame(
-        &mut Vec::new(),
-        &mut cache,
-        &[uploading.clone(), cached],
-        None,
-    )
-    .expect("the second image is queued");
-    advance_kitty_image(&mut Vec::new(), &mut cache).expect("the second image starts");
-    assert!(cache
-        .upload
-        .as_ref()
-        .is_some_and(|upload| upload.codec.started()));
-    let mut output = Vec::new();
-
-    write_kitty_frame(&mut output, &mut cache, &[uploading.clone(), moved], None)
-        .expect("the cached image moves");
-
-    assert_eq!(
-        output,
-        b"\x1b_Ga=d,d=N,I=2,q=2;\x1b\\\x1b[9;8H\x1b_Ga=p,I=1,p=1,x=0,y=0,w=1,h=1,c=1,r=1,C=1,z=0,q=2;\x1b\\\x1b[?25l"
-    );
-    let upload = cache.upload.as_ref().expect("the required image restarts");
-    assert_eq!(upload.content_id, uploading.content_id);
-    assert_eq!(upload.codec.image_number(), 3);
-    assert!(!upload.codec.started());
-}
-
-#[test]
-fn kitty_writer_invalidates_cache_when_an_upload_abort_write_fails() {
-    let pane_id = PaneId::new();
-    let cached = one_cell_image_paint(pane_id, 1, [1, 2, 3, 4], Rect::new(0, 0, 1, 1));
-    let uploading = large_upload_image_paint(pane_id, 2, Rect::new(1, 0, 1, 1));
-    let mut moved = cached.clone();
-    moved.target = Rect::new(7, 8, 1, 1);
-    let mut cache = KittyImageCache::default();
-    write_complete_kitty_frame(
-        &mut Vec::new(),
-        &mut cache,
-        std::slice::from_ref(&cached),
-        None,
-    )
-    .expect("the cached image finishes");
-    write_kitty_frame(
-        &mut Vec::new(),
-        &mut cache,
-        &[uploading.clone(), cached],
-        None,
-    )
-    .expect("the second image is queued");
-    advance_kitty_image(&mut Vec::new(), &mut cache).expect("the second image starts");
-    assert!(cache
-        .upload
-        .as_ref()
-        .is_some_and(|upload| upload.codec.started()));
-
-    let error = write_kitty_frame(&mut FailingWriter, &mut cache, &[uploading, moved], None)
-        .expect_err("the abort write fails");
-
-    assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
-    assert!(cache.images.is_empty());
-    assert!(cache.placements.is_empty());
-    assert!(cache.upload.is_none());
-    assert!(cache.needs_reset);
-    assert!(cache.needs_abort);
-    assert_eq!(cache.next_image_number, 1);
-    assert_eq!(cache.next_placement_id, 1);
-}
-
-#[test]
-fn kitty_writer_aborts_a_started_upload_replaced_by_a_new_record() {
-    let pane_id = PaneId::new();
-    let mut value = 1u32;
-    let rgba = (0..(256 * 256 * 4))
-        .map(|_| {
-            value = value.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            value.to_be_bytes()[0]
-        })
-        .collect();
-    let first = ImagePaint::new(
-        pane_id,
-        4,
-        Arc::new(koshi_terminal::graphics::ImageRecord {
-            protocol: koshi_terminal::graphics::GraphicsProtocol::Kitty,
-            image: (koshi_terminal::graphics::DecodedImage {
-                width: 256,
-                height: 256,
-                rgba,
-            })
-            .into(),
-            animation: None,
-            action: koshi_terminal::graphics::ImageAction::Display,
-            display: koshi_terminal::graphics::ImageDisplay::default(),
-            anchor: (0, 0),
-        }),
-        Rect::new(1, 2, 1, 1),
-        ImageSourceRect {
-            x: 0,
-            y: 0,
-            width: 256,
-            height: 256,
-        },
-        0,
-    );
-    let mut second = ImagePaint::new(
-        pane_id,
-        4,
-        Arc::new(koshi_terminal::graphics::ImageRecord {
-            protocol: koshi_terminal::graphics::GraphicsProtocol::Sixel,
-            image: (koshi_terminal::graphics::DecodedImage {
-                width: 1,
-                height: 1,
-                rgba: vec![5, 6, 7, 8],
-            })
-            .into(),
-            animation: None,
-            action: koshi_terminal::graphics::ImageAction::Display,
-            display: koshi_terminal::graphics::ImageDisplay::default(),
-            anchor: (0, 0),
-        }),
-        Rect::new(7, 8, 1, 1),
-        ImageSourceRect {
-            x: 0,
-            y: 0,
-            width: 1,
-            height: 1,
-        },
-        0,
-    );
-    second.content_id = 5;
-    let mut cache = KittyImageCache::default();
-    let mut output = Vec::new();
-    write_kitty_frame(&mut output, &mut cache, &[first], None)
-        .expect("the first frame queues its upload");
-    advance_kitty_image(&mut output, &mut cache).expect("the first upload sends one slice");
-    let upload = cache
-        .upload
-        .as_ref()
-        .expect("the large first upload remains open after one slice");
-    assert!(upload.codec.started());
-    output.clear();
-
-    write_kitty_frame(&mut output, &mut cache, std::slice::from_ref(&second), None)
-        .expect("the replacement frame aborts the old upload");
-
-    assert_eq!(output, b"\x1b_Ga=d,d=A,q=2;\x1b\\");
-    let upload = cache
-        .upload
-        .as_ref()
-        .expect("the replacement upload starts");
-    assert_eq!(upload.content_id, 5);
-    assert!(Arc::ptr_eq(&upload.record, &second.record));
-    assert_eq!(upload.codec.image_number(), 1);
-    assert!(!upload.codec.started());
-    assert!(!cache.needs_reset);
-}
-
-#[test]
-fn kitty_writer_deletes_pixel_data_when_a_placement_leaves_the_frame() {
-    let paint = ImagePaint::new(
-        PaneId::new(),
-        4,
-        Arc::new(koshi_terminal::graphics::ImageRecord {
-            protocol: koshi_terminal::graphics::GraphicsProtocol::Kitty,
-            image: (koshi_terminal::graphics::DecodedImage {
-                width: 1,
-                height: 1,
-                rgba: vec![1, 2, 3, 4],
-            })
-            .into(),
-            animation: None,
-            action: koshi_terminal::graphics::ImageAction::Display,
-            display: koshi_terminal::graphics::ImageDisplay::default(),
-            anchor: (0, 0),
-        }),
-        Rect::new(0, 0, 1, 1),
-        ImageSourceRect {
-            x: 0,
-            y: 0,
-            width: 1,
-            height: 1,
-        },
-        0,
-    );
-    let mut cache = KittyImageCache::default();
-    write_complete_kitty_frame(&mut Vec::new(), &mut cache, &[paint], None)
-        .expect("the image frame writes");
-    let mut output = Vec::new();
-
-    write_kitty_frame(&mut output, &mut cache, &[], None)
-        .expect("the frame without the image writes");
-
-    assert_eq!(output, b"\x1b_Ga=d,d=N,I=1,q=2;\x1b\\");
-    assert!(cache.images.is_empty());
-}
-
-#[test]
-fn kitty_writer_replaces_pixels_but_keeps_the_placement_identity() {
-    let pane_id = PaneId::new();
-    let mut first = ImagePaint::new(
-        pane_id,
-        4,
-        Arc::new(koshi_terminal::graphics::ImageRecord {
-            protocol: koshi_terminal::graphics::GraphicsProtocol::Kitty,
-            image: (koshi_terminal::graphics::DecodedImage {
-                width: 1,
-                height: 1,
-                rgba: vec![1, 2, 3, 4],
-            })
-            .into(),
-            animation: None,
-            action: koshi_terminal::graphics::ImageAction::Display,
-            display: koshi_terminal::graphics::ImageDisplay::default(),
-            anchor: (0, 0),
-        }),
-        Rect::new(0, 0, 1, 1),
-        ImageSourceRect {
-            x: 0,
-            y: 0,
-            width: 1,
-            height: 1,
-        },
-        0,
-    );
-    first.content_id = 1;
-    let mut second = first.clone();
-    second.content_id = 2;
-    second.record = Arc::new(koshi_terminal::graphics::ImageRecord {
-        protocol: koshi_terminal::graphics::GraphicsProtocol::Kitty,
-        image: (koshi_terminal::graphics::DecodedImage {
-            width: 1,
-            height: 1,
-            rgba: vec![5, 6, 7, 8],
-        })
-        .into(),
-        animation: None,
-        action: koshi_terminal::graphics::ImageAction::Display,
-        display: koshi_terminal::graphics::ImageDisplay::default(),
-        anchor: (0, 0),
-    });
-    let mut cache = KittyImageCache::default();
-    write_complete_kitty_frame(&mut Vec::new(), &mut cache, &[first], None)
-        .expect("the first image frame writes");
-    let mut output = Vec::new();
-
-    write_complete_kitty_frame(&mut output, &mut cache, &[second], None)
-        .expect("the replacement image frame writes");
-
-    let payload = "eAFjZWPnAAAAQAAb";
-    assert_eq!(
-        output,
-        format!("\x1b_Ga=d,d=N,I=1,q=2;\x1b\\\x1b_Ga=t,f=32,s=1,v=1,I=2,q=2,o=z,m=0;{payload}\x1b\\\x1b[1;1H\x1b_Ga=p,I=2,p=1,x=0,y=0,w=1,h=1,c=1,r=1,C=1,z=0,q=2;\x1b\\\x1b[?25l").into_bytes()
-    );
-    let cached = cache.images.get(&2).expect("the replacement is cached");
-    assert_eq!(cached.image_number, 2);
-    assert_eq!(cache.placements[&(pane_id, 4)].id, 1);
-    assert_eq!(cache.placements[&(pane_id, 4)].content_id, 2);
-}
-
-#[test]
-fn kitty_writer_resets_and_reuploads_when_nonzero_ids_are_exhausted() {
-    let record = Arc::new(koshi_terminal::graphics::ImageRecord {
-        protocol: koshi_terminal::graphics::GraphicsProtocol::Kitty,
-        image: (koshi_terminal::graphics::DecodedImage {
-            width: 1,
-            height: 1,
-            rgba: vec![1, 2, 3, 4],
-        })
-        .into(),
-        animation: None,
-        action: koshi_terminal::graphics::ImageAction::Display,
-        display: koshi_terminal::graphics::ImageDisplay::default(),
-        anchor: (0, 0),
-    });
-    let first = ImagePaint::new(
-        PaneId::new(),
-        1,
-        Arc::clone(&record),
-        Rect::new(0, 0, 1, 1),
-        ImageSourceRect {
-            x: 0,
-            y: 0,
-            width: 1,
-            height: 1,
-        },
-        0,
-    );
-    let second = ImagePaint::new(
-        PaneId::new(),
-        2,
-        record,
-        Rect::new(1, 0, 1, 1),
-        ImageSourceRect {
-            x: 0,
-            y: 0,
-            width: 1,
-            height: 1,
-        },
-        0,
-    );
-    let mut cache = KittyImageCache {
-        next_image_number: u32::MAX,
-        next_placement_id: u32::MAX,
-        ..KittyImageCache::default()
-    };
-    write_complete_kitty_frame(
-        &mut Vec::new(),
-        &mut cache,
-        std::slice::from_ref(&first),
-        None,
-    )
-    .expect("the last available ids are used");
-    let mut output = Vec::new();
-
-    write_complete_kitty_frame(&mut output, &mut cache, &[first, second], None)
-        .expect("the exhausted cache resets and paints both images");
-
-    assert!(output.starts_with(b"\x1b_Ga=d,d=A,q=2;\x1b\\"));
-    assert_eq!(cache.images.len(), 2);
-    assert_eq!(cache.next_image_number, 3);
-    assert_eq!(cache.next_placement_id, 3);
-}
-
-#[test]
-fn kitty_writer_emits_first_cell_offsets_and_hides_an_absent_cursor() {
-    let paint = ImagePaint::new(
-        PaneId::new(),
-        4,
-        Arc::new(koshi_terminal::graphics::ImageRecord {
-            protocol: koshi_terminal::graphics::GraphicsProtocol::Kitty,
-            image: (koshi_terminal::graphics::DecodedImage {
-                width: 1,
-                height: 1,
-                rgba: vec![1, 2, 3, 4],
-            })
-            .into(),
-            animation: None,
-            action: koshi_terminal::graphics::ImageAction::TransmitAndDisplay,
-            display: koshi_terminal::graphics::ImageDisplay {
-                cell_offset_x: Some(4),
-                cell_offset_y: Some(5),
-                ..koshi_terminal::graphics::ImageDisplay::default()
-            },
-            anchor: (0, 0),
-        }),
-        Rect {
-            x: 1,
-            y: 2,
-            width: 1,
-            height: 1,
-        },
-        ImageSourceRect {
-            x: 0,
-            y: 0,
-            width: 1,
-            height: 1,
-        },
-        0,
-    );
-    let mut output = Vec::new();
-    let mut cache = KittyImageCache::default();
-
-    write_complete_kitty_frame(&mut output, &mut cache, &[paint], None)
-        .expect("Kitty output writes");
-
-    let payload = "eAFjZGJmAQAAGAAL";
-    assert_eq!(
-        output,
-        format!("\x1b_Ga=t,f=32,s=1,v=1,I=1,q=2,o=z,m=0;{payload}\x1b\\\x1b[3;2H\x1b_Ga=p,I=1,p=1,x=0,y=0,w=1,h=1,X=4,Y=5,c=1,r=1,C=1,z=0,q=2;\x1b\\\x1b[?25l").into_bytes()
-    );
-}
-
-#[test]
-fn native_image_write_failure_reaches_the_paint_caller() {
-    let fake = Arc::new(FakePtyBackend::new());
-    let (mut server, client_id, pane_id) = boot(&fake);
-    let _ = server.handle_runtime_event(RuntimeEvent::PtyOutput {
-        pane_id,
-        bytes: b"\x1b_Ga=T,f=32,s=1,v=1,c=1,r=1,C=1;/wAA/w==\x1b\\".to_vec(),
-    });
-    let client = test_client(&mut server, client_id);
-    let snapshot = frame(&server, client_id);
-    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
-    let mut writer = FailingWriter;
-    let mut images = KittyImageCache::default();
-    let mut output = ImageOutputState::disabled();
-    let committed_regions = regions(VIEWPORT);
-    let paints = image_paints(&snapshot, &committed_regions, Rect::new(0, 0, 80, 24));
-    write_complete_kitty_frame(&mut Vec::new(), &mut images, &paints, None)
-        .expect("the terminal cache is primed");
-    let placement = images
-        .placements
-        .values_mut()
-        .next()
-        .expect("the image has one cached placement");
-    placement.target.x = placement.target.x.checked_add(1).expect("one spare column");
-
-    let error = paint_frame_with_writer(
-        &mut writer,
-        &mut terminal,
-        &client,
-        &snapshot,
-        &committed_regions,
-        &ViewerPaint::from_frame(&client, &snapshot),
-        ImageRenderMode::Native,
-        &mut images,
-        &mut output,
-        None,
-        &mut String::new(),
-        &mut None,
-    )
-    .expect_err("a failed native image writer rejects the frame");
-
-    match error {
-        PaintError::Image(error) => assert_eq!(error.kind(), io::ErrorKind::BrokenPipe),
-        PaintError::Backend(error) => panic!("unexpected backend error: {error:?}"),
-    }
-    assert!(images.needs_abort);
-}
-
-#[test]
-fn kitty_writer_clears_cached_ids_after_an_image_write_failure() {
-    let paint = ImagePaint::new(
-        PaneId::new(),
-        4,
-        Arc::new(koshi_terminal::graphics::ImageRecord {
-            protocol: koshi_terminal::graphics::GraphicsProtocol::Kitty,
-            image: (koshi_terminal::graphics::DecodedImage {
-                width: 1,
-                height: 1,
-                rgba: vec![1, 2, 3, 4],
-            })
-            .into(),
-            animation: None,
-            action: koshi_terminal::graphics::ImageAction::TransmitAndDisplay,
-            display: koshi_terminal::graphics::ImageDisplay::default(),
-            anchor: (0, 0),
-        }),
-        Rect {
-            x: 1,
-            y: 2,
-            width: 1,
-            height: 1,
-        },
-        ImageSourceRect {
-            x: 0,
-            y: 0,
-            width: 1,
-            height: 1,
-        },
-        0,
-    );
-    let mut writer = FailOnWrite {
-        fail_at: 0,
-        writes: 0,
-        output: Vec::new(),
-    };
-    let mut cache = KittyImageCache::default();
-
-    write_kitty_frame(&mut Vec::new(), &mut cache, &[paint], None).expect("the upload is queued");
-    let error = advance_kitty_image(&mut writer, &mut cache)
-        .expect_err("a failed image write should reach the caller");
-
-    assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
-    assert_eq!(writer.output, Vec::<u8>::new());
-    assert!(cache.images.is_empty());
-    assert!(cache.needs_reset);
-    assert!(cache.needs_abort);
-}
-
-#[test]
-fn kitty_writer_aborts_after_a_partial_upload_write_before_reset() {
-    let paint = large_upload_image_paint(PaneId::new(), 4, Rect::new(0, 0, 1, 1));
-    let mut probe_cache = KittyImageCache::default();
-    write_kitty_frame(
-        &mut Vec::new(),
-        &mut probe_cache,
-        std::slice::from_ref(&paint),
-        None,
-    )
-    .expect("the probe upload is queued");
-    let mut expected = Vec::new();
-    advance_kitty_image(&mut expected, &mut probe_cache).expect("the probe upload advances");
-    let first_packet_end = expected
-        .windows(2)
-        .position(|bytes| bytes == b"\x1b\\")
-        .map(|index| index + 2)
-        .expect("the first Kitty packet has a string terminator");
-    assert!(first_packet_end < expected.len());
-
-    let mut cache = KittyImageCache::default();
-    write_kitty_frame(
-        &mut Vec::new(),
-        &mut cache,
-        std::slice::from_ref(&paint),
-        None,
-    )
-    .expect("the upload is queued");
-    let mut writer = FailAfter {
-        output: Vec::new(),
-        limit: first_packet_end,
-    };
-    let error = advance_kitty_image(&mut writer, &mut cache)
-        .expect_err("a write after the first Kitty packet should fail");
-
-    assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
-    assert_eq!(writer.output, expected[..first_packet_end]);
-    assert!(cache.images.is_empty());
-    assert!(cache.placements.is_empty());
-    assert!(cache.upload.is_none());
-    assert!(cache.needs_reset);
-    assert!(cache.needs_abort);
-
-    let mut reset_output = Vec::new();
-    write_kitty_frame(
-        &mut reset_output,
-        &mut cache,
-        std::slice::from_ref(&paint),
-        None,
-    )
-    .expect("the reset writes before queuing a replacement upload");
-    assert_eq!(reset_output, b"\x18\x1b\\\x1b_Ga=d,d=A,q=2;\x1b\\");
-    assert!(!cache.needs_reset);
-    assert!(!cache.needs_abort);
-    assert!(cache
-        .upload
-        .as_ref()
-        .is_some_and(|upload| !upload.codec.started()));
-}
-
-#[test]
-fn kitty_writer_flush_failure_reaches_the_paint_caller() {
-    let mut writer = FailingFlushWriter { output: Vec::new() };
-    let mut cache = KittyImageCache::default();
-    let paint = ImagePaint::new(
-        PaneId::new(),
-        4,
-        Arc::new(koshi_terminal::graphics::ImageRecord {
-            protocol: koshi_terminal::graphics::GraphicsProtocol::Kitty,
-            image: (koshi_terminal::graphics::DecodedImage {
-                width: 1,
-                height: 1,
-                rgba: vec![1, 2, 3, 4],
-            })
-            .into(),
-            animation: None,
-            action: koshi_terminal::graphics::ImageAction::Display,
-            display: koshi_terminal::graphics::ImageDisplay::default(),
-            anchor: (0, 0),
-        }),
-        Rect::new(0, 0, 1, 1),
-        ImageSourceRect {
-            x: 0,
-            y: 0,
-            width: 1,
-            height: 1,
-        },
-        0,
-    );
-    write_kitty_frame(&mut Vec::new(), &mut cache, &[paint], None).expect("the upload is queued");
-
-    let error = advance_kitty_image(&mut writer, &mut cache).expect_err("flush failure");
-
-    assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
-    assert!(writer
-        .output
-        .starts_with(b"\x1b_Ga=t,f=32,s=1,v=1,I=1,q=2,o=z,m=0;"));
-    assert!(cache.needs_reset);
-    assert!(cache.needs_abort);
-}
-
-#[test]
-fn kitty_writer_rejects_a_source_rectangle_outside_rgba_pixels() {
-    let paint = ImagePaint::new(
-        PaneId::new(),
-        4,
-        Arc::new(koshi_terminal::graphics::ImageRecord {
-            protocol: koshi_terminal::graphics::GraphicsProtocol::Kitty,
-            image: (koshi_terminal::graphics::DecodedImage {
-                width: 1,
-                height: 1,
-                rgba: vec![255, 0, 0, 255],
-            })
-            .into(),
-            animation: None,
-            action: koshi_terminal::graphics::ImageAction::TransmitAndDisplay,
-            display: koshi_terminal::graphics::ImageDisplay::default(),
-            anchor: (0, 0),
-        }),
-        Rect {
-            x: 0,
-            y: 0,
-            width: 1,
-            height: 1,
-        },
-        ImageSourceRect {
-            x: 1,
-            y: 0,
-            width: 1,
-            height: 1,
-        },
-        0,
-    );
-    let mut output = Vec::new();
-    let mut cache = KittyImageCache::default();
-
-    let error = write_kitty_frame(&mut output, &mut cache, &[paint], None)
-        .expect_err("invalid source is rejected");
-
-    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-    assert_eq!(output, Vec::<u8>::new());
-    assert!(cache.images.is_empty());
-}
-
-#[test]
-#[ignore = "release performance benchmark"]
-fn benchmark_kitty_upload_slices() {
-    const WIDTH: u32 = 2_048;
-    const HEIGHT: u32 = 1_338;
-    const RUNS: usize = 6;
-
-    let mut state = 0x1234_5678u32;
-    let rgba: Vec<u8> = (0..u64::from(WIDTH) * u64::from(HEIGHT) * 4)
-        .map(|_| {
-            state ^= state << 13;
-            state ^= state >> 17;
-            state ^= state << 5;
-            state as u8
-        })
-        .collect();
-    let paint = ImagePaint::new(
-        PaneId::new(),
-        1,
-        Arc::new(koshi_terminal::graphics::ImageRecord {
-            protocol: koshi_terminal::graphics::GraphicsProtocol::Kitty,
-            image: (koshi_terminal::graphics::DecodedImage {
-                width: WIDTH,
-                height: HEIGHT,
-                rgba,
-            })
-            .into(),
-            animation: None,
-            action: koshi_terminal::graphics::ImageAction::Display,
-            display: koshi_terminal::graphics::ImageDisplay::default(),
-            anchor: (0, 0),
-        }),
-        Rect::new(0, 0, 1, 1),
-        ImageSourceRect {
-            x: 0,
-            y: 0,
-            width: WIDTH,
-            height: HEIGHT,
-        },
-        0,
-    );
-    let mut totals = Vec::with_capacity(RUNS - 1);
-    let mut longest_steps = Vec::with_capacity(RUNS - 1);
-
-    for run in 0..RUNS {
-        let mut cache = KittyImageCache::default();
-        write_kitty_frame(
-            &mut io::sink(),
-            &mut cache,
-            std::slice::from_ref(&paint),
-            None,
-        )
-        .expect("the benchmark image is queued");
-        let started = Instant::now();
-        let mut longest_step = Duration::ZERO;
-        while kitty_image_work_pending(&cache) {
-            let step_started = Instant::now();
-            advance_kitty_image(&mut io::sink(), &mut cache).expect("the benchmark image advances");
-            longest_step = longest_step.max(step_started.elapsed());
-        }
-        if run != 0 {
-            totals.push(started.elapsed());
-            longest_steps.push(longest_step);
-        }
-    }
-
-    totals.sort_unstable();
-    longest_steps.sort_unstable();
-    println!(
-        "Kitty 10.45 MiB upload: median total {:?}, median longest step {:?}",
-        totals[totals.len() / 2],
-        longest_steps[longest_steps.len() / 2]
-    );
-}
-
-#[test]
 fn unsupported_paint_writes_no_terminal_image_output() {
     let fake = Arc::new(FakePtyBackend::new());
     let (mut server, client_id, pane_id) = boot(&fake);
@@ -2803,7 +2351,6 @@ fn unsupported_paint_writes_no_terminal_image_output() {
     let mut output = Vec::new();
     let mut last_title = window_title(&snapshot);
     let mut last_cursor = cursor_style(&snapshot);
-    let mut images = KittyImageCache::default();
     let mut image_output = ImageOutputState::disabled();
 
     paint_frame_with_writer(
@@ -2814,7 +2361,6 @@ fn unsupported_paint_writes_no_terminal_image_output() {
         &regions(VIEWPORT),
         &ViewerPaint::from_frame(&client, &snapshot),
         ImageRenderMode::Placeholder,
-        &mut images,
         &mut image_output,
         None,
         &mut last_title,

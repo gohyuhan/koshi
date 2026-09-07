@@ -16,7 +16,11 @@ use crate::graphics::{
     DecodedAnimation, GraphicsProtocol, ImageAction, ImageDimension, ImageRecord, MAX_IMAGE_SIDE,
 };
 use crate::grid::state::{Grid, ImagePlaceholder};
+
+mod coverage;
 use crate::state::{Screen, TerminalState};
+pub(in crate::state) use coverage::discard_native_fragment_references;
+pub(super) use coverage::NativeImageSource;
 
 mod kitty;
 mod raster;
@@ -116,10 +120,24 @@ impl SixelImageSource {
 }
 
 fn animation_storage_bytes(animation: &DecodedAnimation) -> Result<usize, String> {
+    let mut pointers = HashSet::new();
     animation.frames().iter().try_fold(0usize, |used, frame| {
+        if !pointers.insert(frame.image() as *const crate::graphics::DecodedImage) {
+            return Ok(used);
+        }
         used.checked_add(frame.image().rgba.len())
             .ok_or_else(|| "animation storage count overflows".to_owned())
     })
+}
+
+fn add_image_storage(
+    bytes: &mut usize,
+    pointers: &mut HashSet<*const crate::graphics::DecodedImage>,
+    image: &crate::graphics::DecodedImage,
+) {
+    if pointers.insert(image as *const crate::graphics::DecodedImage) {
+        *bytes = bytes.saturating_add(image.rgba.len());
+    }
 }
 
 /// A retained Kitty upload and its canonical image source.
@@ -215,6 +233,8 @@ impl RasterPlan {
 
 #[derive(Debug, Clone)]
 struct ImageStateSnapshot {
+    native_images: Vec<NativeImageSource>,
+    native_fragment_counts: HashMap<u64, usize>,
     primary_image_placements: Vec<ImagePlacement>,
     primary_image_history: Vec<PrimaryHistoryImagePlacement>,
     alternate_image_placements: Vec<ImagePlacement>,
@@ -229,9 +249,9 @@ enum ImageCursorMovement {
         rows: u16,
     },
     Sixel {
-        anchor: (u16, u16),
+        row: u16,
+        column: u16,
         columns: u16,
-        rows: u16,
         cursor_right: bool,
     },
 }
@@ -376,6 +396,34 @@ impl ImageStateBudget {
         self.used_bytes = total_bytes;
         Ok(())
     }
+
+    fn release(&mut self, released_bytes: usize) {
+        self.used_bytes = self.used_bytes.saturating_sub(released_bytes);
+    }
+}
+
+fn alias_animation_image(
+    image: &mut Option<Arc<crate::graphics::DecodedImage>>,
+    animation: Option<&Arc<DecodedAnimation>>,
+    frame: u32,
+    budget: &mut ImageStateBudget,
+) -> Result<(), String> {
+    let (Some(current), Some(animation)) = (image.as_ref(), animation) else {
+        return Ok(());
+    };
+    let frame_index = usize::try_from(frame)
+        .map_err(|_| ImagePlacementError::AnimationFrameNotFound { frame }.to_string())?;
+    let frame_image = animation
+        .frames()
+        .get(frame_index)
+        .ok_or_else(|| ImagePlacementError::AnimationFrameNotFound { frame }.to_string())?
+        .image_shared();
+    if current.as_ref() != frame_image.as_ref() {
+        return Err("image content pixels do not match its current animation frame".to_owned());
+    }
+    budget.release(current.rgba.capacity());
+    *image = Some(frame_image);
+    Ok(())
 }
 
 struct BudgetedBytesSeed {
@@ -836,12 +884,15 @@ impl<'de> Visitor<'de> for SerializedImageRecordVisitor<'_> {
                 }
             }
         }
-        charge_animation_budget(self.budget, animation.as_ref().and_then(Option::as_ref))
+        let mut image = image.unwrap_or_default();
+        let animation = animation.unwrap_or_default();
+        alias_animation_image(&mut image, animation.as_ref(), 0, self.budget)
             .map_err(de::Error::custom)?;
+        charge_animation_budget(self.budget, animation.as_ref()).map_err(de::Error::custom)?;
         Ok(SerializedImageRecord {
             protocol: protocol.ok_or_else(|| de::Error::missing_field("protocol"))?,
-            image: image.unwrap_or_default(),
-            animation: animation.unwrap_or_default(),
+            image,
+            animation,
             action: action.ok_or_else(|| de::Error::missing_field("action"))?,
             display: display.ok_or_else(|| de::Error::missing_field("display"))?,
             anchor: anchor.ok_or_else(|| de::Error::missing_field("anchor"))?,
@@ -1073,13 +1124,16 @@ impl<'de> Visitor<'de> for SerializedKittyImageVisitor<'_> {
                 }
             }
         }
-        charge_animation_budget(self.budget, animation.as_ref().and_then(Option::as_ref))
+        let mut image = image.unwrap_or_default();
+        let animation = animation.unwrap_or_default();
+        alias_animation_image(&mut image, animation.as_ref(), 0, self.budget)
             .map_err(de::Error::custom)?;
+        charge_animation_budget(self.budget, animation.as_ref()).map_err(de::Error::custom)?;
         Ok(SerializedKittyImage {
             record: SerializedImageRecord {
                 protocol: protocol.ok_or_else(|| de::Error::missing_field("protocol"))?,
-                image: image.unwrap_or_default(),
-                animation: animation.unwrap_or_default(),
+                image,
+                animation,
                 action: action.ok_or_else(|| de::Error::missing_field("action"))?,
                 display: display.ok_or_else(|| de::Error::missing_field("display"))?,
                 anchor: anchor.ok_or_else(|| de::Error::missing_field("anchor"))?,
@@ -1197,6 +1251,24 @@ impl<'de> Visitor<'de> for SerializedImageContentVisitor<'_> {
         }
         let sixel = sixel.unwrap_or_default();
         let animation = animation.unwrap_or_default();
+        let animation_frame = animation_frame.unwrap_or_default();
+        let animation_loops = animation_loops.unwrap_or_default();
+        let animation_elapsed_nanos = animation_elapsed_nanos.unwrap_or_default();
+        let animation_running = animation_running.unwrap_or(false);
+        let animation_loading = animation_loading.unwrap_or(false);
+        let mut image = Some(image.ok_or_else(|| de::Error::missing_field("image"))?);
+        validate_animation_content_state(
+            image.as_ref().expect("the image is present"),
+            animation.as_ref(),
+            animation_frame,
+            animation_loops,
+            animation_elapsed_nanos,
+            animation_running,
+            animation_loading,
+        )
+        .map_err(de::Error::custom)?;
+        alias_animation_image(&mut image, animation.as_ref(), animation_frame, self.budget)
+            .map_err(de::Error::custom)?;
         charge_animation_budget(self.budget, animation.as_ref()).map_err(de::Error::custom)?;
         if let Some(source) = &sixel {
             let bytes = source.storage_bytes().map_err(de::Error::custom)?;
@@ -1204,13 +1276,13 @@ impl<'de> Visitor<'de> for SerializedImageContentVisitor<'_> {
         }
         Ok(SerializedImageContent {
             id: id.ok_or_else(|| de::Error::missing_field("id"))?,
-            image: image.ok_or_else(|| de::Error::missing_field("image"))?,
+            image: image.expect("the image is present"),
             animation,
-            animation_frame: animation_frame.unwrap_or_default(),
-            animation_loops: animation_loops.unwrap_or_default(),
-            animation_elapsed_nanos: animation_elapsed_nanos.unwrap_or_default(),
-            animation_running: animation_running.unwrap_or(false),
-            animation_loading: animation_loading.unwrap_or(false),
+            animation_frame,
+            animation_loops,
+            animation_elapsed_nanos,
+            animation_running,
+            animation_loading,
             sixel,
         })
     }
@@ -1375,7 +1447,11 @@ pub(super) fn serialized_content_table(
         }
         Ok(())
     };
-    for placement in &state.primary_image_placements {
+    for placement in state
+        .primary_image_placements
+        .iter()
+        .chain(state.native_images.iter().map(|source| &source.placement))
+    {
         add(&placement.content)?;
     }
     for placement in &state.primary_image_history {
@@ -1408,7 +1484,7 @@ struct RestoreImageBuilder {
     legacy_kitty: BTreeMap<u32, Arc<ImageContent>>,
     referenced: HashSet<ImageContentId>,
     raster_cache: HashMap<RasterCacheKey, Arc<crate::graphics::DecodedImage>>,
-    raster_pointers: HashSet<usize>,
+    image_pointers: HashSet<*const crate::graphics::DecodedImage>,
     storage_bytes: usize,
     next: ImageContentId,
     new_format: bool,
@@ -1422,6 +1498,7 @@ impl RestoreImageBuilder {
         let new_format = contents.is_some();
         let mut table = BTreeMap::new();
         let mut bytes = 0usize;
+        let mut image_pointers = HashSet::new();
         for content in contents.unwrap_or_default() {
             if table.contains_key(&content.id) {
                 return Err("image content identities must be unique".to_owned());
@@ -1442,11 +1519,16 @@ impl RestoreImageBuilder {
                 content.animation_running,
                 content.animation_loading,
             )?;
+            let image = if let Some(animation) = &content.animation {
+                animation.frames()[content.animation_frame as usize].image_shared()
+            } else {
+                content.image
+            };
             table.insert(
                 content.id,
                 Arc::new(ImageContent {
                     id: content.id,
-                    image: content.image,
+                    image,
                     animation: content.animation,
                     animation_frame: content.animation_frame,
                     animation_loops: content.animation_loops,
@@ -1456,13 +1538,15 @@ impl RestoreImageBuilder {
                     sixel: content.sixel,
                 }),
             );
-            bytes = bytes
-                .checked_add(table[&content.id].image.rgba.len())
-                .ok_or_else(|| "image content storage count overflows".to_owned())?;
+            add_image_storage(
+                &mut bytes,
+                &mut image_pointers,
+                table[&content.id].image.as_ref(),
+            );
             if let Some(animation) = &table[&content.id].animation {
-                bytes = bytes
-                    .checked_add(animation_storage_bytes(animation)?)
-                    .ok_or_else(|| "image content storage count overflows".to_owned())?;
+                for frame in animation.frames() {
+                    add_image_storage(&mut bytes, &mut image_pointers, frame.image());
+                }
             }
             if let Some(source) = &table[&content.id].sixel {
                 bytes = bytes
@@ -1485,7 +1569,7 @@ impl RestoreImageBuilder {
             legacy_kitty: BTreeMap::new(),
             referenced: HashSet::new(),
             raster_cache: HashMap::new(),
-            raster_pointers: HashSet::new(),
+            image_pointers,
             storage_bytes: bytes,
             next,
             new_format,
@@ -1525,7 +1609,7 @@ impl RestoreImageBuilder {
             }
         }
         let id = self.allocate()?;
-        self.add_storage_bytes(image.rgba.len())?;
+        self.retain_image(Arc::clone(image))?;
         let content = Arc::new(ImageContent {
             id,
             image: Arc::clone(image),
@@ -1538,7 +1622,9 @@ impl RestoreImageBuilder {
             sixel: None,
         });
         if let Some(animation) = &record.animation {
-            self.add_storage_bytes(animation_storage_bytes(animation)?)?;
+            for frame in animation.frames() {
+                self.retain_image(frame.image_shared())?;
+            }
         }
         if let Some(image_id) = kitty_image_id_fields(record) {
             self.legacy_kitty.insert(image_id, Arc::clone(&content));
@@ -1609,9 +1695,7 @@ impl RestoreImageBuilder {
             }
             .to_string());
         }
-        if self.raster_pointers.insert(Arc::as_ptr(&raster) as usize) {
-            self.add_storage_bytes(raster.rgba.len())?;
-        }
+        self.retain_image(Arc::clone(&raster))?;
         self.raster_cache.insert(key, Arc::clone(&raster));
         Ok(raster)
     }
@@ -1620,10 +1704,15 @@ impl RestoreImageBuilder {
         &mut self,
         raster: Arc<crate::graphics::DecodedImage>,
     ) -> Result<Arc<crate::graphics::DecodedImage>, String> {
-        if self.raster_pointers.insert(Arc::as_ptr(&raster) as usize) {
-            self.add_storage_bytes(raster.rgba.len())?;
-        }
+        self.retain_image(Arc::clone(&raster))?;
         Ok(raster)
+    }
+
+    fn retain_image(&mut self, image: Arc<crate::graphics::DecodedImage>) -> Result<(), String> {
+        if self.image_pointers.insert(Arc::as_ptr(&image)) {
+            self.add_storage_bytes(image.rgba.len())?;
+        }
+        Ok(())
     }
 
     fn finish(self) -> Result<ImageContentId, String> {
@@ -2266,7 +2355,7 @@ impl PrimaryHistoryImagePlacement {
             columns: self.columns,
             rows: self.rows,
             plan: self.plan,
-            raster: self.raster.clone(),
+            raster: self.raster,
         }
     }
 }
@@ -2300,7 +2389,7 @@ impl AbsoluteImagePlacement {
             columns: self.columns,
             rows: self.rows,
             plan: self.plan,
-            raster: self.raster.clone(),
+            raster: self.raster,
         })
     }
 
@@ -2598,7 +2687,17 @@ pub(super) fn validate_image_state(fields: &super::TerminalStateFields) -> Resul
         }
         let image_id = kitty_image_id(image.record.as_ref())
             .ok_or_else(|| "a retained Kitty upload requires a nonzero image id".to_owned())?;
-        if !retained_kitty_ids.insert(image_id) {
+        let identity = (
+            image_id,
+            image.virtual_placement,
+            image.virtual_screen == Some(Screen::Alternate),
+            if image.virtual_placement {
+                image.display.placement_id
+            } else {
+                None
+            },
+        );
+        if !retained_kitty_ids.insert(identity) {
             return Err("retained Kitty image ids must be unique".to_owned());
         }
         if !Arc::ptr_eq(&image.record.image, &image.content.image) {
@@ -2610,7 +2709,12 @@ pub(super) fn validate_image_state(fields: &super::TerminalStateFields) -> Resul
     for placement in &fields.primary_image_placements {
         validate_live_image_placement(
             placement,
-            fields.primary.dimensions(),
+            if fields.native_image_coverage && placement.record.protocol != GraphicsProtocol::Kitty
+            {
+                (u16::MAX, u16::MAX)
+            } else {
+                fields.primary.dimensions()
+            },
             &mut ids,
             &mut primary_kitty_identities,
             &mut content_ids,
@@ -2704,7 +2808,12 @@ pub(super) fn validate_image_state(fields: &super::TerminalStateFields) -> Resul
     for placement in &fields.alternate_image_placements {
         validate_live_image_placement(
             placement,
-            fields.alternate.dimensions(),
+            if fields.native_image_coverage && placement.record.protocol != GraphicsProtocol::Kitty
+            {
+                (u16::MAX, u16::MAX)
+            } else {
+                fields.alternate.dimensions()
+            },
             &mut ids,
             &mut alternate_kitty_identities,
             &mut content_ids,
@@ -2752,7 +2861,9 @@ fn validate_live_image_placement(
     }
     let row_end = u32::from(placement.anchor.0) + u32::from(placement.rows);
     let column_end = u32::from(placement.anchor.1) + u32::from(placement.columns);
-    if row_end > u32::from(grid_rows) || column_end > u32::from(grid_columns) {
+    if placement.record.display.relative_image_id.is_none()
+        && (row_end > u32::from(grid_rows) || column_end > u32::from(grid_columns))
+    {
         return Err(ImagePlacementError::OutOfBounds {
             row: placement.anchor.0,
             column: placement.anchor.1,
@@ -2916,7 +3027,11 @@ impl TerminalState {
         }
 
         let mut pixels_changed = false;
-        for placement in &mut self.primary_image_placements {
+        for placement in self.primary_image_placements.iter_mut().chain(
+            self.native_images
+                .iter_mut()
+                .map(|source| &mut source.placement),
+        ) {
             if let Some(advanced) = replacements.get(&placement.content.id) {
                 pixels_changed |= advanced.pixels_changed;
                 apply_animation_content(placement, &advanced.content);
@@ -2949,7 +3064,11 @@ impl TerminalState {
 
     fn animation_contents(&self) -> BTreeMap<ImageContentId, Arc<ImageContent>> {
         let mut contents = BTreeMap::new();
-        for placement in &self.primary_image_placements {
+        for placement in self
+            .primary_image_placements
+            .iter()
+            .chain(self.native_images.iter().map(|source| &source.placement))
+        {
             contents
                 .entry(placement.content.id)
                 .or_insert_with(|| Arc::clone(&placement.content));
@@ -3099,6 +3218,7 @@ fn advance_animation_content(
     }
     let new_elapsed = u64::try_from(remaining).ok()?;
     if frame == old_frame
+        && loops == content.animation_loops
         && new_elapsed == content.animation_elapsed_nanos
         && running == content.animation_running
     {
@@ -3163,6 +3283,8 @@ fn apply_animation_history_content(
 impl TerminalState {
     fn take_image_state(&mut self) -> ImageStateSnapshot {
         ImageStateSnapshot {
+            native_images: std::mem::take(&mut self.native_images),
+            native_fragment_counts: std::mem::take(&mut self.native_fragment_counts),
             primary_image_placements: std::mem::take(&mut self.primary_image_placements),
             primary_image_history: std::mem::take(&mut self.primary_image_history),
             alternate_image_placements: std::mem::take(&mut self.alternate_image_placements),
@@ -3179,6 +3301,8 @@ impl TerminalState {
     }
 
     fn put_image_state(&mut self, state: ImageStateSnapshot) {
+        self.native_images = state.native_images;
+        self.native_fragment_counts = state.native_fragment_counts;
         self.primary_image_placements = state.primary_image_placements;
         self.primary_image_history = state.primary_image_history;
         self.alternate_image_placements = state.alternate_image_placements;
@@ -3187,26 +3311,39 @@ impl TerminalState {
         self.next_image_content_id = state.next_image_content_id;
     }
 
-    fn allocate_image_content_id(&mut self) -> Result<ImageContentId, ImagePlacementError> {
-        let used = self
-            .kitty_images
+    /// Every image content the terminal state retains: Kitty uploads, the
+    /// placements of both screens, the primary-screen history, and the native
+    /// image sources.
+    fn retained_image_contents(&self) -> impl Iterator<Item = &Arc<ImageContent>> {
+        self.kitty_images
             .iter()
-            .map(|image| image.content.id)
+            .map(|image| &image.content)
             .chain(
                 self.primary_image_placements
                     .iter()
-                    .map(|placement| placement.content.id),
+                    .map(|placement| &placement.content),
             )
             .chain(
                 self.primary_image_history
                     .iter()
-                    .map(|placement| placement.content.id),
+                    .map(|placement| &placement.content),
             )
             .chain(
                 self.alternate_image_placements
                     .iter()
-                    .map(|placement| placement.content.id),
+                    .map(|placement| &placement.content),
             )
+            .chain(
+                self.native_images
+                    .iter()
+                    .map(|source| &source.placement.content),
+            )
+    }
+
+    fn allocate_image_content_id(&mut self) -> Result<ImageContentId, ImagePlacementError> {
+        let used = self
+            .retained_image_contents()
+            .map(|content| content.id)
             .collect::<HashSet<_>>();
         let mut candidate = self.next_image_content_id;
         loop {
@@ -3221,6 +3358,21 @@ impl TerminalState {
             }
             candidate = next;
         }
+    }
+
+    /// Return the retained image whose pixels equal `image`, or `image` itself.
+    ///
+    /// Two transfers that decode to the same width, height and RGBA bytes share
+    /// one `Arc`.
+    pub(crate) fn shared_image_pixels(
+        &self,
+        image: Arc<crate::graphics::DecodedImage>,
+    ) -> Arc<crate::graphics::DecodedImage> {
+        self.retained_image_contents()
+            .map(|content| &content.image)
+            .find(|kept| kept.as_ref() == image.as_ref())
+            .cloned()
+            .unwrap_or(image)
     }
 
     pub(super) fn allocate_image_content(
@@ -3303,11 +3455,15 @@ impl TerminalState {
     /// insertion order. Primary placements in retained history are returned by
     /// [`image_placements_for_view`](Self::image_placements_for_view).
     #[must_use]
-    pub fn image_placements(&self) -> &[ImagePlacement] {
-        match self.active {
-            Screen::Primary => &self.primary_image_placements,
-            Screen::Alternate => &self.alternate_image_placements,
-        }
+    pub fn image_placements(&self) -> Vec<ImagePlacement> {
+        let mut placements = self.active_image_placements().to_vec();
+        coverage::append_derived(
+            &mut placements,
+            self.native_image_placements(self.active_grid(), 0)
+                .into_iter()
+                .filter_map(|placement| placement.into_live(0)),
+        );
+        placements
     }
 
     /// Return the image portions visible at the requested scrollback offset.
@@ -3315,6 +3471,7 @@ impl TerminalState {
     #[must_use]
     pub fn image_placements_for_view(&self, offset: usize) -> Vec<ImagePlacement> {
         if self.active == Screen::Alternate {
+            let (rows, columns) = self.alternate.dimensions();
             let mut virtual_placements = self.virtual_image_placements(self.alternate.as_ref(), 0);
             let mut absolute = self
                 .alternate_image_placements
@@ -3332,12 +3489,19 @@ impl TerminalState {
                 })
                 .collect::<Vec<_>>();
             self.remap_relative_absolute_placements(&mut absolute, &virtual_placements);
-            absolute.append(&mut virtual_placements);
+            virtual_placements.extend(self.native_image_placements(self.alternate.as_ref(), 0));
             let mut placements = absolute
                 .into_iter()
-                .filter_map(|placement| placement.into_live(0))
+                .filter_map(|placement| {
+                    placement.clipped(0, u64::from(rows), columns)?.into_live(0)
+                })
                 .collect::<Vec<_>>();
-            placements.sort_unstable_by_key(ImagePlacement::id);
+            coverage::append_derived(
+                &mut placements,
+                virtual_placements
+                    .into_iter()
+                    .filter_map(|placement| placement.into_live(0)),
+            );
             return placements;
         }
         let (grid, scrolled) = self.scrolled_view(offset);
@@ -3353,11 +3517,18 @@ impl TerminalState {
             .collect::<Vec<_>>();
         let mut virtual_placements = self.virtual_image_placements(grid.as_ref(), top);
         self.remap_relative_absolute_placements(&mut placements, &virtual_placements);
-        placements.append(&mut virtual_placements);
-        placements
+        virtual_placements.extend(self.native_image_placements(grid.as_ref(), top));
+        let mut visible = placements
             .into_iter()
             .filter_map(|placement| placement.clipped(top, end, columns)?.into_live(top))
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        coverage::append_derived(
+            &mut visible,
+            virtual_placements
+                .into_iter()
+                .filter_map(|placement| placement.clipped(top, end, columns)?.into_live(top)),
+        );
+        visible
     }
 
     fn virtual_image_placements(
@@ -3365,37 +3536,76 @@ impl TerminalState {
         grid: &Grid,
         row_origin: u64,
     ) -> Vec<AbsoluteImagePlacement> {
-        self.kitty_images
-            .iter()
-            .filter(|image| image.virtual_placement && image.virtual_screen == Some(self.active))
-            .filter_map(|image| {
-                let (row, column) = placeholder_anchor(grid, image)?;
-                let columns = image.display.cell_columns?;
-                let rows = image.display.cell_rows?;
-                let mut record = image.record.as_ref().clone();
-                record.display.unicode_placeholder = false;
-                record.display.move_cursor = false;
-                record.anchor = (row, column);
-                let prepared =
-                    raster::prepare_with_plan(&record, self.cell_size, grid.dimensions()).ok()?;
-                let columns = u16::try_from(columns).ok()?;
-                let rows = u16::try_from(rows).ok()?;
-                if prepared.columns != u32::from(columns) || prepared.rows != u32::from(rows) {
-                    return None;
+        let mut lookup = HashMap::new();
+        for (index, image) in self.kitty_images.iter().enumerate() {
+            if image.virtual_placement && image.virtual_screen == Some(self.active) {
+                if let Some(id) = image.display.image_id {
+                    lookup.insert((id, image.display.placement_id), index);
+                    lookup.insert((id, None), index);
                 }
-                let id = virtual_image_placement_id(&record, row, column);
-                Some(AbsoluteImagePlacement {
-                    id,
-                    record: Arc::new(record),
-                    content: Arc::clone(&image.content),
-                    anchor: (row_origin.checked_add(u64::from(row))?, column),
-                    columns,
-                    rows,
-                    plan: prepared.plan,
-                    raster: prepared.raster,
-                })
-            })
-            .collect()
+            }
+        }
+        let mut cells: BTreeMap<usize, Vec<(u16, u16, ResolvedPlaceholder)>> = BTreeMap::new();
+        for (row, row_cells) in grid.rows().iter().enumerate() {
+            let mut previous = None;
+            for (column, cell) in row_cells.iter().enumerate() {
+                let resolved = cell
+                    .image_placeholder()
+                    .and_then(|raw| resolve_placeholder(raw, previous));
+                previous = resolved;
+                let Some(resolved) = resolved else {
+                    continue;
+                };
+                let id = resolved.image_id | (u32::from(resolved.image_id_msb) << 24);
+                if let Some(&index) = lookup.get(&(id, resolved.placement_id)) {
+                    cells
+                        .entry(index)
+                        .or_default()
+                        .push((row as u16, column as u16, resolved));
+                }
+            }
+        }
+        let mut result = Vec::new();
+        for (index, cells) in cells {
+            let image = &self.kitty_images[index];
+            let Ok(prepared) =
+                raster::prepare_with_plan(&image.record, self.cell_size, grid.dimensions())
+            else {
+                continue;
+            };
+            let columns = prepared.plan.geometry.full_size.cols;
+            let rows = prepared.plan.geometry.full_size.rows;
+            let source = ImagePlacement::new(
+                0,
+                Arc::clone(&image.record),
+                Arc::clone(&image.content),
+                prepared.plan,
+                columns,
+                rows,
+                prepared.raster,
+            );
+            let mut runs = Vec::new();
+            for (row, column, resolved) in cells {
+                if resolved.row < rows && resolved.column < columns {
+                    coverage::append_cell(
+                        &mut runs,
+                        &source,
+                        row,
+                        column,
+                        resolved.row,
+                        resolved.column,
+                    );
+                }
+            }
+            result.extend(
+                coverage::merge_rows(runs)
+                    .into_iter()
+                    .filter_map(|placement| {
+                        AbsoluteImagePlacement::from_live(placement, row_origin)
+                    }),
+            );
+        }
+        result
     }
 
     fn remap_relative_absolute_placements(
@@ -3403,37 +3613,74 @@ impl TerminalState {
         placements: &mut [AbsoluteImagePlacement],
         virtual_placements: &[AbsoluteImagePlacement],
     ) {
-        let mut entries = virtual_placements
-            .iter()
-            .map(|placement| {
-                (
-                    Arc::clone(&placement.record),
-                    (
-                        i64::try_from(placement.anchor.0).unwrap_or(i64::MAX),
-                        i64::from(placement.anchor.1),
-                    ),
-                )
-            })
-            .chain(placements.iter().map(|placement| {
-                (
-                    Arc::clone(&placement.record),
-                    (
-                        i64::try_from(placement.anchor.0).unwrap_or(i64::MAX),
-                        i64::from(placement.anchor.1),
-                    ),
-                )
-            }))
-            .collect::<Vec<_>>();
-        let virtual_count = virtual_placements.len();
-        for index in virtual_count..entries.len() {
-            let Some(anchor) =
-                resolve_view_relative_anchor(index, &entries, &mut HashSet::new(), 0)
+        let mut entries: Vec<RelativeEntry> = Vec::new();
+        let mut virtual_indices = HashMap::new();
+        for placement in virtual_placements {
+            let identity = (
+                placement.record.display.image_id,
+                placement.record.display.placement_id,
+            );
+            let anchor = (
+                i64::try_from(placement.anchor.0)
+                    .unwrap_or(i64::MAX)
+                    .saturating_sub(i64::from(placement.plan.geometry.offset.y)),
+                i64::from(placement.anchor.1)
+                    .saturating_sub(i64::from(placement.plan.geometry.offset.x)),
+            );
+            if let Some(&index) = virtual_indices.get(&identity) {
+                let entry: &mut RelativeEntry = &mut entries[index];
+                if let Some(current) = entry.1.as_mut() {
+                    current.0 = current.0.min(anchor.0);
+                    current.1 = current.1.min(anchor.1);
+                }
+            } else {
+                virtual_indices.insert(identity, entries.len());
+                entries.push((Arc::clone(&placement.record), Some(anchor)));
+            }
+        }
+        let virtual_count = entries.len();
+        entries.extend(placements.iter().map(|placement| {
+            (
+                Arc::clone(&placement.record),
+                Some((
+                    i64::try_from(placement.anchor.0).unwrap_or(i64::MAX),
+                    i64::from(placement.anchor.1),
+                )),
+            )
+        }));
+        for (index, placement) in placements.iter_mut().enumerate() {
+            if placement.record.display.relative_image_id.is_none() {
+                continue;
+            }
+            let Ok(Some(anchor)) =
+                resolve_relative_entry(index + virtual_count, &entries, &mut HashSet::new(), 0)
             else {
+                placement.rows = 0;
+                placement.columns = 0;
                 continue;
             };
-            entries[index].1 = anchor;
-            if let (Ok(row), Ok(column)) = (u64::try_from(anchor.0), u16::try_from(anchor.1)) {
-                placements[index - virtual_count].anchor = (row, column);
+            let removed_rows = anchor
+                .0
+                .saturating_neg()
+                .max(0)
+                .min(i64::from(placement.rows)) as u16;
+            let removed_columns = anchor
+                .1
+                .saturating_neg()
+                .max(0)
+                .min(i64::from(placement.columns)) as u16;
+            placement.rows -= removed_rows;
+            placement.columns -= removed_columns;
+            placement.plan.geometry.offset.y += removed_rows;
+            placement.plan.geometry.offset.x += removed_columns;
+            if let (Ok(row), Ok(column)) = (
+                u64::try_from(anchor.0.max(0)),
+                u16::try_from(anchor.1.max(0)),
+            ) {
+                placement.anchor = (row, column);
+            } else {
+                placement.rows = 0;
+                placement.columns = 0;
             }
         }
     }
@@ -3466,6 +3713,9 @@ impl TerminalState {
             .primary_absolute_image_placements_at(old_live_top)
             .into_iter()
             .filter_map(|mut placement| {
+                if placement.record.display.relative_image_id.is_some() {
+                    return Some(placement);
+                }
                 let (removed, mapped_anchor) = (0..placement.rows).find_map(|removed| {
                     let old_row = placement.anchor.0.checked_add(u64::from(removed))?;
                     map(old_row, placement.anchor.1).map(|anchor| (removed, anchor))
@@ -3487,6 +3737,9 @@ impl TerminalState {
         self.alternate_image_placements = std::mem::take(&mut self.alternate_image_placements)
             .into_iter()
             .filter_map(|mut placement| {
+                if placement.record.display.relative_image_id.is_some() {
+                    return Some(placement);
+                }
                 let (removed, anchor) = (0..placement.rows).find_map(|removed| {
                     map(placement.anchor.0.checked_add(removed)?, placement.anchor.1)
                         .map(|anchor| (removed, anchor))
@@ -3516,7 +3769,14 @@ impl TerminalState {
         let live_end = live_top.saturating_add(u64::from(self.primary.dimensions().0));
         let grid_columns = self.primary.dimensions().1;
 
-        for placement in placements.drain(..) {
+        for mut placement in placements.drain(..) {
+            if placement.record.display.relative_image_id.is_some() {
+                placement.anchor.0 = live_top;
+                if let Some(placement) = placement.into_live(live_top) {
+                    self.primary_image_placements.push(placement);
+                }
+                continue;
+            }
             let Some(placement) = placement.clipped(oldest_history_row, live_end, grid_columns)
             else {
                 continue;
@@ -3545,17 +3805,12 @@ impl TerminalState {
         sixel_cursor_right: bool,
         sixel_source: SixelImageSource,
     ) -> Result<(), ImagePlacementError> {
-        let original = self.clone();
-        let result = self.apply_image_record_with_sixel_options(
+        self.apply_image_record_with_sixel_options(
             record,
             Some(sixel_scrolling),
             sixel_cursor_right,
             Some(sixel_source),
-        );
-        if result.is_err() {
-            *self = original;
-        }
-        result
+        )
     }
 
     fn apply_image_record_with_sixel_options(
@@ -3565,6 +3820,30 @@ impl TerminalState {
         sixel_cursor_right: bool,
         sixel_source: Option<SixelImageSource>,
     ) -> Result<(), ImagePlacementError> {
+        if record.protocol != GraphicsProtocol::Kitty {
+            let used_bytes = self.image_storage_bytes();
+            let mut candidate = self.clone();
+            let result = candidate.apply_image_record_inner(
+                record,
+                sixel_scrolling,
+                sixel_cursor_right,
+                sixel_source,
+            );
+            return match result {
+                Ok((_display, cursor_movement)) => {
+                    if let Some(movement) = cursor_movement {
+                        candidate.apply_image_cursor_movement(movement);
+                    }
+                    let requested_bytes =
+                        candidate.image_storage_bytes().saturating_sub(used_bytes);
+                    candidate.check_image_storage(requested_bytes, None)?;
+                    *self = candidate;
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            };
+        }
+
         let original = self.take_image_state();
         let staged = original.clone();
         self.put_image_state(staged);
@@ -3600,6 +3879,11 @@ impl TerminalState {
     {
         let mut record = record.clone();
         self.retain_kitty_upload(&mut record)?;
+        if record.display.unicode_placeholder && record.action != ImageAction::Transmit {
+            self.apply_virtual_kitty_placement(&record.display)?;
+            self.check_image_storage(record.image.rgba.len(), kitty_image_id(&record))?;
+            return Ok((record.display, None));
+        }
         let relative = record.display.relative_image_id.is_some()
             || record.display.relative_placement_id.is_some();
         let move_cursor = record.display.move_cursor && !relative;
@@ -3610,9 +3894,13 @@ impl TerminalState {
                     self.place_image(&mut record, sixel_scrolling.unwrap_or(false), sixel_source)?;
                 Some(if sixel_scrolling.is_some() {
                     ImageCursorMovement::Sixel {
-                        anchor: record.anchor,
+                        row: self.sixel_cursor_row(
+                            record.anchor.0,
+                            rows,
+                            sixel_scrolling.unwrap_or(false),
+                        ),
+                        column: record.anchor.1,
                         columns,
-                        rows,
                         cursor_right: sixel_cursor_right,
                     }
                 } else {
@@ -3620,7 +3908,10 @@ impl TerminalState {
                 })
             }
         };
-        self.check_image_storage(record.image.rgba.len(), kitty_image_id(&record))?;
+        if record.protocol == GraphicsProtocol::Kitty {
+            self.check_image_storage(record.image.rgba.len(), kitty_image_id(&record))?;
+        }
+        let move_cursor = move_cursor && record.protocol != GraphicsProtocol::Iterm2;
         Ok((record.display, movement.filter(|_| move_cursor)))
     }
 
@@ -3633,8 +3924,11 @@ impl TerminalState {
         if record.display.unicode_placeholder {
             return Err(ImagePlacementError::UnsupportedPlacement);
         }
-        if let Some(anchor) = self.resolve_relative_anchor(record)? {
-            record.anchor = anchor;
+        if let Some(anchor) = self.resolve_relative_anchor(record, None)? {
+            record.anchor = (
+                u16::try_from(anchor.0).unwrap_or(0),
+                u16::try_from(anchor.1).unwrap_or(0),
+            );
             record.display.move_cursor = false;
         }
         record.source_rect()?;
@@ -3656,7 +3950,8 @@ impl TerminalState {
         }
 
         let (grid_rows, grid_columns) = self.active_grid().dimensions();
-        if record.anchor.0 >= grid_rows || record.anchor.1 >= grid_columns {
+        let relative = record.display.relative_image_id.is_some();
+        if !relative && (record.anchor.0 >= grid_rows || record.anchor.1 >= grid_columns) {
             return Err(ImagePlacementError::OutOfBounds {
                 row: record.anchor.0,
                 column: record.anchor.1,
@@ -3672,38 +3967,13 @@ impl TerminalState {
         let count = self.primary_image_placements.len()
             + self.primary_image_history.len()
             + self.alternate_image_placements.len()
+            + self.native_images.len()
             + usize::from(replacement_slot.is_none());
         if count > MAX_IMAGE_PLACEMENTS {
             return Err(ImagePlacementError::TooManyPlacements {
                 count,
                 limit: MAX_IMAGE_PLACEMENTS,
             });
-        }
-        if let Some(source) = &sixel_source {
-            let raster_bytes = prepared
-                .raster
-                .as_ref()
-                .map_or(0, |raster| raster.rgba.len());
-            let source_bytes =
-                source
-                    .storage_bytes()
-                    .map_err(|_| ImagePlacementError::StorageLimit {
-                        used_bytes: 0,
-                        requested_bytes: usize::MAX,
-                        limit_bytes: MAX_IMAGE_STORAGE_BYTES,
-                    })?;
-            let requested_bytes = record
-                .image
-                .rgba
-                .len()
-                .checked_add(raster_bytes)
-                .and_then(|bytes| bytes.checked_add(source_bytes))
-                .ok_or(ImagePlacementError::StorageLimit {
-                    used_bytes: 0,
-                    requested_bytes: usize::MAX,
-                    limit_bytes: MAX_IMAGE_STORAGE_BYTES,
-                })?;
-            self.reserve_sixel_storage(requested_bytes)?;
         }
         let id = if let Some(slot) = replacement_slot {
             match slot {
@@ -3719,9 +3989,6 @@ impl TerminalState {
         } else {
             self.content_for_record(&content_record)?
         };
-        if sixel_scrolling {
-            self.scroll_sixel_to_fit(&mut record.anchor, rows);
-        }
         let record = Arc::new(record.clone());
         let mut placement = ImagePlacement::new(
             id,
@@ -3756,8 +4023,21 @@ impl TerminalState {
                 placement.raster = Some(Arc::clone(&retained));
             }
         }
-        placement.rows = rows.min(grid_rows - record.anchor.0);
-        placement.columns = columns.min(grid_columns - record.anchor.1);
+        placement.rows =
+            if relative || record.protocol == GraphicsProtocol::Iterm2 || sixel_scrolling {
+                rows
+            } else {
+                rows.min(grid_rows - record.anchor.0)
+            };
+        placement.columns = if relative {
+            columns
+        } else {
+            columns.min(grid_columns - record.anchor.1)
+        };
+        if record.protocol != GraphicsProtocol::Kitty {
+            self.install_native_image(placement, sixel_scrolling)?;
+            return Ok((columns, rows));
+        }
         match replacement_slot {
             Some(ActiveImagePlacementSlot::Live(index)) => {
                 self.active_image_placements_mut()[index] = placement;
@@ -3772,8 +4052,12 @@ impl TerminalState {
         Ok((columns, rows))
     }
 
-    fn scroll_sixel_to_fit(&mut self, anchor: &mut (u16, u16), rows: u16) {
+    fn sixel_cursor_row(&self, anchor: u16, rows: u16, scrolling: bool) -> u16 {
         let (grid_rows, _) = self.active_grid().dimensions();
+        let last_row = anchor.saturating_add(rows.saturating_sub(1));
+        if !scrolling {
+            return last_row.min(grid_rows.saturating_sub(1));
+        }
         let (top, bottom) =
             self.scroll_region()
                 .map_or((0, grid_rows.saturating_sub(1)), |(top, bottom)| {
@@ -3782,22 +4066,11 @@ impl TerminalState {
                         bottom.min(grid_rows.saturating_sub(1)),
                     )
                 });
-        if top > bottom || anchor.0 < top {
-            return;
+        if top <= anchor && anchor <= bottom {
+            last_row.min(bottom)
+        } else {
+            last_row.min(grid_rows.saturating_sub(1))
         }
-        let image_end = u32::from(anchor.0).saturating_add(u32::from(rows));
-        let region_end = u32::from(bottom) + 1;
-        let overflow = image_end.saturating_sub(region_end);
-        let shift = overflow.min(u32::from(anchor.0 - top));
-        let Ok(shift) = u16::try_from(shift) else {
-            return;
-        };
-        if shift == 0 {
-            return;
-        }
-        let fill = self.active_render().style.bg_fill();
-        self.delete_lines_into_scrollback(top, bottom, shift, fill);
-        anchor.0 -= shift;
     }
 
     pub(super) fn refresh_shared_sixel_images(
@@ -3805,7 +4078,11 @@ impl TerminalState {
         palette: &SixelPalette,
     ) -> Result<(), crate::graphics::GraphicsError> {
         let mut contents = HashMap::new();
-        for placement in &mut self.primary_image_placements {
+        for placement in self.primary_image_placements.iter_mut().chain(
+            self.native_images
+                .iter_mut()
+                .map(|source| &mut source.placement),
+        ) {
             refresh_shared_sixel_placement(placement, palette, &mut contents)?;
         }
         for placement in &mut self.primary_image_history {
@@ -3840,6 +4117,7 @@ impl TerminalState {
                         .iter()
                         .map(|placement| placement.id),
                 )
+                .chain(self.native_images.iter().map(|source| source.placement.id))
                 .any(|id| id == candidate);
             if !used {
                 self.next_image_placement_id = next;
@@ -3918,24 +4196,118 @@ impl TerminalState {
     }
 
     pub(super) fn clear_active_image_placements(&mut self) {
+        let (grid_rows, grid_columns) = self.active_grid().dimensions();
+        let live_top = self.scrollback.total_pushed();
+        let mut relative_anchors = HashMap::new();
         match self.active {
             Screen::Primary => {
-                let live_top = self.scrollback.total_pushed();
-                self.primary_image_placements.clear();
+                for placement in &self.primary_image_placements {
+                    if placement.record.display.relative_image_id.is_some()
+                        || placement.record.display.relative_placement_id.is_some()
+                    {
+                        if let Ok(Some((row, column))) =
+                            self.resolve_relative_anchor(&placement.record, Some(placement.id))
+                        {
+                            relative_anchors.insert(placement.id, (i128::from(row), column));
+                        }
+                    }
+                }
+                for placement in &self.primary_image_history {
+                    if placement.record.display.relative_image_id.is_some()
+                        || placement.record.display.relative_placement_id.is_some()
+                    {
+                        if let Ok(Some((row, column))) =
+                            self.resolve_relative_anchor(&placement.record, Some(placement.id))
+                        {
+                            relative_anchors.insert(placement.id, (i128::from(row), column));
+                        }
+                    }
+                }
+            }
+            Screen::Alternate => {
+                for placement in &self.alternate_image_placements {
+                    if placement.record.display.relative_image_id.is_some()
+                        || placement.record.display.relative_placement_id.is_some()
+                    {
+                        if let Ok(Some((row, column))) =
+                            self.resolve_relative_anchor(&placement.record, Some(placement.id))
+                        {
+                            relative_anchors.insert(placement.id, (i128::from(row), column));
+                        }
+                    }
+                }
+            }
+        }
+        let intersects_live = |record: &ImageRecord,
+                               placement_id: ImagePlacementId,
+                               row: i128,
+                               column: i64,
+                               rows: u16,
+                               columns: u16| {
+            let relative = record.display.relative_image_id.is_some()
+                || record.display.relative_placement_id.is_some();
+            let (row, column) = if relative {
+                let Some(anchor) = relative_anchors.get(&placement_id).copied() else {
+                    return true;
+                };
+                anchor
+            } else {
+                (row, column)
+            };
+            row < i128::from(grid_rows)
+                && row + i128::from(rows) > 0
+                && column < i64::from(grid_columns)
+                && column + i64::from(columns) > 0
+        };
+        match self.active {
+            Screen::Primary => {
+                self.primary_image_placements.retain(|placement| {
+                    !intersects_live(
+                        &placement.record,
+                        placement.id,
+                        i128::from(placement.anchor.0),
+                        i64::from(placement.anchor.1),
+                        placement.rows,
+                        placement.columns,
+                    )
+                });
                 self.primary_image_history.retain(|placement| {
-                    placement
-                        .anchor
-                        .0
-                        .checked_add(u64::from(placement.rows))
-                        .is_some_and(|end| end <= live_top)
+                    !intersects_live(
+                        &placement.record,
+                        placement.id,
+                        i128::from(placement.anchor.0) - i128::from(live_top),
+                        i64::from(placement.anchor.1),
+                        placement.rows,
+                        placement.columns,
+                    )
                 });
             }
-            Screen::Alternate => self.alternate_image_placements.clear(),
+            Screen::Alternate => self.alternate_image_placements.retain(|placement| {
+                !intersects_live(
+                    &placement.record,
+                    placement.id,
+                    i128::from(placement.anchor.0),
+                    i64::from(placement.anchor.1),
+                    placement.rows,
+                    placement.columns,
+                )
+            }),
         }
     }
 
     pub(super) fn clear_alternate_image_placements(&mut self) {
+        let (rows, columns) = self.alternate.dimensions();
+        let previous = self.active;
+        self.active = Screen::Alternate;
+        let mut source_removed = false;
+        for row in 0..rows {
+            source_removed |= self.clear_image_fragments_at_cells(row, 0, columns);
+        }
+        self.active = previous;
+        self.native_images
+            .retain(|source| source.screen != Screen::Alternate);
         self.alternate_image_placements.clear();
+        self.finish_native_fragment_removal(source_removed);
     }
 
     pub(super) fn clear_primary_image_history(&mut self) {
@@ -3943,6 +4315,8 @@ impl TerminalState {
     }
 
     pub(super) fn clear_all_image_placements(&mut self) {
+        self.native_images.clear();
+        self.native_fragment_counts.clear();
         self.kitty_images.clear();
         self.primary_image_placements.clear();
         self.primary_image_history.clear();
@@ -3950,30 +4324,9 @@ impl TerminalState {
     }
 
     pub(super) fn clear_images_at_cells(&mut self, row: u16, column: u16, columns: u16) {
-        if columns == 0 {
-            return;
-        }
-        let row = u64::from(row);
-        let column = u32::from(column);
-        let columns = u32::from(columns);
-        match self.active {
-            Screen::Primary => {
-                let live_top = self.scrollback.total_pushed();
-                let Some(absolute_row) = live_top.checked_add(row) else {
-                    return;
-                };
-                self.primary_image_placements.retain(|placement| {
-                    !image_covers_cells(placement, absolute_row, column, columns, live_top)
-                });
-                self.primary_image_history.retain(|placement| {
-                    !image_covers_cells(placement, absolute_row, column, columns, 0)
-                });
-            }
-            Screen::Alternate => {
-                self.alternate_image_placements
-                    .retain(|placement| !image_covers_cells(placement, row, column, columns, 0));
-            }
-        }
+        let source_removed =
+            self.clear_image_fragments_at_cells(row, column, column.saturating_add(columns));
+        self.finish_native_fragment_removal(source_removed);
     }
 
     fn apply_image_cursor_movement(&mut self, movement: ImageCursorMovement) {
@@ -3982,11 +4335,11 @@ impl TerminalState {
                 self.move_cursor_after_image(columns, rows);
             }
             ImageCursorMovement::Sixel {
-                anchor,
+                row,
+                column,
                 columns,
-                rows,
                 cursor_right,
-            } => self.move_cursor_after_sixel(anchor, columns, rows, cursor_right),
+            } => self.move_cursor_after_sixel(row, column, columns, cursor_right),
         }
     }
 
@@ -4006,9 +4359,9 @@ impl TerminalState {
 
     fn move_cursor_after_sixel(
         &mut self,
-        anchor: (u16, u16),
+        mut row: u16,
+        column: u16,
         columns: u16,
-        rows: u16,
         cursor_right: bool,
     ) {
         let (grid_rows, grid_columns) = self.active_grid().dimensions();
@@ -4020,13 +4373,10 @@ impl TerminalState {
             .map_or((0, grid_rows - 1), |(top, bottom)| {
                 (top.min(grid_rows - 1), bottom.min(grid_rows - 1))
             });
-        let mut row = anchor
-            .0
-            .saturating_add(rows.saturating_sub(1))
-            .min(grid_rows - 1);
-        let mut col = anchor.1;
+        row = row.min(grid_rows - 1);
+        let mut col = column;
         if cursor_right {
-            let right_edge = u32::from(anchor.1).saturating_add(u32::from(columns));
+            let right_edge = u32::from(column).saturating_add(u32::from(columns));
             if right_edge >= u32::from(grid_columns) {
                 col = 0;
                 row = row.saturating_add(1);
@@ -4048,44 +4398,67 @@ impl TerminalState {
     }
 }
 
-fn resolve_view_relative_anchor(
-    index: usize,
-    entries: &[(Arc<ImageRecord>, (i64, i64))],
-    visiting: &mut HashSet<usize>,
-    depth: usize,
-) -> Option<(i64, i64)> {
-    let (record, anchor) = entries.get(index)?;
-    if depth > MAX_RELATIVE_PLACEMENT_DEPTH || !visiting.insert(index) {
+type RelativeEntry = (Arc<ImageRecord>, Option<(i64, i64)>);
+type RelativeIdentity = (u32, Option<u32>);
+
+fn relative_identity(record: &ImageRecord) -> Option<RelativeIdentity> {
+    if record.protocol != GraphicsProtocol::Kitty {
         return None;
     }
-    let result = if let Some(image_id) = record.display.relative_image_id {
-        let placement_id = record
-            .display
-            .relative_placement_id
-            .filter(|placement_id| *placement_id != 0);
-        let parent = (0..index).rev().find(|candidate| {
-            let parent = &entries[*candidate].0;
-            parent.protocol == GraphicsProtocol::Kitty
-                && parent.display.image_id == Some(image_id)
-                && placement_id
-                    .is_none_or(|placement_id| parent.display.placement_id == Some(placement_id))
-        })?;
-        let (parent_row, parent_column) =
-            resolve_view_relative_anchor(parent, entries, visiting, depth + 1)?;
-        Some((
-            parent_row.checked_add(i64::from(record.display.relative_offset_y))?,
-            parent_column.checked_add(i64::from(record.display.relative_offset_x))?,
-        ))
-    } else if record.display.relative_placement_id.is_some()
-        || record.display.relative_offset_x != 0
-        || record.display.relative_offset_y != 0
+    let image_id = record.display.image_id.filter(|id| *id != 0)?;
+    Some((image_id, record.display.placement_id.filter(|id| *id != 0)))
+}
+
+fn resolve_relative_entry(
+    index: usize,
+    entries: &[RelativeEntry],
+    visiting: &mut HashSet<RelativeIdentity>,
+    depth: usize,
+) -> Result<Option<(i64, i64)>, ImagePlacementError> {
+    let identity = relative_identity(&entries[index].0);
+    if identity.is_some_and(|identity| !visiting.insert(identity)) {
+        return Err(ImagePlacementError::RelativeCycle);
+    }
+    if depth > MAX_RELATIVE_PLACEMENT_DEPTH {
+        return Err(ImagePlacementError::RelativeDepth);
+    }
+    let (record, anchor) = &entries[index];
+    let display = &record.display;
+    let result = if let Some(image_id) = display.relative_image_id.filter(|id| *id != 0) {
+        let placement_id = display.relative_placement_id.filter(|id| *id != 0);
+        let parent = entries
+            .get(..index)
+            .and_then(|entries| {
+                entries.iter().rposition(|(parent, _)| {
+                    parent.protocol == GraphicsProtocol::Kitty
+                        && parent.display.image_id == Some(image_id)
+                        && placement_id.is_none_or(|id| parent.display.placement_id == Some(id))
+                })
+            })
+            .ok_or(ImagePlacementError::NoParent)?;
+        resolve_relative_entry(parent, entries, visiting, depth + 1)?
+            .map(|(row, column)| {
+                let next_row = row.checked_add(i64::from(display.relative_offset_y));
+                let next_column = column.checked_add(i64::from(display.relative_offset_x));
+                match (next_row, next_column) {
+                    (Some(row), Some(column)) => Ok((row, column)),
+                    _ => Err(ImagePlacementError::RelativeOffsetOutOfBounds { row, column }),
+                }
+            })
+            .transpose()?
+    } else if display.relative_image_id.is_some()
+        || display.relative_placement_id.is_some()
+        || display.relative_offset_x != 0
+        || display.relative_offset_y != 0
     {
-        None
+        return Err(ImagePlacementError::NoParent);
     } else {
-        Some(*anchor)
+        *anchor
     };
-    visiting.remove(&index);
-    result
+    if let Some(identity) = identity {
+        visiting.remove(&identity);
+    }
+    Ok(result)
 }
 
 fn refresh_shared_sixel_placement(
@@ -4168,23 +4541,6 @@ fn refreshed_shared_sixel_content(
     Ok(Some(content))
 }
 
-fn image_covers_cells(
-    placement: &impl ImageCellPlacement,
-    row: u64,
-    column: u32,
-    columns: u32,
-    live_top: u64,
-) -> bool {
-    let (anchor_row, anchor_column) = placement.image_anchor();
-    let anchor_row = anchor_row.saturating_add(live_top);
-    let row_end = anchor_row.saturating_add(u64::from(placement.image_rows()));
-    let column_end = u32::from(anchor_column).saturating_add(u32::from(placement.image_columns()));
-    row >= anchor_row
-        && row < row_end
-        && column < column_end
-        && column.saturating_add(columns) > u32::from(anchor_column)
-}
-
 #[derive(Clone, Copy)]
 struct ResolvedPlaceholder {
     image_id: u32,
@@ -4194,10 +4550,25 @@ struct ResolvedPlaceholder {
     image_id_msb: u8,
 }
 
-fn placeholder_anchor(grid: &Grid, image: &KittyImage) -> Option<(u16, u16)> {
+fn placeholder_anchor(grid: &Grid, image: &KittyImage) -> Option<(i64, i64)> {
+    placeholder_anchor_rows(
+        image,
+        grid.rows()
+            .iter()
+            .enumerate()
+            .filter_map(|(row, cells)| Some((i64::try_from(row).ok()?, cells.as_slice()))),
+    )
+}
+
+fn placeholder_anchor_rows<'a, I>(image: &KittyImage, rows: I) -> Option<(i64, i64)>
+where
+    I: IntoIterator<Item = (i64, &'a [crate::grid::state::Cell])>,
+{
     let image_id = image.display.image_id.filter(|id| *id != 0)?;
+    let cell_rows = image.display.cell_rows?;
+    let cell_columns = image.display.cell_columns?;
     let mut anchor = None;
-    for (row, cells) in grid.rows().iter().enumerate() {
+    for (row, cells) in rows {
         let mut previous = None;
         for (column, cell) in cells.iter().enumerate() {
             let Some(raw) = cell.image_placeholder() else {
@@ -4211,42 +4582,72 @@ fn placeholder_anchor(grid: &Grid, image: &KittyImage) -> Option<(u16, u16)> {
             previous = Some(placeholder);
             let resolved_image_id =
                 placeholder.image_id | (u32::from(placeholder.image_id_msb) << 24);
-            if resolved_image_id != image_id {
-                continue;
-            }
-            if placeholder.placement_id.is_some()
-                && placeholder.placement_id != image.display.placement_id
+            if resolved_image_id != image_id
+                || (placeholder.placement_id.is_some()
+                    && placeholder.placement_id != image.display.placement_id)
+                || u32::from(placeholder.row) >= cell_rows
+                || u32::from(placeholder.column) >= cell_columns
             {
                 continue;
             }
-            let source_row = u16::try_from(row).ok()?;
-            let source_column = u16::try_from(column).ok()?;
-            let top = source_row.checked_sub(placeholder.row)?;
-            let left = source_column.checked_sub(placeholder.column)?;
-            anchor =
-                Some(anchor.map_or((top, left), |current: (u16, u16)| current.min((top, left))));
+            let column = i64::try_from(column).ok()?;
+            let top = row.checked_sub(i64::from(placeholder.row))?;
+            let left = column.checked_sub(i64::from(placeholder.column))?;
+            anchor = Some(anchor.map_or((top, left), |current: (i64, i64)| {
+                (current.0.min(top), current.1.min(left))
+            }));
         }
     }
     anchor
+}
+
+fn primary_placeholder_anchor(state: &TerminalState, image: &KittyImage) -> Option<(i64, i64)> {
+    let live_top = state.scrollback.total_pushed();
+    let history_start = live_top.saturating_sub(state.scrollback.len() as u64);
+    let history = state
+        .scrollback
+        .lines()
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (cells, _))| {
+            let absolute = history_start.checked_add(u64::try_from(index).ok()?)?;
+            let row = i64::try_from(i128::from(absolute) - i128::from(live_top)).ok()?;
+            Some((row, cells.as_slice()))
+        });
+    let live = state
+        .primary
+        .rows()
+        .iter()
+        .enumerate()
+        .filter_map(|(row, cells)| Some((i64::try_from(row).ok()?, cells.as_slice())));
+    placeholder_anchor_rows(image, history.chain(live))
 }
 
 fn resolve_placeholder(
     raw: ImagePlaceholder,
     previous: Option<ResolvedPlaceholder>,
 ) -> Option<ResolvedPlaceholder> {
-    let same_identity = previous.is_some_and(|previous| {
+    let previous = previous.filter(|previous| {
         previous.image_id == raw.image_id && previous.placement_id == raw.placement_id
     });
-    let row = raw.row.or_else(|| same_identity.then_some(previous?.row))?;
-    let column = match raw.column {
-        Some(column) => column,
-        None if same_identity && previous?.row == row => previous?.column.checked_add(1)?,
-        None => return None,
-    };
-    let image_id_msb = raw
-        .image_id_msb
-        .or_else(|| same_identity.then_some(previous?.image_id_msb))
-        .unwrap_or(0);
+    let mut row = raw.row.unwrap_or(0);
+    let mut column = raw.column.unwrap_or(0);
+    let mut image_id_msb = raw.image_id_msb.unwrap_or(0);
+    if let Some(previous) = previous {
+        if raw.row.is_none() {
+            row = previous.row;
+            column = previous.column.checked_add(1)?;
+            image_id_msb = previous.image_id_msb;
+        } else if raw.column.is_none() && row == previous.row {
+            column = previous.column.checked_add(1)?;
+            image_id_msb = previous.image_id_msb;
+        } else if raw.image_id_msb.is_none()
+            && row == previous.row
+            && previous.column.checked_add(1) == Some(column)
+        {
+            image_id_msb = previous.image_id_msb;
+        }
+    }
     Some(ResolvedPlaceholder {
         image_id: raw.image_id,
         placement_id: raw.placement_id,
@@ -4254,49 +4655,6 @@ fn resolve_placeholder(
         column,
         image_id_msb,
     })
-}
-
-fn virtual_image_placement_id(record: &ImageRecord, row: u16, column: u16) -> ImagePlacementId {
-    let image_id = u64::from(record.display.image_id.unwrap_or_default());
-    let placement_id = u64::from(record.display.placement_id.unwrap_or_default());
-    let value = (image_id << 32) ^ (placement_id << 16) ^ (u64::from(row) << 8) ^ u64::from(column);
-    value | (1u64 << 63)
-}
-
-trait ImageCellPlacement {
-    fn image_anchor(&self) -> (u64, u16);
-
-    fn image_columns(&self) -> u16;
-
-    fn image_rows(&self) -> u16;
-}
-
-impl ImageCellPlacement for ImagePlacement {
-    fn image_anchor(&self) -> (u64, u16) {
-        (u64::from(self.anchor.0), self.anchor.1)
-    }
-
-    fn image_columns(&self) -> u16 {
-        self.columns
-    }
-
-    fn image_rows(&self) -> u16 {
-        self.rows
-    }
-}
-
-impl ImageCellPlacement for PrimaryHistoryImagePlacement {
-    fn image_anchor(&self) -> (u64, u16) {
-        self.anchor
-    }
-
-    fn image_columns(&self) -> u16 {
-        self.columns
-    }
-
-    fn image_rows(&self) -> u16 {
-        self.rows
-    }
 }
 
 fn kitty_placement_identity(record: &ImageRecord) -> Option<(u32, u32)> {
@@ -4314,146 +4672,68 @@ fn kitty_image_id(record: &ImageRecord) -> Option<u32> {
 
 const MAX_RELATIVE_PLACEMENT_DEPTH: usize = 8;
 
-#[derive(Clone)]
-struct RelativeParent {
-    record: Arc<ImageRecord>,
-    anchor: (i64, i64),
-}
-
 impl TerminalState {
     fn resolve_relative_anchor(
         &self,
         record: &ImageRecord,
-    ) -> Result<Option<(u16, u16)>, ImagePlacementError> {
-        let display = &record.display;
-        let has_parent_fields =
-            display.relative_image_id.is_some() || display.relative_placement_id.is_some();
-        if !has_parent_fields {
-            if display.relative_offset_x != 0 || display.relative_offset_y != 0 {
+        current_id: Option<ImagePlacementId>,
+    ) -> Result<Option<(i64, i64)>, ImagePlacementError> {
+        if record.display.relative_image_id.is_none()
+            && record.display.relative_placement_id.is_none()
+        {
+            if record.display.relative_offset_x != 0 || record.display.relative_offset_y != 0 {
                 return Err(ImagePlacementError::NoParent);
             }
             return Ok(None);
         }
-        let Some(parent_id) = display.relative_image_id.filter(|id| *id != 0) else {
-            return Err(ImagePlacementError::NoParent);
-        };
-        let parent_placement_id = display
-            .relative_placement_id
-            .filter(|placement_id| *placement_id != 0);
-        let mut parent = self
-            .relative_parent(parent_id, parent_placement_id)
-            .ok_or(ImagePlacementError::NoParent)?;
-        let mut row = parent.anchor.0;
-        let mut column = parent.anchor.1;
-        let mut seen = HashSet::new();
-        if let Some(identity) = kitty_placement_identity(record) {
-            seen.insert((identity.0, Some(identity.1)));
+        if record.display.unicode_placeholder {
+            return Err(ImagePlacementError::VirtualRelative);
         }
-        for depth in 0..=MAX_RELATIVE_PLACEMENT_DEPTH {
-            let parent_identity = (
-                parent
-                    .record
-                    .display
-                    .image_id
-                    .ok_or(ImagePlacementError::NoParent)?,
-                parent.record.display.placement_id.filter(|id| *id != 0),
-            );
-            if !seen.insert(parent_identity) {
-                return Err(ImagePlacementError::RelativeCycle);
-            }
-            let parent_display = &parent.record.display;
-            let Some(next_parent_id) = parent_display.relative_image_id else {
-                if parent_display.relative_placement_id.is_some()
-                    || parent_display.relative_offset_x != 0
-                    || parent_display.relative_offset_y != 0
-                {
-                    return Err(ImagePlacementError::NoParent);
-                }
-                break;
-            };
-            if depth == MAX_RELATIVE_PLACEMENT_DEPTH {
-                return Err(ImagePlacementError::RelativeDepth);
-            }
-            row = row
-                .checked_add(i64::from(parent_display.relative_offset_y))
-                .ok_or(ImagePlacementError::RelativeOffsetOutOfBounds { row, column })?;
-            column = column
-                .checked_add(i64::from(parent_display.relative_offset_x))
-                .ok_or(ImagePlacementError::RelativeOffsetOutOfBounds { row, column })?;
-            parent = self
-                .relative_parent(
-                    next_parent_id,
-                    parent_display
-                        .relative_placement_id
-                        .filter(|placement_id| *placement_id != 0),
-                )
-                .ok_or(ImagePlacementError::NoParent)?;
-        }
-        row = row
-            .checked_add(i64::from(display.relative_offset_y))
-            .ok_or(ImagePlacementError::RelativeOffsetOutOfBounds { row, column })?;
-        column = column
-            .checked_add(i64::from(display.relative_offset_x))
-            .ok_or(ImagePlacementError::RelativeOffsetOutOfBounds { row, column })?;
-        let resolved_row = u16::try_from(row)
-            .map_err(|_| ImagePlacementError::RelativeOffsetOutOfBounds { row, column })?;
-        let resolved_column = u16::try_from(column)
-            .map_err(|_| ImagePlacementError::RelativeOffsetOutOfBounds { row, column })?;
-        Ok(Some((resolved_row, resolved_column)))
-    }
-
-    fn relative_parent(&self, image_id: u32, placement_id: Option<u32>) -> Option<RelativeParent> {
-        let matches = |record: &ImageRecord| {
-            record.protocol == GraphicsProtocol::Kitty
-                && record.display.image_id == Some(image_id)
-                && placement_id
-                    .is_none_or(|placement_id| record.display.placement_id == Some(placement_id))
-        };
-        let live = self
-            .active_image_placements()
+        let mut entries: Vec<RelativeEntry> = self
+            .kitty_images
             .iter()
-            .rev()
-            .find(|placement| matches(placement.record()));
-        if let Some(placement) = live {
-            return Some(RelativeParent {
-                record: placement.record_arc(),
-                anchor: (i64::from(placement.anchor.0), i64::from(placement.anchor.1)),
-            });
-        }
-        if self.active == Screen::Alternate {
-            return None;
-        }
-        let live_top = self.scrollback.total_pushed();
-        if let Some(placement) = self.primary_image_history.iter().rev().find(|placement| {
-            matches(placement.record.as_ref())
-                && placement.anchor.0 >= live_top
-                && placement.anchor.0 - live_top <= u64::from(u16::MAX)
-        }) {
-            return Some(RelativeParent {
-                record: Arc::clone(&placement.record),
-                anchor: (
-                    i64::try_from(placement.anchor.0 - live_top).ok()?,
-                    i64::from(placement.anchor.1),
-                ),
-            });
-        }
-        self.kitty_images
-            .iter()
-            .rev()
-            .filter(|image| {
-                image.virtual_placement
-                    && image.virtual_screen == Some(self.active)
-                    && matches(image.record.as_ref())
-            })
-            .find_map(|image| {
-                Some(RelativeParent {
-                    record: Arc::clone(&image.record),
-                    anchor: {
-                        let anchor = placeholder_anchor(self.active_grid(), image)?;
-                        (i64::from(anchor.0), i64::from(anchor.1))
+            .filter(|image| image.virtual_placement && image.virtual_screen == Some(self.active))
+            .map(|image| {
+                (
+                    Arc::clone(&image.record),
+                    if self.active == Screen::Primary {
+                        primary_placeholder_anchor(self, image)
+                    } else {
+                        placeholder_anchor(self.active_grid(), image)
                     },
-                })
+                )
             })
+            .collect();
+        let mut current_index = None;
+        if self.active == Screen::Primary {
+            let live_top = self.scrollback.total_pushed();
+            for placement in &self.primary_image_history {
+                if current_id == Some(placement.id) {
+                    current_index = Some(entries.len());
+                }
+                entries.push((
+                    Arc::clone(&placement.record),
+                    i64::try_from(i128::from(placement.anchor.0) - i128::from(live_top))
+                        .ok()
+                        .map(|row| (row, i64::from(placement.anchor.1))),
+                ));
+            }
+        }
+        for placement in self.active_image_placements() {
+            if current_id == Some(placement.id) {
+                current_index = Some(entries.len());
+            }
+            entries.push((
+                Arc::clone(&placement.record),
+                Some((i64::from(placement.anchor.0), i64::from(placement.anchor.1))),
+            ));
+        }
+        let index = current_index.unwrap_or_else(|| {
+            entries.push((Arc::new(record.clone()), None));
+            entries.len() - 1
+        });
+        let resolved = resolve_relative_entry(index, &entries, &mut HashSet::new(), 0)?;
+        resolved.ok_or(ImagePlacementError::NoParent).map(Some)
     }
 }
 

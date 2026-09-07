@@ -51,7 +51,7 @@ fn decodes_file_pixels_and_display_fields() {
 
 #[test]
 fn size_hint_does_not_change_file_decode() {
-    let values = [Some("0"), Some("1"), Some("999"), None];
+    let values = [Some("0"), Some("1"), Some("999"), Some("4294967296"), None];
     for size in values {
         let mut state = None;
         let result = parse_iterm_command(&one_pixel_body(size), &mut state)
@@ -64,18 +64,38 @@ fn size_hint_does_not_change_file_decode() {
 }
 
 #[test]
+fn size_hint_accepts_every_decimal_digit_within_the_control_limit() {
+    let png = red_png();
+    let encoded = encode_base64_for_test(&png);
+    let prefix = "inline=1;size=";
+    let size = "9".repeat(MAX_GRAPHICS_CONTROL_BYTES - prefix.len());
+    let body = format!("File={prefix}{size}:{encoded}");
+    let mut state = None;
+
+    let result = parse_iterm_command(body.as_bytes(), &mut state)
+        .expect("the bounded decimal hint is valid")
+        .expect("the image is complete");
+
+    assert_red_image(&result);
+    assert!(state.is_none());
+}
+
+#[test]
 fn malformed_size_is_rejected_as_invalid_command() {
     let png = red_png();
     let encoded = encode_base64_for_test(&png);
-    let mut state = None;
-    let body = format!("File=inline=1;size=not-a-number:{encoded}");
-    assert_eq!(
-        parse_iterm_command(body.as_bytes(), &mut state),
-        Err(GraphicsError::InvalidCommand {
-            protocol: ITERM_PROTOCOL,
-        })
-    );
-    assert!(state.is_none());
+    for size in ["", "not-a-number", "-1", "+1", "12x"] {
+        let mut state = None;
+        let body = format!("File=inline=1;size={size}:{encoded}");
+        assert_eq!(
+            parse_iterm_command(body.as_bytes(), &mut state),
+            Err(GraphicsError::InvalidCommand {
+                protocol: ITERM_PROTOCOL,
+            }),
+            "size={size:?}"
+        );
+        assert!(state.is_none());
+    }
 }
 
 #[test]
@@ -130,6 +150,90 @@ fn size_hint_does_not_change_multipart_decode() {
         assert_red_image(&result);
         assert!(state.is_none());
     }
+}
+
+#[test]
+fn large_size_hint_does_not_change_multipart_decode() {
+    let encoded = encode_base64_for_test(&red_png());
+    let mut state = None;
+
+    assert_eq!(
+        parse_iterm_command(b"MultipartFile=inline=1;size=4294967296", &mut state,),
+        Ok(None)
+    );
+    assert_eq!(
+        parse_iterm_command(format!("FilePart={encoded}").as_bytes(), &mut state),
+        Ok(None)
+    );
+    let result = parse_iterm_command(b"FileEnd", &mut state)
+        .expect("multipart completes")
+        .expect("the image is present");
+
+    assert_red_image(&result);
+    assert!(state.is_none());
+}
+
+#[test]
+fn signed_dimensions_are_canonicalized_to_renderable_units() {
+    for (value, expected) in [
+        ("-2", ImageDimension::Cells(1)),
+        ("0", ImageDimension::Cells(1)),
+        ("+2", ImageDimension::Cells(2)),
+        ("7", ImageDimension::Cells(7)),
+        ("-2px", ImageDimension::Pixels(1)),
+        ("0px", ImageDimension::Pixels(1)),
+        ("+2px", ImageDimension::Pixels(2)),
+        ("7px", ImageDimension::Pixels(7)),
+        ("-2%", ImageDimension::Cells(1)),
+        ("0%", ImageDimension::Cells(1)),
+        ("1%", ImageDimension::Percent(1)),
+        ("100%", ImageDimension::Percent(100)),
+        ("250%", ImageDimension::Percent(100)),
+        (
+            "999999999999999999999999999999%",
+            ImageDimension::Percent(100),
+        ),
+    ] {
+        assert_eq!(
+            parse_iterm_dimension(value.as_bytes()),
+            Ok(expected),
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn duplicate_metadata_uses_the_final_value() {
+    let encoded = encode_base64_for_test(&red_png());
+    let mut state = None;
+    let body = format!(
+        "File=inline=0;width=2;height=4;inline=1;width=3;height=5;preserveAspectRatio=1;preserveAspectRatio=0:{encoded}"
+    );
+
+    let result = parse_iterm_command(body.as_bytes(), &mut state)
+        .expect("the final metadata values are valid")
+        .expect("the image is complete");
+
+    assert_eq!(result.display.width, Some(ImageDimension::Cells(3)));
+    assert_eq!(result.display.height, Some(ImageDimension::Cells(5)));
+    assert!(!result.display.preserve_aspect_ratio);
+    assert_red_image(&result);
+}
+
+#[test]
+fn duplicate_inline_uses_the_final_disabled_value() {
+    let encoded = encode_base64_for_test(&red_png());
+    let mut state = None;
+    let body = format!("File=inline=1;inline=0:{encoded}");
+
+    assert_eq!(
+        parse_iterm_command(body.as_bytes(), &mut state),
+        Err(GraphicsError::UnsupportedAction {
+            protocol: ITERM_PROTOCOL,
+            action: "inline=0".to_string(),
+        })
+    );
+    assert!(state.is_none());
 }
 
 #[test]

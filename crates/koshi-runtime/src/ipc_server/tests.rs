@@ -785,6 +785,100 @@ fn a_kitty_terminal_receives_pixels_once_then_placement_only_frames() {
 }
 
 #[test]
+fn image_scroll_return_uses_a_new_identity_and_complete_transfer() {
+    let runtime_dir = test_runtime_dir("image-scroll-return");
+    let session_id = SessionId::new();
+    let client_id = ClientId::new();
+    let (inbox_tx, inbox_rx) = mpsc::channel();
+    let (dispatcher, events) = spawn_frame_dispatcher(inbox_rx, client_id, session_id);
+    let server = IpcServer::start(&runtime_dir, session_id, inbox_tx, None).expect("start serving");
+    let mut connection = attach_to_with_graphics(
+        &runtime_dir,
+        session_id,
+        client_id,
+        GraphicsCapabilities {
+            kitty: true,
+            iterm: false,
+            sixel: false,
+        },
+    );
+    let first_record = image_record(1);
+    let visible = image_snapshot(client_id, Arc::clone(&first_record));
+    let mut absent = visible.clone();
+    absent.panes[0].image_placements.clear();
+    let changed_record = image_record(2);
+    let mut changed = visible.clone();
+    changed.panes[0].image_placements[0] =
+        ImagePlacementSnapshot::with_content_id(7, 1, Arc::clone(&changed_record), (0, 0), 1, 1)
+            .expect("the changed placement is valid");
+    for snapshot in [&visible, &absent, &visible, &absent, &changed] {
+        events
+            .send(Delivery::Frame(Box::new(snapshot.clone())))
+            .expect("send an image visibility frame");
+    }
+    events
+        .send(Delivery::HostWrite(vec![9]))
+        .expect("send the event after the image frames");
+
+    for (snapshot, content_id, record) in [
+        (&visible, 1, Some(&first_record)),
+        (&absent, 0, None),
+        (&visible, 2, Some(&first_record)),
+        (&absent, 0, None),
+        (&changed, 3, Some(&changed_record)),
+    ] {
+        let mut frame = wire_frame(snapshot);
+        if let Some(placement) = frame
+            .panes
+            .first_mut()
+            .and_then(|pane| pane.image_placements.first_mut())
+        {
+            placement.content_id = content_id;
+        }
+        assert_eq!(
+            connection.recv::<SessionEvent>().expect("read a frame"),
+            SessionEvent::Painted {
+                frame: Box::new(frame),
+            }
+        );
+        let Some(record) = record else {
+            continue;
+        };
+        assert_eq!(
+            connection
+                .recv::<SessionEvent>()
+                .expect("read an image start"),
+            SessionEvent::ImageContentStart {
+                image: wire_image_transfer(content_id, record),
+            }
+        );
+        assert_eq!(
+            connection.recv::<SessionEvent>().expect("read image bytes"),
+            SessionEvent::ImageContentChunk {
+                chunk: FrameImageChunk {
+                    transfer_id: content_id,
+                    offset: 0,
+                    last: true,
+                    bytes: record.image.rgba.clone(),
+                },
+            }
+        );
+    }
+    assert_eq!(
+        connection
+            .recv::<SessionEvent>()
+            .expect("read the next event"),
+        SessionEvent::HostWrite { bytes: vec![9] }
+    );
+
+    drop(connection);
+    drop(events);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_dir);
+}
+
+#[test]
 fn any_native_terminal_receives_image_content() {
     for (tag, graphics) in [
         (

@@ -4,7 +4,6 @@
 //! Every item here belongs to one attached terminal. The session it is joined
 //! to owns none of them.
 
-use std::collections::{HashMap, HashSet};
 use std::io::{self, IsTerminal, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,7 +15,7 @@ use ratatui::backend::Backend;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::crossterm::execute;
-use ratatui::crossterm::terminal::SetTitle;
+use ratatui::crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate, SetTitle};
 use ratatui::layout::Rect;
 use ratatui::widgets::Widget;
 use ratatui::Terminal;
@@ -24,7 +23,7 @@ use ratatui::Terminal;
 use crate::attach::ViewerPaint;
 use crate::{core_pane_area, Client};
 use koshi_core::geometry::{PixelCellSize, Size};
-use koshi_core::ids::{ClientId, PaneId};
+use koshi_core::ids::ClientId;
 use koshi_core::key::KeySequence;
 use koshi_input::host::{Event, WindowSize};
 use koshi_input::keyboard::decode_key;
@@ -35,9 +34,8 @@ use koshi_iterm::{
     ITERM_CAPABILITIES_QUERY,
 };
 use koshi_kitty::{
-    write_kitty_abort, write_kitty_delete_all, write_kitty_image_delete, write_kitty_placement,
-    write_kitty_placement_delete, write_kitty_support_query, KittyOutputError,
-    KittyPlacement as KittyWirePlacement, KittyUpload as KittyCodecUpload, KITTY_QUERY_IMAGE_ID,
+    write_kitty_abort, write_kitty_delete_all, write_kitty_support_query, KittyOutputError,
+    KITTY_QUERY_IMAGE_ID,
 };
 use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_renderer::snapshot::{
@@ -46,8 +44,7 @@ use koshi_renderer::snapshot::{
 use koshi_renderer::theme::Theme;
 use koshi_renderer::{
     cursor_position, cursor_style, image_cell_snapshot, image_paints,
-    render_frame_with_image_availability, ImagePaint, ImagePlacementKey, ImageRenderMode,
-    ImageSourceRect,
+    render_frame_with_image_availability, ImagePlacementKey, ImageRenderMode,
 };
 use koshi_runtime::runtime::event::RuntimeEvent;
 use koshi_sixel::{PRIMARY_DEVICE_ATTRIBUTES_QUERY, SIXEL_GEOMETRY_QUERY, SIXEL_PALETTE_QUERY};
@@ -60,7 +57,7 @@ mod image_output;
 mod platform;
 mod reader;
 
-pub(crate) use self::image_output::{ImageOutputKind, ImageOutputState};
+pub(crate) use self::image_output::{ImageCompatibility, ImageOutputKind, ImageOutputState};
 
 const TERMINAL_QUERY_TIMEOUT: Duration = Duration::from_millis(300);
 
@@ -130,116 +127,6 @@ pub(crate) enum GraphicsSupport {
         /// Maximum Sixel height in pixels, or `None` when the host reports no limit.
         max_height: Option<u32>,
     },
-}
-
-/// Native Kitty image identities retained by one outer terminal connection.
-pub(crate) struct KittyImageCache {
-    /// Uploaded images, keyed by the connection-local content identity.
-    images: HashMap<u64, KittyImage>,
-    /// Terminal-side placement identities and geometry, keyed by pane and placement.
-    placements: HashMap<(PaneId, u64), KittyPlacement>,
-    /// The newest frame's native image placements.
-    desired: Vec<ImagePaint>,
-    /// The first desired placement not yet checked for an upload.
-    next_upload_index: usize,
-    /// The cursor to restore after placing the newest frame's images.
-    cursor: Option<ratatui::layout::Position>,
-    /// One compressed image transmission being advanced in bounded slices.
-    upload: Option<KittyUpload>,
-    /// Whether the terminal-side image cache must be cleared before reuse.
-    needs_reset: bool,
-    /// Whether a failed Kitty write may have left an APC transfer open.
-    needs_abort: bool,
-    /// The next nonzero Kitty image number.
-    next_image_number: u32,
-    /// The next nonzero Kitty placement identity.
-    next_placement_id: u32,
-}
-
-/// One uploaded image and its outer-terminal image number.
-#[derive(Clone)]
-struct KittyImage {
-    /// The retained record used to detect an in-process replacement.
-    record: Arc<koshi_terminal::graphics::ImageRecord>,
-    /// Kitty image number assigned by this client.
-    image_number: u32,
-}
-
-/// One outer-terminal placement and the pixel content it displays.
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct KittyPlacement {
-    /// Kitty placement identity assigned by this client.
-    id: u32,
-    /// Connection-local content identity received from the session.
-    content_id: u64,
-    /// Destination cells in the outer terminal.
-    target: Rect,
-    /// Source pixels displayed inside `target`.
-    source: ImageSourceRect,
-    /// Horizontal pixel offset inside the first destination cell.
-    cell_offset_x: Option<u32>,
-    /// Vertical pixel offset inside the first destination cell.
-    cell_offset_y: Option<u32>,
-    /// Kitty vertical stacking order.
-    z_index: i32,
-}
-
-impl KittyPlacement {
-    /// Build the terminal-side placement state for one paint.
-    fn new(id: u32, paint: &ImagePaint) -> Self {
-        Self {
-            id,
-            content_id: paint.content_id,
-            target: paint.target,
-            source: paint.source,
-            cell_offset_x: paint.cell_offset_x,
-            cell_offset_y: paint.cell_offset_y,
-            z_index: paint.z_index,
-        }
-    }
-
-    /// Report whether the outer terminal already has this paint state.
-    fn matches_paint(self, paint: &ImagePaint) -> bool {
-        self.content_id == paint.content_id
-            && self.target == paint.target
-            && self.source == paint.source
-            && self.cell_offset_x == paint.cell_offset_x
-            && self.cell_offset_y == paint.cell_offset_y
-            && self.z_index == paint.z_index
-    }
-
-    /// Retain this placement identity with a paint's current state.
-    fn adopt_paint(&mut self, paint: &ImagePaint) {
-        let id = self.id;
-        *self = Self::new(id, paint);
-    }
-}
-
-/// One Kitty upload advanced between attachment-loop passes.
-struct KittyUpload {
-    /// Connection-local content identity received from the session.
-    content_id: u64,
-    /// Record retained while its compressed bytes are generated and sent.
-    record: Arc<koshi_terminal::graphics::ImageRecord>,
-    /// The bounded Kitty upload encoder.
-    codec: KittyCodecUpload,
-}
-
-impl Default for KittyImageCache {
-    fn default() -> Self {
-        Self {
-            images: HashMap::new(),
-            placements: HashMap::new(),
-            desired: Vec::new(),
-            next_upload_index: 0,
-            cursor: None,
-            upload: None,
-            needs_reset: false,
-            needs_abort: false,
-            next_image_number: 1,
-            next_placement_id: 1,
-        }
-    }
 }
 
 /// A failure while painting a frame or emitting its native image data.
@@ -423,10 +310,11 @@ pub(crate) struct TerminalOwner {
 }
 
 impl TerminalOwner {
-    /// Open the controlling terminal and probe its capabilities.
+    /// Open the controlling terminal and probe its capabilities when image
+    /// support is enabled.
     /// With piped input and output, build an unsupported owner without opening
     /// `/dev/tty`; that client reads no keys and writes its frame to the pipe.
-    pub(crate) fn start() -> Result<Self, String> {
+    pub(crate) fn start(image_support: bool) -> Result<Self, String> {
         let input_is_terminal = io::stdin().is_terminal();
         let output_is_terminal = io::stdout().is_terminal();
         let (graphics, cell_size, cell_size_query_pending, terminal, reader, waker) =
@@ -434,15 +322,21 @@ impl TerminalOwner {
                 let (mut terminal, source) = TerminalDevice::open()
                     .map_err(|error| format!("could not open the terminal: {error}"))?;
                 let mut reader = InputReader::new(source);
-                let probe = graphics_support_for_output(output_is_terminal, || {
-                    with_raw_mode(
-                        &mut terminal,
-                        |terminal| terminal.enter_raw_mode(),
-                        |terminal| probe_terminal(terminal, &mut reader),
-                        |terminal| terminal.enter_cooked_mode(),
-                    )
-                })
-                .map_err(|error| format!("could not probe terminal graphics support: {error}"))?;
+                let probe = if image_support {
+                    graphics_support_for_output(output_is_terminal, || {
+                        with_raw_mode(
+                            &mut terminal,
+                            |terminal| terminal.enter_raw_mode(),
+                            |terminal| probe_terminal(terminal, &mut reader),
+                            |terminal| terminal.enter_cooked_mode(),
+                        )
+                    })
+                    .map_err(|error| {
+                        format!("could not probe terminal graphics support: {error}")
+                    })?
+                } else {
+                    TerminalProbe::unsupported()
+                };
                 let waker = reader.waker();
                 (
                     probe.graphics,
@@ -1074,7 +968,6 @@ pub(crate) fn paint_frame<B: Backend>(
     last_title: &mut String,
     last_cursor: &mut Option<CursorStyle>,
 ) -> Result<(), PaintError<B::Error>> {
-    let mut images = KittyImageCache::default();
     let mut output = ImageOutputState::disabled();
     paint_frame_with_images(
         terminal,
@@ -1083,16 +976,16 @@ pub(crate) fn paint_frame<B: Backend>(
         committed_regions,
         frame_paint,
         ImageRenderMode::Placeholder,
-        &mut images,
         &mut output,
         None,
         last_title,
         last_cursor,
     )
+    .map(|_| ())
 }
 
-/// Paint one frame and schedule native Kitty images when the outer terminal
-/// supports them.
+/// Paint one frame and schedule native images when the outer terminal supports
+/// them.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_frame_with_images<B: Backend>(
     terminal: &mut Terminal<B>,
@@ -1101,12 +994,11 @@ pub(crate) fn paint_frame_with_images<B: Backend>(
     committed_regions: &CommittedRegions,
     frame_paint: &ViewerPaint,
     image_mode: ImageRenderMode,
-    images: &mut KittyImageCache,
     output: &mut ImageOutputState,
     cell_size: Option<PixelCellSize>,
     last_title: &mut String,
     last_cursor: &mut Option<CursorStyle>,
-) -> Result<(), PaintError<B::Error>> {
+) -> Result<bool, PaintError<B::Error>> {
     let mut stdout = io::stdout();
     paint_frame_with_writer(
         &mut stdout,
@@ -1116,7 +1008,6 @@ pub(crate) fn paint_frame_with_images<B: Backend>(
         committed_regions,
         frame_paint,
         image_mode,
-        images,
         output,
         cell_size,
         last_title,
@@ -1134,12 +1025,11 @@ fn paint_frame_with_writer<B: Backend, W: Write>(
     committed_regions: &CommittedRegions,
     frame_paint: &ViewerPaint,
     image_mode: ImageRenderMode,
-    images: &mut KittyImageCache,
     output: &mut ImageOutputState,
     cell_size: Option<PixelCellSize>,
     last_title: &mut String,
     last_cursor: &mut Option<CursorStyle>,
-) -> Result<(), PaintError<B::Error>> {
+) -> Result<bool, PaintError<B::Error>> {
     let title = window_title(snapshot);
     let title_changed = title != *last_title;
     let cursor = cursor_style(snapshot);
@@ -1147,530 +1037,127 @@ fn paint_frame_with_writer<B: Backend, W: Write>(
     let hints = client.frame_hints_for(frame_paint.mode, frame_paint.mouse_select);
     let size = terminal.size().map_err(PaintError::Backend)?;
     let mut paint_area = Rect::new(0, 0, size.width, size.height);
-    let mut hardware_cursor = None;
+    let mut hardware_cursor = cursor_position(snapshot, committed_regions, paint_area);
     let native_output = output.kind().is_some();
+    output.note_host_size(size.width, size.height);
     let paints = image_paints(snapshot, committed_regions, paint_area);
-    let cells = native_output
-        .then(|| image_cell_snapshot(snapshot, committed_regions, paint_area).map(Arc::new))
-        .flatten();
-    if native_output {
-        output.submit_frame(&paints, cells, cell_size);
-        output.poll();
-        if output.screen_reset_needed() {
-            terminal.clear().map_err(PaintError::Backend)?;
+    let cells = output
+        .kind()
+        .filter(|kind| kind.composes_with_cells() && !paints.is_empty())
+        .and_then(|_| image_cell_snapshot(snapshot, committed_regions, paint_area))
+        .map(Arc::new);
+    if native_output && !output.prepare_frame(&paints, cells, cell_size) {
+        return Ok(false);
+    }
+    let native_commit = native_output && output.native_commit_pending();
+    let native_bytes = if native_commit {
+        match output.frame_output(hardware_cursor) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                output.fail_frame_commit();
+                return Err(PaintError::Image(error));
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    if native_commit {
+        if let Err(error) = execute!(writer, BeginSynchronizedUpdate) {
+            output.fail_frame_commit();
+            recover_synchronized_frame(writer);
+            return Err(PaintError::Image(error));
         }
     }
-    let image_available = native_output.then(|| output.prepared_keys());
-    terminal
-        .draw(|frame| {
-            let area = frame.area();
-            paint_area = area;
-            hardware_cursor = cursor_position(snapshot, committed_regions, area);
-            frame.render_widget(
-                SnapshotWidget {
-                    snapshot,
-                    theme: client.theme(),
-                    hints: &hints,
-                    pending: frame_paint.pending.as_ref(),
-                    viewer: frame_paint.chrome,
-                    committed_regions,
-                    image_mode,
-                    image_available,
-                },
-                area,
-            );
-            if let Some(position) = hardware_cursor {
-                frame.set_cursor_position(position);
+    let paint_result = (|| {
+        if native_output {
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                for key in output.prepared_keys().iter().copied() {
+                    if let Some(status) = output.compatibility(key) {
+                        if status != ImageCompatibility::default() {
+                            tracing::debug!(
+                                ?key,
+                                ?status,
+                                "native image output has host compatibility limits"
+                            );
+                        }
+                    }
+                }
             }
-        })
-        .map_err(PaintError::Backend)?;
-    output.mark_base_painted();
+            if output
+                .write_frame_reset(writer)
+                .map_err(PaintError::Image)?
+            {
+                // The host screen is blank after `ESC[2J`. Emptying both ratatui
+                // buffers makes the next draw write every cell again.
+                terminal.swap_buffers();
+            }
+        }
+        let image_available = native_output.then(|| output.prepared_keys());
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                paint_area = area;
+                hardware_cursor = cursor_position(snapshot, committed_regions, area);
+                frame.render_widget(
+                    SnapshotWidget {
+                        snapshot,
+                        theme: client.theme(),
+                        hints: &hints,
+                        pending: frame_paint.pending.as_ref(),
+                        viewer: frame_paint.chrome,
+                        committed_regions,
+                        image_mode,
+                        image_available,
+                    },
+                    area,
+                );
+                if let Some(position) = hardware_cursor {
+                    frame.set_cursor_position(position);
+                }
+            })
+            .map_err(PaintError::Backend)?;
+        if title_changed {
+            execute!(writer, SetTitle(&title)).map_err(PaintError::Image)?;
+        }
+        if cursor_changed {
+            if let Some(style) = cursor.map(set_cursor_style) {
+                execute!(writer, style).map_err(PaintError::Image)?;
+            }
+        }
+        if native_commit {
+            writer.write_all(&native_bytes).map_err(PaintError::Image)?;
+        }
+        Ok(())
+    })();
+    if native_commit {
+        if let Err(error) = paint_result {
+            output.fail_frame_commit();
+            recover_synchronized_frame(writer);
+            return Err(error);
+        }
+        if let Err(error) = execute!(writer, EndSynchronizedUpdate).and_then(|()| writer.flush()) {
+            output.fail_frame_commit();
+            recover_synchronized_frame(writer);
+            return Err(PaintError::Image(error));
+        }
+        output.commit_frame();
+    } else {
+        paint_result?;
+    }
     if title_changed {
-        let _ = execute!(writer, SetTitle(&title));
         *last_title = title;
     }
     if cursor_changed {
-        if let Some(style) = cursor.map(set_cursor_style) {
-            let _ = execute!(writer, style);
-        }
         *last_cursor = cursor;
     }
-    if image_mode == ImageRenderMode::Native && !native_output {
-        write_kitty_frame(writer, images, &paints, hardware_cursor).map_err(PaintError::Image)?;
-    }
-    Ok(())
+    Ok(true)
 }
 
-/// Reconcile the newest Kitty image frame and start its first missing upload.
-fn write_kitty_frame<W: Write>(
-    writer: &mut W,
-    images: &mut KittyImageCache,
-    paints: &[ImagePaint],
-    cursor: Option<ratatui::layout::Position>,
-) -> io::Result<()> {
-    validate_image_paints(paints)?;
-    images.desired = paints.to_vec();
-    images.next_upload_index = 0;
-    images.cursor = cursor;
-    let stale_upload = images
-        .upload
-        .as_ref()
-        .filter(|upload| !upload_is_desired(upload, &images.desired))
-        .map(|upload| upload.codec.started());
-    match stale_upload {
-        Some(true) => mark_kitty_cache_uncertain(images),
-        Some(false) => images.upload = None,
-        None => {}
-    }
-    reconcile_kitty_frame(writer, images)?;
-    start_next_kitty_upload(images)
-}
-
-/// Report whether compressed pixels still need client-loop work.
-pub(crate) fn kitty_image_work_pending(images: &KittyImageCache) -> bool {
-    images.upload.is_some()
-}
-
-/// Advance one bounded slice of the current Kitty upload.
-pub(crate) fn advance_kitty_image<W: Write>(
-    writer: &mut W,
-    images: &mut KittyImageCache,
-) -> io::Result<()> {
-    let Some(upload) = images.upload.as_ref() else {
-        return Ok(());
-    };
-    if !upload.codec.started() && !upload_is_desired(upload, &images.desired) {
-        images.upload = None;
-        reconcile_kitty_frame(writer, images)?;
-        return start_next_kitty_upload(images);
-    }
-
-    let result = advance_kitty_upload(writer, images.upload.as_mut().expect("upload exists"));
-    if let Err(error) = result {
-        images.needs_abort = true;
-        mark_kitty_cache_uncertain(images);
-        return Err(error);
-    }
-    let complete = images
-        .upload
-        .as_ref()
-        .is_some_and(|upload| upload.codec.complete());
-    if !complete {
-        return Ok(());
-    }
-
-    let upload = images.upload.take().expect("complete upload exists");
-    images.images.insert(
-        upload.content_id,
-        KittyImage {
-            record: upload.record,
-            image_number: upload.codec.image_number(),
-        },
-    );
-    place_completed_kitty_image(writer, images, upload.content_id)?;
-    start_next_kitty_upload(images)
-}
-
-/// Reconcile uploaded images and placements with the newest frame.
-fn reconcile_kitty_frame<W: Write>(writer: &mut W, images: &mut KittyImageCache) -> io::Result<()> {
-    let mut staged_images = images.images.clone();
-    let mut staged_placements = images.placements.clone();
-    let mut next_image_number = images.next_image_number;
-    let mut next_placement_id = images.next_placement_id;
-    let mut output = Vec::new();
-    let mut cursor_moved = false;
-    let reset = images.needs_reset
-        || image_ids_need_reset(
-            &staged_images,
-            &staged_placements,
-            next_image_number,
-            next_placement_id,
-            &images.desired,
-        );
-    if reset {
-        if images.needs_abort {
-            write_kitty_abort(&mut output).map_err(kitty_output_error)?;
-        }
-        write_kitty_delete_all(&mut output).map_err(kitty_output_error)?;
-        staged_images.clear();
-        staged_placements.clear();
-        next_image_number = 1;
-        next_placement_id = 1;
-    }
-
-    let desired_by_key: HashMap<(PaneId, u64), &ImagePaint> = images
-        .desired
-        .iter()
-        .map(|paint| ((paint.pane_id, paint.placement_id), paint))
-        .collect();
-    let desired_by_content: HashMap<u64, &ImagePaint> = images
-        .desired
-        .iter()
-        .map(|paint| (paint.content_id, paint))
-        .collect();
-    let removed_images: Vec<(u64, u32)> = staged_images
-        .iter()
-        .filter(|(content_id, image)| {
-            desired_by_content
-                .get(content_id)
-                .is_none_or(|paint| !kitty_image_matches(image, &paint.record))
-        })
-        .map(|(content_id, image)| (*content_id, image.image_number))
-        .collect();
-    for (content_id, image_number) in removed_images {
-        write_kitty_image_delete(&mut output, image_number).map_err(kitty_output_error)?;
-        staged_images.remove(&content_id);
-    }
-    let removed_placements: Vec<((PaneId, u64), KittyPlacement)> = staged_placements
-        .iter()
-        .filter(|(key, placement)| {
-            desired_by_key
-                .get(*key)
-                .is_none_or(|paint| paint.content_id != placement.content_id)
-        })
-        .map(|(key, placement)| (*key, *placement))
-        .collect();
-    for (key, placement) in removed_placements {
-        if let Some(image) = staged_images.get(&placement.content_id) {
-            write_kitty_placement_delete(&mut output, image.image_number, placement.id)
-                .map_err(kitty_output_error)?;
-        }
-        if !desired_by_key.contains_key(&key) {
-            staged_placements.remove(&key);
-        }
-    }
-
-    for paint in &images.desired {
-        let key = (paint.pane_id, paint.placement_id);
-        let placement_changed = match staged_placements.entry(key) {
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                let id = take_nonzero_id(
-                    &mut next_placement_id,
-                    "Kitty placement identities are exhausted",
-                )?;
-                entry.insert(KittyPlacement::new(id, paint));
-                true
-            }
-            std::collections::hash_map::Entry::Occupied(mut entry) => {
-                if entry.get().matches_paint(paint) {
-                    false
-                } else {
-                    entry.get_mut().adopt_paint(paint);
-                    true
-                }
-            }
-        };
-        if !placement_changed {
-            continue;
-        }
-        let Some(image) = staged_images
-            .get(&paint.content_id)
-            .filter(|image| kitty_image_matches(image, &paint.record))
-        else {
-            continue;
-        };
-        let placement_id = staged_placements[&key].id;
-        write!(
-            output,
-            "\x1b[{};{}H",
-            u32::from(paint.target.y) + 1,
-            u32::from(paint.target.x) + 1
-        )?;
-        let placement = kitty_wire_placement(image.image_number, placement_id, paint);
-        write_kitty_placement(&mut output, &image.record.image, &placement)
-            .map_err(kitty_output_error)?;
-        cursor_moved = true;
-    }
-
-    let abort_upload = !output.is_empty()
-        && images
-            .upload
-            .as_ref()
-            .is_some_and(|upload| upload.codec.started());
-    if abort_upload && !reset {
-        let mut framed = Vec::with_capacity(output.len() + 40);
-        write_kitty_image_delete(
-            &mut framed,
-            images
-                .upload
-                .as_ref()
-                .expect("a started upload is present")
-                .codec
-                .image_number(),
-        )
-        .map_err(kitty_output_error)?;
-        framed.extend_from_slice(&output);
-        output = framed;
-    }
-    if !output.is_empty() {
-        if cursor_moved {
-            restore_cursor_state(&mut output, images.cursor)?;
-        }
-        if let Err(error) = writer.write_all(&output).and_then(|()| writer.flush()) {
-            images.needs_abort = true;
-            mark_kitty_cache_uncertain(images);
-            return Err(error);
-        }
-    }
-
-    images.images = staged_images;
-    images.placements = staged_placements;
-    images.next_image_number = next_image_number;
-    images.next_placement_id = next_placement_id;
-    images.needs_reset = false;
-    images.needs_abort = false;
-    if reset || abort_upload {
-        images.upload = None;
-        images.next_upload_index = 0;
-    }
-    Ok(())
-}
-
-/// Place every use of an image that completed after this frame was reconciled.
-fn place_completed_kitty_image<W: Write>(
-    writer: &mut W,
-    images: &mut KittyImageCache,
-    content_id: u64,
-) -> io::Result<()> {
-    let image = images
-        .images
-        .get(&content_id)
-        .ok_or_else(|| invalid_image_data("completed image does not match its desired frame"))?;
-    let mut output = Vec::new();
-    let mut placed = false;
-    for paint in images
-        .desired
-        .iter()
-        .filter(|paint| paint.content_id == content_id && kitty_image_matches(image, &paint.record))
-    {
-        let key = (paint.pane_id, paint.placement_id);
-        let placement = images
-            .placements
-            .get(&key)
-            .filter(|placement| placement.content_id == content_id)
-            .ok_or_else(|| invalid_image_data("completed image has no Kitty placement identity"))?;
-        write!(
-            output,
-            "\x1b[{};{}H",
-            u32::from(paint.target.y) + 1,
-            u32::from(paint.target.x) + 1
-        )?;
-        let placement = kitty_wire_placement(image.image_number, placement.id, paint);
-        write_kitty_placement(&mut output, &image.record.image, &placement)
-            .map_err(kitty_output_error)?;
-        placed = true;
-    }
-    if !placed {
-        return Err(invalid_image_data(
-            "completed image is absent from its desired frame",
-        ));
-    }
-    restore_cursor_state(&mut output, images.cursor)?;
-    if let Err(error) = writer.write_all(&output).and_then(|()| writer.flush()) {
-        images.needs_abort = true;
-        mark_kitty_cache_uncertain(images);
-        return Err(error);
-    }
-    Ok(())
-}
-
-/// Start the first desired image whose pixels are not in the terminal cache.
-fn start_next_kitty_upload(images: &mut KittyImageCache) -> io::Result<()> {
-    if images.upload.is_some() {
-        return Ok(());
-    }
-    let Some(desired_index) = (images.next_upload_index..images.desired.len()).find(|index| {
-        let paint = &images.desired[*index];
-        images
-            .images
-            .get(&paint.content_id)
-            .is_none_or(|image| !kitty_image_matches(image, &paint.record))
-    }) else {
-        images.next_upload_index = images.desired.len();
-        return Ok(());
-    };
-    images.next_upload_index = desired_index + 1;
-    let paint = &images.desired[desired_index];
-    let content_id = paint.content_id;
-    let record = Arc::clone(&paint.record);
-    let image_number = take_nonzero_id(
-        &mut images.next_image_number,
-        "Kitty image numbers are exhausted",
-    )?;
-    let codec = KittyCodecUpload::new(Arc::clone(&record.image), image_number)
-        .map_err(kitty_output_error)?;
-    images.upload = Some(KittyUpload {
-        content_id,
-        record,
-        codec,
-    });
-    Ok(())
-}
-
-/// Advance the shared Kitty upload codec at the client I/O boundary.
-fn advance_kitty_upload<W: Write>(writer: &mut W, upload: &mut KittyUpload) -> io::Result<()> {
-    upload.codec.advance(writer).map_err(kitty_output_error)
-}
-
-/// Return whether an upload still belongs to the newest desired frame.
-fn upload_is_desired(upload: &KittyUpload, desired: &[ImagePaint]) -> bool {
-    desired.iter().any(|paint| {
-        paint.content_id == upload.content_id
-            && Arc::ptr_eq(&paint.record.image, &upload.record.image)
-    })
-}
-
-/// Return whether one cached image is the record the paint names.
-fn kitty_image_matches(
-    image: &KittyImage,
-    record: &Arc<koshi_terminal::graphics::ImageRecord>,
-) -> bool {
-    Arc::ptr_eq(&image.record.image, &record.image)
-}
-
-/// Forget terminal-side identities after a partial or failed native write.
-fn mark_kitty_cache_uncertain(images: &mut KittyImageCache) {
-    images.images.clear();
-    images.placements.clear();
-    images.upload = None;
-    images.next_upload_index = 0;
-    images.next_image_number = 1;
-    images.next_placement_id = 1;
-    images.needs_reset = true;
-}
-
-/// Check each current placement and reject duplicate identities before writing.
-fn validate_image_paints(paints: &[ImagePaint]) -> io::Result<()> {
-    let mut placements = HashSet::with_capacity(paints.len());
-    let mut contents: HashMap<u64, &Arc<koshi_terminal::graphics::ImageRecord>> =
-        HashMap::with_capacity(paints.len());
-    for paint in paints {
-        if !placements.insert((paint.pane_id, paint.placement_id)) {
-            return Err(invalid_image_data(
-                "image placement identity is repeated in one frame",
-            ));
-        }
-        if contents
-            .insert(paint.content_id, &paint.record)
-            .is_some_and(|record| !Arc::ptr_eq(&record.image, &paint.record.image))
-        {
-            return Err(invalid_image_data(
-                "image content identity names different pixel records",
-            ));
-        }
-        validate_image_paint(paint)?;
-    }
-    Ok(())
-}
-
-/// Check one image's pixel buffer, source rectangle, and destination rectangle.
-fn validate_image_paint(paint: &ImagePaint) -> io::Result<()> {
-    let image = &paint.record.image;
-    let expected = usize::try_from(image.width)
-        .ok()
-        .and_then(|width| {
-            usize::try_from(image.height)
-                .ok()
-                .and_then(|height| width.checked_mul(height))
-        })
-        .and_then(|pixels| pixels.checked_mul(4));
-    if image.width == 0
-        || image.height == 0
-        || expected != Some(image.rgba.len())
-        || paint.source.width == 0
-        || paint.source.height == 0
-        || paint.target.width == 0
-        || paint.target.height == 0
-        || paint
-            .source
-            .x
-            .checked_add(paint.source.width)
-            .is_none_or(|end| end > image.width)
-        || paint
-            .source
-            .y
-            .checked_add(paint.source.height)
-            .is_none_or(|end| end > image.height)
-    {
-        return Err(invalid_image_data(
-            "image geometry does not match RGBA pixels",
-        ));
-    }
-    Ok(())
-}
-
-/// Report whether allocating this frame's new Kitty ids requires a cache reset.
-fn image_ids_need_reset(
-    images: &HashMap<u64, KittyImage>,
-    placements: &HashMap<(PaneId, u64), KittyPlacement>,
-    next_image_number: u32,
-    next_placement_id: u32,
-    paints: &[ImagePaint],
-) -> bool {
-    let mut new_images = HashSet::new();
-    for paint in paints {
-        if images
-            .get(&paint.content_id)
-            .is_none_or(|image| !kitty_image_matches(image, &paint.record))
-        {
-            new_images.insert(paint.content_id);
-        }
-    }
-    let new_placements = paints
-        .iter()
-        .filter(|paint| !placements.contains_key(&(paint.pane_id, paint.placement_id)))
-        .count();
-    ids_exhausted(next_image_number, new_images.len())
-        || ids_exhausted(next_placement_id, new_placements)
-}
-
-/// Report whether `count` nonzero u32 ids remain from `next`.
-fn ids_exhausted(next: u32, count: usize) -> bool {
-    let available = if next == 0 {
-        0
-    } else {
-        u64::from(u32::MAX) - u64::from(next) + 1
-    };
-    u64::try_from(count).map_or(true, |count| count > available)
-}
-
-/// Take one nonzero u32 identity and advance its counter.
-fn take_nonzero_id(next: &mut u32, exhausted: &'static str) -> io::Result<u32> {
-    let id = *next;
-    if id == 0 {
-        return Err(invalid_image_data(exhausted));
-    }
-    *next = id.checked_add(1).unwrap_or(0);
-    Ok(id)
-}
-
-/// Build protocol-only Kitty placement fields from one rendered paint.
-fn kitty_wire_placement(
-    image_number: u32,
-    placement_id: u32,
-    paint: &ImagePaint,
-) -> KittyWirePlacement {
-    KittyWirePlacement {
-        image_number,
-        placement_id,
-        source_x: paint.source.x,
-        source_y: paint.source.y,
-        source_width: paint.source.width,
-        source_height: paint.source.height,
-        columns: u32::from(paint.target.width),
-        rows: u32::from(paint.target.height),
-        cell_offset_x: paint.cell_offset_x,
-        cell_offset_y: paint.cell_offset_y,
-        z_index: paint.z_index,
-    }
-}
-
-/// Convert a Kitty output failure into the client's image I/O error type.
-fn kitty_output_error(error: KittyOutputError) -> io::Error {
-    match error {
-        KittyOutputError::Io(error) => error,
-        error => io::Error::new(io::ErrorKind::InvalidData, error),
-    }
+/// Cancel an incomplete terminal control string and close synchronized output.
+fn recover_synchronized_frame<W: Write>(writer: &mut W) {
+    let _ = image_output::write_image_abort(writer);
+    let _ = execute!(writer, EndSynchronizedUpdate);
+    let _ = writer.flush();
 }
 
 fn restore_cursor_state<W: Write>(
@@ -1690,9 +1177,11 @@ fn restore_cursor_state<W: Write>(
     Ok(())
 }
 
-/// Build an I/O error for a malformed image source rectangle.
-fn invalid_image_data(message: &'static str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, message)
+fn kitty_output_error(error: KittyOutputError) -> io::Error {
+    match error {
+        KittyOutputError::Io(error) => error,
+        error => io::Error::new(io::ErrorKind::InvalidData, error),
+    }
 }
 
 /// The crossterm command for one pane's cursor style.

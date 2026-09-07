@@ -1,11 +1,11 @@
 //! Retained Kitty uploads, placement commands, deletion, and replies.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use koshi_image::{
-    decode_base64, raw_rgb, raw_rgba, AnimationFrame, DecodedAnimation, DecodedImage, FrameDelay,
-    LoopPolicy,
+    decode_base64, decode_png, raw_rgb, raw_rgba, AnimationFrame, DecodedAnimation, DecodedImage,
+    FrameDelay, LoopPolicy,
 };
 
 use crate::graphics::{
@@ -15,8 +15,8 @@ use crate::graphics::{
 use crate::state::{Screen, TerminalState};
 
 use super::{
-    kitty_image_id, ImageContent, ImageContentId, ImagePlacementError, KittyImage,
-    MAX_IMAGE_PLACEMENTS, MAX_IMAGE_STORAGE_BYTES,
+    add_image_storage, kitty_image_id, ImageContent, ImageContentId, ImagePlacementError,
+    ImagePlacementId, KittyImage, MAX_IMAGE_PLACEMENTS, MAX_IMAGE_STORAGE_BYTES,
 };
 
 impl TerminalState {
@@ -27,7 +27,7 @@ impl TerminalState {
         match command.kind() {
             KittyCommandKind::Place => {
                 if command.display().unicode_placeholder {
-                    let result = self.apply_virtual_kitty_placement(command);
+                    let result = self.apply_virtual_kitty_placement(command.display());
                     let display = self.kitty_reply_display(command.display());
                     self.reply_kitty(&display, result.as_ref().err().copied(), true);
                     return result;
@@ -59,23 +59,22 @@ impl TerminalState {
                 self.delete_kitty_placements(command, selector);
                 Ok(())
             }
-            KittyCommandKind::AnimationFrame
-            | KittyCommandKind::AnimationControl
-            | KittyCommandKind::AnimationCompose
-            | KittyCommandKind::AnimationDelete => {
+            KittyCommandKind::AnimationFrame | KittyCommandKind::AnimationCompose => {
                 let result = self.apply_kitty_animation_command(command);
                 let display = self.kitty_reply_display(command.display());
                 self.reply_kitty(&display, result.as_ref().err().copied(), true);
                 result
             }
+            KittyCommandKind::AnimationControl | KittyCommandKind::AnimationDelete => {
+                self.apply_kitty_animation_command(command)
+            }
         }
     }
 
-    fn apply_virtual_kitty_placement(
+    pub(super) fn apply_virtual_kitty_placement(
         &mut self,
-        command: &KittyCommand,
+        display: &ImageDisplay,
     ) -> Result<(), ImagePlacementError> {
-        let display = command.display();
         if display.relative_image_id.is_some()
             || display.relative_placement_id.is_some()
             || display.relative_offset_x != 0
@@ -97,6 +96,7 @@ impl TerminalState {
             })?;
         let mut virtual_display = display.clone();
         virtual_display.image_id = upload.display.image_id;
+        virtual_display.placement_id = virtual_display.placement_id.filter(|id| *id != 0);
         let record = Arc::new(ImageRecord {
             protocol: GraphicsProtocol::Kitty,
             image: Arc::clone(&upload.image),
@@ -105,6 +105,7 @@ impl TerminalState {
             display: virtual_display,
             anchor: self.active_cursor_position(),
         });
+        super::raster::prepare_with_plan(&record, self.cell_size, self.active_grid().dimensions())?;
         let screen = self.active;
         self.kitty_images.retain(|image| {
             !(image.virtual_placement
@@ -142,6 +143,23 @@ impl TerminalState {
             },
         )?;
         let content = Arc::clone(&image.content);
+        if command.kind() == KittyCommandKind::AnimationDelete
+            && content
+                .animation
+                .as_ref()
+                .is_none_or(|animation| animation.frame_count() <= 1)
+        {
+            if command.free_data() {
+                let image_id = image
+                    .display
+                    .image_id
+                    .ok_or(ImagePlacementError::AnimationDataInvalid)?;
+                self.remove_kitty_image(image_id);
+                self.kitty_images
+                    .retain(|image| image.display.image_id != Some(image_id));
+            }
+            return Ok(());
+        }
         let next = match command.kind() {
             KittyCommandKind::AnimationFrame => {
                 self.apply_kitty_animation_frame(&content, animation_command)?
@@ -177,7 +195,7 @@ impl TerminalState {
                         .expect("the retained image has valid pixels"),
                 ]
             });
-        let target_index = command
+        let requested_index = command
             .frame
             .map(|frame| {
                 frame
@@ -187,12 +205,8 @@ impl TerminalState {
             })
             .transpose()?
             .unwrap_or(frames.len());
-        let editing = command.frame.is_some();
-        if editing && target_index >= frames.len() {
-            return Err(ImagePlacementError::AnimationFrameNotFound {
-                frame: command.frame.unwrap_or(u32::MAX),
-            });
-        }
+        let target_index = requested_index.min(frames.len());
+        let editing = target_index < frames.len();
         let base = if editing {
             frames[target_index].image_shared()
         } else if let Some(base_frame) = command.base_frame {
@@ -326,9 +340,8 @@ impl TerminalState {
         let loop_policy = match command.loops {
             None | Some(0) => current.loop_policy(),
             Some(1) => LoopPolicy::Infinite,
-            Some(value) => {
-                LoopPolicy::finite(value).map_err(|_| ImagePlacementError::AnimationDataInvalid)?
-            }
+            Some(value) => LoopPolicy::finite(value - 1)
+                .map_err(|_| ImagePlacementError::AnimationDataInvalid)?,
         };
         let animation = Arc::new(
             DecodedAnimation::new(frames, loop_policy)
@@ -490,17 +503,22 @@ impl TerminalState {
             .ok_or(ImagePlacementError::AnimationDataInvalid)?;
         let frame = command
             .frame
-            .ok_or(ImagePlacementError::AnimationDataInvalid)?
+            .unwrap_or(1)
+            .min(u32::try_from(current.frame_count()).unwrap_or(u32::MAX))
             .saturating_sub(1) as usize;
-        if frame >= current.frame_count() {
-            return Err(ImagePlacementError::AnimationFrameNotFound {
-                frame: u32::try_from(frame + 1).unwrap_or(u32::MAX),
-            });
-        }
         let mut frames = current.frames().to_vec();
         frames.remove(frame);
         let mut next = (**content).clone();
-        if frames.is_empty() {
+        let selected = content.animation_frame as usize;
+        let selected = if selected > frame {
+            selected - 1
+        } else if selected == frame {
+            frame.min(frames.len().saturating_sub(1))
+        } else {
+            selected
+        };
+        if frames.len() == 1 {
+            next.image = frames[0].image_shared();
             next.animation = None;
             next.animation_frame = 0;
             next.animation_loops = 0;
@@ -513,8 +531,7 @@ impl TerminalState {
             DecodedAnimation::new(frames, current.loop_policy())
                 .map_err(|_| ImagePlacementError::AnimationDataInvalid)?,
         );
-        let frame_index =
-            (content.animation_frame as usize).min(animation.frame_count().saturating_sub(1));
+        let frame_index = selected.min(animation.frame_count().saturating_sub(1));
         next.animation = Some(animation.clone());
         next.animation_frame = u32::try_from(frame_index).unwrap_or(0);
         next.image = animation.frames()[frame_index].image_shared();
@@ -667,38 +684,18 @@ impl TerminalState {
         }
     }
 
-    pub(super) fn reserve_sixel_storage(
-        &mut self,
-        requested_bytes: usize,
-    ) -> Result<(), ImagePlacementError> {
-        loop {
-            let used_bytes = self.image_storage_bytes();
-            let total_bytes = used_bytes.checked_add(requested_bytes).ok_or(
-                ImagePlacementError::StorageLimit {
-                    used_bytes,
-                    requested_bytes,
-                    limit_bytes: MAX_IMAGE_STORAGE_BYTES,
-                },
-            )?;
-            if total_bytes <= MAX_IMAGE_STORAGE_BYTES {
-                return Ok(());
-            }
-            if !self.evict_unused_kitty_upload(None) {
-                return Err(ImagePlacementError::StorageLimit {
-                    used_bytes,
-                    requested_bytes,
-                    limit_bytes: MAX_IMAGE_STORAGE_BYTES,
-                });
-            }
-        }
-    }
-
     fn referenced_kitty_ids(&self) -> HashSet<u32> {
         self.primary_image_placements
             .iter()
             .chain(&self.alternate_image_placements)
             .map(|p| &p.record)
             .chain(self.primary_image_history.iter().map(|p| &p.record))
+            .chain(
+                self.kitty_images
+                    .iter()
+                    .filter(|image| image.virtual_placement)
+                    .map(|image| &image.record),
+            )
             .filter_map(|record| kitty_image_id(record))
             .collect()
     }
@@ -719,15 +716,16 @@ impl TerminalState {
         }
     }
 
-    fn image_storage_bytes(&self) -> usize {
+    pub(super) fn image_storage_bytes(&self) -> usize {
         let mut seen_contents = HashSet::<ImageContentId>::new();
-        let mut bytes = 0usize;
+        let mut seen_images = HashSet::new();
+        let mut bytes = self.native_fragment_storage_bytes();
         let mut add_content = |content: &Arc<super::ImageContent>| {
             if seen_contents.insert(content.id) {
-                bytes = bytes.saturating_add(content.image.rgba.len());
+                add_image_storage(&mut bytes, &mut seen_images, content.image.as_ref());
                 if let Some(animation) = &content.animation {
                     for frame in animation.frames() {
-                        bytes = bytes.saturating_add(frame.image().rgba.len());
+                        add_image_storage(&mut bytes, &mut seen_images, frame.image());
                     }
                 }
                 if let Some(source) = &content.sixel {
@@ -742,6 +740,7 @@ impl TerminalState {
             .primary_image_placements
             .iter()
             .chain(&self.alternate_image_placements)
+            .chain(self.native_images.iter().map(|source| &source.placement))
         {
             add_content(&placement.content);
         }
@@ -749,11 +748,11 @@ impl TerminalState {
             add_content(&placement.content);
         }
 
-        let mut seen_rasters = HashSet::new();
         for raster in self
             .primary_image_placements
             .iter()
             .chain(&self.alternate_image_placements)
+            .chain(self.native_images.iter().map(|source| &source.placement))
             .filter_map(|placement| placement.raster.as_ref())
             .chain(
                 self.primary_image_history
@@ -761,9 +760,7 @@ impl TerminalState {
                     .filter_map(|placement| placement.raster.as_ref()),
             )
         {
-            if seen_rasters.insert(Arc::as_ptr(raster)) {
-                bytes = bytes.saturating_add(raster.rgba.len());
-            }
+            add_image_storage(&mut bytes, &mut seen_images, raster.as_ref());
         }
         bytes
     }
@@ -780,6 +777,12 @@ impl TerminalState {
         let message = match error {
             None => "OK",
             Some(ImagePlacementError::ImageNotFound { .. }) => "ENOENT:image not found",
+            Some(ImagePlacementError::NoParent) => "ENOPARENT:relative image parent not found",
+            Some(ImagePlacementError::RelativeCycle) => "ECYCLE:relative image cycle",
+            Some(ImagePlacementError::RelativeDepth) => "ETOODEEP:relative image chain too deep",
+            Some(ImagePlacementError::AnimationFrameNotFound { .. }) => {
+                "ENOENT:animation frame not found"
+            }
             Some(ImagePlacementError::UnsupportedPlacement) => {
                 "ENOTSUP:unsupported image placement"
             }
@@ -836,22 +839,80 @@ impl TerminalState {
             .and_then(|image| image.display.image_id);
         let cursor = self.active_cursor_position();
         let live_top = self.scrollback.total_pushed();
-        let (grid_rows, _) = self.active_grid().dimensions();
+        let (grid_rows, grid_columns) = self.active_grid().dimensions();
         let mut removed_image_ids = HashSet::new();
         let mut removed_identities = HashSet::new();
+        let mut data_candidates = HashSet::new();
+        let mut relative_anchors = HashMap::new();
+        match self.active {
+            Screen::Primary => {
+                for placement in &self.primary_image_placements {
+                    if placement.record.display.relative_image_id.is_some()
+                        || placement.record.display.relative_placement_id.is_some()
+                    {
+                        if let Ok(Some((row, column))) =
+                            self.resolve_relative_anchor(&placement.record, Some(placement.id))
+                        {
+                            relative_anchors.insert(placement.id, (i128::from(row), column));
+                        }
+                    }
+                }
+                for placement in &self.primary_image_history {
+                    if placement.record.display.relative_image_id.is_some()
+                        || placement.record.display.relative_placement_id.is_some()
+                    {
+                        if let Ok(Some((row, column))) =
+                            self.resolve_relative_anchor(&placement.record, Some(placement.id))
+                        {
+                            relative_anchors.insert(placement.id, (i128::from(row), column));
+                        }
+                    }
+                }
+            }
+            Screen::Alternate => {
+                for placement in &self.alternate_image_placements {
+                    if placement.record.display.relative_image_id.is_some()
+                        || placement.record.display.relative_placement_id.is_some()
+                    {
+                        if let Ok(Some((row, column))) =
+                            self.resolve_relative_anchor(&placement.record, Some(placement.id))
+                        {
+                            relative_anchors.insert(placement.id, (i128::from(row), column));
+                        }
+                    }
+                }
+            }
+        }
         let broad_image_delete = matches!(selector, KittyDelete::Id | KittyDelete::Number)
             && command
                 .display()
                 .placement_id
                 .is_none_or(|placement_id| placement_id == 0);
-        let mut keep = |record: &Arc<ImageRecord>, row: i128, col: u16, rows: u16, columns: u16| {
+        let mut keep = |record: &Arc<ImageRecord>,
+                        placement_id: ImagePlacementId,
+                        stored_row: i128,
+                        stored_column: u16,
+                        rows: u16,
+                        columns: u16| {
             if record.protocol != GraphicsProtocol::Kitty {
                 return true;
             }
             let display = command.display();
+            let relative = record.display.relative_image_id.is_some()
+                || record.display.relative_placement_id.is_some();
+            let geometry = if relative {
+                relative_anchors.get(&placement_id).copied()
+            } else {
+                Some((stored_row, i64::from(stored_column)))
+            };
+            let Some((row, col)) = geometry else {
+                return true;
+            };
             let contains_row = |value: i128| row <= value && value < row + i128::from(rows);
-            let contains_column =
-                |value: u32| u32::from(col) <= value && value < u32::from(col) + u32::from(columns);
+            let contains_column = |value: u32| {
+                let value = i64::from(value);
+                col <= value && value < col + i64::from(columns)
+            };
             let x = display.source_offset_x.unwrap_or(1).saturating_sub(1);
             let y = i128::from(display.source_offset_y.unwrap_or(1)) - 1;
             let by_id = record.display.image_id == resolved && resolved.is_some();
@@ -859,7 +920,12 @@ impl TerminalState {
                 .placement_id
                 .is_none_or(|id| id == 0 || record.display.placement_id == Some(id));
             let matches = match selector {
-                KittyDelete::Visible => row < i128::from(grid_rows) && row + i128::from(rows) > 0,
+                KittyDelete::Visible => {
+                    row < i128::from(grid_rows)
+                        && row + i128::from(rows) > 0
+                        && col < i64::from(grid_columns)
+                        && col + i64::from(columns) > 0
+                }
                 KittyDelete::Id | KittyDelete::Number => by_id && by_placement,
                 KittyDelete::Cursor => {
                     contains_row(i128::from(cursor.0)) && contains_column(u32::from(cursor.1))
@@ -880,6 +946,7 @@ impl TerminalState {
             };
             if matches {
                 if let Some(id) = record.display.image_id {
+                    data_candidates.insert(id);
                     if broad_image_delete || record.display.placement_id.is_none() {
                         removed_image_ids.insert(id);
                     } else if let Some(placement_id) =
@@ -896,6 +963,7 @@ impl TerminalState {
                 self.primary_image_placements.retain(|p| {
                     keep(
                         &p.record,
+                        p.id,
                         i128::from(p.anchor.0),
                         p.anchor.1,
                         p.rows,
@@ -905,6 +973,7 @@ impl TerminalState {
                 self.primary_image_history.retain(|p| {
                     keep(
                         &p.record,
+                        p.id,
                         i128::from(p.anchor.0) - i128::from(live_top),
                         p.anchor.1,
                         p.rows,
@@ -915,6 +984,7 @@ impl TerminalState {
             Screen::Alternate => self.alternate_image_placements.retain(|p| {
                 keep(
                     &p.record,
+                    p.id,
                     i128::from(p.anchor.0),
                     p.anchor.1,
                     p.rows,
@@ -943,6 +1013,9 @@ impl TerminalState {
                 _ => false,
             };
             if matches {
+                if let Some(id) = image_id {
+                    data_candidates.insert(id);
+                }
                 if let Some(identity) = super::kitty_placement_identity(&image.record) {
                     removed_identities.insert(identity);
                 } else if let Some(id) = image_id {
@@ -953,6 +1026,7 @@ impl TerminalState {
         });
         self.remove_relative_dependents(&mut removed_image_ids, &mut removed_identities);
         if command.free_data() {
+            removed_image_ids.extend(data_candidates);
             if let Some(id) =
                 resolved.filter(|_| matches!(selector, KittyDelete::Id | KittyDelete::Number))
             {
@@ -1049,14 +1123,24 @@ fn decode_animation_payload(
     fallback_width: u32,
     fallback_height: u32,
 ) -> Result<DecodedImage, ImagePlacementError> {
-    let width = command.width.unwrap_or(fallback_width);
-    let height = command.height.unwrap_or(fallback_height);
     let bytes = decode_base64(GraphicsProtocol::Kitty, &command.payload)
         .map_err(|_| ImagePlacementError::AnimationDataInvalid)?;
     match command.format.unwrap_or(32) {
-        24 => raw_rgb(GraphicsProtocol::Kitty, width, height, &bytes)
-            .map_err(|_| ImagePlacementError::AnimationDataInvalid),
-        32 => raw_rgba(GraphicsProtocol::Kitty, width, height, &bytes)
+        24 => raw_rgb(
+            GraphicsProtocol::Kitty,
+            command.width.unwrap_or(fallback_width),
+            command.height.unwrap_or(fallback_height),
+            &bytes,
+        )
+        .map_err(|_| ImagePlacementError::AnimationDataInvalid),
+        32 => raw_rgba(
+            GraphicsProtocol::Kitty,
+            command.width.unwrap_or(fallback_width),
+            command.height.unwrap_or(fallback_height),
+            &bytes,
+        )
+        .map_err(|_| ImagePlacementError::AnimationDataInvalid),
+        100 => decode_png(GraphicsProtocol::Kitty, &bytes)
             .map_err(|_| ImagePlacementError::AnimationDataInvalid),
         _ => Err(ImagePlacementError::AnimationDataInvalid),
     }

@@ -21,6 +21,7 @@
 //! as `koshi_terminal::state::*`.
 
 use std::cmp::min;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use koshi_core::process::PtySize;
@@ -36,7 +37,7 @@ use crate::style::Style;
 
 mod cursor;
 mod cwd;
-mod images;
+pub(crate) mod images;
 mod modes;
 mod perform;
 mod reflow;
@@ -107,6 +108,10 @@ pub struct TerminalState {
     primary_image_history: Vec<images::PrimaryHistoryImagePlacement>,
     /// Image placements anchored to the alternate screen's cell grid.
     alternate_image_placements: Vec<ImagePlacement>,
+    /// Native image sources referenced by primary, history, or alternate cells.
+    native_images: Vec<images::NativeImageSource>,
+    /// Counts of native image fragments retained by source identity.
+    native_fragment_counts: HashMap<u64, usize>,
     /// Kitty uploads retained independently of their on-screen placements.
     kitty_images: Vec<images::KittyImage>,
     /// The next terminal-local identity assigned to a new image placement.
@@ -155,6 +160,7 @@ pub struct TerminalState {
 
 #[derive(Serialize)]
 struct TerminalStateSerializeFields<'a> {
+    native_image_coverage: bool,
     cell_size: Option<koshi_core::geometry::PixelCellSize>,
     primary: &'a Arc<Grid>,
     alternate: &'a Arc<Grid>,
@@ -193,6 +199,12 @@ impl Serialize for TerminalState {
         let primary_image_placements = self
             .primary_image_placements
             .iter()
+            .chain(
+                self.native_images
+                    .iter()
+                    .filter(|source| source.screen == Screen::Primary)
+                    .map(|source| &source.placement),
+            )
             .map(images::serialized_image_placement)
             .collect::<Result<Vec<_>, _>>()
             .map_err(serde::ser::Error::custom)?;
@@ -205,6 +217,12 @@ impl Serialize for TerminalState {
         let alternate_image_placements = self
             .alternate_image_placements
             .iter()
+            .chain(
+                self.native_images
+                    .iter()
+                    .filter(|source| source.screen == Screen::Alternate)
+                    .map(|source| &source.placement),
+            )
             .map(images::serialized_image_placement)
             .collect::<Result<Vec<_>, _>>()
             .map_err(serde::ser::Error::custom)?;
@@ -217,6 +235,7 @@ impl Serialize for TerminalState {
         let image_contents =
             images::serialized_content_table(self).map_err(serde::ser::Error::custom)?;
         TerminalStateSerializeFields {
+            native_image_coverage: true,
             cell_size: self.cell_size,
             primary: &self.primary,
             alternate: &self.alternate,
@@ -251,6 +270,7 @@ impl Serialize for TerminalState {
 }
 
 struct TerminalStateFields {
+    native_image_coverage: bool,
     cell_size: Option<koshi_core::geometry::PixelCellSize>,
     primary: Arc<Grid>,
     alternate: Arc<Grid>,
@@ -281,6 +301,7 @@ struct TerminalStateFields {
 }
 
 struct RawTerminalStateFields {
+    native_image_coverage: bool,
     cell_size: Option<koshi_core::geometry::PixelCellSize>,
     primary: Arc<Grid>,
     alternate: Arc<Grid>,
@@ -314,6 +335,7 @@ struct RawTerminalStateFields {
 #[derive(Deserialize)]
 #[serde(field_identifier, rename_all = "snake_case")]
 enum RawTerminalStateField {
+    NativeImageCoverage,
     CellSize,
     Primary,
     Alternate,
@@ -361,6 +383,7 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
     where
         A: MapAccess<'de>,
     {
+        let mut native_image_coverage = None;
         let mut cell_size = None;
         let mut primary = None;
         let mut alternate = None;
@@ -392,6 +415,12 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
 
         while let Some(field) = map.next_key::<RawTerminalStateField>()? {
             match field {
+                RawTerminalStateField::NativeImageCoverage => {
+                    if native_image_coverage.is_some() {
+                        return Err(serde::de::Error::duplicate_field("native_image_coverage"));
+                    }
+                    native_image_coverage = Some(map.next_value()?);
+                }
                 RawTerminalStateField::CellSize => {
                     if cell_size.is_some() {
                         return Err(serde::de::Error::duplicate_field("cell_size"));
@@ -585,6 +614,7 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
         }
 
         Ok(RawTerminalStateFields {
+            native_image_coverage: native_image_coverage.unwrap_or(false),
             cell_size: cell_size.unwrap_or_default(),
             primary: primary.ok_or_else(|| serde::de::Error::missing_field("primary"))?,
             alternate: alternate.ok_or_else(|| serde::de::Error::missing_field("alternate"))?,
@@ -664,6 +694,7 @@ impl<'de> Deserialize<'de> for TerminalStateFields {
         )
         .map_err(serde::de::Error::custom)?;
         Ok(Self {
+            native_image_coverage: raw.native_image_coverage,
             cell_size: raw.cell_size,
             primary: raw.primary,
             alternate: raw.alternate,
@@ -703,7 +734,10 @@ impl<'de> Deserialize<'de> for TerminalState {
         let fields = TerminalStateFields::deserialize(deserializer)?;
         images::validate_image_state(&fields).map_err(serde::de::Error::custom)?;
 
-        Ok(TerminalState {
+        let native_image_coverage = fields.native_image_coverage;
+        let mut state = TerminalState {
+            native_images: Vec::new(),
+            native_fragment_counts: HashMap::new(),
             cell_size: fields.cell_size,
             primary: fields.primary,
             alternate: fields.alternate,
@@ -731,7 +765,11 @@ impl<'de> Deserialize<'de> for TerminalState {
             cluster: fields.cluster,
             cluster_base: fields.cluster_base,
             replies: fields.replies,
-        })
+        };
+        state
+            .restore_native_image_coverage(native_image_coverage)
+            .map_err(serde::de::Error::custom)?;
+        Ok(state)
     }
 }
 
@@ -771,7 +809,7 @@ impl TerminalState {
             return Ok(None);
         };
         let source = SixelImageSource::new(indexed.clone(), palette.clone(), shared_palette);
-        let image = source.resolved(&palette)?;
+        let image = self.shared_image_pixels(source.resolved(&palette)?);
         let scrolling = self.modes.sixel_scrolling;
         let record = crate::graphics::ImageRecord {
             protocol: crate::graphics::GraphicsProtocol::Sixel,
@@ -818,6 +856,8 @@ impl TerminalState {
             alternate_cursor: home_cursor,
             primary_render: RenderState::fresh(),
             alternate_render: RenderState::fresh(),
+            native_images: Vec::new(),
+            native_fragment_counts: HashMap::new(),
             primary_image_placements: Vec::new(),
             primary_image_history: Vec::new(),
             alternate_image_placements: Vec::new(),
@@ -905,6 +945,7 @@ impl TerminalState {
         self.remap_alternate_image_placements(|row, column| {
             Some((row.checked_sub(u16::try_from(cropped_top).ok()?)?, column))
         });
+        self.rebuild_native_fragment_counts();
 
         // Clamp both cursors to the new bounds.
         self.primary_cursor.row = min(self.primary_cursor.row, size.rows.saturating_sub(1));

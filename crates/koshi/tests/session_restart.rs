@@ -1632,6 +1632,7 @@ fn a_resume_run_that_cannot_bind_its_socket_leaves_no_resume_file_behind() {
             graphics_tmux_wrapper_active: std::collections::HashMap::new(),
             graphics_events: std::collections::HashMap::new(),
             graphics_transport: std::collections::HashMap::new(),
+            synchronized_output: std::collections::HashMap::new(),
             quit: None,
         },
     )

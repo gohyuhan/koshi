@@ -156,17 +156,35 @@ impl Server {
             .filter_map(TerminalEngine::next_animation_delay)
             .map(|delay| delay.saturating_sub(now.saturating_duration_since(self.animation_clock)))
             .min();
-        match (self.render_scheduler.next_wakeup(now), animation_wakeup) {
-            (Some(render), Some(animation)) => Some(render.min(animation)),
-            (Some(render), None) => Some(render),
-            (None, Some(animation)) => Some(animation),
-            (None, None) => None,
-        }
+        let synchronized_output_wakeup = self
+            .terminal_engines
+            .values()
+            .filter_map(|engine| engine.next_synchronized_output_delay(now))
+            .min();
+        [
+            self.render_scheduler.next_wakeup(now),
+            animation_wakeup,
+            synchronized_output_wakeup,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     /// Whether a render is due at `now`. When `true`, the scheduler records the
     /// render and clears its pending reasons, so the caller must repaint.
     pub fn poll_render(&mut self, now: Instant) -> bool {
+        let expired: Vec<_> = self
+            .terminal_engines
+            .iter()
+            .filter_map(|(pane_id, engine)| {
+                (engine.next_synchronized_output_delay(now) == Some(Duration::ZERO))
+                    .then_some(*pane_id)
+            })
+            .collect();
+        for pane_id in expired {
+            self.expire_synchronized_output(pane_id, now);
+        }
         let elapsed = now.saturating_duration_since(self.animation_clock);
         self.animation_clock = now;
         let animations_changed = self

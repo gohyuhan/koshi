@@ -1306,6 +1306,25 @@ fn finishing_a_silent_string_leaves_the_next_image_readable() {
 }
 
 #[test]
+fn finishing_an_incomplete_utf8_character_discards_its_carry() {
+    let mut parser = GraphicsParser::default();
+
+    assert!(parser.advance(b"\xe2").is_empty());
+    assert_eq!(parser.carry_bytes(), Some(&b"\xe2"[..]));
+    assert!(parser.finish().is_empty());
+    assert_eq!(parser.carry_bytes(), None);
+    assert!(parser.transport_state().is_none());
+
+    assert_eq!(
+        only_event(&mut parser, &kitty_raw_rgba())
+            .expect("the image after the incomplete character decodes")
+            .image
+            .rgba,
+        [255, 0, 0, 255]
+    );
+}
+
+#[test]
 fn empty_passthrough_wrappers_are_silent_at_finish() {
     for bytes in [b"\x1bPtmux;".as_slice(), b"\x1bP\x1b"] {
         let mut parser = GraphicsParser::default();
@@ -1504,15 +1523,15 @@ fn unsupported_kitty_media_returns_a_typed_error() {
 
 #[test]
 fn unsupported_kitty_controls_return_typed_action_errors() {
-    for key in [b'd', b'O'] {
-        let bytes = format!("\x1b_G{}=1;AAAA\x1b\\", key as char).into_bytes();
+    for (field, action) in [("d=1", "control d"), ("t=x", "transfer medium x")] {
+        let bytes = format!("\x1b_G{field};AAAA\x1b\\").into_bytes();
         let mut parser = GraphicsParser::default();
 
         assert_eq!(
             only_event(&mut parser, &bytes),
             Err(GraphicsError::UnsupportedAction {
                 protocol: GraphicsProtocol::Kitty,
-                action: format!("control {}", key as char),
+                action: action.to_string(),
             })
         );
     }

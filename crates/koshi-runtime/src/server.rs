@@ -16,7 +16,7 @@ use std::{
         mpsc::{Receiver, Sender},
         Arc,
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use koshi_config::layer::PartialKoshiConfig;
@@ -35,7 +35,9 @@ use koshi_pty::backend::state::{PtyBackend, PtyHandle};
 use koshi_renderer::snapshot::Delivery;
 use koshi_session::client::Client;
 use koshi_session::session::state::Session;
-use koshi_terminal::engine::{GraphicsEvent, GraphicsTransportState, TerminalEngine};
+use koshi_terminal::engine::{
+    GraphicsEvent, GraphicsTransportState, SynchronizedOutputTransport, TerminalEngine,
+};
 
 use crate::{
     ipc_server::IpcServer,
@@ -338,6 +340,9 @@ impl Server {
         let mut graphics_tmux_wrapper_active = body.graphics_tmux_wrapper_active;
         let mut graphics_events = body.graphics_events;
         let mut graphics_transport = body.graphics_transport;
+        let mut synchronized_output = body.synchronized_output;
+        let restored_at = Instant::now();
+        let restored_wall_time = SystemTime::now();
         server.terminal_engines = body
             .engines
             .into_iter()
@@ -372,12 +377,15 @@ impl Server {
                 };
                 (
                     pane_id,
-                    TerminalEngine::from_state_with_graphics_and_events_and_wrappers(
+                    TerminalEngine::from_state_with_graphics_events_wrappers_and_synchronized_output(
                         state,
                         &held,
                         &graphics_held,
                         &events,
                         transport,
+                        synchronized_output.remove(&pane_id),
+                        restored_at,
+                        restored_wall_time,
                     ),
                 )
             })
@@ -453,6 +461,8 @@ impl Server {
         let mut graphics_tmux_wrapper_active = HashMap::new();
         let mut graphics_events: HashMap<PaneId, Vec<GraphicsEvent>> = HashMap::new();
         let mut graphics_transport = HashMap::new();
+        let mut synchronized_output: HashMap<PaneId, SynchronizedOutputTransport> = HashMap::new();
+        let carried_at = Instant::now();
         let engines = std::mem::take(&mut self.terminal_engines)
             .into_iter()
             .map(|(pane_id, mut engine)| {
@@ -477,6 +487,9 @@ impl Server {
                 if let Some(transport) = engine.graphics_transport_state() {
                     graphics_transport.insert(pane_id, transport);
                 }
+                if let Some(transport) = engine.synchronized_output_transport(carried_at) {
+                    synchronized_output.insert(pane_id, transport);
+                }
                 let events = engine.take_graphics();
                 if !events.is_empty() {
                     graphics_events.insert(pane_id, events);
@@ -495,6 +508,7 @@ impl Server {
             graphics_tmux_wrapper_active,
             graphics_events,
             graphics_transport,
+            synchronized_output,
             quit: self.quit_requested.then_some(if self.immediate_shutdown {
                 CarriedQuit::Immediate
             } else {

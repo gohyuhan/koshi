@@ -32,7 +32,8 @@ use koshi_core::process::{ExitStatus, PtySize};
 use koshi_session::session::state::Session;
 use koshi_storage::error::StorageError;
 use koshi_terminal::engine::{
-    GraphicsEvent, GraphicsTransportState, MAX_GRAPHICS_EVENTS, MAX_GRAPHICS_EVENT_BATCH,
+    GraphicsEvent, GraphicsTransportState, SynchronizedOutputTransport, MAX_GRAPHICS_EVENTS,
+    MAX_GRAPHICS_EVENT_BATCH,
 };
 use koshi_terminal::graphics::{GraphicsError, MAX_GRAPHICS_CARRY_BYTES, MAX_IMAGE_BYTES};
 use koshi_terminal::state::TerminalState;
@@ -187,6 +188,9 @@ pub struct ResumeBody {
     /// one.
     #[serde(default)]
     pub graphics_transport: HashMap<PaneId, GraphicsTransportState>,
+    /// Open synchronized-output groups keyed by pane id.
+    #[serde(default)]
+    pub synchronized_output: HashMap<PaneId, SynchronizedOutputTransport>,
     /// A quit that was applied and not yet carried out, and how it must be
     /// carried out.
     ///

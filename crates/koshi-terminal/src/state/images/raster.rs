@@ -44,6 +44,7 @@ pub(super) fn prepare_with_plan(
         });
     }
     if kitty
+        && !display.unicode_placeholder
         && columns.is_some()
         && rows.is_some()
         && (cell.is_none()
@@ -96,15 +97,16 @@ pub(super) fn prepare_with_plan(
             height: display.height,
         });
     }
+    let iterm = record.protocol == GraphicsProtocol::Iterm2;
     let requested_width = if kitty {
         columns.map(|value| u64::from(value) * cw)
     } else {
-        pixels(display.width, cw, u64::from(grid.1) * cw)
+        pixels(display.width, cw, u64::from(grid.1) * cw, iterm)
     };
     let requested_height = if kitty {
         rows.map(|value| u64::from(value) * ch)
     } else {
-        pixels(display.height, ch, u64::from(grid.0) * ch)
+        pixels(display.height, ch, u64::from(grid.0) * ch, iterm)
     };
     let (target_width, target_height) = match (requested_width, requested_height) {
         (None, None) => (u64::from(sw), u64::from(sh)),
@@ -116,7 +118,9 @@ pub(super) fn prepare_with_plan(
             let height = height.saturating_sub(y);
             ((height * u64::from(sw) / u64::from(sh)).max(1), height)
         }
-        (Some(width), Some(height)) if kitty => (width.saturating_sub(x), height.saturating_sub(y)),
+        (Some(width), Some(height)) if kitty && !display.unicode_placeholder => {
+            (width.saturating_sub(x), height.saturating_sub(y))
+        }
         (Some(width), Some(height)) if display.preserve_aspect_ratio => {
             if width * u64::from(sh) <= height * u64::from(sw) {
                 (width, (width * u64::from(sh) / u64::from(sw)).max(1))
@@ -133,32 +137,67 @@ pub(super) fn prepare_with_plan(
         });
     }
 
-    let explicit_rectangle = !kitty && requested_width.is_some() && requested_height.is_some();
-    let (columns, rows, canvas_width, canvas_height, width, height) = if explicit_rectangle {
-        let requested_width = requested_width.expect("checked above");
-        let requested_height = requested_height.expect("checked above");
-        let columns = requested_width.div_ceil(cw);
-        let rows = requested_height.div_ceil(ch);
-        (
-            columns,
-            rows,
-            columns * cw,
-            rows * ch,
-            target_width,
-            target_height,
-        )
-    } else {
-        let columns = (target_width + x).div_ceil(cw);
-        let rows = (target_height + y).div_ceil(ch);
-        (
-            columns,
-            rows,
-            columns * cw,
-            rows * ch,
-            target_width,
-            target_height,
-        )
-    };
+    let explicit_rectangle = (!kitty || display.unicode_placeholder)
+        && requested_width.is_some()
+        && requested_height.is_some();
+    let (mut columns, mut rows, mut canvas_width, mut canvas_height, mut width, mut height) =
+        if explicit_rectangle {
+            let requested_width = requested_width.expect("checked above");
+            let requested_height = requested_height.expect("checked above");
+            let columns = requested_width.div_ceil(cw);
+            let rows = requested_height.div_ceil(ch);
+            (
+                columns,
+                rows,
+                columns * cw,
+                rows * ch,
+                target_width,
+                target_height,
+            )
+        } else {
+            let columns = (target_width + x).div_ceil(cw);
+            let rows = (target_height + y).div_ceil(ch);
+            (
+                columns,
+                rows,
+                columns * cw,
+                rows * ch,
+                target_width,
+                target_height,
+            )
+        };
+    if iterm {
+        let available_columns = u64::from(grid.1.saturating_sub(record.anchor.1)).max(1);
+        let scales_both_axes = display.preserve_aspect_ratio
+            || requested_width.is_none()
+            || requested_height.is_none();
+        let mut constrained = false;
+        if columns > available_columns {
+            if scales_both_axes {
+                rows = (rows * available_columns / columns).max(1);
+            }
+            columns = available_columns;
+            constrained = true;
+        }
+        if rows > 255 {
+            if scales_both_axes {
+                columns = (columns * 255 / rows).max(1);
+            }
+            rows = 255;
+            constrained = true;
+        }
+        if constrained {
+            canvas_width = columns * cw;
+            canvas_height = rows * ch;
+            if scales_both_axes {
+                (width, height) =
+                    fit_inside(u64::from(sw), u64::from(sh), canvas_width, canvas_height);
+            } else {
+                width = canvas_width;
+                height = canvas_height;
+            }
+        }
+    }
     let bytes = canvas_width
         .checked_mul(canvas_height)
         .and_then(|value| value.checked_mul(4))
@@ -357,10 +396,26 @@ fn validate_source_pixels(record: &ImageRecord) -> Result<(), ImagePlacementErro
     Ok(())
 }
 
-fn pixels(dimension: Option<ImageDimension>, cell: u64, available: u64) -> Option<u64> {
+fn fit_inside(source_width: u64, source_height: u64, width: u64, height: u64) -> (u64, u64) {
+    if width * source_height <= height * source_width {
+        (width, (width * source_height / source_width).max(1))
+    } else {
+        ((height * source_width / source_height).max(1), height)
+    }
+}
+
+fn pixels(
+    dimension: Option<ImageDimension>,
+    cell: u64,
+    available: u64,
+    ceil_percent: bool,
+) -> Option<u64> {
     match dimension {
         Some(ImageDimension::Cells(value)) => Some(u64::from(value) * cell),
         Some(ImageDimension::Pixels(value)) => Some(u64::from(value)),
+        Some(ImageDimension::Percent(value)) if ceil_percent => {
+            Some((available * u64::from(value)).div_ceil(100))
+        }
         Some(ImageDimension::Percent(value)) => Some(available * u64::from(value) / 100),
         Some(ImageDimension::Auto) | None => None,
     }

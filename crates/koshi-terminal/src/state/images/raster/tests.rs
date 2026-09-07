@@ -239,6 +239,108 @@ fn percent_and_mixed_iterm_dimensions_use_the_shared_grid() {
 }
 
 #[test]
+fn iterm_percent_dimensions_round_up_and_fit_the_right_edge() {
+    let mut record = ImageRecord {
+        protocol: GraphicsProtocol::Iterm2,
+        image: Arc::new(DecodedImage {
+            width: 4,
+            height: 4,
+            rgba: [255, 0, 0, 255].repeat(16),
+        }),
+        animation: None,
+        action: ImageAction::Display,
+        display: ImageDisplay {
+            width: Some(ImageDimension::Percent(1)),
+            height: Some(ImageDimension::Cells(1)),
+            preserve_aspect_ratio: false,
+            ..ImageDisplay::default()
+        },
+        anchor: (0, 0),
+    };
+    let cell = PixelCellSize::new(10, 10);
+
+    let one_percent = prepare_with_plan(&record, cell, (8, 80)).expect("one percent fits");
+    assert_eq!((one_percent.columns, one_percent.rows), (1, 1));
+    assert_eq!(one_percent.plan.canvas, (10, 10));
+
+    record.display.width = Some(ImageDimension::Percent(100));
+    record.display.height = Some(ImageDimension::Cells(4));
+    record.display.preserve_aspect_ratio = true;
+    record.anchor.1 = 79;
+    let preserved = prepare_with_plan(&record, cell, (8, 80)).expect("the edge cell fits");
+    assert_eq!((preserved.columns, preserved.rows), (1, 1));
+    assert_eq!(preserved.plan.target, (10, 10));
+
+    record.display.preserve_aspect_ratio = false;
+    let stretched = prepare_with_plan(&record, cell, (8, 80)).expect("the width is constrained");
+    assert_eq!((stretched.columns, stretched.rows), (1, 4));
+    assert_eq!(stretched.plan.target, (10, 40));
+}
+
+#[test]
+fn iterm_height_is_capped_at_255_rows_with_exact_aspect_behavior() {
+    let mut record = ImageRecord {
+        protocol: GraphicsProtocol::Iterm2,
+        image: Arc::new(DecodedImage {
+            width: 10,
+            height: 300,
+            rgba: [255, 0, 0, 255].repeat(3_000),
+        }),
+        animation: None,
+        action: ImageAction::Display,
+        display: ImageDisplay {
+            width: Some(ImageDimension::Cells(10)),
+            height: Some(ImageDimension::Cells(300)),
+            preserve_aspect_ratio: true,
+            ..ImageDisplay::default()
+        },
+        anchor: (0, 0),
+    };
+    let cell = PixelCellSize::new(1, 1);
+
+    let preserved = prepare_with_plan(&record, cell, (400, 20)).expect("the tall image fits");
+    assert_eq!((preserved.columns, preserved.rows), (8, 255));
+    assert_eq!(preserved.plan.canvas, (8, 255));
+    assert_eq!(preserved.plan.target, (8, 240));
+
+    record.display.preserve_aspect_ratio = false;
+    let stretched = prepare_with_plan(&record, cell, (400, 20)).expect("the tall image fits");
+    assert_eq!((stretched.columns, stretched.rows), (10, 255));
+    assert_eq!(stretched.plan.canvas, (10, 255));
+    assert_eq!(stretched.plan.target, (10, 255));
+}
+
+#[test]
+fn canonical_one_cell_iterm_dimensions_produce_one_cell_geometry() {
+    let base = ImageRecord {
+        protocol: GraphicsProtocol::Iterm2,
+        image: Arc::new(DecodedImage {
+            width: 1,
+            height: 1,
+            rgba: vec![255, 0, 0, 255],
+        }),
+        animation: None,
+        action: ImageAction::Display,
+        display: ImageDisplay {
+            width: Some(ImageDimension::Cells(1)),
+            height: Some(ImageDimension::Cells(1)),
+            preserve_aspect_ratio: false,
+            ..ImageDisplay::default()
+        },
+        anchor: (0, 0),
+    };
+    let cell = PixelCellSize::new(10, 20);
+
+    for dimension in [ImageDimension::Cells(1), ImageDimension::Pixels(1)] {
+        let mut record = base.clone();
+        record.display.width = Some(dimension);
+        record.display.height = Some(dimension);
+        let prepared = prepare_with_plan(&record, cell, (8, 8)).expect("one cell is renderable");
+        assert_eq!((prepared.columns, prepared.rows), (1, 1), "{dimension:?}");
+    }
+}
+
+#[test]
 fn measurements_change_new_images_but_do_not_resize_existing_placements() {
     let mut engine = engine();
     let image = b"\x1b_Ga=T,f=32,s=1,v=1,c=3,C=1,q=2;/wAA/w==\x1b\\";
