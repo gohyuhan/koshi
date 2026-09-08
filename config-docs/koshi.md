@@ -12,9 +12,9 @@ on Linux, `~/Library/Application Support/koshi/koshi.kdl` on macOS,
 `koshi config check` and `migrate` reject them. A bad value in `update` rejects
 the whole app file for that launch.
 
-Settings use blocks. `theme`, `allow-beta-features`, `allow-other-users`,
-`remote-listen`, `remote-reconnect`, `shared-sessions-dir` and
-`auto-close-session` are top-level.
+Settings use blocks. `theme`, `image-support`, `allow-beta-features`,
+`allow-other-users`, `remote-listen`, `remote-reconnect`, `shared-sessions-dir`
+and `auto-close-session` are top-level.
 
 **Whose settings they are:** some belong to the session and are shared by every
 terminal looking at it; the rest belong to the terminal you are sitting at,
@@ -167,6 +167,16 @@ that are marked beta next.
 | Key | Value / type | Default | Since |
 |---|---|---|---|
 | `allow-beta-features` | boolean — run features still marked beta | `#false` | ≥ 0.2.0 |
+
+## `image-support`
+
+Each terminal reads this for itself. On, the terminal probes for Kitty, iTerm2,
+or Sixel output and paints decoded images with the selected protocol. Off, the
+terminal keeps the text and image placeholders but sends no native image output.
+
+| Key | Value / type | Default | Since |
+|---|---|---|---|
+| `image-support` | boolean — send native image output to the terminal | `#true` | ≥ 0.4.0 |
 
 ## `remote-reconnect`
 
@@ -321,6 +331,7 @@ allow-other-users #false
 // remote-listen "0.0.0.0:7654"  // sets the address; opens no port on its own
 // shared-sessions-dir "/var/run/koshi"  // optional override
 auto-close-session #false
+image-support #true
 remote-reconnect #true
 
 pane {

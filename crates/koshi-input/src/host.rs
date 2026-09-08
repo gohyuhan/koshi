@@ -1,7 +1,7 @@
 //! Events received from the terminal that contains the Koshi client.
 //!
 //! [`Parser`] converts terminal input bytes into keys, mouse events, pasted
-//! text, focus changes, and the two replies used during capability detection.
+//! text, focus changes, and terminal capability replies.
 
 use std::ops::{BitOr, BitOrAssign};
 
@@ -210,6 +210,26 @@ pub struct KittyGraphicsReply {
     pub ok: bool,
 }
 
+/// The result of one XTSMGRAPHICS item query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GraphicAttributeReply {
+    /// The terminal's color-register count, or the reported error.
+    Palette(Result<u32, GraphicAttributeError>),
+    /// The terminal's Sixel geometry in pixels, or the reported error.
+    Geometry(Result<(u32, u32), GraphicAttributeError>),
+}
+
+/// The status reported by an XTSMGRAPHICS reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphicAttributeError {
+    /// The terminal rejected the requested item number.
+    InvalidItem,
+    /// The terminal rejected the requested action.
+    InvalidAction,
+    /// The terminal could not complete the request.
+    Failure,
+}
+
 /// One complete host-terminal event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
@@ -219,14 +239,20 @@ pub enum Event {
     Mouse(MouseEvent),
     /// Window-size change.
     WindowResized(WindowSize),
+    /// Measured pixel dimensions of one terminal cell.
+    CellSize(koshi_core::geometry::PixelCellSize),
     /// Text wrapped by bracketed-paste markers.
     Paste(String),
     /// The terminal gained focus.
     FocusIn,
     /// The terminal lost focus.
     FocusOut,
-    /// A primary device-attributes answer.
-    PrimaryDeviceAttributes,
+    /// A primary device-attributes answer and its numeric parameters.
+    PrimaryDeviceAttributes(Vec<u32>),
+    /// An iTerm2 inline-image capability answer and its raw feature string.
+    TerminalFeatures(Vec<u8>),
+    /// A Sixel graphics-attribute answer.
+    SixelGraphicsAttributeReply(GraphicAttributeReply),
     /// A Kitty graphics answer.
     KittyGraphicsReply(KittyGraphicsReply),
 }

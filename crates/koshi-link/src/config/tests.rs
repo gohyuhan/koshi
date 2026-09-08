@@ -775,3 +775,22 @@ fn a_flag_naming_no_other_users_serves_only_this_user() {
         None
     );
 }
+
+// --- Whether a viewer sends native image output ---
+
+#[test]
+fn image_support_with_no_app_file_is_on() {
+    assert!(image_support(None));
+}
+
+#[test]
+fn image_support_takes_the_value_the_app_file_names() {
+    let off = PartialKoshiConfig {
+        image_support: Some(false),
+        ..Default::default()
+    };
+    assert!(!image_support(Some(off)));
+
+    let unset = PartialKoshiConfig::default();
+    assert!(image_support(Some(unset)));
+}

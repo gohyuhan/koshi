@@ -1,7 +1,8 @@
 //! Terminal-cell geometry.
 //!
-//! All coordinates and dimensions are measured in terminal **cells**, never
-//! pixels. The origin `(0, 0)` is the top-left cell; `x` grows rightward
+//! Coordinates and layout sizes are measured in terminal cells. Pixel cell
+//! measurements describe the conversion used by terminal image protocols.
+//! The origin `(0, 0)` is the top-left cell; `x` grows rightward
 //! (columns) and `y` grows downward (rows).
 //!
 //! A [`Rect`] spans the half-open ranges `[x, x + cols)` × `[y, y + rows)`:
@@ -27,6 +28,56 @@ pub struct Size {
     pub cols: u16,
     /// Height in cells (rows).
     pub rows: u16,
+}
+
+/// The complete image size in cells and the cells removed from its top and left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ImageCellGeometry {
+    /// The image's cell dimensions before clipping.
+    pub full_size: Size,
+    /// The clipped columns and rows measured from the complete image's origin.
+    pub offset: Point,
+}
+
+impl ImageCellGeometry {
+    /// Whether a visible rectangle of `size` fits inside the complete image.
+    #[must_use]
+    pub fn contains(self, size: Size) -> bool {
+        size.cols > 0
+            && size.rows > 0
+            && u32::from(self.offset.x) + u32::from(size.cols) <= u32::from(self.full_size.cols)
+            && u32::from(self.offset.y) + u32::from(size.rows) <= u32::from(self.full_size.rows)
+    }
+}
+
+/// The measured width and height of one terminal cell in pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PixelCellSize {
+    width: std::num::NonZeroU16,
+    height: std::num::NonZeroU16,
+}
+
+impl PixelCellSize {
+    /// Build a cell measurement when both pixel dimensions are nonzero.
+    #[must_use]
+    pub fn new(width: u16, height: u16) -> Option<Self> {
+        Some(Self {
+            width: std::num::NonZeroU16::new(width)?,
+            height: std::num::NonZeroU16::new(height)?,
+        })
+    }
+
+    /// Return the width of one cell in pixels.
+    #[must_use]
+    pub fn width(self) -> u16 {
+        self.width.get()
+    }
+
+    /// Return the height of one cell in pixels.
+    #[must_use]
+    pub fn height(self) -> u16 {
+        self.height.get()
+    }
 }
 
 impl Size {

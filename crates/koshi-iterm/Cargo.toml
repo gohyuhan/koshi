@@ -1,0 +1,10 @@
+[package]
+name = "koshi-iterm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+base64 = "0.23.1"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+koshi-image = { version = "0.4.0-pr.1", path = "../koshi-image" }

@@ -109,6 +109,8 @@ fn frame() -> PaintedFrame {
                 view_offset: 0,
             }),
             image_placements: vec![FrameImagePlacement {
+                geometry: None,
+                record: None,
                 id: 7,
                 content_id: 11,
                 available: true,

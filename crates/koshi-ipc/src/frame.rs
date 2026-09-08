@@ -187,6 +187,12 @@ pub struct FrameSlot {
 /// the unavailable-image marker.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FrameImagePlacement {
+    /// The complete cell size and the clipped top and left cells.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub geometry: Option<koshi_core::geometry::ImageCellGeometry>,
+    /// Record metadata for this placement of the shared pixel content.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record: Option<FrameImageRecordHeader>,
     /// The terminal-local placement identity.
     pub id: u64,
     /// The connection-local image-record identity.
@@ -210,6 +216,10 @@ impl<'de> Deserialize<'de> for FrameImagePlacement {
         struct Fields {
             id: u64,
             content_id: u64,
+            #[serde(default)]
+            geometry: Option<koshi_core::geometry::ImageCellGeometry>,
+            #[serde(default)]
+            record: Option<FrameImageRecordHeader>,
             #[serde(default = "default_image_available")]
             available: bool,
             anchor: (u16, u16),
@@ -218,6 +228,16 @@ impl<'de> Deserialize<'de> for FrameImagePlacement {
         }
 
         let fields = Fields::deserialize(deserializer)?;
+        if fields.geometry.is_some_and(|geometry| {
+            !geometry.contains(koshi_core::geometry::Size {
+                cols: fields.columns,
+                rows: fields.rows,
+            })
+        }) {
+            return Err(D::Error::custom(
+                "image clipping exceeds its complete cell dimensions",
+            ));
+        }
         if fields.id == 0 {
             return Err(D::Error::custom(
                 "image placement identity must not be zero",
@@ -242,6 +262,8 @@ impl<'de> Deserialize<'de> for FrameImagePlacement {
         Ok(Self {
             id: fields.id,
             content_id: fields.content_id,
+            geometry: fields.geometry,
+            record: fields.record,
             available: fields.available,
             anchor: fields.anchor,
             columns: fields.columns,
@@ -408,6 +430,9 @@ pub enum FrameSixelBackground {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FrameImageDisplay {
+    /// The source command's response suppression level.
+    #[serde(skip_serializing_if = "zero_quiet")]
+    pub quiet: u8,
     /// The requested width, if the sender supplied one. An unknown dimension is
     /// read as absent.
     #[serde(deserialize_with = "image_or_default")]
@@ -434,6 +459,18 @@ pub struct FrameImageDisplay {
     pub unicode_placeholder: bool,
     /// The Kitty image z-index.
     pub z_index: i32,
+    /// The parent Kitty image id for a relative placement.
+    #[serde(default)]
+    pub relative_image_id: Option<u32>,
+    /// The parent Kitty placement id for a relative placement.
+    #[serde(default)]
+    pub relative_placement_id: Option<u32>,
+    /// The horizontal cell offset from a relative parent placement.
+    #[serde(default)]
+    pub relative_offset_x: i32,
+    /// The vertical cell offset from a relative parent placement.
+    #[serde(default)]
+    pub relative_offset_y: i32,
     /// The number of terminal columns requested by Kitty.
     pub cell_columns: Option<u32>,
     /// The number of terminal rows requested by Kitty.
@@ -453,6 +490,7 @@ pub struct FrameImageDisplay {
 impl Default for FrameImageDisplay {
     fn default() -> Self {
         Self {
+            quiet: 0,
             width: None,
             height: None,
             preserve_aspect_ratio: true,
@@ -463,6 +501,10 @@ impl Default for FrameImageDisplay {
             usage_hints: 0,
             unicode_placeholder: false,
             z_index: 0,
+            relative_image_id: None,
+            relative_placement_id: None,
+            relative_offset_x: 0,
+            relative_offset_y: 0,
             cell_columns: None,
             cell_rows: None,
             source_offset_x: None,
@@ -472,6 +514,10 @@ impl Default for FrameImageDisplay {
             move_cursor: true,
         }
     }
+}
+
+fn zero_quiet(value: &u8) -> bool {
+    *value == 0
 }
 
 /// The transfer action recorded with a frame image.

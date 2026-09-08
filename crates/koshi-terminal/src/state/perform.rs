@@ -42,7 +42,7 @@
 
 use koshi_core::text::sanitize_reported_text;
 
-use crate::grid::state::{Cell, RowEnd};
+use crate::grid::state::{Cell, ImagePlaceholder, RowEnd};
 use crate::state::{
     CursorShape, MouseEncoding, MouseTracking, Screen, ShellIntegrationFact, ShellIntegrationState,
     TerminalState,
@@ -158,7 +158,15 @@ impl vte::Perform for TerminalState {
 
         // Install the base glyph (and, when wide, its continuation), clearing any
         // wide pair the write would split — see `place_glyph`.
-        self.place_glyph(row, col, Cell::new(c, glyph_width as u8, style));
+        let mut cell = Cell::new(
+            if c == '\u{10EEEE}' { ' ' } else { c },
+            glyph_width as u8,
+            style,
+        );
+        if c == '\u{10EEEE}' {
+            cell.set_image_placeholder(ImagePlaceholder::from_style(style));
+        }
+        self.place_glyph(row, col, cell);
 
         // Anchor a new cluster at this base; continuations that follow
         // (combining marks, ZWJ emoji parts, …) fold onto it.
@@ -419,11 +427,16 @@ impl vte::Perform for TerminalState {
                 let fill = self.active_render().style.bg_fill();
                 let (r, c) = (self.active_cursor().row, self.active_cursor().col);
                 let mode = first_param(params).unwrap_or(0);
+                let mut source_removed = false;
                 match mode {
                     // Cursor to end of screen: rest of this row, then every row
                     // below. A row erased end to end also loses its prompt
                     // mark; the partly erased cursor row keeps its own.
                     0 => {
+                        source_removed |= self.clear_image_fragments_at_cells(r, c, cols);
+                        for row in r.saturating_add(1)..rows {
+                            source_removed |= self.clear_image_fragments_at_cells(row, 0, cols);
+                        }
                         let grid = self.active_grid_mut();
                         grid.clear_line(r, c, cols, fill);
                         for row in r.saturating_add(1)..rows {
@@ -434,6 +447,11 @@ impl vte::Perform for TerminalState {
                     // Start of screen to cursor: every row above, then this row
                     // through the cursor column inclusive.
                     1 => {
+                        for row in 0..r {
+                            source_removed |= self.clear_image_fragments_at_cells(row, 0, cols);
+                        }
+                        source_removed |=
+                            self.clear_image_fragments_at_cells(r, 0, c.saturating_add(1));
                         let grid = self.active_grid_mut();
                         for row in 0..r {
                             grid.clear_line(row, 0, cols, fill);
@@ -443,6 +461,9 @@ impl vte::Perform for TerminalState {
                     }
                     // Whole screen.
                     2 => {
+                        for row in 0..rows {
+                            source_removed |= self.clear_image_fragments_at_cells(row, 0, cols);
+                        }
                         let grid = self.active_grid_mut();
                         for row in 0..rows {
                             grid.clear_line(row, 0, cols, fill);
@@ -456,7 +477,7 @@ impl vte::Perform for TerminalState {
                     // only: on the alternate screen ED 3 falls through to the
                     // `_` arm and changes nothing.
                     3 if self.active == Screen::Primary => {
-                        self.scrollback.clear();
+                        self.clear_scrollback_with_images();
                         self.clear_primary_image_history();
                     }
                     // Unknown ED mode: ignored.
@@ -467,6 +488,7 @@ impl vte::Perform for TerminalState {
                 if matches!(mode, 0..=2) {
                     self.clear_wrap_latch();
                 }
+                self.finish_native_fragment_removal(source_removed);
                 // Only the cursor row can be partially cleared; repair its wide
                 // pairs.
                 self.normalize_wide_pairs(r);
@@ -477,6 +499,12 @@ impl vte::Perform for TerminalState {
                 let fill = self.active_render().style.bg_fill();
                 let (r, c) = (self.active_cursor().row, self.active_cursor().col);
                 let mode = first_param(params).unwrap_or(0);
+                let source_removed = match mode {
+                    0 => self.clear_image_fragments_at_cells(r, c, cols),
+                    1 => self.clear_image_fragments_at_cells(r, 0, c.saturating_add(1)),
+                    2 => self.clear_image_fragments_at_cells(r, 0, cols),
+                    _ => false,
+                };
                 match mode {
                     // Cursor to end of line.
                     0 => self.active_grid_mut().clear_line(r, c, cols, fill),
@@ -500,6 +528,7 @@ impl vte::Perform for TerminalState {
                 if matches!(mode, 0..=2) {
                     self.clear_wrap_latch();
                 }
+                self.finish_native_fragment_removal(source_removed);
                 self.normalize_wide_pairs(r);
             }
             // ECH — erase n cells in place from the cursor (BCE, background color
@@ -511,20 +540,31 @@ impl vte::Perform for TerminalState {
                 let fill = self.active_render().style.bg_fill();
                 let (r, c) = (self.active_cursor().row, self.active_cursor().col);
                 let end = c.saturating_add(n).min(cols);
+                let source_removed = self.clear_image_fragments_at_cells(r, c, end);
                 self.active_grid_mut().clear_line(r, c, end, fill);
+                self.finish_native_fragment_removal(source_removed);
                 self.clear_wrap_latch();
                 self.normalize_wide_pairs(r);
             }
             // SGR — set graphic rendition: update the pen colors and text
             // attributes applied to subsequently printed cells.
             'm' => apply_sgr(&mut self.active_render_mut().style, params),
+            't' => self.report_window_size(params),
             // ICH — insert n blank cells at the cursor, shifting the rest of the
             // line right; cells pushed past the right edge fall off.
             '@' => {
                 let n = move_count(params);
                 let fill = self.active_render().style.bg_fill();
                 let (r, c) = (self.active_cursor().row, self.active_cursor().col);
+                let inserted = n.min(cols.saturating_sub(c));
+                let source_removed = self.discard_active_image_fragments(
+                    r,
+                    r.saturating_add(1),
+                    cols.saturating_sub(inserted),
+                    cols,
+                );
                 self.active_grid_mut().insert_cells(r, c, n, fill);
+                self.finish_native_fragment_removal(source_removed);
                 self.normalize_wide_pairs(r);
                 self.clear_wrap_latch();
             }
@@ -534,7 +574,15 @@ impl vte::Perform for TerminalState {
                 let n = move_count(params);
                 let fill = self.active_render().style.bg_fill();
                 let (r, c) = (self.active_cursor().row, self.active_cursor().col);
+                let deleted = n.min(cols.saturating_sub(c));
+                let source_removed = self.discard_active_image_fragments(
+                    r,
+                    r.saturating_add(1),
+                    c,
+                    c.saturating_add(deleted),
+                );
                 self.active_grid_mut().delete_cells(r, c, n, fill);
+                self.finish_native_fragment_removal(source_removed);
                 self.normalize_wide_pairs(r);
                 self.clear_wrap_latch();
             }
@@ -861,6 +909,19 @@ impl TerminalState {
             // cursor arrow keys on the alternate screen.
             ('h', 1007) => self.modes.alt_scroll = true,
             ('l', 1007) => self.modes.alt_scroll = false,
+            // `?80` — Sixel scrolling: a graphic may move the primary screen
+            // content into scrollback when it reaches the bottom.
+            ('h', 80) => self.modes.sixel_scrolling = false,
+            ('l', 80) => self.modes.sixel_scrolling = true,
+            // `?1070` — Sixel color registers: each graphic starts with
+            // private registers when enabled and uses shared registers when
+            // disabled.
+            ('h', 1070) => self.modes.sixel_private_color_registers = true,
+            ('l', 1070) => self.modes.sixel_private_color_registers = false,
+            // `?8452` — Sixel cursor movement: leave the cursor to the right
+            // of the graphic when enabled.
+            ('h', 8452) => self.modes.sixel_cursor_right = true,
+            ('l', 8452) => self.modes.sixel_cursor_right = false,
             // `?7` (DECAWM) — autowrap. On (the default): a glyph at the
             // last column parks there and the next glyph wraps to a new
             // line. Off: the cursor stays pinned and further glyphs

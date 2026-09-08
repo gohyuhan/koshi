@@ -32,7 +32,10 @@ use koshi_core::lock::LockMode;
 use koshi_terminal::grid::state::{Cell, Grid};
 use koshi_terminal::style::{Color as CellColor, Style as CellStyle, UnderlineStyle};
 
-use crate::images::{draw_image_placeholders, image_placeholder_rects, ImageRenderMode};
+use crate::images::{
+    draw_image_placeholders, image_placeholder_rects, image_placeholder_rects_selected,
+    ImagePlacementKey, ImageRenderMode,
+};
 use crate::region::StatuslineInputs;
 use crate::snapshot::{
     CommittedRegions, CursorStyle, KeymapHints, PaneSnapshot, Reconnecting, RenderSnapshot,
@@ -117,6 +120,35 @@ pub fn render_frame_with_images(
     area: RatatuiRect,
     buf: &mut Buffer,
 ) {
+    render_frame_with_image_availability(
+        snapshot,
+        committed_regions,
+        theme,
+        hints,
+        pending,
+        viewer,
+        image_mode,
+        None,
+        area,
+        buf,
+    );
+}
+
+/// Paint one frame with a selected set of image placements kept beneath native
+/// output.
+#[allow(clippy::too_many_arguments)]
+pub fn render_frame_with_image_availability(
+    snapshot: &RenderSnapshot,
+    committed_regions: &CommittedRegions,
+    theme: &Theme,
+    hints: &KeymapHints,
+    pending: Option<&KeySequence>,
+    viewer: ViewerChrome,
+    image_mode: ImageRenderMode,
+    available: Option<&[ImagePlacementKey]>,
+    area: RatatuiRect,
+    buf: &mut Buffer,
+) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -158,7 +190,15 @@ pub fn render_frame_with_images(
             draw_image_placeholders(&rects, buf);
         }
         ImageRenderMode::Native => {
-            let rects = image_placeholder_rects(snapshot, committed_regions, area, true);
+            let rects = match available {
+                Some(available) => image_placeholder_rects_selected(
+                    snapshot,
+                    committed_regions,
+                    area,
+                    Some(available),
+                ),
+                None => image_placeholder_rects(snapshot, committed_regions, area, true),
+            };
             draw_image_placeholders(&rects, buf);
         }
     }

@@ -43,23 +43,22 @@ fn a_standalone_escape_resolves_after_the_sequence_deadline() {
 }
 
 #[test]
-fn an_expired_unterminated_osc_releases_the_next_key() {
+fn an_expired_unterminated_osc_stays_pending_until_its_terminator() {
     let (mut source, mut write) = source();
     write.write_all(b"\x1b]0;title").expect("terminal input");
-    let before_read = Instant::now();
     source.read_input().expect("OSC input");
-    let after_read = Instant::now();
-    let scheduled = source
-        .pending_since
-        .expect("unterminated OSC schedules recovery");
-    assert!((before_read..=after_read).contains(&scheduled));
+    assert_eq!(source.pending_since, None);
+    assert!(source.parser.has_pending());
 
     source.pending_since = Some(Instant::now() - ESCAPE_SEQUENCE_TIMEOUT);
     let event =
-        reader::EventSource::try_read(&mut source, Some(Duration::ZERO)).expect("timeout recovery");
+        reader::EventSource::try_read(&mut source, Some(Duration::ZERO)).expect("timer check");
     assert_eq!(event, None);
+    assert!(source.parser.has_pending());
 
-    write.write_all(b"x").expect("terminal input after OSC");
+    write
+        .write_all(b"\x1b\\x")
+        .expect("terminal input after OSC");
     let event = reader::EventSource::try_read(&mut source, Some(Duration::from_millis(100)))
         .expect("event after OSC");
     assert_eq!(
@@ -72,22 +71,17 @@ fn an_expired_unterminated_osc_releases_the_next_key() {
 }
 
 #[test]
-fn control_string_progress_refreshes_its_inactivity_deadline() {
+fn control_string_progress_does_not_arm_an_inactivity_deadline() {
     let (mut source, mut write) = source();
     write.write_all(b"\x1b]0;").expect("terminal input");
     source.read_input().expect("OSC opening");
-    let expired = Instant::now() - ESCAPE_SEQUENCE_TIMEOUT;
-    source.pending_since = Some(expired);
+    assert_eq!(source.pending_since, None);
+    assert!(source.parser.has_pending());
 
     write.write_all(b"title").expect("terminal input");
-    let before_read = Instant::now();
     source.read_input().expect("OSC body");
-    let after_read = Instant::now();
-
-    let refreshed = source
-        .pending_since
-        .expect("continued OSC keeps a recovery deadline");
-    assert!((before_read..=after_read).contains(&refreshed));
+    assert_eq!(source.pending_since, None);
+    assert!(source.parser.has_pending());
 }
 
 #[test]

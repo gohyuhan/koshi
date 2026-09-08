@@ -19,11 +19,13 @@ fn put(state: &mut TerminalState, row: u16, col: u16, ch: char, width: u8) {
 fn image_record(display: ImageDisplay, anchor: (u16, u16), columns: u32, rows: u32) -> ImageRecord {
     ImageRecord {
         protocol: GraphicsProtocol::Kitty,
-        image: DecodedImage {
+        image: (DecodedImage {
             width: columns,
             height: rows,
             rgba: vec![255; (columns * rows * 4) as usize],
-        },
+        })
+        .into(),
+        animation: None,
         action: ImageAction::Display,
         display,
         anchor,
@@ -129,6 +131,266 @@ fn image_placement_records_its_identity_anchor_dimensions_and_cells() {
     assert!(placement.covers(4, 7));
     assert!(placement.covers(5, 9));
     assert!(!placement.covers(5, 10));
+}
+
+#[test]
+fn independent_static_records_keep_distinct_content_identities() {
+    let mut state = TerminalState::new(PtySize { cols: 8, rows: 8 });
+    let image = Arc::new(DecodedImage {
+        width: 1,
+        height: 1,
+        rgba: vec![255, 0, 0, 255],
+    });
+    let display = ImageDisplay {
+        width: Some(ImageDimension::Cells(1)),
+        height: Some(ImageDimension::Cells(1)),
+        move_cursor: false,
+        ..ImageDisplay::default()
+    };
+    let first = ImageRecord {
+        protocol: GraphicsProtocol::Iterm2,
+        image: Arc::clone(&image),
+        animation: None,
+        action: ImageAction::Display,
+        display: display.clone(),
+        anchor: (0, 0),
+    };
+    let second = ImageRecord {
+        anchor: (1, 1),
+        ..first.clone()
+    };
+
+    state
+        .apply_image_record(&first)
+        .expect("the first static image fits");
+    state
+        .apply_image_record(&second)
+        .expect("the second static image fits");
+
+    let placements = state.image_placements();
+    assert_eq!(placements.len(), 2);
+    assert!(Arc::ptr_eq(&placements[0].record().image, &image));
+    assert!(Arc::ptr_eq(&placements[1].record().image, &image));
+    assert_ne!(placements[0].content_id(), placements[1].content_id());
+}
+
+#[test]
+fn serialized_content_table_is_deduplicated_and_rebuilds_the_same_state() {
+    let mut state = TerminalState::new(PtySize { cols: 8, rows: 8 });
+    let image = Arc::new(DecodedImage {
+        width: 1,
+        height: 1,
+        rgba: vec![255, 0, 0, 255],
+    });
+    let display = ImageDisplay {
+        width: Some(ImageDimension::Cells(1)),
+        height: Some(ImageDimension::Cells(1)),
+        move_cursor: false,
+        ..ImageDisplay::default()
+    };
+    let first = ImageRecord {
+        protocol: GraphicsProtocol::Iterm2,
+        image: Arc::clone(&image),
+        animation: None,
+        action: ImageAction::Display,
+        display: display.clone(),
+        anchor: (0, 0),
+    };
+    let second = ImageRecord {
+        anchor: (1, 1),
+        ..first.clone()
+    };
+    state
+        .apply_image_record(&first)
+        .expect("the first static image fits");
+    state
+        .apply_image_record(&second)
+        .expect("the second static image fits");
+
+    let value = serde_json::to_value(&state).expect("state serializes");
+    assert_eq!(value["image_contents"].as_array().map(Vec::len), Some(2));
+    for placement in value["primary_image_placements"]
+        .as_array()
+        .expect("placements are an array")
+    {
+        assert!(placement["record"].get("image").is_none());
+        assert!(placement["raster"].is_null());
+    }
+
+    let restored: TerminalState = serde_json::from_value(value).expect("state restores");
+    assert_eq!(restored, state);
+    assert_ne!(
+        restored.image_placements()[0].content_id(),
+        restored.image_placements()[1].content_id()
+    );
+}
+
+#[test]
+fn serialized_content_table_rejects_duplicate_dangling_extra_and_inline_entries() {
+    let mut state = TerminalState::new(PtySize { cols: 8, rows: 8 });
+    let record = image_record(
+        ImageDisplay {
+            width: Some(ImageDimension::Cells(1)),
+            height: Some(ImageDimension::Cells(1)),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (0, 0),
+        1,
+        1,
+    );
+    state.apply_image_record(&record).expect("the image fits");
+    let base = serde_json::to_value(&state).expect("state serializes");
+    let content = base["image_contents"][0].clone();
+
+    let mut duplicate = base.clone();
+    duplicate["image_contents"] = serde_json::json!([content.clone(), content.clone()]);
+    let error = serde_json::from_value::<TerminalState>(duplicate)
+        .expect_err("duplicate content identities must be rejected");
+    assert_eq!(error.to_string(), "image content identities must be unique");
+
+    let mut dangling = base.clone();
+    dangling["primary_image_placements"][0]["content_id"] = serde_json::json!(999);
+    let error = serde_json::from_value::<TerminalState>(dangling)
+        .expect_err("a missing content identity must be rejected");
+    assert_eq!(
+        error.to_string(),
+        "image placement refers to missing content"
+    );
+
+    let mut extra = base.clone();
+    let mut extra_content = content.clone();
+    extra_content["id"] = serde_json::json!(999);
+    extra["image_contents"] = serde_json::json!([content.clone(), extra_content]);
+    let error = serde_json::from_value::<TerminalState>(extra)
+        .expect_err("unreferenced content must be rejected");
+    assert_eq!(
+        error.to_string(),
+        "image content table contains unreferenced entries"
+    );
+
+    let mut inline = base.clone();
+    inline["primary_image_placements"][0]["record"]["image"] = content["image"].clone();
+    let error = serde_json::from_value::<TerminalState>(inline)
+        .expect_err("content-table records must not carry inline pixels");
+    assert_eq!(
+        error.to_string(),
+        "content-table image records cannot carry inline pixels"
+    );
+
+    let mut collision = base;
+    collision["next_image_content_id"] = content["id"].clone();
+    let error = serde_json::from_value::<TerminalState>(collision)
+        .expect_err("the next content identity cannot collide");
+    assert_eq!(
+        error.to_string(),
+        "next image content identity collides with retained content"
+    );
+}
+
+#[test]
+fn serialized_content_table_rejects_legacy_raster_fields_and_combined_count_overflow() {
+    let mut state = TerminalState::new(PtySize { cols: 8, rows: 8 });
+    let record = image_record(
+        ImageDisplay {
+            width: Some(ImageDimension::Cells(1)),
+            height: Some(ImageDimension::Cells(1)),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (0, 0),
+        1,
+        1,
+    );
+    state.apply_image_record(&record).expect("the image fits");
+    let base = serde_json::to_value(&state).expect("state serializes");
+    let content = base["image_contents"][0].clone();
+
+    let mut legacy_plan = base.clone();
+    legacy_plan["primary_image_placements"][0]["plan"] = serde_json::Value::Null;
+    let error = serde_json::from_value::<TerminalState>(legacy_plan)
+        .expect_err("new-format placements must carry their validated plan");
+    assert_eq!(
+        error.to_string(),
+        "content-table image placements require a raster plan"
+    );
+
+    let mut legacy_raster = base.clone();
+    legacy_raster["primary_image_placements"][0]["raster"] = content["image"].clone();
+    let error = serde_json::from_value::<TerminalState>(legacy_raster)
+        .expect_err("new-format placements must not carry legacy raster data");
+    assert_eq!(
+        error.to_string(),
+        "content-table image placements cannot carry legacy raster fields"
+    );
+
+    let placement = base["primary_image_placements"][0].clone();
+    let mut placements = Vec::with_capacity(MAX_IMAGE_PLACEMENTS);
+    for id in 1..=MAX_IMAGE_PLACEMENTS {
+        let mut placement = placement.clone();
+        placement["id"] = serde_json::json!(id);
+        placements.push(placement);
+    }
+    let mut count_overflow = base;
+    count_overflow["primary_image_placements"] = serde_json::Value::Array(placements);
+    count_overflow["alternate_image_placements"] = serde_json::json!([placement]);
+    let error = serde_json::from_value::<TerminalState>(count_overflow)
+        .expect_err("combined image placement lists must be bounded");
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "image placement count {} exceeds the limit of {}",
+            MAX_IMAGE_PLACEMENTS + 1,
+            MAX_IMAGE_PLACEMENTS
+        )
+    );
+}
+
+#[test]
+fn raw_image_state_deserialization_shares_one_byte_budget_across_all_fields() {
+    let mut state = TerminalState::new(PtySize { cols: 8, rows: 8 });
+    let record = image_record(
+        ImageDisplay {
+            image_id: Some(7),
+            width: Some(ImageDimension::Cells(1)),
+            height: Some(ImageDimension::Cells(1)),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (0, 0),
+        1,
+        1,
+    );
+    state
+        .apply_image_record(&record)
+        .expect("the image fits the grid");
+    let mut value = serde_json::to_value(&state).expect("state serializes");
+    let image = value["image_contents"][0]["image"].clone();
+    let mut placement = value["primary_image_placements"][0].clone();
+    placement
+        .as_object_mut()
+        .expect("placement is an object")
+        .remove("content_id");
+    placement["record"]["image"] = image.clone();
+    value["primary_image_placements"] = serde_json::json!([placement.clone()]);
+    value["primary_image_history"] = serde_json::json!([placement.clone()]);
+    value["alternate_image_placements"] = serde_json::json!([placement]);
+    let mut kitty = value["primary_image_placements"][0]["record"].clone();
+    kitty["action"] = serde_json::json!("Transmit");
+    value["kitty_images"] = serde_json::json!([kitty]);
+
+    let mut budget = images::ImageStateBudget::with_limit(16);
+    use serde::de::IntoDeserializer;
+
+    let deserializer = value.into_deserializer();
+    let error = match RawTerminalStateFields::deserialize_with_budget(deserializer, &mut budget) {
+        Ok(_) => panic!("the fifth image payload must exceed the shared budget"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error.to_string(),
+        "image state RGBA data exceeds the remaining storage budget of 0 bytes"
+    );
 }
 
 #[test]
@@ -269,7 +531,7 @@ fn failed_kitty_transmit_and_display_keeps_old_placements() {
             move_cursor: false,
             ..ImageDisplay::default()
         },
-        (7, 7),
+        (8, 8),
         2,
         2,
     );
@@ -278,8 +540,8 @@ fn failed_kitty_transmit_and_display_keeps_old_placements() {
     assert_eq!(
         state.apply_image_record(&invalid),
         Err(ImagePlacementError::OutOfBounds {
-            row: 7,
-            column: 7,
+            row: 8,
+            column: 8,
             columns: 2,
             rows: 2,
             grid_rows: 8,
@@ -356,15 +618,15 @@ fn rejected_image_placement_leaves_the_complete_state_unchanged() {
             move_cursor: false,
             ..ImageDisplay::default()
         },
-        (7, 7),
+        (8, 8),
         2,
         2,
     );
     assert_eq!(
         state.apply_image_record(&out_of_bounds),
         Err(ImagePlacementError::OutOfBounds {
-            row: 7,
-            column: 7,
+            row: 8,
+            column: 8,
             columns: 2,
             rows: 2,
             grid_rows: 8,
@@ -414,12 +676,7 @@ fn image_placement_storage_limit_leaves_state_unchanged() {
         move_cursor: false,
         ..ImageDisplay::default()
     };
-    let full = image_record(
-        display.clone(),
-        (0, 0),
-        u32::try_from(MAX_IMAGE_STORAGE_BYTES / 4).expect("the storage limit fits in u32"),
-        1,
-    );
+    let full = image_record(display.clone(), (0, 0), 16_384, 1_024);
     state
         .apply_image_record(&full)
         .expect("the image fits the byte limit");
@@ -448,12 +705,7 @@ fn same_kitty_identity_replacement_reuses_the_storage_budget() {
         move_cursor: false,
         ..ImageDisplay::default()
     };
-    let full = image_record(
-        full_display.clone(),
-        (0, 0),
-        u32::try_from(MAX_IMAGE_STORAGE_BYTES / 4).expect("the storage limit fits in u32"),
-        1,
-    );
+    let full = image_record(full_display.clone(), (0, 0), 16_384, 1_024);
     state
         .apply_image_record(&full)
         .expect("the full image fits the byte limit");
@@ -471,6 +723,9 @@ fn same_kitty_identity_replacement_reuses_the_storage_budget() {
 #[test]
 fn image_dimensions_derive_one_kitty_axis_and_reject_pixel_only_sizes() {
     let mut state = TerminalState::new(PtySize { cols: 12, rows: 8 });
+    state.set_cell_size(
+        koshi_core::geometry::PixelCellSize::new(10, 10).expect("nonzero cell size"),
+    );
     let derived = image_record(
         ImageDisplay {
             image_id: Some(1),
@@ -488,6 +743,7 @@ fn image_dimensions_derive_one_kitty_axis_and_reject_pixel_only_sizes() {
         .apply_image_record(&derived)
         .expect("the missing kitty row count is derived");
     assert_eq!(state.image_placements()[0].dimensions(), (5, 3));
+    state.cell_size = None;
 
     let pixel_only = image_record(
         ImageDisplay {
@@ -519,7 +775,7 @@ fn kitty_source_rectangle_is_validated_before_placement_mutation() {
             cell_columns: Some(1),
             cell_rows: Some(1),
             width: Some(ImageDimension::Pixels(2)),
-            source_offset_x: Some(2),
+            source_offset_x: Some(3),
             move_cursor: false,
             ..ImageDisplay::default()
         },
@@ -532,7 +788,7 @@ fn kitty_source_rectangle_is_validated_before_placement_mutation() {
     assert_eq!(
         state.apply_image_record(&record),
         Err(ImagePlacementError::SourceOutOfBounds {
-            x: 2,
+            x: 3,
             y: 0,
             width: 2,
             height: 1,
@@ -592,11 +848,13 @@ fn kitty_transmit_removes_matching_images_from_both_screens() {
         .expect("the alternate image fits");
     let transmit = ImageRecord {
         protocol: GraphicsProtocol::Kitty,
-        image: DecodedImage {
+        image: (DecodedImage {
             width: 1,
             height: 1,
             rgba: vec![255; 4],
-        },
+        })
+        .into(),
+        animation: None,
         action: ImageAction::Transmit,
         display: ImageDisplay {
             image_id: Some(7),
@@ -635,11 +893,13 @@ fn kitty_transmit_does_not_remove_a_non_kitty_record_with_the_same_id() {
 
     let transmit = ImageRecord {
         protocol: GraphicsProtocol::Kitty,
-        image: DecodedImage {
+        image: (DecodedImage {
             width: 1,
             height: 1,
             rgba: vec![255; 4],
-        },
+        })
+        .into(),
+        animation: None,
         action: ImageAction::Transmit,
         display: ImageDisplay {
             image_id: Some(7),
@@ -658,7 +918,7 @@ fn kitty_transmit_does_not_remove_a_non_kitty_record_with_the_same_id() {
 #[test]
 fn kitty_replacement_does_not_count_non_kitty_records_with_the_same_id() {
     let mut state = TerminalState::new(PtySize { cols: 8, rows: 8 });
-    let mut iterm = image_record(
+    let mut sixel = image_record(
         ImageDisplay {
             width: Some(ImageDimension::Cells(1)),
             height: Some(ImageDimension::Cells(1)),
@@ -670,20 +930,22 @@ fn kitty_replacement_does_not_count_non_kitty_records_with_the_same_id() {
         1,
         1,
     );
-    iterm.protocol = GraphicsProtocol::Iterm2;
+    sixel.protocol = GraphicsProtocol::Sixel;
     for _ in 0..MAX_IMAGE_PLACEMENTS {
         state
-            .apply_image_record(&iterm)
+            .apply_image_record(&sixel)
             .expect("the non-Kitty placement fits");
     }
 
     let retransmit = ImageRecord {
         protocol: GraphicsProtocol::Kitty,
-        image: DecodedImage {
+        image: (DecodedImage {
             width: 1,
             height: 1,
             rgba: vec![255; 4],
-        },
+        })
+        .into(),
+        animation: None,
         action: ImageAction::TransmitAndDisplay,
         display: ImageDisplay {
             image_id: Some(7),
@@ -1079,7 +1341,7 @@ fn primary_image_anchor_follows_text_through_width_reflow() {
 }
 
 #[test]
-fn primary_image_rectangle_is_dropped_when_reflow_cannot_fit_it() {
+fn primary_image_rectangle_is_clipped_when_reflow_narrows_the_grid() {
     let mut state = TerminalState::new(PtySize { cols: 3, rows: 3 });
     advance(&mut state, b"abc");
     let record = image_record(
@@ -1097,12 +1359,17 @@ fn primary_image_rectangle_is_dropped_when_reflow_cannot_fit_it() {
 
     state.resize(PtySize { cols: 2, rows: 3 });
 
-    assert!(state.image_placements().is_empty());
-    assert!(state.image_placements_for_view(0).is_empty());
+    assert_eq!(state.image_placements()[0].anchor(), (0, 1));
+    assert_eq!(state.image_placements()[0].dimensions(), (1, 1));
+    assert_eq!(
+        state.image_placements()[0].geometry().full_size,
+        koshi_core::geometry::Size { cols: 2, rows: 1 }
+    );
+    assert_eq!(state.image_placements_for_view(0), state.image_placements());
 }
 
 #[test]
-fn primary_multi_row_image_drops_when_reflow_changes_its_columns() {
+fn primary_multi_row_image_keeps_its_scale_when_text_reflows() {
     let mut state = TerminalState::new(PtySize { cols: 4, rows: 3 });
     for (column, ch) in "abcd".chars().enumerate() {
         put(&mut state, 0, column as u16, ch, 1);
@@ -1127,8 +1394,9 @@ fn primary_multi_row_image_drops_when_reflow_changes_its_columns() {
 
     state.resize(PtySize { cols: 3, rows: 3 });
 
-    assert!(state.image_placements().is_empty());
-    assert!(state.image_placements_for_view(0).is_empty());
+    assert_eq!(state.image_placements()[0].anchor(), (0, 1));
+    assert_eq!(state.image_placements()[0].dimensions(), (2, 1));
+    assert_eq!(state.image_placements_for_view(0), state.image_placements());
 }
 
 #[test]

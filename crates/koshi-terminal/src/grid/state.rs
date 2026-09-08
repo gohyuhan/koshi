@@ -3,18 +3,188 @@
 use std::cmp::min;
 
 use serde::de::{self, Deserializer};
+use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 
-use crate::style::Style;
+use crate::style::{Color, Style};
 
-/// The part of a cell that almost no cell has: the continuation code points
-/// layered over its base character. A [`Cell`] holds it behind one pointer,
-/// eight bytes on a 64-bit target, null unless the cell has continuations.
+/// A cell-sized portion of one retained native image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ImageCellFragment {
+    pub(crate) source: u64,
+    pub(crate) row: u16,
+    pub(crate) column: u16,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+enum ImageFragments {
+    #[default]
+    Empty,
+    One(ImageCellFragment),
+    Many(Vec<ImageCellFragment>),
+}
+
+impl ImageFragments {
+    fn is_empty(&self) -> bool {
+        matches!(self, Self::Empty)
+    }
+
+    fn as_slice(&self) -> &[ImageCellFragment] {
+        match self {
+            Self::Empty => &[],
+            Self::One(fragment) => std::slice::from_ref(fragment),
+            Self::Many(fragments) => fragments,
+        }
+    }
+
+    fn replace_source(&mut self, fragment: ImageCellFragment) -> bool {
+        match self {
+            Self::One(existing) if existing.source == fragment.source => {
+                *existing = fragment;
+                true
+            }
+            Self::Many(fragments) => {
+                if let Some(existing) = fragments
+                    .iter_mut()
+                    .find(|existing| existing.source == fragment.source)
+                {
+                    *existing = fragment;
+                    return true;
+                }
+                false
+            }
+            Self::Empty | Self::One(_) => false,
+        }
+    }
+
+    fn push(&mut self, fragment: ImageCellFragment) {
+        match self {
+            Self::Empty => *self = Self::One(fragment),
+            Self::One(existing) => *self = Self::Many(vec![*existing, fragment]),
+            Self::Many(fragments) => fragments.push(fragment),
+        }
+    }
+
+    fn clear(&mut self) {
+        *self = Self::Empty;
+    }
+
+    fn storage_bytes(&self) -> usize {
+        match self {
+            Self::Many(fragments) => {
+                fragments.capacity() * std::mem::size_of::<ImageCellFragment>()
+            }
+            Self::Empty | Self::One(_) => 0,
+        }
+    }
+}
+
+impl Serialize for ImageFragments {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_seq(self.as_slice())
+    }
+}
+
+impl<'de> Deserialize<'de> for ImageFragments {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct Fragments;
+
+        impl<'de> de::Visitor<'de> for Fragments {
+            type Value = ImageFragments;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("bounded image cell fragments")
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: de::SeqAccess<'de>,
+            {
+                let mut fragments = Vec::new();
+                while let Some(fragment) = sequence.next_element::<ImageCellFragment>()? {
+                    if fragments.len() == crate::state::images::MAX_IMAGE_PLACEMENTS {
+                        return Err(de::Error::custom("too many image fragments in one cell"));
+                    }
+                    if fragments
+                        .iter()
+                        .any(|entry: &ImageCellFragment| entry.source == fragment.source)
+                    {
+                        return Err(de::Error::custom("duplicate image source in one cell"));
+                    }
+                    fragments.push(fragment);
+                }
+                match fragments.len() {
+                    0 => Ok(ImageFragments::Empty),
+                    1 => Ok(ImageFragments::One(fragments[0])),
+                    _ => Ok(ImageFragments::Many(fragments)),
+                }
+            }
+        }
+
+        deserializer.deserialize_seq(Fragments)
+    }
+}
+
+/// The part of a cell that almost no cell has: continuation code points or
+/// Kitty placeholder metadata. A [`Cell`] holds it behind one pointer, eight
+/// bytes on a 64-bit target, null for ordinary cells.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct CellExtra {
-    /// The continuation code points in arrival order. Never empty: the box is
-    /// allocated when the first one arrives.
+    /// The continuation code points in arrival order.
     combining: Vec<char>,
+    /// Kitty Unicode-placeholder metadata, when the base cell is a placeholder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    image_placeholder: Option<ImagePlaceholder>,
+    /// Native image portions attached to this cell, in paint order.
+    #[serde(default, skip_serializing_if = "ImageFragments::is_empty")]
+    image_fragments: ImageFragments,
+}
+
+/// The image identity and source cell encoded by a Kitty Unicode placeholder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ImagePlaceholder {
+    /// The low 24 bits encoded by the cell foreground color.
+    pub(crate) image_id: u32,
+    /// The optional placement id encoded by the underline color.
+    pub(crate) placement_id: Option<u32>,
+    /// The source row encoded by the first placeholder diacritic.
+    pub(crate) row: Option<u16>,
+    /// The source column encoded by the second placeholder diacritic.
+    pub(crate) column: Option<u16>,
+    /// The most significant image-id byte encoded by the third diacritic.
+    pub(crate) image_id_msb: Option<u8>,
+}
+
+impl ImagePlaceholder {
+    /// Build placeholder metadata from Kitty's foreground and underline colors.
+    pub(crate) fn from_style(style: Style) -> Self {
+        Self {
+            image_id: color_value(style.fg()).unwrap_or_default(),
+            placement_id: style
+                .underline_color()
+                .and_then(color_value)
+                .filter(|value| *value != 0),
+            row: None,
+            column: None,
+            image_id_msb: None,
+        }
+    }
+}
+
+fn color_value(color: Color) -> Option<u32> {
+    match color {
+        Color::Default => None,
+        Color::Indexed(value) => Some(u32::from(value)),
+        Color::Rgb(red, green, blue) => {
+            Some((u32::from(red) << 16) | (u32::from(green) << 8) | u32::from(blue))
+        }
+    }
 }
 
 /// A single grid cell: its character, display width, and style.
@@ -33,9 +203,8 @@ pub struct Cell {
     /// glyphs, skin-tone modifiers, the second half of a flag). `None` for a
     /// plain cell; the renderer draws `ch` followed by these as one glyph.
     ///
-    /// [`push_combining`](Cell::push_combining) is the only writer and always
-    /// leaves at least one code point behind: a present [`CellExtra`] is never
-    /// empty, and `None` is the single representation of "no continuations".
+    /// [`push_combining`](Cell::push_combining) is the normal writer; a
+    /// placeholder can allocate the same storage without continuation marks.
     combining: Option<Box<CellExtra>>,
     /// Display width in cells: 0 (continuation half of a wide glyph), 1
     /// (narrow), or 2 (wide, e.g. CJK).
@@ -106,6 +275,115 @@ impl Cell {
         }
     }
 
+    /// Return native image portions in paint order.
+    pub(crate) fn image_fragments(&self) -> &[ImageCellFragment] {
+        self.combining
+            .as_ref()
+            .map_or(&[], |extra| extra.image_fragments.as_slice())
+    }
+
+    /// Attach a native image portion, replacing or overlaying existing portions.
+    pub(crate) fn set_image_fragment(&mut self, fragment: ImageCellFragment, overlay: bool) {
+        if !overlay {
+            *self = Self::blank_with(self.style);
+        } else if self
+            .combining
+            .as_mut()
+            .is_some_and(|extra| extra.image_fragments.replace_source(fragment))
+        {
+            return;
+        }
+        let extra = self.combining.get_or_insert_with(|| {
+            Box::new(CellExtra {
+                combining: Vec::new(),
+                image_placeholder: None,
+                image_fragments: ImageFragments::Empty,
+            })
+        });
+        extra.image_fragments.push(fragment);
+    }
+
+    /// Heap bytes occupied by native image metadata in this cell.
+    pub(crate) fn image_fragment_storage_bytes(&self) -> usize {
+        self.combining
+            .as_ref()
+            .filter(|extra| !extra.image_fragments.is_empty())
+            .map_or(0, |extra| {
+                usize::from(extra.combining.is_empty() && extra.image_placeholder.is_none())
+                    * std::mem::size_of::<CellExtra>()
+                    + extra.image_fragments.storage_bytes()
+            })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn image_fragment_capacity(&self) -> usize {
+        self.combining.as_ref().map_or(0, |extra| {
+            if let ImageFragments::Many(fragments) = &extra.image_fragments {
+                fragments.capacity()
+            } else {
+                0
+            }
+        })
+    }
+
+    /// Remove native image portions from this cell.
+    pub(crate) fn clear_image_fragments(&mut self) {
+        if let Some(extra) = self.combining.as_mut() {
+            extra.image_fragments.clear();
+            if extra.combining.is_empty() && extra.image_placeholder.is_none() {
+                self.combining = None;
+            }
+        }
+    }
+
+    /// Return the Kitty Unicode-placeholder metadata carried by this cell.
+    pub(crate) fn image_placeholder(&self) -> Option<ImagePlaceholder> {
+        self.combining
+            .as_ref()
+            .and_then(|extra| extra.image_placeholder)
+    }
+
+    /// Return whether this cell carries a Kitty Unicode-placeholder marker.
+    #[must_use]
+    pub fn has_image_placeholder(&self) -> bool {
+        self.image_placeholder().is_some()
+    }
+
+    /// Set the Kitty Unicode-placeholder metadata and use a blank base glyph.
+    pub(crate) fn set_image_placeholder(&mut self, placeholder: ImagePlaceholder) {
+        self.ch = ' ';
+        self.combining
+            .get_or_insert_with(|| {
+                Box::new(CellExtra {
+                    combining: Vec::new(),
+                    image_placeholder: None,
+                    image_fragments: ImageFragments::Empty,
+                })
+            })
+            .image_placeholder = Some(placeholder);
+    }
+
+    /// Add one Kitty placeholder diacritic to the matching metadata slot.
+    pub(crate) fn set_image_placeholder_diacritic(&mut self, mark: char) -> bool {
+        let Some(extra) = self.combining.as_mut() else {
+            return false;
+        };
+        let Some(placeholder) = extra.image_placeholder.as_mut() else {
+            return false;
+        };
+        let Some(index) = image_placeholder_diacritic_index(mark) else {
+            return false;
+        };
+        if placeholder.row.is_none() {
+            placeholder.row = Some(index);
+        } else if placeholder.column.is_none() {
+            placeholder.column = Some(index);
+        } else if placeholder.image_id_msb.is_none() {
+            placeholder.image_id_msb = u8::try_from(index).ok();
+        }
+        true
+    }
+
     /// Layer one continuation code point (combining mark, ZWJ, variation
     /// selector, joined emoji part, …) onto this cell, keeping the base
     /// character and width unchanged. The first mark allocates the backing
@@ -115,6 +393,8 @@ impl Cell {
             .get_or_insert_with(|| {
                 Box::new(CellExtra {
                     combining: Vec::new(),
+                    image_placeholder: None,
+                    image_fragments: ImageFragments::Empty,
                 })
             })
             .combining
@@ -131,6 +411,48 @@ impl Cell {
     pub fn style(&self) -> Style {
         self.style
     }
+}
+
+const IMAGE_PLACEHOLDER_DIACRITICS: [char; 256] = [
+    '\u{0305}', '\u{030d}', '\u{030e}', '\u{0310}', '\u{0312}', '\u{033d}', '\u{033e}', '\u{033f}',
+    '\u{0346}', '\u{034a}', '\u{034b}', '\u{034c}', '\u{0350}', '\u{0351}', '\u{0352}', '\u{0357}',
+    '\u{035b}', '\u{0363}', '\u{0364}', '\u{0365}', '\u{0366}', '\u{0367}', '\u{0368}', '\u{0369}',
+    '\u{036a}', '\u{036b}', '\u{036c}', '\u{036d}', '\u{036e}', '\u{036f}', '\u{0483}', '\u{0484}',
+    '\u{0485}', '\u{0486}', '\u{0487}', '\u{0592}', '\u{0593}', '\u{0594}', '\u{0595}', '\u{0597}',
+    '\u{0598}', '\u{0599}', '\u{059c}', '\u{059d}', '\u{059e}', '\u{059f}', '\u{05a0}', '\u{05a1}',
+    '\u{05a8}', '\u{05a9}', '\u{05ab}', '\u{05ac}', '\u{05af}', '\u{05c4}', '\u{0610}', '\u{0611}',
+    '\u{0612}', '\u{0613}', '\u{0614}', '\u{0615}', '\u{0616}', '\u{0617}', '\u{0657}', '\u{0658}',
+    '\u{0659}', '\u{065a}', '\u{065b}', '\u{065d}', '\u{065e}', '\u{06d6}', '\u{06d7}', '\u{06d8}',
+    '\u{06d9}', '\u{06da}', '\u{06db}', '\u{06dc}', '\u{06df}', '\u{06e0}', '\u{06e1}', '\u{06e2}',
+    '\u{06e4}', '\u{06e7}', '\u{06e8}', '\u{06eb}', '\u{06ec}', '\u{0730}', '\u{0732}', '\u{0733}',
+    '\u{0735}', '\u{0736}', '\u{073a}', '\u{073d}', '\u{073f}', '\u{0740}', '\u{0741}', '\u{0743}',
+    '\u{0745}', '\u{0747}', '\u{0749}', '\u{074a}', '\u{07eb}', '\u{07ec}', '\u{07ed}', '\u{07ee}',
+    '\u{07ef}', '\u{07f0}', '\u{07f1}', '\u{07f3}', '\u{0816}', '\u{0817}', '\u{0818}', '\u{0819}',
+    '\u{081b}', '\u{081c}', '\u{081d}', '\u{081e}', '\u{081f}', '\u{0820}', '\u{0821}', '\u{0822}',
+    '\u{0823}', '\u{0825}', '\u{0826}', '\u{0827}', '\u{0829}', '\u{082a}', '\u{082b}', '\u{082c}',
+    '\u{082d}', '\u{0951}', '\u{0953}', '\u{0954}', '\u{0f82}', '\u{0f83}', '\u{0f86}', '\u{0f87}',
+    '\u{135d}', '\u{135e}', '\u{135f}', '\u{17dd}', '\u{193a}', '\u{1a17}', '\u{1a75}', '\u{1a76}',
+    '\u{1a77}', '\u{1a78}', '\u{1a79}', '\u{1a7a}', '\u{1a7b}', '\u{1a7c}', '\u{1b6b}', '\u{1b6d}',
+    '\u{1b6e}', '\u{1b6f}', '\u{1b70}', '\u{1b71}', '\u{1b72}', '\u{1b73}', '\u{1cd0}', '\u{1cd1}',
+    '\u{1cd2}', '\u{1cda}', '\u{1cdb}', '\u{1ce0}', '\u{1dc0}', '\u{1dc1}', '\u{1dc3}', '\u{1dc4}',
+    '\u{1dc5}', '\u{1dc6}', '\u{1dc7}', '\u{1dc8}', '\u{1dc9}', '\u{1dcb}', '\u{1dcc}', '\u{1dd1}',
+    '\u{1dd2}', '\u{1dd3}', '\u{1dd4}', '\u{1dd5}', '\u{1dd6}', '\u{1dd7}', '\u{1dd8}', '\u{1dd9}',
+    '\u{1dda}', '\u{1ddb}', '\u{1ddc}', '\u{1ddd}', '\u{1dde}', '\u{1ddf}', '\u{1de0}', '\u{1de1}',
+    '\u{1de2}', '\u{1de3}', '\u{1de4}', '\u{1de5}', '\u{1de6}', '\u{1dfe}', '\u{20d0}', '\u{20d1}',
+    '\u{20d4}', '\u{20d5}', '\u{20d6}', '\u{20d7}', '\u{20db}', '\u{20dc}', '\u{20e1}', '\u{20e7}',
+    '\u{20e9}', '\u{20f0}', '\u{2cef}', '\u{2cf0}', '\u{2cf1}', '\u{2de0}', '\u{2de1}', '\u{2de2}',
+    '\u{2de3}', '\u{2de4}', '\u{2de5}', '\u{2de6}', '\u{2de7}', '\u{2de8}', '\u{2de9}', '\u{2dea}',
+    '\u{2deb}', '\u{2dec}', '\u{2ded}', '\u{2dee}', '\u{2def}', '\u{2df0}', '\u{2df1}', '\u{2df2}',
+    '\u{2df3}', '\u{2df4}', '\u{2df5}', '\u{2df6}', '\u{2df7}', '\u{2df8}', '\u{2df9}', '\u{2dfa}',
+    '\u{2dfb}', '\u{2dfc}', '\u{2dfd}', '\u{2dfe}', '\u{2dff}', '\u{a66f}', '\u{a67c}', '\u{a67d}',
+    '\u{a6f0}', '\u{a6f1}', '\u{a8e0}', '\u{a8e1}', '\u{a8e2}', '\u{a8e3}', '\u{a8e4}', '\u{a8e5}',
+];
+
+fn image_placeholder_diacritic_index(mark: char) -> Option<u16> {
+    IMAGE_PLACEHOLDER_DIACRITICS
+        .iter()
+        .position(|candidate| *candidate == mark)
+        .and_then(|index| u16::try_from(index).ok())
 }
 
 /// How a row ends relative to the row directly below it. This is row state,
@@ -273,6 +595,20 @@ impl Grid {
     /// All rows, row-major.
     pub fn rows(&self) -> &[Vec<Cell>] {
         &self.rows
+    }
+
+    /// Blank the other half of a wide glyph overwritten at this cell.
+    pub(crate) fn clear_wide_at(&mut self, row: u16, column: u16, fill: Style) {
+        let other = match self.cell(row, column).map_or(1, Cell::width) {
+            2 => column.checked_add(1),
+            0 => column.checked_sub(1),
+            _ => None,
+        };
+        if let Some(other) = other {
+            if let Some(cell) = self.cell_mut(row, other) {
+                *cell = Cell::blank_with(fill);
+            }
+        }
     }
 
     /// Blank columns `from..to` (half-open, `to` exclusive) in `row`, resetting

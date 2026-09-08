@@ -28,11 +28,13 @@ fn image_placement() -> ImagePlacementSnapshot {
         1,
         Arc::new(ImageRecord {
             protocol: GraphicsProtocol::Kitty,
-            image: DecodedImage {
+            image: (DecodedImage {
                 width: 2,
                 height: 1,
                 rgba: vec![255, 0, 0, 255, 0, 255, 0, 255],
-            },
+            })
+            .into(),
+            animation: None,
             action: ImageAction::TransmitAndDisplay,
             display: ImageDisplay {
                 width: Some(ImageDimension::Cells(3)),
@@ -45,6 +47,10 @@ fn image_placement() -> ImagePlacementSnapshot {
                 usage_hints: 0x12,
                 unicode_placeholder: true,
                 z_index: -2,
+                relative_image_id: None,
+                relative_placement_id: None,
+                relative_offset_x: 0,
+                relative_offset_y: 0,
                 cell_columns: Some(2),
                 cell_rows: Some(1),
                 source_offset_x: Some(1),
@@ -52,6 +58,7 @@ fn image_placement() -> ImagePlacementSnapshot {
                 cell_offset_x: Some(6),
                 cell_offset_y: Some(7),
                 move_cursor: false,
+                quiet: 0,
             },
             anchor: (0, 2),
         }),
@@ -72,6 +79,7 @@ fn image_transfer(id: u64) -> FrameImageTransfer {
             height: 1,
             action: FrameImageAction::TransmitAndDisplay,
             display: FrameImageDisplay {
+                quiet: 0,
                 width: Some(FrameImageDimension::Cells(3)),
                 height: Some(FrameImageDimension::Pixels(1)),
                 preserve_aspect_ratio: false,
@@ -82,6 +90,10 @@ fn image_transfer(id: u64) -> FrameImageTransfer {
                 usage_hints: 0x12,
                 unicode_placeholder: true,
                 z_index: -2,
+                relative_image_id: None,
+                relative_placement_id: None,
+                relative_offset_x: 0,
+                relative_offset_y: 0,
                 cell_columns: Some(2),
                 cell_rows: Some(1),
                 source_offset_x: Some(1),
@@ -104,6 +116,64 @@ fn image_chunk(id: u64) -> FrameImageChunk {
         last: true,
         bytes: vec![255, 0, 0, 255, 0, 255, 0, 255],
     }
+}
+
+#[test]
+fn shared_pixels_keep_each_placements_own_display_metadata() {
+    let original = image_placement().record_arc().expect("pixels");
+    let mut header = image_transfer(1).record;
+    header.action = FrameImageAction::Display;
+    header.display.cell_columns = Some(4);
+    header.display.cell_rows = Some(6);
+    header.display.z_index = 3;
+    header.display.placement_id = Some(10);
+    header.anchor = (5, 6);
+    let geometry = koshi_core::geometry::ImageCellGeometry {
+        full_size: Size { cols: 4, rows: 6 },
+        offset: Point { x: 0, y: 2 },
+    };
+    let placement = FrameImagePlacement {
+        id: 42,
+        content_id: 1,
+        available: true,
+        anchor: (0, 6),
+        columns: 4,
+        rows: 4,
+        geometry: Some(geometry),
+        record: Some(header.clone()),
+    };
+    let snapshot = image_placement_with_record(&placement, Some(&original)).expect("placement");
+    let record = snapshot.record_arc().expect("pixels");
+    assert!(Arc::ptr_eq(&record.image, &original.image));
+    assert_eq!(snapshot.geometry(), geometry);
+    assert_eq!(snapshot.anchor(), (0, 6));
+    assert_eq!(snapshot.dimensions(), (4, 4));
+    assert_eq!(record.action, ImageAction::Display);
+    assert_eq!(record.display, to_image_display(&header.display));
+    assert_eq!(record.anchor, (5, 6));
+    assert_eq!(original.display.placement_id, Some(9));
+    assert_eq!(original.anchor, (0, 2));
+}
+
+#[test]
+fn placement_metadata_cannot_change_cached_pixel_dimensions() {
+    let original = image_placement().record_arc().expect("pixels");
+    let mut header = image_transfer(1).record;
+    header.width = 3;
+    let placement = FrameImagePlacement {
+        id: 42,
+        content_id: 1,
+        available: true,
+        anchor: (0, 0),
+        columns: 2,
+        rows: 1,
+        geometry: None,
+        record: Some(header),
+    };
+    assert_eq!(
+        image_placement_with_record(&placement, Some(&original)),
+        None
+    );
 }
 
 /// Every style field set away from its default, so a field lost on the way
@@ -293,7 +363,7 @@ fn a_frame_that_travels_and_is_read_back_is_the_frame_that_was_sent() {
 }
 
 #[test]
-fn a_frame_draws_an_image_placeholder_then_draws_the_complete_record() {
+fn a_frame_waits_for_the_complete_image_record() {
     let sent = snapshot(vec![
         content_pane_with_image(PaneId::new()),
         empty_pane(PaneId::new()),
@@ -301,11 +371,10 @@ fn a_frame_draws_an_image_placeholder_then_draws_the_complete_record() {
     let wire = wire_frame(&sent);
     let mut cache = ImageCache::new();
 
-    let placeholder = cache
+    let pending = cache
         .begin_frame(Box::new(wire))
         .expect("the placement frame reads");
-    assert_eq!(placeholder.panes[0].image_placements.len(), 1);
-    assert_eq!(placeholder.panes[0].image_placements[0].record(), None);
+    assert_eq!(pending, None);
 
     cache.start(image_transfer(1)).expect("the transfer starts");
     let received = cache
@@ -353,7 +422,7 @@ fn a_complete_cached_image_is_reused_by_the_next_frame() {
         .begin_frame(Box::new(wire))
         .expect("the repeated placement frame reads");
 
-    assert_eq!(reused, sent);
+    assert_eq!(reused, Some(sent));
     assert_eq!(cache.images.len(), 1);
     assert!(cache.missing.is_empty());
     assert_eq!(cache.pending.as_ref().map(|pending| pending.received), None);
@@ -395,6 +464,8 @@ fn a_frame_redraws_only_after_every_missing_image_record_arrives() {
     ]);
     let mut wire = wire_frame(&sent);
     wire.panes[0].image_placements.push(FrameImagePlacement {
+        geometry: None,
+        record: None,
         id: 42,
         content_id: 2,
         available: true,
@@ -459,12 +530,77 @@ fn a_frame_without_a_cached_placement_releases_its_rgba_bytes() {
 
     let without_image = cache
         .begin_frame(Box::new(wire))
-        .expect("the frame without the placement reads");
+        .expect("the frame without the placement reads")
+        .expect("the frame without an image is complete");
 
     assert_eq!(without_image.panes[0].image_placements, Vec::new());
     assert_eq!(cache.images.len(), 0);
     assert_eq!(cache.retained_bytes, 0);
     assert_eq!(cache.missing.len(), 0);
+}
+
+#[test]
+fn a_returning_image_waits_for_its_new_connection_identity() {
+    let sent = snapshot(vec![
+        content_pane_with_image(PaneId::new()),
+        empty_pane(PaneId::new()),
+    ]);
+    let first = wire_frame(&sent);
+    let mut absent = first.clone();
+    absent.panes[0].image_placements.clear();
+    let mut returning = first.clone();
+    returning.panes[0].image_placements[0].content_id = 2;
+    let mut cache = ImageCache::new();
+
+    assert_eq!(
+        cache
+            .begin_frame(Box::new(first))
+            .expect("the first frame reads"),
+        None
+    );
+    cache
+        .start(image_transfer(1))
+        .expect("the first transfer starts");
+    cache
+        .accept(image_chunk(1))
+        .expect("the first transfer reads")
+        .expect("the first image completes the frame");
+    let without_image = cache
+        .begin_frame(Box::new(absent))
+        .expect("the frame without the image reads")
+        .expect("the frame without the image is complete");
+    assert_eq!(without_image.panes[0].image_placements, []);
+    assert_eq!(cache.images.len(), 0);
+
+    assert_eq!(
+        cache
+            .begin_frame(Box::new(returning))
+            .expect("the returning frame reads"),
+        None
+    );
+    assert_eq!(cache.images.len(), 0);
+    assert_eq!(cache.missing, HashSet::from([2]));
+    let mut transfer = image_transfer(2);
+    transfer.id = 2;
+    cache
+        .start(transfer)
+        .expect("the returning transfer starts");
+    let mut chunk = image_chunk(2);
+    chunk.transfer_id = 2;
+    let rebuilt = cache
+        .accept(chunk)
+        .expect("the returning transfer reads")
+        .expect("the returning image completes the frame");
+
+    assert_eq!(rebuilt.panes[0].image_placements[0].content_id(), 2);
+    assert_eq!(
+        rebuilt.panes[0].image_placements[0]
+            .record()
+            .expect("the returning image has pixels")
+            .image
+            .rgba,
+        [255, 0, 0, 255, 0, 255, 0, 255]
+    );
 }
 
 #[test]
@@ -608,6 +744,8 @@ fn image_transfer_metadata_cannot_reserve_more_than_the_frame_limit() {
         .expect("the first image reads")
         .expect("the first image produces a redraw");
     wire.panes[0].image_placements.push(FrameImagePlacement {
+        geometry: None,
+        record: None,
         id: 42,
         content_id: 2,
         available: true,
@@ -646,6 +784,8 @@ fn image_placements_from_several_panes_do_not_share_one_pane_limit() {
     let mut wire = wire_frame(&sent);
     wire.panes[0].image_placements = (0..MAX_FRAME_IMAGE_TRANSFERS)
         .map(|index| FrameImagePlacement {
+            geometry: None,
+            record: None,
             id: u64::try_from(index + 1).expect("the placement identity fits"),
             content_id: u64::try_from(index + 1).expect("the content identity fits"),
             available: false,
@@ -655,6 +795,8 @@ fn image_placements_from_several_panes_do_not_share_one_pane_limit() {
         })
         .collect();
     wire.panes[1].image_placements.push(FrameImagePlacement {
+        geometry: None,
+        record: None,
         id: 1,
         content_id: u64::try_from(MAX_FRAME_IMAGE_TRANSFERS + 1)
             .expect("the content identity fits"),
@@ -667,7 +809,8 @@ fn image_placements_from_several_panes_do_not_share_one_pane_limit() {
 
     let rebuilt = cache
         .begin_frame(Box::new(wire))
-        .expect("placements in distinct panes are accepted");
+        .expect("placements in distinct panes are accepted")
+        .expect("unavailable placements need no image transfer");
 
     assert_eq!(rebuilt.panes[0].image_placements.len(), 4_096);
     assert_eq!(rebuilt.panes[1].image_placements.len(), 1);
@@ -681,6 +824,8 @@ fn one_painted_frame_accepts_at_most_4096_image_transfers() {
     ]);
     let mut wire = wire_frame(&sent);
     wire.panes[0].image_placements.push(FrameImagePlacement {
+        geometry: None,
+        record: None,
         id: 42,
         content_id: 2,
         available: true,
@@ -715,6 +860,8 @@ fn an_unavailable_placement_does_not_hold_back_an_available_image() {
     ]);
     let mut wire = wire_frame(&sent);
     wire.panes[0].image_placements.push(FrameImagePlacement {
+        geometry: None,
+        record: None,
         id: 42,
         content_id: 2,
         available: false,

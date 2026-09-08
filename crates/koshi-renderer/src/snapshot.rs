@@ -623,6 +623,8 @@ pub struct GridView {
 /// the record after its bounded content events pass the wire checks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImagePlacementSnapshot {
+    /// The complete cell size and the clipped top and left cells.
+    geometry: koshi_core::geometry::ImageCellGeometry,
     /// The terminal-local placement identity.
     id: ImagePlacementId,
     /// The connection-local identity of the image record.
@@ -674,6 +676,13 @@ impl ImagePlacementSnapshot {
             anchor,
             columns,
             rows,
+            geometry: koshi_core::geometry::ImageCellGeometry {
+                full_size: koshi_core::geometry::Size {
+                    cols: columns,
+                    rows,
+                },
+                offset: koshi_core::geometry::Point { x: 0, y: 0 },
+            },
         })
     }
 
@@ -693,6 +702,13 @@ impl ImagePlacementSnapshot {
             anchor,
             columns,
             rows,
+            geometry: koshi_core::geometry::ImageCellGeometry {
+                full_size: koshi_core::geometry::Size {
+                    cols: columns,
+                    rows,
+                },
+                offset: koshi_core::geometry::Point { x: 0, y: 0 },
+            },
         })
     }
 
@@ -732,18 +748,43 @@ impl ImagePlacementSnapshot {
         (self.rows, self.columns)
     }
 
+    /// Apply clipping geometry when its visible rectangle fits the complete image.
+    #[must_use]
+    pub fn with_geometry(
+        mut self,
+        geometry: koshi_core::geometry::ImageCellGeometry,
+    ) -> Option<Self> {
+        if !geometry.contains(koshi_core::geometry::Size {
+            cols: self.columns,
+            rows: self.rows,
+        }) {
+            return None;
+        }
+        self.geometry = geometry;
+        Some(self)
+    }
+
+    /// Return the complete cell size and the clipped top and left cells.
+    #[must_use]
+    pub fn geometry(&self) -> koshi_core::geometry::ImageCellGeometry {
+        self.geometry
+    }
+
     /// Copy one terminal placement into the frame while sharing its record.
     #[must_use]
     pub fn from_placement(placement: &ImagePlacement) -> Self {
         let (rows, columns) = placement.dimensions();
-        Self::new(
+        Self::with_content_id(
             placement.id(),
-            placement.record_arc(),
+            placement.content_id(),
+            placement.render_record_arc(),
             placement.anchor(),
             columns,
             rows,
         )
         .expect("terminal image placement is valid")
+        .with_geometry(placement.geometry())
+        .expect("terminal image clipping is valid")
     }
 }
 

@@ -2,9 +2,43 @@
 
 use super::*;
 
+impl GraphicsParser {
+    fn advance(&mut self, bytes: &[u8]) -> Vec<Result<DecodedGraphics, GraphicsError>> {
+        self.advance_operations(bytes)
+            .into_iter()
+            .map(|event| {
+                event.and_then(|operation| match operation {
+                    GraphicsOperation::Image(image) => Ok(image),
+                    GraphicsOperation::Failure { error, .. } => Err(error),
+                    GraphicsOperation::Command(command) => {
+                        panic!("image decoder test received {command:?}")
+                    }
+                    GraphicsOperation::Sixel(graphic) => {
+                        let mut palette = koshi_sixel::SixelPalette::default();
+                        palette.apply_changes(graphic.palette_changes());
+                        let image = graphic.image().expect("the Sixel has drawable pixels");
+                        Ok(DecodedGraphics {
+                            query: false,
+                            protocol: GraphicsProtocol::Sixel,
+                            image: image.resolve(&palette, palette.color(0))?,
+                            animation: None,
+                            action: ImageAction::Display,
+                            display: ImageDisplay {
+                                sixel_background: Some(graphic.background()),
+                                ..ImageDisplay::default()
+                            },
+                        })
+                    }
+                })
+            })
+            .collect()
+    }
+}
+
 use crate::engine::{GraphicsTransportState, TerminalEngine};
 use crate::state::ImagePlacementError;
 use koshi_core::process::PtySize;
+use koshi_image::{decode_raster, decompress_bounded};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 fn red_png() -> Vec<u8> {
@@ -283,6 +317,18 @@ fn only_event(parser: &mut GraphicsParser, bytes: &[u8]) -> Result<DecodedGraphi
     events.into_iter().next().expect("one event")
 }
 
+fn only_sixel(
+    parser: &mut GraphicsParser,
+    bytes: &[u8],
+) -> Result<koshi_sixel::SixelGraphic, GraphicsError> {
+    let events = parser.advance_operations(bytes);
+    assert_eq!(events.len(), 1);
+    match events.into_iter().next().expect("one event")? {
+        GraphicsOperation::Sixel(graphic) => Ok(graphic),
+        operation => panic!("expected a Sixel operation, got {operation:?}"),
+    }
+}
+
 #[test]
 fn sixel_decodes_one_red_pixel_without_terminal_state() {
     let mut parser = GraphicsParser::default();
@@ -291,8 +337,9 @@ fn sixel_decodes_one_red_pixel_without_terminal_state() {
 
     assert_eq!(result.protocol, GraphicsProtocol::Sixel);
     assert_eq!(result.image.width, 1);
-    assert_eq!(result.image.height, 1);
-    assert_eq!(result.image.rgba, [255, 0, 0, 255]);
+    assert_eq!(result.image.height, 6);
+    assert_eq!(&result.image.rgba[..4], [255, 0, 0, 255]);
+    assert_eq!(&result.image.rgba[4..], &[0, 0, 0, 255].repeat(5));
 }
 
 #[test]
@@ -303,10 +350,15 @@ fn sixel_header_accepts_omitted_optional_parameters() {
         only_event(&mut parser, b"\x1bP;2q#1;2;100;0;0@\x1b\\").expect("the Sixel header decodes");
 
     assert_eq!(result.image.width, 1);
-    assert_eq!(result.image.height, 6);
+    assert_eq!(result.image.height, 12);
+    assert_eq!(&result.image.rgba[..4], [255, 0, 0, 255]);
     assert_eq!(
-        result.image.rgba,
-        [255, 0, 0, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        &result.image.rgba[4..],
+        [255, 0, 0, 255]
+            .into_iter()
+            .chain([0, 0, 0, 255].repeat(10))
+            .collect::<Vec<_>>()
+            .as_slice()
     );
     assert_eq!(
         result.display.sixel_background,
@@ -322,24 +374,24 @@ fn sixel_supports_hls_colors_and_the_background_select_parameter() {
     assert_eq!(&hls.image.rgba[..4], [0, 0, 255, 255]);
 
     let mut parser = GraphicsParser::default();
-    let background =
-        only_event(&mut parser, b"\x1bP0;0q?\x1b\\").expect("the opaque background decodes");
-    assert_eq!(background.image.width, 1);
-    assert_eq!(background.image.height, 6);
-    assert_eq!(background.image.rgba, [0, 0, 0, 0].repeat(6));
-    assert_eq!(
-        background.display.sixel_background,
-        Some(SixelBackground::Terminal)
-    );
+    let background = only_sixel(&mut parser, b"\x1bP0;0q?\x1b\\")
+        .expect("the opaque background metadata decodes");
+    let mut palette = koshi_sixel::SixelPalette::default();
+    palette.apply_changes(background.palette_changes());
+    let background_image = background
+        .image()
+        .expect("the opaque background has pixels");
+    let background_image = background_image
+        .resolve(&palette, palette.color(0))
+        .expect("the opaque background resolves");
+    assert_eq!(background_image.rgba, [0, 0, 0, 255].repeat(12));
+    assert_eq!(background.background(), SixelBackground::Terminal);
 
     let mut parser = GraphicsParser::default();
-    let transparent =
-        only_event(&mut parser, b"\x1bP0;1q?\x1b\\").expect("the transparent background decodes");
-    assert_eq!(transparent.image.rgba, [0, 0, 0, 0].repeat(6));
-    assert_eq!(
-        transparent.display.sixel_background,
-        Some(SixelBackground::Preserve)
-    );
+    let transparent = only_sixel(&mut parser, b"\x1bP0;1q?\x1b\\")
+        .expect("the transparent background metadata decodes");
+    assert!(transparent.image().is_none());
+    assert_eq!(transparent.background(), SixelBackground::Preserve);
 }
 
 #[test]
@@ -351,7 +403,7 @@ fn sixel_growth_keeps_a_valid_image_near_the_dimension_limit() {
     let result = only_event(&mut parser, &bytes).expect("the growing Sixel decodes");
 
     assert_eq!(result.image.width, 10_000);
-    assert_eq!(result.image.height, 6);
+    assert_eq!(result.image.height, 12);
 }
 
 #[test]
@@ -366,8 +418,8 @@ fn sixel_growth_preserves_the_existing_canvas_when_fallback_would_shrink_it() {
 
     let result = result.expect("the Sixel image remains within the final limits");
     assert_eq!(result.image.width, 13_000);
-    assert_eq!(result.image.height, 18);
-    assert_eq!(result.image.rgba.len(), 13_000 * 18 * 4);
+    assert_eq!(result.image.height, 36);
+    assert_eq!(result.image.rgba.len(), 13_000 * 36 * 4);
     assert_eq!(&result.image.rgba[0..4], &[0, 0, 0, 255]);
 }
 
@@ -387,8 +439,8 @@ fn sixel_growth_preserves_existing_width_when_fallback_would_shrink_it() {
 
     let result = result.expect("the Sixel image remains within the final limits");
     assert_eq!(result.image.width, 1_000);
-    assert_eq!(result.image.height, 102);
-    assert_eq!(result.image.rgba.len(), 1_000 * 102 * 4);
+    assert_eq!(result.image.height, 204);
+    assert_eq!(result.image.rgba.len(), 1_000 * 204 * 4);
     assert_eq!(&result.image.rgba[0..4], &[0, 0, 0, 255]);
 }
 
@@ -402,6 +454,31 @@ fn cancelling_a_chunked_transfer_clears_its_multipart_state() {
     let result = only_event(&mut parser, kitty_raw_rgba().as_slice()).expect("a new transfer");
 
     assert_eq!(result.image.rgba, [255, 0, 0, 255]);
+}
+
+#[test]
+fn kitty_multipart_animation_frame_emits_one_command_after_the_final_chunk() {
+    let encoded = STANDARD.encode([255, 0, 0, 255]);
+    let first = format!("\x1b_Ga=f,i=7,f=32,s=1,v=1,r=1,m=1;{}\x1b\\", &encoded[..4]);
+    let second = format!("\x1b_Ga=f,m=0;{}\x1b\\", &encoded[4..]);
+    let mut parser = GraphicsParser::default();
+
+    let first_events = parser.advance_operations(first.as_bytes());
+    assert!(
+        first_events.is_empty(),
+        "unexpected first events: {first_events:?}"
+    );
+    let events = parser.advance_operations(second.as_bytes());
+    assert_eq!(events.len(), 1);
+    let command = match events.into_iter().next().expect("one event") {
+        Ok(GraphicsOperation::Command(command)) => command,
+        other => panic!("unexpected animation event: {other:?}"),
+    };
+    assert_eq!(command.kind(), KittyCommandKind::AnimationFrame);
+    assert_eq!(
+        command.animation().expect("animation command").payload,
+        encoded.as_bytes()
+    );
 }
 
 #[test]
@@ -672,35 +749,27 @@ fn iterm_file_decodes_png_and_keeps_display_hints() {
 }
 
 #[test]
-fn animated_iterm_gif_is_rejected_instead_of_being_silently_frozen() {
+fn animated_iterm_gif_keeps_all_frames_and_starts_on_the_first() {
     let mut parser = GraphicsParser::default();
     let bytes = animated_gif();
 
     let encoded = STANDARD.encode(bytes);
     let command = format!("\x1b]1337;File=inline=1:{encoded}\x07");
 
-    assert_eq!(
-        only_event(&mut parser, command.as_bytes()),
-        Err(GraphicsError::UnsupportedMedia {
-            protocol: GraphicsProtocol::Iterm2,
-            format: "animated GIF".to_string(),
-        })
-    );
+    let result = only_event(&mut parser, command.as_bytes()).expect("the animated GIF decodes");
+    let animation = result.animation.as_ref().expect("animation is retained");
+    assert_eq!(animation.frame_count(), 2);
+    assert_eq!(result.image, *animation.frames()[0].image());
 }
 
 #[test]
-fn animated_png_and_webp_are_rejected_instead_of_being_silently_frozen() {
-    for (format, bytes) in [
-        ("animated PNG", animated_png()),
-        ("animated WebP", animated_webp()),
-    ] {
-        assert_eq!(
-            decode_raster(GraphicsProtocol::Iterm2, &bytes),
-            Err(GraphicsError::UnsupportedMedia {
-                protocol: GraphicsProtocol::Iterm2,
-                format: format.to_string(),
-            })
-        );
+fn animated_png_and_webp_keep_all_frames_and_start_on_the_first() {
+    for bytes in [animated_png(), animated_webp()] {
+        let mut parser = GraphicsParser::default();
+        let result = only_event(&mut parser, &iterm_file(&bytes)).expect("animated media decodes");
+        let animation = result.animation.as_ref().expect("animation is retained");
+        assert_eq!(animation.frame_count(), 2);
+        assert_eq!(result.image, *animation.frames()[0].image());
     }
 }
 
@@ -746,7 +815,7 @@ fn iterm_dimensions_keep_cell_pixel_percent_and_auto_units() {
 }
 
 #[test]
-fn iterm_rejects_non_inline_and_mismatched_sizes() {
+fn iterm_rejects_non_inline_and_accepts_mismatched_size_hints() {
     let encoded = STANDARD.encode(red_png());
     let mut parser = GraphicsParser::default();
     let not_inline = format!("\x1b]1337;File=inline=0:{encoded}\x07");
@@ -759,15 +828,37 @@ fn iterm_rejects_non_inline_and_mismatched_sizes() {
     );
 
     let mut parser = GraphicsParser::default();
-    let mismatch = format!("\x1b]1337;File=inline=1;size=1:{encoded}\x07");
-    assert_eq!(
-        only_event(&mut parser, mismatch.as_bytes()),
-        Err(GraphicsError::DeclaredSizeMismatch {
-            protocol: GraphicsProtocol::Iterm2,
-            expected: 1,
-            actual: red_png().len(),
-        })
+    let mismatch = format!(
+        "\x1b]1337;File=inline=1;size=1;width=1px;height=1px;preserveAspectRatio=0:{encoded}\x07"
     );
+    let result = only_event(&mut parser, mismatch.as_bytes()).expect("size is a progress hint");
+    assert_eq!(result.protocol, GraphicsProtocol::Iterm2);
+    assert_eq!(result.image.width, 1);
+    assert_eq!(result.image.height, 1);
+    assert_eq!(result.image.rgba, [255, 0, 0, 255]);
+    assert_eq!(result.display.width, Some(ImageDimension::Pixels(1)));
+    assert_eq!(result.display.height, Some(ImageDimension::Pixels(1)));
+    assert!(!result.display.preserve_aspect_ratio);
+}
+
+#[test]
+fn iterm_multipart_accepts_mismatched_size_hints() {
+    let bytes = red_png();
+    let encoded = STANDARD.encode(&bytes);
+    let command = format!(
+        "\x1b]1337;MultipartFile=inline=1;size=1;width=1px;height=1px;preserveAspectRatio=0\x07\
+         \x1b]1337;FilePart={encoded}\x07\
+         \x1b]1337;FileEnd\x07"
+    );
+    let mut parser = GraphicsParser::default();
+    let result = only_event(&mut parser, command.as_bytes()).expect("size is a progress hint");
+    assert_eq!(result.protocol, GraphicsProtocol::Iterm2);
+    assert_eq!(result.image.width, 1);
+    assert_eq!(result.image.height, 1);
+    assert_eq!(result.image.rgba, [255, 0, 0, 255]);
+    assert_eq!(result.display.width, Some(ImageDimension::Pixels(1)));
+    assert_eq!(result.display.height, Some(ImageDimension::Pixels(1)));
+    assert!(!result.display.preserve_aspect_ratio);
 }
 
 #[test]
@@ -865,7 +956,7 @@ fn screen_wrapper_preserves_inner_string_terminators() {
             .expect("the Screen-wrapped image event")
             .expect("the Screen-wrapped image decodes");
         assert_eq!(result.image.width, 1);
-        assert_eq!(result.image.height, 1);
+        assert_eq!(result.image.height, if name == "Sixel" { 6 } else { 1 });
     }
 }
 
@@ -1215,6 +1306,25 @@ fn finishing_a_silent_string_leaves_the_next_image_readable() {
 }
 
 #[test]
+fn finishing_an_incomplete_utf8_character_discards_its_carry() {
+    let mut parser = GraphicsParser::default();
+
+    assert!(parser.advance(b"\xe2").is_empty());
+    assert_eq!(parser.carry_bytes(), Some(&b"\xe2"[..]));
+    assert!(parser.finish().is_empty());
+    assert_eq!(parser.carry_bytes(), None);
+    assert!(parser.transport_state().is_none());
+
+    assert_eq!(
+        only_event(&mut parser, &kitty_raw_rgba())
+            .expect("the image after the incomplete character decodes")
+            .image
+            .rgba,
+        [255, 0, 0, 255]
+    );
+}
+
+#[test]
 fn empty_passthrough_wrappers_are_silent_at_finish() {
     for bytes in [b"\x1bPtmux;".as_slice(), b"\x1bP\x1b"] {
         let mut parser = GraphicsParser::default();
@@ -1352,15 +1462,12 @@ fn a_zero_raw_dimension_is_rejected_before_payload_decode() {
 }
 
 #[test]
-fn an_invalid_sixel_command_returns_a_typed_error() {
+fn a_sixel_repeat_without_a_count_draws_one_sixel() {
     let mut parser = GraphicsParser::default();
 
-    assert_eq!(
-        only_event(&mut parser, b"\x1bPq!x@\x1b\\"),
-        Err(GraphicsError::InvalidCommand {
-            protocol: GraphicsProtocol::Sixel,
-        })
-    );
+    let result = only_event(&mut parser, b"\x1bPq!x@\x1b\\").expect("the Sixel decodes");
+    assert_eq!(result.image.width, 2);
+    assert_eq!(result.image.height, 12);
 }
 
 #[test]
@@ -1416,15 +1523,30 @@ fn unsupported_kitty_media_returns_a_typed_error() {
 
 #[test]
 fn unsupported_kitty_controls_return_typed_action_errors() {
-    for key in [b'd', b'H', b'O', b'P', b'Q', b'V'] {
-        let bytes = format!("\x1b_G{}=1;AAAA\x1b\\", key as char).into_bytes();
+    for (field, action) in [("d=1", "control d"), ("t=x", "transfer medium x")] {
+        let bytes = format!("\x1b_G{field};AAAA\x1b\\").into_bytes();
         let mut parser = GraphicsParser::default();
 
         assert_eq!(
             only_event(&mut parser, &bytes),
             Err(GraphicsError::UnsupportedAction {
                 protocol: GraphicsProtocol::Kitty,
-                action: format!("control {}", key as char),
+                action: action.to_string(),
+            })
+        );
+    }
+}
+
+#[test]
+fn kitty_relative_controls_require_image_dimensions() {
+    for key in [b'H', b'P', b'Q', b'V'] {
+        let bytes = format!("\x1b_G{}=1;AAAA\x1b\\", key as char).into_bytes();
+        let mut parser = GraphicsParser::default();
+
+        assert_eq!(
+            only_event(&mut parser, &bytes),
+            Err(GraphicsError::InvalidDimensions {
+                protocol: GraphicsProtocol::Kitty,
             })
         );
     }
@@ -1457,14 +1579,15 @@ fn a_kitty_pixel_limit_is_checked_before_payload_decode() {
 }
 
 #[test]
-fn a_hostile_iterm_size_does_not_reserve_the_declared_payload() {
+fn a_hostile_iterm_size_is_only_a_hint() {
     let mut parser = GraphicsParser::default();
     let bytes = b"\x1b]1337;File=inline=1;size=4294967295:AAAA\x07";
 
     assert_eq!(
         only_event(&mut parser, bytes),
-        Err(GraphicsError::TransferTooLarge {
+        Err(GraphicsError::UnsupportedMedia {
             protocol: GraphicsProtocol::Iterm2,
+            format: "unknown".to_string(),
         })
     );
 }
@@ -1491,9 +1614,8 @@ fn rejected_graphics_do_not_change_the_terminal_state() {
     assert_eq!(engine.state(), &before);
     assert_eq!(
         engine.take_graphics(),
-        [Err(GraphicsError::UnsupportedAction {
+        [Err(GraphicsError::InvalidCommand {
             protocol: GraphicsProtocol::Kitty,
-            action: "p".to_string(),
         })]
     );
 }
@@ -1602,11 +1724,13 @@ fn graphics_queue_reports_dropped_events_at_its_bound() {
 
     let expected_record = Ok(ImageRecord {
         protocol: GraphicsProtocol::Kitty,
-        image: DecodedImage {
+        image: (DecodedImage {
             width: 1,
             height: 1,
             rgba: vec![255, 0, 0, 255],
-        },
+        })
+        .into(),
+        animation: None,
         action: ImageAction::TransmitAndDisplay,
         display: ImageDisplay {
             cell_columns: Some(1),
@@ -1683,7 +1807,9 @@ fn kitty_scan_marks_only_the_base64_payload_as_terminal_inert() {
     );
     assert_eq!(scan.events.len(), 1);
     let (offset, event) = scan.events.into_iter().next().expect("one image event");
-    let image = event.expect("the image decodes");
+    let GraphicsOperation::Image(image) = event.expect("the image decodes") else {
+        panic!("expected an image");
+    };
     assert_eq!(offset, bytes.len() - 1);
     assert_eq!(image.protocol, GraphicsProtocol::Kitty);
     assert_eq!(image.image.width, 1);
@@ -1742,7 +1868,9 @@ fn iterm_scan_marks_only_the_base64_payload_as_terminal_inert() {
     );
     assert_eq!(scan.events.len(), 1);
     let (offset, event) = scan.events.into_iter().next().expect("one image event");
-    let image = event.expect("the image decodes");
+    let GraphicsOperation::Image(image) = event.expect("the image decodes") else {
+        panic!("expected an image");
+    };
     assert_eq!(offset, bytes.len() - 1);
     assert_eq!(image.protocol, GraphicsProtocol::Iterm2);
     assert_eq!(image.image.width, 1);
@@ -1801,12 +1929,13 @@ fn sixel_scan_marks_printable_body_bytes_as_terminal_inert() {
     );
     assert_eq!(scan.events.len(), 1);
     let (offset, event) = scan.events.into_iter().next().expect("one image event");
-    let image = event.expect("the image decodes");
+    let GraphicsOperation::Sixel(graphic) = event.expect("the image decodes") else {
+        panic!("expected a Sixel image");
+    };
     assert_eq!(offset, bytes.len() - 1);
-    assert_eq!(image.protocol, GraphicsProtocol::Sixel);
-    assert_eq!(image.image.width, 1);
-    assert_eq!(image.image.height, 1);
-    assert_eq!(image.image.rgba, [255, 0, 0, 255]);
+    let image = graphic.image().expect("the Sixel has drawable pixels");
+    assert_eq!(image.width(), 1);
+    assert_eq!(image.height(), 6);
 }
 
 #[test]

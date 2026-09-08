@@ -53,9 +53,15 @@ use koshi_ipc::transport::{Listener, MAX_FRAME_LEN};
 use koshi_ipc::wire::MaybeKnown;
 use koshi_layout::mode::LayoutMode;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, CommittedRegions, MousePane, PaneKind, PaneSlot, SessionSnapshot, TabMeta,
-    TabSnapshot,
+    ClientSnapshot, CommittedRegions, CursorSnapshot, GridView, ImagePlacementSnapshot, MousePane,
+    PaneKind, PaneSlot, PaneSnapshot, PluginUiSnapshot, RenderSnapshot, ScrollbackMeta,
+    SessionSnapshot, TabMeta, TabSnapshot,
 };
+use koshi_terminal::graphics::{
+    DecodedImage, GraphicsProtocol, ImageAction, ImageDisplay, ImageRecord,
+};
+use koshi_terminal::grid::state::Grid;
+use koshi_terminal::style::Style;
 
 use super::*;
 use crate::tests::VIEWPORT;
@@ -813,6 +819,7 @@ fn coming_back_after_a_restart_keeps_the_client_record_and_graphics_capability()
         client_id,
         &ConnectionToken::new(OLD_TOKEN),
         terminal::GraphicsSupport::Kitty,
+        None,
     )
     .expect("the stand-in session handed the client record back");
     drop(connection);
@@ -826,9 +833,52 @@ fn coming_back_after_a_restart_keeps_the_client_record_and_graphics_capability()
             resume: Some(client_id),
             resume_token: None,
             pane_area: Some(core_pane_area(viewport())),
-            graphics: koshi_ipc::protocol::GraphicsCapabilities { kitty: true },
+            graphics: koshi_ipc::protocol::GraphicsCapabilities {
+                kitty: true,
+                iterm: false,
+                sixel: false,
+            },
+            cell_size: None,
         }),
         "the restart path claims the client record and reports this terminal's capability"
+    );
+}
+
+#[test]
+fn attach_advertises_the_selected_native_protocol() {
+    let iterm = attach_request(None, None, terminal::GraphicsSupport::Iterm, None);
+    let sixel = attach_request(
+        None,
+        None,
+        terminal::GraphicsSupport::Sixel {
+            palette_colors: 2,
+            max_width: None,
+            max_height: None,
+        },
+        None,
+    );
+
+    let IpcRequestKind::Attach { graphics, .. } = iterm.kind else {
+        panic!("expected an attach request");
+    };
+    assert_eq!(
+        graphics,
+        koshi_ipc::protocol::GraphicsCapabilities {
+            kitty: false,
+            iterm: true,
+            sixel: false,
+        }
+    );
+    let IpcRequestKind::Attach { graphics, .. } = sixel.kind else {
+        panic!("expected an attach request");
+    };
+    assert_eq!(
+        graphics,
+        koshi_ipc::protocol::GraphicsCapabilities {
+            kitty: false,
+            iterm: false,
+            sixel: true,
+        }
     );
 }
 
@@ -849,6 +899,7 @@ fn a_restarted_session_that_refuses_the_join_leaves_nothing_to_come_back_to() {
         client_id,
         &ConnectionToken::new(OLD_TOKEN),
         terminal::GraphicsSupport::Unsupported,
+        None,
     );
     assert_eq!(attached.map(|(endpoint, _)| endpoint), None);
 }
@@ -865,6 +916,7 @@ fn a_restarted_session_that_mints_a_new_client_leaves_nothing_to_come_back_to() 
         ClientId::new(),
         &ConnectionToken::new(OLD_TOKEN),
         terminal::GraphicsSupport::Unsupported,
+        None,
     );
     assert_eq!(attached.map(|(endpoint, _)| endpoint), None);
 }
@@ -882,6 +934,7 @@ fn another_local_users_restarting_session_is_not_waited_for() {
         ClientId::new(),
         &ConnectionToken::new(""),
         terminal::GraphicsSupport::Unsupported,
+        None,
     );
 
     assert_eq!(attached.map(|(endpoint, _)| endpoint), None);
@@ -2609,6 +2662,7 @@ fn a_terminal_resize_moves_the_viewers_own_size_and_tells_the_session() {
             client_id,
             size: bigger,
             pane_area: None,
+            cell_size: None,
         },
     );
 
@@ -2624,6 +2678,7 @@ fn a_terminal_resize_moves_the_viewers_own_size_and_tells_the_session() {
             kind: IpcRequestKind::Resize {
                 viewport: bigger,
                 pane_area: Some(core_pane_area(bigger)),
+                cell_size: None,
             },
         }
     );
@@ -2865,6 +2920,102 @@ fn test_screen() -> Screen<TestBackend> {
     )
 }
 
+fn native_image_snapshot() -> RenderSnapshot {
+    let pane_id = PaneId::new();
+    let tab_id = TabId::new();
+    let record = Arc::new(ImageRecord {
+        protocol: GraphicsProtocol::Kitty,
+        image: Arc::new(DecodedImage {
+            width: 1,
+            height: 1,
+            rgba: vec![255, 0, 0, 255],
+        }),
+        animation: None,
+        action: ImageAction::TransmitAndDisplay,
+        display: ImageDisplay::default(),
+        anchor: (0, 0),
+    });
+    let placement = ImagePlacementSnapshot::new(1, record, (0, 0), 1, 1)
+        .expect("the test image placement is valid");
+
+    RenderSnapshot {
+        session: SessionSnapshot {
+            id: SessionId::new(),
+            name: String::from("session"),
+            active_tab: TabSnapshot {
+                id: tab_id,
+                name: String::from("tab"),
+                layout_solved: vec![PaneSlot {
+                    pane_id,
+                    rect: Rect::new(Point { x: 0, y: 0 }, VIEWPORT),
+                    inner_rect: Some(Rect::new(
+                        Point { x: 0, y: 1 },
+                        Size {
+                            cols: VIEWPORT.cols,
+                            rows: VIEWPORT.rows - 2,
+                        },
+                    )),
+                    kind: PaneKind::Terminal,
+                    visible: true,
+                    suppressed: false,
+                    dead: false,
+                }],
+                effective_size: VIEWPORT,
+                stack_headers: Vec::new(),
+                layout_mode: LayoutMode::Tiled,
+                all_suppressed: false,
+                gap: 0,
+            },
+            tabs_metadata: vec![TabMeta {
+                id: tab_id,
+                name: String::from("tab"),
+                index: 0,
+                active: true,
+            }],
+        },
+        panes: vec![PaneSnapshot {
+            id: pane_id,
+            title: None,
+            cursor: CursorSnapshot {
+                row: 0,
+                col: 0,
+                visible: false,
+                blink: false,
+                shape: None,
+            },
+            grid_view: Some(GridView {
+                grid: Arc::new(Grid::blank(
+                    VIEWPORT.rows - 2,
+                    VIEWPORT.cols,
+                    Style::default(),
+                )),
+                view_offset: 0,
+            }),
+            image_placements: vec![placement],
+            reverse_video: false,
+            mouse_tracking: MouseTracking::Off,
+            alt_scroll: false,
+            on_alt_screen: false,
+            view_top_row: 0,
+            selection: None,
+            has_selection: false,
+            scrollback: ScrollbackMeta {
+                truncated: false,
+                retained_lines: 0,
+            },
+        }],
+        client: ClientSnapshot {
+            id: ClientId::new(),
+            viewport: VIEWPORT,
+            active_tab: tab_id,
+            focused_pane: Some(pane_id),
+            lock_mode: LockMode::Normal,
+            mouse_select: false,
+        },
+        plugin_ui: PluginUiSnapshot::default(),
+    }
+}
+
 /// A screen whose backend can fail its next buffer draw.
 fn failing_screen() -> Screen<FailingBackend> {
     Screen::new(
@@ -3006,10 +3157,249 @@ fn a_failed_paint_keeps_the_visible_frame_and_viewer_state_paired() {
 #[test]
 fn an_image_output_failure_keeps_the_committed_text_frame() {
     let error = io::Error::new(io::ErrorKind::BrokenPipe, "image output closed");
-    let result: Result<(), terminal::PaintError<io::Error>> =
+    let result: Result<bool, terminal::PaintError<io::Error>> =
         Err(terminal::PaintError::Image(error));
 
-    assert!(text_frame_was_painted(result));
+    assert!(!frame_was_committed(result));
+}
+
+#[test]
+fn a_failed_native_frame_keeps_an_idle_retry_wakeup() {
+    let mut screen = Screen::with_graphics(
+        Terminal::new(TestBackend::new(VIEWPORT.cols, VIEWPORT.rows)).expect("build terminal"),
+        VIEWPORT,
+        terminal::GraphicsSupport::Kitty,
+        None,
+    );
+    screen.pending_snapshot = Some(native_image_snapshot());
+    screen.outputs.fail_frame_commit();
+
+    assert!(!screen.outputs.work_pending());
+    assert_eq!(
+        screen.next_image_wakeup(),
+        Some(IMAGE_OUTPUT_STEP_DELAY),
+        "a retained snapshot must wake an idle attachment"
+    );
+}
+
+#[test]
+fn a_repeated_native_frame_failure_uses_capped_retry_delay() {
+    let mut screen = Screen::with_graphics(
+        Terminal::new(FailingBackend::new(VIEWPORT)).expect("build terminal"),
+        VIEWPORT,
+        terminal::GraphicsSupport::Kitty,
+        None,
+    );
+    let mut client = viewer();
+    let snapshot = native_image_snapshot();
+    let tab = snapshot.client.active_tab;
+    screen.terminal.backend_mut().fail_draw = true;
+
+    assert_eq!(screen.draw_snapshot(&mut client, snapshot), None);
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while screen.outputs.work_pending() {
+        screen.refresh(&mut client, Some(tab));
+        assert!(
+            Instant::now() < deadline,
+            "native image preparation did not reach the failed commit"
+        );
+        std::thread::yield_now();
+    }
+    assert!(screen.pending_snapshot.is_some());
+    assert_eq!(screen.native_retry_delay, Duration::from_millis(2));
+
+    let mut expected_delay = Duration::from_millis(2);
+    while expected_delay < MAX_IMAGE_OUTPUT_RETRY_DELAY {
+        let retry_at = screen
+            .native_retry_at
+            .expect("a failed commit has a deadline");
+        assert_eq!(
+            screen.next_image_wakeup_at(retry_at - expected_delay),
+            Some(expected_delay)
+        );
+        let result = screen.refresh_at(&mut client, Some(tab), retry_at - Duration::from_nanos(1));
+        assert_eq!(
+            result, None,
+            "input events before the retry deadline must not retry the frame"
+        );
+        assert!(!screen.outputs.work_pending());
+        assert_eq!(screen.native_retry_delay, expected_delay);
+        loop {
+            let retry_at = screen.native_retry_at.expect("the retry remains scheduled");
+            screen.refresh_at(&mut client, Some(tab), retry_at);
+            assert!(
+                Instant::now() < deadline,
+                "native image retry did not reach the next failed commit"
+            );
+            if screen.native_retry_delay > expected_delay {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        expected_delay = expected_delay
+            .saturating_mul(2)
+            .min(MAX_IMAGE_OUTPUT_RETRY_DELAY);
+    }
+
+    let retry_at = screen
+        .native_retry_at
+        .expect("the capped retry has a deadline");
+    assert_eq!(
+        screen.next_image_wakeup_at(retry_at - MAX_IMAGE_OUTPUT_RETRY_DELAY),
+        Some(MAX_IMAGE_OUTPUT_RETRY_DELAY)
+    );
+    screen.refresh_at(&mut client, Some(tab), retry_at);
+    while screen.outputs.work_pending() {
+        let retry_at = screen.native_retry_at.expect("the retry remains scheduled");
+        screen.refresh_at(&mut client, Some(tab), retry_at);
+        assert!(
+            Instant::now() < deadline,
+            "the capped native image retry did not finish"
+        );
+        std::thread::yield_now();
+    }
+    assert_eq!(screen.native_retry_delay, MAX_IMAGE_OUTPUT_RETRY_DELAY);
+
+    screen.terminal.backend_mut().fail_draw = false;
+    while screen.pending_snapshot.is_some() {
+        let retry_at = screen.native_retry_at.expect("the retry remains scheduled");
+        screen.refresh_at(&mut client, Some(tab), retry_at);
+        assert!(
+            Instant::now() < deadline,
+            "native image output did not recover after the writer recovered"
+        );
+        std::thread::yield_now();
+    }
+    assert_eq!(screen.native_retry_delay, IMAGE_OUTPUT_STEP_DELAY);
+}
+
+#[test]
+fn a_native_retry_delay_resets_when_output_connection_resets() {
+    let mut screen = Screen::with_graphics(
+        Terminal::new(TestBackend::new(VIEWPORT.cols, VIEWPORT.rows)).expect("build terminal"),
+        VIEWPORT,
+        terminal::GraphicsSupport::Kitty,
+        None,
+    );
+    screen.native_retry_delay = MAX_IMAGE_OUTPUT_RETRY_DELAY;
+    screen.native_retry_at = Some(Instant::now());
+
+    screen.reset_connection();
+
+    assert_eq!(screen.native_retry_delay, IMAGE_OUTPUT_STEP_DELAY);
+    assert_eq!(screen.native_retry_at, None);
+}
+
+#[test]
+fn a_pending_text_frame_does_not_schedule_an_image_wakeup() {
+    let mut screen = test_screen();
+    screen.pending_snapshot = Some(to_snapshot(&painted_frame()));
+
+    assert_eq!(screen.next_image_wakeup(), None);
+}
+
+#[test]
+fn a_completed_native_image_is_committed_by_refresh() {
+    let mut screen = Screen::with_graphics(
+        Terminal::new(TestBackend::new(VIEWPORT.cols, VIEWPORT.rows)).expect("build terminal"),
+        VIEWPORT,
+        terminal::GraphicsSupport::Kitty,
+        None,
+    );
+    let mut client = viewer();
+    let snapshot = native_image_snapshot();
+    let tab = snapshot.client.active_tab;
+
+    assert_eq!(
+        screen.draw_snapshot(&mut client, snapshot),
+        None,
+        "the first paint waits for native image preparation"
+    );
+    assert!(screen.pending_snapshot.is_some());
+    assert!(screen.next_image_wakeup().is_some());
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while screen.pending_snapshot.is_some() {
+        screen.refresh(&mut client, Some(tab));
+        assert!(
+            Instant::now() < deadline,
+            "native image preparation did not reach refresh"
+        );
+        std::thread::yield_now();
+    }
+
+    assert!(screen.last_snapshot.is_some());
+    assert_eq!(screen.next_image_wakeup(), None);
+}
+
+#[test]
+fn native_images_return_after_scrolling_away_for_each_output_protocol() {
+    let cell_size = PixelCellSize::new(1, 1).expect("test cell size");
+    let output_protocols = [
+        terminal::GraphicsSupport::Kitty,
+        terminal::GraphicsSupport::Iterm,
+        terminal::GraphicsSupport::Sixel {
+            palette_colors: 256,
+            max_width: None,
+            max_height: None,
+        },
+    ];
+
+    for graphics in output_protocols {
+        let mut screen = Screen::with_graphics(
+            Terminal::new(TestBackend::new(VIEWPORT.cols, VIEWPORT.rows)).expect("build terminal"),
+            VIEWPORT,
+            graphics,
+            Some(cell_size),
+        );
+        let mut client = viewer();
+        let image = native_image_snapshot();
+        let tab = image.client.active_tab;
+        let mut scrolled_away = image.clone();
+        for pane in &mut scrolled_away.panes {
+            pane.image_placements.clear();
+        }
+
+        assert_eq!(
+            screen.draw_snapshot(&mut client, image.clone()),
+            None,
+            "{graphics:?} must wait for its first native output"
+        );
+        wait_for_pending_native_frame(&mut screen, &mut client, tab);
+        assert_eq!(screen.outputs.prepared_keys().len(), 1, "{graphics:?}");
+
+        assert!(
+            screen.draw_snapshot(&mut client, scrolled_away).is_some(),
+            "{graphics:?} must commit the frame with no visible image"
+        );
+        assert!(screen.outputs.prepared_keys().is_empty(), "{graphics:?}");
+
+        assert_eq!(
+            screen.draw_snapshot(&mut client, image),
+            None,
+            "{graphics:?} must prepare the image again after it returns"
+        );
+        wait_for_pending_native_frame(&mut screen, &mut client, tab);
+        assert_eq!(screen.outputs.prepared_keys().len(), 1, "{graphics:?}");
+    }
+}
+
+fn wait_for_pending_native_frame(
+    screen: &mut Screen<TestBackend>,
+    client: &mut Client,
+    tab: TabId,
+) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while screen.pending_snapshot.is_some() {
+        screen.refresh(client, Some(tab));
+        assert!(
+            Instant::now() < deadline,
+            "native image preparation did not reach refresh"
+        );
+        std::thread::yield_now();
+    }
+    assert_eq!(screen.next_image_wakeup(), None);
 }
 
 #[test]
@@ -3029,7 +3419,7 @@ fn a_viewer_only_refresh_waits_for_a_frame_after_resize() {
         attempt: 1,
         retry_in_seconds: 1,
     }));
-    screen.refresh(&client, Some(tab));
+    screen.refresh(&mut client, Some(tab));
 
     assert_eq!(screen.terminal.backend().buffer(), &before);
     assert_eq!(screen.committed_regions.viewport, VIEWPORT);
@@ -3126,7 +3516,7 @@ fn a_prefix_key_typed_after_a_frame_in_one_pass_still_draws_its_breadcrumb() {
         client.resolve_key(opener, Instant::now()),
         KeyOutcome::Pending
     );
-    screen.refresh(&client, Some(tab));
+    screen.refresh(&mut client, Some(tab));
 
     // The breadcrumb view opens with the chord that was pressed and ends with
     // the arrow that separates it from the chords continuing it.
@@ -3161,7 +3551,7 @@ fn a_pointer_moved_after_a_frame_in_one_pass_still_draws_the_new_hover() {
         &mut pending,
     );
     let hovered_after = ViewerPaint::read(&client, tab).chrome.hovered_pane;
-    screen.refresh(&client, Some(tab));
+    screen.refresh(&mut client, Some(tab));
 
     assert_eq!(hovered_before, None);
     assert_eq!(hovered_after, Some(second));
@@ -3183,7 +3573,7 @@ fn a_pass_that_moved_nothing_draws_nothing() {
     let drawn = screen.terminal.backend().buffer().clone();
     let shown = screen.shown.clone();
 
-    screen.refresh(&client, Some(tab));
+    screen.refresh(&mut client, Some(tab));
 
     assert_eq!(*screen.terminal.backend().buffer(), drawn);
     assert_eq!(screen.shown, shown);
@@ -3191,11 +3581,11 @@ fn a_pass_that_moved_nothing_draws_nothing() {
 
 #[test]
 fn a_screen_with_no_frame_yet_draws_nothing() {
-    let client = viewer();
+    let mut client = viewer();
     let mut screen = test_screen();
 
-    screen.refresh(&client, None);
-    screen.refresh(&client, Some(TabId::new()));
+    screen.refresh(&mut client, None);
+    screen.refresh(&mut client, Some(TabId::new()));
 
     assert_eq!(screen.shown, None);
     assert_eq!(screen.last_snapshot, None);
@@ -3265,6 +3655,7 @@ fn every_event_from_the_blackout_is_dropped_and_the_hangup_still_reported() {
         rows: 40,
     };
     let (incoming_tx, incoming_rx) = incoming_channel();
+    let mut cell_size_query = terminal::CellSizeQuery::new(None, false, false);
     incoming_tx
         .send(Incoming::Input(Box::new(RuntimeEvent::KeyInput {
             client_id: client.id(),
@@ -3279,6 +3670,7 @@ fn every_event_from_the_blackout_is_dropped_and_the_hangup_still_reported() {
             client_id: client.id(),
             size: resized,
             pane_area: None,
+            cell_size: None,
         })))
         .expect("the loop's channel takes it");
     incoming_tx
@@ -3293,7 +3685,7 @@ fn every_event_from_the_blackout_is_dropped_and_the_hangup_still_reported() {
     let before = client.viewport();
 
     assert!(
-        drop_input_from_the_blackout(&incoming_rx),
+        drop_input_from_the_blackout(&incoming_rx, &mut cell_size_query),
         "the terminal hung up while the link was down"
     );
 
@@ -3311,6 +3703,31 @@ fn every_event_from_the_blackout_is_dropped_and_the_hangup_still_reported() {
 }
 
 #[test]
+fn a_cell_size_reply_in_the_blackout_is_consumed_by_the_outer_query() {
+    let measurement =
+        koshi_core::geometry::PixelCellSize::new(10, 20).expect("positive cell dimensions");
+    let client_id = ClientId::new();
+    let (incoming_tx, incoming_rx) = incoming_channel();
+    let mut cell_size_query = terminal::CellSizeQuery::new(None, true, true);
+    incoming_tx
+        .send(Incoming::Input(Box::new(RuntimeEvent::CellSize {
+            client_id,
+            size: measurement,
+        })))
+        .expect("the cell-size reply is queued");
+
+    assert!(!drop_input_from_the_blackout(
+        &incoming_rx,
+        &mut cell_size_query,
+    ));
+    assert_eq!(
+        cell_size_query.accept(measurement),
+        (None, false),
+        "the blackout consumed the reply instead of leaving it pending"
+    );
+}
+
+#[test]
 fn incoming_batch_leaves_events_past_the_per_pass_limit_queued() {
     let (incoming_tx, incoming_rx) = mpsc::channel();
     for _ in 0..MAX_INCOMING_BATCH {
@@ -3324,6 +3741,7 @@ fn incoming_batch_leaves_events_past_the_per_pass_limit_queued() {
             client_id,
             size: Size { cols: 90, rows: 30 },
             pane_area: None,
+            cell_size: None,
         })))
         .expect("the test receiver is open");
 
@@ -3353,10 +3771,12 @@ fn incoming_batch_leaves_events_past_the_per_pass_limit_queued() {
             client_id: actual_client_id,
             size,
             pane_area,
+            cell_size,
         } => {
             assert_eq!(actual_client_id, client_id);
             assert_eq!(size, Size { cols: 90, rows: 30 });
             assert_eq!(pane_area, None);
+            assert_eq!(cell_size, None);
         }
         event => panic!("the remaining event was {event:?}"),
     }
@@ -3380,6 +3800,7 @@ fn incoming_queue_stops_producers_at_its_fixed_capacity() {
         client_id,
         size: Size { cols: 90, rows: 30 },
         pane_area: None,
+        cell_size: None,
     })));
 
     let Err(mpsc::TrySendError::Full(Incoming::Input(event))) = rejected else {
@@ -3389,6 +3810,7 @@ fn incoming_queue_stops_producers_at_its_fixed_capacity() {
         client_id: actual_client_id,
         size,
         pane_area,
+        cell_size,
     } = *event
     else {
         panic!("the full queue returned another event");
@@ -3396,6 +3818,7 @@ fn incoming_queue_stops_producers_at_its_fixed_capacity() {
     assert_eq!(actual_client_id, client_id);
     assert_eq!(size, Size { cols: 90, rows: 30 });
     assert_eq!(pane_area, None);
+    assert_eq!(cell_size, None);
     for _ in 0..INCOMING_QUEUE_CAPACITY {
         let Incoming::Input(event) = incoming_rx
             .try_recv()
@@ -3428,12 +3851,14 @@ fn terminal_input_queue_stops_the_reader_at_its_fixed_capacity() {
         client_id,
         size: resized,
         pane_area: None,
+        cell_size: None,
     });
 
     let Err(mpsc::TrySendError::Full(RuntimeEvent::Resize {
         client_id: actual_client_id,
         size,
         pane_area,
+        cell_size,
     })) = rejected
     else {
         panic!("the input event past the queue limit was not returned as full");
@@ -3441,6 +3866,7 @@ fn terminal_input_queue_stops_the_reader_at_its_fixed_capacity() {
     assert_eq!(actual_client_id, client_id);
     assert_eq!(size, resized);
     assert_eq!(pane_area, None);
+    assert_eq!(cell_size, None);
     for _ in 0..INCOMING_QUEUE_CAPACITY {
         let event = input_rx
             .try_recv()
@@ -3534,6 +3960,7 @@ fn a_new_connection_is_told_the_size_the_terminal_is_now() {
     let IpcRequestKind::Resize {
         viewport,
         pane_area,
+        cell_size,
     } = request.kind
     else {
         panic!("expected a Resize, got {:?}", request.kind);
@@ -3548,6 +3975,7 @@ fn a_new_connection_is_told_the_size_the_terminal_is_now() {
         Some(core_pane_area(client.viewport())),
         "this client reports the pane area left by the built-in rows"
     );
+    assert_eq!(cell_size, None);
     assert_eq!(
         sent.try_recv().err(),
         Some(mpsc::TryRecvError::Empty),

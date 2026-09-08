@@ -23,14 +23,14 @@ impl TerminalState {
     /// go into scrollback first, oldest first, each with its row end and prompt
     /// mark. The alternate screen, and a delete with `first > 0`, feed nothing:
     /// the removed lines are discarded.
-    pub(super) fn delete_lines_into_scrollback(
+    pub(in crate::state) fn delete_lines_into_scrollback(
         &mut self,
         first: u16,
         bottom: u16,
         n: u16,
         fill: Style,
     ) {
-        let (grid_rows, _) = self.active_grid().dimensions();
+        let (grid_rows, grid_columns) = self.active_grid().dimensions();
         if grid_rows == 0 || first > bottom || first >= grid_rows {
             return;
         }
@@ -39,45 +39,47 @@ impl TerminalState {
         let shift = n.min(band_height);
         let old_live_top = self.scrollback.total_pushed();
         let feeds_history = self.active == Screen::Primary && first == 0;
+        let mut source_removed = false;
         if feeds_history {
-            for row in 0..shift {
-                if let Some(scrolled_off) = self.primary.rows().get(row as usize) {
-                    let meta = self.primary.row_meta(row);
-                    self.scrollback.push_row(scrolled_off, meta);
+            if self.native_fragment_counts.is_empty() {
+                for row in 0..shift {
+                    if let Some(scrolled_off) = self.primary.rows().get(row as usize) {
+                        let meta = self.primary.row_meta(row);
+                        self.scrollback.push_row(scrolled_off, meta);
+                    }
+                }
+            } else {
+                let primary = &self.primary;
+                let scrollback = &mut self.scrollback;
+                let counts = &mut self.native_fragment_counts;
+                for row in 0..shift {
+                    if let Some(scrolled_off) = primary.rows().get(row as usize) {
+                        let meta = primary.row_meta(row);
+                        scrollback.push_row_with_evicted(scrolled_off, meta, |evicted| {
+                            source_removed |=
+                                super::super::images::discard_native_fragment_references(
+                                    counts,
+                                    evicted.iter(),
+                                );
+                        });
+                    }
                 }
             }
+        } else {
+            source_removed |= self.discard_active_image_fragments(
+                first,
+                first.saturating_add(shift),
+                0,
+                grid_columns,
+            );
         }
         self.active_grid_mut().delete_lines(first, bottom, n, fill);
+        self.finish_native_fragment_removal(source_removed);
 
         if shift == 0 {
             return;
         }
-        if feeds_history {
-            self.remap_primary_image_placements(old_live_top, |old_row, column| {
-                if old_row < old_live_top {
-                    return Some((old_row, column));
-                }
-                let row = old_row - old_live_top;
-                if row <= u64::from(bottom) {
-                    Some((old_row, column))
-                } else {
-                    Some((old_row.checked_add(u64::from(shift))?, column))
-                }
-            });
-        } else if self.active == Screen::Primary {
-            self.remap_primary_image_placements(old_live_top, |old_row, column| {
-                if old_row < old_live_top {
-                    return Some((old_row, column));
-                }
-                let row = u16::try_from(old_row - old_live_top).ok()?;
-                let mapped = deleted_row(row, first, bottom, shift)?;
-                Some((old_live_top + u64::from(mapped), column))
-            });
-        } else {
-            self.remap_alternate_image_placements(|row, column| {
-                Some((deleted_row(row, first, bottom, shift)?, column))
-            });
-        }
+        self.scroll_image_rows(first, bottom, shift, true, old_live_top);
     }
 
     /// Insert `n` blank lines at `first`, shifting the rest of the region down.
@@ -89,7 +91,7 @@ impl TerminalState {
         n: u16,
         fill: Style,
     ) {
-        let (grid_rows, _) = self.active_grid().dimensions();
+        let (grid_rows, grid_columns) = self.active_grid().dimensions();
         if grid_rows == 0 || first > bottom || first >= grid_rows {
             return;
         }
@@ -97,25 +99,19 @@ impl TerminalState {
         let band_height = bottom.saturating_sub(first).saturating_add(1);
         let shift = n.min(band_height);
         let live_top = self.scrollback.total_pushed();
+        let source_removed = self.discard_active_image_fragments(
+            bottom.saturating_add(1).saturating_sub(shift),
+            bottom.saturating_add(1),
+            0,
+            grid_columns,
+        );
         self.active_grid_mut().insert_lines(first, bottom, n, fill);
+        self.finish_native_fragment_removal(source_removed);
 
         if shift == 0 {
             return;
         }
-        if self.active == Screen::Primary {
-            self.remap_primary_image_placements(live_top, |old_row, column| {
-                if old_row < live_top {
-                    return Some((old_row, column));
-                }
-                let row = u16::try_from(old_row - live_top).ok()?;
-                let mapped = inserted_row(row, first, bottom, shift)?;
-                Some((live_top + u64::from(mapped), column))
-            });
-        } else {
-            self.remap_alternate_image_placements(|row, column| {
-                Some((inserted_row(row, first, bottom, shift)?, column))
-            });
-        }
+        self.scroll_image_rows(first, bottom, shift, false, live_top);
     }
 
     /// Move the cursor down one line. At the scroll region's bottom margin the
@@ -269,28 +265,6 @@ impl TerminalState {
     /// Clear every horizontal tab stop.
     pub(super) fn clear_all_tab_stops(&mut self) {
         self.tab_stops.fill(false);
-    }
-}
-
-pub(super) fn deleted_row(row: u16, first: u16, bottom: u16, shift: u16) -> Option<u16> {
-    if row < first || row > bottom {
-        return Some(row);
-    }
-    if u32::from(row - first) < u32::from(shift) {
-        None
-    } else {
-        Some(row - shift)
-    }
-}
-
-pub(super) fn inserted_row(row: u16, first: u16, bottom: u16, shift: u16) -> Option<u16> {
-    if row < first || row > bottom {
-        return Some(row);
-    }
-    if u32::from(bottom - row) < u32::from(shift) {
-        None
-    } else {
-        Some(row + shift)
     }
 }
 

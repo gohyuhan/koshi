@@ -15,9 +15,7 @@
 //!
 //! Image placements arrive in the painted frame without RGBA. `ImageCache`
 //! keeps complete records by their connection-local content identity and
-//! rebuilds the newest snapshot as bounded image chunks finish. A missing
-//! record stays as a placement with no pixels, which the renderer draws as
-//! `terminal image unavailable`.
+//! rebuilds the newest snapshot after all required image chunks finish.
 //!
 //! A run travels once and expands back into as many cells as it stood for: a
 //! blank 80-column row arrives as one run with `count: 80` and rebuilds into 80
@@ -253,11 +251,11 @@ impl ImageCache {
         self.pending = None;
     }
 
-    /// Adopt a painted frame, prune unreferenced records, and expose missing placements.
+    /// Adopt a painted frame and return it when every required image is complete.
     pub(crate) fn begin_frame(
         &mut self,
         frame: Box<PaintedFrame>,
-    ) -> Result<RenderSnapshot, ImageAssemblyError> {
+    ) -> Result<Option<RenderSnapshot>, ImageAssemblyError> {
         let placement_count = frame
             .panes
             .iter()
@@ -278,33 +276,9 @@ impl ImageCache {
                 if !placements.insert((pane.id, placement.id)) {
                     return Err(ImageAssemblyError::DuplicatePlacement);
                 }
-                let valid = match (placement.available, self.images.get(&placement.content_id)) {
-                    (false, _) => ImagePlacementSnapshot::unavailable(
-                        placement.id,
-                        placement.content_id,
-                        placement.anchor,
-                        placement.columns,
-                        placement.rows,
-                    )
-                    .is_some(),
-                    (true, Some(record)) => ImagePlacementSnapshot::with_content_id(
-                        placement.id,
-                        placement.content_id,
-                        Arc::clone(record),
-                        placement.anchor,
-                        placement.columns,
-                        placement.rows,
-                    )
-                    .is_some(),
-                    (true, None) => ImagePlacementSnapshot::unavailable(
-                        placement.id,
-                        placement.content_id,
-                        placement.anchor,
-                        placement.columns,
-                        placement.rows,
-                    )
-                    .is_some(),
-                };
+                let valid =
+                    image_placement_with_record(placement, self.images.get(&placement.content_id))
+                        .is_some();
                 if !valid {
                     return Err(ImageAssemblyError::InvalidPlacement);
                 }
@@ -323,7 +297,11 @@ impl ImageCache {
         self.pending = None;
         self.transfer_count = 0;
         self.frame = Some(frame);
-        self.snapshot()
+        if self.missing.is_empty() {
+            self.snapshot().map(Some)
+        } else {
+            Ok(None)
+        }
     }
 
     /// Start receiving one record needed by the newest painted frame.
@@ -456,17 +434,7 @@ impl ImageCache {
             pane.image_placements
                 .iter()
                 .filter(|placement| placement.available && placement.content_id == content_id)
-                .all(|placement| {
-                    ImagePlacementSnapshot::with_content_id(
-                        placement.id,
-                        placement.content_id,
-                        Arc::clone(record),
-                        placement.anchor,
-                        placement.columns,
-                        placement.rows,
-                    )
-                    .is_some()
-                })
+                .all(|placement| image_placement_with_record(placement, Some(record)).is_some())
         });
         if valid {
             Ok(())
@@ -562,47 +530,61 @@ fn to_image_placement(
     placement: &FrameImagePlacement,
     images: &HashMap<u64, Arc<ImageRecord>>,
 ) -> Option<ImagePlacementSnapshot> {
-    if !placement.available {
-        return ImagePlacementSnapshot::unavailable(
+    image_placement_with_record(placement, images.get(&placement.content_id))
+}
+
+fn image_placement_with_record(
+    placement: &FrameImagePlacement,
+    record: Option<&Arc<ImageRecord>>,
+) -> Option<ImagePlacementSnapshot> {
+    let snapshot = if let Some(record) = record.filter(|_| placement.available) {
+        let record = if let Some(header) = &placement.record {
+            if header.width != record.image.width || header.height != record.image.height {
+                return None;
+            }
+            let mut record = record.as_ref().clone();
+            record.protocol = to_graphics_protocol(header.protocol);
+            record.action = to_image_action(header.action);
+            record.display = to_image_display(&header.display);
+            record.anchor = header.anchor;
+            Arc::new(record)
+        } else {
+            Arc::clone(record)
+        };
+        ImagePlacementSnapshot::with_content_id(
+            placement.id,
+            placement.content_id,
+            record,
+            placement.anchor,
+            placement.columns,
+            placement.rows,
+        )?
+    } else {
+        ImagePlacementSnapshot::unavailable(
             placement.id,
             placement.content_id,
             placement.anchor,
             placement.columns,
             placement.rows,
-        );
+        )?
+    };
+    match placement.geometry {
+        Some(geometry) => snapshot.with_geometry(geometry),
+        None => Some(snapshot),
     }
-    images
-        .get(&placement.content_id)
-        .and_then(|record| {
-            ImagePlacementSnapshot::with_content_id(
-                placement.id,
-                placement.content_id,
-                Arc::clone(record),
-                placement.anchor,
-                placement.columns,
-                placement.rows,
-            )
-        })
-        .or_else(|| {
-            ImagePlacementSnapshot::unavailable(
-                placement.id,
-                placement.content_id,
-                placement.anchor,
-                placement.columns,
-                placement.rows,
-            )
-        })
 }
 
 /// One complete image record rebuilt from transfer metadata and RGBA bytes.
 fn to_image_record(record: &FrameImageRecordHeader, rgba: Vec<u8>) -> ImageRecord {
     ImageRecord {
         protocol: to_graphics_protocol(record.protocol),
-        image: DecodedImage {
+        image: (DecodedImage {
             width: record.width,
             height: record.height,
             rgba,
-        },
+        })
+        .into(),
+        animation: None,
         action: to_image_action(record.action),
         display: to_image_display(&record.display),
         anchor: record.anchor,
@@ -648,6 +630,7 @@ fn to_sixel_background(background: FrameSixelBackground) -> SixelBackground {
 /// Display metadata restored from the wire.
 fn to_image_display(display: &FrameImageDisplay) -> ImageDisplay {
     ImageDisplay {
+        quiet: display.quiet,
         width: display.width.map(to_image_dimension),
         height: display.height.map(to_image_dimension),
         preserve_aspect_ratio: display.preserve_aspect_ratio,
@@ -658,6 +641,10 @@ fn to_image_display(display: &FrameImageDisplay) -> ImageDisplay {
         usage_hints: display.usage_hints,
         unicode_placeholder: display.unicode_placeholder,
         z_index: display.z_index,
+        relative_image_id: display.relative_image_id,
+        relative_placement_id: display.relative_placement_id,
+        relative_offset_x: display.relative_offset_x,
+        relative_offset_y: display.relative_offset_y,
         cell_columns: display.cell_columns,
         cell_rows: display.cell_rows,
         source_offset_x: display.source_offset_x,

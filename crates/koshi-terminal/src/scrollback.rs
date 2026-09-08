@@ -139,12 +139,21 @@ impl Scrollback {
     /// blanks: a 200-column row reading `README.md` keeps 9 cells. A
     /// soft-wrapped row keeps every cell. One allocation, at the stored size.
     pub(crate) fn push_row(&mut self, row: &[Cell], meta: RowMeta) {
+        self.push_row_with_evicted(row, meta, |_| {});
+    }
+
+    pub(crate) fn push_row_with_evicted(
+        &mut self,
+        row: &[Cell],
+        meta: RowMeta,
+        on_evict: impl FnMut(&[Cell]),
+    ) {
         let line = kept(row, meta.end).to_vec();
         let new_bytes = line_bytes(&line);
         self.lines.push_back((line, meta));
         self.byte_total += new_bytes;
         self.total_pushed += 1;
-        self.evict_to_caps();
+        self.evict_to_caps(on_evict);
     }
 
     /// Remove and return every retained row with its metadata, oldest at the
@@ -167,6 +176,15 @@ impl Scrollback {
     /// shortened in place: a hard-ended row without its trailing default
     /// blanks, a soft-wrapped row whole.
     pub(crate) fn replace_lines(&mut self, lines: Vec<(Vec<Cell>, RowMeta)>, retained_before: u64) {
+        self.replace_lines_with_evicted(lines, retained_before, |_| {});
+    }
+
+    pub(crate) fn replace_lines_with_evicted(
+        &mut self,
+        lines: Vec<(Vec<Cell>, RowMeta)>,
+        retained_before: u64,
+        on_evict: impl FnMut(&[Cell]),
+    ) {
         self.lines = lines
             .into_iter()
             .map(|(mut cells, meta)| {
@@ -175,7 +193,7 @@ impl Scrollback {
             })
             .collect();
         self.byte_total = self.lines.iter().map(|(cells, _)| line_bytes(cells)).sum();
-        self.evict_to_caps();
+        self.evict_to_caps(on_evict);
         let after = self.lines.len() as u64;
         self.total_pushed += after.saturating_sub(retained_before);
     }
@@ -183,12 +201,13 @@ impl Scrollback {
     /// Drop the oldest row, update `byte_total` and the dropped tallies, and
     /// repeat while the row count exceeds `max_lines`, or while `byte_total`
     /// exceeds `max_bytes` and more than one row remains.
-    fn evict_to_caps(&mut self) {
+    fn evict_to_caps(&mut self, mut on_evict: impl FnMut(&[Cell])) {
         while self.lines.len() > self.max_lines
             || (self.byte_total > self.max_bytes && self.lines.len() > 1)
         {
             let (oldest_line, _) = self.lines.pop_front().unwrap();
             let oldest_bytes = line_bytes(&oldest_line);
+            on_evict(&oldest_line);
 
             self.dropped_lines += 1;
             self.dropped_bytes += oldest_bytes as u64;
@@ -288,7 +307,7 @@ impl<'de> Deserialize<'de> for Scrollback {
             .iter()
             .map(|(cells, _)| line_bytes(cells))
             .sum();
-        scrollback.evict_to_caps();
+        scrollback.evict_to_caps(|_| {});
         Ok(scrollback)
     }
 }

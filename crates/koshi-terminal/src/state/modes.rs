@@ -53,8 +53,9 @@ pub enum CursorShape {
 /// (`?7`), application cursor keys (`?1`), reverse video (`?5`), cursor blink
 /// (`?12`), cursor [shape][CursorShape] (DECSCUSR), bracketed paste (`?2004`),
 /// the mouse [tracking][MouseTracking] level and [encoding][MouseEncoding]
-/// (`?9`/`?1000`/`?1002`/`?1003` and `?1005`/`?1006`/`?1015`), and
-/// alternate-scroll (`?1007`).
+/// (`?9`/`?1000`/`?1002`/`?1003` and `?1005`/`?1006`/`?1015`),
+/// alternate-scroll (`?1007`), Sixel scrolling (`?80`), Sixel register scope
+/// (`?1070`), and Sixel cursor movement (`?8452`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct TerminalModes {
     /// `?2004` — bracketed paste: the input layer wraps pasted text in
@@ -86,6 +87,16 @@ pub(crate) struct TerminalModes {
     /// `CSI 0 SP q`). With `None`, the renderer keeps the user's own terminal
     /// cursor; see [`CursorShape`].
     pub(in crate::state) cursor_shape: Option<CursorShape>,
+    /// `?80` — Sixel scrolling: a graphic at the bottom can scroll the image
+    /// area into the primary screen's scroll region.
+    #[serde(default = "default_true")]
+    pub(in crate::state) sixel_scrolling: bool,
+    /// `?1070` — use private Sixel color registers for each graphic.
+    #[serde(default = "default_true")]
+    pub(in crate::state) sixel_private_color_registers: bool,
+    /// `?8452` — leave the cursor to the right of a Sixel graphic.
+    #[serde(default)]
+    pub(in crate::state) sixel_cursor_right: bool,
 }
 
 impl Default for TerminalModes {
@@ -100,8 +111,15 @@ impl Default for TerminalModes {
             reverse_video: false,
             cursor_blink: false,
             cursor_shape: None,
+            sixel_scrolling: true,
+            sixel_private_color_registers: true,
+            sixel_cursor_right: false,
         }
     }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[cfg(test)]

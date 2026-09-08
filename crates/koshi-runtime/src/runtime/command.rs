@@ -777,6 +777,15 @@ impl Server {
         let Some(session) = self.sessions.get(&session_id) else {
             return;
         };
+        if let Some(cell_size) = session.tab_cell_size(tab_id) {
+            if let Some(tab) = session.tabs.get(&tab_id) {
+                for pane_id in tab.layout().leaf_panes() {
+                    if let Some(engine) = self.terminal_engines.get_mut(&pane_id) {
+                        engine.set_cell_size(cell_size);
+                    }
+                }
+            }
+        }
         let Some(viewport) = session.tab_viewport(tab_id) else {
             return;
         };

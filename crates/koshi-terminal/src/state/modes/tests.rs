@@ -9,8 +9,12 @@ fn terminal_modes_default_matches_the_documented_startup_state() {
     assert_eq!(modes.mouse_tracking, MouseTracking::Off);
     assert_eq!(modes.mouse_encoding, MouseEncoding::Default);
     assert!(!modes.alt_scroll);
-    // Autowrap (DECAWM `?7`) starts on; every other bool flag starts off.
+    // Autowrap (DECAWM `?7`), Sixel scrolling, and private Sixel registers
+    // start on; the other mode flags start off.
     assert!(modes.autowrap);
+    assert!(modes.sixel_scrolling);
+    assert!(modes.sixel_private_color_registers);
+    assert!(!modes.sixel_cursor_right);
     assert!(!modes.app_cursor_keys);
     assert!(!modes.reverse_video);
     assert!(!modes.cursor_blink);
@@ -73,7 +77,7 @@ fn terminal_modes_default_serializes_to_the_resume_body_shape() {
     let json = serde_json::to_string(&TerminalModes::default()).expect("serializes");
     assert_eq!(
         json,
-        r#"{"bracketed_paste":false,"mouse_tracking":"Off","mouse_encoding":"Default","alt_scroll":false,"autowrap":true,"app_cursor_keys":false,"reverse_video":false,"cursor_blink":false,"cursor_shape":null}"#
+        r#"{"bracketed_paste":false,"mouse_tracking":"Off","mouse_encoding":"Default","alt_scroll":false,"autowrap":true,"app_cursor_keys":false,"reverse_video":false,"cursor_blink":false,"cursor_shape":null,"sixel_scrolling":true,"sixel_private_color_registers":true,"sixel_cursor_right":false}"#
     );
 }
 
@@ -89,11 +93,14 @@ fn terminal_modes_with_every_value_flipped_round_trip_through_json() {
         reverse_video: true,
         cursor_blink: true,
         cursor_shape: Some(CursorShape::Bar),
+        sixel_scrolling: false,
+        sixel_private_color_registers: false,
+        sixel_cursor_right: true,
     };
     let json = serde_json::to_string(&modes).expect("serializes");
     assert_eq!(
         json,
-        r#"{"bracketed_paste":true,"mouse_tracking":"AnyMotion","mouse_encoding":"Sgr","alt_scroll":true,"autowrap":false,"app_cursor_keys":true,"reverse_video":true,"cursor_blink":true,"cursor_shape":"Bar"}"#
+        r#"{"bracketed_paste":true,"mouse_tracking":"AnyMotion","mouse_encoding":"Sgr","alt_scroll":true,"autowrap":false,"app_cursor_keys":true,"reverse_video":true,"cursor_blink":true,"cursor_shape":"Bar","sixel_scrolling":false,"sixel_private_color_registers":false,"sixel_cursor_right":true}"#
     );
     let read_back: TerminalModes = serde_json::from_str(&json).expect("reads back");
     assert_eq!(read_back, modes);

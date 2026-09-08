@@ -3,8 +3,8 @@
 use std::collections::VecDeque;
 
 use super::{
-    Event, KeyCode, KeyEvent, KeyEventKind, KittyGraphicsReply, Modifiers, MouseButton, MouseEvent,
-    MouseEventKind,
+    Event, GraphicAttributeError, GraphicAttributeReply, KeyCode, KeyEvent, KeyEventKind,
+    KittyGraphicsReply, Modifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 
 const ESC: u8 = 0x1b;
@@ -30,9 +30,11 @@ enum State {
     Escape,
     Ss3,
     Csi,
+    PrivateCsi,
     CsiX10,
     ApcStart,
     Apc,
+    Osc { escape_seen: bool },
     DiscardCsi,
     DiscardSt { escape_seen: bool },
     DiscardOsc { escape_seen: bool },
@@ -62,19 +64,22 @@ impl Parser {
         }
     }
 
-    /// Resolve a pending Escape key and discard other incomplete input.
+    /// Resolve timeout-eligible prefixes and discard other incomplete input.
+    /// Identified control strings remain pending until their terminator.
     pub fn finish_pending(&mut self) {
         match self.state {
             State::Escape => self.emit_key(KeyCode::Escape, Modifiers::NONE),
             State::ApcStart => self.emit_key(KeyCode::Char('_'), Modifiers::ALT | Modifiers::SHIFT),
-            State::Ground => return,
+            State::Ground
+            | State::Apc
+            | State::Osc { .. }
+            | State::DiscardCsi
+            | State::DiscardSt { .. }
+            | State::DiscardOsc { .. } => return,
+            State::PrivateCsi => return,
             State::Ss3
             | State::Csi
             | State::CsiX10
-            | State::Apc
-            | State::DiscardCsi
-            | State::DiscardSt { .. }
-            | State::DiscardOsc { .. }
             | State::Paste
             | State::DiscardPaste
             | State::Utf8 { .. } => {}
@@ -93,15 +98,7 @@ impl Parser {
     pub fn needs_sequence_timeout(&self) -> bool {
         matches!(
             self.state,
-            State::Escape
-                | State::Ss3
-                | State::Csi
-                | State::CsiX10
-                | State::ApcStart
-                | State::Apc
-                | State::DiscardCsi
-                | State::DiscardSt { .. }
-                | State::DiscardOsc { .. }
+            State::Escape | State::Ss3 | State::Csi | State::CsiX10 | State::ApcStart
         )
     }
 
@@ -115,15 +112,20 @@ impl Parser {
             State::Ground => self.push_ground(byte),
             State::Escape => self.push_escape(byte),
             State::Ss3 => self.push_ss3(byte),
-            State::Csi => self.push_csi(byte),
+            State::Csi | State::PrivateCsi => self.push_csi(byte),
             State::CsiX10 => self.push_x10(byte),
             State::ApcStart => self.push_apc_start(byte),
             State::Apc => self.push_apc(byte),
-            State::DiscardCsi => {
-                if is_csi_final(byte) {
+            State::Osc { escape_seen } => self.push_osc(byte, escape_seen),
+            State::DiscardCsi => match byte {
+                0x18 | 0x1a => self.reset(),
+                ESC => {
                     self.reset();
+                    self.state = State::Escape;
                 }
-            }
+                byte if is_csi_final(byte) => self.reset(),
+                _ => {}
+            },
             State::DiscardSt { escape_seen } => self.push_discard_st(byte, escape_seen),
             State::DiscardOsc { escape_seen } => self.push_discard_osc(byte, escape_seen),
             State::Paste => self.push_paste(byte, false),
@@ -166,7 +168,10 @@ impl Parser {
                 self.state = State::Csi;
             }
             b'O' => self.state = State::Ss3,
-            b']' => self.state = State::DiscardOsc { escape_seen: false },
+            b']' => {
+                self.sequence.clear();
+                self.state = State::Osc { escape_seen: false };
+            }
             b'P' => self.state = State::DiscardSt { escape_seen: false },
             b'_' => self.state = State::ApcStart,
             ESC => {
@@ -199,6 +204,15 @@ impl Parser {
     }
 
     fn push_csi(&mut self, byte: u8) {
+        if matches!(byte, 0x18 | 0x1a) {
+            self.reset();
+            return;
+        }
+        if byte == ESC {
+            self.reset();
+            self.state = State::Escape;
+            return;
+        }
         self.sequence.push(byte);
         if self.sequence == b"200~" {
             self.sequence.clear();
@@ -209,6 +223,10 @@ impl Parser {
         }
         if self.sequence.len() == 1 && byte == b'M' {
             self.state = State::CsiX10;
+            return;
+        }
+        if self.sequence.len() == 1 && byte == b'?' {
+            self.state = State::PrivateCsi;
             return;
         }
         if self.sequence.first() == Some(&b'[') && self.sequence.len() == 1 {
@@ -250,6 +268,10 @@ impl Parser {
     }
 
     fn push_apc(&mut self, byte: u8) {
+        if matches!(byte, 0x18 | 0x1a) {
+            self.reset();
+            return;
+        }
         self.sequence.push(byte);
         if self.sequence.ends_with(b"\x1b\\") || byte == 0x9c {
             let payload_len = if byte == 0x9c {
@@ -269,8 +291,39 @@ impl Parser {
         }
     }
 
+    fn push_osc(&mut self, byte: u8, escape_seen: bool) {
+        if matches!(byte, 0x18 | 0x1a) {
+            self.reset();
+            return;
+        }
+        if byte == 0x07 || byte == 0x9c || (escape_seen && byte == b'\\') {
+            let payload_len = if byte == b'\\' && escape_seen {
+                self.sequence.len().saturating_sub(1)
+            } else {
+                self.sequence.len()
+            };
+            let event = parse_osc(&self.sequence[..payload_len]);
+            self.reset();
+            if let Some(event) = event {
+                self.events.push_back(event);
+            }
+            return;
+        }
+        if self.sequence.len() >= CONTROL_STRING_LIMIT {
+            self.sequence.clear();
+            self.state = State::DiscardOsc {
+                escape_seen: byte == ESC,
+            };
+            return;
+        }
+        self.sequence.push(byte);
+        self.state = State::Osc {
+            escape_seen: byte == ESC,
+        };
+    }
+
     fn push_discard_st(&mut self, byte: u8, escape_seen: bool) {
-        if byte == 0x9c || (escape_seen && byte == b'\\') {
+        if matches!(byte, 0x18 | 0x1a) || byte == 0x9c || (escape_seen && byte == b'\\') {
             self.reset();
         } else {
             self.state = State::DiscardSt {
@@ -280,7 +333,11 @@ impl Parser {
     }
 
     fn push_discard_osc(&mut self, byte: u8, escape_seen: bool) {
-        if byte == 0x07 || byte == 0x9c || (escape_seen && byte == b'\\') {
+        if matches!(byte, 0x18 | 0x1a)
+            || byte == 0x07
+            || byte == 0x9c
+            || (escape_seen && byte == b'\\')
+        {
             self.reset();
         } else {
             self.state = State::DiscardOsc {
@@ -390,6 +447,12 @@ fn utf8_width(first: u8) -> Option<u8> {
     }
 }
 
+fn parse_osc(payload: &[u8]) -> Option<Event> {
+    payload
+        .strip_prefix(b"1337;Capabilities=")
+        .map(|features| Event::TerminalFeatures(features.to_vec()))
+}
+
 fn parse_csi(sequence: &[u8]) -> Option<Event> {
     let (&final_byte, body) = sequence.split_last()?;
     if body == b"[" && (b'A'..=b'E').contains(&final_byte) {
@@ -413,13 +476,28 @@ fn parse_csi(sequence: &[u8]) -> Option<Event> {
         };
         return Some(event);
     }
-    if body[0] == b'?' && final_byte == b'c' && valid_da1(&body[1..]) {
-        return Some(Event::PrimaryDeviceAttributes);
+    if body[0] == b'?' && final_byte == b'c' {
+        return parse_da1(&body[1..]).map(Event::PrimaryDeviceAttributes);
+    }
+    if body[0] == b'?' && final_byte == b'S' {
+        return parse_graphic_attribute(&body[1..]).map(Event::SixelGraphicsAttributeReply);
     }
     if body[0] == b'<' && matches!(final_byte, b'M' | b'm') {
         return parse_sgr_mouse(&body[1..], final_byte).map(Event::Mouse);
     }
     match final_byte {
+        b't' => {
+            let mut fields = body.split(|byte| *byte == b';');
+            if fields.next()? != b"6" {
+                return None;
+            }
+            let height = u16::try_from(decimal(fields.next()?)?).ok()?;
+            let width = u16::try_from(decimal(fields.next()?)?).ok()?;
+            if fields.next().is_some() {
+                return None;
+            }
+            koshi_core::geometry::PixelCellSize::new(width, height).map(Event::CellSize)
+        }
         b'A' | b'B' | b'C' | b'D' | b'F' | b'H' | b'P' | b'Q' | b'R' | b'S' => {
             parse_modified_key(body, final_byte).map(Event::Key)
         }
@@ -430,14 +508,63 @@ fn parse_csi(sequence: &[u8]) -> Option<Event> {
     }
 }
 
-fn valid_da1(body: &[u8]) -> bool {
-    !body.is_empty()
-        && body
-            .iter()
-            .all(|byte| byte.is_ascii_digit() || *byte == b';')
-        && body
-            .split(|byte| *byte == b';')
-            .all(|part| !part.is_empty())
+fn parse_da1(body: &[u8]) -> Option<Vec<u32>> {
+    if body.is_empty() {
+        return None;
+    }
+    body.split(|byte| *byte == b';')
+        .map(decimal)
+        .collect::<Option<Vec<_>>>()
+}
+
+fn parse_graphic_attribute(body: &[u8]) -> Option<GraphicAttributeReply> {
+    let mut fields = body.split(|byte| *byte == b';');
+    let item = decimal(fields.next()?)?;
+    let status = decimal(fields.next()?)?;
+    let reply = match item {
+        1 => parse_palette_reply(status, fields.collect()),
+        2 => parse_geometry_reply(status, fields.collect()),
+        _ => None,
+    }?;
+    Some(reply)
+}
+
+fn parse_palette_reply(status: u32, values: Vec<&[u8]>) -> Option<GraphicAttributeReply> {
+    let error = graphic_attribute_error(status);
+    if let Some(error) = error {
+        return values
+            .is_empty()
+            .then_some(GraphicAttributeReply::Palette(Err(error)));
+    }
+    if status != 0 || values.len() != 1 {
+        return None;
+    }
+    let value = decimal(values[0])?;
+    (value != 0).then_some(GraphicAttributeReply::Palette(Ok(value)))
+}
+
+fn parse_geometry_reply(status: u32, values: Vec<&[u8]>) -> Option<GraphicAttributeReply> {
+    let error = graphic_attribute_error(status);
+    if let Some(error) = error {
+        return values
+            .is_empty()
+            .then_some(GraphicAttributeReply::Geometry(Err(error)));
+    }
+    if status != 0 || values.len() != 2 {
+        return None;
+    }
+    let width = decimal(values[0])?;
+    let height = decimal(values[1])?;
+    Some(GraphicAttributeReply::Geometry(Ok((width, height))))
+}
+
+fn graphic_attribute_error(status: u32) -> Option<GraphicAttributeError> {
+    match status {
+        1 => Some(GraphicAttributeError::InvalidItem),
+        2 => Some(GraphicAttributeError::InvalidAction),
+        3 => Some(GraphicAttributeError::Failure),
+        _ => None,
+    }
 }
 
 fn parse_modified_key(body: &[u8], final_byte: u8) -> Option<KeyEvent> {

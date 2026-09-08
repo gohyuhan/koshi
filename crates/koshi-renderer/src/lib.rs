@@ -17,6 +17,11 @@ pub use hit_test::{
     HitRegion,
 };
 pub use images::{
-    image_paints, ImagePaint, ImageRenderMode, ImageSourceRect, TERMINAL_IMAGE_UNAVAILABLE,
+    image_cell_snapshot, image_paints, ImageCellSnapshot, ImageCellState, ImagePaint,
+    ImagePlacementKey, ImageRenderMode, ImageSourceRect, MAX_IMAGE_CELL_SNAPSHOT_CELLS,
+    TERMINAL_IMAGE_UNAVAILABLE,
 };
-pub use render::{cursor_position, cursor_style, render_frame, render_frame_with_images};
+pub use render::{
+    cursor_position, cursor_style, render_frame, render_frame_with_image_availability,
+    render_frame_with_images,
+};

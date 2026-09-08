@@ -258,6 +258,7 @@ fn body_carrying_only(quit: Option<CarriedQuit>) -> ResumeBody {
         graphics_tmux_wrapper_active: HashMap::new(),
         graphics_events: HashMap::new(),
         graphics_transport: HashMap::new(),
+        synchronized_output: HashMap::new(),
         quit,
     }
 }
@@ -675,11 +676,13 @@ fn a_resume_body_rejects_queued_image_bytes_that_do_not_match_dimensions() {
     let pane = PaneId::new();
     let event: GraphicsEvent = Ok(ImageRecord {
         protocol: GraphicsProtocol::Kitty,
-        image: DecodedImage {
+        image: (DecodedImage {
             width: 1,
             height: 1,
             rgba: vec![255, 0, 0, 255],
-        },
+        })
+        .into(),
+        animation: None,
         action: ImageAction::Display,
         display: ImageDisplay::default(),
         anchor: (0, 0),
@@ -734,11 +737,13 @@ fn a_resume_body_rejects_a_graphics_event_list_over_the_engine_limit() {
     let pane = PaneId::new();
     let event: GraphicsEvent = Ok(ImageRecord {
         protocol: GraphicsProtocol::Kitty,
-        image: DecodedImage {
+        image: (DecodedImage {
             width: 1,
             height: 1,
             rgba: vec![255, 0, 0, 255],
-        },
+        })
+        .into(),
+        animation: None,
         action: ImageAction::Display,
         display: ImageDisplay::default(),
         anchor: (0, 0),
@@ -766,11 +771,13 @@ fn a_resume_body_accepts_the_queue_full_report_after_queued_events() {
     let pane = PaneId::new();
     let event: GraphicsEvent = Ok(ImageRecord {
         protocol: GraphicsProtocol::Kitty,
-        image: DecodedImage {
+        image: (DecodedImage {
             width: 1,
             height: 1,
             rgba: vec![255, 0, 0, 255],
-        },
+        })
+        .into(),
+        animation: None,
         action: ImageAction::Display,
         display: ImageDisplay::default(),
         anchor: (0, 0),
@@ -827,6 +834,7 @@ fn a_header_naming_an_unknown_format_still_reads_back_whole() {
         graphics_tmux_wrapper_active: HashMap::new(),
         graphics_events: HashMap::new(),
         graphics_transport: HashMap::new(),
+        synchronized_output: HashMap::new(),
         quit: None,
     };
     write(&path, &header, &body).expect("write the resume file");
@@ -1284,6 +1292,7 @@ fn a_carried_session_with_its_client_comes_back_whole() {
             graphics_tmux_wrapper_active: HashMap::new(),
             graphics_events: HashMap::new(),
             graphics_transport: HashMap::new(),
+            synchronized_output: HashMap::new(),
             quit: None,
         };
         write(&path, &header, &body).expect("write the resume file");

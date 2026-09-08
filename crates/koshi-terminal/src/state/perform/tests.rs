@@ -37,11 +37,13 @@ fn glyph(state: &TerminalState, row: u16, col: u16) -> Option<char> {
 fn image_record(anchor: (u16, u16), columns: u32, rows: u32) -> ImageRecord {
     ImageRecord {
         protocol: GraphicsProtocol::Kitty,
-        image: DecodedImage {
+        image: (DecodedImage {
             width: columns,
             height: rows,
             rgba: vec![255; (columns * rows * 4) as usize],
-        },
+        })
+        .into(),
+        animation: None,
         action: ImageAction::Display,
         display: ImageDisplay {
             cell_columns: Some(columns),
@@ -489,19 +491,30 @@ fn ed_2_erases_the_whole_screen() {
 }
 
 #[test]
-fn image_placement_stays_separate_from_glyph_writes_and_cell_operations() {
+fn glyph_writes_preserve_overlapped_kitty_placements() {
     let mut state = state(8, 6);
     let image = image_record((2, 2), 2, 2);
     state
         .apply_image_record(&image)
         .expect("the image fits the grid");
+
     let expected_placements = state.image_placements().to_vec();
 
     advance(&mut state, b"\x1b[1;1HA\x1b[3;3HB\x1b[5;5HC");
     assert_eq!(glyph(&state, 0, 0), Some('A'));
     assert_eq!(glyph(&state, 2, 2), Some('B'));
     assert_eq!(glyph(&state, 4, 4), Some('C'));
-    assert_eq!(state.image_placements(), expected_placements.as_slice());
+    assert_eq!(state.image_placements(), expected_placements);
+}
+
+#[test]
+fn cell_operations_and_glyph_writes_preserve_kitty_placements() {
+    let mut state = state(8, 6);
+    let image = image_record((2, 2), 2, 2);
+    state
+        .apply_image_record(&image)
+        .expect("the image fits the grid");
+    let expected_placements = state.image_placements().to_vec();
 
     for sequence in [
         &b"\x1b[6;8H"[..],
@@ -518,6 +531,9 @@ fn image_placement_stays_separate_from_glyph_writes_and_cell_operations() {
             "ordinary operation changed image metadata: {sequence:?}"
         );
     }
+
+    advance(&mut state, b"\x1b[3;3HB");
+    assert_eq!(state.image_placements(), expected_placements);
 }
 
 #[test]
@@ -599,23 +615,6 @@ fn line_operations_drop_images_when_a_one_row_screen_has_no_survivor() {
         .expect("the image fits the one-row grid");
     advance(&mut delete_state, b"\x1b[1;1H\x1b[M");
     assert!(delete_state.image_placements().is_empty());
-}
-
-#[test]
-fn deleting_the_last_u16_row_removes_the_shifted_row() {
-    assert_eq!(
-        super::motion::deleted_row(u16::MAX, u16::MAX, u16::MAX, 1),
-        None
-    );
-    assert_eq!(
-        super::motion::deleted_row(u16::MAX, u16::MAX - 1, u16::MAX, 1),
-        Some(u16::MAX - 1)
-    );
-    assert_eq!(super::motion::inserted_row(0, 0, 0, 1), None);
-    assert_eq!(
-        super::motion::inserted_row(u16::MAX - 1, u16::MAX - 1, u16::MAX, 1),
-        Some(u16::MAX)
-    );
 }
 
 #[test]
@@ -3533,6 +3532,28 @@ fn alt_scroll_enables_and_disables() {
     assert!(state.alt_scroll());
     advance(&mut state, b"\x1b[?1007l");
     assert!(!state.alt_scroll());
+}
+
+#[test]
+fn sixel_modes_start_with_scrolling_and_private_registers() {
+    let state = state(5, 3);
+    assert!(state.modes.sixel_scrolling);
+    assert!(state.modes.sixel_private_color_registers);
+    assert!(!state.modes.sixel_cursor_right);
+}
+
+#[test]
+fn sixel_private_modes_set_and_reset_their_terminal_state() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b[?80;1070;8452h");
+    assert!(!state.modes.sixel_scrolling);
+    assert!(state.modes.sixel_private_color_registers);
+    assert!(state.modes.sixel_cursor_right);
+
+    advance(&mut state, b"\x1b[?80;1070;8452l");
+    assert!(state.modes.sixel_scrolling);
+    assert!(!state.modes.sixel_private_color_registers);
+    assert!(!state.modes.sixel_cursor_right);
 }
 
 // --- Absolute / relative cursor positioning, tab moves, erase-char ---

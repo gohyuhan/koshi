@@ -678,6 +678,7 @@ fn sample_request_kinds() -> Vec<IpcRequestKind> {
             resume_token: None,
             pane_area: None,
             graphics: crate::protocol::GraphicsCapabilities::default(),
+            cell_size: None,
         },
         IpcRequestKind::KeyPress {
             chord: koshi_core::key::KeyChord::new(
@@ -688,6 +689,10 @@ fn sample_request_kinds() -> Vec<IpcRequestKind> {
         IpcRequestKind::Resize {
             viewport: Size { cols: 80, rows: 24 },
             pane_area: None,
+            cell_size: None,
+        },
+        IpcRequestKind::CellSize {
+            size: koshi_core::geometry::PixelCellSize::new(10, 20).expect("nonzero cell size"),
         },
         IpcRequestKind::Paste {
             text: String::new(),

@@ -1,0 +1,13 @@
+[package]
+name = "koshi-sixel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+koshi-image = { version = "0.4.0-pr.1", path = "../koshi-image" }
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

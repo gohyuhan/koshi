@@ -115,13 +115,16 @@ fn image_placement() -> ImagePlacementSnapshot {
         41,
         Arc::new(ImageRecord {
             protocol: GraphicsProtocol::Kitty,
-            image: DecodedImage {
+            image: (DecodedImage {
                 width: 2,
                 height: 1,
                 rgba: vec![255, 0, 0, 255, 0, 255, 0, 255],
-            },
+            })
+            .into(),
+            animation: None,
             action: ImageAction::TransmitAndDisplay,
             display: ImageDisplay {
+                quiet: 0,
                 width: Some(ImageDimension::Cells(3)),
                 height: Some(ImageDimension::Pixels(1)),
                 preserve_aspect_ratio: false,
@@ -138,6 +141,10 @@ fn image_placement() -> ImagePlacementSnapshot {
                 source_offset_y: Some(0),
                 cell_offset_x: Some(6),
                 cell_offset_y: Some(7),
+                relative_image_id: None,
+                relative_placement_id: None,
+                relative_offset_x: 0,
+                relative_offset_y: 0,
                 move_cursor: false,
             },
             anchor: (0, 2),
@@ -305,11 +312,13 @@ fn an_oversized_image_frame_splits_into_bounded_wire_events() {
     let mut source = snapshot(content, PaneId::new());
     let record = Arc::new(ImageRecord {
         protocol: GraphicsProtocol::Kitty,
-        image: DecodedImage {
+        image: (DecodedImage {
             width: 4_096,
             height: 1_024,
             rgba: vec![0x7f; 16 * 1024 * 1024],
-        },
+        })
+        .into(),
+        animation: None,
         action: ImageAction::Display,
         display: ImageDisplay::default(),
         anchor: (0, 0),

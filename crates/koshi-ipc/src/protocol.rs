@@ -167,12 +167,24 @@ pub struct GraphicsCapabilities {
     /// The terminal answered the Kitty graphics protocol query with `OK`.
     #[serde(default)]
     pub kitty: bool,
+    /// The terminal advertised the iTerm2 inline-image protocol.
+    #[serde(default)]
+    pub iterm: bool,
+    /// The terminal advertised the DEC Sixel protocol.
+    #[serde(default)]
+    pub sixel: bool,
 }
 
 impl GraphicsCapabilities {
+    /// Return whether at least one native image protocol was proved.
+    #[must_use]
+    pub const fn has_native(self) -> bool {
+        self.kitty || self.iterm || self.sixel
+    }
+
     /// Return whether the terminal proved no native image protocol.
     fn is_empty(&self) -> bool {
-        !self.kitty
+        !self.has_native()
     }
 }
 
@@ -256,6 +268,10 @@ pub enum IpcRequestKind {
         /// finding belongs to this connection and is not session state.
         #[serde(default, skip_serializing_if = "GraphicsCapabilities::is_empty")]
         graphics: GraphicsCapabilities,
+        /// The cell dimensions measured by this terminal before the attach,
+        /// or `None` when the terminal has no usable measurement.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cell_size: Option<koshi_core::geometry::PixelCellSize>,
     },
     /// One key press the attached client's keymap did not bind, for the pane
     /// it is typing into.
@@ -271,6 +287,15 @@ pub enum IpcRequestKind {
         /// size; `None` replaces any earlier report.
         #[serde(default)]
         pane_area: Option<PaneArea>,
+        /// The cell dimensions measured for this resized viewport, or `None`
+        /// to clear the client's previous measurement until a reply arrives.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cell_size: Option<koshi_core::geometry::PixelCellSize>,
+    },
+    /// The attached client measured the pixel dimensions of one terminal cell.
+    CellSize {
+        /// The nonzero pixel dimensions of one cell.
+        size: koshi_core::geometry::PixelCellSize,
     },
     /// Text the attached client's outer terminal pasted, for the pane it is
     /// typing into. Carried whole: no character of it fires a keybinding.
@@ -336,6 +361,7 @@ impl IpcRequestKind {
             IpcRequestKind::Attach { .. } => "Attach",
             IpcRequestKind::KeyPress { .. } => "KeyPress",
             IpcRequestKind::Resize { .. } => "Resize",
+            IpcRequestKind::CellSize { .. } => "CellSize",
             IpcRequestKind::Paste { .. } => "Paste",
             IpcRequestKind::Mouse(_) => "Mouse",
             IpcRequestKind::SubmitCommand(_) => "SubmitCommand",
@@ -563,6 +589,7 @@ impl WireVariants for IpcRequestKind {
         "Attach",
         "KeyPress",
         "Resize",
+        "CellSize",
         "Paste",
         "Mouse",
         "SubmitCommand",
