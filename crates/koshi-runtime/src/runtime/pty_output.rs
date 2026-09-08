@@ -17,6 +17,7 @@ use std::time::Instant;
 use koshi_core::event::{Event, PaneCommandFinished, PaneCommandStarted};
 use koshi_core::ids::PaneId;
 use koshi_terminal::engine::TerminalEngine;
+use koshi_terminal::graphics::GraphicsError;
 use koshi_terminal::state::ShellIntegrationFact;
 
 use crate::server::Server;
@@ -26,6 +27,8 @@ struct TerminalAdvanceBefore {
     pushed: u64,
     scrollback_len: usize,
     screen: koshi_terminal::state::Screen,
+    graphics_events: usize,
+    graphics_errors_dropped: usize,
 }
 
 impl TerminalAdvanceBefore {
@@ -35,6 +38,8 @@ impl TerminalAdvanceBefore {
             pushed: scrollback.total_pushed(),
             scrollback_len: scrollback.len(),
             screen: engine.state().active_screen(),
+            graphics_events: engine.graphics_events().count(),
+            graphics_errors_dropped: engine.graphics_errors_dropped(),
         }
     }
 }
@@ -47,7 +52,10 @@ impl Server {
     /// A `pane_id` with no engine — the pane closed while the chunk waited in
     /// the inbox — is ignored: no engine is touched, nothing is published, and
     /// nothing is invalidated. A reply write that fails is logged at error
-    /// level and dropped; the querying child gets no answer.
+    /// level and dropped; the querying child gets no answer. Every graphics
+    /// error the chunk completed is logged at warn level with its typed reason.
+    /// A graphics error dropped by the bounded queue is logged as a typed
+    /// queue-full error with its count.
     ///
     /// Lines this chunk scrolls off the top feed the scrollback. Every client
     /// whose view of this pane is held is then re-anchored by that many lines,
@@ -109,6 +117,22 @@ impl Server {
         let Some(engine) = self.terminal_engines.get(&pane_id) else {
             return;
         };
+        for error in engine
+            .graphics_events()
+            .skip(before.graphics_events)
+            .filter_map(|event| event.as_ref().err())
+        {
+            tracing::warn!(%pane_id, %error, "a graphics event in a pane's output failed");
+        }
+        let dropped_errors = engine
+            .graphics_errors_dropped()
+            .saturating_sub(before.graphics_errors_dropped);
+        if dropped_errors != 0 {
+            let error = GraphicsError::QueueFull {
+                dropped: dropped_errors,
+            };
+            tracing::warn!(%pane_id, %error, "image placement errors were dropped");
+        }
         let scrollback_after = engine.state().scrollback();
         let len_after = scrollback_after.len();
         let pushed = (scrollback_after.total_pushed() - before.pushed) as usize;

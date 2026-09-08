@@ -317,6 +317,14 @@ impl EventHandle {
     }
 }
 
+/// Read the current window size of the console that receives rendered frames.
+///
+/// The pixel fields are always `None`: the Windows console reports no pixel
+/// dimensions.
+pub(crate) fn window_size() -> io::Result<WindowSize> {
+    ConsoleHandle::open("CONOUT$")?.window_size()
+}
+
 #[derive(Debug)]
 struct ConsoleHandle(OwnedHandle);
 

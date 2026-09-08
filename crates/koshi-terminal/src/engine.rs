@@ -695,6 +695,8 @@ pub struct TerminalEngine {
     graphics_event_bytes: usize,
     /// Number of events dropped after the bounded graphics queue filled.
     graphics_events_dropped: usize,
+    /// Number of dropped events that were graphics errors.
+    graphics_errors_dropped: usize,
     /// Set when the next DCS is a GNU Screen continuation wrapper.
     graphics_screen_continuation: bool,
     /// Set when the carried bytes belong to an open GNU Screen wrapper.
@@ -733,6 +735,7 @@ impl TerminalEngine {
             synchronized_output: SynchronizedOutput::default(),
             graphics_event_bytes: 0,
             graphics_events_dropped: 0,
+            graphics_errors_dropped: 0,
             graphics_screen_continuation: false,
             graphics_screen_wrapper_active: false,
             graphics_tmux_continuation: false,
@@ -963,6 +966,21 @@ impl TerminalEngine {
         self.state
     }
 
+    /// Iterate the queued image records and recoverable image errors in the
+    /// order their protocol terminators reached the terminal parser, without
+    /// removing them. An event dropped after the bounded queue filled is not
+    /// visible here; [`graphics_errors_dropped`](Self::graphics_errors_dropped)
+    /// and [`take_graphics`](Self::take_graphics) report dropped events.
+    pub fn graphics_events(&self) -> impl Iterator<Item = &GraphicsEvent> {
+        self.graphics_events.iter()
+    }
+
+    /// Return the number of graphics errors dropped because the event queue
+    /// reached its count or image-byte limit.
+    pub fn graphics_errors_dropped(&self) -> usize {
+        self.graphics_errors_dropped
+    }
+
     /// Drain complete image records and recoverable image errors in the order
     /// their protocol terminators reached the terminal parser. When the queue
     /// dropped records, one `QueueFull` report follows the held events.
@@ -978,6 +996,7 @@ impl TerminalEngine {
             }));
             self.graphics_events_dropped = 0;
         }
+        self.graphics_errors_dropped = 0;
         events
     }
 
@@ -1227,6 +1246,9 @@ impl TerminalEngine {
                 .is_none_or(|total| total > MAX_IMAGE_BYTES)
         {
             self.graphics_events_dropped = self.graphics_events_dropped.saturating_add(1);
+            if event.is_err() {
+                self.graphics_errors_dropped = self.graphics_errors_dropped.saturating_add(1);
+            }
             return;
         }
         self.graphics_event_bytes += bytes;

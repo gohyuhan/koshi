@@ -1413,7 +1413,8 @@ fn run_attachment<B: Backend>(
             // is what ends that thread.
             uplink.requests = spawn_uplink_writer(writer);
             uplink.next_request_id = FIRST_LOOP_REQUEST_ID;
-            report_terminal_size_with_cell_size(client, uplink, cell_size_query);
+            let cell_size = terminal::local_cell_size();
+            report_terminal_size_with_cell_size(client, uplink, cell_size_query, cell_size);
             // The new connection numbers its rounds from the start, so no
             // answer to a border move written on the old one can arrive. The
             // next move asks for its whole distance from the drag anchor.
@@ -1849,24 +1850,27 @@ fn next_redial_wait(wait: Duration) -> Duration {
 #[cfg(test)]
 fn report_terminal_size(client: &mut Client, uplink: &mut Uplink) {
     let mut cell_size_query = terminal::CellSizeQuery::new(None, false, false);
-    report_terminal_size_with_cell_size(client, uplink, &mut cell_size_query);
+    report_terminal_size_with_cell_size(client, uplink, &mut cell_size_query, None);
 }
 
-/// Read the terminal's size, clear its old cell measurement, and request a
-/// fresh CSI 16t reply after the resize report is queued.
+/// Report the terminal's size and supplied cell measurement, then request a
+/// fresh CSI 16t reply only when no usable pixel dimensions were supplied.
 fn report_terminal_size_with_cell_size(
     client: &mut Client,
     uplink: &mut Uplink,
     cell_size_query: &mut terminal::CellSizeQuery,
+    local_cell_size: Option<koshi_core::geometry::PixelCellSize>,
 ) {
     let size = viewport();
+    let query = cell_size_query.resize(local_cell_size);
+    let cell_size = cell_size_query.current();
     client.set_viewport(size);
     uplink.send(IpcRequestKind::Resize {
         viewport: size,
         pane_area: Some(core_pane_area(size)),
-        cell_size: None,
+        cell_size,
     });
-    if cell_size_query.resize(None) {
+    if query {
         cell_size_query.request();
     }
 }
@@ -2438,6 +2442,8 @@ fn handle_input_with_cell_size(
             cell_size,
             ..
         } => {
+            let query = cell_size_query.resize(cell_size);
+            let cell_size = cell_size_query.current();
             client.set_viewport(size);
             let pane_area = pane_area.unwrap_or_else(|| core_pane_area(size));
             uplink.send(IpcRequestKind::Resize {
@@ -2445,7 +2451,7 @@ fn handle_input_with_cell_size(
                 pane_area: Some(pane_area),
                 cell_size,
             });
-            if cell_size_query.resize(cell_size) {
+            if query {
                 cell_size_query.request();
             }
         }

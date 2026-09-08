@@ -2654,6 +2654,8 @@ fn a_terminal_resize_moves_the_viewers_own_size_and_tells_the_session() {
         rows: 43,
     };
     assert_eq!(client.viewport(), VIEWPORT);
+    let measurement =
+        koshi_core::geometry::PixelCellSize::new(10, 20).expect("positive cell dimensions");
 
     handle_input(
         &mut client,
@@ -2662,7 +2664,7 @@ fn a_terminal_resize_moves_the_viewers_own_size_and_tells_the_session() {
             client_id,
             size: bigger,
             pane_area: None,
-            cell_size: None,
+            cell_size: Some(measurement),
         },
     );
 
@@ -2682,6 +2684,38 @@ fn a_terminal_resize_moves_the_viewers_own_size_and_tells_the_session() {
             },
         }
     );
+}
+
+#[test]
+fn a_terminal_resize_reports_its_measured_cell_size() {
+    let mut client = viewer();
+    let client_id = client.id();
+    let mut wire = wire();
+    let mut cell_size_query = terminal::CellSizeQuery::new(None, true, false);
+    let measurement =
+        koshi_core::geometry::PixelCellSize::new(10, 20).expect("positive cell dimensions");
+
+    handle_input_with_cell_size(
+        &mut client,
+        &mut wire.uplink,
+        &mut cell_size_query,
+        RuntimeEvent::Resize {
+            client_id,
+            size: Size {
+                cols: 100,
+                rows: 40,
+            },
+            pane_area: None,
+            cell_size: Some(measurement),
+        },
+    );
+
+    wire.uplink.send(IpcRequestKind::Discovery);
+    let request: IpcRequest = wire.session.recv().expect("read the resize");
+    let IpcRequestKind::Resize { cell_size, .. } = request.kind else {
+        panic!("expected a Resize, got {:?}", request.kind);
+    };
+    assert_eq!(cell_size, Some(measurement));
 }
 
 #[test]
@@ -3981,6 +4015,33 @@ fn a_new_connection_is_told_the_size_the_terminal_is_now() {
         Some(mpsc::TryRecvError::Empty),
         "the size is reported once"
     );
+}
+
+#[test]
+fn a_new_connection_reports_a_measured_cell_size() {
+    let mut client = viewer();
+    let (requests, sent) = mpsc::channel();
+    let mut uplink = Uplink {
+        requests,
+        registry: ActionRegistry::new(),
+        next_request_id: FIRST_LOOP_REQUEST_ID,
+    };
+    let measurement =
+        koshi_core::geometry::PixelCellSize::new(10, 20).expect("positive cell dimensions");
+    let mut cell_size_query = terminal::CellSizeQuery::new(None, true, false);
+
+    report_terminal_size_with_cell_size(
+        &mut client,
+        &mut uplink,
+        &mut cell_size_query,
+        Some(measurement),
+    );
+
+    let request = sent.try_recv().expect("the size was reported");
+    let IpcRequestKind::Resize { cell_size, .. } = request.kind else {
+        panic!("expected a Resize, got {:?}", request.kind);
+    };
+    assert_eq!(cell_size, Some(measurement));
 }
 
 #[test]

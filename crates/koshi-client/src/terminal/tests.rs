@@ -42,7 +42,6 @@ fn probe(graphics: GraphicsSupport) -> TerminalProbe {
     TerminalProbe {
         graphics,
         cell_size: None,
-        cell_size_query_pending: false,
     }
 }
 
@@ -1849,7 +1848,6 @@ fn terminal_probe_collects_reordered_replies_before_selecting_kitty() {
         PixelCellSize::new(10, 20),
         "the cell-size reply is retained beside protocol support"
     );
-    assert!(!result.cell_size_query_pending);
     assert_eq!(
         reader
             .read(|event| matches!(event, Event::Key(_)))
@@ -1971,7 +1969,6 @@ fn terminal_probe_without_replies_preserves_unrelated_input_and_reports_unsuppor
 
     assert_eq!(result.graphics, GraphicsSupport::Unsupported);
     assert_eq!(result.cell_size, None);
-    assert!(result.cell_size_query_pending);
     assert_eq!(
         reader
             .read(|event| matches!(event, Event::Key(_)))
@@ -2241,6 +2238,25 @@ fn local_pixel_cell_size_requires_complete_evenly_divisible_metrics() {
 }
 
 #[test]
+fn initial_cell_size_uses_only_native_image_measurements() {
+    let probed = PixelCellSize::new(10, 20).expect("positive cell dimensions");
+    let local = PixelCellSize::new(12, 24).expect("positive cell dimensions");
+
+    assert_eq!(
+        initial_cell_size(GraphicsSupport::Unsupported, Some(probed), Some(local)),
+        None
+    );
+    assert_eq!(
+        initial_cell_size(GraphicsSupport::Kitty, None, Some(local)),
+        Some(local)
+    );
+    assert_eq!(
+        initial_cell_size(GraphicsSupport::Iterm, Some(probed), Some(local)),
+        Some(probed)
+    );
+}
+
+#[test]
 fn an_outstanding_cell_size_query_cannot_accept_a_reply_from_an_old_resize() {
     let old = PixelCellSize::new(10, 20).expect("positive cell dimensions");
     let current = PixelCellSize::new(12, 24).expect("positive cell dimensions");
@@ -2286,18 +2302,16 @@ fn an_old_reply_is_discarded_then_an_unknown_resize_gets_one_new_query() {
 }
 
 #[test]
-fn an_initial_probe_timeout_discards_its_reply_before_a_fresh_query() {
-    let old = PixelCellSize::new(10, 20).expect("positive cell dimensions");
-    let current = PixelCellSize::new(12, 24).expect("positive cell dimensions");
-    let mut query = CellSizeQuery::new(None, true, true);
+fn a_timed_out_probe_does_not_block_a_resize_query() {
+    let measurement = PixelCellSize::new(10, 20).expect("positive cell dimensions");
+    let mut query = CellSizeQuery::new(None, true, false);
     let mut wire = Vec::new();
 
-    assert!(!query.resize(None));
-    assert_eq!(query.accept(old), (None, true));
+    assert!(query.resize(None));
     query
         .request_to(&mut wire)
-        .expect("the fresh query writes after the timed-out probe reply");
-    assert_eq!(query.accept(current), (Some(current), false));
+        .expect("the resize query writes after the timed-out probe");
+    assert_eq!(query.accept(measurement), (Some(measurement), false));
     assert_eq!(wire, b"\x1b[16t");
 }
 
