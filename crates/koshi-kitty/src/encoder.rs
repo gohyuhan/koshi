@@ -400,6 +400,15 @@ pub fn write_kitty_delete_all<W: Write>(writer: &mut W) -> Result<(), KittyOutpu
     Ok(())
 }
 
+/// Write a Kitty command that deletes all visible placements and retains every
+/// image's data. An image number transmitted before this command still places.
+pub fn write_kitty_visible_placement_delete<W: Write>(
+    writer: &mut W,
+) -> Result<(), KittyOutputError> {
+    writer.write_all(b"\x1b_Ga=d,d=a,q=2;\x1b\\")?;
+    Ok(())
+}
+
 /// Write the cancellation sequence for an open Kitty APC transfer.
 pub fn write_kitty_abort<W: Write>(writer: &mut W) -> Result<(), KittyOutputError> {
     writer.write_all(b"\x18\x1b\\")?;

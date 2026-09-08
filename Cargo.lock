@@ -1051,6 +1051,7 @@ dependencies = [
 name = "koshi-client"
 version = "0.4.0-pr.1"
 dependencies = [
+ "base64 0.23.1",
  "koshi-config",
  "koshi-core",
  "koshi-image",
@@ -1188,7 +1189,9 @@ dependencies = [
  "flate2",
  "image",
  "koshi-image",
+ "libc",
  "thiserror 2.0.20",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

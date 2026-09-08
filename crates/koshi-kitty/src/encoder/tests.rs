@@ -291,10 +291,11 @@ fn delete_commands_write_exact_kitty_bytes() {
     write_kitty_image_delete(&mut output, 7).expect("the image delete writes");
     write_kitty_placement_delete(&mut output, 7, 9).expect("the placement delete writes");
     write_kitty_delete_all(&mut output).expect("the all delete writes");
+    write_kitty_visible_placement_delete(&mut output).expect("the placement-only delete writes");
 
     assert_eq!(
         output,
-        b"\x1b_Ga=d,d=N,I=7,q=2;\x1b\\\x1b_Ga=d,d=n,I=7,p=9,q=2;\x1b\\\x1b_Ga=d,d=A,q=2;\x1b\\"
+        b"\x1b_Ga=d,d=N,I=7,q=2;\x1b\\\x1b_Ga=d,d=n,I=7,p=9,q=2;\x1b\\\x1b_Ga=d,d=A,q=2;\x1b\\\x1b_Ga=d,d=a,q=2;\x1b\\"
     );
 }
 

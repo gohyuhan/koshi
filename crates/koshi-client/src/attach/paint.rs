@@ -15,9 +15,7 @@
 //!
 //! Image placements arrive in the painted frame without RGBA. `ImageCache`
 //! keeps complete records by their connection-local content identity and
-//! rebuilds the newest snapshot as bounded image chunks finish. A missing
-//! record stays as a placement with no pixels, which the renderer draws as
-//! `terminal image unavailable`.
+//! rebuilds the newest snapshot after all required image chunks finish.
 //!
 //! A run travels once and expands back into as many cells as it stood for: a
 //! blank 80-column row arrives as one run with `count: 80` and rebuilds into 80
@@ -253,11 +251,11 @@ impl ImageCache {
         self.pending = None;
     }
 
-    /// Adopt a painted frame, prune unreferenced records, and expose missing placements.
+    /// Adopt a painted frame and return it when every required image is complete.
     pub(crate) fn begin_frame(
         &mut self,
         frame: Box<PaintedFrame>,
-    ) -> Result<RenderSnapshot, ImageAssemblyError> {
+    ) -> Result<Option<RenderSnapshot>, ImageAssemblyError> {
         let placement_count = frame
             .panes
             .iter()
@@ -299,7 +297,11 @@ impl ImageCache {
         self.pending = None;
         self.transfer_count = 0;
         self.frame = Some(frame);
-        self.snapshot()
+        if self.missing.is_empty() {
+            self.snapshot().map(Some)
+        } else {
+            Ok(None)
+        }
     }
 
     /// Start receiving one record needed by the newest painted frame.

@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use koshi_core::event::{Event, PaneCommandFinished, PaneCommandStarted};
 use koshi_core::ids::ClientId;
@@ -18,6 +18,7 @@ use koshi_terminal::engine::TerminalEngine;
 use koshi_terminal::style::{Color, Style};
 use koshi_test_support::fake_pty::FakePtyBackend;
 
+use crate::runtime::render_schedule::FRAME_INTERVAL;
 use crate::runtime::{bus::EventFilter, event::RuntimeEvent};
 
 use super::*;
@@ -123,6 +124,95 @@ fn output_schedules_a_render() {
     // PtyOutput was marked pending and nothing has rendered yet, so a render
     // is due immediately.
     assert!(rt.render_scheduler.poll(Instant::now()));
+}
+
+#[test]
+fn synchronized_body_keeps_the_committed_state_and_side_effects_hidden() {
+    let (mut rt, fake, _tx) = new_runtime();
+    let pane = add_engine(&mut rt);
+    spawn_in_fake(&fake, pane);
+    let deliveries = rt.subscribe(ClientId::new(), EventFilter::All);
+    let rendered_at = Instant::now();
+    rt.handle_pty_output(pane, b"old");
+    assert!(rt.render_scheduler.poll(rendered_at));
+
+    rt.handle_pty_output(pane, b"\x1b[?2026h");
+    rt.handle_pty_output(pane, b"\x1b[2J\x1b[Hnew\x1b[5n\x1b]133;C\x07");
+
+    assert_eq!(ch(&rt, pane, 0, 0), 'o');
+    assert_eq!(ch(&rt, pane, 0, 1), 'l');
+    assert_eq!(ch(&rt, pane, 0, 2), 'd');
+    assert_eq!(
+        fake.writes(pane).expect("pane exists"),
+        Vec::<Vec<u8>>::new()
+    );
+    assert_eq!(deliveries.try_iter().collect::<Vec<_>>(), Vec::new());
+    assert!(!rt.render_scheduler.poll(rendered_at));
+
+    rt.handle_pty_output(pane, b"\x1b[?2026l");
+
+    assert_eq!(ch(&rt, pane, 0, 0), 'n');
+    assert_eq!(ch(&rt, pane, 0, 1), 'e');
+    assert_eq!(ch(&rt, pane, 0, 2), 'w');
+    assert_eq!(
+        fake.writes(pane).expect("pane exists"),
+        [b"\x1b[0n".to_vec()]
+    );
+    assert_eq!(
+        deliveries.try_iter().collect::<Vec<_>>(),
+        [Delivery::Event(Event::PaneCommandStarted(
+            PaneCommandStarted { pane_id: pane }
+        ))]
+    );
+    assert_eq!(
+        rt.render_scheduler.next_wakeup(rendered_at),
+        Some(FRAME_INTERVAL)
+    );
+    assert!(rt.render_scheduler.poll(rendered_at + FRAME_INTERVAL));
+}
+
+#[test]
+fn synchronized_deadline_uses_the_runtime_wakeup_and_common_delivery_path() {
+    let (mut rt, fake, _tx) = new_runtime();
+    let pane = add_engine(&mut rt);
+    spawn_in_fake(&fake, pane);
+    let deliveries = rt.subscribe(ClientId::new(), EventFilter::All);
+    let now = Instant::now();
+    let engine = rt
+        .terminal_engines
+        .get_mut(&pane)
+        .expect("the pane has an engine");
+    let _ = engine.advance_with_shell_integration_at(b"\x1b[?2026h", now);
+    let _ = engine.advance_with_shell_integration_at(b"X\x1b[5n\x1b]133;C\x07", now);
+
+    assert_eq!(
+        rt.next_render_wakeup(now + Duration::from_millis(149)),
+        Some(Duration::from_millis(1))
+    );
+    assert!(!rt.poll_render(now + Duration::from_millis(149)));
+    assert_eq!(ch(&rt, pane, 0, 0), ' ');
+    assert_eq!(
+        fake.writes(pane).expect("pane exists"),
+        Vec::<Vec<u8>>::new()
+    );
+    assert_eq!(deliveries.try_iter().collect::<Vec<_>>(), Vec::new());
+
+    assert_eq!(
+        rt.next_render_wakeup(now + Duration::from_millis(150)),
+        Some(Duration::ZERO)
+    );
+    assert!(rt.poll_render(now + Duration::from_millis(150)));
+    assert_eq!(ch(&rt, pane, 0, 0), 'X');
+    assert_eq!(
+        fake.writes(pane).expect("pane exists"),
+        [b"\x1b[0n".to_vec()]
+    );
+    assert_eq!(
+        deliveries.try_iter().collect::<Vec<_>>(),
+        [Delivery::Event(Event::PaneCommandStarted(
+            PaneCommandStarted { pane_id: pane }
+        ))]
+    );
 }
 
 #[test]

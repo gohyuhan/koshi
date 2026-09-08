@@ -30,6 +30,18 @@ pub fn decompress_bounded(
     protocol: GraphicsProtocol,
     data: &[u8],
 ) -> Result<Vec<u8>, GraphicsError> {
+    let (output, consumed) = decompress_bounded_prefix(protocol, data)?;
+    if consumed != data.len() {
+        return Err(GraphicsError::DecodeFailure { protocol });
+    }
+    Ok(output)
+}
+
+/// Decompress one zlib stream and return its exact consumed input length.
+pub fn decompress_bounded_prefix(
+    protocol: GraphicsProtocol,
+    data: &[u8],
+) -> Result<(Vec<u8>, usize), GraphicsError> {
     if data.len() > MAX_GRAPHICS_TRANSFER_BYTES {
         return Err(GraphicsError::TransferTooLarge { protocol });
     }
@@ -98,10 +110,7 @@ pub fn decompress_bounded(
             output.extend_from_slice(&chunk[..produced]);
         }
         if status == Status::StreamEnd {
-            if input_offset != data.len() {
-                return Err(GraphicsError::DecodeFailure { protocol });
-            }
-            return Ok(output);
+            return Ok((output, input_offset));
         }
         if consumed == 0 && produced == 0 {
             return Err(GraphicsError::DecodeFailure { protocol });
@@ -120,6 +129,14 @@ pub fn decode_raster(
             protocol,
             format: format.to_string(),
         });
+    }
+    decode_static_raster(protocol, data)
+}
+
+/// Decode the default image from PNG data into validated RGBA pixels.
+pub fn decode_png(protocol: GraphicsProtocol, data: &[u8]) -> Result<DecodedImage, GraphicsError> {
+    if guess_image_format(protocol, data)? != image::ImageFormat::Png {
+        return Err(GraphicsError::DecodeFailure { protocol });
     }
     decode_static_raster(protocol, data)
 }

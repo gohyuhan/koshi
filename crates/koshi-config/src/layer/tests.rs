@@ -719,6 +719,21 @@ fn remote_reconnect_folds_onto_the_viewer_side_only() {
 }
 
 #[test]
+fn image_support_folds_onto_the_viewer_side_only() {
+    assert!(ClientConfig::default().image_support);
+
+    let layer = PartialKoshiConfig {
+        image_support: Some(false),
+        ..Default::default()
+    };
+    let client = merge_client(ClientConfig::default(), vec![layer.clone()]);
+    assert!(!client.image_support);
+
+    let server = merge_server(ServerConfig::default(), vec![layer]);
+    assert_eq!(server, ServerConfig::default());
+}
+
+#[test]
 fn mouse_overrides_fold_onto_the_viewer_side_only() {
     let layer = PartialKoshiConfig {
         mouse: Some(PartialMouseConfig {

@@ -1623,6 +1623,7 @@ fn carried_nothing(start: &SessionStart) -> (ResumeHeader, ResumeBody) {
         graphics_tmux_wrapper_active: HashMap::new(),
         graphics_events: HashMap::new(),
         graphics_transport: HashMap::new(),
+        synchronized_output: HashMap::new(),
         quit: None,
     };
     (header, body)

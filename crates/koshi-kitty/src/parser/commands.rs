@@ -48,7 +48,7 @@ pub enum KittyCommandKind {
 /// The fields carried by one Kitty animation command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KittyAnimationCommand {
-    /// The raw frame format: 24 for RGB or 32 for RGBA.
+    /// The raw frame format: 24 for RGB, 32 for RGBA, or 100 for PNG.
     pub format: Option<u32>,
     /// The raw frame width in pixels.
     pub width: Option<u32>,
@@ -169,7 +169,7 @@ pub fn parse_command(header: &[u8], payload: &[u8]) -> Option<Result<KittyComman
         b"c" => Some(KittyCommandKind::AnimationCompose),
         b"d" if header
             .split(|byte| *byte == b',')
-            .any(|field| field == b"d=f") =>
+            .any(|field| matches!(field, b"d=f" | b"d=F")) =>
         {
             Some(KittyCommandKind::AnimationDelete)
         }
@@ -316,7 +316,8 @@ fn parse_command_fields(
         || control.medium.is_some()
         || control.format.is_some()
         || control.compression.is_some()
-        || control.declared_size.is_some()
+        || control.source_size.is_some()
+        || control.source_offset.is_some()
         || control.width.is_some()
         || control.height.is_some()
         || (control.display.image_id.is_some() && control.display.image_number.is_some())
@@ -385,10 +386,10 @@ pub(super) fn parse_animation_command_fields(
     allow_more: bool,
 ) -> Result<KittyCommand, GraphicsError> {
     let mut normalized = Vec::new();
-    let mut delete_frame = false;
+    let mut delete_frame = None;
     for field in header.split(|byte| *byte == b',') {
-        if field == b"d=f" {
-            delete_frame = true;
+        if matches!(field, b"d=f" | b"d=F") {
+            delete_frame = Some(field == b"d=F");
             continue;
         }
         if field.starts_with(b"a=") {
@@ -402,11 +403,10 @@ pub(super) fn parse_animation_command_fields(
         normalized.pop();
     }
     let mut control = parse_kitty_control(&normalized)?;
-    if (control.more && !allow_more)
-        || control.query
-        || control.medium.is_some()
-        || control.compression.is_some()
-    {
+    if (control.more && !allow_more) || control.query {
+        return Err(invalid());
+    }
+    if control.more && control.medium.is_some_and(|medium| medium != b'd') {
         return Err(invalid());
     }
     if control.display.image_id.is_none() && control.display.image_number.is_none() {
@@ -430,6 +430,11 @@ pub(super) fn parse_animation_command_fields(
                     | b'Y'
                     | b'X'
                     | b'm'
+                    | b't'
+                    | b'o'
+                    | b'S'
+                    | b'O'
+                    | b'N'
             )
         }
         KittyCommandKind::AnimationControl => {
@@ -466,14 +471,14 @@ pub(super) fn parse_animation_command_fields(
             return Err(invalid());
         }
     }
-    if kind == KittyCommandKind::AnimationDelete && !delete_frame {
+    if kind == KittyCommandKind::AnimationDelete && delete_frame.is_none() {
         return Err(invalid());
     }
     if kind != KittyCommandKind::AnimationFrame && !payload.is_empty() {
         return Err(invalid());
     }
     let format = raw_u32(header, b'f')?;
-    if format.is_some_and(|format| format != 24 && format != 32) {
+    if format.is_some_and(|format| !matches!(format, 24 | 32 | 100)) {
         return Err(GraphicsError::UnsupportedMedia {
             protocol: GraphicsProtocol::Kitty,
             format: format.map_or_else(String::new, |format| format.to_string()),
@@ -592,7 +597,7 @@ pub(super) fn parse_animation_command_fields(
     Ok(KittyCommand {
         kind,
         display: control.display,
-        free_data: false,
+        free_data: delete_frame.unwrap_or(false),
         animation: Some(animation),
     })
 }

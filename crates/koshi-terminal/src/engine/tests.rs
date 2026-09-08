@@ -6,6 +6,7 @@
 use std::path::Path;
 use std::time::Instant;
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use koshi_core::geometry::PixelCellSize;
 use koshi_core::process::PtySize;
 
@@ -460,6 +461,689 @@ fn c1_string_openers_inside_osc_remain_osc_data() {
 
     assert_eq!(engine.state().title(), Some("before�after"));
     assert_eq!(engine.state().active_cursor_position(), (0, 0));
+}
+
+fn red_png() -> Vec<u8> {
+    use image::ImageEncoder;
+
+    let mut bytes = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut bytes)
+        .write_image(&[255, 0, 0, 255], 1, 1, image::ColorType::Rgba8.into())
+        .expect("the one-pixel image encodes");
+    bytes
+}
+
+fn graphics_control(protocol: GraphicsProtocol, c1: bool) -> Vec<u8> {
+    match protocol {
+        GraphicsProtocol::Kitty => {
+            let body = b"Gf=32,s=1,v=1;/wAA/w==";
+            if c1 {
+                let mut bytes = vec![0x9f];
+                bytes.extend_from_slice(body);
+                bytes.push(0x9c);
+                bytes
+            } else {
+                let mut bytes = b"\x1b_".to_vec();
+                bytes.extend_from_slice(body);
+                bytes.extend_from_slice(b"\x1b\\");
+                bytes
+            }
+        }
+        GraphicsProtocol::Sixel => {
+            let body = b"q#1;2;100;0;0#1@";
+            if c1 {
+                let mut bytes = vec![0x90];
+                bytes.extend_from_slice(body);
+                bytes.push(0x9c);
+                bytes
+            } else {
+                let mut bytes = b"\x1bP".to_vec();
+                bytes.extend_from_slice(body);
+                bytes.extend_from_slice(b"\x1b\\");
+                bytes
+            }
+        }
+        GraphicsProtocol::Iterm2 => {
+            let encoded = STANDARD.encode(red_png());
+            let body = format!(
+                "1337;File=inline=1;size=67;width=1px;height=1px;preserveAspectRatio=0:{encoded}"
+            );
+            if c1 {
+                let mut bytes = vec![0x9d];
+                bytes.extend_from_slice(body.as_bytes());
+                bytes.push(0x9c);
+                bytes
+            } else {
+                let mut bytes = b"\x1b]".to_vec();
+                bytes.extend_from_slice(body.as_bytes());
+                bytes.push(0x07);
+                bytes
+            }
+        }
+    }
+}
+
+fn visible_graphics_control(protocol: GraphicsProtocol) -> Vec<u8> {
+    match protocol {
+        GraphicsProtocol::Kitty => b"\x1b_Ga=T,f=32,s=1,v=1,c=1,r=1,C=1;/wAA/w==\x1b\\".to_vec(),
+        GraphicsProtocol::Sixel => sixel_register_image(100, 0, 0),
+        GraphicsProtocol::Iterm2 => graphics_control(GraphicsProtocol::Iterm2, false),
+    }
+}
+
+#[test]
+fn synchronized_graphics_commit_only_after_the_complete_end_sequence() {
+    let now = Instant::now();
+    for protocol in [
+        GraphicsProtocol::Kitty,
+        GraphicsProtocol::Sixel,
+        GraphicsProtocol::Iterm2,
+    ] {
+        let mut engine = engine();
+        engine.set_cell_size(PixelCellSize::new(1, 6).expect("nonzero cell size"));
+        assert_eq!(engine.advance(b"old"), b"");
+        let committed = engine.state().clone();
+        let mut update = BEGIN_SYNCHRONIZED_OUTPUT.to_vec();
+        update.extend_from_slice(b"\x1b[2J\x1b[HN");
+        update.extend(visible_graphics_control(protocol));
+        update.extend_from_slice(END_SYNCHRONIZED_OUTPUT);
+
+        for (index, byte) in update.iter().enumerate() {
+            let (_, _, _) = engine.advance_with_shell_integration_at(&[*byte], now);
+            if index + 1 < update.len() {
+                assert_eq!(engine.state(), &committed, "{protocol:?}, byte {index}");
+                assert_eq!(engine.take_graphics(), [], "{protocol:?}, byte {index}");
+            }
+        }
+
+        assert_eq!(ch(&engine, 0, 0), 'N', "{protocol:?}");
+        assert_eq!(engine.state().image_placements().len(), 1, "{protocol:?}");
+        let events = engine.take_graphics();
+        assert_eq!(events.len(), 1, "{protocol:?}");
+        assert_eq!(
+            events[0].as_ref().map(|record| record.protocol),
+            Ok(protocol)
+        );
+    }
+}
+
+#[test]
+fn synchronized_control_lookalikes_inside_strings_do_not_release() {
+    let now = Instant::now();
+    let strings: [&[u8]; 7] = [
+        b"\x1b_Gbroken\x1b[?2026l\x9b?2026h\x9b?2026lbytes\x1b\\",
+        b"\x1bPqbroken\x1b[?2026l\x9b?2026h\x9b?2026lbytes\x1b\\",
+        b"\x1b]1337;File=inline=1:broken\x1b[?2026l\x9b?2026h\x9b?2026lbytes\x07",
+        b"\x1bPtmux;broken\x1b[?2026l\x9b?2026h\x9b?2026lbytes\x1b\\",
+        b"\x1bP\x1bPbroken\x1b[?2026l\x9b?2026h\x9b?2026lbytes\x1b\\\x1b\\",
+        b"\x1bXbroken\x1b[?2026l\x9b?2026h\x9b?2026lbytes\x1b\\",
+        b"\x1b^broken\x1b[?2026l\x9b?2026h\x9b?2026lbytes\x1b\\",
+    ];
+
+    for string in strings {
+        let mut engine = engine();
+        let (_, _, _) = engine.advance_with_shell_integration_at(BEGIN_SYNCHRONIZED_OUTPUT, now);
+        let mut body = string.to_vec();
+        body.push(b'X');
+        let (replies, facts, advanced) = engine.advance_with_shell_integration_at(&body, now);
+
+        assert_eq!((replies, facts, advanced), (vec![], vec![], false));
+        assert_eq!(ch(&engine, 0, 0), ' ');
+        assert!(engine.synchronized_output_transport(now).is_some());
+
+        let (_, _, advanced) =
+            engine.advance_with_shell_integration_at(END_SYNCHRONIZED_OUTPUT, now);
+        assert!(advanced);
+        assert!(engine.synchronized_output_transport(now).is_none());
+    }
+}
+
+#[test]
+fn c1_synchronized_controls_hold_and_release_at_every_byte_split() {
+    const C1_BEGIN: &[u8] = b"\x9b?2026h";
+    const C1_END: &[u8] = b"\x9b?2026l";
+    let now = Instant::now();
+
+    for begin_split in 0..=C1_BEGIN.len() {
+        for end_split in 0..=C1_END.len() {
+            let mut engine = engine();
+            let _ = engine.advance(b"old");
+            let committed = engine.state().clone();
+
+            let _ = engine.advance_with_shell_integration_at(&C1_BEGIN[..begin_split], now);
+            let _ = engine.advance_with_shell_integration_at(&C1_BEGIN[begin_split..], now);
+            let _ = engine.advance_with_shell_integration_at(b"\x1b[2J\x1b[HN", now);
+            assert_eq!(
+                engine.state(),
+                &committed,
+                "begin={begin_split}, end={end_split}"
+            );
+
+            let (_, _, first_advanced) =
+                engine.advance_with_shell_integration_at(&C1_END[..end_split], now);
+            if end_split < C1_END.len() {
+                assert_eq!(
+                    engine.state(),
+                    &committed,
+                    "begin={begin_split}, end={end_split}"
+                );
+            }
+            let (_, _, second_advanced) =
+                engine.advance_with_shell_integration_at(&C1_END[end_split..], now);
+
+            assert!(
+                first_advanced || second_advanced,
+                "begin={begin_split}, end={end_split}"
+            );
+            assert_eq!(
+                ch(&engine, 0, 0),
+                'N',
+                "begin={begin_split}, end={end_split}"
+            );
+            assert!(engine.synchronized_output_transport(now).is_none());
+        }
+    }
+}
+
+#[test]
+fn c1_synchronized_control_state_survives_process_swaps() {
+    let now = Instant::now();
+    let wall_now = SystemTime::UNIX_EPOCH + Duration::from_secs(4_000);
+    let mut engine = engine();
+    let _ = engine.advance(b"old");
+    let _ = engine.advance(b"\x9b?20");
+    let first_transport = engine
+        .synchronized_output_transport_at(now, wall_now)
+        .expect("the split C1 begin has transport state");
+    let first_undecoded = engine.undecoded().to_vec();
+    let first_graphics_undecoded = engine.graphics_undecoded().to_vec();
+    let first_graphics_transport = engine.graphics_transport_state().unwrap_or_default();
+    let first_events = engine.take_graphics();
+    let first_state = engine.into_state();
+    let mut restored =
+        TerminalEngine::from_state_with_graphics_events_wrappers_and_synchronized_output(
+            first_state,
+            &first_undecoded,
+            &first_graphics_undecoded,
+            &first_events,
+            first_graphics_transport,
+            Some(first_transport),
+            now,
+            wall_now,
+        );
+
+    let _ = restored.advance(b"26h\x1b[2J\x1b[HN\x9b?20");
+    let committed = restored.state().clone();
+    assert_eq!(ch(&restored, 0, 0), 'o');
+    let second_transport = restored
+        .synchronized_output_transport_at(now, wall_now)
+        .expect("the split C1 end has transport state");
+    let second_undecoded = restored.undecoded().to_vec();
+    let second_graphics_undecoded = restored.graphics_undecoded().to_vec();
+    let second_graphics_transport = restored.graphics_transport_state().unwrap_or_default();
+    let second_events = restored.take_graphics();
+    let second_state = restored.into_state();
+    let mut restored =
+        TerminalEngine::from_state_with_graphics_events_wrappers_and_synchronized_output(
+            second_state,
+            &second_undecoded,
+            &second_graphics_undecoded,
+            &second_events,
+            second_graphics_transport,
+            Some(second_transport),
+            now,
+            wall_now,
+        );
+
+    assert_eq!(restored.state(), &committed);
+    let (_, _, advanced) = restored.advance_with_shell_integration_at(b"26l", now);
+
+    assert!(advanced);
+    assert_eq!(ch(&restored, 0, 0), 'N');
+    assert!(restored.synchronized_output_transport(now).is_none());
+}
+
+#[test]
+fn c1_csi_bytes_inside_utf8_and_strings_are_not_synchronized_controls() {
+    let now = Instant::now();
+    let mut engine = engine();
+    let mut bytes = vec![0xe2, 0x9b, 0xa0];
+    bytes.extend_from_slice(b"\x1b]2;\x9b?2026h\x9b?2026l\x07");
+    bytes.extend_from_slice(b"\x1bPq\x9b?2026h\x9b?2026l\x1b\\");
+    bytes.extend_from_slice(b"\x1b_data\x9b?2026h\x9b?2026l\x1b\\");
+    bytes.extend_from_slice(b"\x1bXdata\x9b?2026h\x9b?2026l\x1b\\");
+    bytes.extend_from_slice(b"\x1b^data\x9b?2026h\x9b?2026l\x1b\\X");
+
+    let (_, _, advanced) = engine.advance_with_shell_integration_at(&bytes, now);
+
+    assert!(advanced);
+    assert_eq!(engine.next_synchronized_output_delay(now), None);
+    assert_eq!(ch(&engine, 0, 1), 'X');
+    assert!(engine.synchronized_output_transport(now).is_none());
+}
+
+#[test]
+fn end_then_begin_in_one_chunk_commits_one_group_and_keeps_the_next() {
+    let now = Instant::now();
+    let mut engine = engine();
+    let (_, _, _) = engine.advance_with_shell_integration_at(BEGIN_SYNCHRONIZED_OUTPUT, now);
+    let mut bytes = b"A".to_vec();
+    bytes.extend_from_slice(END_SYNCHRONIZED_OUTPUT);
+    bytes.extend_from_slice(BEGIN_SYNCHRONIZED_OUTPUT);
+    bytes.push(b'B');
+
+    let (_, _, advanced) = engine.advance_with_shell_integration_at(&bytes, now);
+
+    assert!(advanced);
+    assert_eq!(ch(&engine, 0, 0), 'A');
+    assert_eq!(ch(&engine, 0, 1), ' ');
+    assert!(engine.synchronized_output_transport(now).is_some());
+
+    let (_, _, advanced) = engine.advance_with_shell_integration_at(END_SYNCHRONIZED_OUTPUT, now);
+    assert!(advanced);
+    assert_eq!(ch(&engine, 0, 1), 'B');
+}
+
+#[test]
+fn overdue_synchronized_bytes_are_released_before_new_input() {
+    let now = Instant::now();
+    let mut engine = engine();
+    let (_, _, _) = engine.advance_with_shell_integration_at(BEGIN_SYNCHRONIZED_OUTPUT, now);
+    let (_, _, advanced) = engine.advance_with_shell_integration_at(b"A", now);
+    assert!(!advanced);
+
+    let (_, _, advanced) =
+        engine.advance_with_shell_integration_at(b"B", now + SYNCHRONIZED_OUTPUT_TIMEOUT);
+
+    assert!(advanced);
+    assert_eq!(ch(&engine, 0, 0), 'A');
+    assert_eq!(ch(&engine, 0, 1), 'B');
+    assert!(engine
+        .synchronized_output_transport(now + SYNCHRONIZED_OUTPUT_TIMEOUT)
+        .is_none());
+}
+
+#[test]
+fn synchronized_output_releases_when_the_byte_bound_is_reached() {
+    let now = Instant::now();
+    let mut engine = engine();
+    let (_, _, _) = engine.advance_with_shell_integration_at(BEGIN_SYNCHRONIZED_OUTPUT, now);
+
+    let (_, _, advanced) =
+        engine.advance_with_shell_integration_at(&vec![b'x'; MAX_SYNCHRONIZED_OUTPUT_BYTES], now);
+
+    assert!(advanced);
+    assert!(engine.synchronized_output_transport(now).is_none());
+    assert_eq!(ch(&engine, 2, 7), 'x');
+}
+
+#[test]
+fn synchronized_output_deadline_releases_replies_shell_facts_and_graphics() {
+    let now = Instant::now();
+    let mut engine = engine();
+    engine.set_cell_size(PixelCellSize::new(1, 6).expect("nonzero cell size"));
+    let (_, _, _) = engine.advance_with_shell_integration_at(BEGIN_SYNCHRONIZED_OUTPUT, now);
+    let mut body = b"Z\x1b[5n\x1b]133;C\x07".to_vec();
+    body.extend(visible_graphics_control(GraphicsProtocol::Kitty));
+    let (_, _, advanced) = engine.advance_with_shell_integration_at(&body, now);
+    assert!(!advanced);
+
+    assert_eq!(
+        engine.expire_synchronized_output(now + Duration::from_millis(149)),
+        None
+    );
+    assert_eq!(ch(&engine, 0, 0), ' ');
+    let (replies, facts) = engine
+        .expire_synchronized_output(now + SYNCHRONIZED_OUTPUT_TIMEOUT)
+        .expect("the deadline releases the update");
+
+    assert_eq!(replies, b"\x1b[0n");
+    assert_eq!(facts, [ShellIntegrationFact::CommandStarted]);
+    assert_eq!(ch(&engine, 0, 0), 'Z');
+    assert_eq!(engine.state().image_placements().len(), 1);
+    assert_eq!(engine.take_graphics().len(), 1);
+}
+
+#[test]
+fn finish_releases_synchronized_text_and_reports_an_inner_truncated_image() {
+    let now = Instant::now();
+    let mut engine = engine();
+    let (_, _, _) = engine.advance_with_shell_integration_at(BEGIN_SYNCHRONIZED_OUTPUT, now);
+    let (_, _, advanced) =
+        engine.advance_with_shell_integration_at(b"Q\x1b_Gf=32,s=1,v=1;AAAA", now);
+    assert!(!advanced);
+
+    assert_eq!(
+        engine.finish(),
+        [Err(GraphicsError::Truncated {
+            protocol: GraphicsProtocol::Kitty,
+        })]
+    );
+    assert_eq!(ch(&engine, 0, 0), 'Q');
+    assert!(engine.synchronized_output_transport(now).is_none());
+}
+
+#[test]
+fn synchronized_output_deadline_keeps_elapsed_process_swap_time() {
+    let now = Instant::now();
+    let wall_now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+    let mut engine = engine();
+    let (_, _, _) = engine.advance_with_shell_integration_at(BEGIN_SYNCHRONIZED_OUTPUT, now);
+    let (_, _, _) = engine.advance_with_shell_integration_at(b"R", now);
+    let transport = engine
+        .synchronized_output_transport_at(now + Duration::from_millis(40), wall_now)
+        .expect("the open update has transport state");
+    assert_eq!(
+        transport.deadline(),
+        Some(wall_now + Duration::from_millis(110))
+    );
+    let undecoded = engine.undecoded().to_vec();
+    let graphics_undecoded = engine.graphics_undecoded().to_vec();
+    let graphics_transport = engine.graphics_transport_state().unwrap_or_default();
+    let state = engine.into_state();
+    let restored_at = now + Duration::from_secs(1);
+    let mut restored =
+        TerminalEngine::from_state_with_graphics_events_wrappers_and_synchronized_output(
+            state,
+            &undecoded,
+            &graphics_undecoded,
+            &[],
+            graphics_transport,
+            Some(transport),
+            restored_at,
+            wall_now + Duration::from_millis(100),
+        );
+
+    assert_eq!(
+        restored.next_synchronized_output_delay(restored_at),
+        Some(Duration::from_millis(10))
+    );
+    assert_eq!(
+        restored.expire_synchronized_output(restored_at + Duration::from_millis(9)),
+        None
+    );
+    assert!(restored
+        .expire_synchronized_output(restored_at + Duration::from_millis(10))
+        .is_some());
+    assert_eq!(ch(&restored, 0, 0), 'R');
+}
+
+#[test]
+fn synchronized_output_transport_rejects_impossible_scanner_state() {
+    let now = Instant::now();
+    let wall_now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+    let mut engine = engine();
+    let _ = engine.advance_with_shell_integration_at(BEGIN_SYNCHRONIZED_OUTPUT, now);
+    let mut encoded = serde_json::to_value(
+        engine
+            .synchronized_output_transport_at(now, wall_now)
+            .expect("the open update has transport state"),
+    )
+    .expect("the transport serializes");
+
+    encoded["terminal_input"]["utf8_continuations"] = serde_json::json!(4);
+    assert_eq!(
+        serde_json::from_value::<SynchronizedOutputTransport>(encoded.clone())
+            .unwrap_err()
+            .to_string(),
+        "terminal-input UTF-8 continuation count is invalid"
+    );
+
+    encoded["terminal_input"]["utf8_continuations"] = serde_json::json!(0);
+    encoded["terminal_input"]["tail_len"] = serde_json::json!(0);
+    encoded["terminal_input"]["tail_next"] = serde_json::json!(7);
+    assert_eq!(
+        serde_json::from_value::<SynchronizedOutputTransport>(encoded.clone())
+            .unwrap_err()
+            .to_string(),
+        "terminal-input scanner tail is invalid"
+    );
+
+    encoded["terminal_input"]["tail_next"] = serde_json::json!(0);
+    encoded["bytes"] = serde_json::json!([]);
+    assert_eq!(
+        serde_json::from_value::<SynchronizedOutputTransport>(encoded)
+            .unwrap_err()
+            .to_string(),
+        "synchronized-output deadline has no bytes"
+    );
+}
+
+#[test]
+fn overlong_open_string_keeps_its_scanner_state_across_process_swap() {
+    let now = Instant::now();
+    let wall_now = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000);
+    let mut opening = b"\x1b]2;".to_vec();
+    opening.extend(std::iter::repeat_n(b'A', MAX_UNDECODED + 1));
+    let suffix = b"inside\x1b[?2026hdata\x1b[?2026l\x07";
+
+    let mut uninterrupted = engine();
+    let _ = uninterrupted.advance(&opening);
+    assert!(uninterrupted.undecoded().is_empty());
+
+    let mut carried = engine();
+    let _ = carried.advance(&opening);
+    assert!(carried.undecoded().is_empty());
+    let synchronized_output = carried
+        .synchronized_output_transport_at(now, wall_now)
+        .expect("the open string has scanner transport state");
+    assert_eq!(synchronized_output.deadline(), None);
+    let graphics_undecoded = carried.graphics_undecoded().to_vec();
+    let graphics_transport = carried.graphics_transport_state().unwrap_or_default();
+    let state = carried.into_state();
+    let mut restored =
+        TerminalEngine::from_state_with_graphics_events_wrappers_and_synchronized_output(
+            state,
+            &[],
+            &graphics_undecoded,
+            &[],
+            graphics_transport,
+            Some(synchronized_output),
+            now,
+            wall_now,
+        );
+
+    let _ = uninterrupted.advance(suffix);
+    let (_, _, advanced) = restored.advance_with_shell_integration_at(suffix, now);
+
+    assert!(advanced);
+    assert_eq!(restored.next_synchronized_output_delay(now), None);
+    assert_eq!(restored.take_graphics(), uninterrupted.take_graphics());
+    assert!(restored.synchronized_output_transport(now).is_none());
+}
+
+#[test]
+fn c1_string_end_and_split_utf8_stay_exact_across_two_process_swaps() {
+    let now = Instant::now();
+    let wall_now = SystemTime::UNIX_EPOCH + Duration::from_secs(3_000);
+    let mut opening = b"\x1b_Gf=32,s=1,v=1;".to_vec();
+    opening.extend(std::iter::repeat_n(b'A', MAX_UNDECODED + 1));
+
+    let mut uninterrupted = engine();
+    let _ = uninterrupted.advance(&opening);
+    let mut carried = engine();
+    let _ = carried.advance(&opening);
+    let first_sync = carried
+        .synchronized_output_transport_at(now, wall_now)
+        .expect("the open APC has terminal-input transport state");
+    let first_graphics_undecoded = carried.graphics_undecoded().to_vec();
+    let first_graphics_transport = carried
+        .graphics_transport_state()
+        .expect("the open APC has graphics transport state");
+    let first_state = carried.into_state();
+    let mut restored =
+        TerminalEngine::from_state_with_graphics_events_wrappers_and_synchronized_output(
+            first_state,
+            &[],
+            &first_graphics_undecoded,
+            &[],
+            first_graphics_transport,
+            Some(first_sync),
+            now,
+            wall_now,
+        );
+
+    let c1_string_end = [0x9c];
+    let _ = uninterrupted.advance(&c1_string_end);
+    let _ = restored.advance(&c1_string_end);
+    let _ = uninterrupted.advance(BEGIN_SYNCHRONIZED_OUTPUT);
+    let _ = restored.advance(BEGIN_SYNCHRONIZED_OUTPUT);
+    let split_utf8 = [0xe2, 0x94];
+    let _ = uninterrupted.advance(&split_utf8);
+    let _ = restored.advance(&split_utf8);
+
+    let second_sync = restored
+        .synchronized_output_transport_at(now, wall_now)
+        .expect("the held UTF-8 prefix has transport state");
+    let second_undecoded = restored.undecoded().to_vec();
+    let second_graphics_undecoded = restored.graphics_undecoded().to_vec();
+    let second_graphics_transport = restored.graphics_transport_state().unwrap_or_default();
+    let second_events = restored.take_graphics();
+    let second_state = restored.into_state();
+    let mut restored =
+        TerminalEngine::from_state_with_graphics_events_wrappers_and_synchronized_output(
+            second_state,
+            &second_undecoded,
+            &second_graphics_undecoded,
+            &second_events,
+            second_graphics_transport,
+            Some(second_sync),
+            now,
+            wall_now,
+        );
+
+    let final_utf8 = [0x90];
+    let _ = uninterrupted.advance(&final_utf8);
+    let _ = restored.advance(&final_utf8);
+    let _ = uninterrupted.advance(END_SYNCHRONIZED_OUTPUT);
+    let _ = restored.advance(END_SYNCHRONIZED_OUTPUT);
+
+    assert_eq!(ch(&restored, 0, 0), '┐');
+    assert_eq!(restored.next_synchronized_output_delay(now), None);
+    assert_eq!(restored.take_graphics(), uninterrupted.take_graphics());
+    assert_eq!(restored.state(), uninterrupted.state());
+}
+
+#[test]
+fn malformed_synchronized_modes_remain_ordinary_terminal_input() {
+    for bytes in [
+        &b"\x1b[?2026;1hX"[..],
+        &b"\x1b[?1;2026hX"[..],
+        &b"\x1b[?2026:1hX"[..],
+        &b"\x1b[?02026hX"[..],
+    ] {
+        let now = Instant::now();
+        let mut engine = engine();
+        let (_, _, advanced) = engine.advance_with_shell_integration_at(bytes, now);
+
+        assert!(advanced);
+        assert_eq!(ch(&engine, 0, 0), 'X');
+        assert!(engine.synchronized_output_transport(now).is_none());
+    }
+}
+
+fn assert_graphics_event_after_utf8_prefix(prefix: &[u8], protocol: GraphicsProtocol, c1: bool) {
+    let mut engine = engine();
+    engine.set_cell_size(PixelCellSize::new(1, 1).expect("nonzero cell size"));
+    let mut bytes = prefix.to_vec();
+    bytes.extend(graphics_control(protocol, c1));
+
+    let _ = engine.advance(&bytes);
+    let events = engine.take_graphics();
+    assert_eq!(events.len(), 1, "{protocol:?}, C1={c1}");
+    let record = events[0]
+        .as_ref()
+        .unwrap_or_else(|error| panic!("{protocol:?}, C1={c1} was rejected: {error:?}"));
+    assert_eq!(record.protocol, protocol);
+}
+
+#[test]
+fn every_utf8_continuation_before_each_graphics_protocol_is_text() {
+    for continuation in 0x80..=0x9f {
+        let prefix = [0xe0, 0xa0, continuation];
+        for protocol in [
+            GraphicsProtocol::Kitty,
+            GraphicsProtocol::Sixel,
+            GraphicsProtocol::Iterm2,
+        ] {
+            for c1 in [false, true] {
+                assert_graphics_event_after_utf8_prefix(&prefix, protocol, c1);
+            }
+        }
+    }
+}
+
+#[test]
+fn a_split_utf8_code_point_before_each_graphics_protocol_stays_text() {
+    for protocol in [
+        GraphicsProtocol::Kitty,
+        GraphicsProtocol::Sixel,
+        GraphicsProtocol::Iterm2,
+    ] {
+        for c1 in [false, true] {
+            let mut engine = engine();
+            engine.set_cell_size(PixelCellSize::new(1, 1).expect("nonzero cell size"));
+            assert_eq!(engine.advance(b"\xe0\xa0"), b"");
+
+            let mut rest = vec![0x90];
+            rest.extend(graphics_control(protocol, c1));
+            let _ = engine.advance(&rest);
+            let events = engine.take_graphics();
+            assert_eq!(events.len(), 1, "{protocol:?}, C1={c1}");
+            assert_eq!(events[0].as_ref().unwrap().protocol, protocol);
+        }
+    }
+}
+
+#[test]
+fn a_split_utf8_prefix_survives_an_engine_replacement_before_each_protocol() {
+    for protocol in [
+        GraphicsProtocol::Kitty,
+        GraphicsProtocol::Sixel,
+        GraphicsProtocol::Iterm2,
+    ] {
+        for c1 in [false, true] {
+            let mut engine = engine();
+            engine.set_cell_size(PixelCellSize::new(1, 1).expect("nonzero cell size"));
+            assert_eq!(engine.advance(b"\xe2\x94"), b"");
+            assert_eq!(engine.undecoded(), b"\xe2\x94");
+            assert_eq!(engine.graphics_undecoded(), b"\xe2\x94");
+
+            let state = engine.into_state();
+            let mut rebuilt =
+                TerminalEngine::from_state_with_graphics(state, b"\xe2\x94", b"\xe2\x94");
+            assert_eq!(rebuilt.advance(&[0x90]), b"");
+            assert_eq!(ch(&rebuilt, 0, 0), '┐');
+            assert_eq!(rebuilt.state().active_cursor_position(), (0, 1));
+
+            let _ = rebuilt.advance(&graphics_control(protocol, c1));
+            let events = rebuilt.take_graphics();
+            assert_eq!(events.len(), 1, "{protocol:?}, C1={c1}");
+            assert_eq!(events[0].as_ref().unwrap().protocol, protocol);
+        }
+    }
+}
+
+#[test]
+fn an_invalid_utf8_continuation_resets_before_a_standalone_c1_graphics_string() {
+    for protocol in [
+        GraphicsProtocol::Kitty,
+        GraphicsProtocol::Sixel,
+        GraphicsProtocol::Iterm2,
+    ] {
+        let mut engine = engine();
+        engine.set_cell_size(PixelCellSize::new(1, 1).expect("nonzero cell size"));
+        assert_eq!(engine.advance(&[0xe2, b'A']), b"");
+
+        assert_eq!(ch(&engine, 0, 0), '\u{fffd}');
+        assert_eq!(ch(&engine, 0, 1), 'A');
+        assert_eq!(engine.state().active_cursor_position(), (0, 2));
+
+        let _ = engine.advance(&graphics_control(protocol, true));
+        let events = engine.take_graphics();
+        assert_eq!(events.len(), 1, "{protocol:?}");
+        assert_eq!(events[0].as_ref().unwrap().protocol, protocol);
+    }
 }
 
 #[test]
@@ -1490,4 +2174,119 @@ fn a_sequence_past_the_parser_capacity_does_not_disturb_the_next_one() {
     // A printable glyph still lands on the grid.
     let _ = engine.advance(b"z");
     assert_eq!(ch(&engine, 0, 0), 'z');
+}
+
+#[test]
+fn a_repeated_transfer_with_the_same_pixels_shares_one_image() {
+    for protocol in [
+        GraphicsProtocol::Kitty,
+        GraphicsProtocol::Sixel,
+        GraphicsProtocol::Iterm2,
+    ] {
+        let mut engine = sixel_engine();
+        let first = match protocol {
+            GraphicsProtocol::Kitty => {
+                b"\x1b_Ga=T,i=1,f=32,s=1,v=1,c=1,r=1,C=1;/wAA/w==\x1b\\".to_vec()
+            }
+            _ => visible_graphics_control(protocol),
+        };
+        let second = match protocol {
+            GraphicsProtocol::Kitty => {
+                b"\x1b_Ga=T,i=2,f=32,s=1,v=1,c=1,r=1,C=1;/wAA/w==\x1b\\".to_vec()
+            }
+            _ => visible_graphics_control(protocol),
+        };
+        let _ = engine.advance(&first);
+        let _ = engine.advance(b"\r\n");
+        let _ = engine.advance(&second);
+        let events: Vec<_> = engine
+            .take_graphics()
+            .into_iter()
+            .map(|event| event.expect("both transfers succeed"))
+            .collect();
+
+        assert_eq!(events.len(), 2, "{protocol:?}");
+        assert!(
+            std::sync::Arc::ptr_eq(&events[0].image, &events[1].image),
+            "{protocol:?} transfers with equal pixels share one image"
+        );
+        let placements = engine.state().image_placements();
+        assert_eq!(placements.len(), 2, "{protocol:?}");
+        assert!(
+            std::sync::Arc::ptr_eq(&placements[0].record().image, &placements[1].record().image),
+            "{protocol:?} placements share one image"
+        );
+    }
+}
+
+#[test]
+fn a_repeated_transfer_with_different_pixels_keeps_its_own_image() {
+    let mut engine = sixel_engine();
+    let _ = engine.advance(b"\x1b_Ga=T,i=1,f=32,s=1,v=1,c=1,r=1,C=1;/wAA/w==\x1b\\");
+    let _ = engine.advance(b"\x1b_Ga=T,i=2,f=32,s=1,v=1,c=1,r=1,C=1;AP8A/w==\x1b\\");
+    let events: Vec<_> = engine
+        .take_graphics()
+        .into_iter()
+        .map(|event| event.expect("both transfers succeed"))
+        .collect();
+
+    assert_eq!(events.len(), 2);
+    assert!(!std::sync::Arc::ptr_eq(&events[0].image, &events[1].image));
+    assert_eq!(events[0].image.rgba, vec![255, 0, 0, 255]);
+    assert_eq!(events[1].image.rgba, vec![0, 255, 0, 255]);
+}
+
+#[test]
+fn a_transfer_with_the_same_bytes_but_swapped_dimensions_keeps_its_own_image() {
+    let mut engine = sixel_engine();
+    let _ = engine.advance(b"\x1b_Ga=T,i=1,f=32,s=2,v=1,c=1,r=1,C=1;/wAA/wD/AP8=\x1b\\");
+    let _ = engine.advance(b"\x1b_Ga=T,i=2,f=32,s=1,v=2,c=1,r=1,C=1;/wAA/wD/AP8=\x1b\\");
+    let events: Vec<_> = engine
+        .take_graphics()
+        .into_iter()
+        .map(|event| event.expect("both transfers succeed"))
+        .collect();
+
+    assert_eq!(events.len(), 2);
+    assert_eq!((events[0].image.width, events[0].image.height), (2, 1));
+    assert_eq!((events[1].image.width, events[1].image.height), (1, 2));
+    assert_eq!(events[0].image.rgba, events[1].image.rgba);
+    assert!(!std::sync::Arc::ptr_eq(&events[0].image, &events[1].image));
+}
+
+#[test]
+fn a_kitty_upload_without_a_placement_shares_its_pixels_with_a_later_transfer() {
+    let mut engine = sixel_engine();
+    let _ = engine.advance(b"\x1b_Ga=t,i=1,f=32,s=1,v=1;/wAA/w==\x1b\\");
+    let _ = engine.advance(b"\x1b_Ga=T,i=2,f=32,s=1,v=1,c=1,r=1,C=1;/wAA/w==\x1b\\");
+    let events: Vec<_> = engine
+        .take_graphics()
+        .into_iter()
+        .map(|event| event.expect("both transfers succeed"))
+        .collect();
+
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].action, ImageAction::Transmit);
+    assert!(std::sync::Arc::ptr_eq(&events[0].image, &events[1].image));
+}
+
+#[test]
+fn an_image_scrolled_into_history_shares_its_pixels_with_a_later_transfer() {
+    let mut engine = sixel_engine();
+    let _ = engine.advance(b"\x1b_Ga=T,i=1,f=32,s=1,v=1,c=1,r=1,C=1;/wAA/w==\x1b\\");
+    let _ = engine.advance(b"\r\n\r\n\r\n\r\n\r\n\r\n");
+    assert_eq!(
+        engine.state().image_placements().len(),
+        0,
+        "the first image left the visible screen"
+    );
+    let _ = engine.advance(b"\x1b_Ga=T,i=2,f=32,s=1,v=1,c=1,r=1,C=1;/wAA/w==\x1b\\");
+    let events: Vec<_> = engine
+        .take_graphics()
+        .into_iter()
+        .map(|event| event.expect("both transfers succeed"))
+        .collect();
+
+    assert_eq!(events.len(), 2);
+    assert!(std::sync::Arc::ptr_eq(&events[0].image, &events[1].image));
 }

@@ -173,7 +173,6 @@ fn parse_iterm_meta(data: &[u8], require_inline: bool) -> Result<ItermMeta, Grap
     }
     let mut display = ImageDisplay::default();
     let mut inline = false;
-    let mut seen: Vec<&[u8]> = Vec::new();
     for field in data.split(|byte| *byte == b';') {
         if field.is_empty() {
             continue;
@@ -181,12 +180,6 @@ fn parse_iterm_meta(data: &[u8], require_inline: bool) -> Result<ItermMeta, Grap
         let (key, value) = split_at_byte(field, b'=').ok_or(GraphicsError::InvalidHeader {
             protocol: ITERM_PROTOCOL,
         })?;
-        if seen.contains(&key) {
-            return Err(GraphicsError::InvalidHeader {
-                protocol: ITERM_PROTOCOL,
-            });
-        }
-        seen.push(key);
         match key {
             b"inline" => match value {
                 b"1" => inline = true,
@@ -198,7 +191,7 @@ fn parse_iterm_meta(data: &[u8], require_inline: bool) -> Result<ItermMeta, Grap
                 }
             },
             b"size" => {
-                parse_usize(value)?;
+                check_ascii_decimal(value)?;
             }
             b"width" => display.width = Some(parse_iterm_dimension(value)?),
             b"height" => display.height = Some(parse_iterm_dimension(value)?),
@@ -238,59 +231,76 @@ fn parse_iterm_dimension(value: &[u8]) -> Result<ImageDimension, GraphicsError> 
         return Ok(ImageDimension::Auto);
     }
     if value.ends_with(b"px") {
-        let number = parse_u32(&value[..value.len().saturating_sub(2)])?;
-        if number == 0 {
-            return Err(GraphicsError::InvalidDimensions {
-                protocol: ITERM_PROTOCOL,
-            });
-        }
-        return Ok(ImageDimension::Pixels(number));
+        return match parse_signed_decimal(&value[..value.len().saturating_sub(2)])? {
+            SignedDecimal::NonPositive => Ok(ImageDimension::Pixels(1)),
+            SignedDecimal::Positive(number) => Ok(ImageDimension::Pixels(number)),
+            SignedDecimal::TooLarge => Err(invalid_dimensions()),
+        };
     }
     if value.ends_with(b"%") {
-        let number = parse_u32(&value[..value.len().saturating_sub(1)])?;
-        if number == 0 || number > 100 {
-            return Err(GraphicsError::InvalidDimensions {
-                protocol: ITERM_PROTOCOL,
-            });
-        }
-        return Ok(ImageDimension::Percent(u16::try_from(number).map_err(
-            |_| GraphicsError::InvalidDimensions {
-                protocol: ITERM_PROTOCOL,
-            },
-        )?));
+        return match parse_signed_decimal(&value[..value.len().saturating_sub(1)])? {
+            SignedDecimal::NonPositive => Ok(ImageDimension::Cells(1)),
+            SignedDecimal::Positive(number) => Ok(ImageDimension::Percent(
+                u16::try_from(number.min(100)).expect("a clamped percentage fits in u16"),
+            )),
+            SignedDecimal::TooLarge => Ok(ImageDimension::Percent(100)),
+        };
     }
-    let number = parse_u32(value)?;
-    if number == 0 {
-        return Err(GraphicsError::InvalidDimensions {
-            protocol: ITERM_PROTOCOL,
-        });
+    match parse_signed_decimal(value)? {
+        SignedDecimal::NonPositive => Ok(ImageDimension::Cells(1)),
+        SignedDecimal::Positive(number) => Ok(ImageDimension::Cells(number)),
+        SignedDecimal::TooLarge => Err(invalid_dimensions()),
     }
-    Ok(ImageDimension::Cells(number))
 }
 
-fn parse_u32(data: &[u8]) -> Result<u32, GraphicsError> {
+#[derive(Clone, Copy)]
+enum SignedDecimal {
+    NonPositive,
+    Positive(u32),
+    TooLarge,
+}
+
+fn parse_signed_decimal(data: &[u8]) -> Result<SignedDecimal, GraphicsError> {
+    let (negative, digits) = match data {
+        [b'-', digits @ ..] => (true, digits),
+        [b'+', digits @ ..] => (false, digits),
+        digits => (false, digits),
+    };
+    check_ascii_decimal(digits)?;
+    let mut value = 0u32;
+    for &byte in digits {
+        let Some(next) = value
+            .checked_mul(10)
+            .and_then(|value| value.checked_add(u32::from(byte - b'0')))
+        else {
+            return Ok(if negative {
+                SignedDecimal::NonPositive
+            } else {
+                SignedDecimal::TooLarge
+            });
+        };
+        value = next;
+    }
+    if negative || value == 0 {
+        Ok(SignedDecimal::NonPositive)
+    } else {
+        Ok(SignedDecimal::Positive(value))
+    }
+}
+
+fn check_ascii_decimal(data: &[u8]) -> Result<(), GraphicsError> {
     if data.is_empty() || !data.iter().all(u8::is_ascii_digit) {
         return Err(GraphicsError::InvalidCommand {
             protocol: ITERM_PROTOCOL,
         });
     }
-    let mut value = 0u32;
-    for &byte in data {
-        value = value
-            .checked_mul(10)
-            .and_then(|value| value.checked_add(u32::from(byte - b'0')))
-            .ok_or(GraphicsError::InvalidDimensions {
-                protocol: ITERM_PROTOCOL,
-            })?;
-    }
-    Ok(value)
+    Ok(())
 }
 
-fn parse_usize(data: &[u8]) -> Result<usize, GraphicsError> {
-    let value = parse_u32(data)?;
-    usize::try_from(value).map_err(|_| GraphicsError::InvalidDimensions {
+fn invalid_dimensions() -> GraphicsError {
+    GraphicsError::InvalidDimensions {
         protocol: ITERM_PROTOCOL,
-    })
+    }
 }
 
 fn append_bounded(target: &mut Vec<u8>, bytes: &[u8]) -> Result<(), GraphicsError> {

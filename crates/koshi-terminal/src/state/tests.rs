@@ -918,7 +918,7 @@ fn kitty_transmit_does_not_remove_a_non_kitty_record_with_the_same_id() {
 #[test]
 fn kitty_replacement_does_not_count_non_kitty_records_with_the_same_id() {
     let mut state = TerminalState::new(PtySize { cols: 8, rows: 8 });
-    let mut iterm = image_record(
+    let mut sixel = image_record(
         ImageDisplay {
             width: Some(ImageDimension::Cells(1)),
             height: Some(ImageDimension::Cells(1)),
@@ -930,10 +930,10 @@ fn kitty_replacement_does_not_count_non_kitty_records_with_the_same_id() {
         1,
         1,
     );
-    iterm.protocol = GraphicsProtocol::Iterm2;
+    sixel.protocol = GraphicsProtocol::Sixel;
     for _ in 0..MAX_IMAGE_PLACEMENTS {
         state
-            .apply_image_record(&iterm)
+            .apply_image_record(&sixel)
             .expect("the non-Kitty placement fits");
     }
 

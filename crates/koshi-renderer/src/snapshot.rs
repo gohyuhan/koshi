@@ -774,8 +774,9 @@ impl ImagePlacementSnapshot {
     #[must_use]
     pub fn from_placement(placement: &ImagePlacement) -> Self {
         let (rows, columns) = placement.dimensions();
-        Self::new(
+        Self::with_content_id(
             placement.id(),
+            placement.content_id(),
             placement.render_record_arc(),
             placement.anchor(),
             columns,

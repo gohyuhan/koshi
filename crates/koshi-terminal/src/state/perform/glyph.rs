@@ -199,22 +199,14 @@ impl TerminalState {
     /// narrow cell, an out-of-bounds cell, or a continuation at column 0 is
     /// left as it is.
     pub(super) fn clear_wide_at(&mut self, row: u16, col: u16) {
-        let fill = self.active_render().style.bg_fill();
-        match self.active_grid().cell(row, col).map_or(1, Cell::width) {
-            // Wide base: clear its continuation half on the right.
-            2 => {
-                if let Some(cell) = self.active_grid_mut().cell_mut(row, col + 1) {
-                    *cell = Cell::blank_with(fill);
-                }
-            }
-            // Continuation half: clear the wide base on its left.
-            0 if col > 0 => {
-                if let Some(cell) = self.active_grid_mut().cell_mut(row, col - 1) {
-                    *cell = Cell::blank_with(fill);
-                }
-            }
-            _ => {}
+        let width = self.active_grid().cell(row, col).map_or(1, Cell::width);
+        match width {
+            0 if col > 0 => self.clear_images_at_cells(row, col - 1, 2),
+            2 => self.clear_images_at_cells(row, col, 2),
+            _ => self.clear_images_at_cells(row, col, 1),
         }
+        let fill = self.active_render().style.bg_fill();
+        self.active_grid_mut().clear_wide_at(row, col, fill);
     }
 
     /// Install `base` at (`row`, `col`), first clearing any wide glyph the
@@ -295,6 +287,7 @@ impl TerminalState {
                 _ => false,
             };
             if orphan {
+                self.clear_images_at_cells(row, col, 1);
                 if let Some(cell) = self.active_grid_mut().cell_mut(row, col) {
                     *cell = Cell::blank_with(fill);
                 }

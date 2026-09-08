@@ -427,11 +427,16 @@ impl vte::Perform for TerminalState {
                 let fill = self.active_render().style.bg_fill();
                 let (r, c) = (self.active_cursor().row, self.active_cursor().col);
                 let mode = first_param(params).unwrap_or(0);
+                let mut source_removed = false;
                 match mode {
                     // Cursor to end of screen: rest of this row, then every row
                     // below. A row erased end to end also loses its prompt
                     // mark; the partly erased cursor row keeps its own.
                     0 => {
+                        source_removed |= self.clear_image_fragments_at_cells(r, c, cols);
+                        for row in r.saturating_add(1)..rows {
+                            source_removed |= self.clear_image_fragments_at_cells(row, 0, cols);
+                        }
                         let grid = self.active_grid_mut();
                         grid.clear_line(r, c, cols, fill);
                         for row in r.saturating_add(1)..rows {
@@ -442,6 +447,11 @@ impl vte::Perform for TerminalState {
                     // Start of screen to cursor: every row above, then this row
                     // through the cursor column inclusive.
                     1 => {
+                        for row in 0..r {
+                            source_removed |= self.clear_image_fragments_at_cells(row, 0, cols);
+                        }
+                        source_removed |=
+                            self.clear_image_fragments_at_cells(r, 0, c.saturating_add(1));
                         let grid = self.active_grid_mut();
                         for row in 0..r {
                             grid.clear_line(row, 0, cols, fill);
@@ -451,6 +461,9 @@ impl vte::Perform for TerminalState {
                     }
                     // Whole screen.
                     2 => {
+                        for row in 0..rows {
+                            source_removed |= self.clear_image_fragments_at_cells(row, 0, cols);
+                        }
                         let grid = self.active_grid_mut();
                         for row in 0..rows {
                             grid.clear_line(row, 0, cols, fill);
@@ -464,7 +477,7 @@ impl vte::Perform for TerminalState {
                     // only: on the alternate screen ED 3 falls through to the
                     // `_` arm and changes nothing.
                     3 if self.active == Screen::Primary => {
-                        self.scrollback.clear();
+                        self.clear_scrollback_with_images();
                         self.clear_primary_image_history();
                     }
                     // Unknown ED mode: ignored.
@@ -475,6 +488,7 @@ impl vte::Perform for TerminalState {
                 if matches!(mode, 0..=2) {
                     self.clear_wrap_latch();
                 }
+                self.finish_native_fragment_removal(source_removed);
                 // Only the cursor row can be partially cleared; repair its wide
                 // pairs.
                 self.normalize_wide_pairs(r);
@@ -485,6 +499,12 @@ impl vte::Perform for TerminalState {
                 let fill = self.active_render().style.bg_fill();
                 let (r, c) = (self.active_cursor().row, self.active_cursor().col);
                 let mode = first_param(params).unwrap_or(0);
+                let source_removed = match mode {
+                    0 => self.clear_image_fragments_at_cells(r, c, cols),
+                    1 => self.clear_image_fragments_at_cells(r, 0, c.saturating_add(1)),
+                    2 => self.clear_image_fragments_at_cells(r, 0, cols),
+                    _ => false,
+                };
                 match mode {
                     // Cursor to end of line.
                     0 => self.active_grid_mut().clear_line(r, c, cols, fill),
@@ -508,6 +528,7 @@ impl vte::Perform for TerminalState {
                 if matches!(mode, 0..=2) {
                     self.clear_wrap_latch();
                 }
+                self.finish_native_fragment_removal(source_removed);
                 self.normalize_wide_pairs(r);
             }
             // ECH — erase n cells in place from the cursor (BCE, background color
@@ -519,7 +540,9 @@ impl vte::Perform for TerminalState {
                 let fill = self.active_render().style.bg_fill();
                 let (r, c) = (self.active_cursor().row, self.active_cursor().col);
                 let end = c.saturating_add(n).min(cols);
+                let source_removed = self.clear_image_fragments_at_cells(r, c, end);
                 self.active_grid_mut().clear_line(r, c, end, fill);
+                self.finish_native_fragment_removal(source_removed);
                 self.clear_wrap_latch();
                 self.normalize_wide_pairs(r);
             }
@@ -533,7 +556,15 @@ impl vte::Perform for TerminalState {
                 let n = move_count(params);
                 let fill = self.active_render().style.bg_fill();
                 let (r, c) = (self.active_cursor().row, self.active_cursor().col);
+                let inserted = n.min(cols.saturating_sub(c));
+                let source_removed = self.discard_active_image_fragments(
+                    r,
+                    r.saturating_add(1),
+                    cols.saturating_sub(inserted),
+                    cols,
+                );
                 self.active_grid_mut().insert_cells(r, c, n, fill);
+                self.finish_native_fragment_removal(source_removed);
                 self.normalize_wide_pairs(r);
                 self.clear_wrap_latch();
             }
@@ -543,7 +574,15 @@ impl vte::Perform for TerminalState {
                 let n = move_count(params);
                 let fill = self.active_render().style.bg_fill();
                 let (r, c) = (self.active_cursor().row, self.active_cursor().col);
+                let deleted = n.min(cols.saturating_sub(c));
+                let source_removed = self.discard_active_image_fragments(
+                    r,
+                    r.saturating_add(1),
+                    c,
+                    c.saturating_add(deleted),
+                );
                 self.active_grid_mut().delete_cells(r, c, n, fill);
+                self.finish_native_fragment_removal(source_removed);
                 self.normalize_wide_pairs(r);
                 self.clear_wrap_latch();
             }

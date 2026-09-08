@@ -258,6 +258,7 @@ fn body_carrying_only(quit: Option<CarriedQuit>) -> ResumeBody {
         graphics_tmux_wrapper_active: HashMap::new(),
         graphics_events: HashMap::new(),
         graphics_transport: HashMap::new(),
+        synchronized_output: HashMap::new(),
         quit,
     }
 }
@@ -833,6 +834,7 @@ fn a_header_naming_an_unknown_format_still_reads_back_whole() {
         graphics_tmux_wrapper_active: HashMap::new(),
         graphics_events: HashMap::new(),
         graphics_transport: HashMap::new(),
+        synchronized_output: HashMap::new(),
         quit: None,
     };
     write(&path, &header, &body).expect("write the resume file");
@@ -1290,6 +1292,7 @@ fn a_carried_session_with_its_client_comes_back_whole() {
             graphics_tmux_wrapper_active: HashMap::new(),
             graphics_events: HashMap::new(),
             graphics_transport: HashMap::new(),
+            synchronized_output: HashMap::new(),
             quit: None,
         };
         write(&path, &header, &body).expect("write the resume file");

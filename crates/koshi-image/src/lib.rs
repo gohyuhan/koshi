@@ -12,8 +12,8 @@ pub use animation::{
     LoopPolicy,
 };
 pub use codec::{
-    checked_rgba_len, decode_base64, decode_raster, decompress_bounded, raw_rgb, raw_rgba,
-    validate_dimensions,
+    checked_rgba_len, decode_base64, decode_png, decode_raster, decompress_bounded,
+    decompress_bounded_prefix, raw_rgb, raw_rgba, validate_dimensions,
 };
 pub use error::{GraphicsError, ImagePlacementError};
 pub use limits::{

@@ -32,14 +32,14 @@ pub const MAX_IMAGE_CELL_SNAPSHOT_CELLS: usize = 262_144;
 pub type ImagePlacementKey = (PaneId, ImagePlacementId);
 
 /// The cell facts needed to classify image composition.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageCellState {
     /// The base character in the cell.
     pub ch: char,
     /// The terminal display width of the cell.
     pub width: u8,
-    /// Whether the cell has combining or joined code points.
-    pub has_combining: bool,
+    /// The combining and joined code points after the base character.
+    pub combining: Vec<char>,
     /// The terminal style applied to the cell.
     pub style: CellStyle,
 }
@@ -49,7 +49,7 @@ impl Default for ImageCellState {
         Self {
             ch: ' ',
             width: 1,
-            has_combining: false,
+            combining: Vec::new(),
             style: CellStyle::default(),
         }
     }
@@ -76,7 +76,7 @@ impl ImageCellSnapshot {
 
     /// Return the cell at an absolute frame position.
     #[must_use]
-    pub fn cell(&self, x: u16, y: u16) -> Option<ImageCellState> {
+    pub fn cell(&self, x: u16, y: u16) -> Option<&ImageCellState> {
         if x < self.area.x || y < self.area.y || x >= self.area.right() || y >= self.area.bottom() {
             return None;
         }
@@ -85,7 +85,7 @@ impl ImageCellSnapshot {
         let index = row
             .checked_mul(usize::from(self.area.width))?
             .checked_add(column)?;
-        self.cells.get(index).copied()
+        self.cells.get(index)
     }
 }
 
@@ -143,11 +143,18 @@ pub fn image_cell_snapshot(
                 let index = usize::from(y - area.y)
                     .checked_mul(usize::from(area.width))?
                     .checked_add(usize::from(x - area.x))?;
+                let selected = pane
+                    .selection
+                    .as_ref()
+                    .and_then(|selection| selection.row_span(grid_row))
+                    .is_some_and(|(start, end)| grid_column >= start && grid_column <= end);
+                let mut style = cell.style();
+                style.set_reverse(style.attrs().reverse() ^ pane.reverse_video ^ selected);
                 values[index] = ImageCellState {
                     ch: cell.ch(),
                     width: cell.width(),
-                    has_combining: !cell.combining().is_empty(),
-                    style: cell.style(),
+                    combining: cell.combining().to_vec(),
+                    style,
                 };
             }
         }
@@ -163,7 +170,7 @@ pub fn image_cell_snapshot(
 pub enum ImageRenderMode {
     /// Paint image rectangles with the unsupported-image text.
     Placeholder,
-    /// Keep ordinary cells beneath a native Kitty protocol writer.
+    /// Keep prepared image cells unchanged for native protocol output.
     Native,
 }
 
@@ -265,7 +272,7 @@ pub fn image_paints(
     let mut paints = Vec::new();
     let mut order = 0;
 
-    for (pane_order, slot) in snapshot.session.active_tab.layout_solved.iter().enumerate() {
+    for slot in &snapshot.session.active_tab.layout_solved {
         if !slot.visible {
             continue;
         }
@@ -312,11 +319,7 @@ pub fn image_paints(
             let z_index = record.display.z_index;
             let mut paint =
                 ImagePaint::new(pane.id, placement.id(), record, target, source, z_index)
-                    .with_order(
-                        pane_order
-                            .saturating_mul(placement_order_limit())
-                            .saturating_add(order),
-                    );
+                    .with_order(order);
             paint.content_id = placement.content_id();
             paint.cell_offset_x = cell_offset_x;
             paint.cell_offset_y = cell_offset_y;
@@ -533,11 +536,6 @@ fn source_span(start: u32, end: u32, cells: u32, pixels: u32) -> (u32, u32) {
     } else {
         (start, 0)
     }
-}
-
-/// Keep the pane-order component separate from the placement sequence.
-fn placement_order_limit() -> usize {
-    usize::from(u16::MAX) + 1
 }
 
 #[cfg(test)]

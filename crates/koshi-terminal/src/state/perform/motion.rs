@@ -30,7 +30,7 @@ impl TerminalState {
         n: u16,
         fill: Style,
     ) {
-        let (grid_rows, _) = self.active_grid().dimensions();
+        let (grid_rows, grid_columns) = self.active_grid().dimensions();
         if grid_rows == 0 || first > bottom || first >= grid_rows {
             return;
         }
@@ -39,15 +39,42 @@ impl TerminalState {
         let shift = n.min(band_height);
         let old_live_top = self.scrollback.total_pushed();
         let feeds_history = self.active == Screen::Primary && first == 0;
+        let mut source_removed = false;
         if feeds_history {
-            for row in 0..shift {
-                if let Some(scrolled_off) = self.primary.rows().get(row as usize) {
-                    let meta = self.primary.row_meta(row);
-                    self.scrollback.push_row(scrolled_off, meta);
+            if self.native_fragment_counts.is_empty() {
+                for row in 0..shift {
+                    if let Some(scrolled_off) = self.primary.rows().get(row as usize) {
+                        let meta = self.primary.row_meta(row);
+                        self.scrollback.push_row(scrolled_off, meta);
+                    }
+                }
+            } else {
+                let primary = &self.primary;
+                let scrollback = &mut self.scrollback;
+                let counts = &mut self.native_fragment_counts;
+                for row in 0..shift {
+                    if let Some(scrolled_off) = primary.rows().get(row as usize) {
+                        let meta = primary.row_meta(row);
+                        scrollback.push_row_with_evicted(scrolled_off, meta, |evicted| {
+                            source_removed |=
+                                super::super::images::discard_native_fragment_references(
+                                    counts,
+                                    evicted.iter(),
+                                );
+                        });
+                    }
                 }
             }
+        } else {
+            source_removed |= self.discard_active_image_fragments(
+                first,
+                first.saturating_add(shift),
+                0,
+                grid_columns,
+            );
         }
         self.active_grid_mut().delete_lines(first, bottom, n, fill);
+        self.finish_native_fragment_removal(source_removed);
 
         if shift == 0 {
             return;
@@ -64,7 +91,7 @@ impl TerminalState {
         n: u16,
         fill: Style,
     ) {
-        let (grid_rows, _) = self.active_grid().dimensions();
+        let (grid_rows, grid_columns) = self.active_grid().dimensions();
         if grid_rows == 0 || first > bottom || first >= grid_rows {
             return;
         }
@@ -72,7 +99,14 @@ impl TerminalState {
         let band_height = bottom.saturating_sub(first).saturating_add(1);
         let shift = n.min(band_height);
         let live_top = self.scrollback.total_pushed();
+        let source_removed = self.discard_active_image_fragments(
+            bottom.saturating_add(1).saturating_sub(shift),
+            bottom.saturating_add(1),
+            0,
+            grid_columns,
+        );
         self.active_grid_mut().insert_lines(first, bottom, n, fill);
+        self.finish_native_fragment_removal(source_removed);
 
         if shift == 0 {
             return;

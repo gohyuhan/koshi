@@ -46,6 +46,7 @@ fn default_loads_with_expected_values() {
     assert_eq!(server.remote_listen, None);
     assert_eq!(server.shared_sessions_dir, None);
     assert!(!server.auto_close_session);
+    assert!(config.image_support);
     assert!(config.remote_reconnect);
 
     assert_eq!(config.keybindings.chord_timeout_ms, 500);

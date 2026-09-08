@@ -46,7 +46,8 @@ use crate::types::{
 /// set. Merging never fails: an empty layer leaves the config unchanged.
 ///
 /// A layer's viewer-owned sections (theme, keybindings, mouse, copy, layout,
-/// update) are skipped here and folded by [`merge_client`] instead.
+/// update, image support) are skipped here and folded by [`merge_client`]
+/// instead.
 pub fn merge_server(base: ServerConfig, layers: Vec<PartialKoshiConfig>) -> ServerConfig {
     let mut config = base;
     for layer in layers {
@@ -174,6 +175,8 @@ pub struct PartialKoshiConfig {
     pub logging: Option<PartialLoggingConfig>,
     /// Self-update overrides.
     pub update: Option<PartialUpdateConfig>,
+    /// Native image support override.
+    pub image_support: Option<bool>,
     /// Remote-reconnect override.
     pub remote_reconnect: Option<bool>,
     /// Beta-feature gate override.
@@ -242,6 +245,7 @@ impl PartialKoshiConfig {
         if let Some(update) = self.update {
             update.apply(&mut config.update);
         }
+        merge_field(&mut config.image_support, self.image_support);
         merge_field(&mut config.remote_reconnect, self.remote_reconnect);
     }
 

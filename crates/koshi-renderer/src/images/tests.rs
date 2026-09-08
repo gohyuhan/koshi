@@ -24,7 +24,7 @@ use koshi_terminal::style::Style;
 use crate::snapshot::{
     ClientSnapshot, CommittedRegions, CursorSnapshot, GridView, ImagePlacementSnapshot,
     KeymapHints, PaneSlot, PaneSnapshot, PluginUiSnapshot, RenderSnapshot, ScrollbackMeta,
-    SessionSnapshot, TabMeta, TabSnapshot, ViewerChrome,
+    SelectionSpans, SessionSnapshot, TabMeta, TabSnapshot, ViewerChrome,
 };
 use crate::theme::Theme;
 
@@ -141,6 +141,115 @@ fn regions() -> CommittedRegions {
         },
         0,
     )
+}
+
+#[test]
+fn image_cell_snapshot_keeps_exact_combining_characters() {
+    let mut snapshot = snapshot(
+        PaneId::new(),
+        Rect {
+            origin: Point { x: 1, y: 1 },
+            size: Size { cols: 8, rows: 5 },
+        },
+        vec![],
+        true,
+        true,
+        false,
+    );
+    let grid = Arc::make_mut(&mut snapshot.panes[0].grid_view.as_mut().unwrap().grid);
+    let mut first = Cell::new('e', 1, Style::default());
+    first.push_combining('\u{301}');
+    *grid.cell_mut(0, 0).unwrap() = first;
+    let mut second = Cell::new('e', 1, Style::default());
+    second.push_combining('\u{300}');
+    *grid.cell_mut(0, 1).unwrap() = second;
+    let cells = image_cell_snapshot(&snapshot, &regions(), RatatuiRect::new(0, 0, 40, 8)).unwrap();
+    assert_eq!(
+        cells.cell(1, 1),
+        Some(&ImageCellState {
+            ch: 'e',
+            width: 1,
+            combining: vec!['\u{301}'],
+            style: Style::default(),
+        })
+    );
+    assert_eq!(
+        cells.cell(2, 1),
+        Some(&ImageCellState {
+            ch: 'e',
+            width: 1,
+            combining: vec!['\u{300}'],
+            style: Style::default(),
+        })
+    );
+}
+
+#[test]
+fn image_cell_snapshot_matches_screen_reverse_and_selection() {
+    let pane_id = PaneId::new();
+    let mut snapshot = snapshot(
+        pane_id,
+        Rect {
+            origin: Point { x: 1, y: 1 },
+            size: Size { cols: 8, rows: 5 },
+        },
+        vec![],
+        true,
+        true,
+        false,
+    );
+    snapshot.panes[0].reverse_video = true;
+    snapshot.panes[0].selection = Some(SelectionSpans {
+        rows: vec![(0, 0, 0)],
+    });
+    let grid = Arc::make_mut(&mut snapshot.panes[0].grid_view.as_mut().unwrap().grid);
+    let mut reversed = Style::default();
+    reversed.set_reverse(true);
+    *grid.cell_mut(0, 0).unwrap() = Cell::new('a', 1, reversed);
+    *grid.cell_mut(0, 1).unwrap() = Cell::new('b', 1, Style::default());
+    let mut reversed_without_selection = Style::default();
+    reversed_without_selection.set_reverse(true);
+    *grid.cell_mut(0, 2).unwrap() = Cell::new('c', 1, reversed_without_selection);
+
+    let cells = image_cell_snapshot(&snapshot, &regions(), RatatuiRect::new(0, 0, 40, 8)).unwrap();
+
+    assert!(cells.cell(1, 1).unwrap().style.attrs().reverse());
+    assert!(cells.cell(2, 1).unwrap().style.attrs().reverse());
+    assert!(!cells.cell(3, 1).unwrap().style.attrs().reverse());
+}
+
+#[test]
+fn image_order_is_one_global_sequence_across_panes() {
+    let pane_id = PaneId::new();
+    let mut snapshot = snapshot(
+        pane_id,
+        Rect {
+            origin: Point { x: 1, y: 1 },
+            size: Size { cols: 8, rows: 5 },
+        },
+        vec![ImagePlacementSnapshot::new(1, record(1, 1, 0), (0, 0), 1, 1).unwrap()],
+        true,
+        true,
+        false,
+    );
+    let mut second = snapshot.panes[0].clone();
+    second.id = PaneId::new();
+    let mut slot = snapshot.session.active_tab.layout_solved[0].clone();
+    slot.pane_id = second.id;
+    slot.inner_rect.as_mut().unwrap().origin.x = 10;
+    snapshot.panes.push(second);
+    snapshot.session.active_tab.layout_solved.push(slot);
+    let paints = image_paints(&snapshot, &regions(), RatatuiRect::new(0, 0, 40, 8));
+    assert_eq!(
+        paints
+            .iter()
+            .map(|paint| (paint.target, paint.order))
+            .collect::<Vec<_>>(),
+        [
+            (RatatuiRect::new(1, 1, 1, 1), 0),
+            (RatatuiRect::new(10, 1, 1, 1), 1)
+        ]
+    );
 }
 
 #[test]
@@ -686,4 +795,40 @@ fn native_mode_keeps_image_cells_and_placeholder_mode_writes_the_label() {
         .content()
         .iter()
         .all(|cell| !cell.symbol().contains('\u{1b}')));
+
+    let mut unavailable = Buffer::empty(area);
+    crate::render::render_frame_with_image_availability(
+        &snapshot,
+        &regions(),
+        &theme,
+        &hints,
+        None,
+        ViewerChrome::default(),
+        ImageRenderMode::Native,
+        Some(&[]),
+        area,
+        &mut unavailable,
+    );
+    let unavailable_text: String = (1..5)
+        .map(|column| unavailable[(column, 1)].symbol())
+        .collect();
+    assert_eq!(unavailable_text, "term");
+
+    let mut available = Buffer::empty(area);
+    crate::render::render_frame_with_image_availability(
+        &snapshot,
+        &regions(),
+        &theme,
+        &hints,
+        None,
+        ViewerChrome::default(),
+        ImageRenderMode::Native,
+        Some(&[(pane_id, 1)]),
+        area,
+        &mut available,
+    );
+    let available_text: String = (1..5)
+        .map(|column| available[(column, 1)].symbol())
+        .collect();
+    assert_eq!(available_text, "X   ");
 }

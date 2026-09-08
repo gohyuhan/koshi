@@ -67,6 +67,7 @@ const SECTIONS: &[&str] = &[
     "copy",
     "terminal",
     "logging",
+    "image-support",
     "remote-reconnect",
     "allow-beta-features",
     "allow-other-users",
@@ -142,6 +143,12 @@ pub fn parse_app_config(path: &Path, source: &str) -> Result<AppConfigFile, Conf
             "copy" => partial.copy = Some(parse_copy(node, &mut warnings)),
             "terminal" => partial.terminal = Some(parse_terminal(node, &mut warnings)),
             "logging" => partial.logging = Some(parse_logging(node, &mut warnings)),
+            "image-support" => set_top_level(
+                &mut partial.image_support,
+                value_bool(node),
+                name,
+                &mut warnings,
+            ),
             "remote-reconnect" => set_top_level(
                 &mut partial.remote_reconnect,
                 value_bool(node),

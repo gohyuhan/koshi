@@ -325,6 +325,34 @@ fn building_a_snapshot_leaves_terminal_image_state_unchanged() {
 }
 
 #[test]
+fn native_image_fragments_keep_one_content_id_across_snapshot_placements() {
+    let mut rt = new_runtime();
+    let (session, session_id, _tab_id, pane_id, client_id) =
+        session_with_client(Size { cols: 80, rows: 24 });
+    rt.sessions.insert(session_id, session);
+
+    let image = b"\x1b]1337;File=inline=1;width=3;height=1;preserveAspectRatio=0:iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=\x07";
+    let mut engine = TerminalEngine::new(PtySize { cols: 80, rows: 24 });
+    let mut output = image.to_vec();
+    output.extend_from_slice(b"\x1b[1;2Hx");
+    let _ = engine.advance(&output);
+
+    let fragments = engine.state().image_placements_for_view(0);
+    assert_eq!(fragments.len(), 2);
+    assert_ne!(fragments[0].id(), fragments[1].id());
+    assert_eq!(fragments[0].content_id(), fragments[1].content_id());
+    let content_id = fragments[0].content_id();
+    rt.terminal_engines.insert(pane_id, engine);
+
+    let snapshot = rt.build_snapshot(client_id).expect("snapshot");
+    let placements = &snapshot.panes[0].image_placements;
+    assert_eq!(placements.len(), 2);
+    assert_ne!(placements[0].id(), placements[1].id());
+    assert_eq!(placements[0].content_id(), content_id);
+    assert_eq!(placements[1].content_id(), content_id);
+}
+
+#[test]
 fn effective_size_is_the_min_viewport_across_clients_not_the_requesters() {
     let mut rt = new_runtime();
     let (mut session, session_id, tab_id, pane_id, big_client) =

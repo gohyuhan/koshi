@@ -202,6 +202,13 @@ pub fn new_pane_direction(app: Option<PartialKoshiConfig>) -> Direction {
         .new_pane_direction
 }
 
+/// Whether this viewer sends native image output to its terminal: `app`'s
+/// `image-support` folded onto the built-in default. `None` gives `true`.
+#[must_use]
+pub fn image_support(app: Option<PartialKoshiConfig>) -> bool {
+    merge_client(ClientConfig::default(), app.into_iter().collect()).image_support
+}
+
 /// The file's text, or `None` when it is absent (not an error) or unreadable.
 /// A read failure is recorded in `warnings`.
 fn read(path: &Path, warnings: &mut Vec<String>) -> Option<String> {

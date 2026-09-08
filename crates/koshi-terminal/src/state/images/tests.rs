@@ -162,3 +162,112 @@ fn gapless_kitty_style_frames_are_skipped_without_a_visible_intermediate_frame()
         [0, 255, 0, 255]
     );
 }
+
+#[test]
+fn image_storage_counts_shared_animation_and_raster_pixels_once() {
+    let mut state = TerminalState::new(PtySize { cols: 2, rows: 2 });
+    state.set_cell_size(koshi_core::geometry::PixelCellSize::new(1, 1).expect("cell size"));
+    state
+        .apply_image_record(&animated_record(LoopPolicy::Infinite, 10))
+        .expect("the animated image fits");
+    let content = Arc::clone(&state.primary_image_placements[0].content);
+    state.primary_image_placements[0].raster = Some(Arc::clone(&content.image));
+
+    assert_eq!(state.image_storage_bytes(), 8);
+    assert!(Arc::ptr_eq(
+        &content.image,
+        &content.animation.as_ref().expect("animation").frames()[0].image_shared()
+    ));
+
+    let restored: TerminalState = serde_json::from_value(
+        serde_json::to_value(&state).expect("the terminal state serializes"),
+    )
+    .expect("the terminal state restores");
+    let restored = &restored.primary_image_placements[0];
+    assert!(Arc::ptr_eq(
+        &restored.content.image,
+        &restored
+            .content
+            .animation
+            .as_ref()
+            .expect("animation")
+            .frames()[0]
+            .image_shared()
+    ));
+    assert_eq!(restored.raster, None);
+}
+
+#[test]
+fn shared_animation_pixels_fill_the_storage_limit_once() {
+    let frame_bytes = MAX_IMAGE_STORAGE_BYTES / 2;
+    let width = 8_192;
+    let height = u32::try_from(frame_bytes / 4 / width).expect("height fits");
+    let first = Arc::new(DecodedImage {
+        width: width as u32,
+        height,
+        rgba: vec![1; frame_bytes],
+    });
+    let second = Arc::new(DecodedImage {
+        width: width as u32,
+        height,
+        rgba: vec![2; frame_bytes],
+    });
+    let animation = Arc::new(
+        DecodedAnimation::new(
+            vec![
+                AnimationFrame::new(Arc::clone(&first), FrameDelay::new(10, 1).expect("delay"))
+                    .expect("first frame"),
+                AnimationFrame::new(Arc::clone(&second), FrameDelay::new(10, 1).expect("delay"))
+                    .expect("second frame"),
+            ],
+            LoopPolicy::Infinite,
+        )
+        .expect("the animation fills the image limit"),
+    );
+    let record = ImageRecord {
+        protocol: GraphicsProtocol::Kitty,
+        image: first,
+        animation: Some(animation),
+        action: ImageAction::TransmitAndDisplay,
+        display: ImageDisplay {
+            image_id: Some(1),
+            cell_columns: Some(1),
+            cell_rows: Some(1),
+            move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        anchor: (0, 0),
+    };
+    let mut state = TerminalState::new(PtySize { cols: 2, rows: 2 });
+
+    state
+        .apply_image_record(&record)
+        .expect("shared current-frame pixels are charged once");
+    assert_eq!(state.image_storage_bytes(), MAX_IMAGE_STORAGE_BYTES);
+    let before = state.clone();
+    let extra = ImageRecord {
+        protocol: GraphicsProtocol::Kitty,
+        image: Arc::new(DecodedImage {
+            width: 1,
+            height: 1,
+            rgba: vec![3; 4],
+        }),
+        animation: None,
+        action: ImageAction::Transmit,
+        display: ImageDisplay {
+            image_id: Some(2),
+            ..ImageDisplay::default()
+        },
+        anchor: (0, 0),
+    };
+
+    assert_eq!(
+        state.apply_image_record(&extra),
+        Err(ImagePlacementError::StorageLimit {
+            used_bytes: MAX_IMAGE_STORAGE_BYTES,
+            requested_bytes: 4,
+            limit_bytes: MAX_IMAGE_STORAGE_BYTES,
+        })
+    );
+    assert_eq!(state, before);
+}

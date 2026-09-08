@@ -122,6 +122,8 @@ pub struct ClientConfig {
     pub logging: LoggingConfig,
     /// Self-update checking behavior.
     pub update: UpdateConfig,
+    /// Whether this viewer sends native image protocols to its terminal.
+    pub image_support: bool,
     /// Whether a viewer whose link to a session on another machine drops dials
     /// that machine again by itself. While it dials, the viewer draws
     /// `RECONNECTING` on its tab strip and keeps trying for up to 120 seconds,
@@ -144,6 +146,7 @@ impl Default for ClientConfig {
             theme: ThemeConfig::default(),
             logging: LoggingConfig::default(),
             update: UpdateConfig::default(),
+            image_support: true,
             remote_reconnect: true,
         }
     }

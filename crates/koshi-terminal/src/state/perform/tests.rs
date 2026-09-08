@@ -491,22 +491,24 @@ fn ed_2_erases_the_whole_screen() {
 }
 
 #[test]
-fn glyph_writes_remove_overlapped_image_placements() {
+fn glyph_writes_preserve_overlapped_kitty_placements() {
     let mut state = state(8, 6);
     let image = image_record((2, 2), 2, 2);
     state
         .apply_image_record(&image)
         .expect("the image fits the grid");
 
+    let expected_placements = state.image_placements().to_vec();
+
     advance(&mut state, b"\x1b[1;1HA\x1b[3;3HB\x1b[5;5HC");
     assert_eq!(glyph(&state, 0, 0), Some('A'));
     assert_eq!(glyph(&state, 2, 2), Some('B'));
     assert_eq!(glyph(&state, 4, 4), Some('C'));
-    assert!(state.image_placements().is_empty());
+    assert_eq!(state.image_placements(), expected_placements);
 }
 
 #[test]
-fn cell_operations_keep_image_metadata_until_a_glyph_writes_the_cells() {
+fn cell_operations_and_glyph_writes_preserve_kitty_placements() {
     let mut state = state(8, 6);
     let image = image_record((2, 2), 2, 2);
     state
@@ -531,7 +533,7 @@ fn cell_operations_keep_image_metadata_until_a_glyph_writes_the_cells() {
     }
 
     advance(&mut state, b"\x1b[3;3HB");
-    assert!(state.image_placements().is_empty());
+    assert_eq!(state.image_placements(), expected_placements);
 }
 
 #[test]

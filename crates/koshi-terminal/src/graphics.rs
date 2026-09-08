@@ -312,6 +312,8 @@ pub(crate) struct GraphicsParser {
     kitty_transfer: Option<KittyTransfer>,
     kitty_animation_transfer: Option<KittyAnimationTransfer>,
     iterm_transfer: Option<ItermTransfer>,
+    utf8_continuations: u8,
+    utf8_pending: Vec<u8>,
 }
 
 pub(crate) struct GraphicsAdvance {
@@ -337,6 +339,8 @@ impl Default for GraphicsParser {
             kitty_transfer: None,
             kitty_animation_transfer: None,
             iterm_transfer: None,
+            utf8_continuations: 0,
+            utf8_pending: Vec::new(),
         }
     }
 }
@@ -407,6 +411,10 @@ impl GraphicsParser {
         let mut byte_events = Vec::new();
         let mut offset = 0;
         while offset < bytes.len() {
+            if self.consume_utf8_byte(bytes[offset]) {
+                offset += 1;
+                continue;
+            }
             if let Some(consumed) = self.feed_discard_data(&bytes[offset..]) {
                 offset += consumed;
                 continue;
@@ -448,6 +456,36 @@ impl GraphicsParser {
             events,
             terminal_inert,
         }
+    }
+
+    fn consume_utf8_byte(&mut self, byte: u8) -> bool {
+        if !matches!(self.state, GraphicsState::Ground) {
+            return false;
+        }
+        if self.utf8_continuations != 0 {
+            if (byte & 0xc0) == 0x80 {
+                self.utf8_continuations -= 1;
+                self.utf8_pending.push(byte);
+                if self.utf8_continuations == 0 {
+                    self.utf8_pending.clear();
+                }
+                return true;
+            }
+            self.utf8_continuations = 0;
+            self.utf8_pending.clear();
+        }
+        let Some(continuations) = (match byte {
+            0xc2..=0xdf => Some(1),
+            0xe0..=0xef => Some(2),
+            0xf0..=0xf4 => Some(3),
+            _ => None,
+        }) else {
+            return false;
+        };
+        self.utf8_continuations = continuations;
+        self.utf8_pending.clear();
+        self.utf8_pending.push(byte);
+        true
     }
 
     /// Advance one data run in a discarded control string.
@@ -593,6 +631,9 @@ impl GraphicsParser {
     /// exceeded the carry bound and must not be resumed from its opening.
     pub(crate) fn carry_bytes(&self) -> Option<&[u8]> {
         if matches!(self.state, GraphicsState::Ground) {
+            if !self.utf8_pending.is_empty() {
+                return Some(&self.utf8_pending);
+            }
             if let Some(inner) = &self.screen_inner {
                 return inner.carry_bytes();
             }
@@ -623,6 +664,8 @@ impl GraphicsParser {
         let (carry, carryable) = if matches!(self.state, GraphicsState::Ground) {
             if self.has_own_transfer() {
                 (self.transfer_carry.clone(), self.transfer_carryable)
+            } else if !self.utf8_pending.is_empty() {
+                (self.utf8_pending.clone(), true)
             } else {
                 (Vec::new(), true)
             }
@@ -717,6 +760,7 @@ impl GraphicsParser {
             || self.tmux_continuation
             || self.tmux_inner.is_some()
             || self.has_open_transfer()
+            || !self.utf8_pending.is_empty()
     }
 
     /// Return whether the next DCS is a GNU Screen continuation wrapper.
@@ -905,6 +949,8 @@ impl GraphicsParser {
         self.tmux_continuation = false;
         self.screen_inner = None;
         self.tmux_inner = None;
+        self.utf8_continuations = 0;
+        self.utf8_pending.clear();
         events
     }
 
@@ -1641,8 +1687,32 @@ impl GraphicsParser {
             }
         }
         let first_event = events.len();
+        let command = (!parser.is_ignored())
+            .then(|| parse_command(parser.header(), parser.payload()))
+            .flatten();
         if parser.is_ignored() {
             self.reset();
+        } else if command.as_ref().is_some_and(|command| {
+            command.as_ref().is_ok_and(|command| {
+                matches!(
+                    command.kind(),
+                    KittyCommandKind::Delete(_) | KittyCommandKind::AnimationDelete
+                )
+            })
+        }) {
+            self.kitty_transfer = None;
+            self.kitty_animation_transfer = None;
+            if self.abandoned_transfer == Some(GraphicsProtocol::Kitty) {
+                self.abandoned_transfer = None;
+            }
+            self.transfer_carry.clear();
+            self.transfer_carryable = true;
+            self.reset();
+            events.push(
+                command
+                    .expect("the parsed command is present")
+                    .map(GraphicsOperation::Command),
+            );
         } else if self.kitty_animation_transfer.is_some()
             || kitty_animation_transfer_header(parser.header())
         {
@@ -1669,18 +1739,8 @@ impl GraphicsParser {
                 self.transfer_carry.clear();
                 self.transfer_carryable = true;
             }
-        } else if let Some(command) = parse_command(parser.header(), parser.payload()) {
-            if command
-                .as_ref()
-                .is_ok_and(|command| matches!(command.kind(), KittyCommandKind::Delete(_)))
-            {
-                self.kitty_transfer = None;
-                if self.abandoned_transfer == Some(GraphicsProtocol::Kitty) {
-                    self.abandoned_transfer = None;
-                }
-                self.transfer_carry.clear();
-                self.transfer_carryable = true;
-            } else if self.kitty_transfer.is_some() || self.abandoned_transfer.is_some() {
+        } else if let Some(command) = command {
+            if self.kitty_transfer.is_some() || self.abandoned_transfer.is_some() {
                 self.finish_state(
                     Err(GraphicsError::InvalidCommand {
                         protocol: GraphicsProtocol::Kitty,
@@ -1955,6 +2015,8 @@ impl GraphicsParser {
         self.pending.clear();
         self.carryable = true;
         self.sequence_bytes = 0;
+        self.utf8_continuations = 0;
+        self.utf8_pending.clear();
     }
 
     fn cancel_transfers(&mut self) {
