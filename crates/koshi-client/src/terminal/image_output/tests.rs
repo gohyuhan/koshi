@@ -1951,10 +1951,6 @@ fn a_failed_kitty_encode_transmits_its_pixels_again() {
     state.commit_frame();
     assert!(state.kitty_images.is_empty());
 
-    state.active = None;
-    state.settled = false;
-    state.latest.clear();
-    state.latest_keys.clear();
     assert!(!state.prepare_frame(&[placed()], None, None));
     let retried = requests
         .try_recv()
@@ -1966,6 +1962,65 @@ fn a_failed_kitty_encode_transmits_its_pixels_again() {
             transmit: true,
         }]
     );
+}
+
+#[test]
+fn a_failed_iterm_or_sixel_encode_retries_an_unchanged_frame() {
+    for kind in [
+        ImageOutputKind::Iterm,
+        ImageOutputKind::Sixel {
+            palette_colors: 256,
+            max_width: None,
+            max_height: None,
+        },
+    ] {
+        let source = paint(vec![255, 0, 0, 255], 1, 1, 0);
+        let placed = ImagePaint::new(
+            source.key.0,
+            source.key.1,
+            Arc::clone(&source.record),
+            source.target,
+            source.source,
+            source.z_index,
+        );
+        let mut state = ImageOutputState::disabled();
+        state.kind = Some(kind);
+        let (sender, requests) = mpsc::sync_channel(4);
+        state.requests = Some(sender);
+        let (messages, inbox) = mpsc::sync_channel(4);
+        state.messages = Some(inbox);
+        let cells = Arc::new(blank_snapshot(Rect::new(0, 0, 1, 1)));
+        let cell_size = PixelCellSize::new(1, 1).expect("one-pixel cell");
+
+        assert!(
+            !state.prepare_frame(
+                std::slice::from_ref(&placed),
+                Some(Arc::clone(&cells)),
+                Some(cell_size),
+            ),
+            "{kind:?} did not submit the first frame"
+        );
+        let job = requests
+            .try_recv()
+            .expect("the first frame reaches the worker");
+        messages
+            .send(WorkerMessage::Finished {
+                generation: job.generation,
+                failed: true,
+            })
+            .expect("the failure reaches the state");
+        state.poll();
+
+        assert!(
+            !state.prepare_frame(std::slice::from_ref(&placed), Some(cells), Some(cell_size),),
+            "{kind:?} did not resubmit the unchanged frame"
+        );
+        let retried = requests
+            .try_recv()
+            .expect("the unchanged frame reaches the worker again");
+        assert_eq!(retried.generation, job.generation + 2, "{kind:?}");
+        assert_eq!(retried.keys, job.keys, "{kind:?} changed the frame key");
+    }
 }
 
 #[test]

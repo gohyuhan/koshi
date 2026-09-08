@@ -1069,6 +1069,8 @@ impl ImageOutputState {
         }
         self.next_generation();
         self.clear_prepared_output();
+        self.latest_keys.clear();
+        self.latest_coverage.clear();
         self.pending_kitty_images.clear();
         self.ready = true;
     }
