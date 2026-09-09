@@ -148,13 +148,7 @@ impl EventSource {
     }
 
     fn resize_event(&self) -> io::Result<Event> {
-        let size = termios::tcgetwinsize(&self.size)?;
-        Ok(Event::WindowResized(WindowSize {
-            cols: size.ws_col,
-            rows: size.ws_row,
-            pixel_width: nonzero(size.ws_xpixel),
-            pixel_height: nonzero(size.ws_ypixel),
-        }))
+        Ok(Event::WindowResized(window_size_of(&self.size)?))
     }
 }
 
@@ -244,6 +238,24 @@ fn terminal_input() -> io::Result<File> {
     } else {
         open_controlling_terminal()
     }
+}
+
+/// Read the current window size of the terminal that receives rendered frames.
+///
+/// The pixel fields are `None` when the terminal reports them as `0`.
+pub(crate) fn window_size() -> io::Result<WindowSize> {
+    window_size_of(&terminal_output()?)
+}
+
+/// Read one terminal's window size through `TIOCGWINSZ`.
+fn window_size_of(terminal: &File) -> io::Result<WindowSize> {
+    let size = termios::tcgetwinsize(terminal)?;
+    Ok(WindowSize {
+        cols: size.ws_col,
+        rows: size.ws_row,
+        pixel_width: nonzero(size.ws_xpixel),
+        pixel_height: nonzero(size.ws_ypixel),
+    })
 }
 
 fn terminal_output() -> io::Result<File> {

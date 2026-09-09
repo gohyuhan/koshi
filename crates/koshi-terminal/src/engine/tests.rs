@@ -303,6 +303,47 @@ fn a_graphics_image_byte_limit_drops_the_next_image() {
 }
 
 #[test]
+fn queued_graphics_events_are_readable_without_draining() {
+    let mut engine = TerminalEngine::new(PtySize { cols: 4, rows: 4 });
+    assert_eq!(engine.advance(&sixel_register_image(100, 0, 0)), b"");
+
+    let expected = Err(GraphicsError::PlacementRejected {
+        protocol: GraphicsProtocol::Sixel,
+        reason: ImagePlacementError::MissingCellDimensions {
+            width: None,
+            height: None,
+        },
+    });
+    assert_eq!(
+        engine.graphics_events().cloned().collect::<Vec<_>>(),
+        vec![expected.clone()]
+    );
+    assert_eq!(engine.graphics_events().count(), 1);
+    assert_eq!(engine.take_graphics(), vec![expected]);
+    assert_eq!(engine.graphics_events().count(), 0);
+}
+
+#[test]
+fn dropped_graphics_errors_are_counted_separately_from_dropped_images() {
+    let mut engine = TerminalEngine::new(PtySize { cols: 4, rows: 4 });
+    let image = sixel_register_image(100, 0, 0);
+
+    for _ in 0..=MAX_GRAPHICS_EVENTS {
+        assert_eq!(engine.advance(&image), b"");
+    }
+
+    assert_eq!(engine.graphics_events().count(), MAX_GRAPHICS_EVENTS);
+    assert_eq!(engine.graphics_errors_dropped(), 1);
+    let events = engine.take_graphics();
+    assert_eq!(events.len(), MAX_GRAPHICS_EVENT_BATCH);
+    assert_eq!(
+        events.last(),
+        Some(&Err(GraphicsError::QueueFull { dropped: 1 }))
+    );
+    assert_eq!(engine.graphics_errors_dropped(), 0);
+}
+
+#[test]
 fn rejected_graphics_placements_do_not_consume_the_image_byte_budget() {
     let mut engine = engine();
     let rejected = || DecodedGraphics {

@@ -182,8 +182,6 @@ struct TerminalProbe {
     graphics: GraphicsSupport,
     /// The cell dimensions reported by the terminal, if valid.
     cell_size: Option<PixelCellSize>,
-    /// Whether the probe's CSI 16t request still awaits an outer-terminal reply.
-    cell_size_query_pending: bool,
 }
 
 impl TerminalProbe {
@@ -192,8 +190,20 @@ impl TerminalProbe {
         Self {
             graphics: GraphicsSupport::Unsupported,
             cell_size: None,
-            cell_size_query_pending: false,
         }
+    }
+}
+
+/// Select the cell dimensions that a native-image terminal may report.
+fn initial_cell_size(
+    graphics: GraphicsSupport,
+    probed: Option<PixelCellSize>,
+    local: Option<PixelCellSize>,
+) -> Option<PixelCellSize> {
+    if matches!(graphics, GraphicsSupport::Unsupported) {
+        None
+    } else {
+        probed.or(local)
     }
 }
 
@@ -211,11 +221,11 @@ pub(crate) struct CellSizeQuery {
 }
 
 impl CellSizeQuery {
-    /// Build a coordinator with the measurement captured before Attach and the
-    /// probe query's outstanding state.
+    /// Build a coordinator with the measurement captured before Attach and
+    /// whether a cell-size query is already outstanding.
     pub(crate) fn new(current: Option<PixelCellSize>, enabled: bool, pending: bool) -> Self {
         Self {
-            current,
+            current: enabled.then_some(current).flatten(),
             pending: enabled && pending,
             discard_pending: false,
             enabled,
@@ -232,6 +242,7 @@ impl CellSizeQuery {
     /// A pending reply is discarded because CSI 16t carries no request id. A
     /// fresh request is needed only when the resize has no usable local metric.
     pub(crate) fn resize(&mut self, current: Option<PixelCellSize>) -> bool {
+        let current = self.enabled.then_some(current).flatten();
         self.current = current;
         if self.pending {
             self.discard_pending = true;
@@ -283,10 +294,8 @@ impl CellSizeQuery {
 pub(crate) struct TerminalOwner {
     /// Native graphics support proved by the terminal's protocol answer.
     graphics: GraphicsSupport,
-    /// Initial pixel dimensions of one terminal cell, if the probe reported them.
+    /// Initial pixel dimensions of one terminal cell from the probe or window metrics.
     cell_size: Option<PixelCellSize>,
-    /// Whether the initial CSI 16t query still awaits the outer terminal.
-    cell_size_query_pending: bool,
     /// Whether standard output is the terminal receiving rendered frames.
     output_is_terminal: bool,
     /// Terminal handle used for protocol output and platform-mode restoration.
@@ -311,13 +320,14 @@ pub(crate) struct TerminalOwner {
 
 impl TerminalOwner {
     /// Open the controlling terminal and probe its capabilities when image
-    /// support is enabled.
+    /// support is enabled. A native-image terminal whose probe did not receive
+    /// a cell size uses the window's pixel dimensions through [`local_cell_size`].
     /// With piped input and output, build an unsupported owner without opening
     /// `/dev/tty`; that client reads no keys and writes its frame to the pipe.
     pub(crate) fn start(image_support: bool) -> Result<Self, String> {
         let input_is_terminal = io::stdin().is_terminal();
         let output_is_terminal = io::stdout().is_terminal();
-        let (graphics, cell_size, cell_size_query_pending, terminal, reader, waker) =
+        let (graphics, cell_size, terminal, reader, waker) =
             if terminal_device_needed(input_is_terminal, output_is_terminal) {
                 let (mut terminal, source) = TerminalDevice::open()
                     .map_err(|error| format!("could not open the terminal: {error}"))?;
@@ -337,23 +347,29 @@ impl TerminalOwner {
                 } else {
                     TerminalProbe::unsupported()
                 };
+                let local_size = if probe.cell_size.is_some()
+                    || matches!(probe.graphics, GraphicsSupport::Unsupported)
+                {
+                    None
+                } else {
+                    local_cell_size()
+                };
+                let cell_size = initial_cell_size(probe.graphics, probe.cell_size, local_size);
                 let waker = reader.waker();
                 (
                     probe.graphics,
-                    probe.cell_size,
-                    probe.cell_size_query_pending,
+                    cell_size,
                     Some(terminal),
                     Some(reader),
                     Some(waker),
                 )
             } else {
-                (GraphicsSupport::Unsupported, None, false, None, None, None)
+                (GraphicsSupport::Unsupported, None, None, None, None)
             };
         let image_cleanup_claimed = Arc::new(AtomicBool::new(false));
         Ok(Self {
             graphics,
             cell_size,
-            cell_size_query_pending,
             output_is_terminal,
             terminal: Arc::new(Mutex::new(terminal)),
             reader,
@@ -381,8 +397,8 @@ impl TerminalOwner {
     pub(crate) fn cell_size_query(&self) -> CellSizeQuery {
         CellSizeQuery::new(
             self.cell_size,
-            self.output_is_terminal,
-            self.cell_size_query_pending,
+            self.output_is_terminal && !matches!(self.graphics, GraphicsSupport::Unsupported),
+            false,
         )
     }
 
@@ -712,7 +728,6 @@ impl ProbeReplies {
         TerminalProbe {
             graphics,
             cell_size: self.cell_size,
-            cell_size_query_pending: self.cell_size.is_none(),
         }
     }
 
@@ -892,7 +907,17 @@ fn resize_runtime_event(client_id: ClientId, resize: WindowSize) -> RuntimeEvent
     }
 }
 
-/// Derive one cell's pixel dimensions from a Unix window report only when the
+/// Read one cell's pixel dimensions from the output terminal's window size.
+///
+/// `None` when the window size cannot be read, when the platform reports no
+/// pixel dimensions, or when they do not divide evenly across the grid.
+pub(crate) fn local_cell_size() -> Option<PixelCellSize> {
+    platform::window_size()
+        .ok()
+        .and_then(pixel_cell_size_from_window)
+}
+
+/// Derive one cell's pixel dimensions from a host window report only when the
 /// complete pixel dimensions divide evenly across the reported grid.
 fn pixel_cell_size_from_window(resize: WindowSize) -> Option<PixelCellSize> {
     let pixel_width = resize.pixel_width?;
