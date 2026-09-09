@@ -75,6 +75,13 @@ fn init_to_path_creates_the_file_lazily_and_installs_once() {
     let path = dir.join("logs").join("koshi-log-test.log");
     let _ = std::fs::remove_dir_all(&dir);
 
+    init_tracing(LoggingParams {
+        enabled: false,
+        level: LogLevel::Error,
+        format: LogFormat::Json,
+        session_id: SessionId::new(),
+    })
+    .expect("disabled logging installs nothing");
     init_to_path(&path, LogLevel::Warning, LogFormat::Json).expect("first install succeeds");
 
     // No line has been written yet: the file does not exist.

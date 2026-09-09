@@ -156,7 +156,9 @@ impl KittyCommand {
     }
 }
 
-/// Parse a Kitty command that does not carry image payload bytes.
+/// Parse a Kitty placement, deletion, or animation command.
+///
+/// Returns `None` for other actions and multipart animation-frame starts.
 pub fn parse_command(header: &[u8], payload: &[u8]) -> Option<Result<KittyCommand, GraphicsError>> {
     let header_len = header.len();
     let header = header.strip_prefix(b"G")?;
@@ -300,15 +302,15 @@ fn parse_command_fields(
             if !delete || selector.replace(value).is_some() {
                 return Err(invalid());
             }
+            continue;
+        }
+        if !fields.is_empty() {
+            fields.push(b',');
+        }
+        if field.starts_with(b"a=") {
+            fields.extend_from_slice(b"a=t");
         } else {
-            if !fields.is_empty() {
-                fields.push(b',');
-            }
-            if field.starts_with(b"a=") {
-                fields.extend_from_slice(b"a=t");
-            } else {
-                fields.extend_from_slice(field);
-            }
+            fields.extend_from_slice(field);
         }
     }
     let control = parse_kitty_control(&fields)?;

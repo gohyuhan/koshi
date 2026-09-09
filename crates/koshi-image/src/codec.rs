@@ -10,7 +10,10 @@ use flate2::{Decompress, FlushDecompress, Status};
 use crate::{DecodedImage, GraphicsError, GraphicsProtocol};
 use crate::{MAX_GRAPHICS_TRANSFER_BYTES, MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS, MAX_IMAGE_SIDE};
 
-/// Decode a standard or unpadded base64 graphics payload within its transfer limit.
+/// Decode standard or unpadded base64 data within `MAX_GRAPHICS_TRANSFER_BYTES`.
+///
+/// Returns `TransferTooLarge` when the input or decoded bytes exceed the limit and `InvalidBase64`
+/// when the data has invalid alphabet or padding.
 pub fn decode_base64(protocol: GraphicsProtocol, data: &[u8]) -> Result<Vec<u8>, GraphicsError> {
     if data.len() > MAX_GRAPHICS_TRANSFER_BYTES {
         return Err(GraphicsError::TransferTooLarge { protocol });
@@ -25,7 +28,10 @@ pub fn decode_base64(protocol: GraphicsProtocol, data: &[u8]) -> Result<Vec<u8>,
     Ok(decoded)
 }
 
-/// Decompress a zlib graphics payload without exceeding the decoded image limit.
+/// Decode one complete zlib stream without exceeding the transfer or image-byte limits.
+///
+/// Returns `DecodeFailure` for malformed, incomplete, or trailing input, `TransferTooLarge` for
+/// oversized input, and `ImageTooLarge` for output above `MAX_IMAGE_BYTES`.
 pub fn decompress_bounded(
     protocol: GraphicsProtocol,
     data: &[u8],
@@ -37,7 +43,10 @@ pub fn decompress_bounded(
     Ok(output)
 }
 
-/// Decompress one zlib stream and return its exact consumed input length.
+/// Decode one zlib stream and return its exact consumed input length.
+///
+/// Returns `DecodeFailure` for malformed or incomplete input, `TransferTooLarge` for oversized
+/// input, and `ImageTooLarge` when output exceeds `MAX_IMAGE_BYTES`.
 pub fn decompress_bounded_prefix(
     protocol: GraphicsProtocol,
     data: &[u8],
@@ -118,7 +127,10 @@ pub fn decompress_bounded_prefix(
     }
 }
 
-/// Decode one supported raster image into validated RGBA pixels.
+/// Decode one supported non-animated raster image into validated RGBA pixels.
+///
+/// Returns `UnsupportedMedia` for unsupported or animated formats and `ImageTooLarge` when the
+/// encoded input or decoded dimensions exceed the image limits.
 pub fn decode_raster(
     protocol: GraphicsProtocol,
     data: &[u8],
@@ -133,7 +145,10 @@ pub fn decode_raster(
     decode_static_raster(protocol, data)
 }
 
-/// Decode the default image from PNG data into validated RGBA pixels.
+/// Decode PNG data into validated RGBA pixels.
+///
+/// Returns `UnsupportedMedia` for unknown data, `DecodeFailure` for non-PNG or invalid PNG data,
+/// and `ImageTooLarge` when the encoded input or decoded dimensions exceed the image limits.
 pub fn decode_png(protocol: GraphicsProtocol, data: &[u8]) -> Result<DecodedImage, GraphicsError> {
     if guess_image_format(protocol, data)? != image::ImageFormat::Png {
         return Err(GraphicsError::DecodeFailure { protocol });
@@ -300,7 +315,9 @@ pub(crate) fn raster_limits() -> image::Limits {
     limits
 }
 
-/// Convert packed RGB bytes into validated row-major RGBA pixels.
+/// Convert exactly `width * height` packed RGB bytes into opaque RGBA pixels.
+///
+/// Returns `DeclaredSizeMismatch` when `data.len()` differs from the required byte count.
 pub fn raw_rgb(
     protocol: GraphicsProtocol,
     width: u32,
@@ -333,7 +350,9 @@ pub fn raw_rgb(
     })
 }
 
-/// Validate packed RGBA bytes and return them as a decoded image.
+/// Validate exactly `width * height` packed RGBA bytes and copy them into an image.
+///
+/// Returns `DeclaredSizeMismatch` when `data.len()` differs from the required byte count.
 pub fn raw_rgba(
     protocol: GraphicsProtocol,
     width: u32,
@@ -358,7 +377,10 @@ pub fn raw_rgba(
     })
 }
 
-/// Validate image dimensions against the shared pixel and side limits.
+/// Validate nonzero image dimensions against the side and pixel limits.
+///
+/// Returns `ImageTooLarge` for zero or oversized dimensions and `InvalidDimensions` when pixel
+/// multiplication overflows.
 pub fn validate_dimensions(
     protocol: GraphicsProtocol,
     width: usize,
@@ -376,7 +398,10 @@ pub fn validate_dimensions(
     Ok(())
 }
 
-/// Return the bounded RGBA byte length for image dimensions.
+/// Return `width * height * 4` after validating the image dimensions and byte limit.
+///
+/// Returns the same dimension errors as [`validate_dimensions`] and `InvalidDimensions` when the
+/// RGBA byte count overflows or exceeds `MAX_IMAGE_BYTES`.
 pub fn checked_rgba_len(
     protocol: GraphicsProtocol,
     width: usize,

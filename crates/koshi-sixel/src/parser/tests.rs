@@ -306,6 +306,13 @@ fn terminal_zero_bits_do_not_repaint_an_existing_foreground() {
 }
 
 #[test]
+fn hls_color_definitions_convert_to_rgb() {
+    let graphic = parse(b"q#1;1;0;50;100#1@");
+
+    assert_eq!(graphic.palette_changes().entries()[0].color(), [0, 0, 255]);
+}
+
+#[test]
 fn palette_only_and_blank_payloads_return_metadata_without_an_image() {
     let palette_only = parse(b"q#3;2;100;50;0");
     assert!(palette_only.image().is_none());
@@ -434,6 +441,23 @@ fn serde_rejects_duplicate_changes_bad_indices_and_wrong_lengths() {
     )
     .expect_err("duplicate palette edits are invalid");
     assert!(duplicate.to_string().contains("duplicate register"));
+
+    let too_many_colors = serde_json::to_string(&vec![[0u8, 0, 0]; 257]).expect("colors serialize");
+    let error = serde_json::from_str::<SixelPalette>(&too_many_colors)
+        .expect_err("palette must have exactly 256 colors");
+    assert!(error.to_string().contains("more than 256"));
+
+    let mut too_many_changes = String::from("[");
+    for register in 0..=u8::MAX {
+        if register != 0 {
+            too_many_changes.push(',');
+        }
+        too_many_changes.push_str(&format!("{{\"register\":{register},\"color\":[0,0,0]}}"));
+    }
+    too_many_changes.push_str(",{\"register\":0,\"color\":[0,0,0]}]");
+    let error = serde_json::from_str::<SixelPaletteChanges>(&too_many_changes)
+        .expect_err("palette changes must stay within the register bound");
+    assert!(error.to_string().contains("exceed 256 registers"));
 
     let bad_index = serde_json::from_str::<IndexedImage>(
         "{\"width\":1,\"height\":1,\"indices\":[258],\"aspect_vertical\":1,\"aspect_horizontal\":1}",

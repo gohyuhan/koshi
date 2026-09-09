@@ -1,1 +1,1 @@
-//! Commands. This module is empty.
+//! Empty command module.

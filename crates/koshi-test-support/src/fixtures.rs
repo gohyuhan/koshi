@@ -1,14 +1,15 @@
-//! Test fixtures shared across the suite.
+//! Shared test fixtures.
 
 use tempfile::TempDir;
 
-/// A fresh temporary directory standing in for the koshi runtime directory,
-/// removed when the returned handle drops.
+/// Create an isolated runtime directory and remove it when the returned
+/// [`TempDir`] drops.
 ///
-/// On Unix the directory is made under `/tmp`. On Windows it is made under
+/// Unix uses `/tmp` as the parent directory. Windows uses
 /// [`std::env::temp_dir`].
 ///
 /// # Panics
+///
 /// Panics when the directory cannot be created.
 #[must_use]
 pub fn test_runtime_dir() -> TempDir {
@@ -18,3 +19,6 @@ pub fn test_runtime_dir() -> TempDir {
     let base = std::env::temp_dir();
     TempDir::new_in(base).expect("a temporary runtime directory")
 }
+
+#[cfg(test)]
+mod tests;

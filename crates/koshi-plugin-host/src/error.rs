@@ -1,5 +1,5 @@
-//! Plugin domain error: [`PluginError`]. Every variant classifies as
-//! [`DomainCategory::Plugin`].
+//! Plugin errors. Each variant reports [`DomainCategory::Plugin`] and
+//! [`Severity::Recoverable`].
 
 use koshi_core::error::{DomainCategory, DomainError, Severity};
 use thiserror::Error;
@@ -17,12 +17,12 @@ pub enum PluginError {
 }
 
 impl DomainError for PluginError {
-    /// Always [`DomainCategory::Plugin`].
+    /// Returns [`DomainCategory::Plugin`].
     fn category(&self) -> DomainCategory {
         DomainCategory::Plugin
     }
 
-    /// Always [`Severity::Recoverable`].
+    /// Returns [`Severity::Recoverable`].
     fn severity(&self) -> Severity {
         Severity::Recoverable
     }

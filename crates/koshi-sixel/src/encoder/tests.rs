@@ -28,6 +28,11 @@ fn encode(width: u32, height: u32, rgba: &[u8], background: [u8; 3]) -> Vec<u8> 
 }
 
 #[test]
+fn default_options_use_the_largest_supported_palette() {
+    assert_eq!(SixelEncodeOptions::default().max_colors, MAX_PALETTE_COLORS);
+}
+
+#[test]
 fn matches_one_pixel_protocol_fixture() {
     let bytes = encode(1, 1, &[255, 0, 0, 255], [0, 0, 0]);
 
@@ -150,6 +155,21 @@ fn emits_bounded_chunks_and_preserves_all_bytes() {
         .expect("large request is valid")
         .expect("header is available");
     assert!(chunk.len() <= MAX_SIXEL_CHUNK_BYTES);
+}
+
+#[test]
+fn write_to_emits_the_same_bytes_as_chunked_output() {
+    let rgba = [255, 0, 0, 255].repeat(14);
+    let expected = encode(2, 7, &rgba, [0, 0, 0]);
+    let mut encoder = SixelEncoder::new(image(2, 7, rgba), [0, 0, 0]).expect("image encodes");
+    let mut writer = RecordingWriter { bytes: Vec::new() };
+
+    encoder
+        .write_to(&mut writer)
+        .expect("writer accepts output");
+
+    assert_eq!(writer.bytes, expected);
+    assert_eq!(encoder.next_chunk(1).expect("finished encoder"), None);
 }
 
 #[test]

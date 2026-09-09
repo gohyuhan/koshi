@@ -1,7 +1,6 @@
-//! Cell styling: foreground and background color plus boolean text attributes,
-//! set by SGR (Select Graphic Rendition) escape codes such as `ESC[1m` for
-//! bold. `Style` also serves as the "pen": the color/attribute state an app
-//! sets that then applies to every character printed until changed again.
+//! Cell foreground/background colors and boolean text attributes set by SGR
+//! (Select Graphic Rendition) escape codes such as `ESC[1m` for bold. `Style`
+//! stores the pen state applied to each printed character until it changes.
 
 use std::fmt;
 
@@ -22,77 +21,77 @@ pub struct Style {
 }
 
 impl Style {
-    /// Reset the pen to the terminal default: default colors, no attributes,
+    /// Reset the pen to terminal defaults: default colors, no attributes, and
     /// no underline color (SGR `0`).
     pub fn reset(&mut self) {
-        *self = Style::default()
+        *self = Style::default();
     }
 
     /// Set or clear the bold attribute (SGR `1` / `22`).
     pub fn set_bold(&mut self, bold: bool) {
-        self.attrs.set(AttrFlags::BOLD, bold)
+        self.attrs.set(AttrFlags::BOLD, bold);
     }
 
     /// Set or clear the italic attribute (SGR `3` / `23`).
     pub fn set_italic(&mut self, italic: bool) {
-        self.attrs.set(AttrFlags::ITALIC, italic)
+        self.attrs.set(AttrFlags::ITALIC, italic);
     }
 
     /// Set the underline style (SGR `4` single / `21` double / `24` none).
     pub fn set_underline(&mut self, underline: UnderlineStyle) {
-        self.attrs.set_underline(underline)
+        self.attrs.set_underline(underline);
     }
 
     /// Set or clear the reverse-video attribute (SGR `7` / `27`).
     pub fn set_reverse(&mut self, reverse: bool) {
-        self.attrs.set(AttrFlags::REVERSE, reverse)
+        self.attrs.set(AttrFlags::REVERSE, reverse);
     }
 
     /// Set the background color (SGR `40`-`47` / `100`-`107` / `48`, or `49`
     /// for the default).
     pub fn set_bg(&mut self, bg_color: Color) {
-        self.bg = bg_color
+        self.bg = bg_color;
     }
 
     /// Set the foreground (text) color (SGR `30`-`37` / `90`-`97` / `38`, or
     /// `39` for the default).
     pub fn set_fg(&mut self, fg_color: Color) {
-        self.fg = fg_color
+        self.fg = fg_color;
     }
 
     /// Set or clear the faint (decreased-intensity) attribute (SGR `2` / `22`).
     pub fn set_faint(&mut self, faint: bool) {
-        self.attrs.set(AttrFlags::FAINT, faint)
+        self.attrs.set(AttrFlags::FAINT, faint);
     }
 
     /// Set or clear the blink attribute (SGR `5`/`6` / `25`).
     pub fn set_blink(&mut self, blink: bool) {
-        self.attrs.set(AttrFlags::BLINK, blink)
+        self.attrs.set(AttrFlags::BLINK, blink);
     }
 
     /// Set or clear the conceal (hidden) attribute (SGR `8` / `28`).
     pub fn set_conceal(&mut self, conceal: bool) {
-        self.attrs.set(AttrFlags::CONCEAL, conceal)
+        self.attrs.set(AttrFlags::CONCEAL, conceal);
     }
 
     /// Set or clear the strikethrough attribute (SGR `9` / `29`).
     pub fn set_strike(&mut self, strike: bool) {
-        self.attrs.set(AttrFlags::STRIKE, strike)
+        self.attrs.set(AttrFlags::STRIKE, strike);
     }
 
     /// Set or clear the overline attribute (SGR `53` / `55`).
     pub fn set_overline(&mut self, overline: bool) {
-        self.attrs.set(AttrFlags::OVERLINE, overline)
+        self.attrs.set(AttrFlags::OVERLINE, overline);
     }
 
     /// Set the underline color (SGR `58`), or pass `None` for the default that
     /// follows the foreground color (SGR `59`).
     pub fn set_underline_color(&mut self, underline_color: Option<Color>) {
-        self.underline_color = underline_color
+        self.underline_color = underline_color;
     }
 
-    /// The background-color-erase fill style: this pen's background with the
-    /// foreground, every attribute, and the underline color at their defaults.
+    /// Return a background erase style with this background and default
+    /// foreground color, attributes, and underline color.
     pub fn bg_fill(&self) -> Self {
         Style {
             bg: self.bg,

@@ -53,7 +53,7 @@ pub struct FrameDelay {
 }
 
 impl FrameDelay {
-    /// Construct a delay whose denominator is nonzero.
+    /// Return a delay, or [`AnimationError::InvalidDelayDenominator`] when `denominator_ms == 0`.
     pub fn new(numerator_ms: u32, denominator_ms: u32) -> Result<Self, AnimationError> {
         if denominator_ms == 0 {
             return Err(AnimationError::InvalidDelayDenominator);
@@ -70,7 +70,7 @@ impl FrameDelay {
         self.numerator_ms
     }
 
-    /// Return the nonzero dimensionless divisor for the millisecond numerator.
+    /// Return the nonzero denominator of the millisecond ratio.
     #[must_use]
     pub fn denominator_ms(self) -> u32 {
         self.denominator_ms
@@ -103,7 +103,7 @@ pub enum LoopPolicy {
 }
 
 impl LoopPolicy {
-    /// Construct a finite playback policy with a positive count.
+    /// Return a finite policy, or [`AnimationError::InvalidPlaybackCount`] when `total_playbacks == 0`.
     pub fn finite(total_playbacks: u32) -> Result<Self, AnimationError> {
         if total_playbacks == 0 {
             return Err(AnimationError::InvalidPlaybackCount);
@@ -156,7 +156,7 @@ pub struct AnimationFrame {
 }
 
 impl AnimationFrame {
-    /// Construct a frame after validating its RGBA dimensions and delay.
+    /// Return a frame, or [`AnimationError::InvalidFrameImage`] for invalid RGBA dimensions.
     pub fn new<I>(image: I, delay: FrameDelay) -> Result<Self, AnimationError>
     where
         I: Into<Arc<DecodedImage>>,
@@ -170,7 +170,7 @@ impl AnimationFrame {
         })
     }
 
-    /// Construct a frame that is skipped without a display interval.
+    /// Return a zero-delay gapless frame, or [`AnimationError::InvalidFrameImage`] for invalid RGBA dimensions.
     pub fn new_gapless<I>(image: I) -> Result<Self, AnimationError>
     where
         I: Into<Arc<DecodedImage>>,
@@ -237,7 +237,10 @@ pub struct DecodedAnimation {
 }
 
 impl DecodedAnimation {
-    /// Construct an animation after validating frame count, canvases, and bytes.
+    /// Return an animation after validating frames, canvases, bytes, and playback policy.
+    ///
+    /// Returns [`AnimationError`] when the frames are empty, too numerous, inconsistent, invalid,
+    /// or exceed the retained-byte limit, or when the policy has zero finite playbacks.
     pub fn new(
         frames: Vec<AnimationFrame>,
         loop_policy: LoopPolicy,
@@ -601,7 +604,11 @@ pub enum DecodedMedia {
     Animation(DecodedAnimation),
 }
 
-/// Decode a supported static or animated raster into bounded RGBA data.
+/// Decode supported static or animated raster data into bounded RGBA values.
+///
+/// Returns `Static` for BMP, GIF, JPEG, PNG, TIFF, and non-animated WebP data. Returns `Animation`
+/// for animated GIF, PNG, or WebP data, and returns [`GraphicsError`] for unsupported, malformed,
+/// or oversized data.
 pub fn decode_media(
     protocol: GraphicsProtocol,
     data: &[u8],
@@ -806,8 +813,9 @@ enum GifScanError {
 
 fn scan_gif(protocol: GraphicsProtocol, data: &[u8]) -> Result<GifScan, GraphicsError> {
     scan_gif_inner(data).map_err(|error| match error {
-        GifScanError::Malformed => GraphicsError::DecodeFailure { protocol },
-        GifScanError::InvalidMetadata => GraphicsError::DecodeFailure { protocol },
+        GifScanError::Malformed | GifScanError::InvalidMetadata => {
+            GraphicsError::DecodeFailure { protocol }
+        }
         GifScanError::TooManyFrames => GraphicsError::ImageTooLarge { protocol },
     })
 }

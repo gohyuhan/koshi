@@ -52,32 +52,52 @@ fn mismatch_diff_points_at_the_divergent_index() {
     let a = created();
     let b = focused();
     let wrong = closed();
-    let err = catch_unwind(|| assert_events(&[a.clone(), b], &[a, wrong]));
-    let msg = message(err);
-    assert!(msg.contains("event sequence mismatch"), "{msg}");
-    assert!(msg.contains("[0] ok"), "{msg}");
-    assert!(msg.contains("[1] MISMATCH"), "{msg}");
+    let err = catch_unwind(|| assert_events(&[a.clone(), b.clone()], &[a.clone(), wrong.clone()]));
+
+    assert_eq!(
+        message(err),
+        format!(
+            "event sequence mismatch:\n\
+             \x20 [0] ok       {a:?}\n\
+             \x20 [1] MISMATCH expected {wrong:?}\n\
+             \x20              actual   {b:?}\n\
+             \x20 length: expected 2, actual 2"
+        )
+    );
 }
 
 #[test]
 fn a_short_actual_reports_the_missing_event() {
     let a = created();
     let b = focused();
-    let err = catch_unwind(|| assert_events(std::slice::from_ref(&a), &[a.clone(), b]));
-    let msg = message(err);
-    assert!(msg.contains("[1] MISSING"), "{msg}");
-    assert!(msg.contains("length: expected 2, actual 1"), "{msg}");
+    let err = catch_unwind(|| assert_events(std::slice::from_ref(&a), &[a.clone(), b.clone()]));
+
+    assert_eq!(
+        message(err),
+        format!(
+            "event sequence mismatch:\n\
+             \x20 [0] ok       {a:?}\n\
+             \x20 [1] MISSING  expected {b:?}\n\
+             \x20 length: expected 2, actual 1"
+        )
+    );
 }
 
 #[test]
 fn a_long_actual_reports_the_extra_event() {
     let a = created();
     let b = focused();
-    let err = catch_unwind(|| assert_events(&[a.clone(), b], std::slice::from_ref(&a)));
-    let msg = message(err);
-    assert!(msg.contains("event sequence mismatch"), "{msg}");
-    assert!(msg.contains("[1] EXTRA"), "{msg}");
-    assert!(msg.contains("length: expected 1, actual 2"), "{msg}");
+    let err = catch_unwind(|| assert_events(&[a.clone(), b.clone()], std::slice::from_ref(&a)));
+
+    assert_eq!(
+        message(err),
+        format!(
+            "event sequence mismatch:\n\
+             \x20 [0] ok       {a:?}\n\
+             \x20 [1] EXTRA    actual   {b:?}\n\
+             \x20 length: expected 1, actual 2"
+        )
+    );
 }
 
 #[test]

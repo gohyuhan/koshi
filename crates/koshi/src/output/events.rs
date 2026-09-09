@@ -32,14 +32,14 @@ pub fn narrow(
     oldest_kept: Option<SystemTime>,
     wanted: Option<&str>,
 ) -> Vec<RecentEvent> {
-    let wanted = wanted.map(str::to_lowercase);
+    let wanted_filter = wanted.map(str::to_lowercase);
     events
         .into_iter()
         .filter(|event| oldest_kept.is_none_or(|oldest| event.at >= oldest))
         .filter(|event| {
-            wanted
+            wanted_filter
                 .as_ref()
-                .is_none_or(|wanted| event.name.to_lowercase().contains(wanted))
+                .is_none_or(|wanted_name| event.name.to_lowercase().contains(wanted_name))
         })
         .collect()
 }

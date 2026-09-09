@@ -167,12 +167,7 @@ impl SizeWeight {
 impl Default for SizeWeight {
     /// An equal share: `Flex(1)` with no overlays and no resize offset.
     fn default() -> Self {
-        Self {
-            primary: SizeConstraint::Flex(1),
-            min: None,
-            preferred: None,
-            resize_delta: 0,
-        }
+        Self::new(SizeConstraint::Flex(1))
     }
 }
 

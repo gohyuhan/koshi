@@ -2,6 +2,8 @@
 
 use super::*;
 
+use crate::MAX_GRAPHICS_CONTROL_BYTES;
+
 #[test]
 fn base64_accepts_padded_and_unpadded_payloads() {
     assert_eq!(
@@ -69,6 +71,73 @@ fn zlib_data_requires_the_complete_stream_trailer() {
             "truncated prefix length {end}"
         );
     }
+}
+
+#[test]
+fn zlib_prefix_returns_the_first_stream_and_consumed_length() {
+    use std::io::Write;
+
+    let compress = |input: &[u8]| {
+        let mut compressed = Vec::new();
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(&mut compressed, flate2::Compression::default());
+        encoder.write_all(input).expect("zlib input writes");
+        encoder.finish().expect("zlib stream finishes");
+        compressed
+    };
+    let first = compress(b"image");
+    let second = compress(b"next image");
+    let mut streams = first.clone();
+    streams.extend_from_slice(&second);
+
+    let (decoded, consumed) =
+        decompress_bounded_prefix(GraphicsProtocol::Kitty, &streams).expect("first stream decodes");
+
+    assert_eq!(decoded, b"image");
+    assert_eq!(consumed, first.len());
+    assert_eq!(&streams[consumed..], second.as_slice());
+}
+
+#[test]
+fn decode_png_rejects_unknown_data_with_a_typed_media_error() {
+    assert_eq!(
+        decode_png(GraphicsProtocol::Kitty, &[]).expect_err("empty data is not a PNG"),
+        GraphicsError::UnsupportedMedia {
+            protocol: GraphicsProtocol::Kitty,
+            format: "unknown".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn validate_dimensions_accepts_the_pixel_limit_and_rejects_one_more() {
+    let height = MAX_IMAGE_PIXELS / MAX_IMAGE_SIDE;
+    assert_eq!(
+        validate_dimensions(GraphicsProtocol::Sixel, MAX_IMAGE_SIDE, height),
+        Ok(())
+    );
+    assert_eq!(
+        validate_dimensions(GraphicsProtocol::Sixel, MAX_IMAGE_SIDE, height + 1),
+        Err(GraphicsError::ImageTooLarge {
+            protocol: GraphicsProtocol::Sixel
+        })
+    );
+}
+
+#[test]
+fn graphics_error_deserialization_rejects_oversized_text() {
+    let value = serde_json::to_value(GraphicsError::UnsupportedAction {
+        protocol: GraphicsProtocol::Kitty,
+        action: "x".repeat(MAX_GRAPHICS_CONTROL_BYTES + 1),
+    })
+    .expect("graphics error serializes");
+
+    let error = serde_json::from_value::<GraphicsError>(value)
+        .expect_err("oversized graphics error text must be rejected");
+    assert_eq!(
+        error.to_string(),
+        format!("graphics error text exceeds {MAX_GRAPHICS_CONTROL_BYTES} bytes")
+    );
 }
 
 #[test]

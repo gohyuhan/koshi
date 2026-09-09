@@ -61,17 +61,12 @@ impl PaneLifecycle {
             (PaneLifecycle::Spawning, PaneLifecycleEvent::ProcessStarted) => {
                 Ok(PaneLifecycle::Running)
             }
-            (PaneLifecycle::Spawning, PaneLifecycleEvent::CloseRequested { since }) => {
-                Ok(PaneLifecycle::Closing { since })
-            }
+            (
+                PaneLifecycle::Spawning | PaneLifecycle::Running | PaneLifecycle::Exited { .. },
+                PaneLifecycleEvent::CloseRequested { since },
+            ) => Ok(PaneLifecycle::Closing { since }),
             (PaneLifecycle::Running, PaneLifecycleEvent::ProcessExited { code, at }) => {
                 Ok(PaneLifecycle::Exited { code, at })
-            }
-            (PaneLifecycle::Running, PaneLifecycleEvent::CloseRequested { since }) => {
-                Ok(PaneLifecycle::Closing { since })
-            }
-            (PaneLifecycle::Exited { .. }, PaneLifecycleEvent::CloseRequested { since }) => {
-                Ok(PaneLifecycle::Closing { since })
             }
             (PaneLifecycle::Closing { .. }, PaneLifecycleEvent::Cleaned) => {
                 Ok(PaneLifecycle::Removed)

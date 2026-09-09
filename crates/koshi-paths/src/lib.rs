@@ -1,11 +1,10 @@
-//! Platform path resolution — where koshi's files live.
+//! Resolves the directories where koshi stores configuration, data, state, and
+//! runtime files.
 //!
-//! Every directory koshi reads or writes comes from a function here. Each one
-//! returns the platform's conventional location — per-user everywhere except
-//! [`shared_sessions_dir`], which is machine-wide. `KOSHI_RUNTIME_DIR` is the
-//! one `KOSHI_*` variable that moves a directory: it names [`runtime_dir`]
-//! when it holds an absolute path. No other `KOSHI_*` variable relocates
-//! anything:
+//! The resolvers use platform conventions and return per-user paths, except
+//! [`shared_sessions_dir`], which returns a machine-wide path. `KOSHI_RUNTIME_DIR`
+//! is the only `KOSHI_*` variable that changes a path; it names [`runtime_dir`]
+//! when it holds an absolute path. Other `KOSHI_*` variables are ignored:
 //!
 //! | Function | Linux | macOS | Windows |
 //! |---|---|---|---|
@@ -15,23 +14,22 @@
 //! | [`runtime_dir`] | `/tmp/koshi-<uid>` | `/tmp/koshi-<uid>` | `<data_dir>\run` |
 //! | [`shared_sessions_dir`] | `/tmp/koshi` | `/tmp/koshi` | `%ProgramData%\koshi` |
 //!
-//! The [`directories`] crate resolves [`config_dir`], [`data_dir`] and
-//! [`state_dir`]. The Linux column shows their XDG defaults. An absolute
-//! `XDG_CONFIG_HOME`, `XDG_DATA_HOME` or `XDG_STATE_HOME` replaces the
-//! matching base; a relative one is ignored.
-//! [`runtime_dir`] reads no `XDG_*` variable. On Linux and macOS
-//! [`shared_sessions_dir`] is a fixed path that no variable moves.
+//! The [`directories`] crate resolves [`config_dir`], [`data_dir`], and
+//! [`state_dir`]. On Linux, an absolute `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, or
+//! `XDG_STATE_HOME` replaces its matching base; a relative value is ignored.
+//! [`runtime_dir`] reads no `XDG_*` variable. Linux and macOS use a fixed path
+//! for [`shared_sessions_dir`].
 //!
-//! `None` from a per-user resolver means the platform names no home directory
-//! for the current user. On Linux and macOS that is `HOME` unset or empty and
-//! no home directory in the passwd database. On Windows it is `%APPDATA%` or
-//! `%LOCALAPPDATA%` that cannot be resolved. `None` from
-//! [`shared_sessions_dir`] means Windows has `%ProgramData%` unset, or holding
-//! a path that is not absolute.
+//! A per-user resolver returns `None` when the platform cannot provide the
+//! required base directories. On Linux and macOS, `HOME` must be set and
+//! non-empty, or the passwd database must provide a home directory. On
+//! Windows, the `%APPDATA%` and `%LOCALAPPDATA%` known folders must resolve. On
+//! Windows, [`shared_sessions_dir`] returns `None` when `%ProgramData%` is unset
+//! or not absolute.
 //!
-//! The resolvers touch no filesystem and create nothing. Startup creates the
-//! directories it needs through [`ensure_dir`], [`ensure_private_dir`],
-//! [`ensure_shared_base`] and [`ensure_shared_user_dir`].
+//! Resolvers do not inspect the filesystem or create directories. Startup uses
+//! [`ensure_dir`], [`ensure_private_dir`], [`ensure_shared_base`], and
+//! [`ensure_shared_user_dir`] to create the directories it needs.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -42,9 +40,8 @@ use directories::ProjectDirs;
 /// when it is an absolute path.
 const RUNTIME_DIR_VAR: &str = "KOSHI_RUNTIME_DIR";
 
-/// The platform's per-user directory set for the `koshi` project, or `None`
-/// when the platform names no home directory for the current user; see the
-/// [module docs](self) for the exact condition on each platform.
+/// Returns the platform directory set for the `koshi` project, or `None` when
+/// the required platform base directories cannot be resolved.
 fn project_dirs() -> Option<ProjectDirs> {
     ProjectDirs::from("", "", "koshi")
 }
@@ -58,57 +55,56 @@ fn euid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
-/// The directory user configuration lives in: `koshi.kdl` and
-/// `keybinding.kdl` at the top, color themes under `themes/`, session layouts
-/// under `profile/`. On Linux this is `~/.config/koshi`; see the
-/// [module table](self) for every platform.
+/// Returns the directory for `koshi.kdl`, `keybinding.kdl`, `themes/`, and
+/// `profile/`. On Linux this is `~/.config/koshi`; see the [module table](self)
+/// for every platform.
 #[must_use]
 pub fn config_dir() -> Option<PathBuf> {
-    project_dirs().map(|d| d.config_dir().to_path_buf())
+    project_dirs().map(|project| project.config_dir().to_path_buf())
 }
 
-/// The directory for durable data koshi writes — session persistence, crash
-/// reports. On Linux this is `~/.local/share/koshi`; see the
-/// [module table](self).
+/// Returns the directory for durable data, including session persistence and
+/// crash reports. On Linux this is `~/.local/share/koshi`; see the [module
+/// table](self).
 #[must_use]
 pub fn data_dir() -> Option<PathBuf> {
-    project_dirs().map(|d| d.data_dir().to_path_buf())
+    project_dirs().map(|project| project.data_dir().to_path_buf())
 }
 
-/// The directory for machine-local mutable state — the log file lives here.
-/// Linux has a dedicated state location, `~/.local/state/koshi`. macOS and
-/// Windows have none and use the per-user local data directory instead:
-/// `~/Library/Application Support/koshi`, `%LOCALAPPDATA%\koshi\data`.
+/// Returns the directory for machine-local mutable state, including logs.
+/// Linux uses `~/.local/state/koshi`. macOS uses
+/// `~/Library/Application Support/koshi`; Windows uses
+/// `%LOCALAPPDATA%\koshi\data`.
 #[must_use]
 pub fn state_dir() -> Option<PathBuf> {
-    project_dirs().map(|d| {
-        d.state_dir()
-            .unwrap_or_else(|| d.data_local_dir())
+    project_dirs().map(|project| {
+        project
+            .state_dir()
+            .unwrap_or_else(|| project.data_local_dir())
             .to_path_buf()
     })
 }
 
-/// What produced the path [`runtime_dir_with_rule`] answers with.
+/// Identifies how [`runtime_dir_with_rule`] selected its path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeDirRule {
     /// `KOSHI_RUNTIME_DIR` held an absolute path.
     Variable,
-    /// `/tmp/koshi-<effective user id>`.
+    /// The Unix path is `/tmp/koshi-<effective user id>`.
     UserId,
-    /// `run/` under [`data_dir`].
+    /// The Windows path is `run/` under [`data_dir`].
     DataDir,
 }
 
-/// The directory for sockets and other per-boot runtime files, and the rule
-/// that produced it.
+/// Returns the runtime directory for sockets and other per-boot files together
+/// with the rule that selected it.
 ///
-/// `KOSHI_RUNTIME_DIR` names the directory when it holds an absolute path —
-/// [`RuntimeDirRule::Variable`]. Without it, Unix uses
-/// `/tmp/koshi-<effective uid>` — [`RuntimeDirRule::UserId`] — and never
-/// answers `None`. Windows uses `run/` under [`data_dir`] —
-/// [`RuntimeDirRule::DataDir`] — and answers `None` when the machine reports
-/// no home directory. Create the directory with [`ensure_private_dir`];
-/// runtime files are per-user private.
+/// An absolute `KOSHI_RUNTIME_DIR` gives [`RuntimeDirRule::Variable`]. Without
+/// it, Unix returns `/tmp/koshi-<effective uid>` with
+/// [`RuntimeDirRule::UserId`] and never returns `None`. Windows returns
+/// `run/` under [`data_dir`] with [`RuntimeDirRule::DataDir`], or `None` when
+/// the project data directory cannot be resolved. Create the directory with
+/// [`ensure_private_dir`]; runtime files are per-user private.
 #[must_use]
 pub fn runtime_dir_with_rule() -> Option<(PathBuf, RuntimeDirRule)> {
     if let Some(dir) = std::env::var_os(RUNTIME_DIR_VAR)
@@ -133,28 +129,27 @@ pub fn runtime_dir_with_rule() -> Option<(PathBuf, RuntimeDirRule)> {
     }
 }
 
-/// The directory for sockets and other per-boot runtime files.
+/// Returns the runtime directory for sockets and other per-boot files.
 ///
-/// `KOSHI_RUNTIME_DIR` names it when that variable holds an absolute path.
-/// Without it, Unix uses `/tmp/koshi-<effective uid>` and never answers
-/// `None`; Windows uses `run/` under [`data_dir`] and answers `None` when the
-/// machine reports no home directory. Create it with [`ensure_private_dir`];
-/// runtime files are per-user private. [`runtime_dir_with_rule`] answers the
-/// same path together with the rule that produced it.
+/// An absolute `KOSHI_RUNTIME_DIR` names the directory. Without it, Unix
+/// returns `/tmp/koshi-<effective uid>` and Windows returns `run/` under
+/// [`data_dir`]. Unix never returns `None`; Windows returns `None` when the
+/// project data directory cannot be resolved. Create it with
+/// [`ensure_private_dir`]. [`runtime_dir_with_rule`] returns the same path with
+/// its selection rule.
 #[must_use]
 pub fn runtime_dir() -> Option<PathBuf> {
     runtime_dir_with_rule().map(|(dir, _)| dir)
 }
 
-/// The machine-wide directory holding what koshi shares between local users:
-/// the shared session sockets, and on Windows the marker files that name the
-/// sessions listening on a pipe. On Unix this is `/tmp/koshi`. On Windows it
-/// is `koshi` under `%ProgramData%`, and `None` means that variable is unset
-/// or does not hold an absolute path.
+/// Returns the machine-wide directory for shared session sockets. Windows
+/// also stores marker files there for sessions listening on named pipes.
 ///
-/// Create it with [`ensure_shared_base`], then take this user's subdirectory
-/// from [`ensure_shared_user_dir`]. A `shared-sessions-dir` in `koshi.kdl`
-/// names a directory of its own and is used instead.
+/// Unix returns `/tmp/koshi`. Windows returns `koshi` under `%ProgramData%`, or
+/// `None` when that variable is unset or not absolute. Create the directory
+/// with [`ensure_shared_base`], then use [`ensure_shared_user_dir`] to get this
+/// user's directory. A `shared-sessions-dir` in `koshi.kdl` uses its own path
+/// instead.
 #[must_use]
 pub fn shared_sessions_dir() -> Option<PathBuf> {
     #[cfg(unix)]
@@ -170,8 +165,8 @@ pub fn shared_sessions_dir() -> Option<PathBuf> {
     }
 }
 
-/// An [`io::ErrorKind::PermissionDenied`] error whose message is
-/// `<path> <reason>`: `/tmp/koshi-501 is not a directory`.
+/// Returns a [`io::ErrorKind::PermissionDenied`] error with the message
+/// `<path> <reason>`, such as `/tmp/koshi-501 is not a directory`.
 #[cfg(unix)]
 fn dir_refused(path: &Path, reason: &str) -> io::Error {
     io::Error::new(
@@ -180,29 +175,29 @@ fn dir_refused(path: &Path, reason: &str) -> io::Error {
     )
 }
 
-/// Confirm the effective user id owns `path`.
+/// Confirms that the effective user id owns `path`.
 ///
-/// Reads the link itself, not its target. A path another user owns is
-/// refused as [`io::ErrorKind::PermissionDenied`], naming the owner's user id
-/// and the expected one: `/tmp/koshi-501 is owned by uid 0, expected 501`. A
-/// path whose metadata cannot be read yields that read's error.
+/// Reads `path` itself, not a symbolic link target. A different owner returns
+/// [`io::ErrorKind::PermissionDenied`] with both user ids, such as
+/// `/tmp/koshi-501 is owned by uid 0, expected 501`. A metadata read error is
+/// returned unchanged.
 #[cfg(unix)]
 fn verify_owner_is_this_user(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::MetadataExt;
 
-    let expected = euid();
-    let owner = std::fs::symlink_metadata(path)?.uid();
-    if owner != expected {
+    let expected_uid = euid();
+    let owner_uid = std::fs::symlink_metadata(path)?.uid();
+    if owner_uid != expected_uid {
         return Err(dir_refused(
             path,
-            &format!("is owned by uid {owner}, expected {expected}"),
+            &format!("is owned by uid {owner_uid}, expected {expected_uid}"),
         ));
     }
     Ok(())
 }
 
-/// Create `path` without creating its parents. Anything already at `path` —
-/// a directory, a regular file, or a link — is success. A missing parent is
+/// Creates `path` without creating its parents. A directory, regular file, or
+/// symbolic link already at `path` is success. A missing parent returns
 /// [`io::ErrorKind::NotFound`].
 #[cfg(unix)]
 fn create_dir_if_absent(path: &Path) -> io::Result<()> {
@@ -212,15 +207,15 @@ fn create_dir_if_absent(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Confirm `path` is a directory carrying exactly `mode`, setting the mode
-/// when it differs and reading it back afterwards.
+/// Confirms that `path` is a directory with exactly `mode`.
 ///
-/// Reads the link itself, not its target: a symbolic link or a regular file
-/// at `path` is refused as `<path> is not a directory`. A mode that cannot be
-/// set is refused as `<path> mode could not be set: <error>`; one that reads
-/// back different is refused as `<path> mode is 0755, expected 0700`. Every
-/// refusal is [`io::ErrorKind::PermissionDenied`]. A metadata read that fails
-/// yields that read's error.
+/// Reads `path` itself, not a symbolic link target. A symbolic link or regular
+/// file returns [`io::ErrorKind::PermissionDenied`] with `<path> is not a
+/// directory`. A mode-change failure returns
+/// [`io::ErrorKind::PermissionDenied`] with `<path> mode could not be set:
+/// <error>`. A different mode after the change returns the same error kind with
+/// `<path> mode is <found:04o>, expected <mode:04o>`. Metadata read errors are
+/// returned unchanged.
 #[cfg(unix)]
 fn verify_dir_mode(path: &Path, mode: u32) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -232,29 +227,27 @@ fn verify_dir_mode(path: &Path, mode: u32) -> io::Result<()> {
     if metadata.permissions().mode() & 0o7777 != mode {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
             .map_err(|error| dir_refused(path, &format!("mode could not be set: {error}")))?;
-        let found = std::fs::symlink_metadata(path)?.permissions().mode() & 0o7777;
-        if found != mode {
+        let found_mode = std::fs::symlink_metadata(path)?.permissions().mode() & 0o7777;
+        if found_mode != mode {
             return Err(dir_refused(
                 path,
-                &format!("mode is {found:04o}, expected {mode:04o}"),
+                &format!("mode is {found_mode:04o}, expected {mode:04o}"),
             ));
         }
     }
     Ok(())
 }
 
-/// Create `base`, the machine-wide shared directory, and confirm it is safe to
-/// use.
+/// Creates and validates the machine-wide shared directory at `base`.
 ///
-/// On Unix `base` must be a directory with mode `1777`. It is created without
-/// its parents; a missing parent is [`io::ErrorKind::NotFound`]. A directory
-/// carrying another mode has `1777` set on it, and the mode is read back. A
-/// directory whose mode cannot be set — one another user owns — is refused;
-/// one another user owns that already carries `1777` is accepted. A symbolic
-/// link or a regular file at `base` is refused. Every refusal is
-/// [`io::ErrorKind::PermissionDenied`] and names the path. On Windows it
-/// creates `base` and any missing parents; the directory inherits the ACLs
-/// of its parent.
+/// On Unix it creates `base` without creating its parents. A missing parent
+/// returns [`io::ErrorKind::NotFound`]. `base` must be a directory with mode
+/// `1777`; another mode is replaced and checked. A symbolic link, regular
+/// file, failed mode change, or different mode returns
+/// [`io::ErrorKind::PermissionDenied`] with the path. An existing directory
+/// owned by another user is accepted when its mode is `1777` or can be changed
+/// to `1777`. Metadata read errors are returned unchanged. On Windows it
+/// creates `base` and missing parents with the parent's ACLs.
 pub fn ensure_shared_base(base: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -267,17 +260,16 @@ pub fn ensure_shared_base(base: &Path) -> io::Result<()> {
     }
 }
 
-/// Create this user's directory under `base` and confirm it is safe to use,
-/// returning its path.
+/// Creates and validates this user's directory under `base`, then returns its
+/// path.
 ///
-/// On Unix the directory is named after the effective user id —
-/// `/tmp/koshi/501` — and must be owned by that user with mode `0755`. It is
-/// created without its parents: a missing `base` is
-/// [`io::ErrorKind::NotFound`] and stays uncreated. A directory another user
-/// owns, a symbolic link, and a regular file at that path are refused as
-/// [`io::ErrorKind::PermissionDenied`], naming the path. A mode other than
-/// `0755` is set to `0755` and read back. On Windows it creates `base` and
-/// any missing parents and returns `base`; there is no per-user directory.
+/// On Unix the path is named after the effective user id, such as
+/// `/tmp/koshi/501`, and must be owned by that user with mode `0755`. It
+/// creates no parents; a missing `base` returns [`io::ErrorKind::NotFound`] and
+/// remains uncreated. A different owner, symbolic link, or regular file at the
+/// user path returns [`io::ErrorKind::PermissionDenied`] with the path. Another
+/// mode is replaced and checked. On Windows it creates `base` and missing
+/// parents, returns `base`, and uses no per-user directory.
 pub fn ensure_shared_user_dir(base: &Path) -> io::Result<PathBuf> {
     #[cfg(unix)]
     {
@@ -294,24 +286,24 @@ pub fn ensure_shared_user_dir(base: &Path) -> io::Result<PathBuf> {
     }
 }
 
-/// Create `path` and any missing parents. A directory already at `path` is
-/// success; a regular file there is [`io::ErrorKind::AlreadyExists`].
+/// Creates `path` and any missing parents. An existing directory is success;
+/// a regular file at `path` returns [`io::ErrorKind::AlreadyExists`]. Other
+/// filesystem errors are returned unchanged.
 pub fn ensure_dir(path: &Path) -> io::Result<()> {
     std::fs::create_dir_all(path)
 }
 
-/// Create `path` and any missing parents, then confirm it is this user's own
-/// private directory. Used for [`runtime_dir`].
+/// Creates `path` and missing parents, then validates the final directory as
+/// this user's private runtime directory.
 ///
-/// On Unix `path` must be owned by the effective user id and must be a
-/// directory, not a symbolic link: the check reads the link itself. Both
-/// refusals are [`io::ErrorKind::PermissionDenied`], and each names the path
-/// and what is wrong with it. The mode is then set to `0700` and read back; a
-/// mode that cannot be set or reads back different is refused the same way.
-/// A regular file at `path` is [`io::ErrorKind::AlreadyExists`] on every
-/// platform; on Unix so is a symbolic link whose target is missing. On
-/// Windows it only creates the directory, which already carries owner-scoped
-/// ACLs.
+/// On Unix the final path must be owned by the effective user id and must be a
+/// directory, not a symbolic link. Ownership, file-type, mode-change, and
+/// mode-readback refusals return [`io::ErrorKind::PermissionDenied`] with the
+/// path and reason. The final directory is set to and checked for mode `0700`.
+/// A regular file at the final path returns
+/// [`io::ErrorKind::AlreadyExists`]; a dangling symbolic link returns the same
+/// error on Unix. On Windows it creates the directory with ACLs inherited from
+/// its parent.
 pub fn ensure_private_dir(path: &Path) -> io::Result<()> {
     std::fs::create_dir_all(path)?;
     #[cfg(unix)]

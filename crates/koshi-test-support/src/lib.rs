@@ -1,38 +1,33 @@
-//! `koshi-test-support` — testing utilities shared across the workspace.
+//! Shared test utilities for the workspace.
 //!
-//! The crate holds an event-sequence assertion, an in-memory fake PTY
-//! (pseudo-terminal, the virtual terminal a shell process runs inside)
-//! backend, layout invariant checks, a rate-bounded byte pump, and the
-//! shared runtime-directory fixture.
+//! The crate provides event-sequence assertions, an in-memory PTY
+//! (pseudo-terminal) backend, layout checks, a rate-bounded byte pump, and a
+//! runtime-directory fixture.
 
-/// Event-sequence assertion.
+/// Assert ordered event sequences.
 ///
-/// [`event_assert::assert_events`] compares an emitted burst of
-/// [`koshi_core::event::Event`]s against the expected sequence and panics with
-/// an index-aligned diff when they differ.
+/// [`event_assert::assert_events`] compares actual events with expected events
+/// and panics with an index-aligned diff when they differ.
 pub mod event_assert;
 
-/// In-memory fake PTY backend for isolation testing.
+/// In-memory fake PTY backend for tests.
 ///
-/// Implements the [`koshi_pty::backend::state::PtyBackend`] trait entirely in
-/// memory, capturing spawns, writes, resizes, and kills for assertion, and
-/// allowing tests to drive output and child-exit on demand.
+/// Implements [`koshi_pty::backend::state::PtyBackend`] without starting a
+/// shell. It records spawns, writes, resizes, and kills, and lets tests drive
+/// output and child exit.
 pub mod fake_pty;
 
-/// Test fixtures shared across the suite: the temporary runtime directory.
+/// Shared test fixtures, including the runtime directory.
 pub mod fixtures;
 
 /// Layout invariant checks for pure-layout tests.
 ///
-/// Checks that placed panes hold the geometric invariants: exact tiling of
-/// the tab area, no overlaps, no spills, and respect for minimum cell sizes.
-/// Also checks that every layout leaf references a live pane. Each check
-/// returns `Result`, never panics.
+/// Checks exact tiling, overlaps, spills, minimum cell sizes, and live pane
+/// references. Each check returns `Result` instead of panicking.
 pub mod layout_assert;
 
 /// Rate-bounded byte pump for tests that need a slow link.
 ///
-/// [`throttle::pump_throttled`] copies bytes from one stream to another on its
-/// own thread, at most a fixed number of bytes per time slice, and stops at a
-/// deadline.
+/// [`throttle::pump_throttled`] copies bytes between streams on its own thread,
+/// limits each time slice, and checks a deadline.
 pub mod throttle;

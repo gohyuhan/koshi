@@ -1,1 +1,1 @@
-//! Error types. This module is empty.
+//! Empty module for error types.

@@ -126,6 +126,25 @@ fn scroll_keeps_modifiers_and_position() {
 }
 
 #[test]
+fn host_super_and_meta_map_to_super_while_hyper_is_dropped() {
+    let event = MouseEvent {
+        kind: MouseEventKind::Moved,
+        column: 7,
+        row: 9,
+        modifiers: Modifiers::SHIFT | Modifiers::SUPER | Modifiers::META | Modifiers::HYPER,
+    };
+
+    assert_eq!(
+        decode_mouse(event),
+        MouseInput {
+            kind: MouseKind::Motion,
+            at: Point { x: 7, y: 9 },
+            mods: ModFlags::SHIFT | ModFlags::SUPER,
+        }
+    );
+}
+
+#[test]
 fn full_u16_protocol_coordinates_rebase_without_overflow() {
     let event = decode(b"\x1b[<0;65535;65535M").expect("maximum coordinate");
     assert_eq!(

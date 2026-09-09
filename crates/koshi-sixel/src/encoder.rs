@@ -28,7 +28,7 @@ pub const MAX_SIXEL_CHUNK_BYTES: usize = 16 * 1024;
 /// The largest cumulative Sixel transfer emitted by the encoder.
 pub const MAX_SIXEL_OUTPUT_BYTES: usize = MAX_GRAPHICS_TRANSFER_BYTES;
 
-/// The largest complete Sixel unit a connection worker retains for one tile.
+/// The largest chunk requested while encoding one Sixel tile.
 pub const MAX_SIXEL_TILE_BYTES: usize = MAX_SIXEL_CHUNK_BYTES;
 
 const HISTOGRAM_BUCKETS_PER_CHANNEL: usize = 32;
@@ -44,14 +44,16 @@ pub struct SixelEncodeOptions {
 
 impl Default for SixelEncodeOptions {
     fn default() -> Self {
-        SixelEncodeOptions {
-            max_colors: DEFAULT_PALETTE_COLORS,
-        }
+        Self::new(DEFAULT_PALETTE_COLORS)
     }
 }
 
 impl SixelEncodeOptions {
-    /// Create options with a palette limit.
+    /// Create options with `max_colors` as the palette limit.
+    ///
+    /// [`PreparedSixelPalette::prepare`] and [`SixelEncoder::with_options`]
+    /// reject values outside [`MIN_PALETTE_COLORS`] through
+    /// [`MAX_PALETTE_COLORS`].
     #[must_use]
     pub const fn new(max_colors: usize) -> Self {
         SixelEncodeOptions { max_colors }
@@ -65,7 +67,11 @@ pub struct PreparedSixelPalette {
 }
 
 impl PreparedSixelPalette {
-    /// Prepare a bounded palette from validated RGBA pixels.
+    /// Validate the image and options, then prepare a bounded palette from
+    /// RGBA pixels.
+    ///
+    /// Returns an error for invalid dimensions, an RGBA length mismatch, an
+    /// unsupported palette size, or a failed bounded allocation.
     pub fn prepare(
         image: &DecodedImage,
         background: [u8; 3],
@@ -124,7 +130,7 @@ impl From<io::Error> for SixelEncodeError {
 ///
 /// Construction validates and scans the shared image, prepares its bounded
 /// palette, and performs no I/O or threading. The image is retained through
-/// its `Arc`; output is generated into a queue no larger than
+/// its `Arc`; generated output stays in a queue no larger than
 /// [`MAX_SIXEL_CHUNK_BYTES`].
 #[derive(Debug)]
 pub struct SixelEncoder {
@@ -198,8 +204,9 @@ impl SixelEncoder {
 
     /// Return and consume the next output chunk.
     ///
-    /// A requested size above [`MAX_SIXEL_CHUNK_BYTES`] is clamped to that
-    /// limit. A successful call advances the encoder past the returned bytes.
+    /// A `max_bytes` value of zero returns [`SixelEncodeError::ZeroChunkSize`].
+    /// Larger values are clamped to [`MAX_SIXEL_CHUNK_BYTES`]. A successful
+    /// call advances the encoder past the returned bytes; `None` marks the end.
     pub fn next_chunk(&mut self, max_bytes: usize) -> Result<Option<&[u8]>, SixelEncodeError> {
         let max_bytes = chunk_limit(max_bytes)?;
         self.prepare_pending()?;
@@ -213,6 +220,8 @@ impl SixelEncoder {
     }
 
     /// Write all output in chunks of [`MAX_SIXEL_CHUNK_BYTES`].
+    ///
+    /// Returns [`SixelEncodeError::Io`] when the writer rejects a chunk.
     pub fn write_to<W: Write>(&mut self, writer: &mut W) -> Result<(), SixelEncodeError> {
         while self.write_next_chunk(writer, MAX_SIXEL_CHUNK_BYTES)? {}
         Ok(())
@@ -220,10 +229,11 @@ impl SixelEncoder {
 
     /// Write one output chunk and advance only after `write_all` succeeds.
     ///
-    /// A writer can report an error after writing part of the slice. The
-    /// pending bytes stay unchanged. The caller must abort and discard the
-    /// complete open transfer, then restart with a new encoder; resuming this
-    /// encoder would emit an incomplete Sixel string.
+    /// A `max_bytes` value of zero returns [`SixelEncodeError::ZeroChunkSize`].
+    /// A writer can report an error after writing part of the slice; the
+    /// pending bytes stay unchanged. Abort and discard the open transfer, then
+    /// restart with a new encoder instead of resuming this encoder, which would
+    /// emit an incomplete Sixel string.
     pub fn write_next_chunk<W: Write>(
         &mut self,
         writer: &mut W,

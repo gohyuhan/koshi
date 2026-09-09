@@ -3,14 +3,16 @@
 use serde::de::{self, DeserializeSeed, SeqAccess, Visitor};
 use serde::Deserializer;
 
-/// Deserialize a byte sequence while limiting the number of bytes it can hold.
+/// Deserialize a byte sequence with a maximum length and error label.
+///
+/// A sequence longer than `limit` returns a deserializer error before the extra byte is stored.
 pub struct BoundedBytesSeed {
     limit: usize,
     name: &'static str,
 }
 
 impl BoundedBytesSeed {
-    /// Create a byte-sequence deserializer with an error label and byte limit.
+    /// Create a byte-sequence deserializer with `limit` bytes and the supplied error `name`.
     #[must_use]
     pub const fn new(limit: usize, name: &'static str) -> Self {
         BoundedBytesSeed { limit, name }
@@ -34,6 +36,22 @@ impl<'de> DeserializeSeed<'de> for BoundedBytesSeed {
 struct BoundedBytesVisitor {
     limit: usize,
     name: &'static str,
+}
+
+impl BoundedBytesVisitor {
+    fn validate_length<E>(&self, length: usize) -> Result<(), E>
+    where
+        E: de::Error,
+    {
+        if length > self.limit {
+            return Err(de::Error::custom(format!(
+                "{name} exceeds {limit} bytes",
+                name = self.name,
+                limit = self.limit,
+            )));
+        }
+        Ok(())
+    }
 }
 
 impl<'de> Visitor<'de> for BoundedBytesVisitor {
@@ -65,13 +83,7 @@ impl<'de> Visitor<'de> for BoundedBytesVisitor {
     where
         E: de::Error,
     {
-        if bytes.len() > self.limit {
-            return Err(E::custom(format!(
-                "{name} exceeds {limit} bytes",
-                name = self.name,
-                limit = self.limit,
-            )));
-        }
+        self.validate_length(bytes.len())?;
         Ok(bytes.to_vec())
     }
 
@@ -79,13 +91,7 @@ impl<'de> Visitor<'de> for BoundedBytesVisitor {
     where
         E: de::Error,
     {
-        if bytes.len() > self.limit {
-            return Err(E::custom(format!(
-                "{name} exceeds {limit} bytes",
-                name = self.name,
-                limit = self.limit,
-            )));
-        }
+        self.validate_length(bytes.len())?;
         Ok(bytes)
     }
 }

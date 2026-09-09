@@ -9,6 +9,18 @@ use crate::{ImageDimension, MAX_GRAPHICS_CONTROL_BYTES};
 
 struct BoundedGraphicsTextVisitor;
 
+fn validate_graphics_text<E>(value: &str) -> Result<(), E>
+where
+    E: de::Error,
+{
+    if value.len() > MAX_GRAPHICS_CONTROL_BYTES {
+        return Err(E::custom(format!(
+            "graphics error text exceeds {MAX_GRAPHICS_CONTROL_BYTES} bytes"
+        )));
+    }
+    Ok(())
+}
+
 impl<'de> Visitor<'de> for BoundedGraphicsTextVisitor {
     type Value = String;
 
@@ -20,11 +32,7 @@ impl<'de> Visitor<'de> for BoundedGraphicsTextVisitor {
     where
         E: de::Error,
     {
-        if value.len() > MAX_GRAPHICS_CONTROL_BYTES {
-            return Err(E::custom(format!(
-                "graphics error text exceeds {MAX_GRAPHICS_CONTROL_BYTES} bytes"
-            )));
-        }
+        validate_graphics_text(value)?;
         Ok(value.to_owned())
     }
 
@@ -32,11 +40,7 @@ impl<'de> Visitor<'de> for BoundedGraphicsTextVisitor {
     where
         E: de::Error,
     {
-        if value.len() > MAX_GRAPHICS_CONTROL_BYTES {
-            return Err(E::custom(format!(
-                "graphics error text exceeds {MAX_GRAPHICS_CONTROL_BYTES} bytes"
-            )));
-        }
+        validate_graphics_text(&value)?;
         Ok(value)
     }
 }

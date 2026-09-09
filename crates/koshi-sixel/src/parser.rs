@@ -44,7 +44,7 @@ pub struct SixelGraphic {
 }
 
 impl SixelGraphic {
-    /// Return the indexed image, or `None` when the payload has no drawable extent.
+    /// Return the indexed image, or `None` when the payload has no image extent.
     #[must_use]
     pub fn image(&self) -> Option<&IndexedImage> {
         self.image.as_ref()
@@ -63,7 +63,7 @@ impl SixelGraphic {
     }
 }
 
-/// A bounded sequence of Sixel palette register edits.
+/// Up to 256 Sixel palette register edits in first-seen order.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct SixelPaletteChanges {
@@ -159,7 +159,7 @@ impl SixelPaletteChange {
     }
 }
 
-/// The 256 actual Sixel RGB registers used when resolving an indexed image.
+/// The 256 Sixel RGB registers used when resolving an indexed image.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SixelPalette {
     colors: [[u8; 3]; SIXEL_REGISTER_COUNT],
@@ -260,7 +260,7 @@ impl<'de> Deserialize<'de> for SixelPalette {
     }
 }
 
-/// A bounded row-major Sixel register-index image before palette resolution.
+/// A bounded row-major image of Sixel register indices before palette resolution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct IndexedImage {
     width: u32,
@@ -289,7 +289,12 @@ impl IndexedImage {
         (self.aspect_vertical, self.aspect_horizontal)
     }
 
-    /// Resolve register indices, background cells, and pixel aspect into RGBA.
+    /// Resolve register indices and background cells into RGBA pixels.
+    ///
+    /// Uses `background` for terminal-background cells and expands each raw
+    /// pixel by the normalized pixel aspect. Returns a graphics error for
+    /// invalid or oversized dimensions, an invalid stored index, or an RGBA
+    /// allocation failure.
     pub fn resolve(
         &self,
         palette: &SixelPalette,
@@ -461,10 +466,9 @@ impl<'de> Deserialize<'de> for BoundedIndices {
 
 /// Incremental decoder for one Sixel DCS payload.
 ///
-/// The owning terminal parser handles DCS opening and termination. It passes
-/// the DCS parameters, `q`, and body bytes to this type, without the string
-/// terminator. The public `phase` and `escaped` fields are the small bridge
-/// needed by that parser while it carries a split DCS across input chunks.
+/// The owning terminal parser passes DCS parameter bytes, `q`, and body bytes
+/// to this type and handles the string terminator. `phase` reports header or
+/// body parsing, and `escaped` carries a split-terminator state.
 #[derive(Debug, Clone)]
 pub struct SixelParser {
     /// Whether the parser is collecting header parameters or body data.
@@ -493,7 +497,11 @@ impl SixelParser {
         }
     }
 
-    /// Feed one byte between the Sixel `q` introducer and DCS terminator.
+    /// Feed one byte from a Sixel DCS, including header parameters and `q`.
+    ///
+    /// The string terminator is handled by the owning terminal parser. Returns
+    /// a graphics error when the byte or accumulated payload is invalid or too
+    /// large, or when bounded storage cannot be allocated.
     pub fn feed(&mut self, byte: u8) -> Result<(), GraphicsError> {
         if self.input_bytes == MAX_GRAPHICS_TRANSFER_BYTES {
             return Err(transfer_too_large());
@@ -552,6 +560,10 @@ impl SixelParser {
     }
 
     /// Finish the payload and return its indexed image and protocol metadata.
+    ///
+    /// Returns `image() == None` when the payload has no image extent, or an
+    /// error when the header, command, or image dimensions are incomplete or
+    /// invalid, or when bounded storage cannot be allocated.
     pub fn finish(mut self) -> Result<SixelGraphic, GraphicsError> {
         if let Some(command) = self.command.take() {
             self.finish_command(command)?;
@@ -861,16 +873,7 @@ impl SixelCanvas {
     }
 
     fn finish(&self) -> Result<Option<IndexedImage>, GraphicsError> {
-        let data_width = if self.background == SixelBackground::Terminal {
-            self.written_width
-        } else {
-            self.set_width
-        };
-        let data_height = if self.background == SixelBackground::Terminal {
-            self.written_height
-        } else {
-            self.set_height
-        };
+        let (data_width, data_height) = self.logical_extent();
         let width = data_width.max(self.declared_width.unwrap_or(0));
         let height = data_height.max(self.declared_height.unwrap_or(0));
         if width == 0 || height == 0 {

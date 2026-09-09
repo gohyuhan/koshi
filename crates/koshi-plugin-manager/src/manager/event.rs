@@ -1,1 +1,1 @@
-//! Events. This module is empty.
+//! Empty module for plugin manager events.

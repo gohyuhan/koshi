@@ -21,6 +21,15 @@ fn the_gate_follows_what_it_is_set_to() {
 
     set_allowed(false);
     assert!(!allowed());
+
+    let on_another_thread = std::thread::spawn(allowed).join().unwrap();
+    assert!(!on_another_thread);
+
+    set_allowed(true);
+    let on_another_thread = std::thread::spawn(allowed).join().unwrap();
+    assert!(on_another_thread);
+
+    set_allowed(false);
 }
 
 /// `log_blocked` itself logs on every call; the once-per-site limit lives in
@@ -58,6 +67,8 @@ fn log_blocked_keeps_the_function_name_byte_for_byte() {
 
     let lines = logs.lines();
     assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(lines[0].contains(r#""function":"""#), "{lines:?}");
+    assert!(lines[1].contains(r#""function":"a`b{c}""#), "{lines:?}");
     assert!(
         lines[0].contains(
             r#""message":"`` is a beta feature and did nothing; add a top-level `allow-beta-features #true` line to koshi.kdl to run it""#

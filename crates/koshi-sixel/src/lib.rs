@@ -1,7 +1,7 @@
 //! DEC Sixel decoding and bounded RGBA encoding.
 //!
-//! [`SixelParser`] consumes the payload between a DCS `q` introducer and its
-//! string terminator. [`SixelEncoder`] emits protocol bytes without owning
+//! [`SixelParser`] decodes DCS `q` parameters and body bytes; its owner handles
+//! string framing. [`SixelEncoder`] emits protocol bytes without owning the
 //! terminal cursor, mode, or cleanup state.
 
 mod capabilities;

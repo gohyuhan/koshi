@@ -1,10 +1,9 @@
-//! `koshi-macro` — koshi's procedural macros.
+//! `koshi-macro` provides koshi's procedural macros.
 //!
-//! This crate runs inside the compiler. It puts no code in the binary.
+//! The crate runs in the compiler and emits no runtime code.
 //!
-//! It holds [`beta_feature`], the attribute that writes the beta-feature gate.
-//! `koshi-beta` re-exports the attribute beside the functions the generated
-//! code calls.
+//! It provides [`beta_feature`], which wraps a function body with koshi-beta's
+//! gate. `koshi-beta` re-exports the attribute and provides the generated calls.
 
 use proc_macro::TokenStream;
 use quote::quote;
@@ -34,58 +33,58 @@ impl Parse for Args {
     }
 }
 
-/// Reports whether `otherwise` is the literal `()`. A blocked call then gives
-/// up with a bare `return;`.
+/// Returns `true` only for the empty tuple expression `()`.
 ///
-/// Only the literal counts. `otherwise = ()` is true. A unit-valued call such
-/// as `otherwise = do_nothing()` is false, and the blocked call returns that
-/// expression.
+/// `otherwise = ()` produces `return;`. `otherwise = do_nothing()` produces
+/// `return do_nothing();`, even when that call returns unit.
 fn returns_unit(otherwise: &Expr) -> bool {
     matches!(otherwise, Expr::Tuple(tuple) if tuple.elems.is_empty())
 }
 
-/// Runs the function's body only when `koshi.kdl`'s top-level
+/// Runs the function body only when `koshi.kdl`'s top-level
 /// `allow-beta-features` is on.
 ///
-/// If the setting is off, the body does not run and the call gives back the
-/// `otherwise` expression. The first blocked call of each gated function logs a
-/// warning that names the function and the setting. The other blocked calls of
-/// that function log nothing.
+/// When the setting is off, the body does not run and the call returns the
+/// `otherwise` expression. `otherwise = ()` uses a bare `return;`; every other
+/// expression uses `return <expression>;`.
 ///
-/// The warning names the function by its module path and its identifier, joined
-/// by `::`. A gated `attach` in module `session` is named `session::attach`. An
-/// `impl` block adds nothing to the path: `Server::attach` in `session` is also
-/// named `session::attach`.
+/// The first blocked call of each gated function logs one warning. Subsequent
+/// blocked calls of that function log nothing. The warning names the module
+/// path and function identifier joined by `::`: `attach` in `session` is
+/// `session::attach`. An `impl` method such as `Server::attach` in `session`
+/// also uses `session::attach`; the type name is not included. The warning
+/// tells the user to add a top-level `allow-beta-features #true` line to
+/// `koshi.kdl`.
 ///
-/// The gate reads the setting where the body would start. An ordinary function
-/// reads it at the call. An `async fn` reads it at the first poll. A future
-/// that nobody polls reads nothing and logs nothing.
+/// An ordinary function reads the setting at the call. An `async fn` reads it
+/// at its first poll. An async computation that nobody polls reads nothing and
+/// logs nothing.
 ///
-/// The warning travels through `tracing` and appears only where a subscriber is
-/// installed, such as an interactive session with `logging { enabled #true }`. A
-/// `koshi <verb>` command installs no subscriber: a call blocked there gives back
-/// `otherwise` and shows no warning.
+/// The warning uses `tracing` and appears only when a subscriber is installed,
+/// such as in an interactive session with `logging { enabled #true }`. A
+/// `koshi <verb>` command has no subscriber, so a blocked call returns
+/// `otherwise` without a warning.
 ///
-/// The attribute takes exactly one argument, `otherwise = <expression>`. A
-/// missing, misnamed, or extra argument is a compile error.
+/// The attribute requires exactly one argument, `otherwise = <expression>`.
+/// Missing, misnamed, and extra arguments are compile errors.
 ///
-/// The generated code calls `koshi_beta::allowed` and `koshi_beta::log_blocked`.
-/// The gated function's crate depends on `koshi-beta`.
+/// Generated code calls `koshi_beta::allowed` and `koshi_beta::log_blocked`, so
+/// the gated function's crate depends on `koshi-beta`.
 ///
 /// ```ignore
 /// #[beta_feature(otherwise = Ok(()))]
 /// fn attach_to_session(id: SessionId) -> Result<(), CliError> {
-///     // ordinary, finished code
+///     // function body
 /// }
 /// ```
 #[proc_macro_attribute]
 pub fn beta_feature(args: TokenStream, item: TokenStream) -> TokenStream {
-    let Args { otherwise } = parse_macro_input!(args as Args);
+    let otherwise = parse_macro_input!(args as Args).otherwise;
     let mut function = parse_macro_input!(item as ItemFn);
 
     let name = function.sig.ident.to_string();
-    // `module_path!` expands where the attribute is written: a gated `attach`
-    // in module `session` gives the literal `session::attach`.
+    // The path contains the module and function name, such as
+    // `session::attach`; an `impl` type is not included.
     let path = quote!(::core::concat!(::core::module_path!(), "::", #name));
     let body = std::mem::take(&mut function.block.stmts);
     let give_up = if returns_unit(&otherwise) {
@@ -93,8 +92,8 @@ pub fn beta_feature(args: TokenStream, item: TokenStream) -> TokenStream {
     } else {
         quote!(return #otherwise;)
     };
-    // The original statements go back in one by one. The last one stays the
-    // function's tail expression.
+    // Each original statement is interpolated separately, so the final
+    // expression remains the function's tail expression.
     *function.block = syn::parse_quote!({
         if !::koshi_beta::allowed() {
             static BETA_WARNED: ::std::sync::Once = ::std::sync::Once::new();

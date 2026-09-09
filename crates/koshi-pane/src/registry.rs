@@ -10,9 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{error::PaneRegistryError, pane::state::PaneRecord};
 
-/// Owns the [`PaneRecord`] of every pane in one session, keyed by id. The map
-/// is private. Records go in and out only through the methods below, and it
-/// walks in id order.
+/// Owns each pane record for one session, keyed by pane id. The map is
+/// private; [`Self::list`] yields records in id order.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PaneRegistry {
     records: BTreeMap<PaneId, PaneRecord>,
@@ -26,17 +25,18 @@ impl PaneRegistry {
     }
 
     /// Inserts a pane record, keyed by its id. Returns
-    /// [`PaneRegistryError::DuplicateId`] when the id is already registered.
-    /// The error carries the id and the kind of the rejected record. The
-    /// existing record stays untouched.
+    /// [`PaneRegistryError::DuplicateId`] when the id is already registered;
+    /// that error carries the rejected record's id and kind, and the existing
+    /// record stays unchanged.
     pub fn insert(&mut self, pane_record: PaneRecord) -> Result<(), PaneRegistryError> {
-        if self.records.contains_key(&pane_record.id()) {
+        let pane_id = pane_record.id();
+        if self.records.contains_key(&pane_id) {
             return Err(PaneRegistryError::DuplicateId {
-                id: pane_record.id(),
+                id: pane_id,
                 kind: *pane_record.kind(),
             });
         }
-        self.records.insert(pane_record.id(), pane_record);
+        self.records.insert(pane_id, pane_record);
         Ok(())
     }
 
@@ -53,12 +53,10 @@ impl PaneRegistry {
         self.records.remove(&pane_id)
     }
 
-    /// Returns a mutable reference to the record for `pane_id`. Use it to edit
-    /// fields in place, such as the policies or the working directory. Returns
-    /// `None` when the id is not registered.
-    ///
-    /// The record keeps the id it was created with; [`PaneRecord::id`] reads
-    /// it.
+    /// Returns a mutable reference to the record for `pane_id`, or `None` when
+    /// the id is not registered. Callers can edit fields in place, including
+    /// policies and the working directory. The record keeps its original id,
+    /// which [`PaneRecord::id`] returns.
     pub fn get_mut(&mut self, pane_id: PaneId) -> Option<&mut PaneRecord> {
         self.records.get_mut(&pane_id)
     }

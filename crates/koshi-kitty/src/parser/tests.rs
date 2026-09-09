@@ -560,6 +560,14 @@ fn shared_memory_payload_without_size_ignores_mapping_padding() {
 }
 
 #[test]
+fn shared_memory_rgb_payload_without_size_uses_three_channels() {
+    assert_eq!(
+        exact_shared_memory_payload(&[1, 2, 3], KittyFormat::Rgb, Some(1), Some(1), false),
+        Ok(vec![1, 2, 3])
+    );
+}
+
+#[test]
 fn shared_memory_payload_without_size_rejects_truncated_data() {
     assert_eq!(
         exact_shared_memory_payload(

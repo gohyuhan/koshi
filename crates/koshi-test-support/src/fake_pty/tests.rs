@@ -31,7 +31,6 @@ fn spawn_records_spec_and_initial_size() {
     assert_eq!(pty.resizes(pane).unwrap(), vec![size(80, 24)]);
 }
 
-#[cfg(debug_assertions)]
 #[test]
 fn spawning_into_a_live_pane_id_is_refused() {
     let pty = FakePtyBackend::new();
@@ -205,7 +204,7 @@ fn multiple_panes_are_isolated() {
 }
 
 #[test]
-fn a_killed_pane_is_unknown_to_every_later_backend_call() {
+fn a_killed_pane_is_unknown_to_each_subsequent_backend_call() {
     let pty = FakePtyBackend::new();
     let pane = PaneId::new();
     pty.spawn(pane, spec(), size(80, 24)).unwrap();
@@ -548,7 +547,6 @@ fn a_second_fail_spawns_with_replaces_the_armed_error() {
     );
 }
 
-#[cfg(debug_assertions)]
 #[test]
 fn spawning_into_a_live_pane_id_with_a_spawn_failure_armed_returns_the_error_without_panicking() {
     let pty = FakePtyBackend::new();

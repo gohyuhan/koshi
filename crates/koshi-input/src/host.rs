@@ -1,7 +1,8 @@
 //! Events received from the terminal that contains the Koshi client.
 //!
 //! [`Parser`] converts terminal input bytes into keys, mouse events, pasted
-//! text, focus changes, and terminal capability replies.
+//! text, focus changes, and terminal capability replies. For example,
+//! `ESC [ 1 ; 5 C` becomes a Right key with Control held.
 
 use std::ops::{BitOr, BitOrAssign};
 

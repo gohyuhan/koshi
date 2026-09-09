@@ -1,4 +1,4 @@
-//! Plugin manager domain: commands, events, and state.
+//! Plugin manager modules for commands, events, and state.
 
 pub mod command;
 pub mod event;

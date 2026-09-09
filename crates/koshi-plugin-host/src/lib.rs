@@ -1,12 +1,11 @@
-//! Plugin runtime host for koshi.
+//! Provides the plugin host modules and plugin domain error.
 //!
-//! Scope: Wasmtime integration, instance lifecycle, permissions enforcement,
-//! host functions, plugin panes, and plugin status UI. Install and uninstall
-//! state lives in `koshi-plugin-manager`. Only [`error::PluginError`] exists;
-//! every other module is empty.
+//! The crate defines [`error::PluginError`]. The `types` and `host` modules
+//! define no items. Plugin installation and removal state lives in
+//! `koshi-plugin-manager`.
 //!
-//! `cargo xtask dep-guard` fails if any crate other than this one declares
-//! `wasmtime` as a direct dependency.
+//! `cargo xtask dep-guard` permits direct `wasmtime` dependencies only in this
+//! crate.
 
 pub mod error;
 

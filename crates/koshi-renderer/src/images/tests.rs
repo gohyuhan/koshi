@@ -516,6 +516,21 @@ fn image_paint_ignores_kitty_offsets_on_other_protocols() {
 }
 
 #[test]
+fn available_and_unavailable_placements_start_with_full_geometry() {
+    let available = ImagePlacementSnapshot::new(1, record(2, 3, 0), (4, 5), 6, 7)
+        .expect("the available placement is valid");
+    let unavailable = ImagePlacementSnapshot::unavailable(1, 9, (4, 5), 6, 7)
+        .expect("the unavailable placement is valid");
+    let expected = koshi_core::geometry::ImageCellGeometry {
+        full_size: Size { cols: 6, rows: 7 },
+        offset: Point { x: 0, y: 0 },
+    };
+
+    assert_eq!(available.geometry(), expected);
+    assert_eq!(unavailable.geometry(), expected);
+}
+
+#[test]
 fn image_placement_constructor_rejects_invalid_basic_state() {
     let valid = record(1, 1, 0);
     assert_eq!(

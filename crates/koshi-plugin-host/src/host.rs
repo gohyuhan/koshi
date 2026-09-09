@@ -1,5 +1,5 @@
-//! Plugin host domain: instance state, command dispatch, and event handling.
-//! Every module is empty.
+//! Plugin host modules for instance state, command dispatch, and event
+//! handling. The child modules define no items.
 
 pub mod command;
 

@@ -19,6 +19,50 @@ fn encode_base64_for_test(bytes: &[u8]) -> String {
     STANDARD.encode(bytes)
 }
 
+#[test]
+fn command_classifiers_match_complete_and_partial_graphics_names() {
+    for (body, expected) in [
+        (b"".as_slice(), true),
+        (b"File", true),
+        (b"File=inline=1", true),
+        (b"MultipartF", true),
+        (b"FilePart=AAAA", true),
+        (b"FileEnd", true),
+        (b"FileExtra", false),
+        (b"Other", false),
+    ] {
+        assert_eq!(iterm_command_can_be_graphics(body), expected, "{body:?}");
+    }
+
+    for (body, expected) in [
+        (b"".as_slice(), true),
+        (b"File", true),
+        (b"MultipartFile=inline=1", true),
+        (b"FilePart=AAAA", true),
+        (b"FileEnd", true),
+        (b"FileExtra", false),
+        (b"Other", false),
+    ] {
+        assert_eq!(iterm_command_is_graphics(body), expected, "{body:?}");
+    }
+}
+
+#[test]
+fn payload_classifier_waits_for_image_data() {
+    for (body, expected) in [
+        (b"".as_slice(), false),
+        (b"File", false),
+        (b"File=inline=1", false),
+        (b"File=inline=1:", true),
+        (b"MultipartFile=inline=1", false),
+        (b"MultipartFile=inline=1:", true),
+        (b"FilePart=", true),
+        (b"FilePartExtra=", false),
+    ] {
+        assert_eq!(iterm_payload_started(body), expected, "{body:?}");
+    }
+}
+
 fn one_pixel_body(size: Option<&str>) -> Vec<u8> {
     let png = red_png();
     let encoded = encode_base64_for_test(&png);

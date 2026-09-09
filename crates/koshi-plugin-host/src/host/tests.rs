@@ -1,1 +1,1 @@
-//! Tests. This module is empty.
+//! Plugin host tests. This module defines no tests.

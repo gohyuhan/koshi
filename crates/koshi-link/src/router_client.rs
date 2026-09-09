@@ -309,10 +309,8 @@ fn spawn_router_detached(runtime_dir: &Path) -> Result<(), CliError> {
         command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
     }
 
-    // ponytail: the child handle is dropped, so on Unix a router that exits
-    // while this process is still running stays a zombie until this process
-    // exits; keep the handle and collect it if a long-lived caller ever starts
-    // routers repeatedly.
+    // The child handle is dropped. On Unix, a router that exits while this
+    // process remains alive stays a zombie until this process exits.
     command
         .spawn()
         .map(|_| ())

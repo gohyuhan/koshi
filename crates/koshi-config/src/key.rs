@@ -209,23 +209,22 @@ fn named_key(token: &str, name: &str) -> Result<NamedKey, KeyParseError> {
                 )
             });
     }
-    // ponytail: allocates a lowercase copy per name; this runs at config load.
-    let key = match name.to_ascii_lowercase().as_str() {
-        "cr" => NamedKey::Enter,
-        "tab" => NamedKey::Tab,
-        "bs" => NamedKey::Backspace,
-        "esc" => NamedKey::Esc,
-        "space" => NamedKey::Space,
-        "insert" => NamedKey::Insert,
-        "del" => NamedKey::Delete,
-        "home" => NamedKey::Home,
-        "end" => NamedKey::End,
-        "pageup" => NamedKey::PageUp,
-        "pagedown" => NamedKey::PageDown,
-        "left" => NamedKey::Left,
-        "right" => NamedKey::Right,
-        "up" => NamedKey::Up,
-        "down" => NamedKey::Down,
+    Ok(match name.len() {
+        2 if name.eq_ignore_ascii_case("cr") => NamedKey::Enter,
+        2 if name.eq_ignore_ascii_case("bs") => NamedKey::Backspace,
+        2 if name.eq_ignore_ascii_case("up") => NamedKey::Up,
+        3 if name.eq_ignore_ascii_case("tab") => NamedKey::Tab,
+        3 if name.eq_ignore_ascii_case("esc") => NamedKey::Esc,
+        3 if name.eq_ignore_ascii_case("del") => NamedKey::Delete,
+        3 if name.eq_ignore_ascii_case("end") => NamedKey::End,
+        4 if name.eq_ignore_ascii_case("left") => NamedKey::Left,
+        4 if name.eq_ignore_ascii_case("home") => NamedKey::Home,
+        4 if name.eq_ignore_ascii_case("down") => NamedKey::Down,
+        5 if name.eq_ignore_ascii_case("space") => NamedKey::Space,
+        5 if name.eq_ignore_ascii_case("right") => NamedKey::Right,
+        6 if name.eq_ignore_ascii_case("insert") => NamedKey::Insert,
+        6 if name.eq_ignore_ascii_case("pageup") => NamedKey::PageUp,
+        8 if name.eq_ignore_ascii_case("pagedown") => NamedKey::PageDown,
         _ => {
             return Err(err(
                 token,
@@ -234,8 +233,7 @@ fn named_key(token: &str, name: &str) -> Result<NamedKey, KeyParseError> {
                 },
             ));
         }
-    };
-    Ok(key)
+    })
 }
 
 /// Parses one key chord from its config text form.

@@ -104,7 +104,7 @@ fn session_log_path(session_id: SessionId) -> PathBuf {
     }
 }
 
-/// Why [`init_tracing`] could not install a subscriber.
+/// An error from [`init_tracing`].
 #[derive(Debug, Error)]
 pub enum TracingError {
     /// A global subscriber was already installed for this process.
@@ -160,17 +160,12 @@ fn max_level(level: LogLevel) -> Level {
     }
 }
 
-/// A [`MakeWriter`] that appends each formatted event to a per-session log
-/// file. Each write creates the file when it is missing and, when the open
-/// fails, its parent directory; a file or directory removed while koshi runs
-/// comes back on the next line.
-///
-/// Every line is one open-append-close. On a local disk that costs about
-/// 25µs per line. The write runs on the runtime's dispatch thread; a command
-/// committing several events pays it once per event before dispatch returns.
-// ponytail: reopen-per-line buys surviving `rm` of the log file for the ~25µs
-// above. Hold the handle, reopening when a write fails, if dispatch latency
-// needs those microseconds back.
+/// A [`MakeWriter`] that appends formatted events to a per-session log file.
+/// The subscriber creates one writer for each event. Each write creates the
+/// file when it is missing and attempts to create its parent when the open
+/// fails, so a removed file or directory comes back on the next event. For
+/// `logs/koshi-log-abc.log`, a missing `logs` directory is recreated after the
+/// open fails.
 struct SessionLogMaker {
     path: PathBuf,
 }
@@ -198,15 +193,17 @@ struct SessionLogWriter {
 
 impl io::Write for SessionLogWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        if append_to(&self.path, buf).is_err() {
-            // A `logs/` directory removed mid-session makes the open fail;
-            // creating the parent and appending again brings the file back.
-            // An error from either step is returned.
-            if let Some(parent) = self.path.parent() {
-                create_private_dir_all(parent)?;
-            }
-            append_to(&self.path, buf)?;
+        if append_to(&self.path, buf).is_ok() {
+            return Ok(buf.len());
         }
+
+        // A `logs/` directory removed mid-session makes the open fail;
+        // creating the parent and appending again brings the file back.
+        // An error from either step is returned.
+        if let Some(parent) = self.path.parent() {
+            create_private_dir_all(parent)?;
+        }
+        append_to(&self.path, buf)?;
         Ok(buf.len())
     }
 
@@ -244,8 +241,9 @@ fn create_private_dir_all(path: &Path) -> io::Result<()> {
     builder.create(path)
 }
 
-/// A thread-local capture of log output. Returned by [`with_test_writer`] so a
-/// test can assert on what was logged.
+/// A captured log buffer. [`with_test_writer`] installs the subscriber on the
+/// calling thread and returns this buffer for assertions. For an emitted
+/// `tracing::info!("ready")`, [`contents`](Self::contents) includes its line.
 #[derive(Clone, Default)]
 pub struct CapturedLogs {
     buffer: Arc<Mutex<Vec<u8>>>,

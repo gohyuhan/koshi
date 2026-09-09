@@ -1,1 +1,1 @@
-//! Instance state. This module is empty.
+//! Plugin instance state. This module defines no items.

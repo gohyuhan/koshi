@@ -19,10 +19,9 @@ impl TerminalState {
     /// one narrow, non-combining `char`.
     pub(super) fn map_charset(&self, c: char) -> char {
         match self.active_charset() {
-            Charset::Ascii => c,
             Charset::DecLineDrawing => map_dec_line_drawing(c),
             Charset::Uk if c == '#' => '£',
-            Charset::Uk => c,
+            Charset::Ascii | Charset::Uk => c,
         }
     }
 
@@ -33,7 +32,6 @@ impl TerminalState {
     pub(super) fn designate_charset(&mut self, index: usize, byte: u8) {
         let charset = match byte {
             b'0' => Charset::DecLineDrawing,
-            b'B' => Charset::Ascii,
             b'A' => Charset::Uk,
             _ => Charset::Ascii,
         };

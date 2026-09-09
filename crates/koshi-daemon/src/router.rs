@@ -208,7 +208,7 @@ impl RemoteState {
     ///
     /// Each connection's socket is shut down in both directions, ending the
     /// thread reading it and its two bridge threads when it has attached. A
-    /// later attach on a dropped record is refused.
+    /// a new attach on a dropped record is refused.
     ///
     /// Called on a revoke and on a grant that replaces a standing one. An
     /// expiry calls nothing.
@@ -368,10 +368,9 @@ pub fn run_router(
     }
     let _ = std::fs::remove_file(&endpoint_path);
     remove_socket_file(&addr);
-    // ponytail: a serving thread blocked on its peer cannot be joined, so
-    // shutdown waits a fixed moment instead; a caller that loses its last
-    // reply retries, which is the same path a router that has already exited
-    // puts it on.
+    // A serving thread can stay blocked on its peer, so shutdown waits a fixed
+    // moment instead. A caller that loses its last reply retries through the
+    // same path as a router that has already exited.
     std::thread::sleep(DRAIN_GRACE);
 
     drop(lock_file);
@@ -1135,8 +1134,8 @@ fn create_session(
         ));
     }
 
-    // ponytail: creates serialize the dispatcher; move the wait onto the
-    // monitor thread if create latency matters.
+    // The dispatcher waits for this startup report before serving another
+    // event.
     let report = match accept_ready(ready_rx.recv_timeout(READY_WAIT).ok().flatten()) {
         Ok(report) => report,
         Err(reason) => {

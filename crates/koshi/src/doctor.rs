@@ -434,7 +434,7 @@ fn check_log_dir(context: &Context) -> Outcome {
             "give this user a home directory",
         );
     };
-    let path = dir.display();
+    let displayed_path = dir.display();
     if !dir.exists() {
         return absent_directory(dir, "when logging is on");
     }
@@ -442,13 +442,13 @@ fn check_log_dir(context: &Context) -> Outcome {
         Ok(probe) => {
             drop(probe);
             Outcome::ok(format!(
-                "{path} is writable and logging is {}",
+                "{displayed_path} is writable and logging is {}",
                 if context.logging_on { "on" } else { "off" }
             ))
         }
         Err(error) => Outcome::fail(
-            format!("{path} cannot be written: {error}"),
-            &format!("make sure you own {path}"),
+            format!("{displayed_path} cannot be written: {error}"),
+            &format!("make sure you own {displayed_path}"),
         ),
     }
 }
@@ -457,23 +457,23 @@ fn check_plugins_dir(context: &Context) -> Outcome {
     let Some(dir) = context.plugins_dir.as_deref() else {
         return no_home_directory("plugins");
     };
-    let path = dir.display();
+    let displayed_path = dir.display();
     if !dir.exists() {
         return match std::fs::symlink_metadata(dir) {
             Ok(_) => Outcome::fail(
-                format!("{path} is there and koshi cannot read it as a directory"),
-                &format!("remove {path}, or point it at a directory"),
+                format!("{displayed_path} is there and koshi cannot read it as a directory"),
+                &format!("remove {displayed_path}, or point it at a directory"),
             ),
-            Err(_) => Outcome::ok(format!("{path} does not exist")),
+            Err(_) => Outcome::ok(format!("{displayed_path} does not exist")),
         };
     }
     if let Err(error) = std::fs::read_dir(dir) {
         return Outcome::fail(
-            format!("{path} cannot be read: {error}"),
-            &format!("make sure you own {path}"),
+            format!("{displayed_path} cannot be read: {error}"),
+            &format!("make sure you own {displayed_path}"),
         );
     }
-    Outcome::ok(format!("{path} is readable"))
+    Outcome::ok(format!("{displayed_path} is readable"))
 }
 
 fn check_session_directory(context: &Context) -> Outcome {
@@ -546,27 +546,27 @@ fn check_remote_connections(context: &Context) -> Outcome {
 /// `mode` is anything other than 700, and when `dir` is not there and koshi
 /// cannot create it.
 fn runtime_dir_state(dir: &Path, mode: Option<u32>) -> Outcome {
-    let path = dir.display();
+    let displayed_path = dir.display();
     if !dir.exists() {
         return absent_directory(dir, "when a session starts");
     }
     if let Err(error) = std::fs::read_dir(dir) {
         return Outcome::fail(
-            format!("{path} cannot be read: {error}"),
-            &format!("make sure you own {path}"),
+            format!("{displayed_path} cannot be read: {error}"),
+            &format!("make sure you own {displayed_path}"),
         );
     }
     if let Some(mode) = mode {
         if mode != 0o700 {
             return Outcome::fail(
                 format!(
-                    "{path} has mode {mode:03o}; koshi serves a session socket only from a directory with mode 700"
+                    "{displayed_path} has mode {mode:03o}; koshi serves a session socket only from a directory with mode 700"
                 ),
-                &format!("run chmod 700 {path}"),
+                &format!("run chmod 700 {displayed_path}"),
             );
         }
     }
-    Outcome::ok(format!("{path} is ready"))
+    Outcome::ok(format!("{displayed_path} is ready"))
 }
 
 /// `rule` in words, holding no newline:
@@ -588,26 +588,26 @@ fn runtime_dir_rule_phrase(rule: RuntimeDirRule) -> &'static str {
 /// naming what stops it: `dir` itself when that name is taken, else the
 /// closest name above it that takes nothing new.
 fn absent_directory(dir: &Path, created: &str) -> Outcome {
-    let path = dir.display();
+    let displayed_path = dir.display();
     match nearest_existing_name(dir) {
         Some((holder, true)) => Outcome::ok(format!(
-            "{path} does not exist yet; koshi creates it under {} {created}",
+            "{displayed_path} does not exist yet; koshi creates it under {} {created}",
             holder.display()
         )),
         Some((holder, false)) if holder == dir => Outcome::fail(
-            format!("{path} is a name koshi cannot make a directory at"),
-            &format!("remove {path}, or point it at a directory"),
+            format!("{displayed_path} is a name koshi cannot make a directory at"),
+            &format!("remove {displayed_path}, or point it at a directory"),
         ),
         Some((holder, false)) => Outcome::fail(
             format!(
-                "{path} does not exist and koshi cannot create it: nothing new can be written in {}",
+                "{displayed_path} does not exist and koshi cannot create it: nothing new can be written in {}",
                 holder.display()
             ),
             &format!("make sure you can write in {}", holder.display()),
         ),
         None => Outcome::fail(
-            format!("{path} does not exist and no name above it does either"),
-            &format!("make sure a directory above {path} exists"),
+            format!("{displayed_path} does not exist and no name above it does either"),
+            &format!("make sure a directory above {displayed_path} exists"),
         ),
     }
 }
