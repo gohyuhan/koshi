@@ -557,7 +557,7 @@ Tokens are granted only from the machine holding the sessions.
 
 ```text
 koshi version
-koshi 0.4.0-pr.1
+koshi 0.4.0-pr.2
 ```
 
 These two answers differ while an update rolls out. `koshi update` installs a
@@ -568,8 +568,8 @@ a newer build than the process answering it:
 ```text
 koshi server-version
 kind     session                                       version
-router   -                                             0.4.0-pr.1
-session  session-3f2a1c94-8e7b-4d15-9a02-6c5138ef7b40  0.4.0-pr.1
+router   -                                             0.4.0-pr.2
+session  session-3f2a1c94-8e7b-4d15-9a02-6c5138ef7b40  0.4.0-pr.2
 session  session-91c4de07-2b53-41a8-bf6e-70d9a2c81f35  0.3.0
 ```
 
@@ -577,7 +577,7 @@ The version column reads:
 
 | Cell | Meaning |
 |---|---|
-| a build, like `0.4.0-pr.1` | The server answered and named it |
+| a build, like `0.4.0-pr.2` | The server answered and named it |
 | `unknown` | The server answered and is too old to name its build |
 | `not running` | Nothing is listening there |
 | `unreachable` | The server could not be asked; the reason prints on standard error |

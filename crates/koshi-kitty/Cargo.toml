@@ -7,7 +7,7 @@ license.workspace = true
 [dependencies]
 base64 = "0.23.1"
 flate2 = { version = "1.1.9", default-features = false, features = ["rust_backend"] }
-koshi-image = { version = "0.4.0-pr.1", path = "../koshi-image" }
+koshi-image = { version = "0.4.0-pr.2", path = "../koshi-image" }
 libc.workspace = true
 thiserror = "2.0.18"
 
