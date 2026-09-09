@@ -2455,10 +2455,10 @@ fn wait_for_exit(exited: &AtomicBool, timeout: Duration) -> bool {
 
 /// Convert koshi's [`PtySize`] into `portable-pty`'s own size type, zeroing
 /// the pixel dimensions `portable-pty` accepts but this crate does not track.
-fn to_pp_size(s: PtySize) -> portable_pty::PtySize {
+fn to_pp_size(size: PtySize) -> portable_pty::PtySize {
     portable_pty::PtySize {
-        rows: s.rows,
-        cols: s.cols,
+        rows: size.rows,
+        cols: size.cols,
         pixel_width: 0,
         pixel_height: 0,
     }
@@ -2467,10 +2467,10 @@ fn to_pp_size(s: PtySize) -> portable_pty::PtySize {
 /// Convert `portable-pty`'s exit status into koshi's own [`ExitStatus`]:
 /// a signal name (Unix only) maps to [`ExitStatus::Signaled`] via [`sig_no`],
 /// anything else maps to [`ExitStatus::ExitCode`].
-fn map_status(s: portable_pty::ExitStatus) -> ExitStatus {
-    match s.signal() {
+fn map_status(status: portable_pty::ExitStatus) -> ExitStatus {
+    match status.signal() {
         Some(name) => ExitStatus::Signaled(sig_no(name)),
-        None => ExitStatus::ExitCode(s.exit_code() as i32),
+        None => ExitStatus::ExitCode(status.exit_code() as i32),
     }
 }
 

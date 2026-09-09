@@ -406,7 +406,7 @@ fn without_terminal_inert<'a>(bytes: &'a [u8], ranges: &[Range<usize>]) -> Cow<'
         return Cow::Borrowed(bytes);
     }
 
-    let removed = ranges.iter().map(|range| range.len()).sum::<usize>();
+    let removed = ranges.iter().map(std::ops::Range::len).sum::<usize>();
     let mut compacted = Vec::with_capacity(bytes.len() - removed);
     let mut at = 0;
     for range in ranges {
@@ -465,7 +465,7 @@ impl C1InputNormalizer {
             let output = replacement.unwrap_or(std::slice::from_ref(&byte));
             self.push_tail(output);
             if let Some(control) = control.filter(|control| self.tail_matches(*control)) {
-                let end = normalized.as_ref().map_or(index + 1, |buffer| buffer.len());
+                let end = normalized.as_ref().map_or(index + 1, Vec::len);
                 controls.push((end, control));
             }
             index += 1;
@@ -570,10 +570,8 @@ impl C1InputNormalizer {
             },
             C1InputState::Escape => Self::advance_escape(byte),
             C1InputState::EscapeIntermediate => match byte {
-                CANCEL | SUBSTITUTE => C1InputState::Ground,
+                CANCEL | SUBSTITUTE | 0x30..=0x7e => C1InputState::Ground,
                 ESCAPE => C1InputState::Escape,
-                0x20..=0x2f => C1InputState::EscapeIntermediate,
-                0x30..=0x7e => C1InputState::Ground,
                 _ => C1InputState::EscapeIntermediate,
             },
             C1InputState::Csi => match byte {
@@ -596,9 +594,8 @@ impl C1InputNormalizer {
                 _ => C1InputState::String(kind),
             },
             C1InputState::StringEscape(kind) => match byte {
-                CANCEL | SUBSTITUTE => C1InputState::Ground,
+                CANCEL | SUBSTITUTE | b'\\' => C1InputState::Ground,
                 ESCAPE => C1InputState::StringEscape(kind),
-                b'\\' => C1InputState::Ground,
                 _ => C1InputState::String(kind),
             },
         };

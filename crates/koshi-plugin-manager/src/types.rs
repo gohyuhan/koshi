@@ -1,1 +1,1 @@
-//! Core types. This module is empty.
+//! Empty public module for plugin manager core types.

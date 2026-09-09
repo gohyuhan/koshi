@@ -54,6 +54,9 @@ fn new_and_new_with_kind_terminal_build_the_same_record() {
 #[test]
 fn a_rejected_lifecycle_event_leaves_the_record_unchanged() {
     let mut record = PaneRecord::new(PaneId::new(), SystemTime::UNIX_EPOCH);
+    record.cwd = Some(std::path::PathBuf::from("/workspace"));
+    record.close_policy = PaneClosePolicy::Force;
+    let before = record.clone();
 
     // `Cleaned` is illegal from `Spawning`: the record reports the rejection…
     let rejected = record.update_lifecycle(PaneLifecycleEvent::Cleaned);
@@ -66,8 +69,8 @@ fn a_rejected_lifecycle_event_leaves_the_record_unchanged() {
             kind: PaneKind::Terminal,
         })
     );
-    // …and stays exactly where it was.
-    assert_eq!(record.lifecycle(), &PaneLifecycle::Spawning);
+    // …and keeps every field exactly where it was.
+    assert_eq!(record, before);
 }
 
 #[test]

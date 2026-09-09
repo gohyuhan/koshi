@@ -530,21 +530,21 @@ fn read_files(dir: &Path) -> ConfigFiles {
 }
 
 fn read_file(kind: ConfigFileKind, path: PathBuf) -> Result<Option<ConfigFile>, String> {
-    let metadata = match fs::symlink_metadata(&path) {
+    let link_metadata = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(format!("read {}: {error}", path.display())),
     };
-    let (metadata, write_path) = if metadata.file_type().is_symlink() {
+    let (file_metadata, write_path) = if link_metadata.file_type().is_symlink() {
         let write_path =
             fs::canonicalize(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
-        let metadata =
+        let file_metadata =
             fs::metadata(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
-        (metadata, write_path)
+        (file_metadata, write_path)
     } else {
-        (metadata, path.clone())
+        (link_metadata, path.clone())
     };
-    if !metadata.is_file() {
+    if !file_metadata.is_file() {
         return Err(format!("read {}: expected a regular file", path.display()));
     }
     let source =
@@ -572,16 +572,16 @@ fn push_kdl_files(
         }
     };
     for entry in entries {
-        let entry = match entry {
+        let dir_entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
                 errors.push(format!("read {}: {error}", dir.display()));
                 continue;
             }
         };
-        let path = entry.path();
-        if path.extension() == Some(OsStr::new("kdl")) {
-            paths.push((kind, path));
+        let file_path = dir_entry.path();
+        if file_path.extension() == Some(OsStr::new("kdl")) {
+            paths.push((kind, file_path));
         }
     }
 }

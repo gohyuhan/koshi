@@ -640,7 +640,15 @@ pub struct ImagePlacementSnapshot {
 }
 
 impl ImagePlacementSnapshot {
-    /// Build a frame placement from its fields.
+    /// Build a placement with a complete image record and connection-local
+    /// content id equal to `id`.
+    ///
+    /// Returns `None` when an identity or dimension is zero, the placement
+    /// has an anchor plus a row or column count greater than `u16::MAX + 1`,
+    /// the record action is `Transmit`, `record.source_rect()` returns an
+    /// error, or the decoded image has zero width or height, exceeds
+    /// `MAX_IMAGE_SIDE`, `MAX_IMAGE_PIXELS`, or `MAX_IMAGE_BYTES`, or has an
+    /// RGBA length other than `width * height * 4`.
     #[must_use]
     pub fn new(
         id: ImagePlacementId,
@@ -652,7 +660,14 @@ impl ImagePlacementSnapshot {
         Self::with_content_id(id, id, record, anchor, columns, rows)
     }
 
-    /// Build a frame placement with an explicit connection-local content id.
+    /// Build a placement with a complete image record and `content_id`.
+    ///
+    /// Returns `None` when an identity or dimension is zero, the placement
+    /// has an anchor plus a row or column count greater than `u16::MAX + 1`,
+    /// the record action is `Transmit`, `record.source_rect()` returns an
+    /// error, or the decoded image has zero width or height, exceeds
+    /// `MAX_IMAGE_SIDE`, `MAX_IMAGE_PIXELS`, or `MAX_IMAGE_BYTES`, or has an
+    /// RGBA length other than `width * height * 4`.
     #[must_use]
     pub fn with_content_id(
         id: ImagePlacementId,
@@ -676,17 +691,14 @@ impl ImagePlacementSnapshot {
             anchor,
             columns,
             rows,
-            geometry: koshi_core::geometry::ImageCellGeometry {
-                full_size: koshi_core::geometry::Size {
-                    cols: columns,
-                    rows,
-                },
-                offset: koshi_core::geometry::Point { x: 0, y: 0 },
-            },
+            geometry: full_image_geometry(columns, rows),
         })
     }
 
-    /// Build a placement whose content was not sent to this viewer.
+    /// Build a placement whose image record is unavailable to this viewer.
+    ///
+    /// Returns `None` when an identity or dimension is zero, or the placement
+    /// has an anchor plus a row or column count greater than `u16::MAX + 1`.
     #[must_use]
     pub fn unavailable(
         id: ImagePlacementId,
@@ -702,13 +714,7 @@ impl ImagePlacementSnapshot {
             anchor,
             columns,
             rows,
-            geometry: koshi_core::geometry::ImageCellGeometry {
-                full_size: koshi_core::geometry::Size {
-                    cols: columns,
-                    rows,
-                },
-                offset: koshi_core::geometry::Point { x: 0, y: 0 },
-            },
+            geometry: full_image_geometry(columns, rows),
         })
     }
 
@@ -748,7 +754,10 @@ impl ImagePlacementSnapshot {
         (self.rows, self.columns)
     }
 
-    /// Apply clipping geometry when its visible rectangle fits the complete image.
+    /// Set clipping geometry when the visible rectangle fits the complete image.
+    ///
+    /// Returns `None` when `geometry` does not contain this placement's full
+    /// cell size.
     #[must_use]
     pub fn with_geometry(
         mut self,
@@ -770,7 +779,10 @@ impl ImagePlacementSnapshot {
         self.geometry
     }
 
-    /// Copy one terminal placement into the frame while sharing its record.
+    /// Copy a terminal placement into the frame while sharing its image record.
+    ///
+    /// Panics when the terminal supplies an invalid placement or clipping
+    /// geometry.
     #[must_use]
     pub fn from_placement(placement: &ImagePlacement) -> Self {
         let (rows, columns) = placement.dimensions();
@@ -785,6 +797,16 @@ impl ImagePlacementSnapshot {
         .expect("terminal image placement is valid")
         .with_geometry(placement.geometry())
         .expect("terminal image clipping is valid")
+    }
+}
+
+fn full_image_geometry(columns: u16, rows: u16) -> koshi_core::geometry::ImageCellGeometry {
+    koshi_core::geometry::ImageCellGeometry {
+        full_size: koshi_core::geometry::Size {
+            cols: columns,
+            rows,
+        },
+        offset: koshi_core::geometry::Point { x: 0, y: 0 },
     }
 }
 

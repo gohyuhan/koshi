@@ -1,19 +1,19 @@
-//! In-memory fake PTY (pseudo-terminal, the virtual terminal a shell process
-//! runs inside) backend.
+//! In-memory fake PTY (pseudo-terminal) backend.
 //!
-//! [`fake_pty::FakePtyBackend`] implements the whole
-//! [`koshi_pty::backend::state::PtyBackend`] trait in memory, without launching
-//! a real shell. It records every spawn, write, resize, and kill.
+//! [`fake_pty::FakePtyBackend`] implements
+//! [`koshi_pty::backend::state::PtyBackend`] in memory without starting a shell.
+//! It records every spawn, write, resize, and kill.
 //!
-//! A test reads those records back with `spawned_panes`, `spawn_spec`,
-//! `writes`, `resizes`, and `kills`. A test drives child output with
-//! `push_output` and child exit with `trigger_child_exit`.
+//! Tests read records with `spawned_panes`, `spawn_spec`, `writes`, `resizes`,
+//! and `kills`. They drive child output with `push_output` and child exit with
+//! `trigger_child_exit`.
 //!
-//! A pane is live from its spawn until its first `kill`. `resize`, `write` and
-//! `kill` answer [`koshi_pty::error::PtyError::UnknownPane`] for a pane that is
-//! not live; `spawn` answers [`koshi_pty::error::PtyError::Spawn`] for one that
-//! is, and takes the id of one that is not. The record of a killed pane stays
-//! readable.
+//! A pane is live from spawn until its first `kill`. `kill` returns
+//! [`koshi_pty::error::PtyError::UnknownPane`] after that. `resize` and `write`
+//! return their configured failure when one names the pane, otherwise they
+//! return [`koshi_pty::error::PtyError::UnknownPane`]. `spawn` returns
+//! [`koshi_pty::error::PtyError::Spawn`] for a live id and accepts an id that is
+//! not live. Killed records remain readable.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -25,85 +25,85 @@ pub use koshi_core::process::{ExitStatus, KillPolicy, PtySize, SpawnSpec};
 pub use koshi_pty::backend::state::{PtyBackend, PtyHandle};
 pub use koshi_pty::error::PtyError;
 
-/// Everything the backend records and drives for a single spawned pane.
+/// Recorded state and channels for one spawned pane.
 struct PaneRecord {
     spec: SpawnSpec,
     resizes: Vec<PtySize>,
     writes: Vec<Vec<u8>>,
     kills: Vec<KillPolicy>,
     /// `true` between [`spawn`](FakePtyBackend::spawn) and the pane's first
-    /// [`kill`](FakePtyBackend::kill). A record with `false` still answers
+    /// [`kill`](FakePtyBackend::kill). A `false` record remains available to
     /// [`spawn_spec`](FakePtyBackend::spawn_spec),
-    /// [`writes`](FakePtyBackend::writes),
-    /// [`resizes`](FakePtyBackend::resizes) and
-    /// [`kills`](FakePtyBackend::kills), and still delivers
-    /// [`push_output`](FakePtyBackend::push_output) and
-    /// [`trigger_child_exit`](FakePtyBackend::trigger_child_exit), while
-    /// `resize`, `write` and `kill` answer [`PtyError::UnknownPane`].
+    /// [`writes`](FakePtyBackend::writes), [`resizes`](FakePtyBackend::resizes),
+    /// and [`kills`](FakePtyBackend::kills).
+    /// It also accepts [`push_output`](FakePtyBackend::push_output) and
+    /// [`trigger_child_exit`](FakePtyBackend::trigger_child_exit). `kill` returns
+    /// [`PtyError::UnknownPane`], while `resize` and `write` return a configured
+    /// failure first and otherwise return [`PtyError::UnknownPane`].
     live: bool,
     /// The output channel's sending end. [`close_output`](FakePtyBackend::close_output)
-    /// sets it to `None`, which models the child's PTY reaching EOF.
-    /// [`push_output`](FakePtyBackend::push_output) then discards its bytes.
+    /// sets it to `None` and [`push_output`](FakePtyBackend::push_output) then
+    /// discards its bytes.
     output_tx: Option<Sender<Vec<u8>>>,
     exit_tx: Sender<ExitStatus>,
 }
 
-/// Backend state behind the [`Mutex`]. Every method of [`FakePtyBackend`]
-/// locks it for the length of the call.
+/// Backend state protected by [`Mutex`]. Each backend method holds the lock
+/// for the call.
 #[derive(Default)]
 struct State {
     panes: HashMap<PaneId, PaneRecord>,
     spawn_order: Vec<PaneId>,
-    /// When set, every [`spawn`](FakePtyBackend::spawn) fails with this error
-    /// instead of registering a pane.
+    /// When set, every [`spawn`](FakePtyBackend::spawn) returns this error
+    /// without registering a pane.
     spawn_error: Option<PtyError>,
-    /// When set, [`resize`](FakePtyBackend::resize) fails for this pane with this
-    /// error instead of recording.
+    /// When set, [`resize`](FakePtyBackend::resize) returns this error for the
+    /// named pane instead of recording.
     resize_error: Option<(PaneId, PtyError)>,
-    /// When set, [`write`](FakePtyBackend::write) fails for this pane with this
-    /// error instead of recording.
+    /// When set, [`write`](FakePtyBackend::write) returns this error for the
+    /// named pane instead of recording.
     write_error: Option<(PaneId, PtyError)>,
-    /// Per-pane answers for [`live_cwd`](FakePtyBackend::live_cwd). A pane with
-    /// no entry answers `None`.
+    /// Per-pane answers for [`live_cwd`](FakePtyBackend::live_cwd). An absent
+    /// entry returns `None`.
     live_cwds: HashMap<PaneId, PathBuf>,
 }
 
-/// An in-memory [`PtyBackend`] that records every call and lets the test drive
-/// output and child-exit by hand.
+/// An in-memory [`PtyBackend`] that records calls and lets tests drive output
+/// and child exit.
 #[derive(Default)]
 pub struct FakePtyBackend {
     state: Mutex<State>,
 }
 
 impl FakePtyBackend {
-    /// Create an empty backend with no spawned panes.
+    /// Create a backend with no spawned panes.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Make every subsequent [`spawn`](Self::spawn) fail with `error` instead of
-    /// registering a pane. Panes spawned earlier keep working. A second call
-    /// replaces `error`.
+    /// Set `error` as the result of every subsequent [`spawn`](Self::spawn).
+    /// No pane is registered. Existing panes keep working, and a second call
+    /// replaces the stored error.
     pub fn fail_spawns_with(&self, error: PtyError) {
         self.state.lock().unwrap().spawn_error = Some(error);
     }
 
-    /// Make [`resize`](Self::resize) fail for `pane` with `error` instead of
-    /// recording. Other panes still record their resizes. The backend holds
-    /// one such pair: a second call replaces both `pane` and `error`.
+    /// Set [`resize`](Self::resize) to return `error` for `pane` instead of
+    /// recording. Other panes still record resizes. A second call replaces the
+    /// stored pane and error.
     pub fn fail_resizes_on(&self, pane: PaneId, error: PtyError) {
         self.state.lock().unwrap().resize_error = Some((pane, error));
     }
 
-    /// Make [`write`](Self::write) fail for `pane` with `error` instead of
-    /// recording. Other panes still record their writes. The backend holds
-    /// one such pair: a second call replaces both `pane` and `error`.
+    /// Set [`write`](Self::write) to return `error` for `pane` instead of
+    /// recording. Other panes still record writes. A second call replaces the
+    /// stored pane and error.
     pub fn fail_writes_on(&self, pane: PaneId, error: PtyError) {
         self.state.lock().unwrap().write_error = Some((pane, error));
     }
 
-    /// Make [`live_cwd`](Self::live_cwd) answer `cwd` for `pane`. The pane
+    /// Set [`live_cwd`](Self::live_cwd) to return `cwd` for `pane`. The pane
     /// need not be spawned. A second call for the same pane replaces `cwd`.
     pub fn set_live_cwd(&self, pane: PaneId, cwd: impl Into<PathBuf>) {
         self.state
@@ -113,12 +113,11 @@ impl FakePtyBackend {
             .insert(pane, cwd.into());
     }
 
-    /// Deliver `bytes` as a chunk of child output on `pane`'s handle.
+    /// Deliver `bytes` as one child-output chunk on `pane`'s handle.
     ///
     /// Returns [`PtyError::UnknownPane`] if the pane was never spawned. If the
-    /// handle has been dropped, or [`close_output`](Self::close_output) was
-    /// called for the pane, the bytes are discarded and the call still returns
-    /// `Ok(())`.
+    /// handle was dropped or [`close_output`](Self::close_output) was called,
+    /// the bytes are discarded and the call returns `Ok(())`.
     pub fn push_output(&self, pane: PaneId, bytes: impl Into<Vec<u8>>) -> Result<(), PtyError> {
         self.with_record(pane, |record| {
             if let Some(output_tx) = &record.output_tx {
@@ -127,13 +126,11 @@ impl FakePtyBackend {
         })
     }
 
-    /// Close a pane's output channel, which models its PTY reaching EOF once the
-    /// child is gone.
+    /// Close a pane's output channel and make its handle report end of stream.
     ///
-    /// The handle's output receiver then reports the channel closed.
-    /// [`push_output`](Self::push_output) calls made after it discard their
-    /// bytes. A second `close_output` for the same pane changes nothing.
-    /// Returns [`PtyError::UnknownPane`] if the pane was never spawned.
+    /// [`push_output`](Self::push_output) calls after this discard their bytes.
+    /// Repeated calls have no effect. Returns [`PtyError::UnknownPane`] if the
+    /// pane was never spawned.
     pub fn close_output(&self, pane: PaneId) -> Result<(), PtyError> {
         let mut state = self.state.lock().unwrap();
         let record = state
@@ -144,30 +141,29 @@ impl FakePtyBackend {
         Ok(())
     }
 
-    /// Fire `pane`'s child-exit with the given status on its handle.
+    /// Deliver `status` as a child-exit notification on `pane`'s handle.
     ///
-    /// Each call queues one status; the handle reads them in call order.
+    /// Each call queues one status, and the handle reads them in call order.
     /// Returns [`PtyError::UnknownPane`] if the pane was never spawned. If the
-    /// handle has been dropped the status is discarded and the call still
-    /// returns `Ok(())`.
+    /// handle was dropped, the status is discarded and the call returns
+    /// `Ok(())`.
     pub fn trigger_child_exit(&self, pane: PaneId, status: ExitStatus) -> Result<(), PtyError> {
         self.with_record(pane, |record| {
             let _ = record.exit_tx.send(status);
         })
     }
 
-    /// The panes spawned so far, in spawn order, killed panes included. An id
-    /// spawned again after a kill appears once per spawn.
+    /// Return pane ids in spawn order, including killed panes. An id reused
+    /// after a kill appears once for each spawn.
     #[must_use]
     pub fn spawned_panes(&self) -> Vec<PaneId> {
         self.state.lock().unwrap().spawn_order.clone()
     }
 
-    /// Run `read` on a pane's record while the state lock is held, and return
-    /// its value.
+    /// Run `read` on a pane record while holding the state lock.
     ///
     /// Returns [`PtyError::UnknownPane`] if the pane was never spawned; `read`
-    /// then does not run.
+    /// does not run in that case.
     fn with_record<T>(
         &self,
         pane: PaneId,
@@ -181,49 +177,49 @@ impl FakePtyBackend {
             .ok_or(PtyError::UnknownPane { pane })
     }
 
-    /// The [`SpawnSpec`] a pane was spawned with, or
+    /// Return the [`SpawnSpec`] used for a pane, or
     /// [`PtyError::UnknownPane`] if the pane was never spawned.
     pub fn spawn_spec(&self, pane: PaneId) -> Result<SpawnSpec, PtyError> {
         self.with_record(pane, |record| record.spec.clone())
     }
 
-    /// Every write made to a pane, in order, or [`PtyError::UnknownPane`] if
-    /// the pane was never spawned.
+    /// Return every write made to a pane in order, or
+    /// [`PtyError::UnknownPane`] if the pane was never spawned.
     pub fn writes(&self, pane: PaneId) -> Result<Vec<Vec<u8>>, PtyError> {
         self.with_record(pane, |record| record.writes.clone())
     }
 
-    /// Every resize applied to a pane, in order — the spawn size first — or
-    /// [`PtyError::UnknownPane`] if the pane was never spawned.
+    /// Return every resize applied to a pane in order, with the spawn size
+    /// first, or [`PtyError::UnknownPane`] if the pane was never spawned.
     pub fn resizes(&self, pane: PaneId) -> Result<Vec<PtySize>, PtyError> {
         self.with_record(pane, |record| record.resizes.clone())
     }
 
-    /// Every kill requested for a pane, in order, or [`PtyError::UnknownPane`]
-    /// if the pane was never spawned.
+    /// Return every kill requested for a pane in order, or
+    /// [`PtyError::UnknownPane`] if the pane was never spawned.
     pub fn kills(&self, pane: PaneId) -> Result<Vec<KillPolicy>, PtyError> {
         self.with_record(pane, |record| record.kills.clone())
     }
 }
 
 impl PtyBackend for FakePtyBackend {
-    /// Record a pane spawn under the caller's `pane_id` and return a handle.
+    /// Record a spawn under `pane_id` and return a handle.
     ///
-    /// Stores the spawn spec and the initial size in the pane's record, then
-    /// appends `pane_id` to the spawn order. The handle carries the same id. It
-    /// receives the output and exit status a test drives with
-    /// [`push_output`](Self::push_output) and [`trigger_child_exit`](Self::trigger_child_exit).
+    /// Stores `spec` and the initial `size`, then appends `pane_id` to the spawn
+    /// order. The handle carries the same id and receives output and exit status
+    /// sent by [`push_output`](Self::push_output) and
+    /// [`trigger_child_exit`](Self::trigger_child_exit).
     ///
-    /// A pane killed earlier may be spawned again under the same id. The new
-    /// spawn replaces the old record: its spec, writes, resizes and kills start
-    /// empty again, and `pane_id` is appended to the spawn order a second time.
+    /// A killed id can be spawned again. The new spawn replaces the old record,
+    /// replaces its spec, clears its writes, resizes, and kills, and adds the id
+    /// to the spawn order again.
     ///
     /// # Errors
     ///
-    /// Returns the error set by [`fail_spawns_with`](Self::fail_spawns_with),
-    /// when one is set; else [`PtyError::Spawn`] — `pane <id> is already open` —
-    /// when `pane_id` is live. A refused spawn leaves the live pane's record
-    /// and handle untouched.
+    /// Returns the error set by [`fail_spawns_with`](Self::fail_spawns_with)
+    /// when one is set. Otherwise returns [`PtyError::Spawn`] with
+    /// `pane <id> is already open` when `pane_id` is live. A refused spawn does
+    /// not change the live record or handle.
     fn spawn(
         &self,
         pane_id: PaneId,
@@ -261,12 +257,12 @@ impl PtyBackend for FakePtyBackend {
 
     /// Record a resize operation on a pane.
     ///
-    /// Appends the new size to the pane's resize history. The initial size
-    /// from spawn is already recorded; subsequent resizes are added in order.
+    /// Appends `size` to the pane's resize history. The spawn size is already
+    /// the first entry.
     ///
-    /// Returns the error set by [`fail_resizes_on`](Self::fail_resizes_on)
-    /// when it names `pane`, whether or not the pane was spawned; else
-    /// [`PtyError::UnknownPane`] if the pane was never spawned or was killed.
+    /// Returns the error set by [`fail_resizes_on`](Self::fail_resizes_on) when
+    /// it names `pane`, even if the pane was not spawned. Otherwise returns
+    /// [`PtyError::UnknownPane`] when the pane was never spawned or was killed.
     fn resize(&self, pane: PaneId, size: PtySize) -> Result<(), PtyError> {
         let mut state = self.state.lock().unwrap();
         if let Some((failing, error)) = &state.resize_error {
@@ -285,12 +281,12 @@ impl PtyBackend for FakePtyBackend {
 
     /// Record bytes written to a pane.
     ///
-    /// Appends the byte slice to the pane's write history. Calls are
-    /// captured in order; a test asserts on them via [`writes`](Self::writes).
+    /// Appends `bytes` to the pane's write history in call order; tests read it
+    /// with [`writes`](Self::writes).
     ///
-    /// Returns the error set by [`fail_writes_on`](Self::fail_writes_on) when
-    /// it names `pane`, whether or not the pane was spawned; else
-    /// [`PtyError::UnknownPane`] if the pane was never spawned or was killed.
+    /// Returns the error set by [`fail_writes_on`](Self::fail_writes_on) when it
+    /// names `pane`, even if the pane was not spawned. Otherwise returns
+    /// [`PtyError::UnknownPane`] when the pane was never spawned or was killed.
     fn write(&self, pane: PaneId, bytes: &[u8]) -> Result<(), PtyError> {
         let mut state = self.state.lock().unwrap();
         if let Some((failing, error)) = &state.write_error {
@@ -307,18 +303,17 @@ impl PtyBackend for FakePtyBackend {
         Ok(())
     }
 
-    /// Record a kill request for a pane and close the pane.
+    /// Record a kill request and mark the pane as not live.
     ///
-    /// Appends the kill policy to the pane's kill history, then marks the pane
-    /// no longer live. A later [`resize`](Self::resize), [`write`](Self::write)
-    /// or `kill` for it answers [`PtyError::UnknownPane`], and
-    /// [`spawn`](Self::spawn) may take the id again.
-    ///
-    /// The pane's record stays behind for assertions:
-    /// [`spawn_spec`](Self::spawn_spec), [`writes`](Self::writes),
-    /// [`resizes`](Self::resizes) and [`kills`](Self::kills) still answer it,
-    /// and the handle still receives what [`push_output`](Self::push_output)
-    /// and [`trigger_child_exit`](Self::trigger_child_exit) deliver.
+    /// Appends `kill_policy` to the kill history. Subsequent `kill` calls return
+    /// [`PtyError::UnknownPane`]. `resize` and `write` return a configured
+    /// failure first and otherwise return [`PtyError::UnknownPane`].
+    /// [`spawn`](Self::spawn) can reuse the id.
+    /// The record remains available through [`spawn_spec`](Self::spawn_spec),
+    /// [`writes`](Self::writes), [`resizes`](Self::resizes), and
+    /// [`kills`](Self::kills). Its handle still receives data sent by
+    /// [`push_output`](Self::push_output) and
+    /// [`trigger_child_exit`](Self::trigger_child_exit).
     ///
     /// Returns [`PtyError::UnknownPane`] if the pane was never spawned or was
     /// already killed.
@@ -334,8 +329,8 @@ impl PtyBackend for FakePtyBackend {
         Ok(())
     }
 
-    /// Answer the directory set via [`set_live_cwd`](Self::set_live_cwd), or
-    /// `None` when the test set nothing for the pane.
+    /// Return the directory set by [`set_live_cwd`](Self::set_live_cwd), or
+    /// `None` when no directory was set for the pane.
     fn live_cwd(&self, pane: PaneId) -> Option<PathBuf> {
         self.state.lock().unwrap().live_cwds.get(&pane).cloned()
     }

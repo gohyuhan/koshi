@@ -44,8 +44,7 @@ pub enum Event {
     PaneFocused(PaneFocused),
     /// A pane's PTY was resized (emitted per affected pane after a layout solve).
     PtyResized(PtyResized),
-    /// A pane's terminal content changed: a metadata-only damage tick carrying
-    /// no content. Lossy class.
+    /// A lossy damage tick for changed terminal content. Carries no content.
     PaneOutputUpdated(PaneOutputUpdated),
     /// A tab's layout tree changed.
     LayoutChanged(LayoutChanged),

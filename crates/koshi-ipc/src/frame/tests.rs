@@ -1,7 +1,7 @@
-//! Tests for the painted frame's wire form: run-length encoding folds and
-//! expands a row without changing a cell, a count past `u16::MAX` splits into
-//! further runs, and a frame's encoding is pinned field for field so a rename
-//! fails here.
+//! Tests for painted-frame wire encoding, image placement and transfer limits,
+//! row run-length expansion, and compatibility defaults. They verify that row
+//! runs expand to the original cells, counts above `u16::MAX` split, and exact
+//! field names stay on the wire.
 
 use koshi_core::geometry::Point;
 use serde_json::json;
@@ -383,6 +383,41 @@ fn a_chunked_image_header_and_empty_chunk_are_refused_exactly() {
     let error = serde_json::from_value::<FrameImageChunk>(empty_chunk)
         .expect_err("an empty image chunk is refused");
     assert_eq!(error.to_string(), "image chunk must not be empty");
+}
+
+#[test]
+fn image_transfer_dimensions_accept_the_limits_and_refuse_the_next_value() {
+    let at_pixel_limit: FrameImageTransfer = serde_json::from_value(json!({
+        "id": 1,
+        "record": {
+            "protocol": "Kitty",
+            "width": 16_384,
+            "height": 1_024,
+            "action": "Display",
+            "display": FrameImageDisplay::default(),
+            "anchor": [0, 0]
+        },
+        "byte_len": 67_108_864
+    }))
+    .expect("the exact graphics limits are accepted");
+    assert_eq!(at_pixel_limit.byte_len, 67_108_864);
+
+    for (width, height, byte_len) in [(0, 1, 0), (16_385, 1, 65_540), (16_384, 1_025, 67_174_400)] {
+        let error = serde_json::from_value::<FrameImageTransfer>(json!({
+            "id": 1,
+            "record": {
+                "protocol": "Kitty",
+                "width": width,
+                "height": height,
+                "action": "Display",
+                "display": FrameImageDisplay::default(),
+                "anchor": [0, 0]
+            },
+            "byte_len": byte_len
+        }))
+        .expect_err("dimensions beyond the graphics limits are refused");
+        assert_eq!(error.to_string(), "image dimensions exceed graphics limits");
+    }
 }
 
 #[test]

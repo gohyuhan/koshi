@@ -1,30 +1,27 @@
-//! Atomic file replacement. A reader never sees a half-written file.
+//! Atomic file replacement. Readers see the complete old file or the complete
+//! new file, never a torn middle.
 //!
-//! The new bytes go to a temp file beside the target, get fsynced, then get
-//! renamed over it. `rename` swaps the destination in one step on every
-//! platform. The target holds either the whole old file or the whole new one,
-//! even when the process dies mid-write.
+//! [`write_atomic`] uses [`tempfile`] to create a uniquely named temp file
+//! beside the target, calls `sync_all` on that temp, replaces the target with
+//! the platform's atomic replacement operation, and calls `sync_all` on the
+//! target directory on Unix. The temp starts private with mode `0600` on Unix.
+//! Exclusive creation does not follow a symlink or truncate an existing name.
 //!
-//! The temp comes from [`tempfile`]. It carries a unique name, and mode `0600`
-//! on Unix. It opens with `O_EXCL`, which never follows a symlink and never
-//! truncates an existing file.
+//! Windows does not sync the directory. It retries replacement errors
+//! `ERROR_ACCESS_DENIED` (5) and `ERROR_SHARING_VIOLATION` (32), up to 25
+//! attempts.
 //!
-//! Unix fsyncs the target's directory after the rename. Windows does not fsync
-//! the directory. Windows retries a replace that another writer blocks, up to
-//! 25 attempts.
+//! The target directory is not protected. A caller that can write that
+//! directory can replace the target directly. koshi uses user-private
+//! directories.
 //!
-//! Nothing here guards the target's directory. Anyone who can write that
-//! directory can replace the file directly. koshi writes only under its own
-//! user-private directories.
-//!
-//! [`write_atomic`] carries the full contract: per-platform permission
-//! handling, symlink replacement, and the failure cases.
+//! Normal error paths drop the temp file. On Unix, a hard process termination
+//! can leave the named temp file behind.
 //!
 //! Example: `write_atomic("keybinding.kdl", new)` stages a private temp beside
-//! `keybinding.kdl`, fsyncs it, then renames it on top. A crash before the
-//! rename leaves the old `keybinding.kdl` whole, and the partial bytes sit in
-//! the temp sibling, never in the target. Every error path removes that temp;
-//! a hard kill can leave it behind as a stray private file.
+//! `keybinding.kdl`, syncs it, and replaces the target. A crash before the
+//! replacement leaves the old file whole; partial bytes stay in the temp
+//! sibling. A hard kill on Unix can leave that private sibling behind.
 
 use std::fs;
 use std::io::Write;
@@ -39,35 +36,36 @@ mod tests;
 
 /// Writes `data` to `dst`, replacing any existing file atomically.
 ///
-/// Joins a relative `dst` to the current directory once, at entry. An empty
-/// `dst` is [`StorageError::Io`] carrying `empty destination path`, and
-/// nothing is staged. A `dst` that names no file
-/// once anchored — a filesystem root such as `/` — is [`StorageError::Io`]
-/// carrying `no parent directory for /`, and nothing is staged. Stages `data`
-/// in a private temp beside `dst`. On Unix the temp takes `dst`'s mode
-/// when `dst` is an existing regular file; a new file keeps the private `0600`
-/// default. Fsyncs the temp, renames it over `dst`, then fsyncs the directory
-/// on Unix. If any step up to and including the rename fails, removes the temp
-/// and leaves `dst` untouched.
+/// Resolves a relative `dst` against the current directory once at entry. An
+/// empty `dst` returns [`StorageError::Io`] with detail `empty destination
+/// path`, and stages nothing. A filesystem root such as `/` returns
+/// [`StorageError::Io`] with detail `no parent directory for /`, and stages
+/// nothing.
 ///
-/// Replaces a symlink at `dst` with a regular file, the same as `rename`. The
-/// replacement counts as a new file and stays private. It never inherits the
-/// mode of the file the link pointed at.
+/// Stages `data` in a private temp beside `dst`. On Unix, an existing regular
+/// file gives the temp its mode; a missing or non-regular target leaves the
+/// temp at private mode `0600`. Syncs the temp, replaces `dst`, and syncs the
+/// parent directory on Unix. A failed step through the replacement removes the
+/// temp and leaves `dst` unchanged.
 ///
-/// On Windows the replace fails for a read-only file, and for a path past the
-/// OS path-length limit. `dst` stays untouched in both cases. On Unix the
-/// directory's permissions decide whether the replace succeeds.
+/// A symlink at `dst` is replaced by a private regular file. The replacement
+/// does not inherit the mode of the link's referent. On Windows, a read-only
+/// target or a path past the OS path-length limit fails without changing `dst`.
+/// On Unix, the target directory's permissions decide whether replacement
+/// succeeds.
 ///
-/// Returns [`StorageError::Io`] if the write is not durably persisted. A
-/// directory-fsync failure surfaces here even though `dst` may already hold the
-/// new bytes.
+/// # Errors
 ///
-/// Example: overwriting `cfg.kdl` that currently holds `a=1` with `a=2` yields
-/// a `cfg.kdl` reading exactly `a=2`; a crash mid-write leaves exactly `a=1`.
+/// Returns [`StorageError::Io`] when current-directory resolution, Unix target
+/// stat, temp creation, writing, permission setting, syncing, replacement, or
+/// Unix parent-directory syncing fails. A parent-directory sync failure occurs
+/// after replacement, so `dst` may already hold the new bytes.
+///
+/// Example: overwriting `cfg.kdl` that contains `a=1` with `a=2` leaves it
+/// containing exactly `a=2`; a crash before replacement leaves exactly `a=1`.
 pub fn write_atomic(dst: &Path, data: &[u8]) -> Result<(), StorageError> {
-    // Joins a relative path to the current directory once. The temp and the
-    // rename below use this path; a change of the working directory mid-call
-    // moves neither of them.
+    // Resolve a relative path against the current directory once. Both the
+    // temp and replacement use this path if the working directory changes.
     if dst.as_os_str().is_empty() {
         return Err(io_err("empty destination path".to_string()));
     }
@@ -83,19 +81,17 @@ pub fn write_atomic(dst: &Path, data: &[u8]) -> Result<(), StorageError> {
     let Some(dir) = dst.parent() else {
         return Err(io_err(format!("no parent directory for {}", dst.display())));
     };
-    // Read `dst`'s mode before the rename replaces `dst`.
+    // Read `dst`'s mode before replacement.
     let target_mode = target_permissions(dst)?;
 
-    // A failed `?` up to and including `persist` drops the NamedTempFile, which
-    // removes the temp. Every early return leaves `dst` and the directory
-    // untouched.
+    // Errors through `persist` drop `NamedTempFile` and remove its temp. Every
+    // earlier error leaves `dst` unchanged.
     let mut tmp = NamedTempFile::new_in(dir)
         .map_err(|e| io_err(format!("create temp in {}: {e}", dir.display())))?;
     tmp.write_all(data)
         .map_err(|e| io_err(format!("write temp for {}: {e}", dst.display())))?;
-    // The mode goes on the open temp, before the fsync; the fsynced inode
-    // carries it. The renamed file is never readable by anyone that mode
-    // excludes.
+    // Set the mode on the open temp before syncing it. The replaced inode
+    // carries this mode.
     if let Some(perms) = target_mode {
         tmp.as_file()
             .set_permissions(perms)
@@ -109,9 +105,9 @@ pub fn write_atomic(dst: &Path, data: &[u8]) -> Result<(), StorageError> {
     Ok(())
 }
 
-/// Renames the staged temp over `dst` in a single attempt. Unix `rename`
-/// replaces the target in one step even while other writers hold it. A failed
-/// persist drops the temp, which removes it; `dst` is left untouched.
+/// Replaces `dst` with the staged temp in one attempt. Unix `rename` replaces
+/// the target in one step, including while another writer holds it. A failed
+/// persist drops and removes the temp, leaving `dst` untouched.
 #[cfg(not(windows))]
 fn persist_over(tmp: NamedTempFile, dst: &Path) -> Result<(), StorageError> {
     tmp.persist(dst)
@@ -119,13 +115,13 @@ fn persist_over(tmp: NamedTempFile, dst: &Path) -> Result<(), StorageError> {
         .map_err(|e| io_err(format!("replace {}: {}", dst.display(), e.error)))
 }
 
-/// Renames the staged temp over `dst`, retrying up to 25 times. An attempt
-/// that fails with `ERROR_ACCESS_DENIED` (5) or `ERROR_SHARING_VIOLATION` (32)
-/// while `dst` is neither a directory nor a read-only file is retried after a
-/// sleep of `attempt * 4` milliseconds (4 ms after the first attempt, 96 ms
-/// after the 24th). Any other error, a directory or a read-only file at `dst`,
-/// or a failed 25th attempt is reported at once as [`StorageError::Io`]. A
-/// failed persist drops the temp, which removes it; `dst` is untouched.
+/// Replaces `dst`, retrying up to 25 times. An `ERROR_ACCESS_DENIED` (5) or
+/// `ERROR_SHARING_VIOLATION` (32) failure is retried when `dst` is neither a
+/// directory nor a read-only file. The sleep is `attempt * 4` milliseconds:
+/// 4 ms after attempt 1 through 96 ms after attempt 24. Other errors, a
+/// directory or read-only target, and a failed attempt 25 return
+/// [`StorageError::Io`]. A failed persist drops and removes the temp, leaving
+/// `dst` untouched.
 #[cfg(windows)]
 fn persist_over(mut tmp: NamedTempFile, dst: &Path) -> Result<(), StorageError> {
     const MAX_ATTEMPTS: u32 = 25;
@@ -137,9 +133,8 @@ fn persist_over(mut tmp: NamedTempFile, dst: &Path) -> Result<(), StorageError> 
                 e.error
             }
         };
-        // 5 = ERROR_ACCESS_DENIED, 32 = ERROR_SHARING_VIOLATION. A directory
-        // and a read-only file at `dst` refuse the rename however often it is
-        // tried.
+        // Codes 5 and 32 are the retryable replacement errors. A directory or
+        // read-only file at `dst` makes either error permanent.
         let read_only = fs::metadata(dst).is_ok_and(|meta| meta.permissions().readonly());
         let transient =
             matches!(err.raw_os_error(), Some(5) | Some(32)) && !dst.is_dir() && !read_only;
@@ -151,22 +146,18 @@ fn persist_over(mut tmp: NamedTempFile, dst: &Path) -> Result<(), StorageError> 
     unreachable!("the loop returns on its final attempt")
 }
 
-/// The mode to give the temp on Unix: the existing `dst`'s when `dst` is a
-/// regular file, or `None` for anything else. With `None` the temp keeps its
-/// private `0600` default.
+/// Returns the mode for an existing regular `dst` on Unix. Returns `None` for
+/// a missing or non-regular target; the temp then keeps private mode `0600`.
 ///
-/// Uses `symlink_metadata`, which does not follow links. Any other node at
-/// `dst` — a symlink, FIFO, socket, or device — gives `None`; the rename
-/// replaces that node with a new private file. A missing `dst` gives `None`.
-/// Custom POSIX ACLs are not cloned.
+/// Uses `symlink_metadata`, which inspects a link rather than its referent. A
+/// symlink, FIFO, socket, or device at `dst` returns `None`, and replacement
+/// creates a private regular file. Custom POSIX ACLs are not cloned.
 ///
-/// Returns [`StorageError::Io`] when the stat fails with any error but
-/// not-found, such as a regular file in `dst`'s directory path.
+/// Returns [`StorageError::Io`] when stat fails with an error other than
+/// not-found, such as when a regular file blocks a directory component.
 ///
-/// Example: `dst` exists at `0644` → `Some(0644)`, and the replaced file keeps
-/// `0644` instead of the temp's `0600`; a missing `dst` → `None`; `dst` a
-/// symlink to (or a FIFO at) `0644` → `None`, and the replacement file is
-/// `0600`.
+/// Example: a regular `dst` at `0644` returns `Some(0644)`; a missing `dst`, a
+/// symlink, or a FIFO returns `None` and leaves the replacement at `0600`.
 #[cfg(unix)]
 fn target_permissions(dst: &Path) -> Result<Option<fs::Permissions>, StorageError> {
     match fs::symlink_metadata(dst) {
@@ -177,17 +168,16 @@ fn target_permissions(dst: &Path) -> Result<Option<fs::Permissions>, StorageErro
     }
 }
 
-/// The mode to give the temp on every platform but Unix: always `None`. `std`
-/// models only the read-only flag there, and the rename fails on a read-only
-/// `dst`.
+/// Returns `None` on every platform but Unix. On Windows, `std` models only
+/// the read-only flag; this function does not copy it.
 #[cfg(not(unix))]
 fn target_permissions(_dst: &Path) -> Result<Option<fs::Permissions>, StorageError> {
     Ok(None)
 }
 
-/// Fsyncs `dir`, which holds `dst`. Names `dst` in its errors. Returns
-/// [`StorageError::Io`] when the directory cannot be opened or fsynced. Unix
-/// only.
+/// Syncs the directory `dir` that holds `dst` on Unix. Names `dst` in errors
+/// and returns [`StorageError::Io`] when opening or syncing the directory
+/// fails.
 #[cfg(unix)]
 fn fsync_parent_dir(dir: &Path, dst: &Path) -> Result<(), StorageError> {
     let handle =
@@ -203,7 +193,6 @@ fn fsync_parent_dir(_dir: &Path, _dst: &Path) -> Result<(), StorageError> {
     Ok(())
 }
 
-/// Builds a [`StorageError::Io`] from a detail string.
 fn io_err(detail: String) -> StorageError {
     StorageError::Io { detail }
 }

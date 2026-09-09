@@ -46,8 +46,7 @@ fn runtime_error_display_with_empty_name_and_detail() {
 
 #[test]
 fn load_error_display_does_not_escape_backticks_in_name() {
-    // The `#[error]` format substitutes `name` as plain text. A backtick in
-    // `name` reaches the message unescaped.
+    // The error format inserts `name` without escaping backticks.
     let err = PluginError::Load {
         name: "evil`plugin".to_string(),
         detail: "boom".to_string(),
@@ -126,8 +125,8 @@ fn load_error_display_preserves_multibyte_unicode() {
 
 #[test]
 fn load_error_display_substitutes_brace_shaped_fields_verbatim() {
-    // `{name}` and `{detail}` are substituted once. Braces inside a field
-    // reach the message as plain text.
+    // The format substitutes each field once and leaves braces inside fields
+    // as plain text.
     let err = PluginError::Load {
         name: "{detail}".to_string(),
         detail: "{name}".to_string(),
@@ -174,5 +173,17 @@ fn debug_output_names_variant_and_fields() {
     assert_eq!(
         format!("{err:?}"),
         "Load { name: \"vim-mode\", detail: \"boom\" }"
+    );
+}
+
+#[test]
+fn runtime_error_debug_output_names_variant_and_fields() {
+    let err = PluginError::Runtime {
+        name: "vim-mode".to_string(),
+        detail: "boom".to_string(),
+    };
+    assert_eq!(
+        format!("{err:?}"),
+        "Runtime { name: \"vim-mode\", detail: \"boom\" }"
     );
 }

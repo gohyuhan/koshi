@@ -1,6 +1,6 @@
 //! Typed identifiers.
 //!
-//! One newtype around a UUIDv7 per entity; the types are not interchangeable.
+//! One newtype around a `UUIDv7` per entity; the types are not interchangeable.
 //! Ids minted in one process sort by creation order. Every id is `Copy`,
 //! hashable, ordered (usable as a `BTreeMap` key), and `serde`-serializable.
 //! The wire form is the bare uuid; `Display` renders the prefixed form
@@ -22,7 +22,7 @@ use uuid::Uuid;
 pub struct SessionId(Uuid);
 
 impl SessionId {
-    /// Generate a new time-ordered identifier (UUIDv7).
+    /// Generate a new time-ordered identifier (`UUIDv7`).
     #[must_use]
     pub fn new() -> Self {
         Self(Uuid::now_v7())
@@ -58,7 +58,7 @@ impl fmt::Display for SessionId {
 pub struct ClientId(Uuid);
 
 impl ClientId {
-    /// Generate a new time-ordered identifier (UUIDv7).
+    /// Generate a new time-ordered identifier (`UUIDv7`).
     #[must_use]
     pub fn new() -> Self {
         Self(Uuid::now_v7())
@@ -94,7 +94,7 @@ impl fmt::Display for ClientId {
 pub struct TabId(Uuid);
 
 impl TabId {
-    /// Generate a new time-ordered identifier (UUIDv7).
+    /// Generate a new time-ordered identifier (`UUIDv7`).
     #[must_use]
     pub fn new() -> Self {
         Self(Uuid::now_v7())
@@ -130,7 +130,7 @@ impl fmt::Display for TabId {
 pub struct PaneId(Uuid);
 
 impl PaneId {
-    /// Generate a new time-ordered identifier (UUIDv7).
+    /// Generate a new time-ordered identifier (`UUIDv7`).
     #[must_use]
     pub fn new() -> Self {
         Self(Uuid::now_v7())
@@ -166,7 +166,7 @@ impl fmt::Display for PaneId {
 pub struct PluginId(Uuid);
 
 impl PluginId {
-    /// Generate a new time-ordered identifier (UUIDv7).
+    /// Generate a new time-ordered identifier (`UUIDv7`).
     #[must_use]
     pub fn new() -> Self {
         Self(Uuid::now_v7())
@@ -202,7 +202,7 @@ impl fmt::Display for PluginId {
 pub struct CommandId(Uuid);
 
 impl CommandId {
-    /// Generate a new time-ordered identifier (UUIDv7).
+    /// Generate a new time-ordered identifier (`UUIDv7`).
     #[must_use]
     pub fn new() -> Self {
         Self(Uuid::now_v7())
@@ -238,7 +238,7 @@ impl fmt::Display for CommandId {
 pub struct SubscriberId(Uuid);
 
 impl SubscriberId {
-    /// Generate a new time-ordered identifier (UUIDv7).
+    /// Generate a new time-ordered identifier (`UUIDv7`).
     #[must_use]
     pub fn new() -> Self {
         Self(Uuid::now_v7())

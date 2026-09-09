@@ -126,7 +126,7 @@ impl Default for ImageDisplay {
     }
 }
 
-/// A validated row-major RGBA image.
+/// An image stored as row-major RGBA bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DecodedImage {
     /// Image width in pixels.
@@ -227,11 +227,13 @@ pub struct ImageRecord {
 }
 
 impl ImageRecord {
-    /// Return the source rectangle used by a Kitty image placement.
+    /// Return `(x, y, width, height)` in decoded-image pixels.
     ///
-    /// The tuple is `(x, y, width, height)` in decoded-image pixels. Kitty
-    /// `x` and `y` select the source origin; `w` and `h` are represented by
-    /// pixel dimensions in `display`. Other protocols use the complete image.
+    /// Non-Kitty records use the complete image. Kitty offsets default to zero;
+    /// pixel dimensions are clamped to the image, and other dimension units use
+    /// the remaining pixels. A zero extent or an origin outside the image
+    /// returns [`ImagePlacementError::SourceOutOfBounds`]. For an 8x6 image with
+    /// Kitty `x = 2`, `y = 0`, `width = 20`, and no height, it returns `(2, 0, 6, 6)`.
     pub fn source_rect(&self) -> Result<(u32, u32, u32, u32), ImagePlacementError> {
         if self.protocol != GraphicsProtocol::Kitty {
             return Ok((0, 0, self.image.width, self.image.height));

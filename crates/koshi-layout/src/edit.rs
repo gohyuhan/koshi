@@ -56,8 +56,7 @@ pub fn split_leaf(
     let path = tree
         .path_to(target)
         .ok_or(SplitError::PaneNotFound { target })?;
-    // The outermost stack on the path is the operand; without one, the leaf
-    // itself is.
+    // Select the outermost stacked ancestor, or the target leaf when none exists.
     let operand_depth = (0..path.len())
         .find(|&depth| {
             matches!(
@@ -71,11 +70,11 @@ pub fn split_leaf(
     let slot = result.node_at_mut(&path[..operand_depth]);
     let operand = std::mem::replace(slot, LayoutNode::Pane(new_pane));
 
-    let old = operand;
-    let new = LayoutNode::Pane(new_pane);
+    let existing = operand;
+    let new_node = LayoutNode::Pane(new_pane);
     let children = match direction {
-        Direction::Right | Direction::Down => vec![old, new],
-        Direction::Left | Direction::Up => vec![new, old],
+        Direction::Right | Direction::Down => vec![existing, new_node],
+        Direction::Left | Direction::Up => vec![new_node, existing],
     };
     *slot = LayoutNode::Split(SplitNode::with_equal_weights(
         split_axis(direction),
@@ -198,8 +197,8 @@ pub fn remove_pane(
         Removal::NodeEmptied => return Err(RemoveError::LastPane { pane }),
         Removal::Done => {}
     }
-    // A tree whose only remaining children are empty splits holds no pane, so
-    // `pane` was the last one however many nodes survive.
+    // An empty leaf list means the removed pane was the last leaf, even when
+    // empty splits remain.
     if result.leaf_panes().is_empty() {
         return Err(RemoveError::LastPane { pane });
     }

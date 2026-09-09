@@ -1,1 +1,1 @@
-//! Tests. This module is empty.
+//! Empty private test module for the plugin manager.

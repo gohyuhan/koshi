@@ -707,10 +707,10 @@ fn fetching_one_live_session_that_cannot_answer_is_not_reported_as_gone() {
     serving
         .join()
         .expect("the stand-in session thread finishes");
-    assert!(
-        matches!(error, CliError::IpcUnavailable { .. }),
-        "unexpected error: {error}"
-    );
+    let CliError::IpcUnavailable { detail } = error else {
+        panic!("unexpected error: {error}");
+    };
+    assert_eq!(detail, "ipc peer disconnected");
     assert!(
         endpoint_path.exists(),
         "an endpoint something listens behind is kept"

@@ -2628,9 +2628,9 @@ fn legacy_plan(
     let source = record
         .source_rect()
         .unwrap_or((0, 0, record.image.width, record.image.height));
-    let canvas = raster
-        .map(|image| (image.width, image.height))
-        .unwrap_or((record.image.width, record.image.height));
+    let canvas = raster.map_or((record.image.width, record.image.height), |image| {
+        (image.width, image.height)
+    });
     RasterPlan {
         geometry,
         source,
@@ -4804,8 +4804,7 @@ fn explicit_cell_dimensions(record: &ImageRecord) -> Result<(u32, u32), ImagePla
 fn cell_dimension(dimension: Option<ImageDimension>) -> Option<u32> {
     match dimension {
         Some(ImageDimension::Cells(value)) => Some(value),
-        Some(ImageDimension::Auto) | None => None,
-        Some(ImageDimension::Pixels(_) | ImageDimension::Percent(_)) => None,
+        _ => None,
     }
 }
 

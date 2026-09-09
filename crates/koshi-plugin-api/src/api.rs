@@ -1,4 +1,4 @@
-//! API surface: commands and events.
+//! Exposes empty command and event modules.
 
 pub mod command;
 

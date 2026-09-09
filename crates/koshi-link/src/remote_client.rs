@@ -841,7 +841,7 @@ pub fn attach_remote(
 /// [`sanitize_reported_text`].
 ///
 /// A named `client` reaches only a session that settled on protocol version 3
-/// or later; a session that settled below it is refused with
+/// or newer; a session that settled below it is refused with
 /// [`CliError::IpcUnavailable`] before the command is written. `None` names no
 /// client, and the command is written whatever the session settled on.
 ///
@@ -959,7 +959,7 @@ pub fn reach_all(timeout: Duration) -> Vec<Reach> {
         );
     }
 
-    let unheard: Vec<String> = store
+    let asked_labels: Vec<String> = store
         .records
         .iter()
         .take(MAX_REACHED_AT_ONCE)
@@ -992,7 +992,7 @@ pub fn reach_all(timeout: Duration) -> Vec<Reach> {
             Err(_) => break,
         }
     }
-    complete_sweep(heard, unheard)
+    complete_sweep(heard, asked_labels)
 }
 
 /// The server one [`Reach`] is about, whatever it answered.

@@ -38,6 +38,17 @@ fn parses_a_delete_selector_and_uppercase_free_data() {
 }
 
 #[test]
+fn parses_delete_selector_after_other_fields() {
+    let command = parse_command(b"Ga=d,i=7,d=I", &[])
+        .expect("the body is a Kitty command")
+        .expect("the command is valid");
+
+    assert_eq!(command.kind(), KittyCommandKind::Delete(KittyDelete::Id));
+    assert_eq!(command.display().image_id, Some(7));
+    assert!(command.free_data());
+}
+
+#[test]
 fn rejects_payload_bytes_on_a_command() {
     assert_eq!(
         parse_command(b"Ga=p", b"AAAA"),

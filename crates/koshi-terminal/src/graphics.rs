@@ -811,8 +811,7 @@ impl GraphicsParser {
 
         self.abandoned_transfer = match transport.abandonment {
             Some(GraphicsAbandonment::Transfer(protocol)) => Some(protocol),
-            Some(GraphicsAbandonment::Sequence(_))
-            | Some(GraphicsAbandonment::SilentSequence(_))
+            Some(GraphicsAbandonment::Sequence(_) | GraphicsAbandonment::SilentSequence(_))
             | None => None,
         };
 
@@ -1314,11 +1313,11 @@ impl GraphicsParser {
                 return;
             }
             let expected = b"tmux;"[parser.prefix.len()];
-            if byte != expected {
-                self.ignore_string(StringKind::Dcs, byte);
-            } else {
+            if byte == expected {
                 parser.prefix.push(byte);
                 self.state = GraphicsState::Tmux(parser);
+            } else {
+                self.ignore_string(StringKind::Dcs, byte);
             }
             return;
         }
@@ -1752,25 +1751,23 @@ impl GraphicsParser {
             }
             self.reset();
             events.push(command.map(GraphicsOperation::Command));
-        } else {
-            if self.abandoned_transfer == Some(GraphicsProtocol::Kitty) {
-                match parser.finish() {
-                    Ok(chunk) if chunk.more() => self.reset(),
-                    Ok(_) => {
-                        self.abandoned_transfer = None;
-                        self.finish_state(
-                            Err(GraphicsError::TransferTooLarge {
-                                protocol: GraphicsProtocol::Kitty,
-                            }),
-                            events,
-                        );
-                    }
-                    Err(_) => self.reset(),
+        } else if self.abandoned_transfer == Some(GraphicsProtocol::Kitty) {
+            match parser.finish() {
+                Ok(chunk) if chunk.more() => self.reset(),
+                Ok(_) => {
+                    self.abandoned_transfer = None;
+                    self.finish_state(
+                        Err(GraphicsError::TransferTooLarge {
+                            protocol: GraphicsProtocol::Kitty,
+                        }),
+                        events,
+                    );
                 }
-            } else {
-                let result = self.accept_kitty(parser.finish());
-                self.finish_state(result, events);
+                Err(_) => self.reset(),
             }
+        } else {
+            let result = self.accept_kitty(parser.finish());
+            self.finish_state(result, events);
         }
         commands::attach_error_replies(&mut events[first_event..], &reply);
     }
@@ -2107,10 +2104,10 @@ impl ItermParser {
         }
         if !self.prefix_done {
             if byte == b';' {
-                if self.prefix.as_slice() != b"1337" {
-                    self.ignored = true;
-                } else {
+                if self.prefix.as_slice() == b"1337" {
                     self.prefix_done = true;
+                } else {
+                    self.ignored = true;
                 }
                 return Ok(());
             }

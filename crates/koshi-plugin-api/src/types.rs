@@ -1,1 +1,1 @@
-//! Shared types. This module is empty.
+//! Empty module for shared types.

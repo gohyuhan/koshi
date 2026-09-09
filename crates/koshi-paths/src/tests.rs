@@ -1,13 +1,9 @@
-//! Tests for the path resolvers: each resolver routes to its own per-platform
-//! location, the runtime directory answers the same path whatever
-//! `XDG_RUNTIME_DIR` holds, `KOSHI_RUNTIME_DIR` names it only when absolute,
-//! every other `KOSHI_*` variable is ignored, and the ensure helpers refuse
-//! what another user could have planted and set the modes the machine-wide
-//! shared directories need. Two tests run a whole startup path: the directory
-//! `KOSHI_RUNTIME_DIR` names is resolved and then created private, and this
-//! user's shared directory is created under a base created first. Every test
-//! that touches the process environment holds `ENV_LOCK` and restores the
-//! prior values on drop.
+//! Tests platform-specific path resolution, absolute and ignored environment
+//! values, and directory creation. Unix ensure checks cover planted files,
+//! links, wrong owners, and wrong modes. Startup paths cover an absolute
+//! `KOSHI_RUNTIME_DIR` and a user's directory under a shared base.
+//! Every test that reads or writes the process environment holds `ENV_LOCK` and
+//! restores each variable's prior value on drop.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -273,6 +269,18 @@ fn windows_config_dir_lands_under_appdata_config() {
     );
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_state_dir_lands_under_local_appdata_data() {
+    let _env = EnvGuard::new();
+    let base = directories::BaseDirs::new().expect("home directory");
+
+    assert_eq!(
+        state_dir(),
+        Some(base.data_local_dir().join("koshi").join("data"))
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn absolute_xdg_variables_move_the_per_user_directories() {
@@ -306,6 +314,33 @@ fn relative_xdg_variables_are_ignored() {
     assert_eq!(
         state_dir(),
         Some(PathBuf::from("/tmp/koshi-xdg-home/.local/state/koshi"))
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn empty_xdg_variables_are_ignored() {
+    let mut env = EnvGuard::new();
+    env.set("HOME", "/tmp/koshi-empty-xdg-home");
+    env.set("XDG_CONFIG_HOME", "");
+    env.set("XDG_DATA_HOME", "");
+    env.set("XDG_STATE_HOME", "");
+
+    assert_eq!(
+        config_dir(),
+        Some(PathBuf::from("/tmp/koshi-empty-xdg-home/.config/koshi"))
+    );
+    assert_eq!(
+        data_dir(),
+        Some(PathBuf::from(
+            "/tmp/koshi-empty-xdg-home/.local/share/koshi"
+        ))
+    );
+    assert_eq!(
+        state_dir(),
+        Some(PathBuf::from(
+            "/tmp/koshi-empty-xdg-home/.local/state/koshi"
+        ))
     );
 }
 
@@ -388,6 +423,22 @@ fn the_runtime_dir_the_variable_names_is_created_private() {
     assert!(resolved.is_dir());
     #[cfg(unix)]
     assert_eq!(mode_of(&resolved), 0o700);
+}
+
+#[test]
+fn ensure_private_dir_reports_a_file_parent() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let file = root.path().join("occupied");
+    let child = file.join("child");
+    std::fs::write(&file, b"x").expect("plant blocking file");
+
+    let error = ensure_private_dir(&child).expect_err("file blocks the directory");
+    #[cfg(unix)]
+    assert_eq!(error.kind(), io::ErrorKind::NotADirectory);
+    #[cfg(windows)]
+    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+    assert_eq!(std::fs::read(&file).expect("read the blocking file"), b"x");
+    assert!(!child.exists(), "the blocked child must not be created");
 }
 
 #[test]

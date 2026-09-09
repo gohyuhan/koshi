@@ -43,9 +43,9 @@ pub fn iterm_command_is_graphics(body: &[u8]) -> bool {
     }
 }
 
-/// Return whether a partial OSC 1337 body can still become a graphics command.
+/// Return whether an OSC 1337 body names or prefixes a graphics command.
 pub fn iterm_command_can_be_graphics(body: &[u8]) -> bool {
-    let command = split_at_byte(body, b'=').map_or(body, |(command, _)| command);
+    let command = iterm_command_name(body).unwrap_or(body);
     ITERM_GRAPHICS_COMMANDS
         .iter()
         .any(|name| name.starts_with(command))

@@ -1,11 +1,11 @@
-//! Plugin lifecycle manager for koshi.
+//! Plugin manager module boundaries.
 //!
-//! Scope: the plugin inventory state — install, uninstall, enable, disable,
-//! update, list, metadata index, lockfile, registry resolution, local file
-//! sources, integrity checks, and plugin store layout. Every module is empty.
+//! Public modules for errors and core types are empty. The public `manager`
+//! module exposes empty command, event, and state modules. Its private `tests`
+//! module is empty and compiled only for tests.
 //!
-//! `cargo xtask dep-guard` fails if this crate declares `koshi-runtime`,
-//! `koshi-ipc`, or `koshi-plugin-host` as a direct dependency.
+//! This crate declares no dependencies on `koshi-runtime`, `koshi-ipc`, or
+//! `koshi-plugin-host`; `cargo xtask dep-guard` rejects those direct dependencies.
 
 pub mod error;
 pub mod types;

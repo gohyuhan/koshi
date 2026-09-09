@@ -1,1 +1,1 @@
-//! Plugin events. This module is empty.
+//! Plugin event handling. This module defines no items.

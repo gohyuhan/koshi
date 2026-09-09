@@ -268,12 +268,15 @@ impl Client {
         self.zoom_by_tab.retain(|_, zoomed| *zoomed != pane_id);
     }
 
-    /// Where this client's view of `pane_id` sits: lines scrolled up from the
-    /// live bottom. `0` — the default for any pane not scrolled up — is the
-    /// newest line.
+    /// Returns how many lines `pane_id` is scrolled above the live bottom.
+    /// Returns `0` for an unscrolled pane or a view at the newest line; `3`
+    /// means three lines above the live bottom.
     #[must_use]
     pub fn scroll_offset(&self, pane_id: PaneId) -> usize {
-        self.scroll_by_pane.get(&pane_id).copied().unwrap_or(0)
+        self.scroll_by_pane
+            .get(&pane_id)
+            .copied()
+            .unwrap_or_default()
     }
 
     /// Set where this client's view of `pane_id` sits. An offset of `0` removes
@@ -435,9 +438,7 @@ impl ClientRegistry {
     /// An empty registry with no clients attached.
     #[must_use]
     pub fn new() -> Self {
-        ClientRegistry {
-            records: BTreeMap::new(),
-        }
+        Self::default()
     }
 
     /// The client attached under `client_id`, or `None` if none is.

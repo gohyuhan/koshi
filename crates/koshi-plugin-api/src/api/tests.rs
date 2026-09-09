@@ -1,1 +1,1 @@
-//! Tests. This module is empty.
+//! Empty test module.

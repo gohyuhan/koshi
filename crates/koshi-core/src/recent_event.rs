@@ -33,9 +33,8 @@ use crate::ids::{ClientId, CommandId, PaneId, PluginId, SessionId, SubscriberId,
 /// [`at`](Self::at) or [`name`](Self::name) is refused.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecentEvent {
-    /// The moment the caller stamped the record with. `recent_events::record`
-    /// in `koshi-observability` passes the wall clock reading of the moment it
-    /// ran.
+    /// Wall-clock time supplied by the caller. `recent_events::record` in
+    /// `koshi-observability` supplies the clock reading when it runs.
     pub at: SystemTime,
     /// The event variant's name, e.g. `"PaneCreated"` — the string
     /// [`Event::name`] returns. Borrowed while the record stays in the process

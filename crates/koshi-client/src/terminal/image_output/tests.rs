@@ -1190,7 +1190,7 @@ fn crop_image_rejects_a_source_rectangle_outside_the_decoded_pixels() {
         height: 1,
     };
 
-    assert!(crop_image(&source, None).is_err());
+    assert_eq!(crop_image(&source, None), Err(()));
 }
 
 #[test]

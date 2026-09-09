@@ -256,7 +256,7 @@ fn resolve_core(
     args: &ActionArgs,
     new_pane_direction: Direction,
 ) -> Result<Command, ResolveError> {
-    let command = match (action.name.as_str(), args) {
+    Ok(match (action.name.as_str(), args) {
         // --- Panes ---
         ("new-pane", ActionArgs::None) => new_pane_toward(new_pane_direction),
         ("new-pane-left", ActionArgs::None) => new_pane_toward(Direction::Left),
@@ -350,8 +350,7 @@ fn resolve_core(
                 action: action.clone(),
             })
         }
-    };
-    Ok(command)
+    })
 }
 
 /// The command a `new-pane-<direction>` action builds: split the focused pane

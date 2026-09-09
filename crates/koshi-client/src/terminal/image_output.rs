@@ -2224,6 +2224,18 @@ fn blend_pixel(pixel: [u8; 4], background: [u8; 3], background_alpha: u8) -> [u8
     ]
 }
 
+fn blend_onto_background(pixel: &[u8], background: [u8; 3], destination: &mut [u8]) {
+    let alpha = u16::from(pixel[3]);
+    let inverse = 255u16.saturating_sub(alpha);
+    destination[0] =
+        ((u16::from(pixel[0]) * alpha + u16::from(background[0]) * inverse + 127) / 255) as u8;
+    destination[1] =
+        ((u16::from(pixel[1]) * alpha + u16::from(background[1]) * inverse + 127) / 255) as u8;
+    destination[2] =
+        ((u16::from(pixel[2]) * alpha + u16::from(background[2]) * inverse + 127) / 255) as u8;
+    destination[3] = 255;
+}
+
 fn crop_image(paint: &OutputPaint, background: Option<[u8; 3]>) -> Result<Arc<DecodedImage>, ()> {
     let image = &paint.record.image;
     let width = usize::try_from(image.width).map_err(|_| ())?;
@@ -2255,18 +2267,7 @@ fn crop_image(paint: &OutputPaint, background: Option<[u8; 3]>) -> Result<Arc<De
             let destination =
                 &mut rgba[destination_start + column * 4..destination_start + column * 4 + 4];
             if let Some(background) = background {
-                let alpha = u16::from(source[3]);
-                let inverse = 255u16.saturating_sub(alpha);
-                destination[0] =
-                    ((u16::from(source[0]) * alpha + u16::from(background[0]) * inverse + 127)
-                        / 255) as u8;
-                destination[1] =
-                    ((u16::from(source[1]) * alpha + u16::from(background[1]) * inverse + 127)
-                        / 255) as u8;
-                destination[2] =
-                    ((u16::from(source[2]) * alpha + u16::from(background[2]) * inverse + 127)
-                        / 255) as u8;
-                destination[3] = 255;
+                blend_onto_background(source, background, destination);
             } else {
                 destination.copy_from_slice(source);
             }
@@ -2352,21 +2353,7 @@ fn scaled_tile(
             let pixel = &source.rgba[source_index..source_index + 4];
             let destination = &mut rgba[destination_index..destination_index + 4];
             if let Some(background) = background {
-                let alpha = u16::from(pixel[3]);
-                let inverse = 255u16.saturating_sub(alpha);
-                destination[0] = ((u16::from(pixel[0]) * alpha
-                    + u16::from(background[0]) * inverse
-                    + 127)
-                    / 255) as u8;
-                destination[1] = ((u16::from(pixel[1]) * alpha
-                    + u16::from(background[1]) * inverse
-                    + 127)
-                    / 255) as u8;
-                destination[2] = ((u16::from(pixel[2]) * alpha
-                    + u16::from(background[2]) * inverse
-                    + 127)
-                    / 255) as u8;
-                destination[3] = 255;
+                blend_onto_background(pixel, background, destination);
             } else {
                 destination.copy_from_slice(pixel);
             }

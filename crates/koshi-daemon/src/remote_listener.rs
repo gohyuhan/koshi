@@ -226,7 +226,7 @@ pub(crate) struct Occasional {
 impl Occasional {
     /// A warning that has not been written yet.
     pub(crate) fn new() -> Occasional {
-        Occasional { said_at: None }
+        Self { said_at: None }
     }
 
     /// Whether to write the line at `now`. True when no line has been written,
@@ -326,7 +326,10 @@ impl InAdmission {
                 (now < MAX_IN_ADMISSION).then_some(now + 1)
             })
             .is_ok();
-        taken.then(|| InAdmission {
+        if !taken {
+            return None;
+        }
+        Some(InAdmission {
             counted: Arc::clone(counted),
         })
     }
@@ -379,7 +382,7 @@ impl RateTable {
     /// Count one connection from `ip` at `now` and say what to do with it.
     ///
     /// An address is logged once per window, on the attempt that crosses
-    /// [`MAX_ATTEMPTS`]. Every later attempt in that window is dropped in
+    /// [`MAX_ATTEMPTS`]. Every subsequent attempt in that window is dropped in
     /// silence.
     ///
     /// Example — with [`MAX_ATTEMPTS`] at 10, attempts 1 to 10 from one
@@ -698,7 +701,7 @@ fn bridge_to_session(
     };
     let mut inbound = reader;
     let inbound_ended = Arc::clone(&ended);
-    let started = std::thread::Builder::new()
+    let inbound_thread = std::thread::Builder::new()
         .name("koshi-remote-in".to_string())
         .spawn(move || {
             #[cfg(unix)]
@@ -708,7 +711,7 @@ fn bridge_to_session(
             let _ = inbound_control.shutdown(Shutdown::Both);
             inbound_ended.once();
         });
-    if started.is_err() {
+    if inbound_thread.is_err() {
         ended.once();
         return;
     }
@@ -721,7 +724,7 @@ fn bridge_to_session(
         return;
     };
     let outbound_ended = Arc::clone(&ended);
-    let started = std::thread::Builder::new()
+    let outbound_thread = std::thread::Builder::new()
         .name("koshi-remote-out".to_string())
         .spawn(move || {
             #[cfg(unix)]
@@ -730,7 +733,7 @@ fn bridge_to_session(
             let _ = outbound_control.shutdown(Shutdown::Both);
             outbound_ended.once();
         });
-    if started.is_err() {
+    if outbound_thread.is_err() {
         // Shutting the socket ends the inbound direction, which is already
         // running.
         let _ = control.shutdown(Shutdown::Both);
@@ -745,13 +748,13 @@ fn report_ended(admissions: &Sender<RouterEvent>, id: u64) {
 }
 
 /// Reports one bridged connection ended. The first [`EndReport::once`] sends;
-/// every later one does nothing.
+/// every subsequent one does nothing.
 struct EndReport {
     /// Where the report goes.
     admissions: Sender<RouterEvent>,
     /// The number the connection is registered under.
     id: u64,
-    /// Set by the first report. Every later one does nothing.
+    /// Set by the first report. Every subsequent one does nothing.
     reported: std::sync::atomic::AtomicBool,
 }
 
@@ -835,7 +838,9 @@ fn read_client_frame<R: Read>(reader: &mut R, max_len: u32) -> Opening {
     }
 }
 
-/// Write one frame: a 4-byte big-endian length, then the JSON, in one write.
+/// Serialize `frame` as one frame and write all its bytes.
+///
+/// The frame has a 4-byte big-endian length followed by the JSON payload.
 ///
 /// # Errors
 /// The JSON encoder's own failure, `the answer is larger than a frame can

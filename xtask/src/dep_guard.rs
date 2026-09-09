@@ -1,45 +1,44 @@
-//! Dependency-direction guard.
+//! Checks workspace dependency direction with `cargo metadata`.
 //!
-//! [`run`] reads the workspace dependency graph with `cargo metadata` and
-//! reports every edge these five rules forbid:
+//! The guard rejects these direct edges:
 //!
-//! - `koshi-core` depends on no crate whose name starts with `koshi-`.
-//! - `koshi-plugin-manager` depends on none of `koshi-runtime`, `koshi-ipc`,
+//! - `koshi-core` to any name that starts with `koshi-`.
+//! - `koshi-plugin-manager` to `koshi-runtime`, `koshi-ipc`, or
 //!   `koshi-plugin-host`.
-//! - `koshi-plugin-api` depends on neither `koshi-client` nor `koshi-renderer`.
-//! - Only `koshi-plugin-host` depends on `wasmtime`.
-//! - Only `koshi-pty` depends on `portable-pty`.
+//! - `koshi-plugin-api` to `koshi-client` or `koshi-renderer`.
+//! - Any workspace crate other than `koshi-plugin-host` to `wasmtime`.
+//! - Any workspace crate other than `koshi-pty` to `portable-pty`.
 //!
-//! Each rule reads the dependencies a crate declares in its own manifest, of
-//! every kind (normal, dev, build), including optional and target-specific
-//! ones. A renamed dependency counts under its package name, so
-//! `wt = { package = "wasmtime" }` is an edge to `wasmtime`. A dependency
-//! reached through another crate is not an edge here, so `koshi-runtime` ->
-//! `koshi-plugin-host` -> `wasmtime` passes.
+//! The guard reads each workspace crate's declared dependencies in all kinds:
+//! normal, dev, build, optional, and target-specific. Cargo reports the
+//! package name for a renamed dependency, so `wt = { package = "wasmtime" }`
+//! is an edge to `wasmtime`. Transitive edges are not checked; for example,
+//! `koshi-runtime` -> `koshi-plugin-host` -> `wasmtime` passes.
 
 use std::collections::BTreeSet;
 use std::process::ExitCode;
 
 use cargo_metadata::{Metadata, MetadataCommand};
 
-/// A crate name paired with the names of its direct dependencies.
+/// A crate name paired with its direct dependency names.
 type CrateDeps = (String, Vec<String>);
 
-/// Runs `cargo metadata` from the current directory and checks every
-/// workspace crate against the rules in the module doc.
+/// Runs `cargo metadata` in the current directory and checks every workspace
+/// crate against the module's rules.
 ///
-/// No rule broken: prints `dep-guard: ok (N crates checked)` on stdout, where
-/// `N` counts the workspace crates, and returns [`ExitCode::SUCCESS`].
+/// If all edges pass, prints `dep-guard: ok (N crates checked)` on stdout,
+/// where `N` is the number of workspace crates, and returns
+/// [`ExitCode::SUCCESS`].
 ///
-/// Rules broken: prints one `dep-guard: forbidden edge: ...` line per
-/// forbidden edge on stderr, then `dep-guard: N violation(s)`, and returns
+/// If an edge fails, prints one `dep-guard: forbidden edge: ...` line per
+/// violation on stderr, then `dep-guard: N violation(s)`, and returns
 /// [`ExitCode::FAILURE`].
 ///
-/// A `cargo metadata` run that fails prints its error on stderr and returns
-/// [`ExitCode::FAILURE`] with no rule checked.
+/// If `cargo metadata` fails, prints ``dep-guard: `cargo metadata` failed: ...``
+/// on stderr, returns [`ExitCode::FAILURE`], and checks no edge.
 pub fn run() -> ExitCode {
     let metadata = match MetadataCommand::new().exec() {
-        Ok(m) => m,
+        Ok(metadata) => metadata,
         Err(e) => {
             eprintln!("dep-guard: `cargo metadata` failed: {e}");
             return ExitCode::FAILURE;
@@ -53,16 +52,17 @@ pub fn run() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    for v in &violations {
-        eprintln!("dep-guard: {v}");
+    for violation in &violations {
+        eprintln!("dep-guard: {violation}");
     }
     eprintln!("dep-guard: {} violation(s)", violations.len());
     ExitCode::FAILURE
 }
 
-/// Returns every workspace crate paired with the names of the dependencies
-/// its manifest declares, of every kind. Crates are sorted by name; each
-/// dependency list is sorted and deduplicated.
+/// Returns one `(crate, dependencies)` pair for each workspace crate.
+/// Dependencies include normal, dev, build, optional, and target-specific
+/// manifest entries. Crates and dependency names are sorted, and duplicate
+/// dependency names occur once.
 fn direct_deps(metadata: &Metadata) -> Vec<CrateDeps> {
     let mut graph: Vec<CrateDeps> = metadata
         .workspace_packages()
@@ -82,50 +82,54 @@ fn direct_deps(metadata: &Metadata) -> Vec<CrateDeps> {
     graph
 }
 
-/// Returns one message per edge that a rule in the module doc forbids, sorted
-/// and deduplicated. An empty vector means every edge in `graph` is allowed.
+/// Returns sorted, duplicate-free messages for forbidden edges in `graph`.
+/// Returns an empty vector when every edge is allowed.
 pub fn check(graph: &[CrateDeps]) -> Vec<String> {
     let mut violations = BTreeSet::new();
 
-    for (krate, deps) in graph {
-        for dep in deps {
-            if krate == "koshi-core" && dep.starts_with("koshi-") {
+    for (crate_name, dependencies) in graph {
+        for dependency_name in dependencies {
+            if crate_name == "koshi-core" && dependency_name.starts_with("koshi-") {
                 violations.insert(edge(
-                    krate,
-                    dep,
+                    crate_name,
+                    dependency_name,
                     "koshi-core must not depend on internal crates",
                 ));
             }
-            if krate == "koshi-plugin-manager"
+            if crate_name == "koshi-plugin-manager"
                 && matches!(
-                    dep.as_str(),
+                    dependency_name.as_str(),
                     "koshi-runtime" | "koshi-ipc" | "koshi-plugin-host"
                 )
             {
                 violations.insert(edge(
-                    krate,
-                    dep,
+                    crate_name,
+                    dependency_name,
                     "koshi-plugin-manager must not depend on runtime/ipc/host",
                 ));
             }
-            if krate == "koshi-plugin-api"
-                && matches!(dep.as_str(), "koshi-client" | "koshi-renderer")
+            if crate_name == "koshi-plugin-api"
+                && matches!(dependency_name.as_str(), "koshi-client" | "koshi-renderer")
             {
                 violations.insert(edge(
-                    krate,
-                    dep,
+                    crate_name,
+                    dependency_name,
                     "koshi-plugin-api must not depend on client/renderer",
                 ));
             }
-            if dep == "wasmtime" && krate != "koshi-plugin-host" {
+            if dependency_name == "wasmtime" && crate_name != "koshi-plugin-host" {
                 violations.insert(edge(
-                    krate,
-                    dep,
+                    crate_name,
+                    dependency_name,
                     "wasmtime is owned only by koshi-plugin-host",
                 ));
             }
-            if dep == "portable-pty" && krate != "koshi-pty" {
-                violations.insert(edge(krate, dep, "portable-pty is owned only by koshi-pty"));
+            if dependency_name == "portable-pty" && crate_name != "koshi-pty" {
+                violations.insert(edge(
+                    crate_name,
+                    dependency_name,
+                    "portable-pty is owned only by koshi-pty",
+                ));
             }
         }
     }

@@ -1,18 +1,14 @@
-//! `koshi-beta` — the beta-feature gate and the `#[beta_feature]` attribute.
+//! `koshi-beta` provides the process-wide beta-feature gate and re-exports the
+//! `#[beta_feature]` attribute.
 //!
-//! The attribute marks an entry point that runs only when beta features are
-//! allowed. A gated function stays ordinary code: it takes no gate argument and
-//! holds no gate field. The attribute is the whole gate. Taking a feature out
-//! of beta deletes one attribute line per site.
+//! The attribute keeps a gated function's signature and body ordinary. The
+//! gate reads the value stored by [`set_allowed`] at the start of the body: at
+//! the call for an ordinary function and at the first poll for an `async fn`.
+//! The function body stays compiled whether the gate is open or closed.
 //!
-//! `koshi.kdl`'s top-level `allow-beta-features` decides whether a gated entry
-//! point runs. Koshi reads that setting once at startup and stores it here with
-//! [`set_allowed`]. The body is always compiled in. The gate reads the stored
-//! flag where the body would start: at the call for an ordinary function, at
-//! the first poll for an `async fn`.
-//!
-//! [`koshi-macro`](koshi_macro) compiles the attribute. This crate re-exports
-//! it. A crate that gates a function depends on this crate alone.
+//! The top-level `allow-beta-features` value in `koshi.kdl` supplies the stored
+//! value. [`koshi-macro`](koshi_macro) expands the attribute, and this crate
+//! provides the generated calls. A gated crate depends on this crate.
 
 pub use koshi_macro::beta_feature;
 
@@ -20,30 +16,31 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static ALLOWED: AtomicBool = AtomicBool::new(false);
 
-/// Stores `allowed` as the process-wide answer [`allowed`] returns. Each call
-/// replaces the stored value. Koshi calls this once per process, with
-/// `allow-beta-features` from the loaded config.
+/// Sets the process-wide value returned by [`allowed`]. Each call replaces it.
+/// Koshi passes the loaded `allow-beta-features` value once during startup.
 pub fn set_allowed(allowed: bool) {
     ALLOWED.store(allowed, Ordering::Relaxed);
 }
 
-/// Returns whether beta-gated entry points may run: the last value given to
-/// [`set_allowed`], or `false` when no call has happened in this process.
+/// Returns whether beta-gated entry points may run. It returns the last value
+/// passed to [`set_allowed`], or `false` when no call has happened in the
+/// process.
 #[must_use]
 pub fn allowed() -> bool {
     ALLOWED.load(Ordering::Relaxed)
 }
 
-/// Emits one `tracing` event at `WARN` level on every call. The event carries
-/// a `function` field holding `function`. Its message says `function` did
-/// nothing and names the `koshi.kdl` line that lets it run. `function` goes
-/// into the message unchanged: no escaping, no truncation.
+/// Emits one `WARN`-level `tracing` event per call.
 ///
-/// The code `#[beta_feature]` generates calls this on the first blocked call
-/// of each gated function only, and passes the module path and the identifier
-/// joined by `::`, such as `session::attach`.
+/// The event has a `function` field containing `function`. Its message says
+/// that `function` did nothing and names the `koshi.kdl` line that enables it.
+/// The message contains `function` unchanged, without escaping or truncation.
 ///
-/// `log_blocked("attach")` writes the message:
+/// `#[beta_feature]` calls this once, on the first blocked call of each gated
+/// function. It passes the module path and function name joined by `::`, such
+/// as `session::attach`.
+///
+/// `log_blocked("attach")` emits this message:
 /// ``` text
 /// `attach` is a beta feature and did nothing; add a top-level `allow-beta-features #true` line to koshi.kdl to run it
 /// ```

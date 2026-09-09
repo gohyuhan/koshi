@@ -48,8 +48,8 @@ fn write_atomic_leaves_no_temp_on_success() {
 #[test]
 fn write_atomic_cleans_temp_and_keeps_target_when_rename_fails() {
     let dir = TempDir::new().unwrap();
-    // dst is a directory: renaming the temp *file* over it must fail, which
-    // exercises the cleanup path after the temp was already written + fsynced.
+    // `dst` is a directory, so replacement fails after the temp is written and
+    // synced.
     let dst = dir.path().join("target");
     std::fs::create_dir(&dst).unwrap();
 
@@ -69,7 +69,8 @@ fn write_atomic_cleans_temp_and_keeps_target_when_rename_fails() {
 #[test]
 fn write_atomic_reports_io_error_when_temp_dir_is_missing() {
     let dir = TempDir::new().unwrap();
-    // Parent dir does not exist: staging the temp fails and nothing is created.
+    // The parent directory is missing, so temp creation fails and creates
+    // nothing.
     let dst = dir.path().join("missing").join("cfg.kdl");
 
     let err = write_atomic(&dst, b"x").unwrap_err();
@@ -135,8 +136,8 @@ fn write_atomic_replaces_symlink_with_private_file() {
 
     write_atomic(&link, b"secret").unwrap();
 
-    // The link is gone, replaced by a private regular file with the new bytes;
-    // the file it pointed at must never inherit onto the replacement or change.
+    // Replacement removes the link and creates a private regular file. The
+    // referent keeps its mode and bytes.
     let meta = std::fs::symlink_metadata(&link).unwrap();
     assert!(
         meta.file_type().is_file(),
@@ -157,13 +158,13 @@ fn write_atomic_replaces_dangling_symlink_with_private_file() {
     use std::os::unix::fs::PermissionsExt;
 
     let dir = TempDir::new().unwrap();
-    // The link points at a file that does not exist.
+    // The link points at a missing file.
     let link = dir.path().join("cfg.kdl");
     std::os::unix::fs::symlink(dir.path().join("gone.txt"), &link).unwrap();
 
     write_atomic(&link, b"data").unwrap();
 
-    // The dead link is replaced by a private regular file with the new bytes.
+    // Replacement creates a private regular file with the new bytes.
     let meta = std::fs::symlink_metadata(&link).unwrap();
     assert!(
         meta.file_type().is_file(),
@@ -179,7 +180,7 @@ fn write_atomic_replaces_fifo_with_private_file() {
     use std::os::unix::fs::PermissionsExt;
 
     let dir = TempDir::new().unwrap();
-    // A world-readable FIFO sits where the file should go.
+    // A world-readable FIFO occupies the target path.
     let dst = dir.path().join("cfg.kdl");
     let status = std::process::Command::new("mkfifo")
         .arg("-m")
@@ -191,8 +192,8 @@ fn write_atomic_replaces_fifo_with_private_file() {
 
     write_atomic(&dst, b"secret").unwrap();
 
-    // The FIFO is replaced by a private regular file; its loose mode must not
-    // carry over onto the new bytes.
+    // Replacement creates a private regular file; the FIFO mode does not carry
+    // over.
     let meta = std::fs::symlink_metadata(&dst).unwrap();
     assert!(
         meta.file_type().is_file(),
@@ -208,9 +209,7 @@ fn write_atomic_replaces_fifo_with_private_file() {
 
 #[test]
 fn write_atomic_resolves_a_relative_path_against_the_current_dir() {
-    // A relative `dst` is anchored against the current directory on entry. Use a
-    // unique name in the current directory so parallel tests never collide, and
-    // clean it up whether or not the assertion passes.
+    // Use a process-specific name and remove any entry from an earlier run.
     let name = format!("koshi-atomic-relative-{}.tmp", std::process::id());
     let rel = Path::new(&name);
     let _ = std::fs::remove_file(rel);
@@ -227,9 +226,8 @@ fn write_atomic_resolves_a_relative_path_against_the_current_dir() {
 #[test]
 fn write_atomic_reports_io_error_when_a_path_component_is_a_file() {
     let dir = TempDir::new().unwrap();
-    // A regular file sits where a directory component is needed, so reading the
-    // target's mode fails with a not-a-directory error (not NotFound), which the
-    // stat-error arm surfaces as an I/O error before any temp is created.
+    // A regular file blocks a directory component. Unix target stat returns an
+    // I/O error before temp creation.
     let blocker = dir.path().join("not-a-dir");
     std::fs::write(&blocker, b"x").unwrap();
     let dst = blocker.join("cfg.kdl");
@@ -252,9 +250,8 @@ fn write_atomic_reports_io_error_when_a_path_component_is_a_file() {
 fn concurrent_writers_never_leave_partial_content() {
     let dir = TempDir::new().unwrap();
     let dst = dir.path().join("cfg.kdl");
-    // Eight writers, each a distinct 4 KiB buffer. A partial/interleaved write
-    // would produce bytes matching none of them; the atomic replace must leave
-    // exactly one writer's complete buffer and no stray temp.
+    // Each writer supplies a distinct 4 KiB buffer. The final file must equal
+    // one complete buffer, with no temp left beside it.
     let contents: Vec<Vec<u8>> = (0..8u8).map(|i| vec![b'a' + i; 4096]).collect();
 
     std::thread::scope(|s| {
@@ -275,11 +272,8 @@ fn concurrent_writers_never_leave_partial_content() {
 #[test]
 fn write_atomic_stages_the_temp_in_the_targets_own_directory() {
     let dir = TempDir::new().unwrap();
-    // The target's directory does not exist, so staging the temp is what fails,
-    // and the error names that directory. A temp staged in the system temp
-    // directory instead would be created without error, and the failure would
-    // move to the rename. Same-directory staging keeps the rename on one
-    // filesystem, which is what makes it atomic.
+    // The missing target directory is named in the temp-creation error. No
+    // entry is created under `dir`.
     let missing = dir.path().join("missing");
     let dst = missing.join("cfg.kdl");
 
@@ -292,13 +286,14 @@ fn write_atomic_stages_the_temp_in_the_targets_own_directory() {
         detail.starts_with(&format!("create temp in {}: ", missing.display())),
         "unexpected error detail: {detail}"
     );
+    assert_eq!(dir_entries(dir.path()), Vec::<String>::new());
 }
 
 #[test]
 fn write_atomic_names_the_target_when_the_rename_is_blocked() {
     let dir = TempDir::new().unwrap();
-    // A directory at `dst` blocks the rename permanently, so the failure comes
-    // from the replace step rather than from staging or from the fsync.
+    // A directory at `dst` makes replacement fail after the temp is written and
+    // synced.
     let dst = dir.path().join("target");
     std::fs::create_dir(&dst).unwrap();
 
@@ -313,6 +308,47 @@ fn write_atomic_names_the_target_when_the_rename_is_blocked() {
     );
 }
 
+#[cfg(any(unix, windows))]
+#[test]
+fn write_atomic_replaces_only_the_named_hard_link() {
+    let dir = TempDir::new().unwrap();
+    let dst = dir.path().join("cfg.kdl");
+    let alias = dir.path().join("alias.kdl");
+    std::fs::write(&dst, b"old").unwrap();
+    std::fs::hard_link(&dst, &alias).unwrap();
+
+    write_atomic(&dst, b"new").unwrap();
+
+    assert_eq!(std::fs::read(&dst).unwrap(), b"new");
+    assert_eq!(std::fs::read(&alias).unwrap(), b"old");
+}
+
+#[cfg(windows)]
+#[test]
+fn write_atomic_rejects_a_read_only_file_without_changing_it() {
+    let dir = TempDir::new().unwrap();
+    let dst = dir.path().join("cfg.kdl");
+    std::fs::write(&dst, b"old").unwrap();
+    let mut readonly = std::fs::metadata(&dst).unwrap().permissions();
+    readonly.set_readonly(true);
+    std::fs::set_permissions(&dst, readonly).unwrap();
+
+    let error = write_atomic(&dst, b"new").unwrap_err();
+
+    let StorageError::Io { detail } = error else {
+        panic!("expected an Io error, got {error:?}");
+    };
+    assert!(
+        detail.starts_with(&format!("replace {}: ", dst.display())),
+        "unexpected error detail: {detail}"
+    );
+    assert_eq!(std::fs::read(&dst).unwrap(), b"old");
+
+    let mut writable = std::fs::metadata(&dst).unwrap().permissions();
+    writable.set_readonly(false);
+    std::fs::set_permissions(&dst, writable).unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn write_atomic_replaces_a_read_only_file_and_keeps_its_mode() {
@@ -321,9 +357,8 @@ fn write_atomic_replaces_a_read_only_file_and_keeps_its_mode() {
     let dir = TempDir::new().unwrap();
     let dst = dir.path().join("cfg.kdl");
     std::fs::write(&dst, b"old").unwrap();
-    // Mode 0400: the owner may not write the file itself. The directory stays
-    // writable, and on Unix the directory decides whether the rename lands, so
-    // the replace succeeds and the mode carries over onto the new bytes.
+    // The target mode is 0400 and its directory remains writable. Replacement
+    // succeeds and carries the mode onto the new bytes.
     std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o400)).unwrap();
 
     write_atomic(&dst, b"new").unwrap();
@@ -395,8 +430,8 @@ fn write_atomic_twice_leaves_only_the_last_bytes_and_no_temp() {
 #[test]
 fn write_atomic_succeeds_beside_a_target_that_blocked_an_earlier_replace() {
     let dir = TempDir::new().unwrap();
-    // A directory at `blocked` fails the replace. The next write to a sibling
-    // path in the same directory lands, and the failed attempt leaves no temp.
+    // A directory at `blocked` makes replacement fail. The sibling write then
+    // succeeds without a leftover temp.
     let blocked = dir.path().join("blocked");
     std::fs::create_dir(&blocked).unwrap();
     let dst = dir.path().join("cfg.kdl");
@@ -418,8 +453,8 @@ fn write_atomic_copies_a_mode_wider_than_the_umask() {
     let dir = TempDir::new().unwrap();
     let dst = dir.path().join("cfg.kdl");
     std::fs::write(&dst, b"old").unwrap();
-    // A 022 umask narrows a newly created file to 0644. The mode copy sets the
-    // mode on the staged file and lands 0666 unchanged.
+    // Existing mode 0666 is copied to the temp and remains unchanged by the
+    // umask.
     std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o666)).unwrap();
 
     write_atomic(&dst, b"new").unwrap();
@@ -443,8 +478,8 @@ fn write_atomic_replaces_a_symlink_to_a_directory_with_a_private_file() {
 
     write_atomic(&link, b"secret").unwrap();
 
-    // The link is gone, replaced by a private regular file; the directory it
-    // pointed at keeps its own entry untouched.
+    // Replacement removes the link and leaves the referent directory and entry
+    // unchanged.
     let meta = std::fs::symlink_metadata(&link).unwrap();
     assert!(
         meta.file_type().is_file(),
@@ -477,8 +512,7 @@ fn write_atomic_through_a_symlinked_parent_directory_lands_in_the_real_directory
 
 #[test]
 fn an_empty_path_is_refused_before_a_temp_is_staged() {
-    // An empty path joined to the current directory names the directory
-    // itself, whose parent is where the temp would be staged.
+    // An empty path is rejected before resolution or temp staging.
     let error = write_atomic(Path::new(""), b"x").expect_err("an empty path names no file");
 
     let StorageError::Io { detail } = error else {
@@ -489,8 +523,7 @@ fn an_empty_path_is_refused_before_a_temp_is_staged() {
 
 #[test]
 fn a_filesystem_root_is_refused_before_a_temp_is_staged() {
-    // A filesystem root has no parent, so there is no directory to stage a temp
-    // in. The call is refused instead of staging one in the current directory.
+    // A filesystem root has no parent for temp staging.
     let root = std::env::current_dir()
         .unwrap()
         .ancestors()
@@ -514,8 +547,7 @@ fn a_failed_write_is_a_recoverable_storage_error() {
     use koshi_core::error::{DomainCategory, DomainError, Severity};
 
     let dir = TempDir::new().unwrap();
-    // A directory at `dst` blocks the rename, so the failure comes from the
-    // replace step.
+    // A directory at `dst` makes replacement fail.
     let dst = dir.path().join("target");
     std::fs::create_dir(&dst).unwrap();
 

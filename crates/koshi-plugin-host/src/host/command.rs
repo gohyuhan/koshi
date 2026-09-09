@@ -1,1 +1,1 @@
-//! Command dispatch. This module is empty.
+//! Plugin command dispatch. This module defines no items.

@@ -29,7 +29,9 @@ pub use commands::{
     KittyDelete,
 };
 
-/// Parse one non-multipart Kitty command and acquire its animation-frame data.
+/// Parse one non-multipart Kitty command and prepare animation-frame data.
+///
+/// Returns `None` for image transfers and multipart animation-frame starts.
 pub fn parse_command(header: &[u8], payload: &[u8]) -> Option<Result<KittyCommand, GraphicsError>> {
     let action = header
         .strip_prefix(b"G")?
@@ -72,7 +74,7 @@ impl KittyParser {
     /// Create an empty Kitty APC parser.
     #[must_use]
     pub fn new() -> Self {
-        KittyParser {
+        Self {
             header: Vec::new(),
             data: Vec::new(),
             seen_header: false,
@@ -177,6 +179,8 @@ impl KittyParser {
     }
 
     /// Finish parsing a multipart Kitty animation-frame chunk.
+    ///
+    /// Returns `None` when the APC is not an animation-frame chunk.
     pub fn finish_animation_chunk(self) -> Result<Option<KittyAnimationChunk>, GraphicsError> {
         if !self.seen_header || self.header.first().copied() != Some(b'G') {
             return Err(GraphicsError::InvalidHeader {
@@ -587,13 +591,14 @@ fn exact_shared_memory_payload(
                 protocol: KITTY_PROTOCOL,
             })?;
             let channels = if format == KittyFormat::Rgb { 3 } else { 4 };
-            usize::try_from(width)
-                .ok()
-                .and_then(|width| {
-                    usize::try_from(height)
-                        .ok()
-                        .and_then(|height| width.checked_mul(height))
-                })
+            let width = usize::try_from(width).map_err(|_| GraphicsError::ImageTooLarge {
+                protocol: KITTY_PROTOCOL,
+            })?;
+            let height = usize::try_from(height).map_err(|_| GraphicsError::ImageTooLarge {
+                protocol: KITTY_PROTOCOL,
+            })?;
+            width
+                .checked_mul(height)
                 .and_then(|pixels| pixels.checked_mul(channels))
                 .ok_or(GraphicsError::ImageTooLarge {
                     protocol: KITTY_PROTOCOL,
@@ -1094,7 +1099,7 @@ pub(super) struct KittyControl {
 
 impl Default for KittyControl {
     fn default() -> Self {
-        KittyControl {
+        Self {
             query: false,
             id: None,
             action: ImageAction::Transmit,

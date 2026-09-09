@@ -309,9 +309,8 @@ fn locate_offset(rows: &[(Vec<Cell>, RowMeta)], offset: usize) -> (usize, usize)
     let mut remaining = offset;
     for (index, (row, meta)) in rows.iter().enumerate() {
         let contributed = match meta.end {
-            RowEnd::Soft => row.len(),
             RowEnd::SoftWide => row.len().saturating_sub(1),
-            RowEnd::Hard => row.len(),
+            RowEnd::Soft | RowEnd::Hard => row.len(),
         };
         if remaining < contributed || index + 1 == rows.len() {
             return (index, remaining);

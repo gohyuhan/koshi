@@ -195,22 +195,19 @@ impl TerminalState {
     /// wrap latch, and reset the render state to
     /// [`RenderState::fresh`]. The saved snapshot stays.
     pub(super) fn restore_cursor(&mut self) {
-        match self.active_cursor().saved {
-            Some(saved) => {
-                let (rows, cols) = self.active_grid().dimensions();
-                let cursor = self.active_cursor_mut();
-                cursor.row = saved.row.min(rows.saturating_sub(1));
-                cursor.col = saved.col.min(cols.saturating_sub(1));
-                cursor.pending_wrap = saved.pending_wrap;
-                *self.active_render_mut() = saved.render;
-            }
-            None => {
-                let cursor = self.active_cursor_mut();
-                cursor.row = 0;
-                cursor.col = 0;
-                cursor.pending_wrap = false;
-                *self.active_render_mut() = RenderState::fresh();
-            }
+        if let Some(saved) = self.active_cursor().saved {
+            let (rows, cols) = self.active_grid().dimensions();
+            let cursor = self.active_cursor_mut();
+            cursor.row = saved.row.min(rows.saturating_sub(1));
+            cursor.col = saved.col.min(cols.saturating_sub(1));
+            cursor.pending_wrap = saved.pending_wrap;
+            *self.active_render_mut() = saved.render;
+        } else {
+            let cursor = self.active_cursor_mut();
+            cursor.row = 0;
+            cursor.col = 0;
+            cursor.pending_wrap = false;
+            *self.active_render_mut() = RenderState::fresh();
         }
     }
 

@@ -1,4 +1,4 @@
-//! Tests for the dependency-direction guard.
+//! Tests for the workspace dependency-direction guard.
 
 use super::*;
 
@@ -14,10 +14,9 @@ fn graph(items: &[(&str, &[&str])]) -> Vec<CrateDeps> {
         .collect()
 }
 
-/// Parses a `cargo metadata` document whose workspace members are `members`
-/// and whose package list is `packages`, each written as
-/// `(name, dependencies)` with `dependencies` a JSON array of
-/// [`dependency`] entries. A package's id is its name.
+/// Builds metadata from workspace member IDs and `(name, dependencies)`
+/// package tuples. Each dependency string is a JSON array in cargo metadata
+/// format, and each package ID equals its package name.
 fn metadata(members: &[&str], packages: &[(&str, &str)]) -> Metadata {
     let packages: Vec<String> = packages
         .iter()
@@ -39,19 +38,28 @@ fn metadata(members: &[&str], packages: &[(&str, &str)]) -> Metadata {
     MetadataCommand::parse(json).expect("hand-written metadata parses")
 }
 
-/// One entry of a package's `dependencies` array, in the shape `cargo
-/// metadata` prints, without the `source`, `rename`, `registry`, and `path`
-/// fields. `kind` is the JSON value of the `kind` field: `null` for a normal
-/// dependency, `"dev"`, or `"build"`. `target` is the `cfg(...)` string of a
-/// target-specific dependency.
-fn dependency(name: &str, kind: &str, optional: bool, target: Option<&str>) -> String {
+/// Builds one dependency object in cargo metadata JSON format. `kind` is the
+/// raw JSON value `null`, `"dev"`, or `"build"`; `optional` is a JSON boolean;
+/// `target` is a `cfg(...)` string or `null`; and `rename` is an alias or
+/// `null`. The object omits `source`, `registry`, and `path`.
+fn dependency(
+    name: &str,
+    kind: &str,
+    optional: bool,
+    target: Option<&str>,
+    rename: Option<&str>,
+) -> String {
     let target = match target {
         Some(cfg) => format!("\"{cfg}\""),
         None => "null".to_string(),
     };
+    let rename = match rename {
+        Some(alias) => format!("\"{alias}\""),
+        None => "null".to_string(),
+    };
     format!(
         r#"{{"name":"{name}","req":"*","kind":{kind},"optional":{optional},
-            "uses_default_features":true,"features":[],"target":{target}}}"#
+            "uses_default_features":true,"features":[],"target":{target},"rename":{rename}}}"#
     )
 }
 
@@ -69,8 +77,8 @@ fn allowed_graph_has_no_violations() {
             &["koshi-core", "koshi-plugin-api", "koshi-storage"],
         ),
         ("koshi-plugin-api", &["koshi-core"]),
-        // Reaches wasmtime only through koshi-plugin-host, not as a direct
-        // dependency.
+        // This graph has `koshi-runtime` -> `koshi-plugin-host` but no direct
+        // `koshi-runtime` -> `wasmtime` edge.
         (
             "koshi-runtime",
             &["koshi-core", "koshi-plugin-manager", "koshi-plugin-host"],
@@ -284,11 +292,11 @@ fn direct_deps_keeps_only_workspace_members_sorted_by_name() {
         &[
             (
                 "koshi-pty",
-                &format!("[{}]", dependency("koshi-core", "null", false, None)),
+                &format!("[{}]", dependency("koshi-core", "null", false, None, None)),
             ),
             (
                 "tokio",
-                &format!("[{}]", dependency("mio", "null", false, None)),
+                &format!("[{}]", dependency("mio", "null", false, None, None)),
             ),
             ("koshi-core", "[]"),
         ],
@@ -303,12 +311,29 @@ fn direct_deps_keeps_only_workspace_members_sorted_by_name() {
 }
 
 #[test]
+fn direct_deps_uses_package_name_for_renamed_dependencies() {
+    let dependency = dependency("koshi-renderer", "null", false, None, Some("renderer"));
+    let metadata = metadata(
+        &["koshi-plugin-api"],
+        &[("koshi-plugin-api", &format!("[{dependency}]"))],
+    );
+
+    assert_eq!(
+        direct_deps(&metadata),
+        vec![(
+            "koshi-plugin-api".to_string(),
+            vec!["koshi-renderer".to_string()]
+        )]
+    );
+}
+
+#[test]
 fn direct_deps_sorts_and_deduplicates_dependencies_of_every_kind() {
     let deps = [
-        dependency("tokio", "\"dev\"", false, None),
-        dependency("portable-pty", "null", false, None),
-        dependency("cc", "\"build\"", true, Some("cfg(windows)")),
-        dependency("tokio", "null", false, None),
+        dependency("tokio", "\"dev\"", false, None, None),
+        dependency("portable-pty", "null", false, None, None),
+        dependency("cc", "\"build\"", true, Some("cfg(windows)"), None),
+        dependency("tokio", "null", false, None, None),
     ]
     .join(",");
     let m = metadata(&["koshi-pty"], &[("koshi-pty", &format!("[{deps}]"))]);

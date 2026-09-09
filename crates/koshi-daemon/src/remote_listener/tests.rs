@@ -38,7 +38,7 @@ fn test_cert() -> CertFile {
 }
 
 /// A moment `seconds` after `start`.
-fn later(start: Instant, seconds: u64) -> Instant {
+fn at_offset(start: Instant, seconds: u64) -> Instant {
     start + Duration::from_secs(seconds)
 }
 
@@ -91,14 +91,14 @@ fn a_window_that_has_passed_lets_the_same_address_back_in() {
     ));
 
     // One second before the window ends the address is still shut out.
-    let nearly = later(opened, RATE_WINDOW.as_secs() - 1);
+    let nearly = at_offset(opened, RATE_WINDOW.as_secs() - 1);
     assert!(matches!(
         table.allow(caller(1), nearly),
         Attempt::DropInSilence
     ));
 
     // Once the window has passed the address starts a fresh one.
-    let after = later(opened, RATE_WINDOW.as_secs() + 1);
+    let after = at_offset(opened, RATE_WINDOW.as_secs() + 1);
     assert!(matches!(table.allow(caller(1), after), Attempt::Serve));
 }
 
@@ -142,7 +142,7 @@ fn a_full_table_drops_the_address_whose_window_opened_first() {
     // Fill the table, each address one second after the one before it, so the
     // first one in is plainly the oldest.
     for step in 0..u32::try_from(MAX_ENTRIES).expect("the bound fits") {
-        let at = later(opened, u64::from(step) % (RATE_WINDOW.as_secs() - 1));
+        let at = at_offset(opened, u64::from(step) % (RATE_WINDOW.as_secs() - 1));
         table.allow(IpAddr::V4(Ipv4Addr::from(step)), at);
     }
     assert_eq!(table.entries.len(), MAX_ENTRIES);
@@ -175,12 +175,12 @@ fn a_repeated_warning_is_written_once_per_window() {
     assert!(warning.due(opened), "the first refusal says so");
     for step in 0..50 {
         assert!(
-            !warning.due(later(opened, step % LOG_WINDOW.as_secs())),
+            !warning.due(at_offset(opened, step % LOG_WINDOW.as_secs())),
             "refusal {step} inside the same window is silent"
         );
     }
 
-    let after = later(opened, LOG_WINDOW.as_secs() + 1);
+    let after = at_offset(opened, LOG_WINDOW.as_secs() + 1);
     assert!(warning.due(after), "a limit still refusing says so again");
     assert!(!warning.due(after), "and then goes quiet again");
 }
@@ -232,6 +232,32 @@ fn a_connection_reported_ended_by_the_direction_that_finished_first_needs_no_sec
 }
 
 #[test]
+fn concurrent_end_reports_send_one_admission() {
+    let (events_tx, events_rx) = mpsc::channel();
+    let ended = Arc::new(EndReport::new(events_tx, 8));
+    let mut reporters = Vec::new();
+
+    for _ in 0..8 {
+        let ended = Arc::clone(&ended);
+        reporters.push(std::thread::spawn(move || ended.once()));
+    }
+    for reporter in reporters {
+        reporter.join().expect("the report thread ends");
+    }
+
+    let reports: Vec<_> = events_rx.try_iter().collect();
+    assert_eq!(
+        reports.len(),
+        1,
+        "concurrent directions report the end once"
+    );
+    let RouterEvent::Admission(AdmissionAsk::Ended { id }) = &reports[0] else {
+        panic!("the report is an Ended admission");
+    };
+    assert_eq!(*id, 8);
+}
+
+#[test]
 fn the_admission_window_holds_only_what_it_is_bounded_at() {
     // Every place inside the window is taken, and the next caller is turned
     // away.
@@ -247,6 +273,11 @@ fn the_admission_window_holds_only_what_it_is_bounded_at() {
     assert!(
         InAdmission::enter(&counted).is_none(),
         "the caller arriving at a full window is turned away"
+    );
+    assert_eq!(
+        counted.load(Ordering::Acquire),
+        MAX_IN_ADMISSION,
+        "a refused caller does not change the number of occupied places"
     );
 }
 
@@ -1338,7 +1369,13 @@ fn a_refusal_written_before_admission_never_outlives_the_admission_window() {
         writer.deadline.expect("a refusal is given a deadline"),
         admission_ends
     );
-    assert!(!writer.bytes.is_empty(), "the refusal frame is written");
+    assert_eq!(
+        server_frames(&writer.bytes),
+        vec![RemoteServerFrame::Refused {
+            message: REMOTE_REFUSED.to_string(),
+        }],
+        "the refusal frame is written"
+    );
 }
 
 #[test]
@@ -1354,4 +1391,10 @@ fn a_refusal_after_admission_gets_the_whole_refusal_window() {
     let given = writer.deadline.expect("a refusal is given a deadline");
     assert!(given >= before + REFUSAL_WINDOW);
     assert!(given <= Instant::now() + REFUSAL_WINDOW);
+    assert_eq!(
+        server_frames(&writer.bytes),
+        vec![RemoteServerFrame::Refused {
+            message: REMOTE_REFUSED.to_string(),
+        }]
+    );
 }

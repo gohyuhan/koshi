@@ -1,35 +1,32 @@
-//! Environment variable overlay for spawned child processes.
+//! Builds the environment overlay for a spawned child.
 //!
-//! Builds the universal terminal identity (`TERM=xterm-256color`, `COLORTERM=truecolor`)
-//! and applies shell-specific bootstrap variables, with the caller's overrides on top.
-//! This is an overlay only — applied over the inherited parent environment.
+//! The overlay sets the terminal identity, adds the zsh bootstrap variable, and
+//! applies the caller's overrides over the inherited parent environment.
 
 use std::collections::BTreeMap;
 
 use koshi_core::process::{ShellKind, SpawnSpec};
 
-/// Build koshi's environment *overlay* for a spawned child: the universal
-/// terminal identity and a shell-specific bootstrap, with the caller's explicit
-/// `specs.env` overrides layered on top.
+/// Build the environment overlay for a spawned child.
 ///
-/// The map is only the overlay, not the full environment. The caller applies
-/// it over the inherited parent environment; each overlay key replaces the
-/// inherited key of the same name, and on Windows `portable-pty` matches the
-/// names case-insensitively.
-pub fn build_env(specs: &SpawnSpec) -> BTreeMap<String, String> {
+/// The overlay sets `TERM=xterm-256color` and `COLORTERM=truecolor`. A zsh
+/// spec also gets an empty `PROMPT_EOL_MARK`; other shell kinds do not. Entries
+/// in `spec.env` are applied last and replace defaults with the same key.
+///
+/// The returned map contains only overlay entries. The caller applies it over
+/// the inherited parent environment; on Windows, `portable-pty` matches names
+/// case-insensitively.
+pub fn build_env(spec: &SpawnSpec) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
 
-    // Universal terminal identity, set for every shell. `TERM` names the
-    // terminal type whose feature set the child assumes, and `COLORTERM` names
-    // the color depth it may use.
+    // Set the terminal identity for every shell.
     env.insert("TERM".to_string(), "xterm-256color".to_string());
     env.insert("COLORTERM".to_string(), "truecolor".to_string());
 
-    // Shell-specific bootstrap. zsh alone gets one: an empty `PROMPT_EOL_MARK`
-    // turns off the inverse `%` that zsh's on-by-default `PROMPT_CR`/`PROMPT_SP`
-    // options print after output with no trailing newline. Every other shell
-    // gets no bootstrap key.
-    match specs.shell_kind {
+    // zsh gets an empty `PROMPT_EOL_MARK`, which removes the inverse `%` that
+    // its `PROMPT_CR`/`PROMPT_SP` options print after output with no newline.
+    // Other shell kinds get no bootstrap key.
+    match spec.shell_kind {
         ShellKind::Zsh => {
             env.insert("PROMPT_EOL_MARK".to_string(), String::new());
         }
@@ -40,9 +37,8 @@ pub fn build_env(specs: &SpawnSpec) -> BTreeMap<String, String> {
         | ShellKind::Other(_) => {}
     }
 
-    // `specs.env` is applied last; each of its keys overwrites the koshi
-    // default of the same name above.
-    env.extend(specs.env.clone());
+    // Apply explicit entries last so they replace matching defaults.
+    env.extend(spec.env.clone());
     env
 }
 

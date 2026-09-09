@@ -187,14 +187,15 @@ impl TerminalState {
         command: &koshi_kitty::KittyAnimationCommand,
     ) -> Result<Arc<ImageContent>, ImagePlacementError> {
         let existing = content.animation.as_ref();
-        let mut frames = existing
-            .map(|animation| animation.frames().to_vec())
-            .unwrap_or_else(|| {
+        let mut frames = existing.map_or_else(
+            || {
                 vec![
                     AnimationFrame::new(Arc::clone(&content.image), zero_frame_delay())
                         .expect("the retained image has valid pixels"),
                 ]
-            });
+            },
+            |animation| animation.frames().to_vec(),
+        );
         let requested_index = command
             .frame
             .map(|frame| {
@@ -281,8 +282,7 @@ impl TerminalState {
                 image,
                 frames
                     .get(target_index)
-                    .map(AnimationFrame::delay)
-                    .unwrap_or_else(default_frame_delay),
+                    .map_or_else(default_frame_delay, AnimationFrame::delay),
             ),
         }
         .map_err(|_| ImagePlacementError::AnimationDataInvalid)?;
@@ -291,9 +291,8 @@ impl TerminalState {
         } else {
             frames[target_index] = frame;
         }
-        let loop_policy = existing
-            .map(|animation| animation.loop_policy())
-            .unwrap_or(LoopPolicy::Infinite);
+        let loop_policy =
+            existing.map_or(LoopPolicy::Infinite, |animation| animation.loop_policy());
         let animation = Arc::new(
             DecodedAnimation::new(frames, loop_policy)
                 .map_err(|_| ImagePlacementError::AnimationDataInvalid)?,
@@ -322,8 +321,9 @@ impl TerminalState {
         if let Some(gap) = command.gap_ms {
             let index = command
                 .affected_frame
-                .map(|frame| frame.saturating_sub(1) as usize)
-                .unwrap_or(content.animation_frame as usize);
+                .map_or(content.animation_frame as usize, |frame| {
+                    frame.saturating_sub(1) as usize
+                });
             let frame =
                 frames
                     .get_mut(index)

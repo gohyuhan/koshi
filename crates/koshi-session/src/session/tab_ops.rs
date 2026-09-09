@@ -377,7 +377,7 @@ fn tab_at_index(session: &Session, index: usize) -> Option<TabId> {
         .tabs
         .values()
         .find(|tab| tab.index() == index)
-        .map(|tab| tab.id())
+        .map(Tab::id)
 }
 
 /// Move `tab_id` to display position `new_index`, keeping the index dense.
@@ -516,7 +516,7 @@ fn nearest_surviving_tab(session: &Session, closed_index: usize) -> Option<TabId
         .values()
         .filter(|tab| tab.index() > closed_index)
         .min_by_key(|tab| tab.index());
-    previous.or(next).map(|tab| tab.id())
+    previous.or(next).map(Tab::id)
 }
 
 #[cfg(test)]

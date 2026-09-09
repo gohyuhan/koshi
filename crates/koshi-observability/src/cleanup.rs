@@ -81,10 +81,11 @@ impl CrashReport {
 
     /// Write the report to `<dir>/crash-<timestamp>.txt`.
     ///
-    /// On Unix the directory is created and verified as `0700` and the file is
-    /// created as `0600`, so no other local user reads the panic message, the
-    /// place, or the stack. A directory that cannot be created or verified, and
-    /// a write that fails, both leave no file and report nothing.
+    /// On Unix the directory is created and verified as `0700` and a new file
+    /// is created as `0600`. A directory setup error returns without opening
+    /// the file. Open and write errors are ignored; an existing file may be
+    /// truncated before a write error occurs. For timestamp `1700000000`, the
+    /// file is `<dir>/crash-1700000000.txt`.
     fn write(&self, dir: &Path) {
         if koshi_paths::ensure_private_dir(dir).is_err() {
             return;
@@ -187,7 +188,7 @@ impl Drop for PanicHookGuard {
 /// cleanup hooks. `None` reads no panic and writes no file.
 ///
 /// The panic hook shares the guard's registry: whichever of a panic and a
-/// later drop runs first drains it, and the other is a no-op.
+/// guard drop runs first drains it, and the other is a no-op.
 ///
 /// Returns a [`PanicHookGuard`] that restores the previous hook when dropped.
 pub fn install_panic_hook(
@@ -233,8 +234,7 @@ fn restore_then_report(hooks: &Registry, report: Option<(PathBuf, CrashReport)>)
 /// `work` unwinds on that thread; a panic on a thread that is running a panic
 /// hook aborts the process before any `catch_unwind` landing pad.
 ///
-/// Spawning may fail under resource exhaustion mid-panic; then `work` is
-/// dropped unrun, and the terminal may be left dirty.
+/// If the thread cannot be spawned, `work` is dropped without running.
 fn on_fresh_thread(work: impl FnOnce() + Send + 'static) {
     if let Ok(handle) = std::thread::Builder::new().spawn(work) {
         let _ = handle.join();

@@ -29,19 +29,10 @@ fn assert_event_at_every_split(bytes: &[u8], expected: Event) {
 
 #[test]
 fn cell_pixel_report_survives_every_byte_split() {
-    let bytes = b"\x1b[6;20;10t";
-    for split in 0..=bytes.len() {
-        let mut parser = Parser::default();
-        parser.push(&bytes[..split]);
-        parser.push(&bytes[split..]);
-        assert_eq!(
-            events(&mut parser),
-            [Event::CellSize(
-                koshi_core::geometry::PixelCellSize::new(10, 20).expect("nonzero")
-            )],
-            "split {split}"
-        );
-    }
+    assert_event_at_every_split(
+        b"\x1b[6;20;10t",
+        Event::CellSize(koshi_core::geometry::PixelCellSize::new(10, 20).expect("nonzero")),
+    );
 }
 
 #[test]
@@ -212,6 +203,11 @@ fn kitty_shifted_and_functional_keys_decode_exactly() {
             key(KeyCode::Enter, Modifiers::NONE),
         ]
     );
+}
+
+#[test]
+fn kitty_shifted_keys_survive_every_byte_split() {
+    assert_event_at_every_split(b"\x1b[49:33;2u", key(KeyCode::Char('!'), Modifiers::NONE));
 }
 
 #[test]

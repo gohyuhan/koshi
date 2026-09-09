@@ -1,4 +1,9 @@
 //! Incremental parser for input from the terminal that contains Koshi.
+//!
+//! The parser emits complete events and retains incomplete UTF-8, control, and
+//! paste sequences while waiting for more bytes. `finish_pending` resolves
+//! timeout-eligible prefixes and discards other incomplete input. For example,
+//! `ESC [ 1 ; 5 C` becomes a Right key with Control held.
 
 use std::collections::VecDeque;
 
@@ -476,10 +481,10 @@ fn parse_csi(sequence: &[u8]) -> Option<Event> {
         };
         return Some(event);
     }
-    if body[0] == b'?' && final_byte == b'c' {
+    if body.first() == Some(&b'?') && final_byte == b'c' {
         return parse_da1(&body[1..]).map(Event::PrimaryDeviceAttributes);
     }
-    if body[0] == b'?' && final_byte == b'S' {
+    if body.first() == Some(&b'?') && final_byte == b'S' {
         return parse_graphic_attribute(&body[1..]).map(Event::SixelGraphicsAttributeReply);
     }
     if body[0] == b'<' && matches!(final_byte, b'M' | b'm') {
@@ -573,10 +578,7 @@ fn parse_modified_key(body: &[u8], final_byte: u8) -> Option<KeyEvent> {
     if !first.is_empty() && decimal(first)? != 1 {
         return None;
     }
-    let (modifiers, kind) = match fields.next() {
-        Some(field) => parse_modifier_field(field)?,
-        None => (Modifiers::NONE, KeyEventKind::Press),
-    };
+    let (modifiers, kind) = parse_modifier_or_default(fields.next())?;
     if fields.next().is_some() {
         return None;
     }
@@ -603,10 +605,7 @@ fn parse_modified_key(body: &[u8], final_byte: u8) -> Option<KeyEvent> {
 fn parse_tilde_key(body: &[u8]) -> Option<KeyEvent> {
     let mut fields = body.split(|byte| *byte == b';');
     let number = decimal(fields.next()?)?;
-    let (modifiers, kind) = match fields.next() {
-        Some(field) => parse_modifier_field(field)?,
-        None => (Modifiers::NONE, KeyEventKind::Press),
-    };
+    let (modifiers, kind) = parse_modifier_or_default(fields.next())?;
     if fields.next().is_some() {
         return None;
     }
@@ -640,10 +639,7 @@ fn parse_kitty_key(body: &[u8]) -> Option<KeyEvent> {
         .next()
         .filter(|field| !field.is_empty())
         .and_then(decimal);
-    let (mut modifiers, kind) = match fields.next() {
-        Some(field) => parse_modifier_field(field)?,
-        None => (Modifiers::NONE, KeyEventKind::Press),
-    };
+    let (mut modifiers, kind) = parse_modifier_or_default(fields.next())?;
     let mut code = functional_key(codepoint).or_else(|| {
         let character = char::from_u32(codepoint)?;
         Some(match character {
@@ -695,6 +691,13 @@ fn functional_key(codepoint: u32) -> Option<KeyCode> {
         _ => return None,
     };
     Some(code)
+}
+
+fn parse_modifier_or_default(field: Option<&[u8]>) -> Option<(Modifiers, KeyEventKind)> {
+    match field {
+        Some(field) => parse_modifier_field(field),
+        None => Some((Modifiers::NONE, KeyEventKind::Press)),
+    }
 }
 
 fn parse_modifier_field(field: &[u8]) -> Option<(Modifiers, KeyEventKind)> {

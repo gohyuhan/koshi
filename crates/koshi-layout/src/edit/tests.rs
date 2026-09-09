@@ -162,6 +162,30 @@ fn split_result_still_tiles_the_tab() {
     check_exact_tiling(&result.panes, tab).unwrap();
 }
 
+#[test]
+fn a_successful_split_leaves_the_input_unchanged() {
+    let (a, b, new) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let tree = pair(SplitDirection::Horizontal, a, b);
+    let snapshot = tree.clone();
+
+    let result = split_leaf(&tree, a, new, Direction::Right).unwrap();
+
+    assert_eq!(tree, snapshot);
+    assert_eq!(result.leaf_panes(), [a, new, b]);
+}
+
+#[test]
+fn a_successful_stack_addition_leaves_the_input_unchanged() {
+    let (a, b, new) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let tree = pair(SplitDirection::Horizontal, a, b);
+    let snapshot = tree.clone();
+
+    let result = add_to_stack(&tree, a, new).unwrap();
+
+    assert_eq!(tree, snapshot);
+    assert_eq!(result.leaf_panes(), [a, new, b]);
+}
+
 /// Returns a standard test tab size: 80 columns × 24 rows at origin (0, 0).
 fn tab() -> Rect {
     Rect::at_origin(Size { cols: 80, rows: 24 })
