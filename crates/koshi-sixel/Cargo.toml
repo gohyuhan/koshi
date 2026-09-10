@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-koshi-image = { version = "0.4.0-pr.2", path = "../koshi-image" }
+koshi-image = { version = "0.4.0", path = "../koshi-image" }
 serde.workspace = true
 thiserror.workspace = true
 

@@ -66,20 +66,24 @@ from the same machine or another one, and the panes are where you left them.
 - 🗂️ **Stacked panes** — place several panes in one slot and switch the expanded pane.
 - 🔍 **Fullscreen pane** — fill the tab with one pane and restore the prior layout.
 - 📐 **Resize** — move borders by keyboard or drag them with the mouse.
+- ↔️ **Pane gaps** — `pane { gap N }` leaves blank cells between split panes; every attached terminal sees the same gaps.
 - 📑 **Tabs** — create, close, move, and switch tabs.
 - ⌨️ **Multi-key shortcuts** — use key sequences, a configurable leader, hints, and conflict checks.
 - 🔒 **Lock mode** — send keys directly to the active program.
-- 🖱️ **Mouse support** — focus panes, resize borders, scroll, and select text.
+- 🖱️ **Mouse support** — focus panes, resize borders, scroll, and select text; `Shift`+drag selects even while a program owns the mouse.
 - 📋 **Clipboard copy** — copy mouse selections through OSC 52, including remote sessions.
 - 🎯 **Mouse selection mode** — select text while a program owns mouse input.
 - 👥 **Multi-client sessions** — attach several terminals to one session; each keeps its own focus, active tab, and zoom.
 - 📜 **Per-pane history** — keep separate scrollback and scroll positions.
 - 🧾 **Terminal support** — true color, text styles, alternate screens, CJK, emoji, and box drawing.
+- 🖼️ **Terminal images** — programs draw Sixel, Kitty, and iTerm2 images; each image stays at its cells through scrolling, resizing, and reattaching, and paints in every terminal that can show it.
+- 🐚 **Shell integration** — a shell that prints OSC 133 prompt markers gives each command a start and end event; koshi never records the command line or its output.
+- 🔎 **Event log** — `koshi debug events` prints the last 1000 events a session published, filtered by age or name, with ids only and never typed text.
 - 🎨 **Themes** — use the built-in colors or copy one of 25 included themes.
 - ⚙️ **Config files** — keep app settings, themes, keybindings, and layouts separate.
 - 💾 **Saved layouts** — start tabs, panes, commands, directories, environment values, and locked input from a profile.
 - 🪵 **Logging** — write optional per-session text or JSON logs without terminal content.
-- 🌐 **Remote sessions** — attach to a session on another machine over TLS, with a pinned certificate and an access token.
+- 🌐 **Remote sessions** — attach to a session on another machine over TLS with hybrid post-quantum key exchange, a pinned certificate, and an access token.
 - 🔑 **Access tokens** — grant, revoke, and list the tokens that reach your sessions; each grant covers one session or every session.
 - 🔁 **Reconnect** — a dropped remote link dials again for two minutes and puts your tabs, focus, and scroll position back.
 - 👤 **Same-machine sharing** — let the other users of this machine list, attach to, and kill your sessions.
@@ -288,7 +292,7 @@ Koshi uses four optional KDL file types. Each present file must declare
 
 | File | Contents |
 |---|---|
-| `koshi.kdl` | Theme, pane, scrollback, layout, mouse, copy, terminal, logging, update, beta-feature, session-closing, other-user access, and remote access settings |
+| `koshi.kdl` | Theme, image, pane, scrollback, layout, mouse, copy, terminal, logging, update, beta-feature, session-closing, other-user access, and remote access settings |
 | `themes/<name>.kdl` | Koshi interface colors |
 | `keybinding.kdl` | Keybindings and input modes |
 | `profile/<name>.kdl` | Tabs, pane layouts, commands, directories, environment values, and the starting input mode |
@@ -346,7 +350,7 @@ every matching id listed.
 | `koshi inspect session <NAME_OR_ID>` | Show one session |
 | `koshi inspect tab <NAME_OR_ID>` | Show one tab |
 | `koshi inspect pane <PANE_ID>` | Show one pane |
-| `koshi inspect client <CLIENT_ID>` | Show one client |
+| `koshi inspect client <CLIENT_ID>` | Show one client, with the pane area it reports |
 
 ### Panes
 
