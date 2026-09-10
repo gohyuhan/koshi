@@ -8,7 +8,7 @@ license.workspace = true
 base64.workspace = true
 flate2 = { version = "1.1.9", default-features = false, features = ["rust_backend"] }
 image = { version = "0.25.10", default-features = false, features = ["bmp", "gif", "jpeg", "png", "tiff", "webp"] }
-koshi-core = { version = "0.4.0-pr.2", path = "../koshi-core" }
+koshi-core = { version = "0.4.0", path = "../koshi-core" }
 serde = { workspace = true, features = ["rc"] }
 thiserror.workspace = true
 

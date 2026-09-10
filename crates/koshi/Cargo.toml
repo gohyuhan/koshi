@@ -13,16 +13,16 @@ name = "koshi"
 path = "src/main.rs"
 
 [dependencies]
-koshi-client = { version = "0.4.0-pr.2", path = "../koshi-client" }
-koshi-config = { version = "0.4.0-pr.2", path = "../koshi-config" }
-koshi-core = { version = "0.4.0-pr.2", path = "../koshi-core" }
-koshi-daemon = { version = "0.4.0-pr.2", path = "../koshi-daemon" }
-koshi-link = { version = "0.4.0-pr.2", path = "../koshi-link" }
-koshi-ipc = { version = "0.4.0-pr.2", path = "../koshi-ipc" }
-koshi-layout = { version = "0.4.0-pr.2", path = "../koshi-layout" }
-koshi-observability = { version = "0.4.0-pr.2", path = "../koshi-observability" }
-koshi-paths = { version = "0.4.0-pr.2", path = "../koshi-paths" }
-koshi-storage = { version = "0.4.0-pr.2", path = "../koshi-storage" }
+koshi-client = { version = "0.4.0", path = "../koshi-client" }
+koshi-config = { version = "0.4.0", path = "../koshi-config" }
+koshi-core = { version = "0.4.0", path = "../koshi-core" }
+koshi-daemon = { version = "0.4.0", path = "../koshi-daemon" }
+koshi-link = { version = "0.4.0", path = "../koshi-link" }
+koshi-ipc = { version = "0.4.0", path = "../koshi-ipc" }
+koshi-layout = { version = "0.4.0", path = "../koshi-layout" }
+koshi-observability = { version = "0.4.0", path = "../koshi-observability" }
+koshi-paths = { version = "0.4.0", path = "../koshi-paths" }
+koshi-storage = { version = "0.4.0", path = "../koshi-storage" }
 tracing.workspace = true
 clap.workspace = true
 uuid.workspace = true
@@ -43,6 +43,6 @@ tempfile.workspace = true
 libc.workspace = true
 
 [dev-dependencies]
-koshi-pty = { version = "0.4.0-pr.2", path = "../koshi-pty" }
-koshi-runtime = { version = "0.4.0-pr.2", path = "../koshi-runtime" }
-koshi-test-support = { version = "0.4.0-pr.2", path = "../koshi-test-support" }
+koshi-pty = { version = "0.4.0", path = "../koshi-pty" }
+koshi-runtime = { version = "0.4.0", path = "../koshi-runtime" }
+koshi-test-support = { version = "0.4.0", path = "../koshi-test-support" }
