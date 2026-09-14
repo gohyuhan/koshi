@@ -7,9 +7,9 @@ mod windows;
 
 #[cfg(unix)]
 pub(super) use unix::{
-    window_size, EventSource as PlatformEventSource, TerminalDevice, Waker as PlatformWaker,
+    read_window_size, EventSource as PlatformEventSource, TerminalDevice, Waker as PlatformWaker,
 };
 #[cfg(windows)]
 pub(super) use windows::{
-    window_size, EventSource as PlatformEventSource, TerminalDevice, Waker as PlatformWaker,
+    read_window_size, EventSource as PlatformEventSource, TerminalDevice, Waker as PlatformWaker,
 };

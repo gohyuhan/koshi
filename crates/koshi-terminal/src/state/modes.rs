@@ -35,7 +35,7 @@ pub enum MouseEncoding {
 /// configured in their own terminal.
 ///
 /// Blink is stored apart from the shape, in
-/// [`TerminalState::cursor_blink`](crate::state::TerminalState::cursor_blink).
+/// [`TerminalState::is_cursor_blink_enabled`](crate::state::TerminalState::is_cursor_blink_enabled).
 /// Two writers set it: DECSCUSR (`1` = blinking block, `2` = steady block)
 /// and `?12` (att610). The last one to arrive wins.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,14 +67,16 @@ pub(crate) struct TerminalModes {
     pub(in crate::state) mouse_encoding: MouseEncoding,
     /// `?1007` — alternate scroll: on the alternate screen, the mouse layer
     /// sends cursor arrow keys for wheel motion.
-    pub(in crate::state) alt_scroll: bool,
+    #[serde(rename = "alt_scroll")]
+    pub(in crate::state) alternate_scroll: bool,
     /// `?7` (DECAWM) — autowrap. On (the default), a glyph printed into the
     /// last column parks the cursor there and the next glyph wraps to a new
     /// line. Off, the next glyph overwrites the last column in place.
     pub(in crate::state) autowrap: bool,
     /// `?1` (DECCKM) — application cursor keys: the input layer sends `ESC O A`
     /// for the arrow keys; off, it sends `ESC [ A`.
-    pub(in crate::state) app_cursor_keys: bool,
+    #[serde(rename = "app_cursor_keys")]
+    pub(in crate::state) application_cursor_keys: bool,
     /// `?5` (DECSCNM) — reverse video: the renderer swaps foreground and
     /// background across the whole screen.
     pub(in crate::state) reverse_video: bool,
@@ -89,10 +91,10 @@ pub(crate) struct TerminalModes {
     pub(in crate::state) cursor_shape: Option<CursorShape>,
     /// `?80` — Sixel scrolling: a graphic at the bottom can scroll the image
     /// area into the primary screen's scroll region.
-    #[serde(default = "default_true")]
+    #[serde(default = "default_enabled_mode")]
     pub(in crate::state) sixel_scrolling: bool,
     /// `?1070` — use private Sixel color registers for each graphic.
-    #[serde(default = "default_true")]
+    #[serde(default = "default_enabled_mode")]
     pub(in crate::state) sixel_private_color_registers: bool,
     /// `?8452` — leave the cursor to the right of a Sixel graphic.
     #[serde(default)]
@@ -105,9 +107,9 @@ impl Default for TerminalModes {
             bracketed_paste: false,
             mouse_tracking: MouseTracking::Off,
             mouse_encoding: MouseEncoding::Default,
-            alt_scroll: false,
+            alternate_scroll: false,
             autowrap: true,
-            app_cursor_keys: false,
+            application_cursor_keys: false,
             reverse_video: false,
             cursor_blink: false,
             cursor_shape: None,
@@ -118,7 +120,7 @@ impl Default for TerminalModes {
     }
 }
 
-fn default_true() -> bool {
+fn default_enabled_mode() -> bool {
     true
 }
 

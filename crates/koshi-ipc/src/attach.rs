@@ -28,9 +28,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttachedSessionStructureSnapshot {
     /// The session's stable id.
-    pub id: SessionId,
+    #[serde(rename = "id")]
+    pub session_id: SessionId,
     /// The session's display name, shown in the status line.
-    pub name: String,
+    #[serde(rename = "name")]
+    pub session_name: String,
     /// Every tab in the session, in display order.
     pub tabs: Vec<TabStructure>,
     /// Every pane in the session, ordered by [`PaneId`]. A layout leaf names a
@@ -43,11 +45,14 @@ pub struct AttachedSessionStructureSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TabStructure {
     /// The tab's stable id.
-    pub id: TabId,
+    #[serde(rename = "id")]
+    pub tab_id: TabId,
     /// The tab's display name.
-    pub name: String,
+    #[serde(rename = "name")]
+    pub tab_name: String,
     /// The tab's position in the bar, starting at 0.
-    pub index: usize,
+    #[serde(rename = "index")]
+    pub tab_index: usize,
     /// The tab's layout tree, unsolved. The client solves it against its own
     /// terminal size.
     pub layout: LayoutNode,
@@ -62,9 +67,11 @@ pub struct TabStructure {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneStructure {
     /// The pane's stable id, matching its layout leaf.
-    pub id: PaneId,
+    #[serde(rename = "id")]
+    pub pane_id: PaneId,
     /// Whether a terminal or a plugin draws this pane.
-    pub kind: PaneKind,
+    #[serde(rename = "kind")]
+    pub pane_kind: PaneKind,
 }
 
 #[cfg(test)]

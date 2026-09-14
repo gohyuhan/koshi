@@ -21,7 +21,7 @@ use std::process::ExitCode;
 use cargo_metadata::{Metadata, MetadataCommand};
 
 /// A crate name paired with its direct dependency names.
-type CrateDeps = (String, Vec<String>);
+type CrateDependencies = (String, Vec<String>);
 
 /// Runs `cargo metadata` in the current directory and checks every workspace
 /// crate against the module's rules.
@@ -36,19 +36,22 @@ type CrateDeps = (String, Vec<String>);
 ///
 /// If `cargo metadata` fails, prints ``dep-guard: `cargo metadata` failed: ...``
 /// on stderr, returns [`ExitCode::FAILURE`], and checks no edge.
-pub fn run() -> ExitCode {
+pub fn run_dependency_guard() -> ExitCode {
     let metadata = match MetadataCommand::new().exec() {
         Ok(metadata) => metadata,
-        Err(e) => {
-            eprintln!("dep-guard: `cargo metadata` failed: {e}");
+        Err(metadata_error) => {
+            eprintln!("dep-guard: `cargo metadata` failed: {metadata_error}");
             return ExitCode::FAILURE;
         }
     };
 
-    let graph = direct_deps(&metadata);
-    let violations = check(&graph);
+    let crate_dependencies = list_direct_dependencies(&metadata);
+    let violations = validate_dependency_edges(&crate_dependencies);
     if violations.is_empty() {
-        println!("dep-guard: ok ({} crates checked)", graph.len());
+        println!(
+            "dep-guard: ok ({} crates checked)",
+            crate_dependencies.len()
+        );
         return ExitCode::SUCCESS;
     }
 
@@ -63,34 +66,34 @@ pub fn run() -> ExitCode {
 /// Dependencies include normal, dev, build, optional, and target-specific
 /// manifest entries. Crates and dependency names are sorted, and duplicate
 /// dependency names occur once.
-fn direct_deps(metadata: &Metadata) -> Vec<CrateDeps> {
-    let mut graph: Vec<CrateDeps> = metadata
+fn list_direct_dependencies(metadata: &Metadata) -> Vec<CrateDependencies> {
+    let mut crate_dependencies: Vec<CrateDependencies> = metadata
         .workspace_packages()
         .iter()
-        .map(|pkg| {
-            let mut deps: Vec<String> = pkg
+        .map(|workspace_package| {
+            let mut dependency_names: Vec<String> = workspace_package
                 .dependencies
                 .iter()
-                .map(|dep| dep.name.to_string())
+                .map(|dependency| dependency.name.to_string())
                 .collect();
-            deps.sort();
-            deps.dedup();
-            (pkg.name.to_string(), deps)
+            dependency_names.sort();
+            dependency_names.dedup();
+            (workspace_package.name.to_string(), dependency_names)
         })
         .collect();
-    graph.sort_by(|a, b| a.0.cmp(&b.0));
-    graph
+    crate_dependencies.sort_by(|left_crate, right_crate| left_crate.0.cmp(&right_crate.0));
+    crate_dependencies
 }
 
-/// Returns sorted, duplicate-free messages for forbidden edges in `graph`.
+/// Returns sorted, duplicate-free messages for forbidden edges in the crate dependency graph.
 /// Returns an empty vector when every edge is allowed.
-pub fn check(graph: &[CrateDeps]) -> Vec<String> {
+pub fn validate_dependency_edges(crate_dependencies: &[CrateDependencies]) -> Vec<String> {
     let mut violations = BTreeSet::new();
 
-    for (crate_name, dependencies) in graph {
-        for dependency_name in dependencies {
+    for (crate_name, dependency_names) in crate_dependencies {
+        for dependency_name in dependency_names {
             if crate_name == "koshi-core" && dependency_name.starts_with("koshi-") {
-                violations.insert(edge(
+                violations.insert(format_forbidden_edge(
                     crate_name,
                     dependency_name,
                     "koshi-core must not depend on internal crates",
@@ -102,7 +105,7 @@ pub fn check(graph: &[CrateDeps]) -> Vec<String> {
                     "koshi-runtime" | "koshi-ipc" | "koshi-plugin-host"
                 )
             {
-                violations.insert(edge(
+                violations.insert(format_forbidden_edge(
                     crate_name,
                     dependency_name,
                     "koshi-plugin-manager must not depend on runtime/ipc/host",
@@ -111,21 +114,21 @@ pub fn check(graph: &[CrateDeps]) -> Vec<String> {
             if crate_name == "koshi-plugin-api"
                 && matches!(dependency_name.as_str(), "koshi-client" | "koshi-renderer")
             {
-                violations.insert(edge(
+                violations.insert(format_forbidden_edge(
                     crate_name,
                     dependency_name,
                     "koshi-plugin-api must not depend on client/renderer",
                 ));
             }
             if dependency_name == "wasmtime" && crate_name != "koshi-plugin-host" {
-                violations.insert(edge(
+                violations.insert(format_forbidden_edge(
                     crate_name,
                     dependency_name,
                     "wasmtime is owned only by koshi-plugin-host",
                 ));
             }
             if dependency_name == "portable-pty" && crate_name != "koshi-pty" {
-                violations.insert(edge(
+                violations.insert(format_forbidden_edge(
                     crate_name,
                     dependency_name,
                     "portable-pty is owned only by koshi-pty",
@@ -137,9 +140,13 @@ pub fn check(graph: &[CrateDeps]) -> Vec<String> {
     violations.into_iter().collect()
 }
 
-/// Formats `forbidden edge: {from} -> {to} ({rule})`.
-fn edge(from: &str, to: &str, rule: &str) -> String {
-    format!("forbidden edge: {from} -> {to} ({rule})")
+/// Formats one forbidden edge with its source crate, dependency crate, and guard rule.
+fn format_forbidden_edge(
+    source_crate_name: &str,
+    dependency_crate_name: &str,
+    guard_rule: &str,
+) -> String {
+    format!("forbidden edge: {source_crate_name} -> {dependency_crate_name} ({guard_rule})")
 }
 
 #[cfg(test)]

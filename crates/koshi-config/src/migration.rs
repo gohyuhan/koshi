@@ -13,7 +13,7 @@ use thiserror::Error;
 use crate::app_config::parse_app_config;
 use crate::error::{ConfigError, ConfigParseDiagnostic, ConfigVersionDiagnostic};
 use crate::keybinding::{parse_keybindings, KeybindingParseError};
-use crate::parser::{parse_kdl, version_arg};
+use crate::parser::{parse_kdl, parse_version_argument};
 use crate::profile::{parse_profile, ProfileError};
 use crate::theme::parse_theme;
 use crate::types::SCHEMA_VERSION;
@@ -38,79 +38,81 @@ pub enum ConfigFileKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ValidatedConfig {
     /// Schema version declared by the file.
-    pub version: u32,
+    pub schema_version: u32,
     /// Whether the file already uses this build's newest schema.
-    pub current: bool,
+    pub is_current: bool,
 }
 
 /// Successful migration of one config file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MigratedConfig {
     /// Schema version declared before migration.
-    pub from: u32,
+    pub source_schema_version: u32,
     /// Schema version declared after migration.
-    pub to: u32,
+    pub target_schema_version: u32,
     /// Migrated KDL text, or the original text when no migration was needed.
-    pub source: String,
+    pub migrated_source: String,
     /// Whether at least one migration ran.
-    pub changed: bool,
+    pub is_changed: bool,
 }
 
 /// Config validation or migration failure.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum MigrationError {
     /// KDL text could not be parsed.
-    #[error("{detail}")]
+    #[error("{parse_error_detail}")]
     Parse {
         /// Full parse diagnostic as plain text.
-        detail: String,
+        parse_error_detail: String,
     },
     /// The file did not declare one usable schema version.
-    #[error("invalid config version in {path}: {detail}")]
+    #[error("invalid config version in {config_path}: {version_error_detail}")]
     Version {
         /// File path shown to the user.
-        path: String,
+        config_path: String,
         /// Plain reason the version cannot be used.
-        detail: String,
+        version_error_detail: String,
     },
     /// The file does not match its declared schema.
-    #[error("invalid config file {path}: {details}")]
+    #[error("invalid config file {config_path}: {validation_error_detail}")]
     Invalid {
         /// File path shown to the user.
-        path: String,
+        config_path: String,
         /// All schema problems joined for terminal output.
-        details: String,
+        validation_error_detail: String,
     },
     /// Koshi has no schema implementation for a declared version.
-    #[error("config schema version {version} has no validator in this koshi build")]
+    #[error("config schema version {schema_version} has no validator in this koshi build")]
     MissingSchema {
         /// Version with no registered schema.
-        version: u32,
+        schema_version: u32,
     },
     /// Koshi has no migration between two adjacent supported versions.
-    #[error("no config migration from version {from} to version {to}")]
+    #[error(
+        "no config migration from version {from_schema_version} to version {to_schema_version}"
+    )]
     MissingStep {
         /// Source version.
-        from: u32,
+        from_schema_version: u32,
         /// Required next version.
-        to: u32,
+        to_schema_version: u32,
     },
 }
 
-type ValidateFn = fn(ConfigFileKind, &Path, &str) -> Result<(), MigrationError>;
-type MigrateFn = fn(&Path, &str) -> Result<String, MigrationError>;
+type ValidateConfigFunction = fn(ConfigFileKind, &Path, &str) -> Result<(), MigrationError>;
+type MigrateConfigFunction = fn(&Path, &str) -> Result<String, MigrationError>;
 
 #[derive(Clone, Copy)]
-struct Schema {
-    version: u32,
-    validate: ValidateFn,
-    migrate_to_next: Option<MigrateFn>,
+struct ConfigSchema {
+    schema_version: u32,
+    validate_config_file: ValidateConfigFunction,
+    migrate_to_next_schema: Option<MigrateConfigFunction>,
 }
 
-const SCHEMAS: &[Schema] = &[Schema {
-    version: 1,
-    validate: validate_v1,
-    migrate_to_next: None,
+const CONFIG_SCHEMAS: &[ConfigSchema] = &[ConfigSchema {
+    schema_version: 1,
+    validate_config_file: validate_v1,
+    migrate_to_next_schema: None,
 }];
 
 /// Validates one config file against the schema version it declares.
@@ -119,25 +121,25 @@ const SCHEMAS: &[Schema] = &[Schema {
 /// Returns [`MigrationError`] for bad KDL, a missing or unusable version,
 /// an unknown schema version, or any schema error.
 pub fn validate_config(
-    kind: ConfigFileKind,
-    path: &Path,
-    source: &str,
+    config_file_kind: ConfigFileKind,
+    config_path: &Path,
+    config_source_text: &str,
 ) -> Result<ValidatedConfig, MigrationError> {
-    check_registry(SCHEMAS)?;
-    let version = read_version(path, source)?;
-    if version > SCHEMA_VERSION {
+    validate_schema_registry(CONFIG_SCHEMAS)?;
+    let schema_version = read_schema_version(config_path, config_source_text)?;
+    if schema_version > SCHEMA_VERSION {
         return Err(MigrationError::Version {
-            path: path.display().to_string(),
-            detail: format!(
-                "schema version {version} is newer than this koshi supports ({SCHEMA_VERSION})"
+            config_path: config_path.display().to_string(),
+            version_error_detail: format!(
+                "schema version {schema_version} is newer than this koshi supports ({SCHEMA_VERSION})"
             ),
         });
     }
-    let schema = schema_for(SCHEMAS, version)?;
-    (schema.validate)(kind, path, source)?;
+    let schema = find_schema_by_version(CONFIG_SCHEMAS, schema_version)?;
+    (schema.validate_config_file)(config_file_kind, config_path, config_source_text)?;
     Ok(ValidatedConfig {
-        version,
-        current: version == SCHEMA_VERSION,
+        schema_version,
+        is_current: schema_version == SCHEMA_VERSION,
     })
 }
 
@@ -147,194 +149,243 @@ pub fn validate_config(
 /// Returns [`MigrationError`] before producing output when the source is bad,
 /// a schema or migration step is missing, or any migrated result is invalid.
 pub fn migrate_config(
-    kind: ConfigFileKind,
-    path: &Path,
-    source: &str,
+    config_file_kind: ConfigFileKind,
+    config_path: &Path,
+    config_source_text: &str,
 ) -> Result<MigratedConfig, MigrationError> {
-    migrate_with_registry(kind, path, source, SCHEMAS, SCHEMA_VERSION)
+    migrate_with_registry(
+        config_file_kind,
+        config_path,
+        config_source_text,
+        CONFIG_SCHEMAS,
+        SCHEMA_VERSION,
+    )
 }
 
 fn migrate_with_registry(
-    kind: ConfigFileKind,
-    path: &Path,
-    source: &str,
-    schemas: &[Schema],
-    current: u32,
+    config_file_kind: ConfigFileKind,
+    config_path: &Path,
+    config_source_text: &str,
+    config_schemas: &[ConfigSchema],
+    current_schema_version: u32,
 ) -> Result<MigratedConfig, MigrationError> {
-    check_registry_for(schemas, current)?;
-    let from = read_version(path, source)?;
-    if from > current {
+    validate_schema_registry_for(config_schemas, current_schema_version)?;
+    let source_schema_version = read_schema_version(config_path, config_source_text)?;
+    if source_schema_version > current_schema_version {
         return Err(MigrationError::Version {
-            path: path.display().to_string(),
-            detail: format!("schema version {from} is newer than this koshi supports ({current})"),
+            config_path: config_path.display().to_string(),
+            version_error_detail: format!(
+                "schema version {source_schema_version} is newer than this koshi supports ({current_schema_version})"
+            ),
         });
     }
 
-    let mut version = from;
-    let mut migrated = source.to_string();
+    let mut schema_version = source_schema_version;
+    let mut migrated_source = config_source_text.to_string();
     loop {
-        let schema = schema_for(schemas, version)?;
-        (schema.validate)(kind, path, &migrated)?;
-        if version == current {
+        let schema = find_schema_by_version(config_schemas, schema_version)?;
+        (schema.validate_config_file)(config_file_kind, config_path, &migrated_source)?;
+        if schema_version == current_schema_version {
             break;
         }
-        let next = version + 1;
-        let migrate = schema.migrate_to_next.ok_or(MigrationError::MissingStep {
-            from: version,
-            to: next,
-        })?;
-        migrated = migrate(path, &migrated)?;
-        let declared = read_version(path, &migrated)?;
-        if declared != next {
+        let next_schema_version = schema_version + 1;
+        let migrate_to_next_schema =
+            schema
+                .migrate_to_next_schema
+                .ok_or(MigrationError::MissingStep {
+                    from_schema_version: schema_version,
+                    to_schema_version: next_schema_version,
+                })?;
+        migrated_source = migrate_to_next_schema(config_path, &migrated_source)?;
+        let declared_schema_version = read_schema_version(config_path, &migrated_source)?;
+        if declared_schema_version != next_schema_version {
             return Err(MigrationError::Version {
-                path: path.display().to_string(),
-                detail: format!(
-                    "migration from version {version} produced version {declared}, expected {next}"
+                config_path: config_path.display().to_string(),
+                version_error_detail: format!(
+                    "migration from version {schema_version} produced version {declared_schema_version}, expected {next_schema_version}"
                 ),
             });
         }
-        version = next;
+        schema_version = next_schema_version;
     }
 
     Ok(MigratedConfig {
-        from,
-        to: version,
-        changed: from != version,
-        source: migrated,
+        source_schema_version,
+        target_schema_version: schema_version,
+        is_changed: source_schema_version != schema_version,
+        migrated_source,
     })
 }
 
-fn read_version(path: &Path, source: &str) -> Result<u32, MigrationError> {
-    let doc = parse_kdl(path, source).map_err(parse_error)?;
-    version_from_document(path, &doc)
+fn read_schema_version(
+    config_path: &Path,
+    config_source_text: &str,
+) -> Result<u32, MigrationError> {
+    let config_document = parse_kdl(config_path, config_source_text).map_err(build_parse_error)?;
+    parse_schema_version_from_document(config_path, &config_document)
 }
 
-fn version_from_document(path: &Path, doc: &KdlDocument) -> Result<u32, MigrationError> {
-    let mut versions = doc
+fn parse_schema_version_from_document(
+    config_path: &Path,
+    config_document: &KdlDocument,
+) -> Result<u32, MigrationError> {
+    let mut version_nodes = config_document
         .nodes()
         .iter()
         .filter(|node| node.name().value() == "version");
-    let Some(node) = versions.next() else {
-        return Err(version_error(path, "file must declare `version`"));
+    let Some(version_node) = version_nodes.next() else {
+        return Err(build_version_error(
+            config_path,
+            "file must declare `version`",
+        ));
     };
-    if versions.next().is_some() {
-        return Err(version_error(path, "`version` is declared more than once"));
+    if version_nodes.next().is_some() {
+        return Err(build_version_error(
+            config_path,
+            "`version` is declared more than once",
+        ));
     }
-    let version = version_arg(node).map_err(|(_, detail)| version_error(path, detail))?;
-    if version == 0 {
-        return Err(version_error(
-            path,
+    let schema_version =
+        parse_version_argument(version_node).map_err(|(_, version_error_detail)| {
+            build_version_error(config_path, version_error_detail)
+        })?;
+    if schema_version == 0 {
+        return Err(build_version_error(
+            config_path,
             ConfigVersionDiagnostic::TooOld.to_string(),
         ));
     }
-    Ok(version)
+    Ok(schema_version)
 }
 
-fn validate_v1(kind: ConfigFileKind, path: &Path, source: &str) -> Result<(), MigrationError> {
-    match kind {
+fn validate_v1(
+    config_file_kind: ConfigFileKind,
+    config_path: &Path,
+    config_source_text: &str,
+) -> Result<(), MigrationError> {
+    match config_file_kind {
         ConfigFileKind::App => {
-            let parsed =
-                parse_app_config(path, source).map_err(|error| config_error(path, error))?;
-            invalid_warnings(path, parsed.warnings)
+            let parsed_app_config = parse_app_config(config_path, config_source_text)
+                .map_err(|parse_error| build_config_error(config_path, parse_error))?;
+            reject_parse_warnings(config_path, parsed_app_config.parse_warnings)
         }
         ConfigFileKind::Theme => {
-            let (_, warnings) =
-                parse_theme(path, source).map_err(|error| config_error(path, error))?;
-            invalid_warnings(path, warnings)
+            let (_, parse_warnings) = parse_theme(config_path, config_source_text)
+                .map_err(|parse_error| build_config_error(config_path, parse_error))?;
+            reject_parse_warnings(config_path, parse_warnings)
         }
-        ConfigFileKind::Keybinding => parse_keybindings(path, source)
+        ConfigFileKind::Keybinding => parse_keybindings(config_path, config_source_text)
             .map(|_| ())
-            .map_err(keybinding_error),
-        ConfigFileKind::Profile => parse_profile(path, source)
+            .map_err(build_keybinding_error),
+        ConfigFileKind::Profile => parse_profile(config_path, config_source_text)
             .map(|_| ())
-            .map_err(profile_error),
+            .map_err(build_profile_error),
     }
 }
 
-fn invalid_warnings(path: &Path, warnings: Vec<String>) -> Result<(), MigrationError> {
-    if warnings.is_empty() {
+fn reject_parse_warnings(
+    config_path: &Path,
+    parse_warnings: Vec<String>,
+) -> Result<(), MigrationError> {
+    if parse_warnings.is_empty() {
         Ok(())
     } else {
         Err(MigrationError::Invalid {
-            path: path.display().to_string(),
-            details: warnings.join("; "),
+            config_path: config_path.display().to_string(),
+            validation_error_detail: parse_warnings.join("; "),
         })
     }
 }
 
-fn parse_error(error: ConfigParseDiagnostic) -> MigrationError {
-    let error: ConfigError = error.into();
+fn build_parse_error(parse_diagnostic: ConfigParseDiagnostic) -> MigrationError {
+    let config_error: ConfigError = parse_diagnostic.into();
     MigrationError::Parse {
-        detail: error.to_string(),
+        parse_error_detail: config_error.to_string(),
     }
 }
 
-fn config_error(path: &Path, error: ConfigError) -> MigrationError {
-    match error {
+fn build_config_error(config_path: &Path, config_error: ConfigError) -> MigrationError {
+    match config_error {
         ConfigError::Parse { .. } => MigrationError::Parse {
-            detail: error.to_string(),
+            parse_error_detail: config_error.to_string(),
         },
         ConfigError::Validation { .. } => MigrationError::Invalid {
-            path: path.display().to_string(),
-            details: error.to_string(),
+            config_path: config_path.display().to_string(),
+            validation_error_detail: config_error.to_string(),
         },
     }
 }
 
-fn keybinding_error(error: KeybindingParseError) -> MigrationError {
-    match error {
-        KeybindingParseError::Syntax(error) => parse_error(error),
-        KeybindingParseError::Invalid { path, diagnostics } => MigrationError::Invalid {
-            path,
-            details: diagnostics
+fn build_keybinding_error(keybinding_error: KeybindingParseError) -> MigrationError {
+    match keybinding_error {
+        KeybindingParseError::Syntax(parse_diagnostic) => build_parse_error(parse_diagnostic),
+        KeybindingParseError::Invalid {
+            keybinding_path,
+            diagnostics,
+        } => MigrationError::Invalid {
+            config_path: keybinding_path,
+            validation_error_detail: diagnostics
                 .iter()
-                .map(|diagnostic| diagnostic.message())
+                .map(|diagnostic| diagnostic.get_diagnostic_message())
                 .collect::<Vec<_>>()
                 .join("; "),
         },
     }
 }
 
-fn profile_error(error: ProfileError) -> MigrationError {
-    match error {
-        ProfileError::Syntax(error) => parse_error(error),
-        ProfileError::Invalid { path, diagnostics } => MigrationError::Invalid {
-            path,
-            details: diagnostics
+fn build_profile_error(profile_error: ProfileError) -> MigrationError {
+    match profile_error {
+        ProfileError::Syntax(parse_diagnostic) => build_parse_error(parse_diagnostic),
+        ProfileError::Invalid {
+            profile_path,
+            diagnostics,
+        } => MigrationError::Invalid {
+            config_path: profile_path,
+            validation_error_detail: diagnostics
                 .iter()
-                .map(|diagnostic| diagnostic.message())
+                .map(|diagnostic| diagnostic.get_diagnostic_message())
                 .collect::<Vec<_>>()
                 .join("; "),
         },
     }
 }
 
-fn version_error(path: &Path, detail: impl Into<String>) -> MigrationError {
+fn build_version_error(
+    config_path: &Path,
+    version_error_detail: impl Into<String>,
+) -> MigrationError {
     MigrationError::Version {
-        path: path.display().to_string(),
-        detail: detail.into(),
+        config_path: config_path.display().to_string(),
+        version_error_detail: version_error_detail.into(),
     }
 }
 
-fn schema_for(schemas: &[Schema], version: u32) -> Result<Schema, MigrationError> {
-    schemas
+fn find_schema_by_version(
+    config_schemas: &[ConfigSchema],
+    schema_version: u32,
+) -> Result<ConfigSchema, MigrationError> {
+    config_schemas
         .iter()
         .copied()
-        .find(|schema| schema.version == version)
-        .ok_or(MigrationError::MissingSchema { version })
+        .find(|config_schema| config_schema.schema_version == schema_version)
+        .ok_or(MigrationError::MissingSchema { schema_version })
 }
 
-fn check_registry(schemas: &[Schema]) -> Result<(), MigrationError> {
-    check_registry_for(schemas, SCHEMA_VERSION)
+fn validate_schema_registry(config_schemas: &[ConfigSchema]) -> Result<(), MigrationError> {
+    validate_schema_registry_for(config_schemas, SCHEMA_VERSION)
 }
 
-fn check_registry_for(schemas: &[Schema], current: u32) -> Result<(), MigrationError> {
-    for version in 1..=current {
-        let schema = schema_for(schemas, version)?;
-        if version < current && schema.migrate_to_next.is_none() {
+fn validate_schema_registry_for(
+    config_schemas: &[ConfigSchema],
+    current_schema_version: u32,
+) -> Result<(), MigrationError> {
+    for schema_version in 1..=current_schema_version {
+        let config_schema = find_schema_by_version(config_schemas, schema_version)?;
+        if schema_version < current_schema_version && config_schema.migrate_to_next_schema.is_none()
+        {
             return Err(MigrationError::MissingStep {
-                from: version,
-                to: version + 1,
+                from_schema_version: schema_version,
+                to_schema_version: schema_version + 1,
             });
         }
     }

@@ -5,84 +5,110 @@ use super::*;
 impl TerminalState {
     pub(in crate::state) fn scroll_image_rows(
         &mut self,
-        first: u16,
-        bottom: u16,
-        shift: u16,
-        up: bool,
-        old_live_top: u64,
+        first_row_index: u16,
+        bottom_row_index: u16,
+        row_shift_count: u16,
+        is_scrolling_up: bool,
+        old_live_top_row_index: u64,
     ) {
-        let primary = self.active == Screen::Primary;
-        let new_live_top = if primary {
-            self.scrollback.total_pushed()
+        let is_primary_screen = self.active_screen == Screen::Primary;
+        let new_live_top_row_index = if is_primary_screen {
+            self.scrollback.get_total_pushed_line_count()
         } else {
             0
         };
-        let old_live_top = if primary { old_live_top } else { 0 };
-        let full_history_scroll =
-            primary && up && first == 0 && bottom + 1 == self.primary.dimensions().0;
-        let placements = if primary {
-            self.primary_absolute_image_placements_at(old_live_top)
+        let old_live_top_row_index = if is_primary_screen {
+            old_live_top_row_index
+        } else {
+            0
+        };
+        let is_full_history_scroll = is_primary_screen
+            && is_scrolling_up
+            && first_row_index == 0
+            && bottom_row_index + 1 == self.primary.get_grid_dimensions().0;
+        let absolute_image_placements = if is_primary_screen {
+            self.list_primary_absolute_image_placements_at(old_live_top_row_index)
         } else {
             std::mem::take(&mut self.alternate_image_placements)
                 .into_iter()
-                .filter_map(|placement| AbsoluteImagePlacement::from_live(placement, 0))
+                .filter_map(|image_placement| {
+                    AbsoluteImagePlacement::from_live_image_placement(image_placement, 0)
+                })
                 .collect()
         };
-        let (rows, columns) = self.active_grid().dimensions();
-        let mut mapped = placements
+        let (grid_row_count, grid_column_count) = self.get_active_grid().get_grid_dimensions();
+        let mut mapped_absolute_image_placements = absolute_image_placements
             .into_iter()
-            .filter_map(|mut placement| {
-                if placement.record.display.relative_image_id.is_some() {
-                    placement.anchor.0 = new_live_top;
-                    return Some(placement);
+            .filter_map(|mut image_placement| {
+                if image_placement
+                    .image_record
+                    .display
+                    .relative_image_id
+                    .is_some()
+                {
+                    image_placement.anchor.0 = new_live_top_row_index;
+                    return Some(image_placement);
                 }
-                if full_history_scroll || placement.anchor.0 < old_live_top {
-                    return Some(placement);
+                if is_full_history_scroll || image_placement.anchor.0 < old_live_top_row_index {
+                    return Some(image_placement);
                 }
-                let row = placement.anchor.0 - old_live_top;
-                let end = row + u64::from(placement.rows);
-                let contained = row >= u64::from(first) && end <= u64::from(bottom) + 1;
-                if !contained {
-                    placement.anchor.0 = new_live_top.checked_add(row)?;
-                    return Some(placement);
+                let relative_row_offset = image_placement.anchor.0 - old_live_top_row_index;
+                let relative_end_row_offset =
+                    relative_row_offset + u64::from(image_placement.row_count);
+                let is_image_fully_contained = relative_row_offset >= u64::from(first_row_index)
+                    && relative_end_row_offset <= u64::from(bottom_row_index) + 1;
+                if !is_image_fully_contained {
+                    image_placement.anchor.0 =
+                        new_live_top_row_index.checked_add(relative_row_offset)?;
+                    return Some(image_placement);
                 }
-                if up {
-                    let removed = u64::from(shift)
-                        .saturating_sub(row - u64::from(first))
-                        .min(u64::from(placement.rows));
-                    if removed == u64::from(placement.rows) {
+                if is_scrolling_up {
+                    let removed_row_count = u64::from(row_shift_count)
+                        .saturating_sub(relative_row_offset - u64::from(first_row_index))
+                        .min(u64::from(image_placement.row_count));
+                    if removed_row_count == u64::from(image_placement.row_count) {
                         return None;
                     }
-                    placement.plan.geometry.offset.y = placement
+                    image_placement.plan.geometry.cell_offset.row = image_placement
                         .plan
                         .geometry
-                        .offset
-                        .y
-                        .checked_add(u16::try_from(removed).ok()?)?;
-                    placement.rows -= u16::try_from(removed).ok()?;
-                    placement.anchor.0 =
-                        new_live_top.checked_add((row + removed).checked_sub(u64::from(shift))?)?;
+                        .cell_offset
+                        .row
+                        .checked_add(u16::try_from(removed_row_count).ok()?)?;
+                    image_placement.row_count -= u16::try_from(removed_row_count).ok()?;
+                    image_placement.anchor.0 = new_live_top_row_index.checked_add(
+                        (relative_row_offset + removed_row_count)
+                            .checked_sub(u64::from(row_shift_count))?,
+                    )?;
                 } else {
-                    placement.anchor.0 = new_live_top.checked_add(row + u64::from(shift))?;
-                    placement = placement.clipped(
-                        new_live_top + u64::from(first),
-                        new_live_top + u64::from(bottom) + 1,
-                        columns,
+                    image_placement.anchor.0 = new_live_top_row_index
+                        .checked_add(relative_row_offset + u64::from(row_shift_count))?;
+                    image_placement = image_placement.clip_to_visible_area(
+                        new_live_top_row_index + u64::from(first_row_index),
+                        new_live_top_row_index + u64::from(bottom_row_index) + 1,
+                        grid_column_count,
                     )?;
                 }
-                Some(placement)
+                Some(image_placement)
             })
             .collect::<Vec<_>>();
-        if primary {
-            self.set_primary_absolute_image_placements(&mut mapped);
+        if is_primary_screen {
+            self.set_primary_absolute_image_placements(&mut mapped_absolute_image_placements);
         } else {
-            self.alternate_image_placements = mapped
+            self.alternate_image_placements = mapped_absolute_image_placements
                 .into_iter()
-                .filter_map(|placement| {
-                    if placement.record.display.relative_image_id.is_some() {
-                        placement.into_live(0)
+                .filter_map(|image_placement| {
+                    if image_placement
+                        .image_record
+                        .display
+                        .relative_image_id
+                        .is_some()
+                    {
+                        image_placement.into_live_image_placement(0)
                     } else {
-                        placement.clipped(0, u64::from(rows), columns)?.into_live(0)
+                        image_placement
+                            .clip_to_visible_area(0, u64::from(grid_row_count), grid_column_count)?
+                            .into_live_image_placement(0)
                     }
                 })
                 .collect();

@@ -22,12 +22,12 @@ use crate::server::Server;
 
 impl Server {
     /// Swap in a reloaded `koshi.kdl`: replace the app-settings layer with
-    /// `candidate` and recompute both effective configs from it, the session's
+    /// `reloaded_app_config` and recompute both effective configs from it, the session's
     /// own and the viewer copy. `koshi.kdl` carries sections both sides own.
     /// The next pane spawns with the new shell, size floor, and scrollback
     /// limits.
     ///
-    /// `candidate.theme` and `candidate.keybindings` are set to `None` before
+    /// `reloaded_app_config.theme` and `reloaded_app_config.keybindings` are set to `None` before
     /// the swap: the colors come from the theme file and the bindings from
     /// `keybinding.kdl`. Parsing `koshi.kdl` fills neither section; only a
     /// hand-built candidate carries one. The config loader resolves the theme
@@ -35,12 +35,12 @@ impl Server {
     ///
     /// Returns one [`Event::ConfigReloaded`] per live session, in session-id
     /// order.
-    pub fn reload_app_config(&mut self, mut candidate: PartialKoshiConfig) -> Vec<Event> {
-        candidate.theme = None;
-        candidate.keybindings = None;
-        self.app_layer = candidate;
-        self.config = fold_server(&self.app_layer);
-        self.client_config = fold_client(&self.app_layer);
+    pub fn reload_app_config(&mut self, mut reloaded_app_config: PartialKoshiConfig) -> Vec<Event> {
+        reloaded_app_config.theme = None;
+        reloaded_app_config.keybindings = None;
+        self.app_layer = reloaded_app_config;
+        self.config = merge_app_layer_into_server_config(&self.app_layer);
+        self.client_config = merge_app_layer_into_client_config(&self.app_layer);
         self.config_reloaded_events()
     }
 
@@ -50,15 +50,15 @@ impl Server {
     /// `app` is `None` when the file is absent or failed to load; the built-in
     /// defaults then stand. No session exists yet, so the events
     /// [`reload_app_config`](Self::reload_app_config) returns are dropped.
-    pub fn load_startup_config(&mut self, app: Option<PartialKoshiConfig>) {
-        if let Some(app) = app {
-            let _ = self.reload_app_config(app);
+    pub fn load_startup_config(&mut self, startup_app_config: Option<PartialKoshiConfig>) {
+        if let Some(startup_app_config) = startup_app_config {
+            let _ = self.reload_app_config(startup_app_config);
         }
     }
 
     /// One [`Event::ConfigReloaded`] per live session, in session-id order.
     fn config_reloaded_events(&self) -> Vec<Event> {
-        let mut session_ids: Vec<SessionId> = self.sessions.keys().copied().collect();
+        let mut session_ids: Vec<SessionId> = self.session_by_id.keys().copied().collect();
         session_ids.sort_unstable();
         session_ids
             .into_iter()
@@ -67,16 +67,16 @@ impl Server {
     }
 }
 
-/// Fold the stored `koshi.kdl` layer onto the built-in defaults, keeping the
+/// Merge the stored `koshi.kdl` layer onto the built-in defaults, keeping the
 /// sections the session owns.
-pub(crate) fn fold_server(app_layer: &PartialKoshiConfig) -> ServerConfig {
+pub(crate) fn merge_app_layer_into_server_config(app_layer: &PartialKoshiConfig) -> ServerConfig {
     merge_server(ServerConfig::default(), vec![app_layer.clone()])
 }
 
-/// Fold the stored `koshi.kdl` layer onto the built-in defaults, keeping the
+/// Merge the stored `koshi.kdl` layer onto the built-in defaults, keeping the
 /// sections one viewer owns. This is the copy the session itself reads; each
 /// viewer folds its own from its own files.
-pub(crate) fn fold_client(app_layer: &PartialKoshiConfig) -> ClientConfig {
+pub(crate) fn merge_app_layer_into_client_config(app_layer: &PartialKoshiConfig) -> ClientConfig {
     merge_client(ClientConfig::default(), vec![app_layer.clone()])
 }
 

@@ -1,7 +1,7 @@
 //! Config layering: fold ordered override layers onto the built-in defaults.
 //!
 //! Koshi builds its effective config from the built-in defaults plus ordered
-//! override layers, where a later layer overrides an earlier one field by
+//! override layers, where a higher-precedence layer overrides a lower one field by
 //! field. Each override layer is a [`PartialKoshiConfig`]: a mirror of the
 //! whole file whose every field is wrapped in [`Option`], so a layer carries
 //! only the fields it sets.
@@ -15,8 +15,8 @@
 //! file and folds them in a fixed order.
 //!
 //! Merge grain is deep and field-level for struct sections: a layer that sets
-//! `scrollback.max_lines` leaves `scrollback.max_bytes` at the lower layer's
-//! value. The collection-valued `keybindings.modes` is replaced whole when a
+//! `scrollback.maximum_line_count` leaves `scrollback.maximum_byte_count` at the lower layer's
+//! value. The collection-valued `keybindings.mode_bindings_by_name` is replaced whole when a
 //! layer sets it; per-element merge is done by the keymap-merge pass, which
 //! knows the element identity to merge on.
 //!
@@ -42,18 +42,21 @@ use crate::types::{
 ///
 /// `base` is the fully-populated lowest layer, normally
 /// [`ServerConfig::default`](crate::types::ServerConfig::default). Each layer
-/// in `layers` is applied in sequence, so later entries win on any field they
+/// in `layers` is applied in sequence, so higher-precedence entries win on any field they
 /// set. Merging never fails: an empty layer leaves the config unchanged.
 ///
 /// A layer's viewer-owned sections (theme, keybindings, mouse, copy, layout,
 /// update, image support) are skipped here and folded by [`merge_client`]
 /// instead.
-pub fn merge_server(base: ServerConfig, layers: Vec<PartialKoshiConfig>) -> ServerConfig {
-    let mut config = base;
-    for layer in layers {
-        layer.apply_server(&mut config);
+pub fn merge_server(
+    base_server_config: ServerConfig,
+    config_layers: Vec<PartialKoshiConfig>,
+) -> ServerConfig {
+    let mut server_config = base_server_config;
+    for config_layer in config_layers {
+        config_layer.apply_to_server_config(&mut server_config);
     }
-    config
+    server_config
 }
 
 /// Folds `layers` onto `base` in order and returns one viewer's effective
@@ -62,17 +65,20 @@ pub fn merge_server(base: ServerConfig, layers: Vec<PartialKoshiConfig>) -> Serv
 /// The counterpart of [`merge_server`] over the same layers: a layer's
 /// session-owned sections (pane floor, scrollback caps, terminal environment)
 /// are skipped here.
-pub fn merge_client(base: ClientConfig, layers: Vec<PartialKoshiConfig>) -> ClientConfig {
-    let mut config = base;
-    for layer in layers {
-        layer.apply_client(&mut config);
+pub fn merge_client(
+    base_client_config: ClientConfig,
+    config_layers: Vec<PartialKoshiConfig>,
+) -> ClientConfig {
+    let mut client_config = base_client_config;
+    for config_layer in config_layers {
+        config_layer.apply_to_client_config(&mut client_config);
     }
-    config
+    client_config
 }
 
 /// The stored config overrides one viewer reads, one layer per config file,
 /// folded onto the built-in defaults by
-/// [`effective_client`](Self::effective_client).
+/// [`resolve_effective_client_config`](Self::resolve_effective_client_config).
 ///
 /// One file fills one layer, so replacing a file's settings replaces its layer
 /// alone and leaves the others as they are.
@@ -83,11 +89,11 @@ pub fn merge_client(base: ClientConfig, layers: Vec<PartialKoshiConfig>) -> Clie
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ConfigLayers {
     /// The `koshi.kdl` app-settings layer.
-    app: PartialKoshiConfig,
+    app_config_layer: PartialKoshiConfig,
     /// The color-theme file's layer; only its theme section is set.
-    theme: PartialKoshiConfig,
+    theme_config_layer: PartialKoshiConfig,
     /// The `keybinding.kdl` layer; only its keybindings section is set.
-    keybindings: PartialKoshiConfig,
+    keybindings_config_layer: PartialKoshiConfig,
 }
 
 impl ConfigLayers {
@@ -100,21 +106,21 @@ impl ConfigLayers {
     /// fills either one, and only a hand-built `app` value can carry them.
     #[must_use]
     pub fn from_files(
-        app: Option<PartialKoshiConfig>,
-        theme: Option<PartialThemeConfig>,
-        keybindings: Option<PartialKeybindingsConfig>,
+        app_config_layer: Option<PartialKoshiConfig>,
+        theme_config_layer: Option<PartialThemeConfig>,
+        keybindings_config_layer: Option<PartialKeybindingsConfig>,
     ) -> Self {
-        let mut app = app.unwrap_or_default();
-        app.theme = None;
-        app.keybindings = None;
+        let mut app_config_layer = app_config_layer.unwrap_or_default();
+        app_config_layer.theme = None;
+        app_config_layer.keybindings = None;
         ConfigLayers {
-            app,
-            theme: PartialKoshiConfig {
-                theme,
+            app_config_layer,
+            theme_config_layer: PartialKoshiConfig {
+                theme: theme_config_layer,
                 ..PartialKoshiConfig::default()
             },
-            keybindings: PartialKoshiConfig {
-                keybindings,
+            keybindings_config_layer: PartialKoshiConfig {
+                keybindings: keybindings_config_layer,
                 ..PartialKoshiConfig::default()
             },
         }
@@ -126,23 +132,26 @@ impl ConfigLayers {
     /// Fold order: the app layer, then the theme layer, then the keybinding
     /// layer.
     #[must_use]
-    pub fn effective_client(&self) -> ClientConfig {
+    pub fn resolve_effective_client_config(&self) -> ClientConfig {
         merge_client(
             ClientConfig::default(),
             vec![
-                self.app.clone(),
-                self.theme.clone(),
-                self.keybindings.clone(),
+                self.app_config_layer.clone(),
+                self.theme_config_layer.clone(),
+                self.keybindings_config_layer.clone(),
             ],
         )
     }
 }
 
-/// Overwrites `field` with `value` when the layer set one, leaving it
+/// Overwrites `target_field` with `override_field_value` when the layer set one, leaving it
 /// untouched otherwise.
-fn merge_field<T>(field: &mut T, value: Option<T>) {
-    if let Some(value) = value {
-        *field = value;
+fn merge_override_field<FieldValue>(
+    target_field: &mut FieldValue,
+    override_field_value: Option<FieldValue>,
+) {
+    if let Some(override_field_value) = override_field_value {
+        *target_field = override_field_value;
     }
 }
 
@@ -176,13 +185,13 @@ pub struct PartialKoshiConfig {
     /// Self-update overrides.
     pub update: Option<PartialUpdateConfig>,
     /// Native image support override.
-    pub image_support: Option<bool>,
+    pub supports_image_protocols: Option<bool>,
     /// Remote-reconnect override.
-    pub remote_reconnect: Option<bool>,
+    pub should_reconnect_remote_session: Option<bool>,
     /// Beta-feature gate override.
-    pub allow_beta_features: Option<bool>,
+    pub should_allow_beta_features: Option<bool>,
     /// Other-users gate override.
-    pub allow_other_users: Option<bool>,
+    pub should_allow_other_users: Option<bool>,
     /// Remote listen address override. The outer `Option` is whether this
     /// layer sets the field; the inner `Option` is the value (`None` = no
     /// address, so nothing binds).
@@ -190,75 +199,93 @@ pub struct PartialKoshiConfig {
     /// Shared sessions directory override. The outer `Option` is whether this
     /// layer sets the field; the inner `Option` is the value (`None` = the
     /// platform's machine-wide directory).
-    pub shared_sessions_dir: Option<Option<PathBuf>>,
+    pub shared_sessions_directory: Option<Option<PathBuf>>,
     /// Auto-close override.
-    pub auto_close_session: Option<bool>,
+    pub should_auto_close_session: Option<bool>,
 }
 
 impl PartialKoshiConfig {
-    /// Applies the session-owned sections' overrides onto `config`, ignoring
+    /// Applies the session-owned sections' overrides onto `server_config`, ignoring
     /// every viewer-owned section this layer carries.
-    fn apply_server(self, config: &mut ServerConfig) {
+    fn apply_to_server_config(self, server_config: &mut ServerConfig) {
         if let Some(pane) = self.pane {
-            pane.apply(&mut config.pane);
+            pane.apply_to_pane_config(&mut server_config.pane);
         }
         if let Some(scrollback) = self.scrollback {
-            scrollback.apply_limits(&mut config.scrollback);
+            scrollback.apply_limits_to_scrollback(&mut server_config.scrollback);
         }
         if let Some(terminal) = self.terminal {
-            terminal.apply(&mut config.terminal);
+            terminal.apply_to_terminal_config(&mut server_config.terminal);
         }
         if let Some(logging) = self.logging {
-            logging.apply(&mut config.logging);
+            logging.apply_to_logging_config(&mut server_config.logging);
         }
-        merge_field(&mut config.allow_beta_features, self.allow_beta_features);
-        merge_field(&mut config.allow_other_users, self.allow_other_users);
-        merge_field(&mut config.remote_listen, self.remote_listen);
-        merge_field(&mut config.shared_sessions_dir, self.shared_sessions_dir);
-        merge_field(&mut config.auto_close_session, self.auto_close_session);
+        merge_override_field(
+            &mut server_config.should_allow_beta_features,
+            self.should_allow_beta_features,
+        );
+        merge_override_field(
+            &mut server_config.should_allow_other_users,
+            self.should_allow_other_users,
+        );
+        merge_override_field(&mut server_config.remote_listen, self.remote_listen);
+        merge_override_field(
+            &mut server_config.shared_sessions_directory,
+            self.shared_sessions_directory,
+        );
+        merge_override_field(
+            &mut server_config.should_auto_close_session,
+            self.should_auto_close_session,
+        );
     }
 
-    /// Applies the viewer-owned sections' overrides onto `config`, ignoring
+    /// Applies the viewer-owned sections' overrides onto `client_config`, ignoring
     /// every session-owned section this layer carries.
-    fn apply_client(self, config: &mut ClientConfig) {
+    fn apply_to_client_config(self, client_config: &mut ClientConfig) {
         if let Some(keybindings) = self.keybindings {
-            keybindings.apply(&mut config.keybindings);
+            keybindings.apply_to_keybindings_config(&mut client_config.keybindings);
         }
         if let Some(layout) = self.layout {
-            layout.apply(&mut config.layout);
+            layout.apply_to_layout_defaults(&mut client_config.layout);
         }
         if let Some(mouse) = self.mouse {
-            mouse.apply(&mut config.mouse);
+            mouse.apply_to_mouse_config(&mut client_config.mouse);
         }
         if let Some(copy) = self.copy {
-            copy.apply(&mut config.copy);
+            copy.apply_to_copy_config(&mut client_config.copy);
         }
         if let Some(scrollback) = self.scrollback {
-            scrollback.apply_view(&mut config.scrollback);
+            scrollback.apply_view_to_scrollback(&mut client_config.scrollback);
         }
         if let Some(theme) = self.theme {
-            theme.apply(&mut config.theme);
+            theme.apply_to_theme_config(&mut client_config.theme);
         }
         if let Some(logging) = self.logging {
-            logging.apply(&mut config.logging);
+            logging.apply_to_logging_config(&mut client_config.logging);
         }
         if let Some(update) = self.update {
-            update.apply(&mut config.update);
+            update.apply_to_update_config(&mut client_config.update);
         }
-        merge_field(&mut config.image_support, self.image_support);
-        merge_field(&mut config.remote_reconnect, self.remote_reconnect);
+        merge_override_field(
+            &mut client_config.supports_image_protocols,
+            self.supports_image_protocols,
+        );
+        merge_override_field(
+            &mut client_config.should_reconnect_remote_session,
+            self.should_reconnect_remote_session,
+        );
     }
 
     /// The effective logging settings from this layer over the built-in
     /// defaults. Startup resolves logging on its own, before the full config
     /// merge, so tracing can decide whether — and how — to open the log file.
     #[must_use]
-    pub fn logging_config(&self) -> LoggingConfig {
-        let mut config = LoggingConfig::default();
+    pub fn get_logging_config(&self) -> LoggingConfig {
+        let mut logging_config = LoggingConfig::default();
         if let Some(logging) = self.logging {
-            logging.apply(&mut config);
+            logging.apply_to_logging_config(&mut logging_config);
         }
-        config
+        logging_config
     }
 }
 
@@ -266,18 +293,27 @@ impl PartialKoshiConfig {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PartialUpdateConfig {
     /// Whether an interactive launch checks for a newer release when due.
-    pub auto_check: Option<bool>,
+    pub should_auto_check_for_updates: Option<bool>,
     /// Days between startup update checks.
     pub check_interval_days: Option<u32>,
     /// Whether a pre-release build counts as a newer version.
-    pub allow_prerelease: Option<bool>,
+    pub should_allow_prerelease_updates: Option<bool>,
 }
 
 impl PartialUpdateConfig {
-    fn apply(self, target: &mut UpdateConfig) {
-        merge_field(&mut target.auto_check, self.auto_check);
-        merge_field(&mut target.check_interval_days, self.check_interval_days);
-        merge_field(&mut target.allow_prerelease, self.allow_prerelease);
+    fn apply_to_update_config(self, update_config: &mut UpdateConfig) {
+        merge_override_field(
+            &mut update_config.should_auto_check_for_updates,
+            self.should_auto_check_for_updates,
+        );
+        merge_override_field(
+            &mut update_config.check_interval_days,
+            self.check_interval_days,
+        );
+        merge_override_field(
+            &mut update_config.should_allow_prerelease_updates,
+            self.should_allow_prerelease_updates,
+        );
     }
 }
 
@@ -285,19 +321,22 @@ impl PartialUpdateConfig {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PartialPaneConfig {
     /// Minimum pane width in columns.
-    pub min_cols: Option<u16>,
+    pub minimum_column_count: Option<u16>,
     /// Minimum pane height in rows.
-    pub min_rows: Option<u16>,
+    pub minimum_row_count: Option<u16>,
     /// Blank cells between two panes that meet along a horizontal or vertical
     /// split. `0` places panes edge to edge.
-    pub gap: Option<u16>,
+    pub gap_cell_count: Option<u16>,
 }
 
 impl PartialPaneConfig {
-    fn apply(self, target: &mut PaneConfig) {
-        merge_field(&mut target.min_cols, self.min_cols);
-        merge_field(&mut target.min_rows, self.min_rows);
-        merge_field(&mut target.gap, self.gap);
+    fn apply_to_pane_config(self, pane_config: &mut PaneConfig) {
+        merge_override_field(
+            &mut pane_config.minimum_column_count,
+            self.minimum_column_count,
+        );
+        merge_override_field(&mut pane_config.minimum_row_count, self.minimum_row_count);
+        merge_override_field(&mut pane_config.gap_cell_count, self.gap_cell_count);
     }
 }
 
@@ -305,23 +344,32 @@ impl PartialPaneConfig {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PartialScrollbackConfig {
     /// Maximum retained lines per pane.
-    pub max_lines: Option<usize>,
+    pub maximum_line_count: Option<usize>,
     /// Maximum retained bytes of scrollback text per pane.
-    pub max_bytes: Option<usize>,
+    pub maximum_byte_count: Option<usize>,
     /// Whether input to a pane snaps its scrolled-up view back to live output.
-    pub scroll_on_input: Option<bool>,
+    pub should_scroll_to_input: Option<bool>,
 }
 
 impl PartialScrollbackConfig {
     /// The caps half, folded onto the session's buffer limits.
-    fn apply_limits(self, target: &mut ScrollbackLimits) {
-        merge_field(&mut target.max_lines, self.max_lines);
-        merge_field(&mut target.max_bytes, self.max_bytes);
+    fn apply_limits_to_scrollback(self, scrollback_limits: &mut ScrollbackLimits) {
+        merge_override_field(
+            &mut scrollback_limits.maximum_line_count,
+            self.maximum_line_count,
+        );
+        merge_override_field(
+            &mut scrollback_limits.maximum_byte_count,
+            self.maximum_byte_count,
+        );
     }
 
     /// The view half, folded onto one viewer's follow behavior.
-    fn apply_view(self, target: &mut ScrollbackView) {
-        merge_field(&mut target.scroll_on_input, self.scroll_on_input);
+    fn apply_view_to_scrollback(self, scrollback_view: &mut ScrollbackView) {
+        merge_override_field(
+            &mut scrollback_view.should_scroll_to_input,
+            self.should_scroll_to_input,
+        );
     }
 }
 
@@ -336,9 +384,9 @@ pub struct PartialKeybindingsConfig {
     pub max_chord_depth: Option<u8>,
     /// The prefix that `<leader>` in a binding resolves to.
     pub leader: Option<Leader>,
-    /// Per-mode bindings. When set, the whole map replaces the lower layer's;
+    /// Per-mode bindings by mode name. When set, the whole map replaces the lower layer's;
     /// per-mode keymap merging is done by the keymap-merge pass.
-    pub modes: Option<BTreeMap<ModeName, ModeBindings>>,
+    pub mode_bindings_by_name: Option<BTreeMap<ModeName, ModeBindings>>,
     /// Replacement chord for the reserved unlock. The outer `Option` is
     /// whether this layer sets the field; the inner `Option` is the value
     /// (`None` = keep the built-in unlock key).
@@ -346,14 +394,29 @@ pub struct PartialKeybindingsConfig {
 }
 
 impl PartialKeybindingsConfig {
-    fn apply(self, target: &mut KeybindingsConfig) {
-        merge_field(&mut target.chord_timeout_ms, self.chord_timeout_ms);
-        merge_field(&mut target.which_key_delay_ms, self.which_key_delay_ms);
-        merge_field(&mut target.max_chord_depth, self.max_chord_depth);
-        merge_field(&mut target.leader, self.leader);
-        // ponytail: whole-map replace; per-mode keymap merge is the keymap pass.
-        merge_field(&mut target.modes, self.modes);
-        merge_field(&mut target.unlock_alternative, self.unlock_alternative);
+    fn apply_to_keybindings_config(self, keybindings_config: &mut KeybindingsConfig) {
+        merge_override_field(
+            &mut keybindings_config.chord_timeout_ms,
+            self.chord_timeout_ms,
+        );
+        merge_override_field(
+            &mut keybindings_config.which_key_delay_ms,
+            self.which_key_delay_ms,
+        );
+        merge_override_field(
+            &mut keybindings_config.max_chord_depth,
+            self.max_chord_depth,
+        );
+        merge_override_field(&mut keybindings_config.leader, self.leader);
+        // Replace the whole mode map; per-mode keymap merging runs separately.
+        merge_override_field(
+            &mut keybindings_config.mode_bindings_by_name,
+            self.mode_bindings_by_name,
+        );
+        merge_override_field(
+            &mut keybindings_config.unlock_alternative,
+            self.unlock_alternative,
+        );
     }
 }
 
@@ -365,8 +428,11 @@ pub struct PartialLayoutDefaults {
 }
 
 impl PartialLayoutDefaults {
-    fn apply(self, target: &mut LayoutDefaults) {
-        merge_field(&mut target.new_pane_direction, self.new_pane_direction);
+    fn apply_to_layout_defaults(self, layout_defaults: &mut LayoutDefaults) {
+        merge_override_field(
+            &mut layout_defaults.new_pane_direction,
+            self.new_pane_direction,
+        );
     }
 }
 
@@ -374,18 +440,21 @@ impl PartialLayoutDefaults {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PartialMouseConfig {
     /// Whether dragging a pane border resizes it.
-    pub border_resize: Option<bool>,
+    pub can_resize_pane_border: Option<bool>,
     /// Lines scrolled per mouse wheel notch.
-    pub scroll_lines: Option<u16>,
+    pub scroll_line_count: Option<u16>,
     /// What the wheel does over a plain pane.
     pub wheel: Option<WheelScroll>,
 }
 
 impl PartialMouseConfig {
-    fn apply(self, target: &mut MouseConfig) {
-        merge_field(&mut target.border_resize, self.border_resize);
-        merge_field(&mut target.scroll_lines, self.scroll_lines);
-        merge_field(&mut target.wheel, self.wheel);
+    fn apply_to_mouse_config(self, mouse_config: &mut MouseConfig) {
+        merge_override_field(
+            &mut mouse_config.can_resize_pane_border,
+            self.can_resize_pane_border,
+        );
+        merge_override_field(&mut mouse_config.scroll_line_count, self.scroll_line_count);
+        merge_override_field(&mut mouse_config.wheel, self.wheel);
     }
 }
 
@@ -393,14 +462,14 @@ impl PartialMouseConfig {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PartialCopyConfig {
     /// Whether trailing whitespace is trimmed from copied text.
-    pub trim_trailing_whitespace: Option<bool>,
+    pub should_trim_trailing_whitespace: Option<bool>,
 }
 
 impl PartialCopyConfig {
-    fn apply(self, target: &mut CopyConfig) {
-        merge_field(
-            &mut target.trim_trailing_whitespace,
-            self.trim_trailing_whitespace,
+    fn apply_to_copy_config(self, copy_config: &mut CopyConfig) {
+        merge_override_field(
+            &mut copy_config.should_trim_trailing_whitespace,
+            self.should_trim_trailing_whitespace,
         );
     }
 }
@@ -418,10 +487,10 @@ pub struct PartialTerminalConfig {
 }
 
 impl PartialTerminalConfig {
-    fn apply(self, target: &mut TerminalConfig) {
-        merge_field(&mut target.term, self.term);
-        merge_field(&mut target.colorterm, self.colorterm);
-        merge_field(&mut target.default_shell, self.default_shell);
+    fn apply_to_terminal_config(self, terminal_config: &mut TerminalConfig) {
+        merge_override_field(&mut terminal_config.term, self.term);
+        merge_override_field(&mut terminal_config.colorterm, self.colorterm);
+        merge_override_field(&mut terminal_config.default_shell, self.default_shell);
     }
 }
 
@@ -429,16 +498,16 @@ impl PartialTerminalConfig {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PartialThemeConfig {
     /// The theme's display name.
-    pub name: Option<String>,
+    pub theme_name: Option<String>,
     /// Per-role color overrides.
     pub colors: Option<PartialColorPalette>,
 }
 
 impl PartialThemeConfig {
-    fn apply(self, target: &mut ThemeConfig) {
-        merge_field(&mut target.name, self.name);
+    fn apply_to_theme_config(self, theme_config: &mut ThemeConfig) {
+        merge_override_field(&mut theme_config.theme_name, self.theme_name);
         if let Some(colors) = self.colors {
-            colors.apply(&mut target.colors);
+            colors.apply_to_color_palette(&mut theme_config.colors);
         }
     }
 }
@@ -476,20 +545,20 @@ pub struct PartialColorPalette {
 }
 
 impl PartialColorPalette {
-    fn apply(self, target: &mut ColorPalette) {
-        merge_field(&mut target.ramp_start, self.ramp_start);
-        merge_field(&mut target.ramp_end, self.ramp_end);
-        merge_field(&mut target.on_ramp, self.on_ramp);
-        merge_field(&mut target.on_ramp_dim, self.on_ramp_dim);
-        merge_field(&mut target.accent, self.accent);
-        merge_field(&mut target.on_accent, self.on_accent);
-        merge_field(&mut target.border_focused, self.border_focused);
-        merge_field(&mut target.border_unfocused, self.border_unfocused);
-        merge_field(&mut target.border_hover, self.border_hover);
-        merge_field(&mut target.stack_header_fg, self.stack_header_fg);
-        merge_field(&mut target.stack_header_bg, self.stack_header_bg);
-        merge_field(&mut target.letterbox, self.letterbox);
-        merge_field(&mut target.bar_bg, self.bar_bg);
+    fn apply_to_color_palette(self, color_palette: &mut ColorPalette) {
+        merge_override_field(&mut color_palette.ramp_start, self.ramp_start);
+        merge_override_field(&mut color_palette.ramp_end, self.ramp_end);
+        merge_override_field(&mut color_palette.on_ramp, self.on_ramp);
+        merge_override_field(&mut color_palette.on_ramp_dim, self.on_ramp_dim);
+        merge_override_field(&mut color_palette.accent, self.accent);
+        merge_override_field(&mut color_palette.on_accent, self.on_accent);
+        merge_override_field(&mut color_palette.border_focused, self.border_focused);
+        merge_override_field(&mut color_palette.border_unfocused, self.border_unfocused);
+        merge_override_field(&mut color_palette.border_hover, self.border_hover);
+        merge_override_field(&mut color_palette.stack_header_fg, self.stack_header_fg);
+        merge_override_field(&mut color_palette.stack_header_bg, self.stack_header_bg);
+        merge_override_field(&mut color_palette.letterbox, self.letterbox);
+        merge_override_field(&mut color_palette.bar_bg, self.bar_bg);
     }
 }
 
@@ -497,18 +566,18 @@ impl PartialColorPalette {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PartialLoggingConfig {
     /// Whether koshi writes a log file.
-    pub enabled: Option<bool>,
+    pub is_enabled: Option<bool>,
     /// The lowest severity written to the log file.
     pub level: Option<LogLevel>,
     /// How each written log line is rendered.
-    pub format: Option<LogFormat>,
+    pub log_format: Option<LogFormat>,
 }
 
 impl PartialLoggingConfig {
-    fn apply(self, target: &mut LoggingConfig) {
-        merge_field(&mut target.enabled, self.enabled);
-        merge_field(&mut target.level, self.level);
-        merge_field(&mut target.format, self.format);
+    fn apply_to_logging_config(self, logging_config: &mut LoggingConfig) {
+        merge_override_field(&mut logging_config.is_enabled, self.is_enabled);
+        merge_override_field(&mut logging_config.level, self.level);
+        merge_override_field(&mut logging_config.log_format, self.log_format);
     }
 }
 

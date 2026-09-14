@@ -5,13 +5,13 @@
 //! One [`TerminalEngine`] backs one pane. PTY output arrives in read-sized
 //! chunks that can split an escape sequence or a multi-byte UTF-8 code point
 //! at any byte; the parser carries such a partial decode from one chunk to
-//! the next. Each [`advance`](TerminalEngine::advance) call also hands back
+//! the next. Each [`process_pty_output`](TerminalEngine::process_pty_output) call also hands back
 //! the reply bytes the chunk's device queries produced, for the caller to
 //! write into the PTY.
 //!
 //! The engine also keeps the bytes that put another parser where this one
-//! stands — see [`undecoded`](TerminalEngine::undecoded) and
-//! [`graphics_undecoded`](TerminalEngine::graphics_undecoded). A process-image
+//! stands — see [`undecoded_terminal_bytes`](TerminalEngine::undecoded_terminal_bytes) and
+//! [`undecoded_graphics_bytes`](TerminalEngine::undecoded_graphics_bytes). A process-image
 //! swap carries those bytes to the next image's parsers, and a sequence the
 //! swap cut in half completes there. Graphics wrapper nesting and a transfer
 //! that cannot be rebuilt within 64 KiB use the complete transport state.
@@ -27,75 +27,76 @@ use serde::de::{self, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 
 pub use crate::graphics::GraphicsTransportState;
-use crate::graphics::{GraphicsError, GraphicsParser, ImageRecord, MAX_IMAGE_BYTES};
+use crate::graphics::{GraphicsError, GraphicsParser, ImageRecord, MAX_IMAGE_BYTE_COUNT};
 use crate::scrollback::ScrollbackLimit;
 use crate::state::{ShellIntegrationFact, TerminalState};
 
 /// The byte every escape sequence starts with: `ESC`, `0x1b`.
-const ESCAPE: u8 = 0x1b;
+const ESCAPE_BYTE: u8 = 0x1b;
 
 /// `CAN`, `0x18`: abandons the sequence in progress from any parser state.
-const CANCEL: u8 = 0x18;
+const CANCEL_BYTE: u8 = 0x18;
 
 /// `SUB`, `0x1a`: abandons the sequence in progress from any parser state.
-const SUBSTITUTE: u8 = 0x1a;
+const SUBSTITUTE_BYTE: u8 = 0x1a;
 
 /// The second byte of `ESC X`, which opens a start of string.
-const START_OF_STRING: u8 = 0x58;
+const START_OF_STRING_BYTE: u8 = 0x58;
 
 /// The second byte of `ESC ^`, which opens a privacy message.
-const PRIVACY_MESSAGE: u8 = 0x5e;
+const PRIVACY_MESSAGE_BYTE: u8 = 0x5e;
 
 /// The second byte of `ESC _`, which opens an application program command.
-const APPLICATION_COMMAND: u8 = 0x5f;
+const APPLICATION_COMMAND_BYTE: u8 = 0x5f;
 
 /// The bytes one of those three openings takes: `ESC` and the byte after it.
-const STRING_OPENING: usize = 2;
+const STRING_OPENING_BYTE_COUNT: usize = 2;
 
 /// The most bytes of a UTF-8 code point that can be missing at the end of a
 /// chunk: a four-byte code point whose last byte has not arrived.
-const CODE_POINT_TAIL: usize = 3;
+const CODE_POINT_TAIL_BYTE_COUNT: usize = 3;
 
 /// The most bytes [`undecoded`](TerminalEngine::undecoded) holds, 64 KiB. The
 /// engine stops holding a sequence that passes this size and reports nothing
 /// until that sequence ends.
-pub(crate) const MAX_UNDECODED: usize = 64 * 1024;
+pub(crate) const MAX_UNDECODED_BYTE_COUNT: usize = 64 * 1024;
 
 /// The largest number of image events held before the caller drains them.
-pub const MAX_GRAPHICS_EVENTS: usize = 64;
+pub const MAX_GRAPHICS_EVENT_COUNT: usize = 64;
 
-/// The largest batch returned by [`TerminalEngine::take_graphics`], including
+/// The largest batch returned by [`TerminalEngine::take_graphics_events`], including
 /// one queue-full report.
-pub const MAX_GRAPHICS_EVENT_BATCH: usize = MAX_GRAPHICS_EVENTS + 1;
+pub const MAX_GRAPHICS_EVENT_BATCH_COUNT: usize = MAX_GRAPHICS_EVENT_COUNT + 1;
 
 /// One ordered image event produced by the terminal decoder.
 pub type GraphicsEvent = Result<ImageRecord, GraphicsError>;
 
 /// The maximum time an open synchronized-output update remains buffered.
-pub const SYNCHRONIZED_OUTPUT_TIMEOUT: Duration = Duration::from_millis(150);
+pub const SYNCHRONIZED_OUTPUT_TIMEOUT_DURATION: Duration = Duration::from_millis(150);
 
 /// The most normalized terminal bytes held by one synchronized-output update.
-pub const MAX_SYNCHRONIZED_OUTPUT_BYTES: usize = 0x20_0000;
+pub const MAX_SYNCHRONIZED_OUTPUT_BYTE_COUNT: usize = 0x20_0000;
 
-const BEGIN_SYNCHRONIZED_OUTPUT: &[u8; 8] = b"\x1b[?2026h";
-const END_SYNCHRONIZED_OUTPUT: &[u8; 8] = b"\x1b[?2026l";
+const BEGIN_SYNCHRONIZED_OUTPUT_BYTES: &[u8; 8] = b"\x1b[?2026h";
+const END_SYNCHRONIZED_OUTPUT_BYTES: &[u8; 8] = b"\x1b[?2026l";
 
 /// Synchronized-output bytes and deadline carried across a process-image swap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SynchronizedOutputTransport {
     terminal_input: C1InputNormalizer,
-    bytes: Vec<u8>,
+    #[serde(rename = "bytes")]
+    normalized_bytes: Vec<u8>,
     deadline: Option<SystemTime>,
 }
 
 impl SynchronizedOutputTransport {
     /// The normalized bytes held inside the open synchronized update.
-    pub fn bytes(&self) -> &[u8] {
-        &self.bytes
+    pub fn get_normalized_bytes(&self) -> &[u8] {
+        &self.normalized_bytes
     }
 
     /// The wall-clock deadline for releasing the open update.
-    pub fn deadline(&self) -> Option<SystemTime> {
+    pub fn get_deadline(&self) -> Option<SystemTime> {
         self.deadline
     }
 }
@@ -106,41 +107,47 @@ impl<'de> Deserialize<'de> for SynchronizedOutputTransport {
         D: Deserializer<'de>,
     {
         #[derive(Deserialize)]
-        struct Encoded {
+        struct SerializedSynchronizedOutputTransport {
             terminal_input: C1InputNormalizer,
             #[serde(deserialize_with = "deserialize_synchronized_output_bytes")]
-            bytes: Vec<u8>,
+            #[serde(rename = "bytes")]
+            normalized_bytes: Vec<u8>,
             deadline: Option<SystemTime>,
         }
 
-        let encoded = Encoded::deserialize(deserializer)?;
-        let terminal_input = encoded.terminal_input;
-        if terminal_input.utf8_continuations > 3 {
+        let serialized_transport =
+            SerializedSynchronizedOutputTransport::deserialize(deserializer)?;
+        let terminal_input = serialized_transport.terminal_input;
+        if terminal_input.remaining_utf8_continuation_count > 3 {
             return Err(de::Error::custom(
                 "terminal-input UTF-8 continuation count is invalid",
             ));
         }
-        if terminal_input.tail_len > terminal_input.tail.len()
-            || terminal_input.tail_next >= terminal_input.tail.len()
-            || (terminal_input.tail_len < terminal_input.tail.len()
-                && terminal_input.tail_next != terminal_input.tail_len)
+        if terminal_input.trailing_byte_count > terminal_input.trailing_bytes.len()
+            || terminal_input.trailing_start_index >= terminal_input.trailing_bytes.len()
+            || (terminal_input.trailing_byte_count < terminal_input.trailing_bytes.len()
+                && terminal_input.trailing_start_index != terminal_input.trailing_byte_count)
         {
             return Err(de::Error::custom("terminal-input scanner tail is invalid"));
         }
-        if encoded.deadline.is_some() && encoded.bytes.is_empty() {
+        if serialized_transport.deadline.is_some()
+            && serialized_transport.normalized_bytes.is_empty()
+        {
             return Err(de::Error::custom(
                 "synchronized-output deadline has no bytes",
             ));
         }
-        if encoded.deadline.is_none() && !encoded.bytes.is_empty() {
+        if serialized_transport.deadline.is_none()
+            && !serialized_transport.normalized_bytes.is_empty()
+        {
             return Err(de::Error::custom(
                 "synchronized-output bytes have no deadline",
             ));
         }
         Ok(Self {
             terminal_input,
-            bytes: encoded.bytes,
-            deadline: encoded.deadline,
+            normalized_bytes: serialized_transport.normalized_bytes,
+            deadline: serialized_transport.deadline,
         })
     }
 }
@@ -149,37 +156,37 @@ fn deserialize_synchronized_output_bytes<'de, D>(deserializer: D) -> Result<Vec<
 where
     D: Deserializer<'de>,
 {
-    struct BytesVisitor;
+    struct SynchronizedOutputBytesVisitor;
 
-    impl<'de> Visitor<'de> for BytesVisitor {
+    impl<'de> Visitor<'de> for SynchronizedOutputBytesVisitor {
         type Value = Vec<u8>;
 
         fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             formatter.write_str("at most 2097152 synchronized-output bytes")
         }
 
-        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+        fn visit_seq<A>(self, mut byte_sequence: A) -> Result<Self::Value, A::Error>
         where
             A: SeqAccess<'de>,
         {
-            let capacity = sequence
+            let byte_capacity = byte_sequence
                 .size_hint()
                 .unwrap_or(0)
-                .min(MAX_SYNCHRONIZED_OUTPUT_BYTES);
-            let mut bytes = Vec::with_capacity(capacity);
-            while let Some(byte) = sequence.next_element::<u8>()? {
-                if bytes.len() == MAX_SYNCHRONIZED_OUTPUT_BYTES {
+                .min(MAX_SYNCHRONIZED_OUTPUT_BYTE_COUNT);
+            let mut normalized_bytes = Vec::with_capacity(byte_capacity);
+            while let Some(normalized_byte) = byte_sequence.next_element::<u8>()? {
+                if normalized_bytes.len() == MAX_SYNCHRONIZED_OUTPUT_BYTE_COUNT {
                     return Err(de::Error::custom(
                         "synchronized-output bytes exceed 2097152",
                     ));
                 }
-                bytes.push(byte);
+                normalized_bytes.push(normalized_byte);
             }
-            Ok(bytes)
+            Ok(normalized_bytes)
         }
     }
 
-    deserializer.deserialize_seq(BytesVisitor)
+    deserializer.deserialize_seq(SynchronizedOutputBytesVisitor)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -190,175 +197,215 @@ enum SynchronizedControl {
 
 #[derive(Default)]
 struct SynchronizedOutput {
-    bytes: Vec<u8>,
+    buffered_bytes: Vec<u8>,
     deadline: Option<Instant>,
 }
 
 impl SynchronizedOutput {
-    fn advance<F>(
+    fn process_normalized_bytes<F>(
         &mut self,
-        bytes: &[u8],
-        controls: &[(usize, SynchronizedControl)],
-        now: Instant,
-        mut release: F,
+        normalized_input_bytes: &[u8],
+        synchronized_controls: &[(usize, SynchronizedControl)],
+        monotonic_timestamp: Instant,
+        mut release_bytes: F,
     ) -> bool
     where
         F: FnMut(&[u8]),
     {
-        let mut released = if self.deadline.is_some_and(|deadline| now >= deadline) {
-            self.release_all(&mut release)
+        let mut has_released_bytes = if self
+            .deadline
+            .is_some_and(|deadline| monotonic_timestamp >= deadline)
+        {
+            self.release_buffered_bytes(&mut release_bytes)
         } else {
             false
         };
-        let mut at = 0;
-        let mut control_at = 0;
-        while at < bytes.len() {
+        let mut input_byte_index = 0;
+        let mut next_control_index = 0;
+        while input_byte_index < normalized_input_bytes.len() {
             if self.deadline.is_none() {
-                let Some((index, end)) = controls[control_at..].iter().enumerate().find_map(
-                    |(index, (end, control))| {
-                        (*control == SynchronizedControl::Begin && *end > at)
-                            .then_some((control_at + index, *end))
-                    },
-                ) else {
-                    release(&bytes[at..]);
-                    return released || at < bytes.len();
+                let Some((control_index, control_end_index)) = synchronized_controls
+                    [next_control_index..]
+                    .iter()
+                    .enumerate()
+                    .find_map(|(relative_control_index, (control_end_index, control))| {
+                        (*control == SynchronizedControl::Begin
+                            && *control_end_index > input_byte_index)
+                            .then_some((
+                                next_control_index + relative_control_index,
+                                *control_end_index,
+                            ))
+                    })
+                else {
+                    release_bytes(&normalized_input_bytes[input_byte_index..]);
+                    return has_released_bytes || input_byte_index < normalized_input_bytes.len();
                 };
-                let held = BEGIN_SYNCHRONIZED_OUTPUT.len().min(end - at);
-                let direct_end = end - held;
-                release(&bytes[at..direct_end]);
-                released |= at < direct_end;
-                if self.bytes.try_reserve(held).is_err() {
-                    release(&bytes[direct_end..end]);
-                    released = true;
+                let held_byte_count = BEGIN_SYNCHRONIZED_OUTPUT_BYTES
+                    .len()
+                    .min(control_end_index - input_byte_index);
+                let direct_release_end_index = control_end_index - held_byte_count;
+                release_bytes(&normalized_input_bytes[input_byte_index..direct_release_end_index]);
+                has_released_bytes |= input_byte_index < direct_release_end_index;
+                if self.buffered_bytes.try_reserve(held_byte_count).is_err() {
+                    release_bytes(
+                        &normalized_input_bytes[direct_release_end_index..control_end_index],
+                    );
+                    has_released_bytes = true;
                 } else {
-                    self.bytes.extend_from_slice(&bytes[direct_end..end]);
-                    self.deadline = Some(now + SYNCHRONIZED_OUTPUT_TIMEOUT);
+                    self.buffered_bytes.extend_from_slice(
+                        &normalized_input_bytes[direct_release_end_index..control_end_index],
+                    );
+                    self.deadline =
+                        Some(monotonic_timestamp + SYNCHRONIZED_OUTPUT_TIMEOUT_DURATION);
                 }
-                at = end;
-                control_at = index + 1;
+                input_byte_index = control_end_index;
+                next_control_index = control_index + 1;
                 continue;
             }
 
-            let available = MAX_SYNCHRONIZED_OUTPUT_BYTES - self.bytes.len();
-            let read = available.min(bytes.len() - at);
-            if self.bytes.try_reserve(read).is_err() {
-                released |= self.release_all(&mut release);
+            let available_byte_count =
+                MAX_SYNCHRONIZED_OUTPUT_BYTE_COUNT - self.buffered_bytes.len();
+            let read_byte_count =
+                available_byte_count.min(normalized_input_bytes.len() - input_byte_index);
+            if self.buffered_bytes.try_reserve(read_byte_count).is_err() {
+                has_released_bytes |= self.release_buffered_bytes(&mut release_bytes);
                 continue;
             }
-            let buffered_before = self.bytes.len();
-            let end = at + read;
-            self.bytes.extend_from_slice(&bytes[at..end]);
-            let mut last_begin = None;
-            let mut last_end = None;
-            while let Some((control_end, control)) = controls.get(control_at).copied() {
-                if control_end > end {
+            let buffered_byte_count = self.buffered_bytes.len();
+            let input_end_index = input_byte_index + read_byte_count;
+            self.buffered_bytes
+                .extend_from_slice(&normalized_input_bytes[input_byte_index..input_end_index]);
+            let mut last_begin_index = None;
+            let mut last_end_index = None;
+            while let Some((control_end_index, control)) =
+                synchronized_controls.get(next_control_index).copied()
+            {
+                if control_end_index > input_end_index {
                     break;
                 }
-                if control_end > at {
-                    let start = (buffered_before + control_end - at)
-                        .checked_sub(BEGIN_SYNCHRONIZED_OUTPUT.len())
+                if control_end_index > input_byte_index {
+                    let control_start_index = (buffered_byte_count + control_end_index
+                        - input_byte_index)
+                        .checked_sub(BEGIN_SYNCHRONIZED_OUTPUT_BYTES.len())
                         .expect("a synchronized control starts in held bytes");
                     match control {
-                        SynchronizedControl::Begin => last_begin = Some(start),
-                        SynchronizedControl::End => last_end = Some(start),
+                        SynchronizedControl::Begin => last_begin_index = Some(control_start_index),
+                        SynchronizedControl::End => last_end_index = Some(control_start_index),
                     }
                 }
-                control_at += 1;
+                next_control_index += 1;
             }
-            self.apply_buffered_controls(last_begin, last_end, now, &mut release, &mut released);
-            at = end;
+            self.apply_buffered_controls(
+                last_begin_index,
+                last_end_index,
+                monotonic_timestamp,
+                &mut release_bytes,
+                &mut has_released_bytes,
+            );
+            input_byte_index = input_end_index;
 
-            if self.deadline.is_some() && self.bytes.len() == MAX_SYNCHRONIZED_OUTPUT_BYTES {
-                released |= self.release_all(&mut release);
+            if self.deadline.is_some()
+                && self.buffered_bytes.len() == MAX_SYNCHRONIZED_OUTPUT_BYTE_COUNT
+            {
+                has_released_bytes |= self.release_buffered_bytes(&mut release_bytes);
             }
         }
-        released
+        has_released_bytes
     }
 
     fn apply_buffered_controls<F>(
         &mut self,
-        last_begin: Option<usize>,
-        last_end: Option<usize>,
-        now: Instant,
-        release: &mut F,
-        released: &mut bool,
+        last_begin_index: Option<usize>,
+        last_end_index: Option<usize>,
+        monotonic_timestamp: Instant,
+        release_bytes: &mut F,
+        has_released_bytes: &mut bool,
     ) where
         F: FnMut(&[u8]),
     {
-        let Some(end) = last_end else {
-            if last_begin.is_some() {
-                self.deadline = Some(now + SYNCHRONIZED_OUTPUT_TIMEOUT);
+        let Some(end_index) = last_end_index else {
+            if last_begin_index.is_some() {
+                self.deadline = Some(monotonic_timestamp + SYNCHRONIZED_OUTPUT_TIMEOUT_DURATION);
             }
             return;
         };
-        if let Some(begin) = last_begin.filter(|begin| *begin > end) {
-            let retained = self.bytes.split_off(begin);
-            let complete = mem::replace(&mut self.bytes, retained);
-            release(&complete);
-            *released = true;
-            self.deadline = Some(now + SYNCHRONIZED_OUTPUT_TIMEOUT);
+        if let Some(begin_index) = last_begin_index.filter(|begin_index| *begin_index > end_index) {
+            let retained_bytes = self.buffered_bytes.split_off(begin_index);
+            let complete_bytes = mem::replace(&mut self.buffered_bytes, retained_bytes);
+            release_bytes(&complete_bytes);
+            *has_released_bytes = true;
+            self.deadline = Some(monotonic_timestamp + SYNCHRONIZED_OUTPUT_TIMEOUT_DURATION);
         } else {
-            *released |= self.release_all(release);
+            *has_released_bytes |= self.release_buffered_bytes(release_bytes);
         }
     }
 
-    fn release_all<F>(&mut self, release: &mut F) -> bool
+    fn release_buffered_bytes<F>(&mut self, release_bytes: &mut F) -> bool
     where
         F: FnMut(&[u8]),
     {
         self.deadline = None;
-        if self.bytes.is_empty() {
+        if self.buffered_bytes.is_empty() {
             return false;
         }
-        let complete = mem::take(&mut self.bytes);
-        release(&complete);
+        let released_bytes = mem::take(&mut self.buffered_bytes);
+        release_bytes(&released_bytes);
         true
     }
 
-    fn expire<F>(&mut self, now: Instant, mut release: F) -> bool
+    fn release_expired_bytes<F>(
+        &mut self,
+        monotonic_timestamp: Instant,
+        mut release_bytes: F,
+    ) -> bool
     where
         F: FnMut(&[u8]),
     {
-        if self.deadline.is_none_or(|deadline| now < deadline) {
+        if self
+            .deadline
+            .is_none_or(|deadline| monotonic_timestamp < deadline)
+        {
             return false;
         }
-        self.release_all(&mut release)
+        self.release_buffered_bytes(&mut release_bytes)
     }
 
-    fn delay(&self, now: Instant) -> Option<Duration> {
+    fn compute_release_delay(&self, monotonic_timestamp: Instant) -> Option<Duration> {
         self.deadline
-            .map(|deadline| deadline.saturating_duration_since(now))
+            .map(|deadline| deadline.saturating_duration_since(monotonic_timestamp))
     }
 
-    fn transport(
+    fn build_synchronized_output_transport(
         &self,
-        now: Instant,
-        wall_now: SystemTime,
+        monotonic_timestamp: Instant,
+        wall_clock_timestamp: SystemTime,
         terminal_input: C1InputNormalizer,
     ) -> Option<SynchronizedOutputTransport> {
-        if self.deadline.is_none() && !terminal_input.requires_transport() {
+        if self.deadline.is_none() && !terminal_input.is_transport_required() {
             return None;
         }
         Some(SynchronizedOutputTransport {
             terminal_input,
-            bytes: self.bytes.clone(),
-            deadline: self.delay(now).map(|delay| wall_now + delay),
+            normalized_bytes: self.buffered_bytes.clone(),
+            deadline: self
+                .compute_release_delay(monotonic_timestamp)
+                .map(|delay| wall_clock_timestamp + delay),
         })
     }
 
-    fn restore(
+    fn restore_synchronized_output_transport(
         &mut self,
-        transport: SynchronizedOutputTransport,
-        now: Instant,
-        wall_now: SystemTime,
+        synchronized_output_transport: SynchronizedOutputTransport,
+        monotonic_timestamp: Instant,
+        wall_clock_timestamp: SystemTime,
     ) {
-        self.bytes = transport.bytes;
-        self.deadline = transport.deadline.map(|deadline| {
-            let remaining = deadline
-                .duration_since(wall_now)
+        self.buffered_bytes = synchronized_output_transport.normalized_bytes;
+        self.deadline = synchronized_output_transport.deadline.map(|deadline| {
+            let remaining_duration = deadline
+                .duration_since(wall_clock_timestamp)
                 .unwrap_or(Duration::ZERO)
-                .min(SYNCHRONIZED_OUTPUT_TIMEOUT);
-            now + remaining
+                .min(SYNCHRONIZED_OUTPUT_TIMEOUT_DURATION);
+            monotonic_timestamp + remaining_duration
         });
     }
 }
@@ -383,202 +430,254 @@ enum C1InputState {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct C1InputNormalizer {
-    state: C1InputState,
-    utf8_continuations: u8,
-    tail: [u8; 8],
-    tail_len: usize,
-    tail_next: usize,
+    #[serde(rename = "state")]
+    input_state: C1InputState,
+    #[serde(rename = "utf8_continuations")]
+    remaining_utf8_continuation_count: u8,
+    #[serde(rename = "tail")]
+    trailing_bytes: [u8; 8],
+    #[serde(rename = "tail_len")]
+    trailing_byte_count: usize,
+    #[serde(rename = "tail_next")]
+    trailing_start_index: usize,
 }
 
-struct NormalizedInput<'a> {
-    bytes: Cow<'a, [u8]>,
-    controls: Vec<(usize, SynchronizedControl)>,
+struct NormalizedTerminalInput<'a> {
+    normalized_bytes: Cow<'a, [u8]>,
+    synchronized_controls: Vec<(usize, SynchronizedControl)>,
 }
 
-impl<'a> NormalizedInput<'a> {
-    fn bytes(&self) -> &[u8] {
-        &self.bytes
+impl<'a> NormalizedTerminalInput<'a> {
+    fn get_normalized_bytes(&self) -> &[u8] {
+        &self.normalized_bytes
     }
 }
 
-fn without_terminal_inert<'a>(bytes: &'a [u8], ranges: &[Range<usize>]) -> Cow<'a, [u8]> {
-    if ranges.is_empty() {
-        return Cow::Borrowed(bytes);
+fn remove_terminal_inert_bytes<'a>(
+    input_bytes: &'a [u8],
+    terminal_inert_ranges: &[Range<usize>],
+) -> Cow<'a, [u8]> {
+    if terminal_inert_ranges.is_empty() {
+        return Cow::Borrowed(input_bytes);
     }
 
-    let removed = ranges.iter().map(std::ops::Range::len).sum::<usize>();
-    let mut compacted = Vec::with_capacity(bytes.len() - removed);
-    let mut at = 0;
-    for range in ranges {
-        debug_assert!(at <= range.start && range.start <= range.end && range.end <= bytes.len());
-        compacted.extend_from_slice(&bytes[at..range.start]);
-        at = range.end;
-    }
-    compacted.extend_from_slice(&bytes[at..]);
-    Cow::Owned(compacted)
-}
-
-fn without_terminal_inert_offset(raw_end: usize, ranges: &[Range<usize>]) -> usize {
-    let removed = ranges
+    let removed_byte_count = terminal_inert_ranges
         .iter()
-        .take_while(|range| range.start < raw_end)
-        .map(|range| range.end.min(raw_end) - range.start)
+        .map(std::ops::Range::len)
         .sum::<usize>();
-    raw_end - removed
+    let mut compacted_bytes = Vec::with_capacity(input_bytes.len() - removed_byte_count);
+    let mut input_byte_index = 0;
+    for inert_range in terminal_inert_ranges {
+        debug_assert!(
+            input_byte_index <= inert_range.start
+                && inert_range.start <= inert_range.end
+                && inert_range.end <= input_bytes.len()
+        );
+        compacted_bytes.extend_from_slice(&input_bytes[input_byte_index..inert_range.start]);
+        input_byte_index = inert_range.end;
+    }
+    compacted_bytes.extend_from_slice(&input_bytes[input_byte_index..]);
+    Cow::Owned(compacted_bytes)
+}
+
+fn compute_terminal_byte_offset_without_inert_ranges(
+    raw_end_byte_index: usize,
+    terminal_inert_ranges: &[Range<usize>],
+) -> usize {
+    let removed_byte_count = terminal_inert_ranges
+        .iter()
+        .take_while(|range| range.start < raw_end_byte_index)
+        .map(|range| range.end.min(raw_end_byte_index) - range.start)
+        .sum::<usize>();
+    raw_end_byte_index - removed_byte_count
 }
 
 impl C1InputNormalizer {
-    fn requires_transport(&self) -> bool {
-        self.state != C1InputState::Ground || self.utf8_continuations != 0
+    fn is_transport_required(&self) -> bool {
+        self.input_state != C1InputState::Ground || self.remaining_utf8_continuation_count != 0
     }
 
-    fn normalize<'a>(&mut self, bytes: &'a [u8]) -> NormalizedInput<'a> {
-        let mut normalized: Option<Vec<u8>> = None;
-        let mut controls = Vec::new();
-        let mut index = 0;
+    fn normalize_terminal_input_bytes<'a>(
+        &mut self,
+        terminal_input_bytes: &'a [u8],
+    ) -> NormalizedTerminalInput<'a> {
+        let mut normalized_bytes: Option<Vec<u8>> = None;
+        let mut synchronized_controls = Vec::new();
+        let mut byte_index = 0;
 
-        while index < bytes.len() {
-            let plain = self.plain_run(&bytes[index..]);
-            if plain != 0 {
-                self.push_tail(&bytes[index..index + plain]);
-                if let Some(buffer) = normalized.as_mut() {
-                    buffer.extend_from_slice(&bytes[index..index + plain]);
+        while byte_index < terminal_input_bytes.len() {
+            let plain_byte_count =
+                self.get_plain_terminal_input_byte_count(&terminal_input_bytes[byte_index..]);
+            if plain_byte_count != 0 {
+                self.push_trailing_bytes(
+                    &terminal_input_bytes[byte_index..byte_index + plain_byte_count],
+                );
+                if let Some(normalized_byte_buffer) = normalized_bytes.as_mut() {
+                    normalized_byte_buffer.extend_from_slice(
+                        &terminal_input_bytes[byte_index..byte_index + plain_byte_count],
+                    );
                 }
-                index += plain;
+                byte_index += plain_byte_count;
                 continue;
             }
 
-            let byte = bytes[index];
-            let (replacement, control) = self.replacement(byte);
-            if let Some(buffer) = normalized.as_mut() {
-                if let Some(replacement) = replacement {
-                    buffer.extend_from_slice(replacement);
+            let terminal_input_byte = terminal_input_bytes[byte_index];
+            let (replacement_bytes, synchronized_control) =
+                self.normalize_terminal_input_byte(terminal_input_byte);
+            if let Some(normalized_byte_buffer) = normalized_bytes.as_mut() {
+                if let Some(replacement_bytes) = replacement_bytes {
+                    normalized_byte_buffer.extend_from_slice(replacement_bytes);
                 } else {
-                    buffer.push(byte);
+                    normalized_byte_buffer.push(terminal_input_byte);
                 }
-            } else if let Some(replacement) = replacement {
-                let mut buffer = Vec::with_capacity(bytes.len().saturating_add(1));
-                buffer.extend_from_slice(&bytes[..index]);
-                buffer.extend_from_slice(replacement);
-                normalized = Some(buffer);
+            } else if let Some(replacement_bytes) = replacement_bytes {
+                let mut normalized_byte_buffer =
+                    Vec::with_capacity(terminal_input_bytes.len().saturating_add(1));
+                normalized_byte_buffer.extend_from_slice(&terminal_input_bytes[..byte_index]);
+                normalized_byte_buffer.extend_from_slice(replacement_bytes);
+                normalized_bytes = Some(normalized_byte_buffer);
             }
-            let output = replacement.unwrap_or(std::slice::from_ref(&byte));
-            self.push_tail(output);
-            if let Some(control) = control.filter(|control| self.tail_matches(*control)) {
-                let end = normalized.as_ref().map_or(index + 1, Vec::len);
-                controls.push((end, control));
+            let tail_bytes =
+                replacement_bytes.unwrap_or(std::slice::from_ref(&terminal_input_byte));
+            self.push_trailing_bytes(tail_bytes);
+            if let Some(synchronized_control) = synchronized_control
+                .filter(|control| self.is_synchronized_control_in_trailing_bytes(*control))
+            {
+                let control_end_byte_index =
+                    normalized_bytes.as_ref().map_or(byte_index + 1, Vec::len);
+                synchronized_controls.push((control_end_byte_index, synchronized_control));
             }
-            index += 1;
+            byte_index += 1;
         }
 
-        match normalized {
-            Some(bytes) => NormalizedInput {
-                bytes: Cow::Owned(bytes),
-                controls,
+        match normalized_bytes {
+            Some(normalized_bytes) => NormalizedTerminalInput {
+                normalized_bytes: Cow::Owned(normalized_bytes),
+                synchronized_controls,
             },
-            None => NormalizedInput {
-                bytes: Cow::Borrowed(bytes),
-                controls,
+            None => NormalizedTerminalInput {
+                normalized_bytes: Cow::Borrowed(terminal_input_bytes),
+                synchronized_controls,
             },
         }
     }
 
     /// Return the leading bytes that cannot change the normalizer state.
-    fn plain_run(&self, bytes: &[u8]) -> usize {
-        if self.utf8_continuations != 0 {
+    fn get_plain_terminal_input_byte_count(&self, terminal_input_bytes: &[u8]) -> usize {
+        if self.remaining_utf8_continuation_count != 0 {
             return 0;
         }
-        let changes_state = |byte: u8| match self.state {
-            C1InputState::Ground => byte == ESCAPE || byte >= 0x80,
-            C1InputState::String(kind) => {
-                matches!(byte, CANCEL | SUBSTITUTE | ESCAPE)
-                    || byte >= 0x80
-                    || (byte == 0x07 && matches!(kind, C1StringKind::Osc))
+        let changes_input_state = |terminal_input_byte: u8| match self.input_state {
+            C1InputState::Ground => {
+                terminal_input_byte == ESCAPE_BYTE || terminal_input_byte >= 0x80
+            }
+            C1InputState::String(string_kind) => {
+                matches!(
+                    terminal_input_byte,
+                    CANCEL_BYTE | SUBSTITUTE_BYTE | ESCAPE_BYTE
+                ) || terminal_input_byte >= 0x80
+                    || (terminal_input_byte == 0x07 && matches!(string_kind, C1StringKind::Osc))
             }
             C1InputState::Escape
             | C1InputState::EscapeIntermediate
             | C1InputState::Csi
             | C1InputState::StringEscape(_) => true,
         };
-        bytes
+        terminal_input_bytes
             .iter()
-            .position(|byte| changes_state(*byte))
-            .unwrap_or(bytes.len())
+            .position(|terminal_input_byte| changes_input_state(*terminal_input_byte))
+            .unwrap_or(terminal_input_bytes.len())
     }
 
-    fn replacement(&mut self, byte: u8) -> (Option<&'static [u8]>, Option<SynchronizedControl>) {
-        if matches!(self.state, C1InputState::Ground | C1InputState::String(_)) {
-            if self.utf8_continuations != 0 {
-                if (byte & 0xc0) == 0x80 {
-                    self.utf8_continuations -= 1;
+    fn normalize_terminal_input_byte(
+        &mut self,
+        terminal_input_byte: u8,
+    ) -> (Option<&'static [u8]>, Option<SynchronizedControl>) {
+        if matches!(
+            self.input_state,
+            C1InputState::Ground | C1InputState::String(_)
+        ) {
+            if self.remaining_utf8_continuation_count != 0 {
+                if (terminal_input_byte & 0xc0) == 0x80 {
+                    self.remaining_utf8_continuation_count -= 1;
                     return (None, None);
                 }
-                self.utf8_continuations = 0;
+                self.remaining_utf8_continuation_count = 0;
             }
-            self.utf8_continuations = match byte {
+            self.remaining_utf8_continuation_count = match terminal_input_byte {
                 0xc2..=0xdf => 1,
                 0xe0..=0xef => 2,
                 0xf0..=0xf4 => 3,
                 _ => 0,
             };
-            if self.utf8_continuations != 0 {
+            if self.remaining_utf8_continuation_count != 0 {
                 return (None, None);
             }
         } else {
-            self.utf8_continuations = 0;
+            self.remaining_utf8_continuation_count = 0;
         }
 
-        match byte {
-            0x90 if matches!(self.state, C1InputState::Ground) => {
-                self.state = C1InputState::String(C1StringKind::Dcs);
+        match terminal_input_byte {
+            0x90 if matches!(self.input_state, C1InputState::Ground) => {
+                self.input_state = C1InputState::String(C1StringKind::Dcs);
                 (Some(b"\x1bP"), None)
             }
-            0x98 | 0x9e if matches!(self.state, C1InputState::Ground) => {
-                self.state = C1InputState::String(C1StringKind::Dropped);
-                (Some(if byte == 0x98 { b"\x1bX" } else { b"\x1b^" }), None)
+            0x98 | 0x9e if matches!(self.input_state, C1InputState::Ground) => {
+                self.input_state = C1InputState::String(C1StringKind::Dropped);
+                (
+                    Some(if terminal_input_byte == 0x98 {
+                        b"\x1bX"
+                    } else {
+                        b"\x1b^"
+                    }),
+                    None,
+                )
             }
-            0x9d if matches!(self.state, C1InputState::Ground) => {
-                self.state = C1InputState::String(C1StringKind::Osc);
+            0x9d if matches!(self.input_state, C1InputState::Ground) => {
+                self.input_state = C1InputState::String(C1StringKind::Osc);
                 (Some(b"\x1b]"), None)
             }
-            0x9b if matches!(self.state, C1InputState::Ground) => {
-                self.state = C1InputState::Csi;
+            0x9b if matches!(self.input_state, C1InputState::Ground) => {
+                self.input_state = C1InputState::Csi;
                 (Some(b"\x1b["), None)
             }
-            0x9f if matches!(self.state, C1InputState::Ground) => {
-                self.state = C1InputState::String(C1StringKind::Dropped);
+            0x9f if matches!(self.input_state, C1InputState::Ground) => {
+                self.input_state = C1InputState::String(C1StringKind::Dropped);
                 (Some(b"\x1b_"), None)
             }
             0x9c if matches!(
-                self.state,
+                self.input_state,
                 C1InputState::String(_) | C1InputState::StringEscape(_)
             ) =>
             {
-                self.state = C1InputState::Ground;
+                self.input_state = C1InputState::Ground;
                 (Some(b"\x1b\\"), None)
             }
-            _ => (None, self.advance_state(byte)),
+            _ => (None, self.advance_terminal_input_state(terminal_input_byte)),
         }
     }
 
-    fn advance_state(&mut self, byte: u8) -> Option<SynchronizedControl> {
+    fn advance_terminal_input_state(
+        &mut self,
+        terminal_input_byte: u8,
+    ) -> Option<SynchronizedControl> {
         let mut control = None;
-        self.state = match self.state {
-            C1InputState::Ground => match byte {
-                ESCAPE => C1InputState::Escape,
+        self.input_state = match self.input_state {
+            C1InputState::Ground => match terminal_input_byte {
+                ESCAPE_BYTE => C1InputState::Escape,
                 _ => C1InputState::Ground,
             },
-            C1InputState::Escape => Self::advance_escape(byte),
-            C1InputState::EscapeIntermediate => match byte {
-                CANCEL | SUBSTITUTE | 0x30..=0x7e => C1InputState::Ground,
-                ESCAPE => C1InputState::Escape,
+            C1InputState::Escape => Self::advance_escape(terminal_input_byte),
+            C1InputState::EscapeIntermediate => match terminal_input_byte {
+                CANCEL_BYTE | SUBSTITUTE_BYTE | 0x30..=0x7e => C1InputState::Ground,
+                ESCAPE_BYTE => C1InputState::Escape,
                 _ => C1InputState::EscapeIntermediate,
             },
-            C1InputState::Csi => match byte {
-                CANCEL | SUBSTITUTE => C1InputState::Ground,
-                ESCAPE => C1InputState::Escape,
+            C1InputState::Csi => match terminal_input_byte {
+                CANCEL_BYTE | SUBSTITUTE_BYTE => C1InputState::Ground,
+                ESCAPE_BYTE => C1InputState::Escape,
                 0x40..=0x7e => {
-                    control = match byte {
+                    control = match terminal_input_byte {
                         b'h' => Some(SynchronizedControl::Begin),
                         b'l' => Some(SynchronizedControl::End),
                         _ => None,
@@ -587,25 +686,25 @@ impl C1InputNormalizer {
                 }
                 _ => C1InputState::Csi,
             },
-            C1InputState::String(kind) => match byte {
-                CANCEL | SUBSTITUTE => C1InputState::Ground,
-                ESCAPE => C1InputState::StringEscape(kind),
-                0x07 if matches!(kind, C1StringKind::Osc) => C1InputState::Ground,
-                _ => C1InputState::String(kind),
+            C1InputState::String(string_kind) => match terminal_input_byte {
+                CANCEL_BYTE | SUBSTITUTE_BYTE => C1InputState::Ground,
+                ESCAPE_BYTE => C1InputState::StringEscape(string_kind),
+                0x07 if matches!(string_kind, C1StringKind::Osc) => C1InputState::Ground,
+                _ => C1InputState::String(string_kind),
             },
-            C1InputState::StringEscape(kind) => match byte {
-                CANCEL | SUBSTITUTE | b'\\' => C1InputState::Ground,
-                ESCAPE => C1InputState::StringEscape(kind),
-                _ => C1InputState::String(kind),
+            C1InputState::StringEscape(string_kind) => match terminal_input_byte {
+                CANCEL_BYTE | SUBSTITUTE_BYTE | b'\\' => C1InputState::Ground,
+                ESCAPE_BYTE => C1InputState::StringEscape(string_kind),
+                _ => C1InputState::String(string_kind),
             },
         };
         control
     }
 
-    fn advance_escape(byte: u8) -> C1InputState {
-        match byte {
-            CANCEL | SUBSTITUTE => C1InputState::Ground,
-            ESCAPE => C1InputState::Escape,
+    fn advance_escape(terminal_input_byte: u8) -> C1InputState {
+        match terminal_input_byte {
+            CANCEL_BYTE | SUBSTITUTE_BYTE => C1InputState::Ground,
+            ESCAPE_BYTE => C1InputState::Escape,
             0x20..=0x2f => C1InputState::EscapeIntermediate,
             0x50 => C1InputState::String(C1StringKind::Dcs),
             0x58 | 0x5e | 0x5f => C1InputState::String(C1StringKind::Dropped),
@@ -616,127 +715,133 @@ impl C1InputNormalizer {
         }
     }
 
-    fn push_tail(&mut self, bytes: &[u8]) {
-        let tail_len = self.tail.len();
-        if bytes.len() >= tail_len {
-            self.tail.copy_from_slice(&bytes[bytes.len() - tail_len..]);
-            self.tail_len = tail_len;
-            self.tail_next = 0;
+    fn push_trailing_bytes(&mut self, trailing_bytes: &[u8]) {
+        let trailing_byte_capacity = self.trailing_bytes.len();
+        if trailing_bytes.len() >= trailing_byte_capacity {
+            self.trailing_bytes
+                .copy_from_slice(&trailing_bytes[trailing_bytes.len() - trailing_byte_capacity..]);
+            self.trailing_byte_count = trailing_byte_capacity;
+            self.trailing_start_index = 0;
             return;
         }
-        for byte in bytes {
-            self.tail[self.tail_next] = *byte;
-            self.tail_next = (self.tail_next + 1) % tail_len;
-            self.tail_len = (self.tail_len + 1).min(tail_len);
+        for trailing_byte in trailing_bytes {
+            self.trailing_bytes[self.trailing_start_index] = *trailing_byte;
+            self.trailing_start_index = (self.trailing_start_index + 1) % trailing_byte_capacity;
+            self.trailing_byte_count = (self.trailing_byte_count + 1).min(trailing_byte_capacity);
         }
     }
 
-    fn tail_matches(&self, control: SynchronizedControl) -> bool {
-        if self.tail_len != self.tail.len() {
+    fn is_synchronized_control_in_trailing_bytes(&self, control: SynchronizedControl) -> bool {
+        if self.trailing_byte_count != self.trailing_bytes.len() {
             return false;
         }
-        let expected = match control {
-            SynchronizedControl::Begin => BEGIN_SYNCHRONIZED_OUTPUT,
-            SynchronizedControl::End => END_SYNCHRONIZED_OUTPUT,
+        let expected_control_bytes = match control {
+            SynchronizedControl::Begin => BEGIN_SYNCHRONIZED_OUTPUT_BYTES,
+            SynchronizedControl::End => END_SYNCHRONIZED_OUTPUT_BYTES,
         };
-        expected
+        expected_control_bytes
             .iter()
             .enumerate()
-            .all(|(index, byte)| self.tail[(self.tail_next + index) % self.tail.len()] == *byte)
+            .all(|(trailing_byte_index, expected_byte)| {
+                self.trailing_bytes
+                    [(self.trailing_start_index + trailing_byte_index) % self.trailing_bytes.len()]
+                    == *expected_byte
+            })
     }
 }
 
 /// The most bytes one OSC sequence accumulates. The parser drops every byte
 /// past this and dispatches what it holds when the sequence ends.
-pub(crate) const OSC_CAPACITY: usize = 8 * 1024;
+pub(crate) const OSC_BUFFER_BYTE_CAPACITY: usize = 8 * 1024;
 
 /// One pane's emulation engine: the byte decoder and the screen model it
 /// feeds.
 pub struct TerminalEngine {
     /// The VTE state machine. Holds any partial escape sequence or split
-    /// UTF-8 code point between [`advance`](TerminalEngine::advance) calls.
-    parser: vte::Parser<OSC_CAPACITY>,
+    /// UTF-8 code point between [`process_pty_output`](TerminalEngine::process_pty_output) calls.
+    parser: vte::Parser<OSC_BUFFER_BYTE_CAPACITY>,
     /// The screen model the parser's decoded actions mutate.
-    state: TerminalState,
+    terminal_state: TerminalState,
     /// The canonical bytes that put another parser where `parser` stands, as
-    /// [`undecoded`](TerminalEngine::undecoded) describes them. Eight-bit
+    /// [`undecoded_terminal_bytes`](TerminalEngine::undecoded_terminal_bytes) describes them. Eight-bit
     /// string controls use their seven-bit `ESC` forms so the VTE parser can
     /// replay them.
-    undecoded: Vec<u8>,
+    undecoded_terminal_bytes: Vec<u8>,
     /// The raw bytes that put the graphics parser where it stands.
-    graphics_undecoded: Vec<u8>,
+    undecoded_graphics_bytes: Vec<u8>,
     /// A second parser fed the same bytes as `parser`, driving no screen. It
     /// reports where each sequence ends. One chunk costs one pass over that
     /// chunk, however long the sequence it continues.
-    tail_parser: vte::Parser<OSC_CAPACITY>,
-    /// Set while `tail_parser` sits on a sequence boundary, where `undecoded`
+    undecoded_parser: vte::Parser<OSC_BUFFER_BYTE_CAPACITY>,
+    /// Set while `undecoded_parser` sits on a sequence boundary, where `undecoded_terminal_bytes`
     /// holds at most the first bytes of a UTF-8 code point.
-    on_boundary: bool,
-    /// Set while `tail_parser` sits in the body of a string whose bytes
-    /// `undecoded` does not hold: a device control string, a start of string, a
+    is_at_sequence_boundary: bool,
+    /// Set while `undecoded_parser` sits in the body of a string whose bytes
+    /// `undecoded_terminal_bytes` does not hold: a device control string, a start of string, a
     /// privacy message, an application program command, or any sequence that
-    /// passed [`MAX_UNDECODED`]. `undecoded` holds the opening bytes of the
+    /// passed [`MAX_UNDECODED_BYTE_COUNT`]. `undecoded` holds the opening bytes of the
     /// first four kinds and nothing of the fifth.
-    in_string_body: bool,
+    is_in_string_body: bool,
     /// The raw terminal-image parser that observes the same bytes as the VTE
-    /// parser without changing terminal state.
+    /// parser without changing the terminal model.
     graphics_parser: GraphicsParser,
     /// Complete image records and recoverable image errors waiting for the
     /// terminal caller.
     graphics_events: VecDeque<GraphicsEvent>,
     /// Converts 8-bit string controls to the 7-bit forms supported by `vte`.
-    terminal_input: C1InputNormalizer,
+    terminal_input_normalizer: C1InputNormalizer,
     /// Holds complete top-level DEC synchronized-output groups before either parser sees them.
     synchronized_output: SynchronizedOutput,
     /// RGBA bytes held by successful image events.
-    graphics_event_bytes: usize,
+    queued_graphics_rgba_byte_count: usize,
     /// Number of events dropped after the bounded graphics queue filled.
-    graphics_events_dropped: usize,
+    dropped_graphics_event_count: usize,
     /// Number of dropped events that were graphics errors.
-    graphics_errors_dropped: usize,
+    dropped_graphics_error_count: usize,
     /// Set when the next DCS is a GNU Screen continuation wrapper.
-    graphics_screen_continuation: bool,
+    is_graphics_screen_continuation: bool,
     /// Set when the carried bytes belong to an open GNU Screen wrapper.
-    graphics_screen_wrapper_active: bool,
+    is_graphics_screen_wrapper_active: bool,
     /// Set when the next DCS is a tmux continuation wrapper.
-    graphics_tmux_continuation: bool,
+    is_graphics_tmux_continuation: bool,
     /// Set when the carried bytes belong to an open tmux wrapper.
-    graphics_tmux_wrapper_active: bool,
+    is_graphics_tmux_wrapper_active: bool,
 }
 
 impl TerminalEngine {
-    /// An engine for a fresh pane of `size`: an idle parser and a blank
+    /// An engine for a fresh pane of `pty_size`: an idle parser and a blank
     /// [`TerminalState`].
-    pub fn new(size: PtySize) -> Self {
-        Self::with_scrollback(size, ScrollbackLimit::default())
+    pub fn from_pty_size(pty_size: PtySize) -> Self {
+        Self::with_scrollback(pty_size, ScrollbackLimit::default())
     }
 
-    /// Like [`new`](Self::new), with `limit` as the scrollback limit.
-    pub fn with_scrollback(size: PtySize, limit: ScrollbackLimit) -> Self {
-        Self::with_idle_parsers(TerminalState::with_scrollback(size, limit))
+    /// Like [`from_pty_size`](Self::from_pty_size), with `scrollback_limit` as
+    /// the scrollback limit.
+    pub fn with_scrollback(pty_size: PtySize, scrollback_limit: ScrollbackLimit) -> Self {
+        Self::from_idle_parsers(TerminalState::with_scrollback(pty_size, scrollback_limit))
     }
 
-    /// An engine around `state` with both parsers idle and nothing held.
-    fn with_idle_parsers(state: TerminalState) -> Self {
+    /// An engine around `terminal_state` with both parsers idle and nothing held.
+    fn from_idle_parsers(terminal_state: TerminalState) -> Self {
         TerminalEngine {
-            parser: vte::Parser::<OSC_CAPACITY>::new_with_size(),
-            state,
-            undecoded: Vec::new(),
-            graphics_undecoded: Vec::new(),
-            tail_parser: vte::Parser::<OSC_CAPACITY>::new_with_size(),
-            on_boundary: true,
-            in_string_body: false,
+            parser: vte::Parser::<OSC_BUFFER_BYTE_CAPACITY>::new_with_size(),
+            terminal_state,
+            undecoded_terminal_bytes: Vec::new(),
+            undecoded_graphics_bytes: Vec::new(),
+            undecoded_parser: vte::Parser::<OSC_BUFFER_BYTE_CAPACITY>::new_with_size(),
+            is_at_sequence_boundary: true,
+            is_in_string_body: false,
             graphics_parser: GraphicsParser::default(),
             graphics_events: VecDeque::new(),
-            terminal_input: C1InputNormalizer::default(),
+            terminal_input_normalizer: C1InputNormalizer::default(),
             synchronized_output: SynchronizedOutput::default(),
-            graphics_event_bytes: 0,
-            graphics_events_dropped: 0,
-            graphics_errors_dropped: 0,
-            graphics_screen_continuation: false,
-            graphics_screen_wrapper_active: false,
-            graphics_tmux_continuation: false,
-            graphics_tmux_wrapper_active: false,
+            queued_graphics_rgba_byte_count: 0,
+            dropped_graphics_event_count: 0,
+            dropped_graphics_error_count: 0,
+            is_graphics_screen_continuation: false,
+            is_graphics_screen_wrapper_active: false,
+            is_graphics_tmux_continuation: false,
+            is_graphics_tmux_wrapper_active: false,
         }
     }
 
@@ -748,14 +853,14 @@ impl TerminalEngine {
     ///
     /// Chunks may split an escape sequence or a UTF-8 code point at any byte;
     /// the parser resumes the partial decode on the next call, and
-    /// [`undecoded`](Self::undecoded) is set to the canonical bytes that put
+    /// [`undecoded_terminal_bytes`](Self::undecoded_terminal_bytes) is set to the canonical bytes that put
     /// another parser where this one now stands. This method drains shell-integration
     /// facts without returning them; use
-    /// [`Self::advance_with_shell_integration`] when the caller handles those facts.
+    /// [`Self::process_pty_output_with_shell_integration`] when the caller handles those facts.
     #[must_use = "undelivered replies hang the querying app"]
-    pub fn advance(&mut self, bytes: &[u8]) -> Vec<u8> {
-        let (replies, _) = self.advance_with_shell_integration(bytes);
-        replies
+    pub fn process_pty_output(&mut self, pty_output_bytes: &[u8]) -> Vec<u8> {
+        let (reply_bytes, _) = self.process_pty_output_with_shell_integration(pty_output_bytes);
+        reply_bytes
     }
 
     /// Feed one chunk through the parser and return device replies plus the
@@ -766,142 +871,165 @@ impl TerminalEngine {
     /// The facts contain no command text. `ESC ] 133 ; C` followed by
     /// `ESC ] 133 ; D ; 137` returns both facts in that order.
     #[must_use = "undelivered replies or shell facts are lost"]
-    pub fn advance_with_shell_integration(
+    pub fn process_pty_output_with_shell_integration(
         &mut self,
-        bytes: &[u8],
+        pty_output_bytes: &[u8],
     ) -> (Vec<u8>, Vec<ShellIntegrationFact>) {
-        let (replies, facts, _) = self.advance_with_shell_integration_at(bytes, Instant::now());
-        (replies, facts)
+        let (reply_bytes, shell_integration_facts, _) =
+            self.process_pty_output_with_shell_integration_at(pty_output_bytes, Instant::now());
+        (reply_bytes, shell_integration_facts)
     }
 
     /// Feed one chunk at `now` and report whether bytes reached the terminal parsers.
     #[must_use = "undelivered replies or shell facts are lost"]
-    pub fn advance_with_shell_integration_at(
+    pub fn process_pty_output_with_shell_integration_at(
         &mut self,
-        bytes: &[u8],
-        now: Instant,
+        pty_output_bytes: &[u8],
+        monotonic_timestamp: Instant,
     ) -> (Vec<u8>, Vec<ShellIntegrationFact>, bool) {
-        let normalized = self.terminal_input.normalize(bytes);
+        let normalized_terminal_input = self
+            .terminal_input_normalizer
+            .normalize_terminal_input_bytes(pty_output_bytes);
         let mut synchronized_output = mem::take(&mut self.synchronized_output);
-        let advanced =
-            synchronized_output.advance(normalized.bytes(), &normalized.controls, now, |bytes| {
-                self.advance_normalized(bytes)
-            });
+        let has_advanced = synchronized_output.process_normalized_bytes(
+            normalized_terminal_input.get_normalized_bytes(),
+            &normalized_terminal_input.synchronized_controls,
+            monotonic_timestamp,
+            |normalized_bytes| self.process_normalized_terminal_bytes(normalized_bytes),
+        );
         self.synchronized_output = synchronized_output;
         (
-            self.state.take_replies(),
-            self.state.take_shell_integration_facts(),
-            advanced,
+            self.terminal_state.take_device_query_replies(),
+            self.terminal_state.take_shell_integration_facts(),
+            has_advanced,
         )
     }
 
-    fn advance_normalized(&mut self, bytes: &[u8]) {
-        let graphics = self.graphics_parser.advance_with_offsets(bytes);
-        let terminal_input = without_terminal_inert(bytes, &graphics.terminal_inert);
+    fn process_normalized_terminal_bytes(&mut self, normalized_bytes: &[u8]) {
+        let graphics_advance = self
+            .graphics_parser
+            .process_graphics_operations_with_offsets(normalized_bytes);
+        let terminal_input =
+            remove_terminal_inert_bytes(normalized_bytes, &graphics_advance.terminal_inert_ranges);
         let terminal_bytes = terminal_input.as_ref();
-        let mut parser_at = 0;
-        for (offset, result) in graphics.events {
-            let end = without_terminal_inert_offset(offset + 1, &graphics.terminal_inert);
-            if end > parser_at {
-                self.parser
-                    .advance(&mut self.state, &terminal_bytes[parser_at..end]);
-                parser_at = end;
+        let mut parser_byte_index = 0;
+        for (graphics_byte_offset, graphics_event) in graphics_advance.completed_graphics_events {
+            let graphics_event_end_index = compute_terminal_byte_offset_without_inert_ranges(
+                graphics_byte_offset + 1,
+                &graphics_advance.terminal_inert_ranges,
+            );
+            if graphics_event_end_index > parser_byte_index {
+                self.parser.advance(
+                    &mut self.terminal_state,
+                    &terminal_bytes[parser_byte_index..graphics_event_end_index],
+                );
+                parser_byte_index = graphics_event_end_index;
             }
-            let anchor = self.state.active_cursor_position();
-            self.queue_graphics(result, anchor);
+            let cursor_position = self.terminal_state.get_active_cursor_position();
+            self.process_graphics_operation(graphics_event, cursor_position);
         }
-        if parser_at < terminal_bytes.len() {
-            self.parser
-                .advance(&mut self.state, &terminal_bytes[parser_at..]);
+        if parser_byte_index < terminal_bytes.len() {
+            self.parser.advance(
+                &mut self.terminal_state,
+                &terminal_bytes[parser_byte_index..],
+            );
         }
-        self.hold_undecoded(terminal_bytes);
-        self.sync_graphics_undecoded();
+        self.capture_undecoded_terminal_bytes(terminal_bytes);
+        self.update_graphics_transport_state();
     }
 
-    /// An engine wrapped around an existing `state`, with a parser fed
-    /// `undecoded` — the bytes that put a parser where the previous engine's
-    /// parser stood, from [`undecoded`](Self::undecoded).
+    /// An engine wrapped around an existing `terminal_state`, with a parser fed
+    /// `terminal_undecoded_bytes` — the bytes that put a parser where the previous
+    /// engine's parser stood, from [`undecoded_terminal_bytes`](Self::undecoded_terminal_bytes).
     ///
     /// The replay reaches no screen: every action those bytes dispatch is
-    /// dropped, and `state` stays as passed. The replay leaves the parser at
+    /// dropped, and `terminal_state` stays as passed. The replay leaves the parser at
     /// the previous parser's position, and the rest of a sequence that was cut
     /// in half completes here. Pass an empty slice for a state that was not
     /// carried out of a running engine.
-    pub fn from_state(state: TerminalState, undecoded: &[u8]) -> Self {
-        Self::from_state_with_graphics(state, undecoded, &[])
-    }
-
-    /// An engine around `state` with the VTE and graphics parser positions
-    /// carried from another engine.
-    pub fn from_state_with_graphics(
-        state: TerminalState,
-        undecoded: &[u8],
-        graphics_undecoded: &[u8],
+    pub fn from_terminal_state(
+        terminal_state: TerminalState,
+        terminal_undecoded_bytes: &[u8],
     ) -> Self {
-        Self::from_state_with_graphics_and_events(state, undecoded, graphics_undecoded, &[])
+        Self::from_terminal_state_with_graphics(terminal_state, terminal_undecoded_bytes, &[])
     }
 
-    /// An engine around `state` with parser positions and queued graphics
+    /// An engine around `terminal_state` with the VTE and graphics parser positions
+    /// carried from another engine.
+    pub fn from_terminal_state_with_graphics(
+        terminal_state: TerminalState,
+        terminal_undecoded_bytes: &[u8],
+        graphics_undecoded_bytes: &[u8],
+    ) -> Self {
+        Self::from_terminal_state_with_graphics_and_events(
+            terminal_state,
+            terminal_undecoded_bytes,
+            graphics_undecoded_bytes,
+            &[],
+        )
+    }
+
+    /// An engine around `terminal_state` with parser positions and queued graphics
     /// events carried from another engine.
-    pub fn from_state_with_graphics_and_events(
-        state: TerminalState,
-        undecoded: &[u8],
-        graphics_undecoded: &[u8],
+    pub fn from_terminal_state_with_graphics_and_events(
+        terminal_state: TerminalState,
+        terminal_undecoded_bytes: &[u8],
+        graphics_undecoded_bytes: &[u8],
         graphics_events: &[GraphicsEvent],
     ) -> Self {
-        Self::from_state_with_graphics_and_events_and_screen(
-            state,
-            undecoded,
-            graphics_undecoded,
+        Self::from_terminal_state_with_graphics_and_events_and_screen(
+            terminal_state,
+            terminal_undecoded_bytes,
+            graphics_undecoded_bytes,
             graphics_events,
             false,
             false,
         )
     }
 
-    /// An engine around state with parser positions, queued graphics events,
+    /// An engine around `terminal_state` with parser positions, queued graphics events,
     /// and GNU Screen continuation state carried from another engine. This is
     /// the compatibility form for the two legacy wrapper flags; use
-    /// [`from_state_with_graphics_and_events_and_wrappers`](Self::from_state_with_graphics_and_events_and_wrappers)
-    /// when nested parser state or bounded-transfer abandonment is present.
-    pub fn from_state_with_graphics_and_events_and_screen(
-        state: TerminalState,
-        undecoded: &[u8],
-        graphics_undecoded: &[u8],
+    /// [`from_terminal_state_with_graphics_and_events_and_wrappers`](Self::from_terminal_state_with_graphics_and_events_and_wrappers)
+    /// when nested parser state or bounded-transfer graphics_abandonment is present.
+    pub fn from_terminal_state_with_graphics_and_events_and_screen(
+        terminal_state: TerminalState,
+        terminal_undecoded_bytes: &[u8],
+        graphics_undecoded_bytes: &[u8],
         graphics_events: &[GraphicsEvent],
-        graphics_screen_continuation: bool,
-        graphics_screen_wrapper_active: bool,
+        is_graphics_screen_continuation: bool,
+        is_graphics_screen_wrapper_active: bool,
     ) -> Self {
-        Self::from_state_with_graphics_and_events_and_wrappers(
-            state,
-            undecoded,
-            graphics_undecoded,
+        Self::from_terminal_state_with_graphics_and_events_and_wrappers(
+            terminal_state,
+            terminal_undecoded_bytes,
+            graphics_undecoded_bytes,
             graphics_events,
             GraphicsTransportState {
-                screen_continuation: graphics_screen_continuation,
-                screen_wrapper_active: graphics_screen_wrapper_active,
+                is_screen_continuation: is_graphics_screen_continuation,
+                is_screen_wrapper_active: is_graphics_screen_wrapper_active,
                 ..GraphicsTransportState::default()
             },
         )
     }
 
-    /// An engine around state with parser positions, queued graphics events,
+    /// An engine around `terminal_state` with parser positions, queued graphics events,
     /// and the complete graphics transport state carried from another engine.
     /// A split Screen wrapper such as `ESC P ESC ] 1337;File=... ESC \` is
     /// restored from its nested parser record before the next PTY bytes arrive.
-    pub fn from_state_with_graphics_and_events_and_wrappers(
-        state: TerminalState,
-        undecoded: &[u8],
-        graphics_undecoded: &[u8],
+    pub fn from_terminal_state_with_graphics_and_events_and_wrappers(
+        terminal_state: TerminalState,
+        terminal_undecoded_bytes: &[u8],
+        graphics_undecoded_bytes: &[u8],
         graphics_events: &[GraphicsEvent],
-        graphics_transport: GraphicsTransportState,
+        graphics_transport_state: GraphicsTransportState,
     ) -> Self {
-        Self::from_state_with_graphics_events_wrappers_and_synchronized_output(
-            state,
-            undecoded,
-            graphics_undecoded,
+        Self::from_terminal_state_with_graphics_events_wrappers_and_synchronized_output(
+            terminal_state,
+            terminal_undecoded_bytes,
+            graphics_undecoded_bytes,
             graphics_events,
-            graphics_transport,
+            graphics_transport_state,
             None,
             Instant::now(),
             SystemTime::now(),
@@ -910,72 +1038,85 @@ impl TerminalEngine {
 
     /// Restore parser, graphics, and synchronized-output transport state.
     #[allow(clippy::too_many_arguments)]
-    pub fn from_state_with_graphics_events_wrappers_and_synchronized_output(
-        state: TerminalState,
-        undecoded: &[u8],
-        graphics_undecoded: &[u8],
+    pub fn from_terminal_state_with_graphics_events_wrappers_and_synchronized_output(
+        terminal_state: TerminalState,
+        terminal_undecoded_bytes: &[u8],
+        graphics_undecoded_bytes: &[u8],
         graphics_events: &[GraphicsEvent],
-        graphics_transport: GraphicsTransportState,
-        synchronized_output: Option<SynchronizedOutputTransport>,
-        now: Instant,
-        wall_now: SystemTime,
+        graphics_transport_state: GraphicsTransportState,
+        synchronized_output_transport: Option<SynchronizedOutputTransport>,
+        monotonic_timestamp: Instant,
+        wall_clock_timestamp: SystemTime,
     ) -> Self {
-        let mut engine = Self::with_idle_parsers(state);
-        engine
+        let mut terminal_engine = Self::from_idle_parsers(terminal_state);
+        terminal_engine
             .graphics_parser
-            .restore_carry(graphics_undecoded, graphics_transport);
-        let normalized = if synchronized_output.is_some() {
+            .restore_graphics_carry_state(graphics_undecoded_bytes, graphics_transport_state);
+        let normalized_terminal_input_bytes = if synchronized_output_transport.is_some() {
             C1InputNormalizer::default()
-                .normalize(undecoded)
-                .bytes
+                .normalize_terminal_input_bytes(terminal_undecoded_bytes)
+                .normalized_bytes
                 .into_owned()
         } else {
-            engine
-                .terminal_input
-                .normalize(undecoded)
-                .bytes
+            terminal_engine
+                .terminal_input_normalizer
+                .normalize_terminal_input_bytes(terminal_undecoded_bytes)
+                .normalized_bytes
                 .into_owned()
         };
-        engine.parser.advance(&mut NoScreen, &normalized);
-        engine.hold_undecoded(&normalized);
-        engine.sync_graphics_undecoded();
-        for event in graphics_events {
-            if let Err(GraphicsError::QueueFull { dropped }) = event {
-                engine.graphics_events_dropped =
-                    engine.graphics_events_dropped.saturating_add(*dropped);
+        terminal_engine
+            .parser
+            .advance(&mut NoScreen, &normalized_terminal_input_bytes);
+        terminal_engine.capture_undecoded_terminal_bytes(&normalized_terminal_input_bytes);
+        terminal_engine.update_graphics_transport_state();
+        for graphics_event in graphics_events {
+            if let Err(GraphicsError::QueueFull {
+                dropped_event_count,
+            }) = graphics_event
+            {
+                terminal_engine.dropped_graphics_event_count = terminal_engine
+                    .dropped_graphics_event_count
+                    .saturating_add(*dropped_event_count);
             } else {
-                engine.queue_graphics_event(event.clone());
+                terminal_engine.enqueue_graphics_event(graphics_event.clone());
             }
         }
-        if let Some(transport) = synchronized_output {
-            engine.terminal_input = transport.terminal_input;
-            engine.synchronized_output.restore(transport, now, wall_now);
+        if let Some(synchronized_output_transport) = synchronized_output_transport {
+            terminal_engine.terminal_input_normalizer =
+                synchronized_output_transport.terminal_input;
+            terminal_engine
+                .synchronized_output
+                .restore_synchronized_output_transport(
+                    synchronized_output_transport,
+                    monotonic_timestamp,
+                    wall_clock_timestamp,
+                );
         }
-        engine
+        terminal_engine
     }
 
     /// Take the engine apart and hand back its screen model, dropping the
-    /// parser. Read [`undecoded`](Self::undecoded),
-    /// [`graphics_undecoded`](Self::graphics_undecoded), and
-    /// [`take_graphics`](Self::take_graphics) first to carry parser positions
+    /// parser. Read [`undecoded_terminal_bytes`](Self::undecoded_terminal_bytes),
+    /// [`undecoded_graphics_bytes`](Self::undecoded_graphics_bytes), and
+    /// [`take_graphics_events`](Self::take_graphics_events) first to carry parser positions
     /// and queued image events.
-    pub fn into_state(self) -> TerminalState {
-        self.state
+    pub fn into_terminal_state(self) -> TerminalState {
+        self.terminal_state
     }
 
     /// Iterate the queued image records and recoverable image errors in the
     /// order their protocol terminators reached the terminal parser, without
     /// removing them. An event dropped after the bounded queue filled is not
-    /// visible here; [`graphics_errors_dropped`](Self::graphics_errors_dropped)
-    /// and [`take_graphics`](Self::take_graphics) report dropped events.
-    pub fn graphics_events(&self) -> impl Iterator<Item = &GraphicsEvent> {
+    /// visible here; [`get_dropped_graphics_error_count`](Self::get_dropped_graphics_error_count)
+    /// and [`take_graphics_events`](Self::take_graphics_events) report dropped events.
+    pub fn list_graphics_events(&self) -> impl Iterator<Item = &GraphicsEvent> {
         self.graphics_events.iter()
     }
 
     /// Return the number of graphics errors dropped because the event queue
     /// reached its count or image-byte limit.
-    pub fn graphics_errors_dropped(&self) -> usize {
-        self.graphics_errors_dropped
+    pub fn get_dropped_graphics_error_count(&self) -> usize {
+        self.dropped_graphics_error_count
     }
 
     /// Drain complete image records and recoverable image errors in the order
@@ -984,17 +1125,17 @@ impl TerminalEngine {
     ///
     /// A display record is applied to image state before it is made available
     /// to the caller; a malformed or unplaceable record returns a typed error.
-    pub fn take_graphics(&mut self) -> Vec<GraphicsEvent> {
-        let mut events: Vec<GraphicsEvent> = self.graphics_events.drain(..).collect();
-        self.graphics_event_bytes = 0;
-        if self.graphics_events_dropped != 0 {
-            events.push(Err(GraphicsError::QueueFull {
-                dropped: self.graphics_events_dropped,
+    pub fn take_graphics_events(&mut self) -> Vec<GraphicsEvent> {
+        let mut graphics_events: Vec<GraphicsEvent> = self.graphics_events.drain(..).collect();
+        self.queued_graphics_rgba_byte_count = 0;
+        if self.dropped_graphics_event_count != 0 {
+            graphics_events.push(Err(GraphicsError::QueueFull {
+                dropped_event_count: self.dropped_graphics_event_count,
             }));
-            self.graphics_events_dropped = 0;
+            self.dropped_graphics_event_count = 0;
         }
-        self.graphics_errors_dropped = 0;
-        events
+        self.dropped_graphics_error_count = 0;
+        graphics_events
     }
 
     /// Finish the graphics stream, report any incomplete transfer, and drain
@@ -1002,21 +1143,23 @@ impl TerminalEngine {
     ///
     /// A stream ending after `ESC _ Gf=32,s=1,v=1;` returns one typed
     /// `Truncated` error and leaves the terminal cells unchanged.
-    pub fn finish(&mut self) -> Vec<GraphicsEvent> {
+    pub fn finish_graphics_stream(&mut self) -> Vec<GraphicsEvent> {
         let mut synchronized_output = mem::take(&mut self.synchronized_output);
-        synchronized_output.release_all(&mut |bytes| self.advance_normalized(bytes));
+        synchronized_output.release_buffered_bytes(&mut |normalized_bytes| {
+            self.process_normalized_terminal_bytes(normalized_bytes)
+        });
         self.synchronized_output = synchronized_output;
-        let anchor = self.state.active_cursor_position();
-        for result in self.graphics_parser.finish() {
-            self.queue_graphics(result, anchor);
+        let cursor_position = self.terminal_state.get_active_cursor_position();
+        for graphics_event in self.graphics_parser.finish_graphics_stream() {
+            self.process_graphics_operation(graphics_event, cursor_position);
         }
-        self.graphics_undecoded.clear();
-        self.graphics_screen_continuation = false;
-        self.graphics_screen_wrapper_active = false;
-        self.graphics_tmux_continuation = false;
-        self.graphics_tmux_wrapper_active = false;
-        self.terminal_input = C1InputNormalizer::default();
-        self.take_graphics()
+        self.undecoded_graphics_bytes.clear();
+        self.is_graphics_screen_continuation = false;
+        self.is_graphics_screen_wrapper_active = false;
+        self.is_graphics_tmux_continuation = false;
+        self.is_graphics_tmux_wrapper_active = false;
+        self.terminal_input_normalizer = C1InputNormalizer::default();
+        self.take_graphics_events()
     }
 
     /// The canonical bytes that put another parser where this one stands: one escape
@@ -1029,7 +1172,7 @@ impl TerminalEngine {
     /// leaves the parser on a sequence boundary.
     ///
     /// A caller carries these across a process-image swap and hands them to
-    /// [`from_state`](Self::from_state). Eight-bit string controls are stored
+    /// [`from_terminal_state`](Self::from_terminal_state). Eight-bit string controls are stored
     /// in their seven-bit `ESC` forms.
     ///
     /// Example: the chunk ends with `ESC ] 7 ; file://host/Users/yuhan/Proj` →
@@ -1051,274 +1194,329 @@ impl TerminalEngine {
     /// 64 KiB the engine stops holding it and reports empty until it ends. A
     /// swap in that window leaves the next parser on a sequence boundary, and
     /// the rest of the body prints as text.
-    pub fn undecoded(&self) -> &[u8] {
-        &self.undecoded
+    pub fn undecoded_terminal_bytes(&self) -> &[u8] {
+        &self.undecoded_terminal_bytes
     }
 
     /// The raw bytes that put the graphics parser where it stands.
     ///
     /// A caller carrying a simple process-image swap passes these bytes to
-    /// [`from_state_with_graphics`](Self::from_state_with_graphics). A swap
+    /// [`from_terminal_state_with_graphics`](Self::from_terminal_state_with_graphics). A swap
     /// that cuts a tmux or GNU Screen wrapper, or abandons a large transfer,
-    /// uses [`graphics_transport_state`](Self::graphics_transport_state).
-    /// Ordinary VTE parser bytes are returned by [`undecoded`](Self::undecoded).
-    pub fn graphics_undecoded(&self) -> &[u8] {
-        &self.graphics_undecoded
+    /// uses [`get_graphics_transport_state`](Self::get_graphics_transport_state).
+    /// Ordinary VTE parser bytes are returned by
+    /// [`undecoded_terminal_bytes`](Self::undecoded_terminal_bytes).
+    pub fn undecoded_graphics_bytes(&self) -> &[u8] {
+        &self.undecoded_graphics_bytes
     }
 
     /// The complete graphics-parser state needed by a process-image swap.
     ///
     /// Example: a split Screen wrapper returns a state with `screen_inner`;
-    /// `graphics_undecoded` contains the raw bytes without wrapper state.
-    pub fn graphics_transport_state(&self) -> Option<GraphicsTransportState> {
-        self.graphics_parser.transport_state()
+    /// `undecoded_graphics_bytes` contains the raw bytes without wrapper state.
+    pub fn get_graphics_transport_state(&self) -> Option<GraphicsTransportState> {
+        self.graphics_parser.get_graphics_transport_state()
     }
 
-    /// Return the synchronized-output bytes and remaining deadline at `now`.
-    pub fn synchronized_output_transport(
+    /// Return the synchronized-output bytes and remaining deadline at the monotonic timestamp.
+    pub fn get_synchronized_output_transport(
         &self,
-        now: Instant,
+        monotonic_timestamp: Instant,
     ) -> Option<SynchronizedOutputTransport> {
-        self.synchronized_output_transport_at(now, SystemTime::now())
+        self.get_synchronized_output_transport_at(monotonic_timestamp, SystemTime::now())
     }
 
-    fn synchronized_output_transport_at(
+    fn get_synchronized_output_transport_at(
         &self,
-        now: Instant,
-        wall_now: SystemTime,
+        monotonic_timestamp: Instant,
+        wall_clock_timestamp: SystemTime,
     ) -> Option<SynchronizedOutputTransport> {
         self.synchronized_output
-            .transport(now, wall_now, self.terminal_input)
+            .build_synchronized_output_transport(
+                monotonic_timestamp,
+                wall_clock_timestamp,
+                self.terminal_input_normalizer,
+            )
     }
 
     /// Return the time until an open synchronized-output group must be released.
     #[must_use]
-    pub fn next_synchronized_output_delay(&self, now: Instant) -> Option<Duration> {
-        self.synchronized_output.delay(now)
+    pub fn get_next_synchronized_output_delay(
+        &self,
+        monotonic_timestamp: Instant,
+    ) -> Option<Duration> {
+        self.synchronized_output
+            .compute_release_delay(monotonic_timestamp)
     }
 
     /// Release an expired synchronized-output group through both terminal parsers.
     #[must_use = "undelivered replies or shell facts are lost"]
     pub fn expire_synchronized_output(
         &mut self,
-        now: Instant,
+        monotonic_timestamp: Instant,
     ) -> Option<(Vec<u8>, Vec<ShellIntegrationFact>)> {
         let mut synchronized_output = mem::take(&mut self.synchronized_output);
-        let advanced = synchronized_output.expire(now, |bytes| self.advance_normalized(bytes));
+        let has_advanced = synchronized_output
+            .release_expired_bytes(monotonic_timestamp, |normalized_bytes| {
+                self.process_normalized_terminal_bytes(normalized_bytes)
+            });
         self.synchronized_output = synchronized_output;
-        advanced.then(|| {
+        has_advanced.then(|| {
             (
-                self.state.take_replies(),
-                self.state.take_shell_integration_facts(),
+                self.terminal_state.take_device_query_replies(),
+                self.terminal_state.take_shell_integration_facts(),
             )
         })
     }
 
     /// Whether the next DCS belongs to an unfinished GNU Screen wrapper.
-    pub fn graphics_screen_continuation(&self) -> bool {
-        self.graphics_screen_continuation
+    pub fn is_graphics_screen_continuation(&self) -> bool {
+        self.is_graphics_screen_continuation
     }
 
     /// Whether a carried GNU Screen wrapper is still open.
-    pub fn graphics_screen_wrapper_active(&self) -> bool {
-        self.graphics_screen_wrapper_active
+    pub fn is_graphics_screen_wrapper_active(&self) -> bool {
+        self.is_graphics_screen_wrapper_active
     }
 
     /// Whether the next DCS belongs to an unfinished tmux continuation.
-    pub fn graphics_tmux_continuation(&self) -> bool {
-        self.graphics_tmux_continuation
+    pub fn is_graphics_tmux_continuation(&self) -> bool {
+        self.is_graphics_tmux_continuation
     }
 
     /// Whether a carried tmux wrapper is still open.
-    pub fn graphics_tmux_wrapper_active(&self) -> bool {
-        self.graphics_tmux_wrapper_active
+    pub fn is_graphics_tmux_wrapper_active(&self) -> bool {
+        self.is_graphics_tmux_wrapper_active
     }
 
     /// The screen model, for reads (rendering, cursor and mode queries).
-    pub fn state(&self) -> &TerminalState {
-        &self.state
+    pub fn get_terminal_state(&self) -> &TerminalState {
+        &self.terminal_state
     }
 
     /// Set the shared pixel-to-cell measurement for new image placements and queries.
-    pub fn set_cell_size(&mut self, size: koshi_core::geometry::PixelCellSize) {
-        self.state.set_cell_size(size);
+    pub fn set_cell_size(&mut self, pixel_cell_size: koshi_core::geometry::PixelCellSize) {
+        self.terminal_state.set_cell_size(pixel_cell_size);
     }
 
     /// Return the time until the next retained image animation frame is due.
     #[must_use]
-    pub fn next_animation_delay(&self) -> Option<Duration> {
-        self.state.next_animation_delay()
+    pub fn get_next_image_animation_delay(&self) -> Option<Duration> {
+        self.terminal_state.get_next_image_animation_delay()
     }
 
     /// Advance retained image animations and report whether visible pixels changed.
-    pub fn advance_animations(&mut self, elapsed: Duration) -> bool {
-        self.state.advance_animations(elapsed)
+    pub fn advance_image_animations(&mut self, elapsed_duration: Duration) -> bool {
+        self.terminal_state
+            .advance_image_animations(elapsed_duration)
     }
 
-    /// Resize the screen model to `size` (see [`TerminalState::resize`]).
+    /// Resize the terminal state to `pty_size` (see [`TerminalState::resize_terminal_state`]).
     ///
     /// The parser keeps any partial decode: a sequence split across the
     /// resize still completes.
-    pub fn resize(&mut self, size: PtySize) {
-        self.state.resize(size);
+    pub fn resize_terminal_state(&mut self, pty_size: PtySize) {
+        self.terminal_state.resize_terminal_state(pty_size);
     }
 
-    fn queue_graphics(
+    fn process_graphics_operation(
         &mut self,
-        result: Result<crate::graphics::GraphicsOperation, GraphicsError>,
-        anchor: (u16, u16),
+        graphics_result: Result<crate::graphics::GraphicsOperation, GraphicsError>,
+        cursor_position: (u16, u16),
     ) {
-        match result {
-            Ok(crate::graphics::GraphicsOperation::Failure { display, error }) => {
-                self.state.reply_kitty_failure(&display, &error);
-                self.queue_graphics_event(Err(error));
+        match graphics_result {
+            Ok(crate::graphics::GraphicsOperation::Failure {
+                image_display,
+                graphics_error,
+            }) => {
+                self.terminal_state
+                    .reply_to_kitty_failure(&image_display, &graphics_error);
+                self.enqueue_graphics_event(Err(graphics_error));
             }
-            Ok(crate::graphics::GraphicsOperation::Command(command)) => {
-                if let Err(reason) = self.state.apply_kitty_command(&command) {
-                    self.queue_graphics_event(Err(GraphicsError::PlacementRejected {
+            Ok(crate::graphics::GraphicsOperation::Command(graphics_command)) => {
+                if let Err(placement_error) =
+                    self.terminal_state.apply_kitty_command(&graphics_command)
+                {
+                    self.enqueue_graphics_event(Err(GraphicsError::PlacementRejected {
                         protocol: crate::graphics::GraphicsProtocol::Kitty,
-                        reason,
+                        placement_error,
                     }));
                 }
             }
-            Ok(crate::graphics::GraphicsOperation::Image(decoded)) => {
-                if decoded.query {
-                    self.state.reply_kitty(&decoded.display, None, true);
+            Ok(crate::graphics::GraphicsOperation::Image(decoded_image)) => {
+                if decoded_image.is_query {
+                    self.terminal_state
+                        .reply_to_kitty(&decoded_image.display, None, true);
                     return;
                 }
-                let record = ImageRecord {
-                    protocol: decoded.protocol,
-                    image: self.state.shared_image_pixels(decoded.image.into()),
-                    animation: decoded.animation.map(std::sync::Arc::new),
-                    action: decoded.action,
-                    display: decoded.display,
-                    anchor,
+                let image_record = ImageRecord {
+                    protocol: decoded_image.protocol,
+                    image: self
+                        .terminal_state
+                        .get_or_share_image_pixels(decoded_image.image.into()),
+                    animation: decoded_image.animation.map(std::sync::Arc::new),
+                    action: decoded_image.action,
+                    display: decoded_image.display,
+                    anchor: cursor_position,
                 };
-                let bytes = record.image.rgba.len();
-                let protocol = record.protocol;
-                let applied = self.state.apply_image_record(&record);
-                let display = if applied.is_ok() {
-                    self.state.kitty_reply_display(&record.display)
+                let image_rgba_byte_count = image_record.image.rgba_bytes.len();
+                let image_protocol = image_record.protocol;
+                let placement_result = self.terminal_state.apply_image_record(&image_record);
+                let display = if placement_result.is_ok() {
+                    self.terminal_state
+                        .get_kitty_reply_display(&image_record.display)
                 } else {
-                    record.display.clone()
+                    image_record.display.clone()
                 };
-                self.state.reply_kitty(
+                self.terminal_state.reply_to_kitty(
                     &display,
-                    applied.as_ref().err().copied(),
-                    protocol == crate::graphics::GraphicsProtocol::Kitty,
+                    placement_result.as_ref().err().copied(),
+                    image_protocol == crate::graphics::GraphicsProtocol::Kitty,
                 );
-                let event = applied
-                    .map(|()| record)
-                    .map_err(|reason| GraphicsError::PlacementRejected { protocol, reason });
-                let queued_bytes = if event.is_ok() { bytes } else { 0 };
-                self.queue_graphics_event_with_bytes(event, queued_bytes);
+                let graphics_event =
+                    placement_result
+                        .map(|()| image_record)
+                        .map_err(|placement_error| GraphicsError::PlacementRejected {
+                            protocol: image_protocol,
+                            placement_error,
+                        });
+                let queued_image_rgba_byte_count = if graphics_event.is_ok() {
+                    image_rgba_byte_count
+                } else {
+                    0
+                };
+                self.enqueue_graphics_event_with_rgba_byte_count(
+                    graphics_event,
+                    queued_image_rgba_byte_count,
+                );
             }
-            Ok(crate::graphics::GraphicsOperation::Sixel(graphic)) => {
-                match self.state.apply_sixel_graphic(graphic, anchor) {
-                    Ok(Some(record)) => {
-                        let bytes = record.image.rgba.len();
-                        self.queue_graphics_event_with_bytes(Ok(record), bytes);
+            Ok(crate::graphics::GraphicsOperation::Sixel(sixel_graphic)) => {
+                match self
+                    .terminal_state
+                    .apply_sixel_graphic(sixel_graphic, cursor_position)
+                {
+                    Ok(Some(image_record)) => {
+                        let image_rgba_byte_count = image_record.image.rgba_bytes.len();
+                        self.enqueue_graphics_event_with_rgba_byte_count(
+                            Ok(image_record),
+                            image_rgba_byte_count,
+                        );
                     }
                     Ok(None) => {}
-                    Err(error) => self.queue_graphics_event(Err(error)),
+                    Err(graphics_error) => self.enqueue_graphics_event(Err(graphics_error)),
                 }
             }
-            Err(error) => self.queue_graphics_event(Err(error)),
+            Err(graphics_error) => self.enqueue_graphics_event(Err(graphics_error)),
         }
     }
 
-    fn queue_graphics_event(&mut self, event: GraphicsEvent) {
-        let bytes = match &event {
-            Ok(record) => record.image.rgba.len(),
+    fn enqueue_graphics_event(&mut self, graphics_event: GraphicsEvent) {
+        let image_rgba_byte_count = match &graphics_event {
+            Ok(image_record) => image_record.image.rgba_bytes.len(),
             Err(_) => 0,
         };
-        self.queue_graphics_event_with_bytes(event, bytes);
+        self.enqueue_graphics_event_with_rgba_byte_count(graphics_event, image_rgba_byte_count);
     }
 
-    fn queue_graphics_event_with_bytes(&mut self, event: GraphicsEvent, bytes: usize) {
-        if self.graphics_events.len() == MAX_GRAPHICS_EVENTS
+    fn enqueue_graphics_event_with_rgba_byte_count(
+        &mut self,
+        graphics_event: GraphicsEvent,
+        image_rgba_byte_count: usize,
+    ) {
+        if self.graphics_events.len() == MAX_GRAPHICS_EVENT_COUNT
             || self
-                .graphics_event_bytes
-                .checked_add(bytes)
-                .is_none_or(|total| total > MAX_IMAGE_BYTES)
+                .queued_graphics_rgba_byte_count
+                .checked_add(image_rgba_byte_count)
+                .is_none_or(|total_rgba_byte_count| total_rgba_byte_count > MAX_IMAGE_BYTE_COUNT)
         {
-            self.graphics_events_dropped = self.graphics_events_dropped.saturating_add(1);
-            if event.is_err() {
-                self.graphics_errors_dropped = self.graphics_errors_dropped.saturating_add(1);
+            self.dropped_graphics_event_count = self.dropped_graphics_event_count.saturating_add(1);
+            if graphics_event.is_err() {
+                self.dropped_graphics_error_count =
+                    self.dropped_graphics_error_count.saturating_add(1);
             }
             return;
         }
-        self.graphics_event_bytes += bytes;
-        self.graphics_events.push_back(event);
+        self.queued_graphics_rgba_byte_count += image_rgba_byte_count;
+        self.graphics_events.push_back(graphics_event);
     }
 
-    fn sync_graphics_undecoded(&mut self) {
-        self.graphics_undecoded.clear();
-        if let Some(carry) = self.graphics_parser.carry_bytes() {
-            self.graphics_undecoded.extend_from_slice(carry);
+    fn update_graphics_transport_state(&mut self) {
+        self.undecoded_graphics_bytes.clear();
+        if let Some(graphics_carry_bytes) = self.graphics_parser.get_graphics_carry_bytes() {
+            self.undecoded_graphics_bytes
+                .extend_from_slice(graphics_carry_bytes);
         }
-        self.graphics_screen_continuation = self.graphics_parser.screen_continuation();
-        self.graphics_screen_wrapper_active = self.graphics_parser.screen_wrapper_active();
-        self.graphics_tmux_continuation = self.graphics_parser.tmux_continuation();
-        self.graphics_tmux_wrapper_active = self.graphics_parser.tmux_wrapper_active();
+        self.is_graphics_screen_continuation = self.graphics_parser.is_screen_continuation();
+        self.is_graphics_screen_wrapper_active = self.graphics_parser.is_screen_wrapper_active();
+        self.is_graphics_tmux_continuation = self.graphics_parser.is_tmux_continuation();
+        self.is_graphics_tmux_wrapper_active = self.graphics_parser.is_tmux_wrapper_active();
     }
 
-    /// Move `tail_parser` over `chunk` and update
-    /// [`undecoded`](Self::undecoded) from where it stops.
+    /// Move `undecoded_parser` over `normalized_bytes` and update
+    /// [`undecoded_terminal_bytes`](Self::undecoded_terminal_bytes) from where it stops.
     ///
-    /// A parser leaves a sequence boundary only at [`ESCAPE`]. The scan drops
-    /// what it holds and restarts on a fresh parser at the last `ESCAPE` in
-    /// `chunk`; the last sequence opens there and everything before it is
-    /// decoded. A chunk with no `ESCAPE` carries on from where the previous
+    /// A parser leaves a sequence boundary only at [`ESCAPE_BYTE`]. The scan drops
+    /// what it holds and restarts on a fresh parser at the last `ESCAPE_BYTE` in
+    /// `pty_output_chunk`; the last sequence opens there and everything before it is
+    /// decoded. A chunk with no `ESCAPE_BYTE` carries on from where the previous
     /// chunk stopped. A sequence spread over many chunks is read once.
     ///
-    /// The scan holds at most [`MAX_UNDECODED`] bytes of one sequence. Past
+    /// The scan holds at most [`MAX_UNDECODED_BYTE_COUNT`] bytes of one sequence. Past
     /// that it releases the buffer and holds nothing more until the sequence
     /// ends.
-    fn hold_undecoded(&mut self, chunk: &[u8]) {
-        let mut at = 0;
-        if let Some(start) = chunk.iter().rposition(|byte| *byte == ESCAPE) {
-            self.tail_parser = vte::Parser::<OSC_CAPACITY>::new_with_size();
-            self.undecoded.clear();
-            self.on_boundary = false;
-            self.in_string_body = false;
-            at = start;
+    fn capture_undecoded_terminal_bytes(&mut self, normalized_bytes: &[u8]) {
+        let mut normalized_byte_index = 0;
+        if let Some(last_escape_byte_index) = normalized_bytes
+            .iter()
+            .rposition(|normalized_byte| *normalized_byte == ESCAPE_BYTE)
+        {
+            self.undecoded_parser = vte::Parser::<OSC_BUFFER_BYTE_CAPACITY>::new_with_size();
+            self.undecoded_terminal_bytes.clear();
+            self.is_at_sequence_boundary = false;
+            self.is_in_string_body = false;
+            normalized_byte_index = last_escape_byte_index;
         }
         // Each round runs to the action that ends a sequence or opens the body
-        // of a device control string, or to the end of the chunk.
-        while at < chunk.len() {
+        // of a device control string, or to the end of the normalized bytes.
+        while normalized_byte_index < normalized_bytes.len() {
             let mut probe = ActionProbe::default();
-            let read = self
-                .tail_parser
-                .advance_until_terminated(&mut probe, &chunk[at..]);
-            let stop = at + read;
-            if probe.boundary {
-                self.undecoded.clear();
-                self.on_boundary = true;
-                self.in_string_body = false;
-            } else if !self.on_boundary && !self.in_string_body {
-                self.undecoded.extend_from_slice(&chunk[at..stop]);
-                if opens_dropped_string(&self.undecoded) {
+            let consumed_byte_count = self
+                .undecoded_parser
+                .advance_until_terminated(&mut probe, &normalized_bytes[normalized_byte_index..]);
+            let stop_byte_index = normalized_byte_index + consumed_byte_count;
+            if probe.is_at_sequence_boundary {
+                self.undecoded_terminal_bytes.clear();
+                self.is_at_sequence_boundary = true;
+                self.is_in_string_body = false;
+            } else if !self.is_at_sequence_boundary && !self.is_in_string_body {
+                self.undecoded_terminal_bytes
+                    .extend_from_slice(&normalized_bytes[normalized_byte_index..stop_byte_index]);
+                if is_dropped_string_opening(&self.undecoded_terminal_bytes) {
                     // The opening alone puts another parser inside the body.
-                    self.undecoded.truncate(STRING_OPENING);
-                    self.in_string_body = true;
-                } else if self.undecoded.len() > MAX_UNDECODED {
+                    self.undecoded_terminal_bytes
+                        .truncate(STRING_OPENING_BYTE_COUNT);
+                    self.is_in_string_body = true;
+                } else if self.undecoded_terminal_bytes.len() > MAX_UNDECODED_BYTE_COUNT {
                     // A fresh `Vec` frees the buffer's capacity.
-                    self.undecoded = Vec::new();
-                    self.in_string_body = true;
+                    self.undecoded_terminal_bytes = Vec::new();
+                    self.is_in_string_body = true;
                 } else {
-                    self.in_string_body = probe.hooked;
+                    self.is_in_string_body = probe.is_string_started;
                 }
             }
-            at = stop;
+            normalized_byte_index = stop_byte_index;
         }
-        if self.on_boundary {
+        if self.is_at_sequence_boundary {
             // Only the first bytes of a UTF-8 code point can be left over.
-            let tail = chunk.len().saturating_sub(CODE_POINT_TAIL);
-            self.undecoded.extend_from_slice(&chunk[tail..]);
-            let kept = split_code_point(&self.undecoded).len();
-            let decoded = self.undecoded.len() - kept;
-            self.undecoded.drain(..decoded);
+            let code_point_trailing_start_index = normalized_bytes
+                .len()
+                .saturating_sub(CODE_POINT_TAIL_BYTE_COUNT);
+            self.undecoded_terminal_bytes
+                .extend_from_slice(&normalized_bytes[code_point_trailing_start_index..]);
+            let incomplete_byte_count =
+                find_incomplete_utf8_code_point_bytes(&self.undecoded_terminal_bytes).len();
+            let decoded_byte_count = self.undecoded_terminal_bytes.len() - incomplete_byte_count;
+            self.undecoded_terminal_bytes.drain(..decoded_byte_count);
         }
     }
 }
@@ -1334,38 +1532,38 @@ impl vte::Perform for NoScreen {}
 /// control string. It touches no screen.
 ///
 /// Every action listed here leaves the parser on a sequence boundary, as long
-/// as the bytes scanned hold no [`ESCAPE`] past their first byte: `ESCAPE`
+/// as the bytes scanned hold no [`ESCAPE_BYTE`] past their first byte: `ESCAPE_BYTE`
 /// alone ends an operating system command or a device control string into the
 /// next sequence instead of into the ground state.
 #[derive(Default)]
 struct ActionProbe {
     /// Set when an action put the parser back on a sequence boundary.
-    boundary: bool,
+    is_at_sequence_boundary: bool,
     /// Set when the parser opened a device control string.
-    hooked: bool,
+    is_string_started: bool,
 }
 
 impl vte::Perform for ActionProbe {
     fn print(&mut self, _c: char) {
-        self.boundary = true;
+        self.is_at_sequence_boundary = true;
     }
 
-    fn execute(&mut self, byte: u8) {
-        if byte == CANCEL || byte == SUBSTITUTE {
-            self.boundary = true;
+    fn execute(&mut self, control_byte: u8) {
+        if control_byte == CANCEL_BYTE || control_byte == SUBSTITUTE_BYTE {
+            self.is_at_sequence_boundary = true;
         }
     }
 
     fn hook(&mut self, _params: &vte::Params, _intermediates: &[u8], _ignore: bool, _action: char) {
-        self.hooked = true;
+        self.is_string_started = true;
     }
 
     fn unhook(&mut self) {
-        self.boundary = true;
+        self.is_at_sequence_boundary = true;
     }
 
     fn osc_dispatch(&mut self, _params: &[&[u8]], _bell_terminated: bool) {
-        self.boundary = true;
+        self.is_at_sequence_boundary = true;
     }
 
     fn csi_dispatch(
@@ -1375,46 +1573,47 @@ impl vte::Perform for ActionProbe {
         _ignore: bool,
         _action: char,
     ) {
-        self.boundary = true;
+        self.is_at_sequence_boundary = true;
     }
 
     fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, _byte: u8) {
-        self.boundary = true;
+        self.is_at_sequence_boundary = true;
     }
 
     /// Stops [`vte::Parser::advance_until_terminated`] at each sequence
     /// boundary and at the start of a device control string body.
     fn terminated(&self) -> bool {
-        self.boundary || self.hooked
+        self.is_at_sequence_boundary || self.is_string_started
     }
 }
 
-/// True when `bytes` opens a start of string, a privacy message or an
+/// True when `input_bytes` opens a start of string, a privacy message or an
 /// application program command: `ESC X`, `ESC ^` or `ESC _`. The parser reads
 /// the body of each one and keeps none of it.
-fn opens_dropped_string(bytes: &[u8]) -> bool {
+fn is_dropped_string_opening(input_bytes: &[u8]) -> bool {
     matches!(
-        bytes,
+        input_bytes,
         [
-            ESCAPE,
-            START_OF_STRING | PRIVACY_MESSAGE | APPLICATION_COMMAND,
+            ESCAPE_BYTE,
+            START_OF_STRING_BYTE | PRIVACY_MESSAGE_BYTE | APPLICATION_COMMAND_BYTE,
             ..
         ]
     )
 }
 
-/// The bytes at the end of `bytes` that begin a UTF-8 code point without
+/// The bytes at the end of `input_bytes` that begin a UTF-8 code point without
 /// completing it, or empty when the last code point is whole.
-fn split_code_point(bytes: &[u8]) -> &[u8] {
-    let mut tail = &bytes[bytes.len().saturating_sub(CODE_POINT_TAIL)..];
+fn find_incomplete_utf8_code_point_bytes(input_bytes: &[u8]) -> &[u8] {
+    let mut incomplete_bytes =
+        &input_bytes[input_bytes.len().saturating_sub(CODE_POINT_TAIL_BYTE_COUNT)..];
     loop {
-        let Err(error) = std::str::from_utf8(tail) else {
+        let Err(utf8_error) = std::str::from_utf8(incomplete_bytes) else {
             return &[];
         };
-        let Some(invalid) = error.error_len() else {
-            return &tail[error.valid_up_to()..];
+        let Some(invalid_byte_count) = utf8_error.error_len() else {
+            return &incomplete_bytes[utf8_error.valid_up_to()..];
         };
-        tail = &tail[error.valid_up_to() + invalid..];
+        incomplete_bytes = &incomplete_bytes[utf8_error.valid_up_to() + invalid_byte_count..];
     }
 }
 

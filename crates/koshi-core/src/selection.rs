@@ -58,13 +58,16 @@ pub enum SelectionKind {
 ///
 /// Both numbers come from the running total of lines a pane has pushed into
 /// its scrollback and the count it still retains, which the terminal engine
-/// tracks as `Scrollback::total_pushed` and `Scrollback::len`.
+/// tracks as `Scrollback::get_total_pushed_line_count` and
+/// `Scrollback::get_retained_line_count`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct GridPos {
+pub struct GridPosition {
     /// Absolute line number — see the type docs. Never renumbered.
-    pub row: u64,
+    #[serde(rename = "row")]
+    pub row_index: u64,
     /// Column in cells, 0-indexed from the left.
-    pub col: u16,
+    #[serde(rename = "col")]
+    pub column_index: u16,
 }
 
 /// A selection: a highlighted range of text, always made with the mouse — a
@@ -81,18 +84,19 @@ pub struct GridPos {
 /// themselves.
 ///
 /// The pane a selection is in is not a field here — the command
-/// ([`SetSelectionArgs::pane`](crate::command::SetSelectionArgs::pane)) and the
+/// ([`SetSelectionArgs::pane_id`](crate::command::SetSelectionArgs::pane_id)) and the
 /// event
 /// ([`SelectionChanged::pane_id`](crate::event::SelectionChanged::pane_id))
 /// each name it, and the client keys its highlights by it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Selection {
     /// Selection shape.
-    pub kind: SelectionKind,
+    #[serde(rename = "kind")]
+    pub selection_kind: SelectionKind,
     /// The end that stays put — where the drag started.
-    pub anchor: GridPos,
+    pub anchor: GridPosition,
     /// The end that follows the pointer.
-    pub cursor: GridPos,
+    pub cursor: GridPosition,
 }
 
 /// Which clipboard a copy targets.

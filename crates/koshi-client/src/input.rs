@@ -23,7 +23,7 @@
 use std::time::{Duration, Instant};
 
 use koshi_config::types::BoundAction;
-use koshi_core::action::ActionRef;
+use koshi_core::action::ActionReference;
 use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags, NamedKey, PendingKeySequence};
 use koshi_core::lock::LockMode;
 use koshi_core::resolve::ActionArgs;
@@ -34,7 +34,7 @@ use crate::Client;
 mod tests;
 
 /// The chord that backs out of an open multi-chord sequence.
-const ESCAPE: KeyChord = KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Esc));
+const ESCAPE_KEY_CHORD: KeyChord = KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Esc));
 
 /// What the viewer decided one keypress means.
 ///
@@ -62,7 +62,7 @@ pub enum KeyOutcome {
 impl Client {
     /// The viewer's current input mode.
     #[must_use]
-    pub fn lock_mode(&self) -> LockMode {
+    pub fn get_lock_mode(&self) -> LockMode {
         self.lock_mode
     }
 
@@ -72,17 +72,19 @@ impl Client {
     /// session reports a mode change aimed at this viewer (`koshi lock
     /// --client`). Held chords were typed at koshi, so a mode change drops
     /// them and no pane ever sees them.
-    pub fn set_lock_mode(&mut self, mode: LockMode) {
-        if self.lock_mode != mode {
-            self.lock_mode = mode;
-            self.pending = None;
+    pub fn set_lock_mode(&mut self, lock_mode: LockMode) {
+        if self.lock_mode != lock_mode {
+            self.lock_mode = lock_mode;
+            self.pending_key_sequence = None;
         }
     }
 
     /// The chords of an open sequence, for the hint bar's breadcrumb.
     #[must_use]
-    pub fn pending_sequence(&self) -> Option<&KeySequence> {
-        self.pending.as_ref().map(|pending| &pending.sequence)
+    pub fn get_pending_key_sequence(&self) -> Option<&KeySequence> {
+        self.pending_key_sequence
+            .as_ref()
+            .map(|pending_key_sequence| &pending_key_sequence.sequence)
     }
 
     /// Decide what `chord` means in this viewer's current mode.
@@ -91,59 +93,69 @@ impl Client {
     /// says; `<C-p>` in the default keymap yields `Pending` because it opens
     /// the pane group; a plain `a` with nothing bound yields
     /// `PassThrough('a')`.
-    pub fn resolve_key(&mut self, chord: KeyChord, now: Instant) -> KeyOutcome {
-        let mode = self.lock_mode;
-        let pending = self.pending.take();
+    pub fn resolve_key(&mut self, chord: KeyChord, current_time: Instant) -> KeyOutcome {
+        let lock_mode = self.lock_mode;
+        let open_key_sequence = self.pending_key_sequence.take();
 
         // The guaranteed escape from locked mode, resolved before the keymap
         // and before sequence buffering: whatever the viewer is in the middle
         // of, this chord unlocks it.
-        if mode == LockMode::Locked && chord == self.keymap.unlock_chord() {
-            return KeyOutcome::Fire(unlock());
+        if lock_mode == LockMode::Locked && chord == self.keymap_catalog.get_unlock_chord() {
+            return KeyOutcome::Fire(build_unlock_bound_action());
         }
 
         // The open sequence's chords with this one after them, or this one on
         // its own. One keypress allocates the chord list once and the sequence
         // once.
-        let sequence = match pending.as_ref() {
-            Some(open) => {
-                let held = open.sequence.chords();
-                let mut rest = Vec::with_capacity(held.len());
-                rest.extend_from_slice(&held[1..]);
-                rest.push(chord);
-                KeySequence::new(held[0], rest)
+        let key_sequence = match open_key_sequence.as_ref() {
+            Some(open_key_sequence) => {
+                let held_chords = open_key_sequence.sequence.list_chords();
+                let mut remaining_chords = Vec::with_capacity(held_chords.len());
+                remaining_chords.extend_from_slice(&held_chords[1..]);
+                remaining_chords.push(chord);
+                KeySequence::from_first_and_rest(held_chords[0], remaining_chords)
             }
             None => KeySequence::from(chord),
         };
 
-        let matched = self.keymap.match_sequence(mode, &sequence);
-        match (matched.exact, matched.prefix) {
-            (Some(bound), false) => {
-                self.rearm_continuous(&bound, &sequence);
-                KeyOutcome::Fire(bound)
+        let sequence_match = self.keymap_catalog.match_sequence(lock_mode, &key_sequence);
+        match (
+            sequence_match.exact_bound_action,
+            sequence_match.has_longer_key_sequence,
+        ) {
+            (Some(bound_action), false) => {
+                self.rearm_continuous(&bound_action, &key_sequence);
+                KeyOutcome::Fire(bound_action)
             }
-            (exact, true) => {
+            (exact_bound_action, true) => {
                 // A prefix-only sequence waits for its next chord with no
                 // deadline; only exact-plus-longer ambiguity arms one, and
                 // reaching it fires the exact binding.
-                let deadline = exact.is_some().then(|| now + self.keymap.chord_timeout());
-                self.pending = Some(PendingKeySequence { sequence, deadline });
+                let deadline = exact_bound_action
+                    .is_some()
+                    .then(|| current_time + self.keymap_catalog.get_chord_timeout());
+                self.pending_key_sequence = Some(PendingKeySequence {
+                    sequence: key_sequence,
+                    deadline,
+                });
                 KeyOutcome::Pending
             }
-            (None, false) => match pending {
+            (None, false) => match open_key_sequence {
                 // Escape leaves an open sequence: the held chords are dropped
                 // and the Escape itself is consumed rather than typed.
-                Some(_) if chord == ESCAPE => KeyOutcome::Pending,
+                Some(_) if chord == ESCAPE_KEY_CHORD => KeyOutcome::Pending,
                 // A key that continues nothing is discarded and the sequence
                 // stands unchanged, deadline included: the viewer is inside a
                 // koshi context, so a key that context cannot use goes nowhere
                 // rather than surprising the program underneath.
-                Some(held) => {
-                    self.pending = Some(held);
+                Some(held_key_sequence) => {
+                    self.pending_key_sequence = Some(held_key_sequence);
                     KeyOutcome::Pending
                 }
                 // No sequence is open, so the key is the user's own to type.
-                None if mode.passes_to_pane() => KeyOutcome::PassThrough(chord),
+                None if lock_mode.should_pass_unbound_input_to_pane() => {
+                    KeyOutcome::PassThrough(chord)
+                }
                 None => KeyOutcome::Discard,
             },
         }
@@ -153,11 +165,11 @@ impl Client {
     /// can wake for it. Prefix-only sequences carry no deadline and never wake
     /// it.
     #[must_use]
-    pub fn next_key_wakeup(&self, now: Instant) -> Option<Duration> {
-        self.pending
+    pub fn next_key_wakeup(&self, current_time: Instant) -> Option<Duration> {
+        self.pending_key_sequence
             .as_ref()
-            .and_then(|pending| pending.deadline)
-            .map(|deadline| deadline.saturating_duration_since(now))
+            .and_then(|pending_key_sequence| pending_key_sequence.deadline)
+            .map(|deadline| deadline.saturating_duration_since(current_time))
     }
 
     /// Fire the open sequence's complete binding if its ambiguity deadline has
@@ -167,22 +179,22 @@ impl Client {
     /// binding, so it normally still is. A keymap change can retire that
     /// binding while the sequence waits; the held chords then resolve to
     /// nothing and are dropped, never typed at the pane.
-    pub fn expire_key_sequence(&mut self, now: Instant) -> Option<BoundAction> {
-        let due = self
-            .pending
+    pub fn expire_key_sequence(&mut self, current_time: Instant) -> Option<BoundAction> {
+        let is_deadline_due = self
+            .pending_key_sequence
             .as_ref()
-            .and_then(|pending| pending.deadline)
-            .is_some_and(|deadline| deadline <= now);
-        if !due {
+            .and_then(|pending_key_sequence| pending_key_sequence.deadline)
+            .is_some_and(|deadline| deadline <= current_time);
+        if !is_deadline_due {
             return None;
         }
-        let pending = self.pending.take()?;
-        let bound = self
-            .keymap
-            .match_sequence(self.lock_mode, &pending.sequence)
-            .exact?;
-        self.rearm_continuous(&bound, &pending.sequence);
-        Some(bound)
+        let pending_key_sequence = self.pending_key_sequence.take()?;
+        let bound_action = self
+            .keymap_catalog
+            .match_sequence(self.lock_mode, &pending_key_sequence.sequence)
+            .exact_bound_action?;
+        self.rearm_continuous(&bound_action, &pending_key_sequence.sequence);
+        Some(bound_action)
     }
 
     /// Re-open the prefix of a sequence whose action the registry marks
@@ -193,17 +205,20 @@ impl Client {
     /// captures the keyboard like any other open sequence, so a key that
     /// resizes nothing is discarded and the prefix stands until `Esc` leaves
     /// it.
-    fn rearm_continuous(&mut self, bound: &BoundAction, sequence: &KeySequence) {
-        let continuous = self
+    fn rearm_continuous(&mut self, bound_action: &BoundAction, key_sequence: &KeySequence) {
+        let is_continuous = self
             .registry
-            .lookup(&bound.action)
-            .is_some_and(|metadata| metadata.continuous);
-        let chords = sequence.chords();
-        if !continuous || chords.len() < 2 {
+            .find_action_metadata(&bound_action.action_reference)
+            .is_some_and(|action_metadata| action_metadata.is_continuous);
+        let sequence_chords = key_sequence.list_chords();
+        if !is_continuous || sequence_chords.len() < 2 {
             return;
         }
-        self.pending = Some(PendingKeySequence {
-            sequence: KeySequence::new(chords[0], chords[1..chords.len() - 1].to_vec()),
+        self.pending_key_sequence = Some(PendingKeySequence {
+            sequence: KeySequence::from_first_and_rest(
+                sequence_chords[0],
+                sequence_chords[1..sequence_chords.len() - 1].to_vec(),
+            ),
             deadline: None,
         });
     }
@@ -211,10 +226,10 @@ impl Client {
 
 /// The binding the unlock chord fires, built here and never looked up in the
 /// keymap. The escape from locked mode holds whatever any config layer says.
-fn unlock() -> BoundAction {
+fn build_unlock_bound_action() -> BoundAction {
     BoundAction {
-        action: ActionRef::core("unlock")
+        action_reference: ActionReference::from_core_action_name("unlock")
             .expect("the reserved unlock action name satisfies the action-name grammar"),
-        args: ActionArgs::None,
+        action_arguments: ActionArgs::None,
     }
 }

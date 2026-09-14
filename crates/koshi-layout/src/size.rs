@@ -13,20 +13,21 @@ use thiserror::Error;
 ///
 /// Two flex children with weights 2 and 1 receive two thirds and one third of
 /// the space remaining after fixed and percent children are placed.
-pub type Weight = u32;
+pub type FlexWeight = u32;
 
 /// How a split child claims cells along the split axis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SizeConstraint {
     /// A weighted share of the space left over after `Fixed` and `Percent`
     /// children are placed.
-    Flex(Weight),
+    Flex(FlexWeight),
     /// A percentage (1–100) of the parent's axis, floored to whole cells.
     Percent(u8),
     /// An exact number of cells.
     Fixed(u16),
     /// A floor: behaves like `Flex(1)` but never solves below this many cells.
-    Min(u16),
+    #[serde(rename = "Min")]
+    Minimum(u16),
     /// A target honored when slack allows: behaves like `Flex(1)` that aims
     /// for this many cells.
     Preferred(u16),
@@ -38,18 +39,18 @@ pub enum ConstraintError {
     /// The flex weight is `0`.
     #[error("flex weight must be at least 1")]
     ZeroFlexWeight,
-    /// The percentage is outside 1–100; `got` is the rejected value.
-    #[error("percent must be between 1 and 100, got {got}")]
-    PercentOutOfRange { got: u8 },
+    /// The percentage is outside 1–100; `received_percent` is the rejected value.
+    #[error("percent must be between 1 and 100, got {received_percent}")]
+    PercentOutOfRange { received_percent: u8 },
     /// The fixed size is `0` cells.
     #[error("fixed size must be at least one cell")]
-    ZeroFixed,
+    ZeroFixedCellCount,
     /// The minimum is `0` cells.
     #[error("minimum size must be at least one cell")]
-    ZeroMin,
+    ZeroMinimumCellCount,
     /// The preferred size is `0` cells.
     #[error("preferred size must be at least one cell")]
-    ZeroPreferred,
+    ZeroPreferredCellCount,
 }
 
 impl DomainError for ConstraintError {
@@ -57,7 +58,7 @@ impl DomainError for ConstraintError {
         DomainCategory::Layout
     }
 
-    fn severity(&self) -> Severity {
+    fn get_severity(&self) -> Severity {
         Severity::Recoverable
     }
 }
@@ -67,12 +68,12 @@ impl SizeConstraint {
     ///
     /// # Errors
     ///
-    /// [`ConstraintError::ZeroFlexWeight`] when `weight` is zero.
-    pub fn flex(weight: Weight) -> Result<Self, ConstraintError> {
-        if weight == 0 {
+    /// [`ConstraintError::ZeroFlexWeight`] when `flex_weight` is zero.
+    pub fn from_flex_weight(flex_weight: FlexWeight) -> Result<Self, ConstraintError> {
+        if flex_weight == 0 {
             Err(ConstraintError::ZeroFlexWeight)
         } else {
-            Ok(Self::Flex(weight))
+            Ok(Self::Flex(flex_weight))
         }
     }
 
@@ -81,11 +82,13 @@ impl SizeConstraint {
     /// # Errors
     ///
     /// [`ConstraintError::PercentOutOfRange`] when outside 1–100.
-    pub fn percent(percent: u8) -> Result<Self, ConstraintError> {
-        if (1..=100).contains(&percent) {
-            Ok(Self::Percent(percent))
+    pub fn from_percent(percent_value: u8) -> Result<Self, ConstraintError> {
+        if (1..=100).contains(&percent_value) {
+            Ok(Self::Percent(percent_value))
         } else {
-            Err(ConstraintError::PercentOutOfRange { got: percent })
+            Err(ConstraintError::PercentOutOfRange {
+                received_percent: percent_value,
+            })
         }
     }
 
@@ -93,12 +96,12 @@ impl SizeConstraint {
     ///
     /// # Errors
     ///
-    /// [`ConstraintError::ZeroFixed`] when `cells` is zero.
-    pub fn fixed(cells: u16) -> Result<Self, ConstraintError> {
-        if cells == 0 {
-            Err(ConstraintError::ZeroFixed)
+    /// [`ConstraintError::ZeroFixedCellCount`] when `cell_count` is zero.
+    pub fn from_fixed_cell_count(cell_count: u16) -> Result<Self, ConstraintError> {
+        if cell_count == 0 {
+            Err(ConstraintError::ZeroFixedCellCount)
         } else {
-            Ok(Self::Fixed(cells))
+            Ok(Self::Fixed(cell_count))
         }
     }
 
@@ -106,12 +109,12 @@ impl SizeConstraint {
     ///
     /// # Errors
     ///
-    /// [`ConstraintError::ZeroMin`] when `cells` is zero.
-    pub fn min(cells: u16) -> Result<Self, ConstraintError> {
-        if cells == 0 {
-            Err(ConstraintError::ZeroMin)
+    /// [`ConstraintError::ZeroMinimumCellCount`] when `cell_count` is zero.
+    pub fn from_minimum_cell_count(cell_count: u16) -> Result<Self, ConstraintError> {
+        if cell_count == 0 {
+            Err(ConstraintError::ZeroMinimumCellCount)
         } else {
-            Ok(Self::Min(cells))
+            Ok(Self::Minimum(cell_count))
         }
     }
 
@@ -119,46 +122,51 @@ impl SizeConstraint {
     ///
     /// # Errors
     ///
-    /// [`ConstraintError::ZeroPreferred`] when `cells` is zero.
-    pub fn preferred(cells: u16) -> Result<Self, ConstraintError> {
-        if cells == 0 {
-            Err(ConstraintError::ZeroPreferred)
+    /// [`ConstraintError::ZeroPreferredCellCount`] when `cell_count` is zero.
+    pub fn from_preferred_cell_count(cell_count: u16) -> Result<Self, ConstraintError> {
+        if cell_count == 0 {
+            Err(ConstraintError::ZeroPreferredCellCount)
         } else {
-            Ok(Self::Preferred(cells))
+            Ok(Self::Preferred(cell_count))
         }
     }
 }
 
 /// The complete sizing instruction for one split child.
 ///
-/// `primary` picks the distribution strategy; `min` and `preferred` overlay a
+/// `primary_constraint` picks the distribution strategy; `minimum_cell_count` and
+/// `preferred_cell_count` overlay a
 /// floor and a target on top of any primary; `resize_delta` is the
 /// accumulated user resize in cells, applied after the primary distribution
 /// on every solve, at any terminal size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SizeWeight {
     /// The distribution strategy for this child.
-    pub primary: SizeConstraint,
+    #[serde(rename = "primary")]
+    pub primary_constraint: SizeConstraint,
     /// Floor in cells along the split axis: a guaranteed minimum applied
     /// after the primary distribution, whatever the primary is. Combinable
-    /// with `preferred` — both overlays may be set at once.
-    pub min: Option<u16>,
+    /// with `preferred_cell_count` — both overlays may be set at once.
+    #[serde(rename = "min")]
+    pub minimum_cell_count: Option<u16>,
     /// Target in cells along the split axis, honored only with slack that
     /// flexible siblings can give after the primary distribution and
-    /// without pushing anyone below a floor. Combinable with `min`.
-    pub preferred: Option<u16>,
-    /// Accumulated user-resize offset in cells, applied after `primary`.
+    /// without pushing anyone below a floor. Combinable with
+    /// `minimum_cell_count`.
+    #[serde(rename = "preferred")]
+    pub preferred_cell_count: Option<u16>,
+    /// Accumulated user-resize offset in cells, applied after `primary_constraint`.
     pub resize_delta: i32,
 }
 
 impl SizeWeight {
-    /// A weight using `primary` with no overlays and no resize offset.
+    /// A weight using `primary_constraint` with no overlays and no resize offset.
     #[must_use]
-    pub fn new(primary: SizeConstraint) -> Self {
+    pub fn from_primary_constraint(primary_constraint: SizeConstraint) -> Self {
         Self {
-            primary,
-            min: None,
-            preferred: None,
+            primary_constraint,
+            minimum_cell_count: None,
+            preferred_cell_count: None,
             resize_delta: 0,
         }
     }
@@ -167,7 +175,7 @@ impl SizeWeight {
 impl Default for SizeWeight {
     /// An equal share: `Flex(1)` with no overlays and no resize offset.
     fn default() -> Self {
-        Self::new(SizeConstraint::Flex(1))
+        Self::from_primary_constraint(SizeConstraint::Flex(1))
     }
 }
 

@@ -20,154 +20,262 @@ use crate::snapshot::{
 
 /// A frame of one session named `one`, holding one tab named `first` with no
 /// panes in it.
-fn snapshot() -> RenderSnapshot {
+fn build_render_snapshot() -> RenderSnapshot {
     let tab_id = TabId::new();
 
     RenderSnapshot {
-        session: SessionSnapshot {
-            id: SessionId::new(),
-            name: "one".to_string(),
-            active_tab: TabSnapshot {
-                id: tab_id,
-                name: "first".to_string(),
-                layout_solved: Vec::new(),
-                effective_size: Size { cols: 80, rows: 24 },
+        session_snapshot: SessionSnapshot {
+            session_id: SessionId::new(),
+            session_name: "one".to_string(),
+            active_tab_snapshot: TabSnapshot {
+                tab_id,
+                tab_name: "first".to_string(),
+                pane_slots: Vec::new(),
+                effective_cell_size: Size {
+                    column_count: 80,
+                    row_count: 24,
+                },
                 stack_headers: Vec::new(),
                 layout_mode: LayoutMode::Tiled,
-                all_suppressed: false,
-                gap: 0,
+                are_all_panes_suppressed: false,
+                gap_cell_count: 0,
             },
             tabs_metadata: vec![TabMeta {
-                id: tab_id,
-                name: "first".to_string(),
-                index: 0,
-                active: true,
+                tab_id,
+                tab_name: "first".to_string(),
+                tab_index: 0,
+                is_active: true,
             }],
         },
-        panes: Vec::new(),
-        client: ClientSnapshot {
-            id: ClientId::new(),
-            viewport: Size { cols: 80, rows: 24 },
-            active_tab: tab_id,
-            focused_pane: None,
+        pane_snapshots: Vec::new(),
+        client_snapshot: ClientSnapshot {
+            client_id: ClientId::new(),
+            viewport_size: Size {
+                column_count: 80,
+                row_count: 24,
+            },
+            active_tab_id: tab_id,
+            focused_pane_id: None,
             lock_mode: LockMode::Normal,
-            mouse_select: false,
+            is_mouse_selection_enabled: false,
         },
-        plugin_ui: PluginUiSnapshot::default(),
+        plugin_ui_snapshot: PluginUiSnapshot::default(),
     }
 }
 
 /// Hints holding one binding: `<C-l>` labeled `Lock`.
-fn hints() -> KeymapHints {
+fn build_keymap_hints() -> KeymapHints {
     KeymapHints {
-        entries: Arc::new(vec![HintBinding {
-            sequence: KeySequence::new(KeyChord::new(ModFlags::CTRL, Key::Char('l')), Vec::new()),
-            label: "Lock".to_string(),
-            user_set: false,
-            pinned: false,
+        hint_bindings: Arc::new(vec![HintBinding {
+            key_sequence: KeySequence::from_first_and_rest(
+                KeyChord::from_parts(ModFlags::CTRL, Key::Char('l')),
+                Vec::new(),
+            ),
+            action_display_name: "Lock".to_string(),
+            is_user_authored: false,
+            is_pinned: false,
         }]),
         prefix_labels: Arc::new(BTreeMap::new()),
-        removed: Arc::new(BTreeSet::new()),
-        reverted: false,
+        removed_key_sequences: Arc::new(BTreeSet::new()),
+        is_reverted_to_defaults: false,
     }
 }
 
 #[test]
 fn core_regions_commit_exact_chrome_rectangles_and_revision() {
-    let committed = CommittedRegions::core(Size { cols: 80, rows: 24 }, 7);
+    let committed_regions = CommittedRegions::core(
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        7,
+    );
 
-    assert_eq!(committed.viewport, Size { cols: 80, rows: 24 });
-    assert_eq!(committed.input_revision, 7);
     assert_eq!(
-        committed.solve.regions,
+        committed_regions.viewport_size,
+        Size {
+            column_count: 80,
+            row_count: 24,
+        }
+    );
+    assert_eq!(committed_regions.region_input_revision, 7);
+    assert_eq!(
+        committed_regions.solved_regions.region_rects,
         vec![
-            Rect::new(Point { x: 0, y: 0 }, Size { cols: 80, rows: 1 }),
-            Rect::new(Point { x: 0, y: 23 }, Size { cols: 80, rows: 1 }),
+            Rect::from_origin_and_size(
+                Point { column: 0, row: 0 },
+                Size {
+                    column_count: 80,
+                    row_count: 1,
+                },
+            ),
+            Rect::from_origin_and_size(
+                Point { column: 0, row: 23 },
+                Size {
+                    column_count: 80,
+                    row_count: 1,
+                },
+            ),
         ]
     );
     assert_eq!(
-        committed.solve.pane_rect,
-        Rect::new(Point { x: 0, y: 1 }, Size { cols: 80, rows: 22 })
+        committed_regions.solved_regions.pane_rect,
+        Rect::from_origin_and_size(
+            Point { column: 0, row: 1 },
+            Size {
+                column_count: 80,
+                row_count: 22,
+            },
+        )
     );
 }
 
 #[test]
-fn core_region_solve_keeps_a_rectangle_per_region_on_short_viewports() {
+fn solve_core_regions_keeps_a_rectangle_per_region_on_short_viewports() {
     // Two rows: the tab row takes the first, the hint row the second, and no row
     // is left for panes.
-    let two = core_region_solve(Size { cols: 80, rows: 2 });
+    let two_row_regions = solve_core_regions(Size {
+        column_count: 80,
+        row_count: 2,
+    });
     assert_eq!(
-        two.regions,
+        two_row_regions.region_rects,
         vec![
-            Rect::new(Point { x: 0, y: 0 }, Size { cols: 80, rows: 1 }),
-            Rect::new(Point { x: 0, y: 1 }, Size { cols: 80, rows: 1 }),
+            Rect::from_origin_and_size(
+                Point { column: 0, row: 0 },
+                Size {
+                    column_count: 80,
+                    row_count: 1,
+                },
+            ),
+            Rect::from_origin_and_size(
+                Point { column: 0, row: 1 },
+                Size {
+                    column_count: 80,
+                    row_count: 1,
+                },
+            ),
         ]
     );
     assert_eq!(
-        two.pane_rect,
-        Rect::new(Point { x: 0, y: 1 }, Size { cols: 80, rows: 0 })
+        two_row_regions.pane_rect,
+        Rect::from_origin_and_size(
+            Point { column: 0, row: 1 },
+            Size {
+                column_count: 80,
+                row_count: 0,
+            },
+        )
     );
 
     // One row: the tab row takes it and the hint row keeps a zero-height
     // rectangle at the row after it.
-    let one = core_region_solve(Size { cols: 80, rows: 1 });
+    let one_row_regions = solve_core_regions(Size {
+        column_count: 80,
+        row_count: 1,
+    });
     assert_eq!(
-        one.regions,
+        one_row_regions.region_rects,
         vec![
-            Rect::new(Point { x: 0, y: 0 }, Size { cols: 80, rows: 1 }),
-            Rect::new(Point { x: 0, y: 1 }, Size { cols: 80, rows: 0 }),
+            Rect::from_origin_and_size(
+                Point { column: 0, row: 0 },
+                Size {
+                    column_count: 80,
+                    row_count: 1,
+                },
+            ),
+            Rect::from_origin_and_size(
+                Point { column: 0, row: 1 },
+                Size {
+                    column_count: 80,
+                    row_count: 0,
+                },
+            ),
         ]
     );
     assert_eq!(
-        one.pane_rect,
-        Rect::new(Point { x: 0, y: 1 }, Size { cols: 80, rows: 0 })
+        one_row_regions.pane_rect,
+        Rect::from_origin_and_size(
+            Point { column: 0, row: 1 },
+            Size {
+                column_count: 80,
+                row_count: 0,
+            },
+        )
     );
 
     // A zero-size viewport: both rectangles are empty at the origin.
-    let zero = core_region_solve(Size { cols: 0, rows: 0 });
-    assert_eq!(zero.regions, vec![Rect::zero(), Rect::zero()]);
-    assert_eq!(zero.pane_rect, Rect::zero());
+    let zero_size_regions = solve_core_regions(Size {
+        column_count: 0,
+        row_count: 0,
+    });
+    assert_eq!(
+        zero_size_regions.region_rects,
+        vec![Rect::empty_at_origin(), Rect::empty_at_origin()]
+    );
+    assert_eq!(zero_size_regions.pane_rect, Rect::empty_at_origin());
 }
 
 #[test]
 fn assembling_the_keybinding_row_input_twice_shares_every_allocation() {
-    let hints = hints();
-    let pending = KeySequence::new(KeyChord::new(ModFlags::CTRL, Key::Char('p')), Vec::new());
+    let keymap_hints = build_keymap_hints();
+    let pending_key_sequence = KeySequence::from_first_and_rest(
+        KeyChord::from_parts(ModFlags::CTRL, Key::Char('p')),
+        Vec::new(),
+    );
 
-    let first = StatuslineInputs {
-        hints: &hints,
-        pending: Some(&pending),
+    let first_statusline_inputs = StatuslineInputs {
+        keymap_hints: &keymap_hints,
+        pending_key_sequence: Some(&pending_key_sequence),
     };
-    let second = StatuslineInputs {
-        hints: &hints,
-        pending: Some(&pending),
+    let second_statusline_inputs = StatuslineInputs {
+        keymap_hints: &keymap_hints,
+        pending_key_sequence: Some(&pending_key_sequence),
     };
 
     assert!(
-        Arc::ptr_eq(&first.hints.entries, &second.hints.entries),
-        "entries was copied"
+        Arc::ptr_eq(
+            &first_statusline_inputs.keymap_hints.hint_bindings,
+            &second_statusline_inputs.keymap_hints.hint_bindings,
+        ),
+        "hint_bindings was copied"
     );
     assert!(
-        Arc::ptr_eq(&first.hints.prefix_labels, &second.hints.prefix_labels),
+        Arc::ptr_eq(
+            &first_statusline_inputs.keymap_hints.prefix_labels,
+            &second_statusline_inputs.keymap_hints.prefix_labels,
+        ),
         "prefix_labels was copied"
     );
     assert!(
-        Arc::ptr_eq(&first.hints.removed, &second.hints.removed),
-        "removed was copied"
+        Arc::ptr_eq(
+            &first_statusline_inputs.keymap_hints.removed_key_sequences,
+            &second_statusline_inputs.keymap_hints.removed_key_sequences,
+        ),
+        "removed_key_sequences was copied"
     );
-    assert!(std::ptr::eq(first.hints, second.hints), "hints was copied");
     assert!(
-        std::ptr::eq(first.pending.unwrap(), second.pending.unwrap()),
-        "pending was copied"
+        std::ptr::eq(
+            first_statusline_inputs.keymap_hints,
+            second_statusline_inputs.keymap_hints,
+        ),
+        "keymap_hints was copied"
+    );
+    assert!(
+        std::ptr::eq(
+            first_statusline_inputs.pending_key_sequence.unwrap(),
+            second_statusline_inputs.pending_key_sequence.unwrap(),
+        ),
+        "pending_key_sequence was copied"
     );
 }
 
 #[test]
 fn assembling_the_tab_row_input_twice_borrows_each_shared_field() {
-    let mut snapshot = snapshot();
-    snapshot.client.lock_mode = LockMode::Locked;
-    snapshot.client.mouse_select = true;
-    let viewer = ViewerChrome {
+    let mut render_snapshot = build_render_snapshot();
+    render_snapshot.client_snapshot.lock_mode = LockMode::Locked;
+    render_snapshot.client_snapshot.is_mouse_selection_enabled = true;
+    let viewer_chrome = ViewerChrome {
         reconnecting: Some(Reconnecting {
             attempt: 3,
             retry_in_seconds: 8,
@@ -176,46 +284,67 @@ fn assembling_the_tab_row_input_twice_borrows_each_shared_field() {
         ..ViewerChrome::default()
     };
 
-    let first = TablineInputs {
-        session_name: &snapshot.session.name,
-        tabs: &snapshot.session.tabs_metadata,
-        lock_mode: snapshot.client.lock_mode,
-        mouse_select: snapshot.client.mouse_select,
-        reconnecting: viewer.reconnecting,
-        tabline_offset: viewer.tabline_offset,
+    let first_tabline_inputs = TablineInputs {
+        session_name: &render_snapshot.session_snapshot.session_name,
+        tabs_metadata: &render_snapshot.session_snapshot.tabs_metadata,
+        lock_mode: render_snapshot.client_snapshot.lock_mode,
+        is_mouse_selection_enabled: render_snapshot.client_snapshot.is_mouse_selection_enabled,
+        reconnecting: viewer_chrome.reconnecting,
+        tabline_offset: viewer_chrome.tabline_offset,
     };
-    let second = TablineInputs {
-        session_name: &snapshot.session.name,
-        tabs: &snapshot.session.tabs_metadata,
-        lock_mode: snapshot.client.lock_mode,
-        mouse_select: snapshot.client.mouse_select,
-        reconnecting: viewer.reconnecting,
-        tabline_offset: viewer.tabline_offset,
+    let second_tabline_inputs = TablineInputs {
+        session_name: &render_snapshot.session_snapshot.session_name,
+        tabs_metadata: &render_snapshot.session_snapshot.tabs_metadata,
+        lock_mode: render_snapshot.client_snapshot.lock_mode,
+        is_mouse_selection_enabled: render_snapshot.client_snapshot.is_mouse_selection_enabled,
+        reconnecting: viewer_chrome.reconnecting,
+        tabline_offset: viewer_chrome.tabline_offset,
     };
 
-    assert_eq!(first.session_name, "one");
-    assert_eq!(first.tabs[0].name, "first");
-    assert_eq!(first.lock_mode, LockMode::Locked);
-    assert!(first.mouse_select);
+    assert_eq!(first_tabline_inputs.session_name, "one");
+    assert_eq!(first_tabline_inputs.tabs_metadata[0].tab_name, "first");
+    assert_eq!(first_tabline_inputs.lock_mode, LockMode::Locked);
+    assert!(first_tabline_inputs.is_mouse_selection_enabled);
     assert_eq!(
-        first.reconnecting,
+        first_tabline_inputs.reconnecting,
         Some(Reconnecting {
             attempt: 3,
             retry_in_seconds: 8,
         })
     );
-    assert_eq!(first.tabline_offset, Some(2));
+    assert_eq!(first_tabline_inputs.tabline_offset, Some(2));
     assert!(
-        std::ptr::eq(first.session_name, second.session_name),
+        std::ptr::eq(
+            first_tabline_inputs.session_name,
+            second_tabline_inputs.session_name,
+        ),
         "session name was copied"
     );
-    assert!(std::ptr::eq(first.tabs, second.tabs), "tabs were copied");
-    assert_eq!(first.lock_mode, second.lock_mode);
-    assert_eq!(first.mouse_select, second.mouse_select);
-    assert_eq!(first.reconnecting, second.reconnecting);
-    assert_eq!(first.tabline_offset, second.tabline_offset);
+    assert!(
+        std::ptr::eq(
+            first_tabline_inputs.tabs_metadata,
+            second_tabline_inputs.tabs_metadata,
+        ),
+        "tabs_metadata were copied"
+    );
+    assert_eq!(
+        first_tabline_inputs.lock_mode,
+        second_tabline_inputs.lock_mode
+    );
+    assert_eq!(
+        first_tabline_inputs.is_mouse_selection_enabled,
+        second_tabline_inputs.is_mouse_selection_enabled
+    );
+    assert_eq!(
+        first_tabline_inputs.reconnecting,
+        second_tabline_inputs.reconnecting
+    );
+    assert_eq!(
+        first_tabline_inputs.tabline_offset,
+        second_tabline_inputs.tabline_offset
+    );
 
     // The frame yields the same value, field for field.
-    let layout = snapshot.layout(viewer);
-    assert_eq!(first, layout.tabline());
+    let frame_layout = render_snapshot.build_frame_layout(viewer_chrome);
+    assert_eq!(first_tabline_inputs, frame_layout.get_tabline_inputs());
 }

@@ -97,40 +97,44 @@ fn mouse_kind_serde_wire_form_names_the_variant_and_its_value() {
 
 #[test]
 fn mouse_input_serde_wire_form_carries_the_kind_cell_and_modifiers() {
-    let click = MouseInput {
-        kind: MouseKind::Press(MouseButton::Left),
-        at: Point { x: 10, y: 3 },
-        mods: ModFlags::CTRL,
+    let left_click = MouseInput {
+        mouse_kind: MouseKind::Press(MouseButton::Left),
+        position: Point { column: 10, row: 3 },
+        modifier_flags: ModFlags::CTRL,
     };
 
     assert_eq!(
-        serde_json::to_string(&click).expect("serialize"),
+        serde_json::to_string(&left_click).expect("serialize"),
         "{\"kind\":{\"Press\":\"Left\"},\"at\":{\"x\":10,\"y\":3},\"mods\":1}"
     );
 }
 
 #[test]
 fn mouse_answer_serde_wire_form_names_the_variant_and_its_fields() {
-    let pane = PaneId::from_uuid(Uuid::nil());
+    let pane_id = PaneId::from_uuid(Uuid::nil());
 
     assert_eq!(
         serde_json::to_string(&MouseAnswer::Scrolled {
-            pane,
-            top: Some(101)
+            pane_id,
+            top_row_number: Some(101)
         })
         .expect("serialize"),
         "{\"Scrolled\":{\"pane\":\"00000000-0000-0000-0000-000000000000\",\"top\":101}}"
     );
     assert_eq!(
-        serde_json::to_string(&MouseAnswer::Scrolled { pane, top: None }).expect("serialize"),
+        serde_json::to_string(&MouseAnswer::Scrolled {
+            pane_id,
+            top_row_number: None,
+        })
+        .expect("serialize"),
         "{\"Scrolled\":{\"pane\":\"00000000-0000-0000-0000-000000000000\",\"top\":null}}"
     );
     assert_eq!(
         serde_json::to_string(&MouseAnswer::Resized {
-            pane,
-            side: Direction::Up,
-            step: -1,
-            applied: 3
+            pane_id,
+            border_side: Direction::Up,
+            resize_step: -1,
+            applied_cell_count: 3
         })
         .expect("serialize"),
         "{\"Resized\":{\"pane\":\"00000000-0000-0000-0000-000000000000\",\
@@ -140,109 +144,118 @@ fn mouse_answer_serde_wire_form_names_the_variant_and_its_fields() {
 
 #[test]
 fn a_mouse_button_survives_a_serde_round_trip() {
-    for button in [MouseButton::Left, MouseButton::Middle, MouseButton::Right] {
-        let json = serde_json::to_string(&button).expect("serialize");
-        let restored: MouseButton = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(button, restored);
+    for mouse_button in [MouseButton::Left, MouseButton::Middle, MouseButton::Right] {
+        let mouse_button_json = serde_json::to_string(&mouse_button).expect("serialize");
+        let deserialized_mouse_button: MouseButton =
+            serde_json::from_str(&mouse_button_json).expect("deserialize");
+        assert_eq!(mouse_button, deserialized_mouse_button);
     }
 }
 
 #[test]
 fn a_scroll_direction_survives_a_serde_round_trip() {
-    for direction in [
+    for scroll_direction in [
         ScrollDirection::Up,
         ScrollDirection::Down,
         ScrollDirection::Left,
         ScrollDirection::Right,
     ] {
-        let json = serde_json::to_string(&direction).expect("serialize");
-        let restored: ScrollDirection = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(direction, restored);
+        let scroll_direction_json = serde_json::to_string(&scroll_direction).expect("serialize");
+        let deserialized_scroll_direction: ScrollDirection =
+            serde_json::from_str(&scroll_direction_json).expect("deserialize");
+        assert_eq!(scroll_direction, deserialized_scroll_direction);
     }
 }
 
 #[test]
 fn a_mouse_tracking_level_survives_a_serde_round_trip() {
-    for tracking in [
+    for mouse_tracking in [
         MouseTracking::Off,
         MouseTracking::X10,
         MouseTracking::Normal,
         MouseTracking::ButtonMotion,
         MouseTracking::AnyMotion,
     ] {
-        let json = serde_json::to_string(&tracking).expect("serialize");
-        let restored: MouseTracking = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(tracking, restored);
+        let mouse_tracking_json = serde_json::to_string(&mouse_tracking).expect("serialize");
+        let deserialized_mouse_tracking: MouseTracking =
+            serde_json::from_str(&mouse_tracking_json).expect("deserialize");
+        assert_eq!(mouse_tracking, deserialized_mouse_tracking);
     }
 }
 
 #[test]
 fn a_mouse_kind_survives_a_serde_round_trip() {
-    for kind in [
+    for mouse_kind in [
         MouseKind::Press(MouseButton::Left),
         MouseKind::Release(MouseButton::Middle),
         MouseKind::Drag(MouseButton::Right),
         MouseKind::Scroll(ScrollDirection::Down),
         MouseKind::Motion,
     ] {
-        let json = serde_json::to_string(&kind).expect("serialize");
-        let restored: MouseKind = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(kind, restored);
+        let mouse_kind_json = serde_json::to_string(&mouse_kind).expect("serialize");
+        let deserialized_mouse_kind: MouseKind =
+            serde_json::from_str(&mouse_kind_json).expect("deserialize");
+        assert_eq!(mouse_kind, deserialized_mouse_kind);
     }
 }
 
 #[test]
 fn a_mouse_input_survives_a_serde_round_trip() {
-    let input = MouseInput {
-        kind: MouseKind::Drag(MouseButton::Left),
-        at: Point { x: 42, y: 7 },
-        mods: ModFlags::CTRL.union(ModFlags::SHIFT),
+    let mouse_input = MouseInput {
+        mouse_kind: MouseKind::Drag(MouseButton::Left),
+        position: Point { column: 42, row: 7 },
+        modifier_flags: ModFlags::CTRL.union(ModFlags::SHIFT),
     };
 
-    let json = serde_json::to_string(&input).expect("serialize");
-    let restored: MouseInput = serde_json::from_str(&json).expect("deserialize");
-    assert_eq!(input, restored);
+    let mouse_input_json = serde_json::to_string(&mouse_input).expect("serialize");
+    let deserialized_mouse_input: MouseInput =
+        serde_json::from_str(&mouse_input_json).expect("deserialize");
+    assert_eq!(mouse_input, deserialized_mouse_input);
 }
 
 #[test]
 fn a_mouse_answer_survives_a_serde_round_trip() {
-    let pane = PaneId::new();
-    for answer in [
+    let pane_id = PaneId::new();
+    for mouse_answer in [
         MouseAnswer::Scrolled {
-            pane,
-            top: Some(101),
+            pane_id,
+            top_row_number: Some(101),
         },
-        MouseAnswer::Scrolled { pane, top: None },
-        MouseAnswer::Resized {
-            pane,
-            side: Direction::Up,
-            step: -1,
-            applied: 3,
+        MouseAnswer::Scrolled {
+            pane_id,
+            top_row_number: None,
         },
         MouseAnswer::Resized {
-            pane,
-            side: Direction::Right,
-            step: 1,
-            applied: 0,
+            pane_id,
+            border_side: Direction::Up,
+            resize_step: -1,
+            applied_cell_count: 3,
+        },
+        MouseAnswer::Resized {
+            pane_id,
+            border_side: Direction::Right,
+            resize_step: 1,
+            applied_cell_count: 0,
         },
     ] {
-        let json = serde_json::to_string(&answer).expect("serialize");
-        let restored: MouseAnswer = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(answer, restored);
+        let mouse_answer_json = serde_json::to_string(&mouse_answer).expect("serialize");
+        let deserialized_mouse_answer: MouseAnswer =
+            serde_json::from_str(&mouse_answer_json).expect("deserialize");
+        assert_eq!(mouse_answer, deserialized_mouse_answer);
     }
 }
 
 #[test]
 fn a_left_click_input_carries_its_kind_cell_and_modifiers() {
-    let click = MouseInput {
-        kind: MouseKind::Press(MouseButton::Left),
-        at: Point { x: 10, y: 3 },
-        mods: ModFlags::NONE,
+    let left_click = MouseInput {
+        mouse_kind: MouseKind::Press(MouseButton::Left),
+        position: Point { column: 10, row: 3 },
+        modifier_flags: ModFlags::NONE,
     };
 
-    assert_eq!(click.kind, MouseKind::Press(MouseButton::Left));
-    assert_eq!(click.at, Point { x: 10, y: 3 });
-    assert_eq!(click.mods, ModFlags::NONE);
+    assert_eq!(left_click.mouse_kind, MouseKind::Press(MouseButton::Left));
+    assert_eq!(left_click.position, Point { column: 10, row: 3 });
+    assert_eq!(left_click.modifier_flags, ModFlags::NONE);
 }
 
 #[test]
@@ -263,68 +276,83 @@ fn a_press_and_a_release_of_the_same_button_are_distinct_kinds() {
 
 #[test]
 fn every_tracking_level_answers_every_event_kind_exactly() {
-    let press = MouseKind::Press(MouseButton::Left);
-    let release = MouseKind::Release(MouseButton::Left);
-    let drag = MouseKind::Drag(MouseButton::Left);
-    let scroll = MouseKind::Scroll(ScrollDirection::Up);
-    let motion = MouseKind::Motion;
+    let press_mouse_kind = MouseKind::Press(MouseButton::Left);
+    let release_mouse_kind = MouseKind::Release(MouseButton::Left);
+    let drag_mouse_kind = MouseKind::Drag(MouseButton::Left);
+    let scroll_mouse_kind = MouseKind::Scroll(ScrollDirection::Up);
+    let motion_mouse_kind = MouseKind::Motion;
 
-    let table = [
-        (MouseTracking::Off, press, false),
-        (MouseTracking::Off, release, false),
-        (MouseTracking::Off, drag, false),
-        (MouseTracking::Off, scroll, false),
-        (MouseTracking::Off, motion, false),
-        (MouseTracking::X10, press, true),
-        (MouseTracking::X10, release, false),
-        (MouseTracking::X10, drag, false),
-        (MouseTracking::X10, scroll, false),
-        (MouseTracking::X10, motion, false),
-        (MouseTracking::Normal, press, true),
-        (MouseTracking::Normal, release, true),
-        (MouseTracking::Normal, drag, false),
-        (MouseTracking::Normal, scroll, true),
-        (MouseTracking::Normal, motion, false),
-        (MouseTracking::ButtonMotion, press, true),
-        (MouseTracking::ButtonMotion, release, true),
-        (MouseTracking::ButtonMotion, drag, true),
-        (MouseTracking::ButtonMotion, scroll, true),
-        (MouseTracking::ButtonMotion, motion, false),
-        (MouseTracking::AnyMotion, press, true),
-        (MouseTracking::AnyMotion, release, true),
-        (MouseTracking::AnyMotion, drag, true),
-        (MouseTracking::AnyMotion, scroll, true),
-        (MouseTracking::AnyMotion, motion, true),
+    let tracking_expectations = [
+        (MouseTracking::Off, press_mouse_kind, false),
+        (MouseTracking::Off, release_mouse_kind, false),
+        (MouseTracking::Off, drag_mouse_kind, false),
+        (MouseTracking::Off, scroll_mouse_kind, false),
+        (MouseTracking::Off, motion_mouse_kind, false),
+        (MouseTracking::X10, press_mouse_kind, true),
+        (MouseTracking::X10, release_mouse_kind, false),
+        (MouseTracking::X10, drag_mouse_kind, false),
+        (MouseTracking::X10, scroll_mouse_kind, false),
+        (MouseTracking::X10, motion_mouse_kind, false),
+        (MouseTracking::Normal, press_mouse_kind, true),
+        (MouseTracking::Normal, release_mouse_kind, true),
+        (MouseTracking::Normal, drag_mouse_kind, false),
+        (MouseTracking::Normal, scroll_mouse_kind, true),
+        (MouseTracking::Normal, motion_mouse_kind, false),
+        (MouseTracking::ButtonMotion, press_mouse_kind, true),
+        (MouseTracking::ButtonMotion, release_mouse_kind, true),
+        (MouseTracking::ButtonMotion, drag_mouse_kind, true),
+        (MouseTracking::ButtonMotion, scroll_mouse_kind, true),
+        (MouseTracking::ButtonMotion, motion_mouse_kind, false),
+        (MouseTracking::AnyMotion, press_mouse_kind, true),
+        (MouseTracking::AnyMotion, release_mouse_kind, true),
+        (MouseTracking::AnyMotion, drag_mouse_kind, true),
+        (MouseTracking::AnyMotion, scroll_mouse_kind, true),
+        (MouseTracking::AnyMotion, motion_mouse_kind, true),
     ];
 
-    for (tracking, kind, expected) in table {
+    for (mouse_tracking, mouse_kind, expected_is_reported) in tracking_expectations {
         assert_eq!(
-            reports(tracking, kind),
-            expected,
-            "{tracking:?} + {kind:?} must report {expected}"
+            is_mouse_kind_reported(mouse_tracking, mouse_kind),
+            expected_is_reported,
+            "{mouse_tracking:?} + {mouse_kind:?} must report {expected_is_reported}"
         );
     }
 }
 
 #[test]
 fn the_answer_is_the_same_for_every_button_and_every_scroll_direction() {
-    for button in [MouseButton::Left, MouseButton::Middle, MouseButton::Right] {
-        assert!(reports(MouseTracking::X10, MouseKind::Press(button)));
-        assert!(!reports(MouseTracking::X10, MouseKind::Release(button)));
-        assert!(reports(
-            MouseTracking::ButtonMotion,
-            MouseKind::Drag(button)
+    for mouse_button in [MouseButton::Left, MouseButton::Middle, MouseButton::Right] {
+        assert!(is_mouse_kind_reported(
+            MouseTracking::X10,
+            MouseKind::Press(mouse_button)
         ));
-        assert!(!reports(MouseTracking::Normal, MouseKind::Drag(button)));
+        assert!(!is_mouse_kind_reported(
+            MouseTracking::X10,
+            MouseKind::Release(mouse_button)
+        ));
+        assert!(is_mouse_kind_reported(
+            MouseTracking::ButtonMotion,
+            MouseKind::Drag(mouse_button)
+        ));
+        assert!(!is_mouse_kind_reported(
+            MouseTracking::Normal,
+            MouseKind::Drag(mouse_button)
+        ));
     }
-    for direction in [
+    for scroll_direction in [
         ScrollDirection::Up,
         ScrollDirection::Down,
         ScrollDirection::Left,
         ScrollDirection::Right,
     ] {
-        assert!(!reports(MouseTracking::X10, MouseKind::Scroll(direction)));
-        assert!(reports(MouseTracking::Normal, MouseKind::Scroll(direction)));
+        assert!(!is_mouse_kind_reported(
+            MouseTracking::X10,
+            MouseKind::Scroll(scroll_direction)
+        ));
+        assert!(is_mouse_kind_reported(
+            MouseTracking::Normal,
+            MouseKind::Scroll(scroll_direction)
+        ));
     }
 }
 
@@ -335,9 +363,10 @@ fn mouse_tracking_default_is_off() {
 
 #[test]
 fn decoding_refuses_a_mouse_kind_no_variant_names() {
-    let refused = serde_json::from_str::<MouseKind>("\"Hover\"").expect_err("no such kind");
+    let mouse_kind_parse_error =
+        serde_json::from_str::<MouseKind>("\"Hover\"").expect_err("no such kind");
     assert_eq!(
-        refused.to_string(),
+        mouse_kind_parse_error.to_string(),
         "unknown variant `Hover`, expected one of `Press`, `Release`, `Drag`, `Scroll`, `Motion` \
          at line 1 column 7"
     );
@@ -345,14 +374,14 @@ fn decoding_refuses_a_mouse_kind_no_variant_names() {
 
 #[test]
 fn a_scrolled_answer_missing_its_top_line_decodes_as_none() {
-    let decoded: MouseAnswer =
+    let decoded_mouse_answer: MouseAnswer =
         serde_json::from_str("{\"Scrolled\":{\"pane\":\"00000000-0000-0000-0000-000000000000\"}}")
             .expect("a missing `top` reads as `None`");
     assert_eq!(
-        decoded,
+        decoded_mouse_answer,
         MouseAnswer::Scrolled {
-            pane: PaneId::from_uuid(Uuid::nil()),
-            top: None
+            pane_id: PaneId::from_uuid(Uuid::nil()),
+            top_row_number: None
         }
     );
 }

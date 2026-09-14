@@ -17,7 +17,7 @@
 //!
 //! ```text
 //! {"Layout":{"tab":null}}   -> MaybeKnown::Known(IpcRequestKind::Layout { .. })
-//! {"Floating":{"pane":3}}   -> MaybeKnown::Unknown { name: "Floating" }
+//! {"Floating":{"pane":3}}   -> MaybeKnown::Unknown { variant_name: "Floating" }
 //! {"Layout":{"tab":7.5}}    -> Err: Layout is a name this build has
 //! 7                         -> Err: 7 names no variant
 //! ```
@@ -30,9 +30,9 @@
 //! filtered by
 //! [`sanitize_reported_text`](koshi_core::text::sanitize_reported_text) as it
 //! is read: `{"\u{1b}[2JFloating":{}}` reads as
-//! `MaybeKnown::Unknown { name: "[2JFloating" }`, and a name of a million
+//! `MaybeKnown::Unknown { variant_name: "[2JFloating" }`, and a name of a million
 //! characters is cut to
-//! [`MAX_REPORTED_TEXT_BYTES`](koshi_core::text::MAX_REPORTED_TEXT_BYTES).
+//! [`MAX_REPORTED_TEXT_BYTE_COUNT`](koshi_core::text::MAX_REPORTED_TEXT_BYTE_COUNT).
 
 use std::fmt;
 
@@ -46,36 +46,38 @@ use serde_json::value::RawValue;
 /// know, and a misspelled `request_id` is an error. What may travel inside `K`
 /// is each protocol's own business.
 ///
-/// `K` is the request kind. A sender uses the protocol's own kind. A server
-/// uses [`MaybeKnown<K>`], where a kind this build does not have arrives as
+/// `RequestKind` is the request kind. A sender uses the protocol's own kind. A
+/// server uses [`MaybeKnown<RequestKind>`], where a kind this build does not have arrives as
 /// [`MaybeKnown::Unknown`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Envelope<K> {
+pub struct Envelope<RequestKind> {
     /// Caller-chosen id, repeated in the answer to this message. Unique among
     /// the messages in flight on one connection.
     pub request_id: u64,
     /// What is being asked.
-    pub kind: K,
+    #[serde(rename = "kind")]
+    pub request_kind: RequestKind,
 }
 
 /// One message answering an [`Envelope`], on any of koshi's protocols.
 ///
 /// The envelope's own fields are fixed, the same way [`Envelope`]'s are.
 ///
-/// `R` is the answer. A server uses the protocol's own result. A caller uses
-/// [`MaybeKnown<R>`], where a result this build does not have arrives as
+/// `Response` is the answer. A server uses the protocol's own result. A caller uses
+/// [`MaybeKnown<Response>`], where a result this build does not have arrives as
 /// [`MaybeKnown::Unknown`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Answer<R> {
+pub struct Answer<Response> {
     /// The `request_id` of the message being answered, or `None` when the
     /// bytes received were too malformed to read one — a caller that sent
     /// request 7 and reads `None` knows the answer belongs to no request of
     /// its own.
     pub request_id: Option<u64>,
     /// The answer itself.
-    pub result: R,
+    #[serde(rename = "result")]
+    pub answer_result: Response,
 }
 
 /// The variant names a build can decode, for one wire enum.
@@ -107,10 +109,10 @@ pub enum MaybeKnown<T> {
         /// The name the peer spelled, filtered by
         /// [`sanitize_reported_text`](koshi_core::text::sanitize_reported_text):
         /// no control or bidi character, and at most
-        /// [`MAX_REPORTED_TEXT_BYTES`](koshi_core::text::MAX_REPORTED_TEXT_BYTES)
+        /// [`MAX_REPORTED_TEXT_BYTE_COUNT`](koshi_core::text::MAX_REPORTED_TEXT_BYTE_COUNT)
         /// bytes. Every variant name this build has is unchanged by that
         /// filter.
-        name: String,
+        variant_name: String,
     },
 }
 
@@ -128,21 +130,21 @@ where
     /// `serde_json::from_str` and `serde_json::from_slice`, and fails at run
     /// time through `serde_json::from_reader`.
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let text = <&RawValue>::deserialize(deserializer)?.get();
-        let refusal = match serde_json::from_str(text) {
-            Ok(value) => return Ok(MaybeKnown::Known(value)),
-            Err(refusal) => refusal,
+        let raw_json_text = <&RawValue>::deserialize(deserializer)?.get();
+        let decode_error = match serde_json::from_str(raw_json_text) {
+            Ok(decoded_wire_value) => return Ok(MaybeKnown::Known(decoded_wire_value)),
+            Err(decode_error) => decode_error,
         };
-        let Some(name) = variant_name(text) else {
+        let Some(variant_name_text) = parse_wire_variant_name(raw_json_text) else {
             return Err(D::Error::custom(
                 "a wire value is a variant name, or a one-key object naming one",
             ));
         };
-        if T::VARIANTS.contains(&name.as_str()) {
-            return Err(D::Error::custom(refusal));
+        if T::VARIANTS.contains(&variant_name_text.as_str()) {
+            return Err(D::Error::custom(decode_error));
         }
         Ok(MaybeKnown::Unknown {
-            name: koshi_core::text::sanitize_reported_text(&name),
+            variant_name: koshi_core::text::sanitize_reported_text(&variant_name_text),
         })
     }
 }
@@ -158,13 +160,13 @@ where
 ///
 /// Example — a cell whose underline arrives as `"Dotted2"` from a newer koshi
 /// draws with no underline, and every other cell in the frame is untouched.
-pub fn or_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+pub fn deserialize_or_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: Deserializer<'de>,
     T: DeserializeOwned + Default,
 {
-    let text = <&RawValue>::deserialize(deserializer)?.get();
-    Ok(serde_json::from_str(text).unwrap_or_default())
+    let raw_json_text = <&RawValue>::deserialize(deserializer)?.get();
+    Ok(serde_json::from_str(raw_json_text).unwrap_or_default())
 }
 
 /// The variant name a raw JSON message carries: the string itself for a
@@ -173,34 +175,37 @@ where
 /// deserializer refuses the entries the visitor left unread.
 ///
 /// The payload is stepped over without being decoded.
-fn variant_name(text: &str) -> Option<String> {
-    serde_json::Deserializer::from_str(text)
-        .deserialize_any(NameVisitor)
+fn parse_wire_variant_name(raw_json_text: &str) -> Option<String> {
+    serde_json::Deserializer::from_str(raw_json_text)
+        .deserialize_any(WireVariantNameVisitor)
         .ok()
 }
 
 /// Reads the variant name: a bare string is the name, and an object gives its
 /// first key. The value beside that key is stepped over.
-struct NameVisitor;
+struct WireVariantNameVisitor;
 
-impl<'de> Visitor<'de> for NameVisitor {
+impl<'de> Visitor<'de> for WireVariantNameVisitor {
     type Value = String;
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("a variant name, or an object naming one")
     }
 
-    fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<String, E> {
-        Ok(value.to_string())
+    fn visit_str<ErrorType: serde::de::Error>(
+        self,
+        variant_name_text: &str,
+    ) -> Result<String, ErrorType> {
+        Ok(variant_name_text.to_string())
     }
 
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<String, A::Error> {
-        let name = map
+    fn visit_map<A: MapAccess<'de>>(self, mut variant_object: A) -> Result<String, A::Error> {
+        let variant_name = variant_object
             .next_key::<String>()?
             .ok_or_else(|| A::Error::custom("an object naming a variant has a key"))?;
         // `IgnoredAny` walks the payload's syntax and allocates nothing.
-        map.next_value::<IgnoredAny>()?;
-        Ok(name)
+        variant_object.next_value::<IgnoredAny>()?;
+        Ok(variant_name)
     }
 }
 

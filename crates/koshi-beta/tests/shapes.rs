@@ -15,64 +15,67 @@ use koshi_beta::beta_feature;
 
 /// Polls `future` once and returns its value. Panics if the first poll is
 /// `Pending`.
-fn now<F: Future>(future: F) -> F::Output {
+fn poll_future_once<FutureType: Future>(future: FutureType) -> FutureType::Output {
     match pin!(future).poll(&mut Context::from_waker(Waker::noop())) {
-        Poll::Ready(value) => value,
+        Poll::Ready(future_output) => future_output,
         Poll::Pending => panic!("this future awaits nothing and must finish on the first poll"),
     }
 }
 
-struct Server {
-    count: u32,
+struct AttachmentServer {
+    attachment_count: u32,
 }
 
-impl Server {
+impl AttachmentServer {
     #[beta_feature(otherwise = Err("off"))]
-    fn attach(&mut self, id: u32) -> Result<u32, &'static str> {
-        self.count += id;
-        Ok(self.count)
+    fn increment_attachment_count(
+        &mut self,
+        attachment_count_delta: u32,
+    ) -> Result<u32, &'static str> {
+        self.attachment_count += attachment_count_delta;
+        Ok(self.attachment_count)
     }
 
     #[beta_feature(otherwise = 0)]
-    fn peek(&self) -> u32 {
-        self.count
+    fn get_attachment_count(&self) -> u32 {
+        self.attachment_count
     }
 }
 
-trait Attachable {
-    fn go(&self) -> u32;
+trait AttachmentProbe {
+    fn compute_attachment_count(&self) -> u32;
 }
 
-impl Attachable for Server {
+impl AttachmentProbe for AttachmentServer {
     #[beta_feature(otherwise = 0)]
-    fn go(&self) -> u32 {
-        self.count + 1
+    fn compute_attachment_count(&self) -> u32 {
+        self.attachment_count + 1
     }
 }
 
 #[beta_feature(otherwise = None)]
-fn generic<T: Clone>(value: &T) -> Option<T> {
-    Some(value.clone())
+fn clone_cloneable<Cloneable: Clone>(cloneable_reference: &Cloneable) -> Option<Cloneable> {
+    Some(cloneable_reference.clone())
 }
 
 #[beta_feature(otherwise = "")]
-fn first_word<'a>(text: &'a str) -> &'a str {
-    text.split(' ').next().unwrap_or("")
+fn get_first_word<'a>(source_text: &'a str) -> &'a str {
+    source_text.split(' ').next().unwrap_or("")
 }
 
 #[beta_feature(otherwise = Err("off"))]
-async fn asynchronous(value: u32) -> Result<u32, &'static str> {
-    Ok(value)
+async fn run_asynchronous_task(input_number: u32) -> Result<u32, &'static str> {
+    Ok(input_number)
 }
 
 #[beta_feature(otherwise = ())]
-fn returns_unit(slot: &mut u32) {
-    *slot = 9;
+fn set_slot_number(slot_number: &mut u32) {
+    *slot_number = 9;
 }
 
 #[beta_feature(otherwise = 0)]
-fn tail_is_a_block(flag: bool) -> u32 {
-    if flag {
+fn compute_branch_number(is_first_branch: bool) -> u32 {
+    if is_first_branch {
         1
     } else {
         2
@@ -80,62 +83,74 @@ fn tail_is_a_block(flag: bool) -> u32 {
 }
 
 #[beta_feature(otherwise = Err("off"))]
-fn early_return(flag: bool) -> Result<u32, &'static str> {
-    if flag {
+fn return_early_error(is_error_branch: bool) -> Result<u32, &'static str> {
+    if is_error_branch {
         return Err("early");
     }
-    let value = Ok::<u32, &'static str>(3)?;
-    Ok(value)
+    let computed_number = Ok::<u32, &'static str>(3)?;
+    Ok(computed_number)
 }
 
 #[test]
-fn every_shape_compiles_and_gates() {
-    let mut server = Server { count: 0 };
-    let mut slot = 0;
+fn beta_feature_supports_function_shapes_and_gates_results() {
+    let mut attachment_server = AttachmentServer {
+        attachment_count: 0,
+    };
+    let mut slot_number = 0;
 
-    koshi_beta::set_allowed(false);
-    assert_eq!(server.attach(5), Err("off"));
-    assert_eq!(server.peek(), 0);
-    assert_eq!(Attachable::go(&server), 0);
-    assert_eq!(generic(&7u32), None);
-    assert_eq!(generic(&String::from("seven")), None);
-    assert_eq!(first_word("one two"), "");
-    returns_unit(&mut slot);
-    assert_eq!(slot, 0);
-    assert_eq!(tail_is_a_block(true), 0);
-    assert_eq!(tail_is_a_block(false), 0);
-    assert_eq!(early_return(true), Err("off"));
-    assert_eq!(early_return(false), Err("off"));
-    assert_eq!(now(asynchronous(1)), Err("off"));
-    assert_eq!(server.count, 0);
+    koshi_beta::set_beta_features_allowed(false);
+    assert_eq!(attachment_server.increment_attachment_count(5), Err("off"));
+    assert_eq!(attachment_server.get_attachment_count(), 0);
+    assert_eq!(
+        AttachmentProbe::compute_attachment_count(&attachment_server),
+        0
+    );
+    assert_eq!(clone_cloneable(&7u32), None);
+    assert_eq!(clone_cloneable(&String::from("seven")), None);
+    assert_eq!(get_first_word("one two"), "");
+    set_slot_number(&mut slot_number);
+    assert_eq!(slot_number, 0);
+    assert_eq!(compute_branch_number(true), 0);
+    assert_eq!(compute_branch_number(false), 0);
+    assert_eq!(return_early_error(true), Err("off"));
+    assert_eq!(return_early_error(false), Err("off"));
+    assert_eq!(poll_future_once(run_asynchronous_task(1)), Err("off"));
+    assert_eq!(attachment_server.attachment_count, 0);
 
-    koshi_beta::set_allowed(true);
-    assert_eq!(server.attach(5), Ok(5));
-    assert_eq!(server.peek(), 5);
-    assert_eq!(Attachable::go(&server), 6);
-    assert_eq!(generic(&7u32), Some(7));
-    assert_eq!(generic(&String::from("seven")), Some(String::from("seven")));
-    assert_eq!(first_word("one two"), "one");
-    returns_unit(&mut slot);
-    assert_eq!(slot, 9);
-    assert_eq!(tail_is_a_block(true), 1);
-    assert_eq!(tail_is_a_block(false), 2);
-    assert_eq!(early_return(true), Err("early"));
-    assert_eq!(early_return(false), Ok(3));
-    assert_eq!(now(asynchronous(1)), Ok(1));
+    koshi_beta::set_beta_features_allowed(true);
+    assert_eq!(attachment_server.increment_attachment_count(5), Ok(5));
+    assert_eq!(attachment_server.get_attachment_count(), 5);
+    assert_eq!(
+        AttachmentProbe::compute_attachment_count(&attachment_server),
+        6
+    );
+    assert_eq!(clone_cloneable(&7u32), Some(7));
+    assert_eq!(
+        clone_cloneable(&String::from("seven")),
+        Some(String::from("seven"))
+    );
+    assert_eq!(get_first_word("one two"), "one");
+    set_slot_number(&mut slot_number);
+    assert_eq!(slot_number, 9);
+    assert_eq!(compute_branch_number(true), 1);
+    assert_eq!(compute_branch_number(false), 2);
+    assert_eq!(return_early_error(true), Err("early"));
+    assert_eq!(return_early_error(false), Ok(3));
+    assert_eq!(poll_future_once(run_asynchronous_task(1)), Ok(1));
 
-    // The `&self` method re-checked where the two answers differ: `count` is
+    // The `&self` method re-checked where the two answers differ:
+    // `attachment_count` is
     // 5 here, so it answers 0 only while it is blocked.
-    koshi_beta::set_allowed(false);
-    assert_eq!(server.peek(), 0);
+    koshi_beta::set_beta_features_allowed(false);
+    assert_eq!(attachment_server.get_attachment_count(), 0);
 
     // An `async fn` reads the gate at its first poll. The answer follows the
     // flag at the poll, not at the call that built the future.
-    let built_while_off = asynchronous(1);
-    koshi_beta::set_allowed(true);
-    assert_eq!(now(built_while_off), Ok(1));
+    let built_while_off = run_asynchronous_task(1);
+    koshi_beta::set_beta_features_allowed(true);
+    assert_eq!(poll_future_once(built_while_off), Ok(1));
 
-    let built_while_on = asynchronous(1);
-    koshi_beta::set_allowed(false);
-    assert_eq!(now(built_while_on), Err("off"));
+    let built_while_on = run_asynchronous_task(1);
+    koshi_beta::set_beta_features_allowed(false);
+    assert_eq!(poll_future_once(built_while_on), Err("off"));
 }

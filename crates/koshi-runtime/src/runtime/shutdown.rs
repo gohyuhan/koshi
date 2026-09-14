@@ -30,7 +30,7 @@ impl Server {
     pub fn shutdown(&mut self) {
         // Stage 1 — record that teardown started. The event loop has already
         // exited, so no further IPC or plugin command reaches dispatch.
-        self.draining = true;
+        self.is_draining = true;
 
         // Stage 2 — stop answering the control socket, then remove the socket
         // file, the endpoint file and the advert that name this session.
@@ -43,7 +43,7 @@ impl Server {
         // Stage 4 — a quit with no issuing client is immediate; every other
         // ending keeps the graceful process-group window. Both paths reap
         // descendants.
-        if self.immediate_shutdown {
+        if self.should_shutdown_immediately {
             self.kill_all_panes();
         } else {
             self.graceful_kill_all_panes();
@@ -61,24 +61,24 @@ impl Server {
     /// one such window. A pane whose kill fails is skipped and the rest still
     /// run.
     fn graceful_kill_all_panes(&self) {
-        let handles: Vec<_> = self
-            .pty_handles
+        let kill_thread_handles: Vec<_> = self
+            .pty_handle_by_pane_id
             .keys()
             .copied()
             .map(|pane_id| {
-                let backend = Arc::clone(self.pty_backend());
+                let pty_backend = Arc::clone(self.get_pty_backend());
                 thread::spawn(move || {
-                    let _ = backend.kill(
+                    let _ = pty_backend.kill_pane(
                         pane_id,
                         KillPolicy::GracefulTree {
-                            timeout: GRACEFUL_TIMEOUT_DURATION,
+                            timeout_duration: GRACEFUL_TIMEOUT_DURATION,
                         },
                     );
                 })
             })
             .collect();
-        for handle in handles {
-            let _ = handle.join();
+        for kill_thread_handle in kill_thread_handles {
+            let _ = kill_thread_handle.join();
         }
     }
 }

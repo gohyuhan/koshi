@@ -3,7 +3,7 @@
 //! drain leaves behind, a sequence the swap cut in half finishing in the next
 //! image, what the header still yields when the body cannot be read, what a
 //! body format this build does not know is answered with, what a body written
-//! in the older client format reads back as, what a pane record's size, exit
+//! in the older client format reads back as, what a pane carried pane's size, exit
 //! status and applied quit read back as, and what a write over an existing
 //! file and a write into a directory that is not there each do.
 
@@ -12,8 +12,8 @@ use std::sync::{mpsc, Arc};
 use std::time::SystemTime;
 
 use koshi_core::command::{
-    Command, CommandEnvelope, CommandResult, CommandSource, FocusPaneArgs, FocusTarget, GridPos,
-    NewPaneArgs, NewTabArgs, Selection, SelectionKind,
+    Command, CommandEnvelope, CommandResult, CommandSource, FocusPaneArgs, FocusTarget,
+    GridPosition, NewPaneArgs, NewTabArgs, Selection, SelectionKind,
 };
 use koshi_core::geometry::{Direction, Size};
 use koshi_core::ids::{ClientId, CommandId, TabId};
@@ -34,13 +34,16 @@ use crate::runtime::event::RuntimeEvent;
 use crate::server::Server;
 
 /// The viewport of the client the session is bootstrapped with.
-const VIEWPORT: Size = Size { cols: 80, rows: 24 };
+const TEST_VIEWPORT_SIZE: Size = Size {
+    column_count: 80,
+    row_count: 24,
+};
 
-/// The viewport of the second client, sized apart from [`VIEWPORT`] so the two
+/// The viewport of the second client, sized apart from [`TEST_VIEWPORT_SIZE`] so the two
 /// clients are told apart by what they hold.
-const SECOND_VIEWPORT: Size = Size {
-    cols: 100,
-    rows: 30,
+const SECOND_VIEWPORT_SIZE: Size = Size {
+    column_count: 100,
+    row_count: 30,
 };
 
 /// The pieces a test drives a carried server through: the server itself, the
@@ -56,23 +59,28 @@ struct Populated {
     second_tab: TabId,
 }
 
-/// The top row of a screen as text; a blank cell reads as a space.
-fn first_row(state: &TerminalState) -> String {
-    let (_, cols) = state.active_grid().dimensions();
-    (0..cols)
-        .map(|col| state.active_grid().cell(0, col).map_or(' ', Cell::ch))
+/// Return the top row of a screen as text; a blank cell reads as a space.
+fn get_first_terminal_row(terminal_state: &TerminalState) -> String {
+    let (_, column_count) = terminal_state.get_active_grid().get_grid_dimensions();
+    (0..column_count)
+        .map(|column_index| {
+            terminal_state
+                .get_active_grid()
+                .get_cell(0, column_index)
+                .map_or(' ', Cell::get_character)
+        })
         .collect()
 }
 
-/// Run `command` as a keybinding of `client`, and panic unless it was applied.
-fn apply(server: &mut Server, client: ClientId, command: Command) {
-    let envelope = CommandEnvelope::new(
+/// Run `command` as a keybinding of `client_id`, and panic unless it was applied.
+fn apply_keybinding_command(server: &mut Server, client_id: ClientId, command: Command) {
+    let envelope = CommandEnvelope::from_parts(
         CommandId::new(),
-        CommandSource::key_binding(client),
+        CommandSource::from_key_binding(client_id),
         SystemTime::UNIX_EPOCH,
         command,
     );
-    let command_id = envelope.id;
+    let command_id = envelope.command_id;
     match server.submit_command(envelope) {
         CommandResult::Ok {
             command_id: applied,
@@ -89,18 +97,18 @@ fn apply(server: &mut Server, client: ClientId, command: Command) {
 fn populated_server() -> Populated {
     let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::new());
     let (inbox_tx, inbox_rx) = mpsc::channel();
-    let mut server = Server::new(pty_backend, inbox_rx, inbox_tx.clone());
+    let mut server = Server::from_runtime_parts(pty_backend, inbox_rx, inbox_tx.clone());
 
     let session_id = SessionId::new();
     let first_client = server
         .bootstrap_local_named(
             session_id,
             "carried".to_string(),
-            VIEWPORT,
+            TEST_VIEWPORT_SIZE,
             SystemTime::UNIX_EPOCH,
         )
         .expect("bootstrap the session");
-    let first_tab = *server.sessions[&session_id]
+    let first_tab = *server.session_by_id[&session_id]
         .tabs
         .keys()
         .next()
@@ -109,29 +117,29 @@ fn populated_server() -> Populated {
     // Two splits on the first tab: rightward, then downward inside the pane the
     // first split created, so the tree holds a split inside a split.
     for direction in [Direction::Right, Direction::Down] {
-        apply(
+        apply_keybinding_command(
             &mut server,
             first_client,
             Command::NewPane(NewPaneArgs {
-                source: None,
-                tab: None,
+                source_pane_id: None,
+                tab_id: None,
                 direction,
-                stacked: false,
-                cwd: None,
-                command: None,
-                client: None,
+                should_stack: false,
+                working_directory: None,
+                spawn_spec: None,
+                client_id: None,
             }),
         );
     }
 
     // A second tab, which moves the first client onto it and gives the session
     // its fourth pane.
-    apply(
+    apply_keybinding_command(
         &mut server,
         first_client,
         Command::NewTab(NewTabArgs::default()),
     );
-    let second_tab = *server.sessions[&session_id]
+    let second_tab = *server.session_by_id[&session_id]
         .tabs
         .keys()
         .find(|&&tab| tab != first_tab)
@@ -143,50 +151,62 @@ fn populated_server() -> Populated {
     server.handle_client_attach(
         session_id,
         second_client,
-        SECOND_VIEWPORT,
+        SECOND_VIEWPORT_SIZE,
         None,
         first_tab,
         SystemTime::UNIX_EPOCH,
         false,
     );
 
-    let panes = pane_ids(&server, session_id, first_tab);
+    let panes = list_tab_pane_ids(&server, session_id, first_tab);
     // The second client focuses the last pane of the first tab, so the two
     // clients hold different focus as well as different tabs.
-    apply(
+    apply_keybinding_command(
         &mut server,
         second_client,
         Command::FocusPane(FocusPaneArgs {
-            target: FocusTarget::Pane(panes[2]),
-            client: None,
+            focus_target: FocusTarget::Pane(panes[2]),
+            client_id: None,
         }),
     );
-    let session = server.sessions.get_mut(&session_id).expect("the session");
-    let first = session
+    let session = server
+        .session_by_id
+        .get_mut(&session_id)
+        .expect("the session");
+    let first_client_state = session
         .clients
-        .get_mut(first_client)
+        .get_client_mut_by_id(first_client)
         .expect("the first client");
-    first.zoom_pane(first_tab, panes[0]);
-    first.set_scroll_offset(panes[1], 7);
-    let second = session
+    first_client_state.zoom_pane(first_tab, panes[0]);
+    first_client_state.set_scroll_offset(panes[1], 7);
+    let second_client_state = session
         .clients
-        .get_mut(second_client)
+        .get_client_mut_by_id(second_client)
         .expect("the second client");
-    second.zoom_pane(first_tab, panes[2]);
-    second.set_scroll_offset(panes[0], 12);
-    second.set_selection(
+    second_client_state.zoom_pane(first_tab, panes[2]);
+    second_client_state.set_scroll_offset(panes[0], 12);
+    second_client_state.set_selection(
         panes[1],
         Selection {
-            kind: SelectionKind::Word,
-            anchor: GridPos { row: 3, col: 4 },
-            cursor: GridPos { row: 3, col: 9 },
+            selection_kind: SelectionKind::Word,
+            anchor: GridPosition {
+                row_index: 3,
+                column_index: 4,
+            },
+            cursor: GridPosition {
+                row_index: 3,
+                column_index: 9,
+            },
         },
     );
 
     // Distinct output per pane, so a screen that came back under the wrong pane
     // is caught.
-    for (index, pane) in live_panes(&server, session_id).into_iter().enumerate() {
-        server.handle_pty_output(pane, format!("pane {index} output").as_bytes());
+    for (pane_index, pane_id) in list_session_pane_ids(&server, session_id)
+        .into_iter()
+        .enumerate()
+    {
+        server.handle_pty_output(pane_id, format!("pane {pane_index} output").as_bytes());
     }
 
     Populated {
@@ -200,88 +220,95 @@ fn populated_server() -> Populated {
     }
 }
 
-/// The panes of `tab`, in layout order.
-fn pane_ids(server: &Server, session_id: SessionId, tab: TabId) -> Vec<PaneId> {
-    server.sessions[&session_id].tabs[&tab]
-        .layout()
-        .leaf_panes()
+/// Return the pane ids of `tab`, in layout order.
+fn list_tab_pane_ids(server: &Server, session_id: SessionId, tab: TabId) -> Vec<PaneId> {
+    server.session_by_id[&session_id].tabs[&tab]
+        .get_layout_tree()
+        .list_leaf_pane_ids()
 }
 
-/// Every pane of `session_id`, in tab order then layout order.
-fn live_panes(server: &Server, session_id: SessionId) -> Vec<PaneId> {
-    server.sessions[&session_id]
+/// Return every pane id of `session_id`, in tab order then layout order.
+fn list_session_pane_ids(server: &Server, session_id: SessionId) -> Vec<PaneId> {
+    server.session_by_id[&session_id]
         .tabs
         .values()
-        .flat_map(|tab| tab.layout().leaf_panes())
+        .flat_map(|tab| tab.get_layout_tree().list_leaf_pane_ids())
         .collect()
 }
 
-/// One carried record per live pane, as the concrete PTY backend reports them:
+/// Build one carried pane per live pane, as the concrete PTY backend reports them:
 /// a made-up process id and descriptor per pane, and a size the server's own
-/// record overrides.
-fn carried_pty_panes(server: &Server, session_id: SessionId) -> Vec<CarriedPtyPane> {
-    live_panes(server, session_id)
+/// carried pane overrides.
+fn build_carried_pty_panes(server: &Server, session_id: SessionId) -> Vec<CarriedPtyPane> {
+    list_session_pane_ids(server, session_id)
         .into_iter()
         .enumerate()
-        .map(|(index, pane_id)| CarriedPtyPane {
+        .map(|(pane_index, pane_id)| CarriedPtyPane {
             pane_id,
             #[cfg(unix)]
-            terminal_fd: Some(20 + index as i32),
-            pid: 5000 + index as u32,
-            size: PtySize { cols: 1, rows: 1 },
-            exit: None,
+            terminal_fd: Some(20 + pane_index as i32),
+            process_id: 5000 + pane_index as u32,
+            pty_size: PtySize {
+                column_count: 1,
+                row_count: 1,
+            },
+            exit_status: None,
         })
         .collect()
 }
 
-/// A header for `session_id` named `carried`, in the format this build writes,
-/// naming `panes`.
-fn header_for(session_id: SessionId, panes: Vec<CarriedPane>) -> ResumeHeader {
+/// Build a header for `session_id` named `carried`, in the format this build
+/// writes, naming `carried_panes`.
+fn build_resume_header(session_id: SessionId, carried_panes: Vec<CarriedPane>) -> ResumeHeader {
     ResumeHeader {
-        format: RESUME_FORMAT,
+        resume_format: RESUME_FORMAT,
         session_id,
         session_name: "carried".to_string(),
-        panes,
+        carried_panes,
     }
 }
 
-/// A body holding no session, no screen and no held bytes, carrying `quit`.
-fn body_carrying_only(quit: Option<CarriedQuit>) -> ResumeBody {
+/// Build a body holding no session, no screen and no held bytes, carrying
+/// `carried_quit`.
+fn build_resume_body_with_quit(carried_quit: Option<CarriedQuit>) -> ResumeBody {
     ResumeBody {
-        sessions: HashMap::new(),
-        engines: HashMap::new(),
-        undecoded: HashMap::new(),
-        graphics_undecoded: HashMap::new(),
-        graphics_screen_continuation: HashMap::new(),
-        graphics_screen_wrapper_active: HashMap::new(),
-        graphics_tmux_continuation: HashMap::new(),
-        graphics_tmux_wrapper_active: HashMap::new(),
-        graphics_events: HashMap::new(),
-        graphics_transport: HashMap::new(),
-        synchronized_output: HashMap::new(),
-        quit,
+        session_by_id: HashMap::new(),
+        terminal_state_by_pane_id: HashMap::new(),
+        undecoded_bytes_by_pane_id: HashMap::new(),
+        graphics_undecoded_bytes_by_pane_id: HashMap::new(),
+        graphics_screen_continuation_by_pane_id: HashMap::new(),
+        graphics_screen_wrapper_active_by_pane_id: HashMap::new(),
+        graphics_tmux_continuation_by_pane_id: HashMap::new(),
+        graphics_tmux_wrapper_active_by_pane_id: HashMap::new(),
+        graphics_events_by_pane_id: HashMap::new(),
+        graphics_transport_by_pane_id: HashMap::new(),
+        synchronized_output_by_pane_id: HashMap::new(),
+        carried_quit,
     }
 }
 
-/// Rebuild a server from `body`, over detached handles for every pane the
+/// Build a resumed server from `body`, over detached handles for every pane the
 /// header names and the sizes that header carries.
-fn resumed_server(header: &ResumeHeader, body: ResumeBody) -> (Server, mpsc::Sender<RuntimeEvent>) {
+fn build_resumed_server(
+    header: &ResumeHeader,
+    body: ResumeBody,
+) -> (Server, mpsc::Sender<RuntimeEvent>) {
     let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::new());
     let (inbox_tx, inbox_rx) = mpsc::channel();
-    let handles: HashMap<PaneId, PtyHandle> = header
-        .panes
+    let pty_handle_by_pane_id: HashMap<PaneId, PtyHandle> = header
+        .carried_panes
         .iter()
-        .map(|pane| (pane.pane_id, PtyHandle::detached(pane.pane_id)))
+        .map(|pane| (pane.pane_id, PtyHandle::from_detached_pane_id(pane.pane_id)))
         .collect();
-    let sizes: HashMap<PaneId, PtySize> = header
-        .panes
+    let pty_size_by_pane_id: HashMap<PaneId, PtySize> = header
+        .carried_panes
         .iter()
         .map(|pane| {
             (
                 pane.pane_id,
                 PtySize {
-                    cols: pane.cols,
-                    rows: pane.rows,
+                    column_count: pane.column_count,
+                    row_count: pane.row_count,
                 },
             )
         })
@@ -291,98 +318,134 @@ fn resumed_server(header: &ResumeHeader, body: ResumeBody) -> (Server, mpsc::Sen
         inbox_rx,
         inbox_tx.clone(),
         body,
-        handles,
-        sizes,
+        pty_handle_by_pane_id,
+        pty_size_by_pane_id,
     );
     (server, inbox_tx)
 }
 
 #[test]
 fn a_carried_session_reads_back_with_every_tab_pane_client_and_screen() {
-    let dir = TempDir::new().expect("create temp dir");
-    let path = dir.path().join("session.resume");
+    let resume_test_directory = TempDir::new().expect("create temp dir");
+    let resume_file_path = resume_test_directory.path().join("session.resume");
     let mut populated = populated_server();
     let session_id = populated.session_id;
-    let panes = carried_pty_panes(&populated.server, session_id);
-    let expected_tabs = populated.server.sessions[&session_id].tabs.clone();
-    let expected_records = populated.server.sessions[&session_id].panes.clone();
-    let expected_sizes = populated.server.pty_sizes.clone();
+    let panes = build_carried_pty_panes(&populated.server, session_id);
+    let expected_tabs = populated.server.session_by_id[&session_id].tabs.clone();
+    let expected_records = populated.server.session_by_id[&session_id].panes.clone();
+    let expected_sizes = populated.server.pty_size_by_pane_id.clone();
 
     let (header, body) = populated
         .server
         .carry_out(&panes)
         .expect("a session to carry");
-    write(&path, &header, &body).expect("write the resume file");
-    let (read_header, raw_body) = read_header(&path).expect("read the header back");
-    let read_body = read_body(read_header.format, &raw_body).expect("read the body back");
-    let (resumed, _inbox_tx) = resumed_server(&read_header, read_body);
+    write_resume_file(&resume_file_path, &header, &body).expect("write the resume file");
+    let (read_header, raw_body) =
+        read_resume_header(&resume_file_path).expect("read the header back");
+    let read_body =
+        read_resume_body(read_header.resume_format, &raw_body).expect("read the body back");
+    let (resumed, _inbox_tx) = build_resumed_server(&read_header, read_body);
 
     assert_eq!(read_header, header, "the header must read back unchanged");
     assert_eq!(read_header.session_id, session_id);
     assert_eq!(read_header.session_name, "carried");
-    assert_eq!(resumed.sessions.len(), 1, "one session must come back");
-    let session = &resumed.sessions[&session_id];
-    assert_eq!(session.name, "carried");
+    assert_eq!(resumed.session_by_id.len(), 1, "one session must come back");
+    let session = &resumed.session_by_id[&session_id];
+    assert_eq!(session.session_name, "carried");
     assert_eq!(session.tabs, expected_tabs, "every tab and its layout tree");
-    assert_eq!(session.panes, expected_records, "every pane record");
-    assert_eq!(session.clients.len(), 2, "both clients must come back");
-
-    let first = session
-        .clients
-        .get(populated.first_client)
-        .expect("the first client");
-    let first_tab_panes = expected_tabs[&populated.first_tab].layout().leaf_panes();
-    assert_eq!(first.active_tab(), populated.second_tab);
-    assert_eq!(first.viewport(), VIEWPORT);
     assert_eq!(
-        first.zoomed_pane(populated.first_tab),
+        session.panes, expected_records,
+        "every pane carried by the header"
+    );
+    assert_eq!(
+        session.clients.client_count(),
+        2,
+        "both clients must come back"
+    );
+
+    let resumed_first_client = session
+        .clients
+        .get_client_by_id(populated.first_client)
+        .expect("the first client");
+    let first_tab_panes = expected_tabs[&populated.first_tab]
+        .get_layout_tree()
+        .list_leaf_pane_ids();
+    assert_eq!(resumed_first_client.get_active_tab(), populated.second_tab);
+    assert_eq!(resumed_first_client.get_viewport_size(), TEST_VIEWPORT_SIZE);
+    assert_eq!(
+        resumed_first_client.get_zoomed_pane(populated.first_tab),
         Some(first_tab_panes[0])
     );
-    assert_eq!(first.scroll_offset(first_tab_panes[1]), 7);
-    assert_eq!(first.selection(first_tab_panes[1]), None);
+    assert_eq!(
+        resumed_first_client.get_scroll_offset(first_tab_panes[1]),
+        7
+    );
+    assert_eq!(resumed_first_client.get_selection(first_tab_panes[1]), None);
 
-    let second = session
+    let resumed_second_client = session
         .clients
-        .get(populated.second_client)
+        .get_client_by_id(populated.second_client)
         .expect("the second client");
-    assert_eq!(second.active_tab(), populated.first_tab);
-    assert_eq!(second.viewport(), SECOND_VIEWPORT);
+    assert_eq!(resumed_second_client.get_active_tab(), populated.first_tab);
     assert_eq!(
-        second.focused_pane(populated.first_tab),
+        resumed_second_client.get_viewport_size(),
+        SECOND_VIEWPORT_SIZE
+    );
+    assert_eq!(
+        resumed_second_client.get_focused_pane(populated.first_tab),
         Some(first_tab_panes[2])
     );
     assert_eq!(
-        second.zoomed_pane(populated.first_tab),
+        resumed_second_client.get_zoomed_pane(populated.first_tab),
         Some(first_tab_panes[2])
     );
-    assert_eq!(second.scroll_offset(first_tab_panes[0]), 12);
     assert_eq!(
-        second.selection(first_tab_panes[1]),
+        resumed_second_client.get_scroll_offset(first_tab_panes[0]),
+        12
+    );
+    assert_eq!(
+        resumed_second_client.get_selection(first_tab_panes[1]),
         Some(Selection {
-            kind: SelectionKind::Word,
-            anchor: GridPos { row: 3, col: 4 },
-            cursor: GridPos { row: 3, col: 9 },
+            selection_kind: SelectionKind::Word,
+            anchor: GridPosition {
+                row_index: 3,
+                column_index: 4
+            },
+            cursor: GridPosition {
+                row_index: 3,
+                column_index: 9
+            },
         })
     );
 
-    assert_eq!(body.engines.len(), 4, "four panes must have a screen");
-    for (pane_id, screen) in &body.engines {
+    assert_eq!(
+        body.terminal_state_by_pane_id.len(),
+        4,
+        "four panes must have a screen"
+    );
+    for (pane_id, screen) in &body.terminal_state_by_pane_id {
         assert_eq!(
-            resumed.terminal_engines[pane_id].state(),
+            resumed.terminal_engine_by_pane_id[pane_id].get_terminal_state(),
             screen,
             "pane {pane_id} must come back with the screen it went out with"
         );
     }
     // Every pane was fed its own text, so a screen that came back under the
     // wrong pane reads the wrong line here.
-    for (index, pane) in panes.iter().enumerate() {
+    for (pane_index, pane) in panes.iter().enumerate() {
         assert_eq!(
-            first_row(resumed.terminal_engines[&pane.pane_id].state()).trim_end(),
-            format!("pane {index} output")
+            get_first_terminal_row(
+                resumed.terminal_engine_by_pane_id[&pane.pane_id].get_terminal_state(),
+            )
+            .trim_end(),
+            format!("pane {pane_index} output")
         );
     }
-    assert_eq!(resumed.pty_sizes, expected_sizes, "every pane's size");
-    let mut resumed_handles: Vec<PaneId> = resumed.pty_handles.keys().copied().collect();
+    assert_eq!(
+        resumed.pty_size_by_pane_id, expected_sizes,
+        "every pane's size"
+    );
+    let mut resumed_handles: Vec<PaneId> = resumed.pty_handle_by_pane_id.keys().copied().collect();
     resumed_handles.sort();
     let mut carried_ids: Vec<PaneId> = panes.iter().map(|pane| pane.pane_id).collect();
     carried_ids.sort();
@@ -396,7 +459,7 @@ fn a_carried_session_reads_back_with_every_tab_pane_client_and_screen() {
 fn carrying_the_state_out_leaves_the_server_holding_nothing() {
     let mut populated = populated_server();
     let session_id = populated.session_id;
-    let panes = carried_pty_panes(&populated.server, session_id);
+    let panes = build_carried_pty_panes(&populated.server, session_id);
 
     let (_header, body) = populated
         .server
@@ -404,19 +467,27 @@ fn carrying_the_state_out_leaves_the_server_holding_nothing() {
         .expect("a session to carry");
 
     assert_eq!(
-        populated.server.terminal_engines.len(),
+        populated.server.terminal_engine_by_pane_id.len(),
         0,
         "every engine must have moved out"
     );
     assert_eq!(
-        populated.server.sessions.len(),
+        populated.server.session_by_id.len(),
         0,
         "every session must have moved out"
     );
-    assert_eq!(body.engines.len(), 4, "every engine must be in the body");
-    assert_eq!(body.sessions.len(), 1, "the session must be in the body");
     assert_eq!(
-        body.undecoded.len(),
+        body.terminal_state_by_pane_id.len(),
+        4,
+        "every engine must be in the body"
+    );
+    assert_eq!(
+        body.session_by_id.len(),
+        1,
+        "the session must be in the body"
+    );
+    assert_eq!(
+        body.undecoded_bytes_by_pane_id.len(),
         0,
         "no pane's parser was mid-sequence, so nothing is held"
     );
@@ -424,12 +495,12 @@ fn carrying_the_state_out_leaves_the_server_holding_nothing() {
 
 #[test]
 fn a_report_the_swap_cut_in_half_finishes_in_the_next_image() {
-    let dir = TempDir::new().expect("create temp dir");
-    let path = dir.path().join("session.resume");
+    let resume_test_directory = TempDir::new().expect("create temp dir");
+    let resume_file_path = resume_test_directory.path().join("session.resume");
     let mut populated = populated_server();
     let session_id = populated.session_id;
-    let pane = live_panes(&populated.server, session_id)[0];
-    let panes = carried_pty_panes(&populated.server, session_id);
+    let pane = list_session_pane_ids(&populated.server, session_id)[0];
+    let panes = build_carried_pty_panes(&populated.server, session_id);
 
     // The shell reports /Users/yuhan/Projects/koshi through OSC 7, and the last
     // chunk before the swap ends after `/Proj`.
@@ -442,89 +513,114 @@ fn a_report_the_swap_cut_in_half_finishes_in_the_next_image() {
         .carry_out(&panes)
         .expect("a session to carry");
     assert_eq!(
-        body.undecoded,
+        body.undecoded_bytes_by_pane_id,
         HashMap::from([(pane, b"\x1b]7;file://host/Users/yuhan/Proj".to_vec())]),
         "only the pane mid-report holds bytes, and it holds all of them"
     );
-    write(&path, &header, &body).expect("write the resume file");
-    let (read_header, raw_body) = read_header(&path).expect("read the header back");
-    let read_body = read_body(read_header.format, &raw_body).expect("read the body back");
-    let (mut resumed, _inbox_tx) = resumed_server(&read_header, read_body);
+    write_resume_file(&resume_file_path, &header, &body).expect("write the resume file");
+    let (read_header, raw_body) =
+        read_resume_header(&resume_file_path).expect("read the header back");
+    let read_body =
+        read_resume_body(read_header.resume_format, &raw_body).expect("read the body back");
+    let (mut resumed, _inbox_tx) = build_resumed_server(&read_header, read_body);
 
     assert_eq!(
-        resumed.terminal_engines[&pane].state().current_cwd(),
+        resumed.terminal_engine_by_pane_id[&pane]
+            .get_terminal_state()
+            .get_current_working_directory(),
         None,
         "a report with no terminator sets no directory"
     );
-    let before = first_row(resumed.terminal_engines[&pane].state());
+    let initial_terminal_row =
+        get_first_terminal_row(resumed.terminal_engine_by_pane_id[&pane].get_terminal_state());
 
     resumed.handle_pty_output(pane, b"ects/koshi\x07");
 
-    let state = resumed.terminal_engines[&pane].state();
-    let cwd = state.current_cwd().expect("the report finished");
-    assert_eq!(cwd.host(), Some("host"));
-    assert_eq!(cwd.path(), Path::new("/Users/yuhan/Projects/koshi"));
+    let terminal_state = resumed.terminal_engine_by_pane_id[&pane].get_terminal_state();
+    let reported_working_directory = terminal_state
+        .get_current_working_directory()
+        .expect("the report finished");
+    assert_eq!(reported_working_directory.get_host(), Some("host"));
     assert_eq!(
-        first_row(state),
-        before,
+        reported_working_directory.get_working_directory_path(),
+        Path::new("/Users/yuhan/Projects/koshi")
+    );
+    assert_eq!(
+        get_first_terminal_row(terminal_state),
+        initial_terminal_row,
         "the rest of the report joined the sequence instead of printing"
     );
 }
 
 #[test]
 fn a_body_written_without_the_held_bytes_reads_back_with_none() {
-    let dir = TempDir::new().expect("create temp dir");
-    let path = dir.path().join("session.resume");
+    let resume_test_directory = TempDir::new().expect("create temp dir");
+    let resume_file_path = resume_test_directory.path().join("session.resume");
     let mut populated = populated_server();
     let session_id = populated.session_id;
-    let panes = carried_pty_panes(&populated.server, session_id);
+    let panes = build_carried_pty_panes(&populated.server, session_id);
     let (header, body) = populated
         .server
         .carry_out(&panes)
         .expect("a session to carry");
-    write(&path, &header, &body).expect("write the resume file");
+    write_resume_file(&resume_file_path, &header, &body).expect("write the resume file");
 
     // The body with its map of held bytes taken out of the JSON.
     let mut on_disk: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&path).expect("read the file")).expect("valid json");
+        serde_json::from_slice(&std::fs::read(&resume_file_path).expect("read the file"))
+            .expect("valid json");
     on_disk["body"]
         .as_object_mut()
         .expect("the body is a map")
         .remove("undecoded");
-    std::fs::write(&path, serde_json::to_vec(&on_disk).expect("encode")).expect("rewrite the file");
+    std::fs::write(
+        &resume_file_path,
+        serde_json::to_vec(&on_disk).expect("encode"),
+    )
+    .expect("rewrite the file");
 
-    let (read_header, raw_body) = read_header(&path).expect("read the header back");
-    let read_body = read_body(read_header.format, &raw_body).expect("read the body back");
+    let (read_header, raw_body) =
+        read_resume_header(&resume_file_path).expect("read the header back");
+    let read_body =
+        read_resume_body(read_header.resume_format, &raw_body).expect("read the body back");
 
-    assert_eq!(read_body.engines.len(), 4, "every screen still reads back");
-    assert_eq!(read_body.undecoded, HashMap::new());
+    assert_eq!(
+        read_body.terminal_state_by_pane_id.len(),
+        4,
+        "every screen still reads back"
+    );
+    assert_eq!(read_body.undecoded_bytes_by_pane_id, HashMap::new());
 }
 
 #[test]
 fn the_header_names_every_pane_with_the_size_the_server_holds_for_it() {
     let mut populated = populated_server();
     let session_id = populated.session_id;
-    let panes = carried_pty_panes(&populated.server, session_id);
-    let sizes = populated.server.pty_sizes.clone();
+    let panes = build_carried_pty_panes(&populated.server, session_id);
+    let sizes = populated.server.pty_size_by_pane_id.clone();
 
     let (header, _body) = populated
         .server
         .carry_out(&panes)
         .expect("a session to carry");
 
-    assert_eq!(header.format, RESUME_FORMAT);
-    assert_eq!(header.panes.len(), 4, "one record per live pane");
-    for (index, record) in header.panes.iter().enumerate() {
-        assert_eq!(record.pane_id, panes[index].pane_id);
-        assert_eq!(record.pid, 5000 + index as u32);
+    assert_eq!(header.resume_format, RESUME_FORMAT);
+    assert_eq!(
+        header.carried_panes.len(),
+        4,
+        "one carried pane per live pane"
+    );
+    for (pane_index, carried_pane) in header.carried_panes.iter().enumerate() {
+        assert_eq!(carried_pane.pane_id, panes[pane_index].pane_id);
+        assert_eq!(carried_pane.process_id, 5000 + pane_index as u32);
         #[cfg(unix)]
-        assert_eq!(record.terminal_fd, Some(20 + index as i32));
+        assert_eq!(carried_pane.terminal_fd, Some(20 + pane_index as i32));
         #[cfg(windows)]
-        assert_eq!(record.terminal_fd, None);
-        let held = sizes[&record.pane_id];
+        assert_eq!(carried_pane.terminal_fd, None);
+        let held = sizes[&carried_pane.pane_id];
         assert_eq!(
-            (record.cols, record.rows),
-            (held.cols, held.rows),
+            (carried_pane.column_count, carried_pane.row_count),
+            (held.column_count, held.row_count),
             "the header carries the size the server holds, not the backend's"
         );
     }
@@ -534,53 +630,59 @@ fn the_header_names_every_pane_with_the_size_the_server_holds_for_it() {
 fn a_pane_the_server_holds_no_size_for_takes_the_size_the_backend_reports() {
     let mut populated = populated_server();
     let session_id = populated.session_id;
-    let panes = carried_pty_panes(&populated.server, session_id);
+    let panes = build_carried_pty_panes(&populated.server, session_id);
     let forgotten = panes[2].pane_id;
-    populated.server.pty_sizes.remove(&forgotten);
+    populated.server.pty_size_by_pane_id.remove(&forgotten);
 
     let (header, _body) = populated
         .server
         .carry_out(&panes)
         .expect("a session to carry");
 
-    let record = header
-        .panes
+    let carried_pane = header
+        .carried_panes
         .iter()
-        .find(|record| record.pane_id == forgotten)
+        .find(|carried_pane| carried_pane.pane_id == forgotten)
         .expect("the pane the server forgot");
-    assert_eq!((record.cols, record.rows), (1, 1));
+    assert_eq!((carried_pane.column_count, carried_pane.row_count), (1, 1));
 }
 
 #[test]
 fn an_unreadable_body_still_leaves_every_pane_descriptor_and_process_id() {
-    let dir = TempDir::new().expect("create temp dir");
-    let path = dir.path().join("session.resume");
+    let resume_test_directory = TempDir::new().expect("create temp dir");
+    let resume_file_path = resume_test_directory.path().join("session.resume");
     let mut populated = populated_server();
     let session_id = populated.session_id;
-    let panes = carried_pty_panes(&populated.server, session_id);
+    let panes = build_carried_pty_panes(&populated.server, session_id);
     let (header, body) = populated
         .server
         .carry_out(&panes)
         .expect("a session to carry");
-    write(&path, &header, &body).expect("write the resume file");
+    write_resume_file(&resume_file_path, &header, &body).expect("write the resume file");
 
     // Only the body is broken; the header on disk is untouched.
     let mut on_disk: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&path).expect("read the file")).expect("valid json");
+        serde_json::from_slice(&std::fs::read(&resume_file_path).expect("read the file"))
+            .expect("valid json");
     on_disk["body"] = serde_json::json!({ "sessions": "not-a-map" });
-    std::fs::write(&path, serde_json::to_vec(&on_disk).expect("encode")).expect("rewrite the file");
+    std::fs::write(
+        &resume_file_path,
+        serde_json::to_vec(&on_disk).expect("encode"),
+    )
+    .expect("rewrite the file");
 
-    let (read_header, raw_body) = read_header(&path).expect("read the header back");
+    let (read_header, raw_body) =
+        read_resume_header(&resume_file_path).expect("read the header back");
     assert_eq!(read_header, header, "the header survives a broken body");
-    assert_eq!(read_header.panes.len(), 4);
-    for (index, record) in read_header.panes.iter().enumerate() {
-        assert_eq!(record.pid, 5000 + index as u32);
+    assert_eq!(read_header.carried_panes.len(), 4);
+    for (pane_index, carried_pane) in read_header.carried_panes.iter().enumerate() {
+        assert_eq!(carried_pane.process_id, 5000 + pane_index as u32);
         #[cfg(unix)]
-        assert_eq!(record.terminal_fd, Some(20 + index as i32));
+        assert_eq!(carried_pane.terminal_fd, Some(20 + pane_index as i32));
         #[cfg(windows)]
-        assert_eq!(record.terminal_fd, None);
+        assert_eq!(carried_pane.terminal_fd, None);
     }
-    match read_body(read_header.format, &raw_body) {
+    match read_resume_body(read_header.resume_format, &raw_body) {
         Err(StorageError::Corrupt { detail }) => {
             assert_eq!(
                 detail,
@@ -595,7 +697,7 @@ fn an_unreadable_body_still_leaves_every_pane_descriptor_and_process_id() {
 fn a_body_format_this_build_does_not_know_is_refused_by_both_numbers() {
     let too_new = RESUME_FORMAT + 1;
 
-    match read_body(too_new, serde_json::value::RawValue::NULL) {
+    match read_resume_body(too_new, serde_json::value::RawValue::NULL) {
         Err(StorageError::Corrupt { detail }) => {
             assert_eq!(
                 detail,
@@ -615,14 +717,16 @@ fn a_resume_body_rejects_graphics_transport_that_exceeds_wrapper_depth() {
     for _ in 0..9 {
         nested = serde_json::json!({ "screen_inner": nested });
     }
-    let body = serde_json::json!({
+    let serialized_resume_body = serde_json::json!({
         "sessions": {},
         "engines": {},
-        "graphics_transport": { pane.as_uuid().to_string(): nested },
+        "graphics_transport": { pane.get_uuid().to_string(): nested },
     });
-    let raw = serde_json::value::RawValue::from_string(body.to_string()).expect("the body is json");
+    let raw_resume_body =
+        serde_json::value::RawValue::from_string(serialized_resume_body.to_string())
+            .expect("the body is json");
 
-    match read_body(RESUME_FORMAT, &raw) {
+    match read_resume_body(RESUME_FORMAT, &raw_resume_body) {
         Err(StorageError::Corrupt { detail }) => assert_eq!(
             detail.split(" at line ").next(),
             Some("resume body is unreadable: graphics wrapper nesting exceeds the supported limit")
@@ -635,14 +739,16 @@ fn a_resume_body_rejects_graphics_transport_that_exceeds_wrapper_depth() {
 fn a_resume_body_rejects_graphics_transport_with_too_many_carry_bytes() {
     let pane = PaneId::new();
     let oversized = vec![0u8; 64 * 1024 + 1];
-    let body = serde_json::json!({
+    let serialized_resume_body = serde_json::json!({
         "sessions": {},
         "engines": {},
-        "graphics_transport": { pane.as_uuid().to_string(): { "carry": oversized } },
+        "graphics_transport": { pane.get_uuid().to_string(): { "carry": oversized } },
     });
-    let raw = serde_json::value::RawValue::from_string(body.to_string()).expect("the body is json");
+    let raw_resume_body =
+        serde_json::value::RawValue::from_string(serialized_resume_body.to_string())
+            .expect("the body is json");
 
-    match read_body(RESUME_FORMAT, &raw) {
+    match read_resume_body(RESUME_FORMAT, &raw_resume_body) {
         Err(StorageError::Corrupt { detail }) => assert_eq!(
             detail.split(" at line ").next(),
             Some("resume body is unreadable: graphics carry exceeds 65536 bytes")
@@ -654,15 +760,17 @@ fn a_resume_body_rejects_graphics_transport_with_too_many_carry_bytes() {
 #[test]
 fn a_resume_body_rejects_legacy_graphics_carry_that_exceeds_the_limit() {
     let pane = PaneId::new();
-    let oversized = vec![0u8; koshi_terminal::graphics::MAX_GRAPHICS_CARRY_BYTES + 1];
-    let body = serde_json::json!({
+    let oversized = vec![0u8; koshi_terminal::graphics::MAX_GRAPHICS_CARRY_BYTE_COUNT + 1];
+    let serialized_resume_body = serde_json::json!({
         "sessions": {},
         "engines": {},
-        "graphics_undecoded": { pane.as_uuid().to_string(): oversized },
+        "graphics_undecoded": { pane.get_uuid().to_string(): oversized },
     });
-    let raw = serde_json::value::RawValue::from_string(body.to_string()).expect("the body is json");
+    let raw_resume_body =
+        serde_json::value::RawValue::from_string(serialized_resume_body.to_string())
+            .expect("the body is json");
 
-    match read_body(RESUME_FORMAT, &raw) {
+    match read_resume_body(RESUME_FORMAT, &raw_resume_body) {
         Err(StorageError::Corrupt { detail }) => assert_eq!(
             detail.split(" at line ").next(),
             Some("resume body is unreadable: graphics carry exceeds 65536 bytes")
@@ -677,9 +785,9 @@ fn a_resume_body_rejects_queued_image_bytes_that_do_not_match_dimensions() {
     let event: GraphicsEvent = Ok(ImageRecord {
         protocol: GraphicsProtocol::Kitty,
         image: (DecodedImage {
-            width: 1,
-            height: 1,
-            rgba: vec![255, 0, 0, 255],
+            pixel_width: 1,
+            pixel_height: 1,
+            rgba_bytes: vec![255, 0, 0, 255],
         })
         .into(),
         animation: None,
@@ -689,14 +797,16 @@ fn a_resume_body_rejects_queued_image_bytes_that_do_not_match_dimensions() {
     });
     let mut event = serde_json::to_value(event).expect("the image event is json");
     event["Ok"]["image"]["rgba"] = serde_json::json!([255, 0, 0]);
-    let body = serde_json::json!({
+    let serialized_resume_body = serde_json::json!({
         "sessions": {},
         "engines": {},
-        "graphics_events": { pane.as_uuid().to_string(): [event] },
+        "graphics_events": { pane.get_uuid().to_string(): [event] },
     });
-    let raw = serde_json::value::RawValue::from_string(body.to_string()).expect("the body is json");
+    let raw_resume_body =
+        serde_json::value::RawValue::from_string(serialized_resume_body.to_string())
+            .expect("the body is json");
 
-    match read_body(RESUME_FORMAT, &raw) {
+    match read_resume_body(RESUME_FORMAT, &raw_resume_body) {
         Err(StorageError::Corrupt { detail }) => assert_eq!(
             detail.split(" at line ").next(),
             Some("resume body is unreadable: decoded image RGBA length does not match its dimensions")
@@ -714,16 +824,18 @@ fn a_resume_body_rejects_graphics_error_text_over_the_control_limit() {
     });
     let mut event = serde_json::to_value(event).expect("the graphics error is json");
     event["Err"]["UnsupportedAction"]["action"] = serde_json::Value::String(
-        "x".repeat(koshi_terminal::graphics::MAX_GRAPHICS_CONTROL_BYTES + 1),
+        "x".repeat(koshi_terminal::graphics::MAX_GRAPHICS_CONTROL_BYTE_COUNT + 1),
     );
-    let body = serde_json::json!({
+    let serialized_resume_body = serde_json::json!({
         "sessions": {},
         "engines": {},
-        "graphics_events": { pane.as_uuid().to_string(): [event] },
+        "graphics_events": { pane.get_uuid().to_string(): [event] },
     });
-    let raw = serde_json::value::RawValue::from_string(body.to_string()).expect("the body is json");
+    let raw_resume_body =
+        serde_json::value::RawValue::from_string(serialized_resume_body.to_string())
+            .expect("the body is json");
 
-    match read_body(RESUME_FORMAT, &raw) {
+    match read_resume_body(RESUME_FORMAT, &raw_resume_body) {
         Err(StorageError::Corrupt { detail }) => assert_eq!(
             detail.split(" at line ").next(),
             Some("resume body is unreadable: graphics error text exceeds 8192 bytes")
@@ -738,9 +850,9 @@ fn a_resume_body_rejects_a_graphics_event_list_over_the_engine_limit() {
     let event: GraphicsEvent = Ok(ImageRecord {
         protocol: GraphicsProtocol::Kitty,
         image: (DecodedImage {
-            width: 1,
-            height: 1,
-            rgba: vec![255, 0, 0, 255],
+            pixel_width: 1,
+            pixel_height: 1,
+            rgba_bytes: vec![255, 0, 0, 255],
         })
         .into(),
         animation: None,
@@ -749,15 +861,17 @@ fn a_resume_body_rejects_a_graphics_event_list_over_the_engine_limit() {
         anchor: (0, 0),
     });
     let event = serde_json::to_value(event).expect("the image event is json");
-    let events = vec![event; koshi_terminal::engine::MAX_GRAPHICS_EVENTS + 1];
-    let body = serde_json::json!({
+    let events = vec![event; koshi_terminal::engine::MAX_GRAPHICS_EVENT_COUNT + 1];
+    let serialized_resume_body = serde_json::json!({
         "sessions": {},
         "engines": {},
-        "graphics_events": { pane.as_uuid().to_string(): events },
+        "graphics_events": { pane.get_uuid().to_string(): events },
     });
-    let raw = serde_json::value::RawValue::from_string(body.to_string()).expect("the body is json");
+    let raw_resume_body =
+        serde_json::value::RawValue::from_string(serialized_resume_body.to_string())
+            .expect("the body is json");
 
-    match read_body(RESUME_FORMAT, &raw) {
+    match read_resume_body(RESUME_FORMAT, &raw_resume_body) {
         Err(StorageError::Corrupt { detail }) => assert_eq!(
             detail.split(" at line ").next(),
             Some("resume body is unreadable: graphics event count exceeds 64")
@@ -772,9 +886,9 @@ fn a_resume_body_accepts_the_queue_full_report_after_queued_events() {
     let event: GraphicsEvent = Ok(ImageRecord {
         protocol: GraphicsProtocol::Kitty,
         image: (DecodedImage {
-            width: 1,
-            height: 1,
-            rgba: vec![255, 0, 0, 255],
+            pixel_width: 1,
+            pixel_height: 1,
+            rgba_bytes: vec![255, 0, 0, 255],
         })
         .into(),
         animation: None,
@@ -783,74 +897,77 @@ fn a_resume_body_accepts_the_queue_full_report_after_queued_events() {
         anchor: (0, 0),
     });
     let event = serde_json::to_value(event).expect("the image event is json");
-    let mut events = vec![event; koshi_terminal::engine::MAX_GRAPHICS_EVENTS];
+    let mut events = vec![event; koshi_terminal::engine::MAX_GRAPHICS_EVENT_COUNT];
     events.push(serde_json::json!({
         "Err": {
             "QueueFull": { "dropped": 2 }
         }
     }));
-    let body = serde_json::json!({
+    let serialized_resume_body = serde_json::json!({
         "sessions": {},
         "engines": {},
-        "graphics_events": { pane.as_uuid().to_string(): events },
+        "graphics_events": { pane.get_uuid().to_string(): events },
     });
-    let raw = serde_json::value::RawValue::from_string(body.to_string()).expect("the body is json");
+    let raw_resume_body =
+        serde_json::value::RawValue::from_string(serialized_resume_body.to_string())
+            .expect("the body is json");
 
-    let body = read_body(RESUME_FORMAT, &raw).expect("the valid queue batch reads");
+    let parsed_resume_body =
+        read_resume_body(RESUME_FORMAT, &raw_resume_body).expect("the valid queue batch reads");
 
     assert_eq!(
-        body.graphics_events[&pane].len(),
-        koshi_terminal::engine::MAX_GRAPHICS_EVENT_BATCH
+        parsed_resume_body.graphics_events_by_pane_id[&pane].len(),
+        koshi_terminal::engine::MAX_GRAPHICS_EVENT_BATCH_COUNT
     );
 }
 
 #[test]
 fn a_header_naming_an_unknown_format_still_reads_back_whole() {
-    let dir = TempDir::new().expect("create temp dir");
-    let path = dir.path().join("session.resume");
+    let resume_test_directory = TempDir::new().expect("create temp dir");
+    let resume_file_path = resume_test_directory.path().join("session.resume");
     let session_id = SessionId::new();
     let header = ResumeHeader {
-        format: RESUME_FORMAT + 1,
+        resume_format: RESUME_FORMAT + 1,
         session_id,
         session_name: "from-a-newer-build".to_string(),
-        panes: vec![CarriedPane {
+        carried_panes: vec![CarriedPane {
             pane_id: PaneId::new(),
-            pid: 4242,
-            rows: 20,
-            cols: 78,
+            process_id: 4242,
+            row_count: 20,
+            column_count: 78,
             terminal_fd: Some(9),
             terminal_name: Some("/dev/ttys009".to_string()),
-            exit: None,
+            exit_status: None,
         }],
     };
-    let body = ResumeBody {
-        sessions: HashMap::new(),
-        engines: HashMap::new(),
-        undecoded: HashMap::new(),
-        graphics_undecoded: HashMap::new(),
-        graphics_screen_continuation: HashMap::new(),
-        graphics_screen_wrapper_active: HashMap::new(),
-        graphics_tmux_continuation: HashMap::new(),
-        graphics_tmux_wrapper_active: HashMap::new(),
-        graphics_events: HashMap::new(),
-        graphics_transport: HashMap::new(),
-        synchronized_output: HashMap::new(),
-        quit: None,
+    let resume_body = ResumeBody {
+        session_by_id: HashMap::new(),
+        terminal_state_by_pane_id: HashMap::new(),
+        undecoded_bytes_by_pane_id: HashMap::new(),
+        graphics_undecoded_bytes_by_pane_id: HashMap::new(),
+        graphics_screen_continuation_by_pane_id: HashMap::new(),
+        graphics_screen_wrapper_active_by_pane_id: HashMap::new(),
+        graphics_tmux_continuation_by_pane_id: HashMap::new(),
+        graphics_tmux_wrapper_active_by_pane_id: HashMap::new(),
+        graphics_events_by_pane_id: HashMap::new(),
+        graphics_transport_by_pane_id: HashMap::new(),
+        synchronized_output_by_pane_id: HashMap::new(),
+        carried_quit: None,
     };
-    write(&path, &header, &body).expect("write the resume file");
+    write_resume_file(&resume_file_path, &header, &resume_body).expect("write the resume file");
 
-    let (read, _raw_body) = read_header(&path).expect("read the header back");
+    let (read, _raw_body) = read_resume_header(&resume_file_path).expect("read the header back");
 
     assert_eq!(read, header, "any build reads the header of any other");
 }
 
 #[test]
 fn a_header_written_without_a_terminal_name_reads_back_with_none() {
-    // A build that records no terminal name writes a pane record without that
-    // field. This build must still read that record, and read the pane back
+    // A build that records no terminal name writes a pane carried pane without that
+    // field. This build must still read that carried pane, and read the pane back
     // with no name rather than refusing the whole header.
-    let dir = TempDir::new().expect("create temp dir");
-    let path = dir.path().join("session.resume");
+    let resume_test_directory = TempDir::new().expect("create temp dir");
+    let resume_file_path = resume_test_directory.path().join("session.resume");
     let session_id = SessionId::new();
     let pane_id = PaneId::new();
     let written = serde_json::json!({
@@ -868,25 +985,28 @@ fn a_header_written_without_a_terminal_name_reads_back_with_none() {
         },
         "body": { "sessions": {}, "engines": {} },
     });
-    std::fs::write(&path, serde_json::to_vec(&written).expect("encode"))
-        .expect("write the resume file");
+    std::fs::write(
+        &resume_file_path,
+        serde_json::to_vec(&written).expect("encode"),
+    )
+    .expect("write the resume file");
 
-    let (read, _raw_body) = read_header(&path).expect("read the header back");
+    let (read, _raw_body) = read_resume_header(&resume_file_path).expect("read the header back");
 
     assert_eq!(
         read,
         ResumeHeader {
-            format: RESUME_FORMAT,
+            resume_format: RESUME_FORMAT,
             session_id,
             session_name: "from-a-build-without-the-name".to_string(),
-            panes: vec![CarriedPane {
+            carried_panes: vec![CarriedPane {
                 pane_id,
-                pid: 4242,
-                rows: 20,
-                cols: 78,
+                process_id: 4242,
+                row_count: 20,
+                column_count: 78,
                 terminal_fd: Some(9),
                 terminal_name: None,
-                exit: None,
+                exit_status: None,
             }],
         }
     );
@@ -896,17 +1016,20 @@ fn a_header_written_without_a_terminal_name_reads_back_with_none() {
 fn a_resumed_server_starts_with_no_socket_and_no_shutdown_pending() {
     let mut populated = populated_server();
     let session_id = populated.session_id;
-    let panes = carried_pty_panes(&populated.server, session_id);
+    let panes = build_carried_pty_panes(&populated.server, session_id);
     let (header, body) = populated
         .server
         .carry_out(&panes)
         .expect("a session to carry");
 
-    let (resumed, _inbox_tx) = resumed_server(&header, body);
+    let (resumed, _inbox_tx) = build_resumed_server(&header, body);
 
-    assert!(!resumed.quit_requested, "no quit is pending");
-    assert!(!resumed.draining, "teardown has not begun");
-    assert!(!resumed.immediate_shutdown, "no zero-grace quit is pending");
+    assert!(!resumed.is_quit_requested, "no quit is pending");
+    assert!(!resumed.is_draining, "teardown has not begun");
+    assert!(
+        !resumed.should_shutdown_immediately,
+        "no zero-grace quit is pending"
+    );
     assert!(
         resumed.ipc_server().is_none(),
         "the control socket is bound after the swap, not carried through it"
@@ -916,14 +1039,17 @@ fn a_resumed_server_starts_with_no_socket_and_no_shutdown_pending() {
 
 #[test]
 fn reading_a_resume_file_that_is_not_there_is_an_io_failure() {
-    let dir = TempDir::new().expect("create temp dir");
-    let path = dir.path().join("missing.resume");
+    let resume_test_directory = TempDir::new().expect("create temp dir");
+    let resume_file_path = resume_test_directory.path().join("missing.resume");
 
-    match read_header(&path) {
+    match read_resume_header(&resume_file_path) {
         Err(StorageError::Io { detail }) => {
             assert!(
-                detail.starts_with(&format!("read resume state at {}: ", path.display())),
-                "the failure must name the path, got {detail}"
+                detail.starts_with(&format!(
+                    "read resume state at {}: ",
+                    resume_file_path.display()
+                )),
+                "the failure must name the resume_file_path, got {detail}"
             );
         }
         other => panic!("expected an io failure, got {other:?}"),
@@ -932,17 +1058,17 @@ fn reading_a_resume_file_that_is_not_there_is_an_io_failure() {
 
 #[test]
 fn reading_bytes_that_are_not_a_resume_file_is_a_corrupt_failure() {
-    let dir = TempDir::new().expect("create temp dir");
-    let path = dir.path().join("junk.resume");
-    std::fs::write(&path, b"not json").expect("write junk");
+    let resume_test_directory = TempDir::new().expect("create temp dir");
+    let resume_file_path = resume_test_directory.path().join("junk.resume");
+    std::fs::write(&resume_file_path, b"not json").expect("write junk");
 
-    match read_header(&path) {
+    match read_resume_header(&resume_file_path) {
         Err(StorageError::Corrupt { detail }) => {
             assert_eq!(
                 detail,
                 format!(
                     "resume state at {} is unreadable: expected ident at line 1 column 2",
-                    path.display()
+                    resume_file_path.display()
                 )
             );
         }
@@ -957,7 +1083,7 @@ fn a_body_format_below_the_oldest_this_build_reads_is_refused_by_both_numbers() 
     // read it as the shape it no longer has.
     let too_old = RESUME_FORMAT_MIN - 1;
 
-    match read_body(too_old, serde_json::value::RawValue::NULL) {
+    match read_resume_body(too_old, serde_json::value::RawValue::NULL) {
         Err(StorageError::Corrupt { detail }) => {
             assert_eq!(
                 detail,
@@ -975,30 +1101,30 @@ fn a_resume_file_whose_bytes_stop_part_way_is_a_corrupt_failure_naming_the_path(
     // A whole resume file lands at once, so a file cut short is disk damage
     // rather than a half-finished write. The header is inside the same JSON
     // document as the body, so bytes that stop part way cost the reader both.
-    let dir = TempDir::new().expect("create temp dir");
-    let path = dir.path().join("session.resume");
+    let resume_test_directory = TempDir::new().expect("create temp dir");
+    let resume_file_path = resume_test_directory.path().join("session.resume");
     let mut populated = populated_server();
     let session_id = populated.session_id;
-    let panes = carried_pty_panes(&populated.server, session_id);
+    let panes = build_carried_pty_panes(&populated.server, session_id);
     let (header, body) = populated
         .server
         .carry_out(&panes)
         .expect("a session to carry");
-    write(&path, &header, &body).expect("write the resume file");
+    write_resume_file(&resume_file_path, &header, &body).expect("write the resume file");
 
-    let whole = std::fs::read(&path).expect("read the file back");
+    let whole = std::fs::read(&resume_file_path).expect("read the file back");
     let cut = whole.len() / 2;
     assert!(cut > 0, "the file must have bytes to cut");
-    std::fs::write(&path, &whole[..cut]).expect("rewrite the file cut short");
+    std::fs::write(&resume_file_path, &whole[..cut]).expect("rewrite the file cut short");
 
-    match read_header(&path) {
+    match read_resume_header(&resume_file_path) {
         Err(StorageError::Corrupt { detail }) => {
             assert!(
                 detail.starts_with(&format!(
                     "resume state at {} is unreadable: ",
-                    path.display()
+                    resume_file_path.display()
                 )),
-                "the failure must name the path, got {detail}"
+                "the failure must name the resume_file_path, got {detail}"
             );
         }
         other => panic!("expected a corrupt failure, got {other:?}"),
@@ -1009,31 +1135,37 @@ fn a_resume_file_whose_bytes_stop_part_way_is_a_corrupt_failure_naming_the_path(
 fn a_body_missing_one_of_its_two_halves_is_corrupt_while_the_header_still_reads() {
     // The body is one JSON object with two named halves. A body holding only
     // the sessions is readable JSON, so nothing before the decode catches it —
-    // the decode itself must, and it must cost the caller no pane record.
-    let dir = TempDir::new().expect("create temp dir");
-    let path = dir.path().join("session.resume");
+    // the decode itself must, and it must cost the caller no pane carried pane.
+    let resume_test_directory = TempDir::new().expect("create temp dir");
+    let resume_file_path = resume_test_directory.path().join("session.resume");
     let mut populated = populated_server();
     let session_id = populated.session_id;
-    let panes = carried_pty_panes(&populated.server, session_id);
+    let panes = build_carried_pty_panes(&populated.server, session_id);
     let (header, body) = populated
         .server
         .carry_out(&panes)
         .expect("a session to carry");
-    write(&path, &header, &body).expect("write the resume file");
+    write_resume_file(&resume_file_path, &header, &body).expect("write the resume file");
 
     let mut on_disk: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&path).expect("read the file")).expect("valid json");
+        serde_json::from_slice(&std::fs::read(&resume_file_path).expect("read the file"))
+            .expect("valid json");
     on_disk["body"]
         .as_object_mut()
         .expect("a body object")
         .remove("engines");
-    std::fs::write(&path, serde_json::to_vec(&on_disk).expect("encode")).expect("rewrite the file");
+    std::fs::write(
+        &resume_file_path,
+        serde_json::to_vec(&on_disk).expect("encode"),
+    )
+    .expect("rewrite the file");
 
-    let (read_back, raw_body) = read_header(&path).expect("read the header back");
+    let (read_back, raw_body) =
+        read_resume_header(&resume_file_path).expect("read the header back");
     assert_eq!(read_back, header, "the header survives a half body");
-    assert_eq!(read_back.panes.len(), 4, "with every pane it named");
+    assert_eq!(read_back.carried_panes.len(), 4, "with every pane it named");
 
-    match read_body(read_back.format, &raw_body) {
+    match read_resume_body(read_back.resume_format, &raw_body) {
         Err(StorageError::Corrupt { detail }) => {
             assert_eq!(
                 detail,
@@ -1053,53 +1185,71 @@ fn a_session_holding_no_pane_carries_out_and_reads_back_with_no_pane() {
     // The swap runs whatever the session holds. A header naming no pane must
     // round-trip as an empty list rather than as an absent field, so the image
     // that reads it takes nothing back and waits for nothing.
-    let dir = TempDir::new().expect("create temp dir");
-    let path = dir.path().join("empty.resume");
+    let resume_test_directory = TempDir::new().expect("create temp dir");
+    let resume_file_path = resume_test_directory.path().join("empty.resume");
     let mut populated = populated_server();
     let session_id = populated.session_id;
 
     let (header, body) = populated.server.carry_out(&[]).expect("a session to carry");
-    write(&path, &header, &body).expect("write the resume file");
-    let (read_back, raw_body) = read_header(&path).expect("read the header back");
-    let read_body = read_body(read_back.format, &raw_body).expect("read the body back");
+    write_resume_file(&resume_file_path, &header, &body).expect("write the resume file");
+    let (read_back, raw_body) =
+        read_resume_header(&resume_file_path).expect("read the header back");
+    let read_body =
+        read_resume_body(read_back.resume_format, &raw_body).expect("read the body back");
 
-    assert_eq!(read_back.panes, Vec::new(), "no pane crosses the swap");
-    assert_eq!(read_back.format, RESUME_FORMAT);
+    assert_eq!(
+        read_back.carried_panes,
+        Vec::new(),
+        "no pane crosses the swap"
+    );
+    assert_eq!(read_back.resume_format, RESUME_FORMAT);
     assert_eq!(read_back.session_id, session_id);
     assert_eq!(read_back.session_name, "carried");
     assert_eq!(
-        read_body.engines.len(),
+        read_body.terminal_state_by_pane_id.len(),
         4,
         "the screens still cross, since the header names what the backend holds"
     );
 
-    let (resumed, _inbox_tx) = resumed_server(&read_back, read_body);
-    assert_eq!(resumed.pty_handles.len(), 0, "and no handle comes back");
-    assert_eq!(resumed.pty_sizes.len(), 0, "and no size comes back");
-    assert_eq!(resumed.sessions.len(), 1, "the session itself still does");
+    let (resumed, _inbox_tx) = build_resumed_server(&read_back, read_body);
+    assert_eq!(
+        resumed.pty_handle_by_pane_id.len(),
+        0,
+        "and no handle comes back"
+    );
+    assert_eq!(
+        resumed.pty_size_by_pane_id.len(),
+        0,
+        "and no size comes back"
+    );
+    assert_eq!(
+        resumed.session_by_id.len(),
+        1,
+        "the session itself still does"
+    );
 }
 
 #[test]
 fn a_session_holding_many_panes_carries_every_one_of_them_in_order() {
-    // Nothing in the file caps how many panes it names. Each record must keep
+    // Nothing in the file caps how many panes it names. Each carried pane must keep
     // its own descriptor, process id and size, and keep the order the backend
     // reported, so the image that reads it takes back the right terminal for
     // each pane.
-    let dir = TempDir::new().expect("create temp dir");
-    let path = dir.path().join("many.resume");
+    let resume_test_directory = TempDir::new().expect("create temp dir");
+    let resume_file_path = resume_test_directory.path().join("many.resume");
     let mut populated = populated_server();
 
     let many: Vec<CarriedPtyPane> = (0..64)
-        .map(|index| CarriedPtyPane {
+        .map(|pane_index| CarriedPtyPane {
             pane_id: PaneId::new(),
             #[cfg(unix)]
-            terminal_fd: Some(100 + index),
-            pid: 7000 + index as u32,
-            size: PtySize {
-                cols: 40 + index as u16,
-                rows: 10 + index as u16,
+            terminal_fd: Some(100 + pane_index),
+            process_id: 7000 + pane_index as u32,
+            pty_size: PtySize {
+                column_count: 40 + pane_index as u16,
+                row_count: 10 + pane_index as u16,
             },
-            exit: None,
+            exit_status: None,
         })
         .collect();
 
@@ -1107,27 +1257,39 @@ fn a_session_holding_many_panes_carries_every_one_of_them_in_order() {
         .server
         .carry_out(&many)
         .expect("a session to carry");
-    write(&path, &header, &body).expect("write the resume file");
-    let (read_back, _raw_body) = read_header(&path).expect("read the header back");
+    write_resume_file(&resume_file_path, &header, &body).expect("write the resume file");
+    let (read_back, _raw_body) =
+        read_resume_header(&resume_file_path).expect("read the header back");
 
-    assert_eq!(read_back.panes.len(), 64, "every pane must have a record");
-    for (index, record) in read_back.panes.iter().enumerate() {
-        assert_eq!(record.pane_id, many[index].pane_id, "record {index}");
-        assert_eq!(record.pid, 7000 + index as u32, "record {index}");
+    assert_eq!(
+        read_back.carried_panes.len(),
+        64,
+        "every pane must have a carried pane"
+    );
+    for (pane_index, carried_pane) in read_back.carried_panes.iter().enumerate() {
+        assert_eq!(
+            carried_pane.pane_id, many[pane_index].pane_id,
+            "carried pane {pane_index}"
+        );
+        assert_eq!(
+            carried_pane.process_id,
+            7000 + pane_index as u32,
+            "carried pane {pane_index}"
+        );
         #[cfg(unix)]
         assert_eq!(
-            record.terminal_fd,
-            Some(100 + index as i32),
-            "record {index}"
+            carried_pane.terminal_fd,
+            Some(100 + pane_index as i32),
+            "carried pane {pane_index}"
         );
         #[cfg(windows)]
-        assert_eq!(record.terminal_fd, None, "record {index}");
+        assert_eq!(carried_pane.terminal_fd, None, "carried pane {pane_index}");
         // None of these panes is one the server holds a size for, so each takes
         // the size the backend reported.
         assert_eq!(
-            (record.cols, record.rows),
-            (40 + index as u16, 10 + index as u16),
-            "record {index}"
+            (carried_pane.column_count, carried_pane.row_count),
+            (40 + pane_index as u16, 10 + pane_index as u16),
+            "carried pane {pane_index}"
         );
     }
 }
@@ -1139,19 +1301,20 @@ fn held_bytes_naming_a_pane_the_body_carries_no_screen_for_are_dropped_with_that
     // with no screen has no parser those bytes could finish a sequence in.
     let mut populated = populated_server();
     let session_id = populated.session_id;
-    let panes = carried_pty_panes(&populated.server, session_id);
+    let panes = build_carried_pty_panes(&populated.server, session_id);
     let (header, mut body) = populated
         .server
         .carry_out(&panes)
         .expect("a session to carry");
     let stray = PaneId::new();
-    body.undecoded.insert(stray, b"\x1b[".to_vec());
-    let mut carried_screens: Vec<PaneId> = body.engines.keys().copied().collect();
+    body.undecoded_bytes_by_pane_id
+        .insert(stray, b"\x1b[".to_vec());
+    let mut carried_screens: Vec<PaneId> = body.terminal_state_by_pane_id.keys().copied().collect();
     carried_screens.sort();
 
-    let (resumed, _inbox_tx) = resumed_server(&header, body);
+    let (resumed, _inbox_tx) = build_resumed_server(&header, body);
 
-    let mut rebuilt: Vec<PaneId> = resumed.terminal_engines.keys().copied().collect();
+    let mut rebuilt: Vec<PaneId> = resumed.terminal_engine_by_pane_id.keys().copied().collect();
     rebuilt.sort();
     assert_eq!(
         rebuilt, carried_screens,
@@ -1168,38 +1331,50 @@ fn a_screen_the_header_names_no_pane_for_comes_back_with_no_handle_and_no_size()
     // drive it.
     let mut populated = populated_server();
     let session_id = populated.session_id;
-    let panes = carried_pty_panes(&populated.server, session_id);
-    let extra = PaneId::new();
-    populated.server.terminal_engines.insert(
-        extra,
-        koshi_terminal::engine::TerminalEngine::new(PtySize { cols: 80, rows: 24 }),
+    let panes = build_carried_pty_panes(&populated.server, session_id);
+    let unlisted_pane_id = PaneId::new();
+    populated.server.terminal_engine_by_pane_id.insert(
+        unlisted_pane_id,
+        koshi_terminal::engine::TerminalEngine::from_pty_size(PtySize {
+            column_count: 80,
+            row_count: 24,
+        }),
     );
     let (header, body) = populated
         .server
         .carry_out(&panes)
         .expect("a session to carry");
 
-    let mut named_by_the_header: Vec<PaneId> =
-        header.panes.iter().map(|pane| pane.pane_id).collect();
+    let mut named_by_the_header: Vec<PaneId> = header
+        .carried_panes
+        .iter()
+        .map(|pane| pane.pane_id)
+        .collect();
     named_by_the_header.sort();
 
-    let (resumed, _inbox_tx) = resumed_server(&header, body);
+    let (resumed, _inbox_tx) = build_resumed_server(&header, body);
 
-    let mut screens: Vec<PaneId> = resumed.terminal_engines.keys().copied().collect();
+    let mut screens: Vec<PaneId> = resumed.terminal_engine_by_pane_id.keys().copied().collect();
     screens.sort();
-    let mut with_the_extra = named_by_the_header.clone();
-    with_the_extra.push(extra);
-    with_the_extra.sort();
-    assert_eq!(screens, with_the_extra, "every carried screen comes back");
+    let named_panes_and_unlisted_pane = {
+        let mut pane_ids = named_by_the_header.clone();
+        pane_ids.push(unlisted_pane_id);
+        pane_ids.sort();
+        pane_ids
+    };
+    assert_eq!(
+        screens, named_panes_and_unlisted_pane,
+        "every carried screen comes back"
+    );
 
-    let mut driven: Vec<PaneId> = resumed.pty_handles.keys().copied().collect();
+    let mut driven: Vec<PaneId> = resumed.pty_handle_by_pane_id.keys().copied().collect();
     driven.sort();
     assert_eq!(
         driven, named_by_the_header,
         "and only the panes the header named have something driving them"
     );
 
-    let mut sized: Vec<PaneId> = resumed.pty_sizes.keys().copied().collect();
+    let mut sized: Vec<PaneId> = resumed.pty_size_by_pane_id.keys().copied().collect();
     sized.sort();
     assert_eq!(sized, named_by_the_header, "and only they carry a size");
 }
@@ -1209,25 +1384,30 @@ fn a_body_whose_two_halves_are_swapped_is_corrupt_before_any_pane_is_touched() {
     // The header is what every build reads, whatever the body says. Bytes whose
     // header half is not a header at all name no pane, so the read fails and no
     // descriptor and no process id reaches the caller.
-    let dir = TempDir::new().expect("create temp dir");
-    let path = dir.path().join("swapped.resume");
+    let resume_test_directory = TempDir::new().expect("create temp dir");
+    let resume_file_path = resume_test_directory.path().join("swapped.resume");
     let mut populated = populated_server();
     let session_id = populated.session_id;
-    let panes = carried_pty_panes(&populated.server, session_id);
+    let panes = build_carried_pty_panes(&populated.server, session_id);
     let (header, body) = populated
         .server
         .carry_out(&panes)
         .expect("a session to carry");
-    write(&path, &header, &body).expect("write the resume file");
+    write_resume_file(&resume_file_path, &header, &body).expect("write the resume file");
     let mut on_disk: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&path).expect("read the file")).expect("valid json");
+        serde_json::from_slice(&std::fs::read(&resume_file_path).expect("read the file"))
+            .expect("valid json");
     let swapped = serde_json::json!({
         "header": on_disk["body"].take(),
         "body": on_disk["header"].take(),
     });
-    std::fs::write(&path, serde_json::to_vec(&swapped).expect("encode")).expect("rewrite the file");
+    std::fs::write(
+        &resume_file_path,
+        serde_json::to_vec(&swapped).expect("encode"),
+    )
+    .expect("rewrite the file");
 
-    match read_header(&path) {
+    match read_resume_header(&resume_file_path) {
         // The position the decoder names counts bytes into a file whose size
         // follows the carried screens, so the sentence is read up to it.
         Err(StorageError::Corrupt { detail }) => assert_eq!(
@@ -1235,7 +1415,7 @@ fn a_body_whose_two_halves_are_swapped_is_corrupt_before_any_pane_is_touched() {
             Some(
                 format!(
                     "resume state at {} is unreadable: missing field `format`",
-                    path.display()
+                    resume_file_path.display()
                 )
                 .as_str()
             )
@@ -1246,29 +1426,29 @@ fn a_body_whose_two_halves_are_swapped_is_corrupt_before_any_pane_is_touched() {
 
 #[test]
 fn a_carried_session_with_its_client_comes_back_whole() {
-    // The body carries every attached client: a record written by this build
+    // The body carries every attached client: a carried pane written by this build
     // reads back with the identity it went out with, wherever it connected
     // from.
     for (origin, written_origin) in [
         (ClientOrigin::Local, "Local"),
         (ClientOrigin::Remote, "Remote"),
     ] {
-        let dir = TempDir::new().expect("create temp dir");
-        let path = dir.path().join("client.resume");
+        let resume_test_directory = TempDir::new().expect("create temp dir");
+        let resume_file_path = resume_test_directory.path().join("client.resume");
         let session_id = SessionId::new();
         let client_id = ClientId::new();
         let tab_id = TabId::new();
-        let mut session = Session::new(
+        let mut session = Session::from_identity_and_client_registry(
             session_id,
             "carried".to_string(),
             SystemTime::UNIX_EPOCH,
             ClientRegistry::new(),
         );
-        session.attach_client(Client::new(
+        session.attach_client(Client::from_attachment(
             client_id,
             session_id,
             SystemTime::UNIX_EPOCH,
-            VIEWPORT,
+            TEST_VIEWPORT_SIZE,
             None,
             tab_id,
             origin,
@@ -1276,57 +1456,62 @@ fn a_carried_session_with_its_client_comes_back_whole() {
             3,
         ));
         let header = ResumeHeader {
-            format: RESUME_FORMAT,
+            resume_format: RESUME_FORMAT,
             session_id,
             session_name: "carried".to_string(),
-            panes: Vec::new(),
+            carried_panes: Vec::new(),
         };
-        let body = ResumeBody {
-            sessions: HashMap::from([(session_id, session)]),
-            engines: HashMap::new(),
-            undecoded: HashMap::new(),
-            graphics_undecoded: HashMap::new(),
-            graphics_screen_continuation: HashMap::new(),
-            graphics_screen_wrapper_active: HashMap::new(),
-            graphics_tmux_continuation: HashMap::new(),
-            graphics_tmux_wrapper_active: HashMap::new(),
-            graphics_events: HashMap::new(),
-            graphics_transport: HashMap::new(),
-            synchronized_output: HashMap::new(),
-            quit: None,
+        let resume_body = ResumeBody {
+            session_by_id: HashMap::from([(session_id, session)]),
+            terminal_state_by_pane_id: HashMap::new(),
+            undecoded_bytes_by_pane_id: HashMap::new(),
+            graphics_undecoded_bytes_by_pane_id: HashMap::new(),
+            graphics_screen_continuation_by_pane_id: HashMap::new(),
+            graphics_screen_wrapper_active_by_pane_id: HashMap::new(),
+            graphics_tmux_continuation_by_pane_id: HashMap::new(),
+            graphics_tmux_wrapper_active_by_pane_id: HashMap::new(),
+            graphics_events_by_pane_id: HashMap::new(),
+            graphics_transport_by_pane_id: HashMap::new(),
+            synchronized_output_by_pane_id: HashMap::new(),
+            carried_quit: None,
         };
-        write(&path, &header, &body).expect("write the resume file");
+        write_resume_file(&resume_file_path, &header, &resume_body).expect("write the resume file");
 
-        let (read_back, raw_body) = read_header(&path).expect("read the header back");
+        let (read_back, raw_body) =
+            read_resume_header(&resume_file_path).expect("read the header back");
 
         // Format 3 writes the origin and no authority key. The header's format
-        // number and the client record's shape move together.
-        let encoded: serde_json::Value =
+        // number and the client carried pane's shape move together.
+        let encoded_json: serde_json::Value =
             serde_json::from_str(raw_body.get()).expect("the body is json");
-        let record = &encoded["sessions"][session_id.as_uuid().to_string()]["clients"]["records"]
-            [client_id.as_uuid().to_string()];
+        let client_record_json = &encoded_json["sessions"][session_id.get_uuid().to_string()]
+            ["clients"]["records"][client_id.get_uuid().to_string()];
         assert_eq!(
-            record["origin"],
+            client_record_json["origin"],
             serde_json::Value::String(written_origin.to_string())
         );
         assert_eq!(
-            record.get("tier"),
+            client_record_json.get("tier"),
             None,
             "format {RESUME_FORMAT} writes no authority key"
         );
 
-        let read_body = read_body(read_back.format, &raw_body).expect("read the body back");
+        let read_body =
+            read_resume_body(read_back.resume_format, &raw_body).expect("read the body back");
 
-        assert_eq!(read_back.format, RESUME_FORMAT);
+        assert_eq!(read_back.resume_format, RESUME_FORMAT);
         assert_eq!(RESUME_FORMAT, 3);
-        let carried = &read_body.sessions[&session_id];
-        assert_eq!(carried.id, session_id);
-        let client = carried.clients.get(client_id).expect("the carried client");
-        assert_eq!(client.id(), client_id);
-        assert_eq!(client.origin(), origin);
-        assert_eq!(client.label(), "C-swift-otter");
-        assert_eq!(client.colour(), 3);
-        assert_eq!(client.active_tab(), tab_id);
+        let resumed_session = &read_body.session_by_id[&session_id];
+        assert_eq!(resumed_session.session_id, session_id);
+        let client = resumed_session
+            .clients
+            .get_client_by_id(client_id)
+            .expect("the carried client");
+        assert_eq!(client.get_client_id(), client_id);
+        assert_eq!(client.get_origin(), origin);
+        assert_eq!(client.get_label(), "C-swift-otter");
+        assert_eq!(client.get_color(), 3);
+        assert_eq!(client.get_active_tab(), tab_id);
     }
 }
 
@@ -1339,7 +1524,7 @@ fn a_carried_file_written_before_this_change_still_reads() {
     let tab_id = TabId::new();
     let mut clients = serde_json::Map::new();
     clients.insert(
-        client_id.as_uuid().to_string(),
+        client_id.get_uuid().to_string(),
         serde_json::json!({
             "id": client_id,
             "session_id": session_id,
@@ -1360,7 +1545,7 @@ fn a_carried_file_written_before_this_change_still_reads() {
     );
     let mut sessions = serde_json::Map::new();
     sessions.insert(
-        session_id.as_uuid().to_string(),
+        session_id.get_uuid().to_string(),
         serde_json::json!({
             "id": session_id,
             "name": "carried",
@@ -1373,120 +1558,155 @@ fn a_carried_file_written_before_this_change_still_reads() {
         }),
     );
     let written = serde_json::json!({ "sessions": sessions, "engines": {} });
-    let raw = serde_json::value::RawValue::from_string(written.to_string())
+    let raw_resume_body = serde_json::value::RawValue::from_string(written.to_string())
         .expect("the body is one json value");
 
     assert_eq!(RESUME_FORMAT_MIN, 1);
-    let body = read_body(1, &raw).expect("a body written before this change reads back");
+    let parsed_resume_body = read_resume_body(1, &raw_resume_body)
+        .expect("a body written before this change reads back");
 
-    let carried = &body.sessions[&session_id];
-    assert_eq!(carried.id, session_id);
-    let client = carried.clients.get(client_id).expect("the carried client");
-    assert_eq!(client.id(), client_id);
-    assert_eq!(client.origin(), ClientOrigin::Local);
-    assert_eq!(client.label(), "C-swift-otter");
-    assert_eq!(client.colour(), 3);
-    assert_eq!(client.active_tab(), tab_id);
-    assert_eq!(client.viewport(), Size { cols: 80, rows: 24 });
+    let resumed_session = &parsed_resume_body.session_by_id[&session_id];
+    assert_eq!(resumed_session.session_id, session_id);
+    let client = resumed_session
+        .clients
+        .get_client_by_id(client_id)
+        .expect("the carried client");
+    assert_eq!(client.get_client_id(), client_id);
+    assert_eq!(client.get_origin(), ClientOrigin::Local);
+    assert_eq!(client.get_label(), "C-swift-otter");
+    assert_eq!(client.get_color(), 3);
+    assert_eq!(client.get_active_tab(), tab_id);
+    assert_eq!(
+        client.get_viewport_size(),
+        Size {
+            column_count: 80,
+            row_count: 24
+        }
+    );
 }
 
 #[test]
 fn a_carried_pane_reports_the_size_its_rows_and_cols_name() {
     let pane = CarriedPane {
         pane_id: PaneId::new(),
-        pid: 4242,
-        rows: 20,
-        cols: 78,
+        process_id: 4242,
+        row_count: 20,
+        column_count: 78,
         terminal_fd: Some(9),
         terminal_name: Some("/dev/ttys009".to_string()),
-        exit: None,
+        exit_status: None,
     };
 
-    assert_eq!(pane.size(), PtySize { rows: 20, cols: 78 });
+    assert_eq!(
+        pane.get_pty_size(),
+        PtySize {
+            row_count: 20,
+            column_count: 78
+        }
+    );
 }
 
 #[test]
 fn an_applied_quit_crosses_the_file_with_the_kind_it_was_asked_for() {
-    for kind in [CarriedQuit::Graceful, CarriedQuit::Immediate] {
-        let dir = TempDir::new().expect("create temp dir");
-        let path = dir.path().join("quit.resume");
-        let header = header_for(SessionId::new(), Vec::new());
-        let body = body_carrying_only(Some(kind));
-        write(&path, &header, &body).expect("write the resume file");
+    for quit_kind in [CarriedQuit::Graceful, CarriedQuit::Immediate] {
+        let resume_test_directory = TempDir::new().expect("create temp dir");
+        let resume_file_path = resume_test_directory.path().join("quit.resume");
+        let header = build_resume_header(SessionId::new(), Vec::new());
+        let resume_body = build_resume_body_with_quit(Some(quit_kind));
+        write_resume_file(&resume_file_path, &header, &resume_body).expect("write the resume file");
 
-        let (read_back, raw_body) = read_header(&path).expect("read the header back");
-        let read_body = read_body(read_back.format, &raw_body).expect("read the body back");
+        let (read_back, raw_body) =
+            read_resume_header(&resume_file_path).expect("read the header back");
+        let read_body =
+            read_resume_body(read_back.resume_format, &raw_body).expect("read the body back");
 
-        assert_eq!(read_body.quit, Some(kind));
+        assert_eq!(read_body.carried_quit, Some(quit_kind));
     }
 }
 
 #[test]
 fn a_body_written_without_a_quit_reads_back_with_none() {
-    let dir = TempDir::new().expect("create temp dir");
-    let path = dir.path().join("session.resume");
+    let resume_test_directory = TempDir::new().expect("create temp dir");
+    let resume_file_path = resume_test_directory.path().join("session.resume");
     let mut populated = populated_server();
     let session_id = populated.session_id;
-    let panes = carried_pty_panes(&populated.server, session_id);
+    let panes = build_carried_pty_panes(&populated.server, session_id);
     let (header, body) = populated
         .server
         .carry_out(&panes)
         .expect("a session to carry");
-    write(&path, &header, &body).expect("write the resume file");
+    write_resume_file(&resume_file_path, &header, &body).expect("write the resume file");
 
     // The body with its quit key taken out of the JSON.
     let mut on_disk: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&path).expect("read the file")).expect("valid json");
+        serde_json::from_slice(&std::fs::read(&resume_file_path).expect("read the file"))
+            .expect("valid json");
     on_disk["body"]
         .as_object_mut()
         .expect("the body is a map")
         .remove("quit");
-    std::fs::write(&path, serde_json::to_vec(&on_disk).expect("encode")).expect("rewrite the file");
+    std::fs::write(
+        &resume_file_path,
+        serde_json::to_vec(&on_disk).expect("encode"),
+    )
+    .expect("rewrite the file");
 
-    let (read_back, raw_body) = read_header(&path).expect("read the header back");
-    let read_body = read_body(read_back.format, &raw_body).expect("read the body back");
+    let (read_back, raw_body) =
+        read_resume_header(&resume_file_path).expect("read the header back");
+    let read_body =
+        read_resume_body(read_back.resume_format, &raw_body).expect("read the body back");
 
-    assert_eq!(read_body.quit, None);
-    assert_eq!(read_body.engines.len(), 4, "every screen still reads back");
+    assert_eq!(read_body.carried_quit, None);
+    assert_eq!(
+        read_body.terminal_state_by_pane_id.len(),
+        4,
+        "every screen still reads back"
+    );
 }
 
 #[test]
 fn a_pane_whose_child_was_reaped_carries_that_exit_status_across_the_file() {
-    let dir = TempDir::new().expect("create temp dir");
-    let path = dir.path().join("reaped.resume");
-    let header = header_for(
+    let resume_test_directory = TempDir::new().expect("create temp dir");
+    let resume_file_path = resume_test_directory.path().join("reaped.resume");
+    let header = build_resume_header(
         SessionId::new(),
         vec![
             CarriedPane {
                 pane_id: PaneId::new(),
-                pid: 4242,
-                rows: 20,
-                cols: 78,
+                process_id: 4242,
+                row_count: 20,
+                column_count: 78,
                 terminal_fd: Some(9),
                 terminal_name: Some("/dev/ttys009".to_string()),
-                exit: Some(ExitStatus::ExitCode(3)),
+                exit_status: Some(ExitStatus::ExitCode(3)),
             },
             CarriedPane {
                 pane_id: PaneId::new(),
-                pid: 4243,
-                rows: 20,
-                cols: 78,
+                process_id: 4243,
+                row_count: 20,
+                column_count: 78,
                 terminal_fd: Some(10),
                 terminal_name: Some("/dev/ttys010".to_string()),
-                exit: Some(ExitStatus::Signaled(9)),
+                exit_status: Some(ExitStatus::Signaled(9)),
             },
         ],
     );
-    write(&path, &header, &body_carrying_only(None)).expect("write the resume file");
+    write_resume_file(
+        &resume_file_path,
+        &header,
+        &build_resume_body_with_quit(None),
+    )
+    .expect("write the resume file");
 
-    let (read_back, _raw_body) = read_header(&path).expect("read the header back");
+    let (read_back, _raw_body) =
+        read_resume_header(&resume_file_path).expect("read the header back");
 
     assert_eq!(read_back, header);
     assert_eq!(
         read_back
-            .panes
+            .carried_panes
             .iter()
-            .map(|pane| pane.exit)
+            .map(|pane| pane.exit_status)
             .collect::<Vec<Option<ExitStatus>>>(),
         vec![Some(ExitStatus::ExitCode(3)), Some(ExitStatus::Signaled(9))]
     );
@@ -1494,44 +1714,61 @@ fn a_pane_whose_child_was_reaped_carries_that_exit_status_across_the_file() {
 
 #[test]
 fn writing_a_resume_file_replaces_the_bytes_already_there() {
-    let dir = TempDir::new().expect("create temp dir");
-    let path = dir.path().join("session.resume");
-    std::fs::write(&path, b"the bytes of an older write").expect("write the old file");
-    let header = header_for(
+    let resume_test_directory = TempDir::new().expect("create temp dir");
+    let resume_file_path = resume_test_directory.path().join("session.resume");
+    std::fs::write(&resume_file_path, b"the bytes of an older write").expect("write the old file");
+    let header = build_resume_header(
         SessionId::new(),
         vec![CarriedPane {
             pane_id: PaneId::new(),
-            pid: 4242,
-            rows: 20,
-            cols: 78,
+            process_id: 4242,
+            row_count: 20,
+            column_count: 78,
             terminal_fd: Some(9),
             terminal_name: Some("/dev/ttys009".to_string()),
-            exit: None,
+            exit_status: None,
         }],
     );
 
-    write(&path, &header, &body_carrying_only(None)).expect("write the resume file");
+    write_resume_file(
+        &resume_file_path,
+        &header,
+        &build_resume_body_with_quit(None),
+    )
+    .expect("write the resume file");
 
-    let (read_back, raw_body) = read_header(&path).expect("read the header back");
+    let (read_back, raw_body) =
+        read_resume_header(&resume_file_path).expect("read the header back");
     assert_eq!(read_back, header);
-    let read_body = read_body(read_back.format, &raw_body).expect("read the body back");
-    assert_eq!(read_body.sessions.len(), 0);
-    assert_eq!(read_body.engines.len(), 0);
+    let read_body =
+        read_resume_body(read_back.resume_format, &raw_body).expect("read the body back");
+    assert_eq!(read_body.session_by_id.len(), 0);
+    assert_eq!(read_body.terminal_state_by_pane_id.len(), 0);
 }
 
 #[test]
 fn writing_into_a_directory_that_is_not_there_is_an_io_failure_naming_it() {
-    let dir = TempDir::new().expect("create temp dir");
-    let missing = dir.path().join("gone");
-    let path = missing.join("session.resume");
-    let header = header_for(SessionId::new(), Vec::new());
+    let resume_test_directory = TempDir::new().expect("create temp dir");
+    let missing_parent_directory = resume_test_directory.path().join("gone");
+    let resume_file_path = missing_parent_directory.join("session.resume");
+    let header = build_resume_header(SessionId::new(), Vec::new());
 
-    match write(&path, &header, &body_carrying_only(None)) {
+    match write_resume_file(
+        &resume_file_path,
+        &header,
+        &build_resume_body_with_quit(None),
+    ) {
         Err(StorageError::Io { detail }) => assert!(
-            detail.starts_with(&format!("create temp in {}: ", missing.display())),
+            detail.starts_with(&format!(
+                "create temp in {}: ",
+                missing_parent_directory.display()
+            )),
             "the failure must name the directory, got {detail}"
         ),
         other => panic!("expected an io failure, got {other:?}"),
     }
-    assert!(!missing.exists(), "and the directory must not be created");
+    assert!(
+        !missing_parent_directory.exists(),
+        "and the directory must not be created"
+    );
 }

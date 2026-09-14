@@ -4,37 +4,40 @@
 
 use super::*;
 
-use crate::action::{core_action_seeds, ActionMetadata, ActionNamespace, ActionScope, TargetKind};
+use crate::action::{
+    build_core_action_seeds, ActionMetadata, ActionNamespace, ActionScope, TargetKind,
+};
 use crate::command::CommandKind;
 use crate::process::ShellKind;
-use crate::registry::tests::insert_unchecked;
+use crate::registry::tests::insert_action_without_validation;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use uuid::Uuid;
 
 /// A `core:` reference for a name known to satisfy the grammar.
-fn core(name: &str) -> ActionRef {
-    ActionRef::core(name).expect("test action name is valid")
+fn build_core_action_reference(action_name: &str) -> ActionReference {
+    ActionReference::from_core_action_name(action_name).expect("test action name is valid")
 }
 
 /// A plugin id built from a fixed uuid, so the same byte yields the same plugin.
-fn plugin_id(byte: u8) -> PluginId {
-    PluginId::from_uuid(Uuid::from_bytes([byte; 16]))
+fn build_test_plugin_id(uuid_fill_byte: u8) -> PluginId {
+    PluginId::from_uuid(Uuid::from_bytes([uuid_fill_byte; 16]))
 }
 
 /// The program `core:run` is exercised with.
-fn run_program() -> PathBuf {
+fn build_run_program_path() -> PathBuf {
     PathBuf::from("/usr/bin/lazygit")
 }
 
-/// The spawn spec `core:run` must build from [`run_program`]: no `cwd`, no
-/// `env`, and a shell kind derived from the program.
-fn spawn_spec() -> SpawnSpec {
+/// The spawn spec `core:run` must build from [`build_run_program_path`]: no working
+/// directory, no environment variables, and a shell kind derived from the
+/// program.
+fn build_run_spawn_spec() -> SpawnSpec {
     SpawnSpec {
-        program: run_program(),
-        args: vec!["--all".to_string()],
-        cwd: None,
-        env: BTreeMap::new(),
+        program: build_run_program_path(),
+        arguments: vec!["--all".to_string()],
+        working_directory: None,
+        environment_variables: BTreeMap::new(),
         shell_kind: ShellKind::Other("lazygit".to_string()),
     }
 }
@@ -44,7 +47,7 @@ fn spawn_spec() -> SpawnSpec {
 /// index, the text to type), so it is reachable only through a CLI command,
 /// which builds its [`Command`] directly. `resolve_action` refuses every one
 /// of them whatever the arguments. Pinned against the seed table by
-/// [`available_table_matches_seeds`].
+/// [`available_action_table_matches_seeds`].
 const CLI_ONLY: [&str; 5] = [
     "resize-pane",
     "focus-pane",
@@ -60,93 +63,93 @@ const CLIENT_SPLIT: Direction = Direction::Up;
 
 /// A `new-pane` request carrying [`CLIENT_SPLIT`]: what `core:new-pane` builds
 /// for a client on that setting.
-fn new_pane_args() -> NewPaneArgs {
+fn build_new_pane_args() -> NewPaneArgs {
     NewPaneArgs {
-        source: None,
-        tab: None,
+        source_pane_id: None,
+        tab_id: None,
         direction: CLIENT_SPLIT,
-        stacked: false,
-        cwd: None,
-        command: None,
-        client: None,
+        should_stack: false,
+        working_directory: None,
+        spawn_spec: None,
+        client_id: None,
     }
 }
 
 /// Every binding-invocable `Available` core action, the arguments it is
 /// invoked with, and the exact command it must produce. Together with
 /// [`CLI_ONLY`] this covers the whole `Available` seed set, pinned by
-/// [`available_table_matches_seeds`], so an action that gains or loses
+/// [`available_action_table_matches_seeds`], so an action that gains or loses
 /// `Available` status without a matching row fails the suite.
-fn available_table() -> Vec<(&'static str, ActionArgs, Command)> {
+fn build_available_action_table() -> Vec<(&'static str, ActionArgs, Command)> {
     vec![
         (
             "new-pane",
             ActionArgs::None,
-            Command::NewPane(new_pane_args()),
+            Command::NewPane(build_new_pane_args()),
         ),
         (
             "new-pane-left",
             ActionArgs::None,
             Command::NewPane(NewPaneArgs {
-                source: None,
-                tab: None,
+                source_pane_id: None,
+                tab_id: None,
                 direction: Direction::Left,
-                stacked: false,
-                cwd: None,
-                command: None,
-                client: None,
+                should_stack: false,
+                working_directory: None,
+                spawn_spec: None,
+                client_id: None,
             }),
         ),
         (
             "new-pane-down",
             ActionArgs::None,
             Command::NewPane(NewPaneArgs {
-                source: None,
-                tab: None,
+                source_pane_id: None,
+                tab_id: None,
                 direction: Direction::Down,
-                stacked: false,
-                cwd: None,
-                command: None,
-                client: None,
+                should_stack: false,
+                working_directory: None,
+                spawn_spec: None,
+                client_id: None,
             }),
         ),
         (
             "new-pane-up",
             ActionArgs::None,
             Command::NewPane(NewPaneArgs {
-                source: None,
-                tab: None,
+                source_pane_id: None,
+                tab_id: None,
                 direction: Direction::Up,
-                stacked: false,
-                cwd: None,
-                command: None,
-                client: None,
+                should_stack: false,
+                working_directory: None,
+                spawn_spec: None,
+                client_id: None,
             }),
         ),
         (
             "new-pane-right",
             ActionArgs::None,
             Command::NewPane(NewPaneArgs {
-                source: None,
-                tab: None,
+                source_pane_id: None,
+                tab_id: None,
                 direction: Direction::Right,
-                stacked: false,
-                cwd: None,
-                command: None,
-                client: None,
+                should_stack: false,
+                working_directory: None,
+                spawn_spec: None,
+                client_id: None,
             }),
         ),
         (
             "new-pane-stacked",
             ActionArgs::None,
             Command::NewPane(NewPaneArgs {
-                source: None,
-                tab: None,
+                source_pane_id: None,
+                tab_id: None,
                 direction: CLIENT_SPLIT,
-                stacked: true,
-                cwd: None,
-                command: None,
-                client: None,
+                should_stack: true,
+                working_directory: None,
+                spawn_spec: None,
+                client_id: None,
             }),
         ),
         (
@@ -158,77 +161,77 @@ fn available_table() -> Vec<(&'static str, ActionArgs, Command)> {
             "close-pane-tree",
             ActionArgs::None,
             Command::ClosePane(ClosePaneArgs {
-                pane: None,
-                force: false,
-                tree: true,
+                pane_id: None,
+                should_force_close: false,
+                should_kill_process_tree: true,
             }),
         ),
         (
             "resize-pane-left",
             ActionArgs::None,
             Command::ResizePane(ResizePaneArgs {
-                pane: None,
+                pane_id: None,
                 direction: Direction::Left,
-                size: 1,
+                resize_amount_cells: 1,
             }),
         ),
         (
             "resize-pane-down",
             ActionArgs::None,
             Command::ResizePane(ResizePaneArgs {
-                pane: None,
+                pane_id: None,
                 direction: Direction::Down,
-                size: 1,
+                resize_amount_cells: 1,
             }),
         ),
         (
             "resize-pane-up",
             ActionArgs::None,
             Command::ResizePane(ResizePaneArgs {
-                pane: None,
+                pane_id: None,
                 direction: Direction::Up,
-                size: 1,
+                resize_amount_cells: 1,
             }),
         ),
         (
             "resize-pane-right",
             ActionArgs::None,
             Command::ResizePane(ResizePaneArgs {
-                pane: None,
+                pane_id: None,
                 direction: Direction::Right,
-                size: 1,
+                resize_amount_cells: 1,
             }),
         ),
         (
             "focus-pane-left",
             ActionArgs::None,
             Command::FocusPane(FocusPaneArgs {
-                target: FocusTarget::Direction(Direction::Left),
-                client: None,
+                focus_target: FocusTarget::Direction(Direction::Left),
+                client_id: None,
             }),
         ),
         (
             "focus-pane-down",
             ActionArgs::None,
             Command::FocusPane(FocusPaneArgs {
-                target: FocusTarget::Direction(Direction::Down),
-                client: None,
+                focus_target: FocusTarget::Direction(Direction::Down),
+                client_id: None,
             }),
         ),
         (
             "focus-pane-up",
             ActionArgs::None,
             Command::FocusPane(FocusPaneArgs {
-                target: FocusTarget::Direction(Direction::Up),
-                client: None,
+                focus_target: FocusTarget::Direction(Direction::Up),
+                client_id: None,
             }),
         ),
         (
             "focus-pane-right",
             ActionArgs::None,
             Command::FocusPane(FocusPaneArgs {
-                target: FocusTarget::Direction(Direction::Right),
-                client: None,
+                focus_target: FocusTarget::Direction(Direction::Right),
+                client_id: None,
             }),
         ),
         (
@@ -250,16 +253,16 @@ fn available_table() -> Vec<(&'static str, ActionArgs, Command)> {
             "next-tab",
             ActionArgs::None,
             Command::FocusTab(FocusTabArgs {
-                target: TabTarget::Next,
-                client: None,
+                focus_target: TabTarget::Next,
+                client_id: None,
             }),
         ),
         (
             "previous-tab",
             ActionArgs::None,
             Command::FocusTab(FocusTabArgs {
-                target: TabTarget::Prev,
-                client: None,
+                focus_target: TabTarget::Prev,
+                client_id: None,
             }),
         ),
         ("quit", ActionArgs::None, Command::Quit),
@@ -272,35 +275,35 @@ fn available_table() -> Vec<(&'static str, ActionArgs, Command)> {
             "lock",
             ActionArgs::None,
             Command::SetLockMode(LockModeArgs {
-                locked: true,
-                client: None,
+                is_locked: true,
+                client_id: None,
             }),
         ),
         (
             "unlock",
             ActionArgs::None,
             Command::SetLockMode(LockModeArgs {
-                locked: false,
-                client: None,
+                is_locked: false,
+                client_id: None,
             }),
         ),
         ("mouse-select", ActionArgs::None, Command::ToggleMouseSelect),
         (
             "run",
             ActionArgs::Run {
-                program: run_program(),
-                args: vec!["--all".to_string()],
+                program: build_run_program_path(),
+                arguments: vec!["--all".to_string()],
                 direction: Some(Direction::Down),
-                stacked: false,
+                should_stack: false,
             },
             Command::RunCommandPane(RunCommandPaneArgs {
-                command: spawn_spec(),
-                cwd: None,
-                source: None,
-                tab: None,
+                spawn_spec: build_run_spawn_spec(),
+                working_directory: None,
+                source_pane_id: None,
+                tab_id: None,
                 direction: Direction::Down,
-                stacked: false,
-                client: None,
+                should_stack: false,
+                client_id: None,
             }),
         ),
     ]
@@ -308,44 +311,51 @@ fn available_table() -> Vec<(&'static str, ActionArgs, Command)> {
 
 /// Metadata a plugin's own registration carries: its namespace, and a handler
 /// routing back to itself.
-fn plugin_metadata(owner: PluginId) -> ActionMetadata {
+fn build_plugin_metadata(plugin_id: PluginId) -> ActionMetadata {
     ActionMetadata {
-        namespace: ActionNamespace::Plugin(owner),
+        namespace: ActionNamespace::Plugin(plugin_id),
         display_name: "Open Status".to_string(),
         description: "Open the status view".to_string(),
-        scope_class: ActionScope::Global,
-        target_compat: vec![TargetKind::Session],
-        handler: ActionHandlerRef::PluginHostCall(owner),
-        status: ActionStatus::Available,
-        continuous: false,
+        scope: ActionScope::Global,
+        target_kinds: vec![TargetKind::Session],
+        handler: ActionHandlerReference::PluginHostCall(plugin_id),
+        action_status: ActionStatus::Available,
+        is_continuous: false,
     }
 }
 
-/// Metadata for a `user:` macro whose handler fires `steps` in order.
-fn macro_metadata(steps: Vec<ActionRef>) -> ActionMetadata {
+/// Metadata for a `user:` macro whose handler fires `action_steps` in order.
+fn build_macro_metadata(action_steps: Vec<ActionReference>) -> ActionMetadata {
     ActionMetadata {
         namespace: ActionNamespace::User,
         display_name: "Macro".to_string(),
         description: "A user macro".to_string(),
-        scope_class: ActionScope::Global,
-        target_compat: vec![TargetKind::Session],
-        handler: ActionHandlerRef::Sequence(steps),
-        status: ActionStatus::Available,
-        continuous: false,
+        scope: ActionScope::Global,
+        target_kinds: vec![TargetKind::Session],
+        handler: ActionHandlerReference::Sequence(action_steps),
+        action_status: ActionStatus::Available,
+        is_continuous: false,
     }
 }
 
 /// A `user:` reference for a name known to satisfy the grammar.
-fn user(name: &str) -> ActionRef {
-    ActionRef::user(name).expect("test macro name is valid")
+fn build_user_action_reference(action_name: &str) -> ActionReference {
+    ActionReference::from_user_action_name(action_name).expect("test macro name is valid")
 }
 
 /// A registry holding the core seeds plus one `user:` macro whose handler is the
-/// given sequence. `register` refuses `user:` references, so the entry goes in
-/// through [`insert_unchecked`].
-fn registry_with_macro(name: &str, steps: Vec<ActionRef>) -> ActionRegistry {
+/// given sequence. `register_action` refuses `user:` references, so the entry goes in
+/// through [`insert_action_without_validation`].
+fn build_registry_with_macro(
+    action_name: &str,
+    action_steps: Vec<ActionReference>,
+) -> ActionRegistry {
     let mut registry = ActionRegistry::new();
-    insert_unchecked(&mut registry, user(name), macro_metadata(steps));
+    insert_action_without_validation(
+        &mut registry,
+        build_user_action_reference(action_name),
+        build_macro_metadata(action_steps),
+    );
     registry
 }
 
@@ -356,102 +366,127 @@ fn registry_with_macro(name: &str, steps: Vec<ActionRef>) -> ActionRegistry {
 /// The chain is what distinguishes counting sequences from counting
 /// resolutions: it has `levels` sequence handlers and one leaf action beneath
 /// them.
-fn registry_with_macro_chain(levels: usize) -> (ActionRegistry, ActionRef) {
+fn build_registry_with_macro_chain(macro_depth_count: usize) -> (ActionRegistry, ActionReference) {
     let mut registry = ActionRegistry::new();
-    for level in 0..levels {
-        let step = if level + 1 == levels {
-            core("lock")
+    for macro_depth in 0..macro_depth_count {
+        let action_step = if macro_depth + 1 == macro_depth_count {
+            build_core_action_reference("lock")
         } else {
-            user(&format!("m{}", level + 1))
+            build_user_action_reference(&format!("m{}", macro_depth + 1))
         };
-        insert_unchecked(
+        insert_action_without_validation(
             &mut registry,
-            user(&format!("m{level}")),
-            macro_metadata(vec![step]),
+            build_user_action_reference(&format!("m{macro_depth}")),
+            build_macro_metadata(vec![action_step]),
         );
     }
-    (registry, user("m0"))
+    (registry, build_user_action_reference("m0"))
 }
 
 #[test]
-fn available_table_matches_seeds() {
-    let mut seeded: Vec<String> = core_action_seeds()
+fn available_action_table_matches_seeds() {
+    let mut seeded_action_names: Vec<String> = build_core_action_seeds()
         .into_iter()
-        .filter(|(_, metadata)| metadata.status == ActionStatus::Available)
-        .map(|(action, _)| action.name.as_str().to_string())
+        .filter(|(_, action_metadata)| action_metadata.action_status == ActionStatus::Available)
+        .map(|(action_reference, _)| action_reference.action_name.get_name().to_string())
         .collect();
-    seeded.sort();
+    seeded_action_names.sort();
 
-    let mut tabled: Vec<String> = available_table()
+    let mut tabled_action_names: Vec<String> = build_available_action_table()
         .into_iter()
-        .map(|(name, _, _)| name.to_string())
+        .map(|(action_name, _, _)| action_name.to_string())
         .chain(CLI_ONLY.into_iter().map(str::to_string))
         .collect();
-    tabled.sort();
+    tabled_action_names.sort();
 
-    assert_eq!(seeded, tabled);
+    assert_eq!(seeded_action_names, tabled_action_names);
 }
 
 #[test]
 fn every_available_action_resolves_to_its_exact_command() {
     let registry = ActionRegistry::new();
-    for (name, args, expected) in available_table() {
-        let plan = resolve_action(&core(name), &args, &registry, CLIENT_SPLIT)
-            .unwrap_or_else(|err| panic!("core:{name} must resolve, got {err}"));
-        assert_eq!(plan, DispatchPlan::Command(expected), "core:{name}");
+    for (action_name, action_arguments, expected_command) in build_available_action_table() {
+        let plan = resolve_action(
+            &build_core_action_reference(action_name),
+            &action_arguments,
+            &registry,
+            CLIENT_SPLIT,
+        )
+        .unwrap_or_else(|resolve_error| {
+            panic!("core:{action_name} must resolve, got {resolve_error}")
+        });
+        assert_eq!(
+            plan,
+            DispatchPlan::Command(expected_command),
+            "core:{action_name}"
+        );
     }
 }
 
 #[test]
 fn resolved_command_kind_matches_the_seeded_handler() {
     let registry = ActionRegistry::new();
-    for (name, args, _) in available_table() {
-        let action = core(name);
-        let metadata = registry.lookup(&action).expect("seed is registered");
-        let ActionHandlerRef::CoreCommand(kind) = metadata.handler else {
-            panic!("core:{name} must dispatch a core command");
+    for (action_name, action_arguments, _) in build_available_action_table() {
+        let action_reference = build_core_action_reference(action_name);
+        let action_metadata = registry
+            .find_action_metadata(&action_reference)
+            .expect("seed is registered");
+        let ActionHandlerReference::CoreCommand(command_kind) = action_metadata.handler else {
+            panic!("core:{action_name} must dispatch a core command");
         };
-        let Ok(DispatchPlan::Command(command)) =
-            resolve_action(&action, &args, &registry, CLIENT_SPLIT)
-        else {
-            panic!("core:{name} must resolve to a command");
+        let Ok(DispatchPlan::Command(command)) = resolve_action(
+            &action_reference,
+            &action_arguments,
+            &registry,
+            CLIENT_SPLIT,
+        ) else {
+            panic!("core:{action_name} must resolve to a command");
         };
-        assert_eq!(command.kind(), kind, "core:{name}");
+        assert_eq!(
+            command.get_command_kind(),
+            command_kind,
+            "core:{action_name}"
+        );
     }
 }
 
 #[test]
 fn coming_soon_actions_are_refused() {
     let registry = ActionRegistry::new();
-    let coming_soon: Vec<ActionRef> = core_action_seeds()
+    let coming_soon_action_references: Vec<ActionReference> = build_core_action_seeds()
         .into_iter()
-        .filter(|(_, metadata)| metadata.status == ActionStatus::ComingSoon)
-        .map(|(action, _)| action)
+        .filter(|(_, action_metadata)| action_metadata.action_status == ActionStatus::ComingSoon)
+        .map(|(action_reference, _)| action_reference)
         .collect();
 
-    assert_eq!(coming_soon.len(), 7);
-    for action in coming_soon {
+    assert_eq!(coming_soon_action_references.len(), 7);
+    for action_reference in coming_soon_action_references {
         assert_eq!(
-            resolve_action(&action, &ActionArgs::None, &registry, CLIENT_SPLIT),
+            resolve_action(
+                &action_reference,
+                &ActionArgs::None,
+                &registry,
+                CLIENT_SPLIT,
+            ),
             Err(ResolveError::ComingSoon {
-                action: action.clone()
+                action_reference: action_reference.clone()
             }),
-            "{action}"
+            "{action_reference}"
         );
     }
 }
 
 #[test]
 fn coming_soon_names_are_pinned() {
-    let mut names: Vec<String> = core_action_seeds()
+    let mut coming_soon_action_names: Vec<String> = build_core_action_seeds()
         .into_iter()
-        .filter(|(_, metadata)| metadata.status == ActionStatus::ComingSoon)
-        .map(|(action, _)| action.name.as_str().to_string())
+        .filter(|(_, action_metadata)| action_metadata.action_status == ActionStatus::ComingSoon)
+        .map(|(action_reference, _)| action_reference.action_name.get_name().to_string())
         .collect();
-    names.sort();
+    coming_soon_action_names.sort();
 
     assert_eq!(
-        names,
+        coming_soon_action_names,
         vec![
             "copy-selection",
             "plugin-disable",
@@ -467,37 +502,54 @@ fn coming_soon_names_are_pinned() {
 #[test]
 fn unregistered_action_is_an_orphan() {
     let registry = ActionRegistry::new();
-    let action = ActionRef::plugin(plugin_id(1), "open-status").expect("valid name");
+    let action_reference =
+        ActionReference::from_plugin_action_name(build_test_plugin_id(1), "open-status")
+            .expect("valid name");
 
     assert_eq!(
-        resolve_action(&action, &ActionArgs::None, &registry, CLIENT_SPLIT),
+        resolve_action(
+            &action_reference,
+            &ActionArgs::None,
+            &registry,
+            CLIENT_SPLIT,
+        ),
         Err(ResolveError::Unregistered {
-            action: action.clone()
+            action_reference: action_reference.clone()
         })
     );
 }
 
 #[test]
 fn plugin_action_routes_to_its_own_host_call() {
-    let owner = plugin_id(1);
-    let action = ActionRef::plugin(owner, "open-status").expect("valid name");
+    let plugin_id = build_test_plugin_id(1);
+    let action_reference =
+        ActionReference::from_plugin_action_name(plugin_id, "open-status").expect("valid name");
     let mut registry = ActionRegistry::new();
     registry
-        .register(owner, action.clone(), plugin_metadata(owner))
+        .register_action(
+            plugin_id,
+            action_reference.clone(),
+            build_plugin_metadata(plugin_id),
+        )
         .expect("plugin registers its own action");
 
-    let args = ActionArgs::Run {
-        program: run_program(),
-        args: vec![],
+    let action_arguments = ActionArgs::Run {
+        program: build_run_program_path(),
+        arguments: vec![],
         direction: None,
-        stacked: false,
+        should_stack: false,
     };
     assert_eq!(
-        resolve_action(&action, &args, &registry, CLIENT_SPLIT),
+        resolve_action(
+            &action_reference,
+            &action_arguments,
+            &registry,
+            CLIENT_SPLIT,
+        ),
         Ok(DispatchPlan::PluginHostCall {
-            plugin: owner,
-            action,
-            args,
+            plugin_id,
+            action_reference,
+            action_arguments,
         })
     );
 }
@@ -508,71 +560,99 @@ fn cli_only_actions_are_refused_with_and_without_arguments() {
     // names no program and rejects `None` like the others. It accepts its own
     // `Run` arguments, covered by the available table.
     let registry = ActionRegistry::new();
-    let some_args = ActionArgs::Run {
-        program: run_program(),
-        args: vec![],
+    let some_action_arguments = ActionArgs::Run {
+        program: build_run_program_path(),
+        arguments: vec![],
         direction: None,
-        stacked: false,
+        should_stack: false,
     };
-    for name in CLI_ONLY {
-        let action = core(name);
+    for action_name in CLI_ONLY {
+        let action_reference = build_core_action_reference(action_name);
         assert_eq!(
-            resolve_action(&action, &ActionArgs::None, &registry, CLIENT_SPLIT),
+            resolve_action(
+                &action_reference,
+                &ActionArgs::None,
+                &registry,
+                CLIENT_SPLIT,
+            ),
             Err(ResolveError::ArgsMismatch {
-                action: action.clone()
+                action_reference: action_reference.clone()
             }),
-            "core:{name} given no arguments"
+            "core:{action_name} given no arguments"
         );
         assert_eq!(
-            resolve_action(&action, &some_args, &registry, CLIENT_SPLIT),
+            resolve_action(
+                &action_reference,
+                &some_action_arguments,
+                &registry,
+                CLIENT_SPLIT,
+            ),
             Err(ResolveError::ArgsMismatch {
-                action: action.clone()
+                action_reference: action_reference.clone()
             }),
-            "core:{name} given arguments"
+            "core:{action_name} given arguments"
         );
     }
-    let run = core("run");
+    let run_action_reference = build_core_action_reference("run");
     assert_eq!(
-        resolve_action(&run, &ActionArgs::None, &registry, CLIENT_SPLIT),
-        Err(ResolveError::ArgsMismatch { action: run })
+        resolve_action(
+            &run_action_reference,
+            &ActionArgs::None,
+            &registry,
+            CLIENT_SPLIT
+        ),
+        Err(ResolveError::ArgsMismatch {
+            action_reference: run_action_reference
+        })
     );
 }
 
 #[test]
 fn arguments_belonging_to_another_action_are_refused() {
     let registry = ActionRegistry::new();
-    let action = core("next-tab");
+    let action_reference = build_core_action_reference("next-tab");
 
     assert_eq!(
         resolve_action(
-            &action,
+            &action_reference,
             &ActionArgs::Run {
-                program: run_program(),
-                args: vec![],
+                program: build_run_program_path(),
+                arguments: vec![],
                 direction: None,
-                stacked: false,
+                should_stack: false,
             },
             &registry,
             CLIENT_SPLIT
         ),
         Err(ResolveError::ArgsMismatch {
-            action: action.clone()
+            action_reference: action_reference.clone()
         })
     );
 }
 
 #[test]
 fn a_sequence_resolves_each_step_in_order() {
-    let registry = registry_with_macro("split-and-lock", vec![core("new-pane"), core("lock")]);
-    let macro_ref = user("split-and-lock");
+    let registry = build_registry_with_macro(
+        "split-and-lock",
+        vec![
+            build_core_action_reference("new-pane"),
+            build_core_action_reference("lock"),
+        ],
+    );
+    let macro_action_reference = build_user_action_reference("split-and-lock");
 
     assert_eq!(
-        resolve_action(&macro_ref, &ActionArgs::None, &registry, CLIENT_SPLIT),
+        resolve_action(
+            &macro_action_reference,
+            &ActionArgs::None,
+            &registry,
+            CLIENT_SPLIT
+        ),
         Ok(DispatchPlan::Sequence(vec![
-            DispatchPlan::Command(Command::NewPane(new_pane_args())),
+            DispatchPlan::Command(Command::NewPane(build_new_pane_args())),
             DispatchPlan::Command(Command::SetLockMode(LockModeArgs {
-                locked: true,
-                client: None
+                is_locked: true,
+                client_id: None
             })),
         ]))
     );
@@ -580,78 +660,101 @@ fn a_sequence_resolves_each_step_in_order() {
 
 #[test]
 fn a_sequence_halts_on_the_first_failing_step() {
-    let registry = registry_with_macro(
+    let registry = build_registry_with_macro(
         "lock-then-copy",
-        vec![core("lock"), core("copy-selection"), core("unlock")],
+        vec![
+            build_core_action_reference("lock"),
+            build_core_action_reference("copy-selection"),
+            build_core_action_reference("unlock"),
+        ],
     );
-    let macro_ref = user("lock-then-copy");
+    let macro_action_reference = build_user_action_reference("lock-then-copy");
 
     assert_eq!(
-        resolve_action(&macro_ref, &ActionArgs::None, &registry, CLIENT_SPLIT),
+        resolve_action(
+            &macro_action_reference,
+            &ActionArgs::None,
+            &registry,
+            CLIENT_SPLIT
+        ),
         Err(ResolveError::ComingSoon {
-            action: core("copy-selection"),
+            action_reference: build_core_action_reference("copy-selection"),
         })
     );
 }
 
 #[test]
 fn a_sequence_given_arguments_is_refused() {
-    let registry = registry_with_macro("split-and-lock", vec![core("new-pane")]);
-    let macro_ref = user("split-and-lock");
+    let registry = build_registry_with_macro(
+        "split-and-lock",
+        vec![build_core_action_reference("new-pane")],
+    );
+    let macro_action_reference = build_user_action_reference("split-and-lock");
 
     assert_eq!(
         resolve_action(
-            &macro_ref,
+            &macro_action_reference,
             &ActionArgs::Run {
-                program: run_program(),
-                args: vec![],
+                program: build_run_program_path(),
+                arguments: vec![],
                 direction: None,
-                stacked: false,
+                should_stack: false,
             },
             &registry,
             CLIENT_SPLIT
         ),
         Err(ResolveError::ArgsMismatch {
-            action: macro_ref.clone()
+            action_reference: macro_action_reference.clone()
         })
     );
 }
 
 #[test]
 fn a_self_referencing_macro_exhausts_the_depth_budget() {
-    let macro_ref = user("loop");
-    let registry = registry_with_macro("loop", vec![macro_ref.clone()]);
+    let macro_action_reference = build_user_action_reference("loop");
+    let registry = build_registry_with_macro("loop", vec![macro_action_reference.clone()]);
 
     assert_eq!(
-        resolve_action(&macro_ref, &ActionArgs::None, &registry, CLIENT_SPLIT),
+        resolve_action(
+            &macro_action_reference,
+            &ActionArgs::None,
+            &registry,
+            CLIENT_SPLIT
+        ),
         Err(ResolveError::SequenceTooDeep {
-            action: macro_ref.clone()
+            action_reference: macro_action_reference.clone()
         })
     );
 }
 
 #[test]
 fn a_chain_of_exactly_max_depth_sequences_resolves() {
-    let (registry, outermost) = registry_with_macro_chain(MAX_SEQUENCE_DEPTH);
+    let (registry, outermost_action_reference) =
+        build_registry_with_macro_chain(MAX_SEQUENCE_DEPTH);
 
     // The leaf action sits one level below the deepest sequence, and resolves:
     // the budget counts the sequences entered, not the actions reached.
-    let mut plan = resolve_action(&outermost, &ActionArgs::None, &registry, CLIENT_SPLIT)
-        .expect("a chain at the documented limit must resolve");
+    let mut dispatch_plan = resolve_action(
+        &outermost_action_reference,
+        &ActionArgs::None,
+        &registry,
+        CLIENT_SPLIT,
+    )
+    .expect("a chain at the documented limit must resolve");
     for _ in 0..MAX_SEQUENCE_DEPTH - 1 {
-        let DispatchPlan::Sequence(mut steps) = plan else {
+        let DispatchPlan::Sequence(mut dispatch_steps) = dispatch_plan else {
             panic!("every level but the last is a sequence");
         };
-        assert_eq!(steps.len(), 1);
-        plan = steps.remove(0);
+        assert_eq!(dispatch_steps.len(), 1);
+        dispatch_plan = dispatch_steps.remove(0);
     }
 
     assert_eq!(
-        plan,
+        dispatch_plan,
         DispatchPlan::Sequence(vec![DispatchPlan::Command(Command::SetLockMode(
             LockModeArgs {
-                locked: true,
-                client: None
+                is_locked: true,
+                client_id: None
             }
         ))])
     );
@@ -659,13 +762,19 @@ fn a_chain_of_exactly_max_depth_sequences_resolves() {
 
 #[test]
 fn a_chain_one_sequence_past_max_depth_is_refused() {
-    let (registry, outermost) = registry_with_macro_chain(MAX_SEQUENCE_DEPTH + 1);
+    let (registry, outermost_action_reference) =
+        build_registry_with_macro_chain(MAX_SEQUENCE_DEPTH + 1);
 
     assert_eq!(
-        resolve_action(&outermost, &ActionArgs::None, &registry, CLIENT_SPLIT),
+        resolve_action(
+            &outermost_action_reference,
+            &ActionArgs::None,
+            &registry,
+            CLIENT_SPLIT,
+        ),
         Err(ResolveError::SequenceTooDeep {
             // The macro at the deepest allowed level is the one refused.
-            action: user(&format!("m{MAX_SEQUENCE_DEPTH}")),
+            action_reference: build_user_action_reference(&format!("m{MAX_SEQUENCE_DEPTH}")),
         })
     );
 }
@@ -673,58 +782,72 @@ fn a_chain_one_sequence_past_max_depth_is_refused() {
 #[test]
 fn run_never_carries_a_cwd_or_env_from_its_caller() {
     let registry = ActionRegistry::new();
-    let args = ActionArgs::Run {
-        program: run_program(),
-        args: vec!["--all".to_string()],
+    let run_action_arguments = ActionArgs::Run {
+        program: build_run_program_path(),
+        arguments: vec!["--all".to_string()],
         direction: None,
-        stacked: false,
+        should_stack: false,
     };
 
-    let Ok(DispatchPlan::Command(Command::RunCommandPane(built))) =
-        resolve_action(&core("run"), &args, &registry, CLIENT_SPLIT)
+    let Ok(DispatchPlan::Command(Command::RunCommandPane(resolved_run_command_args))) =
+        resolve_action(
+            &build_core_action_reference("run"),
+            &run_action_arguments,
+            &registry,
+            CLIENT_SPLIT,
+        )
     else {
         panic!("core:run must resolve to a run-command-pane command");
     };
 
-    assert_eq!(built.cwd, None);
-    assert_eq!(built.command.cwd, None);
-    assert_eq!(built.command.env, BTreeMap::new());
-    assert_eq!(built.command.program, run_program());
-    assert_eq!(built.command.args, vec!["--all".to_string()]);
+    assert_eq!(resolved_run_command_args.working_directory, None);
+    assert_eq!(resolved_run_command_args.spawn_spec.working_directory, None);
     assert_eq!(
-        built.command.shell_kind,
+        resolved_run_command_args.spawn_spec.environment_variables,
+        BTreeMap::new()
+    );
+    assert_eq!(
+        resolved_run_command_args.spawn_spec.program,
+        build_run_program_path()
+    );
+    assert_eq!(
+        resolved_run_command_args.spawn_spec.arguments,
+        vec!["--all".to_string()]
+    );
+    assert_eq!(
+        resolved_run_command_args.spawn_spec.shell_kind,
         ShellKind::Other("lazygit".to_string())
     );
 }
 
 #[test]
 fn resolve_error_messages_name_the_action() {
-    let action = core("new-pane");
+    let action_reference = build_core_action_reference("new-pane");
 
     assert_eq!(
         ResolveError::Unregistered {
-            action: action.clone()
+            action_reference: action_reference.clone()
         }
         .to_string(),
         "action core:new-pane is not registered"
     );
     assert_eq!(
         ResolveError::ComingSoon {
-            action: action.clone()
+            action_reference: action_reference.clone()
         }
         .to_string(),
         "action core:new-pane is not implemented yet"
     );
     assert_eq!(
         ResolveError::ArgsMismatch {
-            action: action.clone()
+            action_reference: action_reference.clone()
         }
         .to_string(),
         "action core:new-pane was given arguments it does not accept"
     );
     assert_eq!(
         ResolveError::SequenceTooDeep {
-            action: action.clone()
+            action_reference: action_reference.clone()
         }
         .to_string(),
         "action core:new-pane nests past the maximum of 8 sequence levels"
@@ -733,32 +856,37 @@ fn resolve_error_messages_name_the_action() {
 
 #[test]
 fn resolve_error_is_a_recoverable_config_error() {
-    let error = ResolveError::Unregistered {
-        action: core("new-pane"),
+    let resolve_error = ResolveError::Unregistered {
+        action_reference: build_core_action_reference("new-pane"),
     };
 
-    assert_eq!(error.category(), DomainCategory::Config);
-    assert_eq!(error.severity(), Severity::Recoverable);
+    assert_eq!(resolve_error.category(), DomainCategory::Config);
+    assert_eq!(resolve_error.get_severity(), Severity::Recoverable);
 }
 
 #[test]
 fn coming_soon_status_is_checked_before_args_mismatch() {
     // `copy-selection` is seeded `ComingSoon` and takes `ActionArgs::None`.
     // The status check runs before the handler match: an argument shape
-    // `resolve_core` refuses as `ArgsMismatch` reports `ComingSoon`.
+    // `resolve_core_action` refuses as `ArgsMismatch` reports `ComingSoon`.
     let registry = ActionRegistry::new();
-    let action = core("copy-selection");
-    let wrong_args = ActionArgs::Run {
-        program: run_program(),
-        args: vec![],
+    let action_reference = build_core_action_reference("copy-selection");
+    let wrong_action_arguments = ActionArgs::Run {
+        program: build_run_program_path(),
+        arguments: vec![],
         direction: None,
-        stacked: false,
+        should_stack: false,
     };
 
     assert_eq!(
-        resolve_action(&action, &wrong_args, &registry, CLIENT_SPLIT),
+        resolve_action(
+            &action_reference,
+            &wrong_action_arguments,
+            &registry,
+            CLIENT_SPLIT,
+        ),
         Err(ResolveError::ComingSoon {
-            action: action.clone()
+            action_reference: action_reference.clone()
         })
     );
 }
@@ -768,26 +896,37 @@ fn coming_soon_status_is_checked_before_the_plugin_route() {
     // A plugin action seeded `ComingSoon` must still refuse with
     // `ComingSoon`, never routing through as a `PluginHostCall`: the status
     // check runs before the handler match.
-    let owner = plugin_id(1);
-    let action = ActionRef::plugin(owner, "open-status").expect("valid name");
-    let mut metadata = plugin_metadata(owner);
-    metadata.status = ActionStatus::ComingSoon;
+    let plugin_id = build_test_plugin_id(1);
+    let action_reference =
+        ActionReference::from_plugin_action_name(plugin_id, "open-status").expect("valid name");
+    let mut action_metadata = build_plugin_metadata(plugin_id);
+    action_metadata.action_status = ActionStatus::ComingSoon;
     let mut registry = ActionRegistry::new();
-    insert_unchecked(&mut registry, action.clone(), metadata);
+    insert_action_without_validation(&mut registry, action_reference.clone(), action_metadata);
 
     assert_eq!(
-        resolve_action(&action, &ActionArgs::None, &registry, CLIENT_SPLIT),
-        Err(ResolveError::ComingSoon { action })
+        resolve_action(
+            &action_reference,
+            &ActionArgs::None,
+            &registry,
+            CLIENT_SPLIT,
+        ),
+        Err(ResolveError::ComingSoon { action_reference })
     );
 }
 
 #[test]
 fn an_empty_sequence_resolves_to_an_empty_plan() {
-    let registry = registry_with_macro("noop", vec![]);
-    let macro_ref = user("noop");
+    let registry = build_registry_with_macro("noop", vec![]);
+    let macro_action_reference = build_user_action_reference("noop");
 
     assert_eq!(
-        resolve_action(&macro_ref, &ActionArgs::None, &registry, CLIENT_SPLIT),
+        resolve_action(
+            &macro_action_reference,
+            &ActionArgs::None,
+            &registry,
+            CLIENT_SPLIT,
+        ),
         Ok(DispatchPlan::Sequence(vec![]))
     );
 }
@@ -796,98 +935,132 @@ fn an_empty_sequence_resolves_to_an_empty_plan() {
 fn plugin_action_forwards_no_arguments_untouched() {
     // A plugin route accepts any `ActionArgs`, uninterpreted, including
     // `None` — there is no schema check on the resolver's side.
-    let owner = plugin_id(1);
-    let action = ActionRef::plugin(owner, "open-status").expect("valid name");
+    let plugin_id = build_test_plugin_id(1);
+    let action_reference =
+        ActionReference::from_plugin_action_name(plugin_id, "open-status").expect("valid name");
     let mut registry = ActionRegistry::new();
     registry
-        .register(owner, action.clone(), plugin_metadata(owner))
+        .register_action(
+            plugin_id,
+            action_reference.clone(),
+            build_plugin_metadata(plugin_id),
+        )
         .expect("plugin registers its own action");
 
     assert_eq!(
-        resolve_action(&action, &ActionArgs::None, &registry, CLIENT_SPLIT),
+        resolve_action(
+            &action_reference,
+            &ActionArgs::None,
+            &registry,
+            CLIENT_SPLIT,
+        ),
         Ok(DispatchPlan::PluginHostCall {
-            plugin: owner,
-            action,
-            args: ActionArgs::None,
+            plugin_id,
+            action_reference,
+            action_arguments: ActionArgs::None,
         })
     );
 }
 
 #[test]
 fn an_unhandled_core_action_name_falls_through_to_args_mismatch() {
-    // A `core:` entry whose name is not one of `resolve_core`'s match arms
+    // A `core:` entry whose name is not one of `resolve_core_action`'s match arms
     // (e.g. a seed added to the registry table without a matching resolver
     // arm) is refused as `ArgsMismatch`, not a panic or a silent no-op.
     let mut registry = ActionRegistry::new();
-    let action = core("bogus-unhandled-action");
-    insert_unchecked(
+    let action_reference = build_core_action_reference("bogus-unhandled-action");
+    insert_action_without_validation(
         &mut registry,
-        action.clone(),
+        action_reference.clone(),
         ActionMetadata {
             namespace: ActionNamespace::Core,
             display_name: "Bogus".to_string(),
-            description: "Not in the resolve_core table".to_string(),
-            scope_class: ActionScope::Global,
-            target_compat: vec![],
-            handler: ActionHandlerRef::CoreCommand(CommandKind::Quit),
-            status: ActionStatus::Available,
-            continuous: false,
+            description: "Not in the resolve_core_action table".to_string(),
+            scope: ActionScope::Global,
+            target_kinds: vec![],
+            handler: ActionHandlerReference::CoreCommand(CommandKind::Quit),
+            action_status: ActionStatus::Available,
+            is_continuous: false,
         },
     );
 
     assert_eq!(
-        resolve_action(&action, &ActionArgs::None, &registry, CLIENT_SPLIT),
-        Err(ResolveError::ArgsMismatch { action })
+        resolve_action(
+            &action_reference,
+            &ActionArgs::None,
+            &registry,
+            CLIENT_SPLIT,
+        ),
+        Err(ResolveError::ArgsMismatch { action_reference })
     );
 }
 
 #[test]
 fn command_kind_alone_cannot_pick_the_command() {
     let registry = ActionRegistry::new();
-    let lock = registry.lookup(&core("lock")).expect("seeded");
-    let unlock = registry.lookup(&core("unlock")).expect("seeded");
+    let lock_action_metadata = registry
+        .find_action_metadata(&build_core_action_reference("lock"))
+        .expect("seeded");
+    let unlock_action_metadata = registry
+        .find_action_metadata(&build_core_action_reference("unlock"))
+        .expect("seeded");
 
     assert_eq!(
-        lock.handler,
-        ActionHandlerRef::CoreCommand(CommandKind::SetLockMode)
+        lock_action_metadata.handler,
+        ActionHandlerReference::CoreCommand(CommandKind::SetLockMode)
     );
     assert_eq!(
-        unlock.handler,
-        ActionHandlerRef::CoreCommand(CommandKind::SetLockMode)
+        unlock_action_metadata.handler,
+        ActionHandlerReference::CoreCommand(CommandKind::SetLockMode)
     );
     assert_ne!(
-        resolve_action(&core("lock"), &ActionArgs::None, &registry, CLIENT_SPLIT),
-        resolve_action(&core("unlock"), &ActionArgs::None, &registry, CLIENT_SPLIT),
+        resolve_action(
+            &build_core_action_reference("lock"),
+            &ActionArgs::None,
+            &registry,
+            CLIENT_SPLIT
+        ),
+        resolve_action(
+            &build_core_action_reference("unlock"),
+            &ActionArgs::None,
+            &registry,
+            CLIENT_SPLIT
+        ),
     );
 }
 
 #[test]
 fn run_without_a_direction_splits_toward_the_client_setting() {
     let registry = ActionRegistry::new();
-    let args = ActionArgs::Run {
-        program: run_program(),
-        args: vec![],
+    let run_action_arguments = ActionArgs::Run {
+        program: build_run_program_path(),
+        arguments: vec![],
         direction: None,
-        stacked: false,
+        should_stack: false,
     };
 
     assert_eq!(
-        resolve_action(&core("run"), &args, &registry, CLIENT_SPLIT),
+        resolve_action(
+            &build_core_action_reference("run"),
+            &run_action_arguments,
+            &registry,
+            CLIENT_SPLIT,
+        ),
         Ok(DispatchPlan::Command(Command::RunCommandPane(
             RunCommandPaneArgs {
-                command: SpawnSpec {
-                    program: run_program(),
-                    args: vec![],
-                    cwd: None,
-                    env: BTreeMap::new(),
+                spawn_spec: SpawnSpec {
+                    program: build_run_program_path(),
+                    arguments: vec![],
+                    working_directory: None,
+                    environment_variables: BTreeMap::new(),
                     shell_kind: ShellKind::Other("lazygit".to_string()),
                 },
-                cwd: None,
-                source: None,
-                tab: None,
+                working_directory: None,
+                source_pane_id: None,
+                tab_id: None,
                 direction: CLIENT_SPLIT,
-                stacked: false,
-                client: None,
+                should_stack: false,
+                client_id: None,
             }
         )))
     );
@@ -896,70 +1069,99 @@ fn run_without_a_direction_splits_toward_the_client_setting() {
 #[test]
 fn run_stacked_builds_a_stacked_pane_and_still_carries_the_direction() {
     let registry = ActionRegistry::new();
-    let args = ActionArgs::Run {
-        program: run_program(),
-        args: vec![],
+    let run_action_arguments = ActionArgs::Run {
+        program: build_run_program_path(),
+        arguments: vec![],
         direction: Some(Direction::Left),
-        stacked: true,
+        should_stack: true,
     };
 
-    let Ok(DispatchPlan::Command(Command::RunCommandPane(built))) =
-        resolve_action(&core("run"), &args, &registry, CLIENT_SPLIT)
+    let Ok(DispatchPlan::Command(Command::RunCommandPane(resolved_run_command_args))) =
+        resolve_action(
+            &build_core_action_reference("run"),
+            &run_action_arguments,
+            &registry,
+            CLIENT_SPLIT,
+        )
     else {
         panic!("core:run must resolve to a run-command-pane command");
     };
 
-    assert!(built.stacked);
-    assert_eq!(built.direction, Direction::Left);
+    assert!(resolved_run_command_args.should_stack);
+    assert_eq!(resolved_run_command_args.direction, Direction::Left);
 }
 
 #[test]
 fn run_classifies_a_known_shell_from_its_program() {
     let registry = ActionRegistry::new();
-    let args = ActionArgs::Run {
+    let run_action_arguments = ActionArgs::Run {
         program: PathBuf::from("/bin/zsh"),
-        args: vec!["-l".to_string()],
+        arguments: vec!["-l".to_string()],
         direction: None,
-        stacked: false,
+        should_stack: false,
     };
 
-    let Ok(DispatchPlan::Command(Command::RunCommandPane(built))) =
-        resolve_action(&core("run"), &args, &registry, CLIENT_SPLIT)
+    let Ok(DispatchPlan::Command(Command::RunCommandPane(resolved_run_command_args))) =
+        resolve_action(
+            &build_core_action_reference("run"),
+            &run_action_arguments,
+            &registry,
+            CLIENT_SPLIT,
+        )
     else {
         panic!("core:run must resolve to a run-command-pane command");
     };
 
-    assert_eq!(built.command.program, PathBuf::from("/bin/zsh"));
-    assert_eq!(built.command.args, vec!["-l".to_string()]);
-    assert_eq!(built.command.shell_kind, ShellKind::Zsh);
+    assert_eq!(
+        resolved_run_command_args.spawn_spec.program,
+        PathBuf::from("/bin/zsh")
+    );
+    assert_eq!(
+        resolved_run_command_args.spawn_spec.arguments,
+        vec!["-l".to_string()]
+    );
+    assert_eq!(
+        resolved_run_command_args.spawn_spec.shell_kind,
+        ShellKind::Zsh
+    );
 }
 
 #[test]
 fn a_sequence_step_naming_a_plugin_action_routes_to_its_host_call_with_no_arguments() {
-    let owner = plugin_id(1);
-    let plugin_action = ActionRef::plugin(owner, "open-status").expect("valid name");
-    let mut registry =
-        registry_with_macro("lock-and-open", vec![core("lock"), plugin_action.clone()]);
+    let plugin_id = build_test_plugin_id(1);
+    let plugin_action_reference =
+        ActionReference::from_plugin_action_name(plugin_id, "open-status").expect("valid name");
+    let mut registry = build_registry_with_macro(
+        "lock-and-open",
+        vec![
+            build_core_action_reference("lock"),
+            plugin_action_reference.clone(),
+        ],
+    );
     registry
-        .register(owner, plugin_action.clone(), plugin_metadata(owner))
+        .register_action(
+            plugin_id,
+            plugin_action_reference.clone(),
+            build_plugin_metadata(plugin_id),
+        )
         .expect("plugin registers its own action");
 
     assert_eq!(
         resolve_action(
-            &user("lock-and-open"),
+            &build_user_action_reference("lock-and-open"),
             &ActionArgs::None,
             &registry,
             CLIENT_SPLIT
         ),
         Ok(DispatchPlan::Sequence(vec![
             DispatchPlan::Command(Command::SetLockMode(LockModeArgs {
-                locked: true,
-                client: None
+                is_locked: true,
+                client_id: None
             })),
             DispatchPlan::PluginHostCall {
-                plugin: owner,
-                action: plugin_action,
-                args: ActionArgs::None,
+                plugin_id,
+                action_reference: plugin_action_reference,
+                action_arguments: ActionArgs::None,
             },
         ]))
     );
@@ -967,54 +1169,84 @@ fn a_sequence_step_naming_a_plugin_action_routes_to_its_host_call_with_no_argume
 
 #[test]
 fn a_sequence_naming_an_unregistered_step_reports_that_step() {
-    let missing = ActionRef::plugin(plugin_id(1), "open-status").expect("valid name");
-    let registry = registry_with_macro("lock-and-open", vec![core("lock"), missing.clone()]);
+    let missing_action_reference =
+        ActionReference::from_plugin_action_name(build_test_plugin_id(1), "open-status")
+            .expect("valid name");
+    let registry = build_registry_with_macro(
+        "lock-and-open",
+        vec![
+            build_core_action_reference("lock"),
+            missing_action_reference.clone(),
+        ],
+    );
 
     assert_eq!(
         resolve_action(
-            &user("lock-and-open"),
+            &build_user_action_reference("lock-and-open"),
             &ActionArgs::None,
             &registry,
             CLIENT_SPLIT
         ),
-        Err(ResolveError::Unregistered { action: missing })
+        Err(ResolveError::Unregistered {
+            action_reference: missing_action_reference,
+        })
     );
 }
 
 #[test]
 fn a_sequence_step_naming_run_is_refused_for_lack_of_arguments() {
     // Every step resolves with `ActionArgs::None`, and `core:run` rejects it.
-    let registry = registry_with_macro("run-it", vec![core("run")]);
+    let registry = build_registry_with_macro("run-it", vec![build_core_action_reference("run")]);
 
     assert_eq!(
-        resolve_action(&user("run-it"), &ActionArgs::None, &registry, CLIENT_SPLIT),
+        resolve_action(
+            &build_user_action_reference("run-it"),
+            &ActionArgs::None,
+            &registry,
+            CLIENT_SPLIT
+        ),
         Err(ResolveError::ArgsMismatch {
-            action: core("run")
+            action_reference: build_core_action_reference("run")
         })
     );
 }
 
 #[test]
 fn a_macro_inside_a_macro_resolves_to_a_nested_plan_in_step_order() {
-    let mut registry = registry_with_macro("inner", vec![core("lock"), core("unlock")]);
-    insert_unchecked(
+    let mut registry = build_registry_with_macro(
+        "inner",
+        vec![
+            build_core_action_reference("lock"),
+            build_core_action_reference("unlock"),
+        ],
+    );
+    insert_action_without_validation(
         &mut registry,
-        user("outer"),
-        macro_metadata(vec![core("new-pane"), user("inner"), core("quit")]),
+        build_user_action_reference("outer"),
+        build_macro_metadata(vec![
+            build_core_action_reference("new-pane"),
+            build_user_action_reference("inner"),
+            build_core_action_reference("quit"),
+        ]),
     );
 
     assert_eq!(
-        resolve_action(&user("outer"), &ActionArgs::None, &registry, CLIENT_SPLIT),
+        resolve_action(
+            &build_user_action_reference("outer"),
+            &ActionArgs::None,
+            &registry,
+            CLIENT_SPLIT
+        ),
         Ok(DispatchPlan::Sequence(vec![
-            DispatchPlan::Command(Command::NewPane(new_pane_args())),
+            DispatchPlan::Command(Command::NewPane(build_new_pane_args())),
             DispatchPlan::Sequence(vec![
                 DispatchPlan::Command(Command::SetLockMode(LockModeArgs {
-                    locked: true,
-                    client: None
+                    is_locked: true,
+                    client_id: None
                 })),
                 DispatchPlan::Command(Command::SetLockMode(LockModeArgs {
-                    locked: false,
-                    client: None
+                    is_locked: false,
+                    client_id: None
                 })),
             ]),
             DispatchPlan::Command(Command::Quit),
@@ -1027,18 +1259,23 @@ fn two_macros_naming_each_other_exhaust_the_depth_budget() {
     // `ping` → `pong` → `ping` → … : depth 0 is `ping`, depth 1 is `pong`, and
     // every even depth is `ping` again. `MAX_SEQUENCE_DEPTH` is even, so the
     // macro refused at that depth is `ping`.
-    let mut registry = registry_with_macro("ping", vec![user("pong")]);
-    insert_unchecked(
+    let mut registry = build_registry_with_macro("ping", vec![build_user_action_reference("pong")]);
+    insert_action_without_validation(
         &mut registry,
-        user("pong"),
-        macro_metadata(vec![user("ping")]),
+        build_user_action_reference("pong"),
+        build_macro_metadata(vec![build_user_action_reference("ping")]),
     );
 
     assert_eq!(MAX_SEQUENCE_DEPTH % 2, 0);
     assert_eq!(
-        resolve_action(&user("ping"), &ActionArgs::None, &registry, CLIENT_SPLIT),
+        resolve_action(
+            &build_user_action_reference("ping"),
+            &ActionArgs::None,
+            &registry,
+            CLIENT_SPLIT
+        ),
         Err(ResolveError::SequenceTooDeep {
-            action: user("ping")
+            action_reference: build_user_action_reference("ping")
         })
     );
 }
@@ -1054,31 +1291,35 @@ fn action_args_serialize_to_their_wire_form() {
         ActionArgs::None
     );
 
-    let run = ActionArgs::Run {
+    let run_action_arguments = ActionArgs::Run {
         program: PathBuf::from("/usr/bin/lazygit"),
-        args: vec!["--all".to_string()],
+        arguments: vec!["--all".to_string()],
         direction: Some(Direction::Down),
-        stacked: false,
+        should_stack: false,
     };
-    let wire = r#"{"Run":{"program":"/usr/bin/lazygit","args":["--all"],"direction":"Down","stacked":false}}"#;
-    assert_eq!(serde_json::to_string(&run).expect("serializes"), wire);
+    let action_args_json = r#"{"Run":{"program":"/usr/bin/lazygit","args":["--all"],"direction":"Down","stacked":false}}"#;
     assert_eq!(
-        serde_json::from_str::<ActionArgs>(wire).expect("deserializes"),
-        run
+        serde_json::to_string(&run_action_arguments).expect("serializes"),
+        action_args_json
+    );
+    assert_eq!(
+        serde_json::from_str::<ActionArgs>(action_args_json).expect("deserializes"),
+        run_action_arguments
     );
 }
 
 #[test]
 fn action_args_run_deserializes_a_null_direction() {
-    let wire = r#"{"Run":{"program":"/bin/zsh","args":[],"direction":null,"stacked":true}}"#;
+    let null_direction_action_args_json =
+        r#"{"Run":{"program":"/bin/zsh","args":[],"direction":null,"stacked":true}}"#;
 
     assert_eq!(
-        serde_json::from_str::<ActionArgs>(wire).expect("deserializes"),
+        serde_json::from_str::<ActionArgs>(null_direction_action_args_json).expect("deserializes"),
         ActionArgs::Run {
             program: PathBuf::from("/bin/zsh"),
-            args: vec![],
+            arguments: vec![],
             direction: None,
-            stacked: true,
+            should_stack: true,
         }
     );
 }

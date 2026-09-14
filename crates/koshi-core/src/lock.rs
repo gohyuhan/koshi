@@ -37,7 +37,7 @@ impl LockMode {
     /// (`Resize`, `PaneMode`, `TabMode`, `ScrollMode`) own the keyboard while
     /// they are held and discard it.
     #[must_use]
-    pub fn passes_to_pane(self) -> bool {
+    pub fn should_pass_unbound_input_to_pane(self) -> bool {
         matches!(self, LockMode::Normal | LockMode::Locked)
     }
 
@@ -54,7 +54,7 @@ impl LockMode {
     /// The mode's canonical keymap name — the string the keybinding config
     /// groups a mode's bindings under (`modes.normal`, `modes.locked`, …).
     #[must_use]
-    pub fn name(self) -> &'static str {
+    pub fn get_keymap_name(self) -> &'static str {
         match self {
             LockMode::Normal => "normal",
             LockMode::Locked => "locked",

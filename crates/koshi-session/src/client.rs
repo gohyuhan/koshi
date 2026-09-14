@@ -26,8 +26,8 @@ use serde::{Deserialize, Serialize};
 #[must_use]
 pub const fn pane_viewport(viewport: Size) -> Size {
     Size {
-        cols: viewport.cols,
-        rows: viewport.rows.saturating_sub(2),
+        column_count: viewport.column_count,
+        row_count: viewport.row_count.saturating_sub(2),
     }
 }
 
@@ -37,7 +37,8 @@ pub const fn pane_viewport(viewport: Size) -> Size {
 /// tab — keep independent focus, lock mode, viewport and reported pane area.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Client {
-    id: ClientId,
+    #[serde(rename = "id")]
+    client_id: ClientId,
     session_id: SessionId,
     attached_at: SystemTime,
     viewport: Size,
@@ -62,7 +63,8 @@ pub struct Client {
     /// Whether this client grabs the mouse for text selection: while on, a drag
     /// highlights in koshi even over a program that asked for the mouse. Toggled
     /// by `core:mouse-select`; independent of [`lock_mode`](Self::lock_mode).
-    mouse_select: bool,
+    #[serde(rename = "mouse_select")]
+    is_mouse_selection_enabled: bool,
     /// This client's scrollback view position per pane: lines scrolled up from
     /// the live bottom. A pane absent from the map (the default) sits at the live
     /// bottom, offset `0`; only scrolled-up panes have an entry, always with a
@@ -101,13 +103,13 @@ impl Client {
     /// per-tab focus recorded yet and in [`LockMode::Normal`]. The caller
     /// supplies `attached_at`, `origin`, `label` and `colour`; this never reads
     /// the clock itself.
-    // Carries the whole of one attach: the client's identity (`id`,
+    // Carries the whole of one attach: the client's identity (`client_id`,
     // `session_id`, `origin`, `label`, `colour`) and its first view
     // (`attached_at`, `viewport`, `pane_area`, `active_tab`).
     #[allow(clippy::too_many_arguments)]
     #[must_use]
-    pub fn new(
-        id: ClientId,
+    pub fn from_attachment(
+        client_id: ClientId,
         session_id: SessionId,
         attached_at: SystemTime,
         viewport: Size,
@@ -118,7 +120,7 @@ impl Client {
         colour: u8,
     ) -> Self {
         Client {
-            id,
+            client_id,
             session_id,
             attached_at,
             viewport,
@@ -130,58 +132,58 @@ impl Client {
             colour,
             focus_by_tab: HashMap::new(),
             lock_mode: LockMode::Normal,
-            mouse_select: false,
+            is_mouse_selection_enabled: false,
             scroll_by_pane: HashMap::new(),
             selection_by_pane: HashMap::new(),
             zoom_by_tab: HashMap::new(),
         }
     }
 
-    /// This client's id.
+    /// This client's stable identifier.
     #[must_use]
-    pub fn id(&self) -> ClientId {
-        self.id
+    pub fn get_client_id(&self) -> ClientId {
+        self.client_id
     }
 
     /// The session this client is attached to.
     #[must_use]
-    pub fn session_id(&self) -> SessionId {
+    pub fn get_session_id(&self) -> SessionId {
         self.session_id
     }
 
     /// When this client attached.
     #[must_use]
-    pub fn attached_at(&self) -> SystemTime {
+    pub fn get_attached_at(&self) -> SystemTime {
         self.attached_at
     }
 
     /// Where this client connected from.
     #[must_use]
-    pub fn origin(&self) -> ClientOrigin {
+    pub fn get_origin(&self) -> ClientOrigin {
         self.origin
     }
 
     /// This client's generated display name.
     #[must_use]
-    pub fn label(&self) -> &str {
+    pub fn get_label(&self) -> &str {
         &self.label
     }
 
     /// Which palette entry paints this client's identity.
     #[must_use]
-    pub fn colour(&self) -> u8 {
+    pub fn get_color(&self) -> u8 {
         self.colour
     }
 
     /// This client's current viewport size.
     #[must_use]
-    pub fn viewport(&self) -> Size {
+    pub fn get_viewport_size(&self) -> Size {
         self.viewport
     }
 
     /// Return this client's measured terminal cell size in pixels.
     #[must_use]
-    pub fn cell_size(&self) -> Option<koshi_core::geometry::PixelCellSize> {
+    pub fn get_cell_size(&self) -> Option<koshi_core::geometry::PixelCellSize> {
         self.cell_size
     }
 
@@ -200,26 +202,26 @@ impl Client {
     /// closes (the session is quitting), this keeps naming the closed tab until
     /// the transport disconnects the client.
     #[must_use]
-    pub fn active_tab(&self) -> TabId {
+    pub fn get_active_tab(&self) -> TabId {
         self.active_tab
     }
 
     /// This client's lock mode.
     #[must_use]
-    pub fn lock_mode(&self) -> LockMode {
+    pub fn get_lock_mode(&self) -> LockMode {
         self.lock_mode
     }
 
     /// The pane this client has focused in `tab_id`, or `None` if it has not
     /// focused one there.
     #[must_use]
-    pub fn focused_pane(&self, tab_id: TabId) -> Option<PaneId> {
+    pub fn get_focused_pane(&self, tab_id: TabId) -> Option<PaneId> {
         self.focus_by_tab.get(&tab_id).copied()
     }
 
     /// Every focused pane this client remembers, keyed by tab id.
     #[must_use]
-    pub fn focused_panes(&self) -> &HashMap<TabId, PaneId> {
+    pub fn list_focused_panes(&self) -> &HashMap<TabId, PaneId> {
         &self.focus_by_tab
     }
 
@@ -228,24 +230,24 @@ impl Client {
     /// client solves it, so another client can be tiled on the same tab at the
     /// same moment.
     #[must_use]
-    pub fn layout_mode(&self, tab_id: TabId) -> LayoutMode {
+    pub fn get_layout_mode(&self, tab_id: TabId) -> LayoutMode {
         self.zoom_by_tab
             .get(&tab_id)
-            .map_or(LayoutMode::Tiled, |&focused| LayoutMode::Fullscreen {
-                focused,
+            .map_or(LayoutMode::Tiled, |&focused_pane_id| {
+                LayoutMode::Fullscreen { focused_pane_id }
             })
     }
 
     /// The pane this client has zoomed in `tab_id`, if any.
     #[must_use]
-    pub fn zoomed_pane(&self, tab_id: TabId) -> Option<PaneId> {
+    pub fn get_zoomed_pane(&self, tab_id: TabId) -> Option<PaneId> {
         self.zoom_by_tab.get(&tab_id).copied()
     }
 
     /// Every pane this client has zoomed, keyed by tab id. A tab with no entry is
     /// tiled for this client.
     #[must_use]
-    pub fn zoomed_panes(&self) -> &HashMap<TabId, PaneId> {
+    pub fn list_zoomed_panes(&self) -> &HashMap<TabId, PaneId> {
         &self.zoom_by_tab
     }
 
@@ -272,7 +274,7 @@ impl Client {
     /// Returns `0` for an unscrolled pane or a view at the newest line; `3`
     /// means three lines above the live bottom.
     #[must_use]
-    pub fn scroll_offset(&self, pane_id: PaneId) -> usize {
+    pub fn get_scroll_offset(&self, pane_id: PaneId) -> usize {
         self.scroll_by_pane
             .get(&pane_id)
             .copied()
@@ -293,13 +295,13 @@ impl Client {
     /// value the lines scrolled up from the live bottom. A pane with no entry
     /// sits at the live bottom.
     #[must_use]
-    pub fn scroll_offsets(&self) -> &HashMap<PaneId, usize> {
+    pub fn list_scroll_offsets(&self) -> &HashMap<PaneId, usize> {
         &self.scroll_by_pane
     }
 
     /// This client's highlight in `pane_id`, or `None` if it has none there.
     #[must_use]
-    pub fn selection(&self, pane_id: PaneId) -> Option<Selection> {
+    pub fn get_selection(&self, pane_id: PaneId) -> Option<Selection> {
         self.selection_by_pane.get(&pane_id).copied()
     }
 
@@ -338,7 +340,7 @@ impl Client {
     /// live again.
     #[must_use]
     pub fn is_view_held(&self, pane_id: PaneId) -> bool {
-        self.scroll_offset(pane_id) > 0 || self.selection_by_pane.contains_key(&pane_id)
+        self.get_scroll_offset(pane_id) > 0 || self.selection_by_pane.contains_key(&pane_id)
     }
 
     /// Update this client's lock mode.
@@ -348,14 +350,15 @@ impl Client {
 
     /// Whether this client grabs the mouse for text selection.
     #[must_use]
-    pub fn mouse_select(&self) -> bool {
-        self.mouse_select
+    pub fn is_mouse_selection_enabled(&self) -> bool {
+        self.is_mouse_selection_enabled
     }
 
-    /// Flip [`mouse_select`](Self::mouse_select) and return the new value.
-    pub fn toggle_mouse_select(&mut self) -> bool {
-        self.mouse_select = !self.mouse_select;
-        self.mouse_select
+    /// Flip [`is_mouse_selection_enabled`](Self::is_mouse_selection_enabled)
+    /// and return the new value.
+    pub fn toggle_mouse_selection(&mut self) -> bool {
+        self.is_mouse_selection_enabled = !self.is_mouse_selection_enabled;
+        self.is_mouse_selection_enabled
     }
 
     /// Set the pane this client has focused in `tab_id`, returning the prior pane if one was set.
@@ -398,10 +401,10 @@ impl Client {
     /// [`PaneArea::Reported`] → that size clamped per axis to the viewport
     /// (`200x50` reported on an `80x24` viewport → `80x24`).
     #[must_use]
-    pub fn pane_area(&self) -> Option<Size> {
+    pub fn get_pane_area(&self) -> Option<Size> {
         match self.pane_area {
             None => Some(pane_viewport(self.viewport)),
-            Some(PaneArea::Reported(size)) => Some(size.min_axes(self.viewport)),
+            Some(PaneArea::Reported(size)) => Some(size.compute_minimum_axes(self.viewport)),
             Some(PaneArea::Starving) => None,
         }
     }
@@ -409,7 +412,7 @@ impl Client {
     /// The pane region exactly as this client reported it; `None` when it
     /// reported none.
     #[must_use]
-    pub fn reported_pane_area(&self) -> Option<PaneArea> {
+    pub fn get_reported_pane_area(&self) -> Option<PaneArea> {
         self.pane_area
     }
 
@@ -431,7 +434,8 @@ impl Client {
 /// so iteration walks clients in id order.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ClientRegistry {
-    records: BTreeMap<ClientId, Client>,
+    #[serde(rename = "records")]
+    client_by_id: BTreeMap<ClientId, Client>,
 }
 
 impl ClientRegistry {
@@ -443,8 +447,8 @@ impl ClientRegistry {
 
     /// The client attached under `client_id`, or `None` if none is.
     #[must_use]
-    pub fn get(&self, client_id: ClientId) -> Option<&Client> {
-        self.records.get(&client_id)
+    pub fn get_client_by_id(&self, client_id: ClientId) -> Option<&Client> {
+        self.client_by_id.get(&client_id)
     }
 
     /// Mutable access to one client for in-place edits to its view state —
@@ -453,43 +457,43 @@ impl ClientRegistry {
     ///
     /// A client's id is read-only, so the entry stays keyed under `client_id`
     /// for as long as it is attached. Changing a client's id means
-    /// [`detach`](Self::detach) then [`attach`](Self::attach).
-    pub fn get_mut(&mut self, client_id: ClientId) -> Option<&mut Client> {
-        self.records.get_mut(&client_id)
+    /// [`detach_client`](Self::detach_client) then [`attach_client`](Self::attach_client).
+    pub fn get_client_mut_by_id(&mut self, client_id: ClientId) -> Option<&mut Client> {
+        self.client_by_id.get_mut(&client_id)
     }
 
     /// Detach the client under `client_id` on disconnect, returning the removed
     /// [`Client`]. `None` if it was not attached.
-    pub fn detach(&mut self, client_id: ClientId) -> Option<Client> {
-        self.records.remove(&client_id)
+    pub fn detach_client(&mut self, client_id: ClientId) -> Option<Client> {
+        self.client_by_id.remove(&client_id)
     }
 
     /// Register `client` on attach, keyed by its own id. Returns the previous
     /// record if that id was already attached — a re-attach replaces in place.
-    pub fn attach(&mut self, client: Client) -> Option<Client> {
-        self.records.insert(client.id, client)
+    pub fn attach_client(&mut self, client: Client) -> Option<Client> {
+        self.client_by_id.insert(client.client_id, client)
     }
 
     /// Every attached client, in id order.
-    pub fn list_attached(&self) -> impl Iterator<Item = &Client> {
-        self.records.values()
+    pub fn list_attached_clients(&self) -> impl Iterator<Item = &Client> {
+        self.client_by_id.values()
     }
 
     /// Mutable access to every attached client, in id order.
-    pub fn list_attached_mut(&mut self) -> impl Iterator<Item = &mut Client> {
-        self.records.values_mut()
+    pub fn list_attached_clients_mut(&mut self) -> impl Iterator<Item = &mut Client> {
+        self.client_by_id.values_mut()
     }
 
     /// How many clients are attached.
     #[must_use]
-    pub fn len(&self) -> usize {
-        self.records.len()
+    pub fn client_count(&self) -> usize {
+        self.client_by_id.len()
     }
 
-    /// Whether no clients are attached.
+    /// Whether one or more clients are attached.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.records.is_empty()
+    pub fn has_clients(&self) -> bool {
+        !self.client_by_id.is_empty()
     }
 }
 

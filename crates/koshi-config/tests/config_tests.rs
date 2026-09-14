@@ -13,7 +13,7 @@ use koshi_config::layer::{merge_client, merge_server};
 use koshi_config::profile::parse_profile;
 use koshi_config::theme::parse_theme;
 use koshi_config::types::{
-    default_mode_bindings, ClientConfig, ColorPalette, ServerConfig, DEFAULT_THEME,
+    build_default_mode_bindings, ClientConfig, ColorPalette, ServerConfig, DEFAULT_THEME,
 };
 
 /// The KDL text of the fenced block under the `## Full example` heading of
@@ -27,11 +27,13 @@ use koshi_config::types::{
 /// Panics when the page cannot be read, carries no `## Full example` heading,
 /// or has no closed ```` ```kdl ```` block after that heading.
 fn full_example(page: &str) -> String {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+    let config_doc_path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../config-docs")
         .join(page);
-    let markdown = std::fs::read_to_string(&path)
-        .unwrap_or_else(|err| panic!("{} is readable: {err}", path.display()))
+    let markdown = std::fs::read_to_string(&config_doc_path)
+        .unwrap_or_else(|read_error| {
+            panic!("{} is readable: {read_error}", config_doc_path.display())
+        })
         .replace("\r\n", "\n");
     let after_heading = markdown
         .split_once("\n## Full example\n")
@@ -50,38 +52,39 @@ fn full_example(page: &str) -> String {
 
 #[test]
 fn koshi_example_parses_without_warnings() {
-    let source = full_example("koshi.md");
-    let file = parse_app_config(Path::new("koshi.kdl"), &source).expect("koshi.kdl parses");
+    let config_source_text = full_example("koshi.md");
+    let app_config =
+        parse_app_config(Path::new("koshi.kdl"), &config_source_text).expect("koshi.kdl parses");
     assert!(
-        file.warnings.is_empty(),
+        app_config.parse_warnings.is_empty(),
         "unexpected warnings: {:?}",
-        file.warnings
+        app_config.parse_warnings
     );
     // The documented example names the built-in theme.
-    assert_eq!(file.theme, Some(DEFAULT_THEME.to_string()));
+    assert_eq!(app_config.theme_name, Some(DEFAULT_THEME.to_string()));
     // Every value it spells out is the built-in default: folding its layer
     // onto the defaults leaves both sides unchanged.
     assert_eq!(
-        merge_server(ServerConfig::default(), vec![file.layer.clone()]),
+        merge_server(ServerConfig::default(), vec![app_config.layer.clone()]),
         ServerConfig::default()
     );
     assert_eq!(
-        merge_client(ClientConfig::default(), vec![file.layer]),
+        merge_client(ClientConfig::default(), vec![app_config.layer]),
         ClientConfig::default()
     );
 }
 
 #[test]
 fn theme_example_parses_without_warnings() {
-    let source = full_example("theme.md");
-    let (theme, warnings) =
-        parse_theme(Path::new("themes/default.kdl"), &source).expect("theme file parses");
+    let config_source_text = full_example("theme.md");
+    let (theme, warnings) = parse_theme(Path::new("themes/default.kdl"), &config_source_text)
+        .expect("theme file parses");
     assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
 
     // The page documents every color at its default value.
     let colors = theme.colors.expect("the example sets a `colors` block");
     let stock = ColorPalette::default();
-    for (role, parsed, expected) in [
+    for (color_role, parsed_color, default_color) in [
         ("ramp-start", colors.ramp_start, stock.ramp_start),
         ("ramp-end", colors.ramp_end, stock.ramp_end),
         ("on-ramp", colors.on_ramp, stock.on_ramp),
@@ -112,15 +115,19 @@ fn theme_example_parses_without_warnings() {
         ),
         ("letterbox", colors.letterbox, stock.letterbox),
     ] {
-        assert_eq!(parsed, Some(expected), "documented `{role}`");
+        assert_eq!(
+            parsed_color,
+            Some(default_color),
+            "documented `{color_role}`"
+        );
     }
 }
 
 #[test]
 fn keybinding_example_parses() {
-    let source = full_example("keybinding.md");
-    let layer =
-        parse_keybindings(Path::new("keybinding.kdl"), &source).expect("keybinding.kdl parses");
+    let config_source_text = full_example("keybinding.md");
+    let layer = parse_keybindings(Path::new("keybinding.kdl"), &config_source_text)
+        .expect("keybinding.kdl parses");
 
     // The page documents the complete built-in keymap: the layer it parses to
     // is the shipped default table, key for key.
@@ -129,23 +136,27 @@ fn keybinding_example_parses() {
     assert_eq!(layer.max_chord_depth, Some(4));
     assert_eq!(layer.leader, Some(Leader::default()));
     assert_eq!(layer.unlock_alternative, None);
-    assert_eq!(layer.modes, Some(default_mode_bindings(Leader::default())));
+    assert_eq!(
+        layer.mode_bindings_by_name,
+        Some(build_default_mode_bindings(Leader::default()))
+    );
 }
 
 #[test]
 fn profile_example_parses() {
-    let source = full_example("profile.md");
-    let template = parse_profile(Path::new("profile/dev.kdl"), &source).expect("profile parses");
+    let config_source_text = full_example("profile.md");
+    let template =
+        parse_profile(Path::new("profile/dev.kdl"), &config_source_text).expect("profile parses");
 
     // Two tabs; the `focus` marker on the second one selects it at open.
     assert_eq!(template.tabs.len(), 2);
-    assert_eq!(template.focused_tab, 1);
-    assert!(!template.locked);
+    assert_eq!(template.focused_tab_index, 1);
+    assert!(!template.is_locked);
     // The editor pane carries `focus` and wins the first tab. The stack tab
     // marks no pane `focus` and falls back to the first visible leaf — the
     // `expanded` stack member, `htop`, at index 1.
-    assert_eq!(template.tabs[0].focused_leaf, 0);
-    assert_eq!(template.tabs[1].focused_leaf, 1);
+    assert_eq!(template.tabs[0].focused_leaf_index, 0);
+    assert_eq!(template.tabs[1].focused_leaf_index, 1);
 }
 
 /// Every ready-made theme shipped in `themes-example/` must parse with no
@@ -156,23 +167,40 @@ fn profile_example_parses() {
 /// color.
 #[test]
 fn every_shipped_example_theme_is_complete_and_warning_free() {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../themes-example");
-    let mut checked = 0;
-    for entry in std::fs::read_dir(&dir).expect("themes-example directory exists") {
-        let path = entry.expect("readable directory entry").path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("kdl") {
+    let themes_directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../themes-example");
+    let mut checked_theme_count = 0;
+    for theme_directory_entry in
+        std::fs::read_dir(&themes_directory).expect("themes-example directory exists")
+    {
+        let theme_path = theme_directory_entry
+            .expect("readable directory entry")
+            .path();
+        if theme_path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            != Some("kdl")
+        {
             continue;
         }
-        let name = path.file_name().expect("a file name").to_string_lossy();
-        let source = std::fs::read_to_string(&path).expect("theme file is readable");
-        let (theme, warnings) = parse_theme(&path, &source)
-            .unwrap_or_else(|err| panic!("{name} does not parse: {err}"));
-        assert!(warnings.is_empty(), "{name} has warnings: {warnings:?}");
+        let theme_file_name = theme_path
+            .file_name()
+            .expect("a file name")
+            .to_string_lossy();
+        let theme_source_text =
+            std::fs::read_to_string(&theme_path).expect("theme file is readable");
+        let (theme, warnings) =
+            parse_theme(&theme_path, &theme_source_text).unwrap_or_else(|parse_error| {
+                panic!("{theme_file_name} does not parse: {parse_error}")
+            });
+        assert!(
+            warnings.is_empty(),
+            "{theme_file_name} has warnings: {warnings:?}"
+        );
 
         let colors = theme
             .colors
-            .unwrap_or_else(|| panic!("{name} has no `colors` block"));
-        for (role, set) in [
+            .unwrap_or_else(|| panic!("{theme_file_name} has no `colors` block"));
+        for (role, is_set) in [
             ("ramp-start", colors.ramp_start.is_some()),
             ("ramp-end", colors.ramp_end.is_some()),
             ("on-ramp", colors.on_ramp.is_some()),
@@ -187,12 +215,12 @@ fn every_shipped_example_theme_is_complete_and_warning_free() {
             ("stack-header-bg", colors.stack_header_bg.is_some()),
             ("letterbox", colors.letterbox.is_some()),
         ] {
-            assert!(set, "{name} does not set `{role}`");
+            assert!(is_set, "{theme_file_name} does not set `{role}`");
         }
-        checked += 1;
+        checked_theme_count += 1;
     }
     assert!(
-        checked >= 20,
-        "expected at least 20 shipped themes, found {checked}"
+        checked_theme_count >= 20,
+        "expected at least 20 shipped themes, found {checked_theme_count}"
     );
 }

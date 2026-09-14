@@ -31,10 +31,10 @@ use koshi_core::command::{
 use koshi_core::geometry::Direction;
 use koshi_core::ids::{ClientId, CommandId, PaneId};
 use koshi_core::key::{Key, KeyChord, ModFlags, NamedKey};
-use koshi_core::mouse::{reports, MouseAnswer, MouseInput, MouseKind};
-use koshi_input::keyboard::encode;
+use koshi_core::mouse::{is_mouse_kind_reported, MouseAnswer, MouseInput, MouseKind};
+use koshi_input::keyboard::encode_key_chord;
 use koshi_ipc::protocol::WireMouseAction;
-use koshi_renderer::pane_cell_clamped;
+use koshi_renderer::compute_clamped_pane_cell;
 use koshi_renderer::snapshot::ViewerChrome;
 use koshi_terminal::mouse_report::encode_mouse;
 use koshi_terminal::state::Screen;
@@ -50,21 +50,21 @@ impl Server {
     fn dispatch_mouse_command(
         &mut self,
         client_id: ClientId,
-        command: Command,
+        mouse_command: Command,
     ) -> (CommandResult, Option<u16>) {
-        let envelope = CommandEnvelope::new(
+        let mouse_command_envelope = CommandEnvelope::from_parts(
             CommandId::new(),
-            CommandSource::mouse(client_id),
+            CommandSource::from_mouse(client_id),
             SystemTime::now(),
-            command,
+            mouse_command,
         );
-        self.dispatch_reporting_spare(envelope)
+        self.dispatch_reporting_spare(mouse_command_envelope)
     }
 
     /// Dispatch a selection command attributed to `client_id`'s mouse, through
     /// the same dispatch every other mutation takes. The result is dropped.
-    pub(crate) fn dispatch_visual(&mut self, client_id: ClientId, command: VisualCommand) {
-        let _ = self.dispatch_mouse_command(client_id, Command::Visual(command));
+    pub(crate) fn dispatch_visual(&mut self, client_id: ClientId, visual_command: VisualCommand) {
+        let _ = self.dispatch_mouse_command(client_id, Command::Visual(visual_command));
     }
 
     /// Ask for `pane`'s `side` border to move `cells` cells in `step`'s
@@ -74,22 +74,23 @@ impl Server {
     fn ask_border_move(
         &mut self,
         client_id: ClientId,
-        pane: PaneId,
-        side: Direction,
-        step: i16,
-        cells: u16,
+        pane_id: PaneId,
+        border_side: Direction,
+        resize_step: i16,
+        requested_cell_count: u16,
     ) -> Result<(), u16> {
-        // `step * cells` outside ±`i16::MAX` is clamped to it.
-        let size = (i32::from(step) * i32::from(cells))
-            .clamp(-i32::from(i16::MAX), i32::from(i16::MAX)) as i16;
-        let command = Command::ResizePane(ResizePaneArgs {
-            pane: Some(pane),
-            direction: side,
-            size,
+        // `resize_step * requested_cell_count` outside ±`i16::MAX` is clamped to it.
+        let resize_cell_count = (i32::from(resize_step) * i32::from(requested_cell_count))
+            .clamp(-i32::from(i16::MAX), i32::from(i16::MAX))
+            as i16;
+        let resize_command = Command::ResizePane(ResizePaneArgs {
+            pane_id: Some(pane_id),
+            direction: border_side,
+            resize_amount_cells: resize_cell_count,
         });
-        match self.dispatch_mouse_command(client_id, command) {
+        match self.dispatch_mouse_command(client_id, resize_command) {
             (CommandResult::Ok { .. }, _) => Ok(()),
-            (_, spare) => Err(spare.unwrap_or(0)),
+            (_, available_cell_count) => Err(available_cell_count.unwrap_or(0)),
         }
     }
 
@@ -112,28 +113,38 @@ impl Server {
     pub fn drag_resize(
         &mut self,
         client_id: ClientId,
-        pane: PaneId,
-        side: Direction,
-        step: i16,
-        count: u16,
+        pane_id: PaneId,
+        border_side: Direction,
+        resize_step: i16,
+        requested_cell_count: u16,
     ) -> u16 {
-        let mut applied: u16 = 0;
+        let mut applied_cell_count: u16 = 0;
         // What this round asks for: the whole remaining distance, or the cells
         // the last round was told the donating pane can still give.
-        let mut ask = count;
-        while ask > 0 {
-            match self.ask_border_move(client_id, pane, side, step, ask) {
+        let mut requested_round_cell_count = requested_cell_count;
+        while requested_round_cell_count > 0 {
+            match self.ask_border_move(
+                client_id,
+                pane_id,
+                border_side,
+                resize_step,
+                requested_round_cell_count,
+            ) {
                 Ok(()) => {
-                    applied = applied.saturating_add(ask);
-                    ask = count.saturating_sub(applied);
+                    applied_cell_count =
+                        applied_cell_count.saturating_add(requested_round_cell_count);
+                    requested_round_cell_count =
+                        requested_cell_count.saturating_sub(applied_cell_count);
                 }
-                // `spare` is what the donating pane has left above its minimum
+                // `available_cell_count` is what the donating pane has left above its minimum
                 // size, always short of what this round asked for.
-                Err(spare) if spare < ask => ask = spare,
+                Err(available_cell_count) if available_cell_count < requested_round_cell_count => {
+                    requested_round_cell_count = available_cell_count;
+                }
                 Err(_) => break,
             }
         }
-        applied
+        applied_cell_count
     }
 
     /// Move `client_id`'s koshi scrollback view of `pane_id` by `lines`, up into
@@ -145,49 +156,56 @@ impl Server {
     /// history. The screen is read here, at the moment of the move, not as the
     /// frame the viewer decided from had it.
     ///
-    /// The returned line is the same number [`PaneSnapshot::view_top_row`] would
+    /// The returned line is the same number [`PaneSnapshot::view_top_row_index`] would
     /// carry for the next frame. `None` names a pane with no terminal.
     ///
-    /// [`PaneSnapshot::view_top_row`]: koshi_renderer::snapshot::PaneSnapshot::view_top_row
+    /// [`PaneSnapshot::view_top_row_index`]: koshi_renderer::snapshot::PaneSnapshot::view_top_row_index
     pub fn scroll_pane_view(
         &mut self,
         client_id: ClientId,
         pane_id: PaneId,
-        up: bool,
-        lines: usize,
+        is_scrolling_up: bool,
+        scroll_line_count: usize,
     ) -> Option<u64> {
-        if self.pane_on_primary(pane_id) {
-            if up {
-                self.scroll_up(client_id, pane_id, lines);
+        if self.is_pane_on_primary_screen(pane_id) {
+            if is_scrolling_up {
+                self.scroll_up(client_id, pane_id, scroll_line_count);
             } else {
-                self.scroll_down(client_id, pane_id, lines);
+                self.scroll_down(client_id, pane_id, scroll_line_count);
             }
         }
-        self.view_top_row(client_id, pane_id)
+        self.get_view_top_row_index(client_id, pane_id)
     }
 
     /// The line `client_id`'s view of `pane_id` shows on its top row, or `None`
     /// when the pane has no terminal.
-    fn view_top_row(&self, client_id: ClientId, pane_id: PaneId) -> Option<u64> {
-        let offset = self
-            .session_for_client(client_id)
-            .and_then(|session| session.clients.get(client_id))
-            .map_or(0, |client| client.scroll_offset(pane_id));
-        let state = self.terminal_engines.get(&pane_id)?.state();
+    fn get_view_top_row_index(&self, client_id: ClientId, pane_id: PaneId) -> Option<u64> {
+        let scroll_offset = self
+            .get_session_for_client(client_id)
+            .and_then(|session| session.clients.get_client_by_id(client_id))
+            .map_or(0, |attached_client| {
+                attached_client.get_scroll_offset(pane_id)
+            });
+        let terminal_state = self
+            .terminal_engine_by_pane_id
+            .get(&pane_id)?
+            .get_terminal_state();
         Some(
-            state
-                .scrollback()
-                .total_pushed()
-                .saturating_sub(state.effective_view_offset(offset) as u64),
+            terminal_state
+                .get_scrollback()
+                .get_total_pushed_line_count()
+                .saturating_sub(terminal_state.effective_view_offset(scroll_offset) as u64),
         )
     }
 
     /// Whether `pane_id`'s program is on the primary screen — the only screen
     /// with koshi scrollback to scroll.
-    fn pane_on_primary(&self, pane_id: PaneId) -> bool {
-        self.terminal_engines
+    fn is_pane_on_primary_screen(&self, pane_id: PaneId) -> bool {
+        self.terminal_engine_by_pane_id
             .get(&pane_id)
-            .is_some_and(|engine| engine.state().active_screen() == Screen::Primary)
+            .is_some_and(|terminal_engine| {
+                terminal_engine.get_terminal_state().get_active_screen() == Screen::Primary
+            })
     }
 
     /// Hand `mouse` to the program in `pane_id`, encoded as the mouse report
@@ -214,41 +232,60 @@ impl Server {
         &mut self,
         client_id: ClientId,
         pane_id: PaneId,
-        mouse: MouseInput,
+        mouse_input: MouseInput,
     ) -> bool {
-        let Some((tracking, encoding)) = self.terminal_engines.get(&pane_id).map(|engine| {
-            let state = engine.state();
-            (state.mouse_tracking(), state.mouse_encoding())
-        }) else {
+        let Some((tracking, encoding)) =
+            self.terminal_engine_by_pane_id
+                .get(&pane_id)
+                .map(|terminal_engine| {
+                    let terminal_state = terminal_engine.get_terminal_state();
+                    (
+                        terminal_state.get_mouse_tracking(),
+                        terminal_state.get_mouse_encoding(),
+                    )
+                })
+        else {
             return false;
         };
-        if !reports(tracking, mouse.kind) {
+        if !is_mouse_kind_reported(tracking, mouse_input.mouse_kind) {
             return false;
         }
-        let Some(frame) = self.build_layout(client_id) else {
+        let Some(owned_frame_layout) = self.build_frame_layout(client_id) else {
             return false;
         };
         // A mouse report addresses the program's own grid, whose top-left
         // content cell is `(1, 1)`.
-        let Some((col, row)) =
-            pane_cell_clamped(frame.layout(ViewerChrome::default()), pane_id, mouse.at)
-                .map(|(col, row)| (col + 1, row + 1))
-        else {
+        let Some((column_index, row_index)) = compute_clamped_pane_cell(
+            owned_frame_layout.build_frame_layout(ViewerChrome::default()),
+            pane_id,
+            mouse_input.position,
+        )
+        .map(|(column_index, row_index)| (column_index + 1, row_index + 1)) else {
             return false;
         };
-        let Some(bytes) = encode_mouse(mouse.kind, mouse.mods, col, row, tracking, encoding) else {
+        let Some(mouse_report_bytes) = encode_mouse(
+            mouse_input.mouse_kind,
+            mouse_input.modifier_flags,
+            column_index,
+            row_index,
+            tracking,
+            encoding,
+        ) else {
             return false;
         };
-        let written = self.pty_backend().write(pane_id, &bytes).is_ok();
+        let is_report_written = self
+            .get_pty_backend()
+            .write_pane_input(pane_id, &mouse_report_bytes)
+            .is_ok();
         // A wheel tick leaves the highlight standing; every other forwarded
         // report — click, drag, motion, release — drops it.
-        if !matches!(mouse.kind, MouseKind::Scroll(_)) {
+        if !matches!(mouse_input.mouse_kind, MouseKind::Scroll(_)) {
             self.clear_selection_on_pane_input(client_id, pane_id);
         }
-        written
+        is_report_written
     }
 
-    /// Send `count` cursor arrow keys to `pane_id` for a wheel tick — the
+    /// Send `arrow_count` cursor arrow keys to `pane_id` for a wheel tick — the
     /// alternate-scroll (`?1007`) translation. `up` sends up-arrows, otherwise
     /// down-arrows.
     ///
@@ -260,23 +297,42 @@ impl Server {
     /// The byte form follows the program's cursor-key mode (DECCKM), read at the
     /// same moment: `ESC O A` under application keys, `ESC [ A` otherwise.
     ///
-    /// A `count` of `0` writes nothing.
-    pub fn write_alt_scroll_arrows(&mut self, pane_id: PaneId, up: bool, count: usize) {
-        let arrow = if up { NamedKey::Up } else { NamedKey::Down };
-        let Some(app_keys) = self.terminal_engines.get(&pane_id).and_then(|engine| {
-            let state = engine.state();
-            (state.alt_scroll() && state.active_screen() == Screen::Alternate)
-                .then(|| state.app_cursor_keys())
-        }) else {
+    /// An `arrow_count` of `0` writes nothing.
+    pub fn write_alt_scroll_arrows(
+        &mut self,
+        pane_id: PaneId,
+        is_scrolling_up: bool,
+        arrow_count: usize,
+    ) {
+        let arrow_key = if is_scrolling_up {
+            NamedKey::Up
+        } else {
+            NamedKey::Down
+        };
+        let Some(is_application_cursor_keys_enabled) = self
+            .terminal_engine_by_pane_id
+            .get(&pane_id)
+            .and_then(|terminal_engine| {
+                let terminal_state = terminal_engine.get_terminal_state();
+                (terminal_state.is_alternate_scroll_enabled()
+                    && terminal_state.get_active_screen() == Screen::Alternate)
+                    .then(|| terminal_state.are_application_cursor_keys_enabled())
+            })
+        else {
             return;
         };
-        let one_tick = encode(KeyChord::new(ModFlags::NONE, Key::Named(arrow)), app_keys);
-        let mut bytes = Vec::with_capacity(count * one_tick.len());
-        for _ in 0..count {
-            bytes.extend_from_slice(&one_tick);
+        let arrow_key_bytes = encode_key_chord(
+            KeyChord::from_parts(ModFlags::NONE, Key::Named(arrow_key)),
+            is_application_cursor_keys_enabled,
+        );
+        let mut arrow_key_bytes_to_write = Vec::with_capacity(arrow_count * arrow_key_bytes.len());
+        for _ in 0..arrow_count {
+            arrow_key_bytes_to_write.extend_from_slice(&arrow_key_bytes);
         }
-        if !bytes.is_empty() {
-            let _ = self.pty_backend().write(pane_id, &bytes);
+        if !arrow_key_bytes_to_write.is_empty() {
+            let _ = self
+                .get_pty_backend()
+                .write_pane_input(pane_id, &arrow_key_bytes_to_write);
         }
     }
 
@@ -296,44 +352,69 @@ impl Server {
         &mut self,
         client_id: ClientId,
         request_id: u64,
-        actions: Vec<WireMouseAction>,
+        mouse_actions: Vec<WireMouseAction>,
     ) {
-        let mut answers = Vec::new();
-        for action in actions {
-            match action {
-                WireMouseAction::Scroll { pane, up, lines } => {
-                    let top = self.scroll_pane_view(client_id, pane, up, lines);
-                    answers.push(MouseAnswer::Scrolled { pane, top });
-                }
-                WireMouseAction::Forward { pane, mouse } => {
-                    let _ = self.forward_mouse_to_pane(client_id, pane, mouse);
-                }
-                WireMouseAction::AltScrollArrows { pane, up, count } => {
-                    self.write_alt_scroll_arrows(pane, up, count);
-                }
-                WireMouseAction::Resize {
-                    pane,
-                    side,
-                    step,
-                    count,
+        let mut mouse_answers = Vec::new();
+        for mouse_action in mouse_actions {
+            match mouse_action {
+                WireMouseAction::Scroll {
+                    pane_id,
+                    is_scrolling_up,
+                    scroll_line_count,
                 } => {
-                    let applied = self.drag_resize(client_id, pane, side, step, count);
-                    answers.push(MouseAnswer::Resized {
-                        pane,
-                        side,
-                        step,
-                        applied,
+                    let view_top_row_index = self.scroll_pane_view(
+                        client_id,
+                        pane_id,
+                        is_scrolling_up,
+                        scroll_line_count,
+                    );
+                    mouse_answers.push(MouseAnswer::Scrolled {
+                        pane_id,
+                        top_row_number: view_top_row_index,
                     });
                 }
-                WireMouseAction::Command(command) => {
-                    let _ = self.dispatch_mouse_command(client_id, *command);
+                WireMouseAction::Forward {
+                    pane_id,
+                    mouse_input,
+                } => {
+                    let _ = self.forward_mouse_to_pane(client_id, pane_id, mouse_input);
+                }
+                WireMouseAction::AltScrollArrows {
+                    pane_id,
+                    is_scrolling_up,
+                    arrow_count,
+                } => {
+                    self.write_alt_scroll_arrows(pane_id, is_scrolling_up, arrow_count);
+                }
+                WireMouseAction::Resize {
+                    pane_id,
+                    border_side,
+                    resize_step,
+                    requested_cell_count,
+                } => {
+                    let applied_cell_count = self.drag_resize(
+                        client_id,
+                        pane_id,
+                        border_side,
+                        resize_step,
+                        requested_cell_count,
+                    );
+                    mouse_answers.push(MouseAnswer::Resized {
+                        pane_id,
+                        border_side,
+                        resize_step,
+                        applied_cell_count,
+                    });
+                }
+                WireMouseAction::Command(mouse_command) => {
+                    let _ = self.dispatch_mouse_command(client_id, *mouse_command);
                 }
             }
         }
-        self.answer_mouse_round(client_id, request_id, answers);
+        self.answer_mouse_round(client_id, request_id, mouse_answers);
     }
 
-    /// Put `answers` on the queue of the subscriber that views `client_id`, as
+    /// Put `mouse_answers` on the queue of the subscriber that views `client_id`, as
     /// the answer to mouse round `request_id`.
     ///
     /// A client with no subscription has nothing queued. A subscriber whose
@@ -343,17 +424,17 @@ impl Server {
         &mut self,
         client_id: ClientId,
         request_id: u64,
-        answers: Vec<MouseAnswer>,
+        mouse_answers: Vec<MouseAnswer>,
     ) {
-        let Some(&(subscriber, _)) = self
+        let Some(&(subscriber_id, _)) = self
             .subscriptions
             .iter()
-            .find(|&&(_, viewed)| viewed == client_id)
+            .find(|&&(_, viewed_client_id)| viewed_client_id == client_id)
         else {
             return;
         };
         self.event_bus
-            .try_send_answer(subscriber, request_id, answers);
+            .try_send_answer(subscriber_id, request_id, mouse_answers);
     }
 }
 

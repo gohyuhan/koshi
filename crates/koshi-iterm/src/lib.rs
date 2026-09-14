@@ -13,8 +13,10 @@ pub use capabilities::{
     iterm_feature_string_supports_file, iterm_feature_string_supports_sixel,
     ITERM_CAPABILITIES_QUERY,
 };
-pub use encoder::{EncodeError, Encoder, OutputOptions, MAX_ITERM_PACKET_BYTES};
+pub use encoder::{
+    ItermEncodeError, ItermEncoder, ItermOutputOptions, MAX_ITERM_PACKET_BYTE_COUNT,
+};
 pub use parser::{
-    iterm_command_can_be_graphics, iterm_command_is_graphics, iterm_payload_started,
+    can_iterm_command_be_graphics, is_iterm_graphics_command, is_iterm_payload_started,
     parse_iterm_command, ItermTransfer,
 };

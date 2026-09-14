@@ -15,47 +15,60 @@ use koshi_test_support::fake_pty::FakePtyBackend;
 use crate::runtime::event::RuntimeEvent;
 use crate::server::Server;
 
-const PANE_SIZE: PtySize = PtySize { cols: 80, rows: 24 };
-const DEADLINE: Duration = Duration::from_secs(5);
+const TEST_PANE_SIZE: PtySize = PtySize {
+    column_count: 80,
+    row_count: 24,
+};
+const SERVER_TEST_DEADLINE_DURATION: Duration = Duration::from_secs(5);
 
 #[test]
 fn a_spawned_pane_forwards_output_reports_active_and_is_killed_on_graceful_shutdown() {
-    let fake = Arc::new(FakePtyBackend::new());
-    let pty_backend: Arc<dyn PtyBackend> = fake.clone();
-    let (tx, inbox_rx) = mpsc::channel();
-    let mut rt = Server::new(pty_backend, inbox_rx, tx);
+    let fake_pty_backend = Arc::new(FakePtyBackend::new());
+    let pty_backend: Arc<dyn PtyBackend> = fake_pty_backend.clone();
+    let (event_sender, inbox_rx) = mpsc::channel();
+    let mut server = Server::from_runtime_parts(pty_backend, inbox_rx, event_sender);
 
-    assert!(!rt.has_active_panes(), "a fresh server parks no pane");
-    assert!(!rt.is_draining(), "a fresh server is serving");
+    assert!(!server.has_active_panes(), "a fresh server parks no pane");
+    assert!(!server.is_draining(), "a fresh server is serving");
 
-    let pane = PaneId::new();
-    let handle = fake
-        .spawn(
-            pane,
+    let pane_id = PaneId::new();
+    let pty_handle = fake_pty_backend
+        .spawn_pane(
+            pane_id,
             SpawnSpec::default_shell(None, BTreeMap::new()),
-            PANE_SIZE,
+            TEST_PANE_SIZE,
         )
         .expect("spawn");
-    rt.park_pane_pty(pane, handle, PANE_SIZE);
+    server.park_pane_pty(pane_id, pty_handle, TEST_PANE_SIZE);
 
-    fake.push_output(pane, b"hi".to_vec()).expect("push");
-    match rt.inbox_rx().recv_timeout(DEADLINE) {
-        Ok(RuntimeEvent::PtyOutput { pane_id, bytes }) => {
-            assert_eq!(pane_id, pane);
-            assert_eq!(bytes, b"hi");
+    fake_pty_backend
+        .push_output(pane_id, b"hi".to_vec())
+        .expect("push");
+    match server
+        .inbox_rx()
+        .recv_timeout(SERVER_TEST_DEADLINE_DURATION)
+    {
+        Ok(RuntimeEvent::PtyOutput {
+            pane_id: reported_pane_id,
+            output_bytes,
+        }) => {
+            assert_eq!(reported_pane_id, pane_id);
+            assert_eq!(output_bytes, b"hi");
         }
         other => panic!("expected PtyOutput, got {other:?}"),
     }
 
-    assert!(rt.has_active_panes());
+    assert!(server.has_active_panes());
 
-    rt.shutdown();
+    server.shutdown();
 
-    assert!(rt.is_draining());
+    assert!(server.is_draining());
     assert_eq!(
-        fake.kills(pane).expect("pane"),
+        fake_pty_backend
+            .list_pane_kill_policies(pane_id)
+            .expect("pane"),
         vec![KillPolicy::GracefulTree {
-            timeout: GRACEFUL_TIMEOUT_DURATION,
+            timeout_duration: GRACEFUL_TIMEOUT_DURATION,
         }]
     );
 }

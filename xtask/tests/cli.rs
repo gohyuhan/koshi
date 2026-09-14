@@ -1,9 +1,9 @@
 //! Tests exact failure output for missing and unknown commands, including a
 //! non-UTF-8 command argument on Unix.
 
-fn run_xtask(args: &[&str]) -> std::process::Output {
+fn run_xtask(command_arguments: &[&str]) -> std::process::Output {
     std::process::Command::new(env!("CARGO_BIN_EXE_xtask"))
-        .args(args)
+        .args(command_arguments)
         .output()
         .expect("the xtask binary runs")
 }

@@ -3,178 +3,292 @@
 use koshi_core::geometry::{Rect, Size, SplitDirection};
 
 use super::*;
-use crate::solver::{solve, solve_with_mode_min, PaneSizing, SolveResult};
+use crate::solver::{solve_layout, solve_layout_with_mode, LayoutSolve, PaneSizing};
 use crate::tree::{LayoutNode, SplitNode};
 
-/// [`solve_with_mode_min`] at the default [`PaneSizing`].
-fn solve_with_mode(tree: &LayoutNode, mode: LayoutMode, tab_rect: Rect) -> SolveResult {
-    solve_with_mode_min(tree, mode, tab_rect, PaneSizing::default())
+/// [`solve_layout_with_mode`] at the default [`PaneSizing`].
+fn solve_layout_in_mode(
+    layout_tree: &LayoutNode,
+    layout_mode: LayoutMode,
+    tab_rect: Rect,
+) -> LayoutSolve {
+    solve_layout_with_mode(layout_tree, layout_mode, tab_rect, PaneSizing::default())
 }
 
-fn leaf(pane: PaneId) -> LayoutNode {
-    LayoutNode::Pane(pane)
+fn build_pane_leaf(pane_id: PaneId) -> LayoutNode {
+    LayoutNode::Pane(pane_id)
 }
 
-fn tab() -> Rect {
-    Rect::at_origin(Size { cols: 80, rows: 24 })
+fn build_test_tab_rect() -> Rect {
+    Rect::from_size_at_origin(Size {
+        column_count: 80,
+        row_count: 24,
+    })
 }
 
-/// Builds a test layout: horizontal split with `a` on the left and two vertically-stacked panes (`b` over `c`) on the right.
-fn nested(a: PaneId, b: PaneId, c: PaneId) -> LayoutNode {
-    let column = LayoutNode::Split(SplitNode::with_equal_weights(
+/// Builds a test layout: a horizontal split with the first pane on the left
+/// and two vertically stacked panes on the right.
+fn build_nested_layout(
+    first_pane_id: PaneId,
+    second_pane_id: PaneId,
+    third_pane_id: PaneId,
+) -> LayoutNode {
+    let vertical_split = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Vertical,
-        vec![leaf(b), leaf(c)],
+        vec![
+            build_pane_leaf(second_pane_id),
+            build_pane_leaf(third_pane_id),
+        ],
     ));
     LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![leaf(a), column],
+        vec![build_pane_leaf(first_pane_id), vertical_split],
     ))
 }
 
 #[test]
 fn fullscreen_promotes_the_focused_pane_and_hides_the_rest() {
-    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
-    let tree = nested(a, b, c);
+    let (first_pane_id, second_pane_id, third_pane_id) =
+        (PaneId::new(), PaneId::new(), PaneId::new());
+    let layout_tree = build_nested_layout(first_pane_id, second_pane_id, third_pane_id);
 
-    let result = solve_with_mode(&tree, LayoutMode::Fullscreen { focused: b }, tab());
+    let layout_result = solve_layout_in_mode(
+        &layout_tree,
+        LayoutMode::Fullscreen {
+            focused_pane_id: second_pane_id,
+        },
+        build_test_tab_rect(),
+    );
     assert_eq!(
-        result.panes,
-        [(a, Rect::zero()), (b, tab()), (c, Rect::zero())]
+        layout_result.pane_rects,
+        [
+            (first_pane_id, Rect::empty_at_origin()),
+            (second_pane_id, build_test_tab_rect()),
+            (third_pane_id, Rect::empty_at_origin()),
+        ]
     );
     // Hidden panes are not suppressed; they can be toggled back. An overlay
     // should not be drawn over a pane that fits on screen.
-    assert!(result.suppressed.is_empty());
-    assert!(!result.all_suppressed);
+    assert!(layout_result.suppressed_pane_ids.is_empty());
+    assert!(!layout_result.is_all_panes_suppressed);
 }
 
 #[test]
 fn leaving_fullscreen_restores_the_exact_prior_layout() {
-    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
-    let tree = nested(a, b, c);
-    let before = solve_with_mode(&tree, LayoutMode::Tiled, tab());
+    let (first_pane_id, second_pane_id, third_pane_id) =
+        (PaneId::new(), PaneId::new(), PaneId::new());
+    let layout_tree = build_nested_layout(first_pane_id, second_pane_id, third_pane_id);
+    let tiled_layout_before_fullscreen =
+        solve_layout_in_mode(&layout_tree, LayoutMode::Tiled, build_test_tab_rect());
 
     // Entering and leaving fullscreen does not modify the tree. The tiled
     // solve after toggling fullscreen must match the original solve.
-    let snapshot = tree.clone();
-    let _ = solve_with_mode(&tree, LayoutMode::Fullscreen { focused: c }, tab());
-    assert_eq!(tree, snapshot);
-    assert_eq!(solve_with_mode(&tree, LayoutMode::Tiled, tab()), before);
+    let original_layout_tree = layout_tree.clone();
+    let _ = solve_layout_in_mode(
+        &layout_tree,
+        LayoutMode::Fullscreen {
+            focused_pane_id: third_pane_id,
+        },
+        build_test_tab_rect(),
+    );
+    assert_eq!(layout_tree, original_layout_tree);
+    assert_eq!(
+        solve_layout_in_mode(&layout_tree, LayoutMode::Tiled, build_test_tab_rect()),
+        tiled_layout_before_fullscreen
+    );
 }
 
 #[test]
 fn tiled_mode_matches_the_plain_solve() {
-    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
-    let tree = nested(a, b, c);
+    let (first_pane_id, second_pane_id, third_pane_id) =
+        (PaneId::new(), PaneId::new(), PaneId::new());
+    let layout_tree = build_nested_layout(first_pane_id, second_pane_id, third_pane_id);
     assert_eq!(
-        solve_with_mode(&tree, LayoutMode::Tiled, tab()),
-        solve(&tree, tab())
+        solve_layout_in_mode(&layout_tree, LayoutMode::Tiled, build_test_tab_rect()),
+        solve_layout(&layout_tree, build_test_tab_rect())
     );
 }
 
 #[test]
 fn fullscreen_of_the_only_pane_matches_the_tiled_solve() {
-    let a = PaneId::new();
-    let tree = LayoutNode::Pane(a);
+    let pane_id = PaneId::new();
+    let layout_tree = LayoutNode::Pane(pane_id);
 
-    let result = solve_with_mode(&tree, LayoutMode::Fullscreen { focused: a }, tab());
-    assert_eq!(result, solve(&tree, tab()));
-    assert_eq!(result.panes, [(a, tab())]);
+    let layout_result = solve_layout_in_mode(
+        &layout_tree,
+        LayoutMode::Fullscreen {
+            focused_pane_id: pane_id,
+        },
+        build_test_tab_rect(),
+    );
+    assert_eq!(
+        layout_result,
+        solve_layout(&layout_tree, build_test_tab_rect())
+    );
+    assert_eq!(layout_result.pane_rects, [(pane_id, build_test_tab_rect())]);
 }
 
 #[test]
 fn layout_mode_serializes_as_an_externally_tagged_enum() {
-    let focused = PaneId::new();
-    let focused_json = serde_json::to_value(focused).unwrap();
+    let focused_pane_id = PaneId::new();
+    let focused_pane_id_json = serde_json::to_value(focused_pane_id).unwrap();
 
     assert_eq!(
         serde_json::to_value(LayoutMode::Tiled).unwrap(),
         serde_json::json!("Tiled")
     );
     assert_eq!(
-        serde_json::to_value(LayoutMode::Fullscreen { focused }).unwrap(),
-        serde_json::json!({ "Fullscreen": { "focused": focused_json } })
+        serde_json::to_value(LayoutMode::Fullscreen { focused_pane_id }).unwrap(),
+        serde_json::json!({ "Fullscreen": { "focused": focused_pane_id_json } })
     );
 }
 
 #[test]
 fn layout_mode_round_trips_through_serde() {
-    let focused = PaneId::new();
-    for mode in [LayoutMode::Tiled, LayoutMode::Fullscreen { focused }] {
-        let json = serde_json::to_string(&mode).unwrap();
-        assert_eq!(serde_json::from_str::<LayoutMode>(&json).unwrap(), mode);
+    let focused_pane_id = PaneId::new();
+    for mode in [
+        LayoutMode::Tiled,
+        LayoutMode::Fullscreen { focused_pane_id },
+    ] {
+        let serialized_layout_mode_json = serde_json::to_string(&mode).unwrap();
+        assert_eq!(
+            serde_json::from_str::<LayoutMode>(&serialized_layout_mode_json).unwrap(),
+            mode
+        );
     }
 }
 
 #[test]
 fn stale_fullscreen_focus_falls_back_to_tiled() {
-    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
-    let tree = nested(a, b, c);
+    let (first_pane_id, second_pane_id, third_pane_id) =
+        (PaneId::new(), PaneId::new(), PaneId::new());
+    let layout_tree = build_nested_layout(first_pane_id, second_pane_id, third_pane_id);
 
-    let gone = PaneId::new();
-    let result = solve_with_mode(&tree, LayoutMode::Fullscreen { focused: gone }, tab());
-    assert_eq!(result, solve(&tree, tab()));
+    let missing_pane_id = PaneId::new();
+    let layout_result = solve_layout_in_mode(
+        &layout_tree,
+        LayoutMode::Fullscreen {
+            focused_pane_id: missing_pane_id,
+        },
+        build_test_tab_rect(),
+    );
+    assert_eq!(
+        layout_result,
+        solve_layout(&layout_tree, build_test_tab_rect())
+    );
 }
 
 #[test]
 fn fullscreen_promotes_a_collapsed_stack_member_without_touching_the_stack() {
-    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
-    let stack = LayoutNode::Split(SplitNode::stack(vec![b, c], 0));
-    let tree = LayoutNode::Split(SplitNode::with_equal_weights(
-        SplitDirection::Horizontal,
-        vec![leaf(a), stack],
+    let (first_pane_id, second_pane_id, third_pane_id) =
+        (PaneId::new(), PaneId::new(), PaneId::new());
+    let stack = LayoutNode::Split(SplitNode::from_stacked_pane_ids(
+        vec![second_pane_id, third_pane_id],
+        0,
     ));
-    let snapshot = tree.clone();
+    let layout_tree = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![build_pane_leaf(first_pane_id), stack],
+    ));
+    let original_layout_tree = layout_tree.clone();
 
-    // Fullscreen promotes a collapsed stack member (`c`) to fill the entire
+    // Fullscreen promotes the collapsed third pane to fill the entire
     // tab, while the stack and all siblings are hidden.
-    let result = solve_with_mode(&tree, LayoutMode::Fullscreen { focused: c }, tab());
-    assert_eq!(
-        result.panes,
-        [(a, Rect::zero()), (b, Rect::zero()), (c, tab())]
+    let layout_result = solve_layout_in_mode(
+        &layout_tree,
+        LayoutMode::Fullscreen {
+            focused_pane_id: third_pane_id,
+        },
+        build_test_tab_rect(),
     );
-    assert!(result.stack_headers.is_empty());
-    assert!(result.suppressed.is_empty());
+    assert_eq!(
+        layout_result.pane_rects,
+        [
+            (first_pane_id, Rect::empty_at_origin()),
+            (second_pane_id, Rect::empty_at_origin()),
+            (third_pane_id, build_test_tab_rect()),
+        ]
+    );
+    assert!(layout_result.stack_headers.is_empty());
+    assert!(layout_result.suppressed_pane_ids.is_empty());
 
     // Entering fullscreen does not modify the stack structure, so exiting
     // fullscreen restores all prior collapse state.
-    assert_eq!(tree, snapshot);
-    let restored = solve_with_mode(&tree, LayoutMode::Tiled, tab());
-    let LayoutNode::Split(outer) = &tree else {
+    assert_eq!(layout_tree, original_layout_tree);
+    let tiled_layout_after_fullscreen =
+        solve_layout_in_mode(&layout_tree, LayoutMode::Tiled, build_test_tab_rect());
+    let LayoutNode::Split(root_split_node) = &layout_tree else {
         panic!("root must stay a split");
     };
-    let LayoutNode::Split(stack) = &outer.children[1] else {
+    let LayoutNode::Split(stack) = &root_split_node.children[1] else {
         panic!("stack must survive");
     };
-    assert_eq!(stack.active, 0);
-    assert_eq!(restored, solve(&tree, tab()));
-    assert_eq!(restored.stack_headers.len(), 1);
-    assert_eq!(restored.stack_headers[0].pane, c);
+    assert_eq!(stack.active_child_index, 0);
+    assert_eq!(
+        tiled_layout_after_fullscreen,
+        solve_layout(&layout_tree, build_test_tab_rect())
+    );
+    assert_eq!(tiled_layout_after_fullscreen.stack_headers.len(), 1);
+    assert_eq!(
+        tiled_layout_after_fullscreen.stack_headers[0].pane_id,
+        third_pane_id
+    );
 }
 
 #[test]
 fn fullscreen_of_the_active_stack_member_round_trips_identically() {
-    let (a, b) = (PaneId::new(), PaneId::new());
-    let tree = LayoutNode::Split(SplitNode::stack(vec![a, b], 1));
-    let before = solve(&tree, tab());
+    let (first_pane_id, second_pane_id) = (PaneId::new(), PaneId::new());
+    let layout_tree = LayoutNode::Split(SplitNode::from_stacked_pane_ids(
+        vec![first_pane_id, second_pane_id],
+        1,
+    ));
+    let original_layout_solution = solve_layout(&layout_tree, build_test_tab_rect());
 
-    let zoomed = solve_with_mode(&tree, LayoutMode::Fullscreen { focused: b }, tab());
-    assert_eq!(zoomed.panes, [(a, Rect::zero()), (b, tab())]);
+    let fullscreen_layout_solution = solve_layout_in_mode(
+        &layout_tree,
+        LayoutMode::Fullscreen {
+            focused_pane_id: second_pane_id,
+        },
+        build_test_tab_rect(),
+    );
+    assert_eq!(
+        fullscreen_layout_solution.pane_rects,
+        [
+            (first_pane_id, Rect::empty_at_origin()),
+            (second_pane_id, build_test_tab_rect())
+        ]
+    );
 
-    assert_eq!(solve_with_mode(&tree, LayoutMode::Tiled, tab()), before);
+    assert_eq!(
+        solve_layout_in_mode(&layout_tree, LayoutMode::Tiled, build_test_tab_rect()),
+        original_layout_solution
+    );
 }
 
 #[test]
 fn fullscreen_in_a_too_small_tab_suppresses_and_flags_the_overlay() {
-    let (a, b) = (PaneId::new(), PaneId::new());
-    let tree = LayoutNode::Split(SplitNode::with_equal_weights(
+    let (first_pane_id, second_pane_id) = (PaneId::new(), PaneId::new());
+    let layout_tree = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![leaf(a), leaf(b)],
+        vec![
+            build_pane_leaf(first_pane_id),
+            build_pane_leaf(second_pane_id),
+        ],
     ));
-    let tiny = Rect::at_origin(Size { cols: 1, rows: 1 });
+    let undersized_tab_rect = Rect::from_size_at_origin(Size {
+        column_count: 1,
+        row_count: 1,
+    });
 
-    let result = solve_with_mode(&tree, LayoutMode::Fullscreen { focused: a }, tiny);
-    assert_eq!(result.suppressed, [a]);
-    assert!(result.all_suppressed);
+    let layout_result = solve_layout_in_mode(
+        &layout_tree,
+        LayoutMode::Fullscreen {
+            focused_pane_id: first_pane_id,
+        },
+        undersized_tab_rect,
+    );
+    assert_eq!(layout_result.suppressed_pane_ids, [first_pane_id]);
+    assert!(layout_result.is_all_panes_suppressed);
 }
 
 #[test]
@@ -183,21 +297,56 @@ fn fullscreen_suppresses_a_tab_that_fits_content_but_not_the_border() {
     // side. In a 3x2 tab, content fits but a border (4x3 total) does not.
     // Fullscreen suppresses the pane to avoid drawing borders that overflow.
     // At exactly (4,3), the border fits, so the pane shows with 1-cell inset.
-    let (a, b) = (PaneId::new(), PaneId::new());
-    let tree = LayoutNode::Split(SplitNode::with_equal_weights(
+    let (first_pane_id, second_pane_id) = (PaneId::new(), PaneId::new());
+    let layout_tree = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![leaf(a), leaf(b)],
+        vec![
+            build_pane_leaf(first_pane_id),
+            build_pane_leaf(second_pane_id),
+        ],
     ));
 
-    let cramped = Rect::at_origin(Size { cols: 3, rows: 2 });
-    let suppressed = solve_with_mode(&tree, LayoutMode::Fullscreen { focused: a }, cramped);
-    assert_eq!(suppressed.suppressed, [a]);
-    assert!(suppressed.all_suppressed);
+    let undersized_tab_rect = Rect::from_size_at_origin(Size {
+        column_count: 3,
+        row_count: 2,
+    });
+    let suppressed_layout = solve_layout_in_mode(
+        &layout_tree,
+        LayoutMode::Fullscreen {
+            focused_pane_id: first_pane_id,
+        },
+        undersized_tab_rect,
+    );
+    assert_eq!(suppressed_layout.suppressed_pane_ids, [first_pane_id]);
+    assert!(suppressed_layout.is_all_panes_suppressed);
 
-    let snug = Rect::at_origin(Size { cols: 4, rows: 3 });
-    let shown = solve_with_mode(&tree, LayoutMode::Fullscreen { focused: a }, snug);
-    assert!(shown.suppressed.is_empty());
-    assert!(!shown.all_suppressed);
-    assert_eq!(shown.panes, [(a, snug), (b, Rect::zero())]);
-    assert_eq!(snug.inner_with_border().size, Size { cols: 2, rows: 1 });
+    let border_fitting_tab_rect = Rect::from_size_at_origin(Size {
+        column_count: 4,
+        row_count: 3,
+    });
+    let visible_layout = solve_layout_in_mode(
+        &layout_tree,
+        LayoutMode::Fullscreen {
+            focused_pane_id: first_pane_id,
+        },
+        border_fitting_tab_rect,
+    );
+    assert!(visible_layout.suppressed_pane_ids.is_empty());
+    assert!(!visible_layout.is_all_panes_suppressed);
+    assert_eq!(
+        visible_layout.pane_rects,
+        [
+            (first_pane_id, border_fitting_tab_rect),
+            (second_pane_id, Rect::empty_at_origin())
+        ]
+    );
+    assert_eq!(
+        border_fitting_tab_rect
+            .compute_inner_with_border()
+            .cell_size,
+        Size {
+            column_count: 2,
+            row_count: 1,
+        }
+    );
 }

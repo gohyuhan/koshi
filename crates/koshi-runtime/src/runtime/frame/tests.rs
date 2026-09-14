@@ -12,8 +12,8 @@ use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::MouseTracking;
 use koshi_ipc::event::SessionEvent;
-use koshi_ipc::frame::{FrameImageChunk, FrameRun, MAX_FRAME_IMAGE_CHUNK_BYTES};
-use koshi_ipc::transport::MAX_FRAME_LEN;
+use koshi_ipc::frame::{FrameImageChunk, FrameRun, MAX_FRAME_IMAGE_CHUNK_BYTE_COUNT};
+use koshi_ipc::transport::MAX_FRAME_BYTE_COUNT;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::solver::StackHeader;
 use koshi_pane::pane::state::PaneKind;
@@ -31,78 +31,80 @@ use super::*;
 
 /// The style the one written cell carries: every field set away from its
 /// default.
-fn style() -> Style {
-    let mut style = Style::default();
-    style.set_fg(Color::Indexed(4));
-    style.set_bg(Color::Rgb(10, 20, 30));
-    style.set_underline_color(Some(Color::Indexed(9)));
-    style.set_bold(true);
-    style.set_italic(true);
-    style.set_reverse(true);
-    style.set_faint(true);
-    style.set_blink(true);
-    style.set_conceal(true);
-    style.set_strike(true);
-    style.set_overline(true);
-    style.set_underline(UnderlineStyle::Curly);
-    style
+fn build_test_style() -> Style {
+    let mut test_style = Style::default();
+    test_style.set_foreground_color(Color::Indexed(4));
+    test_style.set_background_color(Color::Rgb(10, 20, 30));
+    test_style.set_underline_color(Some(Color::Indexed(9)));
+    test_style.set_bold(true);
+    test_style.set_italic(true);
+    test_style.set_reverse(true);
+    test_style.set_faint(true);
+    test_style.set_blink(true);
+    test_style.set_conceal(true);
+    test_style.set_strike(true);
+    test_style.set_overline(true);
+    test_style.set_underline(UnderlineStyle::Curly);
+    test_style
 }
 
 /// A 1×3 grid: a styled `e` carrying a combining acute accent (U+0301), then
 /// two blank cells in the default style.
-fn grid() -> Grid {
-    let mut grid = Grid::blank(1, 3, Style::default());
-    let cell = grid.cell_mut(0, 0).expect("the grid has a cell at (0, 0)");
-    *cell = Cell::new('e', 1, style());
-    cell.push_combining('\u{301}');
-    grid
+fn build_test_grid() -> Grid {
+    let mut test_grid = Grid::blank(1, 3, Style::default());
+    let written_cell = test_grid
+        .get_cell_mut(0, 0)
+        .expect("the grid has a cell at (0, 0)");
+    *written_cell = Cell::from_character('e', 1, build_test_style());
+    written_cell.push_combining('\u{301}');
+    test_grid
 }
 
 /// The cell [`grid`] writes at (0, 0), as it travels.
-fn wire_written_cell() -> FrameCell {
+fn build_written_frame_cell() -> FrameCell {
     FrameCell {
-        ch: 'e',
-        combining: vec!['\u{301}'],
-        width: 1,
+        character: 'e',
+        combining_characters: vec!['\u{301}'],
+        cell_width: 1,
         style: FrameStyle {
-            fg: FrameColor::Indexed(4),
-            bg: FrameColor::Rgb(10, 20, 30),
+            foreground_color: FrameColor::Indexed(4),
+            background_color: FrameColor::Rgb(10, 20, 30),
             underline_color: Some(FrameColor::Indexed(9)),
-            attrs: FrameAttrs {
-                bold: true,
-                italic: true,
-                reverse: true,
-                faint: true,
-                blink: true,
-                conceal: true,
-                strike: true,
-                overline: true,
-                underline: FrameUnderline::Curly,
+            text_attributes: FrameAttrs {
+                is_bold: true,
+                is_italic: true,
+                is_reverse: true,
+                is_faint: true,
+                is_blinking: true,
+                is_concealed: true,
+                is_struck_through: true,
+                is_overlined: true,
+                underline_style: FrameUnderline::Curly,
             },
         },
     }
 }
 
 /// The two blank cells [`grid`] leaves at (0, 1) and (0, 2), as they travel.
-fn wire_blank_cell() -> FrameCell {
+fn build_blank_frame_cell() -> FrameCell {
     FrameCell {
-        ch: ' ',
-        combining: Vec::new(),
-        width: 1,
+        character: ' ',
+        combining_characters: Vec::new(),
+        cell_width: 1,
         style: FrameStyle {
-            fg: FrameColor::Default,
-            bg: FrameColor::Default,
+            foreground_color: FrameColor::Default,
+            background_color: FrameColor::Default,
             underline_color: None,
-            attrs: FrameAttrs {
-                bold: false,
-                italic: false,
-                reverse: false,
-                faint: false,
-                blink: false,
-                conceal: false,
-                strike: false,
-                overline: false,
-                underline: FrameUnderline::None,
+            text_attributes: FrameAttrs {
+                is_bold: false,
+                is_italic: false,
+                is_reverse: false,
+                is_faint: false,
+                is_blinking: false,
+                is_concealed: false,
+                is_struck_through: false,
+                is_overlined: false,
+                underline_style: FrameUnderline::None,
             },
         },
     }
@@ -110,42 +112,42 @@ fn wire_blank_cell() -> FrameCell {
 
 /// One 2×1 Kitty placement with pixels that make byte and field mistakes easy
 /// to see in the wire assertions.
-fn image_placement() -> ImagePlacementSnapshot {
-    ImagePlacementSnapshot::new(
+fn build_image_placement_snapshot() -> ImagePlacementSnapshot {
+    ImagePlacementSnapshot::from_image_record(
         41,
         Arc::new(ImageRecord {
             protocol: GraphicsProtocol::Kitty,
             image: (DecodedImage {
-                width: 2,
-                height: 1,
-                rgba: vec![255, 0, 0, 255, 0, 255, 0, 255],
+                pixel_width: 2,
+                pixel_height: 1,
+                rgba_bytes: vec![255, 0, 0, 255, 0, 255, 0, 255],
             })
             .into(),
             animation: None,
             action: ImageAction::TransmitAndDisplay,
             display: ImageDisplay {
-                quiet: 0,
-                width: Some(ImageDimension::Cells(3)),
-                height: Some(ImageDimension::Pixels(1)),
-                preserve_aspect_ratio: false,
+                response_suppression_level: 0,
+                requested_width: Some(ImageDimension::Cells(3)),
+                requested_height: Some(ImageDimension::Pixels(1)),
+                is_aspect_ratio_preserved: false,
                 sixel_background: Some(SixelBackground::Preserve),
                 image_id: Some(7),
                 image_number: Some(8),
                 placement_id: Some(9),
                 usage_hints: 0x12,
-                unicode_placeholder: true,
-                cell_columns: Some(2),
-                cell_rows: Some(1),
+                is_unicode_placeholder: true,
+                requested_column_count: Some(2),
+                requested_row_count: Some(1),
                 z_index: -2,
-                source_offset_x: Some(1),
-                source_offset_y: Some(0),
-                cell_offset_x: Some(6),
-                cell_offset_y: Some(7),
+                source_pixel_offset_x: Some(1),
+                source_pixel_offset_y: Some(0),
+                cell_pixel_offset_x: Some(6),
+                cell_pixel_offset_y: Some(7),
                 relative_image_id: None,
                 relative_placement_id: None,
-                relative_offset_x: 0,
-                relative_offset_y: 0,
-                move_cursor: false,
+                relative_column_offset: 0,
+                relative_row_offset: 0,
+                should_move_cursor: false,
             },
             anchor: (0, 2),
         }),
@@ -158,164 +160,187 @@ fn image_placement() -> ImagePlacementSnapshot {
 
 /// One pane holding [`grid`], scrolled 7 lines back, reporting any-motion mouse
 /// tracking and a truncated scrollback of 500 retained lines.
-fn pane(id: PaneId) -> PaneSnapshot {
+fn build_pane_snapshot(pane_id: PaneId) -> PaneSnapshot {
     PaneSnapshot {
-        id,
-        title: Some(String::from("~/work")),
-        cursor: CursorSnapshot {
-            row: 0,
-            col: 2,
-            visible: true,
-            blink: true,
+        pane_id,
+        pane_title: Some(String::from("~/work")),
+        cursor_snapshot: CursorSnapshot {
+            row_index: 0,
+            column_index: 2,
+            is_visible: true,
+            is_blinking: true,
             shape: Some(CursorShape::Bar),
         },
-        grid_view: Some(GridView {
-            grid: Arc::new(grid()),
-            view_offset: 7,
+        terminal_grid_view: Some(GridView {
+            grid: Arc::new(build_test_grid()),
+            view_row_offset: 7,
         }),
-        image_placements: vec![image_placement()],
-        reverse_video: true,
+        image_placement_snapshots: vec![build_image_placement_snapshot()],
+        is_reverse_video: true,
         mouse_tracking: MouseTracking::AnyMotion,
-        alt_scroll: true,
-        on_alt_screen: false,
-        view_top_row: 493,
-        selection: Some(SelectionSpans {
-            rows: vec![(0, 1, 2)],
+        is_alternate_scroll_enabled: true,
+        is_on_alternate_screen: false,
+        view_top_row_index: 493,
+        selection_spans: Some(SelectionSpans {
+            row_spans: vec![(0, 1, 2)],
         }),
         has_selection: true,
-        scrollback: ScrollbackMeta {
-            truncated: true,
-            retained_lines: 500,
+        scrollback_meta: ScrollbackMeta {
+            is_truncated: true,
+            retained_line_count: 500,
         },
     }
 }
 
 /// A pane with no terminal content: no window, a hidden cursor, nothing
 /// highlighted.
-fn empty_pane(id: PaneId) -> PaneSnapshot {
+fn build_empty_pane_snapshot(pane_id: PaneId) -> PaneSnapshot {
     PaneSnapshot {
-        id,
-        title: None,
-        cursor: CursorSnapshot {
-            row: 0,
-            col: 0,
-            visible: false,
-            blink: false,
+        pane_id,
+        pane_title: None,
+        cursor_snapshot: CursorSnapshot {
+            row_index: 0,
+            column_index: 0,
+            is_visible: false,
+            is_blinking: false,
             shape: None,
         },
-        grid_view: None,
-        image_placements: Vec::new(),
-        reverse_video: false,
+        terminal_grid_view: None,
+        image_placement_snapshots: Vec::new(),
+        is_reverse_video: false,
         mouse_tracking: MouseTracking::Off,
-        alt_scroll: false,
-        on_alt_screen: false,
-        view_top_row: 0,
-        selection: None,
+        is_alternate_scroll_enabled: false,
+        is_on_alternate_screen: false,
+        view_top_row_index: 0,
+        selection_spans: None,
         has_selection: false,
-        scrollback: ScrollbackMeta {
-            truncated: false,
-            retained_lines: 0,
+        scrollback_meta: ScrollbackMeta {
+            is_truncated: false,
+            retained_line_count: 0,
         },
     }
 }
 
 /// A frame with one tab, two slots, and the two panes above.
-fn snapshot(content: PaneId, empty: PaneId) -> RenderSnapshot {
-    let tab = TabId::new();
-    let other_tab = TabId::new();
-    let client = ClientId::new();
+fn build_render_snapshot(content_pane_id: PaneId, empty_pane_id: PaneId) -> RenderSnapshot {
+    let tab_id = TabId::new();
+    let other_tab_id = TabId::new();
+    let client_id = ClientId::new();
     RenderSnapshot {
-        session: SessionSnapshot {
-            id: SessionId::new(),
-            name: String::from("session"),
-            active_tab: TabSnapshot {
-                id: tab,
-                name: String::from("tab"),
-                layout_solved: vec![
+        session_snapshot: SessionSnapshot {
+            session_id: SessionId::new(),
+            session_name: String::from("session"),
+            active_tab_snapshot: TabSnapshot {
+                tab_id,
+                tab_name: String::from("tab"),
+                pane_slots: vec![
                     PaneSlot {
-                        pane_id: content,
-                        rect: Rect {
-                            origin: Point { x: 0, y: 0 },
-                            size: Size { cols: 5, rows: 3 },
+                        pane_id: content_pane_id,
+                        outer_rect: Rect {
+                            origin: Point { column: 0, row: 0 },
+                            cell_size: Size {
+                                column_count: 5,
+                                row_count: 3,
+                            },
                         },
-                        inner_rect: Some(Rect {
-                            origin: Point { x: 1, y: 1 },
-                            size: Size { cols: 3, rows: 1 },
+                        content_rect: Some(Rect {
+                            origin: Point { column: 1, row: 1 },
+                            cell_size: Size {
+                                column_count: 3,
+                                row_count: 1,
+                            },
                         }),
-                        kind: PaneKind::Terminal,
-                        visible: true,
-                        suppressed: false,
-                        dead: false,
+                        pane_kind: PaneKind::Terminal,
+                        is_visible: true,
+                        is_suppressed: false,
+                        is_dead: false,
                     },
                     PaneSlot {
-                        pane_id: empty,
-                        rect: Rect {
-                            origin: Point { x: 5, y: 0 },
-                            size: Size { cols: 5, rows: 3 },
+                        pane_id: empty_pane_id,
+                        outer_rect: Rect {
+                            origin: Point { column: 5, row: 0 },
+                            cell_size: Size {
+                                column_count: 5,
+                                row_count: 3,
+                            },
                         },
-                        inner_rect: None,
-                        kind: PaneKind::Terminal,
-                        visible: false,
-                        suppressed: true,
-                        dead: true,
+                        content_rect: None,
+                        pane_kind: PaneKind::Terminal,
+                        is_visible: false,
+                        is_suppressed: true,
+                        is_dead: true,
                     },
                 ],
-                effective_size: Size { cols: 10, rows: 3 },
+                effective_cell_size: Size {
+                    column_count: 10,
+                    row_count: 3,
+                },
                 stack_headers: Vec::new(),
-                layout_mode: LayoutMode::Fullscreen { focused: content },
-                all_suppressed: false,
-                gap: 0,
+                layout_mode: LayoutMode::Fullscreen {
+                    focused_pane_id: content_pane_id,
+                },
+                are_all_panes_suppressed: false,
+                gap_cell_count: 0,
             },
             tabs_metadata: vec![
                 TabMeta {
-                    id: tab,
-                    name: String::from("tab"),
-                    index: 0,
-                    active: true,
+                    tab_id,
+                    tab_name: String::from("tab"),
+                    tab_index: 0,
+                    is_active: true,
                 },
                 TabMeta {
-                    id: other_tab,
-                    name: String::from("other"),
-                    index: 1,
-                    active: false,
+                    tab_id: other_tab_id,
+                    tab_name: String::from("other"),
+                    tab_index: 1,
+                    is_active: false,
                 },
             ],
         },
-        panes: vec![pane(content), empty_pane(empty)],
-        client: ClientSnapshot {
-            id: client,
-            viewport: Size { cols: 20, rows: 6 },
-            active_tab: tab,
-            focused_pane: Some(content),
+        pane_snapshots: vec![
+            build_pane_snapshot(content_pane_id),
+            build_empty_pane_snapshot(empty_pane_id),
+        ],
+        client_snapshot: ClientSnapshot {
+            client_id,
+            viewport_size: Size {
+                column_count: 20,
+                row_count: 6,
+            },
+            active_tab_id: tab_id,
+            focused_pane_id: Some(content_pane_id),
             lock_mode: LockMode::Locked,
-            mouse_select: true,
+            is_mouse_selection_enabled: true,
         },
-        plugin_ui: PluginUiSnapshot::default(),
+        plugin_ui_snapshot: PluginUiSnapshot::default(),
     }
 }
 
 #[test]
 fn a_cell_travels_with_its_character_marks_width_and_every_style_field() {
-    let content = PaneId::new();
-    let frame = wire_frame(&snapshot(content, PaneId::new()));
+    let source_pane_id = PaneId::new();
+    let painted_frame = wire_frame(&build_render_snapshot(source_pane_id, PaneId::new()));
 
-    let window = frame.panes[0]
-        .window
+    let terminal_window = painted_frame.pane_snapshots[0]
+        .terminal_window
         .as_ref()
         .expect("the pane carries a grid");
-    assert_eq!(window.rows[0].cells()[0], wire_written_cell());
+    assert_eq!(
+        terminal_window.row_snapshots[0].expand_cells()[0],
+        build_written_frame_cell()
+    );
 }
 
 #[test]
 fn an_oversized_image_frame_splits_into_bounded_wire_events() {
-    let content = PaneId::new();
-    let mut source = snapshot(content, PaneId::new());
-    let record = Arc::new(ImageRecord {
+    let source_pane_id = PaneId::new();
+    let mut render_snapshot = build_render_snapshot(source_pane_id, PaneId::new());
+    let image_record = Arc::new(ImageRecord {
         protocol: GraphicsProtocol::Kitty,
         image: (DecodedImage {
-            width: 4_096,
-            height: 1_024,
-            rgba: vec![0x7f; 16 * 1024 * 1024],
+            pixel_width: 4_096,
+            pixel_height: 1_024,
+            rgba_bytes: vec![0x7f; 16 * 1024 * 1024],
         })
         .into(),
         animation: None,
@@ -323,77 +348,83 @@ fn an_oversized_image_frame_splits_into_bounded_wire_events() {
         display: ImageDisplay::default(),
         anchor: (0, 0),
     });
-    source.panes[0].image_placements[0] =
-        ImagePlacementSnapshot::new(41, Arc::clone(&record), (0, 0), 2, 1)
+    render_snapshot.pane_snapshots[0].image_placement_snapshots[0] =
+        ImagePlacementSnapshot::from_image_record(41, Arc::clone(&image_record), (0, 0), 2, 1)
             .expect("test image placement is valid");
-    let frame = wire_frame(&source);
+    let painted_frame = wire_frame(&render_snapshot);
 
-    let painted = SessionEvent::Painted {
-        frame: Box::new(frame.clone()),
+    let painted_event = SessionEvent::Painted {
+        frame: Box::new(painted_frame.clone()),
     };
     assert!(
-        serde_json::to_vec(&painted)
+        serde_json::to_vec(&painted_event)
             .expect("the placement frame encodes")
             .len()
-            <= MAX_FRAME_LEN as usize
+            <= MAX_FRAME_BYTE_COUNT as usize
     );
 
-    let transfer = wire_image_transfer(1, &record);
-    assert_eq!(transfer.id, 1);
-    assert_eq!(transfer.byte_len, 16 * 1024 * 1024);
+    let image_transfer = wire_image_transfer(1, &image_record);
+    assert_eq!(image_transfer.image_content_id, 1);
+    assert_eq!(image_transfer.image_byte_count, 16 * 1024 * 1024);
     assert!(
-        serde_json::to_vec(&SessionEvent::ImageContentStart { image: transfer })
+        serde_json::to_vec(&SessionEvent::ImageContentStart { image_transfer })
             .expect("the image start encodes")
             .len()
-            <= MAX_FRAME_LEN as usize
+            <= MAX_FRAME_BYTE_COUNT as usize
     );
 
-    let chunks: Vec<(u64, bool, usize)> = wire_image_chunk_sources(&record)
-        .map(|(offset, last, bytes)| (offset, last, bytes.len()))
+    let image_chunks: Vec<(u64, bool, usize)> = wire_image_chunk_sources(&image_record)
+        .map(|(byte_offset, is_last, chunk_bytes)| (byte_offset, is_last, chunk_bytes.len()))
         .collect();
-    assert_eq!(chunks.len(), 16);
-    assert_eq!(chunks[0], (0, false, MAX_FRAME_IMAGE_CHUNK_BYTES));
+    assert_eq!(image_chunks.len(), 16);
     assert_eq!(
-        chunks[15],
-        (15 * 1024 * 1024, true, MAX_FRAME_IMAGE_CHUNK_BYTES)
+        image_chunks[0],
+        (0, false, MAX_FRAME_IMAGE_CHUNK_BYTE_COUNT)
     );
-    for (offset, last, length) in chunks {
-        let event = SessionEvent::ImageContentChunk {
-            chunk: FrameImageChunk {
-                transfer_id: 1,
-                offset,
-                last,
-                bytes: vec![0; length],
+    assert_eq!(
+        image_chunks[15],
+        (15 * 1024 * 1024, true, MAX_FRAME_IMAGE_CHUNK_BYTE_COUNT)
+    );
+    for (byte_offset, is_last, chunk_byte_count) in image_chunks {
+        let image_chunk_event = SessionEvent::ImageContentChunk {
+            image_chunk: FrameImageChunk {
+                image_transfer_id: 1,
+                byte_offset,
+                is_last,
+                chunk_bytes: vec![0; chunk_byte_count],
             },
         };
         assert!(
-            serde_json::to_vec(&event).expect("the chunk encodes").len() <= MAX_FRAME_LEN as usize
+            serde_json::to_vec(&image_chunk_event)
+                .expect("the chunk encodes")
+                .len()
+                <= MAX_FRAME_BYTE_COUNT as usize
         );
     }
 }
 
 #[test]
 fn equal_neighbouring_cells_fold_into_one_run() {
-    let content = PaneId::new();
-    let frame = wire_frame(&snapshot(content, PaneId::new()));
+    let source_pane_id = PaneId::new();
+    let painted_frame = wire_frame(&build_render_snapshot(source_pane_id, PaneId::new()));
 
     // "e" then two default blanks: one run of 1, then one run of 2.
-    let window = frame.panes[0]
-        .window
+    let terminal_window = painted_frame.pane_snapshots[0]
+        .terminal_window
         .as_ref()
         .expect("the pane carries a grid");
-    assert_eq!(window.cols, 3);
-    assert_eq!(window.rows.len(), 1);
+    assert_eq!(terminal_window.column_count, 3);
+    assert_eq!(terminal_window.row_snapshots.len(), 1);
     assert_eq!(
-        window.rows[0].runs,
+        terminal_window.row_snapshots[0].cell_runs,
         vec![
             FrameRun {
-                count: 1,
-                cell: wire_written_cell(),
+                repeat_count: 1,
+                cell: build_written_frame_cell(),
             },
             FrameRun {
-                count: 2,
-                cell: wire_blank_cell(),
+                repeat_count: 2,
+                cell: build_blank_frame_cell(),
             },
         ]
     );
@@ -401,15 +432,19 @@ fn equal_neighbouring_cells_fold_into_one_run() {
 
 #[test]
 fn a_wire_row_is_as_wide_as_the_grid() {
-    let grid = grid();
-    let (_, cols) = grid.dimensions();
+    let test_grid = build_test_grid();
+    let (_, column_count) = test_grid.get_grid_dimensions();
 
-    let cells = wire_row(&grid, 0, cols).cells();
+    let expanded_cells = wire_row(&test_grid, 0, column_count).expand_cells();
 
-    assert_eq!(cells.len(), cols as usize);
+    assert_eq!(expanded_cells.len(), column_count as usize);
     assert_eq!(
-        cells,
-        vec![wire_written_cell(), wire_blank_cell(), wire_blank_cell()]
+        expanded_cells,
+        vec![
+            build_written_frame_cell(),
+            build_blank_frame_cell(),
+            build_blank_frame_cell()
+        ]
     );
 }
 
@@ -420,57 +455,67 @@ fn a_wire_row_carries_how_its_line_ends() {
     grid.set_row_end(1, RowEnd::Soft);
     grid.set_row_end(2, RowEnd::SoftWide);
 
-    assert_eq!(wire_row(&grid, 0, 1).end, FrameRowEnd::Hard);
-    assert_eq!(wire_row(&grid, 1, 1).end, FrameRowEnd::Soft);
-    assert_eq!(wire_row(&grid, 2, 1).end, FrameRowEnd::SoftWide);
+    assert_eq!(wire_row(&grid, 0, 1).row_end, FrameRowEnd::Hard);
+    assert_eq!(wire_row(&grid, 1, 1).row_end, FrameRowEnd::Soft);
+    assert_eq!(wire_row(&grid, 2, 1).row_end, FrameRowEnd::SoftWide);
 }
 
 #[test]
 fn a_cell_travels_with_its_display_width() {
     let mut grid = Grid::blank(1, 2, Style::default());
-    let cell = grid.cell_mut(0, 0).expect("the grid has a cell at (0, 0)");
-    *cell = Cell::new('世', 2, Style::default());
+    let wide_cell = grid
+        .get_cell_mut(0, 0)
+        .expect("the grid has a cell at (0, 0)");
+    *wide_cell = Cell::from_character('世', 2, Style::default());
 
-    let cells = wire_row(&grid, 0, 2).cells();
+    let expanded_cells = wire_row(&grid, 0, 2).expand_cells();
 
-    assert_eq!(cells[0].ch, '世');
-    assert_eq!(cells[0].width, 2);
-    assert_eq!(cells[1], wire_blank_cell());
+    assert_eq!(expanded_cells[0].character, '世');
+    assert_eq!(expanded_cells[0].cell_width, 2);
+    assert_eq!(expanded_cells[1], build_blank_frame_cell());
 }
 
 #[test]
 fn a_window_carries_every_grid_row_top_to_bottom() {
     let mut grid = Grid::blank(2, 1, Style::default());
-    *grid.cell_mut(0, 0).expect("the grid has a cell at (0, 0)") =
-        Cell::new('a', 1, Style::default());
-    *grid.cell_mut(1, 0).expect("the grid has a cell at (1, 0)") =
-        Cell::new('b', 1, Style::default());
-    let view = GridView {
+    *grid
+        .get_cell_mut(0, 0)
+        .expect("the grid has a cell at (0, 0)") = Cell::from_character('a', 1, Style::default());
+    *grid
+        .get_cell_mut(1, 0)
+        .expect("the grid has a cell at (1, 0)") = Cell::from_character('b', 1, Style::default());
+    let grid_view = GridView {
         grid: Arc::new(grid),
-        view_offset: 4,
+        view_row_offset: 4,
     };
 
-    let window = wire_window(&view);
+    let terminal_window = wire_window(&grid_view);
 
-    assert_eq!(window.cols, 1);
-    assert_eq!(window.view_offset, 4);
-    assert_eq!(window.rows.len(), 2);
-    assert_eq!(window.rows[0].cells()[0].ch, 'a');
-    assert_eq!(window.rows[1].cells()[0].ch, 'b');
+    assert_eq!(terminal_window.column_count, 1);
+    assert_eq!(terminal_window.view_row_offset, 4);
+    assert_eq!(terminal_window.row_snapshots.len(), 2);
+    assert_eq!(
+        terminal_window.row_snapshots[0].expand_cells()[0].character,
+        'a'
+    );
+    assert_eq!(
+        terminal_window.row_snapshots[1].expand_cells()[0].character,
+        'b'
+    );
 }
 
 #[test]
 fn a_grid_with_no_rows_travels_as_a_window_with_no_rows() {
     let view = GridView {
         grid: Arc::new(Grid::blank(0, 0, Style::default())),
-        view_offset: 0,
+        view_row_offset: 0,
     };
 
-    let window = wire_window(&view);
+    let terminal_window = wire_window(&view);
 
-    assert_eq!(window.cols, 0);
-    assert_eq!(window.rows, Vec::new());
-    assert_eq!(window.view_offset, 0);
+    assert_eq!(terminal_window.column_count, 0);
+    assert_eq!(terminal_window.row_snapshots, Vec::new());
+    assert_eq!(terminal_window.view_row_offset, 0);
 }
 
 #[test]
@@ -521,81 +566,82 @@ fn every_cursor_shape_travels_as_its_wire_form() {
 
 #[test]
 fn a_pane_with_no_grid_travels_with_no_window() {
-    let empty = PaneId::new();
-    let frame = wire_frame(&snapshot(PaneId::new(), empty));
+    let empty_pane_id = PaneId::new();
+    let painted_frame = wire_frame(&build_render_snapshot(PaneId::new(), empty_pane_id));
 
-    assert_eq!(frame.panes[1].id, empty);
-    assert_eq!(frame.panes[1].window, None);
+    assert_eq!(painted_frame.pane_snapshots[1].pane_id, empty_pane_id);
+    assert_eq!(painted_frame.pane_snapshots[1].terminal_window, None);
 }
 
 #[test]
 fn a_pane_with_no_grid_travels_with_its_remaining_fields_at_rest() {
-    let empty = PaneId::new();
-    let frame = wire_frame(&snapshot(PaneId::new(), empty));
+    let empty_pane_id = PaneId::new();
+    let painted_frame = wire_frame(&build_render_snapshot(PaneId::new(), empty_pane_id));
 
-    let pane = &frame.panes[1];
-    assert_eq!(pane.title, None);
+    let pane_snapshot = &painted_frame.pane_snapshots[1];
+    assert_eq!(pane_snapshot.pane_title, None);
     assert_eq!(
-        pane.cursor,
+        pane_snapshot.cursor_snapshot,
         FrameCursor {
-            row: 0,
-            col: 0,
-            visible: false,
-            blink: false,
+            row_index: 0,
+            column_index: 0,
+            is_visible: false,
+            is_blinking: false,
             shape: None,
         }
     );
-    assert_eq!(pane.mouse_tracking, MouseTracking::Off);
-    assert!(!pane.reverse_video);
-    assert!(!pane.alt_scroll);
-    assert!(!pane.on_alt_screen);
-    assert_eq!(pane.view_top_row, 0);
-    assert_eq!(pane.selection, None);
-    assert!(!pane.has_selection);
+    assert_eq!(pane_snapshot.mouse_tracking, MouseTracking::Off);
+    assert!(!pane_snapshot.is_reverse_video);
+    assert!(!pane_snapshot.is_alt_scroll_enabled);
+    assert!(!pane_snapshot.is_on_alt_screen);
+    assert_eq!(pane_snapshot.view_top_row_index, 0);
+    assert_eq!(pane_snapshot.selection_spans, None);
+    assert!(!pane_snapshot.has_selection);
     assert_eq!(
-        pane.scrollback,
+        pane_snapshot.scrollback_meta,
         FrameScrollback {
-            truncated: false,
-            retained_lines: 0,
+            is_truncated: false,
+            retained_line_count: 0,
         }
     );
 }
 
 #[test]
 fn the_view_offset_mouse_mode_and_scrollback_scalars_come_through_unchanged() {
-    let content = PaneId::new();
-    let frame = wire_frame(&snapshot(content, PaneId::new()));
+    let source_pane_id = PaneId::new();
+    let painted_frame = wire_frame(&build_render_snapshot(source_pane_id, PaneId::new()));
 
-    let pane = &frame.panes[0];
+    let pane_snapshot = &painted_frame.pane_snapshots[0];
     assert_eq!(
-        pane.window
+        pane_snapshot
+            .terminal_window
             .as_ref()
             .expect("the pane carries a grid")
-            .view_offset,
+            .view_row_offset,
         7
     );
-    assert_eq!(pane.mouse_tracking, MouseTracking::AnyMotion);
-    assert!(pane.scrollback.truncated);
-    assert_eq!(pane.scrollback.retained_lines, 500);
-    assert_eq!(pane.view_top_row, 493);
-    assert_eq!(pane.title, Some(String::from("~/work")));
-    assert!(pane.reverse_video);
-    assert!(pane.alt_scroll);
-    assert!(!pane.on_alt_screen);
-    assert!(pane.has_selection);
+    assert_eq!(pane_snapshot.mouse_tracking, MouseTracking::AnyMotion);
+    assert!(pane_snapshot.scrollback_meta.is_truncated);
+    assert_eq!(pane_snapshot.scrollback_meta.retained_line_count, 500);
+    assert_eq!(pane_snapshot.view_top_row_index, 493);
+    assert_eq!(pane_snapshot.pane_title, Some(String::from("~/work")));
+    assert!(pane_snapshot.is_reverse_video);
+    assert!(pane_snapshot.is_alt_scroll_enabled);
+    assert!(!pane_snapshot.is_on_alt_screen);
+    assert!(pane_snapshot.has_selection);
     assert_eq!(
-        pane.selection,
+        pane_snapshot.selection_spans,
         Some(FrameSelection {
-            rows: vec![(0, 1, 2)],
+            row_spans: vec![(0, 1, 2)],
         })
     );
     assert_eq!(
-        pane.cursor,
+        pane_snapshot.cursor_snapshot,
         FrameCursor {
-            row: 0,
-            col: 2,
-            visible: true,
-            blink: true,
+            row_index: 0,
+            column_index: 2,
+            is_visible: true,
+            is_blinking: true,
             shape: Some(FrameCursorShape::Bar),
         }
     );
@@ -603,171 +649,279 @@ fn the_view_offset_mouse_mode_and_scrollback_scalars_come_through_unchanged() {
 
 #[test]
 fn an_image_placement_and_its_record_travel_in_separate_values() {
-    let content = PaneId::new();
-    let source = snapshot(content, PaneId::new());
-    let record = source.panes[0].image_placements[0]
-        .record()
+    let source_pane_id = PaneId::new();
+    let source_render_snapshot = build_render_snapshot(source_pane_id, PaneId::new());
+    let image_record = source_render_snapshot.pane_snapshots[0].image_placement_snapshots[0]
+        .clone_image_record()
         .expect("the source placement has image content");
-    let frame = wire_frame(&source);
-    let placement = &frame.panes[0].image_placements[0];
-    let transfer = wire_image_transfer(placement.content_id, record);
+    let painted_frame = wire_frame(&source_render_snapshot);
+    let image_placement = &painted_frame.pane_snapshots[0].image_placement_snapshots[0];
+    let image_transfer = wire_image_transfer(image_placement.image_content_id, &image_record);
 
-    assert_eq!(placement.id, 41);
-    assert_eq!(placement.content_id, 1);
-    assert_eq!(placement.anchor, (0, 1));
-    assert_eq!(placement.columns, 2);
-    assert_eq!(placement.rows, 1);
-    assert_eq!(transfer.id, 1);
-    assert_eq!(transfer.record.protocol, FrameGraphicsProtocol::Kitty);
-    assert_eq!(transfer.record.action, FrameImageAction::TransmitAndDisplay);
-    assert_eq!(transfer.record.width, 2);
-    assert_eq!(transfer.record.height, 1);
-    assert_eq!(transfer.byte_len, 8);
-    assert_eq!(record.image.rgba, vec![255, 0, 0, 255, 0, 255, 0, 255]);
-    assert_eq!(transfer.record.display.image_id, Some(7));
-    assert_eq!(transfer.record.display.image_number, Some(8));
-    assert_eq!(transfer.record.display.placement_id, Some(9));
+    assert_eq!(image_placement.placement_id, 41);
+    assert_eq!(image_placement.image_content_id, 1);
+    assert_eq!(image_placement.anchor_cell, (0, 1));
+    assert_eq!(image_placement.column_count, 2);
+    assert_eq!(image_placement.row_count, 1);
+    assert_eq!(image_transfer.image_content_id, 1);
     assert_eq!(
-        transfer.record.display.width,
+        image_transfer.image_record.protocol,
+        FrameGraphicsProtocol::Kitty
+    );
+    assert_eq!(
+        image_transfer.image_record.image_action,
+        FrameImageAction::TransmitAndDisplay
+    );
+    assert_eq!(image_transfer.image_record.pixel_width, 2);
+    assert_eq!(image_transfer.image_record.pixel_height, 1);
+    assert_eq!(image_transfer.image_byte_count, 8);
+    assert_eq!(
+        image_record.image.rgba_bytes,
+        vec![255, 0, 0, 255, 0, 255, 0, 255]
+    );
+    assert_eq!(image_transfer.image_record.display.image_id, Some(7));
+    assert_eq!(image_transfer.image_record.display.image_number, Some(8));
+    assert_eq!(image_transfer.image_record.display.placement_id, Some(9));
+    assert_eq!(
+        image_transfer.image_record.display.requested_width,
         Some(FrameImageDimension::Cells(3))
     );
     assert_eq!(
-        transfer.record.display.height,
+        image_transfer.image_record.display.requested_height,
         Some(FrameImageDimension::Pixels(1))
     );
-    assert!(!transfer.record.display.preserve_aspect_ratio);
+    assert!(
+        !image_transfer
+            .image_record
+            .display
+            .is_aspect_ratio_preserved
+    );
     assert_eq!(
-        transfer.record.display.sixel_background,
+        image_transfer.image_record.display.sixel_background,
         Some(FrameSixelBackground::Preserve)
     );
-    assert_eq!(transfer.record.display.usage_hints, 0x12);
-    assert!(transfer.record.display.unicode_placeholder);
-    assert_eq!(transfer.record.display.cell_columns, Some(2));
-    assert_eq!(transfer.record.display.cell_rows, Some(1));
-    assert_eq!(transfer.record.display.z_index, -2);
-    assert_eq!(transfer.record.display.source_offset_x, Some(1));
-    assert_eq!(transfer.record.display.source_offset_y, Some(0));
-    assert_eq!(transfer.record.display.cell_offset_x, Some(6));
-    assert_eq!(transfer.record.display.cell_offset_y, Some(7));
-    assert!(!transfer.record.display.move_cursor);
-    assert_eq!(transfer.record.anchor, (0, 2));
+    assert_eq!(image_transfer.image_record.display.usage_hints, 0x12);
+    assert!(image_transfer.image_record.display.is_unicode_placeholder);
+    assert_eq!(
+        image_transfer.image_record.display.requested_column_count,
+        Some(2)
+    );
+    assert_eq!(
+        image_transfer.image_record.display.requested_row_count,
+        Some(1)
+    );
+    assert_eq!(image_transfer.image_record.display.z_index, -2);
+    assert_eq!(
+        image_transfer.image_record.display.source_pixel_offset_x,
+        Some(1)
+    );
+    assert_eq!(
+        image_transfer.image_record.display.source_pixel_offset_y,
+        Some(0)
+    );
+    assert_eq!(
+        image_transfer.image_record.display.cell_pixel_offset_x,
+        Some(6)
+    );
+    assert_eq!(
+        image_transfer.image_record.display.cell_pixel_offset_y,
+        Some(7)
+    );
+    assert!(!image_transfer.image_record.display.should_move_cursor);
+    assert_eq!(image_transfer.image_record.anchor_cell, (0, 2));
 }
 
 #[test]
 fn the_session_tab_slot_and_client_fields_copy_straight_across() {
-    let content = PaneId::new();
-    let empty = PaneId::new();
-    let snapshot = snapshot(content, empty);
+    let focused_pane_id = PaneId::new();
+    let empty_pane_id = PaneId::new();
+    let render_snapshot = build_render_snapshot(focused_pane_id, empty_pane_id);
 
-    let frame = wire_frame(&snapshot);
+    let painted_frame = wire_frame(&render_snapshot);
 
-    assert_eq!(frame.session.id, snapshot.session.id);
-    assert_eq!(frame.session.name, String::from("session"));
-    assert_eq!(frame.session.active_tab.id, snapshot.session.active_tab.id);
-    assert_eq!(frame.session.active_tab.name, String::from("tab"));
     assert_eq!(
-        frame.session.active_tab.effective_size,
-        Size { cols: 10, rows: 3 }
+        painted_frame.session_snapshot.session_id,
+        render_snapshot.session_snapshot.session_id
     );
-    assert_eq!(frame.session.active_tab.stack_headers, Vec::new());
     assert_eq!(
-        frame.session.active_tab.layout_mode,
-        LayoutMode::Fullscreen { focused: content }
+        painted_frame.session_snapshot.session_name,
+        String::from("session")
     );
-    assert!(!frame.session.active_tab.all_suppressed);
     assert_eq!(
-        frame.session.active_tab.slots,
+        painted_frame.session_snapshot.active_tab_snapshot.tab_id,
+        render_snapshot.session_snapshot.active_tab_snapshot.tab_id
+    );
+    assert_eq!(
+        painted_frame.session_snapshot.active_tab_snapshot.tab_name,
+        String::from("tab")
+    );
+    assert_eq!(
+        painted_frame
+            .session_snapshot
+            .active_tab_snapshot
+            .effective_cell_size,
+        Size {
+            column_count: 10,
+            row_count: 3
+        }
+    );
+    assert_eq!(
+        painted_frame
+            .session_snapshot
+            .active_tab_snapshot
+            .stack_headers,
+        Vec::new()
+    );
+    assert_eq!(
+        painted_frame
+            .session_snapshot
+            .active_tab_snapshot
+            .layout_mode,
+        LayoutMode::Fullscreen { focused_pane_id }
+    );
+    assert!(
+        !painted_frame
+            .session_snapshot
+            .active_tab_snapshot
+            .is_every_pane_suppressed
+    );
+    assert_eq!(
+        painted_frame
+            .session_snapshot
+            .active_tab_snapshot
+            .pane_slots,
         vec![
             FrameSlot {
-                pane_id: content,
-                rect: Rect {
-                    origin: Point { x: 0, y: 0 },
-                    size: Size { cols: 5, rows: 3 },
+                pane_id: focused_pane_id,
+                outer_rect: Rect {
+                    origin: Point { column: 0, row: 0 },
+                    cell_size: Size {
+                        column_count: 5,
+                        row_count: 3
+                    },
                 },
-                inner_rect: Some(Rect {
-                    origin: Point { x: 1, y: 1 },
-                    size: Size { cols: 3, rows: 1 },
+                content_rect: Some(Rect {
+                    origin: Point { column: 1, row: 1 },
+                    cell_size: Size {
+                        column_count: 3,
+                        row_count: 1
+                    },
                 }),
-                kind: PaneKind::Terminal,
-                visible: true,
-                suppressed: false,
-                dead: false,
+                pane_kind: PaneKind::Terminal,
+                is_visible: true,
+                is_suppressed: false,
+                is_dead: false,
             },
             FrameSlot {
-                pane_id: empty,
-                rect: Rect {
-                    origin: Point { x: 5, y: 0 },
-                    size: Size { cols: 5, rows: 3 },
+                pane_id: empty_pane_id,
+                outer_rect: Rect {
+                    origin: Point { column: 5, row: 0 },
+                    cell_size: Size {
+                        column_count: 5,
+                        row_count: 3
+                    },
                 },
-                inner_rect: None,
-                kind: PaneKind::Terminal,
-                visible: false,
-                suppressed: true,
-                dead: true,
+                content_rect: None,
+                pane_kind: PaneKind::Terminal,
+                is_visible: false,
+                is_suppressed: true,
+                is_dead: true,
             },
         ]
     );
     assert_eq!(
-        frame.session.tabs,
+        painted_frame.session_snapshot.tab_snapshots,
         vec![
             FrameTabMeta {
-                id: snapshot.session.active_tab.id,
-                name: String::from("tab"),
-                index: 0,
-                active: true,
+                tab_id: render_snapshot.session_snapshot.active_tab_snapshot.tab_id,
+                tab_name: String::from("tab"),
+                tab_index: 0,
+                is_active: true,
             },
             FrameTabMeta {
-                id: snapshot.session.tabs_metadata[1].id,
-                name: String::from("other"),
-                index: 1,
-                active: false,
+                tab_id: render_snapshot.session_snapshot.tabs_metadata[1].tab_id,
+                tab_name: String::from("other"),
+                tab_index: 1,
+                is_active: false,
             },
         ]
     );
     assert_eq!(
-        frame.client,
+        painted_frame.client_snapshot,
         FrameClient {
-            id: snapshot.client.id,
-            viewport: Size { cols: 20, rows: 6 },
-            active_tab: snapshot.session.active_tab.id,
-            focused_pane: Some(content),
+            client_id: render_snapshot.client_snapshot.client_id,
+            viewport_size: Size {
+                column_count: 20,
+                row_count: 6
+            },
+            active_tab_id: render_snapshot.session_snapshot.active_tab_snapshot.tab_id,
+            focused_pane_id: Some(focused_pane_id),
             lock_mode: LockMode::Locked,
-            mouse_select: true,
+            is_mouse_selection_enabled: true,
         }
     );
 }
 
 #[test]
 fn the_tab_gap_travels_with_the_frame() {
-    let content = PaneId::new();
-    let empty = PaneId::new();
-    let mut snapshot = snapshot(content, empty);
-    snapshot.session.active_tab.gap = 2;
+    let focused_pane_id = PaneId::new();
+    let empty_pane_id = PaneId::new();
+    let mut render_snapshot = build_render_snapshot(focused_pane_id, empty_pane_id);
+    render_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .gap_cell_count = 2;
 
-    let frame = wire_frame(&snapshot);
+    let painted_frame = wire_frame(&render_snapshot);
 
-    assert_eq!(frame.session.active_tab.gap, 2);
+    assert_eq!(
+        painted_frame
+            .session_snapshot
+            .active_tab_snapshot
+            .gap_cell_count,
+        2
+    );
 }
 
 #[test]
 fn the_tab_stack_headers_and_all_suppressed_flag_travel_with_the_frame() {
-    let content = PaneId::new();
-    let empty = PaneId::new();
-    let header = StackHeader {
-        pane: empty,
-        rect: Rect {
-            origin: Point { x: 5, y: 0 },
-            size: Size { cols: 5, rows: 1 },
+    let focused_pane_id = PaneId::new();
+    let empty_pane_id = PaneId::new();
+    let stack_header = StackHeader {
+        pane_id: empty_pane_id,
+        header_rect: Rect {
+            origin: Point { column: 5, row: 0 },
+            cell_size: Size {
+                column_count: 5,
+                row_count: 1,
+            },
         },
-        position: 1,
-        total: 2,
+        member_index: 1,
+        member_count: 2,
     };
-    let mut snapshot = snapshot(content, empty);
-    snapshot.session.active_tab.stack_headers = vec![header];
-    snapshot.session.active_tab.all_suppressed = true;
+    let mut render_snapshot = build_render_snapshot(focused_pane_id, empty_pane_id);
+    render_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .stack_headers = vec![stack_header];
+    render_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .are_all_panes_suppressed = true;
 
-    let frame = wire_frame(&snapshot);
+    let painted_frame = wire_frame(&render_snapshot);
 
-    assert_eq!(frame.session.active_tab.stack_headers, vec![header]);
-    assert!(frame.session.active_tab.all_suppressed);
+    assert_eq!(
+        painted_frame
+            .session_snapshot
+            .active_tab_snapshot
+            .stack_headers,
+        vec![stack_header]
+    );
+    assert!(
+        painted_frame
+            .session_snapshot
+            .active_tab_snapshot
+            .is_every_pane_suppressed
+    );
 }

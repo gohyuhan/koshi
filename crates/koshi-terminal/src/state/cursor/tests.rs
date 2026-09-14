@@ -4,10 +4,10 @@ use super::*;
 
 /// A cursor at a known position with no saved snapshot, used as the base for
 /// the equality tests.
-fn cursor_at(row: u16, col: u16) -> Cursor {
+fn cursor_at(row_index: u16, column_index: u16) -> Cursor {
     Cursor {
-        row,
-        col,
+        row: row_index,
+        column: column_index,
         is_visible: true,
         pending_wrap: false,
         saved: None,
@@ -18,7 +18,7 @@ fn cursor_at(row: u16, col: u16) -> Cursor {
 fn cursor_fields_read_back_as_written() {
     let cursor = cursor_at(4, 7);
     assert_eq!(cursor.row, 4);
-    assert_eq!(cursor.col, 7);
+    assert_eq!(cursor.column, 7);
     assert!(cursor.is_visible);
     assert!(!cursor.pending_wrap);
     assert_eq!(cursor.saved, None);
@@ -53,12 +53,12 @@ fn copying_a_cursor_leaves_the_original_untouched() {
 fn saved_cursor_carries_position_wrap_latch_and_render_snapshot() {
     let saved = SavedCursor {
         row: 3,
-        col: 8,
+        column: 8,
         pending_wrap: true,
         render: RenderState::fresh(),
     };
     assert_eq!(saved.row, 3);
-    assert_eq!(saved.col, 8);
+    assert_eq!(saved.column, 8);
     assert!(saved.pending_wrap);
     assert_eq!(saved.render, RenderState::fresh());
 }
@@ -67,7 +67,7 @@ fn saved_cursor_carries_position_wrap_latch_and_render_snapshot() {
 fn saved_cursors_differing_only_by_their_render_snapshot_are_not_equal() {
     let with_fresh = SavedCursor {
         row: 0,
-        col: 0,
+        column: 0,
         pending_wrap: false,
         render: RenderState::fresh(),
     };
@@ -85,7 +85,7 @@ fn a_cursor_holding_a_saved_snapshot_differs_from_one_without() {
     let bare = cursor_at(0, 0);
     let snapshot = SavedCursor {
         row: 0,
-        col: 0,
+        column: 0,
         pending_wrap: false,
         render: RenderState::fresh(),
     };
@@ -102,12 +102,12 @@ fn a_cursor_with_a_saved_snapshot_survives_a_serde_round_trip() {
     other_render.gl = 1;
     let cursor = Cursor {
         row: 3,
-        col: 8,
+        column: 8,
         is_visible: false,
         pending_wrap: true,
         saved: Some(SavedCursor {
             row: 1,
-            col: 2,
+            column: 2,
             pending_wrap: true,
             render: other_render,
         }),

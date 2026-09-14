@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use koshi_core::compat::CONTROL_PROTOCOL;
-use koshi_core::discovery::SessionInfo;
+use koshi_core::discovery::SessionDiscovery;
 use koshi_core::ids::SessionId;
 use serde::{Deserialize, Serialize};
 
@@ -45,7 +45,7 @@ use crate::wire::{Answer, Envelope, MaybeKnown, WireName, WireVariants};
 /// [`NotFound`](crate::protocol::IpcErrorCode::NotFound); on version 1 the
 /// same case is
 /// [`MalformedRequest`](crate::protocol::IpcErrorCode::MalformedRequest).
-pub const ROUTER_PROTOCOL_VERSION: u32 = CONTROL_PROTOCOL.max;
+pub const ROUTER_PROTOCOL_VERSION: u32 = CONTROL_PROTOCOL.maximum_version;
 
 /// The lowest control-plane protocol version this build speaks. A peer whose
 /// highest is below this one is refused with
@@ -53,15 +53,17 @@ pub const ROUTER_PROTOCOL_VERSION: u32 = CONTROL_PROTOCOL.max;
 ///
 /// The floor is 1, the version 0.2.0 speaks. Raising it drops support for
 /// every build below it.
-pub const MIN_ROUTER_PROTOCOL_VERSION: u32 = CONTROL_PROTOCOL.min;
+pub const MIN_ROUTER_PROTOCOL_VERSION: u32 = CONTROL_PROTOCOL.minimum_version;
 
 /// Which session a request means: the id, or the generated display name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionSelector {
     /// The session's stable id.
-    Id(SessionId),
+    #[serde(rename = "Id")]
+    SessionId(SessionId),
     /// The session's generated display name, e.g. `"quiet-lake"`.
-    Name(String),
+    #[serde(rename = "Name")]
+    SessionName(String),
 }
 
 /// One message from a caller to the router.
@@ -69,11 +71,12 @@ pub enum SessionSelector {
 /// The envelope's own fields are fixed: decoding rejects any field it does not
 /// know, so a misspelled `request_id` is an error.
 ///
-/// `K` is the request kind. A sender uses `RouterRequest`, where `K` is
+/// `RequestKind` is the request kind. A sender uses `RouterRequest`, where
+/// `RequestKind` is
 /// [`RouterRequestKind`]. The router reads
 /// `RouterRequest<MaybeKnown<RouterRequestKind>>`, where a kind this build
 /// does not have arrives as [`MaybeKnown::Unknown`].
-pub type RouterRequest<K = RouterRequestKind> = Envelope<K>;
+pub type RouterRequest<RequestKind = RouterRequestKind> = Envelope<RequestKind>;
 
 /// What a control-plane request asks for.
 ///
@@ -96,7 +99,8 @@ pub enum RouterRequestKind {
         /// The highest control-plane protocol version the caller speaks.
         max_protocol_version: u32,
         /// The secret read from the router's endpoint file.
-        token: ConnectionToken,
+        #[serde(rename = "token")]
+        connection_token: ConnectionToken,
     },
     /// Start a new session. The router picks the id and the name, spawns the
     /// session server, and answers once that server's socket is bound.
@@ -106,17 +110,20 @@ pub enum RouterRequestKind {
         /// The directory the caller ran in. The session's first shell opens
         /// here; `None` leaves the session server in the directory it
         /// inherited.
-        cwd: Option<PathBuf>,
+        #[serde(rename = "cwd")]
+        working_directory: Option<PathBuf>,
         /// `Some(true)` lets the other users of this machine reach the new
         /// session, whatever that session's `koshi.kdl` says. Any other value
         /// leaves the answer to the file.
-        allow_other_users: Option<bool>,
+        #[serde(rename = "allow_other_users")]
+        is_other_user_access_allowed: Option<bool>,
     },
     /// Look up a running session's control-socket address, so the caller can
     /// connect to that session directly.
     AttachLookup {
         /// Which session to look up.
-        selector: SessionSelector,
+        #[serde(rename = "selector")]
+        session_selector: SessionSelector,
     },
     /// List the running sessions.
     ListSessions,
@@ -170,18 +177,18 @@ impl RouterRequestKind {
     /// [`ROUTER_PROTOCOL_VERSION`], and `token` read from the router's
     /// endpoint file.
     #[must_use]
-    pub fn hello(token: ConnectionToken) -> RouterRequestKind {
+    pub fn build_hello_request(connection_token: ConnectionToken) -> RouterRequestKind {
         RouterRequestKind::Hello {
             min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
             max_protocol_version: ROUTER_PROTOCOL_VERSION,
-            token,
+            connection_token,
         }
     }
 
     /// The kind's name, e.g. `"CreateSession"`, with none of its payload: a
     /// Hello's token does not appear in it.
     #[must_use]
-    pub fn name(&self) -> &'static str {
+    pub fn get_request_kind_name(&self) -> &'static str {
         match self {
             RouterRequestKind::Hello { .. } => "Hello",
             RouterRequestKind::CreateSession { .. } => "CreateSession",
@@ -203,10 +210,11 @@ impl RouterRequestKind {
 /// know. An absent `request_id` means the request could not be read, so a
 /// misspelled one is an error.
 ///
-/// `R` is the answer. The router uses `RouterResponse`, where `R` is
+/// `Response` is the answer. The router uses `RouterResponse`, where
+/// `Response` is
 /// [`RouterResult`]. A caller uses [`IncomingRouterResponse`], where a result
 /// this build does not have arrives as [`MaybeKnown::Unknown`].
-pub type RouterResponse<R = RouterResult> = Answer<R>;
+pub type RouterResponse<Response = RouterResult> = Answer<Response>;
 
 /// A control-plane response as a caller reads it: the result may name
 /// something this build does not have.
@@ -218,15 +226,19 @@ pub type IncomingRouterResponse = RouterResponse<MaybeKnown<RouterResult>>;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionAddress {
     /// The session's stable id.
-    pub id: SessionId,
+    #[serde(rename = "id")]
+    pub session_id: SessionId,
     /// The session's generated display name.
-    pub name: String,
+    #[serde(rename = "name")]
+    pub session_name: String,
     /// The session's control-socket address: a socket-file path on Unix, a
     /// bare pipe name on Windows — the string
     /// [`Connection::connect`](crate::transport::Connection::connect) takes.
-    pub socket: String,
+    #[serde(rename = "socket")]
+    pub socket_address: String,
     /// The process id of the session server serving that socket.
-    pub pid: u32,
+    #[serde(rename = "pid")]
+    pub process_id: u32,
 }
 
 /// The answer to a control-plane request.
@@ -243,7 +255,8 @@ pub enum RouterResult {
         /// The build version of the answering router, e.g. `0.3.0`. Empty
         /// when the router predates this field.
         #[serde(default)]
-        version: String,
+        #[serde(rename = "version")]
+        build_version: String,
     },
     /// Answers [`RouterRequestKind::CreateSession`]: where the new session
     /// listens.
@@ -253,7 +266,7 @@ pub enum RouterResult {
     Found(SessionAddress),
     /// Answers [`RouterRequestKind::ListSessions`]: one record per running
     /// session.
-    Sessions(Vec<SessionInfo>),
+    Sessions(Vec<SessionDiscovery>),
     /// Answers [`RouterRequestKind::Restart`]: the reply is sent, then the
     /// router restarts into the binary now on disk.
     Restarting,
@@ -261,10 +274,12 @@ pub enum RouterResult {
     Granted {
         /// The secret the caller shows the operator once. `ConnectionToken`'s
         /// `Debug` and `Display` write it redacted.
-        token: ConnectionToken,
+        #[serde(rename = "token")]
+        connection_token: ConnectionToken,
         /// Whether a grant the identity already held on this scope stopped
         /// working.
-        replaced: bool,
+        #[serde(rename = "replaced")]
+        did_replace_active_grant: bool,
     },
     /// Answers [`RouterRequestKind::RevokeToken`]: the scope of every grant
     /// this call stopped, empty when the identity held none.
@@ -277,31 +292,38 @@ pub enum RouterResult {
     RemoteStatus {
         /// Where remote clients would be served, as `host:port`, or `None`
         /// when `koshi.kdl` names no listen address.
-        address: Option<String>,
+        #[serde(rename = "address")]
+        remote_listen_address: Option<String>,
         /// Whether the operator has switched remote access on. This is the
         /// answer they gave, which outlives any one run.
-        enabled: bool,
+        #[serde(rename = "enabled")]
+        is_remote_access_enabled: bool,
         /// Whether this router is holding the port right now. `enabled` with
         /// this `false` means the answer was given and the port could not be
         /// taken this start — something else is on the address.
-        listening: bool,
+        #[serde(rename = "listening")]
+        is_listening: bool,
         /// The fingerprint of this machine's certificate, as 64 lowercase
         /// hex characters, or `None` when no certificate has been generated.
-        fingerprint: Option<String>,
+        #[serde(rename = "fingerprint")]
+        certificate_fingerprint: Option<String>,
         /// How many connections from another machine this router holds
         /// admitted right now, whether they have attached to a session or
         /// not. `Some(0)` is a router holding none; `None` is a router whose
         /// build reports no count at all.
         #[serde(default)]
-        remote_connections: Option<usize>,
+        #[serde(rename = "remote_connections")]
+        remote_connection_count: Option<usize>,
     },
     /// Answers [`RouterRequestKind::EnableRemote`]: remote access is on.
     RemoteEnabled {
         /// Where remote clients are served, as `host:port`.
-        address: String,
+        #[serde(rename = "address")]
+        remote_listen_address: String,
         /// The fingerprint of this machine's certificate, as 64 lowercase
         /// hex characters. The dialling side pins it.
-        fingerprint: String,
+        #[serde(rename = "fingerprint")]
+        certificate_fingerprint: String,
     },
     /// The request was refused.
     Error(IpcErrorPayload),
@@ -317,7 +339,8 @@ pub struct SessionServerReady {
     pub protocol_version: u32,
     /// The control-socket address the session server bound: a socket-file
     /// path on Unix, a bare pipe name on Windows.
-    pub socket: String,
+    #[serde(rename = "socket")]
+    pub socket_address: String,
 }
 
 /// What the control-plane protocol's gate calls itself, and the versions it
@@ -328,8 +351,8 @@ const ROUTER_WORDS: GateWords = GateWords {
     caller: "caller",
     versions: "control-plane protocol versions",
     channel: "connection",
-    min_version: MIN_ROUTER_PROTOCOL_VERSION,
-    max_version: ROUTER_PROTOCOL_VERSION,
+    minimum_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+    maximum_protocol_version: ROUTER_PROTOCOL_VERSION,
 };
 
 /// One router connection's handshake gate, held by the router for the
@@ -344,8 +367,11 @@ impl RouterHandshake {
     /// A gate for one newly accepted router connection, closed until a Hello
     /// opens it.
     #[must_use]
-    pub fn new(expected: ConnectionToken) -> RouterHandshake {
-        RouterHandshake(VersionGate::new(expected, ROUTER_WORDS))
+    pub fn from_connection_token(connection_token: ConnectionToken) -> RouterHandshake {
+        RouterHandshake(VersionGate::from_expected_token_and_words(
+            connection_token,
+            ROUTER_WORDS,
+        ))
     }
 
     /// The control-plane protocol version this connection settled on, or
@@ -354,8 +380,8 @@ impl RouterHandshake {
     /// The router puts it in [`RouterResult::Hello`]; the caller uses that
     /// version from then on.
     #[must_use]
-    pub fn agreed(&self) -> Option<u32> {
-        self.0.agreed()
+    pub fn get_agreed_protocol_version(&self) -> Option<u32> {
+        self.0.get_agreed_protocol_version()
     }
 
     /// The refusal for a request kind this build does not have, named `name`.
@@ -366,8 +392,8 @@ impl RouterHandshake {
     /// [`UnsupportedKind`](crate::protocol::IpcErrorCode::UnsupportedKind)
     /// naming it, and the connection keeps serving.
     #[must_use]
-    pub fn refuse_unknown(&self, name: &str) -> IpcErrorPayload {
-        self.0.refuse_unknown(name)
+    pub fn build_unknown_request_kind_error(&self, request_kind_name: &str) -> IpcErrorPayload {
+        self.0.build_unknown_request_kind_error(request_kind_name)
     }
 
     /// Check one incoming request kind against the connection's state.
@@ -385,41 +411,48 @@ impl RouterHandshake {
     /// is not.
     ///
     /// `Ok(())` means the caller serves the request — a Hello is answered
-    /// with [`RouterResult::Hello`] carrying [`agreed`](Self::agreed). An
+    /// with [`RouterResult::Hello`] carrying [`get_agreed_protocol_version`](Self::get_agreed_protocol_version). An
     /// `Err` carries the refusal to send back, and the gate keeps the state it
     /// had.
-    pub fn check(&mut self, kind: &RouterRequestKind) -> Result<(), IpcErrorPayload> {
-        match kind {
+    pub fn validate_request_kind(
+        &mut self,
+        request_kind: &RouterRequestKind,
+    ) -> Result<(), IpcErrorPayload> {
+        match request_kind {
             RouterRequestKind::Hello {
                 min_protocol_version,
                 max_protocol_version,
-                token,
-            } => self
+                connection_token,
+            } => self.0.validate_hello(
+                *min_protocol_version,
+                *max_protocol_version,
+                connection_token,
+            ),
+            request_kind => self
                 .0
-                .hello(*min_protocol_version, *max_protocol_version, token),
-            other => self.0.other(other.name()),
+                .validate_non_hello_request_kind(request_kind.get_request_kind_name()),
         }
     }
 }
 
-/// The control-socket address of the router serving `runtime_dir`: the string
+/// The control-socket address of the router serving `runtime_directory`: the string
 /// [`Connection::connect`](crate::transport::Connection::connect) takes and
 /// the router's [`EndpointFile`](crate::endpoint::EndpointFile) carries. One
 /// runtime directory has one address, and two runtime directories on one
 /// machine have different ones.
 ///
-/// On Unix this is `router.sock` directly inside `runtime_dir` — the location
-/// [`validate_socket_addr`](crate::validate::validate_socket_addr) accepts.
+/// On Unix this is `router.sock` directly inside `runtime_directory` — the location
+/// [`validate_socket_address`](crate::validate::validate_socket_address) accepts.
 /// On Windows it is the pipe name `koshi-router-<hash>`, where `<hash>` is
-/// the standard library's default hash of `runtime_dir` as 16 lowercase hex
+/// the standard library's default hash of `runtime_directory` as 16 lowercase hex
 /// characters, inside the `koshi-` namespace that same check requires.
 ///
-/// Callers resolve `runtime_dir` through `koshi_paths::runtime_dir()`.
+/// Callers resolve `runtime_directory` through `koshi_paths::resolve_runtime_directory()`.
 #[must_use]
-pub fn router_socket_addr(runtime_dir: &Path) -> String {
+pub fn compute_router_socket_address(runtime_directory: &Path) -> String {
     #[cfg(unix)]
     {
-        runtime_dir.join("router.sock").display().to_string()
+        runtime_directory.join("router.sock").display().to_string()
     }
     #[cfg(windows)]
     {
@@ -427,35 +460,35 @@ pub fn router_socket_addr(runtime_dir: &Path) -> String {
         use std::hash::{Hash, Hasher};
 
         let mut hasher = DefaultHasher::new();
-        runtime_dir.hash(&mut hasher);
+        runtime_directory.hash(&mut hasher);
         format!("koshi-router-{:016x}", hasher.finish())
     }
 }
 
 /// Where the router's endpoint file lives: `router.json` directly inside
-/// `runtime_dir`. It names the router's socket and carries the token a
+/// `runtime_directory`. It names the router's socket and carries the token a
 /// connection presents at Hello.
 ///
-/// Callers resolve `runtime_dir` through `koshi_paths::runtime_dir()`.
+/// Callers resolve `runtime_directory` through `koshi_paths::resolve_runtime_directory()`.
 #[must_use]
-pub fn router_endpoint_path(runtime_dir: &Path) -> PathBuf {
-    runtime_dir.join("router.json")
+pub fn resolve_router_endpoint_path(runtime_directory: &Path) -> PathBuf {
+    runtime_directory.join("router.json")
 }
 
 /// Where the router's lock file lives: `router.lock` directly inside
-/// `runtime_dir`. Holding the advisory lock on that file is what makes one
+/// `runtime_directory`. Holding the advisory lock on that file is what makes one
 /// router the only router.
 ///
-/// Callers resolve `runtime_dir` through `koshi_paths::runtime_dir()`.
+/// Callers resolve `runtime_directory` through `koshi_paths::resolve_runtime_directory()`.
 #[must_use]
-pub fn router_lock_path(runtime_dir: &Path) -> PathBuf {
-    runtime_dir.join("router.lock")
+pub fn resolve_router_lock_path(runtime_directory: &Path) -> PathBuf {
+    runtime_directory.join("router.lock")
 }
 
 impl WireVariants for RouterRequestKind {
     /// Every control-plane request kind this build has: one entry per
     /// variant of [`RouterRequestKind`], spelled as
-    /// [`RouterRequestKind::name`] spells it.
+    /// [`RouterRequestKind::get_request_kind_name`] spells it.
     const VARIANTS: &'static [&'static str] = &[
         "Hello",
         "CreateSession",
@@ -472,7 +505,7 @@ impl WireVariants for RouterRequestKind {
 
 impl WireName for RouterRequestKind {
     fn wire_name(&self) -> &'static str {
-        self.name()
+        self.get_request_kind_name()
     }
 }
 
@@ -518,39 +551,42 @@ impl WireName for RouterResult {
 pub struct ControlPlane;
 
 impl crate::plane::Plane for ControlPlane {
-    type Kind = RouterRequestKind;
-    type Result = RouterResult;
+    type RequestKind = RouterRequestKind;
+    type Response = RouterResult;
     type Gate = RouterHandshake;
 
-    fn refusal(payload: IpcErrorPayload) -> RouterResult {
-        RouterResult::Error(payload)
+    fn build_refusal_response(error_payload: IpcErrorPayload) -> RouterResult {
+        RouterResult::Error(error_payload)
     }
 
-    fn hello(agreed: u32, build: &str) -> RouterResult {
+    fn build_hello_response(agreed_protocol_version: u32, build_version: &str) -> RouterResult {
         RouterResult::Hello {
-            protocol_version: agreed,
-            version: build.to_string(),
+            protocol_version: agreed_protocol_version,
+            build_version: build_version.to_string(),
         }
     }
 }
 
 impl crate::plane::Gate for RouterHandshake {
-    type Kind = RouterRequestKind;
+    type RequestKind = RouterRequestKind;
 
-    fn agreed(&self) -> Option<u32> {
-        RouterHandshake::agreed(self)
+    fn get_agreed_protocol_version(&self) -> Option<u32> {
+        RouterHandshake::get_agreed_protocol_version(self)
     }
 
-    fn refuse_unknown(&self, name: &str) -> IpcErrorPayload {
-        RouterHandshake::refuse_unknown(self, name)
+    fn build_unknown_request_kind_error(&self, request_kind_name: &str) -> IpcErrorPayload {
+        RouterHandshake::build_unknown_request_kind_error(self, request_kind_name)
     }
 
-    fn check(&mut self, kind: &RouterRequestKind) -> Result<(), IpcErrorPayload> {
-        RouterHandshake::check(self, kind)
+    fn validate_request_kind(
+        &mut self,
+        request_kind: &RouterRequestKind,
+    ) -> Result<(), IpcErrorPayload> {
+        RouterHandshake::validate_request_kind(self, request_kind)
     }
 
-    fn is_hello(kind: &RouterRequestKind) -> bool {
-        matches!(kind, RouterRequestKind::Hello { .. })
+    fn is_hello(request_kind: &RouterRequestKind) -> bool {
+        matches!(request_kind, RouterRequestKind::Hello { .. })
     }
 }
 

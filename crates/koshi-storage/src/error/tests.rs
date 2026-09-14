@@ -7,45 +7,48 @@ use koshi_core::error::{DomainCategory, DomainError, Severity};
 
 #[test]
 fn io_error_display_carries_the_detail() {
-    let err = StorageError::Io {
+    let storage_error = StorageError::Io {
         detail: "disk full".to_string(),
     };
-    assert_eq!(err.to_string(), "storage io error: disk full");
+    assert_eq!(storage_error.to_string(), "storage io error: disk full");
 }
 
 #[test]
 fn corrupt_error_display_carries_the_detail() {
-    let err = StorageError::Corrupt {
+    let storage_error = StorageError::Corrupt {
         detail: "bad magic".to_string(),
     };
-    assert_eq!(err.to_string(), "corrupt stored state: bad magic");
+    assert_eq!(storage_error.to_string(), "corrupt stored state: bad magic");
 }
 
 #[test]
 fn an_empty_detail_displays_only_the_prefix() {
-    let io = StorageError::Io {
+    let storage_io_error = StorageError::Io {
         detail: String::new(),
     };
-    assert_eq!(io.to_string(), "storage io error: ");
-    let corrupt = StorageError::Corrupt {
+    assert_eq!(storage_io_error.to_string(), "storage io error: ");
+    let corrupt_storage_error = StorageError::Corrupt {
         detail: String::new(),
     };
-    assert_eq!(corrupt.to_string(), "corrupt stored state: ");
+    assert_eq!(corrupt_storage_error.to_string(), "corrupt stored state: ");
 }
 
 #[test]
 fn a_detail_with_newlines_and_non_ascii_displays_verbatim() {
-    let io = StorageError::Io {
+    let storage_io_error = StorageError::Io {
         detail: "line one\nline two: 設定 ✓".to_string(),
     };
     assert_eq!(
-        io.to_string(),
+        storage_io_error.to_string(),
         "storage io error: line one\nline two: 設定 ✓"
     );
-    let corrupt = StorageError::Corrupt {
+    let corrupt_storage_error = StorageError::Corrupt {
         detail: "\tbad\r\nmagic".to_string(),
     };
-    assert_eq!(corrupt.to_string(), "corrupt stored state: \tbad\r\nmagic");
+    assert_eq!(
+        corrupt_storage_error.to_string(),
+        "corrupt stored state: \tbad\r\nmagic"
+    );
 }
 
 #[test]
@@ -72,14 +75,14 @@ fn an_io_error_is_recoverable_but_corruption_is_session_fatal() {
         StorageError::Io {
             detail: String::new()
         }
-        .severity(),
+        .get_severity(),
         Severity::Recoverable
     );
     assert_eq!(
         StorageError::Corrupt {
             detail: String::new()
         }
-        .severity(),
+        .get_severity(),
         Severity::SessionFatal
     );
 }

@@ -1,33 +1,36 @@
 //! Selection command handlers — the commands of visual mode.
 
 use super::*;
+use koshi_core::command::GridPosition;
 
 impl Server {
     /// Route a [`Command::Visual`] sub-command to its handler.
     ///
     /// Every variant acts on the issuing client's own highlights: a highlight
     /// belongs to one client, and a gone issuer takes its highlights with it
-    /// ([`Self::issuing_client`]). [`Self::validate`] has already confirmed the
-    /// source names a client.
+    /// ([`Self::resolve_issuing_client_id`]). [`Self::validate`] has already confirmed the
+    /// command source names a client.
     pub(super) fn handle_visual(
         &mut self,
         command_id: CommandId,
-        source: &CommandSource,
-        command: &VisualCommand,
+        command_source: &CommandSource,
+        visual_command: &VisualCommand,
     ) -> Result<CommandResult, Rejection> {
-        match command {
-            VisualCommand::SetSelection(args) => {
-                self.handle_set_selection(command_id, source, args)
+        match visual_command {
+            VisualCommand::SetSelection(command_args) => {
+                self.handle_set_selection(command_id, command_source, command_args)
             }
-            VisualCommand::ClearSelection(args) => {
-                self.handle_clear_selection(command_id, source, args)
+            VisualCommand::ClearSelection(command_args) => {
+                self.handle_clear_selection(command_id, command_source, command_args)
             }
-            VisualCommand::Copy(args) => self.handle_copy(command_id, source, args),
+            VisualCommand::Copy(command_args) => {
+                self.handle_copy(command_id, command_source, command_args)
+            }
         }
     }
 
-    /// Handle [`VisualCommand::SetSelection`]: highlight `args.selection` in
-    /// `args.pane` for the issuing client, replacing any highlight it had there.
+    /// Handle [`VisualCommand::SetSelection`]: highlight `command_args.selection` in
+    /// `command_args.pane_id` for the issuing client, replacing any highlight it had there.
     ///
     /// Only this client's highlight in this one pane moves — its highlights in
     /// other panes, and every other client's, are untouched. Highlighting also
@@ -51,22 +54,22 @@ impl Server {
     pub(super) fn handle_set_selection(
         &mut self,
         command_id: CommandId,
-        source: &CommandSource,
-        args: &SetSelectionArgs,
+        command_source: &CommandSource,
+        command_args: &SetSelectionArgs,
     ) -> Result<CommandResult, Rejection> {
-        let client_id = Self::issuing_client(source)?;
-        self.require_pane(client_id, args.pane)?;
-        let selection = self.snapped(args.pane, args.selection);
+        let client_id = Self::resolve_issuing_client_id(command_source)?;
+        self.validate_pane_exists(client_id, command_args.pane_id)?;
+        let selection = self.snap_selection(command_args.pane_id, command_args.selection);
         let client = self
-            .client_mut(client_id)
-            .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))?;
-        client.set_selection(args.pane, selection);
+            .get_client_mut(client_id)
+            .ok_or_else(|| Rejection::from_reason(RejectReason::SourceClientStale))?;
+        client.set_selection(command_args.pane_id, selection);
         Ok(Self::commit_events(
             &mut self.event_bus,
             command_id,
             vec![Event::SelectionChanged(SelectionChanged {
                 client_id,
-                pane_id: args.pane,
+                pane_id: command_args.pane_id,
                 selection: Some(selection),
             })],
         ))
@@ -75,44 +78,62 @@ impl Server {
     /// `selection` with each end pulled onto the cell its glyph really lives in,
     /// and then — for a word or line selection — grown outward to whole words or
     /// whole lines. A pane with no terminal text comes back untouched.
-    fn snapped(&self, pane_id: PaneId, selection: Selection) -> Selection {
-        let Some(engine) = self.terminal_engines.get(&pane_id) else {
+    fn snap_selection(&self, pane_id: PaneId, selection: Selection) -> Selection {
+        let Some(terminal_engine) = self.terminal_engine_by_pane_id.get(&pane_id) else {
             return selection;
         };
-        let view = engine.state().text_view();
-        let anchor = glyph_cell(&view, selection.anchor);
-        let cursor = glyph_cell(&view, selection.cursor);
+        let text_view = terminal_engine.get_terminal_state().get_text_view();
+        let anchor = compute_glyph_cell(&text_view, selection.anchor);
+        let cursor = compute_glyph_cell(&text_view, selection.cursor);
         // Which end leads decides which way each one grows.
-        let forward = (anchor.row, anchor.col) <= (cursor.row, cursor.col);
-        let (first, last) = if forward {
+        let is_forward_selection =
+            (anchor.row_index, anchor.column_index) <= (cursor.row_index, cursor.column_index);
+        let (first_grid_position, last_grid_position) = if is_forward_selection {
             (anchor, cursor)
         } else {
             (cursor, anchor)
         };
-        let (first, last) = match selection.kind {
+        let (first_grid_position, last_grid_position) = match selection.selection_kind {
             // A character or block highlight covers the cells the pointer named.
-            SelectionKind::Character | SelectionKind::Block => (first, last),
+            SelectionKind::Character | SelectionKind::Block => {
+                (first_grid_position, last_grid_position)
+            }
             SelectionKind::Word => {
-                let (row, col) = view.word_start(first.row, first.col);
-                let start = GridPos { row, col };
-                let (row, col) = view.word_end(last.row, last.col);
-                (start, GridPos { row, col })
+                let (row_index, column_index) = text_view.get_word_start_position(
+                    first_grid_position.row_index,
+                    first_grid_position.column_index,
+                );
+                let start_grid_position = GridPosition {
+                    row_index,
+                    column_index,
+                };
+                let (row_index, column_index) = text_view.get_word_end_position(
+                    last_grid_position.row_index,
+                    last_grid_position.column_index,
+                );
+                (
+                    start_grid_position,
+                    GridPosition {
+                        row_index,
+                        column_index,
+                    },
+                )
             }
             SelectionKind::Line => (
-                GridPos {
-                    row: view.line_start(first.row),
-                    col: 0,
+                GridPosition {
+                    row_index: text_view.get_line_start_row_index(first_grid_position.row_index),
+                    column_index: 0,
                 },
-                GridPos {
-                    row: view.line_end(last.row),
-                    col: view.cols().saturating_sub(1),
+                GridPosition {
+                    row_index: text_view.get_line_end_row_index(last_grid_position.row_index),
+                    column_index: text_view.get_column_count().saturating_sub(1),
                 },
             ),
         };
-        let (anchor, cursor) = if forward {
-            (first, last)
+        let (anchor, cursor) = if is_forward_selection {
+            (first_grid_position, last_grid_position)
         } else {
-            (last, first)
+            (last_grid_position, first_grid_position)
         };
         Selection {
             anchor,
@@ -122,47 +143,47 @@ impl Server {
     }
 
     /// Handle [`VisualCommand::Copy`]: put the issuing client's highlight in
-    /// `args.pane` on the clipboard, leaving the highlight standing.
+    /// `command_args.pane_id` on the clipboard, leaving the highlight standing.
     ///
     /// The text is read at this instant from the pane's own lines, not from
     /// what is on screen, so a highlight running off the top of the view copies
-    /// whole. `args.trim_trailing_whitespace` drops the blanks a terminal
+    /// whole. `command_args.should_trim_trailing_whitespace` drops the blanks a terminal
     /// pads each row out to the pane's width with: a highlight over `hello` in an
     /// 80-column pane copies `hello` when it is set, and `hello` plus 75 blanks
-    /// when it is not. `args.target` says which clipboard receives it.
+    /// when it is not. `command_args.clipboard_target` says which clipboard receives it.
     ///
     /// A pane with no highlight, or one whose highlight covers no text, copies
     /// nothing and is not an error.
     pub(super) fn handle_copy(
         &mut self,
         command_id: CommandId,
-        source: &CommandSource,
-        args: &CopyArgs,
+        command_source: &CommandSource,
+        command_args: &CopyArgs,
     ) -> Result<CommandResult, Rejection> {
-        let client_id = Self::issuing_client(source)?;
-        self.require_pane(client_id, args.pane)?;
+        let client_id = Self::resolve_issuing_client_id(command_source)?;
+        self.validate_pane_exists(client_id, command_args.pane_id)?;
         let selection = self
-            .client_mut(client_id)
-            .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))?
-            .selection(args.pane);
-        let text = selection
-            .zip(self.terminal_engines.get(&args.pane))
-            .map(|(selection, engine)| {
-                koshi_terminal::selection::selection_text(
-                    &engine.state().text_view(),
+            .get_client_mut(client_id)
+            .ok_or_else(|| Rejection::from_reason(RejectReason::SourceClientStale))?
+            .get_selection(command_args.pane_id);
+        let copied_text = selection
+            .zip(self.terminal_engine_by_pane_id.get(&command_args.pane_id))
+            .map(|(selection, terminal_engine)| {
+                koshi_terminal::selection::serialize_selection_text(
+                    &terminal_engine.get_terminal_state().get_text_view(),
                     &selection,
-                    args.trim_trailing_whitespace,
+                    command_args.should_trim_trailing_whitespace,
                 )
             })
             .unwrap_or_default();
-        if !text.is_empty() {
-            self.copy_to_clipboard(client_id, args.target, &text);
+        if !copied_text.is_empty() {
+            self.copy_to_clipboard(client_id, command_args.clipboard_target, &copied_text);
         }
         Ok(Self::commit_events(&mut self.event_bus, command_id, vec![]))
     }
 
     /// Handle [`VisualCommand::ClearSelection`]: drop the issuing client's
-    /// highlight in `args.pane`, leaving visual mode for that pane.
+    /// highlight in `command_args.pane_id`, leaving visual mode for that pane.
     ///
     /// Clearing a pane with no highlight changes nothing and is not an error.
     ///
@@ -175,43 +196,49 @@ impl Server {
     pub(super) fn handle_clear_selection(
         &mut self,
         command_id: CommandId,
-        source: &CommandSource,
-        args: &ClearSelectionArgs,
+        command_source: &CommandSource,
+        command_args: &ClearSelectionArgs,
     ) -> Result<CommandResult, Rejection> {
-        let client_id = Self::issuing_client(source)?;
-        self.require_pane(client_id, args.pane)?;
+        let client_id = Self::resolve_issuing_client_id(command_source)?;
+        self.validate_pane_exists(client_id, command_args.pane_id)?;
         let client = self
-            .client_mut(client_id)
-            .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))?;
-        client.clear_selection(args.pane);
+            .get_client_mut(client_id)
+            .ok_or_else(|| Rejection::from_reason(RejectReason::SourceClientStale))?;
+        client.clear_selection(command_args.pane_id);
         Ok(Self::commit_events(
             &mut self.event_bus,
             command_id,
             vec![Event::SelectionChanged(SelectionChanged {
                 client_id,
-                pane_id: args.pane,
+                pane_id: command_args.pane_id,
                 selection: None,
             })],
         ))
     }
 }
 
-/// `pos` moved onto the cell its glyph really occupies.
+/// `grid_position` moved onto the cell its glyph really occupies.
 ///
 /// A wide (CJK or emoji) glyph fills two columns: its text lives in the left
 /// one and the right one is a width-0 cell the renderer never paints. A pointer
 /// on either half names the glyph itself, so a highlight can never cover only an
 /// invisible cell. `世界` at columns 0–3 with the pointer on column 1 yields
 /// column 0.
-fn glyph_cell(view: &koshi_terminal::selection::TextView<'_>, pos: GridPos) -> GridPos {
-    let mut col = pos.col;
-    while col > 0
-        && (view
-            .cell(pos.row, col)
-            .is_some_and(|cell| cell.width() == 0)
-            || view.is_wide_wrap_spacer(pos.row, col))
+fn compute_glyph_cell(
+    text_view: &koshi_terminal::selection::TextView<'_>,
+    grid_position: GridPosition,
+) -> GridPosition {
+    let mut column_index = grid_position.column_index;
+    while column_index > 0
+        && (text_view
+            .get_cell(grid_position.row_index, column_index)
+            .is_some_and(|grid_cell| grid_cell.get_display_width() == 0)
+            || text_view.is_wide_wrap_spacer(grid_position.row_index, column_index))
     {
-        col -= 1;
+        column_index -= 1;
     }
-    GridPos { col, ..pos }
+    GridPosition {
+        column_index,
+        ..grid_position
+    }
 }

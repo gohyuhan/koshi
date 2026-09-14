@@ -8,88 +8,98 @@ use super::*;
 
 use std::thread::JoinHandle;
 
-use koshi_ipc::endpoint::{socket_addr, EndpointFile};
+use koshi_ipc::endpoint::{compute_socket_address, EndpointFile};
 use koshi_ipc::protocol::{ConnectionToken, IpcRequest, IpcResponse, IpcResult, PROTOCOL_VERSION};
 use koshi_ipc::router::{
-    router_endpoint_path, router_socket_addr, RouterRequest, RouterResponse, RouterResult,
-    ROUTER_PROTOCOL_VERSION,
+    compute_router_socket_address, resolve_router_endpoint_path, RouterRequest, RouterResponse,
+    RouterResult, ROUTER_PROTOCOL_VERSION,
 };
 use koshi_ipc::transport::Listener;
-use koshi_test_support::fixtures::test_runtime_dir;
+use koshi_test_support::fixtures::build_test_runtime_directory;
 
-/// Serve one router Hello at `runtime_dir`, answering with `named` as the
+/// Serve one router Hello at `runtime_directory`, answering with `build_version_text` as the
 /// build. Binds and writes the endpoint file before returning, so a probe
 /// running next finds the stand-in ready.
-fn fake_router(runtime_dir: &Path, named: &str) -> JoinHandle<()> {
-    let token = ConnectionToken::generate();
-    let addr = router_socket_addr(runtime_dir);
-    let listener = Listener::bind(&addr).expect("bind the stand-in router");
+fn spawn_fake_router(runtime_directory: &Path, build_version_text: &str) -> JoinHandle<()> {
+    let connection_token = ConnectionToken::generate();
+    let socket_address = compute_router_socket_address(runtime_directory);
+    let listener = Listener::bind(&socket_address).expect("bind the stand-in router");
     EndpointFile {
-        socket: addr,
-        token,
-        pid: std::process::id(),
+        socket_address,
+        connection_token,
+        process_id: std::process::id(),
     }
-    .write(&router_endpoint_path(runtime_dir))
+    .write_to_path(&resolve_router_endpoint_path(runtime_directory))
     .expect("write the router endpoint file");
 
-    let named = named.to_string();
+    let build_version_text = build_version_text.to_string();
     std::thread::spawn(move || {
         let mut connection = listener.accept().expect("accept the probe");
-        let hello: RouterRequest = connection.recv().expect("read the hello");
+        let hello_request: RouterRequest = connection.recv().expect("read the hello");
         connection
             .send(&RouterResponse {
-                request_id: Some(hello.request_id),
-                result: RouterResult::Hello {
+                request_id: Some(hello_request.request_id),
+                answer_result: RouterResult::Hello {
                     protocol_version: ROUTER_PROTOCOL_VERSION,
-                    version: named,
+                    build_version: build_version_text,
                 },
             })
             .expect("send the hello reply");
     })
 }
 
-/// Serve one session Hello for `session` at `runtime_dir`, answering with
-/// `named` as the build.
-fn fake_session(runtime_dir: &Path, session: SessionId, named: &str) -> JoinHandle<()> {
-    let addr = socket_addr(runtime_dir, session);
-    let token = ConnectionToken::generate();
-    let listener = Listener::bind(&addr).expect("bind the stand-in session");
+/// Serve one session Hello for `session_id` at `runtime_directory`, answering with
+/// `build_version_text` as the build.
+fn spawn_fake_session(
+    runtime_directory: &Path,
+    session_id: SessionId,
+    build_version_text: &str,
+) -> JoinHandle<()> {
+    let socket_address = compute_socket_address(runtime_directory, session_id);
+    let connection_token = ConnectionToken::generate();
+    let listener = Listener::bind(&socket_address).expect("bind the stand-in session");
     EndpointFile {
-        socket: addr,
-        token,
-        pid: std::process::id(),
+        socket_address,
+        connection_token,
+        process_id: std::process::id(),
     }
-    .write(&EndpointFile::path(runtime_dir, session))
+    .write_to_path(&EndpointFile::resolve_endpoint_file_path(
+        runtime_directory,
+        session_id,
+    ))
     .expect("write the session endpoint file");
 
-    let named = named.to_string();
+    let build_version_text = build_version_text.to_string();
     std::thread::spawn(move || {
         let mut connection = listener.accept().expect("accept the probe");
         let hello: IpcRequest = connection.recv().expect("read the hello");
         connection
             .send(&IpcResponse {
                 request_id: Some(hello.request_id),
-                result: IpcResult::Hello {
+                answer_result: IpcResult::Hello {
                     protocol_version: PROTOCOL_VERSION,
-                    version: named,
+                    build_version: build_version_text,
                 },
             })
             .expect("send the hello reply");
     })
 }
 
-/// Serve one session connection for `session` at `runtime_dir` that closes
+/// Serve one session connection for `session_id` at `runtime_directory` that closes
 /// without answering, the way a server that is wedged or mid-shutdown does.
-fn mute_session(runtime_dir: &Path, session: SessionId) -> JoinHandle<()> {
-    let addr = socket_addr(runtime_dir, session);
-    let token = ConnectionToken::generate();
-    let listener = Listener::bind(&addr).expect("bind the mute session");
+fn spawn_unresponsive_session(runtime_directory: &Path, session_id: SessionId) -> JoinHandle<()> {
+    let socket_address = compute_socket_address(runtime_directory, session_id);
+    let connection_token = ConnectionToken::generate();
+    let listener = Listener::bind(&socket_address).expect("bind the mute session");
     EndpointFile {
-        socket: addr,
-        token,
-        pid: std::process::id(),
+        socket_address,
+        connection_token,
+        process_id: std::process::id(),
     }
-    .write(&EndpointFile::path(runtime_dir, session))
+    .write_to_path(&EndpointFile::resolve_endpoint_file_path(
+        runtime_directory,
+        session_id,
+    ))
     .expect("write the session endpoint file");
 
     std::thread::spawn(move || {
@@ -98,22 +108,25 @@ fn mute_session(runtime_dir: &Path, session: SessionId) -> JoinHandle<()> {
     })
 }
 
-/// Advertise `session` at an address nothing listens on, the way a session
+/// Advertise `session_id` at an address nothing listens on, the way a session
 /// that died without cleaning up leaves its endpoint file behind.
-fn stale_endpoint(runtime_dir: &Path, session: SessionId) {
+fn write_stale_endpoint_file(runtime_directory: &Path, session_id: SessionId) {
     EndpointFile {
-        socket: socket_addr(runtime_dir, session),
-        token: ConnectionToken::generate(),
-        pid: std::process::id(),
+        socket_address: compute_socket_address(runtime_directory, session_id),
+        connection_token: ConnectionToken::generate(),
+        process_id: std::process::id(),
     }
-    .write(&EndpointFile::path(runtime_dir, session))
+    .write_to_path(&EndpointFile::resolve_endpoint_file_path(
+        runtime_directory,
+        session_id,
+    ))
     .expect("write the session endpoint file");
 }
 
 #[test]
 fn the_reported_build_is_the_one_this_program_was_compiled_at() {
     assert_eq!(
-        ClientVersion::of_this_build(),
+        ClientVersion::build_client_version(),
         ClientVersion {
             version: env!("CARGO_PKG_VERSION").to_string(),
         }
@@ -122,26 +135,28 @@ fn the_reported_build_is_the_one_this_program_was_compiled_at() {
 
 #[test]
 fn the_router_and_every_session_report_the_build_they_run() {
-    let runtime_dir = test_runtime_dir();
-    let session = SessionId::new();
-    let router = fake_router(runtime_dir.path(), "0.2.0");
-    let server = fake_session(runtime_dir.path(), session, "0.1.0");
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let router = spawn_fake_router(runtime_directory.path(), "0.2.0");
+    let session_thread = spawn_fake_session(runtime_directory.path(), session_id, "0.1.0");
 
-    let rows = server_version_rows_in(runtime_dir.path(), None).expect("both servers answer");
+    let server_version_rows =
+        list_server_version_rows_in_runtime_directory(runtime_directory.path(), None)
+            .expect("both servers answer");
 
     assert_eq!(
-        rows,
+        server_version_rows,
         vec![
             ServerVersionRow {
-                kind: ServerKind::Router,
-                session: None,
+                server_kind: ServerKind::Router,
+                session_id: None,
                 build: ServerBuild::Running {
                     version: "0.2.0".to_string(),
                 },
             },
             ServerVersionRow {
-                kind: ServerKind::Session,
-                session: Some(session),
+                server_kind: ServerKind::Session,
+                session_id: Some(session_id),
                 build: ServerBuild::Running {
                     version: "0.1.0".to_string(),
                 },
@@ -149,21 +164,24 @@ fn the_router_and_every_session_report_the_build_they_run() {
         ]
     );
     router.join().expect("the stand-in router finishes");
-    server.join().expect("the stand-in session finishes");
+    session_thread
+        .join()
+        .expect("the stand-in session finishes");
 }
 
 #[test]
 fn a_machine_running_nothing_answers_with_the_router_alone() {
-    let runtime_dir = test_runtime_dir();
+    let runtime_directory = build_test_runtime_directory();
 
-    let rows =
-        server_version_rows_in(runtime_dir.path(), None).expect("nothing running is an answer");
+    let server_version_rows =
+        list_server_version_rows_in_runtime_directory(runtime_directory.path(), None)
+            .expect("nothing running is an answer");
 
     assert_eq!(
-        rows,
+        server_version_rows,
         vec![ServerVersionRow {
-            kind: ServerKind::Router,
-            session: None,
+            server_kind: ServerKind::Router,
+            session_id: None,
             build: ServerBuild::NotRunning,
         }]
     );
@@ -171,85 +189,98 @@ fn a_machine_running_nothing_answers_with_the_router_alone() {
 
 #[test]
 fn a_server_that_names_no_build_is_told_apart_from_one_that_is_gone() {
-    let runtime_dir = test_runtime_dir();
-    let silent = SessionId::new();
-    let gone = SessionId::new();
-    let server = fake_session(runtime_dir.path(), silent, "");
-    stale_endpoint(runtime_dir.path(), gone);
+    let runtime_directory = build_test_runtime_directory();
+    let silent_session_id = SessionId::new();
+    let gone_session_id = SessionId::new();
+    let session_thread = spawn_fake_session(runtime_directory.path(), silent_session_id, "");
+    write_stale_endpoint_file(runtime_directory.path(), gone_session_id);
 
-    let rows = server_version_rows_in(runtime_dir.path(), None).expect("both sessions answer");
+    let server_version_rows =
+        list_server_version_rows_in_runtime_directory(runtime_directory.path(), None)
+            .expect("both sessions answer");
 
-    let silent_row = rows
+    let silent_server_version_row = server_version_rows
         .iter()
-        .find(|row| row.session == Some(silent))
-        .expect("the silent session has a row");
-    let gone_row = rows
+        .find(|server_version_row| server_version_row.session_id == Some(silent_session_id))
+        .expect("the silent session has a version row");
+    let gone_server_version_row = server_version_rows
         .iter()
-        .find(|row| row.session == Some(gone))
-        .expect("the gone session has a row");
+        .find(|server_version_row| server_version_row.session_id == Some(gone_session_id))
+        .expect("the gone session has a version row");
     assert_eq!(
-        *silent_row,
+        *silent_server_version_row,
         ServerVersionRow {
-            kind: ServerKind::Session,
-            session: Some(silent),
+            server_kind: ServerKind::Session,
+            session_id: Some(silent_session_id),
             build: ServerBuild::Unnamed,
         }
     );
     assert_eq!(
-        *gone_row,
+        *gone_server_version_row,
         ServerVersionRow {
-            kind: ServerKind::Session,
-            session: Some(gone),
+            server_kind: ServerKind::Session,
+            session_id: Some(gone_session_id),
             build: ServerBuild::NotRunning,
         }
     );
-    server.join().expect("the stand-in session finishes");
+    session_thread
+        .join()
+        .expect("the stand-in session finishes");
 }
 
 #[test]
 fn naming_one_session_leaves_out_the_router_and_the_other_sessions() {
-    let runtime_dir = test_runtime_dir();
-    let asked = SessionId::new();
-    let other = SessionId::new();
-    let server = fake_session(runtime_dir.path(), asked, "0.2.0");
-    stale_endpoint(runtime_dir.path(), other);
+    let runtime_directory = build_test_runtime_directory();
+    let requested_session_id = SessionId::new();
+    let other_session_id = SessionId::new();
+    let session_thread =
+        spawn_fake_session(runtime_directory.path(), requested_session_id, "0.2.0");
+    write_stale_endpoint_file(runtime_directory.path(), other_session_id);
 
-    let rows = server_version_rows_in(runtime_dir.path(), Some(&SessionRef::Id(asked)))
-        .expect("the named session answers");
+    let server_version_rows = list_server_version_rows_in_runtime_directory(
+        runtime_directory.path(),
+        Some(&SessionReference::SessionId(requested_session_id)),
+    )
+    .expect("the requested session answers");
 
     assert_eq!(
-        rows,
+        server_version_rows,
         vec![ServerVersionRow {
-            kind: ServerKind::Session,
-            session: Some(asked),
+            server_kind: ServerKind::Session,
+            session_id: Some(requested_session_id),
             build: ServerBuild::Running {
                 version: "0.2.0".to_string(),
             },
         }]
     );
-    server.join().expect("the stand-in session finishes");
+    session_thread
+        .join()
+        .expect("the stand-in session finishes");
 }
 
 #[test]
 fn naming_a_session_that_is_not_running_reports_it_as_not_running() {
-    let runtime_dir = test_runtime_dir();
-    let gone = SessionId::new();
+    let runtime_directory = build_test_runtime_directory();
+    let gone_session_id = SessionId::new();
 
-    let rows = server_version_rows_in(runtime_dir.path(), Some(&SessionRef::Id(gone)))
-        .expect("an id that nothing answers is still an answer");
+    let server_version_rows = list_server_version_rows_in_runtime_directory(
+        runtime_directory.path(),
+        Some(&SessionReference::SessionId(gone_session_id)),
+    )
+    .expect("a session id that nothing answers is still an answer");
 
     assert_eq!(
-        rows,
+        server_version_rows,
         vec![ServerVersionRow {
-            kind: ServerKind::Session,
-            session: Some(gone),
+            server_kind: ServerKind::Session,
+            session_id: Some(gone_session_id),
             build: ServerBuild::NotRunning,
         }]
     );
 }
 
 /// Two runs of `server-version` print the sessions in the same order, so the
-/// rows are sorted by session id.
+/// server_version_rows are sorted by session id.
 ///
 /// The endpoint files are written newest id first, so a listing that kept the
 /// order the directory hands back comes out unsorted on any filesystem that
@@ -257,118 +288,138 @@ fn naming_a_session_that_is_not_running_reports_it_as_not_running() {
 /// be sorted a one-in-720 coincidence.
 #[test]
 fn the_session_rows_come_back_in_session_id_order() {
-    let runtime_dir = test_runtime_dir();
-    let mut sessions: Vec<SessionId> = (0..6).map(|_| SessionId::new()).collect();
-    sessions.sort();
-    for session in sessions.iter().rev() {
-        stale_endpoint(runtime_dir.path(), *session);
+    let runtime_directory = build_test_runtime_directory();
+    let mut session_ids: Vec<SessionId> = (0..6).map(|_| SessionId::new()).collect();
+    session_ids.sort();
+    for session_id in session_ids.iter().rev() {
+        write_stale_endpoint_file(runtime_directory.path(), *session_id);
     }
 
-    let rows = server_version_rows_in(runtime_dir.path(), None).expect("the sessions are listed");
+    let server_version_rows =
+        list_server_version_rows_in_runtime_directory(runtime_directory.path(), None)
+            .expect("the sessions are listed");
 
-    let listed: Vec<SessionId> = rows.iter().filter_map(|row| row.session).collect();
-    assert_eq!(listed, sessions);
+    let listed_session_ids: Vec<SessionId> = server_version_rows
+        .iter()
+        .filter_map(|server_version_row| server_version_row.session_id)
+        .collect();
+    assert_eq!(listed_session_ids, session_ids);
 }
 
 #[test]
 fn a_server_that_cannot_be_asked_leaves_the_other_rows_standing() {
-    let runtime_dir = test_runtime_dir();
-    let answering = SessionId::new();
-    let mute = SessionId::new();
-    let router = fake_router(runtime_dir.path(), "0.2.0");
-    let server = fake_session(runtime_dir.path(), answering, "0.2.0");
-    let wedged = mute_session(runtime_dir.path(), mute);
+    let runtime_directory = build_test_runtime_directory();
+    let answering_session_id = SessionId::new();
+    let unresponsive_session_id = SessionId::new();
+    let router_thread = spawn_fake_router(runtime_directory.path(), "0.2.0");
+    let session_thread =
+        spawn_fake_session(runtime_directory.path(), answering_session_id, "0.2.0");
+    let unresponsive_session =
+        spawn_unresponsive_session(runtime_directory.path(), unresponsive_session_id);
 
-    let rows = server_version_rows_in(runtime_dir.path(), None)
-        .expect("one server failing is still an answer");
+    let server_version_rows =
+        list_server_version_rows_in_runtime_directory(runtime_directory.path(), None)
+            .expect("one server failing is still an answer");
 
     // The router and the answering session are both here, which is the whole
     // point: one wedged server used to take the entire answer with it.
     assert_eq!(
-        rows.iter()
-            .find(|row| row.kind == ServerKind::Router)
-            .map(|row| &row.build),
+        server_version_rows
+            .iter()
+            .find(|server_version_row| server_version_row.server_kind == ServerKind::Router)
+            .map(|server_version_row| &server_version_row.build),
         Some(&ServerBuild::Running {
             version: "0.2.0".to_string(),
         })
     );
     assert_eq!(
-        rows.iter()
-            .find(|row| row.session == Some(answering))
-            .map(|row| &row.build),
+        server_version_rows
+            .iter()
+            .find(|server_version_row| server_version_row.session_id == Some(answering_session_id))
+            .map(|server_version_row| &server_version_row.build),
         Some(&ServerBuild::Running {
             version: "0.2.0".to_string(),
         })
     );
-    let wedged_row = rows
+    let unresponsive_server_version_row = server_version_rows
         .iter()
-        .find(|row| row.session == Some(mute))
-        .expect("the wedged session has a row");
+        .find(|server_version_row| server_version_row.session_id == Some(unresponsive_session_id))
+        .expect("the unresponsive session has a version row");
     assert_eq!(
-        wedged_row.build,
+        unresponsive_server_version_row.build,
         ServerBuild::Unreachable {
             detail: "IPC unavailable: ipc peer disconnected".to_string(),
         }
     );
 
-    router.join().expect("the stand-in router finishes");
-    server.join().expect("the stand-in session finishes");
-    wedged.join().expect("the mute session finishes");
+    router_thread.join().expect("the stand-in router finishes");
+    session_thread
+        .join()
+        .expect("the stand-in session finishes");
+    unresponsive_session
+        .join()
+        .expect("the unresponsive session finishes");
 }
 
 #[test]
 fn every_server_answering_ends_the_command_with_no_failure() {
-    let rows = vec![
+    let server_version_rows = vec![
         ServerVersionRow {
-            kind: ServerKind::Router,
-            session: None,
+            server_kind: ServerKind::Router,
+            session_id: None,
             build: ServerBuild::NotRunning,
         },
         ServerVersionRow {
-            kind: ServerKind::Session,
-            session: Some(SessionId::new()),
+            server_kind: ServerKind::Session,
+            session_id: Some(SessionId::new()),
             build: ServerBuild::Unnamed,
         },
     ];
 
     assert!(
-        unreachable_servers(&rows).is_none(),
+        build_unreachable_server_error(&server_version_rows).is_none(),
         "every server answered, so nothing is missing from this answer"
     );
 }
 
 #[test]
 fn a_server_that_could_not_be_asked_fails_the_command_after_the_rows_print() {
-    let rows = vec![
+    let server_version_rows = vec![
         ServerVersionRow {
-            kind: ServerKind::Router,
-            session: None,
+            server_kind: ServerKind::Router,
+            session_id: None,
             build: ServerBuild::Unreachable {
                 detail: "the socket closed".to_string(),
             },
         },
         ServerVersionRow {
-            kind: ServerKind::Session,
-            session: Some(SessionId::new()),
+            server_kind: ServerKind::Session,
+            session_id: Some(SessionId::new()),
             build: ServerBuild::Unreachable {
                 detail: "the socket closed".to_string(),
             },
         },
     ];
 
-    let Some(CliError::IpcUnavailable { detail }) = unreachable_servers(&rows) else {
+    let Some(CliError::IpcUnavailable {
+        detail: unreachable_detail,
+    }) = build_unreachable_server_error(&server_version_rows)
+    else {
         panic!("two unreachable servers must fail the command");
     };
     assert_eq!(
-        detail,
+        unreachable_detail,
         "2 koshi servers did not answer, so this answer is incomplete"
     );
 
-    let Some(CliError::IpcUnavailable { detail }) = unreachable_servers(&rows[..1]) else {
+    let Some(CliError::IpcUnavailable {
+        detail: unreachable_detail,
+    }) = build_unreachable_server_error(&server_version_rows[..1])
+    else {
         panic!("one unreachable server must fail the command");
     };
     assert_eq!(
-        detail,
+        unreachable_detail,
         "1 koshi server did not answer, so this answer is incomplete"
     );
 }

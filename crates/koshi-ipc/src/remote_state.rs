@@ -32,14 +32,14 @@ use crate::error::{IpcError, RemoteFile};
 ///
 /// The value and the rule it follows live in
 /// [`koshi_core::compat::REMOTE_CERTIFICATE_FORMAT`].
-pub const CERT_FILE_FORMAT: u32 = koshi_core::compat::REMOTE_CERTIFICATE_FORMAT.max;
+pub const CERT_FILE_FORMAT: u32 = koshi_core::compat::REMOTE_CERTIFICATE_FORMAT.maximum_version;
 
 /// The format number this build writes into the enabled file, and the only
 /// one it reads back.
 ///
 /// The value and the rule it follows live in
 /// [`koshi_core::compat::REMOTE_ACCESS_MARK_FORMAT`].
-pub const ENABLED_FILE_FORMAT: u32 = koshi_core::compat::REMOTE_ACCESS_MARK_FORMAT.max;
+pub const ENABLED_FILE_FORMAT: u32 = koshi_core::compat::REMOTE_ACCESS_MARK_FORMAT.maximum_version;
 
 /// The certificate this machine presents to remote clients, and its private
 /// key.
@@ -50,7 +50,8 @@ pub const ENABLED_FILE_FORMAT: u32 = koshi_core::compat::REMOTE_ACCESS_MARK_FORM
 #[serde(deny_unknown_fields)]
 pub struct CertFile {
     /// The format number of the file these bytes came from or go to.
-    pub format: u32,
+    #[serde(rename = "format")]
+    pub file_format: u32,
     /// The certificate, in DER form: the bytes a client fingerprints.
     pub cert_der: Vec<u8>,
     /// The certificate's private key, in DER form.
@@ -60,31 +61,38 @@ pub struct CertFile {
 impl CertFile {
     /// Where the certificate file lives: `remote/cert` under `data_dir`.
     ///
-    /// Callers resolve `data_dir` through `koshi_paths::data_dir()`.
+    /// Callers resolve `data_directory` through `koshi_paths::resolve_data_directory()`.
     #[must_use]
-    pub fn path(data_dir: &Path) -> PathBuf {
-        data_dir.join("remote").join("cert")
+    pub fn resolve_certificate_file_path(data_directory: &Path) -> PathBuf {
+        data_directory.join("remote").join("cert")
     }
 
-    /// Read the certificate file at `path`.
+    /// Read the certificate file at `certificate_file_path`.
     ///
     /// A path with no file, a file that cannot be read, bytes that are not a
     /// readable certificate file, and a format number that is not
     /// [`CERT_FILE_FORMAT`] are all [`IpcError::RemoteFileUnreadable`].
-    pub fn read(path: &Path) -> Result<CertFile, IpcError> {
-        let file: CertFile = read_private(RemoteFile::Certificate, path)?;
-        if let Some(detail) = format_mismatch(file.format, CERT_FILE_FORMAT) {
-            return Err(unreadable(RemoteFile::Certificate, path, detail));
+    pub fn load_from_path(certificate_file_path: &Path) -> Result<CertFile, IpcError> {
+        let certificate_file: CertFile =
+            load_remote_file(RemoteFile::Certificate, certificate_file_path)?;
+        if let Some(format_error) =
+            find_format_mismatch(certificate_file.file_format, CERT_FILE_FORMAT)
+        {
+            return Err(build_unreadable_remote_file_error(
+                RemoteFile::Certificate,
+                certificate_file_path,
+                format_error,
+            ));
         }
-        Ok(file)
+        Ok(certificate_file)
     }
 
-    /// Write this certificate file at `path`, replacing whatever is there.
+    /// Write this certificate file at `certificate_file_path`, replacing whatever is there.
     ///
     /// # Errors
     /// [`IpcError::RemoteFileWrite`] naming what failed.
-    pub fn write(&self, path: &Path) -> Result<(), IpcError> {
-        write_private(RemoteFile::Certificate, path, self)
+    pub fn write_to_path(&self, certificate_file_path: &Path) -> Result<(), IpcError> {
+        write_remote_file(RemoteFile::Certificate, certificate_file_path, self)
     }
 }
 
@@ -96,7 +104,8 @@ impl CertFile {
 #[serde(deny_unknown_fields)]
 pub struct EnabledFile {
     /// The format number of the file this record came from or goes to.
-    pub format: u32,
+    #[serde(rename = "format")]
+    pub file_format: u32,
     /// When the operator answered yes.
     pub enabled_at: SystemTime,
 }
@@ -104,39 +113,46 @@ pub struct EnabledFile {
 impl EnabledFile {
     /// Where the enabled file lives: `remote/enabled` under `data_dir`.
     ///
-    /// Callers resolve `data_dir` through `koshi_paths::data_dir()`.
+    /// Callers resolve `data_directory` through `koshi_paths::resolve_data_directory()`.
     #[must_use]
-    pub fn path(data_dir: &Path) -> PathBuf {
-        data_dir.join("remote").join("enabled")
+    pub fn resolve_enabled_file_path(data_directory: &Path) -> PathBuf {
+        data_directory.join("remote").join("enabled")
     }
 
-    /// Read the enabled file at `path`.
+    /// Read the enabled file at `enabled_file_path`.
     ///
     /// A path with no file, a file that cannot be read, bytes that are not a
     /// readable enabled file, and a format number that is not
     /// [`ENABLED_FILE_FORMAT`] are all [`IpcError::RemoteFileUnreadable`].
-    pub fn read(path: &Path) -> Result<EnabledFile, IpcError> {
-        let file: EnabledFile = read_private(RemoteFile::RemoteAccessMark, path)?;
-        if let Some(detail) = format_mismatch(file.format, ENABLED_FILE_FORMAT) {
-            return Err(unreadable(RemoteFile::RemoteAccessMark, path, detail));
+    pub fn load_from_path(enabled_file_path: &Path) -> Result<EnabledFile, IpcError> {
+        let enabled_file: EnabledFile =
+            load_remote_file(RemoteFile::RemoteAccessMark, enabled_file_path)?;
+        if let Some(format_error) =
+            find_format_mismatch(enabled_file.file_format, ENABLED_FILE_FORMAT)
+        {
+            return Err(build_unreadable_remote_file_error(
+                RemoteFile::RemoteAccessMark,
+                enabled_file_path,
+                format_error,
+            ));
         }
-        Ok(file)
+        Ok(enabled_file)
     }
 
-    /// Write this enabled file at `path`, replacing whatever is there.
+    /// Write this enabled file at `enabled_file_path`, replacing whatever is there.
     ///
     /// # Errors
     /// [`IpcError::RemoteFileWrite`] naming what failed.
-    pub fn write(&self, path: &Path) -> Result<(), IpcError> {
-        write_private(RemoteFile::RemoteAccessMark, path, self)
+    pub fn write_to_path(&self, enabled_file_path: &Path) -> Result<(), IpcError> {
+        write_remote_file(RemoteFile::RemoteAccessMark, enabled_file_path, self)
     }
 }
 
 /// Whether the operator has switched remote access on for the koshi data
 /// directory at `data_dir`: whether the enabled file reads.
 #[must_use]
-pub fn remote_enabled(data_dir: &Path) -> bool {
-    EnabledFile::read(&EnabledFile::path(data_dir)).is_ok()
+pub fn is_remote_enabled(data_directory: &Path) -> bool {
+    EnabledFile::load_from_path(&EnabledFile::resolve_enabled_file_path(data_directory)).is_ok()
 }
 
 /// The reason `found` is not the format number this build reads, or `None`
@@ -144,38 +160,52 @@ pub fn remote_enabled(data_dir: &Path) -> bool {
 ///
 /// Example — `found` 2 against `expected` 1 gives `Some("format 2 is not the
 /// 1 this build reads")`.
-pub(crate) fn format_mismatch(found: u32, expected: u32) -> Option<String> {
-    (found != expected).then(|| format!("format {found} is not the {expected} this build reads"))
+pub(crate) fn find_format_mismatch(found_format: u32, expected_format: u32) -> Option<String> {
+    (found_format != expected_format)
+        .then(|| format!("format {found_format} is not the {expected_format} this build reads"))
 }
 
 /// A file under `remote/` that could not be used, named in plain words.
-pub(crate) fn unreadable(file: RemoteFile, path: &Path, detail: String) -> IpcError {
+pub(crate) fn build_unreadable_remote_file_error(
+    remote_file: RemoteFile,
+    remote_file_path: &Path,
+    error_detail: String,
+) -> IpcError {
     IpcError::RemoteFileUnreadable {
-        file,
-        path: path.display().to_string(),
-        detail,
+        remote_file,
+        remote_file_path: remote_file_path.display().to_string(),
+        error_detail,
     }
 }
 
 /// Read and decode the JSON file at `path`. A path with no file is
 /// [`IpcError::RemoteFileUnreadable`] on `file`, as is a file that cannot be
 /// read or decoded.
-fn read_private<T: DeserializeOwned>(file: RemoteFile, path: &Path) -> Result<T, IpcError> {
-    let data = std::fs::read(path).map_err(|error| unreadable(file, path, error.to_string()))?;
-    serde_json::from_slice(&data).map_err(|error| unreadable(file, path, error.to_string()))
+fn load_remote_file<FileContents: DeserializeOwned>(
+    remote_file: RemoteFile,
+    remote_file_path: &Path,
+) -> Result<FileContents, IpcError> {
+    let private_file_bytes = std::fs::read(remote_file_path).map_err(|io_error| {
+        build_unreadable_remote_file_error(remote_file, remote_file_path, io_error.to_string())
+    })?;
+    serde_json::from_slice(&private_file_bytes).map_err(|decode_error| {
+        build_unreadable_remote_file_error(remote_file, remote_file_path, decode_error.to_string())
+    })
 }
 
 /// Encode `value` and write it at `path` as a file only the owning user
 /// reaches, naming the failure as [`IpcError::RemoteFileWrite`] on `file`.
-pub(crate) fn write_private<T: Serialize>(
-    file: RemoteFile,
-    path: &Path,
-    value: &T,
+pub(crate) fn write_remote_file<FileContents: Serialize>(
+    remote_file: RemoteFile,
+    remote_file_path: &Path,
+    serializable_contents: &FileContents,
 ) -> Result<(), IpcError> {
-    write_owner_only(path, value).map_err(|detail| IpcError::RemoteFileWrite {
-        file,
-        path: path.display().to_string(),
-        detail,
+    write_owner_only(remote_file_path, serializable_contents).map_err(|error_detail| {
+        IpcError::RemoteFileWrite {
+            remote_file,
+            remote_file_path: remote_file_path.display().to_string(),
+            error_detail,
+        }
     })
 }
 
@@ -191,8 +221,11 @@ pub(crate) fn write_private<T: Serialize>(
 /// # Errors
 /// The text of the first step that failed: creating the directory, setting a
 /// mode, encoding `value`, or replacing the file.
-pub(crate) fn write_owner_only<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
-    if let Some(parent) = path
+pub(crate) fn write_owner_only<FileContents: Serialize>(
+    file_path: &Path,
+    serializable_contents: &FileContents,
+) -> Result<(), String> {
+    if let Some(parent) = file_path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
     {
@@ -205,13 +238,15 @@ pub(crate) fn write_owner_only<T: Serialize>(path: &Path, value: &T) -> Result<(
         }
     }
     #[cfg(unix)]
-    if path.exists() {
+    if file_path.exists() {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        std::fs::set_permissions(file_path, std::fs::Permissions::from_mode(0o600))
             .map_err(|error| error.to_string())?;
     }
-    let data = serde_json::to_vec(value).map_err(|error| error.to_string())?;
-    koshi_storage::atomic::write_atomic(path, &data).map_err(|error| error.to_string())
+    let serialized_file_bytes = serde_json::to_vec(serializable_contents)
+        .map_err(|serialization_error| serialization_error.to_string())?;
+    koshi_storage::atomic::write_atomic(file_path, &serialized_file_bytes)
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

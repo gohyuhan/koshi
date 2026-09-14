@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime};
 
 use clap::Parser;
 use koshi_core::client::ClientOrigin;
-use koshi_core::discovery::{ClientInfo, SessionInfo, SessionOverview};
+use koshi_core::discovery::{ClientDiscovery, SessionDiscovery, SessionOverview};
 use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
@@ -16,33 +16,36 @@ use koshi_ipc::remote_tokens::TokenEntry;
 use koshi_link::in_session::InSessionContext;
 use uuid::Uuid;
 
-use crate::cli::{parse_expiry, Cli, CliCommand, FormatArg};
+use crate::cli::{parse_expiry, Cli, CliCommand, OutputFormat};
 
 /// The one message every bad expiry value comes back with.
-const EXPECTED: &str = "expected a length such as 30s, 15m, 24h or 7d, or the word never";
+const EXPECTED_EXPIRY_ERROR: &str =
+    "expected a length such as 30s, 15m, 24h or 7d, or the word never";
 
 /// The parsed `share` subcommand of `argv`.
-fn share_command(argv: &[&str]) -> ShareCommand {
+fn parse_share_command(argv: &[&str]) -> ShareCommand {
     match Cli::try_parse_from(argv)
         .expect("argv must parse")
         .command
         .expect("argv must carry a subcommand")
     {
         CliCommand::Share { command } => command,
-        other => panic!("argv must parse as a share verb, got {other:?}"),
+        unexpected_cli_command => {
+            panic!("argv must parse as a share verb, got {unexpected_cli_command:?}")
+        }
     }
 }
 
 /// A fixed session id so scope cells and JSON are exact.
-fn fixed_session() -> SessionId {
+fn fixed_session_id() -> SessionId {
     SessionId::from_uuid(
         Uuid::parse_str("0192f0c1-2345-7000-8000-000000000001").expect("literal UUID is valid"),
     )
 }
 
 /// The moment `seconds` after the Unix epoch.
-fn at(seconds: u64) -> SystemTime {
-    SystemTime::UNIX_EPOCH + Duration::from_secs(seconds)
+fn timestamp_at_seconds(elapsed_seconds: u64) -> SystemTime {
+    SystemTime::UNIX_EPOCH + Duration::from_secs(elapsed_seconds)
 }
 
 #[test]
@@ -68,29 +71,35 @@ fn every_unit_of_an_expiry_parses_to_its_own_span() {
 
 #[test]
 fn an_expiry_that_is_not_a_count_and_a_unit_is_refused_with_one_message() {
-    assert_eq!(parse_expiry(""), Err(EXPECTED.to_string()));
-    assert_eq!(parse_expiry("12"), Err(EXPECTED.to_string()));
-    assert_eq!(parse_expiry("12x"), Err(EXPECTED.to_string()));
-    assert_eq!(parse_expiry("h"), Err(EXPECTED.to_string()));
-    assert_eq!(parse_expiry("-1h"), Err(EXPECTED.to_string()));
-    assert_eq!(parse_expiry("NEVER"), Err(EXPECTED.to_string()));
+    assert_eq!(parse_expiry(""), Err(EXPECTED_EXPIRY_ERROR.to_string()));
+    assert_eq!(parse_expiry("12"), Err(EXPECTED_EXPIRY_ERROR.to_string()));
+    assert_eq!(parse_expiry("12x"), Err(EXPECTED_EXPIRY_ERROR.to_string()));
+    assert_eq!(parse_expiry("h"), Err(EXPECTED_EXPIRY_ERROR.to_string()));
+    assert_eq!(parse_expiry("-1h"), Err(EXPECTED_EXPIRY_ERROR.to_string()));
+    assert_eq!(
+        parse_expiry("NEVER"),
+        Err(EXPECTED_EXPIRY_ERROR.to_string())
+    );
 }
 
 #[test]
 fn an_expiry_whose_unit_is_a_multi_byte_character_is_refused_and_never_panics() {
     // The unit is taken as a whole character, so a value ending in a
     // multi-byte one refuses instead of splitting the string mid-character.
-    assert_eq!(parse_expiry("30é"), Err(EXPECTED.to_string()));
-    assert_eq!(parse_expiry("30日"), Err(EXPECTED.to_string()));
-    assert_eq!(parse_expiry("é"), Err(EXPECTED.to_string()));
+    assert_eq!(parse_expiry("30é"), Err(EXPECTED_EXPIRY_ERROR.to_string()));
+    assert_eq!(parse_expiry("30日"), Err(EXPECTED_EXPIRY_ERROR.to_string()));
+    assert_eq!(parse_expiry("é"), Err(EXPECTED_EXPIRY_ERROR.to_string()));
 }
 
 #[test]
 fn an_expiry_wrapped_in_whitespace_is_refused() {
-    assert_eq!(parse_expiry(" 1h"), Err(EXPECTED.to_string()));
-    assert_eq!(parse_expiry("1 h"), Err(EXPECTED.to_string()));
-    assert_eq!(parse_expiry("1h "), Err(EXPECTED.to_string()));
-    assert_eq!(parse_expiry(" never"), Err(EXPECTED.to_string()));
+    assert_eq!(parse_expiry(" 1h"), Err(EXPECTED_EXPIRY_ERROR.to_string()));
+    assert_eq!(parse_expiry("1 h"), Err(EXPECTED_EXPIRY_ERROR.to_string()));
+    assert_eq!(parse_expiry("1h "), Err(EXPECTED_EXPIRY_ERROR.to_string()));
+    assert_eq!(
+        parse_expiry(" never"),
+        Err(EXPECTED_EXPIRY_ERROR.to_string())
+    );
 }
 
 #[test]
@@ -128,7 +137,7 @@ fn a_count_whose_unit_multiply_overflows_is_refused_rather_than_wrapping() {
     // the multiply by 86400 seconds is what does not.
     assert_eq!(
         parse_expiry("18446744073709551615d"),
-        Err(EXPECTED.to_string())
+        Err(EXPECTED_EXPIRY_ERROR.to_string())
     );
 }
 
@@ -145,11 +154,11 @@ fn a_huge_count_of_seconds_parses_because_seconds_need_no_multiply() {
 #[test]
 fn a_bare_grant_covers_every_session_and_lasts_a_day() {
     assert_eq!(
-        share_command(&["koshi", "share", "grant", "alice"]),
+        parse_share_command(&["koshi", "share", "grant", "alice"]),
         ShareCommand::Grant {
             identity: "alice".to_string(),
-            session: None,
-            expires: Expiry::After(Duration::from_secs(86_400)),
+            session_reference: None,
+            token_expiry: Expiry::After(Duration::from_secs(86_400)),
         }
     );
 }
@@ -157,7 +166,7 @@ fn a_bare_grant_covers_every_session_and_lasts_a_day() {
 #[test]
 fn a_grant_takes_a_session_name_and_a_never_expiry() {
     assert_eq!(
-        share_command(&[
+        parse_share_command(&[
             "koshi",
             "share",
             "grant",
@@ -169,8 +178,8 @@ fn a_grant_takes_a_session_name_and_a_never_expiry() {
         ]),
         ShareCommand::Grant {
             identity: "alice".to_string(),
-            session: Some(SessionRef::Name("quiet-lake".to_string())),
-            expires: Expiry::Never,
+            session_reference: Some(SessionReference::SessionName("quiet-lake".to_string())),
+            token_expiry: Expiry::Never,
         }
     );
 }
@@ -178,39 +187,41 @@ fn a_grant_takes_a_session_name_and_a_never_expiry() {
 #[test]
 fn a_listing_takes_the_json_format_flag() {
     assert_eq!(
-        share_command(&["koshi", "share", "list", "--format", "json"]),
+        parse_share_command(&["koshi", "share", "list", "--format", "json"]),
         ShareCommand::List {
-            session: None,
-            format: FormatArg::Json,
+            session_reference: None,
+            output_format: OutputFormat::Json,
         }
     );
 }
 
 #[test]
 fn a_grant_block_with_no_listen_address_names_the_config_key_that_sets_one() {
-    let token = ConnectionToken::new("f00d");
-    let rendered = output::render_share_grant(&token, "alice", &TokenScope::HostWide, false)
-        + &output::render_remote_ready("alice", &RemoteReady::NoAddress);
+    let connection_token = ConnectionToken::from_secret("f00d");
+    let rendered_output =
+        output::render_share_grant(&connection_token, "alice", &TokenScope::HostWide, false)
+            + &output::render_remote_ready("alice", &RemoteReady::NoAddress);
 
     assert_eq!(
-        rendered,
+        rendered_output,
         "anyone holding this token can run anything you can.\n\
          f00d\n\
          no remote listen address is set; add `remote-listen \"<host:port>\"` to koshi.kdl, then \
          run `koshi share grant` again.\n"
     );
-    assert_eq!(rendered.matches("f00d").count(), 1);
-    assert!(!rendered.contains("://"));
+    assert_eq!(rendered_output.matches("f00d").count(), 1);
+    assert!(!rendered_output.contains("://"));
 }
 
 #[test]
 fn a_grant_block_with_remote_access_left_off_says_the_token_cannot_connect_yet() {
-    let token = ConnectionToken::new("f00d");
-    let rendered = output::render_share_grant(&token, "alice", &TokenScope::HostWide, false)
-        + &output::render_remote_ready("alice", &RemoteReady::Off);
+    let connection_token = ConnectionToken::from_secret("f00d");
+    let rendered_output =
+        output::render_share_grant(&connection_token, "alice", &TokenScope::HostWide, false)
+            + &output::render_remote_ready("alice", &RemoteReady::Off);
 
     assert_eq!(
-        rendered,
+        rendered_output,
         "anyone holding this token can run anything you can.\n\
          f00d\n\
          remote access stays off; this token cannot be used to connect yet.\n"
@@ -219,17 +230,18 @@ fn a_grant_block_with_remote_access_left_off_says_the_token_cannot_connect_yet()
 
 #[test]
 fn a_grant_block_with_remote_access_on_ends_with_the_command_that_connects() {
-    let token = ConnectionToken::new("f00d");
-    let rendered = output::render_share_grant(&token, "alice", &TokenScope::HostWide, false)
-        + &output::render_remote_ready(
-            "alice",
-            &RemoteReady::On {
-                address: "laptop.local:7654".to_string(),
-            },
-        );
+    let connection_token = ConnectionToken::from_secret("f00d");
+    let rendered_output =
+        output::render_share_grant(&connection_token, "alice", &TokenScope::HostWide, false)
+            + &output::render_remote_ready(
+                "alice",
+                &RemoteReady::On {
+                    remote_listen_address: "laptop.local:7654".to_string(),
+                },
+            );
 
     assert_eq!(
-        rendered,
+        rendered_output,
         "anyone holding this token can run anything you can.\n\
          f00d\n\
          connect from another machine:\n\
@@ -238,19 +250,22 @@ fn a_grant_block_with_remote_access_on_ends_with_the_command_that_connects() {
     );
     // The secret is printed once, on its own line, and never inside the
     // command a reader would paste into a shell.
-    assert_eq!(rendered.matches("f00d").count(), 1);
-    assert!(!rendered.contains("--remote laptop.local:7654 f00d"));
+    assert_eq!(rendered_output.matches("f00d").count(), 1);
+    assert!(!rendered_output.contains("--remote laptop.local:7654 f00d"));
 }
 
 #[test]
 fn a_grant_block_that_replaced_one_opens_with_the_grant_that_stopped() {
-    let token = ConnectionToken::new("f00d");
-    let rendered =
-        output::render_share_grant(&token, "alice", &TokenScope::Session(fixed_session()), true)
-            + &output::render_remote_ready("alice", &RemoteReady::NoAddress);
+    let connection_token = ConnectionToken::from_secret("f00d");
+    let rendered_output = output::render_share_grant(
+        &connection_token,
+        "alice",
+        &TokenScope::Session(fixed_session_id()),
+        true,
+    ) + &output::render_remote_ready("alice", &RemoteReady::NoAddress);
 
     assert_eq!(
-        rendered,
+        rendered_output,
         "the token alice already held on session-0192f0c1-2345-7000-8000-000000000001 stopped \
          working.\n\
          anyone holding this token can run anything you can.\n\
@@ -263,7 +278,10 @@ fn a_grant_block_that_replaced_one_opens_with_the_grant_that_stopped() {
 #[test]
 fn a_revoke_names_every_grant_it_stopped() {
     assert_eq!(
-        output::render_share_revoke(&[TokenScope::HostWide, TokenScope::Session(fixed_session())]),
+        output::render_share_revoke(&[
+            TokenScope::HostWide,
+            TokenScope::Session(fixed_session_id()),
+        ]),
         "the grant on host stopped working.\n\
          the grant on session-0192f0c1-2345-7000-8000-000000000001 stopped working.\n"
     );
@@ -278,23 +296,23 @@ fn a_revoke_that_stopped_nothing_says_the_identity_holds_no_grant() {
 }
 
 /// A live host-wide grant and a revoked session-scoped one.
-fn two_entries() -> Vec<TokenEntry> {
+fn build_sample_token_entries() -> Vec<TokenEntry> {
     vec![
         TokenEntry {
             identity: "alice".to_string(),
             scope: TokenScope::HostWide,
-            issued_at: at(1_000),
-            expires_at: Some(at(87_400)),
-            last_used_at: Some(at(2_000)),
+            issued_at: timestamp_at_seconds(1_000),
+            expires_at: Some(timestamp_at_seconds(87_400)),
+            last_used_at: Some(timestamp_at_seconds(2_000)),
             revoked_at: None,
         },
         TokenEntry {
             identity: "bob".to_string(),
-            scope: TokenScope::Session(fixed_session()),
-            issued_at: at(3_000),
+            scope: TokenScope::Session(fixed_session_id()),
+            issued_at: timestamp_at_seconds(3_000),
             expires_at: None,
             last_used_at: None,
-            revoked_at: Some(at(4_000)),
+            revoked_at: Some(timestamp_at_seconds(4_000)),
         },
     ]
 }
@@ -302,7 +320,7 @@ fn two_entries() -> Vec<TokenEntry> {
 #[test]
 fn a_listing_renders_one_table_row_per_grant_with_absent_times_as_a_dash() {
     assert_eq!(
-        output::render_share_list(&two_entries(), FormatArg::Table),
+        output::render_share_list(&build_sample_token_entries(), OutputFormat::Table),
         "identity  scope                                         issued  expires  last_used  revoked\n\
          alice     host                                          1000    87400    2000       -\n\
          bob       session-0192f0c1-2345-7000-8000-000000000001  3000    -        -          4000\n"
@@ -312,7 +330,7 @@ fn a_listing_renders_one_table_row_per_grant_with_absent_times_as_a_dash() {
 #[test]
 fn a_listing_renders_the_serde_form_of_every_grant_as_json() {
     assert_eq!(
-        output::render_share_list(&two_entries(), FormatArg::Json),
+        output::render_share_list(&build_sample_token_entries(), OutputFormat::Json),
         r#"[
   {
     "identity": "alice",
@@ -355,17 +373,18 @@ fn a_listing_renders_the_serde_form_of_every_grant_as_json() {
 #[test]
 fn an_empty_listing_is_the_header_row_alone_and_an_empty_json_array() {
     assert_eq!(
-        output::render_share_list(&[], FormatArg::Table),
+        output::render_share_list(&[], OutputFormat::Table),
         "identity  scope  issued  expires  last_used  revoked\n"
     );
-    assert_eq!(output::render_share_list(&[], FormatArg::Json), "[]\n");
+    assert_eq!(output::render_share_list(&[], OutputFormat::Json), "[]\n");
 }
 
 #[test]
 fn the_secret_block_stands_on_its_own_and_says_nothing_about_connecting() {
     // The block renders whole on its own, and names nothing about connecting.
-    let token = ConnectionToken::new("f00d");
-    let secret_block = output::render_share_grant(&token, "alice", &TokenScope::HostWide, false);
+    let connection_token = ConnectionToken::from_secret("f00d");
+    let secret_block =
+        output::render_share_grant(&connection_token, "alice", &TokenScope::HostWide, false);
 
     assert_eq!(
         secret_block,
@@ -382,15 +401,15 @@ fn the_secret_block_stands_on_its_own_and_says_nothing_about_connecting() {
 #[test]
 fn an_identity_shaped_like_an_address_is_not_offered_as_a_saved_name() {
     // `desk:22` has the `host:port` shape, so the flag is left off.
-    let rendered = output::render_remote_ready(
+    let rendered_output = output::render_remote_ready(
         "desk:22",
         &RemoteReady::On {
-            address: "laptop.local:7654".to_string(),
+            remote_listen_address: "laptop.local:7654".to_string(),
         },
     );
 
     assert_eq!(
-        rendered,
+        rendered_output,
         "connect from another machine:\n  \
          koshi attach --remote laptop.local:7654 [SESSION]\n\
          set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n"
@@ -400,30 +419,30 @@ fn an_identity_shaped_like_an_address_is_not_offered_as_a_saved_name() {
 #[test]
 fn an_identity_with_a_space_in_it_is_not_offered_as_a_saved_name() {
     // Two words, so the flag is left off.
-    let rendered = output::render_remote_ready(
+    let rendered_output = output::render_remote_ready(
         "ada lovelace",
         &RemoteReady::On {
-            address: "laptop.local:7654".to_string(),
+            remote_listen_address: "laptop.local:7654".to_string(),
         },
     );
 
     assert!(
-        !rendered.contains("--save-as"),
-        "a name that cannot be typed as one word is not offered: {rendered}"
+        !rendered_output.contains("--save-as"),
+        "a name that cannot be typed as one word is not offered: {rendered_output}"
     );
 }
 
 #[test]
 fn a_plain_identity_is_still_offered_as_the_saved_name() {
-    let rendered = output::render_remote_ready(
+    let rendered_output = output::render_remote_ready(
         "alice",
         &RemoteReady::On {
-            address: "laptop.local:7654".to_string(),
+            remote_listen_address: "laptop.local:7654".to_string(),
         },
     );
 
     assert_eq!(
-        rendered,
+        rendered_output,
         "connect from another machine:\n  \
          koshi attach --remote laptop.local:7654 --save-as alice [SESSION]\n\
          set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n"
@@ -432,27 +451,27 @@ fn a_plain_identity_is_still_offered_as_the_saved_name() {
 
 #[test]
 fn a_router_that_could_not_answer_leaves_the_state_unread_rather_than_off() {
-    // `ready_or_unknown` maps a failed request to `Unknown`, and passes every
+    // `resolve_remote_ready_or_unknown` maps a failed request to `Unknown`, and passes every
     // answer through unchanged.
-    let failed = ready_or_unknown(Err(CliError::IpcUnavailable {
+    let failed_remote_ready = resolve_remote_ready_or_unknown(Err(CliError::IpcUnavailable {
         detail: "the router is not running".to_string(),
     }));
-    assert_eq!(failed, RemoteReady::Unknown);
+    assert_eq!(failed_remote_ready, RemoteReady::Unknown);
 
-    let answered = ready_or_unknown(Ok(RemoteReady::On {
-        address: "laptop.local:7654".to_string(),
+    let answered_remote_ready = resolve_remote_ready_or_unknown(Ok(RemoteReady::On {
+        remote_listen_address: "laptop.local:7654".to_string(),
     }));
     assert_eq!(
-        answered,
+        answered_remote_ready,
         RemoteReady::On {
-            address: "laptop.local:7654".to_string()
+            remote_listen_address: "laptop.local:7654".to_string()
         },
         "an answer is passed through as it stands"
     );
 
-    let off = ready_or_unknown(Ok(RemoteReady::Off));
+    let off_remote_ready = resolve_remote_ready_or_unknown(Ok(RemoteReady::Off));
     assert_eq!(
-        off,
+        off_remote_ready,
         RemoteReady::Off,
         "including a machine that really is off"
     );
@@ -480,7 +499,7 @@ fn a_port_held_by_something_else_says_what_to_run_to_try_again() {
     let rendered = output::render_remote_ready(
         "alice",
         &RemoteReady::Blocked {
-            address: "laptop.local:7654".to_string(),
+            remote_listen_address: "laptop.local:7654".to_string(),
         },
     );
 
@@ -492,51 +511,55 @@ fn a_port_held_by_something_else_says_what_to_run_to_try_again() {
     );
 }
 
-/// What one sink has been told so far.
+/// What one output sink has been told so far.
 #[derive(Default)]
-struct Written {
+struct WrittenOutput {
     /// Every byte written, in order.
-    bytes: Vec<u8>,
+    written_bytes: Vec<u8>,
     /// How many of them had been written when `flush` was last called, or
     /// `None` when it never was.
-    flushed: Option<usize>,
+    flushed_byte_count: Option<usize>,
 }
 
-/// A sink the test can read while `write_grant` is still writing to it, and
+/// A sink the test can read while `write_share_grant` is still writing to it, and
 /// which remembers where its flushes fell.
 #[derive(Clone)]
-struct Recorder(std::rc::Rc<std::cell::RefCell<Written>>);
+struct OutputRecorder(std::rc::Rc<std::cell::RefCell<WrittenOutput>>);
 
-impl Recorder {
-    fn new() -> Recorder {
-        Recorder(std::rc::Rc::new(
-            std::cell::RefCell::new(Written::default()),
-        ))
+impl OutputRecorder {
+    fn new() -> OutputRecorder {
+        OutputRecorder(std::rc::Rc::new(std::cell::RefCell::new(
+            WrittenOutput::default(),
+        )))
     }
 
     /// Everything written so far, as text.
-    fn text(&self) -> String {
-        String::from_utf8(self.0.borrow().bytes.clone()).expect("the bytes written so far")
+    fn get_written_text(&self) -> String {
+        String::from_utf8(self.0.borrow().written_bytes.clone()).expect("the bytes written so far")
     }
 
     /// Everything that had been flushed by the last flush, as text. Empty when
     /// nothing has been flushed.
-    fn flushed_text(&self) -> String {
-        let written = self.0.borrow();
-        let upto = written.flushed.unwrap_or(0);
-        String::from_utf8(written.bytes[..upto].to_vec()).expect("the bytes flushed so far")
+    fn get_flushed_text(&self) -> String {
+        let written_output = self.0.borrow();
+        let flushed_byte_count = written_output.flushed_byte_count.unwrap_or(0);
+        String::from_utf8(written_output.written_bytes[..flushed_byte_count].to_vec())
+            .expect("the bytes flushed so far")
     }
 }
 
-impl std::io::Write for Recorder {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.borrow_mut().bytes.extend_from_slice(bytes);
-        Ok(bytes.len())
+impl std::io::Write for OutputRecorder {
+    fn write(&mut self, output_bytes: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .borrow_mut()
+            .written_bytes
+            .extend_from_slice(output_bytes);
+        Ok(output_bytes.len())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        let mut written = self.0.borrow_mut();
-        written.flushed = Some(written.bytes.len());
+        let mut written_output = self.0.borrow_mut();
+        written_output.flushed_byte_count = Some(written_output.written_bytes.len());
         Ok(())
     }
 }
@@ -545,31 +568,31 @@ impl std::io::Write for Recorder {
 fn the_secret_is_written_before_anything_that_could_prompt_or_fail() {
     // Read from inside the closure: the secret is in `out` before `ready`
     // runs.
-    let token = ConnectionToken::new("f00d");
-    let mut out = Recorder::new();
-    let seen = out.clone();
-    let asked_after = std::cell::RefCell::new(String::new());
+    let token = ConnectionToken::from_secret("f00d");
+    let mut output_recorder = OutputRecorder::new();
+    let recorder_snapshot = output_recorder.clone();
+    let output_seen_before_prompt = std::cell::RefCell::new(String::new());
 
-    write_grant(
-        &mut out,
+    write_share_grant(
+        &mut output_recorder,
         &token,
         "alice",
         &TokenScope::HostWide,
         false,
         || {
-            *asked_after.borrow_mut() = seen.text();
+            *output_seen_before_prompt.borrow_mut() = recorder_snapshot.get_written_text();
             RemoteReady::Off
         },
     )
     .expect("writing to a buffer");
 
     assert!(
-        asked_after.borrow().contains("f00d"),
+        output_seen_before_prompt.borrow().contains("f00d"),
         "the secret was already written when the offer ran, and got: {:?}",
-        asked_after.borrow()
+        output_seen_before_prompt.borrow()
     );
     assert_eq!(
-        out.text(),
+        output_recorder.get_written_text(),
         "anyone holding this token can run anything you can.\n\
          f00d\n\
          remote access stays off; this token cannot be used to connect yet.\n"
@@ -580,26 +603,26 @@ fn the_secret_is_written_before_anything_that_could_prompt_or_fail() {
 fn the_secret_is_flushed_before_anything_that_could_prompt_or_fail() {
     // Read from inside the closure: the whole secret block has been flushed,
     // not only written.
-    let token = ConnectionToken::new("f00d");
-    let mut out = Recorder::new();
-    let seen = out.clone();
-    let flushed_when_asked = std::cell::RefCell::new(String::new());
+    let token = ConnectionToken::from_secret("f00d");
+    let mut output_recorder = OutputRecorder::new();
+    let recorder_snapshot = output_recorder.clone();
+    let flushed_output_before_prompt = std::cell::RefCell::new(String::new());
 
-    write_grant(
-        &mut out,
+    write_share_grant(
+        &mut output_recorder,
         &token,
         "alice",
         &TokenScope::HostWide,
         false,
         || {
-            *flushed_when_asked.borrow_mut() = seen.flushed_text();
+            *flushed_output_before_prompt.borrow_mut() = recorder_snapshot.get_flushed_text();
             RemoteReady::Off
         },
     )
     .expect("writing to a buffer");
 
     assert_eq!(
-        *flushed_when_asked.borrow(),
+        *flushed_output_before_prompt.borrow(),
         "anyone holding this token can run anything you can.\n\
          f00d\n",
         "the whole secret block was flushed before the offer ran"
@@ -608,40 +631,52 @@ fn the_secret_is_flushed_before_anything_that_could_prompt_or_fail() {
 
 // --- Where a share verb may run ---
 
-/// One attached client row at `id`, connected from `origin`.
-fn client_row(id: ClientId, origin: Option<ClientOrigin>) -> ClientInfo {
-    ClientInfo {
-        id,
+/// One attached client record at `client_id`, connected from `client_origin`.
+fn build_client_discovery(
+    client_id: ClientId,
+    client_origin: Option<ClientOrigin>,
+) -> ClientDiscovery {
+    ClientDiscovery {
+        client_id,
         session_id: SessionId::new(),
         attached_at: SystemTime::UNIX_EPOCH,
-        viewport_size: Size { cols: 80, rows: 24 },
-        active_tab: TabId::new(),
-        focused_pane: None,
-        lock_state: LockMode::Normal,
-        origin,
+        viewport_size: Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        active_tab_id: TabId::new(),
+        focused_pane_id: None,
+        lock_mode: LockMode::Normal,
+        origin: client_origin,
         pane_area: None,
     }
 }
 
-/// One session overview holding `clients`, with no tabs and no panes.
-fn overview_holding(session_id: SessionId, clients: Vec<ClientInfo>) -> SessionOverview {
+/// One session overview holding `client_records`, with no tabs and no panes.
+fn build_session_overview_with_clients(
+    session_id: SessionId,
+    client_records: Vec<ClientDiscovery>,
+) -> SessionOverview {
     SessionOverview {
-        session: SessionInfo {
-            id: session_id,
-            name: "quiet-lake".to_string(),
+        session: SessionDiscovery {
+            session_id,
+            session_name: "quiet-lake".to_string(),
             created_at: SystemTime::UNIX_EPOCH,
-            attached_clients: clients.iter().map(|client| client.id).collect(),
+            attached_client_ids: client_records
+                .iter()
+                .map(|client_record| client_record.client_id)
+                .collect(),
             pane_count: 0,
         },
         tabs: Vec::new(),
         panes: Vec::new(),
-        clients,
+        clients: client_records,
     }
 }
 
 /// A pane environment naming `session_id` and no designated client, which is
 /// what a session server's first pane carries.
-fn pane_in(session_id: SessionId) -> InSessionContext {
+fn build_in_session_context(session_id: SessionId) -> InSessionContext {
     InSessionContext {
         session_id,
         client_id: None,
@@ -652,37 +687,45 @@ fn pane_in(session_id: SessionId) -> InSessionContext {
 #[test]
 fn a_pane_of_a_session_nobody_watches_from_elsewhere_keeps_share() {
     let session_id = SessionId::new();
-    let overview = overview_holding(
+    let session_overview = build_session_overview_with_clients(
         session_id,
         vec![
-            client_row(ClientId::new(), Some(ClientOrigin::Local)),
-            client_row(ClientId::new(), Some(ClientOrigin::Local)),
+            build_client_discovery(ClientId::new(), Some(ClientOrigin::Local)),
+            build_client_discovery(ClientId::new(), Some(ClientOrigin::Local)),
         ],
     );
 
-    refuse_while_watched_from_another_machine(&pane_in(session_id), |_| Ok(overview.clone()))
-        .expect("a session nobody reaches over the network keeps `koshi share`");
+    refuse_while_watched_from_another_machine(&build_in_session_context(session_id), |_| {
+        Ok(session_overview.clone())
+    })
+    .expect("a session nobody reaches over the network keeps `koshi share`");
 }
 
 #[test]
 fn a_pane_of_a_remotely_watched_session_refuses_share() {
     let session_id = SessionId::new();
-    let overview = overview_holding(
+    let session_overview = build_session_overview_with_clients(
         session_id,
         vec![
-            client_row(ClientId::new(), Some(ClientOrigin::Local)),
-            client_row(ClientId::new(), Some(ClientOrigin::Remote)),
+            build_client_discovery(ClientId::new(), Some(ClientOrigin::Local)),
+            build_client_discovery(ClientId::new(), Some(ClientOrigin::Remote)),
         ],
     );
 
-    let error = refuse_while_watched_from_another_machine(&pane_in(session_id), |asked| {
-        assert_eq!(asked, session_id, "the pane's own session is the one asked");
-        Ok(overview.clone())
-    })
+    let share_error = refuse_while_watched_from_another_machine(
+        &build_in_session_context(session_id),
+        |asked_session_id| {
+            assert_eq!(
+                asked_session_id, session_id,
+                "the pane's own session is the one asked"
+            );
+            Ok(session_overview.clone())
+        },
+    )
     .expect_err("a remotely watched session refuses the verb");
 
-    let CliError::CommandRejected { reason, help } = error else {
-        panic!("expected a rejection, got {error:?}");
+    let CliError::CommandRejected { reason, help } = share_error else {
+        panic!("expected a rejection, got {share_error:?}");
     };
     assert_eq!(reason, RejectReason::Unauthorized);
     assert!(
@@ -697,14 +740,19 @@ fn a_client_whose_origin_the_session_did_not_answer_refuses_share() {
     // A session server built before the origin field serves rows with no
     // origin. That is not a row saying `Local`.
     let session_id = SessionId::new();
-    let overview = overview_holding(session_id, vec![client_row(ClientId::new(), None)]);
+    let session_overview = build_session_overview_with_clients(
+        session_id,
+        vec![build_client_discovery(ClientId::new(), None)],
+    );
 
-    let error =
-        refuse_while_watched_from_another_machine(&pane_in(session_id), |_| Ok(overview.clone()))
-            .expect_err("an unanswered origin refuses the verb");
+    let share_error =
+        refuse_while_watched_from_another_machine(&build_in_session_context(session_id), |_| {
+            Ok(session_overview.clone())
+        })
+        .expect_err("an unanswered origin refuses the verb");
 
-    let CliError::CommandRejected { reason, help } = error else {
-        panic!("expected a rejection, got {error:?}");
+    let CliError::CommandRejected { reason, help } = share_error else {
+        panic!("expected a rejection, got {share_error:?}");
     };
     assert_eq!(reason, RejectReason::Unauthorized);
     assert!(
@@ -718,8 +766,8 @@ fn a_client_whose_origin_the_session_did_not_answer_refuses_share() {
 fn a_pane_of_a_session_nobody_is_attached_to_keeps_share() {
     let session_id = SessionId::new();
 
-    refuse_while_watched_from_another_machine(&pane_in(session_id), |_| {
-        Ok(overview_holding(session_id, Vec::new()))
+    refuse_while_watched_from_another_machine(&build_in_session_context(session_id), |_| {
+        Ok(build_session_overview_with_clients(session_id, Vec::new()))
     })
     .expect("a session with no attached client keeps `koshi share`");
 }
@@ -731,15 +779,16 @@ fn a_session_that_cannot_be_asked_refuses_share() {
     // anyone is watching this pane.
     let session_id = SessionId::new();
 
-    let error = refuse_while_watched_from_another_machine(&pane_in(session_id), |_| {
-        Err(CliError::SessionNotFound {
-            session: session_id.to_string(),
+    let share_error =
+        refuse_while_watched_from_another_machine(&build_in_session_context(session_id), |_| {
+            Err(CliError::SessionNotFound {
+                session_name: session_id.to_string(),
+            })
         })
-    })
-    .expect_err("a session that cannot be asked refuses the verb");
+        .expect_err("a session that cannot be asked refuses the verb");
 
-    let CliError::CommandRejected { reason, help } = error else {
-        panic!("expected a rejection, got {error:?}");
+    let CliError::CommandRejected { reason, help } = share_error else {
+        panic!("expected a rejection, got {share_error:?}");
     };
     assert_eq!(reason, RejectReason::Unauthorized);
     assert!(
@@ -755,25 +804,25 @@ fn a_session_that_cannot_be_asked_refuses_share() {
 /// Opens no socket and starts no process, so it behaves the same on every
 /// platform and can never reach `spawn_router_detached`.
 struct StandInRouter {
-    entries: Vec<TokenEntry>,
-    refuse_host_wide: bool,
-    revokes: Vec<Option<TokenScope>>,
+    token_entries: Vec<TokenEntry>,
+    should_refuse_host_wide: bool,
+    requested_revoke_scopes: Vec<Option<TokenScope>>,
 }
 
 impl StandInRouter {
-    /// A router holding `entries`, answering every `RevokeToken`.
-    fn new(entries: Vec<TokenEntry>) -> Self {
+    /// A router holding `token_entries`, answering every `RevokeToken`.
+    fn from_token_entries(token_entries: Vec<TokenEntry>) -> Self {
         StandInRouter {
-            entries,
-            refuse_host_wide: false,
-            revokes: Vec::new(),
+            token_entries,
+            should_refuse_host_wide: false,
+            requested_revoke_scopes: Vec::new(),
         }
     }
 
     /// The same router, refusing a `RevokeToken` that names
     /// [`TokenScope::HostWide`].
-    fn refusing_host_wide(mut self) -> Self {
-        self.refuse_host_wide = true;
+    fn with_host_wide_refusal(mut self) -> Self {
+        self.should_refuse_host_wide = true;
         self
     }
 
@@ -781,51 +830,66 @@ impl StandInRouter {
     ///
     /// `ListTokens` answers with the held entries. `RevokeToken` answers with
     /// the scope of each held grant it stopped, by the rule
-    /// [`TokenStore::revoke`](koshi_ipc::remote_tokens::TokenStore::revoke)
+    /// [`TokenStore::revoke_token_grants`](koshi_ipc::remote_tokens::TokenStore::revoke_token_grants)
     /// uses: the identity matches, the grant still stands, and a named scope
     /// matches exactly. A request that matches nothing answers `Revoked([])`,
     /// which is what the router sends when a `--session` revoke finds no grant
     /// scoped to that session.
-    fn ask(&mut self, kind: RouterRequestKind) -> Result<RouterResult, CliError> {
-        match kind {
-            RouterRequestKind::ListTokens { .. } => Ok(RouterResult::Tokens(self.entries.clone())),
+    fn submit_router_request(
+        &mut self,
+        router_request_kind: RouterRequestKind,
+    ) -> Result<RouterResult, CliError> {
+        match router_request_kind {
+            RouterRequestKind::ListTokens { .. } => {
+                Ok(RouterResult::Tokens(self.token_entries.clone()))
+            }
             RouterRequestKind::RevokeToken { identity, scope } => {
-                self.revokes.push(scope.clone());
-                if self.refuse_host_wide && scope == Some(TokenScope::HostWide) {
+                self.requested_revoke_scopes.push(scope.clone());
+                if self.should_refuse_host_wide && scope == Some(TokenScope::HostWide) {
                     return Ok(RouterResult::Error(IpcErrorPayload {
                         code: IpcErrorCode::Unknown,
                         message: "the token store could not be written".to_string(),
                     }));
                 }
-                let now = SystemTime::now();
-                let stopped: Vec<TokenScope> = self
-                    .entries
+                let current_time = SystemTime::now();
+                let revoked_scopes: Vec<TokenScope> = self
+                    .token_entries
                     .iter()
-                    .filter(|entry| {
-                        entry.identity == identity
-                            && entry.is_live(now)
-                            && scope.as_ref().is_none_or(|wanted| *wanted == entry.scope)
+                    .filter(|token_entry| {
+                        token_entry.identity == identity
+                            && token_entry.is_active_at(current_time)
+                            && scope
+                                .as_ref()
+                                .is_none_or(|requested_scope| *requested_scope == token_entry.scope)
                     })
-                    .map(|entry| entry.scope.clone())
+                    .map(|token_entry| token_entry.scope.clone())
                     .collect();
-                self.entries.retain(|entry| {
-                    entry.identity != identity
-                        || scope.as_ref().is_some_and(|wanted| *wanted != entry.scope)
+                self.token_entries.retain(|token_entry| {
+                    token_entry.identity != identity
+                        || scope
+                            .as_ref()
+                            .is_some_and(|requested_scope| *requested_scope != token_entry.scope)
                 });
-                Ok(RouterResult::Revoked(stopped))
+                Ok(RouterResult::Revoked(revoked_scopes))
             }
-            other => panic!("unexpected control-plane request: {other:?}"),
+            unexpected_router_request => {
+                panic!("unexpected control-plane request: {unexpected_router_request:?}")
+            }
         }
     }
 }
 
 /// One token listing row, live unless `expires_at` is already past.
-fn token_entry(identity: &str, scope: TokenScope, expires_at: Option<SystemTime>) -> TokenEntry {
+fn build_token_entry(
+    identity: &str,
+    token_scope: TokenScope,
+    expiration_time: Option<SystemTime>,
+) -> TokenEntry {
     TokenEntry {
         identity: identity.to_string(),
-        scope,
+        scope: token_scope,
         issued_at: SystemTime::UNIX_EPOCH,
-        expires_at,
+        expires_at: expiration_time,
         last_used_at: None,
         revoked_at: None,
     }
@@ -845,38 +909,43 @@ fn the_host_wide_warning_names_the_grant_and_what_stopping_both_costs() {
     );
 }
 
-/// Run [`revoke`] for `identity` narrowed to `session` against `router`,
-/// answering the confirm with `answer`, and hand back the scope each
+/// Run [`revoke_share_grants`] for `identity` narrowed to `session_scope`
+/// against `stand_in_router`, answering the confirm with `confirm_answer`, and
+/// hand back each requested revoke scope.
 /// `RevokeToken` named.
-fn revoke_against(
+fn run_session_revoke(
     identity: &str,
-    session: TokenScope,
-    mut router: StandInRouter,
-    answer: bool,
+    session_scope: TokenScope,
+    mut stand_in_router: StandInRouter,
+    confirm_answer: bool,
 ) -> Vec<Option<TokenScope>> {
-    revoke(
+    revoke_share_grants(
         identity,
-        Some(&session),
-        |_| answer,
-        |kind| router.ask(kind),
+        Some(&session_scope),
+        |_| confirm_answer,
+        |router_request_kind| stand_in_router.submit_router_request(router_request_kind),
     )
     .expect("the router answers");
-    router.revokes
+    stand_in_router.requested_revoke_scopes
 }
 
 #[test]
 fn a_confirmed_session_revoke_stops_the_host_wide_grant_with_it() {
-    let session = TokenScope::Session(SessionId::new());
-    let served = revoke_against(
+    let session_scope = TokenScope::Session(SessionId::new());
+    let requested_revoke_scopes = run_session_revoke(
         "alice",
-        session.clone(),
-        StandInRouter::new(vec![token_entry("alice", TokenScope::HostWide, None)]),
+        session_scope.clone(),
+        StandInRouter::from_token_entries(vec![build_token_entry(
+            "alice",
+            TokenScope::HostWide,
+            None,
+        )]),
         true,
     );
 
     assert_eq!(
-        served,
-        vec![Some(session), Some(TokenScope::HostWide)],
+        requested_revoke_scopes,
+        vec![Some(session_scope), Some(TokenScope::HostWide)],
         "the session grant stops first, then the host-wide one that reaches it"
     );
 }
@@ -886,81 +955,97 @@ fn a_session_revoke_that_stops_nothing_still_cascades_to_the_host_wide_grant() {
     // The identity holds only a host-wide grant, so the router answers the
     // session revoke with `Revoked([])`. The cascade is decided by what the
     // listing holds, not by what the first revoke stopped.
-    let session = TokenScope::Session(SessionId::new());
-    let served = revoke_against(
+    let session_scope = TokenScope::Session(SessionId::new());
+    let requested_revoke_scopes = run_session_revoke(
         "alice",
-        session.clone(),
-        StandInRouter::new(vec![token_entry("alice", TokenScope::HostWide, None)]),
+        session_scope.clone(),
+        StandInRouter::from_token_entries(vec![build_token_entry(
+            "alice",
+            TokenScope::HostWide,
+            None,
+        )]),
         true,
     );
 
     assert_eq!(
-        served,
-        vec![Some(session), Some(TokenScope::HostWide)],
+        requested_revoke_scopes,
+        vec![Some(session_scope), Some(TokenScope::HostWide)],
         "nothing stopped on the session scope, and the host-wide grant still stopped"
     );
 }
 
 #[test]
 fn a_refused_confirm_stops_neither_grant() {
-    let served = revoke_against(
+    let requested_revoke_scopes = run_session_revoke(
         "alice",
         TokenScope::Session(SessionId::new()),
-        StandInRouter::new(vec![token_entry("alice", TokenScope::HostWide, None)]),
-        false,
-    );
-
-    assert_eq!(served, Vec::new(), "a no leaves both grants standing");
-}
-
-#[test]
-fn a_session_revoke_with_no_host_wide_grant_asks_nothing_and_stops_that_one() {
-    let session = TokenScope::Session(SessionId::new());
-    let served = revoke_against(
-        "alice",
-        session.clone(),
-        StandInRouter::new(vec![token_entry("bob", TokenScope::HostWide, None)]),
+        StandInRouter::from_token_entries(vec![build_token_entry(
+            "alice",
+            TokenScope::HostWide,
+            None,
+        )]),
         false,
     );
 
     assert_eq!(
-        served,
-        vec![Some(session)],
+        requested_revoke_scopes,
+        Vec::new(),
+        "a no leaves both grants standing"
+    );
+}
+
+#[test]
+fn a_session_revoke_with_no_host_wide_grant_asks_nothing_and_stops_that_one() {
+    let session_scope = TokenScope::Session(SessionId::new());
+    let requested_revoke_scopes = run_session_revoke(
+        "alice",
+        session_scope.clone(),
+        StandInRouter::from_token_entries(vec![build_token_entry(
+            "bob",
+            TokenScope::HostWide,
+            None,
+        )]),
+        false,
+    );
+
+    assert_eq!(
+        requested_revoke_scopes,
+        vec![Some(session_scope)],
         "another identity's host-wide grant prompts nothing, and the answer is not asked for"
     );
 }
 
 #[test]
 fn a_revoked_host_wide_grant_prompts_nothing() {
-    let session = TokenScope::Session(SessionId::new());
-    let mut entry = token_entry("alice", TokenScope::HostWide, None);
-    entry.revoked_at = Some(SystemTime::UNIX_EPOCH);
-    let served = revoke_against(
+    let session_scope = TokenScope::Session(SessionId::new());
+    let mut revoked_token_entry = build_token_entry("alice", TokenScope::HostWide, None);
+    revoked_token_entry.revoked_at = Some(SystemTime::UNIX_EPOCH);
+    let requested_revoke_scopes = run_session_revoke(
         "alice",
-        session.clone(),
-        StandInRouter::new(vec![entry]),
+        session_scope.clone(),
+        StandInRouter::from_token_entries(vec![revoked_token_entry]),
         false,
     );
 
-    assert_eq!(served, vec![Some(session)]);
+    assert_eq!(requested_revoke_scopes, vec![Some(session_scope)]);
 }
 
 #[test]
 fn an_expired_host_wide_grant_prompts_nothing() {
-    let session = TokenScope::Session(SessionId::new());
-    let expired = SystemTime::now() - Duration::from_secs(60);
-    let served = revoke_against(
+    let session_scope = TokenScope::Session(SessionId::new());
+    let expired_time = SystemTime::now() - Duration::from_secs(60);
+    let requested_revoke_scopes = run_session_revoke(
         "alice",
-        session.clone(),
-        StandInRouter::new(vec![token_entry(
+        session_scope.clone(),
+        StandInRouter::from_token_entries(vec![build_token_entry(
             "alice",
             TokenScope::HostWide,
-            Some(expired),
+            Some(expired_time),
         )]),
         false,
     );
 
-    assert_eq!(served, vec![Some(session)]);
+    assert_eq!(requested_revoke_scopes, vec![Some(session_scope)]);
 }
 
 #[test]
@@ -968,43 +1053,56 @@ fn a_refused_second_revoke_reports_the_grant_left_standing() {
     // The session grant stopped, then the router refused the host-wide one. The
     // operator is half done, so the answer names what still stands and the
     // command that finishes it.
-    let session = TokenScope::Session(SessionId::new());
-    let mut router = StandInRouter::new(vec![token_entry("alice", TokenScope::HostWide, None)])
-        .refusing_host_wide();
+    let session_scope = TokenScope::Session(SessionId::new());
+    let mut stand_in_router = StandInRouter::from_token_entries(vec![build_token_entry(
+        "alice",
+        TokenScope::HostWide,
+        None,
+    )])
+    .with_host_wide_refusal();
 
-    let error = revoke("alice", Some(&session), |_| true, |kind| router.ask(kind))
-        .expect_err("the second revoke was refused");
+    let revoke_error = revoke_share_grants(
+        "alice",
+        Some(&session_scope),
+        |_| true,
+        |router_request_kind| stand_in_router.submit_router_request(router_request_kind),
+    )
+    .expect_err("the second revoke was refused");
 
-    let message = error.to_string();
+    let error_message = revoke_error.to_string();
     assert!(
-        message.contains("alice's host-wide grant is still standing"),
-        "the answer names what survived: {message}"
+        error_message.contains("alice's host-wide grant is still standing"),
+        "the answer names what survived: {error_message}"
     );
     assert!(
-        message.contains("run `koshi share revoke alice` to stop it"),
-        "the answer names the command that finishes it: {message}"
+        error_message.contains("run `koshi share revoke alice` to stop it"),
+        "the answer names the command that finishes it: {error_message}"
     );
     assert_eq!(
-        router.revokes,
-        vec![Some(session), Some(TokenScope::HostWide)],
+        stand_in_router.requested_revoke_scopes,
+        vec![Some(session_scope), Some(TokenScope::HostWide)],
         "both revokes were attempted"
     );
 }
 
 #[test]
 fn a_revoke_naming_no_session_stops_everything_without_asking() {
-    let mut router = StandInRouter::new(vec![token_entry("alice", TokenScope::HostWide, None)]);
+    let mut stand_in_router = StandInRouter::from_token_entries(vec![build_token_entry(
+        "alice",
+        TokenScope::HostWide,
+        None,
+    )]);
 
-    revoke(
+    revoke_share_grants(
         "alice",
         None,
         |_| panic!("a bare revoke asks nothing"),
-        |kind| router.ask(kind),
+        |router_request_kind| stand_in_router.submit_router_request(router_request_kind),
     )
     .expect("the router answers");
 
     assert_eq!(
-        router.revokes,
+        stand_in_router.requested_revoke_scopes,
         vec![None],
         "one request, naming no scope, which stops every grant the identity holds"
     );
@@ -1012,22 +1110,22 @@ fn a_revoke_naming_no_session_stops_everything_without_asking() {
 
 #[test]
 fn a_router_refusal_is_reported_with_the_routers_own_message() {
-    let failure = refusal(&RouterResult::Error(IpcErrorPayload {
+    let router_error = build_router_refusal(&RouterResult::Error(IpcErrorPayload {
         code: IpcErrorCode::NotFound,
         message: "this caller may not grant tokens".to_string(),
     }));
 
-    assert_eq!(failure.to_string(), "this caller may not grant tokens");
+    assert_eq!(router_error.to_string(), "this caller may not grant tokens");
 }
 
 /// A reply of a kind the request cannot produce is not a refusal, so it is
 /// reported as the control plane answering something else, naming the kind.
 #[test]
 fn a_reply_the_request_cannot_produce_is_reported_by_its_wire_name() {
-    let failure = refusal(&RouterResult::Restarting);
+    let router_error = build_router_refusal(&RouterResult::Restarting);
 
     assert_eq!(
-        failure.to_string(),
+        router_error.to_string(),
         "IPC unavailable: the router answered with an unexpected Restarting reply"
     );
 }

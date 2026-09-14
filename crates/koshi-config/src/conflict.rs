@@ -5,7 +5,7 @@
 //! [`detect_conflicts`] inspects the layers before the keymap-merge pass
 //! folds them into the runtime lookup map, and reports every finding as a
 //! typed [`ConflictDiagnostic`]. The report's
-//! [`verdict`](ConflictReport::verdict) tells the caller what to do with the
+//! [`get_verdict`](ConflictReport::get_verdict) tells the caller what to do with the
 //! user keymap as a whole:
 //!
 //! - **Warnings** (ambiguous prefix, orphan action or mode, a
@@ -39,7 +39,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use koshi_core::action::ActionRef;
+use koshi_core::action::ActionReference;
 use koshi_core::geometry::Direction;
 use koshi_core::key::{KeyChord, KeySequence};
 use koshi_core::lock::LockMode;
@@ -47,7 +47,9 @@ use koshi_core::registry::ActionRegistry;
 use koshi_core::resolve::{resolve_action, ActionArgs, ResolveError};
 
 use crate::key::Leader;
-use crate::types::{default_mode_bindings, BoundAction, KeybindingsConfig, ModeBindings, ModeName};
+use crate::types::{
+    build_default_mode_bindings, BoundAction, KeybindingsConfig, ModeBindings, ModeName,
+};
 
 /// Which configuration surface authored a keymap layer, lowest precedence
 /// first. Every origin except `Defaults` is user-authored.
@@ -87,28 +89,28 @@ impl fmt::Display for LayerOrigin {
 
 /// One keymap layer: the surface that authored it plus its per-mode bindings.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KeyMapLayer {
+pub struct KeymapLayer {
     /// The surface this layer came from.
     pub origin: LayerOrigin,
     /// The layer's bindings, grouped by input mode.
-    pub modes: BTreeMap<ModeName, ModeBindings>,
+    pub mode_bindings_by_name: BTreeMap<ModeName, ModeBindings>,
 }
 
-impl KeyMapLayer {
+impl KeymapLayer {
     /// On a user-authored layer, replaces every binding's arguments with
     /// [`ActionArgs::None`], keeping only the key → action mapping. Any
     /// argument a user file carries (an unexpected KDL property, a
     /// hand-edited node) is dropped. The defaults layer is returned
-    /// untouched, arguments included. [`keymap_layers`] applies this to the
+    /// untouched, arguments included. [`build_keymap_layers`] applies this to the
     /// user layer.
     #[must_use]
-    pub fn with_user_args_stripped(mut self) -> Self {
+    pub fn strip_user_arguments(mut self) -> Self {
         if !self.origin.is_user_authored() {
             return self;
         }
-        for bindings in self.modes.values_mut() {
-            for bound in bindings.keys.values_mut() {
-                bound.args = ActionArgs::None;
+        for mode_bindings in self.mode_bindings_by_name.values_mut() {
+            for bound_action in mode_bindings.bound_action_by_key_sequence.values_mut() {
+                bound_action.action_arguments = ActionArgs::None;
             }
         }
         self
@@ -121,34 +123,34 @@ impl KeyMapLayer {
 /// The default table is built against `leader`: every leader-relative default
 /// moves with it, and a user file setting `leader "alt"` turns the `<C-p>`
 /// pane prefix into `<A-p>`. The user layer passes through
-/// [`KeyMapLayer::with_user_args_stripped`], which drops the binding
+/// [`KeymapLayer::strip_user_arguments`], which drops the binding
 /// arguments a user file carries.
 #[must_use]
-pub fn keymap_layers(
+pub fn build_keymap_layers(
     user_modes: Option<BTreeMap<ModeName, ModeBindings>>,
     leader: Leader,
-) -> Vec<KeyMapLayer> {
-    let mut layers = vec![KeyMapLayer {
+) -> Vec<KeymapLayer> {
+    let mut layers = vec![KeymapLayer {
         origin: LayerOrigin::Defaults,
-        modes: default_mode_bindings(leader),
+        mode_bindings_by_name: build_default_mode_bindings(leader),
     }];
-    if let Some(modes) = user_modes {
+    if let Some(user_mode_bindings) = user_modes {
         layers.push(
-            KeyMapLayer {
+            KeymapLayer {
                 origin: LayerOrigin::User,
-                modes,
+                mode_bindings_by_name: user_mode_bindings,
             }
-            .with_user_args_stripped(),
+            .strip_user_arguments(),
         );
     }
     layers
 }
 
 /// Every built-in input mode's name.
-pub(crate) fn built_in_modes() -> BTreeSet<ModeName> {
+pub(crate) fn list_builtin_mode_names() -> BTreeSet<ModeName> {
     LockMode::ALL
         .iter()
-        .map(|mode| ModeName::new(mode.name()))
+        .map(|lock_mode| ModeName::from_text(lock_mode.get_keymap_name()))
         .collect()
 }
 
@@ -176,52 +178,53 @@ pub enum KeymapVerdict {
 }
 
 /// One finding from a detection run. `Display` gives the user-facing
-/// message; [`severity`](Self::severity) gives its weight.
+/// message; [`get_severity`](Self::get_severity) gives its weight.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConflictDiagnostic {
-    /// Two or more user-authored layers bind `key` in `mode` to different
-    /// actions. `claims` holds one entry per distinct bound action, in
+    /// Two or more user-authored layers bind `key_sequence` in `mode_name` to
+    /// different actions. `binding_claims` holds one entry per distinct bound
+    /// action, in
     /// layer order.
     KeyCollision {
         /// The mode whose bindings collide.
-        mode: ModeName,
+        mode_name: ModeName,
         /// The key sequence both layers claim.
-        key: KeySequence,
+        key_sequence: KeySequence,
         /// Each distinct claim: the layer that made it and what it binds.
-        claims: Vec<(LayerOrigin, BoundAction)>,
+        binding_claims: Vec<(LayerOrigin, BoundAction)>,
     },
     /// `prefix` is bound, and so is a longer sequence starting with it.
     /// The prefix binding fires only on the chord timeout.
     AmbiguousPrefix {
         /// The mode holding both bindings.
-        mode: ModeName,
+        mode_name: ModeName,
         /// The shorter, fully-bound sequence.
-        prefix: KeySequence,
+        prefix_sequence: KeySequence,
         /// The action the shorter sequence triggers.
-        prefix_action: ActionRef,
+        prefix_action_reference: ActionReference,
         /// The longer sequence the prefix opens.
-        longer: KeySequence,
+        longer_sequence: KeySequence,
         /// The action the longer sequence triggers.
-        longer_action: ActionRef,
+        longer_action_reference: ActionReference,
     },
     /// The winning live locked-mode binding on the reserved unlock chord
     /// names an action other than `core:unlock`.
     ReservedUnlockShadowed {
         /// The layer whose binding won the reserved chord.
-        origin: LayerOrigin,
+        layer_origin: LayerOrigin,
         /// The action bound in place of the working unlock.
-        action: ActionRef,
+        action_reference: ActionReference,
     },
     /// Locked mode has no binding from the reserved unlock chord to
     /// `core:unlock`.
     ReservedUnlockMissing {
         /// The chord that must map to `core:unlock`.
-        reserved: KeyChord,
+        reserved_unlock_chord: KeyChord,
     },
     /// `unlock_alternative` names a chord plain typing produces.
     UnlockAlternativeTypeable {
         /// The configured alternative chord.
-        chord: KeyChord,
+        unlock_alternative_chord: KeyChord,
     },
     /// A locked-mode sequence of two or more chords holds the reserved unlock
     /// chord. The chord resolves the instant it is pressed, ahead of the
@@ -229,23 +232,23 @@ pub enum ConflictDiagnostic {
     /// fires. `<C-x> <C-l>` unlocks at the `<C-l>`.
     DeadUnderReservedUnlock {
         /// The layer that authored the dead binding.
-        origin: LayerOrigin,
+        layer_origin: LayerOrigin,
         /// The sequence that can never fire.
-        key: KeySequence,
+        key_sequence: KeySequence,
         /// The action it would have triggered.
-        action: ActionRef,
+        action_reference: ActionReference,
     },
     /// A binding's sequence is longer than the `max_chord_depth` cap. No
     /// pending sequence grows long enough to reach it, and it never fires.
     ExceedsChordDepth {
         /// The layer holding the binding.
-        origin: LayerOrigin,
+        layer_origin: LayerOrigin,
         /// The mode the binding lives in.
-        mode: ModeName,
+        mode_name: ModeName,
         /// The bound key sequence.
-        key: KeySequence,
+        key_sequence: KeySequence,
         /// The action it would have triggered.
-        action: ActionRef,
+        action_reference: ActionReference,
         /// The configured cap the sequence exceeds.
         max_chord_depth: u8,
     },
@@ -253,58 +256,58 @@ pub enum ConflictDiagnostic {
     /// this build. The binding cannot fire.
     ComingSoonAction {
         /// The layer holding the binding.
-        origin: LayerOrigin,
+        layer_origin: LayerOrigin,
         /// The mode the binding lives in.
-        mode: ModeName,
+        mode_name: ModeName,
         /// The bound key sequence.
-        key: KeySequence,
+        key_sequence: KeySequence,
         /// The not-yet-implemented action.
-        action: ActionRef,
+        action_reference: ActionReference,
     },
     /// A binding carries arguments its action cannot take, or names a macro
     /// the resolver refuses. The binding never fires as written.
     UnresolvableArgs {
         /// The layer holding the binding.
-        origin: LayerOrigin,
+        layer_origin: LayerOrigin,
         /// The mode the binding lives in.
-        mode: ModeName,
+        mode_name: ModeName,
         /// The bound key sequence.
-        key: KeySequence,
+        key_sequence: KeySequence,
         /// The action whose arguments do not fit.
-        action: ActionRef,
+        action_reference: ActionReference,
     },
     /// A binding names an action the registry does not hold (for example,
     /// its plugin is not loaded). The binding is inactive until the action
     /// is registered.
     OrphanAction {
         /// The layer holding the binding.
-        origin: LayerOrigin,
+        layer_origin: LayerOrigin,
         /// The mode the binding lives in.
-        mode: ModeName,
+        mode_name: ModeName,
         /// The bound key sequence.
-        key: KeySequence,
+        key_sequence: KeySequence,
         /// The unknown action reference.
-        action: ActionRef,
+        action_reference: ActionReference,
     },
     /// A layer declares bindings for a mode that is not registered. Those
     /// bindings are inactive until the mode is registered.
     OrphanMode {
         /// The layer declaring the mode.
-        origin: LayerOrigin,
+        layer_origin: LayerOrigin,
         /// The unregistered mode name.
-        mode: ModeName,
+        mode_name: ModeName,
     },
     /// A user-authored binding opens with a chord plain typing produces,
     /// stealing that key from the pane whenever the client is not locked.
     TypeableBinding {
         /// The layer holding the binding.
-        origin: LayerOrigin,
+        layer_origin: LayerOrigin,
         /// The mode the binding lives in.
-        mode: ModeName,
+        mode_name: ModeName,
         /// The bound key sequence.
-        key: KeySequence,
+        key_sequence: KeySequence,
         /// The action it triggers.
-        action: ActionRef,
+        action_reference: ActionReference,
     },
     /// The configured leader is reachable by plain typing. Every binding that
     /// starts with it steals a typeable key from the pane.
@@ -317,7 +320,7 @@ pub enum ConflictDiagnostic {
 impl ConflictDiagnostic {
     /// The weight of this finding; the report's verdict follows the worst.
     #[must_use]
-    pub fn severity(&self) -> ConflictSeverity {
+    pub fn get_severity(&self) -> ConflictSeverity {
         match self {
             Self::KeyCollision { .. } => ConflictSeverity::Collision,
             Self::ReservedUnlockShadowed { .. }
@@ -339,124 +342,150 @@ impl ConflictDiagnostic {
 impl fmt::Display for ConflictDiagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::KeyCollision { mode, key, claims } => {
-                write!(f, "key `{key}` in mode `{}` is bound", mode.as_str())?;
-                for (i, (origin, bound)) in claims.iter().enumerate() {
-                    if i > 0 {
+            Self::KeyCollision {
+                mode_name,
+                key_sequence,
+                binding_claims,
+            } => {
+                write!(
+                    f,
+                    "key `{key_sequence}` in mode `{}` is bound",
+                    mode_name.get_name()
+                )?;
+                for (claim_index, (layer_origin, bound_action)) in
+                    binding_claims.iter().enumerate()
+                {
+                    if claim_index > 0 {
                         f.write_str(" and")?;
                     }
-                    write!(f, " by {origin} to `{}`", bound.action)?;
+                    write!(
+                        f,
+                        " by {layer_origin} to `{}`",
+                        bound_action.action_reference
+                    )?;
                 }
                 // Claims that all name one action differ only in their
                 // arguments. Fewer than two claims name no difference.
-                let same_action = claims.len() >= 2
-                    && claims
+                let is_all_claims_for_same_action = binding_claims.len() >= 2
+                    && binding_claims
                         .windows(2)
-                        .all(|pair| pair[0].1.action == pair[1].1.action);
-                if same_action {
+                        .all(|claim_pair| {
+                            claim_pair[0].1.action_reference == claim_pair[1].1.action_reference
+                        });
+                if is_all_claims_for_same_action {
                     f.write_str(" with different arguments")?;
                 }
                 f.write_str("; all user keybindings revert to defaults")
             }
             Self::AmbiguousPrefix {
-                mode,
-                prefix,
-                prefix_action,
-                longer,
-                longer_action,
+                mode_name,
+                prefix_sequence,
+                prefix_action_reference,
+                longer_sequence,
+                longer_action_reference,
             } => write!(
                 f,
-                "`{prefix}` (`{prefix_action}`) is a prefix of `{longer}` (`{longer_action}`) \
+                "`{prefix_sequence}` (`{prefix_action_reference}`) is a prefix of `{longer_sequence}` (`{longer_action_reference}`) \
                  in mode `{}`; the shorter binding fires only on the chord timeout",
-                mode.as_str()
+                mode_name.get_name()
             ),
-            Self::ReservedUnlockShadowed { origin, action } => write!(
+            Self::ReservedUnlockShadowed {
+                layer_origin,
+                action_reference,
+            } => write!(
                 f,
-                "the reserved unlock key is bound by {origin} to `{action}` in locked mode; \
+                "the reserved unlock key is bound by {layer_origin} to `{action_reference}` in locked mode; \
                  declare `unlock_alternative` before rebinding it"
             ),
-            Self::ReservedUnlockMissing { reserved } => write!(
+            Self::ReservedUnlockMissing {
+                reserved_unlock_chord,
+            } => write!(
                 f,
-                "locked mode has no binding from `{reserved}` to `core:unlock`; \
+                "locked mode has no binding from `{reserved_unlock_chord}` to `core:unlock`; \
                  the unlock escape would be unreachable"
             ),
-            Self::UnlockAlternativeTypeable { chord } => write!(
+            Self::UnlockAlternativeTypeable {
+                unlock_alternative_chord,
+            } => write!(
                 f,
-                "`unlock_alternative` `{chord}` is a key plain typing produces; \
+                "`unlock_alternative` `{unlock_alternative_chord}` is a key plain typing produces; \
                  hold Ctrl, Alt, or Super"
             ),
             Self::DeadUnderReservedUnlock {
-                origin,
-                key,
-                action,
+                layer_origin,
+                key_sequence,
+                action_reference,
             } => write!(
                 f,
-                "`{key}` ({origin}, `{action}`) in locked mode can never fire: \
+                "`{key_sequence}` ({layer_origin}, `{action_reference}`) in locked mode can never fire: \
                  it holds the reserved unlock chord, which resolves instantly \
                  wherever it is pressed"
             ),
             Self::ExceedsChordDepth {
-                origin,
-                mode,
-                key,
-                action,
+                layer_origin,
+                mode_name,
+                key_sequence,
+                action_reference,
                 max_chord_depth,
             } => write!(
                 f,
-                "`{key}` in mode `{}` ({origin}, `{action}`) is {} chords, over the \
+                "`{key_sequence}` in mode `{}` ({layer_origin}, `{action_reference}`) is {} chords, over the \
                  `max_chord_depth` cap of {max_chord_depth}; the binding can never fire",
-                mode.as_str(),
-                key.chords().len()
+                mode_name.get_name(),
+                key_sequence.list_chords().len()
             ),
             Self::ComingSoonAction {
-                origin,
-                mode,
-                key,
-                action,
+                layer_origin,
+                mode_name,
+                key_sequence,
+                action_reference,
             } => write!(
                 f,
-                "`{key}` in mode `{}` ({origin}) binds `{action}`, which is not \
+                "`{key_sequence}` in mode `{}` ({layer_origin}) binds `{action_reference}`, which is not \
                  implemented yet; the binding cannot fire until it is",
-                mode.as_str()
+                mode_name.get_name()
             ),
             Self::UnresolvableArgs {
-                origin,
-                mode,
-                key,
-                action,
+                layer_origin,
+                mode_name,
+                key_sequence,
+                action_reference,
             } => write!(
                 f,
-                "`{key}` in mode `{}` ({origin}) binds `{action}` with arguments it \
+                "`{key_sequence}` in mode `{}` ({layer_origin}) binds `{action_reference}` with arguments it \
                  cannot take; the binding can never fire as written",
-                mode.as_str()
+                mode_name.get_name()
             ),
             Self::OrphanAction {
-                origin,
-                mode,
-                key,
-                action,
+                layer_origin,
+                mode_name,
+                key_sequence,
+                action_reference,
             } => write!(
                 f,
-                "`{key}` in mode `{}` ({origin}) names unknown action `{action}`; \
+                "`{key_sequence}` in mode `{}` ({layer_origin}) names unknown action `{action_reference}`; \
                  the binding is inactive until the action is registered",
-                mode.as_str()
+                mode_name.get_name()
             ),
-            Self::OrphanMode { origin, mode } => write!(
+            Self::OrphanMode {
+                layer_origin,
+                mode_name,
+            } => write!(
                 f,
-                "the {origin} keymap binds keys in unregistered mode `{}`; \
+                "the {layer_origin} keymap binds keys in unregistered mode `{}`; \
                  those bindings are inactive until the mode is registered",
-                mode.as_str()
+                mode_name.get_name()
             ),
             Self::TypeableBinding {
-                origin,
-                mode,
-                key,
-                action,
+                layer_origin,
+                mode_name,
+                key_sequence,
+                action_reference,
             } => write!(
                 f,
-                "`{key}` in mode `{}` ({origin}, `{action}`) opens with a key plain typing \
+                "`{key_sequence}` in mode `{}` ({layer_origin}, `{action_reference}`) opens with a key plain typing \
                  produces; it steals that key from the pane",
-                mode.as_str()
+                mode_name.get_name()
             ),
             Self::TypeableLeader { leader } => write!(
                 f,
@@ -478,13 +507,13 @@ impl ConflictReport {
     /// The keymap decision the worst finding demands: any fatal finding
     /// rejects, any collision reverts to defaults, warnings alone apply.
     #[must_use]
-    pub fn verdict(&self) -> KeymapVerdict {
-        let worst = self
+    pub fn get_verdict(&self) -> KeymapVerdict {
+        let worst_severity = self
             .diagnostics
             .iter()
-            .map(ConflictDiagnostic::severity)
+            .map(ConflictDiagnostic::get_severity)
             .max();
-        match worst {
+        match worst_severity {
             Some(ConflictSeverity::Fatal) => KeymapVerdict::Reject,
             Some(ConflictSeverity::Collision) => KeymapVerdict::RevertToDefaults,
             Some(ConflictSeverity::Warning) | None => KeymapVerdict::Apply,
@@ -503,56 +532,76 @@ impl ConflictReport {
 /// [`KeybindingsConfig::RESERVED_UNLOCK`].
 #[must_use]
 pub fn detect_conflicts(
-    layers: &[KeyMapLayer],
+    layers: &[KeymapLayer],
     leader: Leader,
     unlock_alternative: Option<KeyChord>,
     max_chord_depth: u8,
     registry: &ActionRegistry,
 ) -> ConflictReport {
-    let known_modes = &built_in_modes();
-    let mut diagnostics = Vec::new();
-    let reserved = unlock_alternative.unwrap_or(KeybindingsConfig::RESERVED_UNLOCK);
-    let locked = ModeName::new("locked");
+    let known_mode_names = &list_builtin_mode_names();
+    let mut conflict_diagnostics = Vec::new();
+    let reserved_unlock_chord = unlock_alternative.unwrap_or(KeybindingsConfig::RESERVED_UNLOCK);
+    let locked_mode_name = ModeName::from_text("locked");
 
-    if leader_is_typeable(leader) {
-        diagnostics.push(ConflictDiagnostic::TypeableLeader { leader });
+    if is_leader_typeable(leader) {
+        conflict_diagnostics.push(ConflictDiagnostic::TypeableLeader { leader });
     }
-    if let Some(chord) = unlock_alternative {
-        if chord.is_typeable() {
-            diagnostics.push(ConflictDiagnostic::UnlockAlternativeTypeable { chord });
+    if let Some(unlock_alternative_chord) = unlock_alternative {
+        if unlock_alternative_chord.is_typeable() {
+            conflict_diagnostics.push(ConflictDiagnostic::UnlockAlternativeTypeable {
+                unlock_alternative_chord,
+            });
         }
     }
 
-    let removals = removal_index(layers, known_modes);
-    let rules = FiringRules {
+    let removal_layer_index_by_mode_and_key = build_removal_layer_index(layers, known_mode_names);
+    let firing_rules = FiringRules {
         registry,
-        reserved,
-        locked: &locked,
+        reserved_unlock_chord,
+        locked_mode_name: &locked_mode_name,
         max_chord_depth,
     };
 
-    for (index, layer) in layers
+    for (layer_index, layer) in layers
         .iter()
         .enumerate()
         .filter(|(_, layer)| layer.origin.is_user_authored())
     {
-        scan_layer(
+        scan_layer_bindings(
             layer,
-            index,
-            &removals,
-            known_modes,
-            &rules,
-            &mut diagnostics,
+            layer_index,
+            &removal_layer_index_by_mode_and_key,
+            known_mode_names,
+            &firing_rules,
+            &mut conflict_diagnostics,
         );
     }
 
-    scan_collisions(layers, &removals, known_modes, &rules, &mut diagnostics);
+    scan_key_collisions(
+        layers,
+        &removal_layer_index_by_mode_and_key,
+        known_mode_names,
+        &firing_rules,
+        &mut conflict_diagnostics,
+    );
 
-    let effective = effective_bindings(layers, &removals, known_modes, &rules);
-    scan_prefixes(&effective, &mut diagnostics);
-    check_reserved_unlock(&effective, reserved, &locked, &mut diagnostics);
+    let effective_bindings_by_mode = build_effective_bindings(
+        layers,
+        &removal_layer_index_by_mode_and_key,
+        known_mode_names,
+        &firing_rules,
+    );
+    scan_ambiguous_prefixes(&effective_bindings_by_mode, &mut conflict_diagnostics);
+    validate_reserved_unlock_binding(
+        &effective_bindings_by_mode,
+        reserved_unlock_chord,
+        &locked_mode_name,
+        &mut conflict_diagnostics,
+    );
 
-    ConflictReport { diagnostics }
+    ConflictReport {
+        diagnostics: conflict_diagnostics,
+    }
 }
 
 /// Whether one binding can fire, judged by handing it to action resolution,
@@ -570,46 +619,54 @@ enum BindingState {
     Unresolvable,
 }
 
-/// For every `(mode, key)` some layer removes, the index of the
-/// highest-precedence layer removing it. A binding at layer index `i` is
-/// voided when a removal for its key exists at an index greater than `i`
-/// ([`removed_above`]). A layer's own remove never voids its own binding:
+/// For every `(mode_name, key_sequence)` some layer removes, the index of the
+/// highest-precedence layer removing it. A binding at layer index
+/// `layer_index` is voided when a removal for its key exists at a greater
+/// index ([`is_removed_by_higher_layer`]). A layer's own remove never voids its own binding:
 /// removing and rebinding a key in one layer keeps the rebind. Removals in
 /// unregistered modes are skipped.
-pub(crate) fn removal_index<'a>(
-    layers: &'a [KeyMapLayer],
-    known_modes: &BTreeSet<ModeName>,
+pub(crate) fn build_removal_layer_index<'a>(
+    layers: &'a [KeymapLayer],
+    known_mode_names: &BTreeSet<ModeName>,
 ) -> BTreeMap<(&'a ModeName, &'a KeySequence), usize> {
-    let mut removals: BTreeMap<(&ModeName, &KeySequence), usize> = BTreeMap::new();
-    for (index, layer) in layers.iter().enumerate() {
-        for (mode, bindings) in &layer.modes {
-            if !known_modes.contains(mode) {
+    let mut removal_layer_index_by_mode_and_key: BTreeMap<(&ModeName, &KeySequence), usize> =
+        BTreeMap::new();
+    for (layer_index, layer) in layers.iter().enumerate() {
+        for (mode_name, mode_bindings) in &layer.mode_bindings_by_name {
+            if !known_mode_names.contains(mode_name) {
                 continue;
             }
-            for key in &bindings.removed {
-                removals.insert((mode, key), index);
+            for key_sequence in &mode_bindings.removed_key_sequences {
+                removal_layer_index_by_mode_and_key.insert((mode_name, key_sequence), layer_index);
             }
         }
     }
-    removals
+    removal_layer_index_by_mode_and_key
 }
 
-/// True when a layer above `index` removes `(mode, key)`, voiding any
-/// binding a layer at `index` holds on it.
-pub(crate) fn removed_above(
-    removals: &BTreeMap<(&ModeName, &KeySequence), usize>,
-    mode: &ModeName,
-    key: &KeySequence,
-    index: usize,
+/// True when a layer above `layer_index` removes `(mode_name, key_sequence)`,
+/// voiding any binding a layer at `layer_index` holds on it.
+pub(crate) fn is_removed_by_higher_layer(
+    removal_layer_index_by_mode_and_key: &BTreeMap<(&ModeName, &KeySequence), usize>,
+    mode_name: &ModeName,
+    key_sequence: &KeySequence,
+    layer_index: usize,
 ) -> bool {
-    removals.get(&(mode, key)).is_some_and(|&at| at > index)
+    removal_layer_index_by_mode_and_key
+        .get(&(mode_name, key_sequence))
+        .is_some_and(|&removal_layer_index| removal_layer_index > layer_index)
 }
 
 /// Classifies one binding with [`resolve_action`], the call a keypress makes.
-fn classify(bound: &BoundAction, registry: &ActionRegistry) -> BindingState {
+fn classify_bound_action(bound_action: &BoundAction, registry: &ActionRegistry) -> BindingState {
     // Only whether the action resolves is read. The plan is dropped, and the
     // `Direction::Right` handed in reaches nothing.
-    match resolve_action(&bound.action, &bound.args, registry, Direction::Right) {
+    match resolve_action(
+        &bound_action.action_reference,
+        &bound_action.action_arguments,
+        registry,
+        Direction::Right,
+    ) {
         Ok(_) => BindingState::Live,
         Err(ResolveError::Unregistered { .. }) => BindingState::Orphan,
         Err(ResolveError::ComingSoon { .. }) => BindingState::ComingSoon,
@@ -619,7 +676,7 @@ fn classify(bound: &BoundAction, registry: &ActionRegistry) -> BindingState {
     }
 }
 
-/// True when `mode` is locked mode and `key` has two or more chords, one of
+/// True when `mode_name` is locked mode and `key_sequence` has two or more chords, one of
 /// which is the reserved unlock chord. The input path resolves that chord the
 /// instant it is pressed, ahead of the keymap and whether or not a sequence
 /// is open, and a sequence holding it never fires.
@@ -627,13 +684,15 @@ fn classify(bound: &BoundAction, registry: &ActionRegistry) -> BindingState {
 /// Position does not matter. `<C-l> x` unlocks at the first chord; `<C-x>
 /// <C-l>` opens and then unlocks at the second. A one-chord `<C-l>` is the
 /// unlock binding itself and stays live.
-fn holds_reserved_unlock(
-    mode: &ModeName,
-    key: &KeySequence,
-    reserved: KeyChord,
-    locked: &ModeName,
+fn is_sequence_dead_under_reserved_unlock(
+    mode_name: &ModeName,
+    key_sequence: &KeySequence,
+    reserved_unlock_chord: KeyChord,
+    locked_mode_name: &ModeName,
 ) -> bool {
-    mode == locked && key.chords().len() > 1 && key.chords().contains(&reserved)
+    mode_name == locked_mode_name
+        && key_sequence.list_chords().len() > 1
+        && key_sequence.list_chords().contains(&reserved_unlock_chord)
 }
 
 /// The inputs the firing judgment reads: the live action table, the
@@ -643,9 +702,9 @@ pub(crate) struct FiringRules<'a> {
     /// The live action table each binding is resolved against.
     pub(crate) registry: &'a ActionRegistry,
     /// The reserved unlock chord.
-    pub(crate) reserved: KeyChord,
+    pub(crate) reserved_unlock_chord: KeyChord,
     /// The locked mode's name.
-    pub(crate) locked: &'a ModeName,
+    pub(crate) locked_mode_name: &'a ModeName,
     /// The chord-depth cap a firing sequence must fit.
     pub(crate) max_chord_depth: u8,
 }
@@ -654,34 +713,39 @@ pub(crate) struct FiringRules<'a> {
 /// sequence does not hold the reserved unlock chord in locked mode, and its
 /// sequence fits the chord-depth cap. Only firing bindings claim keys in the
 /// collision scan or enter the effective map. Removal by a higher layer is a
-/// separate check the callers make with [`removed_above`]. The keymap-merge
+/// separate check the callers make with [`is_removed_by_higher_layer`]. The keymap-merge
 /// pass reads this same predicate.
-pub(crate) fn is_firing(
-    mode: &ModeName,
-    key: &KeySequence,
-    bound: &BoundAction,
-    rules: &FiringRules<'_>,
+pub(crate) fn is_bound_action_firing(
+    mode_name: &ModeName,
+    key_sequence: &KeySequence,
+    bound_action: &BoundAction,
+    firing_rules: &FiringRules<'_>,
 ) -> bool {
-    classify(bound, rules.registry) == BindingState::Live
-        && !holds_reserved_unlock(mode, key, rules.reserved, rules.locked)
-        && !exceeds_chord_depth(key, rules.max_chord_depth)
+    classify_bound_action(bound_action, firing_rules.registry) == BindingState::Live
+        && !is_sequence_dead_under_reserved_unlock(
+            mode_name,
+            key_sequence,
+            firing_rules.reserved_unlock_chord,
+            firing_rules.locked_mode_name,
+        )
+        && !is_over_chord_depth_limit(key_sequence, firing_rules.max_chord_depth)
 }
 
 /// True when the sequence holds more than `max_chord_depth` chords. The input
 /// path grows a pending sequence only while a longer live binding starts with
 /// it; with no live binding past the cap, no pending sequence grows past it,
 /// and a binding past the cap is never reached.
-fn exceeds_chord_depth(key: &KeySequence, max_chord_depth: u8) -> bool {
-    key.chords().len() > usize::from(max_chord_depth)
+fn is_over_chord_depth_limit(key_sequence: &KeySequence, max_chord_depth: u8) -> bool {
+    key_sequence.list_chords().len() > usize::from(max_chord_depth)
 }
 
 /// True when the leader is reachable by plain typing: a chord leader that is
 /// itself typeable, or a modifier-run leader whose modifiers plain typing
 /// produces ([`koshi_core::key::ModFlags::is_typing`] — Shift alone merges into typed keys).
-fn leader_is_typeable(leader: Leader) -> bool {
+fn is_leader_typeable(leader: Leader) -> bool {
     match leader {
-        Leader::Mods(mods) => mods.is_typing(),
-        Leader::Chord(chord) => chord.is_typeable(),
+        Leader::Mods(modifier_flags) => modifier_flags.is_typing(),
+        Leader::Chord(key_chord) => key_chord.is_typeable(),
     }
 }
 
@@ -692,173 +756,202 @@ fn leader_is_typeable(leader: Leader) -> bool {
 /// reason first: the resolver's refusal, then the reserved unlock chord, then
 /// the chord-depth cap. Only a firing binding is checked for a typeable
 /// opening chord.
-fn scan_layer(
-    layer: &KeyMapLayer,
-    index: usize,
-    removals: &BTreeMap<(&ModeName, &KeySequence), usize>,
-    known_modes: &BTreeSet<ModeName>,
-    rules: &FiringRules<'_>,
-    out: &mut Vec<ConflictDiagnostic>,
+fn scan_layer_bindings(
+    layer: &KeymapLayer,
+    layer_index: usize,
+    removal_layer_index_by_mode_and_key: &BTreeMap<(&ModeName, &KeySequence), usize>,
+    known_mode_names: &BTreeSet<ModeName>,
+    firing_rules: &FiringRules<'_>,
+    conflict_diagnostics: &mut Vec<ConflictDiagnostic>,
 ) {
-    for (mode, bindings) in &layer.modes {
-        if !known_modes.contains(mode) {
-            out.push(ConflictDiagnostic::OrphanMode {
-                origin: layer.origin,
-                mode: mode.clone(),
+    for (mode_name, mode_bindings) in &layer.mode_bindings_by_name {
+        if !known_mode_names.contains(mode_name) {
+            conflict_diagnostics.push(ConflictDiagnostic::OrphanMode {
+                layer_origin: layer.origin,
+                mode_name: mode_name.clone(),
             });
             continue;
         }
-        for (key, bound) in &bindings.keys {
-            if removed_above(removals, mode, key, index) {
+        for (key_sequence, bound_action) in &mode_bindings.bound_action_by_key_sequence {
+            if is_removed_by_higher_layer(
+                removal_layer_index_by_mode_and_key,
+                mode_name,
+                key_sequence,
+                layer_index,
+            ) {
                 continue;
             }
-            match classify(bound, rules.registry) {
+            match classify_bound_action(bound_action, firing_rules.registry) {
                 BindingState::Live => {}
                 BindingState::Orphan => {
-                    out.push(ConflictDiagnostic::OrphanAction {
-                        origin: layer.origin,
-                        mode: mode.clone(),
-                        key: key.clone(),
-                        action: bound.action.clone(),
+                    conflict_diagnostics.push(ConflictDiagnostic::OrphanAction {
+                        layer_origin: layer.origin,
+                        mode_name: mode_name.clone(),
+                        key_sequence: key_sequence.clone(),
+                        action_reference: bound_action.action_reference.clone(),
                     });
                     continue;
                 }
                 BindingState::ComingSoon => {
-                    out.push(ConflictDiagnostic::ComingSoonAction {
-                        origin: layer.origin,
-                        mode: mode.clone(),
-                        key: key.clone(),
-                        action: bound.action.clone(),
+                    conflict_diagnostics.push(ConflictDiagnostic::ComingSoonAction {
+                        layer_origin: layer.origin,
+                        mode_name: mode_name.clone(),
+                        key_sequence: key_sequence.clone(),
+                        action_reference: bound_action.action_reference.clone(),
                     });
                     continue;
                 }
                 BindingState::Unresolvable => {
-                    out.push(ConflictDiagnostic::UnresolvableArgs {
-                        origin: layer.origin,
-                        mode: mode.clone(),
-                        key: key.clone(),
-                        action: bound.action.clone(),
+                    conflict_diagnostics.push(ConflictDiagnostic::UnresolvableArgs {
+                        layer_origin: layer.origin,
+                        mode_name: mode_name.clone(),
+                        key_sequence: key_sequence.clone(),
+                        action_reference: bound_action.action_reference.clone(),
                     });
                     continue;
                 }
             }
-            if holds_reserved_unlock(mode, key, rules.reserved, rules.locked) {
-                out.push(ConflictDiagnostic::DeadUnderReservedUnlock {
-                    origin: layer.origin,
-                    key: key.clone(),
-                    action: bound.action.clone(),
+            if is_sequence_dead_under_reserved_unlock(
+                mode_name,
+                key_sequence,
+                firing_rules.reserved_unlock_chord,
+                firing_rules.locked_mode_name,
+            ) {
+                conflict_diagnostics.push(ConflictDiagnostic::DeadUnderReservedUnlock {
+                    layer_origin: layer.origin,
+                    key_sequence: key_sequence.clone(),
+                    action_reference: bound_action.action_reference.clone(),
                 });
                 continue;
             }
-            if exceeds_chord_depth(key, rules.max_chord_depth) {
-                out.push(ConflictDiagnostic::ExceedsChordDepth {
-                    origin: layer.origin,
-                    mode: mode.clone(),
-                    key: key.clone(),
-                    action: bound.action.clone(),
-                    max_chord_depth: rules.max_chord_depth,
+            if is_over_chord_depth_limit(key_sequence, firing_rules.max_chord_depth) {
+                conflict_diagnostics.push(ConflictDiagnostic::ExceedsChordDepth {
+                    layer_origin: layer.origin,
+                    mode_name: mode_name.clone(),
+                    key_sequence: key_sequence.clone(),
+                    action_reference: bound_action.action_reference.clone(),
+                    max_chord_depth: firing_rules.max_chord_depth,
                 });
                 continue;
             }
-            if key.chords()[0].is_typeable() {
-                out.push(ConflictDiagnostic::TypeableBinding {
-                    origin: layer.origin,
-                    mode: mode.clone(),
-                    key: key.clone(),
-                    action: bound.action.clone(),
+            if key_sequence.list_chords()[0].is_typeable() {
+                conflict_diagnostics.push(ConflictDiagnostic::TypeableBinding {
+                    layer_origin: layer.origin,
+                    mode_name: mode_name.clone(),
+                    key_sequence: key_sequence.clone(),
+                    action_reference: bound_action.action_reference.clone(),
                 });
             }
         }
     }
 }
 
-/// Cross-layer key collisions: the same `(mode, key)` bound to different
+/// Cross-layer key collisions: the same `(mode_name, key_sequence)` bound to different
 /// [`BoundAction`]s by two or more user-authored layers. Identical bound
 /// actions in several layers pass. The defaults layer never collides: a
 /// user binding on a defaulted key is a steal.
 ///
-/// Only firing claims count ([`is_firing`]): a binding that cannot fire
-/// claims no key, and [`scan_layer`] warns it instead. The collision appears
+/// Only firing claims count ([`is_bound_action_firing`]): a binding that cannot fire
+/// claims no key, and [`scan_layer_bindings`] warns it instead. The collision appears
 /// on the detection run where the binding turns live: at plugin registration
 /// for an orphan action, at the first load of a build that implements a
 /// coming-soon action. A claim a higher layer removes claims no key either:
 /// removing a key and rebinding it in a higher layer takes the key without a
 /// collision.
-fn scan_collisions(
-    layers: &[KeyMapLayer],
-    removals: &BTreeMap<(&ModeName, &KeySequence), usize>,
-    known_modes: &BTreeSet<ModeName>,
-    rules: &FiringRules<'_>,
-    out: &mut Vec<ConflictDiagnostic>,
+fn scan_key_collisions(
+    layers: &[KeymapLayer],
+    removal_layer_index_by_mode_and_key: &BTreeMap<(&ModeName, &KeySequence), usize>,
+    known_mode_names: &BTreeSet<ModeName>,
+    firing_rules: &FiringRules<'_>,
+    conflict_diagnostics: &mut Vec<ConflictDiagnostic>,
 ) {
-    let mut claims: BTreeMap<(&ModeName, &KeySequence), Vec<(LayerOrigin, &BoundAction)>> =
-        BTreeMap::new();
-    for (index, layer) in layers
+    let mut binding_claims_by_mode_and_key: BTreeMap<
+        (&ModeName, &KeySequence),
+        Vec<(LayerOrigin, &BoundAction)>,
+    > = BTreeMap::new();
+    for (layer_index, layer) in layers
         .iter()
         .enumerate()
         .filter(|(_, layer)| layer.origin.is_user_authored())
     {
-        for (mode, bindings) in &layer.modes {
-            if !known_modes.contains(mode) {
+        for (mode_name, mode_bindings) in &layer.mode_bindings_by_name {
+            if !known_mode_names.contains(mode_name) {
                 continue;
             }
-            for (key, bound) in &bindings.keys {
-                if removed_above(removals, mode, key, index) || !is_firing(mode, key, bound, rules)
+            for (key_sequence, bound_action) in &mode_bindings.bound_action_by_key_sequence {
+                if is_removed_by_higher_layer(
+                    removal_layer_index_by_mode_and_key,
+                    mode_name,
+                    key_sequence,
+                    layer_index,
+                ) || !is_bound_action_firing(mode_name, key_sequence, bound_action, firing_rules)
                 {
                     continue;
                 }
-                let claimants = claims.entry((mode, key)).or_default();
-                if !claimants.iter().any(|(_, held)| *held == bound) {
-                    claimants.push((layer.origin, bound));
+                let binding_claimants = binding_claims_by_mode_and_key
+                    .entry((mode_name, key_sequence))
+                    .or_default();
+                if !binding_claimants
+                    .iter()
+                    .any(|(_, existing_bound_action)| *existing_bound_action == bound_action)
+                {
+                    binding_claimants.push((layer.origin, bound_action));
                 }
             }
         }
     }
-    for ((mode, key), claimants) in claims {
-        if claimants.len() >= 2 {
-            out.push(ConflictDiagnostic::KeyCollision {
-                mode: mode.clone(),
-                key: key.clone(),
-                claims: claimants
+    for ((mode_name, key_sequence), binding_claimants) in binding_claims_by_mode_and_key {
+        if binding_claimants.len() >= 2 {
+            conflict_diagnostics.push(ConflictDiagnostic::KeyCollision {
+                mode_name: mode_name.clone(),
+                key_sequence: key_sequence.clone(),
+                binding_claims: binding_claimants
                     .into_iter()
-                    .map(|(origin, bound)| (origin, bound.clone()))
+                    .map(|(layer_origin, bound_action)| (layer_origin, bound_action.clone()))
                     .collect(),
             });
         }
     }
 }
 
-/// The winning **firing** binding per `(mode, key)` after folding the
+/// The winning **firing** binding per `(mode_name, key_sequence)` after folding the
 /// layers in order: a higher layer's firing entry replaces a lower layer's
 /// on the same key. A binding that cannot fire is transparent, and the firing
 /// binding beneath it shows through. A binding a higher layer removes,
 /// bindings in unregistered modes, locked-mode sequences holding the
 /// reserved unlock chord, and sequences past the chord-depth cap never
 /// enter. The map holds what a keypress reaches.
-fn effective_bindings<'a>(
-    layers: &'a [KeyMapLayer],
-    removals: &BTreeMap<(&'a ModeName, &'a KeySequence), usize>,
-    known_modes: &BTreeSet<ModeName>,
-    rules: &FiringRules<'_>,
+fn build_effective_bindings<'a>(
+    layers: &'a [KeymapLayer],
+    removal_layer_index_by_mode_and_key: &BTreeMap<(&'a ModeName, &'a KeySequence), usize>,
+    known_mode_names: &BTreeSet<ModeName>,
+    firing_rules: &FiringRules<'_>,
 ) -> BTreeMap<&'a ModeName, BTreeMap<&'a KeySequence, (LayerOrigin, &'a BoundAction)>> {
-    let mut effective: BTreeMap<&ModeName, BTreeMap<&KeySequence, (LayerOrigin, &BoundAction)>> =
-        BTreeMap::new();
-    for (index, layer) in layers.iter().enumerate() {
-        for (mode, bindings) in &layer.modes {
-            if !known_modes.contains(mode) {
+    let mut effective_bindings_by_mode: BTreeMap<
+        &ModeName,
+        BTreeMap<&KeySequence, (LayerOrigin, &BoundAction)>,
+    > = BTreeMap::new();
+    for (layer_index, layer) in layers.iter().enumerate() {
+        for (mode_name, mode_bindings) in &layer.mode_bindings_by_name {
+            if !known_mode_names.contains(mode_name) {
                 continue;
             }
-            let mode_map = effective.entry(mode).or_default();
-            for (key, bound) in &bindings.keys {
-                if removed_above(removals, mode, key, index) || !is_firing(mode, key, bound, rules)
+            let merged_mode_bindings = effective_bindings_by_mode.entry(mode_name).or_default();
+            for (key_sequence, bound_action) in &mode_bindings.bound_action_by_key_sequence {
+                if is_removed_by_higher_layer(
+                    removal_layer_index_by_mode_and_key,
+                    mode_name,
+                    key_sequence,
+                    layer_index,
+                ) || !is_bound_action_firing(mode_name, key_sequence, bound_action, firing_rules)
                 {
                     continue;
                 }
-                mode_map.insert(key, (layer.origin, bound));
+                merged_mode_bindings.insert(key_sequence, (layer.origin, bound_action));
             }
         }
     }
-    effective
+    effective_bindings_by_mode
 }
 
 /// Ambiguous-prefix warnings over the winning firing bindings: within one
@@ -866,22 +959,28 @@ fn effective_bindings<'a>(
 /// fires only on the chord timeout. One warning per prefix pair. Locked-mode
 /// sequences holding the reserved unlock chord are absent from the effective
 /// map and never pair here; [`scan_layer`] warns them as dead.
-fn scan_prefixes(
-    effective: &BTreeMap<&ModeName, BTreeMap<&KeySequence, (LayerOrigin, &BoundAction)>>,
-    out: &mut Vec<ConflictDiagnostic>,
+fn scan_ambiguous_prefixes(
+    effective_bindings_by_mode: &BTreeMap<
+        &ModeName,
+        BTreeMap<&KeySequence, (LayerOrigin, &BoundAction)>,
+    >,
+    conflict_diagnostics: &mut Vec<ConflictDiagnostic>,
 ) {
-    for (mode, bindings) in effective {
-        for (short, (_, short_bound)) in bindings {
-            for (long, (_, long_bound)) in bindings {
-                let is_strict_prefix = short.chords().len() < long.chords().len()
-                    && long.chords().starts_with(short.chords());
+    for (mode_name, mode_bindings) in effective_bindings_by_mode {
+        for (shorter_key_sequence, (_, shorter_bound_action)) in mode_bindings {
+            for (longer_key_sequence, (_, longer_bound_action)) in mode_bindings {
+                let is_strict_prefix = shorter_key_sequence.list_chords().len()
+                    < longer_key_sequence.list_chords().len()
+                    && longer_key_sequence
+                        .list_chords()
+                        .starts_with(shorter_key_sequence.list_chords());
                 if is_strict_prefix {
-                    out.push(ConflictDiagnostic::AmbiguousPrefix {
-                        mode: (*mode).clone(),
-                        prefix: (*short).clone(),
-                        prefix_action: short_bound.action.clone(),
-                        longer: (*long).clone(),
-                        longer_action: long_bound.action.clone(),
+                    conflict_diagnostics.push(ConflictDiagnostic::AmbiguousPrefix {
+                        mode_name: (*mode_name).clone(),
+                        prefix_sequence: (*shorter_key_sequence).clone(),
+                        prefix_action_reference: shorter_bound_action.action_reference.clone(),
+                        longer_sequence: (*longer_key_sequence).clone(),
+                        longer_action_reference: longer_bound_action.action_reference.clone(),
                     });
                 }
             }
@@ -896,28 +995,35 @@ fn scan_prefixes(
 /// binding on the reserved chord is transparent and cannot shadow the
 /// escape. The action alone is compared: the map holds firing bindings only,
 /// and `core:unlock` resolves only with [`ActionArgs::None`].
-fn check_reserved_unlock(
-    effective: &BTreeMap<&ModeName, BTreeMap<&KeySequence, (LayerOrigin, &BoundAction)>>,
-    reserved: KeyChord,
-    locked: &ModeName,
-    out: &mut Vec<ConflictDiagnostic>,
+fn validate_reserved_unlock_binding(
+    effective_bindings_by_mode: &BTreeMap<
+        &ModeName,
+        BTreeMap<&KeySequence, (LayerOrigin, &BoundAction)>,
+    >,
+    reserved_unlock_chord: KeyChord,
+    locked_mode_name: &ModeName,
+    conflict_diagnostics: &mut Vec<ConflictDiagnostic>,
 ) {
-    let unlock = ActionRef::core("unlock")
+    let unlock_action_reference = ActionReference::from_core_action_name("unlock")
         .expect("the built-in unlock action name satisfies the action-name grammar");
-    let reserved_seq = KeySequence::from(reserved);
+    let reserved_unlock_sequence = KeySequence::from(reserved_unlock_chord);
 
-    match effective
-        .get(locked)
-        .and_then(|bindings| bindings.get(&reserved_seq))
+    match effective_bindings_by_mode
+        .get(locked_mode_name)
+        .and_then(|mode_bindings| mode_bindings.get(&reserved_unlock_sequence))
     {
-        Some((origin, bound)) if bound.action != unlock => {
-            out.push(ConflictDiagnostic::ReservedUnlockShadowed {
-                origin: *origin,
-                action: bound.action.clone(),
+        Some((layer_origin, bound_action))
+            if bound_action.action_reference != unlock_action_reference =>
+        {
+            conflict_diagnostics.push(ConflictDiagnostic::ReservedUnlockShadowed {
+                layer_origin: *layer_origin,
+                action_reference: bound_action.action_reference.clone(),
             });
         }
         Some(_) => {}
-        None => out.push(ConflictDiagnostic::ReservedUnlockMissing { reserved }),
+        None => conflict_diagnostics.push(ConflictDiagnostic::ReservedUnlockMissing {
+            reserved_unlock_chord,
+        }),
     }
 }
 

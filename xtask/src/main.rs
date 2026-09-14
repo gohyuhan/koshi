@@ -14,22 +14,22 @@ mod dep_guard;
 
 fn main() -> ExitCode {
     let raw_command = std::env::args_os().nth(1);
-    let command = raw_command.as_deref().map(|arg| arg.to_string_lossy());
-    match command.as_deref() {
-        Some("dep-guard") => dep_guard::run(),
+    let requested_command = raw_command.as_deref().map(|arg| arg.to_string_lossy());
+    match requested_command.as_deref() {
+        Some("dep-guard") => dep_guard::run_dependency_guard(),
         Some(other) => {
             eprintln!("xtask: unknown command `{other}`");
-            usage();
+            print_usage();
             ExitCode::FAILURE
         }
         None => {
-            usage();
+            print_usage();
             ExitCode::FAILURE
         }
     }
 }
 
-fn usage() {
+fn print_usage() {
     eprintln!("usage: cargo xtask <command>");
     eprintln!("commands:");
     eprintln!("  dep-guard   assert architecture dependency-direction rules");

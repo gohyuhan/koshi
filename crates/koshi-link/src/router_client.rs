@@ -25,32 +25,33 @@ use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::error::IpcError;
 use koshi_ipc::protocol::{IpcErrorCode, IpcErrorPayload};
 use koshi_ipc::router::{
-    router_endpoint_path, IncomingRouterResponse, RouterRequest, RouterRequestKind, RouterResult,
+    resolve_router_endpoint_path, IncomingRouterResponse, RouterRequest, RouterRequestKind,
+    RouterResult,
 };
 use koshi_ipc::transport::Connection;
 
 use crate::error::CliError;
-use crate::talk::{self, talk_failed};
+use crate::talk::{self, build_ipc_unavailable_error};
 
 #[cfg(test)]
 mod tests;
 
 /// The subcommand this binary starts itself under to run the router. The
-/// arguments after it are [`RUNTIME_DIR_FLAG`] with the directory to serve,
+/// arguments after it are [`RUNTIME_DIRECTORY_FLAG`] with the directory to serve,
 /// and `--wait-for-lock` when a router hands its place to a replacement.
 pub const ROUTER_SUBCOMMAND: &str = "serve-router";
 
 /// The flag naming the runtime directory a started process serves. Takes that
 /// directory as its value.
-pub const RUNTIME_DIR_FLAG: &str = "--runtime-dir";
+pub const RUNTIME_DIRECTORY_FLAG: &str = "--runtime-dir";
 
 /// How long a freshly started router has to bind its socket and advertise it
 /// before the request gives up.
-const ROUTER_START_WAIT: Duration = Duration::from_secs(5);
+const ROUTER_START_TIMEOUT_DURATION: Duration = Duration::from_secs(5);
 
 /// How long the retry loop pauses between connect attempts while it waits for
 /// a freshly started router.
-const ROUTER_START_POLL: Duration = Duration::from_millis(100);
+const ROUTER_START_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(100);
 
 /// The Win32 `DETACHED_PROCESS` creation flag: the started process gets no
 /// console and does not inherit the caller's.
@@ -62,37 +63,37 @@ const DETACHED_PROCESS: u32 = 0x0000_0008;
 #[cfg(windows)]
 const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 
-/// Ask the router `kind` and hand back its answer.
+/// Ask the router for `request_kind` and hand back its answer.
 ///
 /// Tries the exchange once. With no router running it starts one detached and
 /// retries every 100 milliseconds until the router answers or 5 seconds pass.
 /// Nothing is sent on an attempt that finds no router: a retried request
 /// reaches a router exactly once.
 ///
-/// The answer is the router's own result for `kind`, including a
+/// The answer is the router's own result for `request_kind`, including a
 /// [`RouterResult::Error`] refusing it. A refused Hello, a reply answering
 /// nothing that was asked, and every failure to talk are
 /// [`CliError::IpcUnavailable`].
-pub fn router_request(
-    runtime_dir: &Path,
-    kind: RouterRequestKind,
+pub fn submit_router_request(
+    runtime_directory: &Path,
+    request_kind: RouterRequestKind,
 ) -> Result<RouterResult, CliError> {
-    if let Some(result) = exchange(runtime_dir, &kind)? {
-        return Ok(result);
+    if let Some(router_result) = exchange_router_request(runtime_directory, &request_kind)? {
+        return Ok(router_result);
     }
-    spawn_router_detached(runtime_dir)?;
+    spawn_router_detached(runtime_directory)?;
 
-    let deadline = Instant::now() + ROUTER_START_WAIT;
+    let deadline = Instant::now() + ROUTER_START_TIMEOUT_DURATION;
     loop {
-        if let Some(result) = exchange(runtime_dir, &kind)? {
-            return Ok(result);
+        if let Some(router_result) = exchange_router_request(runtime_directory, &request_kind)? {
+            return Ok(router_result);
         }
         if Instant::now() >= deadline {
             return Err(CliError::IpcUnavailable {
                 detail: "the router did not start".to_string(),
             });
         }
-        std::thread::sleep(ROUTER_START_POLL);
+        std::thread::sleep(ROUTER_START_POLL_INTERVAL_DURATION);
     }
 }
 
@@ -105,14 +106,16 @@ pub fn router_request(
 /// the sentence the router sent, filtered by [`sanitize_reported_text`]. A
 /// router whose build has no Restart kind refuses it, and that sentence names
 /// both builds.
-pub fn restart_running_router(runtime_dir: &Path) -> Result<bool, CliError> {
-    match exchange(runtime_dir, &RouterRequestKind::Restart)? {
+pub fn restart_running_router(runtime_directory: &Path) -> Result<bool, CliError> {
+    match exchange_router_request(runtime_directory, &RouterRequestKind::Restart)? {
         None => Ok(false),
         Some(RouterResult::Restarting) => Ok(true),
         Some(RouterResult::Error(refusal)) => Err(CliError::IpcUnavailable {
             detail: refusal.message,
         }),
-        Some(other) => Err(talk::ROUTER.unexpected_reply(&other)),
+        Some(unexpected_router_result) => {
+            Err(talk::ROUTER_PEER_WORDS.build_unexpected_reply_error(&unexpected_router_result))
+        }
     }
 }
 
@@ -134,7 +137,7 @@ pub enum RemoteConnections {
         /// Why there is no count: the sentence the router refused with, the
         /// sentence naming a reply that answers nothing this asked, or the
         /// sentence naming a failure to talk.
-        detail: String,
+        error_detail: String,
     },
 }
 
@@ -148,23 +151,26 @@ pub enum RemoteConnections {
 /// [`RemoteConnections::OlderBuild`]. Every other refusal, unexpected reply
 /// and transport failure is [`RemoteConnections::NoAnswer`].
 #[must_use]
-pub fn running_router_remote_connections(runtime_dir: &Path) -> RemoteConnections {
-    match exchange(runtime_dir, &RouterRequestKind::RemoteStatus) {
+pub fn query_running_router_remote_connections(runtime_directory: &Path) -> RemoteConnections {
+    match exchange_router_request(runtime_directory, &RouterRequestKind::RemoteStatus) {
         Ok(None) => RemoteConnections::NotRunning,
         Ok(Some(RouterResult::RemoteStatus {
-            remote_connections, ..
-        })) => RemoteConnections::Answered(remote_connections),
+            remote_connection_count,
+            ..
+        })) => RemoteConnections::Answered(remote_connection_count),
         Ok(Some(RouterResult::Error(refusal))) if refusal.code == IpcErrorCode::UnsupportedKind => {
             RemoteConnections::OlderBuild
         }
         Ok(Some(RouterResult::Error(refusal))) => RemoteConnections::NoAnswer {
-            detail: refusal.message,
+            error_detail: refusal.message,
         },
-        Ok(Some(other)) => RemoteConnections::NoAnswer {
-            detail: talk::ROUTER.unexpected_reply(&other).to_string(),
+        Ok(Some(unexpected_router_result)) => RemoteConnections::NoAnswer {
+            error_detail: talk::ROUTER_PEER_WORDS
+                .build_unexpected_reply_error(&unexpected_router_result)
+                .to_string(),
         },
-        Err(error) => RemoteConnections::NoAnswer {
-            detail: error.to_string(),
+        Err(ipc_error) => RemoteConnections::NoAnswer {
+            error_detail: ipc_error.to_string(),
         },
     }
 }
@@ -174,69 +180,87 @@ pub fn running_router_remote_connections(runtime_dir: &Path) -> RemoteConnection
 /// `Ok(None)` means no router is running. An empty string means the router
 /// answered but predates the version field. Sends nothing besides the Hello;
 /// never starts a router.
-pub fn running_router_version(runtime_dir: &Path) -> Result<Option<String>, CliError> {
-    let Some((mut connection, endpoint)) = open_router(runtime_dir)? else {
+pub fn get_running_router_version(runtime_directory: &Path) -> Result<Option<String>, CliError> {
+    let Some((mut connection, endpoint)) = connect_to_running_router(runtime_directory)? else {
         return Ok(None);
     };
-    let hello = RouterRequest {
+    let hello_request = RouterRequest {
         request_id: 1,
-        kind: RouterRequestKind::hello(endpoint.token),
+        request_kind: RouterRequestKind::build_hello_request(endpoint.connection_token),
     };
-    connection.send(&hello).map_err(talk_failed)?;
-    let reply: IncomingRouterResponse = connection.recv().map_err(talk_failed)?;
-    talk::router_hello_version(reply).map(Some)
+    connection
+        .send(&hello_request)
+        .map_err(build_ipc_unavailable_error)?;
+    let hello_response: IncomingRouterResponse =
+        connection.recv().map_err(build_ipc_unavailable_error)?;
+    talk::parse_router_hello_version(hello_response).map(Some)
 }
 
 /// A connection to the running router, with the endpoint file that named it.
 ///
 /// `Ok(None)` means no router is running — the endpoint file is missing, or
 /// nothing listens at the address it names. Nothing is sent.
-fn open_router(runtime_dir: &Path) -> Result<Option<(Connection, EndpointFile)>, CliError> {
-    let endpoint = match EndpointFile::read(&router_endpoint_path(runtime_dir)) {
-        Ok(endpoint) => endpoint,
-        Err(IpcError::EndpointFileMissing { .. }) => return Ok(None),
-        Err(error) => return Err(talk_failed(error)),
-    };
-    match Connection::connect(&endpoint.socket) {
+fn connect_to_running_router(
+    runtime_directory: &Path,
+) -> Result<Option<(Connection, EndpointFile)>, CliError> {
+    let endpoint =
+        match EndpointFile::load_from_path(&resolve_router_endpoint_path(runtime_directory)) {
+            Ok(endpoint) => endpoint,
+            Err(IpcError::EndpointFileMissing { .. }) => return Ok(None),
+            Err(ipc_error) => return Err(build_ipc_unavailable_error(ipc_error)),
+        };
+    match Connection::connect(&endpoint.socket_address) {
         Ok(connection) => Ok(Some((connection, endpoint))),
         Err(IpcError::NoListener { .. }) => Ok(None),
-        Err(error) => Err(talk_failed(error)),
+        Err(ipc_error) => Err(build_ipc_unavailable_error(ipc_error)),
     }
 }
 
 /// One exchange with a running router: read its endpoint file, connect,
-/// pipeline the Hello and `kind` back to back, and read both replies in order.
+/// pipeline the Hello and `request_kind` back to back, and read both replies in order.
 ///
-/// A [`RouterResult::Error`] comes back through [`name_other_build`], so its
+/// A [`RouterResult::Error`] comes back through
+/// [`rewrite_router_result_for_build`], so its
 /// message is filtered before any caller reports it.
 ///
 /// `Ok(None)` means no router is running — the endpoint file is missing, or
 /// nothing listens at the address it names — and nothing was sent.
-fn exchange(
-    runtime_dir: &Path,
-    kind: &RouterRequestKind,
+fn exchange_router_request(
+    runtime_directory: &Path,
+    request_kind: &RouterRequestKind,
 ) -> Result<Option<RouterResult>, CliError> {
-    let Some((mut connection, endpoint)) = open_router(runtime_dir)? else {
+    let Some((mut connection, endpoint)) = connect_to_running_router(runtime_directory)? else {
         return Ok(None);
     };
-    let hello = RouterRequest {
+    let hello_request = RouterRequest {
         request_id: 1,
-        kind: RouterRequestKind::hello(endpoint.token),
+        request_kind: RouterRequestKind::build_hello_request(endpoint.connection_token),
     };
-    let request = RouterRequest {
+    let router_request = RouterRequest {
         request_id: 2,
-        kind: kind.clone(),
+        request_kind: request_kind.clone(),
     };
-    connection.send(&hello).map_err(talk_failed)?;
-    connection.send(&request).map_err(talk_failed)?;
+    connection
+        .send(&hello_request)
+        .map_err(build_ipc_unavailable_error)?;
+    connection
+        .send(&router_request)
+        .map_err(build_ipc_unavailable_error)?;
 
-    let hello_reply: IncomingRouterResponse = connection.recv().map_err(talk_failed)?;
-    let router_version = talk::router_hello_version(hello_reply)?;
+    let hello_response: IncomingRouterResponse =
+        connection.recv().map_err(build_ipc_unavailable_error)?;
+    let router_version = talk::parse_router_hello_version(hello_response)?;
 
-    let reply: IncomingRouterResponse = connection.recv().map_err(talk_failed)?;
-    talk::ROUTER
-        .take_result(reply)
-        .map(|result| Some(name_other_build(result, &router_version)))
+    let router_response: IncomingRouterResponse =
+        connection.recv().map_err(build_ipc_unavailable_error)?;
+    talk::ROUTER_PEER_WORDS
+        .take_response_result(router_response)
+        .map(|router_result| {
+            Some(rewrite_router_result_for_build(
+                router_result,
+                &router_version,
+            ))
+        })
 }
 
 /// A refusal filtered by [`sanitize_reported_text`], and — for a request kind
@@ -244,7 +268,7 @@ fn exchange(
 ///
 /// Every refusal passes through this, so the sentence a caller reports carries
 /// no control, bidi-control or tag character, and no more than
-/// [`MAX_REPORTED_TEXT_BYTES`](koshi_core::text::MAX_REPORTED_TEXT_BYTES) of
+/// [`MAX_REPORTED_TEXT_BYTE_COUNT`](koshi_core::text::MAX_REPORTED_TEXT_BYTE_COUNT) of
 /// what the router sent.
 ///
 /// Only [`IpcErrorCode::UnsupportedKind`] is restated, and only when the
@@ -253,19 +277,22 @@ fn exchange(
 ///
 /// `router_version` is the build the router reported in its Hello, empty when
 /// the router predates that field.
-fn name_other_build(result: RouterResult, router_version: &str) -> RouterResult {
-    let this_version = env!("CARGO_PKG_VERSION");
-    let RouterResult::Error(refusal) = result else {
-        return result;
+fn rewrite_router_result_for_build(
+    router_result: RouterResult,
+    router_version: &str,
+) -> RouterResult {
+    let current_build_version = env!("CARGO_PKG_VERSION");
+    let RouterResult::Error(refusal) = router_result else {
+        return router_result;
     };
-    let message = sanitize_reported_text(&refusal.message);
-    if refusal.code != IpcErrorCode::UnsupportedKind || router_version == this_version {
+    let sanitized_refusal_message = sanitize_reported_text(&refusal.message);
+    if refusal.code != IpcErrorCode::UnsupportedKind || router_version == current_build_version {
         return RouterResult::Error(IpcErrorPayload {
             code: refusal.code,
-            message,
+            message: sanitized_refusal_message,
         });
     }
-    let running = if router_version.is_empty() {
+    let running_router_description = if router_version.is_empty() {
         "an older koshi that does not report its build".to_string()
     } else {
         format!("koshi {router_version}")
@@ -273,27 +300,29 @@ fn name_other_build(result: RouterResult, router_version: &str) -> RouterResult 
     RouterResult::Error(IpcErrorPayload {
         code: refusal.code,
         message: format!(
-            "{message} — the running router is {running} and this command is koshi \
-             {this_version}; the router serves its own build until it restarts, which it does \
+            "{sanitized_refusal_message} — the running router is {running_router_description} \
+             and this command is koshi {current_build_version}; the router serves its own build \
+             until it restarts, which it does \
              once no session is left running"
         ),
     })
 }
 
-/// Start the router as a detached process serving `runtime_dir`.
+/// Start the router as a detached process serving `runtime_directory`.
 ///
 /// It gets no standard input, output, or error, and a process group of its
 /// own: it keeps running after the shell that started it goes away, and writes
 /// nothing over the caller's terminal.
-fn spawn_router_detached(runtime_dir: &Path) -> Result<(), CliError> {
-    let exe = std::env::current_exe().map_err(|error| CliError::IpcUnavailable {
-        detail: format!("this binary's own path could not be read: {error}"),
-    })?;
-    let mut command = std::process::Command::new(exe);
-    command
+fn spawn_router_detached(runtime_directory: &Path) -> Result<(), CliError> {
+    let current_executable =
+        std::env::current_exe().map_err(|io_error| CliError::IpcUnavailable {
+            detail: format!("this binary's own path could not be read: {io_error}"),
+        })?;
+    let mut router_process_command = std::process::Command::new(current_executable);
+    router_process_command
         .arg(ROUTER_SUBCOMMAND)
-        .arg(RUNTIME_DIR_FLAG)
-        .arg(runtime_dir)
+        .arg(RUNTIME_DIRECTORY_FLAG)
+        .arg(runtime_directory)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -301,21 +330,21 @@ fn spawn_router_detached(runtime_dir: &Path) -> Result<(), CliError> {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        command.process_group(0);
+        router_process_command.process_group(0);
     }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+        router_process_command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
     }
 
     // The child handle is dropped. On Unix, a router that exits while this
     // process remains alive stays a zombie until this process exits.
-    command
+    router_process_command
         .spawn()
         .map(|_| ())
-        .map_err(|error| CliError::IpcUnavailable {
-            detail: format!("the router could not be started: {error}"),
+        .map_err(|io_error| CliError::IpcUnavailable {
+            detail: format!("the router could not be started: {io_error}"),
         })
 }
 
@@ -326,7 +355,7 @@ fn spawn_router_detached(runtime_dir: &Path) -> Result<(), CliError> {
 /// A directory that cannot be read is sent as `None`, and the session server
 /// keeps the directory it inherited.
 ///
-/// `allow_other_users` `Some(true)` lets the other users of this machine reach
+/// `is_other_user_access_allowed` `Some(true)` lets the other users of this machine reach
 /// the new session whatever its `koshi.kdl` says; `None` leaves that answer to
 /// the file.
 ///
@@ -334,20 +363,22 @@ fn spawn_router_detached(runtime_dir: &Path) -> Result<(), CliError> {
 /// Returns [`CliError::IpcUnavailable`] when the router refuses the create or
 /// answers with anything other than the new session.
 pub fn request_new_session(
-    runtime_dir: &Path,
-    profile: Option<&str>,
-    allow_other_users: Option<bool>,
+    runtime_directory: &Path,
+    profile_name: Option<&str>,
+    is_other_user_access_allowed: Option<bool>,
 ) -> Result<SessionId, CliError> {
-    let kind = RouterRequestKind::CreateSession {
-        profile: profile.map(str::to_string),
-        cwd: std::env::current_dir().ok(),
-        allow_other_users,
+    let create_session_request_kind = RouterRequestKind::CreateSession {
+        profile: profile_name.map(str::to_string),
+        working_directory: std::env::current_dir().ok(),
+        is_other_user_access_allowed,
     };
-    match router_request(runtime_dir, kind)? {
-        RouterResult::Created(address) => Ok(address.id),
+    match submit_router_request(runtime_directory, create_session_request_kind)? {
+        RouterResult::Created(session_address) => Ok(session_address.session_id),
         RouterResult::Error(refusal) => Err(CliError::IpcUnavailable {
             detail: refusal.message,
         }),
-        other => Err(talk::ROUTER.unexpected_reply(&other)),
+        unexpected_result => {
+            Err(talk::ROUTER_PEER_WORDS.build_unexpected_reply_error(&unexpected_result))
+        }
     }
 }

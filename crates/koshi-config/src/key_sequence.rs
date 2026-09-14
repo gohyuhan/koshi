@@ -14,14 +14,16 @@
 
 use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags};
 
-use crate::key::{err, parse_chord, KeyParseError, KeyParseErrorKind, Leader};
+use crate::key::{create_key_parse_error, parse_chord, KeyParseError, KeyParseErrorKind, Leader};
 
-/// True when `run` holds a `-` between two alphanumeric characters.
-fn holds_dash_form(run: &str) -> bool {
-    let chars: Vec<char> = run.chars().collect();
-    chars
-        .windows(3)
-        .any(|w| w[0].is_alphanumeric() && w[1] == '-' && w[2].is_alphanumeric())
+/// True when `word_fragment` holds a `-` between two alphanumeric characters.
+fn holds_dash_form(word_fragment: &str) -> bool {
+    let fragment_characters: Vec<char> = word_fragment.chars().collect();
+    fragment_characters.windows(3).any(|character_window| {
+        character_window[0].is_alphanumeric()
+            && character_window[1] == '-'
+            && character_window[2].is_alphanumeric()
+    })
 }
 
 /// True when `word` is written in the dash form the grammar rejects, such as
@@ -32,62 +34,79 @@ fn holds_dash_form(run: &str) -> bool {
 /// Each `<…>` run is stepped over, so `<C-p>` is not a dash form and
 /// `<leader>Ctrl-g` is. A `<` that never closes ends the walk: the unclosed
 /// bracket is reported by [`split_token`] instead.
-fn is_dash_form(word: &str) -> bool {
-    let mut rest = word;
-    while let Some(open) = rest.find('<') {
-        if holds_dash_form(&rest[..open]) {
+fn is_dash_form(word_text: &str) -> bool {
+    let mut remaining_word_text = word_text;
+    while let Some(open_bracket_index) = remaining_word_text.find('<') {
+        if holds_dash_form(&remaining_word_text[..open_bracket_index]) {
             return true;
         }
-        let Some(close) = rest[open..].find('>') else {
+        let Some(close_bracket_relative_index) =
+            remaining_word_text[open_bracket_index..].find('>')
+        else {
             return false;
         };
-        rest = &rest[open + close + 1..];
+        remaining_word_text =
+            &remaining_word_text[open_bracket_index + close_bracket_relative_index + 1..];
     }
-    holds_dash_form(rest)
+    holds_dash_form(remaining_word_text)
 }
 
-/// Splits the next token off `rest`: a `<...>` run through its first closing
-/// `>`, or a single bare character. Returns the token and what follows it.
+/// Splits the next key token off `remaining_sequence_text`: a `<...>` run
+/// through its first closing `>`, or a single bare character. Returns the key
+/// token and the remaining sequence text.
 ///
-/// `rest` must not be empty; an empty `rest` panics. A `<` with no `>` after
-/// it returns [`KeyParseErrorKind::UnclosedBracket`] carrying `rest` as the
-/// token.
-fn split_token(rest: &str) -> Result<(&str, &str), KeyParseError> {
-    if let Some(after_open) = rest.strip_prefix('<') {
-        match after_open.find('>') {
+/// `remaining_sequence_text` must not be empty; an empty value panics. A `<`
+/// with no `>` after it returns [`KeyParseErrorKind::UnclosedBracket`] carrying
+/// the remaining sequence text as the key token.
+fn split_key_token(remaining_sequence_text: &str) -> Result<(&str, &str), KeyParseError> {
+    if let Some(bracketed_body) = remaining_sequence_text.strip_prefix('<') {
+        match bracketed_body.find('>') {
             // `<` plus the inner run plus `>`.
-            Some(i) => Ok(rest.split_at(i + 2)),
-            None => Err(err(rest, KeyParseErrorKind::UnclosedBracket)),
+            Some(closing_bracket_relative_index) => {
+                Ok(remaining_sequence_text.split_at(closing_bracket_relative_index + 2))
+            }
+            None => Err(create_key_parse_error(
+                remaining_sequence_text,
+                KeyParseErrorKind::UnclosedBracket,
+            )),
         }
     } else {
-        let c = rest.chars().next().expect("rest is not empty");
-        Ok(rest.split_at(c.len_utf8()))
+        let first_key_character = remaining_sequence_text
+            .chars()
+            .next()
+            .expect("remaining_sequence_text is not empty");
+        Ok(remaining_sequence_text.split_at(first_key_character.len_utf8()))
     }
 }
 
-/// True when `token` is the `<leader>` placeholder, matched case-insensitively.
-fn is_leader_token(token: &str) -> bool {
-    token
+/// True when `key_token` is the `<leader>` placeholder, matched
+/// case-insensitively.
+fn is_leader_token(key_token: &str) -> bool {
+    key_token
         .strip_prefix('<')
-        .and_then(|t| t.strip_suffix('>'))
-        .is_some_and(|inner| inner.eq_ignore_ascii_case("leader"))
+        .and_then(|token_body| token_body.strip_suffix('>'))
+        .is_some_and(|token_body| token_body.eq_ignore_ascii_case("leader"))
 }
 
 /// Merges a modifier-run leader into the chord that follows it. Rejects a
 /// merge that lands `SHIFT` on a [`Key::Char`] that is not lowercase; a named
 /// key takes `SHIFT` unchanged.
-fn merge_leader_mods(
-    token: &str,
-    leader_mods: ModFlags,
-    chord: KeyChord,
+fn merge_leader_modifier_flags(
+    key_token: &str,
+    leader_modifier_flags: ModFlags,
+    key_chord: KeyChord,
 ) -> Result<KeyChord, KeyParseError> {
-    let mods = chord.mods.union(leader_mods);
-    if let Key::Char(c) = chord.key {
-        if mods.contains(ModFlags::SHIFT) && !c.is_lowercase() {
-            return Err(err(token, KeyParseErrorKind::ShiftOnNonLetter { ch: c }));
+    let merged_modifier_flags = key_chord.modifier_flags.union(leader_modifier_flags);
+    if let Key::Char(key_character) = key_chord.key {
+        if merged_modifier_flags.has_all_modifiers(ModFlags::SHIFT) && !key_character.is_lowercase()
+        {
+            return Err(create_key_parse_error(
+                key_token,
+                KeyParseErrorKind::ShiftOnNonLetter { key_character },
+            ));
         }
     }
-    Ok(KeyChord::new(mods, chord.key))
+    Ok(KeyChord::from_parts(merged_modifier_flags, key_chord.key))
 }
 
 /// Parses a whole key sequence from its config text form.
@@ -105,81 +124,99 @@ fn merge_leader_mods(
 /// after it, a merge landing `S-` on a non-letter character, or more chords
 /// than `max_chord_depth`.
 pub fn parse_sequence(
-    s: &str,
+    sequence_text: &str,
     leader: Leader,
     max_chord_depth: u8,
 ) -> Result<KeySequence, KeyParseError> {
-    for word in s.split_whitespace() {
-        if is_dash_form(word) {
-            return Err(err(word, KeyParseErrorKind::UnbracketedMultiChar));
+    for sequence_word in sequence_text.split_whitespace() {
+        if is_dash_form(sequence_word) {
+            return Err(create_key_parse_error(
+                sequence_word,
+                KeyParseErrorKind::UnbracketedMultiChar,
+            ));
         }
     }
 
     let mut chords: Vec<KeyChord> = Vec::new();
     // Modifiers from a modifier-run leader, waiting to merge into the next chord.
-    let mut pending_mods = ModFlags::NONE;
-    let mut first_token = true;
-    let mut rest = s.trim_start();
+    let mut pending_leader_modifier_flags = ModFlags::NONE;
+    let mut is_first_token = true;
+    let mut remaining_sequence_text = sequence_text.trim_start();
 
-    while !rest.is_empty() {
-        let (mut token, mut after) = split_token(rest)?;
+    while !remaining_sequence_text.is_empty() {
+        let (mut key_token, mut remaining_after_token) = split_key_token(remaining_sequence_text)?;
 
-        if is_leader_token(token) {
-            if !first_token {
-                return Err(err(token, KeyParseErrorKind::LeaderNotFirst));
+        if is_leader_token(key_token) {
+            if !is_first_token {
+                return Err(create_key_parse_error(
+                    key_token,
+                    KeyParseErrorKind::LeaderNotFirst,
+                ));
             }
             match leader {
-                Leader::Chord(chord) => chords.push(chord),
-                Leader::Mods(mods) => pending_mods = mods,
+                Leader::Chord(leader_chord) => chords.push(leader_chord),
+                Leader::Mods(leader_modifier_flags) => {
+                    pending_leader_modifier_flags = leader_modifier_flags;
+                }
             }
         } else {
-            let mut chord = match parse_chord(token) {
-                Ok(chord) => chord,
+            let mut key_chord = match parse_chord(key_token) {
+                Ok(key_chord) => key_chord,
                 // `<C->>`: the key is `>` itself, and the first `>` closes
                 // nothing. Extend the token through the next `>` and parse
                 // again. `<>` names no modifier run, so `<>>` is not extended.
-                Err(e)
-                    if matches!(e.kind, KeyParseErrorKind::MissingKey)
-                        && token != "<>"
-                        && after.starts_with('>') =>
+                Err(parse_error)
+                    if matches!(parse_error.error_kind, KeyParseErrorKind::MissingKey)
+                        && key_token != "<>"
+                        && remaining_after_token.starts_with('>') =>
                 {
-                    token = &rest[..token.len() + 1];
-                    after = &after[1..];
-                    parse_chord(token)?
+                    key_token = &remaining_sequence_text[..key_token.len() + 1];
+                    remaining_after_token = &remaining_after_token[1..];
+                    parse_chord(key_token)?
                 }
-                Err(e) => return Err(e),
+                Err(parse_error) => return Err(parse_error),
             };
-            if !pending_mods.is_empty() {
-                chord = merge_leader_mods(token, pending_mods, chord)?;
-                pending_mods = ModFlags::NONE;
+            if !pending_leader_modifier_flags.is_empty() {
+                key_chord = merge_leader_modifier_flags(
+                    key_token,
+                    pending_leader_modifier_flags,
+                    key_chord,
+                )?;
+                pending_leader_modifier_flags = ModFlags::NONE;
             }
-            chords.push(chord);
+            chords.push(key_chord);
         }
 
-        first_token = false;
-        rest = after.trim_start();
+        is_first_token = false;
+        remaining_sequence_text = remaining_after_token.trim_start();
     }
 
-    if !pending_mods.is_empty() {
+    if !pending_leader_modifier_flags.is_empty() {
         // The whole sequence was `<leader>` with a modifier-run leader.
-        return Err(err(s, KeyParseErrorKind::DanglingLeaderMods));
+        return Err(create_key_parse_error(
+            sequence_text,
+            KeyParseErrorKind::DanglingLeaderMods,
+        ));
     }
     if chords.is_empty() {
-        return Err(err(s, KeyParseErrorKind::Empty));
+        return Err(create_key_parse_error(
+            sequence_text,
+            KeyParseErrorKind::Empty,
+        ));
     }
-    let len = chords.len();
-    if len > usize::from(max_chord_depth) {
-        return Err(err(
-            s,
+    let chord_count = chords.len();
+    if chord_count > usize::from(max_chord_depth) {
+        return Err(create_key_parse_error(
+            sequence_text,
             KeyParseErrorKind::SequenceTooLong {
-                len,
-                max: max_chord_depth,
+                chord_count,
+                max_chord_depth,
             },
         ));
     }
 
-    let first = chords.remove(0);
-    Ok(KeySequence::new(first, chords))
+    let first_chord = chords.remove(0);
+    Ok(KeySequence::from_first_and_rest(first_chord, chords))
 }
 
 #[cfg(test)]

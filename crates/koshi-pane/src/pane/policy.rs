@@ -14,11 +14,11 @@ use serde::{Deserialize, Serialize};
 /// How a pane carries out a requested close.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PaneClosePolicy {
-    /// Close gracefully. `timeout` is how long the process has to clean up.
-    /// `timeout` serializes as whole seconds; the sub-second part is dropped.
+    /// Close gracefully. `timeout_duration` is how long the process has to clean up.
+    /// `timeout_duration` serializes as whole seconds; the sub-second part is dropped.
     Graceful {
-        #[serde(with = "koshi_core::process::duration_secs")]
-        timeout: Duration,
+        #[serde(rename = "timeout", with = "koshi_core::process::duration_seconds")]
+        timeout_duration: Duration,
     },
     /// Force-kill the process immediately.
     Force,
@@ -30,7 +30,7 @@ pub enum PaneClosePolicy {
 impl Default for PaneClosePolicy {
     fn default() -> Self {
         PaneClosePolicy::Graceful {
-            timeout: GRACEFUL_TIMEOUT_DURATION,
+            timeout_duration: GRACEFUL_TIMEOUT_DURATION,
         }
     }
 }
@@ -42,10 +42,12 @@ impl PaneClosePolicy {
     #[must_use]
     pub fn kill_policy(&self) -> KillPolicy {
         match self {
-            PaneClosePolicy::Graceful { timeout } => KillPolicy::Graceful { timeout: *timeout },
+            PaneClosePolicy::Graceful { timeout_duration } => KillPolicy::Graceful {
+                timeout_duration: *timeout_duration,
+            },
             PaneClosePolicy::Force => KillPolicy::Force,
             PaneClosePolicy::ConfirmIfBusy => KillPolicy::Graceful {
-                timeout: GRACEFUL_TIMEOUT_DURATION,
+                timeout_duration: GRACEFUL_TIMEOUT_DURATION,
             },
         }
     }

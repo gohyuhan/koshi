@@ -37,15 +37,16 @@ pub enum FocusRepairResult {
 /// Pick the pane that inherits focus after the focused pane in `tab` is gone.
 ///
 /// The recovery order is fixed, and the first eligible pane wins:
-/// 1. the tab's focus history, newest first ([`Tab::focus_mru`]);
+/// 1. the tab's focus history, newest first ([`Tab::list_focus_mru`]);
 /// 2. the spatial neighbor of the removed pane's old rect;
 /// 3. the pane that absorbed the most of the removed pane's space;
 /// 4. the first eligible pane in layout order, as a last resort.
 ///
-/// `candidate` is the layout's ranked survivors after the removal (from
-/// `koshi_layout::focus::focus_candidates`); its `layout_order` is exactly the
+/// `ranked_focus_candidates` is the layout's ranked survivors after the removal
+/// (from `koshi_layout::focus::compute_focus_candidates`); its
+/// `layout_order_pane_ids` is exactly the
 /// visible panes, so suppressed panes are already excluded. A pane is
-/// *eligible* when it appears in `layout_order`, has a record in
+/// *eligible* when it appears in `layout_order_pane_ids`, has a record in
 /// `pane_registry`, and that record is not [`PaneLifecycle::Removed`]. A
 /// `Spawning`, `Running`, dead (`Exited`) or `Closing` pane all stay eligible:
 /// each is a visible, focusable placeholder until it is removed.
@@ -58,29 +59,36 @@ pub enum FocusRepairResult {
 pub fn repair_focus(
     tab: &Tab,
     pane_registry: &PaneRegistry,
-    candidate: FocusCandidates,
+    ranked_focus_candidates: FocusCandidates,
     empty_tab_policy: EmptyTabPolicy,
 ) -> FocusRepairResult {
-    let is_eligible = |pane_id: PaneId| {
-        candidate.layout_order.contains(&pane_id)
+    let is_eligible_pane = |pane_id: PaneId| {
+        ranked_focus_candidates
+            .layout_order_pane_ids
+            .contains(&pane_id)
             && pane_registry
-                .get(pane_id)
-                .is_some_and(|pane| *pane.lifecycle() != PaneLifecycle::Removed)
+                .get_pane_record_by_id(pane_id)
+                .is_some_and(|pane_record| *pane_record.get_lifecycle() != PaneLifecycle::Removed)
     };
 
     // The recovery order in one pass, focus history newest-first.
-    let inheritor = tab
-        .focus_mru()
+    let focus_pane_id = tab
+        .list_focus_mru()
         .iter()
         .copied()
-        .chain(candidate.spatial_neighbor)
-        .chain(candidate.absorbed_space)
-        .chain(candidate.layout_order.iter().copied())
-        .find(|&pane_id| is_eligible(pane_id));
+        .chain(ranked_focus_candidates.spatial_neighbor_pane_id)
+        .chain(ranked_focus_candidates.absorbed_space_pane_id)
+        .chain(
+            ranked_focus_candidates
+                .layout_order_pane_ids
+                .iter()
+                .copied(),
+        )
+        .find(|&pane_id| is_eligible_pane(pane_id));
 
-    match inheritor {
+    match focus_pane_id {
         Some(pane_id) => FocusRepairResult::Focused(pane_id),
-        None if tab.layout().leaf_panes().is_empty() => {
+        None if tab.get_layout_tree().list_leaf_pane_ids().is_empty() => {
             FocusRepairResult::EmptyTab(empty_tab_policy)
         }
         None => FocusRepairResult::TerminalTooSmall,

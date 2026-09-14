@@ -10,10 +10,10 @@ use koshi_core::error::{DomainCategory, DomainError, Severity};
 
 #[test]
 fn transport_error_display_carries_the_detail() {
-    let err = IpcError::Transport {
-        detail: "socket reset".to_string(),
+    let error = IpcError::Transport {
+        error_detail: "socket reset".to_string(),
     };
-    assert_eq!(err.to_string(), "ipc transport error: socket reset");
+    assert_eq!(error.to_string(), "ipc transport error: socket reset");
 }
 
 #[test]
@@ -23,103 +23,103 @@ fn disconnected_error_display_is_a_fixed_message() {
 
 #[test]
 fn frame_too_large_display_names_both_sizes() {
-    let err = IpcError::FrameTooLarge {
-        len: 20_000_000,
-        max: 16_777_216,
+    let error = IpcError::FrameTooLarge {
+        frame_byte_count: 20_000_000,
+        maximum_frame_byte_count: 16_777_216,
     };
     assert_eq!(
-        err.to_string(),
+        error.to_string(),
         "ipc frame of 20000000 bytes exceeds the 16777216-byte limit"
     );
 }
 
 #[test]
 fn malformed_frame_display_carries_the_detail() {
-    let err = IpcError::MalformedFrame {
-        detail: "expected value at line 1 column 1".to_string(),
+    let error = IpcError::MalformedFrame {
+        error_detail: "expected value at line 1 column 1".to_string(),
     };
     assert_eq!(
-        err.to_string(),
+        error.to_string(),
         "ipc frame is not a readable message: expected value at line 1 column 1"
     );
 }
 
 #[test]
 fn untrusted_socket_display_names_the_address_and_reason() {
-    let err = IpcError::UntrustedSocket {
-        addr: "/tmp/evil.sock".to_string(),
-        reason: "not directly inside the koshi runtime directory".to_string(),
+    let error = IpcError::UntrustedSocket {
+        socket_address: "/tmp/evil.sock".to_string(),
+        trust_failure_reason: "not directly inside the koshi runtime directory".to_string(),
     };
     assert_eq!(
-        err.to_string(),
+        error.to_string(),
         "untrusted socket address /tmp/evil.sock: not directly inside the koshi runtime directory"
     );
 }
 
 #[test]
 fn no_listener_display_names_the_address() {
-    let err = IpcError::NoListener {
-        addr: "/run/koshi/session-abc.sock".to_string(),
+    let error = IpcError::NoListener {
+        socket_address: "/run/koshi/session-abc.sock".to_string(),
     };
     assert_eq!(
-        err.to_string(),
+        error.to_string(),
         "no koshi is listening at /run/koshi/session-abc.sock"
     );
 }
 
 #[test]
 fn socket_busy_display_names_the_address() {
-    let err = IpcError::SocketBusy {
-        addr: "/run/koshi/session-abc.sock".to_string(),
+    let error = IpcError::SocketBusy {
+        socket_address: "/run/koshi/session-abc.sock".to_string(),
     };
     assert_eq!(
-        err.to_string(),
+        error.to_string(),
         "another process is already listening at /run/koshi/session-abc.sock"
     );
 }
 
 #[test]
 fn endpoint_file_missing_display_names_the_path() {
-    let err = IpcError::EndpointFileMissing {
-        path: "/run/koshi/session-abc.json".to_string(),
+    let error = IpcError::EndpointFileMissing {
+        endpoint_file_path: "/run/koshi/session-abc.json".to_string(),
     };
     assert_eq!(
-        err.to_string(),
+        error.to_string(),
         "no endpoint file at /run/koshi/session-abc.json"
     );
 }
 
 #[test]
 fn endpoint_file_unreadable_display_names_the_path_and_detail() {
-    let err = IpcError::EndpointFileUnreadable {
-        path: "/run/koshi/session-abc.json".to_string(),
-        detail: "expected value at line 1 column 1".to_string(),
+    let error = IpcError::EndpointFileUnreadable {
+        endpoint_file_path: "/run/koshi/session-abc.json".to_string(),
+        error_detail: "expected value at line 1 column 1".to_string(),
     };
     assert_eq!(
-        err.to_string(),
+        error.to_string(),
         "endpoint file /run/koshi/session-abc.json is unreadable: expected value at line 1 column 1"
     );
 }
 
 #[test]
 fn endpoint_file_write_display_names_the_path_and_detail() {
-    let err = IpcError::EndpointFileWrite {
-        path: "/run/koshi/session-abc.json".to_string(),
-        detail: "storage io error: permission denied".to_string(),
+    let error = IpcError::EndpointFileWrite {
+        endpoint_file_path: "/run/koshi/session-abc.json".to_string(),
+        error_detail: "storage io error: permission denied".to_string(),
     };
     assert_eq!(
-        err.to_string(),
+        error.to_string(),
         "endpoint file /run/koshi/session-abc.json could not be written: storage io error: permission denied"
     );
 }
 
 #[test]
 fn connect_refused_display_names_the_address_and_the_way_out() {
-    let err = IpcError::ConnectRefused {
-        address: "laptop.local:7654".to_string(),
+    let error = IpcError::ConnectRefused {
+        server_address: "laptop.local:7654".to_string(),
     };
     assert_eq!(
-        err.to_string(),
+        error.to_string(),
         "laptop.local:7654 refused the connection: nothing is listening on that port. \
          if remote access is not enabled on that machine, run `koshi share grant` \
          there and answer yes to the offer to open the port"
@@ -128,11 +128,11 @@ fn connect_refused_display_names_the_address_and_the_way_out() {
 
 #[test]
 fn connect_timed_out_display_names_the_address_and_what_to_check() {
-    let err = IpcError::ConnectTimedOut {
-        address: "laptop.local:7654".to_string(),
+    let error = IpcError::ConnectTimedOut {
+        server_address: "laptop.local:7654".to_string(),
     };
     assert_eq!(
-        err.to_string(),
+        error.to_string(),
         "connecting to laptop.local:7654 timed out: nothing answered. check that the \
          machine is up, the address and port are right, and the network path \
          allows it"
@@ -141,12 +141,12 @@ fn connect_timed_out_display_names_the_address_and_what_to_check() {
 
 #[test]
 fn tls_handshake_failed_display_names_the_address_and_detail() {
-    let err = IpcError::TlsHandshakeFailed {
-        address: "laptop.local:7654".to_string(),
-        detail: "received fatal alert: HandshakeFailure".to_string(),
+    let error = IpcError::TlsHandshakeFailed {
+        server_address: "laptop.local:7654".to_string(),
+        error_detail: "received fatal alert: HandshakeFailure".to_string(),
     };
     assert_eq!(
-        err.to_string(),
+        error.to_string(),
         "the TLS handshake with laptop.local:7654 failed: received fatal alert: HandshakeFailure"
     );
 }
@@ -175,9 +175,9 @@ fn a_remote_file_names_which_file_it_is_as_well_as_its_path() {
     // serving one.
     assert_eq!(
         IpcError::RemoteFileUnreadable {
-            file: RemoteFile::SavedServers,
-            path: "/home/alice/.local/share/koshi/remote/servers".to_string(),
-            detail: "expected value at line 1 column 1".to_string(),
+            remote_file: RemoteFile::SavedServers,
+            remote_file_path: "/home/alice/.local/share/koshi/remote/servers".to_string(),
+            error_detail: "expected value at line 1 column 1".to_string(),
         }
         .to_string(),
         "the saved servers file at /home/alice/.local/share/koshi/remote/servers is unreadable: \
@@ -185,9 +185,9 @@ fn a_remote_file_names_which_file_it_is_as_well_as_its_path() {
     );
     assert_eq!(
         IpcError::RemoteFileUnreadable {
-            file: RemoteFile::Certificate,
-            path: "/var/lib/koshi/remote/cert".to_string(),
-            detail: "format 2 is not the 1 this build reads".to_string(),
+            remote_file: RemoteFile::Certificate,
+            remote_file_path: "/var/lib/koshi/remote/cert".to_string(),
+            error_detail: "format 2 is not the 1 this build reads".to_string(),
         }
         .to_string(),
         "the remote access certificate at /var/lib/koshi/remote/cert is unreadable: \
@@ -195,9 +195,9 @@ fn a_remote_file_names_which_file_it_is_as_well_as_its_path() {
     );
     assert_eq!(
         IpcError::RemoteFileWrite {
-            file: RemoteFile::RemoteAccessMark,
-            path: "/var/lib/koshi/remote/enabled".to_string(),
-            detail: "permission denied".to_string(),
+            remote_file: RemoteFile::RemoteAccessMark,
+            remote_file_path: "/var/lib/koshi/remote/enabled".to_string(),
+            error_detail: "permission denied".to_string(),
         }
         .to_string(),
         "the remote access record at /var/lib/koshi/remote/enabled could not be written: \
@@ -205,9 +205,9 @@ fn a_remote_file_names_which_file_it_is_as_well_as_its_path() {
     );
     assert_eq!(
         IpcError::RemoteFileUnreadable {
-            file: RemoteFile::TokenStore,
-            path: "/var/lib/koshi/remote/tokens".to_string(),
-            detail: "format 2 is not the 1 this build reads".to_string(),
+            remote_file: RemoteFile::TokenStore,
+            remote_file_path: "/var/lib/koshi/remote/tokens".to_string(),
+            error_detail: "format 2 is not the 1 this build reads".to_string(),
         }
         .to_string(),
         "the remote access token store at /var/lib/koshi/remote/tokens is unreadable: \
@@ -215,9 +215,9 @@ fn a_remote_file_names_which_file_it_is_as_well_as_its_path() {
     );
     assert_eq!(
         IpcError::RemoteFileWrite {
-            file: RemoteFile::TokenStore,
-            path: "/var/lib/koshi/remote/tokens".to_string(),
-            detail: "permission denied".to_string(),
+            remote_file: RemoteFile::TokenStore,
+            remote_file_path: "/var/lib/koshi/remote/tokens".to_string(),
+            error_detail: "permission denied".to_string(),
         }
         .to_string(),
         "the remote access token store at /var/lib/koshi/remote/tokens could not be written: \
@@ -227,13 +227,13 @@ fn a_remote_file_names_which_file_it_is_as_well_as_its_path() {
 
 #[test]
 fn a_changed_certificate_names_both_fingerprints_and_the_way_out() {
-    let err = IpcError::CertificateChanged {
-        address: "laptop.local:7654".to_string(),
-        pinned: "aa".repeat(32),
-        presented: "bb".repeat(32),
+    let error = IpcError::CertificateChanged {
+        server_address: "laptop.local:7654".to_string(),
+        pinned_certificate: "aa".repeat(32),
+        presented_certificate: "bb".repeat(32),
     };
     assert_eq!(
-        err.to_string(),
+        error.to_string(),
         format!(
             "the certificate of laptop.local:7654 changed: pinned {}, presented {}. \
              if the server was reinstalled on purpose, run \
@@ -248,122 +248,126 @@ fn a_changed_certificate_names_both_fingerprints_and_the_way_out() {
 fn every_ipc_error_is_in_the_ipc_domain() {
     assert_eq!(
         IpcError::Transport {
-            detail: String::new()
+            error_detail: String::new()
         }
         .category(),
         DomainCategory::Ipc
     );
     assert_eq!(IpcError::Disconnected.category(), DomainCategory::Ipc);
     assert_eq!(
-        IpcError::FrameTooLarge { len: 0, max: 0 }.category(),
+        IpcError::FrameTooLarge {
+            frame_byte_count: 0,
+            maximum_frame_byte_count: 0
+        }
+        .category(),
         DomainCategory::Ipc
     );
     assert_eq!(
         IpcError::MalformedFrame {
-            detail: String::new()
+            error_detail: String::new()
         }
         .category(),
         DomainCategory::Ipc
     );
     assert_eq!(
         IpcError::UntrustedSocket {
-            addr: String::new(),
-            reason: String::new()
+            socket_address: String::new(),
+            trust_failure_reason: String::new()
         }
         .category(),
         DomainCategory::Ipc
     );
     assert_eq!(
         IpcError::NoListener {
-            addr: String::new()
+            socket_address: String::new()
         }
         .category(),
         DomainCategory::Ipc
     );
     assert_eq!(
         IpcError::SocketBusy {
-            addr: String::new()
+            socket_address: String::new()
         }
         .category(),
         DomainCategory::Ipc
     );
     assert_eq!(
         IpcError::EndpointFileMissing {
-            path: String::new()
+            endpoint_file_path: String::new()
         }
         .category(),
         DomainCategory::Ipc
     );
     assert_eq!(
         IpcError::EndpointFileUnreadable {
-            path: String::new(),
-            detail: String::new()
+            endpoint_file_path: String::new(),
+            error_detail: String::new()
         }
         .category(),
         DomainCategory::Ipc
     );
     assert_eq!(
         IpcError::EndpointFileWrite {
-            path: String::new(),
-            detail: String::new()
+            endpoint_file_path: String::new(),
+            error_detail: String::new()
         }
         .category(),
         DomainCategory::Ipc
     );
     assert_eq!(
         IpcError::RemoteFileUnreadable {
-            file: RemoteFile::SavedServers,
-            path: String::new(),
-            detail: String::new()
+            remote_file: RemoteFile::SavedServers,
+            remote_file_path: String::new(),
+            error_detail: String::new()
         }
         .category(),
         DomainCategory::Ipc
     );
     assert_eq!(
         IpcError::RemoteFileWrite {
-            file: RemoteFile::Certificate,
-            path: String::new(),
-            detail: String::new()
+            remote_file: RemoteFile::Certificate,
+            remote_file_path: String::new(),
+            error_detail: String::new()
         }
         .category(),
         DomainCategory::Ipc
     );
     assert_eq!(
         IpcError::CertificateChanged {
-            address: String::new(),
-            pinned: String::new(),
-            presented: String::new()
+            server_address: String::new(),
+            pinned_certificate: String::new(),
+            presented_certificate: String::new()
         }
         .category(),
         DomainCategory::Ipc
     );
     assert_eq!(
         IpcError::RemoteFileUnreadable {
-            file: RemoteFile::TokenStore,
-            path: String::new(),
-            detail: String::new()
+            remote_file: RemoteFile::TokenStore,
+            remote_file_path: String::new(),
+            error_detail: String::new()
         }
         .category(),
         DomainCategory::Ipc
     );
     assert_eq!(
         IpcError::ConnectRefused {
-            address: String::new()
+            server_address: String::new()
         }
         .category(),
         DomainCategory::Ipc
     );
     assert_eq!(
         IpcError::ConnectTimedOut {
-            address: String::new()
+            server_address: String::new()
         }
         .category(),
         DomainCategory::Ipc
     );
     assert_eq!(
         IpcError::TlsHandshakeFailed {
-            address: String::new(),
-            detail: String::new()
+            server_address: String::new(),
+            error_detail: String::new()
         }
         .category(),
         DomainCategory::Ipc
@@ -374,24 +378,24 @@ fn every_ipc_error_is_in_the_ipc_domain() {
 fn remote_dial_failures_are_client_fatal() {
     assert_eq!(
         IpcError::ConnectRefused {
-            address: String::new()
+            server_address: String::new()
         }
-        .severity(),
+        .get_severity(),
         Severity::ClientFatal
     );
     assert_eq!(
         IpcError::ConnectTimedOut {
-            address: String::new()
+            server_address: String::new()
         }
-        .severity(),
+        .get_severity(),
         Severity::ClientFatal
     );
     assert_eq!(
         IpcError::TlsHandshakeFailed {
-            address: String::new(),
-            detail: String::new()
+            server_address: String::new(),
+            error_detail: String::new()
         }
-        .severity(),
+        .get_severity(),
         Severity::ClientFatal
     );
 }
@@ -400,17 +404,17 @@ fn remote_dial_failures_are_client_fatal() {
 fn endpoint_file_read_failures_are_client_fatal() {
     assert_eq!(
         IpcError::EndpointFileMissing {
-            path: String::new()
+            endpoint_file_path: String::new()
         }
-        .severity(),
+        .get_severity(),
         Severity::ClientFatal
     );
     assert_eq!(
         IpcError::EndpointFileUnreadable {
-            path: String::new(),
-            detail: String::new()
+            endpoint_file_path: String::new(),
+            error_detail: String::new()
         }
-        .severity(),
+        .get_severity(),
         Severity::ClientFatal
     );
 }
@@ -419,10 +423,10 @@ fn endpoint_file_read_failures_are_client_fatal() {
 fn a_failed_endpoint_file_write_is_session_fatal() {
     assert_eq!(
         IpcError::EndpointFileWrite {
-            path: String::new(),
-            detail: String::new()
+            endpoint_file_path: String::new(),
+            error_detail: String::new()
         }
-        .severity(),
+        .get_severity(),
         Severity::SessionFatal
     );
 }
@@ -430,11 +434,11 @@ fn a_failed_endpoint_file_write_is_session_fatal() {
 #[test]
 fn a_failed_advert_marker_write_is_session_fatal_and_names_the_marker() {
     let error = IpcError::AdvertWrite {
-        path: "/tmp/koshi/501/session-1".to_string(),
-        detail: "No such file or directory (os error 2)".to_string(),
+        advert_marker_path: "/tmp/koshi/501/session-1".to_string(),
+        error_detail: "No such file or directory (os error 2)".to_string(),
     };
 
-    assert_eq!(error.severity(), Severity::SessionFatal);
+    assert_eq!(error.get_severity(), Severity::SessionFatal);
     assert_eq!(error.category(), DomainCategory::Ipc);
     assert_eq!(
         error.to_string(),
@@ -447,24 +451,24 @@ fn a_failed_advert_marker_write_is_session_fatal_and_names_the_marker() {
 fn socket_address_check_failures_are_client_fatal() {
     assert_eq!(
         IpcError::UntrustedSocket {
-            addr: String::new(),
-            reason: String::new()
+            socket_address: String::new(),
+            trust_failure_reason: String::new()
         }
-        .severity(),
+        .get_severity(),
         Severity::ClientFatal
     );
     assert_eq!(
         IpcError::NoListener {
-            addr: String::new()
+            socket_address: String::new()
         }
-        .severity(),
+        .get_severity(),
         Severity::ClientFatal
     );
     assert_eq!(
         IpcError::SocketBusy {
-            addr: String::new()
+            socket_address: String::new()
         }
-        .severity(),
+        .get_severity(),
         Severity::ClientFatal
     );
 }
@@ -475,38 +479,38 @@ fn remote_access_failures_are_client_fatal() {
     // needed it.
     assert_eq!(
         IpcError::RemoteFileUnreadable {
-            file: RemoteFile::TokenStore,
-            path: String::new(),
-            detail: String::new()
+            remote_file: RemoteFile::TokenStore,
+            remote_file_path: String::new(),
+            error_detail: String::new()
         }
-        .severity(),
+        .get_severity(),
         Severity::ClientFatal
     );
     assert_eq!(
         IpcError::RemoteFileUnreadable {
-            file: RemoteFile::SavedServers,
-            path: String::new(),
-            detail: String::new()
+            remote_file: RemoteFile::SavedServers,
+            remote_file_path: String::new(),
+            error_detail: String::new()
         }
-        .severity(),
+        .get_severity(),
         Severity::ClientFatal
     );
     assert_eq!(
         IpcError::RemoteFileWrite {
-            file: RemoteFile::RemoteAccessMark,
-            path: String::new(),
-            detail: String::new()
+            remote_file: RemoteFile::RemoteAccessMark,
+            remote_file_path: String::new(),
+            error_detail: String::new()
         }
-        .severity(),
+        .get_severity(),
         Severity::ClientFatal
     );
     assert_eq!(
         IpcError::CertificateChanged {
-            address: String::new(),
-            pinned: String::new(),
-            presented: String::new()
+            server_address: String::new(),
+            pinned_certificate: String::new(),
+            presented_certificate: String::new()
         }
-        .severity(),
+        .get_severity(),
         Severity::ClientFatal
     );
 }
@@ -515,14 +519,18 @@ fn remote_access_failures_are_client_fatal() {
 fn link_and_refused_frame_errors_are_client_fatal() {
     assert_eq!(
         IpcError::Transport {
-            detail: String::new()
+            error_detail: String::new()
         }
-        .severity(),
+        .get_severity(),
         Severity::ClientFatal
     );
-    assert_eq!(IpcError::Disconnected.severity(), Severity::ClientFatal);
+    assert_eq!(IpcError::Disconnected.get_severity(), Severity::ClientFatal);
     assert_eq!(
-        IpcError::FrameTooLarge { len: 0, max: 0 }.severity(),
+        IpcError::FrameTooLarge {
+            frame_byte_count: 0,
+            maximum_frame_byte_count: 0
+        }
+        .get_severity(),
         Severity::ClientFatal
     );
 }
@@ -531,9 +539,9 @@ fn link_and_refused_frame_errors_are_client_fatal() {
 fn a_malformed_frame_is_recoverable() {
     assert_eq!(
         IpcError::MalformedFrame {
-            detail: String::new()
+            error_detail: String::new()
         }
-        .severity(),
+        .get_severity(),
         Severity::Recoverable
     );
 }

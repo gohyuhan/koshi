@@ -2,7 +2,7 @@
 //! into history or back down to live output, and re-anchoring held views as new
 //! output pushes lines into scrollback.
 //!
-//! The offset is per-client view state ([`Client::scroll_offset`](koshi_session::client::Client::scroll_offset)), so two
+//! The offset is per-client view state ([`Client::get_scroll_offset`](koshi_session::client::Client::get_scroll_offset)), so two
 //! clients scroll a shared pane independently. Every public entry point keeps
 //! the offset inside `[0, scrollback len]` and marks the frame stale when the
 //! offset moves.
@@ -17,39 +17,46 @@ use koshi_core::ids::{ClientId, PaneId};
 use crate::server::Server;
 
 impl Server {
-    /// Scroll `client_id`'s view of `pane_id` up by `lines` into scrollback,
+    /// Scroll `client_id`'s view of `pane_id` up by `line_count` into scrollback,
     /// clamped to the pane's retained history. An unknown client, or a view
     /// already at the clamp, moves nothing and schedules no repaint. A pane
     /// with no terminal engine retains nothing, so a view scrolled up in it
     /// clamps back to the newest line.
-    pub fn scroll_up(&mut self, client_id: ClientId, pane_id: PaneId, lines: usize) {
-        let retained = self
-            .terminal_engines
-            .get(&pane_id)
-            .map_or(0, |engine| engine.state().scrollback().len());
-        let Some(client) = self.client_mut(client_id) else {
+    pub fn scroll_up(&mut self, client_id: ClientId, pane_id: PaneId, line_count: usize) {
+        let retained_line_count =
+            self.terminal_engine_by_pane_id
+                .get(&pane_id)
+                .map_or(0, |terminal_engine| {
+                    terminal_engine
+                        .get_terminal_state()
+                        .get_scrollback()
+                        .get_retained_line_count()
+                });
+        let Some(client) = self.get_client_mut(client_id) else {
             return;
         };
-        let current = client.scroll_offset(pane_id);
-        let target = current.saturating_add(lines).min(retained);
-        if target != current {
-            client.set_scroll_offset(pane_id, target);
+        let current_scroll_offset = client.get_scroll_offset(pane_id);
+        let target_scroll_offset = current_scroll_offset
+            .saturating_add(line_count)
+            .min(retained_line_count);
+        if target_scroll_offset != current_scroll_offset {
+            client.set_scroll_offset(pane_id, target_scroll_offset);
             self.render_scheduler.invalidate();
         }
     }
 
-    /// Scroll `client_id`'s view of `pane_id` down by `lines` toward live output;
+    /// Scroll `client_id`'s view of `pane_id` down by `line_count` toward live output;
     /// reaching `0` returns it to the newest line, where it follows live again
     /// unless a highlight is holding it. An unknown client or a view already at
     /// the newest line moves nothing and schedules no repaint.
-    pub fn scroll_down(&mut self, client_id: ClientId, pane_id: PaneId, lines: usize) {
-        let Some(client) = self.client_mut(client_id) else {
+    pub fn scroll_down(&mut self, client_id: ClientId, pane_id: PaneId, line_count: usize) {
+        let Some(client) = self.get_client_mut(client_id) else {
             return;
         };
-        let current = client.scroll_offset(pane_id);
-        let target = current.saturating_sub(lines);
-        if target != current {
-            client.set_scroll_offset(pane_id, target);
+        let current_scroll_offset = client.get_scroll_offset(pane_id);
+        let target_scroll_offset = current_scroll_offset.saturating_sub(line_count);
+        if target_scroll_offset != current_scroll_offset {
+            client.set_scroll_offset(pane_id, target_scroll_offset);
             self.render_scheduler.invalidate();
         }
     }
@@ -67,9 +74,10 @@ impl Server {
         self.scroll_down(client_id, pane_id, usize::MAX);
     }
 
-    /// Re-anchor every client whose view of `pane_id` is held after `pushed`
-    /// lines entered its scrollback, so a held view keeps showing the same text:
-    /// its offset rises by `pushed`, clamped to `len_after` (the count retained
+    /// Re-anchor every client whose view of `pane_id` is held after
+    /// `pushed_line_count` lines entered its scrollback, so a held view keeps
+    /// showing the same text: its offset rises by `pushed_line_count`, clamped
+    /// to `retained_line_count_after` (the count retained
     /// after the push, so a view anchored past a truncated or erased top stops at
     /// the oldest surviving line). A view that is not held follows live output
     /// and is left alone.
@@ -83,14 +91,22 @@ impl Server {
     /// exactly one — and each client is re-anchored on its own, so one client's
     /// held view never moves another's view of the same pane. A pane already
     /// released is a no-op.
-    pub(crate) fn anchor_held_views(&mut self, pane_id: PaneId, pushed: usize, len_after: usize) {
-        let Some(session) = self.session_for_pane_mut(pane_id) else {
+    pub(crate) fn anchor_held_views(
+        &mut self,
+        pane_id: PaneId,
+        pushed_line_count: usize,
+        retained_line_count_after: usize,
+    ) {
+        let Some(session) = self.get_session_for_pane_mut(pane_id) else {
             return;
         };
-        for client in session.clients.list_attached_mut() {
+        for client in session.clients.list_attached_clients_mut() {
             if client.is_view_held(pane_id) {
-                let current = client.scroll_offset(pane_id);
-                client.set_scroll_offset(pane_id, (current + pushed).min(len_after));
+                let current_scroll_offset = client.get_scroll_offset(pane_id);
+                client.set_scroll_offset(
+                    pane_id,
+                    (current_scroll_offset + pushed_line_count).min(retained_line_count_after),
+                );
             }
         }
     }

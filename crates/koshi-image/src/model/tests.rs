@@ -2,18 +2,22 @@
 
 use super::*;
 
-fn image(width: u32, height: u32) -> Arc<DecodedImage> {
+fn build_test_image(image_pixel_width: u32, image_pixel_height: u32) -> Arc<DecodedImage> {
     Arc::new(DecodedImage {
-        width,
-        height,
-        rgba: vec![0; usize::try_from(width * height * 4).expect("test image fits")],
+        pixel_width: image_pixel_width,
+        pixel_height: image_pixel_height,
+        rgba_bytes: vec![
+            0;
+            usize::try_from(image_pixel_width * image_pixel_height * 4)
+                .expect("test image fits")
+        ],
     })
 }
 
-fn record(protocol: GraphicsProtocol, display: ImageDisplay) -> ImageRecord {
+fn build_image_record(protocol: GraphicsProtocol, display: ImageDisplay) -> ImageRecord {
     ImageRecord {
         protocol,
-        image: image(8, 6),
+        image: build_test_image(8, 6),
         animation: None,
         action: ImageAction::Display,
         display,
@@ -23,15 +27,16 @@ fn record(protocol: GraphicsProtocol, display: ImageDisplay) -> ImageRecord {
 
 #[test]
 fn decoded_image_round_trips_with_rgba_bytes() {
-    let source = DecodedImage {
-        width: 2,
-        height: 1,
-        rgba: vec![1, 2, 3, 4, 5, 6, 7, 8],
+    let decoded_image = DecodedImage {
+        pixel_width: 2,
+        pixel_height: 1,
+        rgba_bytes: vec![1, 2, 3, 4, 5, 6, 7, 8],
     };
 
-    let value = serde_json::to_value(&source).expect("decoded image serializes");
+    let serialized_decoded_image =
+        serde_json::to_value(&decoded_image).expect("decoded image serializes");
     assert_eq!(
-        value,
+        serialized_decoded_image,
         serde_json::json!({
             "width": 2,
             "height": 1,
@@ -39,24 +44,25 @@ fn decoded_image_round_trips_with_rgba_bytes() {
         })
     );
     assert_eq!(
-        serde_json::from_value::<DecodedImage>(value).expect("decoded image deserializes"),
-        source
+        serde_json::from_value::<DecodedImage>(serialized_decoded_image)
+            .expect("decoded image deserializes"),
+        decoded_image
     );
 }
 
 #[test]
 fn decoded_image_rejects_zero_dimensions_and_mismatched_bytes() {
-    let zero_width = serde_json::json!({"width": 0, "height": 1, "rgba": []});
-    let mismatch = serde_json::json!({"width": 2, "height": 1, "rgba": [1, 2, 3, 4]});
+    let zero_pixel_width = serde_json::json!({"width": 0, "height": 1, "rgba": []});
+    let mismatched_rgba_length = serde_json::json!({"width": 2, "height": 1, "rgba": [1, 2, 3, 4]});
 
     assert_eq!(
-        serde_json::from_value::<DecodedImage>(zero_width)
+        serde_json::from_value::<DecodedImage>(zero_pixel_width)
             .expect_err("zero width must be rejected")
             .to_string(),
         "decoded image dimensions exceed graphics limits"
     );
     assert_eq!(
-        serde_json::from_value::<DecodedImage>(mismatch)
+        serde_json::from_value::<DecodedImage>(mismatched_rgba_length)
             .expect_err("wrong RGBA length must be rejected")
             .to_string(),
         "decoded image RGBA length does not match its dimensions"
@@ -65,14 +71,14 @@ fn decoded_image_rejects_zero_dimensions_and_mismatched_bytes() {
 
 #[test]
 fn decoded_image_rejects_a_side_above_the_limit() {
-    let value = serde_json::json!({
-        "width": MAX_IMAGE_SIDE as u32 + 1,
+    let invalid_image_json = serde_json::json!({
+        "width": MAX_IMAGE_SIDE_PIXEL_COUNT as u32 + 1,
         "height": 1,
         "rgba": []
     });
 
     assert_eq!(
-        serde_json::from_value::<DecodedImage>(value)
+        serde_json::from_value::<DecodedImage>(invalid_image_json)
             .expect_err("an oversized side must be rejected")
             .to_string(),
         "decoded image dimensions exceed graphics limits"
@@ -80,49 +86,55 @@ fn decoded_image_rejects_a_side_above_the_limit() {
 }
 
 #[test]
-fn source_rect_uses_the_complete_image_for_non_kitty_records() {
-    let record = record(GraphicsProtocol::Iterm2, ImageDisplay::default());
+fn compute_source_rect_uses_the_complete_image_for_non_kitty_records() {
+    let image_record = build_image_record(GraphicsProtocol::Iterm2, ImageDisplay::default());
 
     assert_eq!(
-        record.source_rect().expect("iTerm2 uses complete image"),
+        image_record
+            .compute_source_rect()
+            .expect("iTerm2 uses complete image"),
         (0, 0, 8, 6)
     );
 }
 
 #[test]
-fn source_rect_crops_and_clamps_kitty_pixel_dimensions() {
+fn compute_source_rect_crops_and_clamps_kitty_pixel_dimensions() {
     let display = ImageDisplay {
-        source_offset_x: Some(2),
-        source_offset_y: Some(1),
-        width: Some(ImageDimension::Pixels(20)),
-        height: Some(ImageDimension::Pixels(3)),
+        source_pixel_offset_x: Some(2),
+        source_pixel_offset_y: Some(1),
+        requested_width: Some(ImageDimension::Pixels(20)),
+        requested_height: Some(ImageDimension::Pixels(3)),
         ..ImageDisplay::default()
     };
-    let record = record(GraphicsProtocol::Kitty, display);
+    let image_record = build_image_record(GraphicsProtocol::Kitty, display);
 
     assert_eq!(
-        record.source_rect().expect("crop is inside image"),
+        image_record
+            .compute_source_rect()
+            .expect("crop is inside image"),
         (2, 1, 6, 3)
     );
 }
 
 #[test]
-fn source_rect_rejects_a_kitty_origin_outside_the_image() {
+fn compute_source_rect_rejects_a_kitty_origin_outside_the_image() {
     let display = ImageDisplay {
-        source_offset_x: Some(8),
+        source_pixel_offset_x: Some(8),
         ..ImageDisplay::default()
     };
-    let record = record(GraphicsProtocol::Kitty, display);
+    let image_record = build_image_record(GraphicsProtocol::Kitty, display);
 
     assert_eq!(
-        record.source_rect().expect_err("origin is outside image"),
+        image_record
+            .compute_source_rect()
+            .expect_err("origin is outside image"),
         ImagePlacementError::SourceOutOfBounds {
-            x: 8,
-            y: 0,
-            width: 0,
-            height: 6,
-            image_width: 8,
-            image_height: 6,
+            source_x: 8,
+            source_y: 0,
+            source_pixel_width: 0,
+            source_pixel_height: 6,
+            image_pixel_width: 8,
+            image_pixel_height: 6,
         }
     );
 }

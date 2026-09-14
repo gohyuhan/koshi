@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use percent_encoding::percent_decode;
 
-use crate::state::ReportedCwd;
+use crate::state::ReportedWorkingDirectory;
 
 /// A semantic shell marker carried by OSC 133.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,21 +49,25 @@ pub(super) fn parse_osc133(params: &[&[u8]]) -> Option<Osc133> {
     }
 }
 
-/// The longest OSC 7 URI [`parse_osc7_cwd`] accepts. A longer one yields
+/// The longest OSC 7 URI [`parse_osc7_working_directory`] accepts. A longer one yields
 /// `None` and leaves the last reported working directory in place.
-pub(super) const MAX_OSC7_URI_BYTES: usize = 4 * 1024;
+pub(super) const MAX_OSC7_URI_BYTE_COUNT: usize = 4 * 1024;
 
 /// The bytes an OSC 7 payload carries ahead of the URI on the wire: the command
 /// number `7` and the `;` after it.
-const OSC7_PAYLOAD_PREFIX: usize = 2;
+const OSC7_PAYLOAD_PREFIX_BYTE_COUNT: usize = 2;
 
-// A URI of exactly `MAX_OSC7_URI_BYTES` fits the parser's OSC buffer whole. A
+// A URI of exactly `MAX_OSC7_URI_BYTE_COUNT` fits the parser's OSC buffer whole. A
 // URI the parser cut short is longer than the limit and yields `None`.
-const _: () = assert!(MAX_OSC7_URI_BYTES + OSC7_PAYLOAD_PREFIX <= crate::engine::OSC_CAPACITY);
+const _: () = assert!(
+    MAX_OSC7_URI_BYTE_COUNT + OSC7_PAYLOAD_PREFIX_BYTE_COUNT
+        <= crate::engine::OSC_BUFFER_BYTE_CAPACITY
+);
 
-/// Parse an OSC 7 cwd URI (`file://host/path`) into a [`ReportedCwd`], or
+/// Parse an OSC 7 working-directory URI (`file://host/path`) into a
+/// [`ReportedWorkingDirectory`], or
 /// `None` when it is not a `file://` URI, carries no `/` after the authority,
-/// is longer than [`MAX_OSC7_URI_BYTES`], or decodes to a path holding a NUL
+/// is longer than [`MAX_OSC7_URI_BYTE_COUNT`], or decodes to a path holding a NUL
 /// byte.
 ///
 /// The scheme `file` compares case-insensitively (RFC 3986 §3.1); `://`
@@ -73,49 +77,55 @@ const _: () = assert!(MAX_OSC7_URI_BYTES + OSC7_PAYLOAD_PREFIX <= crate::engine:
 /// an empty authority (`file:///path`) gives `host: None`. The path keeps its
 /// leading `/`, is percent-decoded (`%20` → space, `%C3%A9` → `é`; a `%` not
 /// followed by two hex digits stays literal), and becomes a [`PathBuf`] via
-/// [`bytes_to_path`]. `?` and `#` are ordinary path bytes.
-pub(super) fn parse_osc7_cwd(uri: &[u8]) -> Option<ReportedCwd> {
-    if uri.len() < 7 || uri.len() > MAX_OSC7_URI_BYTES {
+/// [`decode_working_directory_path`]. `?` and `#` are ordinary path bytes.
+pub(super) fn parse_osc7_working_directory(uri: &[u8]) -> Option<ReportedWorkingDirectory> {
+    if uri.len() < 7 || uri.len() > MAX_OSC7_URI_BYTE_COUNT {
         return None;
     }
     if !uri[..4].eq_ignore_ascii_case(b"file") || &uri[4..7] != b"://" {
         return None;
     }
-    let rest = &uri[7..];
-    let slash = rest.iter().position(|&b| b == b'/')?;
-    let host = match &rest[..slash] {
+    let uri_tail = &uri[7..];
+    let path_separator_index = uri_tail.iter().position(|&byte| byte == b'/')?;
+    let host = match &uri_tail[..path_separator_index] {
         [] => None,
         bytes => Some(koshi_core::text::sanitize_reported_text(
             &String::from_utf8_lossy(bytes),
         )),
     };
-    let decoded = percent_decode(&rest[slash..]).collect::<Vec<u8>>();
-    if decoded.contains(&0) {
+    let decoded_path_bytes = percent_decode(&uri_tail[path_separator_index..]).collect::<Vec<u8>>();
+    if decoded_path_bytes.contains(&0) {
         return None;
     }
-    let path = bytes_to_path(decoded)?;
-    Some(ReportedCwd { host, path })
+    let working_directory_path = decode_working_directory_path(decoded_path_bytes)?;
+    Some(ReportedWorkingDirectory {
+        host,
+        working_directory_path,
+    })
 }
 
-/// Turn percent-decoded path bytes into a [`PathBuf`]. The bytes become an
+/// Turn percent-decoded working-directory path bytes into a [`PathBuf`]. The bytes become an
 /// `OsString` unchanged; a path that is not valid UTF-8 survives intact.
 #[cfg(unix)]
-fn bytes_to_path(decoded: Vec<u8>) -> Option<PathBuf> {
+fn decode_working_directory_path(decoded_path_bytes: Vec<u8>) -> Option<PathBuf> {
     use std::os::unix::ffi::OsStringExt;
-    Some(PathBuf::from(std::ffi::OsString::from_vec(decoded)))
+    Some(PathBuf::from(std::ffi::OsString::from_vec(
+        decoded_path_bytes,
+    )))
 }
 
 /// Turn percent-decoded path bytes into a [`PathBuf`], or `None` when they are
 /// not valid UTF-8. A leading `/` before a drive letter is dropped:
 /// `/C:/Users` → `C:/Users`.
 #[cfg(windows)]
-fn bytes_to_path(mut decoded: Vec<u8>) -> Option<PathBuf> {
-    let drive_prefixed =
-        matches!(decoded.as_slice(), [b'/', drive, b':', ..] if drive.is_ascii_alphabetic());
+fn decode_working_directory_path(mut decoded_path_bytes: Vec<u8>) -> Option<PathBuf> {
+    let drive_prefixed = matches!(decoded_path_bytes.as_slice(), [b'/', drive, b':', ..] if drive.is_ascii_alphabetic());
     if drive_prefixed {
-        decoded.remove(0);
+        decoded_path_bytes.remove(0);
     }
-    String::from_utf8(decoded).ok().map(PathBuf::from)
+    String::from_utf8(decoded_path_bytes)
+        .ok()
+        .map(PathBuf::from)
 }
 
 #[cfg(test)]

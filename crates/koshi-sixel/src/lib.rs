@@ -13,8 +13,8 @@ pub use capabilities::{
 };
 pub use encoder::{
     PreparedSixelPalette, SixelEncodeError, SixelEncodeOptions, SixelEncoder,
-    DEFAULT_PALETTE_COLORS, MAX_PALETTE_COLORS, MAX_SIXEL_CHUNK_BYTES, MAX_SIXEL_OUTPUT_BYTES,
-    MAX_SIXEL_TILE_BYTES, MIN_PALETTE_COLORS,
+    DEFAULT_PALETTE_COLOR_COUNT, MAX_PALETTE_COLOR_COUNT, MAX_SIXEL_CHUNK_BYTE_COUNT,
+    MAX_SIXEL_OUTPUT_BYTE_COUNT, MAX_SIXEL_TILE_BYTE_COUNT, MIN_PALETTE_COLOR_COUNT,
 };
 pub use parser::{
     IndexedImage, SixelGraphic, SixelPalette, SixelPaletteChange, SixelPaletteChanges, SixelParser,

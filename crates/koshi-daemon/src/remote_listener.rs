@@ -14,14 +14,14 @@
 //! An admitted secret registers the connection with the router, and it stays
 //! registered until this listener reports it ended. A revoke shuts a registered
 //! connection's socket, attached or not. The router holds at most
-//! [`MAX_LIVE_REMOTE`](crate::router::MAX_LIVE_REMOTE) registrations and
+//! [`MAX_LIVE_REMOTE_CONNECTION_COUNT`](crate::router::MAX_LIVE_REMOTE_CONNECTION_COUNT) registrations and
 //! refuses the connections that arrive over that count.
 //!
 //! The TLS handshake, the frame the caller opens with, and the refusal naming
-//! both version ranges finish inside `ADMISSION_WINDOW`, counted from the
+//! both version ranges finish inside `ADMISSION_WINDOW_DURATION`, counted from the
 //! moment the connection's thread starts. Each single read and write inside
 //! them is given the time left on that deadline when it starts. Every other
-//! refusal replaces that deadline with `REFUSAL_WINDOW`. After the Welcome both
+//! refusal replaces that deadline with `REFUSAL_WINDOW_DURATION`. After the Welcome both
 //! halves lose their deadline.
 //!
 //! Every refusal is
@@ -53,17 +53,20 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::{ServerConfig, ServerConnection};
 
 use koshi_ipc::endpoint::EndpointFile;
-use koshi_ipc::protocol::{agreed_version, ConnectionToken, IpcRequest, IpcRequestKind};
+use koshi_ipc::protocol::{
+    compute_agreed_protocol_version, ConnectionToken, IpcRequest, IpcRequestKind,
+};
 use koshi_ipc::remote_state::CertFile;
 use koshi_ipc::remote_tokens::TokenScope;
 use koshi_ipc::remote_wire::{
-    version_refusal, RemoteClientFrame, RemoteServerFrame, RemoteSessionRow,
-    MIN_REMOTE_PROTOCOL_VERSION, REMOTE_HELLO_MAX_LEN, REMOTE_PROTOCOL_VERSION, REMOTE_REFUSED,
+    format_version_refusal, RemoteClientFrame, RemoteServerFrame, RemoteSessionRow,
+    MIN_REMOTE_PROTOCOL_VERSION, REMOTE_HELLO_MAX_BYTE_COUNT, REMOTE_PROTOCOL_VERSION,
+    REMOTE_REFUSED,
 };
 use koshi_ipc::router::SessionSelector;
 use koshi_ipc::tls::{self, TlsReader, TlsWriter};
 use koshi_ipc::transport::{
-    Connection, Deadlined, RawReader, RawWriter, ReadCloser, MAX_FRAME_LEN,
+    Connection, Deadlined, RawReader, RawWriter, ReadCloser, MAX_FRAME_BYTE_COUNT,
 };
 
 use crate::router::RouterEvent;
@@ -73,17 +76,17 @@ use crate::router::RouterEvent;
 /// before admission, counted from the moment that thread starts. A caller that
 /// is not admitted holds its thread and its admission place for no longer than
 /// this.
-const ADMISSION_WINDOW: Duration = Duration::from_secs(10);
+const ADMISSION_WINDOW_DURATION: Duration = Duration::from_secs(10);
 
 /// How long one address's connection attempts are counted over.
-const RATE_WINDOW: Duration = Duration::from_secs(60);
+const RATE_WINDOW_DURATION: Duration = Duration::from_secs(60);
 
-/// How many connections one address may open inside [`RATE_WINDOW`] before
+/// How many connections one address may open inside [`RATE_WINDOW_DURATION`] before
 /// the rest are dropped.
-const MAX_ATTEMPTS: u32 = 10;
+const MAX_ATTEMPT_COUNT: u32 = 10;
 
-/// How many addresses the attempt table counts at once.
-const MAX_ENTRIES: usize = 1024;
+/// How many peer addresses the attempt table counts at once.
+const MAX_RATE_TABLE_ENTRY_COUNT: usize = 1024;
 
 /// How many connections may be inside the admission window at once, across
 /// every address.
@@ -91,24 +94,24 @@ const MAX_ENTRIES: usize = 1024;
 /// A connection is counted from the moment it is accepted until its secret is
 /// admitted or it goes away. One arriving over this count is closed without a
 /// handshake. An admitted connection is not counted here; it counts against
-/// [`MAX_LIVE_REMOTE`](crate::router::MAX_LIVE_REMOTE) instead.
-const MAX_IN_ADMISSION: usize = 64;
+/// [`MAX_LIVE_REMOTE_CONNECTION_COUNT`](crate::router::MAX_LIVE_REMOTE_CONNECTION_COUNT) instead.
+const MAX_ADMISSION_COUNT: usize = 64;
 
 /// How long the accept loop pauses after a failed accept before trying again.
-const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
+const ACCEPT_RETRY_DELAY_DURATION: Duration = Duration::from_millis(100);
 
 /// How often one repeated warning about this port is written at most.
-pub(crate) const LOG_WINDOW: Duration = Duration::from_secs(60);
+pub(crate) const LOG_WINDOW_DURATION: Duration = Duration::from_secs(60);
 
 /// How long a refusal has to reach the caller it answers, counted from the
 /// write. A refusal written before admission is cut short at the admission
 /// deadline instead.
-const REFUSAL_WINDOW: Duration = Duration::from_secs(10);
+const REFUSAL_WINDOW_DURATION: Duration = Duration::from_secs(10);
 
 /// When a refusal written inside the admission window must be on the socket:
-/// [`REFUSAL_WINDOW`] from now, or `deadline`, whichever comes first.
-fn refusal_deadline(deadline: Instant) -> Instant {
-    deadline.min(Instant::now() + REFUSAL_WINDOW)
+/// [`REFUSAL_WINDOW_DURATION`] from now, or `admission_deadline`, whichever comes first.
+fn compute_refusal_deadline(admission_deadline: Instant) -> Instant {
+    admission_deadline.min(Instant::now() + REFUSAL_WINDOW_DURATION)
 }
 
 /// One question a connection thread puts to the router's dispatcher.
@@ -117,18 +120,18 @@ pub(crate) enum AdmissionAsk {
     /// registers this connection with the router.
     Admit {
         /// The secret the caller presented.
-        token: ConnectionToken,
+        connection_token: ConnectionToken,
         /// The connection's socket. A revoke shuts it.
-        stream: TcpStream,
+        remote_connection_stream: TcpStream,
         /// Where the answer goes. `None` refuses the connection.
-        reply: Sender<Option<Admitted>>,
+        response_sender: Sender<Option<Admitted>>,
     },
     /// The sessions an admitted scope reaches.
     Rows {
         /// How far the admitting grant reaches.
         scope: TokenScope,
         /// Where the answer goes.
-        reply: Sender<Vec<RemoteSessionRow>>,
+        response_sender: Sender<Vec<RemoteSessionRow>>,
     },
     /// Which session a selector names, when this connection still stands and
     /// the admitted scope covers it.
@@ -136,16 +139,16 @@ pub(crate) enum AdmissionAsk {
         /// How far the admitting grant reaches.
         scope: TokenScope,
         /// The number this connection is registered under.
-        id: u64,
+        remote_connection_id: u64,
         /// The session the caller named.
-        selector: SessionSelector,
+        session_selector: SessionSelector,
         /// Where the answer goes. `None` refuses the attach.
-        reply: Sender<Option<PathBuf>>,
+        response_sender: Sender<Option<PathBuf>>,
     },
     /// One admitted connection has ended. It leaves the router's list.
     Ended {
         /// The number that connection was registered under.
-        id: u64,
+        remote_connection_id: u64,
     },
 }
 
@@ -155,156 +158,172 @@ pub(crate) struct Admitted {
     pub scope: TokenScope,
     /// The number this connection is registered under, named again when it
     /// attaches and when it ends.
-    pub id: u64,
+    pub remote_connection_id: u64,
 }
 
 /// A TLS port this machine holds and is not yet serving on.
 ///
-/// Dropping this without calling [`Bound::serve`] gives the port back.
+/// Dropping this without calling [`Bound::start_serving`] gives the port back.
 pub(crate) struct Bound {
     /// Sends the accept loop what it needs to start. Dropping this without
     /// sending ends the waiting thread, which gives the port back.
-    go: Sender<Sender<RouterEvent>>,
+    dispatcher_sender: Sender<Sender<RouterEvent>>,
 }
 
-/// Take the TLS port at `address`, presenting `cert`, without serving on it
+/// Take the TLS port at `remote_listen_address`, presenting `certificate_file`, without serving on it
 /// yet.
 ///
-/// Builds the TLS configuration, binds `address`, and starts the accept thread.
-/// That thread holds the port and accepts nobody until [`Bound::serve`] sends it
+/// Builds the TLS configuration, binds `remote_listen_address`, and starts the accept thread.
+/// That thread holds the port and accepts nobody until [`Bound::start_serving`] sends it
 /// somewhere to put its questions, or until the sender is dropped, which ends it
 /// and releases the port.
 ///
 /// # Errors
 /// The certificate that could not be turned into a TLS configuration, or the
 /// address that could not be bound.
-pub(crate) fn bind(address: String, cert: &CertFile) -> io::Result<Bound> {
-    let tls = Arc::new(server_config(cert)?);
-    let listener = TcpListener::bind(&address)?;
-    let (go, wait) = mpsc::channel::<Sender<RouterEvent>>();
+pub(crate) fn bind_remote_listener(
+    remote_listen_address: String,
+    certificate_file: &CertFile,
+) -> io::Result<Bound> {
+    let tls_config = Arc::new(build_server_config(certificate_file)?);
+    let listener = TcpListener::bind(&remote_listen_address)?;
+    let (dispatcher_sender, dispatcher_receiver) = mpsc::channel::<Sender<RouterEvent>>();
     std::thread::Builder::new()
         .name("koshi-remote-accept".to_string())
         .spawn(move || {
-            let Ok(admissions) = wait.recv() else {
+            let Ok(dispatcher_events_sender) = dispatcher_receiver.recv() else {
                 return;
             };
-            accept_loop(&listener, &tls, &admissions);
+            run_remote_accept_loop(&listener, &tls_config, &dispatcher_events_sender);
         })?;
-    Ok(Bound { go })
+    Ok(Bound { dispatcher_sender })
 }
 
 impl Bound {
-    /// Start serving on this port. The thread [`bind`] started begins accepting
-    /// connections and gives each its own thread; `admissions` carries those
+    /// Start serving on this port. The thread [`bind_remote_listener`] started begins accepting
+    /// connections and gives each its own thread; `dispatcher_events_sender` carries those
     /// threads' questions to the router's dispatcher.
     ///
     /// Cannot fail.
-    pub(crate) fn serve(self, admissions: Sender<RouterEvent>) {
-        let _ = self.go.send(admissions);
+    pub(crate) fn start_serving(self, dispatcher_events_sender: Sender<RouterEvent>) {
+        let _ = self.dispatcher_sender.send(dispatcher_events_sender);
     }
 }
 
 /// The TLS configuration this machine serves with: `cert`'s certificate and
 /// private key, and no client certificate asked for.
-fn server_config(cert: &CertFile) -> io::Result<ServerConfig> {
-    let chain = vec![CertificateDer::from(cert.cert_der.clone())];
-    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.key_der.clone()));
-    ServerConfig::builder_with_provider(koshi_ipc::tls::crypto_provider())
+fn build_server_config(certificate_file: &CertFile) -> io::Result<ServerConfig> {
+    let certificate_chain = vec![CertificateDer::from(certificate_file.cert_der.clone())];
+    let private_key =
+        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(certificate_file.key_der.clone()));
+    ServerConfig::builder_with_provider(koshi_ipc::tls::build_crypto_provider())
         .with_safe_default_protocol_versions()
         .expect("aws-lc-rs supports every default protocol version")
         .with_no_client_auth()
-        .with_single_cert(chain, key)
-        .map_err(|error| io::Error::other(error.to_string()))
+        .with_single_cert(certificate_chain, private_key)
+        .map_err(|certificate_error| io::Error::other(certificate_error.to_string()))
 }
 
-/// One repeated warning, written at most once inside [`LOG_WINDOW`].
-pub(crate) struct Occasional {
+/// One repeated warning, written at most once inside [`LOG_WINDOW_DURATION`].
+pub(crate) struct WarningRateLimiter {
     /// When the last line was written, or `None` when none has been.
-    said_at: Option<Instant>,
+    last_warning_at: Option<Instant>,
 }
 
-impl Occasional {
+impl WarningRateLimiter {
     /// A warning that has not been written yet.
-    pub(crate) fn new() -> Occasional {
-        Self { said_at: None }
+    pub(crate) fn new() -> WarningRateLimiter {
+        Self {
+            last_warning_at: None,
+        }
     }
 
-    /// Whether to write the line at `now`. True when no line has been written,
-    /// and when the last one was written [`LOG_WINDOW`] or longer ago. Writing
+    /// Whether to write the line at `current_time`. True when no line has been written,
+    /// and when the last one was written [`LOG_WINDOW_DURATION`] or longer ago. Writing
     /// is the caller's; this only answers.
     ///
-    /// Example — with [`LOG_WINDOW`] at 60 seconds, ten thousand calls spread
+    /// Example — with [`LOG_WINDOW_DURATION`] at 60 seconds, ten thousand calls spread
     /// over five minutes answer true five times.
-    pub(crate) fn due(&mut self, now: Instant) -> bool {
-        if self
-            .said_at
-            .is_some_and(|said| now.duration_since(said) < LOG_WINDOW)
-        {
+    pub(crate) fn is_due(&mut self, current_time: Instant) -> bool {
+        if self.last_warning_at.is_some_and(|warning_written_at| {
+            current_time.duration_since(warning_written_at) < LOG_WINDOW_DURATION
+        }) {
             return false;
         }
-        self.said_at = Some(now);
+        self.last_warning_at = Some(current_time);
         true
     }
 }
 
 /// Accept connections and give each its own thread, dropping the ones from an
-/// address that has opened more than [`MAX_ATTEMPTS`] inside [`RATE_WINDOW`]
-/// and the ones that arrive while [`MAX_IN_ADMISSION`] connections are already
+/// address that has opened more than [`MAX_ATTEMPT_COUNT`] inside [`RATE_WINDOW_DURATION`]
+/// and the ones that arrive while [`MAX_ADMISSION_COUNT`] connections are already
 /// waiting to present a secret. A failed accept is reported at most once inside
-/// [`LOG_WINDOW`], waits [`ACCEPT_RETRY_DELAY`], and retries.
-fn accept_loop(listener: &TcpListener, tls: &Arc<ServerConfig>, admissions: &Sender<RouterEvent>) {
-    let mut attempts = RateTable::new();
-    let in_admission = Arc::new(AtomicUsize::new(0));
-    let mut refused_full = Occasional::new();
-    let mut failed_accept = Occasional::new();
+/// [`LOG_WINDOW_DURATION`], waits [`ACCEPT_RETRY_DELAY_DURATION`], and retries.
+fn run_remote_accept_loop(
+    listener: &TcpListener,
+    tls_config: &Arc<ServerConfig>,
+    dispatcher_events_sender: &Sender<RouterEvent>,
+) {
+    let mut rate_table = RateTable::new();
+    let admission_count = Arc::new(AtomicUsize::new(0));
+    let mut full_admission_warning = WarningRateLimiter::new();
+    let mut accept_failure_warning = WarningRateLimiter::new();
     loop {
-        let (sock, peer) = match listener.accept() {
-            Ok(accepted) => accepted,
-            Err(error) => {
-                if failed_accept.due(Instant::now()) {
+        let (tcp_stream, peer_address) = match listener.accept() {
+            Ok(accepted_connection) => accepted_connection,
+            Err(accept_error) => {
+                if accept_failure_warning.is_due(Instant::now()) {
                     tracing::warn!(
-                        %error,
+                        %accept_error,
                         "the remote port could not accept a connection; \
-                         retrying every {ACCEPT_RETRY_DELAY:?}"
+                         retrying every {ACCEPT_RETRY_DELAY_DURATION:?}"
                     );
                 }
-                std::thread::sleep(ACCEPT_RETRY_DELAY);
+                std::thread::sleep(ACCEPT_RETRY_DELAY_DURATION);
                 continue;
             }
         };
-        let now = Instant::now();
-        let ip = peer.ip();
-        match attempts.allow(ip, now) {
+        let current_time = Instant::now();
+        let peer_ip_address = peer_address.ip();
+        match rate_table.decide_attempt(peer_ip_address, current_time) {
             Attempt::Serve => {}
             Attempt::DropAndSay => {
                 tracing::warn!(
-                    %ip,
-                    "remote connection attempts from {ip} exceeded {MAX_ATTEMPTS} in \
-                     {RATE_WINDOW:?}; dropping the rest until the window passes"
+                    %peer_ip_address,
+                    "remote connection attempts from {peer_ip_address} exceeded {MAX_ATTEMPT_COUNT} in \
+                     {RATE_WINDOW_DURATION:?}; dropping the rest until the window passes"
                 );
-                drop(sock);
+                drop(tcp_stream);
                 continue;
             }
             Attempt::DropInSilence => {
-                drop(sock);
+                drop(tcp_stream);
                 continue;
             }
         }
-        let Some(counted) = InAdmission::enter(&in_admission) else {
-            if refused_full.due(now) {
+        let Some(admission_slot) = AdmissionSlot::enter_admission(&admission_count) else {
+            if full_admission_warning.is_due(current_time) {
                 tracing::warn!(
-                    "{MAX_IN_ADMISSION} remote connections are waiting to present a secret; \
+                    "{MAX_ADMISSION_COUNT} remote connections are waiting to present a secret; \
                      closing the ones that arrive until some of them finish"
                 );
             }
-            drop(sock);
+            drop(tcp_stream);
             continue;
         };
-        let tls = Arc::clone(tls);
-        let admissions = admissions.clone();
+        let tls_config = Arc::clone(tls_config);
+        let dispatcher_events_sender = dispatcher_events_sender.clone();
         let _ = std::thread::Builder::new()
             .name("koshi-remote".to_string())
-            .spawn(move || serve_remote(sock, &tls, &admissions, counted));
+            .spawn(move || {
+                serve_remote_connection(
+                    tcp_stream,
+                    &tls_config,
+                    &dispatcher_events_sender,
+                    admission_slot,
+                )
+            });
     }
 }
 
@@ -312,32 +331,32 @@ fn accept_loop(listener: &TcpListener, tls: &Arc<ServerConfig>, admissions: &Sen
 ///
 /// The count drops when this is dropped, whichever way the connection left:
 /// admitted, refused, timed out, or hung up.
-struct InAdmission {
+struct AdmissionSlot {
     /// The shared count of connections inside the window.
-    counted: Arc<AtomicUsize>,
+    admission_count: Arc<AtomicUsize>,
 }
 
-impl InAdmission {
-    /// Count one more connection, or `None` when [`MAX_IN_ADMISSION`] are
+impl AdmissionSlot {
+    /// Count one more connection, or `None` when [`MAX_ADMISSION_COUNT`] are
     /// already inside the window.
-    fn enter(counted: &Arc<AtomicUsize>) -> Option<InAdmission> {
-        let taken = counted
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |now| {
-                (now < MAX_IN_ADMISSION).then_some(now + 1)
+    fn enter_admission(admission_count: &Arc<AtomicUsize>) -> Option<AdmissionSlot> {
+        let is_admission_slot_taken = admission_count
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |admission_count| {
+                (admission_count < MAX_ADMISSION_COUNT).then_some(admission_count + 1)
             })
             .is_ok();
-        if !taken {
+        if !is_admission_slot_taken {
             return None;
         }
-        Some(InAdmission {
-            counted: Arc::clone(counted),
+        Some(AdmissionSlot {
+            admission_count: Arc::clone(admission_count),
         })
     }
 }
 
-impl Drop for InAdmission {
+impl Drop for AdmissionSlot {
     fn drop(&mut self) {
-        self.counted.fetch_sub(1, Ordering::AcqRel);
+        self.admission_count.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -354,62 +373,71 @@ enum Attempt {
 }
 
 /// What one address has done inside the window it opened.
-struct Window {
+struct RateWindow {
     /// How many connections that address has opened since `opened`.
-    attempts: u32,
+    attempt_count: u32,
     /// When the first of them arrived.
-    opened: Instant,
+    window_started_at: Instant,
 }
 
 /// How many connections each address has opened lately.
 ///
-/// Bounded at [`MAX_ENTRIES`]. Every check first drops the addresses whose
+/// Bounded at [`MAX_RATE_TABLE_ENTRY_COUNT`]. Every check first drops the addresses whose
 /// window has passed; a check that still finds the table full drops the address
 /// whose window opened first.
 struct RateTable {
     /// One window per address.
-    entries: HashMap<IpAddr, Window>,
+    window_by_peer_ip_address: HashMap<IpAddr, RateWindow>,
 }
 
 impl RateTable {
     /// An empty table.
     fn new() -> RateTable {
         RateTable {
-            entries: HashMap::new(),
+            window_by_peer_ip_address: HashMap::new(),
         }
     }
 
-    /// Count one connection from `ip` at `now` and say what to do with it.
+    /// Count one connection from `peer_ip_address` at `current_time` and say what to do with it.
     ///
     /// An address is logged once per window, on the attempt that crosses
-    /// [`MAX_ATTEMPTS`]. Every subsequent attempt in that window is dropped in
+    /// [`MAX_ATTEMPT_COUNT`]. Every subsequent attempt in that window is dropped in
     /// silence.
     ///
-    /// Example — with [`MAX_ATTEMPTS`] at 10, attempts 1 to 10 from one
+    /// Example — with [`MAX_ATTEMPT_COUNT`] at 10, attempts 1 to 10 from one
     /// address are [`Attempt::Serve`], attempt 11 is [`Attempt::DropAndSay`],
     /// and attempts 12 onward are [`Attempt::DropInSilence`] until the window
     /// passes.
-    fn allow(&mut self, ip: IpAddr, now: Instant) -> Attempt {
-        self.entries
-            .retain(|_, window| now.duration_since(window.opened) < RATE_WINDOW);
-        if self.entries.len() >= MAX_ENTRIES && !self.entries.contains_key(&ip) {
-            let oldest = self
-                .entries
+    fn decide_attempt(&mut self, peer_ip_address: IpAddr, current_time: Instant) -> Attempt {
+        self.window_by_peer_ip_address.retain(|_, window| {
+            current_time.duration_since(window.window_started_at) < RATE_WINDOW_DURATION
+        });
+        if self.window_by_peer_ip_address.len() >= MAX_RATE_TABLE_ENTRY_COUNT
+            && !self
+                .window_by_peer_ip_address
+                .contains_key(&peer_ip_address)
+        {
+            let oldest_peer_ip_address = self
+                .window_by_peer_ip_address
                 .iter()
-                .min_by_key(|(_, window)| window.opened)
-                .map(|(address, _)| *address);
-            if let Some(oldest) = oldest {
-                self.entries.remove(&oldest);
+                .min_by_key(|(_, window)| window.window_started_at)
+                .map(|(peer_ip_address, _)| *peer_ip_address);
+            if let Some(oldest_peer_ip_address) = oldest_peer_ip_address {
+                self.window_by_peer_ip_address
+                    .remove(&oldest_peer_ip_address);
             }
         }
-        let window = self.entries.entry(ip).or_insert(Window {
-            attempts: 0,
-            opened: now,
-        });
-        window.attempts += 1;
-        match window.attempts {
-            counted if counted <= MAX_ATTEMPTS => Attempt::Serve,
-            counted if counted == MAX_ATTEMPTS + 1 => Attempt::DropAndSay,
+        let peer_window = self
+            .window_by_peer_ip_address
+            .entry(peer_ip_address)
+            .or_insert(RateWindow {
+                attempt_count: 0,
+                window_started_at: current_time,
+            });
+        peer_window.attempt_count += 1;
+        match peer_window.attempt_count {
+            attempt_count if attempt_count <= MAX_ATTEMPT_COUNT => Attempt::Serve,
+            attempt_count if attempt_count == MAX_ATTEMPT_COUNT + 1 => Attempt::DropAndSay,
             _ => Attempt::DropInSilence,
         }
     }
@@ -430,8 +458,8 @@ enum Opening {
 /// the sessions that secret reaches or a bridge to one of them.
 ///
 /// The TLS handshake and the frame the caller opens with finish inside
-/// [`ADMISSION_WINDOW`], counted from the moment this thread starts. A refusal
-/// written by [`refuse`] gets [`REFUSAL_WINDOW`] instead. Once the caller is
+/// [`ADMISSION_WINDOW_DURATION`], counted from the moment this thread starts. A refusal
+/// written by [`send_refusal`] gets [`REFUSAL_WINDOW_DURATION`] instead. Once the caller is
 /// admitted both halves and the socket lose their deadlines and block for as
 /// long as it takes.
 ///
@@ -439,132 +467,162 @@ enum Opening {
 /// registration is dropped when the connection finishes, whichever step it
 /// finished at.
 ///
-/// `counted` holds this connection's place in the admission window and is
+/// `admission_slot` holds this connection's place in the admission window and is
 /// dropped the moment the secret is admitted.
 ///
 /// On Unix the thread blocks SIGPIPE on its own signal mask; a write to a peer
 /// that hung up returns an error whatever the process-wide disposition is.
-fn serve_remote(
-    mut sock: TcpStream,
-    tls: &Arc<ServerConfig>,
-    admissions: &Sender<RouterEvent>,
-    counted: InAdmission,
+fn serve_remote_connection(
+    mut tcp_stream: TcpStream,
+    tls_config: &Arc<ServerConfig>,
+    dispatcher_events_sender: &Sender<RouterEvent>,
+    admission_slot: AdmissionSlot,
 ) {
     #[cfg(unix)]
     crate::process::block_sigpipe_on_this_thread();
 
-    let deadline = Instant::now() + ADMISSION_WINDOW;
-    let Ok(control) = sock.try_clone() else {
+    let admission_deadline = Instant::now() + ADMISSION_WINDOW_DURATION;
+    let Ok(control_stream) = tcp_stream.try_clone() else {
         return;
     };
-    let Ok(server) = ServerConnection::new(Arc::clone(tls)) else {
+    let Ok(server_connection) = ServerConnection::new(Arc::clone(tls_config)) else {
         return;
     };
-    let mut conn = rustls::Connection::Server(server);
-    if tls::handshake(&mut conn, &mut sock, deadline).is_err() {
+    let mut tls_connection = rustls::Connection::Server(server_connection);
+    if tls::run_tls_handshake(&mut tls_connection, &mut tcp_stream, admission_deadline).is_err() {
         return;
     }
-    let Ok((mut reader, mut writer)) = tls::split_tls(conn, sock) else {
+    let Ok((mut reader, mut writer)) = tls::split_tls_stream(tls_connection, tcp_stream) else {
         return;
     };
 
-    reader.set_deadline(Some(deadline));
-    writer.set_deadline(Some(deadline));
-    let ((min_remote, max_remote), versions, token) =
-        match read_client_frame(&mut reader, REMOTE_HELLO_MAX_LEN) {
-            Opening::Frame(RemoteClientFrame::Hello {
-                min_remote_version,
-                max_remote_version,
-                min_protocol_version,
-                max_protocol_version,
-                token,
-            }) => (
-                (min_remote_version, max_remote_version),
-                (min_protocol_version, max_protocol_version),
-                token,
-            ),
-            Opening::Frame(_) | Opening::Unreadable => {
-                refuse_by(&mut writer, refusal_deadline(deadline));
-                return;
-            }
-            Opening::Closed => return,
-        };
+    reader.set_deadline(Some(admission_deadline));
+    writer.set_deadline(Some(admission_deadline));
+    let (
+        (minimum_remote_version, maximum_remote_version),
+        session_protocol_versions,
+        connection_token,
+    ) = match read_client_frame(&mut reader, REMOTE_HELLO_MAX_BYTE_COUNT) {
+        Opening::Frame(RemoteClientFrame::Hello {
+            min_remote_version,
+            max_remote_version,
+            min_protocol_version,
+            max_protocol_version,
+            connection_token,
+        }) => (
+            (min_remote_version, max_remote_version),
+            (min_protocol_version, max_protocol_version),
+            connection_token,
+        ),
+        Opening::Frame(_) | Opening::Unreadable => {
+            send_refusal_with_deadline(&mut writer, compute_refusal_deadline(admission_deadline));
+            return;
+        }
+        Opening::Closed => return,
+    };
 
     // The version is settled before the secret is looked at. This refusal names
     // both ranges instead of carrying REMOTE_REFUSED.
-    let Some(remote_version) = agreed_version(
-        min_remote,
-        max_remote,
+    let Some(remote_version) = compute_agreed_protocol_version(
+        minimum_remote_version,
+        maximum_remote_version,
         MIN_REMOTE_PROTOCOL_VERSION,
         REMOTE_PROTOCOL_VERSION,
     ) else {
-        let _ = send_frame(
+        let _ = send_remote_frame(
             &mut writer,
             &RemoteServerFrame::Refused {
-                message: version_refusal(min_remote, max_remote),
+                message: format_version_refusal(minimum_remote_version, maximum_remote_version),
             },
         );
         return;
     };
 
-    let Ok(registered) = control.try_clone() else {
+    let Ok(registered_stream) = control_stream.try_clone() else {
         return;
     };
-    let admitted = ask(admissions, |reply| AdmissionAsk::Admit {
-        token,
-        stream: registered,
-        reply,
+    let admission_result = ask_router_dispatcher(dispatcher_events_sender, |response_sender| {
+        AdmissionAsk::Admit {
+            connection_token,
+            remote_connection_stream: registered_stream,
+            response_sender,
+        }
     });
-    let Some(Some(admitted)) = admitted else {
-        refuse_by(&mut writer, refusal_deadline(deadline));
+    let Some(Some(admitted_connection)) = admission_result else {
+        send_refusal_with_deadline(&mut writer, compute_refusal_deadline(admission_deadline));
         return;
     };
 
     // The caller leaves the admission window.
-    drop(counted);
+    drop(admission_slot);
 
     // Both halves and the socket lose their deadlines.
     reader.set_deadline(None);
     writer.set_deadline(None);
-    let _ = control.set_read_timeout(None);
-    let _ = control.set_write_timeout(None);
-    if send_frame(&mut writer, &RemoteServerFrame::Welcome { remote_version }).is_err() {
-        report_ended(admissions, admitted.id);
+    let _ = control_stream.set_read_timeout(None);
+    let _ = control_stream.set_write_timeout(None);
+    if send_remote_frame(
+        &mut writer,
+        &RemoteServerFrame::Welcome {
+            remote_protocol_version: remote_version,
+        },
+    )
+    .is_err()
+    {
+        report_remote_connection_ended(
+            dispatcher_events_sender,
+            admitted_connection.remote_connection_id,
+        );
         return;
     }
 
-    serve_admitted(reader, writer, control, admitted, versions, admissions);
+    serve_admitted_remote_connection(
+        reader,
+        writer,
+        control_stream,
+        admitted_connection,
+        session_protocol_versions,
+        dispatcher_events_sender,
+    );
 }
 
 /// Serve an admitted connection: list the sessions its secret reaches, as
 /// often as it asks, attach to one when it asks for that, and report the
 /// connection ended when no bridge took it over.
 ///
-/// `versions` is the session protocol range the client named in its opening
+/// `session_protocol_versions` is the session protocol range the client named in its opening
 /// frame. Nothing here reads it: it is carried to
-/// [`bridge_to_session`], which puts it in the session-plane Hello it sends
+/// [`bridge_remote_connection_to_session`], which puts it in the session-plane Hello it sends
 /// for this client, so the client and the session server settle a version
 /// between themselves.
-fn serve_admitted(
+fn serve_admitted_remote_connection(
     mut reader: TlsReader,
     mut writer: TlsWriter,
-    control: TcpStream,
-    admitted: Admitted,
-    versions: (u32, u32),
-    admissions: &Sender<RouterEvent>,
+    control_stream: TcpStream,
+    admitted_connection: Admitted,
+    session_protocol_versions: (u32, u32),
+    dispatcher_events_sender: &Sender<RouterEvent>,
 ) {
-    let attached = admitted_frames(&mut reader, &mut writer, &admitted, admissions);
-    match attached {
-        Some(endpoint) => bridge_to_session(
+    let attached_session_endpoint_path = process_admitted_remote_frames(
+        &mut reader,
+        &mut writer,
+        &admitted_connection,
+        dispatcher_events_sender,
+    );
+    match attached_session_endpoint_path {
+        Some(session_endpoint_path) => bridge_remote_connection_to_session(
             reader,
             writer,
-            control,
-            endpoint,
-            admitted.id,
-            versions,
-            admissions,
+            control_stream,
+            session_endpoint_path,
+            admitted_connection.remote_connection_id,
+            session_protocol_versions,
+            dispatcher_events_sender,
         ),
-        None => report_ended(admissions, admitted.id),
+        None => report_remote_connection_ended(
+            dispatcher_events_sender,
+            admitted_connection.remote_connection_id,
+        ),
     }
 }
 
@@ -575,46 +633,62 @@ fn serve_admitted(
 /// attach reached; the bytes after that attach belong to that session's server.
 /// `None` means the connection is finished: it hung up, it sent something this
 /// loop does not serve, its attach was refused, or the dispatcher is gone.
-fn admitted_frames(
+fn process_admitted_remote_frames(
     reader: &mut impl Read,
     writer: &mut (impl Write + Deadlined),
-    admitted: &Admitted,
-    admissions: &Sender<RouterEvent>,
+    admitted_connection: &Admitted,
+    dispatcher_events_sender: &Sender<RouterEvent>,
 ) -> Option<PathBuf> {
     loop {
-        let frame = match read_client_frame(reader, MAX_FRAME_LEN) {
-            Opening::Frame(frame) => frame,
+        let remote_client_frame = match read_client_frame(reader, MAX_FRAME_BYTE_COUNT) {
+            Opening::Frame(remote_client_frame) => remote_client_frame,
             Opening::Unreadable => {
-                refuse(writer);
+                send_refusal(writer);
                 return None;
             }
             Opening::Closed => return None,
         };
-        match frame {
+        match remote_client_frame {
             RemoteClientFrame::List => {
-                let scope = admitted.scope.clone();
-                let rows = ask(admissions, |reply| AdmissionAsk::Rows { scope, reply })?;
-                if send_frame(writer, &RemoteServerFrame::Sessions { rows }).is_err() {
+                let admitted_token_scope = admitted_connection.scope.clone();
+                let remote_session_rows =
+                    ask_router_dispatcher(dispatcher_events_sender, |response_sender| {
+                        AdmissionAsk::Rows {
+                            scope: admitted_token_scope,
+                            response_sender,
+                        }
+                    })?;
+                if send_remote_frame(
+                    writer,
+                    &RemoteServerFrame::Sessions {
+                        session_rows: remote_session_rows,
+                    },
+                )
+                .is_err()
+                {
                     return None;
                 }
             }
-            RemoteClientFrame::Attach { session } => {
-                let scope = admitted.scope.clone();
-                let id = admitted.id;
-                let located = ask(admissions, |reply| AdmissionAsk::Locate {
-                    scope,
-                    id,
-                    selector: session,
-                    reply,
-                })?;
-                let Some(endpoint) = located else {
-                    refuse(writer);
+            RemoteClientFrame::Attach { session_selector } => {
+                let admitted_token_scope = admitted_connection.scope.clone();
+                let remote_connection_id = admitted_connection.remote_connection_id;
+                let located_session_endpoint_path =
+                    ask_router_dispatcher(dispatcher_events_sender, |response_sender| {
+                        AdmissionAsk::Locate {
+                            scope: admitted_token_scope,
+                            remote_connection_id,
+                            session_selector,
+                            response_sender,
+                        }
+                    })?;
+                let Some(session_endpoint_path) = located_session_endpoint_path else {
+                    send_refusal(writer);
                     return None;
                 };
-                return Some(endpoint);
+                return Some(session_endpoint_path);
             }
             RemoteClientFrame::Hello { .. } => {
-                refuse(writer);
+                send_refusal(writer);
                 return None;
             }
         }
@@ -622,41 +696,49 @@ fn admitted_frames(
 }
 
 /// The Hello the router sends a session server for a caller this listener
-/// accepted: `token` from that session's endpoint file, the caller's own
-/// version range in `versions` as `(min, max)`, and `remote` set.
+/// accepted: `connection_token` from that session's endpoint file, the caller's own
+/// version range in `session_protocol_versions` as `(minimum, maximum)`, and `remote` set.
 ///
 /// This is the only place `remote` is set.
-fn bridged_hello(token: ConnectionToken, versions: (u32, u32)) -> IpcRequest {
-    let (min_protocol_version, max_protocol_version) = versions;
+fn build_bridged_hello(
+    connection_token: ConnectionToken,
+    session_protocol_versions: (u32, u32),
+) -> IpcRequest {
+    let (minimum_protocol_version, maximum_protocol_version) = session_protocol_versions;
     IpcRequest {
         request_id: 1,
-        kind: IpcRequestKind::Hello {
-            min_protocol_version,
-            max_protocol_version,
-            token,
-            remote: true,
+        request_kind: IpcRequestKind::Hello {
+            min_protocol_version: minimum_protocol_version,
+            max_protocol_version: maximum_protocol_version,
+            connection_token,
+            is_remote: true,
         },
     }
 }
 
 /// Open the local connection to the session advertised at `endpoint_path` and
-/// send it the Hello carrying that session's endpoint token and `versions`.
+/// send it the Hello carrying that session's endpoint token and `session_protocol_versions`.
 ///
 /// Hands back the connection's two raw halves and the handle that closes its
 /// read direction.
 ///
 /// `None` when the endpoint file cannot be read, its socket cannot be reached,
 /// the read direction cannot be made closable, or the Hello cannot be sent.
-fn open_session_bridge(
-    endpoint_path: &Path,
-    versions: (u32, u32),
+fn open_local_session_bridge(
+    session_endpoint_path: &Path,
+    session_protocol_versions: (u32, u32),
 ) -> Option<(RawReader, RawWriter, ReadCloser)> {
-    let endpoint = EndpointFile::read(endpoint_path).ok()?;
-    let mut local = Connection::connect(&endpoint.socket).ok()?;
-    let closer = local.read_closer().ok()?;
-    local.send(&bridged_hello(endpoint.token, versions)).ok()?;
-    let (from_session, to_session) = local.split_raw();
-    Some((from_session, to_session, closer))
+    let session_endpoint = EndpointFile::load_from_path(session_endpoint_path).ok()?;
+    let mut session_connection = Connection::connect(&session_endpoint.socket_address).ok()?;
+    let session_read_closer = session_connection.read_closer().ok()?;
+    session_connection
+        .send(&build_bridged_hello(
+            session_endpoint.connection_token,
+            session_protocol_versions,
+        ))
+        .ok()?;
+    let (session_reader, session_writer) = session_connection.split_raw();
+    Some((session_reader, session_writer, session_read_closer))
 }
 
 /// Open the local connection to an admitted client's session and carry the
@@ -677,125 +759,140 @@ fn open_session_bridge(
 ///
 /// The connection is reported ended once, by whichever direction finishes
 /// first.
-fn bridge_to_session(
+fn bridge_remote_connection_to_session(
     reader: TlsReader,
     mut writer: TlsWriter,
-    control: TcpStream,
-    endpoint_path: PathBuf,
-    id: u64,
-    versions: (u32, u32),
-    admissions: &Sender<RouterEvent>,
+    control_stream: TcpStream,
+    session_endpoint_path: PathBuf,
+    remote_connection_id: u64,
+    session_protocol_versions: (u32, u32),
+    dispatcher_events_sender: &Sender<RouterEvent>,
 ) {
-    let Some((mut from_session, mut to_session, closer)) =
-        open_session_bridge(&endpoint_path, versions)
+    let Some((mut session_reader, mut session_writer, session_read_closer)) =
+        open_local_session_bridge(&session_endpoint_path, session_protocol_versions)
     else {
-        refuse(&mut writer);
-        report_ended(admissions, id);
+        send_refusal(&mut writer);
+        report_remote_connection_ended(dispatcher_events_sender, remote_connection_id);
         return;
     };
-    let ended = Arc::new(EndReport::new(admissions.clone(), id));
+    let end_report = Arc::new(EndReport::from_sender_and_connection_id(
+        dispatcher_events_sender.clone(),
+        remote_connection_id,
+    ));
 
-    let Ok(inbound_control) = control.try_clone() else {
-        ended.once();
+    let Ok(inbound_control_stream) = control_stream.try_clone() else {
+        end_report.report_once();
         return;
     };
-    let mut inbound = reader;
-    let inbound_ended = Arc::clone(&ended);
+    let mut remote_reader = reader;
+    let inbound_end_report = Arc::clone(&end_report);
     let inbound_thread = std::thread::Builder::new()
         .name("koshi-remote-in".to_string())
         .spawn(move || {
             #[cfg(unix)]
             crate::process::block_sigpipe_on_this_thread();
-            let _ = io::copy(&mut inbound, &mut to_session);
-            closer.close();
-            let _ = inbound_control.shutdown(Shutdown::Both);
-            inbound_ended.once();
+            let _ = io::copy(&mut remote_reader, &mut session_writer);
+            session_read_closer.close();
+            let _ = inbound_control_stream.shutdown(Shutdown::Both);
+            inbound_end_report.report_once();
         });
     if inbound_thread.is_err() {
-        ended.once();
+        end_report.report_once();
         return;
     }
 
-    let mut outbound = writer;
+    let mut remote_writer = writer;
     // This handle stays here; the thread takes its own clone.
-    let Ok(outbound_control) = control.try_clone() else {
-        let _ = control.shutdown(Shutdown::Both);
-        ended.once();
+    let Ok(outbound_control_stream) = control_stream.try_clone() else {
+        let _ = control_stream.shutdown(Shutdown::Both);
+        end_report.report_once();
         return;
     };
-    let outbound_ended = Arc::clone(&ended);
+    let outbound_end_report = Arc::clone(&end_report);
     let outbound_thread = std::thread::Builder::new()
         .name("koshi-remote-out".to_string())
         .spawn(move || {
             #[cfg(unix)]
             crate::process::block_sigpipe_on_this_thread();
-            let _ = io::copy(&mut from_session, &mut outbound);
-            let _ = outbound_control.shutdown(Shutdown::Both);
-            outbound_ended.once();
+            let _ = io::copy(&mut session_reader, &mut remote_writer);
+            let _ = outbound_control_stream.shutdown(Shutdown::Both);
+            outbound_end_report.report_once();
         });
     if outbound_thread.is_err() {
         // Shutting the socket ends the inbound direction, which is already
         // running.
-        let _ = control.shutdown(Shutdown::Both);
-        ended.once();
+        let _ = control_stream.shutdown(Shutdown::Both);
+        end_report.report_once();
     }
 }
 
 /// Report that one admitted connection has ended. It leaves the router's list
 /// of live remote connections.
-fn report_ended(admissions: &Sender<RouterEvent>, id: u64) {
-    let _ = admissions.send(RouterEvent::Admission(AdmissionAsk::Ended { id }));
+fn report_remote_connection_ended(
+    dispatcher_events_sender: &Sender<RouterEvent>,
+    remote_connection_id: u64,
+) {
+    let _ = dispatcher_events_sender.send(RouterEvent::Admission(AdmissionAsk::Ended {
+        remote_connection_id,
+    }));
 }
 
-/// Reports one bridged connection ended. The first [`EndReport::once`] sends;
+/// Reports one bridged connection ended. The first [`EndReport::report_once`] sends;
 /// every subsequent one does nothing.
 struct EndReport {
     /// Where the report goes.
-    admissions: Sender<RouterEvent>,
+    dispatcher_events_sender: Sender<RouterEvent>,
     /// The number the connection is registered under.
-    id: u64,
+    remote_connection_id: u64,
     /// Set by the first report. Every subsequent one does nothing.
-    reported: std::sync::atomic::AtomicBool,
+    has_reported: std::sync::atomic::AtomicBool,
 }
 
 impl EndReport {
-    /// A report for the connection registered under `id`, not yet made.
-    fn new(admissions: Sender<RouterEvent>, id: u64) -> EndReport {
+    /// A report for the connection registered under `remote_connection_id`, not yet made.
+    fn from_sender_and_connection_id(
+        dispatcher_events_sender: Sender<RouterEvent>,
+        remote_connection_id: u64,
+    ) -> EndReport {
         EndReport {
-            admissions,
-            id,
-            reported: std::sync::atomic::AtomicBool::new(false),
+            dispatcher_events_sender,
+            remote_connection_id,
+            has_reported: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
     /// Report the connection ended, unless something already has.
-    fn once(&self) {
-        if self.reported.swap(true, Ordering::AcqRel) {
+    fn report_once(&self) {
+        if self.has_reported.swap(true, Ordering::AcqRel) {
             return;
         }
-        report_ended(&self.admissions, self.id);
+        report_remote_connection_ended(&self.dispatcher_events_sender, self.remote_connection_id);
     }
 }
 
-/// Put one question on the dispatcher's queue and wait for its answer.
+/// Put one question on the dispatcher's queue and wait for its response.
 ///
 /// `None` when the dispatcher is gone or hung up without answering.
-fn ask<T>(
-    admissions: &Sender<RouterEvent>,
-    build: impl FnOnce(Sender<T>) -> AdmissionAsk,
-) -> Option<T> {
-    let (reply, answer) = mpsc::channel();
-    admissions.send(RouterEvent::Admission(build(reply))).ok()?;
-    answer.recv().ok()
+fn ask_router_dispatcher<Response>(
+    dispatcher_events_sender: &Sender<RouterEvent>,
+    build_admission_question: impl FnOnce(Sender<Response>) -> AdmissionAsk,
+) -> Option<Response> {
+    let (response_sender, response_receiver) = mpsc::channel();
+    dispatcher_events_sender
+        .send(RouterEvent::Admission(build_admission_question(
+            response_sender,
+        )))
+        .ok()?;
+    response_receiver.recv().ok()
 }
 
-/// Write one [`REMOTE_REFUSED`] frame, giving the write until `until`.
+/// Write one [`REMOTE_REFUSED`] frame, giving the write until `refusal_deadline`.
 ///
-/// A write that fails is dropped, and so is one whose `until` has already
+/// A write that fails is dropped, and so is one whose `refusal_deadline` has already
 /// passed.
-fn refuse_by(writer: &mut (impl Write + Deadlined), until: Instant) {
-    writer.set_deadline(Some(until));
-    let _ = send_frame(
+fn send_refusal_with_deadline(writer: &mut (impl Write + Deadlined), refusal_deadline: Instant) {
+    writer.set_deadline(Some(refusal_deadline));
+    let _ = send_remote_frame(
         writer,
         &RemoteServerFrame::Refused {
             message: REMOTE_REFUSED.to_string(),
@@ -804,55 +901,59 @@ fn refuse_by(writer: &mut (impl Write + Deadlined), until: Instant) {
 }
 
 /// Write one [`REMOTE_REFUSED`] frame, replacing whatever deadline `writer`
-/// holds with [`REFUSAL_WINDOW`] counted from now.
+/// holds with [`REFUSAL_WINDOW_DURATION`] counted from now.
 ///
 /// For a caller that is already admitted, whose halves carry no deadline. A
-/// caller still inside the admission window is refused with [`refuse_by`],
+/// caller still inside the admission window is refused with
+/// [`send_refusal_with_deadline`],
 /// which cannot hold a thread past that window.
-fn refuse(writer: &mut (impl Write + Deadlined)) {
-    refuse_by(writer, Instant::now() + REFUSAL_WINDOW);
+fn send_refusal(writer: &mut (impl Write + Deadlined)) {
+    send_refusal_with_deadline(writer, Instant::now() + REFUSAL_WINDOW_DURATION);
 }
 
 /// Read one frame: a 4-byte big-endian length, then that many bytes of JSON.
 ///
-/// The length is checked against `max_len` before the payload buffer is
-/// allocated. Callers pass [`REMOTE_HELLO_MAX_LEN`] before admission and
-/// [`MAX_FRAME_LEN`] after it. A length over `max_len` is [`Opening::Closed`]
+/// The length is checked against `maximum_frame_byte_count` before the payload buffer is
+/// allocated. Callers pass [`REMOTE_HELLO_MAX_BYTE_COUNT`] before admission and
+/// [`MAX_FRAME_BYTE_COUNT`] after it. A length over `maximum_frame_byte_count` is [`Opening::Closed`]
 /// and reads no payload.
-fn read_client_frame<R: Read>(reader: &mut R, max_len: u32) -> Opening {
+fn read_client_frame<R: Read>(reader: &mut R, maximum_frame_byte_count: u32) -> Opening {
     let mut length_bytes = [0u8; 4];
     if reader.read_exact(&mut length_bytes).is_err() {
         return Opening::Closed;
     }
-    let payload_len = u32::from_be_bytes(length_bytes);
-    if payload_len > max_len {
+    let payload_byte_count = u32::from_be_bytes(length_bytes);
+    if payload_byte_count > maximum_frame_byte_count {
         return Opening::Closed;
     }
-    let mut payload = vec![0u8; payload_len as usize];
-    if reader.read_exact(&mut payload).is_err() {
+    let mut payload_bytes = vec![0u8; payload_byte_count as usize];
+    if reader.read_exact(&mut payload_bytes).is_err() {
         return Opening::Closed;
     }
-    match serde_json::from_slice(&payload) {
-        Ok(frame) => Opening::Frame(frame),
+    match serde_json::from_slice(&payload_bytes) {
+        Ok(remote_client_frame) => Opening::Frame(remote_client_frame),
         Err(_) => Opening::Unreadable,
     }
 }
 
-/// Serialize `frame` as one frame and write all its bytes.
+/// Serialize `remote_server_frame` as one frame and write all its bytes.
 ///
 /// The frame has a 4-byte big-endian length followed by the JSON payload.
 ///
 /// # Errors
 /// The JSON encoder's own failure, `the answer is larger than a frame can
 /// carry` for a payload past `u32::MAX` bytes, and whatever the writer reports.
-fn send_frame<W: Write>(writer: &mut W, frame: &RemoteServerFrame) -> io::Result<()> {
-    let payload = serde_json::to_vec(frame)?;
-    let length = u32::try_from(payload.len())
+fn send_remote_frame<W: Write>(
+    writer: &mut W,
+    remote_server_frame: &RemoteServerFrame,
+) -> io::Result<()> {
+    let payload_bytes = serde_json::to_vec(remote_server_frame)?;
+    let frame_byte_count = u32::try_from(payload_bytes.len())
         .map_err(|_| io::Error::other("the answer is larger than a frame can carry"))?;
-    let mut bytes = Vec::with_capacity(payload.len() + 4);
-    bytes.extend_from_slice(&length.to_be_bytes());
-    bytes.extend_from_slice(&payload);
-    writer.write_all(&bytes)
+    let mut frame_bytes = Vec::with_capacity(payload_bytes.len() + 4);
+    frame_bytes.extend_from_slice(&frame_byte_count.to_be_bytes());
+    frame_bytes.extend_from_slice(&payload_bytes);
+    writer.write_all(&frame_bytes)
 }
 
 #[cfg(test)]

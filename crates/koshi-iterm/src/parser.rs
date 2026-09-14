@@ -2,254 +2,295 @@
 
 use koshi_image::{
     decode_base64, decode_media, DecodedGraphics, DecodedMedia, GraphicsError, GraphicsProtocol,
-    ImageAction, ImageDimension, ImageDisplay, MAX_GRAPHICS_CONTROL_BYTES,
-    MAX_GRAPHICS_TRANSFER_BYTES,
+    ImageAction, ImageDimension, ImageDisplay, MAX_GRAPHICS_CONTROL_BYTE_COUNT,
+    MAX_GRAPHICS_TRANSFER_BYTE_COUNT,
 };
 
-const ITERM_PROTOCOL: GraphicsProtocol = GraphicsProtocol::Iterm2;
+const ITERM2_PROTOCOL: GraphicsProtocol = GraphicsProtocol::Iterm2;
 
 /// A multipart iTerm2 image transfer that is waiting for more commands.
 ///
-/// The transfer stores the validated display metadata and the encoded payload
+/// The transfer stores the validated display options and the encoded payload
 /// bytes received so far. Only the terminal parser needs to retain this value;
 /// callers start one with [`parse_iterm_command`] and `None`.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ItermTransfer {
-    meta: ItermMeta,
-    encoded: Vec<u8>,
+    display_options: ItermDisplayOptions,
+    encoded_payload_bytes: Vec<u8>,
 }
 
 impl std::fmt::Debug for ItermTransfer {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("ItermTransfer")
-            .field("meta", &self.meta)
-            .field("encoded_len", &self.encoded.len())
+            .field("display_options", &self.display_options)
+            .field(
+                "encoded_payload_byte_count",
+                &self.encoded_payload_bytes.len(),
+            )
             .finish()
     }
 }
 
-fn iterm_command_name(body: &[u8]) -> Option<&[u8]> {
-    (!body.is_empty()).then(|| split_at_byte(body, b'=').map_or(body, |(command, _)| command))
+fn find_iterm_command_name(command_body: &[u8]) -> Option<&[u8]> {
+    (!command_body.is_empty()).then(|| {
+        split_bytes_at_delimiter(command_body, b'=')
+            .map_or(command_body, |(command_name, _)| command_name)
+    })
 }
 
-const ITERM_GRAPHICS_COMMANDS: [&[u8]; 4] = [b"File", b"MultipartFile", b"FilePart", b"FileEnd"];
+const ITERM_GRAPHICS_COMMAND_NAMES: [&[u8]; 4] =
+    [b"File", b"MultipartFile", b"FilePart", b"FileEnd"];
 
 /// Return whether an OSC 1337 body is an exact iTerm2 graphics command.
-pub fn iterm_command_is_graphics(body: &[u8]) -> bool {
-    match iterm_command_name(body) {
+pub fn is_iterm_graphics_command(command_body: &[u8]) -> bool {
+    match find_iterm_command_name(command_body) {
         None => true,
-        Some(command) => ITERM_GRAPHICS_COMMANDS.contains(&command),
+        Some(command_name) => ITERM_GRAPHICS_COMMAND_NAMES.contains(&command_name),
     }
 }
 
 /// Return whether an OSC 1337 body names or prefixes a graphics command.
-pub fn iterm_command_can_be_graphics(body: &[u8]) -> bool {
-    let command = iterm_command_name(body).unwrap_or(body);
-    ITERM_GRAPHICS_COMMANDS
+pub fn can_iterm_command_be_graphics(command_body: &[u8]) -> bool {
+    let command_name = find_iterm_command_name(command_body).unwrap_or(command_body);
+    ITERM_GRAPHICS_COMMAND_NAMES
         .iter()
-        .any(|name| name.starts_with(command))
+        .any(|command_name_candidate| command_name_candidate.starts_with(command_name))
 }
 
 /// Return whether an iTerm2 body has reached an image payload.
-pub fn iterm_payload_started(body: &[u8]) -> bool {
-    if body.starts_with(b"FilePart=") {
+pub fn is_iterm_payload_started(command_body: &[u8]) -> bool {
+    if command_body.starts_with(b"FilePart=") {
         return true;
     }
-    matches!(iterm_command_name(body), Some(b"File" | b"MultipartFile")) && body.contains(&b':')
+    matches!(
+        find_iterm_command_name(command_body),
+        Some(b"File" | b"MultipartFile")
+    ) && command_body.contains(&b':')
 }
 
 /// Parse one complete iTerm2 OSC 1337 body.
 ///
-/// `multipart` is the caller-owned state for `MultipartFile`, `FilePart`, and
+/// `multipart_transfer` is the caller-owned state for `MultipartFile`, `FilePart`, and
 /// `FileEnd`. A rejected command leaves that state unchanged unless the command
 /// is a valid `FileEnd`, which consumes the completed transfer before decoding.
 pub fn parse_iterm_command(
-    body: &[u8],
-    multipart: &mut Option<ItermTransfer>,
+    command_body: &[u8],
+    multipart_transfer: &mut Option<ItermTransfer>,
 ) -> Result<Option<DecodedGraphics>, GraphicsError> {
-    if body.is_empty() {
+    if command_body.is_empty() {
         return Err(GraphicsError::InvalidHeader {
-            protocol: ITERM_PROTOCOL,
+            protocol: ITERM2_PROTOCOL,
         });
     }
-    let (command, rest) = split_at_byte(body, b'=').unwrap_or((body, &[]));
-    match command {
-        b"File" => parse_file(rest, multipart),
-        b"MultipartFile" => parse_multipart_file(rest, multipart),
-        b"FilePart" => parse_file_part(rest, multipart),
-        b"FileEnd" => parse_file_end(rest, multipart),
+    let (command_name, command_payload) =
+        split_bytes_at_delimiter(command_body, b'=').unwrap_or((command_body, &[]));
+    match command_name {
+        b"File" => parse_file_command(command_payload, multipart_transfer),
+        b"MultipartFile" => parse_multipart_file_command(command_payload, multipart_transfer),
+        b"FilePart" => parse_file_part_command(command_payload, multipart_transfer),
+        b"FileEnd" => parse_file_end_command(command_payload, multipart_transfer),
         _ => Ok(None),
     }
 }
 
-fn parse_file(
-    rest: &[u8],
-    multipart: &Option<ItermTransfer>,
+fn parse_file_command(
+    command_payload: &[u8],
+    multipart_transfer: &Option<ItermTransfer>,
 ) -> Result<Option<DecodedGraphics>, GraphicsError> {
-    if multipart.is_some() {
+    if multipart_transfer.is_some() {
         return Err(GraphicsError::MultipartState);
     }
-    let (params, encoded) = split_at_byte(rest, b':').ok_or(GraphicsError::InvalidHeader {
-        protocol: ITERM_PROTOCOL,
-    })?;
-    let meta = parse_iterm_meta(params, true)?;
-    let bytes = decode_base64(ITERM_PROTOCOL, encoded)?;
-    Ok(Some(decoded_graphics(meta, &bytes)?))
+    let (parameter_bytes, encoded_payload_bytes) = split_bytes_at_delimiter(command_payload, b':')
+        .ok_or(GraphicsError::InvalidHeader {
+            protocol: ITERM2_PROTOCOL,
+        })?;
+    let display_options = parse_iterm_display_options(parameter_bytes, true)?;
+    let decoded_media_bytes = decode_base64(ITERM2_PROTOCOL, encoded_payload_bytes)?;
+    Ok(Some(decode_iterm_graphics(
+        display_options,
+        &decoded_media_bytes,
+    )?))
 }
 
-fn parse_multipart_file(
-    rest: &[u8],
-    multipart: &mut Option<ItermTransfer>,
+fn parse_multipart_file_command(
+    command_payload: &[u8],
+    multipart_transfer: &mut Option<ItermTransfer>,
 ) -> Result<Option<DecodedGraphics>, GraphicsError> {
-    if multipart.is_some() {
+    if multipart_transfer.is_some() {
         return Err(GraphicsError::MultipartState);
     }
-    let (params, encoded) = split_at_byte(rest, b':').unwrap_or((rest, &[]));
-    let meta = parse_iterm_meta(params, true)?;
-    if encoded.len() > MAX_GRAPHICS_TRANSFER_BYTES {
+    let (parameter_bytes, encoded_payload_bytes) =
+        split_bytes_at_delimiter(command_payload, b':').unwrap_or((command_payload, &[]));
+    let display_options = parse_iterm_display_options(parameter_bytes, true)?;
+    if encoded_payload_bytes.len() > MAX_GRAPHICS_TRANSFER_BYTE_COUNT {
         return Err(GraphicsError::TransferTooLarge {
-            protocol: ITERM_PROTOCOL,
+            protocol: ITERM2_PROTOCOL,
         });
     }
-    *multipart = Some(ItermTransfer {
-        meta,
-        encoded: encoded.to_vec(),
+    *multipart_transfer = Some(ItermTransfer {
+        display_options,
+        encoded_payload_bytes: encoded_payload_bytes.to_vec(),
     });
     Ok(None)
 }
 
-fn parse_file_part(
-    rest: &[u8],
-    multipart: &mut Option<ItermTransfer>,
+fn parse_file_part_command(
+    command_payload: &[u8],
+    multipart_transfer: &mut Option<ItermTransfer>,
 ) -> Result<Option<DecodedGraphics>, GraphicsError> {
-    let transfer = multipart.as_mut().ok_or(GraphicsError::MultipartState)?;
-    append_bounded(&mut transfer.encoded, rest)?;
+    let iterm_transfer = multipart_transfer
+        .as_mut()
+        .ok_or(GraphicsError::MultipartState)?;
+    append_bounded_payload_bytes(&mut iterm_transfer.encoded_payload_bytes, command_payload)?;
     Ok(None)
 }
 
-fn parse_file_end(
-    rest: &[u8],
-    multipart: &mut Option<ItermTransfer>,
+fn parse_file_end_command(
+    command_payload: &[u8],
+    multipart_transfer: &mut Option<ItermTransfer>,
 ) -> Result<Option<DecodedGraphics>, GraphicsError> {
-    if !rest.is_empty() {
+    if !command_payload.is_empty() {
         return Err(GraphicsError::InvalidHeader {
-            protocol: ITERM_PROTOCOL,
+            protocol: ITERM2_PROTOCOL,
         });
     }
-    let transfer = multipart.take().ok_or(GraphicsError::MultipartState)?;
-    let bytes = decode_base64(ITERM_PROTOCOL, &transfer.encoded)?;
-    Ok(Some(decoded_graphics(transfer.meta, &bytes)?))
+    let iterm_transfer = multipart_transfer
+        .take()
+        .ok_or(GraphicsError::MultipartState)?;
+    let decoded_media_bytes =
+        decode_base64(ITERM2_PROTOCOL, &iterm_transfer.encoded_payload_bytes)?;
+    Ok(Some(decode_iterm_graphics(
+        iterm_transfer.display_options,
+        &decoded_media_bytes,
+    )?))
 }
 
-fn decoded_graphics(meta: ItermMeta, bytes: &[u8]) -> Result<DecodedGraphics, GraphicsError> {
-    let (image, animation) = match decode_media(ITERM_PROTOCOL, bytes)? {
-        DecodedMedia::Static(image) => (image, None),
+fn decode_iterm_graphics(
+    display_options: ItermDisplayOptions,
+    decoded_media_bytes: &[u8],
+) -> Result<DecodedGraphics, GraphicsError> {
+    let (decoded_image, animation) = match decode_media(ITERM2_PROTOCOL, decoded_media_bytes)? {
+        DecodedMedia::Static(decoded_image) => (decoded_image, None),
         DecodedMedia::Animation(animation) => {
-            let image = animation.frames()[0].image().clone();
-            (image, Some(animation))
+            let first_frame_image = animation.list_frames()[0].get_decoded_image().clone();
+            (first_frame_image, Some(animation))
         }
     };
     Ok(DecodedGraphics {
-        query: false,
-        protocol: ITERM_PROTOCOL,
-        image,
+        is_query: false,
+        protocol: ITERM2_PROTOCOL,
+        image: decoded_image,
         animation,
         action: ImageAction::Display,
-        display: meta.display,
+        display: display_options.display,
     })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct ItermMeta {
+struct ItermDisplayOptions {
     display: ImageDisplay,
 }
 
-fn parse_iterm_meta(data: &[u8], require_inline: bool) -> Result<ItermMeta, GraphicsError> {
-    if data.len() > MAX_GRAPHICS_CONTROL_BYTES {
+fn parse_iterm_display_options(
+    control_bytes: &[u8],
+    is_inline_required: bool,
+) -> Result<ItermDisplayOptions, GraphicsError> {
+    if control_bytes.len() > MAX_GRAPHICS_CONTROL_BYTE_COUNT {
         return Err(GraphicsError::TransferTooLarge {
-            protocol: ITERM_PROTOCOL,
+            protocol: ITERM2_PROTOCOL,
         });
     }
-    let mut display = ImageDisplay::default();
-    let mut inline = false;
-    for field in data.split(|byte| *byte == b';') {
-        if field.is_empty() {
+    let mut image_display = ImageDisplay::default();
+    let mut is_inline = false;
+    for control_field_bytes in control_bytes.split(|byte| *byte == b';') {
+        if control_field_bytes.is_empty() {
             continue;
         }
-        let (key, value) = split_at_byte(field, b'=').ok_or(GraphicsError::InvalidHeader {
-            protocol: ITERM_PROTOCOL,
-        })?;
-        match key {
-            b"inline" => match value {
-                b"1" => inline = true,
-                b"0" => inline = false,
+        let (parameter_name, parameter_value) = split_bytes_at_delimiter(control_field_bytes, b'=')
+            .ok_or(GraphicsError::InvalidHeader {
+                protocol: ITERM2_PROTOCOL,
+            })?;
+        match parameter_name {
+            b"inline" => match parameter_value {
+                b"1" => is_inline = true,
+                b"0" => is_inline = false,
                 _ => {
                     return Err(GraphicsError::InvalidCommand {
-                        protocol: ITERM_PROTOCOL,
+                        protocol: ITERM2_PROTOCOL,
                     })
                 }
             },
             b"size" => {
-                check_ascii_decimal(value)?;
+                validate_ascii_decimal(parameter_value)?;
             }
-            b"width" => display.width = Some(parse_iterm_dimension(value)?),
-            b"height" => display.height = Some(parse_iterm_dimension(value)?),
-            b"preserveAspectRatio" => match value {
-                b"1" => display.preserve_aspect_ratio = true,
-                b"0" => display.preserve_aspect_ratio = false,
+            b"width" => {
+                image_display.requested_width = Some(parse_iterm_dimension(parameter_value)?);
+            }
+            b"height" => {
+                image_display.requested_height = Some(parse_iterm_dimension(parameter_value)?);
+            }
+            b"preserveAspectRatio" => match parameter_value {
+                b"1" => image_display.is_aspect_ratio_preserved = true,
+                b"0" => image_display.is_aspect_ratio_preserved = false,
                 _ => {
                     return Err(GraphicsError::InvalidCommand {
-                        protocol: ITERM_PROTOCOL,
+                        protocol: ITERM2_PROTOCOL,
                     })
                 }
             },
-            b"name" => check_control_value(value)?,
-            _ => check_control_value(value)?,
+            b"name" => validate_iterm_control_value(parameter_value)?,
+            _ => validate_iterm_control_value(parameter_value)?,
         }
     }
-    if require_inline && !inline {
+    if is_inline_required && !is_inline {
         return Err(GraphicsError::UnsupportedAction {
-            protocol: ITERM_PROTOCOL,
+            protocol: ITERM2_PROTOCOL,
             action: "inline=0".to_string(),
         });
     }
-    Ok(ItermMeta { display })
+    Ok(ItermDisplayOptions {
+        display: image_display,
+    })
 }
 
-fn check_control_value(value: &[u8]) -> Result<(), GraphicsError> {
-    if value.len() > MAX_GRAPHICS_CONTROL_BYTES {
+fn validate_iterm_control_value(control_value: &[u8]) -> Result<(), GraphicsError> {
+    if control_value.len() > MAX_GRAPHICS_CONTROL_BYTE_COUNT {
         return Err(GraphicsError::TransferTooLarge {
-            protocol: ITERM_PROTOCOL,
+            protocol: ITERM2_PROTOCOL,
         });
     }
     Ok(())
 }
 
-fn parse_iterm_dimension(value: &[u8]) -> Result<ImageDimension, GraphicsError> {
-    if value == b"auto" {
+fn parse_iterm_dimension(dimension_bytes: &[u8]) -> Result<ImageDimension, GraphicsError> {
+    if dimension_bytes == b"auto" {
         return Ok(ImageDimension::Auto);
     }
-    if value.ends_with(b"px") {
-        return match parse_signed_decimal(&value[..value.len().saturating_sub(2)])? {
+    if dimension_bytes.ends_with(b"px") {
+        return match parse_signed_decimal(
+            &dimension_bytes[..dimension_bytes.len().saturating_sub(2)],
+        )? {
             SignedDecimal::NonPositive => Ok(ImageDimension::Pixels(1)),
-            SignedDecimal::Positive(number) => Ok(ImageDimension::Pixels(number)),
-            SignedDecimal::TooLarge => Err(invalid_dimensions()),
+            SignedDecimal::Positive(dimension_value) => Ok(ImageDimension::Pixels(dimension_value)),
+            SignedDecimal::TooLarge => Err(build_invalid_dimensions_error()),
         };
     }
-    if value.ends_with(b"%") {
-        return match parse_signed_decimal(&value[..value.len().saturating_sub(1)])? {
+    if dimension_bytes.ends_with(b"%") {
+        return match parse_signed_decimal(
+            &dimension_bytes[..dimension_bytes.len().saturating_sub(1)],
+        )? {
             SignedDecimal::NonPositive => Ok(ImageDimension::Cells(1)),
-            SignedDecimal::Positive(number) => Ok(ImageDimension::Percent(
-                u16::try_from(number.min(100)).expect("a clamped percentage fits in u16"),
+            SignedDecimal::Positive(dimension_value) => Ok(ImageDimension::Percent(
+                u16::try_from(dimension_value.min(100)).expect("a clamped percentage fits in u16"),
             )),
             SignedDecimal::TooLarge => Ok(ImageDimension::Percent(100)),
         };
     }
-    match parse_signed_decimal(value)? {
+    match parse_signed_decimal(dimension_bytes)? {
         SignedDecimal::NonPositive => Ok(ImageDimension::Cells(1)),
-        SignedDecimal::Positive(number) => Ok(ImageDimension::Cells(number)),
-        SignedDecimal::TooLarge => Err(invalid_dimensions()),
+        SignedDecimal::Positive(dimension_value) => Ok(ImageDimension::Cells(dimension_value)),
+        SignedDecimal::TooLarge => Err(build_invalid_dimensions_error()),
     }
 }
 
@@ -260,69 +301,79 @@ enum SignedDecimal {
     TooLarge,
 }
 
-fn parse_signed_decimal(data: &[u8]) -> Result<SignedDecimal, GraphicsError> {
-    let (negative, digits) = match data {
-        [b'-', digits @ ..] => (true, digits),
-        [b'+', digits @ ..] => (false, digits),
-        digits => (false, digits),
+fn parse_signed_decimal(decimal_bytes: &[u8]) -> Result<SignedDecimal, GraphicsError> {
+    let (is_negative, decimal_digits) = match decimal_bytes {
+        [b'-', decimal_digits @ ..] => (true, decimal_digits),
+        [b'+', decimal_digits @ ..] => (false, decimal_digits),
+        decimal_digits => (false, decimal_digits),
     };
-    check_ascii_decimal(digits)?;
-    let mut value = 0u32;
-    for &byte in digits {
-        let Some(next) = value
-            .checked_mul(10)
-            .and_then(|value| value.checked_add(u32::from(byte - b'0')))
+    validate_ascii_decimal(decimal_digits)?;
+    let mut decimal_value = 0u32;
+    for &decimal_digit in decimal_digits {
+        let Some(next_decimal_value) =
+            decimal_value
+                .checked_mul(10)
+                .and_then(|current_decimal_value| {
+                    current_decimal_value.checked_add(u32::from(decimal_digit - b'0'))
+                })
         else {
-            return Ok(if negative {
+            return Ok(if is_negative {
                 SignedDecimal::NonPositive
             } else {
                 SignedDecimal::TooLarge
             });
         };
-        value = next;
+        decimal_value = next_decimal_value;
     }
-    if negative || value == 0 {
+    if is_negative || decimal_value == 0 {
         Ok(SignedDecimal::NonPositive)
     } else {
-        Ok(SignedDecimal::Positive(value))
+        Ok(SignedDecimal::Positive(decimal_value))
     }
 }
 
-fn check_ascii_decimal(data: &[u8]) -> Result<(), GraphicsError> {
-    if data.is_empty() || !data.iter().all(u8::is_ascii_digit) {
+fn validate_ascii_decimal(decimal_bytes: &[u8]) -> Result<(), GraphicsError> {
+    if decimal_bytes.is_empty() || !decimal_bytes.iter().all(u8::is_ascii_digit) {
         return Err(GraphicsError::InvalidCommand {
-            protocol: ITERM_PROTOCOL,
+            protocol: ITERM2_PROTOCOL,
         });
     }
     Ok(())
 }
 
-fn invalid_dimensions() -> GraphicsError {
+fn build_invalid_dimensions_error() -> GraphicsError {
     GraphicsError::InvalidDimensions {
-        protocol: ITERM_PROTOCOL,
+        protocol: ITERM2_PROTOCOL,
     }
 }
 
-fn append_bounded(target: &mut Vec<u8>, bytes: &[u8]) -> Result<(), GraphicsError> {
-    let new_len =
-        target
-            .len()
-            .checked_add(bytes.len())
-            .ok_or(GraphicsError::InvalidDimensions {
-                protocol: ITERM_PROTOCOL,
-            })?;
-    if new_len > MAX_GRAPHICS_TRANSFER_BYTES {
+fn append_bounded_payload_bytes(
+    encoded_payload_bytes: &mut Vec<u8>,
+    payload_bytes: &[u8],
+) -> Result<(), GraphicsError> {
+    let encoded_payload_byte_count = encoded_payload_bytes
+        .len()
+        .checked_add(payload_bytes.len())
+        .ok_or(GraphicsError::InvalidDimensions {
+            protocol: ITERM2_PROTOCOL,
+        })?;
+    if encoded_payload_byte_count > MAX_GRAPHICS_TRANSFER_BYTE_COUNT {
         return Err(GraphicsError::TransferTooLarge {
-            protocol: ITERM_PROTOCOL,
+            protocol: ITERM2_PROTOCOL,
         });
     }
-    target.extend_from_slice(bytes);
+    encoded_payload_bytes.extend_from_slice(payload_bytes);
     Ok(())
 }
 
-fn split_at_byte(data: &[u8], delimiter: u8) -> Option<(&[u8], &[u8])> {
-    let index = data.iter().position(|byte| *byte == delimiter)?;
-    Some((&data[..index], &data[index + 1..]))
+fn split_bytes_at_delimiter(source_bytes: &[u8], delimiter_byte: u8) -> Option<(&[u8], &[u8])> {
+    let delimiter_index = source_bytes
+        .iter()
+        .position(|byte| *byte == delimiter_byte)?;
+    Some((
+        &source_bytes[..delimiter_index],
+        &source_bytes[delimiter_index + 1..],
+    ))
 }
 
 #[cfg(test)]

@@ -139,7 +139,7 @@ impl Event {
     /// The variant's name, e.g. `"PaneCreated"`. Contains nothing from the
     /// payload, including user text.
     #[must_use]
-    pub fn name(&self) -> &'static str {
+    pub fn get_event_name(&self) -> &'static str {
         match self {
             Event::PaneCreated(_) => "PaneCreated",
             Event::PaneProcessExited(_) => "PaneProcessExited",
@@ -231,7 +231,8 @@ pub struct PaneFocused {
     /// The newly focused pane.
     pub pane_id: PaneId,
     /// The pane that held this client's focus in the tab before, if any.
-    pub prior_pane: Option<PaneId>,
+    #[serde(rename = "prior_pane")]
+    pub previous_pane_id: Option<PaneId>,
 }
 
 /// Payload for [`Event::PtyResized`].
@@ -240,7 +241,8 @@ pub struct PtyResized {
     /// The pane whose PTY was resized.
     pub pane_id: PaneId,
     /// The new PTY dimensions in cells.
-    pub size: PtySize,
+    #[serde(rename = "size")]
+    pub pty_size: PtySize,
 }
 
 /// Payload for [`Event::PaneOutputUpdated`].
@@ -283,7 +285,8 @@ pub struct TabFocused {
     pub tab_id: TabId,
     /// The tab the client was viewing before the switch. When the switch was
     /// forced by a tab close, this is the closed tab.
-    pub prior_tab: TabId,
+    #[serde(rename = "prior_tab")]
+    pub previous_tab_id: TabId,
 }
 
 /// Payload for [`Event::TabMoved`].
@@ -292,9 +295,11 @@ pub struct TabMoved {
     /// The moved tab.
     pub tab_id: TabId,
     /// The tab's previous zero-based index.
-    pub old_index: usize,
+    #[serde(rename = "old_index")]
+    pub previous_tab_index: usize,
     /// The tab's new zero-based index.
-    pub new_index: usize,
+    #[serde(rename = "new_index")]
+    pub new_tab_index: usize,
 }
 
 /// Payload for [`Event::PaneSuppressed`].
@@ -333,7 +338,8 @@ pub struct TerminalTooSmallEntered {
     /// The affected client viewport.
     pub client_id: ClientId,
     /// The viewport size that could not fit any pane.
-    pub size: Size,
+    #[serde(rename = "size")]
+    pub viewport_size: Size,
     /// The pane area the client reported, or `None` when it reported no area.
     #[serde(default)]
     pub pane_area: Option<PaneArea>,
@@ -348,7 +354,8 @@ pub struct TerminalTooSmallExited {
     /// The affected client viewport.
     pub client_id: ClientId,
     /// The viewport size after recovery.
-    pub size: Size,
+    #[serde(rename = "size")]
+    pub viewport_size: Size,
 }
 
 /// Payload for [`Event::ConfigReloaded`].
@@ -374,7 +381,8 @@ pub struct InputModeChanged {
     /// key is interpreted. A key bound to a koshi shortcut still fires it; a key
     /// that reaches the pane's program clears that pane's highlight on the way.
     /// The highlight itself is reported by [`Event::SelectionChanged`].
-    pub mode: LockMode,
+    #[serde(rename = "mode")]
+    pub lock_mode: LockMode,
 }
 
 /// Payload for [`Event::MouseSelectChanged`].
@@ -384,7 +392,8 @@ pub struct MouseSelectChanged {
     /// client-scoped: clients sharing a session hold independent modes.
     pub client_id: ClientId,
     /// Whether the client now grabs the mouse for text selection.
-    pub on: bool,
+    #[serde(rename = "on")]
+    pub is_enabled: bool,
 }
 
 /// Payload for [`Event::KeybindingMatched`].
@@ -447,7 +456,7 @@ pub enum TypedPayload {
 impl TypedPayload {
     /// The [`PrivacyTier`] this payload encodes.
     #[must_use]
-    pub const fn tier(&self) -> PrivacyTier {
+    pub const fn get_privacy_tier(&self) -> PrivacyTier {
         match self {
             TypedPayload::SafePublic(_) => PrivacyTier::Public,
             TypedPayload::SensitiveRedacted => PrivacyTier::Redacted,
@@ -474,9 +483,11 @@ pub struct PaneTyped {
     /// The client that produced the input.
     pub client_id: ClientId,
     /// The classified, privacy-tiered character payload.
-    pub payload: TypedPayload,
+    #[serde(rename = "payload")]
+    pub typed_payload: TypedPayload,
     /// When the input was accepted.
-    pub timestamp: SystemTime,
+    #[serde(rename = "timestamp")]
+    pub accepted_at: SystemTime,
 }
 
 /// The submitted-line payload of a [`PaneEnterPressed`] event.
@@ -503,7 +514,7 @@ impl SubmittedLinePayload {
     ///
     /// [`UnknownMetadataOnly`]: SubmittedLinePayload::UnknownMetadataOnly
     #[must_use]
-    pub const fn tier(&self) -> PrivacyTier {
+    pub const fn get_privacy_tier(&self) -> PrivacyTier {
         match self {
             SubmittedLinePayload::SafePublic(_) => PrivacyTier::Public,
             SubmittedLinePayload::SensitiveRedacted => PrivacyTier::Redacted,
@@ -525,9 +536,11 @@ pub struct PaneEnterPressed {
     /// The client that produced the input.
     pub client_id: ClientId,
     /// The classified, privacy-tiered submitted-line payload.
-    pub line: SubmittedLinePayload,
+    #[serde(rename = "line")]
+    pub submitted_line: SubmittedLinePayload,
     /// When Enter was accepted.
-    pub timestamp: SystemTime,
+    #[serde(rename = "timestamp")]
+    pub accepted_at: SystemTime,
 }
 
 // ============================================================================
@@ -544,7 +557,8 @@ pub struct MousePressed {
     /// The client that produced the event.
     pub client_id: ClientId,
     /// The hit-tested pane, if any.
-    pub pane: Option<PaneId>,
+    #[serde(rename = "pane")]
+    pub pane_id: Option<PaneId>,
     /// The client-local cell position.
     pub position: Point,
     /// The button pressed.
@@ -557,7 +571,8 @@ pub struct MouseReleased {
     /// The client that produced the event.
     pub client_id: ClientId,
     /// The hit-tested pane, if any.
-    pub pane: Option<PaneId>,
+    #[serde(rename = "pane")]
+    pub pane_id: Option<PaneId>,
     /// The client-local cell position.
     pub position: Point,
     /// The button released.
@@ -570,7 +585,8 @@ pub struct MouseDragged {
     /// The client that produced the event.
     pub client_id: ClientId,
     /// The hit-tested pane, if any.
-    pub pane: Option<PaneId>,
+    #[serde(rename = "pane")]
+    pub pane_id: Option<PaneId>,
     /// The client-local cell position.
     pub position: Point,
     /// The button held during the drag.
@@ -583,7 +599,8 @@ pub struct MouseScrolled {
     /// The client that produced the event.
     pub client_id: ClientId,
     /// The hit-tested pane, if any.
-    pub pane: Option<PaneId>,
+    #[serde(rename = "pane")]
+    pub pane_id: Option<PaneId>,
     /// The client-local cell position.
     pub position: Point,
     /// The wheel direction.
@@ -656,7 +673,7 @@ pub enum EventClass {
 ///
 /// `Lossy` events may coalesce or drop during delivery. `Critical` events must
 /// not silently disappear.
-pub fn classify(event: &Event) -> EventClass {
+pub fn classify_event(event: &Event) -> EventClass {
     match event {
         Event::PaneOutputUpdated(_)
         | Event::PaneTyped(_)
@@ -705,7 +722,7 @@ pub struct SubscriberLagged {
     /// The subscriber whose queue overflowed.
     pub subscriber_id: SubscriberId,
     /// How many events were dropped.
-    pub dropped_count: u64,
+    pub dropped_event_count: u64,
     /// The class of the dropped events.
     pub event_class: EventClass,
 }
@@ -749,9 +766,11 @@ impl std::fmt::Display for RejectReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandRejected {
     /// The command that was rejected.
-    pub id: CommandId,
+    #[serde(rename = "id")]
+    pub command_id: CommandId,
     /// Why it was rejected.
-    pub reason: RejectReason,
+    #[serde(rename = "reason")]
+    pub rejection_reason: RejectReason,
 }
 
 // ============================================================================
@@ -781,9 +800,11 @@ pub struct Copied {
     /// The pane the text was copied from.
     pub pane_id: PaneId,
     /// Where the text was copied to.
-    pub target: CopyTarget,
+    #[serde(rename = "target")]
+    pub clipboard_target: CopyTarget,
     /// The byte length of the copied text.
-    pub byte_len: usize,
+    #[serde(rename = "byte_len")]
+    pub byte_count: usize,
 }
 
 // ============================================================================
@@ -864,7 +885,8 @@ pub struct PluginLoadFailed {
     /// The plugin that failed to load.
     pub plugin_id: PluginId,
     /// A human-readable failure reason.
-    pub reason: String,
+    #[serde(rename = "reason")]
+    pub failure_reason: String,
 }
 
 /// Payload for [`PluginEvent::Unloaded`].
@@ -880,7 +902,8 @@ pub struct PluginBroken {
     /// The plugin marked broken.
     pub plugin_id: PluginId,
     /// A human-readable reason it was disabled.
-    pub reason: String,
+    #[serde(rename = "reason")]
+    pub failure_reason: String,
 }
 
 /// Payload for [`PluginEvent::DoctorCompleted`].

@@ -5,17 +5,17 @@
 //! subscriber is the single place three questions are answered, all from the
 //! `logging` section of `koshi.kdl` — nothing is read from the environment:
 //!
-//! - **Should this line be written?** [`logging::LoggingParams::enabled`] — disabled
+//! - **Should this line be written?** [`logging::LoggingParams::is_enabled`] — disabled
 //!   installs no subscriber at all, so no line is written and no file or
 //!   `logs/` directory is ever created.
 //! - **Where does it go?** A per-session file `logs/koshi-log-<id>.log` under
-//!   the user's state directory ([`logging::log_dir`]). The file is
+//!   the user's state directory ([`logging::resolve_log_directory`]). The file is
 //!   created on the *first* line written and re-created if it is removed while
 //!   koshi runs; on Unix it is created as `0600` inside a `0700` directory.
 //!   Two processes write one session's file — the session server
 //!   and the client attached to it — and every line is one open-append-close;
 //!   the two processes' lines interleave whole.
-//! - **What passes the bar?** [`logging::LoggingParams::level`] — the lowest severity
+//! - **What passes the bar?** [`logging::LoggingParams::log_level`] — the lowest severity
 //!   that gets written; a line below it is dropped before it reaches the file.
 //!
 //! # Logging policy
@@ -71,36 +71,37 @@ pub mod recent_events;
 #[derive(Debug, Clone)]
 pub struct LoggingParams {
     /// Whether to install a subscriber and write a file at all.
-    pub enabled: bool,
+    pub is_enabled: bool,
     /// The lowest severity that gets written.
-    pub level: LogLevel,
+    pub log_level: LogLevel,
     /// How each written line is rendered.
-    pub format: LogFormat,
+    pub log_format: LogFormat,
     /// The session this run logs under; names the per-session log file.
     pub session_id: SessionId,
 }
 
 /// The directory every log file goes in: `logs/` under the user's state
-/// directory (resolved by [`koshi_paths::state_dir`]) —
+/// directory (resolved by [`koshi_paths::resolve_state_directory`]) —
 /// `~/.local/state/koshi/logs` on Linux, `~/Library/Application
 /// Support/koshi/logs` on macOS, `%LOCALAPPDATA%\koshi\data\logs` on Windows.
 /// `None` when no home directory can be found at all.
 #[must_use]
-pub fn log_dir() -> Option<PathBuf> {
-    koshi_paths::state_dir().map(|dir| dir.join("logs"))
+pub fn resolve_log_directory() -> Option<PathBuf> {
+    koshi_paths::resolve_state_directory()
+        .map(|state_directory_path| state_directory_path.join("logs"))
 }
 
-/// The log file for `session_id`: `koshi-log-<uuid>.log` in [`log_dir`]. If no
+/// The log file for `session_id`: `koshi-log-<uuid>.log` in [`resolve_log_directory`]. If no
 /// home directory can be found at all, the file lands in the current directory
 /// as a last resort.
 ///
 /// Example: session `…446655440000` resolves on Linux to
 /// `~/.local/state/koshi/logs/koshi-log-…446655440000.log`.
 fn session_log_path(session_id: SessionId) -> PathBuf {
-    let name = format!("koshi-log-{}.log", session_id.as_uuid());
-    match log_dir() {
-        Some(dir) => dir.join(name),
-        None => PathBuf::from(name),
+    let log_file_name = format!("koshi-log-{}.log", session_id.get_uuid());
+    match resolve_log_directory() {
+        Some(log_directory) => log_directory.join(log_file_name),
+        None => PathBuf::from(log_file_name),
     }
 }
 
@@ -120,40 +121,44 @@ pub enum TracingError {
 ///
 /// Returns [`TracingError::AlreadyInitialized`] if a subscriber is already
 /// installed.
-pub fn init_tracing(params: LoggingParams) -> Result<(), TracingError> {
-    if !params.enabled {
+pub fn init_tracing(logging_params: LoggingParams) -> Result<(), TracingError> {
+    if !logging_params.is_enabled {
         return Ok(());
     }
-    init_to_path(
-        &session_log_path(params.session_id),
-        params.level,
-        params.format,
+    initialize_tracing_at_path(
+        &session_log_path(logging_params.session_id),
+        logging_params.log_level,
+        logging_params.log_format,
     )
 }
 
-/// Install a subscriber writing to `path`. [`init_tracing`] resolves the path
+/// Install a subscriber writing to `log_file_path`. [`init_tracing`] resolves the path
 /// from the session id; this takes the path as given.
-fn init_to_path(path: &Path, level: LogLevel, format: LogFormat) -> Result<(), TracingError> {
-    let writer = SessionLogMaker {
-        path: path.to_path_buf(),
+fn initialize_tracing_at_path(
+    log_file_path: &Path,
+    log_level: LogLevel,
+    log_format: LogFormat,
+) -> Result<(), TracingError> {
+    let log_writer = SessionLogMaker {
+        log_file_path: log_file_path.to_path_buf(),
     };
     // `with_ansi(false)` keeps the file plain text. The format method
     // (`pretty`/`json`) is the only thing that differs per arm.
-    let builder = fmt()
-        .with_max_level(max_level(level))
+    let subscriber_builder = fmt()
+        .with_max_level(resolve_maximum_tracing_level(log_level))
         .with_ansi(false)
-        .with_writer(writer);
-    let result = match format {
-        LogFormat::Pretty => builder.pretty().try_init(),
-        LogFormat::Json => builder.json().try_init(),
+        .with_writer(log_writer);
+    let initialization_result = match log_format {
+        LogFormat::Pretty => subscriber_builder.pretty().try_init(),
+        LogFormat::Json => subscriber_builder.json().try_init(),
     };
-    result.map_err(|_| TracingError::AlreadyInitialized)
+    initialization_result.map_err(|_| TracingError::AlreadyInitialized)
 }
 
 /// The most verbose severity that still gets written for a configured level:
 /// `warning` admits warnings and errors, `error` admits only errors.
-fn max_level(level: LogLevel) -> Level {
-    match level {
+fn resolve_maximum_tracing_level(log_level: LogLevel) -> Level {
+    match log_level {
         LogLevel::Info => Level::INFO,
         LogLevel::Warning => Level::WARN,
         LogLevel::Error => Level::ERROR,
@@ -167,7 +172,7 @@ fn max_level(level: LogLevel) -> Level {
 /// `logs/koshi-log-abc.log`, a missing `logs` directory is recreated after the
 /// open fails.
 struct SessionLogMaker {
-    path: PathBuf,
+    log_file_path: PathBuf,
 }
 
 impl<'a> MakeWriter<'a> for SessionLogMaker {
@@ -175,7 +180,7 @@ impl<'a> MakeWriter<'a> for SessionLogMaker {
 
     fn make_writer(&'a self) -> Self::Writer {
         SessionLogWriter {
-            path: self.path.clone(),
+            log_file_path: self.log_file_path.clone(),
         }
     }
 }
@@ -188,23 +193,23 @@ impl<'a> MakeWriter<'a> for SessionLogMaker {
 /// creates is mode `0700`, so no other local user reads the log. A file or
 /// directory that already exists keeps the mode it has.
 struct SessionLogWriter {
-    path: PathBuf,
+    log_file_path: PathBuf,
 }
 
 impl io::Write for SessionLogWriter {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        if append_to(&self.path, buf).is_ok() {
-            return Ok(buf.len());
+    fn write(&mut self, log_bytes: &[u8]) -> io::Result<usize> {
+        if append_log_bytes_to_file(&self.log_file_path, log_bytes).is_ok() {
+            return Ok(log_bytes.len());
         }
 
         // A `logs/` directory removed mid-session makes the open fail;
         // creating the parent and appending again brings the file back.
         // An error from either step is returned.
-        if let Some(parent) = self.path.parent() {
-            create_private_dir_all(parent)?;
+        if let Some(parent_directory_path) = self.log_file_path.parent() {
+            create_private_directory_with_parents(parent_directory_path)?;
         }
-        append_to(&self.path, buf)?;
-        Ok(buf.len())
+        append_log_bytes_to_file(&self.log_file_path, log_bytes)?;
+        Ok(log_bytes.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -212,52 +217,52 @@ impl io::Write for SessionLogWriter {
     }
 }
 
-/// Append `buf` to the file at `path` in create-and-append mode, then close
+/// Append `log_bytes` to the file at `log_file_path` in create-and-append mode, then close
 /// it. On Unix a file this creates is mode `0600`.
-fn append_to(path: &Path, buf: &[u8]) -> io::Result<()> {
+fn append_log_bytes_to_file(log_file_path: &Path, log_bytes: &[u8]) -> io::Result<()> {
     use io::Write as _;
 
-    let mut options = std::fs::OpenOptions::new();
-    options.create(true).append(true);
+    let mut open_options = std::fs::OpenOptions::new();
+    open_options.create(true).append(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
+        open_options.mode(0o600);
     }
-    options.open(path)?.write_all(buf)
+    open_options.open(log_file_path)?.write_all(log_bytes)
 }
 
-/// Create `path` and any missing parent. On Unix every directory this creates
-/// is mode `0700`. A directory already at `path` is success; a regular file
+/// Create `directory_path` and any missing parent. On Unix every directory this creates
+/// is mode `0700`. A directory already at `directory_path` is success; a regular file
 /// there is [`io::ErrorKind::AlreadyExists`].
-fn create_private_dir_all(path: &Path) -> io::Result<()> {
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
+fn create_private_directory_with_parents(directory_path: &Path) -> io::Result<()> {
+    let mut directory_builder = std::fs::DirBuilder::new();
+    directory_builder.recursive(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt as _;
-        builder.mode(0o700);
+        directory_builder.mode(0o700);
     }
-    builder.create(path)
+    directory_builder.create(directory_path)
 }
 
-/// A captured log buffer. [`with_test_writer`] installs the subscriber on the
-/// calling thread and returns this buffer for assertions. For an emitted
+/// Captured log bytes. [`with_test_writer`] installs the subscriber on the
+/// calling thread and returns these bytes for assertions. For an emitted
 /// `tracing::info!("ready")`, [`contents`](Self::contents) includes its line.
 #[derive(Clone, Default)]
 pub struct CapturedLogs {
-    buffer: Arc<Mutex<Vec<u8>>>,
+    captured_log_bytes: Arc<Mutex<Vec<u8>>>,
 }
 
 impl CapturedLogs {
     /// All captured output as a single string. A poisoned lock is recovered;
     /// the bytes written before the poisoning are returned.
     pub fn contents(&self) -> String {
-        let bytes = self
-            .buffer
+        let captured_log_bytes = self
+            .captured_log_bytes
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        String::from_utf8_lossy(&bytes).into_owned()
+        String::from_utf8_lossy(&captured_log_bytes).into_owned()
     }
 
     /// The captured output split into lines (one JSON record per line).
@@ -266,18 +271,18 @@ impl CapturedLogs {
     }
 }
 
-/// The `io::Write` end of a [`CapturedLogs`] buffer, handed to the fmt layer.
+/// The `io::Write` end of [`CapturedLogs`], handed to the fmt layer.
 pub struct CapturedWriter {
-    buffer: Arc<Mutex<Vec<u8>>>,
+    captured_log_bytes: Arc<Mutex<Vec<u8>>>,
 }
 
 impl io::Write for CapturedWriter {
-    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-        self.buffer
+    fn write(&mut self, log_bytes: &[u8]) -> io::Result<usize> {
+        self.captured_log_bytes
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .extend_from_slice(data);
-        Ok(data.len())
+            .extend_from_slice(log_bytes);
+        Ok(log_bytes.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -290,7 +295,7 @@ impl<'a> MakeWriter<'a> for CapturedLogs {
 
     fn make_writer(&'a self) -> Self::Writer {
         CapturedWriter {
-            buffer: Arc::clone(&self.buffer),
+            captured_log_bytes: Arc::clone(&self.captured_log_bytes),
         }
     }
 }
@@ -299,27 +304,29 @@ impl<'a> MakeWriter<'a> for CapturedLogs {
 ///
 /// The subscriber is the calling thread's default; other threads and the
 /// global subscriber are untouched. Drop the guard to restore the previous
-/// subscriber; read the [`CapturedLogs`] to assert on output.
+/// subscriber; read the [`CapturedLogs`] to assert on log output.
 ///
 /// The first call registers a process-wide anchor dispatcher
 /// (`register_interest_anchor`) that keeps captures visible to call sites
 /// first fired on threads with no subscriber.
 pub fn with_test_writer() -> (tracing::subscriber::DefaultGuard, CapturedLogs) {
-    capture_at(Level::TRACE)
+    capture_logs_at_level(Level::TRACE)
 }
 
-/// Install a JSON subscriber capped at `level` as the calling thread's default
+/// Install a JSON subscriber capped at `maximum_log_level` as the calling thread's default
 /// and capture its output. Registers the interest anchor first.
-fn capture_at(level: Level) -> (tracing::subscriber::DefaultGuard, CapturedLogs) {
+fn capture_logs_at_level(
+    maximum_log_level: Level,
+) -> (tracing::subscriber::DefaultGuard, CapturedLogs) {
     register_interest_anchor();
-    let logs = CapturedLogs::default();
+    let captured_logs = CapturedLogs::default();
     let subscriber = fmt()
-        .with_max_level(level)
+        .with_max_level(maximum_log_level)
         .json()
-        .with_writer(logs.clone())
+        .with_writer(captured_logs.clone())
         .finish();
-    let guard = tracing::subscriber::set_default(subscriber);
-    (guard, logs)
+    let subscriber_guard = tracing::subscriber::set_default(subscriber);
+    (subscriber_guard, captured_logs)
 }
 
 /// Register one TRACE-level dispatcher in tracing's dispatcher registry for
@@ -329,13 +336,13 @@ fn capture_at(level: Level) -> (tracing::subscriber::DefaultGuard, CapturedLogs)
 /// when its call site first fired on a thread with no subscriber. The anchor
 /// never formats an event; its writer is unused.
 fn register_interest_anchor() {
-    static ANCHOR: std::sync::Once = std::sync::Once::new();
-    ANCHOR.call_once(|| {
-        let anchor = fmt()
+    static INTEREST_ANCHOR: std::sync::Once = std::sync::Once::new();
+    INTEREST_ANCHOR.call_once(|| {
+        let anchor_dispatch = fmt()
             .with_max_level(Level::TRACE)
             .with_writer(io::sink as fn() -> io::Sink)
             .finish();
-        std::mem::forget(tracing::Dispatch::new(anchor));
+        std::mem::forget(tracing::Dispatch::new(anchor_dispatch));
     });
 }
 

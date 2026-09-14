@@ -57,12 +57,14 @@ pub enum SessionEvent {
     /// Metadata for one image record whose pixels follow in chunks.
     ImageContentStart {
         /// The image record and its exact RGBA byte count.
-        image: FrameImageTransfer,
+        #[serde(rename = "image")]
+        image_transfer: FrameImageTransfer,
     },
     /// One bounded piece of an image record.
     ImageContentChunk {
         /// The image bytes and their position in the transfer.
-        chunk: FrameImageChunk,
+        #[serde(rename = "chunk")]
+        image_chunk: FrameImageChunk,
     },
     /// A pane was created and registered.
     PaneCreated {
@@ -101,7 +103,8 @@ pub enum SessionEvent {
         /// The newly focused pane.
         pane_id: PaneId,
         /// The pane that held this client's focus in the tab before, if any.
-        prior_pane: Option<PaneId>,
+        #[serde(rename = "prior_pane")]
+        previous_pane_id: Option<PaneId>,
     },
     /// A tab's layout tree changed.
     LayoutChanged {
@@ -126,16 +129,19 @@ pub enum SessionEvent {
         tab_id: TabId,
         /// The tab the client was viewing before the switch. When the switch
         /// was forced by a tab close, this is the closed tab.
-        prior_tab: TabId,
+        #[serde(rename = "prior_tab")]
+        previous_tab_id: TabId,
     },
     /// A tab moved to a new index.
     TabMoved {
         /// The moved tab.
         tab_id: TabId,
         /// The tab's previous zero-based index.
-        old_index: usize,
+        #[serde(rename = "old_index")]
+        previous_tab_index: usize,
         /// The tab's new zero-based index.
-        new_index: usize,
+        #[serde(rename = "new_index")]
+        new_tab_index: usize,
     },
     /// The session is over: its last tab closed, a quit command was applied,
     /// or its last pane's child exited. A terminal frame — nothing follows it.
@@ -153,7 +159,8 @@ pub enum SessionEvent {
     /// skip.
     Resync {
         /// How many events the client missed.
-        dropped_count: u64,
+        #[serde(rename = "dropped_count")]
+        dropped_event_count: u64,
     },
     /// What one round of mouse actions did. Sent once per
     /// [`IpcRequestKind::Mouse`](crate::protocol::IpcRequestKind::Mouse)
@@ -164,7 +171,8 @@ pub enum SessionEvent {
         /// One entry per action in the round that had something to report, in
         /// the order those actions ran. An empty list is the normal case: the
         /// session ran the round and had nothing to say.
-        answers: Vec<koshi_core::mouse::MouseAnswer>,
+        #[serde(rename = "answers")]
+        mouse_answers: Vec<koshi_core::mouse::MouseAnswer>,
     },
     /// Bytes for the terminal this client runs in, written to it verbatim.
     HostWrite {
@@ -173,7 +181,8 @@ pub enum SessionEvent {
         /// from that string or from a list of numbers, the shape a session
         /// server speaking session protocol 2 writes.
         #[serde(with = "crate::bytes::base64_or_list")]
-        bytes: Vec<u8>,
+        #[serde(rename = "bytes")]
+        host_output_bytes: Vec<u8>,
     },
     /// The client drops this session and attaches to the named one.
     SwitchTo {
@@ -187,7 +196,7 @@ impl SessionEvent {
     /// The frame's name, e.g. `"Painted"`, with none of its payload. Written
     /// on log lines.
     #[must_use]
-    pub fn name(&self) -> &'static str {
+    pub fn get_event_name(&self) -> &'static str {
         match self {
             SessionEvent::Painted { .. } => "Painted",
             SessionEvent::ImageCacheReset => "ImageCacheReset",
@@ -216,7 +225,7 @@ impl SessionEvent {
 
 impl WireVariants for SessionEvent {
     /// Every frame this build has. A variant added to [`SessionEvent`] is
-    /// added here and to [`SessionEvent::name`] in the same change.
+    /// added here and to [`SessionEvent::get_event_name`] in the same change.
     const VARIANTS: &'static [&'static str] = &[
         "Painted",
         "ImageCacheReset",
@@ -244,7 +253,7 @@ impl WireVariants for SessionEvent {
 
 impl WireName for SessionEvent {
     fn wire_name(&self) -> &'static str {
-        self.name()
+        self.get_event_name()
     }
 }
 

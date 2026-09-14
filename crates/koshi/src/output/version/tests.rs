@@ -9,33 +9,33 @@ use crate::cli::Cli;
 
 /// A session id whose text is fixed, so a rendered table can be compared
 /// character for character.
-fn session(tag: u128) -> SessionId {
-    SessionId::from_uuid(uuid::Uuid::from_u128(tag))
+fn build_session_id(unique_number: u128) -> SessionId {
+    SessionId::from_uuid(uuid::Uuid::from_u128(unique_number))
 }
 
 /// Every state a server row can be in, against one router and three sessions.
 fn mixed_rows() -> Vec<ServerVersionRow> {
     vec![
         ServerVersionRow {
-            kind: ServerKind::Router,
-            session: None,
+            server_kind: ServerKind::Router,
+            session_id: None,
             build: ServerBuild::Running {
                 version: "0.2.0".to_string(),
             },
         },
         ServerVersionRow {
-            kind: ServerKind::Session,
-            session: Some(session(1)),
+            server_kind: ServerKind::Session,
+            session_id: Some(build_session_id(1)),
             build: ServerBuild::Unnamed,
         },
         ServerVersionRow {
-            kind: ServerKind::Session,
-            session: Some(session(2)),
+            server_kind: ServerKind::Session,
+            session_id: Some(build_session_id(2)),
             build: ServerBuild::NotRunning,
         },
         ServerVersionRow {
-            kind: ServerKind::Session,
-            session: Some(session(3)),
+            server_kind: ServerKind::Session,
+            session_id: Some(build_session_id(3)),
             build: ServerBuild::Unreachable {
                 detail: "the socket closed mid-answer".to_string(),
             },
@@ -45,7 +45,8 @@ fn mixed_rows() -> Vec<ServerVersionRow> {
 
 #[test]
 fn the_version_table_is_the_line_the_version_flag_prints() {
-    let rendered = render_client_version(&ClientVersion::of_this_build(), FormatArg::Table);
+    let rendered =
+        render_client_version(&ClientVersion::build_client_version(), OutputFormat::Table);
 
     assert_eq!(rendered, Cli::command().render_version());
     assert_eq!(rendered, format!("koshi {}\n", env!("CARGO_PKG_VERSION")));
@@ -57,7 +58,7 @@ fn the_version_json_carries_the_build_alone() {
         &ClientVersion {
             version: "0.2.0".to_string(),
         },
-        FormatArg::Json,
+        OutputFormat::Json,
     );
 
     assert_eq!(rendered, "{\n  \"version\": \"0.2.0\"\n}\n");
@@ -65,7 +66,7 @@ fn the_version_json_carries_the_build_alone() {
 
 #[test]
 fn a_server_table_tells_every_state_apart() {
-    let rendered = render_server_versions(&mixed_rows(), FormatArg::Table);
+    let rendered = render_server_versions(&mixed_rows(), OutputFormat::Table);
 
     assert_eq!(
         rendered,
@@ -79,7 +80,7 @@ fn a_server_table_tells_every_state_apart() {
 
 #[test]
 fn a_server_json_answer_keeps_every_state_apart() {
-    let rendered = render_server_versions(&mixed_rows(), FormatArg::Json);
+    let rendered = render_server_versions(&mixed_rows(), OutputFormat::Json);
 
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&rendered).expect("the answer is JSON"),
@@ -107,14 +108,14 @@ fn a_server_json_answer_keeps_every_state_apart() {
 
 #[test]
 fn a_machine_running_nothing_still_renders_its_header_row() {
-    let rows = vec![ServerVersionRow {
-        kind: ServerKind::Router,
-        session: None,
+    let server_version_rows = vec![ServerVersionRow {
+        server_kind: ServerKind::Router,
+        session_id: None,
         build: ServerBuild::NotRunning,
     }];
 
     assert_eq!(
-        render_server_versions(&rows, FormatArg::Table),
+        render_server_versions(&server_version_rows, OutputFormat::Table),
         "kind    session  version\n\
          router  -        not running\n"
     );

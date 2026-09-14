@@ -26,26 +26,28 @@ use crate::runtime::bus::EventBus;
 #[derive(Debug, Default)]
 pub(crate) struct TransactionScope {
     /// Buffered events, in emission order.
-    events: Vec<Event>,
+    emitted_events: Vec<Event>,
 }
 
 impl TransactionScope {
     /// An empty scope, holding no events.
     #[must_use]
     pub(crate) fn new() -> Self {
-        TransactionScope { events: Vec::new() }
+        TransactionScope {
+            emitted_events: Vec::new(),
+        }
     }
 
     /// The buffered events, in emission order.
     #[cfg(test)]
     #[must_use]
-    pub(crate) fn events(&self) -> &[Event] {
-        &self.events
+    pub(crate) fn emitted_events(&self) -> &[Event] {
+        &self.emitted_events
     }
 
     /// Append `event` to the batch, after the events already emitted.
     pub(crate) fn emit(&mut self, event: Event) {
-        self.events.push(event);
+        self.emitted_events.push(event);
     }
 
     /// Consume the scope and seal its batch: write each buffered event to the
@@ -53,15 +55,15 @@ impl TransactionScope {
     /// `bus`, and report the same ordered events as an applied
     /// [`CommandResult::Ok`] keyed to `command_id`.
     #[must_use]
-    pub(crate) fn commit(self, command_id: CommandId, bus: &mut EventBus) -> CommandResult {
-        for event in &self.events {
+    pub(crate) fn commit(self, command_id: CommandId, event_bus: &mut EventBus) -> CommandResult {
+        for event in &self.emitted_events {
             log_event(event);
-            recent_events::record(event);
-            bus.publish(event);
+            recent_events::record_event(event);
+            event_bus.publish(event);
         }
         CommandResult::Ok {
             command_id,
-            emitted_events: self.events,
+            emitted_events: self.emitted_events,
         }
     }
 }

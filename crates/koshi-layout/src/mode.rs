@@ -6,7 +6,7 @@
 //! restores the exact prior layout.
 //!
 //! Each client holds its own mode. The solver takes the mode as an argument
-//! ([`crate::solver::solve_with_mode_min`]). Two clients can solve the same tree
+//! ([`crate::solver::solve_layout_with_mode`]). Two clients can solve the same tree
 //! in the same frame, one fullscreen and one tiled.
 
 use koshi_core::ids::PaneId;
@@ -17,12 +17,13 @@ use serde::{Deserialize, Serialize};
 pub enum LayoutMode {
     /// The tree solves normally: every pane gets its tiled rect.
     Tiled,
-    /// `focused` fills the whole tab; all other panes solve to zero area.
+    /// `focused_pane_id` fills the whole tab; all other panes solve to zero area.
     /// The underlying tree keeps its exact shape, including stack
     /// membership and active children.
     Fullscreen {
         /// The promoted pane.
-        focused: PaneId,
+        #[serde(rename = "focused")]
+        focused_pane_id: PaneId,
     },
 }
 

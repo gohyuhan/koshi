@@ -6,16 +6,16 @@ use uuid::Uuid;
 
 use super::*;
 
-fn id() -> Uuid {
+fn build_fixed_test_uuid() -> Uuid {
     Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("literal UUID parses")
 }
 
 #[test]
 fn a_new_pane_prints_one_pane_id_line() {
-    let pane_id = PaneId::from_uuid(id());
+    let pane_id = PaneId::from_uuid(build_fixed_test_uuid());
     let events = [Event::PaneCreated(PaneCreated {
         pane_id,
-        tab_id: TabId::from_uuid(id()),
+        tab_id: TabId::from_uuid(build_fixed_test_uuid()),
     })];
 
     assert_eq!(
@@ -26,8 +26,8 @@ fn a_new_pane_prints_one_pane_id_line() {
 
 #[test]
 fn a_new_tab_prints_tab_then_root_pane() {
-    let tab_id = TabId::from_uuid(id());
-    let pane_id = PaneId::from_uuid(id());
+    let tab_id = TabId::from_uuid(build_fixed_test_uuid());
+    let pane_id = PaneId::from_uuid(build_fixed_test_uuid());
     let events = [
         Event::TabCreated(TabCreated { tab_id }),
         Event::PaneCreated(PaneCreated { pane_id, tab_id }),
@@ -51,8 +51,8 @@ fn no_events_print_nothing() {
 
 #[test]
 fn created_ids_keep_their_event_order() {
-    let tab_id = TabId::from_uuid(id());
-    let pane_id = PaneId::from_uuid(id());
+    let tab_id = TabId::from_uuid(build_fixed_test_uuid());
+    let pane_id = PaneId::from_uuid(build_fixed_test_uuid());
     let events = [
         Event::PaneCreated(PaneCreated { pane_id, tab_id }),
         Event::Quit,

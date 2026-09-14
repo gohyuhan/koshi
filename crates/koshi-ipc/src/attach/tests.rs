@@ -11,48 +11,51 @@ use super::*;
 
 /// A two-tab session: one stacked tab of three panes with the middle one
 /// expanded, one single-pane tab, and a plugin pane alongside the terminals.
-fn structure() -> AttachedSessionStructureSnapshot {
-    let first = PaneId::new();
-    let second = PaneId::new();
-    let third = PaneId::new();
-    let logs = PaneId::new();
+fn build_attached_session_structure_snapshot() -> AttachedSessionStructureSnapshot {
+    let first_pane_id = PaneId::new();
+    let second_pane_id = PaneId::new();
+    let third_pane_id = PaneId::new();
+    let logs_pane_id = PaneId::new();
     let plugin_id = PluginId::new();
 
     AttachedSessionStructureSnapshot {
-        id: SessionId::new(),
-        name: "koshi-dev".to_string(),
+        session_id: SessionId::new(),
+        session_name: "koshi-dev".to_string(),
         tabs: vec![
             TabStructure {
-                id: TabId::new(),
-                name: "edit".to_string(),
-                index: 0,
-                layout: LayoutNode::Split(SplitNode::stack(vec![first, second, third], 1)),
-                focus_mru: vec![second, first],
+                tab_id: TabId::new(),
+                tab_name: "edit".to_string(),
+                tab_index: 0,
+                layout: LayoutNode::Split(SplitNode::from_stacked_pane_ids(
+                    vec![first_pane_id, second_pane_id, third_pane_id],
+                    1,
+                )),
+                focus_mru: vec![second_pane_id, first_pane_id],
             },
             TabStructure {
-                id: TabId::new(),
-                name: "logs".to_string(),
-                index: 1,
-                layout: LayoutNode::Pane(logs),
-                focus_mru: vec![logs],
+                tab_id: TabId::new(),
+                tab_name: "logs".to_string(),
+                tab_index: 1,
+                layout: LayoutNode::Pane(logs_pane_id),
+                focus_mru: vec![logs_pane_id],
             },
         ],
         panes: vec![
             PaneStructure {
-                id: first,
-                kind: PaneKind::Terminal,
+                pane_id: first_pane_id,
+                pane_kind: PaneKind::Terminal,
             },
             PaneStructure {
-                id: second,
-                kind: PaneKind::Terminal,
+                pane_id: second_pane_id,
+                pane_kind: PaneKind::Terminal,
             },
             PaneStructure {
-                id: third,
-                kind: PaneKind::Plugin { plugin_id },
+                pane_id: third_pane_id,
+                pane_kind: PaneKind::Plugin { plugin_id },
             },
             PaneStructure {
-                id: logs,
-                kind: PaneKind::Terminal,
+                pane_id: logs_pane_id,
+                pane_kind: PaneKind::Terminal,
             },
         ],
     }
@@ -60,31 +63,31 @@ fn structure() -> AttachedSessionStructureSnapshot {
 
 #[test]
 fn the_structure_survives_a_round_trip_field_for_field() {
-    let sent = structure();
+    let expected_structure = build_attached_session_structure_snapshot();
 
-    let encoded = serde_json::to_string(&sent).expect("encodes");
-    let received: AttachedSessionStructureSnapshot =
-        serde_json::from_str(&encoded).expect("decodes");
+    let encoded_json = serde_json::to_string(&expected_structure).expect("encodes");
+    let decoded_structure: AttachedSessionStructureSnapshot =
+        serde_json::from_str(&encoded_json).expect("decodes");
 
-    assert_eq!(received, sent);
+    assert_eq!(decoded_structure, expected_structure);
 }
 
 #[test]
 fn a_stacked_tab_arrives_with_its_collapsed_flags_and_active_index() {
-    let sent = structure();
+    let expected_structure = build_attached_session_structure_snapshot();
 
-    let encoded = serde_json::to_string(&sent).expect("encodes");
-    let received: AttachedSessionStructureSnapshot =
-        serde_json::from_str(&encoded).expect("decodes");
+    let encoded_json = serde_json::to_string(&expected_structure).expect("encodes");
+    let decoded_structure: AttachedSessionStructureSnapshot =
+        serde_json::from_str(&encoded_json).expect("decodes");
 
-    let LayoutNode::Split(stack) = &received.tabs[0].layout else {
+    let LayoutNode::Split(stack_node) = &decoded_structure.tabs[0].layout else {
         panic!("the first tab's layout is a split");
     };
-    assert_eq!(stack.direction, SplitDirection::Stacked);
-    assert_eq!(stack.active, 1);
+    assert_eq!(stack_node.direction, SplitDirection::Stacked);
+    assert_eq!(stack_node.active_child_index, 1);
     assert_eq!(
-        (0..stack.children.len())
-            .map(|index| stack.is_collapsed(index))
+        (0..stack_node.children.len())
+            .map(|child_index| stack_node.is_child_collapsed(child_index))
             .collect::<Vec<bool>>(),
         vec![true, false, true]
     );
@@ -92,134 +95,142 @@ fn a_stacked_tab_arrives_with_its_collapsed_flags_and_active_index() {
 
 #[test]
 fn a_tab_carrying_an_unknown_field_ignores_it() {
-    // One snapshot, encoded once: `structure()` mints fresh ids per call, so
+    // One snapshot, encoded JSON once: the builder mints fresh ids per call, so
     // the comparison is against this exact value.
-    let sent = structure();
-    let mut encoded = serde_json::to_value(&sent).expect("encodes");
-    encoded["tabs"][0]
+    let expected_structure = build_attached_session_structure_snapshot();
+    let mut encoded_json = serde_json::to_value(&expected_structure).expect("encodes");
+    encoded_json["tabs"][0]
         .as_object_mut()
         .expect("a tab encodes as an object")
         .insert("pinned".to_string(), serde_json::Value::Bool(true));
 
-    let decoded: AttachedSessionStructureSnapshot =
-        serde_json::from_value(encoded).expect("a field this build does not know is ignored");
+    let decoded_structure: AttachedSessionStructureSnapshot =
+        serde_json::from_value(encoded_json).expect("a field this build does not know is ignored");
 
     assert_eq!(
-        decoded, sent,
+        decoded_structure, expected_structure,
         "the extra field left nothing behind in the decoded snapshot"
     );
 }
 
 #[test]
 fn a_directional_split_arrives_with_its_direction_and_child_order() {
-    let left = PaneId::new();
-    let right = PaneId::new();
-    let sent = AttachedSessionStructureSnapshot {
-        id: SessionId::new(),
-        name: "s".to_string(),
+    let left_pane_id = PaneId::new();
+    let right_pane_id = PaneId::new();
+    let expected_structure = AttachedSessionStructureSnapshot {
+        session_id: SessionId::new(),
+        session_name: "s".to_string(),
         tabs: vec![TabStructure {
-            id: TabId::new(),
-            name: "edit".to_string(),
-            index: 0,
+            tab_id: TabId::new(),
+            tab_name: "edit".to_string(),
+            tab_index: 0,
             layout: LayoutNode::Split(SplitNode::with_equal_weights(
                 SplitDirection::Vertical,
-                vec![LayoutNode::Pane(left), LayoutNode::Pane(right)],
+                vec![
+                    LayoutNode::Pane(left_pane_id),
+                    LayoutNode::Pane(right_pane_id),
+                ],
             )),
-            focus_mru: vec![left],
+            focus_mru: vec![left_pane_id],
         }],
         panes: vec![
             PaneStructure {
-                id: left,
-                kind: PaneKind::Terminal,
+                pane_id: left_pane_id,
+                pane_kind: PaneKind::Terminal,
             },
             PaneStructure {
-                id: right,
-                kind: PaneKind::Terminal,
+                pane_id: right_pane_id,
+                pane_kind: PaneKind::Terminal,
             },
         ],
     };
 
-    let encoded = serde_json::to_string(&sent).expect("encodes");
-    let received: AttachedSessionStructureSnapshot =
-        serde_json::from_str(&encoded).expect("decodes");
+    let encoded_json = serde_json::to_string(&expected_structure).expect("encodes");
+    let decoded_structure: AttachedSessionStructureSnapshot =
+        serde_json::from_str(&encoded_json).expect("decodes");
 
-    let LayoutNode::Split(split) = &received.tabs[0].layout else {
+    let LayoutNode::Split(split_node) = &decoded_structure.tabs[0].layout else {
         panic!("the tab's layout is a split");
     };
-    assert_eq!(split.direction, SplitDirection::Vertical);
+    assert_eq!(split_node.direction, SplitDirection::Vertical);
     assert_eq!(
-        split.children,
-        vec![LayoutNode::Pane(left), LayoutNode::Pane(right)]
+        split_node.children,
+        vec![
+            LayoutNode::Pane(left_pane_id),
+            LayoutNode::Pane(right_pane_id),
+        ]
     );
 }
 
 #[test]
 fn a_session_with_no_tabs_and_no_panes_survives_a_round_trip() {
-    let sent = AttachedSessionStructureSnapshot {
-        id: SessionId::new(),
-        name: String::new(),
+    let expected_structure = AttachedSessionStructureSnapshot {
+        session_id: SessionId::new(),
+        session_name: String::new(),
         tabs: Vec::new(),
         panes: Vec::new(),
     };
 
-    let encoded = serde_json::to_string(&sent).expect("encodes");
-    let received: AttachedSessionStructureSnapshot =
-        serde_json::from_str(&encoded).expect("decodes");
+    let encoded_json = serde_json::to_string(&expected_structure).expect("encodes");
+    let decoded_structure: AttachedSessionStructureSnapshot =
+        serde_json::from_str(&encoded_json).expect("decodes");
 
-    assert_eq!(received, sent);
+    assert_eq!(decoded_structure, expected_structure);
 }
 
 #[test]
 fn a_tab_that_has_focused_nothing_yet_arrives_with_an_empty_focus_list() {
-    let pane = PaneId::new();
-    let sent = AttachedSessionStructureSnapshot {
-        id: SessionId::new(),
-        name: "s".to_string(),
+    let pane_id = PaneId::new();
+    let expected_structure = AttachedSessionStructureSnapshot {
+        session_id: SessionId::new(),
+        session_name: "s".to_string(),
         tabs: vec![TabStructure {
-            id: TabId::new(),
-            name: "fresh".to_string(),
-            index: 0,
-            layout: LayoutNode::Pane(pane),
+            tab_id: TabId::new(),
+            tab_name: "fresh".to_string(),
+            tab_index: 0,
+            layout: LayoutNode::Pane(pane_id),
             focus_mru: Vec::new(),
         }],
         panes: vec![PaneStructure {
-            id: pane,
-            kind: PaneKind::Terminal,
+            pane_id,
+            pane_kind: PaneKind::Terminal,
         }],
     };
 
-    let encoded = serde_json::to_string(&sent).expect("encodes");
-    let received: AttachedSessionStructureSnapshot =
-        serde_json::from_str(&encoded).expect("decodes");
+    let encoded_json = serde_json::to_string(&expected_structure).expect("encodes");
+    let decoded_structure: AttachedSessionStructureSnapshot =
+        serde_json::from_str(&encoded_json).expect("decodes");
 
-    assert_eq!(received.tabs[0].focus_mru, Vec::<PaneId>::new());
-    assert_eq!(received, sent);
+    assert_eq!(decoded_structure.tabs[0].focus_mru, Vec::<PaneId>::new());
+    assert_eq!(decoded_structure, expected_structure);
 }
 
 #[test]
 fn a_tab_missing_its_focus_list_is_refused() {
-    let mut encoded = serde_json::to_value(structure()).expect("encodes");
-    encoded["tabs"][0]
+    let mut encoded_json =
+        serde_json::to_value(build_attached_session_structure_snapshot()).expect("encodes");
+    encoded_json["tabs"][0]
         .as_object_mut()
         .expect("a tab encodes as an object")
         .remove("focus_mru");
 
-    let error = serde_json::from_value::<AttachedSessionStructureSnapshot>(encoded)
+    let decode_error = serde_json::from_value::<AttachedSessionStructureSnapshot>(encoded_json)
         .expect_err("a tab without its focus list decoded instead of failing");
 
-    assert_eq!(error.to_string(), "missing field `focus_mru`");
+    assert_eq!(decode_error.to_string(), "missing field `focus_mru`");
 }
 
 #[test]
 fn a_pane_missing_its_kind_is_refused() {
-    let mut encoded = serde_json::to_value(structure()).expect("encodes");
-    encoded["panes"][0]
+    let mut encoded_json =
+        serde_json::to_value(build_attached_session_structure_snapshot()).expect("encodes");
+    encoded_json["panes"][0]
         .as_object_mut()
         .expect("a pane encodes as an object")
         .remove("kind");
 
-    let error = serde_json::from_value::<AttachedSessionStructureSnapshot>(encoded)
+    let decode_error = serde_json::from_value::<AttachedSessionStructureSnapshot>(encoded_json)
         .expect_err("a pane without its kind decoded instead of failing");
 
-    assert_eq!(error.to_string(), "missing field `kind`");
+    assert_eq!(decode_error.to_string(), "missing field `kind`");
 }

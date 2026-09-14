@@ -25,15 +25,15 @@ pub struct RegionGeometry {
     /// The viewport edge that owns the region.
     pub edge: Edge,
     /// The region's size along its edge axis, in cells.
-    pub extent: u16,
+    pub extent_cell_count: u16,
 }
 
 /// The rectangles produced for ordered edge regions and the pane rectangle
 /// that remains after all regions are applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RegionSolve {
+pub struct SolvedRegions {
     /// One region rectangle for every input geometry, in input order.
-    pub regions: Vec<Rect>,
+    pub region_rects: Vec<Rect>,
     /// The rectangle left for panes after all regions are applied.
     pub pane_rect: Rect,
 }
@@ -49,75 +49,86 @@ pub struct RegionSolve {
 /// at `(0, 0)` with size `80x1` and `(0, 23)` with size `80x1`; the pane
 /// rectangle is `(0, 1)` with size `80x22`.
 #[must_use]
-pub fn solve(viewport: Size, geometries: &[RegionGeometry]) -> RegionSolve {
-    let mut remaining = Rect::at_origin(viewport);
-    let mut regions = Vec::with_capacity(geometries.len());
+pub fn solve_region_rects(viewport: Size, geometries: &[RegionGeometry]) -> SolvedRegions {
+    let mut remaining_rect = Rect::from_size_at_origin(viewport);
+    let mut region_rects = Vec::with_capacity(geometries.len());
 
-    for geometry in geometries {
-        let region = match geometry.edge {
+    for region_geometry in geometries {
+        let region_rect = match region_geometry.edge {
             Edge::Top => {
-                let extent = geometry.extent.min(remaining.size.rows);
-                let region = Rect::new(
-                    remaining.origin,
+                let row_count = region_geometry
+                    .extent_cell_count
+                    .min(remaining_rect.cell_size.row_count);
+                let region_rect = Rect::from_origin_and_size(
+                    remaining_rect.origin,
                     Size {
-                        cols: remaining.size.cols,
-                        rows: extent,
+                        column_count: remaining_rect.cell_size.column_count,
+                        row_count,
                     },
                 );
-                remaining.origin.y += extent;
-                remaining.size.rows -= extent;
-                region
+                remaining_rect.origin.row += row_count;
+                remaining_rect.cell_size.row_count -= row_count;
+                region_rect
             }
             Edge::Bottom => {
-                let extent = geometry.extent.min(remaining.size.rows);
-                let region = Rect::new(
+                let row_count = region_geometry
+                    .extent_cell_count
+                    .min(remaining_rect.cell_size.row_count);
+                let region_rect = Rect::from_origin_and_size(
                     Point {
-                        x: remaining.origin.x,
-                        y: remaining.origin.y + remaining.size.rows - extent,
+                        column: remaining_rect.origin.column,
+                        row: remaining_rect.origin.row + remaining_rect.cell_size.row_count
+                            - row_count,
                     },
                     Size {
-                        cols: remaining.size.cols,
-                        rows: extent,
+                        column_count: remaining_rect.cell_size.column_count,
+                        row_count,
                     },
                 );
-                remaining.size.rows -= extent;
-                region
+                remaining_rect.cell_size.row_count -= row_count;
+                region_rect
             }
             Edge::Left => {
-                let extent = geometry.extent.min(remaining.size.cols);
-                let region = Rect::new(
-                    remaining.origin,
+                let column_count = region_geometry
+                    .extent_cell_count
+                    .min(remaining_rect.cell_size.column_count);
+                let region_rect = Rect::from_origin_and_size(
+                    remaining_rect.origin,
                     Size {
-                        cols: extent,
-                        rows: remaining.size.rows,
+                        column_count,
+                        row_count: remaining_rect.cell_size.row_count,
                     },
                 );
-                remaining.origin.x += extent;
-                remaining.size.cols -= extent;
-                region
+                remaining_rect.origin.column += column_count;
+                remaining_rect.cell_size.column_count -= column_count;
+                region_rect
             }
             Edge::Right => {
-                let extent = geometry.extent.min(remaining.size.cols);
-                let region = Rect::new(
+                let column_count = region_geometry
+                    .extent_cell_count
+                    .min(remaining_rect.cell_size.column_count);
+                let region_rect = Rect::from_origin_and_size(
                     Point {
-                        x: remaining.origin.x + remaining.size.cols - extent,
-                        y: remaining.origin.y,
+                        column: remaining_rect.origin.column
+                            + remaining_rect.cell_size.column_count
+                            - column_count,
+                        row: remaining_rect.origin.row,
                     },
                     Size {
-                        cols: extent,
-                        rows: remaining.size.rows,
+                        column_count,
+                        row_count: remaining_rect.cell_size.row_count,
                     },
                 );
-                remaining.size.cols -= extent;
-                region
+                remaining_rect.cell_size.column_count -= column_count;
+                region_rect
             }
         };
-        regions.push(region);
+        region_rects.push(region_rect);
     }
 
-    RegionSolve {
-        regions,
-        pane_rect: remaining,
+    SolvedRegions {
+        region_rects,
+        pane_rect: remaining_rect,
     }
 }
 

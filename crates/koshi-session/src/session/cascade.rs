@@ -23,10 +23,10 @@ use koshi_core::event::{
 use koshi_core::geometry::{PaneArea, Rect};
 use koshi_core::ids::{ClientId, PaneId, TabId};
 use koshi_layout::edit::{remove_pane, RemoveError};
-use koshi_layout::focus::focus_candidates;
+use koshi_layout::focus::compute_focus_candidates;
 use koshi_layout::mode::LayoutMode;
-use koshi_layout::normalize::normalize;
-use koshi_layout::solver::{solve_with_mode_min, PaneSizing};
+use koshi_layout::normalize::normalize_layout_tree;
+use koshi_layout::solver::{solve_layout_with_mode, PaneSizing};
 use koshi_pane::pane::policy::PaneExitPolicy;
 
 use crate::client::pane_viewport;
@@ -67,7 +67,7 @@ pub fn remove_pane_cascade(
 ) -> Vec<Event> {
     // Both checks run before anything is removed, so an unknown pane and an
     // unknown tab each leave the session as it was.
-    if !session.tabs.contains_key(&tab_id) || session.panes.remove(pane_id).is_none() {
+    if !session.tabs.contains_key(&tab_id) || session.panes.remove_pane_record(pane_id).is_none() {
         return Vec::new();
     }
     let tab = session
@@ -85,64 +85,73 @@ pub fn remove_pane_cascade(
     // Collapses the layout *before* focus repair: the tree names no removed
     // pane while candidates are computed. Removing the only pane yields
     // `LastPane` — the signal that the tab is now empty. The removal edit
-    // leaves canonicalization to `normalize`, which collapses the unary split
+    // leaves canonicalization to `normalize_layout_tree`, which collapses the unary split
     // the removed leaf leaves behind; every surviving leaf is live, so the pass
     // canonicalizes shape only and drops nothing.
     // `Some` carries the rect the pane vacated, which ranks the spatial focus
     // candidates; `None` means the tab is now empty.
-    let removal = match remove_pane(tab.layout(), tab_rect, pane_id, sizing) {
-        Ok((new_tree, info)) => {
-            let live: HashSet<PaneId> = new_tree.leaf_panes().into_iter().collect();
-            let canonical = normalize(&new_tree, &live).unwrap_or(new_tree);
+    let removal = match remove_pane(tab.get_layout_tree(), tab_rect, pane_id, sizing) {
+        Ok((new_tree, removal_info)) => {
+            let live: HashSet<PaneId> = new_tree.list_leaf_pane_ids().into_iter().collect();
+            let canonical = normalize_layout_tree(&new_tree, &live).unwrap_or(new_tree);
             tab.update_layout(canonical);
             // The layout collapsed a leaf: the tab's geometry changed. This
             // event lands ahead of every focus event.
             events.push(Event::LayoutChanged(LayoutChanged { tab_id }));
-            Some(info.old_rect)
+            Some(removal_info.removed_pane_rect)
         }
         Err(RemoveError::LastPane { .. }) => None,
         // The pane was in the registry but not the layout: a registry/layout
         // desync. The layout stands unchanged, so no rect was vacated and no
         // `LayoutChanged` is emitted; zoom and focus still move off the gone
         // pane below, ranked by focus history and layout order alone.
-        Err(RemoveError::PaneNotFound { .. }) => Some(Rect::zero()),
+        Err(RemoveError::PaneNotFound { .. }) => Some(Rect::empty_at_origin()),
     };
 
     // Every client zoomed on the removed pane returns to its tiled view. A
     // client zoomed on a pane that survives keeps its zoom.
-    for client in session.clients.list_attached_mut() {
+    for client in session.clients.list_attached_clients_mut() {
         client.clear_zoom_of_pane(pane_id);
     }
 
     match removal {
         // The tab still has panes: repair focus for every client that was
         // looking at the removed pane.
-        Some(old_rect) => {
+        Some(removed_pane_rect) => {
             let verdicts: Vec<(ClientId, FocusRepairResult)> = {
                 let tab = &session.tabs[&tab_id];
                 // Candidates are ranked against the tiled solve. Every client
                 // repaired here was focused on the removed pane; zoom follows
                 // focus, and the loop above dropped every zoom on that pane.
-                let solved = solve_with_mode_min(tab.layout(), LayoutMode::Tiled, tab_rect, sizing);
-                let candidates = focus_candidates(old_rect, &solved.panes, &solved.stack_headers);
+                let solved = solve_layout_with_mode(
+                    tab.get_layout_tree(),
+                    LayoutMode::Tiled,
+                    tab_rect,
+                    sizing,
+                );
+                let candidates = compute_focus_candidates(
+                    removed_pane_rect,
+                    &solved.pane_rects,
+                    &solved.stack_headers,
+                );
                 // The verdict reads the tab, the registry and the candidates,
                 // nothing client-specific: every repaired client inherits the
                 // same pane.
                 let verdict = repair_focus(tab, &session.panes, candidates, empty_tab_policy);
                 session
                     .clients
-                    .list_attached()
-                    .filter(|client| client.focused_pane(tab_id) == Some(pane_id))
-                    .map(|client| (client.id(), verdict))
+                    .list_attached_clients()
+                    .filter(|client| client.get_focused_pane(tab_id) == Some(pane_id))
+                    .map(|client| (client.get_client_id(), verdict))
                     .collect()
             };
 
             for (client_id, verdict) in verdicts {
                 match verdict {
                     FocusRepairResult::Focused(new_pane) => {
-                        let prior_pane = session
+                        let previous_pane_id = session
                             .clients
-                            .get_mut(client_id)
+                            .get_client_mut_by_id(client_id)
                             .and_then(|client| client.update_focused_pane(tab_id, new_pane));
                         if let Some(tab) = session.tabs.get_mut(&tab_id) {
                             tab.record_focus_mru(new_pane);
@@ -151,17 +160,17 @@ pub fn remove_pane_cascade(
                             client_id,
                             tab_id,
                             pane_id: new_pane,
-                            prior_pane,
+                            previous_pane_id,
                         }));
                     }
                     FocusRepairResult::TerminalTooSmall => {
                         let cause = terminal_too_small_cause(session, tab_id, client_id, tab_rect);
-                        if let Some(client) = session.clients.get_mut(client_id) {
+                        if let Some(client) = session.clients.get_client_mut_by_id(client_id) {
                             client.remove_focused_pane(tab_id);
                             events.push(Event::TerminalTooSmallEntered(TerminalTooSmallEntered {
                                 client_id,
-                                size: client.viewport(),
-                                pane_area: client.reported_pane_area(),
+                                viewport_size: client.get_viewport_size(),
+                                pane_area: client.get_reported_pane_area(),
                                 cause,
                             }));
                         }
@@ -198,47 +207,51 @@ fn terminal_too_small_cause(
     client_id: ClientId,
     tab_rect: Rect,
 ) -> TerminalTooSmallCause {
-    let Some(client) = session.clients.get(client_id) else {
+    let Some(client) = session.clients.get_client_by_id(client_id) else {
         return TerminalTooSmallCause::Terminal;
     };
 
-    match client.reported_pane_area() {
+    match client.get_reported_pane_area() {
         Some(PaneArea::Starving) => return TerminalTooSmallCause::Regions,
         Some(PaneArea::Reported(reported)) => {
-            let fallback = pane_viewport(client.viewport());
-            let resolved = reported.min_axes(client.viewport());
-            if resolved.cols < fallback.cols || resolved.rows < fallback.rows {
+            let fallback = pane_viewport(client.get_viewport_size());
+            let resolved = reported.compute_minimum_axes(client.get_viewport_size());
+            if resolved.column_count < fallback.column_count
+                || resolved.row_count < fallback.row_count
+            {
                 return TerminalTooSmallCause::Regions;
             }
         }
         None => {}
     }
 
-    let Some(own_area) = client.pane_area() else {
+    let Some(own_area) = client.get_pane_area() else {
         return TerminalTooSmallCause::Regions;
     };
-    let Some(effective) = session.tab_viewport(tab_id) else {
+    let Some(effective) = session.get_tab_viewport(tab_id) else {
         return TerminalTooSmallCause::Terminal;
     };
 
-    if tab_rect.size != effective {
+    if tab_rect.cell_size != effective {
         return TerminalTooSmallCause::Terminal;
     }
 
     if let Some(other_client) = session
         .clients
-        .list_attached()
-        .filter(|other| other.id() != client_id && other.active_tab() == tab_id)
+        .list_attached_clients()
+        .filter(|other| other.get_client_id() != client_id && other.get_active_tab() == tab_id)
         .find(|other| {
-            let Some(other_area) = other.pane_area() else {
+            let Some(other_area) = other.get_pane_area() else {
                 return false;
             };
-            let sets_columns = effective.cols < own_area.cols && other_area.cols == effective.cols;
-            let sets_rows = effective.rows < own_area.rows && other_area.rows == effective.rows;
+            let sets_columns = effective.column_count < own_area.column_count
+                && other_area.column_count == effective.column_count;
+            let sets_rows = effective.row_count < own_area.row_count
+                && other_area.row_count == effective.row_count;
             sets_columns || sets_rows
         })
     {
-        return TerminalTooSmallCause::OtherClient(other_client.id());
+        return TerminalTooSmallCause::OtherClient(other_client.get_client_id());
     }
 
     TerminalTooSmallCause::Terminal
@@ -271,7 +284,11 @@ pub fn on_child_exit(
         exit_code,
     })];
 
-    let Some(policy) = session.panes.get(pane_id).map(|pane| pane.exit_policy) else {
+    let Some(policy) = session
+        .panes
+        .get_pane_record_by_id(pane_id)
+        .map(|pane| pane.exit_policy)
+    else {
         return events;
     };
 

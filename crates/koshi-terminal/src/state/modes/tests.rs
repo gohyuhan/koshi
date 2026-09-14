@@ -8,14 +8,14 @@ fn terminal_modes_default_matches_the_documented_startup_state() {
     assert!(!modes.bracketed_paste);
     assert_eq!(modes.mouse_tracking, MouseTracking::Off);
     assert_eq!(modes.mouse_encoding, MouseEncoding::Default);
-    assert!(!modes.alt_scroll);
+    assert!(!modes.alternate_scroll);
     // Autowrap (DECAWM `?7`), Sixel scrolling, and private Sixel registers
     // start on; the other mode flags start off.
     assert!(modes.autowrap);
     assert!(modes.sixel_scrolling);
     assert!(modes.sixel_private_color_registers);
     assert!(!modes.sixel_cursor_right);
-    assert!(!modes.app_cursor_keys);
+    assert!(!modes.application_cursor_keys);
     assert!(!modes.reverse_video);
     assert!(!modes.cursor_blink);
     assert_eq!(modes.cursor_shape, None);
@@ -40,9 +40,12 @@ fn the_four_mouse_tracking_levels_are_distinct() {
         MouseTracking::ButtonMotion,
         MouseTracking::AnyMotion,
     ];
-    for (i, a) in levels.iter().enumerate() {
-        for (j, b) in levels.iter().enumerate() {
-            assert_eq!(a == b, i == j);
+    for (first_level_index, first_level) in levels.iter().enumerate() {
+        for (second_level_index, second_level) in levels.iter().enumerate() {
+            assert_eq!(
+                first_level == second_level,
+                first_level_index == second_level_index
+            );
         }
     }
 }
@@ -55,9 +58,12 @@ fn the_four_mouse_encodings_are_distinct() {
         MouseEncoding::Sgr,
         MouseEncoding::Urxvt,
     ];
-    for (i, a) in encodings.iter().enumerate() {
-        for (j, b) in encodings.iter().enumerate() {
-            assert_eq!(a == b, i == j);
+    for (first_encoding_index, first_encoding) in encodings.iter().enumerate() {
+        for (second_encoding_index, second_encoding) in encodings.iter().enumerate() {
+            assert_eq!(
+                first_encoding == second_encoding,
+                first_encoding_index == second_encoding_index
+            );
         }
     }
 }
@@ -65,9 +71,12 @@ fn the_four_mouse_encodings_are_distinct() {
 #[test]
 fn the_three_cursor_shapes_are_distinct() {
     let shapes = [CursorShape::Block, CursorShape::Underline, CursorShape::Bar];
-    for (i, a) in shapes.iter().enumerate() {
-        for (j, b) in shapes.iter().enumerate() {
-            assert_eq!(a == b, i == j);
+    for (first_shape_index, first_shape) in shapes.iter().enumerate() {
+        for (second_shape_index, second_shape) in shapes.iter().enumerate() {
+            assert_eq!(
+                first_shape == second_shape,
+                first_shape_index == second_shape_index
+            );
         }
     }
 }
@@ -87,9 +96,9 @@ fn terminal_modes_with_every_value_flipped_round_trip_through_json() {
         bracketed_paste: true,
         mouse_tracking: MouseTracking::AnyMotion,
         mouse_encoding: MouseEncoding::Sgr,
-        alt_scroll: true,
+        alternate_scroll: true,
         autowrap: false,
-        app_cursor_keys: true,
+        application_cursor_keys: true,
         reverse_video: true,
         cursor_blink: true,
         cursor_shape: Some(CursorShape::Bar),
@@ -108,20 +117,21 @@ fn terminal_modes_with_every_value_flipped_round_trip_through_json() {
 
 #[test]
 fn a_terminal_modes_body_without_cursor_shape_reads_back_as_none() {
-    let body = r#"{"bracketed_paste":false,"mouse_tracking":"Off","mouse_encoding":"Default","alt_scroll":false,"autowrap":true,"app_cursor_keys":false,"reverse_video":false,"cursor_blink":false}"#;
-    let read_back: TerminalModes = serde_json::from_str(body).expect("reads back");
+    let serialized_modes_json = r#"{"bracketed_paste":false,"mouse_tracking":"Off","mouse_encoding":"Default","alt_scroll":false,"autowrap":true,"app_cursor_keys":false,"reverse_video":false,"cursor_blink":false}"#;
+    let read_back: TerminalModes = serde_json::from_str(serialized_modes_json).expect("reads back");
     assert_eq!(read_back, TerminalModes::default());
 }
 
 #[test]
 fn a_terminal_modes_body_missing_a_flag_is_rejected() {
-    let body = r#"{"bracketed_paste":false,"mouse_tracking":"Off","mouse_encoding":"Default","alt_scroll":false,"autowrap":true,"app_cursor_keys":false,"reverse_video":false,"cursor_shape":null}"#;
-    let error = serde_json::from_str::<TerminalModes>(body).expect_err("cursor_blink is required");
+    let serialized_modes_json = r#"{"bracketed_paste":false,"mouse_tracking":"Off","mouse_encoding":"Default","alt_scroll":false,"autowrap":true,"app_cursor_keys":false,"reverse_video":false,"cursor_shape":null}"#;
+    let error = serde_json::from_str::<TerminalModes>(serialized_modes_json)
+        .expect_err("cursor_blink is required");
     assert_eq!(
         error.to_string(),
         format!(
             "missing field `cursor_blink` at line 1 column {}",
-            body.len()
+            serialized_modes_json.len()
         )
     );
 }

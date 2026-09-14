@@ -41,7 +41,7 @@ use koshi_core::command::{Command, CommandEnvelope, CommandSource};
 use koshi_core::ids::CommandId;
 use koshi_core::ids::SessionId;
 #[cfg(windows)]
-use koshi_ipc::endpoint::advert_path;
+use koshi_ipc::endpoint::resolve_advertisement_marker_path;
 use koshi_ipc::endpoint::EndpointFile;
 #[cfg(windows)]
 use koshi_ipc::protocol::{IpcRequest, IpcRequestKind, IpcResponse, IpcResult, PROTOCOL_VERSION};
@@ -52,80 +52,84 @@ use tempfile::TempDir;
 mod common;
 
 #[cfg(unix)]
-use common::copy_of_koshi;
-use common::start_koshi;
+use common::copy_koshi_binary;
+#[cfg(any(unix, windows))]
+use common::start_koshi_process;
 
 /// How long a poll waits for something a started process has to do before the
 /// test calls it a failure.
-const WAIT: Duration = Duration::from_secs(20);
+const WAIT_DURATION: Duration = Duration::from_secs(20);
 
 /// How long a poll pauses between attempts.
-const POLL: Duration = Duration::from_millis(100);
+const ATTACH_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(100);
 
 /// The display name the session server is started under, standing in for the
 /// one the router generates.
-const SESSION_NAME: &str = "workspace";
+const SESSION_SERVER_NAME: &str = "workspace";
 
 /// A session server the test started. Dropping it ends that server, so a
 /// failed assertion leaves nothing running.
-struct RunningSession(Child);
+struct RunningSession {
+    child_process: Child,
+}
 
 impl RunningSession {
     /// Whether the server is still up, and its exit status plus what it wrote
     /// to its error stream once it is not — for a failure message.
-    fn state(&mut self) -> String {
-        let Some(status) = self
-            .0
+    fn format_process_status(&mut self) -> String {
+        let Some(exit_status) = self
+            .child_process
             .try_wait()
             .expect("the session server's state can be read")
         else {
             return "it is still running".to_string();
         };
         let mut stderr = String::new();
-        if let Some(pipe) = self.0.stderr.as_mut() {
-            let _ = pipe.read_to_string(&mut stderr);
+        if let Some(stderr_pipe) = self.child_process.stderr.as_mut() {
+            let _ = stderr_pipe.read_to_string(&mut stderr);
         }
-        format!("it exited {status}: {}", stderr.trim())
+        format!("it exited {exit_status}: {}", stderr.trim())
     }
 }
 
 impl Drop for RunningSession {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        let _ = self.child_process.kill();
+        let _ = self.child_process.wait();
     }
 }
 
-/// Wait for the endpoint file `session`'s server writes once its socket is
-/// bound, and hand it back. Fails the test once [`WAIT`] has passed with
+/// Wait for the endpoint file the session server writes once its socket is
+/// bound, and hand it back. Fails the test once [`WAIT_DURATION`] has passed with
 /// nothing advertised, naming why the server is gone when it is.
-fn wait_for_endpoint(
-    session: &mut RunningSession,
-    runtime_dir: &Path,
+fn wait_for_session_endpoint(
+    session_process: &mut RunningSession,
+    runtime_directory: &Path,
     session_id: SessionId,
 ) -> EndpointFile {
-    let path = EndpointFile::path(runtime_dir, session_id);
-    let deadline = Instant::now() + WAIT;
+    let endpoint_file_path =
+        EndpointFile::resolve_endpoint_file_path(runtime_directory, session_id);
+    let deadline = Instant::now() + WAIT_DURATION;
     loop {
-        if let Ok(endpoint) = EndpointFile::read(&path) {
+        if let Ok(endpoint) = EndpointFile::load_from_path(&endpoint_file_path) {
             return endpoint;
         }
         assert!(
             Instant::now() < deadline,
             "no session server advertised {session_id}; {}",
-            session.state()
+            session_process.format_process_status()
         );
-        std::thread::sleep(POLL);
+        std::thread::sleep(ATTACH_POLL_INTERVAL_DURATION);
     }
 }
 
-/// Wait for `session`'s process to exit, and hand back whether it did inside
-/// [`WAIT`].
-fn waited_for_exit(session: &mut RunningSession) -> bool {
-    let deadline = Instant::now() + WAIT;
+/// Wait for `session_process`'s process to exit, and hand back whether it did inside
+/// [`WAIT_DURATION`].
+fn wait_for_session_server_exit(session_process: &mut RunningSession) -> bool {
+    let deadline = Instant::now() + WAIT_DURATION;
     loop {
-        if session
-            .0
+        if session_process
+            .child_process
             .try_wait()
             .expect("the session server's state can be read")
             .is_some()
@@ -135,7 +139,7 @@ fn waited_for_exit(session: &mut RunningSession) -> bool {
         if Instant::now() >= deadline {
             return false;
         }
-        std::thread::sleep(POLL);
+        std::thread::sleep(ATTACH_POLL_INTERVAL_DURATION);
     }
 }
 
@@ -151,7 +155,7 @@ fn waited_for_exit(session: &mut RunningSession) -> bool {
 /// at 49 bytes, which makes the bound path 66 bytes against the 103 bytes a
 /// Unix socket address holds.
 #[cfg(unix)]
-fn test_home() -> TempDir {
+fn build_test_home_directory() -> TempDir {
     tempfile::Builder::new()
         .prefix("k")
         .tempdir_in("/tmp")
@@ -162,45 +166,46 @@ fn test_home() -> TempDir {
 /// short base for the same length cap. The session server creates this user's
 /// directory inside it and binds the socket there.
 #[cfg(unix)]
-fn test_shared_base() -> TempDir {
+fn build_test_shared_directory_base() -> TempDir {
     TempDir::new_in("/tmp").expect("a temporary shared session directory")
 }
 
-/// The runtime directory a `koshi` started by [`koshi_under`] with `home`
+/// The runtime directory a `koshi` started by [`build_koshi_command_under_home`] with `home`
 /// serves: `run/` inside the home directory.
 #[cfg(unix)]
-fn runtime_dir_under(home: &Path) -> PathBuf {
+fn resolve_runtime_directory_under_home(home: &Path) -> PathBuf {
     home.join("run")
 }
 
-/// The config directory a `koshi` started by [`koshi_under`] with `home`
+/// The config directory a `koshi` started by [`build_koshi_command_under_home`] with `home`
 /// reads: macOS derives it from the home directory alone.
 #[cfg(target_os = "macos")]
-fn config_dir_under(home: &Path) -> PathBuf {
+fn resolve_config_directory_under_home(home: &Path) -> PathBuf {
     home.join("Library/Application Support/koshi")
 }
 
-/// The config directory a `koshi` started by [`koshi_under`] with `home`
+/// The config directory a `koshi` started by [`build_koshi_command_under_home`] with `home`
 /// reads: `.config/koshi` inside the home directory.
 #[cfg(all(unix, not(target_os = "macos")))]
-fn config_dir_under(home: &Path) -> PathBuf {
+fn resolve_config_directory_under_home(home: &Path) -> PathBuf {
     home.join(".config/koshi")
 }
 
 /// Write `body` as the `koshi.kdl` a process started under `home` reads.
 #[cfg(unix)]
-fn write_config(home: &Path, body: &str) {
-    let config = config_dir_under(home);
-    std::fs::create_dir_all(&config).expect("a config directory under the test home");
-    std::fs::write(config.join("koshi.kdl"), body).expect("the config file is written");
+fn write_test_config(home: &Path, config_text: &str) {
+    let config_directory = resolve_config_directory_under_home(home);
+    std::fs::create_dir_all(&config_directory).expect("a config directory under the test home");
+    std::fs::write(config_directory.join("koshi.kdl"), config_text)
+        .expect("the config file is written");
 }
 
-/// A `koshi.kdl` with the switch on, sharing sessions through `shared_base`.
+/// A `koshi.kdl` with the switch on, sharing sessions through `shared_directory_base`.
 #[cfg(unix)]
-fn switched_on_config(shared_base: &Path) -> String {
+fn switched_on_config(shared_directory_base: &Path) -> String {
     format!(
         "version 1\nallow-other-users #true\nshared-sessions-dir \"{}\"\n",
-        shared_base.display()
+        shared_directory_base.display()
     )
 }
 
@@ -209,33 +214,43 @@ fn switched_on_config(shared_base: &Path) -> String {
 /// file itself to `0644`. The second user's `koshi` has to read that file to
 /// learn the switch is on.
 #[cfg(unix)]
-fn let_every_user_read_the_config(home: &Path) {
+fn set_config_read_permissions_for_every_user(home: &Path) {
     use std::os::unix::fs::PermissionsExt;
 
-    let config = config_dir_under(home);
-    let mut dir = config.as_path();
+    let config_directory = resolve_config_directory_under_home(home);
+    let mut config_directory_path = config_directory.as_path();
     loop {
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755))
-            .unwrap_or_else(|error| panic!("opening {}: {error}", dir.display()));
-        if dir == home {
+        std::fs::set_permissions(
+            config_directory_path,
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap_or_else(|permission_error| {
+            panic!(
+                "opening {}: {permission_error}",
+                config_directory_path.display()
+            )
+        });
+        if config_directory_path == home {
             break;
         }
-        dir = dir
+        config_directory_path = config_directory_path
             .parent()
             .expect("the config directory sits under the test home");
     }
-    let file = config.join("koshi.kdl");
-    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644))
+    let config_file_path = config_directory.join("koshi.kdl");
+    std::fs::set_permissions(&config_file_path, std::fs::Permissions::from_mode(0o644))
         .expect("the config file opens to every local user");
 }
 
 /// The permission bits of `path`, without the file-type bits.
 #[cfg(unix)]
-fn mode_of(path: &Path) -> u32 {
+fn get_file_permission_mode(file_path: &Path) -> u32 {
     use std::os::unix::fs::PermissionsExt;
 
-    std::fs::metadata(path)
-        .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()))
+    std::fs::metadata(file_path)
+        .unwrap_or_else(|metadata_error| {
+            panic!("reading {}: {metadata_error}", file_path.display())
+        })
         .permissions()
         .mode()
         & 0o777
@@ -243,7 +258,7 @@ fn mode_of(path: &Path) -> u32 {
 
 /// This process's effective user id.
 #[cfg(unix)]
-fn euid() -> u32 {
+fn get_effective_user_id() -> u32 {
     // SAFETY: `geteuid` reads this process's own identity, takes no argument,
     // and cannot fail.
     unsafe { libc::geteuid() }
@@ -252,17 +267,19 @@ fn euid() -> u32 {
 /// The user id and group id of the `nobody` account, or `None` when this
 /// machine has no such account.
 #[cfg(unix)]
-fn nobody_ids() -> Option<(u32, u32)> {
-    let name = std::ffi::CString::new("nobody").expect("the name holds no zero byte");
+fn get_nobody_user_and_group_ids() -> Option<(u32, u32)> {
+    let account_name =
+        std::ffi::CString::new("nobody").expect("the account name holds no zero byte");
     // SAFETY: the pointer passed in is a valid C string that outlives the call.
     // `getpwnam` hands back either null or a pointer into its own storage,
     // which stays valid until the next call from this thread.
-    let entry = unsafe { libc::getpwnam(name.as_ptr()) };
-    if entry.is_null() {
+    let passwd_record = unsafe { libc::getpwnam(account_name.as_ptr()) };
+    if passwd_record.is_null() {
         return None;
     }
-    // SAFETY: `entry` is non-null, so it points at a `passwd` `getpwnam` filled.
-    Some(unsafe { ((*entry).pw_uid, (*entry).pw_gid) })
+    // SAFETY: `passwd_record` is non-null, so it points at a `passwd` record
+    // filled by `getpwnam`.
+    Some(unsafe { ((*passwd_record).pw_uid, (*passwd_record).pw_gid) })
 }
 
 /// A copy of the `koshi` binary at a path every local user may run it from,
@@ -270,14 +287,17 @@ fn nobody_ids() -> Option<(u32, u32)> {
 /// behind directories those users cannot enter. Dropping the handle removes
 /// the copy.
 #[cfg(unix)]
-fn koshi_every_user_can_run() -> (TempDir, PathBuf) {
+fn build_koshi_binary_for_every_user() -> (TempDir, PathBuf) {
     use std::os::unix::fs::PermissionsExt;
 
-    let dir = test_home();
-    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755))
-        .expect("the directory holding the copy opens to every local user");
-    let copy = copy_of_koshi(dir.path());
-    (dir, copy)
+    let test_home_directory = build_test_home_directory();
+    std::fs::set_permissions(
+        test_home_directory.path(),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .expect("the directory holding the copy opens to every local user");
+    let koshi_binary_path = copy_koshi_binary(test_home_directory.path());
+    (test_home_directory, koshi_binary_path)
 }
 
 /// The `koshi` binary at `binary`, set to keep its files under `home` rather
@@ -286,9 +306,9 @@ fn koshi_every_user_can_run() -> (TempDir, PathBuf) {
 /// output streams are pipes the test reads. The runtime directory the child
 /// serves is `<home>/run`.
 #[cfg(unix)]
-fn koshi_at(binary: &Path, home: &Path) -> std::process::Command {
-    let mut command = std::process::Command::new(binary);
-    command
+fn build_koshi_command_at(binary: &Path, home: &Path) -> std::process::Command {
+    let mut process_command = std::process::Command::new(binary);
+    process_command
         .env("HOME", home)
         .env("KOSHI_RUNTIME_DIR", home.join("run"))
         // The five variables the runtime injects at pane spawn; `KOSHI` is the
@@ -306,34 +326,39 @@ fn koshi_at(binary: &Path, home: &Path) -> std::process::Command {
     // it would send this child outside the test home for its `koshi.kdl`, past
     // the one the test wrote. macOS never reads this.
     #[cfg(all(unix, not(target_os = "macos")))]
-    command.env("XDG_CONFIG_HOME", home.join(".config"));
-    command
+    process_command.env("XDG_CONFIG_HOME", home.join(".config"));
+    process_command
 }
 
-/// [`koshi_at`], run from the binary this build produced.
+/// [`build_koshi_command_at`], run from the binary this build produced.
 #[cfg(unix)]
-fn koshi_under(home: &Path) -> std::process::Command {
-    koshi_at(Path::new(env!("CARGO_BIN_EXE_koshi")), home)
+fn build_koshi_command_under_home(home: &Path) -> std::process::Command {
+    build_koshi_command_at(Path::new(env!("CARGO_BIN_EXE_koshi")), home)
 }
 
-/// [`koshi_at`], run as the user `uid` and the group `gid` instead of this
+/// [`build_koshi_command_at`], run as the user `user_id` and the group `group_id` instead of this
 /// one. The group is set first, which is the only order that works once the
 /// user id has been given up.
 #[cfg(unix)]
-fn koshi_under_as(binary: &Path, home: &Path, uid: u32, gid: u32) -> std::process::Command {
+fn build_koshi_command_as_user(
+    binary: &Path,
+    home: &Path,
+    user_id: u32,
+    group_id: u32,
+) -> std::process::Command {
     use std::os::unix::process::CommandExt;
 
-    let mut command = koshi_at(binary, home);
-    command.gid(gid).uid(uid);
-    command
+    let mut process_command = build_koshi_command_at(binary, home);
+    process_command.gid(group_id).uid(user_id);
+    process_command
 }
 
-/// Run `command` to its end and hand back its exit status and both output
-/// streams. Starting goes through [`start_koshi`], which waits out a program
+/// Run `process_command` to its end and hand back its exit status and both output
+/// streams. Starting goes through [`start_koshi_process`], which waits out a program
 /// file the operating system reports as busy.
 #[cfg(unix)]
-fn koshi_output(command: &mut std::process::Command) -> std::process::Output {
-    start_koshi(command)
+fn run_koshi_command(process_command: &mut std::process::Command) -> std::process::Output {
+    start_koshi_process(process_command)
         .wait_with_output()
         .expect("the koshi binary runs to its end")
 }
@@ -343,33 +368,33 @@ fn koshi_output(command: &mut std::process::Command) -> std::process::Output {
 #[cfg(unix)]
 fn start_session_server_under(
     home: &Path,
-    runtime_dir: &Path,
+    runtime_directory: &Path,
     session_id: SessionId,
 ) -> RunningSession {
-    let child = start_koshi(
-        koshi_under(home)
+    let child_process = start_koshi_process(
+        build_koshi_command_under_home(home)
             .arg("serve-session")
             .arg(session_id.to_string())
-            .arg(SESSION_NAME)
+            .arg(SESSION_SERVER_NAME)
             .arg("--runtime-dir")
-            .arg(runtime_dir)
+            .arg(runtime_directory)
             .stdout(Stdio::null()),
     );
-    RunningSession(child)
+    RunningSession { child_process }
 }
 
 /// The exact `koshi list-sessions` table for one session: the header row, then
 /// that session's id and name. Each column is padded to its widest cell and
 /// separated by two spaces, with no trailing spaces.
 #[cfg(unix)]
-fn one_session_listing(session_id: SessionId) -> String {
-    let id = session_id.to_string();
-    let name_width = SESSION_NAME.len().max("name".len());
+fn render_single_session_listing(session_id: SessionId) -> String {
+    let session_id_text = session_id.to_string();
+    let session_name_column_width = SESSION_SERVER_NAME.len().max("name".len());
     format!(
-        "{:id_width$}  {:name_width$}  server\n{id}  {SESSION_NAME:name_width$}  local\n",
+        "{:session_id_column_width$}  {:session_name_column_width$}  server\n{session_id_text}  {SESSION_SERVER_NAME:session_name_column_width$}  local\n",
         "id",
         "name",
-        id_width = id.len(),
+        session_id_column_width = session_id_text.len(),
     )
 }
 
@@ -377,12 +402,12 @@ fn one_session_listing(session_id: SessionId) -> String {
 /// this user reaches is one session another user started: no router of this
 /// user's own, and that session naming the build it runs.
 #[cfg(unix)]
-fn one_server_version_answer(session_id: SessionId, build: &str) -> String {
+fn render_single_server_version_answer(session_id: SessionId, build_version: &str) -> String {
     format!(
         "[\n  {{\n    \"kind\": \"router\",\n    \"session\": null,\n    \
          \"state\": \"not_running\"\n  }},\n  {{\n    \"kind\": \"session\",\n    \
-         \"session\": \"{}\",\n    \"state\": \"running\",\n    \"version\": \"{build}\"\n  }}\n]\n",
-        session_id.as_uuid()
+         \"session\": \"{}\",\n    \"state\": \"running\",\n    \"version\": \"{build_version}\"\n  }}\n]\n",
+        session_id.get_uuid()
     )
 }
 
@@ -391,14 +416,14 @@ fn one_server_version_answer(session_id: SessionId, build: &str) -> String {
 #[cfg(unix)]
 #[test]
 fn another_local_user_lists_and_kills_a_session_while_the_switch_is_on() {
-    if euid() != 0 {
+    if get_effective_user_id() != 0 {
         eprintln!(
             "skipped `another_local_user_lists_and_kills_a_session_while_the_switch_is_on`: \
              running a second user id needs root; re-run under sudo"
         );
         return;
     }
-    let Some((uid, gid)) = nobody_ids() else {
+    let Some((user_id, group_id)) = get_nobody_user_and_group_ids() else {
         eprintln!(
             "skipped `another_local_user_lists_and_kills_a_session_while_the_switch_is_on`: \
              this machine has no `nobody` account"
@@ -406,66 +431,79 @@ fn another_local_user_lists_and_kills_a_session_while_the_switch_is_on() {
         return;
     };
 
-    let shared_base = test_shared_base();
-    let config = switched_on_config(shared_base.path());
+    let shared_directory_base = build_test_shared_directory_base();
+    let config_text = switched_on_config(shared_directory_base.path());
 
-    let owner_home = test_home();
-    write_config(owner_home.path(), &config);
-    let owner_runtime = runtime_dir_under(owner_home.path());
-    std::fs::create_dir_all(&owner_runtime).expect("a runtime directory under the test home");
+    let owner_home = build_test_home_directory();
+    write_test_config(owner_home.path(), &config_text);
+    let owner_runtime_directory = resolve_runtime_directory_under_home(owner_home.path());
+    std::fs::create_dir_all(&owner_runtime_directory)
+        .expect("a runtime directory under the test home");
     let session_id = SessionId::new();
-    let mut session = start_session_server_under(owner_home.path(), &owner_runtime, session_id);
-    let endpoint = wait_for_endpoint(&mut session, &owner_runtime, session_id);
+    let mut session_process =
+        start_session_server_under(owner_home.path(), &owner_runtime_directory, session_id);
+    let endpoint_file =
+        wait_for_session_endpoint(&mut session_process, &owner_runtime_directory, session_id);
 
     // The switch moved the socket out of the private runtime directory, so the
     // second user below really walks the shared one.
-    let owner_shared_dir = shared_base.path().join(euid().to_string());
+    let owner_shared_directory = shared_directory_base
+        .path()
+        .join(get_effective_user_id().to_string());
     assert_eq!(
-        Path::new(&endpoint.socket).parent(),
-        Some(owner_shared_dir.as_path())
+        Path::new(&endpoint_file.socket_address).parent(),
+        Some(owner_shared_directory.as_path())
     );
 
-    let other_home = test_home();
-    write_config(other_home.path(), &config);
-    let_every_user_read_the_config(other_home.path());
-    let (_koshi_dir, koshi) = koshi_every_user_can_run();
+    let other_home = build_test_home_directory();
+    write_test_config(other_home.path(), &config_text);
+    set_config_read_permissions_for_every_user(other_home.path());
+    let (_koshi_binary_directory, koshi_binary_path) = build_koshi_binary_for_every_user();
 
-    let listed =
-        koshi_output(koshi_under_as(&koshi, other_home.path(), uid, gid).arg("list-sessions"));
-    assert_eq!(String::from_utf8_lossy(&listed.stderr), "");
-    assert_eq!(listed.status.code(), Some(CliExitCode::Success.code()));
+    let list_output = run_koshi_command(
+        build_koshi_command_as_user(&koshi_binary_path, other_home.path(), user_id, group_id)
+            .arg("list-sessions"),
+    );
+    assert_eq!(String::from_utf8_lossy(&list_output.stderr), "");
     assert_eq!(
-        String::from_utf8_lossy(&listed.stdout),
-        one_session_listing(session_id)
+        list_output.status.code(),
+        Some(CliExitCode::Success.get_exit_code())
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&list_output.stdout),
+        render_single_session_listing(session_id)
     );
 
     // The version walk reaches the same session the listing did, so a session
     // another user started names its build here too.
-    let versions = koshi_output(
-        koshi_under_as(&koshi, other_home.path(), uid, gid)
+    let version_output = run_koshi_command(
+        build_koshi_command_as_user(&koshi_binary_path, other_home.path(), user_id, group_id)
             .arg("server-version")
             .arg("--format")
             .arg("json"),
     );
-    assert_eq!(String::from_utf8_lossy(&versions.stderr), "");
-    assert_eq!(versions.status.code(), Some(CliExitCode::Success.code()));
+    assert_eq!(String::from_utf8_lossy(&version_output.stderr), "");
     assert_eq!(
-        String::from_utf8_lossy(&versions.stdout),
-        one_server_version_answer(session_id, env!("CARGO_PKG_VERSION"))
+        version_output.status.code(),
+        Some(CliExitCode::Success.get_exit_code())
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&version_output.stdout),
+        render_single_server_version_answer(session_id, env!("CARGO_PKG_VERSION"))
     );
 
-    let killed = koshi_output(
-        koshi_under_as(&koshi, other_home.path(), uid, gid)
+    let kill_output = run_koshi_command(
+        build_koshi_command_as_user(&koshi_binary_path, other_home.path(), user_id, group_id)
             .arg("kill-session")
             .arg(session_id.to_string()),
     );
     // The success reply races the socket shutdown, so the server process
     // ending is what says the kill landed, not the exit code.
     assert!(
-        waited_for_exit(&mut session),
+        wait_for_session_server_exit(&mut session_process),
         "the session server outlived the other user's kill; it exited {} saying {}",
-        killed.status,
-        String::from_utf8_lossy(&killed.stderr).trim()
+        kill_output.status,
+        String::from_utf8_lossy(&kill_output.stderr).trim()
     );
 }
 
@@ -474,14 +512,14 @@ fn another_local_user_lists_and_kills_a_session_while_the_switch_is_on() {
 #[cfg(unix)]
 #[test]
 fn another_local_user_finds_nothing_while_the_switch_is_off() {
-    if euid() != 0 {
+    if get_effective_user_id() != 0 {
         eprintln!(
             "skipped `another_local_user_finds_nothing_while_the_switch_is_off`: \
              running a second user id needs root; re-run under sudo"
         );
         return;
     }
-    let Some((uid, gid)) = nobody_ids() else {
+    let Some((user_id, group_id)) = get_nobody_user_and_group_ids() else {
         eprintln!(
             "skipped `another_local_user_finds_nothing_while_the_switch_is_off`: \
              this machine has no `nobody` account"
@@ -489,45 +527,52 @@ fn another_local_user_finds_nothing_while_the_switch_is_off() {
         return;
     };
 
-    let owner_home = test_home();
-    write_config(owner_home.path(), "version 1\n");
-    let owner_runtime = runtime_dir_under(owner_home.path());
-    std::fs::create_dir_all(&owner_runtime).expect("a runtime directory under the test home");
+    let owner_home = build_test_home_directory();
+    write_test_config(owner_home.path(), "version 1\n");
+    let owner_runtime_directory = resolve_runtime_directory_under_home(owner_home.path());
+    std::fs::create_dir_all(&owner_runtime_directory)
+        .expect("a runtime directory under the test home");
     let session_id = SessionId::new();
-    let mut session = start_session_server_under(owner_home.path(), &owner_runtime, session_id);
-    wait_for_endpoint(&mut session, &owner_runtime, session_id);
+    let mut session_process =
+        start_session_server_under(owner_home.path(), &owner_runtime_directory, session_id);
+    wait_for_session_endpoint(&mut session_process, &owner_runtime_directory, session_id);
 
-    let other_home = test_home();
-    write_config(other_home.path(), "version 1\n");
-    let_every_user_read_the_config(other_home.path());
-    let (_koshi_dir, koshi) = koshi_every_user_can_run();
+    let other_home = build_test_home_directory();
+    write_test_config(other_home.path(), "version 1\n");
+    set_config_read_permissions_for_every_user(other_home.path());
+    let (_koshi_binary_directory, koshi_binary_path) = build_koshi_binary_for_every_user();
 
-    let listed =
-        koshi_output(koshi_under_as(&koshi, other_home.path(), uid, gid).arg("list-sessions"));
-    assert_eq!(String::from_utf8_lossy(&listed.stderr), "");
-    assert_eq!(listed.status.code(), Some(CliExitCode::Success.code()));
+    let list_output = run_koshi_command(
+        build_koshi_command_as_user(&koshi_binary_path, other_home.path(), user_id, group_id)
+            .arg("list-sessions"),
+    );
+    assert_eq!(String::from_utf8_lossy(&list_output.stderr), "");
     assert_eq!(
-        String::from_utf8_lossy(&listed.stdout),
+        list_output.status.code(),
+        Some(CliExitCode::Success.get_exit_code())
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&list_output.stdout),
         "id  name  server\n"
     );
 
-    let killed = koshi_output(
-        koshi_under_as(&koshi, other_home.path(), uid, gid)
+    let kill_output = run_koshi_command(
+        build_koshi_command_as_user(&koshi_binary_path, other_home.path(), user_id, group_id)
             .arg("kill-session")
             .arg(session_id.to_string()),
     );
     assert_eq!(
-        killed.status.code(),
-        Some(CliExitCode::SessionNotFound.code())
+        kill_output.status.code(),
+        Some(CliExitCode::SessionNotFound.get_exit_code())
     );
     assert_eq!(
-        String::from_utf8_lossy(&killed.stderr),
+        String::from_utf8_lossy(&kill_output.stderr),
         format!("koshi: session {session_id} is not running\n")
     );
 
     assert_eq!(
-        session
-            .0
+        session_process
+            .child_process
             .try_wait()
             .expect("the session server's state can be read"),
         None,
@@ -541,48 +586,62 @@ fn another_local_user_finds_nothing_while_the_switch_is_off() {
 #[cfg(unix)]
 #[test]
 fn this_users_own_session_is_listed_once_while_the_switch_is_on() {
-    let shared_base = test_shared_base();
-    let home = test_home();
-    write_config(home.path(), &switched_on_config(shared_base.path()));
-    let runtime_dir = runtime_dir_under(home.path());
-    std::fs::create_dir_all(&runtime_dir).expect("a runtime directory under the test home");
+    let shared_directory_base = build_test_shared_directory_base();
+    let home = build_test_home_directory();
+    write_test_config(
+        home.path(),
+        &switched_on_config(shared_directory_base.path()),
+    );
+    let runtime_directory = resolve_runtime_directory_under_home(home.path());
+    std::fs::create_dir_all(&runtime_directory).expect("a runtime directory under the test home");
     let session_id = SessionId::new();
-    let mut session = start_session_server_under(home.path(), &runtime_dir, session_id);
-    let endpoint = wait_for_endpoint(&mut session, &runtime_dir, session_id);
+    let mut session_process =
+        start_session_server_under(home.path(), &runtime_directory, session_id);
+    let endpoint_file =
+        wait_for_session_endpoint(&mut session_process, &runtime_directory, session_id);
 
     // The switch moved the socket into this user's directory under the shared
     // one, so the listing below really walks that directory.
-    let own_shared_dir = shared_base.path().join(euid().to_string());
+    let own_shared_directory = shared_directory_base
+        .path()
+        .join(get_effective_user_id().to_string());
     assert_eq!(
-        Path::new(&endpoint.socket).parent(),
-        Some(own_shared_dir.as_path())
+        Path::new(&endpoint_file.socket_address).parent(),
+        Some(own_shared_directory.as_path())
     );
     // The token file did not move with the socket and did not widen with it.
-    let endpoint_path = EndpointFile::path(&runtime_dir, session_id);
-    assert_eq!(endpoint_path.parent(), Some(runtime_dir.as_path()));
-    assert_eq!(mode_of(&endpoint_path), 0o600);
+    let endpoint_path = EndpointFile::resolve_endpoint_file_path(&runtime_directory, session_id);
+    assert_eq!(endpoint_path.parent(), Some(runtime_directory.as_path()));
+    assert_eq!(get_file_permission_mode(&endpoint_path), 0o600);
 
-    let listed = koshi_output(koshi_under(home.path()).arg("list-sessions"));
-    assert_eq!(String::from_utf8_lossy(&listed.stderr), "");
-    assert_eq!(listed.status.code(), Some(CliExitCode::Success.code()));
+    let list_output =
+        run_koshi_command(build_koshi_command_under_home(home.path()).arg("list-sessions"));
+    assert_eq!(String::from_utf8_lossy(&list_output.stderr), "");
     assert_eq!(
-        String::from_utf8_lossy(&listed.stdout),
-        one_session_listing(session_id)
+        list_output.status.code(),
+        Some(CliExitCode::Success.get_exit_code())
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&list_output.stdout),
+        render_single_session_listing(session_id)
     );
 
     // The version walk covers the same two places the listing does, so this
     // user's own session earns one row here and not two.
-    let versions = koshi_output(
-        koshi_under(home.path())
+    let version_output = run_koshi_command(
+        build_koshi_command_under_home(home.path())
             .arg("server-version")
             .arg("--format")
             .arg("json"),
     );
-    assert_eq!(String::from_utf8_lossy(&versions.stderr), "");
-    assert_eq!(versions.status.code(), Some(CliExitCode::Success.code()));
+    assert_eq!(String::from_utf8_lossy(&version_output.stderr), "");
     assert_eq!(
-        String::from_utf8_lossy(&versions.stdout),
-        one_server_version_answer(session_id, env!("CARGO_PKG_VERSION"))
+        version_output.status.code(),
+        Some(CliExitCode::Success.get_exit_code())
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&version_output.stdout),
+        render_single_server_version_answer(session_id, env!("CARGO_PKG_VERSION"))
     );
 }
 
@@ -591,21 +650,26 @@ fn this_users_own_session_is_listed_once_while_the_switch_is_on() {
 #[cfg(unix)]
 #[test]
 fn a_session_with_the_switch_off_keeps_its_socket_in_the_private_runtime_directory() {
-    let home = test_home();
-    write_config(home.path(), "version 1\n");
-    let runtime_dir = runtime_dir_under(home.path());
-    std::fs::create_dir_all(&runtime_dir).expect("a runtime directory under the test home");
+    let home = build_test_home_directory();
+    write_test_config(home.path(), "version 1\n");
+    let runtime_directory = resolve_runtime_directory_under_home(home.path());
+    std::fs::create_dir_all(&runtime_directory).expect("a runtime directory under the test home");
     let session_id = SessionId::new();
-    let mut session = start_session_server_under(home.path(), &runtime_dir, session_id);
-    let endpoint = wait_for_endpoint(&mut session, &runtime_dir, session_id);
+    let mut session_process =
+        start_session_server_under(home.path(), &runtime_directory, session_id);
+    let endpoint_file =
+        wait_for_session_endpoint(&mut session_process, &runtime_directory, session_id);
 
     assert_eq!(
-        Path::new(&endpoint.socket).parent(),
-        Some(runtime_dir.as_path())
+        Path::new(&endpoint_file.socket_address).parent(),
+        Some(runtime_directory.as_path())
     );
-    assert_eq!(mode_of(&runtime_dir), 0o700);
+    assert_eq!(get_file_permission_mode(&runtime_directory), 0o700);
     assert_eq!(
-        mode_of(&EndpointFile::path(&runtime_dir, session_id)),
+        get_file_permission_mode(&EndpointFile::resolve_endpoint_file_path(
+            &runtime_directory,
+            session_id,
+        )),
         0o600
     );
 }
@@ -617,96 +681,99 @@ fn a_session_with_the_switch_off_keeps_its_socket_in_the_private_runtime_directo
 fn the_koshi_binary_carries_no_setuid_or_setgid_bit() {
     use std::os::unix::fs::PermissionsExt;
 
-    let mode = std::fs::metadata(env!("CARGO_BIN_EXE_koshi"))
+    let binary_permission_mode = std::fs::metadata(env!("CARGO_BIN_EXE_koshi"))
         .expect("the koshi binary is built")
         .permissions()
         .mode();
-    assert_eq!(mode & 0o6000, 0);
+    assert_eq!(binary_permission_mode & 0o6000, 0);
 }
 
 // --- Windows ---
 
 /// A fresh runtime directory to serve, under the temporary base.
 #[cfg(windows)]
-fn test_runtime_dir() -> TempDir {
+fn build_windows_test_runtime_directory() -> TempDir {
     TempDir::new_in(std::env::temp_dir()).expect("a temporary runtime directory")
 }
 
 /// A fresh directory to stand in for `%ProgramData%`. The session server puts
 /// `koshi` inside it and advertises there.
 #[cfg(windows)]
-fn test_program_data() -> TempDir {
+fn build_test_program_data_directory() -> TempDir {
     TempDir::new_in(std::env::temp_dir()).expect("a temporary program data directory")
 }
 
 /// The machine-wide shared directory a server started with `program_data`
 /// advertises in.
 #[cfg(windows)]
-fn shared_dir_under(program_data: &Path) -> PathBuf {
+fn resolve_shared_directory_under_program_data(program_data: &Path) -> PathBuf {
     program_data.join("koshi")
 }
 
-/// Start one session's server serving `runtime_dir`, with the switch forced on
+/// Start one session's server serving `runtime_directory`, with the switch forced on
 /// and `%ProgramData%` pointed at `program_data`.
 #[cfg(windows)]
 fn start_shared_session_server(
-    runtime_dir: &Path,
+    runtime_directory: &Path,
     program_data: &Path,
     session_id: SessionId,
 ) -> RunningSession {
-    let child = start_koshi(
+    let child_process = start_koshi_process(
         std::process::Command::new(env!("CARGO_BIN_EXE_koshi"))
             .arg("serve-session")
             .arg(session_id.to_string())
-            .arg(SESSION_NAME)
+            .arg(SESSION_SERVER_NAME)
             .arg("--runtime-dir")
-            .arg(runtime_dir)
+            .arg(runtime_directory)
             .arg("--allow-other-users")
             .env("ProgramData", program_data)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null()),
     );
-    RunningSession(child)
+    RunningSession { child_process }
 }
 
 /// Wait for the marker naming `session_id` among the sessions other local users
 /// may reach, and hand back its path. The server writes it after the endpoint
-/// file. Fails the test once [`WAIT`] has passed with no marker.
+/// file. Fails the test once [`WAIT_DURATION`] has passed with no marker.
 #[cfg(windows)]
-fn wait_for_marker(shared_dir: &Path, session_id: SessionId) -> PathBuf {
-    let path = advert_path(shared_dir, session_id);
-    let deadline = Instant::now() + WAIT;
+fn wait_for_session_advertisement_marker(
+    shared_directory: &Path,
+    session_id: SessionId,
+) -> PathBuf {
+    let marker_path = resolve_advertisement_marker_path(shared_directory, session_id);
+    let deadline = Instant::now() + WAIT_DURATION;
     loop {
-        if path.exists() {
-            return path;
+        if marker_path.exists() {
+            return marker_path;
         }
         assert!(
             Instant::now() < deadline,
             "no session server advertised {session_id} in the shared directory"
         );
-        std::thread::sleep(POLL);
+        std::thread::sleep(ATTACH_POLL_INTERVAL_DURATION);
     }
 }
 
-/// Open a connection to the session at `endpoint` and complete the Hello,
+/// Open a connection to the session at `endpoint_file` and complete the Hello,
 /// presenting the token the endpoint file carries.
 #[cfg(windows)]
-fn open(endpoint: &EndpointFile) -> Connection {
-    let mut connection =
-        Connection::connect(&endpoint.socket).expect("the session's pipe answers a connect");
+fn open_windows_session_connection(endpoint_file: &EndpointFile) -> Connection {
+    let mut connection = Connection::connect(&endpoint_file.socket_address)
+        .expect("the session's pipe answers a connect");
     let hello = IpcRequest {
         request_id: 1,
-        kind: IpcRequestKind::hello(endpoint.token.clone()),
+        request_kind: IpcRequestKind::build_hello_request(endpoint_file.connection_token.clone()),
     };
     connection.send(&hello).expect("the server reads the Hello");
-    let reply: IpcResponse = connection.recv().expect("the server answers the Hello");
-    assert_eq!(reply.request_id, Some(1));
+    let ipc_response: IpcResponse = connection.recv().expect("the server answers the Hello");
+    assert_eq!(ipc_response.request_id, Some(1));
     assert_eq!(
-        reply.result,
+        ipc_response.answer_result,
         IpcResult::Hello {
             protocol_version: PROTOCOL_VERSION,
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            build_version: env!("CARGO_PKG_VERSION").to_string(),
         }
     );
     connection
@@ -717,34 +784,35 @@ fn open(endpoint: &EndpointFile) -> Connection {
 #[cfg(windows)]
 #[test]
 fn the_shared_marker_names_the_session_while_it_serves_and_goes_when_it_quits() {
-    let runtime_dir = test_runtime_dir();
-    let program_data = test_program_data();
-    let shared_dir = shared_dir_under(program_data.path());
+    let runtime_directory = build_windows_test_runtime_directory();
+    let program_data = build_test_program_data_directory();
+    let shared_directory = resolve_shared_directory_under_program_data(program_data.path());
     let session_id = SessionId::new();
-    let mut session =
-        start_shared_session_server(runtime_dir.path(), program_data.path(), session_id);
-    let endpoint = wait_for_endpoint(&mut session, runtime_dir.path(), session_id);
-    let marker = wait_for_marker(&shared_dir, session_id);
+    let mut session_process =
+        start_shared_session_server(runtime_directory.path(), program_data.path(), session_id);
+    let endpoint_file =
+        wait_for_session_endpoint(&mut session_process, runtime_directory.path(), session_id);
+    let marker_path = wait_for_session_advertisement_marker(&shared_directory, session_id);
 
-    let mut connection = open(&endpoint);
-    let envelope = CommandEnvelope::new(
+    let mut connection = open_windows_session_connection(&endpoint_file);
+    let envelope = CommandEnvelope::from_parts(
         CommandId::new(),
-        CommandSource::external_cli(Some(session_id), None),
+        CommandSource::from_external_cli(Some(session_id), None),
         std::time::SystemTime::now(),
         Command::Quit,
     );
     connection
         .send(&IpcRequest {
             request_id: 2,
-            kind: IpcRequestKind::SubmitCommand(Box::new(envelope)),
+            request_kind: IpcRequestKind::SubmitCommand(Box::new(envelope)),
         })
         .expect("the server reads the quit");
 
     assert!(
-        waited_for_exit(&mut session),
+        wait_for_session_server_exit(&mut session_process),
         "the session server outlived the quit"
     );
-    assert!(!marker.exists(), "the marker outlived the session");
+    assert!(!marker_path.exists(), "the marker outlived the session");
 }
 
 /// The user who started the session still reaches it once the switch is on: the
@@ -752,17 +820,21 @@ fn the_shared_marker_names_the_session_while_it_serves_and_goes_when_it_quits() 
 #[cfg(windows)]
 #[test]
 fn a_client_of_this_user_completes_the_hello_on_a_shared_session() {
-    let runtime_dir = test_runtime_dir();
-    let program_data = test_program_data();
+    let runtime_directory = build_windows_test_runtime_directory();
+    let program_data = build_test_program_data_directory();
     let session_id = SessionId::new();
-    let mut session =
-        start_shared_session_server(runtime_dir.path(), program_data.path(), session_id);
-    let endpoint = wait_for_endpoint(&mut session, runtime_dir.path(), session_id);
-    wait_for_marker(&shared_dir_under(program_data.path()), session_id);
+    let mut session_process =
+        start_shared_session_server(runtime_directory.path(), program_data.path(), session_id);
+    let endpoint_file =
+        wait_for_session_endpoint(&mut session_process, runtime_directory.path(), session_id);
+    wait_for_session_advertisement_marker(
+        &resolve_shared_directory_under_program_data(program_data.path()),
+        session_id,
+    );
 
-    // The Hello is checked inside `open`, which fails the test on any other
+    // The Hello is checked inside `open_windows_session_connection`, which fails the test on any other
     // answer.
-    let _connection = open(&endpoint);
+    let _connection = open_windows_session_connection(&endpoint_file);
 }
 
 /// Turning the switch on leaves the single-user flow alone: the walk over the
@@ -772,30 +844,31 @@ fn a_client_of_this_user_completes_the_hello_on_a_shared_session() {
 #[cfg(windows)]
 #[test]
 fn this_users_own_session_is_found_once_over_the_shared_directory() {
-    let runtime_dir = test_runtime_dir();
-    let program_data = test_program_data();
-    let shared_dir = shared_dir_under(program_data.path());
+    let runtime_directory = build_windows_test_runtime_directory();
+    let program_data = build_test_program_data_directory();
+    let shared_directory = resolve_shared_directory_under_program_data(program_data.path());
     let session_id = SessionId::new();
-    let mut session =
-        start_shared_session_server(runtime_dir.path(), program_data.path(), session_id);
-    wait_for_endpoint(&mut session, runtime_dir.path(), session_id);
-    wait_for_marker(&shared_dir, session_id);
+    let mut session_process =
+        start_shared_session_server(runtime_directory.path(), program_data.path(), session_id);
+    wait_for_session_endpoint(&mut session_process, runtime_directory.path(), session_id);
+    wait_for_session_advertisement_marker(&shared_directory, session_id);
 
     // The marker is in the shared directory, and the walk over it hands back
     // nothing: this user's own session is never asked for the empty token it
     // would refuse.
     assert_eq!(
-        koshi_link::ipc_client::foreign_sessions(&shared_dir, runtime_dir.path()),
+        koshi_link::ipc_client::list_foreign_sessions(&shared_directory, runtime_directory.path()),
         Vec::new()
     );
 
-    let found = koshi_link::discovery::fetch_all(runtime_dir.path());
-    assert_eq!(found.unasked, 0);
-    let listed: Vec<SessionId> = found
+    let session_discovery =
+        koshi_link::discovery::fetch_all_session_overviews(runtime_directory.path());
+    assert_eq!(session_discovery.unasked_session_count, 0);
+    let listed_session_ids: Vec<SessionId> = session_discovery
         .sessions
         .iter()
-        .map(|overview| overview.session.id)
-        .filter(|id| *id == session_id)
+        .map(|overview| overview.session.session_id)
+        .filter(|listed_session_id| *listed_session_id == session_id)
         .collect();
-    assert_eq!(listed, vec![session_id]);
+    assert_eq!(listed_session_ids, vec![session_id]);
 }

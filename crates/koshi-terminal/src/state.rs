@@ -16,7 +16,7 @@
 //! The state's component types live in sibling submodules — the active
 //! [`Screen`], the per-screen render state and its charset slots, the cursor
 //! and its saved snapshot, the mode flags with their
-//! [`MouseTracking`]/[`MouseEncoding`] levels, and the [`ReportedCwd`]. The
+//! [`MouseTracking`]/[`MouseEncoding`] levels, and the [`ReportedWorkingDirectory`]. The
 //! ones a caller outside this crate can name are re-exported here, reachable
 //! as `koshi_terminal::state::*`.
 
@@ -27,31 +27,31 @@ use std::sync::Arc;
 use koshi_core::process::PtySize;
 use koshi_sixel::{SixelGraphic, SixelPalette};
 
-use serde::de::{MapAccess, Visitor};
+use serde::de::Visitor;
 use serde::{Deserialize, Serialize};
 
-use crate::grid::state::{Cell, Grid, RowMeta};
+use crate::grid::state::{Cell, Grid, RowMetadata};
 use crate::scrollback::{Scrollback, ScrollbackLimit};
 use crate::selection::TextView;
 use crate::style::Style;
 
 mod cursor;
-mod cwd;
 pub(crate) mod images;
 mod modes;
 mod perform;
 mod reflow;
 mod render;
 mod screen;
+mod working_directory;
 
 pub(crate) use cursor::{Cursor, SavedCursor};
-pub use cwd::ReportedCwd;
 pub(crate) use images::SixelImageSource;
 pub use images::{ImagePlacement, ImagePlacementError, ImagePlacementId};
 pub(crate) use modes::TerminalModes;
 pub use modes::{CursorShape, MouseEncoding, MouseTracking};
 pub(crate) use render::{Charset, RenderState};
 pub use screen::Screen;
+pub use working_directory::ReportedWorkingDirectory;
 
 /// The shell lifecycle point last reported through OSC 133.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -90,7 +90,7 @@ pub struct TerminalState {
     alternate: Arc<Grid>,
     /// Which buffer — `primary` or `alternate` — output currently writes to and
     /// the renderer displays.
-    active: Screen,
+    active_screen: Screen,
     /// The cursor for the primary screen, holding its own position, visibility,
     /// wrap latch, and saved snapshot.
     primary_cursor: Cursor,
@@ -111,7 +111,7 @@ pub struct TerminalState {
     /// Native image sources referenced by primary, history, or alternate cells.
     native_images: Vec<images::NativeImageSource>,
     /// Counts of native image fragments retained by source identity.
-    native_fragment_counts: HashMap<u64, usize>,
+    native_fragment_count_by_image_source_id: HashMap<u64, usize>,
     /// Kitty uploads retained independently of their on-screen placements.
     kitty_images: Vec<images::KittyImage>,
     /// The next terminal-local identity assigned to a new image placement.
@@ -127,9 +127,9 @@ pub struct TerminalState {
     /// The window/tab title set via OSC 0/1/2; `None` until the app sets one.
     title: Option<String>,
     /// The working directory last reported by the shell via OSC 7 (host +
-    /// decoded path), or `None` until the shell reports one. Read by cwd
+    /// decoded path), or `None` until the shell reports one. Read by working-directory
     /// inheritance when a new pane spawns.
-    reported_cwd: Option<ReportedCwd>,
+    reported_working_directory: Option<ReportedWorkingDirectory>,
     /// The shell lifecycle point last reported through OSC 133.
     shell_integration_state: ShellIntegrationState,
     /// Shell-integration facts not yet taken by the terminal engine caller.
@@ -148,14 +148,14 @@ pub struct TerminalState {
     /// skin-tone modifiers, regional-indicator flags). Empty when no run is
     /// active; any non-printing event resets it.
     cluster: String,
-    /// The `(row, col)` of the cell holding `cluster`'s base, or `None` when no
+    /// The `(row, column)` of the cell holding `cluster`'s base, or `None` when no
     /// run is active. Continuations attach here and width promotion widens it.
     cluster_base: Option<(u16, u16)>,
     /// Bytes queued for the running app in answer to its device queries
     /// (DA/DSR/DECRQM). The performer appends replies here; the runtime drains
-    /// them via `take_replies` and writes them back into the pane's PTY.
+    /// them via `take_device_query_replies` and writes them back into the pane's PTY.
     /// Device-global: one queue regardless of the active screen.
-    replies: Vec<u8>,
+    device_query_replies: Vec<u8>,
 }
 
 #[derive(Serialize)]
@@ -164,7 +164,8 @@ struct TerminalStateSerializeFields<'a> {
     cell_size: Option<koshi_core::geometry::PixelCellSize>,
     primary: &'a Arc<Grid>,
     alternate: &'a Arc<Grid>,
-    active: Screen,
+    #[serde(rename = "active")]
+    active_screen: Screen,
     primary_cursor: &'a Cursor,
     alternate_cursor: &'a Cursor,
     primary_render: &'a RenderState,
@@ -180,7 +181,8 @@ struct TerminalStateSerializeFields<'a> {
     sixel_palette: &'a SixelPalette,
     tab_stops: &'a Vec<bool>,
     title: &'a Option<String>,
-    reported_cwd: &'a Option<ReportedCwd>,
+    #[serde(rename = "reported_cwd")]
+    reported_working_directory: &'a Option<ReportedWorkingDirectory>,
     shell_integration_state: ShellIntegrationState,
     shell_integration_facts: &'a Vec<ShellIntegrationFact>,
     scrollback: &'a Scrollback,
@@ -188,7 +190,8 @@ struct TerminalStateSerializeFields<'a> {
     alternate_scroll_region: &'a Option<(u16, u16)>,
     cluster: &'a String,
     cluster_base: &'a Option<(u16, u16)>,
-    replies: &'a Vec<u8>,
+    #[serde(rename = "replies")]
+    device_query_replies: &'a Vec<u8>,
 }
 
 impl Serialize for TerminalState {
@@ -205,13 +208,13 @@ impl Serialize for TerminalState {
                     .filter(|source| source.screen == Screen::Primary)
                     .map(|source| &source.placement),
             )
-            .map(images::serialized_image_placement)
+            .map(images::serialize_image_placement)
             .collect::<Result<Vec<_>, _>>()
             .map_err(serde::ser::Error::custom)?;
         let primary_image_history = self
             .primary_image_history
             .iter()
-            .map(images::serialized_history_placement)
+            .map(images::serialize_primary_history_image_placement)
             .collect::<Result<Vec<_>, _>>()
             .map_err(serde::ser::Error::custom)?;
         let alternate_image_placements = self
@@ -223,23 +226,23 @@ impl Serialize for TerminalState {
                     .filter(|source| source.screen == Screen::Alternate)
                     .map(|source| &source.placement),
             )
-            .map(images::serialized_image_placement)
+            .map(images::serialize_image_placement)
             .collect::<Result<Vec<_>, _>>()
             .map_err(serde::ser::Error::custom)?;
         let kitty_images = self
             .kitty_images
             .iter()
-            .map(images::serialized_kitty_image)
+            .map(images::serialize_kitty_image)
             .collect::<Result<Vec<_>, _>>()
             .map_err(serde::ser::Error::custom)?;
         let image_contents =
-            images::serialized_content_table(self).map_err(serde::ser::Error::custom)?;
+            images::serialize_image_content_table(self).map_err(serde::ser::Error::custom)?;
         TerminalStateSerializeFields {
             native_image_coverage: true,
             cell_size: self.cell_size,
             primary: &self.primary,
             alternate: &self.alternate,
-            active: self.active,
+            active_screen: self.active_screen,
             primary_cursor: &self.primary_cursor,
             alternate_cursor: &self.alternate_cursor,
             primary_render: &self.primary_render,
@@ -255,7 +258,7 @@ impl Serialize for TerminalState {
             sixel_palette: &self.sixel_palette,
             tab_stops: &self.tab_stops,
             title: &self.title,
-            reported_cwd: &self.reported_cwd,
+            reported_working_directory: &self.reported_working_directory,
             shell_integration_state: self.shell_integration_state,
             shell_integration_facts: &self.shell_integration_facts,
             scrollback: &self.scrollback,
@@ -263,7 +266,7 @@ impl Serialize for TerminalState {
             alternate_scroll_region: &self.alternate_scroll_region,
             cluster: &self.cluster,
             cluster_base: &self.cluster_base,
-            replies: &self.replies,
+            device_query_replies: &self.device_query_replies,
         }
         .serialize(serializer)
     }
@@ -274,7 +277,7 @@ struct TerminalStateFields {
     cell_size: Option<koshi_core::geometry::PixelCellSize>,
     primary: Arc<Grid>,
     alternate: Arc<Grid>,
-    active: Screen,
+    active_screen: Screen,
     primary_cursor: Cursor,
     alternate_cursor: Cursor,
     primary_render: RenderState,
@@ -289,7 +292,7 @@ struct TerminalStateFields {
     sixel_palette: SixelPalette,
     tab_stops: Vec<bool>,
     title: Option<String>,
-    reported_cwd: Option<ReportedCwd>,
+    reported_working_directory: Option<ReportedWorkingDirectory>,
     shell_integration_state: ShellIntegrationState,
     shell_integration_facts: Vec<ShellIntegrationFact>,
     scrollback: Scrollback,
@@ -297,7 +300,7 @@ struct TerminalStateFields {
     alternate_scroll_region: Option<(u16, u16)>,
     cluster: String,
     cluster_base: Option<(u16, u16)>,
-    replies: Vec<u8>,
+    device_query_replies: Vec<u8>,
 }
 
 struct RawTerminalStateFields {
@@ -305,7 +308,7 @@ struct RawTerminalStateFields {
     cell_size: Option<koshi_core::geometry::PixelCellSize>,
     primary: Arc<Grid>,
     alternate: Arc<Grid>,
-    active: Screen,
+    active_screen: Screen,
     primary_cursor: Cursor,
     alternate_cursor: Cursor,
     primary_render: RenderState,
@@ -321,7 +324,7 @@ struct RawTerminalStateFields {
     sixel_palette: SixelPalette,
     tab_stops: Vec<bool>,
     title: Option<String>,
-    reported_cwd: Option<ReportedCwd>,
+    reported_working_directory: Option<ReportedWorkingDirectory>,
     shell_integration_state: ShellIntegrationState,
     shell_integration_facts: Vec<ShellIntegrationFact>,
     scrollback: Scrollback,
@@ -329,7 +332,7 @@ struct RawTerminalStateFields {
     alternate_scroll_region: Option<(u16, u16)>,
     cluster: String,
     cluster_base: Option<(u16, u16)>,
-    replies: Vec<u8>,
+    device_query_replies: Vec<u8>,
 }
 
 #[derive(Deserialize)]
@@ -355,7 +358,8 @@ enum RawTerminalStateField {
     SixelPalette,
     TabStops,
     Title,
-    ReportedCwd,
+    #[serde(rename = "reported_cwd")]
+    ReportedWorkingDirectory,
     ShellIntegrationState,
     ShellIntegrationFacts,
     Scrollback,
@@ -363,7 +367,8 @@ enum RawTerminalStateField {
     AlternateScrollRegion,
     Cluster,
     ClusterBase,
-    Replies,
+    #[serde(rename = "replies")]
+    DeviceQueryReplies,
     #[serde(other)]
     Other,
 }
@@ -379,15 +384,15 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
         formatter.write_str("a terminal state")
     }
 
-    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    fn visit_map<MapAccess>(self, mut map: MapAccess) -> Result<Self::Value, MapAccess::Error>
     where
-        A: MapAccess<'de>,
+        MapAccess: serde::de::MapAccess<'de>,
     {
         let mut native_image_coverage = None;
         let mut cell_size = None;
-        let mut primary = None;
-        let mut alternate = None;
-        let mut active = None;
+        let mut primary_grid = None;
+        let mut alternate_grid = None;
+        let mut active_screen = None;
         let mut primary_cursor = None;
         let mut alternate_cursor = None;
         let mut primary_render = None;
@@ -403,7 +408,7 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
         let mut sixel_palette = None;
         let mut tab_stops = None;
         let mut title = None;
-        let mut reported_cwd = None;
+        let mut reported_working_directory = None;
         let mut shell_integration_state = None;
         let mut shell_integration_facts = None;
         let mut scrollback = None;
@@ -411,10 +416,10 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
         let mut alternate_scroll_region = None;
         let mut cluster = None;
         let mut cluster_base = None;
-        let mut replies = None;
+        let mut device_query_replies = None;
 
-        while let Some(field) = map.next_key::<RawTerminalStateField>()? {
-            match field {
+        while let Some(terminal_state_field) = map.next_key::<RawTerminalStateField>()? {
+            match terminal_state_field {
                 RawTerminalStateField::NativeImageCoverage => {
                     if native_image_coverage.is_some() {
                         return Err(serde::de::Error::duplicate_field("native_image_coverage"));
@@ -428,22 +433,22 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
                     cell_size = Some(map.next_value()?);
                 }
                 RawTerminalStateField::Primary => {
-                    if primary.is_some() {
+                    if primary_grid.is_some() {
                         return Err(serde::de::Error::duplicate_field("primary"));
                     }
-                    primary = Some(map.next_value()?);
+                    primary_grid = Some(map.next_value()?);
                 }
                 RawTerminalStateField::Alternate => {
-                    if alternate.is_some() {
+                    if alternate_grid.is_some() {
                         return Err(serde::de::Error::duplicate_field("alternate"));
                     }
-                    alternate = Some(map.next_value()?);
+                    alternate_grid = Some(map.next_value()?);
                 }
                 RawTerminalStateField::Active => {
-                    if active.is_some() {
+                    if active_screen.is_some() {
                         return Err(serde::de::Error::duplicate_field("active"));
                     }
-                    active = Some(map.next_value()?);
+                    active_screen = Some(map.next_value()?);
                 }
                 RawTerminalStateField::PrimaryCursor => {
                     if primary_cursor.is_some() {
@@ -476,7 +481,7 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
                         ));
                     }
                     primary_image_placements =
-                        Some(map.next_value_seed(images::SerializedPlacementsSeed {
+                        Some(map.next_value_seed(images::SerializedImagePlacementsSeed {
                             budget: self.budget,
                         })?);
                 }
@@ -485,7 +490,7 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
                         return Err(serde::de::Error::duplicate_field("primary_image_history"));
                     }
                     primary_image_history =
-                        Some(map.next_value_seed(images::SerializedPlacementsSeed {
+                        Some(map.next_value_seed(images::SerializedImagePlacementsSeed {
                             budget: self.budget,
                         })?);
                 }
@@ -496,7 +501,7 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
                         ));
                     }
                     alternate_image_placements =
-                        Some(map.next_value_seed(images::SerializedPlacementsSeed {
+                        Some(map.next_value_seed(images::SerializedImagePlacementsSeed {
                             budget: self.budget,
                         })?);
                 }
@@ -553,11 +558,11 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
                     }
                     title = Some(map.next_value()?);
                 }
-                RawTerminalStateField::ReportedCwd => {
-                    if reported_cwd.is_some() {
+                RawTerminalStateField::ReportedWorkingDirectory => {
+                    if reported_working_directory.is_some() {
                         return Err(serde::de::Error::duplicate_field("reported_cwd"));
                     }
-                    reported_cwd = Some(map.next_value()?);
+                    reported_working_directory = Some(map.next_value()?);
                 }
                 RawTerminalStateField::ShellIntegrationState => {
                     if shell_integration_state.is_some() {
@@ -601,11 +606,11 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
                     }
                     cluster_base = Some(map.next_value()?);
                 }
-                RawTerminalStateField::Replies => {
-                    if replies.is_some() {
+                RawTerminalStateField::DeviceQueryReplies => {
+                    if device_query_replies.is_some() {
                         return Err(serde::de::Error::duplicate_field("replies"));
                     }
-                    replies = Some(map.next_value()?);
+                    device_query_replies = Some(map.next_value()?);
                 }
                 RawTerminalStateField::Other => {
                     let _: serde::de::IgnoredAny = map.next_value()?;
@@ -616,9 +621,11 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
         Ok(RawTerminalStateFields {
             native_image_coverage: native_image_coverage.unwrap_or(false),
             cell_size: cell_size.unwrap_or_default(),
-            primary: primary.ok_or_else(|| serde::de::Error::missing_field("primary"))?,
-            alternate: alternate.ok_or_else(|| serde::de::Error::missing_field("alternate"))?,
-            active: active.ok_or_else(|| serde::de::Error::missing_field("active"))?,
+            primary: primary_grid.ok_or_else(|| serde::de::Error::missing_field("primary"))?,
+            alternate: alternate_grid
+                .ok_or_else(|| serde::de::Error::missing_field("alternate"))?,
+            active_screen: active_screen
+                .ok_or_else(|| serde::de::Error::missing_field("active"))?,
             primary_cursor: primary_cursor
                 .ok_or_else(|| serde::de::Error::missing_field("primary_cursor"))?,
             alternate_cursor: alternate_cursor
@@ -639,7 +646,7 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
             sixel_palette: sixel_palette.unwrap_or_default(),
             tab_stops: tab_stops.ok_or_else(|| serde::de::Error::missing_field("tab_stops"))?,
             title: title.ok_or_else(|| serde::de::Error::missing_field("title"))?,
-            reported_cwd: reported_cwd
+            reported_working_directory: reported_working_directory
                 .ok_or_else(|| serde::de::Error::missing_field("reported_cwd"))?,
             shell_integration_state: shell_integration_state.unwrap_or_default(),
             shell_integration_facts: shell_integration_facts.unwrap_or_default(),
@@ -651,15 +658,16 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
             cluster: cluster.ok_or_else(|| serde::de::Error::missing_field("cluster"))?,
             cluster_base: cluster_base
                 .ok_or_else(|| serde::de::Error::missing_field("cluster_base"))?,
-            replies: replies.ok_or_else(|| serde::de::Error::missing_field("replies"))?,
+            device_query_replies: device_query_replies
+                .ok_or_else(|| serde::de::Error::missing_field("replies"))?,
         })
     }
 }
 
 impl<'de> Deserialize<'de> for RawTerminalStateFields {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    fn deserialize<Deserializer>(deserializer: Deserializer) -> Result<Self, Deserializer::Error>
     where
-        D: serde::Deserializer<'de>,
+        Deserializer: serde::Deserializer<'de>,
     {
         let mut budget = images::ImageStateBudget::new();
         Self::deserialize_with_budget(deserializer, &mut budget)
@@ -667,81 +675,81 @@ impl<'de> Deserialize<'de> for RawTerminalStateFields {
 }
 
 impl RawTerminalStateFields {
-    fn deserialize_with_budget<'de, D>(
-        deserializer: D,
+    fn deserialize_with_budget<'de, Deserializer>(
+        deserializer: Deserializer,
         budget: &mut images::ImageStateBudget,
-    ) -> Result<Self, D::Error>
+    ) -> Result<Self, Deserializer::Error>
     where
-        D: serde::Deserializer<'de>,
+        Deserializer: serde::Deserializer<'de>,
     {
         deserializer.deserialize_map(RawTerminalStateVisitor { budget })
     }
 }
 
 impl<'de> Deserialize<'de> for TerminalStateFields {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    fn deserialize<Deserializer>(deserializer: Deserializer) -> Result<Self, Deserializer::Error>
     where
-        D: serde::Deserializer<'de>,
+        Deserializer: serde::Deserializer<'de>,
     {
-        let raw = RawTerminalStateFields::deserialize(deserializer)?;
+        let serialized_terminal_state = RawTerminalStateFields::deserialize(deserializer)?;
         let images = images::restore_serialized_image_state(
-            raw.primary_image_placements,
-            raw.primary_image_history,
-            raw.alternate_image_placements,
-            raw.kitty_images,
-            raw.image_contents,
-            raw.next_image_content_id,
+            serialized_terminal_state.primary_image_placements,
+            serialized_terminal_state.primary_image_history,
+            serialized_terminal_state.alternate_image_placements,
+            serialized_terminal_state.kitty_images,
+            serialized_terminal_state.image_contents,
+            serialized_terminal_state.next_image_content_id,
         )
         .map_err(serde::de::Error::custom)?;
         Ok(Self {
-            native_image_coverage: raw.native_image_coverage,
-            cell_size: raw.cell_size,
-            primary: raw.primary,
-            alternate: raw.alternate,
-            active: raw.active,
-            primary_cursor: raw.primary_cursor,
-            alternate_cursor: raw.alternate_cursor,
-            primary_render: raw.primary_render,
-            alternate_render: raw.alternate_render,
+            native_image_coverage: serialized_terminal_state.native_image_coverage,
+            cell_size: serialized_terminal_state.cell_size,
+            primary: serialized_terminal_state.primary,
+            alternate: serialized_terminal_state.alternate,
+            active_screen: serialized_terminal_state.active_screen,
+            primary_cursor: serialized_terminal_state.primary_cursor,
+            alternate_cursor: serialized_terminal_state.alternate_cursor,
+            primary_render: serialized_terminal_state.primary_render,
+            alternate_render: serialized_terminal_state.alternate_render,
             primary_image_placements: images.primary_image_placements,
             primary_image_history: images.primary_image_history,
             alternate_image_placements: images.alternate_image_placements,
             kitty_images: images.kitty_images,
-            next_image_placement_id: raw.next_image_placement_id,
+            next_image_placement_id: serialized_terminal_state.next_image_placement_id,
             next_image_content_id: images.next_image_content_id,
-            modes: raw.modes,
-            sixel_palette: raw.sixel_palette,
-            tab_stops: raw.tab_stops,
-            title: raw.title,
-            reported_cwd: raw.reported_cwd,
-            shell_integration_state: raw.shell_integration_state,
-            shell_integration_facts: raw.shell_integration_facts,
-            scrollback: raw.scrollback,
-            primary_scroll_region: raw.primary_scroll_region,
-            alternate_scroll_region: raw.alternate_scroll_region,
-            cluster: raw.cluster,
-            cluster_base: raw.cluster_base,
-            replies: raw.replies,
+            modes: serialized_terminal_state.modes,
+            sixel_palette: serialized_terminal_state.sixel_palette,
+            tab_stops: serialized_terminal_state.tab_stops,
+            title: serialized_terminal_state.title,
+            reported_working_directory: serialized_terminal_state.reported_working_directory,
+            shell_integration_state: serialized_terminal_state.shell_integration_state,
+            shell_integration_facts: serialized_terminal_state.shell_integration_facts,
+            scrollback: serialized_terminal_state.scrollback,
+            primary_scroll_region: serialized_terminal_state.primary_scroll_region,
+            alternate_scroll_region: serialized_terminal_state.alternate_scroll_region,
+            cluster: serialized_terminal_state.cluster,
+            cluster_base: serialized_terminal_state.cluster_base,
+            device_query_replies: serialized_terminal_state.device_query_replies,
         })
     }
 }
 
 impl<'de> Deserialize<'de> for TerminalState {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    fn deserialize<Deserializer>(deserializer: Deserializer) -> Result<Self, Deserializer::Error>
     where
-        D: serde::Deserializer<'de>,
+        Deserializer: serde::Deserializer<'de>,
     {
         let fields = TerminalStateFields::deserialize(deserializer)?;
         images::validate_image_state(&fields).map_err(serde::de::Error::custom)?;
 
         let native_image_coverage = fields.native_image_coverage;
-        let mut state = TerminalState {
+        let mut terminal_state = TerminalState {
             native_images: Vec::new(),
-            native_fragment_counts: HashMap::new(),
+            native_fragment_count_by_image_source_id: HashMap::new(),
             cell_size: fields.cell_size,
             primary: fields.primary,
             alternate: fields.alternate,
-            active: fields.active,
+            active_screen: fields.active_screen,
             primary_cursor: fields.primary_cursor,
             alternate_cursor: fields.alternate_cursor,
             primary_render: fields.primary_render,
@@ -756,7 +764,7 @@ impl<'de> Deserialize<'de> for TerminalState {
             sixel_palette: fields.sixel_palette,
             tab_stops: fields.tab_stops,
             title: fields.title,
-            reported_cwd: fields.reported_cwd,
+            reported_working_directory: fields.reported_working_directory,
             shell_integration_state: fields.shell_integration_state,
             shell_integration_facts: fields.shell_integration_facts,
             scrollback: fields.scrollback,
@@ -764,85 +772,106 @@ impl<'de> Deserialize<'de> for TerminalState {
             alternate_scroll_region: fields.alternate_scroll_region,
             cluster: fields.cluster,
             cluster_base: fields.cluster_base,
-            replies: fields.replies,
+            device_query_replies: fields.device_query_replies,
         };
-        state
+        terminal_state
             .restore_native_image_coverage(native_image_coverage)
             .map_err(serde::de::Error::custom)?;
-        Ok(state)
+        Ok(terminal_state)
     }
 }
 
 impl TerminalState {
     /// Set the shared pixel measurement used by new images and size reports.
-    pub fn set_cell_size(&mut self, size: koshi_core::geometry::PixelCellSize) {
-        self.cell_size = Some(size);
+    pub fn set_cell_size(&mut self, pixel_cell_size: koshi_core::geometry::PixelCellSize) {
+        self.cell_size = Some(pixel_cell_size);
     }
 
     /// Return the shared terminal cell measurement in pixels.
     #[must_use]
-    pub fn cell_size(&self) -> Option<koshi_core::geometry::PixelCellSize> {
+    pub fn get_cell_size(&self) -> Option<koshi_core::geometry::PixelCellSize> {
         self.cell_size
     }
 
     pub(crate) fn apply_sixel_graphic(
         &mut self,
-        graphic: SixelGraphic,
-        anchor: (u16, u16),
+        sixel_graphic: SixelGraphic,
+        anchor_position: (u16, u16),
     ) -> Result<Option<crate::graphics::ImageRecord>, crate::graphics::GraphicsError> {
         let mut palette = if self.modes.sixel_private_color_registers {
             SixelPalette::default()
         } else {
             self.sixel_palette.clone()
         };
-        palette.apply_changes(graphic.palette_changes());
+        palette.apply_palette_changes(sixel_graphic.get_palette_changes());
         if !self.modes.sixel_private_color_registers {
             self.sixel_palette = palette.clone();
         }
 
-        let shared_palette = !self.modes.sixel_private_color_registers;
-        if shared_palette && !graphic.palette_changes().entries().is_empty() {
+        let is_shared_palette = !self.modes.sixel_private_color_registers;
+        if is_shared_palette
+            && !sixel_graphic
+                .get_palette_changes()
+                .list_palette_changes()
+                .is_empty()
+        {
             self.refresh_shared_sixel_images(&palette)?;
         }
 
-        let Some(indexed) = graphic.image() else {
+        let Some(indexed_image) = sixel_graphic.get_indexed_image() else {
             return Ok(None);
         };
-        let source = SixelImageSource::new(indexed.clone(), palette.clone(), shared_palette);
-        let image = self.shared_image_pixels(source.resolved(&palette)?);
-        let scrolling = self.modes.sixel_scrolling;
-        let record = crate::graphics::ImageRecord {
+        let sixel_image_source = SixelImageSource::from_indexed_image(
+            indexed_image.clone(),
+            palette.clone(),
+            is_shared_palette,
+        );
+        let sixel_image =
+            self.get_or_share_image_pixels(sixel_image_source.resolve_sixel_image(&palette)?);
+        let should_scroll_cursor = self.modes.sixel_scrolling;
+        let image_record = crate::graphics::ImageRecord {
             protocol: crate::graphics::GraphicsProtocol::Sixel,
-            image,
+            image: sixel_image,
             animation: None,
             action: crate::graphics::ImageAction::Display,
             display: crate::graphics::ImageDisplay {
-                move_cursor: scrolling,
-                sixel_background: Some(graphic.background()),
+                should_move_cursor: should_scroll_cursor,
+                sixel_background: Some(sixel_graphic.get_sixel_background()),
                 ..crate::graphics::ImageDisplay::default()
             },
-            anchor: if scrolling { anchor } else { (0, 0) },
+            anchor: if should_scroll_cursor {
+                anchor_position
+            } else {
+                (0, 0)
+            },
         };
-        self.apply_sixel_image_record(&record, scrolling, self.modes.sixel_cursor_right, source)
-            .map_err(|reason| crate::graphics::GraphicsError::PlacementRejected {
+        self.apply_sixel_image_record(
+            &image_record,
+            should_scroll_cursor,
+            self.modes.sixel_cursor_right,
+            sixel_image_source,
+        )
+        .map_err(
+            |placement_error| crate::graphics::GraphicsError::PlacementRejected {
                 protocol: crate::graphics::GraphicsProtocol::Sixel,
-                reason,
-            })?;
-        Ok(Some(record))
+                placement_error,
+            },
+        )?;
+        Ok(Some(image_record))
     }
 
-    /// Create per-pane state for a terminal of `size`: both screen buffers
+    /// Create per-pane state for a terminal of `pty_size`: both screen buffers
     /// blank, the cursor at the top-left and visible, default pen, no title.
-    pub fn new(size: PtySize) -> Self {
-        Self::with_scrollback(size, ScrollbackLimit::default())
+    pub fn from_pty_size(pty_size: PtySize) -> Self {
+        Self::with_scrollback(pty_size, ScrollbackLimit::default())
     }
 
-    /// Like [`new`](Self::new), but with an explicit scrollback limit.
-    pub fn with_scrollback(size: PtySize, limit: ScrollbackLimit) -> Self {
-        let blank_screen = Grid::blank(size.rows, size.cols, Style::default());
+    /// Like [`from_pty_size`](Self::from_pty_size), but with an explicit scrollback limit.
+    pub fn with_scrollback(pty_size: PtySize, scrollback_limit: ScrollbackLimit) -> Self {
+        let blank_screen = Grid::blank(pty_size.row_count, pty_size.column_count, Style::default());
         let home_cursor = Cursor {
             row: 0,
-            col: 0,
+            column: 0,
             is_visible: true,
             pending_wrap: false,
             saved: None,
@@ -851,13 +880,13 @@ impl TerminalState {
             cell_size: None,
             primary: Arc::new(blank_screen.clone()),
             alternate: Arc::new(blank_screen),
-            active: Screen::Primary,
+            active_screen: Screen::Primary,
             primary_cursor: home_cursor,
             alternate_cursor: home_cursor,
             primary_render: RenderState::fresh(),
             alternate_render: RenderState::fresh(),
             native_images: Vec::new(),
-            native_fragment_counts: HashMap::new(),
+            native_fragment_count_by_image_source_id: HashMap::new(),
             primary_image_placements: Vec::new(),
             primary_image_history: Vec::new(),
             alternate_image_placements: Vec::new(),
@@ -866,26 +895,26 @@ impl TerminalState {
             next_image_content_id: images::default_next_image_content_id(),
             modes: TerminalModes::default(),
             sixel_palette: SixelPalette::default(),
-            tab_stops: default_tab_stops(size.cols),
+            tab_stops: build_default_tab_stops(pty_size.column_count),
             title: None,
-            reported_cwd: None,
+            reported_working_directory: None,
             shell_integration_state: ShellIntegrationState::default(),
             shell_integration_facts: Vec::new(),
-            scrollback: Scrollback::new(limit),
+            scrollback: Scrollback::from_scrollback_limit(scrollback_limit),
             primary_scroll_region: None,
             alternate_scroll_region: None,
             cluster: String::new(),
             cluster_base: None,
-            replies: Vec::new(),
+            device_query_replies: Vec::new(),
         }
     }
 
     /// Resize the tab-stop table while keeping stops in surviving columns.
-    fn resize_tab_stops(&mut self, columns: u16) {
-        let kept = self.tab_stops.len().min(columns as usize);
-        self.tab_stops.truncate(columns as usize);
+    fn resize_tab_stops(&mut self, column_count: u16) {
+        let retained_tab_stop_count = self.tab_stops.len().min(column_count as usize);
+        self.tab_stops.truncate(column_count as usize);
         self.tab_stops
-            .extend((kept..columns as usize).map(|column| column % 8 == 0));
+            .extend((retained_tab_stop_count..column_count as usize).map(|column| column % 8 == 0));
     }
 
     /// Resize both screen buffers to `size`, preserving their contents.
@@ -909,51 +938,77 @@ impl TerminalState {
     /// Alternate placements follow the cropped rows and retain their image scale.
     /// Both cursors are clamped into the new bounds with their wrap latch
     /// cleared, and an in-progress grapheme cluster is dropped.
-    pub fn resize(&mut self, size: PtySize) {
-        let alternate_fill = self.alternate_render.style.bg_fill();
+    pub fn resize_terminal_state(&mut self, pty_size: PtySize) {
+        let alternate_fill = self.alternate_render.style.get_background_fill_style();
 
-        self.resize_tab_stops(size.cols);
-        self.reflow_primary(size);
+        self.resize_tab_stops(pty_size.column_count);
+        self.reflow_primary(pty_size);
 
         // The alternate screen keeps what fits: crop off the top, pad at the
         // bottom, no history on either side. Row metadata follows each row.
-        let mut rows: Vec<(Vec<Cell>, RowMeta)> = self
+        let mut alternate_rows: Vec<(Vec<Cell>, RowMetadata)> = self
             .alternate
-            .rows()
+            .list_rows()
             .iter()
             .enumerate()
-            .map(|(row, cells)| (cells.clone(), self.alternate.row_meta(row as u16)))
+            .map(|(row_index, row_cells)| {
+                (
+                    row_cells.clone(),
+                    self.alternate.get_row_metadata(row_index as u16),
+                )
+            })
             .collect();
-        for (cells, _) in &mut rows {
-            crop_columns(cells, size.cols, alternate_fill);
+        for (row_cells, _) in &mut alternate_rows {
+            crop_columns(row_cells, pty_size.column_count, alternate_fill);
         }
-        let cropped_top = rows.len().saturating_sub(size.rows as usize);
-        rows.drain(..cropped_top);
+        let dropped_top_row_count = alternate_rows
+            .len()
+            .saturating_sub(pty_size.row_count as usize);
+        alternate_rows.drain(..dropped_top_row_count);
         self.alternate_cursor.row = self
             .alternate_cursor
             .row
-            .saturating_sub(u16::try_from(cropped_top).unwrap_or(u16::MAX));
-        rows.resize(
-            size.rows as usize,
+            .saturating_sub(u16::try_from(dropped_top_row_count).unwrap_or(u16::MAX));
+        alternate_rows.resize(
+            pty_size.row_count as usize,
             (
-                vec![Cell::blank_with(alternate_fill); size.cols as usize],
-                RowMeta::default(),
+                vec![Cell::blank_with(alternate_fill); pty_size.column_count as usize],
+                RowMetadata::default(),
             ),
         );
-        self.alternate = Arc::new(Grid::from_rows_with_meta(rows, size.cols, alternate_fill));
+        self.alternate = Arc::new(Grid::from_rows_with_metadata(
+            alternate_rows,
+            pty_size.column_count,
+            alternate_fill,
+        ));
 
-        self.remap_alternate_image_placements(|row, column| {
-            Some((row.checked_sub(u16::try_from(cropped_top).ok()?)?, column))
+        self.remap_alternate_image_placements(|row_index, column_index| {
+            Some((
+                row_index.checked_sub(u16::try_from(dropped_top_row_count).ok()?)?,
+                column_index,
+            ))
         });
-        self.rebuild_native_fragment_counts();
+        self.rebuild_native_fragment_count_by_image_source_id();
 
         // Clamp both cursors to the new bounds.
-        self.primary_cursor.row = min(self.primary_cursor.row, size.rows.saturating_sub(1));
-        self.primary_cursor.col = min(self.primary_cursor.col, size.cols.saturating_sub(1));
+        self.primary_cursor.row = min(
+            self.primary_cursor.row,
+            pty_size.row_count.saturating_sub(1),
+        );
+        self.primary_cursor.column = min(
+            self.primary_cursor.column,
+            pty_size.column_count.saturating_sub(1),
+        );
         self.primary_cursor.pending_wrap = false;
 
-        self.alternate_cursor.row = min(self.alternate_cursor.row, size.rows.saturating_sub(1));
-        self.alternate_cursor.col = min(self.alternate_cursor.col, size.cols.saturating_sub(1));
+        self.alternate_cursor.row = min(
+            self.alternate_cursor.row,
+            pty_size.row_count.saturating_sub(1),
+        );
+        self.alternate_cursor.column = min(
+            self.alternate_cursor.column,
+            pty_size.column_count.saturating_sub(1),
+        );
         self.alternate_cursor.pending_wrap = false;
 
         // Both scroll regions are dropped: the resized screen scrolls in full
@@ -968,21 +1023,21 @@ impl TerminalState {
     }
 
     /// Which screen (primary or alternate) is currently displayed and written to.
-    pub fn active_screen(&self) -> Screen {
-        self.active
+    pub fn get_active_screen(&self) -> Screen {
+        self.active_screen
     }
 
     /// Whether the primary screen — the one that keeps scrollback history — is
     /// the active one. `false` while a full-screen program holds the alternate
     /// screen, which keeps no history.
-    pub fn on_primary_screen(&self) -> bool {
-        matches!(self.active, Screen::Primary)
+    pub fn is_primary_screen_active(&self) -> bool {
+        matches!(self.active_screen, Screen::Primary)
     }
 
     /// The screen buffer currently displayed and written to — `primary` or
     /// `alternate`, per the active screen.
-    pub fn active_grid(&self) -> &Grid {
-        match self.active {
+    pub fn get_active_grid(&self) -> &Grid {
+        match self.active_screen {
             Screen::Primary => self.primary.as_ref(),
             Screen::Alternate => self.alternate.as_ref(),
         }
@@ -992,7 +1047,7 @@ impl TerminalState {
     /// buffer once (copy-on-write) if a render snapshot still shares it; the
     /// snapshot keeps the pre-write contents.
     pub(crate) fn active_grid_mut(&mut self) -> &mut Grid {
-        match self.active {
+        match self.active_screen {
             Screen::Primary => Arc::make_mut(&mut self.primary),
             Screen::Alternate => Arc::make_mut(&mut self.alternate),
         }
@@ -1002,8 +1057,8 @@ impl TerminalState {
     /// snapshot: clones the `Arc`, not the grid. The next write to this screen
     /// clones the buffer once, leaving this handle pointing at the frozen
     /// contents.
-    pub fn active_grid_arc(&self) -> Arc<Grid> {
-        match self.active {
+    pub fn get_active_grid_arc(&self) -> Arc<Grid> {
+        match self.active_screen {
             Screen::Primary => Arc::clone(&self.primary),
             Screen::Alternate => Arc::clone(&self.alternate),
         }
@@ -1016,12 +1071,15 @@ impl TerminalState {
     /// The scrollback belongs to the primary and stays while the alternate is
     /// up; the alternate's view holds its grid alone. A word or line grown from
     /// the alternate's top row stops at that row.
-    pub fn text_view(&self) -> TextView<'_> {
-        match self.active {
-            Screen::Primary => TextView::new(&self.scrollback, self.active_grid()),
-            Screen::Alternate => {
-                TextView::screen_only(self.active_grid(), self.scrollback.total_pushed())
+    pub fn get_text_view(&self) -> TextView<'_> {
+        match self.active_screen {
+            Screen::Primary => {
+                TextView::from_scrollback_and_grid(&self.scrollback, self.get_active_grid())
             }
+            Screen::Alternate => TextView::from_grid_without_scrollback(
+                self.get_active_grid(),
+                self.scrollback.get_total_pushed_line_count(),
+            ),
         }
     }
 
@@ -1033,10 +1091,10 @@ impl TerminalState {
     /// indicator, cursor suppression, and the row a selection resolves to all
     /// read it.
     pub fn effective_view_offset(&self, offset: usize) -> usize {
-        if !self.on_primary_screen() {
+        if !self.is_primary_screen_active() {
             return 0;
         }
-        offset.min(self.scrollback.len())
+        offset.min(self.scrollback.get_retained_line_count())
     }
 
     /// The active screen buffer the renderer should draw at scrollback view
@@ -1063,38 +1121,44 @@ impl TerminalState {
     pub fn scrolled_view(&self, offset: usize) -> (Arc<Grid>, usize) {
         let scrolled = self.effective_view_offset(offset);
         if scrolled == 0 {
-            return (self.active_grid_arc(), 0);
+            return (self.get_active_grid_arc(), 0);
         }
 
         let grid = self.primary.as_ref();
-        let (rows, cols) = grid.dimensions();
-        let history = self.scrollback.lines();
-        let retained = history.len();
+        let (row_count, column_count) = grid.get_grid_dimensions();
+        let history = self.scrollback.list_retained_lines();
+        let retained_line_count = history.len();
 
         // The visible window: the `scrolled` newest history rows, then the live
         // rows, capped at the screen height. The live grid alone is `rows` tall;
         // the chain always yields a full window and keeps row metadata.
-        let window: Vec<(Vec<Cell>, RowMeta)> = history
+        let window: Vec<(Vec<Cell>, RowMetadata)> = history
             .iter()
-            .skip(retained - scrolled)
-            .map(|(cells, meta)| (cells.clone(), *meta))
+            .skip(retained_line_count - scrolled)
+            .map(|(row_cells, row_metadata)| (row_cells.clone(), *row_metadata))
             .chain(
-                grid.rows()
+                grid.list_rows()
                     .iter()
                     .enumerate()
-                    .map(|(row, cells)| (cells.clone(), grid.row_meta(row as u16))),
+                    .map(|(row_index, row_cells)| {
+                        (row_cells.clone(), grid.get_row_metadata(row_index as u16))
+                    }),
             )
-            .take(rows as usize)
+            .take(row_count as usize)
             .collect();
         (
-            Arc::new(Grid::from_rows_with_meta(window, cols, Style::default())),
+            Arc::new(Grid::from_rows_with_metadata(
+                window,
+                column_count,
+                Style::default(),
+            )),
             scrolled,
         )
     }
 
     /// The window/tab title set by OSC 0/1/2, or `None` if the app has not set
     /// one.
-    pub fn title(&self) -> Option<&str> {
+    pub fn get_title(&self) -> Option<&str> {
         self.title.as_deref()
     }
 
@@ -1102,61 +1166,61 @@ impl TerminalState {
     /// decoded path), or `None` if none has been reported. The pane-spawn layer
     /// compares the host to the local machine before inheriting the path; a
     /// directory reported from a remote host (over SSH) is not opened locally.
-    pub fn current_cwd(&self) -> Option<&ReportedCwd> {
-        self.reported_cwd.as_ref()
+    pub fn get_current_working_directory(&self) -> Option<&ReportedWorkingDirectory> {
+        self.reported_working_directory.as_ref()
     }
 
     /// Whether the cursor should be drawn — toggled by DECTCEM (`?25`).
-    pub fn cursor_visible(&self) -> bool {
+    pub fn is_cursor_visible(&self) -> bool {
         self.active_cursor().is_visible
     }
 
     /// Whether bracketed-paste mode (`?2004`) is active — the input layer reads
     /// this to decide whether to bracket a paste in `ESC[200~`…`ESC[201~`.
-    pub fn bracketed_paste(&self) -> bool {
+    pub fn is_bracketed_paste_enabled(&self) -> bool {
         self.modes.bracketed_paste
     }
 
     /// The active mouse tracking level (`?9`/`?1000`/`?1002`/`?1003`) — the
     /// mouse layer reads this to decide which events to report to the app.
-    pub fn mouse_tracking(&self) -> MouseTracking {
+    pub fn get_mouse_tracking(&self) -> MouseTracking {
         self.modes.mouse_tracking
     }
 
     /// The active mouse report encoding (`?1005`/`?1006`/`?1015`) — the mouse
     /// layer reads this to format the coordinates of a report.
-    pub fn mouse_encoding(&self) -> MouseEncoding {
+    pub fn get_mouse_encoding(&self) -> MouseEncoding {
         self.modes.mouse_encoding
     }
 
     /// Whether alternate-scroll mode (`?1007`) is active — the mouse layer reads
     /// this to translate wheel motion into arrow keys on the alternate screen.
-    pub fn alt_scroll(&self) -> bool {
-        self.modes.alt_scroll
+    pub fn is_alternate_scroll_enabled(&self) -> bool {
+        self.modes.alternate_scroll
     }
 
     /// Whether autowrap (DECAWM `?7`) is active — `print` reads this to decide
     /// whether a glyph at the last column wraps onto a new line. Default on.
-    pub fn autowrap(&self) -> bool {
+    pub fn is_autowrap_enabled(&self) -> bool {
         self.modes.autowrap
     }
 
     /// Whether application-cursor-keys mode (DECCKM `?1`) is active — the input
     /// layer reads this to pick the arrow-key byte form.
-    pub fn app_cursor_keys(&self) -> bool {
-        self.modes.app_cursor_keys
+    pub fn are_application_cursor_keys_enabled(&self) -> bool {
+        self.modes.application_cursor_keys
     }
 
     /// Whether reverse-video mode (DECSCNM `?5`) is active — the renderer reads
     /// this to swap foreground and background across the screen.
-    pub fn reverse_video(&self) -> bool {
+    pub fn is_reverse_video_enabled(&self) -> bool {
         self.modes.reverse_video
     }
 
     /// Whether cursor-blink mode is active — the renderer reads this to blink
     /// the cursor cell. Set by `?12` (att610) and by DECSCUSR, whose style
     /// value says both shape and blink; the last of the two to arrive wins.
-    pub fn cursor_blink(&self) -> bool {
+    pub fn is_cursor_blink_enabled(&self) -> bool {
         self.modes.cursor_blink
     }
 
@@ -1164,14 +1228,14 @@ impl TerminalState {
     /// asked for no shape — the renderer reads this to pick the outer terminal's
     /// cursor style: vim's insert-mode bar shows as a bar, and a pane that never
     /// asked leaves the user's own cursor alone.
-    pub fn cursor_shape(&self) -> Option<CursorShape> {
+    pub fn get_cursor_shape(&self) -> Option<CursorShape> {
         self.modes.cursor_shape
     }
 
     /// The pane's scrollback history. A snapshot reads its truncation tally as
     /// `ScrollbackMeta::truncated`, and the renderer reads its rows to compose
     /// a scrolled-back view.
-    pub fn scrollback(&self) -> &Scrollback {
+    pub fn get_scrollback(&self) -> &Scrollback {
         &self.scrollback
     }
 
@@ -1184,15 +1248,15 @@ impl TerminalState {
     /// the queue empty. The caller writes the returned bytes back into the
     /// pane's PTY.
     #[must_use = "undelivered replies hang the querying app"]
-    pub(crate) fn take_replies(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.replies)
+    pub(crate) fn take_device_query_replies(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.device_query_replies)
     }
 
     /// The scroll region (top and bottom margins) for the active screen, or
     /// `None` if scrolling uses the full height. Margins are zero-based and
     /// inclusive.
-    pub fn scroll_region(&self) -> Option<(u16, u16)> {
-        match self.active {
+    pub fn get_scroll_region(&self) -> Option<(u16, u16)> {
+        match self.active_screen {
             Screen::Primary => self.primary_scroll_region,
             Screen::Alternate => self.alternate_scroll_region,
         }
@@ -1200,20 +1264,20 @@ impl TerminalState {
 
     /// Mutable access to the scroll region for the active screen.
     pub(crate) fn scroll_region_mut(&mut self) -> &mut Option<(u16, u16)> {
-        match self.active {
+        match self.active_screen {
             Screen::Primary => &mut self.primary_scroll_region,
             Screen::Alternate => &mut self.alternate_scroll_region,
         }
     }
 
-    /// The cursor position `(row, col)` on the active screen, both zero-based.
-    pub fn active_cursor_position(&self) -> (u16, u16) {
-        (self.active_cursor().row, self.active_cursor().col)
+    /// The cursor position `(row, column)` on the active screen, both zero-based.
+    pub fn get_active_cursor_position(&self) -> (u16, u16) {
+        (self.active_cursor().row, self.active_cursor().column)
     }
 
     /// The cursor for the active screen.
     fn active_cursor(&self) -> &Cursor {
-        match self.active {
+        match self.active_screen {
             Screen::Primary => &self.primary_cursor,
             Screen::Alternate => &self.alternate_cursor,
         }
@@ -1221,7 +1285,7 @@ impl TerminalState {
 
     /// Mutable access to the cursor for the active screen.
     fn active_cursor_mut(&mut self) -> &mut Cursor {
-        match self.active {
+        match self.active_screen {
             Screen::Primary => &mut self.primary_cursor,
             Screen::Alternate => &mut self.alternate_cursor,
         }
@@ -1229,7 +1293,7 @@ impl TerminalState {
 
     /// The render state (pen, charsets, GL slot) for the active screen.
     fn active_render(&self) -> &RenderState {
-        match self.active {
+        match self.active_screen {
             Screen::Primary => &self.primary_render,
             Screen::Alternate => &self.alternate_render,
         }
@@ -1237,7 +1301,7 @@ impl TerminalState {
 
     /// Mutable access to the render state for the active screen.
     fn active_render_mut(&mut self) -> &mut RenderState {
-        match self.active {
+        match self.active_screen {
             Screen::Primary => &mut self.primary_render,
             Screen::Alternate => &mut self.alternate_render,
         }
@@ -1245,29 +1309,35 @@ impl TerminalState {
 }
 
 /// Build the default tab stops at columns 0, 8, 16, and every eighth column.
-fn default_tab_stops(columns: u16) -> Vec<bool> {
-    (0..columns).map(|column| column % 8 == 0).collect()
+fn build_default_tab_stops(column_count: u16) -> Vec<bool> {
+    (0..column_count)
+        .map(|column_index| column_index % 8 == 0)
+        .collect()
 }
 
-/// `cell` rebuilt with display `width`, keeping its character, combining
-/// marks, and style. `Cell::new('가', 2, style)` with a `~` combining mark
+/// `terminal_cell` rebuilt with display `cell_width`, keeping its character, combining
+/// marks, and style. `Cell::from_character('가', 2, style)` with a `~` combining mark
 /// re-widthed to 1 gives the same character, mark, and style in one column.
-fn rebuilt_with_width(cell: &Cell, width: u8) -> Cell {
-    let mut out = Cell::new(cell.ch(), width, cell.style());
-    for mark in cell.combining() {
-        out.push_combining(*mark);
+fn rebuild_cell_with_width(terminal_cell: &Cell, cell_width: u8) -> Cell {
+    let mut rebuilt_cell = Cell::from_character(
+        terminal_cell.get_character(),
+        cell_width,
+        terminal_cell.get_style(),
+    );
+    for combining_mark in terminal_cell.list_combining_characters() {
+        rebuilt_cell.push_combining(*combining_mark);
     }
-    out
+    rebuilt_cell
 }
 
-/// Normalize `row` to exactly `cols` cells: truncate on the right or pad with
+/// Normalize `row_cells` to exactly `column_count` cells: truncate on the right or pad with
 /// blanks in `fill`. A wide glyph whose right (width-0) half falls past the new
 /// edge leaves its base as the last cell; that dangling base is blanked.
-fn crop_columns(row: &mut Vec<Cell>, cols: u16, fill: Style) {
-    row.resize(cols as usize, Cell::blank_with(fill));
-    if let Some(last) = row.last_mut() {
-        if last.width() > 1 {
-            *last = Cell::blank_with(fill);
+fn crop_columns(row_cells: &mut Vec<Cell>, column_count: u16, fill_style: Style) {
+    row_cells.resize(column_count as usize, Cell::blank_with(fill_style));
+    if let Some(trailing_cell) = row_cells.last_mut() {
+        if trailing_cell.get_display_width() > 1 {
+            *trailing_cell = Cell::blank_with(fill_style);
         }
     }
 }

@@ -50,7 +50,7 @@ use crate::wire::{Answer, Envelope, MaybeKnown, WireName, WireVariants};
 /// [`koshi_core::compat::SUPERVISOR_PROTOCOL`].
 ///
 /// Version 1 is the first version of the link.
-pub const SUPERVISOR_PROTOCOL_VERSION: u32 = SUPERVISOR_PROTOCOL.max;
+pub const SUPERVISOR_PROTOCOL_VERSION: u32 = SUPERVISOR_PROTOCOL.maximum_version;
 
 /// The lowest supervisor-link protocol version this build speaks. A peer whose
 /// highest is below this one is refused with
@@ -58,18 +58,19 @@ pub const SUPERVISOR_PROTOCOL_VERSION: u32 = SUPERVISOR_PROTOCOL.max;
 ///
 /// The floor is 1, the first version of the link. Raising it drops support
 /// for every build below it.
-pub const MIN_SUPERVISOR_PROTOCOL_VERSION: u32 = SUPERVISOR_PROTOCOL.min;
+pub const MIN_SUPERVISOR_PROTOCOL_VERSION: u32 = SUPERVISOR_PROTOCOL.minimum_version;
 
 /// One message from a session server to its supervisor.
 ///
 /// The envelope's own fields are fixed: decoding rejects any field it does not
 /// know; a misspelled `request_id` is an error.
 ///
-/// `K` is the request kind. A sender uses `SupervisorRequest`, where `K` is
+/// `RequestKind` is the request kind. A sender uses `SupervisorRequest`, where
+/// `RequestKind` is
 /// [`SupervisorRequestKind`]. The supervisor uses
 /// [`IncomingSupervisorRequest`], where a kind this build does not have
 /// arrives as [`MaybeKnown::Unknown`].
-pub type SupervisorRequest<K = SupervisorRequestKind> = Envelope<K>;
+pub type SupervisorRequest<RequestKind = SupervisorRequestKind> = Envelope<RequestKind>;
 
 /// A supervisor request as the supervisor reads it: the kind may name
 /// something this build does not have.
@@ -95,7 +96,8 @@ pub enum SupervisorRequestKind {
         /// speaks.
         max_protocol_version: u32,
         /// The secret the session server started this supervisor with.
-        token: ConnectionToken,
+        #[serde(rename = "token")]
+        connection_token: ConnectionToken,
     },
     /// Open a pane: the supervisor makes a pseudo-terminal of `size` and
     /// launches `spec` inside it. Answered with
@@ -104,9 +106,11 @@ pub enum SupervisorRequestKind {
         /// The pane the supervisor keys this child by.
         pane_id: PaneId,
         /// What to launch.
-        spec: SpawnSpec,
+        #[serde(rename = "spec")]
+        spawn_spec: SpawnSpec,
         /// The size the pane's terminal opens at.
-        size: PtySize,
+        #[serde(rename = "size")]
+        pty_size: PtySize,
     },
     /// Retune an open pane's terminal, which its child sees as a window-size
     /// change.
@@ -114,7 +118,8 @@ pub enum SupervisorRequestKind {
         /// The pane to retune.
         pane_id: PaneId,
         /// The new size.
-        size: PtySize,
+        #[serde(rename = "size")]
+        pty_size: PtySize,
     },
     /// Send bytes to a pane's child, which reach it as typed input.
     Write {
@@ -123,7 +128,8 @@ pub enum SupervisorRequestKind {
         /// The bytes to write. They travel as one base64 string, the shape
         /// [`bytes`](crate::bytes) spells out.
         #[serde(with = "crate::bytes")]
-        bytes: Vec<u8>,
+        #[serde(rename = "bytes")]
+        input_bytes: Vec<u8>,
     },
     /// End a pane's child and drop the pane. No output and no exit for that
     /// pane reaches the session server afterwards.
@@ -165,18 +171,18 @@ impl SupervisorRequestKind {
     /// speaks, lowest first, and `token`, the secret the session server started
     /// the supervisor with. Every caller builds its Hello here.
     #[must_use]
-    pub fn hello(token: ConnectionToken) -> SupervisorRequestKind {
+    pub fn build_hello_request(connection_token: ConnectionToken) -> SupervisorRequestKind {
         SupervisorRequestKind::Hello {
             min_protocol_version: MIN_SUPERVISOR_PROTOCOL_VERSION,
             max_protocol_version: SUPERVISOR_PROTOCOL_VERSION,
-            token,
+            connection_token,
         }
     }
 
     /// The kind's name, e.g. `"Spawn"`, with none of its payload: a Hello's
     /// token and a Write's bytes do not appear in it.
     #[must_use]
-    pub fn name(&self) -> &'static str {
+    pub fn get_request_kind_name(&self) -> &'static str {
         match self {
             SupervisorRequestKind::Hello { .. } => "Hello",
             SupervisorRequestKind::Spawn { .. } => "Spawn",
@@ -197,11 +203,12 @@ impl SupervisorRequestKind {
 /// The envelope's own fields are fixed: decoding rejects any field it does not
 /// know; a misspelled `request_id` is an error, not an absent one.
 ///
-/// `R` is the answer. The supervisor uses `SupervisorResponse`, where `R` is
+/// `Response` is the answer. The supervisor uses `SupervisorResponse`, where
+/// `Response` is
 /// [`SupervisorResult`]. A session server reads it inside
 /// [`IncomingSupervisorMessage`], where a result this build does not have
 /// arrives as [`MaybeKnown::Unknown`].
-pub type SupervisorResponse<R = SupervisorResult> = Answer<R>;
+pub type SupervisorResponse<Response = SupervisorResult> = Answer<Response>;
 
 /// One pane the supervisor holds, as [`ListPanes`](SupervisorRequestKind::ListPanes)
 /// reports it.
@@ -212,9 +219,11 @@ pub struct SupervisorPane {
     /// The pane this record is for.
     pub pane_id: PaneId,
     /// The process id of the pane's child.
-    pub pid: u32,
+    #[serde(rename = "pid")]
+    pub process_id: u32,
     /// The last size the pane's terminal was set to.
-    pub size: PtySize,
+    #[serde(rename = "size")]
+    pub pty_size: PtySize,
 }
 
 /// The answer to a supervisor request.
@@ -233,7 +242,8 @@ pub enum SupervisorResult {
     /// child is running under this process id.
     Spawned {
         /// The process id of the new child.
-        pid: u32,
+        #[serde(rename = "pid")]
+        process_id: u32,
     },
     /// Answers [`SupervisorRequestKind::ListPanes`]: one record per pane the
     /// supervisor holds.
@@ -269,7 +279,8 @@ pub enum SupervisorEvent {
         /// The bytes themselves. They travel as one base64 string, the shape
         /// [`bytes`](crate::bytes) spells out.
         #[serde(with = "crate::bytes")]
-        bytes: Vec<u8>,
+        #[serde(rename = "bytes")]
+        output_bytes: Vec<u8>,
     },
     /// A pane's child ended. It comes after the last
     /// [`Output`](SupervisorEvent::Output) for that pane.
@@ -277,7 +288,8 @@ pub enum SupervisorEvent {
         /// The pane whose child ended.
         pane_id: PaneId,
         /// How it ended.
-        status: ExitStatus,
+        #[serde(rename = "status")]
+        exit_status: ExitStatus,
     },
 }
 
@@ -285,7 +297,7 @@ impl SupervisorEvent {
     /// The event's name, e.g. `"Output"`, with none of its payload: an
     /// Output's bytes do not appear in it.
     #[must_use]
-    pub fn name(&self) -> &'static str {
+    pub fn get_event_name(&self) -> &'static str {
         match self {
             SupervisorEvent::Output { .. } => "Output",
             SupervisorEvent::Exited { .. } => "Exited",
@@ -298,17 +310,17 @@ impl SupervisorEvent {
 ///
 /// Every frame the supervisor sends is one of these two.
 ///
-/// `R` and `E` are the answer and the event. The supervisor uses
+/// `Response` and `Event` are the answer and the event. The supervisor uses
 /// `SupervisorMessage`, where they are [`SupervisorResult`] and
 /// [`SupervisorEvent`]. A session server uses [`IncomingSupervisorMessage`],
 /// where a variant this build does not have arrives as
 /// [`MaybeKnown::Unknown`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SupervisorMessage<R = SupervisorResult, E = SupervisorEvent> {
+pub enum SupervisorMessage<Response = SupervisorResult, Event = SupervisorEvent> {
     /// The answer to one request the session server sent.
-    Response(SupervisorResponse<R>),
+    Response(SupervisorResponse<Response>),
     /// Something a pane did that no request asked about.
-    Event(E),
+    Event(Event),
 }
 
 /// A supervisor message as a session server reads it: the answer or the event
@@ -324,8 +336,8 @@ const SUPERVISOR_WORDS: GateWords = GateWords {
     caller: "session server",
     versions: "supervisor-link protocol versions",
     channel: "link",
-    min_version: MIN_SUPERVISOR_PROTOCOL_VERSION,
-    max_version: SUPERVISOR_PROTOCOL_VERSION,
+    minimum_protocol_version: MIN_SUPERVISOR_PROTOCOL_VERSION,
+    maximum_protocol_version: SUPERVISOR_PROTOCOL_VERSION,
 };
 
 /// One supervisor link's handshake gate, held by the supervisor for the link's
@@ -340,8 +352,11 @@ impl SupervisorHandshake {
     /// A gate for one newly accepted supervisor link, closed until a Hello
     /// opens it.
     #[must_use]
-    pub fn new(expected: ConnectionToken) -> SupervisorHandshake {
-        SupervisorHandshake(VersionGate::new(expected, SUPERVISOR_WORDS))
+    pub fn from_connection_token(connection_token: ConnectionToken) -> SupervisorHandshake {
+        SupervisorHandshake(VersionGate::from_expected_token_and_words(
+            connection_token,
+            SUPERVISOR_WORDS,
+        ))
     }
 
     /// The link protocol version this link settled on, or `None` while no
@@ -349,8 +364,8 @@ impl SupervisorHandshake {
     ///
     /// The supervisor puts it in [`SupervisorResult::Hello`].
     #[must_use]
-    pub fn agreed(&self) -> Option<u32> {
-        self.0.agreed()
+    pub fn get_agreed_protocol_version(&self) -> Option<u32> {
+        self.0.get_agreed_protocol_version()
     }
 
     /// The refusal for a request kind this build does not have, named `name`.
@@ -361,8 +376,8 @@ impl SupervisorHandshake {
     /// [`UnsupportedKind`](crate::protocol::IpcErrorCode::UnsupportedKind)
     /// naming it, and the link keeps serving.
     #[must_use]
-    pub fn refuse_unknown(&self, name: &str) -> IpcErrorPayload {
-        self.0.refuse_unknown(name)
+    pub fn build_unknown_request_kind_error(&self, request_kind_name: &str) -> IpcErrorPayload {
+        self.0.build_unknown_request_kind_error(request_kind_name)
     }
 
     /// Check one incoming request kind against the link's state.
@@ -380,18 +395,25 @@ impl SupervisorHandshake {
     /// is not.
     ///
     /// `Ok(())` means the caller serves the request — a Hello is answered with
-    /// [`SupervisorResult::Hello`] carrying [`agreed`](Self::agreed). An `Err`
+    /// [`SupervisorResult::Hello`] carrying [`get_agreed_protocol_version`](Self::get_agreed_protocol_version). An `Err`
     /// carries the refusal to send back, and the gate keeps the state it had.
-    pub fn check(&mut self, kind: &SupervisorRequestKind) -> Result<(), IpcErrorPayload> {
-        match kind {
+    pub fn validate_request_kind(
+        &mut self,
+        request_kind: &SupervisorRequestKind,
+    ) -> Result<(), IpcErrorPayload> {
+        match request_kind {
             SupervisorRequestKind::Hello {
                 min_protocol_version,
                 max_protocol_version,
-                token,
-            } => self
+                connection_token,
+            } => self.0.validate_hello(
+                *min_protocol_version,
+                *max_protocol_version,
+                connection_token,
+            ),
+            request_kind => self
                 .0
-                .hello(*min_protocol_version, *max_protocol_version, token),
-            other => self.0.other(other.name()),
+                .validate_non_hello_request_kind(request_kind.get_request_kind_name()),
         }
     }
 }
@@ -399,37 +421,37 @@ impl SupervisorHandshake {
 /// The address the supervisor holding `session`'s panes listens on: the string
 /// [`Connection::connect`](crate::transport::Connection::connect) takes.
 ///
-/// `supervisor_pid` is the process id of that supervisor and is part of the
+/// `supervisor_process_id` is the process id of that supervisor and is part of the
 /// address: two supervisors of one session with different process ids listen
 /// at different addresses.
 ///
 /// On Unix this is a socket-file path, `session-<uuid>-pty-<pid>.sock` directly
-/// inside `runtime_dir`. On Windows it is the pipe name
-/// `koshi-pty-session-<uuid>-<pid>`, and `runtime_dir` goes unused. Callers
-/// resolve `runtime_dir` through `koshi_paths::runtime_dir()`.
+/// inside `runtime_directory`. On Windows it is the pipe name
+/// `koshi-pty-session-<uuid>-<pid>`, and `runtime_directory` goes unused. Callers
+/// resolve `runtime_directory` through `koshi_paths::resolve_runtime_directory()`.
 #[must_use]
-pub fn supervisor_socket_addr(
-    runtime_dir: &Path,
-    session: SessionId,
-    supervisor_pid: u32,
+pub fn compute_supervisor_socket_address(
+    runtime_directory: &Path,
+    session_id: SessionId,
+    supervisor_process_id: u32,
 ) -> String {
     #[cfg(unix)]
     {
-        runtime_dir
-            .join(format!("{session}-pty-{supervisor_pid}.sock"))
+        runtime_directory
+            .join(format!("{session_id}-pty-{supervisor_process_id}.sock"))
             .display()
             .to_string()
     }
     #[cfg(windows)]
     {
-        let _ = runtime_dir;
-        format!("koshi-pty-{session}-{supervisor_pid}")
+        let _ = runtime_directory;
+        format!("koshi-pty-{session_id}-{supervisor_process_id}")
     }
 }
 
 impl WireVariants for SupervisorRequestKind {
     /// Every supervisor request kind this build has: one entry per variant of
-    /// [`SupervisorRequestKind`], spelled as [`SupervisorRequestKind::name`]
+    /// [`SupervisorRequestKind`], spelled as [`SupervisorRequestKind::get_request_kind_name`]
     /// spells it.
     const VARIANTS: &'static [&'static str] = &[
         "Hello",
@@ -447,7 +469,7 @@ impl WireVariants for SupervisorRequestKind {
 
 impl WireName for SupervisorRequestKind {
     fn wire_name(&self) -> &'static str {
-        self.name()
+        self.get_request_kind_name()
     }
 }
 
@@ -473,13 +495,13 @@ impl WireName for SupervisorResult {
 
 impl WireVariants for SupervisorEvent {
     /// Every supervisor event this build has: one entry per variant of
-    /// [`SupervisorEvent`], spelled as [`SupervisorEvent::name`] spells it.
+    /// [`SupervisorEvent`], spelled as [`SupervisorEvent::get_event_name`] spells it.
     const VARIANTS: &'static [&'static str] = &["Output", "Exited"];
 }
 
 impl WireName for SupervisorEvent {
     fn wire_name(&self) -> &'static str {
-        self.name()
+        self.get_event_name()
     }
 }
 

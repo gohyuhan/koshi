@@ -14,65 +14,65 @@ use crate::pane::lifecycle::{PaneLifecycle, PaneLifecycleEvent};
 use crate::pane::state::PaneKind;
 
 #[test]
-fn a_duplicate_id_error_names_the_pane_in_its_message() {
-    let id = PaneId::new();
+fn a_duplicate_pane_id_error_names_the_pane_in_its_message() {
+    let pane_id = PaneId::new();
     let error = PaneRegistryError::DuplicateId {
-        id,
-        kind: PaneKind::Terminal,
+        pane_id,
+        pane_kind: PaneKind::Terminal,
     };
 
     assert_eq!(
         error.to_string(),
-        format!("pane-{} is already registered", id.as_uuid())
+        format!("pane-{} is already registered", pane_id.get_uuid())
     );
 }
 
 #[test]
 fn a_duplicate_id_error_takes_its_domain_from_the_pane_kind() {
     let terminal = PaneRegistryError::DuplicateId {
-        id: PaneId::new(),
-        kind: PaneKind::Terminal,
+        pane_id: PaneId::new(),
+        pane_kind: PaneKind::Terminal,
     };
     let plugin = PaneRegistryError::DuplicateId {
-        id: PaneId::new(),
-        kind: PaneKind::Plugin {
+        pane_id: PaneId::new(),
+        pane_kind: PaneKind::Plugin {
             plugin_id: PluginId::new(),
         },
     };
 
     assert_eq!(terminal.category(), DomainCategory::Terminal);
     assert_eq!(plugin.category(), DomainCategory::Plugin);
-    assert_eq!(terminal.severity(), Severity::Recoverable);
-    assert_eq!(plugin.severity(), Severity::Recoverable);
+    assert_eq!(terminal.get_severity(), Severity::Recoverable);
+    assert_eq!(plugin.get_severity(), Severity::Recoverable);
 }
 
 #[test]
-fn two_duplicate_id_errors_are_equal_only_when_id_and_kind_match() {
-    let id = PaneId::new();
+fn two_duplicate_pane_id_errors_are_equal_only_when_id_and_kind_match() {
+    let pane_id = PaneId::new();
     let base = PaneRegistryError::DuplicateId {
-        id,
-        kind: PaneKind::Terminal,
+        pane_id,
+        pane_kind: PaneKind::Terminal,
     };
 
     assert_eq!(
         base,
         PaneRegistryError::DuplicateId {
-            id,
-            kind: PaneKind::Terminal,
+            pane_id,
+            pane_kind: PaneKind::Terminal,
         }
     );
     assert_ne!(
         base,
         PaneRegistryError::DuplicateId {
-            id: PaneId::new(),
-            kind: PaneKind::Terminal,
+            pane_id: PaneId::new(),
+            pane_kind: PaneKind::Terminal,
         }
     );
     assert_ne!(
         base,
         PaneRegistryError::DuplicateId {
-            id,
-            kind: PaneKind::Plugin {
+            pane_id,
+            pane_kind: PaneKind::Plugin {
                 plugin_id: PluginId::new(),
             },
         }
@@ -81,52 +81,61 @@ fn two_duplicate_id_errors_are_equal_only_when_id_and_kind_match() {
 
 #[test]
 fn two_invalid_transitions_are_equal_only_when_state_event_and_kind_match() {
-    let at = SystemTime::UNIX_EPOCH;
-    let base = InvalidTransition {
-        from: PaneLifecycle::Running,
-        event: PaneLifecycleEvent::ProcessExited { code: Some(1), at },
-        kind: PaneKind::Terminal,
+    let exited_at = SystemTime::UNIX_EPOCH;
+    let base_error = InvalidTransitionError {
+        previous_lifecycle: PaneLifecycle::Running,
+        lifecycle_event: PaneLifecycleEvent::ProcessExited {
+            exit_code: Some(1),
+            exited_at,
+        },
+        pane_kind: PaneKind::Terminal,
     };
 
     assert_eq!(
-        base,
-        InvalidTransition {
-            from: PaneLifecycle::Running,
-            event: PaneLifecycleEvent::ProcessExited { code: Some(1), at },
-            kind: PaneKind::Terminal,
+        base_error,
+        InvalidTransitionError {
+            previous_lifecycle: PaneLifecycle::Running,
+            lifecycle_event: PaneLifecycleEvent::ProcessExited {
+                exit_code: Some(1),
+                exited_at
+            },
+            pane_kind: PaneKind::Terminal,
         }
     );
     assert_ne!(
-        base,
-        InvalidTransition {
-            from: PaneLifecycle::Spawning,
-            ..base
+        base_error,
+        InvalidTransitionError {
+            previous_lifecycle: PaneLifecycle::Spawning,
+            ..base_error
         }
     );
     assert_ne!(
-        base,
-        InvalidTransition {
-            event: PaneLifecycleEvent::ProcessExited { code: Some(2), at },
-            ..base
+        base_error,
+        InvalidTransitionError {
+            lifecycle_event: PaneLifecycleEvent::ProcessExited {
+                exit_code: Some(2),
+                exited_at
+            },
+            ..base_error
         }
     );
     assert_ne!(
-        base,
-        InvalidTransition {
-            kind: PaneKind::Plugin {
+        base_error,
+        InvalidTransitionError {
+            pane_kind: PaneKind::Plugin {
                 plugin_id: PluginId::new(),
             },
-            ..base
+            ..base_error
         }
     );
 }
 
 #[test]
 fn an_invalid_transition_names_the_state_and_event_in_its_message() {
-    let error = InvalidTransition {
-        from: PaneLifecycle::Spawning,
-        event: PaneLifecycleEvent::Cleaned,
-        kind: PaneKind::Terminal,
+    let error = InvalidTransitionError {
+        previous_lifecycle: PaneLifecycle::Spawning,
+        lifecycle_event: PaneLifecycleEvent::Cleaned,
+        pane_kind: PaneKind::Terminal,
     };
 
     assert_eq!(
@@ -137,32 +146,38 @@ fn an_invalid_transition_names_the_state_and_event_in_its_message() {
 
 #[test]
 fn an_invalid_transition_carries_its_payload_in_the_message() {
-    let at = SystemTime::UNIX_EPOCH;
-    let error = InvalidTransition {
-        from: PaneLifecycle::Running,
-        event: PaneLifecycleEvent::ProcessExited { code: Some(3), at },
-        kind: PaneKind::Terminal,
+    let exited_at = SystemTime::UNIX_EPOCH;
+    let error = InvalidTransitionError {
+        previous_lifecycle: PaneLifecycle::Running,
+        lifecycle_event: PaneLifecycleEvent::ProcessExited {
+            exit_code: Some(3),
+            exited_at,
+        },
+        pane_kind: PaneKind::Terminal,
     };
 
     assert_eq!(
         error.to_string(),
         format!(
             "illegal pane lifecycle transition from Running on {:?}",
-            PaneLifecycleEvent::ProcessExited { code: Some(3), at }
+            PaneLifecycleEvent::ProcessExited {
+                exit_code: Some(3),
+                exited_at
+            }
         )
     );
 }
 
 #[test]
 fn an_invalid_transition_takes_its_domain_from_the_pane_kind() {
-    let plugin = InvalidTransition {
-        from: PaneLifecycle::Removed,
-        event: PaneLifecycleEvent::ProcessStarted,
-        kind: PaneKind::Plugin {
+    let plugin = InvalidTransitionError {
+        previous_lifecycle: PaneLifecycle::Removed,
+        lifecycle_event: PaneLifecycleEvent::ProcessStarted,
+        pane_kind: PaneKind::Plugin {
             plugin_id: PluginId::new(),
         },
     };
 
     assert_eq!(plugin.category(), DomainCategory::Plugin);
-    assert_eq!(plugin.severity(), Severity::Recoverable);
+    assert_eq!(plugin.get_severity(), Severity::Recoverable);
 }

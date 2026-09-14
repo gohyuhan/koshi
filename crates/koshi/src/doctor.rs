@@ -2,7 +2,7 @@
 //! per check.
 //!
 //! Every fact the checks read is gathered once into a
-//! [`crate::doctor::Context`] — the platform directories, `koshi.kdl`, the
+//! [`crate::doctor::DoctorContext`] — the platform directories, `koshi.kdl`, the
 //! environment variables a pane inherits, the remote access grant file, and
 //! the running router. The checks themselves read only that context and touch
 //! the filesystem only where a check names a file operation of its own.
@@ -10,7 +10,7 @@
 //! The checks run in print order, each one a name and a function. A check
 //! answers [`crate::doctor::Verdict::Ok`], [`crate::doctor::Verdict::Warn`] or
 //! [`crate::doctor::Verdict::Fail`] with the fact behind it and what to do
-//! about it. The whole table reaches stdout before [`crate::doctor::run`]
+//! about it. The whole table reaches stdout before [`crate::doctor::run_doctor_checks`]
 //! returns, and a run with any [`crate::doctor::Verdict::Fail`] row ends in
 //! [`koshi_link::error::CliError::Runtime`].
 
@@ -20,14 +20,14 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use koshi_core::process::SpawnSpec;
-use koshi_ipc::remote_tokens::{store_path, TokenStore};
+use koshi_ipc::remote_tokens::{resolve_token_store_path, TokenStore};
 use serde::Serialize;
 
-use crate::cli::FormatArg;
+use crate::cli::OutputFormat;
 use crate::output;
 use koshi_link::error::CliError;
-use koshi_link::router_client::{running_router_remote_connections, RemoteConnections};
-use koshi_paths::RuntimeDirRule;
+use koshi_link::router_client::{query_running_router_remote_connections, RemoteConnections};
+use koshi_paths::RuntimeDirectoryRule;
 
 /// What one check concluded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -43,7 +43,7 @@ pub enum Verdict {
 
 /// One check's answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Outcome {
+pub struct DoctorOutcome {
     /// What the check concluded.
     pub verdict: Verdict,
     /// The fact behind the verdict, on one line and holding no newline.
@@ -56,102 +56,102 @@ pub struct Outcome {
     pub detail: Option<String>,
 }
 
-impl Outcome {
+impl DoctorOutcome {
     /// A [`Verdict::Ok`] answer carrying `reason`, no help and no detail.
-    fn ok(reason: String) -> Outcome {
-        Outcome {
+    fn build_success_outcome(reason: String) -> DoctorOutcome {
+        DoctorOutcome {
             verdict: Verdict::Ok,
-            reason: one_line(reason),
+            reason: format_single_line(reason),
             help: None,
             detail: None,
         }
     }
 
     /// A [`Verdict::Warn`] answer carrying `reason` and `help`, and no detail.
-    fn warn(reason: String, help: &str) -> Outcome {
-        Outcome {
+    fn build_warning_outcome(reason: String, help: &str) -> DoctorOutcome {
+        DoctorOutcome {
             verdict: Verdict::Warn,
-            reason: one_line(reason),
+            reason: format_single_line(reason),
             help: Some(help.to_string()),
             detail: None,
         }
     }
 
     /// A [`Verdict::Fail`] answer carrying `reason` and `help`, and no detail.
-    fn fail(reason: String, help: &str) -> Outcome {
-        Outcome {
+    fn build_failure_outcome(reason: String, help: &str) -> DoctorOutcome {
+        DoctorOutcome {
             verdict: Verdict::Fail,
-            reason: one_line(reason),
+            reason: format_single_line(reason),
             help: Some(help.to_string()),
             detail: None,
         }
     }
 
     /// The same answer carrying `detail` as the full text behind its `reason`.
-    fn with_detail(mut self, detail: String) -> Outcome {
+    fn with_detail(mut self, detail: String) -> DoctorOutcome {
         self.detail = Some(detail);
         self
     }
 }
 
 /// One check: what it is called, and the function that runs it.
-struct Check {
+struct DoctorCheck {
     /// The name printed in the `check` column, e.g. `"runtime directory"`.
-    name: &'static str,
+    check_name: &'static str,
     /// Runs the check against the gathered context.
-    run: fn(&Context) -> Outcome,
+    run_check: fn(&DoctorContext) -> DoctorOutcome,
 }
 
 /// Every check `koshi doctor` runs, in print order.
-const CHECKS: &[Check] = &[
-    Check {
-        name: "config",
-        run: check_config,
+const DOCTOR_CHECKS: &[DoctorCheck] = &[
+    DoctorCheck {
+        check_name: "config",
+        run_check: check_config,
     },
-    Check {
-        name: "shell",
-        run: check_shell,
+    DoctorCheck {
+        check_name: "shell",
+        run_check: check_shell,
     },
-    Check {
-        name: "terminal",
-        run: check_terminal,
+    DoctorCheck {
+        check_name: "terminal",
+        run_check: check_terminal,
     },
-    Check {
-        name: "runtime directory",
-        run: check_runtime_dir,
+    DoctorCheck {
+        check_name: "runtime directory",
+        run_check: check_runtime_directory,
     },
-    Check {
-        name: "log directory",
-        run: check_log_dir,
+    DoctorCheck {
+        check_name: "log directory",
+        run_check: check_log_directory,
     },
-    Check {
-        name: "plugins directory",
-        run: check_plugins_dir,
+    DoctorCheck {
+        check_name: "plugins directory",
+        run_check: check_plugins_directory,
     },
-    Check {
-        name: "router",
-        run: check_router,
+    DoctorCheck {
+        check_name: "router",
+        run_check: check_router,
     },
-    Check {
-        name: "session directory",
-        run: check_session_directory,
+    DoctorCheck {
+        check_name: "session directory",
+        run_check: check_session_directory,
     },
-    Check {
-        name: "remote access",
-        run: check_remote_access,
+    DoctorCheck {
+        check_name: "remote access",
+        run_check: check_remote_access,
     },
-    Check {
-        name: "remote connections",
-        run: check_remote_connections,
+    DoctorCheck {
+        check_name: "remote connections",
+        run_check: check_remote_connections,
     },
 ];
 
 /// The environment variable naming the program a new pane runs: `"SHELL"` on
 /// Unix, `"COMSPEC"` on Windows.
 #[cfg(not(windows))]
-const SHELL_VAR: &str = "SHELL";
+const SHELL_ENVIRONMENT_VARIABLE: &str = "SHELL";
 #[cfg(windows)]
-const SHELL_VAR: &str = "COMSPEC";
+const SHELL_ENVIRONMENT_VARIABLE: &str = "COMSPEC";
 
 /// Where the program a new pane runs was read from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,135 +165,145 @@ pub enum ShellSource {
 }
 
 /// Everything the checks read, gathered once.
-pub struct Context {
+pub struct DoctorContext {
     /// The directory `koshi.kdl` lives in, or `None` when this machine
     /// reports no home directory.
-    pub config_dir: Option<PathBuf>,
+    pub config_directory: Option<PathBuf>,
     /// The private runtime directory holding the endpoint files, or `None`
     /// when this machine reports no home directory.
-    /// [`Context::runtime_dir_rule`] names the rule that produced it.
-    pub runtime_dir: Option<PathBuf>,
-    /// The rule that produced [`Context::runtime_dir`], or `None` when this
+    /// [`DoctorContext::runtime_directory_rule`] names the rule that produced it.
+    pub runtime_directory: Option<PathBuf>,
+    /// The rule that produced [`DoctorContext::runtime_directory`], or `None` when this
     /// machine reports no home directory.
-    pub runtime_dir_rule: Option<RuntimeDirRule>,
+    pub runtime_directory_rule: Option<RuntimeDirectoryRule>,
     /// The runtime directory's permission bits, `None` on Windows, when this
     /// machine reports no home directory, and when the directory could not be
     /// read.
-    pub runtime_mode: Option<u32>,
+    pub runtime_directory_mode: Option<u32>,
     /// The directory koshi writes its log files in, or `None` when this
     /// machine reports no home directory.
-    pub log_dir: Option<PathBuf>,
+    pub log_directory: Option<PathBuf>,
     /// `plugins` under the config directory, or `None` when this machine
     /// reports no home directory.
-    pub plugins_dir: Option<PathBuf>,
+    pub plugins_directory: Option<PathBuf>,
     /// The machine-wide directory the shared session sockets live in:
     /// `koshi.kdl`'s `shared-sessions-dir` when it names one, else this
     /// platform's own. `None` when neither names one.
-    pub shared_dir: Option<PathBuf>,
+    pub shared_directory: Option<PathBuf>,
     /// The program a new pane runs.
     pub shell: PathBuf,
-    /// Where [`Context::shell`] was read from.
+    /// Where [`DoctorContext::shell`] was read from.
     pub shell_source: ShellSource,
     /// `PATH`, used to find a shell named without a directory.
-    pub path: Option<OsString>,
+    pub path_entries: Option<OsString>,
     /// `TERM`, or `None` when it is unset or empty.
     pub term: Option<String>,
     /// `COLORTERM`, or `None` when it is unset or empty.
     pub colorterm: Option<String>,
     /// `koshi.kdl`'s `allow-other-users`.
-    pub allow_other_users: bool,
+    pub is_other_user_access_allowed: bool,
     /// `koshi.kdl`'s `remote-listen` address, or `None` when it names none.
     pub remote_listen: Option<String>,
     /// `koshi.kdl`'s `logging.enabled`.
-    pub logging_on: bool,
+    pub is_logging_enabled: bool,
     /// How many remote access grants still stand, or the message naming why
     /// they could not be read.
-    pub grants: Result<usize, String>,
+    pub standing_grant_count: Result<usize, String>,
     /// What asking the running router produced.
-    pub router: RemoteConnections,
+    pub router_connections: RemoteConnections,
 }
 
-impl Context {
+impl DoctorContext {
     /// Read every fact the checks need from this machine: the platform
     /// directories, the rule that produced the runtime directory, `koshi.kdl`,
     /// the environment, the grant file, and the running router. Creates
     /// nothing and starts no router.
     #[must_use]
-    pub fn of_this_machine() -> Context {
-        let config_dir = koshi_paths::config_dir();
-        let (runtime_dir, runtime_dir_rule) = koshi_paths::runtime_dir_with_rule().unzip();
-        let runtime_mode = runtime_dir.as_deref().and_then(directory_mode);
-        let plugins_dir = config_dir.as_ref().map(|dir| dir.join("plugins"));
-        let server = koshi_link::config::server_config_now();
-        let shared_dir = server
-            .shared_sessions_dir
+    pub fn from_current_machine() -> DoctorContext {
+        let config_directory = koshi_paths::resolve_config_directory();
+        let (runtime_directory, runtime_directory_rule) =
+            koshi_paths::resolve_runtime_directory_with_rule().unzip();
+        let runtime_directory_mode = runtime_directory.as_deref().and_then(read_directory_mode);
+        let plugins_directory = config_directory
+            .as_ref()
+            .map(|config_directory| config_directory.join("plugins"));
+        let server_config = koshi_link::config::load_current_server_config();
+        let shared_directory = server_config
+            .shared_sessions_directory
             .clone()
-            .or_else(koshi_paths::shared_sessions_dir);
-        let grants = match koshi_paths::data_dir() {
-            Some(data_dir) => match TokenStore::read(&store_path(&data_dir)) {
-                Ok(store) => Ok(standing_grants(&store, SystemTime::now())),
-                Err(error) => Err(error.to_string()),
-            },
+            .or_else(koshi_paths::resolve_shared_sessions_directory);
+        let standing_grant_count = match koshi_paths::resolve_data_directory() {
+            Some(data_directory) => {
+                match TokenStore::load_token_store_from_path(&resolve_token_store_path(
+                    &data_directory,
+                )) {
+                    Ok(token_store) => Ok(count_standing_grants(&token_store, SystemTime::now())),
+                    Err(store_error) => Err(store_error.to_string()),
+                }
+            }
             None => Err("this machine reports no home directory".to_string()),
         };
-        let router = match runtime_dir.as_deref() {
-            Some(dir) => running_router_remote_connections(dir),
+        let router_connections = match runtime_directory.as_deref() {
+            Some(runtime_directory) => query_running_router_remote_connections(runtime_directory),
             None => RemoteConnections::NotRunning,
         };
-        Context {
-            config_dir,
-            runtime_dir,
-            runtime_dir_rule,
-            runtime_mode,
-            log_dir: koshi_observability::logging::log_dir(),
-            plugins_dir,
-            shared_dir,
-            shell: match &server.terminal.default_shell {
+        DoctorContext {
+            config_directory,
+            runtime_directory,
+            runtime_directory_rule,
+            runtime_directory_mode,
+            log_directory: koshi_observability::logging::resolve_log_directory(),
+            plugins_directory,
+            shared_directory,
+            shell: match &server_config.terminal.default_shell {
                 Some(program) => PathBuf::from(program),
                 None => SpawnSpec::default_shell(None, BTreeMap::new()).program,
             },
-            shell_source: match &server.terminal.default_shell {
+            shell_source: match &server_config.terminal.default_shell {
                 Some(_) => ShellSource::Config,
-                None if std::env::var_os(SHELL_VAR).is_some_and(|value| !value.is_empty()) => {
+                None if std::env::var_os(SHELL_ENVIRONMENT_VARIABLE)
+                    .is_some_and(|environment_value| !environment_value.is_empty()) =>
+                {
                     ShellSource::Environment
                 }
                 None => ShellSource::Fallback,
             },
-            path: std::env::var_os("PATH"),
+            path_entries: std::env::var_os("PATH"),
             term: std::env::var_os("TERM")
-                .and_then(|value| value.into_string().ok())
-                .filter(|value| !value.is_empty()),
+                .and_then(|environment_value| environment_value.into_string().ok())
+                .filter(|environment_value| !environment_value.is_empty()),
             colorterm: std::env::var_os("COLORTERM")
-                .and_then(|value| value.into_string().ok())
-                .filter(|value| !value.is_empty()),
-            allow_other_users: server.allow_other_users,
-            remote_listen: server.remote_listen,
-            logging_on: server.logging.enabled,
-            grants,
-            router,
+                .and_then(|environment_value| environment_value.into_string().ok())
+                .filter(|environment_value| !environment_value.is_empty()),
+            is_other_user_access_allowed: server_config.should_allow_other_users,
+            remote_listen: server_config.remote_listen,
+            is_logging_enabled: server_config.logging.is_enabled,
+            standing_grant_count,
+            router_connections,
         }
     }
 }
 
 /// One row of the answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct CheckRow {
+pub struct DoctorCheckRow {
     /// The check's name.
-    pub name: &'static str,
+    #[serde(rename = "name")]
+    pub check_name: &'static str,
     /// What the check concluded. `--format json` prints its fields beside
-    /// `name` in the same object.
+    /// `check_name`, serialized as `name`, in the same object.
     #[serde(flatten)]
-    pub outcome: Outcome,
+    pub outcome: DoctorOutcome,
 }
 
-/// Run every check against `context`, in print order.
+/// Run every check against `doctor_context`, in print order.
 #[must_use]
-pub fn rows(context: &Context) -> Vec<CheckRow> {
-    CHECKS
+pub fn build_doctor_check_rows(doctor_context: &DoctorContext) -> Vec<DoctorCheckRow> {
+    DOCTOR_CHECKS
         .iter()
-        .map(|check| CheckRow {
-            name: check.name,
-            outcome: (check.run)(context),
+        .map(|doctor_check| DoctorCheckRow {
+            check_name: doctor_check.check_name,
+            outcome: (doctor_check.run_check)(doctor_context),
         })
         .collect()
 }
@@ -303,89 +313,101 @@ pub fn rows(context: &Context) -> Vec<CheckRow> {
 /// # Errors
 /// [`CliError::Runtime`] when any row is [`Verdict::Fail`], after the whole
 /// answer has been printed. A [`Verdict::Warn`] row never fails the run.
-pub fn run(format: FormatArg) -> Result<(), CliError> {
-    let context = Context::of_this_machine();
-    let rows = rows(&context);
-    print!("{}", output::render_doctor(&rows, format));
-    failed(&rows).map_or(Ok(()), Err)
+pub fn run_doctor_checks(output_format: OutputFormat) -> Result<(), CliError> {
+    let doctor_context = DoctorContext::from_current_machine();
+    let check_rows = build_doctor_check_rows(&doctor_context);
+    print!("{}", output::render_doctor(&check_rows, output_format));
+    build_failure_outcome_from_check_rows(&check_rows).map_or(Ok(()), Err)
 }
 
 /// The failure a run ends with when any row failed, naming how many did, or
 /// `None` when every row is ok or warn.
-fn failed(rows: &[CheckRow]) -> Option<CliError> {
-    let count = rows
+fn build_failure_outcome_from_check_rows(check_rows: &[DoctorCheckRow]) -> Option<CliError> {
+    let failed_check_count = check_rows
         .iter()
-        .filter(|row| row.outcome.verdict == Verdict::Fail)
+        .filter(|check_row| check_row.outcome.verdict == Verdict::Fail)
         .count();
-    if count == 0 {
+    if failed_check_count == 0 {
         return None;
     }
     Some(CliError::Runtime {
-        detail: format!("{} failed", counted(count, "check")),
+        detail: format!(
+            "{} failed",
+            format_counted_noun(failed_check_count, "check")
+        ),
     })
 }
 
-fn check_config(context: &Context) -> Outcome {
-    let Some(dir) = context.config_dir.as_deref() else {
-        return no_home_directory("config");
+fn check_config(doctor_context: &DoctorContext) -> DoctorOutcome {
+    let Some(config_directory) = doctor_context.config_directory.as_deref() else {
+        return build_no_home_directory_outcome("config");
     };
-    let report = crate::config_command::validate_dir(dir);
-    if !report.errors.is_empty() {
-        return Outcome::fail(
-            report.errors.join("; "),
+    let config_report = crate::config_command::validate_config_directory(config_directory);
+    if !config_report.validation_errors.is_empty() {
+        return DoctorOutcome::build_failure_outcome(
+            config_report.validation_errors.join("; "),
             "run koshi config check to see each file",
         );
     }
-    if report.lines.is_empty() {
-        return Outcome::ok(format!("no config file is present in {}", dir.display()));
+    if config_report.report_lines.is_empty() {
+        return DoctorOutcome::build_success_outcome(format!(
+            "no config file is present in {}",
+            config_directory.display()
+        ));
     }
-    Outcome::ok(format!(
+    DoctorOutcome::build_success_outcome(format!(
         "{} validated",
-        counted(report.lines.len(), "config file")
+        format_counted_noun(config_report.report_lines.len(), "config file")
     ))
 }
 
-fn check_shell(context: &Context) -> Outcome {
-    let shell = context.shell.display();
-    match shell_state(&context.shell, context.path.as_ref()) {
-        ShellState::NotExecutable => Outcome::fail(
-            format!("{shell} is on this machine and carries no execute bit"),
-            &format!("run chmod +x {shell}"),
+fn check_shell(doctor_context: &DoctorContext) -> DoctorOutcome {
+    let shell_path = doctor_context.shell.display();
+    match inspect_shell_program(&doctor_context.shell, doctor_context.path_entries.as_ref()) {
+        ShellAvailability::NotExecutable => DoctorOutcome::build_failure_outcome(
+            format!("{shell_path} is on this machine and carries no execute bit"),
+            &format!("run chmod +x {shell_path}"),
         ),
-        ShellState::Missing => match context.shell_source {
-            ShellSource::Config => Outcome::fail(
-                format!("koshi.kdl names {shell}, which is not on this machine"),
+        ShellAvailability::Missing => match doctor_context.shell_source {
+            ShellSource::Config => DoctorOutcome::build_failure_outcome(
+                format!("koshi.kdl names {shell_path}, which is not on this machine"),
                 "set terminal.default-shell in koshi.kdl to a shell that exists",
             ),
-            ShellSource::Environment | ShellSource::Fallback => Outcome::fail(
-                format!("a new pane would run {shell}, which is not on this machine"),
-                &format!("set {SHELL_VAR} to a shell that exists"),
-            ),
-        },
-        ShellState::Runnable => match context.shell_source {
-            ShellSource::Config => {
-                Outcome::ok(format!("koshi.kdl names {shell}, which a new pane runs"))
+            ShellSource::Environment | ShellSource::Fallback => {
+                DoctorOutcome::build_failure_outcome(
+                    format!("a new pane would run {shell_path}, which is not on this machine"),
+                    &format!("set {SHELL_ENVIRONMENT_VARIABLE} to a shell that exists"),
+                )
             }
-            ShellSource::Environment => Outcome::ok(format!("a new pane runs {shell}")),
-            ShellSource::Fallback => Outcome::warn(
-                format!("{SHELL_VAR} is not set, so a new pane runs {shell}"),
-                &format!("set {SHELL_VAR} to the shell you want a new pane to run"),
+        },
+        ShellAvailability::Runnable => match doctor_context.shell_source {
+            ShellSource::Config => DoctorOutcome::build_success_outcome(format!(
+                "koshi.kdl names {shell_path}, which a new pane runs"
+            )),
+            ShellSource::Environment => {
+                DoctorOutcome::build_success_outcome(format!("a new pane runs {shell_path}"))
+            }
+            ShellSource::Fallback => DoctorOutcome::build_warning_outcome(
+                format!("{SHELL_ENVIRONMENT_VARIABLE} is not set, so a new pane runs {shell_path}"),
+                &format!(
+                    "set {SHELL_ENVIRONMENT_VARIABLE} to the shell you want a new pane to run"
+                ),
             ),
         },
     }
 }
 
-fn check_terminal(context: &Context) -> Outcome {
+fn check_terminal(doctor_context: &DoctorContext) -> DoctorOutcome {
     let help = "set TERM before running koshi, for example TERM=xterm-256color";
-    match context.term.as_deref() {
-        None => Outcome::warn("TERM is not set".to_string(), help),
-        Some("dumb") => Outcome::warn(
+    match doctor_context.term.as_deref() {
+        None => DoctorOutcome::build_warning_outcome("TERM is not set".to_string(), help),
+        Some("dumb") => DoctorOutcome::build_warning_outcome(
             "TERM is dumb, which names a terminal with no cursor control".to_string(),
             help,
         ),
-        Some(term) => Outcome::ok(format!(
+        Some(term) => DoctorOutcome::build_success_outcome(format!(
             "TERM is {term}, COLORTERM is {}",
-            context.colorterm.as_deref().unwrap_or("not set")
+            doctor_context.colorterm.as_deref().unwrap_or("not set")
         )),
     }
 }
@@ -395,390 +417,430 @@ fn check_terminal(context: &Context) -> Outcome {
 ///
 /// `/tmp/koshi-501` ready, named by `KOSHI_RUNTIME_DIR`, gives the reason
 /// `"/tmp/koshi-501 is ready; KOSHI_RUNTIME_DIR names it"`.
-fn check_runtime_dir(context: &Context) -> Outcome {
-    let (Some(dir), Some(rule)) = (context.runtime_dir.as_deref(), context.runtime_dir_rule) else {
-        return no_home_directory("runtime");
+fn check_runtime_directory(doctor_context: &DoctorContext) -> DoctorOutcome {
+    let (Some(runtime_directory), Some(runtime_directory_rule)) = (
+        doctor_context.runtime_directory.as_deref(),
+        doctor_context.runtime_directory_rule,
+    ) else {
+        return build_no_home_directory_outcome("runtime");
     };
-    let mut outcome = runtime_dir_state(dir, context.runtime_mode);
-    outcome.reason = one_line(format!(
+    let mut check_outcome =
+        inspect_runtime_directory(runtime_directory, doctor_context.runtime_directory_mode);
+    check_outcome.reason = format_single_line(format!(
         "{}; {}",
-        outcome.reason,
-        runtime_dir_rule_phrase(rule)
+        check_outcome.reason,
+        format_runtime_directory_rule(runtime_directory_rule)
     ));
-    outcome
+    check_outcome
 }
 
-fn check_router(context: &Context) -> Outcome {
-    match &context.router {
-        RemoteConnections::Answered(_) => {
-            Outcome::ok("a router answers on its control socket".to_string())
+fn check_router(doctor_context: &DoctorContext) -> DoctorOutcome {
+    match &doctor_context.router_connections {
+        RemoteConnections::Answered(_) => DoctorOutcome::build_success_outcome(
+            "a router answers on its control socket".to_string(),
+        ),
+        RemoteConnections::NotRunning => {
+            DoctorOutcome::build_success_outcome("no koshi is running".to_string())
         }
-        RemoteConnections::NotRunning => Outcome::ok("no koshi is running".to_string()),
-        RemoteConnections::OlderBuild => Outcome::warn(
+        RemoteConnections::OlderBuild => DoctorOutcome::build_warning_outcome(
             "the running router is an older koshi build".to_string(),
             "end every koshi process on this machine and start one again",
         ),
-        RemoteConnections::NoAnswer { detail } => Outcome::fail(
+        RemoteConnections::NoAnswer {
+            error_detail: router_error_detail,
+        } => DoctorOutcome::build_failure_outcome(
             "a router is listening and did not answer".to_string(),
             "end every koshi process on this machine and start one again",
         )
-        .with_detail(detail.clone()),
+        .with_detail(router_error_detail.clone()),
     }
 }
 
-fn check_log_dir(context: &Context) -> Outcome {
-    let Some(dir) = context.log_dir.as_deref() else {
-        return Outcome::warn(
+fn check_log_directory(doctor_context: &DoctorContext) -> DoctorOutcome {
+    let Some(log_directory) = doctor_context.log_directory.as_deref() else {
+        return DoctorOutcome::build_warning_outcome(
             "this machine reports no home directory, so a log file lands in whichever directory koshi is started from"
                 .to_string(),
             "give this user a home directory",
         );
     };
-    let displayed_path = dir.display();
-    if !dir.exists() {
-        return absent_directory(dir, "when logging is on");
+    let displayed_path = log_directory.display();
+    if !log_directory.exists() {
+        return build_absent_directory_outcome(log_directory, "when logging is on");
     }
-    match tempfile::NamedTempFile::new_in(dir) {
-        Ok(probe) => {
-            drop(probe);
-            Outcome::ok(format!(
+    match tempfile::NamedTempFile::new_in(log_directory) {
+        Ok(writable_file_probe) => {
+            drop(writable_file_probe);
+            DoctorOutcome::build_success_outcome(format!(
                 "{displayed_path} is writable and logging is {}",
-                if context.logging_on { "on" } else { "off" }
+                if doctor_context.is_logging_enabled {
+                    "on"
+                } else {
+                    "off"
+                }
             ))
         }
-        Err(error) => Outcome::fail(
-            format!("{displayed_path} cannot be written: {error}"),
+        Err(log_directory_error) => DoctorOutcome::build_failure_outcome(
+            format!("{displayed_path} cannot be written: {log_directory_error}"),
             &format!("make sure you own {displayed_path}"),
         ),
     }
 }
 
-fn check_plugins_dir(context: &Context) -> Outcome {
-    let Some(dir) = context.plugins_dir.as_deref() else {
-        return no_home_directory("plugins");
+fn check_plugins_directory(doctor_context: &DoctorContext) -> DoctorOutcome {
+    let Some(plugins_directory) = doctor_context.plugins_directory.as_deref() else {
+        return build_no_home_directory_outcome("plugins");
     };
-    let displayed_path = dir.display();
-    if !dir.exists() {
-        return match std::fs::symlink_metadata(dir) {
-            Ok(_) => Outcome::fail(
+    let displayed_path = plugins_directory.display();
+    if !plugins_directory.exists() {
+        return match std::fs::symlink_metadata(plugins_directory) {
+            Ok(_) => DoctorOutcome::build_failure_outcome(
                 format!("{displayed_path} is there and koshi cannot read it as a directory"),
                 &format!("remove {displayed_path}, or point it at a directory"),
             ),
-            Err(_) => Outcome::ok(format!("{displayed_path} does not exist")),
+            Err(_) => {
+                DoctorOutcome::build_success_outcome(format!("{displayed_path} does not exist"))
+            }
         };
     }
-    if let Err(error) = std::fs::read_dir(dir) {
-        return Outcome::fail(
-            format!("{displayed_path} cannot be read: {error}"),
+    if let Err(plugins_directory_error) = std::fs::read_dir(plugins_directory) {
+        return DoctorOutcome::build_failure_outcome(
+            format!("{displayed_path} cannot be read: {plugins_directory_error}"),
             &format!("make sure you own {displayed_path}"),
         );
     }
-    Outcome::ok(format!("{displayed_path} is readable"))
+    DoctorOutcome::build_success_outcome(format!("{displayed_path} is readable"))
 }
 
-fn check_session_directory(context: &Context) -> Outcome {
-    if !context.allow_other_users {
-        let Some(dir) = context.runtime_dir.as_deref() else {
-            return Outcome::ok(
+fn check_session_directory(doctor_context: &DoctorContext) -> DoctorOutcome {
+    if !doctor_context.is_other_user_access_allowed {
+        let Some(runtime_directory) = doctor_context.runtime_directory.as_deref() else {
+            return DoctorOutcome::build_success_outcome(
                 "allow-other-users is off, so only you may reach your sessions".to_string(),
             );
         };
-        let where_they_live = match context.runtime_mode {
-            Some(mode) => format!("{} (mode {mode:03o})", dir.display()),
-            None => dir.display().to_string(),
+        let runtime_directory_description = match doctor_context.runtime_directory_mode {
+            Some(directory_mode) => format!(
+                "{} (mode {directory_mode:03o})",
+                runtime_directory.display()
+            ),
+            None => runtime_directory.display().to_string(),
         };
-        return Outcome::ok(format!(
-            "sessions are advertised in {where_they_live}, which only you may reach"
+        return DoctorOutcome::build_success_outcome(format!(
+            "sessions are advertised in {runtime_directory_description}, which only you may reach"
         ));
     }
-    match context.shared_dir.as_deref() {
-        Some(dir) => Outcome::ok(format!(
+    match doctor_context.shared_directory.as_deref() {
+        Some(shared_directory) => DoctorOutcome::build_success_outcome(format!(
             "allow-other-users is on: sessions are also advertised in {}, which every user of this machine may reach",
-            dir.display()
+            shared_directory.display()
         )),
-        None => Outcome::ok(
+        None => DoctorOutcome::build_success_outcome(
             "allow-other-users is on, and this machine names no shared session directory, so no other user reaches your sessions"
                 .to_string(),
         ),
     }
 }
 
-fn check_remote_access(context: &Context) -> Outcome {
-    let address = match context.remote_listen.as_deref() {
-        Some(address) => format!("koshi.kdl names the remote listen address {address}"),
+fn check_remote_access(doctor_context: &DoctorContext) -> DoctorOutcome {
+    let remote_listen_description = match doctor_context.remote_listen.as_deref() {
+        Some(remote_listen_address) => {
+            format!("koshi.kdl names the remote listen address {remote_listen_address}")
+        }
         None => "koshi.kdl names no remote listen address".to_string(),
     };
-    match &context.grants {
-        Ok(count) => Outcome::ok(format!(
-            "{address}, and this machine holds {}",
-            counted(*count, "standing grant")
+    match &doctor_context.standing_grant_count {
+        Ok(standing_grant_count) => DoctorOutcome::build_success_outcome(format!(
+            "{remote_listen_description}, and this machine holds {}",
+            format_counted_noun(*standing_grant_count, "standing grant")
         )),
-        Err(detail) => Outcome::warn(
-            format!("{address}, and the grants could not be read: {detail}"),
+        Err(grant_read_error) => DoctorOutcome::build_warning_outcome(
+            format!(
+                "{remote_listen_description}, and the grants could not be read: {grant_read_error}"
+            ),
             "make sure you own the koshi data directory",
         ),
     }
 }
 
-fn check_remote_connections(context: &Context) -> Outcome {
-    match &context.router {
-        RemoteConnections::Answered(Some(remote_connections)) => Outcome::ok(format!(
-            "this machine holds {} from another machine",
-            counted(*remote_connections, "open connection")
-        )),
-        RemoteConnections::Answered(None) => {
-            Outcome::ok("the running router reports no count, so this is not known".to_string())
+fn check_remote_connections(doctor_context: &DoctorContext) -> DoctorOutcome {
+    match &doctor_context.router_connections {
+        RemoteConnections::Answered(Some(remote_connection_count)) => {
+            DoctorOutcome::build_success_outcome(format!(
+                "this machine holds {} from another machine",
+                format_counted_noun(*remote_connection_count, "open connection")
+            ))
         }
-        RemoteConnections::NotRunning => Outcome::ok(
+        RemoteConnections::Answered(None) => DoctorOutcome::build_success_outcome(
+            "the running router reports no count, so this is not known".to_string(),
+        ),
+        RemoteConnections::NotRunning => DoctorOutcome::build_success_outcome(
             "no koshi is running, so nothing from another machine is connected".to_string(),
         ),
         RemoteConnections::OlderBuild | RemoteConnections::NoAnswer { .. } => {
-            Outcome::ok("the running router did not answer, so this is not known".to_string())
+            DoctorOutcome::build_success_outcome(
+                "the running router did not answer, so this is not known".to_string(),
+            )
         }
     }
 }
 
-/// What state the runtime directory `dir` is in, with `mode` its permission
-/// bits and `None` where they are not known.
+/// What state the runtime directory `runtime_directory` is in, with
+/// `runtime_directory_mode` its permission bits and `None` where they are not
+/// known.
 ///
-/// Ok when `dir` holds mode 700, when `mode` is `None`, and when `dir` is not
-/// there yet and koshi can create it. Fail when `dir` cannot be read, when
-/// `mode` is anything other than 700, and when `dir` is not there and koshi
-/// cannot create it.
-fn runtime_dir_state(dir: &Path, mode: Option<u32>) -> Outcome {
-    let displayed_path = dir.display();
-    if !dir.exists() {
-        return absent_directory(dir, "when a session starts");
+/// Ok when `runtime_directory` holds mode 700, when `runtime_directory_mode` is
+/// `None`, and when `runtime_directory` is not there yet and koshi can create
+/// it. Fail when `runtime_directory` cannot be read, when
+/// `runtime_directory_mode` is anything other than 700, and when
+/// `runtime_directory` is not there and koshi cannot create it.
+fn inspect_runtime_directory(
+    runtime_directory: &Path,
+    runtime_directory_mode: Option<u32>,
+) -> DoctorOutcome {
+    let displayed_path = runtime_directory.display();
+    if !runtime_directory.exists() {
+        return build_absent_directory_outcome(runtime_directory, "when a session starts");
     }
-    if let Err(error) = std::fs::read_dir(dir) {
-        return Outcome::fail(
-            format!("{displayed_path} cannot be read: {error}"),
+    if let Err(runtime_directory_error) = std::fs::read_dir(runtime_directory) {
+        return DoctorOutcome::build_failure_outcome(
+            format!("{displayed_path} cannot be read: {runtime_directory_error}"),
             &format!("make sure you own {displayed_path}"),
         );
     }
-    if let Some(mode) = mode {
-        if mode != 0o700 {
-            return Outcome::fail(
+    if let Some(permission_mode) = runtime_directory_mode {
+        if permission_mode != 0o700 {
+            return DoctorOutcome::build_failure_outcome(
                 format!(
-                    "{displayed_path} has mode {mode:03o}; koshi serves a session socket only from a directory with mode 700"
+                    "{displayed_path} has mode {permission_mode:03o}; koshi serves a session socket only from a directory with mode 700"
                 ),
                 &format!("run chmod 700 {displayed_path}"),
             );
         }
     }
-    Outcome::ok(format!("{displayed_path} is ready"))
+    DoctorOutcome::build_success_outcome(format!("{displayed_path} is ready"))
 }
 
-/// `rule` in words, holding no newline:
-/// [`RuntimeDirRule::Variable`] gives `"KOSHI_RUNTIME_DIR names it"`.
-fn runtime_dir_rule_phrase(rule: RuntimeDirRule) -> &'static str {
-    match rule {
-        RuntimeDirRule::Variable => "KOSHI_RUNTIME_DIR names it",
-        RuntimeDirRule::UserId => "koshi names it after your user id",
-        RuntimeDirRule::DataDir => "koshi puts it under your application data directory",
+/// `runtime_directory_rule` in words, holding no newline:
+/// [`RuntimeDirectoryRule::EnvironmentVariable`] gives `"KOSHI_RUNTIME_DIR names it"`.
+fn format_runtime_directory_rule(runtime_directory_rule: RuntimeDirectoryRule) -> &'static str {
+    match runtime_directory_rule {
+        RuntimeDirectoryRule::EnvironmentVariable => "KOSHI_RUNTIME_DIR names it",
+        RuntimeDirectoryRule::UserId => "koshi names it after your user id",
+        RuntimeDirectoryRule::DataDirectory => {
+            "koshi puts it under your application data directory"
+        }
     }
 }
 
 /// The answer for a directory koshi makes for itself that is not there yet.
 ///
-/// `created` names the moment koshi makes it, such as `"when a session
+/// `creation_event` names the moment koshi makes it, such as `"when a session
 /// starts"`.
 ///
-/// Ok when a directory can be made at `dir`, naming what it goes under. Fail
-/// naming what stops it: `dir` itself when that name is taken, else the
-/// closest name above it that takes nothing new.
-fn absent_directory(dir: &Path, created: &str) -> Outcome {
-    let displayed_path = dir.display();
-    match nearest_existing_name(dir) {
-        Some((holder, true)) => Outcome::ok(format!(
-            "{displayed_path} does not exist yet; koshi creates it under {} {created}",
-            holder.display()
+/// Ok when a directory can be made at `directory_path`, naming what it goes under. Fail
+/// naming what stops it: `directory_path` itself when that name is taken, else
+/// the closest name above it that takes nothing new.
+fn build_absent_directory_outcome(directory_path: &Path, creation_event: &str) -> DoctorOutcome {
+    let displayed_path = directory_path.display();
+    match find_nearest_existing_path(directory_path) {
+        Some((existing_path, true)) => DoctorOutcome::build_success_outcome(format!(
+            "{displayed_path} does not exist yet; koshi creates it under {} {creation_event}",
+            existing_path.display()
         )),
-        Some((holder, false)) if holder == dir => Outcome::fail(
+        Some((existing_path, false)) if existing_path == directory_path => DoctorOutcome::build_failure_outcome(
             format!("{displayed_path} is a name koshi cannot make a directory at"),
             &format!("remove {displayed_path}, or point it at a directory"),
         ),
-        Some((holder, false)) => Outcome::fail(
+        Some((existing_path, false)) => DoctorOutcome::build_failure_outcome(
             format!(
                 "{displayed_path} does not exist and koshi cannot create it: nothing new can be written in {}",
-                holder.display()
+                existing_path.display()
             ),
-            &format!("make sure you can write in {}", holder.display()),
+            &format!("make sure you can write in {}", existing_path.display()),
         ),
-        None => Outcome::fail(
+        None => DoctorOutcome::build_failure_outcome(
             format!("{displayed_path} does not exist and no name above it does either"),
             &format!("make sure a directory above {displayed_path} exists"),
         ),
     }
 }
 
-/// The closest name at or above `path` that is already there, and whether a
-/// new directory can be made inside it. `None` when neither `path` nor
-/// anything above it is there.
+/// The closest name at or above `directory_path` that is already there, and whether a
+/// new directory can be made inside it. `None` when neither `directory_path` nor
+/// anything above `directory_path` is there.
 ///
 /// Each name is read without following it, so a symbolic link pointing
-/// nowhere counts as being there, and `path` itself is read first. The second
+/// nowhere counts as being there, and `directory_path` itself is read first. The second
 /// value comes from making a directory inside that name and removing it
 /// again.
 ///
 /// `/tmp/koshi-501` with `/tmp` present and writable gives
 /// `Some(("/tmp", true))`. `/tmp/parent/koshi` where `koshi` points nowhere
 /// gives `Some(("/tmp/parent/koshi", false))`.
-fn nearest_existing_name(path: &Path) -> Option<(PathBuf, bool)> {
-    let name = path
+fn find_nearest_existing_path(directory_path: &Path) -> Option<(PathBuf, bool)> {
+    let existing_path = directory_path
         .ancestors()
-        .find(|above| std::fs::symlink_metadata(above).is_ok())?;
-    let takes_a_new_directory = tempfile::TempDir::new_in(name).is_ok();
-    Some((name.to_path_buf(), takes_a_new_directory))
+        .find(|ancestor_path| std::fs::symlink_metadata(ancestor_path).is_ok())?;
+    let can_create_child_directory = tempfile::TempDir::new_in(existing_path).is_ok();
+    Some((existing_path.to_path_buf(), can_create_child_directory))
 }
 
 /// What this machine can do with the program a new pane would run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ShellState {
+enum ShellAvailability {
     /// A regular file this machine can run.
     Runnable,
     /// A regular file carrying no execute bit. Unix only: on Windows a
-    /// regular file is always [`ShellState::Runnable`].
+    /// regular file is always [`ShellAvailability::Runnable`].
     NotExecutable,
     /// No regular file of that name.
     Missing,
 }
 
-/// Whether this user may run `path`, asked of the kernel with `access(X_OK)`.
+/// Whether this user may run `shell_path`, asked of the kernel with `access(X_OK)`.
 ///
 /// The answer covers the owner, group and other bits, any access control
 /// list, and a filesystem mounted without execute permission. It is made
 /// against this process's real user and group.
 #[cfg(unix)]
-fn user_may_execute(path: &Path) -> bool {
+fn user_may_execute(shell_path: &Path) -> bool {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
-    let Ok(name) = CString::new(path.as_os_str().as_bytes()) else {
+    let Ok(shell_path_c_string) = CString::new(shell_path.as_os_str().as_bytes()) else {
         return false;
     };
-    // SAFETY: `name` holds a NUL-terminated C string that outlives the call,
+    // SAFETY: `shell_path_c_string` holds a NUL-terminated C string that outlives the call,
     // and `access` only reads it.
-    unsafe { libc::access(name.as_ptr(), libc::X_OK) == 0 }
+    unsafe { libc::access(shell_path_c_string.as_ptr(), libc::X_OK) == 0 }
 }
 
-/// What `path` is: [`ShellState::Missing`] when it is absent or is not a
-/// regular file, [`ShellState::NotExecutable`] when it is a regular file this
-/// user may not run, else [`ShellState::Runnable`].
+/// What `shell_path` is: [`ShellAvailability::Missing`] when it is absent or is not
+/// a regular file, [`ShellAvailability::NotExecutable`] when it is a regular
+/// file this user may not run, else [`ShellAvailability::Runnable`].
 ///
 /// `/bin/zsh` at mode `755` is `Runnable`. The same file at mode `644` is
 /// `NotExecutable`, and so is a file at mode `011` this user owns, whose
 /// group and other bits do not apply to its owner.
-fn file_state(path: &Path) -> ShellState {
-    let Ok(metadata) = std::fs::metadata(path) else {
-        return ShellState::Missing;
+fn inspect_shell_file(shell_path: &Path) -> ShellAvailability {
+    let Ok(shell_file_metadata) = std::fs::metadata(shell_path) else {
+        return ShellAvailability::Missing;
     };
-    if !metadata.is_file() {
-        return ShellState::Missing;
+    if !shell_file_metadata.is_file() {
+        return ShellAvailability::Missing;
     }
     #[cfg(unix)]
-    if !user_may_execute(path) {
-        return ShellState::NotExecutable;
+    if !user_may_execute(shell_path) {
+        return ShellAvailability::NotExecutable;
     }
-    ShellState::Runnable
+    ShellAvailability::Runnable
 }
 
-/// What this machine can do with `program`: the path itself when it holds a
-/// directory, else each `path` entry in order.
+/// What this machine can do with `shell_program`: the path itself when it holds
+/// a directory, else each `PATH` entry in order.
 ///
-/// A `path` search answers [`ShellState::Runnable`] on the first runnable
-/// match, and [`ShellState::NotExecutable`] only when some entry held a
+/// A `PATH` search answers [`ShellAvailability::Runnable`] on the first runnable
+/// match, and [`ShellAvailability::NotExecutable`] only when some entry held a
 /// regular file and none held a runnable one. `("/bin/zsh", _)` reads `/bin/zsh`;
 /// `("cmd.exe", "C:\\Windows\\System32")` reads
 /// `C:\Windows\System32\cmd.exe`.
-fn shell_state(program: &Path, path: Option<&OsString>) -> ShellState {
-    if program
+fn inspect_shell_program(
+    shell_program: &Path,
+    path_entries: Option<&OsString>,
+) -> ShellAvailability {
+    if shell_program
         .parent()
         .is_some_and(|parent| !parent.as_os_str().is_empty())
     {
-        return file_state(program);
+        return inspect_shell_file(shell_program);
     }
-    let Some(path) = path else {
-        return ShellState::Missing;
+    let Some(path_entries) = path_entries else {
+        return ShellAvailability::Missing;
     };
-    let mut found_a_file = false;
-    for dir in std::env::split_paths(path) {
-        match file_state(&dir.join(program)) {
-            ShellState::Runnable => return ShellState::Runnable,
-            ShellState::NotExecutable => found_a_file = true,
-            ShellState::Missing => {}
+    let mut has_non_executable_file = false;
+    for path_directory in std::env::split_paths(path_entries) {
+        match inspect_shell_file(&path_directory.join(shell_program)) {
+            ShellAvailability::Runnable => return ShellAvailability::Runnable,
+            ShellAvailability::NotExecutable => has_non_executable_file = true,
+            ShellAvailability::Missing => {}
         }
     }
-    if found_a_file {
-        ShellState::NotExecutable
+    if has_non_executable_file {
+        ShellAvailability::NotExecutable
     } else {
-        ShellState::Missing
+        ShellAvailability::Missing
     }
 }
 
-/// The permission bits of `path` on Unix, `None` on Windows and when `path`
+/// The permission bits of `directory_path` on Unix, `None` on Windows and when `directory_path`
 /// cannot be read.
 ///
 /// Masks with `0o777`, the same mask
-/// [`koshi_ipc::validate::validate_socket_addr`] applies before a socket
+/// [`koshi_ipc::validate::validate_socket_address`] applies before a socket
 /// binds, so the setuid, setgid and sticky bits are left out. `0o755` reads
 /// back as `0o755`; a sticky `0o1700` reads back as `0o700`.
-fn directory_mode(path: &Path) -> Option<u32> {
+fn read_directory_mode(directory_path: &Path) -> Option<u32> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
 
-        std::fs::metadata(path)
+        std::fs::metadata(directory_path)
             .ok()
-            .map(|metadata| metadata.permissions().mode() & 0o777)
+            .map(|directory_metadata| directory_metadata.permissions().mode() & 0o777)
     }
     #[cfg(not(unix))]
     {
-        let _ = path;
+        let _ = directory_path;
         None
     }
 }
 
-/// How many grants in `store` still stand at `now`: not revoked, and either
-/// never expiring or expiring after `now`.
-fn standing_grants(store: &TokenStore, now: SystemTime) -> usize {
-    store
-        .records
+/// How many grants in `token_store` still stand at `current_time`: not revoked,
+/// and either never expiring or expiring after `current_time`.
+fn count_standing_grants(token_store: &TokenStore, current_time: SystemTime) -> usize {
+    token_store
+        .token_records
         .iter()
-        .filter(|record| {
-            record.revoked_at.is_none() && record.expires_at.is_none_or(|expiry| expiry > now)
+        .filter(|token_record| {
+            token_record.revoked_at.is_none()
+                && token_record
+                    .expires_at
+                    .is_none_or(|expiration_time| expiration_time > current_time)
         })
         .count()
 }
 
-/// `text` with every newline and carriage return replaced by one space.
+/// `message_text` with every newline and carriage return replaced by one space.
 ///
 /// `"bad\nfile"` gives `"bad file"`; `"bad\r\nfile"` gives `"bad  file"`.
-fn one_line(text: String) -> String {
-    if !text.contains(['\n', '\r']) {
-        return text;
+fn format_single_line(message_text: String) -> String {
+    if !message_text.contains(['\n', '\r']) {
+        return message_text;
     }
-    text.replace(['\n', '\r'], " ")
+    message_text.replace(['\n', '\r'], " ")
 }
 
 /// The answer a check gives when this machine reports no home directory, so
 /// the directory it is about has no location at all. `"config"` gives the
 /// reason `"this machine reports no home directory, so koshi finds no config
 /// directory"`.
-fn no_home_directory(which: &str) -> Outcome {
-    Outcome::fail(
-        format!("this machine reports no home directory, so koshi finds no {which} directory"),
+fn build_no_home_directory_outcome(directory_kind: &str) -> DoctorOutcome {
+    DoctorOutcome::build_failure_outcome(
+        format!(
+            "this machine reports no home directory, so koshi finds no {directory_kind} directory"
+        ),
         "give this user a home directory",
     )
 }
 
-/// `count` and `noun`, with an `s` on the noun when `count` is not 1:
+/// `quantity` and `singular_noun`, with an `s` on the noun when `quantity` is not 1:
 /// `(2, "grant")` gives `"2 grants"`, `(1, "grant")` gives `"1 grant"`.
-fn counted(count: usize, noun: &str) -> String {
-    if count == 1 {
-        format!("{count} {noun}")
+fn format_counted_noun(quantity: usize, singular_noun: &str) -> String {
+    if quantity == 1 {
+        format!("{quantity} {singular_noun}")
     } else {
-        format!("{count} {noun}s")
+        format!("{quantity} {singular_noun}s")
     }
 }
 

@@ -19,11 +19,11 @@ mod tests;
 /// disposition.
 #[cfg(unix)]
 pub(crate) fn block_sigpipe_on_this_thread() {
-    let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
+    let mut signal_set: libc::sigset_t = unsafe { std::mem::zeroed() };
     unsafe {
-        libc::sigemptyset(&mut set);
-        libc::sigaddset(&mut set, libc::SIGPIPE);
-        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+        libc::sigemptyset(&mut signal_set);
+        libc::sigaddset(&mut signal_set, libc::SIGPIPE);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &signal_set, std::ptr::null_mut());
     }
 }
 
@@ -46,9 +46,9 @@ pub(crate) fn block_sigpipe_on_this_thread() {
 pub(crate) fn exec_and_keep_ignoring_sigpipe(command: &mut Command) -> std::io::Error {
     use std::os::unix::process::CommandExt;
 
-    let error = command.exec();
+    let exec_error = command.exec();
     let _ = unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
-    error
+    exec_error
 }
 
 /// The Win32 `DETACHED_PROCESS` creation flag: the started process gets no
@@ -66,7 +66,7 @@ const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 ///
 /// Hands back the same `command`, so the caller spawns it.
 #[cfg(windows)]
-pub(crate) fn detached(command: &mut Command) -> &mut Command {
+pub(crate) fn configure_detached_process(command: &mut Command) -> &mut Command {
     use std::os::windows::process::CommandExt;
 
     command

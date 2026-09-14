@@ -18,7 +18,7 @@ use koshi_terminal::engine::TerminalEngine;
 use koshi_terminal::style::{Color, Style};
 use koshi_test_support::fake_pty::FakePtyBackend;
 
-use crate::runtime::render_schedule::FRAME_INTERVAL;
+use crate::runtime::render_schedule::FRAME_INTERVAL_DURATION;
 use crate::runtime::{bus::EventFilter, event::RuntimeEvent};
 
 use super::*;
@@ -26,211 +26,238 @@ use super::*;
 /// A bare runtime with stub services and no sessions, plus the fake PTY
 /// backend for asserting on writes. The sender is returned so the inbox stays
 /// open.
-fn new_runtime() -> (Server, Arc<FakePtyBackend>, mpsc::Sender<RuntimeEvent>) {
-    let fake = Arc::new(FakePtyBackend::new());
-    let pty_backend: Arc<dyn PtyBackend> = fake.clone();
-    let (tx, inbox_rx) = mpsc::channel();
-    let runtime = Server::new(pty_backend, inbox_rx, tx.clone());
-    (runtime, fake, tx)
+fn build_test_server() -> (Server, Arc<FakePtyBackend>, mpsc::Sender<RuntimeEvent>) {
+    let fake_pty_backend = Arc::new(FakePtyBackend::new());
+    let pty_backend: Arc<dyn PtyBackend> = fake_pty_backend.clone();
+    let (event_sender, event_receiver) = mpsc::channel();
+    let server = Server::from_runtime_parts(pty_backend, event_receiver, event_sender.clone());
+    (server, fake_pty_backend, event_sender)
 }
 
 /// Install an 8x3 terminal engine for a fresh pane id and return the id.
-fn add_engine(rt: &mut Server) -> PaneId {
+fn insert_test_terminal_engine(server: &mut Server) -> PaneId {
     let pane_id = PaneId::new();
-    rt.terminal_engines
-        .insert(pane_id, TerminalEngine::new(PtySize { cols: 8, rows: 3 }));
+    server.terminal_engine_by_pane_id.insert(
+        pane_id,
+        TerminalEngine::from_pty_size(PtySize {
+            column_count: 8,
+            row_count: 3,
+        }),
+    );
     pane_id
 }
 
 /// Register `pane_id` with the fake backend so its writes are recorded.
-fn spawn_in_fake(fake: &FakePtyBackend, pane_id: PaneId) {
-    let spec = SpawnSpec {
+fn spawn_test_pane(fake_pty_backend: &FakePtyBackend, pane_id: PaneId) {
+    let spawn_spec = SpawnSpec {
         program: PathBuf::from("/bin/zsh"),
-        args: Vec::new(),
-        cwd: None,
-        env: BTreeMap::new(),
+        arguments: Vec::new(),
+        working_directory: None,
+        environment_variables: BTreeMap::new(),
         shell_kind: ShellKind::Zsh,
     };
-    fake.spawn(pane_id, spec, PtySize { cols: 8, rows: 3 })
+    fake_pty_backend
+        .spawn_pane(
+            pane_id,
+            spawn_spec,
+            PtySize {
+                column_count: 8,
+                row_count: 3,
+            },
+        )
         .expect("fake spawn succeeds");
 }
 
-/// The character at (`row`, `col`) on `pane_id`'s active grid.
-fn ch(rt: &Server, pane_id: PaneId, row: u16, col: u16) -> char {
-    rt.terminal_engines()[&pane_id]
-        .state()
-        .active_grid()
-        .cell(row, col)
+/// The character at (`row_index`, `column_index`) on `pane_id`'s active grid.
+fn get_pane_cell_character(
+    server: &Server,
+    pane_id: PaneId,
+    row_index: u16,
+    column_index: u16,
+) -> char {
+    server.list_terminal_engines()[&pane_id]
+        .get_terminal_state()
+        .get_active_grid()
+        .get_cell(row_index, column_index)
         .expect("cell in bounds")
-        .ch()
+        .get_character()
 }
 
 #[test]
 fn bytes_update_only_the_owning_panes_grid() {
-    let (mut rt, _fake, _tx) = new_runtime();
-    let pane = add_engine(&mut rt);
-    let other = add_engine(&mut rt);
+    let (mut runtime, _fake_pty_backend, _event_sender) = build_test_server();
+    let pane_id = insert_test_terminal_engine(&mut runtime);
+    let other_pane_id = insert_test_terminal_engine(&mut runtime);
 
-    rt.handle_pty_output(pane, b"hi");
+    runtime.handle_pty_output(pane_id, b"hi");
 
-    assert_eq!(ch(&rt, pane, 0, 0), 'h');
-    assert_eq!(ch(&rt, pane, 0, 1), 'i');
+    assert_eq!(get_pane_cell_character(&runtime, pane_id, 0, 0), 'h');
+    assert_eq!(get_pane_cell_character(&runtime, pane_id, 0, 1), 'i');
     assert_eq!(
-        rt.terminal_engines()[&pane]
-            .state()
-            .active_cursor_position(),
+        runtime.list_terminal_engines()[&pane_id]
+            .get_terminal_state()
+            .get_active_cursor_position(),
         (0, 2)
     );
 
     // The other pane's engine is untouched.
-    assert_eq!(ch(&rt, other, 0, 0), ' ');
+    assert_eq!(get_pane_cell_character(&runtime, other_pane_id, 0, 0), ' ');
     assert_eq!(
-        rt.terminal_engines()[&other]
-            .state()
-            .active_cursor_position(),
+        runtime.list_terminal_engines()[&other_pane_id]
+            .get_terminal_state()
+            .get_active_cursor_position(),
         (0, 0)
     );
 }
 
 #[test]
 fn an_escape_sequence_split_across_two_events_decodes_once() {
-    let (mut rt, _fake, _tx) = new_runtime();
-    let pane = add_engine(&mut rt);
+    let (mut runtime, _fake_pty_backend, _event_sender) = build_test_server();
+    let pane_id = insert_test_terminal_engine(&mut runtime);
 
     // SGR 31 (red foreground) split mid-sequence across two output events:
     // the pane's parser carries the partial sequence between handler calls.
-    rt.handle_pty_output(pane, b"\x1b[3");
-    rt.handle_pty_output(pane, b"1mx");
+    runtime.handle_pty_output(pane_id, b"\x1b[3");
+    runtime.handle_pty_output(pane_id, b"1mx");
 
-    let engines = rt.terminal_engines();
-    let cell = engines[&pane]
-        .state()
-        .active_grid()
-        .cell(0, 0)
+    let terminal_engines = runtime.list_terminal_engines();
+    let grid_cell = terminal_engines[&pane_id]
+        .get_terminal_state()
+        .get_active_grid()
+        .get_cell(0, 0)
         .expect("cell in bounds");
     let mut red = Style::default();
-    red.set_fg(Color::Indexed(1));
-    assert_eq!(cell.ch(), 'x');
-    assert_eq!(cell.style(), red);
+    red.set_foreground_color(Color::Indexed(1));
+    assert_eq!(grid_cell.get_character(), 'x');
+    assert_eq!(grid_cell.get_style(), red);
 }
 
 #[test]
 fn output_schedules_a_render() {
-    let (mut rt, _fake, _tx) = new_runtime();
-    let pane = add_engine(&mut rt);
+    let (mut runtime, _fake_pty_backend, _event_sender) = build_test_server();
+    let pane_id = insert_test_terminal_engine(&mut runtime);
 
-    rt.handle_pty_output(pane, b"hi");
+    runtime.handle_pty_output(pane_id, b"hi");
 
     // PtyOutput was marked pending and nothing has rendered yet, so a render
     // is due immediately.
-    assert!(rt.render_scheduler.poll(Instant::now()));
+    assert!(runtime.render_scheduler.poll(Instant::now()));
 }
 
 #[test]
 fn synchronized_body_keeps_the_committed_state_and_side_effects_hidden() {
-    let (mut rt, fake, _tx) = new_runtime();
-    let pane = add_engine(&mut rt);
-    spawn_in_fake(&fake, pane);
-    let deliveries = rt.subscribe(ClientId::new(), EventFilter::All);
-    let rendered_at = Instant::now();
-    rt.handle_pty_output(pane, b"old");
-    assert!(rt.render_scheduler.poll(rendered_at));
+    let (mut runtime, fake_pty_backend, _event_sender) = build_test_server();
+    let pane_id = insert_test_terminal_engine(&mut runtime);
+    spawn_test_pane(&fake_pty_backend, pane_id);
+    let event_deliveries = runtime.subscribe(ClientId::new(), EventFilter::All);
+    let render_time = Instant::now();
+    runtime.handle_pty_output(pane_id, b"old");
+    assert!(runtime.render_scheduler.poll(render_time));
 
-    rt.handle_pty_output(pane, b"\x1b[?2026h");
-    rt.handle_pty_output(pane, b"\x1b[2J\x1b[Hnew\x1b[5n\x1b]133;C\x07");
+    runtime.handle_pty_output(pane_id, b"\x1b[?2026h");
+    runtime.handle_pty_output(pane_id, b"\x1b[2J\x1b[Hnew\x1b[5n\x1b]133;C\x07");
 
-    assert_eq!(ch(&rt, pane, 0, 0), 'o');
-    assert_eq!(ch(&rt, pane, 0, 1), 'l');
-    assert_eq!(ch(&rt, pane, 0, 2), 'd');
+    assert_eq!(get_pane_cell_character(&runtime, pane_id, 0, 0), 'o');
+    assert_eq!(get_pane_cell_character(&runtime, pane_id, 0, 1), 'l');
+    assert_eq!(get_pane_cell_character(&runtime, pane_id, 0, 2), 'd');
     assert_eq!(
-        fake.writes(pane).expect("pane exists"),
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("pane exists"),
         Vec::<Vec<u8>>::new()
     );
-    assert_eq!(deliveries.try_iter().collect::<Vec<_>>(), Vec::new());
-    assert!(!rt.render_scheduler.poll(rendered_at));
+    assert_eq!(event_deliveries.try_iter().collect::<Vec<_>>(), Vec::new());
+    assert!(!runtime.render_scheduler.poll(render_time));
 
-    rt.handle_pty_output(pane, b"\x1b[?2026l");
+    runtime.handle_pty_output(pane_id, b"\x1b[?2026l");
 
-    assert_eq!(ch(&rt, pane, 0, 0), 'n');
-    assert_eq!(ch(&rt, pane, 0, 1), 'e');
-    assert_eq!(ch(&rt, pane, 0, 2), 'w');
+    assert_eq!(get_pane_cell_character(&runtime, pane_id, 0, 0), 'n');
+    assert_eq!(get_pane_cell_character(&runtime, pane_id, 0, 1), 'e');
+    assert_eq!(get_pane_cell_character(&runtime, pane_id, 0, 2), 'w');
     assert_eq!(
-        fake.writes(pane).expect("pane exists"),
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("pane exists"),
         [b"\x1b[0n".to_vec()]
     );
     assert_eq!(
-        deliveries.try_iter().collect::<Vec<_>>(),
+        event_deliveries.try_iter().collect::<Vec<_>>(),
         [Delivery::Event(Event::PaneCommandStarted(
-            PaneCommandStarted { pane_id: pane }
+            PaneCommandStarted { pane_id }
         ))]
     );
     assert_eq!(
-        rt.render_scheduler.next_wakeup(rendered_at),
-        Some(FRAME_INTERVAL)
+        runtime.render_scheduler.next_wakeup(render_time),
+        Some(FRAME_INTERVAL_DURATION)
     );
-    assert!(rt.render_scheduler.poll(rendered_at + FRAME_INTERVAL));
+    assert!(runtime
+        .render_scheduler
+        .poll(render_time + FRAME_INTERVAL_DURATION));
 }
 
 #[test]
 fn synchronized_deadline_uses_the_runtime_wakeup_and_common_delivery_path() {
-    let (mut rt, fake, _tx) = new_runtime();
-    let pane = add_engine(&mut rt);
-    spawn_in_fake(&fake, pane);
-    let deliveries = rt.subscribe(ClientId::new(), EventFilter::All);
-    let now = Instant::now();
-    let engine = rt
-        .terminal_engines
-        .get_mut(&pane)
+    let (mut runtime, fake_pty_backend, _event_sender) = build_test_server();
+    let pane_id = insert_test_terminal_engine(&mut runtime);
+    spawn_test_pane(&fake_pty_backend, pane_id);
+    let event_deliveries = runtime.subscribe(ClientId::new(), EventFilter::All);
+    let current_time = Instant::now();
+    let engine = runtime
+        .terminal_engine_by_pane_id
+        .get_mut(&pane_id)
         .expect("the pane has an engine");
-    let _ = engine.advance_with_shell_integration_at(b"\x1b[?2026h", now);
-    let _ = engine.advance_with_shell_integration_at(b"X\x1b[5n\x1b]133;C\x07", now);
+    let _ = engine.process_pty_output_with_shell_integration_at(b"\x1b[?2026h", current_time);
+    let _ = engine
+        .process_pty_output_with_shell_integration_at(b"X\x1b[5n\x1b]133;C\x07", current_time);
 
     assert_eq!(
-        rt.next_render_wakeup(now + Duration::from_millis(149)),
+        runtime.next_render_wakeup(current_time + Duration::from_millis(149)),
         Some(Duration::from_millis(1))
     );
-    assert!(!rt.poll_render(now + Duration::from_millis(149)));
-    assert_eq!(ch(&rt, pane, 0, 0), ' ');
+    assert!(!runtime.poll_render(current_time + Duration::from_millis(149)));
+    assert_eq!(get_pane_cell_character(&runtime, pane_id, 0, 0), ' ');
     assert_eq!(
-        fake.writes(pane).expect("pane exists"),
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("pane exists"),
         Vec::<Vec<u8>>::new()
     );
-    assert_eq!(deliveries.try_iter().collect::<Vec<_>>(), Vec::new());
+    assert_eq!(event_deliveries.try_iter().collect::<Vec<_>>(), Vec::new());
 
     assert_eq!(
-        rt.next_render_wakeup(now + Duration::from_millis(150)),
+        runtime.next_render_wakeup(current_time + Duration::from_millis(150)),
         Some(Duration::ZERO)
     );
-    assert!(rt.poll_render(now + Duration::from_millis(150)));
-    assert_eq!(ch(&rt, pane, 0, 0), 'X');
+    assert!(runtime.poll_render(current_time + Duration::from_millis(150)));
+    assert_eq!(get_pane_cell_character(&runtime, pane_id, 0, 0), 'X');
     assert_eq!(
-        fake.writes(pane).expect("pane exists"),
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("pane exists"),
         [b"\x1b[0n".to_vec()]
     );
     assert_eq!(
-        deliveries.try_iter().collect::<Vec<_>>(),
+        event_deliveries.try_iter().collect::<Vec<_>>(),
         [Delivery::Event(Event::PaneCommandStarted(
-            PaneCommandStarted { pane_id: pane }
+            PaneCommandStarted { pane_id }
         ))]
     );
 }
 
 #[test]
 fn shell_markers_publish_command_events_in_order() {
-    let (mut rt, _fake, _tx) = new_runtime();
-    let pane = add_engine(&mut rt);
-    let deliveries = rt.subscribe(ClientId::new(), EventFilter::All);
+    let (mut runtime, _fake_pty_backend, _event_sender) = build_test_server();
+    let pane_id = insert_test_terminal_engine(&mut runtime);
+    let event_deliveries = runtime.subscribe(ClientId::new(), EventFilter::All);
 
-    rt.handle_pty_output(pane, b"\x1b]133;C\x07\x1b]133;D;137\x07");
+    runtime.handle_pty_output(pane_id, b"\x1b]133;C\x07\x1b]133;D;137\x07");
 
     assert_eq!(
-        deliveries.try_iter().collect::<Vec<_>>(),
+        event_deliveries.try_iter().collect::<Vec<_>>(),
         vec![
-            Delivery::Event(Event::PaneCommandStarted(PaneCommandStarted {
-                pane_id: pane,
-            })),
+            Delivery::Event(Event::PaneCommandStarted(PaneCommandStarted { pane_id })),
             Delivery::Event(Event::PaneCommandFinished(PaneCommandFinished {
-                pane_id: pane,
+                pane_id,
                 exit_code: Some(137),
             })),
         ]
@@ -239,20 +266,18 @@ fn shell_markers_publish_command_events_in_order() {
 
 #[test]
 fn duplicate_shell_starts_publish_one_command_pair() {
-    let (mut rt, _fake, _tx) = new_runtime();
-    let pane = add_engine(&mut rt);
-    let deliveries = rt.subscribe(ClientId::new(), EventFilter::All);
+    let (mut runtime, _fake_pty_backend, _event_sender) = build_test_server();
+    let pane_id = insert_test_terminal_engine(&mut runtime);
+    let event_deliveries = runtime.subscribe(ClientId::new(), EventFilter::All);
 
-    rt.handle_pty_output(pane, b"\x1b]133;C\x07\x1b]133;C\x07\x1b]133;D;0\x07");
+    runtime.handle_pty_output(pane_id, b"\x1b]133;C\x07\x1b]133;C\x07\x1b]133;D;0\x07");
 
     assert_eq!(
-        deliveries.try_iter().collect::<Vec<_>>(),
+        event_deliveries.try_iter().collect::<Vec<_>>(),
         vec![
-            Delivery::Event(Event::PaneCommandStarted(PaneCommandStarted {
-                pane_id: pane,
-            })),
+            Delivery::Event(Event::PaneCommandStarted(PaneCommandStarted { pane_id })),
             Delivery::Event(Event::PaneCommandFinished(PaneCommandFinished {
-                pane_id: pane,
+                pane_id,
                 exit_code: Some(0),
             })),
         ]
@@ -261,42 +286,42 @@ fn duplicate_shell_starts_publish_one_command_pair() {
 
 #[test]
 fn an_unmatched_finish_and_plain_output_publish_no_command_events() {
-    let (mut rt, _fake, _tx) = new_runtime();
-    let pane = add_engine(&mut rt);
-    let deliveries = rt.subscribe(ClientId::new(), EventFilter::All);
+    let (mut runtime, _fake_pty_backend, _event_sender) = build_test_server();
+    let pane_id = insert_test_terminal_engine(&mut runtime);
+    let event_deliveries = runtime.subscribe(ClientId::new(), EventFilter::All);
 
-    rt.handle_pty_output(pane, b"\x1b]133;D;1\x07plain output");
+    runtime.handle_pty_output(pane_id, b"\x1b]133;D;1\x07plain output");
 
-    assert_eq!(deliveries.try_iter().collect::<Vec<_>>(), Vec::new());
+    assert_eq!(event_deliveries.try_iter().collect::<Vec<_>>(), Vec::new());
 }
 
 #[test]
 fn command_lifecycle_state_is_independent_per_pane() {
-    let (mut rt, _fake, _tx) = new_runtime();
-    let first = add_engine(&mut rt);
-    let second = add_engine(&mut rt);
-    let deliveries = rt.subscribe(ClientId::new(), EventFilter::All);
+    let (mut runtime, _fake_pty_backend, _event_sender) = build_test_server();
+    let first_pane_id = insert_test_terminal_engine(&mut runtime);
+    let second_pane_id = insert_test_terminal_engine(&mut runtime);
+    let event_deliveries = runtime.subscribe(ClientId::new(), EventFilter::All);
 
-    rt.handle_pty_output(first, b"\x1b]133;C\x07");
-    rt.handle_pty_output(second, b"\x1b]133;C\x07");
-    rt.handle_pty_output(first, b"\x1b]133;D;0\x07");
-    rt.handle_pty_output(second, b"\x1b]133;D\x07");
+    runtime.handle_pty_output(first_pane_id, b"\x1b]133;C\x07");
+    runtime.handle_pty_output(second_pane_id, b"\x1b]133;C\x07");
+    runtime.handle_pty_output(first_pane_id, b"\x1b]133;D;0\x07");
+    runtime.handle_pty_output(second_pane_id, b"\x1b]133;D\x07");
 
     assert_eq!(
-        deliveries.try_iter().collect::<Vec<_>>(),
+        event_deliveries.try_iter().collect::<Vec<_>>(),
         vec![
             Delivery::Event(Event::PaneCommandStarted(PaneCommandStarted {
-                pane_id: first,
+                pane_id: first_pane_id,
             })),
             Delivery::Event(Event::PaneCommandStarted(PaneCommandStarted {
-                pane_id: second,
+                pane_id: second_pane_id,
             })),
             Delivery::Event(Event::PaneCommandFinished(PaneCommandFinished {
-                pane_id: first,
+                pane_id: first_pane_id,
                 exit_code: Some(0),
             })),
             Delivery::Event(Event::PaneCommandFinished(PaneCommandFinished {
-                pane_id: second,
+                pane_id: second_pane_id,
                 exit_code: None,
             })),
         ]
@@ -305,128 +330,145 @@ fn command_lifecycle_state_is_independent_per_pane() {
 
 #[test]
 fn a_device_querys_reply_is_written_back_to_the_pty() {
-    let (mut rt, fake, _tx) = new_runtime();
-    let pane = add_engine(&mut rt);
-    spawn_in_fake(&fake, pane);
+    let (mut runtime, fake_pty_backend, _event_sender) = build_test_server();
+    let pane_id = insert_test_terminal_engine(&mut runtime);
+    spawn_test_pane(&fake_pty_backend, pane_id);
 
     // DSR 5 (operating status) embedded in ordinary output.
-    rt.handle_pty_output(pane, b"hi\x1b[5n");
+    runtime.handle_pty_output(pane_id, b"hi\x1b[5n");
 
-    assert_eq!(fake.writes(pane).unwrap(), vec![b"\x1b[0n".to_vec()]);
+    assert_eq!(
+        fake_pty_backend.list_pane_write_bytes(pane_id).unwrap(),
+        vec![b"\x1b[0n".to_vec()]
+    );
 }
 
 #[test]
 fn replies_from_one_chunk_are_written_as_one_batch_in_query_order() {
-    let (mut rt, fake, _tx) = new_runtime();
-    let pane = add_engine(&mut rt);
-    spawn_in_fake(&fake, pane);
+    let (mut runtime, fake_pty_backend, _event_sender) = build_test_server();
+    let pane_id = insert_test_terminal_engine(&mut runtime);
+    spawn_test_pane(&fake_pty_backend, pane_id);
 
-    rt.handle_pty_output(pane, b"\x1b[5n\x1b[6n");
+    runtime.handle_pty_output(pane_id, b"\x1b[5n\x1b[6n");
 
     assert_eq!(
-        fake.writes(pane).unwrap(),
+        fake_pty_backend.list_pane_write_bytes(pane_id).unwrap(),
         vec![b"\x1b[0n\x1b[1;1R".to_vec()]
     );
 }
 
 #[test]
 fn output_without_a_query_writes_nothing_back() {
-    let (mut rt, fake, _tx) = new_runtime();
-    let pane = add_engine(&mut rt);
-    spawn_in_fake(&fake, pane);
+    let (mut runtime, fake_pty_backend, _event_sender) = build_test_server();
+    let pane_id = insert_test_terminal_engine(&mut runtime);
+    spawn_test_pane(&fake_pty_backend, pane_id);
 
-    rt.handle_pty_output(pane, b"hi\x1b[31m");
+    runtime.handle_pty_output(pane_id, b"hi\x1b[31m");
 
-    assert_eq!(fake.writes(pane).unwrap(), Vec::<Vec<u8>>::new());
+    assert_eq!(
+        fake_pty_backend.list_pane_write_bytes(pane_id).unwrap(),
+        Vec::<Vec<u8>>::new()
+    );
 }
 
 #[test]
 fn a_failed_reply_write_is_dropped_and_output_still_lands() {
-    let (mut rt, fake, _tx) = new_runtime();
+    let (mut runtime, fake_pty_backend, _event_sender) = build_test_server();
     // The engine exists but the pane was never spawned in the backend, so the
     // reply write fails with an unknown-pane error.
-    let pane = add_engine(&mut rt);
+    let pane_id = insert_test_terminal_engine(&mut runtime);
 
-    rt.handle_pty_output(pane, b"x\x1b[5n");
+    runtime.handle_pty_output(pane_id, b"x\x1b[5n");
 
     // The chunk still reached the grid and scheduled a render; the failed
     // write left no record.
-    assert_eq!(ch(&rt, pane, 0, 0), 'x');
-    assert!(rt.render_scheduler.poll(Instant::now()));
+    assert_eq!(get_pane_cell_character(&runtime, pane_id, 0, 0), 'x');
+    assert!(runtime.render_scheduler.poll(Instant::now()));
     assert_eq!(
-        fake.writes(pane).unwrap_err(),
-        PtyError::UnknownPane { pane }
+        fake_pty_backend.list_pane_write_bytes(pane_id).unwrap_err(),
+        PtyError::UnknownPane { pane_id }
     );
 }
 
 #[test]
 fn bytes_for_a_pane_with_no_engine_are_ignored() {
-    let (mut rt, _fake, _tx) = new_runtime();
-    let live = add_engine(&mut rt);
-    let gone = PaneId::new();
+    let (mut runtime, _fake_pty_backend, _event_sender) = build_test_server();
+    let live_pane_id = insert_test_terminal_engine(&mut runtime);
+    let closed_pane_id = PaneId::new();
 
-    rt.handle_pty_output(gone, b"\x1b[31mboom");
+    runtime.handle_pty_output(closed_pane_id, b"\x1b[31mboom");
 
     // No engine changed, no engine was created, and no render was scheduled.
-    assert_eq!(ch(&rt, live, 0, 0), ' ');
-    assert_eq!(rt.terminal_engines().len(), 1);
-    assert!(!rt.render_scheduler.poll(Instant::now()));
+    assert_eq!(get_pane_cell_character(&runtime, live_pane_id, 0, 0), ' ');
+    assert_eq!(runtime.list_terminal_engines().len(), 1);
+    assert!(!runtime.render_scheduler.poll(Instant::now()));
 }
 
 #[test]
 fn an_empty_chunk_schedules_a_render_and_leaves_the_grid_alone() {
-    let (mut rt, _fake, _tx) = new_runtime();
-    let pane = add_engine(&mut rt);
+    let (mut runtime, _fake_pty_backend, _event_sender) = build_test_server();
+    let pane_id = insert_test_terminal_engine(&mut runtime);
 
-    rt.handle_pty_output(pane, b"");
+    runtime.handle_pty_output(pane_id, b"");
 
-    assert_eq!(ch(&rt, pane, 0, 0), ' ');
+    assert_eq!(get_pane_cell_character(&runtime, pane_id, 0, 0), ' ');
     assert_eq!(
-        rt.terminal_engines()[&pane]
-            .state()
-            .active_cursor_position(),
+        runtime.list_terminal_engines()[&pane_id]
+            .get_terminal_state()
+            .get_active_cursor_position(),
         (0, 0)
     );
-    assert!(rt.render_scheduler.poll(Instant::now()));
+    assert!(runtime.render_scheduler.poll(Instant::now()));
 }
 
 #[test]
 fn lines_scrolled_off_the_top_enter_the_panes_scrollback() {
-    let (mut rt, _fake, _tx) = new_runtime();
-    let pane = add_engine(&mut rt);
+    let (mut runtime, _fake_pty_backend, _event_sender) = build_test_server();
+    let pane_id = insert_test_terminal_engine(&mut runtime);
 
     // Five lines on a three-row grid: the first two scroll off the top.
-    rt.handle_pty_output(pane, b"a\r\nb\r\nc\r\nd\r\ne");
+    runtime.handle_pty_output(pane_id, b"a\r\nb\r\nc\r\nd\r\ne");
 
-    let scrollback = rt.terminal_engines()[&pane].state().scrollback();
-    assert_eq!(scrollback.total_pushed(), 2);
-    assert_eq!(scrollback.len(), 2);
+    let scrollback_state = runtime.list_terminal_engines()[&pane_id]
+        .get_terminal_state()
+        .get_scrollback();
+    assert_eq!(scrollback_state.get_total_pushed_line_count(), 2);
+    assert_eq!(scrollback_state.get_retained_line_count(), 2);
 }
 
 #[test]
 fn erasing_the_scrollback_empties_it_and_keeps_the_push_count() {
-    let (mut rt, _fake, _tx) = new_runtime();
-    let pane = add_engine(&mut rt);
-    rt.handle_pty_output(pane, b"a\r\nb\r\nc\r\nd\r\ne");
+    let (mut runtime, _fake_pty_backend, _event_sender) = build_test_server();
+    let pane_id = insert_test_terminal_engine(&mut runtime);
+    runtime.handle_pty_output(pane_id, b"a\r\nb\r\nc\r\nd\r\ne");
 
     // CSI 3 J drops every retained line.
-    rt.handle_pty_output(pane, b"\x1b[3J");
+    runtime.handle_pty_output(pane_id, b"\x1b[3J");
 
-    let scrollback = rt.terminal_engines()[&pane].state().scrollback();
-    assert_eq!(scrollback.len(), 0);
-    assert_eq!(scrollback.total_pushed(), 2);
+    let scrollback_state = runtime.list_terminal_engines()[&pane_id]
+        .get_terminal_state()
+        .get_scrollback();
+    assert_eq!(scrollback_state.get_retained_line_count(), 0);
+    assert_eq!(scrollback_state.get_total_pushed_line_count(), 2);
 }
 
 #[test]
 fn entering_the_alternate_screen_keeps_the_primary_scrollback() {
-    let (mut rt, _fake, _tx) = new_runtime();
-    let pane = add_engine(&mut rt);
-    rt.handle_pty_output(pane, b"a\r\nb\r\nc\r\nd\r\ne");
+    let (mut runtime, _fake_pty_backend, _event_sender) = build_test_server();
+    let pane_id = insert_test_terminal_engine(&mut runtime);
+    runtime.handle_pty_output(pane_id, b"a\r\nb\r\nc\r\nd\r\ne");
 
-    rt.handle_pty_output(pane, b"\x1b[?1049h");
+    runtime.handle_pty_output(pane_id, b"\x1b[?1049h");
 
-    let state = rt.terminal_engines()[&pane].state();
-    assert!(!state.on_primary_screen());
-    assert_eq!(state.scrollback().len(), 2);
-    assert_eq!(state.active_grid().cell(0, 0).expect("cell").ch(), ' ');
+    let terminal_state = runtime.list_terminal_engines()[&pane_id].get_terminal_state();
+    assert!(!terminal_state.is_primary_screen_active());
+    assert_eq!(terminal_state.get_scrollback().get_retained_line_count(), 2);
+    assert_eq!(
+        terminal_state
+            .get_active_grid()
+            .get_cell(0, 0)
+            .expect("cell")
+            .get_character(),
+        ' '
+    );
 }

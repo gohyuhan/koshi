@@ -1,9 +1,9 @@
 //! Incremental parser for input from the terminal that contains Koshi.
 //!
 //! The parser emits complete events and retains incomplete UTF-8, control, and
-//! paste sequences while waiting for more bytes. `finish_pending` resolves
+//! paste sequences while waiting for more bytes. `finish_pending_input` resolves
 //! timeout-eligible prefixes and discards other incomplete input. For example,
-//! `ESC [ 1 ; 5 C` becomes a Right key with Control held.
+//! `ESCAPE_BYTE [ 1 ; 5 C` becomes a Right key with Control held.
 
 use std::collections::VecDeque;
 
@@ -12,25 +12,25 @@ use super::{
     KittyGraphicsReply, Modifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 
-const ESC: u8 = 0x1b;
-const CONTROL_STRING_LIMIT: usize = 4_096;
-const CSI_LIMIT: usize = 128;
-const PASTE_LIMIT: usize = 16 * 1024 * 1024;
-const PASTE_END: &[u8] = b"\x1b[201~";
+const ESCAPE_BYTE: u8 = 0x1b;
+const MAX_CONTROL_STRING_BYTE_COUNT: usize = 4_096;
+const MAX_CSI_BYTE_COUNT: usize = 128;
+const MAX_PASTE_BYTE_COUNT: usize = 16 * 1024 * 1024;
+const PASTE_END_SEQUENCE_BYTES: &[u8] = b"\x1b[201~";
 
 /// An incremental parser for host-terminal input.
 #[derive(Debug)]
 pub struct Parser {
-    state: State,
-    sequence: Vec<u8>,
-    paste: Vec<u8>,
-    paste_match: usize,
-    events: VecDeque<Event>,
-    alt: bool,
+    parser_state: ParserState,
+    control_sequence: Vec<u8>,
+    paste_bytes: Vec<u8>,
+    paste_marker_match_length: usize,
+    pending_events: VecDeque<Event>,
+    is_alt_held: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum State {
+enum ParserState {
     Ground,
     Escape,
     Ss3,
@@ -39,371 +39,399 @@ enum State {
     CsiX10,
     ApcStart,
     Apc,
-    Osc { escape_seen: bool },
+    Osc { is_escape_seen: bool },
     DiscardCsi,
-    DiscardSt { escape_seen: bool },
-    DiscardOsc { escape_seen: bool },
+    DiscardSt { is_escape_seen: bool },
+    DiscardOsc { is_escape_seen: bool },
     Paste,
     DiscardPaste,
-    Utf8 { expected: u8 },
+    Utf8 { expected_utf8_byte_count: u8 },
 }
 
 impl Default for Parser {
     fn default() -> Self {
         Self {
-            state: State::Ground,
-            sequence: Vec::with_capacity(32),
-            paste: Vec::new(),
-            paste_match: 0,
-            events: VecDeque::with_capacity(32),
-            alt: false,
+            parser_state: ParserState::Ground,
+            control_sequence: Vec::with_capacity(32),
+            paste_bytes: Vec::new(),
+            paste_marker_match_length: 0,
+            pending_events: VecDeque::with_capacity(32),
+            is_alt_held: false,
         }
     }
 }
 
 impl Parser {
     /// Parse every byte in `bytes` and queue complete events.
-    pub fn push(&mut self, bytes: &[u8]) {
-        for &byte in bytes {
-            self.push_byte(byte);
+    pub fn process_input_bytes(&mut self, input_bytes: &[u8]) {
+        for &input_byte in input_bytes {
+            self.process_input_byte(input_byte);
         }
     }
 
     /// Resolve timeout-eligible prefixes and discard other incomplete input.
     /// Identified control strings remain pending until their terminator.
-    pub fn finish_pending(&mut self) {
-        match self.state {
-            State::Escape => self.emit_key(KeyCode::Escape, Modifiers::NONE),
-            State::ApcStart => self.emit_key(KeyCode::Char('_'), Modifiers::ALT | Modifiers::SHIFT),
-            State::Ground
-            | State::Apc
-            | State::Osc { .. }
-            | State::DiscardCsi
-            | State::DiscardSt { .. }
-            | State::DiscardOsc { .. } => return,
-            State::PrivateCsi => return,
-            State::Ss3
-            | State::Csi
-            | State::CsiX10
-            | State::Paste
-            | State::DiscardPaste
-            | State::Utf8 { .. } => {}
+    pub fn finish_pending_input(&mut self) {
+        match self.parser_state {
+            ParserState::Escape => self.emit_key(KeyCode::Escape, Modifiers::NONE),
+            ParserState::ApcStart => {
+                self.emit_key(KeyCode::Char('_'), Modifiers::ALT | Modifiers::SHIFT)
+            }
+            ParserState::Ground
+            | ParserState::Apc
+            | ParserState::Osc { .. }
+            | ParserState::DiscardCsi
+            | ParserState::DiscardSt { .. }
+            | ParserState::DiscardOsc { .. } => return,
+            ParserState::PrivateCsi => return,
+            ParserState::Ss3
+            | ParserState::Csi
+            | ParserState::CsiX10
+            | ParserState::Paste
+            | ParserState::DiscardPaste
+            | ParserState::Utf8 { .. } => {}
         }
-        self.reset();
+        self.reset_input_parser();
     }
 
     /// Return whether an incomplete byte sequence is stored.
     #[must_use]
-    pub fn has_pending(&self) -> bool {
-        self.state != State::Ground
+    pub fn has_pending_input(&self) -> bool {
+        self.parser_state != ParserState::Ground
     }
 
     /// Return whether inactivity must resolve an incomplete byte sequence.
     #[must_use]
-    pub fn needs_sequence_timeout(&self) -> bool {
+    pub fn needs_input_sequence_timeout(&self) -> bool {
         matches!(
-            self.state,
-            State::Escape | State::Ss3 | State::Csi | State::CsiX10 | State::ApcStart
+            self.parser_state,
+            ParserState::Escape
+                | ParserState::Ss3
+                | ParserState::Csi
+                | ParserState::CsiX10
+                | ParserState::ApcStart
         )
     }
 
     /// Remove the oldest complete event.
-    pub fn pop(&mut self) -> Option<Event> {
-        self.events.pop_front()
+    pub fn remove_next_pending_event(&mut self) -> Option<Event> {
+        self.pending_events.pop_front()
     }
 
-    fn push_byte(&mut self, byte: u8) {
-        match self.state {
-            State::Ground => self.push_ground(byte),
-            State::Escape => self.push_escape(byte),
-            State::Ss3 => self.push_ss3(byte),
-            State::Csi | State::PrivateCsi => self.push_csi(byte),
-            State::CsiX10 => self.push_x10(byte),
-            State::ApcStart => self.push_apc_start(byte),
-            State::Apc => self.push_apc(byte),
-            State::Osc { escape_seen } => self.push_osc(byte, escape_seen),
-            State::DiscardCsi => match byte {
-                0x18 | 0x1a => self.reset(),
-                ESC => {
-                    self.reset();
-                    self.state = State::Escape;
+    fn process_input_byte(&mut self, input_byte: u8) {
+        match self.parser_state {
+            ParserState::Ground => self.process_ground_byte(input_byte),
+            ParserState::Escape => self.process_escape_byte(input_byte),
+            ParserState::Ss3 => self.process_ss3_byte(input_byte),
+            ParserState::Csi | ParserState::PrivateCsi => self.process_csi_byte(input_byte),
+            ParserState::CsiX10 => self.process_x10_byte(input_byte),
+            ParserState::ApcStart => self.process_apc_start_byte(input_byte),
+            ParserState::Apc => self.process_apc_byte(input_byte),
+            ParserState::Osc { is_escape_seen } => {
+                self.process_osc_byte(input_byte, is_escape_seen)
+            }
+            ParserState::DiscardCsi => match input_byte {
+                0x18 | 0x1a => self.reset_input_parser(),
+                ESCAPE_BYTE => {
+                    self.reset_input_parser();
+                    self.parser_state = ParserState::Escape;
                 }
-                byte if is_csi_final(byte) => self.reset(),
+                input_byte if is_csi_final(input_byte) => self.reset_input_parser(),
                 _ => {}
             },
-            State::DiscardSt { escape_seen } => self.push_discard_st(byte, escape_seen),
-            State::DiscardOsc { escape_seen } => self.push_discard_osc(byte, escape_seen),
-            State::Paste => self.push_paste(byte, false),
-            State::DiscardPaste => self.push_paste(byte, true),
-            State::Utf8 { expected } => self.push_utf8(byte, expected),
+            ParserState::DiscardSt { is_escape_seen } => {
+                self.process_discard_st_byte(input_byte, is_escape_seen)
+            }
+            ParserState::DiscardOsc { is_escape_seen } => {
+                self.process_discard_osc_byte(input_byte, is_escape_seen)
+            }
+            ParserState::Paste => self.process_paste_byte(input_byte, false),
+            ParserState::DiscardPaste => self.process_paste_byte(input_byte, true),
+            ParserState::Utf8 {
+                expected_utf8_byte_count,
+            } => self.process_utf8_byte(input_byte, expected_utf8_byte_count),
         }
     }
 
-    fn push_ground(&mut self, byte: u8) {
-        match byte {
-            ESC => self.state = State::Escape,
+    fn process_ground_byte(&mut self, input_byte: u8) {
+        match input_byte {
+            ESCAPE_BYTE => self.parser_state = ParserState::Escape,
             b'\r' => self.emit_key(KeyCode::Enter, Modifiers::NONE),
             b'\t' => self.emit_key(KeyCode::Tab, Modifiers::NONE),
             0x7f => self.emit_key(KeyCode::Backspace, Modifiers::NONE),
             0 => self.emit_key(KeyCode::Char(' '), Modifiers::CONTROL),
-            byte @ 0x01..=0x1a => self.emit_key(
-                KeyCode::Char(char::from(byte - 1 + b'a')),
+            input_byte @ 0x01..=0x1a => self.emit_key(
+                KeyCode::Char(char::from(input_byte - 1 + b'a')),
                 Modifiers::CONTROL,
             ),
-            byte @ 0x1c..=0x1f => self.emit_key(
-                KeyCode::Char(char::from(byte - 0x1c + b'4')),
+            input_byte @ 0x1c..=0x1f => self.emit_key(
+                KeyCode::Char(char::from(input_byte - 0x1c + b'4')),
                 Modifiers::CONTROL,
             ),
-            0x20..=0x7e => self.emit_char(char::from(byte)),
-            _ => match utf8_width(byte) {
-                Some(expected) => {
-                    self.sequence.clear();
-                    self.sequence.push(byte);
-                    self.state = State::Utf8 { expected };
+            0x20..=0x7e => self.emit_char(char::from(input_byte)),
+            _ => match compute_utf8_byte_width(input_byte) {
+                Some(expected_utf8_byte_count) => {
+                    self.control_sequence.clear();
+                    self.control_sequence.push(input_byte);
+                    self.parser_state = ParserState::Utf8 {
+                        expected_utf8_byte_count,
+                    };
                 }
-                None => self.alt = false,
+                None => self.is_alt_held = false,
             },
         }
     }
 
-    fn push_escape(&mut self, byte: u8) {
-        match byte {
+    fn process_escape_byte(&mut self, input_byte: u8) {
+        match input_byte {
             b'[' => {
-                self.sequence.clear();
-                self.state = State::Csi;
+                self.control_sequence.clear();
+                self.parser_state = ParserState::Csi;
             }
-            b'O' => self.state = State::Ss3,
+            b'O' => self.parser_state = ParserState::Ss3,
             b']' => {
-                self.sequence.clear();
-                self.state = State::Osc { escape_seen: false };
+                self.control_sequence.clear();
+                self.parser_state = ParserState::Osc {
+                    is_escape_seen: false,
+                };
             }
-            b'P' => self.state = State::DiscardSt { escape_seen: false },
-            b'_' => self.state = State::ApcStart,
-            ESC => {
+            b'P' => {
+                self.parser_state = ParserState::DiscardSt {
+                    is_escape_seen: false,
+                }
+            }
+            b'_' => self.parser_state = ParserState::ApcStart,
+            ESCAPE_BYTE => {
                 self.emit_key(KeyCode::Escape, Modifiers::NONE);
-                self.state = State::Escape;
+                self.parser_state = ParserState::Escape;
             }
             _ => {
-                self.state = State::Ground;
-                self.alt = true;
-                self.push_ground(byte);
+                self.parser_state = ParserState::Ground;
+                self.is_alt_held = true;
+                self.process_ground_byte(input_byte);
             }
         }
     }
 
-    fn push_ss3(&mut self, byte: u8) {
-        let code = match byte {
+    fn process_ss3_byte(&mut self, input_byte: u8) {
+        let key_code = match input_byte {
             b'A' => Some(KeyCode::Up),
             b'B' => Some(KeyCode::Down),
             b'C' => Some(KeyCode::Right),
             b'D' => Some(KeyCode::Left),
             b'F' => Some(KeyCode::End),
             b'H' => Some(KeyCode::Home),
-            b'P'..=b'S' => Some(KeyCode::Function(byte - b'P' + 1)),
+            b'P'..=b'S' => Some(KeyCode::Function(input_byte - b'P' + 1)),
             _ => None,
         };
-        self.state = State::Ground;
-        if let Some(code) = code {
-            self.emit_key(code, Modifiers::NONE);
+        self.parser_state = ParserState::Ground;
+        if let Some(key_code) = key_code {
+            self.emit_key(key_code, Modifiers::NONE);
         }
     }
 
-    fn push_csi(&mut self, byte: u8) {
-        if matches!(byte, 0x18 | 0x1a) {
-            self.reset();
+    fn process_csi_byte(&mut self, input_byte: u8) {
+        if matches!(input_byte, 0x18 | 0x1a) {
+            self.reset_input_parser();
             return;
         }
-        if byte == ESC {
-            self.reset();
-            self.state = State::Escape;
+        if input_byte == ESCAPE_BYTE {
+            self.reset_input_parser();
+            self.parser_state = ParserState::Escape;
             return;
         }
-        self.sequence.push(byte);
-        if self.sequence == b"200~" {
-            self.sequence.clear();
-            self.paste.clear();
-            self.paste_match = 0;
-            self.state = State::Paste;
+        self.control_sequence.push(input_byte);
+        if self.control_sequence == b"200~" {
+            self.control_sequence.clear();
+            self.paste_bytes.clear();
+            self.paste_marker_match_length = 0;
+            self.parser_state = ParserState::Paste;
             return;
         }
-        if self.sequence.len() == 1 && byte == b'M' {
-            self.state = State::CsiX10;
+        if self.control_sequence.len() == 1 && input_byte == b'M' {
+            self.parser_state = ParserState::CsiX10;
             return;
         }
-        if self.sequence.len() == 1 && byte == b'?' {
-            self.state = State::PrivateCsi;
+        if self.control_sequence.len() == 1 && input_byte == b'?' {
+            self.parser_state = ParserState::PrivateCsi;
             return;
         }
-        if self.sequence.first() == Some(&b'[') && self.sequence.len() == 1 {
+        if self.control_sequence.first() == Some(&b'[') && self.control_sequence.len() == 1 {
             return;
         }
-        if is_csi_final(byte) {
-            let event = parse_csi(&self.sequence);
-            self.reset();
-            if let Some(event) = event {
-                self.events.push_back(event);
+        if is_csi_final(input_byte) {
+            let parsed_event = parse_csi(&self.control_sequence);
+            self.reset_input_parser();
+            if let Some(parsed_event) = parsed_event {
+                self.pending_events.push_back(parsed_event);
             }
-        } else if self.sequence.len() >= CSI_LIMIT {
-            self.sequence.clear();
-            self.state = State::DiscardCsi;
+        } else if self.control_sequence.len() >= MAX_CSI_BYTE_COUNT {
+            self.control_sequence.clear();
+            self.parser_state = ParserState::DiscardCsi;
         }
     }
 
-    fn push_x10(&mut self, byte: u8) {
-        self.sequence.push(byte);
-        if self.sequence.len() == 4 {
-            let event = parse_x10_mouse(&self.sequence);
-            self.reset();
-            if let Some(event) = event {
-                self.events.push_back(event);
+    fn process_x10_byte(&mut self, input_byte: u8) {
+        self.control_sequence.push(input_byte);
+        if self.control_sequence.len() == 4 {
+            let parsed_event = parse_x10_mouse(&self.control_sequence);
+            self.reset_input_parser();
+            if let Some(parsed_event) = parsed_event {
+                self.pending_events.push_back(parsed_event);
             }
         }
     }
 
-    fn push_apc_start(&mut self, byte: u8) {
-        if byte == b'G' {
-            self.sequence.clear();
-            self.sequence.push(byte);
-            self.state = State::Apc;
+    fn process_apc_start_byte(&mut self, input_byte: u8) {
+        if input_byte == b'G' {
+            self.control_sequence.clear();
+            self.control_sequence.push(input_byte);
+            self.parser_state = ParserState::Apc;
         } else {
             self.emit_key(KeyCode::Char('_'), Modifiers::ALT | Modifiers::SHIFT);
-            self.state = State::Ground;
-            self.push_ground(byte);
+            self.parser_state = ParserState::Ground;
+            self.process_ground_byte(input_byte);
         }
     }
 
-    fn push_apc(&mut self, byte: u8) {
-        if matches!(byte, 0x18 | 0x1a) {
-            self.reset();
+    fn process_apc_byte(&mut self, input_byte: u8) {
+        if matches!(input_byte, 0x18 | 0x1a) {
+            self.reset_input_parser();
             return;
         }
-        self.sequence.push(byte);
-        if self.sequence.ends_with(b"\x1b\\") || byte == 0x9c {
-            let payload_len = if byte == 0x9c {
-                self.sequence.len() - 1
+        self.control_sequence.push(input_byte);
+        if self.control_sequence.ends_with(b"\x1b\\") || input_byte == 0x9c {
+            let payload_byte_count = if input_byte == 0x9c {
+                self.control_sequence.len() - 1
             } else {
-                self.sequence.len() - 2
+                self.control_sequence.len() - 2
             };
-            let event = parse_kitty_reply(&self.sequence[..payload_len]);
-            self.reset();
-            if let Some(event) = event {
-                self.events.push_back(Event::KittyGraphicsReply(event));
+            let parsed_event = parse_kitty_reply(&self.control_sequence[..payload_byte_count]);
+            self.reset_input_parser();
+            if let Some(parsed_event) = parsed_event {
+                self.pending_events
+                    .push_back(Event::KittyGraphicsReply(parsed_event));
             }
-        } else if self.sequence.len() >= CONTROL_STRING_LIMIT {
-            let escape_seen = byte == ESC;
-            self.sequence.clear();
-            self.state = State::DiscardSt { escape_seen };
+        } else if self.control_sequence.len() >= MAX_CONTROL_STRING_BYTE_COUNT {
+            let is_escape_seen = input_byte == ESCAPE_BYTE;
+            self.control_sequence.clear();
+            self.parser_state = ParserState::DiscardSt { is_escape_seen };
         }
     }
 
-    fn push_osc(&mut self, byte: u8, escape_seen: bool) {
-        if matches!(byte, 0x18 | 0x1a) {
-            self.reset();
+    fn process_osc_byte(&mut self, input_byte: u8, is_escape_seen: bool) {
+        if matches!(input_byte, 0x18 | 0x1a) {
+            self.reset_input_parser();
             return;
         }
-        if byte == 0x07 || byte == 0x9c || (escape_seen && byte == b'\\') {
-            let payload_len = if byte == b'\\' && escape_seen {
-                self.sequence.len().saturating_sub(1)
+        if input_byte == 0x07 || input_byte == 0x9c || (is_escape_seen && input_byte == b'\\') {
+            let payload_byte_count = if input_byte == b'\\' && is_escape_seen {
+                self.control_sequence.len().saturating_sub(1)
             } else {
-                self.sequence.len()
+                self.control_sequence.len()
             };
-            let event = parse_osc(&self.sequence[..payload_len]);
-            self.reset();
-            if let Some(event) = event {
-                self.events.push_back(event);
+            let parsed_event = parse_osc(&self.control_sequence[..payload_byte_count]);
+            self.reset_input_parser();
+            if let Some(parsed_event) = parsed_event {
+                self.pending_events.push_back(parsed_event);
             }
             return;
         }
-        if self.sequence.len() >= CONTROL_STRING_LIMIT {
-            self.sequence.clear();
-            self.state = State::DiscardOsc {
-                escape_seen: byte == ESC,
+        if self.control_sequence.len() >= MAX_CONTROL_STRING_BYTE_COUNT {
+            self.control_sequence.clear();
+            self.parser_state = ParserState::DiscardOsc {
+                is_escape_seen: input_byte == ESCAPE_BYTE,
             };
             return;
         }
-        self.sequence.push(byte);
-        self.state = State::Osc {
-            escape_seen: byte == ESC,
+        self.control_sequence.push(input_byte);
+        self.parser_state = ParserState::Osc {
+            is_escape_seen: input_byte == ESCAPE_BYTE,
         };
     }
 
-    fn push_discard_st(&mut self, byte: u8, escape_seen: bool) {
-        if matches!(byte, 0x18 | 0x1a) || byte == 0x9c || (escape_seen && byte == b'\\') {
-            self.reset();
-        } else {
-            self.state = State::DiscardSt {
-                escape_seen: byte == ESC,
-            };
-        }
-    }
-
-    fn push_discard_osc(&mut self, byte: u8, escape_seen: bool) {
-        if matches!(byte, 0x18 | 0x1a)
-            || byte == 0x07
-            || byte == 0x9c
-            || (escape_seen && byte == b'\\')
+    fn process_discard_st_byte(&mut self, input_byte: u8, is_escape_seen: bool) {
+        if matches!(input_byte, 0x18 | 0x1a)
+            || input_byte == 0x9c
+            || (is_escape_seen && input_byte == b'\\')
         {
-            self.reset();
+            self.reset_input_parser();
         } else {
-            self.state = State::DiscardOsc {
-                escape_seen: byte == ESC,
+            self.parser_state = ParserState::DiscardSt {
+                is_escape_seen: input_byte == ESCAPE_BYTE,
             };
         }
     }
 
-    fn push_paste(&mut self, byte: u8, discard: bool) {
-        if byte == PASTE_END[self.paste_match] {
-            self.paste_match += 1;
-            if self.paste_match == PASTE_END.len() {
-                if !discard {
-                    let bytes = std::mem::take(&mut self.paste);
-                    self.events
-                        .push_back(Event::Paste(String::from_utf8_lossy(&bytes).into_owned()));
+    fn process_discard_osc_byte(&mut self, input_byte: u8, is_escape_seen: bool) {
+        if matches!(input_byte, 0x18 | 0x1a)
+            || input_byte == 0x07
+            || input_byte == 0x9c
+            || (is_escape_seen && input_byte == b'\\')
+        {
+            self.reset_input_parser();
+        } else {
+            self.parser_state = ParserState::DiscardOsc {
+                is_escape_seen: input_byte == ESCAPE_BYTE,
+            };
+        }
+    }
+
+    fn process_paste_byte(&mut self, input_byte: u8, should_discard: bool) {
+        if input_byte == PASTE_END_SEQUENCE_BYTES[self.paste_marker_match_length] {
+            self.paste_marker_match_length += 1;
+            if self.paste_marker_match_length == PASTE_END_SEQUENCE_BYTES.len() {
+                if !should_discard {
+                    let paste_bytes = std::mem::take(&mut self.paste_bytes);
+                    self.pending_events.push_back(Event::Paste(
+                        String::from_utf8_lossy(&paste_bytes).into_owned(),
+                    ));
                 }
-                self.reset();
+                self.reset_input_parser();
             }
             return;
         }
 
-        if self.paste_match != 0 {
-            if !discard {
-                self.paste.extend_from_slice(&PASTE_END[..self.paste_match]);
+        if self.paste_marker_match_length != 0 {
+            if !should_discard {
+                self.paste_bytes
+                    .extend_from_slice(&PASTE_END_SEQUENCE_BYTES[..self.paste_marker_match_length]);
             }
-            self.paste_match = 0;
-            if byte == PASTE_END[0] {
-                self.paste_match = 1;
+            self.paste_marker_match_length = 0;
+            if input_byte == PASTE_END_SEQUENCE_BYTES[0] {
+                self.paste_marker_match_length = 1;
                 return;
             }
         }
 
-        if !discard {
-            self.paste.push(byte);
-            if self.paste.len() > PASTE_LIMIT {
-                self.paste.clear();
-                self.state = State::DiscardPaste;
+        if !should_discard {
+            self.paste_bytes.push(input_byte);
+            if self.paste_bytes.len() > MAX_PASTE_BYTE_COUNT {
+                self.paste_bytes.clear();
+                self.parser_state = ParserState::DiscardPaste;
             }
         }
     }
 
-    fn push_utf8(&mut self, byte: u8, expected: u8) {
-        if byte & 0xc0 != 0x80 {
-            self.sequence.clear();
-            self.state = State::Ground;
-            self.alt = false;
-            self.push_ground(byte);
+    fn process_utf8_byte(&mut self, input_byte: u8, expected_utf8_byte_count: u8) {
+        if input_byte & 0xc0 != 0x80 {
+            self.control_sequence.clear();
+            self.parser_state = ParserState::Ground;
+            self.is_alt_held = false;
+            self.process_ground_byte(input_byte);
             return;
         }
-        self.sequence.push(byte);
-        if self.sequence.len() == usize::from(expected) {
-            let character = std::str::from_utf8(&self.sequence)
+        self.control_sequence.push(input_byte);
+        if self.control_sequence.len() == usize::from(expected_utf8_byte_count) {
+            let character = std::str::from_utf8(&self.control_sequence)
                 .ok()
                 .and_then(|text| text.chars().next());
-            self.sequence.clear();
-            self.state = State::Ground;
+            self.control_sequence.clear();
+            self.parser_state = ParserState::Ground;
             if let Some(character) = character {
                 self.emit_char(character);
             } else {
-                self.alt = false;
+                self.is_alt_held = false;
             }
         }
     }
@@ -414,37 +442,39 @@ impl Parser {
         } else {
             Modifiers::NONE
         };
-        if self.alt {
+        if self.is_alt_held {
             modifiers |= Modifiers::ALT;
-            self.alt = false;
+            self.is_alt_held = false;
         }
         self.emit_key(KeyCode::Char(character), modifiers);
     }
 
-    fn emit_key(&mut self, code: KeyCode, mut modifiers: Modifiers) {
-        if self.alt {
+    fn emit_key(&mut self, key_code: KeyCode, mut modifiers: Modifiers) {
+        if self.is_alt_held {
             modifiers |= Modifiers::ALT;
-            self.alt = false;
+            self.is_alt_held = false;
         }
-        self.events
-            .push_back(Event::Key(KeyEvent::new(code, modifiers)));
+        self.pending_events
+            .push_back(Event::Key(KeyEvent::from_key_code_and_modifiers(
+                key_code, modifiers,
+            )));
     }
 
-    fn reset(&mut self) {
-        self.state = State::Ground;
-        self.sequence.clear();
-        self.paste.clear();
-        self.paste_match = 0;
-        self.alt = false;
+    fn reset_input_parser(&mut self) {
+        self.parser_state = ParserState::Ground;
+        self.control_sequence.clear();
+        self.paste_bytes.clear();
+        self.paste_marker_match_length = 0;
+        self.is_alt_held = false;
     }
 }
 
-fn is_csi_final(byte: u8) -> bool {
-    (0x40..=0x7e).contains(&byte)
+fn is_csi_final(input_byte: u8) -> bool {
+    (0x40..=0x7e).contains(&input_byte)
 }
 
-fn utf8_width(first: u8) -> Option<u8> {
-    match first {
+fn compute_utf8_byte_width(first_utf8_byte: u8) -> Option<u8> {
+    match first_utf8_byte {
         0xc2..=0xdf => Some(2),
         0xe0..=0xef => Some(3),
         0xf0..=0xf4 => Some(4),
@@ -452,19 +482,19 @@ fn utf8_width(first: u8) -> Option<u8> {
     }
 }
 
-fn parse_osc(payload: &[u8]) -> Option<Event> {
-    payload
+fn parse_osc(osc_payload: &[u8]) -> Option<Event> {
+    osc_payload
         .strip_prefix(b"1337;Capabilities=")
         .map(|features| Event::TerminalFeatures(features.to_vec()))
 }
 
-fn parse_csi(sequence: &[u8]) -> Option<Event> {
-    let (&final_byte, body) = sequence.split_last()?;
-    if body == b"[" && (b'A'..=b'E').contains(&final_byte) {
+fn parse_csi(control_sequence: &[u8]) -> Option<Event> {
+    let (&final_byte, csi_body) = control_sequence.split_last()?;
+    if csi_body == b"[" && (b'A'..=b'E').contains(&final_byte) {
         return Some(Event::Key(KeyCode::Function(final_byte - b'A' + 1).into()));
     }
-    if body.is_empty() {
-        let event = match final_byte {
+    if csi_body.is_empty() {
+        let parsed_event = match final_byte {
             b'A' => Event::Key(KeyCode::Up.into()),
             b'B' => Event::Key(KeyCode::Down.into()),
             b'C' => Event::Key(KeyCode::Right.into()),
@@ -476,95 +506,114 @@ fn parse_csi(sequence: &[u8]) -> Option<Event> {
             b'P' => Event::Key(KeyCode::Function(1).into()),
             b'Q' => Event::Key(KeyCode::Function(2).into()),
             b'S' => Event::Key(KeyCode::Function(4).into()),
-            b'Z' => Event::Key(KeyEvent::new(KeyCode::BackTab, Modifiers::SHIFT)),
+            b'Z' => Event::Key(KeyEvent::from_key_code_and_modifiers(
+                KeyCode::BackTab,
+                Modifiers::SHIFT,
+            )),
             _ => return None,
         };
-        return Some(event);
+        return Some(parsed_event);
     }
-    if body.first() == Some(&b'?') && final_byte == b'c' {
-        return parse_da1(&body[1..]).map(Event::PrimaryDeviceAttributes);
+    if csi_body.first() == Some(&b'?') && final_byte == b'c' {
+        return parse_da1(&csi_body[1..]).map(Event::PrimaryDeviceAttributes);
     }
-    if body.first() == Some(&b'?') && final_byte == b'S' {
-        return parse_graphic_attribute(&body[1..]).map(Event::SixelGraphicsAttributeReply);
+    if csi_body.first() == Some(&b'?') && final_byte == b'S' {
+        return parse_graphic_attribute(&csi_body[1..]).map(Event::SixelGraphicsAttributeReply);
     }
-    if body[0] == b'<' && matches!(final_byte, b'M' | b'm') {
-        return parse_sgr_mouse(&body[1..], final_byte).map(Event::Mouse);
+    if csi_body[0] == b'<' && matches!(final_byte, b'M' | b'm') {
+        return parse_sgr_mouse(&csi_body[1..], final_byte).map(Event::Mouse);
     }
     match final_byte {
         b't' => {
-            let mut fields = body.split(|byte| *byte == b';');
-            if fields.next()? != b"6" {
+            let mut cell_size_fields = csi_body.split(|field_byte| *field_byte == b';');
+            if cell_size_fields.next()? != b"6" {
                 return None;
             }
-            let height = u16::try_from(decimal(fields.next()?)?).ok()?;
-            let width = u16::try_from(decimal(fields.next()?)?).ok()?;
-            if fields.next().is_some() {
+            let cell_pixel_height = u16::try_from(parse_decimal(cell_size_fields.next()?)?).ok()?;
+            let cell_pixel_width = u16::try_from(parse_decimal(cell_size_fields.next()?)?).ok()?;
+            if cell_size_fields.next().is_some() {
                 return None;
             }
-            koshi_core::geometry::PixelCellSize::new(width, height).map(Event::CellSize)
+            koshi_core::geometry::PixelCellSize::from_pixel_dimensions(
+                cell_pixel_width,
+                cell_pixel_height,
+            )
+            .map(Event::CellSize)
         }
         b'A' | b'B' | b'C' | b'D' | b'F' | b'H' | b'P' | b'Q' | b'R' | b'S' => {
-            parse_modified_key(body, final_byte).map(Event::Key)
+            parse_modified_key(csi_body, final_byte).map(Event::Key)
         }
-        b'M' => parse_rxvt_mouse(body).map(Event::Mouse),
-        b'~' => parse_tilde_key(body).map(Event::Key),
-        b'u' if body.first() != Some(&b'?') => parse_kitty_key(body).map(Event::Key),
+        b'M' => parse_rxvt_mouse(csi_body).map(Event::Mouse),
+        b'~' => parse_tilde_key(csi_body).map(Event::Key),
+        b'u' if csi_body.first() != Some(&b'?') => parse_kitty_key(csi_body).map(Event::Key),
         _ => None,
     }
 }
 
-fn parse_da1(body: &[u8]) -> Option<Vec<u32>> {
-    if body.is_empty() {
+fn parse_da1(attribute_parameter_bytes: &[u8]) -> Option<Vec<u32>> {
+    if attribute_parameter_bytes.is_empty() {
         return None;
     }
-    body.split(|byte| *byte == b';')
-        .map(decimal)
+    attribute_parameter_bytes
+        .split(|field_byte| *field_byte == b';')
+        .map(parse_decimal)
         .collect::<Option<Vec<_>>>()
 }
 
-fn parse_graphic_attribute(body: &[u8]) -> Option<GraphicAttributeReply> {
-    let mut fields = body.split(|byte| *byte == b';');
-    let item = decimal(fields.next()?)?;
-    let status = decimal(fields.next()?)?;
-    let reply = match item {
-        1 => parse_palette_reply(status, fields.collect()),
-        2 => parse_geometry_reply(status, fields.collect()),
+fn parse_graphic_attribute(attribute_parameter_bytes: &[u8]) -> Option<GraphicAttributeReply> {
+    let mut attribute_fields = attribute_parameter_bytes.split(|field_byte| *field_byte == b';');
+    let attribute_number = parse_decimal(attribute_fields.next()?)?;
+    let attribute_status = parse_decimal(attribute_fields.next()?)?;
+    let graphic_attribute_reply = match attribute_number {
+        1 => parse_palette_reply(attribute_status, attribute_fields.collect()),
+        2 => parse_geometry_reply(attribute_status, attribute_fields.collect()),
         _ => None,
     }?;
-    Some(reply)
+    Some(graphic_attribute_reply)
 }
 
-fn parse_palette_reply(status: u32, values: Vec<&[u8]>) -> Option<GraphicAttributeReply> {
-    let error = graphic_attribute_error(status);
-    if let Some(error) = error {
-        return values
+fn parse_palette_reply(
+    attribute_status: u32,
+    reply_parameter_values: Vec<&[u8]>,
+) -> Option<GraphicAttributeReply> {
+    let graphic_attribute_error = find_graphic_attribute_error(attribute_status);
+    if let Some(graphic_attribute_error) = graphic_attribute_error {
+        return reply_parameter_values
             .is_empty()
-            .then_some(GraphicAttributeReply::Palette(Err(error)));
+            .then_some(GraphicAttributeReply::Palette(Err(graphic_attribute_error)));
     }
-    if status != 0 || values.len() != 1 {
+    if attribute_status != 0 || reply_parameter_values.len() != 1 {
         return None;
     }
-    let value = decimal(values[0])?;
-    (value != 0).then_some(GraphicAttributeReply::Palette(Ok(value)))
+    let palette_entry_count = parse_decimal(reply_parameter_values[0])?;
+    (palette_entry_count != 0).then_some(GraphicAttributeReply::Palette(Ok(palette_entry_count)))
 }
 
-fn parse_geometry_reply(status: u32, values: Vec<&[u8]>) -> Option<GraphicAttributeReply> {
-    let error = graphic_attribute_error(status);
-    if let Some(error) = error {
-        return values
+fn parse_geometry_reply(
+    attribute_status: u32,
+    reply_parameter_values: Vec<&[u8]>,
+) -> Option<GraphicAttributeReply> {
+    let graphic_attribute_error = find_graphic_attribute_error(attribute_status);
+    if let Some(graphic_attribute_error) = graphic_attribute_error {
+        return reply_parameter_values
             .is_empty()
-            .then_some(GraphicAttributeReply::Geometry(Err(error)));
+            .then_some(GraphicAttributeReply::Geometry(Err(
+                graphic_attribute_error,
+            )));
     }
-    if status != 0 || values.len() != 2 {
+    if attribute_status != 0 || reply_parameter_values.len() != 2 {
         return None;
     }
-    let width = decimal(values[0])?;
-    let height = decimal(values[1])?;
-    Some(GraphicAttributeReply::Geometry(Ok((width, height))))
+    let pixel_width = parse_decimal(reply_parameter_values[0])?;
+    let pixel_height = parse_decimal(reply_parameter_values[1])?;
+    Some(GraphicAttributeReply::Geometry(Ok((
+        pixel_width,
+        pixel_height,
+    ))))
 }
 
-fn graphic_attribute_error(status: u32) -> Option<GraphicAttributeError> {
-    match status {
+fn find_graphic_attribute_error(attribute_status: u32) -> Option<GraphicAttributeError> {
+    match attribute_status {
         1 => Some(GraphicAttributeError::InvalidItem),
         2 => Some(GraphicAttributeError::InvalidAction),
         3 => Some(GraphicAttributeError::Failure),
@@ -572,17 +621,17 @@ fn graphic_attribute_error(status: u32) -> Option<GraphicAttributeError> {
     }
 }
 
-fn parse_modified_key(body: &[u8], final_byte: u8) -> Option<KeyEvent> {
-    let mut fields = body.split(|byte| *byte == b';');
-    let first = fields.next()?;
-    if !first.is_empty() && decimal(first)? != 1 {
+fn parse_modified_key(csi_body: &[u8], final_byte: u8) -> Option<KeyEvent> {
+    let mut key_parameter_fields = csi_body.split(|field_byte| *field_byte == b';');
+    let first_key_parameter = key_parameter_fields.next()?;
+    if !first_key_parameter.is_empty() && parse_decimal(first_key_parameter)? != 1 {
         return None;
     }
-    let (modifiers, kind) = parse_modifier_or_default(fields.next())?;
-    if fields.next().is_some() {
+    let (modifiers, key_event_kind) = parse_modifier_or_default(key_parameter_fields.next())?;
+    if key_parameter_fields.next().is_some() {
         return None;
     }
-    let code = match final_byte {
+    let key_code = match final_byte {
         b'A' => KeyCode::Up,
         b'B' => KeyCode::Down,
         b'C' => KeyCode::Right,
@@ -596,76 +645,76 @@ fn parse_modified_key(body: &[u8], final_byte: u8) -> Option<KeyEvent> {
         _ => return None,
     };
     Some(KeyEvent {
-        code,
-        kind,
+        code: key_code,
+        key_event_kind,
         modifiers,
     })
 }
 
-fn parse_tilde_key(body: &[u8]) -> Option<KeyEvent> {
-    let mut fields = body.split(|byte| *byte == b';');
-    let number = decimal(fields.next()?)?;
-    let (modifiers, kind) = parse_modifier_or_default(fields.next())?;
-    if fields.next().is_some() {
+fn parse_tilde_key(csi_body: &[u8]) -> Option<KeyEvent> {
+    let mut key_parameter_fields = csi_body.split(|field_byte| *field_byte == b';');
+    let encoded_key_number = parse_decimal(key_parameter_fields.next()?)?;
+    let (modifiers, key_event_kind) = parse_modifier_or_default(key_parameter_fields.next())?;
+    if key_parameter_fields.next().is_some() {
         return None;
     }
-    let code = match number {
+    let key_code = match encoded_key_number {
         1 | 7 => KeyCode::Home,
         2 => KeyCode::Insert,
         3 => KeyCode::Delete,
         4 | 8 => KeyCode::End,
         5 => KeyCode::PageUp,
         6 => KeyCode::PageDown,
-        11..=15 => KeyCode::Function(u8::try_from(number - 10).ok()?),
-        17..=21 => KeyCode::Function(u8::try_from(number - 11).ok()?),
-        23..=26 => KeyCode::Function(u8::try_from(number - 12).ok()?),
-        28..=29 => KeyCode::Function(u8::try_from(number - 15).ok()?),
-        31..=34 => KeyCode::Function(u8::try_from(number - 17).ok()?),
+        11..=15 => KeyCode::Function(u8::try_from(encoded_key_number - 10).ok()?),
+        17..=21 => KeyCode::Function(u8::try_from(encoded_key_number - 11).ok()?),
+        23..=26 => KeyCode::Function(u8::try_from(encoded_key_number - 12).ok()?),
+        28..=29 => KeyCode::Function(u8::try_from(encoded_key_number - 15).ok()?),
+        31..=34 => KeyCode::Function(u8::try_from(encoded_key_number - 17).ok()?),
         _ => return None,
     };
     Some(KeyEvent {
-        code,
-        kind,
+        code: key_code,
+        key_event_kind,
         modifiers,
     })
 }
 
-fn parse_kitty_key(body: &[u8]) -> Option<KeyEvent> {
-    let mut fields = body.split(|byte| *byte == b';');
-    let key_field = fields.next()?;
-    let mut key_codes = key_field.split(|byte| *byte == b':');
-    let codepoint = decimal(key_codes.next()?)?;
-    let shifted = key_codes
+fn parse_kitty_key(csi_body: &[u8]) -> Option<KeyEvent> {
+    let mut key_parameter_fields = csi_body.split(|field_byte| *field_byte == b';');
+    let encoded_key_parameter = key_parameter_fields.next()?;
+    let mut key_code_fields = encoded_key_parameter.split(|field_byte| *field_byte == b':');
+    let codepoint = parse_decimal(key_code_fields.next()?)?;
+    let shifted_codepoint = key_code_fields
         .next()
         .filter(|field| !field.is_empty())
-        .and_then(decimal);
-    let (mut modifiers, kind) = parse_modifier_or_default(fields.next())?;
-    let mut code = functional_key(codepoint).or_else(|| {
+        .and_then(parse_decimal);
+    let (mut modifiers, key_event_kind) = parse_modifier_or_default(key_parameter_fields.next())?;
+    let mut key_code = find_functional_key(codepoint).or_else(|| {
         let character = char::from_u32(codepoint)?;
         Some(match character {
             '\x1b' => KeyCode::Escape,
             '\r' => KeyCode::Enter,
-            '\t' if modifiers.contains(Modifiers::SHIFT) => KeyCode::BackTab,
+            '\t' if modifiers.has_all_modifiers(Modifiers::SHIFT) => KeyCode::BackTab,
             '\t' => KeyCode::Tab,
             '\x7f' => KeyCode::Backspace,
             character => KeyCode::Char(character),
         })
     })?;
-    if modifiers.contains(Modifiers::SHIFT) {
-        if let Some(character) = shifted.and_then(char::from_u32) {
-            code = KeyCode::Char(character);
-            modifiers = without(modifiers, Modifiers::SHIFT);
+    if modifiers.has_all_modifiers(Modifiers::SHIFT) {
+        if let Some(character) = shifted_codepoint.and_then(char::from_u32) {
+            key_code = KeyCode::Char(character);
+            modifiers = remove_modifiers(modifiers, Modifiers::SHIFT);
         }
     }
     Some(KeyEvent {
-        code,
-        kind,
+        code: key_code,
+        key_event_kind,
         modifiers,
     })
 }
 
-fn functional_key(codepoint: u32) -> Option<KeyCode> {
-    let code = match codepoint {
+fn find_functional_key(codepoint: u32) -> Option<KeyCode> {
+    let key_code = match codepoint {
         57_376..=57_387 => KeyCode::Function(u8::try_from(codepoint - 57_376 + 13).ok()?),
         57_388..=57_398 | 57_358..=57_363 | 57_428..=57_454 => KeyCode::Unsupported,
         57_399..=57_408 => KeyCode::Char(char::from_digit(codepoint - 57_399, 10)?),
@@ -690,22 +739,22 @@ fn functional_key(codepoint: u32) -> Option<KeyCode> {
         57_427 => KeyCode::Unsupported,
         _ => return None,
     };
-    Some(code)
+    Some(key_code)
 }
 
-fn parse_modifier_or_default(field: Option<&[u8]>) -> Option<(Modifiers, KeyEventKind)> {
-    match field {
-        Some(field) => parse_modifier_field(field),
+fn parse_modifier_or_default(modifier_field: Option<&[u8]>) -> Option<(Modifiers, KeyEventKind)> {
+    match modifier_field {
+        Some(modifier_field) => parse_modifier_field(modifier_field),
         None => Some((Modifiers::NONE, KeyEventKind::Press)),
     }
 }
 
-fn parse_modifier_field(field: &[u8]) -> Option<(Modifiers, KeyEventKind)> {
-    let mut parts = field.split(|byte| *byte == b':');
-    let encoded = decimal(parts.next()?)?;
-    let bits = encoded.checked_sub(1)?;
+fn parse_modifier_field(modifier_field: &[u8]) -> Option<(Modifiers, KeyEventKind)> {
+    let mut modifier_parts = modifier_field.split(|field_byte| *field_byte == b':');
+    let encoded_modifier = parse_decimal(modifier_parts.next()?)?;
+    let modifier_bits = encoded_modifier.checked_sub(1)?;
     let mut modifiers = Modifiers::NONE;
-    for (bit, modifier) in [
+    for (modifier_bit, modifier) in [
         (1, Modifiers::SHIFT),
         (2, Modifiers::ALT),
         (4, Modifiers::CONTROL),
@@ -713,95 +762,95 @@ fn parse_modifier_field(field: &[u8]) -> Option<(Modifiers, KeyEventKind)> {
         (16, Modifiers::HYPER),
         (32, Modifiers::META),
     ] {
-        if bits & bit != 0 {
+        if modifier_bits & modifier_bit != 0 {
             modifiers |= modifier;
         }
     }
-    let kind = match parts.next() {
+    let key_event_kind = match modifier_parts.next() {
         None => KeyEventKind::Press,
-        Some(part) => match decimal(part)? {
+        Some(event_kind_field) => match parse_decimal(event_kind_field)? {
             1 => KeyEventKind::Press,
             2 => KeyEventKind::Repeat,
             3 => KeyEventKind::Release,
             _ => return None,
         },
     };
-    if parts.next().is_some() {
+    if modifier_parts.next().is_some() {
         return None;
     }
-    Some((modifiers, kind))
+    Some((modifiers, key_event_kind))
 }
 
-fn without(modifiers: Modifiers, removed: Modifiers) -> Modifiers {
-    Modifiers(modifiers.0 & !removed.0)
+fn remove_modifiers(modifiers: Modifiers, removed_modifiers: Modifiers) -> Modifiers {
+    Modifiers(modifiers.0 & !removed_modifiers.0)
 }
 
-fn parse_sgr_mouse(body: &[u8], final_byte: u8) -> Option<MouseEvent> {
-    let mut fields = body.split(|byte| *byte == b';');
-    let cb = u8::try_from(decimal(fields.next()?)?).ok()?;
-    let column = u16::try_from(decimal(fields.next()?)?)
+fn parse_sgr_mouse(csi_body: &[u8], final_byte: u8) -> Option<MouseEvent> {
+    let mut mouse_fields = csi_body.split(|field_byte| *field_byte == b';');
+    let mouse_button_code = u8::try_from(parse_decimal(mouse_fields.next()?)?).ok()?;
+    let mouse_column = u16::try_from(parse_decimal(mouse_fields.next()?)?)
         .ok()?
         .checked_sub(1)?;
-    let row = u16::try_from(decimal(fields.next()?)?)
+    let mouse_row = u16::try_from(parse_decimal(mouse_fields.next()?)?)
         .ok()?
         .checked_sub(1)?;
-    if fields.next().is_some() {
+    if mouse_fields.next().is_some() {
         return None;
     }
-    let (mut kind, modifiers) = mouse_code(cb)?;
+    let (mut mouse_event_kind, modifiers) = decode_mouse_code(mouse_button_code)?;
     if final_byte == b'm' {
-        if let MouseEventKind::Down(button) = kind {
-            kind = MouseEventKind::Up(button);
+        if let MouseEventKind::Down(button) = mouse_event_kind {
+            mouse_event_kind = MouseEventKind::Up(button);
         }
     }
     Some(MouseEvent {
-        kind,
-        column,
-        row,
+        mouse_event_kind,
+        column: mouse_column,
+        row: mouse_row,
         modifiers,
     })
 }
 
-fn parse_rxvt_mouse(body: &[u8]) -> Option<MouseEvent> {
-    let mut fields = body.split(|byte| *byte == b';');
-    let cb = u8::try_from(decimal(fields.next()?)?)
+fn parse_rxvt_mouse(csi_body: &[u8]) -> Option<MouseEvent> {
+    let mut mouse_fields = csi_body.split(|field_byte| *field_byte == b';');
+    let mouse_button_code = u8::try_from(parse_decimal(mouse_fields.next()?)?)
         .ok()?
         .checked_sub(32)?;
-    let column = u16::try_from(decimal(fields.next()?)?)
+    let mouse_column = u16::try_from(parse_decimal(mouse_fields.next()?)?)
         .ok()?
         .checked_sub(1)?;
-    let row = u16::try_from(decimal(fields.next()?)?)
+    let mouse_row = u16::try_from(parse_decimal(mouse_fields.next()?)?)
         .ok()?
         .checked_sub(1)?;
-    if fields.next().is_some() {
+    if mouse_fields.next().is_some() {
         return None;
     }
-    let (kind, modifiers) = mouse_code(cb)?;
+    let (mouse_event_kind, modifiers) = decode_mouse_code(mouse_button_code)?;
     Some(MouseEvent {
-        kind,
-        column,
-        row,
+        mouse_event_kind,
+        column: mouse_column,
+        row: mouse_row,
         modifiers,
     })
 }
 
-fn parse_x10_mouse(sequence: &[u8]) -> Option<Event> {
-    let [b'M', cb, column, row] = sequence else {
+fn parse_x10_mouse(control_sequence: &[u8]) -> Option<Event> {
+    let [b'M', mouse_button_code, encoded_column_byte, encoded_row_byte] = control_sequence else {
         return None;
     };
-    let (kind, modifiers) = mouse_code(cb.checked_sub(32)?)?;
+    let (mouse_event_kind, modifiers) = decode_mouse_code(mouse_button_code.checked_sub(32)?)?;
     Some(Event::Mouse(MouseEvent {
-        kind,
-        column: u16::from(column.checked_sub(33)?),
-        row: u16::from(row.checked_sub(33)?),
+        mouse_event_kind,
+        column: u16::from(encoded_column_byte.checked_sub(33)?),
+        row: u16::from(encoded_row_byte.checked_sub(33)?),
         modifiers,
     }))
 }
 
-fn mouse_code(cb: u8) -> Option<(MouseEventKind, Modifiers)> {
-    let button = (cb & 0b11) | ((cb & 0b1100_0000) >> 4);
-    let drag = cb & 0b0010_0000 != 0;
-    let kind = match (button, drag) {
+fn decode_mouse_code(mouse_button_code: u8) -> Option<(MouseEventKind, Modifiers)> {
+    let mouse_button_number = (mouse_button_code & 0b11) | ((mouse_button_code & 0b1100_0000) >> 4);
+    let is_drag = mouse_button_code & 0b0010_0000 != 0;
+    let mouse_event_kind = match (mouse_button_number, is_drag) {
         (0, false) => MouseEventKind::Down(MouseButton::Left),
         (1, false) => MouseEventKind::Down(MouseButton::Middle),
         (2, false) => MouseEventKind::Down(MouseButton::Right),
@@ -817,53 +866,63 @@ fn mouse_code(cb: u8) -> Option<(MouseEventKind, Modifiers)> {
         _ => return None,
     };
     let mut modifiers = Modifiers::NONE;
-    if cb & 4 != 0 {
+    if mouse_button_code & 4 != 0 {
         modifiers |= Modifiers::SHIFT;
     }
-    if cb & 8 != 0 {
+    if mouse_button_code & 8 != 0 {
         modifiers |= Modifiers::ALT;
     }
-    if cb & 16 != 0 {
+    if mouse_button_code & 16 != 0 {
         modifiers |= Modifiers::CONTROL;
     }
-    Some((kind, modifiers))
+    Some((mouse_event_kind, modifiers))
 }
 
-fn parse_kitty_reply(payload: &[u8]) -> Option<KittyGraphicsReply> {
-    let payload = payload.strip_prefix(b"G")?;
-    let separator = payload.iter().position(|byte| *byte == b';')?;
-    let (control, message) = payload.split_at(separator);
-    let message = message.get(1..)?;
-    if message.is_empty() || !message.iter().all(|byte| (b' '..=b'~').contains(byte)) {
+fn parse_kitty_reply(apc_payload: &[u8]) -> Option<KittyGraphicsReply> {
+    let graphics_payload = apc_payload.strip_prefix(b"G")?;
+    let separator_index = graphics_payload
+        .iter()
+        .position(|payload_byte| *payload_byte == b';')?;
+    let (control_fields, message_bytes) = graphics_payload.split_at(separator_index);
+    let message_bytes = message_bytes.get(1..)?;
+    if message_bytes.is_empty()
+        || !message_bytes
+            .iter()
+            .all(|message_byte| (b' '..=b'~').contains(message_byte))
+    {
         return None;
     }
     let mut image_id = None;
-    for pair in control.split(|byte| *byte == b',') {
-        let equals = pair.iter().position(|byte| *byte == b'=')?;
-        let (key, value) = pair.split_at(equals);
-        if key == b"i" {
+    for control_pair in control_fields.split(|field_byte| *field_byte == b',') {
+        let equals_index = control_pair
+            .iter()
+            .position(|field_byte| *field_byte == b'=')?;
+        let (control_key, control_parameter_bytes) = control_pair.split_at(equals_index);
+        if control_key == b"i" {
             if image_id.is_some() {
                 return None;
             }
-            image_id = Some(decimal(value.get(1..)?)?);
+            image_id = Some(parse_decimal(control_parameter_bytes.get(1..)?)?);
         }
     }
     Some(KittyGraphicsReply {
         image_id: image_id?,
-        ok: message == b"OK",
+        is_successful: message_bytes == b"OK",
     })
 }
 
-fn decimal(bytes: &[u8]) -> Option<u32> {
-    if bytes.is_empty() {
+fn parse_decimal(decimal_bytes: &[u8]) -> Option<u32> {
+    if decimal_bytes.is_empty() {
         return None;
     }
-    bytes.iter().try_fold(0_u32, |value, byte| {
-        value
-            .checked_mul(10)?
-            .checked_add(u32::from(byte.checked_sub(b'0')?))
-            .filter(|_| byte.is_ascii_digit())
-    })
+    decimal_bytes
+        .iter()
+        .try_fold(0_u32, |accumulated_decimal_number, decimal_byte| {
+            accumulated_decimal_number
+                .checked_mul(10)?
+                .checked_add(u32::from(decimal_byte.checked_sub(b'0')?))
+                .filter(|_| decimal_byte.is_ascii_digit())
+        })
 }
 
 #[cfg(test)]

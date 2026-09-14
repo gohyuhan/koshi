@@ -6,133 +6,154 @@
 use super::*;
 
 /// Milliseconds after the seed instant.
-fn at(seed: Instant, ms: u64) -> Instant {
-    seed + Duration::from_millis(ms)
+fn instant_after_milliseconds(seed_instant: Instant, offset_milliseconds: u64) -> Instant {
+    seed_instant + Duration::from_millis(offset_milliseconds)
 }
 
 #[test]
 fn fresh_scheduler_has_nothing_pending() {
-    let t0 = Instant::now();
-    let mut s = RenderScheduler::new();
-    assert!(!s.poll(t0));
-    assert_eq!(s.next_wakeup(t0), None);
+    let timeline_start_time = Instant::now();
+    let mut render_scheduler = RenderScheduler::new();
+    assert!(!render_scheduler.poll(timeline_start_time));
+    assert_eq!(render_scheduler.next_wakeup(timeline_start_time), None);
 }
 
 #[test]
 fn the_default_scheduler_starts_like_a_new_one() {
-    let t0 = Instant::now();
-    let mut s = RenderScheduler::default();
-    assert!(!s.poll(t0));
-    assert_eq!(s.next_wakeup(t0), None);
+    let timeline_start_time = Instant::now();
+    let mut render_scheduler = RenderScheduler::default();
+    assert!(!render_scheduler.poll(timeline_start_time));
+    assert_eq!(render_scheduler.next_wakeup(timeline_start_time), None);
 }
 
 #[test]
 fn the_first_invalidation_renders_immediately() {
-    let t0 = Instant::now();
-    let mut s = RenderScheduler::new();
-    s.invalidate();
-    assert!(s.poll(t0));
+    let timeline_start_time = Instant::now();
+    let mut render_scheduler = RenderScheduler::new();
+    render_scheduler.invalidate();
+    assert!(render_scheduler.poll(timeline_start_time));
 }
 
 #[test]
 fn poll_clears_pending_so_an_immediate_second_poll_is_false() {
-    let t0 = Instant::now();
-    let mut s = RenderScheduler::new();
-    s.invalidate();
-    assert!(s.poll(t0));
-    assert!(!s.poll(t0));
+    let timeline_start_time = Instant::now();
+    let mut render_scheduler = RenderScheduler::new();
+    render_scheduler.invalidate();
+    assert!(render_scheduler.poll(timeline_start_time));
+    assert!(!render_scheduler.poll(timeline_start_time));
 }
 
 #[test]
 fn a_burst_of_invalidations_coalesces_into_one_render() {
-    let t0 = Instant::now();
-    let mut s = RenderScheduler::new();
-    s.invalidate();
-    s.invalidate();
-    s.invalidate();
-    s.invalidate();
-    assert!(s.poll(t0));
-    assert!(!s.poll(t0));
+    let timeline_start_time = Instant::now();
+    let mut render_scheduler = RenderScheduler::new();
+    render_scheduler.invalidate();
+    render_scheduler.invalidate();
+    render_scheduler.invalidate();
+    render_scheduler.invalidate();
+    assert!(render_scheduler.poll(timeline_start_time));
+    assert!(!render_scheduler.poll(timeline_start_time));
 }
 
 #[test]
 fn a_pending_change_gates_at_the_frame_interval() {
-    let t0 = Instant::now();
-    let mut s = RenderScheduler::new();
-    s.invalidate();
-    assert!(s.poll(t0));
+    let timeline_start_time = Instant::now();
+    let mut render_scheduler = RenderScheduler::new();
+    render_scheduler.invalidate();
+    assert!(render_scheduler.poll(timeline_start_time));
 
-    s.invalidate();
-    assert!(!s.poll(at(t0, 7)), "too soon: 7 ms < 8 ms frame interval");
-    assert!(s.poll(at(t0, 8)), "8 ms frame interval elapsed");
+    render_scheduler.invalidate();
+    assert!(
+        !render_scheduler.poll(instant_after_milliseconds(timeline_start_time, 7)),
+        "too soon: 7 ms < 8 ms frame interval"
+    );
+    assert!(
+        render_scheduler.poll(instant_after_milliseconds(timeline_start_time, 8)),
+        "8 ms frame interval elapsed"
+    );
 }
 
 #[test]
 fn a_poll_earlier_than_the_last_render_is_not_due() {
-    let t0 = Instant::now();
-    let mut s = RenderScheduler::new();
-    s.invalidate();
-    assert!(s.poll(at(t0, 100)));
+    let timeline_start_time = Instant::now();
+    let mut render_scheduler = RenderScheduler::new();
+    render_scheduler.invalidate();
+    assert!(render_scheduler.poll(instant_after_milliseconds(timeline_start_time, 100)));
 
-    s.invalidate();
-    assert!(!s.poll(t0));
-    assert_eq!(s.next_wakeup(t0), Some(FRAME_INTERVAL));
+    render_scheduler.invalidate();
+    assert!(!render_scheduler.poll(timeline_start_time));
+    assert_eq!(
+        render_scheduler.next_wakeup(timeline_start_time),
+        Some(FRAME_INTERVAL_DURATION)
+    );
 }
 
 #[test]
 fn five_seconds_of_invalidations_render_at_the_frame_cadence() {
-    let t0 = Instant::now();
-    let mut s = RenderScheduler::new();
+    let timeline_start_time = Instant::now();
+    let mut render_scheduler = RenderScheduler::new();
     // Establish the baseline frame at t0, then measure the next 5 s.
-    s.invalidate();
-    assert!(s.poll(t0));
+    render_scheduler.invalidate();
+    assert!(render_scheduler.poll(timeline_start_time));
 
     // Poll every 50 ms — coarser than the 8 ms cadence, so every poll is due.
-    let mut renders = 0;
-    let mut ms = 50;
-    while ms <= 5000 {
-        s.invalidate();
-        if s.poll(at(t0, ms)) {
-            renders += 1;
+    let mut render_count = 0;
+    let mut elapsed_milliseconds = 50;
+    while elapsed_milliseconds <= 5000 {
+        render_scheduler.invalidate();
+        if render_scheduler.poll(instant_after_milliseconds(
+            timeline_start_time,
+            elapsed_milliseconds,
+        )) {
+            render_count += 1;
         }
-        ms += 50;
+        elapsed_milliseconds += 50;
     }
-    assert_eq!(renders, 100, "one render per 50 ms poll over 5 s");
+    assert_eq!(render_count, 100, "one render per 50 ms poll over 5 s");
 }
 
 #[test]
 fn next_wakeup_is_none_when_nothing_is_pending() {
-    let t0 = Instant::now();
-    let s = RenderScheduler::new();
-    assert_eq!(s.next_wakeup(t0), None);
+    let timeline_start_time = Instant::now();
+    let render_scheduler = RenderScheduler::new();
+    assert_eq!(render_scheduler.next_wakeup(timeline_start_time), None);
 }
 
 #[test]
 fn next_wakeup_is_zero_before_the_first_render() {
-    let t0 = Instant::now();
-    let mut s = RenderScheduler::new();
-    s.invalidate();
-    assert_eq!(s.next_wakeup(t0), Some(Duration::ZERO));
+    let timeline_start_time = Instant::now();
+    let mut render_scheduler = RenderScheduler::new();
+    render_scheduler.invalidate();
+    assert_eq!(
+        render_scheduler.next_wakeup(timeline_start_time),
+        Some(Duration::ZERO)
+    );
 }
 
 #[test]
 fn next_wakeup_reports_the_remaining_frame_time() {
-    let t0 = Instant::now();
-    let mut s = RenderScheduler::new();
-    s.invalidate();
-    assert!(s.poll(t0));
+    let timeline_start_time = Instant::now();
+    let mut render_scheduler = RenderScheduler::new();
+    render_scheduler.invalidate();
+    assert!(render_scheduler.poll(timeline_start_time));
 
-    s.invalidate();
-    assert_eq!(s.next_wakeup(at(t0, 3)), Some(Duration::from_millis(5)));
+    render_scheduler.invalidate();
+    assert_eq!(
+        render_scheduler.next_wakeup(instant_after_milliseconds(timeline_start_time, 3)),
+        Some(Duration::from_millis(5))
+    );
 }
 
 #[test]
 fn next_wakeup_saturates_to_zero_when_already_due() {
-    let t0 = Instant::now();
-    let mut s = RenderScheduler::new();
-    s.invalidate();
-    assert!(s.poll(t0));
+    let timeline_start_time = Instant::now();
+    let mut render_scheduler = RenderScheduler::new();
+    render_scheduler.invalidate();
+    assert!(render_scheduler.poll(timeline_start_time));
 
-    s.invalidate();
-    assert_eq!(s.next_wakeup(at(t0, 20)), Some(Duration::ZERO));
+    render_scheduler.invalidate();
+    assert_eq!(
+        render_scheduler.next_wakeup(instant_after_milliseconds(timeline_start_time, 20)),
+        Some(Duration::ZERO)
+    );
 }

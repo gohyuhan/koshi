@@ -38,7 +38,7 @@ use crate::wire::{Answer, Envelope, MaybeKnown, WireName, WireVariants};
 ///
 /// The value and the rule it follows live in
 /// [`koshi_core::compat::SESSION_PROTOCOL`].
-pub const PROTOCOL_VERSION: u32 = SESSION_PROTOCOL.max;
+pub const PROTOCOL_VERSION: u32 = SESSION_PROTOCOL.maximum_version;
 
 /// The lowest protocol version this build speaks. A peer whose highest is
 /// below this one is refused with
@@ -46,7 +46,7 @@ pub const PROTOCOL_VERSION: u32 = SESSION_PROTOCOL.max;
 ///
 /// The floor is 3, the version this build speaks. Raising it drops support
 /// for every build below it.
-pub const MIN_PROTOCOL_VERSION: u32 = SESSION_PROTOCOL.min;
+pub const MIN_PROTOCOL_VERSION: u32 = SESSION_PROTOCOL.minimum_version;
 
 /// The version two peers use, given the range each speaks: the highest both
 /// have. `None` when the ranges do not overlap.
@@ -54,15 +54,15 @@ pub const MIN_PROTOCOL_VERSION: u32 = SESSION_PROTOCOL.min;
 /// Example — a caller speaking 2 to 4 and a build speaking 2 to 2 settle on
 /// 2; a caller speaking 5 to 6 and the same build settle on nothing.
 #[must_use]
-pub fn agreed_version(
-    caller_min: u32,
-    caller_max: u32,
-    build_min: u32,
-    build_max: u32,
+pub fn compute_agreed_protocol_version(
+    caller_min_protocol_version: u32,
+    caller_max_protocol_version: u32,
+    build_min_protocol_version: u32,
+    build_max_protocol_version: u32,
 ) -> Option<u32> {
-    let highest = caller_max.min(build_max);
-    let lowest = caller_min.max(build_min);
-    (lowest <= highest).then_some(highest)
+    let highest_protocol_version = caller_max_protocol_version.min(build_max_protocol_version);
+    let lowest_protocol_version = caller_min_protocol_version.max(build_min_protocol_version);
+    (lowest_protocol_version <= highest_protocol_version).then_some(highest_protocol_version)
 }
 
 /// The secret a connection presents to prove it belongs to the user who
@@ -76,14 +76,14 @@ pub fn agreed_version(
 ///
 /// - `Serialize` and [`expose`](Self::expose) write the **real secret**, for
 ///   the endpoint file and the socket. `serde_json::to_string(&hello)` on the
-///   Hello [`hello`](IpcRequestKind::hello) builds yields
+///   Hello [`hello`](IpcRequestKind::build_hello_request) builds yields
 ///   `{"Hello":{"min_protocol_version":2,"max_protocol_version":3,
 ///   "token":"k7Qx…","remote":false}}`, secret included.
 /// - `Debug` and `Display` write `***`. A token that reaches a log line, a
 ///   trace, or an error dump reveals nothing.
 ///
 /// Anything describing a request in a log uses the second form, or
-/// [`IpcRequestKind::name`], which carries no payload at all.
+/// [`IpcRequestKind::get_request_kind_name`], which carries no payload at all.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ConnectionToken(String);
@@ -91,7 +91,7 @@ pub struct ConnectionToken(String);
 impl ConnectionToken {
     /// Wrap an already-generated secret.
     #[must_use]
-    pub fn new(secret: impl Into<String>) -> Self {
+    pub fn from_secret(secret: impl Into<String>) -> Self {
         ConnectionToken(secret.into())
     }
 
@@ -102,10 +102,10 @@ impl ConnectionToken {
     /// Panics if the operating system's random source fails.
     #[must_use]
     pub fn generate() -> Self {
-        let mut bytes = [0u8; 32];
-        getrandom::fill(&mut bytes)
+        let mut random_token_bytes = [0u8; 32];
+        getrandom::fill(&mut random_token_bytes)
             .expect("every supported platform provides the system random source");
-        ConnectionToken(crate::bytes::hex(&bytes))
+        ConnectionToken(crate::bytes::format_hex(&random_token_bytes))
     }
 
     /// The secret itself, as plain text.
@@ -123,8 +123,8 @@ impl PartialEq for ConnectionToken {
     ///
     /// Two secrets of different lengths are unequal at once, with no byte
     /// compared. Every generated token has one length, 64 hex characters.
-    fn eq(&self, other: &Self) -> bool {
-        self.0.as_bytes().ct_eq(other.0.as_bytes()).into()
+    fn eq(&self, other_token: &Self) -> bool {
+        self.0.as_bytes().ct_eq(other_token.0.as_bytes()).into()
     }
 }
 
@@ -147,10 +147,11 @@ impl fmt::Display for ConnectionToken {
 /// The envelope's own fields are fixed: decoding rejects any field it does not
 /// know. A misspelled `request_id` is an error.
 ///
-/// `K` is the request kind. A sender uses `IpcRequest`, where `K` is
+/// `RequestKind` is the request kind. A sender uses `IpcRequest`, where
+/// `RequestKind` is
 /// [`IpcRequestKind`]. A server uses [`IncomingRequest`], where a kind this
 /// build does not have arrives as [`MaybeKnown::Unknown`].
-pub type IpcRequest<K = IpcRequestKind> = Envelope<K>;
+pub type IpcRequest<RequestKind = IpcRequestKind> = Envelope<RequestKind>;
 
 /// A request as a server reads it: the kind may name something this build does
 /// not have.
@@ -165,26 +166,26 @@ pub type IncomingRequest = IpcRequest<MaybeKnown<IpcRequestKind>>;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphicsCapabilities {
     /// The terminal answered the Kitty graphics protocol query with `OK`.
-    #[serde(default)]
-    pub kitty: bool,
+    #[serde(default, rename = "kitty")]
+    pub supports_kitty: bool,
     /// The terminal advertised the iTerm2 inline-image protocol.
-    #[serde(default)]
-    pub iterm: bool,
+    #[serde(default, rename = "iterm")]
+    pub supports_iterm: bool,
     /// The terminal advertised the DEC Sixel protocol.
-    #[serde(default)]
-    pub sixel: bool,
+    #[serde(default, rename = "sixel")]
+    pub supports_sixel: bool,
 }
 
 impl GraphicsCapabilities {
     /// Return whether at least one native image protocol was proved.
     #[must_use]
-    pub const fn has_native(self) -> bool {
-        self.kitty || self.iterm || self.sixel
+    pub const fn has_native_image_protocol(self) -> bool {
+        self.supports_kitty || self.supports_iterm || self.supports_sixel
     }
 
     /// Return whether the terminal proved no native image protocol.
     fn is_empty(&self) -> bool {
-        !self.has_native()
+        !self.has_native_image_protocol()
     }
 }
 
@@ -221,14 +222,15 @@ pub enum IpcRequestKind {
         /// The highest protocol version the caller speaks.
         max_protocol_version: u32,
         /// The secret read from the endpoint file.
-        token: ConnectionToken,
+        #[serde(rename = "token")]
+        connection_token: ConnectionToken,
         /// Whether the connection this Hello opens carries a caller on
         /// another machine. The router sets it on the local connection it
         /// opens for a remote caller. Absent means `false`. It changes nothing
         /// about whether the Hello is accepted. The server records it as the
         /// origin of every client attached on this connection.
-        #[serde(default)]
-        remote: bool,
+        #[serde(default, rename = "remote")]
+        is_remote: bool,
     },
     /// Join the session as a viewing client: the server mints the client,
     /// registers it for the events `filter` selects, and answers with
@@ -241,15 +243,16 @@ pub enum IpcRequestKind {
         /// the client's viewport.
         viewport: Size,
         /// Which of the session's events the client receives.
-        filter: EventFilterSpec,
+        #[serde(rename = "filter")]
+        event_filter: EventFilterSpec,
         /// The client record to come back as, named by a caller re-attaching
         /// after the session replaced its own process image. The server hands
         /// that record back when it still holds it, the tab that record was
         /// viewing still exists, and no connection is streaming for it, and
         /// mints a fresh client in every other case. Absent on a first attach,
         /// and from a caller that predates this field.
-        #[serde(default)]
-        resume: Option<ClientId>,
+        #[serde(default, rename = "resume")]
+        resume_client_id: Option<ClientId>,
         /// The token the session handed this caller at its last attach,
         /// presented to get that attach's view back: the active tab, the
         /// focused pane of each tab, the zoomed pane of each tab, and the
@@ -264,10 +267,12 @@ pub enum IpcRequestKind {
         /// client as its viewport minus two rows.
         #[serde(default)]
         pane_area: Option<PaneArea>,
-        /// Native image protocols proved by this attached terminal. The
-        /// finding belongs to this connection and is not session state.
-        #[serde(default, skip_serializing_if = "GraphicsCapabilities::is_empty")]
-        graphics: GraphicsCapabilities,
+        #[serde(
+            default,
+            rename = "graphics",
+            skip_serializing_if = "GraphicsCapabilities::is_empty"
+        )]
+        graphics_capabilities: GraphicsCapabilities,
         /// The cell dimensions measured by this terminal before the attach,
         /// or `None` when the terminal has no usable measurement.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -295,13 +300,15 @@ pub enum IpcRequestKind {
     /// The attached client measured the pixel dimensions of one terminal cell.
     CellSize {
         /// The nonzero pixel dimensions of one cell.
-        size: koshi_core::geometry::PixelCellSize,
+        #[serde(rename = "size")]
+        cell_size: koshi_core::geometry::PixelCellSize,
     },
     /// Text the attached client's outer terminal pasted, for the pane it is
     /// typing into. Carried whole: no character of it fires a keybinding.
     Paste {
         /// The pasted text, exactly as the client's terminal delivered it.
-        text: String,
+        #[serde(rename = "text")]
+        pasted_text: String,
     },
     /// One round of mouse actions the attached client decided, in the order
     /// the session must run them. A round is what the viewer accumulated for
@@ -317,7 +324,8 @@ pub enum IpcRequestKind {
     /// rectangles each viewing client solves it to.
     Layout {
         /// The one tab to describe, or every tab when absent.
-        tab: Option<TabId>,
+        #[serde(rename = "tab")]
+        tab_id: Option<TabId>,
     },
     /// Ask the session for the events it published most recently, newest last.
     /// The answer holds each event's name and the ids it named, and no payload
@@ -340,22 +348,23 @@ pub enum IpcRequestKind {
 
 impl IpcRequestKind {
     /// The Hello this build opens a connection with: the versions it speaks,
-    /// [`MIN_PROTOCOL_VERSION`] then [`PROTOCOL_VERSION`], the `token` the
-    /// caller presents, and `remote` set to `false`.
+    /// [`MIN_PROTOCOL_VERSION`] then [`PROTOCOL_VERSION`], the connection
+    /// token the
+    /// caller presents, and `is_remote` set to `false`.
     #[must_use]
-    pub fn hello(token: ConnectionToken) -> IpcRequestKind {
+    pub fn build_hello_request(connection_token: ConnectionToken) -> IpcRequestKind {
         IpcRequestKind::Hello {
             min_protocol_version: MIN_PROTOCOL_VERSION,
             max_protocol_version: PROTOCOL_VERSION,
-            token,
-            remote: false,
+            connection_token,
+            is_remote: false,
         }
     }
 
     /// The kind's name, e.g. `"SubmitCommand"`. Carries no payload: not the
     /// connection token, not the text the user typed. Safe on a log line.
     #[must_use]
-    pub fn name(&self) -> &'static str {
+    pub fn get_request_kind_name(&self) -> &'static str {
         match self {
             IpcRequestKind::Hello { .. } => "Hello",
             IpcRequestKind::Attach { .. } => "Attach",
@@ -390,41 +399,53 @@ pub enum WireMouseAction {
     /// history or back down toward live output.
     Scroll {
         /// The pane whose view moves.
-        pane: PaneId,
+        #[serde(rename = "pane")]
+        pane_id: PaneId,
         /// Up into history, or down toward live output.
-        up: bool,
+        #[serde(rename = "up")]
+        is_scrolling_up: bool,
         /// Lines to move.
-        lines: usize,
+        #[serde(rename = "lines")]
+        scroll_line_count: usize,
     },
     /// Hand the event to the program in `pane` as a mouse report. The session
     /// encodes it from that pane's live tracking level and encoding.
     Forward {
         /// The pane whose program receives the report.
-        pane: PaneId,
+        #[serde(rename = "pane")]
+        pane_id: PaneId,
         /// The event, with the cell it landed on and the modifiers held.
-        mouse: MouseInput,
+        #[serde(rename = "mouse")]
+        mouse_input: MouseInput,
     },
     /// Send `count` cursor arrow keys to `pane` — the alternate-scroll
     /// (`?1007`) translation of a wheel tick on the alternate screen.
     AltScrollArrows {
         /// The pane whose program receives the arrows.
-        pane: PaneId,
+        #[serde(rename = "pane")]
+        pane_id: PaneId,
         /// Up-arrows, or down-arrows.
-        up: bool,
+        #[serde(rename = "up")]
+        is_scrolling_up: bool,
         /// How many.
-        count: usize,
+        #[serde(rename = "count")]
+        arrow_count: usize,
     },
     /// Move `pane`'s `side` border `count` cells, one cell per step, in the
     /// direction `step` names.
     Resize {
         /// The pane whose border moves.
-        pane: PaneId,
+        #[serde(rename = "pane")]
+        pane_id: PaneId,
         /// Which of the pane's borders was grabbed.
-        side: Direction,
+        #[serde(rename = "side")]
+        border_side: Direction,
         /// `1` grows the pane, `-1` shrinks it.
-        step: i16,
+        #[serde(rename = "step")]
+        resize_step: i16,
         /// How many single-cell steps the pointer travelled.
-        count: u16,
+        #[serde(rename = "count")]
+        requested_cell_count: u16,
     },
     /// Run the command through the session's command door, attributed to this
     /// client's mouse.
@@ -447,10 +468,10 @@ pub enum EventFilterSpec {
 /// know. An absent `request_id` means the request could not be read. A
 /// misspelled one is an error.
 ///
-/// `R` is the answer. A server uses `IpcResponse`, where `R` is
+/// `Response` is the answer. A server uses `IpcResponse`, where `Response` is
 /// [`IpcResult`]. A caller uses [`IncomingResponse`], where a result this
 /// build does not have arrives as [`MaybeKnown::Unknown`].
-pub type IpcResponse<R = IpcResult> = Answer<R>;
+pub type IpcResponse<Response = IpcResult> = Answer<Response>;
 
 /// A response as a caller reads it: the result may name something this build
 /// does not have.
@@ -470,8 +491,8 @@ pub enum IpcResult {
         protocol_version: u32,
         /// The build version of the answering session server, e.g. `0.3.0`.
         /// Empty when the session server predates this field.
-        #[serde(default)]
-        version: String,
+        #[serde(default, rename = "version")]
+        build_version: String,
     },
     /// Answers [`IpcRequestKind::Attach`]: the client is registered and its
     /// event subscription is live. Every field is the server's own answer, and
@@ -483,7 +504,8 @@ pub enum IpcResult {
         /// The session the client joined.
         session_id: SessionId,
         /// What the session contains right now, built for this reply.
-        structure: AttachedSessionStructureSnapshot,
+        #[serde(rename = "structure")]
+        session_structure: AttachedSessionStructureSnapshot,
         /// The fresh secret this attach minted, presented on the next attach
         /// to get this attach's view back. `None` from a session server that
         /// predates this field.
@@ -523,7 +545,7 @@ pub enum IpcResult {
 pub struct IpcErrorPayload {
     /// The refusal, as a value a caller can branch on. A code this build has
     /// no name for reads as [`IpcErrorCode::Unknown`].
-    #[serde(default, deserialize_with = "crate::wire::or_default")]
+    #[serde(default, deserialize_with = "crate::wire::deserialize_or_default")]
     pub code: IpcErrorCode,
     /// A human-facing sentence naming what was wrong.
     pub message: String,
@@ -565,25 +587,25 @@ pub enum IpcErrorCode {
 pub struct SessionPlane;
 
 impl crate::plane::Plane for SessionPlane {
-    type Kind = IpcRequestKind;
-    type Result = IpcResult;
+    type RequestKind = IpcRequestKind;
+    type Response = IpcResult;
     type Gate = crate::handshake::Handshake;
 
-    fn refusal(payload: IpcErrorPayload) -> IpcResult {
-        IpcResult::Error(payload)
+    fn build_refusal_response(error_payload: IpcErrorPayload) -> IpcResult {
+        IpcResult::Error(error_payload)
     }
 
-    fn hello(agreed: u32, build: &str) -> IpcResult {
+    fn build_hello_response(agreed_protocol_version: u32, build_version: &str) -> IpcResult {
         IpcResult::Hello {
-            protocol_version: agreed,
-            version: build.to_string(),
+            protocol_version: agreed_protocol_version,
+            build_version: build_version.to_string(),
         }
     }
 }
 
 impl WireVariants for IpcRequestKind {
     /// Every request kind this build has: one entry per variant of
-    /// [`IpcRequestKind`], spelled as [`IpcRequestKind::name`] spells it.
+    /// [`IpcRequestKind`], spelled as [`IpcRequestKind::get_request_kind_name`] spells it.
     const VARIANTS: &'static [&'static str] = &[
         "Hello",
         "Attach",
@@ -603,7 +625,7 @@ impl WireVariants for IpcRequestKind {
 
 impl WireName for IpcRequestKind {
     fn wire_name(&self) -> &'static str {
-        self.name()
+        self.get_request_kind_name()
     }
 }
 

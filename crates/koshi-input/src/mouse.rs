@@ -18,25 +18,25 @@ use koshi_core::mouse::{MouseButton, MouseInput, MouseKind, ScrollDirection};
 ///
 /// The host parser converts SGR coordinates to zero-based cells, so a left press at
 /// protocol column 11, row 4 becomes
-/// `MouseInput { kind: Press(Left), at: Point { x: 10, y: 3 }, mods: NONE }`;
+/// `MouseInput { mouse_kind: Press(Left), position: Point { column: 10, row: 3 }, modifier_flags: NONE }`;
 /// a wheel tick towards the user becomes `Scroll(Down)` at the pointer cell.
 #[must_use]
-pub fn decode_mouse(event: MouseEvent) -> MouseInput {
+pub fn decode_mouse(mouse_event: MouseEvent) -> MouseInput {
     MouseInput {
-        kind: decode_kind(event.kind),
-        at: Point {
-            x: event.column,
-            y: event.row,
+        mouse_kind: decode_mouse_kind(mouse_event.mouse_event_kind),
+        position: Point {
+            column: mouse_event.column,
+            row: mouse_event.row,
         },
-        mods: decode_mods(event.modifiers),
+        modifier_flags: decode_modifiers(mouse_event.modifiers),
     }
 }
 
 /// Map the host's event kind onto koshi's. Down/Up/Drag carry the button
 /// through [`decode_button`]; the four scroll kinds carry a direction; a buttonless
 /// move is [`MouseKind::Motion`].
-fn decode_kind(kind: MouseEventKind) -> MouseKind {
-    match kind {
+fn decode_mouse_kind(mouse_event_kind: MouseEventKind) -> MouseKind {
+    match mouse_event_kind {
         MouseEventKind::Down(button) => MouseKind::Press(decode_button(button)),
         MouseEventKind::Up(button) => MouseKind::Release(decode_button(button)),
         MouseEventKind::Drag(button) => MouseKind::Drag(decode_button(button)),
@@ -58,14 +58,14 @@ fn decode_button(button: HostButton) -> MouseButton {
 }
 
 /// The modifiers held during the event: Control, Alt and Super from
-/// [`crate::keyboard::decode_mods`], plus Shift. Meta counts as Super; Hyper
+/// [`crate::keyboard::decode_modifiers`], plus Shift. Meta counts as Super; Hyper
 /// is dropped.
-fn decode_mods(modifiers: Modifiers) -> ModFlags {
-    let mods = crate::keyboard::decode_mods(modifiers);
-    if modifiers.contains(Modifiers::SHIFT) {
-        mods.union(ModFlags::SHIFT)
+fn decode_modifiers(host_modifiers: Modifiers) -> ModFlags {
+    let modifier_flags = crate::keyboard::decode_modifiers(host_modifiers);
+    if host_modifiers.has_all_modifiers(Modifiers::SHIFT) {
+        modifier_flags.union(ModFlags::SHIFT)
     } else {
-        mods
+        modifier_flags
     }
 }
 

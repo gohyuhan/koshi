@@ -9,8 +9,8 @@ use koshi_core::key::{Key, ModFlags};
 use std::time::SystemTime;
 
 /// A deterministic, boundary-free envelope for the IPC/plugin variants.
-fn envelope() -> CommandEnvelope {
-    CommandEnvelope::new(
+fn build_test_command_envelope() -> CommandEnvelope {
+    CommandEnvelope::from_parts(
         CommandId::new(),
         CommandSource::Internal,
         SystemTime::UNIX_EPOCH,
@@ -20,118 +20,155 @@ fn envelope() -> CommandEnvelope {
 
 #[test]
 fn pty_output_carries_its_pane_and_bytes() {
-    let pane = PaneId::new();
-    let event = RuntimeEvent::PtyOutput {
-        pane_id: pane,
-        bytes: vec![0x68, 0x69],
+    let expected_pane_id = PaneId::new();
+    let runtime_event = RuntimeEvent::PtyOutput {
+        pane_id: expected_pane_id,
+        output_bytes: vec![0x68, 0x69],
     };
-    let RuntimeEvent::PtyOutput { pane_id, bytes } = &event else {
+    let RuntimeEvent::PtyOutput {
+        pane_id: carried_pane_id,
+        output_bytes,
+    } = &runtime_event
+    else {
         panic!("expected PtyOutput");
     };
-    assert_eq!(*pane_id, pane);
-    assert_eq!(bytes, &[0x68, 0x69]);
+    assert_eq!(*carried_pane_id, expected_pane_id);
+    assert_eq!(output_bytes, &[0x68, 0x69]);
 }
 
 #[test]
 fn child_exit_carries_its_pane_and_status() {
-    let pane = PaneId::new();
-    let event = RuntimeEvent::ChildExit {
-        pane_id: pane,
-        status: ExitStatus::Signaled(9),
+    let expected_pane_id = PaneId::new();
+    let runtime_event = RuntimeEvent::ChildExit {
+        pane_id: expected_pane_id,
+        exit_status: ExitStatus::Signaled(9),
     };
-    let RuntimeEvent::ChildExit { pane_id, status } = &event else {
+    let RuntimeEvent::ChildExit {
+        pane_id: carried_pane_id,
+        exit_status,
+    } = &runtime_event
+    else {
         panic!("expected ChildExit");
     };
-    assert_eq!(*pane_id, pane);
-    assert_eq!(*status, ExitStatus::Signaled(9));
+    assert_eq!(*carried_pane_id, expected_pane_id);
+    assert_eq!(*exit_status, ExitStatus::Signaled(9));
 }
 
 #[test]
 fn resize_carries_its_client_and_size() {
-    let client = ClientId::new();
-    let event = RuntimeEvent::Resize {
-        client_id: client,
-        size: Size { cols: 80, rows: 24 },
+    let expected_client_id = ClientId::new();
+    let runtime_event = RuntimeEvent::Resize {
+        client_id: expected_client_id,
+        viewport_size: Size {
+            column_count: 80,
+            row_count: 24,
+        },
         pane_area: None,
         cell_size: None,
     };
     let RuntimeEvent::Resize {
-        client_id,
-        size,
+        client_id: carried_client_id,
+        viewport_size,
         pane_area,
         cell_size,
-    } = &event
+    } = &runtime_event
     else {
         panic!("expected Resize");
     };
-    assert_eq!(*client_id, client);
-    assert_eq!(*size, Size { cols: 80, rows: 24 });
+    assert_eq!(*carried_client_id, expected_client_id);
+    assert_eq!(
+        *viewport_size,
+        Size {
+            column_count: 80,
+            row_count: 24
+        }
+    );
     assert_eq!(*pane_area, None);
     assert_eq!(*cell_size, None);
 }
 
 #[test]
 fn resize_carries_a_reported_pane_area() {
-    let client = ClientId::new();
-    let reported = PaneArea::Reported(Size { cols: 60, rows: 20 });
-    let event = RuntimeEvent::Resize {
-        client_id: client,
-        size: Size { cols: 80, rows: 24 },
-        pane_area: Some(reported),
+    let expected_client_id = ClientId::new();
+    let reported_pane_area = PaneArea::Reported(Size {
+        column_count: 60,
+        row_count: 20,
+    });
+    let runtime_event = RuntimeEvent::Resize {
+        client_id: expected_client_id,
+        viewport_size: Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        pane_area: Some(reported_pane_area),
         cell_size: None,
     };
     let RuntimeEvent::Resize {
-        client_id,
-        size,
+        client_id: carried_client_id,
+        viewport_size,
         pane_area,
         cell_size,
-    } = &event
+    } = &runtime_event
     else {
         panic!("expected Resize");
     };
-    assert_eq!(*client_id, client);
-    assert_eq!(*size, Size { cols: 80, rows: 24 });
-    assert_eq!(*pane_area, Some(reported));
+    assert_eq!(*carried_client_id, expected_client_id);
+    assert_eq!(
+        *viewport_size,
+        Size {
+            column_count: 80,
+            row_count: 24
+        }
+    );
+    assert_eq!(*pane_area, Some(reported_pane_area));
     assert_eq!(*cell_size, None);
 }
 
 #[test]
 fn client_key_press_carries_its_client_and_chord() {
-    let client = ClientId::new();
-    let pressed = KeyChord::new(ModFlags::CTRL, Key::Char('t'));
-    let event = RuntimeEvent::ClientKeyPress {
-        client_id: client,
-        chord: pressed,
+    let expected_client_id = ClientId::new();
+    let pressed_chord = KeyChord::from_parts(ModFlags::CTRL, Key::Char('t'));
+    let runtime_event = RuntimeEvent::ClientKeyPress {
+        client_id: expected_client_id,
+        chord: pressed_chord,
     };
-    let RuntimeEvent::ClientKeyPress { client_id, chord } = &event else {
+    let RuntimeEvent::ClientKeyPress {
+        client_id: carried_client_id,
+        chord,
+    } = &runtime_event
+    else {
         panic!("expected ClientKeyPress");
     };
-    assert_eq!(*client_id, client);
-    assert_eq!(*chord, pressed);
+    assert_eq!(*carried_client_id, expected_client_id);
+    assert_eq!(*chord, pressed_chord);
 }
 
 #[test]
 fn ipc_carries_its_envelope_and_a_working_reply_channel() {
-    let env = envelope();
-    let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-    let ipc = RuntimeEvent::Ipc {
-        envelope: env.clone(),
-        reply: reply_tx,
+    let command_envelope = build_test_command_envelope();
+    let (reply_sender, reply_receiver) = std::sync::mpsc::channel();
+    let ipc_event = RuntimeEvent::Ipc {
+        envelope: command_envelope.clone(),
+        response_sender: reply_sender,
     };
-    let RuntimeEvent::Ipc { envelope, reply } = &ipc else {
+    let RuntimeEvent::Ipc {
+        envelope,
+        response_sender,
+    } = &ipc_event
+    else {
         panic!("expected Ipc");
     };
-    assert_eq!(envelope, &env);
-    reply
+    assert_eq!(envelope, &command_envelope);
+    response_sender
         .send(CommandResult::Ok {
-            command_id: env.id,
+            command_id: command_envelope.command_id,
             emitted_events: Vec::new(),
         })
         .expect("send on the carried reply channel");
     assert_eq!(
-        reply_rx.recv().expect("receive the reply"),
+        reply_receiver.recv().expect("receive the reply"),
         CommandResult::Ok {
-            command_id: env.id,
+            command_id: command_envelope.command_id,
             emitted_events: Vec::new(),
         },
     );
@@ -139,76 +176,83 @@ fn ipc_carries_its_envelope_and_a_working_reply_channel() {
 
 #[test]
 fn ipc_discovery_carries_a_working_reply_channel() {
-    let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-    let event = RuntimeEvent::IpcDiscovery { reply: reply_tx };
-    let RuntimeEvent::IpcDiscovery { reply } = &event else {
+    let (reply_sender, reply_receiver) = std::sync::mpsc::channel();
+    let runtime_event = RuntimeEvent::IpcDiscovery {
+        response_sender: reply_sender,
+    };
+    let RuntimeEvent::IpcDiscovery { response_sender } = &runtime_event else {
         panic!("expected IpcDiscovery");
     };
-    reply.send(None).expect("send on the carried reply channel");
-    assert_eq!(reply_rx.recv().expect("receive the reply"), None);
+    response_sender
+        .send(None)
+        .expect("send on the carried reply channel");
+    assert_eq!(reply_receiver.recv().expect("receive the reply"), None);
 }
 
 #[test]
 fn an_ending_notice_starts_empty_and_holds_the_ending_it_was_raised_with() {
-    for ending in [SessionEnding::Quit, SessionEnding::Restarting] {
-        let notice = EndingNotice::default();
-        assert_eq!(notice.raised(), None);
-        notice.raise(ending);
-        assert_eq!(notice.raised(), Some(ending));
-        notice.raise(ending);
-        assert_eq!(notice.raised(), Some(ending));
+    for session_ending in [SessionEnding::Quit, SessionEnding::Restarting] {
+        let ending_notice = EndingNotice::default();
+        assert_eq!(ending_notice.get_session_ending(), None);
+        ending_notice.raise_session_ending(session_ending);
+        assert_eq!(ending_notice.get_session_ending(), Some(session_ending));
+        ending_notice.raise_session_ending(session_ending);
+        assert_eq!(ending_notice.get_session_ending(), Some(session_ending));
     }
 }
 
 #[test]
 fn an_ending_notice_keeps_the_first_ending_when_a_second_one_is_raised() {
-    let notice = EndingNotice::default();
+    let ending_notice = EndingNotice::default();
 
-    notice.raise(SessionEnding::Restarting);
-    notice.raise(SessionEnding::Quit);
+    ending_notice.raise_session_ending(SessionEnding::Restarting);
+    ending_notice.raise_session_ending(SessionEnding::Quit);
 
-    assert_eq!(notice.raised(), Some(SessionEnding::Restarting));
+    assert_eq!(
+        ending_notice.get_session_ending(),
+        Some(SessionEnding::Restarting)
+    );
 }
 
 #[test]
 fn an_ending_notice_counts_every_writing_thread_from_start_to_end() {
-    let notice = EndingNotice::default();
-    assert_eq!(notice.writers_running(), 0);
+    let ending_notice = EndingNotice::default();
+    assert_eq!(ending_notice.count_running_writers(), 0);
 
-    notice.writer_started();
-    notice.writer_started();
-    assert_eq!(notice.writers_running(), 2);
+    ending_notice.record_writer_started();
+    ending_notice.record_writer_started();
+    assert_eq!(ending_notice.count_running_writers(), 2);
 
-    notice.writer_ended();
-    assert_eq!(notice.writers_running(), 1);
+    ending_notice.record_writer_ended();
+    assert_eq!(ending_notice.count_running_writers(), 1);
 
-    notice.writer_ended();
-    assert_eq!(notice.writers_running(), 0);
+    ending_notice.record_writer_ended();
+    assert_eq!(ending_notice.count_running_writers(), 0);
 }
 
 #[test]
 fn writing_threads_sharing_one_ending_notice_all_count_into_it() {
-    let notice = Arc::new(EndingNotice::default());
+    let ending_notice = Arc::new(EndingNotice::default());
 
-    let threads: Vec<_> = (0..8)
+    let writer_threads: Vec<_> = (0..8)
         .map(|_| {
-            let notice = Arc::clone(&notice);
-            std::thread::spawn(move || notice.writer_started())
+            let ending_notice = Arc::clone(&ending_notice);
+            std::thread::spawn(move || ending_notice.record_writer_started())
         })
         .collect();
-    for thread in threads {
-        thread.join().expect("the counting thread finished");
+    for writer_thread in writer_threads {
+        writer_thread.join().expect("the counting thread finished");
     }
 
-    assert_eq!(notice.writers_running(), 8);
+    assert_eq!(ending_notice.count_running_writers(), 8);
 }
 
 #[test]
 fn plugin_carries_its_envelope() {
-    let env = envelope();
-    let plugin = RuntimeEvent::Plugin(env.clone());
-    let RuntimeEvent::Plugin(carried) = &plugin else {
+    let command_envelope = build_test_command_envelope();
+    let plugin = RuntimeEvent::Plugin(command_envelope.clone());
+    let RuntimeEvent::Plugin(carried_envelope) = &plugin else {
         panic!("expected Plugin");
     };
-    assert_eq!(carried, &env);
+    assert_eq!(carried_envelope, &command_envelope);
 }

@@ -5,7 +5,7 @@
 //! keybinding layers and the action table: it folds the layers with
 //! [`merge_keymaps`], joins every surviving binding to its action's display
 //! name from the [`ActionRegistry`], and files the result per mode behind
-//! [`Arc`]s. [`KeymapHintCatalog::hints_for`] then hands one mode's data out
+//! [`Arc`]s. [`KeymapHintCatalog::build_hints_for_mode`] then hands one mode's data out
 //! as `Arc` clones, and [`KeymapHintCatalog::match_sequence`] answers one
 //! pending key sequence from the same folded map.
 //!
@@ -17,11 +17,11 @@ use std::ops::Bound;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::conflict::{keymap_layers, KeyMapLayer};
+use crate::conflict::{build_keymap_layers, KeymapLayer};
 use crate::key::Leader;
 use crate::keymap_merge::{merge_keymaps, MergedKeyMap, MergedModeMap};
 use crate::types::{default_prefix_labels, BoundAction, KeybindingsConfig, ModeName};
-use koshi_core::action::ActionRef;
+use koshi_core::action::ActionReference;
 use koshi_core::key::{KeyChord, KeySequence};
 use koshi_core::lock::LockMode;
 use koshi_core::registry::ActionRegistry;
@@ -36,18 +36,18 @@ use koshi_core::registry::ActionRegistry;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KeymapHints {
     /// Every binding in the client's current mode, sorted by key sequence.
-    pub entries: Arc<Vec<HintBinding>>,
+    pub hint_bindings: Arc<Vec<HintBinding>>,
     /// Display labels for prefix chords whose sequence group is untouched
     /// defaults (`<C-p>` → `PANE`). A group with any user-authored entry, or
     /// a user removal under it, ignores this and shows a `+N` marker instead.
     pub prefix_labels: Arc<BTreeMap<KeyChord, String>>,
     /// Every key a user surface removed in the current mode. A removal under
     /// a labeled prefix voids that label.
-    pub removed: Arc<BTreeSet<KeySequence>>,
+    pub removed_key_sequences: Arc<BTreeSet<KeySequence>>,
     /// True when the user keymap was reverted to defaults over a key
     /// collision: the bar shows a conflict marker, and the hints listed are
     /// the reverted-to defaults.
-    pub reverted: bool,
+    pub is_reverted_to_defaults: bool,
 }
 
 /// One binding the hint bar can show: a key sequence, the display name of the
@@ -55,15 +55,15 @@ pub struct KeymapHints {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HintBinding {
     /// The chords pressed to fire the binding.
-    pub sequence: KeySequence,
+    pub key_sequence: KeySequence,
     /// The bound action's human-facing name, from its registry metadata.
-    pub label: String,
+    pub action_display_name: String,
     /// Whether a user surface authored the winning entry (a default shows
     /// `false`). Any `true` entry under a prefix voids the prefix's label.
-    pub user_set: bool,
+    pub is_user_authored: bool,
     /// Whether the hint sorts ahead of the unpinned hints in its own modifier
     /// group — set on every locked-mode entry firing `core:unlock`.
-    pub pinned: bool,
+    pub is_pinned: bool,
 }
 
 /// Per-mode hint-bar data: every mode's bindings joined to display names,
@@ -74,22 +74,22 @@ pub struct HintBinding {
 #[derive(Clone)]
 pub struct KeymapHintCatalog {
     /// Liveness-filtered lookup table shared by hints and keyboard resolution.
-    merged: Arc<MergedKeyMap>,
+    merged_keymap: Arc<MergedKeyMap>,
     /// Multi-chord wait before an incomplete prefix falls through.
-    chord_timeout: Duration,
+    chord_timeout_duration: Duration,
     /// The chord that unlocks a locked client, ahead of every other lookup.
     unlock_chord: KeyChord,
     /// One sorted binding list per built-in mode; a mode nothing binds in
     /// holds an empty list.
-    entries: BTreeMap<ModeName, Arc<Vec<HintBinding>>>,
+    hint_bindings_by_mode_name: BTreeMap<ModeName, Arc<Vec<HintBinding>>>,
     /// Per-mode keys a user surface removed; empty until user layers load.
-    removed: BTreeMap<ModeName, Arc<BTreeSet<KeySequence>>>,
+    removed_key_sequences_by_mode_name: BTreeMap<ModeName, Arc<BTreeSet<KeySequence>>>,
     /// Display labels for the default table's prefix chords.
     prefix_labels: Arc<BTreeMap<KeyChord, String>>,
     /// True when the user keymap was reverted to defaults over a key
     /// collision. [`from_parts`](Self::from_parts) builds it `false`;
-    /// [`with_reverted`](Self::with_reverted) sets it.
-    reverted: bool,
+    /// [`mark_reverted_to_defaults`](Self::mark_reverted_to_defaults) sets it.
+    is_reverted_to_defaults: bool,
 }
 
 impl KeymapHintCatalog {
@@ -97,7 +97,7 @@ impl KeymapHintCatalog {
     /// live action table.
     pub fn from_registry(registry: &ActionRegistry) -> Self {
         Self::from_parts(
-            &keymap_layers(None, Leader::default()),
+            &build_keymap_layers(None, Leader::default()),
             &KeybindingsConfig::default(),
             registry,
         )
@@ -116,11 +116,11 @@ impl KeymapHintCatalog {
     /// flagged pinned; the hint bar sorts pinned hints before unpinned ones
     /// in the same modifier group.
     pub fn from_parts(
-        layers: &[KeyMapLayer],
+        layers: &[KeymapLayer],
         config: &KeybindingsConfig,
         registry: &ActionRegistry,
     ) -> Self {
-        let chord_timeout = Duration::from_millis(u64::from(config.chord_timeout_ms));
+        let chord_timeout_duration = Duration::from_millis(u64::from(config.chord_timeout_ms));
         let unlock_chord = config
             .unlock_alternative
             .unwrap_or(KeybindingsConfig::RESERVED_UNLOCK);
@@ -131,30 +131,41 @@ impl KeymapHintCatalog {
             registry,
         );
 
-        let unlock = ActionRef::core("unlock")
+        let unlock_action_reference = ActionReference::from_core_action_name("unlock")
             .expect("the reserved unlock action name satisfies the action-name grammar");
-        let empty = MergedModeMap::default();
+        let empty_merged_mode_map = MergedModeMap::default();
 
-        let mut entries = BTreeMap::new();
-        let mut removed = BTreeMap::new();
-        for mode in LockMode::ALL {
-            let name = ModeName::new(mode.name());
-            let merged_mode = merged.modes.get(&name).unwrap_or(&empty);
-            entries.insert(
-                name.clone(),
-                Arc::new(mode_entries(merged_mode, registry, mode, &unlock)),
+        let mut hint_bindings_by_mode_name = BTreeMap::new();
+        let mut removed_key_sequences_by_mode_name = BTreeMap::new();
+        for lock_mode in LockMode::ALL {
+            let mode_name = ModeName::from_text(lock_mode.get_keymap_name());
+            let merged_mode_map = merged
+                .mode_map_by_name
+                .get(&mode_name)
+                .unwrap_or(&empty_merged_mode_map);
+            hint_bindings_by_mode_name.insert(
+                mode_name.clone(),
+                Arc::new(build_mode_hint_bindings(
+                    merged_mode_map,
+                    registry,
+                    lock_mode,
+                    &unlock_action_reference,
+                )),
             );
-            removed.insert(name, Arc::new(merged_mode.removed_keys.clone()));
+            removed_key_sequences_by_mode_name.insert(
+                mode_name,
+                Arc::new(merged_mode_map.removed_key_sequences.clone()),
+            );
         }
 
         KeymapHintCatalog {
-            merged: Arc::new(merged),
-            chord_timeout,
+            merged_keymap: Arc::new(merged),
+            chord_timeout_duration,
             unlock_chord,
-            entries,
-            removed,
+            hint_bindings_by_mode_name,
+            removed_key_sequences_by_mode_name,
             prefix_labels: Arc::new(default_prefix_labels(config.leader)),
-            reverted: false,
+            is_reverted_to_defaults: false,
         }
     }
 
@@ -162,54 +173,81 @@ impl KeymapHintCatalog {
     /// keymap that a key collision reverted. The hint bar draws the revert
     /// marker for a catalog marked this way.
     #[must_use]
-    pub fn with_reverted(mut self) -> Self {
-        self.reverted = true;
+    pub fn mark_reverted_to_defaults(mut self) -> Self {
+        self.is_reverted_to_defaults = true;
         self
     }
 
     /// Resolve one pending sequence in a built-in mode.
     ///
-    /// [`KeyMatch::exact`] holds the binding `sequence` fires, the
+    /// [`KeyMatch::exact_bound_action`] holds the binding `key_sequence` fires, the
     /// user-authored entry ahead of the surviving default.
-    /// [`KeyMatch::prefix`] is true when some binding in the mode is longer
-    /// than `sequence` and opens with it. A mode with no bindings answers
-    /// `KeyMatch::default()`: `exact` is `None` and `prefix` is false.
-    pub fn match_sequence(&self, mode: LockMode, sequence: &KeySequence) -> KeyMatch {
-        let Some(mode_map) = self.merged.modes.get(mode.name()) else {
+    /// [`KeyMatch::has_longer_key_sequence`] is true when some binding in the mode
+    /// is longer than `key_sequence` and opens with it. A mode with no bindings
+    /// answers `KeyMatch::default()`: `exact_bound_action` is `None` and
+    /// `has_longer_key_sequence` is false.
+    pub fn match_sequence(&self, lock_mode: LockMode, sequence: &KeySequence) -> KeyMatch {
+        let Some(mode_map) = self
+            .merged_keymap
+            .mode_map_by_name
+            .get(lock_mode.get_keymap_name())
+        else {
             return KeyMatch::default();
         };
-        let exact = mode_map
-            .user_set
+        let exact_bound_action = mode_map
+            .user_bindings_by_key_sequence
             .get(sequence)
-            .map(|binding| binding.bound.clone())
-            .or_else(|| mode_map.defaults.get(sequence).cloned());
-        let prefix = extends(&mode_map.user_set, sequence) || extends(&mode_map.defaults, sequence);
-        KeyMatch { exact, prefix }
+            .map(|binding| binding.bound_action.clone())
+            .or_else(|| {
+                mode_map
+                    .default_bindings_by_key_sequence
+                    .get(sequence)
+                    .cloned()
+            });
+        let has_longer_key_sequence = has_longer_key_sequence_starting_with(
+            &mode_map.user_bindings_by_key_sequence,
+            sequence,
+        ) || has_longer_key_sequence_starting_with(
+            &mode_map.default_bindings_by_key_sequence,
+            sequence,
+        );
+        KeyMatch {
+            exact_bound_action,
+            has_longer_key_sequence,
+        }
     }
 
     /// How long an ambiguous sequence — one that both fires and opens a
     /// longer binding — waits for its next chord, from `chord_timeout_ms`.
-    pub fn chord_timeout(&self) -> Duration {
-        self.chord_timeout
+    pub fn get_chord_timeout(&self) -> Duration {
+        self.chord_timeout_duration
     }
 
     /// The chord that unlocks a locked client: the configured
     /// `unlock_alternative` when the user named one, else the reserved
     /// `<C-l>`. Conflict detection refuses a config whose locked mode does
     /// not fire `core:unlock` from this chord.
-    pub fn unlock_chord(&self) -> KeyChord {
+    pub fn get_unlock_chord(&self) -> KeyChord {
         self.unlock_chord
     }
 
     /// The hint-bar data for one client's current mode: the mode's bindings
     /// and removals shared by reference, plus the labels and the revert flag.
-    pub fn hints_for(&self, mode: LockMode) -> KeymapHints {
-        let name = mode.name();
+    pub fn build_hints_for_mode(&self, lock_mode: LockMode) -> KeymapHints {
+        let mode_name = lock_mode.get_keymap_name();
         KeymapHints {
-            entries: self.entries.get(name).map(Arc::clone).unwrap_or_default(),
+            hint_bindings: self
+                .hint_bindings_by_mode_name
+                .get(mode_name)
+                .map(Arc::clone)
+                .unwrap_or_default(),
             prefix_labels: Arc::clone(&self.prefix_labels),
-            removed: self.removed.get(name).map(Arc::clone).unwrap_or_default(),
-            reverted: self.reverted,
+            removed_key_sequences: self
+                .removed_key_sequences_by_mode_name
+                .get(mode_name)
+                .map(Arc::clone)
+                .unwrap_or_default(),
+            is_reverted_to_defaults: self.is_reverted_to_defaults,
         }
     }
 }
@@ -218,62 +256,72 @@ impl KeymapHintCatalog {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KeyMatch {
     /// The binding the sequence fires, or `None` when nothing binds it.
-    pub exact: Option<BoundAction>,
+    pub exact_bound_action: Option<BoundAction>,
     /// True when a longer binding in the same mode opens with the sequence.
-    pub prefix: bool,
+    pub has_longer_key_sequence: bool,
 }
 
-/// True when `map` holds a key longer than `sequence` that opens with it.
+/// True when `binding_map` holds a key longer than `key_sequence` that opens with it.
 ///
 /// Reads only the first key after `sequence` in sort order: keys sort
 /// lexicographically by chord, and every longer key opening with `sequence`
 /// sorts directly after it.
-fn extends<V>(map: &BTreeMap<KeySequence, V>, sequence: &KeySequence) -> bool {
-    map.range((Bound::Excluded(sequence), Bound::Unbounded))
+fn has_longer_key_sequence_starting_with<Binding>(
+    binding_map: &BTreeMap<KeySequence, Binding>,
+    key_sequence: &KeySequence,
+) -> bool {
+    binding_map
+        .range((Bound::Excluded(key_sequence), Bound::Unbounded))
         .next()
-        .is_some_and(|(candidate, _)| candidate.chords().starts_with(sequence.chords()))
+        .is_some_and(|(candidate_key_sequence, _)| {
+            candidate_key_sequence
+                .list_chords()
+                .starts_with(key_sequence.list_chords())
+        })
 }
 
 /// One mode's merged bindings joined to display names, sorted by sequence.
 ///
-/// Walks the mode's user-set entries and surviving defaults — the merge
+/// Walks the mode's user-authored entries and surviving defaults — the merge
 /// leaves no key in both — reads each action's display name from the
 /// registry, and flags every locked-mode binding firing `unlock` pinned.
-fn mode_entries(
-    merged: &MergedModeMap,
+fn build_mode_hint_bindings(
+    merged_mode_map: &MergedModeMap,
     registry: &ActionRegistry,
-    mode: LockMode,
-    unlock: &ActionRef,
+    lock_mode: LockMode,
+    unlock_action_reference: &ActionReference,
 ) -> Vec<HintBinding> {
-    let user = merged
-        .user_set
+    let user_bindings = merged_mode_map
+        .user_bindings_by_key_sequence
         .iter()
-        .map(|(sequence, binding)| (sequence, &binding.bound, true));
-    let defaults = merged
-        .defaults
+        .map(|(key_sequence, merged_binding)| (key_sequence, &merged_binding.bound_action, true));
+    let default_bindings = merged_mode_map
+        .default_bindings_by_key_sequence
         .iter()
-        .map(|(sequence, bound)| (sequence, bound, false));
+        .map(|(key_sequence, bound_action)| (key_sequence, bound_action, false));
 
-    let mut entries: Vec<HintBinding> = user
-        .chain(defaults)
-        .map(|(sequence, bound, user_set)| {
-            let label = registry
-                .lookup(&bound.action)
+    let mut hint_bindings: Vec<HintBinding> = user_bindings
+        .chain(default_bindings)
+        .map(|(key_sequence, bound_action, is_user_authored)| {
+            let action_display_name = registry
+                .find_action_metadata(&bound_action.action_reference)
                 // `merge_keymaps` admits only bindings whose action resolves
                 // in this same registry.
                 .expect("a merged binding's action is registered")
                 .display_name
                 .clone();
             HintBinding {
-                sequence: sequence.clone(),
-                label,
-                user_set,
-                pinned: mode == LockMode::Locked && bound.action == *unlock,
+                key_sequence: key_sequence.clone(),
+                action_display_name,
+                is_user_authored,
+                is_pinned: lock_mode == LockMode::Locked
+                    && bound_action.action_reference == *unlock_action_reference,
             }
         })
         .collect();
-    entries.sort_by(|a, b| a.sequence.cmp(&b.sequence));
-    entries
+    hint_bindings
+        .sort_by(|left_hint, right_hint| left_hint.key_sequence.cmp(&right_hint.key_sequence));
+    hint_bindings
 }
 
 #[cfg(test)]

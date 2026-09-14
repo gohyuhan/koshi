@@ -10,7 +10,7 @@
 //! the secret — and then dial the server once to check that it admits the
 //! secret. A server that admits it pins the certificate it presented. A
 //! server that does not is named, and the user answers whether to save what
-//! they typed anyway. A record saved that way pins a certificate on its first
+//! they typed anyway. A saved server saved that way pins a certificate on its first
 //! connection.
 //!
 //! `forget` and `set-secret` open no connection. A server that is switched
@@ -19,14 +19,15 @@
 use std::time::SystemTime;
 
 use koshi_ipc::protocol::ConnectionToken;
-use koshi_ipc::remote_servers::{Lookup, SavedServer, ServerStore};
+use koshi_ipc::remote_servers::{SavedServer, SavedServerLookup, ServerStore};
 
 use crate::cli::RemoteCommand;
 use crate::{output, prompt};
 use koshi_link::error::CliError;
 use koshi_link::remote_client::{
-    self, check_name_shape, looks_like_address, prompt_line, prompt_secret, read_store,
-    update_store, DIAL_WAIT, REPLY_WAIT,
+    self, is_server_address, load_saved_server_store, prompt_line, prompt_secret,
+    update_saved_server_store, validate_saved_server_name, DIAL_TIMEOUT_DURATION,
+    REPLY_TIMEOUT_DURATION,
 };
 
 #[cfg(test)]
@@ -34,7 +35,7 @@ mod tests;
 
 /// What the check of one server settled on.
 #[derive(Debug, PartialEq, Eq)]
-enum Checked {
+enum ServerCheckOutcome {
     /// The server admitted the secret, presenting this certificate
     /// fingerprint.
     Pinned(String),
@@ -50,90 +51,108 @@ enum Checked {
 ///
 /// The store read here answers the listing and the questions the wizards ask.
 /// Every verb that changes the store reads it again through
-/// [`koshi_link::remote_client::update_store`], which holds it
+/// [`koshi_link::remote_client::update_saved_server_store`], which holds it
 /// against every other koshi from that read to the write.
 ///
-/// A `SERVER` argument matching no saved record is [`CliError::InvalidArgs`]
+/// A `SERVER` argument matching no saved server is [`CliError::InvalidArgs`]
 /// naming the command that lists what is saved.
-pub fn run(command: &RemoteCommand) -> Result<(), CliError> {
-    let (_, mut store) = read_store()?;
+pub fn run_remote_command(command: &RemoteCommand) -> Result<(), CliError> {
+    let (_, mut server_store) = load_saved_server_store()?;
     match command {
-        RemoteCommand::New => run_new(&store),
-        RemoteCommand::Edit { server } => run_edit(&mut store, server),
-        RemoteCommand::List { format } => {
-            print!("{}", output::render_remote_list(&store.records, *format));
+        RemoteCommand::New => create_saved_server_from_prompts(&server_store),
+        RemoteCommand::Edit { server_reference } => {
+            edit_saved_server_from_prompts(&mut server_store, server_reference)
+        }
+        RemoteCommand::List { output_format } => {
+            print!(
+                "{}",
+                output::render_remote_list(&server_store.saved_servers, *output_format)
+            );
             Ok(())
         }
-        RemoteCommand::Forget { server } => {
-            let address = update_store(|disk| {
-                named(disk, server)?;
-                disk.forget(server).ok_or_else(|| not_saved(server))
+        RemoteCommand::Forget { server_reference } => {
+            let server_address = update_saved_server_store(|server_store| {
+                find_saved_server(server_store, server_reference)?;
+                server_store
+                    .forget_saved_server(server_reference)
+                    .ok_or_else(|| build_saved_server_not_found_error(server_reference))
             })?;
-            print!("{}", output::render_remote_forget(&address));
+            print!("{}", output::render_remote_forget(&server_address));
             Ok(())
         }
-        RemoteCommand::SetSecret { server } => {
+        RemoteCommand::SetSecret { server_reference } => {
             // Read first: the prompt names this address.
-            let address = named(&store, server)?.address.clone();
-            let secret = remote_client::secret_for(&address)?;
-            update_store(|disk| {
-                named(disk, server)?;
-                disk.set_secret(server, secret);
+            let server_address = find_saved_server(&server_store, server_reference)?
+                .server_address
+                .clone();
+            let connection_token = remote_client::resolve_server_connection_token(&server_address)?;
+            update_saved_server_store(|server_store| {
+                find_saved_server(server_store, server_reference)?;
+                server_store.set_connection_token(server_reference, connection_token);
                 Ok(())
             })?;
-            print!("{}", output::render_remote_secret(&address));
+            print!("{}", output::render_remote_secret(&server_address));
             Ok(())
         }
     }
 }
 
 /// Save one server the user describes: ask for the name, the address and the
-/// secret, check them against that server, and write the record.
+/// secret, check them against that server, and write the saved server.
 ///
-/// Every answer is needed, and an empty one asks again. A record whose check
+/// Every answer is needed, and an empty one asks again. A saved server whose check
 /// did not pass is saved with no pinned fingerprint once the user answers to
 /// save it. Its first connection pins the certificate it meets.
 ///
 /// # Errors
 /// [`CliError::InvalidArgs`] when the terminal could not be read, when the
-/// input ended before an answer arrived, and when the record no longer fits
+/// input ended before an answer arrived, and when the saved server no longer fits
 /// the store's naming rules. [`CliError::IpcUnavailable`] when the store could
 /// not be read or written.
-fn run_new(store: &ServerStore) -> Result<(), CliError> {
+fn create_saved_server_from_prompts(server_store: &ServerStore) -> Result<(), CliError> {
     println!("every answer is needed. Ctrl-C stops without saving.");
-    let name = ask_until("name", None, |typed| free_name(store, typed))?;
-    let address = ask_until("address", None, |typed| free_address(store, typed))?;
-    let secret = ask_secret(None)?;
+    let server_name = prompt_until_valid_answer("name", None, |entered_name| {
+        validate_server_name_available(server_store, entered_name)
+    })?;
+    let server_address = prompt_until_valid_answer("address", None, |entered_address| {
+        validate_saved_server_address_is_available(server_store, entered_address)
+    })?;
+    let connection_token = ask_secret(None)?;
 
-    let pinned = match check_server(&address, &secret, None, "save it anyway?")? {
-        Checked::Pinned(fingerprint) => Some(fingerprint),
-        Checked::Unpinned => None,
-        Checked::Discarded => {
+    let certificate_fingerprint = match check_saved_server_connection(
+        &server_address,
+        &connection_token,
+        None,
+        "save it anyway?",
+    )? {
+        ServerCheckOutcome::Pinned(certificate_fingerprint) => Some(certificate_fingerprint),
+        ServerCheckOutcome::Unpinned => None,
+        ServerCheckOutcome::Discarded => {
             print!("{}", output::render_remote_discarded());
             return Ok(());
         }
     };
 
-    let now = SystemTime::now();
-    let record = SavedServer {
-        name: Some(name),
-        address,
-        secret,
-        last_used_at: pinned.is_some().then_some(now),
-        fingerprint: pinned,
-        added_at: now,
+    let current_time = SystemTime::now();
+    let saved_server = SavedServer {
+        server_name: Some(server_name),
+        server_address,
+        connection_token,
+        last_used_at: certificate_fingerprint.is_some().then_some(current_time),
+        certificate_fingerprint,
+        added_at: current_time,
     };
-    update_store(|disk| place(disk, &record, None))?;
-    print!("{}", output::render_remote_saved(&record));
+    update_saved_server_store(|server_store| save_saved_server(server_store, &saved_server, None))?;
+    print!("{}", output::render_remote_saved(&saved_server));
     Ok(())
 }
 
 /// Change what one saved server holds: ask for the name, the address and the
 /// secret with what it holds now offered, check them against that server, and
-/// write the record back.
+/// write the saved server back.
 ///
 /// An empty answer keeps the value in brackets, and an empty secret keeps the
-/// saved secret. The record leaves the store before the questions, so its own
+/// saved secret. The saved server leaves the store before the questions, so its own
 /// name and address are free to keep. It goes back once every answer has
 /// settled, and nothing is written before that.
 ///
@@ -143,185 +162,212 @@ fn run_new(store: &ServerStore) -> Result<(), CliError> {
 /// next connection to that address pins the certificate it meets. A check that
 /// passes pins the certificate the server presented, either way.
 ///
-/// The record on disk must still hold the name, the address, the secret and
+/// The saved server on disk must still hold the name, the address, the secret and
 /// the fingerprint it held when the questions opened, or nothing is written.
-/// The added time and the last-used time come from the record on disk.
+/// The added time and the last-used time come from the saved server on disk.
 ///
 /// # Errors
-/// [`CliError::InvalidArgs`] when `server` names no saved record, when it
+/// [`CliError::InvalidArgs`] when `server_reference` names no saved server, when it
 /// names more than one, when the terminal could not be read, when the input
-/// ended before an answer arrived, when the record changed while the questions
-/// were open, and when the record no longer fits the store's naming rules.
+/// ended before an answer arrived, when the saved server changed while the questions
+/// were open, and when the saved server no longer fits the store's naming rules.
 /// [`CliError::IpcUnavailable`] when the store could not be read or written.
-fn run_edit(store: &mut ServerStore, server: &str) -> Result<(), CliError> {
-    let record = named(store, server)?.clone();
-    store.forget(server);
+fn edit_saved_server_from_prompts(
+    server_store: &mut ServerStore,
+    server_reference: &str,
+) -> Result<(), CliError> {
+    let saved_server = find_saved_server(server_store, server_reference)?.clone();
+    server_store.forget_saved_server(server_reference);
 
     println!(
         "press Enter to keep the value in brackets. An empty secret keeps the saved one. \
          Ctrl-C stops without saving."
     );
-    let name = ask_until("name", record.name.as_deref(), |typed| {
-        if typed.is_empty() {
-            Ok(())
-        } else {
-            free_name(store, typed)
-        }
-    })?;
-    let address = ask_until("address", Some(&record.address), |typed| {
-        free_address(store, typed)
-    })?;
-    let secret = ask_secret(Some(&record.secret))?;
+    let server_name = prompt_until_valid_answer(
+        "name",
+        saved_server.server_name.as_deref(),
+        |entered_name| {
+            if entered_name.is_empty() {
+                Ok(())
+            } else {
+                validate_server_name_available(server_store, entered_name)
+            }
+        },
+    )?;
+    let server_address = prompt_until_valid_answer(
+        "address",
+        Some(&saved_server.server_address),
+        |entered_address| validate_saved_server_address_is_available(server_store, entered_address),
+    )?;
+    let connection_token = ask_secret(Some(&saved_server.connection_token))?;
 
-    let moved = address != record.address;
-    let question = if moved {
+    let is_address_changed = server_address != saved_server.server_address;
+    let confirmation_prompt = if is_address_changed {
         "save the change anyway? The certificate at that address is pinned on the \
          first connection to it."
     } else {
         "save the change anyway?"
     };
-    let held_pin = kept_pin(record.fingerprint.clone(), moved);
-    let pinned = match check_server(&address, &secret, held_pin.as_deref(), question)? {
-        Checked::Pinned(fingerprint) => Some(fingerprint),
-        Checked::Unpinned => None,
-        Checked::Discarded => {
+    let previous_certificate_fingerprint = resolve_certificate_fingerprint(
+        saved_server.certificate_fingerprint.clone(),
+        is_address_changed,
+    );
+    let certificate_fingerprint = match check_saved_server_connection(
+        &server_address,
+        &connection_token,
+        previous_certificate_fingerprint.as_deref(),
+        confirmation_prompt,
+    )? {
+        ServerCheckOutcome::Pinned(certificate_fingerprint) => Some(certificate_fingerprint),
+        ServerCheckOutcome::Unpinned => None,
+        ServerCheckOutcome::Discarded => {
             print!("{}", output::render_remote_discarded());
             return Ok(());
         }
     };
 
-    let now = SystemTime::now();
-    let updated = update_store(|disk| {
-        let on_disk = record_if_unchanged(disk, server, &record)?;
-        let updated = SavedServer {
-            name: (!name.is_empty()).then_some(name),
-            address,
-            secret,
-            last_used_at: if pinned.is_some() {
-                Some(now)
+    let current_time = SystemTime::now();
+    let updated_saved_server = update_saved_server_store(|server_store| {
+        let disk_saved_server =
+            find_unchanged_saved_server(server_store, server_reference, &saved_server)?;
+        let updated_saved_server = SavedServer {
+            server_name: (!server_name.is_empty()).then_some(server_name),
+            server_address,
+            connection_token,
+            last_used_at: if certificate_fingerprint.is_some() {
+                Some(current_time)
             } else {
-                on_disk.last_used_at
+                disk_saved_server.last_used_at
             },
-            fingerprint: pinned.or(held_pin),
-            added_at: on_disk.added_at,
+            certificate_fingerprint: certificate_fingerprint.or(previous_certificate_fingerprint),
+            added_at: disk_saved_server.added_at,
         };
-        place(disk, &updated, Some(server))?;
-        Ok(updated)
+        save_saved_server(server_store, &updated_saved_server, Some(server_reference))?;
+        Ok(updated_saved_server)
     })?;
-    print!("{}", output::render_remote_updated(&updated));
+    print!("{}", output::render_remote_updated(&updated_saved_server));
     Ok(())
 }
 
-/// The record `server` names in `store`, when it is still the `held` the
+/// The saved server `server_reference` names in `server_store`, when it is still the
+/// `saved_server_snapshot` the
 /// questions were answered against.
 ///
 /// The name, the address, the secret and the fingerprint are compared. The
-/// last-used time and the added time are not: a record another koshi only
+/// last-used time and the added time are not: a saved server another koshi only
 /// dialled still passes.
 ///
 /// # Errors
-/// [`CliError::InvalidArgs`] when `server` names no record, when it names more
+/// [`CliError::InvalidArgs`] when `server_reference` names no saved server, when it names more
 /// than one, and when one of the four compared values changed.
-fn record_if_unchanged(
-    store: &ServerStore,
-    server: &str,
-    held: &SavedServer,
+fn find_unchanged_saved_server(
+    server_store: &ServerStore,
+    server_reference: &str,
+    saved_server_snapshot: &SavedServer,
 ) -> Result<SavedServer, CliError> {
-    let now_held = named(store, server)?;
-    if now_held.name != held.name
-        || now_held.address != held.address
-        || now_held.secret != held.secret
-        || now_held.fingerprint != held.fingerprint
+    let current_saved_server = find_saved_server(server_store, server_reference)?;
+    if current_saved_server.server_name != saved_server_snapshot.server_name
+        || current_saved_server.server_address != saved_server_snapshot.server_address
+        || current_saved_server.connection_token != saved_server_snapshot.connection_token
+        || current_saved_server.certificate_fingerprint
+            != saved_server_snapshot.certificate_fingerprint
     {
         return Err(CliError::InvalidArgs {
             detail: format!(
-                "{server} changed while the questions were open, so nothing was \
-                 saved; run `koshi remote edit {server}` again"
+                "{server_reference} changed while the questions were open, so nothing was \
+                 saved; run `koshi remote edit {server_reference}` again"
             ),
         });
     }
-    Ok(now_held.clone())
+    Ok(current_saved_server.clone())
 }
 
-/// The fingerprint a record still holds once its address settled.
+/// The fingerprint a saved server still holds after its address settles.
 ///
-/// `held` is what it pinned before. The answer is `held` while `moved` is
-/// false, and `None` while `moved` is true.
+/// `held_certificate_fingerprint` is what it pinned before. The answer keeps
+/// it when `is_address_changed` is false, and returns `None` when it is true.
 ///
-/// Example — a record pinning `aa…aa` whose address the user left alone keeps
-/// `aa…aa`. The same record moved to another address keeps nothing.
-fn kept_pin(held: Option<String>, moved: bool) -> Option<String> {
-    if moved {
+/// Example — a saved server pinning `aa…aa` whose address the user left alone keeps
+/// `aa…aa`. The same saved server moved to another address keeps nothing.
+fn resolve_certificate_fingerprint(
+    held_certificate_fingerprint: Option<String>,
+    is_address_changed: bool,
+) -> Option<String> {
+    if is_address_changed {
         None
     } else {
-        held
+        held_certificate_fingerprint
     }
 }
 
-/// Put `record` in `store`, taking the place of the record `replacing` names.
+/// Put `saved_server` in `server_store`, replacing the saved server named by
+/// `replaced_server_reference`.
 ///
-/// The replaced record leaves before the checks, so `record` may keep its name
-/// and its address. A refusal leaves `store` as it was. The store is not
+/// The replaced saved server leaves before the checks, so `saved_server` may keep its name
+/// and its address. A refusal leaves `server_store` as it was. The store is not
 /// written; the caller does that.
 ///
 /// # Errors
-/// [`CliError::InvalidArgs`] when `replacing` names no record or more than
-/// one, and when another record answers to `record`'s name or its address.
-fn place(
-    store: &mut ServerStore,
-    record: &SavedServer,
-    replacing: Option<&str>,
+/// [`CliError::InvalidArgs`] when `replaced_server_reference` names no saved server or more than
+/// one, and when another saved server answers to `saved server`'s name or its address.
+fn save_saved_server(
+    server_store: &mut ServerStore,
+    saved_server: &SavedServer,
+    replaced_server_reference: Option<&str>,
 ) -> Result<(), CliError> {
-    let mut settled = store.clone();
-    if let Some(server) = replacing {
-        named(&settled, server)?;
-        settled.forget(server);
+    let mut updated_server_store = server_store.clone();
+    if let Some(replaced_server_reference) = replaced_server_reference {
+        find_saved_server(&updated_server_store, replaced_server_reference)?;
+        updated_server_store.forget_saved_server(replaced_server_reference);
     }
-    if let Some(name) = record.name.as_deref() {
-        free_name(&settled, name)?;
+    if let Some(server_name) = saved_server.server_name.as_deref() {
+        validate_server_name_available(&updated_server_store, server_name)?;
     }
-    free_address(&settled, &record.address)?;
-    settled
-        .save(record.clone())
+    validate_saved_server_address_is_available(
+        &updated_server_store,
+        &saved_server.server_address,
+    )?;
+    updated_server_store
+        .save_server(saved_server.clone())
         .map_err(|taken| CliError::InvalidArgs {
             detail: taken.to_string(),
         })?;
-    *store = settled;
+    *server_store = updated_server_store;
     Ok(())
 }
 
-/// Ask for one value until `check` takes it, and return what it settled on.
+/// Ask for one value until `validate_entered_answer` accepts it, and return what it settled on.
 ///
-/// `current` is printed in brackets, and an empty answer settles on it. With
-/// no `current` an empty answer settles on the empty string, which `check`
-/// answers for. Surrounding whitespace is trimmed. A `check` that refuses
-/// prints its reason and the question is asked again.
+/// `previous_answer` is printed in brackets, and an empty answer keeps it.
+/// With no `previous_answer` an empty answer uses the empty string, which
+/// `validate_entered_answer` checks. Surrounding whitespace is trimmed. A
+/// `validate_entered_answer` failure prints its reason and the question is asked again.
 ///
-/// Example — `ask_until("name", Some("work"), …)` prints `name [work]: `, and
+/// Example — `prompt_until_valid_answer("name", Some("work"), …)` prints `name [work]: `, and
 /// pressing Enter settles on `work`.
 ///
 /// # Errors
 /// [`CliError::InvalidArgs`] when the terminal could not be read, and when the
 /// input ended before an answer arrived.
-fn ask_until(
-    label: &str,
-    current: Option<&str>,
-    check: impl Fn(&str) -> Result<(), CliError>,
+fn prompt_until_valid_answer(
+    prompt_label: &str,
+    previous_answer: Option<&str>,
+    validate_entered_answer: impl Fn(&str) -> Result<(), CliError>,
 ) -> Result<String, CliError> {
-    let prompt = match current {
-        Some(value) => format!("{label} [{value}]: "),
-        None => format!("{label}: "),
+    let prompt_text = match previous_answer {
+        Some(previous_answer) => format!("{prompt_label} [{previous_answer}]: "),
+        None => format!("{prompt_label}: "),
     };
     loop {
-        let typed = prompt_line(&prompt)?;
-        let settled = if typed.is_empty() {
-            current.unwrap_or_default()
+        let entered_answer = prompt_line(&prompt_text)?;
+        let accepted_answer = if entered_answer.is_empty() {
+            previous_answer.unwrap_or_default()
         } else {
-            &typed
+            &entered_answer
         };
-        match check(settled) {
-            Ok(()) => return Ok(settled.to_string()),
-            Err(error) => eprintln!("koshi: {error}"),
+        match validate_entered_answer(accepted_answer) {
+            Ok(()) => return Ok(accepted_answer.to_string()),
+            Err(validation_error) => eprintln!("koshi: {validation_error}"),
         }
     }
 }
@@ -329,29 +375,32 @@ fn ask_until(
 /// Ask for the secret to present to the server, without printing what is
 /// typed.
 ///
-/// `current` is the saved secret an empty answer keeps. With no `current` an
+/// `previous_connection_token` is the saved secret an empty answer keeps. With no
+/// `previous_connection_token` an
 /// empty answer asks again.
 ///
 /// # Errors
 /// [`CliError::InvalidArgs`] when the terminal could not be read, and when the
 /// input ended before an answer arrived.
-fn ask_secret(current: Option<&ConnectionToken>) -> Result<ConnectionToken, CliError> {
+fn ask_secret(
+    previous_connection_token: Option<&ConnectionToken>,
+) -> Result<ConnectionToken, CliError> {
     loop {
-        let typed = prompt_secret("secret: ")?;
-        if !typed.is_empty() {
-            return Ok(ConnectionToken::new(typed));
+        let entered_secret = prompt_secret("secret: ")?;
+        if !entered_secret.is_empty() {
+            return Ok(ConnectionToken::from_secret(entered_secret));
         }
-        match current {
-            Some(secret) => return Ok(secret.clone()),
+        match previous_connection_token {
+            Some(saved_connection_token) => return Ok(saved_connection_token.clone()),
             None => eprintln!("koshi: a secret is needed; paste the one the grant handed out"),
         }
     }
 }
 
-/// Dial the server at `address` once to check that it admits `secret`, and ask
-/// `question` when it does not.
+/// Dial the server at `server_address` once to check that it admits `connection_token`, and ask
+/// `confirmation_prompt` when it does not.
 ///
-/// `pinned` is the fingerprint the server must present, or `None` to take
+/// `pinned_certificate_fingerprint` is the fingerprint the server must present, or `None` to take
 /// whatever certificate it presents. The connection closes as soon as the
 /// server admits the secret. No session is listed, and a server serving no
 /// session passes this check.
@@ -359,99 +408,124 @@ fn ask_secret(current: Option<&ConnectionToken>) -> Result<ConnectionToken, CliE
 /// # Errors
 /// [`CliError::InvalidArgs`] when the terminal could not be read, and when the
 /// input ended before an answer to `question` arrived.
-fn check_server(
-    address: &str,
-    secret: &ConnectionToken,
-    pinned: Option<&str>,
-    question: &str,
-) -> Result<Checked, CliError> {
-    println!("checking {address} …");
-    match remote_client::connect(address, secret, pinned, DIAL_WAIT, Some(REPLY_WAIT)) {
-        Ok(link) => Ok(Checked::Pinned(link.fingerprint)),
-        Err(error) => {
-            eprintln!("koshi: {}", CliError::from(error));
-            if confirmed(question)? {
-                Ok(Checked::Unpinned)
+fn check_saved_server_connection(
+    server_address: &str,
+    connection_token: &ConnectionToken,
+    pinned_certificate_fingerprint: Option<&str>,
+    confirmation_prompt: &str,
+) -> Result<ServerCheckOutcome, CliError> {
+    println!("checking {server_address} …");
+    match remote_client::connect_remote_server(
+        server_address,
+        connection_token,
+        pinned_certificate_fingerprint,
+        DIAL_TIMEOUT_DURATION,
+        Some(REPLY_TIMEOUT_DURATION),
+    ) {
+        Ok(remote_link) => Ok(ServerCheckOutcome::Pinned(
+            remote_link.certificate_fingerprint,
+        )),
+        Err(connection_error) => {
+            eprintln!("koshi: {}", CliError::from(connection_error));
+            if read_confirmation_answer(confirmation_prompt)? {
+                Ok(ServerCheckOutcome::Unpinned)
             } else {
-                Ok(Checked::Discarded)
+                Ok(ServerCheckOutcome::Discarded)
             }
         }
     }
 }
 
-/// Ask `question` and answer it with [`prompt::is_yes`].
+/// Ask `confirmation_prompt` and answer it with [`prompt::is_yes_answer`].
 ///
 /// # Errors
 /// [`CliError::InvalidArgs`] when the terminal could not be read, and when the
 /// input ended before an answer arrived.
-fn confirmed(question: &str) -> Result<bool, CliError> {
-    let typed = prompt_line(&format!("{question} [y/N]: "))?;
-    Ok(prompt::is_yes(&typed))
+fn read_confirmation_answer(confirmation_prompt: &str) -> Result<bool, CliError> {
+    let entered_answer = prompt_line(&format!("{confirmation_prompt} [y/N]: "))?;
+    Ok(prompt::is_yes_answer(&entered_answer))
 }
 
-/// `Ok(())` when `name` is a word this store can give to a record.
+/// `Ok(())` when `server_name` is a word this store can give to a saved server.
 ///
 /// # Errors
-/// [`CliError::InvalidArgs`] when `name` is empty, when it has the shape of an
-/// address, and when another record already answers to it by its own name or
+/// [`CliError::InvalidArgs`] when `server_name` is empty, when it has the shape of an
+/// address, and when another saved server already answers to it by its own name or
 /// its own address.
-fn free_name(store: &ServerStore, name: &str) -> Result<(), CliError> {
-    if name.is_empty() {
+fn validate_server_name_available(
+    server_store: &ServerStore,
+    server_name: &str,
+) -> Result<(), CliError> {
+    if server_name.is_empty() {
         return Err(CliError::InvalidArgs {
             detail: "a name is needed, such as work".to_string(),
         });
     }
-    check_name_shape(name)?;
-    free_word(store, name, "run `koshi remote list` and pick another name")
-}
-
-/// `Ok(())` when `address` is an address this store can give to a record.
-///
-/// # Errors
-/// [`CliError::InvalidArgs`] when `address` is not `host:port`, and when
-/// another record already answers to it by its own name or its own address.
-fn free_address(store: &ServerStore, address: &str) -> Result<(), CliError> {
-    if !looks_like_address(address) {
-        return Err(CliError::InvalidArgs {
-            detail: format!(
-                "an address is host:port, such as laptop.local:7654, and {address} is not"
-            ),
-        });
-    }
-    free_word(
-        store,
-        address,
-        &format!("run `koshi remote edit {address}` to change it"),
+    validate_saved_server_name(server_name)?;
+    validate_saved_server_reference_is_available(
+        server_store,
+        server_name,
+        "run `koshi remote list` and pick another name",
     )
 }
 
-/// `Ok(())` when no record in `store` answers to `word`.
+/// `Ok(())` when `server_address` is an address this store can give to a saved server.
 ///
 /// # Errors
-/// [`CliError::InvalidArgs`] naming `word` and ending in `remedy` when a
-/// record answers to it by its own name or its own address.
-fn free_word(store: &ServerStore, word: &str, remedy: &str) -> Result<(), CliError> {
-    match store.find(word) {
-        Lookup::NotSaved => Ok(()),
-        Lookup::Saved(_) | Lookup::Ambiguous => Err(CliError::InvalidArgs {
-            detail: format!("{word} already answers for a saved server; {remedy}"),
+/// [`CliError::InvalidArgs`] when `server_address` is not `host:port`, and when
+/// another saved server already answers to it by its own name or its own address.
+fn validate_saved_server_address_is_available(
+    server_store: &ServerStore,
+    server_address: &str,
+) -> Result<(), CliError> {
+    if !is_server_address(server_address) {
+        return Err(CliError::InvalidArgs {
+            detail: format!(
+                "an address is host:port, such as laptop.local:7654, and {server_address} is not"
+            ),
+        });
+    }
+    validate_saved_server_reference_is_available(
+        server_store,
+        server_address,
+        &format!("run `koshi remote edit {server_address}` to change it"),
+    )
+}
+
+/// `Ok(())` when no saved server in `server_store` answers to `server_reference`.
+///
+/// # Errors
+/// [`CliError::InvalidArgs`] naming `server_reference` and ending in `remedy` when a
+/// saved server answers to it by its own name or its own address.
+fn validate_saved_server_reference_is_available(
+    server_store: &ServerStore,
+    server_reference: &str,
+    remedy: &str,
+) -> Result<(), CliError> {
+    match server_store.find_saved_server(server_reference) {
+        SavedServerLookup::NotSaved => Ok(()),
+        SavedServerLookup::Saved(_) | SavedServerLookup::Ambiguous => Err(CliError::InvalidArgs {
+            detail: format!("{server_reference} already answers for a saved server; {remedy}"),
         }),
     }
 }
 
-/// The one server `server` names.
+/// The one saved server `server_reference` names.
 ///
 /// # Errors
 /// [`CliError::InvalidArgs`] when nothing is saved under that word, and a
-/// different [`CliError::InvalidArgs`] when more than one record answers to
+/// different [`CliError::InvalidArgs`] when more than one saved server answers to
 /// it.
-fn named<'a>(store: &'a ServerStore, server: &str) -> Result<&'a SavedServer, CliError> {
-    match store.find(server) {
-        Lookup::Saved(record) => Ok(record),
-        Lookup::NotSaved => Err(not_saved(server)),
-        Lookup::Ambiguous => Err(CliError::InvalidArgs {
+fn find_saved_server<'a>(
+    server_store: &'a ServerStore,
+    server_reference: &str,
+) -> Result<&'a SavedServer, CliError> {
+    match server_store.find_saved_server(server_reference) {
+        SavedServerLookup::Saved(saved_server) => Ok(saved_server),
+        SavedServerLookup::NotSaved => Err(build_saved_server_not_found_error(server_reference)),
+        SavedServerLookup::Ambiguous => Err(CliError::InvalidArgs {
             detail: format!(
-                "{server} is the name of one saved server and the address of another; \
+                "{server_reference} is the name of one saved server and the address of another; \
                  run `koshi remote list` and name the one you mean"
             ),
         }),
@@ -459,8 +533,8 @@ fn named<'a>(store: &'a ServerStore, server: &str) -> Result<&'a SavedServer, Cl
 }
 
 /// A `SERVER` argument that matches neither a saved name nor a saved address.
-fn not_saved(server: &str) -> CliError {
+fn build_saved_server_not_found_error(server_reference: &str) -> CliError {
     CliError::InvalidArgs {
-        detail: format!("no saved server is named {server}; run `koshi remote list`"),
+        detail: format!("no saved server is named {server_reference}; run `koshi remote list`"),
     }
 }

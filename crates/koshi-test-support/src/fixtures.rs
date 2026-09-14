@@ -12,7 +12,7 @@ use tempfile::TempDir;
 ///
 /// Panics when the directory cannot be created.
 #[must_use]
-pub fn test_runtime_dir() -> TempDir {
+pub fn build_test_runtime_directory() -> TempDir {
     #[cfg(unix)]
     let base = std::path::PathBuf::from("/tmp");
     #[cfg(windows)]

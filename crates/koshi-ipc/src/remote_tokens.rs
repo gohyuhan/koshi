@@ -5,7 +5,7 @@
 //! [`TokenRecord`](crate::remote_tokens::TokenRecord). The record carries the
 //! sha256 of that secret and never the secret itself. No stored field opens a
 //! connection. sha256 is the 256-bit hash function from the SHA-2 family;
-//! [`hash_token`](crate::remote_tokens::hash_token) writes its 32 result
+//! [`hash_connection_token`](crate::remote_tokens::hash_connection_token) writes its 32 result
 //! bytes as 64 lowercase hex characters.
 //!
 //! A record names one [`TokenScope`](crate::remote_tokens::TokenScope): the
@@ -14,7 +14,7 @@
 //! session. Every other case is refused.
 //!
 //! The whole set lives in one JSON file —
-//! [`store_path`](crate::remote_tokens::store_path) — inside the private
+//! [`resolve_token_store_path`](crate::remote_tokens::resolve_token_store_path) — inside the private
 //! koshi data directory. The file carries the format number
 //! [`TOKEN_STORE_FORMAT`](crate::remote_tokens::TOKEN_STORE_FORMAT), and a
 //! file carrying any other number is refused. Writes go through
@@ -32,14 +32,16 @@ use koshi_core::ids::SessionId;
 
 use crate::error::{IpcError, RemoteFile};
 use crate::protocol::ConnectionToken;
-use crate::remote_state::{format_mismatch, unreadable, write_private};
+use crate::remote_state::{
+    build_unreadable_remote_file_error, find_format_mismatch, write_remote_file,
+};
 
 /// The format number this build writes into every store, and the only one it
 /// reads back.
 ///
 /// The value and the rule it follows live in
 /// [`koshi_core::compat::TOKEN_STORE_FORMAT`].
-pub const TOKEN_STORE_FORMAT: u32 = koshi_core::compat::TOKEN_STORE_FORMAT.max;
+pub const TOKEN_STORE_FORMAT: u32 = koshi_core::compat::TOKEN_STORE_FORMAT.maximum_version;
 
 /// How far one grant reaches.
 ///
@@ -57,10 +59,10 @@ pub enum TokenScope {
 impl TokenScope {
     /// Whether this scope reaches `session`.
     #[must_use]
-    pub fn covers(&self, session: SessionId) -> bool {
+    pub fn is_allowed_for_session(&self, session_id: SessionId) -> bool {
         match self {
             TokenScope::HostWide => true,
-            TokenScope::Session(id) => *id == session,
+            TokenScope::Session(scoped_session_id) => *scoped_session_id == session_id,
         }
     }
 }
@@ -76,7 +78,8 @@ pub struct TokenRecord {
     pub identity: String,
     /// The sha256 of the granted secret, as 64 lowercase hex characters. No
     /// field of this record holds the secret itself.
-    pub hash: String,
+    #[serde(rename = "hash")]
+    pub token_hash: String,
     /// How far this grant reaches.
     pub scope: TokenScope,
     /// When the grant was made.
@@ -97,24 +100,24 @@ pub struct TokenRecord {
 ///
 /// Example — `revoked_at` `None` with `expires_at` one second before `now`
 /// gives `false`.
-fn still_stands(
+fn is_token_active_at(
     revoked_at: Option<SystemTime>,
     expires_at: Option<SystemTime>,
-    now: SystemTime,
+    current_time: SystemTime,
 ) -> bool {
-    revoked_at.is_none() && expires_at.is_none_or(|expiry| expiry > now)
+    revoked_at.is_none() && expires_at.is_none_or(|expiry| expiry > current_time)
 }
 
 impl TokenRecord {
     /// Whether this record still stands at `now`: nobody revoked it, and it
     /// either never expires or expires after `now`.
-    fn is_live(&self, now: SystemTime) -> bool {
-        still_stands(self.revoked_at, self.expires_at, now)
+    fn is_active_at(&self, current_time: SystemTime) -> bool {
+        is_token_active_at(self.revoked_at, self.expires_at, current_time)
     }
 
     /// This record without its hash.
     #[must_use]
-    pub fn entry(&self) -> TokenEntry {
+    pub fn build_token_entry(&self) -> TokenEntry {
         TokenEntry {
             identity: self.identity.clone(),
             scope: self.scope.clone(),
@@ -153,8 +156,8 @@ impl TokenEntry {
     /// Whether this grant still stands at `now`: nobody revoked it, and it
     /// either never expires or expires after `now`.
     #[must_use]
-    pub fn is_live(&self, now: SystemTime) -> bool {
-        still_stands(self.revoked_at, self.expires_at, now)
+    pub fn is_active_at(&self, current_time: SystemTime) -> bool {
+        is_token_active_at(self.revoked_at, self.expires_at, current_time)
     }
 }
 
@@ -176,9 +179,11 @@ pub enum Resolution {
 #[serde(deny_unknown_fields)]
 pub struct TokenStore {
     /// The format number of the file these records came from or go to.
-    pub format: u32,
+    #[serde(rename = "format")]
+    pub store_format: u32,
     /// One record per grant, in the order the grants were made.
-    pub records: Vec<TokenRecord>,
+    #[serde(rename = "records")]
+    pub token_records: Vec<TokenRecord>,
 }
 
 impl Default for TokenStore {
@@ -192,36 +197,44 @@ impl TokenStore {
     #[must_use]
     pub fn new() -> TokenStore {
         TokenStore {
-            format: TOKEN_STORE_FORMAT,
-            records: Vec::new(),
+            store_format: TOKEN_STORE_FORMAT,
+            token_records: Vec::new(),
         }
     }
 
-    /// Read the store at `path`.
+    /// Read the store at `token_store_path`.
     ///
     /// A path with no file is an empty store: this machine has granted
     /// nothing yet. A file that cannot be read, whose bytes are not a
     /// readable store, or whose format number is not
     /// [`TOKEN_STORE_FORMAT`] is [`IpcError::RemoteFileUnreadable`] naming
     /// [`RemoteFile::TokenStore`].
-    pub fn read(path: &Path) -> Result<TokenStore, IpcError> {
-        let refused = |detail: String| unreadable(RemoteFile::TokenStore, path, detail);
-        let data = match std::fs::read(path) {
-            Ok(data) => data,
+    pub fn load_token_store_from_path(token_store_path: &Path) -> Result<TokenStore, IpcError> {
+        let build_refusal = |error_detail: String| {
+            build_unreadable_remote_file_error(
+                RemoteFile::TokenStore,
+                token_store_path,
+                error_detail,
+            )
+        };
+        let token_store_bytes = match std::fs::read(token_store_path) {
+            Ok(token_store_bytes) => token_store_bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(TokenStore::new())
             }
-            Err(error) => return Err(refused(error.to_string())),
+            Err(error) => return Err(build_refusal(error.to_string())),
         };
-        let store: TokenStore =
-            serde_json::from_slice(&data).map_err(|error| refused(error.to_string()))?;
-        if let Some(detail) = format_mismatch(store.format, TOKEN_STORE_FORMAT) {
-            return Err(refused(detail));
+        let token_store: TokenStore = serde_json::from_slice(&token_store_bytes)
+            .map_err(|error| build_refusal(error.to_string()))?;
+        if let Some(format_error) =
+            find_format_mismatch(token_store.store_format, TOKEN_STORE_FORMAT)
+        {
+            return Err(build_refusal(format_error));
         }
-        Ok(store)
+        Ok(token_store)
     }
 
-    /// Write this store at `path`, replacing whatever is there, and create
+    /// Write this store at `token_store_path`, replacing whatever is there, and create
     /// the directory holding it when it is missing.
     ///
     /// The file is restricted to the owning user: mode `0600` on Unix, set on
@@ -231,8 +244,8 @@ impl TokenStore {
     ///
     /// Any failure along the way is [`IpcError::RemoteFileWrite`] naming
     /// [`RemoteFile::TokenStore`].
-    pub fn write(&self, path: &Path) -> Result<(), IpcError> {
-        write_private(RemoteFile::TokenStore, path, self)
+    pub fn write_token_store_to_path(&self, token_store_path: &Path) -> Result<(), IpcError> {
+        write_remote_file(RemoteFile::TokenStore, token_store_path, self)
     }
 
     /// Hand `identity` a fresh secret on `scope` and keep its hash.
@@ -245,29 +258,32 @@ impl TokenStore {
     /// One record per identity and scope: every record `identity` held on
     /// `scope` is dropped, and the new record goes at the end. The store is
     /// not written; the caller does that.
-    pub fn grant(
+    pub fn grant_token(
         &mut self,
         identity: String,
         scope: TokenScope,
         issued_at: SystemTime,
         expires_at: Option<SystemTime>,
     ) -> (ConnectionToken, bool) {
-        let token = ConnectionToken::generate();
-        let replaced = self.records.iter().any(|record| {
-            record.identity == identity && record.scope == scope && record.is_live(issued_at)
+        let connection_token = ConnectionToken::generate();
+        let has_replaced_active_grant = self.token_records.iter().any(|token_record| {
+            token_record.identity == identity
+                && token_record.scope == scope
+                && token_record.is_active_at(issued_at)
         });
-        self.records
-            .retain(|record| record.identity != identity || record.scope != scope);
-        self.records.push(TokenRecord {
+        self.token_records.retain(|token_record| {
+            token_record.identity != identity || token_record.scope != scope
+        });
+        self.token_records.push(TokenRecord {
             identity,
-            hash: hash_token(&token),
+            token_hash: hash_connection_token(&connection_token),
             scope,
             issued_at,
             expires_at,
             last_used_at: None,
             revoked_at: None,
         });
-        (token, replaced)
+        (connection_token, has_replaced_active_grant)
     }
 
     /// Stop every standing grant `identity` holds, narrowed to one scope when
@@ -276,27 +292,27 @@ impl TokenStore {
     /// Returns the scope of each grant this call stopped. A record an earlier
     /// call already stopped keeps that earlier time and stays out of the
     /// answer. The store is not written; the caller does that.
-    pub fn revoke(
+    pub fn revoke_token_grants(
         &mut self,
         identity: &str,
         scope: Option<&TokenScope>,
-        now: SystemTime,
+        current_time: SystemTime,
     ) -> Vec<TokenScope> {
-        let mut stopped = Vec::new();
-        for record in &mut self.records {
-            if record.identity != identity || record.revoked_at.is_some() {
+        let mut revoked_scopes = Vec::new();
+        for token_record in &mut self.token_records {
+            if token_record.identity != identity || token_record.revoked_at.is_some() {
                 continue;
             }
-            if scope.is_some_and(|wanted| *wanted != record.scope) {
+            if scope.is_some_and(|requested_scope| *requested_scope != token_record.scope) {
                 continue;
             }
-            record.revoked_at = Some(now);
-            stopped.push(record.scope.clone());
+            token_record.revoked_at = Some(current_time);
+            revoked_scopes.push(token_record.scope.clone());
         }
-        stopped
+        revoked_scopes
     }
 
-    /// Where in `records` the last record sits that holds the hash `presented`,
+    /// Where in `token_records` the last record sits that holds the hash `presented`,
     /// still stands at `now`, and whose scope `reaches` accepts. `None` when no
     /// record does.
     ///
@@ -304,23 +320,30 @@ impl TokenStore {
     /// last byte; a hash whose length differs from `presented` is unequal at
     /// once, with no byte compared. The walk runs to the end and reads no
     /// record out of a map.
-    fn last_match(
+    fn find_last_matching_token_record_index(
         &self,
-        presented: &str,
-        now: SystemTime,
-        reaches: impl Fn(&TokenScope) -> bool,
+        presented_token_hash: &str,
+        current_time: SystemTime,
+        is_scope_allowed_for_session: impl Fn(&TokenScope) -> bool,
     ) -> Option<usize> {
-        let mut found = None;
-        for (index, record) in self.records.iter().enumerate() {
-            let same_hash: bool = record.hash.as_bytes().ct_eq(presented.as_bytes()).into();
-            if same_hash && record.is_live(now) && reaches(&record.scope) {
-                found = Some(index);
+        let mut matching_token_record_index = None;
+        for (token_record_index, token_record) in self.token_records.iter().enumerate() {
+            let is_token_hash_matching: bool = token_record
+                .token_hash
+                .as_bytes()
+                .ct_eq(presented_token_hash.as_bytes())
+                .into();
+            if is_token_hash_matching
+                && token_record.is_active_at(current_time)
+                && is_scope_allowed_for_session(&token_record.scope)
+            {
+                matching_token_record_index = Some(token_record_index);
             }
         }
-        found
+        matching_token_record_index
     }
 
-    /// What `token` reaches on `session` at `now`.
+    /// What `connection_token` reaches on `session_id` at `current_time`.
     ///
     /// The presented secret is hashed once, then every record is walked and
     /// each hash compared through its last byte. The answer is
@@ -329,42 +352,54 @@ impl TokenStore {
     /// [`Resolution::Refused`]. Admitting stamps the last such record's
     /// last-used time with `now`. The store is not written; the caller does
     /// that.
-    pub fn resolve(
+    pub fn resolve_token_access(
         &mut self,
-        token: &ConnectionToken,
-        session: SessionId,
-        now: SystemTime,
+        connection_token: &ConnectionToken,
+        session_id: SessionId,
+        current_time: SystemTime,
     ) -> Resolution {
-        let presented = hash_token(token);
-        match self.last_match(&presented, now, |scope| scope.covers(session)) {
-            Some(index) => {
-                self.records[index].last_used_at = Some(now);
+        let presented_token_hash = hash_connection_token(connection_token);
+        match self.find_last_matching_token_record_index(
+            &presented_token_hash,
+            current_time,
+            |scope| scope.is_allowed_for_session(session_id),
+        ) {
+            Some(token_record_index) => {
+                self.token_records[token_record_index].last_used_at = Some(current_time);
                 Resolution::Admitted
             }
             None => Resolution::Refused,
         }
     }
 
-    /// What `token` reaches at `now`, without naming a session.
+    /// What `connection_token` reaches at `current_time`, without naming a session.
     ///
     /// The presented secret is hashed once, then every record is walked and
     /// each hash compared through its last byte. The walk runs to the end and
     /// reads no record out of a map. Returns the scope of the last live record
     /// holding that hash, and `None` when no record does. Admitting stamps
-    /// that record's last-used time with `now`. The store is not written; the
+    /// that record's last-used time with `current_time`. The store is not written; the
     /// caller does that.
     ///
     /// The caller checks the scope against the session it wants with
-    /// [`TokenScope::covers`].
-    pub fn admit(&mut self, token: &ConnectionToken, now: SystemTime) -> Option<TokenScope> {
-        let presented = hash_token(token);
-        let index = self.last_match(&presented, now, |_| true)?;
-        self.records[index].last_used_at = Some(now);
-        Some(self.records[index].scope.clone())
+    /// [`TokenScope::is_allowed_for_session`].
+    pub fn admit_token_scope(
+        &mut self,
+        connection_token: &ConnectionToken,
+        current_time: SystemTime,
+    ) -> Option<TokenScope> {
+        let presented_token_hash = hash_connection_token(connection_token);
+        let token_record_index = self.find_last_matching_token_record_index(
+            &presented_token_hash,
+            current_time,
+            |_| true,
+        )?;
+        self.token_records[token_record_index].last_used_at = Some(current_time);
+        Some(self.token_records[token_record_index].scope.clone())
     }
 
     /// Every grant without its hash, narrowed to the grants that reach one
-    /// scope when `scope` is given.
+    /// scope when `requested_scope` is given.
     ///
     /// A session scope lists every grant that reaches that session: a
     /// host-wide grant is listed beside the grants scoped to the session
@@ -373,40 +408,43 @@ impl TokenStore {
     /// Sorted by identity, then by scope with host-wide before session and
     /// sessions by id.
     #[must_use]
-    pub fn entries(&self, scope: Option<&TokenScope>) -> Vec<TokenEntry> {
-        let mut entries: Vec<TokenEntry> = self
-            .records
+    pub fn list_token_entries(&self, requested_scope: Option<&TokenScope>) -> Vec<TokenEntry> {
+        let mut token_entries: Vec<TokenEntry> = self
+            .token_records
             .iter()
-            .filter(|record| {
-                scope.is_none_or(|wanted| match wanted {
-                    TokenScope::HostWide => record.scope == TokenScope::HostWide,
-                    TokenScope::Session(session) => record.scope.covers(*session),
+            .filter(|token_record| {
+                requested_scope.is_none_or(|requested_scope| match requested_scope {
+                    TokenScope::HostWide => token_record.scope == TokenScope::HostWide,
+                    TokenScope::Session(session_id) => {
+                        token_record.scope.is_allowed_for_session(*session_id)
+                    }
                 })
             })
-            .map(TokenRecord::entry)
+            .map(TokenRecord::build_token_entry)
             .collect();
-        entries.sort_by(|left, right| {
-            left.identity
-                .cmp(&right.identity)
-                .then_with(|| left.scope.cmp(&right.scope))
+        token_entries.sort_by(|left_token_entry, right_token_entry| {
+            left_token_entry
+                .identity
+                .cmp(&right_token_entry.identity)
+                .then_with(|| left_token_entry.scope.cmp(&right_token_entry.scope))
         });
-        entries
+        token_entries
     }
 }
 
 /// Where the remote access token store lives: `remote/tokens` under
-/// `data_dir`.
+/// `data_directory`.
 ///
-/// Callers resolve `data_dir` through `koshi_paths::data_dir()`.
+/// Callers resolve `data_directory` through `koshi_paths::resolve_data_directory()`.
 #[must_use]
-pub fn store_path(data_dir: &Path) -> PathBuf {
-    data_dir.join("remote").join("tokens")
+pub fn resolve_token_store_path(data_directory: &Path) -> PathBuf {
+    data_directory.join("remote").join("tokens")
 }
 
-/// The sha256 of `token`'s secret, as 64 lowercase hex characters.
+/// The sha256 of `connection_token`'s secret, as 64 lowercase hex characters.
 #[must_use]
-pub fn hash_token(token: &ConnectionToken) -> String {
-    crate::bytes::hex(&Sha256::digest(token.expose().as_bytes()))
+pub fn hash_connection_token(connection_token: &ConnectionToken) -> String {
+    crate::bytes::format_hex(&Sha256::digest(connection_token.expose().as_bytes()))
 }
 
 #[cfg(test)]

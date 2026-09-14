@@ -9,6 +9,7 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use koshi_core::ids::PaneId;
 use koshi_core::process::KillPolicy;
 use koshi_terminal::engine::TerminalEngine;
 
@@ -21,12 +22,18 @@ impl Server {
     /// request, which each loop reads on its own terms. A [`RuntimeEvent::Quit`]
     /// is a terminal hangup: it breaks the loop and leaves teardown on the
     /// graceful path. Explicit quit travels through the `core:quit` command.
-    pub fn handle_runtime_event(&mut self, event: RuntimeEvent) -> ControlFlow<()> {
-        match event {
+    pub fn handle_runtime_event(&mut self, runtime_event: RuntimeEvent) -> ControlFlow<()> {
+        match runtime_event {
             RuntimeEvent::Quit => return ControlFlow::Break(()),
-            RuntimeEvent::PtyOutput { pane_id, bytes } => self.handle_pty_output(pane_id, &bytes),
-            RuntimeEvent::ChildExit { pane_id, status } => {
-                let events = self.handle_child_exit(pane_id, status);
+            RuntimeEvent::PtyOutput {
+                pane_id,
+                output_bytes,
+            } => self.handle_pty_output(pane_id, &output_bytes),
+            RuntimeEvent::ChildExit {
+                pane_id,
+                exit_status,
+            } => {
+                let events = self.handle_child_exit(pane_id, exit_status);
                 self.publish_events(&events);
             }
             // A raw chord is the viewer's to read: it holds the keymap, the
@@ -48,9 +55,9 @@ impl Server {
             RuntimeEvent::ClientMouse {
                 client_id,
                 request_id,
-                actions,
+                mouse_actions,
             } => {
-                self.run_client_mouse(client_id, request_id, actions);
+                self.run_client_mouse(client_id, request_id, mouse_actions);
             }
             // A mouse event is the viewer's for the same reason: only the frame
             // it painted says which pane the pointer is over and which gesture
@@ -59,84 +66,100 @@ impl Server {
             RuntimeEvent::MouseInput { client_id, .. } => {
                 tracing::debug!(%client_id, "dropping a mouse event no attached viewer answered");
             }
-            RuntimeEvent::HostPaste { client_id, text } => {
-                self.handle_host_paste(client_id, &text);
+            RuntimeEvent::HostPaste {
+                client_id,
+                pasted_text,
+            } => {
+                self.handle_host_paste(client_id, &pasted_text);
             }
             RuntimeEvent::ClientDetached {
                 client_id,
                 detached_at,
-                streamed,
+                is_streamed,
             } => {
                 // The view is filed before the detach, which removes the record
                 // it is read from.
-                if streamed {
-                    self.save_view_of(client_id, detached_at);
+                if is_streamed {
+                    self.save_client_view(client_id, detached_at);
                 } else {
-                    self.saved_views.forget(client_id);
+                    self.saved_view_store.forget_client_resume_token(client_id);
                 }
                 let events = self.handle_client_detach(client_id);
                 self.publish_events(&events);
             }
             RuntimeEvent::Resize {
                 client_id,
-                size,
+                viewport_size,
                 pane_area,
                 cell_size,
             } => {
-                let events =
-                    self.handle_client_resize_with_cell_size(client_id, size, pane_area, cell_size);
-                self.publish_events(&events);
+                let resize_events = self.handle_client_resize_with_cell_size(
+                    client_id,
+                    viewport_size,
+                    pane_area,
+                    cell_size,
+                );
+                self.publish_events(&resize_events);
             }
-            RuntimeEvent::CellSize { client_id, size } => {
-                self.handle_client_cell_size(client_id, size)
-            }
+            RuntimeEvent::CellSize {
+                client_id,
+                cell_size,
+            } => self.handle_client_cell_size(client_id, cell_size),
             // The loop's generic wake-up. The session holds no deadline of its
             // own: a key sequence expires on the viewer that opened it.
             RuntimeEvent::Timer => {}
-            RuntimeEvent::Ipc { envelope, reply } => {
-                let result = self.submit_command(envelope);
+            RuntimeEvent::Ipc {
+                envelope,
+                response_sender,
+            } => {
+                let command_result = self.submit_command(envelope);
                 // A closed reply channel means the connection thread is gone;
                 // the command has already applied, so there is nothing to undo.
-                let _ = reply.send(result);
+                let _ = response_sender.send(command_result);
             }
             RuntimeEvent::IpcAttach {
-                resume,
+                resume_client_id,
                 resume_token,
-                viewport,
+                viewport_size,
                 pane_area,
                 cell_size,
-                filter,
+                event_filter,
                 attached_at,
-                remote,
-                reply,
+                is_remote,
+                response_sender,
             } => {
                 // The client and its subscription are registered together here,
                 // so the structure in the answer and the queue's first event
                 // describe one continuous state.
-                let _ = reply.send(self.handle_ipc_attach_with_cell_size(
-                    resume,
+                let _ = response_sender.send(self.handle_ipc_attach_with_cell_size(
+                    resume_client_id,
                     resume_token,
-                    viewport,
+                    viewport_size,
                     pane_area,
                     cell_size,
-                    filter,
+                    event_filter,
                     attached_at,
-                    remote,
+                    is_remote,
                 ));
             }
-            RuntimeEvent::IpcDiscovery { reply } => {
-                let _ = reply.send(self.build_overview());
+            RuntimeEvent::IpcDiscovery { response_sender } => {
+                let _ = response_sender.send(self.build_overview());
             }
-            RuntimeEvent::IpcLayout { tab, reply } => {
-                let _ = reply.send(self.build_session_layout(tab));
+            RuntimeEvent::IpcLayout {
+                tab_id,
+                response_sender,
+            } => {
+                let _ = response_sender.send(self.build_session_layout(tab_id));
             }
             // The verdict is answered here and the swap runs after the loop
             // ends, so the caller reads the reply on a socket that is still up.
-            RuntimeEvent::IpcRestart { reply } => {
-                let _ = reply.send(self.handle_ipc_restart());
+            RuntimeEvent::IpcRestart { response_sender } => {
+                let _ = response_sender.send(self.handle_ipc_restart());
             }
-            RuntimeEvent::DropUnclaimedClients { deadline } => {
-                let events = self.handle_drop_unclaimed_clients(deadline);
+            RuntimeEvent::DropUnclaimedClients {
+                unclaimed_client_deadline,
+            } => {
+                let events = self.handle_drop_unclaimed_clients(unclaimed_client_deadline);
                 self.publish_events(&events);
             }
             RuntimeEvent::Plugin(envelope) => {
@@ -149,20 +172,24 @@ impl Server {
     /// How long the loop may block before the next render is due: `None` to
     /// sleep until an event, `Some(ZERO)` to render now, else the time left on
     /// the current cadence.
-    pub fn next_render_wakeup(&self, now: Instant) -> Option<Duration> {
+    pub fn next_render_wakeup(&self, current_time: Instant) -> Option<Duration> {
         let animation_wakeup = self
-            .terminal_engines
+            .terminal_engine_by_pane_id
             .values()
-            .filter_map(TerminalEngine::next_animation_delay)
-            .map(|delay| delay.saturating_sub(now.saturating_duration_since(self.animation_clock)))
+            .filter_map(TerminalEngine::get_next_image_animation_delay)
+            .map(|delay| {
+                delay.saturating_sub(current_time.saturating_duration_since(self.animation_clock))
+            })
             .min();
         let synchronized_output_wakeup = self
-            .terminal_engines
+            .terminal_engine_by_pane_id
             .values()
-            .filter_map(|engine| engine.next_synchronized_output_delay(now))
+            .filter_map(|terminal_engine| {
+                terminal_engine.get_next_synchronized_output_delay(current_time)
+            })
             .min();
         [
-            self.render_scheduler.next_wakeup(now),
+            self.render_scheduler.next_wakeup(current_time),
             animation_wakeup,
             synchronized_output_wakeup,
         ]
@@ -171,35 +198,35 @@ impl Server {
         .min()
     }
 
-    /// Whether a render is due at `now`. When `true`, the scheduler records the
+    /// Whether a render is due at `current_time`. When `true`, the scheduler records the
     /// render and clears its pending reasons, so the caller must repaint.
-    pub fn poll_render(&mut self, now: Instant) -> bool {
-        let expired: Vec<_> = self
-            .terminal_engines
+    pub fn poll_render(&mut self, current_time: Instant) -> bool {
+        let expired_pane_ids: Vec<PaneId> = self
+            .terminal_engine_by_pane_id
             .iter()
             .filter_map(|(pane_id, engine)| {
-                (engine.next_synchronized_output_delay(now) == Some(Duration::ZERO))
+                (engine.get_next_synchronized_output_delay(current_time) == Some(Duration::ZERO))
                     .then_some(*pane_id)
             })
             .collect();
-        for pane_id in expired {
-            self.expire_synchronized_output(pane_id, now);
+        for pane_id in expired_pane_ids {
+            self.expire_synchronized_output(pane_id, current_time);
         }
-        let elapsed = now.saturating_duration_since(self.animation_clock);
-        self.animation_clock = now;
-        let animations_changed = self
-            .terminal_engines
+        let elapsed_duration = current_time.saturating_duration_since(self.animation_clock);
+        self.animation_clock = current_time;
+        let has_animation_changes = self
+            .terminal_engine_by_pane_id
             .values_mut()
-            .any(|engine| engine.advance_animations(elapsed));
-        if animations_changed {
+            .any(|terminal_engine| terminal_engine.advance_image_animations(elapsed_duration));
+        if has_animation_changes {
             self.render_scheduler.invalidate();
         }
-        self.render_scheduler.poll(now)
+        self.render_scheduler.poll(current_time)
     }
 
     /// Whether any pane's PTY is still live — the loop exits once none remain.
     pub fn has_active_panes(&self) -> bool {
-        !self.pty_handles.is_empty()
+        !self.pty_handle_by_pane_id.is_empty()
     }
 
     /// Immediately group-kill every live pane's child (`KillPolicy::Tree`),
@@ -207,9 +234,9 @@ impl Server {
     /// panic path — no grace window while unwinding; the normal quit path takes
     /// the staged [`Server::shutdown`].
     pub fn kill_all_panes(&mut self) {
-        let backend = Arc::clone(self.pty_backend());
-        for pane_id in self.pty_handles.keys().copied() {
-            let _ = backend.kill(pane_id, KillPolicy::Tree);
+        let backend = Arc::clone(self.get_pty_backend());
+        for pane_id in self.pty_handle_by_pane_id.keys().copied() {
+            let _ = backend.kill_pane(pane_id, KillPolicy::Tree);
         }
     }
 }

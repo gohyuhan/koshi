@@ -10,36 +10,43 @@ use koshi_core::ids::SessionId;
 use koshi_core::recent_event::RecentEvent;
 
 /// The oldest moment a `--since <length>` window keeps, counted back from
-/// `now`. `None` keeps every event, and comes back both from an absent
-/// `since` and from a window reaching further back than `now` can be counted.
+/// `current_time`. `None` keeps every event, and comes back both from an absent
+/// `since_duration` and from a window reaching further back than `current_time` can be counted.
 ///
-/// Example: `oldest_kept(now, Some(Duration::from_secs(30)))` results in the
-/// moment thirty seconds before `now`.
+/// Example: `compute_oldest_event_time(current_time, Some(Duration::from_secs(30)))` results in the
+/// moment thirty seconds before `current_time`.
 #[must_use]
-pub fn oldest_kept(now: SystemTime, since: Option<Duration>) -> Option<SystemTime> {
-    since.and_then(|window| now.checked_sub(window))
+pub fn compute_oldest_event_time(
+    current_time: SystemTime,
+    since_duration: Option<Duration>,
+) -> Option<SystemTime> {
+    since_duration.and_then(|window| current_time.checked_sub(window))
 }
 
-/// Keep the events recorded at or after `oldest_kept` whose name contains
-/// `wanted`. `wanted` is matched ignoring case, so `pane` keeps `PaneCreated`.
+/// Keep the events recorded at or after `oldest_event_time` whose name contains
+/// `event_name_filter`. `event_name_filter` is matched ignoring case, so `pane` keeps `PaneCreated`.
 /// A `None` on either side drops nothing for that side. Order is unchanged.
 ///
-/// Example: `narrow(events, None, Some("tab"))` keeps `TabCreated` and
+/// Example: `filter_recent_events(recent_events, None, Some("tab"))` keeps `TabCreated` and
 /// `TabMoved` and drops `PaneCreated`.
 #[must_use]
-pub fn narrow(
-    events: Vec<RecentEvent>,
-    oldest_kept: Option<SystemTime>,
-    wanted: Option<&str>,
+pub fn filter_recent_events(
+    recent_events: Vec<RecentEvent>,
+    oldest_event_time: Option<SystemTime>,
+    event_name_filter: Option<&str>,
 ) -> Vec<RecentEvent> {
-    let wanted_filter = wanted.map(str::to_lowercase);
-    events
+    let event_name_filter_lowercase = event_name_filter.map(str::to_lowercase);
+    recent_events
         .into_iter()
-        .filter(|event| oldest_kept.is_none_or(|oldest| event.at >= oldest))
         .filter(|event| {
-            wanted_filter
+            oldest_event_time.is_none_or(|oldest_event_time| event.occurred_at >= oldest_event_time)
+        })
+        .filter(|event| {
+            event_name_filter_lowercase
                 .as_ref()
-                .is_none_or(|wanted_name| event.name.to_lowercase().contains(wanted_name))
+                .is_none_or(|event_name_filter| {
+                    event.event_name.to_lowercase().contains(event_name_filter)
+                })
         })
         .collect()
 }
@@ -48,11 +55,14 @@ pub fn narrow(
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SessionEvents {
     /// The session that remembered them.
-    pub session: SessionId,
+    #[serde(rename = "session")]
+    pub session_id: SessionId,
     /// That session's name.
-    pub name: String,
+    #[serde(rename = "name")]
+    pub session_name: String,
     /// The events, oldest first.
-    pub events: Vec<RecentEvent>,
+    #[serde(rename = "events")]
+    pub recent_events: Vec<RecentEvent>,
 }
 
 /// Render a `debug events` answer. The session cell carries the id and the
@@ -68,25 +78,31 @@ pub struct SessionEvents {
 /// A session that remembered nothing contributes no row. An answer holding
 /// only such sessions renders the header alone.
 #[must_use]
-pub fn render_recent_events(sessions: &[SessionEvents], format: FormatArg) -> String {
-    match format {
-        FormatArg::Json => json(&sessions),
-        FormatArg::Table => {
-            let rows: Vec<Vec<String>> = sessions
+pub fn render_recent_events(
+    session_events: &[SessionEvents],
+    output_format: OutputFormat,
+) -> String {
+    match output_format {
+        OutputFormat::Json => render_json(&session_events),
+        OutputFormat::Table => {
+            let event_rows: Vec<Vec<String>> = session_events
                 .iter()
-                .flat_map(|session| {
-                    session.events.iter().map(|event| {
-                        vec![
-                            session.session.to_string(),
-                            session.name.clone(),
-                            time_cell(event.at),
-                            event.name.to_string(),
-                            id_cells(event),
-                        ]
-                    })
+                .flat_map(|session_event_group| {
+                    session_event_group
+                        .recent_events
+                        .iter()
+                        .map(|recent_event| {
+                            vec![
+                                session_event_group.session_id.to_string(),
+                                session_event_group.session_name.clone(),
+                                format_time_cell(recent_event.occurred_at),
+                                recent_event.event_name.to_string(),
+                                render_event_identifier_cells(recent_event),
+                            ]
+                        })
                 })
                 .collect();
-            table(&["session", "name", "at", "event", "ids"], rows)
+            render_table(&["session", "name", "at", "event", "ids"], event_rows)
         }
     }
 }
@@ -96,21 +112,31 @@ pub fn render_recent_events(sessions: &[SessionEvents], format: FormatArg) -> St
 /// The ids keep this order: session, client, tab, pane, plugin, command,
 /// subscriber. Each prints its own kind, so `client-… tab-… pane-…` needs no
 /// column of its own to say which is which.
-fn id_cells(event: &RecentEvent) -> String {
-    let cells: Vec<String> = [
-        event.session.map(|id| id.to_string()),
-        event.client.map(|id| id.to_string()),
-        event.tab.map(|id| id.to_string()),
-        event.pane.map(|id| id.to_string()),
-        event.plugin.map(|id| id.to_string()),
-        event.command.map(|id| id.to_string()),
-        event.subscriber.map(|id| id.to_string()),
+fn render_event_identifier_cells(recent_event: &RecentEvent) -> String {
+    let event_identifiers: Vec<String> = [
+        recent_event
+            .session_id
+            .map(|session_id| session_id.to_string()),
+        recent_event
+            .client_id
+            .map(|client_id| client_id.to_string()),
+        recent_event.tab_id.map(|tab_id| tab_id.to_string()),
+        recent_event.pane_id.map(|pane_id| pane_id.to_string()),
+        recent_event
+            .plugin_id
+            .map(|plugin_id| plugin_id.to_string()),
+        recent_event
+            .command_id
+            .map(|command_id| command_id.to_string()),
+        recent_event
+            .subscriber_id
+            .map(|subscriber_id| subscriber_id.to_string()),
     ]
     .into_iter()
     .flatten()
     .collect();
-    if cells.is_empty() {
+    if event_identifiers.is_empty() {
         return "-".to_string();
     }
-    cells.join(" ")
+    event_identifiers.join(" ")
 }

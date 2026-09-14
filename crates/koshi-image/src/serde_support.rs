@@ -7,15 +7,21 @@ use serde::Deserializer;
 ///
 /// A sequence longer than `limit` returns a deserializer error before the extra byte is stored.
 pub struct BoundedBytesSeed {
-    limit: usize,
-    name: &'static str,
+    byte_limit: usize,
+    error_label: &'static str,
 }
 
 impl BoundedBytesSeed {
-    /// Create a byte-sequence deserializer with `limit` bytes and the supplied error `name`.
+    /// Create a byte-sequence deserializer with `byte_limit` bytes and the supplied error label.
     #[must_use]
-    pub const fn new(limit: usize, name: &'static str) -> Self {
-        BoundedBytesSeed { limit, name }
+    pub const fn from_byte_limit_and_error_label(
+        byte_limit: usize,
+        error_label: &'static str,
+    ) -> Self {
+        BoundedBytesSeed {
+            byte_limit,
+            error_label,
+        }
     }
 }
 
@@ -27,27 +33,27 @@ impl<'de> DeserializeSeed<'de> for BoundedBytesSeed {
         D: Deserializer<'de>,
     {
         deserializer.deserialize_seq(BoundedBytesVisitor {
-            limit: self.limit,
-            name: self.name,
+            byte_limit: self.byte_limit,
+            error_label: self.error_label,
         })
     }
 }
 
 struct BoundedBytesVisitor {
-    limit: usize,
-    name: &'static str,
+    byte_limit: usize,
+    error_label: &'static str,
 }
 
 impl BoundedBytesVisitor {
-    fn validate_length<E>(&self, length: usize) -> Result<(), E>
+    fn validate_byte_count<E>(&self, byte_count: usize) -> Result<(), E>
     where
         E: de::Error,
     {
-        if length > self.limit {
+        if byte_count > self.byte_limit {
             return Err(de::Error::custom(format!(
-                "{name} exceeds {limit} bytes",
-                name = self.name,
-                limit = self.limit,
+                "{error_label} exceeds {byte_limit} bytes",
+                error_label = self.error_label,
+                byte_limit = self.byte_limit,
             )));
         }
         Ok(())
@@ -61,37 +67,38 @@ impl<'de> Visitor<'de> for BoundedBytesVisitor {
         formatter.write_str("a bounded byte sequence")
     }
 
-    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    fn visit_seq<A>(self, mut byte_sequence: A) -> Result<Self::Value, A::Error>
     where
         A: SeqAccess<'de>,
     {
-        let mut bytes = Vec::with_capacity(sequence.size_hint().unwrap_or(0).min(self.limit));
-        while let Some(byte) = sequence.next_element::<u8>()? {
-            if bytes.len() == self.limit {
+        let mut byte_values =
+            Vec::with_capacity(byte_sequence.size_hint().unwrap_or(0).min(self.byte_limit));
+        while let Some(byte_value) = byte_sequence.next_element::<u8>()? {
+            if byte_values.len() == self.byte_limit {
                 return Err(de::Error::custom(format!(
-                    "{name} exceeds {limit} bytes",
-                    name = self.name,
-                    limit = self.limit,
+                    "{error_label} exceeds {byte_limit} bytes",
+                    error_label = self.error_label,
+                    byte_limit = self.byte_limit,
                 )));
             }
-            bytes.push(byte);
+            byte_values.push(byte_value);
         }
-        Ok(bytes)
+        Ok(byte_values)
     }
 
-    fn visit_bytes<E>(self, bytes: &[u8]) -> Result<Self::Value, E>
+    fn visit_bytes<E>(self, byte_values: &[u8]) -> Result<Self::Value, E>
     where
         E: de::Error,
     {
-        self.validate_length(bytes.len())?;
-        Ok(bytes.to_vec())
+        self.validate_byte_count(byte_values.len())?;
+        Ok(byte_values.to_vec())
     }
 
-    fn visit_byte_buf<E>(self, bytes: Vec<u8>) -> Result<Self::Value, E>
+    fn visit_byte_buf<E>(self, byte_values: Vec<u8>) -> Result<Self::Value, E>
     where
         E: de::Error,
     {
-        self.validate_length(bytes.len())?;
-        Ok(bytes)
+        self.validate_byte_count(byte_values.len())?;
+        Ok(byte_values)
     }
 }

@@ -19,25 +19,30 @@ pub fn iterm_feature_string_supports_sixel(feature_string: &[u8]) -> bool {
     iterm_feature_string_supports(feature_string, b"Sx")
 }
 
-fn iterm_feature_string_supports(feature_string: &[u8], wanted: &[u8]) -> bool {
-    let prefix = feature_string
+fn iterm_feature_string_supports(feature_string: &[u8], requested_feature: &[u8]) -> bool {
+    let feature_prefix = feature_string
         .iter()
-        .position(|byte| !byte.is_ascii_alphanumeric())
-        .map_or(feature_string, |index| &feature_string[..index]);
-    let mut index = 0;
-    while index < prefix.len() {
-        if !prefix[index].is_ascii_uppercase() {
+        .position(|feature_byte| !feature_byte.is_ascii_alphanumeric())
+        .map_or(feature_string, |prefix_end_index| {
+            &feature_string[..prefix_end_index]
+        });
+    let mut feature_index = 0;
+    while feature_index < feature_prefix.len() {
+        if !feature_prefix[feature_index].is_ascii_uppercase() {
             return false;
         }
-        let token_start = index;
-        index += 1;
-        while index < prefix.len() && prefix[index].is_ascii_lowercase() {
-            index += 1;
+        let token_start_index = feature_index;
+        feature_index += 1;
+        while feature_index < feature_prefix.len()
+            && feature_prefix[feature_index].is_ascii_lowercase()
+        {
+            feature_index += 1;
         }
-        while index < prefix.len() && prefix[index].is_ascii_digit() {
-            index += 1;
+        while feature_index < feature_prefix.len() && feature_prefix[feature_index].is_ascii_digit()
+        {
+            feature_index += 1;
         }
-        if &prefix[token_start..index] == wanted {
+        if &feature_prefix[token_start_index..feature_index] == requested_feature {
             return true;
         }
     }

@@ -11,34 +11,34 @@ use crate::protocol::{
     PROTOCOL_VERSION,
 };
 
-/// A socket address unique to this test: a temp-dir file path on Unix, a pipe
+/// A socket address unique to this test: a temporary-directory file path on Unix, a pipe
 /// name on Windows.
-fn test_addr(tag: &str) -> String {
-    let unique = format!("koshi-ipc-{}-{tag}", std::process::id());
+fn build_test_socket_address(test_case_tag: &str) -> String {
+    let unique_socket_name = format!("koshi-ipc-{}-{test_case_tag}", std::process::id());
     #[cfg(unix)]
     {
         // A Unix socket path holds about 100 bytes at most; `/tmp` keeps the
         // address short.
         std::path::Path::new("/tmp")
-            .join(unique)
+            .join(unique_socket_name)
             .with_extension("sock")
             .to_string_lossy()
             .into_owned()
     }
     #[cfg(windows)]
     {
-        unique
+        unique_socket_name
     }
 }
 
-fn hello_request(request_id: u64) -> IpcRequest {
+fn build_hello_request(request_id: u64) -> IpcRequest {
     IpcRequest {
         request_id,
-        kind: IpcRequestKind::Hello {
+        request_kind: IpcRequestKind::Hello {
             min_protocol_version: MIN_PROTOCOL_VERSION,
             max_protocol_version: PROTOCOL_VERSION,
-            token: ConnectionToken::new("test-secret"),
-            remote: false,
+            connection_token: ConnectionToken::from_secret("test-secret"),
+            is_remote: false,
         },
     }
 }
@@ -47,99 +47,112 @@ fn hello_request(request_id: u64) -> IpcRequest {
 
 #[test]
 fn frame_is_a_big_endian_length_prefix_then_the_json_bytes() {
-    let mut written: Vec<u8> = Vec::new();
-    write_message(&mut written, &"hi").expect("write");
-    assert_eq!(written, [0, 0, 0, 4, b'"', b'h', b'i', b'"']);
+    let mut frame_bytes: Vec<u8> = Vec::new();
+    write_message(&mut frame_bytes, &"hi").expect("write");
+    assert_eq!(frame_bytes, [0, 0, 0, 4, b'"', b'h', b'i', b'"']);
 }
 
 /// The length prefix counts UTF-8 bytes: `"é"` is one character and four
 /// payload bytes.
 #[test]
 fn the_length_prefix_counts_utf8_bytes_not_characters() {
-    let mut written: Vec<u8> = Vec::new();
-    write_message(&mut written, &"é").expect("write");
-    assert_eq!(written, [0, 0, 0, 4, b'"', 0xC3, 0xA9, b'"']);
-    let read: String = read_message(&mut Cursor::new(written)).expect("read");
-    assert_eq!(read, "é");
+    let mut frame_bytes: Vec<u8> = Vec::new();
+    write_message(&mut frame_bytes, &"é").expect("write");
+    assert_eq!(frame_bytes, [0, 0, 0, 4, b'"', 0xC3, 0xA9, b'"']);
+    let decoded_message: String = read_message(&mut Cursor::new(frame_bytes)).expect("read");
+    assert_eq!(decoded_message, "é");
 }
 
 #[test]
 fn a_frame_reads_back_as_the_message_that_was_written() {
-    let sent = hello_request(7);
-    let mut written: Vec<u8> = Vec::new();
-    write_message(&mut written, &sent).expect("write");
-    let read: IpcRequest = read_message(&mut Cursor::new(written)).expect("read");
-    assert_eq!(read, sent);
+    let hello_request_message = build_hello_request(7);
+    let mut frame_bytes: Vec<u8> = Vec::new();
+    write_message(&mut frame_bytes, &hello_request_message).expect("write");
+    let decoded_request: IpcRequest = read_message(&mut Cursor::new(frame_bytes)).expect("read");
+    assert_eq!(decoded_request, hello_request_message);
 }
 
 #[test]
 fn two_frames_written_back_to_back_read_back_as_two_messages_in_order() {
-    let first = hello_request(1);
-    let second = IpcRequest {
+    let first_request = build_hello_request(1);
+    let second_request = IpcRequest {
         request_id: 2,
-        kind: IpcRequestKind::Discovery,
+        request_kind: IpcRequestKind::Discovery,
     };
-    let mut written: Vec<u8> = Vec::new();
-    write_message(&mut written, &first).expect("write first");
-    write_message(&mut written, &second).expect("write second");
+    let mut frame_bytes: Vec<u8> = Vec::new();
+    write_message(&mut frame_bytes, &first_request).expect("write first");
+    write_message(&mut frame_bytes, &second_request).expect("write second");
 
-    let mut reader = Cursor::new(written);
-    let read_first: IpcRequest = read_message(&mut reader).expect("read first");
-    let read_second: IpcRequest = read_message(&mut reader).expect("read second");
-    assert_eq!(read_first, first);
-    assert_eq!(read_second, second);
+    let mut reader = Cursor::new(frame_bytes);
+    let first_decoded_request: IpcRequest = read_message(&mut reader).expect("read first");
+    let second_decoded_request: IpcRequest = read_message(&mut reader).expect("read second");
+    assert_eq!(first_decoded_request, first_request);
+    assert_eq!(second_decoded_request, second_request);
 }
 
 #[test]
 fn oversized_length_prefix_is_refused_after_only_the_header_is_read() {
-    let mut bytes = (MAX_FRAME_LEN + 1).to_be_bytes().to_vec();
-    bytes.extend_from_slice(b"payload that must never be read");
-    let mut reader = Cursor::new(bytes);
+    let mut frame_bytes = (MAX_FRAME_BYTE_COUNT + 1).to_be_bytes().to_vec();
+    frame_bytes.extend_from_slice(b"payload that must never be read");
+    let mut reader = Cursor::new(frame_bytes);
 
-    let err = read_message::<String>(&mut reader).unwrap_err();
-    let IpcError::FrameTooLarge { len, max } = err else {
-        panic!("wrong error: {err}");
+    let error = read_message::<String>(&mut reader).unwrap_err();
+    let IpcError::FrameTooLarge {
+        frame_byte_count,
+        maximum_frame_byte_count,
+    } = error
+    else {
+        panic!("wrong error: {error}");
     };
-    assert_eq!(len, u64::from(MAX_FRAME_LEN) + 1);
-    assert_eq!(max, MAX_FRAME_LEN);
+    assert_eq!(frame_byte_count, u64::from(MAX_FRAME_BYTE_COUNT) + 1);
+    assert_eq!(maximum_frame_byte_count, MAX_FRAME_BYTE_COUNT);
     assert_eq!(reader.position(), 4);
 }
 
 #[test]
 fn oversized_message_is_refused_with_nothing_written() {
-    let huge = "x".repeat(MAX_FRAME_LEN as usize);
-    let mut written: Vec<u8> = Vec::new();
+    let oversized_message = "x".repeat(MAX_FRAME_BYTE_COUNT as usize);
+    let mut frame_bytes: Vec<u8> = Vec::new();
 
-    let err = write_message(&mut written, &huge).unwrap_err();
-    let IpcError::FrameTooLarge { len, max } = err else {
-        panic!("wrong error: {err}");
+    let error = write_message(&mut frame_bytes, &oversized_message).unwrap_err();
+    let IpcError::FrameTooLarge {
+        frame_byte_count,
+        maximum_frame_byte_count,
+    } = error
+    else {
+        panic!("wrong error: {error}");
     };
     // Encoding stops at the write that crosses the cap: the opening quote
     // byte was accepted, and the escape-free string body arrives as one
     // refused write. The size reached is 1 + the body.
-    assert_eq!(len, u64::from(MAX_FRAME_LEN) + 1);
-    assert_eq!(max, MAX_FRAME_LEN);
-    assert_eq!(written, Vec::<u8>::new());
+    assert_eq!(frame_byte_count, u64::from(MAX_FRAME_BYTE_COUNT) + 1);
+    assert_eq!(maximum_frame_byte_count, MAX_FRAME_BYTE_COUNT);
+    assert_eq!(frame_bytes, Vec::<u8>::new());
 }
 
-/// `len` is the payload size the refused write reached, not the message's
+/// `frame_byte_count` is the payload size the refused write reached, not the message's
 /// full size: here the first string and the punctuation around it are
 /// accepted, and the second string's body is the write that crosses the cap.
 #[test]
 fn the_refused_write_names_the_size_it_reached_not_the_whole_message() {
-    let first = "x".repeat(MAX_FRAME_LEN as usize - 10);
-    let second = "y".repeat(100);
-    let mut written: Vec<u8> = Vec::new();
+    let first_message_text = "x".repeat(MAX_FRAME_BYTE_COUNT as usize - 10);
+    let second_message_text = "y".repeat(100);
+    let mut frame_bytes: Vec<u8> = Vec::new();
 
-    let err = write_message(&mut written, &[first, second]).unwrap_err();
-    let IpcError::FrameTooLarge { len, max } = err else {
-        panic!("wrong error: {err}");
+    let error =
+        write_message(&mut frame_bytes, &[first_message_text, second_message_text]).unwrap_err();
+    let IpcError::FrameTooLarge {
+        frame_byte_count,
+        maximum_frame_byte_count,
+    } = error
+    else {
+        panic!("wrong error: {error}");
     };
-    // `[`, `"`, the first body, `"`, `,` and `"` are MAX_FRAME_LEN - 5 bytes;
+    // `[`, `"`, the first body, `"`, `,` and `"` are MAX_FRAME_BYTE_COUNT - 5 bytes;
     // the second body adds 100.
-    assert_eq!(len, u64::from(MAX_FRAME_LEN) + 95);
-    assert_eq!(max, MAX_FRAME_LEN);
-    assert_eq!(written, Vec::<u8>::new());
+    assert_eq!(frame_byte_count, u64::from(MAX_FRAME_BYTE_COUNT) + 95);
+    assert_eq!(maximum_frame_byte_count, MAX_FRAME_BYTE_COUNT);
+    assert_eq!(frame_bytes, Vec::<u8>::new());
 }
 
 #[test]
@@ -152,36 +165,36 @@ fn a_message_that_fails_to_encode_is_malformed_with_nothing_written() {
         }
     }
 
-    let mut written: Vec<u8> = Vec::new();
+    let mut frame_bytes: Vec<u8> = Vec::new();
 
-    let err = write_message(&mut written, &Unencodable).unwrap_err();
-    let IpcError::MalformedFrame { detail } = err else {
-        panic!("wrong error: {err}");
+    let error = write_message(&mut frame_bytes, &Unencodable).unwrap_err();
+    let IpcError::MalformedFrame { error_detail } = error else {
+        panic!("wrong error: {error}");
     };
-    assert_eq!(detail, "cannot encode");
-    assert_eq!(written, Vec::<u8>::new());
+    assert_eq!(error_detail, "cannot encode");
+    assert_eq!(frame_bytes, Vec::<u8>::new());
 }
 
 #[test]
 fn message_encoding_to_exactly_the_limit_is_sent() {
     // Two quote bytes around the body bring the payload to exactly the cap.
-    let body = "x".repeat(MAX_FRAME_LEN as usize - 2);
-    let mut written: Vec<u8> = Vec::new();
+    let message_body = "x".repeat(MAX_FRAME_BYTE_COUNT as usize - 2);
+    let mut frame_bytes: Vec<u8> = Vec::new();
 
-    write_message(&mut written, &body).expect("write");
-    assert_eq!(written.len(), 4 + MAX_FRAME_LEN as usize);
-    assert_eq!(written[..4], MAX_FRAME_LEN.to_be_bytes());
+    write_message(&mut frame_bytes, &message_body).expect("write");
+    assert_eq!(frame_bytes.len(), 4 + MAX_FRAME_BYTE_COUNT as usize);
+    assert_eq!(frame_bytes[..4], MAX_FRAME_BYTE_COUNT.to_be_bytes());
 }
 
 /// A prefix naming exactly the limit passes the size check; the read then
 /// runs out of bytes inside the payload.
 #[test]
 fn a_length_prefix_of_exactly_the_limit_passes_the_size_check() {
-    let mut reader = Cursor::new(MAX_FRAME_LEN.to_be_bytes().to_vec());
+    let mut reader = Cursor::new(MAX_FRAME_BYTE_COUNT.to_be_bytes().to_vec());
 
-    let err = read_message::<String>(&mut reader).unwrap_err();
-    let IpcError::Disconnected = err else {
-        panic!("wrong error: {err}");
+    let error = read_message::<String>(&mut reader).unwrap_err();
+    let IpcError::Disconnected = error else {
+        panic!("wrong error: {error}");
     };
     assert_eq!(reader.position(), 4);
 }
@@ -189,40 +202,40 @@ fn a_length_prefix_of_exactly_the_limit_passes_the_size_check() {
 #[test]
 fn empty_frame_is_a_malformed_message() {
     let mut reader = Cursor::new(vec![0, 0, 0, 0]);
-    let err = read_message::<String>(&mut reader).unwrap_err();
-    let IpcError::MalformedFrame { detail } = err else {
-        panic!("wrong error: {err}");
+    let error = read_message::<String>(&mut reader).unwrap_err();
+    let IpcError::MalformedFrame { error_detail } = error else {
+        panic!("wrong error: {error}");
     };
-    assert_eq!(detail, "EOF while parsing a value at line 1 column 0");
+    assert_eq!(error_detail, "EOF while parsing a value at line 1 column 0");
     assert_eq!(reader.position(), 4);
 }
 
 #[test]
 fn non_json_payload_is_malformed_and_the_whole_frame_is_consumed() {
-    let mut bytes = 3u32.to_be_bytes().to_vec();
-    bytes.extend_from_slice(b"???");
-    let mut reader = Cursor::new(bytes);
+    let mut frame_bytes = 3u32.to_be_bytes().to_vec();
+    frame_bytes.extend_from_slice(b"???");
+    let mut reader = Cursor::new(frame_bytes);
 
-    let err = read_message::<String>(&mut reader).unwrap_err();
-    let IpcError::MalformedFrame { detail } = err else {
-        panic!("wrong error: {err}");
+    let error = read_message::<String>(&mut reader).unwrap_err();
+    let IpcError::MalformedFrame { error_detail } = error else {
+        panic!("wrong error: {error}");
     };
-    assert_eq!(detail, "expected value at line 1 column 1");
+    assert_eq!(error_detail, "expected value at line 1 column 1");
     assert_eq!(reader.position(), 7);
 }
 
 #[test]
 fn a_well_formed_payload_of_the_wrong_type_is_malformed_and_consumed() {
-    let mut bytes = 1u32.to_be_bytes().to_vec();
-    bytes.extend_from_slice(b"7");
-    let mut reader = Cursor::new(bytes);
+    let mut frame_bytes = 1u32.to_be_bytes().to_vec();
+    frame_bytes.extend_from_slice(b"7");
+    let mut reader = Cursor::new(frame_bytes);
 
-    let err = read_message::<String>(&mut reader).unwrap_err();
-    let IpcError::MalformedFrame { detail } = err else {
-        panic!("wrong error: {err}");
+    let error = read_message::<String>(&mut reader).unwrap_err();
+    let IpcError::MalformedFrame { error_detail } = error else {
+        panic!("wrong error: {error}");
     };
     assert_eq!(
-        detail,
+        error_detail,
         "invalid type: integer `7`, expected a string at line 1 column 1"
     );
     assert_eq!(reader.position(), 5);
@@ -230,41 +243,41 @@ fn a_well_formed_payload_of_the_wrong_type_is_malformed_and_consumed() {
 
 #[test]
 fn bytes_after_the_json_inside_one_frame_are_malformed_and_consumed() {
-    let mut bytes = 5u32.to_be_bytes().to_vec();
-    bytes.extend_from_slice(b"\"hi\"x");
-    let mut reader = Cursor::new(bytes);
+    let mut frame_bytes = 5u32.to_be_bytes().to_vec();
+    frame_bytes.extend_from_slice(b"\"hi\"x");
+    let mut reader = Cursor::new(frame_bytes);
 
-    let err = read_message::<String>(&mut reader).unwrap_err();
-    let IpcError::MalformedFrame { detail } = err else {
-        panic!("wrong error: {err}");
+    let error = read_message::<String>(&mut reader).unwrap_err();
+    let IpcError::MalformedFrame { error_detail } = error else {
+        panic!("wrong error: {error}");
     };
-    assert_eq!(detail, "trailing characters at line 1 column 5");
+    assert_eq!(error_detail, "trailing characters at line 1 column 5");
     assert_eq!(reader.position(), 9);
 }
 
 #[test]
 fn end_of_stream_before_a_header_reads_as_disconnected() {
-    let err = read_message::<String>(&mut Cursor::new(Vec::<u8>::new())).unwrap_err();
-    let IpcError::Disconnected = err else {
-        panic!("wrong error: {err}");
+    let error = read_message::<String>(&mut Cursor::new(Vec::<u8>::new())).unwrap_err();
+    let IpcError::Disconnected = error else {
+        panic!("wrong error: {error}");
     };
 }
 
 #[test]
 fn end_of_stream_inside_a_header_reads_as_disconnected() {
-    let err = read_message::<String>(&mut Cursor::new(vec![0, 0])).unwrap_err();
-    let IpcError::Disconnected = err else {
-        panic!("wrong error: {err}");
+    let error = read_message::<String>(&mut Cursor::new(vec![0, 0])).unwrap_err();
+    let IpcError::Disconnected = error else {
+        panic!("wrong error: {error}");
     };
 }
 
 #[test]
 fn end_of_stream_inside_a_payload_reads_as_disconnected() {
-    let mut bytes = 5u32.to_be_bytes().to_vec();
-    bytes.extend_from_slice(b"tr");
-    let err = read_message::<String>(&mut Cursor::new(bytes)).unwrap_err();
-    let IpcError::Disconnected = err else {
-        panic!("wrong error: {err}");
+    let mut frame_bytes = 5u32.to_be_bytes().to_vec();
+    frame_bytes.extend_from_slice(b"tr");
+    let error = read_message::<String>(&mut Cursor::new(frame_bytes)).unwrap_err();
+    let IpcError::Disconnected = error else {
+        panic!("wrong error: {error}");
     };
 }
 
@@ -273,36 +286,36 @@ fn end_of_stream_inside_a_payload_reads_as_disconnected() {
 /// peer has closed with `ENOTCONN`, where Linux answers end of stream.
 #[test]
 fn every_peer_is_gone_io_kind_reads_as_disconnected() {
-    for kind in [
+    for error_kind in [
         io::ErrorKind::UnexpectedEof,
         io::ErrorKind::BrokenPipe,
         io::ErrorKind::ConnectionReset,
         io::ErrorKind::ConnectionAborted,
         io::ErrorKind::NotConnected,
     ] {
-        let err = io_failure(io::Error::new(kind, "the peer is gone"));
-        let IpcError::Disconnected = err else {
-            panic!("{kind:?} should read as disconnected, got {err}");
+        let error = convert_io_error(io::Error::new(error_kind, "the peer is gone"));
+        let IpcError::Disconnected = error else {
+            panic!("{error_kind:?} should read as disconnected, got {error}");
         };
     }
 }
 
 #[test]
 fn an_io_kind_that_is_not_the_peer_going_away_keeps_its_own_words() {
-    let err = io_failure(io::Error::new(
+    let error = convert_io_error(io::Error::new(
         io::ErrorKind::PermissionDenied,
         "permission denied",
     ));
 
-    let IpcError::Transport { detail } = err else {
-        panic!("wrong error: {err}");
+    let IpcError::Transport { error_detail } = error else {
+        panic!("wrong error: {error}");
     };
-    assert_eq!(detail, "permission denied");
+    assert_eq!(error_detail, "permission denied");
 }
 
 #[test]
 fn no_listener_error_is_true_for_a_refused_or_missing_address_only() {
-    for (kind, expected) in [
+    for (error_kind, expected) in [
         (io::ErrorKind::ConnectionRefused, true),
         (io::ErrorKind::NotFound, true),
         (io::ErrorKind::PermissionDenied, false),
@@ -310,17 +323,17 @@ fn no_listener_error_is_true_for_a_refused_or_missing_address_only() {
         (io::ErrorKind::Other, false),
     ] {
         assert_eq!(
-            no_listener_error(&io::Error::new(kind, "probe")),
+            is_no_listener_error(&io::Error::new(error_kind, "probe")),
             expected,
-            "{kind:?}"
+            "{error_kind:?}"
         );
     }
     #[cfg(unix)]
     {
-        assert!(no_listener_error(&io::Error::from_raw_os_error(
+        assert!(is_no_listener_error(&io::Error::from_raw_os_error(
             libc::ENOTSOCK
         )));
-        assert!(!no_listener_error(&io::Error::from_raw_os_error(
+        assert!(!is_no_listener_error(&io::Error::from_raw_os_error(
             libc::EACCES
         )));
     }
@@ -328,7 +341,7 @@ fn no_listener_error_is_true_for_a_refused_or_missing_address_only() {
 
 #[test]
 fn waited_out_is_true_for_a_timeout_and_false_for_any_other_kind() {
-    for (kind, expected) in [
+    for (error_kind, expected) in [
         (io::ErrorKind::WouldBlock, true),
         (io::ErrorKind::TimedOut, true),
         (io::ErrorKind::Interrupted, false),
@@ -336,9 +349,9 @@ fn waited_out_is_true_for_a_timeout_and_false_for_any_other_kind() {
         (io::ErrorKind::Other, false),
     ] {
         assert_eq!(
-            waited_out(&io::Error::new(kind, "probe")),
+            is_io_timeout(&io::Error::new(error_kind, "probe")),
             expected,
-            "{kind:?}"
+            "{error_kind:?}"
         );
     }
 }
@@ -346,22 +359,25 @@ fn waited_out_is_true_for_a_timeout_and_false_for_any_other_kind() {
 // --- the frame shape on a stream that is not a local socket ---
 
 /// An in-memory stream half that records the last deadline it was given.
-struct Recorded {
-    input: Cursor<Vec<u8>>,
-    output: Arc<Mutex<Vec<u8>>>,
+struct RecordedStream {
+    read_cursor: Cursor<Vec<u8>>,
+    written_bytes: Arc<Mutex<Vec<u8>>>,
     deadline: Arc<Mutex<Option<Instant>>>,
 }
 
-impl Read for Recorded {
-    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        self.input.read(buffer)
+impl Read for RecordedStream {
+    fn read(&mut self, read_buffer: &mut [u8]) -> io::Result<usize> {
+        self.read_cursor.read(read_buffer)
     }
 }
 
-impl Write for Recorded {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.output.lock().expect("output").extend_from_slice(bytes);
-        Ok(bytes.len())
+impl Write for RecordedStream {
+    fn write(&mut self, frame_bytes: &[u8]) -> io::Result<usize> {
+        self.written_bytes
+            .lock()
+            .expect("written_bytes")
+            .extend_from_slice(frame_bytes);
+        Ok(frame_bytes.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -369,46 +385,55 @@ impl Write for Recorded {
     }
 }
 
-impl Deadlined for Recorded {
-    fn set_deadline(&mut self, at: Option<Instant>) {
-        *self.deadline.lock().expect("deadline") = at;
+impl Deadlined for RecordedStream {
+    fn set_deadline(&mut self, deadline_instant: Option<Instant>) {
+        *self.deadline.lock().expect("deadline") = deadline_instant;
     }
 }
 
 #[test]
 fn frame_halves_speak_the_frame_shape_and_hand_each_deadline_to_its_half() {
     let mut framed: Vec<u8> = Vec::new();
-    write_message(&mut framed, &hello_request(5)).expect("frame");
-    let output = Arc::new(Mutex::new(Vec::new()));
+    write_message(&mut framed, &build_hello_request(5)).expect("frame");
+    let written_bytes = Arc::new(Mutex::new(Vec::new()));
     let read_deadline = Arc::new(Mutex::new(None));
     let write_deadline = Arc::new(Mutex::new(None));
 
     let (mut reader, mut writer) = frame_halves(
-        Box::new(Recorded {
-            input: Cursor::new(framed),
-            output: Arc::clone(&output),
+        Box::new(RecordedStream {
+            read_cursor: Cursor::new(framed),
+            written_bytes: Arc::clone(&written_bytes),
             deadline: Arc::clone(&read_deadline),
         }),
-        Box::new(Recorded {
-            input: Cursor::new(Vec::new()),
-            output: Arc::clone(&output),
+        Box::new(RecordedStream {
+            read_cursor: Cursor::new(Vec::new()),
+            written_bytes: Arc::clone(&written_bytes),
             deadline: Arc::clone(&write_deadline),
         }),
     );
 
-    assert_eq!(reader.recv::<IpcRequest>().expect("recv"), hello_request(5));
+    assert_eq!(
+        reader.recv::<IpcRequest>().expect("recv"),
+        build_hello_request(5)
+    );
     writer.send(&"hi").expect("send");
     assert_eq!(
-        *output.lock().expect("output"),
+        *written_bytes.lock().expect("written_bytes"),
         [0, 0, 0, 4, b'"', b'h', b'i', b'"']
     );
 
-    let at = Instant::now();
-    reader.set_deadline(Some(at));
-    assert_eq!(*read_deadline.lock().expect("deadline"), Some(at));
+    let deadline_instant = Instant::now();
+    reader.set_deadline(Some(deadline_instant));
+    assert_eq!(
+        *read_deadline.lock().expect("deadline"),
+        Some(deadline_instant)
+    );
     assert_eq!(*write_deadline.lock().expect("deadline"), None);
-    writer.set_deadline(Some(at));
-    assert_eq!(*write_deadline.lock().expect("deadline"), Some(at));
+    writer.set_deadline(Some(deadline_instant));
+    assert_eq!(
+        *write_deadline.lock().expect("deadline"),
+        Some(deadline_instant)
+    );
     reader.set_deadline(None);
     assert_eq!(*read_deadline.lock().expect("deadline"), None);
 }
@@ -418,54 +443,57 @@ fn frame_halves_speak_the_frame_shape_and_hand_each_deadline_to_its_half() {
 #[cfg(unix)]
 #[test]
 fn a_unix_address_maps_to_a_filesystem_path() {
-    let name = socket_name("/tmp/koshi-test.sock").expect("map");
-    assert!(name.is_path());
+    let socket_name = resolve_socket_name("/tmp/koshi-test.sock").expect("map");
+    assert!(socket_name.is_path());
 }
 
 #[cfg(windows)]
 #[test]
 fn a_windows_address_maps_to_the_pipe_namespace() {
-    let name = socket_name("koshi-test").expect("map");
-    assert!(name.is_namespaced());
+    let socket_name = resolve_socket_name("koshi-test").expect("map");
+    assert!(socket_name.is_namespaced());
 }
 
 // --- end to end over a real socket ---
 
 #[test]
 fn request_and_response_cross_a_real_socket() {
-    let addr = test_addr("roundtrip");
-    let listener = Listener::bind(&addr).expect("bind");
+    let socket_address = build_test_socket_address("roundtrip");
+    let listener = Listener::bind(&socket_address).expect("bind");
 
     let server = thread::spawn(move || {
-        let mut conn = listener.accept().expect("accept");
-        let request: IpcRequest = conn.recv().expect("server recv");
-        conn.send(&IpcResponse {
-            request_id: Some(request.request_id),
-            result: IpcResult::Hello {
-                protocol_version: PROTOCOL_VERSION,
-                version: env!("CARGO_PKG_VERSION").to_string(),
-            },
-        })
-        .expect("server send");
+        let mut connection = listener.accept().expect("accept");
+        let request: IpcRequest = connection.recv().expect("server recv");
+        connection
+            .send(&IpcResponse {
+                request_id: Some(request.request_id),
+                answer_result: IpcResult::Hello {
+                    protocol_version: PROTOCOL_VERSION,
+                    build_version: env!("CARGO_PKG_VERSION").to_string(),
+                },
+            })
+            .expect("server send");
         request
     });
 
-    let mut conn = Connection::connect(&addr).expect("connect");
-    let sent = hello_request(7);
-    conn.send(&sent).expect("client send");
-    let response: IpcResponse = conn.recv().expect("client recv");
+    let mut connection = Connection::connect(&socket_address).expect("connect");
+    let hello_request_message = build_hello_request(7);
+    connection
+        .send(&hello_request_message)
+        .expect("client send");
+    let response: IpcResponse = connection.recv().expect("client recv");
 
     assert_eq!(
         response,
         IpcResponse {
             request_id: Some(7),
-            result: IpcResult::Hello {
+            answer_result: IpcResult::Hello {
                 protocol_version: PROTOCOL_VERSION,
-                version: env!("CARGO_PKG_VERSION").to_string(),
+                build_version: env!("CARGO_PKG_VERSION").to_string(),
             },
         }
     );
-    assert_eq!(server.join().expect("server thread"), sent);
+    assert_eq!(server.join().expect("server thread"), hello_request_message);
 }
 
 /// On Windows this pins the shared pipe's security descriptor from both sides:
@@ -474,35 +502,38 @@ fn request_and_response_cross_a_real_socket() {
 /// the pipe instance behind it.
 #[test]
 fn a_shared_bind_serves_one_caller_after_another() {
-    let addr = test_addr("shared");
-    let listener = Listener::bind_shared(&addr).expect("bind shared");
+    let socket_address = build_test_socket_address("shared");
+    let listener = Listener::bind_shared(&socket_address).expect("bind shared");
 
     let server = thread::spawn(move || {
         for _ in 0..2 {
-            let mut conn = listener.accept().expect("accept");
-            let request: IpcRequest = conn.recv().expect("server recv");
-            conn.send(&IpcResponse {
-                request_id: Some(request.request_id),
-                result: IpcResult::Hello {
-                    protocol_version: PROTOCOL_VERSION,
-                    version: env!("CARGO_PKG_VERSION").to_string(),
-                },
-            })
-            .expect("server send");
+            let mut connection = listener.accept().expect("accept");
+            let request: IpcRequest = connection.recv().expect("server recv");
+            connection
+                .send(&IpcResponse {
+                    request_id: Some(request.request_id),
+                    answer_result: IpcResult::Hello {
+                        protocol_version: PROTOCOL_VERSION,
+                        build_version: env!("CARGO_PKG_VERSION").to_string(),
+                    },
+                })
+                .expect("server send");
         }
     });
 
     for request_id in [1, 2] {
-        let mut conn = Connection::connect(&addr).expect("connect");
-        conn.send(&hello_request(request_id)).expect("client send");
-        let response: IpcResponse = conn.recv().expect("client recv");
+        let mut connection = Connection::connect(&socket_address).expect("connect");
+        connection
+            .send(&build_hello_request(request_id))
+            .expect("client send");
+        let response: IpcResponse = connection.recv().expect("client recv");
         assert_eq!(
             response,
             IpcResponse {
                 request_id: Some(request_id),
-                result: IpcResult::Hello {
+                answer_result: IpcResult::Hello {
                     protocol_version: PROTOCOL_VERSION,
-                    version: env!("CARGO_PKG_VERSION").to_string(),
+                    build_version: env!("CARGO_PKG_VERSION").to_string(),
                 },
             }
         );
@@ -512,65 +543,68 @@ fn a_shared_bind_serves_one_caller_after_another() {
 
 #[test]
 fn a_caller_from_this_same_process_is_reported_as_the_same_user() {
-    let addr = test_addr("peeruser");
-    let listener = Listener::bind(&addr).expect("bind");
+    let socket_address = build_test_socket_address("peeruser");
+    let listener = Listener::bind(&socket_address).expect("bind");
 
     let server = thread::spawn(move || {
-        let conn = listener.accept().expect("accept");
-        conn.peer_is_same_user().expect("peer creds")
+        let connection = listener.accept().expect("accept");
+        connection.is_peer_same_user().expect("peer creds")
     });
 
     // The caller stays connected until the server has read its credentials.
-    let caller = Connection::connect(&addr).expect("connect");
+    let caller = Connection::connect(&socket_address).expect("connect");
     assert!(server.join().expect("server thread"));
     drop(caller);
 }
 
 #[test]
 fn hello_and_request_sent_back_to_back_arrive_as_two_messages() {
-    let addr = test_addr("backtoback");
-    let listener = Listener::bind(&addr).expect("bind");
+    let socket_address = build_test_socket_address("backtoback");
+    let listener = Listener::bind(&socket_address).expect("bind");
 
     let server = thread::spawn(move || {
-        let mut conn = listener.accept().expect("accept");
-        let first: IpcRequest = conn.recv().expect("server recv first");
-        let second: IpcRequest = conn.recv().expect("server recv second");
-        (first, second)
+        let mut connection = listener.accept().expect("accept");
+        let first_received_request: IpcRequest = connection.recv().expect("server recv first");
+        let second_received_request: IpcRequest = connection.recv().expect("server recv second");
+        (first_received_request, second_received_request)
     });
 
-    let mut conn = Connection::connect(&addr).expect("connect");
-    let hello = hello_request(1);
+    let mut connection = Connection::connect(&socket_address).expect("connect");
+    let hello = build_hello_request(1);
     let request = IpcRequest {
         request_id: 2,
-        kind: IpcRequestKind::Discovery,
+        request_kind: IpcRequestKind::Discovery,
     };
-    conn.send(&hello).expect("send hello");
-    conn.send(&request).expect("send request");
+    connection.send(&hello).expect("send hello");
+    connection.send(&request).expect("send request");
 
     assert_eq!(server.join().expect("server thread"), (hello, request));
 }
 
 #[test]
 fn split_halves_carry_frames_both_ways_from_two_threads() {
-    let addr = test_addr("split");
-    let listener = Listener::bind(&addr).expect("bind");
+    let socket_address = build_test_socket_address("split");
+    let listener = Listener::bind(&socket_address).expect("bind");
 
     let server = thread::spawn(move || {
         let (mut reader, mut writer) = listener.accept().expect("accept").split();
         // The reading half moves to its own thread and blocks there while the
         // writing half sends on this one.
         let reading = thread::spawn(move || {
-            let first: IpcRequest = reader.recv().expect("server recv first");
-            let second: IpcRequest = reader.recv().expect("server recv second");
-            vec![first.request_id, second.request_id]
+            let first_received_request: IpcRequest = reader.recv().expect("server recv first");
+            let second_received_request: IpcRequest = reader.recv().expect("server recv second");
+            vec![
+                first_received_request.request_id,
+                second_received_request.request_id,
+            ]
         });
-        for id in [11, 12] {
+        for request_id in [11, 12] {
             writer
                 .send(&IpcResponse {
-                    request_id: Some(id),
-                    result: IpcResult::Hello {
+                    request_id: Some(request_id),
+                    answer_result: IpcResult::Hello {
                         protocol_version: PROTOCOL_VERSION,
-                        version: env!("CARGO_PKG_VERSION").to_string(),
+                        build_version: env!("CARGO_PKG_VERSION").to_string(),
                     },
                 })
                 .expect("server send");
@@ -578,14 +612,21 @@ fn split_halves_carry_frames_both_ways_from_two_threads() {
         reading.join().expect("server reading thread")
     });
 
-    let (mut reader, mut writer) = Connection::connect(&addr).expect("connect").split();
+    let (mut reader, mut writer) = Connection::connect(&socket_address)
+        .expect("connect")
+        .split();
     let reading = thread::spawn(move || {
-        let first: IpcResponse = reader.recv().expect("client recv first");
-        let second: IpcResponse = reader.recv().expect("client recv second");
-        vec![first.request_id, second.request_id]
+        let first_received_response: IpcResponse = reader.recv().expect("client recv first");
+        let second_received_response: IpcResponse = reader.recv().expect("client recv second");
+        vec![
+            first_received_response.request_id,
+            second_received_response.request_id,
+        ]
     });
-    for id in [21, 22] {
-        writer.send(&hello_request(id)).expect("client send");
+    for request_id in [21, 22] {
+        writer
+            .send(&build_hello_request(request_id))
+            .expect("client send");
     }
 
     assert_eq!(
@@ -597,26 +638,27 @@ fn split_halves_carry_frames_both_ways_from_two_threads() {
 
 #[test]
 fn one_listener_serves_two_callers_in_turn() {
-    let addr = test_addr("twocallers");
-    let listener = Listener::bind(&addr).expect("bind");
+    let socket_address = build_test_socket_address("twocallers");
+    let listener = Listener::bind(&socket_address).expect("bind");
 
     let server = thread::spawn(move || {
-        let mut ids = Vec::new();
+        let mut request_ids = Vec::new();
         for _ in 0..2 {
-            let mut conn = listener.accept().expect("accept");
-            let request: IpcRequest = conn.recv().expect("server recv");
-            ids.push(request.request_id);
+            let mut connection = listener.accept().expect("accept");
+            let request: IpcRequest = connection.recv().expect("server recv");
+            request_ids.push(request.request_id);
         }
-        ids
+        request_ids
     });
 
-    for id in [10, 20] {
-        let mut conn = Connection::connect(&addr).expect("connect");
-        conn.send(&IpcRequest {
-            request_id: id,
-            kind: IpcRequestKind::Discovery,
-        })
-        .expect("send");
+    for request_id in [10, 20] {
+        let mut connection = Connection::connect(&socket_address).expect("connect");
+        connection
+            .send(&IpcRequest {
+                request_id,
+                request_kind: IpcRequestKind::Discovery,
+            })
+            .expect("send");
     }
 
     assert_eq!(server.join().expect("server thread"), vec![10, 20]);
@@ -624,8 +666,8 @@ fn one_listener_serves_two_callers_in_turn() {
 
 #[test]
 fn accept_until_shutdown_serves_each_caller_and_drops_the_wake_up_connection() {
-    let addr = test_addr("acceptloop");
-    let listener = Listener::bind(&addr).expect("bind");
+    let socket_address = build_test_socket_address("acceptloop");
+    let listener = Listener::bind(&socket_address).expect("bind");
     let shutting_down = Arc::new(AtomicBool::new(false));
     let (served_tx, served_rx) = std::sync::mpsc::channel();
 
@@ -648,45 +690,45 @@ fn accept_until_shutdown_serves_each_caller_and_drops_the_wake_up_connection() {
     };
 
     for _ in 0..2 {
-        let _caller = Connection::connect(&addr).expect("connect");
+        let _caller = Connection::connect(&socket_address).expect("connect");
         served_rx.recv().expect("the connection was served");
     }
     shutting_down.store(true, Ordering::SeqCst);
-    let _wake_up = Connection::connect(&addr).expect("connect to wake the loop");
+    let _wake_up = Connection::connect(&socket_address).expect("connect to wake the loop");
 
     assert_eq!(server.join().expect("server thread"), 2);
 }
 
 #[test]
 fn a_read_after_the_peer_hangs_up_reports_disconnected() {
-    let addr = test_addr("peergone");
-    let listener = Listener::bind(&addr).expect("bind");
+    let socket_address = build_test_socket_address("peergone");
+    let listener = Listener::bind(&socket_address).expect("bind");
 
     let server = thread::spawn(move || {
         drop(listener.accept().expect("accept"));
     });
 
-    let mut caller = Connection::connect(&addr).expect("connect");
+    let mut caller = Connection::connect(&socket_address).expect("connect");
     server.join().expect("server thread");
 
-    let err = caller.recv::<IpcResponse>().unwrap_err();
-    let IpcError::Disconnected = err else {
-        panic!("wrong error: {err}");
+    let error = caller.recv::<IpcResponse>().unwrap_err();
+    let IpcError::Disconnected = error else {
+        panic!("wrong error: {error}");
     };
 }
 
 #[cfg(unix)]
 #[test]
 fn binding_an_address_a_listener_already_holds_is_refused() {
-    let addr = test_addr("bindtwice");
-    let _first = Listener::bind(&addr).expect("bind");
+    let socket_address = build_test_socket_address("bindtwice");
+    let _first = Listener::bind(&socket_address).expect("bind");
 
-    let err = Listener::bind(&addr).unwrap_err();
-    let IpcError::Transport { detail } = err else {
-        panic!("wrong error: {err}");
+    let error = Listener::bind(&socket_address).unwrap_err();
+    let IpcError::Transport { error_detail } = error else {
+        panic!("wrong error: {error}");
     };
     assert_eq!(
-        detail,
+        error_detail,
         io::Error::from_raw_os_error(libc::EADDRINUSE).to_string()
     );
 }
@@ -696,138 +738,144 @@ fn binding_an_address_a_listener_already_holds_is_refused() {
 #[cfg(unix)]
 #[test]
 fn binding_a_path_too_long_for_a_unix_socket_is_refused() {
-    let addr = format!(
+    let socket_address = format!(
         "/tmp/koshi-ipc-{}-{}.sock",
         std::process::id(),
         "x".repeat(200)
     );
 
-    let err = Listener::bind(&addr).unwrap_err();
-    let IpcError::Transport { detail } = err else {
-        panic!("wrong error: {err}");
+    let error = Listener::bind(&socket_address).unwrap_err();
+    let IpcError::Transport { error_detail } = error else {
+        panic!("wrong error: {error}");
     };
     assert_eq!(
-        detail,
+        error_detail,
         "local socket name length exceeds capacity of sun_path of sockaddr_un"
     );
-    assert!(!std::path::Path::new(&addr).exists());
+    assert!(!std::path::Path::new(&socket_address).exists());
 }
 
 // --- closing one connection's read direction ---
 
 #[test]
 fn a_closed_read_direction_reports_end_of_stream_on_the_next_read() {
-    let addr = test_addr("readclose-next");
-    let listener = Listener::bind(&addr).expect("bind");
+    let socket_address = build_test_socket_address("readclose-next");
+    let listener = Listener::bind(&socket_address).expect("bind");
 
     let (sent_tx, sent_rx) = std::sync::mpsc::channel();
     let server = thread::spawn(move || {
-        let mut conn = listener.accept().expect("accept");
-        let closer = conn.read_closer().expect("take the read closer");
+        let mut connection = listener.accept().expect("accept");
+        let closer = connection.read_closer().expect("take the read closer");
         sent_rx.recv().expect("the caller sent its frame");
         closer.close();
         // The caller's frame is on the socket by now, and the read still ends.
-        conn.recv::<IpcRequest>()
+        connection.recv::<IpcRequest>()
     });
 
-    let mut caller = Connection::connect(&addr).expect("connect");
-    caller.send(&hello_request(1)).expect("client send");
+    let mut caller = Connection::connect(&socket_address).expect("connect");
+    caller.send(&build_hello_request(1)).expect("client send");
     sent_tx.send(()).expect("the closer is told");
 
-    let err = server.join().expect("server thread").unwrap_err();
-    let IpcError::Disconnected = err else {
-        panic!("wrong error: {err}");
+    let error = server.join().expect("server thread").unwrap_err();
+    let IpcError::Disconnected = error else {
+        panic!("wrong error: {error}");
     };
 }
 
 #[test]
 fn a_second_read_closer_closes_the_same_read_direction() {
-    let addr = test_addr("readclose-second");
-    let listener = Listener::bind(&addr).expect("bind");
+    let socket_address = build_test_socket_address("readclose-second");
+    let listener = Listener::bind(&socket_address).expect("bind");
 
     let server = thread::spawn(move || {
-        let mut conn = listener.accept().expect("accept");
-        let _first = conn.read_closer().expect("take the first closer");
-        let second = conn.read_closer().expect("take the second closer");
-        second.close();
-        conn.recv::<IpcRequest>()
+        let mut connection = listener.accept().expect("accept");
+        let _first_read_closer = connection.read_closer().expect("take the first closer");
+        let second_read_closer = connection.read_closer().expect("take the second closer");
+        second_read_closer.close();
+        connection.recv::<IpcRequest>()
     });
 
-    let _caller = Connection::connect(&addr).expect("connect");
+    let _caller = Connection::connect(&socket_address).expect("connect");
 
-    let err = server.join().expect("server thread").unwrap_err();
-    let IpcError::Disconnected = err else {
-        panic!("wrong error: {err}");
+    let error = server.join().expect("server thread").unwrap_err();
+    let IpcError::Disconnected = error else {
+        panic!("wrong error: {error}");
     };
 }
 
 #[test]
 fn closing_the_read_direction_twice_changes_nothing() {
-    let addr = test_addr("readclose-twice");
-    let listener = Listener::bind(&addr).expect("bind");
+    let socket_address = build_test_socket_address("readclose-twice");
+    let listener = Listener::bind(&socket_address).expect("bind");
 
     let server = thread::spawn(move || {
-        let mut conn = listener.accept().expect("accept");
-        let closer = conn.read_closer().expect("take the read closer");
+        let mut connection = listener.accept().expect("accept");
+        let closer = connection.read_closer().expect("take the read closer");
         closer.close();
         closer.close();
-        conn.recv::<IpcRequest>()
+        connection.recv::<IpcRequest>()
     });
 
-    let _caller = Connection::connect(&addr).expect("connect");
+    let _caller = Connection::connect(&socket_address).expect("connect");
 
-    let err = server.join().expect("server thread").unwrap_err();
-    let IpcError::Disconnected = err else {
-        panic!("wrong error: {err}");
+    let error = server.join().expect("server thread").unwrap_err();
+    let IpcError::Disconnected = error else {
+        panic!("wrong error: {error}");
     };
 }
 
 #[test]
 fn a_read_closer_taken_before_the_split_closes_the_reading_half() {
-    let addr = test_addr("readclose-split");
-    let listener = Listener::bind(&addr).expect("bind");
+    let socket_address = build_test_socket_address("readclose-split");
+    let listener = Listener::bind(&socket_address).expect("bind");
 
     let (sent_tx, sent_rx) = std::sync::mpsc::channel();
     let server = thread::spawn(move || {
-        let conn = listener.accept().expect("accept");
-        let closer = conn.read_closer().expect("take the read closer");
-        let (mut reader, _writer) = conn.split();
+        let connection = listener.accept().expect("accept");
+        let closer = connection.read_closer().expect("take the read closer");
+        let (mut reader, _writer) = connection.split();
         sent_rx.recv().expect("the caller sent its frame");
         closer.close();
         reader.recv::<IpcRequest>()
     });
 
-    let mut caller = Connection::connect(&addr).expect("connect");
-    caller.send(&hello_request(2)).expect("client send");
+    let mut caller = Connection::connect(&socket_address).expect("connect");
+    caller.send(&build_hello_request(2)).expect("client send");
     sent_tx.send(()).expect("the closer is told");
 
-    let err = server.join().expect("server thread").unwrap_err();
-    let IpcError::Disconnected = err else {
-        panic!("wrong error: {err}");
+    let error = server.join().expect("server thread").unwrap_err();
+    let IpcError::Disconnected = error else {
+        panic!("wrong error: {error}");
     };
 }
 
 #[test]
 fn a_closed_read_direction_leaves_the_writing_direction_open() {
-    let addr = test_addr("readclose-write");
-    let listener = Listener::bind(&addr).expect("bind");
-    let owed = IpcResponse {
+    let socket_address = build_test_socket_address("readclose-write");
+    let listener = Listener::bind(&socket_address).expect("bind");
+    let expected_response = IpcResponse {
         request_id: Some(3),
-        result: IpcResult::Hello {
+        answer_result: IpcResult::Hello {
             protocol_version: PROTOCOL_VERSION,
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            build_version: env!("CARGO_PKG_VERSION").to_string(),
         },
     };
-    let sent = owed.clone();
+    let response_to_send = expected_response.clone();
 
     let server = thread::spawn(move || {
-        let mut conn = listener.accept().expect("accept");
-        conn.read_closer().expect("take the read closer").close();
-        conn.send(&sent).expect("server send");
+        let mut connection = listener.accept().expect("accept");
+        connection
+            .read_closer()
+            .expect("take the read closer")
+            .close();
+        connection.send(&response_to_send).expect("server send");
     });
 
-    let mut caller = Connection::connect(&addr).expect("connect");
-    assert_eq!(caller.recv::<IpcResponse>().expect("client recv"), owed);
+    let mut caller = Connection::connect(&socket_address).expect("connect");
+    assert_eq!(
+        caller.recv::<IpcResponse>().expect("client recv"),
+        expected_response
+    );
     server.join().expect("server thread");
 }
 
@@ -838,94 +886,97 @@ fn a_closed_read_direction_leaves_the_writing_direction_open() {
 fn closing_the_read_direction_ends_a_read_the_reader_is_blocked_in() {
     use std::io::Write as _;
 
-    let addr = test_addr("readclose-blocked");
-    let listener = Listener::bind(&addr).expect("bind");
+    let socket_address = build_test_socket_address("readclose-blocked");
+    let listener = Listener::bind(&socket_address).expect("bind");
 
     // Half a length prefix: the reader waits inside the read for the rest of
     // the header, past the check it makes before reading.
-    let mut caller = std::os::unix::net::UnixStream::connect(&addr).expect("connect");
+    let mut caller = std::os::unix::net::UnixStream::connect(&socket_address).expect("connect");
     caller.write_all(&[0, 0]).expect("write half a header");
 
-    let mut conn = listener.accept().expect("accept");
-    let closer = conn.read_closer().expect("take the read closer");
+    let mut connection = listener.accept().expect("accept");
+    let closer = connection.read_closer().expect("take the read closer");
     let (started_tx, started_rx) = std::sync::mpsc::channel();
     let reading = thread::spawn(move || {
         started_tx
             .send(())
             .expect("the reader reports it is starting");
-        conn.recv::<IpcRequest>()
+        connection.recv::<IpcRequest>()
     });
 
     started_rx.recv().expect("the reader started");
     thread::sleep(std::time::Duration::from_millis(50));
     closer.close();
 
-    let err = reading.join().expect("reading thread").unwrap_err();
-    let IpcError::Disconnected = err else {
-        panic!("wrong error: {err}");
+    let error = reading.join().expect("reading thread").unwrap_err();
+    let IpcError::Disconnected = error else {
+        panic!("wrong error: {error}");
     };
     drop(caller);
 }
 
 #[test]
 fn connecting_where_nothing_listens_reports_no_listener() {
-    let expected = test_addr("nobody");
-    let err = Connection::connect(&expected).unwrap_err();
-    let IpcError::NoListener { addr } = err else {
-        panic!("wrong error: {err}");
+    let expected_socket_address = build_test_socket_address("nobody");
+    let error = Connection::connect(&expected_socket_address).unwrap_err();
+    let IpcError::NoListener { socket_address } = error else {
+        panic!("wrong error: {error}");
     };
-    assert_eq!(addr, expected);
+    assert_eq!(socket_address, expected_socket_address);
 }
 
 #[cfg(unix)]
 #[test]
 fn connecting_to_a_stale_socket_file_reports_no_listener() {
-    let expected = test_addr("stalefile");
+    let expected_socket_address = build_test_socket_address("stalefile");
     // `std`'s listener does not unlink its socket file on drop: the file
     // stays behind with nothing listening, as after a crash.
-    let dead = std::os::unix::net::UnixListener::bind(&expected).expect("bind stale");
-    drop(dead);
+    let stale_listener =
+        std::os::unix::net::UnixListener::bind(&expected_socket_address).expect("bind stale");
+    drop(stale_listener);
 
-    let err = Connection::connect(&expected).unwrap_err();
-    let IpcError::NoListener { addr } = err else {
-        panic!("wrong error: {err}");
+    let error = Connection::connect(&expected_socket_address).unwrap_err();
+    let IpcError::NoListener { socket_address } = error else {
+        panic!("wrong error: {error}");
     };
-    assert_eq!(addr, expected);
-    std::fs::remove_file(&expected).expect("cleanup");
+    assert_eq!(socket_address, expected_socket_address);
+    std::fs::remove_file(&expected_socket_address).expect("cleanup");
 }
 
 #[cfg(unix)]
 #[test]
 fn dropping_the_listener_unlinks_the_socket_file() {
-    let addr = test_addr("unlink");
-    let listener = Listener::bind(&addr).expect("bind");
-    assert!(std::path::Path::new(&addr).exists());
+    let socket_address = build_test_socket_address("unlink");
+    let listener = Listener::bind(&socket_address).expect("bind");
+    assert!(std::path::Path::new(&socket_address).exists());
     drop(listener);
-    assert!(!std::path::Path::new(&addr).exists());
+    assert!(!std::path::Path::new(&socket_address).exists());
 }
 
 /// The raw halves carry bytes with no frame shape around them: five bytes
 /// handed in arrive as those same five bytes.
 #[test]
 fn raw_halves_carry_the_bytes_as_given_with_no_frame_around_them() {
-    let addr = test_addr("rawsplit");
-    let listener = Listener::bind(&addr).expect("bind");
+    let socket_address = build_test_socket_address("rawsplit");
+    let listener = Listener::bind(&socket_address).expect("bind");
 
     let server = thread::spawn(move || {
         let (mut reader, mut writer) = listener.accept().expect("accept").split_raw();
-        let mut received = [0u8; 5];
-        reader.read_exact(&mut received).expect("server read");
+        let mut received_bytes = [0u8; 5];
+        reader.read_exact(&mut received_bytes).expect("server read");
         writer.write_all(b"pong").expect("server write");
         writer.flush().expect("server flush");
-        received
+        received_bytes
     });
 
-    let (mut reader, mut writer) = Connection::connect(&addr).expect("connect").split_raw();
+    let (mut reader, mut writer) = Connection::connect(&socket_address)
+        .expect("connect")
+        .split_raw();
     writer.write_all(b"hello").expect("client write");
     writer.flush().expect("client flush");
-    let mut answered = [0u8; 4];
-    reader.read_exact(&mut answered).expect("client read");
+    let mut response_bytes = [0u8; 4];
+    reader.read_exact(&mut response_bytes).expect("client read");
 
-    assert_eq!(&answered, b"pong");
+    assert_eq!(&response_bytes, b"pong");
     assert_eq!(&server.join().expect("server thread"), b"hello");
 }

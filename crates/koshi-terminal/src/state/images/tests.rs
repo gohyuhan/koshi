@@ -9,23 +9,26 @@ use koshi_image::{AnimationFrame, DecodedAnimation, DecodedImage, FrameDelay, Lo
 use super::*;
 use crate::graphics::{GraphicsProtocol, ImageAction, ImageDisplay, ImageRecord};
 
-fn animated_record(loop_policy: LoopPolicy, delay_ms: u32) -> ImageRecord {
-    let first = Arc::new(DecodedImage {
-        width: 1,
-        height: 1,
-        rgba: vec![255, 0, 0, 255],
+fn build_animated_image_record(loop_policy: LoopPolicy, delay_milliseconds: u32) -> ImageRecord {
+    let first_frame_image = Arc::new(DecodedImage {
+        pixel_width: 1,
+        pixel_height: 1,
+        rgba_bytes: vec![255, 0, 0, 255],
     });
-    let second = Arc::new(DecodedImage {
-        width: 1,
-        height: 1,
-        rgba: vec![0, 255, 0, 255],
+    let second_frame_image = Arc::new(DecodedImage {
+        pixel_width: 1,
+        pixel_height: 1,
+        rgba_bytes: vec![0, 255, 0, 255],
     });
-    let delay = FrameDelay::new(delay_ms, 1).expect("the test delay is valid");
+    let frame_delay =
+        FrameDelay::from_millisecond_ratio(delay_milliseconds, 1).expect("the test delay is valid");
     let animation = Arc::new(
-        DecodedAnimation::new(
+        DecodedAnimation::from_frames_and_loop_policy(
             vec![
-                AnimationFrame::new(first, delay).expect("the first frame is valid"),
-                AnimationFrame::new(second, delay).expect("the second frame is valid"),
+                AnimationFrame::from_image_and_delay(first_frame_image, frame_delay)
+                    .expect("the first frame is valid"),
+                AnimationFrame::from_image_and_delay(second_frame_image, frame_delay)
+                    .expect("the second frame is valid"),
             ],
             loop_policy,
         )
@@ -33,13 +36,13 @@ fn animated_record(loop_policy: LoopPolicy, delay_ms: u32) -> ImageRecord {
     );
     ImageRecord {
         protocol: GraphicsProtocol::Kitty,
-        image: animation.frames()[0].image_shared(),
+        image: animation.list_frames()[0].clone_decoded_image(),
         animation: Some(animation),
         action: ImageAction::Display,
         display: ImageDisplay {
-            cell_columns: Some(1),
-            cell_rows: Some(1),
-            move_cursor: false,
+            requested_column_count: Some(1),
+            requested_row_count: Some(1),
+            should_move_cursor: false,
             ..ImageDisplay::default()
         },
         anchor: (0, 0),
@@ -48,209 +51,277 @@ fn animated_record(loop_policy: LoopPolicy, delay_ms: u32) -> ImageRecord {
 
 #[test]
 fn animation_frame_changes_after_its_delay() {
-    let mut state = TerminalState::new(PtySize { cols: 2, rows: 2 });
-    state.set_cell_size(koshi_core::geometry::PixelCellSize::new(1, 1).expect("cell size"));
-    state
-        .apply_image_record(&animated_record(LoopPolicy::Infinite, 10))
+    let mut terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 2,
+        row_count: 2,
+    });
+    terminal_state.set_cell_size(
+        koshi_core::geometry::PixelCellSize::from_pixel_dimensions(1, 1).expect("cell size"),
+    );
+    terminal_state
+        .apply_image_record(&build_animated_image_record(LoopPolicy::Infinite, 10))
         .expect("the animated image fits");
 
     assert_eq!(
-        state.next_animation_delay(),
+        terminal_state.get_next_image_animation_delay(),
         Some(Duration::from_millis(10))
     );
-    assert!(!state.advance_animations(Duration::from_millis(9)));
+    assert!(!terminal_state.advance_image_animations(Duration::from_millis(9)));
     assert_eq!(
-        state.image_placements()[0].record().image.rgba,
+        terminal_state.list_image_placements()[0]
+            .get_image_record()
+            .image
+            .rgba_bytes,
         [255, 0, 0, 255]
     );
-    assert!(state.advance_animations(Duration::from_millis(1)));
+    assert!(terminal_state.advance_image_animations(Duration::from_millis(1)));
     assert_eq!(
-        state.image_placements()[0].record().image.rgba,
+        terminal_state.list_image_placements()[0]
+            .get_image_record()
+            .image
+            .rgba_bytes,
         [0, 255, 0, 255]
     );
 }
 
 #[test]
 fn zero_delay_animation_uses_the_normal_render_interval() {
-    let mut state = TerminalState::new(PtySize { cols: 2, rows: 2 });
-    state.set_cell_size(koshi_core::geometry::PixelCellSize::new(1, 1).expect("cell size"));
-    state
-        .apply_image_record(&animated_record(LoopPolicy::Infinite, 0))
+    let mut terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 2,
+        row_count: 2,
+    });
+    terminal_state.set_cell_size(
+        koshi_core::geometry::PixelCellSize::from_pixel_dimensions(1, 1).expect("cell size"),
+    );
+    terminal_state
+        .apply_image_record(&build_animated_image_record(LoopPolicy::Infinite, 0))
         .expect("the animated image fits");
 
-    assert_eq!(state.next_animation_delay(), Some(Duration::from_millis(8)));
+    assert_eq!(
+        terminal_state.get_next_image_animation_delay(),
+        Some(Duration::from_millis(8))
+    );
 }
 
 #[test]
 fn finite_animation_stops_on_its_last_frame() {
-    let mut state = TerminalState::new(PtySize { cols: 2, rows: 2 });
-    state.set_cell_size(koshi_core::geometry::PixelCellSize::new(1, 1).expect("cell size"));
-    state
-        .apply_image_record(&animated_record(
-            LoopPolicy::finite(1).expect("one playback is valid"),
+    let mut terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 2,
+        row_count: 2,
+    });
+    terminal_state.set_cell_size(
+        koshi_core::geometry::PixelCellSize::from_pixel_dimensions(1, 1).expect("cell size"),
+    );
+    terminal_state
+        .apply_image_record(&build_animated_image_record(
+            LoopPolicy::from_finite_playback_count(1).expect("one playback is valid"),
             10,
         ))
         .expect("the animated image fits");
 
-    assert!(state.advance_animations(Duration::from_millis(10)));
+    assert!(terminal_state.advance_image_animations(Duration::from_millis(10)));
     assert_eq!(
-        state.next_animation_delay(),
+        terminal_state.get_next_image_animation_delay(),
         Some(Duration::from_millis(10))
     );
-    assert!(!state.advance_animations(Duration::from_millis(10)));
+    assert!(!terminal_state.advance_image_animations(Duration::from_millis(10)));
     assert_eq!(
-        state.image_placements()[0].record().image.rgba,
+        terminal_state.list_image_placements()[0]
+            .get_image_record()
+            .image
+            .rgba_bytes,
         [0, 255, 0, 255]
     );
-    assert_eq!(state.next_animation_delay(), None);
+    assert_eq!(terminal_state.get_next_image_animation_delay(), None);
 }
 
 #[test]
 fn gapless_kitty_style_frames_are_skipped_without_a_visible_intermediate_frame() {
-    let first = Arc::new(DecodedImage {
-        width: 1,
-        height: 1,
-        rgba: vec![255, 0, 0, 255],
+    let first_frame_image = Arc::new(DecodedImage {
+        pixel_width: 1,
+        pixel_height: 1,
+        rgba_bytes: vec![255, 0, 0, 255],
     });
-    let gapless = Arc::new(DecodedImage {
-        width: 1,
-        height: 1,
-        rgba: vec![0, 0, 255, 255],
+    let gapless_frame_image = Arc::new(DecodedImage {
+        pixel_width: 1,
+        pixel_height: 1,
+        rgba_bytes: vec![0, 0, 255, 255],
     });
-    let last = Arc::new(DecodedImage {
-        width: 1,
-        height: 1,
-        rgba: vec![0, 255, 0, 255],
+    let final_frame_image = Arc::new(DecodedImage {
+        pixel_width: 1,
+        pixel_height: 1,
+        rgba_bytes: vec![0, 255, 0, 255],
     });
     let animation = Arc::new(
-        DecodedAnimation::new(
+        DecodedAnimation::from_frames_and_loop_policy(
             vec![
-                AnimationFrame::new(first, FrameDelay::new(10, 1).expect("delay is valid"))
-                    .expect("the first frame is valid"),
-                AnimationFrame::new_gapless(gapless).expect("the gapless frame is valid"),
-                AnimationFrame::new(last, FrameDelay::new(10, 1).expect("delay is valid"))
-                    .expect("the last frame is valid"),
+                AnimationFrame::from_image_and_delay(
+                    first_frame_image,
+                    FrameDelay::from_millisecond_ratio(10, 1).expect("delay is valid"),
+                )
+                .expect("the first frame is valid"),
+                AnimationFrame::from_gapless_image(gapless_frame_image)
+                    .expect("the gapless frame is valid"),
+                AnimationFrame::from_image_and_delay(
+                    final_frame_image,
+                    FrameDelay::from_millisecond_ratio(10, 1).expect("delay is valid"),
+                )
+                .expect("the last frame is valid"),
             ],
             LoopPolicy::Infinite,
         )
         .expect("the animation is valid"),
     );
-    let record = ImageRecord {
+    let image_record = ImageRecord {
         protocol: GraphicsProtocol::Kitty,
-        image: animation.frames()[0].image_shared(),
+        image: animation.list_frames()[0].clone_decoded_image(),
         animation: Some(animation),
         action: ImageAction::Display,
         display: ImageDisplay {
-            cell_columns: Some(1),
-            cell_rows: Some(1),
-            move_cursor: false,
+            requested_column_count: Some(1),
+            requested_row_count: Some(1),
+            should_move_cursor: false,
             ..ImageDisplay::default()
         },
         anchor: (0, 0),
     };
-    let mut state = TerminalState::new(PtySize { cols: 2, rows: 2 });
-    state.set_cell_size(koshi_core::geometry::PixelCellSize::new(1, 1).expect("cell size"));
-    state.apply_image_record(&record).expect("the image fits");
+    let mut terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 2,
+        row_count: 2,
+    });
+    terminal_state.set_cell_size(
+        koshi_core::geometry::PixelCellSize::from_pixel_dimensions(1, 1).expect("cell size"),
+    );
+    terminal_state
+        .apply_image_record(&image_record)
+        .expect("the image fits");
 
     assert_eq!(
-        state.next_animation_delay(),
+        terminal_state.get_next_image_animation_delay(),
         Some(Duration::from_millis(10))
     );
-    assert!(state.advance_animations(Duration::from_millis(10)));
+    assert!(terminal_state.advance_image_animations(Duration::from_millis(10)));
     assert_eq!(
-        state.image_placements()[0].record().image.rgba,
+        terminal_state.list_image_placements()[0]
+            .get_image_record()
+            .image
+            .rgba_bytes,
         [0, 255, 0, 255]
     );
 }
 
 #[test]
 fn image_storage_counts_shared_animation_and_raster_pixels_once() {
-    let mut state = TerminalState::new(PtySize { cols: 2, rows: 2 });
-    state.set_cell_size(koshi_core::geometry::PixelCellSize::new(1, 1).expect("cell size"));
-    state
-        .apply_image_record(&animated_record(LoopPolicy::Infinite, 10))
+    let mut terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 2,
+        row_count: 2,
+    });
+    terminal_state.set_cell_size(
+        koshi_core::geometry::PixelCellSize::from_pixel_dimensions(1, 1).expect("cell size"),
+    );
+    terminal_state
+        .apply_image_record(&build_animated_image_record(LoopPolicy::Infinite, 10))
         .expect("the animated image fits");
-    let content = Arc::clone(&state.primary_image_placements[0].content);
-    state.primary_image_placements[0].raster = Some(Arc::clone(&content.image));
+    let image_content = Arc::clone(&terminal_state.primary_image_placements[0].image_content);
+    terminal_state.primary_image_placements[0].raster =
+        Some(Arc::clone(&image_content.decoded_image));
 
-    assert_eq!(state.image_storage_bytes(), 8);
+    assert_eq!(terminal_state.get_image_storage_byte_count(), 8);
     assert!(Arc::ptr_eq(
-        &content.image,
-        &content.animation.as_ref().expect("animation").frames()[0].image_shared()
-    ));
-
-    let restored: TerminalState = serde_json::from_value(
-        serde_json::to_value(&state).expect("the terminal state serializes"),
-    )
-    .expect("the terminal state restores");
-    let restored = &restored.primary_image_placements[0];
-    assert!(Arc::ptr_eq(
-        &restored.content.image,
-        &restored
-            .content
+        &image_content.decoded_image,
+        &image_content
             .animation
             .as_ref()
             .expect("animation")
-            .frames()[0]
-            .image_shared()
+            .list_frames()[0]
+            .clone_decoded_image()
     ));
-    assert_eq!(restored.raster, None);
+
+    let restored_terminal_state: TerminalState = serde_json::from_value(
+        serde_json::to_value(&terminal_state).expect("the terminal state serializes"),
+    )
+    .expect("the terminal state restores");
+    let restored_image_placement = &restored_terminal_state.primary_image_placements[0];
+    assert!(Arc::ptr_eq(
+        &restored_image_placement.image_content.decoded_image,
+        &restored_image_placement
+            .image_content
+            .animation
+            .as_ref()
+            .expect("animation")
+            .list_frames()[0]
+            .clone_decoded_image()
+    ));
+    assert_eq!(restored_image_placement.raster, None);
 }
 
 #[test]
 fn shared_animation_pixels_fill_the_storage_limit_once() {
-    let frame_bytes = MAX_IMAGE_STORAGE_BYTES / 2;
-    let width = 8_192;
-    let height = u32::try_from(frame_bytes / 4 / width).expect("height fits");
-    let first = Arc::new(DecodedImage {
-        width: width as u32,
-        height,
-        rgba: vec![1; frame_bytes],
+    let frame_storage_byte_count = MAX_IMAGE_STORAGE_BYTE_COUNT / 2;
+    let frame_pixel_width = 8_192;
+    let frame_pixel_height =
+        u32::try_from(frame_storage_byte_count / 4 / frame_pixel_width).expect("height fits");
+    let first_frame_image = Arc::new(DecodedImage {
+        pixel_width: frame_pixel_width as u32,
+        pixel_height: frame_pixel_height,
+        rgba_bytes: vec![1; frame_storage_byte_count],
     });
-    let second = Arc::new(DecodedImage {
-        width: width as u32,
-        height,
-        rgba: vec![2; frame_bytes],
+    let second_frame_image = Arc::new(DecodedImage {
+        pixel_width: frame_pixel_width as u32,
+        pixel_height: frame_pixel_height,
+        rgba_bytes: vec![2; frame_storage_byte_count],
     });
     let animation = Arc::new(
-        DecodedAnimation::new(
+        DecodedAnimation::from_frames_and_loop_policy(
             vec![
-                AnimationFrame::new(Arc::clone(&first), FrameDelay::new(10, 1).expect("delay"))
-                    .expect("first frame"),
-                AnimationFrame::new(Arc::clone(&second), FrameDelay::new(10, 1).expect("delay"))
-                    .expect("second frame"),
+                AnimationFrame::from_image_and_delay(
+                    Arc::clone(&first_frame_image),
+                    FrameDelay::from_millisecond_ratio(10, 1).expect("delay"),
+                )
+                .expect("first frame"),
+                AnimationFrame::from_image_and_delay(
+                    Arc::clone(&second_frame_image),
+                    FrameDelay::from_millisecond_ratio(10, 1).expect("delay"),
+                )
+                .expect("second frame"),
             ],
             LoopPolicy::Infinite,
         )
         .expect("the animation fills the image limit"),
     );
-    let record = ImageRecord {
+    let image_record = ImageRecord {
         protocol: GraphicsProtocol::Kitty,
-        image: first,
+        image: first_frame_image,
         animation: Some(animation),
         action: ImageAction::TransmitAndDisplay,
         display: ImageDisplay {
             image_id: Some(1),
-            cell_columns: Some(1),
-            cell_rows: Some(1),
-            move_cursor: false,
+            requested_column_count: Some(1),
+            requested_row_count: Some(1),
+            should_move_cursor: false,
             ..ImageDisplay::default()
         },
         anchor: (0, 0),
     };
-    let mut state = TerminalState::new(PtySize { cols: 2, rows: 2 });
+    let mut terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 2,
+        row_count: 2,
+    });
 
-    state
-        .apply_image_record(&record)
+    terminal_state
+        .apply_image_record(&image_record)
         .expect("shared current-frame pixels are charged once");
-    assert_eq!(state.image_storage_bytes(), MAX_IMAGE_STORAGE_BYTES);
-    let before = state.clone();
-    let extra = ImageRecord {
+    assert_eq!(
+        terminal_state.get_image_storage_byte_count(),
+        MAX_IMAGE_STORAGE_BYTE_COUNT
+    );
+    let terminal_state_before_additional_image = terminal_state.clone();
+    let additional_image_record = ImageRecord {
         protocol: GraphicsProtocol::Kitty,
         image: Arc::new(DecodedImage {
-            width: 1,
-            height: 1,
-            rgba: vec![3; 4],
+            pixel_width: 1,
+            pixel_height: 1,
+            rgba_bytes: vec![3; 4],
         }),
         animation: None,
         action: ImageAction::Transmit,
@@ -262,12 +333,12 @@ fn shared_animation_pixels_fill_the_storage_limit_once() {
     };
 
     assert_eq!(
-        state.apply_image_record(&extra),
+        terminal_state.apply_image_record(&additional_image_record),
         Err(ImagePlacementError::StorageLimit {
-            used_bytes: MAX_IMAGE_STORAGE_BYTES,
-            requested_bytes: 4,
-            limit_bytes: MAX_IMAGE_STORAGE_BYTES,
+            used_byte_count: MAX_IMAGE_STORAGE_BYTE_COUNT,
+            requested_byte_count: 4,
+            byte_limit: MAX_IMAGE_STORAGE_BYTE_COUNT,
         })
     );
-    assert_eq!(state, before);
+    assert_eq!(terminal_state, terminal_state_before_additional_image);
 }

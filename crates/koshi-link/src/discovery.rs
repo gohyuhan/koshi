@@ -16,10 +16,10 @@
 
 use std::path::{Path, PathBuf};
 
-use koshi_core::discovery::{ClientInfo, PaneInfo, SessionOverview, TabInfo};
+use koshi_core::discovery::{ClientDiscovery, PaneDiscovery, SessionOverview, TabDiscovery};
 use koshi_core::event::RejectReason;
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
-use koshi_core::redact::redact_argv;
+use koshi_core::redact::redact_command_argv;
 use koshi_core::text::sanitize_reported_text;
 use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::validate::reclaim_stale_socket;
@@ -32,25 +32,34 @@ use crate::ipc_client;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SessionRow {
     /// Stable session id.
-    pub id: SessionId,
+    #[serde(rename = "id")]
+    pub session_id: SessionId,
     /// The session's display name.
-    pub name: String,
+    #[serde(rename = "name")]
+    pub session_name: String,
     /// The saved server this session runs on, by the name it was saved under
     /// or its `host:port` address. `None` for a session on this machine.
-    pub server: Option<String>,
+    #[serde(rename = "server")]
+    pub server_name_or_address: Option<String>,
 }
 
 impl SessionRow {
-    /// One row for `id`, naming `server`, with `name` filtered by
+    /// One row for `session_id`, naming `server_name_or_address`, with
+    /// `session_name` filtered by
     /// [`sanitize_reported_text`].
     ///
-    /// `SessionRow::new(id, "web\u{7f}srv", None).name` is `"websrv"`.
+    /// `SessionRow::from_session(id, "web\u{7f}srv", None).session_name` is
+    /// `"websrv"`.
     #[must_use]
-    pub fn new(id: SessionId, name: &str, server: Option<String>) -> Self {
+    pub fn from_session(
+        session_id: SessionId,
+        session_name: &str,
+        server_name_or_address: Option<String>,
+    ) -> Self {
         SessionRow {
-            id,
-            name: sanitize_reported_text(name),
-            server,
+            session_id,
+            session_name: sanitize_reported_text(session_name),
+            server_name_or_address,
         }
     }
 }
@@ -59,12 +68,16 @@ impl SessionRow {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TabRow {
     /// Stable tab id.
-    pub id: TabId,
+    #[serde(rename = "id")]
+    pub tab_id: TabId,
     /// The tab's display name.
-    pub name: String,
+    #[serde(rename = "name")]
+    pub tab_name: String,
     /// The session holding the tab.
-    pub session: SessionId,
+    #[serde(rename = "session")]
+    pub session_id: SessionId,
     /// That session's display name.
+    #[serde(rename = "session_name")]
     pub session_name: String,
 }
 
@@ -72,16 +85,22 @@ pub struct TabRow {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PaneRow {
     /// Stable pane id.
-    pub id: PaneId,
+    #[serde(rename = "id")]
+    pub pane_id: PaneId,
     /// The pane's title, once the child has set one.
-    pub name: Option<String>,
+    #[serde(rename = "name")]
+    pub pane_name: Option<String>,
     /// The tab holding the pane.
-    pub tab: TabId,
+    #[serde(rename = "tab")]
+    pub tab_id: TabId,
     /// That tab's display name.
+    #[serde(rename = "tab_name")]
     pub tab_name: String,
     /// The session holding the pane.
-    pub session: SessionId,
+    #[serde(rename = "session")]
+    pub session_id: SessionId,
     /// That session's display name.
+    #[serde(rename = "session_name")]
     pub session_name: String,
 }
 
@@ -89,10 +108,13 @@ pub struct PaneRow {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ClientRow {
     /// Stable client id.
-    pub id: ClientId,
+    #[serde(rename = "id")]
+    pub client_id: ClientId,
     /// The session the client is attached to.
-    pub session: SessionId,
+    #[serde(rename = "session")]
+    pub session_id: SessionId,
     /// That session's display name.
+    #[serde(rename = "session_name")]
     pub session_name: String,
 }
 
@@ -109,49 +131,62 @@ pub struct Discovered {
     /// the same query print the same order.
     pub sessions: Vec<SessionOverview>,
     /// How many running sessions were listening but could not answer.
-    pub unasked: usize,
+    pub unasked_session_count: usize,
 }
 
 impl Discovered {
     /// One session, asked directly and answered — a complete census of the
     /// only session the query is about.
     #[must_use]
-    pub fn of(overview: SessionOverview) -> Discovered {
+    pub fn from_overview(session_overview: SessionOverview) -> Discovered {
         Discovered {
-            sessions: vec![overview],
-            unasked: 0,
+            sessions: vec![session_overview],
+            unasked_session_count: 0,
         }
     }
 
     /// Whether every running session answered.
     #[must_use]
     pub fn is_complete(&self) -> bool {
-        self.unasked == 0
+        self.unasked_session_count == 0
     }
 
     /// Sort the sessions by name and then id, the order
     /// [`sessions`](Self::sessions) documents.
     pub fn sort_sessions(&mut self) {
-        self.sessions.sort_by(|a, b| {
-            a.session
-                .name
-                .cmp(&b.session.name)
-                .then(a.session.id.cmp(&b.session.id))
-        });
+        self.sessions
+            .sort_by(|left_session_overview, right_session_overview| {
+                left_session_overview
+                    .session
+                    .session_name
+                    .cmp(&right_session_overview.session.session_name)
+                    .then(
+                        left_session_overview
+                            .session
+                            .session_id
+                            .cmp(&right_session_overview.session.session_id),
+                    )
+            });
     }
 
     /// The failure for a target that none of the answering sessions holds:
     /// genuinely not found when every session answered, otherwise a report
     /// that one of them could not be asked.
-    pub fn missing(&self, kind: &str, id: &str) -> CliError {
+    pub fn build_missing_target_error(
+        &self,
+        target_kind: &str,
+        target_identifier: &str,
+    ) -> CliError {
         if self.is_complete() {
             CliError::CommandRejected {
                 reason: RejectReason::TargetNotFound,
-                help: Some(format!("no running session has {kind} {id}")),
+                help: Some(format!(
+                    "no running session has {target_kind} {target_identifier}"
+                )),
             }
         } else {
-            self.unanswered(&format!(
-                "{kind} {id} is in none of the sessions that answered"
+            self.build_unanswered_error(&format!(
+                "{target_kind} {target_identifier} is in none of the sessions that answered"
             ))
         }
     }
@@ -159,14 +194,14 @@ impl Discovered {
     /// The failure for a `--session` no answering session matched: not
     /// running when every session answered, otherwise a report that one
     /// could not be asked.
-    pub fn no_such_session(&self, session: &str) -> CliError {
+    pub fn build_missing_session_error(&self, session_name: &str) -> CliError {
         if self.is_complete() {
             CliError::SessionNotFound {
-                session: session.to_string(),
+                session_name: session_name.to_string(),
             }
         } else {
-            self.unanswered(&format!(
-                "`{session}` is not among the sessions that answered"
+            self.build_unanswered_error(&format!(
+                "`{session_name}` is not among the sessions that answered"
             ))
         }
     }
@@ -182,23 +217,27 @@ impl Discovered {
         if self.is_complete() {
             None
         } else {
-            Some(self.unanswered("this listing is incomplete"))
+            Some(self.build_unanswered_error("this listing is incomplete"))
         }
     }
 
-    /// A failure that names `detail` and how many running sessions went
+    /// A failure that names `error_detail` and how many running sessions went
     /// unasked. The count is singular only at exactly 1.
     ///
-    /// `unanswered("this listing is incomplete")` with `unasked` 1 gives
+    /// `build_unanswered_error("this listing is incomplete")` with
+    /// `unasked_session_count` 1 gives
     /// `"this listing is incomplete (1 running session did not answer)"`.
-    pub fn unanswered(&self, detail: &str) -> CliError {
-        let word = if self.unasked == 1 {
+    pub fn build_unanswered_error(&self, error_detail: &str) -> CliError {
+        let session_noun = if self.unasked_session_count == 1 {
             "session"
         } else {
             "sessions"
         };
         CliError::IpcUnavailable {
-            detail: format!("{detail} ({} running {word} did not answer)", self.unasked),
+            detail: format!(
+                "{error_detail} ({} running {session_noun} did not answer)",
+                self.unasked_session_count
+            ),
         }
     }
 }
@@ -212,40 +251,46 @@ impl Discovered {
 /// socket file. A session that is listening but cannot finish the exchange
 /// contributes no rows either, says so on stderr, and is counted.
 #[must_use]
-pub fn fetch_all(runtime_dir: &Path) -> Discovered {
-    let mut found = Discovered::default();
-    for session_id in ipc_client::advertised_sessions(runtime_dir) {
-        add_answer(&mut found, session_id, fetch_one(runtime_dir, session_id));
-    }
-    // A session of another user's is never swept.
-    for (session_id, socket) in ipc_client::shared_base()
-        .into_iter()
-        .flat_map(|base| ipc_client::foreign_sessions(&base, runtime_dir))
-    {
-        add_answer(
-            &mut found,
+pub fn fetch_all_session_overviews(runtime_directory: &Path) -> Discovered {
+    let mut discovered_sessions = Discovered::default();
+    for session_id in ipc_client::list_advertised_sessions(runtime_directory) {
+        record_discovery_answer(
+            &mut discovered_sessions,
             session_id,
-            ipc_client::fetch_foreign_overview(session_id, &socket),
+            fetch_session_overview(runtime_directory, session_id),
         );
     }
-    found.sort_sessions();
-    found
+    // A session of another user's is never swept.
+    for (session_id, socket_address) in ipc_client::resolve_shared_sessions_base_directory()
+        .into_iter()
+        .flat_map(|shared_sessions_base_directory| {
+            ipc_client::list_foreign_sessions(&shared_sessions_base_directory, runtime_directory)
+        })
+    {
+        record_discovery_answer(
+            &mut discovered_sessions,
+            session_id,
+            ipc_client::fetch_foreign_session_overview(session_id, &socket_address),
+        );
+    }
+    discovered_sessions.sort_sessions();
+    discovered_sessions
 }
 
-/// Fold what the session `session_id` answered into `found`: an overview
-/// becomes a row, a session that is gone adds nothing, and every other failure
-/// prints on stderr and counts as unasked.
-fn add_answer(
-    found: &mut Discovered,
+/// Fold what the session `session_id` answered into `discovered_sessions`: an
+/// overview becomes a row, a session that is gone adds nothing, and every
+/// other failure prints on stderr and increments `unasked_session_count`.
+fn record_discovery_answer(
+    discovered_sessions: &mut Discovered,
     session_id: SessionId,
-    answered: Result<SessionOverview, CliError>,
+    session_overview_result: Result<SessionOverview, CliError>,
 ) {
-    match answered {
-        Ok(overview) => found.sessions.push(overview),
+    match session_overview_result {
+        Ok(session_overview) => discovered_sessions.sessions.push(session_overview),
         Err(CliError::SessionNotFound { .. }) => {}
-        Err(error) => {
-            eprintln!("koshi: session {session_id} did not answer: {error}");
-            found.unasked += 1;
+        Err(cli_error) => {
+            eprintln!("koshi: session {session_id} did not answer: {cli_error}");
+            discovered_sessions.unasked_session_count += 1;
         }
     }
 }
@@ -256,10 +301,13 @@ fn add_answer(
 /// Nothing listening is [`CliError::SessionNotFound`]. Something listening
 /// whose exchange failed — a token that no longer matches, say — is
 /// [`CliError::IpcUnavailable`].
-pub fn fetch_one(runtime_dir: &Path, session_id: SessionId) -> Result<SessionOverview, CliError> {
-    ipc_client::fetch_overview(runtime_dir, session_id).inspect_err(|error| {
-        if matches!(error, CliError::SessionNotFound { .. }) {
-            sweep(runtime_dir, session_id);
+pub fn fetch_session_overview(
+    runtime_directory: &Path,
+    session_id: SessionId,
+) -> Result<SessionOverview, CliError> {
+    ipc_client::fetch_session_overview(runtime_directory, session_id).inspect_err(|cli_error| {
+        if matches!(cli_error, CliError::SessionNotFound { .. }) {
+            remove_stale_session_files(runtime_directory, session_id);
         }
     })
 }
@@ -267,36 +315,42 @@ pub fn fetch_one(runtime_dir: &Path, session_id: SessionId) -> Result<SessionOve
 /// Remove what a session that is gone left behind: its endpoint file, and
 /// the socket file it advertised. Every step is best-effort — a file already
 /// removed, or one this user may not remove, leaves the listing unaffected.
-fn sweep(runtime_dir: &Path, session_id: SessionId) {
-    let path = EndpointFile::path(runtime_dir, session_id);
-    if let Ok(endpoint) = EndpointFile::read(&path) {
-        let _ = reclaim_stale_socket(&endpoint.socket);
+fn remove_stale_session_files(runtime_directory: &Path, session_id: SessionId) {
+    let endpoint_path = EndpointFile::resolve_endpoint_file_path(runtime_directory, session_id);
+    if let Ok(endpoint_file) = EndpointFile::load_from_path(&endpoint_path) {
+        let _ = reclaim_stale_socket(&endpoint_file.socket_address);
     }
-    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&endpoint_path);
 }
 
 /// The `list-sessions` answer: one row per running session. Every row's
-/// `server` is `None` — each session in `overviews` runs on this machine.
+/// `server` is `None` — each session in `session_overviews` runs on this machine.
 #[must_use]
-pub fn session_rows(overviews: &[SessionOverview]) -> Vec<SessionRow> {
-    overviews
+pub fn build_session_rows(session_overviews: &[SessionOverview]) -> Vec<SessionRow> {
+    session_overviews
         .iter()
-        .map(|overview| SessionRow::new(overview.session.id, &overview.session.name, None))
+        .map(|session_overview| {
+            SessionRow::from_session(
+                session_overview.session.session_id,
+                &session_overview.session.session_name,
+                None,
+            )
+        })
         .collect()
 }
 
 /// The `list-tabs` answer: every tab of every listed session, in tab-bar
 /// order within each session.
 #[must_use]
-pub fn tab_rows(overviews: &[SessionOverview]) -> Vec<TabRow> {
-    overviews
+pub fn build_tab_rows(session_overviews: &[SessionOverview]) -> Vec<TabRow> {
+    session_overviews
         .iter()
-        .flat_map(|overview| {
-            overview.tabs.iter().map(|tab| TabRow {
-                id: tab.id,
-                name: sanitize_reported_text(&tab.name),
-                session: overview.session.id,
-                session_name: sanitize_reported_text(&overview.session.name),
+        .flat_map(|session_overview| {
+            session_overview.tabs.iter().map(|tab_discovery| TabRow {
+                tab_id: tab_discovery.tab_id,
+                tab_name: sanitize_reported_text(&tab_discovery.tab_name),
+                session_id: session_overview.session.session_id,
+                session_name: sanitize_reported_text(&session_overview.session.session_name),
             })
         })
         .collect()
@@ -307,19 +361,25 @@ pub fn tab_rows(overviews: &[SessionOverview]) -> Vec<TabRow> {
 ///
 /// A pane whose tab is not in the overview's tab list is left out.
 #[must_use]
-pub fn pane_rows(overviews: &[SessionOverview]) -> Vec<PaneRow> {
-    overviews
+pub fn build_pane_rows(session_overviews: &[SessionOverview]) -> Vec<PaneRow> {
+    session_overviews
         .iter()
-        .flat_map(|overview| {
-            overview.panes.iter().filter_map(|pane| {
-                let tab = overview.tabs.iter().find(|tab| tab.id == pane.tab_id)?;
+        .flat_map(|session_overview| {
+            session_overview.panes.iter().filter_map(|pane_discovery| {
+                let tab_discovery = session_overview
+                    .tabs
+                    .iter()
+                    .find(|tab_discovery| tab_discovery.tab_id == pane_discovery.tab_id)?;
                 Some(PaneRow {
-                    id: pane.id,
-                    name: pane.title.as_deref().map(sanitize_reported_text),
-                    tab: tab.id,
-                    tab_name: sanitize_reported_text(&tab.name),
-                    session: overview.session.id,
-                    session_name: sanitize_reported_text(&overview.session.name),
+                    pane_id: pane_discovery.pane_id,
+                    pane_name: pane_discovery
+                        .pane_title
+                        .as_deref()
+                        .map(sanitize_reported_text),
+                    tab_id: tab_discovery.tab_id,
+                    tab_name: sanitize_reported_text(&tab_discovery.tab_name),
+                    session_id: session_overview.session.session_id,
+                    session_name: sanitize_reported_text(&session_overview.session.session_name),
                 })
             })
         })
@@ -328,20 +388,23 @@ pub fn pane_rows(overviews: &[SessionOverview]) -> Vec<PaneRow> {
 
 /// The `list-clients` answer: every client attached to every listed session.
 #[must_use]
-pub fn client_rows(overviews: &[SessionOverview]) -> Vec<ClientRow> {
-    overviews
+pub fn build_client_rows(session_overviews: &[SessionOverview]) -> Vec<ClientRow> {
+    session_overviews
         .iter()
-        .flat_map(|overview| {
-            overview.clients.iter().map(|client| ClientRow {
-                id: client.id,
-                session: overview.session.id,
-                session_name: sanitize_reported_text(&overview.session.name),
-            })
+        .flat_map(|session_overview| {
+            session_overview
+                .clients
+                .iter()
+                .map(|client_discovery| ClientRow {
+                    client_id: client_discovery.client_id,
+                    session_id: session_overview.session.session_id,
+                    session_name: sanitize_reported_text(&session_overview.session.session_name),
+                })
         })
         .collect()
 }
 
-/// Filter every string `overview` took from the session that answered through
+/// Filter every string `session_overview` took from the session that answered through
 /// [`sanitize_reported_text`]: the session name, each tab name, and each pane's
 /// title, working directory and argv. Ids, times, sizes and counts are left as
 /// they are.
@@ -352,75 +415,93 @@ pub fn client_rows(overviews: &[SessionOverview]) -> Vec<ClientRow> {
 ///
 /// A pane whose argv is `["sh", "-c", "\u{1b}[2J"]` reads back as
 /// `["sh", "-c", "[2J"]`.
-pub fn filter_reported_text(overview: &mut SessionOverview) {
-    overview.session.name = sanitize_reported_text(&overview.session.name);
-    for tab in &mut overview.tabs {
-        tab.name = sanitize_reported_text(&tab.name);
+pub fn filter_session_overview_text(session_overview: &mut SessionOverview) {
+    session_overview.session.session_name =
+        sanitize_reported_text(&session_overview.session.session_name);
+    for tab_discovery in &mut session_overview.tabs {
+        tab_discovery.tab_name = sanitize_reported_text(&tab_discovery.tab_name);
     }
-    for pane in &mut overview.panes {
-        pane.title = pane.title.as_deref().map(sanitize_reported_text);
-        pane.cwd = pane
-            .cwd
-            .as_ref()
-            .map(|cwd| PathBuf::from(sanitize_reported_text(&cwd.to_string_lossy())));
-        if let Some(argv) = &mut pane.command {
-            for arg in argv.iter_mut() {
-                *arg = sanitize_reported_text(arg);
+    for pane_discovery in &mut session_overview.panes {
+        pane_discovery.pane_title = pane_discovery
+            .pane_title
+            .as_deref()
+            .map(sanitize_reported_text);
+        pane_discovery.working_directory =
+            pane_discovery
+                .working_directory
+                .as_ref()
+                .map(|working_directory| {
+                    PathBuf::from(sanitize_reported_text(&working_directory.to_string_lossy()))
+                });
+        if let Some(command_argv) = &mut pane_discovery.command_argv {
+            for command_argument in command_argv.iter_mut() {
+                *command_argument = sanitize_reported_text(command_argument);
             }
         }
     }
 }
 
-/// Hide the arguments of every pane's command across `overviews`, leaving
+/// Hide the arguments of every pane's command across `session_overviews`, leaving
 /// each program name visible.
-pub fn redact_pane_commands(overviews: &mut [SessionOverview]) {
-    for overview in overviews.iter_mut() {
-        for pane in overview.panes.iter_mut() {
-            pane.command = pane.command.as_deref().map(redact_argv);
+pub fn redact_pane_commands(session_overviews: &mut [SessionOverview]) {
+    for session_overview in session_overviews.iter_mut() {
+        for pane_discovery in session_overview.panes.iter_mut() {
+            pane_discovery.command_argv = pane_discovery
+                .command_argv
+                .as_deref()
+                .map(redact_command_argv);
         }
     }
 }
 
 /// The tab `tab_id` names, in full, wherever it is running.
 ///
-/// No answering session holding it gives [`Discovered::missing`]'s failure for
+/// No answering session holding it gives [`Discovered::build_missing_target_error`]'s failure for
 /// `"tab"`.
-pub fn find_tab(found: &Discovered, tab_id: TabId) -> Result<TabInfo, CliError> {
-    found
+pub fn find_tab(discovered_sessions: &Discovered, tab_id: TabId) -> Result<TabDiscovery, CliError> {
+    discovered_sessions
         .sessions
         .iter()
-        .flat_map(|overview| overview.tabs.iter())
-        .find(|tab| tab.id == tab_id)
+        .flat_map(|session_overview| session_overview.tabs.iter())
+        .find(|tab_discovery| tab_discovery.tab_id == tab_id)
         .cloned()
-        .ok_or_else(|| found.missing("tab", &tab_id.to_string()))
+        .ok_or_else(|| discovered_sessions.build_missing_target_error("tab", &tab_id.to_string()))
 }
 
 /// The pane `pane_id` names, in full, wherever it is running.
 ///
-/// No answering session holding it gives [`Discovered::missing`]'s failure for
+/// No answering session holding it gives [`Discovered::build_missing_target_error`]'s failure for
 /// `"pane"`.
-pub fn find_pane(found: &Discovered, pane_id: PaneId) -> Result<PaneInfo, CliError> {
-    found
+pub fn find_pane(
+    discovered_sessions: &Discovered,
+    pane_id: PaneId,
+) -> Result<PaneDiscovery, CliError> {
+    discovered_sessions
         .sessions
         .iter()
-        .flat_map(|overview| overview.panes.iter())
-        .find(|pane| pane.id == pane_id)
+        .flat_map(|session_overview| session_overview.panes.iter())
+        .find(|pane_discovery| pane_discovery.pane_id == pane_id)
         .cloned()
-        .ok_or_else(|| found.missing("pane", &pane_id.to_string()))
+        .ok_or_else(|| discovered_sessions.build_missing_target_error("pane", &pane_id.to_string()))
 }
 
 /// The client `client_id` names, in full, wherever it is attached.
 ///
-/// No answering session holding it gives [`Discovered::missing`]'s failure for
+/// No answering session holding it gives [`Discovered::build_missing_target_error`]'s failure for
 /// `"client"`.
-pub fn find_client(found: &Discovered, client_id: ClientId) -> Result<ClientInfo, CliError> {
-    found
+pub fn find_client(
+    discovered_sessions: &Discovered,
+    client_id: ClientId,
+) -> Result<ClientDiscovery, CliError> {
+    discovered_sessions
         .sessions
         .iter()
-        .flat_map(|overview| overview.clients.iter())
-        .find(|client| client.id == client_id)
+        .flat_map(|session_overview| session_overview.clients.iter())
+        .find(|client_discovery| client_discovery.client_id == client_id)
         .cloned()
-        .ok_or_else(|| found.missing("client", &client_id.to_string()))
+        .ok_or_else(|| {
+            discovered_sessions.build_missing_target_error("client", &client_id.to_string())
+        })
 }
 
 #[cfg(test)]

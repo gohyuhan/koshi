@@ -8,7 +8,7 @@
 //! were talking to a real terminal: line editing and colors work.
 
 /// OS lookups about working directories and the machine's own name.
-pub mod cwd;
+pub mod working_directory;
 
 /// The environment overlay a spawned child starts with.
 mod env;

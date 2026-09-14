@@ -5,18 +5,19 @@ use crate::ids::PluginId;
 use std::collections::BTreeSet;
 
 /// Roundtrip a value through JSON and assert it survives unchanged.
-fn roundtrip<T>(value: &T)
+fn assert_json_roundtrip<Roundtrippable>(roundtrippable_value: &Roundtrippable)
 where
-    T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+    Roundtrippable: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
 {
-    let json = serde_json::to_string(value).expect("serialize");
-    let back: T = serde_json::from_str(&json).expect("deserialize");
-    assert_eq!(*value, back);
+    let serialized_json = serde_json::to_string(roundtrippable_value).expect("serialize");
+    let decoded_roundtrippable: Roundtrippable =
+        serde_json::from_str(&serialized_json).expect("deserialize");
+    assert_eq!(*roundtrippable_value, decoded_roundtrippable);
 }
 
 #[test]
-fn action_name_accepts_valid_grammar() {
-    for name in [
+fn action_name_parser_accepts_valid_grammar() {
+    for action_name_text in [
         "a",
         "new-pane",
         "toggle-pane-fullscreen",
@@ -26,117 +27,152 @@ fn action_name_accepts_valid_grammar() {
         "a--b",
     ] {
         assert_eq!(
-            ActionName::new(name).map(String::from),
-            Ok(name.to_string()),
-            "{name:?} should be valid"
+            ActionName::parse_action_name(action_name_text).map(String::from),
+            Ok(action_name_text.to_string()),
+            "{action_name_text:?} should be valid"
         );
     }
     // Exactly the maximum length (1 + 30) is allowed.
-    let max = format!("a{}", "b".repeat(MAX_ACTION_NAME_LEN - 1));
-    assert_eq!(max.len(), MAX_ACTION_NAME_LEN);
-    assert_eq!(ActionName::new(&max).map(String::from), Ok(max.clone()));
-}
-
-#[test]
-fn action_name_rejects_non_ascii_characters() {
+    let maximum_action_name = format!("a{}", "b".repeat(MAX_ACTION_NAME_CHARACTER_COUNT - 1));
+    assert_eq!(maximum_action_name.len(), MAX_ACTION_NAME_CHARACTER_COUNT);
     assert_eq!(
-        ActionName::new("é"),
-        Err(ActionNameError::InvalidStart { ch: 'é' })
-    );
-    assert_eq!(
-        ActionName::new("aé"),
-        Err(ActionNameError::InvalidChar { ch: 'é' })
-    );
-    assert_eq!(
-        ActionName::new("a😀"),
-        Err(ActionNameError::InvalidChar { ch: '😀' })
-    );
-    assert_eq!(
-        ActionName::new("a b"),
-        Err(ActionNameError::InvalidChar { ch: ' ' })
+        ActionName::parse_action_name(&maximum_action_name).map(String::from),
+        Ok(maximum_action_name.clone())
     );
 }
 
 #[test]
-fn action_name_error_messages_are_pinned() {
-    assert_eq!(ActionNameError::Empty.to_string(), "action name is empty");
+fn action_name_parser_rejects_non_ascii_characters() {
     assert_eq!(
-        ActionNameError::TooLong { len: 32 }.to_string(),
-        "action name is 32 chars; the maximum is 31"
+        ActionName::parse_action_name("é"),
+        Err(ActionNameError::InvalidStart {
+            invalid_character: 'é',
+        })
     );
     assert_eq!(
-        ActionNameError::InvalidStart { ch: 'N' }.to_string(),
-        "action name must start with a lowercase letter, found 'N'"
+        ActionName::parse_action_name("aé"),
+        Err(ActionNameError::InvalidChar {
+            invalid_character: 'é',
+        })
     );
     assert_eq!(
-        ActionNameError::InvalidChar { ch: '_' }.to_string(),
-        "action name may only contain [a-z0-9-], found '_'"
-    );
-}
-
-#[test]
-fn action_name_reads_back_as_the_input_string() {
-    let name = ActionName::new("focus-pane").expect("valid");
-    assert_eq!(name.as_str(), "focus-pane");
-    assert_eq!(name.to_string(), "focus-pane");
-    assert_eq!(String::from(name.clone()), "focus-pane");
-    assert_eq!(
-        serde_json::to_string(&name).expect("serialize"),
-        "\"focus-pane\""
-    );
-}
-
-#[test]
-fn action_name_rejects_invalid_grammar() {
-    assert_eq!(ActionName::new(""), Err(ActionNameError::Empty));
-    assert_eq!(
-        ActionName::new("New"),
-        Err(ActionNameError::InvalidStart { ch: 'N' })
+        ActionName::parse_action_name("a😀"),
+        Err(ActionNameError::InvalidChar {
+            invalid_character: '😀',
+        })
     );
     assert_eq!(
-        ActionName::new("1pane"),
-        Err(ActionNameError::InvalidStart { ch: '1' })
-    );
-    assert_eq!(
-        ActionName::new("-pane"),
-        Err(ActionNameError::InvalidStart { ch: '-' })
-    );
-    assert_eq!(
-        ActionName::new("new_pane"),
-        Err(ActionNameError::InvalidChar { ch: '_' })
-    );
-    assert_eq!(
-        ActionName::new("newPane"),
-        Err(ActionNameError::InvalidChar { ch: 'P' })
-    );
-    let too_long = format!("a{}", "b".repeat(MAX_ACTION_NAME_LEN));
-    assert_eq!(
-        ActionName::new(&too_long),
-        Err(ActionNameError::TooLong {
-            len: MAX_ACTION_NAME_LEN + 1
+        ActionName::parse_action_name("a b"),
+        Err(ActionNameError::InvalidChar {
+            invalid_character: ' ',
         })
     );
 }
 
 #[test]
-fn invalid_char_is_reported_even_when_the_name_is_also_too_long() {
-    // The char-grammar scan runs over every character before the length
-    // check, so a bad character anywhere — even past the length cap — wins
-    // over `TooLong`, per the documented precedence.
-    let name = format!("a{}_", "b".repeat(40));
-    assert!(name.chars().count() > MAX_ACTION_NAME_LEN);
+fn action_name_error_display_uses_stable_messages() {
+    assert_eq!(ActionNameError::Empty.to_string(), "action name is empty");
     assert_eq!(
-        ActionName::new(&name),
-        Err(ActionNameError::InvalidChar { ch: '_' })
+        ActionNameError::TooLong {
+            character_count: 32,
+        }
+        .to_string(),
+        "action name is 32 chars; the maximum is 31"
+    );
+    assert_eq!(
+        ActionNameError::InvalidStart {
+            invalid_character: 'N',
+        }
+        .to_string(),
+        "action name must start with a lowercase letter, found 'N'"
+    );
+    assert_eq!(
+        ActionNameError::InvalidChar {
+            invalid_character: '_',
+        }
+        .to_string(),
+        "action name may only contain [a-z0-9-], found '_'"
     );
 }
 
 #[test]
-fn action_name_serde_validates_on_decode() {
-    roundtrip(&ActionName::new("focus-pane").expect("valid"));
-    let decoded: Result<ActionName, _> = serde_json::from_str("\"BadName\"");
+fn action_name_display_and_serialization_preserve_input_string() {
+    let action_name = ActionName::parse_action_name("focus-pane").expect("valid");
+    assert_eq!(action_name.get_name(), "focus-pane");
+    assert_eq!(action_name.to_string(), "focus-pane");
+    assert_eq!(String::from(action_name.clone()), "focus-pane");
     assert_eq!(
-        decoded
+        serde_json::to_string(&action_name).expect("serialize"),
+        "\"focus-pane\""
+    );
+}
+
+#[test]
+fn action_name_parser_rejects_invalid_grammar() {
+    assert_eq!(
+        ActionName::parse_action_name(""),
+        Err(ActionNameError::Empty)
+    );
+    assert_eq!(
+        ActionName::parse_action_name("New"),
+        Err(ActionNameError::InvalidStart {
+            invalid_character: 'N',
+        })
+    );
+    assert_eq!(
+        ActionName::parse_action_name("1pane"),
+        Err(ActionNameError::InvalidStart {
+            invalid_character: '1',
+        })
+    );
+    assert_eq!(
+        ActionName::parse_action_name("-pane"),
+        Err(ActionNameError::InvalidStart {
+            invalid_character: '-',
+        })
+    );
+    assert_eq!(
+        ActionName::parse_action_name("new_pane"),
+        Err(ActionNameError::InvalidChar {
+            invalid_character: '_',
+        })
+    );
+    assert_eq!(
+        ActionName::parse_action_name("newPane"),
+        Err(ActionNameError::InvalidChar {
+            invalid_character: 'P',
+        })
+    );
+    let overlong_action_name = format!("a{}", "b".repeat(MAX_ACTION_NAME_CHARACTER_COUNT));
+    assert_eq!(
+        ActionName::parse_action_name(&overlong_action_name),
+        Err(ActionNameError::TooLong {
+            character_count: MAX_ACTION_NAME_CHARACTER_COUNT + 1
+        })
+    );
+}
+
+#[test]
+fn action_name_parser_reports_invalid_character_before_length_error() {
+    // The char-grammar scan runs over every character before the length
+    // check, so a bad character anywhere — even past the length cap — wins
+    // over `TooLong`, per the documented precedence.
+    let action_name_text = format!("a{}_", "b".repeat(40));
+    assert!(action_name_text.chars().count() > MAX_ACTION_NAME_CHARACTER_COUNT);
+    assert_eq!(
+        ActionName::parse_action_name(&action_name_text),
+        Err(ActionNameError::InvalidChar {
+            invalid_character: '_'
+        })
+    );
+}
+
+#[test]
+fn action_name_deserialization_validates_grammar() {
+    assert_json_roundtrip(&ActionName::parse_action_name("focus-pane").expect("valid"));
+    let decoded_action_name: Result<ActionName, _> = serde_json::from_str("\"BadName\"");
+    assert_eq!(
+        decoded_action_name
             .expect_err("invalid name must not deserialize")
             .to_string(),
         "action name must start with a lowercase letter, found 'B'"
@@ -144,92 +180,101 @@ fn action_name_serde_validates_on_decode() {
 }
 
 #[test]
-fn action_ref_display_per_namespace() {
-    let core = ActionRef::core("new-pane").expect("valid");
-    assert_eq!(core.to_string(), "core:new-pane");
+fn action_reference_display_includes_each_namespace_form() {
+    let core_action_reference = ActionReference::from_core_action_name("new-pane").expect("valid");
+    assert_eq!(core_action_reference.to_string(), "core:new-pane");
 
-    let user = ActionRef::user("my-macro").expect("valid");
-    assert_eq!(user.to_string(), "user:my-macro");
+    let user_action_reference = ActionReference::from_user_action_name("my-macro").expect("valid");
+    assert_eq!(user_action_reference.to_string(), "user:my-macro");
 
     let plugin_id = PluginId::new();
-    let plugin = ActionRef::plugin(plugin_id, "open-status").expect("valid");
+    let plugin_action_reference =
+        ActionReference::from_plugin_action_name(plugin_id, "open-status").expect("valid");
     assert_eq!(
-        plugin.to_string(),
-        format!("plugin:{}:open-status", plugin_id.as_uuid())
+        plugin_action_reference.to_string(),
+        format!("plugin:{}:open-status", plugin_id.get_uuid())
     );
 }
 
 #[test]
-fn action_ref_roundtrips_each_namespace() {
-    roundtrip(&ActionRef::core("close-pane").expect("valid"));
-    roundtrip(&ActionRef::user("workflow-1").expect("valid"));
-    roundtrip(&ActionRef::plugin(PluginId::new(), "diff").expect("valid"));
+fn action_reference_roundtrips_each_namespace_through_serde() {
+    assert_json_roundtrip(&ActionReference::from_core_action_name("close-pane").expect("valid"));
+    assert_json_roundtrip(&ActionReference::from_user_action_name("workflow-1").expect("valid"));
+    assert_json_roundtrip(
+        &ActionReference::from_plugin_action_name(PluginId::new(), "diff").expect("valid"),
+    );
 }
 
 #[test]
-fn action_ref_serializes_as_canonical_string() {
+fn action_reference_serialization_uses_canonical_string() {
     // The wire form is the documented `core:new-pane` token, not a struct, so a
-    // keymap referencing actions by name decodes straight into an `ActionRef`.
-    let core = ActionRef::core("new-pane").expect("valid");
+    // keymap referencing actions by name decodes straight into an `ActionReference`.
+    let core_action_reference = ActionReference::from_core_action_name("new-pane").expect("valid");
     assert_eq!(
-        serde_json::to_string(&core).expect("serialize"),
+        serde_json::to_string(&core_action_reference).expect("serialize"),
         "\"core:new-pane\""
     );
 
-    let decoded: ActionRef = serde_json::from_str("\"core:new-pane\"").expect("deserialize");
-    assert_eq!(decoded, core);
+    let decoded_action_reference: ActionReference =
+        serde_json::from_str("\"core:new-pane\"").expect("deserialize");
+    assert_eq!(decoded_action_reference, core_action_reference);
 }
 
 #[test]
-fn action_ref_parses_canonical_string() {
+fn action_reference_parser_accepts_canonical_strings() {
     assert_eq!(
-        "core:new-pane".parse::<ActionRef>().expect("valid"),
-        ActionRef::core("new-pane").expect("valid")
+        "core:new-pane".parse::<ActionReference>().expect("valid"),
+        ActionReference::from_core_action_name("new-pane").expect("valid")
     );
     assert_eq!(
-        "user:my-macro".parse::<ActionRef>().expect("valid"),
-        ActionRef::user("my-macro").expect("valid")
+        "user:my-macro".parse::<ActionReference>().expect("valid"),
+        ActionReference::from_user_action_name("my-macro").expect("valid")
     );
 
     let plugin_id = PluginId::new();
-    let text = format!("plugin:{}:open-status", plugin_id.as_uuid());
+    let plugin_action_reference_text = format!("plugin:{}:open-status", plugin_id.get_uuid());
     assert_eq!(
-        text.parse::<ActionRef>().expect("valid"),
-        ActionRef::plugin(plugin_id, "open-status").expect("valid")
+        plugin_action_reference_text
+            .parse::<ActionReference>()
+            .expect("valid"),
+        ActionReference::from_plugin_action_name(plugin_id, "open-status").expect("valid")
     );
 }
 
 #[test]
-fn action_ref_rejects_malformed_strings() {
+fn action_reference_parser_rejects_malformed_strings() {
     assert_eq!(
-        "new-pane".parse::<ActionRef>(),
-        Err(ActionRefParseError::MissingNamespace)
+        "new-pane".parse::<ActionReference>(),
+        Err(ActionReferenceParseError::MissingNamespace)
     );
     assert_eq!(
-        "shell:new-pane".parse::<ActionRef>(),
-        Err(ActionRefParseError::UnknownNamespace {
-            found: "shell".to_string()
+        "shell:new-pane".parse::<ActionReference>(),
+        Err(ActionReferenceParseError::UnknownNamespace {
+            unknown_namespace: "shell".to_string()
         })
     );
     assert_eq!(
-        "plugin:not-a-uuid:x".parse::<ActionRef>(),
-        Err(ActionRefParseError::InvalidPluginId)
+        "plugin:not-a-uuid:x".parse::<ActionReference>(),
+        Err(ActionReferenceParseError::InvalidPluginId)
     );
     assert_eq!(
-        format!("plugin:{}", PluginId::new().as_uuid()).parse::<ActionRef>(),
-        Err(ActionRefParseError::MissingPluginName)
+        format!("plugin:{}", PluginId::new().get_uuid()).parse::<ActionReference>(),
+        Err(ActionReferenceParseError::MissingPluginName)
     );
     assert_eq!(
-        "core:Bad Name".parse::<ActionRef>(),
-        Err(ActionRefParseError::Name(ActionNameError::InvalidStart {
-            ch: 'B'
-        }))
+        "core:Bad Name".parse::<ActionReference>(),
+        Err(ActionReferenceParseError::InvalidActionName(
+            ActionNameError::InvalidStart {
+                invalid_character: 'B'
+            }
+        ))
     );
 
     // The same rejection holds when decoding from the wire.
-    let decoded: Result<ActionRef, _> = serde_json::from_str("\"core:Bad Name\"");
+    let decoded_action_reference: Result<ActionReference, _> =
+        serde_json::from_str("\"core:Bad Name\"");
     assert_eq!(
-        decoded
+        decoded_action_reference
             .expect_err("invalid action name must not deserialize")
             .to_string(),
         "action name must start with a lowercase letter, found 'B'"
@@ -237,158 +282,174 @@ fn action_ref_rejects_malformed_strings() {
 }
 
 #[test]
-fn action_ref_parse_reports_the_first_failing_rule() {
+fn action_reference_parser_reports_first_failing_rule() {
     let plugin_id = PluginId::new();
-    let uuid = plugin_id.as_uuid();
-    let cases: &[(String, ActionRefParseError)] = &[
-        (String::new(), ActionRefParseError::MissingNamespace),
-        ("core".to_string(), ActionRefParseError::MissingNamespace),
+    let uuid = plugin_id.get_uuid();
+    let parse_error_cases: &[(String, ActionReferenceParseError)] = &[
+        (String::new(), ActionReferenceParseError::MissingNamespace),
+        (
+            "core".to_string(),
+            ActionReferenceParseError::MissingNamespace,
+        ),
         (
             ":".to_string(),
-            ActionRefParseError::UnknownNamespace {
-                found: String::new(),
+            ActionReferenceParseError::UnknownNamespace {
+                unknown_namespace: String::new(),
             },
         ),
         (
             "CORE:new-pane".to_string(),
-            ActionRefParseError::UnknownNamespace {
-                found: "CORE".to_string(),
+            ActionReferenceParseError::UnknownNamespace {
+                unknown_namespace: "CORE".to_string(),
             },
         ),
         (
             " core:new-pane".to_string(),
-            ActionRefParseError::UnknownNamespace {
-                found: " core".to_string(),
+            ActionReferenceParseError::UnknownNamespace {
+                unknown_namespace: " core".to_string(),
             },
         ),
         (
             "core:".to_string(),
-            ActionRefParseError::Name(ActionNameError::Empty),
+            ActionReferenceParseError::InvalidActionName(ActionNameError::Empty),
         ),
         (
             "user:".to_string(),
-            ActionRefParseError::Name(ActionNameError::Empty),
+            ActionReferenceParseError::InvalidActionName(ActionNameError::Empty),
         ),
         (
             "core:new-pane:x".to_string(),
-            ActionRefParseError::Name(ActionNameError::InvalidChar { ch: ':' }),
+            ActionReferenceParseError::InvalidActionName(ActionNameError::InvalidChar {
+                invalid_character: ':',
+            }),
         ),
         (
             "plugin:".to_string(),
-            ActionRefParseError::MissingPluginName,
+            ActionReferenceParseError::MissingPluginName,
         ),
         (
             "plugin:not-a-uuid".to_string(),
-            ActionRefParseError::MissingPluginName,
+            ActionReferenceParseError::MissingPluginName,
         ),
         (
             "plugin::x".to_string(),
-            ActionRefParseError::InvalidPluginId,
+            ActionReferenceParseError::InvalidPluginId,
         ),
         (
             format!("plugin:{uuid}:"),
-            ActionRefParseError::Name(ActionNameError::Empty),
+            ActionReferenceParseError::InvalidActionName(ActionNameError::Empty),
         ),
         (
             format!("plugin:{uuid}:a:b"),
-            ActionRefParseError::Name(ActionNameError::InvalidChar { ch: ':' }),
+            ActionReferenceParseError::InvalidActionName(ActionNameError::InvalidChar {
+                invalid_character: ':',
+            }),
         ),
     ];
-    for (text, expected) in cases {
+    for (action_reference_text, expected_parse_error) in parse_error_cases {
         assert_eq!(
-            text.parse::<ActionRef>(),
-            Err(expected.clone()),
-            "for {text:?}"
+            action_reference_text.parse::<ActionReference>(),
+            Err(expected_parse_error.clone()),
+            "for {action_reference_text:?}"
         );
     }
 }
 
 #[test]
-fn action_ref_parse_error_messages_are_pinned() {
+fn action_reference_parse_error_display_uses_stable_messages() {
     assert_eq!(
-        ActionRefParseError::MissingNamespace.to_string(),
-        "action ref is missing a 'namespace:' prefix"
+        ActionReferenceParseError::MissingNamespace.to_string(),
+        "action reference is missing a 'namespace:' prefix"
     );
     assert_eq!(
-        ActionRefParseError::UnknownNamespace {
-            found: "shell".to_string()
+        ActionReferenceParseError::UnknownNamespace {
+            unknown_namespace: "shell".to_string()
         }
         .to_string(),
         "unknown action namespace \"shell\"; expected core, plugin, or user"
     );
     assert_eq!(
-        ActionRefParseError::MissingPluginName.to_string(),
-        "plugin action ref must be 'plugin:<uuid>:<name>'"
+        ActionReferenceParseError::MissingPluginName.to_string(),
+        "plugin action reference must be 'plugin:<uuid>:<name>'"
     );
     assert_eq!(
-        ActionRefParseError::InvalidPluginId.to_string(),
-        "plugin action ref has an invalid UUID"
+        ActionReferenceParseError::InvalidPluginId.to_string(),
+        "plugin action reference has an invalid UUID"
     );
     assert_eq!(
-        ActionRefParseError::Name(ActionNameError::Empty).to_string(),
+        ActionReferenceParseError::InvalidActionName(ActionNameError::Empty).to_string(),
         "action name is empty"
     );
 }
 
 #[test]
-fn action_ref_parse_error_source_is_the_name_error_only() {
+fn action_reference_parse_error_source_exposes_only_name_error() {
     use std::error::Error;
 
-    let name_error = ActionRefParseError::Name(ActionNameError::Empty);
+    let name_error = ActionReferenceParseError::InvalidActionName(ActionNameError::Empty);
     assert_eq!(
         name_error.source().map(ToString::to_string),
         Some("action name is empty".to_string())
     );
-    for error in [
-        ActionRefParseError::MissingNamespace,
-        ActionRefParseError::UnknownNamespace {
-            found: "shell".to_string(),
+    for action_parse_error in [
+        ActionReferenceParseError::MissingNamespace,
+        ActionReferenceParseError::UnknownNamespace {
+            unknown_namespace: "shell".to_string(),
         },
-        ActionRefParseError::MissingPluginName,
-        ActionRefParseError::InvalidPluginId,
+        ActionReferenceParseError::MissingPluginName,
+        ActionReferenceParseError::InvalidPluginId,
     ] {
         assert_eq!(
-            error.source().map(ToString::to_string),
+            action_parse_error.source().map(ToString::to_string),
             None,
-            "for {error:?}"
+            "for {action_parse_error:?}"
         );
     }
 }
 
 #[test]
-fn action_ref_parse_accepts_a_plugin_uuid_without_hyphens() {
+fn action_reference_parser_accepts_plugin_uuid_without_hyphens() {
     let plugin_id = PluginId::new();
-    let text = format!("plugin:{}:x", plugin_id.as_uuid().simple());
-    let parsed = text.parse::<ActionRef>().expect("valid");
-    assert_eq!(parsed, ActionRef::plugin(plugin_id, "x").expect("valid"));
+    let plugin_action_reference_text = format!("plugin:{}:x", plugin_id.get_uuid().simple());
+    let parsed_action_reference = plugin_action_reference_text
+        .parse::<ActionReference>()
+        .expect("valid");
+    assert_eq!(
+        parsed_action_reference,
+        ActionReference::from_plugin_action_name(plugin_id, "x").expect("valid")
+    );
     // The canonical form always prints the hyphenated UUID.
     assert_eq!(
-        parsed.to_string(),
-        format!("plugin:{}:x", plugin_id.as_uuid().hyphenated())
+        parsed_action_reference.to_string(),
+        format!("plugin:{}:x", plugin_id.get_uuid().hyphenated())
     );
 }
 
 #[test]
-fn action_ref_serializes_user_and_plugin_forms_as_strings() {
-    let user = ActionRef::user("my-macro").expect("valid");
+fn action_reference_serialization_uses_user_and_plugin_strings() {
+    let user_action_reference = ActionReference::from_user_action_name("my-macro").expect("valid");
     assert_eq!(
-        serde_json::to_string(&user).expect("serialize"),
+        serde_json::to_string(&user_action_reference).expect("serialize"),
         "\"user:my-macro\""
     );
-    assert_eq!(String::from(user.clone()), "user:my-macro");
+    assert_eq!(String::from(user_action_reference.clone()), "user:my-macro");
 
     let plugin_id = PluginId::new();
-    let plugin = ActionRef::plugin(plugin_id, "diff").expect("valid");
-    let expected = format!("plugin:{}:diff", plugin_id.as_uuid());
+    let plugin_action_reference =
+        ActionReference::from_plugin_action_name(plugin_id, "diff").expect("valid");
+    let expected_plugin_reference = format!("plugin:{}:diff", plugin_id.get_uuid());
     assert_eq!(
-        serde_json::to_string(&plugin).expect("serialize"),
-        format!("\"{expected}\"")
+        serde_json::to_string(&plugin_action_reference).expect("serialize"),
+        format!("\"{expected_plugin_reference}\"")
     );
-    assert_eq!(String::from(plugin), expected);
+    assert_eq!(
+        String::from(plugin_action_reference),
+        expected_plugin_reference
+    );
 }
 
 #[test]
-fn action_namespace_wire_form_is_pinned() {
+fn action_namespace_serialization_uses_stable_wire_forms() {
     use serde_json::json;
 
     assert_eq!(
@@ -402,12 +463,12 @@ fn action_namespace_wire_form_is_pinned() {
     let plugin_id = PluginId::new();
     assert_eq!(
         serde_json::to_value(ActionNamespace::Plugin(plugin_id)).expect("serialize"),
-        json!({ "Plugin": plugin_id.as_uuid().to_string() })
+        json!({ "Plugin": plugin_id.get_uuid().to_string() })
     );
 }
 
 #[test]
-fn action_status_serializes_in_kebab_case() {
+fn action_status_serialization_uses_kebab_case() {
     assert_eq!(
         serde_json::to_string(&ActionStatus::Available).expect("serialize"),
         "\"available\""
@@ -416,8 +477,9 @@ fn action_status_serializes_in_kebab_case() {
         serde_json::to_string(&ActionStatus::ComingSoon).expect("serialize"),
         "\"coming-soon\""
     );
-    let decoded: ActionStatus = serde_json::from_str("\"coming-soon\"").expect("deserialize");
-    assert_eq!(decoded, ActionStatus::ComingSoon);
+    let decoded_action_status: ActionStatus =
+        serde_json::from_str("\"coming-soon\"").expect("deserialize");
+    assert_eq!(decoded_action_status, ActionStatus::ComingSoon);
     let rejected: Result<ActionStatus, _> = serde_json::from_str("\"ComingSoon\"");
     assert_eq!(
         rejected
@@ -428,23 +490,23 @@ fn action_status_serializes_in_kebab_case() {
 }
 
 #[test]
-fn action_handler_ref_wire_form_is_pinned() {
+fn action_handler_reference_serialization_uses_stable_wire_forms() {
     use serde_json::json;
 
     assert_eq!(
-        serde_json::to_value(ActionHandlerRef::CoreCommand(CommandKind::NewPane))
+        serde_json::to_value(ActionHandlerReference::CoreCommand(CommandKind::NewPane))
             .expect("serialize"),
         json!({ "CoreCommand": "NewPane" })
     );
     let plugin_id = PluginId::new();
     assert_eq!(
-        serde_json::to_value(ActionHandlerRef::PluginHostCall(plugin_id)).expect("serialize"),
-        json!({ "PluginHostCall": plugin_id.as_uuid().to_string() })
+        serde_json::to_value(ActionHandlerReference::PluginHostCall(plugin_id)).expect("serialize"),
+        json!({ "PluginHostCall": plugin_id.get_uuid().to_string() })
     );
     assert_eq!(
-        serde_json::to_value(ActionHandlerRef::Sequence(vec![
-            ActionRef::core("lock").expect("valid"),
-            ActionRef::core("new-tab").expect("valid"),
+        serde_json::to_value(ActionHandlerReference::Sequence(vec![
+            ActionReference::from_core_action_name("lock").expect("valid"),
+            ActionReference::from_core_action_name("new-tab").expect("valid"),
         ]))
         .expect("serialize"),
         json!({ "Sequence": ["core:lock", "core:new-tab"] })
@@ -452,55 +514,59 @@ fn action_handler_ref_wire_form_is_pinned() {
 }
 
 #[test]
-fn handler_ref_roundtrips() {
-    roundtrip(&ActionHandlerRef::CoreCommand(CommandKind::NewPane));
-    roundtrip(&ActionHandlerRef::PluginHostCall(PluginId::new()));
-    roundtrip(&ActionHandlerRef::Sequence(vec![
-        ActionRef::core("lock").expect("valid"),
-        ActionRef::core("new-tab").expect("valid"),
+fn action_handler_reference_roundtrips_through_serde() {
+    assert_json_roundtrip(&ActionHandlerReference::CoreCommand(CommandKind::NewPane));
+    assert_json_roundtrip(&ActionHandlerReference::PluginHostCall(PluginId::new()));
+    assert_json_roundtrip(&ActionHandlerReference::Sequence(vec![
+        ActionReference::from_core_action_name("lock").expect("valid"),
+        ActionReference::from_core_action_name("new-tab").expect("valid"),
     ]));
 }
 
 #[test]
-fn action_metadata_roundtrips() {
+fn action_metadata_roundtrips_through_serde() {
     let metadata = ActionMetadata {
         namespace: ActionNamespace::Core,
         display_name: "New Pane".to_string(),
         description: "Split the focused pane".to_string(),
-        scope_class: ActionScope::PaneSession,
-        target_compat: vec![TargetKind::Pane],
-        handler: ActionHandlerRef::CoreCommand(CommandKind::NewPane),
-        status: ActionStatus::Available,
-        continuous: false,
+        scope: ActionScope::PaneSession,
+        target_kinds: vec![TargetKind::Pane],
+        handler: ActionHandlerReference::CoreCommand(CommandKind::NewPane),
+        action_status: ActionStatus::Available,
+        is_continuous: false,
     };
-    roundtrip(&metadata);
+    assert_json_roundtrip(&metadata);
 }
 
 #[test]
-fn action_metadata_continuous_is_false_when_absent_on_the_wire() {
+fn action_metadata_defaults_is_continuous_when_wire_field_is_absent() {
     let metadata = ActionMetadata {
         namespace: ActionNamespace::Core,
         display_name: "Resize Pane".to_string(),
         description: "Grow or shrink the focused pane along one edge".to_string(),
-        scope_class: ActionScope::PaneSession,
-        target_compat: vec![TargetKind::Pane],
-        handler: ActionHandlerRef::CoreCommand(CommandKind::ResizePane),
-        status: ActionStatus::Available,
-        continuous: true,
+        scope: ActionScope::PaneSession,
+        target_kinds: vec![TargetKind::Pane],
+        handler: ActionHandlerReference::CoreCommand(CommandKind::ResizePane),
+        action_status: ActionStatus::Available,
+        is_continuous: true,
     };
-    let mut value = serde_json::to_value(&metadata).expect("serialize");
-    assert_eq!(value["continuous"], serde_json::Value::Bool(true));
-    let removed = value
+    let mut metadata_json = serde_json::to_value(&metadata).expect("serialize");
+    assert_eq!(metadata_json["continuous"], serde_json::Value::Bool(true));
+    let removed_continuous_wire_field = metadata_json
         .as_object_mut()
         .expect("metadata is an object")
         .remove("continuous");
-    assert_eq!(removed, Some(serde_json::Value::Bool(true)));
-
-    let decoded: ActionMetadata = serde_json::from_value(value).expect("deserialize");
     assert_eq!(
-        decoded,
+        removed_continuous_wire_field,
+        Some(serde_json::Value::Bool(true))
+    );
+
+    let decoded_metadata: ActionMetadata =
+        serde_json::from_value(metadata_json).expect("deserialize");
+    assert_eq!(
+        decoded_metadata,
         ActionMetadata {
-            continuous: false,
+            is_continuous: false,
             ..metadata
         }
     );
@@ -508,52 +574,59 @@ fn action_metadata_continuous_is_false_when_absent_on_the_wire() {
 
 #[test]
 #[should_panic(expected = "core seed action name must satisfy the action-name grammar")]
-fn core_seed_panics_on_an_invalid_name() {
-    let _ = core_seed(
+fn core_action_seed_panics_on_invalid_action_name() {
+    let _ = build_core_action_seed(
         "Bad Name",
         "Bad",
         "An invalid seed",
         ActionScope::Global,
         vec![],
-        ActionHandlerRef::CoreCommand(CommandKind::Quit),
+        ActionHandlerReference::CoreCommand(CommandKind::Quit),
         ActionStatus::Available,
     );
 }
 
 #[test]
-fn mouse_select_seed_display_name_is_the_hint_label() {
+fn mouse_select_seed_uses_hint_label_as_display_name() {
     assert_eq!(MOUSE_SELECT_HINT, "Mouse Select");
     assert_eq!(MOUSE_UNSELECT_HINT, "Mouse Unselect");
-    let seeds = core_action_seeds();
-    let mouse_select = ActionRef::core("mouse-select").expect("valid");
-    let (_, metadata) = seeds
+    let seeds = build_core_action_seeds();
+    let mouse_select_action_reference =
+        ActionReference::from_core_action_name("mouse-select").expect("valid");
+    let (_, mouse_select_metadata) = seeds
         .iter()
-        .find(|(action, _)| *action == mouse_select)
+        .find(|(action_reference, _)| *action_reference == mouse_select_action_reference)
         .expect("mouse-select is seeded");
-    assert_eq!(metadata.display_name, MOUSE_SELECT_HINT);
+    assert_eq!(mouse_select_metadata.display_name, MOUSE_SELECT_HINT);
 }
 
 /// Pins every seed's position, command kind, scope, and targets, in table
 /// order. `koshi actions list` prints the `Available` rows in this order.
 #[test]
-fn core_seed_order_kind_scope_and_targets_are_pinned() {
+fn core_action_seed_order_kind_scope_and_targets_are_stable() {
     use ActionScope::{Client, Global, PaneSession, Tab};
     use TargetKind::{Client as ClientTarget, Pane, Session, Tab as TabTarget};
 
-    let seeds = core_action_seeds();
-    let actual: Vec<(String, ActionHandlerRef, ActionScope, Vec<TargetKind>)> = seeds
-        .into_iter()
-        .map(|(action, metadata)| {
-            (
-                action.to_string(),
-                metadata.handler,
-                metadata.scope_class,
-                metadata.target_compat,
-            )
-        })
-        .collect();
+    let seeds = build_core_action_seeds();
+    let actual_seed_metadata: Vec<(String, ActionHandlerReference, ActionScope, Vec<TargetKind>)> =
+        seeds
+            .into_iter()
+            .map(|(action, metadata)| {
+                (
+                    action.to_string(),
+                    metadata.handler,
+                    metadata.scope,
+                    metadata.target_kinds,
+                )
+            })
+            .collect();
 
-    let expected: Vec<(String, ActionHandlerRef, ActionScope, Vec<TargetKind>)> = [
+    let expected_seed_metadata: Vec<(
+        String,
+        ActionHandlerReference,
+        ActionScope,
+        Vec<TargetKind>,
+    )> = [
         (
             "core:new-pane",
             CommandKind::NewPane,
@@ -750,60 +823,64 @@ fn core_seed_order_kind_scope_and_targets_are_pinned() {
         ("core:plugin-reload", CommandKind::Plugin, Global, vec![]),
     ]
     .into_iter()
-    .map(|(name, kind, scope, targets)| {
+    .map(|(action_name, command_kind, action_scope, target_kinds)| {
         (
-            name.to_string(),
-            ActionHandlerRef::CoreCommand(kind),
-            scope,
-            targets,
+            action_name.to_string(),
+            ActionHandlerReference::CoreCommand(command_kind),
+            action_scope,
+            target_kinds,
         )
     })
     .collect();
 
-    assert_eq!(actual, expected);
+    assert_eq!(actual_seed_metadata, expected_seed_metadata);
 }
 
 #[test]
-fn core_seeds_are_well_formed() {
-    let seeds = core_action_seeds();
+fn core_action_seeds_have_valid_namespaces_and_serde_forms() {
+    let seeds = build_core_action_seeds();
 
     // Every seed is in the core namespace, on both the ref and its metadata.
-    for (action, metadata) in &seeds {
-        assert_eq!(action.namespace, ActionNamespace::Core);
-        assert_eq!(metadata.namespace, ActionNamespace::Core);
+    for (action_reference, action_metadata) in &seeds {
+        assert_eq!(action_reference.namespace, ActionNamespace::Core);
+        assert_eq!(action_metadata.namespace, ActionNamespace::Core);
     }
 
-    // No duplicate action refs.
-    let unique: BTreeSet<String> = seeds.iter().map(|(a, _)| a.to_string()).collect();
+    // No duplicate action references.
+    let unique_action_references: BTreeSet<String> = seeds
+        .iter()
+        .map(|(action_reference, _)| action_reference.to_string())
+        .collect();
     assert_eq!(
-        unique.len(),
+        unique_action_references.len(),
         seeds.len(),
         "seed action names must be unique"
     );
 
     // The whole table roundtrips through serde.
-    for (action, metadata) in &seeds {
-        roundtrip(action);
-        roundtrip(metadata);
+    for (action_reference, action_metadata) in &seeds {
+        assert_json_roundtrip(action_reference);
+        assert_json_roundtrip(action_metadata);
     }
 }
 
 /// Pins the client-scoped seeds: lock mode and focus are per-client state, so
 /// their actions carry the `Client` scope and accept a client target.
 #[test]
-fn lock_and_focus_seeds_are_client_scoped() {
-    let seeds = core_action_seeds();
-    let metadata_of = |name: &str| {
-        let action = ActionRef::core(name).expect("valid seed name");
+fn lock_and_focus_seeds_use_client_scope_and_targets() {
+    let seeds = build_core_action_seeds();
+    let get_action_metadata = |action_name: &str| {
+        let action_reference =
+            ActionReference::from_core_action_name(action_name).expect("valid seed name");
         seeds
             .iter()
-            .find(|(seeded, _)| *seeded == action)
-            .unwrap_or_else(|| panic!("{name} must be seeded"))
+            .find(|(seeded_action_reference, _)| *seeded_action_reference == action_reference)
+            .unwrap_or_else(|| panic!("{action_name} must be seeded"))
             .1
             .clone()
     };
 
-    let cases: &[(&str, Vec<TargetKind>)] = &[
+    let client_scoped_action_cases: &[(&str, Vec<TargetKind>)] = &[
         ("focus-pane", vec![TargetKind::Pane, TargetKind::Client]),
         ("focus-tab", vec![TargetKind::Tab, TargetKind::Client]),
         ("next-tab", vec![TargetKind::Client]),
@@ -812,10 +889,17 @@ fn lock_and_focus_seeds_are_client_scoped() {
         ("unlock", vec![TargetKind::Client]),
         ("toggle-lock", vec![TargetKind::Client]),
     ];
-    for (name, targets) in cases {
-        let metadata = metadata_of(name);
-        assert_eq!(metadata.scope_class, ActionScope::Client, "for {name}");
-        assert_eq!(metadata.target_compat, *targets, "for {name}");
+    for (action_name, target_kinds) in client_scoped_action_cases {
+        let action_metadata = get_action_metadata(action_name);
+        assert_eq!(
+            action_metadata.scope,
+            ActionScope::Client,
+            "for {action_name}"
+        );
+        assert_eq!(
+            action_metadata.target_kinds, *target_kinds,
+            "for {action_name}"
+        );
     }
 }
 
@@ -823,11 +907,11 @@ fn lock_and_focus_seeds_are_client_scoped() {
 /// actions have no runtime handler, so each is seeded `ComingSoon` and every
 /// other action is `Available`.
 #[test]
-fn coming_soon_seeds_are_pinned() {
-    let mut coming_soon: Vec<String> = core_action_seeds()
+fn coming_soon_action_seeds_are_stable() {
+    let mut coming_soon: Vec<String> = build_core_action_seeds()
         .iter()
-        .filter(|(_, metadata)| metadata.status == ActionStatus::ComingSoon)
-        .map(|(action, _)| action.to_string())
+        .filter(|(_, action_metadata)| action_metadata.action_status == ActionStatus::ComingSoon)
+        .map(|(action_reference, _)| action_reference.to_string())
         .collect();
     coming_soon.sort();
 
@@ -835,7 +919,7 @@ fn coming_soon_seeds_are_pinned() {
     // Entering and leaving it are not actions (a drag enters, any key leaves),
     // and setting/clearing the selection is the mouse layer's command, not a
     // name a user can bind.
-    let mut expected = [
+    let mut expected_coming_soon_action_names = [
         "core:copy-selection",
         "core:plugin-disable",
         "core:plugin-enable",
@@ -846,9 +930,9 @@ fn coming_soon_seeds_are_pinned() {
     ]
     .map(String::from)
     .to_vec();
-    expected.sort();
+    expected_coming_soon_action_names.sort();
 
-    assert_eq!(coming_soon, expected);
+    assert_eq!(coming_soon, expected_coming_soon_action_names);
 }
 
 /// Pins which seeds are continuous: exactly the resize-pane and focus-pane
@@ -856,15 +940,15 @@ fn coming_soon_seeds_are_pinned() {
 /// flag — or the flag appearing on any other action — changes this list and
 /// fails the assert.
 #[test]
-fn continuous_seeds_are_pinned() {
-    let mut continuous: Vec<String> = core_action_seeds()
+fn continuous_action_seeds_are_stable() {
+    let mut continuous: Vec<String> = build_core_action_seeds()
         .iter()
-        .filter(|(_, metadata)| metadata.continuous)
-        .map(|(action, _)| action.to_string())
+        .filter(|(_, action_metadata)| action_metadata.is_continuous)
+        .map(|(action_reference, _)| action_reference.to_string())
         .collect();
     continuous.sort();
 
-    let mut expected = [
+    let mut expected_continuous_action_names = [
         "core:resize-pane",
         "core:resize-pane-left",
         "core:resize-pane-down",
@@ -878,22 +962,22 @@ fn continuous_seeds_are_pinned() {
     ]
     .map(String::from)
     .to_vec();
-    expected.sort();
+    expected_continuous_action_names.sort();
 
-    assert_eq!(continuous, expected);
+    assert_eq!(continuous, expected_continuous_action_names);
 }
 
 /// Pins the exact set of built-in actions. Adding, removing, or renaming a seed
 /// changes this list and fails the assert.
 #[test]
-fn core_seed_snapshot_is_stable() {
-    let mut names: Vec<String> = core_action_seeds()
+fn core_action_seed_name_snapshot_is_stable() {
+    let mut action_names: Vec<String> = build_core_action_seeds()
         .iter()
-        .map(|(action, _)| action.to_string())
+        .map(|(action_reference, _)| action_reference.to_string())
         .collect();
-    names.sort();
+    action_names.sort();
 
-    let expected = vec![
+    let expected_action_names = vec![
         "core:close-pane",
         "core:close-pane-tree",
         "core:close-tab",
@@ -934,5 +1018,5 @@ fn core_seed_snapshot_is_stable() {
         "core:unlock",
         "core:write-to-pane",
     ];
-    assert_eq!(names, expected);
+    assert_eq!(action_names, expected_action_names);
 }

@@ -10,7 +10,7 @@
 //!
 //! The seven types below share the same shape: a wrapped [`Uuid`], a `new`
 //! constructor that mints a fresh id, a `from_uuid` constructor that wraps an
-//! existing one, an `as_uuid` accessor, and a `Display` impl that prefixes the
+//! existing one, a `get_uuid` accessor, and a `Display` impl that prefixes the
 //! id with its entity name.
 
 use serde::{Deserialize, Serialize};
@@ -36,7 +36,7 @@ impl SessionId {
 
     /// Borrow the underlying UUID.
     #[must_use]
-    pub fn as_uuid(&self) -> &Uuid {
+    pub fn get_uuid(&self) -> &Uuid {
         &self.0
     }
 }
@@ -72,7 +72,7 @@ impl ClientId {
 
     /// Borrow the underlying UUID.
     #[must_use]
-    pub fn as_uuid(&self) -> &Uuid {
+    pub fn get_uuid(&self) -> &Uuid {
         &self.0
     }
 }
@@ -108,7 +108,7 @@ impl TabId {
 
     /// Borrow the underlying UUID.
     #[must_use]
-    pub fn as_uuid(&self) -> &Uuid {
+    pub fn get_uuid(&self) -> &Uuid {
         &self.0
     }
 }
@@ -144,7 +144,7 @@ impl PaneId {
 
     /// Borrow the underlying UUID.
     #[must_use]
-    pub fn as_uuid(&self) -> &Uuid {
+    pub fn get_uuid(&self) -> &Uuid {
         &self.0
     }
 }
@@ -180,7 +180,7 @@ impl PluginId {
 
     /// Borrow the underlying UUID.
     #[must_use]
-    pub fn as_uuid(&self) -> &Uuid {
+    pub fn get_uuid(&self) -> &Uuid {
         &self.0
     }
 }
@@ -216,7 +216,7 @@ impl CommandId {
 
     /// Borrow the underlying UUID.
     #[must_use]
-    pub fn as_uuid(&self) -> &Uuid {
+    pub fn get_uuid(&self) -> &Uuid {
         &self.0
     }
 }
@@ -252,7 +252,7 @@ impl SubscriberId {
 
     /// Borrow the underlying UUID.
     #[must_use]
-    pub fn as_uuid(&self) -> &Uuid {
+    pub fn get_uuid(&self) -> &Uuid {
         &self.0
     }
 }
@@ -269,10 +269,10 @@ impl fmt::Display for SubscriberId {
     }
 }
 
-/// Reads an id a person typed, in either spelling koshi accepts: the prefixed
-/// form an id prints as, or the uuid on its own.
+/// Reads an identifier a person typed, in either spelling koshi accepts: the
+/// prefixed form an identifier prints as, or the UUID on its own.
 ///
-/// `prefix` is the word before the hyphen, e.g. `"session"`, matched
+/// `identifier_prefix` is the word before the hyphen, e.g. `"session"`, matched
 /// case-sensitively. The uuid part is read by [`Uuid::parse_str`], which
 /// accepts the hyphenated form, 32 hex digits with no hyphens, the
 /// `urn:uuid:` form, and the braced form.
@@ -284,12 +284,13 @@ impl fmt::Display for SubscriberId {
 ///
 /// # Errors
 /// Returns the sentence above when the text is neither spelling.
-pub fn parse_prefixed_uuid(value: &str, prefix: &str) -> Result<Uuid, String> {
-    let bare = value
-        .strip_prefix(prefix)
-        .and_then(|rest| rest.strip_prefix('-'))
-        .unwrap_or(value);
-    Uuid::parse_str(bare).map_err(|_| format!("expected `{prefix}-<uuid>` or a bare UUID"))
+pub fn parse_prefixed_uuid(identifier_text: &str, identifier_prefix: &str) -> Result<Uuid, String> {
+    let uuid_text = identifier_text
+        .strip_prefix(identifier_prefix)
+        .and_then(|remaining_identifier_text| remaining_identifier_text.strip_prefix('-'))
+        .unwrap_or(identifier_text);
+    Uuid::parse_str(uuid_text)
+        .map_err(|_| format!("expected `{identifier_prefix}-<uuid>` or a bare UUID"))
 }
 
 #[cfg(test)]

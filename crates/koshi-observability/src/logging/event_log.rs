@@ -10,7 +10,7 @@
 //!
 //! # Which events get a line
 //!
-//! Only the ones a person could point at: a pane opened, a tab closed, the
+//! Only the ones a person could point position: a pane opened, a tab closed, the
 //! config applied, the lock mode changed.
 //!
 //! Four kinds are left out.
@@ -31,130 +31,130 @@
 
 use koshi_core::event::{Event, PluginEvent};
 
-/// Write one log line for `event`, at the level its outcome deserves, or write
+/// Write one log line for `runtime_event`, at the level its outcome deserves, or write
 /// nothing when the event is one of the high-frequency kinds the [logging
 /// policy](super#logging-policy) keeps out of the file.
 ///
 /// Example: a `new-pane` binding commits [`Event::PaneCreated`] and
 /// [`Event::PaneFocused`], which become two `info` lines carrying the pane and
 /// tab ids. An [`Event::PaneTyped`] writes nothing, whatever it carries.
-pub fn log_event(event: &Event) {
-    match event {
+pub fn log_event(runtime_event: &Event) {
+    match runtime_event {
         // --- pane and tab lifecycle: one line per fact a person can point at.
-        Event::PaneCreated(payload) => {
-            tracing::info!(pane_id = %payload.pane_id, tab_id = %payload.tab_id, "pane created");
+        Event::PaneCreated(event_payload) => {
+            tracing::info!(pane_id = %event_payload.pane_id, tab_id = %event_payload.tab_id, "pane created");
         }
-        Event::PaneProcessExited(payload) => {
+        Event::PaneProcessExited(event_payload) => {
             // `exit_code` is `None` for a signal-terminated child; the line
             // then carries no `exit_code` field. An exit code of `0` logs at
             // info; every other code, and a signal, logs at warn.
-            if payload.exit_code == Some(0) {
+            if event_payload.exit_code == Some(0) {
                 tracing::info!(
-                    pane_id = %payload.pane_id,
-                    exit_code = payload.exit_code,
+                    pane_id = %event_payload.pane_id,
+                    exit_code = event_payload.exit_code,
                     "pane process exited"
                 );
             } else {
                 tracing::warn!(
-                    pane_id = %payload.pane_id,
-                    exit_code = payload.exit_code,
+                    pane_id = %event_payload.pane_id,
+                    exit_code = event_payload.exit_code,
                     "pane process exited"
                 );
             }
         }
-        Event::PaneRemoved(payload) => {
-            tracing::info!(pane_id = %payload.pane_id, tab_id = %payload.tab_id, "pane removed");
+        Event::PaneRemoved(event_payload) => {
+            tracing::info!(pane_id = %event_payload.pane_id, tab_id = %event_payload.tab_id, "pane removed");
         }
-        Event::PaneFocused(payload) => {
+        Event::PaneFocused(event_payload) => {
             tracing::info!(
-                client_id = %payload.client_id,
-                tab_id = %payload.tab_id,
-                pane_id = %payload.pane_id,
+                client_id = %event_payload.client_id,
+                tab_id = %event_payload.tab_id,
+                pane_id = %event_payload.pane_id,
                 "pane focused"
             );
         }
-        Event::TabCreated(payload) => {
-            tracing::info!(tab_id = %payload.tab_id, "tab created");
+        Event::TabCreated(event_payload) => {
+            tracing::info!(tab_id = %event_payload.tab_id, "tab created");
         }
-        Event::TabClosed(payload) => {
-            tracing::info!(tab_id = %payload.tab_id, "tab closed");
+        Event::TabClosed(event_payload) => {
+            tracing::info!(tab_id = %event_payload.tab_id, "tab closed");
         }
-        Event::TabFocused(payload) => {
+        Event::TabFocused(event_payload) => {
             tracing::info!(
-                client_id = %payload.client_id,
-                tab_id = %payload.tab_id,
+                client_id = %event_payload.client_id,
+                tab_id = %event_payload.tab_id,
                 "tab focused"
             );
         }
-        Event::TabMoved(payload) => {
+        Event::TabMoved(event_payload) => {
             tracing::info!(
-                tab_id = %payload.tab_id,
-                old_index = payload.old_index,
-                new_index = payload.new_index,
+                tab_id = %event_payload.tab_id,
+                previous_tab_index = event_payload.previous_tab_index,
+                new_tab_index = event_payload.new_tab_index,
                 "tab moved"
             );
         }
 
         // --- whole-screen visibility: one line on entering, one on leaving.
-        Event::TerminalTooSmallEntered(payload) => {
+        Event::TerminalTooSmallEntered(event_payload) => {
             tracing::info!(
-                client_id = %payload.client_id,
-                cols = payload.size.cols,
-                rows = payload.size.rows,
-                pane_area = ?payload.pane_area,
-                cause = ?payload.cause,
+                client_id = %event_payload.client_id,
+                column_count = event_payload.viewport_size.column_count,
+                row_count = event_payload.viewport_size.row_count,
+                pane_area = ?event_payload.pane_area,
+                cause = ?event_payload.cause,
                 "terminal too small; panes hidden"
             );
         }
-        Event::TerminalTooSmallExited(payload) => {
+        Event::TerminalTooSmallExited(event_payload) => {
             tracing::info!(
-                client_id = %payload.client_id,
-                cols = payload.size.cols,
-                rows = payload.size.rows,
+                client_id = %event_payload.client_id,
+                column_count = event_payload.viewport_size.column_count,
+                row_count = event_payload.viewport_size.row_count,
                 "terminal big enough again; panes shown"
             );
         }
 
         // --- config.
-        Event::ConfigReloaded(payload) => {
-            tracing::info!(session_id = %payload.session_id, "config reloaded");
+        Event::ConfigReloaded(event_payload) => {
+            tracing::info!(session_id = %event_payload.session_id, "config reloaded");
         }
 
         // --- input mode.
-        Event::InputModeChanged(payload) => {
+        Event::InputModeChanged(event_payload) => {
             tracing::info!(
-                client_id = %payload.client_id,
-                mode = ?payload.mode,
+                client_id = %event_payload.client_id,
+                mode = ?event_payload.lock_mode,
                 "input mode changed"
             );
         }
 
         // --- mouse select.
-        Event::MouseSelectChanged(payload) => {
+        Event::MouseSelectChanged(event_payload) => {
             tracing::info!(
-                client_id = %payload.client_id,
-                on = payload.on,
+                client_id = %event_payload.client_id,
+                is_enabled = event_payload.is_enabled,
                 "mouse select changed"
             );
         }
 
         // --- copy: the byte count only; the copied text never reaches the file.
-        Event::Copied(payload) => {
+        Event::Copied(event_payload) => {
             tracing::info!(
-                client_id = %payload.client_id,
-                pane_id = %payload.pane_id,
-                target = ?payload.target,
-                byte_len = payload.byte_len,
+                client_id = %event_payload.client_id,
+                pane_id = %event_payload.pane_id,
+                clipboard_target = ?event_payload.clipboard_target,
+                byte_count = event_payload.byte_count,
                 "copied"
             );
         }
 
         // --- delivery failures koshi has an answer for.
-        Event::SubscriberLagged(payload) => {
+        Event::SubscriberLagged(event_payload) => {
             tracing::warn!(
-                subscriber_id = %payload.subscriber_id,
-                dropped_count = payload.dropped_count,
-                event_class = ?payload.event_class,
+                subscriber_id = %event_payload.subscriber_id,
+                dropped_count = event_payload.dropped_event_count,
+                event_class = ?event_payload.event_class,
                 "subscriber queue overflowed; events dropped"
             );
         }
@@ -208,43 +208,43 @@ pub fn log_event(event: &Event) {
 
 /// Write one log line for a plugin lifecycle fact. Every variant writes a
 /// line: `LoadFailed` and `Broken` are `warn`, the rest are `info`.
-fn log_plugin_event(event: &PluginEvent) {
-    match event {
-        PluginEvent::Installed(payload) => {
-            tracing::info!(plugin_id = %payload.plugin_id, "plugin installed");
+fn log_plugin_event(plugin_event: &PluginEvent) {
+    match plugin_event {
+        PluginEvent::Installed(plugin_event_payload) => {
+            tracing::info!(plugin_id = %plugin_event_payload.plugin_id, "plugin installed");
         }
-        PluginEvent::Uninstalled(payload) => {
-            tracing::info!(plugin_id = %payload.plugin_id, "plugin uninstalled");
+        PluginEvent::Uninstalled(plugin_event_payload) => {
+            tracing::info!(plugin_id = %plugin_event_payload.plugin_id, "plugin uninstalled");
         }
-        PluginEvent::Enabled(payload) => {
-            tracing::info!(plugin_id = %payload.plugin_id, "plugin enabled");
+        PluginEvent::Enabled(plugin_event_payload) => {
+            tracing::info!(plugin_id = %plugin_event_payload.plugin_id, "plugin enabled");
         }
-        PluginEvent::Disabled(payload) => {
-            tracing::info!(plugin_id = %payload.plugin_id, "plugin disabled");
+        PluginEvent::Disabled(plugin_event_payload) => {
+            tracing::info!(plugin_id = %plugin_event_payload.plugin_id, "plugin disabled");
         }
-        PluginEvent::Updated(payload) => {
-            tracing::info!(plugin_id = %payload.plugin_id, "plugin updated");
+        PluginEvent::Updated(plugin_event_payload) => {
+            tracing::info!(plugin_id = %plugin_event_payload.plugin_id, "plugin updated");
         }
-        PluginEvent::Reloaded(payload) => {
-            tracing::info!(plugin_id = %payload.plugin_id, "plugin reloaded");
+        PluginEvent::Reloaded(plugin_event_payload) => {
+            tracing::info!(plugin_id = %plugin_event_payload.plugin_id, "plugin reloaded");
         }
-        PluginEvent::Unloaded(payload) => {
-            tracing::info!(plugin_id = %payload.plugin_id, "plugin unloaded");
+        PluginEvent::Unloaded(plugin_event_payload) => {
+            tracing::info!(plugin_id = %plugin_event_payload.plugin_id, "plugin unloaded");
         }
-        PluginEvent::DoctorCompleted(payload) => {
-            tracing::info!(plugin_id = %payload.plugin_id, "plugin diagnostic completed");
+        PluginEvent::DoctorCompleted(plugin_event_payload) => {
+            tracing::info!(plugin_id = %plugin_event_payload.plugin_id, "plugin diagnostic completed");
         }
-        PluginEvent::LoadFailed(payload) => {
+        PluginEvent::LoadFailed(plugin_event_payload) => {
             tracing::warn!(
-                plugin_id = %payload.plugin_id,
-                reason = %payload.reason,
+                plugin_id = %plugin_event_payload.plugin_id,
+                failure_reason = %plugin_event_payload.failure_reason,
                 "plugin failed to load; continuing without it"
             );
         }
-        PluginEvent::Broken(payload) => {
+        PluginEvent::Broken(plugin_event_payload) => {
             tracing::warn!(
-                plugin_id = %payload.plugin_id,
-                reason = %payload.reason,
+                plugin_id = %plugin_event_payload.plugin_id,
+                failure_reason = %plugin_event_payload.failure_reason,
                 "plugin marked broken and disabled"
             );
         }
