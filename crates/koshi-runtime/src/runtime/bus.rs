@@ -40,7 +40,7 @@
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::Arc;
 
-use koshi_core::event::{classify, Event, EventClass, SubscriberLagged};
+use koshi_core::event::{classify_event, Event, EventClass, SubscriberLagged};
 use koshi_core::ids::{SessionId, SubscriberId};
 use koshi_core::mouse::MouseAnswer;
 use koshi_ipc::event::SessionEvent;
@@ -65,7 +65,7 @@ pub enum EventFilter {
 
 impl EventFilter {
     /// Whether `event` passes this filter.
-    fn matches(self, _event: &Event) -> bool {
+    fn is_event_allowed(self, _event: &Event) -> bool {
         match self {
             EventFilter::All => true,
         }
@@ -91,13 +91,13 @@ enum DeliveryState {
     Desynced {
         /// How many deliveries the subscriber has missed: the one that paused
         /// it, plus every [`EventClass::Critical`] event published since.
-        dropped: u64,
+        dropped_event_count: u64,
     },
 }
 
 /// What putting one delivery on a subscriber's queue did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Queued {
+enum QueueDeliveryStatus {
     /// The delivery is on the queue.
     Sent,
     /// The queue was full: the delivery is gone and the subscriber is now
@@ -112,17 +112,17 @@ enum Queued {
 /// sending end of its queue.
 #[derive(Debug)]
 struct Subscriber {
-    /// Stable id assigned at subscription, named in log lines about this
+    /// Stable subscriber ID assigned at subscription, named in log lines about this
     /// subscriber.
-    id: SubscriberId,
+    subscriber_id: SubscriberId,
     /// Which events this subscriber receives.
     filter: EventFilter,
     /// Whether this subscriber is receiving events or paused awaiting a
     /// snapshot.
-    state: DeliveryState,
+    delivery_state: DeliveryState,
     /// Sending end of the subscriber's bounded queue; the receiver lives with
     /// the subscriber.
-    tx: SyncSender<Delivery>,
+    delivery_sender: SyncSender<Delivery>,
 }
 
 /// Event fan-out hub: every published event is delivered to each live
@@ -133,7 +133,7 @@ pub(crate) struct EventBus {
     subscribers: Vec<Subscriber>,
     /// Shared with every attached client's writing thread: raised by
     /// [`publish`](Self::publish) with the last frame it delivers.
-    ending: Arc<EndingNotice>,
+    ending_notice: Arc<EndingNotice>,
 }
 
 impl EventBus {
@@ -142,14 +142,14 @@ impl EventBus {
     pub(crate) fn new() -> Self {
         EventBus {
             subscribers: Vec::new(),
-            ending: Arc::new(EndingNotice::default()),
+            ending_notice: Arc::new(EndingNotice::default()),
         }
     }
 
     /// Borrow what this bus and every attached client's writing thread share
     /// about the session's last frame.
     pub(crate) fn ending_notice(&self) -> &Arc<EndingNotice> {
-        &self.ending
+        &self.ending_notice
     }
 
     /// Register a subscriber for the events `filter` selects and hand back its
@@ -157,15 +157,15 @@ impl EventBus {
     /// Dropping the receiver ends the subscription; the bus removes it on the
     /// next publish or delivery to it.
     pub(crate) fn subscribe(&mut self, filter: EventFilter) -> (SubscriberId, Receiver<Delivery>) {
-        let (tx, rx) = sync_channel(SUBSCRIBER_QUEUE_CAPACITY);
-        let id = SubscriberId::new();
+        let (delivery_sender, delivery_receiver) = sync_channel(SUBSCRIBER_QUEUE_CAPACITY);
+        let subscriber_id = SubscriberId::new();
         self.subscribers.push(Subscriber {
-            id,
+            subscriber_id,
             filter,
-            state: DeliveryState::Live,
-            tx,
+            delivery_state: DeliveryState::Live,
+            delivery_sender,
         });
-        (id, rx)
+        (subscriber_id, delivery_receiver)
     }
 
     /// Deliver `event` to every live subscriber whose filter matches it, and
@@ -183,54 +183,67 @@ impl EventBus {
     /// the caller can drop whatever it keeps alongside the subscription. The
     /// returned list is empty on every publish that removes nobody.
     pub(crate) fn publish(&mut self, event: &Event) -> Vec<SubscriberId> {
-        let class = classify(event);
+        let event_class = classify_event(event);
         // The stream's last frame, delivered whatever state the subscriber is
         // in: the client reading it leaves this socket. The notice carries it
         // to a client whose queue has no room left for it.
-        let ending = match event {
+        let session_ending = match event {
             Event::Quit => Some(SessionEnding::Quit),
             Event::Restarting => Some(SessionEnding::Restarting),
             _ => None,
         };
-        if let Some(ending) = ending {
-            self.ending.raise(ending);
+        if let Some(session_ending) = session_ending {
+            self.ending_notice.raise_session_ending(session_ending);
         }
-        let ends_the_stream = ending.is_some();
-        let mut removed = Vec::new();
+        let ends_the_stream = session_ending.is_some();
+        let mut removed_subscriber_ids = Vec::new();
         self.subscribers.retain_mut(|subscriber| {
-            if !subscriber.filter.matches(event) {
+            if !subscriber.filter.is_event_allowed(event) {
                 return true;
             }
-            if let DeliveryState::Desynced { dropped } = &mut subscriber.state {
+            if let DeliveryState::Desynced {
+                dropped_event_count,
+            } = &mut subscriber.delivery_state
+            {
                 if !ends_the_stream {
-                    if class == EventClass::Critical {
-                        *dropped += 1;
+                    if event_class == EventClass::Critical {
+                        *dropped_event_count += 1;
                     }
                     return true;
                 }
             }
-            match subscriber.tx.try_send(Delivery::Event(event.clone())) {
+            match subscriber
+                .delivery_sender
+                .try_send(Delivery::Event(event.clone()))
+            {
                 Ok(()) => true,
                 Err(TrySendError::Full(_)) => {
-                    match (&mut subscriber.state, class) {
-                        (DeliveryState::Desynced { dropped }, _) => {
-                            *dropped += 1;
+                    match (&mut subscriber.delivery_state, event_class) {
+                        (
+                            DeliveryState::Desynced {
+                                dropped_event_count,
+                            },
+                            _,
+                        ) => {
+                            *dropped_event_count += 1;
                             tracing::warn!(
-                                subscriber = %subscriber.id,
-                                event = event.name(),
+                                subscriber = %subscriber.subscriber_id,
+                                event = event.get_event_name(),
                                 "last frame dropped; subscriber queue full"
                             );
                         }
                         (DeliveryState::Live, EventClass::Lossy) => tracing::warn!(
-                            subscriber = %subscriber.id,
-                            event = event.name(),
+                            subscriber = %subscriber.subscriber_id,
+                            event = event.get_event_name(),
                             "event dropped; subscriber queue full"
                         ),
-                        (state @ DeliveryState::Live, EventClass::Critical) => {
-                            *state = DeliveryState::Desynced { dropped: 1 };
+                        (delivery_state @ DeliveryState::Live, EventClass::Critical) => {
+                            *delivery_state = DeliveryState::Desynced {
+                                dropped_event_count: 1,
+                            };
                             tracing::warn!(
-                                subscriber = %subscriber.id,
-                                event = event.name(),
+                                subscriber = %subscriber.subscriber_id,
+                                event = event.get_event_name(),
                                 "critical event dropped; subscriber desynced, awaiting snapshot"
                             );
                         }
@@ -238,216 +251,242 @@ impl EventBus {
                     true
                 }
                 Err(TrySendError::Disconnected(_)) => {
-                    removed.push(subscriber.id);
+                    removed_subscriber_ids.push(subscriber.subscriber_id);
                     false
                 }
             }
         });
-        removed
+        removed_subscriber_ids
     }
 
     /// Whether any subscriber is desynced and awaiting a snapshot.
-    pub(crate) fn has_desynced(&self) -> bool {
+    pub(crate) fn has_desynced_subscribers(&self) -> bool {
         self.subscribers
             .iter()
-            .any(|subscriber| subscriber.state != DeliveryState::Live)
+            .any(|subscriber| subscriber.delivery_state != DeliveryState::Live)
     }
 
     /// The ids of every subscriber desynced and awaiting a snapshot, in
     /// subscription order.
-    pub(crate) fn desynced(&self) -> Vec<SubscriberId> {
+    pub(crate) fn list_desynced_subscriber_ids(&self) -> Vec<SubscriberId> {
         self.subscribers
             .iter()
-            .filter(|subscriber| subscriber.state != DeliveryState::Live)
-            .map(|subscriber| subscriber.id)
+            .filter(|subscriber| subscriber.delivery_state != DeliveryState::Live)
+            .map(|subscriber| subscriber.subscriber_id)
             .collect()
     }
 
-    /// Whether `id` is still registered.
-    pub(crate) fn contains(&self, id: SubscriberId) -> bool {
-        self.index_of(id).is_some()
+    /// Whether `subscriber_id` is still registered.
+    pub(crate) fn has_subscriber(&self, subscriber_id: SubscriberId) -> bool {
+        self.find_subscriber_index(subscriber_id).is_some()
     }
 
-    /// Where `id` sits in the subscription-ordered list, or `None` when `id` is
+    /// Where `subscriber_id` sits in the subscription-ordered list, or `None` when `subscriber_id` is
     /// not registered.
-    fn index_of(&self, id: SubscriberId) -> Option<usize> {
+    fn find_subscriber_index(&self, subscriber_id: SubscriberId) -> Option<usize> {
         self.subscribers
             .iter()
-            .position(|subscriber| subscriber.id == id)
+            .position(|subscriber| subscriber.subscriber_id == subscriber_id)
     }
 
-    /// Drop `id`'s subscription. Does nothing when `id` is not registered.
-    pub(crate) fn unsubscribe(&mut self, id: SubscriberId) {
-        self.subscribers.retain(|subscriber| subscriber.id != id);
+    /// Drop `subscriber_id`'s subscription. Does nothing when `subscriber_id` is not registered.
+    pub(crate) fn unsubscribe(&mut self, subscriber_id: SubscriberId) {
+        self.subscribers
+            .retain(|subscriber| subscriber.subscriber_id != subscriber_id);
     }
 
-    /// Put `snapshot` on desynced subscriber `id`'s queue and return it to live
+    /// Put `snapshot` on desynced subscriber `subscriber_id`'s queue and return it to live
     /// delivery, reporting how many deliveries it missed.
     ///
-    /// Returns `true` once the snapshot is queued. Returns `false` when `id` is
+    /// Returns `true` once the snapshot is queued. Returns `false` when `subscriber_id` is
     /// unknown, when it is already live, or when its queue is still full — the
-    /// caller retries a full queue on a later pass. A subscriber whose receiver
+    /// caller retries a full queue on a subsequent pass. A subscriber whose receiver
     /// is gone is removed.
-    pub(crate) fn try_resync(&mut self, id: SubscriberId, snapshot: Box<RenderSnapshot>) -> bool {
-        let Some(index) = self.index_of(id) else {
+    pub(crate) fn try_resync(
+        &mut self,
+        subscriber_id: SubscriberId,
+        render_snapshot: Box<RenderSnapshot>,
+    ) -> bool {
+        let Some(subscriber_index) = self.find_subscriber_index(subscriber_id) else {
             return false;
         };
-        let subscriber = &mut self.subscribers[index];
-        let DeliveryState::Desynced { dropped } = subscriber.state else {
+        let subscriber = &mut self.subscribers[subscriber_index];
+        let DeliveryState::Desynced {
+            dropped_event_count,
+        } = subscriber.delivery_state
+        else {
             return false;
         };
-        let lagged = SubscriberLagged {
-            subscriber_id: id,
-            dropped_count: dropped,
+        let lag_report = SubscriberLagged {
+            subscriber_id,
+            dropped_event_count,
             event_class: EventClass::Critical,
         };
-        match subscriber
-            .tx
-            .try_send(Delivery::Snapshot { snapshot, lagged })
-        {
+        match subscriber.delivery_sender.try_send(Delivery::Snapshot {
+            render_snapshot,
+            lag_report,
+        }) {
             Ok(()) => {
-                subscriber.state = DeliveryState::Live;
+                subscriber.delivery_state = DeliveryState::Live;
                 tracing::info!(
-                    subscriber = %id,
-                    dropped,
+                    subscriber = %subscriber_id,
+                    dropped_event_count,
                     "snapshot queued; subscriber resynced"
                 );
                 true
             }
             Err(TrySendError::Full(_)) => false,
             Err(TrySendError::Disconnected(_)) => {
-                self.subscribers.remove(index);
+                self.subscribers.remove(subscriber_index);
                 false
             }
         }
     }
 
-    /// Put `snapshot` on live subscriber `id`'s queue as the frame its client
+    /// Put `snapshot` on live subscriber `subscriber_id`'s queue as the frame its client
     /// draws.
     ///
-    /// Returns `true` once the frame is queued. Returns `false` when `id` is
+    /// Returns `true` once the frame is queued. Returns `false` when `subscriber_id` is
     /// unknown, when it is desynced — a paused subscriber takes its resync
     /// snapshot first — or when its queue is full. A subscriber whose receiver
     /// is gone is removed.
     pub(crate) fn try_send_frame(
         &mut self,
-        id: SubscriberId,
-        snapshot: Box<RenderSnapshot>,
+        subscriber_id: SubscriberId,
+        render_snapshot: Box<RenderSnapshot>,
     ) -> bool {
-        let Some(index) = self.index_of(id) else {
+        let Some(subscriber_index) = self.find_subscriber_index(subscriber_id) else {
             return false;
         };
-        let subscriber = &mut self.subscribers[index];
-        if subscriber.state != DeliveryState::Live {
+        let subscriber = &mut self.subscribers[subscriber_index];
+        if subscriber.delivery_state != DeliveryState::Live {
             return false;
         }
-        match subscriber.tx.try_send(Delivery::Frame(snapshot)) {
+        match subscriber
+            .delivery_sender
+            .try_send(Delivery::Frame(render_snapshot))
+        {
             Ok(()) => true,
             Err(TrySendError::Full(_)) => false,
             Err(TrySendError::Disconnected(_)) => {
-                self.subscribers.remove(index);
+                self.subscribers.remove(subscriber_index);
                 false
             }
         }
     }
 
-    /// Put `delivery` on live subscriber `id`'s queue, and report what that did.
+    /// Put `delivery` on live subscriber `subscriber_id`'s queue, and report what that did.
     ///
     /// A full queue drops the delivery and marks the subscriber desynced, so it
     /// is handed a fresh [`RenderSnapshot`] to resume from. A subscriber that is
     /// unknown or already paused takes nothing, and one whose receiver is gone
     /// is removed.
-    fn try_send_direct(&mut self, id: SubscriberId, delivery: Delivery) -> Queued {
-        let Some(index) = self.index_of(id) else {
-            return Queued::Skipped;
+    fn try_send_delivery(
+        &mut self,
+        subscriber_id: SubscriberId,
+        delivery: Delivery,
+    ) -> QueueDeliveryStatus {
+        let Some(subscriber_index) = self.find_subscriber_index(subscriber_id) else {
+            return QueueDeliveryStatus::Skipped;
         };
-        let subscriber = &mut self.subscribers[index];
-        if subscriber.state != DeliveryState::Live {
-            return Queued::Skipped;
+        let subscriber = &mut self.subscribers[subscriber_index];
+        if subscriber.delivery_state != DeliveryState::Live {
+            return QueueDeliveryStatus::Skipped;
         }
-        match subscriber.tx.try_send(delivery) {
-            Ok(()) => Queued::Sent,
+        match subscriber.delivery_sender.try_send(delivery) {
+            Ok(()) => QueueDeliveryStatus::Sent,
             Err(TrySendError::Full(_)) => {
-                subscriber.state = DeliveryState::Desynced { dropped: 1 };
-                Queued::Dropped
+                subscriber.delivery_state = DeliveryState::Desynced {
+                    dropped_event_count: 1,
+                };
+                QueueDeliveryStatus::Dropped
             }
             Err(TrySendError::Disconnected(_)) => {
-                self.subscribers.remove(index);
-                Queued::Skipped
+                self.subscribers.remove(subscriber_index);
+                QueueDeliveryStatus::Skipped
             }
         }
     }
 
-    /// Put the `answers` to mouse round `request_id` on live subscriber `id`'s
+    /// Put the `mouse_answers` to mouse round `request_id` on live subscriber
+    /// `subscriber_id`'s
     /// queue.
     ///
     /// Returns `true` once the answers are queued, `false` otherwise
-    /// ([`Self::try_send_direct`]). A lost answer leaves the viewer's drag
+    /// ([`Self::try_send_delivery`]). A lost answer leaves the viewer's drag
     /// anchor where it was.
     pub(crate) fn try_send_answer(
         &mut self,
-        id: SubscriberId,
+        subscriber_id: SubscriberId,
         request_id: u64,
-        answers: Vec<MouseAnswer>,
+        mouse_answers: Vec<MouseAnswer>,
     ) -> bool {
-        match self.try_send_direct(
-            id,
+        match self.try_send_delivery(
+            subscriber_id,
             Delivery::MouseAnswer {
                 request_id,
-                answers,
+                mouse_answers,
             },
         ) {
-            Queued::Sent => true,
-            Queued::Dropped => {
+            QueueDeliveryStatus::Sent => true,
+            QueueDeliveryStatus::Dropped => {
                 tracing::warn!(
-                    subscriber = %id,
+                    subscriber = %subscriber_id,
                     request_id,
                     "mouse answer dropped; subscriber desynced, awaiting snapshot"
                 );
                 false
             }
-            Queued::Skipped => false,
+            QueueDeliveryStatus::Skipped => false,
         }
     }
 
-    /// Put `bytes` for the terminal live subscriber `id`'s client runs in on
+    /// Put `host_write_bytes` for the terminal live subscriber `subscriber_id`'s client runs in on
     /// that subscriber's queue.
     ///
     /// Returns `true` once the bytes are queued, `false` otherwise
-    /// ([`Self::try_send_direct`]). Dropped bytes leave a clipboard copy
+    /// ([`Self::try_send_delivery`]). Dropped bytes leave a clipboard copy
     /// unwritten.
-    pub(crate) fn try_send_host_write(&mut self, id: SubscriberId, bytes: Vec<u8>) -> bool {
-        match self.try_send_direct(id, Delivery::HostWrite(bytes)) {
-            Queued::Sent => true,
-            Queued::Dropped => {
+    pub(crate) fn try_send_host_write(
+        &mut self,
+        subscriber_id: SubscriberId,
+        host_write_bytes: Vec<u8>,
+    ) -> bool {
+        match self.try_send_delivery(subscriber_id, Delivery::HostWrite(host_write_bytes)) {
+            QueueDeliveryStatus::Sent => true,
+            QueueDeliveryStatus::Dropped => {
                 tracing::warn!(
-                    subscriber = %id,
+                    subscriber = %subscriber_id,
                     "host write dropped; subscriber desynced, awaiting snapshot"
                 );
                 false
             }
-            Queued::Skipped => false,
+            QueueDeliveryStatus::Skipped => false,
         }
     }
 
-    /// Put the session live subscriber `id`'s client moves to on that
+    /// Put the session live subscriber `subscriber_id`'s client moves to on that
     /// subscriber's queue.
     ///
     /// Returns `true` once the switch is queued, `false` otherwise
-    /// ([`Self::try_send_direct`]). A dropped switch leaves the client in this
+    /// ([`Self::try_send_delivery`]). A dropped switch leaves the client in this
     /// session.
-    pub(crate) fn try_send_switch(&mut self, id: SubscriberId, session_id: SessionId) -> bool {
-        match self.try_send_direct(id, Delivery::SwitchTo(session_id)) {
-            Queued::Sent => true,
-            Queued::Dropped => {
+    pub(crate) fn try_send_switch(
+        &mut self,
+        subscriber_id: SubscriberId,
+        session_id: SessionId,
+    ) -> bool {
+        match self.try_send_delivery(subscriber_id, Delivery::SwitchTo(session_id)) {
+            QueueDeliveryStatus::Sent => true,
+            QueueDeliveryStatus::Dropped => {
                 tracing::warn!(
-                    subscriber = %id,
+                    subscriber = %subscriber_id,
                     session = %session_id,
                     "session switch dropped; subscriber desynced, awaiting snapshot"
                 );
                 false
             }
-            Queued::Skipped => false,
+            QueueDeliveryStatus::Skipped => false,
         }
     }
 
@@ -511,7 +550,7 @@ pub fn wire_event(delivery: &Delivery) -> Option<SessionEvent> {
                 client_id: payload.client_id,
                 tab_id: payload.tab_id,
                 pane_id: payload.pane_id,
-                prior_pane: payload.prior_pane,
+                previous_pane_id: payload.previous_pane_id,
             }),
             Event::LayoutChanged(payload) => Some(SessionEvent::LayoutChanged {
                 tab_id: payload.tab_id,
@@ -525,12 +564,12 @@ pub fn wire_event(delivery: &Delivery) -> Option<SessionEvent> {
             Event::TabFocused(payload) => Some(SessionEvent::TabFocused {
                 client_id: payload.client_id,
                 tab_id: payload.tab_id,
-                prior_tab: payload.prior_tab,
+                previous_tab_id: payload.previous_tab_id,
             }),
             Event::TabMoved(payload) => Some(SessionEvent::TabMoved {
                 tab_id: payload.tab_id,
-                old_index: payload.old_index,
-                new_index: payload.new_index,
+                previous_tab_index: payload.previous_tab_index,
+                new_tab_index: payload.new_tab_index,
             }),
             Event::Quit => Some(SessionEvent::Quit),
             Event::Restarting => Some(SessionEvent::Restarting),
@@ -570,21 +609,21 @@ pub fn wire_event(delivery: &Delivery) -> Option<SessionEvent> {
             Event::SelectionChanged(_) | Event::Copied(_) => None,
             Event::Plugin(_) => None,
         },
-        Delivery::Frame(snapshot) => Some(SessionEvent::Painted {
-            frame: Box::new(wire_frame(snapshot)),
+        Delivery::Frame(render_snapshot) => Some(SessionEvent::Painted {
+            frame: Box::new(wire_frame(render_snapshot)),
         }),
-        Delivery::Snapshot { lagged, .. } => Some(SessionEvent::Resync {
-            dropped_count: lagged.dropped_count,
+        Delivery::Snapshot { lag_report, .. } => Some(SessionEvent::Resync {
+            dropped_event_count: lag_report.dropped_event_count,
         }),
         Delivery::MouseAnswer {
             request_id,
-            answers,
+            mouse_answers,
         } => Some(SessionEvent::MouseAnswer {
             request_id: *request_id,
-            answers: answers.clone(),
+            mouse_answers: mouse_answers.clone(),
         }),
-        Delivery::HostWrite(bytes) => Some(SessionEvent::HostWrite {
-            bytes: bytes.clone(),
+        Delivery::HostWrite(host_write_bytes) => Some(SessionEvent::HostWrite {
+            host_output_bytes: host_write_bytes.clone(),
         }),
         Delivery::SwitchTo(session_id) => Some(SessionEvent::SwitchTo {
             session_id: *session_id,

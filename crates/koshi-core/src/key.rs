@@ -40,12 +40,12 @@ impl TryFrom<u8> for ModFlags {
 
     /// Accepts a bit pattern drawn only from the four modifier bits: Control,
     /// Alt, Shift and Super.
-    fn try_from(bits: u8) -> Result<Self, Self::Error> {
-        if bits & !MOD_FLAG_BITS == 0 {
-            Ok(Self(bits))
+    fn try_from(modifier_bits: u8) -> Result<Self, Self::Error> {
+        if modifier_bits & !MOD_FLAG_BITS == 0 {
+            Ok(Self(modifier_bits))
         } else {
             Err(format!(
-                "modifier bits {bits:#010b} name no modifier; the modifiers are {MOD_FLAG_BITS:#010b}"
+                "modifier bits {modifier_bits:#010b} name no modifier; the modifiers are {MOD_FLAG_BITS:#010b}"
             ))
         }
     }
@@ -74,18 +74,18 @@ impl ModFlags {
     }
 
     /// True when every modifier in `other` is held.
-    pub const fn contains(self, other: Self) -> bool {
-        self.0 & other.0 == other.0
+    pub const fn has_all_modifiers(self, required_modifiers: Self) -> bool {
+        self.0 & required_modifiers.0 == required_modifiers.0
     }
 
     /// True when at least one modifier in `other` is held.
-    pub const fn intersects(self, other: Self) -> bool {
-        self.0 & other.0 != 0
+    pub const fn has_shared_modifier(self, candidate_modifiers: Self) -> bool {
+        self.0 & candidate_modifiers.0 != 0
     }
 
     /// The modifiers held in either set.
-    pub const fn union(self, other: Self) -> Self {
-        Self(self.0 | other.0)
+    pub const fn union(self, other_modifier_flags: Self) -> Self {
+        Self(self.0 | other_modifier_flags.0)
     }
 }
 
@@ -101,16 +101,16 @@ impl fmt::Display for ModFlags {
     /// Writes the modifier prefix run in canonical `C-A-S-D-` order, empty when
     /// no modifier is held.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.contains(Self::CTRL) {
+        if self.has_all_modifiers(Self::CTRL) {
             f.write_str("C-")?;
         }
-        if self.contains(Self::ALT) {
+        if self.has_all_modifiers(Self::ALT) {
             f.write_str("A-")?;
         }
-        if self.contains(Self::SHIFT) {
+        if self.has_all_modifiers(Self::SHIFT) {
             f.write_str("S-")?;
         }
-        if self.contains(Self::SUPER) {
+        if self.has_all_modifiers(Self::SUPER) {
             f.write_str("D-")?;
         }
         Ok(())
@@ -120,7 +120,8 @@ impl fmt::Display for ModFlags {
 /// The modifiers that make a chord something ordinary typing cannot produce.
 /// Shift is absent: Shift plus a key is still typing — it gives the key's
 /// capital or shifted variant.
-const NON_TEXT: ModFlags = ModFlags(ModFlags::CTRL.0 | ModFlags::ALT.0 | ModFlags::SUPER.0);
+const NON_TEXT_MODIFIER_FLAGS: ModFlags =
+    ModFlags(ModFlags::CTRL.0 | ModFlags::ALT.0 | ModFlags::SUPER.0);
 
 impl ModFlags {
     /// True when plain typing can produce a key held with exactly these
@@ -128,7 +129,7 @@ impl ModFlags {
     /// types — it gives the key's capital or shifted variant.
     #[must_use]
     pub const fn is_typing(self) -> bool {
-        !self.intersects(NON_TEXT)
+        !self.has_shared_modifier(NON_TEXT_MODIFIER_FLAGS)
     }
 }
 
@@ -178,12 +179,12 @@ fn function_key_number<'de, D>(deserializer: D) -> Result<u8, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let number = u8::deserialize(deserializer)?;
-    if (FIRST_FUNCTION_KEY..=LAST_FUNCTION_KEY).contains(&number) {
-        Ok(number)
+    let function_key_number_value = u8::deserialize(deserializer)?;
+    if (FIRST_FUNCTION_KEY..=LAST_FUNCTION_KEY).contains(&function_key_number_value) {
+        Ok(function_key_number_value)
     } else {
         Err(serde::de::Error::custom(format!(
-            "F{number} is not a function key; they run F{FIRST_FUNCTION_KEY} through F{LAST_FUNCTION_KEY}"
+            "F{function_key_number_value} is not a function key; they run F{FIRST_FUNCTION_KEY} through F{LAST_FUNCTION_KEY}"
         )))
     }
 }
@@ -207,7 +208,7 @@ impl fmt::Display for NamedKey {
             Self::Right => f.write_str("Right"),
             Self::Up => f.write_str("Up"),
             Self::Down => f.write_str("Down"),
-            Self::F(n) => write!(f, "F{n}"),
+            Self::F(function_key_number) => write!(f, "F{function_key_number}"),
         }
     }
 }
@@ -225,8 +226,8 @@ pub enum Key {
 impl fmt::Display for Key {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Char(c) => write!(f, "{c}"),
-            Self::Named(n) => write!(f, "{n}"),
+            Self::Char(character) => write!(f, "{character}"),
+            Self::Named(named_key) => write!(f, "{named_key}"),
         }
     }
 }
@@ -247,22 +248,26 @@ impl fmt::Display for Key {
 /// - `'\u{212A}'` (the Kelvin sign) → unchanged, `false`: it lowercases to
 ///   `'k'`, and `'k'` uppercases to the Latin `'K'`, a different character.
 #[must_use]
-pub fn fold_uppercase(c: char) -> (char, bool) {
-    if !c.is_uppercase() {
-        return (c, false);
+pub fn fold_uppercase_character(character: char) -> (char, bool) {
+    if !character.is_uppercase() {
+        return (character, false);
     }
     // `to_lowercase()` yields one or more chars; `(Some(l), None)` is exactly
     // one.
-    let mut lower = c.to_lowercase();
-    let (Some(lowered), None) = (lower.next(), lower.next()) else {
-        return (c, false);
+    let mut lowercase_characters = character.to_lowercase();
+    let (Some(lowercase_character), None) =
+        (lowercase_characters.next(), lowercase_characters.next())
+    else {
+        return (character, false);
     };
     // Fold only when the capital comes back: uppercasing the lowered form must
     // yield exactly the character that was typed.
-    let mut upper = lowered.to_uppercase();
-    match (upper.next(), upper.next()) {
-        (Some(restored), None) if restored == c => (lowered, true),
-        _ => (c, false),
+    let mut uppercase_characters = lowercase_character.to_uppercase();
+    match (uppercase_characters.next(), uppercase_characters.next()) {
+        (Some(restored_character), None) if restored_character == character => {
+            (lowercase_character, true)
+        }
+        _ => (character, false),
     }
 }
 
@@ -270,7 +275,8 @@ pub fn fold_uppercase(c: char) -> (char, bool) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct KeyChord {
     /// The modifier keys held down.
-    pub mods: ModFlags,
+    #[serde(rename = "mods")]
+    pub modifier_flags: ModFlags,
     /// The key pressed.
     pub key: Key,
 }
@@ -279,15 +285,18 @@ impl KeyChord {
     /// Builds a chord from its parts. Callers are responsible for the canonical
     /// form described in the module documentation; the config crate's chord
     /// parser produces it.
-    pub const fn new(mods: ModFlags, key: Key) -> Self {
-        Self { mods, key }
+    pub const fn from_parts(modifier_flags: ModFlags, key: Key) -> Self {
+        Self {
+            modifier_flags,
+            key,
+        }
     }
 
     /// True when this chord is something ordinary typing produces: no
     /// Control, Alt, or Super is held. Characters, Enter, arrows, editing
     /// keys, and function keys all count, with or without Shift.
     pub fn is_typeable(&self) -> bool {
-        self.mods.is_typing()
+        self.modifier_flags.is_typing()
     }
 }
 
@@ -299,9 +308,10 @@ impl fmt::Display for KeyChord {
     /// character (`<<>`). Any other character with no modifiers is written
     /// bare: `n`, `-`, `>`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let bracketed = !self.mods.is_empty() || matches!(self.key, Key::Named(_) | Key::Char('<'));
-        if bracketed {
-            write!(f, "<{}{}>", self.mods, self.key)
+        let is_bracketed =
+            !self.modifier_flags.is_empty() || matches!(self.key, Key::Named(_) | Key::Char('<'));
+        if is_bracketed {
+            write!(f, "<{}{}>", self.modifier_flags, self.key)
         } else {
             write!(f, "{}", self.key)
         }
@@ -312,7 +322,7 @@ impl fmt::Display for KeyChord {
 ///
 /// Most bindings are a single chord; leader- and prefix-style bindings
 /// (`<C-p> n`) run several. A sequence holds at least one chord by
-/// construction: `new` takes the first chord separately from the rest. The
+/// construction: `from_first_and_rest` takes the first chord separately from the rest. The
 /// configured chord-depth cap is enforced where sequences are parsed and
 /// validated, not by this type.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -321,15 +331,15 @@ pub struct KeySequence(Vec<KeyChord>);
 impl KeySequence {
     /// Builds a sequence from its chords in press order: the first chord,
     /// then any that follow it.
-    pub fn new(first: KeyChord, rest: Vec<KeyChord>) -> Self {
-        let mut chords = Vec::with_capacity(1 + rest.len());
-        chords.push(first);
-        chords.extend(rest);
+    pub fn from_first_and_rest(first_chord: KeyChord, remaining_chords: Vec<KeyChord>) -> Self {
+        let mut chords = Vec::with_capacity(1 + remaining_chords.len());
+        chords.push(first_chord);
+        chords.extend(remaining_chords);
         Self(chords)
     }
 
     /// The chords in press order; never empty.
-    pub fn chords(&self) -> &[KeyChord] {
+    pub fn list_chords(&self) -> &[KeyChord] {
         &self.0
     }
 }
@@ -344,8 +354,8 @@ impl From<KeyChord> for KeySequence {
 impl fmt::Display for KeySequence {
     /// Writes each chord's canonical text form, space-separated.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (index, chord) in self.0.iter().enumerate() {
-            if index > 0 {
+        for (chord_index, chord) in self.0.iter().enumerate() {
+            if chord_index > 0 {
                 f.write_str(" ")?;
             }
             write!(f, "{chord}")?;

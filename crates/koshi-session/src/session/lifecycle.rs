@@ -45,12 +45,15 @@ pub enum SessionLifecycle {
 }
 
 impl SessionLifecycle {
-    /// Apply `event`, returning the next state, or [`InvalidTransition`]
-    /// carrying `self` and `event` if the move is illegal from the current
+    /// Apply `lifecycle_event`, returning the next state, or [`InvalidTransition`]
+    /// carrying `self` and `lifecycle_event` if the move is illegal from the current
     /// state. `Stopped` is terminal and rejects every event. `self` is left as
     /// it was; the next state exists only in the returned value.
-    pub fn transition(self, event: SessionLifecycleEvent) -> Result<Self, InvalidTransition> {
-        match (self, event) {
+    pub fn transition(
+        self,
+        lifecycle_event: SessionLifecycleEvent,
+    ) -> Result<Self, InvalidTransition> {
+        match (self, lifecycle_event) {
             (SessionLifecycle::Starting, SessionLifecycleEvent::FirstTabCreated) => {
                 Ok(SessionLifecycle::Running)
             }
@@ -69,7 +72,10 @@ impl SessionLifecycle {
             (SessionLifecycle::Stopping, SessionLifecycleEvent::StopCompleted) => {
                 Ok(SessionLifecycle::Stopped)
             }
-            _ => Err(InvalidTransition { from: self, event }),
+            _ => Err(InvalidTransition {
+                previous_lifecycle: self,
+                lifecycle_event,
+            }),
         }
     }
 }

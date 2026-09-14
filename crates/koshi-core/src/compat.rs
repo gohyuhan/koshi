@@ -6,7 +6,7 @@
 //!
 //! # The cadence rule
 //!
-//! `max` moves in the same commit as the change that requires it. Three
+//! `maximum_version` moves in the same commit as the change that requires it. Three
 //! changes require it:
 //!
 //! - An existing field changes its type.
@@ -17,11 +17,11 @@
 //! Adding or removing a field that both sides still decode leaves `max` where
 //! it is.
 //!
-//! The first such change after a release sets `max` to `released + 1`. `max`
+//! The first such change after a release sets `maximum_version` to `released_version + 1`. `maximum_version`
 //! then holds until the next release, however many further changes land: one
 //! release cycle moves a surface one step at most.
 //!
-//! [`Surface::version_problem`] checks this rule, and a test runs the whole
+//! [`Surface::find_version_problem`] checks this rule, and a test runs the whole
 //! table through it.
 
 /// One versioned surface: what two builds must agree on, and the versions this
@@ -30,19 +30,20 @@
 pub struct Surface {
     /// What this surface is called in plain words, e.g. `"session protocol"`.
     /// Used in the message a failing check prints.
-    pub name: &'static str,
+    pub surface_name: &'static str,
     /// The lowest version this build accepts. A peer whose highest is below it
     /// is refused.
-    pub min: u32,
+    pub minimum_version: u32,
     /// The highest version this build speaks, and the one it uses when the peer
     /// speaks it too.
-    pub max: u32,
+    pub maximum_version: u32,
     /// The version the last released koshi spoke of this surface, or `None`
     /// when no release has carried it.
     ///
-    /// With `None`, [`Surface::version_problem`] checks only that `min` does
-    /// not exceed `max`; `max` may hold any value.
-    pub released: Option<u32>,
+    /// With `None`, [`Surface::find_version_problem`] checks only that
+    /// `minimum_version` does not exceed `maximum_version`; `maximum_version`
+    /// may hold any value.
+    pub released_version: Option<u32>,
 }
 
 /// The session protocol: what an attached client and a session server speak
@@ -70,10 +71,10 @@ pub struct Surface {
 /// `{"node": …}` record both decode. [`RESUME_FORMAT`] reads back to 1, and a
 /// resume file written by an earlier build can carry the wrapped split shape.
 pub const SESSION_PROTOCOL: Surface = Surface {
-    name: "session protocol",
-    min: 3,
-    max: 3,
-    released: Some(2),
+    surface_name: "session protocol",
+    minimum_version: 3,
+    maximum_version: 3,
+    released_version: Some(2),
 };
 
 /// The control plane: what a caller and the router speak over the router's
@@ -81,10 +82,10 @@ pub const SESSION_PROTOCOL: Surface = Surface {
 ///
 /// `v0.2.0` speaks 1. `v0.3.0` and this build speak 2. The floor is 1.
 pub const CONTROL_PROTOCOL: Surface = Surface {
-    name: "control plane",
-    min: 1,
-    max: 2,
-    released: Some(2),
+    surface_name: "control plane",
+    minimum_version: 1,
+    maximum_version: 2,
+    released_version: Some(2),
 };
 
 /// The supervisor link: what a session server and the process holding its panes
@@ -93,20 +94,20 @@ pub const CONTROL_PROTOCOL: Surface = Surface {
 /// `v0.3.0` and this build both speak 1. The supervisor end can be older than
 /// the session server that reconnects to it.
 pub const SUPERVISOR_PROTOCOL: Surface = Surface {
-    name: "supervisor link",
-    min: 1,
-    max: 1,
-    released: Some(1),
+    surface_name: "supervisor link",
+    minimum_version: 1,
+    maximum_version: 1,
+    released_version: Some(1),
 };
 
 /// The remote access token store: the file this machine keeps its grants in.
 ///
 /// `v0.3.0` and this build both write 1.
 pub const TOKEN_STORE_FORMAT: Surface = Surface {
-    name: "token store format",
-    min: 1,
-    max: 1,
-    released: Some(1),
+    surface_name: "token store format",
+    minimum_version: 1,
+    maximum_version: 1,
+    released_version: Some(1),
 };
 
 /// The remote doorway: what a client on another machine and this machine's TLS
@@ -116,10 +117,10 @@ pub const TOKEN_STORE_FORMAT: Surface = Surface {
 /// The session protocol the two ends settle after the door opens is a separate
 /// surface, [`SESSION_PROTOCOL`].
 pub const REMOTE_PROTOCOL: Surface = Surface {
-    name: "remote doorway",
-    min: 1,
-    max: 1,
-    released: Some(1),
+    surface_name: "remote doorway",
+    minimum_version: 1,
+    maximum_version: 1,
+    released_version: Some(1),
 };
 
 /// The saved server file: the servers a dialling machine has connected to,
@@ -128,10 +129,10 @@ pub const REMOTE_PROTOCOL: Surface = Surface {
 /// `v0.3.0` and this build both write 1. The file sits on the dialling
 /// machine. This build reads what an older koshi saved.
 pub const SAVED_SERVER_FORMAT: Surface = Surface {
-    name: "saved server file format",
-    min: 1,
-    max: 1,
-    released: Some(1),
+    surface_name: "saved server file format",
+    minimum_version: 1,
+    maximum_version: 1,
+    released_version: Some(1),
 };
 
 /// The remote certificate file: the certificate and private key this machine
@@ -140,10 +141,10 @@ pub const SAVED_SERVER_FORMAT: Surface = Surface {
 /// `v0.3.0` and this build both write 1. This build reads a certificate an
 /// older build generated.
 pub const REMOTE_CERTIFICATE_FORMAT: Surface = Surface {
-    name: "remote certificate file format",
-    min: 1,
-    max: 1,
-    released: Some(1),
+    surface_name: "remote certificate file format",
+    minimum_version: 1,
+    maximum_version: 1,
+    released_version: Some(1),
 };
 
 /// The remote access record: the file saying the operator switched remote
@@ -152,10 +153,10 @@ pub const REMOTE_CERTIFICATE_FORMAT: Surface = Surface {
 /// `v0.3.0` and this build both write 1. This build reads a record an older
 /// build wrote, and keeps the port open.
 pub const REMOTE_ACCESS_MARK_FORMAT: Surface = Surface {
-    name: "remote access record format",
-    min: 1,
-    max: 1,
-    released: Some(1),
+    surface_name: "remote access record format",
+    minimum_version: 1,
+    maximum_version: 1,
+    released_version: Some(1),
 };
 
 /// The resume file: the state a session server writes before it replaces its
@@ -170,10 +171,10 @@ pub const REMOTE_ACCESS_MARK_FORMAT: Surface = Surface {
 /// The build being installed states which formats it reads. The running server
 /// reads that answer before it commits to the swap.
 pub const RESUME_FORMAT: Surface = Surface {
-    name: "resume file format",
-    min: 1,
-    max: 3,
-    released: Some(2),
+    surface_name: "resume file format",
+    minimum_version: 1,
+    maximum_version: 3,
+    released_version: Some(2),
 };
 
 /// The config schema: the shape of the files under the config directory.
@@ -181,10 +182,10 @@ pub const RESUME_FORMAT: Surface = Surface {
 /// `v0.1.0`, `v0.2.0` and `v0.3.0` all write 1. A file naming an older version
 /// is migrated forward before it is read.
 pub const CONFIG_SCHEMA: Surface = Surface {
-    name: "config schema",
-    min: 1,
-    max: 1,
-    released: Some(1),
+    surface_name: "config schema",
+    minimum_version: 1,
+    maximum_version: 1,
+    released_version: Some(1),
 };
 
 /// Every versioned surface this build carries. A surface absent from this list
@@ -206,36 +207,37 @@ impl Surface {
     /// Why this surface's numbers break the cadence rule, or `None` when they
     /// follow it.
     ///
-    /// Three checks, in this order. Each names this surface's [`name`](Self::name).
+    /// Three checks, in this order. Each names this surface's
+    /// [`surface_name`](Self::surface_name).
     ///
-    /// 1. `min` exceeds `max`: `"the control plane accepts 4 at the lowest and
+    /// 1. `minimum_version` exceeds `maximum_version`: `"the control plane accepts 4 at the lowest and
     ///    3 at the highest, which is no version at all"`.
-    /// 2. `max` is below `released`: `"the control plane speaks 1, which is
+    /// 2. `maximum_version` is below `released_version`: `"the control plane speaks 1, which is
     ///    below the 2 the last release spoke"`.
-    /// 3. `max` is more than one above `released`: `"the control plane speaks
+    /// 3. `maximum_version` is more than one above `released_version`: `"the control plane speaks
     ///    4, which is more than one step above the 2 the last release spoke"`.
     ///
     /// The first failing check is the one reported. A surface whose `released`
     /// is `None` runs check 1 only.
     #[must_use]
-    pub fn version_problem(&self) -> Option<String> {
-        if self.min > self.max {
+    pub fn find_version_problem(&self) -> Option<String> {
+        if self.minimum_version > self.maximum_version {
             return Some(format!(
                 "the {} accepts {} at the lowest and {} at the highest, which is no version at all",
-                self.name, self.min, self.max
+                self.surface_name, self.minimum_version, self.maximum_version
             ));
         }
-        let released = self.released?;
-        if self.max < released {
+        let released_version = self.released_version?;
+        if self.maximum_version < released_version {
             return Some(format!(
                 "the {} speaks {}, which is below the {} the last release spoke",
-                self.name, self.max, released
+                self.surface_name, self.maximum_version, released_version
             ));
         }
-        if self.max - released > 1 {
+        if self.maximum_version - released_version > 1 {
             return Some(format!(
                 "the {} speaks {}, which is more than one step above the {} the last release spoke",
-                self.name, self.max, released
+                self.surface_name, self.maximum_version, released_version
             ));
         }
         None

@@ -4,14 +4,14 @@
 //! Bindings arrive in the same layers conflict detection reads — the
 //! built-in defaults, then the user's own surfaces (user file, session,
 //! layout), lowest precedence first. [`merge_keymaps`] folds them per key:
-//! a later layer's entry on a key replaces a lower layer's on the same key,
+//! a higher-precedence layer's entry on a key replaces a lower layer's on the same key,
 //! and every other key is untouched. The result splits each mode into two
 //! maps. The two resolve at different tiers of the key-resolution stack, with
 //! sticky plugin layers between them:
 //!
-//! - **`user_set`** — the winning user-authored entries, each tagged with
+//! - **`user_bindings_by_key_sequence`** — the winning user-authored entries, each tagged with
 //!   the layer that authored it.
-//! - **`defaults`** — the surviving built-in entries: shipped defaults
+//! - **`default_bindings_by_key_sequence`** — the surviving built-in entries: shipped defaults
 //!   whose key no user surface took or removed.
 //!
 //! Merging and detection read one shared firing predicate in the conflict
@@ -20,7 +20,7 @@
 //! through. A `remove` in a higher layer voids lower layers' entries on that
 //! key outright.
 //!
-//! Merge runs only on a keymap detection has already verdicted: every
+//! Merge runs only on a keymap detection has already approved: every
 //! layer on [`KeymapVerdict::Apply`](crate::conflict::KeymapVerdict::Apply),
 //! or the defaults alone after
 //! [`RevertToDefaults`](crate::conflict::KeymapVerdict::RevertToDefaults).
@@ -35,7 +35,8 @@ use koshi_core::key::{KeyChord, KeySequence};
 use koshi_core::registry::ActionRegistry;
 
 use crate::conflict::{
-    built_in_modes, is_firing, removal_index, removed_above, FiringRules, KeyMapLayer, LayerOrigin,
+    build_removal_layer_index, is_bound_action_firing, is_removed_by_higher_layer,
+    list_builtin_mode_names, FiringRules, KeymapLayer, LayerOrigin,
 };
 use crate::types::{BoundAction, KeybindingsConfig, ModeName};
 
@@ -44,9 +45,9 @@ use crate::types::{BoundAction, KeybindingsConfig, ModeName};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MergedBinding {
     /// The action and preset arguments the key triggers.
-    pub bound: BoundAction,
+    pub bound_action: BoundAction,
     /// The user-authored surface the winning entry came from.
-    pub source: LayerOrigin,
+    pub layer_origin: LayerOrigin,
 }
 
 /// One mode's merged lookup tables plus its removal and displacement
@@ -55,17 +56,17 @@ pub struct MergedBinding {
 pub struct MergedModeMap {
     /// The winning user-authored binding per key. Resolves above sticky
     /// plugin layers in the key-resolution stack.
-    pub user_set: BTreeMap<KeySequence, MergedBinding>,
+    pub user_bindings_by_key_sequence: BTreeMap<KeySequence, MergedBinding>,
     /// The surviving built-in binding per key: firing shipped defaults no
     /// user surface took or removed. Resolves below sticky plugin layers.
-    pub defaults: BTreeMap<KeySequence, BoundAction>,
+    pub default_bindings_by_key_sequence: BTreeMap<KeySequence, BoundAction>,
     /// Every key any layer removes in this mode, whether or not a lower
     /// layer held it.
-    pub removed_keys: BTreeSet<KeySequence>,
+    pub removed_key_sequences: BTreeSet<KeySequence>,
     /// Built-in bindings displaced by the user — their key stolen by a
-    /// `user_set` entry or cleared by a remove. `koshi keys list` shows each
+    /// `user_bindings_by_key_sequence` entry or cleared by a remove. `koshi keys list` shows each
     /// one with its default action, marked unbound.
-    pub unbound_defaults: BTreeMap<KeySequence, BoundAction>,
+    pub unbound_default_bindings_by_key_sequence: BTreeMap<KeySequence, BoundAction>,
 }
 
 /// The merged keymap: one [`MergedModeMap`] per registered mode any layer
@@ -73,7 +74,7 @@ pub struct MergedModeMap {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MergedKeyMap {
     /// Per-mode merged tables.
-    pub modes: BTreeMap<ModeName, MergedModeMap>,
+    pub mode_map_by_name: BTreeMap<ModeName, MergedModeMap>,
 }
 
 /// Folds keybinding layers (ordered lowest precedence first) into the
@@ -88,77 +89,98 @@ pub struct MergedKeyMap {
 ///
 /// Per key, the highest firing entry wins. A firing user-authored entry on
 /// a defaulted key takes it and the displaced default moves to
-/// [`unbound_defaults`](MergedModeMap::unbound_defaults); a remove above
+/// [`unbound_default_bindings_by_key_sequence`](MergedModeMap::unbound_default_bindings_by_key_sequence); a remove above
 /// the defaults layer does the same. A dead binding (resolver-refused,
 /// swallowed by the locked-mode reserved-chord bypass, or longer than the
 /// chord-depth cap) enters no map: a dead user entry leaves the default
-/// beneath it live, and a dead default is absent from `defaults` and from
-/// [`unbound_defaults`](MergedModeMap::unbound_defaults) both.
+/// beneath it live, and a dead default is absent from
+/// `default_bindings_by_key_sequence` and from
+/// [`unbound_default_bindings_by_key_sequence`](MergedModeMap::unbound_default_bindings_by_key_sequence) both.
 #[must_use]
 pub fn merge_keymaps(
-    layers: &[KeyMapLayer],
+    layers: &[KeymapLayer],
     unlock_alternative: Option<KeyChord>,
     max_chord_depth: u8,
     registry: &ActionRegistry,
 ) -> MergedKeyMap {
-    let known_modes = &built_in_modes();
-    let reserved = unlock_alternative.unwrap_or(KeybindingsConfig::RESERVED_UNLOCK);
-    let locked = ModeName::new("locked");
-    let removals = removal_index(layers, known_modes);
-    let rules = FiringRules {
+    let known_mode_names = &list_builtin_mode_names();
+    let reserved_unlock_chord = unlock_alternative.unwrap_or(KeybindingsConfig::RESERVED_UNLOCK);
+    let locked_mode_name = ModeName::from_text("locked");
+    let removal_layer_index_by_mode_and_key = build_removal_layer_index(layers, known_mode_names);
+    let firing_rules = FiringRules {
         registry,
-        reserved,
-        locked: &locked,
+        reserved_unlock_chord,
+        locked_mode_name: &locked_mode_name,
         max_chord_depth,
     };
 
-    let mut modes: BTreeMap<ModeName, MergedModeMap> = BTreeMap::new();
+    let mut merged_mode_map_by_name: BTreeMap<ModeName, MergedModeMap> = BTreeMap::new();
 
-    for (index, layer) in layers.iter().enumerate() {
-        for (mode, bindings) in &layer.modes {
-            if !known_modes.contains(mode) {
+    for (layer_index, layer) in layers.iter().enumerate() {
+        for (mode_name, mode_bindings) in &layer.mode_bindings_by_name {
+            if !known_mode_names.contains(mode_name) {
                 continue;
             }
-            let merged = modes.entry(mode.clone()).or_default();
+            let merged_mode_map = merged_mode_map_by_name
+                .entry(mode_name.clone())
+                .or_default();
 
-            merged.removed_keys.extend(bindings.removed.iter().cloned());
+            merged_mode_map
+                .removed_key_sequences
+                .extend(mode_bindings.removed_key_sequences.iter().cloned());
 
-            for (key, bound) in &bindings.keys {
-                if !is_firing(mode, key, bound, &rules) {
+            for (key_sequence, bound_action) in &mode_bindings.bound_action_by_key_sequence {
+                if !is_bound_action_firing(mode_name, key_sequence, bound_action, &firing_rules) {
                     continue;
                 }
-                if removed_above(&removals, mode, key, index) {
+                if is_removed_by_higher_layer(
+                    &removal_layer_index_by_mode_and_key,
+                    mode_name,
+                    key_sequence,
+                    layer_index,
+                ) {
                     // A removed default lands in `unbound_defaults`; a removed
                     // user entry enters no map at all.
                     if !layer.origin.is_user_authored() {
-                        merged.unbound_defaults.insert(key.clone(), bound.clone());
+                        merged_mode_map
+                            .unbound_default_bindings_by_key_sequence
+                            .insert(key_sequence.clone(), bound_action.clone());
                     }
                     continue;
                 }
                 if layer.origin.is_user_authored() {
-                    merged.user_set.insert(
-                        key.clone(),
+                    merged_mode_map.user_bindings_by_key_sequence.insert(
+                        key_sequence.clone(),
                         MergedBinding {
-                            bound: bound.clone(),
-                            source: layer.origin,
+                            bound_action: bound_action.clone(),
+                            layer_origin: layer.origin,
                         },
                     );
                 } else {
-                    merged.defaults.insert(key.clone(), bound.clone());
+                    merged_mode_map
+                        .default_bindings_by_key_sequence
+                        .insert(key_sequence.clone(), bound_action.clone());
                 }
             }
         }
     }
 
-    for merged in modes.values_mut() {
-        for key in merged.user_set.keys() {
-            if let Some(bound) = merged.defaults.remove(key) {
-                merged.unbound_defaults.insert(key.clone(), bound);
+    for merged_mode_map in merged_mode_map_by_name.values_mut() {
+        for key_sequence in merged_mode_map.user_bindings_by_key_sequence.keys() {
+            if let Some(bound_action) = merged_mode_map
+                .default_bindings_by_key_sequence
+                .remove(key_sequence)
+            {
+                merged_mode_map
+                    .unbound_default_bindings_by_key_sequence
+                    .insert(key_sequence.clone(), bound_action);
             }
         }
     }
 
-    MergedKeyMap { modes }
+    MergedKeyMap {
+        mode_map_by_name: merged_mode_map_by_name,
+    }
 }
 
 #[cfg(test)]

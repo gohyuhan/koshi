@@ -4,11 +4,12 @@
 //!
 //! Chrome elements that come in runs — the tab list, the statusline's modifier
 //! groups — each take one stop on a gradient by their position.
-//! [`Theme::ramp`] gives a run element its stop; [`Theme::ramp_dim`] is the
+//! [`Theme::get_ramp_color`] gives a run element its stop; [`Theme::get_dimmed_ramp_color`] is the
 //! same stop pulled toward black, used as the quiet half of a two-block ribbon
 //! (label next to key, for example). The single accent for in-progress state
-//! (the pending-sequence breadcrumb) is [`Theme::accent`]. Both koshi-owned
-//! rows — the tabline and the statusline — are filled with [`Theme::bar_bg`]
+//! (the pending-sequence breadcrumb) is [`Theme::accent_color`]. Both koshi-owned
+//! rows — the tabline and the statusline — are filled with
+//! [`Theme::bar_background_color`]
 //! before anything is painted over them. [`Theme::default`] is the stock koshi
 //! look — a light-purple → light-blue ramp with a pink accent over black bars;
 //! the viewing client builds a non-default `Theme` from the config theme's
@@ -28,30 +29,30 @@ pub struct Theme {
     /// taken whole by the last element of a run.
     pub ramp_end: (u8, u8, u8),
     /// Text color over a ramp-colored block.
-    pub on_ramp: Color,
+    pub ramp_block_text_color: Color,
     /// Text color over a dimmed ramp block.
-    pub on_ramp_dim: Color,
+    pub dimmed_ramp_text_color: Color,
     /// The in-progress accent, brighter than any ramp stop: marks the chords
     /// already pressed in a pending key sequence.
-    pub accent: Color,
+    pub accent_color: Color,
     /// Text color over an accent block.
-    pub on_accent: Color,
+    pub accent_block_text_color: Color,
     /// Border of the focused pane.
-    pub border_focused: Color,
+    pub focused_border_color: Color,
     /// Border of unfocused panes.
-    pub border_unfocused: Color,
+    pub unfocused_border_color: Color,
     /// Border of the pane the pointer is hovering over — the pane the wheel
     /// scrolls.
-    pub border_hover: Color,
+    pub hover_border_color: Color,
     /// Text of a collapsed stack member's header strip.
-    pub stack_header_fg: Color,
+    pub stack_header_text_color: Color,
     /// Background of a collapsed stack member's header strip.
-    pub stack_header_bg: Color,
+    pub stack_header_background_color: Color,
     /// Backdrop of the letterbox margin around a centered layout.
-    pub letterbox: Color,
+    pub letterbox_color: Color,
     /// Background filling koshi's own two rows whole: the tab bar on top and
     /// the statusline on the bottom.
-    pub bar_bg: Color,
+    pub bar_background_color: Color,
 }
 
 impl Default for Theme {
@@ -63,68 +64,106 @@ impl Default for Theme {
         Self {
             ramp_start: (0xd0, 0xa5, 0xff),
             ramp_end: (0x7d, 0xbc, 0xff),
-            on_ramp: Color::Rgb(0x12, 0x09, 0x1f),
-            on_ramp_dim: Color::Rgb(0xf0, 0xec, 0xfa),
-            accent: Color::Rgb(0xf5, 0xc2, 0xff),
-            on_accent: Color::Rgb(0x1e, 0x10, 0x33),
-            border_focused: Color::Rgb(0x00, 0xaf, 0xd7),
-            border_unfocused: Color::Rgb(0x58, 0x58, 0x58),
-            border_hover: Color::Rgb(0xaf, 0x5f, 0xff),
-            stack_header_fg: Color::Rgb(0xf4, 0xf1, 0xfa),
-            stack_header_bg: Color::Rgb(0x30, 0x0f, 0x4a),
-            letterbox: Color::Rgb(0x58, 0x58, 0x58),
-            bar_bg: Color::Rgb(0x00, 0x00, 0x00),
+            ramp_block_text_color: Color::Rgb(0x12, 0x09, 0x1f),
+            dimmed_ramp_text_color: Color::Rgb(0xf0, 0xec, 0xfa),
+            accent_color: Color::Rgb(0xf5, 0xc2, 0xff),
+            accent_block_text_color: Color::Rgb(0x1e, 0x10, 0x33),
+            focused_border_color: Color::Rgb(0x00, 0xaf, 0xd7),
+            unfocused_border_color: Color::Rgb(0x58, 0x58, 0x58),
+            hover_border_color: Color::Rgb(0xaf, 0x5f, 0xff),
+            stack_header_text_color: Color::Rgb(0xf4, 0xf1, 0xfa),
+            stack_header_background_color: Color::Rgb(0x30, 0x0f, 0x4a),
+            letterbox_color: Color::Rgb(0x58, 0x58, 0x58),
+            bar_background_color: Color::Rgb(0x00, 0x00, 0x00),
         }
     }
 }
 
 impl Theme {
-    /// The ramp stop for element `index` of a `count`-element run: `0` is
-    /// the [`ramp_start`](Theme::ramp_start) end, `count - 1` the
+    /// The ramp color for element `ramp_element_index` of a
+    /// `ramp_element_count`-element run: `0` is the
+    /// [`ramp_start`](Theme::ramp_start) end, `ramp_element_count - 1` the
     /// [`ramp_end`](Theme::ramp_end) end. A run of one takes the start end
     /// whole.
     #[must_use]
-    pub fn ramp(&self, index: usize, count: usize) -> Color {
-        let (r, g, b) = self.ramp_rgb(index, count);
-        Color::Rgb(r, g, b)
+    pub fn get_ramp_color(&self, ramp_element_index: usize, ramp_element_count: usize) -> Color {
+        let (red_channel, green_channel, blue_channel) =
+            self.compute_ramp_rgb(ramp_element_index, ramp_element_count);
+        Color::Rgb(red_channel, green_channel, blue_channel)
     }
 
-    /// The same ramp stop pulled 45% toward black: the quiet background
-    /// paired with a [`ramp`](Theme::ramp)-colored block.
+    /// The same ramp color pulled 45% toward black: the quiet background
+    /// paired with a [`get_ramp_color`](Theme::get_ramp_color)-colored block.
     #[must_use]
-    pub fn ramp_dim(&self, index: usize, count: usize) -> Color {
-        let (r, g, b) = self.ramp_rgb(index, count);
-        Color::Rgb(scale(r, 55), scale(g, 55), scale(b, 55))
+    pub fn get_dimmed_ramp_color(
+        &self,
+        ramp_element_index: usize,
+        ramp_element_count: usize,
+    ) -> Color {
+        let (red_channel, green_channel, blue_channel) =
+            self.compute_ramp_rgb(ramp_element_index, ramp_element_count);
+        Color::Rgb(
+            scale_color_channel(red_channel, 55),
+            scale_color_channel(green_channel, 55),
+            scale_color_channel(blue_channel, 55),
+        )
     }
 
-    fn ramp_rgb(&self, index: usize, count: usize) -> (u8, u8, u8) {
-        let last = count.saturating_sub(1);
-        let index = index.min(last);
+    fn compute_ramp_rgb(
+        &self,
+        ramp_element_index: usize,
+        ramp_element_count: usize,
+    ) -> (u8, u8, u8) {
+        let last_ramp_element_index = ramp_element_count.saturating_sub(1);
+        let clamped_ramp_element_index = ramp_element_index.min(last_ramp_element_index);
         (
-            lerp(self.ramp_start.0, self.ramp_end.0, index, last),
-            lerp(self.ramp_start.1, self.ramp_end.1, index, last),
-            lerp(self.ramp_start.2, self.ramp_end.2, index, last),
+            compute_interpolated_channel(
+                self.ramp_start.0,
+                self.ramp_end.0,
+                clamped_ramp_element_index,
+                last_ramp_element_index,
+            ),
+            compute_interpolated_channel(
+                self.ramp_start.1,
+                self.ramp_end.1,
+                clamped_ramp_element_index,
+                last_ramp_element_index,
+            ),
+            compute_interpolated_channel(
+                self.ramp_start.2,
+                self.ramp_end.2,
+                clamped_ramp_element_index,
+                last_ramp_element_index,
+            ),
         )
     }
 }
 
-/// Integer interpolation from `a` to `b` at position `num` of `den`; a run of
-/// one element (`den == 0`) sits at `a`.
-fn lerp(a: u8, b: u8, num: usize, den: usize) -> u8 {
-    if den == 0 {
-        return a;
+/// Integer interpolation from `start_channel` to `end_channel` at position
+/// `ramp_element_index` of `last_ramp_element_index`; a one-element run
+/// (`last_ramp_element_index == 0`) stays at `start_channel`.
+fn compute_interpolated_channel(
+    start_channel: u8,
+    end_channel: u8,
+    ramp_element_index: usize,
+    last_ramp_element_index: usize,
+) -> u8 {
+    if last_ramp_element_index == 0 {
+        return start_channel;
     }
-    let a = i128::from(a);
-    let b = i128::from(b);
+    let start_channel = i128::from(start_channel);
+    let end_channel = i128::from(end_channel);
     // `i128` holds every `usize` on every target this builds for, so a long
     // run never wraps its denominator negative and flips the interpolation.
-    let mixed = a + (b - a) * (num as i128) / (den as i128);
-    mixed.clamp(0, 255) as u8
+    let interpolated_channel = start_channel
+        + (end_channel - start_channel) * (ramp_element_index as i128)
+            / (last_ramp_element_index as i128);
+    interpolated_channel.clamp(0, 255) as u8
 }
 
-/// `value` scaled to `percent` of itself.
-fn scale(value: u8, percent: u16) -> u8 {
-    ((u16::from(value) * percent) / 100) as u8
+/// `channel_value` scaled to `percentage` of itself.
+fn scale_color_channel(channel_value: u8, percentage: u16) -> u8 {
+    ((u16::from(channel_value) * percentage) / 100) as u8
 }
 
 #[cfg(test)]

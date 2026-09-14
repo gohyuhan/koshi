@@ -5,7 +5,7 @@
 //! stale with [`RenderScheduler::invalidate`], then asks
 //! [`RenderScheduler::poll`] whether it is time to render. The scheduler
 //! **coalesces** a burst of invalidations into a single repaint and **gates**
-//! how often that repaint may happen at [`FRAME_INTERVAL`]: a chatty child
+//! how often that repaint may happen at [`FRAME_INTERVAL_DURATION`]: a chatty child
 //! produces one frame per tick instead of one per write, and an idle koshi
 //! burns ~0% CPU.
 //!
@@ -16,13 +16,13 @@
 //! its inputs. An [`Instant`] is monotonic: it only ever moves forward, and a
 //! wall-clock jump from a clock-sync correction (NTP, Network Time Protocol)
 //! or a daylight-saving change (DST) does not move it. A test drives the gate
-//! with a synthetic timeline. `last_render` stays on the dispatcher thread and
+//! with a synthetic timeline. `last_render_time` stays on the dispatcher thread and
 //! is never serialized.
 
 use std::time::{Duration, Instant};
 
 /// Fastest cadence a repaint may happen at: ~one frame per 8 ms tick.
-pub const FRAME_INTERVAL: Duration = Duration::from_millis(8);
+pub const FRAME_INTERVAL_DURATION: Duration = Duration::from_millis(8);
 
 /// Decides when the dispatcher thread repaints.
 ///
@@ -34,47 +34,49 @@ pub const FRAME_INTERVAL: Duration = Duration::from_millis(8);
 #[derive(Debug)]
 pub struct RenderScheduler {
     /// Whether a change is waiting to be painted. A render clears it.
-    pending: bool,
+    is_render_pending: bool,
     /// When the last frame was rendered. `None` until the first render, which
     /// makes a pending change render immediately.
-    last_render: Option<Instant>,
+    last_render_time: Option<Instant>,
 }
 
 impl RenderScheduler {
     /// Build a scheduler with nothing pending and no prior render.
     pub fn new() -> Self {
         RenderScheduler {
-            pending: false,
-            last_render: None,
+            is_render_pending: false,
+            last_render_time: None,
         }
     }
 
     /// Mark the screen stale. Idempotent within a coalescing window: marking
     /// twice before a render still yields one render.
     pub fn invalidate(&mut self) {
-        self.pending = true;
+        self.is_render_pending = true;
     }
 
-    /// Whether a repaint is due at `now`, without changing state. `true` when
-    /// something is pending and [`FRAME_INTERVAL`] has elapsed since the last
+    /// Whether a repaint is due at `current_time`, without changing state. `true` when
+    /// something is pending and [`FRAME_INTERVAL_DURATION`] has elapsed since the last
     /// render, or nothing has rendered yet.
-    fn is_due(&self, now: Instant) -> bool {
-        if !self.pending {
+    fn is_render_due(&self, current_time: Instant) -> bool {
+        if !self.is_render_pending {
             return false;
         }
-        match self.last_render {
+        match self.last_render_time {
             None => true,
-            Some(last) => now.saturating_duration_since(last) >= FRAME_INTERVAL,
+            Some(last_render_time) => {
+                current_time.saturating_duration_since(last_render_time) >= FRAME_INTERVAL_DURATION
+            }
         }
     }
 
-    /// Ask whether to render at `now`. On `true`, records `now` as the last
+    /// Ask whether to render at `current_time`. On `true`, records `current_time` as the last
     /// render and clears the pending mark — the caller then repaints. On
     /// `false`, leaves the mark in place for a later poll.
-    pub fn poll(&mut self, now: Instant) -> bool {
-        if self.is_due(now) {
-            self.last_render = Some(now);
-            self.pending = false;
+    pub fn poll(&mut self, current_time: Instant) -> bool {
+        if self.is_render_due(current_time) {
+            self.last_render_time = Some(current_time);
+            self.is_render_pending = false;
             true
         } else {
             false
@@ -85,16 +87,16 @@ impl RenderScheduler {
     ///
     /// `None` when nothing is pending — the loop sleeps until an event arrives.
     /// `Some(Duration::ZERO)` when a render is already due. Otherwise the
-    /// remaining time until [`FRAME_INTERVAL`] elapses.
-    pub fn next_wakeup(&self, now: Instant) -> Option<Duration> {
-        if !self.pending {
+    /// remaining time until [`FRAME_INTERVAL_DURATION`] elapses.
+    pub fn next_wakeup(&self, current_time: Instant) -> Option<Duration> {
+        if !self.is_render_pending {
             return None;
         }
-        match self.last_render {
+        match self.last_render_time {
             None => Some(Duration::ZERO),
-            Some(last) => {
-                let elapsed = now.saturating_duration_since(last);
-                Some(FRAME_INTERVAL.saturating_sub(elapsed))
+            Some(last_render_time) => {
+                let elapsed_duration = current_time.saturating_duration_since(last_render_time);
+                Some(FRAME_INTERVAL_DURATION.saturating_sub(elapsed_duration))
             }
         }
     }

@@ -3,7 +3,7 @@
 
 use super::*;
 
-use koshi_core::action::ActionRef;
+use koshi_core::action::ActionReference;
 use koshi_core::command::{
     ClosePaneArgs, CloseTabArgs, Command, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs,
     NewPaneArgs, NewTabArgs, ResizePaneArgs, TabTarget,
@@ -18,100 +18,132 @@ use crate::error::ColorParseError;
 use crate::key::{parse_chord, Leader};
 
 /// The argless `core:<name>` binding the default table stores.
-fn bound(name: &str) -> BoundAction {
+fn build_bound_action(action_name: &str) -> BoundAction {
     BoundAction {
-        action: ActionRef::core(name).expect("expected action name is valid"),
-        args: ActionArgs::None,
+        action_reference: ActionReference::from_core_action_name(action_name)
+            .expect("expected action name is valid"),
+        action_arguments: ActionArgs::None,
     }
 }
 
 #[test]
 fn default_loads_with_expected_values() {
     let server = ServerConfig::default();
-    let config = ClientConfig::default();
+    let client_config = ClientConfig::default();
 
-    assert_eq!(server.version, SCHEMA_VERSION);
-    assert_eq!(config.version, SCHEMA_VERSION);
+    assert_eq!(server.config_schema_version, SCHEMA_VERSION);
+    assert_eq!(client_config.config_schema_version, SCHEMA_VERSION);
 
-    assert_eq!(server.pane.min_cols, 2);
-    assert_eq!(server.pane.min_rows, 1);
-    assert_eq!(server.pane.gap, 0);
+    assert_eq!(server.pane.minimum_column_count, 2);
+    assert_eq!(server.pane.minimum_row_count, 1);
+    assert_eq!(server.pane.gap_cell_count, 0);
 
-    assert_eq!(server.scrollback.max_lines, 10_000);
-    assert_eq!(server.scrollback.max_bytes, 32 * 1024 * 1024);
-    assert!(config.scrollback.scroll_on_input);
+    assert_eq!(server.scrollback.maximum_line_count, 10_000);
+    assert_eq!(server.scrollback.maximum_byte_count, 32 * 1024 * 1024);
+    assert!(client_config.scrollback.should_scroll_to_input);
 
-    assert!(!server.allow_beta_features);
-    assert!(!server.allow_other_users);
+    assert!(!server.should_allow_beta_features);
+    assert!(!server.should_allow_other_users);
     assert_eq!(server.remote_listen, None);
-    assert_eq!(server.shared_sessions_dir, None);
-    assert!(!server.auto_close_session);
-    assert!(config.image_support);
-    assert!(config.remote_reconnect);
+    assert_eq!(server.shared_sessions_directory, None);
+    assert!(!server.should_auto_close_session);
+    assert!(client_config.supports_image_protocols);
+    assert!(client_config.should_reconnect_remote_session);
 
-    assert_eq!(config.keybindings.chord_timeout_ms, 500);
-    assert_eq!(config.keybindings.which_key_delay_ms, 300);
-    assert_eq!(config.keybindings.max_chord_depth, 4);
-    assert_eq!(config.keybindings.leader, Leader::Mods(ModFlags::CTRL));
-    assert_eq!(config.keybindings.unlock_alternative, None);
+    assert_eq!(client_config.keybindings.chord_timeout_ms, 500);
+    assert_eq!(client_config.keybindings.which_key_delay_ms, 300);
+    assert_eq!(client_config.keybindings.max_chord_depth, 4);
     assert_eq!(
-        config.keybindings.modes.keys().collect::<Vec<_>>(),
-        vec![&ModeName::new("locked"), &ModeName::new("normal")]
+        client_config.keybindings.leader,
+        Leader::Mods(ModFlags::CTRL)
+    );
+    assert_eq!(client_config.keybindings.unlock_alternative, None);
+    assert_eq!(
+        client_config
+            .keybindings
+            .mode_bindings_by_name
+            .keys()
+            .collect::<Vec<_>>(),
+        vec![
+            &ModeName::from_text("locked"),
+            &ModeName::from_text("normal")
+        ]
     );
 
-    assert_eq!(config.layout.new_pane_direction, Direction::Right);
+    assert_eq!(client_config.layout.new_pane_direction, Direction::Right);
 
-    assert!(config.mouse.border_resize);
-    assert_eq!(config.mouse.scroll_lines, 3);
-    assert_eq!(config.mouse.wheel, WheelScroll::ScrollScrollback);
+    assert!(client_config.mouse.can_resize_pane_border);
+    assert_eq!(client_config.mouse.scroll_line_count, 3);
+    assert_eq!(client_config.mouse.wheel, WheelScroll::ScrollScrollback);
 
-    assert!(config.copy.copy_on_select);
-    assert!(config.copy.trim_trailing_whitespace);
-    assert_eq!(config.copy.clipboard, ClipboardBackend::Osc52);
+    assert!(client_config.copy.should_copy_on_select);
+    assert!(client_config.copy.should_trim_trailing_whitespace);
+    assert_eq!(client_config.copy.clipboard, ClipboardBackend::Osc52);
 
     assert_eq!(server.terminal.term, "xterm-256color");
     assert_eq!(server.terminal.colorterm, "truecolor");
     assert_eq!(server.terminal.default_shell, None);
 
-    assert_eq!(config.theme.name, "default");
-    assert_eq!(config.theme.colors, ColorPalette::default());
+    assert_eq!(client_config.theme.theme_name, "default");
+    assert_eq!(client_config.theme.colors, ColorPalette::default());
 
-    assert!(config.update.auto_check);
-    assert_eq!(config.update.check_interval_days, 14);
-    assert!(!config.update.allow_prerelease);
+    assert!(client_config.update.should_auto_check_for_updates);
+    assert_eq!(client_config.update.check_interval_days, 14);
+    assert!(!client_config.update.should_allow_prerelease_updates);
 
     // Logging is process-local: both sides carry the same defaults.
     assert_eq!(server.logging, LoggingConfig::default());
-    assert_eq!(config.logging, LoggingConfig::default());
-    assert!(!server.logging.enabled);
+    assert_eq!(client_config.logging, LoggingConfig::default());
+    assert!(!server.logging.is_enabled);
     assert_eq!(server.logging.level, LogLevel::Warning);
-    assert_eq!(server.logging.format, LogFormat::Pretty);
-    assert!(!config.logging.enabled);
+    assert_eq!(server.logging.log_format, LogFormat::Pretty);
+    assert!(!client_config.logging.is_enabled);
 }
 
 #[test]
 fn default_palette_has_expected_roles() {
     let palette = ColorPalette::default();
-    assert_eq!(palette.ramp_start, RgbColor::new(0xd0, 0xa5, 0xff));
-    assert_eq!(palette.ramp_end, RgbColor::new(0x7d, 0xbc, 0xff));
-    assert_eq!(palette.on_ramp, RgbColor::new(0x12, 0x09, 0x1f));
-    assert_eq!(palette.on_ramp_dim, RgbColor::new(0xf0, 0xec, 0xfa));
-    assert_eq!(palette.accent, RgbColor::new(0xf5, 0xc2, 0xff));
-    assert_eq!(palette.on_accent, RgbColor::new(0x1e, 0x10, 0x33));
-    assert_eq!(palette.border_focused, RgbColor::new(0x00, 0xaf, 0xd7));
-    assert_eq!(palette.border_unfocused, RgbColor::new(0x58, 0x58, 0x58));
-    assert_eq!(palette.border_hover, RgbColor::new(0xaf, 0x5f, 0xff));
-    assert_eq!(palette.stack_header_fg, RgbColor::new(0xf4, 0xf1, 0xfa));
-    assert_eq!(palette.stack_header_bg, RgbColor::new(0x30, 0x0f, 0x4a));
-    assert_eq!(palette.letterbox, RgbColor::new(0x58, 0x58, 0x58));
-    assert_eq!(palette.bar_bg, RgbColor::new(0x00, 0x00, 0x00));
+    assert_eq!(
+        palette.ramp_start,
+        RgbColor::from_channels(0xd0, 0xa5, 0xff)
+    );
+    assert_eq!(palette.ramp_end, RgbColor::from_channels(0x7d, 0xbc, 0xff));
+    assert_eq!(palette.on_ramp, RgbColor::from_channels(0x12, 0x09, 0x1f));
+    assert_eq!(
+        palette.on_ramp_dim,
+        RgbColor::from_channels(0xf0, 0xec, 0xfa)
+    );
+    assert_eq!(palette.accent, RgbColor::from_channels(0xf5, 0xc2, 0xff));
+    assert_eq!(palette.on_accent, RgbColor::from_channels(0x1e, 0x10, 0x33));
+    assert_eq!(
+        palette.border_focused,
+        RgbColor::from_channels(0x00, 0xaf, 0xd7)
+    );
+    assert_eq!(
+        palette.border_unfocused,
+        RgbColor::from_channels(0x58, 0x58, 0x58)
+    );
+    assert_eq!(
+        palette.border_hover,
+        RgbColor::from_channels(0xaf, 0x5f, 0xff)
+    );
+    assert_eq!(
+        palette.stack_header_fg,
+        RgbColor::from_channels(0xf4, 0xf1, 0xfa)
+    );
+    assert_eq!(
+        palette.stack_header_bg,
+        RgbColor::from_channels(0x30, 0x0f, 0x4a)
+    );
+    assert_eq!(palette.letterbox, RgbColor::from_channels(0x58, 0x58, 0x58));
+    assert_eq!(palette.bar_bg, RgbColor::from_channels(0x00, 0x00, 0x00));
 }
 
 #[test]
 fn from_hex_parses_leading_hash() {
     assert_eq!(
         RgbColor::from_hex("#00afd7"),
-        Ok(RgbColor::new(0x00, 0xaf, 0xd7))
+        Ok(RgbColor::from_channels(0x00, 0xaf, 0xd7))
     );
 }
 
@@ -119,7 +151,7 @@ fn from_hex_parses_leading_hash() {
 fn from_hex_parses_bare_and_uppercase() {
     assert_eq!(
         RgbColor::from_hex("00AFD7"),
-        Ok(RgbColor::new(0x00, 0xaf, 0xd7))
+        Ok(RgbColor::from_channels(0x00, 0xaf, 0xd7))
     );
 }
 
@@ -127,7 +159,7 @@ fn from_hex_parses_bare_and_uppercase() {
 fn from_hex_rejects_wrong_length() {
     assert_eq!(
         RgbColor::from_hex("#fff"),
-        Err(ColorParseError::BadLength { got: 3 })
+        Err(ColorParseError::BadLength { character_count: 3 })
     );
 }
 
@@ -135,11 +167,11 @@ fn from_hex_rejects_wrong_length() {
 fn from_hex_rejects_empty_value() {
     assert_eq!(
         RgbColor::from_hex(""),
-        Err(ColorParseError::BadLength { got: 0 })
+        Err(ColorParseError::BadLength { character_count: 0 })
     );
     assert_eq!(
         RgbColor::from_hex("#"),
-        Err(ColorParseError::BadLength { got: 0 })
+        Err(ColorParseError::BadLength { character_count: 0 })
     );
 }
 
@@ -147,7 +179,7 @@ fn from_hex_rejects_empty_value() {
 fn from_hex_rejects_too_long_value() {
     assert_eq!(
         RgbColor::from_hex("#1234567"),
-        Err(ColorParseError::BadLength { got: 7 })
+        Err(ColorParseError::BadLength { character_count: 7 })
     );
 }
 
@@ -156,7 +188,7 @@ fn from_hex_rejects_non_hex_digit() {
     assert_eq!(
         RgbColor::from_hex("#gggggg"),
         Err(ColorParseError::BadDigit {
-            value: "gggggg".to_string()
+            invalid_hex_text: "gggggg".to_string()
         })
     );
 }
@@ -168,7 +200,7 @@ fn from_hex_classifies_a_six_character_multibyte_value_as_bad_digit() {
     assert_eq!(
         RgbColor::from_hex("12345\u{e9}"),
         Err(ColorParseError::BadDigit {
-            value: "12345\u{e9}".to_string()
+            invalid_hex_text: "12345\u{e9}".to_string()
         })
     );
 }
@@ -179,7 +211,7 @@ fn from_hex_counts_length_in_characters_for_multibyte_values() {
     // what the user typed, not the byte count.
     assert_eq!(
         RgbColor::from_hex("caf\u{e9}"),
-        Err(ColorParseError::BadLength { got: 4 })
+        Err(ColorParseError::BadLength { character_count: 4 })
     );
 }
 
@@ -187,7 +219,7 @@ fn from_hex_counts_length_in_characters_for_multibyte_values() {
 fn from_str_delegates_to_from_hex() {
     assert_eq!(
         "#123456".parse::<RgbColor>(),
-        Ok(RgbColor::new(0x12, 0x34, 0x56))
+        Ok(RgbColor::from_channels(0x12, 0x34, 0x56))
     );
 }
 
@@ -195,12 +227,12 @@ fn from_str_delegates_to_from_hex() {
 fn from_str_reports_the_same_errors_as_from_hex() {
     assert_eq!(
         "#fff".parse::<RgbColor>(),
-        Err(ColorParseError::BadLength { got: 3 })
+        Err(ColorParseError::BadLength { character_count: 3 })
     );
     assert_eq!(
         "gggggg".parse::<RgbColor>(),
         Err(ColorParseError::BadDigit {
-            value: "gggggg".to_string()
+            invalid_hex_text: "gggggg".to_string()
         })
     );
 }
@@ -211,13 +243,13 @@ fn from_hex_keeps_surrounding_whitespace_as_content() {
     // whole eight-character run is measured.
     assert_eq!(
         RgbColor::from_hex(" #ffffff"),
-        Err(ColorParseError::BadLength { got: 8 })
+        Err(ColorParseError::BadLength { character_count: 8 })
     );
     // A trailing space keeps the length at six and fails on the space itself.
     assert_eq!(
         RgbColor::from_hex("#fffff "),
         Err(ColorParseError::BadDigit {
-            value: "fffff ".to_string()
+            invalid_hex_text: "fffff ".to_string()
         })
     );
 }
@@ -227,7 +259,7 @@ fn from_hex_strips_only_one_leading_hash() {
     // A second `#` stays as content: the value measures seven characters.
     assert_eq!(
         RgbColor::from_hex("##ffffff"),
-        Err(ColorParseError::BadLength { got: 7 })
+        Err(ColorParseError::BadLength { character_count: 7 })
     );
 }
 
@@ -235,20 +267,26 @@ fn from_hex_strips_only_one_leading_hash() {
 fn from_hex_parses_the_channel_boundaries() {
     // Pure black and pure white are the two extreme channel values, with and
     // without the leading hash.
-    assert_eq!(RgbColor::from_hex("#000000"), Ok(RgbColor::new(0, 0, 0)));
-    assert_eq!(RgbColor::from_hex("000000"), Ok(RgbColor::new(0, 0, 0)));
+    assert_eq!(
+        RgbColor::from_hex("#000000"),
+        Ok(RgbColor::from_channels(0, 0, 0))
+    );
+    assert_eq!(
+        RgbColor::from_hex("000000"),
+        Ok(RgbColor::from_channels(0, 0, 0))
+    );
     assert_eq!(
         RgbColor::from_hex("#ffffff"),
-        Ok(RgbColor::new(0xff, 0xff, 0xff))
+        Ok(RgbColor::from_channels(0xff, 0xff, 0xff))
     );
     // Upper-case and mixed-case digits fold to the same value.
     assert_eq!(
         RgbColor::from_hex("#FFFFFF"),
-        Ok(RgbColor::new(0xff, 0xff, 0xff))
+        Ok(RgbColor::from_channels(0xff, 0xff, 0xff))
     );
     assert_eq!(
         RgbColor::from_hex("#FfAa00"),
-        Ok(RgbColor::new(0xff, 0xaa, 0x00))
+        Ok(RgbColor::from_channels(0xff, 0xaa, 0x00))
     );
 }
 
@@ -258,14 +296,14 @@ fn from_hex_rejects_a_named_color_word_by_its_length() {
     // length rule first, never reaching the digit check.
     assert_eq!(
         RgbColor::from_hex("red"),
-        Err(ColorParseError::BadLength { got: 3 })
+        Err(ColorParseError::BadLength { character_count: 3 })
     );
     // "orange" is six characters, so it passes the length rule and fails on
     // the first non-hex digit instead.
     assert_eq!(
         RgbColor::from_hex("orange"),
         Err(ColorParseError::BadDigit {
-            value: "orange".to_string()
+            invalid_hex_text: "orange".to_string()
         })
     );
 }
@@ -275,22 +313,22 @@ fn from_hex_treats_a_lone_hash_length_as_zero() {
     // Stripping the single `#` leaves an empty value, reported as zero digits.
     assert_eq!(
         RgbColor::from_hex("#"),
-        Err(ColorParseError::BadLength { got: 0 })
+        Err(ColorParseError::BadLength { character_count: 0 })
     );
     // Only the leading `#` is stripped: a trailing `#` stays as content, so
     // the value is six characters with one non-hex digit.
     assert_eq!(
         RgbColor::from_hex("#12345#"),
         Err(ColorParseError::BadDigit {
-            value: "12345#".to_string()
+            invalid_hex_text: "12345#".to_string()
         })
     );
 }
 
 #[test]
 fn mode_name_roundtrips() {
-    let mode = ModeName::new("resize");
-    assert_eq!(mode.as_str(), "resize");
+    let resize_mode_name = ModeName::from_text("resize");
+    assert_eq!(resize_mode_name.get_name(), "resize");
 }
 
 #[test]
@@ -298,23 +336,29 @@ fn mode_names_compare_by_exact_text() {
     // The map key is the raw string, so case and surrounding space both count:
     // a `mode "Normal"` block is a different mode from `mode "normal"`.
     assert_eq!(
-        ModeName::new("normal"),
-        ModeName::new(String::from("normal"))
+        ModeName::from_text("normal"),
+        ModeName::from_text(String::from("normal"))
     );
-    assert_ne!(ModeName::new("Normal"), ModeName::new("normal"));
-    assert_ne!(ModeName::new("normal "), ModeName::new("normal"));
-    assert_eq!(ModeName::new("").as_str(), "");
+    assert_ne!(ModeName::from_text("Normal"), ModeName::from_text("normal"));
+    assert_ne!(
+        ModeName::from_text("normal "),
+        ModeName::from_text("normal")
+    );
+    assert_eq!(ModeName::from_text("").get_name(), "");
 
     // Ordering is the string ordering, which is what fixes the mode order in
     // every `BTreeMap<ModeName, _>`.
-    assert!(ModeName::new("locked") < ModeName::new("normal"));
+    assert!(ModeName::from_text("locked") < ModeName::from_text("normal"));
 }
 
 #[test]
 fn mode_name_maps_answer_str_lookups() {
     // `ModeName` borrows as `str`, so a `BTreeMap<ModeName, _>` answers a
     // `&str` key exactly as it answers the owned key.
-    let map = BTreeMap::from([(ModeName::new("locked"), 1), (ModeName::new("normal"), 2)]);
+    let map = BTreeMap::from([
+        (ModeName::from_text("locked"), 1),
+        (ModeName::from_text("normal"), 2),
+    ]);
     assert_eq!(map.get("locked"), Some(&1));
     assert_eq!(map.get("normal"), Some(&2));
     assert_eq!(map.get("Normal"), None);
@@ -324,12 +368,12 @@ fn mode_name_maps_answer_str_lookups() {
 
 #[test]
 fn the_default_modes_remove_no_sequences() {
-    let modes = default_mode_bindings(Leader::default());
-    for name in ["normal", "locked"] {
+    let modes = build_default_mode_bindings(Leader::default());
+    for mode_name in ["normal", "locked"] {
         assert_eq!(
-            modes[&ModeName::new(name)].removed,
+            modes[&ModeName::from_text(mode_name)].removed_key_sequences,
             BTreeSet::new(),
-            "{name} mode removes nothing"
+            "{mode_name} mode removes nothing"
         );
     }
 }
@@ -337,37 +381,40 @@ fn the_default_modes_remove_no_sequences() {
 #[test]
 fn an_empty_mode_binds_and_removes_nothing() {
     let empty = ModeBindings::default();
-    assert_eq!(empty.keys, BTreeMap::new());
-    assert_eq!(empty.removed, BTreeSet::new());
+    assert_eq!(empty.bound_action_by_key_sequence, BTreeMap::new());
+    assert_eq!(empty.removed_key_sequences, BTreeSet::new());
 }
 
 #[test]
 fn the_default_theme_is_named_default() {
     assert_eq!(DEFAULT_THEME, "default");
-    assert_eq!(ThemeConfig::default().name, DEFAULT_THEME);
+    assert_eq!(ThemeConfig::default().theme_name, DEFAULT_THEME);
 }
 
 #[test]
 fn the_default_keybindings_hold_the_table_for_their_own_leader() {
     let keybindings = KeybindingsConfig::default();
-    assert_eq!(keybindings.modes, default_mode_bindings(keybindings.leader));
+    assert_eq!(
+        keybindings.mode_bindings_by_name,
+        build_default_mode_bindings(keybindings.leader)
+    );
 }
 
 #[test]
 fn each_default_mode_binds_every_action_to_one_key() {
-    for (mode, bindings) in default_mode_bindings(Leader::default()) {
-        let mut actions: Vec<String> = bindings
-            .keys
+    for (mode_name, mode_bindings) in build_default_mode_bindings(Leader::default()) {
+        let mut action_references: Vec<String> = mode_bindings
+            .bound_action_by_key_sequence
             .values()
-            .map(|binding| binding.action.to_string())
+            .map(|binding| binding.action_reference.to_string())
             .collect();
-        let key_count = actions.len();
-        actions.sort();
-        actions.dedup();
+        let key_count = action_references.len();
+        action_references.sort();
+        action_references.dedup();
         assert_eq!(
-            actions.len(),
+            action_references.len(),
             key_count,
-            "{mode:?} binds one action to two keys"
+            "{mode_name:?} binds one action to two keys"
         );
     }
 }
@@ -384,46 +431,55 @@ fn a_shift_modifier_leader_moves_every_leader_binding() {
     // `parse_leader("S-")` yields this leader, and merging Shift onto the
     // lowercase letters the defaults use is legal, so the whole table builds:
     // `<leader>q` becomes `<S-q>`, `<leader>p n` becomes `<S-p> n`.
-    let modes = default_mode_bindings(Leader::Mods(ModFlags::SHIFT));
-    let normal = &modes[&ModeName::new("normal")];
+    let modes = build_default_mode_bindings(Leader::Mods(ModFlags::SHIFT));
+    let normal = &modes[&ModeName::from_text("normal")];
 
-    assert_eq!(normal.keys.len(), 22);
+    assert_eq!(normal.bound_action_by_key_sequence.len(), 22);
     assert_eq!(
-        normal.keys[&KeySequence::from(KeyChord::new(ModFlags::SHIFT, Key::Char('q')))],
-        bound("quit")
+        normal.bound_action_by_key_sequence
+            [&KeySequence::from(KeyChord::from_parts(ModFlags::SHIFT, Key::Char('q')))],
+        build_bound_action("quit")
     );
     assert_eq!(
-        normal.keys[&KeySequence::new(
-            KeyChord::new(ModFlags::SHIFT, Key::Char('p')),
-            vec![KeyChord::new(ModFlags::NONE, Key::Char('n'))],
+        normal.bound_action_by_key_sequence[&KeySequence::from_first_and_rest(
+            KeyChord::from_parts(ModFlags::SHIFT, Key::Char('p')),
+            vec![KeyChord::from_parts(ModFlags::NONE, Key::Char('n'))],
         )],
-        bound("new-pane")
+        build_bound_action("new-pane")
     );
     // `<S-Tab>` is written literally, so it stays put and does not collide
     // with the moved `<leader>t` prefix.
     assert_eq!(
-        normal.keys[&KeySequence::from(KeyChord::new(ModFlags::SHIFT, Key::Named(NamedKey::Tab)))],
-        bound("previous-tab")
+        normal.bound_action_by_key_sequence[&KeySequence::from(KeyChord::from_parts(
+            ModFlags::SHIFT,
+            Key::Named(NamedKey::Tab)
+        ))],
+        build_bound_action("previous-tab")
     );
 }
 
 #[test]
 fn a_chord_leader_prefixes_the_locked_bindings_and_leaves_the_unlock_chord() {
-    let space = KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Space));
-    let modes = default_mode_bindings(Leader::Chord(space));
-    let locked = &modes[&ModeName::new("locked")];
-    let after_leader = |ch| KeySequence::new(space, vec![KeyChord::new(ModFlags::NONE, ch)]);
+    let space = KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Space));
+    let modes = build_default_mode_bindings(Leader::Chord(space));
+    let locked = &modes[&ModeName::from_text("locked")];
+    let build_sequence_after_leader = |key| {
+        KeySequence::from_first_and_rest(space, vec![KeyChord::from_parts(ModFlags::NONE, key)])
+    };
 
-    assert_eq!(locked.keys.len(), 3);
+    assert_eq!(locked.bound_action_by_key_sequence.len(), 3);
     // The reserved unlock is written literally, so it stays `<C-l>`.
     assert_eq!(
-        locked.keys[&KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK)],
-        bound("unlock")
+        locked.bound_action_by_key_sequence[&KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK)],
+        build_bound_action("unlock")
     );
-    assert_eq!(locked.keys[&after_leader(Key::Char('q'))], bound("quit"));
     assert_eq!(
-        locked.keys[&after_leader(Key::Char('g'))],
-        bound("mouse-select")
+        locked.bound_action_by_key_sequence[&build_sequence_after_leader(Key::Char('q'))],
+        build_bound_action("quit")
+    );
+    assert_eq!(
+        locked.bound_action_by_key_sequence[&build_sequence_after_leader(Key::Char('g'))],
+        build_bound_action("mouse-select")
     );
 }
 
@@ -432,266 +488,267 @@ fn a_leader_chord_that_is_also_a_binding_keeps_both() {
     // `<A-f>` is the fullscreen binding and, here, the leader as well. The
     // one-chord sequence and the sequences it opens are separate map keys, so
     // the table still holds all 22 normal-mode bindings.
-    let fullscreen = KeyChord::new(ModFlags::ALT, Key::Char('f'));
-    let modes = default_mode_bindings(Leader::Chord(fullscreen));
-    let normal = &modes[&ModeName::new("normal")];
+    let fullscreen = KeyChord::from_parts(ModFlags::ALT, Key::Char('f'));
+    let modes = build_default_mode_bindings(Leader::Chord(fullscreen));
+    let normal = &modes[&ModeName::from_text("normal")];
 
-    assert_eq!(normal.keys.len(), 22);
+    assert_eq!(normal.bound_action_by_key_sequence.len(), 22);
     assert_eq!(
-        normal.keys[&KeySequence::from(fullscreen)],
-        bound("toggle-pane-fullscreen")
+        normal.bound_action_by_key_sequence[&KeySequence::from(fullscreen)],
+        build_bound_action("toggle-pane-fullscreen")
     );
     assert_eq!(
-        normal.keys[&KeySequence::new(
+        normal.bound_action_by_key_sequence[&KeySequence::from_first_and_rest(
             fullscreen,
-            vec![KeyChord::new(ModFlags::NONE, Key::Char('q'))]
+            vec![KeyChord::from_parts(ModFlags::NONE, Key::Char('q'))]
         )],
-        bound("quit")
+        build_bound_action("quit")
     );
 }
 
 /// The `layout.new-pane-direction` the resolving client holds while the default
 /// binding table below is checked. `Up`, not the stock `Right`, so the
 /// `new-pane` row shows that resolution reads the client's own direction.
-const CLIENT_SPLIT: Direction = Direction::Up;
+const CLIENT_SPLIT_DIRECTION: Direction = Direction::Up;
 
 /// One expected default binding: where it lives, what it binds, and the exact
 /// outcome of resolving it against the built-in action registry.
 struct ExpectedBinding {
-    mode: &'static str,
-    chord: &'static str,
-    action: &'static str,
-    args: ActionArgs,
-    resolved: Result<Command, ResolveError>,
+    mode_name: &'static str,
+    key_sequence_text: &'static str,
+    action_name: &'static str,
+    action_arguments: ActionArgs,
+    resolved_dispatch: Result<Command, ResolveError>,
 }
 
-/// The complete expected default binding table, row for row.
+/// The complete expected default binding table, binding by binding.
 fn expected_default_bindings() -> Vec<ExpectedBinding> {
-    let row = |mode: &'static str,
-               chord: &'static str,
-               action: &'static str,
-               args: ActionArgs,
-               resolved: Result<Command, ResolveError>| ExpectedBinding {
-        mode,
-        chord,
-        action,
-        args,
-        resolved,
-    };
-    let focus_cmd = |direction: Direction| {
+    let build_expected_binding =
+        |mode_name: &'static str,
+         key_sequence_text: &'static str,
+         action_name: &'static str,
+         action_arguments: ActionArgs,
+         resolved_dispatch: Result<Command, ResolveError>| ExpectedBinding {
+            mode_name,
+            key_sequence_text,
+            action_name,
+            action_arguments,
+            resolved_dispatch,
+        };
+    let build_focus_command = |direction: Direction| {
         Command::FocusPane(FocusPaneArgs {
-            target: FocusTarget::Direction(direction),
-            client: None,
+            focus_target: FocusTarget::Direction(direction),
+            client_id: None,
         })
     };
-    let resize_cmd = |direction: Direction| {
+    let build_resize_command = |direction: Direction| {
         Command::ResizePane(ResizePaneArgs {
-            pane: None,
+            pane_id: None,
             direction,
-            size: 1,
+            resize_amount_cells: 1,
         })
     };
-    let new_pane_cmd = |direction: Direction| {
+    let build_new_pane_command = |direction: Direction| {
         Command::NewPane(NewPaneArgs {
-            source: None,
-            tab: None,
+            source_pane_id: None,
+            tab_id: None,
             direction,
-            stacked: false,
-            cwd: None,
-            command: None,
-            client: None,
+            should_stack: false,
+            working_directory: None,
+            spawn_spec: None,
+            client_id: None,
         })
     };
 
     vec![
-        row(
+        build_expected_binding(
             "normal",
             "<C-l>",
             "lock",
             ActionArgs::None,
             Ok(Command::SetLockMode(LockModeArgs {
-                locked: true,
-                client: None,
+                is_locked: true,
+                client_id: None,
             })),
         ),
-        row(
+        build_expected_binding(
             "normal",
             "<C-q>",
             "quit",
             ActionArgs::None,
             Ok(Command::Quit),
         ),
-        row(
+        build_expected_binding(
             "normal",
             "<C-p> n",
             "new-pane",
             ActionArgs::None,
-            Ok(new_pane_cmd(CLIENT_SPLIT)),
+            Ok(build_new_pane_command(CLIENT_SPLIT_DIRECTION)),
         ),
-        row(
+        build_expected_binding(
             "normal",
             "<C-p> h",
             "new-pane-left",
             ActionArgs::None,
-            Ok(new_pane_cmd(Direction::Left)),
+            Ok(build_new_pane_command(Direction::Left)),
         ),
-        row(
+        build_expected_binding(
             "normal",
             "<C-p> j",
             "new-pane-down",
             ActionArgs::None,
-            Ok(new_pane_cmd(Direction::Down)),
+            Ok(build_new_pane_command(Direction::Down)),
         ),
-        row(
+        build_expected_binding(
             "normal",
             "<C-p> k",
             "new-pane-up",
             ActionArgs::None,
-            Ok(new_pane_cmd(Direction::Up)),
+            Ok(build_new_pane_command(Direction::Up)),
         ),
-        row(
+        build_expected_binding(
             "normal",
             "<C-p> l",
             "new-pane-right",
             ActionArgs::None,
-            Ok(new_pane_cmd(Direction::Right)),
+            Ok(build_new_pane_command(Direction::Right)),
         ),
-        row(
+        build_expected_binding(
             "normal",
             "<C-p> x",
             "close-pane-tree",
             ActionArgs::None,
             Ok(Command::ClosePane(ClosePaneArgs {
-                pane: None,
-                force: false,
-                tree: true,
+                pane_id: None,
+                should_force_close: false,
+                should_kill_process_tree: true,
             })),
         ),
-        row(
+        build_expected_binding(
             "normal",
             "<A-f>",
             "toggle-pane-fullscreen",
             ActionArgs::None,
             Ok(Command::TogglePaneFullscreen),
         ),
-        row(
+        build_expected_binding(
             "normal",
             "<C-p> <Left>",
             "focus-pane-left",
             ActionArgs::None,
-            Ok(focus_cmd(Direction::Left)),
+            Ok(build_focus_command(Direction::Left)),
         ),
-        row(
+        build_expected_binding(
             "normal",
             "<C-p> <Down>",
             "focus-pane-down",
             ActionArgs::None,
-            Ok(focus_cmd(Direction::Down)),
+            Ok(build_focus_command(Direction::Down)),
         ),
-        row(
+        build_expected_binding(
             "normal",
             "<C-p> <Up>",
             "focus-pane-up",
             ActionArgs::None,
-            Ok(focus_cmd(Direction::Up)),
+            Ok(build_focus_command(Direction::Up)),
         ),
-        row(
+        build_expected_binding(
             "normal",
             "<C-p> <Right>",
             "focus-pane-right",
             ActionArgs::None,
-            Ok(focus_cmd(Direction::Right)),
+            Ok(build_focus_command(Direction::Right)),
         ),
-        row(
+        build_expected_binding(
             "normal",
             "<C-s> <Left>",
             "resize-pane-left",
             ActionArgs::None,
-            Ok(resize_cmd(Direction::Left)),
+            Ok(build_resize_command(Direction::Left)),
         ),
-        row(
+        build_expected_binding(
             "normal",
             "<C-s> <Down>",
             "resize-pane-down",
             ActionArgs::None,
-            Ok(resize_cmd(Direction::Down)),
+            Ok(build_resize_command(Direction::Down)),
         ),
-        row(
+        build_expected_binding(
             "normal",
             "<C-s> <Up>",
             "resize-pane-up",
             ActionArgs::None,
-            Ok(resize_cmd(Direction::Up)),
+            Ok(build_resize_command(Direction::Up)),
         ),
-        row(
+        build_expected_binding(
             "normal",
             "<C-s> <Right>",
             "resize-pane-right",
             ActionArgs::None,
-            Ok(resize_cmd(Direction::Right)),
+            Ok(build_resize_command(Direction::Right)),
         ),
-        row(
+        build_expected_binding(
             "normal",
             "<C-t> n",
             "new-tab",
             ActionArgs::None,
             Ok(Command::NewTab(NewTabArgs {
-                cwd: None,
-                client: None,
+                working_directory: None,
+                client_id: None,
             })),
         ),
-        row(
+        build_expected_binding(
             "normal",
             "<C-t> x",
             "close-tab",
             ActionArgs::None,
             Ok(Command::CloseTab(CloseTabArgs::default())),
         ),
-        row(
+        build_expected_binding(
             "normal",
             "<Tab>",
             "next-tab",
             ActionArgs::None,
             Ok(Command::FocusTab(FocusTabArgs {
-                target: TabTarget::Next,
-                client: None,
+                focus_target: TabTarget::Next,
+                client_id: None,
             })),
         ),
-        row(
+        build_expected_binding(
             "normal",
             "<S-Tab>",
             "previous-tab",
             ActionArgs::None,
             Ok(Command::FocusTab(FocusTabArgs {
-                target: TabTarget::Prev,
-                client: None,
+                focus_target: TabTarget::Prev,
+                client_id: None,
             })),
         ),
-        row(
+        build_expected_binding(
             "locked",
             "<C-l>",
             "unlock",
             ActionArgs::None,
             Ok(Command::SetLockMode(LockModeArgs {
-                locked: false,
-                client: None,
+                is_locked: false,
+                client_id: None,
             })),
         ),
-        row(
+        build_expected_binding(
             "locked",
             "<C-q>",
             "quit",
             ActionArgs::None,
             Ok(Command::Quit),
         ),
-        row(
+        build_expected_binding(
             "normal",
             "<C-g>",
             "mouse-select",
             ActionArgs::None,
             Ok(Command::ToggleMouseSelect),
         ),
-        row(
+        build_expected_binding(
             "locked",
             "<C-g>",
             "mouse-select",
@@ -703,77 +760,97 @@ fn expected_default_bindings() -> Vec<ExpectedBinding> {
 
 #[test]
 fn default_binding_table_is_exact_and_resolves() {
-    let config = ClientConfig::default();
+    let client_config = ClientConfig::default();
     let registry = ActionRegistry::new();
-    let expected = expected_default_bindings();
+    let expected_binding_rows = expected_default_bindings();
 
-    let total: usize = config
+    let binding_count: usize = client_config
         .keybindings
-        .modes
+        .mode_bindings_by_name
         .values()
-        .map(|bindings| bindings.keys.len())
+        .map(|bindings| bindings.bound_action_by_key_sequence.len())
         .sum();
-    assert_eq!(total, expected.len());
+    assert_eq!(binding_count, expected_binding_rows.len());
 
-    for row in expected {
+    for expected_binding in expected_binding_rows {
         // Space-separated single chords; each token parses on its own (the
         // multi-chord grammar itself belongs to the sequence parser).
-        let mut chords = row
-            .chord
+        let mut chord_tokens = expected_binding
+            .key_sequence_text
             .split(' ')
             .map(|token| parse_chord(token).expect("default chord text parses"));
-        let first = chords.next().expect("expected chord text is non-empty");
-        let sequence = KeySequence::new(first, chords.collect());
-        let bound = config
+        let first_chord = chord_tokens
+            .next()
+            .expect("expected chord text is non-empty");
+        let key_sequence = KeySequence::from_first_and_rest(first_chord, chord_tokens.collect());
+        let bound_action = client_config
             .keybindings
-            .modes
-            .get(&ModeName::new(row.mode))
+            .mode_bindings_by_name
+            .get(&ModeName::from_text(expected_binding.mode_name))
             .expect("default mode exists")
-            .keys
-            .get(&sequence)
-            .unwrap_or_else(|| panic!("no default binding on {} in {}", row.chord, row.mode));
+            .bound_action_by_key_sequence
+            .get(&key_sequence)
+            .unwrap_or_else(|| {
+                panic!(
+                    "no default binding on {} in {}",
+                    expected_binding.key_sequence_text, expected_binding.mode_name
+                )
+            });
         assert_eq!(
-            bound.action,
-            ActionRef::core(row.action).expect("expected action name is valid"),
+            bound_action.action_reference,
+            ActionReference::from_core_action_name(expected_binding.action_name)
+                .expect("expected action name is valid"),
             "action bound to {}",
-            row.chord
+            expected_binding.key_sequence_text
         );
-        assert_eq!(bound.args, row.args, "args bound to {}", row.chord);
         assert_eq!(
-            resolve_action(&bound.action, &bound.args, &registry, CLIENT_SPLIT),
-            row.resolved.map(DispatchPlan::Command),
+            bound_action.action_arguments, expected_binding.action_arguments,
+            "action arguments bound to {}",
+            expected_binding.key_sequence_text
+        );
+        assert_eq!(
+            resolve_action(
+                &bound_action.action_reference,
+                &bound_action.action_arguments,
+                &registry,
+                CLIENT_SPLIT_DIRECTION,
+            ),
+            expected_binding
+                .resolved_dispatch
+                .map(DispatchPlan::Command),
             "resolution of {}",
-            row.chord
+            expected_binding.key_sequence_text
         );
     }
 }
 
 #[test]
 fn default_bindings_open_non_typeable_and_skip_ambiguous_ctrl_chords() {
-    let config = ClientConfig::default();
+    let client_config = ClientConfig::default();
     // On unix terminals without the kitty keyboard protocol these four Ctrl
     // chords arrive as the Tab, Enter, Esc, and Backspace control bytes.
-    let ambiguous = ['i', 'm', '[', 'h'].map(|c| KeyChord::new(ModFlags::CTRL, Key::Char(c)));
+    let ambiguous_control_chords = ['i', 'm', '[', 'h']
+        .map(|character| KeyChord::from_parts(ModFlags::CTRL, Key::Char(character)));
     // The one exception to the non-typeable-opening rule: tab switching is the
     // bare Tab / Shift+Tab pair, and a shell sees a literal Tab only while the
     // client is locked.
-    let tab_switch = [
-        KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Tab)),
-        KeyChord::new(ModFlags::SHIFT, Key::Named(NamedKey::Tab)),
+    let tab_switch_chords = [
+        KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Tab)),
+        KeyChord::from_parts(ModFlags::SHIFT, Key::Named(NamedKey::Tab)),
     ];
-    for (mode, bindings) in &config.keybindings.modes {
-        for sequence in bindings.keys.keys() {
-            // Only the OPENING chord competes with plain typing; later
+    for (mode_name, mode_bindings) in &client_config.keybindings.mode_bindings_by_name {
+        for key_sequence in mode_bindings.bound_action_by_key_sequence.keys() {
+            // Only the OPENING chord competes with plain typing; subsequent
             // chords are read while the pending sequence is live.
-            let first = &sequence.chords()[0];
+            let opening_chord = &key_sequence.list_chords()[0];
             assert!(
-                !first.is_typeable() || tab_switch.contains(first),
-                "default {first} in {mode:?} opens with a typeable chord"
+                !opening_chord.is_typeable() || tab_switch_chords.contains(opening_chord),
+                "default {opening_chord} in {mode_name:?} opens with a typeable chord"
             );
-            for chord in sequence.chords() {
+            for chord in key_sequence.list_chords() {
                 assert!(
-                    !ambiguous.contains(chord),
-                    "default {chord} in {mode:?} is ambiguous without the kitty protocol"
+                    !ambiguous_control_chords.contains(chord),
+                    "default {chord} in {mode_name:?} is ambiguous without the kitty protocol"
                 );
             }
         }
@@ -789,20 +866,20 @@ fn reserved_unlock_is_the_locked_mode_binding() {
         KeybindingsConfig::RESERVED_UNLOCK
     );
 
-    let locked = &config.keybindings.modes[&ModeName::new("locked")];
+    let locked = &config.keybindings.mode_bindings_by_name[&ModeName::from_text("locked")];
     // The reserved unlock — the same chord normal mode locks with, so one
     // key flips both ways — plus the quit and mouse-select chords, which fire
     // whether or not the client is locked.
-    assert_eq!(locked.keys.len(), 3);
-    let bound = locked
-        .keys
+    assert_eq!(locked.bound_action_by_key_sequence.len(), 3);
+    let bound_action = locked
+        .bound_action_by_key_sequence
         .get(&KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK))
         .expect("locked mode binds the reserved unlock chord");
     assert_eq!(
-        bound.action,
-        ActionRef::core("unlock").expect("unlock name is valid")
+        bound_action.action_reference,
+        ActionReference::from_core_action_name("unlock").expect("unlock name is valid")
     );
-    assert_eq!(bound.args, ActionArgs::None);
+    assert_eq!(bound_action.action_arguments, ActionArgs::None);
 }
 
 #[test]
@@ -811,19 +888,19 @@ fn prefix_labels_name_exactly_the_default_prefix_chords() {
     assert_eq!(labels.len(), 3);
     assert_eq!(
         labels
-            .get(&KeyChord::new(ModFlags::CTRL, Key::Char('p')))
+            .get(&KeyChord::from_parts(ModFlags::CTRL, Key::Char('p')))
             .map(String::as_str),
         Some("PANE")
     );
     assert_eq!(
         labels
-            .get(&KeyChord::new(ModFlags::CTRL, Key::Char('s')))
+            .get(&KeyChord::from_parts(ModFlags::CTRL, Key::Char('s')))
             .map(String::as_str),
         Some("RESIZE")
     );
     assert_eq!(
         labels
-            .get(&KeyChord::new(ModFlags::CTRL, Key::Char('t')))
+            .get(&KeyChord::from_parts(ModFlags::CTRL, Key::Char('t')))
             .map(String::as_str),
         Some("TAB")
     );
@@ -831,68 +908,102 @@ fn prefix_labels_name_exactly_the_default_prefix_chords() {
     // Every labeled chord opens at least one multi-chord default sequence,
     // and every multi-chord default sequence's opening chord is labeled —
     // the label table and the binding table stay in lockstep.
-    let normal = &default_mode_bindings(Leader::default())[&ModeName::new("normal")];
-    let openers: std::collections::BTreeSet<KeyChord> = normal
-        .keys
+    let normal = &build_default_mode_bindings(Leader::default())[&ModeName::from_text("normal")];
+    let opening_chords: std::collections::BTreeSet<KeyChord> = normal
+        .bound_action_by_key_sequence
         .keys()
-        .filter(|sequence| sequence.chords().len() > 1)
-        .map(|sequence| sequence.chords()[0])
+        .filter(|sequence| sequence.list_chords().len() > 1)
+        .map(|sequence| sequence.list_chords()[0])
         .collect();
-    assert_eq!(openers, labels.keys().copied().collect());
+    assert_eq!(opening_chords, labels.keys().copied().collect());
 }
 
 #[test]
 fn default_bindings_follow_the_leader() {
-    let normal = |leader| {
-        default_mode_bindings(leader)[&ModeName::new("normal")]
-            .keys
+    let build_normal_mode_bindings = |leader| {
+        build_default_mode_bindings(leader)[&ModeName::from_text("normal")]
+            .bound_action_by_key_sequence
             .clone()
     };
-    let one = |mods, ch| KeySequence::from(KeyChord::new(mods, Key::Char(ch)));
-    let two = |mods, prefix, ch| {
-        KeySequence::new(
-            KeyChord::new(mods, Key::Char(prefix)),
-            vec![KeyChord::new(ModFlags::NONE, Key::Char(ch))],
+    let build_single_key_sequence = |modifier_flags, key_character| {
+        KeySequence::from(KeyChord::from_parts(
+            modifier_flags,
+            Key::Char(key_character),
+        ))
+    };
+    let build_two_key_sequence = |modifier_flags, prefix_character, key_character| {
+        KeySequence::from_first_and_rest(
+            KeyChord::from_parts(modifier_flags, Key::Char(prefix_character)),
+            vec![KeyChord::from_parts(
+                ModFlags::NONE,
+                Key::Char(key_character),
+            )],
         )
     };
 
     // Default leader (the Ctrl modifier run): `<leader>p n` is `<C-p> n`.
-    let ctrl = normal(Leader::default());
-    assert_eq!(ctrl[&two(ModFlags::CTRL, 'p', 'n')], bound("new-pane"));
-    assert_eq!(ctrl[&one(ModFlags::CTRL, 'g')], bound("mouse-select"));
+    let control_leader_bindings = build_normal_mode_bindings(Leader::default());
+    assert_eq!(
+        control_leader_bindings[&build_two_key_sequence(ModFlags::CTRL, 'p', 'n')],
+        build_bound_action("new-pane")
+    );
+    assert_eq!(
+        control_leader_bindings[&build_single_key_sequence(ModFlags::CTRL, 'g')],
+        build_bound_action("mouse-select")
+    );
 
     // Rebind the leader to Alt: the same defaults become `<A-p> n` / `<A-g>`,
     // and the Ctrl forms are gone.
-    let alt = normal(Leader::Mods(ModFlags::ALT));
-    assert_eq!(alt[&two(ModFlags::ALT, 'p', 'n')], bound("new-pane"));
-    assert_eq!(alt[&one(ModFlags::ALT, 'g')], bound("mouse-select"));
-    assert_eq!(alt.get(&two(ModFlags::CTRL, 'p', 'n')), None);
+    let alternate_leader_bindings = build_normal_mode_bindings(Leader::Mods(ModFlags::ALT));
+    assert_eq!(
+        alternate_leader_bindings[&build_two_key_sequence(ModFlags::ALT, 'p', 'n')],
+        build_bound_action("new-pane")
+    );
+    assert_eq!(
+        alternate_leader_bindings[&build_single_key_sequence(ModFlags::ALT, 'g')],
+        build_bound_action("mouse-select")
+    );
+    assert_eq!(
+        alternate_leader_bindings.get(&build_two_key_sequence(ModFlags::CTRL, 'p', 'n')),
+        None
+    );
 
     // A chord leader (Space) makes the leader a prefix: `<Space> p n`.
-    let space = normal(Leader::Chord(KeyChord::new(
+    let space_leader_bindings = build_normal_mode_bindings(Leader::Chord(KeyChord::from_parts(
         ModFlags::NONE,
         Key::Named(NamedKey::Space),
     )));
-    let space_p_n = KeySequence::new(
-        KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Space)),
+    let space_p_n = KeySequence::from_first_and_rest(
+        KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Space)),
         vec![
-            KeyChord::new(ModFlags::NONE, Key::Char('p')),
-            KeyChord::new(ModFlags::NONE, Key::Char('n')),
+            KeyChord::from_parts(ModFlags::NONE, Key::Char('p')),
+            KeyChord::from_parts(ModFlags::NONE, Key::Char('n')),
         ],
     );
-    assert_eq!(space[&space_p_n], bound("new-pane"));
+    assert_eq!(
+        space_leader_bindings[&space_p_n],
+        build_bound_action("new-pane")
+    );
 
     // Explicit bindings never move: `<A-f>` and the reserved `<C-l>` are the
     // same under every leader.
-    let fullscreen = one(ModFlags::ALT, 'f');
+    let fullscreen_key_sequence = build_single_key_sequence(ModFlags::ALT, 'f');
     let unlock = KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK);
-    for map in [&ctrl, &alt, &space] {
+    for mode_bindings in [
+        &control_leader_bindings,
+        &alternate_leader_bindings,
+        &space_leader_bindings,
+    ] {
         assert_eq!(
-            map[&fullscreen],
-            bound("toggle-pane-fullscreen"),
+            mode_bindings[&fullscreen_key_sequence],
+            build_bound_action("toggle-pane-fullscreen"),
             "explicit <A-f> never moves"
         );
-        assert_eq!(map[&unlock], bound("lock"), "reserved <C-l> never moves");
+        assert_eq!(
+            mode_bindings[&unlock],
+            build_bound_action("lock"),
+            "reserved <C-l> never moves"
+        );
     }
 }
 
@@ -901,7 +1012,7 @@ fn a_chord_leader_drops_the_ambiguous_prefix_labels() {
     // A chord leader opens every leader binding with the leader chord, so
     // `<leader>p`, `<leader>s`, and `<leader>t` share an opening — no single
     // group label fits, and the hint bar shows the derived `+N` instead.
-    let space = default_prefix_labels(Leader::Chord(KeyChord::new(
+    let space = default_prefix_labels(Leader::Chord(KeyChord::from_parts(
         ModFlags::NONE,
         Key::Named(NamedKey::Space),
     )));
@@ -911,7 +1022,7 @@ fn a_chord_leader_drops_the_ambiguous_prefix_labels() {
     // distinct openings, so all three labels stand, moved onto Alt.
     let alt = default_prefix_labels(Leader::Mods(ModFlags::ALT));
     let alt_label = |ch| {
-        alt.get(&KeyChord::new(ModFlags::ALT, Key::Char(ch)))
+        alt.get(&KeyChord::from_parts(ModFlags::ALT, Key::Char(ch)))
             .map(String::as_str)
     };
     assert_eq!(alt.len(), 3);
@@ -922,7 +1033,7 @@ fn a_chord_leader_drops_the_ambiguous_prefix_labels() {
 
 #[test]
 fn this_build_writes_config_schema_version_one() {
-    // `SCHEMA_VERSION` reads `koshi_core::compat::CONFIG_SCHEMA.max`, one
+    // `SCHEMA_VERSION` reads `koshi_core::compat::CONFIG_SCHEMA.maximum_version`, one
     // crate away. This pins the version number every config file this build
     // writes carries.
     assert_eq!(SCHEMA_VERSION, 1);

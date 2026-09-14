@@ -74,7 +74,7 @@ pub trait DomainError {
     /// Which domain the failure belongs to.
     fn category(&self) -> DomainCategory;
     /// How far the failure propagates.
-    fn severity(&self) -> Severity;
+    fn get_severity(&self) -> Severity;
 }
 
 #[cfg(test)]

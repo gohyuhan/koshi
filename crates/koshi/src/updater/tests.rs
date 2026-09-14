@@ -7,49 +7,53 @@ use super::*;
 use std::io::Write;
 use std::thread::JoinHandle;
 
-use koshi_ipc::endpoint::{socket_addr, EndpointFile};
+use koshi_ipc::endpoint::{compute_socket_address, EndpointFile};
 use koshi_ipc::protocol::{
     ConnectionToken, IpcErrorCode, IpcErrorPayload, IpcRequest, IpcRequestKind, IpcResponse,
     IpcResult, PROTOCOL_VERSION,
 };
 use koshi_ipc::router::{
-    router_endpoint_path, router_socket_addr, RouterHandshake, RouterRequest, RouterResponse,
-    RouterResult, ROUTER_PROTOCOL_VERSION,
+    compute_router_socket_address, resolve_router_endpoint_path, RouterHandshake, RouterRequest,
+    RouterResponse, RouterResult, ROUTER_PROTOCOL_VERSION,
 };
 use koshi_ipc::transport::{Connection, Listener};
-use koshi_test_support::fixtures::test_runtime_dir;
+use koshi_test_support::fixtures::build_test_runtime_directory;
 
 /// Serve one Hello-only connection as a router would: bind the router's
 /// address, write the endpoint file advertising it, accept one caller, and
-/// answer its Hello with `version`.
-fn fake_router_reporting(runtime_dir: &Path, version: &str) -> JoinHandle<()> {
-    let held = ConnectionToken::generate();
-    let addr = router_socket_addr(runtime_dir);
-    let listener = Listener::bind(&addr).expect("bind the stand-in router");
+/// answer its Hello with `reported_build_version`.
+fn spawn_fake_router_reporting(
+    runtime_directory: &Path,
+    reported_build_version: &str,
+) -> JoinHandle<()> {
+    let connection_token = ConnectionToken::generate();
+    let socket_address = compute_router_socket_address(runtime_directory);
+    let listener = Listener::bind(&socket_address).expect("bind the stand-in router");
     EndpointFile {
-        socket: addr,
-        token: held.clone(),
-        pid: std::process::id(),
+        socket_address,
+        connection_token: connection_token.clone(),
+        process_id: std::process::id(),
     }
-    .write(&router_endpoint_path(runtime_dir))
+    .write_to_path(&resolve_router_endpoint_path(runtime_directory))
     .expect("write the router endpoint file");
 
-    let version = version.to_string();
+    let reported_build_version = reported_build_version.to_string();
     std::thread::spawn(move || {
         let mut connection = listener.accept().expect("accept the caller");
-        let mut gate = RouterHandshake::new(held);
-        let hello: RouterRequest = connection.recv().expect("read the hello");
-        let result = match gate.check(&hello.kind) {
-            Ok(()) => RouterResult::Hello {
-                protocol_version: ROUTER_PROTOCOL_VERSION,
-                version,
-            },
-            Err(refusal) => RouterResult::Error(refusal),
-        };
+        let mut router_handshake = RouterHandshake::from_connection_token(connection_token);
+        let hello_request: RouterRequest = connection.recv().expect("read the hello");
+        let response_result =
+            match router_handshake.validate_request_kind(&hello_request.request_kind) {
+                Ok(()) => RouterResult::Hello {
+                    protocol_version: ROUTER_PROTOCOL_VERSION,
+                    build_version: reported_build_version,
+                },
+                Err(error_response) => RouterResult::Error(error_response),
+            };
         connection
             .send(&RouterResponse {
-                request_id: Some(hello.request_id),
-                result,
+                request_id: Some(hello_request.request_id),
+                answer_result: response_result,
             })
             .expect("send the hello reply");
     })
@@ -57,115 +61,133 @@ fn fake_router_reporting(runtime_dir: &Path, version: &str) -> JoinHandle<()> {
 
 #[test]
 fn a_router_reporting_the_installed_version_confirms_the_restart() {
-    let runtime_dir = test_runtime_dir();
-    let router = fake_router_reporting(runtime_dir.path(), "3.3.3");
+    let runtime_directory = build_test_runtime_directory();
+    let router_thread = spawn_fake_router_reporting(runtime_directory.path(), "3.3.3");
 
     let confirmed = wait_for_version("3.3.3", Duration::from_secs(5), || {
-        probe_router_version(runtime_dir.path())
+        probe_router_version(runtime_directory.path())
     });
 
-    assert_eq!(confirmed, VersionAnswer::Installed);
-    router.join().expect("the stand-in served its connection");
+    assert_eq!(confirmed, VersionProbeOutcome::Installed);
+    router_thread
+        .join()
+        .expect("the stand-in served its connection");
 }
 
 #[test]
 fn a_router_still_on_another_version_is_reported_after_the_wait() {
-    let runtime_dir = test_runtime_dir();
-    let router = fake_router_reporting(runtime_dir.path(), "1.0.0");
+    let runtime_directory = build_test_runtime_directory();
+    let router_thread = spawn_fake_router_reporting(runtime_directory.path(), "1.0.0");
 
     let answered = wait_for_version("2.0.0", Duration::from_millis(250), || {
-        probe_router_version(runtime_dir.path())
+        probe_router_version(runtime_directory.path())
     });
 
-    assert_eq!(answered, VersionAnswer::Other("1.0.0".to_string()));
-    router.join().expect("the stand-in served its connection");
+    assert_eq!(
+        answered,
+        VersionProbeOutcome::OtherVersion("1.0.0".to_string())
+    );
+    router_thread
+        .join()
+        .expect("the stand-in served its connection");
 }
 
 #[test]
 fn no_router_answering_reports_no_version_after_the_wait() {
-    let runtime_dir = test_runtime_dir();
+    let runtime_directory = build_test_runtime_directory();
     assert_eq!(
         wait_for_version("2.0.0", Duration::from_millis(50), || probe_router_version(
-            runtime_dir.path()
+            runtime_directory.path()
         )),
-        VersionAnswer::Silent
+        VersionProbeOutcome::Silent
     );
 }
 
 // --- restarting every running session ---
 
 /// What a stand-in session answers with.
-struct SessionScript {
+struct SessionRestartScript {
     /// The answer to the Restart request.
-    restart: IpcResult,
+    restart_result: IpcResult,
     /// The build version every Hello answer of this session carries.
-    version: String,
+    reported_build_version: String,
 }
 
-/// Serve `connections` callers as a session would: bind the session's address,
+/// Serve `connection_count` callers as a session would: bind the session's address,
 /// write the endpoint file advertising it, then answer that many callers.
 ///
 /// The first caller writes a Hello and a Restart back to back and is answered
-/// per `script`. Every caller after the first writes a Hello alone and is
-/// answered with the script's version. A caller arriving once `connections`
+/// per `session_script`. Every caller after the first writes a Hello alone and is
+/// answered with the script's build version. A caller arriving once `connection_count`
 /// are served finds nothing listening, which is what a session that is
 /// replacing its own image looks like.
-fn fake_session(
-    runtime_dir: &Path,
-    session: SessionId,
-    script: SessionScript,
-    connections: usize,
+fn spawn_fake_session(
+    runtime_directory: &Path,
+    session_id: SessionId,
+    session_script: SessionRestartScript,
+    connection_count: usize,
 ) -> JoinHandle<()> {
-    let held = ConnectionToken::generate();
-    let addr = socket_addr(runtime_dir, session);
-    let listener = Listener::bind(&addr).expect("bind the stand-in session");
+    let connection_token = ConnectionToken::generate();
+    let socket_address = compute_socket_address(runtime_directory, session_id);
+    let listener = Listener::bind(&socket_address).expect("bind the stand-in session");
     EndpointFile {
-        socket: addr,
-        token: held.clone(),
-        pid: std::process::id(),
+        socket_address,
+        connection_token: connection_token.clone(),
+        process_id: std::process::id(),
     }
-    .write(&EndpointFile::path(runtime_dir, session))
+    .write_to_path(&EndpointFile::resolve_endpoint_file_path(
+        runtime_directory,
+        session_id,
+    ))
     .expect("write the session endpoint file");
 
     std::thread::spawn(move || {
-        let SessionScript { restart, version } = script;
-        for served in 0..connections {
+        let SessionRestartScript {
+            restart_result,
+            reported_build_version,
+        } = session_script;
+        for connection_index in 0..connection_count {
             let mut connection = listener.accept().expect("accept the caller");
-            let hello: IpcRequest = connection.recv().expect("read the hello");
+            let hello_request: IpcRequest = connection.recv().expect("read the hello");
             let IpcRequestKind::Hello {
-                token: presented, ..
-            } = &hello.kind
+                connection_token: presented_connection_token,
+                ..
+            } = &hello_request.request_kind
             else {
                 panic!("expected a Hello first");
             };
             assert_eq!(
-                presented, &held,
+                presented_connection_token, &connection_token,
                 "the caller presents the endpoint file's token"
             );
 
-            if served == 0 {
-                let asked: IpcRequest = connection.recv().expect("read the restart");
+            if connection_index == 0 {
+                let restart_request: IpcRequest = connection.recv().expect("read the restart");
                 assert_eq!(
-                    asked.kind,
+                    restart_request.request_kind,
                     IpcRequestKind::Restart,
                     "expected a Restart after the Hello"
                 );
-                answer(
+                send_ipc_response(
                     &mut connection,
-                    hello.request_id,
+                    hello_request.request_id,
                     IpcResult::Hello {
                         protocol_version: PROTOCOL_VERSION,
-                        version: version.clone(),
+                        build_version: reported_build_version.clone(),
                     },
                 );
-                answer(&mut connection, asked.request_id, restart.clone());
-            } else {
-                answer(
+                send_ipc_response(
                     &mut connection,
-                    hello.request_id,
+                    restart_request.request_id,
+                    restart_result.clone(),
+                );
+            } else {
+                send_ipc_response(
+                    &mut connection,
+                    hello_request.request_id,
                     IpcResult::Hello {
                         protocol_version: PROTOCOL_VERSION,
-                        version: version.clone(),
+                        build_version: reported_build_version.clone(),
                     },
                 );
             }
@@ -174,17 +196,17 @@ fn fake_session(
 }
 
 /// Answer `request_id` with `result` on `connection`.
-fn answer(connection: &mut Connection, request_id: u64, result: IpcResult) {
+fn send_ipc_response(connection: &mut Connection, request_id: u64, response_result: IpcResult) {
     connection
         .send(&IpcResponse {
             request_id: Some(request_id),
-            result,
+            answer_result: response_result,
         })
         .expect("send the scripted reply");
 }
 
 /// The refusal a koshi whose build has no Restart request answers with.
-fn no_such_request() -> IpcResult {
+fn build_unsupported_restart_response() -> IpcResult {
     IpcResult::Error(IpcErrorPayload {
         code: IpcErrorCode::UnsupportedKind,
         message: "this koshi has no Restart request".to_string(),
@@ -193,127 +215,140 @@ fn no_such_request() -> IpcResult {
 
 #[test]
 fn a_session_reporting_the_installed_version_confirms_its_restart() {
-    let runtime_dir = test_runtime_dir();
-    let session = SessionId::new();
-    let stand_in = fake_session(
-        runtime_dir.path(),
-        session,
-        SessionScript {
-            restart: IpcResult::Restarting,
-            version: "3.3.3".to_string(),
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let session_thread = spawn_fake_session(
+        runtime_directory.path(),
+        session_id,
+        SessionRestartScript {
+            restart_result: IpcResult::Restarting,
+            reported_build_version: "3.3.3".to_string(),
         },
         2,
     );
 
-    let outcomes = restart_advertised_sessions(runtime_dir.path(), "3.3.3", Duration::from_secs(5));
+    let session_outcomes =
+        restart_advertised_sessions(runtime_directory.path(), "3.3.3", Duration::from_secs(5));
 
-    assert_eq!(outcomes, vec![(session, SessionOutcome::Confirmed)]);
-    stand_in
+    assert_eq!(
+        session_outcomes,
+        vec![(session_id, SessionOutcome::Confirmed)]
+    );
+    session_thread
         .join()
         .expect("the stand-in served its connections");
 }
 
 #[test]
 fn a_session_still_on_the_old_version_is_reported_after_the_wait() {
-    let runtime_dir = test_runtime_dir();
-    let session = SessionId::new();
-    let stand_in = fake_session(
-        runtime_dir.path(),
-        session,
-        SessionScript {
-            restart: IpcResult::Restarting,
-            version: "1.0.0".to_string(),
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let session_thread = spawn_fake_session(
+        runtime_directory.path(),
+        session_id,
+        SessionRestartScript {
+            restart_result: IpcResult::Restarting,
+            reported_build_version: "1.0.0".to_string(),
         },
         2,
     );
 
-    let outcomes =
-        restart_advertised_sessions(runtime_dir.path(), "2.0.0", Duration::from_millis(250));
+    let session_outcomes = restart_advertised_sessions(
+        runtime_directory.path(),
+        "2.0.0",
+        Duration::from_millis(250),
+    );
 
     assert_eq!(
-        outcomes,
-        vec![(session, SessionOutcome::StillOn("1.0.0".to_string()))]
+        session_outcomes,
+        vec![(
+            session_id,
+            SessionOutcome::StillOnVersion("1.0.0".to_string())
+        )]
     );
-    stand_in
+    session_thread
         .join()
         .expect("the stand-in served its connections");
 }
 
 #[test]
 fn a_session_with_no_restart_request_is_reported_as_too_old() {
-    let runtime_dir = test_runtime_dir();
-    let session = SessionId::new();
-    let stand_in = fake_session(
-        runtime_dir.path(),
-        session,
-        SessionScript {
-            restart: no_such_request(),
-            version: "1.0.0".to_string(),
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let session_thread = spawn_fake_session(
+        runtime_directory.path(),
+        session_id,
+        SessionRestartScript {
+            restart_result: build_unsupported_restart_response(),
+            reported_build_version: "1.0.0".to_string(),
         },
         1,
     );
 
-    let outcomes = restart_advertised_sessions(runtime_dir.path(), "3.3.3", Duration::from_secs(5));
+    let session_outcomes =
+        restart_advertised_sessions(runtime_directory.path(), "3.3.3", Duration::from_secs(5));
 
-    assert_eq!(outcomes, vec![(session, SessionOutcome::TooOld)]);
-    stand_in.join().expect("the stand-in served its connection");
+    assert_eq!(session_outcomes, vec![(session_id, SessionOutcome::TooOld)]);
+    session_thread
+        .join()
+        .expect("the stand-in served its connection");
 }
 
 #[test]
 fn one_session_refusing_still_leaves_every_other_session_asked() {
-    let runtime_dir = test_runtime_dir();
-    let confirms_one = SessionId::new();
-    let refuses = SessionId::new();
-    let confirms_two = SessionId::new();
-    let stand_ins = vec![
-        fake_session(
-            runtime_dir.path(),
-            confirms_one,
-            SessionScript {
-                restart: IpcResult::Restarting,
-                version: "3.3.3".to_string(),
+    let runtime_directory = build_test_runtime_directory();
+    let confirmed_session_id_one = SessionId::new();
+    let refusing_session_id = SessionId::new();
+    let confirmed_session_id_two = SessionId::new();
+    let fake_session_threads = vec![
+        spawn_fake_session(
+            runtime_directory.path(),
+            confirmed_session_id_one,
+            SessionRestartScript {
+                restart_result: IpcResult::Restarting,
+                reported_build_version: "3.3.3".to_string(),
             },
             2,
         ),
-        fake_session(
-            runtime_dir.path(),
-            refuses,
-            SessionScript {
-                restart: IpcResult::Error(IpcErrorPayload {
+        spawn_fake_session(
+            runtime_directory.path(),
+            refusing_session_id,
+            SessionRestartScript {
+                restart_result: IpcResult::Error(IpcErrorPayload {
                     code: IpcErrorCode::Unknown,
                     message: "a pane is mid-write".to_string(),
                 }),
-                version: "3.3.3".to_string(),
+                reported_build_version: "3.3.3".to_string(),
             },
             1,
         ),
-        fake_session(
-            runtime_dir.path(),
-            confirms_two,
-            SessionScript {
-                restart: IpcResult::Restarting,
-                version: "3.3.3".to_string(),
+        spawn_fake_session(
+            runtime_directory.path(),
+            confirmed_session_id_two,
+            SessionRestartScript {
+                restart_result: IpcResult::Restarting,
+                reported_build_version: "3.3.3".to_string(),
             },
             2,
         ),
     ];
 
-    let mut outcomes =
-        restart_advertised_sessions(runtime_dir.path(), "3.3.3", Duration::from_secs(5));
-    outcomes.sort_by_key(|(id, _)| id.to_string());
-    let mut expected = vec![
-        (confirms_one, SessionOutcome::Confirmed),
+    let mut session_outcomes =
+        restart_advertised_sessions(runtime_directory.path(), "3.3.3", Duration::from_secs(5));
+    session_outcomes.sort_by_key(|(session_id, _)| session_id.to_string());
+    let mut expected_session_outcomes = vec![
+        (confirmed_session_id_one, SessionOutcome::Confirmed),
         (
-            refuses,
+            refusing_session_id,
             SessionOutcome::Failed("IPC unavailable: a pane is mid-write".to_string()),
         ),
-        (confirms_two, SessionOutcome::Confirmed),
+        (confirmed_session_id_two, SessionOutcome::Confirmed),
     ];
-    expected.sort_by_key(|(id, _)| id.to_string());
+    expected_session_outcomes.sort_by_key(|(session_id, _)| session_id.to_string());
 
-    assert_eq!(outcomes, expected);
-    for stand_in in stand_ins {
-        stand_in
+    assert_eq!(session_outcomes, expected_session_outcomes);
+    for session_thread in fake_session_threads {
+        session_thread
             .join()
             .expect("the stand-in served its connections");
     }
@@ -321,117 +356,132 @@ fn one_session_refusing_still_leaves_every_other_session_asked() {
 
 #[test]
 fn no_running_session_leaves_the_router_confirmation_unchanged() {
-    let runtime_dir = test_runtime_dir();
-    let router = fake_router_reporting(runtime_dir.path(), "3.3.3");
+    let runtime_directory = build_test_runtime_directory();
+    let router_thread = spawn_fake_router_reporting(runtime_directory.path(), "3.3.3");
 
-    let outcomes = restart_advertised_sessions(runtime_dir.path(), "3.3.3", Duration::from_secs(5));
+    let session_outcomes =
+        restart_advertised_sessions(runtime_directory.path(), "3.3.3", Duration::from_secs(5));
 
-    assert_eq!(outcomes, Vec::new());
+    assert_eq!(session_outcomes, Vec::new());
     assert_eq!(
         wait_for_version("3.3.3", Duration::from_secs(5), || probe_router_version(
-            runtime_dir.path()
+            runtime_directory.path()
         )),
-        VersionAnswer::Installed
+        VersionProbeOutcome::Installed
     );
-    router.join().expect("the stand-in served its connection");
+    router_thread
+        .join()
+        .expect("the stand-in served its connection");
 }
 
 #[test]
-fn strip_v_drops_a_leading_v_only() {
-    assert_eq!(strip_v("v1.2.3"), "1.2.3");
-    assert_eq!(strip_v("1.2.3"), "1.2.3");
-    assert_eq!(strip_v("version"), "ersion");
+fn strip_version_prefix_drops_a_leading_v_only() {
+    assert_eq!(strip_version_prefix("v1.2.3"), "1.2.3");
+    assert_eq!(strip_version_prefix("1.2.3"), "1.2.3");
+    assert_eq!(strip_version_prefix("version"), "ersion");
 }
 
 #[test]
-fn a_far_higher_tag_is_newer() {
-    assert!(is_newer("v9999.0.0"));
-    assert!(is_newer("9999.0.0"));
+fn a_far_higher_release_tag_is_newer() {
+    assert!(is_release_newer("v9999.0.0"));
+    assert!(is_release_newer("9999.0.0"));
 }
 
 #[test]
-fn a_zero_tag_is_not_newer() {
-    assert!(!is_newer("v0.0.0"));
+fn a_zero_release_tag_is_not_newer() {
+    assert!(!is_release_newer("v0.0.0"));
 }
 
 #[test]
 fn the_current_build_is_not_newer_than_itself() {
-    assert!(!is_newer(APP_VERSION));
+    assert!(!is_release_newer(APP_VERSION));
 }
 
 #[test]
-fn a_malformed_tag_is_not_newer() {
-    assert!(!is_newer("not-a-version"));
-    assert!(!is_newer("v"));
+fn a_malformed_release_tag_is_not_newer() {
+    assert!(!is_release_newer("not-a-version"));
+    assert!(!is_release_newer("v"));
 }
 
 #[test]
 fn a_first_ever_check_is_due() {
-    let state = UpdateState::default();
-    assert!(is_due(&state, 14));
+    let update_state = UpdateState::default();
+    assert!(is_update_due(&update_state, 14));
 }
 
 #[test]
 fn a_check_within_the_interval_is_not_due() {
-    let state = UpdateState {
-        last_check: Some(now_secs()),
+    let update_state = UpdateState {
+        last_check_unix_seconds: Some(get_current_unix_seconds()),
     };
-    assert!(!is_due(&state, 14));
+    assert!(!is_update_due(&update_state, 14));
 }
 
 #[test]
 fn a_check_older_than_the_interval_is_due() {
-    let fifteen_days_ago = now_secs().saturating_sub(15 * SECONDS_PER_DAY);
-    let state = UpdateState {
-        last_check: Some(fifteen_days_ago),
+    let fifteen_days_ago_unix_seconds =
+        get_current_unix_seconds().saturating_sub(15 * SECONDS_PER_DAY);
+    let update_state = UpdateState {
+        last_check_unix_seconds: Some(fifteen_days_ago_unix_seconds),
     };
-    assert!(is_due(&state, 14));
+    assert!(is_update_due(&update_state, 14));
 }
 
 #[test]
 fn a_zero_interval_is_always_due() {
-    let state = UpdateState {
-        last_check: Some(now_secs()),
+    let update_state = UpdateState {
+        last_check_unix_seconds: Some(get_current_unix_seconds()),
     };
-    assert!(is_due(&state, 0));
+    assert!(is_update_due(&update_state, 0));
 }
 
 #[test]
-fn binary_url_matches_the_release_naming_on_supported_platforms() {
+fn compute_binary_url_matches_release_naming_on_supported_platforms() {
     // The exact archive name is platform-specific; assert the invariant parts
     // for whichever platform the test runs on.
-    let url = binary_url("v0.2.0").expect("dev + CI platforms are all supported");
+    let archive_url = compute_binary_url("v0.2.0").expect("dev + CI platforms are all supported");
     assert!(
-        url.starts_with("https://github.com/gohyuhan/koshi/releases/download/v0.2.0/koshi-v0.2.0-"),
-        "unexpected url: {url}"
+        archive_url.starts_with(
+            "https://github.com/gohyuhan/koshi/releases/download/v0.2.0/koshi-v0.2.0-"
+        ),
+        "unexpected archive URL: {archive_url}"
     );
-    let ext = if cfg!(windows) { ".zip" } else { ".tar.gz" };
-    assert!(url.ends_with(ext), "unexpected extension in {url}");
+    let archive_extension = if cfg!(windows) { ".zip" } else { ".tar.gz" };
+    assert!(
+        archive_url.ends_with(archive_extension),
+        "unexpected archive extension in {archive_url}"
+    );
 }
 
 #[test]
-fn binary_name_is_platform_specific() {
+fn get_binary_file_name_is_platform_specific() {
     if cfg!(windows) {
-        assert_eq!(binary_name(), "koshi.exe");
+        assert_eq!(get_binary_file_name(), "koshi.exe");
     } else {
-        assert_eq!(binary_name(), "koshi");
+        assert_eq!(get_binary_file_name(), "koshi");
     }
 }
 
 #[test]
-fn state_defaults_when_deserialized_from_empty_object() {
-    let state: UpdateState = serde_json::from_str("{}").expect("empty object is valid state");
-    assert_eq!(state.last_check, None);
+fn update_state_defaults_when_deserialized_from_empty_object() {
+    let update_state: UpdateState =
+        serde_json::from_str("{}").expect("empty object is valid update state");
+    assert_eq!(update_state.last_check_unix_seconds, None);
 }
 
 #[test]
-fn state_survives_a_serialize_deserialize_round_trip() {
-    let original = UpdateState {
-        last_check: Some(1_700_000_000),
+fn update_state_survives_a_serialize_deserialize_round_trip() {
+    let original_update_state = UpdateState {
+        last_check_unix_seconds: Some(1_700_000_000),
     };
-    let text = serde_json::to_string(&original).expect("serializable");
-    let restored: UpdateState = serde_json::from_str(&text).expect("deserializable");
-    assert_eq!(restored.last_check, original.last_check);
+    let serialized_update_state =
+        serde_json::to_string(&original_update_state).expect("serializable");
+    let restored_update_state: UpdateState =
+        serde_json::from_str(&serialized_update_state).expect("deserializable");
+    assert_eq!(
+        restored_update_state.last_check_unix_seconds,
+        original_update_state.last_check_unix_seconds
+    );
 }
 
 // --- release JSON parsing (no network: fixture strings only) ---
@@ -440,7 +490,7 @@ fn state_survives_a_serialize_deserialize_round_trip() {
 fn a_release_object_deserializes_its_tag_name() {
     let release: Release = serde_json::from_str(r#"{"tag_name":"v0.2.0","name":"ignored"}"#)
         .expect("a release object with extra fields still parses");
-    assert_eq!(release.tag_name, "v0.2.0");
+    assert_eq!(release.release_tag, "v0.2.0");
 }
 
 #[test]
@@ -448,78 +498,98 @@ fn a_release_list_deserializes_every_tag_in_order() {
     let releases: Vec<Release> =
         serde_json::from_str(r#"[{"tag_name":"v0.2.0"},{"tag_name":"v0.1.0"}]"#)
             .expect("a release array parses");
-    let tags: Vec<String> = releases.into_iter().map(|r| r.tag_name).collect();
-    assert_eq!(tags, vec!["v0.2.0".to_string(), "v0.1.0".to_string()]);
+    let release_tags: Vec<String> = releases
+        .into_iter()
+        .map(|release| release.release_tag)
+        .collect();
+    assert_eq!(
+        release_tags,
+        vec!["v0.2.0".to_string(), "v0.1.0".to_string()]
+    );
 }
 
-// --- update_err + now_secs ---
+// --- update error + current Unix time ---
 
 #[test]
-fn update_err_wraps_the_detail_in_a_cli_update_error() {
-    match update_err("boom") {
+fn update_error_wraps_detail_in_cli_update_error() {
+    match build_update_error("boom") {
         CliError::Update { detail } => assert_eq!(detail, "boom"),
-        other => panic!("expected CliError::Update, got {other:?}"),
+        unexpected_error => panic!("expected CliError::Update, got {unexpected_error:?}"),
     }
 }
 
 #[test]
-fn now_secs_is_after_the_year_2023() {
+fn get_current_unix_seconds_is_after_the_year_2023() {
     // A whole-second Unix timestamp taken now is always past 2023-11-14.
-    assert!(now_secs() > 1_700_000_000);
+    assert!(get_current_unix_seconds() > 1_700_000_000);
 }
 
 // --- archive extraction (local files, no network) ---
 
 /// Writes a gzip-compressed tar to a temp file, one regular-file entry per
 /// `(name, bytes)`.
-fn write_tar_gz(entries: &[(&str, &[u8])]) -> TempPath {
-    let file = Builder::new()
+fn write_tar_gz(archive_entries: &[(&str, &[u8])]) -> TempPath {
+    let archive_file = Builder::new()
         .prefix("koshi-test-")
         .suffix(".tar.gz")
         .tempfile()
-        .expect("temp file");
+        .expect("temporary archive file");
     {
-        let encoder = flate2::write::GzEncoder::new(file.as_file(), flate2::Compression::default());
-        let mut tar = tar::Builder::new(encoder);
-        for (name, data) in entries {
-            let mut header = tar::Header::new_gnu();
-            header.set_path(name).expect("path");
-            header.set_size(data.len() as u64);
-            header.set_mode(0o755);
-            header.set_cksum();
-            tar.append(&header, *data).expect("append entry");
+        let gzip_encoder =
+            flate2::write::GzEncoder::new(archive_file.as_file(), flate2::Compression::default());
+        let mut tar_archive = tar::Builder::new(gzip_encoder);
+        for (archive_entry_name, archive_entry_bytes) in archive_entries {
+            let mut archive_header = tar::Header::new_gnu();
+            archive_header
+                .set_path(archive_entry_name)
+                .expect("archive entry path");
+            archive_header.set_size(archive_entry_bytes.len() as u64);
+            archive_header.set_mode(0o755);
+            archive_header.set_cksum();
+            tar_archive
+                .append(&archive_header, *archive_entry_bytes)
+                .expect("append archive entry");
         }
-        tar.into_inner()
-            .expect("finish tar")
+        tar_archive
+            .into_inner()
+            .expect("finish tar archive")
             .finish()
-            .expect("finish gzip");
+            .expect("finish gzip archive");
     }
-    file.into_temp_path()
+    archive_file.into_temp_path()
 }
 
 /// Writes a zip archive to a temp file, one entry per `(name, bytes)`.
-fn write_zip(entries: &[(&str, &[u8])]) -> TempPath {
-    let file = Builder::new()
+fn write_zip(archive_entries: &[(&str, &[u8])]) -> TempPath {
+    let archive_file = Builder::new()
         .prefix("koshi-test-")
         .suffix(".zip")
         .tempfile()
-        .expect("temp file");
+        .expect("temporary archive file");
     {
-        let mut zip = zip::ZipWriter::new(file.as_file());
-        let options = zip::write::SimpleFileOptions::default();
-        for (name, data) in entries {
-            zip.start_file(*name, options).expect("start entry");
-            zip.write_all(data).expect("write entry");
+        let mut zip_archive = zip::ZipWriter::new(archive_file.as_file());
+        let zip_entry_options = zip::write::SimpleFileOptions::default();
+        for (archive_entry_name, archive_entry_bytes) in archive_entries {
+            zip_archive
+                .start_file(*archive_entry_name, zip_entry_options)
+                .expect("start archive entry");
+            zip_archive
+                .write_all(archive_entry_bytes)
+                .expect("write archive entry");
         }
-        zip.finish().expect("finish zip");
+        zip_archive.finish().expect("finish zip archive");
     }
-    file.into_temp_path()
+    archive_file.into_temp_path()
 }
 
 #[test]
 fn extracting_a_tar_gz_returns_the_named_binary_bytes() {
-    let archive = write_tar_gz(&[("readme.txt", b"docs"), (binary_name(), b"binary-bytes")]);
-    let extracted = extract(archive.as_ref(), "koshi.tar.gz").expect("extract the binary");
+    let archive = write_tar_gz(&[
+        ("readme.txt", b"docs"),
+        (get_binary_file_name(), b"binary-bytes"),
+    ]);
+    let extracted =
+        extract_release_binary(archive.as_ref(), "koshi.tar.gz").expect("extract the binary");
     assert_eq!(
         fs::read(AsRef::<Path>::as_ref(&extracted)).expect("read extracted binary"),
         b"binary-bytes"
@@ -530,15 +600,19 @@ fn extracting_a_tar_gz_returns_the_named_binary_bytes() {
 fn extracting_a_tar_gz_without_the_binary_is_an_error() {
     let archive = write_tar_gz(&[("readme.txt", b"docs")]);
     assert_eq!(
-        extract(archive.as_ref(), "koshi.tar.gz").expect_err("no binary present"),
+        extract_release_binary(archive.as_ref(), "koshi.tar.gz").expect_err("no binary present"),
         "binary not found in archive"
     );
 }
 
 #[test]
 fn extracting_a_zip_returns_the_named_binary_bytes() {
-    let archive = write_zip(&[("readme.txt", b"docs"), (binary_name(), b"binary-bytes")]);
-    let extracted = extract(archive.as_ref(), "koshi.zip").expect("extract the binary");
+    let archive = write_zip(&[
+        ("readme.txt", b"docs"),
+        (get_binary_file_name(), b"binary-bytes"),
+    ]);
+    let extracted =
+        extract_release_binary(archive.as_ref(), "koshi.zip").expect("extract the binary");
     assert_eq!(
         fs::read(AsRef::<Path>::as_ref(&extracted)).expect("read extracted binary"),
         b"binary-bytes"
@@ -549,47 +623,58 @@ fn extracting_a_zip_returns_the_named_binary_bytes() {
 fn extracting_a_zip_without_the_binary_is_an_error() {
     let archive = write_zip(&[("readme.txt", b"docs")]);
     assert_eq!(
-        extract(archive.as_ref(), "koshi.zip").expect_err("no binary present"),
+        extract_release_binary(archive.as_ref(), "koshi.zip").expect_err("no binary present"),
         "binary not found in archive"
     );
 }
 
 /// Writes a gzip-compressed tar to a temp file, one entry per
 /// `(name, entry type, bytes)`.
-fn write_tar_gz_of_kinds(entries: &[(&str, tar::EntryType, &[u8])]) -> TempPath {
-    let file = Builder::new()
+fn write_tar_gz_of_kinds(archive_entries: &[(&str, tar::EntryType, &[u8])]) -> TempPath {
+    let archive_file = Builder::new()
         .prefix("koshi-test-")
         .suffix(".tar.gz")
         .tempfile()
-        .expect("temp file");
+        .expect("temporary archive file");
     {
-        let encoder = flate2::write::GzEncoder::new(file.as_file(), flate2::Compression::default());
-        let mut tar = tar::Builder::new(encoder);
-        for (name, entry_type, data) in entries {
-            let mut header = tar::Header::new_gnu();
-            header.set_path(name).expect("path");
-            header.set_entry_type(*entry_type);
-            header.set_size(data.len() as u64);
-            header.set_mode(0o755);
-            header.set_cksum();
-            tar.append(&header, *data).expect("append entry");
+        let gzip_encoder =
+            flate2::write::GzEncoder::new(archive_file.as_file(), flate2::Compression::default());
+        let mut tar_archive = tar::Builder::new(gzip_encoder);
+        for (archive_entry_name, archive_entry_type, archive_entry_bytes) in archive_entries {
+            let mut archive_header = tar::Header::new_gnu();
+            archive_header
+                .set_path(archive_entry_name)
+                .expect("archive entry path");
+            archive_header.set_entry_type(*archive_entry_type);
+            archive_header.set_size(archive_entry_bytes.len() as u64);
+            archive_header.set_mode(0o755);
+            archive_header.set_cksum();
+            tar_archive
+                .append(&archive_header, *archive_entry_bytes)
+                .expect("append archive entry");
         }
-        tar.into_inner()
-            .expect("finish tar")
+        tar_archive
+            .into_inner()
+            .expect("finish tar archive")
             .finish()
-            .expect("finish gzip");
+            .expect("finish gzip archive");
     }
-    file.into_temp_path()
+    archive_file.into_temp_path()
 }
 
 #[test]
 fn a_directory_carrying_the_binary_name_is_passed_over_for_the_real_file() {
     let archive = write_tar_gz_of_kinds(&[
-        (binary_name(), tar::EntryType::Directory, b""),
-        (binary_name(), tar::EntryType::Regular, b"binary-bytes"),
+        (get_binary_file_name(), tar::EntryType::Directory, b""),
+        (
+            get_binary_file_name(),
+            tar::EntryType::Regular,
+            b"binary-bytes",
+        ),
     ]);
 
-    let extracted = extract(archive.as_ref(), "koshi.tar.gz").expect("extract the binary");
+    let extracted =
+        extract_release_binary(archive.as_ref(), "koshi.tar.gz").expect("extract the binary");
 
     assert_eq!(
         fs::read(AsRef::<Path>::as_ref(&extracted)).expect("read extracted binary"),
@@ -600,11 +685,16 @@ fn a_directory_carrying_the_binary_name_is_passed_over_for_the_real_file() {
 #[test]
 fn a_symbolic_link_carrying_the_binary_name_is_passed_over_for_the_real_file() {
     let archive = write_tar_gz_of_kinds(&[
-        (binary_name(), tar::EntryType::Symlink, b""),
-        (binary_name(), tar::EntryType::Regular, b"binary-bytes"),
+        (get_binary_file_name(), tar::EntryType::Symlink, b""),
+        (
+            get_binary_file_name(),
+            tar::EntryType::Regular,
+            b"binary-bytes",
+        ),
     ]);
 
-    let extracted = extract(archive.as_ref(), "koshi.tar.gz").expect("extract the binary");
+    let extracted =
+        extract_release_binary(archive.as_ref(), "koshi.tar.gz").expect("extract the binary");
 
     assert_eq!(
         fs::read(AsRef::<Path>::as_ref(&extracted)).expect("read extracted binary"),
@@ -614,10 +704,11 @@ fn a_symbolic_link_carrying_the_binary_name_is_passed_over_for_the_real_file() {
 
 #[test]
 fn a_tar_gz_binary_under_a_top_level_directory_is_found_by_its_file_name() {
-    let nested = format!("koshi-v9.9.9-linux-amd64/{}", binary_name());
-    let archive = write_tar_gz(&[(nested.as_str(), b"nested-bytes")]);
+    let nested_archive_path = format!("koshi-v9.9.9-linux-amd64/{}", get_binary_file_name());
+    let archive = write_tar_gz(&[(nested_archive_path.as_str(), b"nested-bytes")]);
 
-    let extracted = extract(archive.as_ref(), "koshi.tar.gz").expect("extract the binary");
+    let extracted =
+        extract_release_binary(archive.as_ref(), "koshi.tar.gz").expect("extract the binary");
 
     assert_eq!(
         fs::read(AsRef::<Path>::as_ref(&extracted)).expect("read extracted binary"),
@@ -627,10 +718,11 @@ fn a_tar_gz_binary_under_a_top_level_directory_is_found_by_its_file_name() {
 
 #[test]
 fn a_zip_binary_under_a_top_level_directory_is_found_by_its_file_name() {
-    let nested = format!("koshi-v9.9.9-windows-amd64/{}", binary_name());
-    let archive = write_zip(&[(nested.as_str(), b"nested-bytes")]);
+    let nested_archive_path = format!("koshi-v9.9.9-windows-amd64/{}", get_binary_file_name());
+    let archive = write_zip(&[(nested_archive_path.as_str(), b"nested-bytes")]);
 
-    let extracted = extract(archive.as_ref(), "koshi.zip").expect("extract the binary");
+    let extracted =
+        extract_release_binary(archive.as_ref(), "koshi.zip").expect("extract the binary");
 
     assert_eq!(
         fs::read(AsRef::<Path>::as_ref(&extracted)).expect("read extracted binary"),
@@ -644,54 +736,57 @@ fn an_extracted_binary_is_left_runnable() {
     use std::os::unix::fs::PermissionsExt;
 
     let archive = write_tar_gz_of_kinds(&[(
-        binary_name(),
+        get_binary_file_name(),
         tar::EntryType::Regular,
         b"binary-bytes" as &[u8],
     )]);
 
-    let extracted = extract(archive.as_ref(), "koshi.tar.gz").expect("extract the binary");
+    let extracted =
+        extract_release_binary(archive.as_ref(), "koshi.tar.gz").expect("extract the binary");
 
-    let mode = fs::metadata(AsRef::<Path>::as_ref(&extracted))
+    let permission_mode = fs::metadata(AsRef::<Path>::as_ref(&extracted))
         .expect("read the extracted binary's metadata")
         .permissions()
         .mode();
-    assert_eq!(mode & 0o777, 0o755);
+    assert_eq!(permission_mode & 0o777, 0o755);
 }
 
 /// The pre-release picker takes the highest version by semver order, never
 /// the newest by publish date: a re-published older-versioned tag loses to a
 /// higher one wherever it sits in the list.
 #[test]
-fn highest_version_picks_semver_order_not_list_order() {
-    let releases = |tags: &[&str]| -> Vec<Release> {
-        tags.iter()
-            .map(|tag| Release {
-                tag_name: (*tag).to_string(),
+fn highest_release_version_picks_semver_order_not_list_order() {
+    let releases = |release_tags: &[&str]| -> Vec<Release> {
+        release_tags
+            .iter()
+            .map(|release_tag| Release {
+                release_tag: (*release_tag).to_string(),
             })
             .collect()
     };
 
     assert_eq!(
-        highest_version(releases(&["v0.3.0-rc.2", "v0.3.0-rc.10", "v0.2.0"])).unwrap(),
+        find_highest_release_version(releases(&["v0.3.0-rc.2", "v0.3.0-rc.10", "v0.2.0",]))
+            .unwrap(),
         "v0.3.0-rc.10"
     );
     // List order plays no part: the highest wins from the front too.
     assert_eq!(
-        highest_version(releases(&["v0.4.0", "v0.3.0"])).unwrap(),
+        find_highest_release_version(releases(&["v0.4.0", "v0.3.0"])).unwrap(),
         "v0.4.0"
     );
     // A tag that is not a version is skipped, not an error.
     assert_eq!(
-        highest_version(releases(&["nightly", "v0.1.0"])).unwrap(),
+        find_highest_release_version(releases(&["nightly", "v0.1.0"])).unwrap(),
         "v0.1.0"
     );
     assert_eq!(
-        highest_version(Vec::new()).unwrap_err(),
+        find_highest_release_version(Vec::new()).unwrap_err(),
         "no releases found"
     );
     // A list where no tag is a version reads the same as an empty one.
     assert_eq!(
-        highest_version(releases(&["nightly", "edge"])).unwrap_err(),
+        find_highest_release_version(releases(&["nightly", "edge"])).unwrap_err(),
         "no releases found"
     );
 }

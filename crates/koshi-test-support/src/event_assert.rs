@@ -7,7 +7,7 @@
 
 use koshi_core::event::Event;
 
-/// Assert that `actual` and `expected` contain the same events in the same
+/// Assert that `actual_events` and `expected_events` contain the same events in the same
 /// order and with the same count.
 ///
 /// # Panics
@@ -15,42 +15,51 @@ use koshi_core::event::Event;
 /// Panics when the slices differ in length or content. The message contains an
 /// index-aligned diff with `ok`, `MISMATCH`, `MISSING`, or `EXTRA` rows and a
 /// final line with both lengths.
-pub fn assert_events(actual: &[Event], expected: &[Event]) {
-    if actual != expected {
+pub fn assert_events(actual_events: &[Event], expected_events: &[Event]) {
+    if actual_events != expected_events {
         panic!(
             "event sequence mismatch:\n{}",
-            format_diff(expected, actual)
+            format_event_sequence_diff(expected_events, actual_events)
         );
     }
 }
 
-/// Build an index-aligned `expected` versus `actual` diff, with one line per
+/// Build an index-aligned expected-versus-actual diff, with one line per
 /// position and a final length line.
-fn format_diff(expected: &[Event], actual: &[Event]) -> String {
+fn format_event_sequence_diff(expected_events: &[Event], actual_events: &[Event]) -> String {
     let mut diff = String::new();
-    let rows = expected.len().max(actual.len());
-    for i in 0..rows {
-        match (expected.get(i), actual.get(i)) {
-            (Some(e), Some(a)) if e == a => {
-                diff.push_str(&format!("  [{i}] ok       {e:?}\n"));
+    let event_count = expected_events.len().max(actual_events.len());
+    for event_index in 0..event_count {
+        match (
+            expected_events.get(event_index),
+            actual_events.get(event_index),
+        ) {
+            (Some(expected_event), Some(actual_event)) if expected_event == actual_event => {
+                diff.push_str(&format!("  [{event_index}] ok       {expected_event:?}\n"));
             }
-            (Some(e), Some(a)) => {
-                diff.push_str(&format!("  [{i}] MISMATCH expected {e:?}\n"));
-                diff.push_str(&format!("               actual   {a:?}\n"));
+            (Some(expected_event), Some(actual_event)) => {
+                diff.push_str(&format!(
+                    "  [{event_index}] MISMATCH expected {expected_event:?}\n"
+                ));
+                diff.push_str(&format!("               actual   {actual_event:?}\n"));
             }
-            (Some(e), None) => {
-                diff.push_str(&format!("  [{i}] MISSING  expected {e:?}\n"));
+            (Some(expected_event), None) => {
+                diff.push_str(&format!(
+                    "  [{event_index}] MISSING  expected {expected_event:?}\n"
+                ));
             }
-            (None, Some(a)) => {
-                diff.push_str(&format!("  [{i}] EXTRA    actual   {a:?}\n"));
+            (None, Some(actual_event)) => {
+                diff.push_str(&format!(
+                    "  [{event_index}] EXTRA    actual   {actual_event:?}\n"
+                ));
             }
             (None, None) => unreachable!("index is bounded by the longer slice"),
         }
     }
     diff.push_str(&format!(
         "  length: expected {}, actual {}",
-        expected.len(),
-        actual.len()
+        expected_events.len(),
+        actual_events.len()
     ));
     diff
 }

@@ -12,8 +12,8 @@
 //!
 //! The **body** ([`ResumeBody`]) carries the fields that type names. Its shape
 //! does change, so
-//! [`ResumeHeader::format`] numbers it: [`RESUME_FORMAT`] is what this build
-//! writes, [`RESUME_FORMAT_MIN`] the oldest it reads, and [`read_body`] refuses
+//! [`ResumeHeader::resume_format`] numbers it: [`RESUME_FORMAT`] is what this build
+//! writes, [`RESUME_FORMAT_MIN`] the oldest it reads, and [`read_resume_body`] refuses
 //! anything outside that range. Formats 1 and 2 differ in one key: format 1
 //! carries a `tier` key on every attached client, format 2 carries none.
 //! Format 3 carries prompt metadata with every terminal row.
@@ -32,10 +32,12 @@ use koshi_core::process::{ExitStatus, PtySize};
 use koshi_session::session::state::Session;
 use koshi_storage::error::StorageError;
 use koshi_terminal::engine::{
-    GraphicsEvent, GraphicsTransportState, SynchronizedOutputTransport, MAX_GRAPHICS_EVENTS,
-    MAX_GRAPHICS_EVENT_BATCH,
+    GraphicsEvent, GraphicsTransportState, SynchronizedOutputTransport,
+    MAX_GRAPHICS_EVENT_BATCH_COUNT, MAX_GRAPHICS_EVENT_COUNT,
 };
-use koshi_terminal::graphics::{GraphicsError, MAX_GRAPHICS_CARRY_BYTES, MAX_IMAGE_BYTES};
+use koshi_terminal::graphics::{
+    GraphicsError, MAX_GRAPHICS_CARRY_BYTE_COUNT, MAX_IMAGE_BYTE_COUNT,
+};
 use koshi_terminal::state::TerminalState;
 use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -46,10 +48,10 @@ use serde_json::value::RawValue;
 /// The value and the rule it follows live in
 /// [`koshi_core::compat::RESUME_FORMAT`]. Named by its full
 /// path here, since this constant carries the same name.
-pub const RESUME_FORMAT: u32 = koshi_core::compat::RESUME_FORMAT.max;
+pub const RESUME_FORMAT: u32 = koshi_core::compat::RESUME_FORMAT.maximum_version;
 
 /// The oldest resume-file format this build reads.
-pub const RESUME_FORMAT_MIN: u32 = koshi_core::compat::RESUME_FORMAT.min;
+pub const RESUME_FORMAT_MIN: u32 = koshi_core::compat::RESUME_FORMAT.minimum_version;
 
 /// One live pane, as the header names it: what the next image needs to take
 /// the pane back, or to shut it down when the body is unreadable.
@@ -58,11 +60,14 @@ pub struct CarriedPane {
     /// The pane this record is for.
     pub pane_id: PaneId,
     /// The process id of the pane's child.
-    pub pid: u32,
+    #[serde(rename = "pid")]
+    pub process_id: u32,
     /// Height in cells of the pane's terminal.
-    pub rows: u16,
+    #[serde(rename = "rows")]
+    pub row_count: u16,
     /// Width in cells of the pane's terminal.
-    pub cols: u16,
+    #[serde(rename = "cols")]
+    pub column_count: u16,
     /// The descriptor of the pane's own terminal on Unix. Always `None` on
     /// Windows, where the pseudoconsole stays in the supervisor process and no
     /// descriptor crosses the swap.
@@ -83,18 +88,18 @@ pub struct CarriedPane {
     /// `None` says the child was still running and the next image waits on it
     /// itself. It is also what a header written by a build that recorded no
     /// status carries.
-    #[serde(default)]
-    pub exit: Option<ExitStatus>,
+    #[serde(default, rename = "exit")]
+    pub exit_status: Option<ExitStatus>,
 }
 
 impl CarriedPane {
-    /// The pane's terminal size, as [`rows`](Self::rows) and
-    /// [`cols`](Self::cols) name it.
+    /// The pane's terminal size, as [`row_count`](Self::row_count) and
+    /// [`column_count`](Self::column_count) name it.
     #[must_use]
-    pub fn size(&self) -> PtySize {
+    pub fn get_pty_size(&self) -> PtySize {
         PtySize {
-            rows: self.rows,
-            cols: self.cols,
+            row_count: self.row_count,
+            column_count: self.column_count,
         }
     }
 }
@@ -104,13 +109,15 @@ impl CarriedPane {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResumeHeader {
     /// Which format the body is written in.
-    pub format: u32,
+    #[serde(rename = "format")]
+    pub resume_format: u32,
     /// The session the writing process serves.
     pub session_id: SessionId,
     /// That session's display name.
     pub session_name: String,
     /// Every live pane, in the order the PTY backend reported them.
-    pub panes: Vec<CarriedPane>,
+    #[serde(rename = "panes")]
+    pub carried_panes: Vec<CarriedPane>,
 }
 
 /// The half of the resume file that [`RESUME_FORMAT`] numbers. Its fields below
@@ -119,66 +126,76 @@ pub struct ResumeHeader {
 pub struct ResumeBody {
     /// Every session the writing process held, keyed by id. Each one owns its
     /// tabs, layout trees, pane records and attached clients.
-    pub sessions: HashMap<SessionId, Session>,
+    #[serde(rename = "sessions")]
+    pub session_by_id: HashMap<SessionId, Session>,
     /// Each pane's screen state, keyed by pane id: grids, scrollback, modes and
     /// cursor. The parser that fed it is not carried; `undecoded` carries that
     /// parser's position.
-    pub engines: HashMap<PaneId, TerminalState>,
+    #[serde(rename = "engines")]
+    pub terminal_state_by_pane_id: HashMap<PaneId, TerminalState>,
     /// The bytes that put each pane's next parser where the last one stood,
     /// keyed by pane id, exactly as
-    /// [`TerminalEngine::undecoded`](koshi_terminal::engine::TerminalEngine::undecoded)
+    /// [`TerminalEngine::undecoded_terminal_bytes`](koshi_terminal::engine::TerminalEngine::undecoded_terminal_bytes)
     /// reports them; a pane it reports nothing for has no entry. The next image
     /// hands an entry to
-    /// [`TerminalEngine::from_state`](koshi_terminal::engine::TerminalEngine::from_state).
+    /// [`TerminalEngine::from_terminal_state`](koshi_terminal::engine::TerminalEngine::from_terminal_state).
     ///
     /// A body whose JSON carries no map for this field reads back as an empty
     /// one.
-    #[serde(default)]
-    pub undecoded: HashMap<PaneId, Vec<u8>>,
+    #[serde(rename = "undecoded", default)]
+    pub undecoded_bytes_by_pane_id: HashMap<PaneId, Vec<u8>>,
     /// The raw bytes that put each pane's graphics parser where the last one
     /// stood, keyed by pane id. The next image uses this compatibility field
-    /// with [`TerminalEngine::from_state_with_graphics`](koshi_terminal::engine::TerminalEngine::from_state_with_graphics)
+    /// with [`TerminalEngine::from_terminal_state_with_graphics`](koshi_terminal::engine::TerminalEngine::from_terminal_state_with_graphics)
     /// when no nested wrapper state is present.
     /// A body whose JSON carries no map for this field reads back as an empty
     /// one.
-    #[serde(default, deserialize_with = "deserialize_graphics_undecoded")]
-    pub graphics_undecoded: HashMap<PaneId, Vec<u8>>,
+    #[serde(
+        rename = "graphics_undecoded",
+        default,
+        deserialize_with = "deserialize_graphics_undecoded"
+    )]
+    pub graphics_undecoded_bytes_by_pane_id: HashMap<PaneId, Vec<u8>>,
     /// Whether each pane's graphics parser expects the next DCS to carry the
     /// next GNU Screen passthrough fragment.
     ///
     /// A body whose JSON carries no map for this field reads back as an empty
     /// one.
-    #[serde(default)]
-    pub graphics_screen_continuation: HashMap<PaneId, bool>,
+    #[serde(rename = "graphics_screen_continuation", default)]
+    pub graphics_screen_continuation_by_pane_id: HashMap<PaneId, bool>,
     /// Whether each pane's carried graphics bytes are inside a GNU Screen
     /// passthrough DCS string.
     ///
     /// A body whose JSON carries no map for this field reads back as an empty
     /// one.
-    #[serde(default)]
-    pub graphics_screen_wrapper_active: HashMap<PaneId, bool>,
+    #[serde(rename = "graphics_screen_wrapper_active", default)]
+    pub graphics_screen_wrapper_active_by_pane_id: HashMap<PaneId, bool>,
     /// Whether each pane's graphics parser expects the next DCS to carry the
     /// next tmux passthrough fragment.
     ///
     /// A body whose JSON carries no map for this field reads back as an empty
     /// one.
-    #[serde(default)]
-    pub graphics_tmux_continuation: HashMap<PaneId, bool>,
+    #[serde(rename = "graphics_tmux_continuation", default)]
+    pub graphics_tmux_continuation_by_pane_id: HashMap<PaneId, bool>,
     /// Whether each pane's carried graphics bytes are inside an open tmux
     /// passthrough DCS string.
     ///
     /// A body whose JSON carries no map for this field reads back as an empty
     /// one.
-    #[serde(default)]
-    pub graphics_tmux_wrapper_active: HashMap<PaneId, bool>,
+    #[serde(rename = "graphics_tmux_wrapper_active", default)]
+    pub graphics_tmux_wrapper_active_by_pane_id: HashMap<PaneId, bool>,
     /// Complete image records and recoverable image errors waiting for each
     /// pane's terminal caller, keyed by pane id. The next image restores them
     /// before it reads new PTY output.
     ///
     /// A body whose JSON carries no map for this field reads back as an empty
     /// one.
-    #[serde(default, deserialize_with = "deserialize_graphics_events")]
-    pub graphics_events: HashMap<PaneId, Vec<GraphicsEvent>>,
+    #[serde(
+        rename = "graphics_events",
+        default,
+        deserialize_with = "deserialize_graphics_events"
+    )]
+    pub graphics_events_by_pane_id: HashMap<PaneId, Vec<GraphicsEvent>>,
     /// The complete graphics-parser state for each pane, including parser
     /// state nested inside a split tmux or GNU Screen wrapper. The next image
     /// restores it before reading new PTY output. A Screen-wrapped iTerm2
@@ -187,10 +204,12 @@ pub struct ResumeBody {
     /// A body whose JSON carries no map for this field reads back as an empty
     /// one.
     #[serde(default)]
-    pub graphics_transport: HashMap<PaneId, GraphicsTransportState>,
+    #[serde(rename = "graphics_transport")]
+    pub graphics_transport_by_pane_id: HashMap<PaneId, GraphicsTransportState>,
     /// Open synchronized-output groups keyed by pane id.
     #[serde(default)]
-    pub synchronized_output: HashMap<PaneId, SynchronizedOutputTransport>,
+    #[serde(rename = "synchronized_output")]
+    pub synchronized_output_by_pane_id: HashMap<PaneId, SynchronizedOutputTransport>,
     /// A quit that was applied and not yet carried out, and how it must be
     /// carried out.
     ///
@@ -204,7 +223,8 @@ pub struct ResumeBody {
     ///
     /// A body whose JSON carries no value for this field reads back as `None`.
     #[serde(default)]
-    pub quit: Option<CarriedQuit>,
+    #[serde(rename = "quit")]
+    pub carried_quit: Option<CarriedQuit>,
 }
 
 /// How a quit carried across an image swap must be carried out.
@@ -220,11 +240,12 @@ pub enum CarriedQuit {
 /// The file as it is read: the header decoded, the body left as the raw JSON
 /// text it was written as. A body whose text is valid JSON of a shape this
 /// build cannot decode costs the caller no part of the header.
-/// [`read_body`] decodes that text once.
+/// [`read_resume_body`] decodes that text once.
 #[derive(Debug, Deserialize)]
 struct ResumeFile {
     header: ResumeHeader,
-    body: Box<RawValue>,
+    #[serde(rename = "body")]
+    raw_body: Box<RawValue>,
 }
 
 /// The same two halves as [`ResumeFile`], borrowed for the write so no pane's
@@ -235,7 +256,7 @@ struct ResumeFileRef<'a> {
     body: &'a ResumeBody,
 }
 
-/// Write `header` and `body` to `path`, replacing whatever is there.
+/// Write `header` and `resume_body` to `resume_file_path`, replacing whatever is there.
 ///
 /// The bytes land through [`koshi_storage::atomic::write_atomic`]: a reader
 /// finds the whole old file or the whole new one, never a half-written middle.
@@ -243,52 +264,76 @@ struct ResumeFileRef<'a> {
 /// # Errors
 /// Returns [`StorageError::Io`] when the state cannot be encoded, or when the
 /// write does not land durably.
-pub fn write(path: &Path, header: &ResumeHeader, body: &ResumeBody) -> Result<(), StorageError> {
-    let data =
-        serde_json::to_vec(&ResumeFileRef { header, body }).map_err(|error| StorageError::Io {
-            detail: format!("encode resume state for {}: {error}", path.display()),
-        })?;
-    koshi_storage::atomic::write_atomic(path, &data)
+pub fn write_resume_file(
+    resume_file_path: &Path,
+    header: &ResumeHeader,
+    resume_body: &ResumeBody,
+) -> Result<(), StorageError> {
+    let resume_file_bytes = serde_json::to_vec(&ResumeFileRef {
+        header,
+        body: resume_body,
+    })
+    .map_err(|serialization_error| StorageError::Io {
+        detail: format!(
+            "encode resume state for {}: {serialization_error}",
+            resume_file_path.display()
+        ),
+    })?;
+    koshi_storage::atomic::write_atomic(resume_file_path, &resume_file_bytes)
 }
 
-/// Read the resume file at `path`: its header, and its body as raw JSON for
-/// [`read_body`].
+/// Read the resume file at `resume_file_path`: its header, and its body as raw JSON for
+/// [`read_resume_body`].
 ///
 /// The header's shape never changes, so this call answers for a file any build
-/// wrote. It does not look at [`ResumeHeader::format`], so a caller holding a
+/// wrote. It does not look at [`ResumeHeader::resume_format`], so a caller holding a
 /// body it cannot read still gets every pane's descriptor and process id.
 ///
 /// # Errors
 /// Returns [`StorageError::Io`] when the file cannot be read, and
 /// [`StorageError::Corrupt`] when its bytes are not a resume file.
-pub fn read_header(path: &Path) -> Result<(ResumeHeader, Box<RawValue>), StorageError> {
-    let data = std::fs::read(path).map_err(|error| StorageError::Io {
-        detail: format!("read resume state at {}: {error}", path.display()),
-    })?;
-    let file: ResumeFile =
-        serde_json::from_slice(&data).map_err(|error| StorageError::Corrupt {
-            detail: format!("resume state at {} is unreadable: {error}", path.display()),
+pub fn read_resume_header(
+    resume_file_path: &Path,
+) -> Result<(ResumeHeader, Box<RawValue>), StorageError> {
+    let resume_file_bytes =
+        std::fs::read(resume_file_path).map_err(|read_error| StorageError::Io {
+            detail: format!(
+                "read resume state at {}: {read_error}",
+                resume_file_path.display()
+            ),
         })?;
-    Ok((file.header, file.body))
+    let resume_file: ResumeFile =
+        serde_json::from_slice(&resume_file_bytes).map_err(|parse_error| {
+            StorageError::Corrupt {
+                detail: format!(
+                    "resume state at {} is unreadable: {parse_error}",
+                    resume_file_path.display()
+                ),
+            }
+        })?;
+    Ok((resume_file.header, resume_file.raw_body))
 }
 
-/// Decode the raw `body` [`read_header`] handed back, given the `format` the
+/// Decode the raw `resume_body` [`read_resume_header`] handed back, given the `resume_format` the
 /// same header named.
 ///
 /// # Errors
 /// Returns [`StorageError::Corrupt`] when `format` is outside
 /// `RESUME_FORMAT_MIN..=RESUME_FORMAT`, and when the body is not that format's
 /// shape.
-pub fn read_body(format: u32, body: &RawValue) -> Result<ResumeBody, StorageError> {
-    if !(RESUME_FORMAT_MIN..=RESUME_FORMAT).contains(&format) {
+pub fn read_resume_body(
+    resume_format: u32,
+    resume_body: &RawValue,
+) -> Result<ResumeBody, StorageError> {
+    if !(RESUME_FORMAT_MIN..=RESUME_FORMAT).contains(&resume_format) {
         return Err(StorageError::Corrupt {
             detail: format!(
-                "resume body format {format} is outside the {RESUME_FORMAT_MIN} to {RESUME_FORMAT} range this build reads"
+                "resume body format {resume_format} is outside the {RESUME_FORMAT_MIN} to {RESUME_FORMAT} range this build reads"
             ),
         });
     }
-    serde_json::from_str(body.get()).map_err(|error| StorageError::Corrupt {
-        detail: format!("resume body is unreadable: {error}"),
+    serde_json::from_str(resume_body.get()).map_err(|parse_error| StorageError::Corrupt {
+        detail: format!("resume body is unreadable: {parse_error}"),
     })
 }
 
@@ -323,15 +368,15 @@ impl<'de> Visitor<'de> for GraphicsUndecodedVisitor {
     where
         A: MapAccess<'de>,
     {
-        let mut carries = HashMap::new();
+        let mut graphics_carry_bytes_by_pane_id = HashMap::new();
         while let Some(pane_id) = map.next_key::<PaneId>()? {
-            if carries.contains_key(&pane_id) {
+            if graphics_carry_bytes_by_pane_id.contains_key(&pane_id) {
                 return Err(de::Error::custom("duplicate graphics carry pane id"));
             }
-            let carry = map.next_value_seed(GraphicsCarrySeed)?;
-            carries.insert(pane_id, carry);
+            let graphics_carry_bytes = map.next_value_seed(GraphicsCarrySeed)?;
+            graphics_carry_bytes_by_pane_id.insert(pane_id, graphics_carry_bytes);
         }
-        Ok(carries)
+        Ok(graphics_carry_bytes_by_pane_id)
     }
 }
 
@@ -357,45 +402,51 @@ impl<'de> Visitor<'de> for GraphicsCarryVisitor {
         formatter.write_str("bounded graphics carry bytes")
     }
 
-    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    fn visit_seq<A>(self, mut graphics_carry_byte_sequence: A) -> Result<Self::Value, A::Error>
     where
         A: SeqAccess<'de>,
     {
-        let size_hint = sequence.size_hint();
-        if size_hint.is_some_and(|size| size > MAX_GRAPHICS_CARRY_BYTES) {
+        let graphics_carry_size_hint = graphics_carry_byte_sequence.size_hint();
+        if graphics_carry_size_hint
+            .is_some_and(|byte_count| byte_count > MAX_GRAPHICS_CARRY_BYTE_COUNT)
+        {
             return Err(de::Error::custom(format!(
-                "graphics carry exceeds {MAX_GRAPHICS_CARRY_BYTES} bytes"
+                "graphics carry exceeds {MAX_GRAPHICS_CARRY_BYTE_COUNT} bytes"
             )));
         }
-        let mut bytes = Vec::with_capacity(size_hint.unwrap_or(0).min(MAX_GRAPHICS_CARRY_BYTES));
-        while let Some(byte) = sequence.next_element::<u8>()? {
-            if bytes.len() == MAX_GRAPHICS_CARRY_BYTES {
+        let mut graphics_carry_bytes = Vec::with_capacity(
+            graphics_carry_size_hint
+                .unwrap_or(0)
+                .min(MAX_GRAPHICS_CARRY_BYTE_COUNT),
+        );
+        while let Some(graphics_carry_byte) = graphics_carry_byte_sequence.next_element::<u8>()? {
+            if graphics_carry_bytes.len() == MAX_GRAPHICS_CARRY_BYTE_COUNT {
                 return Err(de::Error::custom(format!(
-                    "graphics carry exceeds {MAX_GRAPHICS_CARRY_BYTES} bytes"
+                    "graphics carry exceeds {MAX_GRAPHICS_CARRY_BYTE_COUNT} bytes"
                 )));
             }
-            bytes.push(byte);
+            graphics_carry_bytes.push(graphics_carry_byte);
         }
-        Ok(bytes)
+        Ok(graphics_carry_bytes)
     }
 
-    fn visit_bytes<E>(self, bytes: &[u8]) -> Result<Self::Value, E>
+    fn visit_bytes<E>(self, graphics_carry_bytes: &[u8]) -> Result<Self::Value, E>
     where
         E: de::Error,
     {
-        if bytes.len() > MAX_GRAPHICS_CARRY_BYTES {
+        if graphics_carry_bytes.len() > MAX_GRAPHICS_CARRY_BYTE_COUNT {
             return Err(E::custom(format!(
-                "graphics carry exceeds {MAX_GRAPHICS_CARRY_BYTES} bytes"
+                "graphics carry exceeds {MAX_GRAPHICS_CARRY_BYTE_COUNT} bytes"
             )));
         }
-        Ok(bytes.to_vec())
+        Ok(graphics_carry_bytes.to_vec())
     }
 
-    fn visit_byte_buf<E>(self, bytes: Vec<u8>) -> Result<Self::Value, E>
+    fn visit_byte_buf<E>(self, graphics_carry_bytes: Vec<u8>) -> Result<Self::Value, E>
     where
         E: de::Error,
     {
-        self.visit_bytes(&bytes)
+        self.visit_bytes(&graphics_carry_bytes)
     }
 }
 
@@ -412,15 +463,15 @@ impl<'de> Visitor<'de> for GraphicsEventsVisitor {
     where
         A: MapAccess<'de>,
     {
-        let mut events = HashMap::new();
+        let mut graphics_events_by_pane_id = HashMap::new();
         while let Some(pane_id) = map.next_key::<PaneId>()? {
-            if events.contains_key(&pane_id) {
+            if graphics_events_by_pane_id.contains_key(&pane_id) {
                 return Err(de::Error::custom("duplicate graphics event pane id"));
             }
-            let pane_events = map.next_value_seed(GraphicsEventListSeed)?;
-            events.insert(pane_id, pane_events);
+            let graphics_events = map.next_value_seed(GraphicsEventListSeed)?;
+            graphics_events_by_pane_id.insert(pane_id, graphics_events);
         }
-        Ok(events)
+        Ok(graphics_events_by_pane_id)
     }
 }
 
@@ -446,50 +497,59 @@ impl<'de> Visitor<'de> for GraphicsEventListVisitor {
         formatter.write_str("a bounded graphics event list")
     }
 
-    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    fn visit_seq<A>(self, mut graphics_event_sequence: A) -> Result<Self::Value, A::Error>
     where
         A: SeqAccess<'de>,
     {
-        let size_hint = sequence.size_hint();
-        if size_hint.is_some_and(|size| size > MAX_GRAPHICS_EVENT_BATCH) {
+        let graphics_event_size_hint = graphics_event_sequence.size_hint();
+        if graphics_event_size_hint.is_some_and(|graphics_event_count| {
+            graphics_event_count > MAX_GRAPHICS_EVENT_BATCH_COUNT
+        }) {
             return Err(de::Error::custom(format!(
-                "graphics event count exceeds {MAX_GRAPHICS_EVENTS}"
+                "graphics event count exceeds {MAX_GRAPHICS_EVENT_COUNT}"
             )));
         }
-        let mut events = Vec::with_capacity(size_hint.unwrap_or(0).min(MAX_GRAPHICS_EVENT_BATCH));
-        let mut image_bytes = 0usize;
-        while let Some(event) = sequence.next_element::<GraphicsEvent>()? {
-            if events.len() == MAX_GRAPHICS_EVENT_BATCH {
+        let mut graphics_events = Vec::with_capacity(
+            graphics_event_size_hint
+                .unwrap_or(0)
+                .min(MAX_GRAPHICS_EVENT_BATCH_COUNT),
+        );
+        let mut decoded_image_byte_count = 0usize;
+        while let Some(graphics_event) = graphics_event_sequence.next_element::<GraphicsEvent>()? {
+            if graphics_events.len() == MAX_GRAPHICS_EVENT_BATCH_COUNT {
                 return Err(de::Error::custom(format!(
-                    "graphics event count exceeds {MAX_GRAPHICS_EVENTS}"
+                    "graphics event count exceeds {MAX_GRAPHICS_EVENT_COUNT}"
                 )));
             }
-            if let Err(GraphicsError::QueueFull { dropped }) = &event {
-                if *dropped == 0 || events.len() != MAX_GRAPHICS_EVENTS {
+            if let Err(GraphicsError::QueueFull {
+                dropped_event_count,
+            }) = &graphics_event
+            {
+                if *dropped_event_count == 0 || graphics_events.len() != MAX_GRAPHICS_EVENT_COUNT {
                     return Err(de::Error::custom(
                         "graphics queue-full report must follow the event limit",
                     ));
                 }
-            } else if events.len() >= MAX_GRAPHICS_EVENTS {
+            } else if graphics_events.len() >= MAX_GRAPHICS_EVENT_COUNT {
                 return Err(de::Error::custom(format!(
-                    "graphics event count exceeds {MAX_GRAPHICS_EVENTS}"
+                    "graphics event count exceeds {MAX_GRAPHICS_EVENT_COUNT}"
                 )));
             }
-            let event_bytes = match &event {
-                Ok(record) => record.image.rgba.len(),
+            let graphics_event_image_bytes = match &graphics_event {
+                Ok(image_record) => image_record.image.rgba_bytes.len(),
                 Err(_) => 0,
             };
-            image_bytes = image_bytes
-                .checked_add(event_bytes)
+            decoded_image_byte_count = decoded_image_byte_count
+                .checked_add(graphics_event_image_bytes)
                 .ok_or_else(|| de::Error::custom("graphics image-byte count overflows"))?;
-            if image_bytes > MAX_IMAGE_BYTES {
+            if decoded_image_byte_count > MAX_IMAGE_BYTE_COUNT {
                 return Err(de::Error::custom(format!(
-                    "graphics image bytes exceed {MAX_IMAGE_BYTES}"
+                    "graphics image bytes exceed {MAX_IMAGE_BYTE_COUNT}"
                 )));
             }
-            events.push(event);
+            graphics_events.push(graphics_event);
         }
-        Ok(events)
+        Ok(graphics_events)
     }
 }
 

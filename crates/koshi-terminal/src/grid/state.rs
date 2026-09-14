@@ -2,7 +2,7 @@
 
 use std::cmp::min;
 
-use serde::de::{self, Deserializer};
+use serde::de::{self, Deserializer as DeserializerTrait};
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 
@@ -11,9 +11,12 @@ use crate::style::{Color, Style};
 /// A cell-sized portion of one retained native image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ImageCellFragment {
-    pub(crate) source: u64,
-    pub(crate) row: u16,
-    pub(crate) column: u16,
+    #[serde(rename = "source")]
+    pub(crate) image_source_id: u64,
+    #[serde(rename = "row")]
+    pub(crate) source_row_index: u16,
+    #[serde(rename = "column")]
+    pub(crate) source_column_index: u16,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -29,7 +32,7 @@ impl ImageFragments {
         matches!(self, Self::Empty)
     }
 
-    fn as_slice(&self) -> &[ImageCellFragment] {
+    fn get_fragment_slice(&self) -> &[ImageCellFragment] {
         match self {
             Self::Empty => &[],
             Self::One(fragment) => std::slice::from_ref(fragment),
@@ -37,16 +40,16 @@ impl ImageFragments {
         }
     }
 
-    fn replace_source(&mut self, fragment: ImageCellFragment) -> bool {
+    fn replace_fragment_by_image_source_id(&mut self, fragment: ImageCellFragment) -> bool {
         match self {
-            Self::One(existing) if existing.source == fragment.source => {
+            Self::One(existing) if existing.image_source_id == fragment.image_source_id => {
                 *existing = fragment;
                 true
             }
             Self::Many(fragments) => {
                 if let Some(existing) = fragments
                     .iter_mut()
-                    .find(|existing| existing.source == fragment.source)
+                    .find(|existing| existing.image_source_id == fragment.image_source_id)
                 {
                     *existing = fragment;
                     return true;
@@ -57,7 +60,7 @@ impl ImageFragments {
         }
     }
 
-    fn push(&mut self, fragment: ImageCellFragment) {
+    fn append_image_fragment(&mut self, fragment: ImageCellFragment) {
         match self {
             Self::Empty => *self = Self::One(fragment),
             Self::One(existing) => *self = Self::Many(vec![*existing, fragment]),
@@ -65,11 +68,11 @@ impl ImageFragments {
         }
     }
 
-    fn clear(&mut self) {
+    fn clear_image_fragments(&mut self) {
         *self = Self::Empty;
     }
 
-    fn storage_bytes(&self) -> usize {
+    fn compute_image_fragment_storage_byte_count(&self) -> usize {
         match self {
             Self::Many(fragments) => {
                 fragments.capacity() * std::mem::size_of::<ImageCellFragment>()
@@ -84,50 +87,55 @@ impl Serialize for ImageFragments {
     where
         S: Serializer,
     {
-        serializer.collect_seq(self.as_slice())
+        serializer.collect_seq(self.get_fragment_slice())
     }
 }
 
 impl<'de> Deserialize<'de> for ImageFragments {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    fn deserialize<Deserializer>(deserializer: Deserializer) -> Result<Self, Deserializer::Error>
     where
-        D: Deserializer<'de>,
+        Deserializer: DeserializerTrait<'de>,
     {
-        struct Fragments;
+        struct ImageFragmentsVisitor;
 
-        impl<'de> de::Visitor<'de> for Fragments {
+        impl<'de> de::Visitor<'de> for ImageFragmentsVisitor {
             type Value = ImageFragments;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 formatter.write_str("bounded image cell fragments")
             }
 
-            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            fn visit_seq<SequenceAccess>(
+                self,
+                mut sequence: SequenceAccess,
+            ) -> Result<Self::Value, SequenceAccess::Error>
             where
-                A: de::SeqAccess<'de>,
+                SequenceAccess: de::SeqAccess<'de>,
             {
-                let mut fragments = Vec::new();
-                while let Some(fragment) = sequence.next_element::<ImageCellFragment>()? {
-                    if fragments.len() == crate::state::images::MAX_IMAGE_PLACEMENTS {
+                let mut image_fragments = Vec::new();
+                while let Some(image_fragment) = sequence.next_element::<ImageCellFragment>()? {
+                    if image_fragments.len() == crate::state::images::MAX_IMAGE_PLACEMENT_COUNT {
                         return Err(de::Error::custom("too many image fragments in one cell"));
                     }
-                    if fragments
+                    if image_fragments
                         .iter()
-                        .any(|entry: &ImageCellFragment| entry.source == fragment.source)
+                        .any(|candidate_fragment: &ImageCellFragment| {
+                            candidate_fragment.image_source_id == image_fragment.image_source_id
+                        })
                     {
                         return Err(de::Error::custom("duplicate image source in one cell"));
                     }
-                    fragments.push(fragment);
+                    image_fragments.push(image_fragment);
                 }
-                match fragments.len() {
+                match image_fragments.len() {
                     0 => Ok(ImageFragments::Empty),
-                    1 => Ok(ImageFragments::One(fragments[0])),
-                    _ => Ok(ImageFragments::Many(fragments)),
+                    1 => Ok(ImageFragments::One(image_fragments[0])),
+                    _ => Ok(ImageFragments::Many(image_fragments)),
                 }
             }
         }
 
-        deserializer.deserialize_seq(Fragments)
+        deserializer.deserialize_seq(ImageFragmentsVisitor)
     }
 }
 
@@ -154,33 +162,35 @@ pub(crate) struct ImagePlaceholder {
     /// The optional placement id encoded by the underline color.
     pub(crate) placement_id: Option<u32>,
     /// The source row encoded by the first placeholder diacritic.
-    pub(crate) row: Option<u16>,
+    #[serde(rename = "row")]
+    pub(crate) source_row: Option<u16>,
     /// The source column encoded by the second placeholder diacritic.
-    pub(crate) column: Option<u16>,
+    #[serde(rename = "column")]
+    pub(crate) source_column: Option<u16>,
     /// The most significant image-id byte encoded by the third diacritic.
     pub(crate) image_id_msb: Option<u8>,
 }
 
 impl ImagePlaceholder {
     /// Build placeholder metadata from Kitty's foreground and underline colors.
-    pub(crate) fn from_style(style: Style) -> Self {
+    pub(crate) fn from_placeholder_style(style: Style) -> Self {
         Self {
-            image_id: color_value(style.fg()).unwrap_or_default(),
+            image_id: get_color_value(style.get_foreground_color()).unwrap_or_default(),
             placement_id: style
-                .underline_color()
-                .and_then(color_value)
-                .filter(|value| *value != 0),
-            row: None,
-            column: None,
+                .get_underline_color()
+                .and_then(get_color_value)
+                .filter(|placement_color_value| *placement_color_value != 0),
+            source_row: None,
+            source_column: None,
             image_id_msb: None,
         }
     }
 }
 
-fn color_value(color: Color) -> Option<u32> {
+fn get_color_value(color: Color) -> Option<u32> {
     match color {
         Color::Default => None,
-        Color::Indexed(value) => Some(u32::from(value)),
+        Color::Indexed(color_index) => Some(u32::from(color_index)),
         Color::Rgb(red, green, blue) => {
             Some((u32::from(red) << 16) | (u32::from(green) << 8) | u32::from(blue))
         }
@@ -195,8 +205,9 @@ fn color_value(color: Color) -> Option<u32> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cell {
     /// The base character occupying the cell.
-    ch: char,
-    /// The rest of the grapheme cluster layered over the base [`ch`](Cell::ch)
+    #[serde(rename = "ch")]
+    character: char,
+    /// The rest of the grapheme cluster layered over the base character
     /// — a grapheme cluster is the run of code points a person perceives as
     /// one visual character — in arrival order: combining accents, variation
     /// selectors, and the joined parts of a multi-codepoint emoji (ZWJ-joined
@@ -208,7 +219,8 @@ pub struct Cell {
     combining: Option<Box<CellExtra>>,
     /// Display width in cells: 0 (continuation half of a wide glyph), 1
     /// (narrow), or 2 (wide, e.g. CJK).
-    width: u8,
+    #[serde(rename = "width")]
+    display_width: u8,
     /// The cell's visual style (color, bold, italic, etc.).
     style: Style,
 }
@@ -243,32 +255,32 @@ impl Cell {
     /// applied to newly written text.
     pub fn blank_with(style: Style) -> Self {
         Cell {
-            ch: ' ',
+            character: ' ',
             combining: None,
-            width: 1,
+            display_width: 1,
             style,
         }
     }
 
-    /// A cell holding `ch` of the given display `width`, in `style`.
-    pub fn new(ch: char, width: u8, style: Style) -> Self {
+    /// A cell holding `character` of the given `display_width`, in `style`.
+    pub fn from_character(character: char, display_width: u8, style: Style) -> Self {
         Cell {
-            ch,
+            character,
             combining: None,
-            width,
+            display_width,
             style,
         }
     }
 
     /// The character occupying this cell.
-    pub fn ch(&self) -> char {
-        self.ch
+    pub fn get_character(&self) -> char {
+        self.character
     }
 
     /// The rest of the grapheme cluster layered over the base character, in
     /// arrival order (combining marks plus any emoji continuation); empty for a
     /// plain cell.
-    pub fn combining(&self) -> &[char] {
+    pub fn list_combining_characters(&self) -> &[char] {
         match &self.combining {
             Some(extra) => &extra.combining,
             None => &[],
@@ -279,28 +291,28 @@ impl Cell {
     pub(crate) fn image_fragments(&self) -> &[ImageCellFragment] {
         self.combining
             .as_ref()
-            .map_or(&[], |extra| extra.image_fragments.as_slice())
+            .map_or(&[], |extra| extra.image_fragments.get_fragment_slice())
     }
 
     /// Attach a native image portion, replacing or overlaying existing portions.
-    pub(crate) fn set_image_fragment(&mut self, fragment: ImageCellFragment, overlay: bool) {
-        if !overlay {
+    pub(crate) fn set_image_fragment(&mut self, fragment: ImageCellFragment, should_overlay: bool) {
+        if !should_overlay {
             *self = Self::blank_with(self.style);
-        } else if self
-            .combining
-            .as_mut()
-            .is_some_and(|extra| extra.image_fragments.replace_source(fragment))
-        {
+        } else if self.combining.as_mut().is_some_and(|extra| {
+            extra
+                .image_fragments
+                .replace_fragment_by_image_source_id(fragment)
+        }) {
             return;
         }
-        let extra = self.combining.get_or_insert_with(|| {
+        let cell_extra = self.combining.get_or_insert_with(|| {
             Box::new(CellExtra {
                 combining: Vec::new(),
                 image_placeholder: None,
                 image_fragments: ImageFragments::Empty,
             })
         });
-        extra.image_fragments.push(fragment);
+        cell_extra.image_fragments.append_image_fragment(fragment);
     }
 
     /// Heap bytes occupied by native image metadata in this cell.
@@ -311,12 +323,14 @@ impl Cell {
             .map_or(0, |extra| {
                 usize::from(extra.combining.is_empty() && extra.image_placeholder.is_none())
                     * std::mem::size_of::<CellExtra>()
-                    + extra.image_fragments.storage_bytes()
+                    + extra
+                        .image_fragments
+                        .compute_image_fragment_storage_byte_count()
             })
     }
 
     #[cfg(test)]
-    pub(crate) fn image_fragment_capacity(&self) -> usize {
+    pub(crate) fn get_image_fragment_capacity(&self) -> usize {
         self.combining.as_ref().map_or(0, |extra| {
             if let ImageFragments::Many(fragments) = &extra.image_fragments {
                 fragments.capacity()
@@ -329,7 +343,7 @@ impl Cell {
     /// Remove native image portions from this cell.
     pub(crate) fn clear_image_fragments(&mut self) {
         if let Some(extra) = self.combining.as_mut() {
-            extra.image_fragments.clear();
+            extra.image_fragments.clear_image_fragments();
             if extra.combining.is_empty() && extra.image_placeholder.is_none() {
                 self.combining = None;
             }
@@ -351,7 +365,7 @@ impl Cell {
 
     /// Set the Kitty Unicode-placeholder metadata and use a blank base glyph.
     pub(crate) fn set_image_placeholder(&mut self, placeholder: ImagePlaceholder) {
-        self.ch = ' ';
+        self.character = ' ';
         self.combining
             .get_or_insert_with(|| {
                 Box::new(CellExtra {
@@ -364,22 +378,23 @@ impl Cell {
     }
 
     /// Add one Kitty placeholder diacritic to the matching metadata slot.
-    pub(crate) fn set_image_placeholder_diacritic(&mut self, mark: char) -> bool {
+    pub(crate) fn set_image_placeholder_diacritic(&mut self, placeholder_diacritic: char) -> bool {
         let Some(extra) = self.combining.as_mut() else {
             return false;
         };
         let Some(placeholder) = extra.image_placeholder.as_mut() else {
             return false;
         };
-        let Some(index) = image_placeholder_diacritic_index(mark) else {
+        let Some(diacritic_index) = find_image_placeholder_diacritic_index(placeholder_diacritic)
+        else {
             return false;
         };
-        if placeholder.row.is_none() {
-            placeholder.row = Some(index);
-        } else if placeholder.column.is_none() {
-            placeholder.column = Some(index);
+        if placeholder.source_row.is_none() {
+            placeholder.source_row = Some(diacritic_index);
+        } else if placeholder.source_column.is_none() {
+            placeholder.source_column = Some(diacritic_index);
         } else if placeholder.image_id_msb.is_none() {
-            placeholder.image_id_msb = u8::try_from(index).ok();
+            placeholder.image_id_msb = u8::try_from(diacritic_index).ok();
         }
         true
     }
@@ -403,12 +418,12 @@ impl Cell {
 
     /// The cell's display width: 0 (combining/continuation), 1 (narrow), or 2
     /// (wide).
-    pub fn width(&self) -> u8 {
-        self.width
+    pub fn get_display_width(&self) -> u8 {
+        self.display_width
     }
 
     /// The cell's visual style.
-    pub fn style(&self) -> Style {
+    pub fn get_style(&self) -> Style {
         self.style
     }
 }
@@ -448,11 +463,11 @@ const IMAGE_PLACEHOLDER_DIACRITICS: [char; 256] = [
     '\u{a6f0}', '\u{a6f1}', '\u{a8e0}', '\u{a8e1}', '\u{a8e2}', '\u{a8e3}', '\u{a8e4}', '\u{a8e5}',
 ];
 
-fn image_placeholder_diacritic_index(mark: char) -> Option<u16> {
+fn find_image_placeholder_diacritic_index(mark: char) -> Option<u16> {
     IMAGE_PLACEHOLDER_DIACRITICS
         .iter()
         .position(|candidate| *candidate == mark)
-        .and_then(|index| u16::try_from(index).ok())
+        .and_then(|diacritic_index| u16::try_from(diacritic_index).ok())
 }
 
 /// How a row ends relative to the row directly below it. This is row state,
@@ -473,11 +488,13 @@ pub enum RowEnd {
 
 /// Everything the terminal records about a row apart from its cells.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct RowMeta {
+pub struct RowMetadata {
     /// How the row ends relative to the row below it.
-    pub end: RowEnd,
+    #[serde(rename = "end")]
+    pub row_end: RowEnd,
     /// Whether a shell reported a prompt on this row with OSC 133;A.
-    pub prompt: bool,
+    #[serde(rename = "prompt")]
+    pub has_prompt_mark: bool,
 }
 
 /// The number of content cells in a hard-ended row: its length with the
@@ -488,256 +505,315 @@ pub struct RowMeta {
 /// Only meaningful for a [`RowEnd::Hard`] row. A [`RowEnd::Soft`] row is full
 /// of content, and a [`RowEnd::SoftWide`] row's final blank is a spacer
 /// standing in for the wide glyph on the next row.
-pub(crate) fn content_len(row: &[Cell]) -> usize {
+pub(crate) fn count_row_content_cells(row_cells: &[Cell]) -> usize {
     let blank = Cell::blank();
-    row.iter()
+    row_cells
+        .iter()
         .rposition(|cell| *cell != blank)
-        .map_or(0, |index| index + 1)
+        .map_or(0, |content_cell_index| content_cell_index + 1)
 }
 
-/// A fixed-size grid of cells, addressed `rows[row][col]`.
+/// A fixed-size grid of cells, addressed by row and column indexes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Grid {
     /// Row-major cell storage: `rows[row][col]`.
     rows: Vec<Vec<Cell>>,
     /// Per-row metadata, parallel to `rows`. Every operation that adds,
     /// removes, or reorders rows maintains it.
-    row_meta: Vec<RowMeta>,
+    #[serde(rename = "row_meta")]
+    row_metadata: Vec<RowMetadata>,
 }
 
 impl Grid {
-    /// Build a `rows × cols` grid, every cell a blank space in `fill`.
-    pub fn blank(rows: u16, cols: u16, fill: Style) -> Self {
+    /// Build a grid with `row_count` rows and `column_count` columns, filling
+    /// every cell with a blank space in `fill_style`.
+    pub fn blank(row_count: u16, column_count: u16, fill_style: Style) -> Self {
         Grid {
-            rows: vec![vec![Cell::blank_with(fill); cols as usize]; rows as usize],
-            row_meta: vec![RowMeta::default(); rows as usize],
+            rows: vec![
+                vec![Cell::blank_with(fill_style); column_count as usize];
+                row_count as usize
+            ],
+            row_metadata: vec![RowMetadata::default(); row_count as usize],
         }
     }
 
-    /// Build a grid from ready-made `rows`, normalizing each to exactly `cols`
-    /// cells: a longer row is truncated, a shorter one padded with blank spaces
-    /// in `fill`. Every row starts with default metadata.
-    pub fn from_rows(rows: Vec<Vec<Cell>>, cols: u16, fill: Style) -> Self {
-        let rows = rows
+    /// Build a grid from ready-made row cells, normalizing each row to exactly
+    /// `column_count` cells. Every row starts with default metadata.
+    pub fn from_rows(row_cells: Vec<Vec<Cell>>, column_count: u16, fill_style: Style) -> Self {
+        let row_cells = row_cells
             .into_iter()
-            .map(|row| (row, RowMeta::default()))
+            .map(|row_cells| (row_cells, RowMetadata::default()))
             .collect();
-        Self::from_rows_with_meta(rows, cols, fill)
+        Self::from_rows_with_metadata(row_cells, column_count, fill_style)
     }
 
     /// Build a grid from rows and their metadata, normalizing every row to
-    /// exactly `cols` cells.
-    pub(crate) fn from_rows_with_meta(
-        mut rows: Vec<(Vec<Cell>, RowMeta)>,
-        cols: u16,
-        fill: Style,
+    /// exactly `column_count` cells.
+    pub(crate) fn from_rows_with_metadata(
+        mut row_cells: Vec<(Vec<Cell>, RowMetadata)>,
+        column_count: u16,
+        fill_style: Style,
     ) -> Self {
-        for (row, _) in &mut rows {
-            row.resize(cols as usize, Cell::blank_with(fill));
+        for (row_cells, _) in &mut row_cells {
+            row_cells.resize(column_count as usize, Cell::blank_with(fill_style));
         }
-        let (rows, row_meta): (Vec<Vec<Cell>>, Vec<RowMeta>) = rows.into_iter().unzip();
-        Grid { rows, row_meta }
+        let (rows, row_metadata): (Vec<Vec<Cell>>, Vec<RowMetadata>) =
+            row_cells.into_iter().unzip();
+        Grid { rows, row_metadata }
     }
 
-    /// Everything recorded about `row` apart from its cells; out of bounds
-    /// reads as [`RowMeta::default`] — a [`RowEnd::Hard`] end and no prompt
+    /// Everything recorded about `row_index` apart from its cells; out of bounds
+    /// reads as [`RowMetadata::default`] — a [`RowEnd::Hard`] end and no prompt
     /// mark.
-    pub fn row_meta(&self, row: u16) -> RowMeta {
-        self.row_meta.get(row as usize).copied().unwrap_or_default()
+    pub fn get_row_metadata(&self, row_index: u16) -> RowMetadata {
+        self.row_metadata
+            .get(row_index as usize)
+            .copied()
+            .unwrap_or_default()
     }
 
-    /// How `row` ends relative to the row below it; out of bounds reads as
+    /// How `row_index` ends relative to the row below it; out of bounds reads as
     /// [`RowEnd::Hard`].
-    pub fn row_end(&self, row: u16) -> RowEnd {
-        self.row_meta(row).end
+    pub fn get_row_end(&self, row_index: u16) -> RowEnd {
+        self.get_row_metadata(row_index).row_end
     }
 
-    /// Record how `row` ends relative to the row below it. Out of bounds is a
+    /// Record how `row_index` ends relative to the row below it. Out of bounds is a
     /// no-op.
-    pub fn set_row_end(&mut self, row: u16, end: RowEnd) {
-        if let Some(meta) = self.row_meta.get_mut(row as usize) {
-            meta.end = end;
+    pub fn set_row_end(&mut self, row_index: u16, row_end: RowEnd) {
+        if let Some(row_metadata) = self.row_metadata.get_mut(row_index as usize) {
+            row_metadata.row_end = row_end;
         }
     }
 
-    /// Whether a shell reported a prompt on `row`; out of bounds reads false.
-    pub fn prompt_mark(&self, row: u16) -> bool {
-        self.row_meta(row).prompt
+    /// Whether a shell reported a prompt on `row_index`; out of bounds reads false.
+    pub fn has_prompt_mark(&self, row_index: u16) -> bool {
+        self.get_row_metadata(row_index).has_prompt_mark
     }
 
-    /// Set whether a shell reported a prompt on `row`. Out of bounds is a
+    /// Set whether a shell reported a prompt on `row_index`. Out of bounds is a
     /// no-op.
-    pub fn set_prompt_mark(&mut self, row: u16, prompt: bool) {
-        if let Some(meta) = self.row_meta.get_mut(row as usize) {
-            meta.prompt = prompt;
+    pub fn set_prompt_mark(&mut self, row_index: u16, has_prompt_mark: bool) {
+        if let Some(row_metadata) = self.row_metadata.get_mut(row_index as usize) {
+            row_metadata.has_prompt_mark = has_prompt_mark;
         }
     }
 
-    /// The grid's dimensions as `(rows, cols)`.
-    pub fn dimensions(&self) -> (u16, u16) {
+    /// The grid's dimensions as `(row_count, column_count)`.
+    pub fn get_grid_dimensions(&self) -> (u16, u16) {
         (
             self.rows.len() as u16,
             self.rows.first().map_or(0, Vec::len) as u16,
         )
     }
 
-    /// A reference to the cell at (`row`, `col`), or `None` if out of bounds.
-    pub fn cell(&self, row: u16, col: u16) -> Option<&Cell> {
-        self.rows.get(row as usize)?.get(col as usize)
+    /// A reference to the cell at (`row_index`, `column_index`), or `None` if
+    /// out of bounds.
+    pub fn get_cell(&self, row_index: u16, column_index: u16) -> Option<&Cell> {
+        self.rows
+            .get(row_index as usize)?
+            .get(column_index as usize)
     }
 
-    /// A mutable reference to the cell at (`row`, `col`), or `None` if out of
-    /// bounds.
-    pub fn cell_mut(&mut self, row: u16, col: u16) -> Option<&mut Cell> {
-        self.rows.get_mut(row as usize)?.get_mut(col as usize)
+    /// A mutable reference to the cell at (`row_index`, `column_index`), or
+    /// `None` if out of bounds.
+    pub fn get_cell_mut(&mut self, row_index: u16, column_index: u16) -> Option<&mut Cell> {
+        self.rows
+            .get_mut(row_index as usize)?
+            .get_mut(column_index as usize)
     }
 
     /// All rows, row-major.
-    pub fn rows(&self) -> &[Vec<Cell>] {
+    pub fn list_rows(&self) -> &[Vec<Cell>] {
         &self.rows
     }
 
     /// Blank the other half of a wide glyph overwritten at this cell.
-    pub(crate) fn clear_wide_at(&mut self, row: u16, column: u16, fill: Style) {
-        let other = match self.cell(row, column).map_or(1, Cell::width) {
-            2 => column.checked_add(1),
-            0 => column.checked_sub(1),
+    pub(crate) fn clear_wide_glyph_at(
+        &mut self,
+        row_index: u16,
+        column_index: u16,
+        fill_style: Style,
+    ) {
+        let paired_column_index = match self
+            .get_cell(row_index, column_index)
+            .map_or(1, Cell::get_display_width)
+        {
+            2 => column_index.checked_add(1),
+            0 => column_index.checked_sub(1),
             _ => None,
         };
-        if let Some(other) = other {
-            if let Some(cell) = self.cell_mut(row, other) {
-                *cell = Cell::blank_with(fill);
+        if let Some(paired_column_index) = paired_column_index {
+            if let Some(cell) = self.get_cell_mut(row_index, paired_column_index) {
+                *cell = Cell::blank_with(fill_style);
             }
         }
     }
 
-    /// Blank columns `from..to` (half-open, `to` exclusive) in `row`, resetting
-    /// each to a blank space in `fill`. When the span reaches the row's last
-    /// column (`from < cols` and `to >= cols`), the row's end resets to
-    /// [`RowEnd::Hard`]. The span is clipped to the row: an oversized span
-    /// blanks to the last column, and an inverted range (`from >= to`), an
-    /// out-of-bounds `row`, or an empty grid changes nothing.
-    pub fn clear_line(&mut self, row: u16, from: u16, to: u16, fill: Style) {
-        if let Some(cells) = self.rows.get_mut(row as usize) {
-            let end = (to as usize).min(cells.len());
-            if let Some(span) = cells.get_mut(from as usize..end) {
-                span.fill(Cell::blank_with(fill));
+    /// Blank columns `first_column_index..last_column_index_exclusive` in `row_index`.
+    /// The row end resets to [`RowEnd::Hard`] when the span reaches the right
+    /// edge. Out-of-bounds indexes and an empty span change nothing.
+    pub fn clear_line(
+        &mut self,
+        row_index: u16,
+        first_column_index: u16,
+        last_column_index_exclusive: u16,
+        fill_style: Style,
+    ) {
+        if let Some(row_cells) = self.rows.get_mut(row_index as usize) {
+            let end_column_index = (last_column_index_exclusive as usize).min(row_cells.len());
+            if let Some(cell_span) =
+                row_cells.get_mut(first_column_index as usize..end_column_index)
+            {
+                cell_span.fill(Cell::blank_with(fill_style));
             }
         }
-        let (_, cols) = self.dimensions();
-        if to >= cols && from < cols {
-            self.set_row_end(row, RowEnd::Hard);
+        let (_, column_count) = self.get_grid_dimensions();
+        if last_column_index_exclusive >= column_count && first_column_index < column_count {
+            self.set_row_end(row_index, RowEnd::Hard);
         }
     }
 
-    /// Insert `n` blank cells at column `col` of `row`, shifting existing cells
-    /// to the right; cells pushed past the right edge are dropped. If `row` or
-    /// `col` are out of bounds, this is a no-op. The inserted cells are blanks
-    /// in `fill` style (background-color erase). The row's end resets to
+    /// Insert `insert_cell_count` blank cells at `column_index` in `row_index`.
+    /// Cells pushed past the right edge are dropped. The row end resets to
     /// [`RowEnd::Hard`].
-    pub fn insert_cells(&mut self, row: u16, col: u16, n: u16, fill: Style) {
-        let (rows, cols) = self.dimensions();
-        if row >= rows || col >= cols {
+    pub fn insert_cells(
+        &mut self,
+        row_index: u16,
+        column_index: u16,
+        insert_cell_count: u16,
+        fill_style: Style,
+    ) {
+        let (row_count, column_count) = self.get_grid_dimensions();
+        if row_index >= row_count || column_index >= column_count {
             return;
         }
 
-        let r = &mut self.rows[row as usize];
-        let inserted = min(cols - col, n);
+        let row_cells = &mut self.rows[row_index as usize];
+        let inserted_cell_count = min(column_count - column_index, insert_cell_count);
 
-        r.truncate((cols - inserted) as usize);
-        r.splice(
-            col as usize..col as usize,
-            std::iter::repeat_n(Cell::blank_with(fill), inserted as usize),
+        row_cells.truncate((column_count - inserted_cell_count) as usize);
+        row_cells.splice(
+            column_index as usize..column_index as usize,
+            std::iter::repeat_n(Cell::blank_with(fill_style), inserted_cell_count as usize),
         );
-        self.set_row_end(row, RowEnd::Hard);
+        self.set_row_end(row_index, RowEnd::Hard);
     }
 
-    /// Delete `n` cells starting at column `col` of `row`, shifting existing
-    /// cells to the left; the freed space on the right is filled with blank cells
-    /// in `fill` style (background-color erase). If `row` or `col` are out of
-    /// bounds, this is a no-op. The row's end resets to [`RowEnd::Hard`].
-    pub fn delete_cells(&mut self, row: u16, col: u16, n: u16, fill: Style) {
-        let (rows, cols) = self.dimensions();
-        if row >= rows || col >= cols {
+    /// Delete `delete_cell_count` cells starting at `column_index` in `row_index`.
+    /// Freed space on the right is filled with blank cells. The row end resets
+    /// to [`RowEnd::Hard`].
+    pub fn delete_cells(
+        &mut self,
+        row_index: u16,
+        column_index: u16,
+        delete_cell_count: u16,
+        fill_style: Style,
+    ) {
+        let (row_count, column_count) = self.get_grid_dimensions();
+        if row_index >= row_count || column_index >= column_count {
             return;
         }
 
-        let r = &mut self.rows[row as usize];
-        let del = min(cols - col, n);
+        let row_cells = &mut self.rows[row_index as usize];
+        let deleted_cell_count = min(column_count - column_index, delete_cell_count);
 
-        r.drain(col as usize..(col + del) as usize);
-        r.resize(cols as usize, Cell::blank_with(fill));
-        self.set_row_end(row, RowEnd::Hard);
+        row_cells.drain(column_index as usize..(column_index + deleted_cell_count) as usize);
+        row_cells.resize(column_count as usize, Cell::blank_with(fill_style));
+        self.set_row_end(row_index, RowEnd::Hard);
     }
 
-    /// Delete `n` lines from the band `[first, last]` (both inclusive), shifting
+    /// Delete `delete_row_count` lines from the band
+    /// `[first_row_index, last_row_index]` (both inclusive), shifting
     /// lines below the band upward; blank lines are inserted at the bottom of the
-    /// band to preserve the band's height. Cells are filled in `fill` style
+    /// band to preserve the band's height. Cells are filled in `fill_style`
     /// (background-color erase). Coordinates outside the grid are no-ops.
-    pub fn delete_lines(&mut self, first: u16, last: u16, n: u16, fill: Style) {
-        let (rows, cols) = self.dimensions();
-        if first >= rows || last >= rows || first > last {
+    pub fn delete_lines(
+        &mut self,
+        first_row_index: u16,
+        last_row_index: u16,
+        delete_row_count: u16,
+        fill_style: Style,
+    ) {
+        let (row_count, column_count) = self.get_grid_dimensions();
+        if first_row_index >= row_count
+            || last_row_index >= row_count
+            || first_row_index > last_row_index
+        {
             return;
         }
 
         // Never remove more lines than the band holds.
-        let remove_count = min(n, last - first + 1);
+        let removed_line_count = min(delete_row_count, last_row_index - first_row_index + 1);
 
         // Each iteration removes the band's top line — the lines below it slide
-        // up — blanks that line to `cols` cells in place, and re-inserts it at
+        // up — blanks that line to `column_count` cells in place, and re-inserts it at
         // the band's bottom. Row metadata travels with each row.
-        for _ in 0..remove_count as usize {
-            let mut recycled = self.rows.remove(first as usize);
-            recycled.clear();
-            recycled.resize(cols as usize, Cell::blank_with(fill));
-            self.rows.insert(last as usize, recycled);
-            self.row_meta.remove(first as usize);
-            self.row_meta.insert(last as usize, RowMeta::default());
+        for _ in 0..removed_line_count as usize {
+            let mut recycled_row_cells = self.rows.remove(first_row_index as usize);
+            recycled_row_cells.clear();
+            recycled_row_cells.resize(column_count as usize, Cell::blank_with(fill_style));
+            self.rows
+                .insert(last_row_index as usize, recycled_row_cells);
+            self.row_metadata.remove(first_row_index as usize);
+            self.row_metadata
+                .insert(last_row_index as usize, RowMetadata::default());
         }
-        if remove_count > 0 {
-            // The row above the band and the row at `last - remove_count` both
+        if removed_line_count > 0 {
+            // The row above the band and the row at `last_row - removed_line_count` both
             // end hard: each precedes a row it never wrapped into.
-            if first > 0 {
-                self.set_row_end(first - 1, RowEnd::Hard);
+            if first_row_index > 0 {
+                self.set_row_end(first_row_index - 1, RowEnd::Hard);
             }
-            if let Some(slid_last) = last.checked_sub(remove_count) {
+            if let Some(slid_last) = last_row_index.checked_sub(removed_line_count) {
                 self.set_row_end(slid_last, RowEnd::Hard);
             }
         }
     }
 
-    /// Insert `n` blank lines within the band `[first, last]` (both inclusive),
-    /// shifting lines downward; lines pushed below the band are dropped. Blank
-    /// lines are filled in `fill` style (background-color erase). Coordinates
-    /// outside the grid are no-ops, and an `n` of `0` leaves every row and
-    /// every row end as it was.
-    pub fn insert_lines(&mut self, first: u16, last: u16, n: u16, fill: Style) {
-        let (rows, cols) = self.dimensions();
-        if first >= rows || last >= rows || first > last {
+    /// Insert `insert_row_count` blank lines within the band
+    /// `[first_row_index, last_row_index]`
+    /// (both inclusive), shifting lines downward. Lines pushed below the band
+    /// are dropped. Blank lines use `fill_style`. An `insert_row_count` of `0`
+    /// leaves every row and every row end unchanged.
+    pub fn insert_lines(
+        &mut self,
+        first_row_index: u16,
+        last_row_index: u16,
+        insert_row_count: u16,
+        fill_style: Style,
+    ) {
+        let (row_count, column_count) = self.get_grid_dimensions();
+        if first_row_index >= row_count
+            || last_row_index >= row_count
+            || first_row_index > last_row_index
+        {
             return;
         }
 
         // Never insert more lines than the band can hold.
-        let insert_count = min(n, last - first + 1);
+        let inserted_line_count = min(insert_row_count, last_row_index - first_row_index + 1);
 
-        // Each iteration removes the band's bottom line, blanks it to `cols`
+        // Each iteration removes the band's bottom line, blanks it to `column_count`
         // cells in place, and re-inserts it at the band's top — the lines
         // between slide down. Row metadata travels with each row.
-        for _ in 0..insert_count as usize {
-            let mut recycled = self.rows.remove(last as usize);
-            recycled.clear();
-            recycled.resize(cols as usize, Cell::blank_with(fill));
-            self.rows.insert(first as usize, recycled);
-            self.row_meta.remove(last as usize);
-            self.row_meta.insert(first as usize, RowMeta::default());
+        for _ in 0..inserted_line_count as usize {
+            let mut recycled_row_cells = self.rows.remove(last_row_index as usize);
+            recycled_row_cells.clear();
+            recycled_row_cells.resize(column_count as usize, Cell::blank_with(fill_style));
+            self.rows
+                .insert(first_row_index as usize, recycled_row_cells);
+            self.row_metadata.remove(last_row_index as usize);
+            self.row_metadata
+                .insert(first_row_index as usize, RowMetadata::default());
         }
         // The row above the band and the band's bottom row both end hard:
         // each precedes a row it never wrapped into.
-        if insert_count > 0 {
-            if first > 0 {
-                self.set_row_end(first - 1, RowEnd::Hard);
+        if inserted_line_count > 0 {
+            if first_row_index > 0 {
+                self.set_row_end(first_row_index - 1, RowEnd::Hard);
             }
-            self.set_row_end(last, RowEnd::Hard);
+            self.set_row_end(last_row_index, RowEnd::Hard);
         }
     }
 }
@@ -745,36 +821,43 @@ impl Grid {
 #[derive(Deserialize)]
 struct GridFields {
     rows: Vec<Vec<Cell>>,
-    #[serde(default)]
-    row_meta: Option<Vec<RowMeta>>,
+    #[serde(rename = "row_meta", default)]
+    row_metadata: Option<Vec<RowMetadata>>,
     #[serde(default)]
     row_ends: Option<Vec<RowEnd>>,
 }
 
 impl<'de> Deserialize<'de> for Grid {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    fn deserialize<Deserializer>(deserializer: Deserializer) -> Result<Self, Deserializer::Error>
     where
-        D: Deserializer<'de>,
+        Deserializer: DeserializerTrait<'de>,
     {
-        let fields = GridFields::deserialize(deserializer)?;
-        let row_meta = match (fields.row_meta, fields.row_ends) {
-            (Some(row_meta), _) => row_meta,
+        let grid_fields = GridFields::deserialize(deserializer)?;
+        let row_metadata = match (grid_fields.row_metadata, grid_fields.row_ends) {
+            (Some(row_metadata), _) => row_metadata,
             (None, Some(row_ends)) => row_ends
                 .into_iter()
-                .map(|end| RowMeta { end, prompt: false })
+                .map(|row_end| RowMetadata {
+                    row_end,
+                    has_prompt_mark: false,
+                })
                 .collect(),
-            (None, None) => vec![RowMeta::default(); fields.rows.len()],
+            (None, None) => vec![RowMetadata::default(); grid_fields.rows.len()],
         };
-        if row_meta.len() != fields.rows.len() {
+        if row_metadata.len() != grid_fields.rows.len() {
             return Err(de::Error::custom("grid row metadata does not match rows"));
         }
-        let cols = fields.rows.first().map_or(0, Vec::len);
-        if fields.rows.iter().any(|row| row.len() != cols) {
+        let column_count = grid_fields.rows.first().map_or(0, Vec::len);
+        if grid_fields
+            .rows
+            .iter()
+            .any(|row_cells| row_cells.len() != column_count)
+        {
             return Err(de::Error::custom("grid rows differ in length"));
         }
         Ok(Grid {
-            rows: fields.rows,
-            row_meta,
+            rows: grid_fields.rows,
+            row_metadata,
         })
     }
 }

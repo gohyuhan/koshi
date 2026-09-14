@@ -19,7 +19,7 @@
 //! and read from either shape, so a payload an older koshi wrote as
 //! `"bytes":[104,105]` still decodes.
 //!
-//! **Hex, for a secret and for a fingerprint.** [`hex()`](crate::bytes::hex)
+//! **Hex, for a secret and for a fingerprint.** [`format_hex()`](crate::bytes::format_hex)
 //! writes bytes as lowercase hex. Every secret, hash and certificate
 //! fingerprint koshi holds is written this way. Example — the two bytes
 //! `[104, 105]` become `"6869"`.
@@ -31,29 +31,29 @@ use base64::{DecodeError, Engine as _};
 use serde::de::{Error, Visitor};
 use serde::{Deserializer, Serializer};
 
-/// Write `bytes` as lowercase hex, two characters per byte.
+/// Write `input_bytes` as lowercase hex, two characters per byte.
 ///
 /// Example — `[104, 105]` becomes `"6869"`.
 #[must_use]
-pub fn hex(bytes: &[u8]) -> String {
+pub fn format_hex(input_bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut text = String::with_capacity(bytes.len() * 2);
-    for &byte in bytes {
-        text.push(char::from(DIGITS[usize::from(byte >> 4)]));
-        text.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    let mut encoded_hex_text = String::with_capacity(input_bytes.len() * 2);
+    for &input_byte in input_bytes {
+        encoded_hex_text.push(char::from(DIGITS[usize::from(input_byte >> 4)]));
+        encoded_hex_text.push(char::from(DIGITS[usize::from(input_byte & 0x0f)]));
     }
-    text
+    encoded_hex_text
 }
 
-/// Write `bytes` as one base64 string.
+/// Write `payload_bytes` as one base64 string.
 ///
 /// # Errors
 /// Returns whatever `serializer` reports for a string it cannot write.
-pub fn serialize<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
+pub fn serialize<S>(payload_bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
-    serializer.serialize_str(&encode(bytes))
+    serializer.serialize_str(&encode_base64_text(payload_bytes))
 }
 
 /// Read one base64 string back into the bytes it holds.
@@ -80,11 +80,11 @@ impl Visitor<'_> for Base64Visitor {
         formatter.write_str("bytes as a base64 string")
     }
 
-    fn visit_str<E>(self, text: &str) -> Result<Vec<u8>, E>
+    fn visit_str<E>(self, base64_text: &str) -> Result<Vec<u8>, E>
     where
         E: Error,
     {
-        decode(text).map_err(E::custom)
+        decode_base64_text(base64_text).map_err(E::custom)
     }
 }
 
@@ -129,47 +129,49 @@ pub mod base64_or_list {
             formatter.write_str("bytes as a base64 string or as a list of numbers")
         }
 
-        fn visit_str<E>(self, text: &str) -> Result<Vec<u8>, E>
+        fn visit_str<E>(self, base64_text: &str) -> Result<Vec<u8>, E>
         where
             E: Error,
         {
-            super::decode(text).map_err(E::custom)
+            super::decode_base64_text(base64_text).map_err(E::custom)
         }
 
-        fn visit_seq<A>(self, mut seq: A) -> Result<Vec<u8>, A::Error>
+        fn visit_seq<A>(self, mut byte_sequence: A) -> Result<Vec<u8>, A::Error>
         where
             A: SeqAccess<'de>,
         {
-            let mut bytes = Vec::with_capacity(seq.size_hint().unwrap_or(0));
-            while let Some(byte) = seq.next_element::<u8>()? {
-                bytes.push(byte);
+            let mut decoded_bytes = Vec::with_capacity(byte_sequence.size_hint().unwrap_or(0));
+            while let Some(decoded_byte) = byte_sequence.next_element::<u8>()? {
+                decoded_bytes.push(decoded_byte);
             }
-            Ok(bytes)
+            Ok(decoded_bytes)
         }
     }
 }
 
-/// `bytes` as base64 text.
-fn encode(bytes: &[u8]) -> String {
-    STANDARD.encode(bytes)
+/// Format `payload_bytes` as base64 text.
+fn encode_base64_text(payload_bytes: &[u8]) -> String {
+    STANDARD.encode(payload_bytes)
 }
 
 /// The bytes `text` holds, or the reason it is not base64: a last group of
 /// one character, wrong padding, a last character carrying unused bits that
 /// are not zero, or a character the alphabet does not allow where it stands.
-fn decode(text: &str) -> Result<Vec<u8>, &'static str> {
-    STANDARD.decode(text).map_err(|error| match error {
-        DecodeError::InvalidLength(_) => "the base64 text length is not a multiple of four",
-        DecodeError::InvalidPadding => {
-            "the base64 text is not padded to a multiple of four characters"
-        }
-        DecodeError::InvalidLastSymbol { .. } => {
-            "the base64 text ends with unused bits that are not zero"
-        }
-        DecodeError::InvalidByte(_, _) => {
-            "the base64 text holds a character the alphabet does not allow there"
-        }
-    })
+fn decode_base64_text(base64_text: &str) -> Result<Vec<u8>, &'static str> {
+    STANDARD
+        .decode(base64_text)
+        .map_err(|decode_error| match decode_error {
+            DecodeError::InvalidLength(_) => "the base64 text length is not a multiple of four",
+            DecodeError::InvalidPadding => {
+                "the base64 text is not padded to a multiple of four characters"
+            }
+            DecodeError::InvalidLastSymbol { .. } => {
+                "the base64 text ends with unused bits that are not zero"
+            }
+            DecodeError::InvalidByte(_, _) => {
+                "the base64 text holds a character the alphabet does not allow there"
+            }
+        })
 }
 
 #[cfg(test)]

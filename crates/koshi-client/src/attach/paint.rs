@@ -3,7 +3,7 @@
 //! [`RenderSnapshot`](koshi_renderer::snapshot::RenderSnapshot) this process
 //! paints.
 //!
-//! [`to_snapshot`](crate::attach::paint::to_snapshot) is the inverse of
+//! [`build_render_snapshot`](crate::attach::paint::build_render_snapshot) is the inverse of
 //! [`wire_frame`](koshi_runtime::runtime::frame::wire_frame), with the four
 //! names the answering session chose filtered on the way in. The session, tab,
 //! slot, tab-bar and client parts already hold shared types, so they copy
@@ -43,8 +43,8 @@ use koshi_ipc::frame::{
     FrameImageChunk, FrameImageDimension, FrameImageDisplay, FrameImagePlacement,
     FrameImageRecordHeader, FrameImageTransfer, FramePane, FrameRow, FrameRowEnd,
     FrameSixelBackground, FrameSlot, FrameStyle, FrameTabMeta, FrameUnderline, FrameWindow,
-    PaintedFrame, MAX_FRAME_IMAGE_CHUNK_BYTES, MAX_FRAME_IMAGE_TRANSFERS,
-    MAX_FRAME_IMAGE_TRANSFER_BYTES,
+    PaintedFrame, MAX_FRAME_IMAGE_CHUNK_BYTE_COUNT, MAX_FRAME_IMAGE_TRANSFER_BYTE_COUNT,
+    MAX_FRAME_IMAGE_TRANSFER_COUNT,
 };
 use koshi_renderer::snapshot::{
     ClientSnapshot, CursorSnapshot, GridView, ImagePlacementSnapshot, PaneSlot, PaneSnapshot,
@@ -69,70 +69,79 @@ mod tests;
 /// every pane title are filtered by [`sanitize_reported_text`]. A frame naming
 /// its session `"dev\u{7}"` reads back naming it `"dev"`.
 #[must_use]
-pub fn to_snapshot(frame: &PaintedFrame) -> RenderSnapshot {
-    to_snapshot_with_images(frame, &HashMap::new())
+pub fn build_render_snapshot(painted_frame: &PaintedFrame) -> RenderSnapshot {
+    build_render_snapshot_with_images(painted_frame, &HashMap::new())
 }
 
 /// Turn one frame into a render snapshot using image records already received.
-fn to_snapshot_with_images(
-    frame: &PaintedFrame,
-    images: &HashMap<u64, Arc<ImageRecord>>,
+fn build_render_snapshot_with_images(
+    painted_frame: &PaintedFrame,
+    image_record_by_content_id: &HashMap<u64, Arc<ImageRecord>>,
 ) -> RenderSnapshot {
-    let tab = &frame.session.active_tab;
+    let active_tab_snapshot = &painted_frame.session_snapshot.active_tab_snapshot;
     RenderSnapshot {
-        session: SessionSnapshot {
-            id: frame.session.id,
-            name: sanitize_reported_text(&frame.session.name),
-            active_tab: TabSnapshot {
-                id: tab.id,
-                name: sanitize_reported_text(&tab.name),
-                layout_solved: tab.slots.iter().map(to_slot).collect(),
-                effective_size: tab.effective_size,
-                stack_headers: tab.stack_headers.clone(),
-                layout_mode: tab.layout_mode,
-                all_suppressed: tab.all_suppressed,
-                gap: tab.gap,
+        session_snapshot: SessionSnapshot {
+            session_id: painted_frame.session_snapshot.session_id,
+            session_name: sanitize_reported_text(&painted_frame.session_snapshot.session_name),
+            active_tab_snapshot: TabSnapshot {
+                tab_id: active_tab_snapshot.tab_id,
+                tab_name: sanitize_reported_text(&active_tab_snapshot.tab_name),
+                pane_slots: active_tab_snapshot
+                    .pane_slots
+                    .iter()
+                    .map(build_pane_slot)
+                    .collect(),
+                effective_cell_size: active_tab_snapshot.effective_cell_size,
+                stack_headers: active_tab_snapshot.stack_headers.clone(),
+                layout_mode: active_tab_snapshot.layout_mode,
+                are_all_panes_suppressed: active_tab_snapshot.is_every_pane_suppressed,
+                gap_cell_count: active_tab_snapshot.gap_cell_count,
             },
-            tabs_metadata: frame.session.tabs.iter().map(to_tab_meta).collect(),
+            tabs_metadata: painted_frame
+                .session_snapshot
+                .tab_snapshots
+                .iter()
+                .map(build_tab_metadata)
+                .collect(),
         },
-        panes: frame
-            .panes
+        pane_snapshots: painted_frame
+            .pane_snapshots
             .iter()
-            .map(|pane| to_pane(pane, images))
+            .map(|pane_snapshot| build_pane_snapshot(pane_snapshot, image_record_by_content_id))
             .collect(),
-        client: ClientSnapshot {
-            id: frame.client.id,
-            viewport: frame.client.viewport,
-            active_tab: frame.client.active_tab,
-            focused_pane: frame.client.focused_pane,
-            lock_mode: frame.client.lock_mode,
-            mouse_select: frame.client.mouse_select,
+        client_snapshot: ClientSnapshot {
+            client_id: painted_frame.client_snapshot.client_id,
+            viewport_size: painted_frame.client_snapshot.viewport_size,
+            active_tab_id: painted_frame.client_snapshot.active_tab_id,
+            focused_pane_id: painted_frame.client_snapshot.focused_pane_id,
+            lock_mode: painted_frame.client_snapshot.lock_mode,
+            is_mouse_selection_enabled: painted_frame.client_snapshot.is_mouse_selection_enabled,
         },
-        plugin_ui: PluginUiSnapshot::default(),
+        plugin_ui_snapshot: PluginUiSnapshot::default(),
     }
 }
 
 /// Image records retained by one attached client connection.
 pub(crate) struct ImageCache {
     /// Complete records, keyed by identities in painted frames.
-    images: HashMap<u64, Arc<ImageRecord>>,
-    /// Total RGBA bytes retained in `images`.
-    retained_bytes: u64,
+    image_record_by_content_id: HashMap<u64, Arc<ImageRecord>>,
+    /// Total RGBA bytes retained in `image_record_by_content_id`.
+    retained_image_byte_count: u64,
     /// The newest painted frame, retained while records arrive.
-    frame: Option<Box<PaintedFrame>>,
+    painted_frame: Option<Box<PaintedFrame>>,
     /// Record identities the newest frame still needs.
-    missing: HashSet<u64>,
+    missing_image_content_ids: HashSet<u64>,
     /// Image transfers accepted after the newest painted frame.
-    transfer_count: usize,
+    image_transfer_count: usize,
     /// The record whose chunks are currently arriving.
-    pending: Option<PendingImage>,
+    pending_image_transfer: Option<PendingImageTransfer>,
 }
 
 /// One image transfer and the bytes received for it.
-struct PendingImage {
-    transfer: FrameImageTransfer,
-    rgba: Vec<u8>,
-    received: u64,
+struct PendingImageTransfer {
+    image_transfer: FrameImageTransfer,
+    rgba_bytes: Vec<u8>,
+    received_byte_count: u64,
 }
 
 /// A malformed or incomplete image transfer stream.
@@ -143,11 +152,17 @@ pub(crate) enum ImageAssemblyError {
     /// More image transfers followed one painted frame than the batch limit allows.
     TransferCountExceedsFrame,
     /// A transfer does not belong to the newest painted frame.
-    UnknownTransfer(u64),
+    UnknownTransfer {
+        /// The image content identity named by the transfer.
+        image_content_id: u64,
+    },
     /// Another image transfer is still open.
     TransferAlreadyOpen,
     /// A complete image record was sent again.
-    TransferAlreadyComplete(u64),
+    TransferAlreadyComplete {
+        /// The image content identity already retained by the cache.
+        image_content_id: u64,
+    },
     /// A transfer byte length cannot be allocated by this process.
     ByteLengthDoesNotFit,
     /// No painted frame is available for the transfer.
@@ -155,11 +170,11 @@ pub(crate) enum ImageAssemblyError {
     /// A chunk does not continue at the expected raw-byte offset.
     WrongOffset {
         /// The transfer identity.
-        transfer_id: u64,
+        image_transfer_id: u64,
         /// The offset the receiver expects.
-        expected: u64,
+        expected_byte_offset: u64,
         /// The offset the chunk names.
-        actual: u64,
+        actual_byte_offset: u64,
     },
     /// A chunk exceeds the declared image byte length.
     ChunkExceedsImage,
@@ -184,16 +199,19 @@ impl fmt::Display for ImageAssemblyError {
             Self::TransferCountExceedsFrame => {
                 formatter.write_str("painted frame exceeds the image-transfer batch limit")
             }
-            Self::UnknownTransfer(id) => {
-                write!(formatter, "image transfer identity {id} is not needed")
+            Self::UnknownTransfer { image_content_id } => {
+                write!(
+                    formatter,
+                    "image transfer identity {image_content_id} is not needed"
+                )
             }
             Self::TransferAlreadyOpen => {
                 formatter.write_str("another image transfer is still open")
             }
-            Self::TransferAlreadyComplete(id) => {
+            Self::TransferAlreadyComplete { image_content_id } => {
                 write!(
                     formatter,
-                    "image transfer identity {id} is already complete"
+                    "image transfer identity {image_content_id} is already complete"
                 )
             }
             Self::ByteLengthDoesNotFit => {
@@ -201,12 +219,12 @@ impl fmt::Display for ImageAssemblyError {
             }
             Self::MissingBaseFrame => formatter.write_str("image transfer has no painted frame"),
             Self::WrongOffset {
-                transfer_id,
-                expected,
-                actual,
+                image_transfer_id,
+                expected_byte_offset,
+                actual_byte_offset,
             } => write!(
                 formatter,
-                "image transfer {transfer_id} expects offset {expected}, got {actual}"
+                "image transfer {image_transfer_id} expects offset {expected_byte_offset}, got {actual_byte_offset}"
             ),
             Self::ChunkExceedsImage => formatter.write_str("image chunk exceeds its image"),
             Self::FinalMarkerMismatch => {
@@ -232,211 +250,256 @@ impl ImageCache {
     /// Build an empty image cache for one connection.
     pub(crate) fn new() -> Self {
         Self {
-            images: HashMap::new(),
-            retained_bytes: 0,
-            frame: None,
-            missing: HashSet::new(),
-            transfer_count: 0,
-            pending: None,
+            image_record_by_content_id: HashMap::new(),
+            retained_image_byte_count: 0,
+            painted_frame: None,
+            missing_image_content_ids: HashSet::new(),
+            image_transfer_count: 0,
+            pending_image_transfer: None,
         }
     }
 
     /// Discard every connection-local image record and incomplete transfer.
-    pub(crate) fn reset(&mut self) {
-        self.images.clear();
-        self.retained_bytes = 0;
-        self.frame = None;
-        self.missing.clear();
-        self.transfer_count = 0;
-        self.pending = None;
+    pub(crate) fn clear_image_cache(&mut self) {
+        self.image_record_by_content_id.clear();
+        self.retained_image_byte_count = 0;
+        self.painted_frame = None;
+        self.missing_image_content_ids.clear();
+        self.image_transfer_count = 0;
+        self.pending_image_transfer = None;
     }
 
     /// Adopt a painted frame and return it when every required image is complete.
-    pub(crate) fn begin_frame(
+    pub(crate) fn adopt_painted_frame(
         &mut self,
-        frame: Box<PaintedFrame>,
+        painted_frame: Box<PaintedFrame>,
     ) -> Result<Option<RenderSnapshot>, ImageAssemblyError> {
-        let placement_count = frame
-            .panes
+        let placement_count = painted_frame
+            .pane_snapshots
             .iter()
-            .try_fold(0usize, |count, pane| {
-                count.checked_add(pane.image_placements.len())
+            .try_fold(0usize, |placement_count, pane_snapshot| {
+                placement_count.checked_add(pane_snapshot.image_placement_snapshots.len())
             })
             .ok_or(ImageAssemblyError::TransferCountExceedsFrame)?;
-        let mut content_ids = HashSet::new();
-        let mut placements = HashSet::new();
-        content_ids
+        let mut required_image_content_ids = HashSet::new();
+        let mut placement_key_set = HashSet::new();
+        required_image_content_ids
             .try_reserve(placement_count)
             .map_err(|_| ImageAssemblyError::ByteLengthDoesNotFit)?;
-        placements
+        placement_key_set
             .try_reserve(placement_count)
             .map_err(|_| ImageAssemblyError::ByteLengthDoesNotFit)?;
-        for pane in &frame.panes {
-            for placement in &pane.image_placements {
-                if !placements.insert((pane.id, placement.id)) {
+        for pane_snapshot in &painted_frame.pane_snapshots {
+            for image_placement in &pane_snapshot.image_placement_snapshots {
+                if !placement_key_set.insert((pane_snapshot.pane_id, image_placement.placement_id))
+                {
                     return Err(ImageAssemblyError::DuplicatePlacement);
                 }
-                let valid =
-                    image_placement_with_record(placement, self.images.get(&placement.content_id))
-                        .is_some();
-                if !valid {
+                let is_valid = image_placement_with_record(
+                    image_placement,
+                    self.image_record_by_content_id
+                        .get(&image_placement.image_content_id),
+                )
+                .is_some();
+                if !is_valid {
                     return Err(ImageAssemblyError::InvalidPlacement);
                 }
-                if placement.available {
-                    content_ids.insert(placement.content_id);
+                if image_placement.is_available {
+                    required_image_content_ids.insert(image_placement.image_content_id);
                 }
             }
         }
 
-        self.images.retain(|id, _| content_ids.contains(id));
-        self.retained_bytes = retained_image_bytes(&self.images)?;
-        self.missing = content_ids
+        self.image_record_by_content_id
+            .retain(|image_content_id, _| required_image_content_ids.contains(image_content_id));
+        self.retained_image_byte_count =
+            compute_retained_image_byte_count(&self.image_record_by_content_id)?;
+        self.missing_image_content_ids = required_image_content_ids
             .into_iter()
-            .filter(|id| !self.images.contains_key(id))
+            .filter(|image_content_id| {
+                !self
+                    .image_record_by_content_id
+                    .contains_key(image_content_id)
+            })
             .collect();
-        self.pending = None;
-        self.transfer_count = 0;
-        self.frame = Some(frame);
-        if self.missing.is_empty() {
-            self.snapshot().map(Some)
+        self.pending_image_transfer = None;
+        self.image_transfer_count = 0;
+        self.painted_frame = Some(painted_frame);
+        if self.missing_image_content_ids.is_empty() {
+            self.build_render_snapshot().map(Some)
         } else {
             Ok(None)
         }
     }
 
     /// Start receiving one record needed by the newest painted frame.
-    pub(crate) fn start(&mut self, transfer: FrameImageTransfer) -> Result<(), ImageAssemblyError> {
-        if self.frame.is_none() {
+    pub(crate) fn start_image_transfer(
+        &mut self,
+        image_transfer: FrameImageTransfer,
+    ) -> Result<(), ImageAssemblyError> {
+        if self.painted_frame.is_none() {
             return Err(ImageAssemblyError::MissingBaseFrame);
         }
-        if self.pending.is_some() {
+        if self.pending_image_transfer.is_some() {
             return Err(ImageAssemblyError::TransferAlreadyOpen);
         }
-        if self.images.contains_key(&transfer.id) {
-            return Err(ImageAssemblyError::TransferAlreadyComplete(transfer.id));
+        if self
+            .image_record_by_content_id
+            .contains_key(&image_transfer.image_content_id)
+        {
+            return Err(ImageAssemblyError::TransferAlreadyComplete {
+                image_content_id: image_transfer.image_content_id,
+            });
         }
-        if !self.missing.contains(&transfer.id) {
-            return Err(ImageAssemblyError::UnknownTransfer(transfer.id));
+        if !self
+            .missing_image_content_ids
+            .contains(&image_transfer.image_content_id)
+        {
+            return Err(ImageAssemblyError::UnknownTransfer {
+                image_content_id: image_transfer.image_content_id,
+            });
         }
-        if self.transfer_count >= MAX_FRAME_IMAGE_TRANSFERS {
+        if self.image_transfer_count >= MAX_FRAME_IMAGE_TRANSFER_COUNT {
             return Err(ImageAssemblyError::TransferCountExceedsFrame);
         }
-        let expected_bytes = u64::from(transfer.record.width)
-            .checked_mul(u64::from(transfer.record.height))
-            .and_then(|pixels| pixels.checked_mul(4));
-        if expected_bytes != Some(transfer.byte_len) || transfer.byte_len == 0 {
+        let expected_image_byte_count = u64::from(image_transfer.image_record.pixel_width)
+            .checked_mul(u64::from(image_transfer.image_record.pixel_height))
+            .and_then(|pixel_count| pixel_count.checked_mul(4));
+        if expected_image_byte_count != Some(image_transfer.image_byte_count)
+            || image_transfer.image_byte_count == 0
+        {
             return Err(ImageAssemblyError::InvalidTransferLength);
         }
-        let total_bytes = self
-            .retained_bytes
-            .checked_add(transfer.byte_len)
+        let total_image_byte_count = self
+            .retained_image_byte_count
+            .checked_add(image_transfer.image_byte_count)
             .ok_or(ImageAssemblyError::TransferBytesExceedFrame)?;
-        if total_bytes > MAX_FRAME_IMAGE_TRANSFER_BYTES {
+        if total_image_byte_count > MAX_FRAME_IMAGE_TRANSFER_BYTE_COUNT {
             return Err(ImageAssemblyError::TransferBytesExceedFrame);
         }
-        let capacity = usize::try_from(transfer.byte_len)
+        let image_byte_capacity = usize::try_from(image_transfer.image_byte_count)
             .map_err(|_| ImageAssemblyError::ByteLengthDoesNotFit)?;
-        let mut rgba = Vec::new();
-        rgba.try_reserve_exact(capacity)
+        let mut rgba_bytes = Vec::new();
+        rgba_bytes
+            .try_reserve_exact(image_byte_capacity)
             .map_err(|_| ImageAssemblyError::ByteLengthDoesNotFit)?;
-        self.pending = Some(PendingImage {
-            transfer,
-            rgba,
-            received: 0,
+        self.pending_image_transfer = Some(PendingImageTransfer {
+            image_transfer,
+            rgba_bytes,
+            received_byte_count: 0,
         });
-        self.transfer_count += 1;
+        self.image_transfer_count += 1;
         Ok(())
     }
 
     /// Accept one chunk and return a complete frame when every missing record arrived.
-    pub(crate) fn accept(
+    pub(crate) fn accept_image_chunk(
         &mut self,
-        chunk: FrameImageChunk,
+        image_chunk: FrameImageChunk,
     ) -> Result<Option<RenderSnapshot>, ImageAssemblyError> {
-        let result = self.accept_inner(chunk);
-        if result.is_err() {
-            self.pending = None;
+        let image_assembly_result = self.accept_image_chunk_inner(image_chunk);
+        if image_assembly_result.is_err() {
+            self.pending_image_transfer = None;
         }
-        result
+        image_assembly_result
     }
 
     /// Validate and append one chunk to the open transfer.
-    fn accept_inner(
+    fn accept_image_chunk_inner(
         &mut self,
-        chunk: FrameImageChunk,
+        image_chunk: FrameImageChunk,
     ) -> Result<Option<RenderSnapshot>, ImageAssemblyError> {
-        if chunk.bytes.is_empty() {
+        if image_chunk.chunk_bytes.is_empty() {
             return Err(ImageAssemblyError::FinalMarkerMismatch);
         }
-        if chunk.bytes.len() > MAX_FRAME_IMAGE_CHUNK_BYTES {
+        if image_chunk.chunk_bytes.len() > MAX_FRAME_IMAGE_CHUNK_BYTE_COUNT {
             return Err(ImageAssemblyError::ChunkTooLarge);
         }
-        let image = self
-            .pending
+        let pending_image = self
+            .pending_image_transfer
             .as_mut()
-            .filter(|image| image.transfer.id == chunk.transfer_id)
-            .ok_or(ImageAssemblyError::UnknownTransfer(chunk.transfer_id))?;
-        if chunk.offset != image.received {
+            .filter(|pending_image| {
+                pending_image.image_transfer.image_content_id == image_chunk.image_transfer_id
+            })
+            .ok_or(ImageAssemblyError::UnknownTransfer {
+                image_content_id: image_chunk.image_transfer_id,
+            })?;
+        if image_chunk.byte_offset != pending_image.received_byte_count {
             return Err(ImageAssemblyError::WrongOffset {
-                transfer_id: chunk.transfer_id,
-                expected: image.received,
-                actual: chunk.offset,
+                image_transfer_id: image_chunk.image_transfer_id,
+                expected_byte_offset: pending_image.received_byte_count,
+                actual_byte_offset: image_chunk.byte_offset,
             });
         }
-        let chunk_len =
-            u64::try_from(chunk.bytes.len()).map_err(|_| ImageAssemblyError::ChunkExceedsImage)?;
-        let end = chunk
-            .offset
-            .checked_add(chunk_len)
+        let chunk_byte_count = u64::try_from(image_chunk.chunk_bytes.len())
+            .map_err(|_| ImageAssemblyError::ChunkExceedsImage)?;
+        let image_byte_end = image_chunk
+            .byte_offset
+            .checked_add(chunk_byte_count)
             .ok_or(ImageAssemblyError::ChunkExceedsImage)?;
-        if end > image.transfer.byte_len {
+        if image_byte_end > pending_image.image_transfer.image_byte_count {
             return Err(ImageAssemblyError::ChunkExceedsImage);
         }
-        if chunk.last != (end == image.transfer.byte_len) {
+        if image_chunk.is_last != (image_byte_end == pending_image.image_transfer.image_byte_count)
+        {
             return Err(ImageAssemblyError::FinalMarkerMismatch);
         }
-        image.rgba.extend_from_slice(&chunk.bytes);
-        image.received = end;
-        if end != image.transfer.byte_len {
+        pending_image
+            .rgba_bytes
+            .extend_from_slice(&image_chunk.chunk_bytes);
+        pending_image.received_byte_count = image_byte_end;
+        if image_byte_end != pending_image.image_transfer.image_byte_count {
             return Ok(None);
         }
 
-        let image = self
-            .pending
-            .take()
-            .ok_or(ImageAssemblyError::UnknownTransfer(chunk.transfer_id))?;
-        let id = image.transfer.id;
-        let record = Arc::new(to_image_record(&image.transfer.record, image.rgba));
-        self.validate_record(id, &record)?;
-        self.retained_bytes = self
-            .retained_bytes
-            .checked_add(image.transfer.byte_len)
+        let completed_image_transfer =
+            self.pending_image_transfer
+                .take()
+                .ok_or(ImageAssemblyError::UnknownTransfer {
+                    image_content_id: image_chunk.image_transfer_id,
+                })?;
+        let image_content_id = completed_image_transfer.image_transfer.image_content_id;
+        let image_record = Arc::new(build_image_record(
+            &completed_image_transfer.image_transfer.image_record,
+            completed_image_transfer.rgba_bytes,
+        ));
+        self.validate_image_record(image_content_id, &image_record)?;
+        self.retained_image_byte_count = self
+            .retained_image_byte_count
+            .checked_add(completed_image_transfer.image_transfer.image_byte_count)
             .ok_or(ImageAssemblyError::TransferBytesExceedFrame)?;
-        self.images.insert(id, record);
-        self.missing.remove(&id);
-        if !self.missing.is_empty() {
+        self.image_record_by_content_id
+            .insert(image_content_id, image_record);
+        self.missing_image_content_ids.remove(&image_content_id);
+        if !self.missing_image_content_ids.is_empty() {
             return Ok(None);
         }
-        self.snapshot().map(Some)
+        self.build_render_snapshot().map(Some)
     }
 
     /// Check a complete record against every placement that names it.
-    fn validate_record(
+    fn validate_image_record(
         &self,
-        content_id: u64,
-        record: &Arc<ImageRecord>,
+        image_content_id: u64,
+        image_record: &Arc<ImageRecord>,
     ) -> Result<(), ImageAssemblyError> {
-        let frame = self
-            .frame
+        let painted_frame = self
+            .painted_frame
             .as_ref()
             .ok_or(ImageAssemblyError::MissingBaseFrame)?;
-        let valid = frame.panes.iter().all(|pane| {
-            pane.image_placements
+        let is_valid = painted_frame.pane_snapshots.iter().all(|pane_snapshot| {
+            pane_snapshot
+                .image_placement_snapshots
                 .iter()
-                .filter(|placement| placement.available && placement.content_id == content_id)
-                .all(|placement| image_placement_with_record(placement, Some(record)).is_some())
+                .filter(|image_placement| {
+                    image_placement.is_available
+                        && image_placement.image_content_id == image_content_id
+                })
+                .all(|image_placement| {
+                    image_placement_with_record(image_placement, Some(image_record)).is_some()
+                })
         });
-        if valid {
+        if is_valid {
             Ok(())
         } else {
             Err(ImageAssemblyError::InvalidPlacement)
@@ -444,156 +507,186 @@ impl ImageCache {
     }
 
     /// Rebuild the newest painted frame with each available cached record.
-    fn snapshot(&self) -> Result<RenderSnapshot, ImageAssemblyError> {
-        self.frame
+    fn build_render_snapshot(&self) -> Result<RenderSnapshot, ImageAssemblyError> {
+        self.painted_frame
             .as_deref()
-            .map(|frame| to_snapshot_with_images(frame, &self.images))
+            .map(|painted_frame| {
+                build_render_snapshot_with_images(painted_frame, &self.image_record_by_content_id)
+            })
             .ok_or(ImageAssemblyError::MissingBaseFrame)
     }
 }
 
 /// Count the RGBA bytes in complete retained image records.
-fn retained_image_bytes(
-    images: &HashMap<u64, Arc<ImageRecord>>,
+fn compute_retained_image_byte_count(
+    image_record_by_content_id: &HashMap<u64, Arc<ImageRecord>>,
 ) -> Result<u64, ImageAssemblyError> {
-    images.values().try_fold(0u64, |total, record| {
-        let len = u64::try_from(record.image.rgba.len())
-            .map_err(|_| ImageAssemblyError::TransferBytesExceedFrame)?;
-        total
-            .checked_add(len)
-            .ok_or(ImageAssemblyError::TransferBytesExceedFrame)
-    })
+    image_record_by_content_id
+        .values()
+        .try_fold(0u64, |retained_image_byte_count, image_record| {
+            let image_byte_count = u64::try_from(image_record.image.rgba_bytes.len())
+                .map_err(|_| ImageAssemblyError::TransferBytesExceedFrame)?;
+            retained_image_byte_count
+                .checked_add(image_byte_count)
+                .ok_or(ImageAssemblyError::TransferBytesExceedFrame)
+        })
 }
 
 /// One solved pane placement, as the renderer reads it.
-fn to_slot(slot: &FrameSlot) -> PaneSlot {
+fn build_pane_slot(frame_slot: &FrameSlot) -> PaneSlot {
     PaneSlot {
-        pane_id: slot.pane_id,
-        rect: slot.rect,
-        inner_rect: slot.inner_rect,
-        kind: slot.kind,
-        visible: slot.visible,
-        suppressed: slot.suppressed,
-        dead: slot.dead,
+        pane_id: frame_slot.pane_id,
+        outer_rect: frame_slot.outer_rect,
+        content_rect: frame_slot.content_rect,
+        pane_kind: frame_slot.pane_kind,
+        is_visible: frame_slot.is_visible,
+        is_suppressed: frame_slot.is_suppressed,
+        is_dead: frame_slot.is_dead,
     }
 }
 
 /// One tab-bar entry, as the renderer reads it. The name is filtered by
 /// [`sanitize_reported_text`].
-fn to_tab_meta(meta: &FrameTabMeta) -> TabMeta {
+fn build_tab_metadata(frame_tab_metadata: &FrameTabMeta) -> TabMeta {
     TabMeta {
-        id: meta.id,
-        name: sanitize_reported_text(&meta.name),
-        index: meta.index,
-        active: meta.active,
+        tab_id: frame_tab_metadata.tab_id,
+        tab_name: sanitize_reported_text(&frame_tab_metadata.tab_name),
+        tab_index: frame_tab_metadata.tab_index,
+        is_active: frame_tab_metadata.is_active,
     }
 }
 
 /// One pane's content, as the renderer reads it. A pane that sent no window has
 /// no grid. The title is filtered by [`sanitize_reported_text`]; the cells are
 /// not.
-fn to_pane(pane: &FramePane, images: &HashMap<u64, Arc<ImageRecord>>) -> PaneSnapshot {
+fn build_pane_snapshot(
+    frame_pane: &FramePane,
+    image_record_by_content_id: &HashMap<u64, Arc<ImageRecord>>,
+) -> PaneSnapshot {
     PaneSnapshot {
-        id: pane.id,
-        title: pane.title.as_deref().map(sanitize_reported_text),
-        cursor: CursorSnapshot {
-            row: pane.cursor.row,
-            col: pane.cursor.col,
-            visible: pane.cursor.visible,
-            blink: pane.cursor.blink,
-            shape: pane.cursor.shape.as_ref().map(to_cursor_shape),
+        pane_id: frame_pane.pane_id,
+        pane_title: frame_pane.pane_title.as_deref().map(sanitize_reported_text),
+        cursor_snapshot: CursorSnapshot {
+            row_index: frame_pane.cursor_snapshot.row_index,
+            column_index: frame_pane.cursor_snapshot.column_index,
+            is_visible: frame_pane.cursor_snapshot.is_visible,
+            is_blinking: frame_pane.cursor_snapshot.is_blinking,
+            shape: frame_pane
+                .cursor_snapshot
+                .shape
+                .as_ref()
+                .map(convert_frame_cursor_shape),
         },
-        grid_view: pane.window.as_ref().map(to_grid_view),
-        image_placements: pane
-            .image_placements
+        terminal_grid_view: frame_pane.terminal_window.as_ref().map(build_grid_view),
+        image_placement_snapshots: frame_pane
+            .image_placement_snapshots
             .iter()
-            .filter_map(|placement| to_image_placement(placement, images))
+            .filter_map(|frame_image_placement| {
+                build_image_placement_snapshot(frame_image_placement, image_record_by_content_id)
+            })
             .collect(),
-        reverse_video: pane.reverse_video,
-        mouse_tracking: pane.mouse_tracking,
-        alt_scroll: pane.alt_scroll,
-        on_alt_screen: pane.on_alt_screen,
-        view_top_row: pane.view_top_row,
-        selection: pane.selection.as_ref().map(|selection| SelectionSpans {
-            rows: selection.rows.clone(),
-        }),
-        has_selection: pane.has_selection,
-        scrollback: ScrollbackMeta {
-            truncated: pane.scrollback.truncated,
-            retained_lines: pane.scrollback.retained_lines,
+        is_reverse_video: frame_pane.is_reverse_video,
+        mouse_tracking: frame_pane.mouse_tracking,
+        is_alternate_scroll_enabled: frame_pane.is_alt_scroll_enabled,
+        is_on_alternate_screen: frame_pane.is_on_alt_screen,
+        view_top_row_index: frame_pane.view_top_row_index,
+        selection_spans: frame_pane
+            .selection_spans
+            .as_ref()
+            .map(|frame_selection_spans| SelectionSpans {
+                row_spans: frame_selection_spans.row_spans.clone(),
+            }),
+        has_selection: frame_pane.has_selection,
+        scrollback_meta: ScrollbackMeta {
+            is_truncated: frame_pane.scrollback_meta.is_truncated,
+            retained_line_count: frame_pane.scrollback_meta.retained_line_count,
         },
     }
 }
 
 /// One wire image placement, with its cached record when the transfer completed.
-fn to_image_placement(
-    placement: &FrameImagePlacement,
-    images: &HashMap<u64, Arc<ImageRecord>>,
+fn build_image_placement_snapshot(
+    frame_image_placement: &FrameImagePlacement,
+    image_record_by_content_id: &HashMap<u64, Arc<ImageRecord>>,
 ) -> Option<ImagePlacementSnapshot> {
-    image_placement_with_record(placement, images.get(&placement.content_id))
+    image_placement_with_record(
+        frame_image_placement,
+        image_record_by_content_id.get(&frame_image_placement.image_content_id),
+    )
 }
 
 fn image_placement_with_record(
-    placement: &FrameImagePlacement,
-    record: Option<&Arc<ImageRecord>>,
+    frame_image_placement: &FrameImagePlacement,
+    cached_image_record: Option<&Arc<ImageRecord>>,
 ) -> Option<ImagePlacementSnapshot> {
-    let snapshot = if let Some(record) = record.filter(|_| placement.available) {
-        let record = if let Some(header) = &placement.record {
-            if header.width != record.image.width || header.height != record.image.height {
+    let image_placement_snapshot = if let Some(cached_image_record) =
+        cached_image_record.filter(|_| frame_image_placement.is_available)
+    {
+        let image_record = if let Some(image_record_header) = &frame_image_placement.image_record {
+            if image_record_header.pixel_width != cached_image_record.image.pixel_width
+                || image_record_header.pixel_height != cached_image_record.image.pixel_height
+            {
                 return None;
             }
-            let mut record = record.as_ref().clone();
-            record.protocol = to_graphics_protocol(header.protocol);
-            record.action = to_image_action(header.action);
-            record.display = to_image_display(&header.display);
-            record.anchor = header.anchor;
-            Arc::new(record)
+            let mut restored_image_record = cached_image_record.as_ref().clone();
+            restored_image_record.protocol =
+                convert_frame_graphics_protocol(image_record_header.protocol);
+            restored_image_record.action =
+                convert_frame_image_action(image_record_header.image_action);
+            restored_image_record.display = build_image_display(&image_record_header.display);
+            restored_image_record.anchor = image_record_header.anchor_cell;
+            Arc::new(restored_image_record)
         } else {
-            Arc::clone(record)
+            Arc::clone(cached_image_record)
         };
         ImagePlacementSnapshot::with_content_id(
-            placement.id,
-            placement.content_id,
-            record,
-            placement.anchor,
-            placement.columns,
-            placement.rows,
+            frame_image_placement.placement_id,
+            frame_image_placement.image_content_id,
+            image_record,
+            frame_image_placement.anchor_cell,
+            frame_image_placement.column_count,
+            frame_image_placement.row_count,
         )?
     } else {
         ImagePlacementSnapshot::unavailable(
-            placement.id,
-            placement.content_id,
-            placement.anchor,
-            placement.columns,
-            placement.rows,
+            frame_image_placement.placement_id,
+            frame_image_placement.image_content_id,
+            frame_image_placement.anchor_cell,
+            frame_image_placement.column_count,
+            frame_image_placement.row_count,
         )?
     };
-    match placement.geometry {
-        Some(geometry) => snapshot.with_geometry(geometry),
-        None => Some(snapshot),
+    match frame_image_placement.cell_geometry {
+        Some(cell_geometry) => image_placement_snapshot.with_cell_geometry(cell_geometry),
+        None => Some(image_placement_snapshot),
     }
 }
 
 /// One complete image record rebuilt from transfer metadata and RGBA bytes.
-fn to_image_record(record: &FrameImageRecordHeader, rgba: Vec<u8>) -> ImageRecord {
+fn build_image_record(
+    image_record_header: &FrameImageRecordHeader,
+    rgba_bytes: Vec<u8>,
+) -> ImageRecord {
     ImageRecord {
-        protocol: to_graphics_protocol(record.protocol),
+        protocol: convert_frame_graphics_protocol(image_record_header.protocol),
         image: (DecodedImage {
-            width: record.width,
-            height: record.height,
-            rgba,
+            pixel_width: image_record_header.pixel_width,
+            pixel_height: image_record_header.pixel_height,
+            rgba_bytes,
         })
         .into(),
         animation: None,
-        action: to_image_action(record.action),
-        display: to_image_display(&record.display),
-        anchor: record.anchor,
+        action: convert_frame_image_action(image_record_header.image_action),
+        display: build_image_display(&image_record_header.display),
+        anchor: image_record_header.anchor_cell,
     }
 }
 
 /// The source image protocol restored from the wire.
-fn to_graphics_protocol(protocol: FrameGraphicsProtocol) -> GraphicsProtocol {
-    match protocol {
+fn convert_frame_graphics_protocol(
+    frame_graphics_protocol: FrameGraphicsProtocol,
+) -> GraphicsProtocol {
+    match frame_graphics_protocol {
         FrameGraphicsProtocol::Sixel => GraphicsProtocol::Sixel,
         FrameGraphicsProtocol::Kitty => GraphicsProtocol::Kitty,
         FrameGraphicsProtocol::Iterm2 => GraphicsProtocol::Iterm2,
@@ -601,8 +694,8 @@ fn to_graphics_protocol(protocol: FrameGraphicsProtocol) -> GraphicsProtocol {
 }
 
 /// The wire image operation restored from the wire.
-fn to_image_action(action: FrameImageAction) -> ImageAction {
-    match action {
+fn convert_frame_image_action(frame_image_action: FrameImageAction) -> ImageAction {
+    match frame_image_action {
         FrameImageAction::Transmit => ImageAction::Transmit,
         FrameImageAction::Display => ImageAction::Display,
         FrameImageAction::TransmitAndDisplay => ImageAction::TransmitAndDisplay,
@@ -610,73 +703,87 @@ fn to_image_action(action: FrameImageAction) -> ImageAction {
 }
 
 /// One wire dimension restored as terminal image metadata.
-fn to_image_dimension(dimension: FrameImageDimension) -> ImageDimension {
-    match dimension {
-        FrameImageDimension::Cells(value) => ImageDimension::Cells(value),
-        FrameImageDimension::Pixels(value) => ImageDimension::Pixels(value),
-        FrameImageDimension::Percent(value) => ImageDimension::Percent(value),
+fn convert_frame_image_dimension(frame_image_dimension: FrameImageDimension) -> ImageDimension {
+    match frame_image_dimension {
+        FrameImageDimension::Cells(dimension_value) => ImageDimension::Cells(dimension_value),
+        FrameImageDimension::Pixels(dimension_value) => ImageDimension::Pixels(dimension_value),
+        FrameImageDimension::Percent(dimension_value) => ImageDimension::Percent(dimension_value),
         FrameImageDimension::Auto => ImageDimension::Auto,
     }
 }
 
 /// One wire Sixel background rule restored as terminal image metadata.
-fn to_sixel_background(background: FrameSixelBackground) -> SixelBackground {
-    match background {
+fn convert_frame_sixel_background(frame_sixel_background: FrameSixelBackground) -> SixelBackground {
+    match frame_sixel_background {
         FrameSixelBackground::Terminal => SixelBackground::Terminal,
         FrameSixelBackground::Preserve => SixelBackground::Preserve,
     }
 }
 
 /// Display metadata restored from the wire.
-fn to_image_display(display: &FrameImageDisplay) -> ImageDisplay {
+fn build_image_display(frame_image_display: &FrameImageDisplay) -> ImageDisplay {
     ImageDisplay {
-        quiet: display.quiet,
-        width: display.width.map(to_image_dimension),
-        height: display.height.map(to_image_dimension),
-        preserve_aspect_ratio: display.preserve_aspect_ratio,
-        sixel_background: display.sixel_background.map(to_sixel_background),
-        image_id: display.image_id,
-        image_number: display.image_number,
-        placement_id: display.placement_id,
-        usage_hints: display.usage_hints,
-        unicode_placeholder: display.unicode_placeholder,
-        z_index: display.z_index,
-        relative_image_id: display.relative_image_id,
-        relative_placement_id: display.relative_placement_id,
-        relative_offset_x: display.relative_offset_x,
-        relative_offset_y: display.relative_offset_y,
-        cell_columns: display.cell_columns,
-        cell_rows: display.cell_rows,
-        source_offset_x: display.source_offset_x,
-        source_offset_y: display.source_offset_y,
-        cell_offset_x: display.cell_offset_x,
-        cell_offset_y: display.cell_offset_y,
-        move_cursor: display.move_cursor,
+        response_suppression_level: frame_image_display.response_suppression_level,
+        requested_width: frame_image_display
+            .requested_width
+            .map(convert_frame_image_dimension),
+        requested_height: frame_image_display
+            .requested_height
+            .map(convert_frame_image_dimension),
+        is_aspect_ratio_preserved: frame_image_display.is_aspect_ratio_preserved,
+        sixel_background: frame_image_display
+            .sixel_background
+            .map(convert_frame_sixel_background),
+        image_id: frame_image_display.image_id,
+        image_number: frame_image_display.image_number,
+        placement_id: frame_image_display.placement_id,
+        usage_hints: frame_image_display.usage_hints,
+        is_unicode_placeholder: frame_image_display.is_unicode_placeholder,
+        z_index: frame_image_display.z_index,
+        relative_image_id: frame_image_display.relative_image_id,
+        relative_placement_id: frame_image_display.relative_placement_id,
+        relative_column_offset: frame_image_display.relative_column_offset,
+        relative_row_offset: frame_image_display.relative_row_offset,
+        requested_column_count: frame_image_display.requested_column_count,
+        requested_row_count: frame_image_display.requested_row_count,
+        source_pixel_offset_x: frame_image_display.source_pixel_offset_x,
+        source_pixel_offset_y: frame_image_display.source_pixel_offset_y,
+        cell_pixel_offset_x: frame_image_display.cell_pixel_offset_x,
+        cell_pixel_offset_y: frame_image_display.cell_pixel_offset_y,
+        should_move_cursor: frame_image_display.should_move_cursor,
     }
 }
 
 /// The pane's visible cells as one grid, plus how far its view is scrolled
 /// back.
-fn to_grid_view(window: &FrameWindow) -> GridView {
-    let rows: Vec<Vec<Cell>> = window.rows.iter().map(to_row).collect();
+fn build_grid_view(frame_window: &FrameWindow) -> GridView {
+    let terminal_grid_rows: Vec<Vec<Cell>> = frame_window
+        .row_snapshots
+        .iter()
+        .map(build_grid_row)
+        .collect();
     // `from_rows` starts every row `Hard`; each row the wire ends another way
     // is set back afterwards.
-    let mut grid = Grid::from_rows(rows, window.cols, Style::default());
-    for (index, row) in window.rows.iter().enumerate() {
-        let end = to_row_end(row.end);
-        if end != RowEnd::Hard {
-            grid.set_row_end(u16::try_from(index).unwrap_or(u16::MAX), end);
+    let mut terminal_grid = Grid::from_rows(
+        terminal_grid_rows,
+        frame_window.column_count,
+        Style::default(),
+    );
+    for (row_index, frame_row) in frame_window.row_snapshots.iter().enumerate() {
+        let row_end = convert_frame_row_end(frame_row.row_end);
+        if row_end != RowEnd::Hard {
+            terminal_grid.set_row_end(u16::try_from(row_index).unwrap_or(u16::MAX), row_end);
         }
     }
     GridView {
-        grid: Arc::new(grid),
-        view_offset: window.view_offset,
+        grid: Arc::new(terminal_grid),
+        view_row_offset: frame_window.view_row_offset,
     }
 }
 
 /// One row's line-continuation state, read back from the wire.
-fn to_row_end(end: FrameRowEnd) -> RowEnd {
-    match end {
+fn convert_frame_row_end(frame_row_end: FrameRowEnd) -> RowEnd {
+    match frame_row_end {
         FrameRowEnd::Hard => RowEnd::Hard,
         FrameRowEnd::Soft => RowEnd::Soft,
         FrameRowEnd::SoftWide => RowEnd::SoftWide,
@@ -684,59 +791,75 @@ fn to_row_end(end: FrameRowEnd) -> RowEnd {
 }
 
 /// One row's runs, expanded back into cells: each run's cell is built once and
-/// repeated `count` times. A run with `count: 80` yields 80 equal cells.
-fn to_row(row: &FrameRow) -> Vec<Cell> {
-    let width = row.runs.iter().map(|run| usize::from(run.count)).sum();
-    let mut cells = Vec::with_capacity(width);
-    for run in &row.runs {
-        cells.extend(std::iter::repeat_n(
-            to_cell(&run.cell),
-            usize::from(run.count),
+/// repeated `repeat_count` times. A run with `repeat_count: 80` yields 80
+/// equal cells.
+fn build_grid_row(frame_row: &FrameRow) -> Vec<Cell> {
+    let expanded_cell_count = frame_row
+        .cell_runs
+        .iter()
+        .map(|cell_run| usize::from(cell_run.repeat_count))
+        .sum();
+    let mut expanded_cells = Vec::with_capacity(expanded_cell_count);
+    for cell_run in &frame_row.cell_runs {
+        expanded_cells.extend(std::iter::repeat_n(
+            build_terminal_cell(&cell_run.cell),
+            usize::from(cell_run.repeat_count),
         ));
     }
-    cells
+    expanded_cells
 }
 
 /// One cell: its character, the rest of its grapheme cluster layered back on in
 /// arrival order, its display width, and its style.
-fn to_cell(cell: &FrameCell) -> Cell {
-    let mut built = Cell::new(cell.ch, cell.width, to_style(&cell.style));
-    for mark in &cell.combining {
-        built.push_combining(*mark);
+fn build_terminal_cell(frame_cell: &FrameCell) -> Cell {
+    let mut terminal_cell = Cell::from_character(
+        frame_cell.character,
+        frame_cell.cell_width,
+        build_terminal_style(&frame_cell.style),
+    );
+    for combining_character in &frame_cell.combining_characters {
+        terminal_cell.push_combining(*combining_character);
     }
-    built
+    terminal_cell
 }
 
 /// One cell's colors and text attributes.
-fn to_style(style: &FrameStyle) -> Style {
-    let mut built = Style::default();
-    built.set_fg(to_color(&style.fg));
-    built.set_bg(to_color(&style.bg));
-    built.set_underline_color(style.underline_color.as_ref().map(to_color));
-    built.set_bold(style.attrs.bold);
-    built.set_italic(style.attrs.italic);
-    built.set_underline(to_underline(&style.attrs.underline));
-    built.set_reverse(style.attrs.reverse);
-    built.set_faint(style.attrs.faint);
-    built.set_blink(style.attrs.blink);
-    built.set_conceal(style.attrs.conceal);
-    built.set_strike(style.attrs.strike);
-    built.set_overline(style.attrs.overline);
-    built
+fn build_terminal_style(frame_style: &FrameStyle) -> Style {
+    let mut terminal_style = Style::default();
+    terminal_style.set_foreground_color(convert_frame_color(&frame_style.foreground_color));
+    terminal_style.set_background_color(convert_frame_color(&frame_style.background_color));
+    terminal_style.set_underline_color(
+        frame_style
+            .underline_color
+            .as_ref()
+            .map(convert_frame_color),
+    );
+    terminal_style.set_bold(frame_style.text_attributes.is_bold);
+    terminal_style.set_italic(frame_style.text_attributes.is_italic);
+    terminal_style.set_underline(convert_frame_underline_style(
+        &frame_style.text_attributes.underline_style,
+    ));
+    terminal_style.set_reverse(frame_style.text_attributes.is_reverse);
+    terminal_style.set_faint(frame_style.text_attributes.is_faint);
+    terminal_style.set_blink(frame_style.text_attributes.is_blinking);
+    terminal_style.set_conceal(frame_style.text_attributes.is_concealed);
+    terminal_style.set_strike(frame_style.text_attributes.is_struck_through);
+    terminal_style.set_overline(frame_style.text_attributes.is_overlined);
+    terminal_style
 }
 
 /// One foreground, background or underline color.
-fn to_color(color: &FrameColor) -> Color {
-    match color {
+fn convert_frame_color(frame_color: &FrameColor) -> Color {
+    match frame_color {
         FrameColor::Default => Color::Default,
-        FrameColor::Indexed(index) => Color::Indexed(*index),
+        FrameColor::Indexed(color_index) => Color::Indexed(*color_index),
         FrameColor::Rgb(red, green, blue) => Color::Rgb(*red, *green, *blue),
     }
 }
 
 /// One cell's underline style.
-fn to_underline(underline: &FrameUnderline) -> UnderlineStyle {
-    match underline {
+fn convert_frame_underline_style(frame_underline: &FrameUnderline) -> UnderlineStyle {
+    match frame_underline {
         FrameUnderline::None => UnderlineStyle::None,
         FrameUnderline::Single => UnderlineStyle::Single,
         FrameUnderline::Double => UnderlineStyle::Double,
@@ -747,8 +870,8 @@ fn to_underline(underline: &FrameUnderline) -> UnderlineStyle {
 }
 
 /// The shape a pane asked its cursor to be drawn as.
-fn to_cursor_shape(shape: &FrameCursorShape) -> CursorShape {
-    match shape {
+fn convert_frame_cursor_shape(frame_cursor_shape: &FrameCursorShape) -> CursorShape {
+    match frame_cursor_shape {
         FrameCursorShape::Block => CursorShape::Block,
         FrameCursorShape::Underline => CursorShape::Underline,
         FrameCursorShape::Bar => CursorShape::Bar,

@@ -1,19 +1,19 @@
 //! Tests for the doctor renderers: the aligned table and the JSON array.
 
 use super::*;
-use crate::doctor::Outcome;
+use crate::doctor::DoctorOutcome;
 
-/// One row named `name`, carrying `verdict`, `reason`, `help` and `detail`.
-fn row(
-    name: &'static str,
+/// One row named `check_name`, carrying `verdict`, `reason`, `help` and `detail`.
+fn build_check_row(
+    check_name: &'static str,
     verdict: Verdict,
     reason: &str,
     help: Option<&str>,
     detail: Option<&str>,
-) -> CheckRow {
-    CheckRow {
-        name,
-        outcome: Outcome {
+) -> DoctorCheckRow {
+    DoctorCheckRow {
+        check_name,
+        outcome: DoctorOutcome {
             verdict,
             reason: reason.to_string(),
             help: help.map(str::to_string),
@@ -23,10 +23,10 @@ fn row(
 }
 
 /// Two rows: an ok row with no help, and a warn row with help.
-fn sample() -> Vec<CheckRow> {
+fn build_sample_check_rows() -> Vec<DoctorCheckRow> {
     vec![
-        row("config", Verdict::Ok, "1 config file validated", None, None),
-        row(
+        build_check_row("config", Verdict::Ok, "1 config file validated", None, None),
+        build_check_row(
             "terminal",
             Verdict::Warn,
             "TERM is not set",
@@ -38,7 +38,7 @@ fn sample() -> Vec<CheckRow> {
 
 #[test]
 fn the_table_pads_every_column_and_prints_a_dash_for_a_row_with_no_help() {
-    let rendered = render_doctor(&sample(), FormatArg::Table);
+    let rendered = render_doctor(&build_sample_check_rows(), OutputFormat::Table);
 
     assert_eq!(
         rendered,
@@ -50,7 +50,7 @@ fn the_table_pads_every_column_and_prints_a_dash_for_a_row_with_no_help() {
 
 #[test]
 fn the_json_form_is_one_object_per_row() {
-    let rendered = render_doctor(&sample(), FormatArg::Json);
+    let rendered = render_doctor(&build_sample_check_rows(), OutputFormat::Json);
 
     assert_eq!(
         rendered,
@@ -76,15 +76,15 @@ fn the_json_form_is_one_object_per_row() {
 #[test]
 fn no_rows_render_the_header_alone_and_an_empty_json_array() {
     assert_eq!(
-        render_doctor(&[], FormatArg::Table),
+        render_doctor(&[], OutputFormat::Table),
         "check  verdict  reason  help\n"
     );
-    assert_eq!(render_doctor(&[], FormatArg::Json), "[]\n");
+    assert_eq!(render_doctor(&[], OutputFormat::Json), "[]\n");
 }
 
 /// One row whose `reason` is short and whose `detail` holds the whole text.
-fn shortened() -> Vec<CheckRow> {
-    vec![row(
+fn build_shortened_check_rows() -> Vec<DoctorCheckRow> {
+    vec![build_check_row(
         "router",
         Verdict::Fail,
         "a router is listening and did not answer",
@@ -98,7 +98,7 @@ fn shortened() -> Vec<CheckRow> {
 
 #[test]
 fn the_table_leaves_the_full_text_out() {
-    let rendered = render_doctor(&shortened(), FormatArg::Table);
+    let rendered = render_doctor(&build_shortened_check_rows(), OutputFormat::Table);
 
     assert_eq!(
         rendered,
@@ -109,7 +109,7 @@ fn the_table_leaves_the_full_text_out() {
 
 #[test]
 fn the_json_form_carries_the_full_text() {
-    let rendered = render_doctor(&shortened(), FormatArg::Json);
+    let rendered = render_doctor(&build_shortened_check_rows(), OutputFormat::Json);
 
     assert_eq!(
         rendered,
@@ -127,7 +127,7 @@ fn the_json_form_carries_the_full_text() {
 
 #[test]
 fn a_failed_row_renders_the_fail_verdict() {
-    let rows = vec![row(
+    let check_rows = vec![build_check_row(
         "shell",
         Verdict::Fail,
         "a new pane would run /bin/nope, which is not on this machine",
@@ -135,7 +135,7 @@ fn a_failed_row_renders_the_fail_verdict() {
         None,
     )];
 
-    let rendered = render_doctor(&rows, FormatArg::Table);
+    let rendered = render_doctor(&check_rows, OutputFormat::Table);
 
     assert_eq!(
         rendered,

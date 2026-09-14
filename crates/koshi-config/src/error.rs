@@ -25,11 +25,17 @@ use crate::types::SCHEMA_VERSION;
 #[derive(Debug, Error)]
 pub enum ConfigError {
     /// The config file could not be parsed.
-    #[error("config parse error in {path}: {detail}")]
-    Parse { path: String, detail: String },
+    #[error("config parse error in {config_path}: {parse_error_detail}")]
+    Parse {
+        config_path: String,
+        parse_error_detail: String,
+    },
     /// The config parsed but failed schema validation.
-    #[error("invalid config key `{key}`: {detail}")]
-    Validation { key: String, detail: String },
+    #[error("invalid config key `{config_key}`: {validation_detail}")]
+    Validation {
+        config_key: String,
+        validation_detail: String,
+    },
 }
 
 impl DomainError for ConfigError {
@@ -37,17 +43,17 @@ impl DomainError for ConfigError {
         DomainCategory::Config
     }
 
-    fn severity(&self) -> Severity {
+    fn get_severity(&self) -> Severity {
         Severity::Recoverable
     }
 }
 
-/// Builds a [`ConfigError::Validation`] naming the config `key` that failed
-/// and the plain-words `detail`.
-pub(crate) fn validation(key: &str, detail: &str) -> ConfigError {
+/// Builds a [`ConfigError::Validation`] naming the config key that failed
+/// and the plain-word validation detail.
+pub(crate) fn build_validation_error(config_key: &str, validation_detail: &str) -> ConfigError {
     ConfigError::Validation {
-        key: key.to_string(),
-        detail: detail.to_string(),
+        config_key: config_key.to_string(),
+        validation_detail: validation_detail.to_string(),
     }
 }
 
@@ -58,20 +64,20 @@ pub(crate) fn validation(key: &str, detail: &str) -> ConfigError {
 /// KDL crate carries each error's span — so a rendered report points a caret at
 /// the offending line.
 #[derive(Debug, Error)]
-#[error("config parse error in {path}")]
+#[error("config parse error in {config_path}")]
 pub struct ConfigParseDiagnostic {
     /// Path of the config file that failed to parse, for the header line.
-    path: String,
+    config_path: String,
     /// The underlying KDL parse error, carrying source text and spans.
-    err: KdlError,
+    kdl_parse_error: KdlError,
 }
 
 impl ConfigParseDiagnostic {
-    /// Builds a diagnostic from a KDL parse `err` and the file `path` it came from.
-    pub fn new(path: &Path, err: KdlError) -> Self {
+    /// Builds a diagnostic from a KDL parse error and the file path it came from.
+    pub fn from_kdl_error(config_path: &Path, kdl_parse_error: KdlError) -> Self {
         Self {
-            path: path.display().to_string(),
-            err,
+            config_path: config_path.display().to_string(),
+            kdl_parse_error,
         }
     }
 }
@@ -84,26 +90,26 @@ impl Diagnostic for ConfigParseDiagnostic {
 
     // The inner `kdl` error's source text, which a rendered report highlights.
     fn source_code(&self) -> Option<&dyn SourceCode> {
-        self.err.source_code()
+        self.kdl_parse_error.source_code()
     }
 
     // The inner `kdl` error's own sub-diagnostics, each keeping its own span.
     fn related<'a>(&'a self) -> Option<Box<dyn Iterator<Item = &'a dyn Diagnostic> + 'a>> {
-        self.err.related()
+        self.kdl_parse_error.related()
     }
 }
 
 impl From<ConfigParseDiagnostic> for ConfigError {
-    fn from(diag: ConfigParseDiagnostic) -> Self {
+    fn from(parse_diagnostic: ConfigParseDiagnostic) -> Self {
         // `detail` is the first sub-diagnostic's message, or the kdl error's
         // own Display ("Failed to parse KDL document") when it reported none.
-        let detail = match diag.err.diagnostics.first() {
-            Some(d) => d.to_string(),
-            None => diag.err.to_string(),
+        let parse_error_detail = match parse_diagnostic.kdl_parse_error.diagnostics.first() {
+            Some(kdl_diagnostic) => kdl_diagnostic.to_string(),
+            None => parse_diagnostic.kdl_parse_error.to_string(),
         };
         ConfigError::Parse {
-            path: diag.path,
-            detail,
+            config_path: parse_diagnostic.config_path,
+            parse_error_detail,
         }
     }
 }
@@ -116,32 +122,36 @@ pub enum ConfigVersionDiagnostic {
     #[diagnostic(code(koshi::config::version))]
     TooOld,
     /// The file comes from a newer Koshi schema.
-    #[error("config schema version {found} is newer than this koshi supports ({supported})")]
+    #[error(
+        "config schema version {declared_schema_version} is newer than this koshi supports ({supported_schema_version})"
+    )]
     #[diagnostic(
         code(koshi::config::version),
         help("upgrade koshi to a build that understands this config")
     )]
     TooNew {
         /// The version declared in the config file.
-        found: u32,
+        declared_schema_version: u32,
         /// The newest schema version this build supports.
-        supported: u32,
+        supported_schema_version: u32,
     },
 }
 
-/// Checks the declared schema version `found` against [`SCHEMA_VERSION`].
+/// Checks `declared_schema_version` against [`SCHEMA_VERSION`].
 /// Every version from 1 through [`SCHEMA_VERSION`] is accepted.
 ///
 /// # Errors
-/// Returns a [`ConfigVersionDiagnostic`] when `found` is zero or newer than
+/// Returns a [`ConfigVersionDiagnostic`] when `declared_schema_version` is zero or newer than
 /// [`SCHEMA_VERSION`].
-pub fn check_version(found: u32) -> Result<(), ConfigVersionDiagnostic> {
-    if found == 0 {
+pub fn validate_config_schema_version(
+    declared_schema_version: u32,
+) -> Result<(), ConfigVersionDiagnostic> {
+    if declared_schema_version == 0 {
         Err(ConfigVersionDiagnostic::TooOld)
-    } else if found > SCHEMA_VERSION {
+    } else if declared_schema_version > SCHEMA_VERSION {
         Err(ConfigVersionDiagnostic::TooNew {
-            found,
-            supported: SCHEMA_VERSION,
+            declared_schema_version,
+            supported_schema_version: SCHEMA_VERSION,
         })
     } else {
         Ok(())
@@ -152,16 +162,16 @@ pub fn check_version(found: u32) -> Result<(), ConfigVersionDiagnostic> {
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ColorParseError {
     /// The value did not have exactly six characters.
-    #[error("color must be 6 hex digits (#RRGGBB), got {got}")]
+    #[error("color must be 6 hex digits (#RRGGBB), got {character_count}")]
     BadLength {
         /// The number of characters supplied.
-        got: usize,
+        character_count: usize,
     },
     /// The value contained a character that is not a hex digit.
-    #[error("color `{value}` contains a non-hex digit")]
+    #[error("color `{invalid_hex_text}` contains a non-hex digit")]
     BadDigit {
         /// The offending value.
-        value: String,
+        invalid_hex_text: String,
     },
 }
 

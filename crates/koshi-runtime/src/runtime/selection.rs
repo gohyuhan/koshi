@@ -28,22 +28,31 @@ impl Server {
     ///
     /// [`Client::is_view_held`]: koshi_session::client::Client::is_view_held
     pub(crate) fn drop_evicted_selections(&mut self, pane_id: PaneId) {
-        let Some(engine) = self.terminal_engines.get(&pane_id) else {
+        let Some(terminal_engine) = self.terminal_engine_by_pane_id.get(&pane_id) else {
             return;
         };
-        let first_row = engine.state().text_view().first_row();
-        let Some(session) = self.session_for_pane_mut(pane_id) else {
+        let first_retained_row_index = terminal_engine
+            .get_terminal_state()
+            .get_text_view()
+            .get_first_row_index();
+        let Some(session) = self.get_session_for_pane_mut(pane_id) else {
             return;
         };
-        for client in session.clients.list_attached_mut() {
-            let all_rows_gone = client.selection(pane_id).is_some_and(|selection| {
-                koshi_terminal::selection::order(selection.anchor, selection.cursor)
-                    .end
-                    .row
-                    < first_row
-            });
-            if all_rows_gone {
-                client.clear_selection(pane_id);
+        for client_record in session.clients.list_attached_clients_mut() {
+            let is_selection_outside_text =
+                client_record
+                    .get_selection(pane_id)
+                    .is_some_and(|selection| {
+                        koshi_terminal::selection::order_selection_positions(
+                            selection.anchor,
+                            selection.cursor,
+                        )
+                        .end_position
+                        .row_index
+                            < first_retained_row_index
+                    });
+            if is_selection_outside_text {
+                client_record.clear_selection(pane_id);
             }
         }
     }
@@ -57,13 +66,13 @@ impl Server {
     /// An unknown client, and a client with no highlight in `pane_id`,
     /// dispatch nothing.
     pub(crate) fn clear_selection_on_pane_input(&mut self, client_id: ClientId, pane_id: PaneId) {
-        let selecting = self
-            .client_mut(client_id)
-            .is_some_and(|client| client.selection(pane_id).is_some());
-        if selecting {
+        let has_selection = self
+            .get_client_mut(client_id)
+            .is_some_and(|client_record| client_record.get_selection(pane_id).is_some());
+        if has_selection {
             self.dispatch_visual(
                 client_id,
-                VisualCommand::ClearSelection(ClearSelectionArgs { pane: pane_id }),
+                VisualCommand::ClearSelection(ClearSelectionArgs { pane_id }),
             );
         }
     }
@@ -72,11 +81,11 @@ impl Server {
     /// pane switches between its primary and alternate screens. A `pane_id` in
     /// no session changes nothing.
     pub(crate) fn clear_pane_selections(&mut self, pane_id: PaneId) {
-        let Some(session) = self.session_for_pane_mut(pane_id) else {
+        let Some(session) = self.get_session_for_pane_mut(pane_id) else {
             return;
         };
-        for client in session.clients.list_attached_mut() {
-            client.clear_selection(pane_id);
+        for client_record in session.clients.list_attached_clients_mut() {
+            client_record.clear_selection(pane_id);
         }
     }
 }

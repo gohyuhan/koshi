@@ -19,147 +19,190 @@ use crate::runtime::event::RuntimeEvent;
 
 use super::*;
 
-const PANE_SIZE: PtySize = PtySize { cols: 80, rows: 24 };
+const TEST_PTY_SIZE: PtySize = PtySize {
+    column_count: 80,
+    row_count: 24,
+};
 
-/// A runtime sharing one fake backend, returned alongside it so a test can
+/// A runtime sharing one fake PTY backend, returned alongside it so a test can
 /// assert on the kills shutdown issues. The sender keeps the inbox open.
-fn new_runtime_with_fake() -> (Server, Arc<FakePtyBackend>, mpsc::Sender<RuntimeEvent>) {
-    let fake = Arc::new(FakePtyBackend::new());
-    let pty_backend: Arc<dyn PtyBackend> = fake.clone();
-    let (tx, inbox_rx) = mpsc::channel();
-    let runtime = Server::new(pty_backend, inbox_rx, tx.clone());
-    (runtime, fake, tx)
+fn build_test_server_with_fake_pty_backend(
+) -> (Server, Arc<FakePtyBackend>, mpsc::Sender<RuntimeEvent>) {
+    let fake_pty_backend = Arc::new(FakePtyBackend::new());
+    let pty_backend: Arc<dyn PtyBackend> = fake_pty_backend.clone();
+    let (event_sender, inbox_rx) = mpsc::channel();
+    let runtime = Server::from_runtime_parts(pty_backend, inbox_rx, event_sender.clone());
+    (runtime, fake_pty_backend, event_sender)
 }
 
-/// Spawn a pane in the fake backend and park its handle in the runtime, so the
+/// Spawn a pane in the fake PTY backend and park its handle in the runtime, so the
 /// pane is live in both — the backend can record kills and shutdown reaches it.
-fn spawn_and_park(rt: &mut Server, fake: &FakePtyBackend, pane: PaneId) {
-    let handle = fake
-        .spawn(
-            pane,
+fn spawn_test_pane_and_park(
+    runtime: &mut Server,
+    fake_pty_backend: &FakePtyBackend,
+    pane_id: PaneId,
+) {
+    let pty_handle = fake_pty_backend
+        .spawn_pane(
+            pane_id,
             SpawnSpec::default_shell(None, BTreeMap::new()),
-            PANE_SIZE,
+            TEST_PTY_SIZE,
         )
         .expect("spawn");
-    rt.park_pane_pty(pane, handle, PANE_SIZE);
+    runtime.park_pane_pty(pane_id, pty_handle, TEST_PTY_SIZE);
 }
 
-/// A fresh directory to stand in for the runtime dir, under a short base so the
+/// A fresh directory to stand in for the runtime directory, under a short base so the
 /// Unix socket path stays inside the OS path-length cap.
 /// [`IpcServer::start`] creates it private itself.
-fn test_runtime_dir(tag: &str) -> PathBuf {
+fn build_test_server_directory(directory_tag: &str) -> PathBuf {
     #[cfg(unix)]
-    let base = PathBuf::from("/tmp");
+    let base_path = PathBuf::from("/tmp");
     #[cfg(windows)]
-    let base = std::env::temp_dir();
-    base.join(format!("koshi-quit-{}-{tag}", std::process::id()))
+    let base_path = std::env::temp_dir();
+    base_path.join(format!("koshi-quit-{}-{directory_tag}", std::process::id()))
 }
 
 #[test]
 fn explicit_quit_group_kills_every_pane_immediately_as_a_tree() {
-    let (mut rt, fake, _tx) = new_runtime_with_fake();
-    let pane = PaneId::new();
-    spawn_and_park(&mut rt, &fake, pane);
-    rt.immediate_shutdown = true;
+    let (mut runtime, fake_pty_backend, _event_sender) = build_test_server_with_fake_pty_backend();
+    let pane_id = PaneId::new();
+    spawn_test_pane_and_park(&mut runtime, &fake_pty_backend, pane_id);
+    runtime.should_shutdown_immediately = true;
 
-    rt.shutdown();
+    runtime.shutdown();
 
-    assert!(rt.is_draining());
-    assert_eq!(fake.kills(pane).expect("pane"), vec![KillPolicy::Tree]);
+    assert!(runtime.is_draining());
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_kill_policies(pane_id)
+            .expect("pane"),
+        vec![KillPolicy::Tree]
+    );
 }
 
 #[test]
 fn a_natural_ending_group_kills_every_pane_gracefully_with_the_configured_timeout() {
-    let (mut rt, fake, _tx) = new_runtime_with_fake();
-    let first = PaneId::new();
-    let second = PaneId::new();
-    spawn_and_park(&mut rt, &fake, first);
-    spawn_and_park(&mut rt, &fake, second);
+    let (mut runtime, fake_pty_backend, _event_sender) = build_test_server_with_fake_pty_backend();
+    let first_pane_id = PaneId::new();
+    let second_pane_id = PaneId::new();
+    spawn_test_pane_and_park(&mut runtime, &fake_pty_backend, first_pane_id);
+    spawn_test_pane_and_park(&mut runtime, &fake_pty_backend, second_pane_id);
 
-    rt.shutdown();
+    runtime.shutdown();
 
-    assert!(rt.is_draining());
+    assert!(runtime.is_draining());
     let graceful = KillPolicy::GracefulTree {
-        timeout: GRACEFUL_TIMEOUT_DURATION,
+        timeout_duration: GRACEFUL_TIMEOUT_DURATION,
     };
-    assert_eq!(fake.kills(first).expect("first pane"), vec![graceful]);
-    assert_eq!(fake.kills(second).expect("second pane"), vec![graceful]);
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_kill_policies(first_pane_id)
+            .expect("first pane"),
+        vec![graceful]
+    );
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_kill_policies(second_pane_id)
+            .expect("second pane"),
+        vec![graceful]
+    );
 }
 
 #[test]
 fn shutdown_with_no_parked_panes_enters_draining_and_kills_nothing() {
-    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let (mut runtime, fake_pty_backend, _event_sender) = build_test_server_with_fake_pty_backend();
     // Spawn a pane in the backend but never park it, so it is not a live pane
     // the runtime tracks; shutdown must not reach it.
-    let unparked = PaneId::new();
-    fake.spawn(
-        unparked,
-        SpawnSpec::default_shell(None, BTreeMap::new()),
-        PANE_SIZE,
-    )
-    .expect("spawn");
+    let unparked_pane_id = PaneId::new();
+    fake_pty_backend
+        .spawn_pane(
+            unparked_pane_id,
+            SpawnSpec::default_shell(None, BTreeMap::new()),
+            TEST_PTY_SIZE,
+        )
+        .expect("spawn");
 
-    rt.shutdown();
+    runtime.shutdown();
 
-    assert!(rt.is_draining());
-    assert_eq!(fake.kills(unparked).expect("pane"), Vec::new());
+    assert!(runtime.is_draining());
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_kill_policies(unparked_pane_id)
+            .expect("pane"),
+        Vec::new()
+    );
 }
 
 #[test]
 fn calling_shutdown_again_kills_the_pane_group_once() {
-    let (mut rt, fake, _tx) = new_runtime_with_fake();
-    let pane = PaneId::new();
-    spawn_and_park(&mut rt, &fake, pane);
-    rt.immediate_shutdown = true;
+    let (mut runtime, fake_pty_backend, _event_sender) = build_test_server_with_fake_pty_backend();
+    let pane_id = PaneId::new();
+    spawn_test_pane_and_park(&mut runtime, &fake_pty_backend, pane_id);
+    runtime.should_shutdown_immediately = true;
 
-    rt.shutdown();
-    rt.shutdown();
+    runtime.shutdown();
+    runtime.shutdown();
 
     // The first shutdown closes the pane in the backend. The second one's kill
     // for it answers `PtyError::UnknownPane` and signals nothing.
-    assert!(rt.is_draining());
-    assert_eq!(fake.kills(pane).expect("pane"), vec![KillPolicy::Tree]);
+    assert!(runtime.is_draining());
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_kill_policies(pane_id)
+            .expect("pane"),
+        vec![KillPolicy::Tree]
+    );
 }
 
 #[test]
 fn a_pane_the_backend_cannot_kill_leaves_every_other_pane_killed() {
-    let (mut rt, fake, _tx) = new_runtime_with_fake();
-    let live = PaneId::new();
-    let unknown = PaneId::new();
-    spawn_and_park(&mut rt, &fake, live);
+    let (mut runtime, fake_pty_backend, _event_sender) = build_test_server_with_fake_pty_backend();
+    let live_pane_id = PaneId::new();
+    let unknown_pane_id = PaneId::new();
+    spawn_test_pane_and_park(&mut runtime, &fake_pty_backend, live_pane_id);
     // A handle parked for a pane the backend never spawned: its kill answers
     // `PtyError::UnknownPane`, the kill the graceful stage drops.
-    rt.park_pane_pty(unknown, PtyHandle::detached(unknown), PANE_SIZE);
+    runtime.park_pane_pty(
+        unknown_pane_id,
+        PtyHandle::from_detached_pane_id(unknown_pane_id),
+        TEST_PTY_SIZE,
+    );
 
-    rt.shutdown();
+    runtime.shutdown();
 
-    assert!(rt.is_draining());
+    assert!(runtime.is_draining());
     assert_eq!(
-        fake.kills(live).expect("live pane"),
+        fake_pty_backend
+            .list_pane_kill_policies(live_pane_id)
+            .expect("live pane"),
         vec![KillPolicy::GracefulTree {
-            timeout: GRACEFUL_TIMEOUT_DURATION,
+            timeout_duration: GRACEFUL_TIMEOUT_DURATION,
         }]
     );
     assert_eq!(
-        fake.kills(unknown),
-        Err(PtyError::UnknownPane { pane: unknown })
+        fake_pty_backend.list_pane_kill_policies(unknown_pane_id),
+        Err(PtyError::UnknownPane {
+            pane_id: unknown_pane_id
+        })
     );
 }
 
 #[test]
 fn shutdown_stops_the_attached_control_socket_and_removes_its_endpoint_file() {
-    let (mut rt, _fake, tx) = new_runtime_with_fake();
+    let (mut runtime, _fake_pty_backend, event_sender) = build_test_server_with_fake_pty_backend();
     let session = SessionId::new();
-    let runtime_dir = test_runtime_dir("socket");
-    let ipc_server = IpcServer::start(&runtime_dir, session, tx.clone(), None).expect("serving");
-    let endpoint_path = EndpointFile::path(&runtime_dir, session);
+    let runtime_directory = build_test_server_directory("socket");
+    let ipc_server =
+        IpcServer::start(&runtime_directory, session, event_sender.clone(), None).expect("serving");
+    let endpoint_path = EndpointFile::resolve_endpoint_file_path(&runtime_directory, session);
     assert!(endpoint_path.exists(), "the session is advertised");
-    rt.attach_ipc_server(ipc_server);
+    runtime.attach_ipc_server(ipc_server);
 
-    rt.shutdown();
+    runtime.shutdown();
 
-    assert!(rt.is_draining());
-    assert!(rt.ipc_server().is_none());
+    assert!(runtime.is_draining());
+    assert!(runtime.ipc_server().is_none());
     assert!(!endpoint_path.exists());
-    let _ = std::fs::remove_dir_all(&runtime_dir);
+    let _ = std::fs::remove_dir_all(&runtime_directory);
 }

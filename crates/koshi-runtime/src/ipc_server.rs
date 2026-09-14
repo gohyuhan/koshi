@@ -61,21 +61,22 @@ use std::time::{Duration, SystemTime};
 use koshi_core::command::{CommandEnvelope, CommandSource};
 use koshi_core::ids::{ClientId, PaneId, SessionId};
 use koshi_ipc::endpoint::{
-    advert_path, remove_advert, remove_socket_file, shared_socket_addr, socket_addr, write_advert,
+    compute_shared_socket_address, compute_socket_address, remove_advertisement_marker,
+    remove_socket_file, resolve_advertisement_marker_path, write_advertisement_marker,
     EndpointFile,
 };
 use koshi_ipc::error::IpcError;
 use koshi_ipc::event::SessionEvent;
-use koshi_ipc::frame::{FrameImageChunk, PaintedFrame, MAX_FRAME_IMAGE_TRANSFERS};
+use koshi_ipc::frame::{FrameImageChunk, PaintedFrame, MAX_FRAME_IMAGE_TRANSFER_COUNT};
 use koshi_ipc::handshake::{Handshake, Peer};
-use koshi_ipc::plane::{self, Next};
+use koshi_ipc::plane::{self, RequestDisposition};
 use koshi_ipc::protocol::{
     ConnectionToken, GraphicsCapabilities, IncomingRequest, IpcErrorCode, IpcErrorPayload,
     IpcRequestKind, IpcResponse, IpcResult, SessionPlane,
 };
 use koshi_ipc::transport::{self, Connection, FrameWriter, Listener, ReadCloser};
 use koshi_ipc::validate::{
-    reclaim_stale_socket, validate_shared_socket_addr, validate_socket_addr,
+    reclaim_stale_socket, validate_shared_socket_address, validate_socket_address,
 };
 use koshi_ipc::wire::MaybeKnown;
 use koshi_observability::logging::recent_events;
@@ -91,7 +92,7 @@ use crate::runtime::frame::{
 /// How long the accept loop sleeps after a failed accept before it accepts
 /// again. A persistent accept error — say, the process is out of file
 /// descriptors — retries once per interval.
-const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
+const ACCEPT_RETRY_DELAY_DURATION: Duration = Duration::from_millis(100);
 
 /// The version of the binary this session server is, reported in its Hello
 /// answer.
@@ -113,11 +114,11 @@ pub type OtherUsersSetting = Arc<dyn Fn() -> bool + Send + Sync>;
 /// token it carries stays readable only by the user who started the session.
 pub struct OtherUsers {
     /// The machine-wide directory koshi shares between local users, from
-    /// `koshi_paths::shared_sessions_dir`. This user's directory inside it
+    /// `koshi_paths::resolve_shared_sessions_directory`. This user's directory inside it
     /// holds the control socket.
-    pub shared_dir: PathBuf,
+    pub shared_directory: PathBuf,
     /// The live read of the `allow-other-users` setting.
-    pub still_on: OtherUsersSetting,
+    pub is_enabled: OtherUsersSetting,
 }
 
 /// What the control socket takes in: every connection being served, how many of
@@ -125,62 +126,72 @@ pub struct OtherUsers {
 /// the session.
 ///
 /// A serving thread reads `closed` and hands its event to the dispatcher under
-/// one shared borrow of the state, and [`close`](Intake::close) sets `closed`
+/// one shared borrow of the intake, and [`close_intake`](Intake::close_intake) sets
+/// `is_closed`
 /// under the exclusive borrow. So a hand-off either finished before the close,
 /// or reads the closed intake and never happens: once
-/// [`close`](Intake::close) returns, no serving thread sends another event.
+/// [`close_intake`](Intake::close_intake) returns, no serving thread sends another event.
 #[derive(Debug, Default)]
 struct Intake {
-    state: RwLock<IntakeState>,
+    intake_state: RwLock<IntakeState>,
 }
 
 /// What an [`Intake`] holds.
 #[derive(Debug, Default)]
 struct IntakeState {
-    /// `true` once [`Intake::close`] ran. No event reaches the dispatcher from
+    /// `true` once [`Intake::close_intake`] ran. No event reaches the dispatcher from
     /// here.
-    closed: bool,
+    is_closed: bool,
     /// How many connections carry an attached client and are still being read.
-    attached: usize,
+    attached_connection_count: usize,
     /// The read direction of every connection being served, under the number
     /// the intake filed it as. The [`ServedConnection`] its thread holds
     /// removes the entry when that thread ends.
-    readers: HashMap<u64, ReadCloser>,
+    reader_by_connection_number: HashMap<u64, ReadCloser>,
     /// The number the next accepted connection is filed under.
-    next: u64,
+    next_connection_number: u64,
 }
 
 impl Intake {
     /// File `connection`'s read direction and hand back the entry its serving
     /// thread holds. `None` means the connection is not served: intake is
     /// closed, or its read direction could not be taken.
-    fn accept(self: &Arc<Self>, connection: &Connection) -> Option<ServedConnection> {
+    fn accept_connection(self: &Arc<Self>, connection: &Connection) -> Option<ServedConnection> {
         let reader = connection.read_closer().ok()?;
-        let mut state = self.state.write().expect("intake");
-        if state.closed {
+        let mut intake_state = self.intake_state.write().expect("intake");
+        if intake_state.is_closed {
             return None;
         }
-        let number = state.next;
-        state.next += 1;
-        state.readers.insert(number, reader);
+        let connection_number = intake_state.next_connection_number;
+        intake_state.next_connection_number += 1;
+        intake_state
+            .reader_by_connection_number
+            .insert(connection_number, reader);
         Some(ServedConnection {
             intake: Arc::clone(self),
-            number,
+            connection_number,
         })
     }
 
     /// Hand `event` to the dispatcher over the runtime inbox. `false` means it
     /// was not handed over — intake is closed, or the dispatcher is gone — and
     /// the caller's connection ends.
-    fn hand_over(&self, inbox_tx: &Sender<RuntimeEvent>, event: RuntimeEvent) -> bool {
-        let state = self.state.read().expect("intake");
-        !state.closed && inbox_tx.send(event).is_ok()
+    fn hand_over_event(
+        &self,
+        inbox_tx: &Sender<RuntimeEvent>,
+        runtime_event: RuntimeEvent,
+    ) -> bool {
+        let intake_state = self.intake_state.read().expect("intake");
+        !intake_state.is_closed && inbox_tx.send(runtime_event).is_ok()
     }
 
     /// Count one attached client's connection as being read, and hand back the
     /// entry the thread reading it holds.
-    fn attached(self: &Arc<Self>) -> AttachedConnection {
-        self.state.write().expect("intake").attached += 1;
+    fn record_attached_connection(self: &Arc<Self>) -> AttachedConnection {
+        self.intake_state
+            .write()
+            .expect("intake")
+            .attached_connection_count += 1;
         AttachedConnection {
             intake: Arc::clone(self),
         }
@@ -188,25 +199,28 @@ impl Intake {
 
     /// How many connections carry an attached client and are still being read.
     fn attached_connections(&self) -> usize {
-        self.state.read().expect("intake").attached
+        self.intake_state
+            .read()
+            .expect("intake")
+            .attached_connection_count
     }
 
-    /// Take connections again after a [`close`](Intake::close): a connection
+    /// Take connections again after a [`close_intake`](Intake::close_intake): a connection
     /// accepted from here on is served, and a serving thread hands its events
     /// over again.
     ///
     /// The connections closed by that call stay closed.
-    fn reopen(&self) {
-        self.state.write().expect("intake").closed = false;
+    fn reopen_intake(&self) {
+        self.intake_state.write().expect("intake").is_closed = false;
     }
 
     /// Stop events reaching the dispatcher and close the read direction of
     /// every connection being served, so each thread ends without reading
     /// another request.
-    fn close(&self) {
-        let mut state = self.state.write().expect("intake");
-        state.closed = true;
-        for reader in state.readers.values() {
+    fn close_intake(&self) {
+        let mut intake_state = self.intake_state.write().expect("intake");
+        intake_state.is_closed = true;
+        for reader in intake_state.reader_by_connection_number.values() {
             reader.close();
         }
     }
@@ -222,7 +236,11 @@ struct AttachedConnection {
 
 impl Drop for AttachedConnection {
     fn drop(&mut self) {
-        self.intake.state.write().expect("intake").attached -= 1;
+        self.intake
+            .intake_state
+            .write()
+            .expect("intake")
+            .attached_connection_count -= 1;
     }
 }
 
@@ -234,7 +252,7 @@ struct ServedConnection {
     /// its events over through.
     intake: Arc<Intake>,
     /// The number this connection is filed under.
-    number: u64,
+    connection_number: u64,
 }
 
 /// The accepted client state consumed by one attached event stream.
@@ -242,21 +260,21 @@ struct AttachedStream {
     /// Client whose input and output use this stream.
     client_id: ClientId,
     /// Deliveries waiting to be written to the client.
-    events: Receiver<Delivery>,
+    deliveries: Receiver<Delivery>,
     /// Shared session-ending notice read by the writer.
     ending_notice: Arc<EndingNotice>,
     /// Graphics capabilities reported by this connection.
-    graphics: GraphicsCapabilities,
+    graphics_capabilities: GraphicsCapabilities,
 }
 
 impl Drop for ServedConnection {
     fn drop(&mut self) {
         self.intake
-            .state
+            .intake_state
             .write()
             .expect("intake")
-            .readers
-            .remove(&self.number);
+            .reader_by_connection_number
+            .remove(&self.connection_number);
     }
 }
 
@@ -268,21 +286,21 @@ impl Drop for ServedConnection {
 #[derive(Debug)]
 pub struct IpcServer {
     /// The control-socket address the accept loop is serving.
-    addr: String,
-    /// The endpoint file advertising `addr` and the connection token.
+    socket_address: String,
+    /// The endpoint file advertising `socket_address` and the connection token.
     endpoint_path: PathBuf,
     /// The empty marker naming this session among those other local users may
     /// reach, written on Windows where a pipe has no filesystem entry. `None`
     /// on Unix, and `None` for a session only its own user may reach.
-    advert: Option<PathBuf>,
+    shared_socket_marker_path: Option<PathBuf>,
     /// Set by [`shutdown`](Self::shutdown); the accept loop exits when it
     /// observes the flag.
     shutting_down: Arc<AtomicBool>,
     /// The secret a connection presents at Hello, shared with the accept loop,
     /// which reads it for each connection it accepts.
-    token: Arc<RwLock<ConnectionToken>>,
+    connection_token: Arc<RwLock<ConnectionToken>>,
     /// What the socket takes in, shared with every serving thread.
-    intake: Arc<Intake>,
+    connection_intake: Arc<Intake>,
     /// The accept loop, joined at shutdown. `None` once
     /// [`stop`](Self::stop) has taken it out to join it.
     accept_thread: Option<JoinHandle<()>>,
@@ -299,7 +317,7 @@ impl IpcServer {
     /// exists without a listener behind it. A failed endpoint write unwinds
     /// the bind and leaves nothing behind.
     ///
-    /// `other_users` `None` binds the socket inside `runtime_dir`, where only
+    /// `other_users` `None` binds the socket inside `runtime_directory`, where only
     /// the user who started the session can reach it. `Some` binds it in this
     /// user's directory under the machine-wide shared directory instead and
     /// opens it to the other local users: mode `0666` on Unix, a pipe carrying
@@ -308,95 +326,104 @@ impl IpcServer {
     /// is written to the same private path at the same `0600` mode either way;
     /// only the address it carries differs.
     pub fn start(
-        runtime_dir: &Path,
+        runtime_directory: &Path,
         session: SessionId,
         inbox_tx: Sender<RuntimeEvent>,
         other_users: Option<OtherUsers>,
     ) -> Result<IpcServer, IpcError> {
-        koshi_paths::ensure_private_dir(runtime_dir).map_err(|error| IpcError::Transport {
-            detail: format!(
-                "could not create the runtime directory {}: {error}",
-                runtime_dir.display()
-            ),
+        koshi_paths::ensure_private_directory(runtime_directory).map_err(|directory_error| {
+            IpcError::Transport {
+                error_detail: format!(
+                    "could not create the runtime directory {}: {directory_error}",
+                    runtime_directory.display()
+                ),
+            }
         })?;
-        let (addr, advert) = match &other_users {
+        let (socket_address, shared_socket_marker_path) = match &other_users {
             None => {
-                let addr = socket_addr(runtime_dir, session);
-                validate_socket_addr(&addr, runtime_dir)?;
-                (addr, None)
+                let socket_address = compute_socket_address(runtime_directory, session);
+                validate_socket_address(&socket_address, runtime_directory)?;
+                (socket_address, None)
             }
             Some(other_users) => {
-                let shared_user_dir = ensure_shared_dirs(&other_users.shared_dir)?;
-                let addr = shared_socket_addr(&shared_user_dir, session);
-                validate_shared_socket_addr(&addr, &shared_user_dir)?;
+                let shared_user_directory =
+                    ensure_shared_directories(&other_users.shared_directory)?;
+                let socket_address = compute_shared_socket_address(&shared_user_directory, session);
+                validate_shared_socket_address(&socket_address, &shared_user_directory)?;
                 // A Windows pipe has no filesystem entry, so a marker file is
                 // what names the session listening on one.
-                let advert = cfg!(windows).then(|| advert_path(&shared_user_dir, session));
-                (addr, advert)
+                let shared_socket_marker_path = cfg!(windows)
+                    .then(|| resolve_advertisement_marker_path(&shared_user_directory, session));
+                (socket_address, shared_socket_marker_path)
             }
         };
-        reclaim_stale_socket(&addr)?;
+        reclaim_stale_socket(&socket_address)?;
         let listener = if other_users.is_some() {
-            Listener::bind_shared(&addr)?
+            Listener::bind_shared(&socket_address)?
         } else {
-            Listener::bind(&addr)?
+            Listener::bind(&socket_address)?
         };
         #[cfg(unix)]
         if other_users.is_some() {
-            if let Err(error) = widen_socket(&addr) {
+            if let Err(socket_error) = widen_socket(&socket_address) {
                 drop(listener);
-                remove_socket_file(&addr);
-                return Err(error);
+                remove_socket_file(&socket_address);
+                return Err(socket_error);
             }
         }
 
-        let token = ConnectionToken::generate();
-        let endpoint_path = EndpointFile::path(runtime_dir, session);
+        let connection_token = ConnectionToken::generate();
+        let endpoint_path = EndpointFile::resolve_endpoint_file_path(runtime_directory, session);
         let endpoint = EndpointFile {
-            socket: addr.clone(),
-            token: token.clone(),
-            pid: std::process::id(),
+            socket_address: socket_address.clone(),
+            connection_token: connection_token.clone(),
+            process_id: std::process::id(),
         };
-        let advertised = endpoint.write(&endpoint_path).and_then(|()| match &advert {
-            None => Ok(()),
-            Some(advert) => write_advert(advert),
-        });
-        if let Err(error) = advertised {
+        let advertised =
+            endpoint.write_to_path(&endpoint_path).and_then(
+                |()| match &shared_socket_marker_path {
+                    None => Ok(()),
+                    Some(shared_socket_marker_path) => {
+                        write_advertisement_marker(shared_socket_marker_path)
+                    }
+                },
+            );
+        if let Err(advertisement_error) = advertised {
             // Dropping the listener releases the address and unlinks the socket
             // file on Unix, so a failed start leaves nothing behind. The
             // endpoint write is atomic, so a file left at `endpoint_path` is an
             // older run's, naming the socket removed here.
             let _ = std::fs::remove_file(&endpoint_path);
             drop(listener);
-            remove_socket_file(&addr);
-            return Err(error);
+            remove_socket_file(&socket_address);
+            return Err(advertisement_error);
         }
 
-        let still_on = other_users.map(|other_users| other_users.still_on);
+        let allow_other_users_setting = other_users.map(|other_users| other_users.is_enabled);
         let shutting_down = Arc::new(AtomicBool::new(false));
         let accept_flag = Arc::clone(&shutting_down);
-        let intake = Arc::new(Intake::default());
-        let accept_intake = Arc::clone(&intake);
-        let token = Arc::new(RwLock::new(token));
-        let accept_token = Arc::clone(&token);
+        let connection_intake = Arc::new(Intake::default());
+        let accept_intake = Arc::clone(&connection_intake);
+        let connection_token = Arc::new(RwLock::new(connection_token));
+        let accept_connection_token = Arc::clone(&connection_token);
         let accept_thread = std::thread::spawn(move || {
-            accept_loop(
+            run_accept_loop(
                 &listener,
-                &accept_token,
+                &accept_connection_token,
                 &inbox_tx,
                 &accept_flag,
-                still_on.as_ref(),
+                allow_other_users_setting.as_ref(),
                 &accept_intake,
             );
         });
 
         Ok(IpcServer {
-            addr,
+            socket_address,
             endpoint_path,
-            advert,
+            shared_socket_marker_path,
             shutting_down,
-            token,
-            intake,
+            connection_token,
+            connection_intake,
             accept_thread: Some(accept_thread),
         })
     }
@@ -415,7 +442,7 @@ impl IpcServer {
     /// A connection accepted after this is closed without being served.
     /// Closing an already-closed intake changes nothing.
     pub fn close_intake(&self) {
-        self.intake.close();
+        self.connection_intake.close_intake();
     }
 
     /// Mint a fresh connection token, accept it from the next connection on,
@@ -431,18 +458,18 @@ impl IpcServer {
     /// the one this server accepts either way, so the endpoint file then
     /// advertises a token no connection is served under.
     pub fn rotate_token(&self) -> Result<(), IpcError> {
-        let fresh = ConnectionToken::generate();
+        let fresh_connection_token = ConnectionToken::generate();
         // Stored before the intake takes connections again, so no connection is
         // accepted under the token this replaces. Accepted before it is
         // advertised.
-        *self.token.write().expect("token") = fresh.clone();
-        self.intake.reopen();
+        *self.connection_token.write().expect("connection token") = fresh_connection_token.clone();
+        self.connection_intake.reopen_intake();
         let endpoint = EndpointFile {
-            socket: self.addr.clone(),
-            token: fresh,
-            pid: std::process::id(),
+            socket_address: self.socket_address.clone(),
+            connection_token: fresh_connection_token,
+            process_id: std::process::id(),
         };
-        endpoint.write(&self.endpoint_path)
+        endpoint.write_to_path(&self.endpoint_path)
     }
 
     /// How many attached clients' connections are still being read.
@@ -453,13 +480,13 @@ impl IpcServer {
     /// client's input is in the runtime inbox.
     #[must_use]
     pub fn attached_connections(&self) -> usize {
-        self.intake.attached_connections()
+        self.connection_intake.attached_connections()
     }
 
     /// The control-socket address this server is serving.
     #[must_use]
-    pub fn addr(&self) -> &str {
-        &self.addr
+    pub fn get_socket_address(&self) -> &str {
+        &self.socket_address
     }
 
     /// Stop serving: no further connection is accepted, the accept loop is
@@ -478,9 +505,9 @@ impl IpcServer {
     /// The teardown itself, safe to run at most once per field: the join is
     /// guarded by taking `accept_thread`, and removing an already-removed
     /// file is a no-op.
-    fn stop(&mut self) {
+    fn stop_ipc_server(&mut self) {
         self.shutting_down.store(true, Ordering::SeqCst);
-        if let Some(handle) = self.accept_thread.take() {
+        if let Some(accept_thread_handle) = self.accept_thread.take() {
             // The accept loop sits blocked in `accept`. A bare connect wakes it
             // and it reads the flag. That connection stays open across the join:
             // on Windows a connect that drops before `accept` runs can leave
@@ -488,67 +515,73 @@ impl IpcServer {
             // process is out of file descriptors — leaves the loop blocked and
             // skips the join; that thread ends with the process, and the files
             // below are removed either way.
-            if let Ok(wake) = Connection::connect(&self.addr) {
-                let _ = handle.join();
-                drop(wake);
+            if let Ok(wake_connection) = Connection::connect(&self.socket_address) {
+                let _ = accept_thread_handle.join();
+                drop(wake_connection);
             }
         }
         let _ = std::fs::remove_file(&self.endpoint_path);
-        if let Some(advert) = &self.advert {
-            remove_advert(advert);
+        if let Some(shared_socket_marker_path) = &self.shared_socket_marker_path {
+            remove_advertisement_marker(shared_socket_marker_path);
         }
-        remove_socket_file(&self.addr);
+        remove_socket_file(&self.socket_address);
     }
 }
 
 /// Create the machine-wide shared directory and this user's directory inside
 /// it, and hand back this user's directory: where a session other local users
 /// may reach binds its control socket.
-fn ensure_shared_dirs(shared_dir: &Path) -> Result<PathBuf, IpcError> {
-    koshi_paths::ensure_shared_base(shared_dir).map_err(|error| IpcError::Transport {
-        detail: format!(
-            "could not create the shared session directory {}: {error}",
-            shared_dir.display()
-        ),
-    })?;
-    koshi_paths::ensure_shared_user_dir(shared_dir).map_err(|error| IpcError::Transport {
-        detail: format!(
-            "could not create this user's directory under {}: {error}",
-            shared_dir.display()
-        ),
-    })
-}
-
-/// Set the socket file at `addr` to mode `0666`, so every local user of this
-/// machine may connect to it. Unix only: on Windows the address is a pipe name
-/// with no filesystem entry.
-#[cfg(unix)]
-fn widen_socket(addr: &str) -> Result<(), IpcError> {
-    use std::os::unix::fs::PermissionsExt;
-
-    std::fs::set_permissions(addr, std::fs::Permissions::from_mode(0o666)).map_err(|error| {
+fn ensure_shared_directories(shared_directory: &Path) -> Result<PathBuf, IpcError> {
+    koshi_paths::ensure_shared_base(shared_directory).map_err(|directory_error| {
         IpcError::Transport {
-            detail: format!("could not widen the control socket {addr}: {error}"),
+            error_detail: format!(
+                "could not create the shared session directory {}: {directory_error}",
+                shared_directory.display()
+            ),
+        }
+    })?;
+    koshi_paths::ensure_shared_user_directory(shared_directory).map_err(|directory_error| {
+        IpcError::Transport {
+            error_detail: format!(
+                "could not create this user's directory under {}: {directory_error}",
+                shared_directory.display()
+            ),
         }
     })
 }
 
-/// Which peer a newly accepted connection is gated as. `same_user` is what the
-/// OS reports about the process that connected, and `switch_on` is the
-/// `allow-other-users` setting read a moment ago.
+/// Set the socket file at `socket_address` to mode `0666`, so every local user of this
+/// machine may connect to it. Unix only: on Windows the address is a pipe name
+/// with no filesystem entry.
+#[cfg(unix)]
+fn widen_socket(socket_address: &str) -> Result<(), IpcError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(socket_address, std::fs::Permissions::from_mode(0o666)).map_err(
+        |permission_error| IpcError::Transport {
+            error_detail: format!(
+                "could not widen the control socket {socket_address}: {permission_error}"
+            ),
+        },
+    )
+}
+
+/// Which peer a newly accepted connection is gated as. `is_same_user` is what
+/// the OS reports about the process that connected, and `is_allow_other_users_enabled`
+/// is the setting read a moment ago.
 ///
 /// Another local user arriving while the setting is off is gated as a peer the
 /// handshake refuses with `OtherUsersOff`, so no request of theirs is served.
-fn admit(same_user: bool, switch_on: bool) -> Peer {
+fn resolve_peer(is_same_user: bool, is_allow_other_users_enabled: bool) -> Peer {
     Peer::Local {
-        same_user,
-        other_users_allowed: switch_on,
+        is_same_user,
+        is_other_user_access_allowed: is_allow_other_users_enabled,
     }
 }
 
 impl Drop for IpcServer {
     fn drop(&mut self) {
-        self.stop();
+        self.stop_ipc_server();
     }
 }
 
@@ -556,44 +589,63 @@ impl Drop for IpcServer {
 /// serving thread. A failed accept pauses briefly and retries, so one
 /// refused connection cannot stop the socket answering.
 ///
-/// `still_on` is the live read of the `allow-other-users` setting, and is
-/// `None` for a session only its own user may reach. Each connection is gated
+/// `allow_other_users_setting` is the live read of the `allow-other-users`
+/// setting, and is `None` for a session only its own user may reach. Each connection is gated
 /// by the user the OS reports for it; a connection whose user cannot be read
 /// is closed without being served.
 ///
-/// `intake` files each connection's read direction before its thread starts,
-/// and is what that thread hands its events over through. A connection the
-/// intake does not take — it is closed, or the read direction could not be
+/// `connection_intake` files each connection's read direction before its thread
+/// starts, and is what that thread hands its events over through. A connection
+/// the intake does not take — it is closed, or the read direction could not be
 /// taken — is closed without being served.
-fn accept_loop(
+fn run_accept_loop(
     listener: &Listener,
-    token: &RwLock<ConnectionToken>,
+    connection_token: &RwLock<ConnectionToken>,
     inbox_tx: &Sender<RuntimeEvent>,
     shutting_down: &AtomicBool,
-    still_on: Option<&OtherUsersSetting>,
-    intake: &Arc<Intake>,
+    allow_other_users_setting: Option<&OtherUsersSetting>,
+    connection_intake: &Arc<Intake>,
 ) {
-    transport::accept_until_shutdown(listener, shutting_down, ACCEPT_RETRY_DELAY, |connection| {
-        // The OS reports which user opened the connection, so a peer
-        // cannot claim to be another one.
-        let Ok(same_user) = connection.peer_is_same_user() else {
-            return;
-        };
-        let Some(served) = intake.accept(&connection) else {
-            return;
-        };
-        let peer = admit(same_user, still_on.is_some_and(|still_on| still_on()));
-        // Another local user's connection carries the setting with it,
-        // so each of their requests is checked against it again.
-        let live_setting = if same_user { None } else { still_on.cloned() };
-        // Read for each connection, so a token rotated after this
-        // server started is the one the next Hello is checked against.
-        let token = token.read().expect("token").clone();
-        let inbox_tx = inbox_tx.clone();
-        std::thread::spawn(move || {
-            serve_connection(connection, token, &inbox_tx, peer, live_setting, &served);
-        });
-    });
+    transport::accept_until_shutdown(
+        listener,
+        shutting_down,
+        ACCEPT_RETRY_DELAY_DURATION,
+        |connection| {
+            // The OS reports which user opened the connection, so a peer
+            // cannot claim to be another one.
+            let Ok(is_same_user) = connection.is_peer_same_user() else {
+                return;
+            };
+            let Some(served_connection) = connection_intake.accept_connection(&connection) else {
+                return;
+            };
+            let peer = resolve_peer(
+                is_same_user,
+                allow_other_users_setting.is_some_and(|is_enabled| is_enabled()),
+            );
+            // Another local user's connection carries the setting with it,
+            // so each of their requests is checked against it again.
+            let live_setting = if is_same_user {
+                None
+            } else {
+                allow_other_users_setting.cloned()
+            };
+            // Read for each connection, so a token rotated after this
+            // server started is the one the next Hello is checked against.
+            let connection_token = connection_token.read().expect("connection token").clone();
+            let inbox_tx = inbox_tx.clone();
+            std::thread::spawn(move || {
+                serve_connection(
+                    connection,
+                    connection_token,
+                    &inbox_tx,
+                    peer,
+                    live_setting,
+                    &served_connection,
+                );
+            });
+        },
+    );
 }
 
 /// Serve one connection until its peer hangs up or a fault closes it.
@@ -607,7 +659,7 @@ fn accept_loop(
 /// thread, from the process-wide log ring, and reaches no dispatcher.
 ///
 /// A `SubmitCommand` on this connection has its source stamped by
-/// [`cli_source`] before it crosses to the dispatcher: this connection carries
+/// [`stamp_cli_command_source`] before it crosses to the dispatcher: this connection carries
 /// a `koshi` CLI invocation.
 ///
 /// A `Restart` the dispatcher refuses is answered with
@@ -626,106 +678,117 @@ fn accept_loop(
 ///
 /// A `Leaving` request ends the connection with no answer.
 ///
-/// `served` is this connection's entry in the [`Intake`]: the intake holds this
-/// connection's read direction through it, and the entry is removed when this
-/// function returns. An intake that closes ends the connection, whatever the
-/// request was.
+/// `served_connection` is this connection's entry in the [`Intake`]: the intake
+/// holds this connection's read direction through it, and the entry is removed
+/// when this function returns. An intake that closes ends the connection,
+/// whatever the request was.
 fn serve_connection(
     mut connection: Connection,
-    token: ConnectionToken,
+    connection_token: ConnectionToken,
     inbox_tx: &Sender<RuntimeEvent>,
     peer: Peer,
     live_setting: Option<OtherUsersSetting>,
-    served: &ServedConnection,
+    served_connection: &ServedConnection,
 ) {
-    let mut gate = Handshake::new(token, peer);
+    let mut gate = Handshake::from_expected_token_and_peer(connection_token, peer);
     // The setting can change while this connection is open, so it is read
     // again for each request. `None` is a connection from the user who started
     // the session, whose admission cannot be withdrawn.
-    let admission = live_setting.clone();
-    let admitted = move || match &admission {
+    let admission_setting = live_setting.clone();
+    let is_admitted = move || match &admission_setting {
         None => true,
-        Some(still_on) => still_on(),
+        Some(is_enabled) => is_enabled(),
     };
     loop {
-        let (request_id, kind) = match plane::next_request::<SessionPlane>(
+        let (request_id, request_kind) = match plane::next_request::<SessionPlane>(
             &mut connection,
             &mut gate,
             BUILD_VERSION,
-            &admitted,
+            &is_admitted,
         ) {
-            Next::Answered => continue,
-            Next::Stop => return,
-            Next::Dispatch { request_id, kind } => (Some(request_id), kind),
+            RequestDisposition::Answered => continue,
+            RequestDisposition::Stop => return,
+            RequestDisposition::Dispatch {
+                request_id,
+                request_kind,
+            } => (Some(request_id), request_kind),
         };
 
-        let response = match kind {
+        let outgoing_response = match request_kind {
             // Answered before dispatch, so it never reaches this match.
             IpcRequestKind::Hello { .. } => {
                 unreachable!("Hello is answered by the connection thread before dispatch")
             }
             IpcRequestKind::SubmitCommand(envelope) => {
-                let envelope = cli_source(*envelope);
-                let answer = ask_dispatcher(&served.intake, inbox_tx, |reply| RuntimeEvent::Ipc {
-                    envelope,
-                    reply,
-                });
-                let Some(result) = answer else {
+                let envelope = stamp_cli_command_source(*envelope);
+                let dispatch_response = request_dispatcher_response(
+                    &served_connection.intake,
+                    inbox_tx,
+                    |response_sender| RuntimeEvent::Ipc {
+                        envelope,
+                        response_sender,
+                    },
+                );
+                let Some(command_result) = dispatch_response else {
                     return;
                 };
                 IpcResponse {
                     request_id,
-                    result: IpcResult::CommandResult(result),
+                    answer_result: IpcResult::CommandResult(command_result),
                 }
             }
             IpcRequestKind::Attach {
-                viewport,
-                filter,
-                resume,
+                viewport: viewport_size,
+                event_filter,
+                resume_client_id,
                 resume_token,
                 pane_area,
-                graphics,
+                graphics_capabilities,
                 cell_size,
             } => {
-                let answer =
-                    ask_dispatcher(&served.intake, inbox_tx, |reply| RuntimeEvent::IpcAttach {
-                        resume,
+                let dispatch_response = request_dispatcher_response(
+                    &served_connection.intake,
+                    inbox_tx,
+                    |response_sender| RuntimeEvent::IpcAttach {
+                        resume_client_id,
                         resume_token,
-                        viewport,
+                        viewport_size,
                         pane_area,
                         cell_size,
-                        filter: filter.into(),
+                        event_filter: event_filter.into(),
                         attached_at: SystemTime::now(),
-                        remote: gate.remote_caller(),
-                        reply,
-                    });
+                        is_remote: gate.is_remote_caller(),
+                        response_sender,
+                    },
+                );
                 // No running session, or no dispatcher left to mint the
                 // client: the process is past its last session, so the
                 // socket is as good as gone.
-                let Some(Some(accepted)) = answer else {
+                let Some(Some(accepted_client)) = dispatch_response else {
                     return;
                 };
                 // Counted before the answer is written and dropped once the
                 // stream below ends, so a caller that reads its `Attached`
                 // frame never sees this connection uncounted.
-                let _counted = served.intake.attached();
-                let attached = IpcResponse {
+                let _attached_connection_guard =
+                    served_connection.intake.record_attached_connection();
+                let attached_response = IpcResponse {
                     request_id,
-                    result: IpcResult::Attached {
-                        client_id: accepted.client_id,
-                        session_id: accepted.session_id,
-                        structure: accepted.structure,
-                        resume_token: Some(accepted.resume_token),
-                        pane_area: accepted.pane_area,
+                    answer_result: IpcResult::Attached {
+                        client_id: accepted_client.client_id,
+                        session_id: accepted_client.session_id,
+                        session_structure: accepted_client.session_structure,
+                        resume_token: Some(accepted_client.resume_token),
+                        pane_area: accepted_client.pane_area,
                     },
                 };
-                if connection.send(&attached).is_err() {
-                    served.intake.hand_over(
+                if connection.send(&attached_response).is_err() {
+                    served_connection.intake.hand_over_event(
                         inbox_tx,
                         RuntimeEvent::ClientDetached {
-                            client_id: accepted.client_id,
+                            client_id: accepted_client.client_id,
                             detached_at: SystemTime::now(),
-                            streamed: false,
+                            is_streamed: false,
                         },
                     );
                     return;
@@ -735,14 +798,14 @@ fn serve_connection(
                 stream_events(
                     connection,
                     AttachedStream {
-                        client_id: accepted.client_id,
-                        events: accepted.events,
-                        ending_notice: accepted.ending_notice,
-                        graphics,
+                        client_id: accepted_client.client_id,
+                        deliveries: accepted_client.deliveries,
+                        ending_notice: accepted_client.ending_notice,
+                        graphics_capabilities,
                     },
                     inbox_tx,
                     live_setting,
-                    served,
+                    served_connection,
                 );
                 return;
             }
@@ -756,53 +819,62 @@ fn serve_connection(
             | IpcRequestKind::Paste { .. }
             | IpcRequestKind::Mouse(_) => return,
             IpcRequestKind::Discovery => {
-                let answer = ask_dispatcher(&served.intake, inbox_tx, |reply| {
-                    RuntimeEvent::IpcDiscovery { reply }
-                });
+                let dispatch_response = request_dispatcher_response(
+                    &served_connection.intake,
+                    inbox_tx,
+                    |response_sender| RuntimeEvent::IpcDiscovery { response_sender },
+                );
                 // No running session: the process is past its last session, so
                 // the socket is as good as gone.
-                let Some(Some(overview)) = answer else {
+                let Some(Some(overview)) = dispatch_response else {
                     return;
                 };
                 IpcResponse {
                     request_id,
-                    result: IpcResult::Overview(overview),
+                    answer_result: IpcResult::Overview(overview),
                 }
             }
-            IpcRequestKind::Layout { tab } => {
-                let answer = ask_dispatcher(&served.intake, inbox_tx, |reply| {
-                    RuntimeEvent::IpcLayout { tab, reply }
-                });
+            IpcRequestKind::Layout { tab_id } => {
+                let dispatch_response = request_dispatcher_response(
+                    &served_connection.intake,
+                    inbox_tx,
+                    |response_sender| RuntimeEvent::IpcLayout {
+                        tab_id,
+                        response_sender,
+                    },
+                );
                 // No running session: the process is past its last session, so
                 // the socket is as good as gone.
-                let Some(Some(layout)) = answer else {
+                let Some(Some(session_layout)) = dispatch_response else {
                     return;
                 };
                 IpcResponse {
                     request_id,
-                    result: IpcResult::Layout(layout),
+                    answer_result: IpcResult::Layout(session_layout),
                 }
             }
             IpcRequestKind::RecentEvents => IpcResponse {
                 request_id,
-                result: IpcResult::RecentEvents(recent_events::recent()),
+                answer_result: IpcResult::RecentEvents(recent_events::list_recent_events()),
             },
             IpcRequestKind::Restart => {
-                let answer = ask_dispatcher(&served.intake, inbox_tx, |reply| {
-                    RuntimeEvent::IpcRestart { reply }
-                });
-                match answer {
+                let dispatch_response = request_dispatcher_response(
+                    &served_connection.intake,
+                    inbox_tx,
+                    |response_sender| RuntimeEvent::IpcRestart { response_sender },
+                );
+                match dispatch_response {
                     Some(Ok(())) => IpcResponse {
                         request_id,
-                        result: IpcResult::Restarting,
+                        answer_result: IpcResult::Restarting,
                     },
                     // The dispatcher named what is wrong; nothing was torn
                     // down, so the connection keeps serving.
-                    Some(Err(message)) => IpcResponse {
+                    Some(Err(restart_error_message)) => IpcResponse {
                         request_id,
-                        result: IpcResult::Error(IpcErrorPayload {
+                        answer_result: IpcResult::Error(IpcErrorPayload {
                             code: IpcErrorCode::MalformedRequest,
-                            message,
+                            message: restart_error_message,
                         }),
                     },
                     // No dispatcher left to swap anything: the process is
@@ -813,7 +885,7 @@ fn serve_connection(
             // No answer belongs to this one.
             IpcRequestKind::Leaving => return,
         };
-        if connection.send(&response).is_err() {
+        if connection.send(&outgoing_response).is_err() {
             return;
         }
     }
@@ -834,7 +906,7 @@ fn serve_connection(
 /// gone all end the reading loop.
 ///
 /// A `SubmitCommand` on this connection has its source stamped by
-/// [`client_source`], so it is attributed to `client_id` and to no other
+/// [`stamp_client_command_source`], so it is attributed to `client_id` and to no other
 /// client.
 ///
 /// Either half ending detaches the client, which removes its record and drops
@@ -877,18 +949,18 @@ fn stream_events(
     stream: AttachedStream,
     inbox_tx: &Sender<RuntimeEvent>,
     live_setting: Option<OtherUsersSetting>,
-    served: &ServedConnection,
+    served_connection: &ServedConnection,
 ) {
     let AttachedStream {
         client_id,
-        events,
+        deliveries,
         ending_notice,
-        graphics,
+        graphics_capabilities,
     } = stream;
     let (mut reader, mut writer) = connection.split();
     let writer_inbox = inbox_tx.clone();
-    let writer_intake = Arc::clone(&served.intake);
-    ending_notice.writer_started();
+    let writer_intake = Arc::clone(&served_connection.intake);
+    ending_notice.record_writer_started();
     std::thread::spawn(move || {
         let mut image_cache = ConnectionImageCache::new();
         loop {
@@ -896,9 +968,9 @@ fn stream_events(
             // is still queued for it goes unwritten. A queue the server already
             // closed detached this client before the session ended, so its own
             // goodbye is what it reads.
-            if let Some(ending) = ending_notice.raised() {
-                let frame = loop {
-                    match events.try_recv() {
+            if let Some(ending) = ending_notice.get_session_ending() {
+                let terminal_event = loop {
+                    match deliveries.try_recv() {
                         Ok(_) => {}
                         Err(mpsc::TryRecvError::Empty) => {
                             break match ending {
@@ -909,10 +981,10 @@ fn stream_events(
                         Err(mpsc::TryRecvError::Disconnected) => break SessionEvent::Detached,
                     }
                 };
-                let _ = writer.send(&frame);
+                let _ = writer.send(&terminal_event);
                 break;
             }
-            let Ok(delivery) = events.recv() else {
+            let Ok(delivery) = deliveries.recv() else {
                 // The queue closed, which the server does when it detaches this
                 // client. `recv` hands back everything queued before the close,
                 // so the goodbye follows the events that preceded it.
@@ -920,9 +992,13 @@ fn stream_events(
                 break;
             };
             let write_failed = match &delivery {
-                Delivery::Frame(snapshot) => {
-                    send_painted_frame(&mut writer, &mut image_cache, snapshot, graphics, client_id)
-                }
+                Delivery::Frame(snapshot) => send_painted_frame(
+                    &mut writer,
+                    &mut image_cache,
+                    snapshot,
+                    graphics_capabilities,
+                    client_id,
+                ),
                 _ => false,
             };
             if write_failed {
@@ -931,12 +1007,20 @@ fn stream_events(
             if matches!(delivery, Delivery::Frame(_)) {
                 continue;
             }
-            let event = wire_event(&delivery);
-            if let Some(event) = event {
-                let write_failed = match writer.send(&event) {
+            let session_event = wire_event(&delivery);
+            if let Some(session_event) = session_event {
+                let write_failed = match writer.send(&session_event) {
                     Ok(()) => false,
-                    Err(IpcError::FrameTooLarge { len, max }) => {
-                        tracing::warn!(%client_id, len, max, "frame over the cap was not sent");
+                    Err(IpcError::FrameTooLarge {
+                        frame_byte_count,
+                        maximum_frame_byte_count,
+                    }) => {
+                        tracing::warn!(
+                            %client_id,
+                            frame_byte_count,
+                            maximum_frame_byte_count,
+                            "frame over the cap was not sent"
+                        );
                         false
                     }
                     Err(_) => true,
@@ -946,65 +1030,74 @@ fn stream_events(
                 }
                 // `Quit` and `Restarting` are the stream's terminal frames; the
                 // loop ends on either without waiting for the queue to close.
-                if matches!(event, SessionEvent::Quit | SessionEvent::Restarting) {
+                if matches!(session_event, SessionEvent::Quit | SessionEvent::Restarting) {
                     break;
                 }
             }
         }
-        writer_intake.hand_over(
+        writer_intake.hand_over_event(
             &writer_inbox,
             RuntimeEvent::ClientDetached {
                 client_id,
                 detached_at: SystemTime::now(),
-                streamed: true,
+                is_streamed: true,
             },
         );
-        ending_notice.writer_ended();
+        ending_notice.record_writer_ended();
     });
 
-    while let Ok(request) = reader.recv::<IncomingRequest>() {
+    while let Ok(incoming_request) = reader.recv::<IncomingRequest>() {
         // The setting can change while this client is attached, so it is read
         // again for each frame that client sends.
-        if live_setting.as_ref().is_some_and(|still_on| !still_on()) {
+        if live_setting
+            .as_ref()
+            .is_some_and(|is_enabled| !is_enabled())
+        {
             break;
         }
-        let kind = match request.kind {
-            MaybeKnown::Known(kind) => kind,
+        let request_kind = match incoming_request.request_kind {
+            MaybeKnown::Known(request_kind) => request_kind,
             // A kind this build does not have comes from a newer koshi. This
             // connection carries the client's typing, so the one request is
             // dropped and the client keeps its stream.
-            MaybeKnown::Unknown { name } => {
-                tracing::debug!(%client_id, %name, "request kind this build does not have");
+            MaybeKnown::Unknown { variant_name } => {
+                tracing::debug!(%client_id, %variant_name, "request kind this build does not have");
                 continue;
             }
         };
-        let event = match kind {
-            IpcRequestKind::CellSize { size } => RuntimeEvent::CellSize { client_id, size },
+        let runtime_event = match request_kind {
+            IpcRequestKind::CellSize { cell_size } => RuntimeEvent::CellSize {
+                client_id,
+                cell_size,
+            },
             IpcRequestKind::KeyPress { chord } => RuntimeEvent::ClientKeyPress { client_id, chord },
             IpcRequestKind::Resize {
-                viewport,
+                viewport: viewport_size,
                 pane_area,
                 cell_size,
             } => RuntimeEvent::Resize {
                 client_id,
-                size: viewport,
+                viewport_size,
                 pane_area,
                 cell_size,
             },
-            IpcRequestKind::Paste { text } => RuntimeEvent::HostPaste { client_id, text },
-            IpcRequestKind::Mouse(actions) => RuntimeEvent::ClientMouse {
+            IpcRequestKind::Paste { pasted_text } => RuntimeEvent::HostPaste {
                 client_id,
-                request_id: request.request_id,
-                actions,
+                pasted_text,
+            },
+            IpcRequestKind::Mouse(mouse_actions) => RuntimeEvent::ClientMouse {
+                client_id,
+                request_id: incoming_request.request_id,
+                mouse_actions,
             },
             IpcRequestKind::SubmitCommand(envelope) => {
                 // The result is answered by the next painted frame. The reply
                 // channel's receiving end drops here, and the dispatcher's send
                 // into it fails.
-                let (reply, _) = mpsc::channel();
+                let (response_sender, _) = mpsc::channel();
                 RuntimeEvent::Ipc {
-                    envelope: client_source(*envelope, client_id),
-                    reply,
+                    envelope: stamp_client_command_source(*envelope, client_id),
+                    response_sender,
                 }
             }
             // The client sends nothing more on this connection, and everything
@@ -1017,151 +1110,200 @@ fn stream_events(
             | IpcRequestKind::RecentEvents
             | IpcRequestKind::Restart => break,
         };
-        if !served.intake.hand_over(inbox_tx, event) {
+        if !served_connection
+            .intake
+            .hand_over_event(inbox_tx, runtime_event)
+        {
             break;
         }
     }
-    served.intake.hand_over(
+    served_connection.intake.hand_over_event(
         inbox_tx,
         RuntimeEvent::ClientDetached {
             client_id,
             detached_at: SystemTime::now(),
-            streamed: true,
+            is_streamed: true,
         },
     );
 }
 
 /// One image record retained while its placement remains in this connection's frame.
 #[derive(Clone)]
-struct CachedFrameImage {
+struct CachedConnectionImage {
     /// Identity used by painted frames and image transfer events.
-    content_id: u64,
-    /// The record uploaded for this identity. `None` remains a placeholder.
-    record: Option<Arc<ImageRecord>>,
+    image_content_id: u64,
+    /// The image record uploaded for this identity. `None` remains a placeholder.
+    image_record: Option<Arc<ImageRecord>>,
 }
 
 /// Image identities and records that belong to one attached connection.
 struct ConnectionImageCache {
     /// Current records, keyed by pane and terminal-local placement identity.
-    images: HashMap<(PaneId, u64), CachedFrameImage>,
+    cached_image_by_pane_and_placement_id: HashMap<(PaneId, u64), CachedConnectionImage>,
     /// The next nonzero connection-local content identity.
-    next_content_id: u64,
+    next_image_content_id: u64,
     /// Whether the next successful frame must invalidate the client's records.
-    reset_required: bool,
+    needs_image_cache_reset: bool,
 }
 
 impl ConnectionImageCache {
     /// Build an empty cache whose first image identity is 1.
     fn new() -> Self {
         Self {
-            images: HashMap::new(),
-            next_content_id: 1,
-            reset_required: false,
+            cached_image_by_pane_and_placement_id: HashMap::new(),
+            next_image_content_id: 1,
+            needs_image_cache_reset: false,
         }
     }
 
     /// Assign stable content identities and list records this connection has not received.
-    fn prepare(&mut self, snapshot: &RenderSnapshot) -> PreparedImageFrame {
-        let placements = snapshot.panes.iter().flat_map(|pane| {
-            pane.image_placements
-                .iter()
-                .map(move |placement| ((pane.id, placement.id()), placement))
-        });
-        let placements: Vec<((PaneId, u64), &ImagePlacementSnapshot)> = placements.collect();
-        let changed_count = placements
+    fn prepare_image_frame(&mut self, render_snapshot: &RenderSnapshot) -> PreparedImageFrame {
+        let image_placements = render_snapshot
+            .pane_snapshots
             .iter()
-            .filter(|(key, placement)| {
-                self.images
-                    .get(key)
-                    .is_none_or(|cached| !same_record(cached.record.as_ref(), placement.record()))
+            .flat_map(|pane_snapshot| {
+                pane_snapshot.image_placement_snapshots.iter().map(
+                    move |image_placement_snapshot| {
+                        (
+                            (
+                                pane_snapshot.pane_id,
+                                image_placement_snapshot.get_placement_id(),
+                            ),
+                            image_placement_snapshot,
+                        )
+                    },
+                )
+            });
+        let image_placements: Vec<((PaneId, u64), &ImagePlacementSnapshot)> =
+            image_placements.collect();
+        let changed_image_count = image_placements
+            .iter()
+            .filter(|(placement_key, image_placement)| {
+                self.cached_image_by_pane_and_placement_id
+                    .get(placement_key)
+                    .is_none_or(|cached_image| {
+                        !is_same_image_record(
+                            cached_image.image_record.as_ref(),
+                            image_placement.get_image_record(),
+                        )
+                    })
             })
             .count();
-        let available = if self.next_content_id == 0 {
+        let available_image_content_count = if self.next_image_content_id == 0 {
             0
         } else {
-            u64::MAX - self.next_content_id + 1
+            u64::MAX - self.next_image_content_id + 1
         };
-        let reset = self.reset_required
-            || u64::try_from(changed_count).map_or(true, |count| count > available);
-        if reset {
-            self.images.clear();
-            self.next_content_id = 1;
-            self.reset_required = false;
+        let should_reset_image_cache = self.needs_image_cache_reset
+            || u64::try_from(changed_image_count).map_or(true, |image_count| {
+                image_count > available_image_content_count
+            });
+        if should_reset_image_cache {
+            self.cached_image_by_pane_and_placement_id.clear();
+            self.next_image_content_id = 1;
+            self.needs_image_cache_reset = false;
         }
 
-        let mut uploads = Vec::new();
-        let mut retained = HashSet::with_capacity(placements.len());
-        let mut content_by_record = self
-            .images
+        let mut image_uploads = Vec::new();
+        let mut retained_placement_keys = HashSet::with_capacity(image_placements.len());
+        let mut image_content_id_by_memory_address = self
+            .cached_image_by_pane_and_placement_id
             .values()
-            .filter_map(|cached| {
-                cached
-                    .record
-                    .as_ref()
-                    .map(|record| (Arc::as_ptr(&record.image), cached.content_id))
+            .filter_map(|cached_image| {
+                cached_image.image_record.as_ref().map(|image_record| {
+                    (
+                        Arc::as_ptr(&image_record.image),
+                        cached_image.image_content_id,
+                    )
+                })
             })
             .collect::<HashMap<_, _>>();
-        for (key, placement) in placements {
-            retained.insert(key);
-            let record = placement.record_arc();
-            let unchanged = self
-                .images
-                .get(&key)
-                .is_some_and(|cached| same_record(cached.record.as_ref(), record.as_deref()));
-            if unchanged {
+        for (placement_key, image_placement) in image_placements {
+            retained_placement_keys.insert(placement_key);
+            let image_record = image_placement.clone_image_record();
+            let is_unchanged = self
+                .cached_image_by_pane_and_placement_id
+                .get(&placement_key)
+                .is_some_and(|cached_image| {
+                    is_same_image_record(
+                        cached_image.image_record.as_ref(),
+                        image_record.as_deref(),
+                    )
+                });
+            if is_unchanged {
                 continue;
             }
-            let content_id = record
+            let image_content_id = image_record
                 .as_ref()
-                .and_then(|record| content_by_record.get(&Arc::as_ptr(&record.image)).copied())
+                .and_then(|image_record| {
+                    image_content_id_by_memory_address
+                        .get(&Arc::as_ptr(&image_record.image))
+                        .copied()
+                })
                 .unwrap_or_else(|| {
-                    let content_id = self.next_content_id;
-                    self.next_content_id = self.next_content_id.checked_add(1).unwrap_or(0);
-                    if let Some(record) = record.as_ref() {
-                        content_by_record.insert(Arc::as_ptr(&record.image), content_id);
-                        uploads.push((content_id, Arc::clone(record)));
+                    let image_content_id = self.next_image_content_id;
+                    self.next_image_content_id =
+                        self.next_image_content_id.checked_add(1).unwrap_or(0);
+                    if let Some(image_record) = image_record.as_ref() {
+                        image_content_id_by_memory_address
+                            .insert(Arc::as_ptr(&image_record.image), image_content_id);
+                        image_uploads.push((image_content_id, Arc::clone(image_record)));
                     }
-                    content_id
+                    image_content_id
                 });
-            self.images
-                .insert(key, CachedFrameImage { content_id, record });
+            self.cached_image_by_pane_and_placement_id.insert(
+                placement_key,
+                CachedConnectionImage {
+                    image_content_id,
+                    image_record,
+                },
+            );
         }
-        self.images.retain(|key, _| retained.contains(key));
+        self.cached_image_by_pane_and_placement_id
+            .retain(|placement_key, _| retained_placement_keys.contains(placement_key));
 
-        let frame = wire_frame_with_content_ids(snapshot, |pane_id, placement| {
-            self.images
-                .get(&(pane_id, placement.id()))
-                .map_or(placement.content_id(), |cached| cached.content_id)
-        });
+        let painted_frame =
+            wire_frame_with_content_ids(render_snapshot, |pane_id, image_placement| {
+                self.cached_image_by_pane_and_placement_id
+                    .get(&(pane_id, image_placement.get_placement_id()))
+                    .map_or(image_placement.get_image_content_id(), |cached_image| {
+                        cached_image.image_content_id
+                    })
+            });
         PreparedImageFrame {
-            reset,
-            frame,
-            uploads,
+            should_reset_image_cache,
+            painted_frame,
+            image_uploads,
         }
     }
 
     /// Forget all connection-local image identities after a recoverable write failure.
-    fn clear(&mut self) {
-        self.images.clear();
-        self.next_content_id = 1;
-        self.reset_required = true;
+    fn clear_image_cache(&mut self) {
+        self.cached_image_by_pane_and_placement_id.clear();
+        self.next_image_content_id = 1;
+        self.needs_image_cache_reset = true;
     }
 }
 
 /// A painted frame plus the image records its connection still needs.
 struct PreparedImageFrame {
     /// Whether the client must discard every record before this frame.
-    reset: bool,
+    should_reset_image_cache: bool,
     /// Placement geometry and connection-local content identities.
-    frame: PaintedFrame,
+    painted_frame: PaintedFrame,
     /// New content identities and the records uploaded under them.
-    uploads: Vec<(u64, Arc<ImageRecord>)>,
+    image_uploads: Vec<(u64, Arc<ImageRecord>)>,
 }
 
 /// Report whether two cached record slots hold the same retained image record.
-fn same_record(cached: Option<&Arc<ImageRecord>>, incoming: Option<&ImageRecord>) -> bool {
-    match (cached, incoming) {
-        (Some(cached), Some(incoming)) => Arc::ptr_eq(&cached.image, &incoming.image),
+fn is_same_image_record(
+    cached_image_record: Option<&Arc<ImageRecord>>,
+    incoming_image_record: Option<&ImageRecord>,
+) -> bool {
+    match (cached_image_record, incoming_image_record) {
+        (Some(cached_image_record), Some(incoming_image_record)) => {
+            Arc::ptr_eq(&cached_image_record.image, &incoming_image_record.image)
+        }
         (None, None) => true,
         (Some(_), None) | (None, Some(_)) => false,
     }
@@ -1170,65 +1312,90 @@ fn same_record(cached: Option<&Arc<ImageRecord>>, incoming: Option<&ImageRecord>
 /// Send one painted frame and each new image record after it.
 fn send_painted_frame(
     writer: &mut FrameWriter,
-    cache: &mut ConnectionImageCache,
-    snapshot: &RenderSnapshot,
-    graphics: GraphicsCapabilities,
+    image_cache: &mut ConnectionImageCache,
+    render_snapshot: &RenderSnapshot,
+    graphics_capabilities: GraphicsCapabilities,
     client_id: ClientId,
 ) -> bool {
-    if !graphics.has_native() {
-        let event = SessionEvent::Painted {
-            frame: Box::new(wire_frame(snapshot)),
+    if !graphics_capabilities.has_native_image_protocol() {
+        let painted_frame_event = SessionEvent::Painted {
+            frame: Box::new(wire_frame(render_snapshot)),
         };
-        return match writer.send(&event) {
+        return match writer.send(&painted_frame_event) {
             Ok(()) => false,
-            Err(error) => report_image_send_error(cache, client_id, error, "the painted frame"),
+            Err(write_error) => {
+                report_image_send_error(image_cache, client_id, write_error, "the painted frame")
+            }
         };
     }
-    let prepared = cache.prepare(snapshot);
-    if prepared.reset {
-        if let Err(error) = writer.send(&SessionEvent::ImageCacheReset) {
-            return report_image_send_error(cache, client_id, error, "the image cache reset");
+    let prepared_image_frame = image_cache.prepare_image_frame(render_snapshot);
+    if prepared_image_frame.should_reset_image_cache {
+        if let Err(write_error) = writer.send(&SessionEvent::ImageCacheReset) {
+            return report_image_send_error(
+                image_cache,
+                client_id,
+                write_error,
+                "the image cache reset",
+            );
         }
     }
-    let repeated_frame =
-        (prepared.uploads.len() > MAX_FRAME_IMAGE_TRANSFERS).then(|| prepared.frame.clone());
-    let event = SessionEvent::Painted {
-        frame: Box::new(prepared.frame),
+    let repeated_painted_frame = (prepared_image_frame.image_uploads.len()
+        > MAX_FRAME_IMAGE_TRANSFER_COUNT)
+        .then(|| prepared_image_frame.painted_frame.clone());
+    let painted_frame_event = SessionEvent::Painted {
+        frame: Box::new(prepared_image_frame.painted_frame),
     };
-    if let Err(error) = writer.send(&event) {
-        return report_image_send_error(cache, client_id, error, "the painted frame");
+    if let Err(write_error) = writer.send(&painted_frame_event) {
+        return report_image_send_error(image_cache, client_id, write_error, "the painted frame");
     }
-    for (index, (content_id, record)) in prepared.uploads.into_iter().enumerate() {
-        if index != 0 && index % MAX_FRAME_IMAGE_TRANSFERS == 0 {
-            let event = SessionEvent::Painted {
+    for (upload_index, (image_content_id, image_record)) in
+        prepared_image_frame.image_uploads.into_iter().enumerate()
+    {
+        if upload_index != 0 && upload_index % MAX_FRAME_IMAGE_TRANSFER_COUNT == 0 {
+            let repeated_painted_frame_event = SessionEvent::Painted {
                 frame: Box::new(
-                    repeated_frame
+                    repeated_painted_frame
                         .as_ref()
                         .expect("a repeated image batch retained its painted frame")
                         .clone(),
                 ),
             };
-            if let Err(error) = writer.send(&event) {
-                return report_image_send_error(cache, client_id, error, "the painted frame");
+            if let Err(write_error) = writer.send(&repeated_painted_frame_event) {
+                return report_image_send_error(
+                    image_cache,
+                    client_id,
+                    write_error,
+                    "the painted frame",
+                );
             }
         }
-        let event = SessionEvent::ImageContentStart {
-            image: wire_image_transfer(content_id, &record),
+        let image_transfer_start_event = SessionEvent::ImageContentStart {
+            image_transfer: wire_image_transfer(image_content_id, &image_record),
         };
-        if let Err(error) = writer.send(&event) {
-            return report_image_send_error(cache, client_id, error, "an image transfer start");
+        if let Err(write_error) = writer.send(&image_transfer_start_event) {
+            return report_image_send_error(
+                image_cache,
+                client_id,
+                write_error,
+                "an image transfer start",
+            );
         }
-        for (offset, last, bytes) in wire_image_chunk_sources(&record) {
-            let event = SessionEvent::ImageContentChunk {
-                chunk: FrameImageChunk {
-                    transfer_id: content_id,
-                    offset,
-                    last,
-                    bytes: bytes.to_vec(),
+        for (byte_offset, is_last_chunk, chunk_bytes) in wire_image_chunk_sources(&image_record) {
+            let image_transfer_chunk_event = SessionEvent::ImageContentChunk {
+                image_chunk: FrameImageChunk {
+                    image_transfer_id: image_content_id,
+                    byte_offset,
+                    is_last: is_last_chunk,
+                    chunk_bytes: chunk_bytes.to_vec(),
                 },
             };
-            if let Err(error) = writer.send(&event) {
-                return report_image_send_error(cache, client_id, error, "an image transfer chunk");
+            if let Err(write_error) = writer.send(&image_transfer_chunk_event) {
+                return report_image_send_error(
+                    image_cache,
+                    client_id,
+                    write_error,
+                    "an image transfer chunk",
+                );
             }
         }
     }
@@ -1237,19 +1404,33 @@ fn send_painted_frame(
 
 /// Report one image-stream write failure and say whether the connection stays usable.
 fn report_image_send_error(
-    cache: &mut ConnectionImageCache,
+    image_cache: &mut ConnectionImageCache,
     client_id: ClientId,
-    error: IpcError,
-    part: &str,
+    write_error: IpcError,
+    failed_image_transfer_part: &str,
 ) -> bool {
-    match error {
-        IpcError::FrameTooLarge { len, max } => {
-            tracing::warn!(%client_id, %part, len, max, "image transfer part exceeded the frame cap");
-            cache.clear();
+    match write_error {
+        IpcError::FrameTooLarge {
+            frame_byte_count,
+            maximum_frame_byte_count: frame_byte_limit,
+        } => {
+            tracing::warn!(
+                %client_id,
+                failed_image_transfer_part,
+                frame_byte_count,
+                frame_byte_limit,
+                "image transfer part exceeded the frame cap"
+            );
+            image_cache.clear_image_cache();
             false
         }
-        error => {
-            tracing::warn!(%client_id, %part, %error, "image transfer write failed");
+        write_error => {
+            tracing::warn!(
+                %client_id,
+                failed_image_transfer_part,
+                %write_error,
+                "image transfer write failed"
+            );
             true
         }
     }
@@ -1272,15 +1453,21 @@ fn report_image_send_error(
 /// `ExternalCli { session_id: None, target_client: None }` carrying
 /// `Command::ToggleMouseSelect`. The dispatcher's CLI-admission check refuses
 /// it: the CLI has no mouse-select verb.
-fn cli_source(envelope: CommandEnvelope) -> CommandEnvelope {
-    let source = match envelope.source {
-        source @ (CommandSource::InSessionCli { .. } | CommandSource::ExternalCli { .. }) => source,
+fn stamp_cli_command_source(envelope: CommandEnvelope) -> CommandEnvelope {
+    let command_source = match envelope.command_source {
+        command_source @ (CommandSource::InSessionCli { .. }
+        | CommandSource::ExternalCli { .. }) => command_source,
         CommandSource::KeyBinding { .. }
         | CommandSource::Mouse { .. }
         | CommandSource::Plugin { .. }
-        | CommandSource::Internal => CommandSource::external_cli(None, None),
+        | CommandSource::Internal => CommandSource::from_external_cli(None, None),
     };
-    CommandEnvelope::new(envelope.id, source, envelope.issued_at, envelope.command)
+    CommandEnvelope::from_parts(
+        envelope.command_id,
+        command_source,
+        envelope.issued_at,
+        envelope.command,
+    )
 }
 
 /// Rebuild `envelope` with [`CommandSource::KeyBinding`] naming `client_id`,
@@ -1291,10 +1478,10 @@ fn cli_source(envelope: CommandEnvelope) -> CommandEnvelope {
 ///
 /// The envelope's `client_id` is re-derived from the stamped source; the two
 /// always agree.
-fn client_source(envelope: CommandEnvelope, client_id: ClientId) -> CommandEnvelope {
-    CommandEnvelope::new(
-        envelope.id,
-        CommandSource::key_binding(client_id),
+fn stamp_client_command_source(envelope: CommandEnvelope, client_id: ClientId) -> CommandEnvelope {
+    CommandEnvelope::from_parts(
+        envelope.command_id,
+        CommandSource::from_key_binding(client_id),
         envelope.issued_at,
         envelope.command,
     )
@@ -1304,16 +1491,16 @@ fn client_source(envelope: CommandEnvelope, client_id: ClientId) -> CommandEnvel
 /// the inbox event around a fresh reply channel, hand it over the intake, and
 /// block on the reply. `None` means no answer is coming — the intake is closed,
 /// or the dispatcher is gone — so the caller closes its connection without one.
-fn ask_dispatcher<T>(
-    intake: &Intake,
+fn request_dispatcher_response<T>(
+    connection_intake: &Intake,
     inbox_tx: &Sender<RuntimeEvent>,
-    build_event: impl FnOnce(mpsc::Sender<T>) -> RuntimeEvent,
+    build_runtime_event: impl FnOnce(mpsc::Sender<T>) -> RuntimeEvent,
 ) -> Option<T> {
-    let (reply_tx, reply_rx) = mpsc::channel();
-    if !intake.hand_over(inbox_tx, build_event(reply_tx)) {
+    let (response_sender, response_receiver) = mpsc::channel();
+    if !connection_intake.hand_over_event(inbox_tx, build_runtime_event(response_sender)) {
         return None;
     }
-    reply_rx.recv().ok()
+    response_receiver.recv().ok()
 }
 
 #[cfg(test)]

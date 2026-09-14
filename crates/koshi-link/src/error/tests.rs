@@ -6,11 +6,15 @@ use super::*;
 #[test]
 fn maps_each_error_class_to_its_exit_code() {
     assert_eq!(
-        CliExitCode::from(&CliError::UnknownCommand { name: "x".into() }),
+        CliExitCode::from(&CliError::UnknownCommand {
+            command_name: "x".into()
+        }),
         CliExitCode::UsageOrConfig
     );
     assert_eq!(
-        CliExitCode::from(&CliError::UnknownAction { name: "x".into() }),
+        CliExitCode::from(&CliError::UnknownAction {
+            action_name: "x".into()
+        }),
         CliExitCode::UsageOrConfig
     );
     assert_eq!(
@@ -35,7 +39,7 @@ fn maps_each_error_class_to_its_exit_code() {
     );
     assert_eq!(
         CliExitCode::from(&CliError::SessionNotFound {
-            session: "session-x".into()
+            session_name: "session-x".into()
         }),
         CliExitCode::SessionNotFound
     );
@@ -51,26 +55,26 @@ fn maps_each_error_class_to_its_exit_code() {
 #[test]
 fn exit_codes_are_the_documented_numbers() {
     assert_eq!(
-        CliExitCode::from(&CliError::InvalidArgs { detail: "x".into() }).code(),
+        CliExitCode::from(&CliError::InvalidArgs { detail: "x".into() }).get_exit_code(),
         2
     );
     assert_eq!(
-        CliExitCode::from(&CliError::Config { detail: "x".into() }).code(),
+        CliExitCode::from(&CliError::Config { detail: "x".into() }).get_exit_code(),
         2
     );
     assert_eq!(
-        CliExitCode::from(&CliError::IpcUnavailable { detail: "x".into() }).code(),
+        CliExitCode::from(&CliError::IpcUnavailable { detail: "x".into() }).get_exit_code(),
         4
     );
     assert_eq!(
-        CliExitCode::from(&CliError::Runtime { detail: "x".into() }).code(),
+        CliExitCode::from(&CliError::Runtime { detail: "x".into() }).get_exit_code(),
         1
     );
     assert_eq!(
         CliExitCode::from(&CliError::SessionNotFound {
-            session: "session-x".into()
+            session_name: "session-x".into()
         })
-        .code(),
+        .get_exit_code(),
         3
     );
     assert_eq!(
@@ -78,7 +82,7 @@ fn exit_codes_are_the_documented_numbers() {
             reason: RejectReason::Unauthorized,
             help: None
         })
-        .code(),
+        .get_exit_code(),
         1
     );
 }
@@ -103,7 +107,7 @@ fn a_rejected_command_renders_its_reason_and_help_line() {
     );
     assert_eq!(
         CliError::SessionNotFound {
-            session: "session-x".into()
+            session_name: "session-x".into()
         }
         .to_string(),
         "session session-x is not running"
@@ -114,7 +118,7 @@ fn a_rejected_command_renders_its_reason_and_help_line() {
 fn messages_render_without_a_koshi_prefix() {
     assert_eq!(
         CliError::UnknownAction {
-            name: "new-pane".into()
+            action_name: "new-pane".into()
         }
         .to_string(),
         "unknown action: new-pane"
@@ -145,11 +149,17 @@ fn messages_render_without_a_koshi_prefix() {
 #[test]
 fn category_classifies_by_variant() {
     assert_eq!(
-        CliError::UnknownCommand { name: "x".into() }.category(),
+        CliError::UnknownCommand {
+            command_name: "x".into()
+        }
+        .category(),
         DomainCategory::Cli
     );
     assert_eq!(
-        CliError::UnknownAction { name: "x".into() }.category(),
+        CliError::UnknownAction {
+            action_name: "x".into()
+        }
+        .category(),
         DomainCategory::Cli
     );
     assert_eq!(
@@ -177,31 +187,37 @@ fn category_classifies_by_variant() {
 #[test]
 fn severity_is_recoverable_for_every_variant() {
     assert_eq!(
-        CliError::UnknownCommand { name: "x".into() }.severity(),
+        CliError::UnknownCommand {
+            command_name: "x".into()
+        }
+        .get_severity(),
         Severity::Recoverable
     );
     assert_eq!(
-        CliError::UnknownAction { name: "x".into() }.severity(),
+        CliError::UnknownAction {
+            action_name: "x".into()
+        }
+        .get_severity(),
         Severity::Recoverable
     );
     assert_eq!(
-        CliError::InvalidArgs { detail: "x".into() }.severity(),
+        CliError::InvalidArgs { detail: "x".into() }.get_severity(),
         Severity::Recoverable
     );
     assert_eq!(
-        CliError::Config { detail: "x".into() }.severity(),
+        CliError::Config { detail: "x".into() }.get_severity(),
         Severity::Recoverable
     );
     assert_eq!(
-        CliError::InSessionEnv { detail: "x".into() }.severity(),
+        CliError::InSessionEnv { detail: "x".into() }.get_severity(),
         Severity::Recoverable
     );
     assert_eq!(
-        CliError::IpcUnavailable { detail: "x".into() }.severity(),
+        CliError::IpcUnavailable { detail: "x".into() }.get_severity(),
         Severity::Recoverable
     );
     assert_eq!(
-        CliError::Runtime { detail: "x".into() }.severity(),
+        CliError::Runtime { detail: "x".into() }.get_severity(),
         Severity::Recoverable
     );
 }
@@ -210,7 +226,7 @@ fn severity_is_recoverable_for_every_variant() {
 fn unknown_command_and_invalid_args_messages_are_exact() {
     assert_eq!(
         CliError::UnknownCommand {
-            name: "frobnicate".into()
+            command_name: "frobnicate".into()
         }
         .to_string(),
         "unknown command: frobnicate"
@@ -230,14 +246,14 @@ fn an_unbound_key_and_a_bad_keymap_file_exit_as_usage_problems() {
         CliExitCode::from(&CliError::UnboundKey {
             sequence: "<C-t> g".into()
         })
-        .code(),
+        .get_exit_code(),
         2
     );
     assert_eq!(
         CliExitCode::from(&CliError::InvalidKeymapFile {
-            path: "keybinding.kdl".into()
+            keymap_file_path: "keybinding.kdl".into()
         })
-        .code(),
+        .get_exit_code(),
         2
     );
     assert_eq!(
@@ -249,7 +265,7 @@ fn an_unbound_key_and_a_bad_keymap_file_exit_as_usage_problems() {
     );
     assert_eq!(
         CliError::InvalidKeymapFile {
-            path: "keybinding.kdl".into()
+            keymap_file_path: "keybinding.kdl".into()
         }
         .category(),
         DomainCategory::Cli
@@ -262,7 +278,7 @@ fn no_running_session_exits_the_same_as_a_named_session_that_is_gone() {
         CliExitCode::from(&CliError::NoSessions),
         CliExitCode::SessionNotFound
     );
-    assert_eq!(CliExitCode::from(&CliError::NoSessions).code(), 3);
+    assert_eq!(CliExitCode::from(&CliError::NoSessions).get_exit_code(), 3);
     assert_eq!(CliError::NoSessions.category(), DomainCategory::Session);
 }
 
@@ -278,7 +294,7 @@ fn a_failed_update_exits_as_a_runtime_failure() {
         CliExitCode::from(&CliError::Update {
             detail: "the download stopped halfway".into()
         })
-        .code(),
+        .get_exit_code(),
         1
     );
     assert_eq!(
@@ -301,7 +317,7 @@ fn the_key_keymap_no_sessions_and_update_messages_are_exact() {
     );
     assert_eq!(
         CliError::InvalidKeymapFile {
-            path: "/home/u/.config/koshi/keybinding.kdl".into()
+            keymap_file_path: "/home/u/.config/koshi/keybinding.kdl".into()
         }
         .to_string(),
         "keybinding file /home/u/.config/koshi/keybinding.kdl failed validation"
@@ -325,14 +341,14 @@ fn messages_render_an_empty_or_unicode_field_verbatim() {
     // substitution.
     assert_eq!(
         CliError::UnknownCommand {
-            name: String::new()
+            command_name: String::new()
         }
         .to_string(),
         "unknown command: "
     );
     assert_eq!(
         CliError::UnknownAction {
-            name: "日本語".into()
+            action_name: "日本語".into()
         }
         .to_string(),
         "unknown action: 日本語"
@@ -343,7 +359,7 @@ fn messages_render_an_empty_or_unicode_field_verbatim() {
 fn a_missing_session_and_a_rejected_command_are_session_domain() {
     assert_eq!(
         CliError::SessionNotFound {
-            session: "session-x".into()
+            session_name: "session-x".into()
         }
         .category(),
         DomainCategory::Session
@@ -364,34 +380,34 @@ fn severity_is_recoverable_for_the_key_session_and_update_variants() {
         CliError::UnboundKey {
             sequence: "<C-t> g".into()
         }
-        .severity(),
+        .get_severity(),
         Severity::Recoverable
     );
     assert_eq!(
         CliError::InvalidKeymapFile {
-            path: "keybinding.kdl".into()
+            keymap_file_path: "keybinding.kdl".into()
         }
-        .severity(),
+        .get_severity(),
         Severity::Recoverable
     );
     assert_eq!(
         CliError::SessionNotFound {
-            session: "session-x".into()
+            session_name: "session-x".into()
         }
-        .severity(),
+        .get_severity(),
         Severity::Recoverable
     );
-    assert_eq!(CliError::NoSessions.severity(), Severity::Recoverable);
+    assert_eq!(CliError::NoSessions.get_severity(), Severity::Recoverable);
     assert_eq!(
         CliError::CommandRejected {
             reason: RejectReason::MinSize,
             help: None
         }
-        .severity(),
+        .get_severity(),
         Severity::Recoverable
     );
     assert_eq!(
-        CliError::Update { detail: "x".into() }.severity(),
+        CliError::Update { detail: "x".into() }.get_severity(),
         Severity::Recoverable
     );
 }
@@ -406,7 +422,7 @@ fn a_broken_in_session_environment_renders_its_detail() {
         "broken in-session environment: `KOSHI` is set but `KOSHI_SESSION_ID` is missing"
     );
     assert_eq!(
-        CliExitCode::from(&CliError::InSessionEnv { detail: "x".into() }).code(),
+        CliExitCode::from(&CliError::InSessionEnv { detail: "x".into() }).get_exit_code(),
         2
     );
 }
@@ -449,9 +465,19 @@ fn an_empty_help_hint_still_renders_its_own_line() {
 
 #[test]
 fn every_error_class_exits_with_its_documented_number() {
-    for (error, code) in [
-        (CliError::UnknownCommand { name: "x".into() }, 2),
-        (CliError::UnknownAction { name: "x".into() }, 2),
+    for (cli_error, exit_code) in [
+        (
+            CliError::UnknownCommand {
+                command_name: "x".into(),
+            },
+            2,
+        ),
+        (
+            CliError::UnknownAction {
+                action_name: "x".into(),
+            },
+            2,
+        ),
         (CliError::InvalidArgs { detail: "x".into() }, 2),
         (
             CliError::UnboundKey {
@@ -461,7 +487,7 @@ fn every_error_class_exits_with_its_documented_number() {
         ),
         (
             CliError::InvalidKeymapFile {
-                path: "keybinding.kdl".into(),
+                keymap_file_path: "keybinding.kdl".into(),
             },
             2,
         ),
@@ -470,7 +496,7 @@ fn every_error_class_exits_with_its_documented_number() {
         (CliError::IpcUnavailable { detail: "x".into() }, 4),
         (
             CliError::SessionNotFound {
-                session: "session-x".into(),
+                session_name: "session-x".into(),
             },
             3,
         ),
@@ -485,7 +511,11 @@ fn every_error_class_exits_with_its_documented_number() {
         (CliError::Runtime { detail: "x".into() }, 1),
         (CliError::Update { detail: "x".into() }, 1),
     ] {
-        assert_eq!(CliExitCode::from(&error).code(), code, "{error}");
+        assert_eq!(
+            CliExitCode::from(&cli_error).get_exit_code(),
+            exit_code,
+            "{cli_error}"
+        );
     }
 }
 

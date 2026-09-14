@@ -20,7 +20,7 @@ impl DomainError for TerminalError {
 
     /// Always [`Severity::Recoverable`]; a malformed sequence is dropped and
     /// emulation continues.
-    fn severity(&self) -> Severity {
+    fn get_severity(&self) -> Severity {
         Severity::Recoverable
     }
 }

@@ -7,7 +7,7 @@
 //! scroll type serve the whole crate.
 //!
 //! [`MouseTracking`] says which events the program in a pane asked to receive,
-//! and [`reports`] answers that question for one event. The viewer reads them
+//! and [`is_mouse_kind_reported`] answers that question for one event. The viewer reads them
 //! off a painted frame to decide where a mouse event goes; the session reads
 //! them off live state to decide what to write.
 //!
@@ -75,15 +75,18 @@ pub enum MouseKind {
 /// modifiers held.
 ///
 /// A left click at column 10, row 3 with nothing held is
-/// `MouseInput { kind: Press(Left), at: Point { x: 10, y: 3 }, mods: NONE }`.
+/// `MouseInput { mouse_kind: Press(Left), position: Point { column: 10, row: 3 }, modifier_flags: NONE }`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MouseInput {
     /// What the mouse did.
-    pub kind: MouseKind,
+    #[serde(rename = "kind")]
+    pub mouse_kind: MouseKind,
     /// The client cell the event landed on — raw, not yet hit-tested.
-    pub at: Point,
+    #[serde(rename = "at")]
+    pub position: Point,
     /// The modifier keys held during the event.
-    pub mods: ModFlags,
+    #[serde(rename = "mods")]
+    pub modifier_flags: ModFlags,
 }
 
 /// What the session reports back about a mouse action it carried out.
@@ -97,9 +100,11 @@ pub enum MouseAnswer {
     /// `Client::note_scroll_applied`.
     Scrolled {
         /// The pane whose view the scroll moved.
-        pane: PaneId,
+        #[serde(rename = "pane")]
+        pane_id: PaneId,
         /// The line the view now shows on its top row.
-        top: Option<u64>,
+        #[serde(rename = "top")]
+        top_row_number: Option<u64>,
     },
     /// How many cells of a requested border move the session accepted, which is
     /// fewer than asked for when the border hit a wall. Consumed by
@@ -109,14 +114,18 @@ pub enum MouseAnswer {
     /// carrying several border moves is read back move by move.
     Resized {
         /// The pane whose border the move was asked for.
-        pane: PaneId,
+        #[serde(rename = "pane")]
+        pane_id: PaneId,
         /// Which of the pane's borders the move was asked for.
-        side: Direction,
+        #[serde(rename = "side")]
+        border_side: Direction,
         /// The direction the move was asked in: `1` grows the pane, `-1`
         /// shrinks it.
-        step: i16,
+        #[serde(rename = "step")]
+        resize_step: i16,
         /// The number of cells the border actually moved.
-        applied: u16,
+        #[serde(rename = "applied")]
+        applied_cell_count: u16,
     },
 }
 
@@ -145,22 +154,22 @@ pub enum MouseTracking {
 /// `ButtonMotion` and up add drags, only `AnyMotion` adds buttonless motion. A
 /// wheel tick reports from `Normal` up; `X10` reports only presses.
 ///
-/// `reports(MouseTracking::Normal, MouseKind::Scroll(ScrollDirection::Up))` is
-/// `true`; `reports(MouseTracking::X10, MouseKind::Scroll(ScrollDirection::Up))`
+/// `is_mouse_kind_reported(MouseTracking::Normal, MouseKind::Scroll(ScrollDirection::Up))` is
+/// `true`; `is_mouse_kind_reported(MouseTracking::X10, MouseKind::Scroll(ScrollDirection::Up))`
 /// is `false`.
 #[must_use]
-pub fn reports(tracking: MouseTracking, kind: MouseKind) -> bool {
-    match kind {
-        MouseKind::Press(_) => tracking != MouseTracking::Off,
+pub fn is_mouse_kind_reported(mouse_tracking: MouseTracking, mouse_kind: MouseKind) -> bool {
+    match mouse_kind {
+        MouseKind::Press(_) => mouse_tracking != MouseTracking::Off,
         MouseKind::Release(_) | MouseKind::Scroll(_) => matches!(
-            tracking,
+            mouse_tracking,
             MouseTracking::Normal | MouseTracking::ButtonMotion | MouseTracking::AnyMotion
         ),
         MouseKind::Drag(_) => matches!(
-            tracking,
+            mouse_tracking,
             MouseTracking::ButtonMotion | MouseTracking::AnyMotion
         ),
-        MouseKind::Motion => tracking == MouseTracking::AnyMotion,
+        MouseKind::Motion => mouse_tracking == MouseTracking::AnyMotion,
     }
 }
 

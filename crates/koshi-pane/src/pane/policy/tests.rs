@@ -12,7 +12,7 @@ fn the_default_close_policy_is_a_three_second_graceful_close() {
     assert_eq!(
         PaneClosePolicy::default(),
         PaneClosePolicy::Graceful {
-            timeout: Duration::from_secs(3)
+            timeout_duration: Duration::from_secs(3)
         }
     );
 }
@@ -27,11 +27,11 @@ fn each_close_policy_maps_to_its_kill_policy() {
     // Graceful passes its own timeout straight through (5s, not the default).
     assert_eq!(
         PaneClosePolicy::Graceful {
-            timeout: Duration::from_secs(5)
+            timeout_duration: Duration::from_secs(5)
         }
         .kill_policy(),
         KillPolicy::Graceful {
-            timeout: Duration::from_secs(5)
+            timeout_duration: Duration::from_secs(5)
         }
     );
     assert_eq!(PaneClosePolicy::Force.kill_policy(), KillPolicy::Force);
@@ -39,7 +39,7 @@ fn each_close_policy_maps_to_its_kill_policy() {
     assert_eq!(
         PaneClosePolicy::ConfirmIfBusy.kill_policy(),
         KillPolicy::Graceful {
-            timeout: Duration::from_secs(3)
+            timeout_duration: Duration::from_secs(3)
         }
     );
     // No close policy ever escalates to a whole-tree kill.
@@ -49,11 +49,11 @@ fn each_close_policy_maps_to_its_kill_policy() {
 fn a_zero_graceful_timeout_passes_through_as_zero() {
     assert_eq!(
         PaneClosePolicy::Graceful {
-            timeout: Duration::ZERO
+            timeout_duration: Duration::ZERO
         }
         .kill_policy(),
         KillPolicy::Graceful {
-            timeout: Duration::ZERO
+            timeout_duration: Duration::ZERO
         }
     );
 }
@@ -62,24 +62,27 @@ fn a_zero_graceful_timeout_passes_through_as_zero() {
 fn a_close_policy_survives_a_serde_round_trip() {
     for policy in [
         PaneClosePolicy::Graceful {
-            timeout: Duration::from_secs(3),
+            timeout_duration: Duration::from_secs(3),
         },
         PaneClosePolicy::Force,
         PaneClosePolicy::ConfirmIfBusy,
     ] {
-        let json = serde_json::to_string(&policy).expect("serialize");
-        let restored: PaneClosePolicy = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(policy, restored);
+        let policy_json = serde_json::to_string(&policy).expect("serialize");
+        let deserialized_policy: PaneClosePolicy =
+            serde_json::from_str(&policy_json).expect("deserialize");
+        assert_eq!(policy, deserialized_policy);
     }
 }
 
 #[test]
 fn a_graceful_timeout_serializes_as_whole_seconds_matching_kill_policy() {
-    let timeout = Duration::from_secs(3);
-    let close = serde_json::to_string(&PaneClosePolicy::Graceful { timeout }).expect("serialize");
-    let kill = serde_json::to_string(&KillPolicy::Graceful { timeout }).expect("serialize");
+    let timeout_duration = Duration::from_secs(3);
+    let close =
+        serde_json::to_string(&PaneClosePolicy::Graceful { timeout_duration }).expect("serialize");
+    let kill =
+        serde_json::to_string(&KillPolicy::Graceful { timeout_duration }).expect("serialize");
 
-    // `duration_secs` writes the timeout as a whole number of seconds, the same
+    // `duration_seconds` writes the timeout as a whole number of seconds, the same
     // form `KillPolicy` uses.
     assert_eq!(close, r#"{"Graceful":{"timeout":3}}"#);
     assert_eq!(close, kill);
@@ -88,17 +91,18 @@ fn a_graceful_timeout_serializes_as_whole_seconds_matching_kill_policy() {
 #[test]
 fn a_sub_second_graceful_timeout_loses_its_fraction_in_serde() {
     let policy = PaneClosePolicy::Graceful {
-        timeout: Duration::from_millis(1500),
+        timeout_duration: Duration::from_millis(1500),
     };
 
-    let json = serde_json::to_string(&policy).expect("serialize");
-    let restored: PaneClosePolicy = serde_json::from_str(&json).expect("deserialize");
+    let policy_json = serde_json::to_string(&policy).expect("serialize");
+    let deserialized_policy: PaneClosePolicy =
+        serde_json::from_str(&policy_json).expect("deserialize");
 
-    assert_eq!(json, r#"{"Graceful":{"timeout":1}}"#);
+    assert_eq!(policy_json, r#"{"Graceful":{"timeout":1}}"#);
     assert_eq!(
-        restored,
+        deserialized_policy,
         PaneClosePolicy::Graceful {
-            timeout: Duration::from_secs(1)
+            timeout_duration: Duration::from_secs(1)
         }
     );
 }
@@ -106,49 +110,56 @@ fn a_sub_second_graceful_timeout_loses_its_fraction_in_serde() {
 #[test]
 fn the_largest_graceful_timeout_serializes_as_u64_max_seconds() {
     let policy = PaneClosePolicy::Graceful {
-        timeout: Duration::MAX,
+        timeout_duration: Duration::MAX,
     };
 
-    let json = serde_json::to_string(&policy).expect("serialize");
-    let restored: PaneClosePolicy = serde_json::from_str(&json).expect("deserialize");
+    let policy_json = serde_json::to_string(&policy).expect("serialize");
+    let deserialized_policy: PaneClosePolicy =
+        serde_json::from_str(&policy_json).expect("deserialize");
 
-    assert_eq!(json, r#"{"Graceful":{"timeout":18446744073709551615}}"#);
     assert_eq!(
-        restored,
+        policy_json,
+        r#"{"Graceful":{"timeout":18446744073709551615}}"#
+    );
+    assert_eq!(
+        deserialized_policy,
         PaneClosePolicy::Graceful {
-            timeout: Duration::from_secs(u64::MAX)
+            timeout_duration: Duration::from_secs(u64::MAX)
         }
     );
 }
 
 #[test]
 fn a_negative_graceful_timeout_fails_to_deserialize() {
-    let error = serde_json::from_str::<PaneClosePolicy>(r#"{"Graceful":{"timeout":-1}}"#)
-        .expect_err("negative seconds");
+    let deserialization_error =
+        serde_json::from_str::<PaneClosePolicy>(r#"{"Graceful":{"timeout":-1}}"#)
+            .expect_err("negative seconds");
 
     assert_eq!(
-        error.to_string(),
+        deserialization_error.to_string(),
         "invalid value: integer `-1`, expected u64 at line 1 column 25"
     );
 }
 
 #[test]
 fn a_fractional_graceful_timeout_fails_to_deserialize() {
-    let error = serde_json::from_str::<PaneClosePolicy>(r#"{"Graceful":{"timeout":1.5}}"#)
-        .expect_err("fractional seconds");
+    let deserialization_error =
+        serde_json::from_str::<PaneClosePolicy>(r#"{"Graceful":{"timeout":1.5}}"#)
+            .expect_err("fractional seconds");
 
     assert_eq!(
-        error.to_string(),
+        deserialization_error.to_string(),
         "invalid type: floating point `1.5`, expected u64 at line 1 column 26"
     );
 }
 
 #[test]
 fn an_unknown_close_policy_fails_to_deserialize() {
-    let error = serde_json::from_str::<PaneClosePolicy>(r#""Kill""#).expect_err("unknown variant");
+    let deserialization_error =
+        serde_json::from_str::<PaneClosePolicy>(r#""Kill""#).expect_err("unknown variant");
 
     assert_eq!(
-        error.to_string(),
+        deserialization_error.to_string(),
         "unknown variant `Kill`, expected one of `Graceful`, `Force`, `ConfirmIfBusy` at line 1 column 6"
     );
 }
@@ -157,10 +168,11 @@ fn an_unknown_close_policy_fails_to_deserialize() {
 fn an_exit_policy_survives_a_serde_round_trip() {
     let policy = PaneExitPolicy::CloseOnExit;
 
-    let json = serde_json::to_string(&policy).expect("serialize");
-    let restored: PaneExitPolicy = serde_json::from_str(&json).expect("deserialize");
+    let policy_json = serde_json::to_string(&policy).expect("serialize");
+    let deserialized_policy: PaneExitPolicy =
+        serde_json::from_str(&policy_json).expect("deserialize");
 
-    assert_eq!(policy, restored);
+    assert_eq!(policy, deserialized_policy);
 }
 
 #[test]
@@ -185,11 +197,11 @@ fn the_exit_policy_serializes_as_its_variant_name() {
 
 #[test]
 fn an_unknown_exit_policy_fails_to_deserialize() {
-    let error =
+    let deserialization_error =
         serde_json::from_str::<PaneExitPolicy>(r#""KeepOpen""#).expect_err("unknown variant");
 
     assert_eq!(
-        error.to_string(),
+        deserialization_error.to_string(),
         "unknown variant `KeepOpen`, expected `CloseOnExit` at line 1 column 10"
     );
 }
@@ -198,11 +210,11 @@ fn an_unknown_exit_policy_fails_to_deserialize() {
 /// variant, not a second policy.
 #[test]
 fn a_stored_respawn_shell_policy_fails_to_deserialize() {
-    let error =
+    let deserialization_error =
         serde_json::from_str::<PaneExitPolicy>(r#""RespawnShell""#).expect_err("unknown variant");
 
     assert_eq!(
-        error.to_string(),
+        deserialization_error.to_string(),
         "unknown variant `RespawnShell`, expected `CloseOnExit` at line 1 column 14"
     );
 }

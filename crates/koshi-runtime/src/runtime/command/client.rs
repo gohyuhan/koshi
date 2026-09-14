@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use koshi_ipc::protocol::ConnectionToken;
 
-use crate::runtime::attach::session_structure;
+use crate::runtime::attach::build_session_structure_snapshot;
 use crate::runtime::bus::EventFilter;
 use crate::runtime::event::AttachAccepted;
 use crate::runtime::saved_view::SavedView;
@@ -16,43 +16,51 @@ impl Server {
     pub(crate) fn handle_client_cell_size(
         &mut self,
         client_id: ClientId,
-        size: koshi_core::geometry::PixelCellSize,
+        cell_size: koshi_core::geometry::PixelCellSize,
     ) {
-        let Some(session_id) = self.session_for_client(client_id).map(|session| session.id) else {
+        let Some(session_id) = self
+            .get_session_for_client(client_id)
+            .map(|session| session.session_id)
+        else {
             return;
         };
-        let tab = self
-            .sessions
+        let active_tab_id = self
+            .session_by_id
             .get_mut(&session_id)
-            .and_then(|session| session.clients.get_mut(client_id))
+            .and_then(|session| session.clients.get_client_mut_by_id(client_id))
             .map(|client| {
-                client.update_cell_size(size);
-                client.active_tab()
+                client.update_cell_size(cell_size);
+                client.get_active_tab()
             });
-        if let Some(tab) = tab {
-            let backend = Arc::clone(self.pty_backend());
-            let mut events = Vec::new();
-            self.reflow_tab_if_viewed(backend.as_ref(), session_id, tab, &mut events);
+        if let Some(active_tab_id) = active_tab_id {
+            let pty_backend = Arc::clone(self.get_pty_backend());
+            let mut emitted_events = Vec::new();
+            self.reflow_tab_if_viewed(
+                pty_backend.as_ref(),
+                session_id,
+                active_tab_id,
+                &mut emitted_events,
+            );
             self.render_scheduler.invalidate();
-            self.publish_events(&events);
+            self.publish_events(&emitted_events);
         }
     }
 
     /// Serve one attach arriving over the control socket, in this single
     /// dispatcher turn: settle which client this is, register it on the tab it
     /// views, publish what the attach emitted, subscribe it to the events
-    /// `filter` selects, and read the session's structure back.
+    /// `event_filter` selects, and read the session's structure back.
     ///
-    /// `resume` names the client record a caller asks to come back as, after
+    /// `resume_client_id` names the client record a caller asks to come back as, after
     /// the session replaced its own process image. The record is handed back
     /// when the session still holds it, the tab it was viewing still exists,
     /// and no connection is streaming for it: the arriving viewport, pane area
     /// and origin replace the record's, and its per-tab focus, zoom, scrollback
     /// offsets, selections, lock mode, label and colour all stay. That is the
-    /// whole of the `resume` path — no `resume`, an id the session does not
+    /// whole of the `resume_client_id` path — no `resume_client_id`, an id the session does not
     /// hold, an id whose tab is gone, an id a connection is already streaming
     /// for all mint a fresh client instead, so an attach never fails over
-    /// `resume`.
+    /// `resume_client_id`.
     ///
     /// `resume_token` names the view a caller asks to have back, filed when
     /// that caller's last client detached. It is read on the fresh-client path
@@ -80,30 +88,30 @@ impl Server {
     /// running, or when the one running holds no tab to view — neither is
     /// something a client can attach to. `attached_at` is supplied by the
     /// caller; the handler never reads the clock itself.
-    // Carries the whole of one attach request: what it claims back (`resume`,
-    // `resume_token`), the view it arrives with (`viewport`, `pane_area`), and
-    // how the connection is served (`filter`, `attached_at`, `remote`).
+    // Carries the whole of one attach request: what it claims back (`resume_client_id`,
+    // `resume_token`), the view it arrives with (`viewport_size`, `pane_area`), and
+    // how the connection is served (`event_filter`, `attached_at`, `is_remote`).
     #[allow(dead_code)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn handle_ipc_attach(
         &mut self,
-        resume: Option<ClientId>,
+        resume_client_id: Option<ClientId>,
         resume_token: Option<ConnectionToken>,
-        viewport: Size,
+        viewport_size: Size,
         pane_area: Option<PaneArea>,
-        filter: EventFilter,
+        event_filter: EventFilter,
         attached_at: SystemTime,
-        remote: bool,
+        is_remote: bool,
     ) -> Option<AttachAccepted> {
         self.handle_ipc_attach_with_cell_size(
-            resume,
+            resume_client_id,
             resume_token,
-            viewport,
+            viewport_size,
             pane_area,
             None,
-            filter,
+            event_filter,
             attached_at,
-            remote,
+            is_remote,
         )
     }
 
@@ -111,89 +119,101 @@ impl Server {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn handle_ipc_attach_with_cell_size(
         &mut self,
-        resume: Option<ClientId>,
+        resume_client_id: Option<ClientId>,
         resume_token: Option<ConnectionToken>,
-        viewport: Size,
+        viewport_size: Size,
         pane_area: Option<PaneArea>,
         cell_size: Option<koshi_core::geometry::PixelCellSize>,
-        filter: EventFilter,
+        event_filter: EventFilter,
         attached_at: SystemTime,
-        remote: bool,
+        is_remote: bool,
     ) -> Option<AttachAccepted> {
-        let session = self.sole_session()?;
-        let session_id = session.id;
-        let first_tab = session.tabs.values().min_by_key(|tab| tab.index())?.id();
+        let session = self.get_sole_session()?;
+        let session_id = session.session_id;
+        let first_tab_id = session
+            .tabs
+            .values()
+            .min_by_key(|tab| tab.get_tab_index())?
+            .get_tab_id();
 
-        let claimed = resume.and_then(|claimed_id| {
-            let client = session.clients.get(claimed_id)?;
-            let client_tab = client.active_tab();
-            let streaming = self
+        let claimed_client_view = resume_client_id.and_then(|claimed_client_id| {
+            let client = session.clients.get_client_by_id(claimed_client_id)?;
+            let client_active_tab_id = client.get_active_tab();
+            let is_streaming = self
                 .subscriptions
                 .iter()
-                .any(|&(_, viewed)| viewed == claimed_id);
-            (session.tabs.contains_key(&client_tab) && !streaming)
-                .then_some((claimed_id, client_tab))
+                .any(|&(_, viewed_client_id)| viewed_client_id == claimed_client_id);
+            (session.tabs.contains_key(&client_active_tab_id) && !is_streaming)
+                .then_some((claimed_client_id, client_active_tab_id))
         });
-        let saved = resume_token
-            .and_then(|token| self.saved_views.take(&token, attached_at))
-            .filter(|_| claimed.is_none());
-        let (client_id, active_tab) = match claimed {
-            Some(claim) => claim,
+        let saved_view = resume_token
+            .and_then(|resume_token| {
+                self.saved_view_store
+                    .take_saved_view(&resume_token, attached_at)
+            })
+            .filter(|_| claimed_client_view.is_none());
+        let (client_id, active_tab_id) = match claimed_client_view {
+            Some(claimed_client_view) => claimed_client_view,
             None => {
                 let session = self
-                    .sessions
+                    .session_by_id
                     .get(&session_id)
                     .expect("session located above");
-                let tab = saved
+                let active_tab_id = saved_view
                     .as_ref()
-                    .map(|view| view.active_tab)
-                    .filter(|tab| session.tabs.contains_key(tab))
-                    .unwrap_or(first_tab);
-                (ClientId::new(), tab)
+                    .map(|saved_view| saved_view.active_tab_id)
+                    .filter(|tab_id| session.tabs.contains_key(tab_id))
+                    .unwrap_or(first_tab_id);
+                (ClientId::new(), active_tab_id)
             }
         };
-        self.awaiting_reconnect.remove(&client_id);
+        self.client_ids_awaiting_reconnect.remove(&client_id);
 
-        let mut emitted = self.handle_client_attach_with_cell_size(
+        let mut emitted_events = self.handle_client_attach_with_cell_size(
             session_id,
             client_id,
-            viewport,
+            viewport_size,
             pane_area,
-            active_tab,
+            active_tab_id,
             cell_size,
             attached_at,
-            remote,
+            is_remote,
         );
-        if let Some(view) = saved {
-            emitted.extend(self.restore_saved_view(session_id, client_id, active_tab, &view));
+        if let Some(saved_view) = saved_view {
+            emitted_events.extend(self.restore_saved_view(
+                session_id,
+                client_id,
+                active_tab_id,
+                &saved_view,
+            ));
         }
-        self.publish_events(&emitted);
+        self.publish_events(&emitted_events);
 
-        let events = self.subscribe(client_id, filter);
-        let resume_token = self.saved_views.mint(client_id);
+        let deliveries = self.subscribe(client_id, event_filter);
+        let resume_token = self.saved_view_store.mint_resume_token(client_id);
         let session = self
-            .sessions
+            .session_by_id
             .get(&session_id)
             .expect("session located above");
         Some(AttachAccepted {
             client_id,
             session_id,
-            structure: session_structure(session),
-            events,
+            session_structure: build_session_structure_snapshot(session),
+            deliveries,
             ending_notice: Arc::clone(self.event_bus.ending_notice()),
             resume_token,
             pane_area,
         })
     }
 
-    /// Put `view` back on `client_id` in `session_id`, then reconcile the PTY
-    /// sizes of `active_tab` and schedule a redraw.
+    /// Put `saved_view` back on `client_id` in `session_id`, then reconcile the
+    /// PTY sizes of `active_tab_id` and schedule a redraw.
     ///
     /// Applies the focused pane of each tab first, then the zoomed pane of each
     /// tab, then the scroll offset of each pane.
     /// [`Client::update_focused_pane`] moves an existing zoom onto the pane it
     /// focuses; the zoom pass runs after it, and leaves each tab zoomed on the
-    /// pane `view` names.
+    /// pane `saved_view` names.
     ///
     /// An entry naming a tab the session no longer holds, or a pane the session
     /// no longer holds, is dropped instead of applied: that tab keeps no focus
@@ -205,7 +225,7 @@ impl Server {
     /// changes the size the tab's panes solve to, so the tab reflows and one
     /// [`Event::PtyResized`] is returned for each pane whose PTY size changed.
     ///
-    /// A restored focus that moves `active_tab`'s focused pane off the one the
+    /// A restored focus that moves `active_tab_id`'s focused pane off the one the
     /// attach put it on returns one [`Event::PaneFocused`] naming the restored
     /// pane, so the event stream names the pane the client actually views.
     ///
@@ -214,69 +234,83 @@ impl Server {
         &mut self,
         session_id: SessionId,
         client_id: ClientId,
-        active_tab: TabId,
-        view: &SavedView,
+        active_tab_id: TabId,
+        saved_view: &SavedView,
     ) -> Vec<Event> {
         // Clone the shared backend before borrowing the session: the reflow then
         // needs no `&self` across the mutation.
-        let backend = Arc::clone(self.pty_backend());
-        let mut events = Vec::new();
+        let pty_backend = Arc::clone(self.get_pty_backend());
+        let mut emitted_events = Vec::new();
         // The restored pane and the one it replaces, set when the focus pass
-        // moves `active_tab` off the pane the attach focused.
-        let mut focus_move = None;
+        // moves `active_tab_id` off the pane the attach focused.
+        let mut focus_change = None;
 
         {
-            let Some(session) = self.sessions.get_mut(&session_id) else {
-                return events;
+            let Some(session) = self.session_by_id.get_mut(&session_id) else {
+                return emitted_events;
             };
-            let tabs = &session.tabs;
-            let panes = &session.panes;
-            let Some(client) = session.clients.get_mut(client_id) else {
-                return events;
+            let tab_by_id = &session.tabs;
+            let pane_registry = &session.panes;
+            let Some(client) = session.clients.get_client_mut_by_id(client_id) else {
+                return emitted_events;
             };
-            let prior_pane = client.focused_pane(active_tab);
-            for (&tab_id, &pane_id) in &view.focus_by_tab {
-                if tabs.contains_key(&tab_id) && panes.get(pane_id).is_some() {
+            let prior_pane_id = client.get_focused_pane(active_tab_id);
+            for (&tab_id, &pane_id) in &saved_view.focused_pane_id_by_tab_id {
+                if tab_by_id.contains_key(&tab_id)
+                    && pane_registry.get_pane_record_by_id(pane_id).is_some()
+                {
                     client.update_focused_pane(tab_id, pane_id);
                 }
             }
             if let Some(pane_id) = client
-                .focused_pane(active_tab)
-                .filter(|&restored| Some(restored) != prior_pane)
+                .get_focused_pane(active_tab_id)
+                .filter(|&restored_pane_id| Some(restored_pane_id) != prior_pane_id)
             {
-                focus_move = Some((pane_id, prior_pane));
+                focus_change = Some((pane_id, prior_pane_id));
             }
-            for (&tab_id, &pane_id) in &view.zoom_by_tab {
-                if tabs.contains_key(&tab_id) && panes.get(pane_id).is_some() {
+            for (&tab_id, &pane_id) in &saved_view.zoomed_pane_id_by_tab_id {
+                if tab_by_id.contains_key(&tab_id)
+                    && pane_registry.get_pane_record_by_id(pane_id).is_some()
+                {
                     client.zoom_pane(tab_id, pane_id);
                 }
             }
-            for (&pane_id, &offset) in &view.scroll_by_pane {
-                if panes.get(pane_id).is_some() {
-                    let retained = self
-                        .terminal_engines
-                        .get(&pane_id)
-                        .map_or(0, |engine| engine.state().scrollback().len());
-                    client.set_scroll_offset(pane_id, offset.min(retained));
+            for (&pane_id, &scroll_offset) in &saved_view.scroll_offset_by_pane_id {
+                if pane_registry.get_pane_record_by_id(pane_id).is_some() {
+                    let retained_line_count = self.terminal_engine_by_pane_id.get(&pane_id).map_or(
+                        0,
+                        |terminal_engine| {
+                            terminal_engine
+                                .get_terminal_state()
+                                .get_scrollback()
+                                .get_retained_line_count()
+                        },
+                    );
+                    client.set_scroll_offset(pane_id, scroll_offset.min(retained_line_count));
                 }
             }
         }
 
-        self.reflow_tab_if_viewed(backend.as_ref(), session_id, active_tab, &mut events);
-        if let Some((pane_id, prior_pane)) = focus_move {
-            events.push(Event::PaneFocused(PaneFocused {
+        self.reflow_tab_if_viewed(
+            pty_backend.as_ref(),
+            session_id,
+            active_tab_id,
+            &mut emitted_events,
+        );
+        if let Some((pane_id, previous_pane_id)) = focus_change {
+            emitted_events.push(Event::PaneFocused(PaneFocused {
                 client_id,
-                tab_id: active_tab,
+                tab_id: active_tab_id,
                 pane_id,
-                prior_pane,
+                previous_pane_id,
             }));
         }
         self.render_scheduler.invalidate();
 
-        events
+        emitted_events
     }
 
-    /// Attach a client to `session_id` viewing `active_tab`, then reconcile the
+    /// Attach a client to `session_id` viewing `active_tab_id`, then reconcile the
     /// affected tabs' PTY sizes and schedule a redraw.
     ///
     /// A client lives in exactly one session. If this id already lives in another
@@ -294,14 +328,15 @@ impl Server {
     /// flag is spent by that attach, so every client after it starts in
     /// [`LockMode::Normal`].
     ///
-    /// `remote` names where the connection carrying this attach came from. It
+    /// `is_remote` names whether the connection carrying this attach came from another
+    /// process. It
     /// is recorded as the client's [`ClientOrigin`]: [`ClientOrigin::Remote`]
     /// when true, [`ClientOrigin::Local`] otherwise. A re-attach overwrites the
     /// origin the client already carried.
     ///
     /// Records `pane_area` on the client, `None` included: a re-attach that
     /// reports none replaces an earlier report. The viewer joins each affected
-    /// tab's effective size ([`Session::tab_viewport`], the per-axis minimum of
+    /// tab's effective size ([`Session::get_tab_viewport`], the per-axis minimum of
     /// every viewing client's pane area; a client reporting
     /// [`PaneArea::Starving`] contributes none), so a smaller client shrinks a
     /// tab and a departing one lets it grow: the tab's live panes reflow to the
@@ -311,28 +346,28 @@ impl Server {
     /// session does not hold, is dropped. `attached_at` is supplied by the
     /// producer; the handler never reads the clock itself.
     // Carries the whole of one attach: where it lands (`session_id`,
-    // `client_id`, `active_tab`), the view it arrives with (`viewport`,
-    // `pane_area`), and where it came from (`attached_at`, `remote`).
+    // `client_id`, `active_tab_id`), the view it arrives with (`viewport_size`,
+    // `pane_area`), and where it came from (`attached_at`, `is_remote`).
     #[allow(clippy::too_many_arguments)]
     pub fn handle_client_attach(
         &mut self,
         session_id: SessionId,
         client_id: ClientId,
-        viewport: Size,
+        viewport_size: Size,
         pane_area: Option<PaneArea>,
-        active_tab: TabId,
+        active_tab_id: TabId,
         attached_at: SystemTime,
-        remote: bool,
+        is_remote: bool,
     ) -> Vec<Event> {
         self.handle_client_attach_with_cell_size(
             session_id,
             client_id,
-            viewport,
+            viewport_size,
             pane_area,
-            active_tab,
+            active_tab_id,
             None,
             attached_at,
-            remote,
+            is_remote,
         )
     }
 
@@ -343,104 +378,107 @@ impl Server {
         &mut self,
         session_id: SessionId,
         client_id: ClientId,
-        viewport: Size,
+        viewport_size: Size,
         pane_area: Option<PaneArea>,
-        active_tab: TabId,
+        active_tab_id: TabId,
         cell_size: Option<koshi_core::geometry::PixelCellSize>,
         attached_at: SystemTime,
-        remote: bool,
+        is_remote: bool,
     ) -> Vec<Event> {
-        let origin = if remote {
+        let client_origin = if is_remote {
             ClientOrigin::Remote
         } else {
             ClientOrigin::Local
         };
         // Clone the shared backend before borrowing the session: the reflow then
         // needs no `&self` across the mutation.
-        let backend = Arc::clone(self.pty_backend());
-        let mut events = Vec::new();
+        let pty_backend = Arc::clone(self.get_pty_backend());
+        let mut emitted_events = Vec::new();
 
         // Validate the target: an attach naming an unknown session, or a tab the
         // session does not hold, is dropped.
-        match self.sessions.get(&session_id) {
-            Some(session) if session.tabs.contains_key(&active_tab) => {}
+        match self.session_by_id.get(&session_id) {
+            Some(session) if session.tabs.contains_key(&active_tab_id) => {}
             _ => return Vec::new(),
         }
 
         // If the id already lives in a different session, detach it there first
         // and reflow the tab it leaves. One id is never held in two registries.
-        if let Some(old_session_id) = self.session_for_client(client_id).map(|session| session.id) {
+        if let Some(old_session_id) = self
+            .get_session_for_client(client_id)
+            .map(|session| session.session_id)
+        {
             if old_session_id != session_id {
                 let old_session = self
-                    .sessions
+                    .session_by_id
                     .get_mut(&old_session_id)
                     .expect("session located above");
-                let old_tab = old_session
+                let old_tab_id = old_session
                     .detach_client(client_id)
-                    .map(|client| client.active_tab());
-                if let Some(old_tab) = old_tab {
+                    .map(|client| client.get_active_tab());
+                if let Some(old_tab_id) = old_tab_id {
                     self.reflow_tab_if_viewed(
-                        backend.as_ref(),
+                        pty_backend.as_ref(),
                         old_session_id,
-                        old_tab,
-                        &mut events,
+                        old_tab_id,
+                        &mut emitted_events,
                     );
                 }
             }
         }
 
         let session = self
-            .sessions
+            .session_by_id
             .get_mut(&session_id)
             .expect("target session validated above");
 
         // A same-session re-attach updates the view in place, preserving the
         // client's accumulated state and yielding the tab it moved off of; a
         // fresh id is registered anew and has no prior tab.
-        let prior_tab = if let Some(client) = session.clients.get_mut(client_id) {
-            let prior = client.active_tab();
-            client.update_viewport(viewport);
+        let prior_tab_id = if let Some(client) = session.clients.get_client_mut_by_id(client_id) {
+            let previous_tab_id = client.get_active_tab();
+            client.update_viewport(viewport_size);
             client.update_pane_area(pane_area);
-            client.update_active_tab(active_tab);
+            client.update_active_tab(active_tab_id);
             client.replace_cell_size(cell_size);
-            client.update_origin(origin);
-            Some(prior)
+            client.update_origin(client_origin);
+            Some(previous_tab_id)
         } else {
             let label = generate_name(NameKind::Client, |candidate| {
                 session
                     .clients
-                    .list_attached()
-                    .any(|client| client.label() == candidate)
+                    .list_attached_clients()
+                    .any(|client| client.get_label() == candidate)
             });
-            let colour = (0..=u8::MAX)
+            let color = (0..=u8::MAX)
                 .find(|candidate| {
                     !session
                         .clients
-                        .list_attached()
-                        .any(|client| client.colour() == *candidate)
+                        .list_attached_clients()
+                        .any(|client| client.get_color() == *candidate)
                 })
                 // Every palette index is in use: this client takes index 0,
                 // which another client already holds.
                 .unwrap_or(0);
-            let mut client = Client::new(
+            let mut client = Client::from_attachment(
                 client_id,
                 session_id,
                 attached_at,
-                viewport,
+                viewport_size,
                 pane_area,
-                active_tab,
-                origin,
+                active_tab_id,
+                client_origin,
                 label,
-                colour,
+                color,
             );
             client.replace_cell_size(cell_size);
             // A profile carrying `lock` hands its starting mode to the first
             // client that attaches, and the flag is spent there.
             if session.take_start_lock() {
                 client.update_lock_mode(LockMode::Locked);
-                events.push(Event::InputModeChanged(InputModeChanged {
+                emitted_events.push(Event::InputModeChanged(InputModeChanged {
                     client_id,
-                    mode: LockMode::Locked,
+                    lock_mode: LockMode::Locked,
                 }));
             }
             session.attach_client(client);
@@ -450,34 +488,47 @@ impl Server {
         // A client with no focus in the tab it now views starts on that tab's
         // most recent pane, which a session records when the tab is created. A
         // client that already focused a pane here keeps it.
-        let landed_on = session
+        let landed_pane_id = session
             .tabs
-            .get(&active_tab)
-            .and_then(|tab| tab.focus_mru().first().copied());
-        if let (Some(pane_id), Some(client)) = (landed_on, session.clients.get_mut(client_id)) {
-            if client.focused_pane(active_tab).is_none() {
-                client.update_focused_pane(active_tab, pane_id);
-                events.push(Event::PaneFocused(PaneFocused {
+            .get(&active_tab_id)
+            .and_then(|tab| tab.list_focus_mru().first().copied());
+        if let (Some(pane_id), Some(client)) = (
+            landed_pane_id,
+            session.clients.get_client_mut_by_id(client_id),
+        ) {
+            if client.get_focused_pane(active_tab_id).is_none() {
+                client.update_focused_pane(active_tab_id, pane_id);
+                emitted_events.push(Event::PaneFocused(PaneFocused {
                     client_id,
-                    tab_id: active_tab,
+                    tab_id: active_tab_id,
                     pane_id,
-                    prior_pane: None,
+                    previous_pane_id: None,
                 }));
             }
         }
 
         // Reflow the tab the client now views, plus — on a same-session move —
         // the one it left.
-        self.reflow_tab_if_viewed(backend.as_ref(), session_id, active_tab, &mut events);
-        if let Some(prior) = prior_tab {
-            if prior != active_tab {
-                self.reflow_tab_if_viewed(backend.as_ref(), session_id, prior, &mut events);
+        self.reflow_tab_if_viewed(
+            pty_backend.as_ref(),
+            session_id,
+            active_tab_id,
+            &mut emitted_events,
+        );
+        if let Some(previous_tab_id) = prior_tab_id {
+            if previous_tab_id != active_tab_id {
+                self.reflow_tab_if_viewed(
+                    pty_backend.as_ref(),
+                    session_id,
+                    previous_tab_id,
+                    &mut emitted_events,
+                );
             }
         }
 
         self.render_scheduler.invalidate();
 
-        events
+        emitted_events
     }
 
     /// Update one client's full terminal viewport, reconcile the active tab's
@@ -489,40 +540,48 @@ impl Server {
     pub fn handle_client_resize(
         &mut self,
         client_id: ClientId,
-        viewport: Size,
+        viewport_size: Size,
         pane_area: Option<PaneArea>,
     ) -> Vec<Event> {
-        self.handle_client_resize_with_cell_size(client_id, viewport, pane_area, None)
+        self.handle_client_resize_with_cell_size(client_id, viewport_size, pane_area, None)
     }
 
     /// Update one client's viewport and optional measured cell dimensions.
     pub(crate) fn handle_client_resize_with_cell_size(
         &mut self,
         client_id: ClientId,
-        viewport: Size,
+        viewport_size: Size,
         pane_area: Option<PaneArea>,
         cell_size: Option<koshi_core::geometry::PixelCellSize>,
     ) -> Vec<Event> {
-        let backend = Arc::clone(self.pty_backend());
-        let Some(session_id) = self.session_for_client(client_id).map(|session| session.id) else {
+        let pty_backend = Arc::clone(self.get_pty_backend());
+        let Some(session_id) = self
+            .get_session_for_client(client_id)
+            .map(|session| session.session_id)
+        else {
             return Vec::new();
         };
         let session = self
-            .sessions
+            .session_by_id
             .get_mut(&session_id)
             .expect("session located above");
-        let Some(client) = session.clients.get_mut(client_id) else {
+        let Some(client) = session.clients.get_client_mut_by_id(client_id) else {
             return Vec::new();
         };
-        let active_tab = client.active_tab();
-        client.update_viewport(viewport);
+        let active_tab_id = client.get_active_tab();
+        client.update_viewport(viewport_size);
         client.update_pane_area(pane_area);
         client.replace_cell_size(cell_size);
 
-        let mut events = Vec::new();
-        self.reflow_tab_if_viewed(backend.as_ref(), session_id, active_tab, &mut events);
+        let mut emitted_events = Vec::new();
+        self.reflow_tab_if_viewed(
+            pty_backend.as_ref(),
+            session_id,
+            active_tab_id,
+            &mut emitted_events,
+        );
         self.render_scheduler.invalidate();
-        events
+        emitted_events
     }
 
     /// File the view `client_id` is leaving behind, under the token that
@@ -544,23 +603,26 @@ impl Server {
     ///
     /// Call this before [`handle_client_detach`](Self::handle_client_detach),
     /// which removes the record read here.
-    pub(crate) fn save_view_of(&mut self, client_id: ClientId, detached_at: SystemTime) {
-        if self.awaiting_reconnect.contains(&client_id) {
+    pub(crate) fn save_client_view(&mut self, client_id: ClientId, detached_at: SystemTime) {
+        if self.client_ids_awaiting_reconnect.contains(&client_id) {
             return;
         }
-        let Some(session_id) = self.session_for_client(client_id).map(|session| session.id) else {
-            self.saved_views.forget(client_id);
+        let Some(session_id) = self
+            .get_session_for_client(client_id)
+            .map(|session| session.session_id)
+        else {
+            self.saved_view_store.forget_client_resume_token(client_id);
             return;
         };
         let Some(client) = self
-            .sessions
+            .session_by_id
             .get(&session_id)
-            .and_then(|session| session.clients.get(client_id))
+            .and_then(|session| session.clients.get_client_by_id(client_id))
         else {
-            self.saved_views.forget(client_id);
+            self.saved_view_store.forget_client_resume_token(client_id);
             return;
         };
-        self.saved_views.save(client, detached_at);
+        self.saved_view_store.save_client_view(client, detached_at);
     }
 
     /// Detach the client `client_id`, then reconcile the PTY sizes of the tab it
@@ -569,7 +631,7 @@ impl Server {
     /// Removing the client hands back its record, whose `active_tab` names the
     /// tab whose viewer set shrank. The departing viewer is dropped from that
     /// tab's effective size, so if larger viewers remain the tab grows back: its
-    /// live panes reflow to the new [`Session::tab_viewport`], one
+    /// live panes reflow to the new [`Session::get_tab_viewport`], one
     /// [`Event::PtyResized`] each. When it was the last viewer the tab has no
     /// viewport and keeps its sizes. The detach always marks the screen stale so
     /// the remaining clients repaint. A detach for a client this runtime does
@@ -581,7 +643,7 @@ impl Server {
     /// Runs for every detach trigger: a connection drop (either half of an
     /// attached client's connection ending), the [`Command::Detach`] /
     /// [`Command::DetachAll`] execution arms, and a [`Command::Quit`] whose
-    /// source names a client. Target resolution happens at command resolution
+    /// command source names a client. Target resolution happens at command resolution
     /// before this is reached. With `auto-close-session` on, a detach that
     /// leaves the session with no client requests a graceful quit.
     ///
@@ -589,36 +651,46 @@ impl Server {
     /// record's fate belongs to the grace window, which detaches it through
     /// `handle_drop_unclaimed_clients` after removing it from the set.
     pub fn handle_client_detach(&mut self, client_id: ClientId) -> Vec<Event> {
-        if self.awaiting_reconnect.contains(&client_id) {
+        if self.client_ids_awaiting_reconnect.contains(&client_id) {
             return Vec::new();
         }
 
         // Clone the shared backend before borrowing the session: the reflow then
         // needs no `&self` across the mutation.
-        let backend = Arc::clone(self.pty_backend());
+        let pty_backend = Arc::clone(self.get_pty_backend());
 
         // A detach for a client no session holds is dropped.
-        let Some(session_id) = self.session_for_client(client_id).map(|session| session.id) else {
+        let Some(session_id) = self
+            .get_session_for_client(client_id)
+            .map(|session| session.session_id)
+        else {
             return Vec::new();
         };
         let session = self
-            .sessions
+            .session_by_id
             .get_mut(&session_id)
             .expect("session located above");
 
         // Removing the client returns its record; its `active_tab` is the tab
         // whose effective size may now grow.
-        let removed = session.detach_client(client_id);
-        let active_tab = removed.as_ref().map(|client| client.active_tab());
+        let removed_client = session.detach_client(client_id);
+        let active_tab_id = removed_client
+            .as_ref()
+            .map(|client| client.get_active_tab());
         // A client did leave, and none is left attached.
-        let session_emptied = removed.is_some() && session.clients.is_empty();
+        let is_session_empty = removed_client.is_some() && !session.clients.has_clients();
         self.unsubscribe_client(client_id);
 
-        let mut events = Vec::new();
+        let mut emitted_events = Vec::new();
         // Reflow the tab the client left, if any other client still views it; a
         // tab whose last viewer just left has no viewport and keeps its sizes.
-        if let Some(active_tab) = active_tab {
-            self.reflow_tab_if_viewed(backend.as_ref(), session_id, active_tab, &mut events);
+        if let Some(active_tab_id) = active_tab_id {
+            self.reflow_tab_if_viewed(
+                pty_backend.as_ref(),
+                session_id,
+                active_tab_id,
+                &mut emitted_events,
+            );
         }
 
         self.render_scheduler.invalidate();
@@ -627,15 +699,15 @@ impl Server {
         // Each pane's child is asked to stop and given the graceful window
         // before it is killed; a stop request that cannot be delivered goes
         // straight to the kill.
-        if session_emptied && self.config.auto_close_session {
+        if is_session_empty && self.config.should_auto_close_session {
             self.request_graceful_quit();
         }
 
-        events
+        emitted_events
     }
 
     /// Detach every client whose record came across an image swap and has not
-    /// attached again by `deadline`.
+    /// attached again by `unclaimed_client_deadline`.
     ///
     /// Each one goes through
     /// [`handle_client_detach`](Self::handle_client_detach), so its tab reflows
@@ -644,28 +716,32 @@ impl Server {
     /// detaches nobody and emits nothing. The detaches run in client-id order,
     /// so the events they emit arrive in one settled order.
     ///
-    /// `deadline` is when the grace window closed, supplied by the producer;
+    /// `unclaimed_client_deadline` is when the grace window closed, supplied by the producer;
     /// the handler never reads the clock to decide anything.
-    pub(crate) fn handle_drop_unclaimed_clients(&mut self, deadline: Instant) -> Vec<Event> {
-        if self.awaiting_reconnect.is_empty() {
+    pub(crate) fn handle_drop_unclaimed_clients(
+        &mut self,
+        unclaimed_client_deadline: Instant,
+    ) -> Vec<Event> {
+        if self.client_ids_awaiting_reconnect.is_empty() {
             return Vec::new();
         }
-        let mut unclaimed: Vec<ClientId> = std::mem::take(&mut self.awaiting_reconnect)
-            .into_iter()
-            .collect();
-        unclaimed.sort();
+        let mut unclaimed_client_ids: Vec<ClientId> =
+            std::mem::take(&mut self.client_ids_awaiting_reconnect)
+                .into_iter()
+                .collect();
+        unclaimed_client_ids.sort();
         tracing::info!(
-            unclaimed = unclaimed.len(),
+            unclaimed = unclaimed_client_ids.len(),
             waited_ms = Instant::now()
-                .saturating_duration_since(deadline)
+                .saturating_duration_since(unclaimed_client_deadline)
                 .as_millis(),
             "detaching the clients that did not attach again after the restart"
         );
-        let mut events = Vec::new();
-        for client_id in unclaimed {
-            events.extend(self.handle_client_detach(client_id));
+        let mut emitted_events = Vec::new();
+        for client_id in unclaimed_client_ids {
+            emitted_events.extend(self.handle_client_detach(client_id));
         }
-        events
+        emitted_events
     }
 
     /// Handle [`Command::ToggleLockMode`]: flip the target client between
@@ -676,36 +752,46 @@ impl Server {
     pub(super) fn handle_toggle_lock_mode(
         &mut self,
         command_id: CommandId,
-        source: &CommandSource,
-        args: &ToggleLockModeArgs,
+        command_source: &CommandSource,
+        command_args: &ToggleLockModeArgs,
     ) -> Result<CommandResult, Rejection> {
-        self.set_lock_mode(command_id, source, args.client, |current| match current {
-            LockMode::Locked => LockMode::Normal,
-            _ => LockMode::Locked,
-        })
+        self.set_lock_mode(
+            command_id,
+            command_source,
+            command_args.client_id,
+            |current_lock_mode| match current_lock_mode {
+                LockMode::Locked => LockMode::Normal,
+                _ => LockMode::Locked,
+            },
+        )
     }
 
     /// Handle [`Command::SetLockMode`]: set the target client to
-    /// [`LockMode::Locked`] when `args.locked`, else [`LockMode::Normal`].
+    /// [`LockMode::Locked`] when `command_args.locked`, else [`LockMode::Normal`].
     ///
     /// Setting the mode the client already holds is a no-op: applied, zero
     /// events.
     pub(super) fn handle_set_lock_mode(
         &mut self,
         command_id: CommandId,
-        source: &CommandSource,
-        args: &LockModeArgs,
+        command_source: &CommandSource,
+        command_args: &LockModeArgs,
     ) -> Result<CommandResult, Rejection> {
-        let next = if args.locked {
+        let requested_lock_mode = if command_args.is_locked {
             LockMode::Locked
         } else {
             LockMode::Normal
         };
-        self.set_lock_mode(command_id, source, args.client, move |_| next)
+        self.set_lock_mode(
+            command_id,
+            command_source,
+            command_args.client_id,
+            move |_| requested_lock_mode,
+        )
     }
 
     /// Set the target client's [`LockMode`], emitting [`Event::InputModeChanged`]
-    /// only when it changes. `resolve` maps the client's current mode to the
+    /// only when it changes. `resolve_lock_mode` maps the client's current mode to the
     /// next one, so the toggle and the explicit set share one path.
     ///
     /// Lock mode targets a client alone — the explicit `client` argument when
@@ -715,23 +801,23 @@ impl Server {
     fn set_lock_mode(
         &mut self,
         command_id: CommandId,
-        source: &CommandSource,
-        explicit: Option<ClientId>,
-        resolve: impl FnOnce(LockMode) -> LockMode,
+        command_source: &CommandSource,
+        explicit_client_id: Option<ClientId>,
+        resolve_lock_mode: impl FnOnce(LockMode) -> LockMode,
     ) -> Result<CommandResult, Rejection> {
-        let (client_id, client) = self.acting_client_mut(source, explicit)?;
+        let (client_id, client) = self.acting_client_mut(command_source, explicit_client_id)?;
 
-        let current = client.lock_mode();
-        let next = resolve(current);
-        let mut scope = TransactionScope::new();
-        if next != current {
-            client.update_lock_mode(next);
-            scope.emit(Event::InputModeChanged(InputModeChanged {
+        let current_lock_mode = client.get_lock_mode();
+        let next_lock_mode = resolve_lock_mode(current_lock_mode);
+        let mut transaction_scope = TransactionScope::new();
+        if next_lock_mode != current_lock_mode {
+            client.update_lock_mode(next_lock_mode);
+            transaction_scope.emit(Event::InputModeChanged(InputModeChanged {
                 client_id,
-                mode: next,
+                lock_mode: next_lock_mode,
             }));
         }
-        Ok(scope.commit(command_id, &mut self.event_bus))
+        Ok(transaction_scope.commit(command_id, &mut self.event_bus))
     }
 
     /// The target client's mutable record, for commands that act on one
@@ -741,20 +827,21 @@ impl Server {
     /// one [`Self::validate`] admitted the command against.
     fn acting_client_mut(
         &mut self,
-        source: &CommandSource,
-        explicit: Option<ClientId>,
+        command_source: &CommandSource,
+        explicit_client_id: Option<ClientId>,
     ) -> Result<(ClientId, &mut Client), Rejection> {
-        let acting = Self::require_session(self.acting_session(source)?)?;
-        let session_id = acting.id;
-        let client_id = Self::resolve_view_client(explicit, source, acting)?;
+        let acting_session = Self::require_session(self.acting_session(command_source)?)?;
+        let session_id = acting_session.session_id;
+        let client_id =
+            Self::resolve_view_client(explicit_client_id, command_source, acting_session)?;
         let session = self
-            .sessions
+            .session_by_id
             .get_mut(&session_id)
-            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
+            .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
         let client = session
             .clients
-            .get_mut(client_id)
-            .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))?;
+            .get_client_mut_by_id(client_id)
+            .ok_or_else(|| Rejection::from_reason(RejectReason::SourceClientStale))?;
         Ok((client_id, client))
     }
 
@@ -770,15 +857,15 @@ impl Server {
     pub(super) fn handle_toggle_mouse_select(
         &mut self,
         command_id: CommandId,
-        source: &CommandSource,
+        command_source: &CommandSource,
     ) -> Result<CommandResult, Rejection> {
-        let (client_id, client) = self.acting_client_mut(source, None)?;
-        let on = client.toggle_mouse_select();
-        let mut scope = TransactionScope::new();
-        scope.emit(Event::MouseSelectChanged(MouseSelectChanged {
+        let (client_id, client) = self.acting_client_mut(command_source, None)?;
+        let is_mouse_selection_enabled = client.toggle_mouse_selection();
+        let mut transaction_scope = TransactionScope::new();
+        transaction_scope.emit(Event::MouseSelectChanged(MouseSelectChanged {
             client_id,
-            on,
+            is_enabled: is_mouse_selection_enabled,
         }));
-        Ok(scope.commit(command_id, &mut self.event_bus))
+        Ok(transaction_scope.commit(command_id, &mut self.event_bus))
     }
 }

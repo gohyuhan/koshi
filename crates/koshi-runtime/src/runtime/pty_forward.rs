@@ -37,7 +37,7 @@ pub struct InboxSink {
 impl InboxSink {
     /// A sink feeding `inbox_tx`.
     #[must_use]
-    pub fn new(inbox_tx: Sender<RuntimeEvent>) -> Self {
+    pub fn from_event_sender(inbox_tx: Sender<RuntimeEvent>) -> Self {
         InboxSink { inbox_tx }
     }
 }
@@ -46,19 +46,23 @@ impl PtySink for InboxSink {
     /// Queue one chunk of child output as [`RuntimeEvent::PtyOutput`]. Returns
     /// `true` when it is queued, `false` when the inbox is closed, which tells
     /// the reader to stop reading this pane.
-    fn output(&self, pane_id: PaneId, bytes: Vec<u8>) -> bool {
+    fn accept_output_bytes(&self, pane_id: PaneId, output_bytes: Vec<u8>) -> bool {
         self.inbox_tx
-            .send(RuntimeEvent::PtyOutput { pane_id, bytes })
+            .send(RuntimeEvent::PtyOutput {
+                pane_id,
+                output_bytes,
+            })
             .is_ok()
     }
 
     /// Queue the child's exit as [`RuntimeEvent::ChildExit`]. The backend calls
     /// this after the pane's last output, and reads the pane no further. A
     /// closed inbox drops the event.
-    fn exit(&self, pane_id: PaneId, status: ExitStatus) {
-        let _ = self
-            .inbox_tx
-            .send(RuntimeEvent::ChildExit { pane_id, status });
+    fn accept_exit_status(&self, pane_id: PaneId, exit_status: ExitStatus) {
+        let _ = self.inbox_tx.send(RuntimeEvent::ChildExit {
+            pane_id,
+            exit_status,
+        });
     }
 }
 
@@ -66,7 +70,7 @@ impl Server {
     /// Register a freshly spawned pane's PTY: start its output on the way to
     /// the inbox, then record its handle (the live-pane token), `size`, and a
     /// new terminal engine of `size` capped by the config's
-    /// `scrollback.max_lines` and `scrollback.max_bytes`. Every spawn path
+    /// `scrollback.maximum_line_count` and `scrollback.maximum_byte_count`. Every spawn path
     /// calls this. A record already held for `pane_id` is replaced.
     ///
     /// A handle carrying receivers gets a forwarder thread that drains them; a
@@ -75,16 +79,27 @@ impl Server {
     /// # Panics
     ///
     /// Panics when the operating system refuses to start the forwarder thread.
-    pub(crate) fn park_pane_pty(&mut self, pane_id: PaneId, mut handle: PtyHandle, size: PtySize) {
-        if let Some((output_rx, exit_rx)) = handle.take_receivers() {
-            Self::spawn_pty_forwarder(&self.inbox_tx, pane_id, output_rx, exit_rx);
+    pub(crate) fn park_pane_pty(
+        &mut self,
+        pane_id: PaneId,
+        mut pty_handle: PtyHandle,
+        pty_size: PtySize,
+    ) {
+        if let Some((output_receiver, exit_receiver)) = pty_handle.take_output_and_exit_receivers()
+        {
+            Self::spawn_pty_forwarder(&self.inbox_tx, pane_id, output_receiver, exit_receiver);
         }
-        self.pty_handles.insert(pane_id, handle);
-        self.pty_sizes.insert(pane_id, size);
-        let scrollback = &self.config.scrollback;
-        let limit = ScrollbackLimit::new(scrollback.max_lines, scrollback.max_bytes);
-        self.terminal_engines
-            .insert(pane_id, TerminalEngine::with_scrollback(size, limit));
+        self.pty_handle_by_pane_id.insert(pane_id, pty_handle);
+        self.pty_size_by_pane_id.insert(pane_id, pty_size);
+        let scrollback_config = &self.config.scrollback;
+        let scrollback_limit = ScrollbackLimit::from_line_and_byte_limits(
+            scrollback_config.maximum_line_count,
+            scrollback_config.maximum_byte_count,
+        );
+        self.terminal_engine_by_pane_id.insert(
+            pane_id,
+            TerminalEngine::with_scrollback(pty_size, scrollback_limit),
+        );
     }
 
     /// Start the one relay thread for `pane_id`. It forwards every chunk from
@@ -101,20 +116,20 @@ impl Server {
     fn spawn_pty_forwarder(
         inbox_tx: &Sender<RuntimeEvent>,
         pane_id: PaneId,
-        output_rx: Receiver<Vec<u8>>,
-        exit_rx: Receiver<ExitStatus>,
+        output_receiver: Receiver<Vec<u8>>,
+        exit_receiver: Receiver<ExitStatus>,
     ) {
-        let sink = InboxSink::new(inbox_tx.clone());
+        let event_sink = InboxSink::from_event_sender(inbox_tx.clone());
         let _ = thread::Builder::new()
             .name("koshi-pty-fwd".to_string())
             .spawn(move || {
-                while let Ok(bytes) = output_rx.recv() {
-                    if !sink.output(pane_id, bytes) {
+                while let Ok(output_bytes) = output_receiver.recv() {
+                    if !event_sink.accept_output_bytes(pane_id, output_bytes) {
                         return;
                     }
                 }
-                if let Ok(status) = exit_rx.recv() {
-                    sink.exit(pane_id, status);
+                if let Ok(exit_status) = exit_receiver.recv() {
+                    event_sink.accept_exit_status(pane_id, exit_status);
                 }
             })
             .expect("spawn pty forwarder thread");

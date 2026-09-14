@@ -10,12 +10,13 @@ pub const REDACTED: &str = "***";
 /// `argv` yields an empty `Vec`.
 ///
 /// `["mysql", "-pHUNTER2"]` results in `["mysql", "***"]`.
-pub fn redact_argv(argv: &[String]) -> Vec<String> {
-    argv.iter()
+pub fn redact_command_argv(command_argv: &[String]) -> Vec<String> {
+    command_argv
+        .iter()
         .enumerate()
-        .map(|(index, arg)| {
-            if index == 0 {
-                arg.clone()
+        .map(|(argument_index, command_argument)| {
+            if argument_index == 0 {
+                command_argument.clone()
             } else {
                 REDACTED.to_string()
             }

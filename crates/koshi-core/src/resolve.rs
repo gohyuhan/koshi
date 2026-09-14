@@ -2,7 +2,7 @@
 //!
 //! [`action`](crate::action) ships the vocabulary and [`registry`](crate::registry)
 //! holds the live table. This module ships the one step between them and the
-//! dispatcher: given an [`ActionRef`] such as `core:next-tab` plus the arguments
+//! dispatcher: given an [`ActionReference`] such as `core:next-tab` plus the arguments
 //! bound to it, produce the [`Command`] the runtime should execute.
 //!
 //! # Actions and commands are not one-to-one
@@ -10,7 +10,7 @@
 //! Several actions build the same command and differ only by a value fixed for
 //! that action: `lock` and `unlock` both build [`Command::SetLockMode`],
 //! `next-tab` and `previous-tab` both build [`Command::FocusTab`]. Those fixed
-//! values live in a table keyed on the action's NAME. The entry's
+//! values live in a table keyed on the action's NAME. The registry record's
 //! [`CommandKind`](crate::command::CommandKind) is not read.
 //!
 //! # What this module does not decide
@@ -23,11 +23,11 @@
 //!
 //! # Routes
 //!
-//! A registry entry's [`ActionHandlerRef`] picks one of three plans. A
-//! [`CoreCommand`](ActionHandlerRef::CoreCommand) builds a typed command. A
-//! [`PluginHostCall`](ActionHandlerRef::PluginHostCall) becomes a
+//! A registry entry's [`ActionHandlerReference`] picks one of three plans. A
+//! [`CoreCommand`](ActionHandlerReference::CoreCommand) builds a typed command. A
+//! [`PluginHostCall`](ActionHandlerReference::PluginHostCall) becomes a
 //! [`DispatchPlan::PluginHostCall`] carrying the arguments uninterpreted. A
-//! [`Sequence`](ActionHandlerRef::Sequence) fans out into the plans of the
+//! [`Sequence`](ActionHandlerReference::Sequence) fans out into the plans of the
 //! actions it names, in order, halting on the first failure and bounded by
 //! [`MAX_SEQUENCE_DEPTH`].
 
@@ -35,7 +35,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 
-use crate::action::{ActionHandlerRef, ActionRef, ActionStatus};
+use crate::action::{ActionHandlerReference, ActionReference, ActionStatus};
 use crate::command::{
     ClosePaneArgs, CloseTabArgs, Command, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs,
     NewPaneArgs, NewTabArgs, ResizePaneArgs, RunCommandPaneArgs, TabTarget, ToggleLockModeArgs,
@@ -47,7 +47,7 @@ use crate::process::{ShellKind, SpawnSpec};
 use crate::registry::ActionRegistry;
 use serde::{Deserialize, Serialize};
 
-/// How many [`ActionHandlerRef::Sequence`] handlers one chain may nest.
+/// How many [`ActionHandlerReference::Sequence`] handlers one chain may nest.
 ///
 /// The budget is spent on sequences, not on the actions they name: a chain of
 /// eight macros ending in a real action resolves, and a ninth macro inside it
@@ -64,7 +64,8 @@ pub const MAX_SEQUENCE_DEPTH: usize = 8;
 /// arguments replaced with [`ActionArgs::None`] on load.
 ///
 /// [`ActionArgs::Run`] names a program and its arguments, not a whole
-/// [`SpawnSpec`]: the command it builds carries no `cwd` and an empty `env`.
+/// [`SpawnSpec`]: the command it builds carries no working directory and an
+/// empty environment.
 ///
 /// Every `core:` action except `core:run` accepts only [`ActionArgs::None`];
 /// `core:run` accepts only [`ActionArgs::Run`]. A plugin action forwards any
@@ -77,14 +78,17 @@ pub enum ActionArgs {
     /// Arguments for `core:run`.
     Run {
         /// The program to execute.
+        #[serde(rename = "program")]
         program: PathBuf,
         /// Arguments passed to the program, excluding `argv[0]`.
-        args: Vec<String>,
+        #[serde(rename = "args")]
+        arguments: Vec<String>,
         /// Split direction for the new pane; `None` uses the direction the
         /// resolving client passes in.
         direction: Option<Direction>,
         /// Stack onto the source pane instead of splitting space.
-        stacked: bool,
+        #[serde(rename = "stacked")]
+        should_stack: bool,
     },
 }
 
@@ -97,11 +101,11 @@ pub enum DispatchPlan {
     /// Hand the action to the plugin that owns it.
     PluginHostCall {
         /// The plugin that registered the action.
-        plugin: PluginId,
+        plugin_id: PluginId,
         /// The action it was asked to perform.
-        action: ActionRef,
+        action_reference: ActionReference,
         /// The arguments to forward, uninterpreted.
-        args: ActionArgs,
+        action_arguments: ActionArgs,
     },
     /// Run each plan in order, stopping at the first that fails.
     Sequence(Vec<DispatchPlan>),
@@ -110,43 +114,43 @@ pub enum DispatchPlan {
 /// Why an action could not be turned into a plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolveError {
-    /// The reference names no entry in the registry.
+    /// The reference names no registry record.
     Unregistered {
         /// The reference that was not found.
-        action: ActionRef,
+        action_reference: ActionReference,
     },
-    /// The entry's status is [`ActionStatus::ComingSoon`].
+    /// The registry record's status is [`ActionStatus::ComingSoon`].
     ComingSoon {
         /// The reference whose status is `ComingSoon`.
-        action: ActionRef,
+        action_reference: ActionReference,
     },
     /// The arguments do not fit the action.
     ArgsMismatch {
         /// The reference whose arguments did not fit.
-        action: ActionRef,
+        action_reference: ActionReference,
     },
     /// A macro sits deeper than [`MAX_SEQUENCE_DEPTH`] nested sequences.
     SequenceTooDeep {
         /// The macro resolution gave up on.
-        action: ActionRef,
+        action_reference: ActionReference,
     },
 }
 
 impl fmt::Display for ResolveError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ResolveError::Unregistered { action } => {
-                write!(f, "action {action} is not registered")
+            ResolveError::Unregistered { action_reference } => {
+                write!(f, "action {action_reference} is not registered")
             }
-            ResolveError::ComingSoon { action } => {
-                write!(f, "action {action} is not implemented yet")
+            ResolveError::ComingSoon { action_reference } => {
+                write!(f, "action {action_reference} is not implemented yet")
             }
-            ResolveError::ArgsMismatch { action } => {
-                write!(f, "action {action} was given arguments it does not accept")
+            ResolveError::ArgsMismatch { action_reference } => {
+                write!(f, "action {action_reference} was given arguments it does not accept")
             }
-            ResolveError::SequenceTooDeep { action } => write!(
+            ResolveError::SequenceTooDeep { action_reference } => write!(
                 f,
-                "action {action} nests past the maximum of {MAX_SEQUENCE_DEPTH} sequence levels"
+                "action {action_reference} nests past the maximum of {MAX_SEQUENCE_DEPTH} sequence levels"
             ),
         }
     }
@@ -159,7 +163,7 @@ impl DomainError for ResolveError {
         DomainCategory::Config
     }
 
-    fn severity(&self) -> Severity {
+    fn get_severity(&self) -> Severity {
         Severity::Recoverable
     }
 }
@@ -172,75 +176,82 @@ impl DomainError for ResolveError {
 /// `direction: None` — build their command with it.
 ///
 /// # Errors
-/// - [`ResolveError::Unregistered`] if `action` names no entry in `registry`.
-/// - [`ResolveError::ComingSoon`] if the entry's status is
+/// - [`ResolveError::Unregistered`] if `action_reference` names no registry record in `registry`.
+/// - [`ResolveError::ComingSoon`] if the registry record's status is
 ///   [`ActionStatus::ComingSoon`].
-/// - [`ResolveError::ArgsMismatch`] if `args` do not fit `action`.
+/// - [`ResolveError::ArgsMismatch`] if `action_arguments` do not fit `action_reference`.
 /// - [`ResolveError::SequenceTooDeep`] if a macro nests past
 ///   [`MAX_SEQUENCE_DEPTH`].
 pub fn resolve_action(
-    action: &ActionRef,
-    args: &ActionArgs,
+    action_reference: &ActionReference,
+    action_arguments: &ActionArgs,
     registry: &ActionRegistry,
     new_pane_direction: Direction,
 ) -> Result<DispatchPlan, ResolveError> {
-    resolve_at_depth(action, args, registry, new_pane_direction, 0)
+    resolve_action_at_depth(
+        action_reference,
+        action_arguments,
+        registry,
+        new_pane_direction,
+        0,
+    )
 }
 
 /// [`resolve_action`] carrying the count of sequences entered to reach `action`.
-fn resolve_at_depth(
-    action: &ActionRef,
-    args: &ActionArgs,
+fn resolve_action_at_depth(
+    action_reference: &ActionReference,
+    action_arguments: &ActionArgs,
     registry: &ActionRegistry,
     new_pane_direction: Direction,
-    depth: usize,
+    sequence_depth: usize,
 ) -> Result<DispatchPlan, ResolveError> {
-    let metadata = registry
-        .lookup(action)
+    let action_metadata = registry
+        .find_action_metadata(action_reference)
         .ok_or_else(|| ResolveError::Unregistered {
-            action: action.clone(),
+            action_reference: action_reference.clone(),
         })?;
 
-    if metadata.status == ActionStatus::ComingSoon {
+    if action_metadata.action_status == ActionStatus::ComingSoon {
         return Err(ResolveError::ComingSoon {
-            action: action.clone(),
+            action_reference: action_reference.clone(),
         });
     }
 
-    match &metadata.handler {
-        ActionHandlerRef::CoreCommand(_) => {
-            resolve_core(action, args, new_pane_direction).map(DispatchPlan::Command)
+    match &action_metadata.handler {
+        ActionHandlerReference::CoreCommand(_) => {
+            resolve_core_action(action_reference, action_arguments, new_pane_direction)
+                .map(DispatchPlan::Command)
         }
-        ActionHandlerRef::PluginHostCall(plugin) => Ok(DispatchPlan::PluginHostCall {
-            plugin: *plugin,
-            action: action.clone(),
-            args: args.clone(),
+        ActionHandlerReference::PluginHostCall(plugin_id) => Ok(DispatchPlan::PluginHostCall {
+            plugin_id: *plugin_id,
+            action_reference: action_reference.clone(),
+            action_arguments: action_arguments.clone(),
         }),
-        // Every step resolves with `ActionArgs::None`. `depth` counts the
+        // Every step resolves with `ActionArgs::None`. `sequence_depth` counts the
         // sequences entered, not the actions reached: a leaf action below the
         // deepest allowed sequence resolves.
-        ActionHandlerRef::Sequence(steps) => {
-            if depth >= MAX_SEQUENCE_DEPTH {
+        ActionHandlerReference::Sequence(action_steps) => {
+            if sequence_depth >= MAX_SEQUENCE_DEPTH {
                 return Err(ResolveError::SequenceTooDeep {
-                    action: action.clone(),
+                    action_reference: action_reference.clone(),
                 });
             }
-            if args != &ActionArgs::None {
+            if action_arguments != &ActionArgs::None {
                 return Err(ResolveError::ArgsMismatch {
-                    action: action.clone(),
+                    action_reference: action_reference.clone(),
                 });
             }
-            let mut plans = Vec::with_capacity(steps.len());
-            for step in steps {
-                plans.push(resolve_at_depth(
-                    step,
+            let mut dispatch_plans = Vec::with_capacity(action_steps.len());
+            for action_step in action_steps.iter() {
+                dispatch_plans.push(resolve_action_at_depth(
+                    action_step,
                     &ActionArgs::None,
                     registry,
                     new_pane_direction,
-                    depth + 1,
+                    sequence_depth + 1,
                 )?);
             }
-            Ok(DispatchPlan::Sequence(plans))
+            Ok(DispatchPlan::Sequence(dispatch_plans))
         }
     }
 }
@@ -251,138 +262,141 @@ fn resolve_at_depth(
 /// is [`ResolveError::ArgsMismatch`]. Every target field is `None`.
 /// `new_pane_direction` fills the split direction of every pane-opening action
 /// that does not state one itself.
-fn resolve_core(
-    action: &ActionRef,
-    args: &ActionArgs,
+fn resolve_core_action(
+    action_reference: &ActionReference,
+    action_arguments: &ActionArgs,
     new_pane_direction: Direction,
 ) -> Result<Command, ResolveError> {
-    Ok(match (action.name.as_str(), args) {
-        // --- Panes ---
-        ("new-pane", ActionArgs::None) => new_pane_toward(new_pane_direction),
-        ("new-pane-left", ActionArgs::None) => new_pane_toward(Direction::Left),
-        ("new-pane-down", ActionArgs::None) => new_pane_toward(Direction::Down),
-        ("new-pane-up", ActionArgs::None) => new_pane_toward(Direction::Up),
-        ("new-pane-right", ActionArgs::None) => new_pane_toward(Direction::Right),
-        ("new-pane-stacked", ActionArgs::None) => Command::NewPane(NewPaneArgs {
-            source: None,
-            tab: None,
-            direction: new_pane_direction,
-            stacked: true,
-            cwd: None,
-            command: None,
-            client: None,
-        }),
-        ("close-pane", ActionArgs::None) => Command::ClosePane(ClosePaneArgs::default()),
-        ("close-pane-tree", ActionArgs::None) => Command::ClosePane(ClosePaneArgs {
-            pane: None,
-            force: false,
-            tree: true,
-        }),
-        ("resize-pane-left", ActionArgs::None) => resize_toward(Direction::Left),
-        ("resize-pane-down", ActionArgs::None) => resize_toward(Direction::Down),
-        ("resize-pane-up", ActionArgs::None) => resize_toward(Direction::Up),
-        ("resize-pane-right", ActionArgs::None) => resize_toward(Direction::Right),
-        ("focus-pane-left", ActionArgs::None) => focus_toward(Direction::Left),
-        ("focus-pane-down", ActionArgs::None) => focus_toward(Direction::Down),
-        ("focus-pane-up", ActionArgs::None) => focus_toward(Direction::Up),
-        ("focus-pane-right", ActionArgs::None) => focus_toward(Direction::Right),
-        ("toggle-pane-fullscreen", ActionArgs::None) => Command::TogglePaneFullscreen,
+    Ok(
+        match (action_reference.action_name.get_name(), action_arguments) {
+            // --- Panes ---
+            ("new-pane", ActionArgs::None) => build_new_pane_command(new_pane_direction),
+            ("new-pane-left", ActionArgs::None) => build_new_pane_command(Direction::Left),
+            ("new-pane-down", ActionArgs::None) => build_new_pane_command(Direction::Down),
+            ("new-pane-up", ActionArgs::None) => build_new_pane_command(Direction::Up),
+            ("new-pane-right", ActionArgs::None) => build_new_pane_command(Direction::Right),
+            ("new-pane-stacked", ActionArgs::None) => Command::NewPane(NewPaneArgs {
+                source_pane_id: None,
+                tab_id: None,
+                direction: new_pane_direction,
+                should_stack: true,
+                working_directory: None,
+                spawn_spec: None,
+                client_id: None,
+            }),
+            ("close-pane", ActionArgs::None) => Command::ClosePane(ClosePaneArgs::default()),
+            ("close-pane-tree", ActionArgs::None) => Command::ClosePane(ClosePaneArgs {
+                pane_id: None,
+                should_force_close: false,
+                should_kill_process_tree: true,
+            }),
+            ("resize-pane-left", ActionArgs::None) => build_resize_pane_command(Direction::Left),
+            ("resize-pane-down", ActionArgs::None) => build_resize_pane_command(Direction::Down),
+            ("resize-pane-up", ActionArgs::None) => build_resize_pane_command(Direction::Up),
+            ("resize-pane-right", ActionArgs::None) => build_resize_pane_command(Direction::Right),
+            ("focus-pane-left", ActionArgs::None) => build_focus_pane_command(Direction::Left),
+            ("focus-pane-down", ActionArgs::None) => build_focus_pane_command(Direction::Down),
+            ("focus-pane-up", ActionArgs::None) => build_focus_pane_command(Direction::Up),
+            ("focus-pane-right", ActionArgs::None) => build_focus_pane_command(Direction::Right),
+            ("toggle-pane-fullscreen", ActionArgs::None) => Command::TogglePaneFullscreen,
 
-        // --- Tabs ---
-        ("new-tab", ActionArgs::None) => Command::NewTab(NewTabArgs::default()),
-        ("close-tab", ActionArgs::None) => Command::CloseTab(CloseTabArgs::default()),
-        ("next-tab", ActionArgs::None) => Command::FocusTab(FocusTabArgs {
-            target: TabTarget::Next,
-            client: None,
-        }),
-        ("previous-tab", ActionArgs::None) => Command::FocusTab(FocusTabArgs {
-            target: TabTarget::Prev,
-            client: None,
-        }),
+            // --- Tabs ---
+            ("new-tab", ActionArgs::None) => Command::NewTab(NewTabArgs::default()),
+            ("close-tab", ActionArgs::None) => Command::CloseTab(CloseTabArgs::default()),
+            ("next-tab", ActionArgs::None) => Command::FocusTab(FocusTabArgs {
+                focus_target: TabTarget::Next,
+                client_id: None,
+            }),
+            ("previous-tab", ActionArgs::None) => Command::FocusTab(FocusTabArgs {
+                focus_target: TabTarget::Prev,
+                client_id: None,
+            }),
 
-        // --- Session ---
-        ("quit", ActionArgs::None) => Command::Quit,
+            // --- Session ---
+            ("quit", ActionArgs::None) => Command::Quit,
 
-        // --- Lock ---
-        ("toggle-lock", ActionArgs::None) => {
-            Command::ToggleLockMode(ToggleLockModeArgs { client: None })
-        }
-        ("lock", ActionArgs::None) => Command::SetLockMode(LockModeArgs {
-            locked: true,
-            client: None,
-        }),
-        ("unlock", ActionArgs::None) => Command::SetLockMode(LockModeArgs {
-            locked: false,
-            client: None,
-        }),
+            // --- Lock ---
+            ("toggle-lock", ActionArgs::None) => {
+                Command::ToggleLockMode(ToggleLockModeArgs { client_id: None })
+            }
+            ("lock", ActionArgs::None) => Command::SetLockMode(LockModeArgs {
+                is_locked: true,
+                client_id: None,
+            }),
+            ("unlock", ActionArgs::None) => Command::SetLockMode(LockModeArgs {
+                is_locked: false,
+                client_id: None,
+            }),
 
-        // --- Mouse select ---
-        ("mouse-select", ActionArgs::None) => Command::ToggleMouseSelect,
+            // --- Mouse select ---
+            ("mouse-select", ActionArgs::None) => Command::ToggleMouseSelect,
 
-        // --- Run ---
-        // The spawn spec carries no `cwd` and an empty `env`.
-        (
-            "run",
-            ActionArgs::Run {
-                program,
-                args,
-                direction,
-                stacked,
-            },
-        ) => Command::RunCommandPane(RunCommandPaneArgs {
-            command: SpawnSpec {
-                program: program.clone(),
-                args: args.clone(),
-                cwd: None,
-                env: BTreeMap::new(),
-                shell_kind: ShellKind::from_program(program),
-            },
-            cwd: None,
-            source: None,
-            tab: None,
-            direction: direction.unwrap_or(new_pane_direction),
-            stacked: *stacked,
-            client: None,
-        }),
+            // --- Run ---
+            // The spawn spec carries no working directory and an empty
+            // environment.
+            (
+                "run",
+                ActionArgs::Run {
+                    program,
+                    arguments,
+                    direction,
+                    should_stack,
+                },
+            ) => Command::RunCommandPane(RunCommandPaneArgs {
+                spawn_spec: SpawnSpec {
+                    program: program.clone(),
+                    arguments: arguments.clone(),
+                    working_directory: None,
+                    environment_variables: BTreeMap::new(),
+                    shell_kind: ShellKind::from_program(program),
+                },
+                working_directory: None,
+                source_pane_id: None,
+                tab_id: None,
+                direction: direction.unwrap_or(new_pane_direction),
+                should_stack: *should_stack,
+                client_id: None,
+            }),
 
-        _ => {
-            return Err(ResolveError::ArgsMismatch {
-                action: action.clone(),
-            })
-        }
-    })
+            _ => {
+                return Err(ResolveError::ArgsMismatch {
+                    action_reference: action_reference.clone(),
+                })
+            }
+        },
+    )
 }
 
 /// The command a `new-pane-<direction>` action builds: split the focused pane
 /// and open the new one toward `direction`.
-fn new_pane_toward(direction: Direction) -> Command {
+fn build_new_pane_command(direction: Direction) -> Command {
     Command::NewPane(NewPaneArgs {
-        source: None,
-        tab: None,
+        source_pane_id: None,
+        tab_id: None,
         direction,
-        stacked: false,
-        cwd: None,
-        command: None,
-        client: None,
+        should_stack: false,
+        working_directory: None,
+        spawn_spec: None,
+        client_id: None,
     })
 }
 
 /// The command a `resize-pane-<direction>` action builds: move the focused
 /// pane's border one cell toward `direction`.
-fn resize_toward(direction: Direction) -> Command {
+fn build_resize_pane_command(direction: Direction) -> Command {
     Command::ResizePane(ResizePaneArgs {
-        pane: None,
+        pane_id: None,
         direction,
-        size: 1,
+        resize_amount_cells: 1,
     })
 }
 
 /// The command a `focus-pane-<direction>` action builds: move the issuing
 /// client's focus to the neighboring pane toward `direction`.
-fn focus_toward(direction: Direction) -> Command {
+fn build_focus_pane_command(direction: Direction) -> Command {
     Command::FocusPane(FocusPaneArgs {
-        target: FocusTarget::Direction(direction),
-        client: None,
+        focus_target: FocusTarget::Direction(direction),
+        client_id: None,
     })
 }
 

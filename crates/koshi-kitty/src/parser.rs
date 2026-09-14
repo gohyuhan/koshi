@@ -14,43 +14,50 @@ use std::ffi::CString;
 use std::os::fd::FromRawFd;
 
 use koshi_image::{
-    decode_base64, decode_png, decompress_bounded, decompress_bounded_prefix, raw_rgb, raw_rgba,
-    validate_dimensions, DecodedGraphics, GraphicsError, GraphicsProtocol, ImageAction,
-    ImageDisplay, MAX_GRAPHICS_CONTROL_BYTES, MAX_GRAPHICS_TRANSFER_BYTES,
+    decode_base64, decode_png, decode_raw_rgb, decode_raw_rgba, decompress_bounded,
+    decompress_bounded_prefix, validate_image_dimensions, DecodedGraphics, GraphicsError,
+    GraphicsProtocol, ImageAction, ImageDisplay, MAX_GRAPHICS_CONTROL_BYTE_COUNT,
+    MAX_GRAPHICS_TRANSFER_BYTE_COUNT,
 };
 
 const KITTY_PROTOCOL: GraphicsProtocol = GraphicsProtocol::Kitty;
-const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+const PNG_SIGNATURE_BYTES: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 
 mod commands;
 
 pub use commands::{
-    reply_display, KittyAnimationChunk, KittyAnimationCommand, KittyCommand, KittyCommandKind,
-    KittyDelete,
+    parse_reply_display, KittyAnimationChunk, KittyAnimationCommand, KittyCommand,
+    KittyCommandKind, KittyDelete,
 };
 
-/// Parse one non-multipart Kitty command and prepare animation-frame data.
+/// Parse one non-multipart Kitty command and prepare animation-frame payload.
 ///
 /// Returns `None` for image transfers and multipart animation-frame starts.
-pub fn parse_command(header: &[u8], payload: &[u8]) -> Option<Result<KittyCommand, GraphicsError>> {
-    let action = header
+pub fn parse_kitty_command(
+    control_header_bytes: &[u8],
+    encoded_payload_bytes: &[u8],
+) -> Option<Result<KittyCommand, GraphicsError>> {
+    let action_code = control_header_bytes
         .strip_prefix(b"G")?
         .split(|byte| *byte == b',')
-        .find_map(|field| field.strip_prefix(b"a="));
-    let parsed = commands::parse_command(header, payload)?;
-    if action != Some(b"f") {
-        return Some(parsed);
+        .find_map(|control_field| control_field.strip_prefix(b"a="));
+    let parsed_command =
+        commands::parse_kitty_command(control_header_bytes, encoded_payload_bytes)?;
+    if action_code != Some(b"f") {
+        return Some(parsed_command);
     }
-    Some(parsed.and_then(|_| {
-        let prepared = prepare_animation_payload(header, payload, true)?;
-        let body = header
-            .strip_prefix(b"G")
-            .ok_or(GraphicsError::InvalidHeader {
-                protocol: KITTY_PROTOCOL,
-            })?;
+    Some(parsed_command.and_then(|_| {
+        let prepared_payload_bytes =
+            prepare_animation_payload(control_header_bytes, encoded_payload_bytes, true)?;
+        let control_body_bytes =
+            control_header_bytes
+                .strip_prefix(b"G")
+                .ok_or(GraphicsError::InvalidHeader {
+                    protocol: KITTY_PROTOCOL,
+                })?;
         commands::parse_animation_command_fields(
-            body,
-            &prepared,
+            control_body_bytes,
+            &prepared_payload_bytes,
             KittyCommandKind::AnimationFrame,
             false,
         )
@@ -58,16 +65,16 @@ pub fn parse_command(header: &[u8], payload: &[u8]) -> Option<Result<KittyComman
 }
 
 /// The largest base64 payload chunk accepted by the Kitty graphics protocol.
-pub const MAX_KITTY_CHUNK_BYTES: usize = 4096;
+pub const MAX_KITTY_CHUNK_BYTE_COUNT: usize = 4096;
 
 /// Incremental parser for one Kitty APC graphics string.
 #[derive(Clone)]
 pub struct KittyParser {
-    header: Vec<u8>,
-    data: Vec<u8>,
-    seen_header: bool,
-    ignored: bool,
-    escaped: bool,
+    control_header_bytes: Vec<u8>,
+    payload_bytes: Vec<u8>,
+    has_received_control_header: bool,
+    is_ignored: bool,
+    is_escaped: bool,
 }
 
 impl KittyParser {
@@ -75,35 +82,43 @@ impl KittyParser {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            header: Vec::new(),
-            data: Vec::new(),
-            seen_header: false,
-            ignored: false,
-            escaped: false,
+            control_header_bytes: Vec::new(),
+            payload_bytes: Vec::new(),
+            has_received_control_header: false,
+            is_ignored: false,
+            is_escaped: false,
         }
     }
 
     /// Feed one byte from the APC body.
-    pub fn feed(&mut self, byte: u8) -> Result<(), GraphicsError> {
-        if self.ignored {
+    pub fn feed_input_byte(&mut self, input_byte: u8) -> Result<(), GraphicsError> {
+        if self.is_ignored {
             return Ok(());
         }
-        if !self.seen_header {
-            if self.header.is_empty() && byte != b'G' {
-                self.ignored = true;
+        if !self.has_received_control_header {
+            if self.control_header_bytes.is_empty() && input_byte != b'G' {
+                self.is_ignored = true;
                 return Ok(());
             }
-            if self.header.is_empty() {
-                self.header.push(byte);
+            if self.control_header_bytes.is_empty() {
+                self.control_header_bytes.push(input_byte);
                 return Ok(());
             }
-            if byte == b';' {
-                self.seen_header = true;
+            if input_byte == b';' {
+                self.has_received_control_header = true;
                 return Ok(());
             }
-            push_bounded(&mut self.header, byte, MAX_GRAPHICS_CONTROL_BYTES)?;
+            push_bounded_bytes(
+                &mut self.control_header_bytes,
+                input_byte,
+                MAX_GRAPHICS_CONTROL_BYTE_COUNT,
+            )?;
         } else {
-            push_bounded(&mut self.data, byte, MAX_KITTY_CHUNK_BYTES)?;
+            push_bounded_bytes(
+                &mut self.payload_bytes,
+                input_byte,
+                MAX_KITTY_CHUNK_BYTE_COUNT,
+            )?;
         }
         Ok(())
     }
@@ -111,83 +126,89 @@ impl KittyParser {
     /// Return whether the APC body was identified as a non-graphics command.
     #[must_use]
     pub fn is_ignored(&self) -> bool {
-        self.ignored
+        self.is_ignored
     }
 
     /// Return whether the framing parser has received an escape byte.
     #[must_use]
     pub fn is_escaped(&self) -> bool {
-        self.escaped
+        self.is_escaped
     }
 
     /// Set the framing parser's escape-byte state.
-    pub fn set_escaped(&mut self, escaped: bool) {
-        self.escaped = escaped;
+    pub fn set_escaped(&mut self, is_escaped: bool) {
+        self.is_escaped = is_escaped;
     }
 
-    /// Return whether the control-data separator has been received.
+    /// Return whether the control-payload separator has been received.
     #[must_use]
-    pub fn has_header(&self) -> bool {
-        self.seen_header
+    pub fn has_received_control_header(&self) -> bool {
+        self.has_received_control_header
     }
 
-    /// Return the bytes received before the control-data separator.
+    /// Return the bytes received before the control-payload separator.
     #[must_use]
-    pub fn header(&self) -> &[u8] {
-        &self.header
+    pub fn get_control_header_bytes(&self) -> &[u8] {
+        &self.control_header_bytes
     }
 
-    /// Return the base64 bytes received after the control-data separator.
+    /// Return the base64 bytes received after the control-payload separator.
     #[must_use]
-    pub fn payload(&self) -> &[u8] {
-        &self.data
+    pub fn get_payload_bytes(&self) -> &[u8] {
+        &self.payload_bytes
     }
 
     /// Return the number of payload bytes received in this APC string.
     #[must_use]
-    pub fn payload_len(&self) -> usize {
-        self.data.len()
+    pub fn get_payload_byte_count(&self) -> usize {
+        self.payload_bytes.len()
     }
 
     /// Append a validated run of base64 payload bytes.
-    pub fn append_payload(&mut self, bytes: &[u8]) -> Result<(), GraphicsError> {
-        let new_len =
-            self.data
-                .len()
-                .checked_add(bytes.len())
-                .ok_or(GraphicsError::TransferTooLarge {
-                    protocol: KITTY_PROTOCOL,
-                })?;
-        if new_len > MAX_KITTY_CHUNK_BYTES {
+    pub fn append_payload_bytes(&mut self, payload_bytes: &[u8]) -> Result<(), GraphicsError> {
+        let new_payload_byte_count = self
+            .payload_bytes
+            .len()
+            .checked_add(payload_bytes.len())
+            .ok_or(GraphicsError::TransferTooLarge {
+                protocol: KITTY_PROTOCOL,
+            })?;
+        if new_payload_byte_count > MAX_KITTY_CHUNK_BYTE_COUNT {
             return Err(GraphicsError::TransferTooLarge {
                 protocol: KITTY_PROTOCOL,
             });
         }
-        self.data.extend_from_slice(bytes);
+        self.payload_bytes.extend_from_slice(payload_bytes);
         Ok(())
     }
 
-    /// Finish parsing the control data and payload as one Kitty chunk.
-    pub fn finish(self) -> Result<KittyChunk, GraphicsError> {
-        if !self.seen_header || self.header.first().copied() != Some(b'G') {
+    /// Finish parsing the control bytes and payload as one Kitty chunk.
+    pub fn finish_kitty_chunk(self) -> Result<KittyChunk, GraphicsError> {
+        if !self.has_received_control_header
+            || self.control_header_bytes.first().copied() != Some(b'G')
+        {
             return Err(GraphicsError::InvalidHeader {
                 protocol: KITTY_PROTOCOL,
             });
         }
-        let control = parse_kitty_control(&self.header[1..])?;
-        KittyChunk::from_control(control, self.data)
+        let kitty_control = parse_kitty_control(&self.control_header_bytes[1..])?;
+        KittyChunk::from_kitty_control(kitty_control, self.payload_bytes)
     }
 
     /// Finish parsing a multipart Kitty animation-frame chunk.
     ///
     /// Returns `None` when the APC is not an animation-frame chunk.
-    pub fn finish_animation_chunk(self) -> Result<Option<KittyAnimationChunk>, GraphicsError> {
-        if !self.seen_header || self.header.first().copied() != Some(b'G') {
+    pub fn finish_kitty_animation_chunk(
+        self,
+    ) -> Result<Option<KittyAnimationChunk>, GraphicsError> {
+        if !self.has_received_control_header
+            || self.control_header_bytes.first().copied() != Some(b'G')
+        {
             return Err(GraphicsError::InvalidHeader {
                 protocol: KITTY_PROTOCOL,
             });
         }
-        commands::parse_animation_transfer_chunk(&self.header, &self.data)
+        commands::parse_animation_transfer_chunk(&self.control_header_bytes, &self.payload_bytes)
     }
 }
 
@@ -200,115 +221,136 @@ impl Default for KittyParser {
 /// A validated Kitty image chunk.
 #[derive(Clone)]
 pub struct KittyChunk {
-    query: bool,
-    id: Option<u32>,
+    is_query: bool,
+    image_id: Option<u32>,
     action: ImageAction,
-    more: bool,
-    more_specified: bool,
-    continuation_compatible: bool,
-    format: Option<KittyFormat>,
-    width: Option<u32>,
-    height: Option<u32>,
-    display: ImageDisplay,
-    medium: u8,
-    encoded: Vec<u8>,
-    raw_data: bool,
-    compression: Option<bool>,
-    declared_size: Option<usize>,
+    has_more_chunks: bool,
+    has_more_chunks_parameter: bool,
+    supports_continuation: bool,
+    media_format: Option<KittyFormat>,
+    image_width_pixels: Option<u32>,
+    image_height_pixels: Option<u32>,
+    image_display: ImageDisplay,
+    transfer_medium: u8,
+    encoded_payload_bytes: Vec<u8>,
+    is_raw_payload: bool,
+    is_compressed: Option<bool>,
+    declared_payload_byte_count: Option<usize>,
 }
 
 impl KittyChunk {
-    fn from_control(control: KittyControl, data: Vec<u8>) -> Result<Self, GraphicsError> {
-        if data.len() > MAX_KITTY_CHUNK_BYTES {
+    fn from_kitty_control(
+        kitty_control: KittyControl,
+        encoded_payload_bytes: Vec<u8>,
+    ) -> Result<Self, GraphicsError> {
+        if encoded_payload_bytes.len() > MAX_KITTY_CHUNK_BYTE_COUNT {
             return Err(GraphicsError::TransferTooLarge {
                 protocol: KITTY_PROTOCOL,
             });
         }
-        if control.more && (!data.len().is_multiple_of(4) || data.contains(&b'=')) {
+        if kitty_control.has_more_chunks
+            && (!encoded_payload_bytes.len().is_multiple_of(4)
+                || encoded_payload_bytes.contains(&b'='))
+        {
             return Err(GraphicsError::InvalidBase64 {
                 protocol: KITTY_PROTOCOL,
             });
         }
-        let medium = control.medium.unwrap_or(b'd');
-        let continuation = control.more_specified && control.continuation_compatible;
-        let (encoded, raw_data, compression, declared_size) = if continuation {
-            if medium != b'd' || control.source_offset.is_some() {
-                return Err(GraphicsError::InvalidCommand {
-                    protocol: KITTY_PROTOCOL,
-                });
-            }
-            (data, false, control.compression, control.source_size)
-        } else {
-            validate_transfer_controls(&control, medium)?;
-            let data = acquire_transfer_data(TransferRequest {
-                medium,
-                payload: &data,
-                source_offset: control.source_offset,
-                source_size: control.source_size,
-                compressed: control.compression == Some(true),
-                final_chunk: !control.more,
-                format: control.format,
-                width: control.width,
-                height: control.height,
-            })?;
-            match data {
-                TransferData::Encoded(data) => {
-                    (data, false, control.compression, control.source_size)
+        let transfer_medium = kitty_control.transfer_medium.unwrap_or(b'd');
+        let is_continuation =
+            kitty_control.has_more_chunks_parameter && kitty_control.supports_continuation;
+        let (encoded_payload_bytes, is_raw_payload, is_compressed, declared_payload_byte_count) =
+            if is_continuation {
+                if transfer_medium != b'd' || kitty_control.source_byte_offset.is_some() {
+                    return Err(GraphicsError::InvalidCommand {
+                        protocol: KITTY_PROTOCOL,
+                    });
                 }
-                TransferData::Ready(data) => (data, true, Some(false), None),
-            }
-        };
-        if matches!(control.format, Some(KittyFormat::Rgb | KittyFormat::Rgba))
-            && (control.width == Some(0) || control.height == Some(0))
+                (
+                    encoded_payload_bytes,
+                    false,
+                    kitty_control.is_compressed,
+                    kitty_control.source_byte_count,
+                )
+            } else {
+                validate_transfer_controls(&kitty_control, transfer_medium)?;
+                let transfer_payload = load_transfer_payload(TransferRequest {
+                    transfer_medium,
+                    source_payload_bytes: &encoded_payload_bytes,
+                    source_byte_offset: kitty_control.source_byte_offset,
+                    source_byte_count: kitty_control.source_byte_count,
+                    is_compressed: kitty_control.is_compressed == Some(true),
+                    is_final_chunk: !kitty_control.has_more_chunks,
+                    media_format: kitty_control.media_format,
+                    image_width_pixels: kitty_control.image_width_pixels,
+                    image_height_pixels: kitty_control.image_height_pixels,
+                })?;
+                match transfer_payload {
+                    TransferData::EncodedPayloadBytes(encoded_payload_bytes) => (
+                        encoded_payload_bytes,
+                        false,
+                        kitty_control.is_compressed,
+                        kitty_control.source_byte_count,
+                    ),
+                    TransferData::DecodedPayloadBytes(decoded_payload_bytes) => {
+                        (decoded_payload_bytes, true, Some(false), None)
+                    }
+                }
+            };
+        if matches!(
+            kitty_control.media_format,
+            Some(KittyFormat::Rgb | KittyFormat::Rgba)
+        ) && (kitty_control.image_width_pixels == Some(0)
+            || kitty_control.image_height_pixels == Some(0))
         {
             return Err(GraphicsError::InvalidDimensions {
                 protocol: KITTY_PROTOCOL,
             });
         }
         Ok(KittyChunk {
-            query: control.query,
-            id: control.id,
-            action: control.action,
-            more: control.more,
-            more_specified: control.more_specified,
-            continuation_compatible: control.continuation_compatible,
-            format: control.format,
-            width: control.width,
-            height: control.height,
-            display: control.display,
-            medium,
-            encoded,
-            raw_data,
-            compression,
-            declared_size,
+            is_query: kitty_control.is_query,
+            image_id: kitty_control.image_id,
+            action: kitty_control.action,
+            has_more_chunks: kitty_control.has_more_chunks,
+            has_more_chunks_parameter: kitty_control.has_more_chunks_parameter,
+            supports_continuation: kitty_control.supports_continuation,
+            media_format: kitty_control.media_format,
+            image_width_pixels: kitty_control.image_width_pixels,
+            image_height_pixels: kitty_control.image_height_pixels,
+            image_display: kitty_control.image_display,
+            transfer_medium,
+            encoded_payload_bytes,
+            is_raw_payload,
+            is_compressed,
+            declared_payload_byte_count,
         })
     }
 
     /// Return whether another chunk is required before decoding.
     #[must_use]
-    pub fn more(&self) -> bool {
-        self.more
+    pub fn has_more_chunks(&self) -> bool {
+        self.has_more_chunks
     }
 }
 
 /// A validated Kitty transfer that is waiting for more chunks.
 #[derive(Debug, Clone)]
 pub struct KittyTransfer {
-    query: bool,
-    id: Option<u32>,
+    is_query: bool,
+    image_id: Option<u32>,
     action: ImageAction,
-    format: KittyFormat,
-    width: Option<u32>,
-    height: Option<u32>,
-    display: ImageDisplay,
-    medium: u8,
-    encoded: Vec<u8>,
-    raw_data: bool,
-    compression: bool,
-    declared_size: Option<usize>,
+    media_format: KittyFormat,
+    image_width_pixels: Option<u32>,
+    image_height_pixels: Option<u32>,
+    image_display: ImageDisplay,
+    transfer_medium: u8,
+    encoded_payload_bytes: Vec<u8>,
+    is_raw_payload: bool,
+    is_compressed: bool,
+    declared_payload_byte_count: Option<usize>,
 }
 
-/// The result of starting or extending a Kitty transfer.
+/// The outcome of starting or extending a Kitty transfer.
 #[derive(Debug)]
 pub enum KittyTransferOutcome {
     /// The transfer remains open and must receive another chunk.
@@ -320,11 +362,11 @@ pub enum KittyTransferOutcome {
 /// A validated Kitty animation-frame transfer that is waiting for more chunks.
 #[derive(Debug, Clone)]
 pub struct KittyAnimationTransfer {
-    header: Vec<u8>,
-    encoded: Vec<u8>,
+    control_header_bytes: Vec<u8>,
+    encoded_payload_bytes: Vec<u8>,
 }
 
-/// The result of starting or extending a Kitty animation-frame transfer.
+/// The outcome of starting or extending a Kitty animation-frame transfer.
 #[derive(Debug)]
 pub enum KittyAnimationTransferOutcome {
     /// The transfer remains open and must receive another chunk.
@@ -334,346 +376,381 @@ pub enum KittyAnimationTransferOutcome {
 }
 
 /// Start a Kitty transfer from its first validated chunk.
-pub fn start_transfer(chunk: KittyChunk) -> Result<KittyTransferOutcome, GraphicsError> {
-    let more = chunk.more;
+pub fn start_kitty_transfer(chunk: KittyChunk) -> Result<KittyTransferOutcome, GraphicsError> {
+    let has_more_chunks = chunk.has_more_chunks;
     let transfer = KittyTransfer::from_chunk(chunk)?;
-    if more {
+    if has_more_chunks {
         Ok(KittyTransferOutcome::Pending(transfer))
     } else {
-        Ok(KittyTransferOutcome::Complete(transfer.finish()?))
+        Ok(KittyTransferOutcome::Complete(transfer.decode_graphics()?))
     }
 }
 
 /// Start a multipart Kitty animation-frame transfer.
-pub fn start_animation_transfer(
+pub fn start_kitty_animation_transfer(
     chunk: KittyAnimationChunk,
 ) -> Result<KittyAnimationTransferOutcome, GraphicsError> {
-    if chunk.continuation() || !chunk.more() {
+    if chunk.is_continuation() || !chunk.has_more_chunks() {
         return Err(GraphicsError::InvalidHeader {
             protocol: KITTY_PROTOCOL,
         });
     }
     let transfer = KittyAnimationTransfer {
-        header: chunk.header().to_vec(),
-        encoded: chunk.payload().to_vec(),
+        control_header_bytes: chunk.get_control_header_bytes().to_vec(),
+        encoded_payload_bytes: chunk.get_encoded_payload_bytes().to_vec(),
     };
     Ok(KittyAnimationTransferOutcome::Pending(transfer))
 }
 
 impl KittyTransfer {
     fn from_chunk(chunk: KittyChunk) -> Result<Self, GraphicsError> {
-        let format = chunk.format.unwrap_or(KittyFormat::Rgba);
-        let width = chunk.width;
-        let height = chunk.height;
-        if matches!(format, KittyFormat::Rgb | KittyFormat::Rgba)
-            && (width.is_none() || height.is_none())
+        let media_format = chunk.media_format.unwrap_or(KittyFormat::Rgba);
+        let image_width_pixels = chunk.image_width_pixels;
+        let image_height_pixels = chunk.image_height_pixels;
+        if matches!(media_format, KittyFormat::Rgb | KittyFormat::Rgba)
+            && (image_width_pixels.is_none() || image_height_pixels.is_none())
         {
             return Err(GraphicsError::InvalidDimensions {
                 protocol: KITTY_PROTOCOL,
             });
         }
-        if let (Some(width), Some(height)) = (width, height) {
-            validate_dimensions(
+        if let (Some(image_width_pixels), Some(image_height_pixels)) =
+            (image_width_pixels, image_height_pixels)
+        {
+            validate_image_dimensions(
                 KITTY_PROTOCOL,
-                usize::try_from(width).map_err(|_| GraphicsError::ImageTooLarge {
+                usize::try_from(image_width_pixels).map_err(|_| GraphicsError::ImageTooLarge {
                     protocol: KITTY_PROTOCOL,
                 })?,
-                usize::try_from(height).map_err(|_| GraphicsError::ImageTooLarge {
+                usize::try_from(image_height_pixels).map_err(|_| GraphicsError::ImageTooLarge {
                     protocol: KITTY_PROTOCOL,
                 })?,
             )?;
         }
         Ok(KittyTransfer {
-            query: chunk.query,
-            id: chunk.id,
+            is_query: chunk.is_query,
+            image_id: chunk.image_id,
             action: chunk.action,
-            format,
-            width,
-            height,
-            display: chunk.display,
-            medium: chunk.medium,
-            encoded: chunk.encoded,
-            raw_data: chunk.raw_data,
-            compression: chunk.compression.unwrap_or(false),
-            declared_size: chunk.declared_size,
+            media_format,
+            image_width_pixels,
+            image_height_pixels,
+            image_display: chunk.image_display,
+            transfer_medium: chunk.transfer_medium,
+            encoded_payload_bytes: chunk.encoded_payload_bytes,
+            is_raw_payload: chunk.is_raw_payload,
+            is_compressed: chunk.is_compressed.unwrap_or(false),
+            declared_payload_byte_count: chunk.declared_payload_byte_count,
         })
     }
 
     /// Return display metadata used for a response to this transfer.
     #[must_use]
-    pub fn display(&self) -> &ImageDisplay {
-        &self.display
+    pub fn get_image_display(&self) -> &ImageDisplay {
+        &self.image_display
     }
 
     /// Validate and append a continuation chunk.
-    pub fn accept_chunk(
+    pub fn accept_continuation_chunk(
         mut self,
         chunk: KittyChunk,
     ) -> Result<KittyTransferOutcome, GraphicsError> {
         validate_kitty_continuation(&self, &chunk)?;
-        append_bounded(&mut self.encoded, &chunk.encoded)?;
-        if chunk.more {
+        append_bounded_bytes(
+            &mut self.encoded_payload_bytes,
+            &chunk.encoded_payload_bytes,
+        )?;
+        if chunk.has_more_chunks {
             Ok(KittyTransferOutcome::Pending(self))
         } else {
-            if let Some(expected) = chunk.declared_size {
-                if self.declared_size.is_some() && self.declared_size != Some(expected) {
+            if let Some(declared_payload_byte_count) = chunk.declared_payload_byte_count {
+                if self.declared_payload_byte_count.is_some()
+                    && self.declared_payload_byte_count != Some(declared_payload_byte_count)
+                {
                     return Err(GraphicsError::InvalidHeader {
                         protocol: KITTY_PROTOCOL,
                     });
                 }
-                self.declared_size = Some(expected);
+                self.declared_payload_byte_count = Some(declared_payload_byte_count);
             }
-            Ok(KittyTransferOutcome::Complete(self.finish()?))
+            Ok(KittyTransferOutcome::Complete(self.decode_graphics()?))
         }
     }
 
-    fn finish(self) -> Result<DecodedGraphics, GraphicsError> {
-        let bytes = if self.raw_data {
-            self.encoded
+    fn decode_graphics(self) -> Result<DecodedGraphics, GraphicsError> {
+        let decoded_payload_bytes = if self.is_raw_payload {
+            self.encoded_payload_bytes
         } else {
-            match acquire_transfer_data(TransferRequest {
-                medium: self.medium,
-                payload: &self.encoded,
-                source_offset: None,
-                source_size: self.declared_size,
-                compressed: self.compression,
-                final_chunk: true,
-                format: Some(self.format),
-                width: self.width,
-                height: self.height,
+            match load_transfer_payload(TransferRequest {
+                transfer_medium: self.transfer_medium,
+                source_payload_bytes: &self.encoded_payload_bytes,
+                source_byte_offset: None,
+                source_byte_count: self.declared_payload_byte_count,
+                is_compressed: self.is_compressed,
+                is_final_chunk: true,
+                media_format: Some(self.media_format),
+                image_width_pixels: self.image_width_pixels,
+                image_height_pixels: self.image_height_pixels,
             })? {
-                TransferData::Ready(data) => data,
-                TransferData::Encoded(_) => {
+                TransferData::DecodedPayloadBytes(decoded_payload_bytes) => decoded_payload_bytes,
+                TransferData::EncodedPayloadBytes(_) => {
                     return Err(GraphicsError::InvalidBase64 {
                         protocol: KITTY_PROTOCOL,
                     })
                 }
             }
         };
-        let (image, animation) = match self.format {
+        let (decoded_image, animation) = match self.media_format {
             KittyFormat::Rgb => (
-                raw_rgb(
+                decode_raw_rgb(
                     KITTY_PROTOCOL,
-                    self.width.ok_or(GraphicsError::InvalidDimensions {
-                        protocol: KITTY_PROTOCOL,
-                    })?,
-                    self.height.ok_or(GraphicsError::InvalidDimensions {
-                        protocol: KITTY_PROTOCOL,
-                    })?,
-                    &bytes,
+                    self.image_width_pixels
+                        .ok_or(GraphicsError::InvalidDimensions {
+                            protocol: KITTY_PROTOCOL,
+                        })?,
+                    self.image_height_pixels
+                        .ok_or(GraphicsError::InvalidDimensions {
+                            protocol: KITTY_PROTOCOL,
+                        })?,
+                    &decoded_payload_bytes,
                 )?,
                 None,
             ),
             KittyFormat::Rgba => (
-                raw_rgba(
+                decode_raw_rgba(
                     KITTY_PROTOCOL,
-                    self.width.ok_or(GraphicsError::InvalidDimensions {
-                        protocol: KITTY_PROTOCOL,
-                    })?,
-                    self.height.ok_or(GraphicsError::InvalidDimensions {
-                        protocol: KITTY_PROTOCOL,
-                    })?,
-                    &bytes,
+                    self.image_width_pixels
+                        .ok_or(GraphicsError::InvalidDimensions {
+                            protocol: KITTY_PROTOCOL,
+                        })?,
+                    self.image_height_pixels
+                        .ok_or(GraphicsError::InvalidDimensions {
+                            protocol: KITTY_PROTOCOL,
+                        })?,
+                    &decoded_payload_bytes,
                 )?,
                 None,
             ),
             KittyFormat::Png => {
-                if !bytes.starts_with(PNG_SIGNATURE) {
+                if !decoded_payload_bytes.starts_with(PNG_SIGNATURE_BYTES) {
                     return Err(GraphicsError::DecodeFailure {
                         protocol: KITTY_PROTOCOL,
                     });
                 }
-                (decode_png(KITTY_PROTOCOL, &bytes)?, None)
+                (decode_png(KITTY_PROTOCOL, &decoded_payload_bytes)?, None)
             }
         };
         Ok(DecodedGraphics {
-            query: self.query,
+            is_query: self.is_query,
             protocol: KITTY_PROTOCOL,
-            image,
+            image: decoded_image,
             animation,
             action: self.action,
-            display: self.display,
+            display: self.image_display,
         })
     }
 }
 
 enum TransferData {
-    Encoded(Vec<u8>),
-    Ready(Vec<u8>),
+    EncodedPayloadBytes(Vec<u8>),
+    DecodedPayloadBytes(Vec<u8>),
 }
 
 struct TransferRequest<'a> {
-    medium: u8,
-    payload: &'a [u8],
-    source_offset: Option<usize>,
-    source_size: Option<usize>,
-    compressed: bool,
-    final_chunk: bool,
-    format: Option<KittyFormat>,
-    width: Option<u32>,
-    height: Option<u32>,
+    transfer_medium: u8,
+    source_payload_bytes: &'a [u8],
+    source_byte_offset: Option<usize>,
+    source_byte_count: Option<usize>,
+    is_compressed: bool,
+    is_final_chunk: bool,
+    media_format: Option<KittyFormat>,
+    image_width_pixels: Option<u32>,
+    image_height_pixels: Option<u32>,
 }
 
-fn acquire_transfer_data(request: TransferRequest<'_>) -> Result<TransferData, GraphicsError> {
+fn load_transfer_payload(
+    transfer_request: TransferRequest<'_>,
+) -> Result<TransferData, GraphicsError> {
     let TransferRequest {
-        medium,
-        payload,
-        source_offset,
-        source_size,
-        compressed,
-        final_chunk,
-        format,
-        width,
-        height,
-    } = request;
-    if !final_chunk {
-        if medium != b'd' || source_offset.is_some() {
+        transfer_medium,
+        source_payload_bytes,
+        source_byte_offset,
+        source_byte_count,
+        is_compressed,
+        is_final_chunk,
+        media_format,
+        image_width_pixels,
+        image_height_pixels,
+    } = transfer_request;
+    if !is_final_chunk {
+        if transfer_medium != b'd' || source_byte_offset.is_some() {
             return Err(GraphicsError::InvalidCommand {
                 protocol: KITTY_PROTOCOL,
             });
         }
-        return Ok(TransferData::Encoded(payload.to_vec()));
+        return Ok(TransferData::EncodedPayloadBytes(
+            source_payload_bytes.to_vec(),
+        ));
     }
 
-    let bytes = match medium {
-        b'd' => decode_base64(KITTY_PROTOCOL, payload)?,
-        b'f' | b't' | b's' => read_external_source(medium, payload, source_offset, source_size)?,
-        other => {
+    let transfer_source_bytes = match transfer_medium {
+        b'd' => decode_base64(KITTY_PROTOCOL, source_payload_bytes)?,
+        b'f' | b't' | b's' => load_external_transfer_payload(
+            transfer_medium,
+            source_payload_bytes,
+            source_byte_offset,
+            source_byte_count,
+        )?,
+        unsupported_transfer_medium => {
             return Err(GraphicsError::UnsupportedAction {
                 protocol: KITTY_PROTOCOL,
-                action: format!("transfer medium {}", other as char),
+                action: format!("transfer medium {}", unsupported_transfer_medium as char),
             })
         }
     };
-    let bytes = if medium == b's' && source_size.is_none() {
+    let decoded_payload_bytes = if transfer_medium == b's' && source_byte_count.is_none() {
         exact_shared_memory_payload(
-            &bytes,
-            format.unwrap_or(KittyFormat::Rgba),
-            width,
-            height,
-            compressed,
+            &transfer_source_bytes,
+            media_format.unwrap_or(KittyFormat::Rgba),
+            image_width_pixels,
+            image_height_pixels,
+            is_compressed,
         )?
-    } else if compressed {
-        decompress_bounded(KITTY_PROTOCOL, &bytes)?
+    } else if is_compressed {
+        decompress_bounded(KITTY_PROTOCOL, &transfer_source_bytes)?
     } else {
-        bytes
+        transfer_source_bytes
     };
-    if medium == b'd' && compressed && format == Some(KittyFormat::Png) {
-        if let Some(expected) = source_size {
-            if expected != bytes.len() {
+    if transfer_medium == b'd' && is_compressed && media_format == Some(KittyFormat::Png) {
+        if let Some(declared_payload_byte_count) = source_byte_count {
+            if declared_payload_byte_count != decoded_payload_bytes.len() {
                 return Err(GraphicsError::DeclaredSizeMismatch {
                     protocol: KITTY_PROTOCOL,
-                    expected,
-                    actual: bytes.len(),
+                    expected_byte_count: declared_payload_byte_count,
+                    actual_byte_count: decoded_payload_bytes.len(),
                 });
             }
         }
     }
-    Ok(TransferData::Ready(bytes))
+    Ok(TransferData::DecodedPayloadBytes(decoded_payload_bytes))
 }
 
 fn exact_shared_memory_payload(
-    bytes: &[u8],
-    format: KittyFormat,
-    width: Option<u32>,
-    height: Option<u32>,
-    compressed: bool,
+    shared_memory_bytes: &[u8],
+    media_format: KittyFormat,
+    image_width_pixels: Option<u32>,
+    image_height_pixels: Option<u32>,
+    is_compressed: bool,
 ) -> Result<Vec<u8>, GraphicsError> {
-    if compressed {
-        return decompress_bounded_prefix(KITTY_PROTOCOL, bytes).map(|(decoded, _)| decoded);
+    if is_compressed {
+        return decompress_bounded_prefix(KITTY_PROTOCOL, shared_memory_bytes)
+            .map(|(decoded_payload_bytes, _)| decoded_payload_bytes);
     }
-    let length = match format {
+    let payload_byte_count = match media_format {
         KittyFormat::Rgb | KittyFormat::Rgba => {
-            let width = width.ok_or(GraphicsError::InvalidDimensions {
-                protocol: KITTY_PROTOCOL,
-            })?;
-            let height = height.ok_or(GraphicsError::InvalidDimensions {
-                protocol: KITTY_PROTOCOL,
-            })?;
-            let channels = if format == KittyFormat::Rgb { 3 } else { 4 };
-            let width = usize::try_from(width).map_err(|_| GraphicsError::ImageTooLarge {
-                protocol: KITTY_PROTOCOL,
-            })?;
-            let height = usize::try_from(height).map_err(|_| GraphicsError::ImageTooLarge {
-                protocol: KITTY_PROTOCOL,
-            })?;
-            width
-                .checked_mul(height)
-                .and_then(|pixels| pixels.checked_mul(channels))
+            let image_width_pixels =
+                image_width_pixels.ok_or(GraphicsError::InvalidDimensions {
+                    protocol: KITTY_PROTOCOL,
+                })?;
+            let image_height_pixels =
+                image_height_pixels.ok_or(GraphicsError::InvalidDimensions {
+                    protocol: KITTY_PROTOCOL,
+                })?;
+            let channel_count = if media_format == KittyFormat::Rgb {
+                3
+            } else {
+                4
+            };
+            let image_width_pixels =
+                usize::try_from(image_width_pixels).map_err(|_| GraphicsError::ImageTooLarge {
+                    protocol: KITTY_PROTOCOL,
+                })?;
+            let image_height_pixels =
+                usize::try_from(image_height_pixels).map_err(|_| GraphicsError::ImageTooLarge {
+                    protocol: KITTY_PROTOCOL,
+                })?;
+            image_width_pixels
+                .checked_mul(image_height_pixels)
+                .and_then(|image_pixel_count| image_pixel_count.checked_mul(channel_count))
                 .ok_or(GraphicsError::ImageTooLarge {
                     protocol: KITTY_PROTOCOL,
                 })?
         }
-        KittyFormat::Png => png_stream_len(bytes)?,
+        KittyFormat::Png => compute_png_stream_byte_count(shared_memory_bytes)?,
     };
-    if length > MAX_GRAPHICS_TRANSFER_BYTES {
+    if payload_byte_count > MAX_GRAPHICS_TRANSFER_BYTE_COUNT {
         return Err(GraphicsError::TransferTooLarge {
             protocol: KITTY_PROTOCOL,
         });
     }
-    bytes
-        .get(..length)
+    shared_memory_bytes
+        .get(..payload_byte_count)
         .map(<[u8]>::to_vec)
         .ok_or(GraphicsError::DecodeFailure {
             protocol: KITTY_PROTOCOL,
         })
 }
 
-fn png_stream_len(bytes: &[u8]) -> Result<usize, GraphicsError> {
-    if !bytes.starts_with(PNG_SIGNATURE) {
+fn compute_png_stream_byte_count(png_bytes: &[u8]) -> Result<usize, GraphicsError> {
+    if !png_bytes.starts_with(PNG_SIGNATURE_BYTES) {
         return Err(GraphicsError::DecodeFailure {
             protocol: KITTY_PROTOCOL,
         });
     }
-    let mut offset = PNG_SIGNATURE.len();
+    let mut png_byte_offset = PNG_SIGNATURE_BYTES.len();
     loop {
-        let header =
-            bytes
-                .get(offset..offset.saturating_add(8))
-                .ok_or(GraphicsError::DecodeFailure {
-                    protocol: KITTY_PROTOCOL,
-                })?;
-        let data_len = usize::try_from(u32::from_be_bytes(header[..4].try_into().map_err(
-            |_| GraphicsError::DecodeFailure {
+        let png_chunk_header = png_bytes
+            .get(png_byte_offset..png_byte_offset.saturating_add(8))
+            .ok_or(GraphicsError::DecodeFailure {
                 protocol: KITTY_PROTOCOL,
-            },
-        )?))
+            })?;
+        let png_chunk_byte_count = usize::try_from(u32::from_be_bytes(
+            png_chunk_header[..4]
+                .try_into()
+                .map_err(|_| GraphicsError::DecodeFailure {
+                    protocol: KITTY_PROTOCOL,
+                })?,
+        ))
         .map_err(|_| GraphicsError::DecodeFailure {
             protocol: KITTY_PROTOCOL,
         })?;
-        let end = offset
+        let png_chunk_end_byte_offset = png_byte_offset
             .checked_add(12)
-            .and_then(|length| length.checked_add(data_len))
+            .and_then(|png_chunk_start_byte_offset| {
+                png_chunk_start_byte_offset.checked_add(png_chunk_byte_count)
+            })
             .ok_or(GraphicsError::ImageTooLarge {
                 protocol: KITTY_PROTOCOL,
             })?;
-        if end > bytes.len() {
+        if png_chunk_end_byte_offset > png_bytes.len() {
             return Err(GraphicsError::DecodeFailure {
                 protocol: KITTY_PROTOCOL,
             });
         }
-        if &header[4..8] == b"IEND" {
-            return Ok(end);
+        if &png_chunk_header[4..8] == b"IEND" {
+            return Ok(png_chunk_end_byte_offset);
         }
-        offset = end;
+        png_byte_offset = png_chunk_end_byte_offset;
     }
 }
 
-fn validate_transfer_controls(control: &KittyControl, medium: u8) -> Result<(), GraphicsError> {
-    if medium != b'd' && control.more {
+fn validate_transfer_controls(
+    kitty_control: &KittyControl,
+    transfer_medium: u8,
+) -> Result<(), GraphicsError> {
+    if transfer_medium != b'd' && kitty_control.has_more_chunks {
         return Err(GraphicsError::InvalidCommand {
             protocol: KITTY_PROTOCOL,
         });
     }
-    if medium == b'd' && control.source_offset.is_some() {
+    if transfer_medium == b'd' && kitty_control.source_byte_offset.is_some() {
         return Err(GraphicsError::InvalidCommand {
             protocol: KITTY_PROTOCOL,
         });
     }
-    if control.format == Some(KittyFormat::Png)
-        && control.compression == Some(true)
-        && control.source_size.is_none()
-        && medium == b'd'
+    if kitty_control.media_format == Some(KittyFormat::Png)
+        && kitty_control.is_compressed == Some(true)
+        && kitty_control.source_byte_count.is_none()
+        && transfer_medium == b'd'
     {
         return Err(GraphicsError::InvalidHeader {
             protocol: KITTY_PROTOCOL,
@@ -683,239 +760,272 @@ fn validate_transfer_controls(control: &KittyControl, medium: u8) -> Result<(), 
 }
 
 fn prepare_animation_payload(
-    header: &[u8],
-    payload: &[u8],
-    final_chunk: bool,
+    control_header_bytes: &[u8],
+    encoded_payload_bytes: &[u8],
+    is_final_chunk: bool,
 ) -> Result<Vec<u8>, GraphicsError> {
-    let control = animation_control(header)?;
-    let medium = control.medium.unwrap_or(b'd');
-    validate_transfer_controls(&control, medium)?;
-    let data = acquire_transfer_data(TransferRequest {
-        medium,
-        payload,
-        source_offset: control.source_offset,
-        source_size: control.source_size,
-        compressed: control.compression == Some(true),
-        final_chunk,
-        format: control.format,
-        width: control.width,
-        height: control.height,
+    let kitty_control = parse_animation_control(control_header_bytes)?;
+    let transfer_medium = kitty_control.transfer_medium.unwrap_or(b'd');
+    validate_transfer_controls(&kitty_control, transfer_medium)?;
+    let transfer_payload = load_transfer_payload(TransferRequest {
+        transfer_medium,
+        source_payload_bytes: encoded_payload_bytes,
+        source_byte_offset: kitty_control.source_byte_offset,
+        source_byte_count: kitty_control.source_byte_count,
+        is_compressed: kitty_control.is_compressed == Some(true),
+        is_final_chunk,
+        media_format: kitty_control.media_format,
+        image_width_pixels: kitty_control.image_width_pixels,
+        image_height_pixels: kitty_control.image_height_pixels,
     })?;
-    match data {
-        TransferData::Ready(data) => Ok(STANDARD.encode(data).into_bytes()),
-        TransferData::Encoded(_) => Err(GraphicsError::InvalidBase64 {
+    match transfer_payload {
+        TransferData::DecodedPayloadBytes(decoded_payload_bytes) => {
+            Ok(STANDARD.encode(decoded_payload_bytes).into_bytes())
+        }
+        TransferData::EncodedPayloadBytes(_) => Err(GraphicsError::InvalidBase64 {
             protocol: KITTY_PROTOCOL,
         }),
     }
 }
 
-fn animation_control(header: &[u8]) -> Result<KittyControl, GraphicsError> {
-    let body = header
-        .strip_prefix(b"G")
-        .ok_or(GraphicsError::InvalidHeader {
-            protocol: KITTY_PROTOCOL,
-        })?;
-    let mut normalized = Vec::new();
-    for field in body.split(|byte| *byte == b',') {
-        if field.starts_with(b"a=") {
-            normalized.extend_from_slice(b"a=t");
+fn parse_animation_control(control_header_bytes: &[u8]) -> Result<KittyControl, GraphicsError> {
+    let control_body_bytes =
+        control_header_bytes
+            .strip_prefix(b"G")
+            .ok_or(GraphicsError::InvalidHeader {
+                protocol: KITTY_PROTOCOL,
+            })?;
+    let mut normalized_control_bytes = Vec::new();
+    for control_field in control_body_bytes.split(|byte| *byte == b',') {
+        if control_field.starts_with(b"a=") {
+            normalized_control_bytes.extend_from_slice(b"a=t");
         } else {
-            normalized.extend_from_slice(field);
+            normalized_control_bytes.extend_from_slice(control_field);
         }
-        normalized.push(b',');
+        normalized_control_bytes.push(b',');
     }
-    if normalized.last() == Some(&b',') {
-        normalized.pop();
+    if normalized_control_bytes.last() == Some(&b',') {
+        normalized_control_bytes.pop();
     }
-    parse_kitty_control(&normalized)
+    parse_kitty_control(&normalized_control_bytes)
 }
 
-fn read_external_source(
-    medium: u8,
-    encoded_name: &[u8],
-    source_offset: Option<usize>,
-    source_size: Option<usize>,
+fn load_external_transfer_payload(
+    transfer_medium: u8,
+    encoded_source_name_bytes: &[u8],
+    source_byte_offset: Option<usize>,
+    source_byte_count: Option<usize>,
 ) -> Result<Vec<u8>, GraphicsError> {
-    let name = decode_base64(KITTY_PROTOCOL, encoded_name)?;
-    if name.is_empty() || name.len() > MAX_GRAPHICS_TRANSFER_BYTES {
+    let source_name_bytes = decode_base64(KITTY_PROTOCOL, encoded_source_name_bytes)?;
+    if source_name_bytes.is_empty() || source_name_bytes.len() > MAX_GRAPHICS_TRANSFER_BYTE_COUNT {
         return Err(GraphicsError::InvalidHeader {
             protocol: KITTY_PROTOCOL,
         });
     }
-    let offset = source_offset.unwrap_or(0);
-    match medium {
-        b'f' => read_regular_file(&name, offset, source_size, false),
-        b't' => read_regular_file(&name, offset, source_size, true),
-        b's' => read_shared_memory(&name, offset, source_size),
+    let source_byte_offset = source_byte_offset.unwrap_or(0);
+    match transfer_medium {
+        b'f' => load_regular_file_payload(
+            &source_name_bytes,
+            source_byte_offset,
+            source_byte_count,
+            false,
+        ),
+        b't' => load_regular_file_payload(
+            &source_name_bytes,
+            source_byte_offset,
+            source_byte_count,
+            true,
+        ),
+        b's' => {
+            load_shared_memory_payload(&source_name_bytes, source_byte_offset, source_byte_count)
+        }
         _ => Err(GraphicsError::UnsupportedAction {
             protocol: KITTY_PROTOCOL,
-            action: format!("transfer medium {}", medium as char),
+            action: format!("transfer medium {}", transfer_medium as char),
         }),
     }
 }
 
-fn read_regular_file(
-    name: &[u8],
-    offset: usize,
-    size: Option<usize>,
-    delete: bool,
+fn load_regular_file_payload(
+    source_name_bytes: &[u8],
+    source_byte_offset: usize,
+    source_byte_count: Option<usize>,
+    should_delete_source: bool,
 ) -> Result<Vec<u8>, GraphicsError> {
-    let supplied_path = path_from_bytes(name)?;
-    let path = if delete {
-        disposable_file_path(&supplied_path).ok_or_else(external_source_error)?
+    let supplied_source_path = parse_source_path_bytes(source_name_bytes)?;
+    let source_path = if should_delete_source {
+        find_disposable_file_path(&supplied_source_path).ok_or_else(build_external_source_error)?
     } else {
-        supplied_path
+        supplied_source_path
     };
-    let mut file = open_regular_source(&path)?;
-    let result = file
+    let mut source_file = open_regular_source_file(&source_path)?;
+    let source_read_result = source_file
         .metadata()
-        .map_err(|_| external_source_error())
-        .and_then(|metadata| {
-            if metadata.file_type().is_file() {
-                read_file_range(&mut file, offset, size)
+        .map_err(|_| build_external_source_error())
+        .and_then(|source_metadata| {
+            if source_metadata.file_type().is_file() {
+                load_file_byte_range(&mut source_file, source_byte_offset, source_byte_count)
             } else {
-                Err(external_source_error())
+                Err(build_external_source_error())
             }
         });
-    drop(file);
-    if delete {
-        let removed = fs::remove_file(&path).is_ok();
-        if !removed {
-            return Err(external_source_error());
+    drop(source_file);
+    if should_delete_source {
+        let is_source_removed = fs::remove_file(&source_path).is_ok();
+        if !is_source_removed {
+            return Err(build_external_source_error());
         }
     }
-    result
+    source_read_result
 }
 
 #[cfg(unix)]
-fn open_regular_source(path: &Path) -> Result<File, GraphicsError> {
+fn open_regular_source_file(source_path: &Path) -> Result<File, GraphicsError> {
     use std::os::unix::fs::OpenOptionsExt;
 
     OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
-        .open(path)
-        .map_err(|_| external_source_error())
+        .open(source_path)
+        .map_err(|_| build_external_source_error())
 }
 
 #[cfg(not(unix))]
-fn open_regular_source(path: &Path) -> Result<File, GraphicsError> {
-    File::open(path).map_err(|_| external_source_error())
+fn open_regular_source_file(source_path: &Path) -> Result<File, GraphicsError> {
+    File::open(source_path).map_err(|_| build_external_source_error())
 }
 
-fn read_file_range(
-    file: &mut File,
-    offset: usize,
-    size: Option<usize>,
+fn load_file_byte_range(
+    source_file: &mut File,
+    source_byte_offset: usize,
+    requested_byte_count: Option<usize>,
 ) -> Result<Vec<u8>, GraphicsError> {
-    let file_size = file.metadata().map_err(|_| external_source_error())?.len();
-    let offset = u64::try_from(offset).map_err(|_| external_source_error())?;
-    if offset > file_size {
-        return Err(external_source_error());
+    let source_file_byte_count = source_file
+        .metadata()
+        .map_err(|_| build_external_source_error())?
+        .len();
+    let source_byte_offset =
+        u64::try_from(source_byte_offset).map_err(|_| build_external_source_error())?;
+    if source_byte_offset > source_file_byte_count {
+        return Err(build_external_source_error());
     }
-    let available = file_size - offset;
-    let length = match size {
-        Some(size) => {
-            if u64::try_from(size).map_err(|_| external_source_error())? > available {
-                return Err(external_source_error());
+    let available_byte_count = source_file_byte_count - source_byte_offset;
+    let requested_byte_count = match requested_byte_count {
+        Some(requested_byte_count) => {
+            if u64::try_from(requested_byte_count).map_err(|_| build_external_source_error())?
+                > available_byte_count
+            {
+                return Err(build_external_source_error());
             }
-            size
+            requested_byte_count
         }
-        None => usize::try_from(available).map_err(|_| external_source_too_large())?,
+        None => {
+            usize::try_from(available_byte_count).map_err(|_| build_external_source_too_large())?
+        }
     };
-    if length > MAX_GRAPHICS_TRANSFER_BYTES {
-        return Err(external_source_too_large());
+    if requested_byte_count > MAX_GRAPHICS_TRANSFER_BYTE_COUNT {
+        return Err(build_external_source_too_large());
     }
-    file.seek(SeekFrom::Start(offset))
-        .map_err(|_| external_source_error())?;
-    let mut data = Vec::new();
-    data.try_reserve_exact(length)
-        .map_err(|_| external_source_too_large())?;
-    let mut remaining = length;
-    let mut buffer = [0u8; 8192];
-    while remaining != 0 {
-        let read_length = remaining.min(buffer.len());
-        let count = file
-            .read(&mut buffer[..read_length])
-            .map_err(|_| external_source_error())?;
-        if count == 0 {
-            return Err(external_source_error());
+    source_file
+        .seek(SeekFrom::Start(source_byte_offset))
+        .map_err(|_| build_external_source_error())?;
+    let mut source_payload_bytes = Vec::new();
+    source_payload_bytes
+        .try_reserve_exact(requested_byte_count)
+        .map_err(|_| build_external_source_too_large())?;
+    let mut remaining_byte_count = requested_byte_count;
+    let mut source_read_buffer = [0u8; 8192];
+    while remaining_byte_count != 0 {
+        let read_request_byte_count = remaining_byte_count.min(source_read_buffer.len());
+        let read_byte_count = source_file
+            .read(&mut source_read_buffer[..read_request_byte_count])
+            .map_err(|_| build_external_source_error())?;
+        if read_byte_count == 0 {
+            return Err(build_external_source_error());
         }
-        data.extend_from_slice(&buffer[..count]);
-        remaining -= count;
+        source_payload_bytes.extend_from_slice(&source_read_buffer[..read_byte_count]);
+        remaining_byte_count -= read_byte_count;
     }
-    Ok(data)
+    Ok(source_payload_bytes)
 }
 
-fn disposable_file_path(path: &Path) -> Option<PathBuf> {
-    let canonical = fs::canonicalize(path).ok()?;
-    let name = canonical.to_string_lossy().to_ascii_lowercase();
-    if !name.contains("tty-graphics-protocol") {
+fn find_disposable_file_path(source_path: &Path) -> Option<PathBuf> {
+    let canonical_source_path = fs::canonicalize(source_path).ok()?;
+    let canonical_path_text = canonical_source_path.to_string_lossy().to_ascii_lowercase();
+    if !canonical_path_text.contains("tty-graphics-protocol") {
         return None;
     }
-    let mut roots = Vec::new();
-    if let Ok(root) = fs::canonicalize(std::env::temp_dir()) {
-        roots.push(root);
+    let mut disposable_roots = Vec::new();
+    if let Ok(disposable_root) = fs::canonicalize(std::env::temp_dir()) {
+        disposable_roots.push(disposable_root);
     }
     #[cfg(unix)]
     {
-        for root in [Path::new("/tmp"), Path::new("/dev/shm")] {
-            if let Ok(root) = fs::canonicalize(root) {
-                roots.push(root);
+        for candidate_root in [Path::new("/tmp"), Path::new("/dev/shm")] {
+            if let Ok(disposable_root) = fs::canonicalize(candidate_root) {
+                disposable_roots.push(disposable_root);
             }
         }
     }
-    roots
+    disposable_roots
         .iter()
-        .any(|root| canonical.starts_with(root))
-        .then_some(canonical)
+        .any(|disposable_root| canonical_source_path.starts_with(disposable_root))
+        .then_some(canonical_source_path)
 }
 
-fn path_from_bytes(bytes: &[u8]) -> Result<PathBuf, GraphicsError> {
+fn parse_source_path_bytes(source_path_bytes: &[u8]) -> Result<PathBuf, GraphicsError> {
     #[cfg(unix)]
     {
         use std::ffi::OsString;
         use std::os::unix::ffi::OsStringExt;
 
-        if bytes.contains(&0) {
-            return Err(external_source_error());
+        if source_path_bytes.contains(&0) {
+            return Err(build_external_source_error());
         }
-        Ok(PathBuf::from(OsString::from_vec(bytes.to_vec())))
+        Ok(PathBuf::from(OsString::from_vec(
+            source_path_bytes.to_vec(),
+        )))
     }
     #[cfg(not(unix))]
     {
-        String::from_utf8(bytes.to_vec())
+        String::from_utf8(source_path_bytes.to_vec())
             .map(PathBuf::from)
-            .map_err(|_| external_source_error())
+            .map_err(|_| build_external_source_error())
     }
 }
 
 #[cfg(unix)]
-fn read_shared_memory(
-    name: &[u8],
-    offset: usize,
-    size: Option<usize>,
+fn load_shared_memory_payload(
+    shared_memory_name_bytes: &[u8],
+    source_byte_offset: usize,
+    source_byte_count: Option<usize>,
 ) -> Result<Vec<u8>, GraphicsError> {
-    let name = CString::new(name).map_err(|_| external_source_error())?;
-    let descriptor = unsafe { libc::shm_open(name.as_ptr(), libc::O_RDONLY, 0) };
-    if descriptor < 0 {
-        return Err(external_source_error());
+    let shared_memory_name =
+        CString::new(shared_memory_name_bytes).map_err(|_| build_external_source_error())?;
+    let shared_memory_descriptor =
+        unsafe { libc::shm_open(shared_memory_name.as_ptr(), libc::O_RDONLY, 0) };
+    if shared_memory_descriptor < 0 {
+        return Err(build_external_source_error());
     }
-    let mut file = unsafe { File::from_raw_fd(descriptor) };
-    let result = read_file_range(&mut file, offset, size);
-    drop(file);
-    let unlinked = unsafe { libc::shm_unlink(name.as_ptr()) } == 0;
-    if !unlinked && result.is_ok() {
-        return Err(external_source_error());
+    let mut shared_memory_file = unsafe { File::from_raw_fd(shared_memory_descriptor) };
+    let source_read_result = load_file_byte_range(
+        &mut shared_memory_file,
+        source_byte_offset,
+        source_byte_count,
+    );
+    drop(shared_memory_file);
+    let is_unlinked = unsafe { libc::shm_unlink(shared_memory_name.as_ptr()) } == 0;
+    if !is_unlinked && source_read_result.is_ok() {
+        return Err(build_external_source_error());
     }
-    result
+    source_read_result
 }
 
 #[cfg(windows)]
-fn read_shared_memory(
-    name: &[u8],
-    offset: usize,
-    size: Option<usize>,
+fn load_shared_memory_payload(
+    shared_memory_name_bytes: &[u8],
+    source_byte_offset: usize,
+    source_byte_count: Option<usize>,
 ) -> Result<Vec<u8>, GraphicsError> {
     use std::ffi::c_void;
     use std::mem::size_of;
@@ -927,90 +1037,115 @@ fn read_shared_memory(
     };
     use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
 
-    let name = String::from_utf8(name.to_vec()).map_err(|_| external_source_error())?;
-    let mut wide = name.encode_utf16().collect::<Vec<_>>();
-    wide.push(0);
-    let mapping = unsafe { OpenFileMappingW(FILE_MAP_READ, 0, wide.as_ptr()) };
-    if mapping.is_null() {
-        return Err(external_source_error());
+    let shared_memory_name = String::from_utf8(shared_memory_name_bytes.to_vec())
+        .map_err(|_| build_external_source_error())?;
+    let mut wide_name_units = shared_memory_name.encode_utf16().collect::<Vec<_>>();
+    wide_name_units.push(0);
+    let shared_memory_mapping =
+        unsafe { OpenFileMappingW(FILE_MAP_READ, 0, wide_name_units.as_ptr()) };
+    if shared_memory_mapping.is_null() {
+        return Err(build_external_source_error());
     }
-    let result = (|| {
-        let offset = u64::try_from(offset).map_err(|_| external_source_error())?;
-        let mut system_info = SYSTEM_INFO::default();
-        unsafe { GetSystemInfo(&mut system_info) };
-        let granularity = u64::from(system_info.dwAllocationGranularity);
-        if granularity == 0 {
-            return Err(external_source_error());
+    let shared_memory_mapping_result = (|| {
+        let source_byte_offset_u64 =
+            u64::try_from(source_byte_offset).map_err(|_| build_external_source_error())?;
+        let mut windows_system_info = SYSTEM_INFO::default();
+        unsafe { GetSystemInfo(&mut windows_system_info) };
+        let allocation_granularity_bytes = u64::from(windows_system_info.dwAllocationGranularity);
+        if allocation_granularity_bytes == 0 {
+            return Err(build_external_source_error());
         }
-        let aligned = offset - offset % granularity;
-        let delta = usize::try_from(offset - aligned).map_err(|_| external_source_error())?;
-        if size.is_some_and(|size| size > MAX_GRAPHICS_TRANSFER_BYTES) {
-            return Err(external_source_too_large());
+        let aligned_source_byte_offset =
+            source_byte_offset_u64 - source_byte_offset_u64 % allocation_granularity_bytes;
+        let mapped_view_byte_offset =
+            usize::try_from(source_byte_offset_u64 - aligned_source_byte_offset)
+                .map_err(|_| build_external_source_error())?;
+        if source_byte_count.is_some_and(|requested_byte_count| {
+            requested_byte_count > MAX_GRAPHICS_TRANSFER_BYTE_COUNT
+        }) {
+            return Err(build_external_source_too_large());
         }
-        let requested = match size {
-            Some(size) => Some(delta.checked_add(size).ok_or_else(external_source_error)?),
+        let requested_view_byte_count = match source_byte_count {
+            Some(requested_byte_count) => Some(
+                mapped_view_byte_offset
+                    .checked_add(requested_byte_count)
+                    .ok_or_else(build_external_source_error)?,
+            ),
             None => None,
         };
-        let view = unsafe {
+        let mapped_view = unsafe {
             MapViewOfFile(
-                mapping,
+                shared_memory_mapping,
                 FILE_MAP_READ,
-                u32::try_from(aligned >> 32).map_err(|_| external_source_error())?,
-                u32::try_from(aligned).map_err(|_| external_source_error())?,
-                requested.unwrap_or(0),
+                u32::try_from(aligned_source_byte_offset >> 32)
+                    .map_err(|_| build_external_source_error())?,
+                u32::try_from(aligned_source_byte_offset)
+                    .map_err(|_| build_external_source_error())?,
+                requested_view_byte_count.unwrap_or(0),
             )
         };
-        if view.Value.is_null() {
-            return Err(external_source_error());
+        if mapped_view.Value.is_null() {
+            return Err(build_external_source_error());
         }
-        let result = (|| {
-            let length = if let Some(size) = size {
-                size
+        let mapped_view_result = (|| {
+            let payload_byte_count = if let Some(requested_byte_count) = source_byte_count {
+                requested_byte_count
             } else {
-                let mut information = MEMORY_BASIC_INFORMATION::default();
-                let queried = unsafe {
+                let mut memory_information = MEMORY_BASIC_INFORMATION::default();
+                let queried_byte_count = unsafe {
                     VirtualQuery(
-                        view.Value as *const c_void,
-                        &mut information,
+                        mapped_view.Value as *const c_void,
+                        &mut memory_information,
                         size_of::<MEMORY_BASIC_INFORMATION>(),
                     )
                 };
-                if queried == 0 || delta > information.RegionSize {
-                    return Err(external_source_error());
+                if queried_byte_count == 0
+                    || mapped_view_byte_offset > memory_information.RegionSize
+                {
+                    return Err(build_external_source_error());
                 }
-                (information.RegionSize - delta).min(MAX_GRAPHICS_TRANSFER_BYTES)
+                (memory_information.RegionSize - mapped_view_byte_offset)
+                    .min(MAX_GRAPHICS_TRANSFER_BYTE_COUNT)
             };
-            let mut data = Vec::new();
-            data.try_reserve_exact(length)
-                .map_err(|_| external_source_too_large())?;
-            data.resize(length, 0);
-            let source = unsafe { (view.Value as *const u8).add(delta) };
-            unsafe { ptr::copy_nonoverlapping(source, data.as_mut_ptr(), length) };
-            Ok(data)
+            let mut shared_memory_bytes = Vec::new();
+            shared_memory_bytes
+                .try_reserve_exact(payload_byte_count)
+                .map_err(|_| build_external_source_too_large())?;
+            shared_memory_bytes.resize(payload_byte_count, 0);
+            let source_pointer =
+                unsafe { (mapped_view.Value as *const u8).add(mapped_view_byte_offset) };
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    source_pointer,
+                    shared_memory_bytes.as_mut_ptr(),
+                    payload_byte_count,
+                )
+            };
+            Ok(shared_memory_bytes)
         })();
-        unsafe { UnmapViewOfFile(view) };
-        result
+        unsafe { UnmapViewOfFile(mapped_view) };
+        mapped_view_result
     })();
-    unsafe { CloseHandle(mapping) };
-    result
+    unsafe { CloseHandle(shared_memory_mapping) };
+    shared_memory_mapping_result
 }
 
 #[cfg(not(any(unix, windows)))]
-fn read_shared_memory(
-    _name: &[u8],
-    _offset: usize,
-    _size: Option<usize>,
+fn load_shared_memory_payload(
+    _shared_memory_name_bytes: &[u8],
+    _source_byte_offset: usize,
+    _source_byte_count: Option<usize>,
 ) -> Result<Vec<u8>, GraphicsError> {
-    Err(external_source_error())
+    Err(build_external_source_error())
 }
 
-fn external_source_error() -> GraphicsError {
+fn build_external_source_error() -> GraphicsError {
     GraphicsError::DecodeFailure {
         protocol: KITTY_PROTOCOL,
     }
 }
 
-fn external_source_too_large() -> GraphicsError {
+fn build_external_source_too_large() -> GraphicsError {
     GraphicsError::TransferTooLarge {
         protocol: KITTY_PROTOCOL,
     }
@@ -1019,51 +1154,60 @@ fn external_source_too_large() -> GraphicsError {
 impl KittyAnimationTransfer {
     /// Return display metadata from the first animation-frame chunk.
     #[must_use]
-    pub fn display(&self) -> ImageDisplay {
-        reply_display(&self.header)
+    pub fn get_image_display(&self) -> ImageDisplay {
+        commands::parse_reply_display(&self.control_header_bytes)
     }
 
     /// Validate and append a continuation chunk.
-    pub fn accept_chunk(
+    pub fn accept_continuation_chunk(
         mut self,
         chunk: KittyAnimationChunk,
     ) -> Result<KittyAnimationTransferOutcome, GraphicsError> {
-        if !chunk.continuation() {
+        if !chunk.is_continuation() {
             return Err(GraphicsError::InvalidHeader {
                 protocol: KITTY_PROTOCOL,
             });
         }
-        let header = chunk.header();
-        let body = header
-            .strip_prefix(b"G")
-            .ok_or(GraphicsError::InvalidHeader {
-                protocol: KITTY_PROTOCOL,
-            })?;
-        if !body
-            .split(|byte| *byte == b',')
-            .filter(|field| !field.is_empty())
-            .all(|field| {
-                field.starts_with(b"a=f") || field.starts_with(b"m=") || field.starts_with(b"q=")
+        let control_header_bytes = chunk.get_control_header_bytes();
+        let control_body_bytes =
+            control_header_bytes
+                .strip_prefix(b"G")
+                .ok_or(GraphicsError::InvalidHeader {
+                    protocol: KITTY_PROTOCOL,
+                })?;
+        if !control_body_bytes
+            .split(|control_byte| *control_byte == b',')
+            .filter(|control_field| !control_field.is_empty())
+            .all(|control_field| {
+                control_field.starts_with(b"a=f")
+                    || control_field.starts_with(b"m=")
+                    || control_field.starts_with(b"q=")
             })
         {
             return Err(GraphicsError::InvalidHeader {
                 protocol: KITTY_PROTOCOL,
             });
         }
-        append_bounded(&mut self.encoded, chunk.payload())?;
-        if chunk.more() {
+        append_bounded_bytes(
+            &mut self.encoded_payload_bytes,
+            chunk.get_encoded_payload_bytes(),
+        )?;
+        if chunk.has_more_chunks() {
             Ok(KittyAnimationTransferOutcome::Pending(self))
         } else {
-            let payload = prepare_animation_payload(&self.header, &self.encoded, true)?;
-            let body = self
-                .header
-                .strip_prefix(b"G")
-                .ok_or(GraphicsError::InvalidHeader {
+            let prepared_payload_bytes = prepare_animation_payload(
+                &self.control_header_bytes,
+                &self.encoded_payload_bytes,
+                true,
+            )?;
+            let control_body_bytes = self.control_header_bytes.strip_prefix(b"G").ok_or(
+                GraphicsError::InvalidHeader {
                     protocol: KITTY_PROTOCOL,
-                })?;
+                },
+            )?;
             let command = commands::parse_animation_command_fields(
-                body,
-                &payload,
+                control_body_bytes,
+                &prepared_payload_bytes,
                 KittyCommandKind::AnimationFrame,
                 true,
             )?;
@@ -1081,155 +1225,159 @@ pub(super) enum KittyFormat {
 
 #[derive(Debug)]
 pub(super) struct KittyControl {
-    pub(super) query: bool,
-    pub(super) id: Option<u32>,
+    pub(super) is_query: bool,
+    pub(super) image_id: Option<u32>,
     pub(super) action: ImageAction,
-    pub(super) medium: Option<u8>,
-    pub(super) format: Option<KittyFormat>,
-    pub(super) width: Option<u32>,
-    pub(super) height: Option<u32>,
-    pub(super) more: bool,
-    pub(super) more_specified: bool,
-    pub(super) compression: Option<bool>,
-    pub(super) source_size: Option<usize>,
-    pub(super) source_offset: Option<usize>,
-    pub(super) display: ImageDisplay,
-    pub(super) continuation_compatible: bool,
+    pub(super) transfer_medium: Option<u8>,
+    pub(super) media_format: Option<KittyFormat>,
+    pub(super) image_width_pixels: Option<u32>,
+    pub(super) image_height_pixels: Option<u32>,
+    pub(super) has_more_chunks: bool,
+    pub(super) has_more_chunks_parameter: bool,
+    pub(super) is_compressed: Option<bool>,
+    pub(super) source_byte_count: Option<usize>,
+    pub(super) source_byte_offset: Option<usize>,
+    pub(super) image_display: ImageDisplay,
+    pub(super) supports_continuation: bool,
 }
 
 impl Default for KittyControl {
     fn default() -> Self {
         Self {
-            query: false,
-            id: None,
+            is_query: false,
+            image_id: None,
             action: ImageAction::Transmit,
-            medium: None,
-            format: None,
-            width: None,
-            height: None,
-            more: false,
-            more_specified: false,
-            compression: None,
-            source_size: None,
-            source_offset: None,
-            display: ImageDisplay::default(),
-            continuation_compatible: true,
+            transfer_medium: None,
+            media_format: None,
+            image_width_pixels: None,
+            image_height_pixels: None,
+            has_more_chunks: false,
+            has_more_chunks_parameter: false,
+            is_compressed: None,
+            source_byte_count: None,
+            source_byte_offset: None,
+            image_display: ImageDisplay::default(),
+            supports_continuation: true,
         }
     }
 }
 
-pub(super) fn parse_kitty_control(data: &[u8]) -> Result<KittyControl, GraphicsError> {
-    let mut control = KittyControl::default();
-    let mut seen = [false; 256];
-    for field in data.split(|byte| *byte == b',') {
-        if field.is_empty() {
+pub(super) fn parse_kitty_control(control_bytes: &[u8]) -> Result<KittyControl, GraphicsError> {
+    let mut kitty_control = KittyControl::default();
+    let mut seen_control_keys = [false; 256];
+    for control_field_bytes in control_bytes.split(|byte| *byte == b',') {
+        if control_field_bytes.is_empty() {
             continue;
         }
-        let (key, value) = split_at_byte(field, b'=').ok_or(GraphicsError::InvalidHeader {
-            protocol: KITTY_PROTOCOL,
-        })?;
-        if key.len() != 1 || value.is_empty() {
+        let (control_key_bytes, parameter_value) =
+            split_bytes_at_delimiter(control_field_bytes, b'=').ok_or(
+                GraphicsError::InvalidHeader {
+                    protocol: KITTY_PROTOCOL,
+                },
+            )?;
+        if control_key_bytes.len() != 1 || parameter_value.is_empty() {
             return Err(GraphicsError::InvalidHeader {
                 protocol: KITTY_PROTOCOL,
             });
         }
-        let key = key[0];
-        let slot = match key {
+        let control_key = control_key_bytes[0];
+        let control_key_slot = match control_key {
             b'a' | b'C' | b'c' | b'd' | b'f' | b'h' | b'H' | b'i' | b'I' | b'm' | b'N' | b'o'
             | b'O' | b'p' | b'P' | b'q' | b'Q' | b'r' | b's' | b'S' | b't' | b'U' | b'v' | b'V'
-            | b'w' | b'x' | b'X' | b'y' | b'Y' | b'z' => usize::from(key),
+            | b'w' | b'x' | b'X' | b'y' | b'Y' | b'z' => usize::from(control_key),
             _ => {
                 return Err(GraphicsError::InvalidHeader {
                     protocol: KITTY_PROTOCOL,
                 })
             }
         };
-        if seen[slot] {
+        if seen_control_keys[control_key_slot] {
             return Err(GraphicsError::InvalidHeader {
                 protocol: KITTY_PROTOCOL,
             });
         }
-        seen[slot] = true;
-        if !matches!(key, b'm' | b'q') {
-            control.continuation_compatible = false;
+        seen_control_keys[control_key_slot] = true;
+        if !matches!(control_key, b'm' | b'q') {
+            kitty_control.supports_continuation = false;
         }
-        match key {
+        match control_key {
             b'a' => {
-                let action = as_ascii(value)?;
-                control.action = match value {
+                let action_name = parse_ascii_text(parameter_value)?;
+                kitty_control.action = match parameter_value {
                     b"t" => ImageAction::Transmit,
                     b"T" => ImageAction::TransmitAndDisplay,
                     b"q" => {
-                        control.query = true;
+                        kitty_control.is_query = true;
                         ImageAction::Transmit
                     }
                     _ => {
                         return Err(GraphicsError::UnsupportedAction {
                             protocol: KITTY_PROTOCOL,
-                            action,
+                            action: action_name,
                         })
                     }
                 };
             }
             b'f' => {
-                control.format = Some(match parse_u32(value)? {
+                kitty_control.media_format = Some(match parse_decimal_u32(parameter_value)? {
                     24 => KittyFormat::Rgb,
                     32 => KittyFormat::Rgba,
                     100 => KittyFormat::Png,
                     _ => {
                         return Err(GraphicsError::UnsupportedMedia {
                             protocol: KITTY_PROTOCOL,
-                            format: String::from_utf8_lossy(value).into_owned(),
+                            media_format: String::from_utf8_lossy(parameter_value).into_owned(),
                         })
                     }
                 });
             }
             b'h' => {
-                let height = parse_u32(value)?;
-                if height == 0 {
+                let requested_pixel_height = parse_decimal_u32(parameter_value)?;
+                if requested_pixel_height == 0 {
                     return Err(GraphicsError::InvalidDimensions {
                         protocol: KITTY_PROTOCOL,
                     });
                 }
-                control.display.height = Some(koshi_image::ImageDimension::Pixels(height));
+                kitty_control.image_display.requested_height =
+                    Some(koshi_image::ImageDimension::Pixels(requested_pixel_height));
             }
             b'i' => {
-                if control.display.image_number.is_some() {
+                if kitty_control.image_display.image_number.is_some() {
                     return Err(GraphicsError::InvalidHeader {
                         protocol: KITTY_PROTOCOL,
                     });
                 }
-                let id = parse_u32(value)?;
-                if id == 0 {
+                let image_id = parse_decimal_u32(parameter_value)?;
+                if image_id == 0 {
                     return Err(GraphicsError::InvalidCommand {
                         protocol: KITTY_PROTOCOL,
                     });
                 }
-                control.id = Some(id);
-                control.display.image_id = Some(id);
+                kitty_control.image_id = Some(image_id);
+                kitty_control.image_display.image_id = Some(image_id);
             }
             b'I' => {
-                if control.id.is_some() {
+                if kitty_control.image_id.is_some() {
                     return Err(GraphicsError::InvalidHeader {
                         protocol: KITTY_PROTOCOL,
                     });
                 }
-                let id = parse_u32(value)?;
-                if id == 0 {
+                let image_number = parse_decimal_u32(parameter_value)?;
+                if image_number == 0 {
                     return Err(GraphicsError::InvalidCommand {
                         protocol: KITTY_PROTOCOL,
                     });
                 }
-                control.display.image_number = Some(id);
+                kitty_control.image_display.image_number = Some(image_number);
             }
-            b'm' => match value {
+            b'm' => match parameter_value {
                 b"0" => {
-                    control.more = false;
-                    control.more_specified = true;
+                    kitty_control.has_more_chunks = false;
+                    kitty_control.has_more_chunks_parameter = true;
                 }
                 b"1" => {
-                    control.more = true;
-                    control.more_specified = true;
+                    kitty_control.has_more_chunks = true;
+                    kitty_control.has_more_chunks_parameter = true;
                 }
                 _ => {
                     return Err(GraphicsError::InvalidCommand {
@@ -1238,98 +1386,113 @@ pub(super) fn parse_kitty_control(data: &[u8]) -> Result<KittyControl, GraphicsE
                 }
             },
             b'o' => {
-                control.compression = Some(match value {
+                kitty_control.is_compressed = Some(match parameter_value {
                     b"z" => true,
                     _ => {
                         return Err(GraphicsError::UnsupportedMedia {
                             protocol: KITTY_PROTOCOL,
-                            format: as_ascii(value)?,
+                            media_format: parse_ascii_text(parameter_value)?,
                         })
                     }
                 });
             }
-            b's' => control.width = Some(parse_u32(value)?),
-            b'v' => control.height = Some(parse_u32(value)?),
+            b's' => kitty_control.image_width_pixels = Some(parse_decimal_u32(parameter_value)?),
+            b'v' => kitty_control.image_height_pixels = Some(parse_decimal_u32(parameter_value)?),
             b'p' => {
-                control.display.placement_id = Some(parse_u32(value)?);
+                kitty_control.image_display.placement_id =
+                    Some(parse_decimal_u32(parameter_value)?);
             }
-            b'S' => control.source_size = Some(parse_usize(value)?),
-            b'O' => control.source_offset = Some(parse_usize(value)?),
+            b'S' => kitty_control.source_byte_count = Some(parse_decimal_usize(parameter_value)?),
+            b'O' => kitty_control.source_byte_offset = Some(parse_decimal_usize(parameter_value)?),
             b't' => {
-                if value.len() != 1 {
+                if parameter_value.len() != 1 {
                     return Err(GraphicsError::InvalidCommand {
                         protocol: KITTY_PROTOCOL,
                     });
                 }
-                control.medium = Some(value[0]);
+                kitty_control.transfer_medium = Some(parameter_value[0]);
             }
             b'c' => {
-                control.display.cell_columns = Some(parse_positive_u32(value)?);
+                kitty_control.image_display.requested_column_count =
+                    Some(parse_positive_decimal_u32(parameter_value)?);
             }
             b'r' => {
-                control.display.cell_rows = Some(parse_positive_u32(value)?);
+                kitty_control.image_display.requested_row_count =
+                    Some(parse_positive_decimal_u32(parameter_value)?);
             }
             b'w' => {
-                control.display.width = Some(koshi_image::ImageDimension::Pixels(
-                    parse_positive_u32(value)?,
-                ));
+                kitty_control.image_display.requested_width =
+                    Some(koshi_image::ImageDimension::Pixels(
+                        parse_positive_decimal_u32(parameter_value)?,
+                    ));
             }
             b'x' => {
-                control.display.source_offset_x = Some(parse_u32(value)?);
+                kitty_control.image_display.source_pixel_offset_x =
+                    Some(parse_decimal_u32(parameter_value)?);
             }
             b'y' => {
-                control.display.source_offset_y = Some(parse_u32(value)?);
+                kitty_control.image_display.source_pixel_offset_y =
+                    Some(parse_decimal_u32(parameter_value)?);
             }
             b'X' => {
-                control.display.cell_offset_x = Some(parse_u32(value)?);
+                kitty_control.image_display.cell_pixel_offset_x =
+                    Some(parse_decimal_u32(parameter_value)?);
             }
             b'Y' => {
-                control.display.cell_offset_y = Some(parse_u32(value)?);
+                kitty_control.image_display.cell_pixel_offset_y =
+                    Some(parse_decimal_u32(parameter_value)?);
             }
             b'C' => {
-                control.display.move_cursor = match parse_u32(value)? {
-                    0 => true,
-                    1 => false,
-                    _ => {
-                        return Err(GraphicsError::InvalidCommand {
-                            protocol: KITTY_PROTOCOL,
-                        })
-                    }
-                };
+                kitty_control.image_display.should_move_cursor =
+                    match parse_decimal_u32(parameter_value)? {
+                        0 => true,
+                        1 => false,
+                        _ => {
+                            return Err(GraphicsError::InvalidCommand {
+                                protocol: KITTY_PROTOCOL,
+                            })
+                        }
+                    };
             }
             b'N' => {
-                control.display.usage_hints = parse_u32(value)?;
+                kitty_control.image_display.usage_hints = parse_decimal_u32(parameter_value)?;
             }
             b'U' => {
-                control.display.unicode_placeholder = match parse_u32(value)? {
-                    0 => false,
-                    1 => true,
-                    _ => {
-                        return Err(GraphicsError::InvalidCommand {
-                            protocol: KITTY_PROTOCOL,
-                        })
-                    }
-                };
+                kitty_control.image_display.is_unicode_placeholder =
+                    match parse_decimal_u32(parameter_value)? {
+                        0 => false,
+                        1 => true,
+                        _ => {
+                            return Err(GraphicsError::InvalidCommand {
+                                protocol: KITTY_PROTOCOL,
+                            })
+                        }
+                    };
             }
             b'P' => {
-                control.display.relative_image_id = Some(parse_positive_u32(value)?);
+                kitty_control.image_display.relative_image_id =
+                    Some(parse_positive_decimal_u32(parameter_value)?);
             }
             b'Q' => {
-                control.display.relative_placement_id = Some(parse_positive_u32(value)?);
+                kitty_control.image_display.relative_placement_id =
+                    Some(parse_positive_decimal_u32(parameter_value)?);
             }
             b'H' => {
-                control.display.relative_offset_x = parse_i32(value)?;
+                kitty_control.image_display.relative_column_offset =
+                    parse_decimal_i32(parameter_value)?;
             }
             b'V' => {
-                control.display.relative_offset_y = parse_i32(value)?;
+                kitty_control.image_display.relative_row_offset =
+                    parse_decimal_i32(parameter_value)?;
             }
             b'z' => {
-                control.display.z_index = parse_i32(value)?;
+                kitty_control.image_display.z_index = parse_decimal_i32(parameter_value)?;
             }
             b'q' => {
-                let quiet = parse_u32(value)?;
-                control.display.quiet = quiet.min(2) as u8;
-                if quiet > 2 {
+                let response_suppression_level = parse_decimal_u32(parameter_value)?;
+                kitty_control.image_display.response_suppression_level =
+                    response_suppression_level.min(2) as u8;
+                if response_suppression_level > 2 {
                     return Err(GraphicsError::InvalidCommand {
                         protocol: KITTY_PROTOCOL,
                     });
@@ -1338,61 +1501,63 @@ pub(super) fn parse_kitty_control(data: &[u8]) -> Result<KittyControl, GraphicsE
             b'd' => {
                 return Err(GraphicsError::UnsupportedAction {
                     protocol: KITTY_PROTOCOL,
-                    action: format!("control {}", key as char),
+                    action: format!("control {}", control_key as char),
                 });
             }
             _ => unreachable!(),
         }
     }
-    Ok(control)
+    Ok(kitty_control)
 }
 
 fn validate_kitty_continuation(
     transfer: &KittyTransfer,
     chunk: &KittyChunk,
 ) -> Result<(), GraphicsError> {
-    if !chunk.more_specified || !chunk.continuation_compatible {
+    if !chunk.has_more_chunks_parameter || !chunk.supports_continuation {
         return Err(GraphicsError::InvalidHeader {
             protocol: KITTY_PROTOCOL,
         });
     }
-    if let Some(id) = chunk.id {
-        if transfer.id != Some(id) {
+    if let Some(image_id) = chunk.image_id {
+        if transfer.image_id != Some(image_id) {
             return Err(GraphicsError::InvalidHeader {
                 protocol: KITTY_PROTOCOL,
             });
         }
     }
-    if let Some(format) = chunk.format {
-        if format != transfer.format {
+    if let Some(media_format) = chunk.media_format {
+        if media_format != transfer.media_format {
             return Err(GraphicsError::InvalidHeader {
                 protocol: KITTY_PROTOCOL,
             });
         }
     }
-    if let Some(width) = chunk.width {
-        if transfer.width != Some(width) {
+    if let Some(image_width_pixels) = chunk.image_width_pixels {
+        if transfer.image_width_pixels != Some(image_width_pixels) {
             return Err(GraphicsError::InvalidDimensions {
                 protocol: KITTY_PROTOCOL,
             });
         }
     }
-    if let Some(height) = chunk.height {
-        if transfer.height != Some(height) {
+    if let Some(image_height_pixels) = chunk.image_height_pixels {
+        if transfer.image_height_pixels != Some(image_height_pixels) {
             return Err(GraphicsError::InvalidDimensions {
                 protocol: KITTY_PROTOCOL,
             });
         }
     }
-    if let Some(compression) = chunk.compression {
-        if compression != transfer.compression {
+    if let Some(is_compressed) = chunk.is_compressed {
+        if is_compressed != transfer.is_compressed {
             return Err(GraphicsError::InvalidCommand {
                 protocol: KITTY_PROTOCOL,
             });
         }
     }
-    if let Some(expected) = chunk.declared_size {
-        if transfer.declared_size.is_some() && transfer.declared_size != Some(expected) {
+    if let Some(declared_payload_byte_count) = chunk.declared_payload_byte_count {
+        if transfer.declared_payload_byte_count.is_some()
+            && transfer.declared_payload_byte_count != Some(declared_payload_byte_count)
+        {
             return Err(GraphicsError::InvalidHeader {
                 protocol: KITTY_PROTOCOL,
             });
@@ -1401,122 +1566,133 @@ fn validate_kitty_continuation(
     Ok(())
 }
 
-fn append_bounded(target: &mut Vec<u8>, bytes: &[u8]) -> Result<(), GraphicsError> {
-    let new_len =
-        target
-            .len()
-            .checked_add(bytes.len())
-            .ok_or(GraphicsError::InvalidDimensions {
-                protocol: KITTY_PROTOCOL,
-            })?;
-    if new_len > MAX_GRAPHICS_TRANSFER_BYTES {
+fn append_bounded_bytes(
+    encoded_payload_bytes: &mut Vec<u8>,
+    payload_bytes: &[u8],
+) -> Result<(), GraphicsError> {
+    let encoded_payload_byte_count = encoded_payload_bytes
+        .len()
+        .checked_add(payload_bytes.len())
+        .ok_or(GraphicsError::InvalidDimensions {
+            protocol: KITTY_PROTOCOL,
+        })?;
+    if encoded_payload_byte_count > MAX_GRAPHICS_TRANSFER_BYTE_COUNT {
         return Err(GraphicsError::TransferTooLarge {
             protocol: KITTY_PROTOCOL,
         });
     }
-    target.extend_from_slice(bytes);
+    encoded_payload_bytes.extend_from_slice(payload_bytes);
     Ok(())
 }
 
-fn push_bounded(target: &mut Vec<u8>, byte: u8, limit: usize) -> Result<(), GraphicsError> {
-    if target.len() == limit {
+fn push_bounded_bytes(
+    bounded_byte_buffer: &mut Vec<u8>,
+    input_byte: u8,
+    maximum_byte_count: usize,
+) -> Result<(), GraphicsError> {
+    if bounded_byte_buffer.len() == maximum_byte_count {
         return Err(GraphicsError::TransferTooLarge {
             protocol: KITTY_PROTOCOL,
         });
     }
-    target.push(byte);
+    bounded_byte_buffer.push(input_byte);
     Ok(())
 }
 
-fn parse_u32(data: &[u8]) -> Result<u32, GraphicsError> {
-    if data.is_empty() || !data.iter().all(u8::is_ascii_digit) {
+fn parse_decimal_u32(decimal_bytes: &[u8]) -> Result<u32, GraphicsError> {
+    if decimal_bytes.is_empty() || !decimal_bytes.iter().all(u8::is_ascii_digit) {
         return Err(GraphicsError::InvalidCommand {
             protocol: KITTY_PROTOCOL,
         });
     }
-    let mut value = 0u32;
-    for &byte in data {
-        value = value
+    let mut decimal_value = 0u32;
+    for &decimal_digit in decimal_bytes {
+        decimal_value = decimal_value
             .checked_mul(10)
-            .and_then(|value| value.checked_add(u32::from(byte - b'0')))
+            .and_then(|decimal_value| decimal_value.checked_add(u32::from(decimal_digit - b'0')))
             .ok_or(GraphicsError::InvalidDimensions {
                 protocol: KITTY_PROTOCOL,
             })?;
     }
-    Ok(value)
+    Ok(decimal_value)
 }
 
-fn parse_i32(data: &[u8]) -> Result<i32, GraphicsError> {
-    if data.is_empty() {
+fn parse_decimal_i32(decimal_bytes: &[u8]) -> Result<i32, GraphicsError> {
+    if decimal_bytes.is_empty() {
         return Err(GraphicsError::InvalidCommand {
             protocol: KITTY_PROTOCOL,
         });
     }
-    let (negative, digits) = match data.first() {
-        Some(b'-') => (true, &data[1..]),
-        _ => (false, data),
+    let (is_negative, decimal_digits) = match decimal_bytes.first() {
+        Some(b'-') => (true, &decimal_bytes[1..]),
+        _ => (false, decimal_bytes),
     };
-    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+    if decimal_digits.is_empty() || !decimal_digits.iter().all(u8::is_ascii_digit) {
         return Err(GraphicsError::InvalidCommand {
             protocol: KITTY_PROTOCOL,
         });
     }
-    let mut value = 0u32;
-    for &byte in digits {
-        value = value
+    let mut decimal_value = 0u32;
+    for &decimal_digit in decimal_digits {
+        decimal_value = decimal_value
             .checked_mul(10)
-            .and_then(|value| value.checked_add(u32::from(byte - b'0')))
+            .and_then(|decimal_value| decimal_value.checked_add(u32::from(decimal_digit - b'0')))
             .ok_or(GraphicsError::InvalidCommand {
                 protocol: KITTY_PROTOCOL,
             })?;
     }
-    if negative {
-        if value == 2_147_483_648 {
+    if is_negative {
+        if decimal_value == 2_147_483_648 {
             Ok(i32::MIN)
         } else {
-            i32::try_from(value)
+            i32::try_from(decimal_value)
                 .ok()
-                .and_then(|value| value.checked_neg())
+                .and_then(|decimal_value| decimal_value.checked_neg())
                 .ok_or(GraphicsError::InvalidCommand {
                     protocol: KITTY_PROTOCOL,
                 })
         }
     } else {
-        i32::try_from(value).map_err(|_| GraphicsError::InvalidCommand {
+        i32::try_from(decimal_value).map_err(|_| GraphicsError::InvalidCommand {
             protocol: KITTY_PROTOCOL,
         })
     }
 }
 
-fn parse_positive_u32(data: &[u8]) -> Result<u32, GraphicsError> {
-    let value = parse_u32(data)?;
-    if value == 0 {
+fn parse_positive_decimal_u32(decimal_bytes: &[u8]) -> Result<u32, GraphicsError> {
+    let positive_decimal_value = parse_decimal_u32(decimal_bytes)?;
+    if positive_decimal_value == 0 {
         return Err(GraphicsError::InvalidDimensions {
             protocol: KITTY_PROTOCOL,
         });
     }
-    Ok(value)
+    Ok(positive_decimal_value)
 }
 
-fn parse_usize(data: &[u8]) -> Result<usize, GraphicsError> {
-    let value = parse_u32(data)?;
-    usize::try_from(value).map_err(|_| GraphicsError::InvalidDimensions {
+fn parse_decimal_usize(decimal_bytes: &[u8]) -> Result<usize, GraphicsError> {
+    let decimal_value = parse_decimal_u32(decimal_bytes)?;
+    usize::try_from(decimal_value).map_err(|_| GraphicsError::InvalidDimensions {
         protocol: KITTY_PROTOCOL,
     })
 }
 
-fn as_ascii(data: &[u8]) -> Result<String, GraphicsError> {
-    if !data.is_ascii() {
+fn parse_ascii_text(ascii_bytes: &[u8]) -> Result<String, GraphicsError> {
+    if !ascii_bytes.is_ascii() {
         return Err(GraphicsError::InvalidHeader {
             protocol: KITTY_PROTOCOL,
         });
     }
-    Ok(String::from_utf8_lossy(data).into_owned())
+    Ok(String::from_utf8_lossy(ascii_bytes).into_owned())
 }
 
-fn split_at_byte(data: &[u8], delimiter: u8) -> Option<(&[u8], &[u8])> {
-    let index = data.iter().position(|byte| *byte == delimiter)?;
-    Some((&data[..index], &data[index + 1..]))
+fn split_bytes_at_delimiter(source_bytes: &[u8], delimiter_byte: u8) -> Option<(&[u8], &[u8])> {
+    let delimiter_index = source_bytes
+        .iter()
+        .position(|source_byte| *source_byte == delimiter_byte)?;
+    Some((
+        &source_bytes[..delimiter_index],
+        &source_bytes[delimiter_index + 1..],
+    ))
 }
 
 #[cfg(test)]

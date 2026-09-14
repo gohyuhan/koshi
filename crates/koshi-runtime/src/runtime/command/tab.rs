@@ -7,29 +7,30 @@ impl Server {
     /// [`Command::MoveTab`]) to its tab and the owning session, borrowed
     /// mutably.
     ///
-    /// The tab is [`Self::resolve_tab_or_active`]: the explicit `tab`
+    /// The tab is [`Self::resolve_tab_or_active`]: the explicit `tab_id`
     /// argument, else the tab holding the issuing pane for an in-session CLI,
     /// else the acting client's active tab.
     ///
-    /// Rejects with [`RejectReason::TargetNotFound`] when the source names no
+    /// Rejects with [`RejectReason::TargetNotFound`] when the command source names no
     /// live session, the issuing pane is gone, or the tab is gone;
-    /// [`RejectReason::SourceClientStale`] when the source's client is no
+    /// [`RejectReason::SourceClientStale`] when the command source's client is no
     /// longer attached; [`RejectReason::TargetAmbiguous`] when several clients
     /// are attached and none is named.
-    fn acting_tab_session(
+    fn resolve_acting_tab_session(
         &mut self,
-        tab: Option<TabId>,
-        source: &CommandSource,
+        requested_tab_id: Option<TabId>,
+        command_source: &CommandSource,
     ) -> Result<(TabId, &mut Session), Rejection> {
-        let acting = self.acting_session(source)?;
-        let tab_id = self.resolve_tab_or_active(tab, source, acting)?;
-        let session_id = acting
-            .map(|session| session.id)
-            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
+        let acting_session = self.acting_session(command_source)?;
+        let tab_id =
+            self.resolve_tab_or_active(requested_tab_id, command_source, acting_session)?;
+        let session_id = acting_session
+            .map(|session| session.session_id)
+            .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
         let session = self
-            .sessions
+            .session_by_id
             .get_mut(&session_id)
-            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
+            .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
         Ok((tab_id, session))
     }
 
@@ -46,7 +47,7 @@ impl Server {
     /// tab names — the caller supplies none.
     /// The root pane runs the default shell in the requested directory,
     /// else where the designated client's focused pane currently is
-    /// ([`Self::pane_live_cwd`]). After the
+    /// ([`Self::resolve_pane_working_directory`]). After the
     /// commit, the tab the client left reflows to its remaining viewers'
     /// viewport; a tab left with no viewer keeps its sizes. A designated
     /// client reporting [`PaneArea::Starving`], and a pane area too small to
@@ -56,104 +57,129 @@ impl Server {
     pub(super) fn handle_new_tab(
         &mut self,
         command_id: CommandId,
-        source: &CommandSource,
-        args: &NewTabArgs,
+        command_source: &CommandSource,
+        command_args: &NewTabArgs,
         issued_at: SystemTime,
     ) -> Result<CommandResult, Rejection> {
-        let acting = self.acting_session(source)?;
-        let target = Self::resolve_new_tab_target(args, source, acting)?;
+        let acting_session = self.acting_session(command_source)?;
+        let tab_target =
+            Self::resolve_new_tab_target(command_args, command_source, acting_session)?;
         // An owned handle on the shared backend. The spawn below uses it while
         // the session is borrowed mutably.
-        let backend = Arc::clone(self.pty_backend());
-        let sizing = self.pane_sizing();
+        let pty_backend = Arc::clone(self.get_pty_backend());
+        let pane_sizing = self.get_pane_sizing();
         // The root pane runs the default shell in the requested directory.
         // Built before the session is borrowed, reading `self.config.terminal`.
-        let mut spawn_spec = self.default_shell_spec(args.cwd.clone(), BTreeMap::new());
+        let mut spawn_spec =
+            self.build_default_shell_spec(command_args.working_directory.clone(), BTreeMap::new());
         // No directory was asked for: the tab opens where the designated
-        // client's focused pane currently is ([`Self::pane_live_cwd`]).
-        if spawn_spec.cwd.is_none() {
-            spawn_spec.cwd = self
-                .sessions
-                .get(&target.session_id)
-                .and_then(|session| session.clients.get(target.client_id))
-                .and_then(|client| client.focused_pane(client.active_tab()))
-                .and_then(|pane| self.pane_live_cwd(target.session_id, pane));
+        // client's focused pane currently is ([`Self::resolve_pane_working_directory`]).
+        if spawn_spec.working_directory.is_none() {
+            spawn_spec.working_directory = self
+                .session_by_id
+                .get(&tab_target.session_id)
+                .and_then(|session| session.clients.get_client_by_id(tab_target.client_id))
+                .and_then(|client| client.get_focused_pane(client.get_active_tab()))
+                .and_then(|pane_id| {
+                    self.resolve_pane_working_directory(tab_target.session_id, pane_id)
+                });
         }
 
         let session = self
-            .sessions
-            .get_mut(&target.session_id)
-            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
+            .session_by_id
+            .get_mut(&tab_target.session_id)
+            .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
         let client = session
             .clients
-            .get(target.client_id)
-            .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))?;
+            .get_client_by_id(tab_target.client_id)
+            .ok_or_else(|| Rejection::from_reason(RejectReason::SourceClientStale))?;
 
         // The new tab fills the designated client's pane area.
-        let no_room = || Rejection::new(RejectReason::MinSize, "not enough space for a new tab");
-        let viewport = client.pane_area().ok_or_else(no_room)?;
+        let reject_when_no_room = || {
+            Rejection::from_reason_and_help(RejectReason::MinSize, "not enough space for a new tab")
+        };
+        let designated_pane_area = client.get_pane_area().ok_or_else(reject_when_no_room)?;
         let new_pane_id = PaneId::new();
         let new_tab_id = TabId::new();
-        let tab_rect = Rect::at_origin(viewport);
-        if !fits(&LayoutNode::Pane(new_pane_id), tab_rect, sizing) {
-            return Err(no_room());
+        let tab_rect = Rect::from_size_at_origin(designated_pane_area);
+        if !is_layout_within_rect(&LayoutNode::Pane(new_pane_id), tab_rect, pane_sizing) {
+            return Err(reject_when_no_room());
         }
-        let spawn_size = size_root_pane(new_pane_id, viewport, sizing);
+        let new_tab_pty_size = size_root_pane(new_pane_id, designated_pane_area, pane_sizing);
 
         // Resolve the tab's name before the spawn: a generated one no
         // existing tab in the session already uses.
-        let name = generate_name(NameKind::Tab, |candidate| {
-            session.tabs.values().any(|tab| tab.name() == candidate)
+        let tab_name = generate_name(NameKind::Tab, |candidate_tab_name| {
+            session
+                .tabs
+                .values()
+                .any(|tab| tab.get_tab_name() == candidate_tab_name)
         });
 
-        let launch_cwd = spawn_spec.cwd.clone();
-        spawn_spec.env.extend(koshi_env(
-            target.session_id,
-            Some(target.client_id),
-            new_pane_id,
-            koshi_paths::runtime_dir().as_deref(),
-        ));
+        let launch_working_directory = spawn_spec.working_directory.clone();
+        spawn_spec
+            .environment_variables
+            .extend(build_koshi_environment(
+                tab_target.session_id,
+                Some(tab_target.client_id),
+                new_pane_id,
+                koshi_paths::resolve_runtime_directory().as_deref(),
+            ));
 
         // Launch the child BEFORE committing any state. A failure returns
         // here with nothing registered and no view moved.
-        let handle = Self::spawn_child(backend.as_ref(), new_pane_id, spawn_spec, spawn_size)?;
+        let child_handle = Self::spawn_child(
+            pty_backend.as_ref(),
+            new_pane_id,
+            spawn_spec,
+            new_tab_pty_size,
+        )?;
 
         // The child is live — commit all session state through the pure op:
         // it registers the root pane `Running`, appends the tab, and switches
         // the designated client onto it. It returns the client's previous
         // tab, for the reflow below.
-        let spec = NewPaneSpec {
-            cwd: launch_cwd,
-            command: None,
+        let new_pane_spec = NewPaneSpec {
+            working_directory: launch_working_directory,
+            spawn_spec: None,
         };
-        let (prev_tab, mut events) = tab_ops::commit_new_tab(
+        let (previous_tab_id, mut emitted_events) = tab_ops::commit_new_tab(
             session,
             new_tab_id,
             new_pane_id,
-            name,
-            Some(target.client_id),
-            spec,
+            tab_name,
+            Some(tab_target.client_id),
+            new_pane_spec,
             issued_at,
         );
 
         // Park the handle: a forwarder relays its output and exit, the spawn
         // size lands in the size cache later reflows compare against, and the
         // terminal engine gives the child's output a grid to land in.
-        self.park_pane_pty(new_pane_id, handle, spawn_size);
+        self.park_pane_pty(new_pane_id, child_handle, new_tab_pty_size);
         // Announce the new pane's size — PaneCreated carries none.
-        events.push(Event::PtyResized(PtyResized {
+        emitted_events.push(Event::PtyResized(PtyResized {
             pane_id: new_pane_id,
-            size: spawn_size,
+            pty_size: new_tab_pty_size,
         }));
 
         // The client left its previous tab; if that tab still has a viewer,
         // reflow its live panes to the viewport it now sizes against. A tab
         // left with no viewer has no viewport and keeps its sizes.
-        if let Some(prev_tab) = prev_tab {
-            self.reflow_tab_if_viewed(backend.as_ref(), target.session_id, prev_tab, &mut events);
+        if let Some(previous_tab_id) = previous_tab_id {
+            self.reflow_tab_if_viewed(
+                pty_backend.as_ref(),
+                tab_target.session_id,
+                previous_tab_id,
+                &mut emitted_events,
+            );
         }
 
-        Ok(Self::commit_events(&mut self.event_bus, command_id, events))
+        Ok(Self::commit_events(
+            &mut self.event_bus,
+            command_id,
+            emitted_events,
+        ))
     }
 
     /// Handle [`Command::CloseTab`]: tear the tab and every pane in it out of
@@ -179,40 +205,41 @@ impl Server {
     pub(super) fn handle_close_tab(
         &mut self,
         command_id: CommandId,
-        source: &CommandSource,
-        args: &CloseTabArgs,
+        command_source: &CommandSource,
+        command_args: &CloseTabArgs,
     ) -> Result<CommandResult, Rejection> {
         // An owned handle on the shared backend. Each kill thread takes its own
         // clone of it, and no `&self` borrow crosses the commit below.
-        let backend = Arc::clone(self.pty_backend());
+        let pty_backend = Arc::clone(self.get_pty_backend());
 
-        let (tab_id, session) = self.acting_tab_session(args.tab, source)?;
-        let session_id = session.id;
-        let tab = session
+        let (tab_id, session) =
+            self.resolve_acting_tab_session(command_args.tab_id, command_source)?;
+        let session_id = session.session_id;
+        let target_tab_state = session
             .tabs
             .get(&tab_id)
-            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
-        let pane_ids = tab.layout().leaf_panes();
+            .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
+        let pane_ids = target_tab_state.get_layout_tree().list_leaf_pane_ids();
 
         // Pick how every child dies before anything mutates — all-or-nothing:
         // one busy `ConfirmIfBusy` pane rejects the whole tab.
-        let mut kills: Vec<(PaneId, KillPolicy)> = Vec::with_capacity(pane_ids.len());
+        let mut pane_kill_policies: Vec<(PaneId, KillPolicy)> = Vec::with_capacity(pane_ids.len());
         for &pane_id in &pane_ids {
-            let Some(record) = session.panes.get(pane_id) else {
+            let Some(pane_record) = session.panes.get_pane_record_by_id(pane_id) else {
                 continue;
             };
-            let kill_policy = Self::pick_kill_policy(
-                record,
-                args.force,
-                args.tree,
+            let kill_policy = Self::resolve_pane_kill_policy(
+                pane_record,
+                command_args.should_force_close,
+                command_args.should_kill_process_tree,
                 "a pane in the tab may be busy; pass --force to close anyway",
             )?;
-            kills.push((pane_id, kill_policy));
+            pane_kill_policies.push((pane_id, kill_policy));
         }
 
         // Commit the state removal: pane records drop, the tab goes, viewers
         // move to the nearest surviving tab, last-tab close quits the session.
-        let mut events = tab_ops::close_tab(session, tab_id);
+        let mut emitted_events = tab_ops::close_tab(session, tab_id);
 
         // The panes are gone from state; drop their runtime bookkeeping — PTY
         // handle, size cache, terminal engine, scroll offsets, and highlights. Keyed
@@ -224,17 +251,26 @@ impl Server {
         // Displaced viewers landed on the nearest surviving tab (the
         // cascade's `TabFocused`); its viewport now counts them, and it
         // reflows. A destination with no viewport keeps its sizes.
-        if let Some(destination) = tab_focused_in(&events) {
-            self.reflow_tab_if_viewed(backend.as_ref(), session_id, destination, &mut events);
+        if let Some(destination_tab_id) = find_first_focused_tab_id(&emitted_events) {
+            self.reflow_tab_if_viewed(
+                pty_backend.as_ref(),
+                session_id,
+                destination_tab_id,
+                &mut emitted_events,
+            );
         }
 
         // One thread per pane, so every child receives its stop request
         // immediately.
-        for (pane_id, kill_policy) in kills {
-            super::kill_off_thread(&backend, pane_id, kill_policy);
+        for (pane_id, kill_policy) in pane_kill_policies {
+            super::kill_off_thread(&pty_backend, pane_id, kill_policy);
         }
 
-        Ok(Self::commit_events(&mut self.event_bus, command_id, events))
+        Ok(Self::commit_events(
+            &mut self.event_bus,
+            command_id,
+            emitted_events,
+        ))
     }
 
     /// Handle [`Command::FocusTab`]: switch the designated client's view to
@@ -252,44 +288,54 @@ impl Server {
     pub(super) fn handle_focus_tab(
         &mut self,
         command_id: CommandId,
-        source: &CommandSource,
-        args: &FocusTabArgs,
+        command_source: &CommandSource,
+        command_args: &FocusTabArgs,
     ) -> Result<CommandResult, Rejection> {
-        let acting = self.acting_session(source)?;
-        let target = Self::resolve_focus_tab_target(args, source, acting)?;
+        let acting_session = self.acting_session(command_source)?;
+        let tab_target =
+            Self::resolve_focus_tab_target(command_args, command_source, acting_session)?;
 
-        let backend = Arc::clone(self.pty_backend());
+        let pty_backend = Arc::clone(self.get_pty_backend());
 
         let session = self
-            .sessions
-            .get_mut(&target.session_id)
-            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
+            .session_by_id
+            .get_mut(&tab_target.session_id)
+            .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
         let client = session
             .clients
-            .get(target.client_id)
-            .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))?;
-        let prior_tab = client.active_tab();
+            .get_client_by_id(tab_target.client_id)
+            .ok_or_else(|| Rejection::from_reason(RejectReason::SourceClientStale))?;
+        let prior_tab_id = client.get_active_tab();
 
         // Already viewing it — nothing to do, and no events: events are
         // completed facts.
-        if prior_tab == target.tab_id {
+        if prior_tab_id == tab_target.tab_id {
             return Ok(TransactionScope::new().commit(command_id, &mut self.event_bus));
         }
 
-        let mut events = tab_ops::focus_tab(
+        let mut emitted_events = tab_ops::focus_tab(
             session,
-            target.client_id,
-            tab_ops::TabTarget::Id(target.tab_id),
+            tab_target.client_id,
+            tab_ops::TabTarget::Id(tab_target.tab_id),
         );
 
         // Both tabs' viewer sets changed: the target tab gained the arriving
         // viewer, the left tab lost it. Reflow each that still has a viewer;
         // a tab with no viewer has no viewport and keeps its sizes.
-        for tab_id in [target.tab_id, prior_tab] {
-            self.reflow_tab_if_viewed(backend.as_ref(), target.session_id, tab_id, &mut events);
+        for tab_id in [tab_target.tab_id, prior_tab_id] {
+            self.reflow_tab_if_viewed(
+                pty_backend.as_ref(),
+                tab_target.session_id,
+                tab_id,
+                &mut emitted_events,
+            );
         }
 
-        Ok(Self::commit_events(&mut self.event_bus, command_id, events))
+        Ok(Self::commit_events(
+            &mut self.event_bus,
+            command_id,
+            emitted_events,
+        ))
     }
 
     /// Handle [`Command::MoveTab`]: reorder the target tab to a new display
@@ -305,13 +351,18 @@ impl Server {
     pub(super) fn handle_move_tab(
         &mut self,
         command_id: CommandId,
-        source: &CommandSource,
-        args: &MoveTabArgs,
+        command_source: &CommandSource,
+        command_args: &MoveTabArgs,
     ) -> Result<CommandResult, Rejection> {
-        let (tab_id, session) = self.acting_tab_session(args.tab, source)?;
+        let (tab_id, session) =
+            self.resolve_acting_tab_session(command_args.tab_id, command_source)?;
 
-        let events = tab_ops::move_tab(session, tab_id, args.index);
+        let emitted_events = tab_ops::move_tab(session, tab_id, command_args.target_tab_index);
 
-        Ok(Self::commit_events(&mut self.event_bus, command_id, events))
+        Ok(Self::commit_events(
+            &mut self.event_bus,
+            command_id,
+            emitted_events,
+        ))
     }
 }

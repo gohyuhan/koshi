@@ -11,15 +11,15 @@ use koshi_core::ids::PaneId;
 use thiserror::Error;
 
 use crate::size::SizeWeight;
-use crate::solver::{cell_area, shows_content, solve_with_min, PaneSizing};
-use crate::tree::{split_axis, LayoutNode, SplitNode};
+use crate::solver::{compute_cell_area, is_content_visible, solve_layout_with_sizing, PaneSizing};
+use crate::tree::{compute_split_direction, LayoutNode, SplitNode};
 
 /// A rejected split or stack edit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum SplitError {
     /// The pane to split next to, or to stack onto, is not in this layout.
-    #[error("pane {target} is not in this layout")]
-    PaneNotFound { target: PaneId },
+    #[error("pane {target_pane_id} is not in this layout")]
+    PaneNotFound { target_pane_id: PaneId },
 }
 
 impl DomainError for SplitError {
@@ -27,106 +27,112 @@ impl DomainError for SplitError {
         DomainCategory::Layout
     }
 
-    fn severity(&self) -> Severity {
+    fn get_severity(&self) -> Severity {
         Severity::Recoverable
     }
 }
 
-/// Split next to `target`, placing `new_pane` beside it.
+/// Split next to `target_pane_id`, placing `new_pane_id` beside it.
 ///
 /// The operand is replaced by a split of the operand and the new pane with
 /// equal weights. `direction` sets the split axis (`Left` and `Right` split
 /// horizontally, `Up` and `Down` vertically) and where the new pane lands:
 /// `Right` and `Down` put it after the operand, `Left` and `Up` before.
 ///
-/// When `target` sits inside a stack, the operand is the outermost stack on
-/// the path to `target`, kept whole. Otherwise the operand is the target's
+/// When `target_pane_id` sits inside a stack, the operand is the outermost stack on
+/// the path to `target_pane_id`, kept whole. Otherwise the operand is the target's
 /// leaf. The parent split keeps the operand's weight for the new split.
 ///
 /// # Errors
 ///
-/// [`SplitError::PaneNotFound`] when `target` has no leaf in `tree`; the
+/// [`SplitError::PaneNotFound`] when `target_pane_id` has no leaf in `layout_tree`; the
 /// caller's tree is unchanged.
 pub fn split_leaf(
-    tree: &LayoutNode,
-    target: PaneId,
-    new_pane: PaneId,
+    layout_tree: &LayoutNode,
+    target_pane_id: PaneId,
+    new_pane_id: PaneId,
     direction: Direction,
 ) -> Result<LayoutNode, SplitError> {
-    let path = tree
-        .path_to(target)
-        .ok_or(SplitError::PaneNotFound { target })?;
+    let pane_path = layout_tree
+        .find_pane_path(target_pane_id)
+        .ok_or(SplitError::PaneNotFound { target_pane_id })?;
     // Select the outermost stacked ancestor, or the target leaf when none exists.
-    let operand_depth = (0..path.len())
+    let operand_depth = (0..pane_path.len())
         .find(|&depth| {
             matches!(
-                tree.node_at(&path[..depth]),
+                layout_tree.get_node_at_path(&pane_path[..depth]),
                 LayoutNode::Split(split) if split.direction == SplitDirection::Stacked
             )
         })
-        .unwrap_or(path.len());
+        .unwrap_or(pane_path.len());
 
-    let mut result = tree.clone();
-    let slot = result.node_at_mut(&path[..operand_depth]);
-    let operand = std::mem::replace(slot, LayoutNode::Pane(new_pane));
+    let mut edited_tree = layout_tree.clone();
+    let target_node_slot = edited_tree.get_node_at_path_mut(&pane_path[..operand_depth]);
+    let existing_subtree = std::mem::replace(target_node_slot, LayoutNode::Pane(new_pane_id));
 
-    let existing = operand;
-    let new_node = LayoutNode::Pane(new_pane);
+    let new_pane_node = LayoutNode::Pane(new_pane_id);
     let children = match direction {
-        Direction::Right | Direction::Down => vec![existing, new_node],
-        Direction::Left | Direction::Up => vec![new_node, existing],
+        Direction::Right | Direction::Down => vec![existing_subtree, new_pane_node],
+        Direction::Left | Direction::Up => vec![new_pane_node, existing_subtree],
     };
-    *slot = LayoutNode::Split(SplitNode::with_equal_weights(
-        split_axis(direction),
+    *target_node_slot = LayoutNode::Split(SplitNode::with_equal_weights(
+        compute_split_direction(direction),
         children,
     ));
-    Ok(result)
+    Ok(edited_tree)
 }
 
-/// Stack `new_pane` onto `anchor`'s position.
+/// Stack `new_pane_id` onto `anchor_pane_id`'s position.
 ///
-/// If `anchor` already sits inside a stack, the new pane is appended as the
+/// If `anchor_pane_id` already sits inside a stack, the new pane is appended as the
 /// last member of the innermost stack holding it; otherwise the anchor's
-/// leaf becomes a two-member stack of `anchor` then `new_pane`. Either way
+/// leaf becomes a two-member stack of `anchor_pane_id` then `new_pane_id`. Either way
 /// the new pane is the active (expanded) member afterwards and every other
 /// member is collapsed.
 ///
 /// # Errors
 ///
-/// [`SplitError::PaneNotFound`] when `anchor` has no leaf in `tree`; the
+/// [`SplitError::PaneNotFound`] when `anchor_pane_id` has no leaf in `layout_tree`; the
 /// caller's tree is unchanged.
-pub fn add_to_stack(
-    tree: &LayoutNode,
-    anchor: PaneId,
-    new_pane: PaneId,
+pub fn add_pane_to_stack(
+    layout_tree: &LayoutNode,
+    anchor_pane_id: PaneId,
+    new_pane_id: PaneId,
 ) -> Result<LayoutNode, SplitError> {
-    if !tree.contains_pane(anchor) {
-        return Err(SplitError::PaneNotFound { target: anchor });
+    if !layout_tree.contains_pane(anchor_pane_id) {
+        return Err(SplitError::PaneNotFound {
+            target_pane_id: anchor_pane_id,
+        });
     }
 
-    let mut result = tree.clone();
-    if let Some(stack) = result.stack_containing_mut(anchor) {
-        stack.children.push(LayoutNode::Pane(new_pane));
+    let mut edited_tree = layout_tree.clone();
+    if let Some(stack) = edited_tree.find_containing_stack_mut(anchor_pane_id) {
+        stack.children.push(LayoutNode::Pane(new_pane_id));
         stack.weights.push(SizeWeight::default());
-        stack.active = stack.children.len() - 1;
+        stack.active_child_index = stack.children.len() - 1;
     } else {
-        let path = result.path_to(anchor).expect("presence checked above");
-        let slot = result.node_at_mut(&path);
-        *slot = LayoutNode::Split(SplitNode::stack(vec![anchor, new_pane], 1));
+        let pane_path = edited_tree
+            .find_pane_path(anchor_pane_id)
+            .expect("presence checked above");
+        let target_node_slot = edited_tree.get_node_at_path_mut(&pane_path);
+        *target_node_slot = LayoutNode::Split(SplitNode::from_stacked_pane_ids(
+            vec![anchor_pane_id, new_pane_id],
+            1,
+        ));
     }
-    Ok(result)
+    Ok(edited_tree)
 }
 
 /// A rejected removal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum RemoveError {
     /// The pane to remove is not in this layout.
-    #[error("pane {pane} is not in this layout")]
-    PaneNotFound { pane: PaneId },
+    #[error("pane {pane_id} is not in this layout")]
+    PaneNotFound { pane_id: PaneId },
     /// The pane to remove is the only pane in this layout; removing it would
     /// leave no layout at all.
-    #[error("pane {pane} is the last pane in this layout")]
-    LastPane { pane: PaneId },
+    #[error("pane {pane_id} is the last pane in this layout")]
+    LastPane { pane_id: PaneId },
 }
 
 impl DomainError for RemoveError {
@@ -134,7 +140,7 @@ impl DomainError for RemoveError {
         DomainCategory::Layout
     }
 
-    fn severity(&self) -> Severity {
+    fn get_severity(&self) -> Severity {
         Severity::Recoverable
     }
 }
@@ -142,20 +148,20 @@ impl DomainError for RemoveError {
 /// What a removal freed and who took it over. Callers use this to repair
 /// focus and to resize the PTYs that grew.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RemovalInfo {
+pub struct PaneRemovalOutcome {
     /// The rect the removed pane occupied before removal.
-    pub old_rect: Rect,
-    /// Panes whose new rects cover part of `old_rect`, largest absorbed
+    pub removed_pane_rect: Rect,
+    /// Panes whose new rects cover part of `removed_pane_rect`, largest absorbed
     /// area first (ties keep layout order), followed in layout order by
     /// panes that cover none of it but changed size. Removing a stack member
     /// regrows the active member in place without its rect touching the
     /// freed strip; that member is listed in the second group. Zero-area
     /// panes and collapsed stack members (whose rect is their one-row header
     /// strip) are never listed.
-    pub absorbed_by: Vec<PaneId>,
+    pub absorbing_pane_ids: Vec<PaneId>,
 }
 
-/// Remove the leaf holding `pane`; its space flows to the siblings on the
+/// Remove the leaf holding `pane_id`; its space flows to the siblings on the
 /// next solve.
 ///
 /// Splits emptied by the removal are pruned. A split left with a single
@@ -166,124 +172,140 @@ pub struct RemovalInfo {
 /// one-member stack; a stack left with none is pruned like any emptied
 /// split.
 ///
-/// `tab_rect` is the rect the tree solves into; the returned
-/// [`RemovalInfo`] geometry is measured in it. `sizing` is the caller's own
+/// `tab_rect` is the rect the layout tree solves into; the returned
+/// [`PaneRemovalOutcome`] geometry is measured in it. `sizing` is the caller's own
 /// [`PaneSizing`]; the before and after solves use it, so they agree with
 /// the caller's solve on which panes are suppressed and where each rect
 /// sits.
 ///
 /// # Errors
 ///
-/// - [`RemoveError::PaneNotFound`] when `pane` has no leaf in `tree`.
-/// - [`RemoveError::LastPane`] when `pane` is the only pane left, including
+/// - [`RemoveError::PaneNotFound`] when `pane_id` has no leaf in `layout_tree`.
+/// - [`RemoveError::LastPane`] when `pane_id` is the only pane left, including
 ///   when the tree's other children are splits holding no leaf.
 ///
-/// The caller's tree is unchanged in both cases.
+/// The caller's layout tree is unchanged in both cases.
 pub fn remove_pane(
-    tree: &LayoutNode,
+    layout_tree: &LayoutNode,
     tab_rect: Rect,
-    pane: PaneId,
+    pane_id: PaneId,
     sizing: PaneSizing,
-) -> Result<(LayoutNode, RemovalInfo), RemoveError> {
+) -> Result<(LayoutNode, PaneRemovalOutcome), RemoveError> {
     // The solve before the edit gives the rect the pane frees.
-    let before = solve_with_min(tree, tab_rect, sizing);
-    let Some(&(_, old_rect)) = before.panes.iter().find(|&&(id, _)| id == pane) else {
-        return Err(RemoveError::PaneNotFound { pane });
+    let before_layout = solve_layout_with_sizing(layout_tree, tab_rect, sizing);
+    let Some(&(_, removed_pane_rect)) = before_layout
+        .pane_rects
+        .iter()
+        .find(|&&(before_pane_id, _)| before_pane_id == pane_id)
+    else {
+        return Err(RemoveError::PaneNotFound { pane_id });
     };
 
-    let mut result = tree.clone();
-    match remove_leaf(&mut result, pane) {
-        Removal::NotHere => return Err(RemoveError::PaneNotFound { pane }),
-        Removal::NodeEmptied => return Err(RemoveError::LastPane { pane }),
-        Removal::Done => {}
+    let mut edited_tree = layout_tree.clone();
+    match remove_leaf(&mut edited_tree, pane_id) {
+        PaneRemovalStatus::PaneNotFound => return Err(RemoveError::PaneNotFound { pane_id }),
+        PaneRemovalStatus::SubtreeEmpty => return Err(RemoveError::LastPane { pane_id }),
+        PaneRemovalStatus::Removed => {}
     }
     // An empty leaf list means the removed pane was the last leaf, even when
     // empty splits remain.
-    if result.leaf_panes().is_empty() {
-        return Err(RemoveError::LastPane { pane });
+    if edited_tree.list_leaf_pane_ids().is_empty() {
+        return Err(RemoveError::LastPane { pane_id });
     }
 
     // Solve again after the edit and collect every surviving, visible pane
     // that either grew into the freed space or simply changed size.
-    let after = solve_with_min(&result, tab_rect, sizing);
-    let mut absorbers: Vec<(PaneId, u64)> = after
-        .panes
+    let after_layout = solve_layout_with_sizing(&edited_tree, tab_rect, sizing);
+    let mut affected_pane_area_pairs: Vec<(PaneId, u64)> = after_layout
+        .pane_rects
         .iter()
-        .filter(|&&(id, rect)| shows_content(id, rect, &after.stack_headers))
-        .filter_map(|&(id, rect)| {
-            let overlap = rect.intersection(old_rect).map_or(0, cell_area);
-            let resized = before
-                .panes
-                .iter()
-                .any(|&(before_id, before_rect)| before_id == id && before_rect.size != rect.size);
-            (overlap > 0 || resized).then_some((id, overlap))
+        .filter(|&&(pane_id, pane_rect)| {
+            is_content_visible(pane_id, pane_rect, &after_layout.stack_headers)
+        })
+        .filter_map(|&(pane_id, pane_rect)| {
+            let absorbed_cell_area = pane_rect
+                .compute_intersection(removed_pane_rect)
+                .map_or(0, compute_cell_area);
+            let is_resized =
+                before_layout
+                    .pane_rects
+                    .iter()
+                    .any(|&(before_pane_id, before_pane_rect)| {
+                        before_pane_id == pane_id
+                            && before_pane_rect.cell_size != pane_rect.cell_size
+                    });
+            (absorbed_cell_area > 0 || is_resized).then_some((pane_id, absorbed_cell_area))
         })
         .collect();
     // Largest absorbed area first; the stable sort keeps layout order among
     // equal areas, including the zero-overlap resizes.
-    absorbers.sort_by_key(|&(_, area)| std::cmp::Reverse(area));
+    affected_pane_area_pairs
+        .sort_by_key(|&(_, absorbed_cell_area)| std::cmp::Reverse(absorbed_cell_area));
 
     Ok((
-        result,
-        RemovalInfo {
-            old_rect,
-            absorbed_by: absorbers.into_iter().map(|(id, _)| id).collect(),
+        edited_tree,
+        PaneRemovalOutcome {
+            removed_pane_rect,
+            absorbing_pane_ids: affected_pane_area_pairs
+                .into_iter()
+                .map(|(pane_id, _)| pane_id)
+                .collect(),
         },
     ))
 }
 
 /// What happened below while looking for the leaf to remove.
-enum Removal {
+enum PaneRemovalStatus {
     /// The pane is not in this subtree.
-    NotHere,
+    PaneNotFound,
     /// Removed; the subtree is still alive.
-    Done,
+    Removed,
     /// Removed, and this whole node is now empty — the parent must drop it.
-    NodeEmptied,
+    SubtreeEmpty,
 }
 
-/// Walks `node` depth-first for the leaf holding `pane` and drops it, along
-/// with every split the drop empties below `node`. Returns
-/// [`Removal::NodeEmptied`] when `node` itself is left with no child.
-fn remove_leaf(node: &mut LayoutNode, pane: PaneId) -> Removal {
-    let LayoutNode::Split(split) = node else {
-        return if *node == LayoutNode::Pane(pane) {
-            Removal::NodeEmptied
+/// Walks `layout_node` depth-first for the leaf holding `pane_id` and drops it, along
+/// with every split the drop empties below `layout_node`. Returns
+/// [`PaneRemovalStatus::SubtreeEmpty`] when `layout_node` itself is left with no child.
+fn remove_leaf(layout_node: &mut LayoutNode, pane_id: PaneId) -> PaneRemovalStatus {
+    let LayoutNode::Split(split_node) = layout_node else {
+        return if *layout_node == LayoutNode::Pane(pane_id) {
+            PaneRemovalStatus::SubtreeEmpty
         } else {
-            Removal::NotHere
+            PaneRemovalStatus::PaneNotFound
         };
     };
 
-    for index in 0..split.children.len() {
-        match remove_leaf(&mut split.children[index], pane) {
-            Removal::NotHere => continue,
-            Removal::Done => return Removal::Done,
-            Removal::NodeEmptied => {
+    for child_index in 0..split_node.children.len() {
+        match remove_leaf(&mut split_node.children[child_index], pane_id) {
+            PaneRemovalStatus::PaneNotFound => continue,
+            PaneRemovalStatus::Removed => return PaneRemovalStatus::Removed,
+            PaneRemovalStatus::SubtreeEmpty => {
                 // That child's subtree lost its last pane: drop the child
                 // and its weight, then repair this split's active slot.
-                split.children.remove(index);
-                if index < split.weights.len() {
-                    split.weights.remove(index);
+                split_node.children.remove(child_index);
+                if child_index < split_node.weights.len() {
+                    split_node.weights.remove(child_index);
                 }
-                if split.children.is_empty() {
-                    return Removal::NodeEmptied;
+                if split_node.children.is_empty() {
+                    return PaneRemovalStatus::SubtreeEmpty;
                 }
-                reseat_active(split, index);
-                return Removal::Done;
+                set_active_child_after_removal(split_node, child_index);
+                return PaneRemovalStatus::Removed;
             }
         }
     }
-    Removal::NotHere
+    PaneRemovalStatus::PaneNotFound
 }
 
-/// Keep `active` pointing at the same child after the child at
-/// `removed_index` is gone, clamped into bounds: removing the active child
+/// Keep the active child index pointing at the same child after the child at
+/// `removed_child_index` is gone, clamped into bounds: removing the active child
 /// activates the one that slid into its place.
-fn reseat_active(split: &mut SplitNode, removed_index: usize) {
-    if removed_index < split.active {
-        split.active -= 1;
+fn set_active_child_after_removal(split_node: &mut SplitNode, removed_child_index: usize) {
+    if removed_child_index < split_node.active_child_index {
+        split_node.active_child_index -= 1;
     }
-    split.active = split.active_index();
+    split_node.active_child_index = split_node.get_active_child_index();
 }
 
 #[cfg(test)]

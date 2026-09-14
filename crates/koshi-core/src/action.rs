@@ -7,9 +7,9 @@
 //!
 //! The action set is open. Built-in actions live in the `core:` namespace,
 //! plugins own `plugin:<id>:*`, and `user:` is reserved for user-defined
-//! macros. This file holds the primitives — [`ActionRef`], [`ActionNamespace`],
-//! [`ActionMetadata`], [`ActionHandlerRef`], and the static
-//! [`core_action_seeds`] table. The mutable runtime table that loads those seeds
+//! macros. This file holds the primitives — [`ActionReference`], [`ActionNamespace`],
+//! [`ActionMetadata`], [`ActionHandlerReference`], and the static
+//! [`build_core_action_seeds`] table. The mutable runtime table that loads those seeds
 //! and accepts plugin registrations is
 //! [`ActionRegistry`](crate::registry::ActionRegistry).
 
@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 /// The maximum length of an [`ActionName`], from the grammar
 /// `^[a-z][a-z0-9-]{0,30}$` (1 leading letter + up to 30 trailing chars).
-const MAX_ACTION_NAME_LEN: usize = 31;
+const MAX_ACTION_NAME_CHARACTER_COUNT: usize = 31;
 
 /// Why a string is not a valid [`ActionName`].
 ///
@@ -33,20 +33,20 @@ const MAX_ACTION_NAME_LEN: usize = 31;
 pub enum ActionNameError {
     /// The name was empty.
     Empty,
-    /// The name exceeded `MAX_ACTION_NAME_LEN` characters.
+    /// The name exceeded `MAX_ACTION_NAME_CHARACTER_COUNT` characters.
     TooLong {
         /// The offending length.
-        len: usize,
+        character_count: usize,
     },
     /// The first character was not an ASCII lowercase letter.
     InvalidStart {
         /// The offending leading character.
-        ch: char,
+        invalid_character: char,
     },
     /// A character after the first was outside `[a-z0-9-]`.
     InvalidChar {
         /// The offending character.
-        ch: char,
+        invalid_character: char,
     },
 }
 
@@ -54,16 +54,19 @@ impl fmt::Display for ActionNameError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ActionNameError::Empty => f.write_str("action name is empty"),
-            ActionNameError::TooLong { len } => write!(
+            ActionNameError::TooLong { character_count } => write!(
                 f,
-                "action name is {len} chars; the maximum is {MAX_ACTION_NAME_LEN}"
+                "action name is {character_count} chars; the maximum is {MAX_ACTION_NAME_CHARACTER_COUNT}"
             ),
-            ActionNameError::InvalidStart { ch } => write!(
+            ActionNameError::InvalidStart { invalid_character } => write!(
                 f,
-                "action name must start with a lowercase letter, found {ch:?}"
+                "action name must start with a lowercase letter, found {invalid_character:?}"
             ),
-            ActionNameError::InvalidChar { ch } => {
-                write!(f, "action name may only contain [a-z0-9-], found {ch:?}")
+            ActionNameError::InvalidChar { invalid_character } => {
+                write!(
+                    f,
+                    "action name may only contain [a-z0-9-], found {invalid_character:?}"
+                )
             }
         }
     }
@@ -74,43 +77,47 @@ impl std::error::Error for ActionNameError {}
 /// The local name of an action within its namespace, validated against
 /// `^[a-z][a-z0-9-]{0,30}$`.
 ///
-/// [`ActionName::new`] and deserialization (via [`TryFrom<String>`]) both run
-/// the grammar check: a name decoded from a config file, the IPC socket, or a
-/// plugin is always valid.
+/// [`ActionName::parse_action_name`] and deserialization (via
+/// [`TryFrom<String>`]) both run the grammar check: a name decoded from a
+/// config file, the IPC socket, or a plugin is always valid.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct ActionName(String);
 
 impl ActionName {
-    /// Validate `name` against the action-name grammar.
+    /// Parse and validate `action_name` against the action-name grammar.
     ///
     /// # Errors
     /// Returns an [`ActionNameError`] describing the first rule the input
     /// violates.
-    pub fn new(name: &str) -> Result<Self, ActionNameError> {
-        let mut chars = name.chars();
-        let first = chars.next().ok_or(ActionNameError::Empty)?;
-        if !first.is_ascii_lowercase() {
-            return Err(ActionNameError::InvalidStart { ch: first });
+    pub fn parse_action_name(action_name: &str) -> Result<Self, ActionNameError> {
+        let mut remaining_characters = action_name.chars();
+        let first_character = remaining_characters.next().ok_or(ActionNameError::Empty)?;
+        if !first_character.is_ascii_lowercase() {
+            return Err(ActionNameError::InvalidStart {
+                invalid_character: first_character,
+            });
         }
         // Every character after the first must be a lowercase letter, digit, or hyphen.
-        for ch in chars {
-            if !(ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-') {
-                return Err(ActionNameError::InvalidChar { ch });
+        for character in remaining_characters {
+            if !(character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-') {
+                return Err(ActionNameError::InvalidChar {
+                    invalid_character: character,
+                });
             }
         }
         // The length check runs after the charset scan: a name that is both
         // over-long and holds a bad character reports the bad character.
-        let len = name.chars().count();
-        if len > MAX_ACTION_NAME_LEN {
-            return Err(ActionNameError::TooLong { len });
+        let character_count = action_name.chars().count();
+        if character_count > MAX_ACTION_NAME_CHARACTER_COUNT {
+            return Err(ActionNameError::TooLong { character_count });
         }
-        Ok(ActionName(name.to_string()))
+        Ok(ActionName(action_name.to_string()))
     }
 
     /// Borrow the validated name.
     #[must_use]
-    pub fn as_str(&self) -> &str {
+    pub fn get_name(&self) -> &str {
         &self.0
     }
 }
@@ -118,14 +125,14 @@ impl ActionName {
 impl TryFrom<String> for ActionName {
     type Error = ActionNameError;
 
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        ActionName::new(&value)
+    fn try_from(action_name: String) -> Result<Self, Self::Error> {
+        ActionName::parse_action_name(&action_name)
     }
 }
 
 impl From<ActionName> for String {
-    fn from(name: ActionName) -> Self {
-        name.0
+    fn from(action_name: ActionName) -> Self {
+        action_name.0
     }
 }
 
@@ -156,144 +163,159 @@ pub enum ActionNamespace {
 /// entry `"<C-p>n" action="core:new-pane"` decodes to exactly this type.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct ActionRef {
+pub struct ActionReference {
     /// The namespace that owns the action.
     pub namespace: ActionNamespace,
     /// The local name within the namespace.
-    pub name: ActionName,
+    pub action_name: ActionName,
 }
 
-impl ActionRef {
-    /// Reference a built-in `core:` action.
+impl ActionReference {
+    /// Build a reference to a built-in `core:` action.
     ///
     /// # Errors
-    /// Returns an [`ActionNameError`] if `name` violates the grammar.
-    pub fn core(name: &str) -> Result<Self, ActionNameError> {
-        Ok(ActionRef {
+    /// Returns an [`ActionNameError`] if `action_name` violates the grammar.
+    pub fn from_core_action_name(action_name: &str) -> Result<Self, ActionNameError> {
+        Ok(ActionReference {
             namespace: ActionNamespace::Core,
-            name: ActionName::new(name)?,
+            action_name: ActionName::parse_action_name(action_name)?,
         })
     }
 
-    /// Reference an action owned by `plugin`.
+    /// Build a reference to an action owned by `plugin_id`.
     ///
     /// # Errors
-    /// Returns an [`ActionNameError`] if `name` violates the grammar.
-    pub fn plugin(plugin: PluginId, name: &str) -> Result<Self, ActionNameError> {
-        Ok(ActionRef {
-            namespace: ActionNamespace::Plugin(plugin),
-            name: ActionName::new(name)?,
+    /// Returns an [`ActionNameError`] if `action_name` violates the grammar.
+    pub fn from_plugin_action_name(
+        plugin_id: PluginId,
+        action_name: &str,
+    ) -> Result<Self, ActionNameError> {
+        Ok(ActionReference {
+            namespace: ActionNamespace::Plugin(plugin_id),
+            action_name: ActionName::parse_action_name(action_name)?,
         })
     }
 
-    /// Reference a `user:` macro action.
+    /// Build a reference to a `user:` macro action.
     ///
     /// # Errors
-    /// Returns an [`ActionNameError`] if `name` violates the grammar.
-    pub fn user(name: &str) -> Result<Self, ActionNameError> {
-        Ok(ActionRef {
+    /// Returns an [`ActionNameError`] if `action_name` violates the grammar.
+    pub fn from_user_action_name(action_name: &str) -> Result<Self, ActionNameError> {
+        Ok(ActionReference {
             namespace: ActionNamespace::User,
-            name: ActionName::new(name)?,
+            action_name: ActionName::parse_action_name(action_name)?,
         })
     }
 }
 
-impl fmt::Display for ActionRef {
+impl fmt::Display for ActionReference {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.namespace {
-            ActionNamespace::Core => write!(f, "core:{}", self.name),
-            ActionNamespace::Plugin(id) => write!(f, "plugin:{}:{}", id.as_uuid(), self.name),
-            ActionNamespace::User => write!(f, "user:{}", self.name),
+            ActionNamespace::Core => write!(f, "core:{}", self.action_name),
+            ActionNamespace::Plugin(plugin_id) => {
+                write!(f, "plugin:{}:{}", plugin_id.get_uuid(), self.action_name)
+            }
+            ActionNamespace::User => write!(f, "user:{}", self.action_name),
         }
     }
 }
 
-/// Why a string is not a valid [`ActionRef`].
+/// Why a string is not a valid [`ActionReference`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ActionRefParseError {
+pub enum ActionReferenceParseError {
     /// No `namespace:` prefix was present.
     MissingNamespace,
     /// The namespace prefix was not one of `core`, `plugin`, or `user`.
     UnknownNamespace {
         /// The unrecognized prefix.
-        found: String,
+        unknown_namespace: String,
     },
     /// A `plugin:` reference was missing the `:<name>` after its id.
     MissingPluginName,
     /// A `plugin:` reference's id was not a valid UUID.
     InvalidPluginId,
     /// The local name failed the action-name grammar.
-    Name(ActionNameError),
+    InvalidActionName(ActionNameError),
 }
 
-impl fmt::Display for ActionRefParseError {
+impl fmt::Display for ActionReferenceParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ActionRefParseError::MissingNamespace => {
-                f.write_str("action ref is missing a 'namespace:' prefix")
+            ActionReferenceParseError::MissingNamespace => {
+                f.write_str("action reference is missing a 'namespace:' prefix")
             }
-            ActionRefParseError::UnknownNamespace { found } => write!(
+            ActionReferenceParseError::UnknownNamespace { unknown_namespace } => write!(
                 f,
-                "unknown action namespace {found:?}; expected core, plugin, or user"
+                "unknown action namespace {unknown_namespace:?}; expected core, plugin, or user"
             ),
-            ActionRefParseError::MissingPluginName => {
-                f.write_str("plugin action ref must be 'plugin:<uuid>:<name>'")
+            ActionReferenceParseError::MissingPluginName => {
+                f.write_str("plugin action reference must be 'plugin:<uuid>:<name>'")
             }
-            ActionRefParseError::InvalidPluginId => {
-                f.write_str("plugin action ref has an invalid UUID")
+            ActionReferenceParseError::InvalidPluginId => {
+                f.write_str("plugin action reference has an invalid UUID")
             }
-            ActionRefParseError::Name(err) => write!(f, "{err}"),
+            ActionReferenceParseError::InvalidActionName(action_name_error) => {
+                write!(f, "{action_name_error}")
+            }
         }
     }
 }
 
-impl std::error::Error for ActionRefParseError {
+impl std::error::Error for ActionReferenceParseError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            ActionRefParseError::Name(err) => Some(err),
+            ActionReferenceParseError::InvalidActionName(action_name_error) => {
+                Some(action_name_error)
+            }
             _ => None,
         }
     }
 }
 
-impl FromStr for ActionRef {
-    type Err = ActionRefParseError;
+impl FromStr for ActionReference {
+    type Err = ActionReferenceParseError;
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
+    fn from_str(action_reference_text: &str) -> Result<Self, Self::Err> {
         // Split off the "core"/"user"/"plugin" prefix from everything after its colon.
-        let (namespace, rest) = s
+        let (namespace, reference_tail) = action_reference_text
             .split_once(':')
-            .ok_or(ActionRefParseError::MissingNamespace)?;
+            .ok_or(ActionReferenceParseError::MissingNamespace)?;
         match namespace {
-            "core" => ActionRef::core(rest).map_err(ActionRefParseError::Name),
-            "user" => ActionRef::user(rest).map_err(ActionRefParseError::Name),
+            "core" => ActionReference::from_core_action_name(reference_tail)
+                .map_err(ActionReferenceParseError::InvalidActionName),
+            "user" => ActionReference::from_user_action_name(reference_tail)
+                .map_err(ActionReferenceParseError::InvalidActionName),
             "plugin" => {
-                // A plugin ref has one more segment than core/user: "<uuid>:<name>".
-                let (id, name) = rest
+                // A plugin reference has one more segment than core/user: "<uuid>:<name>".
+                let (plugin_id_text, action_name) = reference_tail
                     .split_once(':')
-                    .ok_or(ActionRefParseError::MissingPluginName)?;
-                let uuid = Uuid::parse_str(id).map_err(|_| ActionRefParseError::InvalidPluginId)?;
-                ActionRef::plugin(PluginId::from_uuid(uuid), name)
-                    .map_err(ActionRefParseError::Name)
+                    .ok_or(ActionReferenceParseError::MissingPluginName)?;
+                let plugin_uuid = Uuid::parse_str(plugin_id_text)
+                    .map_err(|_| ActionReferenceParseError::InvalidPluginId)?;
+                ActionReference::from_plugin_action_name(
+                    PluginId::from_uuid(plugin_uuid),
+                    action_name,
+                )
+                .map_err(ActionReferenceParseError::InvalidActionName)
             }
-            found => Err(ActionRefParseError::UnknownNamespace {
-                found: found.to_string(),
+            unknown_namespace => Err(ActionReferenceParseError::UnknownNamespace {
+                unknown_namespace: unknown_namespace.to_string(),
             }),
         }
     }
 }
 
-impl TryFrom<String> for ActionRef {
-    type Error = ActionRefParseError;
+impl TryFrom<String> for ActionReference {
+    type Error = ActionReferenceParseError;
 
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        value.parse()
+    fn try_from(action_reference_text: String) -> Result<Self, Self::Error> {
+        action_reference_text.parse()
     }
 }
 
-impl From<ActionRef> for String {
-    fn from(action: ActionRef) -> Self {
-        action.to_string()
+impl From<ActionReference> for String {
+    fn from(action_reference: ActionReference) -> Self {
+        action_reference.to_string()
     }
 }
 
@@ -311,7 +333,7 @@ pub enum ActionScope {
     Global,
 }
 
-/// A kind of entity an action can target. [`ActionMetadata::target_compat`]
+/// A kind of entity an action can target. [`ActionMetadata::target_kinds`]
 /// lists the kinds an action accepts; `koshi actions explain` prints them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TargetKind {
@@ -341,21 +363,21 @@ pub enum ActionStatus {
 
 /// How an action is dispatched once it fires.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ActionHandlerRef {
+pub enum ActionHandlerReference {
     /// Build and dispatch the named core [`Command`](crate::command::Command).
     CoreCommand(CommandKind),
     /// Route to a plugin via a host command request.
     PluginHostCall(PluginId),
     /// Fire a sequence of actions in order (a macro); halts on first failure.
-    Sequence(Vec<ActionRef>),
+    Sequence(Vec<ActionReference>),
 }
 
 /// Everything the registry knows about one action: how to show it, what it can
 /// target, and how to dispatch it.
 ///
-/// `namespace` repeats the owning [`ActionRef`]'s namespace, so metadata handed
+/// `namespace` repeats the owning [`ActionReference`]'s namespace, so metadata handed
 /// out on its own still names its owner.
-/// [`ActionRegistry::register`](crate::registry::ActionRegistry::register)
+/// [`ActionRegistry::register_action`](crate::registry::ActionRegistry::register_action)
 /// refuses an entry whose two namespaces disagree.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionMetadata {
@@ -366,48 +388,51 @@ pub struct ActionMetadata {
     /// One-line description for `describe`/which-key output.
     pub description: String,
     /// How broad the action's effect is.
-    pub scope_class: ActionScope,
+    #[serde(rename = "scope_class")]
+    pub scope: ActionScope,
     /// Entity kinds the action can target.
-    pub target_compat: Vec<TargetKind>,
+    #[serde(rename = "target_compat")]
+    pub target_kinds: Vec<TargetKind>,
     /// How the action is dispatched.
-    pub handler: ActionHandlerRef,
+    pub handler: ActionHandlerReference,
     /// Whether the runtime implements the action.
-    pub status: ActionStatus,
+    #[serde(rename = "status")]
+    pub action_status: ActionStatus,
     /// Whether the action repeats from a held prefix: fired from a
     /// multi-chord binding, the binding's prefix stays armed and the next
     /// chord alone fires again (`<C-s> h h h` resizes three times). Declared
     /// per action here, never in a binding. Absent on the wire means `false`.
-    #[serde(default)]
-    pub continuous: bool,
+    #[serde(default, rename = "continuous")]
+    pub is_continuous: bool,
 }
 
 /// Build one `core:` seed entry, with `namespace` set to
-/// [`ActionNamespace::Core`] and `continuous` `false`.
+/// [`ActionNamespace::Core`] and `is_continuous` `false`.
 ///
 /// # Panics
 /// Panics if `name` violates the action-name grammar.
-fn core_seed(
-    name: &'static str,
+fn build_core_action_seed(
+    action_name: &'static str,
     display_name: &str,
     description: &str,
-    scope_class: ActionScope,
-    target_compat: Vec<TargetKind>,
-    handler: ActionHandlerRef,
-    status: ActionStatus,
-) -> (ActionRef, ActionMetadata) {
-    let action =
-        ActionRef::core(name).expect("core seed action name must satisfy the action-name grammar");
+    scope: ActionScope,
+    target_kinds: Vec<TargetKind>,
+    handler: ActionHandlerReference,
+    action_status: ActionStatus,
+) -> (ActionReference, ActionMetadata) {
+    let action_reference = ActionReference::from_core_action_name(action_name)
+        .expect("core seed action name must satisfy the action-name grammar");
     let metadata = ActionMetadata {
         namespace: ActionNamespace::Core,
         display_name: display_name.to_string(),
         description: description.to_string(),
-        scope_class,
-        target_compat,
+        scope,
+        target_kinds,
         handler,
-        status,
-        continuous: false,
+        action_status,
+        is_continuous: false,
     };
-    (action, metadata)
+    (action_reference, metadata)
 }
 
 /// The hint-bar label for `core:mouse-select` while the mode is **off**, and
@@ -433,15 +458,15 @@ pub const MOUSE_UNSELECT_HINT: &str = "Mouse Unselect";
 /// other action is `Available`. The `resize-pane*` and `focus-pane*` actions
 /// are `continuous`; every other action is not.
 #[must_use]
-pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
-    use ActionHandlerRef::CoreCommand;
+pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
+    use ActionHandlerReference::CoreCommand;
     use ActionScope::{Client, Global, PaneSession, Tab};
     use ActionStatus::{Available, ComingSoon};
     use TargetKind::{Client as ClientTarget, Pane, Session, Tab as TabTarget};
 
-    let mut seeds = vec![
+    let mut action_seeds = vec![
         // --- Panes ---
-        core_seed(
+        build_core_action_seed(
             "new-pane",
             "New Pane",
             "Split the focused pane and start a shell in the new one",
@@ -450,7 +475,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             CoreCommand(CommandKind::NewPane),
             Available,
         ),
-        core_seed(
+        build_core_action_seed(
             "new-pane-left",
             "New Pane Left",
             "Split the focused pane and open the new one on the left",
@@ -459,7 +484,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             CoreCommand(CommandKind::NewPane),
             Available,
         ),
-        core_seed(
+        build_core_action_seed(
             "new-pane-down",
             "New Pane Down",
             "Split the focused pane and open the new one below",
@@ -468,7 +493,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             CoreCommand(CommandKind::NewPane),
             Available,
         ),
-        core_seed(
+        build_core_action_seed(
             "new-pane-up",
             "New Pane Up",
             "Split the focused pane and open the new one above",
@@ -477,7 +502,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             CoreCommand(CommandKind::NewPane),
             Available,
         ),
-        core_seed(
+        build_core_action_seed(
             "new-pane-right",
             "New Pane Right",
             "Split the focused pane and open the new one on the right",
@@ -486,7 +511,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             CoreCommand(CommandKind::NewPane),
             Available,
         ),
-        core_seed(
+        build_core_action_seed(
             "new-pane-stacked",
             "New Stacked Pane",
             "Add a new pane to the focused pane's stack, sharing its space",
@@ -495,7 +520,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             CoreCommand(CommandKind::NewPane),
             Available,
         ),
-        core_seed(
+        build_core_action_seed(
             "close-pane",
             "Close Pane",
             "Close the focused pane",
@@ -504,7 +529,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             CoreCommand(CommandKind::ClosePane),
             Available,
         ),
-        core_seed(
+        build_core_action_seed(
             "close-pane-tree",
             "Close Pane Tree",
             "Close the focused pane and kill every process it started",
@@ -513,7 +538,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             CoreCommand(CommandKind::ClosePane),
             Available,
         ),
-        core_seed(
+        build_core_action_seed(
             "resize-pane",
             "Resize Pane",
             "Grow or shrink the focused pane along one edge",
@@ -522,7 +547,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             CoreCommand(CommandKind::ResizePane),
             Available,
         ),
-        core_seed(
+        build_core_action_seed(
             "resize-pane-left",
             "Resize Pane Left",
             "Move the focused pane's border one cell to the left",
@@ -531,7 +556,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             CoreCommand(CommandKind::ResizePane),
             Available,
         ),
-        core_seed(
+        build_core_action_seed(
             "resize-pane-down",
             "Resize Pane Down",
             "Move the focused pane's border one cell down",
@@ -540,7 +565,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             CoreCommand(CommandKind::ResizePane),
             Available,
         ),
-        core_seed(
+        build_core_action_seed(
             "resize-pane-up",
             "Resize Pane Up",
             "Move the focused pane's border one cell up",
@@ -549,7 +574,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             CoreCommand(CommandKind::ResizePane),
             Available,
         ),
-        core_seed(
+        build_core_action_seed(
             "resize-pane-right",
             "Resize Pane Right",
             "Move the focused pane's border one cell to the right",
@@ -558,7 +583,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             CoreCommand(CommandKind::ResizePane),
             Available,
         ),
-        core_seed(
+        build_core_action_seed(
             "focus-pane",
             "Focus Pane",
             "Move the issuing client's focus to a pane",
@@ -567,7 +592,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             CoreCommand(CommandKind::FocusPane),
             Available,
         ),
-        core_seed(
+        build_core_action_seed(
             "focus-pane-left",
             "Focus Pane Left",
             "Move the issuing client's focus to the pane on the left",
@@ -576,7 +601,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             CoreCommand(CommandKind::FocusPane),
             Available,
         ),
-        core_seed(
+        build_core_action_seed(
             "focus-pane-down",
             "Focus Pane Down",
             "Move the issuing client's focus to the pane below",
@@ -585,7 +610,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             CoreCommand(CommandKind::FocusPane),
             Available,
         ),
-        core_seed(
+        build_core_action_seed(
             "focus-pane-up",
             "Focus Pane Up",
             "Move the issuing client's focus to the pane above",
@@ -594,7 +619,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             CoreCommand(CommandKind::FocusPane),
             Available,
         ),
-        core_seed(
+        build_core_action_seed(
             "focus-pane-right",
             "Focus Pane Right",
             "Move the issuing client's focus to the pane on the right",
@@ -603,7 +628,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             CoreCommand(CommandKind::FocusPane),
             Available,
         ),
-        core_seed(
+        build_core_action_seed(
             "toggle-pane-fullscreen",
             "Toggle Pane Fullscreen",
             "Toggle fullscreen for the focused pane",
@@ -612,7 +637,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             CoreCommand(CommandKind::TogglePaneFullscreen),
             Available,
         ),
-        core_seed(
+        build_core_action_seed(
             "write-to-pane",
             "Write To Pane",
             "Send text to a pane's shell, as if it had been typed there",
@@ -622,7 +647,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Available,
         ),
         // --- Tabs ---
-        core_seed(
+        build_core_action_seed(
             "new-tab",
             "New Tab",
             "Create a new tab",
@@ -631,7 +656,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             CoreCommand(CommandKind::NewTab),
             Available,
         ),
-        core_seed(
+        build_core_action_seed(
             "close-tab",
             "Close Tab",
             "Close the focused tab",
@@ -640,7 +665,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             CoreCommand(CommandKind::CloseTab),
             Available,
         ),
-        core_seed(
+        build_core_action_seed(
             "focus-tab",
             "Focus Tab",
             "Switch the issuing client's view to a specific tab",
@@ -649,7 +674,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             CoreCommand(CommandKind::FocusTab),
             Available,
         ),
-        core_seed(
+        build_core_action_seed(
             "next-tab",
             "Next Tab",
             "Switch the issuing client's view to the next tab",
@@ -658,7 +683,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             CoreCommand(CommandKind::FocusTab),
             Available,
         ),
-        core_seed(
+        build_core_action_seed(
             "previous-tab",
             "Previous Tab",
             "Switch the issuing client's view to the previous tab",
@@ -667,7 +692,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             CoreCommand(CommandKind::FocusTab),
             Available,
         ),
-        core_seed(
+        build_core_action_seed(
             "move-tab",
             "Move Tab",
             "Move the focused tab to a new index",
@@ -677,7 +702,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Available,
         ),
         // --- Session ---
-        core_seed(
+        build_core_action_seed(
             "quit",
             "Quit",
             "Leave the session, ending it when auto-close-session is on and no other client stays",
@@ -687,7 +712,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Available,
         ),
         // --- Lock mode ---
-        core_seed(
+        build_core_action_seed(
             "toggle-lock",
             "Toggle Lock",
             "Toggle pass-through lock mode for the issuing client",
@@ -696,7 +721,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             CoreCommand(CommandKind::ToggleLockMode),
             Available,
         ),
-        core_seed(
+        build_core_action_seed(
             "lock",
             "Lock",
             "Enable pass-through lock mode for the issuing client",
@@ -705,7 +730,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             CoreCommand(CommandKind::SetLockMode),
             Available,
         ),
-        core_seed(
+        build_core_action_seed(
             "unlock",
             "Unlock",
             "Disable pass-through lock mode for the issuing client",
@@ -715,7 +740,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Available,
         ),
         // --- Mouse select ---
-        core_seed(
+        build_core_action_seed(
             "mouse-select",
             MOUSE_SELECT_HINT,
             "Toggle grabbing the mouse for text selection, so a drag highlights \
@@ -726,7 +751,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Available,
         ),
         // --- Run ---
-        core_seed(
+        build_core_action_seed(
             "run",
             "Run Command",
             "Spawn a command in a new pane",
@@ -744,7 +769,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
     // dropping it (a click, or any input reaching the pane's program) have no
     // action name. The mouse layer issues `SetSelection` and `ClearSelection`
     // directly.
-    seeds.push(core_seed(
+    action_seeds.push(build_core_action_seed(
         "copy-selection",
         "Copy Selection",
         "Copy the highlighted text to a clipboard target",
@@ -755,7 +780,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
     ));
 
     // --- Plugin lifecycle --- (all: Global scope, no targets, Plugin command, ComingSoon)
-    let plugin_seeds = [
+    let plugin_action_seeds = [
         (
             "plugin-install",
             "Install Plugin",
@@ -783,24 +808,26 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
         ),
         ("plugin-reload", "Reload Plugin", "Reload a plugin in place"),
     ];
-    seeds.extend(plugin_seeds.map(|(name, display_name, description)| {
-        core_seed(
-            name,
-            display_name,
-            description,
-            Global,
-            vec![],
-            CoreCommand(CommandKind::Plugin),
-            ComingSoon,
-        )
-    }));
+    action_seeds.extend(
+        plugin_action_seeds.map(|(action_name, display_name, description)| {
+            build_core_action_seed(
+                action_name,
+                display_name,
+                description,
+                Global,
+                vec![],
+                CoreCommand(CommandKind::Plugin),
+                ComingSoon,
+            )
+        }),
+    );
 
     // Repeat-from-prefix actions: fired from a multi-chord binding, the
     // prefix stays armed and the next chord alone fires again (`<C-s> h h h`,
     // `<C-p> ← ← ←`).
-    for (action, metadata) in &mut seeds {
+    for (action_reference, action_metadata) in &mut action_seeds {
         if matches!(
-            action.name.as_str(),
+            action_reference.action_name.get_name(),
             "resize-pane"
                 | "resize-pane-left"
                 | "resize-pane-down"
@@ -812,11 +839,11 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
                 | "focus-pane-up"
                 | "focus-pane-right"
         ) {
-            metadata.continuous = true;
+            action_metadata.is_continuous = true;
         }
     }
 
-    seeds
+    action_seeds
 }
 
 #[cfg(test)]

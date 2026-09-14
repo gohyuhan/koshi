@@ -4,7 +4,7 @@
 //! `Server::dispatch` — reached from outside the crate through
 //! [`Server::submit_command`] — validates one [`CommandEnvelope`] against live
 //! state, then routes it via an exhaustive `match` on [`Command`] — one arm per
-//! variant. Validation runs first: a command whose source may not issue it, or
+//! variant. Validation runs first: a command whose command source may not issue it, or
 //! whose target does not resolve, is rejected before any handler runs. A
 //! command with no handler rejects with [`RejectReason::InvalidState`] and a
 //! hint naming it. The match is exhaustive, so every `Command` variant has an
@@ -23,13 +23,13 @@ use std::thread;
 use std::time::SystemTime;
 
 use crate::runtime::{
-    bus::EventBus, snapshot::solve_tab, spawn_env::koshi_env, transaction::TransactionScope,
+    bus::EventBus, spawn_env::build_koshi_environment, transaction::TransactionScope,
 };
 use crate::server::Server;
 use koshi_core::{
     command::{
         ClearSelectionArgs, ClosePaneArgs, CloseTabArgs, Command, CommandEnvelope, CommandResult,
-        CommandSource, CopyArgs, DetachArgs, FocusPaneArgs, FocusTabArgs, FocusTarget, GridPos,
+        CommandSource, CopyArgs, DetachArgs, FocusPaneArgs, FocusTabArgs, FocusTarget,
         LockModeArgs, MoveTabArgs, NewPaneArgs, NewTabArgs, ResizePaneArgs, RunCommandPaneArgs,
         Selection, SelectionKind, SetSelectionArgs, SwitchSessionArgs, TabTarget,
         ToggleLockModeArgs, VisualCommand, WriteToPaneArgs,
@@ -45,12 +45,12 @@ use koshi_core::{
     process::{ExitStatus, KillPolicy, PtySize, SpawnSpec},
 };
 use koshi_layout::{
-    content::content_rects,
-    edit::{add_to_stack, split_leaf},
-    focus::stack_activate,
+    content::list_content_rects,
+    edit::{add_pane_to_stack, split_leaf},
+    focus::activate_stack_member,
     mode::LayoutMode,
-    resize::{resize_with_min, ResizeError},
-    solver::{fits, solve_with_min, solve_with_mode_min, PaneSizing},
+    resize::{resize_layout_with_sizing, ResizeError},
+    solver::{is_layout_within_rect, solve_layout_with_mode, solve_layout_with_sizing, PaneSizing},
     tree::LayoutNode,
 };
 use koshi_pane::pane::{
@@ -76,16 +76,24 @@ use koshi_session::session::{
 ///
 /// A pane the solve gives no content rect falls back to the whole `viewport`
 /// rect.
-pub(crate) fn size_root_pane(pane_id: PaneId, viewport: Size, sizing: PaneSizing) -> PtySize {
-    let candidate = LayoutNode::Pane(pane_id);
-    let tab_rect = Rect::at_origin(viewport);
-    let rects = content_rects(&solve_with_min(&candidate, tab_rect, sizing));
-    let rect = rects
+pub(crate) fn size_root_pane(
+    pane_id: PaneId,
+    viewport_size: Size,
+    pane_sizing: PaneSizing,
+) -> PtySize {
+    let root_layout_tree = LayoutNode::Pane(pane_id);
+    let tab_layout_rect = Rect::from_size_at_origin(viewport_size);
+    let pane_content_rects = list_content_rects(&solve_layout_with_sizing(
+        &root_layout_tree,
+        tab_layout_rect,
+        pane_sizing,
+    ));
+    let pane_content_rect = pane_content_rects
         .iter()
-        .find(|(id, _)| *id == pane_id)
-        .and_then(|(_, content)| *content)
-        .unwrap_or(tab_rect);
-    compute_pty_size(rect)
+        .find(|(matched_pane_id, _)| *matched_pane_id == pane_id)
+        .and_then(|(_, content_rect)| *content_rect)
+        .unwrap_or(tab_layout_rect);
+    compute_pty_size(pane_content_rect)
 }
 
 /// The PTY size for every pane in `layout` filling `viewport`: solve the whole
@@ -94,89 +102,104 @@ pub(crate) fn size_root_pane(pane_id: PaneId, viewport: Size, sizing: PaneSizing
 /// not the whole tab. A pane the solve suppressed for lack of space has no
 /// content rect and falls back to the full tab rect — the same floor
 /// [`size_root_pane`] uses.
-pub(crate) fn pane_spawn_sizes(
-    layout: &LayoutNode,
-    viewport: Size,
-    sizing: PaneSizing,
+pub(crate) fn compute_pane_spawn_sizes(
+    layout_tree: &LayoutNode,
+    viewport_size: Size,
+    pane_sizing: PaneSizing,
 ) -> Vec<(PaneId, PtySize)> {
-    let tab_rect = Rect::at_origin(viewport);
-    content_rects(&solve_with_min(layout, tab_rect, sizing))
-        .into_iter()
-        .map(|(pane, content)| (pane, compute_pty_size(content.unwrap_or(tab_rect))))
-        .collect()
+    let tab_layout_rect = Rect::from_size_at_origin(viewport_size);
+    list_content_rects(&solve_layout_with_sizing(
+        layout_tree,
+        tab_layout_rect,
+        pane_sizing,
+    ))
+    .into_iter()
+    .map(|(pane_id, content_rect)| {
+        (
+            pane_id,
+            compute_pty_size(content_rect.unwrap_or(tab_layout_rect)),
+        )
+    })
+    .collect()
 }
 
 /// The overlap length of the spans `[a_start, a_start + a_len)` and
 /// `[b_start, b_start + b_len)`, `0` when they are disjoint. Used by the
 /// directional focus lookup to require that a neighbor actually shares rows
 /// (or columns) with the pane focus moves from.
-fn span_overlap(a_start: u16, a_len: u16, b_start: u16, b_len: u16) -> u16 {
-    let start = a_start.max(b_start);
-    let end = (a_start + a_len).min(b_start + b_len);
-    end.saturating_sub(start)
+fn compute_span_overlap(
+    first_span_start: u16,
+    first_span_length: u16,
+    second_span_start: u16,
+    second_span_length: u16,
+) -> u16 {
+    let overlap_start = first_span_start.max(second_span_start);
+    let overlap_end =
+        (first_span_start + first_span_length).min(second_span_start + second_span_length);
+    overlap_end.saturating_sub(overlap_start)
 }
 
-/// The tab named by the first [`Event::TabFocused`] in `events`, or `None` when
-/// `events` holds none.
-fn tab_focused_in(events: &[Event]) -> Option<TabId> {
-    events.iter().find_map(|event| match event {
-        Event::TabFocused(focused) => Some(focused.tab_id),
+/// The tab named by the first [`Event::TabFocused`] in `emitted_events`, or
+/// `None` when `emitted_events` holds none.
+fn find_first_focused_tab_id(emitted_events: &[Event]) -> Option<TabId> {
+    emitted_events.iter().find_map(|event| match event {
+        Event::TabFocused(focused_tab) => Some(focused_tab.tab_id),
         _ => None,
     })
 }
 
 /// A validation failure: the reason a command was rejected, plus an optional
-/// human-facing hint. The `Err` half of [`Server::validate`].
+/// human-facing hint. The `Err` half of [`Server::validate_command`].
 struct Rejection {
     reason: RejectReason,
     help: Option<String>,
     /// Cells the donating pane can still give, for a resize refused at a pane
     /// minimum; `None` for every other rejection. A rejection carrying this is
     /// the one [`Server::rejected`] leaves unlogged.
-    spare: Option<u16>,
+    spare_cell_count: Option<u16>,
 }
 
 impl Rejection {
     /// A rejection with the given reason and a hint string.
-    fn new(reason: RejectReason, help: &str) -> Self {
+    fn from_reason_and_help(reason: RejectReason, help: &str) -> Self {
         Rejection {
             reason,
             help: Some(help.to_string()),
-            spare: None,
+            spare_cell_count: None,
         }
     }
 
     /// A rejection with the given reason and no hint.
-    fn bare(reason: RejectReason) -> Self {
+    fn from_reason(reason: RejectReason) -> Self {
         Rejection {
             reason,
             help: None,
-            spare: None,
+            spare_cell_count: None,
         }
     }
 
-    /// A resize refused at a pane minimum, carrying the `spare` cells the
+    /// A resize refused at a pane minimum, carrying the `spare_cell_count` cells the
     /// donating pane can still give in both the hint and the field.
-    fn min_size(spare: u16) -> Self {
+    fn min_size(spare_cell_count: u16) -> Self {
         Rejection {
             reason: RejectReason::MinSize,
             help: Some(format!(
-                "the donating pane has only {spare} spare cells to give"
+                "the donating pane has only {spare_cell_count} spare cells to give"
             )),
-            spare: Some(spare),
+            spare_cell_count: Some(spare_cell_count),
         }
     }
 }
 
 /// The resolved concrete target of a [`Command::NewPane`]: the session and tab
-/// the new pane joins, the source pane it splits from, and the client to
+/// the new pane joins, the command source pane it splits from, and the client to
 /// auto-focus it for (when one applies). All fields are `Copy`, so resolving
 /// holds no borrow into the session map.
 struct NewPaneTarget {
     session_id: SessionId,
-    source_pane: PaneId,
+    source_pane_id: PaneId,
     tab_id: TabId,
-    focus_client: Option<ClientId>,
+    focus_client_id: Option<ClientId>,
 }
 
 /// The resolved concrete target of a pane-addressed command
@@ -225,7 +248,7 @@ impl Server {
     ///
     /// Every mutation enters here; nothing mutates session, layout, or pane
     /// state outside a handler reached through this method. The command is
-    /// validated first (target resolution, source policy); a command that
+    /// validated first (target resolution, command source policy); a command that
     /// passes validation but has no handler yet is rejected with
     /// [`RejectReason::InvalidState`]. A command that reaches its handler
     /// schedules a repaint, whichever entry point — key binding, IPC, or
@@ -244,64 +267,84 @@ impl Server {
         &mut self,
         envelope: CommandEnvelope,
     ) -> (CommandResult, Option<u16>) {
-        let command_id = envelope.id;
-        if let Err(rejection) = self.validate(&envelope) {
+        let command_id = envelope.command_id;
+        if let Err(rejection) = self.validate_command(&envelope) {
             return (Self::rejected(command_id, rejection), None);
         }
         let outcome = match envelope.command {
-            Command::NewPane(args) => {
-                self.handle_new_pane(command_id, &envelope.source, &args, envelope.issued_at)
+            Command::NewPane(command_args) => self.handle_new_pane(
+                command_id,
+                &envelope.command_source,
+                &command_args,
+                envelope.issued_at,
+            ),
+            Command::ClosePane(command_args) => {
+                self.handle_close_pane(command_id, &envelope.command_source, &command_args)
             }
-            Command::ClosePane(args) => self.handle_close_pane(command_id, &envelope.source, &args),
-            Command::ResizePane(args) => {
-                self.handle_resize_pane(command_id, &envelope.source, &args)
+            Command::ResizePane(command_args) => {
+                self.handle_resize_pane(command_id, &envelope.command_source, &command_args)
             }
-            Command::FocusPane(args) => self.handle_focus_pane(command_id, &envelope.source, &args),
-            Command::NewTab(args) => {
-                self.handle_new_tab(command_id, &envelope.source, &args, envelope.issued_at)
+            Command::FocusPane(command_args) => {
+                self.handle_focus_pane(command_id, &envelope.command_source, &command_args)
             }
-            Command::CloseTab(args) => self.handle_close_tab(command_id, &envelope.source, &args),
-            Command::FocusTab(args) => self.handle_focus_tab(command_id, &envelope.source, &args),
-            Command::WriteToPane(args) => {
-                self.handle_write_to_pane(command_id, &envelope.source, &args)
+            Command::NewTab(command_args) => self.handle_new_tab(
+                command_id,
+                &envelope.command_source,
+                &command_args,
+                envelope.issued_at,
+            ),
+            Command::CloseTab(command_args) => {
+                self.handle_close_tab(command_id, &envelope.command_source, &command_args)
             }
-            Command::ToggleLockMode(args) => {
-                self.handle_toggle_lock_mode(command_id, &envelope.source, &args)
+            Command::FocusTab(command_args) => {
+                self.handle_focus_tab(command_id, &envelope.command_source, &command_args)
             }
-            Command::SetLockMode(args) => {
-                self.handle_set_lock_mode(command_id, &envelope.source, &args)
+            Command::WriteToPane(command_args) => {
+                self.handle_write_to_pane(command_id, &envelope.command_source, &command_args)
+            }
+            Command::ToggleLockMode(command_args) => {
+                self.handle_toggle_lock_mode(command_id, &envelope.command_source, &command_args)
+            }
+            Command::SetLockMode(command_args) => {
+                self.handle_set_lock_mode(command_id, &envelope.command_source, &command_args)
             }
             Command::ToggleMouseSelect => {
-                self.handle_toggle_mouse_select(command_id, &envelope.source)
+                self.handle_toggle_mouse_select(command_id, &envelope.command_source)
             }
-            Command::RunCommandPane(args) => {
-                let new_pane_args = Self::run_command_new_pane_args(&args);
+            Command::RunCommandPane(command_args) => {
+                let new_pane_args = Self::run_command_new_pane_args(&command_args);
                 self.handle_new_pane(
                     command_id,
-                    &envelope.source,
+                    &envelope.command_source,
                     &new_pane_args,
                     envelope.issued_at,
                 )
             }
-            Command::Visual(command) => self.handle_visual(command_id, &envelope.source, &command),
-            Command::Plugin(_) => Ok(self.reject(command_id, "plugin")),
-            Command::Quit => Ok(self.handle_quit(command_id, &envelope.source)),
-            Command::Detach(args) => self.handle_detach(command_id, &envelope.source, &args),
-            Command::DetachAll => self.handle_detach_all(command_id, &envelope.source),
-            Command::TogglePaneFullscreen => {
-                self.handle_toggle_pane_fullscreen(command_id, &envelope.source)
+            Command::Visual(command) => {
+                self.handle_visual(command_id, &envelope.command_source, &command)
             }
-            Command::MoveTab(args) => self.handle_move_tab(command_id, &envelope.source, &args),
-            Command::SwitchSession(args) => {
-                self.handle_switch_session(command_id, &envelope.source, &args)
+            Command::Plugin(_) => Ok(self.build_rejected_command_result(command_id, "plugin")),
+            Command::Quit => Ok(self.handle_quit(command_id, &envelope.command_source)),
+            Command::Detach(command_args) => {
+                self.handle_detach(command_id, &envelope.command_source, &command_args)
+            }
+            Command::DetachAll => self.handle_detach_all(command_id, &envelope.command_source),
+            Command::TogglePaneFullscreen => {
+                self.handle_toggle_pane_fullscreen(command_id, &envelope.command_source)
+            }
+            Command::MoveTab(command_args) => {
+                self.handle_move_tab(command_id, &envelope.command_source, &command_args)
+            }
+            Command::SwitchSession(command_args) => {
+                self.handle_switch_session(command_id, &envelope.command_source, &command_args)
             }
         };
         self.render_scheduler.invalidate();
         match outcome {
-            Ok(result) => (result, None),
+            Ok(command_result) => (command_result, None),
             Err(rejection) => {
-                let spare = rejection.spare;
-                (Self::rejected(command_id, rejection), spare)
+                let spare_cell_count = rejection.spare_cell_count;
+                (Self::rejected(command_id, rejection), spare_cell_count)
             }
         }
     }
@@ -310,7 +353,7 @@ impl Server {
     /// originating envelope by `command_id`, and log it at `warn`. `label` names
     /// the command in the log line and in the hint, which reads
     /// `"<label> not yet implemented"`.
-    fn reject(&self, command_id: CommandId, label: &str) -> CommandResult {
+    fn build_rejected_command_result(&self, command_id: CommandId, label: &str) -> CommandResult {
         tracing::warn!(
             command_id = %command_id,
             command = label,
@@ -325,28 +368,28 @@ impl Server {
 
     /// The client a command came from, for commands that act on that client's
     /// own state and can act on no other — a highlight belongs to the screen
-    /// that made it, so a source whose client is gone has nothing to act on
+    /// that made it, so a command source whose client is gone has nothing to act on
     /// and gets [`RejectReason::SourceClientStale`] rather than the
     /// sole-attached-client stand-in [`Server::resolve_acting_client`] applies.
     ///
     /// This is the check itself, not an assertion about an earlier one:
     /// [`Self::resolve_target`] calls it for the selection commands, and the
     /// handlers call it again to get the id.
-    fn issuing_client(source: &CommandSource) -> Result<ClientId, Rejection> {
-        source
-            .client_id()
-            .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))
+    fn resolve_issuing_client_id(command_source: &CommandSource) -> Result<ClientId, Rejection> {
+        command_source
+            .get_client_id()
+            .ok_or_else(|| Rejection::from_reason(RejectReason::SourceClientStale))
     }
 
     /// Confirm `pane_id` still exists in the session `client_id` is attached to.
-    fn require_pane(&self, client_id: ClientId, pane_id: PaneId) -> Result<(), Rejection> {
-        let exists = self
-            .session_for_client(client_id)
-            .is_some_and(|session| session.panes.get(pane_id).is_some());
-        if exists {
+    fn validate_pane_exists(&self, client_id: ClientId, pane_id: PaneId) -> Result<(), Rejection> {
+        let is_pane_present = self
+            .get_session_for_client(client_id)
+            .is_some_and(|session| session.panes.get_pane_record_by_id(pane_id).is_some());
+        if is_pane_present {
             Ok(())
         } else {
-            Err(Rejection::bare(RejectReason::TargetGone))
+            Err(Rejection::from_reason(RejectReason::TargetGone))
         }
     }
 
@@ -356,9 +399,9 @@ impl Server {
     /// Every rejection a handler or validation produces is built here, and
     /// logged here at `warn`: the command did not apply, state is untouched,
     /// and the session carries on. A border move refused at a pane minimum —
-    /// the rejection carrying `spare` — is not logged.
+    /// the rejection carrying `spare_cell_count` — is not logged.
     fn rejected(command_id: CommandId, rejection: Rejection) -> CommandResult {
-        if rejection.spare.is_none() {
+        if rejection.spare_cell_count.is_none() {
             tracing::warn!(
                 command_id = %command_id,
                 reason = %rejection.reason,
@@ -394,63 +437,72 @@ impl Server {
     fn spawn_child(
         backend: &dyn PtyBackend,
         pane_id: PaneId,
-        spec: SpawnSpec,
-        size: PtySize,
+        spawn_spec: SpawnSpec,
+        pty_size: PtySize,
     ) -> Result<PtyHandle, Rejection> {
-        backend.spawn(pane_id, spec, size).map_err(|_| {
-            Rejection::new(
-                RejectReason::InvalidState,
-                "failed to launch the pane's process",
-            )
-        })
+        backend
+            .spawn_pane(pane_id, spawn_spec, pty_size)
+            .map_err(|_| {
+                Rejection::from_reason_and_help(
+                    RejectReason::InvalidState,
+                    "failed to launch the pane's process",
+                )
+            })
     }
 
     /// Add koshi's configured terminal identity — `TERM` and `COLORTERM` from
     /// the `terminal` config section — to a spawned child's environment overlay,
-    /// filling each only when the pane's own env has not already set it: an
-    /// explicit per-pane value (a profile pane's `env`) is kept.
-    pub(crate) fn terminal_identity_env(
+    /// filling each only when the pane's own environment variables have not
+    /// already set it: an explicit per-pane value is kept.
+    pub(crate) fn apply_terminal_identity_environment_variables(
         &self,
-        mut env: BTreeMap<String, String>,
+        mut environment_variables: BTreeMap<String, String>,
     ) -> BTreeMap<String, String> {
-        env.entry("TERM".to_string())
+        environment_variables
+            .entry("TERM".to_string())
             .or_insert_with(|| self.config.terminal.term.clone());
-        env.entry("COLORTERM".to_string())
+        environment_variables
+            .entry("COLORTERM".to_string())
             .or_insert_with(|| self.config.terminal.colorterm.clone());
-        env
+        environment_variables
     }
 
     /// The spawn spec for a default-shell pane: the configured
     /// `terminal.default_shell` when set, otherwise the platform default from
     /// `$SHELL` / `%COMSPEC%`. Either way it carries koshi's terminal identity
     /// in its environment.
-    pub(crate) fn default_shell_spec(
+    pub(crate) fn build_default_shell_spec(
         &self,
-        cwd: Option<PathBuf>,
-        env: BTreeMap<String, String>,
+        working_directory: Option<PathBuf>,
+        environment_variables: BTreeMap<String, String>,
     ) -> SpawnSpec {
-        let env = self.terminal_identity_env(env);
+        let environment_variables =
+            self.apply_terminal_identity_environment_variables(environment_variables);
         match &self.config.terminal.default_shell {
-            Some(program) => SpawnSpec::shell(PathBuf::from(program), cwd, env),
-            None => SpawnSpec::default_shell(cwd, env),
+            Some(program) => SpawnSpec::from_shell_program(
+                PathBuf::from(program),
+                working_directory,
+                environment_variables,
+            ),
+            None => SpawnSpec::default_shell(working_directory, environment_variables),
         }
     }
 
     /// Map [`Command::RunCommandPane`] onto the [`NewPaneArgs`] that realize it:
-    /// its command is required (never the default shell), and its source
+    /// its command is required (never the default shell), and its command source
     /// pane, placement — split direction or stacking — and working directory
     /// carry through to the new-pane transaction. [`Self::dispatch`] and
-    /// [`Self::resolve_target`] both call it, so the validate pre-check and
+    /// [`Self::resolve_target`] both call it, so the validation pre-check and
     /// the handler read the same anchor pane.
-    fn run_command_new_pane_args(args: &RunCommandPaneArgs) -> NewPaneArgs {
+    fn run_command_new_pane_args(command_args: &RunCommandPaneArgs) -> NewPaneArgs {
         NewPaneArgs {
-            source: args.source,
-            tab: args.tab,
-            direction: args.direction,
-            stacked: args.stacked,
-            cwd: args.cwd.clone(),
-            command: Some(args.command.clone()),
-            client: args.client,
+            source_pane_id: command_args.source_pane_id,
+            tab_id: command_args.tab_id,
+            direction: command_args.direction,
+            should_stack: command_args.should_stack,
+            working_directory: command_args.working_directory.clone(),
+            spawn_spec: Some(command_args.spawn_spec.clone()),
+            client_id: command_args.client_id,
         }
     }
 
@@ -460,20 +512,34 @@ impl Server {
     /// `None` when nothing knows — a spawn using this then inherits koshi's
     /// own directory. Every answer is already at hand or one non-blocking
     /// OS call.
-    pub(super) fn pane_live_cwd(&self, session_id: SessionId, pane: PaneId) -> Option<PathBuf> {
-        if let Some(reported) = self
-            .terminal_engines
-            .get(&pane)
-            .and_then(|engine| engine.state().current_cwd())
+    pub(super) fn resolve_pane_working_directory(
+        &self,
+        session_id: SessionId,
+        pane_id: PaneId,
+    ) -> Option<PathBuf> {
+        if let Some(reported_working_directory) = self
+            .terminal_engine_by_pane_id
+            .get(&pane_id)
+            .and_then(|engine| engine.get_terminal_state().get_current_working_directory())
         {
-            if is_local_host(reported.host()) {
-                return Some(reported.path().to_path_buf());
+            if is_local_host(reported_working_directory.get_host()) {
+                return Some(
+                    reported_working_directory
+                        .get_working_directory_path()
+                        .to_path_buf(),
+                );
             }
         }
-        if let Some(cwd) = self.pty_backend().live_cwd(pane) {
-            return Some(cwd);
+        if let Some(working_directory) = self.get_pty_backend().find_live_working_directory(pane_id)
+        {
+            return Some(working_directory);
         }
-        self.sessions.get(&session_id)?.panes.get(pane)?.cwd.clone()
+        self.session_by_id
+            .get(&session_id)?
+            .panes
+            .get_pane_record_by_id(pane_id)?
+            .working_directory
+            .clone()
     }
 
     /// Mark the process for immediate teardown: the event loop polls the quit
@@ -482,7 +548,7 @@ impl Server {
     /// group-kills every pane's child without the graceful window.
     pub(crate) fn request_quit(&mut self) {
         self.request_graceful_quit();
-        self.immediate_shutdown = true;
+        self.should_shutdown_immediately = true;
     }
 
     /// Mark the process for teardown, keeping the graceful window: the event
@@ -491,11 +557,11 @@ impl Server {
     /// before group-killing it; a stop request that cannot be delivered goes
     /// straight to the group-kill.
     pub(crate) fn request_graceful_quit(&mut self) {
-        self.quit_requested = true;
+        self.is_quit_requested = true;
     }
 
-    /// Handle [`Command::Quit`]: a source that names a client leaves the
-    /// session; a source that names none ends the process.
+    /// Handle [`Command::Quit`]: a command source that names a client leaves the
+    /// session; a command source that names none ends the process.
     ///
     /// A keybinding or a mouse action names the client that issued it, so quit
     /// removes that client alone, through the same detach [`Command::Detach`]
@@ -505,11 +571,15 @@ impl Server {
     /// with the setting off, or with another client still attached, the session
     /// and its panes keep running.
     ///
-    /// A source that names no client — `kill-session` over the external CLI,
+    /// A command source that names no client — `kill-session` over the external CLI,
     /// the plugin host, the runtime itself — takes [`Self::request_quit`]
     /// instead.
-    fn handle_quit(&mut self, command_id: CommandId, source: &CommandSource) -> CommandResult {
-        let Some(client_id) = source.client_id() else {
+    fn handle_quit(
+        &mut self,
+        command_id: CommandId,
+        command_source: &CommandSource,
+    ) -> CommandResult {
+        let Some(client_id) = command_source.get_client_id() else {
             self.request_quit();
             return CommandResult::Ok {
                 command_id,
@@ -531,18 +601,19 @@ impl Server {
     fn handle_detach(
         &mut self,
         command_id: CommandId,
-        source: &CommandSource,
-        args: &DetachArgs,
+        command_source: &CommandSource,
+        command_args: &DetachArgs,
     ) -> Result<CommandResult, Rejection> {
-        let session = Self::require_session(self.acting_session(source)?)?;
-        let client_id = Self::resolve_target_client(args.client, source, session)?;
+        let session = Self::require_session(self.acting_session(command_source)?)?;
+        let client_id =
+            Self::resolve_target_client(command_args.client_id, command_source, session)?;
 
         let events = self.handle_client_detach(client_id);
         Ok(Self::commit_events(&mut self.event_bus, command_id, events))
     }
 
     /// Handle [`Command::SwitchSession`]: move one client out of this session
-    /// and into the session `args` names.
+    /// and into the session `command_args` names.
     ///
     /// The client is resolved by [`Server::resolve_target_client`], the same
     /// call validation made: a named client must be attached here, and no name
@@ -560,27 +631,28 @@ impl Server {
     fn handle_switch_session(
         &mut self,
         command_id: CommandId,
-        source: &CommandSource,
-        args: &SwitchSessionArgs,
+        command_source: &CommandSource,
+        command_args: &SwitchSessionArgs,
     ) -> Result<CommandResult, Rejection> {
-        // The plugin host grants `session_switch`; a plugin source holds none.
+        // The plugin host grants `session_switch`; a plugin command source holds none.
         // A plugin resolves no session, so validation refuses it before this.
-        if matches!(source, CommandSource::Plugin { .. }) {
-            return Err(Rejection::new(
+        if matches!(command_source, CommandSource::Plugin { .. }) {
+            return Err(Rejection::from_reason_and_help(
                 RejectReason::Unauthorized,
                 "plugin lacks the session_switch capability",
             ));
         }
-        let session = Self::require_session(self.acting_session(source)?)?;
-        if args.session == session.id {
-            return Err(Rejection::new(
+        let session = Self::require_session(self.acting_session(command_source)?)?;
+        if command_args.session_id == session.session_id {
+            return Err(Rejection::from_reason_and_help(
                 RejectReason::InvalidState,
                 "this client is already in that session",
             ));
         }
-        let client_id = Self::resolve_target_client(args.client, source, session)?;
-        if !self.send_switch(client_id, args.session) {
-            return Err(Rejection::new(
+        let client_id =
+            Self::resolve_target_client(command_args.client_id, command_source, session)?;
+        if !self.send_switch(client_id, command_args.session_id) {
+            return Err(Rejection::from_reason_and_help(
                 RejectReason::InvalidState,
                 "the client is too far behind to be moved right now; try again",
             ));
@@ -588,7 +660,7 @@ impl Server {
         tracing::info!(
             command_id = %command_id,
             client = %client_id,
-            session = %args.session,
+            session = %command_args.session_id,
             "a client was moved to another session"
         );
         Ok(CommandResult::Ok {
@@ -604,13 +676,13 @@ impl Server {
     fn handle_detach_all(
         &mut self,
         command_id: CommandId,
-        source: &CommandSource,
+        command_source: &CommandSource,
     ) -> Result<CommandResult, Rejection> {
-        let session = Self::require_session(self.acting_session(source)?)?;
+        let session = Self::require_session(self.acting_session(command_source)?)?;
         let clients: Vec<ClientId> = session
             .clients
-            .list_attached()
-            .map(|client| client.id())
+            .list_attached_clients()
+            .map(|client| client.get_client_id())
             .collect();
 
         let mut events = Vec::new();
@@ -629,7 +701,7 @@ impl Server {
     /// [`Server::resolve_acting_client`], which answers which client a command
     /// *acts on*: a session with no attached client cannot show a new tab
     /// ([`RejectReason::InvalidState`]), while a command with no client to act
-    /// on came from a source whose client is gone
+    /// on came from a command source whose client is gone
     /// ([`RejectReason::SourceClientStale`]).
     ///
     /// On a session with two clients,
@@ -641,14 +713,14 @@ impl Server {
         none_tail: &str,
         ambiguous_noun: &str,
     ) -> Result<&'a Client, Rejection> {
-        let mut attached = session.clients.list_attached();
-        match (attached.next(), attached.next()) {
-            (None, _) => Err(Rejection::new(
+        let mut attached_clients = session.clients.list_attached_clients();
+        match (attached_clients.next(), attached_clients.next()) {
+            (None, _) => Err(Rejection::from_reason_and_help(
                 RejectReason::InvalidState,
                 &format!("no attached client {none_tail}"),
             )),
             (Some(only), None) => Ok(only),
-            (Some(_), Some(_)) => Err(Rejection::new(
+            (Some(_), Some(_)) => Err(Rejection::from_reason_and_help(
                 RejectReason::TargetAmbiguous,
                 &format!("multiple clients; name a target client for {ambiguous_noun}"),
             )),
@@ -681,59 +753,71 @@ impl Server {
         session: &Session,
         tab_id: TabId,
         viewport: Size,
-        sizing: PaneSizing,
+        pane_sizing: PaneSizing,
     ) -> Vec<(PaneId, Option<Rect>)> {
         let Some(tab) = session.tabs.get(&tab_id) else {
             return Vec::new();
         };
-        let tab_rect = Rect::at_origin(viewport);
+        let tab_rect = Rect::from_size_at_origin(viewport);
 
         // One solve per viewer, each in that client's own layout mode.
-        let per_viewer: Vec<Vec<(PaneId, Option<Rect>)>> = session
+        let per_viewer_content_rects: Vec<Vec<(PaneId, Option<Rect>)>> = session
             .clients
-            .list_attached()
-            .filter(|client| client.active_tab() == tab_id)
+            .list_attached_clients()
+            .filter(|client| client.get_active_tab() == tab_id)
             .map(|client| {
-                content_rects(&solve_with_mode_min(
-                    tab.layout(),
-                    client.layout_mode(tab_id),
+                list_content_rects(&solve_layout_with_mode(
+                    tab.get_layout_tree(),
+                    client.get_layout_mode(tab_id),
                     tab_rect,
-                    sizing,
+                    pane_sizing,
                 ))
             })
             .collect();
 
         // No viewer: no client draws any of these panes, so none of them is
         // resized and every PTY keeps the size it has.
-        let Some(first) = per_viewer.first() else {
+        let Some(first_viewer_layouts) = per_viewer_content_rects.first() else {
             return Vec::new();
         };
 
         // Merge by pane id: a pane's smallest rect across the viewers that draw
         // it. The merge keys on the id alone, so it holds however each solve
         // orders its panes.
-        let mut smallest: HashMap<PaneId, Option<Rect>> = HashMap::with_capacity(first.len());
-        for viewer in &per_viewer {
-            for &(pane_id, content) in viewer {
-                let entry = smallest.entry(pane_id).or_insert(None);
-                let Some(rect) = content else {
+        let mut smallest_content_rect_by_pane_id: HashMap<PaneId, Option<Rect>> =
+            HashMap::with_capacity(first_viewer_layouts.len());
+        for viewer_content_rects in &per_viewer_content_rects {
+            for &(pane_id, content_rect) in viewer_content_rects {
+                let smallest_content_rect = smallest_content_rect_by_pane_id
+                    .entry(pane_id)
+                    .or_insert(None);
+                let Some(rect) = content_rect else {
                     // This viewer draws no content for the pane, and asks
                     // nothing of its size.
                     continue;
                 };
-                *entry = match *entry {
-                    Some(current) => {
-                        Some(Rect::new(current.origin, current.size.min_axes(rect.size)))
-                    }
+                *smallest_content_rect = match *smallest_content_rect {
+                    Some(current_rect) => Some(Rect::from_origin_and_size(
+                        current_rect.origin,
+                        current_rect.cell_size.compute_minimum_axes(rect.cell_size),
+                    )),
                     None => Some(rect),
                 };
             }
         }
 
         // Emit in the first viewer's solve order.
-        first
+        first_viewer_layouts
             .iter()
-            .map(|&(pane_id, _)| (pane_id, smallest.get(&pane_id).copied().flatten()))
+            .map(|&(pane_id, _)| {
+                (
+                    pane_id,
+                    smallest_content_rect_by_pane_id
+                        .get(&pane_id)
+                        .copied()
+                        .flatten(),
+                )
+            })
             .collect()
     }
 
@@ -741,17 +825,17 @@ impl Server {
     /// currently solved against. Rejects when the session is gone or when no
     /// attached client views the tab — an unviewed tab has no terminal size to
     /// solve against.
-    fn session_and_viewport(
+    fn resolve_session_and_viewport(
         &mut self,
         session_id: SessionId,
         tab_id: TabId,
     ) -> Result<(&mut Session, Size), Rejection> {
         let session = self
-            .sessions
+            .session_by_id
             .get_mut(&session_id)
-            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
-        let viewport = session.tab_viewport(tab_id).ok_or_else(|| {
-            Rejection::new(
+            .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
+        let viewport = session.get_tab_viewport(tab_id).ok_or_else(|| {
+            Rejection::from_reason_and_help(
                 RejectReason::InvalidState,
                 "pane's tab is not viewed by any client",
             )
@@ -774,22 +858,22 @@ impl Server {
         tab_id: TabId,
         events: &mut Vec<Event>,
     ) {
-        let Some(session) = self.sessions.get(&session_id) else {
+        let Some(session) = self.session_by_id.get(&session_id) else {
             return;
         };
-        if let Some(cell_size) = session.tab_cell_size(tab_id) {
+        if let Some(cell_size) = session.get_tab_cell_size(tab_id) {
             if let Some(tab) = session.tabs.get(&tab_id) {
-                for pane_id in tab.layout().leaf_panes() {
-                    if let Some(engine) = self.terminal_engines.get_mut(&pane_id) {
+                for pane_id in tab.get_layout_tree().list_leaf_pane_ids() {
+                    if let Some(engine) = self.terminal_engine_by_pane_id.get_mut(&pane_id) {
                         engine.set_cell_size(cell_size);
                     }
                 }
             }
         }
-        let Some(viewport) = session.tab_viewport(tab_id) else {
+        let Some(viewport) = session.get_tab_viewport(tab_id) else {
             return;
         };
-        let rects = Self::tab_content_rects(session, tab_id, viewport, self.pane_sizing());
+        let rects = Self::tab_content_rects(session, tab_id, viewport, self.get_pane_sizing());
         self.reflow_changed(backend, rects, None, events);
     }
 
@@ -798,7 +882,7 @@ impl Server {
     /// one [`Event::PtyResized`] per pane it resized.
     ///
     /// A pane is passed to the executor only when it has a content rect, has a
-    /// live handle, is not `skip` (the freshly-spawned pane is sized
+    /// live handle, is not `excluded_pane_id` (the freshly-spawned pane is sized
     /// separately), and its new [`compute_pty_size`] differs from `pty_sizes`.
     /// A pane with no content rect, and a pane whose size is unchanged, is left
     /// alone. The executor is stateless; this owns the last-set-size cache
@@ -807,30 +891,35 @@ impl Server {
     fn reflow_changed(
         &mut self,
         backend: &dyn PtyBackend,
-        rects: Vec<(PaneId, Option<Rect>)>,
-        skip: Option<PaneId>,
-        events: &mut Vec<Event>,
+        content_rects: Vec<(PaneId, Option<Rect>)>,
+        excluded_pane_id: Option<PaneId>,
+        emitted_events: &mut Vec<Event>,
     ) {
-        let items: Vec<(PaneId, Option<Rect>)> = rects
+        let resize_candidates: Vec<(PaneId, Option<Rect>)> = content_rects
             .into_iter()
-            .filter(|&(pane_id, content)| {
-                let Some(rect) = content else {
+            .filter(|&(pane_id, content_rect)| {
+                let Some(content_rect) = content_rect else {
                     return false;
                 };
-                Some(pane_id) != skip
-                    && self.pty_handles.contains_key(&pane_id)
-                    && self.pty_sizes.get(&pane_id) != Some(&compute_pty_size(rect))
+                Some(pane_id) != excluded_pane_id
+                    && self.pty_handle_by_pane_id.contains_key(&pane_id)
+                    && self.pty_size_by_pane_id.get(&pane_id)
+                        != Some(&compute_pty_size(content_rect))
             })
             .collect();
-        for result in resize_for_layout_change(backend, items) {
-            if let Some(size) = result.applied {
-                self.pty_sizes.insert(result.pane_id, size);
-                if let Some(engine) = self.terminal_engines.get_mut(&result.pane_id) {
-                    engine.resize(size);
+        for resize_outcome in resize_for_layout_change(backend, resize_candidates) {
+            if let Some(pty_size) = resize_outcome.applied_pty_size {
+                self.pty_size_by_pane_id
+                    .insert(resize_outcome.pane_id, pty_size);
+                if let Some(engine) = self
+                    .terminal_engine_by_pane_id
+                    .get_mut(&resize_outcome.pane_id)
+                {
+                    engine.resize_terminal_state(pty_size);
                 }
-                events.push(Event::PtyResized(PtyResized {
-                    pane_id: result.pane_id,
-                    size,
+                emitted_events.push(Event::PtyResized(PtyResized {
+                    pane_id: resize_outcome.pane_id,
+                    pty_size,
                 }));
             }
         }
@@ -852,13 +941,13 @@ pub(super) fn kill_off_thread(
     kill_policy: KillPolicy,
 ) {
     let off_thread = Arc::clone(backend);
-    let started = thread::Builder::new()
+    let is_thread_started = thread::Builder::new()
         .spawn(move || {
-            let _ = off_thread.kill(pane_id, kill_policy);
+            let _ = off_thread.kill_pane(pane_id, kill_policy);
         })
         .is_ok();
-    if !started {
-        let _ = backend.kill(pane_id, kill_policy);
+    if !is_thread_started {
+        let _ = backend.kill_pane(pane_id, kill_policy);
     }
 }
 
@@ -877,17 +966,18 @@ fn is_local_host(host: Option<&str>) -> bool {
     if host.eq_ignore_ascii_case("localhost") {
         return true;
     }
-    let bare = host
+    let bare_host = host
         .strip_prefix('[')
-        .and_then(|inner| inner.strip_suffix(']'))
+        .and_then(|bracketed_host| bracketed_host.strip_suffix(']'))
         .unwrap_or(host);
-    if bare
+    if bare_host
         .parse::<std::net::IpAddr>()
         .is_ok_and(|address| address.is_loopback())
     {
         return true;
     }
-    koshi_pty::cwd::local_hostname().is_some_and(|name| name.eq_ignore_ascii_case(host))
+    koshi_pty::working_directory::get_local_hostname()
+        .is_some_and(|local_hostname| local_hostname.eq_ignore_ascii_case(host))
 }
 
 mod client;

@@ -12,7 +12,7 @@
 //! settled doorway version, or
 //! [`Refused`](crate::remote_wire::RemoteServerFrame::Refused). After that the
 //! client either lists the sessions its secret reaches, or asks to attach to
-//! one. [`open`](crate::remote_wire::open) is the dialling side of that
+//! one. [`open_remote_connection`](crate::remote_wire::open_remote_connection) is the dialling side of that
 //! opening: it dials, sends the Hello and reads the one frame answering it,
 //! all inside one deadline.
 //!
@@ -20,7 +20,7 @@
 //! admitted, these frames stop. The next bytes on the stream are the session
 //! server's own answer frames, carried through unparsed.
 //!
-//! How long the halves [`open`](crate::remote_wire::open) hands back may block
+//! How long the halves [`open_remote_connection`](crate::remote_wire::open_remote_connection) hands back may block
 //! is the caller's choice, made when it dials.
 //!
 //! Every refusal carries the same sentence,
@@ -43,23 +43,23 @@ use crate::transport::{frame_halves, read_message, write_message, FrameReader, F
 ///
 /// The value and the rule it follows live in
 /// [`koshi_core::compat::REMOTE_PROTOCOL`].
-pub const REMOTE_PROTOCOL_VERSION: u32 = koshi_core::compat::REMOTE_PROTOCOL.max;
+pub const REMOTE_PROTOCOL_VERSION: u32 = koshi_core::compat::REMOTE_PROTOCOL.maximum_version;
 
 /// The lowest doorway version this build serves. A caller whose highest is
 /// below it is refused.
-pub const MIN_REMOTE_PROTOCOL_VERSION: u32 = koshi_core::compat::REMOTE_PROTOCOL.min;
+pub const MIN_REMOTE_PROTOCOL_VERSION: u32 = koshi_core::compat::REMOTE_PROTOCOL.minimum_version;
 
 /// The largest frame the server accepts before a Hello is admitted: 4 KiB.
 ///
 /// A Hello carries four version numbers and one secret. One carrying a
 /// generated secret fits inside the cap at every value the versions can hold.
-pub const REMOTE_HELLO_MAX_LEN: u32 = 4096;
+pub const REMOTE_HELLO_MAX_BYTE_COUNT: u32 = 4096;
 
 /// The one sentence every refusal carries: a wrong secret, a revoked one, an
 /// expired one, a session that does not exist, and a session the secret holds
 /// no grant for all read the same.
 ///
-/// A doorway version that does not overlap carries [`version_refusal`]
+/// A doorway version that does not overlap carries [`format_version_refusal`]
 /// instead.
 pub const REMOTE_REFUSED: &str = "this server did not admit the connection";
 
@@ -70,9 +70,12 @@ pub const REMOTE_REFUSED: &str = "this server did not admit the connection";
 /// Example — a caller speaking 2 to 3 against a build speaking 1 to 1 reads
 /// `"the caller speaks remote doorway 2 to 3, this koshi speaks 1 to 1"`.
 #[must_use]
-pub fn version_refusal(caller_min: u32, caller_max: u32) -> String {
+pub fn format_version_refusal(
+    caller_min_protocol_version: u32,
+    caller_max_protocol_version: u32,
+) -> String {
     format!(
-        "the caller speaks remote doorway {caller_min} to {caller_max}, \
+        "the caller speaks remote doorway {caller_min_protocol_version} to {caller_max_protocol_version}, \
          this koshi speaks {MIN_REMOTE_PROTOCOL_VERSION} to {REMOTE_PROTOCOL_VERSION}"
     )
 }
@@ -102,14 +105,16 @@ pub enum RemoteClientFrame {
         /// The highest session protocol version the client speaks.
         max_protocol_version: u32,
         /// The secret the operator handed out with a grant.
-        token: ConnectionToken,
+        #[serde(rename = "token")]
+        connection_token: ConnectionToken,
     },
     /// List the sessions this secret reaches.
     List,
     /// Attach to one session.
     Attach {
         /// Which session to attach to.
-        session: SessionSelector,
+        #[serde(rename = "session")]
+        session_selector: SessionSelector,
     },
 }
 
@@ -124,11 +129,12 @@ pub enum RemoteServerFrame {
     Welcome {
         /// The doorway version both ends settled on: the highest they both
         /// speak.
-        remote_version: u32,
+        #[serde(rename = "remote_version")]
+        remote_protocol_version: u32,
     },
     /// The stream is not open, or the frame is not served.
     Refused {
-        /// [`REMOTE_REFUSED`], or the sentence [`version_refusal`] builds
+        /// [`REMOTE_REFUSED`], or the sentence [`format_version_refusal`] builds
         /// when no doorway version suits both ends.
         message: String,
     },
@@ -136,21 +142,22 @@ pub enum RemoteServerFrame {
     /// reaches.
     Sessions {
         /// The sessions, in the order the server holds them.
-        rows: Vec<RemoteSessionRow>,
+        #[serde(rename = "rows")]
+        session_rows: Vec<RemoteSessionRow>,
     },
 }
 
-/// Open a TLS stream to `address`, send `hello`, and read the one frame the
+/// Open a TLS stream to `server_address`, send `hello_frame`, and read the one frame the
 /// server answers it with.
 ///
-/// `pinned` is the fingerprint saved from an earlier connection, or `None` on
+/// `pinned_certificate_fingerprint` is the fingerprint saved from an earlier connection, or `None` on
 /// the first connection to this server.
 ///
-/// `timeout` bounds everything after the name lookup: the connect, the TLS
+/// `connection_timeout` bounds everything after the name lookup: the connect, the TLS
 /// handshake, the Hello and the answer share one deadline. A server that
 /// sends its answer one byte at a time is cut off at that deadline.
 ///
-/// `reply_wait` says how long the halves that come back may block:
+/// `reply_timeout` says how long the halves that come back may block:
 ///
 /// - `None` — they block for as long as it takes.
 /// - `Some(wait)` — every read and write on them finishes inside `wait`,
@@ -168,23 +175,32 @@ pub enum RemoteServerFrame {
 /// for the lookup, the stream split, and a Hello or answer that ran out of
 /// time. [`IpcError::Disconnected`] when the server hung up,
 /// [`IpcError::FrameTooLarge`] when its answer's length prefix is past
-/// [`MAX_FRAME_LEN`](crate::transport::MAX_FRAME_LEN), and
+/// [`MAX_FRAME_BYTE_COUNT`](crate::transport::MAX_FRAME_BYTE_COUNT), and
 /// [`IpcError::MalformedFrame`] when its answer does not decode.
-pub fn open(
-    address: &str,
-    pinned: Option<&str>,
-    hello: &RemoteClientFrame,
-    timeout: Duration,
-    reply_wait: Option<Duration>,
+pub fn open_remote_connection(
+    server_address: &str,
+    pinned_certificate_fingerprint: Option<&str>,
+    hello_frame: &RemoteClientFrame,
+    connection_timeout: Duration,
+    reply_timeout: Option<Duration>,
 ) -> Result<(FrameReader, FrameWriter, String, RemoteServerFrame), IpcError> {
-    let (mut reader, mut writer, presented) = tls::dial(address, pinned, timeout)?;
-    write_message(&mut writer, hello)?;
-    let answer = read_message::<RemoteServerFrame>(&mut reader)?;
-    let after = reply_wait.map(|wait| Instant::now() + wait);
-    reader.set_deadline(after);
-    writer.set_deadline(after);
+    let (mut reader, mut writer, presented_certificate_fingerprint) = tls::connect_tls_stream(
+        server_address,
+        pinned_certificate_fingerprint,
+        connection_timeout,
+    )?;
+    write_message(&mut writer, hello_frame)?;
+    let server_response = read_message::<RemoteServerFrame>(&mut reader)?;
+    let reply_deadline = reply_timeout.map(|reply_timeout| Instant::now() + reply_timeout);
+    reader.set_deadline(reply_deadline);
+    writer.set_deadline(reply_deadline);
     let (reader, writer) = frame_halves(Box::new(reader), Box::new(writer));
-    Ok((reader, writer, presented, answer))
+    Ok((
+        reader,
+        writer,
+        presented_certificate_fingerprint,
+        server_response,
+    ))
 }
 
 /// One session as a remote client may see it.
@@ -195,9 +211,11 @@ pub fn open(
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteSessionRow {
     /// The session's stable id.
-    pub id: SessionId,
+    #[serde(rename = "id")]
+    pub session_id: SessionId,
     /// The session's generated display name.
-    pub name: String,
+    #[serde(rename = "name")]
+    pub session_name: String,
 }
 
 #[cfg(test)]

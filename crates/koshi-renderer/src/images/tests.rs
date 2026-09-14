@@ -13,7 +13,7 @@ use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::MouseTracking;
 use koshi_layout::mode::LayoutMode;
-use koshi_layout::regions::RegionSolve;
+use koshi_layout::regions::SolvedRegions;
 use koshi_pane::pane::state::PaneKind;
 use koshi_terminal::graphics::{
     DecodedImage, GraphicsProtocol, ImageAction, ImageDimension, ImageDisplay, ImageRecord,
@@ -28,15 +28,15 @@ use crate::snapshot::{
 };
 use crate::theme::Theme;
 
-fn record(width: u32, height: u32, z_index: i32) -> Arc<ImageRecord> {
-    let pixel_count = usize::try_from(width * height).expect("test image fits usize");
+fn build_image_record(pixel_width: u32, pixel_height: u32, z_index: i32) -> Arc<ImageRecord> {
+    let pixel_count = usize::try_from(pixel_width * pixel_height).expect("test image fits usize");
     Arc::new(ImageRecord {
         protocol: GraphicsProtocol::Kitty,
         image: (DecodedImage {
-            width,
-            height,
-            rgba: (0..pixel_count * 4)
-                .map(|value| u8::try_from(value % 256).expect("test byte fits"))
+            pixel_width,
+            pixel_height,
+            rgba_bytes: (0..pixel_count * 4)
+                .map(|channel_value| u8::try_from(channel_value % 256).expect("test byte fits"))
                 .collect(),
         })
         .into(),
@@ -50,94 +50,103 @@ fn record(width: u32, height: u32, z_index: i32) -> Arc<ImageRecord> {
     })
 }
 
-fn snapshot(
+fn build_render_snapshot(
     pane_id: PaneId,
-    inner: Rect,
-    placements: Vec<ImagePlacementSnapshot>,
-    grid: bool,
-    visible: bool,
-    all_suppressed: bool,
+    content_rect: Rect,
+    image_placement_snapshots: Vec<ImagePlacementSnapshot>,
+    has_terminal_grid: bool,
+    is_visible: bool,
+    are_all_panes_suppressed: bool,
 ) -> RenderSnapshot {
     let tab_id = TabId::new();
-    let viewport = Size { cols: 40, rows: 8 };
-    let pane = PaneSnapshot {
-        id: pane_id,
-        title: None,
-        cursor: CursorSnapshot {
-            row: 0,
-            col: 0,
-            visible: false,
-            blink: false,
+    let viewport_size = Size {
+        column_count: 40,
+        row_count: 8,
+    };
+    let pane_snapshot = PaneSnapshot {
+        pane_id,
+        pane_title: None,
+        cursor_snapshot: CursorSnapshot {
+            row_index: 0,
+            column_index: 0,
+            is_visible: false,
+            is_blinking: false,
             shape: None,
         },
-        grid_view: grid.then(|| GridView {
+        terminal_grid_view: has_terminal_grid.then(|| GridView {
             grid: Arc::new(Grid::blank(6, 38, Style::default())),
-            view_offset: 0,
+            view_row_offset: 0,
         }),
-        image_placements: placements,
-        reverse_video: false,
+        image_placement_snapshots,
+        is_reverse_video: false,
         mouse_tracking: MouseTracking::Off,
-        alt_scroll: false,
-        on_alt_screen: false,
-        view_top_row: 0,
-        selection: None,
+        is_alternate_scroll_enabled: false,
+        is_on_alternate_screen: false,
+        view_top_row_index: 0,
+        selection_spans: None,
         has_selection: false,
-        scrollback: ScrollbackMeta {
-            truncated: false,
-            retained_lines: 0,
+        scrollback_meta: ScrollbackMeta {
+            is_truncated: false,
+            retained_line_count: 0,
         },
     };
     RenderSnapshot {
-        session: SessionSnapshot {
-            id: SessionId::new(),
-            name: String::from("session"),
-            active_tab: TabSnapshot {
-                id: tab_id,
-                name: String::from("tab"),
-                layout_solved: vec![PaneSlot {
+        session_snapshot: SessionSnapshot {
+            session_id: SessionId::new(),
+            session_name: String::from("session"),
+            active_tab_snapshot: TabSnapshot {
+                tab_id,
+                tab_name: String::from("tab"),
+                pane_slots: vec![PaneSlot {
                     pane_id,
-                    rect: Rect {
-                        origin: Point { x: 0, y: 0 },
-                        size: viewport,
+                    outer_rect: Rect {
+                        origin: Point { column: 0, row: 0 },
+                        cell_size: viewport_size,
                     },
-                    inner_rect: Some(inner),
-                    kind: PaneKind::Terminal,
-                    visible,
-                    suppressed: all_suppressed,
-                    dead: false,
+                    content_rect: Some(content_rect),
+                    pane_kind: PaneKind::Terminal,
+                    is_visible,
+                    is_suppressed: are_all_panes_suppressed,
+                    is_dead: false,
                 }],
-                effective_size: viewport,
+                effective_cell_size: viewport_size,
                 stack_headers: Vec::new(),
                 layout_mode: LayoutMode::Tiled,
-                all_suppressed,
-                gap: 0,
+                are_all_panes_suppressed,
+                gap_cell_count: 0,
             },
             tabs_metadata: vec![TabMeta {
-                id: tab_id,
-                name: String::from("tab"),
-                index: 0,
-                active: true,
+                tab_id,
+                tab_name: String::from("tab"),
+                tab_index: 0,
+                is_active: true,
             }],
         },
-        panes: vec![pane],
-        client: ClientSnapshot {
-            id: ClientId::new(),
-            viewport,
-            active_tab: tab_id,
-            focused_pane: Some(pane_id),
+        pane_snapshots: vec![pane_snapshot],
+        client_snapshot: ClientSnapshot {
+            client_id: ClientId::new(),
+            viewport_size,
+            active_tab_id: tab_id,
+            focused_pane_id: Some(pane_id),
             lock_mode: LockMode::Normal,
-            mouse_select: false,
+            is_mouse_selection_enabled: false,
         },
-        plugin_ui: PluginUiSnapshot::default(),
+        plugin_ui_snapshot: PluginUiSnapshot::default(),
     }
 }
 
 fn regions() -> CommittedRegions {
-    CommittedRegions::new(
-        Size { cols: 40, rows: 8 },
-        RegionSolve {
-            regions: Vec::new(),
-            pane_rect: Rect::at_origin(Size { cols: 40, rows: 8 }),
+    CommittedRegions::from_solved_regions(
+        Size {
+            column_count: 40,
+            row_count: 8,
+        },
+        SolvedRegions {
+            region_rects: Vec::new(),
+            pane_rect: Rect::from_size_at_origin(Size {
+                column_count: 40,
+                row_count: 8,
+            }),
         },
         0,
     )
@@ -145,40 +154,50 @@ fn regions() -> CommittedRegions {
 
 #[test]
 fn image_cell_snapshot_keeps_exact_combining_characters() {
-    let mut snapshot = snapshot(
+    let mut snapshot = build_render_snapshot(
         PaneId::new(),
         Rect {
-            origin: Point { x: 1, y: 1 },
-            size: Size { cols: 8, rows: 5 },
+            origin: Point { column: 1, row: 1 },
+            cell_size: Size {
+                column_count: 8,
+                row_count: 5,
+            },
         },
         vec![],
         true,
         true,
         false,
     );
-    let grid = Arc::make_mut(&mut snapshot.panes[0].grid_view.as_mut().unwrap().grid);
-    let mut first = Cell::new('e', 1, Style::default());
-    first.push_combining('\u{301}');
-    *grid.cell_mut(0, 0).unwrap() = first;
-    let mut second = Cell::new('e', 1, Style::default());
-    second.push_combining('\u{300}');
-    *grid.cell_mut(0, 1).unwrap() = second;
-    let cells = image_cell_snapshot(&snapshot, &regions(), RatatuiRect::new(0, 0, 40, 8)).unwrap();
+    let grid = Arc::make_mut(
+        &mut snapshot.pane_snapshots[0]
+            .terminal_grid_view
+            .as_mut()
+            .unwrap()
+            .grid,
+    );
+    let mut first_cell = Cell::from_character('e', 1, Style::default());
+    first_cell.push_combining('\u{301}');
+    *grid.get_cell_mut(0, 0).unwrap() = first_cell;
+    let mut second_cell = Cell::from_character('e', 1, Style::default());
+    second_cell.push_combining('\u{300}');
+    *grid.get_cell_mut(0, 1).unwrap() = second_cell;
+    let image_cells =
+        build_image_cell_snapshot(&snapshot, &regions(), RatatuiRect::new(0, 0, 40, 8)).unwrap();
     assert_eq!(
-        cells.cell(1, 1),
+        image_cells.find_cell(1, 1),
         Some(&ImageCellState {
-            ch: 'e',
-            width: 1,
-            combining: vec!['\u{301}'],
+            character: 'e',
+            cell_width: 1,
+            combining_characters: vec!['\u{301}'],
             style: Style::default(),
         })
     );
     assert_eq!(
-        cells.cell(2, 1),
+        image_cells.find_cell(2, 1),
         Some(&ImageCellState {
-            ch: 'e',
-            width: 1,
-            combining: vec!['\u{300}'],
+            character: 'e',
+            cell_width: 1,
+            combining_characters: vec!['\u{300}'],
             style: Style::default(),
         })
     );
@@ -187,63 +206,107 @@ fn image_cell_snapshot_keeps_exact_combining_characters() {
 #[test]
 fn image_cell_snapshot_matches_screen_reverse_and_selection() {
     let pane_id = PaneId::new();
-    let mut snapshot = snapshot(
+    let mut snapshot = build_render_snapshot(
         pane_id,
         Rect {
-            origin: Point { x: 1, y: 1 },
-            size: Size { cols: 8, rows: 5 },
+            origin: Point { column: 1, row: 1 },
+            cell_size: Size {
+                column_count: 8,
+                row_count: 5,
+            },
         },
         vec![],
         true,
         true,
         false,
     );
-    snapshot.panes[0].reverse_video = true;
-    snapshot.panes[0].selection = Some(SelectionSpans {
-        rows: vec![(0, 0, 0)],
+    snapshot.pane_snapshots[0].is_reverse_video = true;
+    snapshot.pane_snapshots[0].selection_spans = Some(SelectionSpans {
+        row_spans: vec![(0, 0, 0)],
     });
-    let grid = Arc::make_mut(&mut snapshot.panes[0].grid_view.as_mut().unwrap().grid);
+    let grid = Arc::make_mut(
+        &mut snapshot.pane_snapshots[0]
+            .terminal_grid_view
+            .as_mut()
+            .unwrap()
+            .grid,
+    );
     let mut reversed = Style::default();
     reversed.set_reverse(true);
-    *grid.cell_mut(0, 0).unwrap() = Cell::new('a', 1, reversed);
-    *grid.cell_mut(0, 1).unwrap() = Cell::new('b', 1, Style::default());
+    *grid.get_cell_mut(0, 0).unwrap() = Cell::from_character('a', 1, reversed);
+    *grid.get_cell_mut(0, 1).unwrap() = Cell::from_character('b', 1, Style::default());
     let mut reversed_without_selection = Style::default();
     reversed_without_selection.set_reverse(true);
-    *grid.cell_mut(0, 2).unwrap() = Cell::new('c', 1, reversed_without_selection);
+    *grid.get_cell_mut(0, 2).unwrap() = Cell::from_character('c', 1, reversed_without_selection);
 
-    let cells = image_cell_snapshot(&snapshot, &regions(), RatatuiRect::new(0, 0, 40, 8)).unwrap();
+    let image_cells =
+        build_image_cell_snapshot(&snapshot, &regions(), RatatuiRect::new(0, 0, 40, 8)).unwrap();
 
-    assert!(cells.cell(1, 1).unwrap().style.attrs().reverse());
-    assert!(cells.cell(2, 1).unwrap().style.attrs().reverse());
-    assert!(!cells.cell(3, 1).unwrap().style.attrs().reverse());
+    assert!(image_cells
+        .find_cell(1, 1)
+        .unwrap()
+        .style
+        .get_attributes()
+        .is_reverse());
+    assert!(image_cells
+        .find_cell(2, 1)
+        .unwrap()
+        .style
+        .get_attributes()
+        .is_reverse());
+    assert!(!image_cells
+        .find_cell(3, 1)
+        .unwrap()
+        .style
+        .get_attributes()
+        .is_reverse());
 }
 
 #[test]
 fn image_order_is_one_global_sequence_across_panes() {
     let pane_id = PaneId::new();
-    let mut snapshot = snapshot(
+    let mut snapshot = build_render_snapshot(
         pane_id,
         Rect {
-            origin: Point { x: 1, y: 1 },
-            size: Size { cols: 8, rows: 5 },
+            origin: Point { column: 1, row: 1 },
+            cell_size: Size {
+                column_count: 8,
+                row_count: 5,
+            },
         },
-        vec![ImagePlacementSnapshot::new(1, record(1, 1, 0), (0, 0), 1, 1).unwrap()],
+        vec![ImagePlacementSnapshot::from_image_record(
+            1,
+            build_image_record(1, 1, 0),
+            (0, 0),
+            1,
+            1,
+        )
+        .unwrap()],
         true,
         true,
         false,
     );
-    let mut second = snapshot.panes[0].clone();
-    second.id = PaneId::new();
-    let mut slot = snapshot.session.active_tab.layout_solved[0].clone();
-    slot.pane_id = second.id;
-    slot.inner_rect.as_mut().unwrap().origin.x = 10;
-    snapshot.panes.push(second);
-    snapshot.session.active_tab.layout_solved.push(slot);
-    let paints = image_paints(&snapshot, &regions(), RatatuiRect::new(0, 0, 40, 8));
+    let mut second_pane_snapshot = snapshot.pane_snapshots[0].clone();
+    second_pane_snapshot.pane_id = PaneId::new();
+    let mut second_pane_slot = snapshot.session_snapshot.active_tab_snapshot.pane_slots[0].clone();
+    second_pane_slot.pane_id = second_pane_snapshot.pane_id;
+    second_pane_slot
+        .content_rect
+        .as_mut()
+        .unwrap()
+        .origin
+        .column = 10;
+    snapshot.pane_snapshots.push(second_pane_snapshot);
+    snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .pane_slots
+        .push(second_pane_slot);
+    let image_paints = build_image_paints(&snapshot, &regions(), RatatuiRect::new(0, 0, 40, 8));
     assert_eq!(
-        paints
+        image_paints
             .iter()
-            .map(|paint| (paint.target, paint.order))
+            .map(|image_paint| (image_paint.target_area, image_paint.draw_order))
             .collect::<Vec<_>>(),
         [
             (RatatuiRect::new(1, 1, 1, 1), 0),
@@ -255,37 +318,44 @@ fn image_order_is_one_global_sequence_across_panes() {
 #[test]
 fn a_scrolled_crop_keeps_the_full_image_scale() {
     let pane_id = PaneId::new();
-    let placement = ImagePlacementSnapshot::new(7, record(8, 12, 0), (0, 0), 4, 4)
-        .expect("valid placement")
-        .with_geometry(koshi_core::geometry::ImageCellGeometry {
-            full_size: Size { cols: 4, rows: 6 },
-            offset: Point { x: 0, y: 2 },
-        })
-        .expect("visible crop");
-    let snapshot = snapshot(
+    let placement =
+        ImagePlacementSnapshot::from_image_record(7, build_image_record(8, 12, 0), (0, 0), 4, 4)
+            .expect("valid placement")
+            .with_cell_geometry(koshi_core::geometry::ImageCellGeometry {
+                full_size: Size {
+                    column_count: 4,
+                    row_count: 6,
+                },
+                cell_offset: Point { column: 0, row: 2 },
+            })
+            .expect("visible crop");
+    let snapshot = build_render_snapshot(
         pane_id,
         Rect {
-            origin: Point { x: 1, y: 1 },
-            size: Size { cols: 8, rows: 5 },
+            origin: Point { column: 1, row: 1 },
+            cell_size: Size {
+                column_count: 8,
+                row_count: 5,
+            },
         },
         vec![placement],
         true,
         true,
         false,
     );
-    let paints = image_paints(&snapshot, &regions(), RatatuiRect::new(0, 0, 40, 8));
+    let image_paints = build_image_paints(&snapshot, &regions(), RatatuiRect::new(0, 0, 40, 8));
     assert_eq!(
-        paints
+        image_paints
             .iter()
-            .map(|paint| (paint.target, paint.source))
+            .map(|image_paint| (image_paint.target_area, image_paint.source_rect))
             .collect::<Vec<_>>(),
         [(
             RatatuiRect::new(1, 1, 4, 4),
             ImageSourceRect {
-                x: 0,
-                y: 4,
-                width: 8,
-                height: 8
+                pixel_x: 0,
+                pixel_y: 4,
+                pixel_width: 8,
+                pixel_height: 8
             }
         )]
     );
@@ -294,20 +364,24 @@ fn a_scrolled_crop_keeps_the_full_image_scale() {
 #[test]
 fn image_paint_keeps_geometry_and_rgba_record() {
     let pane_id = PaneId::new();
-    let placement = ImagePlacementSnapshot::new(7, record(6, 4, 0), (1, 2), 3, 2)
-        .expect("test image placement is valid");
-    let snapshot = snapshot(
+    let placement =
+        ImagePlacementSnapshot::from_image_record(7, build_image_record(6, 4, 0), (1, 2), 3, 2)
+            .expect("test image placement is valid");
+    let snapshot = build_render_snapshot(
         pane_id,
         Rect {
-            origin: Point { x: 1, y: 1 },
-            size: Size { cols: 8, rows: 5 },
+            origin: Point { column: 1, row: 1 },
+            cell_size: Size {
+                column_count: 8,
+                row_count: 5,
+            },
         },
         vec![placement],
         true,
         true,
         false,
     );
-    let paints = image_paints(
+    let image_paints = build_image_paints(
         &snapshot,
         &regions(),
         RatatuiRect {
@@ -318,11 +392,11 @@ fn image_paint_keeps_geometry_and_rgba_record() {
         },
     );
 
-    assert_eq!(paints.len(), 1);
-    assert_eq!(paints[0].pane_id, pane_id);
-    assert_eq!(paints[0].placement_id, 7);
+    assert_eq!(image_paints.len(), 1);
+    assert_eq!(image_paints[0].pane_id, pane_id);
+    assert_eq!(image_paints[0].placement_id, 7);
     assert_eq!(
-        paints[0].target,
+        image_paints[0].target_area,
         RatatuiRect {
             x: 3,
             y: 2,
@@ -331,35 +405,38 @@ fn image_paint_keeps_geometry_and_rgba_record() {
         }
     );
     assert_eq!(
-        paints[0].source,
+        image_paints[0].source_rect,
         ImageSourceRect {
-            x: 0,
-            y: 0,
-            width: 6,
-            height: 4,
+            pixel_x: 0,
+            pixel_y: 0,
+            pixel_width: 6,
+            pixel_height: 4,
         }
     );
-    assert_eq!(paints[0].record.image.width, 6);
-    assert_eq!(paints[0].record.image.height, 4);
-    assert_eq!(paints[0].record.image.rgba[0], 0);
-    assert_eq!(paints[0].record.image.rgba[95], 95);
+    assert_eq!(image_paints[0].image_record.image.pixel_width, 6);
+    assert_eq!(image_paints[0].image_record.image.pixel_height, 4);
+    assert_eq!(image_paints[0].image_record.image.rgba_bytes[0], 0);
+    assert_eq!(image_paints[0].image_record.image.rgba_bytes[95], 95);
 }
 
 #[test]
 fn image_paint_crops_right_and_bottom_edges_to_the_pane() {
     let pane_id = PaneId::new();
-    let inner = Rect {
-        origin: Point { x: 2, y: 2 },
-        size: Size { cols: 4, rows: 4 },
+    let pane_content_rect = Rect {
+        origin: Point { column: 2, row: 2 },
+        cell_size: Size {
+            column_count: 4,
+            row_count: 4,
+        },
     };
     let placements = vec![
-        ImagePlacementSnapshot::new(1, record(8, 8, 0), (0, 3), 4, 4)
+        ImagePlacementSnapshot::from_image_record(1, build_image_record(8, 8, 0), (0, 3), 4, 4)
             .expect("test image placement is valid"),
-        ImagePlacementSnapshot::new(2, record(8, 8, 0), (3, 0), 4, 4)
+        ImagePlacementSnapshot::from_image_record(2, build_image_record(8, 8, 0), (3, 0), 4, 4)
             .expect("test image placement is valid"),
     ];
-    let snapshot = snapshot(pane_id, inner, placements, true, true, false);
-    let paints = image_paints(
+    let snapshot = build_render_snapshot(pane_id, pane_content_rect, placements, true, true, false);
+    let image_paints = build_image_paints(
         &snapshot,
         &regions(),
         RatatuiRect {
@@ -370,10 +447,10 @@ fn image_paint_crops_right_and_bottom_edges_to_the_pane() {
         },
     );
 
-    assert_eq!(paints.len(), 2);
-    assert_eq!(paints[0].placement_id, 1);
+    assert_eq!(image_paints.len(), 2);
+    assert_eq!(image_paints[0].placement_id, 1);
     assert_eq!(
-        paints[0].target,
+        image_paints[0].target_area,
         RatatuiRect {
             x: 5,
             y: 2,
@@ -382,17 +459,17 @@ fn image_paint_crops_right_and_bottom_edges_to_the_pane() {
         }
     );
     assert_eq!(
-        paints[0].source,
+        image_paints[0].source_rect,
         ImageSourceRect {
-            x: 0,
-            y: 0,
-            width: 2,
-            height: 8
+            pixel_x: 0,
+            pixel_y: 0,
+            pixel_width: 2,
+            pixel_height: 8
         }
     );
-    assert_eq!(paints[1].placement_id, 2);
+    assert_eq!(image_paints[1].placement_id, 2);
     assert_eq!(
-        paints[1].target,
+        image_paints[1].target_area,
         RatatuiRect {
             x: 2,
             y: 5,
@@ -401,12 +478,12 @@ fn image_paint_crops_right_and_bottom_edges_to_the_pane() {
         }
     );
     assert_eq!(
-        paints[1].source,
+        image_paints[1].source_rect,
         ImageSourceRect {
-            x: 0,
-            y: 0,
-            width: 8,
-            height: 2
+            pixel_x: 0,
+            pixel_y: 0,
+            pixel_width: 8,
+            pixel_height: 2
         }
     );
 }
@@ -414,25 +491,29 @@ fn image_paint_crops_right_and_bottom_edges_to_the_pane() {
 #[test]
 fn image_paint_applies_kitty_source_and_first_cell_offsets() {
     let pane_id = PaneId::new();
-    let mut record = (*record(6, 4, 0)).clone();
-    record.display = ImageDisplay {
-        width: Some(ImageDimension::Pixels(3)),
-        height: Some(ImageDimension::Pixels(2)),
-        source_offset_x: Some(1),
-        source_offset_y: Some(1),
-        cell_offset_x: Some(4),
-        cell_offset_y: Some(5),
-        cell_columns: Some(3),
-        cell_rows: Some(2),
+    let mut image_record = (*build_image_record(6, 4, 0)).clone();
+    image_record.display = ImageDisplay {
+        requested_width: Some(ImageDimension::Pixels(3)),
+        requested_height: Some(ImageDimension::Pixels(2)),
+        source_pixel_offset_x: Some(1),
+        source_pixel_offset_y: Some(1),
+        cell_pixel_offset_x: Some(4),
+        cell_pixel_offset_y: Some(5),
+        requested_column_count: Some(3),
+        requested_row_count: Some(2),
         ..ImageDisplay::default()
     };
-    let placement = ImagePlacementSnapshot::new(1, Arc::new(record), (0, 0), 3, 2)
-        .expect("test image placement is valid");
-    let snapshot = snapshot(
+    let placement =
+        ImagePlacementSnapshot::from_image_record(1, Arc::new(image_record), (0, 0), 3, 2)
+            .expect("test image placement is valid");
+    let snapshot = build_render_snapshot(
         pane_id,
         Rect {
-            origin: Point { x: 0, y: 0 },
-            size: Size { cols: 3, rows: 2 },
+            origin: Point { column: 0, row: 0 },
+            cell_size: Size {
+                column_count: 3,
+                row_count: 2,
+            },
         },
         vec![placement],
         true,
@@ -440,7 +521,7 @@ fn image_paint_applies_kitty_source_and_first_cell_offsets() {
         false,
     );
 
-    let paints = image_paints(
+    let image_paints = build_image_paints(
         &snapshot,
         &regions(),
         RatatuiRect {
@@ -451,47 +532,50 @@ fn image_paint_applies_kitty_source_and_first_cell_offsets() {
         },
     );
 
-    assert_eq!(paints.len(), 1);
+    assert_eq!(image_paints.len(), 1);
     assert_eq!(
-        paints[0].source,
+        image_paints[0].source_rect,
         ImageSourceRect {
-            x: 1,
-            y: 1,
-            width: 3,
-            height: 2,
+            pixel_x: 1,
+            pixel_y: 1,
+            pixel_width: 3,
+            pixel_height: 2,
         }
     );
-    assert_eq!(paints[0].cell_offset_x, Some(4));
-    assert_eq!(paints[0].cell_offset_y, Some(5));
+    assert_eq!(image_paints[0].cell_pixel_offset_x, Some(4));
+    assert_eq!(image_paints[0].cell_pixel_offset_y, Some(5));
 }
 
 #[test]
 fn image_paint_ignores_kitty_offsets_on_other_protocols() {
     let pane_id = PaneId::new();
-    let record = Arc::new(ImageRecord {
+    let image_record = Arc::new(ImageRecord {
         protocol: GraphicsProtocol::Iterm2,
         image: (DecodedImage {
-            width: 1,
-            height: 1,
-            rgba: vec![0, 0, 0, 255],
+            pixel_width: 1,
+            pixel_height: 1,
+            rgba_bytes: vec![0, 0, 0, 255],
         })
         .into(),
         animation: None,
         action: ImageAction::Display,
         display: ImageDisplay {
-            cell_offset_x: Some(4),
-            cell_offset_y: Some(5),
+            cell_pixel_offset_x: Some(4),
+            cell_pixel_offset_y: Some(5),
             ..ImageDisplay::default()
         },
         anchor: (0, 0),
     });
-    let placement = ImagePlacementSnapshot::new(1, record, (0, 0), 1, 1)
+    let placement = ImagePlacementSnapshot::from_image_record(1, image_record, (0, 0), 1, 1)
         .expect("test image placement is valid");
-    let snapshot = snapshot(
+    let snapshot = build_render_snapshot(
         pane_id,
         Rect {
-            origin: Point { x: 0, y: 0 },
-            size: Size { cols: 1, rows: 1 },
+            origin: Point { column: 0, row: 0 },
+            cell_size: Size {
+                column_count: 1,
+                row_count: 1,
+            },
         },
         vec![placement],
         true,
@@ -499,7 +583,7 @@ fn image_paint_ignores_kitty_offsets_on_other_protocols() {
         false,
     );
 
-    let paints = image_paints(
+    let image_paints = build_image_paints(
         &snapshot,
         &regions(),
         RatatuiRect {
@@ -510,52 +594,59 @@ fn image_paint_ignores_kitty_offsets_on_other_protocols() {
         },
     );
 
-    assert_eq!(paints.len(), 1);
-    assert_eq!(paints[0].cell_offset_x, None);
-    assert_eq!(paints[0].cell_offset_y, None);
+    assert_eq!(image_paints.len(), 1);
+    assert_eq!(image_paints[0].cell_pixel_offset_x, None);
+    assert_eq!(image_paints[0].cell_pixel_offset_y, None);
 }
 
 #[test]
 fn available_and_unavailable_placements_start_with_full_geometry() {
-    let available = ImagePlacementSnapshot::new(1, record(2, 3, 0), (4, 5), 6, 7)
-        .expect("the available placement is valid");
+    let available =
+        ImagePlacementSnapshot::from_image_record(1, build_image_record(2, 3, 0), (4, 5), 6, 7)
+            .expect("the available placement is valid");
     let unavailable = ImagePlacementSnapshot::unavailable(1, 9, (4, 5), 6, 7)
         .expect("the unavailable placement is valid");
-    let expected = koshi_core::geometry::ImageCellGeometry {
-        full_size: Size { cols: 6, rows: 7 },
-        offset: Point { x: 0, y: 0 },
+    let expected_image_cell_geometry = koshi_core::geometry::ImageCellGeometry {
+        full_size: Size {
+            column_count: 6,
+            row_count: 7,
+        },
+        cell_offset: Point { column: 0, row: 0 },
     };
 
-    assert_eq!(available.geometry(), expected);
-    assert_eq!(unavailable.geometry(), expected);
+    assert_eq!(available.get_cell_geometry(), expected_image_cell_geometry);
+    assert_eq!(
+        unavailable.get_cell_geometry(),
+        expected_image_cell_geometry
+    );
 }
 
 #[test]
 fn image_placement_constructor_rejects_invalid_basic_state() {
-    let valid = record(1, 1, 0);
+    let valid_image_record = build_image_record(1, 1, 0);
     assert_eq!(
-        ImagePlacementSnapshot::new(0, valid.clone(), (0, 0), 1, 1),
+        ImagePlacementSnapshot::from_image_record(0, valid_image_record.clone(), (0, 0), 1, 1),
         None
     );
     assert_eq!(
-        ImagePlacementSnapshot::new(1, valid.clone(), (0, 0), 0, 1),
+        ImagePlacementSnapshot::from_image_record(1, valid_image_record.clone(), (0, 0), 0, 1),
         None
     );
     assert_eq!(
-        ImagePlacementSnapshot::new(1, valid.clone(), (0, 0), 1, 0),
+        ImagePlacementSnapshot::from_image_record(1, valid_image_record.clone(), (0, 0), 1, 0),
         None
     );
     assert_eq!(
-        ImagePlacementSnapshot::new(1, valid, (u16::MAX, 0), 2, 2),
+        ImagePlacementSnapshot::from_image_record(1, valid_image_record, (u16::MAX, 0), 2, 2),
         None
     );
 
-    let invalid_record = Arc::new(ImageRecord {
+    let invalid_image_record = Arc::new(ImageRecord {
         protocol: GraphicsProtocol::Kitty,
         image: (DecodedImage {
-            width: 1,
-            height: 1,
-            rgba: Vec::new(),
+            pixel_width: 1,
+            pixel_height: 1,
+            rgba_bytes: Vec::new(),
         })
         .into(),
         animation: None,
@@ -564,38 +655,38 @@ fn image_placement_constructor_rejects_invalid_basic_state() {
         anchor: (0, 0),
     });
     assert_eq!(
-        ImagePlacementSnapshot::new(1, invalid_record, (0, 0), 1, 1),
+        ImagePlacementSnapshot::from_image_record(1, invalid_image_record, (0, 0), 1, 1),
         None
     );
 
-    let invalid_source = Arc::new(ImageRecord {
+    let invalid_source_image_record = Arc::new(ImageRecord {
         protocol: GraphicsProtocol::Kitty,
         image: (DecodedImage {
-            width: 1,
-            height: 1,
-            rgba: vec![0, 0, 0, 255],
+            pixel_width: 1,
+            pixel_height: 1,
+            rgba_bytes: vec![0, 0, 0, 255],
         })
         .into(),
         animation: None,
         action: ImageAction::TransmitAndDisplay,
         display: ImageDisplay {
-            source_offset_x: Some(1),
+            source_pixel_offset_x: Some(1),
             ..ImageDisplay::default()
         },
         anchor: (0, 0),
     });
     assert_eq!(
-        ImagePlacementSnapshot::new(1, invalid_source, (0, 0), 1, 1),
+        ImagePlacementSnapshot::from_image_record(1, invalid_source_image_record, (0, 0), 1, 1,),
         None
     );
 }
 
 #[test]
 fn image_placeholder_clips_all_four_buffer_edges() {
-    let paint = ImagePaint::new(
+    let image_paint = ImagePaint::from_image_placement(
         PaneId::new(),
         1,
-        record(4, 4, 0),
+        build_image_record(4, 4, 0),
         RatatuiRect {
             x: 0,
             y: 0,
@@ -603,59 +694,84 @@ fn image_placeholder_clips_all_four_buffer_edges() {
             height: 4,
         },
         ImageSourceRect {
-            x: 0,
-            y: 0,
-            width: 4,
-            height: 4,
+            pixel_x: 0,
+            pixel_y: 0,
+            pixel_width: 4,
+            pixel_height: 4,
         },
         0,
     );
-    let mut buffer = Buffer::empty(RatatuiRect {
+    let mut render_buffer = Buffer::empty(RatatuiRect {
         x: 1,
         y: 1,
         width: 2,
         height: 2,
     });
 
-    draw_image_placeholders(&[paint.target], &mut buffer);
+    draw_image_placeholders(&[image_paint.target_area], &mut render_buffer);
 
-    assert_eq!(buffer[(1, 1)].symbol(), "t");
-    assert_eq!(buffer[(2, 1)].symbol(), "e");
-    assert_eq!(buffer[(1, 2)].symbol(), "r");
-    assert_eq!(buffer[(2, 2)].symbol(), "m");
+    assert_eq!(render_buffer[(1, 1)].symbol(), "t");
+    assert_eq!(render_buffer[(2, 1)].symbol(), "e");
+    assert_eq!(render_buffer[(1, 2)].symbol(), "r");
+    assert_eq!(render_buffer[(2, 2)].symbol(), "m");
 }
 
 #[test]
 fn image_paints_skip_hidden_suppressed_and_gridless_panes() {
     let pane_id = PaneId::new();
-    let placement = ImagePlacementSnapshot::new(1, record(2, 2, 0), (0, 0), 1, 1)
-        .expect("test image placement is valid");
-    let inner = Rect {
-        origin: Point { x: 0, y: 0 },
-        size: Size { cols: 4, rows: 4 },
+    let placement =
+        ImagePlacementSnapshot::from_image_record(1, build_image_record(2, 2, 0), (0, 0), 1, 1)
+            .expect("test image placement is valid");
+    let pane_content_rect = Rect {
+        origin: Point { column: 0, row: 0 },
+        cell_size: Size {
+            column_count: 4,
+            row_count: 4,
+        },
     };
-    let area = RatatuiRect {
+    let viewport_area = RatatuiRect {
         x: 0,
         y: 0,
         width: 40,
         height: 8,
     };
-    assert!(image_paints(
-        &snapshot(pane_id, inner, vec![placement.clone()], false, true, false),
+    assert!(build_image_paints(
+        &build_render_snapshot(
+            pane_id,
+            pane_content_rect,
+            vec![placement.clone()],
+            false,
+            true,
+            false,
+        ),
         &regions(),
-        area
+        viewport_area
     )
     .is_empty());
-    assert!(image_paints(
-        &snapshot(pane_id, inner, vec![placement.clone()], true, false, false),
+    assert!(build_image_paints(
+        &build_render_snapshot(
+            pane_id,
+            pane_content_rect,
+            vec![placement.clone()],
+            true,
+            false,
+            false,
+        ),
         &regions(),
-        area
+        viewport_area
     )
     .is_empty());
-    assert!(image_paints(
-        &snapshot(pane_id, inner, vec![placement], true, true, true),
+    assert!(build_image_paints(
+        &build_render_snapshot(
+            pane_id,
+            pane_content_rect,
+            vec![placement],
+            true,
+            true,
+            true,
+        ),
         &regions(),
-        area
+        viewport_area
     )
     .is_empty());
 }
@@ -664,17 +780,20 @@ fn image_paints_skip_hidden_suppressed_and_gridless_panes() {
 fn image_paints_sort_overlaps_by_z_index() {
     let pane_id = PaneId::new();
     let placements = vec![
-        ImagePlacementSnapshot::new(10, record(2, 2, 4), (0, 0), 2, 1)
+        ImagePlacementSnapshot::from_image_record(10, build_image_record(2, 2, 4), (0, 0), 2, 1)
             .expect("test image placement is valid"),
-        ImagePlacementSnapshot::new(9, record(2, 2, -1), (0, 0), 2, 1)
+        ImagePlacementSnapshot::from_image_record(9, build_image_record(2, 2, -1), (0, 0), 2, 1)
             .expect("test image placement is valid"),
     ];
-    let paints = image_paints(
-        &snapshot(
+    let image_paints = build_image_paints(
+        &build_render_snapshot(
             pane_id,
             Rect {
-                origin: Point { x: 0, y: 0 },
-                size: Size { cols: 4, rows: 4 },
+                origin: Point { column: 0, row: 0 },
+                cell_size: Size {
+                    column_count: 4,
+                    row_count: 4,
+                },
             },
             placements,
             true,
@@ -691,14 +810,17 @@ fn image_paints_sort_overlaps_by_z_index() {
     );
 
     assert_eq!(
-        paints
+        image_paints
             .iter()
-            .map(|paint| paint.placement_id)
+            .map(|image_paint| image_paint.placement_id)
             .collect::<Vec<_>>(),
         [9, 10]
     );
     assert_eq!(
-        paints.iter().map(|paint| paint.z_index).collect::<Vec<_>>(),
+        image_paints
+            .iter()
+            .map(|image_paint| image_paint.z_index)
+            .collect::<Vec<_>>(),
         [-1, 4]
     );
 }
@@ -706,20 +828,24 @@ fn image_paints_sort_overlaps_by_z_index() {
 #[test]
 fn unsupported_image_text_fills_the_visible_coverage() {
     let pane_id = PaneId::new();
-    let placement = ImagePlacementSnapshot::new(1, record(26, 1, 0), (0, 0), 26, 1)
-        .expect("test image placement is valid");
-    let snapshot = snapshot(
+    let placement =
+        ImagePlacementSnapshot::from_image_record(1, build_image_record(26, 1, 0), (0, 0), 26, 1)
+            .expect("test image placement is valid");
+    let snapshot = build_render_snapshot(
         pane_id,
         Rect {
-            origin: Point { x: 0, y: 0 },
-            size: Size { cols: 26, rows: 1 },
+            origin: Point { column: 0, row: 0 },
+            cell_size: Size {
+                column_count: 26,
+                row_count: 1,
+            },
         },
         vec![placement],
         true,
         true,
         false,
     );
-    let paints = image_paints(
+    let image_paints = build_image_paints(
         &snapshot,
         &regions(),
         RatatuiRect {
@@ -736,114 +862,130 @@ fn unsupported_image_text_fills_the_visible_coverage() {
         height: 8,
     });
 
-    let rects: Vec<RatatuiRect> = paints.iter().map(|paint| paint.target).collect();
-    draw_image_placeholders(&rects, &mut buffer);
+    let image_target_areas: Vec<RatatuiRect> = image_paints
+        .iter()
+        .map(|image_paint| image_paint.target_area)
+        .collect();
+    draw_image_placeholders(&image_target_areas, &mut buffer);
 
-    let text: String = (0..26).map(|col| buffer[(col, 0)].symbol()).collect();
-    assert_eq!(text, TERMINAL_IMAGE_UNAVAILABLE);
+    let rendered_placeholder_text: String = (0..26)
+        .map(|column_index| buffer[(column_index, 0)].symbol())
+        .collect();
+    assert_eq!(rendered_placeholder_text, TERMINAL_IMAGE_UNAVAILABLE);
 }
 
 #[test]
 fn native_mode_keeps_image_cells_and_placeholder_mode_writes_the_label() {
     let pane_id = PaneId::new();
-    let mut snapshot = snapshot(
+    let mut snapshot = build_render_snapshot(
         pane_id,
         Rect {
-            origin: Point { x: 1, y: 1 },
-            size: Size { cols: 4, rows: 1 },
+            origin: Point { column: 1, row: 1 },
+            cell_size: Size {
+                column_count: 4,
+                row_count: 1,
+            },
         },
-        vec![
-            ImagePlacementSnapshot::new(1, record(4, 1, 0), (0, 0), 4, 1)
-                .expect("test image placement is valid"),
-        ],
+        vec![ImagePlacementSnapshot::from_image_record(
+            1,
+            build_image_record(4, 1, 0),
+            (0, 0),
+            4,
+            1,
+        )
+        .expect("test image placement is valid")],
         true,
         true,
         false,
     );
-    let mut grid = Grid::blank(6, 38, Style::default());
-    *grid.cell_mut(0, 0).expect("image target cell exists") = Cell::new('X', 1, Style::default());
-    snapshot.panes[0].grid_view = Some(GridView {
-        grid: Arc::new(grid),
-        view_offset: 0,
+    let mut terminal_grid = Grid::blank(6, 38, Style::default());
+    *terminal_grid
+        .get_cell_mut(0, 0)
+        .expect("image target cell exists") = Cell::from_character('X', 1, Style::default());
+    snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView {
+        grid: Arc::new(terminal_grid),
+        view_row_offset: 0,
     });
-    let area = RatatuiRect {
+    let viewport_area = RatatuiRect {
         x: 0,
         y: 0,
         width: 40,
         height: 8,
     };
-    let hints = KeymapHints::default();
-    let theme = Theme::default();
+    let keymap_hints = KeymapHints::default();
+    let render_theme = Theme::default();
 
-    let mut placeholder = Buffer::empty(area);
+    let mut placeholder_buffer = Buffer::empty(viewport_area);
     crate::render::render_frame_with_images(
         &snapshot,
         &regions(),
-        &theme,
-        &hints,
+        &render_theme,
+        &keymap_hints,
         None,
         ViewerChrome::default(),
         ImageRenderMode::Placeholder,
-        area,
-        &mut placeholder,
+        viewport_area,
+        &mut placeholder_buffer,
     );
     let placeholder_text: String = (1..5)
-        .map(|column| placeholder[(column, 1)].symbol())
+        .map(|column_index| placeholder_buffer[(column_index, 1)].symbol())
         .collect();
     assert_eq!(placeholder_text, "term");
 
-    let mut native = Buffer::empty(area);
+    let mut native_buffer = Buffer::empty(viewport_area);
     crate::render::render_frame_with_images(
         &snapshot,
         &regions(),
-        &theme,
-        &hints,
+        &render_theme,
+        &keymap_hints,
         None,
         ViewerChrome::default(),
         ImageRenderMode::Native,
-        area,
-        &mut native,
+        viewport_area,
+        &mut native_buffer,
     );
-    let native_text: String = (1..5).map(|column| native[(column, 1)].symbol()).collect();
+    let native_text: String = (1..5)
+        .map(|column_index| native_buffer[(column_index, 1)].symbol())
+        .collect();
     assert_eq!(native_text, "X   ");
-    assert!(native
+    assert!(native_buffer
         .content()
         .iter()
-        .all(|cell| !cell.symbol().contains('\u{1b}')));
+        .all(|buffer_cell| !buffer_cell.symbol().contains('\u{1b}')));
 
-    let mut unavailable = Buffer::empty(area);
+    let mut unavailable_buffer = Buffer::empty(viewport_area);
     crate::render::render_frame_with_image_availability(
         &snapshot,
         &regions(),
-        &theme,
-        &hints,
+        &render_theme,
+        &keymap_hints,
         None,
         ViewerChrome::default(),
         ImageRenderMode::Native,
         Some(&[]),
-        area,
-        &mut unavailable,
+        viewport_area,
+        &mut unavailable_buffer,
     );
     let unavailable_text: String = (1..5)
-        .map(|column| unavailable[(column, 1)].symbol())
+        .map(|column_index| unavailable_buffer[(column_index, 1)].symbol())
         .collect();
     assert_eq!(unavailable_text, "term");
 
-    let mut available = Buffer::empty(area);
+    let mut available_buffer = Buffer::empty(viewport_area);
     crate::render::render_frame_with_image_availability(
         &snapshot,
         &regions(),
-        &theme,
-        &hints,
+        &render_theme,
+        &keymap_hints,
         None,
         ViewerChrome::default(),
         ImageRenderMode::Native,
         Some(&[(pane_id, 1)]),
-        area,
-        &mut available,
+        viewport_area,
+        &mut available_buffer,
     );
     let available_text: String = (1..5)
-        .map(|column| available[(column, 1)].symbol())
+        .map(|column_index| available_buffer[(column_index, 1)].symbol())
         .collect();
     assert_eq!(available_text, "X   ");
 }

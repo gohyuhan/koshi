@@ -4,7 +4,7 @@
 use koshi_core::geometry::Size;
 use koshi_core::key::KeySequence;
 use koshi_core::lock::LockMode;
-use koshi_layout::regions::{solve, Edge, RegionGeometry, RegionSolve};
+use koshi_layout::regions::{solve_region_rects, Edge, RegionGeometry, SolvedRegions};
 
 use crate::snapshot::{KeymapHints, Reconnecting, TabMeta};
 
@@ -13,18 +13,18 @@ use crate::snapshot::{KeymapHints, Reconnecting, TabMeta};
 const CORE_REGION_GEOMETRIES: [RegionGeometry; 2] = [
     RegionGeometry {
         edge: Edge::Top,
-        extent: 1,
+        extent_cell_count: 1,
     },
     RegionGeometry {
         edge: Edge::Bottom,
-        extent: 1,
+        extent_cell_count: 1,
     },
 ];
 
 /// Solve the compiled-in tabline and statusline regions for `viewport`.
 #[must_use]
-pub fn core_region_solve(viewport: Size) -> RegionSolve {
-    solve(viewport, &CORE_REGION_GEOMETRIES)
+pub fn solve_core_regions(viewport: Size) -> SolvedRegions {
+    solve_region_rects(viewport, &CORE_REGION_GEOMETRIES)
 }
 
 /// The statusline facts needed to paint it: the keybinding hints and the open
@@ -36,10 +36,10 @@ pub fn core_region_solve(viewport: Size) -> RegionSolve {
 pub(crate) struct StatuslineInputs<'a> {
     /// Every binding in the viewer's current mode, with the prefix labels, the
     /// removals, and the keymap-reverted marker.
-    pub(crate) hints: &'a KeymapHints,
+    pub(crate) keymap_hints: &'a KeymapHints,
     /// The chords already pressed of an open key sequence. `None` when no
     /// sequence is open.
-    pub(crate) pending: Option<&'a KeySequence>,
+    pub(crate) pending_key_sequence: Option<&'a KeySequence>,
 }
 
 /// The tabline facts needed to solve its geometry and paint it.
@@ -52,11 +52,11 @@ pub(crate) struct TablineInputs<'a> {
     /// The session display name shown in the left block.
     pub(crate) session_name: &'a str,
     /// The tab metadata shown between the left and right blocks.
-    pub(crate) tabs: &'a [TabMeta],
+    pub(crate) tabs_metadata: &'a [TabMeta],
     /// The viewing client's lock state shown in the mode tag.
     pub(crate) lock_mode: LockMode,
     /// Whether the viewing client is selecting with the mouse.
-    pub(crate) mouse_select: bool,
+    pub(crate) is_mouse_selection_enabled: bool,
     /// The reconnect state shown in the mode tag, if the viewer has no link.
     pub(crate) reconnecting: Option<Reconnecting>,
     /// The first tab index the viewer is peeking at, if one is set.

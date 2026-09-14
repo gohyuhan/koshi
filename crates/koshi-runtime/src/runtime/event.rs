@@ -49,21 +49,21 @@ pub enum RuntimeEvent {
         /// Pane whose child produced the output.
         pane_id: PaneId,
         /// The bytes read from the PTY, fed verbatim to the pane's terminal.
-        bytes: Vec<u8>,
+        output_bytes: Vec<u8>,
     },
     /// A child process ended.
     ChildExit {
         /// Pane whose child exited.
         pane_id: PaneId,
         /// How the child ended: an exit code or a terminating signal.
-        status: ExitStatus,
+        exit_status: ExitStatus,
     },
     /// A client's outer terminal changed size.
     Resize {
         /// Client whose terminal was resized.
         client_id: ClientId,
         /// The client's new size in cells, before size reconciliation.
-        size: Size,
+        viewport_size: Size,
         /// The pane region the client draws the tab's panes in at the new
         /// size; `None` replaces any earlier report.
         pane_area: Option<PaneArea>,
@@ -76,7 +76,7 @@ pub enum RuntimeEvent {
         /// The client that supplied the measurement.
         client_id: ClientId,
         /// The nonzero pixel dimensions of one cell.
-        size: koshi_core::geometry::PixelCellSize,
+        cell_size: koshi_core::geometry::PixelCellSize,
     },
     /// A client left, stopping its view of whatever tab it held.
     ClientDetached {
@@ -88,7 +88,7 @@ pub enum RuntimeEvent {
         /// Whether the connection carrying this client reached its event
         /// stream. `false` from the attach reply failing to write, which hands
         /// the client no token; the view it was looking at is dropped.
-        streamed: bool,
+        is_streamed: bool,
     },
     /// A periodic tick for time-driven refreshes such as cursor blink.
     Timer,
@@ -125,7 +125,7 @@ pub enum RuntimeEvent {
         /// The `request_id` the round arrived under, repeated in its answer.
         request_id: u64,
         /// What to run, in order. An empty round is answered like any other.
-        actions: Vec<WireMouseAction>,
+        mouse_actions: Vec<WireMouseAction>,
     },
     /// One decoded outer-terminal mouse event awaiting the viewer's answer.
     /// Carries the event alone: which pane it lands on, which gesture it
@@ -139,7 +139,7 @@ pub enum RuntimeEvent {
         /// Client whose terminal produced the mouse event.
         client_id: ClientId,
         /// The decoded event: kind, cell position, and modifiers.
-        mouse: MouseInput,
+        mouse_input: MouseInput,
     },
     /// Text the client's outer terminal pasted — the OS paste key pressed in
     /// the terminal koshi runs in, delivered whole so no character of it can
@@ -148,7 +148,7 @@ pub enum RuntimeEvent {
         /// Client whose terminal pasted.
         client_id: ClientId,
         /// The pasted text, exactly as the outer terminal delivered it.
-        text: String,
+        pasted_text: String,
     },
     /// A command delivered over the IPC socket, from external or in-session
     /// CLI. Carries the reply sender the connection thread waits on: the
@@ -158,7 +158,7 @@ pub enum RuntimeEvent {
         /// The command as it arrived over the socket.
         envelope: CommandEnvelope,
         /// Where the dispatcher sends the command's result.
-        reply: Sender<CommandResult>,
+        response_sender: Sender<CommandResult>,
     },
     /// An attach request delivered over the IPC socket: the caller asks to
     /// join the running session as a viewing client. Carries the reply sender
@@ -171,7 +171,7 @@ pub enum RuntimeEvent {
         /// record back when it still holds it, the tab that record was viewing
         /// still exists, and no connection is streaming for it, and mints a
         /// fresh client otherwise.
-        resume: Option<ClientId>,
+        resume_client_id: Option<ClientId>,
         /// The token the caller's last attach minted, presented to get that
         /// attach's view back: the active tab, the focused pane of each tab,
         /// the zoomed pane of each tab, and the scroll offset of each pane. The
@@ -180,13 +180,13 @@ pub enum RuntimeEvent {
         resume_token: Option<ConnectionToken>,
         /// The caller's terminal size in cells, recorded as the client's
         /// viewport.
-        viewport: Size,
+        viewport_size: Size,
         /// The pane region the client reported, recorded on its record.
         pane_area: Option<PaneArea>,
         /// The cell dimensions measured before this attach, if available.
         cell_size: Option<koshi_core::geometry::PixelCellSize>,
         /// Which of the session's events the client receives.
-        filter: EventFilter,
+        event_filter: EventFilter,
         /// When the producer received the request, carried on the event so the
         /// handler never reads the clock itself.
         attached_at: SystemTime,
@@ -194,9 +194,9 @@ pub enum RuntimeEvent {
         /// from another machine. The client is minted with it as its origin.
         /// The router marks the Hello it sends for a remote caller; every
         /// other connection leaves it `false`.
-        remote: bool,
+        is_remote: bool,
         /// Where the dispatcher sends what it minted.
-        reply: Sender<Option<AttachAccepted>>,
+        response_sender: Sender<Option<AttachAccepted>>,
     },
     /// A discovery request delivered over the IPC socket: the caller asks
     /// this process to describe its session. Carries the reply sender the
@@ -204,7 +204,7 @@ pub enum RuntimeEvent {
     /// built from live state, or `None` when no session is running.
     IpcDiscovery {
         /// Where the dispatcher sends the overview.
-        reply: Sender<Option<SessionOverview>>,
+        response_sender: Sender<Option<SessionOverview>>,
     },
     /// A layout request delivered over the IPC socket: the caller asks this
     /// process to describe how its session arranges panes. Carries the reply
@@ -212,9 +212,9 @@ pub enum RuntimeEvent {
     /// layout built from live state, or `None` when no session is running.
     IpcLayout {
         /// The one tab to describe, or every tab when absent.
-        tab: Option<TabId>,
+        tab_id: Option<TabId>,
         /// Where the dispatcher sends the layout.
-        reply: Sender<Option<SessionLayout>>,
+        response_sender: Sender<Option<SessionLayout>>,
     },
     /// A restart request delivered over the IPC socket: the caller asks this
     /// process to replace its own image with the binary at the path it started
@@ -224,7 +224,7 @@ pub enum RuntimeEvent {
     /// wrong. A refused restart changes nothing and the session keeps serving.
     IpcRestart {
         /// Where the dispatcher sends its verdict.
-        reply: Sender<Result<(), String>>,
+        response_sender: Sender<Result<(), String>>,
     },
     /// The grace window for the clients whose records came across an image
     /// swap has closed. The dispatcher detaches every one of those clients
@@ -232,7 +232,7 @@ pub enum RuntimeEvent {
     DropUnclaimedClients {
         /// When the window closed, supplied by the producer so the handler
         /// never reads the clock itself.
-        deadline: Instant,
+        unclaimed_client_deadline: Instant,
     },
     /// A capability-checked command issued by a plugin.
     Plugin(CommandEnvelope),
@@ -252,9 +252,9 @@ pub struct AttachAccepted {
     /// The session the client joined.
     pub session_id: SessionId,
     /// What the session contains, built for this reply.
-    pub structure: AttachedSessionStructureSnapshot,
+    pub session_structure: AttachedSessionStructureSnapshot,
     /// The client's event queue. Dropping it ends the subscription.
-    pub events: Receiver<Delivery>,
+    pub deliveries: Receiver<Delivery>,
     /// Shared with the session, so this client's writing thread learns that the
     /// session is ending even when the queue above is full, and so the session
     /// learns when that thread has written the last frame.
@@ -289,7 +289,7 @@ pub enum SessionEnding {
 /// server closed already left the session, so its writing thread keeps to its
 /// own goodbye.
 ///
-/// [`writers_running`](Self::writers_running) counts the writing threads that
+/// [`count_running_writers`](Self::count_running_writers) counts the writing threads that
 /// have not ended. Each one ends right after it writes the last frame, so the
 /// session waits for the count to reach zero before it replaces its own process
 /// image or tears the process down.
@@ -302,41 +302,41 @@ pub enum SessionEnding {
 pub struct EndingNotice {
     /// Which frame ends every attached client's stream; empty while the session
     /// serves. Set once: the session is ending by then.
-    ending: OnceLock<SessionEnding>,
+    session_ending: OnceLock<SessionEnding>,
     /// How many client writing threads have started and not yet ended.
-    writers: AtomicUsize,
+    running_writer_count: AtomicUsize,
 }
 
 impl EndingNotice {
     /// Raise the notice: every attached client's writing thread writes
-    /// `ending`'s frame at its next turn. The notice keeps the ending it was
+    /// `session_ending`'s frame at its next turn. The notice keeps the ending it was
     /// raised with first.
-    pub fn raise(&self, ending: SessionEnding) {
-        let _ = self.ending.set(ending);
+    pub fn raise_session_ending(&self, session_ending: SessionEnding) {
+        let _ = self.session_ending.set(session_ending);
     }
 
     /// How every attached client's stream ends, or `None` while the session
     /// serves.
     #[must_use]
-    pub fn raised(&self) -> Option<SessionEnding> {
-        self.ending.get().copied()
+    pub fn get_session_ending(&self) -> Option<SessionEnding> {
+        self.session_ending.get().copied()
     }
 
     /// Count one client writing thread as started. Paired with
-    /// [`writer_ended`](Self::writer_ended).
-    pub fn writer_started(&self) {
-        self.writers.fetch_add(1, Ordering::SeqCst);
+    /// [`record_writer_ended`](Self::record_writer_ended).
+    pub fn record_writer_started(&self) {
+        self.running_writer_count.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Count one client writing thread as ended.
-    pub fn writer_ended(&self) {
-        self.writers.fetch_sub(1, Ordering::SeqCst);
+    pub fn record_writer_ended(&self) {
+        self.running_writer_count.fetch_sub(1, Ordering::SeqCst);
     }
 
     /// How many client writing threads have started and not yet ended.
     #[must_use]
-    pub fn writers_running(&self) -> usize {
-        self.writers.load(Ordering::SeqCst)
+    pub fn count_running_writers(&self) -> usize {
+        self.running_writer_count.load(Ordering::SeqCst)
     }
 }
 

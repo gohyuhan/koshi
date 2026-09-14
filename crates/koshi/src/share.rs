@@ -32,7 +32,7 @@ use std::path::Path;
 use std::time::SystemTime;
 
 use koshi_core::client::ClientOrigin;
-use koshi_core::discovery::{ClientInfo, SessionOverview};
+use koshi_core::discovery::{ClientDiscovery, SessionOverview};
 use koshi_core::event::RejectReason;
 use koshi_core::ids::SessionId;
 use koshi_ipc::protocol::ConnectionToken;
@@ -40,7 +40,7 @@ use koshi_ipc::remote_tokens::TokenScope;
 use koshi_ipc::router::{RouterRequestKind, RouterResult};
 use koshi_ipc::wire::WireName;
 
-use crate::cli::{Expiry, SessionRef, ShareCommand};
+use crate::cli::{Expiry, SessionReference, ShareCommand};
 use crate::output::RemoteReady;
 use crate::{output, prompt, targeting};
 use koshi_link::error::CliError;
@@ -55,10 +55,10 @@ mod tests;
 /// True for a row naming [`ClientOrigin::Remote`], and for a row naming no
 /// origin at all: a session server built before that field existed serves such
 /// a row, and it does not say the client is local.
-fn watched_from_another_machine(clients: &[ClientInfo]) -> bool {
-    clients
+fn has_client_from_another_machine(client_discoveries: &[ClientDiscovery]) -> bool {
+    client_discoveries
         .iter()
-        .any(|client| client.origin != Some(ClientOrigin::Local))
+        .any(|client_discovery| client_discovery.origin != Some(ClientOrigin::Local))
 }
 
 /// Refuse a `share` verb run in a pane of a session anyone is attached to from
@@ -69,29 +69,31 @@ fn watched_from_another_machine(clients: &[ClientInfo]) -> bool {
 /// so a client on another machine reads whatever they printed. A pane of a
 /// session nobody watches from elsewhere prints to that machine alone.
 ///
-/// `context` is the pane environment the calling CLI inherited. [`run`] calls
+/// `in_session_context` is the pane environment the calling CLI inherited.
+/// [`run_share_command`] calls
 /// this only when it has one: a run outside every pane prints to a terminal
-/// koshi does not paint, and is never refused. `look_up` asks one session to
-/// describe itself; the command passes [`ipc_client::fetch_overview`].
+/// koshi does not paint, and is never refused. `fetch_session_overview` asks one session to
+/// describe itself; the command passes [`ipc_client::fetch_session_overview`].
 ///
 /// # Errors
 /// [`CliError::CommandRejected`] with [`RejectReason::Unauthorized`] on two
 /// conditions: the session lists a client that is not
-/// [`ClientOrigin::Local`], and `look_up` fails. Nothing is read from or
+/// [`ClientOrigin::Local`], and `fetch_session_overview` fails. Nothing is read from or
 /// written to the token store.
 fn refuse_while_watched_from_another_machine(
-    context: &InSessionContext,
-    look_up: impl FnOnce(SessionId) -> Result<SessionOverview, CliError>,
+    in_session_context: &InSessionContext,
+    fetch_session_overview: impl FnOnce(SessionId) -> Result<SessionOverview, CliError>,
 ) -> Result<(), CliError> {
-    let overview = look_up(context.session_id).map_err(|error| CliError::CommandRejected {
+    let session_overview = fetch_session_overview(in_session_context.session_id)
+        .map_err(|overview_error| CliError::CommandRejected {
         reason: RejectReason::Unauthorized,
         help: Some(format!(
             "this session could not say who is attached to it, so whether anyone sees this \
-             pane from another machine is unknown: {error}. Run `koshi share` from a terminal \
+             pane from another machine is unknown: {overview_error}. Run `koshi share` from a terminal \
              outside koshi."
         )),
     })?;
-    if !watched_from_another_machine(&overview.clients) {
+    if !has_client_from_another_machine(&session_overview.clients) {
         return Ok(());
     }
     Err(CliError::CommandRejected {
@@ -111,59 +113,86 @@ fn refuse_while_watched_from_another_machine(
 /// revoke or a listing with no `--session` covers every scope. A router that
 /// refuses the request is [`CliError::Runtime`] carrying the router's own
 /// message.
-pub fn run(command: &ShareCommand, context: Option<&InSessionContext>) -> Result<(), CliError> {
-    let runtime_dir = ipc_client::runtime_dir()?;
-    if let Some(context) = context {
-        refuse_while_watched_from_another_machine(context, |session_id| {
-            ipc_client::fetch_overview(&runtime_dir, session_id)
+pub fn run_share_command(
+    command: &ShareCommand,
+    in_session_context: Option<&InSessionContext>,
+) -> Result<(), CliError> {
+    let runtime_directory = ipc_client::resolve_runtime_directory()?;
+    if let Some(in_session_context) = in_session_context {
+        refuse_while_watched_from_another_machine(in_session_context, |session_id| {
+            ipc_client::fetch_session_overview(&runtime_directory, session_id)
         })?;
     }
     match command {
         ShareCommand::Grant {
             identity,
-            session,
-            expires,
+            session_reference,
+            token_expiry,
         } => {
-            let scope = scope_of(&runtime_dir, session.as_ref())?.unwrap_or(TokenScope::HostWide);
-            let expires_in = match expires {
-                Expiry::After(span) => Some(*span),
+            let token_scope = resolve_token_scope(&runtime_directory, session_reference.as_ref())?
+                .unwrap_or(TokenScope::HostWide);
+            let expiration_duration = match token_expiry {
+                Expiry::After(expiration_duration) => Some(*expiration_duration),
                 Expiry::Never => None,
             };
-            let kind = RouterRequestKind::GrantToken {
+            let router_request_kind = RouterRequestKind::GrantToken {
                 identity: identity.clone(),
-                scope: scope.clone(),
-                expires_in,
+                scope: token_scope.clone(),
+                expires_in: expiration_duration,
             };
-            match router_client::router_request(&runtime_dir, kind)? {
-                RouterResult::Granted { token, replaced } => {
-                    let mut out = io::stdout();
-                    write_grant(&mut out, &token, identity, &scope, replaced, || {
-                        ready_or_unknown(remote_ready(&runtime_dir))
-                    })
-                    .map_err(|error| CliError::Runtime {
-                        detail: format!("the grant could not be printed: {error}"),
+            match router_client::submit_router_request(&runtime_directory, router_request_kind)? {
+                RouterResult::Granted {
+                    connection_token,
+                    did_replace_active_grant: has_replaced_active_grant,
+                } => {
+                    let mut output_writer = io::stdout();
+                    write_share_grant(
+                        &mut output_writer,
+                        &connection_token,
+                        identity,
+                        &token_scope,
+                        has_replaced_active_grant,
+                        || {
+                            resolve_remote_ready_or_unknown(resolve_remote_access_ready(
+                                &runtime_directory,
+                            ))
+                        },
+                    )
+                    .map_err(|write_error| CliError::Runtime {
+                        detail: format!("the grant could not be printed: {write_error}"),
                     })
                 }
-                other => Err(refusal(&other)),
+                unexpected_router_result => Err(build_router_refusal(&unexpected_router_result)),
             }
         }
-        ShareCommand::Revoke { identity, session } => {
-            let scope = scope_of(&runtime_dir, session.as_ref())?;
-            revoke(identity, scope.as_ref(), prompt::yes, |kind| {
-                router_client::router_request(&runtime_dir, kind)
-            })
+        ShareCommand::Revoke {
+            identity,
+            session_reference,
+        } => {
+            let token_scope = resolve_token_scope(&runtime_directory, session_reference.as_ref())?;
+            revoke_share_grants(
+                identity,
+                token_scope.as_ref(),
+                prompt::read_yes_answer,
+                |router_request_kind| {
+                    router_client::submit_router_request(&runtime_directory, router_request_kind)
+                },
+            )
         }
-        ShareCommand::List { session, format } => {
-            let scope = scope_of(&runtime_dir, session.as_ref())?;
-            match router_client::router_request(
-                &runtime_dir,
-                RouterRequestKind::ListTokens { scope },
+        ShareCommand::List {
+            session_reference,
+            output_format,
+        } => {
+            let token_scope = resolve_token_scope(&runtime_directory, session_reference.as_ref())?;
+            match router_client::submit_router_request(
+                &runtime_directory,
+                RouterRequestKind::ListTokens { scope: token_scope },
             )? {
                 RouterResult::Tokens(entries) => {
-                    print!("{}", output::render_share_list(&entries, *format));
+                    print!("{}", output::render_share_list(&entries, *output_format));
                     Ok(())
                 }
-                other => Err(refusal(&other)),
+                unexpected_router_result => Err(build_router_refusal(&unexpected_router_result)),
             }
         }
     }
@@ -184,60 +213,72 @@ pub fn run(command: &ShareCommand, context: Option<&InSessionContext>) -> Result
 ///
 /// Grants on other sessions are never touched: each request names one scope.
 ///
-/// `confirm` is asked once, with the question to print; `prompt::yes` is what
+/// `confirm_revoke` is asked once, with the question to print; `prompt::read_yes_answer` is what
 /// the command passes. `ask` carries one control-plane request to the router
 /// and hands back its answer; the command passes
-/// [`router_client::router_request`].
+/// [`router_client::submit_router_request`].
 ///
 /// # Errors
 /// Whatever the router reports for the listing, and for the first revoke. A
 /// refusal of the second revoke prints what the first one stopped, then reports
 /// that the host-wide grant is still standing and names the command that stops
 /// it.
-fn revoke(
+fn revoke_share_grants(
     identity: &str,
-    scope: Option<&TokenScope>,
-    confirm: impl FnOnce(&str) -> bool,
-    mut ask: impl FnMut(RouterRequestKind) -> Result<RouterResult, CliError>,
+    token_scope: Option<&TokenScope>,
+    confirm_revoke: impl FnOnce(&str) -> bool,
+    mut request_router: impl FnMut(RouterRequestKind) -> Result<RouterResult, CliError>,
 ) -> Result<(), CliError> {
-    let Some(session @ TokenScope::Session(_)) = scope else {
+    let Some(session_scope @ TokenScope::Session(_)) = token_scope else {
         print!(
             "{}",
-            output::render_share_revoke(&revoke_scope(&mut ask, identity, scope)?)
+            output::render_share_revoke(&revoke_token_scope(
+                &mut request_router,
+                identity,
+                token_scope,
+            )?)
         );
         return Ok(());
     };
-    if !holds_live_host_wide(&mut ask, identity)? {
+    if !has_active_host_wide_grant(&mut request_router, identity)? {
         print!(
             "{}",
-            output::render_share_revoke(&revoke_scope(&mut ask, identity, Some(session))?)
+            output::render_share_revoke(&revoke_token_scope(
+                &mut request_router,
+                identity,
+                Some(session_scope),
+            )?)
         );
         return Ok(());
     }
 
     print!(
         "{}",
-        output::render_revoke_host_wide_warning(identity, session)
+        output::render_revoke_host_wide_warning(identity, session_scope)
     );
-    if !confirm(&format!(
+    if !confirm_revoke(&format!(
         "stop both the grant on that session and {identity}'s host-wide grant? [y/N] "
     )) {
         println!("nothing was revoked.");
         return Ok(());
     }
-    let stopped = revoke_scope(&mut ask, identity, Some(session))?;
-    match revoke_scope(&mut ask, identity, Some(&TokenScope::HostWide)) {
-        Ok(host_wide) => {
-            let all: Vec<TokenScope> = stopped.into_iter().chain(host_wide).collect();
-            print!("{}", output::render_share_revoke(&all));
+    let revoked_session_scopes =
+        revoke_token_scope(&mut request_router, identity, Some(session_scope))?;
+    match revoke_token_scope(&mut request_router, identity, Some(&TokenScope::HostWide)) {
+        Ok(revoked_host_wide_scopes) => {
+            let revoked_scopes: Vec<TokenScope> = revoked_session_scopes
+                .into_iter()
+                .chain(revoked_host_wide_scopes)
+                .collect();
+            print!("{}", output::render_share_revoke(&revoked_scopes));
             Ok(())
         }
-        Err(error) => {
-            print!("{}", output::render_share_revoke(&stopped));
+        Err(host_wide_revoke_error) => {
+            print!("{}", output::render_share_revoke(&revoked_session_scopes));
             Err(CliError::Runtime {
                 detail: format!(
                     "{identity}'s host-wide grant is still standing, and still reaches that \
-                     session: {error}\n  run `koshi share revoke {identity}` to stop it"
+                     session: {host_wide_revoke_error}\n  run `koshi share revoke {identity}` to stop it"
                 ),
             })
         }
@@ -249,18 +290,18 @@ fn revoke(
 ///
 /// # Errors
 /// Whatever the router answers other than [`RouterResult::Revoked`].
-fn revoke_scope(
-    ask: &mut impl FnMut(RouterRequestKind) -> Result<RouterResult, CliError>,
+fn revoke_token_scope(
+    request_router: &mut impl FnMut(RouterRequestKind) -> Result<RouterResult, CliError>,
     identity: &str,
-    scope: Option<&TokenScope>,
+    token_scope: Option<&TokenScope>,
 ) -> Result<Vec<TokenScope>, CliError> {
-    let kind = RouterRequestKind::RevokeToken {
+    let router_request_kind = RouterRequestKind::RevokeToken {
         identity: identity.to_string(),
-        scope: scope.cloned(),
+        scope: token_scope.cloned(),
     };
-    match ask(kind)? {
-        RouterResult::Revoked(scopes) => Ok(scopes),
-        other => Err(refusal(&other)),
+    match request_router(router_request_kind)? {
+        RouterResult::Revoked(revoked_scopes) => Ok(revoked_scopes),
+        unexpected_router_result => Err(build_router_refusal(&unexpected_router_result)),
     }
 }
 
@@ -268,55 +309,69 @@ fn revoke_scope(
 ///
 /// # Errors
 /// Whatever the router answers other than [`RouterResult::Tokens`].
-fn holds_live_host_wide(
-    ask: &mut impl FnMut(RouterRequestKind) -> Result<RouterResult, CliError>,
+fn has_active_host_wide_grant(
+    request_router: &mut impl FnMut(RouterRequestKind) -> Result<RouterResult, CliError>,
     identity: &str,
 ) -> Result<bool, CliError> {
-    let held = match ask(RouterRequestKind::ListTokens { scope: None })? {
-        RouterResult::Tokens(entries) => entries,
-        other => return Err(refusal(&other)),
+    let active_token_entries = match request_router(RouterRequestKind::ListTokens { scope: None })?
+    {
+        RouterResult::Tokens(token_entries) => token_entries,
+        unexpected_router_result => return Err(build_router_refusal(&unexpected_router_result)),
     };
-    let now = SystemTime::now();
-    Ok(held.iter().any(|entry| {
-        entry.identity == identity && entry.scope == TokenScope::HostWide && entry.is_live(now)
+    let current_time = SystemTime::now();
+    Ok(active_token_entries.iter().any(|token_entry| {
+        token_entry.identity == identity
+            && token_entry.scope == TokenScope::HostWide
+            && token_entry.is_active_at(current_time)
     }))
 }
 
-/// Write a grant to `out`: the secret first, then what it can reach.
+/// Write a share grant to `output_writer`: the secret first, then what it can reach.
 ///
-/// Writes the secret block, flushes `out`, calls `ready`, then writes what
-/// `ready` returned. `ready` may prompt and may fail; nothing it does happens
+/// Writes the secret block, flushes `output_writer`, calls `resolve_remote_ready`, then writes what
+/// `resolve_remote_ready` returned. It may prompt and may fail; nothing it does happens
 /// before the flush.
 ///
 /// # Errors
-/// Whatever `out` reports.
-fn write_grant<W: Write>(
-    out: &mut W,
-    token: &ConnectionToken,
+/// Whatever `output_writer` reports.
+fn write_share_grant<Writer: Write>(
+    output_writer: &mut Writer,
+    connection_token: &ConnectionToken,
     identity: &str,
-    scope: &TokenScope,
-    replaced: bool,
-    ready: impl FnOnce() -> RemoteReady,
+    token_scope: &TokenScope,
+    has_replaced_active_grant: bool,
+    resolve_remote_ready: impl FnOnce() -> RemoteReady,
 ) -> io::Result<()> {
     write!(
-        out,
+        output_writer,
         "{}",
-        output::render_share_grant(token, identity, scope, replaced)
+        output::render_share_grant(
+            connection_token,
+            identity,
+            token_scope,
+            has_replaced_active_grant,
+        )
     )?;
-    out.flush()?;
-    let ready = ready();
-    write!(out, "{}", output::render_remote_ready(identity, &ready))
+    output_writer.flush()?;
+    let remote_ready = resolve_remote_ready();
+    write!(
+        output_writer,
+        "{}",
+        output::render_remote_ready(identity, &remote_ready)
+    )
 }
 
 /// What a grant closes with, given what asking the router produced.
 ///
 /// `Ok` passes the answer through. `Err` writes the error to stderr and returns
 /// [`RemoteReady::Unknown`], never [`RemoteReady::Off`].
-fn ready_or_unknown(asked: Result<RemoteReady, CliError>) -> RemoteReady {
-    match asked {
-        Ok(ready) => ready,
-        Err(error) => {
-            eprintln!("remote access was left as it is: {error}");
+fn resolve_remote_ready_or_unknown(
+    remote_ready_result: Result<RemoteReady, CliError>,
+) -> RemoteReady {
+    match remote_ready_result {
+        Ok(remote_ready) => remote_ready,
+        Err(remote_ready_error) => {
+            eprintln!("remote access was left as it is: {remote_ready_error}");
             RemoteReady::Unknown
         }
     }
@@ -335,41 +390,61 @@ fn ready_or_unknown(asked: Result<RemoteReady, CliError>) -> RemoteReady {
 /// [`RemoteReady::Off`] when remote access was off, and
 /// [`RemoteReady::Blocked`] when it was on. A refused enable is
 /// [`RemoteReady::Blocked`].
-fn remote_ready(runtime_dir: &Path) -> Result<RemoteReady, CliError> {
-    let status = router_client::router_request(runtime_dir, RouterRequestKind::RemoteStatus)?;
-    let (address, enabled, listening) = match status {
-        RouterResult::RemoteStatus {
-            address,
-            enabled,
-            listening,
-            ..
-        } => (address, enabled, listening),
-        other => return Err(refusal(&other)),
-    };
-    let Some(address) = address else {
+fn resolve_remote_access_ready(runtime_directory: &Path) -> Result<RemoteReady, CliError> {
+    let remote_status_response =
+        router_client::submit_router_request(runtime_directory, RouterRequestKind::RemoteStatus)?;
+    let (remote_address, is_remote_access_enabled, is_remote_listener_active) =
+        match remote_status_response {
+            RouterResult::RemoteStatus {
+                remote_listen_address,
+                is_remote_access_enabled,
+                is_listening,
+                ..
+            } => (
+                remote_listen_address,
+                is_remote_access_enabled,
+                is_listening,
+            ),
+            unexpected_router_result => {
+                return Err(build_router_refusal(&unexpected_router_result))
+            }
+        };
+    let Some(remote_address) = remote_address else {
         return Ok(RemoteReady::NoAddress);
     };
-    if enabled && listening {
-        return Ok(RemoteReady::On { address });
+    if is_remote_access_enabled && is_remote_listener_active {
+        return Ok(RemoteReady::On {
+            remote_listen_address: remote_address,
+        });
     }
-    let question = if enabled {
-        println!("remote access is on, and nothing is listening on {address}.");
-        format!("try to open {address} now? [y/N] ")
+    let prompt_text = if is_remote_access_enabled {
+        println!("remote access is on, and nothing is listening on {remote_address}.");
+        format!("try to open {remote_address} now? [y/N] ")
     } else {
         println!("remote access is off.");
-        format!("turn it on and open {address}? [y/N] ")
+        format!("turn it on and open {remote_address}? [y/N] ")
     };
-    if !prompt::yes(&question) {
-        return Ok(if enabled {
-            RemoteReady::Blocked { address }
+    if !prompt::read_yes_answer(&prompt_text) {
+        return Ok(if is_remote_access_enabled {
+            RemoteReady::Blocked {
+                remote_listen_address: remote_address,
+            }
         } else {
             RemoteReady::Off
         });
     }
-    match router_client::router_request(runtime_dir, RouterRequestKind::EnableRemote)? {
-        RouterResult::RemoteEnabled { address, .. } => Ok(RemoteReady::On { address }),
-        RouterResult::Error(_) => Ok(RemoteReady::Blocked { address }),
-        other => Err(refusal(&other)),
+    match router_client::submit_router_request(runtime_directory, RouterRequestKind::EnableRemote)?
+    {
+        RouterResult::RemoteEnabled {
+            remote_listen_address,
+            ..
+        } => Ok(RemoteReady::On {
+            remote_listen_address,
+        }),
+        RouterResult::Error(_) => Ok(RemoteReady::Blocked {
+            remote_listen_address: remote_address,
+        }),
+        unexpected_router_result => Err(build_router_refusal(&unexpected_router_result)),
     }
 }
 
@@ -378,35 +453,39 @@ fn remote_ready(runtime_dir: &Path) -> Result<RemoteReady, CliError> {
 ///
 /// A name matching no running session, or two of them, comes back as the
 /// targeting layer's own refusal.
-fn scope_of(
-    runtime_dir: &Path,
-    session: Option<&SessionRef>,
+fn resolve_token_scope(
+    runtime_directory: &Path,
+    session_reference: Option<&SessionReference>,
 ) -> Result<Option<TokenScope>, CliError> {
-    let Some(session_ref) = session else {
+    let Some(session_reference) = session_reference else {
         return Ok(None);
     };
-    let found = targeting::scope_sessions(runtime_dir, Some(session_ref))?;
-    let overview = found
-        .sessions
-        .first()
-        .ok_or_else(|| CliError::SessionNotFound {
-            session: session_ref.to_string(),
-        })?;
-    Ok(Some(TokenScope::Session(overview.session.id)))
+    let discovered_sessions =
+        targeting::resolve_session_scope(runtime_directory, Some(session_reference))?;
+    let session_overview =
+        discovered_sessions
+            .sessions
+            .first()
+            .ok_or_else(|| CliError::SessionNotFound {
+                session_name: session_reference.to_string(),
+            })?;
+    Ok(Some(TokenScope::Session(
+        session_overview.session.session_id,
+    )))
 }
 
 /// The failure behind an answer that is not the one the request asks for: the
 /// router's own message when it refused, else the reply naming a result the
 /// request cannot produce.
-fn refusal(result: &RouterResult) -> CliError {
-    match result {
-        RouterResult::Error(payload) => CliError::Runtime {
-            detail: payload.message.clone(),
+fn build_router_refusal(router_result: &RouterResult) -> CliError {
+    match router_result {
+        RouterResult::Error(error_payload) => CliError::Runtime {
+            detail: error_payload.message.clone(),
         },
-        other => CliError::IpcUnavailable {
+        unexpected_router_result => CliError::IpcUnavailable {
             detail: format!(
                 "the router answered with an unexpected {} reply",
-                other.wire_name()
+                unexpected_router_result.wire_name()
             ),
         },
     }

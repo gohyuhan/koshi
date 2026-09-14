@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use koshi_core::action::ActionRef;
+use koshi_core::action::ActionReference;
 use koshi_core::geometry::Direction;
 use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags};
 use koshi_core::log::{LogFormat, LogLevel};
@@ -36,7 +36,7 @@ use crate::key_sequence::parse_sequence;
 ///
 /// The value and the rule it follows live in
 /// [`koshi_core::compat::CONFIG_SCHEMA`].
-pub const SCHEMA_VERSION: u32 = koshi_core::compat::CONFIG_SCHEMA.max;
+pub const SCHEMA_VERSION: u32 = koshi_core::compat::CONFIG_SCHEMA.maximum_version;
 
 /// The name of the built-in theme, whose colors are compiled into koshi. It is
 /// the theme in effect when `koshi.kdl` names no theme, names this one, or
@@ -54,7 +54,7 @@ pub const DEFAULT_THEME: &str = "default";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerConfig {
     /// The schema version this config was written against.
-    pub version: u32,
+    pub config_schema_version: u32,
     /// Pane sizing floor for the shared layout.
     pub pane: PaneConfig,
     /// Per-pane scrollback history caps.
@@ -64,33 +64,33 @@ pub struct ServerConfig {
     /// Log-file behavior for this process.
     pub logging: LoggingConfig,
     /// Whether entry points marked `#[beta_feature]` may run.
-    pub allow_beta_features: bool,
+    pub should_allow_beta_features: bool,
     /// Whether other users of this machine may reach this session's socket.
-    pub allow_other_users: bool,
+    pub should_allow_other_users: bool,
     /// The TCP address the remote listener binds, such as `"0.0.0.0:7654"`.
     /// Setting it opens nothing; `koshi share grant` switches remote access on.
     pub remote_listen: Option<String>,
     /// The directory the session sockets other users reach live in. `None`
     /// takes the platform's machine-wide directory, `/tmp/koshi` on Unix and
     /// `%ProgramData%\koshi` on Windows.
-    pub shared_sessions_dir: Option<PathBuf>,
+    pub shared_sessions_directory: Option<PathBuf>,
     /// Whether the session ends when its last client leaves.
-    pub auto_close_session: bool,
+    pub should_auto_close_session: bool,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            version: SCHEMA_VERSION,
+            config_schema_version: SCHEMA_VERSION,
             pane: PaneConfig::default(),
             scrollback: ScrollbackLimits::default(),
             terminal: TerminalConfig::default(),
             logging: LoggingConfig::default(),
-            allow_beta_features: false,
-            allow_other_users: false,
+            should_allow_beta_features: false,
+            should_allow_other_users: false,
             remote_listen: None,
-            shared_sessions_dir: None,
-            auto_close_session: false,
+            shared_sessions_directory: None,
+            should_auto_close_session: false,
         }
     }
 }
@@ -105,7 +105,7 @@ impl Default for ServerConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientConfig {
     /// The schema version this config was written against.
-    pub version: u32,
+    pub config_schema_version: u32,
     /// Keybinding timing, chord depth, leader prefix, and per-mode bindings.
     pub keybindings: KeybindingsConfig,
     /// Defaults applied when creating panes and layouts.
@@ -123,7 +123,7 @@ pub struct ClientConfig {
     /// Self-update checking behavior.
     pub update: UpdateConfig,
     /// Whether this viewer sends native image protocols to its terminal.
-    pub image_support: bool,
+    pub supports_image_protocols: bool,
     /// Whether a viewer whose link to a session on another machine drops dials
     /// that machine again by itself. While it dials, the viewer draws
     /// `RECONNECTING` on its tab strip and keeps trying for up to 120 seconds,
@@ -131,13 +131,13 @@ pub struct ClientConfig {
     /// tab, and the scroll offset of each pane. `false` ends the viewer on a
     /// dropped link, with the message that names how to attach again by hand. A
     /// link to a session on this machine ends the viewer either way.
-    pub remote_reconnect: bool,
+    pub should_reconnect_remote_session: bool,
 }
 
 impl Default for ClientConfig {
     fn default() -> Self {
         Self {
-            version: SCHEMA_VERSION,
+            config_schema_version: SCHEMA_VERSION,
             keybindings: KeybindingsConfig::default(),
             layout: LayoutDefaults::default(),
             mouse: MouseConfig::default(),
@@ -146,8 +146,8 @@ impl Default for ClientConfig {
             theme: ThemeConfig::default(),
             logging: LoggingConfig::default(),
             update: UpdateConfig::default(),
-            image_support: true,
-            remote_reconnect: true,
+            supports_image_protocols: true,
+            should_reconnect_remote_session: true,
         }
     }
 }
@@ -159,19 +159,19 @@ impl Default for ClientConfig {
 pub struct UpdateConfig {
     /// Whether an interactive launch checks GitHub for a newer release when a
     /// check is due.
-    pub auto_check: bool,
+    pub should_auto_check_for_updates: bool,
     /// Days to wait between startup update checks.
     pub check_interval_days: u32,
     /// Whether a pre-release build counts as a newer version to update to.
-    pub allow_prerelease: bool,
+    pub should_allow_prerelease_updates: bool,
 }
 
 impl Default for UpdateConfig {
     fn default() -> Self {
         Self {
-            auto_check: true,
+            should_auto_check_for_updates: true,
             check_interval_days: 14,
-            allow_prerelease: false,
+            should_allow_prerelease_updates: false,
         }
     }
 }
@@ -180,20 +180,20 @@ impl Default for UpdateConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneConfig {
     /// Minimum pane width in columns.
-    pub min_cols: u16,
+    pub minimum_column_count: u16,
     /// Minimum pane height in rows.
-    pub min_rows: u16,
+    pub minimum_row_count: u16,
     /// Blank cells between two panes that meet along a horizontal or vertical
     /// split. `0` places panes edge to edge.
-    pub gap: u16,
+    pub gap_cell_count: u16,
 }
 
 impl Default for PaneConfig {
     fn default() -> Self {
         Self {
-            min_cols: 2,
-            min_rows: 1,
-            gap: 0,
+            minimum_column_count: 2,
+            minimum_row_count: 1,
+            gap_cell_count: 0,
         }
     }
 }
@@ -204,16 +204,16 @@ impl Default for PaneConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScrollbackLimits {
     /// Maximum retained lines per pane.
-    pub max_lines: usize,
+    pub maximum_line_count: usize,
     /// Maximum retained bytes of scrollback text per pane.
-    pub max_bytes: usize,
+    pub maximum_byte_count: usize,
 }
 
 impl Default for ScrollbackLimits {
     fn default() -> Self {
         Self {
-            max_lines: 10_000,
-            max_bytes: 32 * 1024 * 1024,
+            maximum_line_count: 10_000,
+            maximum_byte_count: 32 * 1024 * 1024,
         }
     }
 }
@@ -227,13 +227,13 @@ pub struct ScrollbackView {
     /// jumps to the prompt. Off: the view stays in history and the input still
     /// goes through. Only the primary screen follows; the alternate
     /// screen's scroll position belongs to the full-screen program on it.
-    pub scroll_on_input: bool,
+    pub should_scroll_to_input: bool,
 }
 
 impl Default for ScrollbackView {
     fn default() -> Self {
         Self {
-            scroll_on_input: true,
+            should_scroll_to_input: true,
         }
     }
 }
@@ -250,10 +250,10 @@ pub struct KeybindingsConfig {
     /// The prefix that `<leader>` in a binding resolves to. A modifier run
     /// merges into the chord that follows it; a chord stands on its own.
     pub leader: Leader,
-    /// Bindings grouped by input mode. `Default` ships the built-in binding
+    /// Bindings grouped by input mode name. `Default` ships the built-in binding
     /// set (`normal` plus the reserved unlock in `locked`); user layers
     /// override it at merge.
-    pub modes: BTreeMap<ModeName, ModeBindings>,
+    pub mode_bindings_by_name: BTreeMap<ModeName, ModeBindings>,
     /// Replacement chord for the reserved unlock. When set, this chord (not
     /// [`RESERVED_UNLOCK`](Self::RESERVED_UNLOCK)) is the guaranteed
     /// locked-mode escape: conflict detection requires it bound to
@@ -268,7 +268,7 @@ impl KeybindingsConfig {
     /// fires `core:unlock` and is intercepted ahead of pane pass-through;
     /// validation refuses a config that removes it without naming an
     /// explicit alternative.
-    pub const RESERVED_UNLOCK: KeyChord = KeyChord::new(ModFlags::CTRL, Key::Char('l'));
+    pub const RESERVED_UNLOCK: KeyChord = KeyChord::from_parts(ModFlags::CTRL, Key::Char('l'));
 }
 
 impl Default for KeybindingsConfig {
@@ -278,7 +278,7 @@ impl Default for KeybindingsConfig {
             which_key_delay_ms: 300,
             max_chord_depth: 4,
             leader: Leader::default(),
-            modes: default_mode_bindings(Leader::default()),
+            mode_bindings_by_name: build_default_mode_bindings(Leader::default()),
             unlock_alternative: None,
         }
     }
@@ -292,12 +292,12 @@ pub struct ModeName(String);
 
 impl ModeName {
     /// Wraps a mode name string.
-    pub fn new(name: impl Into<String>) -> Self {
-        Self(name.into())
+    pub fn from_text(mode_name_text: impl Into<String>) -> Self {
+        Self(mode_name_text.into())
     }
 
     /// The mode name as a string slice.
-    pub fn as_str(&self) -> &str {
+    pub fn get_name(&self) -> &str {
         &self.0
     }
 }
@@ -319,9 +319,9 @@ impl Borrow<str> for ModeName {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundAction {
     /// The action to resolve when the sequence fires.
-    pub action: ActionRef,
+    pub action_reference: ActionReference,
     /// The arguments handed to action resolution alongside it.
-    pub args: ActionArgs,
+    pub action_arguments: ActionArgs,
 }
 
 /// The bindings for one input mode, keyed by the key sequence pressed.
@@ -335,12 +335,12 @@ pub struct BoundAction {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ModeBindings {
     /// Key sequence → the action it triggers.
-    pub keys: BTreeMap<KeySequence, BoundAction>,
+    pub bound_action_by_key_sequence: BTreeMap<KeySequence, BoundAction>,
     /// Key sequences this surface clears: a removed key voids whatever any
     /// lower-precedence layer bound on it, leaving the key free for this or
     /// a higher layer to rebind. Authored as `remove "<C-x>"` in a mode
     /// block. The built-in defaults carry none.
-    pub removed: BTreeSet<KeySequence>,
+    pub removed_key_sequences: BTreeSet<KeySequence>,
 }
 
 /// The built-in default binding table: the `normal`-mode set plus the
@@ -353,7 +353,7 @@ pub struct ModeBindings {
 /// Under the default `C-` leader every sequence OPENS with a non-typeable
 /// chord (Ctrl or Alt held), with one exception: the bare `Tab`/`Shift+Tab`
 /// tab-switching pair. Outside locked mode the keymap owns Tab, and a shell
-/// sees a literal Tab only while the client is locked. A later chord in a
+/// sees a literal Tab only while the client is locked. A subsequent chord in a
 /// sequence may be a plain key; it is read only while the pending sequence is
 /// live. No opening chord uses `<C-i>`, `<C-m>`, `<C-[>`, or `<C-h>`, which
 /// unix terminals without the kitty keyboard protocol cannot tell apart from
@@ -363,57 +363,121 @@ pub struct ModeBindings {
 /// action choice with a fixed set of values is part of the action name
 /// (`new-pane-left`, `close-pane-tree`), so any key here can be rebound from
 /// `keybinding.kdl`.
-pub fn default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBindings> {
-    let seq = |text: &str| {
-        parse_sequence(text, leader, u8::MAX).expect("a built-in default binding must parse")
+pub fn build_default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBindings> {
+    let parse_default_key_sequence = |key_sequence_text: &str| {
+        parse_sequence(key_sequence_text, leader, u8::MAX)
+            .expect("a built-in default binding must parse")
     };
-    let reserved = || KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK);
-    let bound = |name: &str| BoundAction {
-        action: ActionRef::core(name)
+    let build_reserved_unlock_sequence = || KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK);
+    let build_bound_action = |action_name: &str| BoundAction {
+        action_reference: ActionReference::from_core_action_name(action_name)
             .expect("default binding action name must satisfy the action-name grammar"),
-        args: ActionArgs::None,
+        action_arguments: ActionArgs::None,
     };
 
-    let normal: BTreeMap<KeySequence, BoundAction> = [
+    let normal_mode_bindings: BTreeMap<KeySequence, BoundAction> = [
         // Lock — the reserved chord, written literally: it does not move with
         // the leader. The same chord unlocks in locked mode.
-        (reserved(), bound("lock")),
+        (build_reserved_unlock_sequence(), build_bound_action("lock")),
         // Quit and mouse-select — leader-relative, and bound in locked mode
         // too. Mouse-select grabs the mouse: a drag highlights in koshi even
         // over a program that asked for the mouse itself.
-        (seq("<leader>q"), bound("quit")),
-        (seq("<leader>g"), bound("mouse-select")),
+        (
+            parse_default_key_sequence("<leader>q"),
+            build_bound_action("quit"),
+        ),
+        (
+            parse_default_key_sequence("<leader>g"),
+            build_bound_action("mouse-select"),
+        ),
         // Pane lifecycle, under the leader then `p`. `n` splits in the
         // configured default direction; the vim letters pick the side.
-        (seq("<leader>p n"), bound("new-pane")),
-        (seq("<leader>p h"), bound("new-pane-left")),
-        (seq("<leader>p j"), bound("new-pane-down")),
-        (seq("<leader>p k"), bound("new-pane-up")),
-        (seq("<leader>p l"), bound("new-pane-right")),
+        (
+            parse_default_key_sequence("<leader>p n"),
+            build_bound_action("new-pane"),
+        ),
+        (
+            parse_default_key_sequence("<leader>p h"),
+            build_bound_action("new-pane-left"),
+        ),
+        (
+            parse_default_key_sequence("<leader>p j"),
+            build_bound_action("new-pane-down"),
+        ),
+        (
+            parse_default_key_sequence("<leader>p k"),
+            build_bound_action("new-pane-up"),
+        ),
+        (
+            parse_default_key_sequence("<leader>p l"),
+            build_bound_action("new-pane-right"),
+        ),
         // The close key kills the pane's whole process group.
-        (seq("<leader>p x"), bound("close-pane-tree")),
+        (
+            parse_default_key_sequence("<leader>p x"),
+            build_bound_action("close-pane-tree"),
+        ),
         // Fullscreen — an explicit chord, so it stays put under any leader.
-        (seq("<A-f>"), bound("toggle-pane-fullscreen")),
+        (
+            parse_default_key_sequence("<A-f>"),
+            build_bound_action("toggle-pane-fullscreen"),
+        ),
         // Directional focus: arrows under the pane prefix. These fire
         // continuous actions, so the prefix stays armed after each press.
-        (seq("<leader>p <Left>"), bound("focus-pane-left")),
-        (seq("<leader>p <Down>"), bound("focus-pane-down")),
-        (seq("<leader>p <Up>"), bound("focus-pane-up")),
-        (seq("<leader>p <Right>"), bound("focus-pane-right")),
+        (
+            parse_default_key_sequence("<leader>p <Left>"),
+            build_bound_action("focus-pane-left"),
+        ),
+        (
+            parse_default_key_sequence("<leader>p <Down>"),
+            build_bound_action("focus-pane-down"),
+        ),
+        (
+            parse_default_key_sequence("<leader>p <Up>"),
+            build_bound_action("focus-pane-up"),
+        ),
+        (
+            parse_default_key_sequence("<leader>p <Right>"),
+            build_bound_action("focus-pane-right"),
+        ),
         // Resize: one cell per press, arrows under the leader then `s`.
-        (seq("<leader>s <Left>"), bound("resize-pane-left")),
-        (seq("<leader>s <Down>"), bound("resize-pane-down")),
-        (seq("<leader>s <Up>"), bound("resize-pane-up")),
-        (seq("<leader>s <Right>"), bound("resize-pane-right")),
+        (
+            parse_default_key_sequence("<leader>s <Left>"),
+            build_bound_action("resize-pane-left"),
+        ),
+        (
+            parse_default_key_sequence("<leader>s <Down>"),
+            build_bound_action("resize-pane-down"),
+        ),
+        (
+            parse_default_key_sequence("<leader>s <Up>"),
+            build_bound_action("resize-pane-up"),
+        ),
+        (
+            parse_default_key_sequence("<leader>s <Right>"),
+            build_bound_action("resize-pane-right"),
+        ),
         // Copy and paste have NO bindings — they follow the OS.
         // Tab lifecycle, under the leader then `t`: `n` opens, `x` closes.
         // Switching is the bare Tab / Shift+Tab pair, written literally and
         // never leader-relative: outside locked mode the keymap owns Tab, and
         // a shell sees a literal Tab only while the client is locked.
-        (seq("<leader>t n"), bound("new-tab")),
-        (seq("<leader>t x"), bound("close-tab")),
-        (seq("<Tab>"), bound("next-tab")),
-        (seq("<S-Tab>"), bound("previous-tab")),
+        (
+            parse_default_key_sequence("<leader>t n"),
+            build_bound_action("new-tab"),
+        ),
+        (
+            parse_default_key_sequence("<leader>t x"),
+            build_bound_action("close-tab"),
+        ),
+        (
+            parse_default_key_sequence("<Tab>"),
+            build_bound_action("next-tab"),
+        ),
+        (
+            parse_default_key_sequence("<S-Tab>"),
+            build_bound_action("previous-tab"),
+        ),
     ]
     .into_iter()
     .collect();
@@ -421,27 +485,36 @@ pub fn default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBindings>
     // Locked mode intercepts exactly its bound chords and passes every other
     // key to the pane: the reserved unlock (the same chord that locks in
     // normal mode), the quit chord, and the mouse-select chord.
-    let locked: BTreeMap<KeySequence, BoundAction> = [
-        (reserved(), bound("unlock")),
-        (seq("<leader>q"), bound("quit")),
-        (seq("<leader>g"), bound("mouse-select")),
+    let locked_mode_bindings: BTreeMap<KeySequence, BoundAction> = [
+        (
+            build_reserved_unlock_sequence(),
+            build_bound_action("unlock"),
+        ),
+        (
+            parse_default_key_sequence("<leader>q"),
+            build_bound_action("quit"),
+        ),
+        (
+            parse_default_key_sequence("<leader>g"),
+            build_bound_action("mouse-select"),
+        ),
     ]
     .into_iter()
     .collect();
 
     BTreeMap::from([
         (
-            ModeName::new("normal"),
+            ModeName::from_text("normal"),
             ModeBindings {
-                keys: normal,
-                removed: BTreeSet::new(),
+                bound_action_by_key_sequence: normal_mode_bindings,
+                removed_key_sequences: BTreeSet::new(),
             },
         ),
         (
-            ModeName::new("locked"),
+            ModeName::from_text("locked"),
             ModeBindings {
-                keys: locked,
-                removed: BTreeSet::new(),
+                bound_action_by_key_sequence: locked_mode_bindings,
+                removed_key_sequences: BTreeSet::new(),
             },
         ),
     ])
@@ -460,14 +533,14 @@ pub fn default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBindings>
 /// back to a derived `+N` marker.
 #[must_use]
 pub fn default_prefix_labels(leader: Leader) -> BTreeMap<KeyChord, String> {
-    let opening = |text: &str| {
-        *parse_sequence(text, leader, u8::MAX)
+    let parse_opening_chord = |prefix_text: &str| {
+        *parse_sequence(prefix_text, leader, u8::MAX)
             .expect("a built-in prefix must parse")
-            .chords()
+            .list_chords()
             .first()
             .expect("a prefix sequence has an opening chord")
     };
-    let groups = [
+    let prefix_groups = [
         ("<leader>p", "PANE"),
         ("<leader>s", "RESIZE"),
         ("<leader>t", "TAB"),
@@ -475,14 +548,16 @@ pub fn default_prefix_labels(leader: Leader) -> BTreeMap<KeyChord, String> {
     // `C-` gives each group its own opening chord: `<C-p> PANE`,
     // `<C-s> RESIZE`, `<C-t> TAB`. A chord leader opens every group at the
     // leader itself, so `<Space>` collapses all three onto one entry.
-    let labels: BTreeMap<KeyChord, String> = groups
+    let prefix_labels: BTreeMap<KeyChord, String> = prefix_groups
         .iter()
-        .map(|(prefix, label)| (opening(prefix), (*label).to_string()))
+        .map(|(prefix_text, label_text)| {
+            (parse_opening_chord(prefix_text), (*label_text).to_string())
+        })
         .collect();
-    if labels.len() < groups.len() {
+    if prefix_labels.len() < prefix_groups.len() {
         return BTreeMap::new();
     }
-    labels
+    prefix_labels
 }
 
 /// Defaults applied when creating panes and layouts.
@@ -507,9 +582,9 @@ impl Default for LayoutDefaults {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MouseConfig {
     /// Whether dragging a pane border resizes it.
-    pub border_resize: bool,
+    pub can_resize_pane_border: bool,
     /// Lines scrolled per mouse wheel notch.
-    pub scroll_lines: u16,
+    pub scroll_line_count: u16,
     /// What the wheel does over a plain pane — one with no text highlighted, no
     /// program asking for the mouse, and no alternate-scroll mode on. The other
     /// cases are fixed: a highlight holds and scrolls koshi's own scrollback, a
@@ -521,8 +596,8 @@ pub struct MouseConfig {
 impl Default for MouseConfig {
     fn default() -> Self {
         Self {
-            border_resize: true,
-            scroll_lines: 3,
+            can_resize_pane_border: true,
+            scroll_line_count: 3,
             wheel: WheelScroll::default(),
         }
     }
@@ -543,9 +618,9 @@ pub enum WheelScroll {
 pub struct CopyConfig {
     /// Whether completing a selection copies it immediately. No `koshi.kdl`
     /// key sets it, so it always holds its default.
-    pub copy_on_select: bool,
+    pub should_copy_on_select: bool,
     /// Whether trailing whitespace is trimmed from copied text.
-    pub trim_trailing_whitespace: bool,
+    pub should_trim_trailing_whitespace: bool,
     /// Which clipboard backend receives copied text.
     pub clipboard: ClipboardBackend,
 }
@@ -553,8 +628,8 @@ pub struct CopyConfig {
 impl Default for CopyConfig {
     fn default() -> Self {
         Self {
-            copy_on_select: true,
-            trim_trailing_whitespace: true,
+            should_copy_on_select: true,
+            should_trim_trailing_whitespace: true,
             clipboard: ClipboardBackend::Osc52,
         }
     }
@@ -596,7 +671,7 @@ pub struct ThemeConfig {
     /// The theme's name: the file stem of the `themes/<name>.kdl` its colors
     /// were read from, or [`DEFAULT_THEME`] when the built-in colors are in
     /// effect.
-    pub name: String,
+    pub theme_name: String,
     /// The theme's colors.
     pub colors: ColorPalette,
 }
@@ -604,7 +679,7 @@ pub struct ThemeConfig {
 impl Default for ThemeConfig {
     fn default() -> Self {
         Self {
-            name: DEFAULT_THEME.to_string(),
+            theme_name: DEFAULT_THEME.to_string(),
             colors: ColorPalette::default(),
         }
     }
@@ -661,19 +736,19 @@ impl Default for ColorPalette {
     /// accent over black bars — applied when no theme is configured.
     fn default() -> Self {
         Self {
-            ramp_start: RgbColor::new(0xd0, 0xa5, 0xff),
-            ramp_end: RgbColor::new(0x7d, 0xbc, 0xff),
-            on_ramp: RgbColor::new(0x12, 0x09, 0x1f),
-            on_ramp_dim: RgbColor::new(0xf0, 0xec, 0xfa),
-            accent: RgbColor::new(0xf5, 0xc2, 0xff),
-            on_accent: RgbColor::new(0x1e, 0x10, 0x33),
-            border_focused: RgbColor::new(0x00, 0xaf, 0xd7),
-            border_unfocused: RgbColor::new(0x58, 0x58, 0x58),
-            border_hover: RgbColor::new(0xaf, 0x5f, 0xff),
-            stack_header_fg: RgbColor::new(0xf4, 0xf1, 0xfa),
-            stack_header_bg: RgbColor::new(0x30, 0x0f, 0x4a),
-            letterbox: RgbColor::new(0x58, 0x58, 0x58),
-            bar_bg: RgbColor::new(0x00, 0x00, 0x00),
+            ramp_start: RgbColor::from_channels(0xd0, 0xa5, 0xff),
+            ramp_end: RgbColor::from_channels(0x7d, 0xbc, 0xff),
+            on_ramp: RgbColor::from_channels(0x12, 0x09, 0x1f),
+            on_ramp_dim: RgbColor::from_channels(0xf0, 0xec, 0xfa),
+            accent: RgbColor::from_channels(0xf5, 0xc2, 0xff),
+            on_accent: RgbColor::from_channels(0x1e, 0x10, 0x33),
+            border_focused: RgbColor::from_channels(0x00, 0xaf, 0xd7),
+            border_unfocused: RgbColor::from_channels(0x58, 0x58, 0x58),
+            border_hover: RgbColor::from_channels(0xaf, 0x5f, 0xff),
+            stack_header_fg: RgbColor::from_channels(0xf4, 0xf1, 0xfa),
+            stack_header_bg: RgbColor::from_channels(0x30, 0x0f, 0x4a),
+            letterbox: RgbColor::from_channels(0x58, 0x58, 0x58),
+            bar_bg: RgbColor::from_channels(0x00, 0x00, 0x00),
         }
     }
 }
@@ -682,17 +757,17 @@ impl Default for ColorPalette {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RgbColor {
     /// Red channel.
-    pub r: u8,
+    pub red: u8,
     /// Green channel.
-    pub g: u8,
+    pub green: u8,
     /// Blue channel.
-    pub b: u8,
+    pub blue: u8,
 }
 
 impl RgbColor {
     /// Builds a color from its red, green, and blue channels.
-    pub const fn new(r: u8, g: u8, b: u8) -> Self {
-        Self { r, g, b }
+    pub const fn from_channels(red: u8, green: u8, blue: u8) -> Self {
+        Self { red, green, blue }
     }
 
     /// Parses a `#RRGGBB` (or bare `RRGGBB`) hex string into a color.
@@ -702,30 +777,45 @@ impl RgbColor {
     ///   leading `#`, is not exactly six characters.
     /// - [`ColorParseError::BadDigit`] if any of those six characters is not
     ///   a hex digit (`0-9`, `a-f`, `A-F`).
-    pub fn from_hex(s: &str) -> Result<Self, ColorParseError> {
+    pub fn from_hex(hex_text: &str) -> Result<Self, ColorParseError> {
         // Accept the value with or without its leading `#`.
-        let hex = s.strip_prefix('#').unwrap_or(s);
-        let char_count = hex.chars().count();
-        if char_count != 6 {
-            return Err(ColorParseError::BadLength { got: char_count });
+        let bare_hex_text = hex_text.strip_prefix('#').unwrap_or(hex_text);
+        let hex_character_count = bare_hex_text.chars().count();
+        if hex_character_count != 6 {
+            return Err(ColorParseError::BadLength {
+                character_count: hex_character_count,
+            });
         }
-        if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        if !bare_hex_text
+            .chars()
+            .all(|hex_character| hex_character.is_ascii_hexdigit())
+        {
             return Err(ColorParseError::BadDigit {
-                value: hex.to_string(),
+                invalid_hex_text: bare_hex_text.to_string(),
             });
         }
         // Six ASCII hex digits: one byte per character, so each two-byte
         // slice is valid ASCII and parses.
-        let component = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).expect("validated hex");
-        Ok(Self::new(component(0), component(2), component(4)))
+        let parse_color_component = |component_start_index: usize| {
+            u8::from_str_radix(
+                &bare_hex_text[component_start_index..component_start_index + 2],
+                16,
+            )
+            .expect("validated hex")
+        };
+        Ok(Self::from_channels(
+            parse_color_component(0),
+            parse_color_component(2),
+            parse_color_component(4),
+        ))
     }
 }
 
 impl FromStr for RgbColor {
     type Err = ColorParseError;
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::from_hex(s)
+    fn from_str(hex_text: &str) -> Result<Self, Self::Err> {
+        Self::from_hex(hex_text)
     }
 }
 
@@ -736,12 +826,12 @@ pub struct LoggingConfig {
     /// log file or `logs/` directory is created; enabled, log lines at or
     /// above [`level`](Self::level) are written to a per-session file under
     /// the platform state directory, created on the first line written.
-    pub enabled: bool,
+    pub is_enabled: bool,
     /// The lowest severity that gets written. A line below this is dropped —
     /// e.g. [`LogLevel::Warning`] drops `info` lines.
     pub level: LogLevel,
     /// How each written line is rendered.
-    pub format: LogFormat,
+    pub log_format: LogFormat,
 }
 
 impl Default for LoggingConfig {
@@ -749,9 +839,9 @@ impl Default for LoggingConfig {
     /// human-readable format.
     fn default() -> Self {
         Self {
-            enabled: false,
+            is_enabled: false,
             level: LogLevel::Warning,
-            format: LogFormat::Pretty,
+            log_format: LogFormat::Pretty,
         }
     }
 }

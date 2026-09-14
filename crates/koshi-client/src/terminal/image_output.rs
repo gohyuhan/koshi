@@ -11,35 +11,36 @@ use ratatui::layout::{Position, Rect};
 
 use koshi_core::geometry::PixelCellSize;
 use koshi_image::{
-    checked_rgba_len, validate_dimensions, DecodedImage, GraphicsProtocol, MAX_IMAGE_BYTES,
+    compute_rgba_byte_count, validate_image_dimensions, DecodedImage, GraphicsProtocol,
+    MAX_IMAGE_BYTE_COUNT,
 };
-use koshi_iterm::{Encoder as ItermEncoder, OutputOptions, MAX_ITERM_PACKET_BYTES};
+use koshi_iterm::{ItermEncoder, ItermOutputOptions, MAX_ITERM_PACKET_BYTE_COUNT};
 use koshi_kitty::{
     write_kitty_delete_all, write_kitty_image_delete, write_kitty_placement,
     write_kitty_visible_placement_delete, KittyOutputError, KittyPlacement, KittyUpload,
 };
 use koshi_renderer::{
     ImageCellSnapshot, ImageCellState, ImagePaint, ImagePlacementKey, ImageSourceRect,
-    MAX_IMAGE_CELL_SNAPSHOT_CELLS,
+    MAX_IMAGE_CELL_SNAPSHOT_CELL_COUNT,
 };
 use koshi_sixel::{
-    PreparedSixelPalette, SixelEncodeOptions, SixelEncoder, MAX_PALETTE_COLORS,
-    MAX_SIXEL_OUTPUT_BYTES, MAX_SIXEL_TILE_BYTES, MIN_PALETTE_COLORS,
+    PreparedSixelPalette, SixelEncodeOptions, SixelEncoder, MAX_PALETTE_COLOR_COUNT,
+    MAX_SIXEL_OUTPUT_BYTE_COUNT, MAX_SIXEL_TILE_BYTE_COUNT, MIN_PALETTE_COLOR_COUNT,
 };
 use koshi_terminal::graphics::{ImageRecord, SixelBackground};
 
 use super::{restore_cursor_state, GraphicsSupport};
 
-const MAX_OUTPUT_PAINTS: usize = 4_096;
-const MAX_NATIVE_FRAME_OUTPUT_BYTES: usize =
-    MAX_IMAGE_BYTES * 2 + MAX_OUTPUT_PAINTS * (std::mem::size_of::<OutputPaint>() + 256);
+const MAX_OUTPUT_PAINT_COUNT: usize = 4_096;
+const MAX_NATIVE_FRAME_OUTPUT_BYTE_COUNT: usize =
+    MAX_IMAGE_BYTE_COUNT * 2 + MAX_OUTPUT_PAINT_COUNT * (std::mem::size_of::<OutputPaint>() + 256);
 
-const SIXEL_MODE_SAVE: &[u8] = b"\x1b[?80s\x1b[?8452s\x1b[?1070s";
-const SIXEL_MODE_RESET: &[u8] = b"\x1b[?80l\x1b[?8452l\x1b[?1070h";
-const SIXEL_MODE_RESTORE: &[u8] = b"\x1b[?80r\x1b[?8452r\x1b[?1070r";
-const IMAGE_ABORT: &[u8] = b"\x18\x1b\\";
-const SCREEN_RESET: &[u8] = b"\x1b[2J";
-const KITTY_BACKGROUND_LAYER_Z: i32 = i32::MIN / 2;
+const SIXEL_MODE_SAVE_BYTES: &[u8] = b"\x1b[?80s\x1b[?8452s\x1b[?1070s";
+const SIXEL_MODE_RESET_BYTES: &[u8] = b"\x1b[?80l\x1b[?8452l\x1b[?1070h";
+const SIXEL_MODE_RESTORE_BYTES: &[u8] = b"\x1b[?80r\x1b[?8452r\x1b[?1070r";
+const IMAGE_ABORT_BYTES: &[u8] = b"\x18\x1b\\";
+const SCREEN_RESET_BYTES: &[u8] = b"\x1b[2J";
+const KITTY_BACKGROUND_LAYER_Z_INDEX: i32 = i32::MIN / 2;
 
 /// Output protocol settings for one connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -51,11 +52,11 @@ pub(crate) enum ImageOutputKind {
     /// DEC Sixel output with the host's measured limits.
     Sixel {
         /// Maximum palette entries accepted by the host.
-        palette_colors: usize,
+        palette_color_count: usize,
         /// Maximum Sixel width in pixels.
-        max_width: Option<u32>,
+        max_pixel_width: Option<u32>,
         /// Maximum Sixel height in pixels.
-        max_height: Option<u32>,
+        max_pixel_height: Option<u32>,
     },
 }
 
@@ -63,13 +64,13 @@ pub(crate) enum ImageOutputKind {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct ImageCompatibility {
     /// The host cannot express the image layer order relative to text glyphs.
-    pub(crate) text_layer_order: bool,
+    pub(crate) has_text_layer_order_mismatch: bool,
     /// iTerm2 alpha cannot preserve the required underlying pixels.
-    pub(crate) iterm_alpha: bool,
+    pub(crate) has_iterm_alpha_mismatch: bool,
     /// Sixel partial alpha uses an unknown underlying color.
-    pub(crate) sixel_alpha: bool,
+    pub(crate) has_sixel_alpha_mismatch: bool,
     /// Sixel terminal-background pixels use an unknown cell color.
-    pub(crate) sixel_terminal_background: bool,
+    pub(crate) has_sixel_terminal_background_mismatch: bool,
 }
 
 impl ImageCompatibility {
@@ -85,13 +86,13 @@ impl ImageOutputKind {
             GraphicsSupport::Kitty => Some(Self::Kitty),
             GraphicsSupport::Iterm => Some(Self::Iterm),
             GraphicsSupport::Sixel {
-                palette_colors,
-                max_width,
-                max_height,
+                palette_color_count,
+                max_pixel_width,
+                max_pixel_height,
             } => Some(Self::Sixel {
-                palette_colors,
-                max_width,
-                max_height,
+                palette_color_count,
+                max_pixel_width,
+                max_pixel_height,
             }),
             GraphicsSupport::Unsupported => None,
         }
@@ -104,52 +105,52 @@ impl ImageOutputKind {
 
     /// Return whether the protocol blends image pixels with the cells the
     /// image covers. Kitty places pixels by z-index, so it reads no cell.
-    pub(crate) const fn composes_with_cells(self) -> bool {
+    pub(crate) const fn uses_cell_composition(self) -> bool {
         !matches!(self, Self::Kitty)
     }
 }
 
 /// Return the Sixel mode-save sequence used at application-mode setup.
-pub(crate) const fn sixel_mode_save() -> &'static [u8] {
-    SIXEL_MODE_SAVE
+pub(crate) const fn get_sixel_mode_save_bytes() -> &'static [u8] {
+    SIXEL_MODE_SAVE_BYTES
 }
 
 /// Return the Sixel mode-restore sequence used at application-mode cleanup.
-pub(crate) const fn sixel_mode_restore() -> &'static [u8] {
-    SIXEL_MODE_RESTORE
+pub(crate) const fn get_sixel_mode_restore_bytes() -> &'static [u8] {
+    SIXEL_MODE_RESTORE_BYTES
 }
 
 /// Write the cancellation sequence for an open image string.
 pub(crate) fn write_image_abort<W: Write>(writer: &mut W) -> io::Result<()> {
-    writer.write_all(IMAGE_ABORT)
+    writer.write_all(IMAGE_ABORT_BYTES)
 }
 
 /// One image's current connection-local output state.
 #[derive(Debug, Clone)]
 struct OutputPaint {
-    key: ImagePlacementKey,
-    content_id: u64,
-    record: Arc<ImageRecord>,
-    target: Rect,
-    source: ImageSourceRect,
-    cell_offset_x: Option<u32>,
-    cell_offset_y: Option<u32>,
+    placement_key: ImagePlacementKey,
+    image_content_id: u64,
+    image_record: Arc<ImageRecord>,
+    target_area: Rect,
+    source_rect: ImageSourceRect,
+    cell_pixel_offset_x: Option<u32>,
+    cell_pixel_offset_y: Option<u32>,
     z_index: i32,
-    alpha: Option<AlphaStats>,
+    alpha_stats: Option<AlphaStats>,
 }
 
 impl OutputPaint {
-    fn from_paint(paint: &ImagePaint, alpha: Option<AlphaStats>) -> Self {
+    fn from_paint(image_paint: &ImagePaint, alpha_stats: Option<AlphaStats>) -> Self {
         Self {
-            key: (paint.pane_id, paint.placement_id),
-            content_id: paint.content_id,
-            record: Arc::clone(&paint.record),
-            target: paint.target,
-            source: paint.source,
-            cell_offset_x: paint.cell_offset_x,
-            cell_offset_y: paint.cell_offset_y,
-            z_index: paint.z_index,
-            alpha,
+            placement_key: (image_paint.pane_id, image_paint.placement_id),
+            image_content_id: image_paint.image_content_id,
+            image_record: Arc::clone(&image_paint.image_record),
+            target_area: image_paint.target_area,
+            source_rect: image_paint.source_rect,
+            cell_pixel_offset_x: image_paint.cell_pixel_offset_x,
+            cell_pixel_offset_y: image_paint.cell_pixel_offset_y,
+            z_index: image_paint.z_index,
+            alpha_stats,
         }
     }
 
@@ -158,81 +159,84 @@ impl OutputPaint {
     /// A fully opaque image at a z-index at or above zero replaces every cell
     /// it covers, so its pixels and its host compatibility read no cell. An
     /// unknown alpha coverage reads the cells.
-    fn depends_on_target_cells(&self, kind: ImageOutputKind) -> bool {
-        if !kind.composes_with_cells() {
+    fn needs_target_cell_composition(&self, output_kind: ImageOutputKind) -> bool {
+        if !output_kind.uses_cell_composition() {
             return false;
         }
-        !(self.z_index >= 0 && self.alpha.is_some_and(AlphaStats::is_fully_opaque))
+        !(self.z_index >= 0 && self.alpha_stats.is_some_and(AlphaStats::is_fully_opaque))
     }
 }
 
 /// Values that identify exact image output inputs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct EncodeKey {
-    content_id: u64,
-    image_address: usize,
-    source: ImageSourceKey,
-    target_width: u16,
-    target_height: u16,
-    cell_size: PixelCellSize,
-    kind: ImageOutputKind,
+    image_content_id: u64,
+    image_memory_address: usize,
+    source_rect: ImageSourceKey,
+    target_column_count: u16,
+    target_row_count: u16,
+    pixel_cell_size: PixelCellSize,
+    output_kind: ImageOutputKind,
     z_index: i32,
-    uses_terminal_background: bool,
-    composition: u64,
-    composition_cell_size: Option<PixelCellSize>,
+    has_terminal_background: bool,
+    composition_revision: u64,
+    composition_pixel_cell_size: Option<PixelCellSize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct ImageSourceKey {
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
+    pixel_x: u32,
+    pixel_y: u32,
+    pixel_width: u32,
+    pixel_height: u32,
 }
 
 #[derive(Debug)]
 struct CompositionFrame {
-    cells: Arc<ImageCellSnapshot>,
-    paints: Arc<[CompositionPaint]>,
+    cell_snapshot: Arc<ImageCellSnapshot>,
+    composition_paints: Arc<[CompositionPaint]>,
 }
 
 #[derive(Debug, Clone)]
 struct CompositionState {
-    frame: Arc<CompositionFrame>,
-    paint_index: usize,
+    composition_frame: Arc<CompositionFrame>,
+    composition_paint_index: usize,
 }
 
 #[derive(Debug)]
 struct VersionedComposition {
-    state: CompositionState,
-    revision: u64,
+    composition_state: CompositionState,
+    composition_revision: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CompositionPaint {
-    image_address: usize,
-    content_id: u64,
-    record: Arc<ImageRecord>,
-    key: ImagePlacementKey,
-    target: Rect,
-    source: ImageSourceKey,
+    image_memory_address: usize,
+    image_content_id: u64,
+    image_record: Arc<ImageRecord>,
+    placement_key: ImagePlacementKey,
+    target_area: Rect,
+    source_rect: ImageSourceKey,
     z_index: i32,
 }
 
 impl CompositionFrame {
-    fn new(cells: &Arc<ImageCellSnapshot>, paints: &[OutputPaint]) -> Self {
+    fn from_cell_snapshot_and_output_paints(
+        cell_snapshot: &Arc<ImageCellSnapshot>,
+        output_paints: &[OutputPaint],
+    ) -> Self {
         Self {
-            cells: Arc::clone(cells),
-            paints: paints
+            cell_snapshot: Arc::clone(cell_snapshot),
+            composition_paints: output_paints
                 .iter()
-                .map(|paint| CompositionPaint {
-                    image_address: Arc::as_ptr(&paint.record.image) as usize,
-                    content_id: paint.content_id,
-                    record: Arc::clone(&paint.record),
-                    key: paint.key,
-                    target: paint.target,
-                    source: ImageSourceKey::from_source(paint.source),
-                    z_index: paint.z_index,
+                .map(|output_paint| CompositionPaint {
+                    image_memory_address: Arc::as_ptr(&output_paint.image_record.image) as usize,
+                    image_content_id: output_paint.image_content_id,
+                    image_record: Arc::clone(&output_paint.image_record),
+                    placement_key: output_paint.placement_key,
+                    target_area: output_paint.target_area,
+                    source_rect: ImageSourceKey::from_source_rect(output_paint.source_rect),
+                    z_index: output_paint.z_index,
                 })
                 .collect::<Vec<_>>()
                 .into(),
@@ -242,35 +246,66 @@ impl CompositionFrame {
 
 impl PartialEq for CompositionState {
     fn eq(&self, other: &Self) -> bool {
-        let Some(paint) = self.frame.paints.get(self.paint_index) else {
+        let Some(composition_paint) = self
+            .composition_frame
+            .composition_paints
+            .get(self.composition_paint_index)
+        else {
             return false;
         };
-        let Some(other_paint) = other.frame.paints.get(other.paint_index) else {
+        let Some(other_composition_paint) = other
+            .composition_frame
+            .composition_paints
+            .get(other.composition_paint_index)
+        else {
             return false;
         };
-        paint == other_paint
-            && (paint.target.y..paint.target.bottom()).all(|y| {
-                (paint.target.x..paint.target.right())
-                    .all(|x| self.frame.cells.cell(x, y) == other.frame.cells.cell(x, y))
-            })
-            && self.frame.paints[..self.paint_index]
+        composition_paint == other_composition_paint
+            && (composition_paint.target_area.y..composition_paint.target_area.bottom()).all(
+                |row_index| {
+                    (composition_paint.target_area.x..composition_paint.target_area.right()).all(
+                        |column_index| {
+                            self.composition_frame
+                                .cell_snapshot
+                                .find_cell(column_index, row_index)
+                                == other
+                                    .composition_frame
+                                    .cell_snapshot
+                                    .find_cell(column_index, row_index)
+                        },
+                    )
+                },
+            )
+            && self.composition_frame.composition_paints[..self.composition_paint_index]
                 .iter()
-                .filter(|lower| rectangles_overlap(lower.target, paint.target))
-                .eq(other.frame.paints[..other.paint_index]
-                    .iter()
-                    .filter(|lower| rectangles_overlap(lower.target, other_paint.target)))
+                .filter(|lower_paint| {
+                    is_rectangles_overlapping(
+                        lower_paint.target_area,
+                        composition_paint.target_area,
+                    )
+                })
+                .eq(
+                    other.composition_frame.composition_paints[..other.composition_paint_index]
+                        .iter()
+                        .filter(|lower_paint| {
+                            is_rectangles_overlapping(
+                                lower_paint.target_area,
+                                other_composition_paint.target_area,
+                            )
+                        }),
+                )
     }
 }
 
 impl Eq for CompositionState {}
 
 impl ImageSourceKey {
-    fn from_source(source: ImageSourceRect) -> Self {
+    fn from_source_rect(source_rect: ImageSourceRect) -> Self {
         Self {
-            x: source.x,
-            y: source.y,
-            width: source.width,
-            height: source.height,
+            pixel_x: source_rect.pixel_x,
+            pixel_y: source_rect.pixel_y,
+            pixel_width: source_rect.pixel_width,
+            pixel_height: source_rect.pixel_height,
         }
     }
 }
@@ -279,138 +314,138 @@ impl ImageSourceKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct KittyImage {
     /// The nonzero Kitty image number carried by `I=`.
-    number: u32,
-    /// The address of the `DecodedImage` transmitted under `number`.
-    address: usize,
+    kitty_image_number: u32,
+    /// The address of the `DecodedImage` transmitted under `kitty_image_number`.
+    image_memory_address: usize,
 }
 
 /// The Kitty image number one paint places, and whether that paint carries the
-/// pixels. `transmit` is false when the host already holds `number`.
+/// pixels. `should_transmit_image` is false when the host already holds the
+/// image content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct KittyPaintImage {
     /// The nonzero Kitty image number this paint places.
-    number: u32,
+    kitty_image_number: u32,
     /// Whether this paint writes the image's pixels before it places them.
-    transmit: bool,
+    should_transmit_image: bool,
 }
 
 /// A worker request containing one bounded frame's images and one shared cell snapshot.
 struct WorkerRequest {
-    generation: u64,
-    kind: ImageOutputKind,
-    cell_size: PixelCellSize,
-    measured_cell_size: Option<PixelCellSize>,
-    cells: Option<Arc<ImageCellSnapshot>>,
-    paints: Vec<OutputPaint>,
-    keys: Vec<EncodeKey>,
-    /// One entry per paint, in the same order. Empty for every other protocol.
-    kitty_images: Vec<KittyPaintImage>,
-    cancel: Arc<AtomicBool>,
+    frame_generation: u64,
+    output_kind: ImageOutputKind,
+    pixel_cell_size: PixelCellSize,
+    measured_pixel_cell_size: Option<PixelCellSize>,
+    cell_snapshot: Option<Arc<ImageCellSnapshot>>,
+    output_paints: Vec<OutputPaint>,
+    encode_keys: Vec<EncodeKey>,
+    /// One entry per output paint, in the same order. Empty for every other protocol.
+    kitty_paint_images: Vec<KittyPaintImage>,
+    cancellation_token: Arc<AtomicBool>,
 }
 
 /// A worker output unit with relative cell geometry.
 #[derive(Debug)]
 struct OutputUnit {
-    generation: u64,
-    key: ImagePlacementKey,
-    kind: ImageOutputKind,
-    offset: (u16, u16),
-    bytes: Arc<[u8]>,
+    frame_generation: u64,
+    placement_key: ImagePlacementKey,
+    output_kind: ImageOutputKind,
+    tile_offset: (u16, u16),
+    output_bytes: Arc<[u8]>,
 }
 
 /// Messages sent by the bounded image worker.
 #[derive(Debug)]
 enum WorkerMessage {
     Prepared {
-        generation: u64,
-        key: ImagePlacementKey,
-        compatibility: ImageCompatibility,
+        frame_generation: u64,
+        placement_key: ImagePlacementKey,
+        image_compatibility: ImageCompatibility,
     },
     Unavailable {
-        generation: u64,
-        key: ImagePlacementKey,
+        frame_generation: u64,
+        placement_key: ImagePlacementKey,
     },
     Unit(OutputUnit),
     Finished {
-        generation: u64,
-        failed: bool,
+        frame_generation: u64,
+        has_failed: bool,
     },
 }
 
 /// One active request and its cancellation token.
 struct ActiveJob {
-    generation: u64,
-    cancel: Arc<AtomicBool>,
+    frame_generation: u64,
+    cancellation_token: Arc<AtomicBool>,
 }
 
 /// Bounded image output state owned by one terminal connection.
 pub(crate) struct ImageOutputState {
-    kind: Option<ImageOutputKind>,
-    requests: Option<SyncSender<WorkerRequest>>,
-    messages: Option<Receiver<WorkerMessage>>,
+    output_kind: Option<ImageOutputKind>,
+    worker_request_sender: Option<SyncSender<WorkerRequest>>,
+    worker_messages: Option<Receiver<WorkerMessage>>,
     worker: Option<JoinHandle<()>>,
-    generation: u64,
-    active: Option<ActiveJob>,
-    pending: Option<WorkerRequest>,
-    latest: Vec<OutputPaint>,
-    latest_index: HashMap<ImagePlacementKey, usize>,
-    latest_keys: Vec<EncodeKey>,
-    /// The composition revision of the cells under each paint in `latest`.
-    latest_coverage: Vec<u64>,
-    composition_states: HashMap<ImagePlacementKey, VersionedComposition>,
-    composition_revision: u64,
-    settled: bool,
-    ready: bool,
-    prepared: Vec<ImagePlacementKey>,
-    prepared_set: HashSet<ImagePlacementKey>,
-    compatibility: HashMap<ImagePlacementKey, ImageCompatibility>,
-    units: Vec<OutputUnit>,
-    unit_bytes: usize,
-    host_pixels_present: bool,
-    screen_reset_needed: bool,
-    needs_abort: bool,
+    frame_generation: u64,
+    active_job: Option<ActiveJob>,
+    pending_worker_request: Option<WorkerRequest>,
+    latest_output_paints: Vec<OutputPaint>,
+    latest_paint_index_by_placement_key: HashMap<ImagePlacementKey, usize>,
+    latest_encode_keys: Vec<EncodeKey>,
+    /// The composition revision of the cells under each output paint in the latest frame.
+    latest_composition_revisions: Vec<u64>,
+    composition_state_by_placement_key: HashMap<ImagePlacementKey, VersionedComposition>,
+    next_composition_revision: u64,
+    is_settled: bool,
+    is_ready: bool,
+    prepared_placement_keys: Vec<ImagePlacementKey>,
+    prepared_placement_key_set: HashSet<ImagePlacementKey>,
+    compatibility_by_placement_key: HashMap<ImagePlacementKey, ImageCompatibility>,
+    output_units: Vec<OutputUnit>,
+    output_unit_byte_count: usize,
+    has_host_pixels: bool,
+    needs_screen_reset: bool,
+    needs_image_abort: bool,
     /// Host screen size in columns and rows at the last painted frame.
-    host_size: Option<(u16, u16)>,
+    host_terminal_size: Option<(u16, u16)>,
     /// Alpha coverage per decoded-image address and source rectangle. Holds
-    /// only the addresses `latest` retains, so no address is reused under a
-    /// stale entry.
-    alpha_cache: HashMap<(usize, ImageSourceKey), Option<AlphaStats>>,
+    /// only the addresses retained by the latest frame.
+    alpha_stats_by_image_and_source: HashMap<(usize, ImageSourceKey), Option<AlphaStats>>,
     /// Kitty image numbers the host holds, keyed by content identity.
-    kitty_images: HashMap<u64, KittyImage>,
-    /// Kitty image numbers this frame transmits. They join `kitty_images` when
-    /// the frame commits, and are dropped when it does not.
-    pending_kitty_images: Vec<(u64, KittyImage)>,
+    kitty_image_by_content_id: HashMap<u64, KittyImage>,
+    /// Kitty image numbers this frame transmits. They join the committed image
+    /// map when the frame commits, and are dropped when it does not.
+    pending_kitty_images_by_content_id: Vec<(u64, KittyImage)>,
     /// Kitty image numbers the next frame reset frees on the host.
-    kitty_image_deletes: Vec<u32>,
+    kitty_image_numbers_to_delete: Vec<u32>,
     /// Whether the next frame reset frees every Kitty image the host holds.
-    kitty_free_all: bool,
+    should_free_all_kitty_images: bool,
     /// The next Kitty image number handed out. Never zero.
     next_kitty_image_number: u32,
 }
 
 impl ImageOutputState {
     fn rebuild_latest_index(&mut self) {
-        self.latest_index.clear();
-        self.latest_index.extend(
-            self.latest
+        self.latest_paint_index_by_placement_key.clear();
+        self.latest_paint_index_by_placement_key.extend(
+            self.latest_output_paints
                 .iter()
                 .enumerate()
-                .map(|(index, paint)| (paint.key, index)),
+                .map(|(paint_index, output_paint)| (output_paint.placement_key, paint_index)),
         );
     }
 
     /// Build a connection-local worker for the selected output protocol.
-    pub(crate) fn new(kind: Option<ImageOutputKind>) -> Self {
-        let (requests, messages, worker) = if kind.is_some() {
-            let (request_tx, request_rx) = mpsc::sync_channel(1);
-            let (message_tx, message_rx) = mpsc::sync_channel(1);
+    pub(crate) fn from_output_kind(output_kind: Option<ImageOutputKind>) -> Self {
+        let (worker_request_sender, worker_messages, worker) = if output_kind.is_some() {
+            let (request_sender, request_receiver) = mpsc::sync_channel(1);
+            let (message_sender, message_receiver) = mpsc::sync_channel(1);
             match thread::Builder::new()
                 .name(String::from("koshi-image-output"))
-                .spawn(move || worker_loop(request_rx, message_tx))
+                .spawn(move || worker_loop(request_receiver, message_sender))
             {
-                Ok(worker) => (Some(request_tx), Some(message_rx), Some(worker)),
-                Err(error) => {
-                    tracing::warn!(%error, "could not start the image output worker");
+                Ok(worker) => (Some(request_sender), Some(message_receiver), Some(worker)),
+                Err(worker_spawn_error) => {
+                    tracing::warn!(%worker_spawn_error, "could not start the image output worker");
                     (None, None, None)
                 }
             }
@@ -418,35 +453,35 @@ impl ImageOutputState {
             (None, None, None)
         };
         Self {
-            kind,
-            requests,
-            messages,
+            output_kind,
+            worker_request_sender,
+            worker_messages,
             worker,
-            generation: 0,
-            active: None,
-            pending: None,
-            latest: Vec::new(),
-            latest_index: HashMap::new(),
-            latest_keys: Vec::new(),
-            latest_coverage: Vec::new(),
-            composition_states: HashMap::new(),
-            composition_revision: 0,
-            settled: false,
-            ready: true,
-            prepared: Vec::new(),
-            prepared_set: HashSet::new(),
-            compatibility: HashMap::new(),
-            units: Vec::new(),
-            unit_bytes: 0,
-            host_pixels_present: false,
-            screen_reset_needed: false,
-            host_size: None,
-            needs_abort: false,
-            alpha_cache: HashMap::new(),
-            kitty_images: HashMap::new(),
-            pending_kitty_images: Vec::new(),
-            kitty_image_deletes: Vec::new(),
-            kitty_free_all: false,
+            frame_generation: 0,
+            active_job: None,
+            pending_worker_request: None,
+            latest_output_paints: Vec::new(),
+            latest_paint_index_by_placement_key: HashMap::new(),
+            latest_encode_keys: Vec::new(),
+            latest_composition_revisions: Vec::new(),
+            composition_state_by_placement_key: HashMap::new(),
+            next_composition_revision: 0,
+            is_settled: false,
+            is_ready: true,
+            prepared_placement_keys: Vec::new(),
+            prepared_placement_key_set: HashSet::new(),
+            compatibility_by_placement_key: HashMap::new(),
+            output_units: Vec::new(),
+            output_unit_byte_count: 0,
+            has_host_pixels: false,
+            needs_screen_reset: false,
+            needs_image_abort: false,
+            host_terminal_size: None,
+            alpha_stats_by_image_and_source: HashMap::new(),
+            kitty_image_by_content_id: HashMap::new(),
+            pending_kitty_images_by_content_id: Vec::new(),
+            kitty_image_numbers_to_delete: Vec::new(),
+            should_free_all_kitty_images: false,
             next_kitty_image_number: 1,
         }
     }
@@ -454,118 +489,148 @@ impl ImageOutputState {
     /// Return an inactive state for tests and terminals without image output.
     #[cfg(test)]
     pub(crate) fn disabled() -> Self {
-        Self::new(None)
+        Self::from_output_kind(None)
     }
 
     /// Return the connection's output protocol, if it has one.
-    pub(crate) const fn kind(&self) -> Option<ImageOutputKind> {
-        self.kind
+    pub(crate) const fn output_kind(&self) -> Option<ImageOutputKind> {
+        self.output_kind
     }
 
     /// Return prepared placement keys for renderer selection.
-    pub(crate) fn prepared_keys(&self) -> &[ImagePlacementKey] {
-        &self.prepared
+    pub(crate) fn list_prepared_placement_keys(&self) -> &[ImagePlacementKey] {
+        &self.prepared_placement_keys
     }
 
     /// Return the host composition status for one prepared placement.
-    pub(crate) fn compatibility(&self, key: ImagePlacementKey) -> Option<ImageCompatibility> {
-        self.compatibility.get(&key).copied()
+    pub(crate) fn get_image_compatibility(
+        &self,
+        placement_key: ImagePlacementKey,
+    ) -> Option<ImageCompatibility> {
+        self.compatibility_by_placement_key
+            .get(&placement_key)
+            .copied()
     }
 
     /// Return whether this state needs another attachment-loop pass.
     pub(crate) fn work_pending(&self) -> bool {
-        !self.ready || self.active.is_some() || self.pending.is_some()
+        !self.is_ready || self.active_job.is_some() || self.pending_worker_request.is_some()
     }
 
     /// Return whether the newest frame can re-emit the encoded output the
     /// committed frame already holds.
     ///
     /// [`frame_output`](Self::frame_output) reads each unit's screen position
-    /// from `latest` when it writes the frame, so output whose encode keys and
+    /// from the latest output paints when it writes the frame, so output whose encode keys and
     /// placement identities are unchanged stays correct at a new position.
     /// Kitty writes each placement's position into its own unit, so its output
     /// is never reused.
-    fn can_reuse_output(&self, latest: &[OutputPaint], keys: &[EncodeKey]) -> bool {
+    fn can_reuse_native_output(
+        &self,
+        latest_output_paints: &[OutputPaint],
+        encode_keys: &[EncodeKey],
+    ) -> bool {
         matches!(
-            self.kind,
+            self.output_kind,
             Some(ImageOutputKind::Iterm | ImageOutputKind::Sixel { .. })
-        ) && self.ready
-            && !self.units.is_empty()
-            && self.latest_keys == keys
-            && self.latest.len() == latest.len()
+        ) && self.is_ready
+            && !self.output_units.is_empty()
+            && self.latest_encode_keys == encode_keys
+            && self.latest_output_paints.len() == latest_output_paints.len()
             && self
-                .latest
+                .latest_output_paints
                 .iter()
-                .zip(latest)
-                .all(|(held, next)| held.key == next.key)
+                .zip(latest_output_paints)
+                .all(|(held_paint, next_paint)| {
+                    held_paint.placement_key == next_paint.placement_key
+                })
     }
 
-    /// Assign one Kitty image number per paint in `self.latest`.
+    /// Assign one Kitty image number per output paint in `self.latest_output_paints`.
     ///
     /// A content identity the host already holds keeps its number and
     /// transmits no pixels. Every number whose content identity left the frame
-    /// joins `kitty_image_deletes`. Returns `None` when the numbers cannot be
+    /// joins `kitty_image_numbers_to_delete`. Returns `None` when the numbers cannot be
     /// reserved.
     fn plan_kitty_images(&mut self) -> Option<Vec<KittyPaintImage>> {
         if self.next_kitty_image_number == u32::MAX {
             self.forget_kitty_images();
         }
-        let mut plan = Vec::new();
-        plan.try_reserve_exact(self.latest.len()).ok()?;
-        self.pending_kitty_images.clear();
-        let mut frame_numbers = HashMap::new();
-        frame_numbers.try_reserve(self.latest.len()).ok()?;
-        for index in 0..self.latest.len() {
-            let paint = &self.latest[index];
-            let content_id = paint.content_id;
-            let address = Arc::as_ptr(&paint.record.image) as usize;
-            if let Some(&number) = frame_numbers.get(&(content_id, address)) {
-                plan.push(KittyPaintImage {
-                    number,
-                    transmit: false,
+        let mut kitty_paint_images = Vec::new();
+        kitty_paint_images
+            .try_reserve_exact(self.latest_output_paints.len())
+            .ok()?;
+        self.pending_kitty_images_by_content_id.clear();
+        let mut kitty_image_number_by_content_and_address = HashMap::new();
+        kitty_image_number_by_content_and_address
+            .try_reserve(self.latest_output_paints.len())
+            .ok()?;
+        for paint_index in 0..self.latest_output_paints.len() {
+            let output_paint = &self.latest_output_paints[paint_index];
+            let image_content_id = output_paint.image_content_id;
+            let image_memory_address = Arc::as_ptr(&output_paint.image_record.image) as usize;
+            if let Some(&kitty_image_number) = kitty_image_number_by_content_and_address
+                .get(&(image_content_id, image_memory_address))
+            {
+                kitty_paint_images.push(KittyPaintImage {
+                    kitty_image_number,
+                    should_transmit_image: false,
                 });
                 continue;
             }
-            let held = self
-                .kitty_images
-                .get(&content_id)
-                .filter(|image| image.address == address)
+            let held_kitty_image = self
+                .kitty_image_by_content_id
+                .get(&image_content_id)
+                .filter(|kitty_image| kitty_image.image_memory_address == image_memory_address)
                 .copied();
-            let (number, transmit) = match held {
-                Some(image) => (image.number, false),
+            let (kitty_image_number, should_transmit_image) = match held_kitty_image {
+                Some(kitty_image) => (kitty_image.kitty_image_number, false),
                 None => {
-                    let number = self.next_kitty_image_number;
-                    self.next_kitty_image_number = number.checked_add(1)?;
-                    self.pending_kitty_images
-                        .push((content_id, KittyImage { number, address }));
-                    (number, true)
+                    let kitty_image_number = self.next_kitty_image_number;
+                    self.next_kitty_image_number = kitty_image_number.checked_add(1)?;
+                    self.pending_kitty_images_by_content_id.push((
+                        image_content_id,
+                        KittyImage {
+                            kitty_image_number,
+                            image_memory_address,
+                        },
+                    ));
+                    (kitty_image_number, true)
                 }
             };
-            frame_numbers.insert((content_id, address), number);
-            plan.push(KittyPaintImage { number, transmit });
+            kitty_image_number_by_content_and_address
+                .insert((image_content_id, image_memory_address), kitty_image_number);
+            kitty_paint_images.push(KittyPaintImage {
+                kitty_image_number,
+                should_transmit_image,
+            });
         }
-        let departed = self
-            .kitty_images
+        let departed_kitty_images = self
+            .kitty_image_by_content_id
             .iter()
-            .filter(|(content_id, image)| {
-                !frame_numbers.contains_key(&(**content_id, image.address))
+            .filter(|(image_content_id, kitty_image)| {
+                !kitty_image_number_by_content_and_address
+                    .contains_key(&(**image_content_id, kitty_image.image_memory_address))
             })
-            .map(|(content_id, image)| (*content_id, image.number))
+            .map(|(image_content_id, kitty_image)| {
+                (*image_content_id, kitty_image.kitty_image_number)
+            })
             .collect::<Vec<_>>();
-        for (content_id, number) in departed {
-            self.kitty_images.remove(&content_id);
-            self.kitty_image_deletes.push(number);
+        for (image_content_id, kitty_image_number) in departed_kitty_images {
+            self.kitty_image_by_content_id.remove(&image_content_id);
+            self.kitty_image_numbers_to_delete.push(kitty_image_number);
         }
-        Some(plan)
+        Some(kitty_paint_images)
     }
 
     /// Drop every Kitty image number and free the host's data at the next
     /// reset. On every other protocol this frees nothing.
     fn forget_kitty_images(&mut self) {
-        self.kitty_images.clear();
-        self.pending_kitty_images.clear();
-        self.kitty_image_deletes.clear();
-        self.kitty_free_all = matches!(self.kind, Some(ImageOutputKind::Kitty));
+        self.kitty_image_by_content_id.clear();
+        self.pending_kitty_images_by_content_id.clear();
+        self.kitty_image_numbers_to_delete.clear();
+        self.should_free_all_kitty_images =
+            matches!(self.output_kind, Some(ImageOutputKind::Kitty));
         self.next_kitty_image_number = 1;
     }
 
@@ -573,232 +638,271 @@ impl ImageOutputState {
     ///
     /// A changed size forgets every Kitty image number. The next frame
     /// transmits its images again.
-    pub(crate) fn note_host_size(&mut self, columns: u16, rows: u16) {
-        let size = Some((columns, rows));
-        if self.host_size == size {
+    pub(crate) fn set_host_terminal_size(&mut self, column_count: u16, row_count: u16) {
+        let host_terminal_size = Some((column_count, row_count));
+        if self.host_terminal_size == host_terminal_size {
             return;
         }
-        let resized = self.host_size.is_some();
-        self.host_size = size;
-        if resized && matches!(self.kind, Some(ImageOutputKind::Kitty)) {
+        let has_previous_terminal_size = self.host_terminal_size.is_some();
+        self.host_terminal_size = host_terminal_size;
+        if has_previous_terminal_size && matches!(self.output_kind, Some(ImageOutputKind::Kitty)) {
             self.forget_kitty_images();
-            self.latest_keys.clear();
-            self.latest_coverage.clear();
+            self.latest_encode_keys.clear();
+            self.latest_composition_revisions.clear();
         }
     }
 
     /// Submit the newest frame and return whether it can be committed.
     pub(crate) fn prepare_frame(
         &mut self,
-        paints: &[ImagePaint],
-        cells: Option<Arc<ImageCellSnapshot>>,
-        cell_size: Option<PixelCellSize>,
+        image_paints: &[ImagePaint],
+        cell_snapshot: Option<Arc<ImageCellSnapshot>>,
+        measured_pixel_cell_size: Option<PixelCellSize>,
     ) -> bool {
         self.poll();
-        let Some(kind) = self.kind else {
+        let Some(output_kind) = self.output_kind else {
             return true;
         };
-        let measured_cell_size = cell_size;
-        let cell_size = if kind.is_sixel() {
-            let Some(cell_size) = cell_size else {
-                self.set_unavailable_frame(paints);
+        let pixel_cell_size = if output_kind.is_sixel() {
+            let Some(pixel_cell_size) = measured_pixel_cell_size else {
+                self.set_unavailable_frame(image_paints);
                 return true;
             };
-            cell_size
+            pixel_cell_size
         } else {
-            PixelCellSize::new(1, 1).expect("one-pixel cell is nonzero")
+            PixelCellSize::from_pixel_dimensions(1, 1).expect("one-pixel cell is nonzero")
         };
-        if paints.len() > MAX_OUTPUT_PAINTS {
-            self.set_unavailable_frame(paints);
+        if image_paints.len() > MAX_OUTPUT_PAINT_COUNT {
+            self.set_unavailable_frame(image_paints);
             return true;
         }
-        if !paints.is_empty()
-            && kind.composes_with_cells()
-            && cells.as_ref().is_none_or(|cells| {
-                usize::try_from(cells.area.area()).ok() > Some(MAX_IMAGE_CELL_SNAPSHOT_CELLS)
+        if !image_paints.is_empty()
+            && output_kind.uses_cell_composition()
+            && cell_snapshot.as_ref().is_none_or(|cell_snapshot| {
+                usize::try_from(cell_snapshot.screen_area.area()).ok()
+                    > Some(MAX_IMAGE_CELL_SNAPSHOT_CELL_COUNT)
             })
         {
-            self.set_unavailable_frame(paints);
+            self.set_unavailable_frame(image_paints);
             return true;
         }
-        let mut latest = Vec::new();
-        let mut alpha_cache = HashMap::new();
-        if latest.try_reserve_exact(paints.len()).is_err()
-            || alpha_cache.try_reserve(paints.len()).is_err()
+        let mut latest_output_paints = Vec::new();
+        let mut alpha_stats_by_image_and_source = HashMap::new();
+        if latest_output_paints
+            .try_reserve_exact(image_paints.len())
+            .is_err()
+            || alpha_stats_by_image_and_source
+                .try_reserve(image_paints.len())
+                .is_err()
         {
-            self.set_unavailable_frame(paints);
+            self.set_unavailable_frame(image_paints);
             return true;
         }
-        for paint in paints {
-            let key = (
-                Arc::as_ptr(&paint.record.image) as usize,
-                ImageSourceKey::from_source(paint.source),
+        for image_paint in image_paints {
+            let image_source_key = (
+                Arc::as_ptr(&image_paint.image_record.image) as usize,
+                ImageSourceKey::from_source_rect(image_paint.source_rect),
             );
-            let alpha = match self.alpha_cache.get(&key).copied() {
-                Some(alpha) => alpha,
-                None if kind.composes_with_cells() => {
-                    alpha_stats(&paint.record.image, paint.source)
+            let image_alpha_stats = match self
+                .alpha_stats_by_image_and_source
+                .get(&image_source_key)
+                .copied()
+            {
+                Some(alpha_stats) => alpha_stats,
+                None if output_kind.uses_cell_composition() => {
+                    compute_alpha_stats(&image_paint.image_record.image, image_paint.source_rect)
                 }
                 None => None,
             };
-            alpha_cache.insert(key, alpha);
-            latest.push(OutputPaint::from_paint(paint, alpha));
+            alpha_stats_by_image_and_source.insert(image_source_key, image_alpha_stats);
+            latest_output_paints.push(OutputPaint::from_paint(image_paint, image_alpha_stats));
         }
-        self.alpha_cache = alpha_cache;
-        let coverage = if let Some(cells) = cells.as_ref() {
-            self.update_composition_revisions(kind, cells, &latest)
+        self.alpha_stats_by_image_and_source = alpha_stats_by_image_and_source;
+        let composition_revisions = if let Some(cell_snapshot) = cell_snapshot.as_ref() {
+            self.update_composition_revisions(output_kind, cell_snapshot, &latest_output_paints)
         } else {
-            vec![0; latest.len()]
+            vec![0; latest_output_paints.len()]
         };
-        let mut covered_cells = HashSet::new();
-        let keys = latest
+        let mut covered_cell_positions = HashSet::new();
+        let encode_keys = latest_output_paints
             .iter()
-            .zip(coverage.iter().copied())
-            .map(|(paint, composition_revision)| {
-                let overlaps_lower = target_contains_covered_cell(paint.target, &covered_cells);
-                let mut key = output_encode_key(kind, cell_size, paint);
-                if paint.depends_on_target_cells(kind) {
-                    key.composition = composition_revision;
-                    if matches!(kind, ImageOutputKind::Iterm)
-                        && paint.alpha.is_some_and(|alpha| !alpha.is_fully_opaque())
-                        && (overlaps_lower
-                            || cells.as_ref().is_some_and(|cells| {
-                                let composition = composition_info(cells, paint);
-                                !composition.default_blank && composition.solid_background.is_none()
+            .zip(composition_revisions.iter().copied())
+            .map(|(output_paint, composition_revision)| {
+                let has_lower_overlap =
+                    has_covered_target_cell(output_paint.target_area, &covered_cell_positions);
+                let mut encode_key =
+                    build_output_encode_key(output_kind, pixel_cell_size, output_paint);
+                if output_paint.needs_target_cell_composition(output_kind) {
+                    encode_key.composition_revision = composition_revision;
+                    if matches!(output_kind, ImageOutputKind::Iterm)
+                        && output_paint
+                            .alpha_stats
+                            .is_some_and(|alpha_stats| !alpha_stats.is_fully_opaque())
+                        && (has_lower_overlap
+                            || cell_snapshot.as_ref().is_some_and(|cell_snapshot| {
+                                let composition_details =
+                                    compute_composition_info(cell_snapshot, output_paint);
+                                !composition_details.is_default_blank
+                                    && composition_details.solid_background_color.is_none()
                             }))
                     {
-                        key.composition_cell_size = measured_cell_size;
+                        encode_key.composition_pixel_cell_size = measured_pixel_cell_size;
                     }
                 }
-                add_target_cells(paint.target, &mut covered_cells);
-                key
+                add_target_area_cells(output_paint.target_area, &mut covered_cell_positions);
+                encode_key
             })
             .collect::<Vec<_>>();
-        let same_paints = output_frames_equal(&self.latest, &latest);
-        if same_paints && self.latest_keys == keys && self.latest_coverage == coverage {
-            return self.ready;
+        let are_output_paints_unchanged =
+            is_output_paint_sequence_equal(&self.latest_output_paints, &latest_output_paints);
+        if are_output_paints_unchanged
+            && self.latest_encode_keys == encode_keys
+            && self.latest_composition_revisions == composition_revisions
+        {
+            return self.is_ready;
         }
-        if self.can_reuse_output(&latest, &keys) {
-            self.latest = latest;
-            self.latest_coverage = coverage;
+        if self.can_reuse_native_output(&latest_output_paints, &encode_keys) {
+            self.latest_output_paints = latest_output_paints;
+            self.latest_composition_revisions = composition_revisions;
             self.rebuild_latest_index();
-            self.settled = false;
-            self.screen_reset_needed = !same_paints && self.host_pixels_present;
+            self.is_settled = false;
+            self.needs_screen_reset = !are_output_paints_unchanged && self.has_host_pixels;
             return true;
         }
-        self.latest = latest;
-        self.latest_keys = keys.clone();
-        self.latest_coverage = coverage;
+        self.latest_output_paints = latest_output_paints;
+        self.latest_encode_keys = encode_keys.clone();
+        self.latest_composition_revisions = composition_revisions;
         self.rebuild_latest_index();
-        let kitty_images = if matches!(kind, ImageOutputKind::Kitty) {
+        let kitty_paint_images = if matches!(output_kind, ImageOutputKind::Kitty) {
             match self.plan_kitty_images() {
-                Some(images) => images,
+                Some(kitty_paint_images) => kitty_paint_images,
                 None => {
-                    self.set_unavailable_frame(paints);
+                    self.set_unavailable_frame(image_paints);
                     return true;
                 }
             }
         } else {
             Vec::new()
         };
-        self.settled = false;
-        self.ready = self.latest.is_empty();
-        self.screen_reset_needed = self.host_pixels_present;
+        self.is_settled = false;
+        self.is_ready = self.latest_output_paints.is_empty();
+        self.needs_screen_reset = self.has_host_pixels;
         self.clear_prepared_output();
         self.cancel_active();
-        if let Some(previous) = self.pending.take() {
-            previous.cancel.store(true, Ordering::Release);
+        if let Some(previous_request) = self.pending_worker_request.take() {
+            previous_request
+                .cancellation_token
+                .store(true, Ordering::Release);
         }
-        if self.ready {
+        if self.is_ready {
             self.next_generation();
             return true;
         }
-        let request_cancel = Arc::new(AtomicBool::new(false));
-        let request = WorkerRequest {
-            generation: self.next_generation(),
-            kind,
-            cell_size,
-            measured_cell_size,
-            cells,
-            paints: self.latest.clone(),
-            keys: keys.clone(),
-            kitty_images,
-            cancel: Arc::clone(&request_cancel),
+        let request_cancellation_token = Arc::new(AtomicBool::new(false));
+        let worker_request = WorkerRequest {
+            frame_generation: self.next_generation(),
+            output_kind,
+            pixel_cell_size,
+            measured_pixel_cell_size,
+            cell_snapshot,
+            output_paints: self.latest_output_paints.clone(),
+            encode_keys: encode_keys.clone(),
+            kitty_paint_images,
+            cancellation_token: Arc::clone(&request_cancellation_token),
         };
-        if self.active.is_none() {
-            self.start_request(request);
+        if self.active_job.is_none() {
+            self.start_worker_request(worker_request);
         } else {
-            self.pending = Some(request);
+            self.pending_worker_request = Some(worker_request);
         }
-        self.ready
+        self.is_ready
     }
 
     /// Receive worker results without waiting on the output queue.
     pub(crate) fn poll(&mut self) {
         loop {
-            let message = match self.messages.as_ref().map(Receiver::try_recv) {
-                Some(Ok(message)) => message,
+            let worker_message = match self.worker_messages.as_ref().map(Receiver::try_recv) {
+                Some(Ok(worker_message)) => worker_message,
                 Some(Err(TryRecvError::Empty)) | None => break,
                 Some(Err(TryRecvError::Disconnected)) => {
-                    self.active = None;
-                    self.pending = None;
+                    self.active_job = None;
+                    self.pending_worker_request = None;
                     self.fail_current_generation();
                     break;
                 }
             };
-            match message {
+            match worker_message {
                 WorkerMessage::Prepared {
-                    generation,
-                    key,
-                    compatibility,
+                    frame_generation,
+                    placement_key,
+                    image_compatibility,
                 } => {
-                    if self.current_generation(generation) && self.latest_index.contains_key(&key) {
-                        if self.prepared.len() < MAX_OUTPUT_PAINTS && self.prepared_set.insert(key)
-                        {
-                            self.prepared.push(key);
-                        }
-                        self.compatibility.insert(key, compatibility);
-                    }
-                }
-                WorkerMessage::Unavailable { generation, key } => {
-                    if self.current_generation(generation) {
-                        self.compatibility.remove(&key);
-                    }
-                }
-                WorkerMessage::Unit(unit) => {
-                    if self.current_generation(unit.generation)
-                        && self.prepared_set.contains(&unit.key)
-                        && self.latest_index.contains_key(&unit.key)
+                    if self.is_current_generation(frame_generation)
+                        && self
+                            .latest_paint_index_by_placement_key
+                            .contains_key(&placement_key)
                     {
-                        let Some(next_bytes) = self.unit_bytes.checked_add(unit.bytes.len()) else {
+                        if self.prepared_placement_keys.len() < MAX_OUTPUT_PAINT_COUNT
+                            && self.prepared_placement_key_set.insert(placement_key)
+                        {
+                            self.prepared_placement_keys.push(placement_key);
+                        }
+                        self.compatibility_by_placement_key
+                            .insert(placement_key, image_compatibility);
+                    }
+                }
+                WorkerMessage::Unavailable {
+                    frame_generation,
+                    placement_key,
+                } => {
+                    if self.is_current_generation(frame_generation) {
+                        self.compatibility_by_placement_key.remove(&placement_key);
+                    }
+                }
+                WorkerMessage::Unit(output_unit) => {
+                    if self.is_current_generation(output_unit.frame_generation)
+                        && self
+                            .prepared_placement_key_set
+                            .contains(&output_unit.placement_key)
+                        && self
+                            .latest_paint_index_by_placement_key
+                            .contains_key(&output_unit.placement_key)
+                    {
+                        let Some(next_output_byte_count) = self
+                            .output_unit_byte_count
+                            .checked_add(output_unit.output_bytes.len())
+                        else {
                             self.fail_current_generation();
                             continue;
                         };
-                        if next_bytes > MAX_NATIVE_FRAME_OUTPUT_BYTES
-                            || self.units.try_reserve(1).is_err()
+                        if next_output_byte_count > MAX_NATIVE_FRAME_OUTPUT_BYTE_COUNT
+                            || self.output_units.try_reserve(1).is_err()
                         {
                             self.fail_current_generation();
                             continue;
                         }
-                        self.unit_bytes = next_bytes;
-                        self.units.push(unit);
+                        self.output_unit_byte_count = next_output_byte_count;
+                        self.output_units.push(output_unit);
                     }
                 }
-                WorkerMessage::Finished { generation, failed } => {
-                    if self.current_generation(generation) {
-                        if failed {
+                WorkerMessage::Finished {
+                    frame_generation,
+                    has_failed,
+                } => {
+                    if self.is_current_generation(frame_generation) {
+                        if has_failed {
                             self.fail_current_generation();
                         } else {
-                            self.ready = true;
+                            self.is_ready = true;
                         }
                     }
                     if self
-                        .active
+                        .active_job
                         .as_ref()
-                        .is_some_and(|active| active.generation == generation)
+                        .is_some_and(|active_job| active_job.frame_generation == frame_generation)
                     {
-                        self.active = None;
-                        self.start_pending();
+                        self.active_job = None;
+                        self.start_pending_worker_request();
                     }
                 }
             }
@@ -807,7 +911,7 @@ impl ImageOutputState {
 
     /// Return whether the newest frame changes native terminal image state.
     pub(crate) const fn native_commit_pending(&self) -> bool {
-        !self.settled
+        !self.is_settled
     }
 
     /// Write the host-side reset that precedes the newest frame's base cells.
@@ -819,32 +923,35 @@ impl ImageOutputState {
     /// the previous frame's pixels are stale. Kitty output never writes
     /// `ESC[2J`. Returns whether the caller must redraw every text cell.
     pub(crate) fn write_frame_reset<W: Write>(&mut self, writer: &mut W) -> io::Result<bool> {
-        let kitty_pending = self.kitty_free_all || !self.kitty_image_deletes.is_empty();
-        if !self.screen_reset_needed && !self.needs_abort && !kitty_pending {
+        let has_pending_kitty_cleanup =
+            self.should_free_all_kitty_images || !self.kitty_image_numbers_to_delete.is_empty();
+        if !self.needs_screen_reset && !self.needs_image_abort && !has_pending_kitty_cleanup {
             return Ok(false);
         }
-        if self.needs_abort {
+        if self.needs_image_abort {
             write_image_abort(writer)?;
-            self.needs_abort = false;
+            self.needs_image_abort = false;
         }
-        let kitty = matches!(self.kind, Some(ImageOutputKind::Kitty));
-        if kitty {
-            if self.kitty_free_all {
-                write_kitty_delete_all(writer).map_err(kitty_output_error)?;
-                self.kitty_free_all = false;
-                self.kitty_image_deletes.clear();
+        let is_kitty_output = matches!(self.output_kind, Some(ImageOutputKind::Kitty));
+        if is_kitty_output {
+            if self.should_free_all_kitty_images {
+                write_kitty_delete_all(writer).map_err(convert_kitty_output_error)?;
+                self.should_free_all_kitty_images = false;
+                self.kitty_image_numbers_to_delete.clear();
             } else {
-                if self.screen_reset_needed {
-                    write_kitty_visible_placement_delete(writer).map_err(kitty_output_error)?;
+                if self.needs_screen_reset {
+                    write_kitty_visible_placement_delete(writer)
+                        .map_err(convert_kitty_output_error)?;
                 }
-                for number in self.kitty_image_deletes.drain(..) {
-                    write_kitty_image_delete(writer, number).map_err(kitty_output_error)?;
+                for kitty_image_number in self.kitty_image_numbers_to_delete.drain(..) {
+                    write_kitty_image_delete(writer, kitty_image_number)
+                        .map_err(convert_kitty_output_error)?;
                 }
             }
         }
-        let clears_screen = self.screen_reset_needed && !kitty;
+        let clears_screen = self.needs_screen_reset && !is_kitty_output;
         if clears_screen {
-            writer.write_all(SCREEN_RESET)?;
+            writer.write_all(SCREEN_RESET_BYTES)?;
         }
         writer.flush()?;
         Ok(clears_screen)
@@ -852,287 +959,322 @@ impl ImageOutputState {
 
     /// Build all native bytes written after the newest base-cell frame.
     pub(crate) fn frame_output(&self, cursor: Option<Position>) -> io::Result<Vec<u8>> {
-        let mut output = Vec::new();
-        let overhead = self.units.len().saturating_mul(128).saturating_add(32);
-        output
-            .try_reserve(self.unit_bytes.saturating_add(overhead))
+        let mut output_bytes = Vec::new();
+        let overhead = self
+            .output_units
+            .len()
+            .saturating_mul(128)
+            .saturating_add(32);
+        output_bytes
+            .try_reserve(self.output_unit_byte_count.saturating_add(overhead))
             .map_err(|_| invalid_output("image output storage could not be allocated"))?;
-        for unit in &self.units {
-            let Some(&index) = self.latest_index.get(&unit.key) else {
+        for output_unit in &self.output_units {
+            let Some(&paint_index) = self
+                .latest_paint_index_by_placement_key
+                .get(&output_unit.placement_key)
+            else {
                 continue;
             };
-            let paint = &self.latest[index];
-            let x = paint
-                .target
+            let output_paint = &self.latest_output_paints[paint_index];
+            let screen_column = output_paint
+                .target_area
                 .x
-                .checked_add(unit.offset.0)
+                .checked_add(output_unit.tile_offset.0)
                 .ok_or_else(|| invalid_output("image tile x coordinate overflows the frame"))?;
-            let y = paint
-                .target
+            let screen_row = output_paint
+                .target_area
                 .y
-                .checked_add(unit.offset.1)
+                .checked_add(output_unit.tile_offset.1)
                 .ok_or_else(|| invalid_output("image tile y coordinate overflows the frame"))?;
-            match unit.kind {
-                ImageOutputKind::Kitty => output.extend_from_slice(&unit.bytes),
+            match output_unit.output_kind {
+                ImageOutputKind::Kitty => output_bytes.extend_from_slice(&output_unit.output_bytes),
                 ImageOutputKind::Iterm => {
-                    write_cursor_position(&mut output, x, y)?;
-                    output.extend_from_slice(&unit.bytes);
-                    restore_cursor_state(&mut output, cursor)?;
+                    write_cursor_position(&mut output_bytes, screen_column, screen_row)?;
+                    output_bytes.extend_from_slice(&output_unit.output_bytes);
+                    restore_cursor_state(&mut output_bytes, cursor)?;
                 }
                 ImageOutputKind::Sixel { .. } => {
-                    output.extend_from_slice(SIXEL_MODE_RESET);
-                    write_cursor_position(&mut output, x, y)?;
-                    output.extend_from_slice(&unit.bytes);
-                    restore_cursor_state(&mut output, cursor)?;
-                    output.extend_from_slice(SIXEL_MODE_RESTORE);
+                    output_bytes.extend_from_slice(SIXEL_MODE_RESET_BYTES);
+                    write_cursor_position(&mut output_bytes, screen_column, screen_row)?;
+                    output_bytes.extend_from_slice(&output_unit.output_bytes);
+                    restore_cursor_state(&mut output_bytes, cursor)?;
+                    output_bytes.extend_from_slice(SIXEL_MODE_RESTORE_BYTES);
                 }
             }
         }
-        if matches!(self.kind, Some(ImageOutputKind::Kitty)) && !output.is_empty() {
-            restore_cursor_state(&mut output, cursor)?;
+        if matches!(self.output_kind, Some(ImageOutputKind::Kitty)) && !output_bytes.is_empty() {
+            restore_cursor_state(&mut output_bytes, cursor)?;
         }
-        if output.len() > MAX_NATIVE_FRAME_OUTPUT_BYTES {
+        if output_bytes.len() > MAX_NATIVE_FRAME_OUTPUT_BYTE_COUNT {
             return Err(invalid_output(
                 "native image frame exceeds its output limit",
             ));
         }
-        Ok(output)
+        Ok(output_bytes)
     }
 
     /// Adopt the newest frame after its base cells and native bytes are written.
     pub(crate) fn commit_frame(&mut self) {
-        self.host_pixels_present = !self.prepared.is_empty();
-        self.settled = true;
-        self.ready = true;
-        self.screen_reset_needed = false;
-        for (content_id, image) in self.pending_kitty_images.drain(..) {
-            self.kitty_images.insert(content_id, image);
+        self.has_host_pixels = !self.prepared_placement_keys.is_empty();
+        self.is_settled = true;
+        self.is_ready = true;
+        self.needs_screen_reset = false;
+        for (image_content_id, kitty_image) in self.pending_kitty_images_by_content_id.drain(..) {
+            self.kitty_image_by_content_id
+                .insert(image_content_id, kitty_image);
         }
     }
 
     /// Keep the newest frame uncommitted after a native output failure.
     pub(crate) fn fail_frame_commit(&mut self) {
-        self.needs_abort = self.kind.is_some();
+        self.needs_image_abort = self.output_kind.is_some();
         self.cancel_active();
-        if let Some(pending) = self.pending.take() {
-            pending.cancel.store(true, Ordering::Release);
+        if let Some(pending_request) = self.pending_worker_request.take() {
+            pending_request
+                .cancellation_token
+                .store(true, Ordering::Release);
         }
         self.next_generation();
         self.clear_prepared_output();
-        self.latest.clear();
-        self.latest_index.clear();
-        self.latest_keys.clear();
-        self.latest_coverage.clear();
-        self.alpha_cache.clear();
-        self.host_pixels_present = true;
-        self.screen_reset_needed = true;
-        self.settled = false;
-        self.ready = true;
+        self.latest_output_paints.clear();
+        self.latest_paint_index_by_placement_key.clear();
+        self.latest_encode_keys.clear();
+        self.latest_composition_revisions.clear();
+        self.alpha_stats_by_image_and_source.clear();
+        self.has_host_pixels = true;
+        self.needs_screen_reset = true;
+        self.is_settled = false;
+        self.is_ready = true;
         self.forget_kitty_images();
     }
 
     /// Reset this output state when a connection is replaced.
     pub(crate) fn reset_connection(&mut self) {
-        self.settled = false;
-        self.ready = true;
+        self.is_settled = false;
+        self.is_ready = true;
         self.cancel_active();
-        if let Some(pending) = self.pending.take() {
-            pending.cancel.store(true, Ordering::Release);
+        if let Some(pending_request) = self.pending_worker_request.take() {
+            pending_request
+                .cancellation_token
+                .store(true, Ordering::Release);
         }
-        self.generation = self.generation.wrapping_add(1).max(1);
+        self.frame_generation = self.frame_generation.wrapping_add(1).max(1);
         self.clear_prepared_output();
-        self.composition_states.clear();
-        self.composition_revision = 0;
-        self.latest.clear();
-        self.latest_index.clear();
-        self.latest_keys.clear();
-        self.latest_coverage.clear();
-        self.screen_reset_needed = self.host_pixels_present;
-        self.alpha_cache.clear();
+        self.composition_state_by_placement_key.clear();
+        self.next_composition_revision = 0;
+        self.latest_output_paints.clear();
+        self.latest_paint_index_by_placement_key.clear();
+        self.latest_encode_keys.clear();
+        self.latest_composition_revisions.clear();
+        self.needs_screen_reset = self.has_host_pixels;
+        self.alpha_stats_by_image_and_source.clear();
         self.forget_kitty_images();
     }
 
     fn update_composition_revisions(
         &mut self,
-        kind: ImageOutputKind,
-        cells: &Arc<ImageCellSnapshot>,
-        paints: &[OutputPaint],
+        output_kind: ImageOutputKind,
+        cell_snapshot: &Arc<ImageCellSnapshot>,
+        output_paints: &[OutputPaint],
     ) -> Vec<u64> {
-        if self.composition_revision == u64::MAX {
-            self.composition_states.clear();
-            self.composition_revision = 0;
+        if self.next_composition_revision == u64::MAX {
+            self.composition_state_by_placement_key.clear();
+            self.next_composition_revision = 0;
         }
-        let frame = Arc::new(CompositionFrame::new(cells, paints));
-        let mut active = HashSet::new();
-        let revisions = paints
+        let composition_frame = Arc::new(CompositionFrame::from_cell_snapshot_and_output_paints(
+            cell_snapshot,
+            output_paints,
+        ));
+        let mut active_placement_keys = HashSet::new();
+        let revisions = output_paints
             .iter()
             .enumerate()
-            .map(|(paint_index, paint)| {
-                if !kind.composes_with_cells() {
+            .map(|(paint_index, output_paint)| {
+                if !output_kind.uses_cell_composition() {
                     return 0;
                 }
-                active.insert(paint.key);
-                let state = CompositionState {
-                    frame: Arc::clone(&frame),
-                    paint_index,
+                active_placement_keys.insert(output_paint.placement_key);
+                let composition_state = CompositionState {
+                    composition_frame: Arc::clone(&composition_frame),
+                    composition_paint_index: paint_index,
                 };
-                if let Some(versioned) = self.composition_states.get(&paint.key) {
-                    if versioned.state == state {
-                        return versioned.revision;
+                if let Some(versioned_composition) = self
+                    .composition_state_by_placement_key
+                    .get(&output_paint.placement_key)
+                {
+                    if versioned_composition.composition_state == composition_state {
+                        return versioned_composition.composition_revision;
                     }
                 }
-                self.composition_revision += 1;
-                self.composition_states.insert(
-                    paint.key,
+                self.next_composition_revision += 1;
+                self.composition_state_by_placement_key.insert(
+                    output_paint.placement_key,
                     VersionedComposition {
-                        state,
-                        revision: self.composition_revision,
+                        composition_state,
+                        composition_revision: self.next_composition_revision,
                     },
                 );
-                self.composition_revision
+                self.next_composition_revision
             })
             .collect();
-        self.composition_states
-            .retain(|key, _| active.contains(key));
+        self.composition_state_by_placement_key
+            .retain(|placement_key, _| active_placement_keys.contains(placement_key));
         revisions
     }
 
     fn next_generation(&mut self) -> u64 {
-        self.generation = self.generation.wrapping_add(1).max(1);
-        self.generation
+        self.frame_generation = self.frame_generation.wrapping_add(1).max(1);
+        self.frame_generation
     }
 
-    fn start_request(&mut self, request: WorkerRequest) {
-        let active = ActiveJob {
-            generation: request.generation,
-            cancel: Arc::clone(&request.cancel),
+    fn start_worker_request(&mut self, worker_request: WorkerRequest) {
+        let active_job = ActiveJob {
+            frame_generation: worker_request.frame_generation,
+            cancellation_token: Arc::clone(&worker_request.cancellation_token),
         };
-        let Some(sender) = &self.requests else {
+        let Some(worker_request_sender) = &self.worker_request_sender else {
             self.fail_current_generation();
             return;
         };
-        match sender.try_send(request) {
+        match worker_request_sender.try_send(worker_request) {
             Ok(()) => {
-                self.active = Some(active);
+                self.active_job = Some(active_job);
             }
-            Err(TrySendError::Full(request)) => {
-                self.pending = Some(request);
+            Err(TrySendError::Full(worker_request)) => {
+                self.pending_worker_request = Some(worker_request);
             }
             Err(TrySendError::Disconnected(_)) => self.fail_current_generation(),
         }
     }
 
-    fn start_pending(&mut self) {
-        let Some(request) = self.pending.take() else {
+    fn start_pending_worker_request(&mut self) {
+        let Some(worker_request) = self.pending_worker_request.take() else {
             return;
         };
-        self.start_request(request);
+        self.start_worker_request(worker_request);
     }
 
-    fn current_generation(&self, generation: u64) -> bool {
-        generation == self.generation
+    fn is_current_generation(&self, generation: u64) -> bool {
+        generation == self.frame_generation
     }
 
     fn clear_prepared_output(&mut self) {
-        self.prepared.clear();
-        self.prepared_set.clear();
-        self.compatibility.clear();
-        self.units.clear();
-        self.unit_bytes = 0;
+        self.prepared_placement_keys.clear();
+        self.prepared_placement_key_set.clear();
+        self.compatibility_by_placement_key.clear();
+        self.output_units.clear();
+        self.output_unit_byte_count = 0;
     }
 
-    fn set_unavailable_frame(&mut self, paints: &[ImagePaint]) {
+    fn set_unavailable_frame(&mut self, image_paints: &[ImagePaint]) {
         self.cancel_active();
-        if let Some(pending) = self.pending.take() {
-            pending.cancel.store(true, Ordering::Release);
+        if let Some(pending_request) = self.pending_worker_request.take() {
+            pending_request
+                .cancellation_token
+                .store(true, Ordering::Release);
         }
         self.next_generation();
-        self.latest = paints
+        self.latest_output_paints = image_paints
             .iter()
-            .map(|paint| OutputPaint::from_paint(paint, None))
+            .map(|image_paint| OutputPaint::from_paint(image_paint, None))
             .collect();
         self.rebuild_latest_index();
-        self.alpha_cache.clear();
+        self.alpha_stats_by_image_and_source.clear();
         self.forget_kitty_images();
-        self.latest_keys.clear();
-        self.latest_coverage.clear();
-        self.settled = false;
-        self.ready = true;
-        self.screen_reset_needed = self.host_pixels_present;
+        self.latest_encode_keys.clear();
+        self.latest_composition_revisions.clear();
+        self.is_settled = false;
+        self.is_ready = true;
+        self.needs_screen_reset = self.has_host_pixels;
         self.clear_prepared_output();
     }
 
     fn fail_current_generation(&mut self) {
         self.cancel_active();
-        if let Some(pending) = self.pending.take() {
-            pending.cancel.store(true, Ordering::Release);
+        if let Some(pending_request) = self.pending_worker_request.take() {
+            pending_request
+                .cancellation_token
+                .store(true, Ordering::Release);
         }
         self.next_generation();
         self.clear_prepared_output();
-        self.latest_keys.clear();
-        self.latest_coverage.clear();
-        self.pending_kitty_images.clear();
-        self.ready = true;
+        self.latest_encode_keys.clear();
+        self.latest_composition_revisions.clear();
+        self.pending_kitty_images_by_content_id.clear();
+        self.is_ready = true;
     }
 
     fn cancel_active(&mut self) {
-        if let Some(active) = self.active.as_ref() {
-            active.cancel.store(true, Ordering::Release);
+        if let Some(active_job) = self.active_job.as_ref() {
+            active_job.cancellation_token.store(true, Ordering::Release);
         }
     }
 }
 
 impl Drop for ImageOutputState {
     fn drop(&mut self) {
-        if let Some(active) = self.active.take() {
-            active.cancel.store(true, Ordering::Release);
+        if let Some(active_job) = self.active_job.take() {
+            active_job.cancellation_token.store(true, Ordering::Release);
         }
-        if let Some(pending) = self.pending.take() {
-            pending.cancel.store(true, Ordering::Release);
+        if let Some(pending_request) = self.pending_worker_request.take() {
+            pending_request
+                .cancellation_token
+                .store(true, Ordering::Release);
         }
-        self.messages.take();
-        self.requests.take();
+        self.worker_messages.take();
+        self.worker_request_sender.take();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
     }
 }
 
-fn output_frames_equal(left: &[OutputPaint], right: &[OutputPaint]) -> bool {
-    left.len() == right.len()
-        && left.iter().zip(right).all(|(left, right)| {
-            left.key == right.key
-                && left.content_id == right.content_id
-                && Arc::ptr_eq(&left.record.image, &right.record.image)
-                && left.record.display.sixel_background == right.record.display.sixel_background
-                && left.target == right.target
-                && left.source == right.source
-                && left.cell_offset_x == right.cell_offset_x
-                && left.cell_offset_y == right.cell_offset_y
-                && left.z_index == right.z_index
-        })
+fn is_output_paint_sequence_equal(
+    committed_output_paints: &[OutputPaint],
+    next_output_paints: &[OutputPaint],
+) -> bool {
+    committed_output_paints.len() == next_output_paints.len()
+        && committed_output_paints.iter().zip(next_output_paints).all(
+            |(committed_output_paint, next_output_paint)| {
+                committed_output_paint.placement_key == next_output_paint.placement_key
+                    && committed_output_paint.image_content_id == next_output_paint.image_content_id
+                    && Arc::ptr_eq(
+                        &committed_output_paint.image_record.image,
+                        &next_output_paint.image_record.image,
+                    )
+                    && committed_output_paint.image_record.display.sixel_background
+                        == next_output_paint.image_record.display.sixel_background
+                    && committed_output_paint.target_area == next_output_paint.target_area
+                    && committed_output_paint.source_rect == next_output_paint.source_rect
+                    && committed_output_paint.cell_pixel_offset_x
+                        == next_output_paint.cell_pixel_offset_x
+                    && committed_output_paint.cell_pixel_offset_y
+                        == next_output_paint.cell_pixel_offset_y
+                    && committed_output_paint.z_index == next_output_paint.z_index
+            },
+        )
 }
 
-fn output_encode_key(
-    kind: ImageOutputKind,
-    cell_size: PixelCellSize,
-    paint: &OutputPaint,
+fn build_output_encode_key(
+    output_kind: ImageOutputKind,
+    pixel_cell_size: PixelCellSize,
+    output_paint: &OutputPaint,
 ) -> EncodeKey {
     EncodeKey {
-        content_id: paint.content_id,
-        image_address: Arc::as_ptr(&paint.record.image) as usize,
-        source: ImageSourceKey::from_source(paint.source),
-        target_width: paint.target.width,
-        target_height: paint.target.height,
-        cell_size,
-        kind,
-        z_index: paint.z_index,
-        uses_terminal_background: matches!(
-            paint.record.display.sixel_background,
+        image_content_id: output_paint.image_content_id,
+        image_memory_address: Arc::as_ptr(&output_paint.image_record.image) as usize,
+        source_rect: ImageSourceKey::from_source_rect(output_paint.source_rect),
+        target_column_count: output_paint.target_area.width,
+        target_row_count: output_paint.target_area.height,
+        pixel_cell_size,
+        output_kind,
+        z_index: output_paint.z_index,
+        has_terminal_background: matches!(
+            output_paint.image_record.display.sixel_background,
             Some(SixelBackground::Terminal)
         ),
-        composition: 0,
-        composition_cell_size: None,
+        composition_revision: 0,
+        composition_pixel_cell_size: None,
     }
 }
 
@@ -1148,28 +1290,43 @@ impl AlphaStats {
     }
 }
 
-fn alpha_stats(image: &DecodedImage, source: ImageSourceRect) -> Option<AlphaStats> {
-    let width = usize::try_from(image.width).ok()?;
-    let height = usize::try_from(image.height).ok()?;
-    validate_dimensions(GraphicsProtocol::Iterm2, width, height).ok()?;
-    let expected = checked_rgba_len(GraphicsProtocol::Iterm2, width, height).ok()?;
-    if image.rgba.len() != expected
-        || source.width == 0
-        || source.height == 0
-        || source.x.checked_add(source.width)? > image.width
-        || source.y.checked_add(source.height)? > image.height
+fn compute_alpha_stats(
+    decoded_image: &DecodedImage,
+    source_rect: ImageSourceRect,
+) -> Option<AlphaStats> {
+    let image_pixel_width = usize::try_from(decoded_image.pixel_width).ok()?;
+    let image_pixel_height = usize::try_from(decoded_image.pixel_height).ok()?;
+    validate_image_dimensions(
+        GraphicsProtocol::Iterm2,
+        image_pixel_width,
+        image_pixel_height,
+    )
+    .ok()?;
+    let expected_rgba_byte_count = compute_rgba_byte_count(
+        GraphicsProtocol::Iterm2,
+        image_pixel_width,
+        image_pixel_height,
+    )
+    .ok()?;
+    if decoded_image.rgba_bytes.len() != expected_rgba_byte_count
+        || source_rect.pixel_width == 0
+        || source_rect.pixel_height == 0
+        || source_rect.pixel_x.checked_add(source_rect.pixel_width)? > decoded_image.pixel_width
+        || source_rect.pixel_y.checked_add(source_rect.pixel_height)? > decoded_image.pixel_height
     {
         return None;
     }
     let mut stats = AlphaStats::default();
-    for row in source.y..source.y + source.height {
-        let row_start = usize::try_from(row).ok()?.checked_mul(width)?;
-        for column in source.x..source.x + source.width {
-            let index = row_start
-                .checked_add(usize::try_from(column).ok()?)?
+    for pixel_row in source_rect.pixel_y..source_rect.pixel_y + source_rect.pixel_height {
+        let row_start = usize::try_from(pixel_row)
+            .ok()?
+            .checked_mul(image_pixel_width)?;
+        for pixel_column in source_rect.pixel_x..source_rect.pixel_x + source_rect.pixel_width {
+            let rgba_byte_index = row_start
+                .checked_add(usize::try_from(pixel_column).ok()?)?
                 .checked_mul(4)?;
-            let alpha = *image.rgba.get(index + 3)?;
-            match alpha {
+            let alpha_value = *decoded_image.rgba_bytes.get(rgba_byte_index + 3)?;
+            match alpha_value {
                 0 => stats.has_zero = true,
                 255 => {}
                 _ => stats.has_partial = true,
@@ -1183,23 +1340,23 @@ fn alpha_stats(image: &DecodedImage, source: ImageSourceRect) -> Option<AlphaSta
 struct CompositionInfo {
     has_glyph: bool,
     has_non_default_background: bool,
-    per_cell_backgrounds_known: bool,
-    solid_background: Option<[u8; 3]>,
-    default_blank: bool,
+    has_known_per_cell_backgrounds: bool,
+    solid_background_color: Option<[u8; 3]>,
+    is_default_blank: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct ItermComposition {
-    background: Option<[u8; 3]>,
-    per_cell: bool,
-    per_cell_backgrounds_known: bool,
+    background_color: Option<[u8; 3]>,
+    uses_per_cell_composition: bool,
+    has_known_per_cell_backgrounds: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
 struct SixelComposition {
-    background: Option<[u8; 3]>,
-    alpha: bool,
-    terminal_background: bool,
+    background_color: Option<[u8; 3]>,
+    has_alpha: bool,
+    has_terminal_background: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1213,50 +1370,58 @@ fn cell_has_glyph(cell: Option<&ImageCellState>) -> bool {
     let Some(cell) = cell else {
         return true;
     };
-    cell.ch != ' ' || cell.width != 1 || !cell.combining.is_empty()
+    cell.character != ' ' || cell.cell_width != 1 || !cell.combining_characters.is_empty()
 }
 
-fn composition_info(cells: &ImageCellSnapshot, paint: &OutputPaint) -> CompositionInfo {
+fn compute_composition_info(
+    cell_snapshot: &ImageCellSnapshot,
+    output_paint: &OutputPaint,
+) -> CompositionInfo {
     let mut has_glyph = false;
     let mut has_non_default_background = false;
-    let mut per_cell_backgrounds_known = true;
-    let mut default_blank = true;
-    let mut background = BackgroundAccumulator::Initial;
-    for row in 0..paint.target.height {
-        for column in 0..paint.target.width {
-            let x = paint.target.x.saturating_add(column);
-            let y = paint.target.y.saturating_add(row);
-            let Some(cell) = cells.cell(x, y) else {
+    let mut has_known_per_cell_backgrounds = true;
+    let mut is_default_blank = true;
+    let mut background_accumulator = BackgroundAccumulator::Initial;
+    for row_offset in 0..output_paint.target_area.height {
+        for column_offset in 0..output_paint.target_area.width {
+            let cell_column = output_paint.target_area.x.saturating_add(column_offset);
+            let cell_row = output_paint.target_area.y.saturating_add(row_offset);
+            let Some(cell) = cell_snapshot.find_cell(cell_column, cell_row) else {
                 has_glyph = true;
                 has_non_default_background = true;
-                per_cell_backgrounds_known = false;
-                default_blank = false;
-                background = BackgroundAccumulator::Incompatible;
+                has_known_per_cell_backgrounds = false;
+                is_default_blank = false;
+                background_accumulator = BackgroundAccumulator::Incompatible;
                 continue;
             };
-            has_non_default_background |= cell.style.bg() != koshi_terminal::style::Color::Default;
-            default_blank &= cell == &ImageCellState::default();
+            has_non_default_background |=
+                cell.style.get_background_color() != koshi_terminal::style::Color::Default;
+            is_default_blank &= cell == &ImageCellState::default();
             let glyph = cell_has_glyph(Some(cell));
             has_glyph |= glyph;
             if cell == &ImageCellState::default() {
-                background = BackgroundAccumulator::Incompatible;
+                background_accumulator = BackgroundAccumulator::Incompatible;
                 continue;
             }
-            if glyph || cell.style.attrs() != Default::default() {
-                per_cell_backgrounds_known = false;
-                background = BackgroundAccumulator::Incompatible;
+            if glyph || cell.style.get_attributes() != Default::default() {
+                has_known_per_cell_backgrounds = false;
+                background_accumulator = BackgroundAccumulator::Incompatible;
                 continue;
             }
-            let koshi_terminal::style::Color::Rgb(red, green, blue) = cell.style.bg() else {
-                per_cell_backgrounds_known = false;
-                background = BackgroundAccumulator::Incompatible;
+            let koshi_terminal::style::Color::Rgb(red, green, blue) =
+                cell.style.get_background_color()
+            else {
+                has_known_per_cell_backgrounds = false;
+                background_accumulator = BackgroundAccumulator::Incompatible;
                 continue;
             };
-            let color = [red, green, blue];
-            background = match background {
-                BackgroundAccumulator::Initial => BackgroundAccumulator::Uniform(color),
-                BackgroundAccumulator::Uniform(previous) if previous == color => {
-                    BackgroundAccumulator::Uniform(previous)
+            let background_color = [red, green, blue];
+            background_accumulator = match background_accumulator {
+                BackgroundAccumulator::Initial => BackgroundAccumulator::Uniform(background_color),
+                BackgroundAccumulator::Uniform(previous_color)
+                    if previous_color == background_color =>
+                {
+                    BackgroundAccumulator::Uniform(previous_color)
                 }
                 BackgroundAccumulator::Uniform(_) | BackgroundAccumulator::Incompatible => {
                     BackgroundAccumulator::Incompatible
@@ -1267,335 +1432,430 @@ fn composition_info(cells: &ImageCellSnapshot, paint: &OutputPaint) -> Compositi
     CompositionInfo {
         has_glyph,
         has_non_default_background,
-        per_cell_backgrounds_known,
-        solid_background: match background {
-            BackgroundAccumulator::Uniform(color) => Some(color),
+        has_known_per_cell_backgrounds,
+        solid_background_color: match background_accumulator {
+            BackgroundAccumulator::Uniform(background_color) => Some(background_color),
             BackgroundAccumulator::Initial | BackgroundAccumulator::Incompatible => None,
         },
-        default_blank,
+        is_default_blank,
     }
 }
 
 #[derive(Debug)]
 struct Plan<'a> {
-    paint: &'a OutputPaint,
-    key: EncodeKey,
-    iterm: ItermComposition,
-    sixel: SixelComposition,
-    compatibility: ImageCompatibility,
-    opaque: bool,
+    output_paint: &'a OutputPaint,
+    encode_key: EncodeKey,
+    iterm_composition: ItermComposition,
+    sixel_composition: SixelComposition,
+    image_compatibility: ImageCompatibility,
+    is_opaque: bool,
 }
 
-fn has_known_cell_background(cells: &ImageCellSnapshot, paint: &OutputPaint) -> bool {
-    (0..paint.target.height).all(|row| {
-        (0..paint.target.width).all(|column| {
-            let x = paint.target.x.saturating_add(column);
-            let y = paint.target.y.saturating_add(row);
-            let Some(cell) = cells.cell(x, y) else {
+fn has_known_cell_background(
+    cell_snapshot: &ImageCellSnapshot,
+    output_paint: &OutputPaint,
+) -> bool {
+    (0..output_paint.target_area.height).all(|row_offset| {
+        (0..output_paint.target_area.width).all(|column_offset| {
+            let cell_column = output_paint.target_area.x.saturating_add(column_offset);
+            let cell_row = output_paint.target_area.y.saturating_add(row_offset);
+            let Some(cell) = cell_snapshot.find_cell(cell_column, cell_row) else {
                 return false;
             };
-            matches!(cell.style.bg(), koshi_terminal::style::Color::Rgb(..))
-                && cell.ch == ' '
-                && cell.width == 1
-                && cell.combining.is_empty()
-                && cell.style.attrs() == Default::default()
+            matches!(
+                cell.style.get_background_color(),
+                koshi_terminal::style::Color::Rgb(..)
+            ) && cell.character == ' '
+                && cell.cell_width == 1
+                && cell.combining_characters.is_empty()
+                && cell.style.get_attributes() == Default::default()
         })
     })
 }
 
-fn classify<'a>(
-    kind: ImageOutputKind,
-    cells: &ImageCellSnapshot,
-    covered_cells: &HashSet<(u16, u16)>,
-    paint: &'a OutputPaint,
-    key: EncodeKey,
+fn classify_output_paint<'a>(
+    output_kind: ImageOutputKind,
+    cell_snapshot: &ImageCellSnapshot,
+    covered_cell_positions: &HashSet<(u16, u16)>,
+    output_paint: &'a OutputPaint,
+    encode_key: EncodeKey,
 ) -> Result<Plan<'a>, TemplateError> {
-    let stats = paint.alpha.ok_or(TemplateError::Failed)?;
-    let composition = composition_info(cells, paint);
-    let overlaps_lower = target_contains_covered_cell(paint.target, covered_cells);
-    let known_cell_background = has_known_cell_background(cells, paint);
-    let mut compatibility = ImageCompatibility::exact();
-    compatibility.text_layer_order = (paint.z_index < 0 && composition.has_glyph)
-        || (paint.z_index < KITTY_BACKGROUND_LAYER_Z && composition.has_non_default_background);
-    match kind {
+    let alpha_stats = output_paint.alpha_stats.ok_or(TemplateError::Failed)?;
+    let composition_details = compute_composition_info(cell_snapshot, output_paint);
+    let is_overlapping_lower =
+        has_covered_target_cell(output_paint.target_area, covered_cell_positions);
+    let has_known_cell_background = has_known_cell_background(cell_snapshot, output_paint);
+    let mut image_compatibility = ImageCompatibility::exact();
+    image_compatibility.has_text_layer_order_mismatch = (output_paint.z_index < 0
+        && composition_details.has_glyph)
+        || (output_paint.z_index < KITTY_BACKGROUND_LAYER_Z_INDEX
+            && composition_details.has_non_default_background);
+    match output_kind {
         ImageOutputKind::Kitty => Ok(Plan {
-            paint,
-            key,
-            iterm: ItermComposition::default(),
-            sixel: SixelComposition::default(),
-            compatibility,
-            opaque: stats.is_fully_opaque(),
+            output_paint,
+            encode_key,
+            iterm_composition: ItermComposition::default(),
+            sixel_composition: SixelComposition::default(),
+            image_compatibility,
+            is_opaque: alpha_stats.is_fully_opaque(),
         }),
         ImageOutputKind::Iterm => {
-            let has_alpha = !stats.is_fully_opaque();
-            let mut iterm = ItermComposition::default();
+            let has_alpha = !alpha_stats.is_fully_opaque();
+            let mut iterm_composition = ItermComposition::default();
             if has_alpha {
-                if composition.has_glyph {
-                    compatibility.iterm_alpha = true;
-                } else if overlaps_lower
-                    || (!composition.default_blank && composition.solid_background.is_none())
+                if composition_details.has_glyph {
+                    image_compatibility.has_iterm_alpha_mismatch = true;
+                } else if is_overlapping_lower
+                    || (!composition_details.is_default_blank
+                        && composition_details.solid_background_color.is_none())
                 {
-                    compatibility.iterm_alpha = true;
-                    iterm.per_cell = true;
-                    iterm.per_cell_backgrounds_known = composition.per_cell_backgrounds_known;
-                } else if let Some(background) = composition.solid_background {
-                    iterm.background = Some(background);
-                } else if !composition.default_blank {
-                    compatibility.iterm_alpha = true;
+                    image_compatibility.has_iterm_alpha_mismatch = true;
+                    iterm_composition.uses_per_cell_composition = true;
+                    iterm_composition.has_known_per_cell_backgrounds =
+                        composition_details.has_known_per_cell_backgrounds;
+                } else if let Some(background_color) = composition_details.solid_background_color {
+                    iterm_composition.background_color = Some(background_color);
+                } else if !composition_details.is_default_blank {
+                    image_compatibility.has_iterm_alpha_mismatch = true;
                 }
             }
             Ok(Plan {
-                paint,
-                key,
-                iterm,
-                sixel: SixelComposition::default(),
-                compatibility,
-                opaque: stats.is_fully_opaque() || iterm.background.is_some(),
+                output_paint,
+                encode_key,
+                iterm_composition,
+                sixel_composition: SixelComposition::default(),
+                image_compatibility,
+                is_opaque: alpha_stats.is_fully_opaque()
+                    || iterm_composition.background_color.is_some(),
             })
         }
         ImageOutputKind::Sixel { .. } => {
-            let terminal_background =
-                paint.record.display.sixel_background == Some(SixelBackground::Terminal);
-            let background = if !overlaps_lower
-                && composition.solid_background.is_some()
-                && ((stats.has_partial && !stats.has_zero)
-                    || (stats.has_zero && terminal_background))
+            let has_terminal_background = output_paint.image_record.display.sixel_background
+                == Some(SixelBackground::Terminal);
+            let background_color = if !is_overlapping_lower
+                && composition_details.solid_background_color.is_some()
+                && ((alpha_stats.has_partial && !alpha_stats.has_zero)
+                    || (alpha_stats.has_zero && has_terminal_background))
             {
-                composition.solid_background
+                composition_details.solid_background_color
             } else {
                 None
             };
-            let alpha = stats.has_partial && background.is_none();
-            let terminal_background = stats.has_zero && terminal_background && background.is_none();
-            compatibility.sixel_alpha = alpha && !known_cell_background;
-            compatibility.sixel_terminal_background = terminal_background && !known_cell_background;
+            let has_alpha = alpha_stats.has_partial && background_color.is_none();
+            let has_terminal_background =
+                alpha_stats.has_zero && has_terminal_background && background_color.is_none();
+            image_compatibility.has_sixel_alpha_mismatch = has_alpha && !has_known_cell_background;
+            image_compatibility.has_sixel_terminal_background_mismatch =
+                has_terminal_background && !has_known_cell_background;
             Ok(Plan {
-                paint,
-                key,
-                iterm: ItermComposition::default(),
-                sixel: SixelComposition {
-                    background,
-                    alpha,
-                    terminal_background,
+                output_paint,
+                encode_key,
+                iterm_composition: ItermComposition::default(),
+                sixel_composition: SixelComposition {
+                    background_color,
+                    has_alpha,
+                    has_terminal_background,
                 },
-                compatibility,
-                opaque: background.is_some()
-                    || (!stats.has_zero && !stats.has_partial)
-                    || (known_cell_background && (alpha || terminal_background)),
+                image_compatibility,
+                is_opaque: background_color.is_some()
+                    || (!alpha_stats.has_zero && !alpha_stats.has_partial)
+                    || (has_known_cell_background && (has_alpha || has_terminal_background)),
             })
         }
     }
 }
 
-fn lower_images_cover_target(paint: &OutputPaint, lower: &[Plan<'_>]) -> bool {
-    let mut covered = HashSet::new();
-    for plan in lower {
-        if !plan.opaque || plan.compatibility != ImageCompatibility::default() {
+fn lower_images_cover_target(output_paint: &OutputPaint, lower_plans: &[Plan<'_>]) -> bool {
+    let mut covered_cell_positions = HashSet::new();
+    for lower_plan in lower_plans {
+        if !lower_plan.is_opaque || lower_plan.image_compatibility != ImageCompatibility::default()
+        {
             continue;
         }
-        let left = paint.target.x.max(plan.paint.target.x);
-        let top = paint.target.y.max(plan.paint.target.y);
-        let right = paint.target.right().min(plan.paint.target.right());
-        let bottom = paint.target.bottom().min(plan.paint.target.bottom());
-        for y in top..bottom {
-            for x in left..right {
-                covered.insert((x, y));
+        let left_column = output_paint
+            .target_area
+            .x
+            .max(lower_plan.output_paint.target_area.x);
+        let top_row_index = output_paint
+            .target_area
+            .y
+            .max(lower_plan.output_paint.target_area.y);
+        let right_column = output_paint
+            .target_area
+            .right()
+            .min(lower_plan.output_paint.target_area.right());
+        let bottom_row_index = output_paint
+            .target_area
+            .bottom()
+            .min(lower_plan.output_paint.target_area.bottom());
+        for row_index in top_row_index..bottom_row_index {
+            for column_index in left_column..right_column {
+                covered_cell_positions.insert((column_index, row_index));
             }
         }
     }
-    !((paint.target.y..paint.target.bottom())
-        .any(|y| (paint.target.x..paint.target.right()).any(|x| !covered.contains(&(x, y)))))
+    !((output_paint.target_area.y..output_paint.target_area.bottom()).any(|row_index| {
+        (output_paint.target_area.x..output_paint.target_area.right())
+            .any(|column_index| !covered_cell_positions.contains(&(column_index, row_index)))
+    }))
 }
 
-fn resolve_compatibility(
-    kind: ImageOutputKind,
-    measured_cell_size: Option<PixelCellSize>,
-    plans: &mut [Plan<'_>],
+fn resolve_image_compatibility(
+    output_kind: ImageOutputKind,
+    measured_pixel_cell_size: Option<PixelCellSize>,
+    image_plans: &mut [Plan<'_>],
 ) {
-    for index in 0..plans.len() {
-        let covered = lower_images_cover_target(plans[index].paint, &plans[..index]);
-        if matches!(kind, ImageOutputKind::Iterm) {
-            if plans[index].iterm.per_cell
-                && plans[index].iterm.per_cell_backgrounds_known
-                && measured_cell_size.is_some()
+    for plan_index in 0..image_plans.len() {
+        let is_covered_by_lower_images = lower_images_cover_target(
+            image_plans[plan_index].output_paint,
+            &image_plans[..plan_index],
+        );
+        if matches!(output_kind, ImageOutputKind::Iterm) {
+            if image_plans[plan_index]
+                .iterm_composition
+                .uses_per_cell_composition
+                && image_plans[plan_index]
+                    .iterm_composition
+                    .has_known_per_cell_backgrounds
+                && measured_pixel_cell_size.is_some()
             {
-                plans[index].compatibility.iterm_alpha = false;
+                image_plans[plan_index]
+                    .image_compatibility
+                    .has_iterm_alpha_mismatch = false;
             }
             continue;
         }
-        let unavailable_lower = plans[..index].iter().any(|plan| {
-            plan.compatibility != ImageCompatibility::default()
-                && plan
-                    .paint
-                    .target
-                    .intersection(plans[index].paint.target)
+        let has_unavailable_lower_image = image_plans[..plan_index].iter().any(|lower_plan| {
+            lower_plan.image_compatibility != ImageCompatibility::default()
+                && lower_plan
+                    .output_paint
+                    .target_area
+                    .intersection(image_plans[plan_index].output_paint.target_area)
                     .width
                     > 0
-                && plan
-                    .paint
-                    .target
-                    .intersection(plans[index].paint.target)
+                && lower_plan
+                    .output_paint
+                    .target_area
+                    .intersection(image_plans[plan_index].output_paint.target_area)
                     .height
                     > 0
         });
-        if covered {
-            let plan = &mut plans[index];
-            plan.compatibility.sixel_alpha = false;
-        } else if unavailable_lower && plans[index].sixel.alpha {
-            plans[index].compatibility.sixel_alpha = true;
+        if is_covered_by_lower_images {
+            let image_plan = &mut image_plans[plan_index];
+            image_plan.image_compatibility.has_sixel_alpha_mismatch = false;
+        } else if has_unavailable_lower_image && image_plans[plan_index].sixel_composition.has_alpha
+        {
+            image_plans[plan_index]
+                .image_compatibility
+                .has_sixel_alpha_mismatch = true;
         }
     }
 }
 
-fn target_contains_covered_cell(target: Rect, covered_cells: &HashSet<(u16, u16)>) -> bool {
-    (target.y..target.bottom())
-        .any(|y| (target.x..target.right()).any(|x| covered_cells.contains(&(x, y))))
+fn has_covered_target_cell(
+    target_area: Rect,
+    covered_cell_positions: &HashSet<(u16, u16)>,
+) -> bool {
+    (target_area.y..target_area.bottom()).any(|row_index| {
+        (target_area.x..target_area.right())
+            .any(|column_index| covered_cell_positions.contains(&(column_index, row_index)))
+    })
 }
 
-fn rectangles_overlap(first: Rect, second: Rect) -> bool {
-    first.x < second.right()
-        && second.x < first.right()
-        && first.y < second.bottom()
-        && second.y < first.bottom()
+fn is_rectangles_overlapping(left_rect: Rect, right_rect: Rect) -> bool {
+    left_rect.x < right_rect.right()
+        && right_rect.x < left_rect.right()
+        && left_rect.y < right_rect.bottom()
+        && right_rect.y < left_rect.bottom()
 }
 
-fn add_target_cells(target: Rect, covered_cells: &mut HashSet<(u16, u16)>) {
-    for y in target.y..target.bottom() {
-        for x in target.x..target.right() {
-            covered_cells.insert((x, y));
+fn add_target_area_cells(target_area: Rect, covered_cell_positions: &mut HashSet<(u16, u16)>) {
+    for row_index in target_area.y..target_area.bottom() {
+        for column_index in target_area.x..target_area.right() {
+            covered_cell_positions.insert((column_index, row_index));
         }
     }
 }
 
-fn worker_loop(requests: Receiver<WorkerRequest>, messages: SyncSender<WorkerMessage>) {
-    while let Ok(request) = requests.recv() {
-        if request.cancel.load(Ordering::Acquire) {
-            let _ = messages.send(WorkerMessage::Finished {
-                generation: request.generation,
-                failed: false,
+fn worker_loop(
+    worker_request_receiver: Receiver<WorkerRequest>,
+    worker_message_sender: SyncSender<WorkerMessage>,
+) {
+    while let Ok(worker_request) = worker_request_receiver.recv() {
+        if worker_request.cancellation_token.load(Ordering::Acquire) {
+            let _ = worker_message_sender.send(WorkerMessage::Finished {
+                frame_generation: worker_request.frame_generation,
+                has_failed: false,
             });
             continue;
         }
-        let generation = request.generation;
-        let failed = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run_job(&request, &messages)
+        let frame_generation = worker_request.frame_generation;
+        let has_failed = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_worker_job(&worker_request, &worker_message_sender)
         })) {
-            Ok(result) => result.is_err(),
+            Ok(job_result) => job_result.is_err(),
             Err(_) => true,
         };
-        let _ = messages.send(WorkerMessage::Finished { generation, failed });
+        let _ = worker_message_sender.send(WorkerMessage::Finished {
+            frame_generation,
+            has_failed,
+        });
     }
 }
 
-fn run_job(request: &WorkerRequest, messages: &SyncSender<WorkerMessage>) -> Result<(), ()> {
-    run_job_with_limit(request, messages, MAX_NATIVE_FRAME_OUTPUT_BYTES)
-}
-
-fn run_job_with_limit(
-    request: &WorkerRequest,
-    messages: &SyncSender<WorkerMessage>,
-    output_limit: usize,
+fn run_worker_job(
+    worker_request: &WorkerRequest,
+    worker_message_sender: &SyncSender<WorkerMessage>,
 ) -> Result<(), ()> {
-    if matches!(request.kind, ImageOutputKind::Kitty) {
-        return run_kitty_job(request, messages);
+    run_worker_job_with_limit(
+        worker_request,
+        worker_message_sender,
+        MAX_NATIVE_FRAME_OUTPUT_BYTE_COUNT,
+    )
+}
+
+fn run_worker_job_with_limit(
+    worker_request: &WorkerRequest,
+    worker_message_sender: &SyncSender<WorkerMessage>,
+    output_byte_limit: usize,
+) -> Result<(), ()> {
+    if matches!(worker_request.output_kind, ImageOutputKind::Kitty) {
+        return run_kitty_worker_job(worker_request, worker_message_sender);
     }
-    let cells = request.cells.as_deref().ok_or(())?;
-    let mut plans = Vec::new();
-    let mut covered_cells = HashSet::new();
-    if plans.try_reserve_exact(request.paints.len()).is_err() {
+    let cell_snapshot = worker_request.cell_snapshot.as_deref().ok_or(())?;
+    let mut image_plans = Vec::new();
+    let mut covered_cell_positions = HashSet::new();
+    if image_plans
+        .try_reserve_exact(worker_request.output_paints.len())
+        .is_err()
+    {
         return Err(());
     }
-    for (paint, key) in request.paints.iter().zip(&request.keys) {
-        if request.cancel.load(Ordering::Acquire) {
+    for (output_paint, encode_key) in worker_request
+        .output_paints
+        .iter()
+        .zip(&worker_request.encode_keys)
+    {
+        if worker_request.cancellation_token.load(Ordering::Acquire) {
             return Ok(());
         }
-        let plan = classify(request.kind, cells, &covered_cells, paint, *key).map_err(|_| ())?;
-        add_target_cells(paint.target, &mut covered_cells);
-        plans.push(plan);
+        let image_plan = classify_output_paint(
+            worker_request.output_kind,
+            cell_snapshot,
+            &covered_cell_positions,
+            output_paint,
+            *encode_key,
+        )
+        .map_err(|_| ())?;
+        add_target_area_cells(output_paint.target_area, &mut covered_cell_positions);
+        image_plans.push(image_plan);
     }
-    resolve_compatibility(request.kind, request.measured_cell_size, &mut plans);
+    resolve_image_compatibility(
+        worker_request.output_kind,
+        worker_request.measured_pixel_cell_size,
+        &mut image_plans,
+    );
 
-    let mut templates: Vec<Option<Vec<TemplateUnit>>> = Vec::new();
-    let mut template_indices = HashMap::new();
-    let mut template_bytes = 0usize;
-    let mut emitted_bytes = 0usize;
-    for (index, plan) in plans.iter().enumerate() {
-        if request.cancel.load(Ordering::Acquire) {
+    let mut encoded_templates: Vec<Option<Vec<TemplateUnit>>> = Vec::new();
+    let mut template_index_by_encode_key = HashMap::new();
+    let mut template_byte_count = 0usize;
+    let mut emitted_byte_count = 0usize;
+    for (plan_index, image_plan) in image_plans.iter().enumerate() {
+        if worker_request.cancellation_token.load(Ordering::Acquire) {
             return Ok(());
         }
-        if plan.compatibility != ImageCompatibility::default() {
-            send_message(
-                messages,
-                &request.cancel,
+        if image_plan.image_compatibility != ImageCompatibility::default() {
+            send_worker_message(
+                worker_message_sender,
+                &worker_request.cancellation_token,
                 WorkerMessage::Unavailable {
-                    generation: request.generation,
-                    key: plan.paint.key,
+                    frame_generation: worker_request.frame_generation,
+                    placement_key: image_plan.output_paint.placement_key,
                 },
             )?;
             continue;
         }
-        let template_index = if let Some(index) = template_indices.get(&plan.key) {
-            *index
+        let template_index = if let Some(template_index) =
+            template_index_by_encode_key.get(&image_plan.encode_key)
+        {
+            *template_index
         } else {
-            let remaining = output_limit.checked_sub(template_bytes).ok_or(())?;
-            let template = match encode_template(request, plan, &plans[..index], remaining) {
-                Ok(template) => {
-                    let encoded = template
+            let remaining_output_bytes = output_byte_limit
+                .checked_sub(template_byte_count)
+                .ok_or(())?;
+            let encoded_template = match encode_output_template(
+                worker_request,
+                image_plan,
+                &image_plans[..plan_index],
+                remaining_output_bytes,
+            ) {
+                Ok(template_units) => {
+                    let encoded_byte_count = template_units
                         .iter()
-                        .try_fold(0usize, |total, unit| total.checked_add(unit.bytes.len()));
-                    let encoded = encoded.filter(|encoded| *encoded <= remaining).ok_or(())?;
-                    template_bytes = template_bytes.checked_add(encoded).ok_or(())?;
-                    Some(template)
+                        .try_fold(0usize, |total, template_unit| {
+                            total.checked_add(template_unit.output_bytes.len())
+                        });
+                    let encoded_byte_count = encoded_byte_count
+                        .filter(|byte_count| *byte_count <= remaining_output_bytes)
+                        .ok_or(())?;
+                    template_byte_count = template_byte_count
+                        .checked_add(encoded_byte_count)
+                        .ok_or(())?;
+                    Some(template_units)
                 }
-                Err(TemplateError::Unavailable) if request.cancel.load(Ordering::Acquire) => {
+                Err(TemplateError::Unavailable)
+                    if worker_request.cancellation_token.load(Ordering::Acquire) =>
+                {
                     return Ok(())
                 }
                 Err(TemplateError::Unavailable) => None,
                 Err(TemplateError::Failed) => return Err(()),
             };
-            let index = templates.len();
-            templates.push(template);
-            template_indices.insert(plan.key, index);
-            index
+            let template_index = encoded_templates.len();
+            encoded_templates.push(encoded_template);
+            template_index_by_encode_key.insert(image_plan.encode_key, template_index);
+            template_index
         };
-        let Some(template) = &templates[template_index] else {
-            send_message(
-                messages,
-                &request.cancel,
+        let Some(template_units) = &encoded_templates[template_index] else {
+            send_worker_message(
+                worker_message_sender,
+                &worker_request.cancellation_token,
                 WorkerMessage::Unavailable {
-                    generation: request.generation,
-                    key: plan.paint.key,
+                    frame_generation: worker_request.frame_generation,
+                    placement_key: image_plan.output_paint.placement_key,
                 },
             )?;
             continue;
         };
-        let encoded = template
+        let encoded_byte_count = template_units
             .iter()
-            .try_fold(0usize, |total, unit| total.checked_add(unit.bytes.len()));
-        let encoded = encoded.ok_or(())?;
-        emitted_bytes = emitted_bytes
-            .checked_add(encoded)
-            .filter(|bytes| *bytes <= output_limit)
+            .try_fold(0usize, |total, template_unit| {
+                total.checked_add(template_unit.output_bytes.len())
+            });
+        let encoded_byte_count = encoded_byte_count.ok_or(())?;
+        emitted_byte_count = emitted_byte_count
+            .checked_add(encoded_byte_count)
+            .filter(|byte_count| *byte_count <= output_byte_limit)
             .ok_or(())?;
-        send_message(
-            messages,
-            &request.cancel,
+        send_worker_message(
+            worker_message_sender,
+            &worker_request.cancellation_token,
             WorkerMessage::Prepared {
-                generation: request.generation,
-                key: plan.paint.key,
-                compatibility: plan.compatibility,
+                frame_generation: worker_request.frame_generation,
+                placement_key: image_plan.output_paint.placement_key,
+                image_compatibility: image_plan.image_compatibility,
             },
         )?;
-        for unit in template {
-            send_message(
-                messages,
-                &request.cancel,
+        for template_unit in template_units {
+            send_worker_message(
+                worker_message_sender,
+                &worker_request.cancellation_token,
                 WorkerMessage::Unit(OutputUnit {
-                    generation: request.generation,
-                    key: plan.paint.key,
-                    kind: request.kind,
-                    offset: unit.offset,
-                    bytes: Arc::clone(&unit.bytes),
+                    frame_generation: worker_request.frame_generation,
+                    placement_key: image_plan.output_paint.placement_key,
+                    output_kind: worker_request.output_kind,
+                    tile_offset: template_unit.tile_offset,
+                    output_bytes: Arc::clone(&template_unit.output_bytes),
                 }),
             )?;
         }
@@ -1603,92 +1863,120 @@ fn run_job_with_limit(
     Ok(())
 }
 
-fn run_kitty_job(request: &WorkerRequest, messages: &SyncSender<WorkerMessage>) -> Result<(), ()> {
-    if request.kitty_images.len() != request.paints.len() {
+fn run_kitty_worker_job(
+    worker_request: &WorkerRequest,
+    worker_message_sender: &SyncSender<WorkerMessage>,
+) -> Result<(), ()> {
+    if worker_request.kitty_paint_images.len() != worker_request.output_paints.len() {
         return Err(());
     }
-    let mut output = BoundedOutput::new(MAX_NATIVE_FRAME_OUTPUT_BYTES);
-    for (paint, image) in request.paints.iter().zip(&request.kitty_images) {
-        if !image.transmit {
+    let mut bounded_output =
+        BoundedOutput::from_output_byte_limit(MAX_NATIVE_FRAME_OUTPUT_BYTE_COUNT);
+    for (output_paint, kitty_paint_image) in worker_request
+        .output_paints
+        .iter()
+        .zip(&worker_request.kitty_paint_images)
+    {
+        if !kitty_paint_image.should_transmit_image {
             continue;
         }
-        let mut upload =
-            KittyUpload::new(Arc::clone(&paint.record.image), image.number).map_err(|_| ())?;
-        while !upload.complete() {
-            if request.cancel.load(Ordering::Acquire) {
+        let mut kitty_upload = KittyUpload::from_decoded_image(
+            Arc::clone(&output_paint.image_record.image),
+            kitty_paint_image.kitty_image_number,
+        )
+        .map_err(|_| ())?;
+        while !kitty_upload.is_upload_complete() {
+            if worker_request.cancellation_token.load(Ordering::Acquire) {
                 return Ok(());
             }
-            upload.advance(&mut output).map_err(|_| ())?;
+            kitty_upload
+                .advance_upload(&mut bounded_output)
+                .map_err(|_| ())?;
         }
     }
-    for (index, (paint, image)) in request.paints.iter().zip(&request.kitty_images).enumerate() {
-        if request.cancel.load(Ordering::Acquire) {
+    for (paint_index, (output_paint, kitty_paint_image)) in worker_request
+        .output_paints
+        .iter()
+        .zip(&worker_request.kitty_paint_images)
+        .enumerate()
+    {
+        if worker_request.cancellation_token.load(Ordering::Acquire) {
             return Ok(());
         }
-        write_cursor_position(&mut output, paint.target.x, paint.target.y).map_err(|_| ())?;
-        let placement = kitty_placement(
-            image.number,
-            u32::try_from(index + 1).map_err(|_| ())?,
-            paint,
+        write_cursor_position(
+            &mut bounded_output,
+            output_paint.target_area.x,
+            output_paint.target_area.y,
+        )
+        .map_err(|_| ())?;
+        let placement = build_kitty_placement(
+            kitty_paint_image.kitty_image_number,
+            u32::try_from(paint_index + 1).map_err(|_| ())?,
+            output_paint,
         );
-        write_kitty_placement(&mut output, &paint.record.image, &placement).map_err(|_| ())?;
+        write_kitty_placement(
+            &mut bounded_output,
+            &output_paint.image_record.image,
+            &placement,
+        )
+        .map_err(|_| ())?;
     }
-    for paint in &request.paints {
-        send_message(
-            messages,
-            &request.cancel,
+    for output_paint in &worker_request.output_paints {
+        send_worker_message(
+            worker_message_sender,
+            &worker_request.cancellation_token,
             WorkerMessage::Prepared {
-                generation: request.generation,
-                key: paint.key,
-                compatibility: ImageCompatibility::exact(),
+                frame_generation: worker_request.frame_generation,
+                placement_key: output_paint.placement_key,
+                image_compatibility: ImageCompatibility::exact(),
             },
         )?;
     }
-    let first = request.paints.first().ok_or(())?;
-    send_message(
-        messages,
-        &request.cancel,
+    let first_output_paint = worker_request.output_paints.first().ok_or(())?;
+    send_worker_message(
+        worker_message_sender,
+        &worker_request.cancellation_token,
         WorkerMessage::Unit(OutputUnit {
-            generation: request.generation,
-            key: first.key,
-            kind: request.kind,
-            offset: (0, 0),
-            bytes: output.finish().into(),
+            frame_generation: worker_request.frame_generation,
+            placement_key: first_output_paint.placement_key,
+            output_kind: worker_request.output_kind,
+            tile_offset: (0, 0),
+            output_bytes: bounded_output.into_output_bytes().into(),
         }),
     )
 }
 
 struct BoundedOutput {
-    bytes: Vec<u8>,
-    limit: usize,
+    output_bytes: Vec<u8>,
+    output_byte_limit: usize,
 }
 
 impl BoundedOutput {
-    fn new(limit: usize) -> Self {
+    fn from_output_byte_limit(output_byte_limit: usize) -> Self {
         Self {
-            bytes: Vec::new(),
-            limit,
+            output_bytes: Vec::new(),
+            output_byte_limit,
         }
     }
 
-    fn finish(self) -> Vec<u8> {
-        self.bytes
+    fn into_output_bytes(self) -> Vec<u8> {
+        self.output_bytes
     }
 }
 
 impl Write for BoundedOutput {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        let next = self
-            .bytes
+    fn write(&mut self, chunk_bytes: &[u8]) -> io::Result<usize> {
+        let next_output_byte_count = self
+            .output_bytes
             .len()
-            .checked_add(bytes.len())
-            .filter(|length| *length <= self.limit)
+            .checked_add(chunk_bytes.len())
+            .filter(|byte_count| *byte_count <= self.output_byte_limit)
             .ok_or_else(|| invalid_output("native image frame exceeds its output limit"))?;
-        self.bytes
-            .try_reserve(next - self.bytes.len())
+        self.output_bytes
+            .try_reserve(next_output_byte_count - self.output_bytes.len())
             .map_err(|_| invalid_output("native image output storage could not be allocated"))?;
-        self.bytes.extend_from_slice(bytes);
-        Ok(bytes.len())
+        self.output_bytes.extend_from_slice(chunk_bytes);
+        Ok(chunk_bytes.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -1696,38 +1984,42 @@ impl Write for BoundedOutput {
     }
 }
 
-fn kitty_placement(image_number: u32, placement_id: u32, paint: &OutputPaint) -> KittyPlacement {
+fn build_kitty_placement(
+    kitty_image_number: u32,
+    kitty_placement_id: u32,
+    output_paint: &OutputPaint,
+) -> KittyPlacement {
     KittyPlacement {
-        image_number,
-        placement_id,
-        source_x: paint.source.x,
-        source_y: paint.source.y,
-        source_width: paint.source.width,
-        source_height: paint.source.height,
-        columns: u32::from(paint.target.width),
-        rows: u32::from(paint.target.height),
-        cell_offset_x: paint.cell_offset_x,
-        cell_offset_y: paint.cell_offset_y,
-        z_index: paint.z_index,
+        image_number: kitty_image_number,
+        placement_id: kitty_placement_id,
+        source_x_pixels: output_paint.source_rect.pixel_x,
+        source_y_pixels: output_paint.source_rect.pixel_y,
+        source_width_pixels: output_paint.source_rect.pixel_width,
+        source_height_pixels: output_paint.source_rect.pixel_height,
+        column_count: u32::from(output_paint.target_area.width),
+        row_count: u32::from(output_paint.target_area.height),
+        cell_pixel_offset_x: output_paint.cell_pixel_offset_x,
+        cell_pixel_offset_y: output_paint.cell_pixel_offset_y,
+        z_index: output_paint.z_index,
     }
 }
 
-fn kitty_output_error(error: KittyOutputError) -> io::Error {
-    match error {
-        KittyOutputError::Io(error) => error,
-        error => io::Error::new(io::ErrorKind::InvalidData, error),
+fn convert_kitty_output_error(kitty_output_error: KittyOutputError) -> io::Error {
+    match kitty_output_error {
+        KittyOutputError::Io(io_error) => io_error,
+        other_error => io::Error::new(io::ErrorKind::InvalidData, other_error),
     }
 }
 
-fn send_message(
-    messages: &SyncSender<WorkerMessage>,
-    cancel: &AtomicBool,
-    message: WorkerMessage,
+fn send_worker_message(
+    worker_message_sender: &SyncSender<WorkerMessage>,
+    cancellation_token: &AtomicBool,
+    worker_message: WorkerMessage,
 ) -> Result<(), ()> {
-    if cancel.load(Ordering::Acquire) {
+    if cancellation_token.load(Ordering::Acquire) {
         return Err(());
     }
-    messages.send(message).map_err(|_| ())
+    worker_message_sender.send(worker_message).map_err(|_| ())
 }
 
 #[derive(Debug)]
@@ -1738,155 +2030,200 @@ enum TemplateError {
 
 #[derive(Debug)]
 struct TemplateUnit {
-    offset: (u16, u16),
-    bytes: Arc<[u8]>,
+    tile_offset: (u16, u16),
+    output_bytes: Arc<[u8]>,
 }
 
-fn encode_template(
-    request: &WorkerRequest,
-    plan: &Plan<'_>,
-    lower: &[Plan<'_>],
-    output_limit: usize,
+fn encode_output_template(
+    worker_request: &WorkerRequest,
+    image_plan: &Plan<'_>,
+    lower_plans: &[Plan<'_>],
+    output_byte_limit: usize,
 ) -> Result<Vec<TemplateUnit>, TemplateError> {
-    match request.kind {
+    match worker_request.output_kind {
         ImageOutputKind::Kitty => Err(TemplateError::Failed),
-        ImageOutputKind::Iterm => encode_iterm_template(request, plan, lower, output_limit),
+        ImageOutputKind::Iterm => {
+            encode_iterm_template(worker_request, image_plan, lower_plans, output_byte_limit)
+        }
         ImageOutputKind::Sixel {
-            palette_colors,
-            max_width,
-            max_height,
+            palette_color_count,
+            max_pixel_width,
+            max_pixel_height,
         } => encode_sixel_template(
-            request,
-            plan,
-            lower,
-            palette_colors,
-            max_width,
-            max_height,
-            output_limit,
+            worker_request,
+            image_plan,
+            lower_plans,
+            palette_color_count,
+            max_pixel_width,
+            max_pixel_height,
+            output_byte_limit,
         ),
     }
 }
 
 fn encode_iterm_template(
-    request: &WorkerRequest,
-    plan: &Plan<'_>,
-    lower: &[Plan<'_>],
-    output_limit: usize,
+    worker_request: &WorkerRequest,
+    image_plan: &Plan<'_>,
+    lower_plans: &[Plan<'_>],
+    output_byte_limit: usize,
 ) -> Result<Vec<TemplateUnit>, TemplateError> {
-    let image = if plan.iterm.per_cell {
-        compose_iterm_image(request, plan, lower)?
+    let decoded_image = if image_plan.iterm_composition.uses_per_cell_composition {
+        compose_iterm_image(worker_request, image_plan, lower_plans)?
     } else {
-        crop_image(plan.paint, plan.iterm.background).map_err(|_| TemplateError::Failed)?
+        crop_output_image(
+            image_plan.output_paint,
+            image_plan.iterm_composition.background_color,
+        )
+        .map_err(|_| TemplateError::Failed)?
     };
-    let options = OutputOptions::new(
-        u32::from(plan.paint.target.width),
-        u32::from(plan.paint.target.height),
+    let options = ItermOutputOptions::from_cell_dimensions(
+        u32::from(image_plan.output_paint.target_area.width),
+        u32::from(image_plan.output_paint.target_area.height),
     )
     .map_err(|_| TemplateError::Failed)?;
-    let mut encoder = ItermEncoder::new(&image, options).map_err(|_| TemplateError::Failed)?;
-    let mut units = Vec::new();
-    let mut total = 0usize;
-    while let Some(packet) = encoder.next_packet() {
-        if packet.len() > MAX_ITERM_PACKET_BYTES {
+    let mut encoder =
+        ItermEncoder::from_image(&decoded_image, options).map_err(|_| TemplateError::Failed)?;
+    let mut template_units = Vec::new();
+    let mut output_byte_count = 0usize;
+    while let Some(packet_bytes) = encoder.take_next_packet() {
+        if packet_bytes.len() > MAX_ITERM_PACKET_BYTE_COUNT {
             return Err(TemplateError::Failed);
         }
-        total = checked_output_len(total, packet.len(), output_limit)?;
-        let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(packet.len())
+        output_byte_count = compute_checked_output_byte_count(
+            output_byte_count,
+            packet_bytes.len(),
+            output_byte_limit,
+        )?;
+        let mut output_bytes = Vec::new();
+        output_bytes
+            .try_reserve_exact(packet_bytes.len())
             .map_err(|_| TemplateError::Failed)?;
-        bytes.extend_from_slice(packet);
-        units.push(TemplateUnit {
-            offset: (0, 0),
-            bytes: bytes.into(),
+        output_bytes.extend_from_slice(packet_bytes);
+        template_units.push(TemplateUnit {
+            tile_offset: (0, 0),
+            output_bytes: output_bytes.into(),
         });
     }
-    Ok(units)
+    Ok(template_units)
 }
 
-fn checked_output_len(
-    total: usize,
-    additional: usize,
-    limit: usize,
+fn compute_checked_output_byte_count(
+    current_output_byte_count: usize,
+    additional_output_byte_count: usize,
+    output_byte_limit: usize,
 ) -> Result<usize, TemplateError> {
-    total
-        .checked_add(additional)
-        .filter(|length| *length <= limit)
+    current_output_byte_count
+        .checked_add(additional_output_byte_count)
+        .filter(|output_byte_count| *output_byte_count <= output_byte_limit)
         .ok_or(TemplateError::Failed)
 }
 
 fn compose_iterm_image(
-    request: &WorkerRequest,
-    plan: &Plan<'_>,
-    lower: &[Plan<'_>],
+    worker_request: &WorkerRequest,
+    image_plan: &Plan<'_>,
+    lower_plans: &[Plan<'_>],
 ) -> Result<Arc<DecodedImage>, TemplateError> {
-    let cell_size = request.measured_cell_size.ok_or(TemplateError::Failed)?;
-    let cell_width = u32::from(cell_size.width());
-    let cell_height = u32::from(cell_size.height());
-    let source = scaled_tile(
-        &plan.paint.record.image,
-        plan.paint.source,
-        plan.paint.target,
+    let measured_pixel_cell_size = worker_request
+        .measured_pixel_cell_size
+        .ok_or(TemplateError::Failed)?;
+    let cell_pixel_width = u32::from(measured_pixel_cell_size.get_pixel_width());
+    let cell_pixel_height = u32::from(measured_pixel_cell_size.get_pixel_height());
+    let scaled_image = scale_output_tile(
+        &image_plan.output_paint.image_record.image,
+        image_plan.output_paint.source_rect,
+        image_plan.output_paint.target_area,
         TileRect {
-            x: 0,
-            y: 0,
-            width: plan.paint.target.width,
-            height: plan.paint.target.height,
+            column_offset: 0,
+            row_offset: 0,
+            column_count: image_plan.output_paint.target_area.width,
+            row_count: image_plan.output_paint.target_area.height,
         },
-        cell_width,
-        cell_height,
+        cell_pixel_width,
+        cell_pixel_height,
         None,
     )
     .map_err(|_| TemplateError::Failed)?;
-    let mut rgba = source.rgba.clone();
-    let width = usize::try_from(source.width).map_err(|_| TemplateError::Failed)?;
-    for y in 0..source.height {
-        for x in 0..source.width {
-            let global_x = u32::from(plan.paint.target.x)
-                .checked_mul(cell_width)
-                .and_then(|value| value.checked_add(x))
+    let mut output_rgba = scaled_image.rgba_bytes.clone();
+    let output_pixel_width =
+        usize::try_from(scaled_image.pixel_width).map_err(|_| TemplateError::Failed)?;
+    for output_pixel_row in 0..scaled_image.pixel_height {
+        for output_pixel_column in 0..scaled_image.pixel_width {
+            let global_pixel_x = u32::from(image_plan.output_paint.target_area.x)
+                .checked_mul(cell_pixel_width)
+                .and_then(|pixel_origin_x| pixel_origin_x.checked_add(output_pixel_column))
                 .ok_or(TemplateError::Failed)?;
-            let global_y = u32::from(plan.paint.target.y)
-                .checked_mul(cell_height)
-                .and_then(|value| value.checked_add(y))
+            let global_pixel_y = u32::from(image_plan.output_paint.target_area.y)
+                .checked_mul(cell_pixel_height)
+                .and_then(|pixel_origin_y| pixel_origin_y.checked_add(output_pixel_row))
                 .ok_or(TemplateError::Failed)?;
-            let mut under = iterm_cell_background(request, global_x, global_y)
-                .ok_or(TemplateError::Unavailable)?;
-            for lower_plan in lower {
-                if let Some(pixel) = sample_scaled_pixel(cell_size, lower_plan, global_x, global_y)
-                {
-                    under = blend_pixel(pixel, [under[0], under[1], under[2]], under[3]);
+            let mut underlying_pixel =
+                get_iterm_cell_background(worker_request, global_pixel_x, global_pixel_y)
+                    .ok_or(TemplateError::Unavailable)?;
+            for lower_plan in lower_plans {
+                if let Some(lower_image_pixel) = sample_scaled_pixel(
+                    measured_pixel_cell_size,
+                    lower_plan,
+                    global_pixel_x,
+                    global_pixel_y,
+                ) {
+                    underlying_pixel = blend_pixel(
+                        lower_image_pixel,
+                        [
+                            underlying_pixel[0],
+                            underlying_pixel[1],
+                            underlying_pixel[2],
+                        ],
+                        underlying_pixel[3],
+                    );
                 }
             }
-            let index = (usize::try_from(y).map_err(|_| TemplateError::Failed)? * width
-                + usize::try_from(x).map_err(|_| TemplateError::Failed)?)
+            let rgba_byte_index = (usize::try_from(output_pixel_row)
+                .map_err(|_| TemplateError::Failed)?
+                * output_pixel_width
+                + usize::try_from(output_pixel_column).map_err(|_| TemplateError::Failed)?)
                 * 4;
-            let pixel: [u8; 4] = rgba[index..index + 4]
+            let image_pixel: [u8; 4] = output_rgba[rgba_byte_index..rgba_byte_index + 4]
                 .try_into()
                 .map_err(|_| TemplateError::Failed)?;
-            let output = blend_pixel(pixel, [under[0], under[1], under[2]], under[3]);
-            rgba[index..index + 4].copy_from_slice(&output);
+            let composited_pixel = blend_pixel(
+                image_pixel,
+                [
+                    underlying_pixel[0],
+                    underlying_pixel[1],
+                    underlying_pixel[2],
+                ],
+                underlying_pixel[3],
+            );
+            output_rgba[rgba_byte_index..rgba_byte_index + 4].copy_from_slice(&composited_pixel);
         }
     }
     Ok(Arc::new(DecodedImage {
-        width: source.width,
-        height: source.height,
-        rgba,
+        pixel_width: scaled_image.pixel_width,
+        pixel_height: scaled_image.pixel_height,
+        rgba_bytes: output_rgba,
     }))
 }
 
-fn iterm_cell_background(request: &WorkerRequest, pixel_x: u32, pixel_y: u32) -> Option<[u8; 4]> {
-    let cell_size = request.measured_cell_size?;
-    let cell_x = u16::try_from(pixel_x / u32::from(cell_size.width())).ok()?;
-    let cell_y = u16::try_from(pixel_y / u32::from(cell_size.height())).ok()?;
-    let cell = request.cells.as_deref()?.cell(cell_x, cell_y)?;
+fn get_iterm_cell_background(
+    worker_request: &WorkerRequest,
+    pixel_x: u32,
+    pixel_y: u32,
+) -> Option<[u8; 4]> {
+    let pixel_cell_size = worker_request.measured_pixel_cell_size?;
+    let cell_x = u16::try_from(pixel_x / u32::from(pixel_cell_size.get_pixel_width())).ok()?;
+    let cell_y = u16::try_from(pixel_y / u32::from(pixel_cell_size.get_pixel_height())).ok()?;
+    let cell = worker_request
+        .cell_snapshot
+        .as_deref()?
+        .find_cell(cell_x, cell_y)?;
     if cell == &ImageCellState::default() {
         return Some([0, 0, 0, 0]);
     }
-    if cell_has_glyph(Some(cell)) || cell.style.attrs() != Default::default() {
+    if cell_has_glyph(Some(cell)) || cell.style.get_attributes() != Default::default() {
         return None;
     }
-    let koshi_terminal::style::Color::Rgb(red, green, blue) = cell.style.bg() else {
+    let koshi_terminal::style::Color::Rgb(red, green, blue) = cell.style.get_background_color()
+    else {
         return None;
     };
     Some([red, green, blue, 255])
@@ -1894,480 +2231,662 @@ fn iterm_cell_background(request: &WorkerRequest, pixel_x: u32, pixel_y: u32) ->
 
 #[derive(Debug, Clone, Copy)]
 struct TileRect {
-    x: u16,
-    y: u16,
-    width: u16,
-    height: u16,
+    column_offset: u16,
+    row_offset: u16,
+    column_count: u16,
+    row_count: u16,
 }
 
 fn encode_sixel_template(
-    request: &WorkerRequest,
-    plan: &Plan<'_>,
-    lower: &[Plan<'_>],
-    palette_colors: usize,
-    max_width: Option<u32>,
-    max_height: Option<u32>,
-    output_limit: usize,
+    worker_request: &WorkerRequest,
+    image_plan: &Plan<'_>,
+    lower_plans: &[Plan<'_>],
+    palette_color_count: usize,
+    max_pixel_width: Option<u32>,
+    max_pixel_height: Option<u32>,
+    output_byte_limit: usize,
 ) -> Result<Vec<TemplateUnit>, TemplateError> {
-    let image = crop_image(plan.paint, None).map_err(|_| TemplateError::Failed)?;
-    let options =
-        SixelEncodeOptions::new(palette_colors.clamp(MIN_PALETTE_COLORS, MAX_PALETTE_COLORS));
-    let palette = PreparedSixelPalette::prepare(&image, [0, 0, 0], options)
+    let cropped_image =
+        crop_output_image(image_plan.output_paint, None).map_err(|_| TemplateError::Failed)?;
+    let encode_options = SixelEncodeOptions::with_maximum_palette_color_count(
+        palette_color_count.clamp(MIN_PALETTE_COLOR_COUNT, MAX_PALETTE_COLOR_COUNT),
+    );
+    let palette = PreparedSixelPalette::prepare(&cropped_image, [0, 0, 0], encode_options)
         .map_err(|_| TemplateError::Failed)?;
-    let cell_width = u32::from(request.cell_size.width());
-    let cell_height = u32::from(request.cell_size.height());
-    let max_columns = max_width
-        .map(|width| width / cell_width)
-        .unwrap_or(u32::from(plan.paint.target.width));
-    let max_rows = max_height
-        .map(|height| height / cell_height)
-        .unwrap_or(u32::from(plan.paint.target.height));
-    let max_columns = max_columns.min(u32::from(plan.paint.target.width));
-    let max_rows = max_rows.min(u32::from(plan.paint.target.height));
+    let cell_pixel_width = u32::from(worker_request.pixel_cell_size.get_pixel_width());
+    let cell_pixel_height = u32::from(worker_request.pixel_cell_size.get_pixel_height());
+    let max_columns = max_pixel_width
+        .map(|pixel_width| pixel_width / cell_pixel_width)
+        .unwrap_or(u32::from(image_plan.output_paint.target_area.width));
+    let max_rows = max_pixel_height
+        .map(|pixel_height| pixel_height / cell_pixel_height)
+        .unwrap_or(u32::from(image_plan.output_paint.target_area.height));
+    let max_columns = max_columns.min(u32::from(image_plan.output_paint.target_area.width));
+    let max_rows = max_rows.min(u32::from(image_plan.output_paint.target_area.height));
     if max_columns == 0 || max_rows == 0 {
         return Err(TemplateError::Failed);
     }
-    let mut output = Vec::new();
-    let tile_width = u16::try_from(max_columns).map_err(|_| TemplateError::Failed)?;
-    let tile_height = u16::try_from(max_rows).map_err(|_| TemplateError::Failed)?;
-    let target_width = plan.paint.target.width;
-    let target_height = plan.paint.target.height;
-    let mut output_bytes = 0usize;
-    let mut y = 0;
-    while y < target_height {
-        let height = tile_height.min(target_height - y);
-        let mut x = 0;
-        while x < target_width {
-            let width = tile_width.min(target_width - x);
+    let mut template_units = Vec::new();
+    let tile_column_count = u16::try_from(max_columns).map_err(|_| TemplateError::Failed)?;
+    let tile_row_count = u16::try_from(max_rows).map_err(|_| TemplateError::Failed)?;
+    let target_column_count = image_plan.output_paint.target_area.width;
+    let target_row_count = image_plan.output_paint.target_area.height;
+    let mut template_output_byte_count = 0usize;
+    let mut row_offset = 0;
+    while row_offset < target_row_count {
+        let row_count = tile_row_count.min(target_row_count - row_offset);
+        let mut column_offset = 0;
+        while column_offset < target_column_count {
+            let column_count = tile_column_count.min(target_column_count - column_offset);
             append_sixel_tiles(
-                request,
-                plan,
-                &image,
-                lower,
-                palette_colors,
+                worker_request,
+                image_plan,
+                &cropped_image,
+                lower_plans,
+                palette_color_count,
                 &palette,
-                cell_width,
-                cell_height,
+                cell_pixel_width,
+                cell_pixel_height,
                 TileRect {
-                    x,
-                    y,
-                    width,
-                    height,
+                    column_offset,
+                    row_offset,
+                    column_count,
+                    row_count,
                 },
-                &mut output,
-                &mut output_bytes,
-                output_limit,
+                &mut template_units,
+                &mut template_output_byte_count,
+                output_byte_limit,
             )?;
-            x = x.saturating_add(width);
+            column_offset = column_offset.saturating_add(column_count);
         }
-        y = y.saturating_add(height);
+        row_offset = row_offset.saturating_add(row_count);
     }
-    Ok(output)
+    Ok(template_units)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn append_sixel_tiles(
-    request: &WorkerRequest,
-    plan: &Plan<'_>,
-    source: &DecodedImage,
-    lower: &[Plan<'_>],
-    palette_colors: usize,
+    worker_request: &WorkerRequest,
+    image_plan: &Plan<'_>,
+    source_image: &DecodedImage,
+    lower_plans: &[Plan<'_>],
+    palette_color_count: usize,
     palette: &PreparedSixelPalette,
-    cell_width: u32,
-    cell_height: u32,
+    cell_pixel_width: u32,
+    cell_pixel_height: u32,
     tile: TileRect,
-    output: &mut Vec<TemplateUnit>,
-    output_bytes: &mut usize,
-    output_limit: usize,
+    template_units: &mut Vec<TemplateUnit>,
+    template_output_byte_count: &mut usize,
+    output_byte_limit: usize,
 ) -> Result<(), TemplateError> {
-    if request.cancel.load(Ordering::Acquire) {
+    if worker_request.cancellation_token.load(Ordering::Acquire) {
         return Err(TemplateError::Unavailable);
     }
-    let tile_image = scaled_tile(
-        source,
+    let tile_image = scale_output_tile(
+        source_image,
         ImageSourceRect {
-            x: 0,
-            y: 0,
-            width: source.width,
-            height: source.height,
+            pixel_x: 0,
+            pixel_y: 0,
+            pixel_width: source_image.pixel_width,
+            pixel_height: source_image.pixel_height,
         },
-        plan.paint.target,
+        image_plan.output_paint.target_area,
         tile,
-        cell_width,
-        cell_height,
+        cell_pixel_width,
+        cell_pixel_height,
         None,
     )
     .map_err(|_| TemplateError::Failed)?;
-    let compose =
-        plan.sixel.background.is_some() || plan.sixel.alpha || plan.sixel.terminal_background;
-    let tile_image = if compose {
-        compose_sixel_tile(request, plan, lower, tile, tile_image)?
+    let should_compose = image_plan.sixel_composition.background_color.is_some()
+        || image_plan.sixel_composition.has_alpha
+        || image_plan.sixel_composition.has_terminal_background;
+    let tile_image = if should_compose {
+        compose_sixel_tile(worker_request, image_plan, lower_plans, tile, tile_image)?
     } else {
         tile_image
     };
-    let mut encoder = if compose {
+    let mut encoder = if should_compose {
         SixelEncoder::with_options(
             Arc::clone(&tile_image),
             [0, 0, 0],
-            SixelEncodeOptions::new(palette_colors.clamp(MIN_PALETTE_COLORS, MAX_PALETTE_COLORS)),
+            SixelEncodeOptions::with_maximum_palette_color_count(
+                palette_color_count.clamp(MIN_PALETTE_COLOR_COUNT, MAX_PALETTE_COLOR_COUNT),
+            ),
         )
     } else {
         SixelEncoder::with_palette(tile_image, [0, 0, 0], palette.clone())
     }
     .map_err(|_| TemplateError::Failed)?;
-    let mut bytes = Vec::new();
-    while let Some(chunk) = encoder
-        .next_chunk(MAX_SIXEL_TILE_BYTES)
+    let mut tile_output_bytes = Vec::new();
+    while let Some(chunk_bytes) = encoder
+        .take_next_chunk(MAX_SIXEL_TILE_BYTE_COUNT)
         .map_err(|_| TemplateError::Failed)?
     {
-        if request.cancel.load(Ordering::Acquire) {
+        if worker_request.cancellation_token.load(Ordering::Acquire) {
             return Err(TemplateError::Unavailable);
         }
-        let next_len = bytes
+        let next_output_byte_count = tile_output_bytes
             .len()
-            .checked_add(chunk.len())
-            .filter(|length| *length <= MAX_SIXEL_OUTPUT_BYTES)
+            .checked_add(chunk_bytes.len())
+            .filter(|output_byte_count| *output_byte_count <= MAX_SIXEL_OUTPUT_BYTE_COUNT)
             .ok_or(TemplateError::Failed)?;
-        checked_output_len(*output_bytes, next_len, output_limit)?;
-        bytes
-            .try_reserve(next_len - bytes.len())
+        compute_checked_output_byte_count(
+            *template_output_byte_count,
+            next_output_byte_count,
+            output_byte_limit,
+        )?;
+        tile_output_bytes
+            .try_reserve(next_output_byte_count - tile_output_bytes.len())
             .map_err(|_| TemplateError::Failed)?;
-        bytes.extend_from_slice(chunk);
+        tile_output_bytes.extend_from_slice(chunk_bytes);
     }
-    if bytes.is_empty() {
+    if tile_output_bytes.is_empty() {
         return Ok(());
     }
-    *output_bytes = checked_output_len(*output_bytes, bytes.len(), output_limit)?;
-    output.push(TemplateUnit {
-        offset: (tile.x, tile.y),
-        bytes: bytes.into(),
+    *template_output_byte_count = compute_checked_output_byte_count(
+        *template_output_byte_count,
+        tile_output_bytes.len(),
+        output_byte_limit,
+    )?;
+    template_units.push(TemplateUnit {
+        tile_offset: (tile.column_offset, tile.row_offset),
+        output_bytes: tile_output_bytes.into(),
     });
     Ok(())
 }
 
 fn compose_sixel_tile(
-    request: &WorkerRequest,
-    plan: &Plan<'_>,
-    lower: &[Plan<'_>],
+    worker_request: &WorkerRequest,
+    image_plan: &Plan<'_>,
+    lower_plans: &[Plan<'_>],
     tile: TileRect,
-    source: Arc<DecodedImage>,
+    tile_image: Arc<DecodedImage>,
 ) -> Result<Arc<DecodedImage>, TemplateError> {
-    let cell_width = u32::from(request.cell_size.width());
-    let cell_height = u32::from(request.cell_size.height());
-    let mut rgba = source.rgba.clone();
-    let width = usize::try_from(source.width).map_err(|_| TemplateError::Failed)?;
-    for y in 0..source.height {
-        for x in 0..source.width {
-            let global_x = u32::from(plan.paint.target.x)
-                .checked_mul(cell_width)
-                .and_then(|value| {
-                    u32::from(tile.x)
-                        .checked_mul(cell_width)
-                        .and_then(|offset| value.checked_add(offset))
+    let cell_pixel_width = u32::from(worker_request.pixel_cell_size.get_pixel_width());
+    let cell_pixel_height = u32::from(worker_request.pixel_cell_size.get_pixel_height());
+    let mut output_rgba = tile_image.rgba_bytes.clone();
+    let tile_pixel_width =
+        usize::try_from(tile_image.pixel_width).map_err(|_| TemplateError::Failed)?;
+    for tile_pixel_row in 0..tile_image.pixel_height {
+        for tile_pixel_column in 0..tile_image.pixel_width {
+            let global_pixel_x = u32::from(image_plan.output_paint.target_area.x)
+                .checked_mul(cell_pixel_width)
+                .and_then(|image_origin_x| {
+                    u32::from(tile.column_offset)
+                        .checked_mul(cell_pixel_width)
+                        .and_then(|tile_origin_x| image_origin_x.checked_add(tile_origin_x))
                 })
-                .and_then(|value| value.checked_add(x))
+                .and_then(|pixel_origin_x| pixel_origin_x.checked_add(tile_pixel_column))
                 .ok_or(TemplateError::Failed)?;
-            let global_y = u32::from(plan.paint.target.y)
-                .checked_mul(cell_height)
-                .and_then(|value| {
-                    u32::from(tile.y)
-                        .checked_mul(cell_height)
-                        .and_then(|offset| value.checked_add(offset))
+            let global_pixel_y = u32::from(image_plan.output_paint.target_area.y)
+                .checked_mul(cell_pixel_height)
+                .and_then(|image_origin_y| {
+                    u32::from(tile.row_offset)
+                        .checked_mul(cell_pixel_height)
+                        .and_then(|tile_origin_y| image_origin_y.checked_add(tile_origin_y))
                 })
-                .and_then(|value| value.checked_add(y))
+                .and_then(|pixel_origin_y| pixel_origin_y.checked_add(tile_pixel_row))
                 .ok_or(TemplateError::Failed)?;
-            let (base, _) = terminal_background(request, global_x, global_y);
-            let mut under = [base[0], base[1], base[2], 255];
-            for lower_plan in lower {
-                if lower_plan.compatibility != ImageCompatibility::default() {
+            let (terminal_background_color, _) =
+                get_terminal_background(worker_request, global_pixel_x, global_pixel_y);
+            let mut underlying_pixel = [
+                terminal_background_color[0],
+                terminal_background_color[1],
+                terminal_background_color[2],
+                255,
+            ];
+            for lower_plan in lower_plans {
+                if lower_plan.image_compatibility != ImageCompatibility::default() {
                     continue;
                 }
-                if let Some(pixel) =
-                    sample_scaled_pixel(request.cell_size, lower_plan, global_x, global_y)
-                {
-                    under = apply_sixel_layer(lower_plan, pixel, base, under);
+                if let Some(lower_image_pixel) = sample_scaled_pixel(
+                    worker_request.pixel_cell_size,
+                    lower_plan,
+                    global_pixel_x,
+                    global_pixel_y,
+                ) {
+                    underlying_pixel = apply_sixel_layer(
+                        lower_plan,
+                        lower_image_pixel,
+                        terminal_background_color,
+                        underlying_pixel,
+                    );
                 }
             }
-            let index = (usize::try_from(y).map_err(|_| TemplateError::Failed)? * width
-                + usize::try_from(x).map_err(|_| TemplateError::Failed)?)
+            let rgba_byte_index = (usize::try_from(tile_pixel_row)
+                .map_err(|_| TemplateError::Failed)?
+                * tile_pixel_width
+                + usize::try_from(tile_pixel_column).map_err(|_| TemplateError::Failed)?)
                 * 4;
-            let pixel: [u8; 4] = rgba[index..index + 4]
+            let image_pixel: [u8; 4] = output_rgba[rgba_byte_index..rgba_byte_index + 4]
                 .try_into()
                 .map_err(|_| TemplateError::Failed)?;
-            let output = apply_current_sixel_layer(plan, pixel, base, under);
-            rgba[index..index + 4].copy_from_slice(&output);
+            let composited_pixel = apply_current_sixel_layer(
+                image_plan,
+                image_pixel,
+                terminal_background_color,
+                underlying_pixel,
+            );
+            output_rgba[rgba_byte_index..rgba_byte_index + 4].copy_from_slice(&composited_pixel);
         }
     }
     Ok(Arc::new(DecodedImage {
-        width: source.width,
-        height: source.height,
-        rgba,
+        pixel_width: tile_image.pixel_width,
+        pixel_height: tile_image.pixel_height,
+        rgba_bytes: output_rgba,
     }))
 }
 
-fn terminal_background(request: &WorkerRequest, pixel_x: u32, pixel_y: u32) -> ([u8; 3], bool) {
-    let cell_width = u32::from(request.cell_size.width());
-    let cell_height = u32::from(request.cell_size.height());
-    let cell_x = u16::try_from(pixel_x / cell_width).ok();
-    let cell_y = u16::try_from(pixel_y / cell_height).ok();
-    let Some(cell) = cell_x.and_then(|x| {
-        cell_y.and_then(|y| request.cells.as_deref().and_then(|cells| cells.cell(x, y)))
+fn get_terminal_background(
+    worker_request: &WorkerRequest,
+    pixel_x: u32,
+    pixel_y: u32,
+) -> ([u8; 3], bool) {
+    let cell_pixel_width = u32::from(worker_request.pixel_cell_size.get_pixel_width());
+    let cell_pixel_height = u32::from(worker_request.pixel_cell_size.get_pixel_height());
+    let cell_column = u16::try_from(pixel_x / cell_pixel_width).ok();
+    let cell_row = u16::try_from(pixel_y / cell_pixel_height).ok();
+    let Some(cell) = cell_column.and_then(|cell_column| {
+        cell_row.and_then(|cell_row| {
+            worker_request
+                .cell_snapshot
+                .as_deref()
+                .and_then(|cell_snapshot| cell_snapshot.find_cell(cell_column, cell_row))
+        })
     }) else {
         return ([0, 0, 0], false);
     };
-    let koshi_terminal::style::Color::Rgb(red, green, blue) = cell.style.bg() else {
+    let koshi_terminal::style::Color::Rgb(red, green, blue) = cell.style.get_background_color()
+    else {
         return ([0, 0, 0], false);
     };
-    let known = cell.ch == ' '
-        && cell.width == 1
-        && cell.combining.is_empty()
-        && cell.style.attrs() == Default::default();
-    ([red, green, blue], known)
+    let is_known = cell.character == ' '
+        && cell.cell_width == 1
+        && cell.combining_characters.is_empty()
+        && cell.style.get_attributes() == Default::default();
+    ([red, green, blue], is_known)
 }
 
 fn sample_scaled_pixel(
-    cell_size: PixelCellSize,
-    plan: &Plan<'_>,
+    pixel_cell_size: PixelCellSize,
+    image_plan: &Plan<'_>,
     pixel_x: u32,
     pixel_y: u32,
 ) -> Option<[u8; 4]> {
-    let cell_width = u32::from(cell_size.width());
-    let cell_height = u32::from(cell_size.height());
-    let origin_x = u32::from(plan.paint.target.x).checked_mul(cell_width)?;
-    let origin_y = u32::from(plan.paint.target.y).checked_mul(cell_height)?;
-    let width = u32::from(plan.paint.target.width).checked_mul(cell_width)?;
-    let height = u32::from(plan.paint.target.height).checked_mul(cell_height)?;
-    let local_x = pixel_x.checked_sub(origin_x)?;
-    let local_y = pixel_y.checked_sub(origin_y)?;
-    if local_x >= width || local_y >= height {
+    let cell_pixel_width = u32::from(pixel_cell_size.get_pixel_width());
+    let cell_pixel_height = u32::from(pixel_cell_size.get_pixel_height());
+    let image_origin_x =
+        u32::from(image_plan.output_paint.target_area.x).checked_mul(cell_pixel_width)?;
+    let image_origin_y =
+        u32::from(image_plan.output_paint.target_area.y).checked_mul(cell_pixel_height)?;
+    let image_pixel_width =
+        u32::from(image_plan.output_paint.target_area.width).checked_mul(cell_pixel_width)?;
+    let image_pixel_height =
+        u32::from(image_plan.output_paint.target_area.height).checked_mul(cell_pixel_height)?;
+    let local_pixel_x = pixel_x.checked_sub(image_origin_x)?;
+    let local_pixel_y = pixel_y.checked_sub(image_origin_y)?;
+    if local_pixel_x >= image_pixel_width || local_pixel_y >= image_pixel_height {
         return None;
     }
-    let source_x = plan.paint.source.x.checked_add(
+    let source_pixel_x = image_plan.output_paint.source_rect.pixel_x.checked_add(
         u32::try_from(
-            u64::from(local_x)
-                .checked_mul(u64::from(plan.paint.source.width))?
-                .checked_div(u64::from(width))?,
+            u64::from(local_pixel_x)
+                .checked_mul(u64::from(image_plan.output_paint.source_rect.pixel_width))?
+                .checked_div(u64::from(image_pixel_width))?,
         )
         .ok()?,
     )?;
-    let source_y = plan.paint.source.y.checked_add(
+    let source_pixel_y = image_plan.output_paint.source_rect.pixel_y.checked_add(
         u32::try_from(
-            u64::from(local_y)
-                .checked_mul(u64::from(plan.paint.source.height))?
-                .checked_div(u64::from(height))?,
+            u64::from(local_pixel_y)
+                .checked_mul(u64::from(image_plan.output_paint.source_rect.pixel_height))?
+                .checked_div(u64::from(image_pixel_height))?,
         )
         .ok()?,
     )?;
-    let image_width = usize::try_from(plan.paint.record.image.width).ok()?;
-    let index = (usize::try_from(source_y).ok()? * image_width + usize::try_from(source_x).ok()?)
-        .checked_mul(4)?;
-    plan.paint
-        .record
+    let decoded_image_width =
+        usize::try_from(image_plan.output_paint.image_record.image.pixel_width).ok()?;
+    let rgba_byte_index = (usize::try_from(source_pixel_y).ok()? * decoded_image_width
+        + usize::try_from(source_pixel_x).ok()?)
+    .checked_mul(4)?;
+    image_plan
+        .output_paint
+        .image_record
         .image
-        .rgba
-        .get(index..index + 4)?
+        .rgba_bytes
+        .get(rgba_byte_index..rgba_byte_index + 4)?
         .try_into()
         .ok()
 }
 
-fn apply_sixel_layer(plan: &Plan<'_>, pixel: [u8; 4], base: [u8; 3], under: [u8; 4]) -> [u8; 4] {
-    if let Some(background) = plan.sixel.background {
-        return blend_pixel(pixel, background, 255);
+fn apply_sixel_layer(
+    image_plan: &Plan<'_>,
+    image_pixel: [u8; 4],
+    terminal_background_color: [u8; 3],
+    underlying_pixel: [u8; 4],
+) -> [u8; 4] {
+    if let Some(background_color) = image_plan.sixel_composition.background_color {
+        return blend_pixel(image_pixel, background_color, 255);
     }
-    if pixel[3] == 0 {
-        return if plan.paint.record.display.sixel_background == Some(SixelBackground::Terminal) {
-            [base[0], base[1], base[2], 255]
+    if image_pixel[3] == 0 {
+        return if image_plan
+            .output_paint
+            .image_record
+            .display
+            .sixel_background
+            == Some(SixelBackground::Terminal)
+        {
+            [
+                terminal_background_color[0],
+                terminal_background_color[1],
+                terminal_background_color[2],
+                255,
+            ]
         } else {
-            under
+            underlying_pixel
         };
     }
-    blend_pixel(pixel, [under[0], under[1], under[2]], under[3])
+    blend_pixel(
+        image_pixel,
+        [
+            underlying_pixel[0],
+            underlying_pixel[1],
+            underlying_pixel[2],
+        ],
+        underlying_pixel[3],
+    )
 }
 
 fn apply_current_sixel_layer(
-    plan: &Plan<'_>,
-    pixel: [u8; 4],
-    base: [u8; 3],
-    under: [u8; 4],
+    image_plan: &Plan<'_>,
+    image_pixel: [u8; 4],
+    terminal_background_color: [u8; 3],
+    underlying_pixel: [u8; 4],
 ) -> [u8; 4] {
-    if let Some(background) = plan.sixel.background {
-        return blend_pixel(pixel, background, 255);
+    if let Some(background_color) = image_plan.sixel_composition.background_color {
+        return blend_pixel(image_pixel, background_color, 255);
     }
-    if pixel[3] == 0 {
-        return if plan.paint.record.display.sixel_background == Some(SixelBackground::Terminal) {
-            [base[0], base[1], base[2], 255]
+    if image_pixel[3] == 0 {
+        return if image_plan
+            .output_paint
+            .image_record
+            .display
+            .sixel_background
+            == Some(SixelBackground::Terminal)
+        {
+            [
+                terminal_background_color[0],
+                terminal_background_color[1],
+                terminal_background_color[2],
+                255,
+            ]
         } else {
             [0, 0, 0, 0]
         };
     }
-    blend_pixel(pixel, [under[0], under[1], under[2]], under[3])
+    blend_pixel(
+        image_pixel,
+        [
+            underlying_pixel[0],
+            underlying_pixel[1],
+            underlying_pixel[2],
+        ],
+        underlying_pixel[3],
+    )
 }
 
-fn blend_pixel(pixel: [u8; 4], background: [u8; 3], background_alpha: u8) -> [u8; 4] {
-    let alpha = u32::from(pixel[3]);
-    let inverse = 255u32.saturating_sub(alpha);
+fn blend_pixel(image_pixel: [u8; 4], background_color: [u8; 3], background_alpha: u8) -> [u8; 4] {
+    let image_alpha = u32::from(image_pixel[3]);
+    let inverse_image_alpha = 255u32.saturating_sub(image_alpha);
     let background_alpha = u32::from(background_alpha);
-    let output_alpha = alpha * 255 + background_alpha * inverse;
-    if output_alpha == 0 {
+    let composited_alpha = image_alpha * 255 + background_alpha * inverse_image_alpha;
+    if composited_alpha == 0 {
         return [0, 0, 0, 0];
     }
-    let channel = |source: u8, under: u8| {
-        let numerator =
-            u32::from(source) * alpha * 255 + u32::from(under) * background_alpha * inverse;
-        u8::try_from((numerator + output_alpha / 2) / output_alpha).unwrap_or(255)
+    let blend_channel = |image_channel: u8, background_channel: u8| {
+        let numerator = u32::from(image_channel) * image_alpha * 255
+            + u32::from(background_channel) * background_alpha * inverse_image_alpha;
+        u8::try_from((numerator + composited_alpha / 2) / composited_alpha).unwrap_or(255)
     };
     [
-        channel(pixel[0], background[0]),
-        channel(pixel[1], background[1]),
-        channel(pixel[2], background[2]),
-        u8::try_from(((output_alpha + 127) / 255).min(255)).unwrap_or(255),
+        blend_channel(image_pixel[0], background_color[0]),
+        blend_channel(image_pixel[1], background_color[1]),
+        blend_channel(image_pixel[2], background_color[2]),
+        u8::try_from(((composited_alpha + 127) / 255).min(255)).unwrap_or(255),
     ]
 }
 
-fn blend_onto_background(pixel: &[u8], background: [u8; 3], destination: &mut [u8]) {
-    let alpha = u16::from(pixel[3]);
-    let inverse = 255u16.saturating_sub(alpha);
-    destination[0] =
-        ((u16::from(pixel[0]) * alpha + u16::from(background[0]) * inverse + 127) / 255) as u8;
-    destination[1] =
-        ((u16::from(pixel[1]) * alpha + u16::from(background[1]) * inverse + 127) / 255) as u8;
-    destination[2] =
-        ((u16::from(pixel[2]) * alpha + u16::from(background[2]) * inverse + 127) / 255) as u8;
-    destination[3] = 255;
+fn blend_onto_background(
+    image_pixel_bytes: &[u8],
+    background_color: [u8; 3],
+    destination_pixel_bytes: &mut [u8],
+) {
+    let image_alpha = u16::from(image_pixel_bytes[3]);
+    let inverse_image_alpha = 255u16.saturating_sub(image_alpha);
+    destination_pixel_bytes[0] = ((u16::from(image_pixel_bytes[0]) * image_alpha
+        + u16::from(background_color[0]) * inverse_image_alpha
+        + 127)
+        / 255) as u8;
+    destination_pixel_bytes[1] = ((u16::from(image_pixel_bytes[1]) * image_alpha
+        + u16::from(background_color[1]) * inverse_image_alpha
+        + 127)
+        / 255) as u8;
+    destination_pixel_bytes[2] = ((u16::from(image_pixel_bytes[2]) * image_alpha
+        + u16::from(background_color[2]) * inverse_image_alpha
+        + 127)
+        / 255) as u8;
+    destination_pixel_bytes[3] = 255;
 }
 
-fn crop_image(paint: &OutputPaint, background: Option<[u8; 3]>) -> Result<Arc<DecodedImage>, ()> {
-    let image = &paint.record.image;
-    let width = usize::try_from(image.width).map_err(|_| ())?;
-    let height = usize::try_from(image.height).map_err(|_| ())?;
-    validate_dimensions(GraphicsProtocol::Iterm2, width, height).map_err(|_| ())?;
-    let expected = checked_rgba_len(GraphicsProtocol::Iterm2, width, height).map_err(|_| ())?;
-    if image.rgba.len() != expected
-        || paint.source.width == 0
-        || paint.source.height == 0
-        || paint.source.x.checked_add(paint.source.width).ok_or(())? > image.width
-        || paint.source.y.checked_add(paint.source.height).ok_or(())? > image.height
+fn crop_output_image(
+    output_paint: &OutputPaint,
+    background_color: Option<[u8; 3]>,
+) -> Result<Arc<DecodedImage>, ()> {
+    let decoded_image = &output_paint.image_record.image;
+    let image_pixel_width = usize::try_from(decoded_image.pixel_width).map_err(|_| ())?;
+    let image_pixel_height = usize::try_from(decoded_image.pixel_height).map_err(|_| ())?;
+    validate_image_dimensions(
+        GraphicsProtocol::Iterm2,
+        image_pixel_width,
+        image_pixel_height,
+    )
+    .map_err(|_| ())?;
+    let expected_rgba_byte_count = compute_rgba_byte_count(
+        GraphicsProtocol::Iterm2,
+        image_pixel_width,
+        image_pixel_height,
+    )
+    .map_err(|_| ())?;
+    if decoded_image.rgba_bytes.len() != expected_rgba_byte_count
+        || output_paint.source_rect.pixel_width == 0
+        || output_paint.source_rect.pixel_height == 0
+        || output_paint
+            .source_rect
+            .pixel_x
+            .checked_add(output_paint.source_rect.pixel_width)
+            .ok_or(())?
+            > decoded_image.pixel_width
+        || output_paint
+            .source_rect
+            .pixel_y
+            .checked_add(output_paint.source_rect.pixel_height)
+            .ok_or(())?
+            > decoded_image.pixel_height
     {
         return Err(());
     }
-    let crop_width = usize::try_from(paint.source.width).map_err(|_| ())?;
-    let crop_height = usize::try_from(paint.source.height).map_err(|_| ())?;
-    let bytes_len =
-        checked_rgba_len(GraphicsProtocol::Iterm2, crop_width, crop_height).map_err(|_| ())?;
-    let mut rgba = Vec::new();
-    rgba.try_reserve_exact(bytes_len).map_err(|_| ())?;
-    rgba.resize(bytes_len, 0);
-    for row in 0..crop_height {
-        let source_row = usize::try_from(paint.source.y).map_err(|_| ())? + row;
-        let source_start =
-            (source_row * width + usize::try_from(paint.source.x).map_err(|_| ())?) * 4;
-        let destination_start = row * crop_width * 4;
-        for column in 0..crop_width {
-            let source = &image.rgba[source_start + column * 4..source_start + column * 4 + 4];
-            let destination =
-                &mut rgba[destination_start + column * 4..destination_start + column * 4 + 4];
-            if let Some(background) = background {
-                blend_onto_background(source, background, destination);
+    let crop_pixel_width = usize::try_from(output_paint.source_rect.pixel_width).map_err(|_| ())?;
+    let crop_pixel_height =
+        usize::try_from(output_paint.source_rect.pixel_height).map_err(|_| ())?;
+    let crop_rgba_byte_count = compute_rgba_byte_count(
+        GraphicsProtocol::Iterm2,
+        crop_pixel_width,
+        crop_pixel_height,
+    )
+    .map_err(|_| ())?;
+    let mut cropped_rgba = Vec::new();
+    cropped_rgba
+        .try_reserve_exact(crop_rgba_byte_count)
+        .map_err(|_| ())?;
+    cropped_rgba.resize(crop_rgba_byte_count, 0);
+    for crop_row in 0..crop_pixel_height {
+        let source_pixel_row =
+            usize::try_from(output_paint.source_rect.pixel_y).map_err(|_| ())? + crop_row;
+        let source_rgba_byte_index = (source_pixel_row * image_pixel_width
+            + usize::try_from(output_paint.source_rect.pixel_x).map_err(|_| ())?)
+            * 4;
+        let destination_rgba_byte_index = crop_row * crop_pixel_width * 4;
+        for crop_column in 0..crop_pixel_width {
+            let source_pixel_bytes = &decoded_image.rgba_bytes[source_rgba_byte_index
+                + crop_column * 4
+                ..source_rgba_byte_index + crop_column * 4 + 4];
+            let destination_pixel_bytes = &mut cropped_rgba[destination_rgba_byte_index
+                + crop_column * 4
+                ..destination_rgba_byte_index + crop_column * 4 + 4];
+            if let Some(background_color) = background_color {
+                blend_onto_background(
+                    source_pixel_bytes,
+                    background_color,
+                    destination_pixel_bytes,
+                );
             } else {
-                destination.copy_from_slice(source);
+                destination_pixel_bytes.copy_from_slice(source_pixel_bytes);
             }
         }
     }
     Ok(Arc::new(DecodedImage {
-        width: paint.source.width,
-        height: paint.source.height,
-        rgba,
+        pixel_width: output_paint.source_rect.pixel_width,
+        pixel_height: output_paint.source_rect.pixel_height,
+        rgba_bytes: cropped_rgba,
     }))
 }
 
-fn scaled_tile(
-    source: &DecodedImage,
+fn scale_output_tile(
+    source_image: &DecodedImage,
     source_rect: ImageSourceRect,
-    target: Rect,
+    target_area: Rect,
     tile: TileRect,
-    cell_width: u32,
-    cell_height: u32,
-    background: Option<[u8; 3]>,
+    cell_pixel_width: u32,
+    cell_pixel_height: u32,
+    background_color: Option<[u8; 3]>,
 ) -> Result<Arc<DecodedImage>, ()> {
-    let source_right = source_rect.x.checked_add(source_rect.width).ok_or(())?;
-    let source_bottom = source_rect.y.checked_add(source_rect.height).ok_or(())?;
-    let tile_right = tile.x.checked_add(tile.width).ok_or(())?;
-    let tile_bottom = tile.y.checked_add(tile.height).ok_or(())?;
-    if source_rect.width == 0
-        || source_rect.height == 0
-        || source_right > source.width
-        || source_bottom > source.height
-        || target.width == 0
-        || target.height == 0
-        || tile.width == 0
-        || tile.height == 0
-        || tile_right > target.width
-        || tile_bottom > target.height
+    let source_pixel_right = source_rect
+        .pixel_x
+        .checked_add(source_rect.pixel_width)
+        .ok_or(())?;
+    let source_pixel_bottom = source_rect
+        .pixel_y
+        .checked_add(source_rect.pixel_height)
+        .ok_or(())?;
+    let tile_column_end = tile
+        .column_offset
+        .checked_add(tile.column_count)
+        .ok_or(())?;
+    let tile_row_end = tile.row_offset.checked_add(tile.row_count).ok_or(())?;
+    if source_rect.pixel_width == 0
+        || source_rect.pixel_height == 0
+        || source_pixel_right > source_image.pixel_width
+        || source_pixel_bottom > source_image.pixel_height
+        || target_area.width == 0
+        || target_area.height == 0
+        || tile.column_count == 0
+        || tile.row_count == 0
+        || tile_column_end > target_area.width
+        || tile_row_end > target_area.height
     {
         return Err(());
     }
-    let width = u32::from(tile.width).checked_mul(cell_width).ok_or(())?;
-    let height = u32::from(tile.height).checked_mul(cell_height).ok_or(())?;
-    let full_width = u32::from(target.width).checked_mul(cell_width).ok_or(())?;
-    let full_height = u32::from(target.height)
-        .checked_mul(cell_height)
+    let tile_pixel_width = u32::from(tile.column_count)
+        .checked_mul(cell_pixel_width)
         .ok_or(())?;
-    let width_usize = usize::try_from(width).map_err(|_| ())?;
-    let height_usize = usize::try_from(height).map_err(|_| ())?;
-    let bytes_len =
-        checked_rgba_len(GraphicsProtocol::Sixel, width_usize, height_usize).map_err(|_| ())?;
-    let mut rgba = Vec::new();
-    rgba.try_reserve_exact(bytes_len).map_err(|_| ())?;
-    rgba.resize(bytes_len, 0);
-    let source_width = usize::try_from(source.width).map_err(|_| ())?;
-    for y in 0..height {
-        let full_y = u32::from(tile.y)
-            .checked_mul(cell_height)
-            .and_then(|value| value.checked_add(y))
+    let tile_pixel_height = u32::from(tile.row_count)
+        .checked_mul(cell_pixel_height)
+        .ok_or(())?;
+    let target_pixel_width = u32::from(target_area.width)
+        .checked_mul(cell_pixel_width)
+        .ok_or(())?;
+    let target_pixel_height = u32::from(target_area.height)
+        .checked_mul(cell_pixel_height)
+        .ok_or(())?;
+    let tile_pixel_width_usize = usize::try_from(tile_pixel_width).map_err(|_| ())?;
+    let tile_pixel_height_usize = usize::try_from(tile_pixel_height).map_err(|_| ())?;
+    let bytes_len = compute_rgba_byte_count(
+        GraphicsProtocol::Sixel,
+        tile_pixel_width_usize,
+        tile_pixel_height_usize,
+    )
+    .map_err(|_| ())?;
+    let mut scaled_rgba = Vec::new();
+    scaled_rgba.try_reserve_exact(bytes_len).map_err(|_| ())?;
+    scaled_rgba.resize(bytes_len, 0);
+    let source_image_pixel_width = usize::try_from(source_image.pixel_width).map_err(|_| ())?;
+    for tile_pixel_row in 0..tile_pixel_height {
+        let target_pixel_row = u32::from(tile.row_offset)
+            .checked_mul(cell_pixel_height)
+            .and_then(|tile_pixel_origin_y| tile_pixel_origin_y.checked_add(tile_pixel_row))
             .ok_or(())?;
-        let source_y = source_rect
-            .y
+        let source_pixel_y = source_rect
+            .pixel_y
             .checked_add(
-                (u64::from(full_y) * u64::from(source_rect.height) / u64::from(full_height))
-                    .min(u64::from(source_rect.height - 1)) as u32,
+                (u64::from(target_pixel_row) * u64::from(source_rect.pixel_height)
+                    / u64::from(target_pixel_height))
+                .min(u64::from(source_rect.pixel_height - 1)) as u32,
             )
             .ok_or(())?;
-        for x in 0..width {
-            let full_x = u32::from(tile.x)
-                .checked_mul(cell_width)
-                .and_then(|value| value.checked_add(x))
+        for tile_pixel_column in 0..tile_pixel_width {
+            let target_pixel_column = u32::from(tile.column_offset)
+                .checked_mul(cell_pixel_width)
+                .and_then(|tile_pixel_origin_x| tile_pixel_origin_x.checked_add(tile_pixel_column))
                 .ok_or(())?;
-            let source_x = source_rect
-                .x
+            let source_pixel_x = source_rect
+                .pixel_x
                 .checked_add(
-                    (u64::from(full_x) * u64::from(source_rect.width) / u64::from(full_width))
-                        .min(u64::from(source_rect.width - 1)) as u32,
+                    (u64::from(target_pixel_column) * u64::from(source_rect.pixel_width)
+                        / u64::from(target_pixel_width))
+                    .min(u64::from(source_rect.pixel_width - 1)) as u32,
                 )
                 .ok_or(())?;
-            let source_index = (usize::try_from(source_y).map_err(|_| ())? * source_width
-                + usize::try_from(source_x).map_err(|_| ())?)
+            let source_rgba_byte_index = (usize::try_from(source_pixel_y).map_err(|_| ())?
+                * source_image_pixel_width
+                + usize::try_from(source_pixel_x).map_err(|_| ())?)
                 * 4;
-            let destination_index = (usize::try_from(y).map_err(|_| ())? * width_usize
-                + usize::try_from(x).map_err(|_| ())?)
+            let destination_rgba_byte_index = (usize::try_from(tile_pixel_row).map_err(|_| ())?
+                * tile_pixel_width_usize
+                + usize::try_from(tile_pixel_column).map_err(|_| ())?)
                 * 4;
-            let pixel = &source.rgba[source_index..source_index + 4];
-            let destination = &mut rgba[destination_index..destination_index + 4];
-            if let Some(background) = background {
-                blend_onto_background(pixel, background, destination);
+            let source_pixel_bytes =
+                &source_image.rgba_bytes[source_rgba_byte_index..source_rgba_byte_index + 4];
+            let destination_pixel_bytes =
+                &mut scaled_rgba[destination_rgba_byte_index..destination_rgba_byte_index + 4];
+            if let Some(background_color) = background_color {
+                blend_onto_background(
+                    source_pixel_bytes,
+                    background_color,
+                    destination_pixel_bytes,
+                );
             } else {
-                destination.copy_from_slice(pixel);
+                destination_pixel_bytes.copy_from_slice(source_pixel_bytes);
             }
         }
     }
     Ok(Arc::new(DecodedImage {
-        width,
-        height,
-        rgba,
+        pixel_width: tile_pixel_width,
+        pixel_height: tile_pixel_height,
+        rgba_bytes: scaled_rgba,
     }))
 }
 
-fn write_cursor_position<W: Write>(writer: &mut W, x: u16, y: u16) -> io::Result<()> {
-    write!(writer, "\x1b[{};{}H", u32::from(y) + 1, u32::from(x) + 1)
+fn write_cursor_position<W: Write>(
+    writer: &mut W,
+    screen_column: u16,
+    screen_row: u16,
+) -> io::Result<()> {
+    write!(
+        writer,
+        "\x1b[{};{}H",
+        u32::from(screen_row) + 1,
+        u32::from(screen_column) + 1
+    )
 }
 
 fn invalid_output(message: &'static str) -> io::Error {

@@ -41,21 +41,21 @@ use crate::error::PtyError;
 ///
 /// The supervisor serves one link at a time. The window includes the time it
 /// is still spending on the link a replaced process image left behind.
-const ANSWER_WAIT: Duration = Duration::from_secs(10);
+const ANSWER_WAIT_DURATION: Duration = Duration::from_secs(10);
 
 /// What this side keeps for one pane the supervisor holds.
 ///
 /// The supervisor is the authority on the pane itself.
-/// [`carried_panes`](SupervisorPtyBackend::carried_panes) reads these two
+/// [`carried_panes`](SupervisorPtyBackend::list_carried_panes) reads these two
 /// facts without a round trip.
 #[derive(Debug, Clone, Copy)]
 struct LivePane {
     /// The process id of the pane's child, as the supervisor reported it.
-    pid: u32,
+    process_id: u32,
     /// The last size this pane's terminal was set to: what it was spawned or
     /// taken back at, then whatever the newest successful
-    /// [`resize`](PtyBackend::resize) carried.
-    size: PtySize,
+    /// [`resize_pane`](PtyBackend::resize_pane) carried.
+    pty_size: PtySize,
 }
 
 /// The link, held under one lock: one request is in flight at a time.
@@ -64,9 +64,9 @@ struct LivePane {
 /// caller reads is the one to its own request.
 struct Link {
     /// The writing half: every request goes out here.
-    writer: FrameWriter,
+    frame_writer: FrameWriter,
     /// The answers the reader thread hands over, in arrival order.
-    answers: Receiver<SupervisorResponse<MaybeKnown<SupervisorResult>>>,
+    response_receiver: Receiver<SupervisorResponse<MaybeKnown<SupervisorResult>>>,
     /// The id the next request carries.
     next_request_id: u64,
 }
@@ -80,32 +80,32 @@ struct Link {
 ///
 /// One process builds one of these and keeps it. Dropping it leaves the link's
 /// reader thread holding the reading half. The link closes when this process
-/// exits or when [`shut_down`](Self::shut_down) ends the supervisor.
+/// exits or when [`shutdown_supervisor`](Self::shutdown_supervisor) ends the supervisor.
 pub struct SupervisorPtyBackend {
     /// The link to the supervisor.
     link: Mutex<Link>,
-    /// The panes this backend believes the supervisor holds, keyed by id. A
-    /// [`spawn`](PtyBackend::spawn) adds one and a [`kill`](PtyBackend::kill)
+    /// The panes this backend believes the supervisor holds, keyed by pane id. A
+    /// [`spawn_pane`](PtyBackend::spawn_pane) adds one and a [`kill_pane`](PtyBackend::kill_pane)
     /// removes one.
-    panes: Mutex<HashMap<PaneId, LivePane>>,
+    live_panes_by_id: Mutex<HashMap<PaneId, LivePane>>,
     /// Where every pane's output and exit is delivered.
     /// [`connect`](Self::connect) reports a pane the supervisor no longer has
     /// as ended through it.
-    sink: Arc<dyn PtySink>,
+    pty_sink: Arc<dyn PtySink>,
 }
 
 impl SupervisorPtyBackend {
-    /// Open a link to the supervisor listening at `addr`, present `token`, and
-    /// settle which panes this backend drives.
+    /// Open a link to the supervisor listening at `supervisor_address`, present
+    /// `connection_token`, and reconcile which panes this backend drives.
     ///
-    /// `panes` is what the caller believes is running: empty for a session
+    /// `pane_ids` is what the caller believes is running: empty for a session
     /// starting fresh, and the carried pane list for one that has just replaced
     /// its own image. It is settled against what the supervisor holds:
     ///
-    /// - A pane the supervisor holds that is not in `panes` is killed with
+    /// - A pane the supervisor holds that is not in `pane_ids` is killed with
     ///   [`KillPolicy::Tree`], in the order the supervisor listed it. The
     ///   answer to that kill is not checked.
-    /// - A pane in `panes` the supervisor does not hold is reported to `sink`
+    /// - A pane in `pane_ids` the supervisor does not hold is reported to `pty_sink`
     ///   as ended, carrying `ExitCode(-1)` — the status a child that cannot be
     ///   waited on reports. Every kill above is sent first.
     ///
@@ -122,88 +122,111 @@ impl SupervisorPtyBackend {
     /// # Panics
     /// Panics when the operating system cannot start the link's reader thread.
     pub fn connect(
-        addr: &str,
-        token: ConnectionToken,
-        sink: Arc<dyn PtySink>,
-        panes: &[PaneId],
+        supervisor_address: &str,
+        connection_token: ConnectionToken,
+        pty_sink: Arc<dyn PtySink>,
+        pane_ids: &[PaneId],
     ) -> Result<SupervisorPtyBackend, PtyError> {
-        let connection = Connection::connect(addr).map_err(|error| PtyError::Io {
-            detail: format!("the supervisor at {addr} could not be reached: {error}"),
-        })?;
-        let closer = connection.read_closer().ok();
-        let (reader, writer) = connection.split();
-        let (answers_tx, answers) = channel();
-        start_link_reader(reader, answers_tx, Arc::clone(&sink));
+        let connection =
+            Connection::connect(supervisor_address).map_err(|io_error| PtyError::Io {
+                detail: format!(
+                    "the supervisor at {supervisor_address} could not be reached: {io_error}"
+                ),
+            })?;
+        let link_closer = connection.read_closer().ok();
+        let (frame_reader, frame_writer) = connection.split();
+        let (response_sender, response_receiver) = channel();
+        start_link_reader_thread(frame_reader, response_sender, Arc::clone(&pty_sink));
 
         let backend = SupervisorPtyBackend {
             link: Mutex::new(Link {
-                writer,
-                answers,
+                frame_writer,
+                response_receiver,
                 next_request_id: 1,
             }),
-            panes: Mutex::new(HashMap::new()),
-            sink,
+            live_panes_by_id: Mutex::new(HashMap::new()),
+            pty_sink,
         };
 
-        match backend.settle(token, panes) {
+        match backend.reconcile_panes(connection_token, pane_ids) {
             Ok(()) => Ok(backend),
-            Err(error) => {
-                if let Some(closer) = closer {
-                    closer.close();
+            Err(reconcile_error) => {
+                if let Some(link_closer) = link_closer {
+                    link_closer.close();
                 }
-                Err(error)
+                Err(reconcile_error)
             }
         }
     }
 
-    /// Present `token`, read the pane list, and settle it against `panes`, the
-    /// panes the caller believes are running.
+    /// Present `connection_token`, read the pane list, and reconcile it against
+    /// `pane_ids`, the panes the caller believes are running.
     ///
-    /// A pane the supervisor holds that `panes` does not name is killed with
-    /// [`KillPolicy::Tree`]; a pane `panes` names that the supervisor does not
-    /// hold is reported to the sink as ended. Every remaining pane is written
+    /// A pane the supervisor holds that `pane_ids` does not name is killed with
+    /// [`KillPolicy::Tree`]; a pane `pane_ids` names that the supervisor does not
+    /// hold is reported to the `pty_sink` as ended. Every remaining pane is written
     /// into this backend's pane map.
     ///
     /// # Errors
     /// Returns [`PtyError::Io`] when the supervisor refuses the Hello or the
     /// pane list, answers either with something else, or does not answer.
-    fn settle(&self, token: ConnectionToken, panes: &[PaneId]) -> Result<(), PtyError> {
-        match self.ask(SupervisorRequestKind::hello(token))? {
+    fn reconcile_panes(
+        &self,
+        connection_token: ConnectionToken,
+        pane_ids: &[PaneId],
+    ) -> Result<(), PtyError> {
+        match self.send_request_and_receive_result(SupervisorRequestKind::build_hello_request(
+            connection_token,
+        ))? {
             SupervisorResult::Hello { .. } => {}
-            other => return Err(unexpected_answer("Hello", &other)),
+            unexpected_supervisor_result => {
+                return Err(build_unexpected_supervisor_result_error(
+                    "Hello",
+                    &unexpected_supervisor_result,
+                ))
+            }
         }
-        let held = match self.ask(SupervisorRequestKind::ListPanes)? {
-            SupervisorResult::Panes(held) => held,
-            other => return Err(unexpected_answer("ListPanes", &other)),
-        };
+        let supervisor_panes =
+            match self.send_request_and_receive_result(SupervisorRequestKind::ListPanes)? {
+                SupervisorResult::Panes(supervisor_panes) => supervisor_panes,
+                unexpected_supervisor_result => {
+                    return Err(build_unexpected_supervisor_result_error(
+                        "ListPanes",
+                        &unexpected_supervisor_result,
+                    ))
+                }
+            };
 
         // Both differences are settled before any pane is driven.
-        let wanted: HashSet<PaneId> = panes.iter().copied().collect();
-        for pane in &held {
-            if !wanted.contains(&pane.pane_id) {
-                let _ = self.ask(SupervisorRequestKind::Kill {
-                    pane_id: pane.pane_id,
+        let requested_pane_ids: HashSet<PaneId> = pane_ids.iter().copied().collect();
+        for supervisor_pane in &supervisor_panes {
+            if !requested_pane_ids.contains(&supervisor_pane.pane_id) {
+                let _ = self.send_request_and_receive_result(SupervisorRequestKind::Kill {
+                    pane_id: supervisor_pane.pane_id,
                     kill_policy: KillPolicy::Tree,
                 });
             }
         }
-        let kept: HashMap<PaneId, LivePane> = held
+        let retained_live_panes_by_id: HashMap<PaneId, LivePane> = supervisor_panes
             .iter()
-            .filter(|pane| wanted.contains(&pane.pane_id))
-            .map(|pane| {
+            .filter(|supervisor_pane| requested_pane_ids.contains(&supervisor_pane.pane_id))
+            .map(|supervisor_pane| {
                 (
-                    pane.pane_id,
+                    supervisor_pane.pane_id,
                     LivePane {
-                        pid: pane.pid,
-                        size: pane.size,
+                        process_id: supervisor_pane.process_id,
+                        pty_size: supervisor_pane.pty_size,
                     },
                 )
             })
             .collect();
-        for pane in panes.iter().filter(|pane| !kept.contains_key(pane)) {
-            self.sink.exit(*pane, UNOBSERVED_EXIT);
+        for pane_id in pane_ids
+            .iter()
+            .filter(|pane_id| !retained_live_panes_by_id.contains_key(pane_id))
+        {
+            self.pty_sink.accept_exit_status(*pane_id, UNOBSERVED_EXIT);
         }
-        *self.panes.lock().expect("supervisor panes") = kept;
+        *self.live_panes_by_id.lock().expect("supervisor panes") = retained_live_panes_by_id;
 
         Ok(())
     }
@@ -227,7 +250,7 @@ impl SupervisorPtyBackend {
     /// it answers with something else, or when the link fails. A supervisor
     /// built before the request existed refuses it by name.
     pub fn pause_readers(&self) -> Result<(), PtyError> {
-        self.ask_done(SupervisorRequestKind::PauseOutput)
+        self.send_request_and_require_done(SupervisorRequestKind::PauseOutput)
     }
 
     /// Put every held reader back to work: the supervisor writes what it held
@@ -235,14 +258,14 @@ impl SupervisorPtyBackend {
     ///
     /// A refusal, a link that broke, and an answer that never came are all
     /// dropped here. Each one is a supervisor no longer serving this session,
-    /// which every later request on this link reports in turn.
+    /// which every subsequent request on this link reports in turn.
     pub fn resume_readers(&self) {
-        let _ = self.ask(SupervisorRequestKind::ResumeOutput);
+        let _ = self.send_request_and_receive_result(SupervisorRequestKind::ResumeOutput);
     }
 
     /// Wait until no byte this backend took for a child is still queued.
     ///
-    /// [`write`](PtyBackend::write) sends the bytes to the supervisor and waits
+    /// [`write_pane_input`](PtyBackend::write_pane_input) sends the bytes to the supervisor and waits
     /// for its answer. A write that has returned is already the supervisor's,
     /// and this process queues nothing. The supervisor keeps running across an
     /// image swap, and its own writer threads carry those bytes to the
@@ -263,17 +286,17 @@ impl SupervisorPtyBackend {
     /// is always `None`; that descriptor belongs to the supervisor. The exit
     /// status is always `None`; the supervisor reaps every child and reports
     /// the status over the link.
-    pub fn carried_panes(&self) -> Vec<CarriedPtyPane> {
-        let panes = self.panes.lock().expect("supervisor panes");
-        panes
+    pub fn list_carried_panes(&self) -> Vec<CarriedPtyPane> {
+        let live_panes_by_id = self.live_panes_by_id.lock().expect("supervisor panes");
+        live_panes_by_id
             .iter()
-            .map(|(pane_id, live)| CarriedPtyPane {
+            .map(|(pane_id, live_pane)| CarriedPtyPane {
                 pane_id: *pane_id,
                 #[cfg(unix)]
                 terminal_fd: None,
-                pid: live.pid,
-                size: live.size,
-                exit: None,
+                process_id: live_pane.process_id,
+                pty_size: live_pane.pty_size,
+                exit_status: None,
             })
             .collect()
     }
@@ -287,16 +310,19 @@ impl SupervisorPtyBackend {
     /// # Errors
     /// Returns [`PtyError::Io`] when the supervisor answers Shutdown with
     /// something other than [`SupervisorResult::Done`].
-    pub fn shut_down(&self) -> Result<(), PtyError> {
-        match self.ask(SupervisorRequestKind::Shutdown) {
+    pub fn shutdown_supervisor(&self) -> Result<(), PtyError> {
+        match self.send_request_and_receive_result(SupervisorRequestKind::Shutdown) {
             Ok(SupervisorResult::Done) => Ok(()),
-            Ok(other) => Err(unexpected_answer("Shutdown", &other)),
+            Ok(unexpected_result) => Err(build_unexpected_supervisor_result_error(
+                "Shutdown",
+                &unexpected_result,
+            )),
             Err(_) => Ok(()),
         }
     }
 
-    /// Send one request and wait for the answer to that request, for at most
-    /// the window [`answer_wait`] gives that request. The window starts once
+    /// Send one request and wait for its response, for at most the duration
+    /// [`compute_answer_wait_duration`] gives that request. The window starts once
     /// the link lock is taken, so time spent waiting behind another caller's
     /// exchange is not charged against it.
     ///
@@ -311,102 +337,136 @@ impl SupervisorPtyBackend {
     /// answer arrives, when the answer names a request this side never sent,
     /// when the supervisor refuses the request, or when the answer names
     /// something this build has no name for.
-    fn ask(&self, kind: SupervisorRequestKind) -> Result<SupervisorResult, PtyError> {
-        let name = kind.name();
-        let wait = answer_wait(&kind);
-        let mut link = self.link.lock().expect("supervisor link");
-        let deadline = Instant::now() + wait;
-        let request_id = link.next_request_id;
-        link.next_request_id += 1;
-        link.writer
-            .send(&SupervisorRequest { request_id, kind })
-            .map_err(|error| PtyError::Io {
-                detail: format!("{name} could not be sent to the supervisor: {error}"),
+    fn send_request_and_receive_result(
+        &self,
+        request_kind: SupervisorRequestKind,
+    ) -> Result<SupervisorResult, PtyError> {
+        let request_kind_name = request_kind.get_request_kind_name();
+        let wait_duration = compute_answer_wait_duration(&request_kind);
+        let mut link_state = self.link.lock().expect("supervisor link");
+        let deadline = Instant::now() + wait_duration;
+        let request_id = link_state.next_request_id;
+        link_state.next_request_id += 1;
+        link_state
+            .frame_writer
+            .send(&SupervisorRequest {
+                request_id,
+                request_kind,
+            })
+            .map_err(|io_error| PtyError::Io {
+                detail: format!(
+                    "{request_kind_name} could not be sent to the supervisor: {io_error}"
+                ),
             })?;
-        let response = loop {
-            let left = deadline.saturating_duration_since(Instant::now());
-            match link.answers.recv_timeout(left) {
-                Ok(response) if response.request_id == Some(request_id) => break response,
-                // The answer to an earlier request of this side's own, whose
+        let supervisor_response = loop {
+            let remaining_wait_duration = deadline.saturating_duration_since(Instant::now());
+            match link_state
+                .response_receiver
+                .recv_timeout(remaining_wait_duration)
+            {
+                Ok(supervisor_response) if supervisor_response.request_id == Some(request_id) => {
+                    break supervisor_response
+                }
+                // The response to an earlier request of this side's own, whose
                 // wait already ran out.
-                Ok(response) if response.request_id.is_some_and(|id| id < request_id) => {}
-                Ok(response) => {
+                Ok(supervisor_response)
+                    if supervisor_response
+                        .request_id
+                        .is_some_and(|supervisor_response_id| {
+                            supervisor_response_id < request_id
+                        }) => {}
+                Ok(supervisor_response) => {
                     return Err(PtyError::Io {
                         detail: format!(
-                            "the supervisor answered request {:?} while {name} \
+                            "the supervisor answered request {:?} while {request_kind_name} \
                              (request {request_id}) was in flight",
-                            response.request_id
+                            supervisor_response.request_id
                         ),
                     })
                 }
                 Err(RecvTimeoutError::Timeout) => {
                     return Err(PtyError::Io {
                         detail: format!(
-                            "the supervisor did not answer {name} within {} seconds",
-                            wait.as_secs()
+                            "the supervisor did not answer {request_kind_name} within {} seconds",
+                            wait_duration.as_secs()
                         ),
                     })
                 }
                 Err(RecvTimeoutError::Disconnected) => {
                     return Err(PtyError::Io {
-                        detail: format!("the supervisor link closed while {name} was in flight"),
+                        detail: format!(
+                            "the supervisor link closed while {request_kind_name} was in flight"
+                        ),
                     })
                 }
             }
         };
-        drop(link);
+        drop(link_state);
 
-        match response.result {
-            MaybeKnown::Known(SupervisorResult::Error(payload)) => Err(PtyError::Io {
-                detail: format!("the supervisor refused {name}: {}", payload.message),
-            }),
-            MaybeKnown::Known(result) => Ok(result),
-            MaybeKnown::Unknown { name: answer } => Err(PtyError::Io {
+        match supervisor_response.answer_result {
+            MaybeKnown::Known(SupervisorResult::Error(supervisor_error_payload)) => {
+                Err(PtyError::Io {
+                    detail: format!(
+                        "the supervisor refused {request_kind_name}: {}",
+                        supervisor_error_payload.message
+                    ),
+                })
+            }
+            MaybeKnown::Known(supervisor_result) => Ok(supervisor_result),
+            MaybeKnown::Unknown {
+                variant_name: answer_variant_name,
+            } => Err(PtyError::Io {
                 detail: format!(
-                    "the supervisor answered {name} with {answer}, \
+                    "the supervisor answered {request_kind_name} with {answer_variant_name}, \
                      which this build has no name for"
                 ),
             }),
         }
     }
 
-    /// Send one request whose only good answer is
+    /// Send one request whose only good response is
     /// [`SupervisorResult::Done`], and hand back nothing else.
     ///
     /// # Errors
-    /// Returns whatever [`ask`](Self::ask) reports, and [`PtyError::Io`] naming
-    /// both the request and an answer that is not `Done`.
-    fn ask_done(&self, kind: SupervisorRequestKind) -> Result<(), PtyError> {
-        let name = kind.name();
-        match self.ask(kind)? {
+    /// Returns whatever [`send_request_and_receive_result`](Self::send_request_and_receive_result)
+    /// reports, and [`PtyError::Io`] naming both the request and a response that is not `Done`.
+    fn send_request_and_require_done(
+        &self,
+        request_kind: SupervisorRequestKind,
+    ) -> Result<(), PtyError> {
+        let request_kind_name = request_kind.get_request_kind_name();
+        match self.send_request_and_receive_result(request_kind)? {
             SupervisorResult::Done => Ok(()),
-            other => Err(unexpected_answer(name, &other)),
+            unexpected_supervisor_result => Err(build_unexpected_supervisor_result_error(
+                request_kind_name,
+                &unexpected_supervisor_result,
+            )),
         }
     }
 
-    /// [`PtyError::UnknownPane`] when this backend does not drive `pane`.
+    /// [`PtyError::UnknownPane`] when this backend does not drive `pane_id`.
     /// Checked before every request that names one pane.
-    fn refuse_unknown_pane(&self, pane: PaneId) -> Result<(), PtyError> {
+    fn validate_pane_is_driven(&self, pane_id: PaneId) -> Result<(), PtyError> {
         if self
-            .panes
+            .live_panes_by_id
             .lock()
             .expect("supervisor panes")
-            .contains_key(&pane)
+            .contains_key(&pane_id)
         {
             Ok(())
         } else {
-            Err(PtyError::UnknownPane { pane })
+            Err(PtyError::UnknownPane { pane_id })
         }
     }
 }
 
 impl PtyBackend for SupervisorPtyBackend {
-    /// Ask the supervisor to open a pane: it makes a terminal of `size` and
-    /// launches `spec` inside it.
+    /// Ask the supervisor to open a pane: it makes a terminal of `pty_size` and
+    /// launches `spawn_spec` inside it.
     ///
     /// The child runs in the supervisor's process, not this one, and its output
     /// and exit arrive as events on the link. The returned handle is
-    /// [`PtyHandle::detached`]: it carries no channels, and the caller starts
+    /// [`PtyHandle::from_detached_pane_id`]: it carries no channels, and the caller starts
     /// no relay thread for the pane.
     ///
     /// # Errors
@@ -417,37 +477,49 @@ impl PtyBackend for SupervisorPtyBackend {
     ///
     /// # Panics
     /// In debug builds, panics when `pane_id` is already live in this backend.
-    fn spawn(
+    fn spawn_pane(
         &self,
         pane_id: PaneId,
-        spec: SpawnSpec,
-        size: PtySize,
+        spawn_spec: SpawnSpec,
+        pty_size: PtySize,
     ) -> Result<PtyHandle, PtyError> {
         debug_assert!(
             !self
-                .panes
+                .live_panes_by_id
                 .lock()
                 .expect("supervisor panes")
                 .contains_key(&pane_id),
             "spawn into an already-live pane id {pane_id}; kill it before respawning"
         );
-        let answer = self.ask(SupervisorRequestKind::Spawn {
-            pane_id,
-            spec,
-            size,
-        });
-        let pid = match answer {
-            Ok(SupervisorResult::Spawned { pid }) => pid,
-            Ok(other) => return Err(unexpected_answer("Spawn", &other)),
+        let supervisor_result =
+            self.send_request_and_receive_result(SupervisorRequestKind::Spawn {
+                pane_id,
+                spawn_spec,
+                pty_size,
+            });
+        let process_id = match supervisor_result {
+            Ok(SupervisorResult::Spawned { process_id }) => process_id,
+            Ok(unexpected_supervisor_result) => {
+                return Err(build_unexpected_supervisor_result_error(
+                    "Spawn",
+                    &unexpected_supervisor_result,
+                ))
+            }
             // Every failure of the exchange is reported as a spawn failure.
             Err(PtyError::Io { detail }) => return Err(PtyError::Spawn { detail }),
-            Err(error) => return Err(error),
+            Err(pty_error) => return Err(pty_error),
         };
-        self.panes
+        self.live_panes_by_id
             .lock()
             .expect("supervisor panes")
-            .insert(pane_id, LivePane { pid, size });
-        Ok(PtyHandle::detached(pane_id))
+            .insert(
+                pane_id,
+                LivePane {
+                    process_id,
+                    pty_size,
+                },
+            );
+        Ok(PtyHandle::from_detached_pane_id(pane_id))
     }
 
     /// Retune a pane's terminal, which its child sees as a window-size change.
@@ -457,31 +529,33 @@ impl PtyBackend for SupervisorPtyBackend {
     ///
     /// # Errors
     /// Returns [`PtyError::UnknownPane`] when this backend does not drive
-    /// `pane`, and [`PtyError::Io`] when the supervisor refuses or the link
+    /// `pane_id`, and [`PtyError::Io`] when the supervisor refuses or the link
     /// fails.
-    fn resize(&self, pane: PaneId, size: PtySize) -> Result<(), PtyError> {
-        self.refuse_unknown_pane(pane)?;
-        self.ask_done(SupervisorRequestKind::Resize {
-            pane_id: pane,
-            size,
-        })?;
-        if let Some(live) = self.panes.lock().expect("supervisor panes").get_mut(&pane) {
-            live.size = size;
+    fn resize_pane(&self, pane_id: PaneId, pty_size: PtySize) -> Result<(), PtyError> {
+        self.validate_pane_is_driven(pane_id)?;
+        self.send_request_and_require_done(SupervisorRequestKind::Resize { pane_id, pty_size })?;
+        if let Some(live_pane) = self
+            .live_panes_by_id
+            .lock()
+            .expect("supervisor panes")
+            .get_mut(&pane_id)
+        {
+            live_pane.pty_size = pty_size;
         }
         Ok(())
     }
 
-    /// Send bytes to a pane's child, which reach it as typed input.
+    /// Send `input_bytes` to a pane's child, which reach it as typed input.
     ///
     /// # Errors
     /// Returns [`PtyError::UnknownPane`] when this backend does not drive
-    /// `pane`, and [`PtyError::Io`] when the supervisor refuses or the link
+    /// `pane_id`, and [`PtyError::Io`] when the supervisor refuses or the link
     /// fails.
-    fn write(&self, pane: PaneId, bytes: &[u8]) -> Result<(), PtyError> {
-        self.refuse_unknown_pane(pane)?;
-        self.ask_done(SupervisorRequestKind::Write {
-            pane_id: pane,
-            bytes: bytes.to_vec(),
+    fn write_pane_input(&self, pane_id: PaneId, input_bytes: &[u8]) -> Result<(), PtyError> {
+        self.validate_pane_is_driven(pane_id)?;
+        self.send_request_and_require_done(SupervisorRequestKind::Write {
+            pane_id,
+            input_bytes: input_bytes.to_vec(),
         })
     }
 
@@ -492,80 +566,89 @@ impl PtyBackend for SupervisorPtyBackend {
     ///
     /// # Errors
     /// Returns [`PtyError::UnknownPane`] when this backend does not drive
-    /// `pane`, and [`PtyError::Io`] when the supervisor refuses or the link
+    /// `pane_id`, and [`PtyError::Io`] when the supervisor refuses or the link
     /// fails.
-    fn kill(&self, pane: PaneId, kill_policy: KillPolicy) -> Result<(), PtyError> {
+    fn kill_pane(&self, pane_id: PaneId, kill_policy: KillPolicy) -> Result<(), PtyError> {
         if self
-            .panes
+            .live_panes_by_id
             .lock()
             .expect("supervisor panes")
-            .remove(&pane)
+            .remove(&pane_id)
             .is_none()
         {
-            return Err(PtyError::UnknownPane { pane });
+            return Err(PtyError::UnknownPane { pane_id });
         }
-        self.ask_done(SupervisorRequestKind::Kill {
-            pane_id: pane,
+        self.send_request_and_require_done(SupervisorRequestKind::Kill {
+            pane_id,
             kill_policy,
         })
     }
 
-    /// The live working directory of `pane`'s child, asked from the operating
+    /// The live working directory of `pane_id`'s child, asked from the operating
     /// system by the supervisor, which is the child's parent. `None` when this
-    /// backend does not drive `pane`, the pane has no live child, the platform
+    /// backend does not drive `pane_id`, the pane has no live child, the platform
     /// has no lookup, the supervisor refuses, or the link fails.
-    fn live_cwd(&self, pane: PaneId) -> Option<PathBuf> {
-        self.refuse_unknown_pane(pane).ok()?;
-        match self.ask(SupervisorRequestKind::LiveCwd { pane_id: pane }) {
-            Ok(SupervisorResult::Cwd(cwd)) => cwd,
+    fn find_live_working_directory(&self, pane_id: PaneId) -> Option<PathBuf> {
+        self.validate_pane_is_driven(pane_id).ok()?;
+        match self.send_request_and_receive_result(SupervisorRequestKind::LiveCwd { pane_id }) {
+            Ok(SupervisorResult::Cwd(working_directory_path)) => working_directory_path,
             _ => None,
         }
     }
 }
 
-/// How long `kind` waits for its answer: [`ANSWER_WAIT`], plus the grace window
+/// How long `request_kind` waits for its response: [`ANSWER_WAIT_DURATION`], plus the grace window
 /// of a kill that asks the child to exit on its own.
 ///
 /// The supervisor answers such a kill after it has spent that window.
-fn answer_wait(kind: &SupervisorRequestKind) -> Duration {
-    match kind {
+fn compute_answer_wait_duration(request_kind: &SupervisorRequestKind) -> Duration {
+    match request_kind {
         SupervisorRequestKind::Kill {
-            kill_policy: KillPolicy::Graceful { timeout } | KillPolicy::GracefulTree { timeout },
+            kill_policy:
+                KillPolicy::Graceful {
+                    timeout_duration: kill_timeout_duration,
+                }
+                | KillPolicy::GracefulTree {
+                    timeout_duration: kill_timeout_duration,
+                },
             ..
-        } => ANSWER_WAIT + *timeout,
-        _ => ANSWER_WAIT,
+        } => ANSWER_WAIT_DURATION + *kill_timeout_duration,
+        _ => ANSWER_WAIT_DURATION,
     }
 }
 
 /// The failure for an answer that does not fit the request it answers, naming
 /// both. The answer is named by its variant alone; no payload reaches the
 /// message.
-fn unexpected_answer(request: &str, answer: &SupervisorResult) -> PtyError {
+fn build_unexpected_supervisor_result_error(
+    request_kind_name: &str,
+    supervisor_result: &SupervisorResult,
+) -> PtyError {
     PtyError::Io {
         detail: format!(
-            "the supervisor answered {request} with {}",
-            answer.wire_name()
+            "the supervisor answered {request_kind_name} with {}",
+            supervisor_result.wire_name()
         ),
     }
 }
 
-/// Start the thread that reads the link: it hands each answer to whoever is
-/// waiting on [`Link::answers`] and each event to `sink`.
+/// Start the thread that reads the link: it hands each response to whoever is
+/// waiting on [`Link::response_receiver`] and each event to `pty_sink`.
 ///
 /// The thread ends when the link breaks, when a frame does not decode, or when
 /// no one holds the receiving end of `answers`. Ending drops `answers`: a
 /// caller waiting for an answer reads the link as closed. An event this build
 /// has no name for is passed over, and the link keeps carrying the rest.
 ///
-/// A pane whose chunk `sink` refused takes nothing more, its exit included;
+/// A pane whose output chunk `pty_sink` refused takes nothing more, its exit included;
 /// every other pane keeps being delivered.
 ///
 /// # Panics
 /// Panics when the operating system cannot start the thread.
-fn start_link_reader(
-    mut reader: FrameReader,
-    answers: Sender<SupervisorResponse<MaybeKnown<SupervisorResult>>>,
-    sink: Arc<dyn PtySink>,
+fn start_link_reader_thread(
+    mut frame_reader: FrameReader,
+    response_sender: Sender<SupervisorResponse<MaybeKnown<SupervisorResult>>>,
+    pty_sink: Arc<dyn PtySink>,
 ) {
     let _ = thread::Builder::new()
         .name("koshi-pty-link".to_string())
@@ -573,28 +656,32 @@ fn start_link_reader(
             // A pane whose chunk the consumer refused. Nothing more of that
             // pane is delivered, its exit included; every other pane keeps
             // being delivered.
-            let mut refused: HashSet<PaneId> = HashSet::new();
-            while let Ok(message) = reader.recv::<IncomingSupervisorMessage>() {
-                match message {
-                    SupervisorMessage::Response(response) => {
-                        if answers.send(response).is_err() {
+            let mut output_rejected_pane_ids: HashSet<PaneId> = HashSet::new();
+            while let Ok(incoming_supervisor_message) =
+                frame_reader.recv::<IncomingSupervisorMessage>()
+            {
+                match incoming_supervisor_message {
+                    SupervisorMessage::Response(supervisor_response) => {
+                        if response_sender.send(supervisor_response).is_err() {
                             return;
                         }
                     }
                     SupervisorMessage::Event(MaybeKnown::Known(SupervisorEvent::Output {
                         pane_id,
-                        bytes,
+                        output_bytes,
                     })) => {
-                        if !refused.contains(&pane_id) && !sink.output(pane_id, bytes) {
-                            refused.insert(pane_id);
+                        if !output_rejected_pane_ids.contains(&pane_id)
+                            && !pty_sink.accept_output_bytes(pane_id, output_bytes)
+                        {
+                            output_rejected_pane_ids.insert(pane_id);
                         }
                     }
                     SupervisorMessage::Event(MaybeKnown::Known(SupervisorEvent::Exited {
                         pane_id,
-                        status,
+                        exit_status,
                     })) => {
-                        if !refused.contains(&pane_id) {
-                            sink.exit(pane_id, status);
+                        if !output_rejected_pane_ids.contains(&pane_id) {
+                            pty_sink.accept_exit_status(pane_id, exit_status);
                         }
                     }
                     SupervisorMessage::Event(MaybeKnown::Unknown { .. }) => {}

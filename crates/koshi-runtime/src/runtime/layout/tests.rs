@@ -22,30 +22,38 @@ use crate::runtime::event::RuntimeEvent;
 use super::*;
 
 /// The terminal size every client below reports.
-const VIEWPORT: Size = Size { cols: 80, rows: 24 };
+const TEST_VIEWPORT_SIZE: Size = Size {
+    column_count: 80,
+    row_count: 24,
+};
 
-/// The size a tab solves against for a client at [`VIEWPORT`]: the terminal
+/// The size a tab solves against for a client at [`TEST_VIEWPORT_SIZE`]: the terminal
 /// minus the two chrome rows.
-const TAB_VIEWPORT: Size = Size { cols: 80, rows: 22 };
+const TAB_VIEWPORT_SIZE: Size = Size {
+    column_count: 80,
+    row_count: 22,
+};
 
 /// A bare runtime with stub services and no sessions. The sender is returned
 /// so the inbox stays open.
-fn new_runtime() -> (Server, mpsc::Sender<RuntimeEvent>) {
+fn build_test_runtime() -> (Server, mpsc::Sender<RuntimeEvent>) {
     let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::new());
-    let (tx, inbox_rx) = mpsc::channel();
-    let runtime = Server::new(pty_backend, inbox_rx, tx.clone());
-    (runtime, tx)
+    let (event_sender, event_receiver) = mpsc::channel();
+    let server = Server::from_runtime_parts(pty_backend, event_receiver, event_sender.clone());
+    (server, event_sender)
 }
 
-/// A fixed UUID ending in `tail`, so tab ids sort in a known order.
-fn uuid_ending(tail: u8) -> Uuid {
-    Uuid::parse_str(&format!("00000000-0000-0000-0000-0000000000{tail:02}"))
-        .expect("literal UUID parses")
+/// A fixed UUID ending in `suffix_byte`, so tab ids sort in a known order.
+fn build_test_uuid_with_suffix(suffix_byte: u8) -> Uuid {
+    Uuid::parse_str(&format!(
+        "00000000-0000-0000-0000-0000000000{suffix_byte:02}"
+    ))
+    .expect("literal UUID parses")
 }
 
 /// A session named `quiet-lake` with no tabs and no clients.
-fn empty_session(session_id: SessionId) -> Session {
-    Session::new(
+fn build_empty_session(session_id: SessionId) -> Session {
+    Session::from_identity_and_client_registry(
         session_id,
         "quiet-lake".to_string(),
         SystemTime::UNIX_EPOCH,
@@ -53,62 +61,72 @@ fn empty_session(session_id: SessionId) -> Session {
     )
 }
 
-/// Add a tab named `name` at bar position `index`, showing `root_pane`.
-fn add_tab(session: &mut Session, tab_id: TabId, name: &str, index: usize, root_pane: PaneId) {
-    session
-        .tabs
-        .insert(tab_id, Tab::new(tab_id, name.to_string(), index, root_pane));
+/// Add a tab named `tab_name` at bar position `tab_index`, showing `root_pane`.
+fn add_session_tab(
+    session: &mut Session,
+    tab_id: TabId,
+    tab_name: &str,
+    tab_index: usize,
+    root_pane: PaneId,
+) {
+    session.tabs.insert(
+        tab_id,
+        Tab::from_root_pane(tab_id, tab_name.to_string(), tab_index, root_pane),
+    );
 }
 
-/// Attach `client_id` viewing `tab` at `viewport` reporting `pane_area`,
-/// focused on `focused`, and zoomed on `zoomed`.
-fn attach(
+/// Attach `client_id` viewing `tab_id` at `viewport_size` reporting `pane_area`,
+/// focused on `focused_pane_id`, and zoomed on `zoomed_pane_id`.
+fn attach_test_client(
     session: &mut Session,
     client_id: ClientId,
-    tab: TabId,
-    viewport: Size,
+    tab_id: TabId,
+    viewport_size: Size,
     pane_area: Option<PaneArea>,
-    focused: Option<PaneId>,
-    zoomed: Option<PaneId>,
+    focused_pane_id: Option<PaneId>,
+    zoomed_pane_id: Option<PaneId>,
 ) {
-    let mut client = Client::new(
+    let mut attached_client = Client::from_attachment(
         client_id,
-        session.id,
+        session.session_id,
         SystemTime::UNIX_EPOCH,
-        viewport,
+        viewport_size,
         pane_area,
-        tab,
+        tab_id,
         ClientOrigin::Local,
         "C-test-client".to_string(),
         0,
     );
-    if let Some(pane) = focused {
-        client.update_focused_pane(tab, pane);
+    if let Some(focused_pane_id) = focused_pane_id {
+        attached_client.update_focused_pane(tab_id, focused_pane_id);
     }
-    if let Some(pane) = zoomed {
-        client.zoom_pane(tab, pane);
+    if let Some(zoomed_pane_id) = zoomed_pane_id {
+        attached_client.zoom_pane(tab_id, zoomed_pane_id);
     }
-    session.attach_client(client);
+    session.attach_client(attached_client);
 }
 
 /// A runtime holding exactly `session`.
-fn runtime_with(session: Session) -> (Server, mpsc::Sender<RuntimeEvent>) {
-    let (mut runtime, tx) = new_runtime();
-    runtime.sessions.insert(session.id, session);
-    (runtime, tx)
+fn build_test_runtime_with_session(session: Session) -> (Server, mpsc::Sender<RuntimeEvent>) {
+    let (mut server, event_sender) = build_test_runtime();
+    server.session_by_id.insert(session.session_id, session);
+    (server, event_sender)
 }
 
-/// A left-right split of `left` and `right`, each taking an equal share.
-fn side_by_side(left: PaneId, right: PaneId) -> LayoutNode {
+/// A left-right split of `left_pane_id` and `right_pane_id`, each taking an equal share.
+fn build_horizontal_split(left_pane_id: PaneId, right_pane_id: PaneId) -> LayoutNode {
     LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![LayoutNode::Pane(left), LayoutNode::Pane(right)],
+        vec![
+            LayoutNode::Pane(left_pane_id),
+            LayoutNode::Pane(right_pane_id),
+        ],
     ))
 }
 
 #[test]
 fn no_session_yields_no_layout() {
-    let (runtime, _tx) = new_runtime();
+    let (runtime, _tx) = build_test_runtime();
 
     assert_eq!(runtime.build_session_layout(None), None);
 }
@@ -116,13 +134,21 @@ fn no_session_yields_no_layout() {
 #[test]
 fn one_tab_one_client_reports_the_tree_the_solve_and_the_focus() {
     let session_id = SessionId::new();
-    let tab = TabId::new();
-    let pane = PaneId::new();
+    let tab_id = TabId::new();
+    let pane_id = PaneId::new();
     let client = ClientId::new();
-    let mut session = empty_session(session_id);
-    add_tab(&mut session, tab, "editor", 0, pane);
-    attach(&mut session, client, tab, VIEWPORT, None, Some(pane), None);
-    let (runtime, _tx) = runtime_with(session);
+    let mut session = build_empty_session(session_id);
+    add_session_tab(&mut session, tab_id, "editor", 0, pane_id);
+    attach_test_client(
+        &mut session,
+        client,
+        tab_id,
+        TEST_VIEWPORT_SIZE,
+        None,
+        Some(pane_id),
+        None,
+    );
+    let (runtime, _tx) = build_test_runtime_with_session(session);
 
     let layout = runtime
         .build_session_layout(None)
@@ -131,30 +157,30 @@ fn one_tab_one_client_reports_the_tree_the_solve_and_the_focus() {
     assert_eq!(
         layout,
         SessionLayout {
-            id: session_id,
-            name: "quiet-lake".to_string(),
+            session_id,
+            session_name: "quiet-lake".to_string(),
             tabs: vec![TabLayout {
-                id: tab,
-                name: "editor".to_string(),
-                index: 0,
-                tree: LayoutNode::Pane(pane),
-                solved: vec![SolvedTab {
-                    client,
-                    viewport: TAB_VIEWPORT,
-                    mode: LayoutMode::Tiled,
-                    panes: vec![SolvedPane {
-                        id: pane,
-                        rect: Rect::at_origin(TAB_VIEWPORT),
+                tab_id,
+                tab_name: "editor".to_string(),
+                tab_index: 0,
+                layout_tree: LayoutNode::Pane(pane_id),
+                solved_tabs: vec![SolvedTab {
+                    client_id: client,
+                    viewport_size: TAB_VIEWPORT_SIZE,
+                    layout_mode: LayoutMode::Tiled,
+                    pane_rects: vec![SolvedPane {
+                        pane_id,
+                        outer_rect: Rect::from_size_at_origin(TAB_VIEWPORT_SIZE),
                     }],
-                    suppressed: Vec::new(),
-                    all_suppressed: false,
+                    suppressed_pane_ids: Vec::new(),
+                    is_every_pane_suppressed: false,
                     stack_headers: Vec::new(),
                 }],
             }],
             clients: vec![ClientFocus {
-                id: client,
-                active_tab: tab,
-                focused_pane: Some(pane),
+                client_id: client,
+                active_tab_id: tab_id,
+                focused_pane_id: Some(pane_id),
             }],
         },
     );
@@ -163,13 +189,21 @@ fn one_tab_one_client_reports_the_tree_the_solve_and_the_focus() {
 #[test]
 fn a_client_that_has_focused_nothing_reports_no_focused_pane() {
     let session_id = SessionId::new();
-    let tab = TabId::new();
-    let pane = PaneId::new();
+    let tab_id = TabId::new();
+    let pane_id = PaneId::new();
     let client = ClientId::new();
-    let mut session = empty_session(session_id);
-    add_tab(&mut session, tab, "editor", 0, pane);
-    attach(&mut session, client, tab, VIEWPORT, None, None, None);
-    let (runtime, _tx) = runtime_with(session);
+    let mut session = build_empty_session(session_id);
+    add_session_tab(&mut session, tab_id, "editor", 0, pane_id);
+    attach_test_client(
+        &mut session,
+        client,
+        tab_id,
+        TEST_VIEWPORT_SIZE,
+        None,
+        None,
+        None,
+    );
+    let (runtime, _tx) = build_test_runtime_with_session(session);
 
     let layout = runtime
         .build_session_layout(None)
@@ -178,9 +212,9 @@ fn a_client_that_has_focused_nothing_reports_no_focused_pane() {
     assert_eq!(
         layout.clients,
         vec![ClientFocus {
-            id: client,
-            active_tab: tab,
-            focused_pane: None,
+            client_id: client,
+            active_tab_id: tab_id,
+            focused_pane_id: None,
         }],
     );
 }
@@ -188,7 +222,7 @@ fn a_client_that_has_focused_nothing_reports_no_focused_pane() {
 #[test]
 fn a_session_with_no_tabs_and_no_clients_reports_only_its_own_name() {
     let session_id = SessionId::new();
-    let (runtime, _tx) = runtime_with(empty_session(session_id));
+    let (runtime, _tx) = build_test_runtime_with_session(build_empty_session(session_id));
 
     let layout = runtime
         .build_session_layout(None)
@@ -197,8 +231,8 @@ fn a_session_with_no_tabs_and_no_clients_reports_only_its_own_name() {
     assert_eq!(
         layout,
         SessionLayout {
-            id: session_id,
-            name: "quiet-lake".to_string(),
+            session_id,
+            session_name: "quiet-lake".to_string(),
             tabs: Vec::new(),
             clients: Vec::new(),
         },
@@ -208,21 +242,21 @@ fn a_session_with_no_tabs_and_no_clients_reports_only_its_own_name() {
 #[test]
 fn a_tab_whose_only_viewer_is_starving_lists_no_solved_layout() {
     let session_id = SessionId::new();
-    let tab = TabId::new();
-    let pane = PaneId::new();
+    let tab_id = TabId::new();
+    let pane_id = PaneId::new();
     let client = ClientId::new();
-    let mut session = empty_session(session_id);
-    add_tab(&mut session, tab, "editor", 0, pane);
-    attach(
+    let mut session = build_empty_session(session_id);
+    add_session_tab(&mut session, tab_id, "editor", 0, pane_id);
+    attach_test_client(
         &mut session,
         client,
-        tab,
-        VIEWPORT,
+        tab_id,
+        TEST_VIEWPORT_SIZE,
         Some(PaneArea::Starving),
-        Some(pane),
+        Some(pane_id),
         None,
     );
-    let (runtime, _tx) = runtime_with(session);
+    let (runtime, _tx) = build_test_runtime_with_session(session);
 
     let layout = runtime
         .build_session_layout(None)
@@ -231,145 +265,157 @@ fn a_tab_whose_only_viewer_is_starving_lists_no_solved_layout() {
     let described = layout
         .tabs
         .iter()
-        .find(|entry| entry.id == tab)
+        .find(|tab_summary| tab_summary.tab_id == tab_id)
         .expect("the tab is still described");
-    assert_eq!(described.tree, LayoutNode::Pane(pane));
-    assert_eq!(described.solved, Vec::new());
+    assert_eq!(described.layout_tree, LayoutNode::Pane(pane_id));
+    assert_eq!(described.solved_tabs, Vec::new());
 }
 
 #[test]
 fn a_reported_pane_area_is_the_size_the_tab_solves_against() {
     let session_id = SessionId::new();
-    let tab = TabId::new();
-    let pane = PaneId::new();
+    let tab_id = TabId::new();
+    let pane_id = PaneId::new();
     let client = ClientId::new();
-    let mut session = empty_session(session_id);
-    add_tab(&mut session, tab, "editor", 0, pane);
+    let mut session = build_empty_session(session_id);
+    add_session_tab(&mut session, tab_id, "editor", 0, pane_id);
     // A reported area replaces the terminal-minus-chrome default outright: the
     // two chrome rows are not taken off it again.
-    attach(
+    attach_test_client(
         &mut session,
         client,
-        tab,
-        VIEWPORT,
-        Some(PaneArea::Reported(Size { cols: 40, rows: 10 })),
-        Some(pane),
+        tab_id,
+        TEST_VIEWPORT_SIZE,
+        Some(PaneArea::Reported(Size {
+            column_count: 40,
+            row_count: 10,
+        })),
+        Some(pane_id),
         None,
     );
-    let (runtime, _tx) = runtime_with(session);
+    let (runtime, _tx) = build_test_runtime_with_session(session);
 
     let layout = runtime
         .build_session_layout(None)
         .expect("one session is running");
 
-    let solved = &layout.tabs[0].solved[0];
-    assert_eq!(solved.viewport, Size { cols: 40, rows: 10 });
+    let solved = &layout.tabs[0].solved_tabs[0];
     assert_eq!(
-        solved.panes,
+        solved.viewport_size,
+        Size {
+            column_count: 40,
+            row_count: 10
+        }
+    );
+    assert_eq!(
+        solved.pane_rects,
         vec![SolvedPane {
-            id: pane,
-            rect: Rect::at_origin(Size { cols: 40, rows: 10 }),
+            pane_id,
+            outer_rect: Rect::from_size_at_origin(Size {
+                column_count: 40,
+                row_count: 10
+            }),
         }],
     );
-    assert_eq!(solved.suppressed, Vec::new());
-    assert!(!solved.all_suppressed);
+    assert_eq!(solved.suppressed_pane_ids, Vec::new());
+    assert!(!solved.is_every_pane_suppressed);
 }
 
 #[test]
 fn a_reported_pane_area_larger_than_the_terminal_is_clamped_to_it() {
     let session_id = SessionId::new();
-    let tab = TabId::new();
-    let pane = PaneId::new();
+    let tab_id = TabId::new();
+    let pane_id = PaneId::new();
     let client = ClientId::new();
-    let mut session = empty_session(session_id);
-    add_tab(&mut session, tab, "editor", 0, pane);
-    attach(
+    let mut session = build_empty_session(session_id);
+    add_session_tab(&mut session, tab_id, "editor", 0, pane_id);
+    attach_test_client(
         &mut session,
         client,
-        tab,
-        VIEWPORT,
+        tab_id,
+        TEST_VIEWPORT_SIZE,
         Some(PaneArea::Reported(Size {
-            cols: 200,
-            rows: 100,
+            column_count: 200,
+            row_count: 100,
         })),
-        Some(pane),
+        Some(pane_id),
         None,
     );
-    let (runtime, _tx) = runtime_with(session);
+    let (runtime, _tx) = build_test_runtime_with_session(session);
 
     let layout = runtime
         .build_session_layout(None)
         .expect("one session is running");
 
     // Clamped to the 80x24 terminal on each axis, chrome rows included.
-    let solved = &layout.tabs[0].solved[0];
-    assert_eq!(solved.viewport, VIEWPORT);
+    let solved = &layout.tabs[0].solved_tabs[0];
+    assert_eq!(solved.viewport_size, TEST_VIEWPORT_SIZE);
     assert_eq!(
-        solved.panes,
+        solved.pane_rects,
         vec![SolvedPane {
-            id: pane,
-            rect: Rect::at_origin(VIEWPORT),
+            pane_id,
+            outer_rect: Rect::from_size_at_origin(TEST_VIEWPORT_SIZE),
         }],
     );
-    assert_eq!(solved.suppressed, Vec::new());
-    assert!(!solved.all_suppressed);
+    assert_eq!(solved.suppressed_pane_ids, Vec::new());
+    assert!(!solved.is_every_pane_suppressed);
 }
 
 #[test]
 fn a_starving_viewer_still_gets_a_solve_when_another_viewer_reports_a_size() {
     let session_id = SessionId::new();
-    let tab = TabId::new();
-    let pane = PaneId::new();
+    let tab_id = TabId::new();
+    let pane_id = PaneId::new();
     let mut ids = [ClientId::new(), ClientId::new()];
     ids.sort();
     let [starving, reporting] = ids;
-    let mut session = empty_session(session_id);
-    add_tab(&mut session, tab, "editor", 0, pane);
-    attach(
+    let mut session = build_empty_session(session_id);
+    add_session_tab(&mut session, tab_id, "editor", 0, pane_id);
+    attach_test_client(
         &mut session,
         starving,
-        tab,
-        VIEWPORT,
+        tab_id,
+        TEST_VIEWPORT_SIZE,
         Some(PaneArea::Starving),
-        Some(pane),
+        Some(pane_id),
         None,
     );
-    attach(
+    attach_test_client(
         &mut session,
         reporting,
-        tab,
-        VIEWPORT,
+        tab_id,
+        TEST_VIEWPORT_SIZE,
         None,
-        Some(pane),
+        Some(pane_id),
         None,
     );
-    let (runtime, _tx) = runtime_with(session);
+    let (runtime, _tx) = build_test_runtime_with_session(session);
 
     let layout = runtime
         .build_session_layout(None)
         .expect("one session is running");
 
     // Clients are listed in id order, and the ids were sorted above. The
-    // starving client contributes no size to the tab, and is still solved
+    // starving client contributes no size to the tab_id, and is still solved
     // against the size the other viewer set.
-    let solved = &layout.tabs[0].solved;
+    let solved = &layout.tabs[0].solved_tabs;
     assert_eq!(solved.len(), 2);
-    assert_eq!(solved[0].client, starving);
-    assert_eq!(solved[0].viewport, TAB_VIEWPORT);
+    assert_eq!(solved[0].client_id, starving);
+    assert_eq!(solved[0].viewport_size, TAB_VIEWPORT_SIZE);
     assert_eq!(
-        solved[0].panes,
+        solved[0].pane_rects,
         vec![SolvedPane {
-            id: pane,
-            rect: Rect::at_origin(TAB_VIEWPORT),
+            pane_id,
+            outer_rect: Rect::from_size_at_origin(TAB_VIEWPORT_SIZE),
         }],
     );
-    assert_eq!(solved[1].client, reporting);
-    assert_eq!(solved[1].viewport, TAB_VIEWPORT);
+    assert_eq!(solved[1].client_id, reporting);
+    assert_eq!(solved[1].viewport_size, TAB_VIEWPORT_SIZE);
     assert_eq!(
-        solved[1].panes,
+        solved[1].pane_rects,
         vec![SolvedPane {
-            id: pane,
-            rect: Rect::at_origin(TAB_VIEWPORT),
+            pane_id,
+            outer_rect: Rect::from_size_at_origin(TAB_VIEWPORT_SIZE),
         }],
     );
 }
@@ -382,19 +428,19 @@ fn a_tab_no_client_views_carries_its_tree_and_no_solve() {
     let watched_pane = PaneId::new();
     let unwatched_pane = PaneId::new();
     let client = ClientId::new();
-    let mut session = empty_session(session_id);
-    add_tab(&mut session, watched, "editor", 0, watched_pane);
-    add_tab(&mut session, unwatched, "logs", 1, unwatched_pane);
-    attach(
+    let mut session = build_empty_session(session_id);
+    add_session_tab(&mut session, watched, "editor", 0, watched_pane);
+    add_session_tab(&mut session, unwatched, "logs", 1, unwatched_pane);
+    attach_test_client(
         &mut session,
         client,
         watched,
-        VIEWPORT,
+        TEST_VIEWPORT_SIZE,
         None,
         Some(watched_pane),
         None,
     );
-    let (runtime, _tx) = runtime_with(session);
+    let (runtime, _tx) = build_test_runtime_with_session(session);
 
     let layout = runtime
         .build_session_layout(None)
@@ -403,18 +449,18 @@ fn a_tab_no_client_views_carries_its_tree_and_no_solve() {
     let described = layout
         .tabs
         .iter()
-        .find(|entry| entry.id == unwatched)
+        .find(|tab_summary| tab_summary.tab_id == unwatched)
         .expect("the unwatched tab is still described");
-    assert_eq!(described.tree, LayoutNode::Pane(unwatched_pane));
-    assert_eq!(described.solved, Vec::new());
+    assert_eq!(described.layout_tree, LayoutNode::Pane(unwatched_pane));
+    assert_eq!(described.solved_tabs, Vec::new());
 
     let viewed = layout
         .tabs
         .iter()
-        .find(|entry| entry.id == watched)
+        .find(|tab_summary| tab_summary.tab_id == watched)
         .expect("the watched tab is described");
-    assert_eq!(viewed.solved.len(), 1);
-    assert_eq!(viewed.solved[0].client, client);
+    assert_eq!(viewed.solved_tabs.len(), 1);
+    assert_eq!(viewed.solved_tabs[0].client_id, client);
 }
 
 #[test]
@@ -429,28 +475,28 @@ fn a_client_viewing_another_tab_is_left_out_of_this_tab_solve() {
     let logs_pane = PaneId::new();
     let on_editor = ClientId::new();
     let on_logs = ClientId::new();
-    let mut session = empty_session(session_id);
-    add_tab(&mut session, editor, "editor", 0, editor_pane);
-    add_tab(&mut session, logs, "logs", 1, logs_pane);
-    attach(
+    let mut session = build_empty_session(session_id);
+    add_session_tab(&mut session, editor, "editor", 0, editor_pane);
+    add_session_tab(&mut session, logs, "logs", 1, logs_pane);
+    attach_test_client(
         &mut session,
         on_editor,
         editor,
-        VIEWPORT,
+        TEST_VIEWPORT_SIZE,
         None,
         Some(editor_pane),
         None,
     );
-    attach(
+    attach_test_client(
         &mut session,
         on_logs,
         logs,
-        VIEWPORT,
+        TEST_VIEWPORT_SIZE,
         None,
         Some(logs_pane),
         None,
     );
-    let (runtime, _tx) = runtime_with(session);
+    let (runtime, _tx) = build_test_runtime_with_session(session);
 
     let layout = runtime
         .build_session_layout(None)
@@ -459,22 +505,22 @@ fn a_client_viewing_another_tab_is_left_out_of_this_tab_solve() {
     let editor_solvers: Vec<ClientId> = layout
         .tabs
         .iter()
-        .find(|entry| entry.id == editor)
+        .find(|tab_summary| tab_summary.tab_id == editor)
         .expect("the editor tab is described")
-        .solved
+        .solved_tabs
         .iter()
-        .map(|solved| solved.client)
+        .map(|solved| solved.client_id)
         .collect();
     assert_eq!(editor_solvers, vec![on_editor]);
 
     let logs_solvers: Vec<ClientId> = layout
         .tabs
         .iter()
-        .find(|entry| entry.id == logs)
+        .find(|tab_summary| tab_summary.tab_id == logs)
         .expect("the logs tab is described")
-        .solved
+        .solved_tabs
         .iter()
-        .map(|solved| solved.client)
+        .map(|solved| solved.client_id)
         .collect();
     assert_eq!(logs_solvers, vec![on_logs]);
 }
@@ -484,12 +530,12 @@ fn tabs_come_back_in_tab_bar_order_not_in_id_order() {
     // The tab map is keyed by id, so the lower id is visited first; the tab
     // bar puts it second.
     let session_id = SessionId::new();
-    let lower = TabId::from_uuid(uuid_ending(1));
-    let higher = TabId::from_uuid(uuid_ending(2));
-    let mut session = empty_session(session_id);
-    add_tab(&mut session, lower, "second", 1, PaneId::new());
-    add_tab(&mut session, higher, "first", 0, PaneId::new());
-    let (runtime, _tx) = runtime_with(session);
+    let lower = TabId::from_uuid(build_test_uuid_with_suffix(1));
+    let higher = TabId::from_uuid(build_test_uuid_with_suffix(2));
+    let mut session = build_empty_session(session_id);
+    add_session_tab(&mut session, lower, "second", 1, PaneId::new());
+    add_session_tab(&mut session, higher, "first", 0, PaneId::new());
+    let (runtime, _tx) = build_test_runtime_with_session(session);
 
     let layout = runtime
         .build_session_layout(None)
@@ -498,7 +544,7 @@ fn tabs_come_back_in_tab_bar_order_not_in_id_order() {
     let order: Vec<(TabId, usize)> = layout
         .tabs
         .iter()
-        .map(|entry| (entry.id, entry.index))
+        .map(|tab_summary| (tab_summary.tab_id, tab_summary.tab_index))
         .collect();
     assert_eq!(order, vec![(higher, 0), (lower, 1)]);
 }
@@ -508,12 +554,12 @@ fn two_tabs_at_the_same_bar_index_come_back_in_id_order() {
     // Sorting by bar position keeps the order the tab map handed over, which
     // is id order, so a shared index is broken by id.
     let session_id = SessionId::new();
-    let lower = TabId::from_uuid(uuid_ending(1));
-    let higher = TabId::from_uuid(uuid_ending(2));
-    let mut session = empty_session(session_id);
-    add_tab(&mut session, lower, "editor", 0, PaneId::new());
-    add_tab(&mut session, higher, "logs", 0, PaneId::new());
-    let (runtime, _tx) = runtime_with(session);
+    let lower = TabId::from_uuid(build_test_uuid_with_suffix(1));
+    let higher = TabId::from_uuid(build_test_uuid_with_suffix(2));
+    let mut session = build_empty_session(session_id);
+    add_session_tab(&mut session, lower, "editor", 0, PaneId::new());
+    add_session_tab(&mut session, higher, "logs", 0, PaneId::new());
+    let (runtime, _tx) = build_test_runtime_with_session(session);
 
     let layout = runtime
         .build_session_layout(None)
@@ -522,7 +568,7 @@ fn two_tabs_at_the_same_bar_index_come_back_in_id_order() {
     let order: Vec<(TabId, usize)> = layout
         .tabs
         .iter()
-        .map(|entry| (entry.id, entry.index))
+        .map(|tab_summary| (tab_summary.tab_id, tab_summary.tab_index))
         .collect();
     assert_eq!(order, vec![(lower, 0), (higher, 0)]);
 }
@@ -530,45 +576,45 @@ fn two_tabs_at_the_same_bar_index_come_back_in_id_order() {
 #[test]
 fn narrowing_to_one_tab_describes_that_tab_alone_and_still_names_every_client() {
     let session_id = SessionId::new();
-    let first = TabId::new();
-    let second = TabId::new();
-    let first_pane = PaneId::new();
-    let second_pane = PaneId::new();
+    let first_tab_id = TabId::new();
+    let second_tab_id = TabId::new();
+    let first_pane_id = PaneId::new();
+    let second_pane_id = PaneId::new();
     let client = ClientId::new();
-    let mut session = empty_session(session_id);
-    add_tab(&mut session, first, "editor", 0, first_pane);
-    add_tab(&mut session, second, "logs", 1, second_pane);
-    attach(
+    let mut session = build_empty_session(session_id);
+    add_session_tab(&mut session, first_tab_id, "editor", 0, first_pane_id);
+    add_session_tab(&mut session, second_tab_id, "logs", 1, second_pane_id);
+    attach_test_client(
         &mut session,
         client,
-        first,
-        VIEWPORT,
+        first_tab_id,
+        TEST_VIEWPORT_SIZE,
         None,
-        Some(first_pane),
+        Some(first_pane_id),
         None,
     );
-    let (runtime, _tx) = runtime_with(session);
+    let (runtime, _tx) = build_test_runtime_with_session(session);
 
     let layout = runtime
-        .build_session_layout(Some(second))
+        .build_session_layout(Some(second_tab_id))
         .expect("one session is running");
 
     assert_eq!(
         layout.tabs,
         vec![TabLayout {
-            id: second,
-            name: "logs".to_string(),
-            index: 1,
-            tree: LayoutNode::Pane(second_pane),
-            solved: Vec::new(),
+            tab_id: second_tab_id,
+            tab_name: "logs".to_string(),
+            tab_index: 1,
+            layout_tree: LayoutNode::Pane(second_pane_id),
+            solved_tabs: Vec::new(),
         }],
     );
     assert_eq!(
         layout.clients,
         vec![ClientFocus {
-            id: client,
-            active_tab: first,
-            focused_pane: Some(first_pane),
+            client_id: client,
+            active_tab_id: first_tab_id,
+            focused_pane_id: Some(first_pane_id),
         }],
     );
 }
@@ -581,19 +627,19 @@ fn narrowing_to_the_tab_its_own_viewer_watches_keeps_that_tabs_solve() {
     let editor_pane = PaneId::new();
     let logs_pane = PaneId::new();
     let client = ClientId::new();
-    let mut session = empty_session(session_id);
-    add_tab(&mut session, editor, "editor", 0, editor_pane);
-    add_tab(&mut session, logs, "logs", 1, logs_pane);
-    attach(
+    let mut session = build_empty_session(session_id);
+    add_session_tab(&mut session, editor, "editor", 0, editor_pane);
+    add_session_tab(&mut session, logs, "logs", 1, logs_pane);
+    attach_test_client(
         &mut session,
         client,
         editor,
-        VIEWPORT,
+        TEST_VIEWPORT_SIZE,
         None,
         Some(editor_pane),
         None,
     );
-    let (runtime, _tx) = runtime_with(session);
+    let (runtime, _tx) = build_test_runtime_with_session(session);
 
     let layout = runtime
         .build_session_layout(Some(editor))
@@ -602,20 +648,20 @@ fn narrowing_to_the_tab_its_own_viewer_watches_keeps_that_tabs_solve() {
     assert_eq!(
         layout.tabs,
         vec![TabLayout {
-            id: editor,
-            name: "editor".to_string(),
-            index: 0,
-            tree: LayoutNode::Pane(editor_pane),
-            solved: vec![SolvedTab {
-                client,
-                viewport: TAB_VIEWPORT,
-                mode: LayoutMode::Tiled,
-                panes: vec![SolvedPane {
-                    id: editor_pane,
-                    rect: Rect::at_origin(TAB_VIEWPORT),
+            tab_id: editor,
+            tab_name: "editor".to_string(),
+            tab_index: 0,
+            layout_tree: LayoutNode::Pane(editor_pane),
+            solved_tabs: vec![SolvedTab {
+                client_id: client,
+                viewport_size: TAB_VIEWPORT_SIZE,
+                layout_mode: LayoutMode::Tiled,
+                pane_rects: vec![SolvedPane {
+                    pane_id: editor_pane,
+                    outer_rect: Rect::from_size_at_origin(TAB_VIEWPORT_SIZE),
                 }],
-                suppressed: Vec::new(),
-                all_suppressed: false,
+                suppressed_pane_ids: Vec::new(),
+                is_every_pane_suppressed: false,
                 stack_headers: Vec::new(),
             }],
         }],
@@ -625,13 +671,21 @@ fn narrowing_to_the_tab_its_own_viewer_watches_keeps_that_tabs_solve() {
 #[test]
 fn narrowing_to_a_tab_that_does_not_exist_describes_no_tab_at_all() {
     let session_id = SessionId::new();
-    let tab = TabId::new();
-    let pane = PaneId::new();
+    let tab_id = TabId::new();
+    let pane_id = PaneId::new();
     let client = ClientId::new();
-    let mut session = empty_session(session_id);
-    add_tab(&mut session, tab, "editor", 0, pane);
-    attach(&mut session, client, tab, VIEWPORT, None, Some(pane), None);
-    let (runtime, _tx) = runtime_with(session);
+    let mut session = build_empty_session(session_id);
+    add_session_tab(&mut session, tab_id, "editor", 0, pane_id);
+    attach_test_client(
+        &mut session,
+        client,
+        tab_id,
+        TEST_VIEWPORT_SIZE,
+        None,
+        Some(pane_id),
+        None,
+    );
+    let (runtime, _tx) = build_test_runtime_with_session(session);
 
     let layout = runtime
         .build_session_layout(Some(TabId::new()))
@@ -640,13 +694,13 @@ fn narrowing_to_a_tab_that_does_not_exist_describes_no_tab_at_all() {
     assert_eq!(
         layout,
         SessionLayout {
-            id: session_id,
-            name: "quiet-lake".to_string(),
+            session_id,
+            session_name: "quiet-lake".to_string(),
             tabs: Vec::new(),
             clients: vec![ClientFocus {
-                id: client,
-                active_tab: tab,
-                focused_pane: Some(pane),
+                client_id: client,
+                active_tab_id: tab_id,
+                focused_pane_id: Some(pane_id),
             }],
         },
     );
@@ -655,114 +709,141 @@ fn narrowing_to_a_tab_that_does_not_exist_describes_no_tab_at_all() {
 #[test]
 fn a_zoomed_client_reports_fullscreen_and_gives_the_whole_tab_to_one_pane() {
     let session_id = SessionId::new();
-    let tab = TabId::new();
-    let left = PaneId::new();
-    let right = PaneId::new();
+    let tab_id = TabId::new();
+    let left_pane_id = PaneId::new();
+    let right_pane_id = PaneId::new();
     let client = ClientId::new();
-    let mut session = empty_session(session_id);
-    add_tab(&mut session, tab, "editor", 0, left);
+    let mut session = build_empty_session(session_id);
+    add_session_tab(&mut session, tab_id, "editor", 0, left_pane_id);
     session
         .tabs
-        .get_mut(&tab)
+        .get_mut(&tab_id)
         .expect("the tab was just added")
-        .update_layout(side_by_side(left, right));
-    attach(
+        .update_layout(build_horizontal_split(left_pane_id, right_pane_id));
+    attach_test_client(
         &mut session,
         client,
-        tab,
-        VIEWPORT,
+        tab_id,
+        TEST_VIEWPORT_SIZE,
         None,
-        Some(right),
-        Some(right),
+        Some(right_pane_id),
+        Some(right_pane_id),
     );
-    let (runtime, _tx) = runtime_with(session);
+    let (runtime, _tx) = build_test_runtime_with_session(session);
 
     let layout = runtime
         .build_session_layout(None)
         .expect("one session is running");
 
-    let solved = &layout.tabs[0].solved[0];
-    assert_eq!(solved.mode, LayoutMode::Fullscreen { focused: right });
+    let solved = &layout.tabs[0].solved_tabs[0];
     assert_eq!(
-        solved.panes,
+        solved.layout_mode,
+        LayoutMode::Fullscreen {
+            focused_pane_id: right_pane_id
+        }
+    );
+    assert_eq!(
+        solved.pane_rects,
         vec![
             SolvedPane {
-                id: left,
-                rect: Rect::zero(),
+                pane_id: left_pane_id,
+                outer_rect: Rect::empty_at_origin(),
             },
             SolvedPane {
-                id: right,
-                rect: Rect::at_origin(TAB_VIEWPORT),
+                pane_id: right_pane_id,
+                outer_rect: Rect::from_size_at_origin(TAB_VIEWPORT_SIZE),
             },
         ],
     );
-    assert_eq!(solved.suppressed, Vec::new());
-    assert!(!solved.all_suppressed);
+    assert_eq!(solved.suppressed_pane_ids, Vec::new());
+    assert!(!solved.is_every_pane_suppressed);
     assert_eq!(solved.stack_headers, Vec::new());
 }
 
 #[test]
 fn two_clients_on_one_tab_each_get_their_own_solve_of_the_same_tree() {
     let session_id = SessionId::new();
-    let tab = TabId::new();
-    let left = PaneId::new();
-    let right = PaneId::new();
+    let tab_id = TabId::new();
+    let left_pane_id = PaneId::new();
+    let right_pane_id = PaneId::new();
     let mut ids = [ClientId::new(), ClientId::new()];
     ids.sort();
-    let [tiled, zoomed] = ids;
-    let mut session = empty_session(session_id);
-    add_tab(&mut session, tab, "editor", 0, left);
+    let [tiled_client_id, zoomed_client_id] = ids;
+    let mut session = build_empty_session(session_id);
+    add_session_tab(&mut session, tab_id, "editor", 0, left_pane_id);
     session
         .tabs
-        .get_mut(&tab)
+        .get_mut(&tab_id)
         .expect("the tab was just added")
-        .update_layout(side_by_side(left, right));
-    attach(&mut session, tiled, tab, VIEWPORT, None, Some(left), None);
-    attach(
+        .update_layout(build_horizontal_split(left_pane_id, right_pane_id));
+    attach_test_client(
         &mut session,
-        zoomed,
-        tab,
-        VIEWPORT,
+        tiled_client_id,
+        tab_id,
+        TEST_VIEWPORT_SIZE,
         None,
-        Some(left),
-        Some(left),
+        Some(left_pane_id),
+        None,
     );
-    let (runtime, _tx) = runtime_with(session);
+    attach_test_client(
+        &mut session,
+        zoomed_client_id,
+        tab_id,
+        TEST_VIEWPORT_SIZE,
+        None,
+        Some(left_pane_id),
+        Some(left_pane_id),
+    );
+    let (runtime, _tx) = build_test_runtime_with_session(session);
 
     let layout = runtime
         .build_session_layout(None)
         .expect("one session is running");
 
     // Clients are listed in id order, and the ids were sorted above.
-    let solved = &layout.tabs[0].solved;
+    let solved = &layout.tabs[0].solved_tabs;
     assert_eq!(solved.len(), 2);
-    assert_eq!(solved[0].client, tiled);
-    assert_eq!(solved[0].mode, LayoutMode::Tiled);
+    assert_eq!(solved[0].client_id, tiled_client_id);
+    assert_eq!(solved[0].layout_mode, LayoutMode::Tiled);
     assert_eq!(
-        solved[0].panes,
+        solved[0].pane_rects,
         vec![
             SolvedPane {
-                id: left,
-                rect: Rect::at_origin(Size { cols: 40, rows: 22 }),
+                pane_id: left_pane_id,
+                outer_rect: Rect::from_size_at_origin(Size {
+                    column_count: 40,
+                    row_count: 22
+                }),
             },
             SolvedPane {
-                id: right,
-                rect: Rect::new(Point { x: 40, y: 0 }, Size { cols: 40, rows: 22 }),
+                pane_id: right_pane_id,
+                outer_rect: Rect::from_origin_and_size(
+                    Point { column: 40, row: 0 },
+                    Size {
+                        column_count: 40,
+                        row_count: 22
+                    },
+                ),
             },
         ],
     );
-    assert_eq!(solved[1].client, zoomed);
-    assert_eq!(solved[1].mode, LayoutMode::Fullscreen { focused: left });
+    assert_eq!(solved[1].client_id, zoomed_client_id);
     assert_eq!(
-        solved[1].panes,
+        solved[1].layout_mode,
+        LayoutMode::Fullscreen {
+            focused_pane_id: left_pane_id
+        }
+    );
+    assert_eq!(
+        solved[1].pane_rects,
         vec![
             SolvedPane {
-                id: left,
-                rect: Rect::at_origin(TAB_VIEWPORT),
+                pane_id: left_pane_id,
+                outer_rect: Rect::from_size_at_origin(TAB_VIEWPORT_SIZE),
             },
             SolvedPane {
-                id: right,
-                rect: Rect::zero(),
+                pane_id: right_pane_id,
+                outer_rect: Rect::empty_at_origin(),
             },
         ],
     );
@@ -771,27 +852,35 @@ fn two_clients_on_one_tab_each_get_their_own_solve_of_the_same_tree() {
 #[test]
 fn two_clients_of_different_sizes_on_one_tab_both_solve_against_the_smaller() {
     let session_id = SessionId::new();
-    let tab = TabId::new();
-    let pane = PaneId::new();
+    let tab_id = TabId::new();
+    let pane_id = PaneId::new();
     let mut ids = [ClientId::new(), ClientId::new()];
     ids.sort();
-    let [small, big] = ids;
-    let mut session = empty_session(session_id);
-    add_tab(&mut session, tab, "editor", 0, pane);
-    attach(&mut session, small, tab, VIEWPORT, None, Some(pane), None);
-    attach(
+    let [small_client_id, big_client_id] = ids;
+    let mut session = build_empty_session(session_id);
+    add_session_tab(&mut session, tab_id, "editor", 0, pane_id);
+    attach_test_client(
         &mut session,
-        big,
-        tab,
-        Size {
-            cols: 120,
-            rows: 40,
-        },
+        small_client_id,
+        tab_id,
+        TEST_VIEWPORT_SIZE,
         None,
-        Some(pane),
+        Some(pane_id),
         None,
     );
-    let (runtime, _tx) = runtime_with(session);
+    attach_test_client(
+        &mut session,
+        big_client_id,
+        tab_id,
+        Size {
+            column_count: 120,
+            row_count: 40,
+        },
+        None,
+        Some(pane_id),
+        None,
+    );
+    let (runtime, _tx) = build_test_runtime_with_session(session);
 
     let layout = runtime
         .build_session_layout(None)
@@ -800,24 +889,24 @@ fn two_clients_of_different_sizes_on_one_tab_both_solve_against_the_smaller() {
     // Clients are listed in id order, and the ids were sorted above. The tab
     // solves once, for the smallest viewer on each axis, so the 120x40 client
     // gets 80x22 too.
-    let solved = &layout.tabs[0].solved;
+    let solved = &layout.tabs[0].solved_tabs;
     assert_eq!(solved.len(), 2);
-    assert_eq!(solved[0].client, small);
-    assert_eq!(solved[0].viewport, TAB_VIEWPORT);
+    assert_eq!(solved[0].client_id, small_client_id);
+    assert_eq!(solved[0].viewport_size, TAB_VIEWPORT_SIZE);
     assert_eq!(
-        solved[0].panes,
+        solved[0].pane_rects,
         vec![SolvedPane {
-            id: pane,
-            rect: Rect::at_origin(TAB_VIEWPORT),
+            pane_id,
+            outer_rect: Rect::from_size_at_origin(TAB_VIEWPORT_SIZE),
         }],
     );
-    assert_eq!(solved[1].client, big);
-    assert_eq!(solved[1].viewport, TAB_VIEWPORT);
+    assert_eq!(solved[1].client_id, big_client_id);
+    assert_eq!(solved[1].viewport_size, TAB_VIEWPORT_SIZE);
     assert_eq!(
-        solved[1].panes,
+        solved[1].pane_rects,
         vec![SolvedPane {
-            id: pane,
-            rect: Rect::at_origin(TAB_VIEWPORT),
+            pane_id,
+            outer_rect: Rect::from_size_at_origin(TAB_VIEWPORT_SIZE),
         }],
     );
 }
@@ -825,53 +914,76 @@ fn two_clients_of_different_sizes_on_one_tab_both_solve_against_the_smaller() {
 #[test]
 fn a_collapsed_stack_member_reports_its_header_strip() {
     let session_id = SessionId::new();
-    let tab = TabId::new();
-    let shown = PaneId::new();
-    let collapsed = PaneId::new();
+    let tab_id = TabId::new();
+    let shown_pane_id = PaneId::new();
+    let collapsed_pane_id = PaneId::new();
     let client = ClientId::new();
-    let mut session = empty_session(session_id);
-    add_tab(&mut session, tab, "editor", 0, shown);
+    let mut session = build_empty_session(session_id);
+    add_session_tab(&mut session, tab_id, "editor", 0, shown_pane_id);
     session
         .tabs
-        .get_mut(&tab)
+        .get_mut(&tab_id)
         .expect("the tab was just added")
-        .update_layout(LayoutNode::Split(SplitNode::stack(
-            vec![shown, collapsed],
+        .update_layout(LayoutNode::Split(SplitNode::from_stacked_pane_ids(
+            vec![shown_pane_id, collapsed_pane_id],
             0,
         )));
-    attach(&mut session, client, tab, VIEWPORT, None, Some(shown), None);
-    let (runtime, _tx) = runtime_with(session);
+    attach_test_client(
+        &mut session,
+        client,
+        tab_id,
+        TEST_VIEWPORT_SIZE,
+        None,
+        Some(shown_pane_id),
+        None,
+    );
+    let (runtime, _tx) = build_test_runtime_with_session(session);
 
     let layout = runtime
         .build_session_layout(None)
         .expect("one session is running");
 
-    let solved = &layout.tabs[0].solved[0];
+    let solved = &layout.tabs[0].solved_tabs[0];
     // The header takes the last row; the active member keeps the other 21.
     assert_eq!(
-        solved.panes,
+        solved.pane_rects,
         vec![
             SolvedPane {
-                id: shown,
-                rect: Rect::at_origin(Size { cols: 80, rows: 21 }),
+                pane_id: shown_pane_id,
+                outer_rect: Rect::from_size_at_origin(Size {
+                    column_count: 80,
+                    row_count: 21
+                }),
             },
             SolvedPane {
-                id: collapsed,
-                rect: Rect::new(Point { x: 0, y: 21 }, Size { cols: 80, rows: 1 }),
+                pane_id: collapsed_pane_id,
+                outer_rect: Rect::from_origin_and_size(
+                    Point { column: 0, row: 21 },
+                    Size {
+                        column_count: 80,
+                        row_count: 1
+                    },
+                ),
             },
         ],
     );
     assert_eq!(
         solved.stack_headers,
         vec![StackHeader {
-            pane: collapsed,
-            rect: Rect::new(Point { x: 0, y: 21 }, Size { cols: 80, rows: 1 }),
-            position: 1,
-            total: 2,
+            pane_id: collapsed_pane_id,
+            header_rect: Rect::from_origin_and_size(
+                Point { column: 0, row: 21 },
+                Size {
+                    column_count: 80,
+                    row_count: 1
+                },
+            ),
+            member_index: 1,
+            member_count: 2,
         }],
     );
-    assert_eq!(solved.suppressed, Vec::new());
-    assert!(!solved.all_suppressed);
+    assert_eq!(solved.suppressed_pane_ids, Vec::new());
+    assert!(!solved.is_every_pane_suppressed);
 }
 
 #[test]
@@ -879,50 +991,76 @@ fn a_stack_whose_active_member_is_flagged_collapsed_still_expands_that_member() 
     // `active` decides which member expands; the per-child `collapsed` flag
     // does not feed the solve.
     let session_id = SessionId::new();
-    let tab = TabId::new();
-    let first = PaneId::new();
-    let second = PaneId::new();
+    let tab_id = TabId::new();
+    let first_pane_id = PaneId::new();
+    let second_pane_id = PaneId::new();
     let client = ClientId::new();
-    let mut session = empty_session(session_id);
-    add_tab(&mut session, tab, "editor", 0, first);
+    let mut session = build_empty_session(session_id);
+    add_session_tab(&mut session, tab_id, "editor", 0, first_pane_id);
     session
         .tabs
-        .get_mut(&tab)
+        .get_mut(&tab_id)
         .expect("the tab was just added")
         .update_layout(LayoutNode::Split(SplitNode {
             direction: SplitDirection::Stacked,
-            children: vec![LayoutNode::Pane(first), LayoutNode::Pane(second)],
+            children: vec![
+                LayoutNode::Pane(first_pane_id),
+                LayoutNode::Pane(second_pane_id),
+            ],
             weights: vec![SizeWeight::default(), SizeWeight::default()],
-            active: 0,
+            active_child_index: 0,
         }));
-    attach(&mut session, client, tab, VIEWPORT, None, Some(first), None);
-    let (runtime, _tx) = runtime_with(session);
+    attach_test_client(
+        &mut session,
+        client,
+        tab_id,
+        TEST_VIEWPORT_SIZE,
+        None,
+        Some(first_pane_id),
+        None,
+    );
+    let (runtime, _tx) = build_test_runtime_with_session(session);
 
     let layout = runtime
         .build_session_layout(None)
         .expect("one session is running");
 
-    let solved = &layout.tabs[0].solved[0];
+    let solved = &layout.tabs[0].solved_tabs[0];
     assert_eq!(
-        solved.panes,
+        solved.pane_rects,
         vec![
             SolvedPane {
-                id: first,
-                rect: Rect::at_origin(Size { cols: 80, rows: 21 }),
+                pane_id: first_pane_id,
+                outer_rect: Rect::from_size_at_origin(Size {
+                    column_count: 80,
+                    row_count: 21
+                }),
             },
             SolvedPane {
-                id: second,
-                rect: Rect::new(Point { x: 0, y: 21 }, Size { cols: 80, rows: 1 }),
+                pane_id: second_pane_id,
+                outer_rect: Rect::from_origin_and_size(
+                    Point { column: 0, row: 21 },
+                    Size {
+                        column_count: 80,
+                        row_count: 1
+                    },
+                ),
             },
         ],
     );
     assert_eq!(
         solved.stack_headers,
         vec![StackHeader {
-            pane: second,
-            rect: Rect::new(Point { x: 0, y: 21 }, Size { cols: 80, rows: 1 }),
-            position: 1,
-            total: 2,
+            pane_id: second_pane_id,
+            header_rect: Rect::from_origin_and_size(
+                Point { column: 0, row: 21 },
+                Size {
+                    column_count: 80,
+                    row_count: 1
+                },
+            ),
+            member_index: 1,
+            member_count: 2,
         }],
     );
 }
@@ -930,84 +1068,99 @@ fn a_stack_whose_active_member_is_flagged_collapsed_still_expands_that_member() 
 #[test]
 fn a_terminal_too_small_for_one_pane_suppresses_every_pane() {
     let session_id = SessionId::new();
-    let tab = TabId::new();
-    let pane = PaneId::new();
+    let tab_id = TabId::new();
+    let pane_id = PaneId::new();
     let client = ClientId::new();
-    let mut session = empty_session(session_id);
-    add_tab(&mut session, tab, "editor", 0, pane);
-    // Three columns leaves no room for a bordered pane, which needs four.
-    attach(
+    let mut session = build_empty_session(session_id);
+    add_session_tab(&mut session, tab_id, "editor", 0, pane_id);
+    // Three columns leaves no room for a bordered pane_id, which needs four.
+    attach_test_client(
         &mut session,
         client,
-        tab,
-        Size { cols: 3, rows: 5 },
+        tab_id,
+        Size {
+            column_count: 3,
+            row_count: 5,
+        },
         None,
-        Some(pane),
+        Some(pane_id),
         None,
     );
-    let (runtime, _tx) = runtime_with(session);
+    let (runtime, _tx) = build_test_runtime_with_session(session);
 
     let layout = runtime
         .build_session_layout(None)
         .expect("one session is running");
 
-    let solved = &layout.tabs[0].solved[0];
-    assert_eq!(solved.viewport, Size { cols: 3, rows: 3 });
+    let solved = &layout.tabs[0].solved_tabs[0];
     assert_eq!(
-        solved.panes,
+        solved.viewport_size,
+        Size {
+            column_count: 3,
+            row_count: 3
+        }
+    );
+    assert_eq!(
+        solved.pane_rects,
         vec![SolvedPane {
-            id: pane,
-            rect: Rect::zero(),
+            pane_id,
+            outer_rect: Rect::empty_at_origin(),
         }],
     );
-    assert_eq!(solved.suppressed, vec![pane]);
-    assert!(solved.all_suppressed);
+    assert_eq!(solved.suppressed_pane_ids, vec![pane_id]);
+    assert!(solved.is_every_pane_suppressed);
 }
 
 #[test]
 fn a_pane_that_no_longer_fits_beside_its_neighbour_is_the_only_one_suppressed() {
     let session_id = SessionId::new();
-    let tab = TabId::new();
-    let left = PaneId::new();
-    let right = PaneId::new();
+    let tab_id = TabId::new();
+    let left_pane_id = PaneId::new();
+    let right_pane_id = PaneId::new();
     let client = ClientId::new();
-    let mut session = empty_session(session_id);
-    add_tab(&mut session, tab, "editor", 0, left);
+    let mut session = build_empty_session(session_id);
+    add_session_tab(&mut session, tab_id, "editor", 0, left_pane_id);
     session
         .tabs
-        .get_mut(&tab)
+        .get_mut(&tab_id)
         .expect("the tab was just added")
-        .update_layout(side_by_side(left, right));
+        .update_layout(build_horizontal_split(left_pane_id, right_pane_id));
     // Six columns hold one bordered pane of four, never two.
-    attach(
+    attach_test_client(
         &mut session,
         client,
-        tab,
-        Size { cols: 6, rows: 6 },
+        tab_id,
+        Size {
+            column_count: 6,
+            row_count: 6,
+        },
         None,
-        Some(left),
+        Some(left_pane_id),
         None,
     );
-    let (runtime, _tx) = runtime_with(session);
+    let (runtime, _tx) = build_test_runtime_with_session(session);
 
     let layout = runtime
         .build_session_layout(None)
         .expect("one session is running");
 
-    let solved = &layout.tabs[0].solved[0];
+    let solved = &layout.tabs[0].solved_tabs[0];
     assert_eq!(
-        solved.panes,
+        solved.pane_rects,
         vec![
             SolvedPane {
-                id: left,
-                rect: Rect::at_origin(Size { cols: 6, rows: 4 }),
+                pane_id: left_pane_id,
+                outer_rect: Rect::from_size_at_origin(Size {
+                    column_count: 6,
+                    row_count: 4
+                }),
             },
             SolvedPane {
-                id: right,
-                rect: Rect::zero(),
+                pane_id: right_pane_id,
+                outer_rect: Rect::empty_at_origin(),
             },
         ],
     );
-    assert_eq!(solved.suppressed, vec![right]);
-    assert!(!solved.all_suppressed);
+    assert_eq!(solved.suppressed_pane_ids, vec![right_pane_id]);
+    assert!(!solved.is_every_pane_suppressed);
 }

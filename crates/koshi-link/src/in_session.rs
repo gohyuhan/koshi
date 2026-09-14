@@ -44,22 +44,38 @@ impl InSessionContext {
     /// identity is missing or malformed. Presence of `KOSHI` is the marker;
     /// its value is not inspected.
     pub fn from_env() -> Result<Option<InSessionContext>, CliError> {
-        Self::from_lookup(|name| {
-            std::env::var_os(name).map(|value| value.to_string_lossy().into_owned())
+        Self::from_lookup(|environment_variable_name| {
+            std::env::var_os(environment_variable_name).map(|environment_variable_value| {
+                environment_variable_value.to_string_lossy().into_owned()
+            })
         })
     }
 
-    /// Build the identity from `get`, one lookup per variable name.
+    /// Build the identity from one lookup per environment variable name.
     fn from_lookup(
-        get: impl Fn(&str) -> Option<String>,
+        lookup_environment_variable: impl Fn(&str) -> Option<String>,
     ) -> Result<Option<InSessionContext>, CliError> {
-        if get("KOSHI").is_none() {
+        if lookup_environment_variable("KOSHI").is_none() {
             return Ok(None);
         }
-        let session_id =
-            parse_required(&get, "KOSHI_SESSION_ID", "session").map(SessionId::from_uuid)?;
-        let client_id = parse_optional(&get, "KOSHI_CLIENT_ID", "client")?.map(ClientId::from_uuid);
-        let pane_id = parse_required(&get, "KOSHI_PANE_ID", "pane").map(PaneId::from_uuid)?;
+        let session_id = parse_required_environment_variable_id(
+            &lookup_environment_variable,
+            "KOSHI_SESSION_ID",
+            "session",
+        )
+        .map(SessionId::from_uuid)?;
+        let client_id = parse_optional_environment_variable_id(
+            &lookup_environment_variable,
+            "KOSHI_CLIENT_ID",
+            "client",
+        )?
+        .map(ClientId::from_uuid);
+        let pane_id = parse_required_environment_variable_id(
+            &lookup_environment_variable,
+            "KOSHI_PANE_ID",
+            "pane",
+        )
+        .map(PaneId::from_uuid)?;
         Ok(Some(InSessionContext {
             session_id,
             client_id,
@@ -70,34 +86,53 @@ impl InSessionContext {
 
 /// Parse a variable the in-session identity requires: missing or malformed
 /// reports [`CliError::InSessionEnv`] naming the variable.
-fn parse_required(
-    get: &impl Fn(&str) -> Option<String>,
-    name: &str,
-    prefix: &str,
+fn parse_required_environment_variable_id(
+    lookup_environment_variable: &impl Fn(&str) -> Option<String>,
+    environment_variable_name: &str,
+    identifier_prefix: &str,
 ) -> Result<Uuid, CliError> {
-    let value = get(name).ok_or_else(|| CliError::InSessionEnv {
-        detail: format!("`KOSHI` is set but `{name}` is missing"),
-    })?;
-    parse_value(name, &value, prefix)
+    let environment_variable_value = lookup_environment_variable(environment_variable_name)
+        .ok_or_else(|| CliError::InSessionEnv {
+            detail: format!("`KOSHI` is set but `{environment_variable_name}` is missing"),
+        })?;
+    parse_environment_variable_value(
+        environment_variable_name,
+        &environment_variable_value,
+        identifier_prefix,
+    )
 }
 
 /// Parse a variable the in-session identity may omit: absent is `Ok(None)`,
 /// present-but-malformed reports [`CliError::InSessionEnv`].
-fn parse_optional(
-    get: &impl Fn(&str) -> Option<String>,
-    name: &str,
-    prefix: &str,
+fn parse_optional_environment_variable_id(
+    lookup_environment_variable: &impl Fn(&str) -> Option<String>,
+    environment_variable_name: &str,
+    identifier_prefix: &str,
 ) -> Result<Option<Uuid>, CliError> {
-    get(name)
-        .map(|value| parse_value(name, &value, prefix))
+    lookup_environment_variable(environment_variable_name)
+        .map(|environment_variable_value| {
+            parse_environment_variable_value(
+                environment_variable_name,
+                &environment_variable_value,
+                identifier_prefix,
+            )
+        })
         .transpose()
 }
 
 /// Parse one variable's value as a `<prefix>-<uuid>` id or a bare UUID,
 /// reporting the variable name and the offending value on failure.
-fn parse_value(name: &str, value: &str, prefix: &str) -> Result<Uuid, CliError> {
-    parse_prefixed_uuid(value, prefix).map_err(|expected| CliError::InSessionEnv {
-        detail: format!("`{name}` is `{value}`: {expected}"),
+fn parse_environment_variable_value(
+    environment_variable_name: &str,
+    environment_variable_value: &str,
+    identifier_prefix: &str,
+) -> Result<Uuid, CliError> {
+    parse_prefixed_uuid(environment_variable_value, identifier_prefix).map_err(|expected_format| {
+        CliError::InSessionEnv {
+            detail: format!(
+                "`{environment_variable_name}` is `{environment_variable_value}`: {expected_format}"
+            ),
+        }
     })
 }
 

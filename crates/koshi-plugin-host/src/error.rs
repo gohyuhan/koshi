@@ -9,11 +9,17 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum PluginError {
     /// The plugin module could not be loaded or instantiated.
-    #[error("failed to load plugin `{name}`: {detail}")]
-    Load { name: String, detail: String },
+    #[error("failed to load plugin `{plugin_name}`: {error_detail}")]
+    Load {
+        plugin_name: String,
+        error_detail: String,
+    },
     /// The plugin trapped or errored during execution.
-    #[error("plugin `{name}` runtime error: {detail}")]
-    Runtime { name: String, detail: String },
+    #[error("plugin `{plugin_name}` runtime error: {error_detail}")]
+    Runtime {
+        plugin_name: String,
+        error_detail: String,
+    },
 }
 
 impl DomainError for PluginError {
@@ -23,7 +29,7 @@ impl DomainError for PluginError {
     }
 
     /// Returns [`Severity::Recoverable`].
-    fn severity(&self) -> Severity {
+    fn get_severity(&self) -> Severity {
         Severity::Recoverable
     }
 }

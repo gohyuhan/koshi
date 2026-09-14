@@ -1,422 +1,563 @@
 //! Pixel-sized images fitted and padded to their shared terminal-cell rectangle.
 
 use super::*;
-use crate::graphics::{DecodedImage, MAX_IMAGE_SIDE};
+use crate::graphics::{DecodedImage, MAX_IMAGE_SIDE_PIXEL_COUNT};
 use koshi_core::geometry::PixelCellSize;
 
 pub(super) struct PreparedRaster {
-    pub(super) columns: u32,
-    pub(super) rows: u32,
+    pub(super) column_count: u32,
+    pub(super) row_count: u32,
     pub(super) plan: RasterPlan,
     pub(super) raster: Option<Arc<DecodedImage>>,
 }
 
 #[cfg(test)]
-pub(super) fn prepare(
-    record: &ImageRecord,
-    cell: Option<PixelCellSize>,
-    grid: (u16, u16),
+pub(super) fn prepare_image_raster(
+    image_record: &ImageRecord,
+    pixel_cell_size: Option<PixelCellSize>,
+    grid_dimensions: (u16, u16),
 ) -> Result<(u32, u32, Option<Arc<DecodedImage>>), ImagePlacementError> {
-    let prepared = prepare_with_plan(record, cell, grid)?;
-    Ok((prepared.columns, prepared.rows, prepared.raster))
+    let prepared = prepare_image_with_raster_plan(image_record, pixel_cell_size, grid_dimensions)?;
+    Ok((prepared.column_count, prepared.row_count, prepared.raster))
 }
 
-pub(super) fn prepare_with_plan(
-    record: &ImageRecord,
-    cell: Option<PixelCellSize>,
-    grid: (u16, u16),
+pub(super) fn prepare_image_with_raster_plan(
+    image_record: &ImageRecord,
+    pixel_cell_size: Option<PixelCellSize>,
+    grid_dimensions: (u16, u16),
 ) -> Result<PreparedRaster, ImagePlacementError> {
-    let display = &record.display;
-    let kitty = record.protocol == GraphicsProtocol::Kitty;
-    let columns = display
-        .cell_columns
-        .or_else(|| cell_dimension(display.width));
-    let rows = display.cell_rows.or_else(|| cell_dimension(display.height));
-    if kitty
-        && cell.is_some_and(|cell| {
-            display.cell_offset_x.unwrap_or(0) >= u32::from(cell.width())
-                || display.cell_offset_y.unwrap_or(0) >= u32::from(cell.height())
+    let image_display = &image_record.display;
+    let is_kitty_protocol = image_record.protocol == GraphicsProtocol::Kitty;
+    let requested_column_count = image_display
+        .requested_column_count
+        .or_else(|| find_requested_cell_count(image_display.requested_width));
+    let requested_row_count = image_display
+        .requested_row_count
+        .or_else(|| find_requested_cell_count(image_display.requested_height));
+    if is_kitty_protocol
+        && pixel_cell_size.is_some_and(|pixel_cell_size| {
+            image_display.cell_pixel_offset_x.unwrap_or(0)
+                >= u32::from(pixel_cell_size.get_pixel_width())
+                || image_display.cell_pixel_offset_y.unwrap_or(0)
+                    >= u32::from(pixel_cell_size.get_pixel_height())
         })
     {
         return Err(ImagePlacementError::UnsupportedCellDimensions {
-            width: display.width,
-            height: display.height,
+            requested_width: image_display.requested_width,
+            requested_height: image_display.requested_height,
         });
     }
-    if kitty
-        && !display.unicode_placeholder
-        && columns.is_some()
-        && rows.is_some()
-        && (cell.is_none()
-            || (display.cell_offset_x.unwrap_or(0) == 0 && display.cell_offset_y.unwrap_or(0) == 0))
+    if is_kitty_protocol
+        && !image_display.is_unicode_placeholder
+        && requested_column_count.is_some()
+        && requested_row_count.is_some()
+        && (pixel_cell_size.is_none()
+            || (image_display.cell_pixel_offset_x.unwrap_or(0) == 0
+                && image_display.cell_pixel_offset_y.unwrap_or(0) == 0))
     {
-        let (columns, rows) = cell_dimensions(record)?;
-        validate_source_pixels(record)?;
-        let plan = identity_plan(record, columns, rows)?;
+        let (column_count, row_count) = compute_image_cell_dimensions(image_record)?;
+        validate_source_pixels(image_record)?;
+        let raster_plan = build_identity_raster_plan(image_record, column_count, row_count)?;
         return Ok(PreparedRaster {
-            columns,
-            rows,
-            plan,
+            column_count,
+            row_count,
+            plan: raster_plan,
             raster: None,
         });
     }
-    let Some(cell) = cell else {
-        if kitty && (columns.is_none() || rows.is_none()) {
+    let Some(pixel_cell_size) = pixel_cell_size else {
+        if is_kitty_protocol && (requested_column_count.is_none() || requested_row_count.is_none())
+        {
             return Err(ImagePlacementError::MissingCellDimensions {
-                width: display.width,
-                height: display.height,
+                requested_width: image_display.requested_width,
+                requested_height: image_display.requested_height,
             });
         }
-        let (columns, rows) = cell_dimensions(record)?;
-        validate_source_pixels(record)?;
-        let plan = identity_plan(record, columns, rows)?;
+        let (column_count, row_count) = compute_image_cell_dimensions(image_record)?;
+        validate_source_pixels(image_record)?;
+        let raster_plan = build_identity_raster_plan(image_record, column_count, row_count)?;
         return Ok(PreparedRaster {
-            columns,
-            rows,
-            plan,
+            column_count,
+            row_count,
+            plan: raster_plan,
             raster: None,
         });
     };
-    validate_source_pixels(record)?;
-    let cw = u64::from(cell.width());
-    let ch = u64::from(cell.height());
-    let (sx, sy, sw, sh) = record.source_rect()?;
-    let x = if kitty {
-        u64::from(display.cell_offset_x.unwrap_or(0))
+    validate_source_pixels(image_record)?;
+    let cell_pixel_width = u64::from(pixel_cell_size.get_pixel_width());
+    let cell_pixel_height = u64::from(pixel_cell_size.get_pixel_height());
+    let (source_x_pixel, source_y_pixel, source_pixel_width, source_pixel_height) =
+        image_record.compute_source_rect()?;
+    let output_pixel_offset_x = if is_kitty_protocol {
+        u64::from(image_display.cell_pixel_offset_x.unwrap_or(0))
     } else {
         0
     };
-    let y = if kitty {
-        u64::from(display.cell_offset_y.unwrap_or(0))
+    let output_pixel_offset_y = if is_kitty_protocol {
+        u64::from(image_display.cell_pixel_offset_y.unwrap_or(0))
     } else {
         0
     };
-    if x >= cw || y >= ch {
+    if output_pixel_offset_x >= cell_pixel_width || output_pixel_offset_y >= cell_pixel_height {
         return Err(ImagePlacementError::UnsupportedCellDimensions {
-            width: display.width,
-            height: display.height,
+            requested_width: image_display.requested_width,
+            requested_height: image_display.requested_height,
         });
     }
-    let iterm = record.protocol == GraphicsProtocol::Iterm2;
-    let requested_width = if kitty {
-        columns.map(|value| u64::from(value) * cw)
+    let is_iterm_protocol = image_record.protocol == GraphicsProtocol::Iterm2;
+    let requested_width_pixels = if is_kitty_protocol {
+        requested_column_count.map(|column_count| u64::from(column_count) * cell_pixel_width)
     } else {
-        pixels(display.width, cw, u64::from(grid.1) * cw, iterm)
+        compute_requested_image_pixel_size(
+            image_display.requested_width,
+            cell_pixel_width,
+            u64::from(grid_dimensions.1) * cell_pixel_width,
+            is_iterm_protocol,
+        )
     };
-    let requested_height = if kitty {
-        rows.map(|value| u64::from(value) * ch)
+    let requested_height_pixels = if is_kitty_protocol {
+        requested_row_count.map(|row_count| u64::from(row_count) * cell_pixel_height)
     } else {
-        pixels(display.height, ch, u64::from(grid.0) * ch, iterm)
+        compute_requested_image_pixel_size(
+            image_display.requested_height,
+            cell_pixel_height,
+            u64::from(grid_dimensions.0) * cell_pixel_height,
+            is_iterm_protocol,
+        )
     };
-    let (target_width, target_height) = match (requested_width, requested_height) {
-        (None, None) => (u64::from(sw), u64::from(sh)),
-        (Some(width), None) => {
-            let width = width.saturating_sub(x);
-            (width, (width * u64::from(sh) / u64::from(sw)).max(1))
-        }
-        (None, Some(height)) => {
-            let height = height.saturating_sub(y);
-            ((height * u64::from(sw) / u64::from(sh)).max(1), height)
-        }
-        (Some(width), Some(height)) if kitty && !display.unicode_placeholder => {
-            (width.saturating_sub(x), height.saturating_sub(y))
-        }
-        (Some(width), Some(height)) if display.preserve_aspect_ratio => {
-            if width * u64::from(sh) <= height * u64::from(sw) {
-                (width, (width * u64::from(sh) / u64::from(sw)).max(1))
-            } else {
-                ((height * u64::from(sw) / u64::from(sh)).max(1), height)
+    let (target_width_pixels, target_height_pixels) =
+        match (requested_width_pixels, requested_height_pixels) {
+            (None, None) => (
+                u64::from(source_pixel_width),
+                u64::from(source_pixel_height),
+            ),
+            (Some(width_pixels), None) => {
+                let width_pixels = width_pixels.saturating_sub(output_pixel_offset_x);
+                (
+                    width_pixels,
+                    (width_pixels * u64::from(source_pixel_height) / u64::from(source_pixel_width))
+                        .max(1),
+                )
             }
-        }
-        (Some(width), Some(height)) => (width, height),
-    };
-    if target_width == 0 || target_height == 0 {
+            (None, Some(height_pixels)) => {
+                let height_pixels = height_pixels.saturating_sub(output_pixel_offset_y);
+                (
+                    (height_pixels * u64::from(source_pixel_width)
+                        / u64::from(source_pixel_height))
+                    .max(1),
+                    height_pixels,
+                )
+            }
+            (Some(width_pixels), Some(height_pixels))
+                if is_kitty_protocol && !image_display.is_unicode_placeholder =>
+            {
+                (
+                    width_pixels.saturating_sub(output_pixel_offset_x),
+                    height_pixels.saturating_sub(output_pixel_offset_y),
+                )
+            }
+            (Some(width_pixels), Some(height_pixels))
+                if image_display.is_aspect_ratio_preserved =>
+            {
+                if width_pixels * u64::from(source_pixel_height)
+                    <= height_pixels * u64::from(source_pixel_width)
+                {
+                    (
+                        width_pixels,
+                        (width_pixels * u64::from(source_pixel_height)
+                            / u64::from(source_pixel_width))
+                        .max(1),
+                    )
+                } else {
+                    (
+                        (height_pixels * u64::from(source_pixel_width)
+                            / u64::from(source_pixel_height))
+                        .max(1),
+                        height_pixels,
+                    )
+                }
+            }
+            (Some(width_pixels), Some(height_pixels)) => (width_pixels, height_pixels),
+        };
+    if target_width_pixels == 0 || target_height_pixels == 0 {
         return Err(ImagePlacementError::ZeroSize {
-            columns: u32::try_from(target_width).unwrap_or(u32::MAX),
-            rows: u32::try_from(target_height).unwrap_or(u32::MAX),
+            column_count: u32::try_from(target_width_pixels).unwrap_or(u32::MAX),
+            row_count: u32::try_from(target_height_pixels).unwrap_or(u32::MAX),
         });
     }
 
-    let explicit_rectangle = (!kitty || display.unicode_placeholder)
-        && requested_width.is_some()
-        && requested_height.is_some();
-    let (mut columns, mut rows, mut canvas_width, mut canvas_height, mut width, mut height) =
-        if explicit_rectangle {
-            let requested_width = requested_width.expect("checked above");
-            let requested_height = requested_height.expect("checked above");
-            let columns = requested_width.div_ceil(cw);
-            let rows = requested_height.div_ceil(ch);
-            (
-                columns,
-                rows,
-                columns * cw,
-                rows * ch,
-                target_width,
-                target_height,
-            )
-        } else {
-            let columns = (target_width + x).div_ceil(cw);
-            let rows = (target_height + y).div_ceil(ch);
-            (
-                columns,
-                rows,
-                columns * cw,
-                rows * ch,
-                target_width,
-                target_height,
-            )
-        };
-    if iterm {
-        let available_columns = u64::from(grid.1.saturating_sub(record.anchor.1)).max(1);
-        let scales_both_axes = display.preserve_aspect_ratio
-            || requested_width.is_none()
-            || requested_height.is_none();
-        let mut constrained = false;
-        if columns > available_columns {
-            if scales_both_axes {
-                rows = (rows * available_columns / columns).max(1);
+    let is_explicit_rectangle = (!is_kitty_protocol || image_display.is_unicode_placeholder)
+        && requested_width_pixels.is_some()
+        && requested_height_pixels.is_some();
+    let (
+        mut column_count,
+        mut row_count,
+        mut canvas_width_pixels,
+        mut canvas_height_pixels,
+        mut target_width_pixels,
+        mut target_height_pixels,
+    ) = if is_explicit_rectangle {
+        let requested_width_pixels = requested_width_pixels.expect("checked above");
+        let requested_height_pixels = requested_height_pixels.expect("checked above");
+        let column_count = requested_width_pixels.div_ceil(cell_pixel_width);
+        let row_count = requested_height_pixels.div_ceil(cell_pixel_height);
+        (
+            column_count,
+            row_count,
+            column_count * cell_pixel_width,
+            row_count * cell_pixel_height,
+            target_width_pixels,
+            target_height_pixels,
+        )
+    } else {
+        let column_count = (target_width_pixels + output_pixel_offset_x).div_ceil(cell_pixel_width);
+        let row_count = (target_height_pixels + output_pixel_offset_y).div_ceil(cell_pixel_height);
+        (
+            column_count,
+            row_count,
+            column_count * cell_pixel_width,
+            row_count * cell_pixel_height,
+            target_width_pixels,
+            target_height_pixels,
+        )
+    };
+    if is_iterm_protocol {
+        let available_column_count =
+            u64::from(grid_dimensions.1.saturating_sub(image_record.anchor.1)).max(1);
+        let is_scaling_both_axes = image_display.is_aspect_ratio_preserved
+            || requested_width_pixels.is_none()
+            || requested_height_pixels.is_none();
+        let mut is_constrained = false;
+        if column_count > available_column_count {
+            if is_scaling_both_axes {
+                row_count = (row_count * available_column_count / column_count).max(1);
             }
-            columns = available_columns;
-            constrained = true;
+            column_count = available_column_count;
+            is_constrained = true;
         }
-        if rows > 255 {
-            if scales_both_axes {
-                columns = (columns * 255 / rows).max(1);
+        if row_count > 255 {
+            if is_scaling_both_axes {
+                column_count = (column_count * 255 / row_count).max(1);
             }
-            rows = 255;
-            constrained = true;
+            row_count = 255;
+            is_constrained = true;
         }
-        if constrained {
-            canvas_width = columns * cw;
-            canvas_height = rows * ch;
-            if scales_both_axes {
-                (width, height) =
-                    fit_inside(u64::from(sw), u64::from(sh), canvas_width, canvas_height);
+        if is_constrained {
+            canvas_width_pixels = column_count * cell_pixel_width;
+            canvas_height_pixels = row_count * cell_pixel_height;
+            if is_scaling_both_axes {
+                (target_width_pixels, target_height_pixels) = compute_aspect_fit_size(
+                    u64::from(source_pixel_width),
+                    u64::from(source_pixel_height),
+                    canvas_width_pixels,
+                    canvas_height_pixels,
+                );
             } else {
-                width = canvas_width;
-                height = canvas_height;
+                target_width_pixels = canvas_width_pixels;
+                target_height_pixels = canvas_height_pixels;
             }
         }
     }
-    let bytes = canvas_width
-        .checked_mul(canvas_height)
-        .and_then(|value| value.checked_mul(4))
+    let raster_byte_count = canvas_width_pixels
+        .checked_mul(canvas_height_pixels)
+        .and_then(|pixel_count| pixel_count.checked_mul(4))
         .unwrap_or(u64::MAX);
-    if canvas_width > MAX_IMAGE_SIDE as u64
-        || canvas_height > MAX_IMAGE_SIDE as u64
-        || bytes > MAX_IMAGE_STORAGE_BYTES as u64
+    if canvas_width_pixels > MAX_IMAGE_SIDE_PIXEL_COUNT as u64
+        || canvas_height_pixels > MAX_IMAGE_SIDE_PIXEL_COUNT as u64
+        || raster_byte_count > MAX_IMAGE_STORAGE_BYTE_COUNT as u64
     {
         return Err(ImagePlacementError::StorageLimit {
-            used_bytes: 0,
-            requested_bytes: usize::try_from(bytes).unwrap_or(usize::MAX),
-            limit_bytes: MAX_IMAGE_STORAGE_BYTES,
+            used_byte_count: 0,
+            requested_byte_count: usize::try_from(raster_byte_count).unwrap_or(usize::MAX),
+            byte_limit: MAX_IMAGE_STORAGE_BYTE_COUNT,
         });
     }
-    let columns = u32::try_from(columns).map_err(|_| ImagePlacementError::DimensionsTooLarge {
-        columns: u32::MAX,
-        rows: u32::MAX,
-    })?;
-    let rows = u32::try_from(rows).map_err(|_| ImagePlacementError::DimensionsTooLarge {
-        columns,
-        rows: u32::MAX,
-    })?;
-    if sx == 0
-        && sy == 0
-        && sw == record.image.width
-        && sh == record.image.height
-        && canvas_width == u64::from(sw)
-        && canvas_height == u64::from(sh)
-        && width == u64::from(sw)
-        && height == u64::from(sh)
-        && x == 0
-        && y == 0
+    let column_count =
+        u32::try_from(column_count).map_err(|_| ImagePlacementError::DimensionsTooLarge {
+            column_count: u32::MAX,
+            row_count: u32::MAX,
+        })?;
+    let row_count =
+        u32::try_from(row_count).map_err(|_| ImagePlacementError::DimensionsTooLarge {
+            column_count,
+            row_count: u32::MAX,
+        })?;
+    if source_x_pixel == 0
+        && source_y_pixel == 0
+        && source_pixel_width == image_record.image.pixel_width
+        && source_pixel_height == image_record.image.pixel_height
+        && canvas_width_pixels == u64::from(source_pixel_width)
+        && canvas_height_pixels == u64::from(source_pixel_height)
+        && target_width_pixels == u64::from(source_pixel_width)
+        && target_height_pixels == u64::from(source_pixel_height)
+        && output_pixel_offset_x == 0
+        && output_pixel_offset_y == 0
     {
         return Ok(PreparedRaster {
-            columns,
-            rows,
+            column_count,
+            row_count,
             plan: RasterPlan {
                 geometry: ImageCellGeometry {
                     full_size: Size {
-                        cols: u16::try_from(columns).map_err(|_| {
-                            ImagePlacementError::DimensionsTooLarge { columns, rows }
+                        column_count: u16::try_from(column_count).map_err(|_| {
+                            ImagePlacementError::DimensionsTooLarge {
+                                column_count,
+                                row_count,
+                            }
                         })?,
-                        rows: u16::try_from(rows).map_err(|_| {
-                            ImagePlacementError::DimensionsTooLarge { columns, rows }
+                        row_count: u16::try_from(row_count).map_err(|_| {
+                            ImagePlacementError::DimensionsTooLarge {
+                                column_count,
+                                row_count,
+                            }
                         })?,
                     },
-                    offset: Point { x: 0, y: 0 },
+                    cell_offset: Point { column: 0, row: 0 },
                 },
-                source: (sx, sy, sw, sh),
-                target: (width as u32, height as u32),
-                canvas: (canvas_width as u32, canvas_height as u32),
-                pixel_offset: (x as u32, y as u32),
+                source_rect: (
+                    source_x_pixel,
+                    source_y_pixel,
+                    source_pixel_width,
+                    source_pixel_height,
+                ),
+                target_size: (target_width_pixels as u32, target_height_pixels as u32),
+                canvas_size: (canvas_width_pixels as u32, canvas_height_pixels as u32),
+                pixel_offset: (output_pixel_offset_x as u32, output_pixel_offset_y as u32),
             },
             raster: None,
         });
     }
-    let source = image::RgbaImage::from_raw(
-        record.image.width,
-        record.image.height,
-        record.image.rgba.clone(),
+    let source_rgba_image = image::RgbaImage::from_raw(
+        image_record.image.pixel_width,
+        image_record.image.pixel_height,
+        image_record.image.rgba_bytes.clone(),
     )
     .expect("decoded image dimensions are valid");
-    let source = image::imageops::crop_imm(&source, sx, sy, sw, sh);
-    let resized = image::imageops::resize(
-        &*source,
-        u32::try_from(width)
-            .map_err(|_| ImagePlacementError::DimensionsTooLarge { columns, rows })?,
-        u32::try_from(height)
-            .map_err(|_| ImagePlacementError::DimensionsTooLarge { columns, rows })?,
+    let cropped_source_image = image::imageops::crop_imm(
+        &source_rgba_image,
+        source_x_pixel,
+        source_y_pixel,
+        source_pixel_width,
+        source_pixel_height,
+    );
+    let resized_image = image::imageops::resize(
+        &*cropped_source_image,
+        u32::try_from(target_width_pixels).map_err(|_| {
+            ImagePlacementError::DimensionsTooLarge {
+                column_count,
+                row_count,
+            }
+        })?,
+        u32::try_from(target_height_pixels).map_err(|_| {
+            ImagePlacementError::DimensionsTooLarge {
+                column_count,
+                row_count,
+            }
+        })?,
         image::imageops::FilterType::Triangle,
     );
-    let mut canvas = image::RgbaImage::new(canvas_width as u32, canvas_height as u32);
-    image::imageops::replace(&mut canvas, &resized, x as i64, y as i64);
-    let columns_u16 = u16::try_from(columns)
-        .map_err(|_| ImagePlacementError::DimensionsTooLarge { columns, rows })?;
-    let rows_u16 = u16::try_from(rows)
-        .map_err(|_| ImagePlacementError::DimensionsTooLarge { columns, rows })?;
-    let raster = Arc::new(DecodedImage {
-        width: canvas_width as u32,
-        height: canvas_height as u32,
-        rgba: canvas.into_raw(),
+    let mut raster_canvas =
+        image::RgbaImage::new(canvas_width_pixels as u32, canvas_height_pixels as u32);
+    image::imageops::replace(
+        &mut raster_canvas,
+        &resized_image,
+        output_pixel_offset_x as i64,
+        output_pixel_offset_y as i64,
+    );
+    let validated_column_count =
+        u16::try_from(column_count).map_err(|_| ImagePlacementError::DimensionsTooLarge {
+            column_count,
+            row_count,
+        })?;
+    let validated_row_count =
+        u16::try_from(row_count).map_err(|_| ImagePlacementError::DimensionsTooLarge {
+            column_count,
+            row_count,
+        })?;
+    let raster_image = Arc::new(DecodedImage {
+        pixel_width: canvas_width_pixels as u32,
+        pixel_height: canvas_height_pixels as u32,
+        rgba_bytes: raster_canvas.into_raw(),
     });
     Ok(PreparedRaster {
-        columns,
-        rows,
+        column_count,
+        row_count,
         plan: RasterPlan {
             geometry: ImageCellGeometry {
                 full_size: Size {
-                    cols: columns_u16,
-                    rows: rows_u16,
+                    column_count: validated_column_count,
+                    row_count: validated_row_count,
                 },
-                offset: Point { x: 0, y: 0 },
+                cell_offset: Point { column: 0, row: 0 },
             },
-            source: (sx, sy, sw, sh),
-            target: (width as u32, height as u32),
-            canvas: (canvas_width as u32, canvas_height as u32),
-            pixel_offset: (x as u32, y as u32),
+            source_rect: (
+                source_x_pixel,
+                source_y_pixel,
+                source_pixel_width,
+                source_pixel_height,
+            ),
+            target_size: (target_width_pixels as u32, target_height_pixels as u32),
+            canvas_size: (canvas_width_pixels as u32, canvas_height_pixels as u32),
+            pixel_offset: (output_pixel_offset_x as u32, output_pixel_offset_y as u32),
         },
-        raster: Some(raster),
+        raster: Some(raster_image),
     })
 }
 
-pub(super) fn rebuild(
-    record: &ImageRecord,
-    plan: &RasterPlan,
+pub(super) fn rebuild_raster_image(
+    image_record: &ImageRecord,
+    raster_plan: &RasterPlan,
 ) -> Result<Option<Arc<DecodedImage>>, ImagePlacementError> {
-    if plan.target == plan.canvas
-        && plan.pixel_offset == (0, 0)
-        && plan.source == record.source_rect()?
-        && plan.target == (record.image.width, record.image.height)
+    if raster_plan.target_size == raster_plan.canvas_size
+        && raster_plan.pixel_offset == (0, 0)
+        && raster_plan.source_rect == image_record.compute_source_rect()?
+        && raster_plan.target_size
+            == (
+                image_record.image.pixel_width,
+                image_record.image.pixel_height,
+            )
     {
         return Ok(None);
     }
-    validate_source_pixels(record)?;
-    let source = image::RgbaImage::from_raw(
-        record.image.width,
-        record.image.height,
-        record.image.rgba.clone(),
+    validate_source_pixels(image_record)?;
+    let source_rgba_image = image::RgbaImage::from_raw(
+        image_record.image.pixel_width,
+        image_record.image.pixel_height,
+        image_record.image.rgba_bytes.clone(),
     )
     .ok_or(ImagePlacementError::UnsupportedPlacement)?;
-    let (sx, sy, sw, sh) = plan.source;
-    let source = image::imageops::crop_imm(&source, sx, sy, sw, sh);
-    let resized = image::imageops::resize(
-        &*source,
-        plan.target.0,
-        plan.target.1,
+    let (source_x_pixel, source_y_pixel, source_pixel_width, source_pixel_height) =
+        raster_plan.source_rect;
+    let cropped_source_image = image::imageops::crop_imm(
+        &source_rgba_image,
+        source_x_pixel,
+        source_y_pixel,
+        source_pixel_width,
+        source_pixel_height,
+    );
+    let resized_image = image::imageops::resize(
+        &*cropped_source_image,
+        raster_plan.target_size.0,
+        raster_plan.target_size.1,
         image::imageops::FilterType::Triangle,
     );
-    let mut canvas = image::RgbaImage::new(plan.canvas.0, plan.canvas.1);
+    let mut raster_canvas =
+        image::RgbaImage::new(raster_plan.canvas_size.0, raster_plan.canvas_size.1);
     image::imageops::replace(
-        &mut canvas,
-        &resized,
-        i64::from(plan.pixel_offset.0),
-        i64::from(plan.pixel_offset.1),
+        &mut raster_canvas,
+        &resized_image,
+        i64::from(raster_plan.pixel_offset.0),
+        i64::from(raster_plan.pixel_offset.1),
     );
     Ok(Some(Arc::new(DecodedImage {
-        width: plan.canvas.0,
-        height: plan.canvas.1,
-        rgba: canvas.into_raw(),
+        pixel_width: raster_plan.canvas_size.0,
+        pixel_height: raster_plan.canvas_size.1,
+        rgba_bytes: raster_canvas.into_raw(),
     })))
 }
 
-fn identity_plan(
-    record: &ImageRecord,
-    columns: u32,
-    rows: u32,
+fn build_identity_raster_plan(
+    image_record: &ImageRecord,
+    column_count: u32,
+    row_count: u32,
 ) -> Result<RasterPlan, ImagePlacementError> {
-    let source = record.source_rect()?;
-    let columns = u16::try_from(columns)
-        .map_err(|_| ImagePlacementError::DimensionsTooLarge { columns, rows })?;
-    let rows = u16::try_from(rows).map_err(|_| ImagePlacementError::DimensionsTooLarge {
-        columns: u32::from(columns),
-        rows,
-    })?;
+    let source_rect = image_record.compute_source_rect()?;
+    let column_count =
+        u16::try_from(column_count).map_err(|_| ImagePlacementError::DimensionsTooLarge {
+            column_count,
+            row_count,
+        })?;
+    let row_count =
+        u16::try_from(row_count).map_err(|_| ImagePlacementError::DimensionsTooLarge {
+            column_count: u32::from(column_count),
+            row_count,
+        })?;
     Ok(RasterPlan {
         geometry: ImageCellGeometry {
             full_size: Size {
-                cols: columns,
-                rows,
+                column_count,
+                row_count,
             },
-            offset: Point { x: 0, y: 0 },
+            cell_offset: Point { column: 0, row: 0 },
         },
-        source,
-        target: (record.image.width, record.image.height),
-        canvas: (record.image.width, record.image.height),
+        source_rect,
+        target_size: (
+            image_record.image.pixel_width,
+            image_record.image.pixel_height,
+        ),
+        canvas_size: (
+            image_record.image.pixel_width,
+            image_record.image.pixel_height,
+        ),
         pixel_offset: (0, 0),
     })
 }
 
-fn validate_source_pixels(record: &ImageRecord) -> Result<(), ImagePlacementError> {
-    let width = usize::try_from(record.image.width).map_err(|_| {
+fn validate_source_pixels(image_record: &ImageRecord) -> Result<(), ImagePlacementError> {
+    let image_pixel_width = usize::try_from(image_record.image.pixel_width).map_err(|_| {
         ImagePlacementError::DimensionsTooLarge {
-            columns: record.image.width,
-            rows: record.image.height,
+            column_count: image_record.image.pixel_width,
+            row_count: image_record.image.pixel_height,
         }
     })?;
-    let height = usize::try_from(record.image.height).map_err(|_| {
+    let image_pixel_height = usize::try_from(image_record.image.pixel_height).map_err(|_| {
         ImagePlacementError::DimensionsTooLarge {
-            columns: record.image.width,
-            rows: record.image.height,
+            column_count: image_record.image.pixel_width,
+            row_count: image_record.image.pixel_height,
         }
     })?;
-    let expected =
-        crate::graphics::checked_rgba_len(record.protocol, width, height).map_err(|_| {
-            ImagePlacementError::DimensionsTooLarge {
-                columns: record.image.width,
-                rows: record.image.height,
-            }
-        })?;
-    if record.image.rgba.len() != expected {
+    let expected_rgba_byte_count = crate::graphics::compute_rgba_byte_count(
+        image_record.protocol,
+        image_pixel_width,
+        image_pixel_height,
+    )
+    .map_err(|_| ImagePlacementError::DimensionsTooLarge {
+        column_count: image_record.image.pixel_width,
+        row_count: image_record.image.pixel_height,
+    })?;
+    if image_record.image.rgba_bytes.len() != expected_rgba_byte_count {
         return Err(ImagePlacementError::DimensionsTooLarge {
-            columns: record.image.width,
-            rows: record.image.height,
+            column_count: image_record.image.pixel_width,
+            row_count: image_record.image.pixel_height,
         });
     }
     Ok(())
 }
 
-fn fit_inside(source_width: u64, source_height: u64, width: u64, height: u64) -> (u64, u64) {
-    if width * source_height <= height * source_width {
-        (width, (width * source_height / source_width).max(1))
+fn compute_aspect_fit_size(
+    source_pixel_width: u64,
+    source_pixel_height: u64,
+    available_pixel_width: u64,
+    available_pixel_height: u64,
+) -> (u64, u64) {
+    if available_pixel_width * source_pixel_height <= available_pixel_height * source_pixel_width {
+        (
+            available_pixel_width,
+            (available_pixel_width * source_pixel_height / source_pixel_width).max(1),
+        )
     } else {
-        ((height * source_width / source_height).max(1), height)
+        (
+            (available_pixel_height * source_pixel_width / source_pixel_height).max(1),
+            available_pixel_height,
+        )
     }
 }
 
-fn pixels(
-    dimension: Option<ImageDimension>,
-    cell: u64,
-    available: u64,
-    ceil_percent: bool,
+fn compute_requested_image_pixel_size(
+    requested_dimension: Option<ImageDimension>,
+    cell_pixel_size: u64,
+    available_pixel_size: u64,
+    should_round_percent_up: bool,
 ) -> Option<u64> {
-    match dimension {
-        Some(ImageDimension::Cells(value)) => Some(u64::from(value) * cell),
-        Some(ImageDimension::Pixels(value)) => Some(u64::from(value)),
-        Some(ImageDimension::Percent(value)) if ceil_percent => {
-            Some((available * u64::from(value)).div_ceil(100))
+    match requested_dimension {
+        Some(ImageDimension::Cells(cell_count)) => Some(u64::from(cell_count) * cell_pixel_size),
+        Some(ImageDimension::Pixels(pixel_count)) => Some(u64::from(pixel_count)),
+        Some(ImageDimension::Percent(percent)) if should_round_percent_up => {
+            Some((available_pixel_size * u64::from(percent)).div_ceil(100))
         }
-        Some(ImageDimension::Percent(value)) => Some(available * u64::from(value) / 100),
+        Some(ImageDimension::Percent(percent)) => {
+            Some(available_pixel_size * u64::from(percent) / 100)
+        }
         Some(ImageDimension::Auto) | None => None,
     }
 }

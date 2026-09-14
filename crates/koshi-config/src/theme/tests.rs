@@ -8,41 +8,51 @@ use crate::types::{RgbColor, SCHEMA_VERSION};
 
 use super::parse_theme;
 
-/// Parses `source` as a theme file, panicking on error.
-fn parse(source: &str) -> (PartialThemeConfig, Vec<String>) {
-    let source = if source
+/// Parses `theme_text` as a theme file, panicking on error.
+fn parse_theme_text(theme_text: &str) -> (PartialThemeConfig, Vec<String>) {
+    let theme_text_with_version = if theme_text
         .lines()
         .any(|line| line.trim_start().starts_with("version "))
     {
-        source.to_string()
+        theme_text.to_string()
     } else {
-        format!("version 1\n{source}")
+        format!("version 1\n{theme_text}")
     };
-    parse_theme(Path::new("themes/midnight.kdl"), &source).expect("valid theme")
+    parse_theme(Path::new("themes/midnight.kdl"), &theme_text_with_version).expect("valid theme")
 }
 
 #[test]
 fn missing_version_is_a_validation_error() {
-    let error = parse_theme(Path::new("themes/midnight.kdl"), "colors {}")
+    let config_error = parse_theme(Path::new("themes/midnight.kdl"), "colors {}")
         .expect_err("version is required");
 
-    let ConfigError::Validation { key, detail } = error else {
-        panic!("expected version validation error, got {error:?}");
+    let ConfigError::Validation {
+        config_key,
+        validation_detail,
+    } = config_error
+    else {
+        panic!("expected version validation error, got {config_error:?}");
     };
-    assert_eq!(key, "version");
-    assert_eq!(detail, "file must declare `version`");
+    assert_eq!(config_key, "version");
+    assert_eq!(validation_detail, "file must declare `version`");
 }
 
 #[test]
 fn colors_parse_and_the_theme_is_left_unnamed() {
     let (theme, warnings) =
-        parse("colors {\n    ramp-start \"#581c87\"\n    accent \"#a78bfa\"\n}");
+        parse_theme_text("colors {\n    ramp-start \"#581c87\"\n    accent \"#a78bfa\"\n}");
     // The theme is named by its file, which this parser never sees; the loader
     // fills the name in from the path it read.
-    assert_eq!(theme.name, None);
+    assert_eq!(theme.theme_name, None);
     let colors = theme.colors.expect("colors present");
-    assert_eq!(colors.ramp_start, Some(RgbColor::new(0x58, 0x1c, 0x87)));
-    assert_eq!(colors.accent, Some(RgbColor::new(0xa7, 0x8b, 0xfa)));
+    assert_eq!(
+        colors.ramp_start,
+        Some(RgbColor::from_channels(0x58, 0x1c, 0x87))
+    );
+    assert_eq!(
+        colors.accent,
+        Some(RgbColor::from_channels(0xa7, 0x8b, 0xfa))
+    );
     // A role the file did not name keeps the lower layer's color.
     assert_eq!(colors.ramp_end, None);
     assert!(warnings.is_empty());
@@ -50,7 +60,7 @@ fn colors_parse_and_the_theme_is_left_unnamed() {
 
 #[test]
 fn every_color_role_parses() {
-    let (theme, warnings) = parse(
+    let (theme, warnings) = parse_theme_text(
         "colors {\n\
          ramp-start \"#010101\"\n\
          ramp-end \"#020202\"\n\
@@ -67,29 +77,45 @@ fn every_color_role_parses() {
          bar-bg \"#0d0d0d\"\n\
          }",
     );
-    let c = theme.colors.expect("colors present");
-    assert_eq!(c.ramp_start, Some(RgbColor::new(1, 1, 1)));
-    assert_eq!(c.ramp_end, Some(RgbColor::new(2, 2, 2)));
-    assert_eq!(c.on_ramp, Some(RgbColor::new(3, 3, 3)));
-    assert_eq!(c.on_ramp_dim, Some(RgbColor::new(4, 4, 4)));
-    assert_eq!(c.accent, Some(RgbColor::new(5, 5, 5)));
-    assert_eq!(c.on_accent, Some(RgbColor::new(6, 6, 6)));
-    assert_eq!(c.border_focused, Some(RgbColor::new(7, 7, 7)));
-    assert_eq!(c.border_unfocused, Some(RgbColor::new(8, 8, 8)));
-    assert_eq!(c.border_hover, Some(RgbColor::new(9, 9, 9)));
-    assert_eq!(c.stack_header_fg, Some(RgbColor::new(10, 10, 10)));
-    assert_eq!(c.stack_header_bg, Some(RgbColor::new(11, 11, 11)));
-    assert_eq!(c.letterbox, Some(RgbColor::new(12, 12, 12)));
-    assert_eq!(c.bar_bg, Some(RgbColor::new(13, 13, 13)));
+    let colors = theme.colors.expect("colors present");
+    assert_eq!(colors.ramp_start, Some(RgbColor::from_channels(1, 1, 1)));
+    assert_eq!(colors.ramp_end, Some(RgbColor::from_channels(2, 2, 2)));
+    assert_eq!(colors.on_ramp, Some(RgbColor::from_channels(3, 3, 3)));
+    assert_eq!(colors.on_ramp_dim, Some(RgbColor::from_channels(4, 4, 4)));
+    assert_eq!(colors.accent, Some(RgbColor::from_channels(5, 5, 5)));
+    assert_eq!(colors.on_accent, Some(RgbColor::from_channels(6, 6, 6)));
+    assert_eq!(
+        colors.border_focused,
+        Some(RgbColor::from_channels(7, 7, 7))
+    );
+    assert_eq!(
+        colors.border_unfocused,
+        Some(RgbColor::from_channels(8, 8, 8))
+    );
+    assert_eq!(colors.border_hover, Some(RgbColor::from_channels(9, 9, 9)));
+    assert_eq!(
+        colors.stack_header_fg,
+        Some(RgbColor::from_channels(10, 10, 10))
+    );
+    assert_eq!(
+        colors.stack_header_bg,
+        Some(RgbColor::from_channels(11, 11, 11))
+    );
+    assert_eq!(colors.letterbox, Some(RgbColor::from_channels(12, 12, 12)));
+    assert_eq!(colors.bar_bg, Some(RgbColor::from_channels(13, 13, 13)));
     assert!(warnings.is_empty());
 }
 
 #[test]
 fn a_bad_color_is_skipped_and_the_rest_apply() {
-    let (theme, warnings) = parse("colors {\n    ramp-start \"nothex\"\n    accent \"#a78bfa\"\n}");
+    let (theme, warnings) =
+        parse_theme_text("colors {\n    ramp-start \"nothex\"\n    accent \"#a78bfa\"\n}");
     let colors = theme.colors.expect("colors present");
     assert_eq!(colors.ramp_start, None);
-    assert_eq!(colors.accent, Some(RgbColor::new(0xa7, 0x8b, 0xfa)));
+    assert_eq!(
+        colors.accent,
+        Some(RgbColor::from_channels(0xa7, 0x8b, 0xfa))
+    );
     assert_eq!(
         warnings,
         ["ignored `colors.ramp-start`: color `nothex` contains a non-hex digit"]
@@ -98,7 +124,7 @@ fn a_bad_color_is_skipped_and_the_rest_apply() {
 
 #[test]
 fn an_unknown_color_role_warns() {
-    let (_, warnings) = parse("colors {\n    foreground \"#ffffff\"\n}");
+    let (_, warnings) = parse_theme_text("colors {\n    foreground \"#ffffff\"\n}");
     assert_eq!(
         warnings,
         vec![
@@ -109,50 +135,62 @@ fn an_unknown_color_role_warns() {
 
 #[test]
 fn a_bare_hex_without_a_hash_parses() {
-    let (theme, _) = parse("colors {\n    accent \"a78bfa\"\n}");
+    let (theme, _) = parse_theme_text("colors {\n    accent \"a78bfa\"\n}");
     assert_eq!(
         theme.colors.expect("colors present").accent,
-        Some(RgbColor::new(0xa7, 0x8b, 0xfa))
+        Some(RgbColor::from_channels(0xa7, 0x8b, 0xfa))
     );
 }
 
 #[test]
 fn a_newer_schema_version_is_rejected() {
-    let error = parse_theme(Path::new("themes/midnight.kdl"), "version 999")
+    let config_error = parse_theme(Path::new("themes/midnight.kdl"), "version 999")
         .expect_err("version newer than this build");
 
-    let ConfigError::Validation { key, detail } = error else {
-        panic!("expected version validation error, got {error:?}");
+    let ConfigError::Validation {
+        config_key,
+        validation_detail,
+    } = config_error
+    else {
+        panic!("expected version validation error, got {config_error:?}");
     };
-    assert_eq!(key, "version");
+    assert_eq!(config_key, "version");
     assert_eq!(
-        detail,
+        validation_detail,
         format!("config schema version 999 is newer than this koshi supports ({SCHEMA_VERSION})")
     );
 }
 
 #[test]
 fn a_version_with_children_is_rejected() {
-    let error = parse_theme(Path::new("themes/midnight.kdl"), "version 1 {}")
+    let config_error = parse_theme(Path::new("themes/midnight.kdl"), "version 1 {}")
         .expect_err("version children rejected");
 
-    let ConfigError::Validation { key, detail } = error else {
-        panic!("expected version validation error, got {error:?}");
+    let ConfigError::Validation {
+        config_key,
+        validation_detail,
+    } = config_error
+    else {
+        panic!("expected version validation error, got {config_error:?}");
     };
-    assert_eq!(key, "version");
-    assert_eq!(detail, "`version` takes no children");
+    assert_eq!(config_key, "version");
+    assert_eq!(validation_detail, "`version` takes no children");
 }
 
 #[test]
 fn a_syntax_error_is_a_parse_error() {
-    let error = parse_theme(Path::new("themes/midnight.kdl"), "colors { accent \"#fff\"")
+    let config_error = parse_theme(Path::new("themes/midnight.kdl"), "colors { accent \"#fff\"")
         .expect_err("unclosed block");
 
-    let ConfigError::Parse { path, detail } = error else {
-        panic!("expected a parse error, got {error:?}");
+    let ConfigError::Parse {
+        config_path,
+        parse_error_detail,
+    } = config_error
+    else {
+        panic!("expected a parse error, got {config_error:?}");
     };
-    assert_eq!(path, "themes/midnight.kdl");
-    assert_eq!(detail, "No closing '}' for child block");
+    assert_eq!(config_path, "themes/midnight.kdl");
+    assert_eq!(parse_error_detail, "No closing '}' for child block");
 }
 
 // -- adversarial: type confusion and exact warnings -----------------------
@@ -161,14 +199,14 @@ fn a_syntax_error_is_a_parse_error() {
 fn a_bad_color_names_the_exact_reason_in_its_warning() {
     // The skip warning carries the underlying color-parse reason verbatim, not
     // just the field name.
-    let (theme, warnings) = parse("colors {\n    ramp-start \"nothex\"\n}");
+    let (theme, warnings) = parse_theme_text("colors {\n    ramp-start \"nothex\"\n}");
     assert_eq!(theme.colors.expect("colors present").ramp_start, None);
     assert_eq!(
         warnings,
         vec!["ignored `colors.ramp-start`: color `nothex` contains a non-hex digit".to_string()]
     );
 
-    let (_, warnings) = parse("colors {\n    accent \"#fff\"\n}");
+    let (_, warnings) = parse_theme_text("colors {\n    accent \"#fff\"\n}");
     assert_eq!(
         warnings,
         vec!["ignored `colors.accent`: color must be 6 hex digits (#RRGGBB), got 3".to_string()]
@@ -180,7 +218,7 @@ fn a_color_given_as_an_integer_is_skipped_as_a_non_string() {
     // A number where a hex string belongs is the wrong kind of value; it is
     // skipped with the shared "expected a string" reason and the default
     // color stands.
-    let (theme, warnings) = parse("colors {\n    accent 5\n}");
+    let (theme, warnings) = parse_theme_text("colors {\n    accent 5\n}");
     assert_eq!(theme.colors.expect("colors present").accent, None);
     assert_eq!(
         warnings,
@@ -192,11 +230,12 @@ fn a_color_given_as_an_integer_is_skipped_as_a_non_string() {
 fn a_name_node_warns_because_the_file_name_owns_the_theme_name() {
     // The theme's name comes from its file name, so a `name` node in the file
     // is not part of the schema.
-    let (theme, warnings) = parse("name \"solarized\"\ncolors {\n    accent \"#ffffff\"\n}");
-    assert_eq!(theme.name, None);
+    let (theme, warnings) =
+        parse_theme_text("name \"solarized\"\ncolors {\n    accent \"#ffffff\"\n}");
+    assert_eq!(theme.theme_name, None);
     assert_eq!(
         theme.colors.expect("colors present").accent,
-        Some(RgbColor::new(0xff, 0xff, 0xff))
+        Some(RgbColor::from_channels(0xff, 0xff, 0xff))
     );
     assert_eq!(
         warnings,
@@ -205,13 +244,14 @@ fn a_name_node_warns_because_the_file_name_owns_the_theme_name() {
 }
 
 #[test]
-fn a_repeated_color_role_keeps_the_last_value() {
-    // Two entries for one role: the later one overwrites the earlier, with no
+fn a_repeated_color_role_keeps_the_final_value() {
+    // Two entries for one role: the final one overwrites the earlier, with no
     // warning — KDL allows the repeat and the parser takes the final word.
-    let (theme, warnings) = parse("colors {\n    accent \"#000000\"\n    accent \"#ffffff\"\n}");
+    let (theme, warnings) =
+        parse_theme_text("colors {\n    accent \"#000000\"\n    accent \"#ffffff\"\n}");
     assert_eq!(
         theme.colors.expect("colors present").accent,
-        Some(RgbColor::new(0xff, 0xff, 0xff))
+        Some(RgbColor::from_channels(0xff, 0xff, 0xff))
     );
     assert!(warnings.is_empty());
 }
@@ -219,17 +259,20 @@ fn a_repeated_color_role_keeps_the_last_value() {
 #[test]
 fn the_channel_boundaries_survive_the_parser() {
     let (theme, warnings) =
-        parse("colors {\n    on-accent \"#000000\"\n    on-ramp \"#ffffff\"\n}");
+        parse_theme_text("colors {\n    on-accent \"#000000\"\n    on-ramp \"#ffffff\"\n}");
     let colors = theme.colors.expect("colors present");
-    assert_eq!(colors.on_accent, Some(RgbColor::new(0, 0, 0)));
-    assert_eq!(colors.on_ramp, Some(RgbColor::new(0xff, 0xff, 0xff)));
+    assert_eq!(colors.on_accent, Some(RgbColor::from_channels(0, 0, 0)));
+    assert_eq!(
+        colors.on_ramp,
+        Some(RgbColor::from_channels(0xff, 0xff, 0xff))
+    );
     assert!(warnings.is_empty());
 }
 
 #[test]
 fn an_empty_colors_block_sets_no_role() {
     // A `colors` block with no children is present but overrides nothing.
-    let (theme, warnings) = parse("colors {\n}");
+    let (theme, warnings) = parse_theme_text("colors {\n}");
     let colors = theme.colors.expect("colors present");
     assert_eq!(colors.ramp_start, None);
     assert_eq!(colors.accent, None);
@@ -239,32 +282,38 @@ fn an_empty_colors_block_sets_no_role() {
 #[test]
 fn a_non_integer_version_is_a_validation_error() {
     // A garbage version value is a validation failure, not a silent skip.
-    let error = parse_theme(Path::new("themes/midnight.kdl"), "version \"abc\"")
+    let config_error = parse_theme(Path::new("themes/midnight.kdl"), "version \"abc\"")
         .expect_err("string is not a version integer");
-    match error {
-        ConfigError::Validation { key, detail } => {
-            assert_eq!(key, "version");
-            assert_eq!(detail, "`version` must be an integer from 1 to 4294967295");
+    match config_error {
+        ConfigError::Validation {
+            config_key,
+            validation_detail,
+        } => {
+            assert_eq!(config_key, "version");
+            assert_eq!(
+                validation_detail,
+                "`version` must be an integer from 1 to 4294967295"
+            );
         }
-        other => panic!("expected a validation error, got {other:?}"),
+        other_config_error => panic!("expected a validation error, got {other_config_error:?}"),
     }
 }
 
 #[test]
 fn a_comments_only_theme_is_treated_as_empty() {
-    let (theme, warnings) = parse("// just a comment\n");
-    assert_eq!(theme.name, None);
+    let (theme, warnings) = parse_theme_text("// just a comment\n");
+    assert_eq!(theme.theme_name, None);
     assert_eq!(theme.colors, None);
     assert!(warnings.is_empty());
 }
 
 #[test]
 fn a_repeated_colors_block_warns_and_the_first_one_stands() {
-    let (theme, warnings) = parse(
+    let (theme, warnings) = parse_theme_text(
         "colors {\n    accent \"#000000\"\n}\ncolors {\n    accent \"#ffffff\"\n    letterbox \"#123456\"\n}",
     );
     let colors = theme.colors.expect("colors present");
-    assert_eq!(colors.accent, Some(RgbColor::new(0, 0, 0)));
+    assert_eq!(colors.accent, Some(RgbColor::from_channels(0, 0, 0)));
     // Nothing of the second block is read, not even a role the first left unset.
     assert_eq!(colors.letterbox, None);
     assert_eq!(warnings, ["ignored duplicate `colors` section"]);
@@ -272,62 +321,88 @@ fn a_repeated_colors_block_warns_and_the_first_one_stands() {
 
 #[test]
 fn a_repeated_version_is_a_validation_error() {
-    let error = parse_theme(Path::new("themes/midnight.kdl"), "version 1\nversion 1")
+    let config_error = parse_theme(Path::new("themes/midnight.kdl"), "version 1\nversion 1")
         .expect_err("version declared twice");
 
-    let ConfigError::Validation { key, detail } = error else {
-        panic!("expected version validation error, got {error:?}");
+    let ConfigError::Validation {
+        config_key,
+        validation_detail,
+    } = config_error
+    else {
+        panic!("expected version validation error, got {config_error:?}");
     };
-    assert_eq!(key, "version");
-    assert_eq!(detail, "`version` is declared more than once");
+    assert_eq!(config_key, "version");
+    assert_eq!(validation_detail, "`version` is declared more than once");
 }
 
 #[test]
 fn version_zero_is_rejected() {
-    let error =
+    let config_error =
         parse_theme(Path::new("themes/midnight.kdl"), "version 0").expect_err("zero is too old");
 
-    let ConfigError::Validation { key, detail } = error else {
-        panic!("expected version validation error, got {error:?}");
+    let ConfigError::Validation {
+        config_key,
+        validation_detail,
+    } = config_error
+    else {
+        panic!("expected version validation error, got {config_error:?}");
     };
-    assert_eq!(key, "version");
-    assert_eq!(detail, "config schema version must be at least 1");
+    assert_eq!(config_key, "version");
+    assert_eq!(
+        validation_detail,
+        "config schema version must be at least 1"
+    );
 }
 
 #[test]
 fn a_negative_version_is_rejected() {
-    let error = parse_theme(Path::new("themes/midnight.kdl"), "version -1")
+    let config_error = parse_theme(Path::new("themes/midnight.kdl"), "version -1")
         .expect_err("negative is not a u32");
 
-    let ConfigError::Validation { key, detail } = error else {
-        panic!("expected version validation error, got {error:?}");
+    let ConfigError::Validation {
+        config_key,
+        validation_detail,
+    } = config_error
+    else {
+        panic!("expected version validation error, got {config_error:?}");
     };
-    assert_eq!(key, "version");
-    assert_eq!(detail, "`version` must be an integer from 1 to 4294967295");
+    assert_eq!(config_key, "version");
+    assert_eq!(
+        validation_detail,
+        "`version` must be an integer from 1 to 4294967295"
+    );
 }
 
 #[test]
 fn a_version_with_two_values_is_rejected() {
-    let error = parse_theme(Path::new("themes/midnight.kdl"), "version 1 2")
+    let config_error = parse_theme(Path::new("themes/midnight.kdl"), "version 1 2")
         .expect_err("version takes one value");
 
-    let ConfigError::Validation { key, detail } = error else {
-        panic!("expected version validation error, got {error:?}");
+    let ConfigError::Validation {
+        config_key,
+        validation_detail,
+    } = config_error
+    else {
+        panic!("expected version validation error, got {config_error:?}");
     };
-    assert_eq!(key, "version");
-    assert_eq!(detail, "`version` takes exactly one integer argument");
+    assert_eq!(config_key, "version");
+    assert_eq!(
+        validation_detail,
+        "`version` takes exactly one integer argument"
+    );
 }
 
 #[test]
 fn a_colors_node_without_a_block_sets_no_role() {
-    let (theme, warnings) = parse("colors");
+    let (theme, warnings) = parse_theme_text("colors");
     assert_eq!(theme.colors, Some(PartialColorPalette::default()));
     assert!(warnings.is_empty());
 }
 
 #[test]
 fn a_color_carrying_a_child_block_is_skipped() {
-    let (theme, warnings) = parse("colors {\n    accent \"#ffffff\" {\n        shade\n    }\n}");
+    let (theme, warnings) =
+        parse_theme_text("colors {\n    accent \"#ffffff\" {\n        shade\n    }\n}");
     assert_eq!(theme.colors.expect("colors present").accent, None);
     assert_eq!(
         warnings,
@@ -337,14 +412,14 @@ fn a_color_carrying_a_child_block_is_skipped() {
 
 #[test]
 fn a_color_that_is_not_exactly_one_value_is_skipped() {
-    let (theme, warnings) = parse("colors {\n    accent \"#ffffff\" \"#000000\"\n}");
+    let (theme, warnings) = parse_theme_text("colors {\n    accent \"#ffffff\" \"#000000\"\n}");
     assert_eq!(theme.colors.expect("colors present").accent, None);
     assert_eq!(
         warnings,
         ["ignored `colors.accent`: expected exactly one value".to_string()]
     );
 
-    let (theme, warnings) = parse("colors {\n    accent value=\"#ffffff\"\n}");
+    let (theme, warnings) = parse_theme_text("colors {\n    accent value=\"#ffffff\"\n}");
     assert_eq!(theme.colors.expect("colors present").accent, None);
     assert_eq!(
         warnings,
@@ -353,18 +428,18 @@ fn a_color_that_is_not_exactly_one_value_is_skipped() {
 }
 
 #[test]
-fn uppercase_hex_digits_parse() {
-    let (theme, warnings) = parse("colors {\n    accent \"#A78BFA\"\n}");
+fn uppercase_hex_digits_parse_theme_text() {
+    let (theme, warnings) = parse_theme_text("colors {\n    accent \"#A78BFA\"\n}");
     assert_eq!(
         theme.colors.expect("colors present").accent,
-        Some(RgbColor::new(0xa7, 0x8b, 0xfa))
+        Some(RgbColor::from_channels(0xa7, 0x8b, 0xfa))
     );
     assert!(warnings.is_empty());
 }
 
 #[test]
 fn an_empty_color_string_is_skipped() {
-    let (theme, warnings) = parse("colors {\n    accent \"\"\n}");
+    let (theme, warnings) = parse_theme_text("colors {\n    accent \"\"\n}");
     assert_eq!(theme.colors.expect("colors present").accent, None);
     assert_eq!(
         warnings,
@@ -374,7 +449,7 @@ fn an_empty_color_string_is_skipped() {
 
 #[test]
 fn a_seven_digit_color_is_skipped() {
-    let (theme, warnings) = parse("colors {\n    accent \"#1234567\"\n}");
+    let (theme, warnings) = parse_theme_text("colors {\n    accent \"#1234567\"\n}");
     assert_eq!(theme.colors.expect("colors present").accent, None);
     assert_eq!(
         warnings,
@@ -387,7 +462,7 @@ fn a_six_character_color_of_multi_byte_characters_is_skipped() {
     // Six characters, twelve bytes. The digit check rejects the value before
     // any byte slicing runs.
     let (theme, warnings) =
-        parse("colors {\n    accent \"#\u{ff}\u{ff}\u{ff}\u{ff}\u{ff}\u{ff}\"\n}");
+        parse_theme_text("colors {\n    accent \"#\u{ff}\u{ff}\u{ff}\u{ff}\u{ff}\u{ff}\"\n}");
     assert_eq!(theme.colors.expect("colors present").accent, None);
     assert_eq!(
         warnings,
@@ -400,10 +475,10 @@ fn a_six_character_color_of_multi_byte_characters_is_skipped() {
 
 #[test]
 fn warnings_come_out_in_file_order() {
-    let (theme, warnings) = parse(
+    let (theme, warnings) = parse_theme_text(
         "name \"solarized\"\ncolors {\n    foreground \"#ffffff\"\n}\ncolors {\n    accent \"#ffffff\"\n}",
     );
-    assert_eq!(theme.name, None);
+    assert_eq!(theme.theme_name, None);
     assert_eq!(theme.colors.expect("colors present").accent, None);
     assert_eq!(
         warnings,
@@ -417,7 +492,7 @@ fn warnings_come_out_in_file_order() {
 
 #[test]
 fn a_value_on_the_colors_line_is_warned_about_and_ignored() {
-    let (theme, warnings) = parse("colors \"oops\" {\n    accent \"#ff0000\"\n}");
+    let (theme, warnings) = parse_theme_text("colors \"oops\" {\n    accent \"#ff0000\"\n}");
     assert_eq!(
         warnings,
         ["ignored `colors` value: a section takes a `{ … }` block"]
@@ -425,7 +500,7 @@ fn a_value_on_the_colors_line_is_warned_about_and_ignored() {
     assert_eq!(
         theme.colors,
         Some(PartialColorPalette {
-            accent: Some(RgbColor::new(0xff, 0x00, 0x00)),
+            accent: Some(RgbColor::from_channels(0xff, 0x00, 0x00)),
             ..PartialColorPalette::default()
         })
     );

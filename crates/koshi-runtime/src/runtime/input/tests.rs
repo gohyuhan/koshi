@@ -10,7 +10,7 @@ use std::sync::{mpsc, Arc};
 use koshi_config::conflict::KeymapVerdict;
 use koshi_config::layer::{PartialKeybindingsConfig, PartialKoshiConfig, PartialLayoutDefaults};
 use koshi_config::types::{BoundAction, KeybindingsConfig, ModeBindings, ModeName};
-use koshi_core::action::ActionRef;
+use koshi_core::action::ActionReference;
 use koshi_core::command::{Command, CommandResult, FocusPaneArgs, FocusTarget, NewPaneArgs};
 use koshi_core::geometry::{Direction, PaneArea, Size};
 use koshi_core::ids::{PluginId, SessionId};
@@ -31,27 +31,34 @@ use koshi_observability::cleanup::TerminalCleanupGuard;
 use crate::runtime::bus::EventFilter;
 use crate::server::Server;
 
-fn runtime() -> (Server, Arc<FakePtyBackend>, ClientId, ViewerClient) {
-    let fake = Arc::new(FakePtyBackend::new());
-    let (tx, rx) = mpsc::channel();
-    let mut runtime = Server::new(fake.clone(), rx, tx);
-    let client = runtime
+fn build_test_runtime() -> (Server, Arc<FakePtyBackend>, ClientId, ViewerClient) {
+    let fake_pty_backend = Arc::new(FakePtyBackend::new());
+    let (event_sender, inbox_receiver) = mpsc::channel();
+    let mut runtime =
+        Server::from_runtime_parts(fake_pty_backend.clone(), inbox_receiver, event_sender);
+    let client_id = runtime
         .bootstrap_local(
             SessionId::new(),
-            Size { cols: 80, rows: 24 },
+            Size {
+                column_count: 80,
+                row_count: 24,
+            },
             SystemTime::UNIX_EPOCH,
         )
         .expect("bootstrap");
-    let viewer = viewer_for(&mut runtime, client);
-    (runtime, fake, client, viewer)
+    let viewer = build_viewer_client(&mut runtime, client_id);
+    (runtime, fake_pty_backend, client_id, viewer)
 }
 
 /// The viewer half for `client_id`: it holds the keymap and resolves every
 /// press below before the session hears about it.
-fn viewer_for(runtime: &mut Server, client_id: ClientId) -> ViewerClient {
-    ViewerClient::new(
+fn build_viewer_client(runtime: &mut Server, client_id: ClientId) -> ViewerClient {
+    ViewerClient::from_client_id_and_viewport(
         client_id,
-        Size { cols: 80, rows: 24 },
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
         runtime.subscribe(client_id, EventFilter::All),
         TerminalCleanupGuard::new(),
     )
@@ -59,12 +66,17 @@ fn viewer_for(runtime: &mut Server, client_id: ClientId) -> ViewerClient {
 
 /// One keypress, the way the running binary delivers it: the viewer decides
 /// what the chord means, and only what it resolves to reaches the session.
-fn press(runtime: &mut Server, viewer: &mut ViewerClient, chord: KeyChord, now: Instant) {
-    let client_id = viewer.id();
-    match viewer.resolve_key(chord, now) {
-        KeyOutcome::Fire(bound) => {
-            let direction = viewer.config().layout.new_pane_direction;
-            runtime.handle_bound_action(client_id, bound, direction);
+fn apply_key_press(
+    runtime: &mut Server,
+    viewer: &mut ViewerClient,
+    chord: KeyChord,
+    current_time: Instant,
+) {
+    let client_id = viewer.get_client_id();
+    match viewer.resolve_key(chord, current_time) {
+        KeyOutcome::Fire(bound_action) => {
+            let new_pane_direction = viewer.get_client_config().layout.new_pane_direction;
+            runtime.handle_bound_action(client_id, bound_action, new_pane_direction);
         }
         KeyOutcome::PassThrough(chord) => runtime.handle_key_press(client_id, chord),
         KeyOutcome::Pending | KeyOutcome::Discard => {}
@@ -73,109 +85,134 @@ fn press(runtime: &mut Server, viewer: &mut ViewerClient, chord: KeyChord, now: 
 }
 
 /// Fire an open sequence's binding if its ambiguity deadline has passed.
-fn expire(runtime: &mut Server, viewer: &mut ViewerClient, now: Instant) {
-    if let Some(bound) = viewer.expire_key_sequence(now) {
-        let direction = viewer.config().layout.new_pane_direction;
-        runtime.handle_bound_action(viewer.id(), bound, direction);
+fn expire_pending_key_sequence(
+    runtime: &mut Server,
+    viewer: &mut ViewerClient,
+    current_time: Instant,
+) {
+    if let Some(bound_action) = viewer.expire_key_sequence(current_time) {
+        let new_pane_direction = viewer.get_client_config().layout.new_pane_direction;
+        runtime.handle_bound_action(viewer.get_client_id(), bound_action, new_pane_direction);
     }
     viewer.apply_events();
 }
 
-fn chord(mods: ModFlags, key: char) -> KeyChord {
-    KeyChord::new(mods, Key::Char(key))
+fn build_key_chord(modifier_flags: ModFlags, key_character: char) -> KeyChord {
+    KeyChord::from_parts(modifier_flags, Key::Char(key_character))
 }
 
 /// An unmodified named key, for the arrows the default focus and resize
 /// sequences continue with.
-fn named(key: NamedKey) -> KeyChord {
-    KeyChord::new(ModFlags::NONE, Key::Named(key))
+fn build_named_key_chord(key: NamedKey) -> KeyChord {
+    KeyChord::from_parts(ModFlags::NONE, Key::Named(key))
 }
 
-fn only_pane(runtime: &Server) -> koshi_core::ids::PaneId {
-    *runtime.pty_handles.keys().next().expect("one pane")
+fn get_only_pane_id(runtime: &Server) -> koshi_core::ids::PaneId {
+    *runtime
+        .pty_handle_by_pane_id
+        .keys()
+        .next()
+        .expect("one pane")
 }
 
-/// Whether the session still holds `client`.
-fn attached(runtime: &Server, client: ClientId) -> bool {
+/// Whether the session still holds `client_id`.
+fn is_client_attached(runtime: &Server, client_id: ClientId) -> bool {
     runtime
-        .sessions()
+        .list_sessions()
         .values()
         .next()
         .expect("one session")
         .clients
-        .get(client)
+        .get_client_by_id(client_id)
         .is_some()
 }
 
 /// The client's scroll offset for the pane — `0` means the view follows live output.
-fn scroll_offset(runtime: &Server, client: ClientId, pane: koshi_core::ids::PaneId) -> usize {
+fn get_client_scroll_offset(
+    runtime: &Server,
+    client_id: ClientId,
+    pane_id: koshi_core::ids::PaneId,
+) -> usize {
     runtime
-        .sessions()
+        .list_sessions()
         .values()
         .next()
         .expect("one session")
         .clients
-        .get(client)
+        .get_client_by_id(client_id)
         .expect("client present")
-        .scroll_offset(pane)
+        .get_scroll_offset(pane_id)
 }
 
 /// A bootstrapped runtime whose one client has scrolled its view 3 lines up into a
 /// pane's history — the parked-view starting point the `scroll-on-input` tests share.
-fn runtime_scrolled_up() -> (Server, koshi_core::ids::PaneId, ClientId, ViewerClient) {
-    let (mut runtime, _fake, client, viewer) = runtime();
-    let pane = only_pane(&runtime);
-    runtime.handle_pty_output(pane, &b"\n".repeat(40)); // push lines into history
-    runtime.scroll_up(client, pane, 3);
-    (runtime, pane, client, viewer)
+fn build_runtime_with_scrolled_client() -> (Server, koshi_core::ids::PaneId, ClientId, ViewerClient)
+{
+    let (mut runtime, _fake_pty_backend, client_id, viewer) = build_test_runtime();
+    let pane_id = get_only_pane_id(&runtime);
+    runtime.handle_pty_output(pane_id, &b"\n".repeat(40)); // push lines into history
+    runtime.scroll_up(client_id, pane_id, 3);
+    (runtime, pane_id, client_id, viewer)
 }
 
-/// Run `command` as if `client` had issued it from a keybinding, asserting it
+/// Run `command` as if `client_id` had issued it from a keybinding, asserting it
 /// was applied — a test that silently dispatched a rejected command would be
 /// asserting against a state it never reached.
-fn dispatch(runtime: &mut Server, client: ClientId, command: Command) {
-    let envelope = CommandEnvelope::new(
+fn dispatch_test_command(runtime: &mut Server, client_id: ClientId, command: Command) {
+    let command_envelope = CommandEnvelope::from_parts(
         CommandId::new(),
-        CommandSource::key_binding(client),
+        CommandSource::from_key_binding(client_id),
         SystemTime::now(),
         command,
     );
-    let result = runtime.dispatch(envelope);
+    let dispatch_result = runtime.dispatch(command_envelope);
     assert!(
-        matches!(result, CommandResult::Ok { .. }),
-        "test setup: command was rejected: {result:?}"
+        matches!(dispatch_result, CommandResult::Ok { .. }),
+        "test setup: command was rejected: {dispatch_result:?}"
     );
 }
 
 #[test]
 fn unbound_plain_key_passes_to_focused_pty() {
-    let (mut runtime, fake, _client, mut viewer) = runtime();
-    let pane = only_pane(&runtime);
-    press(
+    let (mut runtime, fake_pty_backend, _client_id, mut viewer) = build_test_runtime();
+    let pane_id = get_only_pane_id(&runtime);
+    apply_key_press(
         &mut runtime,
         &mut viewer,
-        chord(ModFlags::NONE, 'a'),
+        build_key_chord(ModFlags::NONE, 'a'),
         Instant::now(),
     );
-    assert_eq!(fake.writes(pane).expect("writes"), vec![vec![b'a']]);
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        vec![vec![b'a']]
+    );
 }
 
 #[test]
 fn an_unbound_arrow_follows_the_focused_panes_application_cursor_mode() {
-    let (mut runtime, fake, _client, mut viewer) = runtime();
-    let pane = only_pane(&runtime);
-    let up = KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Up));
+    let (mut runtime, fake_pty_backend, _client_id, mut viewer) = build_test_runtime();
+    let pane_id = get_only_pane_id(&runtime);
+    let up_key_chord = KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Up));
 
     // A shell leaves application-cursor-keys mode off, and reads `ESC [ A`.
-    press(&mut runtime, &mut viewer, up, Instant::now());
-    assert_eq!(fake.writes(pane).expect("writes"), vec![b"\x1b[A".to_vec()]);
+    apply_key_press(&mut runtime, &mut viewer, up_key_chord, Instant::now());
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        vec![b"\x1b[A".to_vec()]
+    );
 
     // vim turns it on (DECCKM, `ESC [ ? 1 h`) and now reads `ESC O A` for the
     // same press. The pane's mode, not the press, picks the bytes.
-    runtime.handle_pty_output(pane, b"\x1b[?1h");
-    press(&mut runtime, &mut viewer, up, Instant::now());
+    runtime.handle_pty_output(pane_id, b"\x1b[?1h");
+    apply_key_press(&mut runtime, &mut viewer, up_key_chord, Instant::now());
     assert_eq!(
-        fake.writes(pane).expect("writes"),
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
         vec![b"\x1b[A".to_vec(), b"\x1bOA".to_vec()]
     );
 }
@@ -187,62 +224,101 @@ fn a_buffered_key_reaches_no_pane_at_all_even_after_focus_moves() {
     // `core:focus-pane` command over IPC — and the question "which pane gets the
     // buffered key" has one answer: none of them. Nothing typed into an open
     // sequence is ever written, so a stale recipient cannot be picked wrongly.
-    let (mut runtime, fake, client, mut viewer) = runtime();
-    let first = only_pane(&runtime);
-    let up = KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Up));
+    let (mut runtime, fake_pty_backend, client_id, mut viewer) = build_test_runtime();
+    let original_pane_id = get_only_pane_id(&runtime);
+    let up_key_chord = KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Up));
     let now = Instant::now();
 
     // A second pane, which takes focus. It runs vim: application-cursor-keys on.
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'p'), now);
-    press(&mut runtime, &mut viewer, chord(ModFlags::NONE, 'n'), now);
-    let second = focused_pane(&runtime, client);
-    assert_ne!(second, first);
-    runtime.handle_pty_output(second, b"\x1b[?1h");
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::CTRL, 'p'),
+        now,
+    );
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::NONE, 'n'),
+        now,
+    );
+    let focused_pane_id = get_focused_pane_id(&runtime, client_id);
+    assert_ne!(focused_pane_id, original_pane_id);
+    runtime.handle_pty_output(focused_pane_id, b"\x1b[?1h");
 
     // `<Up> x` makes a bare `<Up>` a prefix, so pressing it opens a sequence.
-    bind_normal(
+    configure_normal_keybinding(
         &mut viewer,
-        KeySequence::new(up, vec![chord(ModFlags::NONE, 'x')]),
-        ActionRef::core("new-tab").expect("valid core action name"),
+        KeySequence::from_first_and_rest(up_key_chord, vec![build_key_chord(ModFlags::NONE, 'x')]),
+        ActionReference::from_core_action_name("new-tab").expect("valid core action name"),
         ActionArgs::None,
     );
-    press(&mut runtime, &mut viewer, up, now);
+    apply_key_press(&mut runtime, &mut viewer, up_key_chord, now);
 
     // Focus moves off that pane WITHOUT a keypress: a `core:focus-pane` command
     // from another source entirely. Only a keypress touches a pending sequence,
     // so the buffered `<Up>` is still open when the focused pane changes.
-    let envelope = CommandEnvelope::new(
+    let envelope = CommandEnvelope::from_parts(
         CommandId::new(),
-        CommandSource::Mouse { client_id: client },
+        CommandSource::Mouse { client_id },
         SystemTime::now(),
         Command::FocusPane(FocusPaneArgs {
-            target: FocusTarget::Pane(first),
-            client: Some(client),
+            focus_target: FocusTarget::Pane(original_pane_id),
+            client_id: Some(client_id),
         }),
     );
-    let result = runtime.dispatch(envelope);
-    assert_eq!(focused_pane(&runtime, client), first, "{result:?}");
+    let dispatch_result = runtime.dispatch(envelope);
+    assert_eq!(
+        get_focused_pane_id(&runtime, client_id),
+        original_pane_id,
+        "{dispatch_result:?}"
+    );
 
     // `z` continues nothing: it is discarded, and the sequence stands. Neither
     // pane sees a byte — not the buffered `<Up>`, not the `z`.
-    press(&mut runtime, &mut viewer, chord(ModFlags::NONE, 'z'), now);
-    assert_eq!(fake.writes(second).expect("writes"), Vec::<Vec<u8>>::new());
-    assert_eq!(fake.writes(first).expect("writes"), Vec::<Vec<u8>>::new());
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::NONE, 'z'),
+        now,
+    );
     assert_eq!(
-        viewer.pending_sequence().cloned(),
-        Some(KeySequence::from(up)),
+        fake_pty_backend
+            .list_pane_write_bytes(focused_pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(original_pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
+    assert_eq!(
+        viewer.get_pending_key_sequence().cloned(),
+        Some(KeySequence::from(up_key_chord)),
         "the open sequence outlives a key it cannot use"
     );
 
     // Escape leaves the sequence, and still nothing is typed at either pane.
-    press(
+    apply_key_press(
         &mut runtime,
         &mut viewer,
-        KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Esc)),
+        KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Esc)),
         now,
     );
-    assert_eq!(fake.writes(second).expect("writes"), Vec::<Vec<u8>>::new());
-    assert_eq!(fake.writes(first).expect("writes"), Vec::<Vec<u8>>::new());
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(focused_pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(original_pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
 }
 
 #[test]
@@ -251,307 +327,527 @@ fn a_buffered_arrow_is_never_written_even_when_its_pane_flips_cursor_mode() {
     // a sequence waits — its bytes are applied on the same loop. It changes
     // nothing here: the buffered `<Up>` has no byte form to get wrong, because
     // it is never written in either mode.
-    let (mut runtime, fake, _client, mut viewer) = runtime();
-    let pane = only_pane(&runtime);
-    let up = KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Up));
+    let (mut runtime, fake_pty_backend, _client_id, mut viewer) = build_test_runtime();
+    let pane_id = get_only_pane_id(&runtime);
+    let up_key_chord = KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Up));
 
     // `<Up> x` makes a bare `<Up>` a prefix, so pressing it opens a sequence
     // instead of passing straight through.
-    bind_normal(
+    configure_normal_keybinding(
         &mut viewer,
-        KeySequence::new(up, vec![chord(ModFlags::NONE, 'x')]),
-        ActionRef::core("new-tab").expect("valid core action name"),
+        KeySequence::from_first_and_rest(up_key_chord, vec![build_key_chord(ModFlags::NONE, 'x')]),
+        ActionReference::from_core_action_name("new-tab").expect("valid core action name"),
         ActionArgs::None,
     );
 
     // Press `<Up>` while the pane is a plain shell: buffered, nothing written.
     let now = Instant::now();
-    press(&mut runtime, &mut viewer, up, now);
-    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
+    apply_key_press(&mut runtime, &mut viewer, up_key_chord, now);
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
 
     // The pane now turns application-cursor-keys mode ON, mid-sequence.
-    runtime.handle_pty_output(pane, b"\x1b[?1h");
+    runtime.handle_pty_output(pane_id, b"\x1b[?1h");
 
     // `z` continues nothing, so it is discarded and the sequence stands. The
     // pane sees neither the arrow nor the `z`, in either cursor mode.
-    press(&mut runtime, &mut viewer, chord(ModFlags::NONE, 'z'), now);
-    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::NONE, 'z'),
+        now,
+    );
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
 
     // Completing the sequence fires the binding — still no bytes to the pane.
-    press(&mut runtime, &mut viewer, chord(ModFlags::NONE, 'x'), now);
-    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::NONE, 'x'),
+        now,
+    );
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
 }
 
 #[test]
 fn a_modified_arrow_keeps_its_modifier_on_the_way_to_the_pane() {
-    let (mut runtime, fake, _client, mut viewer) = runtime();
-    let pane = only_pane(&runtime);
+    let (mut runtime, fake_pty_backend, _client_id, mut viewer) = build_test_runtime();
+    let pane_id = get_only_pane_id(&runtime);
 
     // `<C-Right>` is a word-jump to a shell; dropping the Control would leave
     // it a plain Right and move one character instead.
-    press(
+    apply_key_press(
         &mut runtime,
         &mut viewer,
-        KeyChord::new(ModFlags::CTRL, Key::Named(NamedKey::Right)),
+        KeyChord::from_parts(ModFlags::CTRL, Key::Named(NamedKey::Right)),
         Instant::now(),
     );
     assert_eq!(
-        fake.writes(pane).expect("writes"),
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
         vec![b"\x1b[1;5C".to_vec()]
     );
 }
 
 #[test]
 fn the_lock_chord_flips_the_client_both_ways_without_pty_bytes() {
-    let (mut runtime, fake, client, mut viewer) = runtime();
-    let pane = only_pane(&runtime);
+    let (mut runtime, fake_pty_backend, client_id, mut viewer) = build_test_runtime();
+    let pane_id = get_only_pane_id(&runtime);
     let now = Instant::now();
     // `<C-l>` locks in normal mode…
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'l'), now);
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::CTRL, 'l'),
+        now,
+    );
     assert_eq!(
         runtime
-            .session_for_client(client)
+            .get_session_for_client(client_id)
             .unwrap()
             .clients
-            .get(client)
+            .get_client_by_id(client_id)
             .unwrap()
-            .lock_mode(),
+            .get_lock_mode(),
         LockMode::Locked
     );
     // …and the SAME chord is the reserved unlock in locked mode.
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'l'), now);
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::CTRL, 'l'),
+        now,
+    );
     assert_eq!(
         runtime
-            .session_for_client(client)
+            .get_session_for_client(client_id)
             .unwrap()
             .clients
-            .get(client)
+            .get_client_by_id(client_id)
             .unwrap()
-            .lock_mode(),
+            .get_lock_mode(),
         LockMode::Normal
     );
-    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
 }
 
 #[test]
 fn quit_binding_detaches_the_client_in_normal_mode() {
-    let (mut runtime, fake, client, mut viewer) = runtime();
-    let pane = only_pane(&runtime);
-    press(
+    let (mut runtime, fake_pty_backend, client_id, mut viewer) = build_test_runtime();
+    let pane_id = get_only_pane_id(&runtime);
+    apply_key_press(
         &mut runtime,
         &mut viewer,
-        chord(ModFlags::CTRL, 'q'),
+        build_key_chord(ModFlags::CTRL, 'q'),
         Instant::now(),
     );
     // `auto-close-session` defaults off, so the client leaves and the session
     // keeps running.
-    assert!(!attached(&runtime, client));
-    assert!(!runtime.quit_requested());
-    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
+    assert!(!is_client_attached(&runtime, client_id));
+    assert!(!runtime.is_quit_requested());
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
 }
 
 #[test]
 fn quit_binding_detaches_the_client_in_locked_mode_too() {
-    let (mut runtime, fake, client, mut viewer) = runtime();
-    let pane = only_pane(&runtime);
+    let (mut runtime, fake_pty_backend, client_id, mut viewer) = build_test_runtime();
+    let pane_id = get_only_pane_id(&runtime);
     let now = Instant::now();
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'l'), now);
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'q'), now);
-    assert!(!attached(&runtime, client));
-    assert!(!runtime.quit_requested());
-    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::CTRL, 'l'),
+        now,
+    );
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::CTRL, 'q'),
+        now,
+    );
+    assert!(!is_client_attached(&runtime, client_id));
+    assert!(!runtime.is_quit_requested());
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
 }
 
 #[test]
 fn quit_binding_ends_the_session_when_auto_close_is_on() {
-    let (mut runtime, fake, client, mut viewer) = runtime();
-    let pane = only_pane(&runtime);
-    runtime.config.auto_close_session = true;
-    press(
+    let (mut runtime, fake_pty_backend, client_id, mut viewer) = build_test_runtime();
+    let pane_id = get_only_pane_id(&runtime);
+    runtime.config.should_auto_close_session = true;
+    apply_key_press(
         &mut runtime,
         &mut viewer,
-        chord(ModFlags::CTRL, 'q'),
+        build_key_chord(ModFlags::CTRL, 'q'),
         Instant::now(),
     );
     // The sole client leaves, so the setting ends the session; teardown keeps
     // the graceful window.
-    assert!(!attached(&runtime, client));
-    assert!(runtime.quit_requested());
-    assert!(!runtime.immediate_shutdown);
-    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
+    assert!(!is_client_attached(&runtime, client_id));
+    assert!(runtime.is_quit_requested());
+    assert!(!runtime.should_shutdown_immediately);
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
 }
 
 #[test]
 fn continuous_resize_keeps_the_prefix_armed_for_repeat_presses() {
-    let (mut runtime, _fake, _client, mut viewer) = runtime();
+    let (mut runtime, _fake_pty_backend, _client_id, mut viewer) = build_test_runtime();
     let now = Instant::now();
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'p'), now);
-    press(&mut runtime, &mut viewer, chord(ModFlags::NONE, 'n'), now);
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::CTRL, 'p'),
+        now,
+    );
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::NONE, 'n'),
+        now,
+    );
 
     // First resize: full `<C-s> <Left>` sequence.
-    let sizes_start = runtime.pty_sizes.clone();
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 's'), now);
-    press(&mut runtime, &mut viewer, named(NamedKey::Left), now);
-    let sizes_once = runtime.pty_sizes.clone();
-    assert_ne!(sizes_once, sizes_start);
+    let pty_sizes_before = runtime.pty_size_by_pane_id.clone();
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::CTRL, 's'),
+        now,
+    );
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_named_key_chord(NamedKey::Left),
+        now,
+    );
+    let pty_sizes_after_first_resize = runtime.pty_size_by_pane_id.clone();
+    assert_ne!(pty_sizes_after_first_resize, pty_sizes_before);
 
     // The prefix stayed armed: `<Left>` alone fires the resize again…
     assert_eq!(
-        viewer.pending_sequence().cloned(),
-        Some(KeySequence::from(chord(ModFlags::CTRL, 's')))
+        viewer.get_pending_key_sequence().cloned(),
+        Some(KeySequence::from(build_key_chord(ModFlags::CTRL, 's')))
     );
-    press(&mut runtime, &mut viewer, named(NamedKey::Left), now);
-    assert_ne!(runtime.pty_sizes, sizes_once);
-
-    // …and Escape puts the bar back to idle.
-    press(
+    apply_key_press(
         &mut runtime,
         &mut viewer,
-        KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Esc)),
+        build_named_key_chord(NamedKey::Left),
         now,
     );
-    assert_eq!(viewer.pending_sequence().cloned(), None);
+    assert_ne!(runtime.pty_size_by_pane_id, pty_sizes_after_first_resize);
+
+    // …and Escape puts the bar back to idle.
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Esc)),
+        now,
+    );
+    assert_eq!(viewer.get_pending_key_sequence().cloned(), None);
 }
 
 #[test]
 fn one_shot_bindings_clear_the_whole_sequence_after_firing() {
-    let (mut runtime, _fake, _client, mut viewer) = runtime();
+    let (mut runtime, _fake_pty_backend, _client_id, mut viewer) = build_test_runtime();
     let now = Instant::now();
     // `new-pane` is not continuous: after `<C-p> n` fires, nothing pends.
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'p'), now);
-    press(&mut runtime, &mut viewer, chord(ModFlags::NONE, 'n'), now);
-    assert_eq!(runtime.pty_handles.len(), 2);
-    assert_eq!(viewer.pending_sequence().cloned(), None);
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::CTRL, 'p'),
+        now,
+    );
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::NONE, 'n'),
+        now,
+    );
+    assert_eq!(runtime.pty_handle_by_pane_id.len(), 2);
+    assert_eq!(viewer.get_pending_key_sequence().cloned(), None);
 }
 
 #[test]
 fn locked_mode_passes_non_unlock_keys_verbatim() {
-    let (mut runtime, fake, _client, mut viewer) = runtime();
-    let pane = only_pane(&runtime);
+    let (mut runtime, fake_pty_backend, _client_id, mut viewer) = build_test_runtime();
+    let pane_id = get_only_pane_id(&runtime);
     let now = Instant::now();
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'l'), now);
-    press(&mut runtime, &mut viewer, chord(ModFlags::NONE, 'x'), now);
-    assert_eq!(fake.writes(pane).expect("writes"), vec![vec![b'x']]);
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::CTRL, 'l'),
+        now,
+    );
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::NONE, 'x'),
+        now,
+    );
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        vec![vec![b'x']]
+    );
 }
 
 #[test]
 fn pane_prefix_updates_snapshot_then_new_pane_fires() {
-    let (mut runtime, _fake, _client, mut viewer) = runtime();
+    let (mut runtime, _fake_pty_backend, _client_id, mut viewer) = build_test_runtime();
     let now = Instant::now();
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'p'), now);
-    assert_eq!(
-        viewer.pending_sequence().cloned(),
-        Some(KeySequence::from(chord(ModFlags::CTRL, 'p')))
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::CTRL, 'p'),
+        now,
     );
-    press(&mut runtime, &mut viewer, chord(ModFlags::NONE, 'n'), now);
-    assert_eq!(runtime.pty_handles.len(), 2);
-    assert_eq!(viewer.pending_sequence().cloned(), None);
+    assert_eq!(
+        viewer.get_pending_key_sequence().cloned(),
+        Some(KeySequence::from(build_key_chord(ModFlags::CTRL, 'p')))
+    );
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::NONE, 'n'),
+        now,
+    );
+    assert_eq!(runtime.pty_handle_by_pane_id.len(), 2);
+    assert_eq!(viewer.get_pending_key_sequence().cloned(), None);
 }
 
 #[test]
 fn prefix_pending_never_expires() {
-    let (mut runtime, fake, _client, mut viewer) = runtime();
-    let pane = only_pane(&runtime);
+    let (mut runtime, fake_pty_backend, _client_id, mut viewer) = build_test_runtime();
+    let pane_id = get_only_pane_id(&runtime);
     let now = Instant::now();
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'p'), now);
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::CTRL, 'p'),
+        now,
+    );
     // A prefix-only sequence arms no deadline and outlives any wait: the
     // continuation hints stay up until the user presses another key.
     assert_eq!(viewer.next_key_wakeup(now), None);
-    expire(&mut runtime, &mut viewer, now + Duration::from_secs(3600));
-    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
+    expire_pending_key_sequence(&mut runtime, &mut viewer, now + Duration::from_secs(3600));
     assert_eq!(
-        viewer.pending_sequence().cloned(),
-        Some(KeySequence::from(chord(ModFlags::CTRL, 'p')))
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
+    assert_eq!(
+        viewer.get_pending_key_sequence().cloned(),
+        Some(KeySequence::from(build_key_chord(ModFlags::CTRL, 'p')))
     );
 }
 
 #[test]
 fn escape_cancels_a_pending_sequence_silently() {
-    let (mut runtime, fake, _client, mut viewer) = runtime();
-    let pane = only_pane(&runtime);
+    let (mut runtime, fake_pty_backend, _client_id, mut viewer) = build_test_runtime();
+    let pane_id = get_only_pane_id(&runtime);
     let now = Instant::now();
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'p'), now);
-    press(
+    apply_key_press(
         &mut runtime,
         &mut viewer,
-        KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Esc)),
+        build_key_chord(ModFlags::CTRL, 'p'),
+        now,
+    );
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Esc)),
         now,
     );
     // Neither the buffered prefix nor the Escape reaches the pane, and the
     // pending sequence is gone — the bar returns to its idle hints.
-    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
-    assert_eq!(viewer.pending_sequence().cloned(), None);
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
+    assert_eq!(viewer.get_pending_key_sequence().cloned(), None);
 }
 
 #[test]
 fn an_unmatched_continuation_is_discarded_and_the_sequence_stands() {
-    let (mut runtime, fake, _client, mut viewer) = runtime();
-    let pane = only_pane(&runtime);
+    let (mut runtime, fake_pty_backend, _client_id, mut viewer) = build_test_runtime();
+    let pane_id = get_only_pane_id(&runtime);
     let now = Instant::now();
     // `<C-p>` opens the pane prefix. `z` binds nothing under it: it goes
     // nowhere, and the prefix is still open — the shell must not see `Ctrl-P`
     // (history-back) or the `z`, because both were typed at Koshi.
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'p'), now);
-    press(&mut runtime, &mut viewer, chord(ModFlags::NONE, 'z'), now);
-    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::CTRL, 'p'),
+        now,
+    );
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::NONE, 'z'),
+        now,
+    );
     assert_eq!(
-        viewer.pending_sequence().cloned(),
-        Some(KeySequence::from(chord(ModFlags::CTRL, 'p')))
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
+    assert_eq!(
+        viewer.get_pending_key_sequence().cloned(),
+        Some(KeySequence::from(build_key_chord(ModFlags::CTRL, 'p')))
     );
 
     // The sequence is live, not merely remembered: `n` still completes it.
-    press(&mut runtime, &mut viewer, chord(ModFlags::NONE, 'n'), now);
-    assert_eq!(runtime.pty_handles.len(), 2);
-    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::NONE, 'n'),
+        now,
+    );
+    assert_eq!(runtime.pty_handle_by_pane_id.len(), 2);
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
 }
 
 #[test]
 fn directional_focus_binding_moves_focus_across_a_split() {
-    let (mut runtime, _fake, client, mut viewer) = runtime();
+    let (mut runtime, _fake_pty_backend, client_id, mut viewer) = build_test_runtime();
     let now = Instant::now();
     // Split: the new right pane takes focus.
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'p'), now);
-    press(&mut runtime, &mut viewer, chord(ModFlags::NONE, 'n'), now);
-    let focused_after_split = focused_pane(&runtime, client);
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::CTRL, 'p'),
+        now,
+    );
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::NONE, 'n'),
+        now,
+    );
+    let focused_pane_id_after_split = get_focused_pane_id(&runtime, client_id);
 
     // `<C-p> <Left>` focuses the left neighbor.
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'p'), now);
-    press(&mut runtime, &mut viewer, named(NamedKey::Left), now);
-    let focused_left = focused_pane(&runtime, client);
-    assert_ne!(focused_left, focused_after_split);
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::CTRL, 'p'),
+        now,
+    );
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_named_key_chord(NamedKey::Left),
+        now,
+    );
+    let focused_left_pane_id = get_focused_pane_id(&runtime, client_id);
+    assert_ne!(focused_left_pane_id, focused_pane_id_after_split);
 
     // Focus is continuous, so the prefix stays armed: `<Right>` alone returns
     // to the right pane.
-    press(&mut runtime, &mut viewer, named(NamedKey::Right), now);
-    assert_eq!(focused_pane(&runtime, client), focused_after_split);
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_named_key_chord(NamedKey::Right),
+        now,
+    );
+    assert_eq!(
+        get_focused_pane_id(&runtime, client_id),
+        focused_pane_id_after_split
+    );
 }
 
 #[test]
 fn directional_new_pane_binding_splits_on_that_side() {
-    let (mut runtime, _fake, client, mut viewer) = runtime();
-    let original = only_pane(&runtime);
+    let (mut runtime, _fake_pty_backend, client_id, mut viewer) = build_test_runtime();
+    let original_pane_id = get_only_pane_id(&runtime);
     let now = Instant::now();
 
     // `<C-p> h` opens a new pane on the LEFT of the focused one, and the new
     // pane takes focus.
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'p'), now);
-    press(&mut runtime, &mut viewer, chord(ModFlags::NONE, 'h'), now);
-    assert_eq!(runtime.pty_handles.len(), 2);
-    let new_pane = focused_pane(&runtime, client);
-    assert_ne!(new_pane, original);
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::CTRL, 'p'),
+        now,
+    );
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::NONE, 'h'),
+        now,
+    );
+    assert_eq!(runtime.pty_handle_by_pane_id.len(), 2);
+    let new_pane_id = get_focused_pane_id(&runtime, client_id);
+    assert_ne!(new_pane_id, original_pane_id);
 
     // The original pane is the new pane's RIGHT neighbor — exactly where a
     // left split puts it. A wrong split side leaves nothing to the right and
     // this focus move would stay put.
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'p'), now);
-    press(&mut runtime, &mut viewer, named(NamedKey::Right), now);
-    assert_eq!(focused_pane(&runtime, client), original);
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::CTRL, 'p'),
+        now,
+    );
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_named_key_chord(NamedKey::Right),
+        now,
+    );
+    assert_eq!(get_focused_pane_id(&runtime, client_id), original_pane_id);
 }
 
 #[test]
 fn the_viewers_configured_split_direction_reaches_the_new_pane() {
-    let (mut runtime, _fake, client, mut viewer) = runtime();
-    let original = only_pane(&runtime);
+    let (mut runtime, _fake_pty_backend, client_id, mut viewer) = build_test_runtime();
+    let original_pane_id = get_only_pane_id(&runtime);
     let now = Instant::now();
 
     // The viewer folds `layout.new-pane-direction "down"` out of its own
@@ -568,308 +864,509 @@ fn the_viewers_configured_split_direction_reaches_the_new_pane() {
         None,
         None,
     );
-    assert_eq!(viewer.config().layout.new_pane_direction, Direction::Down);
+    assert_eq!(
+        viewer.get_client_config().layout.new_pane_direction,
+        Direction::Down
+    );
 
-    let tab = tab_of(&runtime, client);
-    let before = runtime.session_for_client(client).expect("session").tabs[&tab]
-        .layout()
+    let tab_id = get_active_tab_id(&runtime, client_id);
+    let original_layout_tree = runtime
+        .get_session_for_client(client_id)
+        .expect("session")
+        .tabs[&tab_id]
+        .get_layout_tree()
         .clone();
 
     // `<C-p> n` is the direction-less new-pane binding.
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'p'), now);
-    press(&mut runtime, &mut viewer, chord(ModFlags::NONE, 'n'), now);
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::CTRL, 'p'),
+        now,
+    );
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::NONE, 'n'),
+        now,
+    );
 
-    let new_pane = focused_pane(&runtime, client);
-    assert_ne!(new_pane, original);
-    let expected =
-        split_leaf(&before, original, new_pane, Direction::Down).expect("split on the source leaf");
+    let new_pane_id = get_focused_pane_id(&runtime, client_id);
+    assert_ne!(new_pane_id, original_pane_id);
+    let expected_layout_tree = split_leaf(
+        &original_layout_tree,
+        original_pane_id,
+        new_pane_id,
+        Direction::Down,
+    )
+    .expect("split on the source leaf");
     assert_eq!(
-        runtime.session_for_client(client).expect("session").tabs[&tab].layout(),
-        &expected
+        runtime
+            .get_session_for_client(client_id)
+            .expect("session")
+            .tabs[&tab_id]
+            .get_layout_tree(),
+        &expected_layout_tree
     );
 }
 
 #[test]
 fn a_user_bound_stacked_new_pane_key_builds_a_stack() {
-    let (mut runtime, _fake, client, mut viewer) = runtime();
-    let original = only_pane(&runtime);
+    let (mut runtime, _fake_pty_backend, client_id, mut viewer) = build_test_runtime();
+    let original_pane_id = get_only_pane_id(&runtime);
     let now = Instant::now();
 
     // `new-pane-stacked` ships with no default key; a user binds their own.
-    bind_normal(
+    configure_normal_keybinding(
         &mut viewer,
-        KeySequence::from(chord(ModFlags::ALT, 's')),
-        ActionRef::core("new-pane-stacked").expect("valid name"),
+        KeySequence::from(build_key_chord(ModFlags::ALT, 's')),
+        ActionReference::from_core_action_name("new-pane-stacked").expect("valid name"),
         ActionArgs::None,
     );
-    press(&mut runtime, &mut viewer, chord(ModFlags::ALT, 's'), now);
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::ALT, 's'),
+        now,
+    );
 
     // The leaf becomes a two-member stack: the source collapses to a header
     // and the new pane is the expanded, focused member.
-    assert_eq!(runtime.pty_handles.len(), 2);
-    let new_pane = focused_pane(&runtime, client);
-    assert_ne!(new_pane, original);
-    let session = runtime.session_for_client(client).expect("session");
-    let tab = session.clients.get(client).expect("client").active_tab();
+    assert_eq!(runtime.pty_handle_by_pane_id.len(), 2);
+    let new_pane_id = get_focused_pane_id(&runtime, client_id);
+    assert_ne!(new_pane_id, original_pane_id);
+    let session = runtime.get_session_for_client(client_id).expect("session");
+    let tab_id = session
+        .clients
+        .get_client_by_id(client_id)
+        .expect("client")
+        .get_active_tab();
     assert_eq!(
-        session.tabs[&tab].layout(),
-        &LayoutNode::Split(SplitNode::stack(vec![original, new_pane], 1))
+        session.tabs[&tab_id].get_layout_tree(),
+        &LayoutNode::Split(SplitNode::from_stacked_pane_ids(
+            vec![original_pane_id, new_pane_id],
+            1
+        ))
     );
 }
 
 #[test]
 fn fullscreen_binding_toggles_the_layout_mode() {
-    let (mut runtime, _fake, client, mut viewer) = runtime();
+    let (mut runtime, _fake_pty_backend, client_id, mut viewer) = build_test_runtime();
     let now = Instant::now();
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'p'), now);
-    press(&mut runtime, &mut viewer, chord(ModFlags::NONE, 'n'), now);
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::CTRL, 'p'),
+        now,
+    );
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::NONE, 'n'),
+        now,
+    );
 
-    press(&mut runtime, &mut viewer, chord(ModFlags::ALT, 'f'), now);
-    let snap = runtime.build_snapshot(client).expect("snapshot");
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::ALT, 'f'),
+        now,
+    );
+    let snapshot = runtime.build_snapshot(client_id).expect("snapshot");
     assert_eq!(
-        snap.session.active_tab.layout_mode,
+        snapshot.session_snapshot.active_tab_snapshot.layout_mode,
         koshi_layout::mode::LayoutMode::Fullscreen {
-            focused: focused_pane(&runtime, client)
+            focused_pane_id: get_focused_pane_id(&runtime, client_id)
         }
     );
 
-    press(&mut runtime, &mut viewer, chord(ModFlags::ALT, 'f'), now);
-    let snap = runtime.build_snapshot(client).expect("snapshot");
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::ALT, 'f'),
+        now,
+    );
+    let snapshot = runtime.build_snapshot(client_id).expect("snapshot");
     assert_eq!(
-        snap.session.active_tab.layout_mode,
+        snapshot.session_snapshot.active_tab_snapshot.layout_mode,
         koshi_layout::mode::LayoutMode::Tiled
     );
 }
 
-fn focused_pane(runtime: &Server, client: ClientId) -> koshi_core::ids::PaneId {
-    let session = runtime.session_for_client(client).expect("session");
-    let state = session.clients.get(client).expect("client");
-    state
-        .focused_pane(state.active_tab())
+fn get_focused_pane_id(runtime: &Server, client_id: ClientId) -> koshi_core::ids::PaneId {
+    let session = runtime.get_session_for_client(client_id).expect("session");
+    let client_state = session.clients.get_client_by_id(client_id).expect("client");
+    client_state
+        .get_focused_pane(client_state.get_active_tab())
         .expect("a focused pane")
 }
 
 /// The tab the client is looking at.
-fn tab_of(runtime: &Server, client: ClientId) -> koshi_core::ids::TabId {
+fn get_active_tab_id(runtime: &Server, client_id: ClientId) -> koshi_core::ids::TabId {
     runtime
-        .session_for_client(client)
+        .get_session_for_client(client_id)
         .expect("session")
         .clients
-        .get(client)
+        .get_client_by_id(client_id)
         .expect("client")
-        .active_tab()
+        .get_active_tab()
 }
 
 #[test]
 fn resize_prefix_moves_a_live_split_border() {
-    let (mut runtime, _fake, _client, mut viewer) = runtime();
+    let (mut runtime, _fake_pty_backend, _client_id, mut viewer) = build_test_runtime();
     let now = Instant::now();
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'p'), now);
-    press(&mut runtime, &mut viewer, chord(ModFlags::NONE, 'n'), now);
-    let sizes_before = runtime.pty_sizes.clone();
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 's'), now);
-    press(&mut runtime, &mut viewer, named(NamedKey::Left), now);
-    assert_ne!(runtime.pty_sizes, sizes_before);
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::CTRL, 'p'),
+        now,
+    );
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::NONE, 'n'),
+        now,
+    );
+    let pty_sizes_before = runtime.pty_size_by_pane_id.clone();
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::CTRL, 's'),
+        now,
+    );
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_named_key_chord(NamedKey::Left),
+        now,
+    );
+    assert_ne!(runtime.pty_size_by_pane_id, pty_sizes_before);
 }
 
 #[test]
 fn continuous_focus_rearm_walks_panes_with_repeated_arrows() {
-    let (mut runtime, _fake, client, mut viewer) = runtime();
+    let (mut runtime, _fake_pty_backend, client_id, mut viewer) = build_test_runtime();
     let now = Instant::now();
     // Two splits: three panes across, focus on the right-most.
     for _ in 0..2 {
-        press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'p'), now);
-        press(&mut runtime, &mut viewer, chord(ModFlags::NONE, 'n'), now);
+        apply_key_press(
+            &mut runtime,
+            &mut viewer,
+            build_key_chord(ModFlags::CTRL, 'p'),
+            now,
+        );
+        apply_key_press(
+            &mut runtime,
+            &mut viewer,
+            build_key_chord(ModFlags::NONE, 'n'),
+            now,
+        );
     }
-    let rightmost = focused_pane(&runtime, client);
+    let rightmost_pane_id = get_focused_pane_id(&runtime, client_id);
 
     // `<C-p> ←` moves one pane left and re-arms the prefix…
-    let left = KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Left));
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'p'), now);
-    press(&mut runtime, &mut viewer, left, now);
-    let middle = focused_pane(&runtime, client);
-    assert_ne!(middle, rightmost);
+    let left_key_chord = KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Left));
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::CTRL, 'p'),
+        now,
+    );
+    apply_key_press(&mut runtime, &mut viewer, left_key_chord, now);
+    let middle_pane_id = get_focused_pane_id(&runtime, client_id);
+    assert_ne!(middle_pane_id, rightmost_pane_id);
     assert_eq!(
-        viewer.pending_sequence().cloned(),
-        Some(KeySequence::from(chord(ModFlags::CTRL, 'p')))
+        viewer.get_pending_key_sequence().cloned(),
+        Some(KeySequence::from(build_key_chord(ModFlags::CTRL, 'p')))
     );
 
     // …so a bare ← walks one further pane left.
-    press(&mut runtime, &mut viewer, left, now);
-    let leftmost = focused_pane(&runtime, client);
-    assert_ne!(leftmost, middle);
-    assert_ne!(leftmost, rightmost);
+    apply_key_press(&mut runtime, &mut viewer, left_key_chord, now);
+    let leftmost_pane_id = get_focused_pane_id(&runtime, client_id);
+    assert_ne!(leftmost_pane_id, middle_pane_id);
+    assert_ne!(leftmost_pane_id, rightmost_pane_id);
 }
 
 #[test]
 fn abandoned_rearmed_prefix_writes_nothing_to_the_pane() {
-    let (mut runtime, fake, client, mut viewer) = runtime();
+    let (mut runtime, fake_pty_backend, client_id, mut viewer) = build_test_runtime();
     let now = Instant::now();
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'p'), now);
-    press(&mut runtime, &mut viewer, chord(ModFlags::NONE, 'n'), now);
-    let focused = focused_pane(&runtime, client);
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::CTRL, 'p'),
+        now,
+    );
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::NONE, 'n'),
+        now,
+    );
+    let focused_pane_id = get_focused_pane_id(&runtime, client_id);
 
     // Resize once, leave the re-armed prefix hanging, then cancel with Esc:
     // the re-armed prefix carries no fallback bytes, so the shell sees none.
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 's'), now);
-    press(&mut runtime, &mut viewer, named(NamedKey::Left), now);
-    press(
+    apply_key_press(
         &mut runtime,
         &mut viewer,
-        KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Esc)),
+        build_key_chord(ModFlags::CTRL, 's'),
         now,
     );
-    assert_eq!(fake.writes(focused).expect("writes"), Vec::<Vec<u8>>::new());
-    assert_eq!(viewer.pending_sequence().cloned(), None);
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_named_key_chord(NamedKey::Left),
+        now,
+    );
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Esc)),
+        now,
+    );
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(focused_pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
+    assert_eq!(viewer.get_pending_key_sequence().cloned(), None);
 }
 
 #[test]
 fn an_unmatched_key_under_a_rearmed_prefix_is_discarded_and_it_stays_armed() {
-    let (mut runtime, fake, client, mut viewer) = runtime();
+    let (mut runtime, fake_pty_backend, client_id, mut viewer) = build_test_runtime();
     let now = Instant::now();
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'p'), now);
-    press(&mut runtime, &mut viewer, chord(ModFlags::NONE, 'n'), now);
-    let focused = focused_pane(&runtime, client);
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::CTRL, 'p'),
+        now,
+    );
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::NONE, 'n'),
+        now,
+    );
+    let focused_pane_id = get_focused_pane_id(&runtime, client_id);
 
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 's'), now);
-    press(&mut runtime, &mut viewer, named(NamedKey::Left), now);
-    let sizes_after_one_resize = runtime.pty_sizes.clone();
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::CTRL, 's'),
+        now,
+    );
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_named_key_chord(NamedKey::Left),
+        now,
+    );
+    let sizes_after_one_resize = runtime.pty_size_by_pane_id.clone();
 
     // A re-armed prefix is an open sequence like any other, and captures like
     // one: `z` resizes nothing, so it is discarded — not passed to the shell —
     // and `<C-s>` stays armed.
-    press(&mut runtime, &mut viewer, chord(ModFlags::NONE, 'z'), now);
-    assert_eq!(fake.writes(focused).expect("writes"), Vec::<Vec<u8>>::new());
-    assert_eq!(runtime.pty_sizes, sizes_after_one_resize);
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::NONE, 'z'),
+        now,
+    );
     assert_eq!(
-        viewer.pending_sequence().cloned(),
-        Some(KeySequence::from(chord(ModFlags::CTRL, 's')))
+        fake_pty_backend
+            .list_pane_write_bytes(focused_pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
+    assert_eq!(runtime.pty_size_by_pane_id, sizes_after_one_resize);
+    assert_eq!(
+        viewer.get_pending_key_sequence().cloned(),
+        Some(KeySequence::from(build_key_chord(ModFlags::CTRL, 's')))
     );
 
     // Still armed, so the next `<Left>` resizes again without re-pressing `<C-s>`.
-    press(&mut runtime, &mut viewer, named(NamedKey::Left), now);
-    assert_ne!(runtime.pty_sizes, sizes_after_one_resize);
-
-    // Escape is the way out, and it types nothing at the pane.
-    press(
+    apply_key_press(
         &mut runtime,
         &mut viewer,
-        KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Esc)),
+        build_named_key_chord(NamedKey::Left),
         now,
     );
-    assert_eq!(fake.writes(focused).expect("writes"), Vec::<Vec<u8>>::new());
-    assert_eq!(viewer.pending_sequence().cloned(), None);
+    assert_ne!(runtime.pty_size_by_pane_id, sizes_after_one_resize);
+
+    // Escape is the way out, and it types nothing at the pane.
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Esc)),
+        now,
+    );
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(focused_pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
+    assert_eq!(viewer.get_pending_key_sequence().cloned(), None);
 }
 
 #[test]
 fn resize_binding_at_the_tab_edge_moves_the_opposite_border() {
-    let (mut runtime, _fake, client, mut viewer) = runtime();
+    let (mut runtime, _fake_pty_backend, client_id, mut viewer) = build_test_runtime();
     let now = Instant::now();
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'p'), now);
-    press(&mut runtime, &mut viewer, chord(ModFlags::NONE, 'n'), now);
-    let focused = focused_pane(&runtime, client);
-    let before = runtime.pty_sizes[&focused];
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::CTRL, 'p'),
+        now,
+    );
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::NONE, 'n'),
+        now,
+    );
+    let focused_pane_id = get_focused_pane_id(&runtime, client_id);
+    let original_pty_size = runtime.pty_size_by_pane_id[&focused_pane_id];
 
     // The focused pane touches the tab's right edge: `<C-s> l` has no right
     // border to grow through, so its left border moves right — it shrinks.
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 's'), now);
-    press(&mut runtime, &mut viewer, named(NamedKey::Right), now);
-    let after = runtime.pty_sizes[&focused];
-    assert_eq!(after.cols, before.cols - 1);
-    assert_eq!(after.rows, before.rows);
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::CTRL, 's'),
+        now,
+    );
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_named_key_chord(NamedKey::Right),
+        now,
+    );
+    let resized_pty_size = runtime.pty_size_by_pane_id[&focused_pane_id];
+    assert_eq!(
+        resized_pty_size.column_count,
+        original_pty_size.column_count - 1
+    );
+    assert_eq!(resized_pty_size.row_count, original_pty_size.row_count);
 }
 
 /// Bind one `normal`-mode sequence to `action` in the viewer's own keymap.
-fn bind_normal(
+fn configure_normal_keybinding(
     viewer: &mut ViewerClient,
     sequence: KeySequence,
-    action: ActionRef,
-    args: ActionArgs,
+    action: ActionReference,
+    action_arguments: ActionArgs,
 ) {
-    bind_normal_all(viewer, vec![(sequence, action, args)]);
+    configure_normal_keybindings(viewer, vec![(sequence, action, action_arguments)]);
 }
 
 /// Bind one `locked`-mode sequence to `action`, keeping the shipped locked
 /// bindings (the unlock chord among them) beside it — a user layer that dropped
 /// the unlock entry would be refused by conflict detection.
-fn bind_locked(
+fn configure_locked_keybinding(
     viewer: &mut ViewerClient,
     sequence: KeySequence,
-    action: ActionRef,
-    args: ActionArgs,
+    action: ActionReference,
+    action_arguments: ActionArgs,
 ) {
-    let mut keys = KeybindingsConfig::default()
-        .modes
-        .remove(&ModeName::new("locked"))
+    let mut key_binding_by_sequence = KeybindingsConfig::default()
+        .mode_bindings_by_name
+        .remove(&ModeName::from_text("locked"))
         .expect("the shipped config binds locked mode")
-        .keys;
-    keys.insert(sequence, BoundAction { action, args });
-    let mut modes = BTreeMap::new();
-    modes.insert(
-        ModeName::new("locked"),
-        ModeBindings {
-            keys,
-            removed: BTreeSet::new(),
+        .bound_action_by_key_sequence;
+    key_binding_by_sequence.insert(
+        sequence,
+        BoundAction {
+            action_reference: action,
+            action_arguments,
         },
     );
-    let report = viewer.load_startup_config(
+    let mut mode_bindings_by_name = BTreeMap::new();
+    mode_bindings_by_name.insert(
+        ModeName::from_text("locked"),
+        ModeBindings {
+            bound_action_by_key_sequence: key_binding_by_sequence,
+            removed_key_sequences: BTreeSet::new(),
+        },
+    );
+    let keymap_report = viewer.load_startup_config(
         None,
         None,
         Some(PartialKeybindingsConfig {
-            modes: Some(modes),
+            mode_bindings_by_name: Some(mode_bindings_by_name),
             ..PartialKeybindingsConfig::default()
         }),
     );
     assert_eq!(
-        report.expect("a keybinding file was given").verdict(),
+        keymap_report
+            .expect("a keybinding file was given")
+            .get_verdict(),
         KeymapVerdict::Apply,
         "test setup: the candidate binding must apply cleanly"
     );
 }
 
 /// How long the viewer waits for the next chord of an ambiguous sequence.
-fn chord_timeout(viewer: &ViewerClient) -> Duration {
-    Duration::from_millis(u64::from(viewer.config().keybindings.chord_timeout_ms))
+fn get_chord_timeout(viewer: &ViewerClient) -> Duration {
+    Duration::from_millis(u64::from(
+        viewer.get_client_config().keybindings.chord_timeout_ms,
+    ))
 }
 
 /// The client's current lock mode.
-fn lock_mode(runtime: &Server, client: ClientId) -> LockMode {
+fn get_client_lock_mode(runtime: &Server, client_id: ClientId) -> LockMode {
     runtime
-        .session_for_client(client)
+        .get_session_for_client(client_id)
         .expect("session")
         .clients
-        .get(client)
+        .get_client_by_id(client_id)
         .expect("client")
-        .lock_mode()
+        .get_lock_mode()
 }
 
-/// Bind every `(sequence, action, args)` triple in `bindings` under `normal`
+/// Bind every `(sequence, action, action_arguments)` triple in `bindings` under `normal`
 /// mode in one `keybinding.kdl` the viewer reads. Reading the file replaces
 /// the whole keybinding layer, so binding several sequences needs one call
 /// with every entry, not several calls that would each overwrite the last.
-fn bind_normal_all(viewer: &mut ViewerClient, bindings: Vec<(KeySequence, ActionRef, ActionArgs)>) {
-    let mut keys = BTreeMap::new();
-    for (sequence, action, args) in bindings {
-        keys.insert(sequence, BoundAction { action, args });
+fn configure_normal_keybindings(
+    viewer: &mut ViewerClient,
+    bindings: Vec<(KeySequence, ActionReference, ActionArgs)>,
+) {
+    let mut key_binding_by_sequence = BTreeMap::new();
+    for (sequence, action, action_arguments) in bindings {
+        key_binding_by_sequence.insert(
+            sequence,
+            BoundAction {
+                action_reference: action,
+                action_arguments,
+            },
+        );
     }
-    let mut modes = BTreeMap::new();
-    modes.insert(
-        ModeName::new("normal"),
+    let mut mode_bindings_by_name = BTreeMap::new();
+    mode_bindings_by_name.insert(
+        ModeName::from_text("normal"),
         ModeBindings {
-            keys,
-            removed: BTreeSet::new(),
+            bound_action_by_key_sequence: key_binding_by_sequence,
+            removed_key_sequences: BTreeSet::new(),
         },
     );
-    let report = viewer.load_startup_config(
+    let keymap_report = viewer.load_startup_config(
         None,
         None,
         Some(PartialKeybindingsConfig {
-            modes: Some(modes),
+            mode_bindings_by_name: Some(mode_bindings_by_name),
             ..PartialKeybindingsConfig::default()
         }),
     );
     assert_eq!(
-        report.expect("a keybinding file was given").verdict(),
+        keymap_report
+            .expect("a keybinding file was given")
+            .get_verdict(),
         KeymapVerdict::Apply,
         "test setup: the candidate binding must apply cleanly"
     );
@@ -877,67 +1374,82 @@ fn bind_normal_all(viewer: &mut ViewerClient, bindings: Vec<(KeySequence, Action
 
 #[test]
 fn a_key_from_an_unknown_client_writes_nothing() {
-    let (mut runtime, fake, _client, _viewer) = runtime();
-    let pane = only_pane(&runtime);
+    let (mut runtime, fake_pty_backend, _client_id, _viewer) = build_test_runtime();
+    let pane_id = get_only_pane_id(&runtime);
 
     // A press arriving for a client the session does not know resolves to no
     // pane, so nothing is written rather than landing on someone else's.
-    runtime.handle_key_press(ClientId::new(), chord(ModFlags::NONE, 'x'));
+    runtime.handle_key_press(ClientId::new(), build_key_chord(ModFlags::NONE, 'x'));
 
-    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
 }
 
 #[test]
 fn a_key_writes_nothing_when_the_client_has_no_focused_pane() {
-    let (mut runtime, fake, client, mut viewer) = runtime();
-    let pane = only_pane(&runtime);
-    let tab = runtime
-        .session_for_client(client)
+    let (mut runtime, fake_pty_backend, client_id, mut viewer) = build_test_runtime();
+    let pane_id = get_only_pane_id(&runtime);
+    let tab_id = runtime
+        .get_session_for_client(client_id)
         .expect("session")
         .clients
-        .get(client)
+        .get_client_by_id(client_id)
         .expect("client")
-        .active_tab();
+        .get_active_tab();
     runtime
-        .session_for_client_mut(client)
+        .get_session_for_client_mut(client_id)
         .expect("session")
         .clients
-        .get_mut(client)
+        .get_client_mut_by_id(client_id)
         .expect("client")
-        .remove_focused_pane(tab);
+        .remove_focused_pane(tab_id);
 
-    press(
+    apply_key_press(
         &mut runtime,
         &mut viewer,
-        chord(ModFlags::NONE, 'x'),
+        build_key_chord(ModFlags::NONE, 'x'),
         Instant::now(),
     );
 
-    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
 }
 
 /// A tab whose only viewer reports [`PaneArea::Starving`] has no effective
 /// size, so it solves to no drawn pane and takes no keystroke.
 #[test]
 fn a_key_from_a_starving_sole_viewer_writes_nothing() {
-    let (mut runtime, fake, client, mut viewer) = runtime();
-    let pane = only_pane(&runtime);
+    let (mut runtime, fake_pty_backend, client_id, mut viewer) = build_test_runtime();
+    let pane_id = get_only_pane_id(&runtime);
     runtime
-        .session_for_client_mut(client)
+        .get_session_for_client_mut(client_id)
         .expect("session")
         .clients
-        .get_mut(client)
+        .get_client_mut_by_id(client_id)
         .expect("client")
         .update_pane_area(Some(PaneArea::Starving));
 
-    press(
+    apply_key_press(
         &mut runtime,
         &mut viewer,
-        chord(ModFlags::NONE, 'x'),
+        build_key_chord(ModFlags::NONE, 'x'),
         Instant::now(),
     );
 
-    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
 }
 
 /// A pane the tab has no room to draw takes no keystroke: the client cannot see
@@ -945,57 +1457,93 @@ fn a_key_from_a_starving_sole_viewer_writes_nothing() {
 /// below the pane's minimum, the pane is suppressed, and `l` reaches no shell.
 #[test]
 fn a_key_writes_nothing_when_the_focused_pane_is_suppressed() {
-    let (mut runtime, fake, client, mut viewer) = runtime();
-    let pane = only_pane(&runtime);
+    let (mut runtime, fake_pty_backend, client_id, mut viewer) = build_test_runtime();
+    let pane_id = get_only_pane_id(&runtime);
 
     // Shrink the terminal until the sole pane no longer fits: a pane needs
     // MIN_PANE_SIZE plus its one-cell border, and 3x3 leaves less than that.
-    runtime.handle_client_resize(client, Size { cols: 3, rows: 3 }, None);
+    runtime.handle_client_resize(
+        client_id,
+        Size {
+            column_count: 3,
+            row_count: 3,
+        },
+        None,
+    );
     assert!(
         runtime
-            .build_snapshot(client)
+            .build_snapshot(client_id)
             .expect("snapshot")
-            .session
-            .active_tab
-            .all_suppressed,
+            .session_snapshot
+            .active_tab_snapshot
+            .are_all_panes_suppressed,
         "test setup: the sole pane must be suppressed at this size"
     );
 
-    press(
+    apply_key_press(
         &mut runtime,
         &mut viewer,
-        chord(ModFlags::NONE, 'l'),
+        build_key_chord(ModFlags::NONE, 'l'),
         Instant::now(),
     );
 
-    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
 }
 
 /// A key still reaches the pane once the terminal grows back: suppression
 /// blocks the write while it lasts, and leaves nothing latched behind it.
 #[test]
 fn a_key_reaches_the_pane_again_once_it_is_no_longer_suppressed() {
-    let (mut runtime, fake, client, mut viewer) = runtime();
-    let pane = only_pane(&runtime);
+    let (mut runtime, fake_pty_backend, client_id, mut viewer) = build_test_runtime();
+    let pane_id = get_only_pane_id(&runtime);
 
-    runtime.handle_client_resize(client, Size { cols: 3, rows: 3 }, None);
-    press(
+    runtime.handle_client_resize(
+        client_id,
+        Size {
+            column_count: 3,
+            row_count: 3,
+        },
+        None,
+    );
+    apply_key_press(
         &mut runtime,
         &mut viewer,
-        chord(ModFlags::NONE, 'l'),
+        build_key_chord(ModFlags::NONE, 'l'),
         Instant::now(),
     );
-    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
 
-    runtime.handle_client_resize(client, Size { cols: 80, rows: 24 }, None);
-    press(
+    runtime.handle_client_resize(
+        client_id,
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        None,
+    );
+    apply_key_press(
         &mut runtime,
         &mut viewer,
-        chord(ModFlags::NONE, 'l'),
+        build_key_chord(ModFlags::NONE, 'l'),
         Instant::now(),
     );
 
-    assert_eq!(fake.writes(pane).expect("writes"), vec![vec![b'l']]);
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        vec![vec![b'l']]
+    );
 }
 
 /// A plugin pane has no PTY behind it, so the bytes a chord encodes are not
@@ -1003,20 +1551,27 @@ fn a_key_reaches_the_pane_again_once_it_is_no_longer_suppressed() {
 /// PTY handle in the backend from when it was a terminal pane.
 #[test]
 fn a_key_writes_nothing_when_the_focused_pane_is_a_plugin_pane() {
-    let (mut runtime, fake, client, mut viewer) = runtime();
-    let pane = only_pane(&runtime);
+    let (mut runtime, fake_pty_backend, client_id, mut viewer) = build_test_runtime();
+    let pane_id = get_only_pane_id(&runtime);
 
     // Re-file the focused pane's record under `Plugin`, keeping its id: the
     // layout leaf, the focus, and the PTY handle all stay exactly as they were,
     // so only the pane's KIND can explain a missing write.
-    let session_id = runtime.session_for_client(client).expect("session").id;
-    let session = runtime.sessions.get_mut(&session_id).expect("session");
-    let created_at = session.panes.get(pane).expect("pane record").created_at();
-    session.panes.remove(pane);
+    let session_id = runtime
+        .get_session_for_client(client_id)
+        .expect("session")
+        .session_id;
+    let session = runtime.session_by_id.get_mut(&session_id).expect("session");
+    let created_at = session
+        .panes
+        .get_pane_record_by_id(pane_id)
+        .expect("pane record")
+        .get_created_at();
+    session.panes.remove_pane_record(pane_id);
     session
         .panes
-        .insert(PaneRecord::new_with_kind(
-            pane,
+        .register_pane_record(PaneRecord::from_pane_kind(
+            pane_id,
             PaneKind::Plugin {
                 plugin_id: PluginId::new(),
             },
@@ -1024,14 +1579,19 @@ fn a_key_writes_nothing_when_the_focused_pane_is_a_plugin_pane() {
         ))
         .expect("re-inserting a removed pane id");
 
-    press(
+    apply_key_press(
         &mut runtime,
         &mut viewer,
-        chord(ModFlags::NONE, 'l'),
+        build_key_chord(ModFlags::NONE, 'l'),
         Instant::now(),
     );
 
-    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
 }
 
 /// Zoom is per-client, so one client zooming a pane does not silence another
@@ -1042,56 +1602,95 @@ fn a_key_writes_nothing_when_the_focused_pane_is_a_plugin_pane() {
 /// the tab instead, B's pane would look hidden behind A's zoom and B's keystrokes
 /// would vanish.
 #[test]
-fn one_clients_zoom_does_not_stop_another_clients_keys() {
-    let (mut runtime, fake, client_a, mut viewer) = runtime();
+fn one_client_zooming_does_not_stop_another_client_keys() {
+    let (mut runtime, fake_pty_backend, first_client_id, mut viewer) = build_test_runtime();
     let now = Instant::now();
-    let first = only_pane(&runtime);
+    let original_pane_id = get_only_pane_id(&runtime);
 
     // Split so the tab has two panes; client A's focus lands on the new one.
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'p'), now);
-    press(&mut runtime, &mut viewer, chord(ModFlags::NONE, 'n'), now);
-    let second = focused_pane(&runtime, client_a);
-    assert_ne!(second, first);
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::CTRL, 'p'),
+        now,
+    );
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::NONE, 'n'),
+        now,
+    );
+    let focused_pane_id = get_focused_pane_id(&runtime, first_client_id);
+    assert_ne!(focused_pane_id, original_pane_id);
 
     // Client B joins the tab, focused on the first pane.
     let (session_id, tab_id) = {
-        let session = runtime.session_for_client(client_a).expect("session");
+        let session = runtime
+            .get_session_for_client(first_client_id)
+            .expect("session");
         (
-            session.id,
-            session.clients.get(client_a).expect("client").active_tab(),
+            session.session_id,
+            session
+                .clients
+                .get_client_by_id(first_client_id)
+                .expect("client")
+                .get_active_tab(),
         )
     };
-    let client_b = ClientId::new();
-    let mut joining = Client::new(
-        client_b,
+    let second_client_id = ClientId::new();
+    let mut joining_client = Client::from_attachment(
+        second_client_id,
         session_id,
         SystemTime::now(),
-        Size { cols: 80, rows: 24 },
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
         None,
         tab_id,
         ClientOrigin::Local,
         "C-test-client".to_string(),
         0,
     );
-    joining.update_focused_pane(tab_id, first);
+    joining_client.update_focused_pane(tab_id, original_pane_id);
     runtime
-        .sessions
+        .session_by_id
         .get_mut(&session_id)
         .expect("session")
-        .attach_client(joining);
+        .attach_client(joining_client);
 
-    let mut viewer_b = viewer_for(&mut runtime, client_b);
+    let mut second_viewer = build_viewer_client(&mut runtime, second_client_id);
 
-    // Client A zooms its own pane, hiding `first` — from A's view only.
-    dispatch(&mut runtime, client_a, Command::TogglePaneFullscreen);
+    // Client A zooms its own pane, hiding `original_pane_id` — from A's view only.
+    dispatch_test_command(&mut runtime, first_client_id, Command::TogglePaneFullscreen);
 
-    // B types. B is tiled and can see `first`, so its key lands there.
-    press(&mut runtime, &mut viewer_b, chord(ModFlags::NONE, 'y'), now);
-    assert_eq!(fake.writes(first).expect("writes"), vec![vec![b'y']]);
+    // B types. B is tiled and can see `original_pane_id`, so its key lands there.
+    apply_key_press(
+        &mut runtime,
+        &mut second_viewer,
+        build_key_chord(ModFlags::NONE, 'y'),
+        now,
+    );
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(original_pane_id)
+            .expect("writes"),
+        vec![vec![b'y']]
+    );
 
     // A types. A can see its zoomed pane, so its key lands there.
-    press(&mut runtime, &mut viewer, chord(ModFlags::NONE, 'z'), now);
-    assert_eq!(fake.writes(second).expect("writes"), vec![vec![b'z']]);
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::NONE, 'z'),
+        now,
+    );
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(focused_pane_id)
+            .expect("writes"),
+        vec![vec![b'z']]
+    );
 }
 
 /// Two clients view one tab holding a stack. Only the stack's active member is
@@ -1103,198 +1702,275 @@ fn one_clients_zoom_does_not_stop_another_clients_keys() {
 /// suppressed, it simply draws no content.
 #[test]
 fn a_key_writes_nothing_when_the_focused_pane_collapsed_to_a_stack_header() {
-    let (mut runtime, fake, client_a, mut viewer) = runtime();
+    let (mut runtime, fake_pty_backend, first_client_id, mut viewer) = build_test_runtime();
     let now = Instant::now();
-    let first = only_pane(&runtime);
+    let original_pane_id = get_only_pane_id(&runtime);
 
-    // Stack a second pane onto the first. The new member becomes the active one
-    // and takes client A's focus; `first` collapses to a header.
-    dispatch(
+    // Stack a second pane onto the original pane. The new member becomes the
+    // active one and takes client A's focus; the original pane collapses to a header.
+    dispatch_test_command(
         &mut runtime,
-        client_a,
+        first_client_id,
         Command::NewPane(NewPaneArgs {
-            source: Some(first),
-            tab: None,
+            source_pane_id: Some(original_pane_id),
+            tab_id: None,
             direction: Direction::Right,
-            stacked: true,
-            cwd: None,
-            command: None,
-            client: Some(client_a),
+            should_stack: true,
+            working_directory: None,
+            spawn_spec: None,
+            client_id: Some(first_client_id),
         }),
     );
-    let second = focused_pane(&runtime, client_a);
-    assert_ne!(second, first, "test setup: the stacked pane took focus");
+    let stacked_pane_id = get_focused_pane_id(&runtime, first_client_id);
+    assert_ne!(
+        stacked_pane_id, original_pane_id,
+        "test setup: the stacked pane took focus"
+    );
 
     // Client B joins the same tab.
     let (session_id, tab_id) = {
-        let session = runtime.session_for_client(client_a).expect("session");
+        let session = runtime
+            .get_session_for_client(first_client_id)
+            .expect("session");
         (
-            session.id,
-            session.clients.get(client_a).expect("client").active_tab(),
+            session.session_id,
+            session
+                .clients
+                .get_client_by_id(first_client_id)
+                .expect("client")
+                .get_active_tab(),
         )
     };
-    let client_b = ClientId::new();
-    let mut joining = Client::new(
-        client_b,
+    let second_client_id = ClientId::new();
+    let mut joining_client = Client::from_attachment(
+        second_client_id,
         session_id,
         SystemTime::now(),
-        Size { cols: 80, rows: 24 },
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
         None,
         tab_id,
         ClientOrigin::Local,
         "C-test-client".to_string(),
         0,
     );
-    joining.update_focused_pane(tab_id, second);
+    joining_client.update_focused_pane(tab_id, stacked_pane_id);
     runtime
-        .sessions
+        .session_by_id
         .get_mut(&session_id)
         .expect("session")
-        .attach_client(joining);
+        .attach_client(joining_client);
 
-    // Client B focuses the other member, which activates it — so `second`, the
-    // pane client A still has focused, collapses to a header.
-    dispatch(
+    // Client B focuses the other member, which activates it, so the stacked pane
+    // client A still has focused collapses to a header.
+    dispatch_test_command(
         &mut runtime,
-        client_b,
+        second_client_id,
         Command::FocusPane(FocusPaneArgs {
-            target: FocusTarget::Pane(first),
-            client: Some(client_b),
+            focus_target: FocusTarget::Pane(original_pane_id),
+            client_id: Some(second_client_id),
         }),
     );
     assert_eq!(
-        focused_pane(&runtime, client_a),
-        second,
-        "test setup: client A's focus did not move"
+        get_focused_pane_id(&runtime, first_client_id),
+        stacked_pane_id,
+        "test setup: client_id A's focus did not move"
     );
 
     // Client A types at a pane that now draws nothing; client B types at the
     // member that is drawn.
-    let mut viewer_b = viewer_for(&mut runtime, client_b);
-    press(&mut runtime, &mut viewer, chord(ModFlags::NONE, 'z'), now);
-    press(&mut runtime, &mut viewer_b, chord(ModFlags::NONE, 'y'), now);
+    let mut second_viewer = build_viewer_client(&mut runtime, second_client_id);
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::NONE, 'z'),
+        now,
+    );
+    apply_key_press(
+        &mut runtime,
+        &mut second_viewer,
+        build_key_chord(ModFlags::NONE, 'y'),
+        now,
+    );
 
-    assert_eq!(fake.writes(second).expect("writes"), Vec::<Vec<u8>>::new());
-    assert_eq!(fake.writes(first).expect("writes"), vec![vec![b'y']]);
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(stacked_pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(original_pane_id)
+            .expect("writes"),
+        vec![vec![b'y']]
+    );
 }
 
 #[test]
 fn pending_sequences_stay_independent_across_clients_in_the_same_session() {
-    let (mut runtime, fake, client_a, mut viewer) = runtime();
+    let (mut runtime, fake_pty_backend, first_client_id, mut viewer) = build_test_runtime();
     let now = Instant::now();
-    let original_pane = only_pane(&runtime);
+    let original_pane_id = get_only_pane_id(&runtime);
 
     // Split: client A's focus moves to the new pane, leaving `original_pane`
     // unfocused by anyone yet.
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'p'), now);
-    press(&mut runtime, &mut viewer, chord(ModFlags::NONE, 'n'), now);
-    let pane_a = focused_pane(&runtime, client_a);
-    assert_ne!(pane_a, original_pane);
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::CTRL, 'p'),
+        now,
+    );
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::NONE, 'n'),
+        now,
+    );
+    let first_client_pane_id = get_focused_pane_id(&runtime, first_client_id);
+    assert_ne!(first_client_pane_id, original_pane_id);
 
     // Client B joins the same session, focused on the original pane — a
     // different pane than client A's.
     let (session_id, tab_id) = {
-        let session = runtime.session_for_client(client_a).expect("session");
+        let session = runtime
+            .get_session_for_client(first_client_id)
+            .expect("session");
         (
-            session.id,
-            session.clients.get(client_a).expect("client").active_tab(),
+            session.session_id,
+            session
+                .clients
+                .get_client_by_id(first_client_id)
+                .expect("client")
+                .get_active_tab(),
         )
     };
-    let client_b = ClientId::new();
-    let mut second = Client::new(
-        client_b,
+    let second_client_id = ClientId::new();
+    let mut joining_client = Client::from_attachment(
+        second_client_id,
         session_id,
         SystemTime::now(),
-        Size { cols: 80, rows: 24 },
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
         None,
         tab_id,
         ClientOrigin::Local,
         "C-test-client".to_string(),
         0,
     );
-    second.update_focused_pane(tab_id, original_pane);
+    joining_client.update_focused_pane(tab_id, original_pane_id);
     runtime
-        .sessions
+        .session_by_id
         .get_mut(&session_id)
         .expect("session")
-        .attach_client(second);
+        .attach_client(joining_client);
 
     // Each viewer holds its own keymap and its own open sequence, so client B
     // gets one of its own.
-    let mut viewer_b = viewer_for(&mut runtime, client_b);
+    let mut second_viewer = build_viewer_client(&mut runtime, second_client_id);
 
     // Client A opens the pane prefix and leaves it hanging...
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'p'), now);
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::CTRL, 'p'),
+        now,
+    );
     // ...client B, meanwhile, sends an unrelated unbound key straight through
     // on its own (different) pane.
-    press(&mut runtime, &mut viewer_b, chord(ModFlags::NONE, 'z'), now);
+    apply_key_press(
+        &mut runtime,
+        &mut second_viewer,
+        build_key_chord(ModFlags::NONE, 'z'),
+        now,
+    );
 
     // Only `z` reaches client B's own pane — never client A's buffered
     // `<C-p>` byte, and client A's held pane sees nothing at all.
     assert_eq!(
-        fake.writes(original_pane).expect("writes"),
+        fake_pty_backend
+            .list_pane_write_bytes(original_pane_id)
+            .expect("writes"),
         vec![vec![b'z']]
     );
-    assert_eq!(fake.writes(pane_a).expect("writes"), Vec::<Vec<u8>>::new());
     assert_eq!(
-        viewer.pending_sequence().cloned(),
-        Some(KeySequence::from(chord(ModFlags::CTRL, 'p'))),
+        fake_pty_backend
+            .list_pane_write_bytes(first_client_pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
+    assert_eq!(
+        viewer.get_pending_key_sequence().cloned(),
+        Some(KeySequence::from(build_key_chord(ModFlags::CTRL, 'p'))),
         "client A's sequence is still open"
     );
     assert_eq!(
-        viewer_b.pending_sequence().cloned(),
+        second_viewer.get_pending_key_sequence().cloned(),
         None,
         "client B never opened one of its own"
     );
 }
 
 #[test]
-fn one_viewers_open_sequence_is_invisible_to_another() {
+fn one_viewer_open_sequence_is_invisible_to_another_viewer() {
     // Each viewer owns the sequence it is typing, so one holding a prefix open
     // cannot make another viewer's next key continue it.
-    let (mut runtime, _fake, client_a, mut viewer) = runtime();
-    press(
+    let (mut runtime, _fake_pty_backend, first_client_id, mut viewer) = build_test_runtime();
+    apply_key_press(
         &mut runtime,
         &mut viewer,
-        chord(ModFlags::CTRL, 'p'),
+        build_key_chord(ModFlags::CTRL, 'p'),
         Instant::now(),
     );
 
     // Client B joins the same session with no sequence of its own.
     let (session_id, tab_id) = {
-        let session = runtime.session_for_client(client_a).expect("session");
+        let session = runtime
+            .get_session_for_client(first_client_id)
+            .expect("session");
         (
-            session.id,
-            session.clients.get(client_a).expect("client").active_tab(),
+            session.session_id,
+            session
+                .clients
+                .get_client_by_id(first_client_id)
+                .expect("client")
+                .get_active_tab(),
         )
     };
-    let client_b = ClientId::new();
-    let mut second = Client::new(
-        client_b,
+    let second_client_id = ClientId::new();
+    let mut joining_client = Client::from_attachment(
+        second_client_id,
         session_id,
         SystemTime::now(),
-        Size { cols: 80, rows: 24 },
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
         None,
         tab_id,
         ClientOrigin::Local,
         "C-test-client".to_string(),
         0,
     );
-    second.update_focused_pane(tab_id, only_pane(&runtime));
+    joining_client.update_focused_pane(tab_id, get_only_pane_id(&runtime));
     runtime
-        .sessions
+        .session_by_id
         .get_mut(&session_id)
         .expect("session")
-        .attach_client(second);
-    let mut viewer_b = viewer_for(&mut runtime, client_b);
+        .attach_client(joining_client);
+    let mut second_viewer = build_viewer_client(&mut runtime, second_client_id);
 
     assert_eq!(
-        viewer.pending_sequence().cloned(),
-        Some(KeySequence::from(chord(ModFlags::CTRL, 'p'))),
+        viewer.get_pending_key_sequence().cloned(),
+        Some(KeySequence::from(build_key_chord(ModFlags::CTRL, 'p'))),
         "client A is mid-sequence"
     );
     assert_eq!(
-        viewer_b.pending_sequence().cloned(),
+        second_viewer.get_pending_key_sequence().cloned(),
         None,
         "client B has nothing open"
     );
@@ -1302,40 +1978,40 @@ fn one_viewers_open_sequence_is_invisible_to_another() {
     // So B's `n` is its own key, not the continuation that would fire
     // `<C-p> n` — it types, and A's sequence is still waiting.
     assert_eq!(
-        viewer_b.resolve_key(chord(ModFlags::NONE, 'n'), Instant::now()),
-        KeyOutcome::PassThrough(chord(ModFlags::NONE, 'n'))
+        second_viewer.resolve_key(build_key_chord(ModFlags::NONE, 'n'), Instant::now()),
+        KeyOutcome::PassThrough(build_key_chord(ModFlags::NONE, 'n'))
     );
     assert_eq!(
-        viewer.pending_sequence().cloned(),
-        Some(KeySequence::from(chord(ModFlags::CTRL, 'p'))),
+        viewer.get_pending_key_sequence().cloned(),
+        Some(KeySequence::from(build_key_chord(ModFlags::CTRL, 'p'))),
         "A's sequence outlives B's keypress"
     );
 }
 
 #[test]
 fn a_sequence_grows_to_the_chord_depth_cap_and_no_further() {
-    let (mut runtime, fake, _client, mut viewer) = runtime();
-    let pane = only_pane(&runtime);
+    let (mut runtime, fake_pty_backend, _client_id, mut viewer) = build_test_runtime();
+    let pane_id = get_only_pane_id(&runtime);
     // A 4-chord binding, exactly the default `max_chord_depth`. The cap bounds
     // pending state without a check on the input path: a sequence only grows
     // while a longer live binding still starts with it, and the merge drops any
     // binding past the cap, so no pending sequence can outgrow it.
-    let long = KeySequence::new(
-        chord(ModFlags::CTRL, 'y'),
+    let long_key_sequence = KeySequence::from_first_and_rest(
+        build_key_chord(ModFlags::CTRL, 'y'),
         vec![
-            chord(ModFlags::NONE, 'a'),
-            chord(ModFlags::NONE, 'b'),
-            chord(ModFlags::NONE, 'c'),
+            build_key_chord(ModFlags::NONE, 'a'),
+            build_key_chord(ModFlags::NONE, 'b'),
+            build_key_chord(ModFlags::NONE, 'c'),
         ],
     );
-    bind_normal(
+    configure_normal_keybinding(
         &mut viewer,
-        long.clone(),
-        ActionRef::core("new-tab").expect("valid core action name"),
+        long_key_sequence.clone(),
+        ActionReference::from_core_action_name("new-tab").expect("valid core action name"),
         ActionArgs::None,
     );
-    let tabs_before = runtime
-        .sessions()
+    let tab_count_before = runtime
+        .list_sessions()
         .values()
         .next()
         .expect("session")
@@ -1343,80 +2019,113 @@ fn a_sequence_grows_to_the_chord_depth_cap_and_no_further() {
         .len();
 
     let now = Instant::now();
-    for chord in long.chords() {
-        press(&mut runtime, &mut viewer, *chord, now);
+    for chord in long_key_sequence.list_chords() {
+        apply_key_press(&mut runtime, &mut viewer, *chord, now);
     }
 
     // The full-depth binding fires, the sequence closes, and nothing along the
     // way was typed at the pane.
     assert_eq!(
         runtime
-            .sessions()
+            .list_sessions()
             .values()
             .next()
             .expect("session")
             .tabs
             .len(),
-        tabs_before + 1
+        tab_count_before + 1
     );
-    assert_eq!(viewer.pending_sequence().cloned(), None);
-    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
+    assert_eq!(viewer.get_pending_key_sequence().cloned(), None);
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
 }
 
 #[test]
 fn the_unlock_chord_escapes_a_locked_client_from_inside_an_open_sequence() {
-    let (mut runtime, fake, client, mut viewer) = runtime();
-    let pane = only_pane(&runtime);
+    let (mut runtime, fake_pty_backend, client_id, mut viewer) = build_test_runtime();
+    let pane_id = get_only_pane_id(&runtime);
     let now = Instant::now();
     // A locked-mode sequence of the user's own: `<C-x> a`. Pressing `<C-x>`
     // opens it, so the client is locked AND mid-sequence — the state the unlock
     // guarantee has to survive.
-    bind_locked(
+    configure_locked_keybinding(
         &mut viewer,
-        KeySequence::new(chord(ModFlags::CTRL, 'x'), vec![chord(ModFlags::NONE, 'a')]),
-        ActionRef::core("new-tab").expect("valid core action name"),
+        KeySequence::from_first_and_rest(
+            build_key_chord(ModFlags::CTRL, 'x'),
+            vec![build_key_chord(ModFlags::NONE, 'a')],
+        ),
+        ActionReference::from_core_action_name("new-tab").expect("valid core action name"),
         ActionArgs::None,
     );
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'l'), now);
-    assert_eq!(lock_mode(&runtime, client), LockMode::Locked);
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'x'), now);
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::CTRL, 'l'),
+        now,
+    );
+    assert_eq!(get_client_lock_mode(&runtime, client_id), LockMode::Locked);
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::CTRL, 'x'),
+        now,
+    );
     assert_eq!(
-        viewer.pending_sequence().cloned(),
-        Some(KeySequence::from(chord(ModFlags::CTRL, 'x')))
+        viewer.get_pending_key_sequence().cloned(),
+        Some(KeySequence::from(build_key_chord(ModFlags::CTRL, 'x')))
     );
 
     // The unlock chord resolves ahead of the keymap and ahead of the open
     // sequence: the client unlocks, the held `<C-x>` is dropped rather than
     // typed at the pane, and no pending sequence survives into normal mode.
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'l'), now);
-    assert_eq!(lock_mode(&runtime, client), LockMode::Normal);
-    assert_eq!(viewer.pending_sequence().cloned(), None);
-    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::CTRL, 'l'),
+        now,
+    );
+    assert_eq!(get_client_lock_mode(&runtime, client_id), LockMode::Normal);
+    assert_eq!(viewer.get_pending_key_sequence().cloned(), None);
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
 }
 
 #[test]
 fn a_locked_binding_holding_the_unlock_chord_never_fires_and_never_captures() {
-    let (mut runtime, fake, client, mut viewer) = runtime();
-    let pane = only_pane(&runtime);
+    let (mut runtime, fake_pty_backend, client_id, mut viewer) = build_test_runtime();
+    let pane_id = get_only_pane_id(&runtime);
     let now = Instant::now();
     // `<C-x> <C-l>` in locked mode: the unlock resolves at the `<C-l>` wherever
     // it is pressed, so this binding can never fire. The config layer knows it
     // is dead and drops it, which is what keeps the two halves honest — if the
     // merge admitted it, `<C-x>` would become a live prefix that captures the
     // keyboard and offers a hint-bar continuation that silently unlocks.
-    bind_locked(
+    configure_locked_keybinding(
         &mut viewer,
-        KeySequence::new(
-            chord(ModFlags::CTRL, 'x'),
+        KeySequence::from_first_and_rest(
+            build_key_chord(ModFlags::CTRL, 'x'),
             vec![KeybindingsConfig::RESERVED_UNLOCK],
         ),
-        ActionRef::core("new-tab").expect("valid core action name"),
+        ActionReference::from_core_action_name("new-tab").expect("valid core action name"),
         ActionArgs::None,
     );
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'l'), now);
-    assert_eq!(lock_mode(&runtime, client), LockMode::Locked);
-    let tabs_before = runtime
-        .sessions()
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::CTRL, 'l'),
+        now,
+    );
+    assert_eq!(get_client_lock_mode(&runtime, client_id), LockMode::Locked);
+    let tab_count_before = runtime
+        .list_sessions()
         .values()
         .next()
         .expect("session")
@@ -1425,322 +2134,405 @@ fn a_locked_binding_holding_the_unlock_chord_never_fires_and_never_captures() {
 
     // The dead binding wins no key: `<C-x>` opens no sequence and passes to the
     // pane verbatim, exactly as locked mode passes every unbound key.
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'x'), now);
-    assert_eq!(viewer.pending_sequence().cloned(), None);
-    assert_eq!(fake.writes(pane).expect("writes"), vec![vec![0x18]]);
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::CTRL, 'x'),
+        now,
+    );
+    assert_eq!(viewer.get_pending_key_sequence().cloned(), None);
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        vec![vec![0x18]]
+    );
 
     // And the unlock still unlocks — it never became a continuation of anything.
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'l'), now);
-    assert_eq!(lock_mode(&runtime, client), LockMode::Normal);
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::CTRL, 'l'),
+        now,
+    );
+    assert_eq!(get_client_lock_mode(&runtime, client_id), LockMode::Normal);
     assert_eq!(
         runtime
-            .sessions()
+            .list_sessions()
             .values()
             .next()
             .expect("session")
             .tabs
             .len(),
-        tabs_before,
+        tab_count_before,
         "the dead binding's action must never run"
     );
-    assert_eq!(fake.writes(pane).expect("writes"), vec![vec![0x18]]);
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        vec![vec![0x18]]
+    );
 }
 
 #[test]
 fn expire_key_sequences_before_the_deadline_leaves_pending_intact() {
-    let (mut runtime, _fake, _client, mut viewer) = runtime();
+    let (mut runtime, _fake_pty_backend, _client_id, mut viewer) = build_test_runtime();
     // `<C-y>` alone is both a complete binding and a prefix of `<C-y> x`, so
     // pressing it arms an ambiguity deadline.
-    bind_normal_all(
+    configure_normal_keybindings(
         &mut viewer,
         vec![
             (
-                KeySequence::new(chord(ModFlags::CTRL, 'y'), Vec::new()),
-                ActionRef::core("new-tab").expect("valid core action name"),
+                KeySequence::from_first_and_rest(build_key_chord(ModFlags::CTRL, 'y'), Vec::new()),
+                ActionReference::from_core_action_name("new-tab").expect("valid core action name"),
                 ActionArgs::None,
             ),
             (
-                KeySequence::new(chord(ModFlags::CTRL, 'y'), vec![chord(ModFlags::NONE, 'x')]),
-                ActionRef::core("unlock").expect("valid core action name"),
+                KeySequence::from_first_and_rest(
+                    build_key_chord(ModFlags::CTRL, 'y'),
+                    vec![build_key_chord(ModFlags::NONE, 'x')],
+                ),
+                ActionReference::from_core_action_name("unlock").expect("valid core action name"),
                 ActionArgs::None,
             ),
         ],
     );
     let now = Instant::now();
-    let tabs_before = runtime
-        .sessions()
+    let tab_count_before = runtime
+        .list_sessions()
         .values()
         .next()
         .expect("session")
         .tabs
         .len();
 
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'y'), now);
-    let deadline = now + chord_timeout(&viewer);
-    expire(
+    apply_key_press(
         &mut runtime,
         &mut viewer,
-        deadline - Duration::from_millis(1),
+        build_key_chord(ModFlags::CTRL, 'y'),
+        now,
+    );
+    let ambiguity_deadline = now + get_chord_timeout(&viewer);
+    expire_pending_key_sequence(
+        &mut runtime,
+        &mut viewer,
+        ambiguity_deadline - Duration::from_millis(1),
     );
 
     assert_eq!(
         runtime
-            .sessions()
+            .list_sessions()
             .values()
             .next()
             .expect("session")
             .tabs
             .len(),
-        tabs_before
+        tab_count_before
     );
     assert_eq!(
-        viewer.pending_sequence().cloned(),
-        Some(KeySequence::from(chord(ModFlags::CTRL, 'y')))
+        viewer.get_pending_key_sequence().cloned(),
+        Some(KeySequence::from(build_key_chord(ModFlags::CTRL, 'y')))
     );
 }
 
 #[test]
 fn expire_key_sequences_at_the_deadline_fires_the_ambiguous_bindings_exact_match() {
-    let (mut runtime, _fake, _client, mut viewer) = runtime();
-    bind_normal_all(
+    let (mut runtime, _fake_pty_backend, _client_id, mut viewer) = build_test_runtime();
+    configure_normal_keybindings(
         &mut viewer,
         vec![
             (
-                KeySequence::new(chord(ModFlags::CTRL, 'y'), Vec::new()),
-                ActionRef::core("new-tab").expect("valid core action name"),
+                KeySequence::from_first_and_rest(build_key_chord(ModFlags::CTRL, 'y'), Vec::new()),
+                ActionReference::from_core_action_name("new-tab").expect("valid core action name"),
                 ActionArgs::None,
             ),
             (
-                KeySequence::new(chord(ModFlags::CTRL, 'y'), vec![chord(ModFlags::NONE, 'x')]),
-                ActionRef::core("unlock").expect("valid core action name"),
+                KeySequence::from_first_and_rest(
+                    build_key_chord(ModFlags::CTRL, 'y'),
+                    vec![build_key_chord(ModFlags::NONE, 'x')],
+                ),
+                ActionReference::from_core_action_name("unlock").expect("valid core action name"),
                 ActionArgs::None,
             ),
         ],
     );
     let now = Instant::now();
-    let tabs_before = runtime
-        .sessions()
+    let tab_count_before = runtime
+        .list_sessions()
         .values()
         .next()
         .expect("session")
         .tabs
         .len();
 
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'y'), now);
-    let deadline = now + chord_timeout(&viewer);
-    expire(&mut runtime, &mut viewer, deadline);
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::CTRL, 'y'),
+        now,
+    );
+    let ambiguity_deadline = now + get_chord_timeout(&viewer);
+    expire_pending_key_sequence(&mut runtime, &mut viewer, ambiguity_deadline);
 
     assert_eq!(
         runtime
-            .sessions()
+            .list_sessions()
             .values()
             .next()
             .expect("session")
             .tabs
             .len(),
-        tabs_before + 1
+        tab_count_before + 1
     );
-    assert_eq!(viewer.pending_sequence().cloned(), None);
+    assert_eq!(viewer.get_pending_key_sequence().cloned(), None);
 }
 
 #[test]
 fn a_held_exact_binding_survives_a_key_it_cannot_use_and_fires_at_its_deadline() {
-    let (mut runtime, fake, client, mut viewer) = runtime();
-    let pane = only_pane(&runtime);
+    let (mut runtime, fake_pty_backend, client_id, mut viewer) = build_test_runtime();
+    let pane_id = get_only_pane_id(&runtime);
     // `<C-y>` alone is both a complete binding and a prefix of `<C-y> x`, so
     // pressing it opens a sequence that carries an ambiguity deadline.
-    bind_normal_all(
+    configure_normal_keybindings(
         &mut viewer,
         vec![
             (
-                KeySequence::new(chord(ModFlags::CTRL, 'y'), Vec::new()),
-                ActionRef::core("new-tab").expect("valid core action name"),
+                KeySequence::from_first_and_rest(build_key_chord(ModFlags::CTRL, 'y'), Vec::new()),
+                ActionReference::from_core_action_name("new-tab").expect("valid core action name"),
                 ActionArgs::None,
             ),
             (
-                KeySequence::new(chord(ModFlags::CTRL, 'y'), vec![chord(ModFlags::NONE, 'x')]),
-                ActionRef::core("unlock").expect("valid core action name"),
+                KeySequence::from_first_and_rest(
+                    build_key_chord(ModFlags::CTRL, 'y'),
+                    vec![build_key_chord(ModFlags::NONE, 'x')],
+                ),
+                ActionReference::from_core_action_name("unlock").expect("valid core action name"),
                 ActionArgs::None,
             ),
         ],
     );
     let now = Instant::now();
-    let tabs_before = runtime
-        .sessions()
+    let tab_count_before = runtime
+        .list_sessions()
         .values()
         .next()
         .expect("session")
         .tabs
         .len();
 
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'y'), now);
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::CTRL, 'y'),
+        now,
+    );
     // `z` extends `<C-y>` into nothing, so it is discarded — the sequence is not
     // abandoned by a key it cannot use, and its deadline still stands.
-    press(&mut runtime, &mut viewer, chord(ModFlags::NONE, 'z'), now);
+    apply_key_press(
+        &mut runtime,
+        &mut viewer,
+        build_key_chord(ModFlags::NONE, 'z'),
+        now,
+    );
     assert_eq!(
         runtime
-            .sessions()
+            .list_sessions()
             .values()
             .next()
             .expect("session")
             .tabs
             .len(),
-        tabs_before,
-        "the held binding waits for its deadline, not for a mismatch"
+        tab_count_before,
+        "the held binding waits for its ambiguity_deadline, not for a mismatch"
     );
     assert_eq!(
-        viewer.pending_sequence().cloned(),
-        Some(KeySequence::from(chord(ModFlags::CTRL, 'y')))
+        viewer.get_pending_key_sequence().cloned(),
+        Some(KeySequence::from(build_key_chord(ModFlags::CTRL, 'y')))
     );
 
     // The deadline decides: `<C-y>`'s own binding fires, and the client lands on
     // the new tab. Neither the held chord nor the discarded `z` was ever typed.
-    let deadline = now + chord_timeout(&viewer);
-    expire(&mut runtime, &mut viewer, deadline);
+    let ambiguity_deadline = now + get_chord_timeout(&viewer);
+    expire_pending_key_sequence(&mut runtime, &mut viewer, ambiguity_deadline);
     assert_eq!(
         runtime
-            .sessions()
+            .list_sessions()
             .values()
             .next()
             .expect("session")
             .tabs
             .len(),
-        tabs_before + 1
+        tab_count_before + 1
     );
-    let new_pane = focused_pane(&runtime, client);
+    let new_pane_id = get_focused_pane_id(&runtime, client_id);
     assert_ne!(
-        new_pane, pane,
+        new_pane_id, pane_id,
         "new-tab must have switched focus to a new pane"
     );
     assert_eq!(
-        fake.writes(new_pane).expect("writes"),
+        fake_pty_backend
+            .list_pane_write_bytes(new_pane_id)
+            .expect("writes"),
         Vec::<Vec<u8>>::new()
     );
-    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
-    assert_eq!(viewer.pending_sequence().cloned(), None);
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
+    assert_eq!(viewer.get_pending_key_sequence().cloned(), None);
 }
 
 #[test]
 fn typing_snaps_a_scrolled_up_view_back_to_live_output() {
-    let (mut runtime, pane, client, mut viewer) = runtime_scrolled_up();
-    assert_eq!(scroll_offset(&runtime, client, pane), 3);
+    let (mut runtime, pane_id, client_id, mut viewer) = build_runtime_with_scrolled_client();
+    assert_eq!(get_client_scroll_offset(&runtime, client_id, pane_id), 3);
 
-    press(
+    apply_key_press(
         &mut runtime,
         &mut viewer,
-        chord(ModFlags::NONE, 'a'),
+        build_key_chord(ModFlags::NONE, 'a'),
         Instant::now(),
     );
-    assert_eq!(scroll_offset(&runtime, client, pane), 0);
+    assert_eq!(get_client_scroll_offset(&runtime, client_id, pane_id), 0);
 }
 
 #[test]
 fn typing_leaves_the_view_parked_when_scroll_on_input_is_off() {
-    let (mut runtime, pane, client, mut viewer) = runtime_scrolled_up();
-    runtime.client_config.scrollback.scroll_on_input = false;
+    let (mut runtime, pane_id, client_id, mut viewer) = build_runtime_with_scrolled_client();
+    runtime.client_config.scrollback.should_scroll_to_input = false;
 
-    press(
+    apply_key_press(
         &mut runtime,
         &mut viewer,
-        chord(ModFlags::NONE, 'a'),
+        build_key_chord(ModFlags::NONE, 'a'),
         Instant::now(),
     );
-    assert_eq!(scroll_offset(&runtime, client, pane), 3);
+    assert_eq!(get_client_scroll_offset(&runtime, client_id, pane_id), 3);
 }
 
 #[test]
 fn typing_on_the_alternate_screen_leaves_the_view_to_the_program() {
-    let (mut runtime, pane, client, mut viewer) = runtime_scrolled_up();
-    runtime.handle_pty_output(pane, b"\x1b[?1049h"); // enter the alternate screen
+    let (mut runtime, pane_id, client_id, mut viewer) = build_runtime_with_scrolled_client();
+    runtime.handle_pty_output(pane_id, b"\x1b[?1049h"); // enter the alternate screen
 
-    press(
+    apply_key_press(
         &mut runtime,
         &mut viewer,
-        chord(ModFlags::NONE, 'a'),
+        build_key_chord(ModFlags::NONE, 'a'),
         Instant::now(),
     );
-    assert_eq!(scroll_offset(&runtime, client, pane), 3);
+    assert_eq!(get_client_scroll_offset(&runtime, client_id, pane_id), 3);
 }
 
 #[test]
 fn pasting_snaps_a_scrolled_up_view_back_to_live_output() {
-    let (mut runtime, pane, client, _viewer) = runtime_scrolled_up();
+    let (mut runtime, pane_id, client_id, _viewer) = build_runtime_with_scrolled_client();
 
-    runtime.handle_host_paste(client, "ls\n");
-    assert_eq!(scroll_offset(&runtime, client, pane), 0);
+    runtime.handle_host_paste(client_id, "ls\n");
+    assert_eq!(get_client_scroll_offset(&runtime, client_id, pane_id), 0);
 }
 
 #[test]
 fn an_empty_host_paste_writes_nothing() {
-    let (mut runtime, fake, client, _viewer) = runtime();
-    let pane = only_pane(&runtime);
+    let (mut runtime, fake_pty_backend, client_id, _viewer) = build_test_runtime();
+    let pane_id = get_only_pane_id(&runtime);
 
     // Selecting nothing and hitting the OS paste key hands the session an
     // empty string; no empty write reaches the shell.
-    runtime.handle_host_paste(client, "");
+    runtime.handle_host_paste(client_id, "");
 
-    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
 }
 
 #[test]
 fn a_host_paste_from_an_unknown_client_writes_nothing() {
-    let (mut runtime, fake, _client, _viewer) = runtime();
-    let pane = only_pane(&runtime);
+    let (mut runtime, fake_pty_backend, _client_id, _viewer) = build_test_runtime();
+    let pane_id = get_only_pane_id(&runtime);
 
     // A paste arriving for a client the session does not know has no lock mode
     // to read, so nothing is written rather than landing on someone else's pane.
     runtime.handle_host_paste(ClientId::new(), "ls");
 
-    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
 }
 
 #[test]
 fn a_host_paste_still_reaches_the_pane_while_the_client_is_locked() {
-    let (mut runtime, fake, client, mut viewer) = runtime();
-    let pane = only_pane(&runtime);
-    press(
+    let (mut runtime, fake_pty_backend, client_id, mut viewer) = build_test_runtime();
+    let pane_id = get_only_pane_id(&runtime);
+    apply_key_press(
         &mut runtime,
         &mut viewer,
-        chord(ModFlags::CTRL, 'l'),
+        build_key_chord(ModFlags::CTRL, 'l'),
         Instant::now(),
     );
-    assert_eq!(lock_mode(&runtime, client), LockMode::Locked);
+    assert_eq!(get_client_lock_mode(&runtime, client_id), LockMode::Locked);
 
-    runtime.handle_host_paste(client, "ls");
+    runtime.handle_host_paste(client_id, "ls");
 
     // Locked mode passes what it does not bind, and it binds no paste.
-    assert_eq!(fake.writes(pane).expect("writes"), vec![b"ls".to_vec()]);
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        vec![b"ls".to_vec()]
+    );
 }
 
 #[test]
 fn a_host_paste_writes_nothing_when_the_focused_pane_is_suppressed() {
-    let (mut runtime, fake, client, _viewer) = runtime();
-    let pane = only_pane(&runtime);
+    let (mut runtime, fake_pty_backend, client_id, _viewer) = build_test_runtime();
+    let pane_id = get_only_pane_id(&runtime);
 
     // 3x3 leaves less than MIN_PANE_SIZE plus the pane's one-cell border, so
     // the sole pane draws no content and a paste is aimed at nothing.
-    runtime.handle_client_resize(client, Size { cols: 3, rows: 3 }, None);
+    runtime.handle_client_resize(
+        client_id,
+        Size {
+            column_count: 3,
+            row_count: 3,
+        },
+        None,
+    );
     assert!(
         runtime
-            .build_snapshot(client)
+            .build_snapshot(client_id)
             .expect("snapshot")
-            .session
-            .active_tab
-            .all_suppressed,
+            .session_snapshot
+            .active_tab_snapshot
+            .are_all_panes_suppressed,
         "test setup: the sole pane must be suppressed at this size"
     );
 
-    runtime.handle_host_paste(client, "ls");
+    runtime.handle_host_paste(client_id, "ls");
 
-    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
 }
 
 #[test]
 fn a_bound_action_the_session_does_not_know_dispatches_nothing() {
-    let (mut runtime, fake, client, _viewer) = runtime();
-    let pane = only_pane(&runtime);
-    let tabs_before = runtime
-        .sessions()
+    let (mut runtime, fake_pty_backend, client_id, _viewer) = build_test_runtime();
+    let pane_id = get_only_pane_id(&runtime);
+    let tab_count_before = runtime
+        .list_sessions()
         .values()
         .next()
         .expect("session")
@@ -1751,24 +2543,30 @@ fn a_bound_action_the_session_does_not_know_dispatches_nothing() {
     // for: the action resolves to no plan, so no command is dispatched and the
     // chord is not written to the pane either.
     runtime.handle_bound_action(
-        client,
+        client_id,
         BoundAction {
-            action: ActionRef::core("no-such-action").expect("valid core action name"),
-            args: ActionArgs::None,
+            action_reference: ActionReference::from_core_action_name("no-such-action")
+                .expect("valid core action name"),
+            action_arguments: ActionArgs::None,
         },
         Direction::Right,
     );
 
     assert_eq!(
         runtime
-            .sessions()
+            .list_sessions()
             .values()
             .next()
             .expect("session")
             .tabs
             .len(),
-        tabs_before
+        tab_count_before
     );
-    assert_eq!(runtime.pty_handles.len(), 1);
-    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
+    assert_eq!(runtime.pty_handle_by_pane_id.len(), 1);
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
 }

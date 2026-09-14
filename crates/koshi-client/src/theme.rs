@@ -1,7 +1,7 @@
 //! Turning a viewer's configured palette into the colors it paints with.
 //!
 //! A config theme names each chrome role as `#RRGGBB` text; the renderer wants
-//! truecolor values. [`resolve`] is that one conversion, run once when a
+//! truecolor values. [`resolve_theme`] is that one conversion, run once when a
 //! viewer's config loads or reloads rather than once per frame.
 
 use koshi_config::types::{RgbColor, ThemeConfig};
@@ -17,31 +17,39 @@ mod tests;
 /// first tab ribbon paints red. Resolving the default config theme yields
 /// exactly [`Theme::default`], so a default config reproduces the stock look.
 #[must_use]
-pub fn resolve(config: &ThemeConfig) -> Theme {
-    let colors = &config.colors;
+pub fn resolve_theme(theme_config: &ThemeConfig) -> Theme {
+    let theme_colors = &theme_config.colors;
     Theme {
-        ramp_start: rgb_channels(colors.ramp_start),
-        ramp_end: rgb_channels(colors.ramp_end),
-        on_ramp: rgb_color(colors.on_ramp),
-        on_ramp_dim: rgb_color(colors.on_ramp_dim),
-        accent: rgb_color(colors.accent),
-        on_accent: rgb_color(colors.on_accent),
-        border_focused: rgb_color(colors.border_focused),
-        border_unfocused: rgb_color(colors.border_unfocused),
-        border_hover: rgb_color(colors.border_hover),
-        stack_header_fg: rgb_color(colors.stack_header_fg),
-        stack_header_bg: rgb_color(colors.stack_header_bg),
-        letterbox: rgb_color(colors.letterbox),
-        bar_bg: rgb_color(colors.bar_bg),
+        ramp_start: extract_rgb_channels(theme_colors.ramp_start),
+        ramp_end: extract_rgb_channels(theme_colors.ramp_end),
+        ramp_block_text_color: convert_rgb_color(theme_colors.on_ramp),
+        dimmed_ramp_text_color: convert_rgb_color(theme_colors.on_ramp_dim),
+        accent_color: convert_rgb_color(theme_colors.accent),
+        accent_block_text_color: convert_rgb_color(theme_colors.on_accent),
+        focused_border_color: convert_rgb_color(theme_colors.border_focused),
+        unfocused_border_color: convert_rgb_color(theme_colors.border_unfocused),
+        hover_border_color: convert_rgb_color(theme_colors.border_hover),
+        stack_header_text_color: convert_rgb_color(theme_colors.stack_header_fg),
+        stack_header_background_color: convert_rgb_color(theme_colors.stack_header_bg),
+        letterbox_color: convert_rgb_color(theme_colors.letterbox),
+        bar_background_color: convert_rgb_color(theme_colors.bar_bg),
     }
 }
 
 /// A config color's `(r, g, b)` channels, for the theme's ramp endpoints.
-fn rgb_channels(color: RgbColor) -> (u8, u8, u8) {
-    (color.r, color.g, color.b)
+fn extract_rgb_channels(rgb_color_value: RgbColor) -> (u8, u8, u8) {
+    (
+        rgb_color_value.red,
+        rgb_color_value.green,
+        rgb_color_value.blue,
+    )
 }
 
 /// A config color as a ratatui truecolor.
-fn rgb_color(color: RgbColor) -> Color {
-    Color::Rgb(color.r, color.g, color.b)
+fn convert_rgb_color(rgb_color_value: RgbColor) -> Color {
+    Color::Rgb(
+        rgb_color_value.red,
+        rgb_color_value.green,
+        rgb_color_value.blue,
+    )
 }

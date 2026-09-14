@@ -6,14 +6,14 @@
 //! each of that tab's panes' terminal grids, cursors, and scrollback tallies
 //! copied out. A pane the client follows live travels by reference — the
 //! per-pane [`Arc<Grid>`](koshi_terminal::grid::state::Grid) handle from
-//! [`TerminalState::active_grid_arc`](koshi_terminal::state::TerminalState::active_grid_arc)
+//! [`TerminalState::get_active_grid_arc`](koshi_terminal::state::TerminalState::get_active_grid_arc)
 //! — and copies no cells; the next write to that pane clones its buffer once
 //! (copy-on-write). A pane the client has scrolled back in carries a grid
 //! composed for that window instead.
 //!
 //! The snapshot is per-client, not session-global: `session.active_tab` holds
 //! *this* client's viewed tab, and always names the same tab as
-//! `client.active_tab`, while `session.name`/`tabs_metadata` are the true
+//! `client.active_tab`, while `session.session_name`/`tabs_metadata` are the true
 //! session-wide data.
 //!
 //! `Server::build_layout` is the same work stopping short of the panes: it
@@ -31,9 +31,9 @@ use koshi_core::command::{Selection, SelectionKind};
 use koshi_core::geometry::{Rect, Size};
 use koshi_core::ids::{ClientId, PaneId};
 use koshi_core::mouse::MouseTracking;
-use koshi_layout::content::content_rects;
+use koshi_layout::content::list_content_rects;
 use koshi_layout::mode::LayoutMode;
-use koshi_layout::solver::{solve_with_mode_min, PaneSizing, SolveResult};
+use koshi_layout::solver::{solve_layout_with_mode, LayoutSolve, PaneSizing};
 use koshi_pane::pane::lifecycle::PaneLifecycle;
 use koshi_pane::pane::state::PaneKind;
 use koshi_renderer::snapshot::{
@@ -44,7 +44,7 @@ use koshi_renderer::snapshot::{
 use koshi_session::session::state::Tab;
 use koshi_terminal::grid::state::Grid;
 use koshi_terminal::scrollback::Scrollback;
-use koshi_terminal::selection::order;
+use koshi_terminal::selection::order_selection_positions;
 use koshi_terminal::state::Screen;
 
 use crate::server::Server;
@@ -61,30 +61,30 @@ impl Server {
     /// [`PaneArea::Starving`](koshi_core::geometry::PaneArea::Starving) solves
     /// at `0x0`: every pane is suppressed and the frame carries `all_suppressed`.
     pub fn build_snapshot(&self, client_id: ClientId) -> Option<RenderSnapshot> {
-        let layout = self.build_layout(client_id)?;
-        let session = self.session_for_client(client_id)?;
-        let client = session.clients.get(client_id)?;
+        let owned_frame_layout = self.build_frame_layout(client_id)?;
+        let session = self.get_session_for_client(client_id)?;
+        let client = session.clients.get_client_by_id(client_id)?;
 
         // One content snapshot per solved slot, in slot order.
-        let panes: Vec<PaneSnapshot> = layout
-            .session
-            .active_tab
-            .layout_solved
+        let pane_snapshots: Vec<PaneSnapshot> = owned_frame_layout
+            .session_snapshot
+            .active_tab_snapshot
+            .pane_slots
             .iter()
-            .map(|slot| {
-                self.pane_snapshot(
-                    slot.pane_id,
-                    client.scroll_offset(slot.pane_id),
-                    client.selection(slot.pane_id),
+            .map(|pane_slot| {
+                self.build_pane_snapshot(
+                    pane_slot.pane_id,
+                    client.get_scroll_offset(pane_slot.pane_id),
+                    client.get_selection(pane_slot.pane_id),
                 )
             })
             .collect();
 
         Some(RenderSnapshot {
-            session: layout.session,
-            panes,
-            client: layout.client,
-            plugin_ui: PluginUiSnapshot::default(),
+            session_snapshot: owned_frame_layout.session_snapshot,
+            pane_snapshots,
+            client_snapshot: owned_frame_layout.client_snapshot,
+            plugin_ui_snapshot: PluginUiSnapshot::default(),
         })
     }
 
@@ -98,11 +98,11 @@ impl Server {
     /// This is [`build_snapshot`](Self::build_snapshot) without the per-pane
     /// content: no grid, no title, no highlight resolution. Placing a forwarded
     /// mouse report in its pane reads only these fields.
-    pub(crate) fn build_layout(&self, client_id: ClientId) -> Option<OwnedFrameLayout> {
-        let session = self.session_for_client(client_id)?;
-        let client = session.clients.get(client_id)?;
-        let active_tab_id = client.active_tab();
-        let tab = session.tabs.get(&active_tab_id)?;
+    pub(crate) fn build_frame_layout(&self, client_id: ClientId) -> Option<OwnedFrameLayout> {
+        let session = self.get_session_for_client(client_id)?;
+        let client = session.clients.get_client_by_id(client_id)?;
+        let active_tab_id = client.get_active_tab();
+        let tab_record = session.tabs.get(&active_tab_id)?;
 
         // Solve the active tab's layout over a rect at origin (0, 0) sized to the
         // shared effective size; the renderer offsets it into the client viewport.
@@ -112,76 +112,84 @@ impl Server {
         // The solve uses THIS client's layout mode: zoom is per-client, so a pane
         // filling the tab for this client can be one tile among several for
         // another client viewing the same tab at the same moment.
-        let effective_size = session
-            .tab_viewport(active_tab_id)
-            .unwrap_or(Size { cols: 0, rows: 0 });
-        let layout_mode = client.layout_mode(active_tab_id);
-        let sizing = self.pane_sizing();
-        let solve = solve_tab(tab, layout_mode, effective_size, sizing);
-        let content = content_rects(&solve);
+        let effective_cell_size = session.get_tab_viewport(active_tab_id).unwrap_or(Size {
+            column_count: 0,
+            row_count: 0,
+        });
+        let layout_mode = client.get_layout_mode(active_tab_id);
+        let pane_sizing = self.get_pane_sizing();
+        let layout_solve =
+            solve_tab_layout(tab_record, layout_mode, effective_cell_size, pane_sizing);
+        let computed_content_rects = list_content_rects(&layout_solve);
 
         // One `PaneSlot` per leaf: outer rect from the solve, inner (content)
-        // rect from `content_rects`, both in the same solve order. A tab with
+        // rect from `computed_content_rects`, both in the same solve order. A tab with
         // no room suppresses every pane it holds.
-        let suppressed: HashSet<PaneId> = solve.suppressed.iter().copied().collect();
-        let layout_solved: Vec<PaneSlot> = solve
-            .panes
+        let suppressed_pane_ids: HashSet<PaneId> =
+            layout_solve.suppressed_pane_ids.iter().copied().collect();
+        let pane_slots: Vec<PaneSlot> = layout_solve
+            .pane_rects
             .iter()
-            .zip(content.iter())
-            .map(|(&(pane_id, rect), &(_, inner_rect))| {
-                let record = session.panes.get(pane_id);
-                PaneSlot {
-                    pane_id,
-                    rect,
-                    inner_rect,
-                    kind: record.map_or(PaneKind::Terminal, |record| *record.kind()),
-                    visible: inner_rect.is_some(),
-                    suppressed: suppressed.contains(&pane_id),
-                    dead: record.is_some_and(|record| {
-                        matches!(record.lifecycle(), PaneLifecycle::Exited { .. })
-                    }),
-                }
-            })
+            .zip(computed_content_rects.iter())
+            .map(
+                |(&(pane_id, outer_rect), &(content_pane_id, content_rect))| {
+                    debug_assert_eq!(pane_id, content_pane_id);
+                    let pane_record = session.panes.get_pane_record_by_id(pane_id);
+                    PaneSlot {
+                        pane_id,
+                        outer_rect,
+                        content_rect,
+                        pane_kind: pane_record.map_or(PaneKind::Terminal, |pane_record| {
+                            *pane_record.get_pane_kind()
+                        }),
+                        is_visible: content_rect.is_some(),
+                        is_suppressed: suppressed_pane_ids.contains(&pane_id),
+                        is_dead: pane_record.is_some_and(|pane_record| {
+                            matches!(pane_record.get_lifecycle(), PaneLifecycle::Exited { .. })
+                        }),
+                    }
+                },
+            )
             .collect();
 
-        let active_tab = TabSnapshot {
-            id: tab.id(),
-            name: tab.name().to_owned(),
-            layout_solved,
-            effective_size,
-            stack_headers: solve.stack_headers,
+        let active_tab_snapshot = TabSnapshot {
+            tab_id: tab_record.get_tab_id(),
+            tab_name: tab_record.get_tab_name().to_owned(),
+            pane_slots,
+            effective_cell_size,
+            stack_headers: layout_solve.stack_headers,
             layout_mode,
-            all_suppressed: solve.all_suppressed,
-            gap: sizing.gap,
+            are_all_panes_suppressed: layout_solve.is_all_panes_suppressed,
+            gap_cell_count: pane_sizing.gap_cell_count,
         };
 
         // Metadata for every tab in the session, in display (index) order.
         let mut tabs_metadata: Vec<TabMeta> = session
             .tabs
             .values()
-            .map(|t| TabMeta {
-                id: t.id(),
-                name: t.name().to_owned(),
-                index: t.index(),
-                active: t.id() == active_tab_id,
+            .map(|tab_record| TabMeta {
+                tab_id: tab_record.get_tab_id(),
+                tab_name: tab_record.get_tab_name().to_owned(),
+                tab_index: tab_record.get_tab_index(),
+                is_active: tab_record.get_tab_id() == active_tab_id,
             })
             .collect();
-        tabs_metadata.sort_by_key(|meta| meta.index);
+        tabs_metadata.sort_by_key(|tab_metadata| tab_metadata.tab_index);
 
         Some(OwnedFrameLayout {
-            session: SessionSnapshot {
-                id: session.id,
-                name: session.name.clone(),
-                active_tab,
+            session_snapshot: SessionSnapshot {
+                session_id: session.session_id,
+                session_name: session.session_name.clone(),
+                active_tab_snapshot,
                 tabs_metadata,
             },
-            client: ClientSnapshot {
-                id: client.id(),
-                viewport: client.viewport(),
-                active_tab: active_tab_id,
-                focused_pane: client.focused_pane(active_tab_id),
-                lock_mode: client.lock_mode(),
-                mouse_select: client.mouse_select(),
+            client_snapshot: ClientSnapshot {
+                client_id: client.get_client_id(),
+                viewport_size: client.get_viewport_size(),
+                active_tab_id,
+                focused_pane_id: client.get_focused_pane(active_tab_id),
+                lock_mode: client.get_lock_mode(),
+                is_mouse_selection_enabled: client.is_mouse_selection_enabled(),
             },
         })
     }
@@ -201,87 +209,101 @@ impl Server {
     /// renderer draws no cells for it, and a wheel over it asks nothing of a
     /// program.
     #[allow(clippy::needless_pass_by_value)]
-    fn pane_snapshot(
+    fn build_pane_snapshot(
         &self,
         pane_id: PaneId,
-        view_offset: usize,
-        selection: Option<Selection>,
+        scrollback_offset: usize,
+        pane_selection: Option<Selection>,
     ) -> PaneSnapshot {
-        let Some(engine) = self.terminal_engines.get(&pane_id) else {
+        let Some(terminal_engine) = self.terminal_engine_by_pane_id.get(&pane_id) else {
             return PaneSnapshot {
-                id: pane_id,
-                title: None,
-                cursor: CursorSnapshot {
-                    row: 0,
-                    col: 0,
-                    visible: false,
-                    blink: false,
+                pane_id,
+                pane_title: None,
+                cursor_snapshot: CursorSnapshot {
+                    row_index: 0,
+                    column_index: 0,
+                    is_visible: false,
+                    is_blinking: false,
                     shape: None,
                 },
-                grid_view: None,
-                image_placements: Vec::new(),
-                reverse_video: false,
+                terminal_grid_view: None,
+                image_placement_snapshots: Vec::new(),
+                is_reverse_video: false,
                 mouse_tracking: MouseTracking::Off,
-                alt_scroll: false,
-                on_alt_screen: false,
-                selection: None,
+                is_alternate_scroll_enabled: false,
+                is_on_alternate_screen: false,
+                selection_spans: None,
                 has_selection: false,
-                view_top_row: 0,
-                scrollback: ScrollbackMeta {
-                    truncated: false,
-                    retained_lines: 0,
+                view_top_row_index: 0,
+                scrollback_meta: ScrollbackMeta {
+                    is_truncated: false,
+                    retained_line_count: 0,
                 },
             };
         };
 
-        let state = engine.state();
-        let (row, col) = state.active_cursor_position();
-        let scrollback = state.scrollback();
+        let terminal_state = terminal_engine.get_terminal_state();
+        let (row_index, column_index) = terminal_state.get_active_cursor_position();
+        let scrollback_state = terminal_state.get_scrollback();
         // The engine resolves the requested offset to the grid actually shown and
         // its effective offset (0 while following live or on the alternate
         // screen), so the composed grid, the indicator, and cursor suppression
         // all agree on how far the view is scrolled.
-        let (grid, view_offset) = state.scrolled_view(view_offset);
-        let image_placements = state
-            .image_placements_for_view(view_offset)
+        let (terminal_grid, effective_scrollback_offset) =
+            terminal_state.scrolled_view(scrollback_offset);
+        let image_placement_snapshots = terminal_state
+            .list_image_placements_for_view(effective_scrollback_offset)
             .iter()
             .map(ImagePlacementSnapshot::from_placement)
             .collect();
         // On the alternate screen the pane's name is the app's OSC 0/1/2 title.
         // On the primary screen it is the shell's OSC 7 working directory,
         // `~`-shortened, falling back to the OSC title when none was reported.
-        let title = match state.active_screen() {
-            Screen::Alternate => state.title().map(str::to_owned),
-            Screen::Primary => state
-                .current_cwd()
-                .map(|cwd| display_path(cwd.path()))
-                .or_else(|| state.title().map(str::to_owned)),
+        let pane_title = match terminal_state.get_active_screen() {
+            Screen::Alternate => terminal_state.get_title().map(str::to_owned),
+            Screen::Primary => terminal_state
+                .get_current_working_directory()
+                .map(|reported_working_directory| {
+                    format_display_path(reported_working_directory.get_working_directory_path())
+                })
+                .or_else(|| terminal_state.get_title().map(str::to_owned)),
         };
         PaneSnapshot {
-            id: pane_id,
-            title,
-            cursor: CursorSnapshot {
-                row,
-                col,
-                visible: state.cursor_visible(),
-                blink: state.cursor_blink(),
-                shape: state.cursor_shape(),
+            pane_id,
+            pane_title,
+            cursor_snapshot: CursorSnapshot {
+                row_index,
+                column_index,
+                is_visible: terminal_state.is_cursor_visible(),
+                is_blinking: terminal_state.is_cursor_blink_enabled(),
+                shape: terminal_state.get_cursor_shape(),
             },
-            has_selection: selection.is_some(),
-            image_placements,
-            selection: selection
-                .and_then(|selection| selection_spans(&selection, &grid, scrollback, view_offset)),
-            // The same line number `selection_spans` resolves its rows against:
-            // the window's top row shows line `total_pushed - view_offset`.
-            view_top_row: scrollback.total_pushed().saturating_sub(view_offset as u64),
-            grid_view: Some(GridView { grid, view_offset }),
-            reverse_video: state.reverse_video(),
-            mouse_tracking: state.mouse_tracking(),
-            alt_scroll: state.alt_scroll(),
-            on_alt_screen: state.active_screen() == Screen::Alternate,
-            scrollback: ScrollbackMeta {
-                truncated: scrollback.dropped_lines() > 0,
-                retained_lines: scrollback.len(),
+            has_selection: pane_selection.is_some(),
+            image_placement_snapshots,
+            selection_spans: pane_selection.and_then(|pane_selection| {
+                compute_selection_spans(
+                    &pane_selection,
+                    &terminal_grid,
+                    scrollback_state,
+                    effective_scrollback_offset,
+                )
+            }),
+            // The same line number `compute_selection_spans` resolves its rows against:
+            // the window's top row shows line `total_pushed - scrollback_offset`.
+            view_top_row_index: scrollback_state
+                .get_total_pushed_line_count()
+                .saturating_sub(effective_scrollback_offset as u64),
+            terminal_grid_view: Some(GridView {
+                grid: terminal_grid,
+                view_row_offset: effective_scrollback_offset,
+            }),
+            is_reverse_video: terminal_state.is_reverse_video_enabled(),
+            mouse_tracking: terminal_state.get_mouse_tracking(),
+            is_alternate_scroll_enabled: terminal_state.is_alternate_scroll_enabled(),
+            is_on_alternate_screen: terminal_state.get_active_screen() == Screen::Alternate,
+            scrollback_meta: ScrollbackMeta {
+                is_truncated: scrollback_state.get_dropped_line_count() > 0,
+                retained_line_count: scrollback_state.get_retained_line_count(),
             },
         }
     }
@@ -292,36 +314,39 @@ impl Server {
 /// [`sanitize_reported_text`](koshi_core::text::sanitize_reported_text).
 ///
 /// `/tmp/a\u{7f}b` results in `/tmp/ab`.
-fn display_path(path: &std::path::Path) -> String {
-    koshi_core::text::sanitize_reported_text(&shorten_home(path, home_text()))
+fn format_display_path(display_path: &std::path::Path) -> String {
+    koshi_core::text::sanitize_reported_text(&shorten_home_path(display_path, get_home_path_text()))
 }
 /// The home directory as display text, read from the environment on the first
-/// call and reused after — `HOME`, or `USERPROFILE` on Windows. `None` when
-/// neither is set, which leaves every path whole. A later change to either
-/// variable does not alter the stored value.
-fn home_text() -> Option<&'static str> {
+/// call and reused — `HOME`, or `USERPROFILE` on Windows. `None` when neither
+/// is set, which leaves every path whole. A change to either variable after the
+/// first call does not alter the stored value.
+fn get_home_path_text() -> Option<&'static str> {
     static HOME: OnceLock<Option<String>> = OnceLock::new();
     HOME.get_or_init(|| {
         std::env::var_os("HOME")
             .or_else(|| std::env::var_os("USERPROFILE"))
-            .map(|home| std::path::Path::new(&home).display().to_string())
+            .map(|home_path| std::path::Path::new(&home_path).display().to_string())
     })
     .as_deref()
 }
 
-/// The `~`-shortening behind [`display_path`], with the home directory passed
+/// The `~`-shortening behind [`format_display_path`], with the home directory passed
 /// in. The prefix must end on a path boundary — a sibling like `/Users/ab2`
 /// next to home `/Users/ab` stays whole.
-fn shorten_home(path: &std::path::Path, home: Option<&str>) -> String {
-    let text = path.display().to_string();
-    if let Some(home) = home {
-        if let Some(rest) = text.strip_prefix(home) {
-            if rest.is_empty() || rest.starts_with('/') || rest.starts_with('\\') {
-                return format!("~{rest}");
+fn shorten_home_path(display_path: &std::path::Path, home_path_text: Option<&str>) -> String {
+    let display_path_text = display_path.display().to_string();
+    if let Some(home_path_text) = home_path_text {
+        if let Some(relative_path_text) = display_path_text.strip_prefix(home_path_text) {
+            if relative_path_text.is_empty()
+                || relative_path_text.starts_with('/')
+                || relative_path_text.starts_with('\\')
+            {
+                return format!("~{relative_path_text}");
             }
         }
     }
-    text
+    display_path_text
 }
 
 /// Solve `tab`'s current layout in `mode` over a `viewport`-sized rect at origin
@@ -330,13 +355,18 @@ fn shorten_home(path: &std::path::Path, home: Option<&str>) -> String {
 /// `mode` is a viewing client's, never the tab's: the tab holds only the tree,
 /// and whether a pane is zoomed is a fact about one client's view. Two clients
 /// on this tab can pass different modes for the same tree in the same frame.
-pub(crate) fn solve_tab(
+pub(crate) fn solve_tab_layout(
     tab: &Tab,
-    mode: LayoutMode,
-    viewport: Size,
-    sizing: PaneSizing,
-) -> SolveResult {
-    solve_with_mode_min(tab.layout(), mode, Rect::at_origin(viewport), sizing)
+    layout_mode: LayoutMode,
+    effective_cell_size: Size,
+    pane_sizing: PaneSizing,
+) -> LayoutSolve {
+    solve_layout_with_mode(
+        tab.get_layout_tree(),
+        layout_mode,
+        Rect::from_size_at_origin(effective_cell_size),
+        pane_sizing,
+    )
 }
 
 /// Cut `selection` down to the rows this frame shows, as a column range per
@@ -357,56 +387,70 @@ pub(crate) fn solve_tab(
 /// line 103 column 4 → rows `[(1, 12, 19), (2, 0, 19), (3, 0, 4)]`: the first
 /// row from column 12 to the edge, the middle row whole, the last row up to
 /// column 4.
-fn selection_spans(
+fn compute_selection_spans(
     selection: &Selection,
-    grid: &Grid,
+    terminal_grid: &Grid,
     scrollback: &Scrollback,
-    view_offset: usize,
+    scrollback_offset: usize,
 ) -> Option<SelectionSpans> {
-    let (rows, cols) = grid.dimensions();
-    if rows == 0 || cols == 0 {
+    let (row_count, column_count) = terminal_grid.get_grid_dimensions();
+    if row_count == 0 || column_count == 0 {
         return None;
     }
     // The absolute line number the window's top row is showing.
-    let top = scrollback.total_pushed() as i64 - view_offset as i64;
-    let ordered = order(selection.anchor, selection.cursor);
-    let first = ordered.start.row as i64 - top;
-    let last = ordered.end.row as i64 - top;
-    let bottom = i64::from(rows) - 1;
-    if last < 0 || first > bottom {
+    let top_row_index = scrollback.get_total_pushed_line_count() as i64 - scrollback_offset as i64;
+    let ordered_selection_positions = order_selection_positions(selection.anchor, selection.cursor);
+    let first_visible_row_index =
+        ordered_selection_positions.start_position.row_index as i64 - top_row_index;
+    let last_visible_row_index =
+        ordered_selection_positions.end_position.row_index as i64 - top_row_index;
+    let bottom_row_index = i64::from(row_count) - 1;
+    if last_visible_row_index < 0 || first_visible_row_index > bottom_row_index {
         return None;
     }
-    let last_col = cols - 1;
-    let mut spans = Vec::new();
-    for view_row in first.max(0)..=last.min(bottom) {
-        let (start_col, end_col) = match selection.kind {
+    let last_column_index = column_count - 1;
+    let mut row_spans = Vec::new();
+    for visible_row_index in
+        first_visible_row_index.max(0)..=last_visible_row_index.min(bottom_row_index)
+    {
+        let (start_column_index, end_column_index) = match selection.selection_kind {
             // A block is the same columns on every row it covers.
             SelectionKind::Block => (
-                ordered.start.col.min(ordered.end.col),
-                ordered.start.col.max(ordered.end.col),
+                ordered_selection_positions
+                    .start_position
+                    .column_index
+                    .min(ordered_selection_positions.end_position.column_index),
+                ordered_selection_positions
+                    .start_position
+                    .column_index
+                    .max(ordered_selection_positions.end_position.column_index),
             ),
             // The others run with the text: from the start column on the first
             // row, through whole rows, to the end column on the last.
             SelectionKind::Character | SelectionKind::Word | SelectionKind::Line => {
-                let start = if view_row == first {
-                    ordered.start.col
+                let start_column_index = if visible_row_index == first_visible_row_index {
+                    ordered_selection_positions.start_position.column_index
                 } else {
                     0
                 };
-                let end = if view_row == last {
-                    ordered.end.col
+                let end_column_index = if visible_row_index == last_visible_row_index {
+                    ordered_selection_positions.end_position.column_index
                 } else {
-                    last_col
+                    last_column_index
                 };
-                (start, end)
+                (start_column_index, end_column_index)
             }
         };
-        let end_col = end_col.min(last_col);
-        if start_col <= end_col {
-            spans.push((view_row as u16, start_col, end_col));
+        let end_column_index = end_column_index.min(last_column_index);
+        if start_column_index <= end_column_index {
+            row_spans.push((
+                visible_row_index as u16,
+                start_column_index,
+                end_column_index,
+            ));
         }
     }
-    (!spans.is_empty()).then_some(SelectionSpans { rows: spans })
+    (!row_spans.is_empty()).then_some(SelectionSpans { row_spans })
 }
 
 #[cfg(test)]

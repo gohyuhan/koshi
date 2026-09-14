@@ -5,19 +5,19 @@
 //! count. When a push exceeds either cap the oldest rows are dropped from the
 //! front. The count and byte size of everything dropped are tallied, never the
 //! content itself. A snapshot reads the row tally as one boolean:
-//! `dropped_lines() > 0` becomes `ScrollbackMeta::truncated`.
+//! `dropped_line_count() > 0` becomes `ScrollbackMeta::truncated`.
 
 use std::collections::VecDeque;
 
-use serde::de::Deserializer;
+use serde::de::Deserializer as DeserializerTrait;
 use serde::{Deserialize, Serialize};
 
-use crate::grid::state::{content_len, Cell, RowEnd, RowMeta};
+use crate::grid::state::{count_row_content_cells, Cell, RowEnd, RowMetadata};
 
 /// Default scrollback line cap: 10 000 lines per pane.
-const DEFAULT_MAX_LINES: usize = 10_000;
+const DEFAULT_MAX_LINE_COUNT: usize = 10_000;
 /// Default scrollback byte cap: 32 MiB of retained text per pane.
-const DEFAULT_MAX_BYTES: usize = 32 * 1024 * 1024;
+const DEFAULT_MAX_BYTE_COUNT: usize = 32 * 1024 * 1024;
 
 /// The cells history keeps of `row`: a [`RowEnd::Hard`] row without the
 /// trailing run of fully-default blanks, every other row whole.
@@ -27,11 +27,11 @@ const DEFAULT_MAX_BYTES: usize = 32 * 1024 * 1024;
 /// A [`RowEnd::Soft`] row keeps every cell. A [`RowEnd::SoftWide`] row keeps
 /// every cell, including the final blank spacer that stands in for the wide
 /// glyph on the next row.
-fn kept(row: &[Cell], end: RowEnd) -> &[Cell] {
-    if end == RowEnd::Hard {
-        &row[..content_len(row)]
+fn get_retained_cells(row_cells: &[Cell], row_end: RowEnd) -> &[Cell] {
+    if row_end == RowEnd::Hard {
+        &row_cells[..count_row_content_cells(row_cells)]
     } else {
-        row
+        row_cells
     }
 }
 
@@ -41,13 +41,14 @@ fn kept(row: &[Cell], end: RowEnd) -> &[Cell] {
 ///
 /// A width-0 cell is the placeholder right half of a wide glyph and adds
 /// nothing; the glyph's text is counted in its width-2 base cell.
-fn line_bytes(line: &[Cell]) -> usize {
-    line.iter()
-        .filter(|cell| cell.width() != 0)
+fn compute_line_byte_count(line_cells: &[Cell]) -> usize {
+    line_cells
+        .iter()
+        .filter(|cell| cell.get_display_width() != 0)
         .map(|cell| {
-            cell.ch().len_utf8()
+            cell.get_character().len_utf8()
                 + cell
-                    .combining()
+                    .list_combining_characters()
                     .iter()
                     .map(|combining| combining.len_utf8())
                     .sum::<usize>()
@@ -55,26 +56,26 @@ fn line_bytes(line: &[Cell]) -> usize {
         .sum()
 }
 
-/// Truncate an owned `row` to what [`kept`] keeps of it and release the spare
-/// capacity.
-fn keep_in_place(row: &mut Vec<Cell>, end: RowEnd) {
-    row.truncate(kept(row, end).len());
-    row.shrink_to_fit();
+/// Truncate owned `row_cells` to what [`get_retained_cells`] keeps of it and
+/// release the spare capacity.
+fn truncate_line_cells(row_cells: &mut Vec<Cell>, row_end: RowEnd) {
+    row_cells.truncate(get_retained_cells(row_cells, row_end).len());
+    row_cells.shrink_to_fit();
 }
 
 /// The line- and byte-count caps bounding one pane's [`Scrollback`].
 #[derive(Debug, Clone, Copy)]
 pub struct ScrollbackLimit {
-    max_lines: usize,
-    max_bytes: usize,
+    maximum_line_count: usize,
+    maximum_byte_count: usize,
 }
 
 impl ScrollbackLimit {
-    /// A cap of exactly `max_lines` rows and `max_bytes` bytes.
-    pub fn new(max_lines: usize, max_bytes: usize) -> Self {
+    /// A cap of exactly `maximum_line_count` rows and `maximum_byte_count` bytes.
+    pub fn from_line_and_byte_limits(maximum_line_count: usize, maximum_byte_count: usize) -> Self {
         ScrollbackLimit {
-            max_lines,
-            max_bytes,
+            maximum_line_count,
+            maximum_byte_count,
         }
     }
 }
@@ -83,8 +84,8 @@ impl Default for ScrollbackLimit {
     /// 10 000 lines and 32 MiB of retained text.
     fn default() -> Self {
         ScrollbackLimit {
-            max_lines: DEFAULT_MAX_LINES,
-            max_bytes: DEFAULT_MAX_BYTES,
+            maximum_line_count: DEFAULT_MAX_LINE_COUNT,
+            maximum_byte_count: DEFAULT_MAX_BYTE_COUNT,
         }
     }
 }
@@ -94,220 +95,255 @@ impl Default for ScrollbackLimit {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Scrollback {
     /// Retained rows, oldest at the front and newest at the back, each paired
-    /// with its row metadata. A row holds what [`kept`] keeps of it: a
+    /// with its row metadata. A row holds what [`get_retained_cells`] keeps of it: a
     /// hard-ended row stops at its last content cell and reads as blank right
     /// of that.
-    lines: VecDeque<(Vec<Cell>, RowMeta)>,
+    #[serde(rename = "lines")]
+    retained_lines: VecDeque<(Vec<Cell>, RowMetadata)>,
     /// Maximum rows retained before the oldest are dropped.
-    max_lines: usize,
+    #[serde(rename = "max_lines")]
+    maximum_line_count: usize,
     /// Maximum total bytes (UTF-8 text payload) retained before the oldest rows
     /// are dropped.
-    max_bytes: usize,
-    /// The sum of [`line_bytes`] over every retained row, updated on every
+    #[serde(rename = "max_bytes")]
+    maximum_byte_count: usize,
+    /// The sum of [`compute_line_byte_count`] over every retained row, updated on every
     /// push, replacement, eviction and clear.
-    byte_total: usize,
+    #[serde(rename = "byte_total")]
+    retained_byte_count: usize,
     /// Count of rows ever pushed into the buffer. It only grows:
     /// [`clear`](Self::clear) does not reset it.
-    total_pushed: u64,
+    #[serde(rename = "total_pushed")]
+    total_pushed_line_count: u64,
     /// Count of rows dropped to honor the caps. It only grows.
-    dropped_lines: u64,
+    #[serde(rename = "dropped_lines")]
+    dropped_line_count: u64,
     /// Bytes dropped to honor the caps. It only grows.
-    dropped_bytes: u64,
+    #[serde(rename = "dropped_bytes")]
+    dropped_byte_count: u64,
 }
 
 impl Scrollback {
     /// An empty buffer bounded by `limit`.
-    pub fn new(limit: ScrollbackLimit) -> Self {
+    pub fn from_scrollback_limit(scrollback_limit: ScrollbackLimit) -> Self {
         Scrollback {
-            lines: VecDeque::new(),
-            max_lines: limit.max_lines,
-            max_bytes: limit.max_bytes,
-            byte_total: 0,
-            total_pushed: 0,
-            dropped_lines: 0,
-            dropped_bytes: 0,
+            retained_lines: VecDeque::new(),
+            maximum_line_count: scrollback_limit.maximum_line_count,
+            maximum_byte_count: scrollback_limit.maximum_byte_count,
+            retained_byte_count: 0,
+            total_pushed_line_count: 0,
+            dropped_line_count: 0,
+            dropped_byte_count: 0,
         }
     }
 
-    /// Append `row` as the newest line with `meta`, then drop the oldest rows
+    /// Append `row` as the newest line with `row_metadata`, then drop the oldest rows
     /// from the front until both caps hold, tallying each drop. The byte cap
     /// never drops the sole remaining row: a single row larger than
-    /// `max_bytes` is retained on arrival. The line cap has no such guard; the
-    /// row count always ends at or under `max_lines`.
+    /// `maximum_byte_count` is retained on arrival. The line cap has no such guard; the
+    /// row count always ends at or under `maximum_line_count`.
     ///
     /// A hard-ended row is stored without its trailing run of fully-default
     /// blanks: a 200-column row reading `README.md` keeps 9 cells. A
     /// soft-wrapped row keeps every cell. One allocation, at the stored size.
-    pub(crate) fn push_row(&mut self, row: &[Cell], meta: RowMeta) {
-        self.push_row_with_evicted(row, meta, |_| {});
+    pub(crate) fn push_row(&mut self, row_cells: &[Cell], row_metadata: RowMetadata) {
+        self.push_row_with_evicted(row_cells, row_metadata, |_| {});
     }
 
     pub(crate) fn push_row_with_evicted(
         &mut self,
-        row: &[Cell],
-        meta: RowMeta,
-        on_evict: impl FnMut(&[Cell]),
+        row_cells: &[Cell],
+        row_metadata: RowMetadata,
+        mut eviction_callback: impl FnMut(&[Cell]),
     ) {
-        let line = kept(row, meta.end).to_vec();
-        let new_bytes = line_bytes(&line);
-        self.lines.push_back((line, meta));
-        self.byte_total += new_bytes;
-        self.total_pushed += 1;
-        self.evict_to_caps(on_evict);
+        let retained_cells = get_retained_cells(row_cells, row_metadata.row_end).to_vec();
+        let new_line_byte_count = compute_line_byte_count(&retained_cells);
+        self.retained_lines
+            .push_back((retained_cells, row_metadata));
+        self.retained_byte_count += new_line_byte_count;
+        self.total_pushed_line_count += 1;
+        self.evict_oldest_lines_to_limits(&mut eviction_callback);
     }
 
     /// Remove and return every retained row with its metadata, oldest at the
     /// front, leaving the buffer empty with a zero byte total. The caps, the
-    /// dropped tallies, and [`total_pushed`](Self::total_pushed) keep their
+    /// dropped tallies, and [`total_pushed_line_count`](Self::total_pushed_line_count) keep their
     /// values. The caller passes the returned rows' count to
-    /// [`replace_lines`](Self::replace_lines) as `retained_before`.
-    pub(crate) fn take_lines(&mut self) -> VecDeque<(Vec<Cell>, RowMeta)> {
-        self.byte_total = 0;
-        std::mem::take(&mut self.lines)
+    /// [`replace_retained_lines`](Self::replace_retained_lines) as `retained_line_count_before`.
+    pub(crate) fn take_retained_lines(&mut self) -> VecDeque<(Vec<Cell>, RowMetadata)> {
+        self.retained_byte_count = 0;
+        std::mem::take(&mut self.retained_lines)
     }
 
     /// Replace every retained row with `lines`, each keeping its own metadata,
     /// then apply both caps. Rows the caps evict are tallied as dropped.
-    /// [`total_pushed`](Self::total_pushed) grows by the count of retained
-    /// rows (counted after eviction) exceeding `retained_before` and never
+    /// [`total_pushed_line_count`](Self::total_pushed_line_count) grows by the count of retained
+    /// rows (counted after eviction) exceeding `retained_line_count_before` and never
     /// decreases.
     ///
     /// Each row is stored the way [`push_row`](Self::push_row) stores one,
     /// shortened in place: a hard-ended row without its trailing default
     /// blanks, a soft-wrapped row whole.
-    pub(crate) fn replace_lines(&mut self, lines: Vec<(Vec<Cell>, RowMeta)>, retained_before: u64) {
-        self.replace_lines_with_evicted(lines, retained_before, |_| {});
+    pub(crate) fn replace_retained_lines(
+        &mut self,
+        retained_lines: Vec<(Vec<Cell>, RowMetadata)>,
+        retained_line_count_before: u64,
+    ) {
+        self.replace_retained_lines_with_evicted(
+            retained_lines,
+            retained_line_count_before,
+            |_| {},
+        );
     }
 
-    pub(crate) fn replace_lines_with_evicted(
+    pub(crate) fn replace_retained_lines_with_evicted(
         &mut self,
-        lines: Vec<(Vec<Cell>, RowMeta)>,
-        retained_before: u64,
-        on_evict: impl FnMut(&[Cell]),
+        retained_lines: Vec<(Vec<Cell>, RowMetadata)>,
+        retained_line_count_before: u64,
+        mut eviction_callback: impl FnMut(&[Cell]),
     ) {
-        self.lines = lines
+        self.retained_lines = retained_lines
             .into_iter()
-            .map(|(mut cells, meta)| {
-                keep_in_place(&mut cells, meta.end);
-                (cells, meta)
+            .map(|(mut line_cells, row_metadata)| {
+                truncate_line_cells(&mut line_cells, row_metadata.row_end);
+                (line_cells, row_metadata)
             })
             .collect();
-        self.byte_total = self.lines.iter().map(|(cells, _)| line_bytes(cells)).sum();
-        self.evict_to_caps(on_evict);
-        let after = self.lines.len() as u64;
-        self.total_pushed += after.saturating_sub(retained_before);
+        self.retained_byte_count = self
+            .retained_lines
+            .iter()
+            .map(|(line_cells, _)| compute_line_byte_count(line_cells))
+            .sum();
+        self.evict_oldest_lines_to_limits(&mut eviction_callback);
+        let retained_line_count_after = self.retained_lines.len() as u64;
+        self.total_pushed_line_count +=
+            retained_line_count_after.saturating_sub(retained_line_count_before);
     }
 
-    /// Drop the oldest row, update `byte_total` and the dropped tallies, and
-    /// repeat while the row count exceeds `max_lines`, or while `byte_total`
-    /// exceeds `max_bytes` and more than one row remains.
-    fn evict_to_caps(&mut self, mut on_evict: impl FnMut(&[Cell])) {
-        while self.lines.len() > self.max_lines
-            || (self.byte_total > self.max_bytes && self.lines.len() > 1)
+    /// Drop the oldest row, update `retained_byte_count` and the dropped tallies, and
+    /// repeat while the row count exceeds `maximum_line_count`, or while `retained_byte_count`
+    /// exceeds `maximum_byte_count` and more than one row remains.
+    fn evict_oldest_lines_to_limits(&mut self, eviction_callback: &mut impl FnMut(&[Cell])) {
+        while self.retained_lines.len() > self.maximum_line_count
+            || (self.retained_byte_count > self.maximum_byte_count && self.retained_lines.len() > 1)
         {
-            let (oldest_line, _) = self.lines.pop_front().unwrap();
-            let oldest_bytes = line_bytes(&oldest_line);
-            on_evict(&oldest_line);
+            let (oldest_line_cells, _) = self.retained_lines.pop_front().unwrap();
+            let oldest_line_byte_count = compute_line_byte_count(&oldest_line_cells);
+            eviction_callback(&oldest_line_cells);
 
-            self.dropped_lines += 1;
-            self.dropped_bytes += oldest_bytes as u64;
-            self.byte_total -= oldest_bytes;
+            self.dropped_line_count += 1;
+            self.dropped_byte_count += oldest_line_byte_count as u64;
+            self.retained_byte_count -= oldest_line_byte_count;
         }
     }
 
     /// Drop every retained row (xterm `CSI 3 J`, "erase saved lines") and zero
-    /// `byte_total`. The dropped tallies and
-    /// [`total_pushed`](Self::total_pushed) keep their values.
-    pub fn clear(&mut self) {
-        self.lines.clear();
-        self.byte_total = 0;
+    /// `retained_byte_count`. The dropped tallies and
+    /// [`get_total_pushed_line_count`](Self::get_total_pushed_line_count) keep their values.
+    pub fn clear_scrollback(&mut self) {
+        self.retained_lines.clear();
+        self.retained_byte_count = 0;
     }
 
     /// The number of rows currently retained.
-    pub fn len(&self) -> usize {
-        self.lines.len()
+    pub fn get_retained_line_count(&self) -> usize {
+        self.retained_lines.len()
     }
 
     /// Whether the buffer retains no rows.
     pub fn is_empty(&self) -> bool {
-        self.lines.is_empty()
+        self.retained_lines.is_empty()
     }
 
     /// The retained rows with their metadata, oldest at the front.
-    pub fn lines(&self) -> &VecDeque<(Vec<Cell>, RowMeta)> {
-        &self.lines
+    pub fn list_retained_lines(&self) -> &VecDeque<(Vec<Cell>, RowMetadata)> {
+        &self.retained_lines
     }
 
     /// Count of rows ever pushed into the buffer. It never decreases;
-    /// [`clear`](Self::clear) does not reset it.
-    pub fn total_pushed(&self) -> u64 {
-        self.total_pushed
+    /// [`clear_scrollback`](Self::clear_scrollback) does not reset it.
+    pub fn get_total_pushed_line_count(&self) -> u64 {
+        self.total_pushed_line_count
     }
 
     /// Count of rows dropped to honor the caps.
-    pub fn dropped_lines(&self) -> u64 {
-        self.dropped_lines
+    pub fn get_dropped_line_count(&self) -> u64 {
+        self.dropped_line_count
     }
 
     /// Bytes dropped to honor the caps.
-    pub fn dropped_bytes(&self) -> u64 {
-        self.dropped_bytes
+    pub fn get_dropped_byte_count(&self) -> u64 {
+        self.dropped_byte_count
     }
 }
 
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum SerializedLine {
-    Current((Vec<Cell>, RowMeta)),
-    Legacy((Vec<Cell>, RowEnd)),
+    CurrentRow((Vec<Cell>, RowMetadata)),
+    LegacyRow((Vec<Cell>, RowEnd)),
 }
 
 /// The stored form of a [`Scrollback`], as [`Deserialize`] reads it.
 ///
-/// `byte_total` is not read: it is derived from `lines` instead, so a stored
+/// `retained_byte_count` is not read: it is derived from `retained_lines` instead, so a stored
 /// total that does not match the rows cannot underflow the first eviction.
 /// The caps are applied to the rows that were read, so a stored buffer holding
-/// more than `max_lines` rows loses its oldest ones at load and tallies them
+/// more than `maximum_line_count` rows loses its oldest ones at load and tallies them
 /// as dropped.
 #[derive(Deserialize)]
 struct ScrollbackFields {
-    lines: VecDeque<SerializedLine>,
-    max_lines: usize,
-    max_bytes: usize,
-    total_pushed: u64,
-    dropped_lines: u64,
-    dropped_bytes: u64,
+    #[serde(rename = "lines")]
+    retained_lines: VecDeque<SerializedLine>,
+    #[serde(rename = "max_lines")]
+    maximum_line_count: usize,
+    #[serde(rename = "max_bytes")]
+    maximum_byte_count: usize,
+    #[serde(rename = "total_pushed")]
+    total_pushed_line_count: u64,
+    #[serde(rename = "dropped_lines")]
+    dropped_line_count: u64,
+    #[serde(rename = "dropped_bytes")]
+    dropped_byte_count: u64,
 }
 
 impl<'de> Deserialize<'de> for Scrollback {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    fn deserialize<Deserializer>(deserializer: Deserializer) -> Result<Self, Deserializer::Error>
     where
-        D: Deserializer<'de>,
+        Deserializer: DeserializerTrait<'de>,
     {
-        let fields = ScrollbackFields::deserialize(deserializer)?;
-        let lines = fields
-            .lines
+        let serialized_fields = ScrollbackFields::deserialize(deserializer)?;
+        let retained_lines = serialized_fields
+            .retained_lines
             .into_iter()
-            .map(|line| match line {
-                SerializedLine::Current((cells, meta)) => (cells, meta),
-                SerializedLine::Legacy((cells, end)) => (cells, RowMeta { end, prompt: false }),
+            .map(|serialized_line| match serialized_line {
+                SerializedLine::CurrentRow((line_cells, row_metadata)) => {
+                    (line_cells, row_metadata)
+                }
+                SerializedLine::LegacyRow((line_cells, row_end)) => (
+                    line_cells,
+                    RowMetadata {
+                        row_end,
+                        has_prompt_mark: false,
+                    },
+                ),
             })
             .collect();
         let mut scrollback = Scrollback {
-            lines,
-            max_lines: fields.max_lines,
-            max_bytes: fields.max_bytes,
-            byte_total: 0,
-            total_pushed: fields.total_pushed,
-            dropped_lines: fields.dropped_lines,
-            dropped_bytes: fields.dropped_bytes,
+            retained_lines,
+            maximum_line_count: serialized_fields.maximum_line_count,
+            maximum_byte_count: serialized_fields.maximum_byte_count,
+            retained_byte_count: 0,
+            total_pushed_line_count: serialized_fields.total_pushed_line_count,
+            dropped_line_count: serialized_fields.dropped_line_count,
+            dropped_byte_count: serialized_fields.dropped_byte_count,
         };
-        scrollback.byte_total = scrollback
-            .lines
+        scrollback.retained_byte_count = scrollback
+            .retained_lines
             .iter()
-            .map(|(cells, _)| line_bytes(cells))
+            .map(|(line_cells, _)| compute_line_byte_count(line_cells))
             .sum();
-        scrollback.evict_to_caps(|_| {});
+        scrollback.evict_oldest_lines_to_limits(&mut |_| {});
         Ok(scrollback)
     }
 }

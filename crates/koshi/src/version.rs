@@ -12,7 +12,7 @@ use std::path::Path;
 use koshi_core::ids::SessionId;
 use serde::Serialize;
 
-use crate::cli::SessionRef;
+use crate::cli::SessionReference;
 use crate::targeting;
 use koshi_link::error::CliError;
 use koshi_link::{ipc_client, router_client};
@@ -28,7 +28,7 @@ pub struct ClientVersion {
 impl ClientVersion {
     /// The build this program was compiled at.
     #[must_use]
-    pub fn of_this_build() -> ClientVersion {
+    pub fn build_client_version() -> ClientVersion {
         ClientVersion {
             version: env!("CARGO_PKG_VERSION").to_string(),
         }
@@ -69,9 +69,11 @@ pub enum ServerBuild {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ServerVersionRow {
     /// Which server this row is about.
-    pub kind: ServerKind,
+    #[serde(rename = "kind")]
+    pub server_kind: ServerKind,
     /// The session this row is about; absent on the router's row.
-    pub session: Option<SessionId>,
+    #[serde(rename = "session")]
+    pub session_id: Option<SessionId>,
     /// What asking it produced.
     #[serde(flatten)]
     pub build: ServerBuild,
@@ -85,29 +87,29 @@ impl ServerVersionRow {
     /// A server that could not be asked also says so on standard error as the
     /// probe returns, so the reason is visible beside a table that has no room
     /// for it.
-    fn from_probe(
-        kind: ServerKind,
-        session: Option<SessionId>,
-        probed: Result<Option<String>, CliError>,
+    fn from_version_probe(
+        server_kind: ServerKind,
+        session_id: Option<SessionId>,
+        version_probe_result: Result<Option<String>, CliError>,
     ) -> ServerVersionRow {
-        let build = match probed {
+        let build = match version_probe_result {
             Ok(None) => ServerBuild::NotRunning,
-            Ok(Some(named)) if named.is_empty() => ServerBuild::Unnamed,
+            Ok(Some(server_version)) if server_version.is_empty() => ServerBuild::Unnamed,
             Ok(Some(version)) => ServerBuild::Running { version },
-            Err(error) => {
-                let named = match session {
+            Err(version_probe_error) => {
+                let server_label = match session_id {
                     Some(session_id) => format!("session {session_id}"),
                     None => "the router".to_string(),
                 };
-                eprintln!("koshi: {named} did not answer: {error}");
+                eprintln!("koshi: {server_label} did not answer: {version_probe_error}");
                 ServerBuild::Unreachable {
-                    detail: error.to_string(),
+                    detail: version_probe_error.to_string(),
                 }
             }
         };
         ServerVersionRow {
-            kind,
-            session,
+            server_kind,
+            session_id,
             build,
         }
     }
@@ -120,21 +122,25 @@ impl ServerVersionRow {
 /// stops a caller reading only standard output and the exit code from taking
 /// those rows for the whole picture.
 #[must_use]
-pub fn unreachable_servers(rows: &[ServerVersionRow]) -> Option<CliError> {
-    let unasked = rows
+pub fn build_unreachable_server_error(
+    server_version_rows: &[ServerVersionRow],
+) -> Option<CliError> {
+    let unreachable_server_count = server_version_rows
         .iter()
-        .filter(|row| matches!(row.build, ServerBuild::Unreachable { .. }))
+        .filter(|server_version_row| {
+            matches!(server_version_row.build, ServerBuild::Unreachable { .. })
+        })
         .count();
-    if unasked == 0 {
+    if unreachable_server_count == 0 {
         return None;
     }
-    let servers = if unasked == 1 {
+    let unreachable_server_summary = if unreachable_server_count == 1 {
         "1 koshi server did not answer".to_string()
     } else {
-        format!("{unasked} koshi servers did not answer")
+        format!("{unreachable_server_count} koshi servers did not answer")
     };
     Some(CliError::IpcUnavailable {
-        detail: format!("{servers}, so this answer is incomplete"),
+        detail: format!("{unreachable_server_summary}, so this answer is incomplete"),
     })
 }
 
@@ -149,66 +155,79 @@ pub fn unreachable_servers(rows: &[ServerVersionRow]) -> Option<CliError> {
 /// sessions and must match exactly one.
 ///
 /// A server that could not be asked earns a row saying so rather than sinking
-/// the whole answer; [`unreachable_servers`] turns those rows into the failure
+/// the whole answer; [`build_unreachable_server_error`] turns those rows into the failure
 /// the caller ends with.
-pub fn server_version_rows(
-    session: Option<&SessionRef>,
+pub fn list_server_version_rows(
+    session_reference: Option<&SessionReference>,
 ) -> Result<Vec<ServerVersionRow>, CliError> {
-    server_version_rows_in(&ipc_client::runtime_dir()?, session)
+    list_server_version_rows_in_runtime_directory(
+        &ipc_client::resolve_runtime_directory()?,
+        session_reference,
+    )
 }
 
-/// [`server_version_rows`] against an explicit runtime directory.
-fn server_version_rows_in(
-    runtime_dir: &Path,
-    session: Option<&SessionRef>,
+/// [`list_server_version_rows`] against an explicit runtime directory.
+fn list_server_version_rows_in_runtime_directory(
+    runtime_directory: &Path,
+    session_reference: Option<&SessionReference>,
 ) -> Result<Vec<ServerVersionRow>, CliError> {
-    if let Some(session) = session {
-        let session_id = resolve_session(runtime_dir, session)?;
-        return Ok(vec![session_row(runtime_dir, session_id)]);
+    if let Some(session_reference) = session_reference {
+        let session_id = resolve_session_id(runtime_directory, session_reference)?;
+        return Ok(vec![build_session_version_row(
+            runtime_directory,
+            session_id,
+        )]);
     }
 
-    let mut rows = vec![ServerVersionRow::from_probe(
+    let mut server_version_rows = vec![ServerVersionRow::from_version_probe(
         ServerKind::Router,
         None,
-        router_client::running_router_version(runtime_dir),
+        router_client::get_running_router_version(runtime_directory),
     )];
     // The two sources never overlap: `foreign_sessions` drops every id
     // `advertised_sessions` reports, so no session earns two rows.
-    let mut sessions = ipc_client::advertised_sessions(runtime_dir);
-    sessions.extend(
-        ipc_client::shared_base()
+    let mut session_ids = ipc_client::list_advertised_sessions(runtime_directory);
+    session_ids.extend(
+        ipc_client::resolve_shared_sessions_base_directory()
             .into_iter()
-            .flat_map(|base| ipc_client::foreign_sessions(&base, runtime_dir))
+            .flat_map(|shared_base_directory| {
+                ipc_client::list_foreign_sessions(&shared_base_directory, runtime_directory)
+            })
             .map(|(session_id, _)| session_id),
     );
-    sessions.sort();
-    for session_id in sessions {
-        rows.push(session_row(runtime_dir, session_id));
+    session_ids.sort();
+    for session_id in session_ids {
+        server_version_rows.push(build_session_version_row(runtime_directory, session_id));
     }
-    Ok(rows)
+    Ok(server_version_rows)
 }
 
 /// Ask one session's server for its build.
-fn session_row(runtime_dir: &Path, session_id: SessionId) -> ServerVersionRow {
-    ServerVersionRow::from_probe(
+fn build_session_version_row(runtime_directory: &Path, session_id: SessionId) -> ServerVersionRow {
+    ServerVersionRow::from_version_probe(
         ServerKind::Session,
         Some(session_id),
-        ipc_client::running_session_version(runtime_dir, session_id),
+        ipc_client::get_running_session_version(runtime_directory, session_id),
     )
 }
 
 /// The session a `--session` value names: an id is taken as it stands, and a
 /// name is looked up over a census of the running sessions.
-fn resolve_session(runtime_dir: &Path, session: &SessionRef) -> Result<SessionId, CliError> {
-    match session {
-        SessionRef::Id(id) => Ok(*id),
-        SessionRef::Name(name) => targeting::scope_sessions(runtime_dir, Some(session))?
-            .sessions
-            .first()
-            .map(|overview| overview.session.id)
-            .ok_or_else(|| CliError::SessionNotFound {
-                session: name.clone(),
-            }),
+fn resolve_session_id(
+    runtime_directory: &Path,
+    session_reference: &SessionReference,
+) -> Result<SessionId, CliError> {
+    match session_reference {
+        SessionReference::SessionId(session_id) => Ok(*session_id),
+        SessionReference::SessionName(session_name) => {
+            targeting::resolve_session_scope(runtime_directory, Some(session_reference))?
+                .sessions
+                .first()
+                .map(|overview| overview.session.session_id)
+                .ok_or_else(|| CliError::SessionNotFound {
+                    session_name: session_name.clone(),
+                })
+        }
     }
 }
 

@@ -7,20 +7,23 @@ use std::path::Path;
 #[test]
 fn shell_program_uses_a_set_nonempty_value() {
     assert_eq!(
-        shell_program(Some(OsString::from("/usr/bin/fish")), "/bin/sh"),
+        resolve_shell_program(Some(OsString::from("/usr/bin/fish")), "/bin/sh"),
         PathBuf::from("/usr/bin/fish"),
     );
 }
 
 #[test]
 fn shell_program_falls_back_when_unset() {
-    assert_eq!(shell_program(None, "/bin/sh"), PathBuf::from("/bin/sh"));
+    assert_eq!(
+        resolve_shell_program(None, "/bin/sh"),
+        PathBuf::from("/bin/sh")
+    );
 }
 
 #[test]
 fn shell_program_treats_a_set_but_empty_value_as_unset() {
     assert_eq!(
-        shell_program(Some(OsString::new()), "/bin/sh"),
+        resolve_shell_program(Some(OsString::new()), "/bin/sh"),
         PathBuf::from("/bin/sh"),
     );
 }
@@ -28,52 +31,53 @@ fn shell_program_treats_a_set_but_empty_value_as_unset() {
 #[test]
 fn kill_policy_serializes_timeout_as_seconds() {
     let policy = KillPolicy::Graceful {
-        timeout: Duration::from_secs(3),
+        timeout_duration: Duration::from_secs(3),
     };
-    let json = serde_json::to_string(&policy).expect("serialize");
+    let policy_json = serde_json::to_string(&policy).expect("serialize");
     // Timeout is a bare integer count of seconds, not a struct.
-    assert_eq!(json, r#"{"Graceful":{"timeout":3}}"#);
+    assert_eq!(policy_json, r#"{"Graceful":{"timeout":3}}"#);
 }
 
 #[test]
 fn kill_policy_graceful_tree_serializes_timeout_as_seconds() {
     let policy = KillPolicy::GracefulTree {
-        timeout: Duration::from_secs(3),
+        timeout_duration: Duration::from_secs(3),
     };
-    let json = serde_json::to_string(&policy).expect("serialize");
+    let policy_json = serde_json::to_string(&policy).expect("serialize");
     // Timeout is a bare integer count of seconds, not a struct.
-    assert_eq!(json, r#"{"GracefulTree":{"timeout":3}}"#);
+    assert_eq!(policy_json, r#"{"GracefulTree":{"timeout":3}}"#);
 }
 
 #[test]
 fn kill_policy_roundtrips() {
     for policy in [
         KillPolicy::Graceful {
-            timeout: Duration::from_secs(5),
+            timeout_duration: Duration::from_secs(5),
         },
         KillPolicy::Force,
         KillPolicy::Tree,
         KillPolicy::GracefulTree {
-            timeout: Duration::from_secs(5),
+            timeout_duration: Duration::from_secs(5),
         },
     ] {
-        let json = serde_json::to_string(&policy).expect("serialize");
-        let back: KillPolicy = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(policy, back);
+        let policy_json = serde_json::to_string(&policy).expect("serialize");
+        let deserialized_policy: KillPolicy =
+            serde_json::from_str(&policy_json).expect("deserialize");
+        assert_eq!(policy, deserialized_policy);
     }
 }
 
 #[test]
 fn kill_policy_drops_subsecond_part() {
     let policy = KillPolicy::Graceful {
-        timeout: Duration::from_millis(3_750),
+        timeout_duration: Duration::from_millis(3_750),
     };
-    let json = serde_json::to_string(&policy).expect("serialize");
-    let back: KillPolicy = serde_json::from_str(&json).expect("deserialize");
+    let policy_json = serde_json::to_string(&policy).expect("serialize");
+    let deserialized_policy: KillPolicy = serde_json::from_str(&policy_json).expect("deserialize");
     assert_eq!(
-        back,
+        deserialized_policy,
         KillPolicy::Graceful {
-            timeout: Duration::from_secs(3),
+            timeout_duration: Duration::from_secs(3),
         }
     );
 }
@@ -130,83 +134,99 @@ fn shell_kind_of_an_empty_program_path_is_other_with_an_empty_name() {
 
 #[test]
 fn spawn_spec_roundtrips() {
-    let mut env = BTreeMap::new();
-    env.insert("TERM".to_string(), "xterm-256color".to_string());
-    env.insert("LANG".to_string(), "en_US.UTF-8".to_string());
-    let spec = SpawnSpec {
+    let mut environment_variables = BTreeMap::new();
+    environment_variables.insert("TERM".to_string(), "xterm-256color".to_string());
+    environment_variables.insert("LANG".to_string(), "en_US.UTF-8".to_string());
+    let spawn_spec = SpawnSpec {
         program: PathBuf::from("/bin/zsh"),
-        args: vec!["-l".to_string()],
-        cwd: Some(PathBuf::from("/home/u")),
-        env,
+        arguments: vec!["-l".to_string()],
+        working_directory: Some(PathBuf::from("/home/u")),
+        environment_variables,
         shell_kind: ShellKind::Zsh,
     };
-    let json = serde_json::to_string(&spec).expect("serialize");
-    let back: SpawnSpec = serde_json::from_str(&json).expect("deserialize");
-    assert_eq!(spec, back);
+    let spawn_spec_json = serde_json::to_string(&spawn_spec).expect("serialize");
+    let deserialized_spawn_spec: SpawnSpec =
+        serde_json::from_str(&spawn_spec_json).expect("deserialize");
+    assert_eq!(spawn_spec, deserialized_spawn_spec);
 }
 
 #[test]
 fn pty_size_roundtrips() {
-    let size = PtySize { cols: 80, rows: 24 };
-    let json = serde_json::to_string(&size).expect("serialize");
-    let back: PtySize = serde_json::from_str(&json).expect("deserialize");
-    assert_eq!(size, back);
+    let pty_size = PtySize {
+        column_count: 80,
+        row_count: 24,
+    };
+    let pty_size_json = serde_json::to_string(&pty_size).expect("serialize");
+    let decoded_pty_size: PtySize = serde_json::from_str(&pty_size_json).expect("deserialize");
+    assert_eq!(pty_size, decoded_pty_size);
 }
 
 #[test]
 fn exit_status_roundtrips() {
-    for status in [
+    for exit_status in [
         ExitStatus::ExitCode(0),
         ExitStatus::ExitCode(1),
         ExitStatus::Signaled(9),
     ] {
-        let json = serde_json::to_string(&status).expect("serialize");
-        let back: ExitStatus = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(status, back);
+        let exit_status_json = serde_json::to_string(&exit_status).expect("serialize");
+        let deserialized_exit_status: ExitStatus =
+            serde_json::from_str(&exit_status_json).expect("deserialize");
+        assert_eq!(exit_status, deserialized_exit_status);
     }
 }
 
 #[test]
 fn tree_scoped_widens_each_policy_to_its_group_flavor() {
-    let timeout = Duration::from_secs(3);
-    let cases = [
+    let timeout_duration = Duration::from_secs(3);
+    let policy_cases = [
         (
-            KillPolicy::Graceful { timeout },
-            KillPolicy::GracefulTree { timeout },
+            KillPolicy::Graceful { timeout_duration },
+            KillPolicy::GracefulTree { timeout_duration },
         ),
         (KillPolicy::Force, KillPolicy::Tree),
         (KillPolicy::Tree, KillPolicy::Tree),
         (
-            KillPolicy::GracefulTree { timeout },
-            KillPolicy::GracefulTree { timeout },
+            KillPolicy::GracefulTree { timeout_duration },
+            KillPolicy::GracefulTree { timeout_duration },
         ),
     ];
-    for (policy, widened) in cases {
-        assert_eq!(policy.tree_scoped(), widened, "{policy:?}");
+    for (kill_policy, expected_group_policy) in policy_cases {
+        assert_eq!(
+            kill_policy.apply_tree_scope(),
+            expected_group_policy,
+            "{kill_policy:?}"
+        );
     }
 }
 
 #[test]
-fn the_default_shell_spec_passes_the_callers_cwd_and_env_through_and_takes_no_arguments() {
-    let cwd = PathBuf::from("/tmp/koshi-default-shell");
-    let mut env = BTreeMap::new();
-    env.insert("KOSHI_SESSION_ID".to_string(), "abc".to_string());
+fn the_default_shell_spec_passes_the_callers_working_directory_and_environment_variables_through_and_takes_no_arguments(
+) {
+    let working_directory = PathBuf::from("/tmp/koshi-default-shell");
+    let mut environment_variables = BTreeMap::new();
+    environment_variables.insert("KOSHI_SESSION_ID".to_string(), "abc".to_string());
 
-    let spec = SpawnSpec::default_shell(Some(cwd.clone()), env.clone());
+    let spawn_spec = SpawnSpec::default_shell(
+        Some(working_directory.clone()),
+        environment_variables.clone(),
+    );
 
-    assert_eq!(spec.cwd, Some(cwd));
-    assert_eq!(spec.env, env);
-    assert_eq!(spec.args, Vec::<String>::new());
+    assert_eq!(spawn_spec.working_directory, Some(working_directory));
+    assert_eq!(spawn_spec.environment_variables, environment_variables);
+    assert_eq!(spawn_spec.arguments, Vec::<String>::new());
 }
 
 #[test]
 fn the_default_shell_program_is_never_empty_and_its_kind_matches_that_program() {
-    let spec = SpawnSpec::default_shell(None, BTreeMap::new());
+    let spawn_spec = SpawnSpec::default_shell(None, BTreeMap::new());
 
-    assert_ne!(spec.program, PathBuf::new());
-    assert_eq!(spec.shell_kind, ShellKind::from_program(&spec.program));
-    assert_eq!(spec.cwd, None);
-    assert_eq!(spec.env, BTreeMap::new());
+    assert_ne!(spawn_spec.program, PathBuf::new());
+    assert_eq!(
+        spawn_spec.shell_kind,
+        ShellKind::from_program(&spawn_spec.program)
+    );
+    assert_eq!(spawn_spec.working_directory, None);
+    assert_eq!(spawn_spec.environment_variables, BTreeMap::new());
 }
 
 #[test]
@@ -277,29 +297,38 @@ fn kill_policy_force_and_tree_serialize_as_bare_names() {
 
 #[test]
 fn kill_policy_refuses_a_negative_timeout() {
-    let refusal = serde_json::from_str::<KillPolicy>(r#"{"Graceful":{"timeout":-1}}"#)
-        .expect_err("a negative second count is refused");
-    assert!(refusal.to_string().contains("u64"), "{refusal}");
+    let negative_timeout_parse_error =
+        serde_json::from_str::<KillPolicy>(r#"{"Graceful":{"timeout":-1}}"#)
+            .expect_err("a negative second count is refused");
+    assert!(
+        negative_timeout_parse_error.to_string().contains("u64"),
+        "{negative_timeout_parse_error}"
+    );
 }
 
 #[test]
 fn kill_policy_refuses_a_fractional_timeout() {
-    let refusal = serde_json::from_str::<KillPolicy>(r#"{"GracefulTree":{"timeout":3.5}}"#)
-        .expect_err("a fractional second count is refused");
-    assert!(refusal.to_string().contains("u64"), "{refusal}");
+    let fractional_timeout_parse_error =
+        serde_json::from_str::<KillPolicy>(r#"{"GracefulTree":{"timeout":3.5}}"#)
+            .expect_err("a fractional second count is refused");
+    assert!(
+        fractional_timeout_parse_error.to_string().contains("u64"),
+        "{fractional_timeout_parse_error}"
+    );
 }
 
 #[test]
 fn kill_policy_zero_and_max_timeouts_roundtrip() {
-    for timeout in [Duration::ZERO, Duration::from_secs(u64::MAX)] {
-        let policy = KillPolicy::Graceful { timeout };
-        let json = serde_json::to_string(&policy).expect("serialize");
-        let back: KillPolicy = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(back, policy);
+    for timeout_duration in [Duration::ZERO, Duration::from_secs(u64::MAX)] {
+        let policy = KillPolicy::Graceful { timeout_duration };
+        let policy_json = serde_json::to_string(&policy).expect("serialize");
+        let deserialized_policy: KillPolicy =
+            serde_json::from_str(&policy_json).expect("deserialize");
+        assert_eq!(deserialized_policy, policy);
     }
     assert_eq!(
         serde_json::to_string(&KillPolicy::Graceful {
-            timeout: Duration::ZERO
+            timeout_duration: Duration::ZERO
         })
         .expect("serialize"),
         r#"{"Graceful":{"timeout":0}}"#
@@ -320,88 +349,100 @@ fn exit_status_serializes_as_a_tagged_integer() {
 
 #[test]
 fn exit_status_keeps_a_negative_exit_code() {
-    let json = serde_json::to_string(&ExitStatus::ExitCode(-1)).expect("serialize");
-    assert_eq!(json, r#"{"ExitCode":-1}"#);
-    let back: ExitStatus = serde_json::from_str(&json).expect("deserialize");
-    assert_eq!(back, ExitStatus::ExitCode(-1));
+    let exit_status_json = serde_json::to_string(&ExitStatus::ExitCode(-1)).expect("serialize");
+    assert_eq!(exit_status_json, r#"{"ExitCode":-1}"#);
+    let deserialized_exit_status: ExitStatus =
+        serde_json::from_str(&exit_status_json).expect("deserialize");
+    assert_eq!(deserialized_exit_status, ExitStatus::ExitCode(-1));
 }
 
 #[test]
 fn pty_size_serializes_cols_then_rows() {
     assert_eq!(
-        serde_json::to_string(&PtySize { cols: 80, rows: 24 }).expect("serialize"),
+        serde_json::to_string(&PtySize {
+            column_count: 80,
+            row_count: 24,
+        })
+        .expect("serialize"),
         r#"{"cols":80,"rows":24}"#
     );
 }
 
 #[test]
 fn pty_size_zero_and_max_roundtrip() {
-    for size in [
-        PtySize { cols: 0, rows: 0 },
+    for pty_size in [
         PtySize {
-            cols: u16::MAX,
-            rows: u16::MAX,
+            column_count: 0,
+            row_count: 0,
+        },
+        PtySize {
+            column_count: u16::MAX,
+            row_count: u16::MAX,
         },
     ] {
-        let json = serde_json::to_string(&size).expect("serialize");
-        let back: PtySize = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(back, size);
+        let pty_size_json = serde_json::to_string(&pty_size).expect("serialize");
+        let deserialized_pty_size: PtySize =
+            serde_json::from_str(&pty_size_json).expect("deserialize");
+        assert_eq!(deserialized_pty_size, pty_size);
     }
 }
 
 #[test]
 fn pty_size_refuses_a_dimension_past_u16() {
-    let refusal = serde_json::from_str::<PtySize>(r#"{"cols":65536,"rows":24}"#)
+    let pty_size_parse_error = serde_json::from_str::<PtySize>(r#"{"cols":65536,"rows":24}"#)
         .expect_err("a column count past u16 is refused");
-    assert!(refusal.to_string().contains("u16"), "{refusal}");
+    assert!(
+        pty_size_parse_error.to_string().contains("u16"),
+        "{pty_size_parse_error}"
+    );
 }
 
 #[test]
 fn spawn_spec_serializes_with_its_field_names_and_sorted_env() {
-    let mut env = BTreeMap::new();
-    env.insert("TERM".to_string(), "xterm-256color".to_string());
-    env.insert("LANG".to_string(), "en_US.UTF-8".to_string());
-    let spec = SpawnSpec {
+    let mut environment_variables = BTreeMap::new();
+    environment_variables.insert("TERM".to_string(), "xterm-256color".to_string());
+    environment_variables.insert("LANG".to_string(), "en_US.UTF-8".to_string());
+    let spawn_spec = SpawnSpec {
         program: PathBuf::from("/bin/zsh"),
-        args: vec!["-l".to_string()],
-        cwd: Some(PathBuf::from("/home/u")),
-        env,
+        arguments: vec!["-l".to_string()],
+        working_directory: Some(PathBuf::from("/home/u")),
+        environment_variables,
         shell_kind: ShellKind::Zsh,
     };
     assert_eq!(
-        serde_json::to_string(&spec).expect("serialize"),
+        serde_json::to_string(&spawn_spec).expect("serialize"),
         r#"{"program":"/bin/zsh","args":["-l"],"cwd":"/home/u","env":{"LANG":"en_US.UTF-8","TERM":"xterm-256color"},"shell_kind":"Zsh"}"#
     );
 }
 
 #[test]
 fn spawn_spec_with_no_cwd_serializes_cwd_as_null() {
-    let spec = SpawnSpec::shell(PathBuf::from("/bin/sh"), None, BTreeMap::new());
+    let spawn_spec = SpawnSpec::from_shell_program(PathBuf::from("/bin/sh"), None, BTreeMap::new());
     assert_eq!(
-        serde_json::to_string(&spec).expect("serialize"),
+        serde_json::to_string(&spawn_spec).expect("serialize"),
         r#"{"program":"/bin/sh","args":[],"cwd":null,"env":{},"shell_kind":{"Other":"sh"}}"#
     );
 }
 
 #[test]
 fn spawn_spec_shell_derives_the_kind_from_the_program_and_takes_no_arguments() {
-    let cwd = PathBuf::from("/tmp/koshi-shell");
-    let mut env = BTreeMap::new();
-    env.insert("KOSHI_SESSION_ID".to_string(), "abc".to_string());
+    let working_directory = PathBuf::from("/tmp/koshi-shell");
+    let mut environment_variables = BTreeMap::new();
+    environment_variables.insert("KOSHI_SESSION_ID".to_string(), "abc".to_string());
 
-    let spec = SpawnSpec::shell(
+    let spawn_spec = SpawnSpec::from_shell_program(
         PathBuf::from("/usr/bin/fish"),
-        Some(cwd.clone()),
-        env.clone(),
+        Some(working_directory.clone()),
+        environment_variables.clone(),
     );
 
     assert_eq!(
-        spec,
+        spawn_spec,
         SpawnSpec {
             program: PathBuf::from("/usr/bin/fish"),
-            args: Vec::new(),
-            cwd: Some(cwd),
-            env,
+            arguments: Vec::new(),
+            working_directory: Some(working_directory),
+            environment_variables,
             shell_kind: ShellKind::Fish,
         }
     );

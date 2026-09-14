@@ -17,7 +17,10 @@ use crate::supervisor::{SupervisorEvent, SupervisorRequestKind, SupervisorResult
 /// `Keep` and `Bare`, and nothing else.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum Sample {
-    Keep { value: u32 },
+    Keep {
+        #[serde(rename = "value")]
+        payload_number: u32,
+    },
     Bare,
 }
 
@@ -37,7 +40,10 @@ impl WireName for Sample {
 #[test]
 fn a_variant_this_build_has_decodes_as_itself() {
     let decoded: MaybeKnown<Sample> = serde_json::from_str(r#"{"Keep":{"value":7}}"#).unwrap();
-    assert_eq!(decoded, MaybeKnown::Known(Sample::Keep { value: 7 }));
+    assert_eq!(
+        decoded,
+        MaybeKnown::Known(Sample::Keep { payload_number: 7 })
+    );
 }
 
 #[test]
@@ -52,7 +58,7 @@ fn a_variant_this_build_lacks_decodes_as_unknown_and_keeps_its_name() {
     assert_eq!(
         decoded,
         MaybeKnown::Unknown {
-            name: "Added".to_string()
+            variant_name: "Added".to_string()
         }
     );
 }
@@ -63,7 +69,7 @@ fn a_variant_this_build_lacks_and_that_carries_no_fields_decodes_as_unknown() {
     assert_eq!(
         decoded,
         MaybeKnown::Unknown {
-            name: "Added".to_string()
+            variant_name: "Added".to_string()
         }
     );
 }
@@ -92,14 +98,14 @@ fn a_known_variant_spelled_without_its_fields_is_an_error() {
 fn whitespace_around_a_value_does_not_change_what_it_names() {
     let known: MaybeKnown<Sample> =
         serde_json::from_str(" { \"Keep\" : { \"value\" : 7 } } ").unwrap();
-    assert_eq!(known, MaybeKnown::Known(Sample::Keep { value: 7 }));
+    assert_eq!(known, MaybeKnown::Known(Sample::Keep { payload_number: 7 }));
 
     for text in [" \"Added\" ", " { \"Added\" : 1 } "] {
         let unknown: MaybeKnown<Sample> = serde_json::from_str(text).unwrap();
         assert_eq!(
             unknown,
             MaybeKnown::Unknown {
-                name: "Added".to_string()
+                variant_name: "Added".to_string()
             },
             "{text}"
         );
@@ -112,7 +118,7 @@ fn a_non_ascii_name_is_kept_as_the_peer_spelled_it() {
     assert_eq!(
         decoded,
         MaybeKnown::Unknown {
-            name: "Añadido".to_string()
+            variant_name: "Añadido".to_string()
         }
     );
 }
@@ -144,7 +150,10 @@ fn a_value_that_names_no_variant_is_an_error() {
 fn an_unknown_field_inside_a_known_variant_is_ignored() {
     let decoded: MaybeKnown<Sample> =
         serde_json::from_str(r#"{"Keep":{"value":7,"added_later":true}}"#).unwrap();
-    assert_eq!(decoded, MaybeKnown::Known(Sample::Keep { value: 7 }));
+    assert_eq!(
+        decoded,
+        MaybeKnown::Known(Sample::Keep { payload_number: 7 })
+    );
 }
 
 /// A variant travels as a one-key object. An object with a second key names no
@@ -173,7 +182,7 @@ fn an_empty_name_is_unknown_with_an_empty_name() {
     assert_eq!(
         decoded,
         MaybeKnown::Unknown {
-            name: String::new()
+            variant_name: String::new()
         }
     );
 }
@@ -187,7 +196,7 @@ fn an_escaped_name_is_read_as_the_characters_it_stands_for() {
         assert_eq!(
             decoded,
             MaybeKnown::Unknown {
-                name: "Added".to_string()
+                variant_name: "Added".to_string()
             },
             "{text}"
         );
@@ -216,7 +225,7 @@ fn a_payload_nested_past_the_decoders_depth_limit_still_names_its_variant() {
     assert_eq!(
         unknown,
         MaybeKnown::Unknown {
-            name: "Added".to_string()
+            variant_name: "Added".to_string()
         }
     );
 
@@ -263,8 +272,8 @@ fn an_envelope_carrying_a_kind_this_build_lacks_reads_as_unknown() {
         decoded,
         Envelope {
             request_id: 9,
-            kind: MaybeKnown::Unknown {
-                name: "Added".to_string()
+            request_kind: MaybeKnown::Unknown {
+                variant_name: "Added".to_string()
             },
         }
     );
@@ -308,19 +317,19 @@ fn an_answer_with_a_field_it_does_not_know_is_refused() {
 fn an_envelope_and_an_answer_write_their_fields_in_order() {
     let envelope = Envelope {
         request_id: 7,
-        kind: Sample::Keep { value: 1 },
+        request_kind: Sample::Keep { payload_number: 1 },
     };
     assert_eq!(
         serde_json::to_string(&envelope).unwrap(),
         r#"{"request_id":7,"kind":{"Keep":{"value":1}}}"#
     );
 
-    let answer = Answer {
+    let response = Answer {
         request_id: None,
-        result: Sample::Bare,
+        answer_result: Sample::Bare,
     };
     assert_eq!(
-        serde_json::to_string(&answer).unwrap(),
+        serde_json::to_string(&response).unwrap(),
         r#"{"request_id":null,"result":"Bare"}"#
     );
 }
@@ -333,8 +342,8 @@ fn an_answer_carrying_a_result_this_build_lacks_reads_as_unknown() {
         decoded,
         Answer {
             request_id: Some(9),
-            result: MaybeKnown::Unknown {
-                name: "Added".to_string()
+            answer_result: MaybeKnown::Unknown {
+                variant_name: "Added".to_string()
             },
         }
     );
@@ -353,7 +362,7 @@ fn an_answer_with_no_request_id_reads_as_none() {
             decoded,
             Answer {
                 request_id: None,
-                result: Sample::Bare,
+                answer_result: Sample::Bare,
             },
             "{text}"
         );
@@ -369,7 +378,7 @@ fn naming_an_unknown_variant_never_reads_its_payload() {
     assert_eq!(
         decoded,
         MaybeKnown::Unknown {
-            name: "Added".to_string()
+            variant_name: "Added".to_string()
         }
     );
 }
@@ -382,8 +391,14 @@ fn naming_an_unknown_variant_never_reads_its_payload() {
 fn a_value_that_decodes_is_known_even_when_variants_omits_its_name() {
     #[derive(Debug, PartialEq, Eq, Deserialize)]
     enum Partial {
-        Listed { value: u32 },
-        Unlisted { value: u32 },
+        Listed {
+            #[serde(rename = "value")]
+            payload_number: u32,
+        },
+        Unlisted {
+            #[serde(rename = "value")]
+            payload_number: u32,
+        },
     }
 
     impl WireVariants for Partial {
@@ -391,16 +406,22 @@ fn a_value_that_decodes_is_known_even_when_variants_omits_its_name() {
     }
 
     let decoded: MaybeKnown<Partial> = serde_json::from_str(r#"{"Unlisted":{"value":3}}"#).unwrap();
-    assert_eq!(decoded, MaybeKnown::Known(Partial::Unlisted { value: 3 }));
+    assert_eq!(
+        decoded,
+        MaybeKnown::Known(Partial::Unlisted { payload_number: 3 })
+    );
 
     let listed: MaybeKnown<Partial> = serde_json::from_str(r#"{"Listed":{"value":4}}"#).unwrap();
-    assert_eq!(listed, MaybeKnown::Known(Partial::Listed { value: 4 }));
+    assert_eq!(
+        listed,
+        MaybeKnown::Known(Partial::Listed { payload_number: 4 })
+    );
 
     let absent: MaybeKnown<Partial> = serde_json::from_str(r#"{"Added":{"value":5}}"#).unwrap();
     assert_eq!(
         absent,
         MaybeKnown::Unknown {
-            name: "Added".to_string()
+            variant_name: "Added".to_string()
         }
     );
 }
@@ -409,7 +430,7 @@ fn a_value_that_decodes_is_known_even_when_variants_omits_its_name() {
 fn or_default_falls_back_for_a_value_this_build_cannot_read() {
     #[derive(Debug, Default, PartialEq, Eq, Deserialize)]
     struct Holder {
-        #[serde(default, deserialize_with = "or_default")]
+        #[serde(default, deserialize_with = "deserialize_or_default")]
         shade: Shade,
     }
 
@@ -454,7 +475,7 @@ fn or_default_falls_back_for_a_value_this_build_cannot_read() {
 fn or_default_falls_back_for_null_and_for_a_number_outside_the_type() {
     #[derive(Debug, Default, PartialEq, Eq, Deserialize)]
     struct Holder {
-        #[serde(default, deserialize_with = "or_default")]
+        #[serde(default, deserialize_with = "deserialize_or_default")]
         gap: u16,
     }
 
@@ -470,13 +491,13 @@ fn or_default_falls_back_for_null_and_for_a_number_outside_the_type() {
     }
 }
 
-/// `or_default` borrows the raw text the same way `MaybeKnown` does, and a
+/// `deserialize_or_default` borrows the raw text the same way `MaybeKnown` does, and a
 /// reader lends nothing.
 #[test]
 fn or_default_from_a_reader_that_lends_no_bytes_is_an_error() {
     #[derive(Debug, Default, PartialEq, Eq, Deserialize)]
     struct Holder {
-        #[serde(default, deserialize_with = "or_default")]
+        #[serde(default, deserialize_with = "deserialize_or_default")]
         gap: u16,
     }
 
@@ -494,27 +515,27 @@ fn or_default_from_a_reader_that_lends_no_bytes_is_an_error() {
 /// JSON the value writes names that same variant.
 #[test]
 fn every_wire_enum_lists_the_variants_it_writes() {
-    fn assert_listed<T>(values: Vec<T>)
+    fn assert_listed<T>(wire_variants: Vec<T>)
     where
         T: Serialize + WireName + WireVariants + std::fmt::Debug,
     {
         assert_eq!(
             T::VARIANTS.len(),
-            values.len(),
+            wire_variants.len(),
             "the sample list and VARIANTS must cover the same variants: {:?}",
             T::VARIANTS
         );
-        for value in values {
-            let name = value.wire_name();
+        for wire_variant in wire_variants {
+            let wire_name = wire_variant.wire_name();
             assert!(
-                T::VARIANTS.contains(&name),
-                "{name} is written but missing from VARIANTS"
+                T::VARIANTS.contains(&wire_name),
+                "{wire_name} is written but missing from VARIANTS"
             );
-            let encoded = serde_json::to_string(&value).unwrap();
+            let encoded_json = serde_json::to_string(&wire_variant).unwrap();
             assert_eq!(
-                variant_name(&encoded).as_deref(),
-                Some(name),
-                "{value:?} writes a tag that does not match its name"
+                parse_wire_variant_name(&encoded_json).as_deref(),
+                Some(wire_name),
+                "{wire_variant:?} writes a tag that does not match its name"
             );
         }
     }
@@ -539,7 +560,10 @@ fn every_wire_enum_lists_the_variants_it_writes() {
 #[test]
 fn every_wire_enum_lists_exactly_the_variants_its_type_has() {
     fn assert_matches<T: DeserializeOwned + WireVariants>(type_name: &str) {
-        let mut listed: Vec<String> = T::VARIANTS.iter().map(|name| (*name).to_string()).collect();
+        let mut listed: Vec<String> = T::VARIANTS
+            .iter()
+            .map(|wire_variant_name| (*wire_variant_name).to_string())
+            .collect();
         listed.sort();
         let mut real = variants_of::<T>();
         real.sort();
@@ -586,32 +610,35 @@ fn variants_of<T: DeserializeOwned>() -> Vec<String> {
 fn sample_supervisor_kinds() -> Vec<SupervisorRequestKind> {
     use koshi_core::process::{KillPolicy, PtySize, ShellKind, SpawnSpec};
 
-    let size = PtySize { cols: 80, rows: 24 };
+    let sample_pty_size = PtySize {
+        column_count: 80,
+        row_count: 24,
+    };
 
     vec![
         SupervisorRequestKind::Hello {
             min_protocol_version: 1,
             max_protocol_version: 1,
-            token: ConnectionToken::new("t"),
+            connection_token: ConnectionToken::from_secret("t"),
         },
         SupervisorRequestKind::Spawn {
             pane_id: PaneId::new(),
-            spec: SpawnSpec {
+            spawn_spec: SpawnSpec {
                 program: std::path::PathBuf::from("/bin/sh"),
-                args: Vec::new(),
-                cwd: None,
-                env: std::collections::BTreeMap::new(),
+                arguments: Vec::new(),
+                working_directory: None,
+                environment_variables: std::collections::BTreeMap::new(),
                 shell_kind: ShellKind::Bash,
             },
-            size,
+            pty_size: sample_pty_size,
         },
         SupervisorRequestKind::Resize {
             pane_id: PaneId::new(),
-            size,
+            pty_size: sample_pty_size,
         },
         SupervisorRequestKind::Write {
             pane_id: PaneId::new(),
-            bytes: Vec::new(),
+            input_bytes: Vec::new(),
         },
         SupervisorRequestKind::Kill {
             pane_id: PaneId::new(),
@@ -633,7 +660,7 @@ fn sample_supervisor_results() -> Vec<SupervisorResult> {
         SupervisorResult::Hello {
             protocol_version: 1,
         },
-        SupervisorResult::Spawned { pid: 1 },
+        SupervisorResult::Spawned { process_id: 1 },
         SupervisorResult::Panes(Vec::new()),
         SupervisorResult::Cwd(None),
         SupervisorResult::Done,
@@ -651,11 +678,11 @@ fn sample_supervisor_events() -> Vec<SupervisorEvent> {
     vec![
         SupervisorEvent::Output {
             pane_id: PaneId::new(),
-            bytes: Vec::new(),
+            output_bytes: Vec::new(),
         },
         SupervisorEvent::Exited {
             pane_id: PaneId::new(),
-            status: ExitStatus::Signaled(9),
+            exit_status: ExitStatus::Signaled(9),
         },
     ]
 }
@@ -668,41 +695,48 @@ fn sample_request_kinds() -> Vec<IpcRequestKind> {
         IpcRequestKind::Hello {
             min_protocol_version: 2,
             max_protocol_version: 2,
-            token: ConnectionToken::new("t"),
-            remote: false,
+            connection_token: ConnectionToken::from_secret("t"),
+            is_remote: false,
         },
         IpcRequestKind::Attach {
-            viewport: Size { cols: 80, rows: 24 },
-            filter: crate::protocol::EventFilterSpec::All,
-            resume: None,
+            viewport: Size {
+                column_count: 80,
+                row_count: 24,
+            },
+            event_filter: crate::protocol::EventFilterSpec::All,
+            resume_client_id: None,
             resume_token: None,
             pane_area: None,
-            graphics: crate::protocol::GraphicsCapabilities::default(),
+            graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
             cell_size: None,
         },
         IpcRequestKind::KeyPress {
-            chord: koshi_core::key::KeyChord::new(
+            chord: koshi_core::key::KeyChord::from_parts(
                 koshi_core::key::ModFlags::NONE,
                 koshi_core::key::Key::Char('a'),
             ),
         },
         IpcRequestKind::Resize {
-            viewport: Size { cols: 80, rows: 24 },
+            viewport: Size {
+                column_count: 80,
+                row_count: 24,
+            },
             pane_area: None,
             cell_size: None,
         },
         IpcRequestKind::CellSize {
-            size: koshi_core::geometry::PixelCellSize::new(10, 20).expect("nonzero cell size"),
+            cell_size: koshi_core::geometry::PixelCellSize::from_pixel_dimensions(10, 20)
+                .expect("nonzero cell size"),
         },
         IpcRequestKind::Paste {
-            text: String::new(),
+            pasted_text: String::new(),
         },
         IpcRequestKind::Mouse(Vec::new()),
-        IpcRequestKind::SubmitCommand(Box::new(koshi_core::command::CommandEnvelope::new(
+        IpcRequestKind::SubmitCommand(Box::new(koshi_core::command::CommandEnvelope::from_parts(
             koshi_core::ids::CommandId::new(),
             koshi_core::command::CommandSource::ExternalCli {
                 session_id: None,
-                target_client: None,
+                target_client_id: None,
             },
             std::time::UNIX_EPOCH,
             koshi_core::command::Command::ToggleLockMode(
@@ -710,7 +744,7 @@ fn sample_request_kinds() -> Vec<IpcRequestKind> {
             ),
         ))),
         IpcRequestKind::Discovery,
-        IpcRequestKind::Layout { tab: None },
+        IpcRequestKind::Layout { tab_id: None },
         IpcRequestKind::RecentEvents,
         IpcRequestKind::Restart,
         IpcRequestKind::Leaving,
@@ -722,14 +756,14 @@ fn sample_results() -> Vec<IpcResult> {
     vec![
         IpcResult::Hello {
             protocol_version: 2,
-            version: String::new(),
+            build_version: String::new(),
         },
         IpcResult::Attached {
             client_id: koshi_core::ids::ClientId::new(),
             session_id: koshi_core::ids::SessionId::new(),
-            structure: crate::attach::AttachedSessionStructureSnapshot {
-                id: koshi_core::ids::SessionId::new(),
-                name: String::new(),
+            session_structure: crate::attach::AttachedSessionStructureSnapshot {
+                session_id: koshi_core::ids::SessionId::new(),
+                session_name: String::new(),
                 tabs: Vec::new(),
                 panes: Vec::new(),
             },
@@ -741,14 +775,14 @@ fn sample_results() -> Vec<IpcResult> {
             emitted_events: Vec::new(),
         }),
         IpcResult::Overview(koshi_core::discovery::SessionOverview {
-            session: session_info(),
+            session: build_test_session_discovery(),
             tabs: Vec::new(),
             panes: Vec::new(),
             clients: Vec::new(),
         }),
         IpcResult::Layout(crate::layout::SessionLayout {
-            id: koshi_core::ids::SessionId::new(),
-            name: String::new(),
+            session_id: koshi_core::ids::SessionId::new(),
+            session_name: String::new(),
             tabs: Vec::new(),
             clients: Vec::new(),
         }),
@@ -762,12 +796,12 @@ fn sample_results() -> Vec<IpcResult> {
 }
 
 /// The smallest session record a discovery answer can carry.
-fn session_info() -> koshi_core::discovery::SessionInfo {
-    koshi_core::discovery::SessionInfo {
-        id: koshi_core::ids::SessionId::new(),
-        name: String::new(),
+fn build_test_session_discovery() -> koshi_core::discovery::SessionDiscovery {
+    koshi_core::discovery::SessionDiscovery {
+        session_id: koshi_core::ids::SessionId::new(),
+        session_name: String::new(),
         created_at: std::time::UNIX_EPOCH,
-        attached_clients: Vec::new(),
+        attached_client_ids: Vec::new(),
         pane_count: 0,
     }
 }
@@ -778,29 +812,29 @@ fn sample_events() -> Vec<SessionEvent> {
 
     vec![
         SessionEvent::Painted {
-            frame: Box::new(painted_frame()),
+            frame: Box::new(build_test_painted_frame()),
         },
         SessionEvent::ImageCacheReset,
         SessionEvent::ImageContentStart {
-            image: FrameImageTransfer {
-                id: 1,
-                record: FrameImageRecordHeader {
+            image_transfer: FrameImageTransfer {
+                image_content_id: 1,
+                image_record: FrameImageRecordHeader {
                     protocol: FrameGraphicsProtocol::Kitty,
-                    width: 1,
-                    height: 1,
-                    action: FrameImageAction::Display,
+                    pixel_width: 1,
+                    pixel_height: 1,
+                    image_action: FrameImageAction::Display,
                     display: FrameImageDisplay::default(),
-                    anchor: (0, 0),
+                    anchor_cell: (0, 0),
                 },
-                byte_len: 4,
+                image_byte_count: 4,
             },
         },
         SessionEvent::ImageContentChunk {
-            chunk: FrameImageChunk {
-                transfer_id: 1,
-                offset: 0,
-                last: true,
-                bytes: vec![0],
+            image_chunk: FrameImageChunk {
+                image_transfer_id: 1,
+                byte_offset: 0,
+                is_last: true,
+                chunk_bytes: vec![0],
             },
         },
         SessionEvent::PaneCreated {
@@ -822,7 +856,7 @@ fn sample_events() -> Vec<SessionEvent> {
             client_id: ClientId::new(),
             tab_id: TabId::new(),
             pane_id: PaneId::new(),
-            prior_pane: None,
+            previous_pane_id: None,
         },
         SessionEvent::LayoutChanged {
             tab_id: TabId::new(),
@@ -836,22 +870,26 @@ fn sample_events() -> Vec<SessionEvent> {
         SessionEvent::TabFocused {
             client_id: ClientId::new(),
             tab_id: TabId::new(),
-            prior_tab: TabId::new(),
+            previous_tab_id: TabId::new(),
         },
         SessionEvent::TabMoved {
             tab_id: TabId::new(),
-            old_index: 0,
-            new_index: 1,
+            previous_tab_index: 0,
+            new_tab_index: 1,
         },
         SessionEvent::Quit,
         SessionEvent::Restarting,
         SessionEvent::Detached,
-        SessionEvent::Resync { dropped_count: 1 },
+        SessionEvent::Resync {
+            dropped_event_count: 1,
+        },
         SessionEvent::MouseAnswer {
             request_id: 1,
-            answers: Vec::new(),
+            mouse_answers: Vec::new(),
         },
-        SessionEvent::HostWrite { bytes: Vec::new() },
+        SessionEvent::HostWrite {
+            host_output_bytes: Vec::new(),
+        },
         SessionEvent::SwitchTo {
             session_id: SessionId::new(),
         },
@@ -864,15 +902,15 @@ fn sample_router_kinds() -> Vec<RouterRequestKind> {
         RouterRequestKind::Hello {
             min_protocol_version: 1,
             max_protocol_version: 1,
-            token: ConnectionToken::new("t"),
+            connection_token: ConnectionToken::from_secret("t"),
         },
         RouterRequestKind::CreateSession {
             profile: None,
-            cwd: None,
-            allow_other_users: None,
+            working_directory: None,
+            is_other_user_access_allowed: None,
         },
         RouterRequestKind::AttachLookup {
-            selector: crate::router::SessionSelector::Name("quiet-lake".to_string()),
+            session_selector: crate::router::SessionSelector::SessionName("quiet-lake".to_string()),
         },
         RouterRequestKind::ListSessions,
         RouterRequestKind::Restart,
@@ -893,37 +931,37 @@ fn sample_router_kinds() -> Vec<RouterRequestKind> {
 
 /// One value per [`RouterResult`] variant.
 fn sample_router_results() -> Vec<RouterResult> {
-    let address = crate::router::SessionAddress {
-        id: koshi_core::ids::SessionId::new(),
-        name: String::new(),
-        socket: String::new(),
-        pid: 1,
+    let session_address = crate::router::SessionAddress {
+        session_id: koshi_core::ids::SessionId::new(),
+        session_name: String::new(),
+        socket_address: String::new(),
+        process_id: 1,
     };
     vec![
         RouterResult::Hello {
             protocol_version: 1,
-            version: String::new(),
+            build_version: String::new(),
         },
-        RouterResult::Created(address.clone()),
-        RouterResult::Found(address),
+        RouterResult::Created(session_address.clone()),
+        RouterResult::Found(session_address),
         RouterResult::Sessions(Vec::new()),
         RouterResult::Restarting,
         RouterResult::Granted {
-            token: ConnectionToken::new("t"),
-            replaced: false,
+            connection_token: ConnectionToken::from_secret("t"),
+            did_replace_active_grant: false,
         },
         RouterResult::Revoked(Vec::new()),
         RouterResult::Tokens(Vec::new()),
         RouterResult::RemoteStatus {
-            address: None,
-            enabled: false,
-            listening: false,
-            fingerprint: None,
-            remote_connections: Some(0),
+            remote_listen_address: None,
+            is_remote_access_enabled: false,
+            is_listening: false,
+            certificate_fingerprint: None,
+            remote_connection_count: Some(0),
         },
         RouterResult::RemoteEnabled {
-            address: String::new(),
-            fingerprint: String::new(),
+            remote_listen_address: String::new(),
+            certificate_fingerprint: String::new(),
         },
         RouterResult::Error(crate::protocol::IpcErrorPayload {
             code: crate::protocol::IpcErrorCode::BadToken,
@@ -933,34 +971,40 @@ fn sample_router_results() -> Vec<RouterResult> {
 }
 
 /// The smallest frame that still holds every record a painted frame needs.
-fn painted_frame() -> crate::frame::PaintedFrame {
+fn build_test_painted_frame() -> crate::frame::PaintedFrame {
     use koshi_core::geometry::Size;
     use koshi_core::ids::{ClientId, SessionId, TabId};
 
     crate::frame::PaintedFrame {
-        session: crate::frame::FrameSession {
-            id: SessionId::new(),
-            name: String::new(),
-            active_tab: crate::frame::FrameTab {
-                id: TabId::new(),
-                name: String::new(),
-                slots: Vec::new(),
-                effective_size: Size { cols: 80, rows: 24 },
+        session_snapshot: crate::frame::FrameSession {
+            session_id: SessionId::new(),
+            session_name: String::new(),
+            active_tab_snapshot: crate::frame::FrameTab {
+                tab_id: TabId::new(),
+                tab_name: String::new(),
+                pane_slots: Vec::new(),
+                effective_cell_size: Size {
+                    column_count: 80,
+                    row_count: 24,
+                },
                 stack_headers: Vec::new(),
                 layout_mode: koshi_layout::mode::LayoutMode::Tiled,
-                all_suppressed: false,
-                gap: 0,
+                is_every_pane_suppressed: false,
+                gap_cell_count: 0,
             },
-            tabs: Vec::new(),
+            tab_snapshots: Vec::new(),
         },
-        panes: Vec::new(),
-        client: crate::frame::FrameClient {
-            id: ClientId::new(),
-            viewport: Size { cols: 80, rows: 24 },
-            active_tab: TabId::new(),
-            focused_pane: None,
+        pane_snapshots: Vec::new(),
+        client_snapshot: crate::frame::FrameClient {
+            client_id: ClientId::new(),
+            viewport_size: Size {
+                column_count: 80,
+                row_count: 24,
+            },
+            active_tab_id: TabId::new(),
+            focused_pane_id: None,
             lock_mode: koshi_core::lock::LockMode::default(),
-            mouse_select: false,
+            is_mouse_selection_enabled: false,
         },
     }
 }
@@ -974,7 +1018,7 @@ fn an_unknown_name_is_filtered_as_it_is_read() {
     assert_eq!(
         decoded,
         MaybeKnown::Unknown {
-            name: "[2JAdded".to_string(),
+            variant_name: "[2JAdded".to_string(),
         }
     );
 }
@@ -984,8 +1028,11 @@ fn an_unknown_name_is_cut_to_the_reported_text_cap() {
     let long = "A".repeat(100_000);
     let decoded: MaybeKnown<Sample> =
         serde_json::from_str(&format!(r#"{{"{long}":{{"pane":3}}}}"#)).unwrap();
-    let MaybeKnown::Unknown { name } = decoded else {
+    let MaybeKnown::Unknown { variant_name } = decoded else {
         panic!("a name this build does not have reads as unknown");
     };
-    assert_eq!(name.len(), koshi_core::text::MAX_REPORTED_TEXT_BYTES);
+    assert_eq!(
+        variant_name.len(),
+        koshi_core::text::MAX_REPORTED_TEXT_BYTE_COUNT
+    );
 }

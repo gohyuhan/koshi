@@ -5,8 +5,8 @@ use std::time::{Duration, SystemTime};
 
 use clap::Parser;
 use koshi::cli::{
-    parse_session_ref, ActionsCommand, Cli, CliCommand, DebugCommand, FormatArg, InspectTarget,
-    KeysCommand, ResolvedTargets, TabRef,
+    parse_session_reference, ActionsCommand, Cli, CliCommand, DebugCommand, InspectTarget,
+    KeysCommand, OutputFormat, ResolvedTargets, TabReference,
 };
 use koshi::config_command;
 use koshi::doctor;
@@ -29,7 +29,7 @@ use koshi_link::discovery::{self, SessionRow};
 use koshi_link::error::CliError;
 use koshi_link::in_session::InSessionContext;
 use koshi_link::ipc_client;
-use koshi_link::remote_client::{self, Reach, REACH_WAIT};
+use koshi_link::remote_client::{self, Reach, REACH_TIMEOUT_DURATION};
 
 fn main() -> ExitCode {
     // Usage errors print through clap and exit 2; --help/--version exit 0.
@@ -37,16 +37,16 @@ fn main() -> ExitCode {
 
     // A failure prints `koshi: <error>` on standard error before the process
     // exits with that error's code.
-    let code = match run(&cli) {
+    let cli_exit_code = match run_cli_invocation(&cli) {
         Ok(()) => CliExitCode::Success,
-        Err(err) => {
-            eprintln!("koshi: {err}");
-            CliExitCode::from(&err)
+        Err(cli_error) => {
+            eprintln!("koshi: {cli_error}");
+            CliExitCode::from(&cli_error)
         }
     };
 
     // Exit codes are 0..=4, always in u8 range.
-    ExitCode::from(code.code() as u8)
+    ExitCode::from(cli_exit_code.get_exit_code() as u8)
 }
 
 /// Run one parsed invocation, reporting failures as a [`CliError`]. The
@@ -61,32 +61,32 @@ fn main() -> ExitCode {
 /// the only running session. `--remote` names another machine and picks the
 /// target from that machine's sessions instead, by the same rules. A verb the
 /// socket does not serve yet reports IPC unavailable.
-fn run(cli: &Cli) -> Result<(), CliError> {
+fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
     // `apply_beta_gate` sets the process-wide flag every `#[beta_feature]`
     // entry point reads. It runs before any verb dispatches, so one
     // `allow-beta-features` answer covers the CLI verbs and the interactive
     // launch alike.
-    let app = config::load_app_layer();
-    config::apply_beta_gate(app.clone());
+    let app_config_layer = config::load_app_layer();
+    config::apply_beta_gate(app_config_layer.clone());
 
     // `layout.new-pane-direction` from this machine's `koshi.kdl`. A
     // pane-opening verb given no `--direction` splits toward it; the session
     // holds no direction of its own.
-    let new_pane_direction = config::new_pane_direction(app);
+    let new_pane_direction = config::resolve_new_pane_direction(app_config_layer);
 
-    // `to_action` with default targets answers only whether this is an action
+    // `build_action_command` with default targets answers only whether this is an action
     // verb. The command that travels the socket is built after routing
     // resolves the targets.
-    let is_action = cli.command.as_ref().is_some_and(|command| {
-        command
-            .to_action(&ResolvedTargets::default(), new_pane_direction)
+    let is_action = cli.command.as_ref().is_some_and(|cli_command| {
+        cli_command
+            .build_action_command(&ResolvedTargets::default(), new_pane_direction)
             .is_some()
     });
 
     // `--remote` runs with `attach`, with `list-sessions`, and with an action
     // verb. Every other verb, `--headless`, and a bare `koshi --remote
     // <server>` are refused.
-    if cli.remote.is_some()
+    if cli.remote_server_reference.is_some()
         && !is_action
         && !matches!(
             cli.command,
@@ -113,7 +113,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
     }
 
     if let Some(CliCommand::Config { command }) = &cli.command {
-        return config_command::run(command);
+        return config_command::run_config_command(command);
     }
 
     if let Some(CliCommand::Share { command }) = &cli.command {
@@ -121,44 +121,46 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         // this machine's own socket. A run outside every pane is never
         // refused. A run in a pane is refused while anyone is attached to that
         // pane's session from another machine.
-        return share::run(command, InSessionContext::from_env()?.as_ref());
+        return share::run_share_command(command, InSessionContext::from_env()?.as_ref());
     }
 
     if let Some(CliCommand::Remote { command }) = &cli.command {
         // Every remote verb reads or writes the saved-server store on this
         // machine. It opens no connection and asks no running koshi.
-        return remote_cmd::run(command);
+        return remote_cmd::run_remote_command(command);
     }
 
-    if let Some(CliCommand::Doctor { format }) = &cli.command {
+    if let Some(CliCommand::Doctor { output_format }) = &cli.command {
         // Doctor reads this machine's own files and asks the running router
         // one question. It dispatches no command and starts no router.
-        return doctor::run(*format);
+        return doctor::run_doctor_checks(*output_format);
     }
 
     if let Some(CliCommand::ServeRouter {
-        runtime_dir,
-        wait_for_lock,
+        runtime_directory,
+        should_wait_for_lock,
     }) = &cli.command
     {
         // This process becomes the router: it serves the control socket in
         // that directory until no session is left.
-        let runtime_dir = match runtime_dir {
-            Some(dir) => dir.clone(),
-            None => ipc_client::runtime_dir()?,
+        let runtime_directory = match runtime_directory {
+            Some(runtime_directory_path) => runtime_directory_path.clone(),
+            None => ipc_client::resolve_runtime_directory()?,
         };
-        return router::run_router(&runtime_dir, *wait_for_lock).map_err(|err| CliError::Runtime {
-            detail: err.to_string(),
-        });
+        return router::run_router(&runtime_directory, *should_wait_for_lock).map_err(
+            |runtime_error| CliError::Runtime {
+                detail: runtime_error.to_string(),
+            },
+        );
     }
 
     if let Some(CliCommand::ServeSession {
         session_id,
         session_name,
-        runtime_dir,
-        profile,
-        allow_other_users,
-        resume,
+        runtime_directory,
+        profile_name,
+        should_allow_other_users,
+        resume_state_path,
         supervisor_token,
         supervisor_pid,
     }) = &cli.command
@@ -166,22 +168,22 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         // This process becomes one session's server: the router started it
         // and gave it the identity to seed the session under, or the image it
         // replaces started it and gave it the state to come up from.
-        let runtime_dir = match runtime_dir {
-            Some(dir) => dir.clone(),
-            None => ipc_client::runtime_dir()?,
+        let runtime_directory = match runtime_directory {
+            Some(runtime_directory_path) => runtime_directory_path.clone(),
+            None => ipc_client::resolve_runtime_directory()?,
         };
         return session_server::run_session_server(
-            &runtime_dir,
+            &runtime_directory,
             *session_id,
             session_name.clone(),
-            profile.as_deref(),
-            allow_other_users.then_some(true),
-            resume.as_deref(),
+            profile_name.as_deref(),
+            should_allow_other_users.then_some(true),
+            resume_state_path.as_deref(),
             supervisor_token.as_deref(),
             *supervisor_pid,
         )
-        .map_err(|err| CliError::Runtime {
-            detail: err.to_string(),
+        .map_err(|runtime_error| CliError::Runtime {
+            detail: runtime_error.to_string(),
         });
     }
 
@@ -191,7 +193,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         // binary can take its carried state back.
         println!(
             "{}",
-            serde_json::to_string(&ResumeSupport::of_this_build())
+            serde_json::to_string(&ResumeSupport::from_current_build())
                 .expect("a pair of numbers always encodes")
         );
         return Ok(());
@@ -199,24 +201,24 @@ fn run(cli: &Cli) -> Result<(), CliError> {
 
     if let Some(CliCommand::ServePtySupervisor {
         session_id,
-        token,
-        runtime_dir,
+        supervisor_token,
+        runtime_directory,
     }) = &cli.command
     {
         // This process becomes the holder of one session's panes: the session
         // server started it and gave it the session to serve and the secret a
         // link presents.
-        let runtime_dir = match runtime_dir {
-            Some(dir) => dir.clone(),
-            None => ipc_client::runtime_dir()?,
+        let runtime_directory = match runtime_directory {
+            Some(runtime_directory_path) => runtime_directory_path.clone(),
+            None => ipc_client::resolve_runtime_directory()?,
         };
         return pty_supervisor::run_pty_supervisor(
-            &runtime_dir,
+            &runtime_directory,
             *session_id,
-            ConnectionToken::new(token.clone()),
+            ConnectionToken::from_secret(supervisor_token.clone()),
         )
-        .map_err(|err| CliError::Runtime {
-            detail: err.to_string(),
+        .map_err(|runtime_error| CliError::Runtime {
+            detail: runtime_error.to_string(),
         });
     }
 
@@ -226,23 +228,34 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         return updater::run_update_command();
     }
 
-    if let Some(CliCommand::Version { format }) = &cli.command {
+    if let Some(CliCommand::Version { output_format }) = &cli.command {
         // This program's own build. Nothing is asked over a socket.
         print!(
             "{}",
-            output::render_client_version(&version::ClientVersion::of_this_build(), *format)
+            output::render_client_version(
+                &version::ClientVersion::build_client_version(),
+                *output_format,
+            )
         );
         return Ok(());
     }
 
-    if let Some(CliCommand::ServerVersion { session, format }) = &cli.command {
+    if let Some(CliCommand::ServerVersion {
+        session_reference,
+        output_format,
+    }) = &cli.command
+    {
         // Each koshi server names its own build in its greeting; this
         // dispatches no command. The rows print whether or not every server
         // answered, and the exit code carries the gap.
-        let rows = version::server_version_rows(session.as_ref())?;
-        print!("{}", output::render_server_versions(&rows, *format));
-        return match version::unreachable_servers(&rows) {
-            Some(error) => Err(error),
+        let list_server_version_rows =
+            version::list_server_version_rows(session_reference.as_ref())?;
+        print!(
+            "{}",
+            output::render_server_versions(&list_server_version_rows, *output_format)
+        );
+        return match version::build_unreachable_server_error(&list_server_version_rows) {
+            Some(unreachable_server_error) => Err(unreachable_server_error),
             None => Ok(()),
         };
     }
@@ -250,30 +263,30 @@ fn run(cli: &Cli) -> Result<(), CliError> {
     if let Some(command) = cli
         .command
         .as_ref()
-        .filter(|command| command.is_discovery())
+        .filter(|command| command.is_discovery_query())
     {
         // The discovery queries read every running session's state and render
         // it here. They dispatch no command and never enter the routing layer
         // the action verbs use.
-        return run_discovery(command, cli.remote.as_deref());
+        return run_discovery(command, cli.remote_server_reference.as_deref());
     }
 
     if let Some(CliCommand::Debug { command }) = &cli.command {
         return run_debug(command);
     }
 
-    if let Some(CliCommand::KillSession { session }) = &cli.command {
-        return finish_command(session_control::kill_session(session.as_ref())?);
+    if let Some(CliCommand::KillSession { session_reference }) = &cli.command {
+        return render_command_result(session_control::kill_session(session_reference.as_ref())?);
     }
 
-    if cli.headless {
+    if cli.is_headless {
         // The session is created and left running with nothing attached. Its
         // id prints as `[SESSION ID]: <id>` on standard output.
-        let runtime_dir = ipc_client::runtime_dir()?;
+        let runtime_directory = ipc_client::resolve_runtime_directory()?;
         let session_id = session_control::request_headless_session(
-            &runtime_dir,
-            cli.profile.as_deref(),
-            cli.allow_other_users.then_some(true),
+            &runtime_directory,
+            cli.profile_name.as_deref(),
+            cli.should_allow_other_users.then_some(true),
         )?;
         println!("[SESSION ID]: {session_id}");
         return Ok(());
@@ -284,56 +297,84 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         // its answer from plain standard input. A failure never blocks the
         // launch.
         updater::maybe_prompt_startup_update();
-        return koshi_client::app::run(cli.profile.as_deref());
+        return koshi_client::app::run_default_client(cli.profile_name.as_deref());
     }
 
     // The in-session identity is read before any session verb dispatches, so a
     // broken pane environment reports itself rather than a missing daemon.
-    let in_session = InSessionContext::from_env()?;
+    let in_session_context = InSessionContext::from_env()?;
 
     // Attach is not an action verb, so it dispatches here rather than through
     // the routing layer. Typed inside a pane it moves that pane's client to
     // the named session; typed outside one it joins that session in this
     // terminal.
-    if let Some(CliCommand::Attach { session, save_as }) = &cli.command {
+    if let Some(CliCommand::Attach {
+        session_argument,
+        save_as,
+    }) = &cli.command
+    {
         // With `--remote` the session is resolved and joined on the named
         // machine; a pane identity on this one is not read.
-        if let Some(server) = &cli.remote {
-            return attach::run_remote(server, save_as.as_deref(), session.as_deref());
+        if let Some(server_reference) = &cli.remote_server_reference {
+            return attach::attach_remote_session(
+                server_reference,
+                save_as.as_deref(),
+                session_argument.as_deref(),
+            );
         }
-        return match in_session.as_ref() {
-            Some(context) => {
-                finish_command(attach::switch_in_session(context, session.as_deref())?)
-            }
-            None => attach::run(session.as_deref()),
+        return match in_session_context.as_ref() {
+            Some(in_session_context) => render_command_result(attach::switch_in_session(
+                in_session_context,
+                session_argument.as_deref(),
+            )?),
+            None => attach::attach_selected_session(session_argument.as_deref()),
         };
     }
 
     // Detach is not an action verb, so it dispatches here rather than through
     // the routing layer. Success prints nothing; a detach the session refuses
     // comes back as a rejected command.
-    if let Some(CliCommand::Detach { target, all }) = &cli.command {
-        return match (target.as_deref(), all) {
+    if let Some(CliCommand::Detach {
+        detach_target,
+        should_detach_all_clients,
+    }) = &cli.command
+    {
+        return match (detach_target.as_deref(), should_detach_all_clients) {
             (None, false) => {
-                let context = in_session.as_ref().ok_or_else(|| CliError::InvalidArgs {
+                let in_session_context = in_session_context
+                    .as_ref()
+                    .ok_or_else(|| CliError::InvalidArgs {
                     detail: "bare koshi detach only works inside a koshi session; outside one use koshi detach <id>".to_string(),
-                })?;
-                finish_command(ipc_client::submit_in_session(
-                    context,
-                    Command::Detach(DetachArgs { client: None }),
+                    })?;
+                render_command_result(ipc_client::submit_in_session_command(
+                    in_session_context,
+                    Command::Detach(DetachArgs { client_id: None }),
                 )?)
             }
-            (Some(raw), false) => finish_command(session_control::detach_client_or_session(raw)?),
-            (None, true) => {
-                let context = in_session.as_ref().ok_or_else(|| CliError::InvalidArgs {
-                    detail: "bare koshi detach --all only works inside a koshi session; outside one use koshi detach --all <session>".to_string(),
-                })?;
-                finish_command(ipc_client::submit_in_session(context, Command::DetachAll)?)
+            (Some(target_text), false) => {
+                render_command_result(session_control::detach_client_or_session(target_text)?)
             }
-            (Some(raw), true) => {
-                let session =
-                    parse_session_ref(raw).map_err(|detail| CliError::InvalidArgs { detail })?;
-                finish_command(session_control::detach_all_session(Some(&session))?)
+            (None, true) => {
+                let in_session_context = in_session_context
+                    .as_ref()
+                    .ok_or_else(|| CliError::InvalidArgs {
+                    detail: "bare koshi detach --all only works inside a koshi session; outside one use koshi detach --all <session>".to_string(),
+                    })?;
+                render_command_result(ipc_client::submit_in_session_command(
+                    in_session_context,
+                    Command::DetachAll,
+                )?)
+            }
+            (Some(target_text), true) => {
+                let target_session_reference =
+                    parse_session_reference(target_text).map_err(|parse_error_detail| {
+                        CliError::InvalidArgs {
+                            detail: parse_error_detail,
+                        }
+                    })?;
+                render_command_result(session_control::detach_all_session(Some(
+                    &target_session_reference,
+                ))?)
             }
         };
     }
@@ -350,31 +391,41 @@ fn run(cli: &Cli) -> Result<(), CliError> {
 
     // With `--remote` the target is picked from the sessions on the named
     // machine; the pane identity on this one is not read.
-    let result = match &cli.remote {
-        Some(server) => targeting::submit_remote(server, cli_command, new_pane_direction)?,
-        None => match targeting::route(cli_command, in_session.as_ref())? {
-            Route::InSession(targets) => {
-                let context = in_session.expect("an in-session route needs the pane identity");
-                let (_, command) = cli_command
-                    .to_action(&targets, new_pane_direction)
+    let command_result = match &cli.remote_server_reference {
+        Some(server_reference) => {
+            targeting::submit_remote(server_reference, cli_command, new_pane_direction)?
+        }
+        None => match targeting::resolve_command_route(cli_command, in_session_context.as_ref())? {
+            Route::InSession(resolved_targets) => {
+                let in_session_context =
+                    in_session_context.expect("an in-session route needs the pane identity");
+                let (_, action_command) = cli_command
+                    .build_action_command(&resolved_targets, new_pane_direction)
                     .expect("checked to be an action verb above");
-                ipc_client::submit_in_session(&context, command)?
+                ipc_client::submit_in_session_command(&in_session_context, action_command)?
             }
-            Route::External { session, targets } => {
-                let (_, command) = cli_command
-                    .to_action(&targets, new_pane_direction)
+            Route::External {
+                session_id,
+                targets: resolved_targets,
+            } => {
+                let (_, action_command) = cli_command
+                    .build_action_command(&resolved_targets, new_pane_direction)
                     .expect("checked to be an action verb above");
-                ipc_client::submit_external(session, cli_command.source_client(), command)?
+                ipc_client::submit_external_command(
+                    session_id,
+                    cli_command.get_source_client_id(),
+                    action_command,
+                )?
             }
         },
     };
 
-    finish_command(result)
+    render_command_result(command_result)
 }
 
 /// Print an applied command's created ids, or surface its rejection.
-fn finish_command(result: CommandResult) -> Result<(), CliError> {
-    match result {
+fn render_command_result(command_result: CommandResult) -> Result<(), CliError> {
+    match command_result {
         CommandResult::Ok { emitted_events, .. } => {
             print!("{}", output::render_created_events(&emitted_events));
             Ok(())
@@ -406,96 +457,142 @@ fn finish_command(result: CommandResult) -> Result<(), CliError> {
 /// answer, or pins no certificate yet is named on stderr and its sessions are
 /// left out; only a session on this machine that could not answer fails the
 /// listing.
-fn run_discovery(command: &CliCommand, remote: Option<&str>) -> Result<(), CliError> {
-    if let (CliCommand::ListSessions { format }, Some(server)) = (command, remote) {
-        let arg = remote_client::resolve_server(server)?;
-        let (mut link, _) =
-            remote_client::connect_saved(&arg, None, Some(remote_client::REPLY_WAIT))?;
-        let listed = remote_client::list_remote_sessions(&mut link)?;
-        let label = arg.label();
-        let rows: Vec<SessionRow> = listed
+fn run_discovery(command: &CliCommand, remote_server: Option<&str>) -> Result<(), CliError> {
+    if let (CliCommand::ListSessions { output_format }, Some(server)) = (command, remote_server) {
+        let saved_server_argument = remote_client::resolve_server(server)?;
+        let (mut remote_link, _) = remote_client::connect_saved_server(
+            &saved_server_argument,
+            None,
+            Some(remote_client::REPLY_TIMEOUT_DURATION),
+        )?;
+        let remote_session_rows = remote_client::list_remote_sessions(&mut remote_link)?;
+        let server_label = saved_server_argument.format_server_label();
+        let session_rows: Vec<SessionRow> = remote_session_rows
             .into_iter()
-            .map(|row| SessionRow::new(row.id, &row.name, Some(label.clone())))
+            .map(|remote_session_row| {
+                SessionRow::from_session(
+                    remote_session_row.session_id,
+                    &remote_session_row.session_name,
+                    Some(server_label.clone()),
+                )
+            })
             .collect();
-        print!("{}", output::render_sessions(&rows, *format));
+        print!("{}", output::render_sessions(&session_rows, *output_format));
         return Ok(());
     }
 
-    let runtime_dir = ipc_client::runtime_dir()?;
-    let found = targeting::scope_sessions(&runtime_dir, command.discovery_session())?;
-    let sessions = found.sessions.as_slice();
+    let runtime_directory = ipc_client::resolve_runtime_directory()?;
+    let discovered_sessions = targeting::resolve_session_scope(
+        &runtime_directory,
+        command.get_discovery_session_reference(),
+    )?;
+    let session_overviews = discovered_sessions.sessions.as_slice();
 
-    let rendered = match command {
-        CliCommand::ListSessions { format } => {
-            let mut rows = discovery::session_rows(sessions);
-            for reach in remote_client::reach_all(REACH_WAIT) {
+    let rendered_output = match command {
+        CliCommand::ListSessions { output_format } => {
+            let mut session_rows = discovery::build_session_rows(session_overviews);
+            for reach in remote_client::reach_all_saved_servers(REACH_TIMEOUT_DURATION) {
                 match reach {
                     Reach::Reached {
-                        server,
-                        rows: listed,
+                        server_label,
+                        session_rows: remote_session_rows,
                     } => {
-                        rows.extend(
-                            listed.into_iter().map(|row| {
-                                SessionRow::new(row.id, &row.name, Some(server.clone()))
-                            }),
+                        session_rows.extend(remote_session_rows.into_iter().map(
+                            |remote_session_row| {
+                                SessionRow::from_session(
+                                    remote_session_row.session_id,
+                                    &remote_session_row.session_name,
+                                    Some(server_label.clone()),
+                                )
+                            },
+                        ));
+                    }
+                    Reach::Refused { server_label } => eprintln!(
+                        "koshi: {server_label}: the saved secret was refused; \
+                         run `koshi remote set-secret {server_label}`"
+                    ),
+                    Reach::CertificateChanged {
+                        server_label,
+                        certificate_error_detail,
+                    } => {
+                        eprintln!(
+                            "koshi: {server_label}: {certificate_error_detail} its sessions are not listed"
                         );
                     }
-                    Reach::Refused { server } => eprintln!(
-                        "koshi: {server}: the saved secret was refused; \
-                         run `koshi remote set-secret {server}`"
-                    ),
-                    Reach::CertificateChanged { server, detail } => {
-                        eprintln!("koshi: {server}: {detail} its sessions are not listed");
+                    Reach::Unreachable { server_label } => {
+                        eprintln!(
+                            "koshi: {server_label} did not answer; its sessions are not listed"
+                        );
                     }
-                    Reach::Unreachable { server } => {
-                        eprintln!("koshi: {server} did not answer; its sessions are not listed");
-                    }
-                    Reach::Unchecked { server } => eprintln!(
-                        "koshi: {server} has no pinned certificate yet; \
-                         run `koshi list-sessions --remote {server}` to connect and pin it"
+                    Reach::Unchecked { server_label } => eprintln!(
+                        "koshi: {server_label} has no pinned certificate yet; \
+                         run `koshi list-sessions --remote {server_label}` to connect and pin it"
                     ),
                 }
             }
-            output::render_sessions(&rows, *format)
+            output::render_sessions(&session_rows, *output_format)
         }
-        CliCommand::ListTabs { format, .. } => {
-            output::render_tabs(&discovery::tab_rows(sessions), *format)
-        }
-        CliCommand::ListPanes { format, .. } => {
-            output::render_panes(&discovery::pane_rows(sessions), *format)
-        }
-        CliCommand::ListClients { format, .. } => {
-            output::render_clients(&discovery::client_rows(sessions), *format)
-        }
-        CliCommand::Inspect { target } => match target {
-            InspectTarget::Session { session, format } => {
+        CliCommand::ListTabs { output_format, .. } => output::render_tabs(
+            &discovery::build_tab_rows(session_overviews),
+            *output_format,
+        ),
+        CliCommand::ListPanes { output_format, .. } => output::render_panes(
+            &discovery::build_pane_rows(session_overviews),
+            *output_format,
+        ),
+        CliCommand::ListClients { output_format, .. } => output::render_clients(
+            &discovery::build_client_rows(session_overviews),
+            *output_format,
+        ),
+        CliCommand::Inspect { inspect_target } => match inspect_target {
+            InspectTarget::Session {
+                session_reference,
+                output_format,
+            } => {
                 // The scope already resolved the named session, so the census
                 // holds that one session; an empty census reports it as not
                 // found.
-                let overview = sessions.first().ok_or_else(|| CliError::SessionNotFound {
-                    session: session.to_string(),
-                })?;
-                output::render_session(&overview.session, *format)
+                let session_overview =
+                    session_overviews
+                        .first()
+                        .ok_or_else(|| CliError::SessionNotFound {
+                            session_name: session_reference.to_string(),
+                        })?;
+                output::render_session(&session_overview.session, *output_format)
             }
-            InspectTarget::Tab { tab, format } => {
-                let tab_id = targeting::tab_by_ref(&found, tab)?;
-                output::render_tab(&discovery::find_tab(&found, tab_id)?, *format)
+            InspectTarget::Tab {
+                tab_reference,
+                output_format,
+            } => {
+                let tab_id = targeting::resolve_tab_reference(&discovered_sessions, tab_reference)?;
+                output::render_tab(
+                    &discovery::find_tab(&discovered_sessions, tab_id)?,
+                    *output_format,
+                )
             }
-            InspectTarget::Pane { pane, format } => {
-                output::render_pane(&discovery::find_pane(&found, *pane)?, *format)
-            }
-            InspectTarget::Client { client, format } => {
-                output::render_client(&discovery::find_client(&found, *client)?, *format)
-            }
+            InspectTarget::Pane {
+                pane_id,
+                output_format,
+            } => output::render_pane(
+                &discovery::find_pane(&discovered_sessions, *pane_id)?,
+                *output_format,
+            ),
+            InspectTarget::Client {
+                client_id,
+                output_format,
+            } => output::render_client(
+                &discovery::find_client(&discovered_sessions, *client_id)?,
+                *output_format,
+            ),
         },
         _ => unreachable!("checked to be a discovery query above"),
     };
-    print!("{rendered}");
+    print!("{rendered_output}");
 
     // Every discovery query other than an `inspect` is a listing.
-    let listing = !matches!(command, CliCommand::Inspect { .. });
-    match found.incomplete_listing() {
-        Some(error) if listing => Err(error),
+    let is_listing = !matches!(command, CliCommand::Inspect { .. });
+    match discovered_sessions.incomplete_listing() {
+        Some(incomplete_listing_error) if is_listing => Err(incomplete_listing_error),
         _ => Ok(()),
     }
 }
@@ -503,13 +600,20 @@ fn run_discovery(command: &CliCommand, remote: Option<&str>) -> Result<(), CliEr
 /// Serve a `koshi debug` dump from live state.
 fn run_debug(command: &DebugCommand) -> Result<(), CliError> {
     match command {
-        DebugCommand::DumpState { format } => run_dump_state(*format),
-        DebugCommand::DumpLayout { tab, format } => run_dump_layout(tab.as_ref(), *format),
+        DebugCommand::DumpState { output_format } => run_dump_state(*output_format),
+        DebugCommand::DumpLayout {
+            tab_reference,
+            output_format,
+        } => run_dump_layout(tab_reference.as_ref(), *output_format),
         DebugCommand::Events {
-            since,
-            filter,
-            format,
-        } => run_debug_events(*since, filter.as_deref(), *format),
+            event_age_limit,
+            event_name_filter,
+            output_format,
+        } => run_debug_events(
+            *event_age_limit,
+            event_name_filter.as_deref(),
+            *output_format,
+        ),
     }
 }
 
@@ -517,13 +621,16 @@ fn run_debug(command: &DebugCommand) -> Result<(), CliError> {
 /// arguments hidden.
 ///
 /// Prints every session it reached, then fails when one could not answer.
-fn run_dump_state(format: FormatArg) -> Result<(), CliError> {
-    let runtime_dir = ipc_client::runtime_dir()?;
-    let mut found = discovery::fetch_all(&runtime_dir);
-    discovery::redact_pane_commands(&mut found.sessions);
-    print!("{}", output::render_dump_state(&found.sessions, format));
-    match found.incomplete_listing() {
-        Some(error) => Err(error),
+fn run_dump_state(output_format: OutputFormat) -> Result<(), CliError> {
+    let runtime_directory = ipc_client::resolve_runtime_directory()?;
+    let mut discovered_sessions = discovery::fetch_all_session_overviews(&runtime_directory);
+    discovery::redact_pane_commands(&mut discovered_sessions.sessions);
+    print!(
+        "{}",
+        output::render_dump_state(&discovered_sessions.sessions, output_format)
+    );
+    match discovered_sessions.incomplete_listing() {
+        Some(incomplete_listing_error) => Err(incomplete_listing_error),
         None => Ok(()),
     }
 }
@@ -535,30 +642,39 @@ fn run_dump_state(format: FormatArg) -> Result<(), CliError> {
 /// closes between that lookup and the session's answer. A session that refuses
 /// the layout request fails the command before anything prints; a session that
 /// was listening but could not be probed fails it after everything prints.
-fn run_dump_layout(tab: Option<&TabRef>, format: FormatArg) -> Result<(), CliError> {
-    let runtime_dir = ipc_client::runtime_dir()?;
-    let found = targeting::scope_sessions(&runtime_dir, None)?;
+fn run_dump_layout(
+    tab_reference: Option<&TabReference>,
+    output_format: OutputFormat,
+) -> Result<(), CliError> {
+    let runtime_directory = ipc_client::resolve_runtime_directory()?;
+    let discovered_sessions = targeting::resolve_session_scope(&runtime_directory, None)?;
 
-    let layouts = match tab {
-        Some(tab_ref) => {
-            let tab_id = targeting::tab_by_ref(&found, tab_ref)?;
-            let session_id = discovery::find_tab(&found, tab_id)?.session_id;
+    let layouts = match tab_reference {
+        Some(tab_reference) => {
+            let tab_id = targeting::resolve_tab_reference(&discovered_sessions, tab_reference)?;
+            let session_id = discovery::find_tab(&discovered_sessions, tab_id)?.session_id;
             vec![ipc_client::fetch_layout(
-                &runtime_dir,
+                &runtime_directory,
                 session_id,
                 Some(tab_id),
             )?]
         }
-        None => found
+        None => discovered_sessions
             .sessions
             .iter()
-            .map(|overview| ipc_client::fetch_layout(&runtime_dir, overview.session.id, None))
+            .map(|session_overview| {
+                ipc_client::fetch_layout(
+                    &runtime_directory,
+                    session_overview.session.session_id,
+                    None,
+                )
+            })
             .collect::<Result<Vec<_>, CliError>>()?,
     };
-    print!("{}", output::render_layouts(&layouts, format));
+    print!("{}", output::render_layouts(&layouts, output_format));
 
-    match found.incomplete_listing() {
-        Some(error) => Err(error),
+    match discovered_sessions.incomplete_listing() {
+        Some(incomplete_listing_error) => Err(incomplete_listing_error),
         None => Ok(()),
     }
 }
@@ -575,30 +691,40 @@ fn run_dump_layout(tab: Option<&TabRef>, format: FormatArg) -> Result<(), CliErr
 /// prints; a session that was listening but could not be probed fails it after
 /// everything prints.
 fn run_debug_events(
-    since: Option<Duration>,
-    filter: Option<&str>,
-    format: FormatArg,
+    since_duration: Option<Duration>,
+    event_name_filter: Option<&str>,
+    output_format: OutputFormat,
 ) -> Result<(), CliError> {
-    let runtime_dir = ipc_client::runtime_dir()?;
-    let found = targeting::scope_sessions(&runtime_dir, None)?;
-    let oldest_kept = output::oldest_kept(SystemTime::now(), since);
+    let runtime_directory = ipc_client::resolve_runtime_directory()?;
+    let discovered_sessions = targeting::resolve_session_scope(&runtime_directory, None)?;
+    let oldest_event_time = output::compute_oldest_event_time(SystemTime::now(), since_duration);
 
-    let sessions = found
+    let session_events = discovered_sessions
         .sessions
         .iter()
-        .map(|overview| {
-            let events = ipc_client::fetch_recent_events(&runtime_dir, overview.session.id)?;
+        .map(|session_overview| {
+            let recent_events = ipc_client::fetch_recent_events(
+                &runtime_directory,
+                session_overview.session.session_id,
+            )?;
             Ok(output::SessionEvents {
-                session: overview.session.id,
-                name: overview.session.name.clone(),
-                events: output::narrow(events, oldest_kept, filter),
+                session_id: session_overview.session.session_id,
+                session_name: session_overview.session.session_name.clone(),
+                recent_events: output::filter_recent_events(
+                    recent_events,
+                    oldest_event_time,
+                    event_name_filter,
+                ),
             })
         })
         .collect::<Result<Vec<_>, CliError>>()?;
-    print!("{}", output::render_recent_events(&sessions, format));
+    print!(
+        "{}",
+        output::render_recent_events(&session_events, output_format)
+    );
 
-    match found.incomplete_listing() {
-        Some(error) => Err(error),
+    match discovered_sessions.incomplete_listing() {
+        Some(incomplete_listing_error) => Err(incomplete_listing_error),
         None => Ok(()),
     }
 }
@@ -607,21 +733,22 @@ fn run_debug_events(
 /// rendered answer, or report an unknown action name.
 fn run_actions(command: &ActionsCommand) -> Result<(), CliError> {
     match command {
-        ActionsCommand::List { format } => {
-            print!("{}", output::render_actions_list(*format));
+        ActionsCommand::List { output_format } => {
+            print!("{}", output::render_actions_list(*output_format));
             Ok(())
         }
-        ActionsCommand::Explain { action, format } => {
-            match output::render_action_explain(action, *format) {
-                Some(rendered) => {
-                    print!("{rendered}");
-                    Ok(())
-                }
-                None => Err(CliError::UnknownAction {
-                    name: action.clone(),
-                }),
+        ActionsCommand::Explain {
+            action_reference_text,
+            output_format,
+        } => match output::render_action_explain(action_reference_text, *output_format) {
+            Some(rendered_output) => {
+                print!("{rendered_output}");
+                Ok(())
             }
-        }
+            None => Err(CliError::UnknownAction {
+                action_name: action_reference_text.clone(),
+            }),
+        },
     }
 }
 
@@ -631,54 +758,79 @@ fn run_actions(command: &ActionsCommand) -> Result<(), CliError> {
 fn run_keys_query(command: &KeysCommand) -> Result<(), CliError> {
     match command {
         KeysCommand::List {
-            mode,
+            input_mode_name,
             scope,
-            recommended,
-            format,
+            is_recommended,
+            output_format,
         } => {
-            if *recommended {
-                print!("{}", output::render_keys_recommended(*format));
+            if *is_recommended {
+                print!("{}", output::render_keys_recommended(*output_format));
                 return Ok(());
             }
-            let view = keymap::load_keymap_view();
-            warn_keymap_reverted(&view);
+            let keymap_view = keymap::load_keymap_view();
+            warn_keymap_reverted(&keymap_view);
             print!(
                 "{}",
-                output::render_keys_list(&view, mode.as_deref(), *scope, *format)
+                output::render_keys_list(
+                    &keymap_view,
+                    input_mode_name.as_deref(),
+                    *scope,
+                    *output_format,
+                )
             );
             Ok(())
         }
-        KeysCommand::Describe { sequence, format } => {
-            let view = keymap::load_keymap_view();
-            warn_keymap_reverted(&view);
-            match output::render_keys_describe(&view, sequence, *format) {
-                Ok(Some(rendered)) => {
-                    print!("{rendered}");
+        KeysCommand::Describe {
+            key_sequence_text,
+            output_format,
+        } => {
+            let keymap_view = keymap::load_keymap_view();
+            warn_keymap_reverted(&keymap_view);
+            match output::render_keys_describe(&keymap_view, key_sequence_text, *output_format) {
+                Ok(Some(rendered_output)) => {
+                    print!("{rendered_output}");
                     Ok(())
                 }
                 Ok(None) => Err(CliError::UnboundKey {
-                    sequence: sequence.clone(),
+                    sequence: key_sequence_text.clone(),
                 }),
-                Err(detail) => Err(CliError::InvalidArgs { detail }),
+                Err(parse_error_detail) => Err(CliError::InvalidArgs {
+                    detail: parse_error_detail,
+                }),
             }
         }
-        KeysCommand::Conflicts { format } => {
+        KeysCommand::Conflicts { output_format } => {
             // An ignored file is part of the rendered answer itself, so no
             // stderr note is needed here.
-            let view = keymap::load_keymap_view();
-            print!("{}", output::render_keys_conflicts(&view, *format));
+            let keymap_view = keymap::load_keymap_view();
+            print!(
+                "{}",
+                output::render_keys_conflicts(&keymap_view, *output_format)
+            );
             Ok(())
         }
-        KeysCommand::Validate { path, format } => {
-            let outcome = keymap::validate_file(path).map_err(|err| CliError::InvalidArgs {
-                detail: format!("cannot read {}: {err}", path.display()),
-            })?;
-            print!("{}", output::render_keys_validate(&outcome, *format));
-            if output::validation_applies(&outcome) {
+        KeysCommand::Validate {
+            keybinding_file_path,
+            output_format,
+        } => {
+            let validation_outcome =
+                keymap::validate_keymap_file(keybinding_file_path).map_err(|read_error| {
+                    CliError::InvalidArgs {
+                        detail: format!(
+                            "cannot read {}: {read_error}",
+                            keybinding_file_path.display()
+                        ),
+                    }
+                })?;
+            print!(
+                "{}",
+                output::render_keys_validate(&validation_outcome, *output_format)
+            );
+            if output::does_validation_apply(&validation_outcome) {
                 Ok(())
             } else {
                 Err(CliError::InvalidKeymapFile {
-                    path: path.display().to_string(),
+                    keymap_file_path: keybinding_file_path.display().to_string(),
                 })
             }
         }
@@ -688,10 +840,10 @@ fn run_keys_query(command: &KeysCommand) -> Result<(), CliError> {
 /// Warn on stderr when the user's keybinding file exists but was not
 /// admitted, so the defaults-only answer on stdout is not mistaken for the
 /// file's contents.
-fn warn_keymap_reverted(view: &KeymapView) {
-    if let Some(error) = &view.file_error {
-        eprintln!("koshi: keybinding file ignored: {error}");
-    } else if view.reverted {
+fn warn_keymap_reverted(keymap_view: &KeymapView) {
+    if let Some(keymap_error) = &keymap_view.file_error_message {
+        eprintln!("koshi: keybinding file ignored: {keymap_error}");
+    } else if keymap_view.is_reverted_to_defaults {
         eprintln!(
             "koshi: keybinding file not applied (conflicts); showing built-in defaults — \
              run `koshi keys conflicts` for details"

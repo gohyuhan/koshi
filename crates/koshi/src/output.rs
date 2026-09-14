@@ -28,21 +28,21 @@
 use std::time::SystemTime;
 
 use koshi_core::action::{
-    core_action_seeds, ActionHandlerRef, ActionMetadata, ActionRef, ActionScope, ActionStatus,
-    TargetKind,
+    build_core_action_seeds, ActionHandlerReference, ActionMetadata, ActionReference, ActionScope,
+    ActionStatus, TargetKind,
 };
 use koshi_core::discovery::{
-    ClientInfo, PaneInfo, PaneState, SessionInfo, SessionOverview, TabInfo,
+    ClientDiscovery, PaneDiscovery, PaneLifecycle, SessionDiscovery, SessionOverview, TabDiscovery,
 };
 use koshi_core::geometry::Size;
 use serde::Serialize;
 
-use crate::cli::{FormatArg, ScopeArg};
+use crate::cli::{KeymapScope, OutputFormat};
 use koshi_link::discovery::{ClientRow, PaneRow, SessionRow, TabRow};
 
-/// The pretty-printed JSON form of `value`, ending in a newline.
-fn json<T: Serialize>(value: &T) -> String {
-    let mut rendered = serde_json::to_string_pretty(value).expect(
+/// The pretty-printed JSON form of `serializable_value`, ending in a newline.
+fn render_json<SerializableValue: Serialize>(serializable_value: &SerializableValue) -> String {
+    let mut rendered = serde_json::to_string_pretty(serializable_value).expect(
         "output structs serialize: strings are valid, paths render lossily, clocks post-epoch",
     );
     rendered.push('\n');
@@ -51,51 +51,56 @@ fn json<T: Serialize>(value: &T) -> String {
 
 /// Aligned columns: a header row, then one row per item, each column padded
 /// to its widest cell and separated by two spaces, with no trailing spaces.
-fn table(headers: &[&str], rows: Vec<Vec<String>>) -> String {
+fn render_table(column_headers: &[&str], table_rows: Vec<Vec<String>>) -> String {
     // Each column's width is the widest cell in that column, starting from
     // the header's own width.
-    let mut widths: Vec<usize> = headers
+    let mut column_widths: Vec<usize> = column_headers
         .iter()
         .map(|header| header.chars().count())
         .collect();
-    for row in &rows {
-        for (width, cell) in widths.iter_mut().zip(row) {
-            *width = (*width).max(cell.chars().count());
+    for row_cells in &table_rows {
+        for (column_width, cell_text) in column_widths.iter_mut().zip(row_cells) {
+            *column_width = (*column_width).max(cell_text.chars().count());
         }
     }
-    let mut rendered = String::new();
-    let header_cells: Vec<String> = headers.iter().map(|header| (*header).to_string()).collect();
+    let mut rendered_output = String::new();
+    let header_cells: Vec<String> = column_headers
+        .iter()
+        .map(|header| (*header).to_string())
+        .collect();
     // Render the header first, then every data row, using the same padding logic.
-    for row in std::iter::once(&header_cells).chain(rows.iter()) {
-        let mut line = String::new();
-        for (index, (cell, width)) in row.iter().zip(&widths).enumerate() {
-            if index > 0 {
-                line.push_str("  ");
+    for row_cells in std::iter::once(&header_cells).chain(table_rows.iter()) {
+        let mut rendered_line = String::new();
+        for (column_index, (cell_text, column_width)) in
+            row_cells.iter().zip(&column_widths).enumerate()
+        {
+            if column_index > 0 {
+                rendered_line.push_str("  ");
             }
-            line.push_str(cell);
-            let padding = width.saturating_sub(cell.chars().count());
+            rendered_line.push_str(cell_text);
+            let cell_padding_count = column_width.saturating_sub(cell_text.chars().count());
             // Pad every cell except the last, whose trailing spaces get
             // trimmed off the line below anyway.
-            if index < row.len() - 1 {
-                line.extend(std::iter::repeat_n(' ', padding));
+            if column_index < row_cells.len() - 1 {
+                rendered_line.extend(std::iter::repeat_n(' ', cell_padding_count));
             }
         }
-        rendered.push_str(line.trim_end());
-        rendered.push('\n');
+        rendered_output.push_str(rendered_line.trim_end());
+        rendered_output.push('\n');
     }
-    rendered
+    rendered_output
 }
 
 /// A single item as `field: value` lines, one per header.
-fn fields(headers: &[&str], row: Vec<String>) -> String {
-    let mut rendered = String::new();
-    for (header, cell) in headers.iter().zip(row) {
-        rendered.push_str(header);
-        rendered.push_str(": ");
-        rendered.push_str(&cell);
-        rendered.push('\n');
+fn render_fields(field_headers: &[&str], field_values: Vec<String>) -> String {
+    let mut rendered_output = String::new();
+    for (field_header, field_value) in field_headers.iter().zip(field_values) {
+        rendered_output.push_str(field_header);
+        rendered_output.push_str(": ");
+        rendered_output.push_str(&field_value);
+        rendered_output.push('\n');
     }
-    rendered
+    rendered_output
 }
 
 mod actions;

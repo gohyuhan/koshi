@@ -17,45 +17,45 @@ pub enum PaneRegistryError {
     /// An insert used an id that the registry already holds. `PaneId` displays
     /// as `pane-<uuid>`, so the message reads `pane-<uuid> is already
     /// registered`.
-    #[error("{id} is already registered")]
+    #[error("{pane_id} is already registered")]
     DuplicateId {
-        /// The id that is already registered.
-        id: PaneId,
+        /// The pane identifier that is already registered.
+        pane_id: PaneId,
         /// The kind of the record that the insert rejected.
-        kind: PaneKind,
+        pane_kind: PaneKind,
     },
 }
 
 impl DomainError for PaneRegistryError {
     fn category(&self) -> DomainCategory {
         match self {
-            PaneRegistryError::DuplicateId { kind, .. } => kind.domain_category(),
+            PaneRegistryError::DuplicateId { pane_kind, .. } => pane_kind.domain_category(),
         }
     }
 
-    fn severity(&self) -> Severity {
+    fn get_severity(&self) -> Severity {
         Severity::Recoverable
     }
 }
 
 /// An attempt to move a pane through an illegal lifecycle step.
 #[derive(Debug, Error, PartialEq, Eq)]
-#[error("illegal pane lifecycle transition from {from:?} on {event:?}")]
-pub struct InvalidTransition {
+#[error("illegal pane lifecycle transition from {previous_lifecycle:?} on {lifecycle_event:?}")]
+pub struct InvalidTransitionError {
     /// The state the pane was in.
-    pub from: PaneLifecycle,
+    pub previous_lifecycle: PaneLifecycle,
     /// The event that was rejected.
-    pub event: PaneLifecycleEvent,
+    pub lifecycle_event: PaneLifecycleEvent,
     /// The kind of the pane, terminal or plugin.
-    pub kind: PaneKind,
+    pub pane_kind: PaneKind,
 }
 
-impl DomainError for InvalidTransition {
+impl DomainError for InvalidTransitionError {
     fn category(&self) -> DomainCategory {
-        self.kind.domain_category()
+        self.pane_kind.domain_category()
     }
 
-    fn severity(&self) -> Severity {
+    fn get_severity(&self) -> Severity {
         Severity::Recoverable
     }
 }

@@ -24,22 +24,22 @@ use crate::server::Server;
 
 #[derive(Clone, Copy)]
 struct TerminalAdvanceBefore {
-    pushed: u64,
-    scrollback_len: usize,
+    pushed_line_count: u64,
+    retained_line_count: usize,
     screen: koshi_terminal::state::Screen,
-    graphics_events: usize,
-    graphics_errors_dropped: usize,
+    graphics_event_count: usize,
+    dropped_graphics_error_count: usize,
 }
 
 impl TerminalAdvanceBefore {
-    fn capture(engine: &TerminalEngine) -> Self {
-        let scrollback = engine.state().scrollback();
+    fn capture_terminal_advance_state(engine: &TerminalEngine) -> Self {
+        let scrollback_state = engine.get_terminal_state().get_scrollback();
         Self {
-            pushed: scrollback.total_pushed(),
-            scrollback_len: scrollback.len(),
-            screen: engine.state().active_screen(),
-            graphics_events: engine.graphics_events().count(),
-            graphics_errors_dropped: engine.graphics_errors_dropped(),
+            pushed_line_count: scrollback_state.get_total_pushed_line_count(),
+            retained_line_count: scrollback_state.get_retained_line_count(),
+            screen: engine.get_terminal_state().get_active_screen(),
+            graphics_event_count: engine.list_graphics_events().count(),
+            dropped_graphics_error_count: engine.get_dropped_graphics_error_count(),
         }
     }
 }
@@ -68,101 +68,119 @@ impl Server {
     /// alternate) than it started on drops every client's highlight in it.
     ///
     /// Shell-integration facts become command lifecycle events in marker order.
-    pub fn handle_pty_output(&mut self, pane_id: PaneId, bytes: &[u8]) {
-        let cell_size = self.sessions.values().find_map(|session| {
-            let tab = session
+    pub fn handle_pty_output(&mut self, pane_id: PaneId, output_bytes: &[u8]) {
+        let terminal_cell_size = self.session_by_id.values().find_map(|session| {
+            let tab_state = session
                 .tabs
                 .values()
-                .find(|tab| tab.layout().contains_pane(pane_id))?;
-            session.tab_cell_size(tab.id())
+                .find(|tab_state| tab_state.get_layout_tree().contains_pane(pane_id))?;
+            session.get_tab_cell_size(tab_state.get_tab_id())
         });
-        let Some(engine) = self.terminal_engines.get_mut(&pane_id) else {
+        let Some(engine) = self.terminal_engine_by_pane_id.get_mut(&pane_id) else {
             return;
         };
-        if let Some(size) = cell_size {
-            engine.set_cell_size(size);
+        if let Some(terminal_cell_size) = terminal_cell_size {
+            engine.set_cell_size(terminal_cell_size);
         }
-        let before = TerminalAdvanceBefore::capture(engine);
-        let (replies, shell_facts, advanced) =
-            engine.advance_with_shell_integration_at(bytes, Instant::now());
-        if !advanced && !bytes.is_empty() {
+        let terminal_advance_before = TerminalAdvanceBefore::capture_terminal_advance_state(engine);
+        let (reply_bytes, shell_integration_facts, is_terminal_advanced) =
+            engine.process_pty_output_with_shell_integration_at(output_bytes, Instant::now());
+        if !is_terminal_advanced && !output_bytes.is_empty() {
             return;
         }
-        self.finish_terminal_advance(pane_id, before, replies, shell_facts);
+        self.finish_terminal_advance(
+            pane_id,
+            terminal_advance_before,
+            reply_bytes,
+            shell_integration_facts,
+        );
     }
 
     pub(in crate::runtime) fn expire_synchronized_output(
         &mut self,
         pane_id: PaneId,
-        now: Instant,
+        current_time: Instant,
     ) -> bool {
-        let Some(engine) = self.terminal_engines.get_mut(&pane_id) else {
+        let Some(engine) = self.terminal_engine_by_pane_id.get_mut(&pane_id) else {
             return false;
         };
-        let before = TerminalAdvanceBefore::capture(engine);
-        let Some((replies, shell_facts)) = engine.expire_synchronized_output(now) else {
+        let terminal_advance_before = TerminalAdvanceBefore::capture_terminal_advance_state(engine);
+        let Some((reply_bytes, shell_integration_facts)) =
+            engine.expire_synchronized_output(current_time)
+        else {
             return false;
         };
-        self.finish_terminal_advance(pane_id, before, replies, shell_facts);
+        self.finish_terminal_advance(
+            pane_id,
+            terminal_advance_before,
+            reply_bytes,
+            shell_integration_facts,
+        );
         true
     }
 
     fn finish_terminal_advance(
         &mut self,
         pane_id: PaneId,
-        before: TerminalAdvanceBefore,
-        replies: Vec<u8>,
-        shell_facts: Vec<ShellIntegrationFact>,
+        terminal_advance_before: TerminalAdvanceBefore,
+        reply_bytes: Vec<u8>,
+        shell_integration_facts: Vec<ShellIntegrationFact>,
     ) {
-        let Some(engine) = self.terminal_engines.get(&pane_id) else {
+        let Some(engine) = self.terminal_engine_by_pane_id.get(&pane_id) else {
             return;
         };
-        for error in engine
-            .graphics_events()
-            .skip(before.graphics_events)
+        for graphics_error in engine
+            .list_graphics_events()
+            .skip(terminal_advance_before.graphics_event_count)
             .filter_map(|event| event.as_ref().err())
         {
-            tracing::warn!(%pane_id, %error, "a graphics event in a pane's output failed");
+            tracing::warn!(%pane_id, %graphics_error, "a graphics event in a pane's output failed");
         }
-        let dropped_errors = engine
-            .graphics_errors_dropped()
-            .saturating_sub(before.graphics_errors_dropped);
-        if dropped_errors != 0 {
-            let error = GraphicsError::QueueFull {
-                dropped: dropped_errors,
+        let dropped_graphics_error_count = engine
+            .get_dropped_graphics_error_count()
+            .saturating_sub(terminal_advance_before.dropped_graphics_error_count);
+        if dropped_graphics_error_count != 0 {
+            let graphics_error = GraphicsError::QueueFull {
+                dropped_event_count: dropped_graphics_error_count,
             };
-            tracing::warn!(%pane_id, %error, "image placement errors were dropped");
+            tracing::warn!(%pane_id, %graphics_error, "image placement errors were dropped");
         }
-        let scrollback_after = engine.state().scrollback();
-        let len_after = scrollback_after.len();
-        let pushed = (scrollback_after.total_pushed() - before.pushed) as usize;
-        let screen_after = engine.state().active_screen();
+        let scrollback_after = engine.get_terminal_state().get_scrollback();
+        let retained_line_count_after = scrollback_after.get_retained_line_count();
+        let pushed_line_count = (scrollback_after.get_total_pushed_line_count()
+            - terminal_advance_before.pushed_line_count) as usize;
+        let screen_after = engine.get_terminal_state().get_active_screen();
 
-        if !replies.is_empty() {
-            if let Err(error) = self.pty_backend().write(pane_id, &replies) {
+        if !reply_bytes.is_empty() {
+            if let Err(write_error) = self
+                .get_pty_backend()
+                .write_pane_input(pane_id, &reply_bytes)
+            {
                 tracing::error!(
                     %pane_id,
-                    %error,
-                    replies = replies.len(),
+                    %write_error,
+                    reply_byte_count = reply_bytes.len(),
                     "the answer to a pane's device query could not be written"
                 );
             }
         }
-        if before.screen != screen_after {
+        if terminal_advance_before.screen != screen_after {
             self.clear_pane_selections(pane_id);
         }
         // Held views move only when history gained lines (offsets rise) or
         // shrank under an erase (offsets reclamp). A chunk that touches no
         // history skips the client walk. A highlight whose every line the chunk
         // erased or evicted is dropped before the walk.
-        if pushed > 0 || len_after < before.scrollback_len {
+        if pushed_line_count > 0
+            || retained_line_count_after < terminal_advance_before.retained_line_count
+        {
             self.drop_evicted_selections(pane_id);
-            self.anchor_held_views(pane_id, pushed, len_after);
+            self.anchor_held_views(pane_id, pushed_line_count, retained_line_count_after);
         }
-        if !shell_facts.is_empty() {
-            let events: Vec<Event> = shell_facts
+        if !shell_integration_facts.is_empty() {
+            let shell_integration_events: Vec<Event> = shell_integration_facts
                 .into_iter()
-                .map(|fact| match fact {
+                .map(|shell_integration_fact| match shell_integration_fact {
                     ShellIntegrationFact::CommandStarted => {
                         Event::PaneCommandStarted(PaneCommandStarted { pane_id })
                     }
@@ -171,7 +189,7 @@ impl Server {
                     }
                 })
                 .collect();
-            self.publish_events(&events);
+            self.publish_events(&shell_integration_events);
         }
         self.render_scheduler.invalidate();
     }

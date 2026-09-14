@@ -2,62 +2,75 @@
 
 use super::*;
 
-fn roundtrip(weight: &SizeWeight) {
-    let json = serde_json::to_string(weight).expect("serialize");
-    let back: SizeWeight = serde_json::from_str(&json).expect("deserialize");
-    assert_eq!(*weight, back);
+fn assert_size_weight_round_trip(weight: &SizeWeight) {
+    let serialized_weight_json = serde_json::to_string(weight).expect("serialize");
+    let deserialized_weight: SizeWeight =
+        serde_json::from_str(&serialized_weight_json).expect("deserialize");
+    assert_eq!(*weight, deserialized_weight);
 }
 
 #[test]
 fn default_weight_is_one_flex_share() {
     let weight = SizeWeight::default();
-    assert_eq!(weight.primary, SizeConstraint::Flex(1));
-    assert_eq!(weight.min, None);
-    assert_eq!(weight.preferred, None);
+    assert_eq!(weight.primary_constraint, SizeConstraint::Flex(1));
+    assert_eq!(weight.minimum_cell_count, None);
+    assert_eq!(weight.preferred_cell_count, None);
     assert_eq!(weight.resize_delta, 0);
 }
 
 #[test]
-fn every_constraint_kind_roundtrips() {
-    let kinds = [
+fn every_constraint_kind_assert_size_weight_round_trips() {
+    let size_constraints = [
         SizeConstraint::Flex(3),
         SizeConstraint::Percent(40),
         SizeConstraint::Fixed(80),
-        SizeConstraint::Min(10),
+        SizeConstraint::Minimum(10),
         SizeConstraint::Preferred(120),
     ];
-    for primary in kinds {
-        roundtrip(&SizeWeight {
-            primary,
-            min: None,
-            preferred: None,
+    for size_constraint in size_constraints {
+        assert_size_weight_round_trip(&SizeWeight {
+            primary_constraint: size_constraint,
+            minimum_cell_count: None,
+            preferred_cell_count: None,
             resize_delta: 0,
         });
     }
 }
 
 #[test]
-fn combined_flex_with_overlays_roundtrips() {
-    roundtrip(&SizeWeight {
-        primary: SizeConstraint::Flex(2),
-        min: Some(20),
-        preferred: Some(50),
+fn combined_flex_with_overlays_assert_size_weight_round_trips() {
+    assert_size_weight_round_trip(&SizeWeight {
+        primary_constraint: SizeConstraint::Flex(2),
+        minimum_cell_count: Some(20),
+        preferred_cell_count: Some(50),
         resize_delta: -3,
     });
 }
 
 #[test]
 fn constructors_accept_valid_values() {
-    assert_eq!(SizeConstraint::flex(1), Ok(SizeConstraint::Flex(1)));
-    assert_eq!(SizeConstraint::percent(1), Ok(SizeConstraint::Percent(1)));
     assert_eq!(
-        SizeConstraint::percent(100),
+        SizeConstraint::from_flex_weight(1),
+        Ok(SizeConstraint::Flex(1))
+    );
+    assert_eq!(
+        SizeConstraint::from_percent(1),
+        Ok(SizeConstraint::Percent(1))
+    );
+    assert_eq!(
+        SizeConstraint::from_percent(100),
         Ok(SizeConstraint::Percent(100))
     );
-    assert_eq!(SizeConstraint::fixed(80), Ok(SizeConstraint::Fixed(80)));
-    assert_eq!(SizeConstraint::min(2), Ok(SizeConstraint::Min(2)));
     assert_eq!(
-        SizeConstraint::preferred(120),
+        SizeConstraint::from_fixed_cell_count(80),
+        Ok(SizeConstraint::Fixed(80))
+    );
+    assert_eq!(
+        SizeConstraint::from_minimum_cell_count(2),
+        Ok(SizeConstraint::Minimum(2))
+    );
+    assert_eq!(
+        SizeConstraint::from_preferred_cell_count(120),
         Ok(SizeConstraint::Preferred(120))
     );
 }
@@ -65,41 +78,51 @@ fn constructors_accept_valid_values() {
 #[test]
 fn constructors_reject_invalid_values() {
     assert_eq!(
-        SizeConstraint::flex(0),
+        SizeConstraint::from_flex_weight(0),
         Err(ConstraintError::ZeroFlexWeight)
     );
     assert_eq!(
-        SizeConstraint::percent(0),
-        Err(ConstraintError::PercentOutOfRange { got: 0 })
+        SizeConstraint::from_percent(0),
+        Err(ConstraintError::PercentOutOfRange {
+            received_percent: 0
+        })
     );
     assert_eq!(
-        SizeConstraint::percent(101),
-        Err(ConstraintError::PercentOutOfRange { got: 101 })
+        SizeConstraint::from_percent(101),
+        Err(ConstraintError::PercentOutOfRange {
+            received_percent: 101,
+        })
     );
-    assert_eq!(SizeConstraint::fixed(0), Err(ConstraintError::ZeroFixed));
-    assert_eq!(SizeConstraint::min(0), Err(ConstraintError::ZeroMin));
     assert_eq!(
-        SizeConstraint::preferred(0),
-        Err(ConstraintError::ZeroPreferred)
+        SizeConstraint::from_fixed_cell_count(0),
+        Err(ConstraintError::ZeroFixedCellCount)
+    );
+    assert_eq!(
+        SizeConstraint::from_minimum_cell_count(0),
+        Err(ConstraintError::ZeroMinimumCellCount)
+    );
+    assert_eq!(
+        SizeConstraint::from_preferred_cell_count(0),
+        Err(ConstraintError::ZeroPreferredCellCount)
     );
 }
 
 #[test]
 fn constructors_accept_their_maximum_values() {
     assert_eq!(
-        SizeConstraint::flex(u32::MAX),
+        SizeConstraint::from_flex_weight(u32::MAX),
         Ok(SizeConstraint::Flex(u32::MAX))
     );
     assert_eq!(
-        SizeConstraint::fixed(u16::MAX),
+        SizeConstraint::from_fixed_cell_count(u16::MAX),
         Ok(SizeConstraint::Fixed(u16::MAX))
     );
     assert_eq!(
-        SizeConstraint::min(u16::MAX),
-        Ok(SizeConstraint::Min(u16::MAX))
+        SizeConstraint::from_minimum_cell_count(u16::MAX),
+        Ok(SizeConstraint::Minimum(u16::MAX))
     );
     assert_eq!(
-        SizeConstraint::preferred(u16::MAX),
+        SizeConstraint::from_preferred_cell_count(u16::MAX),
         Ok(SizeConstraint::Preferred(u16::MAX))
     );
 }
@@ -107,24 +130,26 @@ fn constructors_accept_their_maximum_values() {
 #[test]
 fn percent_rejects_its_type_maximum() {
     assert_eq!(
-        SizeConstraint::percent(u8::MAX),
-        Err(ConstraintError::PercentOutOfRange { got: u8::MAX })
+        SizeConstraint::from_percent(u8::MAX),
+        Err(ConstraintError::PercentOutOfRange {
+            received_percent: u8::MAX,
+        })
     );
 }
 
 #[test]
 fn both_overlays_apply_to_any_primary() {
     let weight = SizeWeight {
-        min: Some(9),
-        preferred: Some(6),
-        ..SizeWeight::new(SizeConstraint::Percent(40))
+        minimum_cell_count: Some(9),
+        preferred_cell_count: Some(6),
+        ..SizeWeight::from_primary_constraint(SizeConstraint::Percent(40))
     };
     assert_eq!(
         weight,
         SizeWeight {
-            primary: SizeConstraint::Percent(40),
-            min: Some(9),
-            preferred: Some(6),
+            primary_constraint: SizeConstraint::Percent(40),
+            minimum_cell_count: Some(9),
+            preferred_cell_count: Some(6),
             resize_delta: 0,
         }
     );
@@ -137,44 +162,49 @@ fn constraint_errors_display_their_exact_messages() {
         "flex weight must be at least 1"
     );
     assert_eq!(
-        ConstraintError::PercentOutOfRange { got: 101 }.to_string(),
+        ConstraintError::PercentOutOfRange {
+            received_percent: 101,
+        }
+        .to_string(),
         "percent must be between 1 and 100, got 101"
     );
     assert_eq!(
-        ConstraintError::ZeroFixed.to_string(),
+        ConstraintError::ZeroFixedCellCount.to_string(),
         "fixed size must be at least one cell"
     );
     assert_eq!(
-        ConstraintError::ZeroMin.to_string(),
+        ConstraintError::ZeroMinimumCellCount.to_string(),
         "minimum size must be at least one cell"
     );
     assert_eq!(
-        ConstraintError::ZeroPreferred.to_string(),
+        ConstraintError::ZeroPreferredCellCount.to_string(),
         "preferred size must be at least one cell"
     );
 }
 
 #[test]
 fn constraint_errors_are_recoverable_layout_errors() {
-    let errors = [
+    let constraint_errors = [
         ConstraintError::ZeroFlexWeight,
-        ConstraintError::PercentOutOfRange { got: 0 },
-        ConstraintError::ZeroFixed,
-        ConstraintError::ZeroMin,
-        ConstraintError::ZeroPreferred,
+        ConstraintError::PercentOutOfRange {
+            received_percent: 0,
+        },
+        ConstraintError::ZeroFixedCellCount,
+        ConstraintError::ZeroMinimumCellCount,
+        ConstraintError::ZeroPreferredCellCount,
     ];
-    for error in errors {
-        assert_eq!(error.category(), DomainCategory::Layout);
-        assert_eq!(error.severity(), Severity::Recoverable);
+    for constraint_error in constraint_errors {
+        assert_eq!(constraint_error.category(), DomainCategory::Layout);
+        assert_eq!(constraint_error.get_severity(), Severity::Recoverable);
     }
 }
 
 #[test]
 fn a_weight_serializes_to_its_exact_json_shape() {
     let weight = SizeWeight {
-        primary: SizeConstraint::Flex(2),
-        min: Some(20),
-        preferred: None,
+        primary_constraint: SizeConstraint::Flex(2),
+        minimum_cell_count: Some(20),
+        preferred_cell_count: None,
         resize_delta: -3,
     };
     assert_eq!(
@@ -198,7 +228,7 @@ fn every_constraint_kind_serializes_as_a_tagged_object() {
         r#"{"Fixed":80}"#
     );
     assert_eq!(
-        serde_json::to_string(&SizeConstraint::Min(10)).unwrap(),
+        serde_json::to_string(&SizeConstraint::Minimum(10)).unwrap(),
         r#"{"Min":10}"#
     );
     assert_eq!(
@@ -213,9 +243,10 @@ fn absent_overlays_deserialize_as_none_and_resize_delta_is_required() {
         serde_json::from_str(r#"{"primary":{"Flex":1},"resize_delta":0}"#).unwrap();
     assert_eq!(weight, SizeWeight::default());
 
-    let err = serde_json::from_str::<SizeWeight>(r#"{"primary":{"Flex":1}}"#).unwrap_err();
+    let deserialization_error =
+        serde_json::from_str::<SizeWeight>(r#"{"primary":{"Flex":1}}"#).unwrap_err();
     assert_eq!(
-        err.to_string(),
+        deserialization_error.to_string(),
         "missing field `resize_delta` at line 1 column 22"
     );
 }
@@ -229,9 +260,9 @@ fn deserialization_keeps_out_of_range_values_as_stored() {
     assert_eq!(
         weight,
         SizeWeight {
-            primary: SizeConstraint::Percent(250),
-            min: Some(0),
-            preferred: Some(0),
+            primary_constraint: SizeConstraint::Percent(250),
+            minimum_cell_count: Some(0),
+            preferred_cell_count: Some(0),
             resize_delta: 0,
         }
     );

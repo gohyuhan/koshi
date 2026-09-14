@@ -15,11 +15,11 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum CliError {
     /// The subcommand is not recognized.
-    #[error("unknown command: {name}")]
-    UnknownCommand { name: String },
+    #[error("unknown command: {command_name}")]
+    UnknownCommand { command_name: String },
     /// The named action is not in the action registry.
-    #[error("unknown action: {name}")]
-    UnknownAction { name: String },
+    #[error("unknown action: {action_name}")]
+    UnknownAction { action_name: String },
     /// Arguments were missing or invalid for the chosen command.
     #[error("invalid arguments: {detail}")]
     InvalidArgs { detail: String },
@@ -27,8 +27,8 @@ pub enum CliError {
     #[error("nothing is bound on `{sequence}` in any mode")]
     UnboundKey { sequence: String },
     /// A keybinding file dry-run found problems.
-    #[error("keybinding file {path} failed validation")]
-    InvalidKeymapFile { path: String },
+    #[error("keybinding file {keymap_file_path} failed validation")]
+    InvalidKeymapFile { keymap_file_path: String },
     /// A config command could not read, validate, explain, or migrate config.
     #[error("config failed: {detail}")]
     Config { detail: String },
@@ -41,14 +41,14 @@ pub enum CliError {
     IpcUnavailable { detail: String },
     /// The named (or in-session) session is not running: nothing advertises
     /// its endpoint, or nothing listens behind the advertised socket.
-    #[error("session {session} is not running")]
-    SessionNotFound { session: String },
+    #[error("session {session_name} is not running")]
+    SessionNotFound { session_name: String },
     /// No running koshi advertises any session, so there is nothing for an
     /// external command to target.
     #[error("no koshi session is running")]
     NoSessions,
     /// The session refused the dispatched command.
-    #[error("{}", rejection_message(*.reason, .help.as_deref()))]
+    #[error("{}", format_rejection_message(*.reason, .help.as_deref()))]
     CommandRejected {
         /// Why the session rejected it.
         reason: RejectReason,
@@ -68,7 +68,7 @@ pub enum CliError {
 ///
 /// [`RejectReason::Unauthorized`] with `Some("attach first")` gives
 /// `"command not permitted\n  attach first"`.
-fn rejection_message(reason: RejectReason, help: Option<&str>) -> String {
+fn format_rejection_message(reason: RejectReason, help: Option<&str>) -> String {
     match help {
         Some(help) => format!("{reason}\n  {help}"),
         None => reason.to_string(),
@@ -94,7 +94,7 @@ impl DomainError for CliError {
         }
     }
 
-    fn severity(&self) -> Severity {
+    fn get_severity(&self) -> Severity {
         Severity::Recoverable
     }
 }
@@ -105,8 +105,8 @@ impl DomainError for CliError {
 /// exits 4, and a runtime error, a rejected command, or a failed update exits
 /// 1.
 impl From<&CliError> for CliExitCode {
-    fn from(err: &CliError) -> Self {
-        match err {
+    fn from(cli_error: &CliError) -> Self {
+        match cli_error {
             CliError::UnknownCommand { .. }
             | CliError::UnknownAction { .. }
             | CliError::InvalidArgs { .. }

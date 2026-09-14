@@ -10,8 +10,8 @@
 //!
 //! Scrollback rows never travel here. A pane sends the rows its window shows
 //! this frame and nothing else, plus the two numbers the scroll indicator is
-//! drawn from — [`truncated`](crate::frame::FrameScrollback::truncated) and
-//! [`retained_lines`](crate::frame::FrameScrollback::retained_lines). A client
+//! drawn from — [`is_truncated`](crate::frame::FrameScrollback::is_truncated) and
+//! [`retained_line_count`](crate::frame::FrameScrollback::retained_line_count). A client
 //! scrolled 500 lines back over a 24-row pane receives those 24 rows, never the
 //! 500 above them.
 //!
@@ -20,7 +20,7 @@
 //! stretch of equal neighbouring cells into one
 //! [`FrameRun`](crate::frame::FrameRun): a blank 80-column row travels as a
 //! single run with `count == 80`, and
-//! [`FrameRow::cells`](crate::frame::FrameRow::cells) expands the runs back
+//! [`FrameRow::expand_cells`](crate::frame::FrameRow::expand_cells) expands the runs back
 //! into the same 80 cells.
 //!
 //! A field this build does not know is ignored, in this record and every one
@@ -46,45 +46,49 @@ use koshi_pane::pane::state::PaneKind;
 use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 
-const MAX_FRAME_IMAGE_SIDE: u32 = 16_384;
-const MAX_FRAME_IMAGE_PIXELS: u64 = 16_777_216;
+const MAX_FRAME_IMAGE_SIDE_PIXEL_COUNT: u32 = 16_384;
+const MAX_FRAME_IMAGE_PIXEL_COUNT: u64 = 16_777_216;
 
 /// The maximum total RGBA bytes a chunked painted frame may carry.
-pub const MAX_FRAME_IMAGE_TRANSFER_BYTES: u64 = 67_108_864;
+pub const MAX_FRAME_IMAGE_TRANSFER_BYTE_COUNT: u64 = 67_108_864;
 
 /// The largest raw image chunk carried by one session event.
-pub const MAX_FRAME_IMAGE_CHUNK_BYTES: usize = 1_048_576;
+pub const MAX_FRAME_IMAGE_CHUNK_BYTE_COUNT: usize = 1_048_576;
 
 /// The largest number of image transfers accepted after one painted frame.
-pub const MAX_FRAME_IMAGE_TRANSFERS: usize = 4_096;
+pub const MAX_FRAME_IMAGE_TRANSFER_COUNT: usize = 4_096;
 
 /// Decode an image presentation value through an owned JSON value so the
 /// fallback works for transport input and for owned deserialization callers.
-fn image_or_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+fn deserialize_image_or_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: serde::de::DeserializeOwned + Default,
 {
-    let value = serde_json::Value::deserialize(deserializer)?;
-    Ok(T::deserialize(value).unwrap_or_default())
+    let image_value = serde_json::Value::deserialize(deserializer)?;
+    Ok(T::deserialize(image_value).unwrap_or_default())
 }
 
 /// One frame, as it travels to a client: the session's active tab, the content
 /// of every pane in it, and the viewing client's own state.
 ///
-/// A reader joins [`panes`](Self::panes) to the [`FrameSlot`]s in
-/// [`session`](Self::session)'s active tab by [`PaneId`]: a slot says *where* a
-/// pane sits, its [`FramePane`] says *what* is inside it.
+/// A reader joins [`pane_snapshots`](Self::pane_snapshots) to the
+/// [`FrameSlot`]s in [`session_snapshot`](Self::session_snapshot)'s active tab
+/// by [`PaneId`]: a slot says *where* a pane sits, its [`FramePane`] says
+/// *what* is inside it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaintedFrame {
     /// The session being viewed: its identity, its solved active tab, and its
     /// tab list.
-    pub session: FrameSession,
+    #[serde(rename = "session")]
+    pub session_snapshot: FrameSession,
     /// Per-pane content, one entry per live pane in the active tab, matched to
     /// a [`FrameSlot`] by [`PaneId`].
-    pub panes: Vec<FramePane>,
+    #[serde(rename = "panes")]
+    pub pane_snapshots: Vec<FramePane>,
     /// The viewing client's own state (viewport, focus, lock mode).
-    pub client: FrameClient,
+    #[serde(rename = "client")]
+    pub client_snapshot: FrameClient,
 }
 
 /// The session-scoped part of a frame: identity, the solved active tab, and the
@@ -92,31 +96,39 @@ pub struct PaintedFrame {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameSession {
     /// The session's stable id.
-    pub id: SessionId,
+    #[serde(rename = "id")]
+    pub session_id: SessionId,
     /// The session's display name.
-    pub name: String,
+    #[serde(rename = "name")]
+    pub session_name: String,
     /// The tab this client is shown, solved and ready to draw.
-    pub active_tab: FrameTab,
+    #[serde(rename = "active_tab")]
+    pub active_tab_snapshot: FrameTab,
     /// One entry per tab in the session, in display order.
-    pub tabs: Vec<FrameTabMeta>,
+    #[serde(rename = "tabs")]
+    pub tab_snapshots: Vec<FrameTabMeta>,
 }
 
 /// The active tab, with its layout already solved into placed pane slots.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameTab {
     /// The tab's stable id.
-    pub id: TabId,
+    #[serde(rename = "id")]
+    pub tab_id: TabId,
     /// The tab's display name.
-    pub name: String,
+    #[serde(rename = "name")]
+    pub tab_name: String,
     /// The solved layout: one [`FrameSlot`] per pane, giving outer and content
     /// rects and coarse status.
-    pub slots: Vec<FrameSlot>,
+    #[serde(rename = "slots")]
+    pub pane_slots: Vec<FrameSlot>,
     /// The viewport size the layout was solved for: the element-wise minimum
     /// viewport across the clients viewing this tab. The
-    /// [`slots`](Self::slots) rects live in this space with origin `(0, 0)`. A
-    /// client whose own [`viewport`](FrameClient::viewport) is larger draws
+    /// [`pane_slots`](Self::pane_slots) rects live in this space with origin `(0, 0)`. A
+    /// client whose own [`viewport_size`](FrameClient::viewport_size) is larger draws
     /// this layout centered and letterboxes the surrounding margin.
-    pub effective_size: Size,
+    #[serde(rename = "effective_size")]
+    pub effective_cell_size: Size,
     /// Header strips for stacked panes: the one-row title bar each collapsed
     /// stack member shows in place of its content.
     pub stack_headers: Vec<StackHeader>,
@@ -126,13 +138,15 @@ pub struct FrameTab {
     pub layout_mode: LayoutMode,
     /// True when the tab has no room to draw and every pane is suppressed;
     /// the client fills the whole frame with the "terminal too small" overlay.
-    pub all_suppressed: bool,
+    #[serde(rename = "all_suppressed")]
+    pub is_every_pane_suppressed: bool,
     /// Blank cells between two panes that meet along a horizontal or
-    /// vertical split, in the [`slots`](Self::slots) space. A frame from a
+    /// vertical split, in the [`pane_slots`](Self::pane_slots) space. A frame from a
     /// server without this field reads as `0`, and so does a value that is
     /// not a cell count.
-    #[serde(default, deserialize_with = "crate::wire::or_default")]
-    pub gap: u16,
+    #[serde(default, deserialize_with = "crate::wire::deserialize_or_default")]
+    #[serde(rename = "gap")]
+    pub gap_cell_count: u16,
 }
 
 /// One tab's entry in the tab bar: enough to draw the tab list without its
@@ -140,44 +154,54 @@ pub struct FrameTab {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameTabMeta {
     /// The tab's stable id.
-    pub id: TabId,
+    #[serde(rename = "id")]
+    pub tab_id: TabId,
     /// The tab's display name.
-    pub name: String,
+    #[serde(rename = "name")]
+    pub tab_name: String,
     /// The tab's position in the bar, starting at 0.
-    pub index: usize,
+    #[serde(rename = "index")]
+    pub tab_index: usize,
     /// Whether this is the client's active tab, drawn with the active marker.
-    pub active: bool,
+    #[serde(rename = "active")]
+    pub is_active: bool,
 }
 
 /// One pane's placement in the solved layout: where its box sits, its content
 /// area, and coarse status flags. Paired with a [`FramePane`] by
 /// [`pane_id`](Self::pane_id).
 ///
-/// [`visible`](Self::visible) is true exactly when
-/// [`inner_rect`](Self::inner_rect) is `Some`, and a
-/// [`suppressed`](Self::suppressed) pane is not visible. [`dead`](Self::dead)
+/// [`is_visible`](Self::is_visible) is true exactly when
+/// [`content_rect`](Self::content_rect) is `Some`, and an
+/// [`is_suppressed`](Self::is_suppressed) pane is not visible. [`is_dead`](Self::is_dead)
 /// is a separate axis: an exited pane stays laid out, drawn dimmed, until it is
-/// removed. `inner_rect` is `None` for three distinct reasons — no room,
-/// hidden, or a collapsed stack member — and [`suppressed`](Self::suppressed)
+/// removed. `content_rect` is `None` for three distinct reasons — no room,
+/// hidden, or a collapsed stack member — and [`is_suppressed`](Self::is_suppressed)
 /// marks the no-room case.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameSlot {
     /// The pane this slot places.
     pub pane_id: PaneId,
     /// The outer pane box, including the 1-cell border gutter.
-    pub rect: Rect,
+    #[serde(rename = "rect")]
+    pub outer_rect: Rect,
     /// The content area inside the border — the rect the PTY was sized from.
     /// `None` when the pane shows no content (suppressed, hidden, or a
     /// collapsed stack member). Cells and the cursor are drawn here.
-    pub inner_rect: Option<Rect>,
+    #[serde(rename = "inner_rect")]
+    pub content_rect: Option<Rect>,
     /// Whether a terminal or a plugin backs this pane.
-    pub kind: PaneKind,
+    #[serde(rename = "kind")]
+    pub pane_kind: PaneKind,
     /// Whether the pane is currently shown.
-    pub visible: bool,
+    #[serde(rename = "visible")]
+    pub is_visible: bool,
     /// Whether the pane is suppressed for lack of room.
-    pub suppressed: bool,
+    #[serde(rename = "suppressed")]
+    pub is_suppressed: bool,
     /// Whether the pane's process has exited.
-    pub dead: bool,
+    #[serde(rename = "dead")]
+    pub is_dead: bool,
 }
 
 /// One image placement carried with a pane's visible cells.
@@ -189,22 +213,30 @@ pub struct FrameSlot {
 pub struct FrameImagePlacement {
     /// The complete cell size and the clipped top and left cells.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub geometry: Option<koshi_core::geometry::ImageCellGeometry>,
+    #[serde(rename = "geometry")]
+    pub cell_geometry: Option<koshi_core::geometry::ImageCellGeometry>,
     /// Record metadata for this placement of the shared pixel content.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub record: Option<FrameImageRecordHeader>,
+    #[serde(rename = "record")]
+    pub image_record: Option<FrameImageRecordHeader>,
     /// The terminal-local placement identity.
-    pub id: u64,
+    #[serde(rename = "id")]
+    pub placement_id: u64,
     /// The connection-local image-record identity.
-    pub content_id: u64,
+    #[serde(rename = "content_id")]
+    pub image_content_id: u64,
     /// Whether the source snapshot has the named image record.
-    pub available: bool,
+    #[serde(rename = "available")]
+    pub is_available: bool,
     /// The zero-based row and column of the upper-left covered cell.
-    pub anchor: (u16, u16),
+    #[serde(rename = "anchor")]
+    pub anchor_cell: (u16, u16),
     /// The number of covered columns.
-    pub columns: u16,
+    #[serde(rename = "columns")]
+    pub column_count: u16,
     /// The number of covered rows.
-    pub rows: u16,
+    #[serde(rename = "rows")]
+    pub row_count: u16,
 }
 
 impl<'de> Deserialize<'de> for FrameImagePlacement {
@@ -213,66 +245,76 @@ impl<'de> Deserialize<'de> for FrameImagePlacement {
         D: serde::Deserializer<'de>,
     {
         #[derive(Deserialize)]
-        struct Fields {
-            id: u64,
-            content_id: u64,
+        struct FrameImagePlacementFields {
+            #[serde(rename = "id")]
+            placement_id: u64,
+            #[serde(rename = "content_id")]
+            image_content_id: u64,
             #[serde(default)]
-            geometry: Option<koshi_core::geometry::ImageCellGeometry>,
+            #[serde(rename = "geometry")]
+            cell_geometry: Option<koshi_core::geometry::ImageCellGeometry>,
             #[serde(default)]
-            record: Option<FrameImageRecordHeader>,
-            #[serde(default = "default_image_available")]
-            available: bool,
-            anchor: (u16, u16),
-            columns: u16,
-            rows: u16,
+            #[serde(rename = "record")]
+            image_record: Option<FrameImageRecordHeader>,
+            #[serde(default = "is_image_available_by_default")]
+            #[serde(rename = "available")]
+            is_available: bool,
+            #[serde(rename = "anchor")]
+            anchor_cell: (u16, u16),
+            #[serde(rename = "columns")]
+            column_count: u16,
+            #[serde(rename = "rows")]
+            row_count: u16,
         }
 
-        let fields = Fields::deserialize(deserializer)?;
-        if fields.geometry.is_some_and(|geometry| {
-            !geometry.contains(koshi_core::geometry::Size {
-                cols: fields.columns,
-                rows: fields.rows,
+        let placement_fields = FrameImagePlacementFields::deserialize(deserializer)?;
+        if placement_fields.cell_geometry.is_some_and(|cell_geometry| {
+            !cell_geometry.is_visible_size_contained(koshi_core::geometry::Size {
+                column_count: placement_fields.column_count,
+                row_count: placement_fields.row_count,
             })
         }) {
             return Err(D::Error::custom(
                 "image clipping exceeds its complete cell dimensions",
             ));
         }
-        if fields.id == 0 {
+        if placement_fields.placement_id == 0 {
             return Err(D::Error::custom(
                 "image placement identity must not be zero",
             ));
         }
-        if fields.content_id == 0 {
+        if placement_fields.image_content_id == 0 {
             return Err(D::Error::custom("image content identity must not be zero"));
         }
-        if fields.columns == 0 || fields.rows == 0 {
+        if placement_fields.column_count == 0 || placement_fields.row_count == 0 {
             return Err(D::Error::custom(
                 "image placement dimensions must not be zero",
             ));
         }
         let coordinate_end = u32::from(u16::MAX) + 1;
-        if u32::from(fields.anchor.0) + u32::from(fields.rows) > coordinate_end
-            || u32::from(fields.anchor.1) + u32::from(fields.columns) > coordinate_end
+        if u32::from(placement_fields.anchor_cell.0) + u32::from(placement_fields.row_count)
+            > coordinate_end
+            || u32::from(placement_fields.anchor_cell.1) + u32::from(placement_fields.column_count)
+                > coordinate_end
         {
             return Err(D::Error::custom(
                 "image placement exceeds the cell coordinate range",
             ));
         }
         Ok(Self {
-            id: fields.id,
-            content_id: fields.content_id,
-            geometry: fields.geometry,
-            record: fields.record,
-            available: fields.available,
-            anchor: fields.anchor,
-            columns: fields.columns,
-            rows: fields.rows,
+            placement_id: placement_fields.placement_id,
+            image_content_id: placement_fields.image_content_id,
+            cell_geometry: placement_fields.cell_geometry,
+            image_record: placement_fields.image_record,
+            is_available: placement_fields.is_available,
+            anchor_cell: placement_fields.anchor_cell,
+            column_count: placement_fields.column_count,
+            row_count: placement_fields.row_count,
         })
     }
 }
 
-const fn default_image_available() -> bool {
+const fn is_image_available_by_default() -> bool {
     true
 }
 
@@ -280,31 +322,38 @@ const fn default_image_available() -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameImageRecordHeader {
     /// Protocol that supplied the image. An unknown protocol reads as Kitty.
-    #[serde(default, deserialize_with = "image_or_default")]
+    #[serde(default, deserialize_with = "deserialize_image_or_default")]
     pub protocol: FrameGraphicsProtocol,
     /// Image width in pixels.
-    pub width: u32,
+    #[serde(rename = "width")]
+    pub pixel_width: u32,
     /// Image height in pixels.
-    pub height: u32,
+    #[serde(rename = "height")]
+    pub pixel_height: u32,
     /// The state operation represented by the transfer. An unknown action reads
     /// as `Display`.
-    #[serde(default, deserialize_with = "image_or_default")]
-    pub action: FrameImageAction,
+    #[serde(default, deserialize_with = "deserialize_image_or_default")]
+    #[serde(rename = "action")]
+    pub image_action: FrameImageAction,
     /// Display hints supplied by the protocol.
     pub display: FrameImageDisplay,
     /// Cursor position when the image sequence ended, as row and column.
-    pub anchor: (u16, u16),
+    #[serde(rename = "anchor")]
+    pub anchor_cell: (u16, u16),
 }
 
 /// One image record whose RGBA bytes travel in separate bounded events.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FrameImageTransfer {
     /// The image-record identity on this connection.
-    pub id: u64,
+    #[serde(rename = "id")]
+    pub image_content_id: u64,
     /// The image record metadata and its pixel dimensions.
-    pub record: FrameImageRecordHeader,
+    #[serde(rename = "record")]
+    pub image_record: FrameImageRecordHeader,
     /// The exact number of RGBA bytes the chunks carry.
-    pub byte_len: u64,
+    #[serde(rename = "byte_len")]
+    pub image_byte_count: u64,
 }
 
 impl<'de> Deserialize<'de> for FrameImageTransfer {
@@ -313,32 +362,38 @@ impl<'de> Deserialize<'de> for FrameImageTransfer {
         D: serde::Deserializer<'de>,
     {
         #[derive(Deserialize)]
-        struct Fields {
-            id: u64,
-            record: FrameImageRecordHeader,
-            byte_len: u64,
+        struct FrameImageTransferFields {
+            #[serde(rename = "id")]
+            image_content_id: u64,
+            #[serde(rename = "record")]
+            image_record: FrameImageRecordHeader,
+            #[serde(rename = "byte_len")]
+            image_byte_count: u64,
         }
 
-        let fields = Fields::deserialize(deserializer)?;
-        if fields.id == 0 {
+        let transfer_fields = FrameImageTransferFields::deserialize(deserializer)?;
+        if transfer_fields.image_content_id == 0 {
             return Err(D::Error::custom("image transfer identity must not be zero"));
         }
-        if fields.record.action == FrameImageAction::Transmit {
+        if transfer_fields.image_record.image_action == FrameImageAction::Transmit {
             return Err(D::Error::custom(
                 "a transmitted-only image cannot be an image placement",
             ));
         }
-        let expected_bytes = frame_image_byte_len(fields.record.width, fields.record.height)
-            .map_err(D::Error::custom)?;
-        if fields.byte_len != expected_bytes {
+        let expected_byte_count = compute_frame_image_byte_count(
+            transfer_fields.image_record.pixel_width,
+            transfer_fields.image_record.pixel_height,
+        )
+        .map_err(D::Error::custom)?;
+        if transfer_fields.image_byte_count != expected_byte_count {
             return Err(D::Error::custom(
                 "image transfer byte length does not match its dimensions",
             ));
         }
         Ok(Self {
-            id: fields.id,
-            record: fields.record,
-            byte_len: fields.byte_len,
+            image_content_id: transfer_fields.image_content_id,
+            image_record: transfer_fields.image_record,
+            image_byte_count: transfer_fields.image_byte_count,
         })
     }
 }
@@ -347,14 +402,18 @@ impl<'de> Deserialize<'de> for FrameImageTransfer {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FrameImageChunk {
     /// The image-record identity named by the transfer start.
-    pub transfer_id: u64,
+    #[serde(rename = "transfer_id")]
+    pub image_transfer_id: u64,
     /// The raw-byte offset of `bytes` in that image.
-    pub offset: u64,
+    #[serde(rename = "offset")]
+    pub byte_offset: u64,
     /// Whether this chunk ends the transfer.
-    pub last: bool,
+    #[serde(rename = "last")]
+    pub is_last: bool,
     /// Raw RGBA bytes, encoded as base64 on the wire.
     #[serde(with = "crate::bytes::base64_or_list")]
-    pub bytes: Vec<u8>,
+    #[serde(rename = "bytes")]
+    pub chunk_bytes: Vec<u8>,
 }
 
 impl<'de> Deserialize<'de> for FrameImageChunk {
@@ -363,29 +422,33 @@ impl<'de> Deserialize<'de> for FrameImageChunk {
         D: serde::Deserializer<'de>,
     {
         #[derive(Deserialize)]
-        struct Fields {
-            transfer_id: u64,
-            offset: u64,
-            last: bool,
+        struct FrameImageChunkFields {
+            #[serde(rename = "transfer_id")]
+            image_transfer_id: u64,
+            #[serde(rename = "offset")]
+            byte_offset: u64,
+            #[serde(rename = "last")]
+            is_last: bool,
             #[serde(with = "crate::bytes::base64_or_list")]
-            bytes: Vec<u8>,
+            #[serde(rename = "bytes")]
+            chunk_bytes: Vec<u8>,
         }
 
-        let fields = Fields::deserialize(deserializer)?;
-        if fields.transfer_id == 0 {
+        let chunk_fields = FrameImageChunkFields::deserialize(deserializer)?;
+        if chunk_fields.image_transfer_id == 0 {
             return Err(D::Error::custom("image transfer identity must not be zero"));
         }
-        if fields.bytes.is_empty() {
+        if chunk_fields.chunk_bytes.is_empty() {
             return Err(D::Error::custom("image chunk must not be empty"));
         }
-        if fields.bytes.len() > MAX_FRAME_IMAGE_CHUNK_BYTES {
+        if chunk_fields.chunk_bytes.len() > MAX_FRAME_IMAGE_CHUNK_BYTE_COUNT {
             return Err(D::Error::custom("image chunk exceeds its byte limit"));
         }
         Ok(Self {
-            transfer_id: fields.transfer_id,
-            offset: fields.offset,
-            last: fields.last,
-            bytes: fields.bytes,
+            image_transfer_id: chunk_fields.image_transfer_id,
+            byte_offset: chunk_fields.byte_offset,
+            is_last: chunk_fields.is_last,
+            chunk_bytes: chunk_fields.chunk_bytes,
         })
     }
 }
@@ -431,21 +494,27 @@ pub enum FrameSixelBackground {
 #[serde(default)]
 pub struct FrameImageDisplay {
     /// The source command's response suppression level.
-    #[serde(skip_serializing_if = "zero_quiet")]
-    pub quiet: u8,
+    #[serde(
+        rename = "quiet",
+        skip_serializing_if = "is_zero_response_suppression_level"
+    )]
+    pub response_suppression_level: u8,
     /// The requested width, if the sender supplied one. An unknown dimension is
     /// read as absent.
-    #[serde(deserialize_with = "image_or_default")]
-    pub width: Option<FrameImageDimension>,
+    #[serde(deserialize_with = "deserialize_image_or_default")]
+    #[serde(rename = "width")]
+    pub requested_width: Option<FrameImageDimension>,
     /// The requested height, if the sender supplied one. An unknown dimension is
     /// read as absent.
-    #[serde(deserialize_with = "image_or_default")]
-    pub height: Option<FrameImageDimension>,
+    #[serde(deserialize_with = "deserialize_image_or_default")]
+    #[serde(rename = "height")]
+    pub requested_height: Option<FrameImageDimension>,
     /// Whether the sender requests aspect-ratio preservation.
-    pub preserve_aspect_ratio: bool,
+    #[serde(rename = "preserve_aspect_ratio")]
+    pub is_aspect_ratio_preserved: bool,
     /// The Sixel background rule, when the record came from Sixel. An unknown
     /// rule is read as absent.
-    #[serde(deserialize_with = "image_or_default")]
+    #[serde(deserialize_with = "deserialize_image_or_default")]
     pub sixel_background: Option<FrameSixelBackground>,
     /// The Kitty image id, when one was supplied.
     pub image_id: Option<u32>,
@@ -456,7 +525,8 @@ pub struct FrameImageDisplay {
     /// Usage flags supplied by Kitty.
     pub usage_hints: u32,
     /// Whether Kitty asks for a Unicode-placeholder placement.
-    pub unicode_placeholder: bool,
+    #[serde(rename = "unicode_placeholder")]
+    pub is_unicode_placeholder: bool,
     /// The Kitty image z-index.
     pub z_index: i32,
     /// The parent Kitty image id for a relative placement.
@@ -467,57 +537,66 @@ pub struct FrameImageDisplay {
     pub relative_placement_id: Option<u32>,
     /// The horizontal cell offset from a relative parent placement.
     #[serde(default)]
-    pub relative_offset_x: i32,
+    #[serde(rename = "relative_offset_x")]
+    pub relative_column_offset: i32,
     /// The vertical cell offset from a relative parent placement.
     #[serde(default)]
-    pub relative_offset_y: i32,
+    #[serde(rename = "relative_offset_y")]
+    pub relative_row_offset: i32,
     /// The number of terminal columns requested by Kitty.
-    pub cell_columns: Option<u32>,
+    #[serde(rename = "cell_columns")]
+    pub requested_column_count: Option<u32>,
     /// The number of terminal rows requested by Kitty.
-    pub cell_rows: Option<u32>,
+    #[serde(rename = "cell_rows")]
+    pub requested_row_count: Option<u32>,
     /// The source image x offset requested by Kitty, in pixels.
-    pub source_offset_x: Option<u32>,
+    #[serde(rename = "source_offset_x")]
+    pub source_pixel_offset_x: Option<u32>,
     /// The source image y offset requested by Kitty, in pixels.
-    pub source_offset_y: Option<u32>,
+    #[serde(rename = "source_offset_y")]
+    pub source_pixel_offset_y: Option<u32>,
     /// The x offset inside the first terminal cell requested by Kitty.
-    pub cell_offset_x: Option<u32>,
+    #[serde(rename = "cell_offset_x")]
+    pub cell_pixel_offset_x: Option<u32>,
     /// The y offset inside the first terminal cell requested by Kitty.
-    pub cell_offset_y: Option<u32>,
+    #[serde(rename = "cell_offset_y")]
+    pub cell_pixel_offset_y: Option<u32>,
     /// Whether Kitty asks the placement to move the cursor after display.
-    pub move_cursor: bool,
+    #[serde(rename = "move_cursor")]
+    pub should_move_cursor: bool,
 }
 
 impl Default for FrameImageDisplay {
     fn default() -> Self {
         Self {
-            quiet: 0,
-            width: None,
-            height: None,
-            preserve_aspect_ratio: true,
+            response_suppression_level: 0,
+            requested_width: None,
+            requested_height: None,
+            is_aspect_ratio_preserved: true,
             sixel_background: None,
             image_id: None,
             image_number: None,
             placement_id: None,
             usage_hints: 0,
-            unicode_placeholder: false,
+            is_unicode_placeholder: false,
             z_index: 0,
             relative_image_id: None,
             relative_placement_id: None,
-            relative_offset_x: 0,
-            relative_offset_y: 0,
-            cell_columns: None,
-            cell_rows: None,
-            source_offset_x: None,
-            source_offset_y: None,
-            cell_offset_x: None,
-            cell_offset_y: None,
-            move_cursor: true,
+            relative_column_offset: 0,
+            relative_row_offset: 0,
+            requested_column_count: None,
+            requested_row_count: None,
+            source_pixel_offset_x: None,
+            source_pixel_offset_y: None,
+            cell_pixel_offset_x: None,
+            cell_pixel_offset_y: None,
+            should_move_cursor: true,
         }
     }
 }
 
-fn zero_quiet(value: &u8) -> bool {
-    *value == 0
+fn is_zero_response_suppression_level(response_suppression_level: &u8) -> bool {
+    *response_suppression_level == 0
 }
 
 /// The transfer action recorded with a frame image.
@@ -533,42 +612,52 @@ pub enum FrameImageAction {
 }
 
 /// Validate frame image dimensions and return the exact RGBA byte count.
-fn frame_image_byte_len(width: u32, height: u32) -> Result<u64, &'static str> {
-    let pixels = u64::from(width)
-        .checked_mul(u64::from(height))
+fn compute_frame_image_byte_count(
+    pixel_width: u32,
+    pixel_height: u32,
+) -> Result<u64, &'static str> {
+    let pixel_count = u64::from(pixel_width)
+        .checked_mul(u64::from(pixel_height))
         .ok_or("image dimensions overflow")?;
-    let expected_bytes = pixels.checked_mul(4).ok_or("image byte count overflows")?;
-    if width == 0
-        || height == 0
-        || width > MAX_FRAME_IMAGE_SIDE
-        || height > MAX_FRAME_IMAGE_SIDE
-        || pixels > MAX_FRAME_IMAGE_PIXELS
-        || expected_bytes > MAX_FRAME_IMAGE_TRANSFER_BYTES
+    let image_byte_count = pixel_count
+        .checked_mul(4)
+        .ok_or("image byte count overflows")?;
+    if pixel_width == 0
+        || pixel_height == 0
+        || pixel_width > MAX_FRAME_IMAGE_SIDE_PIXEL_COUNT
+        || pixel_height > MAX_FRAME_IMAGE_SIDE_PIXEL_COUNT
+        || pixel_count > MAX_FRAME_IMAGE_PIXEL_COUNT
+        || image_byte_count > MAX_FRAME_IMAGE_TRANSFER_BYTE_COUNT
     {
         return Err("image dimensions exceed graphics limits");
     }
-    Ok(expected_bytes)
+    Ok(image_byte_count)
 }
 
 /// The viewing client's own state: what this client sees and how it is moded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameClient {
     /// The client's stable id.
-    pub id: ClientId,
+    #[serde(rename = "id")]
+    pub client_id: ClientId,
     /// The client's terminal size in cells.
-    pub viewport: Size,
+    #[serde(rename = "viewport")]
+    pub viewport_size: Size,
     /// The tab the client is viewing.
-    pub active_tab: TabId,
+    #[serde(rename = "active_tab")]
+    pub active_tab_id: TabId,
     /// The client's focused pane in the active tab, or `None` when the tab has
     /// no focusable pane. The client highlights the pane whose
     /// [`FrameSlot::pane_id`] matches, and places the cursor there.
-    pub focused_pane: Option<PaneId>,
+    #[serde(rename = "focused_pane")]
+    pub focused_pane_id: Option<PaneId>,
     /// The client's input mode, as the session has it.
     pub lock_mode: LockMode,
     /// Whether this client grabs the mouse for text selection. Adds the
     /// `SELECT` tag to the mode indicator, and decides whether a press in a
     /// mouse-aware pane begins a highlight.
-    pub mouse_select: bool,
+    #[serde(rename = "mouse_select")]
+    pub is_mouse_selection_enabled: bool,
 }
 
 /// One pane's content: the cells drawn inside the matching [`FrameSlot`]'s
@@ -576,65 +665,80 @@ pub struct FrameClient {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FramePane {
     /// The pane this content belongs to, matched to a [`FrameSlot`] by id.
-    pub id: PaneId,
+    #[serde(rename = "id")]
+    pub pane_id: PaneId,
     /// The pane's resolved display title: on the alternate screen the running
     /// app's OSC 0/1/2 title; on the primary screen the shell's OSC 7 working
     /// directory (`~`-shortened), falling back to the OSC title. `None` when
     /// the pane has reported neither.
-    pub title: Option<String>,
+    #[serde(rename = "title")]
+    pub pane_title: Option<String>,
     /// The cursor's position and look within the content area.
-    pub cursor: FrameCursor,
+    #[serde(rename = "cursor")]
+    pub cursor_snapshot: FrameCursor,
     /// The visible terminal cells. `None` for a pane with no terminal content —
     /// a plugin pane, or a slot showing nothing this frame.
-    pub window: Option<FrameWindow>,
+    #[serde(rename = "window")]
+    pub terminal_window: Option<FrameWindow>,
     /// The complete image placements whose rectangles fit inside this pane's
     /// visible window. Empty when the pane has no image to draw.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub image_placements: Vec<FrameImagePlacement>,
+    #[serde(rename = "image_placements")]
+    pub image_placement_snapshots: Vec<FrameImagePlacement>,
     /// Whether the whole screen is in reverse video (DECSCNM): the client swaps
     /// the default foreground and background for every cell.
-    pub reverse_video: bool,
+    #[serde(rename = "reverse_video")]
+    pub is_reverse_video: bool,
     /// Which mouse events the pane's program asked to be told about
     /// (`?9`/`?1000`/`?1002`/`?1003`). Present in every frame: a pane that
     /// asked for nothing sends [`MouseTracking::Off`].
     pub mouse_tracking: MouseTracking,
     /// Whether alternate-scroll mode (`?1007`) is on: on the alternate screen a
     /// wheel tick becomes cursor arrow keys.
-    pub alt_scroll: bool,
+    #[serde(rename = "alt_scroll")]
+    pub is_alt_scroll_enabled: bool,
     /// Whether the pane is showing the alternate screen. The alternate screen
     /// keeps no scrollback and has no view to scroll.
-    pub on_alt_screen: bool,
+    #[serde(rename = "on_alt_screen")]
+    pub is_on_alt_screen: bool,
     /// The absolute line number of the top row this frame shows for the pane,
     /// counting every line the pane has ever pushed into scrollback. A press on
-    /// the pane's `n`-th visible row names line `view_top_row + n`.
-    pub view_top_row: u64,
+    /// the pane's `n`-th visible row names line `view_top_row_index + n`.
+    #[serde(rename = "view_top_row")]
+    pub view_top_row_index: u64,
     /// The viewing client's highlighted text in this pane, cut down to the rows
     /// this frame shows. `None` when the client has nothing highlighted here,
     /// or when the highlight is entirely outside the visible rows.
-    pub selection: Option<FrameSelection>,
+    #[serde(rename = "selection")]
+    pub selection_spans: Option<FrameSelection>,
     /// Whether the viewing client has a highlight in this pane at all,
     /// including one scrolled entirely out of the visible rows, where
-    /// [`selection`](Self::selection) is `None`.
+    /// [`selection_spans`](Self::selection_spans) is `None`.
     pub has_selection: bool,
     /// Scrollback state for the scroll-position indicator.
-    pub scrollback: FrameScrollback,
+    #[serde(rename = "scrollback")]
+    pub scrollback_meta: FrameScrollback,
 }
 
 /// The cursor's position within the content area, and how it is drawn.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameCursor {
     /// The cursor's row within the content area, starting at 0.
-    pub row: u16,
+    #[serde(rename = "row")]
+    pub row_index: u16,
     /// The cursor's column within the content area, starting at 0.
-    pub col: u16,
+    #[serde(rename = "col")]
+    pub column_index: u16,
     /// Whether the cursor is visible.
-    pub visible: bool,
+    #[serde(rename = "visible")]
+    pub is_visible: bool,
     /// Whether the cursor blinks.
-    pub blink: bool,
+    #[serde(rename = "blink")]
+    pub is_blinking: bool,
     /// The shape the cursor is drawn as (DECSCUSR), or `None` while the pane
     /// has asked for no shape at all, which leaves the user's own configured
     /// cursor standing. A shape this build has no name for reads as `None`.
-    #[serde(default, deserialize_with = "crate::wire::or_default")]
+    #[serde(default, deserialize_with = "crate::wire::deserialize_or_default")]
     pub shape: Option<FrameCursorShape>,
 }
 
@@ -660,44 +764,52 @@ pub enum FrameCursorShape {
 pub struct FrameSelection {
     /// One entry per highlighted row: the row, then the first and last
     /// highlighted column on it. Both columns are inclusive.
-    pub rows: Vec<(u16, u16, u16)>,
+    #[serde(rename = "rows")]
+    pub row_spans: Vec<(u16, u16, u16)>,
 }
 
 /// Scrollback state the scroll-position indicator is drawn from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameScrollback {
     /// Whether the buffer reached its cap and dropped its oldest lines.
-    pub truncated: bool,
+    #[serde(rename = "truncated")]
+    pub is_truncated: bool,
     /// How many scrollback lines are currently retained.
-    pub retained_lines: usize,
+    #[serde(rename = "retained_lines")]
+    pub retained_line_count: usize,
 }
 
 /// The cells a pane shows this frame, run-length encoded row by row.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameWindow {
     /// The width every row expands back to.
-    pub cols: u16,
+    #[serde(rename = "cols")]
+    pub column_count: u16,
     /// The visible rows, top row first.
-    pub rows: Vec<FrameRow>,
+    #[serde(rename = "rows")]
+    pub row_snapshots: Vec<FrameRow>,
     /// Rows scrolled up from the live tail; `0` shows the live bottom of the
     /// buffer.
-    pub view_offset: usize,
+    #[serde(rename = "view_offset")]
+    pub view_row_offset: usize,
 }
 
 /// One row of cells, as runs of equal neighbouring cells.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameRow {
     /// The runs, left to right. Their counts sum to the row's width.
-    pub runs: Vec<FrameRun>,
+    #[serde(rename = "runs")]
+    pub cell_runs: Vec<FrameRun>,
     /// Whether the row ends its logical line or continues onto the next. An
     /// ending this build has no name for reads as
     /// [`Hard`](FrameRowEnd::Hard).
     #[serde(
         default,
-        deserialize_with = "crate::wire::or_default",
+        deserialize_with = "crate::wire::deserialize_or_default",
         skip_serializing_if = "FrameRowEnd::is_hard"
     )]
-    pub end: FrameRowEnd,
+    #[serde(rename = "end")]
+    pub row_end: FrameRowEnd,
 }
 
 /// How a row ends: the wire form of the terminal's per-row line-continuation
@@ -728,36 +840,50 @@ impl FrameRowEnd {
 }
 
 impl FrameRow {
-    /// Fold `cells` into runs: each stretch of equal neighbouring cells becomes
+    /// Fold `frame_cells` into runs: each stretch of equal neighbouring cells becomes
     /// one [`FrameRun`]. A count stops at [`u16::MAX`] and the next equal cell
     /// opens a new run. `end` is how the row ends its logical line.
     ///
     /// 80 blank cells give one run with `count == 80`. 70 000 blank cells give
     /// two runs, `65_535` then `4_465`.
     #[must_use]
-    pub fn from_cells(cells: impl IntoIterator<Item = FrameCell>, end: FrameRowEnd) -> Self {
-        let mut runs: Vec<FrameRun> = Vec::new();
-        for cell in cells {
-            match runs.last_mut() {
-                Some(run) if run.cell == cell && run.count < u16::MAX => run.count += 1,
-                _ => runs.push(FrameRun { count: 1, cell }),
+    pub fn from_cells(
+        frame_cells: impl IntoIterator<Item = FrameCell>,
+        row_end: FrameRowEnd,
+    ) -> Self {
+        let mut cell_runs: Vec<FrameRun> = Vec::new();
+        for frame_cell in frame_cells {
+            match cell_runs.last_mut() {
+                Some(cell_run)
+                    if cell_run.cell == frame_cell && cell_run.repeat_count < u16::MAX =>
+                {
+                    cell_run.repeat_count += 1;
+                }
+                _ => cell_runs.push(FrameRun {
+                    repeat_count: 1,
+                    cell: frame_cell,
+                }),
             }
         }
-        Self { runs, end }
+        Self { cell_runs, row_end }
     }
 
     /// Expand the runs back into cells, each run's cell repeated `count` times.
     /// The inverse of [`from_cells`](Self::from_cells). The returned vector is
     /// allocated once, at the runs' total count.
     #[must_use]
-    pub fn cells(&self) -> Vec<FrameCell> {
-        let total = self.runs.iter().map(|run| usize::from(run.count)).sum();
-        let mut cells = Vec::with_capacity(total);
-        for run in &self.runs {
-            let count = usize::from(run.count);
-            cells.extend(std::iter::repeat_n(run.cell.clone(), count));
+    pub fn expand_cells(&self) -> Vec<FrameCell> {
+        let total_cell_count = self
+            .cell_runs
+            .iter()
+            .map(|cell_run| usize::from(cell_run.repeat_count))
+            .sum();
+        let mut frame_cells = Vec::with_capacity(total_cell_count);
+        for cell_run in &self.cell_runs {
+            let repeat_count = usize::from(cell_run.repeat_count);
+            frame_cells.extend(std::iter::repeat_n(cell_run.cell.clone(), repeat_count));
         }
-        cells
+        frame_cells
     }
 }
 
@@ -765,7 +891,8 @@ impl FrameRow {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameRun {
     /// How many cells this run stands for. Never 0.
-    pub count: u16,
+    #[serde(rename = "count")]
+    pub repeat_count: u16,
     /// The cell every position in the run holds.
     pub cell: FrameCell,
 }
@@ -775,16 +902,19 @@ pub struct FrameRun {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameCell {
     /// The base character occupying the cell.
-    pub ch: char,
-    /// The rest of the grapheme cluster layered over [`ch`](Self::ch), in
+    #[serde(rename = "ch")]
+    pub character: char,
+    /// The rest of the grapheme cluster layered over [`character`](Self::character), in
     /// arrival order: combining accents, variation selectors, and the joined
     /// parts of a multi-codepoint emoji. Empty for a plain cell; the client
-    /// draws `ch` followed by these as one glyph.
+    /// draws `character` followed by these as one glyph.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub combining: Vec<char>,
+    #[serde(rename = "combining")]
+    pub combining_characters: Vec<char>,
     /// Display width in cells: 0 (continuation half of a wide glyph), 1
     /// (narrow), or 2 (wide, e.g. CJK).
-    pub width: u8,
+    #[serde(rename = "width")]
+    pub cell_width: u8,
     /// The cell's colors and text attributes.
     pub style: FrameStyle,
 }
@@ -794,22 +924,25 @@ pub struct FrameCell {
 pub struct FrameStyle {
     /// The foreground color. A color this build has no name for reads as
     /// [`Default`](FrameColor::Default).
-    #[serde(default, deserialize_with = "crate::wire::or_default")]
-    pub fg: FrameColor,
+    #[serde(default, deserialize_with = "crate::wire::deserialize_or_default")]
+    #[serde(rename = "fg")]
+    pub foreground_color: FrameColor,
     /// The background color. A color this build has no name for reads as
     /// [`Default`](FrameColor::Default).
-    #[serde(default, deserialize_with = "crate::wire::or_default")]
-    pub bg: FrameColor,
+    #[serde(default, deserialize_with = "crate::wire::deserialize_or_default")]
+    #[serde(rename = "bg")]
+    pub background_color: FrameColor,
     /// The underline color (SGR 58); `None` follows the foreground color. A
     /// color this build has no name for reads as `None`.
     #[serde(
         default,
-        deserialize_with = "crate::wire::or_default",
+        deserialize_with = "crate::wire::deserialize_or_default",
         skip_serializing_if = "Option::is_none"
     )]
     pub underline_color: Option<FrameColor>,
     /// The boolean text attributes and the underline style.
-    pub attrs: FrameAttrs,
+    #[serde(rename = "attrs")]
+    pub text_attributes: FrameAttrs,
 }
 
 /// The SGR text attributes of one cell.
@@ -817,32 +950,41 @@ pub struct FrameStyle {
 pub struct FrameAttrs {
     /// Bold / increased intensity (SGR 1).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub bold: bool,
+    #[serde(rename = "bold")]
+    pub is_bold: bool,
     /// Italic (SGR 3).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub italic: bool,
+    #[serde(rename = "italic")]
+    pub is_italic: bool,
     /// Reverse video — swap foreground and background (SGR 7).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub reverse: bool,
+    #[serde(rename = "reverse")]
+    pub is_reverse: bool,
     /// Faint / decreased intensity (SGR 2).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub faint: bool,
+    #[serde(rename = "faint")]
+    pub is_faint: bool,
     /// Blink (SGR 5 slow or 6 rapid, collapsed to one flag).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub blink: bool,
+    #[serde(rename = "blink")]
+    pub is_blinking: bool,
     /// Conceal — hidden text (SGR 8).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub conceal: bool,
+    #[serde(rename = "conceal")]
+    pub is_concealed: bool,
     /// Crossed-out / strikethrough (SGR 9).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub strike: bool,
+    #[serde(rename = "strike")]
+    pub is_struck_through: bool,
     /// Overline (SGR 53).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub overline: bool,
+    #[serde(rename = "overline")]
+    pub is_overlined: bool,
     /// The underline style (SGR 4 / 21 / 24 and the `4:n` forms). A style this
     /// build has no name for reads as [`None`](FrameUnderline::None).
-    #[serde(default, deserialize_with = "crate::wire::or_default")]
-    pub underline: FrameUnderline,
+    #[serde(default, deserialize_with = "crate::wire::deserialize_or_default")]
+    #[serde(rename = "underline")]
+    pub underline_style: FrameUnderline,
 }
 
 /// A foreground or background color. Mirrors `koshi_terminal::style::Color`.

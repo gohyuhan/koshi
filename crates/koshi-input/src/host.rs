@@ -36,30 +36,30 @@ impl Modifiers {
         Self::NONE
     }
 
-    /// Return whether every bit in `other` is set.
+    /// Return whether every bit in `required_modifiers` is set.
     #[must_use]
-    pub const fn contains(self, other: Self) -> bool {
-        self.0 & other.0 == other.0
+    pub const fn has_all_modifiers(self, required_modifiers: Self) -> bool {
+        self.0 & required_modifiers.0 == required_modifiers.0
     }
 
     /// Return the union of two modifier sets.
     #[must_use]
-    pub const fn union(self, other: Self) -> Self {
-        Self(self.0 | other.0)
+    pub const fn combine_modifiers(self, additional_modifiers: Self) -> Self {
+        Self(self.0 | additional_modifiers.0)
     }
 }
 
 impl BitOr for Modifiers {
     type Output = Self;
 
-    fn bitor(self, rhs: Self) -> Self::Output {
-        self.union(rhs)
+    fn bitor(self, right_modifiers: Self) -> Self::Output {
+        self.combine_modifiers(right_modifiers)
     }
 }
 
 impl BitOrAssign for Modifiers {
-    fn bitor_assign(&mut self, rhs: Self) {
-        self.0 |= rhs.0;
+    fn bitor_assign(&mut self, right_modifiers: Self) {
+        self.0 |= right_modifiers.0;
     }
 }
 
@@ -121,7 +121,7 @@ pub struct KeyEvent {
     /// Key identity.
     pub code: KeyCode,
     /// Physical action.
-    pub kind: KeyEventKind,
+    pub key_event_kind: KeyEventKind,
     /// Active modifiers.
     pub modifiers: Modifiers,
 }
@@ -129,10 +129,10 @@ pub struct KeyEvent {
 impl KeyEvent {
     /// Build a key press.
     #[must_use]
-    pub const fn new(code: KeyCode, modifiers: Modifiers) -> Self {
+    pub const fn from_key_code_and_modifiers(code: KeyCode, modifiers: Modifiers) -> Self {
         Self {
             code,
-            kind: KeyEventKind::Press,
+            key_event_kind: KeyEventKind::Press,
             modifiers,
         }
     }
@@ -140,7 +140,7 @@ impl KeyEvent {
 
 impl From<KeyCode> for KeyEvent {
     fn from(code: KeyCode) -> Self {
-        Self::new(code, Modifiers::NONE)
+        Self::from_key_code_and_modifiers(code, Modifiers::NONE)
     }
 }
 
@@ -180,7 +180,7 @@ pub enum MouseEventKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MouseEvent {
     /// Mouse action.
-    pub kind: MouseEventKind,
+    pub mouse_event_kind: MouseEventKind,
     /// Zero-based column.
     pub column: u16,
     /// Zero-based row.
@@ -193,9 +193,9 @@ pub struct MouseEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WindowSize {
     /// Cell columns.
-    pub cols: u16,
-    /// Cell rows.
-    pub rows: u16,
+    pub column_count: u16,
+    /// Cell row count.
+    pub row_count: u16,
     /// Pixel width when the platform reports it.
     pub pixel_width: Option<u16>,
     /// Pixel height when the platform reports it.
@@ -208,7 +208,7 @@ pub struct KittyGraphicsReply {
     /// Image id copied from the query.
     pub image_id: u32,
     /// Whether the terminal returned `OK`.
-    pub ok: bool,
+    pub is_successful: bool,
 }
 
 /// The result of one XTSMGRAPHICS item query.

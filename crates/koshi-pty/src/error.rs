@@ -18,8 +18,8 @@ pub enum PtyError {
     #[error("pty io error: {detail}")]
     Io { detail: String },
     /// An operation named a pane the backend never spawned (or already removed).
-    #[error("invalid pane: id - {pane}")]
-    UnknownPane { pane: PaneId },
+    #[error("invalid pane: id - {pane_id}")]
+    UnknownPane { pane_id: PaneId },
     /// Delivering a termination signal (Unix) or a Job-Object/`TerminateProcess`
     /// call (Windows) to the child failed, or the child could not join its
     /// Job Objects at spawn (Windows).
@@ -32,7 +32,7 @@ impl DomainError for PtyError {
         DomainCategory::Pty
     }
 
-    fn severity(&self) -> Severity {
+    fn get_severity(&self) -> Severity {
         Severity::Recoverable
     }
 }

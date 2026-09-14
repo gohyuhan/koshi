@@ -6,7 +6,7 @@ use koshi_sixel::SixelPalette;
 
 use crate::grid::state::Grid;
 use crate::state::{
-    default_tab_stops, Cursor, RenderState, Screen, ShellIntegrationState, TerminalModes,
+    build_default_tab_stops, Cursor, RenderState, Screen, ShellIntegrationState, TerminalModes,
     TerminalState,
 };
 use crate::style::Style;
@@ -26,7 +26,7 @@ impl TerminalState {
 
         *self.active_render_mut() = RenderState::fresh();
         *self.scroll_region_mut() = None;
-        self.modes.app_cursor_keys = false;
+        self.modes.application_cursor_keys = false;
         self.modes.autowrap = false;
         self.reset_cluster();
     }
@@ -40,19 +40,22 @@ impl TerminalState {
     /// in-progress grapheme cluster. The reported cwd, queued device replies,
     /// queued shell-integration facts, and the scrollback tallies stay.
     pub(super) fn hard_reset(&mut self) {
-        let (rows, columns) = self.primary.dimensions();
-        debug_assert_eq!(self.alternate.dimensions(), (rows, columns));
+        let (row_count, column_count) = self.primary.get_grid_dimensions();
+        debug_assert_eq!(
+            self.alternate.get_grid_dimensions(),
+            (row_count, column_count)
+        );
 
-        let grid = Grid::blank(rows, columns, Style::default());
+        let grid = Grid::blank(row_count, column_count, Style::default());
         self.primary = Arc::new(grid.clone());
         self.alternate = Arc::new(grid);
-        self.active = Screen::Primary;
+        self.active_screen = Screen::Primary;
         self.clear_all_image_placements();
-        self.scrollback.clear();
+        self.scrollback.clear_scrollback();
 
         let cursor = Cursor {
             row: 0,
-            col: 0,
+            column: 0,
             is_visible: true,
             pending_wrap: false,
             saved: None,
@@ -65,7 +68,7 @@ impl TerminalState {
         self.sixel_palette = SixelPalette::default();
         self.primary_scroll_region = None;
         self.alternate_scroll_region = None;
-        self.tab_stops = default_tab_stops(columns);
+        self.tab_stops = build_default_tab_stops(column_count);
         self.title = None;
         self.shell_integration_state = ShellIntegrationState::default();
         self.reset_cluster();

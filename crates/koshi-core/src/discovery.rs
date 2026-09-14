@@ -1,6 +1,6 @@
 //! Read-only discovery snapshots answering the list and inspect queries.
 //!
-//! Each `*Info` struct describes one entity from live runtime state. An
+//! Each discovery struct describes one entity from live runtime state. A
 //! `inspect` query renders one of them in full; a `list-*` query keeps the
 //! ids and names off them and prints one row per entity. Every struct
 //! carries the stable ids printed by Koshi, usable directly as explicit
@@ -10,8 +10,8 @@
 //! makes one request across the process boundary and keeps the rows its query
 //! asked for.
 //!
-//! [`PaneInfo::cwd`] serializes as the path's lossy UTF-8 string: bytes that
-//! are not valid UTF-8 become U+FFFD.
+//! [`PaneDiscovery::working_directory`] serializes as the path's lossy UTF-8
+//! string: bytes that are not valid UTF-8 become U+FFFD.
 
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -26,15 +26,18 @@ use crate::lock::LockMode;
 /// One session, as `inspect session` reports it and `list-sessions` rows
 /// are drawn from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionInfo {
+pub struct SessionDiscovery {
     /// Stable session id.
-    pub id: SessionId,
+    #[serde(rename = "id")]
+    pub session_id: SessionId,
     /// The session's generated display name.
-    pub name: String,
+    #[serde(rename = "name")]
+    pub session_name: String,
     /// When the session was created.
     pub created_at: SystemTime,
     /// Ids of the clients currently attached.
-    pub attached_clients: Vec<ClientId>,
+    #[serde(rename = "attached_clients")]
+    pub attached_client_ids: Vec<ClientId>,
     /// Number of panes across all of the session's tabs.
     pub pane_count: usize,
 }
@@ -42,17 +45,21 @@ pub struct SessionInfo {
 /// One tab, as `inspect tab` reports it and `list-tabs` rows are drawn
 /// from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TabInfo {
+pub struct TabDiscovery {
     /// Stable tab id.
-    pub id: TabId,
+    #[serde(rename = "id")]
+    pub tab_id: TabId,
     /// The session holding the tab.
     pub session_id: SessionId,
     /// The tab's generated display name.
-    pub name: String,
+    #[serde(rename = "name")]
+    pub tab_name: String,
     /// The tab's position in the tab bar, zero-based.
-    pub index: usize,
+    #[serde(rename = "index")]
+    pub tab_index: usize,
     /// The tab's most-recently-focused pane, once one has been focused.
-    pub active_pane: Option<PaneId>,
+    #[serde(rename = "active_pane")]
+    pub active_pane_id: Option<PaneId>,
     /// Number of panes in the tab.
     pub pane_count: usize,
 }
@@ -60,16 +67,17 @@ pub struct TabInfo {
 /// Where a pane sits in its life, as reported by discovery queries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PaneState {
+pub enum PaneLifecycle {
     /// The pane is being created; its child has not started yet.
     Spawning,
     /// The pane's child process is running.
     Running,
-    /// The pane's child exited. `code` is `None` when it was signal-killed
+    /// The pane's child exited. `exit_code` is `None` when it was signal-killed
     /// or its status was unavailable.
     Exited {
         /// The child's exit code, when one was observed.
-        code: Option<i32>,
+        #[serde(rename = "code")]
+        exit_code: Option<i32>,
     },
     /// The pane is shutting down.
     Closing,
@@ -78,34 +86,41 @@ pub enum PaneState {
 /// One pane, as `inspect pane` reports it and `list-panes` rows are drawn
 /// from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaneInfo {
+pub struct PaneDiscovery {
     /// Stable pane id.
-    pub id: PaneId,
+    #[serde(rename = "id")]
+    pub pane_id: PaneId,
     /// The tab holding the pane.
     pub tab_id: TabId,
     /// The session holding the pane.
     pub session_id: SessionId,
     /// The pane's display title, once the child has set one.
-    pub title: Option<String>,
+    #[serde(rename = "title")]
+    pub pane_title: Option<String>,
     /// Working directory the pane started in, when known. Serializes as
     /// the path's lossy UTF-8 string.
     #[serde(serialize_with = "serialize_path_lossy")]
-    pub cwd: Option<PathBuf>,
+    #[serde(rename = "cwd")]
+    pub working_directory: Option<PathBuf>,
     /// The argv the pane was spawned to run — program first, then its
     /// arguments — for a command pane; `None` for a shell pane.
-    pub command: Option<Vec<String>>,
+    #[serde(rename = "command")]
+    pub command_argv: Option<Vec<String>>,
     /// Where the pane sits in its life.
-    pub state: PaneState,
+    #[serde(rename = "state")]
+    pub lifecycle: PaneLifecycle,
     /// Ids of the clients whose focus is on this pane.
-    pub focused_by_clients: Vec<ClientId>,
+    #[serde(rename = "focused_by_clients")]
+    pub focused_by_client_ids: Vec<ClientId>,
 }
 
 /// One attached client, as `inspect client` reports it and `list-clients`
 /// rows are drawn from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ClientInfo {
+pub struct ClientDiscovery {
     /// Stable client id.
-    pub id: ClientId,
+    #[serde(rename = "id")]
+    pub client_id: ClientId,
     /// The session the client is attached to.
     pub session_id: SessionId,
     /// When the client attached.
@@ -113,12 +128,15 @@ pub struct ClientInfo {
     /// The client's terminal viewport size.
     pub viewport_size: Size,
     /// The tab the client is viewing.
-    pub active_tab: TabId,
+    #[serde(rename = "active_tab")]
+    pub active_tab_id: TabId,
     /// The client's focused pane in the tab it is viewing, once it has
     /// focused one.
-    pub focused_pane: Option<PaneId>,
+    #[serde(rename = "focused_pane")]
+    pub focused_pane_id: Option<PaneId>,
     /// The client's modal input state.
-    pub lock_state: LockMode,
+    #[serde(rename = "lock_state")]
+    pub lock_mode: LockMode,
     /// Where the client connected from. `None` when the row carries no
     /// `origin` field; `None` is not [`ClientOrigin::Local`].
     #[serde(default)]
@@ -138,23 +156,28 @@ pub struct ClientInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionOverview {
     /// The session itself.
-    pub session: SessionInfo,
+    pub session: SessionDiscovery,
     /// The session's tabs, in tab-bar order.
-    pub tabs: Vec<TabInfo>,
+    pub tabs: Vec<TabDiscovery>,
     /// Every pane in the session, across all of its tabs.
-    pub panes: Vec<PaneInfo>,
+    pub panes: Vec<PaneDiscovery>,
     /// The clients currently attached to the session.
-    pub clients: Vec<ClientInfo>,
+    pub clients: Vec<ClientDiscovery>,
 }
 
-/// Serializes `None` as none and `Some(path)` as the path's lossy UTF-8
+/// Serializes `None` as none and `Some(working_directory_path)` as the path's lossy UTF-8
 /// string: bytes that are not valid UTF-8 become U+FFFD.
-fn serialize_path_lossy<S>(path: &Option<PathBuf>, serializer: S) -> Result<S::Ok, S::Error>
+fn serialize_path_lossy<S>(
+    working_directory: &Option<PathBuf>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
-    match path {
-        Some(path) => serializer.serialize_some(&path.to_string_lossy()),
+    match working_directory {
+        Some(working_directory_path) => {
+            serializer.serialize_some(&working_directory_path.to_string_lossy())
+        }
         None => serializer.serialize_none(),
     }
 }

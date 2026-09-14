@@ -2,227 +2,336 @@
 
 use super::*;
 
-fn rect(x: u16, y: u16, cols: u16, rows: u16) -> Rect {
-    Rect::new(Point { x, y }, Size { cols, rows })
+fn build_cell_rect(column_index: u16, row_index: u16, column_count: u16, row_count: u16) -> Rect {
+    Rect::from_origin_and_size(
+        Point {
+            column: column_index,
+            row: row_index,
+        },
+        Size {
+            column_count,
+            row_count,
+        },
+    )
 }
 
-fn geometry(edge: Edge, extent: u16) -> RegionGeometry {
-    RegionGeometry { edge, extent }
+fn build_region_geometry(edge: Edge, extent_cell_count: u16) -> RegionGeometry {
+    RegionGeometry {
+        edge,
+        extent_cell_count,
+    }
 }
 
 #[test]
 fn empty_geometry_keeps_the_full_viewport() {
-    let result = solve(Size { cols: 80, rows: 24 }, &[]);
+    let regions_result = solve_region_rects(
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        &[],
+    );
 
-    assert_eq!(result.regions, []);
-    assert_eq!(result.pane_rect, rect(0, 0, 80, 24));
+    assert_eq!(regions_result.region_rects, []);
+    assert_eq!(regions_result.pane_rect, build_cell_rect(0, 0, 80, 24));
 }
 
 #[test]
 fn zero_viewport_keeps_zero_regions_without_underflow() {
-    let result = solve(
-        Size { cols: 0, rows: 0 },
+    let regions_result = solve_region_rects(
+        Size {
+            column_count: 0,
+            row_count: 0,
+        },
         &[
-            geometry(Edge::Top, u16::MAX),
-            geometry(Edge::Bottom, u16::MAX),
-            geometry(Edge::Left, u16::MAX),
-            geometry(Edge::Right, u16::MAX),
+            build_region_geometry(Edge::Top, u16::MAX),
+            build_region_geometry(Edge::Bottom, u16::MAX),
+            build_region_geometry(Edge::Left, u16::MAX),
+            build_region_geometry(Edge::Right, u16::MAX),
         ],
     );
 
     assert_eq!(
-        result.regions,
+        regions_result.region_rects,
         [
-            rect(0, 0, 0, 0),
-            rect(0, 0, 0, 0),
-            rect(0, 0, 0, 0),
-            rect(0, 0, 0, 0)
+            build_cell_rect(0, 0, 0, 0),
+            build_cell_rect(0, 0, 0, 0),
+            build_cell_rect(0, 0, 0, 0),
+            build_cell_rect(0, 0, 0, 0)
         ]
     );
-    assert_eq!(result.pane_rect, rect(0, 0, 0, 0));
+    assert_eq!(regions_result.pane_rect, build_cell_rect(0, 0, 0, 0));
 }
 
 #[test]
 fn top_and_bottom_regions_leave_the_middle() {
-    let result = solve(
-        Size { cols: 80, rows: 24 },
-        &[geometry(Edge::Top, 1), geometry(Edge::Bottom, 1)],
+    let regions_result = solve_region_rects(
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        &[
+            build_region_geometry(Edge::Top, 1),
+            build_region_geometry(Edge::Bottom, 1),
+        ],
     );
 
-    assert_eq!(result.regions, [rect(0, 0, 80, 1), rect(0, 23, 80, 1)]);
-    assert_eq!(result.pane_rect, rect(0, 1, 80, 22));
+    assert_eq!(
+        regions_result.region_rects,
+        [build_cell_rect(0, 0, 80, 1), build_cell_rect(0, 23, 80, 1)]
+    );
+    assert_eq!(regions_result.pane_rect, build_cell_rect(0, 1, 80, 22));
 }
 
 #[test]
 fn all_edges_remove_cells_from_the_remaining_rectangle() {
-    let result = solve(
-        Size { cols: 20, rows: 10 },
+    let regions_result = solve_region_rects(
+        Size {
+            column_count: 20,
+            row_count: 10,
+        },
         &[
-            geometry(Edge::Top, 2),
-            geometry(Edge::Left, 3),
-            geometry(Edge::Bottom, 4),
-            geometry(Edge::Right, 5),
+            build_region_geometry(Edge::Top, 2),
+            build_region_geometry(Edge::Left, 3),
+            build_region_geometry(Edge::Bottom, 4),
+            build_region_geometry(Edge::Right, 5),
         ],
     );
 
     assert_eq!(
-        result.regions,
+        regions_result.region_rects,
         [
-            rect(0, 0, 20, 2),
-            rect(0, 2, 3, 8),
-            rect(3, 6, 17, 4),
-            rect(15, 2, 5, 4),
+            build_cell_rect(0, 0, 20, 2),
+            build_cell_rect(0, 2, 3, 8),
+            build_cell_rect(3, 6, 17, 4),
+            build_cell_rect(15, 2, 5, 4),
         ]
     );
-    assert_eq!(result.pane_rect, rect(3, 2, 12, 4));
+    assert_eq!(regions_result.pane_rect, build_cell_rect(3, 2, 12, 4));
 }
 
 #[test]
 fn repeated_edges_keep_input_order() {
-    let result = solve(
-        Size { cols: 10, rows: 6 },
+    let regions_result = solve_region_rects(
+        Size {
+            column_count: 10,
+            row_count: 6,
+        },
         &[
-            geometry(Edge::Top, 1),
-            geometry(Edge::Top, 2),
-            geometry(Edge::Bottom, 1),
+            build_region_geometry(Edge::Top, 1),
+            build_region_geometry(Edge::Top, 2),
+            build_region_geometry(Edge::Bottom, 1),
         ],
     );
 
     assert_eq!(
-        result.regions,
-        [rect(0, 0, 10, 1), rect(0, 1, 10, 2), rect(0, 5, 10, 1)]
+        regions_result.region_rects,
+        [
+            build_cell_rect(0, 0, 10, 1),
+            build_cell_rect(0, 1, 10, 2),
+            build_cell_rect(0, 5, 10, 1)
+        ]
     );
-    assert_eq!(result.pane_rect, rect(0, 3, 10, 2));
+    assert_eq!(regions_result.pane_rect, build_cell_rect(0, 3, 10, 2));
 }
 
 #[test]
 fn earlier_regions_own_the_reached_corners() {
-    let top_first = solve(
-        Size { cols: 6, rows: 5 },
-        &[geometry(Edge::Top, 2), geometry(Edge::Left, 2)],
+    let top_first_solution = solve_region_rects(
+        Size {
+            column_count: 6,
+            row_count: 5,
+        },
+        &[
+            build_region_geometry(Edge::Top, 2),
+            build_region_geometry(Edge::Left, 2),
+        ],
     );
-    let left_first = solve(
-        Size { cols: 6, rows: 5 },
-        &[geometry(Edge::Left, 2), geometry(Edge::Top, 2)],
+    let left_first_solution = solve_region_rects(
+        Size {
+            column_count: 6,
+            row_count: 5,
+        },
+        &[
+            build_region_geometry(Edge::Left, 2),
+            build_region_geometry(Edge::Top, 2),
+        ],
     );
 
-    assert_eq!(top_first.regions, [rect(0, 0, 6, 2), rect(0, 2, 2, 3)]);
-    assert_eq!(top_first.pane_rect, rect(2, 2, 4, 3));
-    assert_eq!(left_first.regions, [rect(0, 0, 2, 5), rect(2, 0, 4, 2)]);
-    assert_eq!(left_first.pane_rect, rect(2, 2, 4, 3));
+    assert_eq!(
+        top_first_solution.region_rects,
+        [build_cell_rect(0, 0, 6, 2), build_cell_rect(0, 2, 2, 3)]
+    );
+    assert_eq!(top_first_solution.pane_rect, build_cell_rect(2, 2, 4, 3));
+    assert_eq!(
+        left_first_solution.region_rects,
+        [build_cell_rect(0, 0, 2, 5), build_cell_rect(2, 0, 4, 2)]
+    );
+    assert_eq!(left_first_solution.pane_rect, build_cell_rect(2, 2, 4, 3));
 }
 
 #[test]
 fn zero_extent_keeps_each_region_index_and_the_full_pane() {
-    let result = solve(
-        Size { cols: 8, rows: 4 },
+    let regions_result = solve_region_rects(
+        Size {
+            column_count: 8,
+            row_count: 4,
+        },
         &[
-            geometry(Edge::Top, 0),
-            geometry(Edge::Left, 0),
-            geometry(Edge::Bottom, 0),
-            geometry(Edge::Right, 0),
+            build_region_geometry(Edge::Top, 0),
+            build_region_geometry(Edge::Left, 0),
+            build_region_geometry(Edge::Bottom, 0),
+            build_region_geometry(Edge::Right, 0),
         ],
     );
 
     assert_eq!(
-        result.regions,
+        regions_result.region_rects,
         [
-            rect(0, 0, 8, 0),
-            rect(0, 0, 0, 4),
-            rect(0, 4, 8, 0),
-            rect(8, 0, 0, 4),
+            build_cell_rect(0, 0, 8, 0),
+            build_cell_rect(0, 0, 0, 4),
+            build_cell_rect(0, 4, 8, 0),
+            build_cell_rect(8, 0, 0, 4),
         ]
     );
-    assert_eq!(result.pane_rect, rect(0, 0, 8, 4));
+    assert_eq!(regions_result.pane_rect, build_cell_rect(0, 0, 8, 4));
 }
 
 #[test]
 fn clamped_extent_keeps_a_zero_region_at_the_remaining_edge() {
-    let result = solve(
-        Size { cols: 4, rows: 3 },
-        &[geometry(Edge::Top, 10), geometry(Edge::Bottom, 10)],
+    let regions_result = solve_region_rects(
+        Size {
+            column_count: 4,
+            row_count: 3,
+        },
+        &[
+            build_region_geometry(Edge::Top, 10),
+            build_region_geometry(Edge::Bottom, 10),
+        ],
     );
 
-    assert_eq!(result.regions, [rect(0, 0, 4, 3), rect(0, 3, 4, 0)]);
-    assert_eq!(result.pane_rect, rect(0, 3, 4, 0));
+    assert_eq!(
+        regions_result.region_rects,
+        [build_cell_rect(0, 0, 4, 3), build_cell_rect(0, 3, 4, 0)]
+    );
+    assert_eq!(regions_result.pane_rect, build_cell_rect(0, 3, 4, 0));
 }
 
 #[test]
 fn two_by_two_viewport_keeps_exact_remaining_cells() {
-    let result = solve(
-        Size { cols: 2, rows: 2 },
-        &[geometry(Edge::Top, 1), geometry(Edge::Left, 1)],
+    let regions_result = solve_region_rects(
+        Size {
+            column_count: 2,
+            row_count: 2,
+        },
+        &[
+            build_region_geometry(Edge::Top, 1),
+            build_region_geometry(Edge::Left, 1),
+        ],
     );
 
-    assert_eq!(result.regions, [rect(0, 0, 2, 1), rect(0, 1, 1, 1)]);
-    assert_eq!(result.pane_rect, rect(1, 1, 1, 1));
+    assert_eq!(
+        regions_result.region_rects,
+        [build_cell_rect(0, 0, 2, 1), build_cell_rect(0, 1, 1, 1)]
+    );
+    assert_eq!(regions_result.pane_rect, build_cell_rect(1, 1, 1, 1));
 }
 
 #[test]
 fn one_by_one_viewport_clamps_every_edge_without_underflow() {
-    let result = solve(
-        Size { cols: 1, rows: 1 },
+    let regions_result = solve_region_rects(
+        Size {
+            column_count: 1,
+            row_count: 1,
+        },
         &[
-            geometry(Edge::Top, 2),
-            geometry(Edge::Left, 2),
-            geometry(Edge::Bottom, 2),
-            geometry(Edge::Right, 2),
+            build_region_geometry(Edge::Top, 2),
+            build_region_geometry(Edge::Left, 2),
+            build_region_geometry(Edge::Bottom, 2),
+            build_region_geometry(Edge::Right, 2),
         ],
     );
 
     assert_eq!(
-        result.regions,
+        regions_result.region_rects,
         [
-            rect(0, 0, 1, 1),
-            rect(0, 1, 1, 0),
-            rect(1, 1, 0, 0),
-            rect(1, 1, 0, 0),
+            build_cell_rect(0, 0, 1, 1),
+            build_cell_rect(0, 1, 1, 0),
+            build_cell_rect(1, 1, 0, 0),
+            build_cell_rect(1, 1, 0, 0),
         ]
     );
-    assert_eq!(result.pane_rect, rect(1, 1, 0, 0));
+    assert_eq!(regions_result.pane_rect, build_cell_rect(1, 1, 0, 0));
 }
 
 #[test]
 fn maximum_viewport_clamps_without_overflow() {
-    let result = solve(
+    let regions_result = solve_region_rects(
         Size {
-            cols: u16::MAX,
-            rows: u16::MAX,
+            column_count: u16::MAX,
+            row_count: u16::MAX,
         },
         &[
-            geometry(Edge::Bottom, u16::MAX),
-            geometry(Edge::Right, u16::MAX),
+            build_region_geometry(Edge::Bottom, u16::MAX),
+            build_region_geometry(Edge::Right, u16::MAX),
         ],
     );
 
     assert_eq!(
-        result.regions,
-        [rect(0, 0, u16::MAX, u16::MAX), rect(0, 0, u16::MAX, 0),]
+        regions_result.region_rects,
+        [
+            build_cell_rect(0, 0, u16::MAX, u16::MAX),
+            build_cell_rect(0, 0, u16::MAX, 0),
+        ]
     );
-    assert_eq!(result.pane_rect, rect(0, 0, 0, 0));
+    assert_eq!(regions_result.pane_rect, build_cell_rect(0, 0, 0, 0));
 }
 
 #[test]
 fn repeated_solves_are_identical() {
     let geometries = [
-        geometry(Edge::Right, 4),
-        geometry(Edge::Top, 2),
-        geometry(Edge::Bottom, 3),
-        geometry(Edge::Left, 1),
+        build_region_geometry(Edge::Right, 4),
+        build_region_geometry(Edge::Top, 2),
+        build_region_geometry(Edge::Bottom, 3),
+        build_region_geometry(Edge::Left, 1),
     ];
 
-    let first = solve(Size { cols: 12, rows: 9 }, &geometries);
+    let first_region_solution = solve_region_rects(
+        Size {
+            column_count: 12,
+            row_count: 9,
+        },
+        &geometries,
+    );
 
-    assert_eq!(solve(Size { cols: 12, rows: 9 }, &geometries), first);
+    assert_eq!(
+        solve_region_rects(
+            Size {
+                column_count: 12,
+                row_count: 9
+            },
+            &geometries
+        ),
+        first_region_solution
+    );
 }
 
 #[test]
 fn an_extent_equal_to_the_remaining_edge_takes_all_of_it() {
-    let result = solve(
-        Size { cols: 80, rows: 24 },
-        &[geometry(Edge::Top, 24), geometry(Edge::Left, 80)],
+    let regions_result = solve_region_rects(
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        &[
+            build_region_geometry(Edge::Top, 24),
+            build_region_geometry(Edge::Left, 80),
+        ],
     );
 
-    assert_eq!(result.regions, [rect(0, 0, 80, 24), rect(0, 24, 80, 0)]);
-    assert_eq!(result.pane_rect, rect(80, 24, 0, 0));
+    assert_eq!(
+        regions_result.region_rects,
+        [build_cell_rect(0, 0, 80, 24), build_cell_rect(0, 24, 80, 0)]
+    );
+    assert_eq!(regions_result.pane_rect, build_cell_rect(80, 24, 0, 0));
 }

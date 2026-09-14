@@ -6,9 +6,9 @@
 //! `vertical` (children top to bottom), `stack` (children share one
 //! rectangle, one expanded), `pane` (terminal), `plugin "name"` (plugin
 //! pane). Every setting is a child node — no properties: `pane { command
-//! "nvim" "file"; cwd "~/proj"; env "K" "V"; size "60%"; focus }`. Sizing
-//! (`size` cells or `"N%"`, `weight`, `min`, `preferred`) is valid only on
-//! children of `horizontal`/`vertical`; `expanded` marks a stack's one
+//! "nvim" "file"; cwd "~/proj"; env "K" "V"; size "60%"; focus }`.
+//! Sizing (`size` cells or `"N%"`, `weight`, `min`, `preferred`) is valid only
+//! on children of `horizontal`/`vertical`; `expanded` marks a stack's one
 //! expanded member; `focus` marks the starting pane (one per tab) and, as a
 //! direct `tab` child, the starting tab. A bare top-level `lock` node starts
 //! the session's first client in locked input mode.
@@ -30,8 +30,8 @@ use koshi_layout::template::{
 use miette::{Diagnostic, NamedSource, SourceSpan};
 use thiserror::Error;
 
-use crate::error::{check_version, ConfigParseDiagnostic};
-use crate::parser::{parse_kdl, unknown_key, version_arg};
+use crate::error::{validate_config_schema_version, ConfigParseDiagnostic};
+use crate::parser::{format_unknown_key, parse_kdl, parse_version_argument};
 
 #[cfg(test)]
 mod tests;
@@ -45,11 +45,11 @@ pub enum ProfileError {
     Syntax(#[from] ConfigParseDiagnostic),
     /// The file is valid KDL but violates the profile schema. Carries every
     /// problem found.
-    #[error("invalid profile file {path}")]
+    #[error("invalid profile file {profile_path}")]
     #[diagnostic(code(koshi::config::profile))]
     Invalid {
         /// Path of the profile file, for the header line.
-        path: String,
+        profile_path: String,
         /// Every schema violation, each pointing at its own span.
         #[related]
         diagnostics: Vec<ProfileDiagnostic>,
@@ -59,14 +59,14 @@ pub enum ProfileError {
 /// One schema violation in a profile file, rendered with a caret at the
 /// offending node.
 #[derive(Debug, Error, Diagnostic)]
-#[error("{message}")]
+#[error("{diagnostic_message}")]
 #[diagnostic(code(koshi::config::profile))]
 pub struct ProfileDiagnostic {
     /// What is wrong, in plain words.
-    message: String,
+    diagnostic_message: String,
     /// The profile file text, named by its path.
     #[source_code]
-    src: NamedSource<String>,
+    profile_source: NamedSource<String>,
     /// Where in the file the problem sits.
     #[label]
     span: SourceSpan,
@@ -75,39 +75,44 @@ pub struct ProfileDiagnostic {
 impl ProfileDiagnostic {
     /// The plain-words description of the violation.
     #[must_use]
-    pub fn message(&self) -> &str {
-        &self.message
+    pub fn get_diagnostic_message(&self) -> &str {
+        &self.diagnostic_message
     }
 
     /// Where in the file the problem sits, as the caret label's span.
     #[must_use]
-    pub fn span(&self) -> SourceSpan {
+    pub fn get_source_span(&self) -> SourceSpan {
         self.span
     }
 }
 
-/// Parses `source` — the already-read contents of the profile file at `path`
-/// — into a [`ProfileTemplate`]. Does no file I/O: discovery and reading
-/// happen in the caller.
+/// Parses `profile_source_text`, the already-read contents of the profile
+/// file at `profile_path`, into a [`ProfileTemplate`]. Does no file I/O:
+/// discovery and reading happen in the caller.
 ///
 /// # Errors
 /// [`ProfileError::Syntax`] when the text is not valid KDL;
 /// [`ProfileError::Invalid`] with every schema violation otherwise.
-pub fn parse_profile(path: &Path, source: &str) -> Result<ProfileTemplate, ProfileError> {
-    let doc = parse_kdl(path, source)?;
-    let mut walker = Walker {
-        path,
-        source,
-        diagnostics: Vec::new(),
-        tab_leaves: 0,
-        tab_focus: Vec::new(),
+pub fn parse_profile(
+    profile_path: &Path,
+    profile_source_text: &str,
+) -> Result<ProfileTemplate, ProfileError> {
+    let profile_document = parse_kdl(profile_path, profile_source_text)?;
+    let mut profile_walker = ProfileDocumentWalker {
+        profile_path,
+        profile_source_text,
+        profile_diagnostics: Vec::new(),
+        tab_leaf_count: 0,
+        focused_tab_leaf_spans: Vec::new(),
     };
-    let template = walker.document(&doc);
-    match template {
-        Some(template) if walker.diagnostics.is_empty() => Ok(template),
+    let profile_template = profile_walker.parse_document(&profile_document);
+    match profile_template {
+        Some(profile_template) if profile_walker.profile_diagnostics.is_empty() => {
+            Ok(profile_template)
+        }
         _ => Err(ProfileError::Invalid {
-            path: path.display().to_string(),
-            diagnostics: walker.diagnostics,
+            profile_path: profile_path.display().to_string(),
+            diagnostics: profile_walker.profile_diagnostics,
         }),
     }
 }
@@ -115,7 +120,7 @@ pub fn parse_profile(path: &Path, source: &str) -> Result<ProfileTemplate, Profi
 /// Where a structural node sits, deciding which config its children may
 /// carry: sizing only under a directional split, `expanded` only in a stack.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Context {
+enum ProfileNodeContext {
     /// The single root slot of a `tab`.
     TabRoot,
     /// A child slot of `horizontal` or `vertical`.
@@ -127,106 +132,113 @@ enum Context {
 /// Sizing config collected from one structural node's children, becoming
 /// that node's [`SizeWeight`] in its parent split.
 #[derive(Default)]
-struct Sizing {
+struct ProfileSizing {
     /// `size` or `weight` value, with the node span that set it.
-    primary: Option<(SizeConstraint, SourceSpan)>,
+    primary_constraint: Option<(SizeConstraint, SourceSpan)>,
     /// `min` overlay in cells, with its span.
-    min: Option<(u16, SourceSpan)>,
+    minimum_cell_count: Option<(u16, SourceSpan)>,
     /// `preferred` overlay in cells, with its span.
-    preferred: Option<(u16, SourceSpan)>,
+    preferred_cell_count: Option<(u16, SourceSpan)>,
 }
 
-impl Sizing {
+impl ProfileSizing {
     /// The weight this sizing describes. An untouched sizing yields
     /// `SizeConstraint::Flex(1)` with no `min`, no `preferred`, and a zero
     /// resize offset.
-    fn weight(&self) -> SizeWeight {
+    fn build_size_weight(&self) -> SizeWeight {
         SizeWeight {
-            primary: self
-                .primary
+            primary_constraint: self
+                .primary_constraint
                 .map_or(SizeConstraint::Flex(1), |(constraint, _)| constraint),
-            min: self.min.map(|(cells, _)| cells),
-            preferred: self.preferred.map(|(cells, _)| cells),
+            minimum_cell_count: self.minimum_cell_count.map(|(cell_count, _)| cell_count),
+            preferred_cell_count: self.preferred_cell_count.map(|(cell_count, _)| cell_count),
             resize_delta: 0,
         }
     }
 
     /// The span of the first sizing node present, for "sizing not allowed
     /// here" reports. `None` when no sizing was given.
-    fn first_span(&self) -> Option<SourceSpan> {
-        self.primary
+    fn find_first_sizing_span(&self) -> Option<SourceSpan> {
+        self.primary_constraint
             .map(|(_, span)| span)
-            .or(self.min.map(|(_, span)| span))
-            .or(self.preferred.map(|(_, span)| span))
+            .or(self.minimum_cell_count.map(|(_, span)| span))
+            .or(self.preferred_cell_count.map(|(_, span)| span))
     }
 }
 
 /// Everything a parsed structural node hands back to its parent: the
 /// subtree, its sizing, and whether a leaf marked itself `expanded`.
-struct Slot {
+struct ProfileSlot {
     /// The parsed subtree.
-    node: TemplateNode,
+    template_node: TemplateNode,
     /// Sizing config for this node's slot in a directional parent.
-    sizing: Sizing,
+    slot_sizing: ProfileSizing,
     /// Span of an `expanded` marker, set only by leaves inside a stack.
-    expanded: Option<SourceSpan>,
+    expanded_span: Option<SourceSpan>,
 }
 
 /// Recursive-descent walker over a profile document. Collects every
 /// diagnostic instead of stopping at the first; every method that gives up
 /// on a value (`None`, or a placeholder slot) records at least one
 /// diagnostic explaining it first.
-struct Walker<'a> {
+struct ProfileDocumentWalker<'a> {
     /// Profile file path, stamped onto every diagnostic.
-    path: &'a Path,
+    profile_path: &'a Path,
     /// Profile file text, stamped onto every diagnostic for span rendering.
-    source: &'a str,
+    profile_source_text: &'a str,
     /// Every schema violation found so far.
-    diagnostics: Vec<ProfileDiagnostic>,
+    profile_diagnostics: Vec<ProfileDiagnostic>,
     /// Leaves assigned so far in the current tab, in layout order; the next
     /// leaf parsed gets this index.
-    tab_leaves: usize,
+    tab_leaf_count: usize,
     /// `focus`-marked leaves of the current tab: `(leaf index, span)`.
-    tab_focus: Vec<(usize, SourceSpan)>,
+    focused_tab_leaf_spans: Vec<(usize, SourceSpan)>,
 }
 
-impl Walker<'_> {
-    /// Records a schema violation at `span`.
-    fn error(&mut self, span: SourceSpan, message: impl Into<String>) {
-        self.diagnostics.push(ProfileDiagnostic {
-            message: message.into(),
-            src: NamedSource::new(self.path.display().to_string(), self.source.to_string()),
-            span,
+impl ProfileDocumentWalker<'_> {
+    /// Records a schema violation at `diagnostic_span`.
+    fn record_diagnostic(
+        &mut self,
+        diagnostic_span: SourceSpan,
+        diagnostic_message: impl Into<String>,
+    ) {
+        self.profile_diagnostics.push(ProfileDiagnostic {
+            diagnostic_message: diagnostic_message.into(),
+            profile_source: NamedSource::new(
+                self.profile_path.display().to_string(),
+                self.profile_source_text.to_string(),
+            ),
+            span: diagnostic_span,
         });
     }
 
     /// Parses the whole document: a `version` node, one or more `tab` nodes,
     /// and an optional bare `lock` marker. Returns `None` when the file has no
     /// usable tab list.
-    fn document(&mut self, doc: &KdlDocument) -> Option<ProfileTemplate> {
-        let mut version_seen = false;
-        let mut tabs = Vec::new();
-        let mut focused_tab: Option<usize> = None;
-        let mut locked = false;
-        let mut lock_seen = false;
-        for node in doc.nodes() {
+    fn parse_document(&mut self, profile_document: &KdlDocument) -> Option<ProfileTemplate> {
+        let mut has_version_node = false;
+        let mut tab_templates = Vec::new();
+        let mut focused_tab_index: Option<usize> = None;
+        let mut starts_locked = false;
+        let mut has_lock_node = false;
+        for node in profile_document.nodes() {
             match node.name().value() {
                 "version" => {
-                    if version_seen {
-                        self.error(node.span(), "`version` is declared more than once");
+                    if has_version_node {
+                        self.record_diagnostic(node.span(), "`version` is declared more than once");
                     } else {
-                        version_seen = true;
-                        self.version(node);
+                        has_version_node = true;
+                        self.parse_version_node(node);
                     }
                 }
                 "tab" => {
-                    let index = tabs.len();
-                    let (tab, focused) = self.tab(node);
-                    tabs.push(tab);
-                    if focused {
-                        match focused_tab {
-                            None => focused_tab = Some(index),
-                            Some(_) => self.error(
+                    let tab_index = tab_templates.len();
+                    let (tab_template, is_tab_focused) = self.parse_tab_node(node);
+                    tab_templates.push(tab_template);
+                    if is_tab_focused {
+                        match focused_tab_index {
+                            None => focused_tab_index = Some(tab_index),
+                            Some(_) => self.record_diagnostic(
                                 node.span(),
                                 "another tab already carries `focus`; only one tab starts focused",
                             ),
@@ -234,43 +246,54 @@ impl Walker<'_> {
                     }
                 }
                 "lock" => {
-                    let is_bare = self.marker(node, "lock");
-                    if lock_seen {
-                        self.error(node.span(), "`lock` is declared more than once");
+                    let is_bare_marker = self.validate_marker(node, "lock");
+                    if has_lock_node {
+                        self.record_diagnostic(node.span(), "`lock` is declared more than once");
                     } else {
-                        lock_seen = true;
-                        locked = is_bare;
+                        has_lock_node = true;
+                        starts_locked = is_bare_marker;
                     }
                 }
-                other => {
-                    self.error(node.span(), unknown_key(other, &["version", "tab", "lock"]));
+                other_node_name => {
+                    self.record_diagnostic(
+                        node.span(),
+                        format_unknown_key(other_node_name, &["version", "tab", "lock"]),
+                    );
                 }
             }
         }
-        if !version_seen {
-            self.error(doc.span(), "profile file must declare `version`");
+        if !has_version_node {
+            self.record_diagnostic(
+                profile_document.span(),
+                "profile file must declare `version`",
+            );
         }
-        if tabs.is_empty() {
-            self.error(doc.span(), "profile file must define at least one `tab`");
+        if tab_templates.is_empty() {
+            self.record_diagnostic(
+                profile_document.span(),
+                "profile file must define at least one `tab`",
+            );
             return None;
         }
         Some(ProfileTemplate {
-            tabs,
-            focused_tab: focused_tab.unwrap_or(0),
-            locked,
+            tabs: tab_templates,
+            focused_tab_index: focused_tab_index.unwrap_or(0),
+            is_locked: starts_locked,
         })
     }
 
     /// Validates the `version` node: one integer at least one, nothing else,
     /// no newer than this build's schema.
-    fn version(&mut self, node: &KdlNode) {
-        match version_arg(node) {
-            Ok(found) => {
-                if let Err(err) = check_version(found) {
-                    self.error(node.span(), err.to_string());
+    fn parse_version_node(&mut self, version_node: &KdlNode) {
+        match parse_version_argument(version_node) {
+            Ok(schema_version) => {
+                if let Err(version_error) = validate_config_schema_version(schema_version) {
+                    self.record_diagnostic(version_node.span(), version_error.to_string());
                 }
             }
-            Err((span, detail)) => self.error(span, detail),
+            Err((diagnostic_span, diagnostic_message)) => {
+                self.record_diagnostic(diagnostic_span, diagnostic_message);
+            }
         }
     }
 
@@ -278,45 +301,49 @@ impl Walker<'_> {
     /// `focus` marker. Returns the tab and whether it starts focused. A tab
     /// with problems is still returned, over a placeholder shell root when
     /// no structural node parsed. With no leaf marked `focus`, the tab
-    /// focuses its root's [`TemplateNode::first_visible_leaf`].
-    fn tab(&mut self, node: &KdlNode) -> (TabTemplate, bool) {
-        if !node.entries().is_empty() {
-            self.error(
-                node.span(),
+    /// focuses its root's [`TemplateNode::find_first_visible_leaf_index`].
+    fn parse_tab_node(&mut self, tab_node: &KdlNode) -> (TabTemplate, bool) {
+        if !tab_node.entries().is_empty() {
+            self.record_diagnostic(
+                tab_node.span(),
                 "`tab` takes no arguments or properties; its layout goes in the children block",
             );
         }
-        self.tab_leaves = 0;
-        self.tab_focus = Vec::new();
-        let mut root: Option<Slot> = None;
-        let mut focused = false;
-        if let Some(children) = node.children() {
-            for child in children.nodes() {
-                match child.name().value() {
+        self.tab_leaf_count = 0;
+        self.focused_tab_leaf_spans = Vec::new();
+        let mut root_slot: Option<ProfileSlot> = None;
+        let mut is_tab_focused = false;
+        if let Some(tab_children) = tab_node.children() {
+            for child_node in tab_children.nodes() {
+                match child_node.name().value() {
                     "focus" => {
-                        if self.marker(child, "focus") {
-                            if focused {
-                                self.error(child.span(), "`focus` is declared more than once");
+                        if self.validate_marker(child_node, "focus") {
+                            if is_tab_focused {
+                                self.record_diagnostic(
+                                    child_node.span(),
+                                    "`focus` is declared more than once",
+                                );
                             } else {
-                                focused = true;
+                                is_tab_focused = true;
                             }
                         }
                     }
-                    name if is_structural(name) => {
-                        let slot = self.structural(child, Context::TabRoot);
-                        match root {
-                            None => root = Some(slot),
-                            Some(_) => self.error(
-                                child.span(),
+                    node_name if is_structural_node_name(node_name) => {
+                        let profile_slot =
+                            self.parse_structural_node(child_node, ProfileNodeContext::TabRoot);
+                        match root_slot {
+                            None => root_slot = Some(profile_slot),
+                            Some(_) => self.record_diagnostic(
+                                child_node.span(),
                                 "`tab` holds one root node; wrap multiple panes in \
                                  `horizontal`, `vertical`, or `stack`",
                             ),
                         }
                     }
-                    other => self.error(
-                        child.span(),
-                        unknown_key(
-                            &format!("tab.{other}"),
+                    other_node_name => self.record_diagnostic(
+                        child_node.span(),
+                        format_unknown_key(
+                            &format!("tab.{other_node_name}"),
                             &[
                                 "tab.focus",
                                 "tab.pane",
@@ -330,97 +357,127 @@ impl Walker<'_> {
                 }
             }
         }
-        let root = match root {
-            Some(slot) => slot,
+        let root_slot = match root_slot {
+            Some(profile_slot) => profile_slot,
             None => {
-                self.error(
-                    node.span(),
+                self.record_diagnostic(
+                    tab_node.span(),
                     "`tab` needs one layout node (`pane`, `plugin`, `horizontal`, \
                      `vertical`, or `stack`)",
                 );
-                Slot {
-                    node: TemplateNode::Leaf(LeafTemplate::Terminal(TerminalTemplate::default())),
-                    sizing: Sizing::default(),
-                    expanded: None,
+                ProfileSlot {
+                    template_node: TemplateNode::Leaf(LeafTemplate::Terminal(
+                        TerminalTemplate::default(),
+                    )),
+                    slot_sizing: ProfileSizing::default(),
+                    expanded_span: None,
                 }
             }
         };
-        let extra_focus: Vec<SourceSpan> = self
-            .tab_focus
+        let extra_focus_spans: Vec<SourceSpan> = self
+            .focused_tab_leaf_spans
             .iter()
             .skip(1)
-            .map(|&(_, span)| span)
+            .map(|&(_, focus_span)| focus_span)
             .collect();
-        for span in extra_focus {
-            self.error(span, "this tab already focuses another pane");
+        for focus_span in extra_focus_spans {
+            self.record_diagnostic(focus_span, "this tab already focuses another pane");
         }
-        let focused_leaf = self
-            .tab_focus
-            .first()
-            .map_or_else(|| root.node.first_visible_leaf(), |&(index, _)| index);
+        let focused_leaf_index = self.focused_tab_leaf_spans.first().map_or_else(
+            || root_slot.template_node.find_first_visible_leaf_index(),
+            |&(leaf_index, _)| leaf_index,
+        );
         (
             TabTemplate {
-                root: root.node,
-                focused_leaf,
+                root: root_slot.template_node,
+                focused_leaf_index,
             },
-            focused,
+            is_tab_focused,
         )
     }
 
-    /// Dispatches one structural node by name. `node`'s name must pass
-    /// [`is_structural`]; any other name panics. Always yields a slot: a node
-    /// with problems is diagnosed and returned in degraded form, never
-    /// dropped.
-    fn structural(&mut self, node: &KdlNode, context: Context) -> Slot {
-        match node.name().value() {
-            "pane" => self.pane(node, context),
-            "plugin" => self.plugin(node, context),
-            "horizontal" => self.split(node, context, SplitDirection::Horizontal),
-            "vertical" => self.split(node, context, SplitDirection::Vertical),
-            "stack" => self.stack(node, context),
-            other => unreachable!("caller checked is_structural({other:?})"),
+    /// Dispatches one structural node by name. `structural_node`'s name must
+    /// pass [`is_structural_node_name`]; any other name panics. Always yields
+    /// a slot: a node with problems is diagnosed and returned in degraded
+    /// form, never dropped.
+    fn parse_structural_node(
+        &mut self,
+        structural_node: &KdlNode,
+        parent_context: ProfileNodeContext,
+    ) -> ProfileSlot {
+        match structural_node.name().value() {
+            "pane" => self.parse_pane_node(structural_node, parent_context),
+            "plugin" => self.parse_plugin_node(structural_node, parent_context),
+            "horizontal" => {
+                self.parse_split_node(structural_node, parent_context, SplitDirection::Horizontal)
+            }
+            "vertical" => {
+                self.parse_split_node(structural_node, parent_context, SplitDirection::Vertical)
+            }
+            "stack" => self.parse_stack_node(structural_node, parent_context),
+            other_node_name => {
+                unreachable!("caller checked is_structural_node_name({other_node_name:?})")
+            }
         }
     }
 
     /// Parses a `pane` leaf: optional `command`, `cwd`, repeated `env`,
     /// sizing, `focus`, and (in a stack) `expanded`, all as children.
-    fn pane(&mut self, node: &KdlNode, context: Context) -> Slot {
-        if !node.entries().is_empty() {
-            self.error(
-                node.span(),
+    fn parse_pane_node(
+        &mut self,
+        pane_node: &KdlNode,
+        parent_context: ProfileNodeContext,
+    ) -> ProfileSlot {
+        if !pane_node.entries().is_empty() {
+            self.record_diagnostic(
+                pane_node.span(),
                 "`pane` takes no arguments or properties; its configuration goes in the \
                  children block",
             );
         }
-        let mut command: Option<CommandTemplate> = None;
-        let mut cwd: Option<PathBuf> = None;
-        let mut env: BTreeMap<String, String> = BTreeMap::new();
-        let mut leaf = LeafSlot::default();
-        if let Some(children) = node.children() {
-            for child in children.nodes() {
-                match child.name().value() {
+        let mut command_template: Option<CommandTemplate> = None;
+        let mut working_directory: Option<PathBuf> = None;
+        let mut environment_variables: BTreeMap<String, String> = BTreeMap::new();
+        let mut leaf_config = ProfileLeafConfig::default();
+        if let Some(pane_children) = pane_node.children() {
+            for child_node in pane_children.nodes() {
+                match child_node.name().value() {
                     "command" => {
-                        if command.is_some() {
-                            self.error(child.span(), "`command` is declared more than once");
-                        } else if let Some(parsed) = self.command(child) {
-                            command = Some(parsed);
+                        if command_template.is_some() {
+                            self.record_diagnostic(
+                                child_node.span(),
+                                "`command` is declared more than once",
+                            );
+                        } else if let Some(parsed_command_template) =
+                            self.parse_command_node(child_node)
+                        {
+                            command_template = Some(parsed_command_template);
                         }
                     }
                     "cwd" => {
-                        if cwd.is_some() {
-                            self.error(child.span(), "`cwd` is declared more than once");
-                        } else if let Some(parsed) = self.single_string(child, "cwd") {
-                            cwd = Some(PathBuf::from(parsed));
+                        if working_directory.is_some() {
+                            self.record_diagnostic(
+                                child_node.span(),
+                                "`cwd` is declared more than once",
+                            );
+                        } else if let Some(working_directory_text) =
+                            self.parse_single_string(child_node, "cwd")
+                        {
+                            working_directory = Some(PathBuf::from(working_directory_text));
                         }
                     }
-                    "env" => self.env(child, &mut env),
+                    "env" => self.parse_environment_node(child_node, &mut environment_variables),
                     _ => {
-                        if !self.leaf_config(child, context, &mut leaf) {
-                            let key = format!("pane.{}", child.name().value());
-                            self.error(
-                                child.span(),
-                                unknown_key(
-                                    &key,
+                        if !self.parse_leaf_config_node(
+                            child_node,
+                            parent_context,
+                            &mut leaf_config,
+                        ) {
+                            let setting_key = format!("pane.{}", child_node.name().value());
+                            self.record_diagnostic(
+                                child_node.span(),
+                                format_unknown_key(
+                                    &setting_key,
                                     &[
                                         "pane.command",
                                         "pane.cwd",
@@ -439,47 +496,56 @@ impl Walker<'_> {
                 }
             }
         }
-        self.finish_leaf(&leaf);
-        Slot {
-            node: TemplateNode::Leaf(LeafTemplate::Terminal(TerminalTemplate {
-                command,
-                cwd,
-                env,
+        self.record_leaf(&leaf_config);
+        ProfileSlot {
+            template_node: TemplateNode::Leaf(LeafTemplate::Terminal(TerminalTemplate {
+                command: command_template,
+                working_directory,
+                environment_variables,
             })),
-            sizing: leaf.sizing,
-            expanded: leaf.expanded,
+            slot_sizing: leaf_config.leaf_sizing,
+            expanded_span: leaf_config.expanded_span,
         }
     }
 
     /// Parses a `plugin "name"` leaf: the name as its one argument, plus
     /// optional sizing, `focus`, and (in a stack) `expanded` children. A name
     /// that cannot be read is reported and becomes an empty string.
-    fn plugin(&mut self, node: &KdlNode, context: Context) -> Slot {
-        let name = match node.entries() {
-            [entry] if entry.name().is_none() => match entry.value().as_string() {
-                Some(name) if !name.is_empty() => Some(name.to_string()),
-                _ => {
-                    self.error(entry.span(), "`plugin` takes one non-empty name string");
-                    None
+    fn parse_plugin_node(
+        &mut self,
+        plugin_node: &KdlNode,
+        parent_context: ProfileNodeContext,
+    ) -> ProfileSlot {
+        let plugin_name = match plugin_node.entries() {
+            [plugin_argument] if plugin_argument.name().is_none() => {
+                match plugin_argument.value().as_string() {
+                    Some(plugin_name) if !plugin_name.is_empty() => Some(plugin_name.to_string()),
+                    _ => {
+                        self.record_diagnostic(
+                            plugin_argument.span(),
+                            "`plugin` takes one non-empty name string",
+                        );
+                        None
+                    }
                 }
-            },
+            }
             _ => {
-                self.error(
-                    node.span(),
+                self.record_diagnostic(
+                    plugin_node.span(),
                     "`plugin` takes exactly one name string, like `plugin \"session-manager\"`",
                 );
                 None
             }
         };
-        let mut leaf = LeafSlot::default();
-        if let Some(children) = node.children() {
-            for child in children.nodes() {
-                if !self.leaf_config(child, context, &mut leaf) {
-                    let key = format!("plugin.{}", child.name().value());
-                    self.error(
-                        child.span(),
-                        unknown_key(
-                            &key,
+        let mut leaf_config = ProfileLeafConfig::default();
+        if let Some(plugin_children) = plugin_node.children() {
+            for child_node in plugin_children.nodes() {
+                if !self.parse_leaf_config_node(child_node, parent_context, &mut leaf_config) {
+                    let setting_key = format!("plugin.{}", child_node.name().value());
+                    self.record_diagnostic(
+                        child_node.span(),
+                        format_unknown_key(
+                            &setting_key,
                             &[
                                 "plugin.size",
                                 "plugin.weight",
@@ -493,111 +559,134 @@ impl Walker<'_> {
                 }
             }
         }
-        self.finish_leaf(&leaf);
-        let name = name.unwrap_or_default();
-        Slot {
-            node: TemplateNode::Leaf(LeafTemplate::Plugin(PluginTemplate { name })),
-            sizing: leaf.sizing,
-            expanded: leaf.expanded,
+        self.record_leaf(&leaf_config);
+        let plugin_name = plugin_name.unwrap_or_default();
+        ProfileSlot {
+            template_node: TemplateNode::Leaf(LeafTemplate::Plugin(PluginTemplate { plugin_name })),
+            slot_sizing: leaf_config.leaf_sizing,
+            expanded_span: leaf_config.expanded_span,
         }
     }
 
     /// Parses `horizontal` or `vertical`: its own sizing children plus at
     /// least two structural children.
-    fn split(&mut self, node: &KdlNode, context: Context, direction: SplitDirection) -> Slot {
-        let name = node.name().value();
-        if !node.entries().is_empty() {
-            self.error(
-                node.span(),
-                format!("`{name}` takes no arguments or properties"),
+    fn parse_split_node(
+        &mut self,
+        split_node: &KdlNode,
+        parent_context: ProfileNodeContext,
+        direction: SplitDirection,
+    ) -> ProfileSlot {
+        let split_name = split_node.name().value();
+        if !split_node.entries().is_empty() {
+            self.record_diagnostic(
+                split_node.span(),
+                format!("`{split_name}` takes no arguments or properties"),
             );
         }
-        let mut sizing = Sizing::default();
-        let mut slots: Vec<Slot> = Vec::new();
-        if let Some(children) = node.children() {
-            for child in children.nodes() {
-                let child_name = child.name().value();
-                if is_structural(child_name) {
-                    slots.push(self.structural(child, Context::Directional));
-                } else if !self.sizing_config(child, &mut sizing) {
-                    let key = format!("{name}.{child_name}");
-                    self.error(
-                        child.span(),
-                        unknown_key(
-                            &key,
+        let mut split_sizing = ProfileSizing::default();
+        let mut child_slots: Vec<ProfileSlot> = Vec::new();
+        if let Some(split_children) = split_node.children() {
+            for child_node in split_children.nodes() {
+                let child_node_name = child_node.name().value();
+                if is_structural_node_name(child_node_name) {
+                    child_slots.push(
+                        self.parse_structural_node(child_node, ProfileNodeContext::Directional),
+                    );
+                } else if !self.parse_sizing_node(child_node, &mut split_sizing) {
+                    let setting_key = format!("{split_name}.{child_node_name}");
+                    self.record_diagnostic(
+                        child_node.span(),
+                        format_unknown_key(
+                            &setting_key,
                             &[
-                                &format!("{name}.pane"),
-                                &format!("{name}.plugin"),
-                                &format!("{name}.horizontal"),
-                                &format!("{name}.vertical"),
-                                &format!("{name}.stack"),
-                                &format!("{name}.size"),
-                                &format!("{name}.weight"),
-                                &format!("{name}.min"),
-                                &format!("{name}.preferred"),
+                                &format!("{split_name}.pane"),
+                                &format!("{split_name}.plugin"),
+                                &format!("{split_name}.horizontal"),
+                                &format!("{split_name}.vertical"),
+                                &format!("{split_name}.stack"),
+                                &format!("{split_name}.size"),
+                                &format!("{split_name}.weight"),
+                                &format!("{split_name}.min"),
+                                &format!("{split_name}.preferred"),
                             ],
                         ),
                     );
                 }
             }
         }
-        self.check_sizing_context(&sizing, context);
-        if slots.len() < 2 {
-            self.error(
-                node.span(),
-                format!("`{name}` needs at least two children to divide space between"),
+        self.validate_sizing_context(&split_sizing, parent_context);
+        if child_slots.len() < 2 {
+            self.record_diagnostic(
+                split_node.span(),
+                format!("`{split_name}` needs at least two children to divide space between"),
             );
         }
-        let weights = slots.iter().map(|slot| slot.sizing.weight()).collect();
-        let children = slots.into_iter().map(|slot| slot.node).collect();
-        Slot {
-            node: TemplateNode::Split(TemplateSplit {
+        let child_weights = child_slots
+            .iter()
+            .map(|profile_slot| profile_slot.slot_sizing.build_size_weight())
+            .collect();
+        let template_children = child_slots
+            .into_iter()
+            .map(|profile_slot| profile_slot.template_node)
+            .collect();
+        ProfileSlot {
+            template_node: TemplateNode::Split(TemplateSplit {
                 direction,
-                children,
-                weights,
-                active: 0,
+                children: template_children,
+                weights: child_weights,
+                active_child_index: 0,
             }),
-            sizing,
-            expanded: None,
+            slot_sizing: split_sizing,
+            expanded_span: None,
         }
     }
 
     /// Parses `stack`: its own sizing children plus at least two leaf
     /// members (`pane`/`plugin`), at most one marked `expanded`.
-    fn stack(&mut self, node: &KdlNode, context: Context) -> Slot {
-        if !node.entries().is_empty() {
-            self.error(node.span(), "`stack` takes no arguments or properties");
+    fn parse_stack_node(
+        &mut self,
+        stack_node: &KdlNode,
+        parent_context: ProfileNodeContext,
+    ) -> ProfileSlot {
+        if !stack_node.entries().is_empty() {
+            self.record_diagnostic(
+                stack_node.span(),
+                "`stack` takes no arguments or properties",
+            );
         }
-        let mut sizing = Sizing::default();
-        let mut members: Vec<Slot> = Vec::new();
+        let mut stack_sizing = ProfileSizing::default();
+        let mut stack_members: Vec<ProfileSlot> = Vec::new();
         // One entry per member: the leaf index of a leaf member, or `None`
         // for an invalid-subtree placeholder.
-        let mut member_leaves: Vec<Option<usize>> = Vec::new();
-        if let Some(children) = node.children() {
-            for child in children.nodes() {
-                let child_name = child.name().value();
-                if child_name == "pane" || child_name == "plugin" {
-                    let leaf_index = self.tab_leaves;
-                    let slot = self.structural(child, Context::Stack);
-                    members.push(slot);
-                    member_leaves.push(Some(leaf_index));
-                } else if is_structural(child_name) {
-                    self.error(
-                        child.span(),
+        let mut member_leaf_indices: Vec<Option<usize>> = Vec::new();
+        if let Some(stack_children) = stack_node.children() {
+            for child_node in stack_children.nodes() {
+                let child_node_name = child_node.name().value();
+                if child_node_name == "pane" || child_node_name == "plugin" {
+                    let leaf_index = self.tab_leaf_count;
+                    let profile_slot =
+                        self.parse_structural_node(child_node, ProfileNodeContext::Stack);
+                    stack_members.push(profile_slot);
+                    member_leaf_indices.push(Some(leaf_index));
+                } else if is_structural_node_name(child_node_name) {
+                    self.record_diagnostic(
+                        child_node.span(),
                         format!(
-                            "`{child_name}` cannot be a stack member; stack members are \
+                            "`{child_node_name}` cannot be a stack member; stack members are \
                              `pane` or `plugin`"
                         ),
                     );
                     // Parsed as a directional child: sizing on it and on its
                     // own children is accepted.
-                    members.push(self.structural(child, Context::Directional));
-                    member_leaves.push(None);
-                } else if !self.sizing_config(child, &mut sizing) {
-                    self.error(
-                        child.span(),
-                        unknown_key(
-                            &format!("stack.{child_name}"),
+                    stack_members.push(
+                        self.parse_structural_node(child_node, ProfileNodeContext::Directional),
+                    );
+                    member_leaf_indices.push(None);
+                } else if !self.parse_sizing_node(child_node, &mut stack_sizing) {
+                    self.record_diagnostic(
+                        child_node.span(),
+                        format_unknown_key(
+                            &format!("stack.{child_node_name}"),
                             &[
                                 "stack.pane",
                                 "stack.plugin",
@@ -611,92 +700,104 @@ impl Walker<'_> {
                 }
             }
         }
-        self.check_sizing_context(&sizing, context);
-        if members.len() < 2 {
-            self.error(node.span(), "`stack` needs at least two members");
+        self.validate_sizing_context(&stack_sizing, parent_context);
+        if stack_members.len() < 2 {
+            self.record_diagnostic(stack_node.span(), "`stack` needs at least two members");
         }
-        let mut active: Option<usize> = None;
-        for (index, member) in members.iter().enumerate() {
-            if let Some(span) = member.expanded {
-                match active {
-                    None => active = Some(index),
-                    Some(_) => self.error(
-                        span,
+        let mut expanded_member_index: Option<usize> = None;
+        for (member_index, profile_slot) in stack_members.iter().enumerate() {
+            if let Some(expanded_span) = profile_slot.expanded_span {
+                match expanded_member_index {
+                    None => expanded_member_index = Some(member_index),
+                    Some(_) => self.record_diagnostic(
+                        expanded_span,
                         "another member is already `expanded`; a stack expands exactly one",
                     ),
                 }
             }
         }
-        let active = active.unwrap_or(0);
-        let collapsed_focus: Vec<SourceSpan> = member_leaves
+        let expanded_member_index = expanded_member_index.unwrap_or(0);
+        let collapsed_focus_spans: Vec<SourceSpan> = member_leaf_indices
             .iter()
             .enumerate()
-            .filter(|&(member_index, _)| member_index != active)
+            .filter(|&(member_index, _)| member_index != expanded_member_index)
             .filter_map(|(_, &leaf_index)| leaf_index)
             .filter_map(|leaf_index| {
-                self.tab_focus
+                self.focused_tab_leaf_spans
                     .iter()
-                    .find(|&&(focus_leaf, _)| focus_leaf == leaf_index)
-                    .map(|&(_, span)| span)
+                    .find(|&&(focus_leaf_index, _)| focus_leaf_index == leaf_index)
+                    .map(|&(_, focus_span)| focus_span)
             })
             .collect();
-        for span in collapsed_focus {
-            self.error(
-                span,
+        for focus_span in collapsed_focus_spans {
+            self.record_diagnostic(
+                focus_span,
                 "a collapsed stack member cannot hold focus; mark it `expanded`",
             );
         }
-        let weights = vec![SizeWeight::default(); members.len()];
-        let children = members.into_iter().map(|slot| slot.node).collect();
-        Slot {
-            node: TemplateNode::Split(TemplateSplit {
+        let stack_weights = vec![SizeWeight::default(); stack_members.len()];
+        let template_children = stack_members
+            .into_iter()
+            .map(|profile_slot| profile_slot.template_node)
+            .collect();
+        ProfileSlot {
+            template_node: TemplateNode::Split(TemplateSplit {
                 direction: SplitDirection::Stacked,
-                children,
-                weights,
-                active,
+                children: template_children,
+                weights: stack_weights,
+                active_child_index: expanded_member_index,
             }),
-            sizing,
-            expanded: None,
+            slot_sizing: stack_sizing,
+            expanded_span: None,
         }
     }
 
     /// Handles a config child shared by both leaf kinds: sizing, `focus`,
     /// `expanded`. Sizing outside a `Directional` slot is reported and
     /// discarded. Returns `false` when the node is none of the three.
-    fn leaf_config(&mut self, child: &KdlNode, context: Context, leaf: &mut LeafSlot) -> bool {
-        match child.name().value() {
+    fn parse_leaf_config_node(
+        &mut self,
+        config_node: &KdlNode,
+        parent_context: ProfileNodeContext,
+        leaf_config: &mut ProfileLeafConfig,
+    ) -> bool {
+        match config_node.name().value() {
             "focus" => {
-                if self.marker(child, "focus") {
-                    match leaf.focus {
-                        None => leaf.focus = Some(child.span()),
-                        Some(_) => self.error(child.span(), "`focus` is declared more than once"),
+                if self.validate_marker(config_node, "focus") {
+                    match leaf_config.focus_span {
+                        None => leaf_config.focus_span = Some(config_node.span()),
+                        Some(_) => self.record_diagnostic(
+                            config_node.span(),
+                            "`focus` is declared more than once",
+                        ),
                     }
                 }
                 true
             }
             "expanded" => {
-                if self.marker(child, "expanded") {
-                    if context != Context::Stack {
-                        self.error(
-                            child.span(),
+                if self.validate_marker(config_node, "expanded") {
+                    if parent_context != ProfileNodeContext::Stack {
+                        self.record_diagnostic(
+                            config_node.span(),
                             "`expanded` applies only to members of a `stack`",
                         );
                     } else {
-                        match leaf.expanded {
-                            None => leaf.expanded = Some(child.span()),
-                            Some(_) => {
-                                self.error(child.span(), "`expanded` is declared more than once")
-                            }
+                        match leaf_config.expanded_span {
+                            None => leaf_config.expanded_span = Some(config_node.span()),
+                            Some(_) => self.record_diagnostic(
+                                config_node.span(),
+                                "`expanded` is declared more than once",
+                            ),
                         }
                     }
                 }
                 true
             }
             _ => {
-                if self.sizing_config(child, &mut leaf.sizing) {
-                    if context != Context::Directional {
-                        self.check_sizing_context(&leaf.sizing, context);
-                        leaf.sizing = Sizing::default();
+                if self.parse_sizing_node(config_node, &mut leaf_config.leaf_sizing) {
+                    if parent_context != ProfileNodeContext::Directional {
+                        self.validate_sizing_context(&leaf_config.leaf_sizing, parent_context);
+                        leaf_config.leaf_sizing = ProfileSizing::default();
                     }
                     true
                 } else {
@@ -708,24 +809,28 @@ impl Walker<'_> {
 
     /// Assigns the next leaf index of the current tab and records its
     /// `focus` marker, keeping leaf numbering aligned with
-    /// [`TemplateNode::leaves`] layout order.
-    fn finish_leaf(&mut self, leaf: &LeafSlot) {
-        let index = self.tab_leaves;
-        self.tab_leaves += 1;
-        if let Some(span) = leaf.focus {
-            self.tab_focus.push((index, span));
+    /// [`TemplateNode::list_leaf_templates`] layout order.
+    fn record_leaf(&mut self, leaf_config: &ProfileLeafConfig) {
+        let leaf_index = self.tab_leaf_count;
+        self.tab_leaf_count += 1;
+        if let Some(focus_span) = leaf_config.focus_span {
+            self.focused_tab_leaf_spans.push((leaf_index, focus_span));
         }
     }
 
     /// Reports sizing given where none is meaningful — anywhere but a child
     /// slot of `horizontal`/`vertical`.
-    fn check_sizing_context(&mut self, sizing: &Sizing, context: Context) {
-        if context == Context::Directional {
+    fn validate_sizing_context(
+        &mut self,
+        sizing: &ProfileSizing,
+        parent_context: ProfileNodeContext,
+    ) {
+        if parent_context == ProfileNodeContext::Directional {
             return;
         }
-        if let Some(span) = sizing.first_span() {
-            self.error(
-                span,
+        if let Some(sizing_span) = sizing.find_first_sizing_span() {
+            self.record_diagnostic(
+                sizing_span,
                 "sizing applies only to children of `horizontal` or `vertical`",
             );
         }
@@ -733,46 +838,59 @@ impl Walker<'_> {
 
     /// Handles one sizing node (`size`, `weight`, `min`, `preferred`) into
     /// `sizing`. Returns `false` when the node is not a sizing node.
-    fn sizing_config(&mut self, child: &KdlNode, sizing: &mut Sizing) -> bool {
-        match child.name().value() {
+    fn parse_sizing_node(&mut self, sizing_node: &KdlNode, sizing: &mut ProfileSizing) -> bool {
+        match sizing_node.name().value() {
             "size" => {
-                if sizing.primary.is_some() {
-                    self.error(
-                        child.span(),
+                if sizing.primary_constraint.is_some() {
+                    self.record_diagnostic(
+                        sizing_node.span(),
                         "this node already has `size` or `weight`; give one of the two, once",
                     );
-                } else if let Some(constraint) = self.size(child) {
-                    sizing.primary = Some((constraint, child.span()));
+                } else if let Some(size_constraint) = self.parse_size_constraint(sizing_node) {
+                    sizing.primary_constraint = Some((size_constraint, sizing_node.span()));
                 }
                 true
             }
             "weight" => {
-                if sizing.primary.is_some() {
-                    self.error(
-                        child.span(),
+                if sizing.primary_constraint.is_some() {
+                    self.record_diagnostic(
+                        sizing_node.span(),
                         "this node already has `size` or `weight`; give one of the two, once",
                     );
-                } else if let Some(weight) = self.cells(child, "weight", u32::MAX) {
-                    match SizeConstraint::flex(weight) {
-                        Ok(constraint) => sizing.primary = Some((constraint, child.span())),
-                        Err(err) => self.error(child.span(), err.to_string()),
+                } else if let Some(weight_value) =
+                    self.parse_cell_count_in_range(sizing_node, "weight", u32::MAX)
+                {
+                    match SizeConstraint::from_flex_weight(weight_value) {
+                        Ok(size_constraint) => {
+                            sizing.primary_constraint = Some((size_constraint, sizing_node.span()));
+                        }
+                        Err(size_error) => {
+                            self.record_diagnostic(sizing_node.span(), size_error.to_string());
+                        }
                     }
                 }
                 true
             }
             "min" => {
-                if sizing.min.is_some() {
-                    self.error(child.span(), "`min` is declared more than once");
-                } else if let Some(cells) = self.cell_count(child, "min") {
-                    sizing.min = Some((cells, child.span()));
+                if sizing.minimum_cell_count.is_some() {
+                    self.record_diagnostic(sizing_node.span(), "`min` is declared more than once");
+                } else if let Some(minimum_cell_count) =
+                    self.parse_positive_cell_count(sizing_node, "min")
+                {
+                    sizing.minimum_cell_count = Some((minimum_cell_count, sizing_node.span()));
                 }
                 true
             }
             "preferred" => {
-                if sizing.preferred.is_some() {
-                    self.error(child.span(), "`preferred` is declared more than once");
-                } else if let Some(cells) = self.cell_count(child, "preferred") {
-                    sizing.preferred = Some((cells, child.span()));
+                if sizing.preferred_cell_count.is_some() {
+                    self.record_diagnostic(
+                        sizing_node.span(),
+                        "`preferred` is declared more than once",
+                    );
+                } else if let Some(preferred_cell_count) =
+                    self.parse_positive_cell_count(sizing_node, "preferred")
+                {
+                    sizing.preferred_cell_count = Some((preferred_cell_count, sizing_node.span()));
                 }
                 true
             }
@@ -782,78 +900,90 @@ impl Walker<'_> {
 
     /// Parses a `size` value: an integer argument is exact cells, a string
     /// like `"60%"` is a percentage of the parent's axis.
-    fn size(&mut self, node: &KdlNode) -> Option<SizeConstraint> {
-        let entry = self.single_argument(node, "size")?;
-        if let Some(value) = entry.value().as_integer() {
-            let Ok(cells) = u16::try_from(value) else {
-                self.error(
-                    entry.span(),
+    fn parse_size_constraint(&mut self, size_node: &KdlNode) -> Option<SizeConstraint> {
+        let size_argument = self.find_single_argument(size_node, "size")?;
+        if let Some(cell_count_value) = size_argument.value().as_integer() {
+            let Ok(cell_count) = u16::try_from(cell_count_value) else {
+                self.record_diagnostic(
+                    size_argument.span(),
                     format!("`size` cells must fit 1-{}", u16::MAX),
                 );
                 return None;
             };
-            return match SizeConstraint::fixed(cells) {
-                Ok(constraint) => Some(constraint),
-                Err(err) => {
-                    self.error(entry.span(), err.to_string());
+            return match SizeConstraint::from_fixed_cell_count(cell_count) {
+                Ok(size_constraint) => Some(size_constraint),
+                Err(size_error) => {
+                    self.record_diagnostic(size_argument.span(), size_error.to_string());
                     None
                 }
             };
         }
-        if let Some(value) = entry.value().as_string() {
-            let Some(percent) = value
+        if let Some(percentage_text) = size_argument.value().as_string() {
+            let Some(percentage) = percentage_text
                 .strip_suffix('%')
                 .and_then(|digits| digits.parse::<u8>().ok())
             else {
-                self.error(
-                    entry.span(),
+                self.record_diagnostic(
+                    size_argument.span(),
                     "`size` is a cell count like `size 30` or a percentage like `size \"60%\"`",
                 );
                 return None;
             };
-            return match SizeConstraint::percent(percent) {
-                Ok(constraint) => Some(constraint),
-                Err(err) => {
-                    self.error(entry.span(), err.to_string());
+            return match SizeConstraint::from_percent(percentage) {
+                Ok(size_constraint) => Some(size_constraint),
+                Err(size_error) => {
+                    self.record_diagnostic(size_argument.span(), size_error.to_string());
                     None
                 }
             };
         }
-        self.error(
-            entry.span(),
+        self.record_diagnostic(
+            size_argument.span(),
             "`size` is a cell count like `size 30` or a percentage like `size \"60%\"`",
         );
         None
     }
 
     /// Parses a `min`/`preferred` value: one positive cell count.
-    fn cell_count(&mut self, node: &KdlNode, name: &str) -> Option<u16> {
-        let cells = self.cells(node, name, u32::from(u16::MAX))?;
-        let cells = u16::try_from(cells).expect("bounded by u16::MAX above");
-        if cells == 0 {
-            self.error(node.span(), format!("`{name}` must be at least one cell"));
+    fn parse_positive_cell_count(
+        &mut self,
+        sizing_node: &KdlNode,
+        sizing_name: &str,
+    ) -> Option<u16> {
+        let cell_count =
+            self.parse_cell_count_in_range(sizing_node, sizing_name, u32::from(u16::MAX))?;
+        let cell_count = u16::try_from(cell_count).expect("bounded by u16::MAX above");
+        if cell_count == 0 {
+            self.record_diagnostic(
+                sizing_node.span(),
+                format!("`{sizing_name}` must be at least one cell"),
+            );
             return None;
         }
-        Some(cells)
+        Some(cell_count)
     }
 
-    /// Parses one integer argument in `0..=max` — the shared shape of
-    /// `weight`, `min`, and `preferred` values. A non-integer, a negative
-    /// value, or a value above `max` is reported as `must be an integer
-    /// between 1 and <max>` and returns `None`. Zero passes; each caller
-    /// rejects it with its own message.
-    fn cells(&mut self, node: &KdlNode, name: &str, max: u32) -> Option<u32> {
-        let entry = self.single_argument(node, name)?;
-        match entry
+    /// Parses one integer argument in `0..=max_cell_count` — the shared
+    /// shape of `weight`, `min`, and `preferred` values. A non-integer, a
+    /// negative value, or a value above the limit is reported and returns
+    /// `None`. Zero passes; each caller rejects it with its own message.
+    fn parse_cell_count_in_range(
+        &mut self,
+        sizing_node: &KdlNode,
+        sizing_name: &str,
+        max_cell_count: u32,
+    ) -> Option<u32> {
+        let sizing_argument = self.find_single_argument(sizing_node, sizing_name)?;
+        match sizing_argument
             .value()
             .as_integer()
-            .and_then(|value| u32::try_from(value).ok())
+            .and_then(|integer_value| u32::try_from(integer_value).ok())
         {
-            Some(value) if value <= max => Some(value),
+            Some(cell_count) if cell_count <= max_cell_count => Some(cell_count),
             _ => {
-                self.error(
-                    entry.span(),
-                    format!("`{name}` must be an integer between 1 and {max}"),
+                self.record_diagnostic(
+                    sizing_argument.span(),
+                    format!("`{sizing_name}` must be an integer between 1 and {max_cell_count}"),
                 );
                 None
             }
@@ -863,133 +993,169 @@ impl Walker<'_> {
     /// Parses a `command` node: the program plus its arguments, all strings.
     /// The program must be non-empty; arguments may be empty strings. No word
     /// may hold a NUL character.
-    fn command(&mut self, node: &KdlNode) -> Option<CommandTemplate> {
-        if node.children().is_some() {
-            self.error(node.span(), "`command` takes no children");
+    fn parse_command_node(&mut self, command_node: &KdlNode) -> Option<CommandTemplate> {
+        if command_node.children().is_some() {
+            self.record_diagnostic(command_node.span(), "`command` takes no children");
             return None;
         }
-        let mut words = Vec::with_capacity(node.entries().len());
-        for entry in node.entries() {
-            if entry.name().is_some() {
-                self.error(entry.span(), "`command` takes arguments, not properties");
+        let mut command_words = Vec::with_capacity(command_node.entries().len());
+        for command_argument in command_node.entries() {
+            if command_argument.name().is_some() {
+                self.record_diagnostic(
+                    command_argument.span(),
+                    "`command` takes arguments, not properties",
+                );
                 return None;
             }
-            let Some(word) = entry.value().as_string() else {
-                self.error(entry.span(), "`command` arguments must be strings");
+            let Some(command_word) = command_argument.value().as_string() else {
+                self.record_diagnostic(
+                    command_argument.span(),
+                    "`command` arguments must be strings",
+                );
                 return None;
             };
-            if word.contains('\0') {
-                self.error(
-                    entry.span(),
+            if command_word.contains('\0') {
+                self.record_diagnostic(
+                    command_argument.span(),
                     "`command` program and arguments must not contain a NUL character",
                 );
                 return None;
             }
-            words.push(word.to_string());
+            command_words.push(command_word.to_string());
         }
-        if words.is_empty() {
-            self.error(
-                node.span(),
+        if command_words.is_empty() {
+            self.record_diagnostic(
+                command_node.span(),
                 "`command` names a program, like `command \"nvim\" \"file.txt\"`",
             );
             return None;
         }
-        if words[0].is_empty() {
-            self.error(node.span(), "`command` program must not be empty");
+        if command_words[0].is_empty() {
+            self.record_diagnostic(command_node.span(), "`command` program must not be empty");
             return None;
         }
-        let program = PathBuf::from(words.remove(0));
+        let program_path = PathBuf::from(command_words.remove(0));
         Some(CommandTemplate {
-            program,
-            args: words,
+            program: program_path,
+            arguments: command_words,
         })
     }
 
-    /// Parses an `env "NAME" "value"` node into `env`. The name must be
-    /// non-empty, hold no `=`, hold no NUL, and be set once; the value must
-    /// hold no NUL. Names compare case-insensitively over ASCII:
+    /// Parses an `env "NAME" "value"` node into `environment_variables`.
+    /// The name must be non-empty, hold no `=`, hold no NUL, and be set once;
+    /// the value must hold no NUL. Names compare case-insensitively over ASCII:
     /// `env "Path" "/b"` after `env "PATH" "/a"` is a duplicate.
-    fn env(&mut self, node: &KdlNode, env: &mut BTreeMap<String, String>) {
-        if node.children().is_some() {
-            self.error(node.span(), "`env` takes no children");
+    fn parse_environment_node(
+        &mut self,
+        environment_node: &KdlNode,
+        environment_variables: &mut BTreeMap<String, String>,
+    ) {
+        if environment_node.children().is_some() {
+            self.record_diagnostic(environment_node.span(), "`env` takes no children");
             return;
         }
-        let values: Vec<&str> = node
+        let environment_values: Vec<&str> = environment_node
             .entries()
             .iter()
-            .filter(|entry| entry.name().is_none())
-            .filter_map(|entry| entry.value().as_string())
+            .filter(|environment_entry| environment_entry.name().is_none())
+            .filter_map(|environment_entry| environment_entry.value().as_string())
             .collect();
-        let ([name, value], true) = (values.as_slice(), values.len() == node.entries().len())
-        else {
-            self.error(
-                node.span(),
+        let ([environment_variable_name, environment_variable_value], true) = (
+            environment_values.as_slice(),
+            environment_values.len() == environment_node.entries().len(),
+        ) else {
+            self.record_diagnostic(
+                environment_node.span(),
                 "`env` takes a name and a value, both strings, like `env \"RUST_LOG\" \"debug\"`",
             );
             return;
         };
-        if name.is_empty() {
-            self.error(node.span(), "`env` name must not be empty");
+        if environment_variable_name.is_empty() {
+            self.record_diagnostic(environment_node.span(), "`env` name must not be empty");
             return;
         }
-        if name.contains('=') {
-            self.error(node.span(), "`env` name must not contain `=`");
+        if environment_variable_name.contains('=') {
+            self.record_diagnostic(environment_node.span(), "`env` name must not contain `=`");
             return;
         }
-        if name.contains('\0') || value.contains('\0') {
-            self.error(
-                node.span(),
+        if environment_variable_name.contains('\0') || environment_variable_value.contains('\0') {
+            self.record_diagnostic(
+                environment_node.span(),
                 "`env` name and value must not contain a NUL character",
             );
             return;
         }
-        if let Some(existing) = env.keys().find(|key| key.eq_ignore_ascii_case(name)) {
-            let message = if existing == name {
-                format!("`env` sets `{name}` more than once")
+        if let Some(existing_environment_name) =
+            environment_variables.keys().find(|environment_name| {
+                environment_name.eq_ignore_ascii_case(environment_variable_name)
+            })
+        {
+            let diagnostic_message = if existing_environment_name == environment_variable_name {
+                format!("`env` sets `{environment_variable_name}` more than once")
             } else {
                 format!(
-                    "`env` already sets `{existing}`; env names match case-insensitively \
-                     (Windows folds environment keys by case)"
+                    "`env` already sets `{existing_environment_name}`; env names match \
+                     case-insensitively (Windows folds environment keys by case)"
                 )
             };
-            self.error(node.span(), message);
+            self.record_diagnostic(environment_node.span(), diagnostic_message);
             return;
         }
-        env.insert((*name).to_string(), (*value).to_string());
+        environment_variables.insert(
+            (*environment_variable_name).to_string(),
+            (*environment_variable_value).to_string(),
+        );
     }
 
     /// Parses a single-string-argument node (`cwd`). An empty string, and a
     /// string holding a NUL character, are each reported and yield `None`.
-    fn single_string(&mut self, node: &KdlNode, name: &str) -> Option<String> {
-        let entry = self.single_argument(node, name)?;
-        let value = match entry.value().as_string() {
-            Some(value) if !value.is_empty() => value,
+    fn parse_single_string(
+        &mut self,
+        setting_node: &KdlNode,
+        setting_name: &str,
+    ) -> Option<String> {
+        let string_argument = self.find_single_argument(setting_node, setting_name)?;
+        let string_value = match string_argument.value().as_string() {
+            Some(string_value) if !string_value.is_empty() => string_value,
             _ => {
-                self.error(entry.span(), format!("`{name}` takes one non-empty string"));
+                self.record_diagnostic(
+                    string_argument.span(),
+                    format!("`{setting_name}` takes one non-empty string"),
+                );
                 return None;
             }
         };
-        if value.contains('\0') {
-            self.error(
-                entry.span(),
-                format!("`{name}` must not contain a NUL character"),
+        if string_value.contains('\0') {
+            self.record_diagnostic(
+                string_argument.span(),
+                format!("`{setting_name}` must not contain a NUL character"),
             );
             return None;
         }
-        Some(value.to_string())
+        Some(string_value.to_string())
     }
 
     /// Validates a node down to exactly one positional argument and no
     /// children, returning that argument's entry.
-    fn single_argument<'k>(&mut self, node: &'k KdlNode, name: &str) -> Option<&'k kdl::KdlEntry> {
-        if node.children().is_some() {
-            self.error(node.span(), format!("`{name}` takes no children"));
+    fn find_single_argument<'k>(
+        &mut self,
+        setting_node: &'k KdlNode,
+        setting_name: &str,
+    ) -> Option<&'k kdl::KdlEntry> {
+        if setting_node.children().is_some() {
+            self.record_diagnostic(
+                setting_node.span(),
+                format!("`{setting_name}` takes no children"),
+            );
             return None;
         }
-        match node.entries() {
-            [entry] if entry.name().is_none() => Some(entry),
+        match setting_node.entries() {
+            [argument_entry] if argument_entry.name().is_none() => Some(argument_entry),
             _ => {
-                self.error(node.span(), format!("`{name}` takes exactly one value"));
+                self.record_diagnostic(
+                    setting_node.span(),
+                    format!("`{setting_name}` takes exactly one value"),
+                );
                 None
             }
         }
@@ -997,13 +1163,13 @@ impl Walker<'_> {
 
     /// Validates a bare marker node (`focus`, `expanded`): no arguments,
     /// no properties, no children. Returns whether the marker is usable.
-    fn marker(&mut self, node: &KdlNode, name: &str) -> bool {
-        if node.entries().is_empty() && node.children().is_none() {
+    fn validate_marker(&mut self, marker_node: &KdlNode, marker_name: &str) -> bool {
+        if marker_node.entries().is_empty() && marker_node.children().is_none() {
             true
         } else {
-            self.error(
-                node.span(),
-                format!("`{name}` is a bare marker and takes no values or children"),
+            self.record_diagnostic(
+                marker_node.span(),
+                format!("`{marker_name}` is a bare marker and takes no values or children"),
             );
             false
         }
@@ -1012,19 +1178,20 @@ impl Walker<'_> {
 
 /// Focus/expanded/sizing markers collected while parsing one leaf.
 #[derive(Default)]
-struct LeafSlot {
+struct ProfileLeafConfig {
     /// Sizing config from the leaf's children.
-    sizing: Sizing,
+    leaf_sizing: ProfileSizing,
     /// Span of a `focus` marker, if any.
-    focus: Option<SourceSpan>,
+    focus_span: Option<SourceSpan>,
     /// Span of an `expanded` marker, if any.
-    expanded: Option<SourceSpan>,
+    expanded_span: Option<SourceSpan>,
 }
 
-/// Whether `name` is a structural layout node, as opposed to a config node.
-fn is_structural(name: &str) -> bool {
+/// Whether `node_name` is a structural layout node, as opposed to a config
+/// node.
+fn is_structural_node_name(node_name: &str) -> bool {
     matches!(
-        name,
+        node_name,
         "pane" | "plugin" | "horizontal" | "vertical" | "stack"
     )
 }

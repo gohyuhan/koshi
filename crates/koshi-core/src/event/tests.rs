@@ -3,279 +3,304 @@
 //! Every [`Event`] and [`PluginEvent`] variant survives a JSON round trip
 //! unchanged, in the externally tagged shape, and reports its canonical
 //! variant name from `Debug`. Every [`Event`] variant also reports that name
-//! from [`Event::name`] and maps to its delivery class. Each input payload
+//! from [`Event::get_event_name`] and maps to its delivery class. Each input payload
 //! maps to its privacy tier, and no `SensitiveBlocked` variant holds content.
 
 use super::*;
-use crate::command::{GridPos, SelectionKind};
+use crate::command::{GridPosition, SelectionKind};
 use crate::geometry::{PaneArea, Point, Size};
 use crate::ids::{ClientId, CommandId, PaneId, PluginId, SessionId, SubscriberId, TabId};
 use crate::process::PtySize;
 use std::time::{Duration, UNIX_EPOCH};
 
 /// Roundtrip a value through JSON and assert it survives unchanged.
-fn roundtrip<T>(value: &T)
+fn assert_json_roundtrip<Roundtrippable>(roundtrippable_value: &Roundtrippable)
 where
-    T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+    Roundtrippable: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
 {
-    let json = serde_json::to_string(value).expect("serialize");
-    let back: T = serde_json::from_str(&json).expect("deserialize");
-    assert_eq!(*value, back);
+    let serialized_json = serde_json::to_string(roundtrippable_value).expect("serialize");
+    let decoded_roundtrippable_value: Roundtrippable =
+        serde_json::from_str(&serialized_json).expect("deserialize");
+    assert_eq!(*roundtrippable_value, decoded_roundtrippable_value);
 }
 
 /// A fixed timestamp: `1_700_000_000` seconds after the Unix epoch.
-fn fixed_time() -> SystemTime {
+fn build_fixed_timestamp() -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(1_700_000_000)
 }
 
 #[test]
 fn lifecycle_events_roundtrip() {
-    roundtrip(&Event::PaneCreated(PaneCreated {
+    assert_json_roundtrip(&Event::PaneCreated(PaneCreated {
         pane_id: PaneId::new(),
         tab_id: TabId::new(),
     }));
-    roundtrip(&Event::PaneProcessExited(PaneProcessExited {
+    assert_json_roundtrip(&Event::PaneProcessExited(PaneProcessExited {
         pane_id: PaneId::new(),
         exit_code: Some(0),
     }));
-    roundtrip(&Event::PaneRemoved(PaneRemoved {
+    assert_json_roundtrip(&Event::PaneRemoved(PaneRemoved {
         pane_id: PaneId::new(),
         tab_id: TabId::new(),
     }));
-    roundtrip(&Event::PtyResized(PtyResized {
+    assert_json_roundtrip(&Event::PtyResized(PtyResized {
         pane_id: PaneId::new(),
-        size: PtySize { cols: 80, rows: 24 },
+        pty_size: PtySize {
+            column_count: 80,
+            row_count: 24,
+        },
     }));
-    roundtrip(&Event::PaneOutputUpdated(PaneOutputUpdated {
+    assert_json_roundtrip(&Event::PaneOutputUpdated(PaneOutputUpdated {
         pane_id: PaneId::new(),
     }));
-    roundtrip(&Event::PaneCommandStarted(PaneCommandStarted {
+    assert_json_roundtrip(&Event::PaneCommandStarted(PaneCommandStarted {
         pane_id: PaneId::new(),
     }));
-    roundtrip(&Event::PaneCommandFinished(PaneCommandFinished {
+    assert_json_roundtrip(&Event::PaneCommandFinished(PaneCommandFinished {
         pane_id: PaneId::new(),
         exit_code: Some(1),
     }));
-    roundtrip(&Event::InputModeChanged(InputModeChanged {
+    assert_json_roundtrip(&Event::InputModeChanged(InputModeChanged {
         client_id: ClientId::new(),
-        mode: LockMode::Locked,
+        lock_mode: LockMode::Locked,
     }));
-    roundtrip(&Event::MouseSelectChanged(MouseSelectChanged {
+    assert_json_roundtrip(&Event::MouseSelectChanged(MouseSelectChanged {
         client_id: ClientId::new(),
-        on: true,
+        is_enabled: true,
     }));
 }
 
 #[test]
 fn move_suppression_and_reload_events_roundtrip() {
-    roundtrip(&Event::TabMoved(TabMoved {
+    assert_json_roundtrip(&Event::TabMoved(TabMoved {
         tab_id: TabId::new(),
-        old_index: 0,
-        new_index: 2,
+        previous_tab_index: 0,
+        new_tab_index: 2,
     }));
-    roundtrip(&Event::PaneSuppressed(PaneSuppressed {
+    assert_json_roundtrip(&Event::PaneSuppressed(PaneSuppressed {
         pane_id: PaneId::new(),
         tab_id: TabId::new(),
     }));
-    roundtrip(&Event::PaneResumed(PaneResumed {
+    assert_json_roundtrip(&Event::PaneResumed(PaneResumed {
         pane_id: PaneId::new(),
         tab_id: TabId::new(),
     }));
-    roundtrip(&Event::TerminalTooSmallEntered(TerminalTooSmallEntered {
+    assert_json_roundtrip(&Event::TerminalTooSmallEntered(TerminalTooSmallEntered {
         client_id: ClientId::new(),
-        size: Size { cols: 1, rows: 1 },
-        pane_area: Some(PaneArea::Reported(Size { cols: 1, rows: 0 })),
+        viewport_size: Size {
+            column_count: 1,
+            row_count: 1,
+        },
+        pane_area: Some(PaneArea::Reported(Size {
+            column_count: 1,
+            row_count: 0,
+        })),
         cause: TerminalTooSmallCause::Terminal,
     }));
-    roundtrip(&Event::TerminalTooSmallExited(TerminalTooSmallExited {
+    assert_json_roundtrip(&Event::TerminalTooSmallExited(TerminalTooSmallExited {
         client_id: ClientId::new(),
-        size: Size { cols: 80, rows: 24 },
+        viewport_size: Size {
+            column_count: 80,
+            row_count: 24,
+        },
     }));
-    roundtrip(&Event::ConfigReloaded(ConfigReloaded {
+    assert_json_roundtrip(&Event::ConfigReloaded(ConfigReloaded {
         session_id: SessionId::new(),
     }));
 }
 
 #[test]
 fn too_small_causes_roundtrip() {
-    let other_client = ClientId::new();
+    let other_client_id = ClientId::new();
     for cause in [
         TerminalTooSmallCause::Terminal,
         TerminalTooSmallCause::Regions,
-        TerminalTooSmallCause::OtherClient(other_client),
+        TerminalTooSmallCause::OtherClient(other_client_id),
     ] {
-        roundtrip(&cause);
+        assert_json_roundtrip(&cause);
     }
 }
 
 #[test]
 fn an_old_too_small_event_defaults_new_fields() {
     let client_id = ClientId::new();
-    let old = serde_json::json!({
+    let old_event_json = serde_json::json!({
         "client_id": client_id,
         "size": { "cols": 80, "rows": 24 }
     });
 
-    let event: TerminalTooSmallEntered =
-        serde_json::from_value(old).expect("the old event shape remains readable");
-    assert_eq!(event.client_id, client_id);
-    assert_eq!(event.size, Size { cols: 80, rows: 24 });
-    assert_eq!(event.pane_area, None);
-    assert_eq!(event.cause, TerminalTooSmallCause::Terminal);
+    let entered_event: TerminalTooSmallEntered =
+        serde_json::from_value(old_event_json).expect("the old event shape remains readable");
+    assert_eq!(entered_event.client_id, client_id);
+    assert_eq!(
+        entered_event.viewport_size,
+        Size {
+            column_count: 80,
+            row_count: 24,
+        }
+    );
+    assert_eq!(entered_event.pane_area, None);
+    assert_eq!(entered_event.cause, TerminalTooSmallCause::Terminal);
 }
 
 #[test]
 fn input_privacy_events_roundtrip() {
-    roundtrip(&Event::PaneTyped(PaneTyped {
+    assert_json_roundtrip(&Event::PaneTyped(PaneTyped {
         pane_id: PaneId::new(),
         tab_id: TabId::new(),
         session_id: SessionId::new(),
         client_id: ClientId::new(),
-        payload: TypedPayload::SafePublic('a'),
-        timestamp: fixed_time(),
+        typed_payload: TypedPayload::SafePublic('a'),
+        accepted_at: build_fixed_timestamp(),
     }));
-    roundtrip(&Event::PaneEnterPressed(PaneEnterPressed {
+    assert_json_roundtrip(&Event::PaneEnterPressed(PaneEnterPressed {
         pane_id: PaneId::new(),
         tab_id: TabId::new(),
         session_id: SessionId::new(),
         client_id: ClientId::new(),
-        line: SubmittedLinePayload::SensitiveRedacted,
-        timestamp: fixed_time(),
+        submitted_line: SubmittedLinePayload::SensitiveRedacted,
+        accepted_at: build_fixed_timestamp(),
     }));
 }
 
 #[test]
 fn mouse_events_roundtrip() {
-    roundtrip(&Event::MousePressed(MousePressed {
+    assert_json_roundtrip(&Event::MousePressed(MousePressed {
         client_id: ClientId::new(),
-        pane: Some(PaneId::new()),
-        position: Point { x: 4, y: 9 },
+        pane_id: Some(PaneId::new()),
+        position: Point { column: 4, row: 9 },
         button: MouseButton::Left,
     }));
-    roundtrip(&Event::MouseScrolled(MouseScrolled {
+    assert_json_roundtrip(&Event::MouseScrolled(MouseScrolled {
         client_id: ClientId::new(),
-        pane: None,
-        position: Point { x: 0, y: 0 },
+        pane_id: None,
+        position: Point { column: 0, row: 0 },
         direction: ScrollDirection::Up,
     }));
-    roundtrip(&Event::MouseScrolled(MouseScrolled {
+    assert_json_roundtrip(&Event::MouseScrolled(MouseScrolled {
         client_id: ClientId::new(),
-        pane: None,
-        position: Point { x: 0, y: 0 },
+        pane_id: None,
+        position: Point { column: 0, row: 0 },
         direction: ScrollDirection::Left,
     }));
-    roundtrip(&Event::PluginMouseInput(PluginMouseInput {
+    assert_json_roundtrip(&Event::PluginMouseInput(PluginMouseInput {
         plugin_id: PluginId::new(),
     }));
 }
 
 #[test]
 fn delivery_and_rejection_events_roundtrip() {
-    roundtrip(&Event::SubscriberLagged(SubscriberLagged {
+    assert_json_roundtrip(&Event::SubscriberLagged(SubscriberLagged {
         subscriber_id: SubscriberId::new(),
-        dropped_count: 12,
+        dropped_event_count: 12,
         event_class: EventClass::Lossy,
     }));
-    roundtrip(&Event::PaneScrollbackTruncated(PaneScrollbackTruncated {
+    assert_json_roundtrip(&Event::PaneScrollbackTruncated(PaneScrollbackTruncated {
         pane_id: PaneId::new(),
         dropped_lines: 500,
         dropped_bytes: 8192,
     }));
-    roundtrip(&Event::CommandRejected(CommandRejected {
-        id: CommandId::new(),
-        reason: RejectReason::TargetGone,
+    assert_json_roundtrip(&Event::CommandRejected(CommandRejected {
+        command_id: CommandId::new(),
+        rejection_reason: RejectReason::TargetGone,
     }));
 }
 
 #[test]
 fn selection_and_copy_events_roundtrip() {
-    roundtrip(&Event::SelectionChanged(SelectionChanged {
+    assert_json_roundtrip(&Event::SelectionChanged(SelectionChanged {
         client_id: ClientId::new(),
         pane_id: PaneId::new(),
         selection: Some(Selection {
-            kind: SelectionKind::Block,
-            anchor: GridPos { row: 1, col: 0 },
-            cursor: GridPos { row: 3, col: 20 },
+            selection_kind: SelectionKind::Block,
+            anchor: GridPosition {
+                row_index: 1,
+                column_index: 0,
+            },
+            cursor: GridPosition {
+                row_index: 3,
+                column_index: 20,
+            },
         }),
     }));
-    roundtrip(&Event::SelectionChanged(SelectionChanged {
+    assert_json_roundtrip(&Event::SelectionChanged(SelectionChanged {
         client_id: ClientId::new(),
         pane_id: PaneId::new(),
         selection: None,
     }));
-    roundtrip(&Event::Copied(Copied {
+    assert_json_roundtrip(&Event::Copied(Copied {
         client_id: ClientId::new(),
         pane_id: PaneId::new(),
-        target: CopyTarget::Osc52,
-        byte_len: 42,
+        clipboard_target: CopyTarget::Osc52,
+        byte_count: 42,
     }));
 }
 
 #[test]
 fn plugin_events_roundtrip() {
-    roundtrip(&Event::Plugin(PluginEvent::Installed(PluginInstalled {
+    assert_json_roundtrip(&Event::Plugin(PluginEvent::Installed(PluginInstalled {
         plugin_id: PluginId::new(),
     })));
-    roundtrip(&Event::Plugin(PluginEvent::LoadFailed(PluginLoadFailed {
+    assert_json_roundtrip(&Event::Plugin(PluginEvent::LoadFailed(PluginLoadFailed {
         plugin_id: PluginId::new(),
-        reason: "missing export".to_string(),
+        failure_reason: "missing export".to_string(),
     })));
 }
 
 /// Round-trips the variants the named round-trip tests above leave out, with
-/// both `Some` and `None` for `PaneFocused::prior_pane`.
+/// both `Some` and `None` for `PaneFocused::previous_pane_id`.
 #[test]
 fn remaining_event_variants_survive_a_json_round_trip() {
-    roundtrip(&Event::PaneClosing(PaneClosing {
+    assert_json_roundtrip(&Event::PaneClosing(PaneClosing {
         pane_id: PaneId::new(),
     }));
-    roundtrip(&Event::PaneFocused(PaneFocused {
+    assert_json_roundtrip(&Event::PaneFocused(PaneFocused {
         client_id: ClientId::new(),
         tab_id: TabId::new(),
         pane_id: PaneId::new(),
-        prior_pane: Some(PaneId::new()),
+        previous_pane_id: Some(PaneId::new()),
     }));
-    roundtrip(&Event::PaneFocused(PaneFocused {
+    assert_json_roundtrip(&Event::PaneFocused(PaneFocused {
         client_id: ClientId::new(),
         tab_id: TabId::new(),
         pane_id: PaneId::new(),
-        prior_pane: None,
+        previous_pane_id: None,
     }));
-    roundtrip(&Event::LayoutChanged(LayoutChanged {
+    assert_json_roundtrip(&Event::LayoutChanged(LayoutChanged {
         tab_id: TabId::new(),
     }));
-    roundtrip(&Event::TabCreated(TabCreated {
+    assert_json_roundtrip(&Event::TabCreated(TabCreated {
         tab_id: TabId::new(),
     }));
-    roundtrip(&Event::TabClosed(TabClosed {
+    assert_json_roundtrip(&Event::TabClosed(TabClosed {
         tab_id: TabId::new(),
     }));
-    roundtrip(&Event::TabFocused(TabFocused {
+    assert_json_roundtrip(&Event::TabFocused(TabFocused {
         client_id: ClientId::new(),
         tab_id: TabId::new(),
-        prior_tab: TabId::new(),
+        previous_tab_id: TabId::new(),
     }));
-    roundtrip(&Event::KeybindingMatched(KeybindingMatched {
+    assert_json_roundtrip(&Event::KeybindingMatched(KeybindingMatched {
         client_id: ClientId::new(),
         command_id: CommandId::new(),
     }));
-    roundtrip(&Event::MouseReleased(MouseReleased {
+    assert_json_roundtrip(&Event::MouseReleased(MouseReleased {
         client_id: ClientId::new(),
-        pane: Some(PaneId::new()),
-        position: Point { x: 1, y: 2 },
+        pane_id: Some(PaneId::new()),
+        position: Point { column: 1, row: 2 },
         button: MouseButton::Right,
     }));
-    roundtrip(&Event::MouseDragged(MouseDragged {
+    assert_json_roundtrip(&Event::MouseDragged(MouseDragged {
         client_id: ClientId::new(),
-        pane: None,
-        position: Point { x: 0, y: 0 },
+        pane_id: None,
+        position: Point { column: 0, row: 0 },
         button: MouseButton::Middle,
     }));
-    roundtrip(&Event::PaneMouseForwarded(PaneMouseForwarded {
+    assert_json_roundtrip(&Event::PaneMouseForwarded(PaneMouseForwarded {
         pane_id: PaneId::new(),
     }));
-    roundtrip(&Event::Quit);
-    roundtrip(&Event::Restarting);
+    assert_json_roundtrip(&Event::Quit);
+    assert_json_roundtrip(&Event::Restarting);
 }
 
 /// The tier of an input event is its payload variant; there is no separate
@@ -284,57 +309,63 @@ fn remaining_event_variants_survive_a_json_round_trip() {
 /// with no `(`.
 #[test]
 fn sensitive_blocked_tier_carries_no_content() {
-    let blocked = [
+    let blocked_debug_representations = [
         format!("{:?}", PrivacyTier::SensitiveBlocked),
         format!("{:?}", TypedPayload::SensitiveBlocked),
         format!("{:?}", SubmittedLinePayload::SensitiveBlocked),
     ];
-    for repr in &blocked {
-        assert_eq!(repr, "SensitiveBlocked");
-        assert!(!repr.contains('('), "{repr} must hold no payload");
+    for debug_representation in &blocked_debug_representations {
+        assert_eq!(debug_representation, "SensitiveBlocked");
+        assert!(
+            !debug_representation.contains('('),
+            "{debug_representation} must hold no payload"
+        );
     }
 }
 
-/// The `tier()` accessor maps each payload variant to its privacy tier, and
+/// The `get_privacy_tier()` accessor maps each payload variant to its privacy tier, and
 /// `Unknown` lines fail closed to `MetadataOnly`.
 #[test]
 fn payload_tier_accessors_map_to_privacy_tier() {
-    assert_eq!(TypedPayload::SafePublic('x').tier(), PrivacyTier::Public);
     assert_eq!(
-        TypedPayload::SensitiveRedacted.tier(),
+        TypedPayload::SafePublic('x').get_privacy_tier(),
+        PrivacyTier::Public
+    );
+    assert_eq!(
+        TypedPayload::SensitiveRedacted.get_privacy_tier(),
         PrivacyTier::Redacted
     );
     assert_eq!(
-        TypedPayload::AlternateScreenMetadataOnly.tier(),
+        TypedPayload::AlternateScreenMetadataOnly.get_privacy_tier(),
         PrivacyTier::MetadataOnly
     );
     assert_eq!(
-        TypedPayload::RawModeMetadataOnly.tier(),
+        TypedPayload::RawModeMetadataOnly.get_privacy_tier(),
         PrivacyTier::MetadataOnly
     );
     assert_eq!(
-        TypedPayload::UnknownMetadataOnly.tier(),
+        TypedPayload::UnknownMetadataOnly.get_privacy_tier(),
         PrivacyTier::MetadataOnly
     );
     assert_eq!(
-        TypedPayload::SensitiveBlocked.tier(),
+        TypedPayload::SensitiveBlocked.get_privacy_tier(),
         PrivacyTier::SensitiveBlocked
     );
 
     assert_eq!(
-        SubmittedLinePayload::SafePublic("ls".to_string()).tier(),
+        SubmittedLinePayload::SafePublic("ls".to_string()).get_privacy_tier(),
         PrivacyTier::Public
     );
     assert_eq!(
-        SubmittedLinePayload::SensitiveRedacted.tier(),
+        SubmittedLinePayload::SensitiveRedacted.get_privacy_tier(),
         PrivacyTier::Redacted
     );
     assert_eq!(
-        SubmittedLinePayload::UnknownMetadataOnly.tier(),
+        SubmittedLinePayload::UnknownMetadataOnly.get_privacy_tier(),
         PrivacyTier::MetadataOnly
     );
     assert_eq!(
-        SubmittedLinePayload::SensitiveBlocked.tier(),
+        SubmittedLinePayload::SensitiveBlocked.get_privacy_tier(),
         PrivacyTier::SensitiveBlocked
     );
 }
@@ -342,14 +373,18 @@ fn payload_tier_accessors_map_to_privacy_tier() {
 /// The variant name in a value's `Debug` output: the text before the first
 /// `(`, or the whole string for a unit variant.
 /// `PaneCreated(PaneCreated { .. })` → `"PaneCreated"`; `Quit` → `"Quit"`.
-fn variant_name<T: std::fmt::Debug>(value: &T) -> String {
-    let repr = format!("{value:?}");
-    repr.split('(').next().unwrap_or(&repr).to_string()
+fn get_variant_name<DebugValue: std::fmt::Debug>(debug_value: &DebugValue) -> String {
+    let debug_text = format!("{debug_value:?}");
+    debug_text
+        .split('(')
+        .next()
+        .unwrap_or(&debug_text)
+        .to_string()
 }
 
 /// One instance per top-level `Event` variant with its canonical name and
 /// delivery class. The array length is the variant count.
-pub(crate) fn event_cases() -> [(Event, &'static str, EventClass); 38] {
+pub(crate) fn list_event_cases() -> [(Event, &'static str, EventClass); 38] {
     [
         (
             Event::PaneCreated(PaneCreated {
@@ -387,7 +422,7 @@ pub(crate) fn event_cases() -> [(Event, &'static str, EventClass); 38] {
                 client_id: ClientId::new(),
                 tab_id: TabId::new(),
                 pane_id: PaneId::new(),
-                prior_pane: None,
+                previous_pane_id: None,
             }),
             "PaneFocused",
             EventClass::Critical,
@@ -395,7 +430,10 @@ pub(crate) fn event_cases() -> [(Event, &'static str, EventClass); 38] {
         (
             Event::PtyResized(PtyResized {
                 pane_id: PaneId::new(),
-                size: PtySize { cols: 80, rows: 24 },
+                pty_size: PtySize {
+                    column_count: 80,
+                    row_count: 24,
+                },
             }),
             "PtyResized",
             EventClass::Critical,
@@ -447,7 +485,7 @@ pub(crate) fn event_cases() -> [(Event, &'static str, EventClass); 38] {
             Event::TabFocused(TabFocused {
                 client_id: ClientId::new(),
                 tab_id: TabId::new(),
-                prior_tab: TabId::new(),
+                previous_tab_id: TabId::new(),
             }),
             "TabFocused",
             EventClass::Critical,
@@ -455,8 +493,8 @@ pub(crate) fn event_cases() -> [(Event, &'static str, EventClass); 38] {
         (
             Event::TabMoved(TabMoved {
                 tab_id: TabId::new(),
-                old_index: 0,
-                new_index: 1,
+                previous_tab_index: 0,
+                new_tab_index: 1,
             }),
             "TabMoved",
             EventClass::Critical,
@@ -480,7 +518,10 @@ pub(crate) fn event_cases() -> [(Event, &'static str, EventClass); 38] {
         (
             Event::TerminalTooSmallEntered(TerminalTooSmallEntered {
                 client_id: ClientId::new(),
-                size: Size { cols: 1, rows: 1 },
+                viewport_size: Size {
+                    column_count: 1,
+                    row_count: 1,
+                },
                 pane_area: Some(PaneArea::Starving),
                 cause: TerminalTooSmallCause::Regions,
             }),
@@ -490,7 +531,10 @@ pub(crate) fn event_cases() -> [(Event, &'static str, EventClass); 38] {
         (
             Event::TerminalTooSmallExited(TerminalTooSmallExited {
                 client_id: ClientId::new(),
-                size: Size { cols: 80, rows: 24 },
+                viewport_size: Size {
+                    column_count: 80,
+                    row_count: 24,
+                },
             }),
             "TerminalTooSmallExited",
             EventClass::Critical,
@@ -505,7 +549,7 @@ pub(crate) fn event_cases() -> [(Event, &'static str, EventClass); 38] {
         (
             Event::InputModeChanged(InputModeChanged {
                 client_id: ClientId::new(),
-                mode: LockMode::Normal,
+                lock_mode: LockMode::Normal,
             }),
             "InputModeChanged",
             EventClass::Critical,
@@ -513,7 +557,7 @@ pub(crate) fn event_cases() -> [(Event, &'static str, EventClass); 38] {
         (
             Event::MouseSelectChanged(MouseSelectChanged {
                 client_id: ClientId::new(),
-                on: true,
+                is_enabled: true,
             }),
             "MouseSelectChanged",
             EventClass::Critical,
@@ -532,8 +576,8 @@ pub(crate) fn event_cases() -> [(Event, &'static str, EventClass); 38] {
                 tab_id: TabId::new(),
                 session_id: SessionId::new(),
                 client_id: ClientId::new(),
-                payload: TypedPayload::SensitiveRedacted,
-                timestamp: fixed_time(),
+                typed_payload: TypedPayload::SensitiveRedacted,
+                accepted_at: build_fixed_timestamp(),
             }),
             "PaneTyped",
             EventClass::Lossy,
@@ -544,8 +588,8 @@ pub(crate) fn event_cases() -> [(Event, &'static str, EventClass); 38] {
                 tab_id: TabId::new(),
                 session_id: SessionId::new(),
                 client_id: ClientId::new(),
-                line: SubmittedLinePayload::UnknownMetadataOnly,
-                timestamp: fixed_time(),
+                submitted_line: SubmittedLinePayload::UnknownMetadataOnly,
+                accepted_at: build_fixed_timestamp(),
             }),
             "PaneEnterPressed",
             EventClass::Critical,
@@ -553,8 +597,8 @@ pub(crate) fn event_cases() -> [(Event, &'static str, EventClass); 38] {
         (
             Event::MousePressed(MousePressed {
                 client_id: ClientId::new(),
-                pane: None,
-                position: Point { x: 0, y: 0 },
+                pane_id: None,
+                position: Point { column: 0, row: 0 },
                 button: MouseButton::Left,
             }),
             "MousePressed",
@@ -563,8 +607,8 @@ pub(crate) fn event_cases() -> [(Event, &'static str, EventClass); 38] {
         (
             Event::MouseReleased(MouseReleased {
                 client_id: ClientId::new(),
-                pane: None,
-                position: Point { x: 0, y: 0 },
+                pane_id: None,
+                position: Point { column: 0, row: 0 },
                 button: MouseButton::Right,
             }),
             "MouseReleased",
@@ -573,8 +617,8 @@ pub(crate) fn event_cases() -> [(Event, &'static str, EventClass); 38] {
         (
             Event::MouseDragged(MouseDragged {
                 client_id: ClientId::new(),
-                pane: None,
-                position: Point { x: 0, y: 0 },
+                pane_id: None,
+                position: Point { column: 0, row: 0 },
                 button: MouseButton::Middle,
             }),
             "MouseDragged",
@@ -583,8 +627,8 @@ pub(crate) fn event_cases() -> [(Event, &'static str, EventClass); 38] {
         (
             Event::MouseScrolled(MouseScrolled {
                 client_id: ClientId::new(),
-                pane: None,
-                position: Point { x: 0, y: 0 },
+                pane_id: None,
+                position: Point { column: 0, row: 0 },
                 direction: ScrollDirection::Down,
             }),
             "MouseScrolled",
@@ -616,7 +660,7 @@ pub(crate) fn event_cases() -> [(Event, &'static str, EventClass); 38] {
         (
             Event::SubscriberLagged(SubscriberLagged {
                 subscriber_id: SubscriberId::new(),
-                dropped_count: 0,
+                dropped_event_count: 0,
                 event_class: EventClass::Critical,
             }),
             "SubscriberLagged",
@@ -624,8 +668,8 @@ pub(crate) fn event_cases() -> [(Event, &'static str, EventClass); 38] {
         ),
         (
             Event::CommandRejected(CommandRejected {
-                id: CommandId::new(),
-                reason: RejectReason::Unauthorized,
+                command_id: CommandId::new(),
+                rejection_reason: RejectReason::Unauthorized,
             }),
             "CommandRejected",
             EventClass::Critical,
@@ -643,8 +687,8 @@ pub(crate) fn event_cases() -> [(Event, &'static str, EventClass); 38] {
             Event::Copied(Copied {
                 client_id: ClientId::new(),
                 pane_id: PaneId::new(),
-                target: CopyTarget::Native,
-                byte_len: 0,
+                clipboard_target: CopyTarget::Native,
+                byte_count: 0,
             }),
             "Copied",
             EventClass::Critical,
@@ -661,41 +705,45 @@ pub(crate) fn event_cases() -> [(Event, &'static str, EventClass); 38] {
     ]
 }
 
-/// Checks 38 distinct top-level event names against `Debug` and [`Event::name`].
+/// Checks 38 distinct top-level event names against `Debug` and
+/// [`Event::get_event_name`].
 #[test]
 fn event_variant_names_are_canonical() {
-    let cases = event_cases();
-    let mut names = std::collections::BTreeSet::new();
-    assert_eq!(cases.len(), 38);
-    for (event, name, _) in cases {
-        assert_eq!(variant_name(&event), name);
-        assert_eq!(event.name(), name);
-        assert!(names.insert(name), "duplicate event name: {name}");
+    let event_cases = list_event_cases();
+    let mut event_names = std::collections::BTreeSet::new();
+    assert_eq!(event_cases.len(), 38);
+    for (event, event_name, _) in event_cases {
+        assert_eq!(get_variant_name(&event), event_name);
+        assert_eq!(event.get_event_name(), event_name);
+        assert!(
+            event_names.insert(event_name),
+            "duplicate event name: {event_name}"
+        );
     }
-    assert_eq!(names.len(), 38);
+    assert_eq!(event_names.len(), 38);
 }
 
 #[test]
 fn classify_maps_every_event_variant() {
-    let mut lossy = 0;
-    let mut critical = 0;
+    let mut lossy_event_count = 0;
+    let mut critical_event_count = 0;
 
-    for (event, name, expected_class) in event_cases() {
-        let actual_class = classify(&event);
-        assert_eq!(actual_class, expected_class, "{name}");
+    for (event, event_name, expected_event_class) in list_event_cases() {
+        let actual_class = classify_event(&event);
+        assert_eq!(actual_class, expected_event_class, "{event_name}");
         match actual_class {
-            EventClass::Lossy => lossy += 1,
-            EventClass::Critical => critical += 1,
+            EventClass::Lossy => lossy_event_count += 1,
+            EventClass::Critical => critical_event_count += 1,
         }
     }
 
-    assert_eq!(lossy, 7);
-    assert_eq!(critical, 31);
+    assert_eq!(lossy_event_count, 7);
+    assert_eq!(critical_event_count, 31);
 }
 
 /// One instance per [`PluginEvent`] variant with its canonical name. The array
 /// length is the variant count.
-fn plugin_event_cases() -> [(PluginEvent, &'static str); 10] {
+fn list_plugin_event_cases() -> [(PluginEvent, &'static str); 10] {
     [
         (
             PluginEvent::Installed(PluginInstalled {
@@ -736,7 +784,7 @@ fn plugin_event_cases() -> [(PluginEvent, &'static str); 10] {
         (
             PluginEvent::LoadFailed(PluginLoadFailed {
                 plugin_id: PluginId::new(),
-                reason: "x".to_string(),
+                failure_reason: "x".to_string(),
             }),
             "LoadFailed",
         ),
@@ -749,7 +797,7 @@ fn plugin_event_cases() -> [(PluginEvent, &'static str); 10] {
         (
             PluginEvent::Broken(PluginBroken {
                 plugin_id: PluginId::new(),
-                reason: "x".to_string(),
+                failure_reason: "x".to_string(),
             }),
             "Broken",
         ),
@@ -764,29 +812,29 @@ fn plugin_event_cases() -> [(PluginEvent, &'static str); 10] {
 
 #[test]
 fn plugin_event_variant_names_are_canonical() {
-    let cases = plugin_event_cases();
-    assert_eq!(cases.len(), 10);
-    for (value, name) in &cases {
-        assert_eq!(&variant_name(value), name);
+    let plugin_event_cases = list_plugin_event_cases();
+    assert_eq!(plugin_event_cases.len(), 10);
+    for (plugin_event, event_name) in &plugin_event_cases {
+        assert_eq!(&get_variant_name(plugin_event), event_name);
     }
 }
 
 #[test]
 fn every_plugin_event_survives_a_json_round_trip() {
-    for (plugin_event, name) in plugin_event_cases() {
+    for (plugin_event, event_name) in list_plugin_event_cases() {
         let event = Event::Plugin(plugin_event);
-        let json = serde_json::to_string(&event).expect("serialize");
-        let back: Event = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(back, event, "{name}");
+        let event_json = serde_json::to_string(&event).expect("serialize");
+        let decoded_event: Event = serde_json::from_str(&event_json).expect("deserialize");
+        assert_eq!(decoded_event, event, "{event_name}");
     }
 }
 
 #[test]
 fn every_event_case_survives_a_json_round_trip() {
-    for (event, name, _class) in event_cases() {
-        let json = serde_json::to_string(&event).expect("serialize");
-        let back: Event = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(back, event, "{name}");
+    for (event, event_name, _event_class) in list_event_cases() {
+        let event_json = serde_json::to_string(&event).expect("serialize");
+        let decoded_event: Event = serde_json::from_str(&event_json).expect("deserialize");
+        assert_eq!(decoded_event, event, "{event_name}");
     }
 }
 
@@ -798,9 +846,9 @@ fn privacy_tiers_and_input_payloads_roundtrip() {
         PrivacyTier::Redacted,
         PrivacyTier::SensitiveBlocked,
     ] {
-        roundtrip(&tier);
+        assert_json_roundtrip(&tier);
     }
-    for payload in [
+    for typed_payload in [
         TypedPayload::SafePublic('a'),
         TypedPayload::SafePublic('🦀'),
         TypedPayload::SafePublic('\u{0}'),
@@ -810,16 +858,16 @@ fn privacy_tiers_and_input_payloads_roundtrip() {
         TypedPayload::UnknownMetadataOnly,
         TypedPayload::SensitiveBlocked,
     ] {
-        roundtrip(&payload);
+        assert_json_roundtrip(&typed_payload);
     }
-    for line in [
+    for submitted_line_payload in [
         SubmittedLinePayload::SafePublic(String::new()),
         SubmittedLinePayload::SafePublic("echo \"日本語\" \\ \t \u{1b}[0m 🦀".to_string()),
         SubmittedLinePayload::SensitiveRedacted,
         SubmittedLinePayload::UnknownMetadataOnly,
         SubmittedLinePayload::SensitiveBlocked,
     ] {
-        roundtrip(&line);
+        assert_json_roundtrip(&submitted_line_payload);
     }
 }
 
@@ -835,11 +883,14 @@ fn events_encode_externally_tagged() {
     );
 
     let pane_id = PaneId::new();
-    let json =
+    let event_json =
         serde_json::to_string(&Event::PaneClosing(PaneClosing { pane_id })).expect("serialize");
     assert_eq!(
-        json,
-        format!(r#"{{"PaneClosing":{{"pane_id":"{}"}}}}"#, pane_id.as_uuid())
+        event_json,
+        format!(
+            r#"{{"PaneClosing":{{"pane_id":"{}"}}}}"#,
+            pane_id.get_uuid()
+        )
     );
 
     assert_eq!(
@@ -851,10 +902,11 @@ fn events_encode_externally_tagged() {
         r#""SensitiveBlocked""#
     );
 
-    let other = ClientId::new();
+    let other_client_id = ClientId::new();
     assert_eq!(
-        serde_json::to_string(&TerminalTooSmallCause::OtherClient(other)).expect("serialize"),
-        format!(r#"{{"OtherClient":"{}"}}"#, other.as_uuid())
+        serde_json::to_string(&TerminalTooSmallCause::OtherClient(other_client_id))
+            .expect("serialize"),
+        format!(r#"{{"OtherClient":"{}"}}"#, other_client_id.get_uuid())
     );
 }
 
@@ -869,16 +921,23 @@ fn too_small_cause_defaults_to_terminal() {
 #[test]
 fn a_too_small_event_reads_an_explicit_null_pane_area_as_none() {
     let client_id = ClientId::new();
-    let json = serde_json::json!({
+    let too_small_event_json = serde_json::json!({
         "client_id": client_id,
         "size": { "cols": 80, "rows": 24 },
         "pane_area": null,
         "cause": "Regions"
     });
 
-    let event: TerminalTooSmallEntered = serde_json::from_value(json).expect("deserialize");
+    let event: TerminalTooSmallEntered =
+        serde_json::from_value(too_small_event_json).expect("deserialize");
     assert_eq!(event.client_id, client_id);
-    assert_eq!(event.size, Size { cols: 80, rows: 24 });
+    assert_eq!(
+        event.viewport_size,
+        Size {
+            column_count: 80,
+            row_count: 24,
+        }
+    );
     assert_eq!(event.pane_area, None);
     assert_eq!(event.cause, TerminalTooSmallCause::Regions);
 }
@@ -890,10 +949,13 @@ fn a_timestamp_before_the_unix_epoch_cannot_be_serialized() {
         tab_id: TabId::new(),
         session_id: SessionId::new(),
         client_id: ClientId::new(),
-        payload: TypedPayload::SensitiveBlocked,
-        timestamp: UNIX_EPOCH - Duration::from_secs(1),
+        typed_payload: TypedPayload::SensitiveBlocked,
+        accepted_at: UNIX_EPOCH - Duration::from_secs(1),
     });
 
-    let err = serde_json::to_string(&event).expect_err("pre-epoch timestamp");
-    assert_eq!(err.to_string(), "SystemTime must be later than UNIX_EPOCH");
+    let serialization_error = serde_json::to_string(&event).expect_err("pre-epoch timestamp");
+    assert_eq!(
+        serialization_error.to_string(),
+        "SystemTime must be later than UNIX_EPOCH"
+    );
 }

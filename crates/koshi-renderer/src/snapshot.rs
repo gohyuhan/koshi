@@ -34,53 +34,55 @@ use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::MouseTracking;
 use koshi_layout::mode::LayoutMode;
-use koshi_layout::regions::RegionSolve;
+use koshi_layout::regions::SolvedRegions;
 use koshi_layout::solver::StackHeader;
 use koshi_terminal::graphics::{
-    ImageAction, ImageRecord, MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS, MAX_IMAGE_SIDE,
+    ImageAction, ImageRecord, MAX_IMAGE_BYTE_COUNT, MAX_IMAGE_PIXEL_COUNT,
+    MAX_IMAGE_SIDE_PIXEL_COUNT,
 };
 use koshi_terminal::grid::state::Grid;
 use koshi_terminal::state::{CursorShape, ImagePlacement, ImagePlacementId};
 
-use crate::region::{core_region_solve, TablineInputs};
+use crate::region::{solve_core_regions, TablineInputs};
 
 /// The statusline data the renderer draws, re-exported from the keymap crate
 /// that produces it: `koshi_config::hints`.
 pub use koshi_config::hints::{HintBinding, KeymapHints};
 
-/// What a pane runs, as [`PaneSlot::kind`] reports it. Re-exported from
+/// What a pane runs, as [`PaneSlot::pane_kind`] reports it. Re-exported from
 /// `koshi_pane::pane::state`.
 pub use koshi_pane::pane::state::PaneKind;
 
 /// One frozen frame: the full read-only view the renderer draws from.
 ///
-/// The renderer joins [`panes`](Self::panes) to the [`PaneSlot`]s in
-/// [`session`](Self::session)'s active tab by [`PaneId`]: a slot says *where* a
-/// pane sits, its [`PaneSnapshot`] says *what* is inside it.
+/// The renderer joins [`pane_snapshots`](Self::pane_snapshots) to the
+/// [`PaneSlot`]s in [`session_snapshot`](Self::session_snapshot)'s active tab
+/// by [`PaneId`]: a slot says where a pane sits, and its [`PaneSnapshot`] says
+/// what is inside it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderSnapshot {
     /// The session being viewed: its identity, active tab, and tab list.
-    pub session: SessionSnapshot,
+    pub session_snapshot: SessionSnapshot,
     /// Per-pane content (grid, cursor, title), one entry per live pane in the
     /// active tab, matched to a [`PaneSlot`] by [`PaneId`].
-    pub panes: Vec<PaneSnapshot>,
+    pub pane_snapshots: Vec<PaneSnapshot>,
     /// The viewing client's own state (viewport, focus, lock mode).
-    pub client: ClientSnapshot,
+    pub client_snapshot: ClientSnapshot,
     /// Plugin-contributed UI (statusline/tabline segments, notifications,
     /// overlays). Empty for a stock, plugin-free Koshi.
-    pub plugin_ui: PluginUiSnapshot,
+    pub plugin_ui_snapshot: PluginUiSnapshot,
 }
 
 impl RenderSnapshot {
     /// Borrow the server-provided parts of this frame that say where things
-    /// sit, with `viewer` supplying what the session does not hold. The client
+    /// sit, with `viewer_chrome` supplying what the session does not hold. The client
     /// adds its committed region solve when it builds a [`MouseFrame`].
     #[must_use]
-    pub fn layout(&self, viewer: ViewerChrome) -> FrameLayout<'_> {
+    pub fn build_frame_layout(&self, viewer_chrome: ViewerChrome) -> FrameLayout<'_> {
         FrameLayout {
-            session: &self.session,
-            client: &self.client,
-            viewer,
+            session_snapshot: &self.session_snapshot,
+            client_snapshot: &self.client_snapshot,
+            viewer_chrome,
             committed_regions: None,
         }
     }
@@ -88,35 +90,44 @@ impl RenderSnapshot {
 
 /// The region geometry that was committed with one painted frame.
 ///
-/// `viewport` is the client-local terminal size used to solve `solve`.
-/// `input_revision` changes when the region inputs change. The renderer and
-/// mouse path read the same value from the last painted frame.
+/// `viewport_size` is the client-local terminal size used to solve the
+/// `solved_regions`. `region_input_revision` changes when the region inputs
+/// change. The renderer and mouse path read the same value from the last
+/// painted frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommittedRegions {
     /// The client viewport used for this solve.
-    pub viewport: Size,
+    pub viewport_size: Size,
     /// The ordered region rectangles and the pane rectangle left by them.
-    pub solve: RegionSolve,
+    pub solved_regions: SolvedRegions,
     /// The region-input revision that produced this solve.
-    pub input_revision: u64,
+    pub region_input_revision: u64,
 }
 
 impl CommittedRegions {
     /// Build a committed region value from an exact solve and its input revision.
     #[must_use]
-    pub fn new(viewport: Size, solve: RegionSolve, input_revision: u64) -> Self {
+    pub fn from_solved_regions(
+        viewport_size: Size,
+        solved_regions: SolvedRegions,
+        region_input_revision: u64,
+    ) -> Self {
         Self {
-            viewport,
-            solve,
-            input_revision,
+            viewport_size,
+            solved_regions,
+            region_input_revision,
         }
     }
 
     /// Build a committed region value whose solve is the compiled-in tabline
     /// and statusline solve for `viewport`, tagged with `input_revision`.
     #[must_use]
-    pub fn core(viewport: Size, input_revision: u64) -> Self {
-        Self::new(viewport, core_region_solve(viewport), input_revision)
+    pub fn core(viewport_size: Size, region_input_revision: u64) -> Self {
+        Self::from_solved_regions(
+            viewport_size,
+            solve_core_regions(viewport_size),
+            region_input_revision,
+        )
     }
 }
 
@@ -138,10 +149,10 @@ pub enum Delivery {
     Snapshot {
         /// The state the subscriber picks up from, replacing the events it did
         /// not receive.
-        snapshot: Box<RenderSnapshot>,
+        render_snapshot: Box<RenderSnapshot>,
         /// Which subscriber lagged, how many events were dropped, and their
         /// class.
-        lagged: SubscriberLagged,
+        lag_report: SubscriberLagged,
     },
     /// What one round of mouse actions did, for the client that asked for the
     /// round.
@@ -151,7 +162,7 @@ pub enum Delivery {
         /// One entry per action in the round that had something to report, in
         /// the order those actions ran. Empty when the round had nothing to
         /// say.
-        answers: Vec<koshi_core::mouse::MouseAnswer>,
+        mouse_answers: Vec<koshi_core::mouse::MouseAnswer>,
     },
     /// Bytes for the terminal the subscriber's client runs in, written to it
     /// verbatim.
@@ -173,7 +184,7 @@ pub struct ViewerChrome {
     /// The renderer draws an *unfocused* pane under the pointer in the hover
     /// color so the wheel target is visible; the focused pane keeps its focus
     /// color.
-    pub hovered_pane: Option<PaneId>,
+    pub hovered_pane_id: Option<PaneId>,
     /// Where the viewer's tab strip is scrolled: `None` follows the active tab —
     /// the strip always reveals it — while `Some(i)` peeks from tab index `i`
     /// without changing focus. The renderer windows the tab list from this and
@@ -212,19 +223,19 @@ pub struct Reconnecting {
 /// value has no theme; renderers apply colors when they draw cells.
 ///
 /// A caller that already holds a [`RenderSnapshot`] borrows one out of it with
-/// [`RenderSnapshot::layout`], and an [`OwnedFrameLayout`] with
-/// [`OwnedFrameLayout::layout`]; both leave the committed region solve unset,
+/// [`RenderSnapshot::build_frame_layout`], and an [`OwnedFrameLayout`] with
+/// [`OwnedFrameLayout::build_frame_layout`]; both leave the committed region solve unset,
 /// and hit-testing then works from the built-in geometry. A [`MouseFrame`]
 /// fills the solve in with the one that placed the pane area when the frame was
 /// painted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameLayout<'a> {
     /// The session being viewed, including its solved active tab.
-    pub session: &'a SessionSnapshot,
+    pub session_snapshot: &'a SessionSnapshot,
     /// The viewing client's own state (viewport, focus, lock mode).
-    pub client: &'a ClientSnapshot,
+    pub client_snapshot: &'a ClientSnapshot,
     /// The viewer's pointer, tab-strip, and link state.
-    pub viewer: ViewerChrome,
+    pub viewer_chrome: ViewerChrome,
     /// The region solve committed with the painted frame. `None` leaves
     /// hit-testing on the built-in geometry: the pane area is the whole area,
     /// the tabline its top row, the statusline its bottom row.
@@ -237,14 +248,14 @@ impl<'a> FrameLayout<'a> {
     /// A frame named `work` with tabs `shell` and `logs` yields those names and
     /// their tab state, but it does not yield a pane slot or terminal grid.
     #[must_use]
-    pub(crate) fn tabline(&self) -> TablineInputs<'a> {
+    pub(crate) fn get_tabline_inputs(&self) -> TablineInputs<'a> {
         TablineInputs {
-            session_name: &self.session.name,
-            tabs: &self.session.tabs_metadata,
-            lock_mode: self.client.lock_mode,
-            mouse_select: self.client.mouse_select,
-            reconnecting: self.viewer.reconnecting,
-            tabline_offset: self.viewer.tabline_offset,
+            session_name: &self.session_snapshot.session_name,
+            tabs_metadata: &self.session_snapshot.tabs_metadata,
+            lock_mode: self.client_snapshot.lock_mode,
+            is_mouse_selection_enabled: self.client_snapshot.is_mouse_selection_enabled,
+            reconnecting: self.viewer_chrome.reconnecting,
+            tabline_offset: self.viewer_chrome.tabline_offset,
         }
     }
 }
@@ -254,23 +265,23 @@ impl<'a> FrameLayout<'a> {
 ///
 /// Answering a mouse event needs to know where the surfaces are and nothing
 /// about what is inside them, so the mouse path builds one of these and calls
-/// [`layout`](Self::layout) to hand it to the hit-testing functions.
+/// [`build_frame_layout`](Self::build_frame_layout) to hand it to the hit-testing functions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnedFrameLayout {
     /// The session being viewed, including its solved active tab.
-    pub session: SessionSnapshot,
+    pub session_snapshot: SessionSnapshot,
     /// The viewing client's own state (viewport, focus, lock mode).
-    pub client: ClientSnapshot,
+    pub client_snapshot: ClientSnapshot,
 }
 
 impl OwnedFrameLayout {
-    /// Borrow these two as a [`FrameLayout`], with `viewer` supplying the rest.
+    /// Borrow these two as a [`FrameLayout`], with `viewer_chrome` supplying the rest.
     #[must_use]
-    pub fn layout(&self, viewer: ViewerChrome) -> FrameLayout<'_> {
+    pub fn build_frame_layout(&self, viewer_chrome: ViewerChrome) -> FrameLayout<'_> {
         FrameLayout {
-            session: &self.session,
-            client: &self.client,
-            viewer,
+            session_snapshot: &self.session_snapshot,
+            client_snapshot: &self.client_snapshot,
+            viewer_chrome,
             committed_regions: None,
         }
     }
@@ -285,25 +296,25 @@ impl OwnedFrameLayout {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MouseFrame {
     /// The session being viewed, including its solved active tab.
-    pub session: SessionSnapshot,
+    pub session_snapshot: SessionSnapshot,
     /// The viewing client's own state (viewport, focus, lock mode).
-    pub client: ClientSnapshot,
+    pub client_snapshot: ClientSnapshot,
     /// One entry per pane the frame carried content for, matched to a
-    /// [`PaneSlot`] by id.
-    pub panes: Vec<MousePane>,
+    /// [`PaneSlot`] by pane id.
+    pub mouse_panes: Vec<MousePane>,
     /// The region solve and input revision that were painted with this frame.
     pub committed_regions: CommittedRegions,
 }
 
 impl MouseFrame {
     /// Borrow the parts of this painted frame that say where things sit, with
-    /// `viewer` supplying the pointer and tab-strip state.
+    /// `viewer_chrome` supplying the pointer and tab-strip state.
     #[must_use]
-    pub fn layout(&self, viewer: ViewerChrome) -> FrameLayout<'_> {
+    pub fn build_frame_layout(&self, viewer_chrome: ViewerChrome) -> FrameLayout<'_> {
         FrameLayout {
-            session: &self.session,
-            client: &self.client,
-            viewer,
+            session_snapshot: &self.session_snapshot,
+            client_snapshot: &self.client_snapshot,
+            viewer_chrome,
             committed_regions: Some(&self.committed_regions),
         }
     }
@@ -313,22 +324,36 @@ impl MouseFrame {
     /// The mouse frame copies session, client, and per-pane input data. It does
     /// not copy pane grids.
     #[must_use]
-    pub fn from_snapshot(snapshot: &RenderSnapshot, committed_regions: CommittedRegions) -> Self {
+    pub fn from_snapshot(
+        render_snapshot: &RenderSnapshot,
+        committed_regions: CommittedRegions,
+    ) -> Self {
         Self {
-            panes: snapshot.panes.iter().map(MousePane::from).collect(),
-            session: snapshot.session.clone(),
-            client: snapshot.client.clone(),
+            mouse_panes: render_snapshot
+                .pane_snapshots
+                .iter()
+                .map(MousePane::from)
+                .collect(),
+            session_snapshot: render_snapshot.session_snapshot.clone(),
+            client_snapshot: render_snapshot.client_snapshot.clone(),
             committed_regions,
         }
     }
 
     /// Build the mouse frame with the exact region solve that was painted.
     #[must_use]
-    pub fn with_regions(snapshot: RenderSnapshot, committed_regions: CommittedRegions) -> Self {
+    pub fn from_snapshot_with_regions(
+        render_snapshot: RenderSnapshot,
+        committed_regions: CommittedRegions,
+    ) -> Self {
         Self {
-            panes: snapshot.panes.iter().map(MousePane::from).collect(),
-            session: snapshot.session,
-            client: snapshot.client,
+            mouse_panes: render_snapshot
+                .pane_snapshots
+                .iter()
+                .map(MousePane::from)
+                .collect(),
+            session_snapshot: render_snapshot.session_snapshot,
+            client_snapshot: render_snapshot.client_snapshot,
             committed_regions,
         }
     }
@@ -337,9 +362,10 @@ impl MouseFrame {
 impl From<RenderSnapshot> for MouseFrame {
     /// Takes the frame by value and uses the compiled-in region solve for the
     /// client's viewport, at input revision `0`.
-    fn from(snapshot: RenderSnapshot) -> Self {
-        let committed_regions = CommittedRegions::core(snapshot.client.viewport, 0);
-        Self::with_regions(snapshot, committed_regions)
+    fn from(render_snapshot: RenderSnapshot) -> Self {
+        let committed_regions =
+            CommittedRegions::core(render_snapshot.client_snapshot.viewport_size, 0);
+        Self::from_snapshot_with_regions(render_snapshot, committed_regions)
     }
 }
 
@@ -348,33 +374,33 @@ impl From<RenderSnapshot> for MouseFrame {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MousePane {
     /// The pane this entry describes, matched to a [`PaneSlot`] by id.
-    pub id: PaneId,
+    pub pane_id: PaneId,
     /// The absolute line number of the pane's top visible row, copied from
-    /// [`PaneSnapshot::view_top_row`].
-    pub view_top_row: u64,
+    /// [`PaneSnapshot::view_top_row_index`].
+    pub view_top_row_index: u64,
     /// Which mouse events the pane's program asked to be told about, copied
     /// from [`PaneSnapshot::mouse_tracking`].
     pub mouse_tracking: MouseTracking,
     /// Whether alternate-scroll mode (`?1007`) is on, copied from
-    /// [`PaneSnapshot::alt_scroll`].
-    pub alt_scroll: bool,
+    /// [`PaneSnapshot::is_alternate_scroll_enabled`].
+    pub is_alternate_scroll_enabled: bool,
     /// Whether the pane is showing the alternate screen, copied from
-    /// [`PaneSnapshot::on_alt_screen`].
-    pub on_alt_screen: bool,
+    /// [`PaneSnapshot::is_on_alternate_screen`].
+    pub is_on_alternate_screen: bool,
     /// Whether the viewing client has a highlight in the pane, copied from
     /// [`PaneSnapshot::has_selection`].
     pub has_selection: bool,
 }
 
 impl From<&PaneSnapshot> for MousePane {
-    fn from(pane: &PaneSnapshot) -> Self {
+    fn from(pane_snapshot: &PaneSnapshot) -> Self {
         Self {
-            id: pane.id,
-            view_top_row: pane.view_top_row,
-            mouse_tracking: pane.mouse_tracking,
-            alt_scroll: pane.alt_scroll,
-            on_alt_screen: pane.on_alt_screen,
-            has_selection: pane.has_selection,
+            pane_id: pane_snapshot.pane_id,
+            view_top_row_index: pane_snapshot.view_top_row_index,
+            mouse_tracking: pane_snapshot.mouse_tracking,
+            is_alternate_scroll_enabled: pane_snapshot.is_alternate_scroll_enabled,
+            is_on_alternate_screen: pane_snapshot.is_on_alternate_screen,
+            has_selection: pane_snapshot.has_selection,
         }
     }
 }
@@ -384,11 +410,11 @@ impl From<&PaneSnapshot> for MousePane {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionSnapshot {
     /// The session's stable id.
-    pub id: SessionId,
+    pub session_id: SessionId,
     /// The session's display name.
-    pub name: String,
+    pub session_name: String,
     /// The tab currently shown, solved and ready to draw.
-    pub active_tab: TabSnapshot,
+    pub active_tab_snapshot: TabSnapshot,
     /// Lightweight entry per tab for the tab bar (index, name, active marker).
     pub tabs_metadata: Vec<TabMeta>,
 }
@@ -398,32 +424,33 @@ pub struct SessionSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TabMeta {
     /// The tab's stable id.
-    pub id: TabId,
+    pub tab_id: TabId,
     /// The tab's display name.
-    pub name: String,
+    pub tab_name: String,
     /// The tab's ordinal position in the bar, starting at 0.
-    pub index: usize,
+    pub tab_index: usize,
     /// Whether this is the client's active tab (drawn with the active marker).
-    pub active: bool,
+    pub is_active: bool,
 }
 
 /// The active tab, with its layout already solved into placed pane slots.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TabSnapshot {
     /// The tab's stable id.
-    pub id: TabId,
+    pub tab_id: TabId,
     /// The tab's display name.
-    pub name: String,
+    pub tab_name: String,
     /// The solved layout: one [`PaneSlot`] per pane, giving outer and content
     /// rects and coarse status.
-    pub layout_solved: Vec<PaneSlot>,
+    pub pane_slots: Vec<PaneSlot>,
     /// The viewport size the layout was solved for: the tab's effective size,
     /// the element-wise minimum viewport across the clients viewing this tab.
-    /// The [`layout_solved`](Self::layout_solved) rects live in this space with
-    /// origin `(0, 0)`. A client whose own [`viewport`](ClientSnapshot::viewport)
+    /// The [`pane_slots`](Self::pane_slots) rects live in this space with
+    /// origin `(0, 0)`. A client whose own
+    /// [`viewport_size`](ClientSnapshot::viewport_size)
     /// is larger draws this layout centered and letterboxes the surrounding
     /// margin; a client at exactly this size draws it edge to edge.
-    pub effective_size: Size,
+    pub effective_cell_size: Size,
     /// Header strips for stacked panes (title bars for collapsed stack members).
     pub stack_headers: Vec<StackHeader>,
     /// Whether **this snapshot's client** sees the tab tiled, or sees a single
@@ -432,46 +459,46 @@ pub struct TabSnapshot {
     pub layout_mode: LayoutMode,
     /// True when every pane is suppressed because the tab has no room to draw —
     /// the renderer fills the whole frame with the "terminal too small" overlay.
-    pub all_suppressed: bool,
+    pub are_all_panes_suppressed: bool,
     /// Blank cells between two panes that meet along a horizontal or
-    /// vertical split, in the [`layout_solved`](Self::layout_solved) space.
-    pub gap: u16,
+    /// vertical split, in the [`effective_cell_size`](Self::effective_cell_size) space.
+    pub gap_cell_count: u16,
 }
 
 /// One pane's placement in the solved layout: where its box sits, its content
 /// area, and coarse status flags. Paired with a [`PaneSnapshot`] by
 /// [`pane_id`](Self::pane_id).
 ///
-/// The builder keeps these fields consistent: [`visible`](Self::visible) is
-/// true exactly when [`inner_rect`](Self::inner_rect) is `Some` (the pane has a
-/// content area to draw), and a [`suppressed`](Self::suppressed) pane is not
-/// visible. [`dead`](Self::dead) is an orthogonal axis: it does not by itself
+/// The builder keeps these fields consistent: [`is_visible`](Self::is_visible)
+/// is true exactly when [`content_rect`](Self::content_rect) is `Some` (the pane has a
+/// content area to draw), and an [`is_suppressed`](Self::is_suppressed) pane is not
+/// visible. [`is_dead`](Self::is_dead) is an orthogonal axis: it does not by itself
 /// change visibility — an exited pane stays laid out, drawn like any other,
-/// until it is removed. `inner_rect` is `None` for three distinct reasons — no room,
-/// hidden, or a collapsed stack member — and [`suppressed`](Self::suppressed)
+/// until it is removed. `content_rect` is `None` for three distinct reasons — no room,
+/// hidden, or a collapsed stack member — and [`is_suppressed`](Self::is_suppressed)
 /// marks the no-room case.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneSlot {
     /// The pane this slot places.
     pub pane_id: PaneId,
     /// The outer pane box, including the 1-cell border gutter.
-    pub rect: Rect,
+    pub outer_rect: Rect,
     /// The content area inside the border — the layout-owned rect the PTY was
     /// sized from, taken verbatim from
-    /// [`content_rects`](koshi_layout::content::content_rects). `None` when the
+    /// [`list_content_rects`](koshi_layout::content::list_content_rects). `None` when the
     /// pane shows no content (suppressed, hidden, or a collapsed stack member).
     /// The renderer draws cells and places the cursor here and never re-computes
     /// the inset.
-    pub inner_rect: Option<Rect>,
+    pub content_rect: Option<Rect>,
     /// Whether the pane runs a terminal or a plugin.
-    pub kind: PaneKind,
+    pub pane_kind: PaneKind,
     /// Whether the pane is currently shown.
-    pub visible: bool,
+    pub is_visible: bool,
     /// Whether the pane is suppressed for lack of room.
-    pub suppressed: bool,
+    pub is_suppressed: bool,
     /// Whether the pane's process has exited. The renderer paints an exited
     /// pane the same as a live one.
-    pub dead: bool,
+    pub is_dead: bool,
 }
 
 /// One pane's content: what the renderer paints inside the matching
@@ -479,59 +506,61 @@ pub struct PaneSlot {
 /// answered from.
 ///
 /// Those last fields are not painted. [`mouse_tracking`](Self::mouse_tracking),
-/// [`alt_scroll`](Self::alt_scroll), [`on_alt_screen`](Self::on_alt_screen),
+/// [`is_alternate_scroll_enabled`](Self::is_alternate_scroll_enabled),
+/// [`is_on_alternate_screen`](Self::is_on_alternate_screen),
 /// [`has_selection`](Self::has_selection) and
-/// [`view_top_row`](Self::view_top_row) are copied into a [`MousePane`] as the
+/// [`view_top_row_index`](Self::view_top_row_index) are copied into a
+/// [`MousePane`] as the
 /// frame is painted, and that is what the viewer's decision reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneSnapshot {
     /// The pane this content belongs to, matched to a [`PaneSlot`] by id.
-    pub id: PaneId,
+    pub pane_id: PaneId,
     /// The pane's resolved display title: on the alternate screen the running
     /// app's OSC 0/1/2 title; on the primary screen the shell's OSC 7 working
     /// directory (`~`-shortened), falling back to the OSC title. `None` when
     /// the pane has reported neither.
-    pub title: Option<String>,
+    pub pane_title: Option<String>,
     /// The cursor's position and visibility within the content area.
-    pub cursor: CursorSnapshot,
+    pub cursor_snapshot: CursorSnapshot,
     /// The visible terminal cells. `None` for a pane with no terminal content
     /// (a plugin pane, or a slot showing nothing this frame).
-    pub grid_view: Option<GridView>,
+    pub terminal_grid_view: Option<GridView>,
     /// The image placements whose rectangles fit inside this view. A remote
     /// viewer can hold the rectangle before its image record arrives. Their
-    /// anchors use the same pane-local rows and columns as `grid_view`.
-    pub image_placements: Vec<ImagePlacementSnapshot>,
+    /// anchors use the same pane-local rows and columns as `terminal_grid_view`.
+    pub image_placement_snapshots: Vec<ImagePlacementSnapshot>,
     /// Whether the whole screen is in reverse video (DECSCNM): the renderer
     /// swaps the default foreground and background for every cell.
-    pub reverse_video: bool,
+    pub is_reverse_video: bool,
     /// Which mouse events the pane's program asked to be told about
     /// (`?9`/`?1000`/`?1002`/`?1003`). An event a pane asked for is the
     /// program's; anything it did not ask for is koshi's.
     pub mouse_tracking: MouseTracking,
     /// Whether alternate-scroll mode (`?1007`) is on: on the alternate screen a
     /// wheel tick becomes cursor arrow keys.
-    pub alt_scroll: bool,
+    pub is_alternate_scroll_enabled: bool,
     /// Whether the pane is showing the alternate screen. The alternate screen
     /// keeps no scrollback, so there is no view to scroll there.
-    pub on_alt_screen: bool,
+    pub is_on_alternate_screen: bool,
     /// The absolute line number of the top row this frame shows for the pane —
-    /// the same numbering [`koshi_core::command::GridPos::row`] uses, counting
+    /// the same numbering [`koshi_core::command::GridPosition::row_index`] uses, counting
     /// every line the pane has ever pushed into scrollback.
     ///
-    /// A press on the pane's `n`-th visible row names line `view_top_row + n`.
+    /// A press on the pane's `n`-th visible row names line `view_top_row_index + n`.
     /// Absolute line numbers never move, and that answer keeps naming the same
     /// text after more output arrives.
-    pub view_top_row: u64,
+    pub view_top_row_index: u64,
     /// The viewing client's highlighted text in this pane, already cut down to
     /// the rows this frame shows. `None` when the client has nothing highlighted
     /// here, or when the highlight is entirely outside the visible rows.
-    pub selection: Option<SelectionSpans>,
+    pub selection_spans: Option<SelectionSpans>,
     /// Whether the viewing client has a highlight in this pane at all, including
     /// one scrolled entirely out of the visible rows, where
-    /// [`selection`](Self::selection) is `None`.
+    /// [`selection_spans`](Self::selection_spans) is `None`.
     pub has_selection: bool,
     /// Scrollback state for the scroll-position indicator.
-    pub scrollback: ScrollbackMeta,
+    pub scrollback_meta: ScrollbackMeta,
 }
 
 /// Which cells of a pane are highlighted this frame, as a column range per
@@ -549,16 +578,16 @@ pub struct PaneSnapshot {
 pub struct SelectionSpans {
     /// One entry per highlighted row: the row, then the first and last
     /// highlighted column on it. Both columns are inclusive.
-    pub rows: Vec<(u16, u16, u16)>,
+    pub row_spans: Vec<(u16, u16, u16)>,
 }
 
 impl SelectionSpans {
     /// The highlighted column range on `row`, or `None` if it has none.
     #[must_use]
-    pub fn row_span(&self, row: u16) -> Option<(u16, u16)> {
-        self.rows
+    pub fn find_row_span(&self, row_index: u16) -> Option<(u16, u16)> {
+        self.row_spans
             .iter()
-            .find(|(candidate, _, _)| *candidate == row)
+            .find(|(candidate_row_index, _, _)| *candidate_row_index == row_index)
             .map(|&(_, start, end)| (start, end))
     }
 }
@@ -568,13 +597,13 @@ impl SelectionSpans {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CursorSnapshot {
     /// The cursor's row within the content area, starting at 0.
-    pub row: u16,
+    pub row_index: u16,
     /// The cursor's column within the content area, starting at 0.
-    pub col: u16,
+    pub column_index: u16,
     /// Whether the cursor is visible (the app may hide it).
-    pub visible: bool,
+    pub is_visible: bool,
     /// Whether the cursor blinks.
-    pub blink: bool,
+    pub is_blinking: bool,
     /// The shape the cursor is drawn as (DECSCUSR) — a program in the pane
     /// switches it to show its own mode, as vim does between a normal-mode
     /// block and an insert-mode bar — or `None` while the pane has asked for no
@@ -605,7 +634,7 @@ pub enum CursorStyle {
 ///
 /// The grid is held behind an [`Arc`], so cloning a built [`GridView`] shares
 /// the buffer by reference. The history rows for a non-zero
-/// [`view_offset`](Self::view_offset) are supplied by the scroll feature that
+/// [`view_row_offset`](Self::view_row_offset) are supplied by the scroll feature that
 /// sets it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GridView {
@@ -613,7 +642,7 @@ pub struct GridView {
     pub grid: Arc<Grid>,
     /// Rows scrolled up from the live tail; `0` shows the live bottom of the
     /// buffer.
-    pub view_offset: usize,
+    pub view_row_offset: usize,
 }
 
 /// One validated terminal image placement carried in a read-only frame.
@@ -624,74 +653,86 @@ pub struct GridView {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImagePlacementSnapshot {
     /// The complete cell size and the clipped top and left cells.
-    geometry: koshi_core::geometry::ImageCellGeometry,
+    cell_geometry: koshi_core::geometry::ImageCellGeometry,
     /// The terminal-local placement identity.
-    id: ImagePlacementId,
+    placement_id: ImagePlacementId,
     /// The connection-local identity of the image record.
-    content_id: u64,
+    image_content_id: u64,
     /// The decoded image and its display metadata, when this viewer has it.
-    record: Option<Arc<ImageRecord>>,
+    image_record: Option<Arc<ImageRecord>>,
     /// The zero-based row and column of the upper-left covered cell.
-    anchor: (u16, u16),
+    anchor_cell: (u16, u16),
     /// The number of covered columns.
-    columns: u16,
+    column_count: u16,
     /// The number of covered rows.
-    rows: u16,
+    row_count: u16,
 }
 
 impl ImagePlacementSnapshot {
     /// Build a placement with a complete image record and connection-local
-    /// content id equal to `id`.
+    /// content id equal to `image_content_id`.
     ///
     /// Returns `None` when an identity or dimension is zero, the placement
     /// has an anchor plus a row or column count greater than `u16::MAX + 1`,
-    /// the record action is `Transmit`, `record.source_rect()` returns an
+    /// the record action is `Transmit`, `record.compute_source_rect()` returns an
     /// error, or the decoded image has zero width or height, exceeds
-    /// `MAX_IMAGE_SIDE`, `MAX_IMAGE_PIXELS`, or `MAX_IMAGE_BYTES`, or has an
+    /// `MAX_IMAGE_SIDE_PIXEL_COUNT`, `MAX_IMAGE_PIXEL_COUNT`, or `MAX_IMAGE_BYTE_COUNT`, or has an
     /// RGBA length other than `width * height * 4`.
     #[must_use]
-    pub fn new(
-        id: ImagePlacementId,
-        record: Arc<ImageRecord>,
-        anchor: (u16, u16),
-        columns: u16,
-        rows: u16,
+    pub fn from_image_record(
+        placement_id: ImagePlacementId,
+        image_record: Arc<ImageRecord>,
+        anchor_cell: (u16, u16),
+        column_count: u16,
+        row_count: u16,
     ) -> Option<Self> {
-        Self::with_content_id(id, id, record, anchor, columns, rows)
+        Self::with_content_id(
+            placement_id,
+            placement_id,
+            image_record,
+            anchor_cell,
+            column_count,
+            row_count,
+        )
     }
 
     /// Build a placement with a complete image record and `content_id`.
     ///
     /// Returns `None` when an identity or dimension is zero, the placement
     /// has an anchor plus a row or column count greater than `u16::MAX + 1`,
-    /// the record action is `Transmit`, `record.source_rect()` returns an
+    /// the record action is `Transmit`, `record.compute_source_rect()` returns an
     /// error, or the decoded image has zero width or height, exceeds
-    /// `MAX_IMAGE_SIDE`, `MAX_IMAGE_PIXELS`, or `MAX_IMAGE_BYTES`, or has an
+    /// `MAX_IMAGE_SIDE_PIXEL_COUNT`, `MAX_IMAGE_PIXEL_COUNT`, or `MAX_IMAGE_BYTE_COUNT`, or has an
     /// RGBA length other than `width * height * 4`.
     #[must_use]
     pub fn with_content_id(
-        id: ImagePlacementId,
-        content_id: u64,
-        record: Arc<ImageRecord>,
-        anchor: (u16, u16),
-        columns: u16,
-        rows: u16,
+        placement_id: ImagePlacementId,
+        image_content_id: u64,
+        image_record: Arc<ImageRecord>,
+        anchor_cell: (u16, u16),
+        column_count: u16,
+        row_count: u16,
     ) -> Option<Self> {
-        if !valid_placement(id, content_id, anchor, columns, rows)
-            || record.action == ImageAction::Transmit
-            || record.source_rect().is_err()
-            || !valid_image_record(&record)
+        if !is_valid_placement(
+            placement_id,
+            image_content_id,
+            anchor_cell,
+            column_count,
+            row_count,
+        ) || image_record.action == ImageAction::Transmit
+            || image_record.compute_source_rect().is_err()
+            || !is_valid_image_record(&image_record)
         {
             return None;
         }
         Some(Self {
-            id,
-            content_id,
-            record: Some(record),
-            anchor,
-            columns,
-            rows,
-            geometry: full_image_geometry(columns, rows),
+            placement_id,
+            image_content_id,
+            image_record: Some(image_record),
+            anchor_cell,
+            column_count,
+            row_count,
+            cell_geometry: compute_full_image_geometry(column_count, row_count),
         })
     }
 
@@ -701,57 +742,64 @@ impl ImagePlacementSnapshot {
     /// has an anchor plus a row or column count greater than `u16::MAX + 1`.
     #[must_use]
     pub fn unavailable(
-        id: ImagePlacementId,
-        content_id: u64,
-        anchor: (u16, u16),
-        columns: u16,
-        rows: u16,
+        placement_id: ImagePlacementId,
+        image_content_id: u64,
+        anchor_cell: (u16, u16),
+        column_count: u16,
+        row_count: u16,
     ) -> Option<Self> {
-        valid_placement(id, content_id, anchor, columns, rows).then_some(Self {
-            id,
-            content_id,
-            record: None,
-            anchor,
-            columns,
-            rows,
-            geometry: full_image_geometry(columns, rows),
+        is_valid_placement(
+            placement_id,
+            image_content_id,
+            anchor_cell,
+            column_count,
+            row_count,
+        )
+        .then_some(Self {
+            placement_id,
+            image_content_id,
+            image_record: None,
+            anchor_cell,
+            column_count,
+            row_count,
+            cell_geometry: compute_full_image_geometry(column_count, row_count),
         })
     }
 
     /// Return the terminal-local placement identity.
     #[must_use]
-    pub fn id(&self) -> ImagePlacementId {
-        self.id
+    pub fn get_placement_id(&self) -> ImagePlacementId {
+        self.placement_id
     }
 
     /// Return the connection-local identity of the image record.
     #[must_use]
-    pub fn content_id(&self) -> u64 {
-        self.content_id
+    pub fn get_image_content_id(&self) -> u64 {
+        self.image_content_id
     }
 
     /// Return the complete image record when this viewer received it.
     #[must_use]
-    pub fn record(&self) -> Option<&ImageRecord> {
-        self.record.as_deref()
+    pub fn get_image_record(&self) -> Option<&ImageRecord> {
+        self.image_record.as_deref()
     }
 
     /// Return the shared complete image record.
     #[must_use]
-    pub fn record_arc(&self) -> Option<Arc<ImageRecord>> {
-        self.record.as_ref().map(Arc::clone)
+    pub fn clone_image_record(&self) -> Option<Arc<ImageRecord>> {
+        self.image_record.as_ref().map(Arc::clone)
     }
 
     /// Return the zero-based row and column of the placement anchor.
     #[must_use]
-    pub fn anchor(&self) -> (u16, u16) {
-        self.anchor
+    pub fn get_anchor_cell(&self) -> (u16, u16) {
+        self.anchor_cell
     }
 
-    /// Return the placement dimensions as `(rows, columns)`.
+    /// Return the placement dimensions as `(row_count, column_count)`.
     #[must_use]
-    pub fn dimensions(&self) -> (u16, u16) {
-        (self.rows, self.columns)
+    pub fn get_cell_dimensions(&self) -> (u16, u16) {
+        (self.row_count, self.column_count)
     }
 
     /// Set clipping geometry when the visible rectangle fits the complete image.
@@ -759,24 +807,24 @@ impl ImagePlacementSnapshot {
     /// Returns `None` when `geometry` does not contain this placement's full
     /// cell size.
     #[must_use]
-    pub fn with_geometry(
+    pub fn with_cell_geometry(
         mut self,
-        geometry: koshi_core::geometry::ImageCellGeometry,
+        cell_geometry: koshi_core::geometry::ImageCellGeometry,
     ) -> Option<Self> {
-        if !geometry.contains(koshi_core::geometry::Size {
-            cols: self.columns,
-            rows: self.rows,
+        if !cell_geometry.is_visible_size_contained(koshi_core::geometry::Size {
+            column_count: self.column_count,
+            row_count: self.row_count,
         }) {
             return None;
         }
-        self.geometry = geometry;
+        self.cell_geometry = cell_geometry;
         Some(self)
     }
 
     /// Return the complete cell size and the clipped top and left cells.
     #[must_use]
-    pub fn geometry(&self) -> koshi_core::geometry::ImageCellGeometry {
-        self.geometry
+    pub fn get_cell_geometry(&self) -> koshi_core::geometry::ImageCellGeometry {
+        self.cell_geometry
     }
 
     /// Copy a terminal placement into the frame while sharing its image record.
@@ -785,78 +833,81 @@ impl ImagePlacementSnapshot {
     /// geometry.
     #[must_use]
     pub fn from_placement(placement: &ImagePlacement) -> Self {
-        let (rows, columns) = placement.dimensions();
+        let (row_count, column_count) = placement.get_image_cell_dimensions();
         Self::with_content_id(
-            placement.id(),
-            placement.content_id(),
-            placement.render_record_arc(),
-            placement.anchor(),
-            columns,
-            rows,
+            placement.get_image_placement_id(),
+            placement.get_image_content_id(),
+            placement.clone_image_record(),
+            placement.get_image_anchor(),
+            column_count,
+            row_count,
         )
         .expect("terminal image placement is valid")
-        .with_geometry(placement.geometry())
+        .with_cell_geometry(placement.get_image_geometry())
         .expect("terminal image clipping is valid")
     }
 }
 
-fn full_image_geometry(columns: u16, rows: u16) -> koshi_core::geometry::ImageCellGeometry {
+fn compute_full_image_geometry(
+    column_count: u16,
+    row_count: u16,
+) -> koshi_core::geometry::ImageCellGeometry {
     koshi_core::geometry::ImageCellGeometry {
         full_size: koshi_core::geometry::Size {
-            cols: columns,
-            rows,
+            column_count,
+            row_count,
         },
-        offset: koshi_core::geometry::Point { x: 0, y: 0 },
+        cell_offset: koshi_core::geometry::Point { column: 0, row: 0 },
     }
 }
 
-fn valid_placement(
-    id: ImagePlacementId,
-    content_id: u64,
-    anchor: (u16, u16),
-    columns: u16,
-    rows: u16,
+fn is_valid_placement(
+    placement_id: ImagePlacementId,
+    image_content_id: u64,
+    anchor_cell: (u16, u16),
+    column_count: u16,
+    row_count: u16,
 ) -> bool {
-    id != 0
-        && content_id != 0
-        && columns != 0
-        && rows != 0
-        && u32::from(anchor.0) + u32::from(rows) <= u32::from(u16::MAX) + 1
-        && u32::from(anchor.1) + u32::from(columns) <= u32::from(u16::MAX) + 1
+    placement_id != 0
+        && image_content_id != 0
+        && column_count != 0
+        && row_count != 0
+        && u32::from(anchor_cell.0) + u32::from(row_count) <= u32::from(u16::MAX) + 1
+        && u32::from(anchor_cell.1) + u32::from(column_count) <= u32::from(u16::MAX) + 1
 }
 
-fn valid_image_record(record: &ImageRecord) -> bool {
-    let Ok(width) = usize::try_from(record.image.width) else {
+fn is_valid_image_record(image_record: &ImageRecord) -> bool {
+    let Ok(pixel_width) = usize::try_from(image_record.image.pixel_width) else {
         return false;
     };
-    let Ok(height) = usize::try_from(record.image.height) else {
+    let Ok(pixel_height) = usize::try_from(image_record.image.pixel_height) else {
         return false;
     };
-    let Some(pixels) = width.checked_mul(height) else {
+    let Some(pixel_count) = pixel_width.checked_mul(pixel_height) else {
         return false;
     };
-    let Some(expected_bytes) = pixels.checked_mul(4) else {
+    let Some(expected_byte_count) = pixel_count.checked_mul(4) else {
         return false;
     };
-    width > 0
-        && height > 0
-        && width <= MAX_IMAGE_SIDE
-        && height <= MAX_IMAGE_SIDE
-        && pixels <= MAX_IMAGE_PIXELS
-        && expected_bytes <= MAX_IMAGE_BYTES
-        && record.image.rgba.len() == expected_bytes
+    pixel_width > 0
+        && pixel_height > 0
+        && pixel_width <= MAX_IMAGE_SIDE_PIXEL_COUNT
+        && pixel_height <= MAX_IMAGE_SIDE_PIXEL_COUNT
+        && pixel_count <= MAX_IMAGE_PIXEL_COUNT
+        && expected_byte_count <= MAX_IMAGE_BYTE_COUNT
+        && image_record.image.rgba_bytes.len() == expected_byte_count
 }
 
 /// A pane's scrollback state. The renderer draws
-/// [`retained_lines`](Self::retained_lines) as the total in the
+/// [`retained_line_count`](Self::retained_line_count) as the total in the
 /// scroll-position indicator and paints nothing from
-/// [`truncated`](Self::truncated).
+/// [`is_truncated`](Self::is_truncated).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScrollbackMeta {
     /// Whether the buffer reached its cap and dropped its oldest lines.
-    pub truncated: bool,
+    pub is_truncated: bool,
     /// How many scrollback lines are currently retained.
-    pub retained_lines: usize,
+    pub retained_line_count: usize,
 }
 
 /// The viewing client's own state: what this client sees and how it is moded.
@@ -866,16 +917,16 @@ pub struct ScrollbackMeta {
 /// viewport independently.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientSnapshot {
-    /// The client's stable id.
-    pub id: ClientId,
+    /// The client's stable identifier.
+    pub client_id: ClientId,
     /// The client's terminal size in cells.
-    pub viewport: Size,
+    pub viewport_size: Size,
     /// The tab the client is currently viewing.
-    pub active_tab: TabId,
+    pub active_tab_id: TabId,
     /// The client's focused pane in the active tab, or `None` when the tab has
     /// no focusable pane. The renderer highlights the pane whose
     /// [`PaneSlot::pane_id`] matches, and places the cursor there.
-    pub focused_pane: Option<PaneId>,
+    pub focused_pane_id: Option<PaneId>,
     /// The client's input mode, as the session has it: it drives the mode tag,
     /// decides whether a paste from the client's own terminal reaches the pane,
     /// and is what `koshi list-clients` reports.
@@ -884,7 +935,7 @@ pub struct ClientSnapshot {
     /// tag to the mode indicator; orthogonal to [`lock_mode`](Self::lock_mode),
     /// so both can be on at once. The viewer also reads it off a painted frame
     /// to decide whether a press in a mouse-aware pane begins a highlight.
-    pub mouse_select: bool,
+    pub is_mouse_selection_enabled: bool,
 }
 
 /// Plugin-contributed UI for one frame. All slots are empty for a stock,
@@ -905,21 +956,21 @@ pub struct PluginUiSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Segment {
     /// The segment's rendered text.
-    pub text: String,
+    pub rendered_text: String,
 }
 
 /// A plugin-contributed notification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotificationView {
     /// The notification's rendered text.
-    pub text: String,
+    pub rendered_text: String,
 }
 
 /// A plugin-contributed floating overlay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OverlayView {
     /// The overlay's rendered text.
-    pub text: String,
+    pub rendered_text: String,
 }
 
 #[cfg(test)]

@@ -9,7 +9,7 @@
 //! command here talks to a runtime.
 //!
 //! Action subcommands carry typed arguments and map to the core command
-//! vocabulary through [`CliCommand::to_action`](crate::cli::CliCommand::to_action),
+//! vocabulary through [`CliCommand::build_action_command`](crate::cli::CliCommand::build_action_command),
 //! which pairs each with its `core:` action reference. Entity ids are parsed
 //! at this boundary: a flag accepts the id exactly as koshi prints it
 //! (`pane-<uuid>`) or as a bare UUID. A session or tab argument accepts the
@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use koshi_core::action::ActionRef;
+use koshi_core::action::ActionReference;
 use koshi_core::command::{
     ClosePaneArgs, CloseTabArgs, Command, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs,
     MoveTabArgs, NewPaneArgs, NewTabArgs, ResizePaneArgs, RunCommandPaneArgs, TabTarget,
@@ -44,23 +44,23 @@ use koshi_core::process::{ShellKind, SpawnSpec};
 pub struct Cli {
     /// Create a session, print its id, and return to the shell with nothing
     /// attached.
-    #[arg(long)]
-    pub headless: bool,
+    #[arg(long = "headless")]
+    pub is_headless: bool,
 
     /// Let the other users of this machine reach the session this command
     /// creates, whatever `koshi.kdl` says. Only with `--headless`.
-    #[arg(long, requires = "headless")]
-    pub allow_other_users: bool,
+    #[arg(long = "allow-other-users", requires = "is_headless")]
+    pub should_allow_other_users: bool,
 
     /// Launch with a named profile: read `profile/<name>.kdl` from the config
     /// directory and open its tabs and panes instead of a single shell.
-    #[arg(long, value_name = "NAME")]
-    pub profile: Option<String>,
+    #[arg(long = "profile", value_name = "NAME")]
+    pub profile_name: Option<String>,
 
     /// Run this invocation against the machine SERVER names — the name it was
     /// saved under, or the `host:port` it listens on — instead of this one.
-    #[arg(long, global = true, value_name = "SERVER")]
-    pub remote: Option<String>,
+    #[arg(long = "remote", global = true, value_name = "SERVER")]
+    pub remote_server_reference: Option<String>,
 
     /// The verb to run; absent on the bare interactive launch.
     #[command(subcommand)]
@@ -72,14 +72,14 @@ impl Cli {
     /// and no `--remote` — which launches the interactive app.
     #[must_use]
     pub fn is_interactive_launch(&self) -> bool {
-        !self.headless && self.command.is_none() && self.remote.is_none()
+        !self.is_headless && self.command.is_none() && self.remote_server_reference.is_none()
     }
 }
 
 /// A split or resize direction as typed on the command line. Converts to the
 /// core [`Direction`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum DirectionArg {
+pub enum DirectionArgument {
     /// Rightward.
     Right,
     /// Downward.
@@ -90,13 +90,13 @@ pub enum DirectionArg {
     Up,
 }
 
-impl From<DirectionArg> for Direction {
-    fn from(value: DirectionArg) -> Direction {
-        match value {
-            DirectionArg::Right => Direction::Right,
-            DirectionArg::Down => Direction::Down,
-            DirectionArg::Left => Direction::Left,
-            DirectionArg::Up => Direction::Up,
+impl From<DirectionArgument> for Direction {
+    fn from(direction_argument: DirectionArgument) -> Direction {
+        match direction_argument {
+            DirectionArgument::Right => Direction::Right,
+            DirectionArgument::Down => Direction::Down,
+            DirectionArgument::Left => Direction::Left,
+            DirectionArgument::Up => Direction::Up,
         }
     }
 }
@@ -104,20 +104,20 @@ impl From<DirectionArg> for Direction {
 /// A session named on the command line: a `session-<uuid>` id (or bare
 /// UUID), or a display name to look up against the running sessions.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SessionRef {
+pub enum SessionReference {
     /// An exact session id.
-    Id(SessionId),
+    SessionId(SessionId),
     /// A display name; it must match exactly one running session.
-    Name(String),
+    SessionName(String),
 }
 
-impl fmt::Display for SessionRef {
+impl fmt::Display for SessionReference {
     /// Writes the reference as the user named it: the session id for `Id`,
     /// the display name for `Name`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SessionRef::Id(id) => id.fmt(f),
-            SessionRef::Name(name) => f.write_str(name),
+            SessionReference::SessionId(session_id) => session_id.fmt(f),
+            SessionReference::SessionName(session_name) => f.write_str(session_name),
         }
     }
 }
@@ -125,22 +125,22 @@ impl fmt::Display for SessionRef {
 /// A tab named on the command line: a `tab-<uuid>` id (or bare UUID), or a
 /// display name to look up against the target session's tabs.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TabRef {
+pub enum TabReference {
     /// An exact tab id.
-    Id(TabId),
+    TabId(TabId),
     /// A display name; it must match exactly one tab.
-    Name(String),
+    TabName(String),
 }
 
 /// Parse a session argument: an id when the value reads as one, else a
 /// display name. An empty value is `Err("expected a session id or name")`.
-pub fn parse_session_ref(value: &str) -> Result<SessionRef, String> {
-    if value.is_empty() {
+pub fn parse_session_reference(session_argument: &str) -> Result<SessionReference, String> {
+    if session_argument.is_empty() {
         return Err("expected a session id or name".to_string());
     }
-    Ok(match parse_prefixed_uuid(value, "session") {
-        Ok(uuid) => SessionRef::Id(SessionId::from_uuid(uuid)),
-        Err(_) => SessionRef::Name(value.to_string()),
+    Ok(match parse_prefixed_uuid(session_argument, "session") {
+        Ok(uuid) => SessionReference::SessionId(SessionId::from_uuid(uuid)),
+        Err(_) => SessionReference::SessionName(session_argument.to_string()),
     })
 }
 
@@ -153,83 +153,100 @@ pub enum Expiry {
     Never,
 }
 
-/// Parse a length argument: a decimal count followed by one unit character —
+/// Parse a duration argument: a decimal count followed by one unit character —
 /// `s` seconds, `m` minutes, `h` hours, `d` days. `30s` is thirty seconds.
 ///
-/// `expected` is reported for every value this cannot read: an empty value, a
+/// `expected_error_message` is reported for every value this cannot read: an empty value, a
 /// unit character that is none of the four, a count that is not a whole
 /// number, and a count times its unit that overflows `u64` seconds.
-fn parse_length(value: &str, expected: &'static str) -> Result<Duration, String> {
-    let mut characters = value.chars();
-    let unit = characters.next_back().ok_or(expected)?;
-    let unit_seconds: u64 = match unit {
+fn parse_duration_argument(
+    duration_argument: &str,
+    expected_error_message: &'static str,
+) -> Result<Duration, String> {
+    let mut duration_characters = duration_argument.chars();
+    let duration_unit = duration_characters
+        .next_back()
+        .ok_or(expected_error_message)?;
+    let duration_unit_seconds: u64 = match duration_unit {
         's' => 1,
         'm' => 60,
         'h' => 3600,
         'd' => 86400,
-        _ => return Err(expected.to_string()),
+        _ => return Err(expected_error_message.to_string()),
     };
-    let count: u64 = characters.as_str().parse().map_err(|_| expected)?;
-    let seconds = count.checked_mul(unit_seconds).ok_or(expected)?;
-    Ok(Duration::from_secs(seconds))
+    let duration_unit_count: u64 = duration_characters
+        .as_str()
+        .parse()
+        .map_err(|_| expected_error_message)?;
+    let duration_seconds = duration_unit_count
+        .checked_mul(duration_unit_seconds)
+        .ok_or(expected_error_message)?;
+    Ok(Duration::from_secs(duration_seconds))
 }
 
 /// Parse an expiry argument: the word `never`, or a decimal count followed by
 /// one unit character — `s` seconds, `m` minutes, `h` hours, `d` days.
 ///
 /// A count times its unit that overflows `u64` seconds is an error.
-pub fn parse_expiry(value: &str) -> Result<Expiry, String> {
-    const EXPECTED: &str = "expected a length such as 30s, 15m, 24h or 7d, or the word never";
+pub fn parse_expiry(expiry_argument: &str) -> Result<Expiry, String> {
+    const EXPECTED_EXPIRY_ERROR_MESSAGE: &str =
+        "expected a length such as 30s, 15m, 24h or 7d, or the word never";
 
-    if value == "never" {
+    if expiry_argument == "never" {
         return Ok(Expiry::Never);
     }
-    Ok(Expiry::After(parse_length(value, EXPECTED)?))
+    Ok(Expiry::After(parse_duration_argument(
+        expiry_argument,
+        EXPECTED_EXPIRY_ERROR_MESSAGE,
+    )?))
 }
 
 /// Parse a `--since` flag value: a decimal count followed by one unit
 /// character — `s` seconds, `m` minutes, `h` hours, `d` days. Every value this
 /// cannot read is `Err("expected a length such as 30s, 15m, 24h or 7d")`.
-fn parse_since(value: &str) -> Result<Duration, String> {
-    parse_length(value, "expected a length such as 30s, 15m, 24h or 7d")
+fn parse_event_age(event_age_argument: &str) -> Result<Duration, String> {
+    parse_duration_argument(
+        event_age_argument,
+        "expected a length such as 30s, 15m, 24h or 7d",
+    )
 }
 
 /// Parse a `--filter` flag value: any text an event name may contain. An empty
 /// value is `Err("expected part of an event name, such as pane or TabMoved")`.
-fn parse_event_filter(value: &str) -> Result<String, String> {
-    if value.is_empty() {
+fn parse_event_filter(filter_argument: &str) -> Result<String, String> {
+    if filter_argument.is_empty() {
         return Err("expected part of an event name, such as pane or TabMoved".to_string());
     }
-    Ok(value.to_string())
+    Ok(filter_argument.to_string())
 }
 
 /// Parse a `--tab` flag value: an id when the value reads as one, else a
 /// display name. An empty value is `Err("expected a tab id or name")`.
-fn parse_tab_ref(value: &str) -> Result<TabRef, String> {
-    if value.is_empty() {
+fn parse_tab_reference(tab_reference_argument: &str) -> Result<TabReference, String> {
+    if tab_reference_argument.is_empty() {
         return Err("expected a tab id or name".to_string());
     }
-    Ok(match parse_prefixed_uuid(value, "tab") {
-        Ok(uuid) => TabRef::Id(TabId::from_uuid(uuid)),
-        Err(_) => TabRef::Name(value.to_string()),
+    Ok(match parse_prefixed_uuid(tab_reference_argument, "tab") {
+        Ok(uuid) => TabReference::TabId(TabId::from_uuid(uuid)),
+        Err(_) => TabReference::TabName(tab_reference_argument.to_string()),
     })
 }
 
 /// The `--session`/`--tab` flags of one invocation, resolved to concrete ids
 /// (a name looked up against the running sessions). The routing layer builds
-/// this before [`CliCommand::to_action`]; a verb without those flags takes
+/// this before [`CliCommand::build_action_command`]; a verb without those flags takes
 /// `default()`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ResolvedTargets {
     /// The resolved `--session` value.
-    pub session: Option<SessionId>,
+    pub session_id: Option<SessionId>,
     /// The resolved `--tab` value.
-    pub tab: Option<TabId>,
+    pub tab_id: Option<TabId>,
 }
 
 /// The output format of a discovery query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum FormatArg {
+pub enum OutputFormat {
     /// Human-readable aligned columns.
     Table,
     /// Machine-readable JSON.
@@ -241,7 +258,7 @@ pub enum FormatArg {
 /// Lifecycle commands (`list-sessions`, `kill-session`, `attach`, `detach`,
 /// `doctor`) run outside any session, except a bare `detach`, which names this
 /// pane's own client. Action subcommands carry their typed arguments and map
-/// to core commands via [`CliCommand::to_action`]. The discovery queries
+/// to core commands via [`CliCommand::build_action_command`]. The discovery queries
 /// (`inspect`, the `list-*` verbs) carry typed target and `--format`
 /// arguments; their answers are rendered by [`crate::output`]. `actions`
 /// introspects the action registry through its `list`/`explain` subcommands,
@@ -258,24 +275,29 @@ pub enum CliCommand {
     /// List running sessions, here and on every saved server that answers.
     ListSessions {
         /// Output format.
-        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
-        format: FormatArg,
+        #[arg(
+            long = "format",
+            value_enum,
+            value_name = "FORMAT",
+            default_value = "table"
+        )]
+        output_format: OutputFormat,
     },
     /// Kill a session; without a name, targets the only running session.
     KillSession {
         /// Session to kill, by id or name.
-        #[arg(value_parser = parse_session_ref, value_name = "SESSION")]
-        session: Option<SessionRef>,
+        #[arg(value_parser = parse_session_reference, value_name = "SESSION")]
+        session_reference: Option<SessionReference>,
     },
     /// Attach this terminal to a running session as a second window onto it.
     Attach {
         /// Session to attach to, by id or name; without one, pick from the
         /// sessions running for this user and on the saved servers.
         #[arg(value_name = "SESSION")]
-        session: Option<String>,
-        /// Save a server reached for the first time under this name, so later
+        session_argument: Option<String>,
+        /// Save a server reached for the first time under this name, so subsequent
         /// commands name it instead of its address.
-        #[arg(long, requires = "remote", value_name = "NAME")]
+        #[arg(long, requires = "remote_server_reference", value_name = "NAME")]
         save_as: Option<String>,
     },
     /// Detach one client, or with `--all` every client of a session. The
@@ -285,76 +307,91 @@ pub enum CliCommand {
         /// session name. With `--all`: the session whose clients all detach,
         /// by id or name. Without a value, this pane's own client or session.
         #[arg(value_name = "CLIENT_OR_SESSION")]
-        target: Option<String>,
+        detach_target: Option<String>,
         /// Detach every client attached to the session instead of one client.
-        #[arg(long)]
-        all: bool,
+        #[arg(long = "all")]
+        should_detach_all_clients: bool,
     },
     /// Check the local koshi installation and environment.
     Doctor {
         /// Output format.
-        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
-        format: FormatArg,
+        #[arg(
+            long = "format",
+            value_enum,
+            value_name = "FORMAT",
+            default_value = "table"
+        )]
+        output_format: OutputFormat,
     },
     /// Open a new pane running a shell; its working directory and
     /// environment come from the issuing terminal.
     NewPane {
         /// Split direction; omitted follows your `layout.new-pane-direction`
         /// setting.
-        #[arg(long, value_enum, value_name = "DIRECTION", conflicts_with = "stacked")]
-        direction: Option<DirectionArg>,
+        #[arg(
+            long = "direction",
+            value_enum,
+            value_name = "DIRECTION",
+            conflicts_with = "should_stack"
+        )]
+        direction: Option<DirectionArgument>,
         /// Stack the new pane onto the source pane instead of splitting.
-        #[arg(long)]
-        stacked: bool,
+        #[arg(long = "stacked")]
+        should_stack: bool,
         /// Pane to split from; defaults to the focused pane.
-        #[arg(long, value_parser = parse_pane_id, value_name = "PANE_ID")]
-        pane: Option<PaneId>,
+        #[arg(long = "pane", value_parser = parse_pane_id, value_name = "PANE_ID")]
+        pane_id: Option<PaneId>,
         /// Session receiving the pane, by id or name; defaults to the current
         /// session, else the only running one.
-        #[arg(long, value_parser = parse_session_ref, value_name = "SESSION")]
-        session: Option<SessionRef>,
+        #[arg(long = "session", value_parser = parse_session_reference, value_name = "SESSION")]
+        session_reference: Option<SessionReference>,
         /// Tab receiving the pane, by id or name; the split anchors on that
         /// tab's most recently focused pane. Defaults to the source pane's tab.
-        #[arg(long, value_parser = parse_tab_ref, value_name = "TAB", conflicts_with = "pane")]
-        tab: Option<TabRef>,
+        #[arg(
+            long = "tab",
+            value_parser = parse_tab_reference,
+            value_name = "TAB",
+            conflicts_with = "pane_id"
+        )]
+        tab_reference: Option<TabReference>,
         /// Client that shows and focuses the new pane; defaults to the
         /// issuing client, else the session's only attached one.
-        #[arg(long, value_parser = parse_client_id, value_name = "CLIENT_ID")]
-        client: Option<ClientId>,
+        #[arg(long = "client", value_parser = parse_client_id, value_name = "CLIENT_ID")]
+        client_id: Option<ClientId>,
     },
     /// Close a pane.
     ClosePane {
         /// Pane to close; defaults to the focused pane.
-        #[arg(long, value_parser = parse_pane_id, value_name = "PANE_ID")]
-        pane: Option<PaneId>,
+        #[arg(long = "pane", value_parser = parse_pane_id, value_name = "PANE_ID")]
+        pane_id: Option<PaneId>,
         /// Kill the pane's child immediately, overriding its close policy.
-        #[arg(long)]
-        force: bool,
+        #[arg(long = "force")]
+        should_force_close: bool,
     },
     /// Move one of a pane's borders: a positive size grows the pane toward
     /// the direction, a negative size shrinks it.
     ResizePane {
         /// Which of the pane's borders moves.
         #[arg(long, value_enum, value_name = "DIRECTION")]
-        direction: DirectionArg,
+        direction: DirectionArgument,
         /// Signed number of cells the border moves; defaults to 1.
         #[arg(
-            long,
+            long = "size",
             value_name = "SIZE",
             default_value_t = 1,
             allow_negative_numbers = true
         )]
-        size: i16,
+        resize_amount_cells: i16,
         /// Pane to resize; defaults to the focused pane.
-        #[arg(long, value_parser = parse_pane_id, value_name = "PANE_ID")]
-        pane: Option<PaneId>,
+        #[arg(long = "pane", value_parser = parse_pane_id, value_name = "PANE_ID")]
+        pane_id: Option<PaneId>,
     },
     /// Toggle fullscreen on the focused pane.
     TogglePaneFullscreen {
         /// Client whose own view goes fullscreen; defaults to the issuing
         /// client, else the session's only attached one.
-        #[arg(long, value_parser = parse_client_id, value_name = "CLIENT_ID")]
-        client: Option<ClientId>,
+        #[arg(long = "client", value_parser = parse_client_id, value_name = "CLIENT_ID")]
+        client_id: Option<ClientId>,
     },
     /// Type text into a pane's shell, as if it had been typed there. The text
     /// is followed by Enter, so the shell runs it; `--no-enter` leaves it
@@ -363,106 +400,106 @@ pub enum CliCommand {
         /// Text to type into the pane. Text starting with `-` is taken as text,
         /// not as a flag, so a scripted line is passed through whatever it says.
         #[arg(value_name = "TEXT", allow_hyphen_values = true)]
-        text: String,
+        input_text: String,
         /// Pane to type into; defaults to the focused pane.
-        #[arg(long, value_parser = parse_pane_id, value_name = "PANE_ID")]
-        pane: Option<PaneId>,
+        #[arg(long = "pane", value_parser = parse_pane_id, value_name = "PANE_ID")]
+        pane_id: Option<PaneId>,
         /// Leave the text at the prompt instead of pressing Enter after it.
-        #[arg(long)]
-        no_enter: bool,
+        #[arg(long = "no-enter")]
+        should_leave_input_at_prompt: bool,
     },
     /// Open a new tab; its first pane inherits the issuing terminal's
     /// working directory and environment.
     NewTab {
         /// Session the tab joins, by id or name; defaults to the current
         /// session, else the only running one.
-        #[arg(long, value_parser = parse_session_ref, value_name = "SESSION")]
-        session: Option<SessionRef>,
+        #[arg(long = "session", value_parser = parse_session_reference, value_name = "SESSION")]
+        session_reference: Option<SessionReference>,
         /// Client that switches onto the new tab; defaults to the issuing
         /// client, else the session's only attached one.
-        #[arg(long, value_parser = parse_client_id, value_name = "CLIENT_ID")]
-        client: Option<ClientId>,
+        #[arg(long = "client", value_parser = parse_client_id, value_name = "CLIENT_ID")]
+        client_id: Option<ClientId>,
     },
     /// Close a tab.
     CloseTab {
         /// Tab to close, by id or name; defaults to the focused tab.
-        #[arg(long, value_parser = parse_tab_ref, value_name = "TAB")]
-        tab: Option<TabRef>,
+        #[arg(long = "tab", value_parser = parse_tab_reference, value_name = "TAB")]
+        tab_reference: Option<TabReference>,
         /// Session owning the tab, by id or name; defaults to the current
         /// session, else the only running one.
-        #[arg(long, value_parser = parse_session_ref, value_name = "SESSION")]
-        session: Option<SessionRef>,
+        #[arg(long = "session", value_parser = parse_session_reference, value_name = "SESSION")]
+        session_reference: Option<SessionReference>,
         /// Kill every pane's child immediately, overriding each close policy.
-        #[arg(long)]
-        force: bool,
+        #[arg(long = "force")]
+        should_force_close: bool,
     },
     /// Focus the next tab.
     NextTab {
         /// Client whose view switches; defaults to the issuing client.
-        #[arg(long, value_parser = parse_client_id, value_name = "CLIENT_ID")]
-        client: Option<ClientId>,
+        #[arg(long = "client", value_parser = parse_client_id, value_name = "CLIENT_ID")]
+        client_id: Option<ClientId>,
     },
     /// Focus the previous tab.
     PreviousTab {
         /// Client whose view switches; defaults to the issuing client.
-        #[arg(long, value_parser = parse_client_id, value_name = "CLIENT_ID")]
-        client: Option<ClientId>,
+        #[arg(long = "client", value_parser = parse_client_id, value_name = "CLIENT_ID")]
+        client_id: Option<ClientId>,
     },
     /// Move a tab to a new index.
     MoveTab {
         /// Destination zero-based index.
-        #[arg(long, value_name = "INDEX")]
-        index: usize,
+        #[arg(long = "index", value_name = "INDEX")]
+        tab_index: usize,
         /// Tab to move, by id or name; defaults to the focused tab.
-        #[arg(long, value_parser = parse_tab_ref, value_name = "TAB")]
-        tab: Option<TabRef>,
+        #[arg(long = "tab", value_parser = parse_tab_reference, value_name = "TAB")]
+        tab_reference: Option<TabReference>,
     },
     /// Focus a tab by index, id, or name.
     FocusTab {
         /// Zero-based index of the tab to focus.
         #[arg(
-            long,
+            long = "index",
             value_name = "INDEX",
-            conflicts_with = "tab",
-            required_unless_present = "tab"
+            conflicts_with = "tab_reference",
+            required_unless_present = "tab_reference"
         )]
-        index: Option<usize>,
+        tab_index: Option<usize>,
         /// Tab to focus, by id or name.
-        #[arg(long, value_parser = parse_tab_ref, value_name = "TAB")]
-        tab: Option<TabRef>,
+        #[arg(long = "tab", value_parser = parse_tab_reference, value_name = "TAB")]
+        tab_reference: Option<TabReference>,
         /// Client whose view switches; defaults to the issuing client.
-        #[arg(long, value_parser = parse_client_id, value_name = "CLIENT_ID")]
-        client: Option<ClientId>,
+        #[arg(long = "client", value_parser = parse_client_id, value_name = "CLIENT_ID")]
+        client_id: Option<ClientId>,
     },
     /// Focus a pane by id.
     FocusPane {
         /// Pane to focus.
-        #[arg(long, value_parser = parse_pane_id, value_name = "PANE_ID")]
-        pane: PaneId,
+        #[arg(long = "pane", value_parser = parse_pane_id, value_name = "PANE_ID")]
+        pane_id: PaneId,
         /// Client whose focus moves; defaults to the issuing client.
-        #[arg(long, value_parser = parse_client_id, value_name = "CLIENT_ID")]
-        client: Option<ClientId>,
+        #[arg(long = "client", value_parser = parse_client_id, value_name = "CLIENT_ID")]
+        client_id: Option<ClientId>,
     },
     /// Enter locked input mode.
     Lock {
         /// Client to lock; defaults to the issuing client, else the
         /// session's only attached one.
-        #[arg(long, value_parser = parse_client_id, value_name = "CLIENT_ID")]
-        client: Option<ClientId>,
+        #[arg(long = "client", value_parser = parse_client_id, value_name = "CLIENT_ID")]
+        client_id: Option<ClientId>,
     },
     /// Leave locked input mode.
     Unlock {
         /// Client to unlock; defaults to the issuing client, else the
         /// session's only attached one.
-        #[arg(long, value_parser = parse_client_id, value_name = "CLIENT_ID")]
-        client: Option<ClientId>,
+        #[arg(long = "client", value_parser = parse_client_id, value_name = "CLIENT_ID")]
+        client_id: Option<ClientId>,
     },
     /// Toggle locked input mode.
     ToggleLock {
         /// Client whose lock flips; defaults to the issuing client, else the
         /// session's only attached one.
-        #[arg(long, value_parser = parse_client_id, value_name = "CLIENT_ID")]
-        client: Option<ClientId>,
+        #[arg(long = "client", value_parser = parse_client_id, value_name = "CLIENT_ID")]
+        client_id: Option<ClientId>,
     },
     /// Inspect, validate, and migrate configuration.
     Config {
@@ -498,19 +535,29 @@ pub enum CliCommand {
     /// Print the version of the koshi program running this command.
     Version {
         /// Output format.
-        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
-        format: FormatArg,
+        #[arg(
+            long = "format",
+            value_enum,
+            value_name = "FORMAT",
+            default_value = "table"
+        )]
+        output_format: OutputFormat,
     },
     /// Print the version of every running koshi server: this machine's
     /// router, and each running session.
     ServerVersion {
         /// Report this session alone, by id or name, and leave out the
         /// router.
-        #[arg(long, value_parser = parse_session_ref, value_name = "SESSION")]
-        session: Option<SessionRef>,
+        #[arg(long = "session", value_parser = parse_session_reference, value_name = "SESSION")]
+        session_reference: Option<SessionReference>,
         /// Output format.
-        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
-        format: FormatArg,
+        #[arg(
+            long = "format",
+            value_enum,
+            value_name = "FORMAT",
+            default_value = "table"
+        )]
+        output_format: OutputFormat,
     },
     /// Introspect the action registry.
     Actions {
@@ -522,63 +569,88 @@ pub enum CliCommand {
     Inspect {
         /// What to inspect.
         #[command(subcommand)]
-        target: InspectTarget,
+        inspect_target: InspectTarget,
     },
     /// List tabs across every running session.
     ListTabs {
         /// Narrow the listing to one session, by id or name.
-        #[arg(long, value_parser = parse_session_ref, value_name = "SESSION")]
-        session: Option<SessionRef>,
+        #[arg(long = "session", value_parser = parse_session_reference, value_name = "SESSION")]
+        session_reference: Option<SessionReference>,
         /// Output format.
-        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
-        format: FormatArg,
+        #[arg(
+            long = "format",
+            value_enum,
+            value_name = "FORMAT",
+            default_value = "table"
+        )]
+        output_format: OutputFormat,
     },
     /// List panes across every running session.
     ListPanes {
         /// Narrow the listing to one session, by id or name.
-        #[arg(long, value_parser = parse_session_ref, value_name = "SESSION")]
-        session: Option<SessionRef>,
+        #[arg(long = "session", value_parser = parse_session_reference, value_name = "SESSION")]
+        session_reference: Option<SessionReference>,
         /// Output format.
-        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
-        format: FormatArg,
+        #[arg(
+            long = "format",
+            value_enum,
+            value_name = "FORMAT",
+            default_value = "table"
+        )]
+        output_format: OutputFormat,
     },
     /// List clients attached across every running session.
     ListClients {
         /// Narrow the listing to one session, by id or name.
-        #[arg(long, value_parser = parse_session_ref, value_name = "SESSION")]
-        session: Option<SessionRef>,
+        #[arg(long = "session", value_parser = parse_session_reference, value_name = "SESSION")]
+        session_reference: Option<SessionReference>,
         /// Output format.
-        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
-        format: FormatArg,
+        #[arg(
+            long = "format",
+            value_enum,
+            value_name = "FORMAT",
+            default_value = "table"
+        )]
+        output_format: OutputFormat,
     },
     /// Open a new pane running the command given after `--`; its working
     /// directory and environment come from the issuing terminal.
     Run {
         /// Split direction; omitted follows your `layout.new-pane-direction`
         /// setting.
-        #[arg(long, value_enum, value_name = "DIRECTION", conflicts_with = "stacked")]
-        direction: Option<DirectionArg>,
+        #[arg(
+            long = "direction",
+            value_enum,
+            value_name = "DIRECTION",
+            conflicts_with = "should_stack"
+        )]
+        direction: Option<DirectionArgument>,
         /// Stack the new pane onto the source pane instead of splitting.
-        #[arg(long)]
-        stacked: bool,
+        #[arg(long = "stacked")]
+        should_stack: bool,
         /// Pane to split from; defaults to the focused pane.
-        #[arg(long, value_parser = parse_pane_id, value_name = "PANE_ID")]
-        pane: Option<PaneId>,
+        #[arg(long = "pane", value_parser = parse_pane_id, value_name = "PANE_ID")]
+        pane_id: Option<PaneId>,
         /// Session receiving the pane, by id or name; defaults to the current
         /// session, else the only running one.
-        #[arg(long, value_parser = parse_session_ref, value_name = "SESSION")]
-        session: Option<SessionRef>,
+        #[arg(long = "session", value_parser = parse_session_reference, value_name = "SESSION")]
+        session_reference: Option<SessionReference>,
         /// Tab receiving the pane, by id or name; the split anchors on that
         /// tab's most recently focused pane. Defaults to the source pane's tab.
-        #[arg(long, value_parser = parse_tab_ref, value_name = "TAB", conflicts_with = "pane")]
-        tab: Option<TabRef>,
+        #[arg(
+            long = "tab",
+            value_parser = parse_tab_reference,
+            value_name = "TAB",
+            conflicts_with = "pane_id"
+        )]
+        tab_reference: Option<TabReference>,
         /// Client that shows and focuses the new pane; defaults to the
         /// issuing client, else the session's only attached one.
-        #[arg(long, value_parser = parse_client_id, value_name = "CLIENT_ID")]
-        client: Option<ClientId>,
+        #[arg(long = "client", value_parser = parse_client_id, value_name = "CLIENT_ID")]
+        client_id: Option<ClientId>,
         /// The command and its arguments, given after `--`.
         #[arg(last = true, required = true, value_name = "COMMAND")]
-        command: Vec<String>,
+        command_arguments: Vec<String>,
     },
     /// Inspect keybindings.
     Keys {
@@ -590,13 +662,13 @@ pub enum CliCommand {
     #[command(hide = true)]
     ServeRouter {
         /// Runtime directory to serve; defaults to this user's own.
-        #[arg(long, value_name = "DIR")]
-        runtime_dir: Option<PathBuf>,
+        #[arg(long = "runtime-dir", value_name = "DIRECTORY")]
+        runtime_directory: Option<PathBuf>,
         /// Wait for the router lock instead of yielding to the router that
         /// holds it. A router restarting into a newly installed binary passes
         /// this.
-        #[arg(long)]
-        wait_for_lock: bool,
+        #[arg(long = "wait-for-lock")]
+        should_wait_for_lock: bool,
     },
     /// Run one session's server process.
     #[command(hide = true)]
@@ -608,20 +680,20 @@ pub enum CliCommand {
         #[arg(value_name = "SESSION_NAME")]
         session_name: String,
         /// Runtime directory to serve; defaults to this user's own.
-        #[arg(long, value_name = "DIR")]
-        runtime_dir: Option<PathBuf>,
+        #[arg(long = "runtime-dir", value_name = "DIRECTORY")]
+        runtime_directory: Option<PathBuf>,
         /// Open this profile's tabs and panes instead of one shell.
-        #[arg(long, value_name = "NAME")]
-        profile: Option<String>,
+        #[arg(long = "profile", value_name = "NAME")]
+        profile_name: Option<String>,
         /// Let the other users of this machine reach this session, whatever
         /// `koshi.kdl` says.
-        #[arg(long)]
-        allow_other_users: bool,
+        #[arg(long = "allow-other-users")]
+        should_allow_other_users: bool,
         /// Come up from the state at this path instead of seeding a new
         /// session. The image being replaced wrote it; this one reads it once
         /// and removes it.
-        #[arg(long, value_name = "PATH")]
-        resume: Option<PathBuf>,
+        #[arg(long = "resume", value_name = "PATH")]
+        resume_state_path: Option<PathBuf>,
         /// The secret the link to the process holding this session's panes
         /// presents. Windows only, and only on a resume run.
         #[arg(long, value_name = "TOKEN")]
@@ -641,10 +713,10 @@ pub enum CliCommand {
         /// The secret a link presents at Hello, which the session server
         /// generated.
         #[arg(value_name = "TOKEN")]
-        token: String,
+        supervisor_token: String,
         /// Runtime directory to serve; defaults to this user's own.
-        #[arg(long, value_name = "DIR")]
-        runtime_dir: Option<PathBuf>,
+        #[arg(long = "runtime-dir", value_name = "DIRECTORY")]
+        runtime_directory: Option<PathBuf>,
     },
     /// Print which resume-file formats this build takes back, as one JSON line.
     #[command(hide = true)]
@@ -659,7 +731,7 @@ pub enum ConfigCommand {
     /// Explain one file-qualified config key.
     Explain {
         /// Key to explain, such as `koshi.pane.min-cols`.
-        key: String,
+        config_key: String,
     },
     /// Validate every known config file without changing it.
     Check,
@@ -678,12 +750,17 @@ pub enum ShareCommand {
         identity: String,
         /// The one session the token reaches, by id or name. Without this
         /// flag the token reaches every session on this machine.
-        #[arg(long, value_parser = parse_session_ref, value_name = "SESSION")]
-        session: Option<SessionRef>,
+        #[arg(long = "session", value_parser = parse_session_reference, value_name = "SESSION")]
+        session_reference: Option<SessionReference>,
         /// How long the token works: a length such as `30s`, `15m`, `24h` or
         /// `7d`, or the word `never`.
-        #[arg(long, value_parser = parse_expiry, value_name = "DURATION", default_value = "24h")]
-        expires: Expiry,
+        #[arg(
+            long = "expires",
+            value_parser = parse_expiry,
+            value_name = "DURATION",
+            default_value = "24h"
+        )]
+        token_expiry: Expiry,
     },
     /// Stop the tokens one identity holds.
     Revoke {
@@ -693,19 +770,24 @@ pub enum ShareCommand {
         /// The one grant that stops working, named by the session it reaches,
         /// by id or name. Without this flag every grant that identity holds
         /// stops working.
-        #[arg(long, value_parser = parse_session_ref, value_name = "SESSION")]
-        session: Option<SessionRef>,
+        #[arg(long = "session", value_parser = parse_session_reference, value_name = "SESSION")]
+        session_reference: Option<SessionReference>,
     },
     /// List the grants this machine has made.
     List {
         /// List only the grants that reach this one session, by id or name.
         /// A grant that reaches every session on this machine is listed here
         /// too.
-        #[arg(long, value_parser = parse_session_ref, value_name = "SESSION")]
-        session: Option<SessionRef>,
+        #[arg(long = "session", value_parser = parse_session_reference, value_name = "SESSION")]
+        session_reference: Option<SessionReference>,
         /// Output format.
-        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
-        format: FormatArg,
+        #[arg(
+            long = "format",
+            value_enum,
+            value_name = "FORMAT",
+            default_value = "table"
+        )]
+        output_format: OutputFormat,
     },
 }
 
@@ -723,19 +805,24 @@ pub enum RemoteCommand {
     Edit {
         /// Server to change, by the name it was saved under or its address.
         #[arg(value_name = "SERVER")]
-        server: String,
+        server_reference: String,
     },
     /// List the servers this machine has saved.
     List {
         /// Output format.
-        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
-        format: FormatArg,
+        #[arg(
+            long = "format",
+            value_enum,
+            value_name = "FORMAT",
+            default_value = "table"
+        )]
+        output_format: OutputFormat,
     },
     /// Drop one saved server, so nothing on this machine holds its secret.
     Forget {
         /// Server to drop, by the name it was saved under or its address.
         #[arg(value_name = "SERVER")]
-        server: String,
+        server_reference: String,
     },
     /// Replace the secret of one saved server, after the machine serving it
     /// granted a fresh one.
@@ -743,7 +830,7 @@ pub enum RemoteCommand {
         /// Server whose secret is replaced, by the name it was saved under or
         /// its address.
         #[arg(value_name = "SERVER")]
-        server: String,
+        server_reference: String,
     },
 }
 
@@ -754,18 +841,28 @@ pub enum DebugCommand {
     /// clients — with each pane's command arguments hidden.
     DumpState {
         /// Output format.
-        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
-        format: FormatArg,
+        #[arg(
+            long = "format",
+            value_enum,
+            value_name = "FORMAT",
+            default_value = "table"
+        )]
+        output_format: OutputFormat,
     },
     /// Print each tab's split tree, the rectangles it solves to, the panes
     /// with no room, the stacks, and each client's focus.
     DumpLayout {
         /// Narrow the answer to one tab, by id or name.
-        #[arg(long, value_parser = parse_tab_ref, value_name = "TAB")]
-        tab: Option<TabRef>,
+        #[arg(long = "tab", value_parser = parse_tab_reference, value_name = "TAB")]
+        tab_reference: Option<TabReference>,
         /// Output format.
-        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
-        format: FormatArg,
+        #[arg(
+            long = "format",
+            value_enum,
+            value_name = "FORMAT",
+            default_value = "table"
+        )]
+        output_format: OutputFormat,
     },
     /// Print the events each running session published most recently, oldest
     /// first. Each line names the event and the ids it named, never any
@@ -773,21 +870,26 @@ pub enum DebugCommand {
     Events {
         /// Keep only the events recorded within this much of now, e.g. `30s`,
         /// `5m`, `2h`, `7d`.
-        #[arg(long, value_parser = parse_since, value_name = "LENGTH")]
-        since: Option<Duration>,
+        #[arg(long = "since", value_parser = parse_event_age, value_name = "LENGTH")]
+        event_age_limit: Option<Duration>,
         /// Keep only the events whose name contains this text, matched
         /// ignoring case, e.g. `pane` or `TabMoved`.
-        #[arg(long, value_parser = parse_event_filter, value_name = "NAME")]
-        filter: Option<String>,
+        #[arg(long = "filter", value_parser = parse_event_filter, value_name = "NAME")]
+        event_name_filter: Option<String>,
         /// Output format.
-        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
-        format: FormatArg,
+        #[arg(
+            long = "format",
+            value_enum,
+            value_name = "FORMAT",
+            default_value = "table"
+        )]
+        output_format: OutputFormat,
     },
 }
 
 /// Which keymap layer authored a binding, as typed on the command line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum ScopeArg {
+pub enum KeymapScope {
     /// The built-in default binding table.
     Default,
     /// The user's keybinding file.
@@ -805,42 +907,62 @@ pub enum KeysCommand {
     /// List effective keybindings per mode.
     List {
         /// Limit the listing to one input mode.
-        #[arg(long, value_name = "MODE")]
-        mode: Option<String>,
+        #[arg(long = "mode", value_name = "MODE")]
+        input_mode_name: Option<String>,
         /// Limit the listing to bindings authored by one layer.
         #[arg(long, value_enum, value_name = "SCOPE")]
-        scope: Option<ScopeArg>,
+        scope: Option<KeymapScope>,
         /// List plugin-recommended bindings instead of effective ones.
-        #[arg(long)]
-        recommended: bool,
+        #[arg(long = "recommended")]
+        is_recommended: bool,
         /// Output format.
-        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
-        format: FormatArg,
+        #[arg(
+            long = "format",
+            value_enum,
+            value_name = "FORMAT",
+            default_value = "table"
+        )]
+        output_format: OutputFormat,
     },
     /// Describe a key sequence: its action, source layer, and metadata.
     Describe {
         /// The key sequence, in the angle grammar (`"<C-p> n"`).
         #[arg(value_name = "KEY_SEQUENCE")]
-        sequence: String,
+        key_sequence_text: String,
         /// Output format.
-        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
-        format: FormatArg,
+        #[arg(
+            long = "format",
+            value_enum,
+            value_name = "FORMAT",
+            default_value = "table"
+        )]
+        output_format: OutputFormat,
     },
     /// Report keybinding conflicts, dead bindings, and warnings.
     Conflicts {
         /// Output format.
-        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
-        format: FormatArg,
+        #[arg(
+            long = "format",
+            value_enum,
+            value_name = "FORMAT",
+            default_value = "table"
+        )]
+        output_format: OutputFormat,
     },
     /// Dry-run a keybinding file: parse and conflict-check it without
     /// applying anything.
     Validate {
         /// Path of the keybinding KDL file to check.
         #[arg(value_name = "PATH")]
-        path: PathBuf,
+        keybinding_file_path: PathBuf,
         /// Output format.
-        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
-        format: FormatArg,
+        #[arg(
+            long = "format",
+            value_enum,
+            value_name = "FORMAT",
+            default_value = "table"
+        )]
+        output_format: OutputFormat,
     },
 }
 
@@ -852,38 +974,58 @@ pub enum InspectTarget {
     /// Report a session: name, creation time, clients, and pane count.
     Session {
         /// Session to inspect, by id or name.
-        #[arg(value_parser = parse_session_ref, value_name = "SESSION")]
-        session: SessionRef,
+        #[arg(value_parser = parse_session_reference, value_name = "SESSION")]
+        session_reference: SessionReference,
         /// Output format.
-        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
-        format: FormatArg,
+        #[arg(
+            long = "format",
+            value_enum,
+            value_name = "FORMAT",
+            default_value = "table"
+        )]
+        output_format: OutputFormat,
     },
     /// Report a tab: name, position, active pane, and pane count.
     Tab {
         /// Tab to inspect, by id or name.
-        #[arg(value_parser = parse_tab_ref, value_name = "TAB")]
-        tab: TabRef,
+        #[arg(value_parser = parse_tab_reference, value_name = "TAB")]
+        tab_reference: TabReference,
         /// Output format.
-        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
-        format: FormatArg,
+        #[arg(
+            long = "format",
+            value_enum,
+            value_name = "FORMAT",
+            default_value = "table"
+        )]
+        output_format: OutputFormat,
     },
     /// Report a pane: location, title, cwd, command, state, and rectangle.
     Pane {
         /// Pane to inspect.
         #[arg(value_parser = parse_pane_id, value_name = "PANE_ID")]
-        pane: PaneId,
+        pane_id: PaneId,
         /// Output format.
-        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
-        format: FormatArg,
+        #[arg(
+            long = "format",
+            value_enum,
+            value_name = "FORMAT",
+            default_value = "table"
+        )]
+        output_format: OutputFormat,
     },
     /// Report a client: session, attach time, viewport, focus, and lock state.
     Client {
         /// Client to inspect.
         #[arg(value_parser = parse_client_id, value_name = "CLIENT_ID")]
-        client: ClientId,
+        client_id: ClientId,
         /// Output format.
-        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
-        format: FormatArg,
+        #[arg(
+            long = "format",
+            value_enum,
+            value_name = "FORMAT",
+            default_value = "table"
+        )]
+        output_format: OutputFormat,
     },
 }
 
@@ -895,18 +1037,28 @@ pub enum ActionsCommand {
     /// List every supported action with its internal command and scope.
     List {
         /// Output format.
-        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
-        format: FormatArg,
+        #[arg(
+            long = "format",
+            value_enum,
+            value_name = "FORMAT",
+            default_value = "table"
+        )]
+        output_format: OutputFormat,
     },
     /// Explain one action: its scope, target compatibility, internal command,
     /// and usage examples.
     Explain {
         /// Action to explain, as a bare name (`new-pane`) or full ref
         /// (`core:new-pane`).
-        action: String,
+        action_reference_text: String,
         /// Output format.
-        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
-        format: FormatArg,
+        #[arg(
+            long = "format",
+            value_enum,
+            value_name = "FORMAT",
+            default_value = "table"
+        )]
+        output_format: OutputFormat,
     },
 }
 
@@ -914,7 +1066,7 @@ impl CliCommand {
     /// The typed action this subcommand requests: its `core:` action
     /// reference paired with the fully-built core [`Command`].
     ///
-    /// `targets` carries this invocation's `--session`/`--tab` flags already
+    /// `resolved_targets` carries this invocation's `--session`/`--tab` flags already
     /// resolved to ids (a name looked up against the running sessions); the
     /// routing layer builds it, and a verb without those flags passes
     /// `ResolvedTargets::default()`. A resolved target wins; without one, a
@@ -922,7 +1074,7 @@ impl CliCommand {
     ///
     /// `new_pane_direction` is this CLI's own `layout.new-pane-direction`
     /// setting, read from `koshi.kdl` by
-    /// [`config::new_pane_direction`](koshi_link::config::new_pane_direction). A
+    /// [`config::resolve_new_pane_direction`](koshi_link::config::resolve_new_pane_direction). A
     /// pane-opening verb given no `--direction` splits toward it.
     ///
     /// `None` for the verbs that are not actions — the lifecycle commands
@@ -933,116 +1085,143 @@ impl CliCommand {
     /// hidden `serve-router`, `serve-session`, `serve-pty-supervisor` and
     /// `resume-support`.
     #[must_use]
-    pub fn to_action(
+    pub fn build_action_command(
         &self,
-        targets: &ResolvedTargets,
+        resolved_targets: &ResolvedTargets,
         new_pane_direction: Direction,
-    ) -> Option<(ActionRef, Command)> {
-        let (name, command) = match self {
+    ) -> Option<(ActionReference, Command)> {
+        let (action_name, command) = match self {
             CliCommand::NewPane {
                 direction,
-                stacked,
-                pane,
-                session: _,
-                tab,
-                client,
+                should_stack,
+                pane_id,
+                session_reference: _,
+                tab_reference,
+                client_id,
             } => (
                 "new-pane",
                 Command::NewPane(NewPaneArgs {
-                    source: *pane,
-                    tab: targets.tab.or(tab_ref_id(tab)),
+                    source_pane_id: *pane_id,
+                    tab_id: resolved_targets
+                        .tab_id
+                        .or(resolve_tab_reference_id(tab_reference)),
                     direction: direction.map(Direction::from).unwrap_or(new_pane_direction),
-                    stacked: *stacked,
-                    cwd: None,
-                    command: None,
-                    client: *client,
+                    should_stack: *should_stack,
+                    working_directory: None,
+                    spawn_spec: None,
+                    client_id: *client_id,
                 }),
             ),
-            CliCommand::ClosePane { pane, force } => (
+            CliCommand::ClosePane {
+                pane_id,
+                should_force_close,
+            } => (
                 "close-pane",
                 Command::ClosePane(ClosePaneArgs {
-                    pane: *pane,
-                    force: *force,
-                    tree: false,
+                    pane_id: *pane_id,
+                    should_force_close: *should_force_close,
+                    should_kill_process_tree: false,
                 }),
             ),
             CliCommand::ResizePane {
                 direction,
-                size,
-                pane,
+                resize_amount_cells,
+                pane_id,
             } => (
                 "resize-pane",
                 Command::ResizePane(ResizePaneArgs {
-                    pane: *pane,
+                    pane_id: *pane_id,
                     direction: Direction::from(*direction),
-                    size: *size,
+                    resize_amount_cells: *resize_amount_cells,
                 }),
             ),
-            CliCommand::TogglePaneFullscreen { client: _ } => {
+            CliCommand::TogglePaneFullscreen { client_id: _ } => {
                 ("toggle-pane-fullscreen", Command::TogglePaneFullscreen)
             }
             CliCommand::Input {
-                text,
-                pane,
-                no_enter,
+                input_text,
+                pane_id,
+                should_leave_input_at_prompt,
             } => {
                 // The text alone sits at the shell prompt; the text plus `\r`,
                 // the byte the Enter key sends, runs as a line.
-                let mut data = text.clone().into_bytes();
-                if !no_enter {
-                    data.push(b'\r');
+                let mut input_bytes = input_text.clone().into_bytes();
+                if !should_leave_input_at_prompt {
+                    input_bytes.push(b'\r');
                 }
                 (
                     "write-to-pane",
-                    Command::WriteToPane(WriteToPaneArgs { pane: *pane, data }),
+                    Command::WriteToPane(WriteToPaneArgs {
+                        pane_id: *pane_id,
+                        input_bytes,
+                    }),
                 )
             }
-            CliCommand::NewTab { session: _, client } => (
+            CliCommand::NewTab {
+                session_reference: _,
+                client_id,
+            } => (
                 "new-tab",
                 Command::NewTab(NewTabArgs {
-                    cwd: None,
-                    client: *client,
+                    working_directory: None,
+                    client_id: *client_id,
                 }),
             ),
             CliCommand::CloseTab {
-                tab,
-                session: _,
-                force,
+                tab_reference,
+                session_reference: _,
+                should_force_close,
             } => (
                 "close-tab",
                 Command::CloseTab(CloseTabArgs {
-                    tab: targets.tab.or(tab_ref_id(tab)),
-                    force: *force,
-                    tree: false,
+                    tab_id: resolved_targets
+                        .tab_id
+                        .or(resolve_tab_reference_id(tab_reference)),
+                    should_force_close: *should_force_close,
+                    should_kill_process_tree: false,
                 }),
             ),
-            CliCommand::NextTab { client } => (
+            CliCommand::NextTab { client_id } => (
                 "next-tab",
                 Command::FocusTab(FocusTabArgs {
-                    target: TabTarget::Next,
-                    client: *client,
+                    focus_target: TabTarget::Next,
+                    client_id: *client_id,
                 }),
             ),
-            CliCommand::PreviousTab { client } => (
+            CliCommand::PreviousTab { client_id } => (
                 "previous-tab",
                 Command::FocusTab(FocusTabArgs {
-                    target: TabTarget::Prev,
-                    client: *client,
+                    focus_target: TabTarget::Prev,
+                    client_id: *client_id,
                 }),
             ),
-            CliCommand::MoveTab { index, tab } => (
+            CliCommand::MoveTab {
+                tab_index,
+                tab_reference,
+            } => (
                 "move-tab",
                 Command::MoveTab(MoveTabArgs {
-                    tab: targets.tab.or(tab_ref_id(tab)),
-                    index: *index,
+                    tab_id: resolved_targets
+                        .tab_id
+                        .or(resolve_tab_reference_id(tab_reference)),
+                    target_tab_index: *tab_index,
                 }),
             ),
-            CliCommand::FocusTab { index, tab, client } => {
+            CliCommand::FocusTab {
+                tab_index,
+                tab_reference,
+                client_id,
+            } => {
                 // The parser enforces exactly one of the two flags, and the
                 // routing layer resolves a `--tab` name to its id.
-                let target = match (index, targets.tab.or(tab_ref_id(tab))) {
-                    (Some(index), None) => TabTarget::Index(*index),
-                    (None, Some(tab)) => TabTarget::Id(tab),
+                let focus_target = match (
+                    tab_index,
+                    resolved_targets
+                        .tab_id
+                        .or(resolve_tab_reference_id(tab_reference)),
+                ) {
+                    (Some(tab_index), None) => TabTarget::Index(*tab_index),
+                    (None, Some(tab_id)) => TabTarget::Id(tab_id),
                     _ => unreachable!(
                         "clap enforces exactly one of --index/--tab, and routing resolves a tab name"
                     ),
@@ -1050,54 +1229,58 @@ impl CliCommand {
                 (
                     "focus-tab",
                     Command::FocusTab(FocusTabArgs {
-                        target,
-                        client: *client,
+                        focus_target,
+                        client_id: *client_id,
                     }),
                 )
             }
-            CliCommand::FocusPane { pane, client } => (
+            CliCommand::FocusPane { pane_id, client_id } => (
                 "focus-pane",
                 Command::FocusPane(FocusPaneArgs {
-                    target: FocusTarget::Pane(*pane),
-                    client: *client,
+                    focus_target: FocusTarget::Pane(*pane_id),
+                    client_id: *client_id,
                 }),
             ),
-            CliCommand::Lock { client } => (
+            CliCommand::Lock { client_id } => (
                 "lock",
                 Command::SetLockMode(LockModeArgs {
-                    locked: true,
-                    client: *client,
+                    is_locked: true,
+                    client_id: *client_id,
                 }),
             ),
-            CliCommand::Unlock { client } => (
+            CliCommand::Unlock { client_id } => (
                 "unlock",
                 Command::SetLockMode(LockModeArgs {
-                    locked: false,
-                    client: *client,
+                    is_locked: false,
+                    client_id: *client_id,
                 }),
             ),
-            CliCommand::ToggleLock { client } => (
+            CliCommand::ToggleLock { client_id } => (
                 "toggle-lock",
-                Command::ToggleLockMode(ToggleLockModeArgs { client: *client }),
+                Command::ToggleLockMode(ToggleLockModeArgs {
+                    client_id: *client_id,
+                }),
             ),
             CliCommand::Run {
                 direction,
-                stacked,
-                pane,
-                session: _,
-                tab,
-                client,
-                command,
+                should_stack,
+                pane_id,
+                session_reference: _,
+                tab_reference,
+                client_id,
+                command_arguments,
             } => (
                 "run",
                 Command::RunCommandPane(RunCommandPaneArgs {
-                    command: spawn_spec_from_argv(command),
-                    cwd: None,
-                    source: *pane,
-                    tab: targets.tab.or(tab_ref_id(tab)),
+                    spawn_spec: build_spawn_spec_from_arguments(command_arguments),
+                    working_directory: None,
+                    source_pane_id: *pane_id,
+                    tab_id: resolved_targets
+                        .tab_id
+                        .or(resolve_tab_reference_id(tab_reference)),
                     direction: direction.map(Direction::from).unwrap_or(new_pane_direction),
-                    stacked: *stacked,
-                    client: *client,
+                    should_stack: *should_stack,
+                    client_id: *client_id,
                 }),
             ),
             CliCommand::ListSessions { .. }
@@ -1124,21 +1307,29 @@ impl CliCommand {
             | CliCommand::ServePtySupervisor { .. }
             | CliCommand::ResumeSupport => return None,
         };
-        let action = ActionRef::core(name)
+        let action_reference = ActionReference::from_core_action_name(action_name)
             .expect("CLI action names are constants satisfying the action-name grammar");
-        Some((action, command))
+        Some((action_reference, command))
     }
 
     /// The `--session` flag of this invocation, for the verbs that take one.
     /// The routing layer reads it to pick which running session the command
     /// is sent to.
     #[must_use]
-    pub fn target_session(&self) -> Option<&SessionRef> {
+    pub fn get_target_session_reference(&self) -> Option<&SessionReference> {
         match self {
-            CliCommand::NewPane { session, .. }
-            | CliCommand::Run { session, .. }
-            | CliCommand::NewTab { session, .. }
-            | CliCommand::CloseTab { session, .. } => session.as_ref(),
+            CliCommand::NewPane {
+                session_reference, ..
+            }
+            | CliCommand::Run {
+                session_reference, ..
+            }
+            | CliCommand::NewTab {
+                session_reference, ..
+            }
+            | CliCommand::CloseTab {
+                session_reference, ..
+            } => session_reference.as_ref(),
             _ => None,
         }
     }
@@ -1147,13 +1338,13 @@ impl CliCommand {
     /// routing layer resolves it to a concrete tab id within the target
     /// session.
     #[must_use]
-    pub fn target_tab(&self) -> Option<&TabRef> {
+    pub fn get_target_tab_reference(&self) -> Option<&TabReference> {
         match self {
-            CliCommand::NewPane { tab, .. }
-            | CliCommand::Run { tab, .. }
-            | CliCommand::CloseTab { tab, .. }
-            | CliCommand::MoveTab { tab, .. }
-            | CliCommand::FocusTab { tab, .. } => tab.as_ref(),
+            CliCommand::NewPane { tab_reference, .. }
+            | CliCommand::Run { tab_reference, .. }
+            | CliCommand::CloseTab { tab_reference, .. }
+            | CliCommand::MoveTab { tab_reference, .. }
+            | CliCommand::FocusTab { tab_reference, .. } => tab_reference.as_ref(),
             _ => None,
         }
     }
@@ -1161,14 +1352,14 @@ impl CliCommand {
     /// The explicit pane this invocation names, for the verbs that take one.
     /// The routing layer reads it to find the session owning that pane.
     #[must_use]
-    pub fn target_pane(&self) -> Option<PaneId> {
+    pub fn get_target_pane_id(&self) -> Option<PaneId> {
         match self {
-            CliCommand::NewPane { pane, .. }
-            | CliCommand::Run { pane, .. }
-            | CliCommand::ClosePane { pane, .. }
-            | CliCommand::ResizePane { pane, .. }
-            | CliCommand::Input { pane, .. } => *pane,
-            CliCommand::FocusPane { pane, .. } => Some(*pane),
+            CliCommand::NewPane { pane_id, .. }
+            | CliCommand::Run { pane_id, .. }
+            | CliCommand::ClosePane { pane_id, .. }
+            | CliCommand::ResizePane { pane_id, .. }
+            | CliCommand::Input { pane_id, .. } => *pane_id,
+            CliCommand::FocusPane { pane_id, .. } => Some(*pane_id),
             _ => None,
         }
     }
@@ -1177,36 +1368,36 @@ impl CliCommand {
     /// one. The routing layer reads it to find the session that client is
     /// attached to.
     #[must_use]
-    pub fn target_client(&self) -> Option<ClientId> {
+    pub fn get_target_client_id(&self) -> Option<ClientId> {
         match self {
-            CliCommand::NewPane { client, .. }
-            | CliCommand::Run { client, .. }
-            | CliCommand::NewTab { client, .. }
-            | CliCommand::NextTab { client }
-            | CliCommand::PreviousTab { client }
-            | CliCommand::FocusTab { client, .. }
-            | CliCommand::FocusPane { client, .. }
-            | CliCommand::Lock { client }
-            | CliCommand::Unlock { client }
-            | CliCommand::ToggleLock { client }
-            | CliCommand::TogglePaneFullscreen { client } => *client,
+            CliCommand::NewPane { client_id, .. }
+            | CliCommand::Run { client_id, .. }
+            | CliCommand::NewTab { client_id, .. }
+            | CliCommand::NextTab { client_id }
+            | CliCommand::PreviousTab { client_id }
+            | CliCommand::FocusTab { client_id, .. }
+            | CliCommand::FocusPane { client_id, .. }
+            | CliCommand::Lock { client_id }
+            | CliCommand::Unlock { client_id }
+            | CliCommand::ToggleLock { client_id }
+            | CliCommand::TogglePaneFullscreen { client_id } => *client_id,
             _ => None,
         }
     }
 
     /// The client this invocation names that no [`Command`] carries; it rides
     /// on the command's source instead
-    /// ([`CommandSource::external_cli`](koshi_core::command::CommandSource::external_cli)).
+    /// ([`CommandSource::ExternalCli`](koshi_core::command::CommandSource::ExternalCli)).
     /// Only `toggle-pane-fullscreen` answers `Some`: every other client-taking
     /// verb puts its client in the command's own arguments, which travel on
     /// both routes.
     /// [`CommandSource::InSessionCli`](koshi_core::command::CommandSource::InSessionCli)
     /// carries no client, and a command with one here never takes the
-    /// in-session route ([`crate::targeting::route`]).
+    /// in-session route ([`crate::targeting::resolve_command_route`]).
     #[must_use]
-    pub fn source_client(&self) -> Option<ClientId> {
+    pub fn get_source_client_id(&self) -> Option<ClientId> {
         match self {
-            CliCommand::TogglePaneFullscreen { client } => *client,
+            CliCommand::TogglePaneFullscreen { client_id } => *client_id,
             _ => None,
         }
     }
@@ -1214,7 +1405,7 @@ impl CliCommand {
     /// Whether this is a discovery query: a `list-*` verb or an `inspect`
     /// form.
     #[must_use]
-    pub fn is_discovery(&self) -> bool {
+    pub fn is_discovery_query(&self) -> bool {
         matches!(
             self,
             CliCommand::ListSessions { .. }
@@ -1229,14 +1420,23 @@ impl CliCommand {
     /// listing's `--session` flag, or the session an `inspect session` names.
     /// Every other query spans all running sessions.
     #[must_use]
-    pub fn discovery_session(&self) -> Option<&SessionRef> {
+    pub fn get_discovery_session_reference(&self) -> Option<&SessionReference> {
         match self {
-            CliCommand::ListTabs { session, .. }
-            | CliCommand::ListPanes { session, .. }
-            | CliCommand::ListClients { session, .. } => session.as_ref(),
+            CliCommand::ListTabs {
+                session_reference, ..
+            }
+            | CliCommand::ListPanes {
+                session_reference, ..
+            }
+            | CliCommand::ListClients {
+                session_reference, ..
+            } => session_reference.as_ref(),
             CliCommand::Inspect {
-                target: InspectTarget::Session { session, .. },
-            } => Some(session),
+                inspect_target:
+                    InspectTarget::Session {
+                        session_reference, ..
+                    },
+            } => Some(session_reference),
             _ => None,
         }
     }
@@ -1244,9 +1444,9 @@ impl CliCommand {
 
 /// The id inside a `--tab` flag given directly as one; a name (or no flag)
 /// yields `None` and needs the routing layer's lookup.
-fn tab_ref_id(tab: &Option<TabRef>) -> Option<TabId> {
-    match tab {
-        Some(TabRef::Id(id)) => Some(*id),
+fn resolve_tab_reference_id(tab_reference: &Option<TabReference>) -> Option<TabId> {
+    match tab_reference {
+        Some(TabReference::TabId(tab_id)) => Some(*tab_id),
         _ => None,
     }
 }
@@ -1257,14 +1457,14 @@ fn tab_ref_id(tab: &Option<TabRef>) -> Option<TabId> {
 /// the command is sent.
 ///
 /// Panics when `argv` is empty.
-fn spawn_spec_from_argv(argv: &[String]) -> SpawnSpec {
-    let program = PathBuf::from(&argv[0]);
+fn build_spawn_spec_from_arguments(command_arguments: &[String]) -> SpawnSpec {
+    let program = PathBuf::from(&command_arguments[0]);
     let shell_kind = ShellKind::from_program(&program);
     SpawnSpec {
         program,
-        args: argv[1..].to_vec(),
-        cwd: None,
-        env: BTreeMap::new(),
+        arguments: command_arguments[1..].to_vec(),
+        working_directory: None,
+        environment_variables: BTreeMap::new(),
         shell_kind,
     }
 }
@@ -1274,18 +1474,18 @@ fn spawn_spec_from_argv(argv: &[String]) -> SpawnSpec {
 // `parse_pane_id("tab-<uuid>")` is an error, not a pane id.
 
 /// Parse a session id argument into a [`SessionId`].
-fn parse_session_id(value: &str) -> Result<SessionId, String> {
-    parse_prefixed_uuid(value, "session").map(SessionId::from_uuid)
+fn parse_session_id(session_argument: &str) -> Result<SessionId, String> {
+    parse_prefixed_uuid(session_argument, "session").map(SessionId::from_uuid)
 }
 
 /// Parse a `--pane` flag value into a [`PaneId`].
-fn parse_pane_id(value: &str) -> Result<PaneId, String> {
-    parse_prefixed_uuid(value, "pane").map(PaneId::from_uuid)
+fn parse_pane_id(pane_argument: &str) -> Result<PaneId, String> {
+    parse_prefixed_uuid(pane_argument, "pane").map(PaneId::from_uuid)
 }
 
 /// Parse a `--client` flag value into a [`ClientId`].
-fn parse_client_id(value: &str) -> Result<ClientId, String> {
-    parse_prefixed_uuid(value, "client").map(ClientId::from_uuid)
+fn parse_client_id(client_argument: &str) -> Result<ClientId, String> {
+    parse_prefixed_uuid(client_argument, "client").map(ClientId::from_uuid)
 }
 
 #[cfg(test)]

@@ -5,17 +5,17 @@ use super::{GraphicsError, GraphicsOperation, ImageDisplay};
 pub(crate) use koshi_kitty::{KittyCommand, KittyCommandKind, KittyDelete};
 
 pub(super) fn attach_error_replies(
-    events: &mut [Result<GraphicsOperation, GraphicsError>],
-    display: &ImageDisplay,
+    graphics_events: &mut [Result<GraphicsOperation, GraphicsError>],
+    image_display: &ImageDisplay,
 ) {
-    if display.image_id.unwrap_or(0) == 0 && display.image_number.unwrap_or(0) == 0 {
+    if image_display.image_id.unwrap_or(0) == 0 && image_display.image_number.unwrap_or(0) == 0 {
         return;
     }
-    for event in events {
-        if let Err(error) = event {
-            *event = Ok(GraphicsOperation::Failure {
-                display: display.clone(),
-                error: error.clone(),
+    for graphics_event in graphics_events {
+        if let Err(graphics_error) = graphics_event {
+            *graphics_event = Ok(GraphicsOperation::Failure {
+                image_display: image_display.clone(),
+                graphics_error: graphics_error.clone(),
             });
         }
     }

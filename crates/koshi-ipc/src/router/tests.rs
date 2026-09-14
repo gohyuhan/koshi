@@ -11,38 +11,38 @@ use super::*;
 use crate::protocol::IpcErrorCode;
 
 /// The one UUID every fixed id below uses.
-fn fixed_uuid() -> uuid::Uuid {
+fn build_fixed_test_uuid() -> uuid::Uuid {
     uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("literal UUID parses")
 }
 
 /// A token holding a fixed secret.
-fn token() -> ConnectionToken {
-    ConnectionToken::new("k7QxSecret")
+fn build_test_connection_token() -> ConnectionToken {
+    ConnectionToken::from_secret("k7QxSecret")
 }
 
 /// One session's address, at fixed values, so its encoding is byte-stable.
-fn address() -> SessionAddress {
+fn build_test_session_address() -> SessionAddress {
     SessionAddress {
-        id: SessionId::from_uuid(fixed_uuid()),
-        name: "quiet-lake".to_string(),
-        socket: "/run/koshi/session.sock".to_string(),
-        pid: 4242,
+        session_id: SessionId::from_uuid(build_fixed_test_uuid()),
+        session_name: "quiet-lake".to_string(),
+        socket_address: "/run/koshi/session.sock".to_string(),
+        process_id: 4242,
     }
 }
 
 /// One list row, at fixed ids and times, so its encoding is byte-stable.
-fn session_info() -> SessionInfo {
-    SessionInfo {
-        id: SessionId::from_uuid(fixed_uuid()),
-        name: "quiet-lake".to_string(),
+fn build_test_session_discovery() -> SessionDiscovery {
+    SessionDiscovery {
+        session_id: SessionId::from_uuid(build_fixed_test_uuid()),
+        session_name: "quiet-lake".to_string(),
         created_at: UNIX_EPOCH + Duration::from_secs(1_700_000_000),
-        attached_clients: vec![ClientId::from_uuid(fixed_uuid())],
+        attached_client_ids: vec![ClientId::from_uuid(build_fixed_test_uuid())],
         pane_count: 1,
     }
 }
 
 /// One remote access grant, at fixed values, so its encoding is byte-stable.
-fn token_entry() -> TokenEntry {
+fn build_test_token_entry() -> TokenEntry {
     TokenEntry {
         identity: "build-box".to_string(),
         scope: TokenScope::HostWide,
@@ -54,7 +54,7 @@ fn token_entry() -> TokenEntry {
 }
 
 /// Encode `message` as the exact bytes that go on the wire.
-fn encode<T: Serialize>(message: &T) -> String {
+fn serialize_test_wire_message<T: Serialize>(message: &T) -> String {
     serde_json::to_string(message).expect("message encodes")
 }
 
@@ -72,87 +72,89 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
     // catch this: one build encoding and decoding its own structs always
     // agrees with itself.
     assert_eq!(
-        encode(&RouterRequest {
+        serialize_test_wire_message(&RouterRequest {
             request_id: 1,
-            kind: RouterRequestKind::Hello {
+            request_kind: RouterRequestKind::Hello {
                 min_protocol_version: 1,
                 max_protocol_version: 1,
-                token: token(),
+                connection_token: build_test_connection_token(),
             },
         }),
         r#"{"request_id":1,"kind":{"Hello":{"min_protocol_version":1,"max_protocol_version":1,"token":"k7QxSecret"}}}"#
     );
     assert_eq!(
-        encode(&RouterRequest {
+        serialize_test_wire_message(&RouterRequest {
             request_id: 2,
-            kind: RouterRequestKind::CreateSession {
+            request_kind: RouterRequestKind::CreateSession {
                 profile: None,
-                cwd: None,
-                allow_other_users: None,
+                working_directory: None,
+                is_other_user_access_allowed: None,
             },
         }),
         r#"{"request_id":2,"kind":{"CreateSession":{"profile":null,"cwd":null,"allow_other_users":null}}}"#
     );
     assert_eq!(
-        encode(&RouterRequest {
+        serialize_test_wire_message(&RouterRequest {
             request_id: 2,
-            kind: RouterRequestKind::CreateSession {
+            request_kind: RouterRequestKind::CreateSession {
                 profile: Some("dev".to_string()),
-                cwd: None,
-                allow_other_users: None,
+                working_directory: None,
+                is_other_user_access_allowed: None,
             },
         }),
         r#"{"request_id":2,"kind":{"CreateSession":{"profile":"dev","cwd":null,"allow_other_users":null}}}"#
     );
     assert_eq!(
-        encode(&RouterRequest {
+        serialize_test_wire_message(&RouterRequest {
             request_id: 2,
-            kind: RouterRequestKind::CreateSession {
+            request_kind: RouterRequestKind::CreateSession {
                 profile: Some("dev".to_string()),
-                cwd: Some(PathBuf::from("/home/dev/api")),
-                allow_other_users: None,
+                working_directory: Some(PathBuf::from("/home/dev/api")),
+                is_other_user_access_allowed: None,
             },
         }),
         r#"{"request_id":2,"kind":{"CreateSession":{"profile":"dev","cwd":"/home/dev/api","allow_other_users":null}}}"#
     );
     assert_eq!(
-        encode(&RouterRequest {
+        serialize_test_wire_message(&RouterRequest {
             request_id: 2,
-            kind: RouterRequestKind::CreateSession {
+            request_kind: RouterRequestKind::CreateSession {
                 profile: None,
-                cwd: None,
-                allow_other_users: Some(true),
+                working_directory: None,
+                is_other_user_access_allowed: Some(true),
             },
         }),
         r#"{"request_id":2,"kind":{"CreateSession":{"profile":null,"cwd":null,"allow_other_users":true}}}"#
     );
     assert_eq!(
-        encode(&RouterRequest {
+        serialize_test_wire_message(&RouterRequest {
             request_id: 3,
-            kind: RouterRequestKind::AttachLookup {
-                selector: SessionSelector::Id(SessionId::from_uuid(fixed_uuid())),
+            request_kind: RouterRequestKind::AttachLookup {
+                session_selector: SessionSelector::SessionId(SessionId::from_uuid(
+                    build_fixed_test_uuid()
+                )),
             },
         }),
         r#"{"request_id":3,"kind":{"AttachLookup":{"selector":{"Id":"00000000-0000-0000-0000-000000000001"}}}}"#
     );
     assert_eq!(
-        encode(&RouterRequest {
+        serialize_test_wire_message(&RouterRequest {
             request_id: 4,
-            kind: RouterRequestKind::ListSessions,
+            request_kind: RouterRequestKind::ListSessions,
         }),
         r#"{"request_id":4,"kind":"ListSessions"}"#
     );
     assert_eq!(
-        encode(&RouterRequest {
+        serialize_test_wire_message(&RouterRequest {
             request_id: 5,
-            kind: RouterRequestKind::Restart,
+            request_kind: RouterRequestKind::Restart,
         }),
         r#"{"request_id":5,"kind":"Restart"}"#
     );
     assert_eq!(
-        encode(&RouterRequest {
+        serialize_test_wire_message(&RouterRequest {
             request_id: 6,
-            kind: RouterRequestKind::GrantToken {
+            request_kind: RouterRequestKind::GrantToken {
                 identity: "build-box".to_string(),
                 scope: TokenScope::HostWide,
                 expires_in: Some(Duration::from_secs(3600)),
@@ -161,20 +163,20 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
         r#"{"request_id":6,"kind":{"GrantToken":{"identity":"build-box","scope":"HostWide","expires_in":{"secs":3600,"nanos":0}}}}"#
     );
     assert_eq!(
-        encode(&RouterRequest {
+        serialize_test_wire_message(&RouterRequest {
             request_id: 6,
-            kind: RouterRequestKind::GrantToken {
+            request_kind: RouterRequestKind::GrantToken {
                 identity: "build-box".to_string(),
-                scope: TokenScope::Session(SessionId::from_uuid(fixed_uuid())),
+                scope: TokenScope::Session(SessionId::from_uuid(build_fixed_test_uuid())),
                 expires_in: None,
             },
         }),
         r#"{"request_id":6,"kind":{"GrantToken":{"identity":"build-box","scope":{"Session":"00000000-0000-0000-0000-000000000001"},"expires_in":null}}}"#
     );
     assert_eq!(
-        encode(&RouterRequest {
+        serialize_test_wire_message(&RouterRequest {
             request_id: 7,
-            kind: RouterRequestKind::RevokeToken {
+            request_kind: RouterRequestKind::RevokeToken {
                 identity: "build-box".to_string(),
                 scope: None,
             },
@@ -182,9 +184,9 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
         r#"{"request_id":7,"kind":{"RevokeToken":{"identity":"build-box","scope":null}}}"#
     );
     assert_eq!(
-        encode(&RouterRequest {
+        serialize_test_wire_message(&RouterRequest {
             request_id: 7,
-            kind: RouterRequestKind::RevokeToken {
+            request_kind: RouterRequestKind::RevokeToken {
                 identity: "build-box".to_string(),
                 scope: Some(TokenScope::HostWide),
             },
@@ -192,91 +194,93 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
         r#"{"request_id":7,"kind":{"RevokeToken":{"identity":"build-box","scope":"HostWide"}}}"#
     );
     assert_eq!(
-        encode(&RouterRequest {
+        serialize_test_wire_message(&RouterRequest {
             request_id: 8,
-            kind: RouterRequestKind::ListTokens { scope: None },
+            request_kind: RouterRequestKind::ListTokens { scope: None },
         }),
         r#"{"request_id":8,"kind":{"ListTokens":{"scope":null}}}"#
     );
     assert_eq!(
-        encode(&RouterRequest {
+        serialize_test_wire_message(&RouterRequest {
             request_id: 8,
-            kind: RouterRequestKind::ListTokens {
-                scope: Some(TokenScope::Session(SessionId::from_uuid(fixed_uuid()))),
+            request_kind: RouterRequestKind::ListTokens {
+                scope: Some(TokenScope::Session(SessionId::from_uuid(
+                    build_fixed_test_uuid()
+                ))),
             },
         }),
         r#"{"request_id":8,"kind":{"ListTokens":{"scope":{"Session":"00000000-0000-0000-0000-000000000001"}}}}"#
     );
 
     assert_eq!(
-        encode(&RouterResponse {
+        serialize_test_wire_message(&RouterResponse {
             request_id: Some(1),
-            result: RouterResult::Hello {
+            answer_result: RouterResult::Hello {
                 protocol_version: ROUTER_PROTOCOL_VERSION,
-                version: "0.9.9".to_string(),
+                build_version: "0.9.9".to_string(),
             },
         }),
         r#"{"request_id":1,"result":{"Hello":{"protocol_version":2,"version":"0.9.9"}}}"#
     );
     assert_eq!(
-        encode(&RouterResponse {
+        serialize_test_wire_message(&RouterResponse {
             request_id: Some(2),
-            result: RouterResult::Created(address()),
+            answer_result: RouterResult::Created(build_test_session_address()),
         }),
         r#"{"request_id":2,"result":{"Created":{"id":"00000000-0000-0000-0000-000000000001","name":"quiet-lake","socket":"/run/koshi/session.sock","pid":4242}}}"#
     );
     assert_eq!(
-        encode(&RouterResponse {
+        serialize_test_wire_message(&RouterResponse {
             request_id: Some(3),
-            result: RouterResult::Found(address()),
+            answer_result: RouterResult::Found(build_test_session_address()),
         }),
         r#"{"request_id":3,"result":{"Found":{"id":"00000000-0000-0000-0000-000000000001","name":"quiet-lake","socket":"/run/koshi/session.sock","pid":4242}}}"#
     );
     assert_eq!(
-        encode(&RouterResponse {
+        serialize_test_wire_message(&RouterResponse {
             request_id: Some(4),
-            result: RouterResult::Sessions(vec![session_info()]),
+            answer_result: RouterResult::Sessions(vec![build_test_session_discovery()]),
         }),
         r#"{"request_id":4,"result":{"Sessions":[{"id":"00000000-0000-0000-0000-000000000001","name":"quiet-lake","created_at":{"secs_since_epoch":1700000000,"nanos_since_epoch":0},"attached_clients":["00000000-0000-0000-0000-000000000001"],"pane_count":1}]}}"#
     );
     assert_eq!(
-        encode(&RouterResponse {
+        serialize_test_wire_message(&RouterResponse {
             request_id: Some(5),
-            result: RouterResult::Restarting,
+            answer_result: RouterResult::Restarting,
         }),
         r#"{"request_id":5,"result":"Restarting"}"#
     );
     assert_eq!(
-        encode(&RouterResponse {
+        serialize_test_wire_message(&RouterResponse {
             request_id: Some(6),
-            result: RouterResult::Granted {
-                token: token(),
-                replaced: true,
+            answer_result: RouterResult::Granted {
+                connection_token: build_test_connection_token(),
+                did_replace_active_grant: true,
             },
         }),
         r#"{"request_id":6,"result":{"Granted":{"token":"k7QxSecret","replaced":true}}}"#
     );
     assert_eq!(
-        encode(&RouterResponse {
+        serialize_test_wire_message(&RouterResponse {
             request_id: Some(7),
-            result: RouterResult::Revoked(vec![
+            answer_result: RouterResult::Revoked(vec![
                 TokenScope::HostWide,
-                TokenScope::Session(SessionId::from_uuid(fixed_uuid())),
+                TokenScope::Session(SessionId::from_uuid(build_fixed_test_uuid())),
             ]),
         }),
         r#"{"request_id":7,"result":{"Revoked":["HostWide",{"Session":"00000000-0000-0000-0000-000000000001"}]}}"#
     );
     assert_eq!(
-        encode(&RouterResponse {
+        serialize_test_wire_message(&RouterResponse {
             request_id: Some(8),
-            result: RouterResult::Tokens(vec![token_entry()]),
+            answer_result: RouterResult::Tokens(vec![build_test_token_entry()]),
         }),
         r#"{"request_id":8,"result":{"Tokens":[{"identity":"build-box","scope":"HostWide","issued_at":{"secs_since_epoch":1700000000,"nanos_since_epoch":0},"expires_at":null,"last_used_at":null,"revoked_at":null}]}}"#
     );
     assert_eq!(
-        encode(&RouterResponse {
+        serialize_test_wire_message(&RouterResponse {
             request_id: None,
-            result: RouterResult::Error(IpcErrorPayload {
+            answer_result: RouterResult::Error(IpcErrorPayload {
                 code: IpcErrorCode::MalformedRequest,
                 message: "the request could not be read".to_string(),
             }),
@@ -285,9 +289,9 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
     );
 
     assert_eq!(
-        encode(&SessionServerReady {
+        serialize_test_wire_message(&SessionServerReady {
             protocol_version: 1,
-            socket: "/run/koshi/session.sock".to_string(),
+            socket_address: "/run/koshi/session.sock".to_string(),
         }),
         r#"{"protocol_version":1,"socket":"/run/koshi/session.sock"}"#
     );
@@ -296,10 +300,10 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
 #[test]
 fn an_attach_lookup_by_name_carries_the_name() {
     assert_eq!(
-        encode(&RouterRequest {
+        serialize_test_wire_message(&RouterRequest {
             request_id: 3,
-            kind: RouterRequestKind::AttachLookup {
-                selector: SessionSelector::Name("quiet-lake".to_string()),
+            request_kind: RouterRequestKind::AttachLookup {
+                session_selector: SessionSelector::SessionName("quiet-lake".to_string()),
             },
         }),
         r#"{"request_id":3,"kind":{"AttachLookup":{"selector":{"Name":"quiet-lake"}}}}"#
@@ -309,16 +313,16 @@ fn an_attach_lookup_by_name_carries_the_name() {
 #[test]
 fn the_remote_access_requests_travel_as_bare_names() {
     assert_eq!(
-        encode(&RouterRequest {
+        serialize_test_wire_message(&RouterRequest {
             request_id: 9,
-            kind: RouterRequestKind::RemoteStatus,
+            request_kind: RouterRequestKind::RemoteStatus,
         }),
         r#"{"request_id":9,"kind":"RemoteStatus"}"#
     );
     assert_eq!(
-        encode(&RouterRequest {
+        serialize_test_wire_message(&RouterRequest {
             request_id: 10,
-            kind: RouterRequestKind::EnableRemote,
+            request_kind: RouterRequestKind::EnableRemote,
         }),
         r#"{"request_id":10,"kind":"EnableRemote"}"#
     );
@@ -327,14 +331,14 @@ fn the_remote_access_requests_travel_as_bare_names() {
 #[test]
 fn the_remote_access_answers_keep_their_wire_bytes() {
     assert_eq!(
-        encode(&RouterResponse {
+        serialize_test_wire_message(&RouterResponse {
             request_id: Some(9),
-            result: RouterResult::RemoteStatus {
-                address: Some("0.0.0.0:7654".to_string()),
-                enabled: true,
-                listening: false,
-                fingerprint: Some("ab".repeat(32)),
-                remote_connections: Some(2),
+            answer_result: RouterResult::RemoteStatus {
+                remote_listen_address: Some("0.0.0.0:7654".to_string()),
+                is_remote_access_enabled: true,
+                is_listening: false,
+                certificate_fingerprint: Some("ab".repeat(32)),
+                remote_connection_count: Some(2),
             },
         }),
         format!(
@@ -343,24 +347,24 @@ fn the_remote_access_answers_keep_their_wire_bytes() {
         )
     );
     assert_eq!(
-        encode(&RouterResponse {
+        serialize_test_wire_message(&RouterResponse {
             request_id: Some(9),
-            result: RouterResult::RemoteStatus {
-                address: None,
-                enabled: false,
-                listening: false,
-                fingerprint: None,
-                remote_connections: None,
+            answer_result: RouterResult::RemoteStatus {
+                remote_listen_address: None,
+                is_remote_access_enabled: false,
+                is_listening: false,
+                certificate_fingerprint: None,
+                remote_connection_count: None,
             },
         }),
         r#"{"request_id":9,"result":{"RemoteStatus":{"address":null,"enabled":false,"listening":false,"fingerprint":null,"remote_connections":null}}}"#
     );
     assert_eq!(
-        encode(&RouterResponse {
+        serialize_test_wire_message(&RouterResponse {
             request_id: Some(10),
-            result: RouterResult::RemoteEnabled {
-                address: "0.0.0.0:7654".to_string(),
-                fingerprint: "ab".repeat(32),
+            answer_result: RouterResult::RemoteEnabled {
+                remote_listen_address: "0.0.0.0:7654".to_string(),
+                certificate_fingerprint: "ab".repeat(32),
             },
         }),
         format!(
@@ -381,12 +385,12 @@ fn a_remote_status_without_a_connection_count_decodes_with_none() {
         response,
         RouterResponse {
             request_id: Some(9),
-            result: RouterResult::RemoteStatus {
-                address: None,
-                enabled: false,
-                listening: false,
-                fingerprint: None,
-                remote_connections: None,
+            answer_result: RouterResult::RemoteStatus {
+                remote_listen_address: None,
+                is_remote_access_enabled: false,
+                is_listening: false,
+                certificate_fingerprint: None,
+                remote_connection_count: None,
             },
         }
     );
@@ -407,36 +411,42 @@ fn every_request_kind_names_itself_without_its_payload() {
         RouterRequestKind::Hello {
             min_protocol_version: 1,
             max_protocol_version: 1,
-            token: token(),
+            connection_token: build_test_connection_token(),
         }
-        .name(),
+        .get_request_kind_name(),
         "Hello"
     );
     assert_eq!(
         RouterRequestKind::CreateSession {
             profile: None,
-            cwd: None,
-            allow_other_users: None,
+            working_directory: None,
+            is_other_user_access_allowed: None,
         }
-        .name(),
+        .get_request_kind_name(),
         "CreateSession"
     );
     assert_eq!(
         RouterRequestKind::AttachLookup {
-            selector: SessionSelector::Name("quiet-lake".to_string()),
+            session_selector: SessionSelector::SessionName("quiet-lake".to_string()),
         }
-        .name(),
+        .get_request_kind_name(),
         "AttachLookup"
     );
-    assert_eq!(RouterRequestKind::ListSessions.name(), "ListSessions");
-    assert_eq!(RouterRequestKind::Restart.name(), "Restart");
+    assert_eq!(
+        RouterRequestKind::ListSessions.get_request_kind_name(),
+        "ListSessions"
+    );
+    assert_eq!(
+        RouterRequestKind::Restart.get_request_kind_name(),
+        "Restart"
+    );
     assert_eq!(
         RouterRequestKind::GrantToken {
             identity: "build-box".to_string(),
             scope: TokenScope::HostWide,
             expires_in: None,
         }
-        .name(),
+        .get_request_kind_name(),
         "GrantToken"
     );
     assert_eq!(
@@ -444,15 +454,21 @@ fn every_request_kind_names_itself_without_its_payload() {
             identity: "build-box".to_string(),
             scope: None,
         }
-        .name(),
+        .get_request_kind_name(),
         "RevokeToken"
     );
     assert_eq!(
-        RouterRequestKind::ListTokens { scope: None }.name(),
+        RouterRequestKind::ListTokens { scope: None }.get_request_kind_name(),
         "ListTokens"
     );
-    assert_eq!(RouterRequestKind::RemoteStatus.name(), "RemoteStatus");
-    assert_eq!(RouterRequestKind::EnableRemote.name(), "EnableRemote");
+    assert_eq!(
+        RouterRequestKind::RemoteStatus.get_request_kind_name(),
+        "RemoteStatus"
+    );
+    assert_eq!(
+        RouterRequestKind::EnableRemote.get_request_kind_name(),
+        "EnableRemote"
+    );
 }
 
 /// Every answer this build writes names itself, and both wire lists hold one
@@ -465,15 +481,15 @@ fn every_answer_names_itself_and_both_wire_lists_are_complete() {
         RouterRequestKind::Hello {
             min_protocol_version: 1,
             max_protocol_version: 1,
-            token: token(),
+            connection_token: build_test_connection_token(),
         },
         RouterRequestKind::CreateSession {
             profile: None,
-            cwd: None,
-            allow_other_users: None,
+            working_directory: None,
+            is_other_user_access_allowed: None,
         },
         RouterRequestKind::AttachLookup {
-            selector: SessionSelector::Name("quiet-lake".to_string()),
+            session_selector: SessionSelector::SessionName("quiet-lake".to_string()),
         },
         RouterRequestKind::ListSessions,
         RouterRequestKind::Restart,
@@ -494,37 +510,46 @@ fn every_answer_names_itself_and_both_wire_lists_are_complete() {
         (
             RouterResult::Hello {
                 protocol_version: ROUTER_PROTOCOL_VERSION,
-                version: "0.9.9".to_string(),
+                build_version: "0.9.9".to_string(),
             },
             "Hello",
         ),
-        (RouterResult::Created(address()), "Created"),
-        (RouterResult::Found(address()), "Found"),
-        (RouterResult::Sessions(vec![session_info()]), "Sessions"),
+        (
+            RouterResult::Created(build_test_session_address()),
+            "Created",
+        ),
+        (RouterResult::Found(build_test_session_address()), "Found"),
+        (
+            RouterResult::Sessions(vec![build_test_session_discovery()]),
+            "Sessions",
+        ),
         (RouterResult::Restarting, "Restarting"),
         (
             RouterResult::Granted {
-                token: token(),
-                replaced: true,
+                connection_token: build_test_connection_token(),
+                did_replace_active_grant: true,
             },
             "Granted",
         ),
         (RouterResult::Revoked(vec![TokenScope::HostWide]), "Revoked"),
-        (RouterResult::Tokens(vec![token_entry()]), "Tokens"),
+        (
+            RouterResult::Tokens(vec![build_test_token_entry()]),
+            "Tokens",
+        ),
         (
             RouterResult::RemoteStatus {
-                address: Some("0.0.0.0:7654".to_string()),
-                enabled: true,
-                listening: false,
-                fingerprint: Some("ab".repeat(32)),
-                remote_connections: Some(2),
+                remote_listen_address: Some("0.0.0.0:7654".to_string()),
+                is_remote_access_enabled: true,
+                is_listening: false,
+                certificate_fingerprint: Some("ab".repeat(32)),
+                remote_connection_count: Some(2),
             },
             "RemoteStatus",
         ),
         (
             RouterResult::RemoteEnabled {
-                address: "0.0.0.0:7654".to_string(),
-                fingerprint: "ab".repeat(32),
+                remote_listen_address: "0.0.0.0:7654".to_string(),
+                certificate_fingerprint: "ab".repeat(32),
             },
             "RemoteEnabled",
         ),
@@ -537,20 +562,23 @@ fn every_answer_names_itself_and_both_wire_lists_are_complete() {
         ),
     ];
 
-    for kind in &kinds {
-        assert_eq!(kind.wire_name(), kind.name());
+    for request_kind in &kinds {
+        assert_eq!(
+            request_kind.wire_name(),
+            request_kind.get_request_kind_name()
+        );
     }
-    let kind_names: Vec<&str> = kinds.iter().map(RouterRequestKind::wire_name).collect();
-    assert_eq!(kind_names, RouterRequestKind::VARIANTS);
+    let request_kind_names: Vec<&str> = kinds.iter().map(RouterRequestKind::wire_name).collect();
+    assert_eq!(request_kind_names, RouterRequestKind::VARIANTS);
 
-    for (result, name) in &results {
-        assert_eq!(result.wire_name(), *name);
+    for (router_result, expected_wire_name) in &results {
+        assert_eq!(router_result.wire_name(), *expected_wire_name);
     }
-    let result_names: Vec<&str> = results
+    let router_result_names: Vec<&str> = results
         .iter()
-        .map(|(result, _)| result.wire_name())
+        .map(|(router_result, _)| router_result.wire_name())
         .collect();
-    assert_eq!(result_names, RouterResult::VARIANTS);
+    assert_eq!(router_result_names, RouterResult::VARIANTS);
 }
 
 #[test]
@@ -563,8 +591,8 @@ fn a_request_kind_this_build_lacks_reads_as_unknown_carrying_its_name() {
         decoded,
         RouterRequest {
             request_id: 9,
-            kind: MaybeKnown::Unknown {
-                name: "RehomeToken".to_string(),
+            request_kind: MaybeKnown::Unknown {
+                variant_name: "RehomeToken".to_string(),
             },
         }
     );
@@ -580,8 +608,8 @@ fn an_unknown_kind_sent_as_a_bare_name_reads_as_unknown_carrying_its_name() {
         decoded,
         RouterRequest {
             request_id: 9,
-            kind: MaybeKnown::Unknown {
-                name: "RehomeToken".to_string(),
+            request_kind: MaybeKnown::Unknown {
+                variant_name: "RehomeToken".to_string(),
             },
         }
     );
@@ -610,8 +638,8 @@ fn an_answer_this_build_does_not_have_reads_as_unknown_carrying_its_name() {
         decoded,
         RouterResponse {
             request_id: Some(9),
-            result: MaybeKnown::Unknown {
-                name: "Rehomed".to_string(),
+            answer_result: MaybeKnown::Unknown {
+                variant_name: "Rehomed".to_string(),
             },
         }
     );
@@ -640,10 +668,10 @@ fn a_request_kind_carrying_a_field_this_build_does_not_know_still_reads() {
         decoded,
         RouterRequest {
             request_id: 2,
-            kind: RouterRequestKind::CreateSession {
+            request_kind: RouterRequestKind::CreateSession {
                 profile: None,
-                cwd: None,
-                allow_other_users: None,
+                working_directory: None,
+                is_other_user_access_allowed: None,
             },
         }
     );
@@ -656,7 +684,7 @@ fn a_session_address_carrying_a_field_this_build_does_not_know_still_reads() {
     )
     .expect("a field this build lacks is passed over");
 
-    assert_eq!(decoded, address());
+    assert_eq!(decoded, build_test_session_address());
 }
 
 #[test]
@@ -670,7 +698,7 @@ fn a_ready_line_carrying_a_field_this_build_does_not_know_still_reads() {
         decoded,
         SessionServerReady {
             protocol_version: 1,
-            socket: "/run/koshi/session.sock".to_string(),
+            socket_address: "/run/koshi/session.sock".to_string(),
         }
     );
 }
@@ -680,14 +708,14 @@ fn printing_a_granted_answer_reveals_no_secret() {
     let printed = format!(
         "{:?}",
         RouterResult::Granted {
-            token: token(),
-            replaced: false,
+            connection_token: build_test_connection_token(),
+            did_replace_active_grant: false,
         }
     );
 
     assert_eq!(
         printed,
-        "Granted { token: ConnectionToken(***), replaced: false }"
+        "Granted { connection_token: ConnectionToken(***), did_replace_active_grant: false }"
     );
 }
 
@@ -715,10 +743,10 @@ fn a_create_session_carrying_the_other_users_answer_decodes() {
         decoded,
         RouterRequest {
             request_id: 2,
-            kind: RouterRequestKind::CreateSession {
+            request_kind: RouterRequestKind::CreateSession {
                 profile: None,
-                cwd: None,
-                allow_other_users: Some(true),
+                working_directory: None,
+                is_other_user_access_allowed: Some(true),
             },
         }
     );
@@ -738,10 +766,10 @@ fn a_create_session_naming_no_other_users_answer_leaves_it_to_the_session() {
         decoded,
         RouterRequest {
             request_id: 2,
-            kind: RouterRequestKind::CreateSession {
+            request_kind: RouterRequestKind::CreateSession {
                 profile: None,
-                cwd: None,
-                allow_other_users: None,
+                working_directory: None,
+                is_other_user_access_allowed: None,
             },
         }
     );
@@ -758,9 +786,9 @@ fn a_hello_without_a_version_field_decodes_with_an_empty_version() {
         response,
         RouterResponse {
             request_id: Some(1),
-            result: RouterResult::Hello {
+            answer_result: RouterResult::Hello {
                 protocol_version: 2,
-                version: String::new(),
+                build_version: String::new(),
             },
         }
     );
@@ -778,14 +806,14 @@ fn a_restart_and_its_answer_read_back_from_their_wire_text() {
         request,
         RouterRequest {
             request_id: 5,
-            kind: RouterRequestKind::Restart,
+            request_kind: RouterRequestKind::Restart,
         }
     );
     assert_eq!(
         response,
         RouterResponse {
             request_id: Some(5),
-            result: RouterResult::Restarting,
+            answer_result: RouterResult::Restarting,
         }
     );
 }
@@ -809,63 +837,73 @@ fn a_session_address_missing_its_pid_is_refused() {
 
 #[test]
 fn a_hello_with_the_right_version_and_token_is_accepted() {
-    let mut gate = RouterHandshake::new(token());
+    let mut router_handshake =
+        RouterHandshake::from_connection_token(build_test_connection_token());
 
     assert_eq!(
-        gate.check(&RouterRequestKind::Hello {
+        router_handshake.validate_request_kind(&RouterRequestKind::Hello {
             min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
             max_protocol_version: ROUTER_PROTOCOL_VERSION,
-            token: token(),
+            connection_token: build_test_connection_token(),
         }),
         Ok(())
     );
-    assert_eq!(gate.agreed(), Some(ROUTER_PROTOCOL_VERSION));
+    assert_eq!(
+        router_handshake.get_agreed_protocol_version(),
+        Some(ROUTER_PROTOCOL_VERSION)
+    );
 }
 
 #[test]
 fn a_hello_built_here_names_this_builds_range() {
     assert_eq!(
-        RouterRequestKind::hello(token()),
+        RouterRequestKind::build_hello_request(build_test_connection_token()),
         RouterRequestKind::Hello {
             min_protocol_version: 1,
             max_protocol_version: 2,
-            token: token(),
+            connection_token: build_test_connection_token(),
         }
     );
 }
 
 #[test]
 fn an_accepted_hello_opens_the_gate_for_other_requests() {
-    let mut gate = RouterHandshake::new(token());
+    let mut router_handshake =
+        RouterHandshake::from_connection_token(build_test_connection_token());
 
-    gate.check(&RouterRequestKind::Hello {
-        min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
-        max_protocol_version: ROUTER_PROTOCOL_VERSION,
-        token: token(),
-    })
-    .expect("the Hello is accepted");
+    router_handshake
+        .validate_request_kind(&RouterRequestKind::Hello {
+            min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+            max_protocol_version: ROUTER_PROTOCOL_VERSION,
+            connection_token: build_test_connection_token(),
+        })
+        .expect("the Hello is accepted");
 
     assert_eq!(
-        gate.check(&RouterRequestKind::CreateSession {
+        router_handshake.validate_request_kind(&RouterRequestKind::CreateSession {
             profile: None,
-            cwd: None,
-            allow_other_users: None,
+            working_directory: None,
+            is_other_user_access_allowed: None,
         }),
         Ok(())
     );
-    assert_eq!(gate.check(&RouterRequestKind::ListSessions), Ok(()));
+    assert_eq!(
+        router_handshake.validate_request_kind(&RouterRequestKind::ListSessions),
+        Ok(())
+    );
 }
 
 #[test]
 fn a_caller_speaking_only_above_this_router_is_refused_naming_both_ranges() {
-    let mut gate = RouterHandshake::new(token());
+    let mut router_handshake =
+        RouterHandshake::from_connection_token(build_test_connection_token());
     let above = ROUTER_PROTOCOL_VERSION + 1;
 
     assert_eq!(
-        gate.check(&RouterRequestKind::Hello {
+        router_handshake.validate_request_kind(&RouterRequestKind::Hello {
             min_protocol_version: above,
             max_protocol_version: above,
-            token: token(),
+            connection_token: build_test_connection_token(),
         }),
         Err(IpcErrorPayload {
             code: IpcErrorCode::UnsupportedVersion,
@@ -875,44 +913,55 @@ fn a_caller_speaking_only_above_this_router_is_refused_naming_both_ranges() {
             ),
         })
     );
-    assert_eq!(gate.agreed(), None, "a refused Hello settles nothing");
+    assert_eq!(
+        router_handshake.get_agreed_protocol_version(),
+        None,
+        "a refused Hello settles nothing"
+    );
 }
 
 #[test]
 fn a_caller_reaching_above_this_router_settles_on_the_routers_highest() {
-    let mut gate = RouterHandshake::new(token());
+    let mut router_handshake =
+        RouterHandshake::from_connection_token(build_test_connection_token());
 
-    gate.check(&RouterRequestKind::Hello {
-        min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
-        max_protocol_version: ROUTER_PROTOCOL_VERSION + 3,
-        token: token(),
-    })
-    .expect("a range covering this router's is accepted");
+    router_handshake
+        .validate_request_kind(&RouterRequestKind::Hello {
+            min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+            max_protocol_version: ROUTER_PROTOCOL_VERSION + 3,
+            connection_token: build_test_connection_token(),
+        })
+        .expect("a range covering this router's is accepted");
 
-    assert_eq!(gate.agreed(), Some(ROUTER_PROTOCOL_VERSION));
+    assert_eq!(
+        router_handshake.get_agreed_protocol_version(),
+        Some(ROUTER_PROTOCOL_VERSION)
+    );
 }
 
 #[test]
 fn an_unknown_kind_is_refused_by_name_once_the_gate_is_open() {
-    let mut gate = RouterHandshake::new(token());
+    let mut router_handshake =
+        RouterHandshake::from_connection_token(build_test_connection_token());
 
     assert_eq!(
-        gate.refuse_unknown("Rehome"),
+        router_handshake.build_unknown_request_kind_error("Rehome"),
         IpcErrorPayload {
             code: IpcErrorCode::HelloRequired,
             message: "Rehome arrived before a Hello opened the connection".to_string(),
         }
     );
 
-    gate.check(&RouterRequestKind::Hello {
-        min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
-        max_protocol_version: ROUTER_PROTOCOL_VERSION,
-        token: token(),
-    })
-    .expect("the Hello is accepted");
+    router_handshake
+        .validate_request_kind(&RouterRequestKind::Hello {
+            min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+            max_protocol_version: ROUTER_PROTOCOL_VERSION,
+            connection_token: build_test_connection_token(),
+        })
+        .expect("the Hello is accepted");
 
     assert_eq!(
-        gate.refuse_unknown("Rehome"),
+        router_handshake.build_unknown_request_kind_error("Rehome"),
         IpcErrorPayload {
             code: IpcErrorCode::UnsupportedKind,
             message: "this router has no request kind named Rehome".to_string(),
@@ -922,14 +971,15 @@ fn an_unknown_kind_is_refused_by_name_once_the_gate_is_open() {
 
 #[test]
 fn an_out_of_range_hello_with_a_wrong_token_is_refused_for_the_version() {
-    let mut gate = RouterHandshake::new(token());
+    let mut router_handshake =
+        RouterHandshake::from_connection_token(build_test_connection_token());
     let above = ROUTER_PROTOCOL_VERSION + 1;
 
     assert_eq!(
-        gate.check(&RouterRequestKind::Hello {
+        router_handshake.validate_request_kind(&RouterRequestKind::Hello {
             min_protocol_version: above,
             max_protocol_version: above,
-            token: ConnectionToken::new("wrongToken"),
+            connection_token: ConnectionToken::from_secret("wrongToken"),
         }),
         Err(IpcErrorPayload {
             code: IpcErrorCode::UnsupportedVersion,
@@ -939,37 +989,47 @@ fn an_out_of_range_hello_with_a_wrong_token_is_refused_for_the_version() {
             ),
         })
     );
-    assert_eq!(gate.agreed(), None, "a refused Hello settles nothing");
+    assert_eq!(
+        router_handshake.get_agreed_protocol_version(),
+        None,
+        "a refused Hello settles nothing"
+    );
 }
 
 #[test]
 fn a_hello_with_a_wrong_token_is_refused_as_bad_token() {
-    let mut gate = RouterHandshake::new(token());
+    let mut router_handshake =
+        RouterHandshake::from_connection_token(build_test_connection_token());
 
     assert_eq!(
-        gate.check(&RouterRequestKind::Hello {
+        router_handshake.validate_request_kind(&RouterRequestKind::Hello {
             min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
             max_protocol_version: ROUTER_PROTOCOL_VERSION,
-            token: ConnectionToken::new("wrongToken"),
+            connection_token: ConnectionToken::from_secret("wrongToken"),
         }),
         Err(IpcErrorPayload {
             code: IpcErrorCode::BadToken,
             message: "the token presented does not match the router's".to_string(),
         })
     );
-    assert_eq!(gate.agreed(), None, "a refused Hello settles nothing");
+    assert_eq!(
+        router_handshake.get_agreed_protocol_version(),
+        None,
+        "a refused Hello settles nothing"
+    );
 }
 
 #[test]
 fn a_caller_speaking_only_below_this_router_is_refused_naming_both_ranges() {
-    let mut gate = RouterHandshake::new(token());
+    let mut router_handshake =
+        RouterHandshake::from_connection_token(build_test_connection_token());
     let below = MIN_ROUTER_PROTOCOL_VERSION - 1;
 
     assert_eq!(
-        gate.check(&RouterRequestKind::Hello {
+        router_handshake.validate_request_kind(&RouterRequestKind::Hello {
             min_protocol_version: below,
             max_protocol_version: below,
-            token: token(),
+            connection_token: build_test_connection_token(),
         }),
         Err(IpcErrorPayload {
             code: IpcErrorCode::UnsupportedVersion,
@@ -979,41 +1039,62 @@ fn a_caller_speaking_only_below_this_router_is_refused_naming_both_ranges() {
             ),
         })
     );
-    assert_eq!(gate.agreed(), None, "a refused Hello settles nothing");
+    assert_eq!(
+        router_handshake.get_agreed_protocol_version(),
+        None,
+        "a refused Hello settles nothing"
+    );
 }
 
 #[test]
 fn a_caller_speaking_only_the_floor_settles_on_the_floor() {
-    let mut gate = RouterHandshake::new(token());
+    let mut router_handshake =
+        RouterHandshake::from_connection_token(build_test_connection_token());
 
     assert_eq!(
-        gate.check(&RouterRequestKind::Hello {
+        router_handshake.validate_request_kind(&RouterRequestKind::Hello {
             min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
             max_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
-            token: token(),
+            connection_token: build_test_connection_token(),
         }),
         Ok(())
     );
-    assert_eq!(gate.agreed(), Some(MIN_ROUTER_PROTOCOL_VERSION));
+    assert_eq!(
+        router_handshake.get_agreed_protocol_version(),
+        Some(MIN_ROUTER_PROTOCOL_VERSION)
+    );
 }
 
 #[test]
 fn a_second_hello_with_a_narrower_range_settles_the_version_again_from_that_range() {
-    let mut gate = RouterHandshake::new(token());
-    gate.check(&RouterRequestKind::hello(token()))
+    let mut router_handshake =
+        RouterHandshake::from_connection_token(build_test_connection_token());
+    router_handshake
+        .validate_request_kind(&RouterRequestKind::build_hello_request(
+            build_test_connection_token(),
+        ))
         .expect("the first Hello is accepted");
-    assert_eq!(gate.agreed(), Some(ROUTER_PROTOCOL_VERSION));
+    assert_eq!(
+        router_handshake.get_agreed_protocol_version(),
+        Some(ROUTER_PROTOCOL_VERSION)
+    );
 
     assert_eq!(
-        gate.check(&RouterRequestKind::Hello {
+        router_handshake.validate_request_kind(&RouterRequestKind::Hello {
             min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
             max_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
-            token: token(),
+            connection_token: build_test_connection_token(),
         }),
         Ok(())
     );
-    assert_eq!(gate.agreed(), Some(MIN_ROUTER_PROTOCOL_VERSION));
-    assert_eq!(gate.check(&RouterRequestKind::ListSessions), Ok(()));
+    assert_eq!(
+        router_handshake.get_agreed_protocol_version(),
+        Some(MIN_ROUTER_PROTOCOL_VERSION)
+    );
+    assert_eq!(
+        router_handshake.validate_request_kind(&RouterRequestKind::ListSessions),
+        Ok(())
+    );
 }
 
 #[test]
@@ -1022,14 +1103,14 @@ fn every_other_kind_is_refused_by_name_before_a_hello_and_served_after_one() {
         (
             RouterRequestKind::CreateSession {
                 profile: None,
-                cwd: None,
-                allow_other_users: None,
+                working_directory: None,
+                is_other_user_access_allowed: None,
             },
             "CreateSession",
         ),
         (
             RouterRequestKind::AttachLookup {
-                selector: SessionSelector::Name("quiet-lake".to_string()),
+                session_selector: SessionSelector::SessionName("quiet-lake".to_string()),
             },
             "AttachLookup",
         ),
@@ -1054,40 +1135,51 @@ fn every_other_kind_is_refused_by_name_before_a_hello_and_served_after_one() {
         (RouterRequestKind::RemoteStatus, "RemoteStatus"),
         (RouterRequestKind::EnableRemote, "EnableRemote"),
     ];
-    let mut gate = RouterHandshake::new(token());
+    let mut router_handshake =
+        RouterHandshake::from_connection_token(build_test_connection_token());
 
-    for (kind, name) in &kinds {
+    for (request_kind, request_kind_name) in &kinds {
         assert_eq!(
-            gate.check(kind),
+            router_handshake.validate_request_kind(request_kind),
             Err(IpcErrorPayload {
                 code: IpcErrorCode::HelloRequired,
-                message: format!("{name} arrived before a Hello opened the connection"),
+                message: format!(
+                    "{request_kind_name} arrived before a Hello opened the connection"
+                ),
             })
         );
     }
-    assert_eq!(gate.agreed(), None, "a refused kind opens nothing");
+    assert_eq!(
+        router_handshake.get_agreed_protocol_version(),
+        None,
+        "a refused request kind opens nothing"
+    );
 
-    gate.check(&RouterRequestKind::hello(token()))
+    router_handshake
+        .validate_request_kind(&RouterRequestKind::build_hello_request(
+            build_test_connection_token(),
+        ))
         .expect("the Hello is accepted");
 
-    for (kind, name) in &kinds {
+    for (request_kind, request_kind_name) in &kinds {
         assert_eq!(
-            gate.check(kind),
+            router_handshake.validate_request_kind(request_kind),
             Ok(()),
-            "{name} is served on an open connection"
+            "{request_kind_name} is served on an open connection"
         );
     }
 }
 
 #[test]
 fn a_request_before_any_hello_is_refused_as_hello_required() {
-    let mut gate = RouterHandshake::new(token());
+    let mut router_handshake =
+        RouterHandshake::from_connection_token(build_test_connection_token());
 
     assert_eq!(
-        gate.check(&RouterRequestKind::CreateSession {
+        router_handshake.validate_request_kind(&RouterRequestKind::CreateSession {
             profile: None,
-            cwd: None,
-            allow_other_users: None,
+            working_directory: None,
+            is_other_user_access_allowed: None,
         }),
         Err(IpcErrorPayload {
             code: IpcErrorCode::HelloRequired,
@@ -1098,11 +1190,12 @@ fn a_request_before_any_hello_is_refused_as_hello_required() {
 
 #[test]
 fn a_hello_required_refusal_names_the_kind_without_its_payload() {
-    let mut gate = RouterHandshake::new(token());
+    let mut router_handshake =
+        RouterHandshake::from_connection_token(build_test_connection_token());
 
     assert_eq!(
-        gate.check(&RouterRequestKind::AttachLookup {
-            selector: SessionSelector::Name("quiet-lake".to_string()),
+        router_handshake.validate_request_kind(&RouterRequestKind::AttachLookup {
+            session_selector: SessionSelector::SessionName("quiet-lake".to_string()),
         }),
         Err(IpcErrorPayload {
             code: IpcErrorCode::HelloRequired,
@@ -1113,39 +1206,46 @@ fn a_hello_required_refusal_names_the_kind_without_its_payload() {
 
 #[test]
 fn a_restart_is_refused_before_a_hello_and_served_after_one() {
-    let mut gate = RouterHandshake::new(token());
+    let mut router_handshake =
+        RouterHandshake::from_connection_token(build_test_connection_token());
 
     assert_eq!(
-        gate.check(&RouterRequestKind::Restart),
+        router_handshake.validate_request_kind(&RouterRequestKind::Restart),
         Err(IpcErrorPayload {
             code: IpcErrorCode::HelloRequired,
             message: "Restart arrived before a Hello opened the connection".to_string(),
         })
     );
 
-    gate.check(&RouterRequestKind::Hello {
-        min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
-        max_protocol_version: ROUTER_PROTOCOL_VERSION,
-        token: token(),
-    })
-    .expect("the Hello is accepted");
+    router_handshake
+        .validate_request_kind(&RouterRequestKind::Hello {
+            min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+            max_protocol_version: ROUTER_PROTOCOL_VERSION,
+            connection_token: build_test_connection_token(),
+        })
+        .expect("the Hello is accepted");
 
-    assert_eq!(gate.check(&RouterRequestKind::Restart), Ok(()));
+    assert_eq!(
+        router_handshake.validate_request_kind(&RouterRequestKind::Restart),
+        Ok(())
+    );
 }
 
 #[test]
 fn a_refused_hello_leaves_the_gate_closed() {
-    let mut gate = RouterHandshake::new(token());
+    let mut router_handshake =
+        RouterHandshake::from_connection_token(build_test_connection_token());
 
-    gate.check(&RouterRequestKind::Hello {
-        min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
-        max_protocol_version: ROUTER_PROTOCOL_VERSION,
-        token: ConnectionToken::new("wrongToken"),
-    })
-    .expect_err("the Hello is refused");
+    router_handshake
+        .validate_request_kind(&RouterRequestKind::Hello {
+            min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+            max_protocol_version: ROUTER_PROTOCOL_VERSION,
+            connection_token: ConnectionToken::from_secret("wrongToken"),
+        })
+        .expect_err("the Hello is refused");
 
     assert_eq!(
-        gate.check(&RouterRequestKind::ListSessions),
+        router_handshake.validate_request_kind(&RouterRequestKind::ListSessions),
         Err(IpcErrorPayload {
             code: IpcErrorCode::HelloRequired,
             message: "ListSessions arrived before a Hello opened the connection".to_string(),
@@ -1155,26 +1255,29 @@ fn a_refused_hello_leaves_the_gate_closed() {
 
 #[test]
 fn a_good_hello_after_a_refusal_opens_the_gate() {
-    let mut gate = RouterHandshake::new(token());
+    let mut router_handshake =
+        RouterHandshake::from_connection_token(build_test_connection_token());
 
-    gate.check(&RouterRequestKind::Hello {
-        min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
-        max_protocol_version: ROUTER_PROTOCOL_VERSION,
-        token: ConnectionToken::new("wrongToken"),
-    })
-    .expect_err("the Hello is refused");
-    gate.check(&RouterRequestKind::Hello {
-        min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
-        max_protocol_version: ROUTER_PROTOCOL_VERSION,
-        token: token(),
-    })
-    .expect("the Hello is accepted");
+    router_handshake
+        .validate_request_kind(&RouterRequestKind::Hello {
+            min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+            max_protocol_version: ROUTER_PROTOCOL_VERSION,
+            connection_token: ConnectionToken::from_secret("wrongToken"),
+        })
+        .expect_err("the Hello is refused");
+    router_handshake
+        .validate_request_kind(&RouterRequestKind::Hello {
+            min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+            max_protocol_version: ROUTER_PROTOCOL_VERSION,
+            connection_token: build_test_connection_token(),
+        })
+        .expect("the Hello is accepted");
 
     assert_eq!(
-        gate.check(&RouterRequestKind::CreateSession {
+        router_handshake.validate_request_kind(&RouterRequestKind::CreateSession {
             profile: None,
-            cwd: None,
-            allow_other_users: None,
+            working_directory: None,
+            is_other_user_access_allowed: None,
         }),
         Ok(())
     );
@@ -1182,26 +1285,29 @@ fn a_good_hello_after_a_refusal_opens_the_gate() {
 
 #[test]
 fn a_refused_hello_on_an_open_gate_leaves_it_open() {
-    let mut gate = RouterHandshake::new(token());
+    let mut router_handshake =
+        RouterHandshake::from_connection_token(build_test_connection_token());
 
-    gate.check(&RouterRequestKind::Hello {
-        min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
-        max_protocol_version: ROUTER_PROTOCOL_VERSION,
-        token: token(),
-    })
-    .expect("the Hello is accepted");
-    gate.check(&RouterRequestKind::Hello {
-        min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
-        max_protocol_version: ROUTER_PROTOCOL_VERSION,
-        token: ConnectionToken::new("wrongToken"),
-    })
-    .expect_err("the Hello is refused");
+    router_handshake
+        .validate_request_kind(&RouterRequestKind::Hello {
+            min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+            max_protocol_version: ROUTER_PROTOCOL_VERSION,
+            connection_token: build_test_connection_token(),
+        })
+        .expect("the Hello is accepted");
+    router_handshake
+        .validate_request_kind(&RouterRequestKind::Hello {
+            min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+            max_protocol_version: ROUTER_PROTOCOL_VERSION,
+            connection_token: ConnectionToken::from_secret("wrongToken"),
+        })
+        .expect_err("the Hello is refused");
 
     assert_eq!(
-        gate.check(&RouterRequestKind::CreateSession {
+        router_handshake.validate_request_kind(&RouterRequestKind::CreateSession {
             profile: None,
-            cwd: None,
-            allow_other_users: None,
+            working_directory: None,
+            is_other_user_access_allowed: None,
         }),
         Ok(())
     );
@@ -1211,7 +1317,7 @@ fn a_refused_hello_on_an_open_gate_leaves_it_open() {
 #[cfg(unix)]
 fn the_router_socket_sits_directly_inside_the_runtime_directory() {
     assert_eq!(
-        router_socket_addr(Path::new("/run/user/1000/koshi")),
+        compute_router_socket_address(Path::new("/run/user/1000/koshi")),
         "/run/user/1000/koshi/router.sock"
     );
 }
@@ -1221,9 +1327,10 @@ fn the_router_socket_sits_directly_inside_the_runtime_directory() {
 fn each_runtime_directory_gets_its_own_router_pipe_in_the_koshi_namespace() {
     const PREFIX: &str = "koshi-router-";
 
-    let pipe = router_socket_addr(Path::new(r"C:\Users\u\AppData\Local\koshi"));
-    let pipe_again = router_socket_addr(Path::new(r"C:\Users\u\AppData\Local\koshi"));
-    let other_pipe = router_socket_addr(Path::new(r"C:\Users\u\AppData\Local\koshi-test"));
+    let pipe = compute_router_socket_address(Path::new(r"C:\Users\u\AppData\Local\koshi"));
+    let pipe_again = compute_router_socket_address(Path::new(r"C:\Users\u\AppData\Local\koshi"));
+    let other_pipe =
+        compute_router_socket_address(Path::new(r"C:\Users\u\AppData\Local\koshi-test"));
 
     assert_eq!(pipe, pipe_again);
     assert_ne!(pipe, other_pipe);
@@ -1237,31 +1344,34 @@ fn each_runtime_directory_gets_its_own_router_pipe_in_the_koshi_namespace() {
 
 #[test]
 fn the_router_socket_address_passes_the_trust_check() {
-    let runtime_dir = tempfile::tempdir().expect("a temporary directory is created");
+    let runtime_directory = tempfile::tempdir().expect("a temporary directory is created");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(runtime_dir.path(), std::fs::Permissions::from_mode(0o700))
-            .expect("the runtime directory mode is set");
+        std::fs::set_permissions(
+            runtime_directory.path(),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .expect("the runtime directory mode is set");
     }
 
-    crate::validate::validate_socket_addr(
-        &router_socket_addr(runtime_dir.path()),
-        runtime_dir.path(),
+    crate::validate::validate_socket_address(
+        &compute_router_socket_address(runtime_directory.path()),
+        runtime_directory.path(),
     )
     .expect("the router socket sits where the trust check accepts it");
 }
 
 #[test]
 fn the_router_endpoint_and_lock_files_sit_beside_the_socket() {
-    let runtime_dir = Path::new("/run/user/1000/koshi");
+    let runtime_directory = Path::new("/run/user/1000/koshi");
 
     assert_eq!(
-        router_endpoint_path(runtime_dir),
+        resolve_router_endpoint_path(runtime_directory),
         PathBuf::from("/run/user/1000/koshi/router.json")
     );
     assert_eq!(
-        router_lock_path(runtime_dir),
+        resolve_router_lock_path(runtime_directory),
         PathBuf::from("/run/user/1000/koshi/router.lock")
     );
 }

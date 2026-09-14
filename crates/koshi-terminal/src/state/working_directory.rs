@@ -12,23 +12,23 @@ use serde::{Deserialize, Serialize};
 /// inherit a directory a remote host reported; a shell over SSH reports
 /// `file://remote/…`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReportedCwd {
+pub struct ReportedWorkingDirectory {
     /// The URI authority (the part between `//` and the path), or `None` when
     /// it was empty (`file:///path`). `localhost` and the local machine's own
     /// hostname both denote the local machine.
     pub(in crate::state) host: Option<String>,
     /// The decoded working-directory path.
-    pub(in crate::state) path: PathBuf,
+    pub(in crate::state) working_directory_path: PathBuf,
 }
 
-impl ReportedCwd {
+impl ReportedWorkingDirectory {
     /// The host the shell named, or `None` for an empty authority.
-    pub fn host(&self) -> Option<&str> {
+    pub fn get_host(&self) -> Option<&str> {
         self.host.as_deref()
     }
 
     /// The decoded working-directory path.
-    pub fn path(&self) -> &Path {
-        &self.path
+    pub fn get_working_directory_path(&self) -> &Path {
+        &self.working_directory_path
     }
 }

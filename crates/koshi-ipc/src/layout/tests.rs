@@ -1,5 +1,5 @@
 //! Tests for the layout answer's wire form: a populated layout survives a
-//! round trip, its encoded shape is pinned field by field, the same bytes
+//! round trip, its encoded JSON shape is pinned field by field, the same bytes
 //! decode back into the same values, a field this build does not know is
 //! ignored, and a missing or malformed field is refused with its exact error.
 
@@ -13,99 +13,121 @@ use uuid::Uuid;
 
 use super::*;
 
-/// A fixed UUID ending in `tail`, so every id in one encoding stays
+/// A fixed UUID ending in `suffix_byte`, so every id in one encoding stays
 /// distinguishable.
-fn uuid_ending(tail: u8) -> Uuid {
-    Uuid::parse_str(&format!("00000000-0000-0000-0000-0000000000{tail:02}"))
-        .expect("literal UUID parses")
+fn build_test_uuid_with_suffix(suffix_byte: u8) -> Uuid {
+    Uuid::parse_str(&format!(
+        "00000000-0000-0000-0000-0000000000{suffix_byte:02}"
+    ))
+    .expect("literal UUID parses")
 }
 
 /// The session in every fixture below.
-fn session_id() -> SessionId {
-    SessionId::from_uuid(uuid_ending(1))
+fn build_test_session_id() -> SessionId {
+    SessionId::from_uuid(build_test_uuid_with_suffix(1))
 }
 
 /// The tab in every fixture below.
-fn tab_id() -> TabId {
-    TabId::from_uuid(uuid_ending(2))
+fn build_test_tab_id() -> TabId {
+    TabId::from_uuid(build_test_uuid_with_suffix(2))
 }
 
 /// The client viewing the tab in every fixture below.
-fn client_id() -> ClientId {
-    ClientId::from_uuid(uuid_ending(3))
+fn build_test_client_id() -> ClientId {
+    ClientId::from_uuid(build_test_uuid_with_suffix(3))
 }
 
 /// The stack's active member.
-fn active_pane() -> PaneId {
-    PaneId::from_uuid(uuid_ending(4))
+fn build_test_active_pane_id() -> PaneId {
+    PaneId::from_uuid(build_test_uuid_with_suffix(4))
 }
 
 /// The stack's collapsed member, which owns the header strip.
-fn collapsed_pane() -> PaneId {
-    PaneId::from_uuid(uuid_ending(5))
+fn build_test_collapsed_pane_id() -> PaneId {
+    PaneId::from_uuid(build_test_uuid_with_suffix(5))
 }
 
 /// Encode `message` and decode it back.
-fn round_trip<T: Serialize + DeserializeOwned>(message: &T) -> T {
-    let encoded = serde_json::to_string(message).expect("message encodes");
-    serde_json::from_str(&encoded).expect("message decodes")
+fn round_trip_wire_message<WireMessage: Serialize + DeserializeOwned>(
+    wire_message: &WireMessage,
+) -> WireMessage {
+    let encoded_json = serde_json::to_string(wire_message).expect("wire message encodes");
+    serde_json::from_str(&encoded_json).expect("wire message decodes")
 }
 
 /// A layout with every field carrying a value: a stacked tab, one viewing
 /// client zoomed on a pane, a suppressed pane, and a header strip.
-fn populated_layout() -> SessionLayout {
+fn build_populated_session_layout() -> SessionLayout {
     SessionLayout {
-        id: session_id(),
-        name: "quiet-lake".to_string(),
+        session_id: build_test_session_id(),
+        session_name: "quiet-lake".to_string(),
         tabs: vec![TabLayout {
-            id: tab_id(),
-            name: "editor".to_string(),
-            index: 1,
-            tree: LayoutNode::Split(SplitNode {
+            tab_id: build_test_tab_id(),
+            tab_name: "editor".to_string(),
+            tab_index: 1,
+            layout_tree: LayoutNode::Split(SplitNode {
                 direction: SplitDirection::Stacked,
                 children: vec![
-                    LayoutNode::Pane(active_pane()),
-                    LayoutNode::Pane(collapsed_pane()),
+                    LayoutNode::Pane(build_test_active_pane_id()),
+                    LayoutNode::Pane(build_test_collapsed_pane_id()),
                 ],
                 weights: vec![SizeWeight::default(), SizeWeight::default()],
-                active: 0,
+                active_child_index: 0,
             }),
-            solved: vec![SolvedTab {
-                client: client_id(),
-                viewport: Size { cols: 80, rows: 22 },
-                mode: LayoutMode::Fullscreen {
-                    focused: active_pane(),
+            solved_tabs: vec![SolvedTab {
+                client_id: build_test_client_id(),
+                viewport_size: Size {
+                    column_count: 80,
+                    row_count: 22,
                 },
-                panes: vec![
+                layout_mode: LayoutMode::Fullscreen {
+                    focused_pane_id: build_test_active_pane_id(),
+                },
+                pane_rects: vec![
                     SolvedPane {
-                        id: active_pane(),
-                        rect: Rect::at_origin(Size { cols: 80, rows: 21 }),
+                        pane_id: build_test_active_pane_id(),
+                        outer_rect: Rect::from_size_at_origin(Size {
+                            column_count: 80,
+                            row_count: 21,
+                        }),
                     },
                     SolvedPane {
-                        id: collapsed_pane(),
-                        rect: Rect::new(Point { x: 0, y: 21 }, Size { cols: 80, rows: 1 }),
+                        pane_id: build_test_collapsed_pane_id(),
+                        outer_rect: Rect::from_origin_and_size(
+                            Point { column: 0, row: 21 },
+                            Size {
+                                column_count: 80,
+                                row_count: 1,
+                            },
+                        ),
                     },
                 ],
-                suppressed: vec![collapsed_pane()],
-                all_suppressed: true,
+                suppressed_pane_ids: vec![build_test_collapsed_pane_id()],
+                is_every_pane_suppressed: true,
                 stack_headers: vec![StackHeader {
-                    pane: collapsed_pane(),
-                    rect: Rect::new(Point { x: 0, y: 21 }, Size { cols: 80, rows: 1 }),
-                    position: 1,
-                    total: 2,
+                    pane_id: build_test_collapsed_pane_id(),
+                    header_rect: Rect::from_origin_and_size(
+                        Point { column: 0, row: 21 },
+                        Size {
+                            column_count: 80,
+                            row_count: 1,
+                        },
+                    ),
+                    member_index: 1,
+                    member_count: 2,
                 }],
             }],
         }],
         clients: vec![ClientFocus {
-            id: client_id(),
-            active_tab: tab_id(),
-            focused_pane: Some(active_pane()),
+            client_id: build_test_client_id(),
+            active_tab_id: build_test_tab_id(),
+            focused_pane_id: Some(build_test_active_pane_id()),
         }],
     }
 }
 
-/// The exact encoding of [`populated_layout`].
-fn populated_layout_json() -> serde_json::Value {
+/// The exact encoding of [`build_populated_session_layout`].
+fn build_populated_layout_json() -> serde_json::Value {
     json!({
         "id": "00000000-0000-0000-0000-000000000001",
         "name": "quiet-lake",
@@ -181,85 +203,85 @@ fn populated_layout_json() -> serde_json::Value {
 }
 
 #[test]
-fn a_populated_layout_survives_a_round_trip() {
-    let layout = populated_layout();
+fn a_populated_layout_survives_a_round_trip_wire_message() {
+    let layout = build_populated_session_layout();
 
-    assert_eq!(round_trip(&layout), layout);
+    assert_eq!(round_trip_wire_message(&layout), layout);
 }
 
 #[test]
-fn a_layout_with_no_tabs_and_no_clients_survives_a_round_trip() {
+fn a_layout_with_no_tabs_and_no_clients_survives_a_round_trip_wire_message() {
     let layout = SessionLayout {
-        id: session_id(),
-        name: "quiet-lake".to_string(),
+        session_id: build_test_session_id(),
+        session_name: "quiet-lake".to_string(),
         tabs: Vec::new(),
         clients: Vec::new(),
     };
 
-    assert_eq!(round_trip(&layout), layout);
+    assert_eq!(round_trip_wire_message(&layout), layout);
 }
 
 #[test]
 fn a_tab_no_client_views_survives_a_round_trip_with_an_empty_solve_list() {
     let layout = SessionLayout {
-        id: session_id(),
-        name: "quiet-lake".to_string(),
+        session_id: build_test_session_id(),
+        session_name: "quiet-lake".to_string(),
         tabs: vec![TabLayout {
-            id: tab_id(),
-            name: "editor".to_string(),
-            index: 0,
-            tree: LayoutNode::Pane(active_pane()),
-            solved: Vec::new(),
+            tab_id: build_test_tab_id(),
+            tab_name: "editor".to_string(),
+            tab_index: 0,
+            layout_tree: LayoutNode::Pane(build_test_active_pane_id()),
+            solved_tabs: Vec::new(),
         }],
         clients: Vec::new(),
     };
 
-    let decoded = round_trip(&layout);
+    let decoded_tab_layout = round_trip_wire_message(&layout);
 
-    assert_eq!(decoded, layout);
-    assert_eq!(decoded.tabs[0].solved, Vec::new());
+    assert_eq!(decoded_tab_layout, layout);
+    assert_eq!(decoded_tab_layout.tabs[0].solved_tabs, Vec::new());
 }
 
 #[test]
-fn a_client_that_has_focused_nothing_survives_a_round_trip() {
+fn a_client_that_has_focused_nothing_survives_a_round_trip_wire_message() {
     let layout = SessionLayout {
-        id: session_id(),
-        name: "quiet-lake".to_string(),
+        session_id: build_test_session_id(),
+        session_name: "quiet-lake".to_string(),
         tabs: Vec::new(),
         clients: vec![ClientFocus {
-            id: client_id(),
-            active_tab: tab_id(),
-            focused_pane: None,
+            client_id: build_test_client_id(),
+            active_tab_id: build_test_tab_id(),
+            focused_pane_id: None,
         }],
     };
 
-    let decoded = round_trip(&layout);
+    let decoded_client_focus = round_trip_wire_message(&layout);
 
-    assert_eq!(decoded, layout);
-    assert_eq!(decoded.clients[0].focused_pane, None);
+    assert_eq!(decoded_client_focus, layout);
+    assert_eq!(decoded_client_focus.clients[0].focused_pane_id, None);
 }
 
 #[test]
-fn a_split_with_no_children_survives_a_round_trip() {
+fn a_split_with_no_children_survives_a_round_trip_wire_message() {
     let layout = SessionLayout {
-        id: session_id(),
-        name: "quiet-lake".to_string(),
+        session_id: build_test_session_id(),
+        session_name: "quiet-lake".to_string(),
         tabs: vec![TabLayout {
-            id: tab_id(),
-            name: "editor".to_string(),
-            index: 0,
-            tree: LayoutNode::Split(SplitNode {
+            tab_id: build_test_tab_id(),
+            tab_name: "editor".to_string(),
+            tab_index: 0,
+            layout_tree: LayoutNode::Split(SplitNode {
                 direction: SplitDirection::Horizontal,
                 children: Vec::new(),
                 weights: Vec::new(),
-                active: 0,
+                active_child_index: 0,
             }),
-            solved: Vec::new(),
+            solved_tabs: Vec::new(),
         }],
         clients: Vec::new(),
     };
 
-    assert_eq!(round_trip(&layout), layout);
+    assert_eq!(round_trip_wire_message(&layout), layout);
 }
 
 #[test]
@@ -274,31 +296,31 @@ fn the_layout_wire_shape_belongs_to_this_protocol_version() {
     // Round-trip tests cannot catch this: one build encoding and decoding its
     // own structs always agrees with itself.
     assert_eq!(
-        serde_json::to_value(populated_layout()).expect("layout encodes"),
-        populated_layout_json(),
+        serde_json::to_value(build_populated_session_layout()).expect("layout encodes"),
+        build_populated_layout_json(),
     );
 }
 
 #[test]
 fn the_pinned_wire_shape_decodes_back_into_the_same_layout() {
-    let decoded: SessionLayout =
-        serde_json::from_value(populated_layout_json()).expect("the pinned shape decodes");
+    let decoded_session_layout: SessionLayout =
+        serde_json::from_value(build_populated_layout_json()).expect("the pinned shape decodes");
 
-    assert_eq!(decoded, populated_layout());
+    assert_eq!(decoded_session_layout, build_populated_session_layout());
 }
 
 #[test]
 fn a_layout_carrying_an_unknown_field_ignores_it() {
-    let decoded: SessionLayout = serde_json::from_str(
+    let decoded_session_layout: SessionLayout = serde_json::from_str(
         r#"{"id":"00000000-0000-0000-0000-000000000001","name":"quiet-lake","tabs":[],"clients":[],"junk":5}"#,
     )
     .expect("a field this build does not know is ignored");
 
     assert_eq!(
-        decoded,
+        decoded_session_layout,
         SessionLayout {
-            id: session_id(),
-            name: "quiet-lake".to_string(),
+            session_id: build_test_session_id(),
+            session_name: "quiet-lake".to_string(),
             tabs: Vec::new(),
             clients: Vec::new(),
         }
@@ -307,39 +329,42 @@ fn a_layout_carrying_an_unknown_field_ignores_it() {
 
 #[test]
 fn a_tab_carrying_an_unknown_field_ignores_it() {
-    let decoded: TabLayout = serde_json::from_str(
+    let decoded_tab_layout: TabLayout = serde_json::from_str(
         r#"{"id":"00000000-0000-0000-0000-000000000002","name":"editor","index":0,"tree":{"Pane":"00000000-0000-0000-0000-000000000004"},"solved":[],"junk":5}"#,
     )
     .expect("a field this build does not know is ignored");
 
     assert_eq!(
-        decoded,
+        decoded_tab_layout,
         TabLayout {
-            id: tab_id(),
-            name: "editor".to_string(),
-            index: 0,
-            tree: LayoutNode::Pane(active_pane()),
-            solved: Vec::new(),
+            tab_id: build_test_tab_id(),
+            tab_name: "editor".to_string(),
+            tab_index: 0,
+            layout_tree: LayoutNode::Pane(build_test_active_pane_id()),
+            solved_tabs: Vec::new(),
         }
     );
 }
 
 #[test]
 fn a_solved_tab_carrying_an_unknown_field_ignores_it() {
-    let decoded: SolvedTab = serde_json::from_str(
+    let decoded_solved_tab: SolvedTab = serde_json::from_str(
         r#"{"client":"00000000-0000-0000-0000-000000000003","viewport":{"cols":80,"rows":22},"mode":"Tiled","panes":[],"suppressed":[],"all_suppressed":false,"stack_headers":[],"junk":5}"#,
     )
     .expect("a field this build does not know is ignored");
 
     assert_eq!(
-        decoded,
+        decoded_solved_tab,
         SolvedTab {
-            client: client_id(),
-            viewport: Size { cols: 80, rows: 22 },
-            mode: LayoutMode::Tiled,
-            panes: Vec::new(),
-            suppressed: Vec::new(),
-            all_suppressed: false,
+            client_id: build_test_client_id(),
+            viewport_size: Size {
+                column_count: 80,
+                row_count: 22
+            },
+            layout_mode: LayoutMode::Tiled,
+            pane_rects: Vec::new(),
+            suppressed_pane_ids: Vec::new(),
+            is_every_pane_suppressed: false,
             stack_headers: Vec::new(),
         }
     );
@@ -347,62 +372,65 @@ fn a_solved_tab_carrying_an_unknown_field_ignores_it() {
 
 #[test]
 fn a_solved_pane_carrying_an_unknown_field_ignores_it() {
-    let decoded: SolvedPane = serde_json::from_str(
+    let decoded_solved_pane: SolvedPane = serde_json::from_str(
         r#"{"id":"00000000-0000-0000-0000-000000000004","rect":{"origin":{"x":0,"y":0},"size":{"cols":80,"rows":22}},"junk":5}"#,
     )
     .expect("a field this build does not know is ignored");
 
     assert_eq!(
-        decoded,
+        decoded_solved_pane,
         SolvedPane {
-            id: active_pane(),
-            rect: Rect::at_origin(Size { cols: 80, rows: 22 }),
+            pane_id: build_test_active_pane_id(),
+            outer_rect: Rect::from_size_at_origin(Size {
+                column_count: 80,
+                row_count: 22
+            }),
         }
     );
 }
 
 #[test]
 fn a_client_focus_carrying_an_unknown_field_ignores_it() {
-    let decoded: ClientFocus = serde_json::from_str(
+    let decoded_client_focus: ClientFocus = serde_json::from_str(
         r#"{"id":"00000000-0000-0000-0000-000000000003","active_tab":"00000000-0000-0000-0000-000000000002","focused_pane":null,"junk":5}"#,
     )
     .expect("a field this build does not know is ignored");
 
     assert_eq!(
-        decoded,
+        decoded_client_focus,
         ClientFocus {
-            id: client_id(),
-            active_tab: tab_id(),
-            focused_pane: None,
+            client_id: build_test_client_id(),
+            active_tab_id: build_test_tab_id(),
+            focused_pane_id: None,
         }
     );
 }
 
 #[test]
 fn a_client_focus_with_no_focused_pane_key_reads_as_focusing_nothing() {
-    let decoded: ClientFocus = serde_json::from_str(
+    let decoded_client_focus: ClientFocus = serde_json::from_str(
         r#"{"id":"00000000-0000-0000-0000-000000000003","active_tab":"00000000-0000-0000-0000-000000000002"}"#,
     )
     .expect("a missing `focused_pane` reads as `None`");
 
     assert_eq!(
-        decoded,
+        decoded_client_focus,
         ClientFocus {
-            id: client_id(),
-            active_tab: tab_id(),
-            focused_pane: None,
+            client_id: build_test_client_id(),
+            active_tab_id: build_test_tab_id(),
+            focused_pane_id: None,
         }
     );
 }
 
 #[test]
 fn a_layout_with_a_misspelled_field_name_is_refused() {
-    let decoded: Result<SessionLayout, _> = serde_json::from_str(
+    let decoded_layout_result: Result<SessionLayout, _> = serde_json::from_str(
         r#"{"id":"00000000-0000-0000-0000-000000000001","nmae":"quiet-lake","tabs":[],"clients":[]}"#,
     );
 
     assert_eq!(
-        decoded
+        decoded_layout_result
             .expect_err("a misspelled field is refused")
             .to_string(),
         "missing field `name` at line 1 column 88"
@@ -411,12 +439,12 @@ fn a_layout_with_a_misspelled_field_name_is_refused() {
 
 #[test]
 fn a_tab_whose_index_is_below_zero_is_refused() {
-    let decoded: Result<TabLayout, _> = serde_json::from_str(
+    let decoded_tab_result: Result<TabLayout, _> = serde_json::from_str(
         r#"{"id":"00000000-0000-0000-0000-000000000002","name":"editor","index":-1,"tree":{"Pane":"00000000-0000-0000-0000-000000000004"},"solved":[]}"#,
     );
 
     assert_eq!(
-        decoded
+        decoded_tab_result
             .expect_err("a negative index is refused")
             .to_string(),
         "invalid value: integer `-1`, expected usize at line 1 column 71"
@@ -425,12 +453,12 @@ fn a_tab_whose_index_is_below_zero_is_refused() {
 
 #[test]
 fn a_solve_whose_mode_this_build_does_not_have_is_refused() {
-    let decoded: Result<SolvedTab, _> = serde_json::from_str(
+    let decoded_solved_tab_result: Result<SolvedTab, _> = serde_json::from_str(
         r#"{"client":"00000000-0000-0000-0000-000000000003","viewport":{"cols":80,"rows":22},"mode":"Floating","panes":[],"suppressed":[],"all_suppressed":false,"stack_headers":[]}"#,
     );
 
     assert_eq!(
-        decoded
+        decoded_solved_tab_result
             .expect_err("a mode this build does not have is refused")
             .to_string(),
         "unknown variant `Floating`, expected `Tiled` or `Fullscreen` at line 1 column 99"
@@ -439,12 +467,14 @@ fn a_solve_whose_mode_this_build_does_not_have_is_refused() {
 
 #[test]
 fn a_layout_missing_its_clients_is_refused() {
-    let decoded: Result<SessionLayout, _> = serde_json::from_str(
+    let decoded_layout_result: Result<SessionLayout, _> = serde_json::from_str(
         r#"{"id":"00000000-0000-0000-0000-000000000001","name":"quiet-lake","tabs":[]}"#,
     );
 
     assert_eq!(
-        decoded.expect_err("a missing field is refused").to_string(),
+        decoded_layout_result
+            .expect_err("a missing field is refused")
+            .to_string(),
         "missing field `clients` at line 1 column 75"
     );
 }

@@ -4,18 +4,19 @@ use super::*;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-fn roundtrip<T>(value: &T)
+fn assert_serde_roundtrip<Roundtrippable>(serializable_value: &Roundtrippable)
 where
-    T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug,
+    Roundtrippable: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug,
 {
-    let json = serde_json::to_string(value).expect("serialize");
-    let back: T = serde_json::from_str(&json).expect("deserialize");
-    assert_eq!(*value, back);
+    let serialized_json = serde_json::to_string(serializable_value).expect("serialize");
+    let deserialized_roundtrippable: Roundtrippable =
+        serde_json::from_str(&serialized_json).expect("deserialize");
+    assert_eq!(*serializable_value, deserialized_roundtrippable);
 }
 
 #[test]
 fn domain_category_roundtrips() {
-    let cases = [
+    let category_values = [
         DomainCategory::Config,
         DomainCategory::Cli,
         DomainCategory::Ipc,
@@ -26,24 +27,24 @@ fn domain_category_roundtrips() {
         DomainCategory::Session,
         DomainCategory::Storage,
     ];
-    for c in &cases {
-        roundtrip(c);
+    for category in &category_values {
+        assert_serde_roundtrip(category);
     }
-    assert_eq!(cases.len(), 9);
+    assert_eq!(category_values.len(), 9);
 }
 
 #[test]
 fn severity_roundtrips() {
-    let cases = [
+    let severity_values = [
         Severity::Recoverable,
         Severity::ClientFatal,
         Severity::SessionFatal,
         Severity::ProcessFatal,
     ];
-    for s in &cases {
-        roundtrip(s);
+    for severity in &severity_values {
+        assert_serde_roundtrip(severity);
     }
-    assert_eq!(cases.len(), 4);
+    assert_eq!(severity_values.len(), 4);
 }
 
 #[test]
@@ -55,7 +56,7 @@ fn severity_orders_least_to_most_fatal() {
 
 #[test]
 fn category_display_is_human() {
-    let cases = [
+    let category_display_cases = [
         (DomainCategory::Config, "config"),
         (DomainCategory::Cli, "cli"),
         (DomainCategory::Ipc, "ipc"),
@@ -66,29 +67,29 @@ fn category_display_is_human() {
         (DomainCategory::Plugin, "plugin"),
         (DomainCategory::Storage, "storage"),
     ];
-    for (cat, want) in &cases {
-        assert_eq!(cat.to_string(), *want);
+    for (category, expected_display) in &category_display_cases {
+        assert_eq!(category.to_string(), *expected_display);
     }
-    assert_eq!(cases.len(), 9);
+    assert_eq!(category_display_cases.len(), 9);
 }
 
 #[test]
 fn severity_display_is_human() {
-    let cases = [
+    let severity_display_cases = [
         (Severity::Recoverable, "recoverable"),
         (Severity::ClientFatal, "client-fatal"),
         (Severity::SessionFatal, "session-fatal"),
         (Severity::ProcessFatal, "process-fatal"),
     ];
-    for (sev, want) in &cases {
-        assert_eq!(sev.to_string(), *want);
+    for (severity, expected_display) in &severity_display_cases {
+        assert_eq!(severity.to_string(), *expected_display);
     }
-    assert_eq!(cases.len(), 4);
+    assert_eq!(severity_display_cases.len(), 4);
 }
 
 #[test]
 fn domain_category_serializes_as_its_variant_name() {
-    let cases = [
+    let category_json_cases = [
         (DomainCategory::Config, "\"Config\""),
         (DomainCategory::Cli, "\"Cli\""),
         (DomainCategory::Ipc, "\"Ipc\""),
@@ -99,55 +100,62 @@ fn domain_category_serializes_as_its_variant_name() {
         (DomainCategory::Session, "\"Session\""),
         (DomainCategory::Storage, "\"Storage\""),
     ];
-    for (cat, want) in &cases {
-        assert_eq!(serde_json::to_string(cat).expect("serialize"), *want);
+    for (category, expected_json) in &category_json_cases {
+        assert_eq!(
+            serde_json::to_string(category).expect("serialize"),
+            *expected_json
+        );
     }
-    assert_eq!(cases.len(), 9);
+    assert_eq!(category_json_cases.len(), 9);
 }
 
 #[test]
 fn severity_serializes_as_its_variant_name() {
-    let cases = [
+    let severity_json_cases = [
         (Severity::Recoverable, "\"Recoverable\""),
         (Severity::ClientFatal, "\"ClientFatal\""),
         (Severity::SessionFatal, "\"SessionFatal\""),
         (Severity::ProcessFatal, "\"ProcessFatal\""),
     ];
-    for (sev, want) in &cases {
-        assert_eq!(serde_json::to_string(sev).expect("serialize"), *want);
+    for (severity, expected_json) in &severity_json_cases {
+        assert_eq!(
+            serde_json::to_string(severity).expect("serialize"),
+            *expected_json
+        );
     }
-    assert_eq!(cases.len(), 4);
+    assert_eq!(severity_json_cases.len(), 4);
 }
 
 #[test]
 fn an_unknown_category_name_is_rejected() {
-    let err = serde_json::from_str::<DomainCategory>("\"Network\"").expect_err("rejects");
+    let category_parse_error =
+        serde_json::from_str::<DomainCategory>("\"Network\"").expect_err("rejects");
 
     assert_eq!(
-        err.to_string(),
+        category_parse_error.to_string(),
         "unknown variant `Network`, expected one of `Config`, `Cli`, `Ipc`, `Pty`, `Terminal`, `Layout`, `Plugin`, `Session`, `Storage` at line 1 column 9"
     );
 }
 
 #[test]
 fn an_unknown_severity_name_is_rejected() {
-    let err = serde_json::from_str::<Severity>("\"Fatal\"").expect_err("rejects");
+    let severity_parse_error = serde_json::from_str::<Severity>("\"Fatal\"").expect_err("rejects");
 
     assert_eq!(
-        err.to_string(),
+        severity_parse_error.to_string(),
         "unknown variant `Fatal`, expected one of `Recoverable`, `ClientFatal`, `SessionFatal`, `ProcessFatal` at line 1 column 7"
     );
 }
 
 #[test]
 fn process_fatal_is_the_most_fatal_severity() {
-    let all = [
+    let severities = [
         Severity::Recoverable,
         Severity::ClientFatal,
         Severity::SessionFatal,
         Severity::ProcessFatal,
     ];
 
-    assert_eq!(all.iter().max(), Some(&Severity::ProcessFatal));
-    assert_eq!(all.iter().min(), Some(&Severity::Recoverable));
+    assert_eq!(severities.iter().max(), Some(&Severity::ProcessFatal));
+    assert_eq!(severities.iter().min(), Some(&Severity::Recoverable));
 }

@@ -1,7 +1,7 @@
 //! Kitty image-placement and image-deletion command parsing.
 
 use super::parse_kitty_control;
-use koshi_image::{GraphicsError, GraphicsProtocol, ImageDisplay, MAX_GRAPHICS_CONTROL_BYTES};
+use koshi_image::{GraphicsError, GraphicsProtocol, ImageDisplay, MAX_GRAPHICS_CONTROL_BYTE_COUNT};
 
 /// A Kitty image-placement or image-deletion selector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -9,9 +9,9 @@ pub enum KittyDelete {
     /// Delete all visible placements.
     Visible,
     /// Delete placements for an image identifier.
-    Id,
+    ImageId,
     /// Delete placements for an image number.
-    Number,
+    ImageNumber,
     /// Delete the placement at the cursor.
     Cursor,
     /// Delete placements intersecting one cell.
@@ -19,13 +19,13 @@ pub enum KittyDelete {
     /// Delete placements intersecting one cell at one z-index.
     CellAtZ,
     /// Delete an image identifier range.
-    IdRange,
+    ImageIdRange,
     /// Delete placements in a column.
     Column,
     /// Delete placements in a row.
     Row,
     /// Delete placements at one z-index.
-    Z,
+    ZIndex,
 }
 
 /// The operation requested by a Kitty command.
@@ -49,237 +49,262 @@ pub enum KittyCommandKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KittyAnimationCommand {
     /// The raw frame format: 24 for RGB, 32 for RGBA, or 100 for PNG.
-    pub format: Option<u32>,
+    pub media_format: Option<u32>,
     /// The raw frame width in pixels.
-    pub width: Option<u32>,
+    pub frame_width_pixels: Option<u32>,
     /// The raw frame height in pixels.
-    pub height: Option<u32>,
+    pub frame_height_pixels: Option<u32>,
     /// The target frame number for a frame transfer or control command.
-    pub frame: Option<u32>,
+    pub frame_number: Option<u32>,
     /// The frame whose delay is changed by an animation control command.
-    pub affected_frame: Option<u32>,
+    pub affected_frame_number: Option<u32>,
     /// The base frame number for a partial frame transfer.
-    pub base_frame: Option<u32>,
+    pub base_frame_number: Option<u32>,
     /// The source frame number for a composition.
-    pub source_frame: Option<u32>,
+    pub source_frame_number: Option<u32>,
     /// The destination frame number for a composition.
-    pub destination_frame: Option<u32>,
+    pub destination_frame_number: Option<u32>,
     /// The source or patch x coordinate in pixels.
-    pub source_x: u32,
+    pub source_x_pixels: u32,
     /// The source or patch y coordinate in pixels.
-    pub source_y: u32,
+    pub source_y_pixels: u32,
     /// The composition destination x coordinate in pixels.
-    pub destination_x: u32,
+    pub destination_x_pixels: u32,
     /// The composition destination y coordinate in pixels.
-    pub destination_y: u32,
+    pub destination_y_pixels: u32,
     /// The frame delay in milliseconds, including negative gapless values.
-    pub gap_ms: Option<i32>,
+    pub gap_milliseconds: Option<i32>,
     /// The packed RGBA background for a new frame.
-    pub background: Option<[u8; 4]>,
+    pub background_rgba_bytes: Option<[u8; 4]>,
     /// Whether composition replaces destination pixels instead of blending them.
-    pub replace: bool,
+    pub replaces_destination_pixels: bool,
     /// The playback state requested by a control command.
-    pub state: Option<u8>,
-    /// The playback loop value requested by a control command.
-    pub loops: Option<u32>,
+    pub playback_state: Option<u8>,
+    /// The playback loop count requested by a control command.
+    pub loop_count: Option<u32>,
     /// The base64 frame payload.
-    pub payload: Vec<u8>,
+    pub encoded_payload_bytes: Vec<u8>,
 }
 
 /// One validated chunk of a multipart Kitty animation-frame transfer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KittyAnimationChunk {
-    header: Vec<u8>,
-    payload: Vec<u8>,
-    more: bool,
-    continuation: bool,
+    control_header_bytes: Vec<u8>,
+    encoded_payload_bytes: Vec<u8>,
+    has_more_chunks: bool,
+    is_continuation: bool,
 }
 
 impl KittyAnimationChunk {
     /// Return the control bytes, including the leading `G`.
     #[must_use]
-    pub(crate) fn header(&self) -> &[u8] {
-        &self.header
+    pub(crate) fn get_control_header_bytes(&self) -> &[u8] {
+        &self.control_header_bytes
     }
 
     /// Return the base64 bytes in this chunk.
     #[must_use]
-    pub(crate) fn payload(&self) -> &[u8] {
-        &self.payload
+    pub(crate) fn get_encoded_payload_bytes(&self) -> &[u8] {
+        &self.encoded_payload_bytes
     }
 
     /// Return whether another chunk is required.
     #[must_use]
-    pub(crate) fn more(&self) -> bool {
-        self.more
+    pub(crate) fn has_more_chunks(&self) -> bool {
+        self.has_more_chunks
     }
 
     /// Return whether this is a continuation chunk.
     #[must_use]
-    pub(crate) fn continuation(&self) -> bool {
-        self.continuation
+    pub(crate) fn is_continuation(&self) -> bool {
+        self.is_continuation
     }
 }
 
 /// A validated Kitty image-placement or image-deletion command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KittyCommand {
-    kind: KittyCommandKind,
-    display: ImageDisplay,
-    free_data: bool,
-    animation: Option<KittyAnimationCommand>,
+    command_kind: KittyCommandKind,
+    image_display: ImageDisplay,
+    should_free_image_data: bool,
+    animation_command: Option<KittyAnimationCommand>,
 }
 
 impl KittyCommand {
     /// Return the requested Kitty operation.
     #[must_use]
-    pub fn kind(&self) -> KittyCommandKind {
-        self.kind
+    pub fn get_command_kind(&self) -> KittyCommandKind {
+        self.command_kind
     }
 
     /// Return display and selection metadata carried by the command.
     #[must_use]
-    pub fn display(&self) -> &ImageDisplay {
-        &self.display
+    pub fn get_image_display(&self) -> &ImageDisplay {
+        &self.image_display
     }
 
     /// Return whether the command uses the uppercase delete form.
     #[must_use]
-    pub fn free_data(&self) -> bool {
-        self.free_data
+    pub fn should_free_image_data(&self) -> bool {
+        self.should_free_image_data
     }
 
     /// Return animation fields for an animation command.
     #[must_use]
-    pub fn animation(&self) -> Option<&KittyAnimationCommand> {
-        self.animation.as_ref()
+    pub fn get_animation_command(&self) -> Option<&KittyAnimationCommand> {
+        self.animation_command.as_ref()
     }
 }
 
 /// Parse a Kitty placement, deletion, or animation command.
 ///
 /// Returns `None` for other actions and multipart animation-frame starts.
-pub fn parse_command(header: &[u8], payload: &[u8]) -> Option<Result<KittyCommand, GraphicsError>> {
-    let header_len = header.len();
-    let header = header.strip_prefix(b"G")?;
-    let action = header
+pub fn parse_kitty_command(
+    control_header_bytes: &[u8],
+    encoded_payload_bytes: &[u8],
+) -> Option<Result<KittyCommand, GraphicsError>> {
+    let control_header_byte_count = control_header_bytes.len();
+    let control_body_bytes = control_header_bytes.strip_prefix(b"G")?;
+    let action_code = control_body_bytes
         .split(|byte| *byte == b',')
-        .find_map(|field| field.strip_prefix(b"a="))?;
-    let animation = match action {
+        .find_map(|control_field| control_field.strip_prefix(b"a="))?;
+    let animation_command_kind = match action_code {
         b"f" => Some(KittyCommandKind::AnimationFrame),
         b"a" => Some(KittyCommandKind::AnimationControl),
         b"c" => Some(KittyCommandKind::AnimationCompose),
-        b"d" if header
+        b"d" if control_body_bytes
             .split(|byte| *byte == b',')
-            .any(|field| matches!(field, b"d=f" | b"d=F")) =>
+            .any(|control_field| matches!(control_field, b"d=f" | b"d=F")) =>
         {
             Some(KittyCommandKind::AnimationDelete)
         }
         _ => None,
     };
-    if action != b"p" && action != b"d" && animation.is_none() {
+    if action_code != b"p" && action_code != b"d" && animation_command_kind.is_none() {
         return None;
     }
-    if action == b"f" && raw_value(header, b'm') == Some(b"1") {
+    if action_code == b"f" && find_control_parameter_bytes(control_body_bytes, b'm') == Some(b"1") {
         return None;
     }
-    if header_len > MAX_GRAPHICS_CONTROL_BYTES {
+    if control_header_byte_count > MAX_GRAPHICS_CONTROL_BYTE_COUNT {
         return Some(Err(GraphicsError::TransferTooLarge {
             protocol: GraphicsProtocol::Kitty,
         }));
     }
-    Some(if let Some(kind) = animation {
-        parse_animation_command_fields(header, payload, kind, false)
+    Some(if let Some(command_kind) = animation_command_kind {
+        parse_animation_command_fields(
+            control_body_bytes,
+            encoded_payload_bytes,
+            command_kind,
+            false,
+        )
     } else {
-        parse_command_fields(header, payload, action == b"d")
+        parse_kitty_command_fields(
+            control_body_bytes,
+            encoded_payload_bytes,
+            action_code == b"d",
+        )
     })
 }
 
-/// Parse the first or a continuation chunk of a multipart Kitty animation
-/// frame transfer.
+/// Parse the first or a continuation chunk of a multipart Kitty animation-frame
+/// transfer.
 pub(crate) fn parse_animation_transfer_chunk(
-    header: &[u8],
-    payload: &[u8],
+    control_header_bytes: &[u8],
+    encoded_payload_bytes: &[u8],
 ) -> Result<Option<KittyAnimationChunk>, GraphicsError> {
-    let body = header
-        .strip_prefix(b"G")
-        .ok_or(GraphicsError::InvalidHeader {
-            protocol: GraphicsProtocol::Kitty,
-        })?;
-    let action = body
+    let control_body_bytes =
+        control_header_bytes
+            .strip_prefix(b"G")
+            .ok_or(GraphicsError::InvalidHeader {
+                protocol: GraphicsProtocol::Kitty,
+            })?;
+    let action_code = control_body_bytes
         .split(|byte| *byte == b',')
-        .find_map(|field| field.strip_prefix(b"a="));
-    let continuation_fields = body
+        .find_map(|control_field| control_field.strip_prefix(b"a="));
+    let continuation_fields = control_body_bytes
         .split(|byte| *byte == b',')
-        .filter(|field| !field.is_empty())
-        .all(|field| {
-            field.starts_with(b"a=f") || field.starts_with(b"m=") || field.starts_with(b"q=")
+        .filter(|control_field| !control_field.is_empty())
+        .all(|control_field| {
+            control_field.starts_with(b"a=f")
+                || control_field.starts_with(b"m=")
+                || control_field.starts_with(b"q=")
         });
-    if action == Some(b"f")
+    if action_code == Some(b"f")
         && continuation_fields
-        && raw_value(header, b'i').is_none()
-        && raw_value(header, b'I').is_none()
+        && find_control_parameter_bytes(control_body_bytes, b'i').is_none()
+        && find_control_parameter_bytes(control_body_bytes, b'I').is_none()
     {
-        let mut normalized = Vec::new();
-        for field in body.split(|byte| *byte == b',') {
-            if field.starts_with(b"a=") {
-                normalized.extend_from_slice(b"a=t");
+        let mut normalized_control_bytes = Vec::new();
+        for control_field in control_body_bytes.split(|byte| *byte == b',') {
+            if control_field.starts_with(b"a=") {
+                normalized_control_bytes.extend_from_slice(b"a=t");
             } else {
-                normalized.extend_from_slice(field);
+                normalized_control_bytes.extend_from_slice(control_field);
             }
-            normalized.push(b',');
+            normalized_control_bytes.push(b',');
         }
-        normalized.pop();
-        let control = super::parse_kitty_control(&normalized)?;
-        if !control.more_specified {
-            return Err(invalid());
+        normalized_control_bytes.pop();
+        let kitty_control = super::parse_kitty_control(&normalized_control_bytes)?;
+        if !kitty_control.has_more_chunks_parameter {
+            return Err(build_invalid_command_error());
         }
-        validate_nonfinal_animation_payload(payload, control.more)?;
+        validate_nonfinal_animation_payload(encoded_payload_bytes, kitty_control.has_more_chunks)?;
         return Ok(Some(KittyAnimationChunk {
-            header: header.to_vec(),
-            payload: payload.to_vec(),
-            more: control.more,
-            continuation: true,
+            control_header_bytes: control_header_bytes.to_vec(),
+            encoded_payload_bytes: encoded_payload_bytes.to_vec(),
+            has_more_chunks: kitty_control.has_more_chunks,
+            is_continuation: true,
         }));
     }
-    if action == Some(b"f") {
-        if raw_value(header, b'm') != Some(b"1") {
+    if action_code == Some(b"f") {
+        if find_control_parameter_bytes(control_body_bytes, b'm') != Some(b"1") {
             return Ok(None);
         }
-        parse_animation_command_fields(body, payload, KittyCommandKind::AnimationFrame, true)?;
-        validate_nonfinal_animation_payload(payload, true)?;
+        parse_animation_command_fields(
+            control_body_bytes,
+            encoded_payload_bytes,
+            KittyCommandKind::AnimationFrame,
+            true,
+        )?;
+        validate_nonfinal_animation_payload(encoded_payload_bytes, true)?;
         return Ok(Some(KittyAnimationChunk {
-            header: header.to_vec(),
-            payload: payload.to_vec(),
-            more: true,
-            continuation: false,
+            control_header_bytes: control_header_bytes.to_vec(),
+            encoded_payload_bytes: encoded_payload_bytes.to_vec(),
+            has_more_chunks: true,
+            is_continuation: false,
         }));
     }
-    if action.is_some() {
+    if action_code.is_some() {
         return Ok(None);
     }
-    if body
+    if control_body_bytes
         .split(|byte| *byte == b',')
-        .filter(|field| !field.is_empty())
-        .all(|field| field.starts_with(b"m=") || field.starts_with(b"q="))
+        .filter(|control_field| !control_field.is_empty())
+        .all(|control_field| control_field.starts_with(b"m=") || control_field.starts_with(b"q="))
     {
-        let control = super::parse_kitty_control(body)?;
-        if !control.more_specified {
+        let kitty_control = super::parse_kitty_control(control_body_bytes)?;
+        if !kitty_control.has_more_chunks_parameter {
             return Ok(None);
         }
-        validate_nonfinal_animation_payload(payload, control.more)?;
+        validate_nonfinal_animation_payload(encoded_payload_bytes, kitty_control.has_more_chunks)?;
         return Ok(Some(KittyAnimationChunk {
-            header: header.to_vec(),
-            payload: payload.to_vec(),
-            more: control.more,
-            continuation: true,
+            control_header_bytes: control_header_bytes.to_vec(),
+            encoded_payload_bytes: encoded_payload_bytes.to_vec(),
+            has_more_chunks: kitty_control.has_more_chunks,
+            is_continuation: true,
         }));
     }
     Ok(None)
 }
 
-fn validate_nonfinal_animation_payload(payload: &[u8], more: bool) -> Result<(), GraphicsError> {
-    if more && (!payload.len().is_multiple_of(4) || payload.contains(&b'=')) {
+fn validate_nonfinal_animation_payload(
+    encoded_payload_bytes: &[u8],
+    has_more_chunks: bool,
+) -> Result<(), GraphicsError> {
+    if has_more_chunks
+        && (!encoded_payload_bytes.len().is_multiple_of(4) || encoded_payload_bytes.contains(&b'='))
+    {
         return Err(GraphicsError::InvalidBase64 {
             protocol: GraphicsProtocol::Kitty,
         });
@@ -287,137 +312,158 @@ fn validate_nonfinal_animation_payload(payload: &[u8], more: bool) -> Result<(),
     Ok(())
 }
 
-fn parse_command_fields(
-    header: &[u8],
-    payload: &[u8],
-    delete: bool,
+fn parse_kitty_command_fields(
+    control_header_bytes: &[u8],
+    encoded_payload_bytes: &[u8],
+    is_delete_command: bool,
 ) -> Result<KittyCommand, GraphicsError> {
-    if !payload.is_empty() {
-        return Err(invalid());
+    if !encoded_payload_bytes.is_empty() {
+        return Err(build_invalid_command_error());
     }
-    let mut fields = Vec::new();
-    let mut selector = None;
-    for field in header.split(|byte| *byte == b',') {
-        if let Some(value) = field.strip_prefix(b"d=") {
-            if !delete || selector.replace(value).is_some() {
-                return Err(invalid());
+    let mut normalized_control_bytes = Vec::new();
+    let mut delete_selector_bytes = None;
+    for control_field in control_header_bytes.split(|byte| *byte == b',') {
+        if let Some(delete_selector_value_bytes) = control_field.strip_prefix(b"d=") {
+            if !is_delete_command
+                || delete_selector_bytes
+                    .replace(delete_selector_value_bytes)
+                    .is_some()
+            {
+                return Err(build_invalid_command_error());
             }
             continue;
         }
-        if !fields.is_empty() {
-            fields.push(b',');
+        if !normalized_control_bytes.is_empty() {
+            normalized_control_bytes.push(b',');
         }
-        if field.starts_with(b"a=") {
-            fields.extend_from_slice(b"a=t");
+        if control_field.starts_with(b"a=") {
+            normalized_control_bytes.extend_from_slice(b"a=t");
         } else {
-            fields.extend_from_slice(field);
+            normalized_control_bytes.extend_from_slice(control_field);
         }
     }
-    let control = parse_kitty_control(&fields)?;
-    if control.more_specified
-        || control.medium.is_some()
-        || control.format.is_some()
-        || control.compression.is_some()
-        || control.source_size.is_some()
-        || control.source_offset.is_some()
-        || control.width.is_some()
-        || control.height.is_some()
-        || (control.display.image_id.is_some() && control.display.image_number.is_some())
+    let kitty_control = parse_kitty_control(&normalized_control_bytes)?;
+    if kitty_control.has_more_chunks_parameter
+        || kitty_control.transfer_medium.is_some()
+        || kitty_control.media_format.is_some()
+        || kitty_control.is_compressed.is_some()
+        || kitty_control.source_byte_count.is_some()
+        || kitty_control.source_byte_offset.is_some()
+        || kitty_control.image_width_pixels.is_some()
+        || kitty_control.image_height_pixels.is_some()
+        || (kitty_control.image_display.image_id.is_some()
+            && kitty_control.image_display.image_number.is_some())
     {
-        return Err(invalid());
+        return Err(build_invalid_command_error());
     }
-    if !delete {
+    if !is_delete_command {
         return Ok(KittyCommand {
-            kind: KittyCommandKind::Place,
-            display: control.display,
-            free_data: false,
-            animation: None,
+            command_kind: KittyCommandKind::Place,
+            image_display: kitty_control.image_display,
+            should_free_image_data: false,
+            animation_command: None,
         });
     }
-    let selector = selector.unwrap_or(b"a");
-    let [letter] = selector else {
-        return Err(invalid());
+    let delete_selector_bytes = delete_selector_bytes.unwrap_or(b"a");
+    let [delete_selector_letter] = delete_selector_bytes else {
+        return Err(build_invalid_command_error());
     };
-    let kind = match letter.to_ascii_lowercase() {
+    let delete_selector = match delete_selector_letter.to_ascii_lowercase() {
         b'a' => KittyDelete::Visible,
-        b'i' => KittyDelete::Id,
-        b'n' => KittyDelete::Number,
+        b'i' => KittyDelete::ImageId,
+        b'n' => KittyDelete::ImageNumber,
         b'c' => KittyDelete::Cursor,
         b'p' => KittyDelete::Cell,
         b'q' => KittyDelete::CellAtZ,
-        b'r' => KittyDelete::IdRange,
+        b'r' => KittyDelete::ImageIdRange,
         b'x' => KittyDelete::Column,
         b'y' => KittyDelete::Row,
-        b'z' => KittyDelete::Z,
+        b'z' => KittyDelete::ZIndex,
         _ => {
             return Err(GraphicsError::UnsupportedAction {
                 protocol: GraphicsProtocol::Kitty,
-                action: format!("delete {}", char::from(*letter)),
+                action: format!("delete {}", char::from(*delete_selector_letter)),
             })
         }
     };
-    let display = control.display;
-    let has_x = display.source_offset_x.is_some_and(|value| value != 0);
-    let has_y = display.source_offset_y.is_some_and(|value| value != 0);
-    let valid = match kind {
-        KittyDelete::Id => display.image_id.is_some_and(|id| id != 0),
-        KittyDelete::Number => display.image_number.is_some_and(|id| id != 0),
-        KittyDelete::Cell | KittyDelete::CellAtZ => has_x && has_y,
-        KittyDelete::IdRange => {
-            has_x && has_y && display.source_offset_x <= display.source_offset_y
+    let image_display = kitty_control.image_display;
+    let has_nonzero_source_pixel_offset_x = image_display
+        .source_pixel_offset_x
+        .is_some_and(|source_pixel_offset_x| source_pixel_offset_x != 0);
+    let has_nonzero_source_pixel_offset_y = image_display
+        .source_pixel_offset_y
+        .is_some_and(|source_pixel_offset_y| source_pixel_offset_y != 0);
+    let is_valid_delete_selection = match delete_selector {
+        KittyDelete::ImageId => image_display.image_id.is_some_and(|image_id| image_id != 0),
+        KittyDelete::ImageNumber => image_display
+            .image_number
+            .is_some_and(|image_number| image_number != 0),
+        KittyDelete::Cell | KittyDelete::CellAtZ => {
+            has_nonzero_source_pixel_offset_x && has_nonzero_source_pixel_offset_y
         }
-        KittyDelete::Column => has_x,
-        KittyDelete::Row => has_y,
-        KittyDelete::Visible | KittyDelete::Cursor | KittyDelete::Z => true,
+        KittyDelete::ImageIdRange => {
+            has_nonzero_source_pixel_offset_x
+                && has_nonzero_source_pixel_offset_y
+                && image_display.source_pixel_offset_x <= image_display.source_pixel_offset_y
+        }
+        KittyDelete::Column => has_nonzero_source_pixel_offset_x,
+        KittyDelete::Row => has_nonzero_source_pixel_offset_y,
+        KittyDelete::Visible | KittyDelete::Cursor | KittyDelete::ZIndex => true,
     };
-    if !valid {
-        return Err(invalid());
+    if !is_valid_delete_selection {
+        return Err(build_invalid_command_error());
     }
     Ok(KittyCommand {
-        kind: KittyCommandKind::Delete(kind),
-        display,
-        free_data: letter.is_ascii_uppercase(),
-        animation: None,
+        command_kind: KittyCommandKind::Delete(delete_selector),
+        image_display,
+        should_free_image_data: delete_selector_letter.is_ascii_uppercase(),
+        animation_command: None,
     })
 }
 
 pub(super) fn parse_animation_command_fields(
-    header: &[u8],
-    payload: &[u8],
-    kind: KittyCommandKind,
-    allow_more: bool,
+    control_header_bytes: &[u8],
+    encoded_payload_bytes: &[u8],
+    command_kind: KittyCommandKind,
+    allows_additional_chunks: bool,
 ) -> Result<KittyCommand, GraphicsError> {
-    let mut normalized = Vec::new();
-    let mut delete_frame = None;
-    for field in header.split(|byte| *byte == b',') {
-        if matches!(field, b"d=f" | b"d=F") {
-            delete_frame = Some(field == b"d=F");
+    let mut normalized_control_bytes = Vec::new();
+    let mut is_delete_frame = None;
+    for control_field in control_header_bytes.split(|byte| *byte == b',') {
+        if matches!(control_field, b"d=f" | b"d=F") {
+            is_delete_frame = Some(control_field == b"d=F");
             continue;
         }
-        if field.starts_with(b"a=") {
-            normalized.extend_from_slice(b"a=t");
+        if control_field.starts_with(b"a=") {
+            normalized_control_bytes.extend_from_slice(b"a=t");
         } else {
-            normalized.extend_from_slice(field);
+            normalized_control_bytes.extend_from_slice(control_field);
         }
-        normalized.push(b',');
+        normalized_control_bytes.push(b',');
     }
-    if normalized.last() == Some(&b',') {
-        normalized.pop();
+    if normalized_control_bytes.last() == Some(&b',') {
+        normalized_control_bytes.pop();
     }
-    let mut control = parse_kitty_control(&normalized)?;
-    if (control.more && !allow_more) || control.query {
-        return Err(invalid());
+    let mut kitty_control = parse_kitty_control(&normalized_control_bytes)?;
+    if (kitty_control.has_more_chunks && !allows_additional_chunks) || kitty_control.is_query {
+        return Err(build_invalid_command_error());
     }
-    if control.more && control.medium.is_some_and(|medium| medium != b'd') {
-        return Err(invalid());
+    if kitty_control.has_more_chunks
+        && kitty_control
+            .transfer_medium
+            .is_some_and(|transfer_medium| transfer_medium != b'd')
+    {
+        return Err(build_invalid_command_error());
     }
-    if control.display.image_id.is_none() && control.display.image_number.is_none() {
-        return Err(invalid());
+    if kitty_control.image_display.image_id.is_none()
+        && kitty_control.image_display.image_number.is_none()
+    {
+        return Err(build_invalid_command_error());
     }
-    let allowed = |key: u8| match kind {
+    let is_control_key_allowed = |control_key: u8| match command_kind {
         KittyCommandKind::AnimationFrame => {
             matches!(
-                key,
+                control_key,
                 b'a' | b'i'
                     | b'I'
                     | b'q'
@@ -441,13 +487,13 @@ pub(super) fn parse_animation_command_fields(
         }
         KittyCommandKind::AnimationControl => {
             matches!(
-                key,
+                control_key,
                 b'a' | b'i' | b'I' | b'q' | b'c' | b'r' | b's' | b'v' | b'z'
             )
         }
         KittyCommandKind::AnimationCompose => {
             matches!(
-                key,
+                control_key,
                 b'a' | b'i'
                     | b'I'
                     | b'q'
@@ -462,204 +508,232 @@ pub(super) fn parse_animation_command_fields(
                     | b'C'
             )
         }
-        KittyCommandKind::AnimationDelete => matches!(key, b'a' | b'i' | b'I' | b'q' | b'r'),
+        KittyCommandKind::AnimationDelete => {
+            matches!(control_key, b'a' | b'i' | b'I' | b'q' | b'r')
+        }
         KittyCommandKind::Place | KittyCommandKind::Delete(_) => false,
     };
-    for field in header.split(|byte| *byte == b',') {
-        let Some(key) = field.first().copied() else {
-            return Err(invalid());
+    for control_field in control_header_bytes.split(|byte| *byte == b',') {
+        let Some(control_key) = control_field.first().copied() else {
+            return Err(build_invalid_command_error());
         };
-        if key != b'd' && !allowed(key) {
-            return Err(invalid());
+        if control_key != b'd' && !is_control_key_allowed(control_key) {
+            return Err(build_invalid_command_error());
         }
     }
-    if kind == KittyCommandKind::AnimationDelete && delete_frame.is_none() {
-        return Err(invalid());
+    if command_kind == KittyCommandKind::AnimationDelete && is_delete_frame.is_none() {
+        return Err(build_invalid_command_error());
     }
-    if kind != KittyCommandKind::AnimationFrame && !payload.is_empty() {
-        return Err(invalid());
+    if command_kind != KittyCommandKind::AnimationFrame && !encoded_payload_bytes.is_empty() {
+        return Err(build_invalid_command_error());
     }
-    let format = raw_u32(header, b'f')?;
-    if format.is_some_and(|format| !matches!(format, 24 | 32 | 100)) {
+    let media_format = parse_raw_u32_parameter(control_header_bytes, b'f')?;
+    if media_format.is_some_and(|media_format| !matches!(media_format, 24 | 32 | 100)) {
         return Err(GraphicsError::UnsupportedMedia {
             protocol: GraphicsProtocol::Kitty,
-            format: format.map_or_else(String::new, |format| format.to_string()),
+            media_format: media_format
+                .map_or_else(String::new, |media_format| media_format.to_string()),
         });
     }
-    let width = if kind == KittyCommandKind::AnimationCompose {
-        raw_u32(header, b'w')?
+    let frame_width_pixels = if command_kind == KittyCommandKind::AnimationCompose {
+        parse_raw_u32_parameter(control_header_bytes, b'w')?
     } else {
-        raw_u32(header, b's')?
+        parse_raw_u32_parameter(control_header_bytes, b's')?
     };
-    let height = if kind == KittyCommandKind::AnimationCompose {
-        raw_u32(header, b'h')?
+    let frame_height_pixels = if command_kind == KittyCommandKind::AnimationCompose {
+        parse_raw_u32_parameter(control_header_bytes, b'h')?
     } else {
-        raw_u32(header, b'v')?
+        parse_raw_u32_parameter(control_header_bytes, b'v')?
     };
-    if width == Some(0) || height == Some(0) {
+    if frame_width_pixels == Some(0) || frame_height_pixels == Some(0) {
         return Err(GraphicsError::InvalidDimensions {
             protocol: GraphicsProtocol::Kitty,
         });
     }
-    let frame = match kind {
+    let frame_number = match command_kind {
         KittyCommandKind::AnimationFrame | KittyCommandKind::AnimationDelete => {
-            raw_positive_u32(header, b'r')?
+            parse_raw_positive_u32_parameter(control_header_bytes, b'r')?
         }
-        KittyCommandKind::AnimationControl => raw_positive_u32(header, b'c')?,
+        KittyCommandKind::AnimationControl => {
+            parse_raw_positive_u32_parameter(control_header_bytes, b'c')?
+        }
         KittyCommandKind::AnimationCompose
         | KittyCommandKind::Place
         | KittyCommandKind::Delete(_) => None,
     };
-    let affected_frame = (kind == KittyCommandKind::AnimationControl)
-        .then(|| raw_positive_u32(header, b'r'))
+    let affected_frame_number = (command_kind == KittyCommandKind::AnimationControl)
+        .then(|| parse_raw_positive_u32_parameter(control_header_bytes, b'r'))
         .transpose()?
         .flatten();
-    let base_frame = (kind == KittyCommandKind::AnimationFrame)
-        .then(|| raw_positive_u32(header, b'c'))
+    let base_frame_number = (command_kind == KittyCommandKind::AnimationFrame)
+        .then(|| parse_raw_positive_u32_parameter(control_header_bytes, b'c'))
         .transpose()?
         .flatten();
-    let source_frame = (kind == KittyCommandKind::AnimationCompose)
-        .then(|| raw_positive_u32(header, b'r'))
+    let source_frame_number = (command_kind == KittyCommandKind::AnimationCompose)
+        .then(|| parse_raw_positive_u32_parameter(control_header_bytes, b'r'))
         .transpose()?
         .flatten();
-    let destination_frame = (kind == KittyCommandKind::AnimationCompose)
-        .then(|| raw_positive_u32(header, b'c'))
+    let destination_frame_number = (command_kind == KittyCommandKind::AnimationCompose)
+        .then(|| parse_raw_positive_u32_parameter(control_header_bytes, b'c'))
         .transpose()?
         .flatten();
-    let state = (kind == KittyCommandKind::AnimationControl)
-        .then(|| raw_u32(header, b's'))
+    let playback_state = (command_kind == KittyCommandKind::AnimationControl)
+        .then(|| parse_raw_u32_parameter(control_header_bytes, b's'))
         .transpose()?
         .flatten()
-        .map(|value| u8::try_from(value).unwrap_or(u8::MAX));
-    let loops = (kind == KittyCommandKind::AnimationControl)
-        .then(|| raw_u32(header, b'v'))
+        .map(|playback_state_value| u8::try_from(playback_state_value).unwrap_or(u8::MAX));
+    let loop_count = (command_kind == KittyCommandKind::AnimationControl)
+        .then(|| parse_raw_u32_parameter(control_header_bytes, b'v'))
         .transpose()?
         .flatten();
-    if state.is_some_and(|value| !(1..=3).contains(&value)) {
-        return Err(invalid());
+    if playback_state.is_some_and(|control_value| !(1..=3).contains(&control_value)) {
+        return Err(build_invalid_command_error());
     }
-    let gap_ms = raw_i32(header, b'z')?.filter(|value| *value != 0);
-    let background = (kind == KittyCommandKind::AnimationFrame)
-        .then(|| raw_u32(header, b'Y'))
+    let gap_milliseconds = parse_raw_i32_parameter(control_header_bytes, b'z')?
+        .filter(|gap_milliseconds| *gap_milliseconds != 0);
+    let background_rgba_bytes = (command_kind == KittyCommandKind::AnimationFrame)
+        .then(|| parse_raw_u32_parameter(control_header_bytes, b'Y'))
         .transpose()?
         .flatten()
         .map(u32::to_be_bytes);
-    let replace_key = if kind == KittyCommandKind::AnimationFrame {
+    let replacement_control_key = if command_kind == KittyCommandKind::AnimationFrame {
         b'X'
     } else {
         b'C'
     };
-    let replace = raw_u32(header, replace_key)?.is_some_and(|value| value == 1);
-    control.display.width = None;
-    control.display.height = None;
-    control.display.cell_columns = None;
-    control.display.cell_rows = None;
-    control.display.source_offset_x = None;
-    control.display.source_offset_y = None;
-    control.display.cell_offset_x = None;
-    control.display.cell_offset_y = None;
-    control.display.move_cursor = false;
-    control.display.z_index = 0;
-    let animation = KittyAnimationCommand {
-        format,
-        width,
-        height,
-        frame,
-        affected_frame,
-        base_frame,
-        source_frame,
-        destination_frame,
-        source_x: if kind == KittyCommandKind::AnimationCompose {
-            raw_u32(header, b'X')?.unwrap_or(0)
+    let replaces_destination_pixels =
+        parse_raw_u32_parameter(control_header_bytes, replacement_control_key)?
+            .is_some_and(|replacement_value| replacement_value == 1);
+    kitty_control.image_display.requested_width = None;
+    kitty_control.image_display.requested_height = None;
+    kitty_control.image_display.requested_column_count = None;
+    kitty_control.image_display.requested_row_count = None;
+    kitty_control.image_display.source_pixel_offset_x = None;
+    kitty_control.image_display.source_pixel_offset_y = None;
+    kitty_control.image_display.cell_pixel_offset_x = None;
+    kitty_control.image_display.cell_pixel_offset_y = None;
+    kitty_control.image_display.should_move_cursor = false;
+    kitty_control.image_display.z_index = 0;
+    let animation_command = KittyAnimationCommand {
+        media_format,
+        frame_width_pixels,
+        frame_height_pixels,
+        frame_number,
+        affected_frame_number,
+        base_frame_number,
+        source_frame_number,
+        destination_frame_number,
+        source_x_pixels: if command_kind == KittyCommandKind::AnimationCompose {
+            parse_raw_u32_parameter(control_header_bytes, b'X')?.unwrap_or(0)
         } else {
-            raw_u32(header, b'x')?.unwrap_or(0)
+            parse_raw_u32_parameter(control_header_bytes, b'x')?.unwrap_or(0)
         },
-        source_y: if kind == KittyCommandKind::AnimationCompose {
-            raw_u32(header, b'Y')?.unwrap_or(0)
+        source_y_pixels: if command_kind == KittyCommandKind::AnimationCompose {
+            parse_raw_u32_parameter(control_header_bytes, b'Y')?.unwrap_or(0)
         } else {
-            raw_u32(header, b'y')?.unwrap_or(0)
+            parse_raw_u32_parameter(control_header_bytes, b'y')?.unwrap_or(0)
         },
-        destination_x: if kind == KittyCommandKind::AnimationCompose {
-            raw_u32(header, b'x')?.unwrap_or(0)
-        } else {
-            0
-        },
-        destination_y: if kind == KittyCommandKind::AnimationCompose {
-            raw_u32(header, b'y')?.unwrap_or(0)
+        destination_x_pixels: if command_kind == KittyCommandKind::AnimationCompose {
+            parse_raw_u32_parameter(control_header_bytes, b'x')?.unwrap_or(0)
         } else {
             0
         },
-        gap_ms,
-        background,
-        replace,
-        state,
-        loops,
-        payload: payload.to_vec(),
+        destination_y_pixels: if command_kind == KittyCommandKind::AnimationCompose {
+            parse_raw_u32_parameter(control_header_bytes, b'y')?.unwrap_or(0)
+        } else {
+            0
+        },
+        gap_milliseconds,
+        background_rgba_bytes,
+        replaces_destination_pixels,
+        playback_state,
+        loop_count,
+        encoded_payload_bytes: encoded_payload_bytes.to_vec(),
     };
     Ok(KittyCommand {
-        kind,
-        display: control.display,
-        free_data: delete_frame.unwrap_or(false),
-        animation: Some(animation),
+        command_kind,
+        image_display: kitty_control.image_display,
+        should_free_image_data: is_delete_frame.unwrap_or(false),
+        animation_command: Some(animation_command),
     })
 }
 
-fn raw_value(header: &[u8], key: u8) -> Option<&[u8]> {
-    header.split(|byte| *byte == b',').find_map(|field| {
-        (field.first().copied() == Some(key))
-            .then(|| field.get(2..))
-            .flatten()
-    })
+fn find_control_parameter_bytes(control_header_bytes: &[u8], control_key: u8) -> Option<&[u8]> {
+    control_header_bytes
+        .split(|byte| *byte == b',')
+        .find_map(|control_field| {
+            (control_field.first().copied() == Some(control_key))
+                .then(|| control_field.get(2..))
+                .flatten()
+        })
 }
 
-fn raw_u32(header: &[u8], key: u8) -> Result<Option<u32>, GraphicsError> {
-    raw_value(header, key).map(super::parse_u32).transpose()
-}
-
-fn raw_positive_u32(header: &[u8], key: u8) -> Result<Option<u32>, GraphicsError> {
-    raw_value(header, key)
-        .map(super::parse_positive_u32)
+fn parse_raw_u32_parameter(
+    control_header_bytes: &[u8],
+    control_key: u8,
+) -> Result<Option<u32>, GraphicsError> {
+    find_control_parameter_bytes(control_header_bytes, control_key)
+        .map(super::parse_decimal_u32)
         .transpose()
 }
 
-fn raw_i32(header: &[u8], key: u8) -> Result<Option<i32>, GraphicsError> {
-    raw_value(header, key).map(super::parse_i32).transpose()
+fn parse_raw_positive_u32_parameter(
+    control_header_bytes: &[u8],
+    control_key: u8,
+) -> Result<Option<u32>, GraphicsError> {
+    find_control_parameter_bytes(control_header_bytes, control_key)
+        .map(super::parse_positive_decimal_u32)
+        .transpose()
 }
 
-fn invalid() -> GraphicsError {
+fn parse_raw_i32_parameter(
+    control_header_bytes: &[u8],
+    control_key: u8,
+) -> Result<Option<i32>, GraphicsError> {
+    find_control_parameter_bytes(control_header_bytes, control_key)
+        .map(super::parse_decimal_i32)
+        .transpose()
+}
+
+fn build_invalid_command_error() -> GraphicsError {
     GraphicsError::InvalidCommand {
         protocol: GraphicsProtocol::Kitty,
     }
 }
 
-/// Extract Kitty identifiers and quiet level for an error response.
-pub fn reply_display(header: &[u8]) -> ImageDisplay {
-    let mut display = ImageDisplay::default();
-    for field in header
+/// Extract Kitty identifiers and response suppression level for an error response.
+pub fn parse_reply_display(control_header_bytes: &[u8]) -> ImageDisplay {
+    let mut response_display = ImageDisplay::default();
+    for control_field in control_header_bytes
         .strip_prefix(b"G")
-        .unwrap_or(header)
+        .unwrap_or(control_header_bytes)
         .split(|byte| *byte == b',')
     {
-        let Some(index) = field.iter().position(|byte| *byte == b'=') else {
-            continue;
-        };
-        let (key, tail) = field.split_at(index);
-        let value = &tail[1..];
-        let Some(value) = std::str::from_utf8(value)
-            .ok()
-            .and_then(|value| value.parse::<u32>().ok())
+        let Some(delimiter_byte_offset) = control_field.iter().position(|byte| *byte == b'=')
         else {
             continue;
         };
-        match key {
-            b"i" => display.image_id = Some(value),
-            b"I" => display.image_number = Some(value),
-            b"p" => display.placement_id = Some(value),
-            b"q" => display.quiet = u8::try_from(value).unwrap_or(2).min(2),
+        let (control_key, control_value_with_delimiter) =
+            control_field.split_at(delimiter_byte_offset);
+        let control_value_bytes = &control_value_with_delimiter[1..];
+        let Some(control_value_number) = std::str::from_utf8(control_value_bytes)
+            .ok()
+            .and_then(|control_value_text| control_value_text.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        match control_key {
+            b"i" => response_display.image_id = Some(control_value_number),
+            b"I" => response_display.image_number = Some(control_value_number),
+            b"p" => response_display.placement_id = Some(control_value_number),
+            b"q" => {
+                response_display.response_suppression_level =
+                    u8::try_from(control_value_number).unwrap_or(2).min(2)
+            }
             _ => {}
         }
     }
-    display
+    response_display
 }
 
 #[cfg(test)]

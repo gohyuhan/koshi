@@ -22,7 +22,7 @@ impl DomainError for StorageError {
         DomainCategory::Storage
     }
 
-    fn severity(&self) -> Severity {
+    fn get_severity(&self) -> Severity {
         match self {
             StorageError::Io { .. } => Severity::Recoverable,
             StorageError::Corrupt { .. } => Severity::SessionFatal,

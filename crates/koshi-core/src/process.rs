@@ -11,31 +11,31 @@ use std::time::Duration;
 
 /// How to terminate a child process.
 ///
-/// `Graceful` asks the process to exit and waits up to `timeout` before the
+/// `Graceful` asks the process to exit and waits up to `timeout_duration` before the
 /// caller escalates; `Force` kills it immediately; `Tree` kills the whole
 /// process group/job, grandchildren included; `GracefulTree` asks the whole
-/// group to exit, waits up to `timeout`, then kills the whole group.
+/// group to exit, waits up to `timeout_duration`, then kills the whole group.
 ///
-/// `timeout` serializes as a whole number of seconds (see [`duration_secs`]).
+/// `timeout_duration` serializes as a whole number of seconds (see [`duration_seconds`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KillPolicy {
-    /// Request a clean shutdown, allowing up to `timeout` to comply.
+    /// Request a clean shutdown, allowing up to `timeout_duration` to comply.
     Graceful {
         /// How long to wait for the process to exit on its own.
-        #[serde(with = "duration_secs")]
-        timeout: Duration,
+        #[serde(rename = "timeout", with = "duration_seconds")]
+        timeout_duration: Duration,
     },
     /// Kill the process immediately.
     Force,
     /// Kill the entire process tree (group/job), not just the leader.
     Tree,
     /// Request a clean shutdown of the whole process group, allowing up to
-    /// `timeout`, then kill the whole group (`killpg` / `TerminateJobObject`).
+    /// `timeout_duration`, then kill the whole group (`killpg` / `TerminateJobObject`).
     GracefulTree {
         /// How long to wait for the process to exit on its own before the
         /// group-kill.
-        #[serde(with = "duration_secs")]
-        timeout: Duration,
+        #[serde(rename = "timeout", with = "duration_seconds")]
+        timeout_duration: Duration,
     },
 }
 
@@ -45,9 +45,9 @@ impl KillPolicy {
     /// becomes [`Tree`](Self::Tree); `Tree` and `GracefulTree` are returned
     /// unchanged.
     #[must_use]
-    pub fn tree_scoped(self) -> Self {
+    pub fn apply_tree_scope(self) -> Self {
         match self {
-            Self::Graceful { timeout } => Self::GracefulTree { timeout },
+            Self::Graceful { timeout_duration } => Self::GracefulTree { timeout_duration },
             Self::Force => Self::Tree,
             already_tree_scoped => already_tree_scoped,
         }
@@ -84,18 +84,18 @@ impl ShellKind {
     /// (`""`) or a stem that is not valid UTF-8 yields `Other("")`.
     #[must_use]
     pub fn from_program(program: &Path) -> Self {
-        let stem = program
+        let program_stem = program
             .file_stem()
-            .and_then(|s| s.to_str())
+            .and_then(|program_stem_text| program_stem_text.to_str())
             .unwrap_or_default()
             .to_ascii_lowercase();
-        match stem.as_str() {
+        match program_stem.as_str() {
             "zsh" => ShellKind::Zsh,
             "bash" => ShellKind::Bash,
             "fish" => ShellKind::Fish,
             "pwsh" | "powershell" => ShellKind::PowerShell,
             "nu" => ShellKind::Nu,
-            other => ShellKind::Other(other.to_string()),
+            unrecognized_program_stem => ShellKind::Other(unrecognized_program_stem.to_string()),
         }
     }
 }
@@ -106,11 +106,14 @@ pub struct SpawnSpec {
     /// The program to execute.
     pub program: PathBuf,
     /// Arguments passed to the program (excluding `argv[0]`).
-    pub args: Vec<String>,
+    #[serde(rename = "args")]
+    pub arguments: Vec<String>,
     /// Working directory; `None` inherits the parent's.
-    pub cwd: Option<PathBuf>,
+    #[serde(rename = "cwd")]
+    pub working_directory: Option<PathBuf>,
     /// Environment overrides, sorted for deterministic serialization.
-    pub env: BTreeMap<String, String>,
+    #[serde(rename = "env")]
+    pub environment_variables: BTreeMap<String, String>,
     /// Which shell this spawn targets.
     pub shell_kind: ShellKind,
 }
@@ -121,32 +124,36 @@ impl SpawnSpec {
     /// The program is read from `$SHELL` on Unix and `%COMSPEC%` on Windows,
     /// falling back to `/bin/sh` and `cmd.exe` respectively. A variable that is
     /// set but empty (`SHELL=`) takes the fallback; the program is never an
-    /// empty path. `cwd` and `env` pass straight through; `args` is empty;
+    /// empty path. `working_directory` and `environment_variables` pass
+    /// straight through; `arguments` is empty;
     /// `shell_kind` is [`ShellKind::from_program`] of the chosen program.
     #[must_use]
-    pub fn default_shell(cwd: Option<PathBuf>, env: BTreeMap<String, String>) -> SpawnSpec {
+    pub fn default_shell(
+        working_directory: Option<PathBuf>,
+        environment_variables: BTreeMap<String, String>,
+    ) -> SpawnSpec {
         #[cfg(windows)]
-        let program = shell_program(std::env::var_os("COMSPEC"), "cmd.exe");
+        let program = resolve_shell_program(std::env::var_os("COMSPEC"), "cmd.exe");
         #[cfg(not(windows))]
-        let program = shell_program(std::env::var_os("SHELL"), "/bin/sh");
+        let program = resolve_shell_program(std::env::var_os("SHELL"), "/bin/sh");
 
-        SpawnSpec::shell(program, cwd, env)
+        SpawnSpec::from_shell_program(program, working_directory, environment_variables)
     }
 
     /// Build a spec that launches `program` as an interactive shell with no
     /// arguments. `shell_kind` is [`ShellKind::from_program`] of `program`.
     #[must_use]
-    pub fn shell(
+    pub fn from_shell_program(
         program: PathBuf,
-        cwd: Option<PathBuf>,
-        env: BTreeMap<String, String>,
+        working_directory: Option<PathBuf>,
+        environment_variables: BTreeMap<String, String>,
     ) -> SpawnSpec {
         let shell_kind = ShellKind::from_program(&program);
         SpawnSpec {
             program,
-            args: Vec::new(),
-            cwd,
-            env,
+            arguments: Vec::new(),
+            working_directory,
+            environment_variables,
             shell_kind,
         }
     }
@@ -155,11 +162,14 @@ impl SpawnSpec {
 /// Pick the shell program path from an environment variable's value: the value
 /// when present and non-empty, else `fallback`. A set-but-empty variable
 /// (`SHELL=`) takes `fallback`.
-fn shell_program(env_value: Option<std::ffi::OsString>, fallback: &str) -> PathBuf {
+fn resolve_shell_program(
+    environment_value: Option<std::ffi::OsString>,
+    fallback_program: &str,
+) -> PathBuf {
     PathBuf::from(
-        env_value
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| fallback.into()),
+        environment_value
+            .filter(|environment_value| !environment_value.is_empty())
+            .unwrap_or_else(|| fallback_program.into()),
     )
 }
 
@@ -170,15 +180,17 @@ fn shell_program(env_value: Option<std::ffi::OsString>, fallback: &str) -> PathB
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PtySize {
     /// Width in cells (columns).
-    pub cols: u16,
+    #[serde(rename = "cols")]
+    pub column_count: u16,
     /// Height in cells (rows).
-    pub rows: u16,
+    #[serde(rename = "rows")]
+    pub row_count: u16,
 }
 
 /// Serialize a [`Duration`] as a whole number of seconds: a plain unsigned
 /// integer with the sub-second part dropped. Deserialization refuses a
 /// negative or fractional number.
-pub mod duration_secs {
+pub mod duration_seconds {
     use serde::{Deserialize, Deserializer, Serializer};
     use std::time::Duration;
 
@@ -195,8 +207,8 @@ pub mod duration_secs {
     where
         D: Deserializer<'de>,
     {
-        let secs = u64::deserialize(deserializer)?;
-        Ok(Duration::from_secs(secs))
+        let seconds = u64::deserialize(deserializer)?;
+        Ok(Duration::from_secs(seconds))
     }
 }
 

@@ -8,7 +8,7 @@
 /// The longest string [`sanitize_reported_text`] returns, in bytes. A longer
 /// one is cut at the last character boundary that fits. 512 bytes holds 512
 /// ASCII characters, or 170 three-byte characters such as `日`.
-pub const MAX_REPORTED_TEXT_BYTES: usize = 512;
+pub const MAX_REPORTED_TEXT_BYTE_COUNT: usize = 512;
 
 /// Whether [`sanitize_reported_text`] removes `c`.
 ///
@@ -26,24 +26,24 @@ pub const MAX_REPORTED_TEXT_BYTES: usize = 512;
 /// Every other character is kept, including zero-width joiners, combining
 /// marks and variation selectors. A tag-sequence flag keeps its base character
 /// and loses its region.
-fn is_refused(c: char) -> bool {
-    matches!(c,
+fn is_refused_character(character: char) -> bool {
+    matches!(character,
         '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
         | '\u{200E}' | '\u{200F}' | '\u{061C}'
         | '\u{2028}' | '\u{2029}'
         | '\u{FFF9}'..='\u{FFFB}'
         | '\u{FFFE}' | '\u{FFFF}'
         | '\u{E0000}'..='\u{E007F}'
-    ) || c.is_control()
+    ) || character.is_control()
 }
 
-/// `raw` with every control, bidi-control, line and paragraph separator,
+/// `raw_reported_text` with every control, bidi-control, line and paragraph separator,
 /// noncharacter, interlinear annotation and tag character removed, cut to
-/// [`MAX_REPORTED_TEXT_BYTES`].
+/// [`MAX_REPORTED_TEXT_BYTE_COUNT`].
 ///
 /// A removed character consumes none of the byte budget. The cut keeps the
 /// start and lands on a character boundary, so the result is never longer than
-/// [`MAX_REPORTED_TEXT_BYTES`] and never holds a partial character. It may end
+/// [`MAX_REPORTED_TEXT_BYTE_COUNT`] and never holds a partial character. It may end
 /// inside a grapheme cluster: a string cut mid emoji sequence can end on a
 /// joiner.
 ///
@@ -53,15 +53,19 @@ fn is_refused(c: char) -> bool {
 /// - 5 MiB of `"a"` → the first 512 of them
 /// - `"日"` repeated 1000 times → 510 bytes, 170 characters
 #[must_use]
-pub fn sanitize_reported_text(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len().min(MAX_REPORTED_TEXT_BYTES));
-    for c in raw.chars().filter(|c| !is_refused(*c)) {
-        if out.len() + c.len_utf8() > MAX_REPORTED_TEXT_BYTES {
+pub fn sanitize_reported_text(raw_reported_text: &str) -> String {
+    let mut sanitized_text =
+        String::with_capacity(raw_reported_text.len().min(MAX_REPORTED_TEXT_BYTE_COUNT));
+    for character in raw_reported_text
+        .chars()
+        .filter(|character| !is_refused_character(*character))
+    {
+        if sanitized_text.len() + character.len_utf8() > MAX_REPORTED_TEXT_BYTE_COUNT {
             break;
         }
-        out.push(c);
+        sanitized_text.push(character);
     }
-    out
+    sanitized_text
 }
 
 #[cfg(test)]

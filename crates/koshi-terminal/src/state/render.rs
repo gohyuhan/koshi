@@ -40,7 +40,7 @@ pub(crate) struct RenderState {
     pub(in crate::state) charsets: [Charset; 4],
     /// Which `G0`–`G3` slot is invoked into the GL range for printing: `0` after
     /// `SI`, `1` after `SO`. Indexes `charsets`, so it stays below `4`.
-    #[serde(deserialize_with = "gl_slot")]
+    #[serde(deserialize_with = "deserialize_gl_slot")]
     pub(in crate::state) gl: usize,
 }
 
@@ -48,12 +48,12 @@ pub(crate) struct RenderState {
 ///
 /// The wire form is a bare number. A `4` gives the error `GL slot must be 0-3`,
 /// which reaches a resume file's reader as a corrupt body.
-fn gl_slot<'de, D: Deserializer<'de>>(deserializer: D) -> Result<usize, D::Error> {
-    let gl = usize::deserialize(deserializer)?;
-    if gl > 3 {
+fn deserialize_gl_slot<'de, D: Deserializer<'de>>(deserializer: D) -> Result<usize, D::Error> {
+    let gl_slot_index = usize::deserialize(deserializer)?;
+    if gl_slot_index > 3 {
         return Err(D::Error::custom("GL slot must be 0-3"));
     }
-    Ok(gl)
+    Ok(gl_slot_index)
 }
 
 impl RenderState {

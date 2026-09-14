@@ -8,33 +8,33 @@ use std::collections::HashSet;
 
 #[test]
 fn every_surface_follows_the_version_rule() {
-    let problems: Vec<String> = SURFACES
+    let version_problems: Vec<String> = SURFACES
         .iter()
-        .filter_map(Surface::version_problem)
+        .filter_map(Surface::find_version_problem)
         .collect();
 
-    assert_eq!(problems, Vec::<String>::new());
+    assert_eq!(version_problems, Vec::<String>::new());
 }
 
 #[test]
 fn the_table_names_every_surface_once() {
-    let mut seen = HashSet::new();
+    let mut surface_names = HashSet::new();
     for surface in SURFACES {
         assert!(
-            seen.insert(surface.name),
+            surface_names.insert(surface.surface_name),
             "{} appears in the table twice",
-            surface.name
+            surface.surface_name
         );
     }
 
-    assert_eq!(seen.len(), SURFACES.len());
+    assert_eq!(surface_names.len(), SURFACES.len());
 }
 
 #[test]
 fn every_surface_is_named() {
     for surface in SURFACES {
         assert!(
-            !surface.name.is_empty(),
+            !surface.surface_name.is_empty(),
             "a surface in the table has no name"
         );
     }
@@ -42,15 +42,15 @@ fn every_surface_is_named() {
 
 #[test]
 fn a_floor_above_the_ceiling_is_no_version_at_all() {
-    let inverted = Surface {
-        name: "sample",
-        min: 3,
-        max: 2,
-        released: Some(2),
+    let inverted_surface = Surface {
+        surface_name: "sample",
+        minimum_version: 3,
+        maximum_version: 2,
+        released_version: Some(2),
     };
 
     assert_eq!(
-        inverted.version_problem(),
+        inverted_surface.find_version_problem(),
         Some(
             "the sample accepts 3 at the lowest and 2 at the highest, which is no version at all"
                 .to_string()
@@ -62,15 +62,15 @@ fn a_floor_above_the_ceiling_is_no_version_at_all() {
 fn a_surface_breaking_both_rules_is_reported_on_its_floor_first() {
     // The floor is above the ceiling AND the ceiling is two steps above the
     // released value; the floor check runs first and names the message.
-    let doubly_broken = Surface {
-        name: "sample",
-        min: 5,
-        max: 4,
-        released: Some(1),
+    let doubly_broken_surface = Surface {
+        surface_name: "sample",
+        minimum_version: 5,
+        maximum_version: 4,
+        released_version: Some(1),
     };
 
     assert_eq!(
-        doubly_broken.version_problem(),
+        doubly_broken_surface.find_version_problem(),
         Some(
             "the sample accepts 5 at the lowest and 4 at the highest, which is no version at all"
                 .to_string()
@@ -80,15 +80,15 @@ fn a_surface_breaking_both_rules_is_reported_on_its_floor_first() {
 
 #[test]
 fn two_steps_above_the_released_value_is_a_problem() {
-    let over_bumped = Surface {
-        name: "sample",
-        min: 1,
-        max: 3,
-        released: Some(1),
+    let over_bumped_surface = Surface {
+        surface_name: "sample",
+        minimum_version: 1,
+        maximum_version: 3,
+        released_version: Some(1),
     };
 
     assert_eq!(
-        over_bumped.version_problem(),
+        over_bumped_surface.find_version_problem(),
         Some(
             "the sample speaks 3, which is more than one step above the 1 the last release spoke"
                 .to_string()
@@ -98,64 +98,64 @@ fn two_steps_above_the_released_value_is_a_problem() {
 
 #[test]
 fn dropping_below_the_released_value_is_a_problem() {
-    let regressed = Surface {
-        name: "sample",
-        min: 1,
-        max: 1,
-        released: Some(2),
+    let regressed_surface = Surface {
+        surface_name: "sample",
+        minimum_version: 1,
+        maximum_version: 1,
+        released_version: Some(2),
     };
 
     assert_eq!(
-        regressed.version_problem(),
+        regressed_surface.find_version_problem(),
         Some("the sample speaks 1, which is below the 2 the last release spoke".to_string())
     );
 }
 
 #[test]
 fn one_step_above_the_released_value_is_the_allowed_move() {
-    let bumped_once = Surface {
-        name: "sample",
-        min: 1,
-        max: 2,
-        released: Some(1),
+    let bumped_once_surface = Surface {
+        surface_name: "sample",
+        minimum_version: 1,
+        maximum_version: 2,
+        released_version: Some(1),
     };
 
-    assert_eq!(bumped_once.version_problem(), None);
+    assert_eq!(bumped_once_surface.find_version_problem(), None);
 }
 
 #[test]
 fn holding_at_the_released_value_is_allowed() {
-    let unmoved = Surface {
-        name: "sample",
-        min: 2,
-        max: 2,
-        released: Some(2),
+    let unmoved_surface = Surface {
+        surface_name: "sample",
+        minimum_version: 2,
+        maximum_version: 2,
+        released_version: Some(2),
     };
 
-    assert_eq!(unmoved.version_problem(), None);
+    assert_eq!(unmoved_surface.find_version_problem(), None);
 }
 
 #[test]
 fn a_surface_no_release_carries_is_checked_on_the_floor_alone() {
     // Any ceiling is allowed; a floor above that ceiling is still no version
     // at all.
-    let unreleased = Surface {
-        name: "sample",
-        min: 1,
-        max: 9,
-        released: None,
+    let unreleased_surface = Surface {
+        surface_name: "sample",
+        minimum_version: 1,
+        maximum_version: 9,
+        released_version: None,
     };
 
-    assert_eq!(unreleased.version_problem(), None);
+    assert_eq!(unreleased_surface.find_version_problem(), None);
 
-    let inverted = Surface {
-        min: 4,
-        max: 3,
-        ..unreleased
+    let inverted_surface = Surface {
+        minimum_version: 4,
+        maximum_version: 3,
+        ..unreleased_surface
     };
 
     assert_eq!(
-        inverted.version_problem(),
+        inverted_surface.find_version_problem(),
         Some(
             "the sample accepts 4 at the lowest and 3 at the highest, which is no version at all"
                 .to_string()
@@ -165,16 +165,16 @@ fn a_surface_no_release_carries_is_checked_on_the_floor_alone() {
 
 #[test]
 fn the_session_protocol_speaks_three_and_accepts_nothing_older() {
-    assert_eq!(SESSION_PROTOCOL.min, 3);
-    assert_eq!(SESSION_PROTOCOL.max, 3);
-    assert_eq!(SESSION_PROTOCOL.released, Some(2));
+    assert_eq!(SESSION_PROTOCOL.minimum_version, 3);
+    assert_eq!(SESSION_PROTOCOL.maximum_version, 3);
+    assert_eq!(SESSION_PROTOCOL.released_version, Some(2));
 }
 
 #[test]
 fn the_control_plane_speaks_two_and_still_accepts_one() {
-    assert_eq!(CONTROL_PROTOCOL.min, 1);
-    assert_eq!(CONTROL_PROTOCOL.max, 2);
-    assert_eq!(CONTROL_PROTOCOL.released, Some(2));
+    assert_eq!(CONTROL_PROTOCOL.minimum_version, 1);
+    assert_eq!(CONTROL_PROTOCOL.maximum_version, 2);
+    assert_eq!(CONTROL_PROTOCOL.released_version, Some(2));
 }
 
 /// The `max` each surface reads in the `v0.3.0` tag, which is the last
@@ -194,23 +194,30 @@ const WHAT_V0_3_0_SPEAKS: [(&str, Option<u32>); 10] = [
 
 #[test]
 fn every_anchor_holds_the_version_the_v0_3_0_tag_speaks() {
-    let anchors: Vec<(&str, Option<u32>)> = SURFACES
+    let released_versions: Vec<(&str, Option<u32>)> = SURFACES
         .iter()
-        .map(|surface| (surface.name, surface.released))
+        .map(|surface| (surface.surface_name, surface.released_version))
         .collect();
 
-    assert_eq!(anchors, WHAT_V0_3_0_SPEAKS);
+    assert_eq!(released_versions, WHAT_V0_3_0_SPEAKS);
 }
 
 #[test]
 fn the_table_pins_every_surface_by_name_and_numbers() {
-    let rows: Vec<(&str, u32, u32, Option<u32>)> = SURFACES
+    let surface_versions: Vec<(&str, u32, u32, Option<u32>)> = SURFACES
         .iter()
-        .map(|surface| (surface.name, surface.min, surface.max, surface.released))
+        .map(|surface| {
+            (
+                surface.surface_name,
+                surface.minimum_version,
+                surface.maximum_version,
+                surface.released_version,
+            )
+        })
         .collect();
 
     assert_eq!(
-        rows,
+        surface_versions,
         [
             ("session protocol", 3, 3, Some(2)),
             ("control plane", 1, 2, Some(2)),
@@ -230,38 +237,38 @@ fn the_table_pins_every_surface_by_name_and_numbers() {
 fn a_floor_raised_above_the_released_value_is_allowed() {
     // Only the ceiling is held to the released value; the floor may move past it.
     let floor_raised = Surface {
-        name: "sample",
-        min: 3,
-        max: 3,
-        released: Some(2),
+        surface_name: "sample",
+        minimum_version: 3,
+        maximum_version: 3,
+        released_version: Some(2),
     };
 
-    assert_eq!(floor_raised.version_problem(), None);
+    assert_eq!(floor_raised.find_version_problem(), None);
 }
 
 #[test]
 fn a_floor_equal_to_the_ceiling_is_one_version() {
-    let single = Surface {
-        name: "sample",
-        min: 0,
-        max: 0,
-        released: Some(0),
+    let single_version_surface = Surface {
+        surface_name: "sample",
+        minimum_version: 0,
+        maximum_version: 0,
+        released_version: Some(0),
     };
 
-    assert_eq!(single.version_problem(), None);
+    assert_eq!(single_version_surface.find_version_problem(), None);
 }
 
 #[test]
 fn two_steps_above_a_released_zero_is_a_problem() {
-    let over_bumped = Surface {
-        name: "sample",
-        min: 0,
-        max: 2,
-        released: Some(0),
+    let over_bumped_surface = Surface {
+        surface_name: "sample",
+        minimum_version: 0,
+        maximum_version: 2,
+        released_version: Some(0),
     };
 
     assert_eq!(
-        over_bumped.version_problem(),
+        over_bumped_surface.find_version_problem(),
         Some(
             "the sample speaks 2, which is more than one step above the 0 the last release spoke"
                 .to_string()
@@ -273,30 +280,30 @@ fn two_steps_above_a_released_zero_is_a_problem() {
 fn a_ceiling_below_the_released_value_is_reported_before_an_over_bump_can_be() {
     // `max` is below `released`, so the "below" check fires and the "more than
     // one step above" check is never reached.
-    let regressed = Surface {
-        name: "sample",
-        min: 0,
-        max: 3,
-        released: Some(9),
+    let regressed_surface = Surface {
+        surface_name: "sample",
+        minimum_version: 0,
+        maximum_version: 3,
+        released_version: Some(9),
     };
 
     assert_eq!(
-        regressed.version_problem(),
+        regressed_surface.find_version_problem(),
         Some("the sample speaks 3, which is below the 9 the last release spoke".to_string())
     );
 }
 
 #[test]
 fn the_problem_message_carries_the_surface_name() {
-    let inverted = Surface {
-        name: "remote doorway",
-        min: 2,
-        max: 1,
-        released: None,
+    let inverted_surface = Surface {
+        surface_name: "remote doorway",
+        minimum_version: 2,
+        maximum_version: 1,
+        released_version: None,
     };
 
     assert_eq!(
-        inverted.version_problem(),
+        inverted_surface.find_version_problem(),
         Some(
             "the remote doorway accepts 2 at the lowest and 1 at the highest, which is no version at all"
                 .to_string()
@@ -306,12 +313,12 @@ fn the_problem_message_carries_the_surface_name() {
 
 #[test]
 fn a_released_value_at_the_top_of_the_range_is_held_without_overflow() {
-    let maxed = Surface {
-        name: "sample",
-        min: u32::MAX,
-        max: u32::MAX,
-        released: Some(u32::MAX),
+    let maxed_surface = Surface {
+        surface_name: "sample",
+        minimum_version: u32::MAX,
+        maximum_version: u32::MAX,
+        released_version: Some(u32::MAX),
     };
 
-    assert_eq!(maxed.version_problem(), None);
+    assert_eq!(maxed_surface.find_version_problem(), None);
 }

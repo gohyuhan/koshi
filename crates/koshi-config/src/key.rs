@@ -18,17 +18,17 @@
 use std::fmt;
 
 use koshi_core::error::{DomainCategory, DomainError, Severity};
-use koshi_core::key::{fold_uppercase, Key, KeyChord, ModFlags, NamedKey};
+use koshi_core::key::{fold_uppercase_character, Key, KeyChord, ModFlags, NamedKey};
 use thiserror::Error;
 
-/// A key token that does not name a chord, with the token that failed.
+/// A key token that does not name a chord, with the failed token and reason.
 #[derive(Debug, Error, PartialEq, Eq)]
-#[error("invalid key `{token}`: {kind}")]
+#[error("invalid key `{key_token}`: {error_kind}")]
 pub struct KeyParseError {
     /// The token as written in the config.
-    pub token: String,
+    pub key_token: String,
     /// Why it failed.
-    pub kind: KeyParseErrorKind,
+    pub error_kind: KeyParseErrorKind,
 }
 
 impl DomainError for KeyParseError {
@@ -36,7 +36,7 @@ impl DomainError for KeyParseError {
         DomainCategory::Config
     }
 
-    fn severity(&self) -> Severity {
+    fn get_severity(&self) -> Severity {
         Severity::Recoverable
     }
 }
@@ -66,31 +66,35 @@ pub enum KeyParseErrorKind {
         modifier: char,
     },
     /// A bracketed multi-character key that names no known key.
-    #[error("unknown key name `{name}`")]
+    #[error("unknown key name `{key_name}`")]
     UnknownNamedKey {
         /// The unrecognized name.
-        name: String,
+        key_name: String,
     },
     /// Several characters with no brackets, as in `Ctrl-g` or `Tab`.
     #[error("a multi-character key must be bracketed, as in `<Tab>`")]
     UnbracketedMultiChar,
     /// `S-` applied to a character that is not lowercase.
-    #[error("`S-` applies to letters only, not `{ch}`; write the shifted character itself")]
+    #[error(
+        "`S-` applies to letters only, not `{key_character}`; write the shifted character itself"
+    )]
     ShiftOnNonLetter {
         /// The key the shift was applied to.
-        ch: char,
+        key_character: char,
     },
     /// A function key outside `F1..=F24`.
-    #[error("function keys run F1 to F24, got `F{n}`")]
+    #[error("function keys run F1 to F24, got `F{function_key_number_text}`")]
     FunctionKeyOutOfRange {
         /// The number as written.
-        n: String,
+        function_key_number_text: String,
     },
     /// A raw whitespace or control character where a key was expected.
-    #[error("the character {ch:?} is written by its key name, such as `<Space>` or `<Tab>`")]
+    #[error(
+        "the character {key_character:?} is written by its key name, such as `<Space>` or `<Tab>`"
+    )]
     RawWhitespaceOrControl {
         /// The character as written.
-        ch: char,
+        key_character: char,
     },
     /// `<leader>` where a single chord was expected.
     #[error("`<leader>` stands for a prefix, not a chord")]
@@ -103,26 +107,29 @@ pub enum KeyParseErrorKind {
     #[error("the leader's modifiers need a key after them")]
     DanglingLeaderMods,
     /// A sequence with more chords than the configured cap.
-    #[error("the sequence has {len} chords; the cap is {max}")]
+    #[error("the sequence has {chord_count} chords; the cap is {max_chord_depth}")]
     SequenceTooLong {
         /// The number of chords written.
-        len: usize,
+        chord_count: usize,
         /// The configured `max_chord_depth`.
-        max: u8,
+        max_chord_depth: u8,
     },
 }
 
-/// Attaches the failing `token` to a `kind`.
-pub(crate) fn err(token: &str, kind: KeyParseErrorKind) -> KeyParseError {
+/// Attaches the failing `key_token` to an `error_kind`.
+pub(crate) fn create_key_parse_error(
+    key_token: &str,
+    error_kind: KeyParseErrorKind,
+) -> KeyParseError {
     KeyParseError {
-        token: token.to_string(),
-        kind,
+        key_token: key_token.to_string(),
+        error_kind,
     }
 }
 
 /// Maps a modifier letter to its bit, accepting either case.
-fn mod_flag(c: char) -> Option<ModFlags> {
-    match c {
+fn resolve_modifier_flag(modifier_character: char) -> Option<ModFlags> {
+    match modifier_character {
         'C' | 'c' => Some(ModFlags::CTRL),
         'A' | 'a' => Some(ModFlags::ALT),
         'S' | 's' => Some(ModFlags::SHIFT),
@@ -131,105 +138,129 @@ fn mod_flag(c: char) -> Option<ModFlags> {
     }
 }
 
-/// Consumes leading `X-` modifier pairs from `s`, returning the modifiers and
-/// the unconsumed remainder. `token` is the whole key token, carried into any
+/// Consumes leading `X-` modifier pairs from `key_text`, returning the modifiers
+/// and the unconsumed remainder. `key_token` is the whole key token, carried into any
 /// error. A leading pair whose first character is not a modifier letter is an
 /// error. Anything that is not an `X-` pair ends the run: `Space` leaves the
 /// whole word (`S` is not followed by `-`), and `C--` yields
 /// [`ModFlags::CTRL`] with `-` left.
-fn split_mods<'a>(token: &str, s: &'a str) -> Result<(ModFlags, &'a str), KeyParseError> {
-    let mut mods = ModFlags::NONE;
-    let mut rest = s;
+fn split_modifier_flags<'a>(
+    key_token: &str,
+    key_text: &'a str,
+) -> Result<(ModFlags, &'a str), KeyParseError> {
+    let mut modifier_flags = ModFlags::NONE;
+    let mut remaining_key_text = key_text;
     loop {
-        let mut chars = rest.chars();
-        let (Some(c), Some('-')) = (chars.next(), chars.next()) else {
+        let mut key_text_characters = remaining_key_text.chars();
+        let (Some(modifier_character), Some('-')) =
+            (key_text_characters.next(), key_text_characters.next())
+        else {
             // Not an `X-` pair: too short, or the second character is not a
             // dash. The modifier run is over.
-            return Ok((mods, rest));
+            return Ok((modifier_flags, remaining_key_text));
         };
-        let Some(flag) = mod_flag(c) else {
-            return Err(err(
-                token,
-                KeyParseErrorKind::UnknownModifier { modifier: c },
+        let Some(modifier_flag) = resolve_modifier_flag(modifier_character) else {
+            return Err(create_key_parse_error(
+                key_token,
+                KeyParseErrorKind::UnknownModifier {
+                    modifier: modifier_character,
+                },
             ));
         };
-        if mods.contains(flag) {
-            return Err(err(
-                token,
-                KeyParseErrorKind::DuplicateModifier { modifier: c },
+        if modifier_flags.has_all_modifiers(modifier_flag) {
+            return Err(create_key_parse_error(
+                key_token,
+                KeyParseErrorKind::DuplicateModifier {
+                    modifier: modifier_character,
+                },
             ));
         }
-        mods = mods.union(flag);
+        modifier_flags = modifier_flags.union(modifier_flag);
         // Drop the consumed `X-` pair and look for another one.
-        rest = chars.as_str();
+        remaining_key_text = key_text_characters.as_str();
     }
 }
 
 /// Folds a single-character key into canonical form: an uppercase letter becomes
 /// its lowercase plus [`ModFlags::SHIFT`]. Rejects `SHIFT` on a character that
 /// is not lowercase (`<S-1>`), and rejects any whitespace or control character.
-fn finish_char(token: &str, mut mods: ModFlags, c: char) -> Result<KeyChord, KeyParseError> {
-    if c.is_whitespace() || c.is_control() {
-        return Err(err(
-            token,
-            KeyParseErrorKind::RawWhitespaceOrControl { ch: c },
+fn finish_key_character(
+    key_token: &str,
+    mut modifier_flags: ModFlags,
+    key_character: char,
+) -> Result<KeyChord, KeyParseError> {
+    if key_character.is_whitespace() || key_character.is_control() {
+        return Err(create_key_parse_error(
+            key_token,
+            KeyParseErrorKind::RawWhitespaceOrControl { key_character },
         ));
     }
-    let (key_char, shifted) = fold_uppercase(c);
-    if shifted {
-        mods = mods.union(ModFlags::SHIFT);
+    let (canonical_key_character, needs_shift_modifier) = fold_uppercase_character(key_character);
+    if needs_shift_modifier {
+        modifier_flags = modifier_flags.union(ModFlags::SHIFT);
     }
-    if mods.contains(ModFlags::SHIFT) && !key_char.is_lowercase() {
-        return Err(err(
-            token,
-            KeyParseErrorKind::ShiftOnNonLetter { ch: key_char },
+    if modifier_flags.has_all_modifiers(ModFlags::SHIFT) && !canonical_key_character.is_lowercase()
+    {
+        return Err(create_key_parse_error(
+            key_token,
+            KeyParseErrorKind::ShiftOnNonLetter {
+                key_character: canonical_key_character,
+            },
         ));
     }
-    Ok(KeyChord::new(mods, Key::Char(key_char)))
+    Ok(KeyChord::from_parts(
+        modifier_flags,
+        Key::Char(canonical_key_character),
+    ))
 }
 
 /// Resolves a bracketed multi-character key name.
-fn named_key(token: &str, name: &str) -> Result<NamedKey, KeyParseError> {
-    let function_key_digits = name
+fn resolve_named_key(key_token: &str, key_name: &str) -> Result<NamedKey, KeyParseError> {
+    let function_key_number_text = key_name
         .strip_prefix('F')
-        .or_else(|| name.strip_prefix('f'))
-        .filter(|digits| !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()));
-    if let Some(digits) = function_key_digits {
-        return digits
+        .or_else(|| key_name.strip_prefix('f'))
+        .filter(|function_key_number_text| {
+            !function_key_number_text.is_empty()
+                && function_key_number_text
+                    .chars()
+                    .all(|key_character| key_character.is_ascii_digit())
+        });
+    if let Some(function_key_number_text) = function_key_number_text {
+        return function_key_number_text
             .parse::<u8>()
             .ok()
-            .filter(|n| (1..=24).contains(n))
+            .filter(|function_key_number| (1..=24).contains(function_key_number))
             .map(NamedKey::F)
             .ok_or_else(|| {
-                err(
-                    token,
+                create_key_parse_error(
+                    key_token,
                     KeyParseErrorKind::FunctionKeyOutOfRange {
-                        n: digits.to_string(),
+                        function_key_number_text: function_key_number_text.to_string(),
                     },
                 )
             });
     }
-    Ok(match name.len() {
-        2 if name.eq_ignore_ascii_case("cr") => NamedKey::Enter,
-        2 if name.eq_ignore_ascii_case("bs") => NamedKey::Backspace,
-        2 if name.eq_ignore_ascii_case("up") => NamedKey::Up,
-        3 if name.eq_ignore_ascii_case("tab") => NamedKey::Tab,
-        3 if name.eq_ignore_ascii_case("esc") => NamedKey::Esc,
-        3 if name.eq_ignore_ascii_case("del") => NamedKey::Delete,
-        3 if name.eq_ignore_ascii_case("end") => NamedKey::End,
-        4 if name.eq_ignore_ascii_case("left") => NamedKey::Left,
-        4 if name.eq_ignore_ascii_case("home") => NamedKey::Home,
-        4 if name.eq_ignore_ascii_case("down") => NamedKey::Down,
-        5 if name.eq_ignore_ascii_case("space") => NamedKey::Space,
-        5 if name.eq_ignore_ascii_case("right") => NamedKey::Right,
-        6 if name.eq_ignore_ascii_case("insert") => NamedKey::Insert,
-        6 if name.eq_ignore_ascii_case("pageup") => NamedKey::PageUp,
-        8 if name.eq_ignore_ascii_case("pagedown") => NamedKey::PageDown,
+    Ok(match key_name.len() {
+        2 if key_name.eq_ignore_ascii_case("cr") => NamedKey::Enter,
+        2 if key_name.eq_ignore_ascii_case("bs") => NamedKey::Backspace,
+        2 if key_name.eq_ignore_ascii_case("up") => NamedKey::Up,
+        3 if key_name.eq_ignore_ascii_case("tab") => NamedKey::Tab,
+        3 if key_name.eq_ignore_ascii_case("esc") => NamedKey::Esc,
+        3 if key_name.eq_ignore_ascii_case("del") => NamedKey::Delete,
+        3 if key_name.eq_ignore_ascii_case("end") => NamedKey::End,
+        4 if key_name.eq_ignore_ascii_case("left") => NamedKey::Left,
+        4 if key_name.eq_ignore_ascii_case("home") => NamedKey::Home,
+        4 if key_name.eq_ignore_ascii_case("down") => NamedKey::Down,
+        5 if key_name.eq_ignore_ascii_case("space") => NamedKey::Space,
+        5 if key_name.eq_ignore_ascii_case("right") => NamedKey::Right,
+        6 if key_name.eq_ignore_ascii_case("insert") => NamedKey::Insert,
+        6 if key_name.eq_ignore_ascii_case("pageup") => NamedKey::PageUp,
+        8 if key_name.eq_ignore_ascii_case("pagedown") => NamedKey::PageDown,
         _ => {
-            return Err(err(
-                token,
+            return Err(create_key_parse_error(
+                key_token,
                 KeyParseErrorKind::UnknownNamedKey {
-                    name: name.to_string(),
+                    key_name: key_name.to_string(),
                 },
             ));
         }
@@ -258,46 +289,67 @@ fn named_key(token: &str, name: &str) -> Result<NamedKey, KeyParseError> {
 /// `<S-1>`, and
 /// [`RawWhitespaceOrControl`](KeyParseErrorKind::RawWhitespaceOrControl) for a
 /// literal tab.
-pub fn parse_chord(s: &str) -> Result<KeyChord, KeyParseError> {
-    if s.is_empty() {
-        return Err(err(s, KeyParseErrorKind::Empty));
+pub fn parse_chord(chord_text: &str) -> Result<KeyChord, KeyParseError> {
+    if chord_text.is_empty() {
+        return Err(create_key_parse_error(chord_text, KeyParseErrorKind::Empty));
     }
 
     // No leading `<`: a single bare printable character.
-    let Some(after_open) = s.strip_prefix('<') else {
-        let mut chars = s.chars();
-        let c = chars.next().expect("s is not empty");
-        if chars.next().is_some() {
-            return Err(err(s, KeyParseErrorKind::UnbracketedMultiChar));
+    let Some(bracketed_body) = chord_text.strip_prefix('<') else {
+        let mut chord_characters = chord_text.chars();
+        let key_character = chord_characters.next().expect("chord_text is not empty");
+        if chord_characters.next().is_some() {
+            return Err(create_key_parse_error(
+                chord_text,
+                KeyParseErrorKind::UnbracketedMultiChar,
+            ));
         }
-        return finish_char(s, ModFlags::NONE, c);
+        return finish_key_character(chord_text, ModFlags::NONE, key_character);
     };
 
     // Bracketed form: must close with `>`.
-    let Some(inner) = after_open.strip_suffix('>') else {
-        return Err(err(s, KeyParseErrorKind::UnclosedBracket));
+    let Some(bracketed_key_text) = bracketed_body.strip_suffix('>') else {
+        return Err(create_key_parse_error(
+            chord_text,
+            KeyParseErrorKind::UnclosedBracket,
+        ));
     };
-    if inner.is_empty() {
-        return Err(err(s, KeyParseErrorKind::MissingKey));
+    if bracketed_key_text.is_empty() {
+        return Err(create_key_parse_error(
+            chord_text,
+            KeyParseErrorKind::MissingKey,
+        ));
     }
-    if inner.eq_ignore_ascii_case("leader") {
-        return Err(err(s, KeyParseErrorKind::LeaderNotAChord));
+    if bracketed_key_text.eq_ignore_ascii_case("leader") {
+        return Err(create_key_parse_error(
+            chord_text,
+            KeyParseErrorKind::LeaderNotAChord,
+        ));
     }
 
     // Strip any `X-` modifier pairs, leaving the key itself.
-    let (mods, rest) = split_mods(s, inner)?;
-    if rest.is_empty() {
-        return Err(err(s, KeyParseErrorKind::MissingKey));
+    let (modifier_flags, remaining_key_text) =
+        split_modifier_flags(chord_text, bracketed_key_text)?;
+    if remaining_key_text.is_empty() {
+        return Err(create_key_parse_error(
+            chord_text,
+            KeyParseErrorKind::MissingKey,
+        ));
     }
 
     // One character left: a single (possibly modified) key. More than one:
     // a bracketed name such as `Tab` or `F5`.
-    let mut chars = rest.chars();
-    let c = chars.next().expect("rest is not empty");
-    if chars.next().is_none() {
-        finish_char(s, mods, c)
+    let mut key_characters = remaining_key_text.chars();
+    let key_character = key_characters
+        .next()
+        .expect("remaining_key_text is not empty");
+    if key_characters.next().is_none() {
+        finish_key_character(chord_text, modifier_flags, key_character)
     } else {
-        Ok(KeyChord::new(mods, Key::Named(named_key(s, rest)?)))
+        Ok(KeyChord::from_parts(
+            modifier_flags,
+            Key::Named(resolve_named_key(chord_text, remaining_key_text)?),
+        ))
     }
 }
 
@@ -330,8 +382,8 @@ impl Default for Leader {
 impl fmt::Display for Leader {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Mods(m) => write!(f, "{m}"),
-            Self::Chord(c) => write!(f, "{c}"),
+            Self::Mods(modifier_flags) => write!(f, "{modifier_flags}"),
+            Self::Chord(key_chord) => write!(f, "{key_chord}"),
         }
     }
 }
@@ -344,17 +396,20 @@ impl fmt::Display for Leader {
 /// holding an unknown or repeated modifier letter reports that modifier
 /// (`x-` gives [`KeyParseErrorKind::UnknownModifier`]). Any other input
 /// reports what [`parse_chord`] rejects it for.
-pub fn parse_leader(s: &str) -> Result<Leader, KeyParseError> {
-    if s.is_empty() {
-        return Err(err(s, KeyParseErrorKind::Empty));
+pub fn parse_leader(leader_text: &str) -> Result<Leader, KeyParseError> {
+    if leader_text.is_empty() {
+        return Err(create_key_parse_error(
+            leader_text,
+            KeyParseErrorKind::Empty,
+        ));
     }
-    if !s.starts_with('<') && s.ends_with('-') {
-        let (mods, rest) = split_mods(s, s)?;
-        if rest.is_empty() && !mods.is_empty() {
-            return Ok(Leader::Mods(mods));
+    if !leader_text.starts_with('<') && leader_text.ends_with('-') {
+        let (modifier_flags, remaining_key_text) = split_modifier_flags(leader_text, leader_text)?;
+        if remaining_key_text.is_empty() && !modifier_flags.is_empty() {
+            return Ok(Leader::Mods(modifier_flags));
         }
     }
-    parse_chord(s).map(Leader::Chord)
+    parse_chord(leader_text).map(Leader::Chord)
 }
 
 #[cfg(test)]

@@ -14,31 +14,31 @@ use crate::runtime::bus::EventFilter;
 #[test]
 fn a_new_scope_buffers_no_events() {
     let scope = TransactionScope::new();
-    assert!(scope.events().is_empty());
+    assert!(scope.emitted_events().is_empty());
 }
 
 #[test]
 fn emit_appends_in_call_order() {
-    let tab = TabId::new();
-    let prior = TabId::new();
+    let tab_id = TabId::new();
+    let previous_tab_id = TabId::new();
     let client_id = ClientId::new();
     let mut scope = TransactionScope::new();
-    scope.emit(Event::TabCreated(TabCreated { tab_id: tab }));
+    scope.emit(Event::TabCreated(TabCreated { tab_id }));
     scope.emit(Event::TabFocused(TabFocused {
         client_id,
-        tab_id: tab,
-        prior_tab: prior,
+        tab_id,
+        previous_tab_id,
     }));
     scope.emit(Event::Quit);
 
     assert_eq!(
-        scope.events(),
+        scope.emitted_events(),
         &[
-            Event::TabCreated(TabCreated { tab_id: tab }),
+            Event::TabCreated(TabCreated { tab_id }),
             Event::TabFocused(TabFocused {
                 client_id,
-                tab_id: tab,
-                prior_tab: prior,
+                tab_id,
+                previous_tab_id,
             }),
             Event::Quit,
         ]
@@ -47,16 +47,16 @@ fn emit_appends_in_call_order() {
 
 #[test]
 fn emit_keeps_a_repeated_event_as_its_own_entry() {
-    let tab = TabId::new();
+    let tab_id = TabId::new();
     let mut scope = TransactionScope::new();
-    scope.emit(Event::TabCreated(TabCreated { tab_id: tab }));
-    scope.emit(Event::TabCreated(TabCreated { tab_id: tab }));
+    scope.emit(Event::TabCreated(TabCreated { tab_id }));
+    scope.emit(Event::TabCreated(TabCreated { tab_id }));
 
     assert_eq!(
-        scope.events(),
+        scope.emitted_events(),
         &[
-            Event::TabCreated(TabCreated { tab_id: tab }),
-            Event::TabCreated(TabCreated { tab_id: tab }),
+            Event::TabCreated(TabCreated { tab_id }),
+            Event::TabCreated(TabCreated { tab_id }),
         ]
     );
 }
@@ -161,10 +161,10 @@ fn commit_still_applies_when_a_subscribers_receiver_is_gone() {
     let mut scope = TransactionScope::new();
     scope.emit(Event::TabCreated(TabCreated { tab_id: tab }));
 
-    let result = scope.commit(command_id, &mut bus);
+    let transaction_result = scope.commit(command_id, &mut bus);
 
     assert_eq!(
-        result,
+        transaction_result,
         CommandResult::Ok {
             command_id,
             emitted_events: vec![Event::TabCreated(TabCreated { tab_id: tab })],
@@ -197,7 +197,7 @@ fn two_scopes_commit_independently_with_no_shared_state() {
 
     // Scope A's buffer is untouched by scope B's later emits.
     assert_eq!(
-        scope_a.events(),
+        scope_a.emitted_events(),
         &[Event::TabCreated(TabCreated { tab_id: tab_a })]
     );
 
@@ -251,10 +251,10 @@ fn commit_remembers_the_batch_in_the_recent_events_ring() {
 
     // The ring is process-wide and every test in this binary writes to it, so
     // the two records are found by this tab's own id rather than by position.
-    let names: Vec<String> = recent_events::recent()
+    let names: Vec<String> = recent_events::list_recent_events()
         .iter()
-        .filter(|event| event.tab == Some(tab))
-        .map(|event| event.name.to_string())
+        .filter(|event| event.tab_id == Some(tab))
+        .map(|event| event.event_name.to_string())
         .collect();
     assert_eq!(names, ["TabCreated", "LayoutChanged"]);
 }
@@ -266,7 +266,7 @@ fn an_uncommitted_scope_remembers_nothing() {
     scope.emit(Event::TabCreated(TabCreated { tab_id: tab }));
     drop(scope);
 
-    assert!(recent_events::recent()
+    assert!(recent_events::list_recent_events()
         .iter()
-        .all(|event| event.tab != Some(tab)));
+        .all(|event| event.tab_id != Some(tab)));
 }

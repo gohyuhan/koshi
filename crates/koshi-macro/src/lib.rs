@@ -11,25 +11,25 @@ use syn::parse::{Parse, ParseStream};
 use syn::{parse_macro_input, Expr, Ident, ItemFn, Token};
 
 /// The attribute's one argument: what a blocked call returns instead.
-struct Args {
+struct BetaFeatureArguments {
     otherwise: Expr,
 }
 
-impl Parse for Args {
-    fn parse(input: ParseStream) -> syn::Result<Self> {
-        let name: Ident = input.parse()?;
-        if name != "otherwise" {
+impl Parse for BetaFeatureArguments {
+    fn parse(argument_stream: ParseStream) -> syn::Result<Self> {
+        let argument_name: Ident = argument_stream.parse()?;
+        if argument_name != "otherwise" {
             return Err(syn::Error::new(
-                name.span(),
+                argument_name.span(),
                 "expected `otherwise = <expression>`",
             ));
         }
-        input.parse::<Token![=]>()?;
-        let otherwise: Expr = input.parse()?;
-        if !input.is_empty() {
-            return Err(input.error("expected only `otherwise = <expression>`"));
+        argument_stream.parse::<Token![=]>()?;
+        let otherwise: Expr = argument_stream.parse()?;
+        if !argument_stream.is_empty() {
+            return Err(argument_stream.error("expected only `otherwise = <expression>`"));
         }
-        Ok(Args { otherwise })
+        Ok(BetaFeatureArguments { otherwise })
     }
 }
 
@@ -37,7 +37,7 @@ impl Parse for Args {
 ///
 /// `otherwise = ()` produces `return;`. `otherwise = do_nothing()` produces
 /// `return do_nothing();`, even when that call returns unit.
-fn returns_unit(otherwise: &Expr) -> bool {
+fn is_unit_expression(otherwise: &Expr) -> bool {
     matches!(otherwise, Expr::Tuple(tuple) if tuple.elems.is_empty())
 }
 
@@ -68,42 +68,42 @@ fn returns_unit(otherwise: &Expr) -> bool {
 /// The attribute requires exactly one argument, `otherwise = <expression>`.
 /// Missing, misnamed, and extra arguments are compile errors.
 ///
-/// Generated code calls `koshi_beta::allowed` and `koshi_beta::log_blocked`, so
+/// Generated code calls the beta-feature gate and warning logger, so
 /// the gated function's crate depends on `koshi-beta`.
 ///
 /// ```ignore
 /// #[beta_feature(otherwise = Ok(()))]
-/// fn attach_to_session(id: SessionId) -> Result<(), CliError> {
+/// fn attach_to_session(session_id: SessionId) -> Result<(), CliError> {
 ///     // function body
 /// }
 /// ```
 #[proc_macro_attribute]
-pub fn beta_feature(args: TokenStream, item: TokenStream) -> TokenStream {
-    let otherwise = parse_macro_input!(args as Args).otherwise;
-    let mut function = parse_macro_input!(item as ItemFn);
+pub fn beta_feature(attribute_arguments: TokenStream, function_item: TokenStream) -> TokenStream {
+    let otherwise = parse_macro_input!(attribute_arguments as BetaFeatureArguments).otherwise;
+    let mut gated_function = parse_macro_input!(function_item as ItemFn);
 
-    let name = function.sig.ident.to_string();
+    let function_name = gated_function.sig.ident.to_string();
     // The path contains the module and function name, such as
     // `session::attach`; an `impl` type is not included.
-    let path = quote!(::core::concat!(::core::module_path!(), "::", #name));
-    let body = std::mem::take(&mut function.block.stmts);
-    let give_up = if returns_unit(&otherwise) {
+    let warning_path = quote!(::core::concat!(::core::module_path!(), "::", #function_name));
+    let original_statements = std::mem::take(&mut gated_function.block.stmts);
+    let blocked_return = if is_unit_expression(&otherwise) {
         quote!(return;)
     } else {
         quote!(return #otherwise;)
     };
     // Each original statement is interpolated separately, so the final
     // expression remains the function's tail expression.
-    *function.block = syn::parse_quote!({
-        if !::koshi_beta::allowed() {
+    *gated_function.block = syn::parse_quote!({
+        if !::koshi_beta::are_beta_features_allowed() {
             static BETA_WARNED: ::std::sync::Once = ::std::sync::Once::new();
-            BETA_WARNED.call_once(|| ::koshi_beta::log_blocked(#path));
-            #give_up
+            BETA_WARNED.call_once(|| ::koshi_beta::log_blocked_feature_warning(#warning_path));
+            #blocked_return
         }
-        #(#body)*
+        #(#original_statements)*
     });
 
-    quote!(#function).into()
+    quote!(#gated_function).into()
 }
 
 #[cfg(test)]

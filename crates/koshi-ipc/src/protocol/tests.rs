@@ -9,7 +9,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use koshi_core::client::ClientOrigin;
 
 use koshi_core::command::{Command, CommandSource, NewPaneArgs, ToggleLockModeArgs};
-use koshi_core::discovery::{ClientInfo, PaneInfo, PaneState, SessionInfo, TabInfo};
+use koshi_core::discovery::{
+    ClientDiscovery, PaneDiscovery, PaneLifecycle, SessionDiscovery, TabDiscovery,
+};
 use koshi_core::event::RejectReason;
 use koshi_core::geometry::{Direction, PaneArea, Point, Rect, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
@@ -34,17 +36,17 @@ use crate::wire::{MaybeKnown, WireName, WireVariants};
 use super::*;
 
 /// A token holding a fixed secret.
-fn token() -> ConnectionToken {
-    ConnectionToken::new("k7QxSecret")
+fn build_test_connection_token() -> ConnectionToken {
+    ConnectionToken::from_secret("k7QxSecret")
 }
 
 /// An envelope carrying one command with no arguments.
-fn envelope() -> CommandEnvelope {
-    CommandEnvelope::new(
+fn build_test_command_envelope() -> CommandEnvelope {
+    CommandEnvelope::from_parts(
         CommandId::new(),
         CommandSource::ExternalCli {
             session_id: None,
-            target_client: None,
+            target_client_id: None,
         },
         UNIX_EPOCH + Duration::from_secs(1_700_000_000),
         Command::ToggleLockMode(ToggleLockModeArgs::default()),
@@ -53,42 +55,45 @@ fn envelope() -> CommandEnvelope {
 
 /// An envelope carrying a `NewPane` with every optional field filled, at fixed
 /// ids and times. Encodes to the same bytes on every call.
-fn populated_envelope() -> CommandEnvelope {
-    CommandEnvelope::new(
-        CommandId::from_uuid(fixed_uuid()),
+fn build_populated_test_command_envelope() -> CommandEnvelope {
+    CommandEnvelope::from_parts(
+        CommandId::from_uuid(build_fixed_test_uuid()),
         CommandSource::InSessionCli {
-            session_id: SessionId::from_uuid(fixed_uuid()),
-            client_id: Some(ClientId::from_uuid(fixed_uuid())),
-            pane_id: PaneId::from_uuid(fixed_uuid()),
+            session_id: SessionId::from_uuid(build_fixed_test_uuid()),
+            client_id: Some(ClientId::from_uuid(build_fixed_test_uuid())),
+            pane_id: PaneId::from_uuid(build_fixed_test_uuid()),
             socket_path: PathBuf::from("/run/koshi.sock"),
         },
         UNIX_EPOCH + Duration::from_secs(1_700_000_000),
         Command::NewPane(NewPaneArgs {
-            source: Some(PaneId::from_uuid(fixed_uuid())),
-            tab: Some(TabId::from_uuid(fixed_uuid())),
+            source_pane_id: Some(PaneId::from_uuid(build_fixed_test_uuid())),
+            tab_id: Some(TabId::from_uuid(build_fixed_test_uuid())),
             direction: Direction::Down,
-            stacked: true,
-            cwd: Some(PathBuf::from("/home/user")),
-            command: Some(SpawnSpec {
+            should_stack: true,
+            working_directory: Some(PathBuf::from("/home/user")),
+            spawn_spec: Some(SpawnSpec {
                 program: PathBuf::from("/bin/zsh"),
-                args: vec!["-l".to_string()],
-                cwd: Some(PathBuf::from("/home/user")),
-                env: BTreeMap::from([("KOSHI_PANE_ID".to_string(), "pane-1".to_string())]),
+                arguments: vec!["-l".to_string()],
+                working_directory: Some(PathBuf::from("/home/user")),
+                environment_variables: BTreeMap::from([(
+                    "KOSHI_PANE_ID".to_string(),
+                    "pane-1".to_string(),
+                )]),
                 shell_kind: ShellKind::Zsh,
             }),
-            client: Some(ClientId::from_uuid(fixed_uuid())),
+            client_id: Some(ClientId::from_uuid(build_fixed_test_uuid())),
         }),
     )
 }
 
 /// An overview of a session with no tabs, panes, or clients.
-fn overview() -> SessionOverview {
+fn build_empty_session_overview() -> SessionOverview {
     SessionOverview {
-        session: SessionInfo {
-            id: SessionId::new(),
-            name: "quiet-lake".to_string(),
+        session: SessionDiscovery {
+            session_id: SessionId::new(),
+            session_name: "quiet-lake".to_string(),
             created_at: UNIX_EPOCH + Duration::from_secs(1_700_000_000),
-            attached_clients: Vec::new(),
+            attached_client_ids: Vec::new(),
             pane_count: 0,
         },
         tabs: Vec::new(),
@@ -98,11 +103,11 @@ fn overview() -> SessionOverview {
 }
 
 /// One remembered event: a pane created in a tab, stamped at the epoch.
-fn recent() -> RecentEvent {
-    koshi_core::recent_event::record(
+fn build_test_recent_event() -> RecentEvent {
+    koshi_core::recent_event::record_event(
         &koshi_core::event::Event::PaneCreated(koshi_core::event::PaneCreated {
-            pane_id: PaneId::from_uuid(fixed_uuid()),
-            tab_id: TabId::from_uuid(fixed_uuid()),
+            pane_id: PaneId::from_uuid(build_fixed_test_uuid()),
+            tab_id: TabId::from_uuid(build_fixed_test_uuid()),
         }),
         std::time::SystemTime::UNIX_EPOCH,
     )
@@ -110,83 +115,92 @@ fn recent() -> RecentEvent {
 
 /// The layout of a session with one tab, holding one pane, that one client
 /// views. The wire form of every field is pinned in `crate::layout::tests`.
-fn layout() -> SessionLayout {
-    let tab_id = TabId::from_uuid(fixed_uuid());
-    let pane_id = PaneId::from_uuid(fixed_uuid());
-    let client_id = ClientId::from_uuid(fixed_uuid());
+fn build_test_session_layout() -> SessionLayout {
+    let tab_id = TabId::from_uuid(build_fixed_test_uuid());
+    let pane_id = PaneId::from_uuid(build_fixed_test_uuid());
+    let client_id = ClientId::from_uuid(build_fixed_test_uuid());
 
     SessionLayout {
-        id: SessionId::from_uuid(fixed_uuid()),
-        name: "quiet-lake".to_string(),
+        session_id: SessionId::from_uuid(build_fixed_test_uuid()),
+        session_name: "quiet-lake".to_string(),
         tabs: vec![TabLayout {
-            id: tab_id,
-            name: "editor".to_string(),
-            index: 0,
-            tree: LayoutNode::Pane(pane_id),
-            solved: vec![SolvedTab {
-                client: client_id,
-                viewport: Size { cols: 80, rows: 22 },
-                mode: LayoutMode::Tiled,
-                panes: vec![SolvedPane {
-                    id: pane_id,
-                    rect: Rect::at_origin(Size { cols: 80, rows: 22 }),
+            tab_id,
+            tab_name: "editor".to_string(),
+            tab_index: 0,
+            layout_tree: LayoutNode::Pane(pane_id),
+            solved_tabs: vec![SolvedTab {
+                client_id,
+                viewport_size: Size {
+                    column_count: 80,
+                    row_count: 22,
+                },
+                layout_mode: LayoutMode::Tiled,
+                pane_rects: vec![SolvedPane {
+                    pane_id,
+                    outer_rect: Rect::from_size_at_origin(Size {
+                        column_count: 80,
+                        row_count: 22,
+                    }),
                 }],
-                suppressed: Vec::new(),
-                all_suppressed: false,
+                suppressed_pane_ids: Vec::new(),
+                is_every_pane_suppressed: false,
                 stack_headers: Vec::new(),
             }],
         }],
         clients: vec![ClientFocus {
-            id: client_id,
-            active_tab: tab_id,
-            focused_pane: Some(pane_id),
+            client_id,
+            active_tab_id: tab_id,
+            focused_pane_id: Some(pane_id),
         }],
     }
 }
 
 /// An overview of a session with one tab, one pane in it, and one attached
 /// client, at fixed ids and times. Encodes to the same bytes on every call.
-fn populated_overview() -> SessionOverview {
-    let session_id = SessionId::from_uuid(fixed_uuid());
-    let tab_id = TabId::from_uuid(fixed_uuid());
-    let pane_id = PaneId::from_uuid(fixed_uuid());
-    let client_id = ClientId::from_uuid(fixed_uuid());
-    let at = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+fn build_populated_test_session_overview() -> SessionOverview {
+    let session_id = SessionId::from_uuid(build_fixed_test_uuid());
+    let tab_id = TabId::from_uuid(build_fixed_test_uuid());
+    let pane_id = PaneId::from_uuid(build_fixed_test_uuid());
+    let client_id = ClientId::from_uuid(build_fixed_test_uuid());
+    let event_timestamp = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
 
     SessionOverview {
-        session: SessionInfo {
-            id: session_id,
-            name: "quiet-lake".to_string(),
-            created_at: at,
-            attached_clients: vec![client_id],
+        session: SessionDiscovery {
+            session_id,
+            session_name: "quiet-lake".to_string(),
+            created_at: event_timestamp,
+            attached_client_ids: vec![client_id],
             pane_count: 1,
         },
-        tabs: vec![TabInfo {
-            id: tab_id,
-            session_id,
-            name: "editor".to_string(),
-            index: 0,
-            active_pane: Some(pane_id),
-            pane_count: 1,
-        }],
-        panes: vec![PaneInfo {
-            id: pane_id,
+        tabs: vec![TabDiscovery {
             tab_id,
             session_id,
-            title: Some("vim".to_string()),
-            cwd: Some(PathBuf::from("/home/user")),
-            command: None,
-            state: PaneState::Running,
-            focused_by_clients: vec![client_id],
+            tab_name: "editor".to_string(),
+            tab_index: 0,
+            active_pane_id: Some(pane_id),
+            pane_count: 1,
         }],
-        clients: vec![ClientInfo {
-            id: client_id,
+        panes: vec![PaneDiscovery {
+            pane_id,
+            tab_id,
             session_id,
-            attached_at: at,
-            viewport_size: Size { cols: 80, rows: 24 },
-            active_tab: tab_id,
-            focused_pane: Some(pane_id),
-            lock_state: LockMode::Normal,
+            pane_title: Some("vim".to_string()),
+            working_directory: Some(PathBuf::from("/home/user")),
+            command_argv: None,
+            lifecycle: PaneLifecycle::Running,
+            focused_by_client_ids: vec![client_id],
+        }],
+        clients: vec![ClientDiscovery {
+            client_id,
+            session_id,
+            attached_at: event_timestamp,
+            viewport_size: Size {
+                column_count: 80,
+                row_count: 24,
+            },
+            active_tab_id: tab_id,
+            focused_pane_id: Some(pane_id),
+            lock_mode: LockMode::Normal,
             origin: Some(ClientOrigin::Local),
             pane_area: None,
         }],
@@ -196,21 +210,21 @@ fn populated_overview() -> SessionOverview {
 /// A session structure holding one tab and the one terminal pane in it, at
 /// fixed ids. Encodes to the same bytes on every call.
 fn populated_structure() -> AttachedSessionStructureSnapshot {
-    let pane_id = PaneId::from_uuid(fixed_uuid());
+    let pane_id = PaneId::from_uuid(build_fixed_test_uuid());
 
     AttachedSessionStructureSnapshot {
-        id: SessionId::from_uuid(fixed_uuid()),
-        name: "quiet-lake".to_string(),
+        session_id: SessionId::from_uuid(build_fixed_test_uuid()),
+        session_name: "quiet-lake".to_string(),
         tabs: vec![TabStructure {
-            id: TabId::from_uuid(fixed_uuid()),
-            name: "editor".to_string(),
-            index: 0,
+            tab_id: TabId::from_uuid(build_fixed_test_uuid()),
+            tab_name: "editor".to_string(),
+            tab_index: 0,
             layout: LayoutNode::Pane(pane_id),
             focus_mru: vec![pane_id],
         }],
         panes: vec![PaneStructure {
-            id: pane_id,
-            kind: PaneKind::Terminal,
+            pane_id,
+            pane_kind: PaneKind::Terminal,
         }],
     }
 }
@@ -218,32 +232,32 @@ fn populated_structure() -> AttachedSessionStructureSnapshot {
 /// Every mouse action a round can carry, in the order the enum declares them,
 /// at fixed ids.
 fn every_mouse_action() -> Vec<WireMouseAction> {
-    let pane = PaneId::from_uuid(fixed_uuid());
+    let pane = PaneId::from_uuid(build_fixed_test_uuid());
 
     vec![
         WireMouseAction::Scroll {
-            pane,
-            up: true,
-            lines: 3,
+            pane_id: pane,
+            is_scrolling_up: true,
+            scroll_line_count: 3,
         },
         WireMouseAction::Forward {
-            pane,
-            mouse: MouseInput {
-                kind: MouseKind::Press(MouseButton::Left),
-                at: Point { x: 10, y: 3 },
-                mods: ModFlags::CTRL,
+            pane_id: pane,
+            mouse_input: MouseInput {
+                mouse_kind: MouseKind::Press(MouseButton::Left),
+                position: Point { column: 10, row: 3 },
+                modifier_flags: ModFlags::CTRL,
             },
         },
         WireMouseAction::AltScrollArrows {
-            pane,
-            up: false,
-            count: 5,
+            pane_id: pane,
+            is_scrolling_up: false,
+            arrow_count: 5,
         },
         WireMouseAction::Resize {
-            pane,
-            side: Direction::Left,
-            step: -1,
-            count: 2,
+            pane_id: pane,
+            border_side: Direction::Left,
+            resize_step: -1,
+            requested_cell_count: 2,
         },
         WireMouseAction::Command(Box::new(Command::ToggleLockMode(
             ToggleLockModeArgs::default(),
@@ -254,37 +268,41 @@ fn every_mouse_action() -> Vec<WireMouseAction> {
 /// One request of every kind, in the order the enum declares them.
 fn every_request_kind() -> Vec<IpcRequestKind> {
     vec![
-        IpcRequestKind::hello(token()),
+        IpcRequestKind::build_hello_request(build_test_connection_token()),
         IpcRequestKind::Attach {
-            viewport: Size { cols: 80, rows: 24 },
-            filter: EventFilterSpec::All,
-            resume: None,
+            viewport: Size {
+                column_count: 80,
+                row_count: 24,
+            },
+            event_filter: EventFilterSpec::All,
+            resume_client_id: None,
             resume_token: None,
             pane_area: None,
-            graphics: crate::protocol::GraphicsCapabilities::default(),
+            graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
             cell_size: None,
         },
         IpcRequestKind::KeyPress {
-            chord: KeyChord::new(ModFlags::CTRL, Key::Char('c')),
+            chord: KeyChord::from_parts(ModFlags::CTRL, Key::Char('c')),
         },
         IpcRequestKind::Resize {
             viewport: Size {
-                cols: 120,
-                rows: 40,
+                column_count: 120,
+                row_count: 40,
             },
             pane_area: None,
             cell_size: None,
         },
         IpcRequestKind::CellSize {
-            size: koshi_core::geometry::PixelCellSize::new(10, 20).expect("nonzero cell size"),
+            cell_size: koshi_core::geometry::PixelCellSize::from_pixel_dimensions(10, 20)
+                .expect("nonzero cell size"),
         },
         IpcRequestKind::Paste {
-            text: "hello\nworld".to_string(),
+            pasted_text: "hello\nworld".to_string(),
         },
         IpcRequestKind::Mouse(every_mouse_action()),
-        IpcRequestKind::SubmitCommand(Box::new(envelope())),
+        IpcRequestKind::SubmitCommand(Box::new(build_test_command_envelope())),
         IpcRequestKind::Discovery,
-        IpcRequestKind::Layout { tab: None },
+        IpcRequestKind::Layout { tab_id: None },
         IpcRequestKind::RecentEvents,
         IpcRequestKind::Restart,
         IpcRequestKind::Leaving,
@@ -292,26 +310,26 @@ fn every_request_kind() -> Vec<IpcRequestKind> {
 }
 
 /// One answer of every kind, in the order the enum declares them.
-fn every_result() -> Vec<IpcResult> {
+fn list_all_ipc_results() -> Vec<IpcResult> {
     vec![
         IpcResult::Hello {
             protocol_version: PROTOCOL_VERSION,
-            version: "0.3.0".to_string(),
+            build_version: "0.3.0".to_string(),
         },
         IpcResult::Attached {
-            client_id: ClientId::from_uuid(fixed_uuid()),
-            session_id: SessionId::from_uuid(fixed_uuid()),
-            structure: populated_structure(),
+            client_id: ClientId::from_uuid(build_fixed_test_uuid()),
+            session_id: SessionId::from_uuid(build_fixed_test_uuid()),
+            session_structure: populated_structure(),
             resume_token: None,
             pane_area: None,
         },
         IpcResult::CommandResult(CommandResult::Ok {
-            command_id: CommandId::from_uuid(fixed_uuid()),
+            command_id: CommandId::from_uuid(build_fixed_test_uuid()),
             emitted_events: Vec::new(),
         }),
-        IpcResult::Overview(overview()),
-        IpcResult::Layout(layout()),
-        IpcResult::RecentEvents(vec![recent()]),
+        IpcResult::Overview(build_empty_session_overview()),
+        IpcResult::Layout(build_test_session_layout()),
+        IpcResult::RecentEvents(vec![build_test_recent_event()]),
         IpcResult::Restarting,
         IpcResult::Error(IpcErrorPayload {
             code: IpcErrorCode::BadToken,
@@ -321,30 +339,34 @@ fn every_result() -> Vec<IpcResult> {
 }
 
 /// The one UUID every fixed id in this file uses.
-fn fixed_uuid() -> uuid::Uuid {
+fn build_fixed_test_uuid() -> uuid::Uuid {
     uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("literal UUID parses")
 }
 
 /// Encode `message` and decode it back.
-fn round_trip<T: Serialize + DeserializeOwned>(message: &T) -> T {
-    let encoded = serde_json::to_string(message).expect("message encodes");
-    serde_json::from_str(&encoded).expect("message decodes")
+fn round_trip_wire_message<T: Serialize + DeserializeOwned>(message: &T) -> T {
+    let encoded_json = serde_json::to_string(message).expect("message encodes");
+    serde_json::from_str(&encoded_json).expect("message decodes")
 }
 
-/// The tag an encoded enum variant carries: the single key of
+/// The tag an encoded JSON enum variant carries: the single key of
 /// `{"Overview": { … }}`, or the string itself for `"Restarting"`.
-fn tag_of(value: &serde_json::Value) -> String {
-    if let Some(name) = value.as_str() {
-        return name.to_string();
+fn tag_of(encoded_json: &serde_json::Value) -> String {
+    if let Some(tag_name) = encoded_json.as_str() {
+        return tag_name.to_string();
     }
 
-    let fields = value
+    let object_fields = encoded_json
         .as_object()
         .expect("a tagged variant encodes as a string or an object");
 
-    assert_eq!(fields.len(), 1, "expected exactly one tag in {value}");
+    assert_eq!(
+        object_fields.len(),
+        1,
+        "expected exactly one tag in {encoded_json}"
+    );
 
-    fields.keys().next().expect("one key").clone()
+    object_fields.keys().next().expect("one key").clone()
 }
 
 #[test]
@@ -358,44 +380,44 @@ fn the_lowest_protocol_version_this_build_speaks_is_three() {
 }
 
 #[test]
-fn agreed_version_is_the_highest_version_both_ranges_hold() {
-    assert_eq!(agreed_version(2, 4, 2, 2), Some(2));
-    assert_eq!(agreed_version(2, 3, 2, 3), Some(3));
-    assert_eq!(agreed_version(5, 6, 2, 2), None);
+fn compute_agreed_protocol_version_uses_highest_shared_version() {
+    assert_eq!(compute_agreed_protocol_version(2, 4, 2, 2), Some(2));
+    assert_eq!(compute_agreed_protocol_version(2, 3, 2, 3), Some(3));
+    assert_eq!(compute_agreed_protocol_version(5, 6, 2, 2), None);
 }
 
 #[test]
-fn agreed_version_settles_where_the_ranges_touch_at_one_version() {
-    assert_eq!(agreed_version(1, 2, 2, 5), Some(2));
-    assert_eq!(agreed_version(2, 5, 1, 2), Some(2));
+fn compute_agreed_protocol_version_accepts_one_shared_version() {
+    assert_eq!(compute_agreed_protocol_version(1, 2, 2, 5), Some(2));
+    assert_eq!(compute_agreed_protocol_version(2, 5, 1, 2), Some(2));
 }
 
 #[test]
-fn agreed_version_of_an_inverted_range_is_none() {
-    assert_eq!(agreed_version(5, 2, 2, 5), None);
-    assert_eq!(agreed_version(2, 5, 5, 2), None);
+fn compute_agreed_protocol_version_rejects_inverted_ranges() {
+    assert_eq!(compute_agreed_protocol_version(5, 2, 2, 5), None);
+    assert_eq!(compute_agreed_protocol_version(2, 5, 5, 2), None);
 }
 
 #[test]
 fn the_session_plane_answers_a_refusal_as_an_error_result() {
-    let payload = IpcErrorPayload {
+    let ipc_error_payload = IpcErrorPayload {
         code: IpcErrorCode::BadToken,
         message: "the token does not match".to_string(),
     };
 
     assert_eq!(
-        SessionPlane::refusal(payload.clone()),
-        IpcResult::Error(payload)
+        SessionPlane::build_refusal_response(ipc_error_payload.clone()),
+        IpcResult::Error(ipc_error_payload)
     );
 }
 
 #[test]
 fn the_session_plane_answers_a_hello_with_the_agreed_version_and_the_build() {
     assert_eq!(
-        SessionPlane::hello(2, "0.3.0"),
+        SessionPlane::build_hello_response(2, "0.3.0"),
         IpcResult::Hello {
             protocol_version: 2,
-            version: "0.3.0".to_string(),
+            build_version: "0.3.0".to_string(),
         }
     );
 }
@@ -410,7 +432,7 @@ fn the_overview_wire_shape_belongs_to_this_protocol_version() {
     // `a_client_row_decodes_across_the_shape_that_added_origin` pins the
     // decoding half of that.
     assert_eq!(
-        serde_json::to_value(populated_overview()).expect("overview encodes"),
+        serde_json::to_value(build_populated_test_session_overview()).expect("overview encodes"),
         json!({
             "session": {
                 "id": "00000000-0000-0000-0000-000000000001",
@@ -481,7 +503,7 @@ fn a_client_row_decodes_across_the_shape_that_added_origin() {
         "focused_pane": null,
         "lock_state": "Normal"
     });
-    let decoded: ClientInfo =
+    let decoded: ClientDiscovery =
         serde_json::from_value(without_origin).expect("a row from a build without origin decodes");
     assert_eq!(
         decoded.origin, None,
@@ -493,7 +515,8 @@ fn a_client_row_decodes_across_the_shape_that_added_origin() {
     #[derive(Deserialize)]
     #[allow(dead_code)]
     struct OldClientInfo {
-        id: ClientId,
+        #[serde(rename = "id")]
+        client_id: ClientId,
         session_id: SessionId,
         attached_at: SystemTime,
         viewport_size: Size,
@@ -501,12 +524,12 @@ fn a_client_row_decodes_across_the_shape_that_added_origin() {
         focused_pane: Option<PaneId>,
         lock_state: LockMode,
     }
-    let mut written = populated_overview().clients.remove(0);
+    let mut written = build_populated_test_session_overview().clients.remove(0);
     written.origin = Some(ClientOrigin::Remote);
     let written = serde_json::to_value(written).expect("a client row encodes");
-    let old: OldClientInfo =
+    let legacy_client_info: OldClientInfo =
         serde_json::from_value(written).expect("the older shape reads a row carrying origin");
-    assert_eq!(old.lock_state, LockMode::Normal);
+    assert_eq!(legacy_client_info.lock_state, LockMode::Normal);
 }
 
 #[test]
@@ -520,7 +543,9 @@ fn the_submit_command_wire_shape_belongs_to_this_protocol_version() {
     // `koshi_core::compat`.
     let request = IpcRequest {
         request_id: 2,
-        kind: IpcRequestKind::SubmitCommand(Box::new(populated_envelope())),
+        request_kind: IpcRequestKind::SubmitCommand(Box::new(
+            build_populated_test_command_envelope(),
+        )),
     };
 
     assert_eq!(
@@ -577,13 +602,16 @@ fn the_attach_wire_shape_belongs_to_this_protocol_version() {
     // taking the default, does not.
     let request = IpcRequest {
         request_id: 4,
-        kind: IpcRequestKind::Attach {
-            viewport: Size { cols: 80, rows: 24 },
-            filter: EventFilterSpec::All,
-            resume: None,
+        request_kind: IpcRequestKind::Attach {
+            viewport: Size {
+                column_count: 80,
+                row_count: 24,
+            },
+            event_filter: EventFilterSpec::All,
+            resume_client_id: None,
             resume_token: None,
             pane_area: None,
-            graphics: crate::protocol::GraphicsCapabilities::default(),
+            graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
             cell_size: None,
         },
     };
@@ -606,10 +634,10 @@ fn the_attach_wire_shape_belongs_to_this_protocol_version() {
 
     let response = IpcResponse {
         request_id: Some(4),
-        result: IpcResult::Attached {
-            client_id: ClientId::from_uuid(fixed_uuid()),
-            session_id: SessionId::from_uuid(fixed_uuid()),
-            structure: populated_structure(),
+        answer_result: IpcResult::Attached {
+            client_id: ClientId::from_uuid(build_fixed_test_uuid()),
+            session_id: SessionId::from_uuid(build_fixed_test_uuid()),
+            session_structure: populated_structure(),
             resume_token: None,
             pane_area: None,
         },
@@ -650,16 +678,19 @@ fn the_attach_wire_shape_belongs_to_this_protocol_version() {
 fn attach_reports_positive_kitty_support_and_defaults_an_absent_report_to_false() {
     let supported = IpcRequest {
         request_id: 4,
-        kind: IpcRequestKind::Attach {
-            viewport: Size { cols: 80, rows: 24 },
-            filter: EventFilterSpec::All,
-            resume: None,
+        request_kind: IpcRequestKind::Attach {
+            viewport: Size {
+                column_count: 80,
+                row_count: 24,
+            },
+            event_filter: EventFilterSpec::All,
+            resume_client_id: None,
             resume_token: None,
             pane_area: None,
-            graphics: crate::protocol::GraphicsCapabilities {
-                kitty: true,
-                iterm: false,
-                sixel: false,
+            graphics_capabilities: crate::protocol::GraphicsCapabilities {
+                supports_kitty: true,
+                supports_iterm: false,
+                supports_sixel: false,
             },
             cell_size: None,
         },
@@ -698,16 +729,19 @@ fn attach_reports_positive_kitty_support_and_defaults_an_absent_report_to_false(
         absent,
         IpcRequest {
             request_id: 4,
-            kind: IpcRequestKind::Attach {
-                viewport: Size { cols: 80, rows: 24 },
-                filter: EventFilterSpec::All,
-                resume: None,
+            request_kind: IpcRequestKind::Attach {
+                viewport: Size {
+                    column_count: 80,
+                    row_count: 24
+                },
+                event_filter: EventFilterSpec::All,
+                resume_client_id: None,
                 resume_token: None,
                 pane_area: None,
-                graphics: crate::protocol::GraphicsCapabilities {
-                    kitty: false,
-                    iterm: false,
-                    sixel: false,
+                graphics_capabilities: crate::protocol::GraphicsCapabilities {
+                    supports_kitty: false,
+                    supports_iterm: false,
+                    supports_sixel: false,
                 },
                 cell_size: None,
             },
@@ -717,25 +751,25 @@ fn attach_reports_positive_kitty_support_and_defaults_an_absent_report_to_false(
 
 #[test]
 fn graphics_capabilities_default_and_native_detection_cover_each_protocol() {
-    assert!(!GraphicsCapabilities::default().has_native());
+    assert!(!GraphicsCapabilities::default().has_native_image_protocol());
     assert!(GraphicsCapabilities {
-        kitty: true,
-        iterm: false,
-        sixel: false,
+        supports_kitty: true,
+        supports_iterm: false,
+        supports_sixel: false,
     }
-    .has_native());
+    .has_native_image_protocol());
     assert!(GraphicsCapabilities {
-        kitty: false,
-        iterm: true,
-        sixel: false,
+        supports_kitty: false,
+        supports_iterm: true,
+        supports_sixel: false,
     }
-    .has_native());
+    .has_native_image_protocol());
     assert!(GraphicsCapabilities {
-        kitty: false,
-        iterm: false,
-        sixel: true,
+        supports_kitty: false,
+        supports_iterm: false,
+        supports_sixel: true,
     }
-    .has_native());
+    .has_native_image_protocol());
 }
 
 #[test]
@@ -749,9 +783,9 @@ fn graphics_capabilities_ignore_unknown_fields_and_default_new_fields() {
     assert_eq!(
         decoded,
         GraphicsCapabilities {
-            kitty: true,
-            iterm: false,
-            sixel: false,
+            supports_kitty: true,
+            supports_iterm: false,
+            supports_sixel: false,
         }
     );
 }
@@ -760,13 +794,14 @@ fn graphics_capabilities_ignore_unknown_fields_and_default_new_fields() {
 fn an_overview_missing_a_field_this_version_needs_is_refused() {
     // A tab record without `session_id` fails to decode; no default fills it
     // in.
-    let mut encoded = serde_json::to_value(populated_overview()).expect("overview encodes");
-    encoded["tabs"][0]
+    let mut encoded_json =
+        serde_json::to_value(build_populated_test_session_overview()).expect("overview encodes");
+    encoded_json["tabs"][0]
         .as_object_mut()
         .expect("a tab encodes as an object")
         .remove("session_id");
 
-    let decoded: Result<SessionOverview, _> = serde_json::from_value(encoded);
+    let decoded: Result<SessionOverview, _> = serde_json::from_value(encoded_json);
     let error = decoded.expect_err("a tab without its session is not this version's shape");
     assert_eq!(error.to_string(), "missing field `session_id`");
 }
@@ -775,26 +810,26 @@ fn an_overview_missing_a_field_this_version_needs_is_refused() {
 fn hello_request_round_trips() {
     let request = IpcRequest {
         request_id: 1,
-        kind: IpcRequestKind::Hello {
+        request_kind: IpcRequestKind::Hello {
             min_protocol_version: MIN_PROTOCOL_VERSION,
             max_protocol_version: PROTOCOL_VERSION,
-            token: token(),
-            remote: false,
+            connection_token: build_test_connection_token(),
+            is_remote: false,
         },
     };
 
-    assert_eq!(round_trip(&request), request);
+    assert_eq!(round_trip_wire_message(&request), request);
 }
 
 #[test]
 fn hello_request_encodes_to_the_expected_shape() {
     let request = IpcRequest {
         request_id: 1,
-        kind: IpcRequestKind::Hello {
+        request_kind: IpcRequestKind::Hello {
             min_protocol_version: 1,
             max_protocol_version: 2,
-            token: token(),
-            remote: false,
+            connection_token: build_test_connection_token(),
+            is_remote: false,
         },
     };
 
@@ -818,15 +853,15 @@ fn hello_request_encodes_to_the_expected_shape() {
 fn a_hello_marking_a_remote_caller_round_trips_and_encodes_true() {
     let request = IpcRequest {
         request_id: 1,
-        kind: IpcRequestKind::Hello {
+        request_kind: IpcRequestKind::Hello {
             min_protocol_version: MIN_PROTOCOL_VERSION,
             max_protocol_version: PROTOCOL_VERSION,
-            token: token(),
-            remote: true,
+            connection_token: build_test_connection_token(),
+            is_remote: true,
         },
     };
 
-    assert_eq!(round_trip(&request), request);
+    assert_eq!(round_trip_wire_message(&request), request);
     assert_eq!(
         serde_json::to_value(&request).expect("request encodes")["kind"]["Hello"]["remote"],
         json!(true)
@@ -850,50 +885,56 @@ fn a_hello_whose_token_is_not_a_string_is_refused() {
 fn attach_request_round_trips() {
     let request = IpcRequest {
         request_id: 4,
-        kind: IpcRequestKind::Attach {
-            viewport: Size { cols: 80, rows: 24 },
-            filter: EventFilterSpec::All,
-            resume: None,
+        request_kind: IpcRequestKind::Attach {
+            viewport: Size {
+                column_count: 80,
+                row_count: 24,
+            },
+            event_filter: EventFilterSpec::All,
+            resume_client_id: None,
             resume_token: None,
             pane_area: None,
-            graphics: crate::protocol::GraphicsCapabilities::default(),
+            graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
             cell_size: None,
         },
     };
 
-    assert_eq!(round_trip(&request), request);
+    assert_eq!(round_trip_wire_message(&request), request);
 }
 
 #[test]
 fn attach_and_resize_keep_cell_measurements_and_default_old_wire_frames() {
-    let cell_size =
-        koshi_core::geometry::PixelCellSize::new(10, 20).expect("positive cell dimensions");
+    let cell_size = koshi_core::geometry::PixelCellSize::from_pixel_dimensions(10, 20)
+        .expect("positive cell dimensions");
     let attach = IpcRequest {
         request_id: 4,
-        kind: IpcRequestKind::Attach {
-            viewport: Size { cols: 80, rows: 24 },
-            filter: EventFilterSpec::All,
-            resume: None,
+        request_kind: IpcRequestKind::Attach {
+            viewport: Size {
+                column_count: 80,
+                row_count: 24,
+            },
+            event_filter: EventFilterSpec::All,
+            resume_client_id: None,
             resume_token: None,
             pane_area: None,
-            graphics: crate::protocol::GraphicsCapabilities::default(),
+            graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
             cell_size: Some(cell_size),
         },
     };
     let resize = IpcRequest {
         request_id: 6,
-        kind: IpcRequestKind::Resize {
+        request_kind: IpcRequestKind::Resize {
             viewport: Size {
-                cols: 120,
-                rows: 40,
+                column_count: 120,
+                row_count: 40,
             },
             pane_area: None,
             cell_size: Some(cell_size),
         },
     };
 
-    assert_eq!(round_trip(&attach), attach);
-    assert_eq!(round_trip(&resize), resize);
+    assert_eq!(round_trip_wire_message(&attach), attach);
+    assert_eq!(round_trip_wire_message(&resize), resize);
     assert_eq!(
         serde_json::to_value(&attach).expect("attach encodes")["kind"]["Attach"]["cell_size"],
         json!({ "width": 10, "height": 20 })
@@ -905,13 +946,13 @@ fn attach_and_resize_keep_cell_measurements_and_default_old_wire_frames() {
         .expect("legacy attach decodes"),
         IpcRequest {
             request_id: 4,
-            kind: IpcRequestKind::Attach {
-                viewport: Size { cols: 80, rows: 24 },
-                filter: EventFilterSpec::All,
-                resume: None,
+            request_kind: IpcRequestKind::Attach {
+                viewport: Size { column_count: 80, row_count: 24 },
+                event_filter: EventFilterSpec::All,
+                resume_client_id: None,
                 resume_token: None,
                 pane_area: None,
-                graphics: crate::protocol::GraphicsCapabilities::default(),
+                graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
                 cell_size: None,
             },
         }
@@ -923,10 +964,10 @@ fn attach_and_resize_keep_cell_measurements_and_default_old_wire_frames() {
         .expect("legacy resize decodes"),
         IpcRequest {
             request_id: 6,
-            kind: IpcRequestKind::Resize {
+            request_kind: IpcRequestKind::Resize {
                 viewport: Size {
-                    cols: 120,
-                    rows: 40,
+                    column_count: 120,
+                    row_count: 40,
                 },
                 pane_area: None,
                 cell_size: None,
@@ -939,18 +980,21 @@ fn attach_and_resize_keep_cell_measurements_and_default_old_wire_frames() {
 fn an_attach_request_naming_a_client_to_come_back_as_round_trips() {
     let request = IpcRequest {
         request_id: 4,
-        kind: IpcRequestKind::Attach {
-            viewport: Size { cols: 80, rows: 24 },
-            filter: EventFilterSpec::All,
-            resume: Some(ClientId::from_uuid(fixed_uuid())),
+        request_kind: IpcRequestKind::Attach {
+            viewport: Size {
+                column_count: 80,
+                row_count: 24,
+            },
+            event_filter: EventFilterSpec::All,
+            resume_client_id: Some(ClientId::from_uuid(build_fixed_test_uuid())),
             resume_token: None,
             pane_area: None,
-            graphics: crate::protocol::GraphicsCapabilities::default(),
+            graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
             cell_size: None,
         },
     };
 
-    assert_eq!(round_trip(&request), request);
+    assert_eq!(round_trip_wire_message(&request), request);
 }
 
 #[test]
@@ -966,13 +1010,16 @@ fn an_attach_request_written_without_the_resume_fields_decodes_as_no_claim() {
         decoded,
         IpcRequest {
             request_id: 4,
-            kind: IpcRequestKind::Attach {
-                viewport: Size { cols: 80, rows: 24 },
-                filter: EventFilterSpec::All,
-                resume: None,
+            request_kind: IpcRequestKind::Attach {
+                viewport: Size {
+                    column_count: 80,
+                    row_count: 24
+                },
+                event_filter: EventFilterSpec::All,
+                resume_client_id: None,
                 resume_token: None,
                 pane_area: None,
-                graphics: crate::protocol::GraphicsCapabilities::default(),
+                graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
                 cell_size: None,
             },
         }
@@ -983,13 +1030,16 @@ fn an_attach_request_written_without_the_resume_fields_decodes_as_no_claim() {
 fn an_attach_request_carrying_a_resume_token_keeps_the_secret_whole() {
     let request = IpcRequest {
         request_id: 4,
-        kind: IpcRequestKind::Attach {
-            viewport: Size { cols: 80, rows: 24 },
-            filter: EventFilterSpec::All,
-            resume: Some(ClientId::from_uuid(fixed_uuid())),
-            resume_token: Some(token()),
+        request_kind: IpcRequestKind::Attach {
+            viewport: Size {
+                column_count: 80,
+                row_count: 24,
+            },
+            event_filter: EventFilterSpec::All,
+            resume_client_id: Some(ClientId::from_uuid(build_fixed_test_uuid())),
+            resume_token: Some(build_test_connection_token()),
             pane_area: None,
-            graphics: crate::protocol::GraphicsCapabilities::default(),
+            graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
             cell_size: None,
         },
     };
@@ -997,12 +1047,12 @@ fn an_attach_request_carrying_a_resume_token_keeps_the_secret_whole() {
     let IpcRequestKind::Attach {
         resume_token: Some(carried),
         ..
-    } = round_trip(&request).kind
+    } = round_trip_wire_message(&request).request_kind
     else {
         panic!("an attach carrying a resume token decodes as one");
     };
 
-    assert_eq!(carried.expose(), token().expose());
+    assert_eq!(carried.expose(), build_test_connection_token().expose());
 }
 
 #[test]
@@ -1018,13 +1068,16 @@ fn an_attach_request_written_without_a_resume_token_beside_a_resume_decodes_as_n
         decoded,
         IpcRequest {
             request_id: 4,
-            kind: IpcRequestKind::Attach {
-                viewport: Size { cols: 80, rows: 24 },
-                filter: EventFilterSpec::All,
-                resume: Some(ClientId::from_uuid(fixed_uuid())),
+            request_kind: IpcRequestKind::Attach {
+                viewport: Size {
+                    column_count: 80,
+                    row_count: 24
+                },
+                event_filter: EventFilterSpec::All,
+                resume_client_id: Some(ClientId::from_uuid(build_fixed_test_uuid())),
                 resume_token: None,
                 pane_area: None,
-                graphics: crate::protocol::GraphicsCapabilities::default(),
+                graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
                 cell_size: None,
             },
         }
@@ -1043,16 +1096,16 @@ fn an_attach_request_written_without_a_pane_area_decodes_as_none() {
         decoded,
         IpcRequest {
             request_id: 1,
-            kind: IpcRequestKind::Attach {
+            request_kind: IpcRequestKind::Attach {
                 viewport: Size {
-                    cols: 120,
-                    rows: 40,
+                    column_count: 120,
+                    row_count: 40,
                 },
-                filter: EventFilterSpec::All,
-                resume: None,
+                event_filter: EventFilterSpec::All,
+                resume_client_id: None,
                 resume_token: None,
                 pane_area: None,
-                graphics: crate::protocol::GraphicsCapabilities::default(),
+                graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
                 cell_size: None,
             },
         }
@@ -1089,19 +1142,19 @@ fn an_attach_naming_an_unknown_filter_is_refused() {
 fn an_attach_request_reporting_a_pane_area_round_trips() {
     let reported = IpcRequest {
         request_id: 1,
-        kind: IpcRequestKind::Attach {
+        request_kind: IpcRequestKind::Attach {
             viewport: Size {
-                cols: 120,
-                rows: 40,
+                column_count: 120,
+                row_count: 40,
             },
-            filter: EventFilterSpec::All,
-            resume: None,
+            event_filter: EventFilterSpec::All,
+            resume_client_id: None,
             resume_token: None,
             pane_area: Some(PaneArea::Reported(Size {
-                cols: 100,
-                rows: 30,
+                column_count: 100,
+                row_count: 30,
             })),
-            graphics: crate::protocol::GraphicsCapabilities::default(),
+            graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
             cell_size: None,
         },
     };
@@ -1121,20 +1174,20 @@ fn an_attach_request_reporting_a_pane_area_round_trips() {
             }
         })
     );
-    assert_eq!(round_trip(&reported), reported);
+    assert_eq!(round_trip_wire_message(&reported), reported);
 
     let starving = IpcRequest {
         request_id: 1,
-        kind: IpcRequestKind::Attach {
+        request_kind: IpcRequestKind::Attach {
             viewport: Size {
-                cols: 120,
-                rows: 40,
+                column_count: 120,
+                row_count: 40,
             },
-            filter: EventFilterSpec::All,
-            resume: None,
+            event_filter: EventFilterSpec::All,
+            resume_client_id: None,
             resume_token: None,
             pane_area: Some(PaneArea::Starving),
-            graphics: crate::protocol::GraphicsCapabilities::default(),
+            graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
             cell_size: None,
         },
     };
@@ -1154,17 +1207,17 @@ fn an_attach_request_reporting_a_pane_area_round_trips() {
             }
         })
     );
-    assert_eq!(round_trip(&starving), starving);
+    assert_eq!(round_trip_wire_message(&starving), starving);
 }
 
 #[test]
 fn restart_request_round_trips() {
     let request = IpcRequest {
         request_id: 5,
-        kind: IpcRequestKind::Restart,
+        request_kind: IpcRequestKind::Restart,
     };
 
-    assert_eq!(round_trip(&request), request);
+    assert_eq!(round_trip_wire_message(&request), request);
     assert_eq!(
         serde_json::to_value(&request).expect("request encodes"),
         json!({ "request_id": 5, "kind": "Restart" })
@@ -1175,10 +1228,10 @@ fn restart_request_round_trips() {
 fn restarting_response_round_trips() {
     let response = IpcResponse {
         request_id: Some(5),
-        result: IpcResult::Restarting,
+        answer_result: IpcResult::Restarting,
     };
 
-    assert_eq!(round_trip(&response), response);
+    assert_eq!(round_trip_wire_message(&response), response);
     assert_eq!(
         serde_json::to_value(&response).expect("response encodes"),
         json!({ "request_id": 5, "result": "Restarting" })
@@ -1189,27 +1242,27 @@ fn restarting_response_round_trips() {
 fn attached_response_round_trips() {
     let response = IpcResponse {
         request_id: Some(4),
-        result: IpcResult::Attached {
+        answer_result: IpcResult::Attached {
             client_id: ClientId::new(),
             session_id: SessionId::new(),
-            structure: populated_structure(),
+            session_structure: populated_structure(),
             resume_token: None,
             pane_area: None,
         },
     };
 
-    assert_eq!(round_trip(&response), response);
+    assert_eq!(round_trip_wire_message(&response), response);
 }
 
 #[test]
 fn an_attached_response_carrying_a_resume_token_keeps_the_secret_whole() {
     let response = IpcResponse {
         request_id: Some(4),
-        result: IpcResult::Attached {
-            client_id: ClientId::from_uuid(fixed_uuid()),
-            session_id: SessionId::from_uuid(fixed_uuid()),
-            structure: populated_structure(),
-            resume_token: Some(token()),
+        answer_result: IpcResult::Attached {
+            client_id: ClientId::from_uuid(build_fixed_test_uuid()),
+            session_id: SessionId::from_uuid(build_fixed_test_uuid()),
+            session_structure: populated_structure(),
+            resume_token: Some(build_test_connection_token()),
             pane_area: None,
         },
     };
@@ -1217,12 +1270,12 @@ fn an_attached_response_carrying_a_resume_token_keeps_the_secret_whole() {
     let IpcResult::Attached {
         resume_token: Some(carried),
         ..
-    } = round_trip(&response).result
+    } = round_trip_wire_message(&response).answer_result
     else {
         panic!("an attached answer carrying a resume token decodes as one");
     };
 
-    assert_eq!(carried.expose(), token().expose());
+    assert_eq!(carried.expose(), build_test_connection_token().expose());
 }
 
 #[test]
@@ -1238,12 +1291,12 @@ fn an_attached_response_written_without_the_resume_token_decodes_as_no_token() {
         decoded,
         IpcResponse {
             request_id: Some(4),
-            result: IpcResult::Attached {
-                client_id: ClientId::from_uuid(fixed_uuid()),
-                session_id: SessionId::from_uuid(fixed_uuid()),
-                structure: AttachedSessionStructureSnapshot {
-                    id: SessionId::from_uuid(fixed_uuid()),
-                    name: "quiet-lake".to_string(),
+            answer_result: IpcResult::Attached {
+                client_id: ClientId::from_uuid(build_fixed_test_uuid()),
+                session_id: SessionId::from_uuid(build_fixed_test_uuid()),
+                session_structure: AttachedSessionStructureSnapshot {
+                    session_id: SessionId::from_uuid(build_fixed_test_uuid()),
+                    session_name: "quiet-lake".to_string(),
                     tabs: Vec::new(),
                     panes: Vec::new(),
                 },
@@ -1267,10 +1320,10 @@ fn an_attached_reply_written_without_a_pane_area_decodes_as_none() {
         decoded,
         IpcResponse {
             request_id: Some(4),
-            result: IpcResult::Attached {
-                client_id: ClientId::from_uuid(fixed_uuid()),
-                session_id: SessionId::from_uuid(fixed_uuid()),
-                structure: populated_structure(),
+            answer_result: IpcResult::Attached {
+                client_id: ClientId::from_uuid(build_fixed_test_uuid()),
+                session_id: SessionId::from_uuid(build_fixed_test_uuid()),
+                session_structure: populated_structure(),
                 resume_token: None,
                 pane_area: None,
             },
@@ -1323,13 +1376,16 @@ fn an_attach_naming_where_it_connected_from_carries_none_of_it() {
         with_origin,
         IpcRequest {
             request_id: 4,
-            kind: IpcRequestKind::Attach {
-                viewport: Size { cols: 80, rows: 24 },
-                filter: EventFilterSpec::All,
-                resume: None,
+            request_kind: IpcRequestKind::Attach {
+                viewport: Size {
+                    column_count: 80,
+                    row_count: 24
+                },
+                event_filter: EventFilterSpec::All,
+                resume_client_id: None,
                 resume_token: None,
                 pane_area: None,
-                graphics: crate::protocol::GraphicsCapabilities::default(),
+                graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
                 cell_size: None,
             },
         }
@@ -1351,25 +1407,28 @@ fn an_attach_naming_its_own_authority_carries_none_of_it() {
     )
     .expect("the same attach without the extra field decodes");
 
-    let expected = IpcRequest {
+    let expected_attach_request = IpcRequest {
         request_id: 4,
-        kind: IpcRequestKind::Attach {
-            viewport: Size { cols: 80, rows: 24 },
-            filter: EventFilterSpec::All,
-            resume: None,
+        request_kind: IpcRequestKind::Attach {
+            viewport: Size {
+                column_count: 80,
+                row_count: 24,
+            },
+            event_filter: EventFilterSpec::All,
+            resume_client_id: None,
             resume_token: None,
             pane_area: None,
-            graphics: crate::protocol::GraphicsCapabilities::default(),
+            graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
             cell_size: None,
         },
     };
 
     assert_eq!(
-        with_tier, expected,
+        with_tier, expected_attach_request,
         "the authority field left nothing behind in the decoded request"
     );
     assert_eq!(
-        without_tier, expected,
+        without_tier, expected_attach_request,
         "the two frames decode to the same request"
     );
 }
@@ -1378,43 +1437,46 @@ fn an_attach_naming_its_own_authority_carries_none_of_it() {
 fn key_press_request_round_trips() {
     let request = IpcRequest {
         request_id: 5,
-        kind: IpcRequestKind::KeyPress {
-            chord: KeyChord::new(ModFlags::CTRL, Key::Char('c')),
+        request_kind: IpcRequestKind::KeyPress {
+            chord: KeyChord::from_parts(ModFlags::CTRL, Key::Char('c')),
         },
     };
 
-    assert_eq!(round_trip(&request), request);
+    assert_eq!(round_trip_wire_message(&request), request);
 }
 
 #[test]
 fn resize_request_round_trips() {
     let request = IpcRequest {
         request_id: 6,
-        kind: IpcRequestKind::Resize {
+        request_kind: IpcRequestKind::Resize {
             viewport: Size {
-                cols: 120,
-                rows: 40,
+                column_count: 120,
+                row_count: 40,
             },
             pane_area: None,
             cell_size: None,
         },
     };
 
-    assert_eq!(round_trip(&request), request);
+    assert_eq!(round_trip_wire_message(&request), request);
 }
 
 #[test]
 fn a_resize_request_reporting_a_starving_pane_area_round_trips() {
     let request = IpcRequest {
         request_id: 6,
-        kind: IpcRequestKind::Resize {
-            viewport: Size { cols: 2, rows: 2 },
+        request_kind: IpcRequestKind::Resize {
+            viewport: Size {
+                column_count: 2,
+                row_count: 2,
+            },
             pane_area: Some(PaneArea::Starving),
             cell_size: None,
         },
     };
 
-    assert_eq!(round_trip(&request), request);
+    assert_eq!(round_trip_wire_message(&request), request);
     assert_eq!(
         serde_json::to_value(&request).expect("request encodes"),
         json!({
@@ -1438,10 +1500,10 @@ fn a_resize_request_written_without_a_pane_area_decodes_as_none() {
         decoded,
         IpcRequest {
             request_id: 6,
-            kind: IpcRequestKind::Resize {
+            request_kind: IpcRequestKind::Resize {
                 viewport: Size {
-                    cols: 120,
-                    rows: 40,
+                    column_count: 120,
+                    row_count: 40,
                 },
                 pane_area: None,
                 cell_size: None,
@@ -1453,7 +1515,7 @@ fn a_resize_request_written_without_a_pane_area_decodes_as_none() {
 #[test]
 fn every_mouse_action_round_trips() {
     for action in every_mouse_action() {
-        assert_eq!(round_trip(&action), action);
+        assert_eq!(round_trip_wire_message(&action), action);
     }
 }
 
@@ -1461,28 +1523,28 @@ fn every_mouse_action_round_trips() {
 fn a_mouse_request_keeps_its_round_in_the_order_it_was_sent() {
     // Three actions that differ from one another: a reordered or dropped one
     // changes the decoded round.
-    let pane = PaneId::from_uuid(fixed_uuid());
+    let pane = PaneId::from_uuid(build_fixed_test_uuid());
     let request = IpcRequest {
         request_id: 7,
-        kind: IpcRequestKind::Mouse(vec![
+        request_kind: IpcRequestKind::Mouse(vec![
             WireMouseAction::Scroll {
-                pane,
-                up: true,
-                lines: 3,
+                pane_id: pane,
+                is_scrolling_up: true,
+                scroll_line_count: 3,
             },
             WireMouseAction::Command(Box::new(Command::ToggleLockMode(
                 ToggleLockModeArgs::default(),
             ))),
             WireMouseAction::Resize {
-                pane,
-                side: Direction::Left,
-                step: -1,
-                count: 2,
+                pane_id: pane,
+                border_side: Direction::Left,
+                resize_step: -1,
+                requested_cell_count: 2,
             },
         ]),
     };
 
-    assert_eq!(round_trip(&request), request);
+    assert_eq!(round_trip_wire_message(&request), request);
 }
 
 #[test]
@@ -1505,10 +1567,10 @@ fn a_mouse_action_carrying_an_unknown_field_ignores_it() {
         without_it,
         IpcRequest {
             request_id: 7,
-            kind: IpcRequestKind::Mouse(vec![WireMouseAction::Scroll {
-                pane: PaneId::from_uuid(fixed_uuid()),
-                up: true,
-                lines: 3,
+            request_kind: IpcRequestKind::Mouse(vec![WireMouseAction::Scroll {
+                pane_id: PaneId::from_uuid(build_fixed_test_uuid()),
+                is_scrolling_up: true,
+                scroll_line_count: 3,
             }]),
         }
     );
@@ -1518,27 +1580,27 @@ fn a_mouse_action_carrying_an_unknown_field_ignores_it() {
 fn submit_command_request_round_trips() {
     let request = IpcRequest {
         request_id: 2,
-        kind: IpcRequestKind::SubmitCommand(Box::new(envelope())),
+        request_kind: IpcRequestKind::SubmitCommand(Box::new(build_test_command_envelope())),
     };
 
-    assert_eq!(round_trip(&request), request);
+    assert_eq!(round_trip_wire_message(&request), request);
 }
 
 #[test]
 fn discovery_request_round_trips() {
     let request = IpcRequest {
         request_id: 3,
-        kind: IpcRequestKind::Discovery,
+        request_kind: IpcRequestKind::Discovery,
     };
 
-    assert_eq!(round_trip(&request), request);
+    assert_eq!(round_trip_wire_message(&request), request);
 }
 
 #[test]
 fn discovery_request_encodes_to_the_expected_shape() {
     let request = IpcRequest {
         request_id: 3,
-        kind: IpcRequestKind::Discovery,
+        request_kind: IpcRequestKind::Discovery,
     };
 
     assert_eq!(
@@ -1551,22 +1613,22 @@ fn discovery_request_encodes_to_the_expected_shape() {
 fn paste_request_round_trips_its_text_whole() {
     let request = IpcRequest {
         request_id: 8,
-        kind: IpcRequestKind::Paste {
-            text: "hello\nworld\u{1b}[A\ttab \u{0} 日本語 🐚".to_string(),
+        request_kind: IpcRequestKind::Paste {
+            pasted_text: "hello\nworld\u{1b}[A\ttab \u{0} 日本語 🐚".to_string(),
         },
     };
 
-    assert_eq!(round_trip(&request), request);
+    assert_eq!(round_trip_wire_message(&request), request);
 }
 
 #[test]
 fn recent_events_request_round_trips() {
     let request = IpcRequest {
         request_id: 9,
-        kind: IpcRequestKind::RecentEvents,
+        request_kind: IpcRequestKind::RecentEvents,
     };
 
-    assert_eq!(round_trip(&request), request);
+    assert_eq!(round_trip_wire_message(&request), request);
     assert_eq!(
         serde_json::to_value(&request).expect("request encodes"),
         json!({ "request_id": 9, "kind": "RecentEvents" })
@@ -1577,10 +1639,10 @@ fn recent_events_request_round_trips() {
 fn leaving_request_round_trips() {
     let request = IpcRequest {
         request_id: 10,
-        kind: IpcRequestKind::Leaving,
+        request_kind: IpcRequestKind::Leaving,
     };
 
-    assert_eq!(round_trip(&request), request);
+    assert_eq!(round_trip_wire_message(&request), request);
     assert_eq!(
         serde_json::to_value(&request).expect("request encodes"),
         json!({ "request_id": 10, "kind": "Leaving" })
@@ -1591,13 +1653,13 @@ fn leaving_request_round_trips() {
 fn hello_response_round_trips() {
     let response = IpcResponse {
         request_id: Some(1),
-        result: IpcResult::Hello {
+        answer_result: IpcResult::Hello {
             protocol_version: PROTOCOL_VERSION,
-            version: "0.3.0".to_string(),
+            build_version: "0.3.0".to_string(),
         },
     };
 
-    assert_eq!(round_trip(&response), response);
+    assert_eq!(round_trip_wire_message(&response), response);
 }
 
 #[test]
@@ -1611,9 +1673,9 @@ fn a_hello_response_written_without_the_build_version_decodes_as_empty() {
         decoded,
         IpcResponse {
             request_id: Some(1),
-            result: IpcResult::Hello {
+            answer_result: IpcResult::Hello {
                 protocol_version: 2,
-                version: String::new(),
+                build_version: String::new(),
             },
         }
     );
@@ -1630,9 +1692,9 @@ fn a_hello_answer_carrying_an_unknown_field_ignores_it() {
         decoded,
         IpcResponse {
             request_id: Some(1),
-            result: IpcResult::Hello {
+            answer_result: IpcResult::Hello {
                 protocol_version: 2,
-                version: "0.3.0".to_string(),
+                build_version: "0.3.0".to_string(),
             },
         }
     );
@@ -1642,67 +1704,67 @@ fn a_hello_answer_carrying_an_unknown_field_ignores_it() {
 fn applied_command_result_response_round_trips() {
     let response = IpcResponse {
         request_id: Some(2),
-        result: IpcResult::CommandResult(CommandResult::Ok {
+        answer_result: IpcResult::CommandResult(CommandResult::Ok {
             command_id: CommandId::new(),
             emitted_events: Vec::new(),
         }),
     };
 
-    assert_eq!(round_trip(&response), response);
+    assert_eq!(round_trip_wire_message(&response), response);
 }
 
 #[test]
 fn rejected_command_result_response_round_trips() {
     let response = IpcResponse {
         request_id: Some(2),
-        result: IpcResult::CommandResult(CommandResult::Rejected {
+        answer_result: IpcResult::CommandResult(CommandResult::Rejected {
             command_id: CommandId::new(),
             reason: RejectReason::TargetNotFound,
             help: Some("name a session with --session".to_string()),
         }),
     };
 
-    assert_eq!(round_trip(&response), response);
+    assert_eq!(round_trip_wire_message(&response), response);
 }
 
 #[test]
 fn overview_response_round_trips() {
     let response = IpcResponse {
         request_id: Some(3),
-        result: IpcResult::Overview(overview()),
+        answer_result: IpcResult::Overview(build_empty_session_overview()),
     };
 
-    assert_eq!(round_trip(&response), response);
+    assert_eq!(round_trip_wire_message(&response), response);
 }
 
 #[test]
 fn a_layout_request_naming_one_tab_round_trips() {
     let request = IpcRequest {
         request_id: 4,
-        kind: IpcRequestKind::Layout {
-            tab: Some(TabId::from_uuid(fixed_uuid())),
+        request_kind: IpcRequestKind::Layout {
+            tab_id: Some(TabId::from_uuid(build_fixed_test_uuid())),
         },
     };
 
-    assert_eq!(round_trip(&request), request);
+    assert_eq!(round_trip_wire_message(&request), request);
 }
 
 #[test]
 fn a_layout_request_naming_no_tab_round_trips() {
     let request = IpcRequest {
         request_id: 4,
-        kind: IpcRequestKind::Layout { tab: None },
+        request_kind: IpcRequestKind::Layout { tab_id: None },
     };
 
-    assert_eq!(round_trip(&request), request);
+    assert_eq!(round_trip_wire_message(&request), request);
 }
 
 #[test]
 fn a_layout_request_encodes_to_the_expected_shape() {
     let request = IpcRequest {
         request_id: 4,
-        kind: IpcRequestKind::Layout {
-            tab: Some(TabId::from_uuid(fixed_uuid())),
+        request_kind: IpcRequestKind::Layout {
+            tab_id: Some(TabId::from_uuid(build_fixed_test_uuid())),
         },
     };
 
@@ -1719,7 +1781,7 @@ fn a_layout_request_encodes_to_the_expected_shape() {
 fn a_layout_request_for_every_tab_encodes_a_null_tab() {
     let request = IpcRequest {
         request_id: 4,
-        kind: IpcRequestKind::Layout { tab: None },
+        request_kind: IpcRequestKind::Layout { tab_id: None },
     };
 
     assert_eq!(
@@ -1738,7 +1800,7 @@ fn a_layout_request_carrying_an_unknown_field_ignores_it() {
         decoded,
         IpcRequest {
             request_id: 4,
-            kind: IpcRequestKind::Layout { tab: None },
+            request_kind: IpcRequestKind::Layout { tab_id: None },
         }
     );
 }
@@ -1752,7 +1814,7 @@ fn a_layout_request_written_without_a_tab_decodes_as_every_tab() {
         decoded,
         IpcRequest {
             request_id: 4,
-            kind: IpcRequestKind::Layout { tab: None },
+            request_kind: IpcRequestKind::Layout { tab_id: None },
         }
     );
 }
@@ -1774,40 +1836,40 @@ fn a_request_envelope_carrying_an_unknown_field_is_still_refused() {
 fn layout_response_round_trips() {
     let response = IpcResponse {
         request_id: Some(4),
-        result: IpcResult::Layout(layout()),
+        answer_result: IpcResult::Layout(build_test_session_layout()),
     };
 
-    assert_eq!(round_trip(&response), response);
+    assert_eq!(round_trip_wire_message(&response), response);
 }
 
 #[test]
 fn recent_events_response_round_trips() {
     let response = IpcResponse {
         request_id: Some(9),
-        result: IpcResult::RecentEvents(vec![recent()]),
+        answer_result: IpcResult::RecentEvents(vec![build_test_recent_event()]),
     };
 
-    assert_eq!(round_trip(&response), response);
+    assert_eq!(round_trip_wire_message(&response), response);
 }
 
 #[test]
 fn error_response_round_trips() {
     let response = IpcResponse {
         request_id: Some(1),
-        result: IpcResult::Error(IpcErrorPayload {
+        answer_result: IpcResult::Error(IpcErrorPayload {
             code: IpcErrorCode::UnsupportedVersion,
             message: "this Koshi speaks protocol 1, the caller speaks 2".to_string(),
         }),
     };
 
-    assert_eq!(round_trip(&response), response);
+    assert_eq!(round_trip_wire_message(&response), response);
 }
 
 #[test]
 fn error_response_encodes_its_code_in_snake_case() {
     let response = IpcResponse {
         request_id: Some(4),
-        result: IpcResult::Error(IpcErrorPayload {
+        answer_result: IpcResult::Error(IpcErrorPayload {
             code: IpcErrorCode::HelloRequired,
             message: "open the connection first".to_string(),
         }),
@@ -1828,13 +1890,13 @@ fn error_response_encodes_its_code_in_snake_case() {
 fn a_refusal_naming_the_other_users_setting_round_trips() {
     let response = IpcResponse {
         request_id: Some(7),
-        result: IpcResult::Error(IpcErrorPayload {
+        answer_result: IpcResult::Error(IpcErrorPayload {
             code: IpcErrorCode::OtherUsersOff,
             message: "this Koshi serves only the user who started it".to_string(),
         }),
     };
 
-    assert_eq!(round_trip(&response), response);
+    assert_eq!(round_trip_wire_message(&response), response);
     assert_eq!(
         serde_json::to_value(&response).expect("response encodes"),
         json!({
@@ -1853,12 +1915,12 @@ fn a_refusal_naming_the_other_users_setting_round_trips() {
 /// `IpcErrorCode::Unknown`. The message beside it decodes whole.
 #[test]
 fn a_refusal_code_this_build_cannot_name_reads_as_unknown() {
-    let payload: IpcErrorPayload =
+    let ipc_error_payload: IpcErrorPayload =
         serde_json::from_str(r#"{"code":"rate_limited","message":"too many attach requests"}"#)
-            .expect("payload decodes");
+            .expect("error payload decodes");
 
     assert_eq!(
-        payload,
+        ipc_error_payload,
         IpcErrorPayload {
             code: IpcErrorCode::Unknown,
             message: "too many attach requests".to_string(),
@@ -1868,12 +1930,12 @@ fn a_refusal_code_this_build_cannot_name_reads_as_unknown() {
 
 #[test]
 fn a_refusal_written_without_a_code_reads_as_unknown() {
-    let payload: IpcErrorPayload =
+    let ipc_error_payload: IpcErrorPayload =
         serde_json::from_str(r#"{"message":"too many attach requests"}"#)
             .expect("a refusal without a code decodes");
 
     assert_eq!(
-        payload,
+        ipc_error_payload,
         IpcErrorPayload {
             code: IpcErrorCode::Unknown,
             message: "too many attach requests".to_string(),
@@ -1930,13 +1992,13 @@ fn every_refusal_code_encodes_to_its_own_wire_name() {
 fn a_response_to_unreadable_bytes_names_no_request() {
     let response = IpcResponse {
         request_id: None,
-        result: IpcResult::Error(IpcErrorPayload {
+        answer_result: IpcResult::Error(IpcErrorPayload {
             code: IpcErrorCode::MalformedRequest,
             message: "the request could not be read".to_string(),
         }),
     };
 
-    assert_eq!(round_trip(&response), response);
+    assert_eq!(round_trip_wire_message(&response), response);
     assert_eq!(
         serde_json::to_value(&response).expect("response encodes")["request_id"],
         json!(null)
@@ -1948,12 +2010,15 @@ fn each_request_kind_is_tagged_with_its_own_name() {
     assert_eq!(
         tag_of(
             &serde_json::to_value(IpcRequestKind::Attach {
-                viewport: Size { cols: 80, rows: 24 },
-                filter: EventFilterSpec::All,
-                resume: None,
+                viewport: Size {
+                    column_count: 80,
+                    row_count: 24
+                },
+                event_filter: EventFilterSpec::All,
+                resume_client_id: None,
                 resume_token: None,
                 pane_area: None,
-                graphics: crate::protocol::GraphicsCapabilities::default(),
+                graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
                 cell_size: None,
             })
             .unwrap()
@@ -1961,7 +2026,12 @@ fn each_request_kind_is_tagged_with_its_own_name() {
         "Attach"
     );
     assert_eq!(
-        tag_of(&serde_json::to_value(IpcRequestKind::SubmitCommand(Box::new(envelope()))).unwrap()),
+        tag_of(
+            &serde_json::to_value(IpcRequestKind::SubmitCommand(Box::new(
+                build_test_command_envelope()
+            )))
+            .unwrap()
+        ),
         "SubmitCommand"
     );
     assert_eq!(
@@ -1969,7 +2039,7 @@ fn each_request_kind_is_tagged_with_its_own_name() {
         json!("Discovery")
     );
     assert_eq!(
-        tag_of(&serde_json::to_value(IpcRequestKind::Layout { tab: None }).unwrap()),
+        tag_of(&serde_json::to_value(IpcRequestKind::Layout { tab_id: None }).unwrap()),
         "Layout"
     );
     assert_eq!(
@@ -1988,7 +2058,7 @@ fn each_result_is_tagged_with_its_own_name() {
         tag_of(
             &serde_json::to_value(IpcResult::Hello {
                 protocol_version: PROTOCOL_VERSION,
-                version: "0.3.0".to_string(),
+                build_version: "0.3.0".to_string(),
             })
             .unwrap()
         ),
@@ -1999,7 +2069,7 @@ fn each_result_is_tagged_with_its_own_name() {
             &serde_json::to_value(IpcResult::Attached {
                 client_id: ClientId::new(),
                 session_id: SessionId::new(),
-                structure: populated_structure(),
+                session_structure: populated_structure(),
                 resume_token: None,
                 pane_area: None,
             })
@@ -2018,15 +2088,18 @@ fn each_result_is_tagged_with_its_own_name() {
         "CommandResult"
     );
     assert_eq!(
-        tag_of(&serde_json::to_value(IpcResult::Overview(overview())).unwrap()),
+        tag_of(&serde_json::to_value(IpcResult::Overview(build_empty_session_overview())).unwrap()),
         "Overview"
     );
     assert_eq!(
-        tag_of(&serde_json::to_value(IpcResult::Layout(layout())).unwrap()),
+        tag_of(&serde_json::to_value(IpcResult::Layout(build_test_session_layout())).unwrap()),
         "Layout"
     );
     assert_eq!(
-        tag_of(&serde_json::to_value(IpcResult::RecentEvents(vec![recent()])).unwrap()),
+        tag_of(
+            &serde_json::to_value(IpcResult::RecentEvents(vec![build_test_recent_event()]))
+                .unwrap()
+        ),
         "RecentEvents"
     );
     assert_eq!(
@@ -2047,19 +2120,27 @@ fn each_result_is_tagged_with_its_own_name() {
 
 #[test]
 fn every_request_kind_is_tagged_with_its_name() {
-    for kind in every_request_kind() {
-        let encoded = serde_json::to_value(&kind).expect("request kind encodes");
+    for request_kind in every_request_kind() {
+        let encoded_json = serde_json::to_value(&request_kind).expect("request kind encodes");
 
-        assert_eq!(tag_of(&encoded), kind.name(), "{kind:?}");
+        assert_eq!(
+            tag_of(&encoded_json),
+            request_kind.get_request_kind_name(),
+            "{request_kind:?}"
+        );
     }
 }
 
 #[test]
-fn every_result_is_tagged_with_its_wire_name() {
-    for result in every_result() {
-        let encoded = serde_json::to_value(&result).expect("result encodes");
+fn every_ipc_result_variant_has_its_wire_name() {
+    for ipc_result in list_all_ipc_results() {
+        let encoded_json = serde_json::to_value(&ipc_result).expect("the IPC result encodes");
 
-        assert_eq!(tag_of(&encoded), result.wire_name(), "{result:?}");
+        assert_eq!(
+            tag_of(&encoded_json),
+            ipc_result.wire_name(),
+            "{ipc_result:?}"
+        );
     }
 }
 
@@ -2067,7 +2148,7 @@ fn every_result_is_tagged_with_its_wire_name() {
 fn variants_lists_every_request_kind_in_declaration_order() {
     let names: Vec<&str> = every_request_kind()
         .iter()
-        .map(IpcRequestKind::name)
+        .map(IpcRequestKind::get_request_kind_name)
         .collect();
 
     assert_eq!(names, IpcRequestKind::VARIANTS);
@@ -2075,7 +2156,10 @@ fn variants_lists_every_request_kind_in_declaration_order() {
 
 #[test]
 fn variants_lists_every_result_in_declaration_order() {
-    let names: Vec<&str> = every_result().iter().map(IpcResult::wire_name).collect();
+    let names: Vec<&str> = list_all_ipc_results()
+        .iter()
+        .map(IpcResult::wire_name)
+        .collect();
 
     assert_eq!(names, IpcResult::VARIANTS);
 }
@@ -2090,8 +2174,8 @@ fn a_request_naming_a_kind_this_build_does_not_have_reads_as_unknown() {
         decoded,
         IncomingRequest {
             request_id: 9,
-            kind: MaybeKnown::Unknown {
-                name: "Floating".to_string(),
+            request_kind: MaybeKnown::Unknown {
+                variant_name: "Floating".to_string(),
             },
         }
     );
@@ -2107,7 +2191,7 @@ fn a_request_naming_a_kind_this_build_has_reads_as_known() {
         decoded,
         IncomingRequest {
             request_id: 9,
-            kind: MaybeKnown::Known(IpcRequestKind::Layout { tab: None }),
+            request_kind: MaybeKnown::Known(IpcRequestKind::Layout { tab_id: None }),
         }
     );
 }
@@ -2121,8 +2205,8 @@ fn a_response_naming_a_result_this_build_does_not_have_reads_as_unknown() {
         decoded,
         IncomingResponse {
             request_id: Some(9),
-            result: MaybeKnown::Unknown {
-                name: "Rebooted".to_string(),
+            answer_result: MaybeKnown::Unknown {
+                variant_name: "Rebooted".to_string(),
             },
         }
     );
@@ -2138,7 +2222,7 @@ fn a_response_naming_a_result_this_build_has_reads_as_known() {
         decoded,
         IncomingResponse {
             request_id: Some(9),
-            result: MaybeKnown::Known(IpcResult::Restarting),
+            answer_result: MaybeKnown::Known(IpcResult::Restarting),
         }
     );
 }
@@ -2171,9 +2255,9 @@ fn a_response_envelope_this_build_reads_decodes() {
         decoded,
         IpcResponse {
             request_id: Some(7),
-            result: IpcResult::Hello {
+            answer_result: IpcResult::Hello {
                 protocol_version: 2,
-                version: String::new(),
+                build_version: String::new(),
             },
         }
     );
@@ -2204,11 +2288,11 @@ fn a_hello_carrying_an_unknown_field_ignores_it() {
         decoded,
         IpcRequest {
             request_id: 1,
-            kind: IpcRequestKind::Hello {
+            request_kind: IpcRequestKind::Hello {
                 min_protocol_version: 2,
                 max_protocol_version: 2,
-                token: token(),
-                remote: false,
+                connection_token: build_test_connection_token(),
+                is_remote: false,
             },
         }
     );
@@ -2228,7 +2312,7 @@ fn a_hello_missing_a_version_is_refused() {
     );
 }
 
-/// `IpcRequestKind::hello` fills `min_protocol_version` with
+/// `IpcRequestKind::build_hello_request` fills `min_protocol_version` with
 /// `MIN_PROTOCOL_VERSION` and `max_protocol_version` with `PROTOCOL_VERSION`,
 /// carries the token through, and sets `remote` to `false`.
 #[test]
@@ -2236,9 +2320,9 @@ fn the_hello_this_build_sends_carries_the_range_it_speaks() {
     let IpcRequestKind::Hello {
         min_protocol_version,
         max_protocol_version,
-        token: carried,
-        remote: false,
-    } = IpcRequestKind::hello(token())
+        connection_token: carried,
+        is_remote: false,
+    } = IpcRequestKind::build_hello_request(build_test_connection_token())
     else {
         panic!("the constructor builds a Hello");
     };
@@ -2249,13 +2333,17 @@ fn the_hello_this_build_sends_carries_the_range_it_speaks() {
         min_protocol_version <= max_protocol_version,
         "the lowest version this build speaks is not above its highest"
     );
-    assert_eq!(carried, token(), "the endpoint's token is carried through");
+    assert_eq!(
+        carried,
+        build_test_connection_token(),
+        "the endpoint's token is carried through"
+    );
 }
 
 #[test]
 fn token_encodes_as_a_bare_string() {
     assert_eq!(
-        serde_json::to_value(token()).expect("token encodes"),
+        serde_json::to_value(build_test_connection_token()).expect("token encodes"),
         json!("k7QxSecret")
     );
 }
@@ -2265,28 +2353,31 @@ fn token_decodes_from_a_bare_string() {
     let decoded: ConnectionToken =
         serde_json::from_str(r#""k7QxSecret""#).expect("a bare string decodes as a token");
 
-    assert_eq!(decoded, token());
+    assert_eq!(decoded, build_test_connection_token());
 }
 
 #[test]
 fn token_debug_hides_the_secret() {
-    assert_eq!(format!("{:?}", token()), "ConnectionToken(***)");
+    assert_eq!(
+        format!("{:?}", build_test_connection_token()),
+        "ConnectionToken(***)"
+    );
 }
 
 #[test]
 fn token_display_hides_the_secret() {
-    assert_eq!(token().to_string(), "***");
+    assert_eq!(build_test_connection_token().to_string(), "***");
 }
 
 #[test]
 fn nesting_a_token_in_a_request_keeps_it_out_of_debug_output() {
     let request = IpcRequest {
         request_id: 1,
-        kind: IpcRequestKind::Hello {
+        request_kind: IpcRequestKind::Hello {
             min_protocol_version: 1,
             max_protocol_version: 1,
-            token: token(),
-            remote: false,
+            connection_token: build_test_connection_token(),
+            is_remote: false,
         },
     };
 
@@ -2305,68 +2396,84 @@ fn every_request_kind_names_itself_without_its_payload() {
         IpcRequestKind::Hello {
             min_protocol_version: 1,
             max_protocol_version: 1,
-            token: token(),
-            remote: false,
+            connection_token: build_test_connection_token(),
+            is_remote: false,
         }
-        .name(),
+        .get_request_kind_name(),
         "Hello"
     );
     assert_eq!(
         IpcRequestKind::Attach {
-            viewport: Size { cols: 80, rows: 24 },
-            filter: EventFilterSpec::All,
-            resume: None,
+            viewport: Size {
+                column_count: 80,
+                row_count: 24
+            },
+            event_filter: EventFilterSpec::All,
+            resume_client_id: None,
             resume_token: None,
             pane_area: None,
-            graphics: crate::protocol::GraphicsCapabilities::default(),
+            graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
             cell_size: None,
         }
-        .name(),
+        .get_request_kind_name(),
         "Attach"
     );
     assert_eq!(
         IpcRequestKind::KeyPress {
-            chord: KeyChord::new(ModFlags::CTRL, Key::Char('c')),
+            chord: KeyChord::from_parts(ModFlags::CTRL, Key::Char('c')),
         }
-        .name(),
+        .get_request_kind_name(),
         "KeyPress"
     );
     assert_eq!(
         IpcRequestKind::Resize {
             viewport: Size {
-                cols: 120,
-                rows: 40,
+                column_count: 120,
+                row_count: 40,
             },
             pane_area: None,
             cell_size: None,
         }
-        .name(),
+        .get_request_kind_name(),
         "Resize"
     );
     assert_eq!(
         IpcRequestKind::Paste {
-            text: String::from("hello\nworld"),
+            pasted_text: String::from("hello\nworld"),
         }
-        .name(),
+        .get_request_kind_name(),
         "Paste"
     );
-    assert_eq!(IpcRequestKind::Mouse(every_mouse_action()).name(), "Mouse");
     assert_eq!(
-        IpcRequestKind::SubmitCommand(Box::new(envelope())).name(),
+        IpcRequestKind::Mouse(every_mouse_action()).get_request_kind_name(),
+        "Mouse"
+    );
+    assert_eq!(
+        IpcRequestKind::SubmitCommand(Box::new(build_test_command_envelope()))
+            .get_request_kind_name(),
         "SubmitCommand"
     );
-    assert_eq!(IpcRequestKind::Discovery.name(), "Discovery");
-    assert_eq!(IpcRequestKind::Layout { tab: None }.name(), "Layout");
     assert_eq!(
-        IpcRequestKind::Layout {
-            tab: Some(TabId::from_uuid(fixed_uuid())),
-        }
-        .name(),
+        IpcRequestKind::Discovery.get_request_kind_name(),
+        "Discovery"
+    );
+    assert_eq!(
+        IpcRequestKind::Layout { tab_id: None }.get_request_kind_name(),
         "Layout"
     );
-    assert_eq!(IpcRequestKind::RecentEvents.name(), "RecentEvents");
-    assert_eq!(IpcRequestKind::Restart.name(), "Restart");
-    assert_eq!(IpcRequestKind::Leaving.name(), "Leaving");
+    assert_eq!(
+        IpcRequestKind::Layout {
+            tab_id: Some(TabId::from_uuid(build_fixed_test_uuid())),
+        }
+        .get_request_kind_name(),
+        "Layout"
+    );
+    assert_eq!(
+        IpcRequestKind::RecentEvents.get_request_kind_name(),
+        "RecentEvents"
+    );
+    assert_eq!(IpcRequestKind::Restart.get_request_kind_name(), "Restart");
+    assert_eq!(IpcRequestKind::Leaving.get_request_kind_name(), "Leaving");
 }
 
 /// Serializing a Hello writes the real secret.
@@ -2374,52 +2481,70 @@ fn every_request_kind_names_itself_without_its_payload() {
 fn serializing_a_hello_writes_the_real_secret() {
     let request = IpcRequest {
         request_id: 1,
-        kind: IpcRequestKind::Hello {
+        request_kind: IpcRequestKind::Hello {
             min_protocol_version: 1,
             max_protocol_version: 1,
-            token: token(),
-            remote: false,
+            connection_token: build_test_connection_token(),
+            is_remote: false,
         },
     };
 
-    let encoded = serde_json::to_string(&request).expect("request encodes");
+    let encoded_json = serde_json::to_string(&request).expect("request encodes");
 
-    assert!(encoded.contains("k7QxSecret"), "{encoded}");
+    assert!(encoded_json.contains("k7QxSecret"), "{encoded_json}");
 }
 
 #[test]
 fn tokens_holding_the_same_secret_are_equal() {
-    assert_eq!(ConnectionToken::new("k7QxSecret"), token());
+    assert_eq!(
+        ConnectionToken::from_secret("k7QxSecret"),
+        build_test_connection_token()
+    );
 }
 
 #[test]
 fn tokens_differing_in_one_byte_are_not_equal() {
-    assert_ne!(ConnectionToken::new("k7QxSecreT"), token());
+    assert_ne!(
+        ConnectionToken::from_secret("k7QxSecreT"),
+        build_test_connection_token()
+    );
 }
 
 #[test]
 fn tokens_differing_in_the_first_byte_are_not_equal() {
-    assert_ne!(ConnectionToken::new("K7QxSecret"), token());
+    assert_ne!(
+        ConnectionToken::from_secret("K7QxSecret"),
+        build_test_connection_token()
+    );
 }
 
 #[test]
 fn a_token_that_is_a_prefix_of_another_is_not_equal() {
-    assert_ne!(ConnectionToken::new("k7QxSecre"), token());
+    assert_ne!(
+        ConnectionToken::from_secret("k7QxSecre"),
+        build_test_connection_token()
+    );
 }
 
 #[test]
 fn an_empty_token_is_not_equal_to_a_real_one() {
-    assert_ne!(ConnectionToken::new(""), token());
+    assert_ne!(
+        ConnectionToken::from_secret(""),
+        build_test_connection_token()
+    );
 }
 
 #[test]
 fn two_empty_tokens_are_equal() {
-    assert_eq!(ConnectionToken::new(""), ConnectionToken::new(""));
+    assert_eq!(
+        ConnectionToken::from_secret(""),
+        ConnectionToken::from_secret("")
+    );
 }
 
 #[test]
 fn expose_returns_the_secret_for_writing_it_to_the_endpoint_file() {
-    assert_eq!(token().expose(), "k7QxSecret");
+    assert_eq!(build_test_connection_token().expose(), "k7QxSecret");
 }
 
 #[test]
@@ -2430,7 +2555,7 @@ fn a_generated_token_is_64_lowercase_hex_characters() {
     assert!(
         secret
             .bytes()
-            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')),
         "{secret}"
     );
 }

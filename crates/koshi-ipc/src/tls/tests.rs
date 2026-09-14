@@ -21,58 +21,58 @@ use rustls::{NamedGroup, ServerConfig, ServerConnection};
 use super::*;
 use crate::protocol::ConnectionToken;
 use crate::remote_wire::{
-    open, RemoteClientFrame, RemoteServerFrame, RemoteSessionRow, MIN_REMOTE_PROTOCOL_VERSION,
-    REMOTE_PROTOCOL_VERSION,
+    open_remote_connection, RemoteClientFrame, RemoteServerFrame, RemoteSessionRow,
+    MIN_REMOTE_PROTOCOL_VERSION, REMOTE_PROTOCOL_VERSION,
 };
 use crate::transport::{frame_halves, Deadlined};
 
 /// How long a loopback handshake and the frames after it have to finish. Well
 /// past what a loopback stream needs, so a slow machine does not fail the run.
-const LOOPBACK_WAIT: Duration = Duration::from_secs(10);
+const LOOPBACK_TIMEOUT_DURATION: Duration = Duration::from_secs(10);
 
 /// The timeout the deadline tests give a dial.
-const SHORT_TIMEOUT: Duration = Duration::from_millis(300);
+const SHORT_TIMEOUT_DURATION: Duration = Duration::from_millis(300);
 
 /// How far past its timeout a dial may still return, so a busy machine that
 /// takes a moment to schedule the returning thread does not fail the run. The
 /// bound is what the test proves: the dial returns, rather than waiting on a
 /// server that never answers.
-const SLACK: Duration = Duration::from_secs(3);
+const DEADLINE_SLACK_DURATION: Duration = Duration::from_secs(3);
 
 /// The timeout the opening-exchange tests give a dial: room for a loopback
-/// handshake on a busy machine, and far less than the drip and the pause that
+/// handshake on a busy machine, and far less than the send_test_drip_bytes and the pause that
 /// follow it.
-const OPENING_WINDOW: Duration = Duration::from_secs(1);
+const OPENING_TIMEOUT_DURATION: Duration = Duration::from_secs(1);
 
 /// How long a server waits before the frame it sends after the answer. Past
-/// [`OPENING_WINDOW`], so a read still holding the dial's deadline would fail.
-const PAUSE_AFTER_THE_ANSWER: Duration = Duration::from_millis(1500);
+/// [`OPENING_TIMEOUT_DURATION`], so a read still holding the dial's deadline would fail.
+const PAUSE_AFTER_OPENING_RESPONSE_DURATION: Duration = Duration::from_millis(1500);
 
-/// How long the drip tests leave between the bytes they send.
-const DRIP_GAP: Duration = Duration::from_millis(50);
+/// How long the send_test_drip_bytes tests leave between the bytes they send.
+const DRIP_INTERVAL_DURATION: Duration = Duration::from_millis(50);
 
-/// How many bytes the drip tests send. At one byte every [`DRIP_GAP`] the drip
-/// lasts far longer than [`SHORT_TIMEOUT`] or [`OPENING_WINDOW`] with [`SLACK`]
+/// How many bytes the send_test_drip_bytes tests send. At one byte every [`DRIP_INTERVAL_DURATION`] the send_test_drip_bytes
+/// lasts far longer than [`SHORT_TIMEOUT_DURATION`] or [`OPENING_TIMEOUT_DURATION`] with [`DEADLINE_SLACK_DURATION`]
 /// on top, so a peer that stretched its deadline by dripping would fail these
 /// tests.
-const DRIP_BYTES: usize = 200;
+const DRIP_BYTE_COUNT: usize = 200;
 
-/// The head of a TLS record of `kind`, the version, and a payload of 256
-/// bytes. The drip that follows never reaches that many, so the record is
+/// The header of a TLS record of `tls_record_type`, the version, and a payload of 256
+/// bytes. The drip helper that follows never reaches that many, so the TLS record is
 /// never whole and the reader keeps wanting more.
-fn record_head(kind: u8) -> [u8; 5] {
-    [kind, 0x03, 0x03, 0x01, 0x00]
+fn build_test_tls_record_header(tls_record_type: u8) -> [u8; 5] {
+    [tls_record_type, 0x03, 0x03, 0x01, 0x00]
 }
 
-/// Send `head` and then one byte every [`DRIP_GAP`], stopping early when the
+/// Send `record_header` and then one byte every [`DRIP_INTERVAL_DURATION`], stopping early when the
 /// peer has closed the socket.
-fn drip(sock: &mut TcpStream, head: [u8; 5]) {
-    if sock.write_all(&head).is_err() {
+fn send_test_drip_bytes(socket: &mut TcpStream, record_header: [u8; 5]) {
+    if socket.write_all(&record_header).is_err() {
         return;
     }
-    for _ in 0..DRIP_BYTES {
-        std::thread::sleep(DRIP_GAP);
-        if sock.write_all(&[0]).is_err() {
+    for _ in 0..DRIP_BYTE_COUNT {
+        std::thread::sleep(DRIP_INTERVAL_DURATION);
+        if socket.write_all(&[0]).is_err() {
             return;
         }
     }
@@ -80,16 +80,19 @@ fn drip(sock: &mut TcpStream, head: [u8; 5]) {
 
 /// The name a verifier is handed. Never checked: the fingerprint is what a
 /// server is recognised by.
-fn any_name() -> ServerName<'static> {
+fn build_test_server_name() -> ServerName<'static> {
     ServerName::try_from("127.0.0.1".to_string()).expect("a loopback address is a server name")
 }
 
-/// Ask `verifier` about the certificate `der`.
-fn present(verifier: &PinVerifier, der: &[u8]) -> Result<ServerCertVerified, rustls::Error> {
-    verifier.verify_server_cert(
-        &CertificateDer::from(der.to_vec()),
+/// Ask `pin_verifier` about `certificate_der_bytes`.
+fn verify_test_certificate(
+    pin_verifier: &PinVerifier,
+    certificate_der_bytes: &[u8],
+) -> Result<ServerCertVerified, rustls::Error> {
+    pin_verifier.verify_server_cert(
+        &CertificateDer::from(certificate_der_bytes.to_vec()),
         &[],
-        &any_name(),
+        &build_test_server_name(),
         &[],
         UnixTime::since_unix_epoch(Duration::from_secs(1_700_000_000)),
     )
@@ -98,36 +101,50 @@ fn present(verifier: &PinVerifier, der: &[u8]) -> Result<ServerCertVerified, rus
 #[test]
 fn the_fingerprint_is_the_sha256_as_sixty_four_lowercase_hex_characters() {
     assert_eq!(
-        fingerprint(&[]),
+        compute_certificate_fingerprint(&[]),
         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     );
 }
 
 #[test]
 fn a_first_connection_takes_the_certificate_and_records_its_fingerprint() {
-    let verifier = PinVerifier::new(None);
-    assert_eq!(verifier.seen(), None);
-    present(&verifier, b"a certificate").expect("a first connection takes any certificate");
-    assert_eq!(verifier.seen(), Some(fingerprint(b"a certificate")));
+    let pin_verifier = PinVerifier::from_expected_certificate_fingerprint(None);
+    assert_eq!(pin_verifier.get_presented_certificate_fingerprint(), None);
+    verify_test_certificate(&pin_verifier, b"a certificate")
+        .expect("a first connection takes any certificate");
+    assert_eq!(
+        pin_verifier.get_presented_certificate_fingerprint(),
+        Some(compute_certificate_fingerprint(b"a certificate"))
+    );
 }
 
 #[test]
 fn the_pinned_fingerprint_is_taken_and_every_other_one_is_refused() {
-    let pinned = fingerprint(b"the first certificate");
-    let verifier = PinVerifier::new(Some(&pinned));
-    present(&verifier, b"the first certificate").expect("the pinned certificate is taken");
-    assert_eq!(verifier.seen(), Some(pinned.clone()));
-
-    let verifier = PinVerifier::new(Some(&pinned));
-    let refused = present(&verifier, b"another certificate").expect_err("a changed certificate");
+    let pinned_certificate_fingerprint = compute_certificate_fingerprint(b"the first certificate");
+    let pin_verifier =
+        PinVerifier::from_expected_certificate_fingerprint(Some(&pinned_certificate_fingerprint));
+    verify_test_certificate(&pin_verifier, b"the first certificate")
+        .expect("the pinned certificate is taken");
     assert_eq!(
-        refused,
+        pin_verifier.get_presented_certificate_fingerprint(),
+        Some(pinned_certificate_fingerprint.clone())
+    );
+
+    let pin_verifier =
+        PinVerifier::from_expected_certificate_fingerprint(Some(&pinned_certificate_fingerprint));
+    let verification_error = verify_test_certificate(&pin_verifier, b"another certificate")
+        .expect_err("a changed certificate");
+    assert_eq!(
+        verification_error,
         rustls::Error::General(format!(
-            "the pinned certificate is {pinned}, the server presented {}",
-            fingerprint(b"another certificate")
+            "the pinned certificate is {pinned_certificate_fingerprint}, the server presented {}",
+            compute_certificate_fingerprint(b"another certificate")
         ))
     );
-    assert_eq!(verifier.seen(), Some(fingerprint(b"another certificate")));
+    assert_eq!(
+        pin_verifier.get_presented_certificate_fingerprint(),
+        Some(compute_certificate_fingerprint(b"another certificate"))
+    );
 }
 
 #[test]
@@ -135,21 +152,25 @@ fn a_port_nothing_listens_on_refuses_the_dial_and_names_the_way_to_open_it() {
     // The operating system picks a free port. The listener goes before the
     // dial, and nothing holds that port when the connection arrives.
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-    let address = listener.local_addr().expect("read the bound address");
+    let server_address = listener.local_addr().expect("read the bound address");
     drop(listener);
 
-    let failure = dial(&address.to_string(), None, LOOPBACK_WAIT)
-        .expect_err("a port nothing listens on refuses the connection");
+    let ipc_error =
+        connect_tls_stream(&server_address.to_string(), None, LOOPBACK_TIMEOUT_DURATION)
+            .expect_err("a port nothing listens on refuses the connection");
 
-    let printed = failure.to_string();
-    let IpcError::ConnectRefused { address: named } = failure else {
+    let rendered_error = ipc_error.to_string();
+    let IpcError::ConnectRefused {
+        server_address: named_server_address,
+    } = ipc_error
+    else {
         panic!("a refused connection is its own failure, not a transport failure");
     };
-    assert_eq!(named, address.to_string());
+    assert_eq!(named_server_address, server_address.to_string());
     assert_eq!(
-        printed,
+        rendered_error,
         format!(
-            "{address} refused the connection: nothing is listening on that port. \
+            "{server_address} refused the connection: nothing is listening on that port. \
              if remote access is not enabled on that machine, run `koshi share grant` \
              there and answer yes to the offer to open the port"
         )
@@ -160,18 +181,21 @@ fn a_port_nothing_listens_on_refuses_the_dial_and_names_the_way_to_open_it() {
 fn a_dial_with_no_time_left_times_out_before_it_connects() {
     // A zero timeout leaves no time after the name lookup. The dial ends
     // before it opens a socket, and no bytes reach the address.
-    let address = "127.0.0.1:1";
+    let server_address = "127.0.0.1:1";
 
-    let failure =
-        dial(address, None, Duration::ZERO).expect_err("a dial with no time left never connects");
+    let ipc_error = connect_tls_stream(server_address, None, Duration::ZERO)
+        .expect_err("a dial with no time left never connects");
 
-    let printed = failure.to_string();
-    let IpcError::ConnectTimedOut { address: named } = failure else {
+    let rendered_error = ipc_error.to_string();
+    let IpcError::ConnectTimedOut {
+        server_address: named_server_address,
+    } = ipc_error
+    else {
         panic!("a connect with no time left is a timeout, not a transport failure");
     };
-    assert_eq!(named, address);
+    assert_eq!(named_server_address, server_address);
     assert_eq!(
-        printed,
+        rendered_error,
         "connecting to 127.0.0.1:1 timed out: nothing answered. check that the machine is up, \
          the address and port are right, and the network path allows it"
     );
@@ -181,8 +205,8 @@ fn a_dial_with_no_time_left_times_out_before_it_connects() {
 fn a_failed_handshake_names_the_address_and_the_reason() {
     assert_eq!(
         IpcError::TlsHandshakeFailed {
-            address: "laptop.local:7654".to_string(),
-            detail: "the TLS handshake did not finish in time".to_string(),
+            server_address: "laptop.local:7654".to_string(),
+            error_detail: "the TLS handshake did not finish in time".to_string(),
         }
         .to_string(),
         "the TLS handshake with laptop.local:7654 failed: \
@@ -195,120 +219,138 @@ fn a_server_that_answers_nothing_ends_the_dial_at_the_deadline() {
     // Bound and never accepted: the operating system's backlog completes the
     // TCP connection, so the dial reaches the handshake and waits there.
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-    let address = listener.local_addr().expect("read the bound address");
+    let server_address = listener.local_addr().expect("read the bound address");
 
-    let started = Instant::now();
-    let failure = dial(&address.to_string(), None, SHORT_TIMEOUT)
+    let handshake_started_at = Instant::now();
+    let ipc_error = connect_tls_stream(&server_address.to_string(), None, SHORT_TIMEOUT_DURATION)
         .expect_err("a server that sends nothing never finishes the handshake");
-    let waited = started.elapsed();
+    let handshake_elapsed_duration = handshake_started_at.elapsed();
 
     let IpcError::TlsHandshakeFailed {
-        address: named,
-        detail,
-    } = failure
+        server_address: named_server_address,
+        error_detail,
+    } = ipc_error
     else {
         panic!("a handshake that ran out of time is a handshake failure");
     };
-    assert_eq!(named, address.to_string());
-    assert_eq!(detail, "the TLS handshake did not finish in time");
+    assert_eq!(named_server_address, server_address.to_string());
+    assert_eq!(error_detail, "the TLS handshake did not finish in time");
     assert!(
-        waited < SHORT_TIMEOUT + SLACK,
-        "the dial returned {waited:?} after it started, inside its {SHORT_TIMEOUT:?} timeout"
+        handshake_elapsed_duration < SHORT_TIMEOUT_DURATION + DEADLINE_SLACK_DURATION,
+        "the dial returned {handshake_elapsed_duration:?} after it started, inside its {SHORT_TIMEOUT_DURATION:?} timeout"
     );
 }
 
 #[test]
 fn a_server_that_sends_one_byte_at_a_time_ends_the_dial_at_the_deadline() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-    let address = listener.local_addr().expect("read the bound address");
+    let server_address = listener.local_addr().expect("read the bound address");
 
-    let server = std::thread::spawn(move || {
-        let Ok((mut sock, _)) = listener.accept() else {
+    let server_thread = std::thread::spawn(move || {
+        let Ok((mut socket, _)) = listener.accept() else {
             return;
         };
-        drip(&mut sock, record_head(0x16));
+        send_test_drip_bytes(&mut socket, build_test_tls_record_header(0x16));
     });
 
-    let started = Instant::now();
-    let failure = dial(&address.to_string(), None, SHORT_TIMEOUT)
+    let handshake_started_at = Instant::now();
+    let ipc_error = connect_tls_stream(&server_address.to_string(), None, SHORT_TIMEOUT_DURATION)
         .expect_err("a server that drips its bytes never finishes the handshake");
-    let waited = started.elapsed();
+    let handshake_elapsed_duration = handshake_started_at.elapsed();
 
     let IpcError::TlsHandshakeFailed {
-        address: named,
-        detail,
-    } = failure
+        server_address: named_server_address,
+        error_detail,
+    } = ipc_error
     else {
         panic!("a handshake that ran out of time is a handshake failure");
     };
-    assert_eq!(named, address.to_string());
-    assert_eq!(detail, "the TLS handshake did not finish in time");
+    assert_eq!(named_server_address, server_address.to_string());
+    assert_eq!(error_detail, "the TLS handshake did not finish in time");
     assert!(
-        waited < SHORT_TIMEOUT + SLACK,
-        "the dial returned {waited:?} after it started, inside its {SHORT_TIMEOUT:?} timeout, \
-         though the server kept it fed with a byte every {DRIP_GAP:?}"
+        handshake_elapsed_duration < SHORT_TIMEOUT_DURATION + DEADLINE_SLACK_DURATION,
+        "the dial returned {handshake_elapsed_duration:?} after it started, inside its {SHORT_TIMEOUT_DURATION:?} timeout, \
+         though the server kept it fed with a byte every {DRIP_INTERVAL_DURATION:?}"
     );
-    let _ = server.join();
+    let _ = server_thread.join();
 }
 
 /// A fresh self-signed certificate and a server configuration serving it with
-/// `provider`.
-fn server_with(provider: Arc<CryptoProvider>) -> (ServerConfig, Vec<u8>) {
-    let made = rcgen::generate_simple_self_signed(vec!["koshi".to_string()])
+/// `crypto_provider`.
+fn build_server_config_with_provider(
+    crypto_provider: Arc<CryptoProvider>,
+) -> (ServerConfig, Vec<u8>) {
+    let generated_certificate = rcgen::generate_simple_self_signed(vec!["koshi".to_string()])
         .expect("generate a self-signed certificate");
-    let cert_der = made.cert.der().to_vec();
-    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(made.signing_key.serialize_der()));
-    let config = ServerConfig::builder_with_provider(provider)
+    let certificate_der_bytes = generated_certificate.cert.der().to_vec();
+    let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+        generated_certificate.signing_key.serialize_der(),
+    ));
+    let server_config = ServerConfig::builder_with_provider(crypto_provider)
         .with_safe_default_protocol_versions()
         .expect("aws-lc-rs supports every default protocol version")
         .with_no_client_auth()
-        .with_single_cert(vec![CertificateDer::from(cert_der.clone())], key)
+        .with_single_cert(
+            vec![CertificateDer::from(certificate_der_bytes.clone())],
+            private_key,
+        )
         .expect("a certificate and its key make a server configuration");
-    (config, cert_der)
+    (server_config, certificate_der_bytes)
 }
 
 /// A fresh self-signed certificate and the TLS configuration serving it, the
 /// way this machine's own certificate is served.
-fn fresh_server() -> (ServerConfig, Vec<u8>) {
-    server_with(crypto_provider())
+fn build_fresh_server_config() -> (ServerConfig, Vec<u8>) {
+    build_server_config_with_provider(build_crypto_provider())
 }
 
 /// A fresh self-signed certificate and a server configuration whose key
 /// exchange list holds `X25519` alone.
-fn classical_only_server() -> (ServerConfig, Vec<u8>) {
-    let mut provider = rustls::crypto::aws_lc_rs::default_provider();
-    provider.kx_groups = vec![rustls::crypto::aws_lc_rs::kx_group::X25519];
-    server_with(Arc::new(provider))
+fn build_classical_only_server_config() -> (ServerConfig, Vec<u8>) {
+    let mut crypto_provider = rustls::crypto::aws_lc_rs::default_provider();
+    crypto_provider.kx_groups = vec![rustls::crypto::aws_lc_rs::kx_group::X25519];
+    build_server_config_with_provider(Arc::new(crypto_provider))
 }
 
 /// The one session a loopback server reports.
-fn one_row() -> RemoteSessionRow {
+fn build_remote_session_row() -> RemoteSessionRow {
     RemoteSessionRow {
-        id: SessionId::new(),
-        name: "quiet-lake".to_string(),
+        session_id: SessionId::new(),
+        session_name: "quiet-lake".to_string(),
     }
 }
 
-/// Serve `config` on a loopback port, dial it, and report the key exchange
+/// Serve `server_config` on a loopback port, dial it, and report the key exchange
 /// group the handshake settled on together with the fingerprint the client
 /// was shown.
-fn negotiated_key_exchange(config: ServerConfig) -> (Option<NamedGroup>, String) {
+fn negotiate_key_exchange_group(server_config: ServerConfig) -> (Option<NamedGroup>, String) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-    let address = listener.local_addr().expect("read the bound address");
+    let server_address = listener.local_addr().expect("read the bound address");
 
-    let server = std::thread::spawn(move || {
-        let (mut sock, _) = listener.accept().expect("accept the client");
-        let conn = ServerConnection::new(Arc::new(config)).expect("a server connection");
-        let mut conn = rustls::Connection::Server(conn);
-        handshake(&mut conn, &mut sock, Instant::now() + LOOPBACK_WAIT)
-            .expect("the loopback handshake finishes");
-        conn.negotiated_key_exchange_group().map(|kx| kx.name())
+    let server_thread = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("accept the client");
+        let server_connection =
+            ServerConnection::new(Arc::new(server_config)).expect("a server connection");
+        let mut tls_connection = rustls::Connection::Server(server_connection);
+        run_tls_handshake(
+            &mut tls_connection,
+            &mut socket,
+            Instant::now() + LOOPBACK_TIMEOUT_DURATION,
+        )
+        .expect("the loopback handshake finishes");
+        tls_connection
+            .negotiated_key_exchange_group()
+            .map(|key_exchange_group| key_exchange_group.name())
     });
 
-    let (_reader, _writer, presented) =
-        dial(&address.to_string(), None, LOOPBACK_WAIT).expect("the dial opens");
-    let negotiated = server.join().expect("the server thread finishes");
-    (negotiated, presented)
+    let (_reader, _writer, presented_certificate_fingerprint) =
+        connect_tls_stream(&server_address.to_string(), None, LOOPBACK_TIMEOUT_DURATION)
+            .expect("the dial opens");
+    let negotiated_key_exchange_group = server_thread.join().expect("the server thread finishes");
+    (
+        negotiated_key_exchange_group,
+        presented_certificate_fingerprint,
+    )
 }
 
 /// Two koshi peers settle on `X25519MLKEM768`: the X25519 elliptic curve
@@ -316,280 +358,347 @@ fn negotiated_key_exchange(config: ServerConfig) -> (Option<NamedGroup>, String)
 /// koshi offers that group ahead of every classical one.
 #[test]
 fn a_loopback_handshake_settles_on_the_hybrid_post_quantum_key_exchange() {
-    let (config, cert_der) = fresh_server();
+    let (server_config, certificate_der_bytes) = build_fresh_server_config();
 
-    let (negotiated, presented) = negotiated_key_exchange(config);
+    let (negotiated_key_exchange_group, presented_certificate_fingerprint) =
+        negotiate_key_exchange_group(server_config);
 
-    assert_eq!(negotiated, Some(NamedGroup::X25519MLKEM768));
-    assert_eq!(presented, fingerprint(&cert_der));
+    assert_eq!(
+        negotiated_key_exchange_group,
+        Some(NamedGroup::X25519MLKEM768)
+    );
+    assert_eq!(
+        presented_certificate_fingerprint,
+        compute_certificate_fingerprint(&certificate_der_bytes)
+    );
 }
 
 /// A server whose key exchange list holds `X25519` alone accepts the dial,
 /// and the handshake settles on `X25519` rather than failing.
 #[test]
 fn a_server_that_offers_only_classical_key_exchange_still_accepts_a_dial() {
-    let (config, cert_der) = classical_only_server();
+    let (server_config, certificate_der_bytes) = build_classical_only_server_config();
 
-    let (negotiated, presented) = negotiated_key_exchange(config);
+    let (negotiated_key_exchange_group, presented_certificate_fingerprint) =
+        negotiate_key_exchange_group(server_config);
 
-    assert_eq!(negotiated, Some(NamedGroup::X25519));
-    assert_eq!(presented, fingerprint(&cert_der));
+    assert_eq!(negotiated_key_exchange_group, Some(NamedGroup::X25519));
+    assert_eq!(
+        presented_certificate_fingerprint,
+        compute_certificate_fingerprint(&certificate_der_bytes)
+    );
 }
 
 #[test]
 fn frames_cross_a_loopback_stream_both_ways_and_the_client_pins_what_it_was_shown() {
-    let (config, cert_der) = fresh_server();
+    let (server_config, certificate_der_bytes) = build_fresh_server_config();
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-    let address = listener.local_addr().expect("read the bound address");
-    let row = one_row();
-    let served = row.clone();
+    let server_address = listener.local_addr().expect("read the bound address");
+    let session_row = build_remote_session_row();
+    let served_session_row = session_row.clone();
 
-    let server = std::thread::spawn(move || {
-        let (mut sock, _) = listener.accept().expect("accept the client");
-        let conn = ServerConnection::new(Arc::new(config)).expect("a server connection");
-        let mut conn = rustls::Connection::Server(conn);
-        handshake(&mut conn, &mut sock, Instant::now() + LOOPBACK_WAIT)
-            .expect("the loopback handshake finishes");
-        let (reader, writer) = split_tls(conn, sock).expect("split the loopback stream");
-        let (mut incoming, mut outgoing) = frame_halves(Box::new(reader), Box::new(writer));
+    let server_thread = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("accept the client");
+        let server_connection =
+            ServerConnection::new(Arc::new(server_config)).expect("a server connection");
+        let mut tls_connection = rustls::Connection::Server(server_connection);
+        run_tls_handshake(
+            &mut tls_connection,
+            &mut socket,
+            Instant::now() + LOOPBACK_TIMEOUT_DURATION,
+        )
+        .expect("the loopback handshake finishes");
+        let (reader, writer) =
+            split_tls_stream(tls_connection, socket).expect("split the loopback stream");
+        let (mut frame_reader, mut frame_writer) = frame_halves(Box::new(reader), Box::new(writer));
 
-        let opened: RemoteClientFrame = incoming.recv().expect("the client's opening frame");
-        outgoing
+        let opening_frame: RemoteClientFrame =
+            frame_reader.recv().expect("the client's opening frame");
+        frame_writer
             .send(&RemoteServerFrame::Welcome {
-                remote_version: REMOTE_PROTOCOL_VERSION,
+                remote_protocol_version: REMOTE_PROTOCOL_VERSION,
             })
             .expect("answer the opening frame");
-        let asked: RemoteClientFrame = incoming.recv().expect("the client's next frame");
-        outgoing
-            .send(&RemoteServerFrame::Sessions { rows: vec![served] })
+        let requested_frame: RemoteClientFrame =
+            frame_reader.recv().expect("the client's next frame");
+        frame_writer
+            .send(&RemoteServerFrame::Sessions {
+                session_rows: vec![served_session_row],
+            })
             .expect("answer the list");
-        (opened, asked)
+        (opening_frame, requested_frame)
     });
 
-    let (reader, writer, presented) =
-        dial(&address.to_string(), None, LOOPBACK_WAIT).expect("the dial opens");
-    assert_eq!(presented, fingerprint(&cert_der));
-    let (mut incoming, mut outgoing) = frame_halves(Box::new(reader), Box::new(writer));
+    let (reader, writer, presented_certificate_fingerprint) =
+        connect_tls_stream(&server_address.to_string(), None, LOOPBACK_TIMEOUT_DURATION)
+            .expect("the dial opens");
+    assert_eq!(
+        presented_certificate_fingerprint,
+        compute_certificate_fingerprint(&certificate_der_bytes)
+    );
+    let (mut frame_reader, mut frame_writer) = frame_halves(Box::new(reader), Box::new(writer));
 
-    let hello = RemoteClientFrame::Hello {
+    let hello_frame = RemoteClientFrame::Hello {
         min_remote_version: MIN_REMOTE_PROTOCOL_VERSION,
         max_remote_version: REMOTE_PROTOCOL_VERSION,
         min_protocol_version: 1,
         max_protocol_version: 1,
-        token: ConnectionToken::new("the secret the operator handed out"),
+        connection_token: ConnectionToken::from_secret("the secret the operator handed out"),
     };
-    outgoing.send(&hello).expect("send the opening frame");
+    frame_writer
+        .send(&hello_frame)
+        .expect("send the opening frame");
     assert_eq!(
-        incoming
+        frame_reader
             .recv::<RemoteServerFrame>()
             .expect("read the answer"),
         RemoteServerFrame::Welcome {
-            remote_version: REMOTE_PROTOCOL_VERSION
+            remote_protocol_version: REMOTE_PROTOCOL_VERSION
         }
     );
-    outgoing
+    frame_writer
         .send(&RemoteClientFrame::List)
         .expect("ask for the sessions");
     assert_eq!(
-        incoming
+        frame_reader
             .recv::<RemoteServerFrame>()
             .expect("read the sessions"),
-        RemoteServerFrame::Sessions { rows: vec![row] }
+        RemoteServerFrame::Sessions {
+            session_rows: vec![session_row],
+        }
     );
 
-    let (opened, asked) = server.join().expect("the server thread finished");
-    assert_eq!(opened, hello);
-    assert_eq!(asked, RemoteClientFrame::List);
+    let (opening_frame, requested_frame) =
+        server_thread.join().expect("the server thread finished");
+    assert_eq!(opening_frame, hello_frame);
+    assert_eq!(requested_frame, RemoteClientFrame::List);
 }
 
 #[test]
 fn a_peer_that_drips_after_the_handshake_ends_a_read_at_the_readers_deadline() {
-    let (config, _) = fresh_server();
+    let (server_config, _) = build_fresh_server_config();
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-    let address = listener.local_addr().expect("read the bound address");
+    let server_address = listener.local_addr().expect("read the bound address");
 
-    let server = std::thread::spawn(move || {
-        let Ok((mut sock, _)) = listener.accept() else {
+    let server_thread = std::thread::spawn(move || {
+        let Ok((mut socket, _)) = listener.accept() else {
             return;
         };
-        let Ok(conn) = ServerConnection::new(Arc::new(config)) else {
+        let Ok(server_connection) = ServerConnection::new(Arc::new(server_config)) else {
             return;
         };
-        let mut conn = rustls::Connection::Server(conn);
-        if handshake(&mut conn, &mut sock, Instant::now() + LOOPBACK_WAIT).is_err() {
+        let mut tls_connection = rustls::Connection::Server(server_connection);
+        if run_tls_handshake(
+            &mut tls_connection,
+            &mut socket,
+            Instant::now() + LOOPBACK_TIMEOUT_DURATION,
+        )
+        .is_err()
+        {
             return;
         }
-        drip(&mut sock, record_head(0x17));
+        send_test_drip_bytes(&mut socket, build_test_tls_record_header(0x17));
     });
 
-    let (mut reader, writer, _presented) =
-        dial(&address.to_string(), None, LOOPBACK_WAIT).expect("the dial opens");
-    reader.set_deadline(Some(Instant::now() + SHORT_TIMEOUT));
+    let (mut reader, writer, _presented_certificate_fingerprint) =
+        connect_tls_stream(&server_address.to_string(), None, LOOPBACK_TIMEOUT_DURATION)
+            .expect("the dial opens");
+    reader.set_deadline(Some(Instant::now() + SHORT_TIMEOUT_DURATION));
 
-    let started = Instant::now();
-    let mut length = [0u8; 4];
-    let failure = reader
-        .read_exact(&mut length)
-        .expect_err("a drip never fills a frame");
-    let waited = started.elapsed();
+    let read_started_at = Instant::now();
+    let mut frame_length_bytes = [0u8; 4];
+    let read_error = reader
+        .read_exact(&mut frame_length_bytes)
+        .expect_err("a send_test_drip_bytes never fills a frame");
+    let read_elapsed_duration = read_started_at.elapsed();
 
     assert!(
-        waited_out(&failure),
-        "the read ended on the deadline, not on the bytes: {failure:?}"
+        is_io_timeout(&read_error),
+        "the read ended on the deadline, not on the bytes: {read_error:?}"
     );
     assert!(
-        waited < SHORT_TIMEOUT + SLACK,
-        "the read returned {waited:?} after it started, inside its {SHORT_TIMEOUT:?} deadline, \
-         though the peer kept it fed with a byte every {DRIP_GAP:?}"
+        read_elapsed_duration < SHORT_TIMEOUT_DURATION + DEADLINE_SLACK_DURATION,
+        "the read returned {read_elapsed_duration:?} after it started, inside its {SHORT_TIMEOUT_DURATION:?} deadline, \
+         though the peer kept it fed with a byte every {DRIP_INTERVAL_DURATION:?}"
     );
-    // Both halves hold the socket, so both go before the drip sees it close.
+    // Both halves hold the socket, so both go before the send_test_drip_bytes sees it close.
     drop(reader);
     drop(writer);
-    let _ = server.join();
+    let _ = server_thread.join();
 }
 
 #[test]
 fn a_second_connection_presenting_another_certificate_is_refused_by_the_pinned_fingerprint() {
-    let (config, cert_der) = fresh_server();
+    let (server_config, certificate_der_bytes) = build_fresh_server_config();
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-    let address = listener.local_addr().expect("read the bound address");
+    let server_address = listener.local_addr().expect("read the bound address");
 
-    let server = std::thread::spawn(move || {
-        let Ok((mut sock, _)) = listener.accept() else {
+    let server_thread = std::thread::spawn(move || {
+        let Ok((mut socket, _)) = listener.accept() else {
             return;
         };
-        let Ok(conn) = ServerConnection::new(Arc::new(config)) else {
+        let Ok(server_connection) = ServerConnection::new(Arc::new(server_config)) else {
             return;
         };
-        let mut conn = rustls::Connection::Server(conn);
-        let _ = handshake(&mut conn, &mut sock, Instant::now() + LOOPBACK_WAIT);
+        let mut tls_connection = rustls::Connection::Server(server_connection);
+        let _ = run_tls_handshake(
+            &mut tls_connection,
+            &mut socket,
+            Instant::now() + LOOPBACK_TIMEOUT_DURATION,
+        );
     });
 
     // The fingerprint of a certificate this server does not hold.
-    let pinned = fingerprint(b"a certificate from another machine");
-    let failure = dial(&address.to_string(), Some(&pinned), LOOPBACK_WAIT)
-        .expect_err("a changed certificate is refused");
+    let pinned_certificate_fingerprint =
+        compute_certificate_fingerprint(b"a certificate from another machine");
+    let ipc_error = connect_tls_stream(
+        &server_address.to_string(),
+        Some(&pinned_certificate_fingerprint),
+        LOOPBACK_TIMEOUT_DURATION,
+    )
+    .expect_err("a changed certificate is refused");
 
     let IpcError::CertificateChanged {
-        address: named,
-        pinned: was,
-        presented,
-    } = failure
+        server_address: named_server_address,
+        pinned_certificate,
+        presented_certificate,
+    } = ipc_error
     else {
         panic!("a changed certificate is its own refusal, not a transport failure");
     };
-    assert_eq!(named, address.to_string());
-    assert_eq!(was, pinned);
-    assert_eq!(presented, fingerprint(&cert_der));
-    let _ = server.join();
+    assert_eq!(named_server_address, server_address.to_string());
+    assert_eq!(pinned_certificate, pinned_certificate_fingerprint);
+    assert_eq!(
+        presented_certificate,
+        compute_certificate_fingerprint(&certificate_der_bytes)
+    );
+    let _ = server_thread.join();
 }
 
 /// The opening frame a dialling client sends.
-fn an_opening_frame() -> RemoteClientFrame {
+fn build_opening_frame() -> RemoteClientFrame {
     RemoteClientFrame::Hello {
         min_remote_version: MIN_REMOTE_PROTOCOL_VERSION,
         max_remote_version: REMOTE_PROTOCOL_VERSION,
         min_protocol_version: 1,
         max_protocol_version: 1,
-        token: ConnectionToken::new("the secret the operator handed out"),
+        connection_token: ConnectionToken::from_secret("the secret the operator handed out"),
     }
 }
 
 #[test]
 fn a_server_that_drips_its_answer_ends_the_opening_exchange_at_the_deadline() {
-    let (config, _) = fresh_server();
+    let (server_config, _) = build_fresh_server_config();
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-    let address = listener.local_addr().expect("read the bound address");
+    let server_address = listener.local_addr().expect("read the bound address");
 
-    let server = std::thread::spawn(move || {
-        let Ok((mut sock, _)) = listener.accept() else {
+    let server_thread = std::thread::spawn(move || {
+        let Ok((mut socket, _)) = listener.accept() else {
             return;
         };
-        let Ok(conn) = ServerConnection::new(Arc::new(config)) else {
+        let Ok(server_connection) = ServerConnection::new(Arc::new(server_config)) else {
             return;
         };
-        let mut conn = rustls::Connection::Server(conn);
-        if handshake(&mut conn, &mut sock, Instant::now() + LOOPBACK_WAIT).is_err() {
+        let mut tls_connection = rustls::Connection::Server(server_connection);
+        if run_tls_handshake(
+            &mut tls_connection,
+            &mut socket,
+            Instant::now() + LOOPBACK_TIMEOUT_DURATION,
+        )
+        .is_err()
+        {
             return;
         }
         // The Hello is never read, and the answer never arrives whole.
-        drip(&mut sock, record_head(0x17));
+        send_test_drip_bytes(&mut socket, build_test_tls_record_header(0x17));
     });
 
-    let started = Instant::now();
-    let failure = open(
-        &address.to_string(),
+    let exchange_started_at = Instant::now();
+    let ipc_error = open_remote_connection(
+        &server_address.to_string(),
         None,
-        &an_opening_frame(),
-        OPENING_WINDOW,
+        &build_opening_frame(),
+        OPENING_TIMEOUT_DURATION,
         None,
     )
-    .expect_err("a drip never fills the answer");
-    let waited = started.elapsed();
+    .expect_err("a send_test_drip_bytes never fills the answer");
+    let exchange_elapsed_duration = exchange_started_at.elapsed();
 
-    let IpcError::Transport { detail } = failure else {
+    let IpcError::Transport { error_detail } = ipc_error else {
         panic!("an exchange that ran out of time is a transport failure");
     };
     assert!(
-        waited < OPENING_WINDOW + SLACK,
-        "the exchange returned {waited:?} after it started, inside its {OPENING_WINDOW:?} \
-         timeout, though the server kept it fed with a byte every {DRIP_GAP:?}: {detail}"
+        exchange_elapsed_duration < OPENING_TIMEOUT_DURATION + DEADLINE_SLACK_DURATION,
+        "the exchange returned {exchange_elapsed_duration:?} after it started, inside its {OPENING_TIMEOUT_DURATION:?} \
+         timeout, though the server kept it fed with a byte every {DRIP_INTERVAL_DURATION:?}: {error_detail}"
     );
-    let _ = server.join();
+    let _ = server_thread.join();
 }
 
 #[test]
 fn a_caller_that_asked_to_wait_reads_however_long_the_server_takes() {
-    let (config, _) = fresh_server();
+    let (server_config, _) = build_fresh_server_config();
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-    let address = listener.local_addr().expect("read the bound address");
-    let row = one_row();
-    let served = row.clone();
+    let server_address = listener.local_addr().expect("read the bound address");
+    let session_row = build_remote_session_row();
+    let served_session_row = session_row.clone();
 
-    let server = std::thread::spawn(move || {
-        let (mut sock, _) = listener.accept().expect("accept the client");
-        let conn = ServerConnection::new(Arc::new(config)).expect("a server connection");
-        let mut conn = rustls::Connection::Server(conn);
-        handshake(&mut conn, &mut sock, Instant::now() + LOOPBACK_WAIT)
-            .expect("the loopback handshake finishes");
-        let (reader, writer) = split_tls(conn, sock).expect("split the loopback stream");
-        let (mut incoming, mut outgoing) = frame_halves(Box::new(reader), Box::new(writer));
-        let opened: RemoteClientFrame = incoming.recv().expect("the client's opening frame");
-        outgoing
+    let server_thread = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("accept the client");
+        let server_connection =
+            ServerConnection::new(Arc::new(server_config)).expect("a server connection");
+        let mut tls_connection = rustls::Connection::Server(server_connection);
+        run_tls_handshake(
+            &mut tls_connection,
+            &mut socket,
+            Instant::now() + LOOPBACK_TIMEOUT_DURATION,
+        )
+        .expect("the loopback handshake finishes");
+        let (reader, writer) =
+            split_tls_stream(tls_connection, socket).expect("split the loopback stream");
+        let (mut frame_reader, mut frame_writer) = frame_halves(Box::new(reader), Box::new(writer));
+        let opening_frame: RemoteClientFrame =
+            frame_reader.recv().expect("the client's opening frame");
+        frame_writer
             .send(&RemoteServerFrame::Welcome {
-                remote_version: REMOTE_PROTOCOL_VERSION,
+                remote_protocol_version: REMOTE_PROTOCOL_VERSION,
             })
             .expect("answer the opening frame");
-        std::thread::sleep(PAUSE_AFTER_THE_ANSWER);
-        outgoing
-            .send(&RemoteServerFrame::Sessions { rows: vec![served] })
+        std::thread::sleep(PAUSE_AFTER_OPENING_RESPONSE_DURATION);
+        frame_writer
+            .send(&RemoteServerFrame::Sessions {
+                session_rows: vec![served_session_row],
+            })
             .expect("send the frame after the pause");
-        opened
+        opening_frame
     });
 
-    let (mut incoming, _outgoing, _presented, answer) = open(
-        &address.to_string(),
-        None,
-        &an_opening_frame(),
-        OPENING_WINDOW,
-        None,
-    )
-    .expect("the opening exchange finishes");
+    let (mut frame_reader, _frame_writer, _presented_certificate_fingerprint, opening_response) =
+        open_remote_connection(
+            &server_address.to_string(),
+            None,
+            &build_opening_frame(),
+            OPENING_TIMEOUT_DURATION,
+            None,
+        )
+        .expect("the opening exchange finishes");
     assert_eq!(
-        answer,
+        opening_response,
         RemoteServerFrame::Welcome {
-            remote_version: REMOTE_PROTOCOL_VERSION
+            remote_protocol_version: REMOTE_PROTOCOL_VERSION
         }
     );
     assert_eq!(
-        incoming
+        frame_reader
             .recv::<RemoteServerFrame>()
             .expect("read the frame the server sent after the pause"),
-        RemoteServerFrame::Sessions { rows: vec![row] }
+        RemoteServerFrame::Sessions {
+            session_rows: vec![session_row],
+        }
     );
 
-    let opened = server.join().expect("the server thread finished");
-    assert_eq!(opened, an_opening_frame());
+    let opening_frame = server_thread.join().expect("the server thread finished");
+    assert_eq!(opening_frame, build_opening_frame());
 }
 
 #[test]
@@ -597,60 +706,69 @@ fn a_caller_that_asked_for_a_bounded_wait_stops_reading_at_it() {
     // What a one-shot command needs. The server admits the connection and then
     // says nothing more; without the bound the read never returns and the
     // command has nothing to print and no reason to stop.
-    let (config, _) = fresh_server();
+    let (server_config, _) = build_fresh_server_config();
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-    let address = listener.local_addr().expect("read the bound address");
+    let server_address = listener.local_addr().expect("read the bound address");
 
-    let server = std::thread::spawn(move || {
-        let (mut sock, _) = listener.accept().expect("accept the client");
-        let conn = ServerConnection::new(Arc::new(config)).expect("a server connection");
-        let mut conn = rustls::Connection::Server(conn);
-        handshake(&mut conn, &mut sock, Instant::now() + LOOPBACK_WAIT)
-            .expect("the loopback handshake finishes");
-        let (reader, writer) = split_tls(conn, sock).expect("split the loopback stream");
-        let (mut incoming, mut outgoing) = frame_halves(Box::new(reader), Box::new(writer));
-        let _: RemoteClientFrame = incoming.recv().expect("the client's opening frame");
-        outgoing
+    let server_thread = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("accept the client");
+        let server_connection =
+            ServerConnection::new(Arc::new(server_config)).expect("a server connection");
+        let mut tls_connection = rustls::Connection::Server(server_connection);
+        run_tls_handshake(
+            &mut tls_connection,
+            &mut socket,
+            Instant::now() + LOOPBACK_TIMEOUT_DURATION,
+        )
+        .expect("the loopback handshake finishes");
+        let (reader, writer) =
+            split_tls_stream(tls_connection, socket).expect("split the loopback stream");
+        let (mut frame_reader, mut frame_writer) = frame_halves(Box::new(reader), Box::new(writer));
+        let _: RemoteClientFrame = frame_reader.recv().expect("the client's opening frame");
+        frame_writer
             .send(&RemoteServerFrame::Welcome {
-                remote_version: REMOTE_PROTOCOL_VERSION,
+                remote_protocol_version: REMOTE_PROTOCOL_VERSION,
             })
             .expect("answer the opening frame");
         // Admitted, and then nothing. Held open so the client is reading a
         // live connection rather than a closed one.
-        std::thread::sleep(PAUSE_AFTER_THE_ANSWER * 4);
+        std::thread::sleep(PAUSE_AFTER_OPENING_RESPONSE_DURATION * 4);
     });
 
-    let bounded = PAUSE_AFTER_THE_ANSWER / 2;
-    let (mut incoming, _outgoing, _presented, answer) = open(
-        &address.to_string(),
-        None,
-        &an_opening_frame(),
-        OPENING_WINDOW,
-        Some(bounded),
-    )
-    .expect("the opening exchange finishes");
+    let bounded_wait_duration = PAUSE_AFTER_OPENING_RESPONSE_DURATION / 2;
+    let (mut frame_reader, _frame_writer, _presented_certificate_fingerprint, opening_response) =
+        open_remote_connection(
+            &server_address.to_string(),
+            None,
+            &build_opening_frame(),
+            OPENING_TIMEOUT_DURATION,
+            Some(bounded_wait_duration),
+        )
+        .expect("the opening exchange finishes");
     assert_eq!(
-        answer,
+        opening_response,
         RemoteServerFrame::Welcome {
-            remote_version: REMOTE_PROTOCOL_VERSION
+            remote_protocol_version: REMOTE_PROTOCOL_VERSION
         }
     );
 
-    let started = Instant::now();
-    let failure = incoming
+    let read_started_at = Instant::now();
+    let read_error = frame_reader
         .recv::<RemoteServerFrame>()
         .expect_err("a server that says nothing more is not waited for");
-    let waited = started.elapsed();
+    let read_elapsed_duration = read_started_at.elapsed();
 
     assert!(
-        waited < PAUSE_AFTER_THE_ANSWER * 3,
-        "the read ended on the bound it was given, taking {waited:?}"
+        read_elapsed_duration < PAUSE_AFTER_OPENING_RESPONSE_DURATION * 3,
+        "the read ended on the bound it was given, taking {read_elapsed_duration:?}"
     );
-    let IpcError::Transport { .. } = failure else {
-        panic!("the read ran out of time, and did not misread a frame or lose the peer: {failure}");
+    let IpcError::Transport { .. } = read_error else {
+        panic!(
+            "the read ran out of time, and did not misread a frame or lose the peer: {read_error}"
+        );
     };
 
-    let _ = server.join();
+    let _ = server_thread.join();
 }
 
 #[test]
@@ -660,124 +778,146 @@ fn a_framed_half_keeps_the_deadline_it_was_dialled_with_and_can_be_told_to_drop_
     // could not remove it would hold a clock over frames that arrive when a
     // person types; a caller whose deadline the box swallowed would wait for
     // good on a server that admits a connection and then says nothing.
-    let (config, _) = fresh_server();
+    let (server_config, _) = build_fresh_server_config();
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-    let address = listener.local_addr().expect("read the bound address");
-    let row = one_row();
-    let served = row.clone();
+    let server_address = listener.local_addr().expect("read the bound address");
+    let session_row = build_remote_session_row();
+    let served_session_row = session_row.clone();
 
-    let server = std::thread::spawn(move || {
-        let (mut sock, _) = listener.accept().expect("accept the client");
-        let conn = ServerConnection::new(Arc::new(config)).expect("a server connection");
-        let mut conn = rustls::Connection::Server(conn);
-        handshake(&mut conn, &mut sock, Instant::now() + LOOPBACK_WAIT)
-            .expect("the loopback handshake finishes");
-        let (reader, writer) = split_tls(conn, sock).expect("split the loopback stream");
-        let (mut incoming, mut outgoing) = frame_halves(Box::new(reader), Box::new(writer));
-        let _: RemoteClientFrame = incoming.recv().expect("the client's opening frame");
-        outgoing
+    let server_thread = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("accept the client");
+        let server_connection =
+            ServerConnection::new(Arc::new(server_config)).expect("a server connection");
+        let mut tls_connection = rustls::Connection::Server(server_connection);
+        run_tls_handshake(
+            &mut tls_connection,
+            &mut socket,
+            Instant::now() + LOOPBACK_TIMEOUT_DURATION,
+        )
+        .expect("the loopback handshake finishes");
+        let (reader, writer) =
+            split_tls_stream(tls_connection, socket).expect("split the loopback stream");
+        let (mut frame_reader, mut frame_writer) = frame_halves(Box::new(reader), Box::new(writer));
+        let _: RemoteClientFrame = frame_reader.recv().expect("the client's opening frame");
+        frame_writer
             .send(&RemoteServerFrame::Welcome {
-                remote_version: REMOTE_PROTOCOL_VERSION,
+                remote_protocol_version: REMOTE_PROTOCOL_VERSION,
             })
             .expect("answer the opening frame");
-        std::thread::sleep(PAUSE_AFTER_THE_ANSWER);
-        outgoing
-            .send(&RemoteServerFrame::Sessions { rows: vec![served] })
+        std::thread::sleep(PAUSE_AFTER_OPENING_RESPONSE_DURATION);
+        frame_writer
+            .send(&RemoteServerFrame::Sessions {
+                session_rows: vec![served_session_row],
+            })
             .expect("send the frame after the pause");
     });
 
-    let bounded = PAUSE_AFTER_THE_ANSWER / 2;
-    let (mut incoming, mut outgoing, _presented, answer) = open(
-        &address.to_string(),
-        None,
-        &an_opening_frame(),
-        OPENING_WINDOW,
-        Some(bounded),
-    )
-    .expect("the opening exchange finishes");
+    let bounded_wait_duration = PAUSE_AFTER_OPENING_RESPONSE_DURATION / 2;
+    let (mut frame_reader, mut frame_writer, _presented_certificate_fingerprint, opening_response) =
+        open_remote_connection(
+            &server_address.to_string(),
+            None,
+            &build_opening_frame(),
+            OPENING_TIMEOUT_DURATION,
+            Some(bounded_wait_duration),
+        )
+        .expect("the opening exchange finishes");
     assert_eq!(
-        answer,
+        opening_response,
         RemoteServerFrame::Welcome {
-            remote_version: REMOTE_PROTOCOL_VERSION
+            remote_protocol_version: REMOTE_PROTOCOL_VERSION
         }
     );
 
     // The deadline came through the box: the server is still pausing, so this
     // read gives up rather than waiting it out.
-    let held = incoming
+    let read_error = frame_reader
         .recv::<RemoteServerFrame>()
         .expect_err("the dialled deadline holds through the boxed half");
-    let IpcError::Transport { .. } = held else {
-        panic!("a read that ran out of time is a transport failure, not a lost peer: {held}");
+    let IpcError::Transport { .. } = read_error else {
+        panic!("a read that ran out of time is a transport failure, not a lost peer: {read_error}");
     };
 
     // And it can be taken off through the box: the same server, the same
     // pause, and now the frame is waited for.
-    incoming.set_deadline(None);
-    outgoing.set_deadline(None);
+    frame_reader.set_deadline(None);
+    frame_writer.set_deadline(None);
     assert_eq!(
-        incoming
+        frame_reader
             .recv::<RemoteServerFrame>()
             .expect("with no deadline the frame after the pause arrives"),
-        RemoteServerFrame::Sessions { rows: vec![row] }
+        RemoteServerFrame::Sessions {
+            session_rows: vec![session_row],
+        }
     );
 
-    let _ = server.join();
+    let _ = server_thread.join();
 }
 
 /// How many bytes the burst test sends in one go. Far past what one socket
 /// read can hand the decryption state at once, so a reader that drops the
 /// rest of a socket read loses bytes here.
-const BURST_BYTES: usize = 400 * 1024;
+const BURST_BYTE_COUNT: usize = 400 * 1024;
 
 #[test]
 fn a_burst_larger_than_one_socket_read_arrives_whole() {
-    let (config, _cert) = fresh_server();
+    let (server_config, _certificate_der_bytes) = build_fresh_server_config();
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-    let address = listener.local_addr().expect("read the bound address");
+    let server_address = listener.local_addr().expect("read the bound address");
 
-    let sent: Vec<u8> = (0..BURST_BYTES).map(|i| (i % 251) as u8).collect();
-    let written = sent.clone();
-    let server = std::thread::spawn(move || {
-        let (mut sock, _) = listener.accept().expect("accept the client");
-        let conn = ServerConnection::new(Arc::new(config)).expect("a server connection");
-        let mut conn = rustls::Connection::Server(conn);
-        handshake(&mut conn, &mut sock, Instant::now() + LOOPBACK_WAIT)
-            .expect("the loopback handshake finishes");
-        let (_reader, mut writer) = split_tls(conn, sock).expect("split the loopback stream");
-        writer.write_all(&written).expect("the burst is written");
+    let sent_bytes: Vec<u8> = (0..BURST_BYTE_COUNT)
+        .map(|byte_index| (byte_index % 251) as u8)
+        .collect();
+    let expected_bytes = sent_bytes.clone();
+    let server_thread = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("accept the client");
+        let server_connection =
+            ServerConnection::new(Arc::new(server_config)).expect("a server connection");
+        let mut tls_connection = rustls::Connection::Server(server_connection);
+        run_tls_handshake(
+            &mut tls_connection,
+            &mut socket,
+            Instant::now() + LOOPBACK_TIMEOUT_DURATION,
+        )
+        .expect("the loopback handshake finishes");
+        let (_reader, mut writer) =
+            split_tls_stream(tls_connection, socket).expect("split the loopback stream");
+        writer
+            .write_all(&expected_bytes)
+            .expect("the burst is written");
     });
 
-    let (mut reader, _writer, _presented) =
-        dial(&address.to_string(), None, LOOPBACK_WAIT).expect("the dial opens");
-    reader.set_deadline(Some(Instant::now() + LOOPBACK_WAIT));
-    let mut received = vec![0u8; BURST_BYTES];
+    let (mut reader, _writer, _presented_certificate_fingerprint) =
+        connect_tls_stream(&server_address.to_string(), None, LOOPBACK_TIMEOUT_DURATION)
+            .expect("the dial opens");
+    reader.set_deadline(Some(Instant::now() + LOOPBACK_TIMEOUT_DURATION));
+    let mut received_bytes = vec![0u8; BURST_BYTE_COUNT];
     reader
-        .read_exact(&mut received)
+        .read_exact(&mut received_bytes)
         .expect("every byte of the burst arrives");
-    assert_eq!(received, sent, "the burst arrived changed");
+    assert_eq!(received_bytes, sent_bytes, "the burst arrived changed");
 
-    server.join().expect("the server thread finished");
+    server_thread.join().expect("the server thread finished");
 }
 
 #[test]
 fn the_fingerprint_of_three_bytes_is_their_sha256() {
     assert_eq!(
-        fingerprint(b"abc"),
+        compute_certificate_fingerprint(b"abc"),
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
     );
 }
 
 #[test]
 fn the_provider_offers_the_hybrid_group_first_and_the_classical_ones_after() {
-    let offered: Vec<NamedGroup> = crypto_provider()
+    let offered_key_exchange_groups: Vec<NamedGroup> = build_crypto_provider()
         .kx_groups
         .iter()
         .map(|group| group.name())
         .collect();
 
     assert_eq!(
-        offered,
+        offered_key_exchange_groups,
         [
             NamedGroup::X25519MLKEM768,
             NamedGroup::X25519,
@@ -789,33 +929,33 @@ fn the_provider_offers_the_hybrid_group_first_and_the_classical_ones_after() {
 
 #[test]
 fn an_address_with_no_port_is_a_lookup_failure_and_no_connection_is_made() {
-    let failure = dial("127.0.0.1", None, LOOPBACK_WAIT)
+    let ipc_error = connect_tls_stream("127.0.0.1", None, LOOPBACK_TIMEOUT_DURATION)
         .expect_err("an address with no port names nothing to dial");
 
-    let printed = failure.to_string();
-    let IpcError::Transport { detail } = failure else {
-        panic!("a failed lookup is a transport failure: {failure}");
+    let rendered_error = ipc_error.to_string();
+    let IpcError::Transport { error_detail } = ipc_error else {
+        panic!("a failed lookup is a transport failure: {ipc_error}");
     };
     assert_eq!(
-        detail,
+        error_detail,
         "127.0.0.1 could not be looked up: invalid socket address"
     );
     assert_eq!(
-        printed,
+        rendered_error,
         "ipc transport error: 127.0.0.1 could not be looked up: invalid socket address"
     );
 }
 
 #[test]
 fn an_address_whose_port_is_not_a_number_is_a_lookup_failure() {
-    let failure = dial("127.0.0.1:seven", None, LOOPBACK_WAIT)
+    let ipc_error = connect_tls_stream("127.0.0.1:seven", None, LOOPBACK_TIMEOUT_DURATION)
         .expect_err("a port that is not a number names nothing to dial");
 
-    let IpcError::Transport { detail } = failure else {
-        panic!("a failed lookup is a transport failure: {failure}");
+    let IpcError::Transport { error_detail } = ipc_error else {
+        panic!("a failed lookup is a transport failure: {ipc_error}");
     };
     assert_eq!(
-        detail,
+        error_detail,
         "127.0.0.1:seven could not be looked up: invalid port value"
     );
 }
@@ -823,340 +963,392 @@ fn an_address_whose_port_is_not_a_number_is_a_lookup_failure() {
 #[test]
 fn a_server_that_hangs_up_during_the_handshake_is_a_handshake_failure() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-    let address = listener.local_addr().expect("read the bound address");
+    let server_address = listener.local_addr().expect("read the bound address");
 
-    let server = std::thread::spawn(move || {
+    let server_thread = std::thread::spawn(move || {
         // Accepted, and dropped before a byte is answered.
         let _ = listener.accept();
     });
 
-    let failure = dial(&address.to_string(), None, LOOPBACK_WAIT)
-        .expect_err("a server that hangs up never finishes the handshake");
+    let ipc_error =
+        connect_tls_stream(&server_address.to_string(), None, LOOPBACK_TIMEOUT_DURATION)
+            .expect_err("a server that hangs up never finishes the handshake");
 
     let IpcError::TlsHandshakeFailed {
-        address: named,
-        detail,
-    } = failure
+        server_address: named_server_address,
+        error_detail,
+    } = ipc_error
     else {
         panic!("a peer gone mid-handshake is a handshake failure, not a transport failure");
     };
-    assert_eq!(named, address.to_string());
+    assert_eq!(named_server_address, server_address.to_string());
     // The words are the operating system's: end of file on one platform, a
     // reset connection on another.
-    assert_ne!(detail, "the TLS handshake did not finish in time");
-    let _ = server.join();
+    assert_ne!(error_detail, "the TLS handshake did not finish in time");
+    let _ = server_thread.join();
 }
 
 /// A connected loopback socket pair: the dialling end and the accepted end.
-fn loopback_pair() -> (TcpStream, TcpStream) {
+fn build_loopback_socket_pair() -> (TcpStream, TcpStream) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-    let address = listener.local_addr().expect("read the bound address");
-    let dialled = TcpStream::connect(address).expect("connect to loopback");
-    let (accepted, _) = listener.accept().expect("accept the dial");
-    (dialled, accepted)
+    let loopback_address = listener.local_addr().expect("read the bound address");
+    let dialled_socket = TcpStream::connect(loopback_address).expect("connect to loopback");
+    let (accepted_socket, _) = listener.accept().expect("accept the dial");
+    (dialled_socket, accepted_socket)
 }
 
 #[test]
 fn no_deadline_leaves_the_socket_timeouts_as_they_are() {
-    let (sock, _peer) = loopback_pair();
-    sock.set_read_timeout(Some(Duration::from_secs(7)))
+    let (socket, _peer) = build_loopback_socket_pair();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(7)))
         .expect("set a read timeout");
-    sock.set_write_timeout(Some(Duration::from_secs(9)))
+    socket
+        .set_write_timeout(Some(Duration::from_secs(9)))
         .expect("set a write timeout");
 
-    set_timeouts_until(&sock, None).expect("no deadline is not a failure");
+    set_socket_timeouts_until(&socket, None).expect("no deadline is not a failure");
 
     assert_eq!(
-        sock.read_timeout().expect("read the timeout"),
+        socket.read_timeout().expect("read the timeout"),
         Some(Duration::from_secs(7))
     );
     assert_eq!(
-        sock.write_timeout().expect("read the timeout"),
+        socket.write_timeout().expect("read the timeout"),
         Some(Duration::from_secs(9))
     );
 }
 
 #[test]
 fn a_deadline_already_reached_is_timed_out_and_the_socket_timeouts_stay_unset() {
-    let (sock, _peer) = loopback_pair();
+    let (socket, _peer) = build_loopback_socket_pair();
 
-    let failure =
-        set_timeouts_until(&sock, Some(Instant::now())).expect_err("no time left is a failure");
+    let timeout_error = set_socket_timeouts_until(&socket, Some(Instant::now()))
+        .expect_err("no time left is a failure");
 
-    assert_eq!(failure.kind(), io::ErrorKind::TimedOut);
-    assert_eq!(failure.to_string(), "this step ran out of time");
-    assert_eq!(sock.read_timeout().expect("read the timeout"), None);
-    assert_eq!(sock.write_timeout().expect("read the timeout"), None);
+    assert_eq!(timeout_error.kind(), io::ErrorKind::TimedOut);
+    assert_eq!(timeout_error.to_string(), "this step ran out of time");
+    assert_eq!(socket.read_timeout().expect("read the timeout"), None);
+    assert_eq!(socket.write_timeout().expect("read the timeout"), None);
 }
 
 #[test]
 fn a_deadline_ahead_sets_both_socket_timeouts_to_the_time_left() {
-    let (sock, _peer) = loopback_pair();
+    let (socket, _peer) = build_loopback_socket_pair();
 
-    set_timeouts_until(&sock, Some(Instant::now() + Duration::from_secs(60)))
+    set_socket_timeouts_until(&socket, Some(Instant::now() + Duration::from_secs(60)))
         .expect("time left is not a failure");
 
-    let read = sock
+    let read_timeout = socket
         .read_timeout()
         .expect("read the timeout")
         .expect("a read timeout is set");
-    let write = sock
+    let write_timeout = socket
         .write_timeout()
         .expect("read the timeout")
         .expect("a write timeout is set");
     // The time left shrinks between the call and this look at it.
     assert!(
-        read > Duration::from_secs(59) && read <= Duration::from_secs(60),
-        "the read timeout is the time left: {read:?}"
+        read_timeout > Duration::from_secs(59) && read_timeout <= Duration::from_secs(60),
+        "the read timeout is the time left: {read_timeout:?}"
     );
     assert!(
-        write > Duration::from_secs(59) && write <= Duration::from_secs(60),
-        "the write timeout is the time left: {write:?}"
+        write_timeout > Duration::from_secs(59) && write_timeout <= Duration::from_secs(60),
+        "the write timeout is the time left: {write_timeout:?}"
     );
 }
 
-/// The client configuration [`dial`] builds, with a verifier that takes any
+/// The client configuration [`connect_tls_stream`] builds, with a verifier that takes any
 /// certificate.
-fn client_config() -> ClientConfig {
-    ClientConfig::builder_with_provider(crypto_provider())
+fn build_test_client_config() -> ClientConfig {
+    ClientConfig::builder_with_provider(build_crypto_provider())
         .with_safe_default_protocol_versions()
         .expect("aws-lc-rs supports every default protocol version")
         .dangerous()
-        .with_custom_certificate_verifier(Arc::new(PinVerifier::new(None)))
+        .with_custom_certificate_verifier(Arc::new(
+            PinVerifier::from_expected_certificate_fingerprint(None),
+        ))
         .with_no_client_auth()
 }
 
 /// A TLS stream over a loopback socket pair with no handshake run: the
 /// dialling end split into its halves, and the accepted end.
-fn split_without_handshake() -> (TlsReader, TlsWriter, TcpStream) {
-    let (dialled, accepted) = loopback_pair();
-    let client =
-        ClientConnection::new(Arc::new(client_config()), any_name()).expect("a client connection");
-    let (reader, writer) =
-        split_tls(rustls::Connection::Client(client), dialled).expect("split the stream");
+fn build_split_tls_without_handshake() -> (TlsReader, TlsWriter, TcpStream) {
+    let (dialled, accepted) = build_loopback_socket_pair();
+    let client_connection = ClientConnection::new(
+        Arc::new(build_test_client_config()),
+        build_test_server_name(),
+    )
+    .expect("a client connection");
+    let (reader, writer) = split_tls_stream(rustls::Connection::Client(client_connection), dialled)
+        .expect("split the stream");
     (reader, writer, accepted)
 }
 
 #[test]
 fn giving_a_half_a_deadline_stores_it_and_leaves_the_socket_timeouts_alone() {
-    let (mut reader, _writer, _peer) = split_without_handshake();
+    let (mut reader, _writer, _peer) = build_split_tls_without_handshake();
     reader
-        .sock
+        .socket
         .set_read_timeout(Some(Duration::from_secs(7)))
         .expect("set a read timeout");
-    let at = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_secs(60);
 
-    reader.set_deadline(Some(at));
+    reader.set_deadline(Some(deadline));
 
-    assert_eq!(reader.deadline, Some(at));
+    assert_eq!(reader.deadline, Some(deadline));
     assert_eq!(
-        reader.sock.read_timeout().expect("read the timeout"),
+        reader.socket.read_timeout().expect("read the timeout"),
         Some(Duration::from_secs(7))
     );
 }
 
 #[test]
 fn taking_the_deadline_away_clears_both_timeouts_on_that_halfs_handle() {
-    let (mut reader, _writer, _peer) = split_without_handshake();
+    let (mut reader, _writer, _peer) = build_split_tls_without_handshake();
     reader.set_deadline(Some(Instant::now() + Duration::from_secs(60)));
     reader
-        .sock
+        .socket
         .set_read_timeout(Some(Duration::from_secs(7)))
         .expect("set a read timeout");
     reader
-        .sock
+        .socket
         .set_write_timeout(Some(Duration::from_secs(9)))
         .expect("set a write timeout");
 
     reader.set_deadline(None);
 
     assert_eq!(reader.deadline, None);
-    assert_eq!(reader.sock.read_timeout().expect("read the timeout"), None);
-    assert_eq!(reader.sock.write_timeout().expect("read the timeout"), None);
+    assert_eq!(
+        reader.socket.read_timeout().expect("read the timeout"),
+        None
+    );
+    assert_eq!(
+        reader.socket.write_timeout().expect("read the timeout"),
+        None
+    );
 }
 
 #[test]
 fn a_reader_prints_its_socket_and_deadline_and_none_of_its_buffer() {
-    let (reader, _writer, _peer) = split_without_handshake();
+    let (reader, _writer, _peer) = build_split_tls_without_handshake();
 
-    let printed = format!("{reader:?}");
+    let rendered_debug = format!("{reader:?}");
 
     assert!(
-        printed.starts_with("TlsReader { sock: TcpStream {"),
-        "{printed}"
+        rendered_debug.starts_with("TlsReader { socket: TcpStream {"),
+        "{rendered_debug}"
     );
-    assert!(printed.ends_with(", deadline: None, .. }"), "{printed}");
+    assert!(
+        rendered_debug.ends_with(", deadline: None, .. }"),
+        "{rendered_debug}"
+    );
 }
 
 #[test]
 fn a_handshake_whose_deadline_has_passed_is_timed_out_before_the_socket_is_touched() {
-    let (mut dialled, peer) = loopback_pair();
-    let client =
-        ClientConnection::new(Arc::new(client_config()), any_name()).expect("a client connection");
-    let mut conn = rustls::Connection::Client(client);
+    let (mut dialled, peer) = build_loopback_socket_pair();
+    let client_connection = ClientConnection::new(
+        Arc::new(build_test_client_config()),
+        build_test_server_name(),
+    )
+    .expect("a client connection");
+    let mut tls_connection = rustls::Connection::Client(client_connection);
 
-    let failure = handshake(&mut conn, &mut dialled, Instant::now())
+    let timeout_error = run_tls_handshake(&mut tls_connection, &mut dialled, Instant::now())
         .expect_err("a deadline already reached ends the handshake");
 
-    assert_eq!(failure.kind(), io::ErrorKind::TimedOut);
+    assert_eq!(timeout_error.kind(), io::ErrorKind::TimedOut);
     assert_eq!(
-        failure.to_string(),
+        timeout_error.to_string(),
         "the TLS handshake did not finish in time"
     );
     // Nothing was written: the peer's read finds no byte and ends on its own
     // timeout.
     peer.set_read_timeout(Some(Duration::from_millis(100)))
         .expect("set a read timeout");
-    let mut byte = [0u8; 1];
-    let nothing = (&peer)
-        .read(&mut byte)
+    let mut probe_byte = [0u8; 1];
+    let peer_read_error = (&peer)
+        .read(&mut probe_byte)
         .expect_err("no byte reached the peer");
     assert!(
-        waited_out(&nothing),
-        "the peer's read ended on its timeout, not on bytes: {nothing:?}"
+        is_io_timeout(&peer_read_error),
+        "the peer's read ended on its timeout, not on bytes: {peer_read_error:?}"
     );
 }
 
-/// Serve `config` on a loopback port and run the handshake on the connection
-/// that arrives, then hand the finished stream to `after`. Returns the
+/// Serve `server_config` on a loopback port and run the handshake on the connection
+/// that arrives, then hand the finished stream to `after_tls_handshake`. Returns the
 /// address to dial and the thread.
-fn serve_after_handshake<T: Send + 'static>(
-    config: ServerConfig,
-    after: impl FnOnce(rustls::Connection, TcpStream) -> T + Send + 'static,
+fn serve_after_tls_handshake<T: Send + 'static>(
+    server_config: ServerConfig,
+    after_tls_handshake: impl FnOnce(rustls::Connection, TcpStream) -> T + Send + 'static,
 ) -> (String, std::thread::JoinHandle<T>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-    let address = listener.local_addr().expect("read the bound address");
-    let server = std::thread::spawn(move || {
-        let (mut sock, _) = listener.accept().expect("accept the client");
-        let conn = ServerConnection::new(Arc::new(config)).expect("a server connection");
-        let mut conn = rustls::Connection::Server(conn);
-        handshake(&mut conn, &mut sock, Instant::now() + LOOPBACK_WAIT)
-            .expect("the loopback handshake finishes");
-        after(conn, sock)
+    let server_address = listener.local_addr().expect("read the bound address");
+    let server_thread = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("accept the client");
+        let server_connection =
+            ServerConnection::new(Arc::new(server_config)).expect("a server connection");
+        let mut tls_connection = rustls::Connection::Server(server_connection);
+        run_tls_handshake(
+            &mut tls_connection,
+            &mut socket,
+            Instant::now() + LOOPBACK_TIMEOUT_DURATION,
+        )
+        .expect("the loopback handshake finishes");
+        after_tls_handshake(tls_connection, socket)
     });
-    (address.to_string(), server)
+    (server_address.to_string(), server_thread)
 }
 
 #[test]
 fn a_peer_that_closes_the_stream_cleanly_reads_as_end_of_stream_every_time() {
-    let (config, _cert) = fresh_server();
-    let (address, server) = serve_after_handshake(config, |mut conn, mut sock| {
-        conn.send_close_notify();
-        while conn.wants_write() {
-            conn.write_tls(&mut sock).expect("the close is written");
-        }
-    });
+    let (server_config, _certificate_der_bytes) = build_fresh_server_config();
+    let (server_address, server_thread) =
+        serve_after_tls_handshake(server_config, |mut tls_connection, mut socket| {
+            tls_connection.send_close_notify();
+            while tls_connection.wants_write() {
+                tls_connection
+                    .write_tls(&mut socket)
+                    .expect("the close is written");
+            }
+        });
 
-    let (mut reader, _writer, _presented) =
-        dial(&address, None, LOOPBACK_WAIT).expect("the dial opens");
-    let mut byte = [0u8; 1];
+    let (mut reader, _writer, _presented_certificate_fingerprint) =
+        connect_tls_stream(&server_address, None, LOOPBACK_TIMEOUT_DURATION)
+            .expect("the dial opens");
+    let mut probe_byte = [0u8; 1];
 
     assert_eq!(
         reader
-            .read(&mut byte)
+            .read(&mut probe_byte)
             .expect("a clean close is end of stream"),
         0
     );
-    assert_eq!(reader.read(&mut byte).expect("and stays end of stream"), 0);
-    server.join().expect("the server thread finished");
+    assert_eq!(
+        reader
+            .read(&mut probe_byte)
+            .expect("and stays end of stream"),
+        0
+    );
+    server_thread.join().expect("the server thread finished");
 }
 
 #[test]
 fn a_peer_that_drops_the_socket_without_closing_the_stream_is_an_unexpected_eof_every_time() {
-    let (config, _cert) = fresh_server();
-    let (address, server) = serve_after_handshake(config, |_conn, sock| drop(sock));
+    let (server_config, _certificate_der_bytes) = build_fresh_server_config();
+    let (server_address, server_thread) =
+        serve_after_tls_handshake(server_config, |_tls_connection, socket| drop(socket));
 
-    let (mut reader, _writer, _presented) =
-        dial(&address, None, LOOPBACK_WAIT).expect("the dial opens");
-    let mut byte = [0u8; 1];
+    let (mut reader, _writer, _presented_certificate_fingerprint) =
+        connect_tls_stream(&server_address, None, LOOPBACK_TIMEOUT_DURATION)
+            .expect("the dial opens");
+    let mut probe_byte = [0u8; 1];
 
-    let cut = reader
-        .read(&mut byte)
+    let unexpected_eof_error = reader
+        .read(&mut probe_byte)
         .expect_err("a cut stream is not end of stream");
-    assert_eq!(cut.kind(), io::ErrorKind::UnexpectedEof);
-    let again = reader.read(&mut byte).expect_err("and stays cut");
-    assert_eq!(again.kind(), io::ErrorKind::UnexpectedEof);
-    server.join().expect("the server thread finished");
+    assert_eq!(unexpected_eof_error.kind(), io::ErrorKind::UnexpectedEof);
+    let repeated_unexpected_eof_error = reader.read(&mut probe_byte).expect_err("and stays cut");
+    assert_eq!(
+        repeated_unexpected_eof_error.kind(),
+        io::ErrorKind::UnexpectedEof
+    );
+    server_thread.join().expect("the server thread finished");
 }
 
 #[test]
 fn bytes_that_do_not_decrypt_end_the_read_with_invalid_data() {
-    let (config, _cert) = fresh_server();
-    let (address, server) = serve_after_handshake(config, |_conn, mut sock| {
-        // A record of application data whose 32 bytes were never encrypted.
-        let mut record = vec![0x17, 0x03, 0x03, 0x00, 0x20];
-        record.extend_from_slice(&[0u8; 32]);
-        sock.write_all(&record).expect("the record is written");
-    });
+    let (server_config, _certificate_der_bytes) = build_fresh_server_config();
+    let (server_address, server_thread) =
+        serve_after_tls_handshake(server_config, |_tls_connection, mut socket| {
+            // A TLS record of application data whose 32 bytes were never encrypted.
+            let mut tls_record_bytes = vec![0x17, 0x03, 0x03, 0x00, 0x20];
+            tls_record_bytes.extend_from_slice(&[0u8; 32]);
+            socket
+                .write_all(&tls_record_bytes)
+                .expect("the TLS record bytes are written");
+        });
 
-    let (mut reader, _writer, _presented) =
-        dial(&address, None, LOOPBACK_WAIT).expect("the dial opens");
-    let mut byte = [0u8; 1];
+    let (mut reader, _writer, _presented_certificate_fingerprint) =
+        connect_tls_stream(&server_address, None, LOOPBACK_TIMEOUT_DURATION)
+            .expect("the dial opens");
+    let mut probe_byte = [0u8; 1];
 
-    let failure = reader
-        .read(&mut byte)
+    let io_error = reader
+        .read(&mut probe_byte)
         .expect_err("bytes that do not decrypt are not plaintext");
-    assert_eq!(failure.kind(), io::ErrorKind::InvalidData);
-    server.join().expect("the server thread finished");
+    assert_eq!(io_error.kind(), io::ErrorKind::InvalidData);
+    server_thread.join().expect("the server thread finished");
 }
 
 /// How many bytes one plaintext write hands to rustls at most: its send
 /// buffer limit, 64 KiB.
-const ONE_WRITE_TAKES: usize = 64 * 1024;
+const MAX_PLAINTEXT_WRITE_BYTE_COUNT: usize = 64 * 1024;
 
 #[test]
 fn one_write_takes_at_most_sixty_four_kib_and_write_all_delivers_the_rest() {
-    let (config, _cert) = fresh_server();
-    let sent: Vec<u8> = (0..ONE_WRITE_TAKES + 1000)
-        .map(|i| (i % 251) as u8)
+    let (server_config, _certificate_der_bytes) = build_fresh_server_config();
+    let sent_bytes: Vec<u8> = (0..MAX_PLAINTEXT_WRITE_BYTE_COUNT + 1000)
+        .map(|byte_index| (byte_index % 251) as u8)
         .collect();
-    let expected_len = sent.len();
-    let (address, server) = serve_after_handshake(config, move |conn, sock| {
-        let (mut reader, _writer) = split_tls(conn, sock).expect("split the loopback stream");
-        let mut received = vec![0u8; expected_len];
-        reader
-            .read_exact(&mut received)
-            .expect("every byte arrives");
-        received
-    });
+    let sent_byte_count = sent_bytes.len();
+    let (server_address, server_thread) =
+        serve_after_tls_handshake(server_config, move |tls_connection, socket| {
+            let (mut reader, _writer) =
+                split_tls_stream(tls_connection, socket).expect("split the loopback stream");
+            let mut received_bytes = vec![0u8; sent_byte_count];
+            reader
+                .read_exact(&mut received_bytes)
+                .expect("every byte arrives");
+            received_bytes
+        });
 
-    let (_reader, mut writer, _presented) =
-        dial(&address, None, LOOPBACK_WAIT).expect("the dial opens");
-    let taken = writer
-        .write(&sent)
+    let (_reader, mut writer, _presented_certificate_fingerprint) =
+        connect_tls_stream(&server_address, None, LOOPBACK_TIMEOUT_DURATION)
+            .expect("the dial opens");
+    let written_byte_count = writer
+        .write(&sent_bytes)
         .expect("the first write is taken in part");
-    assert_eq!(taken, ONE_WRITE_TAKES);
+    assert_eq!(written_byte_count, MAX_PLAINTEXT_WRITE_BYTE_COUNT);
     writer
-        .write_all(&sent[taken..])
+        .write_all(&sent_bytes[written_byte_count..])
         .expect("the rest is written");
 
-    assert_eq!(server.join().expect("the server thread finished"), sent);
+    assert_eq!(
+        server_thread.join().expect("the server thread finished"),
+        sent_bytes
+    );
 }
 
 #[test]
 fn a_write_after_a_write_that_ran_out_of_time_still_takes_bytes() {
     // The timed-out write leaves 64 KiB of encrypted bytes queued. The next
     // write drains them first, so it has room for its own plaintext.
-    let (config, _cert) = fresh_server();
+    let (server_config, _certificate_der_bytes) = build_fresh_server_config();
     // The server reads the exact byte count the client writes, so it finishes
     // without waiting for end of stream and the client holds the connection
     // open until it has.
-    let (address, server) = serve_after_handshake(config, |conn, sock| {
-        let (mut reader, _writer) = split_tls(conn, sock).expect("split the loopback stream");
-        let mut received = vec![0u8; ONE_WRITE_TAKES + 5];
-        reader
-            .read_exact(&mut received)
-            .expect("every byte the client wrote arrives");
-        received.len()
-    });
+    let (server_address, server_thread) =
+        serve_after_tls_handshake(server_config, |tls_connection, socket| {
+            let (mut reader, _writer) =
+                split_tls_stream(tls_connection, socket).expect("split the loopback stream");
+            let mut received = vec![0u8; MAX_PLAINTEXT_WRITE_BYTE_COUNT + 5];
+            reader
+                .read_exact(&mut received)
+                .expect("every byte the client wrote arrives");
+            received.len()
+        });
 
-    let (reader, mut writer, _presented) =
-        dial(&address, None, LOOPBACK_WAIT).expect("the dial opens");
+    let (reader, mut writer, _presented_certificate_fingerprint) =
+        connect_tls_stream(&server_address, None, LOOPBACK_TIMEOUT_DURATION)
+            .expect("the dial opens");
     writer.set_deadline(Some(Instant::now()));
-    let held = writer
-        .write(&[0u8; ONE_WRITE_TAKES])
+    let timeout_error = writer
+        .write(&[0u8; MAX_PLAINTEXT_WRITE_BYTE_COUNT])
         .expect_err("no time left ends the write");
-    assert_eq!(held.kind(), io::ErrorKind::TimedOut);
+    assert_eq!(timeout_error.kind(), io::ErrorKind::TimedOut);
 
     writer.set_deadline(None);
     assert_eq!(
@@ -1165,8 +1357,8 @@ fn a_write_after_a_write_that_ran_out_of_time_still_takes_bytes() {
     );
 
     assert_eq!(
-        server.join().expect("the server thread finished"),
-        ONE_WRITE_TAKES + 5
+        server_thread.join().expect("the server thread finished"),
+        MAX_PLAINTEXT_WRITE_BYTE_COUNT + 5
     );
     drop(writer);
     drop(reader);
@@ -1175,56 +1367,59 @@ fn a_write_after_a_write_that_ran_out_of_time_still_takes_bytes() {
 /// How many bytes the blocked-write test sends: far past what the loopback
 /// socket buffers of any platform hold, so the write blocks on a peer that
 /// does not read.
-const UNREAD_BYTES: usize = 32 * 1024 * 1024;
+const UNREAD_BYTE_COUNT: usize = 32 * 1024 * 1024;
 
 #[test]
 fn a_write_to_a_peer_that_does_not_read_ends_at_the_writers_deadline() {
-    let (config, _cert) = fresh_server();
+    let (server_config, _certificate_der_bytes) = build_fresh_server_config();
     let (given_up_tx, given_up_rx) = std::sync::mpsc::channel::<()>();
-    let (address, server) = serve_after_handshake(config, move |_conn, sock| {
-        // Reads nothing, and holds the socket open until the write gave up.
-        let _ = given_up_rx.recv_timeout(LOOPBACK_WAIT * 3);
-        drop(sock);
-    });
+    let (server_address, server_thread) =
+        serve_after_tls_handshake(server_config, move |_tls_connection, socket| {
+            // Reads nothing, and holds the socket open until the write gave up.
+            let _ = given_up_rx.recv_timeout(LOOPBACK_TIMEOUT_DURATION * 3);
+            drop(socket);
+        });
 
-    let (_reader, mut writer, _presented) =
-        dial(&address, None, LOOPBACK_WAIT).expect("the dial opens");
-    writer.set_deadline(Some(Instant::now() + SHORT_TIMEOUT));
+    let (_reader, mut writer, _presented_certificate_fingerprint) =
+        connect_tls_stream(&server_address, None, LOOPBACK_TIMEOUT_DURATION)
+            .expect("the dial opens");
+    writer.set_deadline(Some(Instant::now() + SHORT_TIMEOUT_DURATION));
 
-    let started = Instant::now();
-    let failure = writer
-        .write_all(&vec![0u8; UNREAD_BYTES])
+    let write_started_at = Instant::now();
+    let timeout_error = writer
+        .write_all(&vec![0u8; UNREAD_BYTE_COUNT])
         .expect_err("a peer that does not read never takes the bytes");
-    let waited = started.elapsed();
+    let write_elapsed_duration = write_started_at.elapsed();
     let _ = given_up_tx.send(());
 
     assert!(
-        waited_out(&failure),
-        "the write ended on the deadline, not on the bytes: {failure:?}"
+        is_io_timeout(&timeout_error),
+        "the write ended on the deadline, not on the bytes: {timeout_error:?}"
     );
     assert!(
-        waited < SHORT_TIMEOUT + SLACK,
-        "the write returned {waited:?} after it started, inside its {SHORT_TIMEOUT:?} deadline"
+        write_elapsed_duration < SHORT_TIMEOUT_DURATION + DEADLINE_SLACK_DURATION,
+        "the write returned {write_elapsed_duration:?} after it started, inside its {SHORT_TIMEOUT_DURATION:?} deadline"
     );
-    server.join().expect("the server thread finished");
+    server_thread.join().expect("the server thread finished");
 }
 
 #[test]
 fn less_than_a_millisecond_left_counts_as_no_time_left() {
-    let (sock, _peer) = loopback_pair();
+    let (socket, _peer) = build_loopback_socket_pair();
 
-    let failure = set_timeouts_until(&sock, Some(Instant::now() + Duration::from_micros(500)))
-        .expect_err("less than a millisecond is no time left");
+    let timeout_error =
+        set_socket_timeouts_until(&socket, Some(Instant::now() + Duration::from_micros(500)))
+            .expect_err("less than a millisecond is no time left");
 
-    assert_eq!(failure.kind(), io::ErrorKind::TimedOut);
-    assert_eq!(failure.to_string(), "this step ran out of time");
-    assert_eq!(sock.read_timeout().expect("read the timeout"), None);
-    assert_eq!(sock.write_timeout().expect("read the timeout"), None);
+    assert_eq!(timeout_error.kind(), io::ErrorKind::TimedOut);
+    assert_eq!(timeout_error.to_string(), "this step ran out of time");
+    assert_eq!(socket.read_timeout().expect("read the timeout"), None);
+    assert_eq!(socket.write_timeout().expect("read the timeout"), None);
 }
 
 #[test]
 fn an_empty_buffer_reads_as_zero_bytes_before_the_socket_is_touched() {
-    let (mut reader, _writer, _peer) = split_without_handshake();
+    let (mut reader, _writer, _peer) = build_split_tls_without_handshake();
     // A read that reached the socket would wait for bytes that never come
     // and end on this deadline instead of returning `0`.
     reader.set_deadline(Some(Instant::now() + Duration::from_millis(100)));
@@ -1239,53 +1434,53 @@ fn an_empty_buffer_reads_as_zero_bytes_before_the_socket_is_touched() {
 
 #[test]
 fn a_read_with_no_time_left_is_timed_out_before_the_socket_is_touched() {
-    let (mut reader, _writer, peer) = split_without_handshake();
+    let (mut reader, _writer, peer) = build_split_tls_without_handshake();
     reader.set_deadline(Some(Instant::now()));
-    let mut byte = [0u8; 1];
+    let mut probe_byte = [0u8; 1];
 
-    let failure = reader
-        .read(&mut byte)
+    let io_error = reader
+        .read(&mut probe_byte)
         .expect_err("no time left ends the read");
 
-    assert_eq!(failure.kind(), io::ErrorKind::TimedOut);
-    assert_eq!(failure.to_string(), "this step ran out of time");
+    assert_eq!(io_error.kind(), io::ErrorKind::TimedOut);
+    assert_eq!(io_error.to_string(), "this step ran out of time");
     peer.set_read_timeout(Some(Duration::from_millis(100)))
         .expect("set a read timeout");
-    let nothing = (&peer)
-        .read(&mut byte)
+    let peer_read_error = (&peer)
+        .read(&mut probe_byte)
         .expect_err("no byte reached the peer");
     assert!(
-        waited_out(&nothing),
-        "the peer's read ended on its timeout, not on bytes: {nothing:?}"
+        is_io_timeout(&peer_read_error),
+        "the peer's read ended on its timeout, not on bytes: {peer_read_error:?}"
     );
 }
 
 #[test]
 fn a_write_with_no_time_left_is_timed_out_before_the_socket_is_touched() {
-    let (_reader, mut writer, peer) = split_without_handshake();
+    let (_reader, mut writer, peer) = build_split_tls_without_handshake();
     writer.set_deadline(Some(Instant::now()));
 
-    let failure = writer
+    let io_error = writer
         .write(b"never sent")
         .expect_err("no time left ends the write");
 
-    assert_eq!(failure.kind(), io::ErrorKind::TimedOut);
-    assert_eq!(failure.to_string(), "this step ran out of time");
+    assert_eq!(io_error.kind(), io::ErrorKind::TimedOut);
+    assert_eq!(io_error.to_string(), "this step ran out of time");
     peer.set_read_timeout(Some(Duration::from_millis(100)))
         .expect("set a read timeout");
-    let mut byte = [0u8; 1];
-    let nothing = (&peer)
-        .read(&mut byte)
+    let mut probe_byte = [0u8; 1];
+    let peer_read_error = (&peer)
+        .read(&mut probe_byte)
         .expect_err("no byte reached the peer");
     assert!(
-        waited_out(&nothing),
-        "the peer's read ended on its timeout, not on bytes: {nothing:?}"
+        is_io_timeout(&peer_read_error),
+        "the peer's read ended on its timeout, not on bytes: {peer_read_error:?}"
     );
 }
 
 #[test]
 fn an_empty_write_takes_zero_bytes() {
-    let (_reader, mut writer, _peer) = split_without_handshake();
+    let (_reader, mut writer, _peer) = build_split_tls_without_handshake();
 
     assert_eq!(
         writer.write(b"").expect("an empty write is not a failure"),
@@ -1295,36 +1490,46 @@ fn an_empty_write_takes_zero_bytes() {
 
 #[test]
 fn the_deadline_trait_reaches_the_halves_own_deadline() {
-    let (mut reader, mut writer, _peer) = split_without_handshake();
-    let at = Instant::now() + Duration::from_secs(60);
+    let (mut reader, mut writer, _peer) = build_split_tls_without_handshake();
+    let deadline = Instant::now() + Duration::from_secs(60);
     writer
-        .sock
+        .socket
         .set_write_timeout(Some(Duration::from_secs(9)))
         .expect("set a write timeout");
 
-    Deadlined::set_deadline(&mut reader, Some(at));
+    Deadlined::set_deadline(&mut reader, Some(deadline));
     Deadlined::set_deadline(&mut writer, None);
 
-    assert_eq!(reader.deadline, Some(at));
+    assert_eq!(reader.deadline, Some(deadline));
     assert_eq!(writer.deadline, None);
-    assert_eq!(writer.sock.write_timeout().expect("read the timeout"), None);
+    assert_eq!(
+        writer.socket.write_timeout().expect("read the timeout"),
+        None
+    );
 }
 
 #[test]
 fn a_peer_whose_bytes_are_not_a_handshake_ends_it_with_invalid_data() {
-    let (mut dialled, mut peer) = loopback_pair();
-    let client =
-        ClientConnection::new(Arc::new(client_config()), any_name()).expect("a client connection");
-    let mut conn = rustls::Connection::Client(client);
+    let (mut dialled, mut peer) = build_loopback_socket_pair();
+    let client = ClientConnection::new(
+        Arc::new(build_test_client_config()),
+        build_test_server_name(),
+    )
+    .expect("a client connection");
+    let mut tls_connection = rustls::Connection::Client(client);
     peer.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n")
         .expect("the peer's bytes are written");
 
-    let failure = handshake(&mut conn, &mut dialled, Instant::now() + LOOPBACK_WAIT)
-        .expect_err("bytes that are not a handshake end it");
+    let io_error = run_tls_handshake(
+        &mut tls_connection,
+        &mut dialled,
+        Instant::now() + LOOPBACK_TIMEOUT_DURATION,
+    )
+    .expect_err("bytes that are not a handshake end it");
 
-    assert_eq!(failure.kind(), io::ErrorKind::InvalidData);
+    assert_eq!(io_error.kind(), io::ErrorKind::InvalidData);
     assert_eq!(
-        failure.to_string(),
+        io_error.to_string(),
         "received corrupt message of type InvalidContentType"
     );
 }
@@ -1332,62 +1537,71 @@ fn a_peer_whose_bytes_are_not_a_handshake_ends_it_with_invalid_data() {
 #[test]
 fn a_server_whose_bytes_are_not_a_handshake_is_a_handshake_failure_carrying_its_words() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-    let address = listener.local_addr().expect("read the bound address");
+    let server_address = listener.local_addr().expect("read the bound address");
 
-    let server = std::thread::spawn(move || {
-        let Ok((mut sock, _)) = listener.accept() else {
+    let server_thread = std::thread::spawn(move || {
+        let Ok((mut socket, _)) = listener.accept() else {
             return;
         };
-        let _ = sock.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n");
+        let _ = socket.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n");
         // Held open until the client has read the answer and hung up.
-        let mut rest = Vec::new();
-        let _ = sock.read_to_end(&mut rest);
+        let mut remaining_bytes = Vec::new();
+        let _ = socket.read_to_end(&mut remaining_bytes);
     });
 
-    let failure = dial(&address.to_string(), None, LOOPBACK_WAIT)
-        .expect_err("a server that does not speak TLS never finishes the handshake");
+    let ipc_error =
+        connect_tls_stream(&server_address.to_string(), None, LOOPBACK_TIMEOUT_DURATION)
+            .expect_err("a server that does not speak TLS never finishes the handshake");
 
     let IpcError::TlsHandshakeFailed {
-        address: named,
-        detail,
-    } = failure
+        server_address: named_server_address,
+        error_detail,
+    } = ipc_error
     else {
-        panic!("bytes that are not a handshake are a handshake failure: {failure}");
+        panic!("bytes that are not a handshake are a handshake failure: {ipc_error}");
     };
-    assert_eq!(named, address.to_string());
+    assert_eq!(named_server_address, server_address.to_string());
     assert_eq!(
-        detail,
+        error_detail,
         "received corrupt message of type InvalidContentType"
     );
-    let _ = server.join();
+    let _ = server_thread.join();
 }
 
 #[test]
 fn the_pinned_fingerprint_is_compared_byte_for_byte() {
-    let lowercase = fingerprint(b"the first certificate");
-    let uppercase = lowercase.to_uppercase();
-    let verifier = PinVerifier::new(Some(&uppercase));
+    let lowercase_certificate_fingerprint =
+        compute_certificate_fingerprint(b"the first certificate");
+    let uppercase_certificate_fingerprint = lowercase_certificate_fingerprint.to_uppercase();
+    let pin_verifier = PinVerifier::from_expected_certificate_fingerprint(Some(
+        &uppercase_certificate_fingerprint,
+    ));
 
-    let refused = present(&verifier, b"the first certificate")
+    let verification_error = verify_test_certificate(&pin_verifier, b"the first certificate")
         .expect_err("an uppercase pin does not match the lowercase fingerprint");
 
     assert_eq!(
-        refused,
+        verification_error,
         rustls::Error::General(format!(
-            "the pinned certificate is {uppercase}, the server presented {lowercase}"
+            "the pinned certificate is {uppercase_certificate_fingerprint}, the server presented {lowercase_certificate_fingerprint}"
         ))
     );
-    assert_eq!(verifier.seen(), Some(lowercase));
+    assert_eq!(
+        pin_verifier.get_presented_certificate_fingerprint(),
+        Some(lowercase_certificate_fingerprint)
+    );
 }
 
 #[test]
 fn a_verifier_remembers_the_last_certificate_it_was_shown() {
-    let verifier = PinVerifier::new(None);
-    present(&verifier, b"the first certificate").expect("a first connection takes any certificate");
-    present(&verifier, b"the second certificate").expect("and the next one too");
+    let pin_verifier = PinVerifier::from_expected_certificate_fingerprint(None);
+    verify_test_certificate(&pin_verifier, b"the first certificate")
+        .expect("a first connection takes any certificate");
+    verify_test_certificate(&pin_verifier, b"the second certificate")
+        .expect("and the next one too");
 
     assert_eq!(
-        verifier.seen(),
-        Some(fingerprint(b"the second certificate"))
+        pin_verifier.get_presented_certificate_fingerprint(),
+        Some(compute_certificate_fingerprint(b"the second certificate"))
     );
 }

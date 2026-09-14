@@ -5,46 +5,101 @@
 
 use super::*;
 
-/// Constructs a [`Rect`] from origin (x, y) and size (cols, rows).
-fn rect(x: u16, y: u16, cols: u16, rows: u16) -> Rect {
-    Rect::new(Point { x, y }, Size { cols, rows })
+/// Constructs a [`Rect`] from an origin and cell dimensions.
+fn build_rect(column_index: u16, row_index: u16, column_count: u16, row_count: u16) -> Rect {
+    Rect::from_origin_and_size(
+        Point {
+            column: column_index,
+            row: row_index,
+        },
+        Size {
+            column_count,
+            row_count,
+        },
+    )
 }
 
 #[test]
 fn image_geometry_validates_the_visible_crop_without_overflow() {
     let geometry = ImageCellGeometry {
-        full_size: Size { cols: 4, rows: 5 },
-        offset: Point { x: 1, y: 2 },
+        full_size: Size {
+            column_count: 4,
+            row_count: 5,
+        },
+        cell_offset: Point { column: 1, row: 2 },
     };
-    for (size, expected) in [
-        (Size { cols: 3, rows: 3 }, true),
-        (Size { cols: 4, rows: 3 }, false),
-        (Size { cols: 3, rows: 4 }, false),
-        (Size { cols: 0, rows: 3 }, false),
-        (Size { cols: 3, rows: 0 }, false),
+    for (visible_size, expected_is_contained) in [
         (
             Size {
-                cols: u16::MAX,
-                rows: u16::MAX,
+                column_count: 3,
+                row_count: 3,
+            },
+            true,
+        ),
+        (
+            Size {
+                column_count: 4,
+                row_count: 3,
+            },
+            false,
+        ),
+        (
+            Size {
+                column_count: 3,
+                row_count: 4,
+            },
+            false,
+        ),
+        (
+            Size {
+                column_count: 0,
+                row_count: 3,
+            },
+            false,
+        ),
+        (
+            Size {
+                column_count: 3,
+                row_count: 0,
+            },
+            false,
+        ),
+        (
+            Size {
+                column_count: u16::MAX,
+                row_count: u16::MAX,
             },
             false,
         ),
     ] {
-        assert_eq!(geometry.contains(size), expected, "{size:?}");
+        assert_eq!(
+            geometry.is_visible_size_contained(visible_size),
+            expected_is_contained,
+            "{visible_size:?}"
+        );
     }
 }
 
 #[test]
 fn pixel_cell_dimensions_are_nonzero_and_round_trip_exactly() {
-    assert_eq!(PixelCellSize::new(0, 20), None);
-    assert_eq!(PixelCellSize::new(10, 0), None);
-    let size = PixelCellSize::new(10, 20).expect("nonzero");
-    assert_eq!((size.width(), size.height()), (10, 20));
-    let value = serde_json::to_value(size).expect("serialize");
-    assert_eq!(value, serde_json::json!({"width": 10, "height": 20}));
+    assert_eq!(PixelCellSize::from_pixel_dimensions(0, 20), None);
+    assert_eq!(PixelCellSize::from_pixel_dimensions(10, 0), None);
+    let pixel_cell_size = PixelCellSize::from_pixel_dimensions(10, 20).expect("nonzero");
     assert_eq!(
-        serde_json::from_value::<PixelCellSize>(value).expect("restore"),
-        size
+        (
+            pixel_cell_size.get_pixel_width(),
+            pixel_cell_size.get_pixel_height()
+        ),
+        (10, 20)
+    );
+    let pixel_cell_size_json = serde_json::to_value(pixel_cell_size).expect("serialize");
+    assert_eq!(
+        pixel_cell_size_json,
+        serde_json::json!({"width": 10, "height": 20})
+    );
+    assert_eq!(
+        serde_json::from_value::<PixelCellSize>(pixel_cell_size_json).expect("restore"),
+        pixel_cell_size
     );
     assert!(
         serde_json::from_value::<PixelCellSize>(serde_json::json!({"width": 0, "height": 20}))
@@ -53,249 +108,328 @@ fn pixel_cell_dimensions_are_nonzero_and_round_trip_exactly() {
 }
 
 #[test]
-fn zero_is_empty() {
-    let z = Rect::zero();
-    assert!(z.is_empty());
-    assert_eq!(z, rect(0, 0, 0, 0));
+fn zero_sized_rect_is_empty() {
+    let empty_rect = Rect::empty_at_origin();
+    assert!(empty_rect.is_empty());
+    assert_eq!(empty_rect, build_rect(0, 0, 0, 0));
 }
 
 #[test]
-fn is_empty_on_either_axis() {
-    assert!(rect(3, 3, 0, 5).is_empty());
-    assert!(rect(3, 3, 5, 0).is_empty());
-    assert!(!rect(3, 3, 1, 1).is_empty());
+fn rect_with_zero_width_or_height_is_empty() {
+    assert!(build_rect(3, 3, 0, 5).is_empty());
+    assert!(build_rect(3, 3, 5, 0).is_empty());
+    assert!(!build_rect(3, 3, 1, 1).is_empty());
 }
 
 #[test]
-fn containment_table() {
-    let r = rect(2, 2, 4, 3); // x in [2,6), y in [2,5)
+fn rect_contains_points_only_inside_half_open_bounds() {
+    let rect = build_rect(2, 2, 4, 3); // columns in [2,6), rows in [2,5)
     let cases = [
-        (Point { x: 2, y: 2 }, true),  // top-left corner (inclusive)
-        (Point { x: 5, y: 4 }, true),  // last interior cell
-        (Point { x: 6, y: 4 }, false), // right edge is exclusive
-        (Point { x: 5, y: 5 }, false), // bottom edge is exclusive
-        (Point { x: 1, y: 3 }, false), // left of origin
-        (Point { x: 3, y: 1 }, false), // above origin
+        (Point { column: 2, row: 2 }, true),
+        (Point { column: 5, row: 4 }, true),
+        (Point { column: 6, row: 4 }, false),
+        (Point { column: 5, row: 5 }, false),
+        (Point { column: 1, row: 3 }, false),
+        (Point { column: 3, row: 1 }, false),
     ];
-    for (p, expected) in cases {
-        assert_eq!(r.contains(p), expected, "contains {p:?}");
+    for (point, expected_containment) in cases {
+        assert_eq!(
+            rect.is_point_inside(point),
+            expected_containment,
+            "contains {point:?}"
+        );
     }
 }
 
 #[test]
 fn empty_rect_contains_nothing() {
-    let r = rect(2, 2, 0, 0);
-    assert!(!r.contains(Point { x: 2, y: 2 }));
+    let empty_rect = build_rect(2, 2, 0, 0);
+    assert!(!empty_rect.is_point_inside(Point { column: 2, row: 2 }));
 }
 
 #[test]
-fn intersection_table() {
-    let base = rect(2, 2, 4, 4); // [2,6) x [2,6)
+fn rect_intersection_returns_each_expected_relationship() {
+    let base_rect = build_rect(2, 2, 4, 4);
 
     // Overlapping: clipped to the shared region.
-    assert_eq!(base.intersection(rect(4, 4, 4, 4)), Some(rect(4, 4, 2, 2)));
+    assert_eq!(
+        base_rect.compute_intersection(build_rect(4, 4, 4, 4)),
+        Some(build_rect(4, 4, 2, 2))
+    );
 
     // Fully contained.
-    assert_eq!(base.intersection(rect(3, 3, 1, 1)), Some(rect(3, 3, 1, 1)));
+    assert_eq!(
+        base_rect.compute_intersection(build_rect(3, 3, 1, 1)),
+        Some(build_rect(3, 3, 1, 1))
+    );
 
     // Identical.
-    assert_eq!(base.intersection(base), Some(base));
+    assert_eq!(base_rect.compute_intersection(base_rect), Some(base_rect));
 
     // Adjacent on the right edge — touching, not overlapping.
-    assert_eq!(base.intersection(rect(6, 2, 3, 4)), None);
+    assert_eq!(base_rect.compute_intersection(build_rect(6, 2, 3, 4)), None);
 
     // Adjacent on the bottom edge.
-    assert_eq!(base.intersection(rect(2, 6, 4, 3)), None);
+    assert_eq!(base_rect.compute_intersection(build_rect(2, 6, 4, 3)), None);
 
     // Disjoint.
-    assert_eq!(base.intersection(rect(20, 20, 4, 4)), None);
+    assert_eq!(
+        base_rect.compute_intersection(build_rect(20, 20, 4, 4)),
+        None
+    );
 
     // Zero-size operand never intersects.
-    assert_eq!(base.intersection(rect(3, 3, 0, 0)), None);
+    assert_eq!(base_rect.compute_intersection(build_rect(3, 3, 0, 0)), None);
 }
 
 #[test]
 fn intersection_touching_only_at_a_corner_is_not_an_overlap() {
     // The rects meet only at the point (6, 6) and share no cell.
-    let base = rect(2, 2, 4, 4); // [2,6) x [2,6)
-    let corner_only = rect(6, 6, 4, 4); // [6,10) x [6,10), touches at (6,6)
-    assert_eq!(base.intersection(corner_only), None);
+    let base_rect = build_rect(2, 2, 4, 4);
+    let corner_touching_rect = build_rect(6, 6, 4, 4);
+    assert_eq!(base_rect.compute_intersection(corner_touching_rect), None);
 }
 
 #[test]
 fn intersection_with_an_empty_self_is_none() {
-    let base = rect(2, 2, 4, 4);
-    assert_eq!(rect(3, 3, 0, 0).intersection(base), None);
-    assert_eq!(rect(3, 3, 0, 2).intersection(base), None);
-    assert_eq!(rect(3, 3, 2, 0).intersection(base), None);
-    assert_eq!(base.intersection(rect(3, 3, 2, 0)), None);
+    let base_rect = build_rect(2, 2, 4, 4);
+    assert_eq!(build_rect(3, 3, 0, 0).compute_intersection(base_rect), None);
+    assert_eq!(build_rect(3, 3, 0, 2).compute_intersection(base_rect), None);
+    assert_eq!(build_rect(3, 3, 2, 0).compute_intersection(base_rect), None);
+    assert_eq!(base_rect.compute_intersection(build_rect(3, 3, 2, 0)), None);
 }
 
 #[test]
 fn intersection_is_symmetric() {
-    let a = rect(2, 2, 4, 4);
-    let b = rect(4, 4, 4, 4);
-    assert_eq!(b.intersection(a), Some(rect(4, 4, 2, 2)));
-    assert_eq!(a.intersection(b), b.intersection(a));
+    let first_rect = build_rect(2, 2, 4, 4);
+    let second_rect = build_rect(4, 4, 4, 4);
+    assert_eq!(
+        second_rect.compute_intersection(first_rect),
+        Some(build_rect(4, 4, 2, 2))
+    );
+    assert_eq!(
+        first_rect.compute_intersection(second_rect),
+        second_rect.compute_intersection(first_rect)
+    );
 }
 
 #[test]
 fn contains_at_the_grid_maximum_does_not_overflow() {
-    // x in [65535, 65536): the right edge is one past u16::MAX.
-    let corner = rect(u16::MAX, u16::MAX, 1, 1);
-    assert!(corner.contains(Point {
-        x: u16::MAX,
-        y: u16::MAX
+    // The right edge is one past u16::MAX.
+    let corner = build_rect(u16::MAX, u16::MAX, 1, 1);
+    assert!(corner.is_point_inside(Point {
+        column: u16::MAX,
+        row: u16::MAX
     }));
-    assert!(!corner.contains(Point {
-        x: u16::MAX - 1,
-        y: u16::MAX
+    assert!(!corner.is_point_inside(Point {
+        column: u16::MAX - 1,
+        row: u16::MAX
     }));
 
-    let wide = rect(u16::MAX - 1, 0, 2, 1); // x in [65534, 65536), y in [0, 1)
-    assert!(wide.contains(Point { x: u16::MAX, y: 0 }));
-    assert!(!wide.contains(Point { x: u16::MAX, y: 1 }));
+    let wide_rect = build_rect(u16::MAX - 1, 0, 2, 1);
+    assert!(wide_rect.is_point_inside(Point {
+        column: u16::MAX,
+        row: 0,
+    }));
+    assert!(!wide_rect.is_point_inside(Point {
+        column: u16::MAX,
+        row: 1,
+    }));
 }
 
 #[test]
 fn inset_shrinks_all_sides() {
-    let r = rect(2, 2, 10, 8);
-    assert_eq!(r.inset(1), rect(3, 3, 8, 6));
-    assert_eq!(r.inset(2), rect(4, 4, 6, 4));
-    assert_eq!(r.inner_with_border(), rect(3, 3, 8, 6));
+    let rect = build_rect(2, 2, 10, 8);
+    assert_eq!(rect.compute_inset(1), build_rect(3, 3, 8, 6));
+    assert_eq!(rect.compute_inset(2), build_rect(4, 4, 6, 4));
+    assert_eq!(rect.compute_inner_with_border(), build_rect(3, 3, 8, 6));
 }
 
 #[test]
 fn inset_underflow_clamps_to_zero() {
     // Border larger than half the rect: dimensions clamp to zero, no panic.
-    let r = rect(0, 0, 3, 2);
-    assert_eq!(r.inset(5), rect(5, 5, 0, 0));
+    let rect = build_rect(0, 0, 3, 2);
+    assert_eq!(rect.compute_inset(5), build_rect(5, 5, 0, 0));
 }
 
 #[test]
 fn inset_by_zero_is_the_same_rect() {
-    let r = rect(2, 3, 10, 8);
-    assert_eq!(r.inset(0), r);
+    let rect = build_rect(2, 3, 10, 8);
+    assert_eq!(rect.compute_inset(0), rect);
 }
 
 #[test]
 fn inset_by_exactly_half_leaves_an_empty_rect_at_the_center() {
-    assert_eq!(rect(0, 0, 4, 4).inset(2), rect(2, 2, 0, 0));
+    assert_eq!(
+        build_rect(0, 0, 4, 4).compute_inset(2),
+        build_rect(2, 2, 0, 0)
+    );
     // An odd width keeps its middle column; the even height loses every row.
-    assert_eq!(rect(0, 0, 5, 4).inset(2), rect(2, 2, 1, 0));
+    assert_eq!(
+        build_rect(0, 0, 5, 4).compute_inset(2),
+        build_rect(2, 2, 1, 0)
+    );
 }
 
 #[test]
 fn inset_border_at_the_doubling_limit() {
     // 2 * 32767 = 65534 fits u16; 2 * 32768 saturates at u16::MAX.
-    let full = rect(0, 0, u16::MAX, u16::MAX);
-    assert_eq!(full.inset(32767), rect(32767, 32767, 1, 1));
-    assert_eq!(full.inset(32768), rect(32768, 32768, 0, 0));
+    let maximum_rect = build_rect(0, 0, u16::MAX, u16::MAX);
+    assert_eq!(
+        maximum_rect.compute_inset(32767),
+        build_rect(32767, 32767, 1, 1)
+    );
+    assert_eq!(
+        maximum_rect.compute_inset(32768),
+        build_rect(32768, 32768, 0, 0)
+    );
 }
 
 #[test]
 fn inset_origin_does_not_overflow() {
     // Origin near u16::MAX: saturating add keeps it in range, no panic.
-    let r = rect(u16::MAX - 1, u16::MAX - 1, 1, 1);
-    assert_eq!(r.inset(u16::MAX), rect(u16::MAX, u16::MAX, 0, 0));
+    let rect = build_rect(u16::MAX - 1, u16::MAX - 1, 1, 1);
+    assert_eq!(
+        rect.compute_inset(u16::MAX),
+        build_rect(u16::MAX, u16::MAX, 0, 0)
+    );
 }
 
 #[test]
 fn intersection_at_grid_max_edge_no_overflow() {
     // Right/bottom edges land at u16::MAX + 1.
-    let a = rect(u16::MAX - 3, u16::MAX - 3, 4, 4);
-    let b = rect(u16::MAX - 1, u16::MAX - 1, 4, 4);
+    let first_rect = build_rect(u16::MAX - 3, u16::MAX - 3, 4, 4);
+    let second_rect = build_rect(u16::MAX - 1, u16::MAX - 1, 4, 4);
     assert_eq!(
-        a.intersection(b),
-        Some(rect(u16::MAX - 1, u16::MAX - 1, 2, 2))
+        first_rect.compute_intersection(second_rect),
+        Some(build_rect(u16::MAX - 1, u16::MAX - 1, 2, 2))
     );
 }
 
 #[test]
-fn serde_roundtrip_rect() {
-    let r = rect(1, 2, 3, 4);
-    let json = serde_json::to_string(&r).expect("serialize");
-    let back: Rect = serde_json::from_str(&json).expect("deserialize");
-    assert_eq!(r, back);
+fn serde_roundtrip_preserves_rect() {
+    let rect = build_rect(1, 2, 3, 4);
+    let rect_json = serde_json::to_string(&rect).expect("serialize");
+    let decoded_rect: Rect = serde_json::from_str(&rect_json).expect("deserialize");
+    assert_eq!(rect, decoded_rect);
 }
 
 #[test]
-fn serde_roundtrip_enums() {
-    for dir in [
+fn serde_roundtrip_preserves_directions_and_split_directions() {
+    for direction in [
         Direction::Left,
         Direction::Right,
         Direction::Up,
         Direction::Down,
     ] {
-        let json = serde_json::to_string(&dir).expect("serialize");
-        let back: Direction = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(dir, back);
+        let direction_json = serde_json::to_string(&direction).expect("serialize");
+        let decoded_direction: Direction =
+            serde_json::from_str(&direction_json).expect("deserialize");
+        assert_eq!(direction, decoded_direction);
     }
-    for split in [
+    for split_direction in [
         SplitDirection::Horizontal,
         SplitDirection::Vertical,
         SplitDirection::Stacked,
     ] {
-        let json = serde_json::to_string(&split).expect("serialize");
-        let back: SplitDirection = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(split, back);
+        let split_direction_json = serde_json::to_string(&split_direction).expect("serialize");
+        let decoded_split_direction: SplitDirection =
+            serde_json::from_str(&split_direction_json).expect("deserialize");
+        assert_eq!(split_direction, decoded_split_direction);
     }
 }
 
 #[test]
 fn pane_area_reported_encodes_as_a_tagged_size() {
-    let json =
-        serde_json::to_string(&PaneArea::Reported(Size { cols: 80, rows: 22 })).expect("serialize");
+    let pane_area_json = serde_json::to_string(&PaneArea::Reported(Size {
+        column_count: 80,
+        row_count: 22,
+    }))
+    .expect("serialize");
 
-    assert_eq!(json, r#"{"Reported":{"cols":80,"rows":22}}"#);
+    assert_eq!(pane_area_json, r#"{"Reported":{"cols":80,"rows":22}}"#);
 }
 
 #[test]
 fn pane_area_starving_encodes_as_a_bare_tag() {
-    let json = serde_json::to_string(&PaneArea::Starving).expect("serialize");
+    let pane_area_json = serde_json::to_string(&PaneArea::Starving).expect("serialize");
 
-    assert_eq!(json, r#""Starving""#);
+    assert_eq!(pane_area_json, r#""Starving""#);
 }
 
 #[test]
-fn pane_area_round_trips() {
-    for area in [
-        PaneArea::Reported(Size { cols: 80, rows: 22 }),
+fn serde_roundtrip_preserves_pane_area() {
+    for pane_area in [
+        PaneArea::Reported(Size {
+            column_count: 80,
+            row_count: 22,
+        }),
         PaneArea::Starving,
     ] {
-        let json = serde_json::to_string(&area).expect("serialize");
-        let back: PaneArea = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(area, back, "{json}");
+        let pane_area_json = serde_json::to_string(&pane_area).expect("serialize");
+        let decoded_pane_area: PaneArea =
+            serde_json::from_str(&pane_area_json).expect("deserialize");
+        assert_eq!(pane_area, decoded_pane_area, "{pane_area_json}");
     }
 }
 
 #[test]
 fn direction_opposite_pairs_each_cardinal() {
-    assert_eq!(Direction::Left.opposite(), Direction::Right);
-    assert_eq!(Direction::Right.opposite(), Direction::Left);
-    assert_eq!(Direction::Up.opposite(), Direction::Down);
-    assert_eq!(Direction::Down.opposite(), Direction::Up);
+    assert_eq!(
+        Direction::Left.compute_opposite_direction(),
+        Direction::Right
+    );
+    assert_eq!(
+        Direction::Right.compute_opposite_direction(),
+        Direction::Left
+    );
+    assert_eq!(Direction::Up.compute_opposite_direction(), Direction::Down);
+    assert_eq!(Direction::Down.compute_opposite_direction(), Direction::Up);
 }
 
 #[test]
-fn min_axes_takes_the_smaller_of_each_axis() {
-    let a = Size { cols: 40, rows: 10 };
-    let b = Size { cols: 20, rows: 24 };
-    assert_eq!(a.min_axes(b), Size { cols: 20, rows: 10 });
-    assert_eq!(b.min_axes(a), Size { cols: 20, rows: 10 });
-    assert_eq!(a.min_axes(a), a);
+fn compute_minimum_axes_returns_the_smaller_count_on_each_axis() {
+    let first_size = Size {
+        column_count: 40,
+        row_count: 10,
+    };
+    let second_size = Size {
+        column_count: 20,
+        row_count: 24,
+    };
     assert_eq!(
-        a.min_axes(Size { cols: 0, rows: 0 }),
-        Size { cols: 0, rows: 0 }
+        first_size.compute_minimum_axes(second_size),
+        Size {
+            column_count: 20,
+            row_count: 10
+        }
+    );
+    assert_eq!(
+        second_size.compute_minimum_axes(first_size),
+        Size {
+            column_count: 20,
+            row_count: 10
+        }
+    );
+    assert_eq!(first_size.compute_minimum_axes(first_size), first_size);
+    assert_eq!(
+        first_size.compute_minimum_axes(Size {
+            column_count: 0,
+            row_count: 0,
+        }),
+        Size {
+            column_count: 0,
+            row_count: 0,
+        }
     );
 }
 
 #[test]
 fn rect_encodes_origin_then_size() {
-    let json = serde_json::to_string(&rect(1, 2, 3, 4)).expect("serialize");
+    let rect_json = serde_json::to_string(&build_rect(1, 2, 3, 4)).expect("serialize");
 
     assert_eq!(
-        json,
+        rect_json,
         r#"{"origin":{"x":1,"y":2},"size":{"cols":3,"rows":4}}"#
     );
 }
@@ -314,15 +448,17 @@ fn layout_enums_encode_as_bare_variant_names() {
 
 #[test]
 fn point_rejects_a_coordinate_outside_u16() {
-    let negative = serde_json::from_str::<Point>(r#"{"x":-1,"y":0}"#).expect_err("negative");
+    let negative_coordinate_error =
+        serde_json::from_str::<Point>(r#"{"x":-1,"y":0}"#).expect_err("negative");
     assert_eq!(
-        negative.to_string(),
+        negative_coordinate_error.to_string(),
         "invalid value: integer `-1`, expected u16 at line 1 column 7"
     );
 
-    let too_big = serde_json::from_str::<Point>(r#"{"x":65536,"y":0}"#).expect_err("too big");
+    let oversized_coordinate_error =
+        serde_json::from_str::<Point>(r#"{"x":65536,"y":0}"#).expect_err("too big");
     assert_eq!(
-        too_big.to_string(),
+        oversized_coordinate_error.to_string(),
         "invalid value: integer `65536`, expected u16 at line 1 column 10"
     );
 }
@@ -331,5 +467,5 @@ fn point_rejects_a_coordinate_outside_u16() {
 fn point_ignores_an_unknown_field() {
     let point: Point = serde_json::from_str(r#"{"x":1,"y":2,"z":3}"#).expect("deserialize");
 
-    assert_eq!(point, Point { x: 1, y: 2 });
+    assert_eq!(point, Point { column: 1, row: 2 });
 }

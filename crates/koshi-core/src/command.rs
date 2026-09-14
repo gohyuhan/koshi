@@ -16,13 +16,13 @@ use crate::event::{Event, RejectReason};
 use crate::geometry::Direction;
 use crate::ids::{ClientId, CommandId, PaneId, PluginId, SessionId, TabId};
 use crate::process::SpawnSpec;
-pub use crate::selection::{CopyTarget, GridPos, Selection, SelectionKind};
+pub use crate::selection::{CopyTarget, GridPosition, Selection, SelectionKind};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
 /// A requested mutation the runtime can apply. One variant exists per command
-/// the action registry can dispatch; [`Command::kind`] maps each variant to
+/// the action registry can dispatch; [`Command::get_command_kind`] maps each variant to
 /// its payload-free [`CommandKind`] discriminant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Command {
@@ -80,7 +80,7 @@ pub enum Command {
 /// The action registry ([`crate::action`]) routes a user-facing action to a
 /// core command by naming its `CommandKind`; the dispatcher then rebuilds the
 /// full typed `Command` from that kind plus resolved targets and args.
-/// [`Command::kind`] maps the other way.
+/// [`Command::get_command_kind`] maps the other way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CommandKind {
     /// Discriminant of [`Command::NewPane`].
@@ -128,7 +128,7 @@ pub enum CommandKind {
 impl Command {
     /// The payload-free [`CommandKind`] discriminant of this command.
     #[must_use]
-    pub const fn kind(&self) -> CommandKind {
+    pub const fn get_command_kind(&self) -> CommandKind {
         match self {
             Command::NewPane(_) => CommandKind::NewPane,
             Command::ClosePane(_) => CommandKind::ClosePane,
@@ -156,30 +156,35 @@ impl Command {
 
 /// Arguments for [`Command::NewPane`].
 ///
-/// The dispatcher routes on `stacked`: set, the new pane joins the source's
+/// The dispatcher routes on `should_stack`: set, the new pane joins the source's
 /// stack, creating one if needed; unset, the source leaf splits
 /// directionally.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewPaneArgs {
     /// Pane to split from; `None` uses the focused pane.
-    pub source: Option<PaneId>,
+    #[serde(rename = "source")]
+    pub source_pane_id: Option<PaneId>,
     /// Tab the new pane joins when no source pane names one: the split
     /// anchor becomes that tab's most recently focused pane (its first pane
     /// in layout order until one is focused). Ignored when `source` is set —
     /// a source pane's own tab wins.
     #[serde(default)]
-    pub tab: Option<TabId>,
+    #[serde(rename = "tab")]
+    pub tab_id: Option<TabId>,
     /// Split direction, always named by the client that issues the command:
     /// the direction its own `layout.new-pane-direction` setting resolves to,
     /// or the one the action or CLI flag states outright. Unused when
-    /// `stacked` is set — a stack has no direction.
+    /// `should_stack` is set — a stack has no direction.
     pub direction: Direction,
     /// Stack the new pane onto the source instead of splitting space.
-    pub stacked: bool,
+    #[serde(rename = "stacked")]
+    pub should_stack: bool,
     /// Working directory; `None` inherits.
-    pub cwd: Option<PathBuf>,
-    /// Command to run; `None` launches the default shell.
-    pub command: Option<SpawnSpec>,
+    #[serde(rename = "cwd")]
+    pub working_directory: Option<PathBuf>,
+    /// Spawn specification; `None` launches the default shell.
+    #[serde(rename = "command")]
+    pub spawn_spec: Option<SpawnSpec>,
     /// Client to show the new pane on.
     ///
     /// - `Some(client)`: that client is targeted, even over an in-session
@@ -188,35 +193,41 @@ pub struct NewPaneArgs {
     /// - `None`: the issuing client; for a source with no client, the
     ///   session's sole client. A session with several attached clients and
     ///   no named target is rejected.
-    pub client: Option<ClientId>,
+    #[serde(rename = "client")]
+    pub client_id: Option<ClientId>,
 }
 
 /// Arguments for [`Command::ClosePane`].
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ClosePaneArgs {
     /// Pane to close; `None` closes the focused pane.
-    pub pane: Option<PaneId>,
+    #[serde(rename = "pane")]
+    pub pane_id: Option<PaneId>,
     /// Kill the pane's child immediately, overriding its close policy.
-    pub force: bool,
+    #[serde(rename = "force")]
+    pub should_force_close: bool,
     /// Kill the child's whole process group: every descendant it spawned
     /// stops with it. Changes kill scope only; a `ConfirmIfBusy` pane still
     /// rejects the close while busy.
     #[serde(default)]
-    pub tree: bool,
+    #[serde(rename = "tree")]
+    pub should_kill_process_tree: bool,
 }
 
 /// Arguments for [`Command::ResizePane`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResizePaneArgs {
     /// Pane to resize; `None` resizes the focused pane.
-    pub pane: Option<PaneId>,
+    #[serde(rename = "pane")]
+    pub pane_id: Option<PaneId>,
     /// Which of the pane's borders moves.
     pub direction: Direction,
     /// Signed number of cells the border moves. Positive moves it outward —
     /// the pane grows toward `direction` and the neighbor on that side
     /// donates the cells; negative moves it inward — the pane shrinks and
     /// that neighbor gains the cells. Zero is rejected at dispatch.
-    pub size: i16,
+    #[serde(rename = "size")]
+    pub resize_amount_cells: i16,
 }
 
 /// The pane a [`Command::FocusPane`] moves focus to.
@@ -233,10 +244,12 @@ pub enum FocusTarget {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FocusPaneArgs {
     /// Pane to focus, by id or by direction from the focused pane.
-    pub target: FocusTarget,
+    #[serde(rename = "target")]
+    pub focus_target: FocusTarget,
     /// Client whose focus moves; resolved by the same rules as
-    /// [`NewPaneArgs::client`].
-    pub client: Option<ClientId>,
+    /// [`NewPaneArgs::client_id`].
+    #[serde(rename = "client")]
+    pub client_id: Option<ClientId>,
 }
 
 /// Arguments for [`Command::NewTab`]. The tab's name is not supplied by the
@@ -244,24 +257,29 @@ pub struct FocusPaneArgs {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct NewTabArgs {
     /// Working directory for the tab's first pane; `None` inherits.
-    pub cwd: Option<PathBuf>,
+    #[serde(rename = "cwd")]
+    pub working_directory: Option<PathBuf>,
     /// Client that switches onto the new tab; resolved by the same rules as
-    /// [`NewPaneArgs::client`].
-    pub client: Option<ClientId>,
+    /// [`NewPaneArgs::client_id`].
+    #[serde(rename = "client")]
+    pub client_id: Option<ClientId>,
 }
 
 /// Arguments for [`Command::CloseTab`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct CloseTabArgs {
     /// Tab to close; `None` closes the focused tab.
-    pub tab: Option<TabId>,
+    #[serde(rename = "tab")]
+    pub tab_id: Option<TabId>,
     /// Kill every pane's child immediately, overriding each close policy.
-    pub force: bool,
+    #[serde(rename = "force")]
+    pub should_force_close: bool,
     /// Kill each child's whole process group: every descendant stops with
     /// its pane. Changes kill scope only; a `ConfirmIfBusy` pane still
     /// rejects the close while busy.
     #[serde(default)]
-    pub tree: bool,
+    #[serde(rename = "tree")]
+    pub should_kill_process_tree: bool,
 }
 
 /// Where [`Command::FocusTab`] should move focus.
@@ -281,39 +299,46 @@ pub enum TabTarget {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FocusTabArgs {
     /// Which tab to focus.
-    pub target: TabTarget,
+    #[serde(rename = "target")]
+    pub focus_target: TabTarget,
     /// Client whose view switches; resolved by the same rules as
-    /// [`NewPaneArgs::client`].
-    pub client: Option<ClientId>,
+    /// [`NewPaneArgs::client_id`].
+    #[serde(rename = "client")]
+    pub client_id: Option<ClientId>,
 }
 
 /// Arguments for [`Command::WriteToPane`].
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct WriteToPaneArgs {
     /// Pane to write to; `None` writes to the focused pane.
-    pub pane: Option<PaneId>,
+    #[serde(rename = "pane")]
+    pub pane_id: Option<PaneId>,
     /// Raw bytes to inject into the pane's input.
-    pub data: Vec<u8>,
+    #[serde(rename = "data")]
+    pub input_bytes: Vec<u8>,
 }
 
 /// Arguments for [`Command::SetLockMode`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LockModeArgs {
     /// Whether the client should be locked (input passed through verbatim).
-    pub locked: bool,
+    #[serde(rename = "locked")]
+    pub is_locked: bool,
     /// Client whose lock mode changes; resolved by the same rules as
-    /// [`NewPaneArgs::client`].
+    /// [`NewPaneArgs::client_id`].
     #[serde(default)]
-    pub client: Option<ClientId>,
+    #[serde(rename = "client")]
+    pub client_id: Option<ClientId>,
 }
 
 /// Arguments for [`Command::ToggleLockMode`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ToggleLockModeArgs {
     /// Client whose lock mode flips; resolved by the same rules as
-    /// [`NewPaneArgs::client`].
+    /// [`NewPaneArgs::client_id`].
     #[serde(default)]
-    pub client: Option<ClientId>,
+    #[serde(rename = "client")]
+    pub client_id: Option<ClientId>,
 }
 
 /// Arguments for [`Command::RunCommandPane`]. The pane's display name is not
@@ -321,43 +346,52 @@ pub struct ToggleLockModeArgs {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunCommandPaneArgs {
     /// The command to spawn.
-    pub command: SpawnSpec,
+    #[serde(rename = "command")]
+    pub spawn_spec: SpawnSpec,
     /// Working directory; `None` inherits.
-    pub cwd: Option<PathBuf>,
+    #[serde(rename = "cwd")]
+    pub working_directory: Option<PathBuf>,
     /// Pane to split from; `None` uses the focused pane.
-    pub source: Option<PaneId>,
+    #[serde(rename = "source")]
+    pub source_pane_id: Option<PaneId>,
     /// Tab the new pane joins when no source pane names one; resolved by the
-    /// same rules as [`NewPaneArgs::tab`].
+    /// same rules as [`NewPaneArgs::tab_id`].
     #[serde(default)]
-    pub tab: Option<TabId>,
+    #[serde(rename = "tab")]
+    pub tab_id: Option<TabId>,
     /// Split direction for the new pane, resolved by the issuing client the
-    /// same way [`NewPaneArgs::direction`] is. Unused when `stacked` is set —
+    /// same way [`NewPaneArgs::direction`] is. Unused when `should_stack` is set —
     /// a stack has no direction.
     pub direction: Direction,
     /// Stack the new pane onto the source pane instead of splitting space.
-    pub stacked: bool,
+    #[serde(rename = "stacked")]
+    pub should_stack: bool,
     /// Client to show the new pane on; resolved by the same rules as
-    /// [`NewPaneArgs::client`].
+    /// [`NewPaneArgs::client_id`].
     #[serde(default)]
-    pub client: Option<ClientId>,
+    #[serde(rename = "client")]
+    pub client_id: Option<ClientId>,
 }
 
 /// Arguments for [`Command::MoveTab`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MoveTabArgs {
     /// Tab to move; `None` moves the focused tab.
-    pub tab: Option<TabId>,
+    #[serde(rename = "tab")]
+    pub tab_id: Option<TabId>,
     /// Destination zero-based index.
-    pub index: usize,
+    #[serde(rename = "index")]
+    pub target_tab_index: usize,
 }
 
 /// Arguments for [`Command::Detach`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct DetachArgs {
     /// Client that detaches; resolved by the same rules as
-    /// [`NewPaneArgs::client`].
+    /// [`NewPaneArgs::client_id`].
     #[serde(default)]
-    pub client: Option<ClientId>,
+    #[serde(rename = "client")]
+    pub client_id: Option<ClientId>,
 }
 
 /// Arguments for [`Command::SwitchSession`].
@@ -366,10 +400,12 @@ pub struct SwitchSessionArgs {
     /// Client to move; `None` moves the issuing client. A session with several
     /// attached clients and no named target is rejected.
     #[serde(default)]
-    pub client: Option<ClientId>,
+    #[serde(rename = "client")]
+    pub client_id: Option<ClientId>,
     /// Session the client moves to. The caller resolves it; this session never
     /// looks a name up.
-    pub session: SessionId,
+    #[serde(rename = "session")]
+    pub session_id: SessionId,
 }
 
 /// Selection and copy commands — the commands of visual mode.
@@ -398,7 +434,8 @@ pub enum VisualCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetSelectionArgs {
     /// The pane to highlight in.
-    pub pane: PaneId,
+    #[serde(rename = "pane")]
+    pub pane_id: PaneId,
     /// The highlight to put there, replacing any the pane already had.
     pub selection: Selection,
 }
@@ -410,7 +447,8 @@ pub struct SetSelectionArgs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClearSelectionArgs {
     /// The pane whose highlight is dropped.
-    pub pane: PaneId,
+    #[serde(rename = "pane")]
+    pub pane_id: PaneId,
 }
 
 /// Arguments for [`VisualCommand::Copy`].
@@ -420,15 +458,18 @@ pub struct ClearSelectionArgs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CopyArgs {
     /// The pane whose highlight is copied.
-    pub pane: PaneId,
+    #[serde(rename = "pane")]
+    pub pane_id: PaneId,
     /// Where the copied text goes.
-    pub target: CopyTarget,
+    #[serde(rename = "target")]
+    pub clipboard_target: CopyTarget,
     /// Whether blanks at the end of each copied row are dropped.
     ///
     /// A terminal row is padded to the pane's full width with blank cells: a
     /// highlight over `hello` in an 80-column pane covers 75 trailing blanks.
     /// `true` copies `hello`; `false` copies `hello` followed by those blanks.
-    pub trim_trailing_whitespace: bool,
+    #[serde(rename = "trim_trailing_whitespace")]
+    pub should_trim_trailing_whitespace: bool,
 }
 
 /// Plugin lifecycle commands.
@@ -452,42 +493,48 @@ pub enum PluginCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstallPluginArgs {
     /// Where to fetch the plugin from (path, URL, or registry ref).
-    pub source: String,
+    #[serde(rename = "source")]
+    pub plugin_source: String,
 }
 
 /// Arguments for [`PluginCommand::Uninstall`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UninstallPluginArgs {
     /// The plugin to remove.
-    pub plugin: PluginId,
+    #[serde(rename = "plugin")]
+    pub plugin_id: PluginId,
 }
 
 /// Arguments for [`PluginCommand::Enable`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnablePluginArgs {
     /// The plugin to enable.
-    pub plugin: PluginId,
+    #[serde(rename = "plugin")]
+    pub plugin_id: PluginId,
 }
 
 /// Arguments for [`PluginCommand::Disable`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DisablePluginArgs {
     /// The plugin to disable.
-    pub plugin: PluginId,
+    #[serde(rename = "plugin")]
+    pub plugin_id: PluginId,
 }
 
 /// Arguments for [`PluginCommand::Update`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdatePluginArgs {
     /// The plugin to update.
-    pub plugin: PluginId,
+    #[serde(rename = "plugin")]
+    pub plugin_id: PluginId,
 }
 
 /// Arguments for [`PluginCommand::Reload`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReloadPluginArgs {
     /// The plugin to reload.
-    pub plugin: PluginId,
+    #[serde(rename = "plugin")]
+    pub plugin_id: PluginId,
 }
 
 // === Command envelope and source metadata ===
@@ -539,11 +586,12 @@ pub enum CommandSource {
         session_id: Option<SessionId>,
         /// The client the caller named on the command line, for a command whose
         /// own arguments carry no client field; `None` when the invocation named
-        /// none. Read by [`CommandSource::target_client`]. A source names this
+        /// none. Read by [`CommandSource::get_target_client_id`]. A source names this
         /// client and an issuing client separately, and this one is never the
         /// issuer.
         #[serde(default)]
-        target_client: Option<ClientId>,
+        #[serde(rename = "target_client")]
+        target_client_id: Option<ClientId>,
     },
     /// A command issued by a plugin.
     Plugin {
@@ -560,9 +608,9 @@ impl CommandSource {
     /// pane was spawned for a client; `ExternalCli`, `Plugin`, and `Internal`
     /// never do. `ExternalCli` never names a client here even when the
     /// invocation named one — that client is a target the caller chose, read
-    /// through [`Self::target_client`], not the issuer.
+    /// through [`Self::get_target_client_id`], not the issuer.
     #[must_use]
-    pub const fn client_id(&self) -> Option<ClientId> {
+    pub const fn get_client_id(&self) -> Option<ClientId> {
         match self {
             CommandSource::KeyBinding { client_id } | CommandSource::Mouse { client_id } => {
                 Some(*client_id)
@@ -579,9 +627,11 @@ impl CommandSource {
     /// `None`. A target that is not attached to the acting session is refused,
     /// never replaced by a fallback.
     #[must_use]
-    pub const fn target_client(&self) -> Option<ClientId> {
+    pub const fn get_target_client_id(&self) -> Option<ClientId> {
         match self {
-            CommandSource::ExternalCli { target_client, .. } => *target_client,
+            CommandSource::ExternalCli {
+                target_client_id, ..
+            } => *target_client_id,
             CommandSource::KeyBinding { .. }
             | CommandSource::Mouse { .. }
             | CommandSource::InSessionCli { .. }
@@ -592,19 +642,19 @@ impl CommandSource {
 
     /// Construct a [`CommandSource::KeyBinding`].
     #[must_use]
-    pub const fn key_binding(client_id: ClientId) -> Self {
+    pub const fn from_key_binding(client_id: ClientId) -> Self {
         CommandSource::KeyBinding { client_id }
     }
 
     /// Construct a [`CommandSource::Mouse`].
     #[must_use]
-    pub const fn mouse(client_id: ClientId) -> Self {
+    pub const fn from_mouse(client_id: ClientId) -> Self {
         CommandSource::Mouse { client_id }
     }
 
     /// Construct a [`CommandSource::InSessionCli`].
     #[must_use]
-    pub const fn in_session_cli(
+    pub const fn from_in_session_cli(
         session_id: SessionId,
         client_id: Option<ClientId>,
         pane_id: PaneId,
@@ -620,19 +670,19 @@ impl CommandSource {
 
     /// Construct a [`CommandSource::ExternalCli`].
     #[must_use]
-    pub const fn external_cli(
+    pub const fn from_external_cli(
         session_id: Option<SessionId>,
-        target_client: Option<ClientId>,
+        target_client_id: Option<ClientId>,
     ) -> Self {
         CommandSource::ExternalCli {
             session_id,
-            target_client,
+            target_client_id,
         }
     }
 
     /// Construct a [`CommandSource::Plugin`].
     #[must_use]
-    pub const fn plugin(plugin_id: PluginId) -> Self {
+    pub const fn from_plugin(plugin_id: PluginId) -> Self {
         CommandSource::Plugin { plugin_id }
     }
 }
@@ -640,8 +690,8 @@ impl CommandSource {
 /// Why a [`CommandEnvelope`] is not internally consistent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandEnvelopeError {
-    /// `client_id` does not match the client named by `source`, or names a
-    /// client for a source that has none.
+    /// `client_id` does not match the client named by `command_source`, or
+    /// names a client for a source that has none.
     ClientIdMismatch,
 }
 
@@ -659,18 +709,20 @@ impl std::error::Error for CommandEnvelopeError {}
 
 /// One command crossing a boundary, with its identity, origin, and timestamp.
 ///
-/// `client_id` mirrors the client named by `source`; the two must agree.
+/// `client_id` mirrors the client named by `command_source`; the two must agree.
 /// Deserialization is routed through `CommandEnvelopeWire`, which rejects any
-/// envelope where they disagree. [`CommandEnvelope::new`] derives the field;
-/// [`CommandEnvelope::validate`] checks a hand-built value.
+/// envelope where they disagree. [`CommandEnvelope::from_parts`] derives the field;
+/// [`CommandEnvelope::validate_command_envelope`] checks a hand-built value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "CommandEnvelopeWire")]
 pub struct CommandEnvelope {
     /// Unique id for this command transaction.
-    pub id: CommandId,
+    #[serde(rename = "id")]
+    pub command_id: CommandId,
     /// Where the command originated.
-    pub source: CommandSource,
-    /// Client the command is attributed to; mirrors the source's client when it
+    #[serde(rename = "source")]
+    pub command_source: CommandSource,
+    /// Client the command is attributed to; mirrors the command source's client when it
     /// names one, and is `None` for sources that do not.
     pub client_id: Option<ClientId>,
     /// When the command was issued, as wall-clock time. The envelope crosses
@@ -681,34 +733,34 @@ pub struct CommandEnvelope {
 }
 
 impl CommandEnvelope {
-    /// Build an envelope, deriving `client_id` from `source`. The caller
-    /// supplies `id` and `issued_at`; this reads no clock and draws no random
+    /// Build an envelope, deriving `client_id` from `command_source`. The caller
+    /// supplies `command_id` and `issued_at`; this reads no clock and draws no random
     /// value.
     #[must_use]
-    pub fn new(
-        id: CommandId,
-        source: CommandSource,
+    pub fn from_parts(
+        command_id: CommandId,
+        command_source: CommandSource,
         issued_at: SystemTime,
         command: Command,
     ) -> Self {
-        let client_id = source.client_id();
+        let client_id = command_source.get_client_id();
         CommandEnvelope {
-            id,
-            source,
+            command_id,
+            command_source,
             client_id,
             issued_at,
             command,
         }
     }
 
-    /// Check that `client_id` matches the client named by `source`, returning
+    /// Check that `client_id` matches the client named by `command_source`, returning
     /// the envelope unchanged when it does. Deserialization runs this check on
     /// every envelope.
     ///
     /// # Errors
     /// Returns [`CommandEnvelopeError::ClientIdMismatch`] if the two disagree.
-    pub fn validate(self) -> Result<Self, CommandEnvelopeError> {
-        if self.client_id == self.source.client_id() {
+    pub fn validate_command_envelope(self) -> Result<Self, CommandEnvelopeError> {
+        if self.client_id == self.command_source.get_client_id() {
             Ok(self)
         } else {
             Err(CommandEnvelopeError::ClientIdMismatch)
@@ -718,11 +770,13 @@ impl CommandEnvelope {
 
 /// Unvalidated wire shape for [`CommandEnvelope`]. Deserialization lands here
 /// first, then the `try_from` conversion below runs
-/// [`CommandEnvelope::validate`], which rejects inconsistent attribution.
+/// [`CommandEnvelope::validate_command_envelope`], which rejects inconsistent attribution.
 #[derive(Deserialize)]
 struct CommandEnvelopeWire {
-    id: CommandId,
-    source: CommandSource,
+    #[serde(rename = "id")]
+    command_id: CommandId,
+    #[serde(rename = "source")]
+    command_source: CommandSource,
     client_id: Option<ClientId>,
     issued_at: SystemTime,
     command: Command,
@@ -733,13 +787,13 @@ impl TryFrom<CommandEnvelopeWire> for CommandEnvelope {
 
     fn try_from(wire: CommandEnvelopeWire) -> Result<Self, Self::Error> {
         CommandEnvelope {
-            id: wire.id,
-            source: wire.source,
+            command_id: wire.command_id,
+            command_source: wire.command_source,
             client_id: wire.client_id,
             issued_at: wire.issued_at,
             command: wire.command,
         }
-        .validate()
+        .validate_command_envelope()
     }
 }
 
@@ -792,7 +846,7 @@ pub enum CliExitCode {
 impl CliExitCode {
     /// The numeric exit code this variant reports to the OS.
     #[must_use]
-    pub const fn code(self) -> i32 {
+    pub const fn get_exit_code(self) -> i32 {
         self as i32
     }
 }

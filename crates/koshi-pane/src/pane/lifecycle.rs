@@ -30,7 +30,7 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{error::InvalidTransition, pane::state::PaneKind};
+use crate::{error::InvalidTransitionError, pane::state::PaneKind};
 
 /// Where a pane sits between spawn and removal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,43 +39,58 @@ pub enum PaneLifecycle {
     Spawning,
     /// The child process is running.
     Running,
-    /// The child process ended at `at`. `code` is `None` when a signal killed
+    /// The child process ended at `exited_at`. `exit_code` is `None` when a signal killed
     /// the child or when no exit status was available.
-    Exited { code: Option<i32>, at: SystemTime },
-    /// The pane is shutting down. `since` is the time of the close request.
-    Closing { since: SystemTime },
+    Exited {
+        #[serde(rename = "code")]
+        exit_code: Option<i32>,
+        #[serde(rename = "at")]
+        exited_at: SystemTime,
+    },
+    /// The pane is shutting down. `close_requested_at` is the time of the close request.
+    Closing {
+        #[serde(rename = "since")]
+        close_requested_at: SystemTime,
+    },
     /// The pane is removed from the registry. This state is terminal.
     Removed,
 }
 
 impl PaneLifecycle {
-    /// Applies `event` to this state and returns the next state. Returns
+    /// Applies `lifecycle_event` to this state and returns the next state. Returns
     /// [`InvalidTransition`] when the pair is not one of the six legal steps.
-    /// `kind` only fills in that error.
+    /// `pane_kind` fills in that error.
     pub(crate) fn transition(
         self,
-        event: PaneLifecycleEvent,
-        kind: PaneKind,
-    ) -> Result<Self, InvalidTransition> {
-        match (self, event) {
+        lifecycle_event: PaneLifecycleEvent,
+        pane_kind: PaneKind,
+    ) -> Result<Self, InvalidTransitionError> {
+        match (self, lifecycle_event) {
             (PaneLifecycle::Spawning, PaneLifecycleEvent::ProcessStarted) => {
                 Ok(PaneLifecycle::Running)
             }
             (
                 PaneLifecycle::Spawning | PaneLifecycle::Running | PaneLifecycle::Exited { .. },
-                PaneLifecycleEvent::CloseRequested { since },
-            ) => Ok(PaneLifecycle::Closing { since }),
-            (PaneLifecycle::Running, PaneLifecycleEvent::ProcessExited { code, at }) => {
-                Ok(PaneLifecycle::Exited { code, at })
-            }
+                PaneLifecycleEvent::CloseRequested { close_requested_at },
+            ) => Ok(PaneLifecycle::Closing { close_requested_at }),
+            (
+                PaneLifecycle::Running,
+                PaneLifecycleEvent::ProcessExited {
+                    exit_code,
+                    exited_at,
+                },
+            ) => Ok(PaneLifecycle::Exited {
+                exit_code,
+                exited_at,
+            }),
             (PaneLifecycle::Closing { .. }, PaneLifecycleEvent::Cleaned) => {
                 Ok(PaneLifecycle::Removed)
             }
 
-            _ => Err(InvalidTransition {
-                from: self,
-                event,
-                kind,
+            _ => Err(InvalidTransitionError {
+                previous_lifecycle: self,
+                lifecycle_event,
+                pane_kind,
             }),
         }
     }
@@ -88,12 +103,20 @@ impl PaneLifecycle {
 pub enum PaneLifecycleEvent {
     /// The child process became live.
     ProcessStarted,
-    /// The child process ended at `at`. `code` is `None` when a signal killed
+    /// The child process ended at `exited_at`. `exit_code` is `None` when a signal killed
     /// the child or when no exit status was available.
-    ProcessExited { code: Option<i32>, at: SystemTime },
-    /// A user or a policy asked the pane to close. `since` is the time of the
-    /// request.
-    CloseRequested { since: SystemTime },
+    ProcessExited {
+        #[serde(rename = "code")]
+        exit_code: Option<i32>,
+        #[serde(rename = "at")]
+        exited_at: SystemTime,
+    },
+    /// A user or a policy asked the pane to close. `close_requested_at` is the
+    /// time of the request.
+    CloseRequested {
+        #[serde(rename = "since")]
+        close_requested_at: SystemTime,
+    },
     /// The close finished its cleanup.
     Cleaned,
 }

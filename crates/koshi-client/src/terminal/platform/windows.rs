@@ -24,44 +24,47 @@ use windows_sys::Win32::System::Threading::{
 use crate::terminal::reader;
 
 const CP_UTF8: u32 = 65_001;
-const ESCAPE_SEQUENCE_TIMEOUT: Duration = Duration::from_millis(25);
-const RESIZE_POLL_INTERVAL: Duration = Duration::from_millis(50);
-const INPUT_BYTES: usize = 4_096;
-const OUTPUT_BUFFER_BYTES: usize = 4_096;
+const ESCAPE_SEQUENCE_TIMEOUT_DURATION: Duration = Duration::from_millis(25);
+const RESIZE_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(50);
+const INPUT_BYTE_COUNT: usize = 4_096;
+const OUTPUT_BUFFER_BYTE_COUNT: usize = 4_096;
 
 /// The mode and output owner for one Windows console.
 #[derive(Debug)]
 pub(crate) struct TerminalDevice {
-    input: ConsoleHandle,
-    output: BufWriter<ConsoleHandle>,
+    input_handle: ConsoleHandle,
+    output_writer: BufWriter<ConsoleHandle>,
     original_input_mode: CONSOLE_MODE,
     original_output_mode: CONSOLE_MODE,
     original_input_code_page: u32,
     original_output_code_page: u32,
-    raw: bool,
+    is_raw_mode: bool,
 }
 
 impl TerminalDevice {
     /// Open the console and its event source without changing global modes.
-    pub(crate) fn open() -> io::Result<(Self, EventSource)> {
-        let input = ConsoleHandle::open("CONIN$")?;
-        let output = ConsoleHandle::open("CONOUT$")?;
-        let source = EventSource::new(input.try_clone()?, output.try_clone()?)?;
-        let original_input_mode = input.mode()?;
-        let original_output_mode = output.mode()?;
+    pub(crate) fn open_terminal_device() -> io::Result<(Self, EventSource)> {
+        let input_handle = ConsoleHandle::open_console_handle("CONIN$")?;
+        let output_handle = ConsoleHandle::open_console_handle("CONOUT$")?;
+        let event_source = EventSource::from_console_handles(
+            input_handle.clone_handle()?,
+            output_handle.clone_handle()?,
+        )?;
+        let original_input_mode = input_handle.read_console_mode()?;
+        let original_output_mode = output_handle.read_console_mode()?;
         let original_input_code_page = input_code_page()?;
         let original_output_code_page = output_code_page()?;
         Ok((
             Self {
-                input,
-                output: BufWriter::with_capacity(OUTPUT_BUFFER_BYTES, output),
+                input_handle,
+                output_writer: BufWriter::with_capacity(OUTPUT_BUFFER_BYTE_COUNT, output_handle),
                 original_input_mode,
                 original_output_mode,
                 original_input_code_page,
                 original_output_code_page,
-                raw: false,
+                is_raw_mode: false,
             },
-            source,
+            event_source,
         ))
     }
 
@@ -81,47 +84,49 @@ impl TerminalDevice {
             | ENABLE_VIRTUAL_TERMINAL_PROCESSING
             | DISABLE_NEWLINE_AUTO_RETURN;
 
-        let result = (|| {
+        let mode_change_result = (|| {
             set_input_code_page(CP_UTF8)?;
             set_output_code_page(CP_UTF8)?;
-            self.output.get_ref().set_mode(output_mode)?;
-            self.input.set_mode(input_mode)
+            self.output_writer.get_ref().set_console_mode(output_mode)?;
+            self.input_handle.set_console_mode(input_mode)
         })();
-        if let Err(error) = result {
-            let _ = self.restore();
-            return Err(error);
+        if let Err(mode_change_error) = mode_change_result {
+            let _ = self.restore_console_modes();
+            return Err(mode_change_error);
         }
-        self.raw = true;
+        self.is_raw_mode = true;
         Ok(())
     }
 
-    /// Restore the console modes and code pages captured by [`Self::open`].
+    /// Restore the console modes and code pages captured by [`Self::open_terminal_device`].
     pub(crate) fn enter_cooked_mode(&mut self) -> io::Result<()> {
-        if !self.raw {
+        if !self.is_raw_mode {
             return Ok(());
         }
-        let result = self.restore();
-        if result.is_ok() {
-            self.raw = false;
+        let restore_result = self.restore_console_modes();
+        if restore_result.is_ok() {
+            self.is_raw_mode = false;
         }
-        result
+        restore_result
     }
 
-    fn restore(&mut self) -> io::Result<()> {
+    fn restore_console_modes(&mut self) -> io::Result<()> {
         let mut first_error = None;
-        keep_first(
+        retain_first_error(
             &mut first_error,
-            self.input.set_mode(self.original_input_mode),
+            self.input_handle.set_console_mode(self.original_input_mode),
         );
-        keep_first(
+        retain_first_error(
             &mut first_error,
-            self.output.get_ref().set_mode(self.original_output_mode),
+            self.output_writer
+                .get_ref()
+                .set_console_mode(self.original_output_mode),
         );
-        keep_first(
+        retain_first_error(
             &mut first_error,
             set_input_code_page(self.original_input_code_page),
         );
-        keep_first(
+        retain_first_error(
             &mut first_error,
             set_output_code_page(self.original_output_code_page),
         );
@@ -130,12 +135,12 @@ impl TerminalDevice {
 }
 
 impl Write for TerminalDevice {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.output.write(bytes)
+    fn write(&mut self, terminal_output_bytes: &[u8]) -> io::Result<usize> {
+        self.output_writer.write(terminal_output_bytes)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.output.flush()
+        self.output_writer.flush()
     }
 }
 
@@ -149,133 +154,145 @@ impl Drop for TerminalDevice {
 /// Parsed input, resize records, and interruption for one Windows console.
 #[derive(Debug)]
 pub(crate) struct EventSource {
-    input: ConsoleHandle,
-    size: ConsoleHandle,
+    input_handle: ConsoleHandle,
+    window_size_handle: ConsoleHandle,
     parser: Parser,
-    waker: Arc<EventHandle>,
+    wake_event: Arc<EventHandle>,
     pending_since: Option<Instant>,
-    last_size: WindowSize,
+    last_window_size: WindowSize,
     next_resize_check: Instant,
 }
 
 impl EventSource {
-    fn new(input: ConsoleHandle, size: ConsoleHandle) -> io::Result<Self> {
-        let last_size = size.window_size()?;
+    fn from_console_handles(
+        input_handle: ConsoleHandle,
+        window_size_handle: ConsoleHandle,
+    ) -> io::Result<Self> {
+        let last_window_size = window_size_handle.read_window_size()?;
         Ok(Self {
-            input,
-            size,
+            input_handle,
+            window_size_handle,
             parser: Parser::default(),
-            waker: Arc::new(EventHandle::new()?),
+            wake_event: Arc::new(EventHandle::new()?),
             pending_since: None,
-            last_size,
-            next_resize_check: Instant::now() + RESIZE_POLL_INTERVAL,
+            last_window_size,
+            next_resize_check: Instant::now() + RESIZE_POLL_INTERVAL_DURATION,
         })
     }
 
     /// Return a handle that interrupts this source's wait.
-    pub(crate) fn waker(&self) -> Waker {
+    pub(crate) fn create_waker(&self) -> Waker {
         Waker {
-            event: Arc::clone(&self.waker),
+            event_handle: Arc::clone(&self.wake_event),
         }
     }
 
-    fn read_input(&mut self) -> io::Result<()> {
-        let mut bytes = [0_u8; INPUT_BYTES];
-        let mut count = 0_u32;
-        let read = unsafe {
+    fn read_input_bytes(&mut self) -> io::Result<()> {
+        let mut input_bytes = [0_u8; INPUT_BYTE_COUNT];
+        let mut byte_count = 0_u32;
+        let read_result = unsafe {
             ReadFile(
-                self.input.raw(),
-                bytes.as_mut_ptr(),
-                INPUT_BYTES as u32,
-                &mut count,
+                self.input_handle.get_raw_handle(),
+                input_bytes.as_mut_ptr(),
+                INPUT_BYTE_COUNT as u32,
+                &mut byte_count,
                 ptr::null_mut(),
             )
         };
-        if read == 0 {
+        if read_result == 0 {
             return Err(io::Error::last_os_error());
         }
-        if count == 0 {
+        if byte_count == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "terminal input reached end-of-file",
             ));
         }
-        self.parser.push(&bytes[..count as usize]);
-        self.pending_since = self.parser.needs_sequence_timeout().then(Instant::now);
+        self.parser
+            .process_input_bytes(&input_bytes[..byte_count as usize]);
+        self.pending_since = self
+            .parser
+            .needs_input_sequence_timeout()
+            .then(Instant::now);
         Ok(())
     }
 
-    fn resize_event(&mut self) -> io::Result<Option<Event>> {
-        self.next_resize_check = Instant::now() + RESIZE_POLL_INTERVAL;
-        let size = self.size.window_size()?;
-        if size == self.last_size {
+    fn read_resize_event(&mut self) -> io::Result<Option<Event>> {
+        self.next_resize_check = Instant::now() + RESIZE_POLL_INTERVAL_DURATION;
+        let current_window_size = self.window_size_handle.read_window_size()?;
+        if current_window_size == self.last_window_size {
             return Ok(None);
         }
-        self.last_size = size;
-        Ok(Some(Event::WindowResized(size)))
+        self.last_window_size = current_window_size;
+        Ok(Some(Event::WindowResized(current_window_size)))
     }
 }
 
 impl reader::EventSource for EventSource {
-    fn try_read(&mut self, timeout: Option<Duration>) -> io::Result<Option<Event>> {
-        let deadline = timeout.map(|duration| Instant::now() + duration);
+    fn try_read_event(&mut self, timeout: Option<Duration>) -> io::Result<Option<Event>> {
+        let deadline_instant = timeout.map(|timeout_duration| Instant::now() + timeout_duration);
         loop {
-            if let Some(event) = self.parser.pop() {
-                return Ok(Some(event));
+            if let Some(parsed_event) = self.parser.remove_next_pending_event() {
+                return Ok(Some(parsed_event));
             }
             if Instant::now() >= self.next_resize_check {
-                if let Some(event) = self.resize_event()? {
-                    return Ok(Some(event));
+                if let Some(resize_event) = self.read_resize_event()? {
+                    return Ok(Some(resize_event));
                 }
             }
             let sequence_timeout = self
                 .pending_since
-                .map(|start| ESCAPE_SEQUENCE_TIMEOUT.saturating_sub(start.elapsed()));
-            let wait = shorter(
+                .map(|start| ESCAPE_SEQUENCE_TIMEOUT_DURATION.saturating_sub(start.elapsed()));
+            let wait_timeout = choose_shorter_duration(
                 Some(
                     self.next_resize_check
                         .saturating_duration_since(Instant::now()),
                 ),
-                deadline.map(|end| end.saturating_duration_since(Instant::now())),
+                deadline_instant.map(|deadline| deadline.saturating_duration_since(Instant::now())),
             );
-            let wait = shorter(wait, sequence_timeout);
-            let handles = [self.waker.raw(), self.input.raw()];
-            let result = unsafe {
+            let wait_timeout = choose_shorter_duration(wait_timeout, sequence_timeout);
+            let wait_handles = [
+                self.wake_event.get_raw_handle(),
+                self.input_handle.get_raw_handle(),
+            ];
+            let wait_result = unsafe {
                 WaitForMultipleObjects(
-                    handles.len() as u32,
-                    handles.as_ptr(),
+                    wait_handles.len() as u32,
+                    wait_handles.as_ptr(),
                     0,
-                    wait.map(wait_millis).unwrap_or(INFINITE),
+                    wait_timeout
+                        .map(convert_wait_timeout_milliseconds)
+                        .unwrap_or(INFINITE),
                 )
             };
-            match result {
+            match wait_result {
                 WAIT_OBJECT_0 => {
                     return Err(io::Error::new(
                         io::ErrorKind::Interrupted,
                         "terminal input was interrupted",
                     ));
                 }
-                value if value == WAIT_OBJECT_0 + 1 => {
-                    self.read_input()?;
+                wait_result if wait_result == WAIT_OBJECT_0 + 1 => {
+                    self.read_input_bytes()?;
                     continue;
                 }
                 WAIT_TIMEOUT => {}
                 WAIT_FAILED => return Err(io::Error::last_os_error()),
-                value => {
+                unexpected_wait_result => {
                     return Err(io::Error::other(format!(
-                        "unexpected terminal wait result {value}"
+                        "unexpected terminal wait result {unexpected_wait_result}"
                     )))
                 }
             }
             if self
                 .pending_since
-                .is_some_and(|start| start.elapsed() >= ESCAPE_SEQUENCE_TIMEOUT)
+                .is_some_and(|start| start.elapsed() >= ESCAPE_SEQUENCE_TIMEOUT_DURATION)
             {
-                self.parser.finish_pending();
+                self.parser.finish_pending_input();
                 self.pending_since = None;
                 continue;
             }
-            if deadline.is_some_and(|end| Instant::now() >= end) {
+            if deadline_instant.is_some_and(|deadline| Instant::now() >= deadline) {
                 return Ok(None);
             }
         }
@@ -285,13 +302,13 @@ impl reader::EventSource for EventSource {
 /// A cloneable interruption handle for one Windows input source.
 #[derive(Debug, Clone)]
 pub(crate) struct Waker {
-    event: Arc<EventHandle>,
+    event_handle: Arc<EventHandle>,
 }
 
 impl Waker {
     /// Interrupt a blocked event read.
     pub(crate) fn wake(&self) -> io::Result<()> {
-        if unsafe { SetEvent(self.event.raw()) } == 0 {
+        if unsafe { SetEvent(self.event_handle.get_raw_handle()) } == 0 {
             Err(io::Error::last_os_error())
         } else {
             Ok(())
@@ -304,15 +321,15 @@ struct EventHandle(OwnedHandle);
 
 impl EventHandle {
     fn new() -> io::Result<Self> {
-        let handle = unsafe { CreateEventW(ptr::null(), 0, 0, ptr::null()) };
-        if handle.is_null() {
+        let event_handle = unsafe { CreateEventW(ptr::null(), 0, 0, ptr::null()) };
+        if event_handle.is_null() {
             return Err(io::Error::last_os_error());
         }
-        let handle = unsafe { OwnedHandle::from_raw_handle(handle as RawHandle) };
-        Ok(Self(handle))
+        let owned_event_handle = unsafe { OwnedHandle::from_raw_handle(event_handle as RawHandle) };
+        Ok(Self(owned_event_handle))
     }
 
-    fn raw(&self) -> HANDLE {
+    fn get_raw_handle(&self) -> HANDLE {
         self.0.as_raw_handle() as HANDLE
     }
 }
@@ -321,62 +338,72 @@ impl EventHandle {
 ///
 /// The pixel fields are always `None`: the Windows console reports no pixel
 /// dimensions.
-pub(crate) fn window_size() -> io::Result<WindowSize> {
-    ConsoleHandle::open("CONOUT$")?.window_size()
+pub(crate) fn read_window_size() -> io::Result<WindowSize> {
+    ConsoleHandle::open_console_handle("CONOUT$")?.read_window_size()
 }
 
 #[derive(Debug)]
 struct ConsoleHandle(OwnedHandle);
 
 impl ConsoleHandle {
-    fn open(name: &str) -> io::Result<Self> {
-        let file = OpenOptions::new().read(true).write(true).open(name)?;
-        Ok(Self(OwnedHandle::from(file)))
+    fn open_console_handle(console_device_path: &str) -> io::Result<Self> {
+        let console_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(console_device_path)?;
+        Ok(Self(OwnedHandle::from(console_file)))
     }
 
-    fn try_clone(&self) -> io::Result<Self> {
+    fn clone_handle(&self) -> io::Result<Self> {
         self.0.try_clone().map(Self)
     }
 
-    fn raw(&self) -> HANDLE {
+    fn get_raw_handle(&self) -> HANDLE {
         self.0.as_raw_handle() as HANDLE
     }
 
-    fn mode(&self) -> io::Result<CONSOLE_MODE> {
-        let mut mode = 0;
-        if unsafe { GetConsoleMode(self.raw(), &mut mode) } == 0 {
+    fn read_console_mode(&self) -> io::Result<CONSOLE_MODE> {
+        let mut console_mode = 0;
+        if unsafe { GetConsoleMode(self.get_raw_handle(), &mut console_mode) } == 0 {
             Err(io::Error::last_os_error())
         } else {
-            Ok(mode)
+            Ok(console_mode)
         }
     }
 
-    fn set_mode(&self, mode: CONSOLE_MODE) -> io::Result<()> {
-        if unsafe { SetConsoleMode(self.raw(), mode) } == 0 {
+    fn set_console_mode(&self, console_mode: CONSOLE_MODE) -> io::Result<()> {
+        if unsafe { SetConsoleMode(self.get_raw_handle(), console_mode) } == 0 {
             Err(io::Error::last_os_error())
         } else {
             Ok(())
         }
     }
 
-    fn window_size(&self) -> io::Result<WindowSize> {
-        let mut info = CONSOLE_SCREEN_BUFFER_INFO::default();
-        if unsafe { GetConsoleScreenBufferInfo(self.raw(), &mut info) } == 0 {
+    fn read_window_size(&self) -> io::Result<WindowSize> {
+        let mut console_screen_buffer_info = CONSOLE_SCREEN_BUFFER_INFO::default();
+        if unsafe {
+            GetConsoleScreenBufferInfo(self.get_raw_handle(), &mut console_screen_buffer_info)
+        } == 0
+        {
             return Err(io::Error::last_os_error());
         }
-        let cols = i32::from(info.srWindow.Right) - i32::from(info.srWindow.Left) + 1;
-        let rows = i32::from(info.srWindow.Bottom) - i32::from(info.srWindow.Top) + 1;
-        let cols = u16::try_from(cols)
+        let column_count = i32::from(console_screen_buffer_info.srWindow.Right)
+            - i32::from(console_screen_buffer_info.srWindow.Left)
+            + 1;
+        let row_count = i32::from(console_screen_buffer_info.srWindow.Bottom)
+            - i32::from(console_screen_buffer_info.srWindow.Top)
+            + 1;
+        let column_count = u16::try_from(column_count)
             .ok()
-            .filter(|value| *value != 0)
+            .filter(|column_count| *column_count != 0)
             .ok_or_else(|| io::Error::other("console window has no columns"))?;
-        let rows = u16::try_from(rows)
+        let row_count = u16::try_from(row_count)
             .ok()
-            .filter(|value| *value != 0)
+            .filter(|row_count| *row_count != 0)
             .ok_or_else(|| io::Error::other("console window has no rows"))?;
         Ok(WindowSize {
-            cols,
-            rows,
+            column_count,
+            row_count,
             pixel_width: None,
             pixel_height: None,
         })
@@ -384,22 +411,22 @@ impl ConsoleHandle {
 }
 
 impl Write for ConsoleHandle {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        let count = bytes.len().min(u32::MAX as usize);
-        let mut written = 0_u32;
-        let result = unsafe {
+    fn write(&mut self, console_output_bytes: &[u8]) -> io::Result<usize> {
+        let byte_count = console_output_bytes.len().min(u32::MAX as usize);
+        let mut written_byte_count = 0_u32;
+        let write_result = unsafe {
             WriteFile(
-                self.raw(),
-                bytes.as_ptr(),
-                count as u32,
-                &mut written,
+                self.get_raw_handle(),
+                console_output_bytes.as_ptr(),
+                byte_count as u32,
+                &mut written_byte_count,
                 ptr::null_mut(),
             )
         };
-        if result == 0 {
+        if write_result == 0 {
             Err(io::Error::last_os_error())
         } else {
-            Ok(written as usize)
+            Ok(written_byte_count as usize)
         }
     }
 
@@ -442,25 +469,28 @@ fn set_output_code_page(code_page: u32) -> io::Result<()> {
     }
 }
 
-fn keep_first(first: &mut Option<io::Error>, result: io::Result<()>) {
-    if let Err(error) = result {
-        if first.is_none() {
-            *first = Some(error);
+fn retain_first_error(first_error: &mut Option<io::Error>, operation_result: io::Result<()>) {
+    if let Err(operation_error) = operation_result {
+        if first_error.is_none() {
+            *first_error = Some(operation_error);
         }
     }
 }
 
-fn shorter(left: Option<Duration>, right: Option<Duration>) -> Option<Duration> {
-    match (left, right) {
-        (Some(left), Some(right)) => Some(left.min(right)),
-        (Some(value), None) | (None, Some(value)) => Some(value),
+fn choose_shorter_duration(
+    first_duration: Option<Duration>,
+    second_duration: Option<Duration>,
+) -> Option<Duration> {
+    match (first_duration, second_duration) {
+        (Some(first_duration), Some(second_duration)) => Some(first_duration.min(second_duration)),
+        (Some(timeout_duration), None) | (None, Some(timeout_duration)) => Some(timeout_duration),
         (None, None) => None,
     }
 }
 
-fn wait_millis(duration: Duration) -> u32 {
-    let millis = duration
+fn convert_wait_timeout_milliseconds(timeout_duration: Duration) -> u32 {
+    let timeout_milliseconds = timeout_duration
         .as_millis()
-        .saturating_add(u128::from(duration.subsec_nanos() % 1_000_000 != 0));
-    u32::try_from(millis.min(u128::from(INFINITE - 1))).unwrap_or(INFINITE - 1)
+        .saturating_add(u128::from(timeout_duration.subsec_nanos() % 1_000_000 != 0));
+    u32::try_from(timeout_milliseconds.min(u128::from(INFINITE - 1))).unwrap_or(INFINITE - 1)
 }
