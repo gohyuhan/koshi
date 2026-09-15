@@ -22,6 +22,7 @@ impl TerminalState {
     /// - prompt marks cleared,
     /// - scroll region (DECSTBM, the CSI sequence that sets the top/bottom
     ///   scroll margins) back to the full screen,
+    /// - horizontal margins (DECSLRM) back to the full width,
     /// - image placements cleared,
     /// - cursor home, shown, no wrap latch, no DECSC stash.
     ///
@@ -41,21 +42,24 @@ impl TerminalState {
             alternate.set_prompt_mark(row_index, false);
         }
         self.alternate_scroll_region = None;
+        self.alternate_horizontal_margins = None;
         self.alternate_cursor.row = 0;
         self.alternate_cursor.column = 0;
         self.alternate_cursor.is_visible = true;
         self.alternate_cursor.pending_wrap = false;
+        self.alternate_cursor.origin = false;
         self.alternate_cursor.saved = None;
     }
 
-    /// DECSC the primary screen's cursor (`row`, `column`, wrap latch) and render
-    /// state into the primary's saved slot, whichever screen is active. Called
-    /// by the `?1049` entry.
+    /// DECSC the primary screen's cursor (`row`, `column`, origin mode, wrap
+    /// latch) and render state into the primary's saved slot, whichever screen
+    /// is active. Called by the `?1049` entry.
     pub(super) fn save_primary_cursor(&mut self) {
         self.primary_cursor.saved = Some(SavedCursor {
             row: self.primary_cursor.row,
             column: self.primary_cursor.column,
             pending_wrap: self.primary_cursor.pending_wrap,
+            origin: self.primary_cursor.origin,
             render: self.primary_render,
         });
     }

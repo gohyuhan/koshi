@@ -47,6 +47,23 @@ fn a_soft_wide_row_end_travels_with_a_scrolled_row() {
 }
 
 #[test]
+fn partial_line_scroll_moves_cells_without_moving_row_metadata() {
+    let mut grid = Grid::blank(3, 3, Style::default());
+    grid.set_row_end(0, RowEnd::Soft);
+    grid.set_row_end(1, RowEnd::SoftWide);
+    grid.set_prompt_mark(2, true);
+    *grid.get_cell_mut(1, 1).expect("the cell exists") =
+        Cell::from_character('x', 1, Style::default());
+
+    grid.delete_lines_in_columns(0, 2, 1, 1, 1, Style::default());
+
+    assert_eq!(grid.get_cell(0, 1).map(Cell::get_character), Some('x'));
+    assert_eq!(grid.get_row_end(0), RowEnd::Soft);
+    assert_eq!(grid.get_row_end(1), RowEnd::SoftWide);
+    assert!(grid.get_row_metadata(2).has_prompt_mark);
+}
+
+#[test]
 fn cells_differing_only_by_a_combining_mark_are_not_equal() {
     let plain = Cell::from_character('e', 1, Style::default());
     let mut accented = Cell::from_character('e', 1, Style::default());

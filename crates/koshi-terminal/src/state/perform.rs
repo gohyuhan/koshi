@@ -120,13 +120,12 @@ impl vte::Perform for TerminalState {
                 // The row the cursor leaves soft-wraps into the next, including
                 // when a bottom-margin scroll moves it above a fresh blank row.
                 self.wrap_linefeed(RowEnd::Soft);
-                self.active_cursor_mut().column = 0;
+                self.active_cursor_mut().column = self.get_horizontal_margin_bounds().0;
             }
             self.clear_wrap_latch();
         }
 
-        let (_, column_count) = self.get_active_grid().get_grid_dimensions();
-        let last_column_index = column_count.saturating_sub(1);
+        let (first_column_index, last_column_index) = self.get_horizontal_margin_bounds();
         let style = self.active_render().style;
 
         // A wide glyph at the last column of a multi-column pane: blank that
@@ -135,7 +134,7 @@ impl vte::Perform for TerminalState {
         // `place_glyph` stores the glyph narrow in place.
         if glyph_width == 2
             && self.active_cursor().column == last_column_index
-            && last_column_index > 0
+            && first_column_index < last_column_index
         {
             // With autowrap off the glyph is dropped: the cursor rests on the
             // last column with no wrap armed, and the next glyph overwrites
@@ -158,7 +157,7 @@ impl vte::Perform for TerminalState {
             // The freed last column is a wide-glyph spacer; `SoftWide` marks the
             // row so a reflow re-joins the rows and drops the spacer.
             self.wrap_linefeed(RowEnd::SoftWide);
-            self.active_cursor_mut().column = 0;
+            self.active_cursor_mut().column = first_column_index;
             self.clear_wrap_latch();
         }
 
@@ -192,7 +191,7 @@ impl vte::Perform for TerminalState {
         // free column after it.
         let end_column_index = cursor_column_index + glyph_width - 1;
         if end_column_index >= last_column_index {
-            self.arm_wrap_latch(last_column_index);
+            self.arm_wrap_latch();
         } else {
             self.active_cursor_mut().column = end_column_index + 1;
         }
@@ -210,30 +209,44 @@ impl vte::Perform for TerminalState {
                 self.linefeed();
                 self.clear_wrap_latch();
             }
-            // CR: carriage return to column 0.
+            // CR: carriage return to the active left horizontal margin.
             0x0D => {
-                self.active_cursor_mut().column = 0;
+                let (minimum_column_index, _) = self.get_horizontal_margin_bounds();
+                self.active_cursor_mut().column = minimum_column_index;
                 self.clear_wrap_latch();
             }
-            // BS: backspace one column (no erase).
+            // BS: backspace one column (no erase), clamped to the active left
+            // horizontal margin.
             0x08 => {
-                self.active_cursor_mut().column = self.active_cursor().column.saturating_sub(1);
+                let (minimum_column_index, _) = self.get_horizontal_margin_bounds();
+                self.active_cursor_mut().column = self
+                    .active_cursor()
+                    .column
+                    .saturating_sub(1)
+                    .max(minimum_column_index);
                 self.clear_wrap_latch();
             }
-            // HT: advance to the next stored tab stop, clamped to the grid.
+            // HT: advance to the next stored tab stop, clamped to the active
+            // horizontal margins.
             0x09 => {
-                let (_, column_count) = self.get_active_grid().get_grid_dimensions();
-                let last_column_index = column_count.saturating_sub(1);
-                let cursor_column_index = self.active_cursor().column;
+                let (minimum_column_index, maximum_column_index) =
+                    self.get_horizontal_margin_bounds();
+                let cursor_column_index = self
+                    .active_cursor()
+                    .column
+                    .max(minimum_column_index)
+                    .min(maximum_column_index);
                 let next_column_index =
-                    find_next_tab_stop(&self.tab_stops, cursor_column_index, last_column_index);
+                    find_next_tab_stop(&self.tab_stops, cursor_column_index, maximum_column_index);
                 self.active_cursor_mut().column = next_column_index;
                 self.clear_wrap_latch();
             }
-            // NEL: move down one line, then return to column zero.
+            // NEL: move down one line, then return to the active left
+            // horizontal margin.
             0x85 => {
                 self.linefeed();
-                self.active_cursor_mut().column = 0;
+                let (minimum_column_index, _) = self.get_horizontal_margin_bounds();
+                self.active_cursor_mut().column = minimum_column_index;
                 self.clear_wrap_latch();
             }
             // HTS: set a horizontal tab stop at the cursor.
@@ -350,53 +363,65 @@ impl vte::Perform for TerminalState {
 
         let (row_count, column_count) = self.get_active_grid().get_grid_dimensions();
         let last_row_index = row_count.saturating_sub(1);
-        let last_column_index = column_count.saturating_sub(1);
 
         match action {
             // CUU — cursor up; absent/zero count means one.
             'A' => {
+                let (minimum_row_index, maximum_row_index) = self.get_cursor_row_bounds();
                 self.active_cursor_mut().row = self
                     .active_cursor()
                     .row
-                    .saturating_sub(get_cursor_move_count(params));
+                    .saturating_sub(get_cursor_move_count(params))
+                    .max(minimum_row_index)
+                    .min(maximum_row_index);
                 self.clear_wrap_latch();
             }
-            // CUD / VPR — cursor down, clamped to the last row (VPR `e` is the
-            // same vertical move as CUD).
+            // CUD / VPR — cursor down, clamped to the active row bounds (VPR
+            // `e` is the same vertical move as CUD).
             'B' | 'e' => {
                 let movement_count = get_cursor_move_count(params);
+                let (minimum_row_index, maximum_row_index) = self.get_cursor_row_bounds();
                 self.active_cursor_mut().row = self
                     .active_cursor()
                     .row
                     .saturating_add(movement_count)
-                    .min(last_row_index);
+                    .max(minimum_row_index)
+                    .min(maximum_row_index);
                 self.clear_wrap_latch();
             }
-            // CUF / HPR — cursor forward, clamped to the last column (HPR `a` is
-            // the same horizontal move as CUF).
+            // CUF / HPR — cursor forward, clamped to the active column bounds
+            // (HPR `a` is the same horizontal move as CUF).
             'C' | 'a' => {
                 let movement_count = get_cursor_move_count(params);
+                let (minimum_column_index, maximum_column_index) = self.get_cursor_column_bounds();
                 self.active_cursor_mut().column = self
                     .active_cursor()
                     .column
                     .saturating_add(movement_count)
-                    .min(last_column_index);
+                    .max(minimum_column_index)
+                    .min(maximum_column_index);
                 self.clear_wrap_latch();
             }
             // CUB — cursor back.
             'D' => {
+                let (minimum_column_index, maximum_column_index) = self.get_cursor_column_bounds();
                 self.active_cursor_mut().column = self
                     .active_cursor()
                     .column
-                    .saturating_sub(get_cursor_move_count(params));
+                    .saturating_sub(get_cursor_move_count(params))
+                    .max(minimum_column_index)
+                    .min(maximum_column_index);
                 self.clear_wrap_latch();
             }
             // CUP / HVP — absolute position; 1-based row;col arguments mapped to
             // 0-based coordinates and clamped into the grid (via `move_cursor_to`).
-            'H' | 'f' => self.move_cursor_to(
-                get_cursor_coordinate(params, 0),
-                get_cursor_coordinate(params, 1),
-            ),
+            'H' | 'f' => {
+                let (row_offset, column_offset) = self.get_cursor_origin_offsets();
+                self.move_cursor_to(
+                    get_cursor_coordinate(params, 0).saturating_add(row_offset),
+                    get_cursor_coordinate(params, 1).saturating_add(column_offset),
+                );
+            }
             // CHA / HPA — absolute column on the current row; 1-based → 0-based.
             'G' | '`' => {
                 let cursor_row_index = self.active_cursor().row;
@@ -405,7 +430,11 @@ impl vte::Perform for TerminalState {
             // VPA — absolute row in the current column; 1-based → 0-based.
             'd' => {
                 let cursor_column_index = self.active_cursor().column;
-                self.move_cursor_to(get_cursor_coordinate(params, 0), cursor_column_index);
+                let (row_offset, _) = self.get_cursor_origin_offsets();
+                self.move_cursor_to(
+                    get_cursor_coordinate(params, 0).saturating_add(row_offset),
+                    cursor_column_index,
+                );
             }
             // CNL — cursor next line: n rows down (clamped, no scroll) to col 0.
             'E' => {
@@ -423,28 +452,45 @@ impl vte::Perform for TerminalState {
                     .saturating_sub(get_cursor_move_count(params));
                 self.move_cursor_to(cursor_row_index, 0);
             }
-            // CHT — advance n stored tab stops, clamped to the last column.
+            // CHT — advance n stored tab stops, clamped to the active column
+            // bounds.
             'I' => {
-                let mut cursor_column_index = self.active_cursor().column;
+                let (minimum_column_index, maximum_column_index) = self.get_cursor_column_bounds();
+                let mut cursor_column_index = self
+                    .active_cursor()
+                    .column
+                    .max(minimum_column_index)
+                    .min(maximum_column_index);
                 for _ in 0..get_cursor_move_count(params) {
-                    if cursor_column_index >= last_column_index {
+                    if cursor_column_index >= maximum_column_index {
                         break;
                     }
-                    cursor_column_index =
-                        find_next_tab_stop(&self.tab_stops, cursor_column_index, last_column_index);
+                    cursor_column_index = find_next_tab_stop(
+                        &self.tab_stops,
+                        cursor_column_index,
+                        maximum_column_index,
+                    );
                 }
                 self.active_cursor_mut().column = cursor_column_index;
                 self.clear_wrap_latch();
             }
-            // CBT — retreat n stored tab stops, floored at column zero.
+            // CBT — retreat n stored tab stops, clamped to the active column
+            // bounds.
             'Z' => {
-                let mut cursor_column_index = self.active_cursor().column;
+                let (minimum_column_index, maximum_column_index) = self.get_cursor_column_bounds();
+                let mut cursor_column_index = self
+                    .active_cursor()
+                    .column
+                    .max(minimum_column_index)
+                    .min(maximum_column_index);
                 for _ in 0..get_cursor_move_count(params) {
-                    if cursor_column_index == 0 {
+                    if cursor_column_index <= minimum_column_index {
                         break;
                     }
                     cursor_column_index =
-                        find_previous_tab_stop(&self.tab_stops, cursor_column_index);
+                        find_previous_tab_stop(&self.tab_stops, cursor_column_index)
+                            .max(minimum_column_index)
+                            .min(maximum_column_index);
                 }
                 self.active_cursor_mut().column = cursor_column_index;
                 self.clear_wrap_latch();
@@ -642,20 +688,28 @@ impl vte::Perform for TerminalState {
                 let background_cell = self.active_render().style.get_background_fill_style();
                 let cursor_row_index = self.active_cursor().row;
                 let cursor_column_index = self.active_cursor().column;
-                let inserted_cell_count =
-                    requested_cell_count.min(column_count.saturating_sub(cursor_column_index));
-                let did_remove_image_fragments = self.discard_active_image_fragments(
-                    cursor_row_index,
-                    cursor_row_index.saturating_add(1),
-                    column_count.saturating_sub(inserted_cell_count),
-                    column_count,
-                );
-                self.active_grid_mut().insert_cells(
-                    cursor_row_index,
-                    cursor_column_index,
-                    requested_cell_count,
-                    background_cell,
-                );
+                let (left_column_index, right_column_index) = self.get_horizontal_margin_bounds();
+                let operation_column_index = cursor_column_index.max(left_column_index);
+                let mut did_remove_image_fragments = false;
+                if operation_column_index <= right_column_index {
+                    let inserted_cell_count =
+                        requested_cell_count.min(right_column_index - operation_column_index + 1);
+                    did_remove_image_fragments = self.discard_active_image_fragments(
+                        cursor_row_index,
+                        cursor_row_index.saturating_add(1),
+                        right_column_index
+                            .saturating_add(1)
+                            .saturating_sub(inserted_cell_count),
+                        right_column_index.saturating_add(1),
+                    );
+                    self.active_grid_mut().insert_cells_in_columns(
+                        cursor_row_index,
+                        operation_column_index,
+                        right_column_index,
+                        requested_cell_count,
+                        background_cell,
+                    );
+                }
                 self.finish_native_fragment_removal(did_remove_image_fragments);
                 self.normalize_wide_pairs(cursor_row_index);
                 self.clear_wrap_latch();
@@ -667,23 +721,50 @@ impl vte::Perform for TerminalState {
                 let background_cell = self.active_render().style.get_background_fill_style();
                 let cursor_row_index = self.active_cursor().row;
                 let cursor_column_index = self.active_cursor().column;
-                let deleted_cell_count =
-                    requested_cell_count.min(column_count.saturating_sub(cursor_column_index));
-                let did_remove_image_fragments = self.discard_active_image_fragments(
-                    cursor_row_index,
-                    cursor_row_index.saturating_add(1),
-                    cursor_column_index,
-                    cursor_column_index.saturating_add(deleted_cell_count),
-                );
-                self.active_grid_mut().delete_cells(
-                    cursor_row_index,
-                    cursor_column_index,
-                    requested_cell_count,
-                    background_cell,
-                );
+                let (left_column_index, right_column_index) = self.get_horizontal_margin_bounds();
+                let operation_column_index = cursor_column_index.max(left_column_index);
+                let mut did_remove_image_fragments = false;
+                if operation_column_index <= right_column_index {
+                    let deleted_cell_count =
+                        requested_cell_count.min(right_column_index - operation_column_index + 1);
+                    did_remove_image_fragments = self.discard_active_image_fragments(
+                        cursor_row_index,
+                        cursor_row_index.saturating_add(1),
+                        operation_column_index,
+                        operation_column_index.saturating_add(deleted_cell_count),
+                    );
+                    self.active_grid_mut().delete_cells_in_columns(
+                        cursor_row_index,
+                        operation_column_index,
+                        right_column_index,
+                        requested_cell_count,
+                        background_cell,
+                    );
+                }
                 self.finish_native_fragment_removal(did_remove_image_fragments);
                 self.normalize_wide_pairs(cursor_row_index);
                 self.clear_wrap_latch();
+            }
+            // DECSLRM — set the left/right margins and home the cursor when
+            // DECLRMM (`?69`) is enabled. With the mode off, the same final
+            // byte remains SCOSC.
+            's' if self.modes.declrmm => {
+                let last_column_index = column_count.saturating_sub(1);
+                let left_column_index = get_cursor_coordinate(params, 0).min(last_column_index);
+                let right_column_index = get_parameter_number_at(params, 1)
+                    .filter(|&parameter_number| parameter_number != 0)
+                    .map_or(last_column_index, |parameter_number| parameter_number - 1)
+                    .min(last_column_index);
+                if left_column_index < right_column_index {
+                    let horizontal_margins =
+                        if left_column_index == 0 && right_column_index == last_column_index {
+                            None
+                        } else {
+                            Some((left_column_index, right_column_index))
+                        };
+                    *self.horizontal_margins_mut() = horizontal_margins;
+                    self.move_cursor_to(0, 0);
+                }
             }
             // SCOSC — save cursor (ANSI.SYS), companion to DECSC.
             's' => self.save_cursor(),
@@ -771,9 +852,7 @@ impl vte::Perform for TerminalState {
                         Screen::Primary => self.primary_scroll_region = scroll_region,
                         Screen::Alternate => self.alternate_scroll_region = scroll_region,
                     }
-                    self.active_cursor_mut().row = 0;
-                    self.active_cursor_mut().column = 0;
-                    self.clear_wrap_latch();
+                    self.move_cursor_to(0, 0);
                 }
             }
             // Any other CSI final byte is ignored.
@@ -813,10 +892,12 @@ impl vte::Perform for TerminalState {
                 self.linefeed();
                 self.clear_wrap_latch();
             }
-            // NEL — move down one line, then return to column zero.
+            // NEL — move down one line, then return to the active left
+            // horizontal margin.
             b'E' => {
                 self.linefeed();
-                self.active_cursor_mut().column = 0;
+                let (minimum_column_index, _) = self.get_horizontal_margin_bounds();
+                self.active_cursor_mut().column = minimum_column_index;
                 self.clear_wrap_latch();
             }
             // HTS — set a horizontal tab stop at the cursor.
@@ -995,6 +1076,33 @@ impl TerminalState {
             // `ESC[200~`…`ESC[201~`.
             ('h', 2004) => self.modes.bracketed_paste = true,
             ('l', 2004) => self.modes.bracketed_paste = false,
+            // `?69` (DECLRMM) gates DECSLRM. Resetting the gate also clears
+            // both screens' horizontal margins and their stale wrap latches.
+            ('h', 69) => self.modes.declrmm = true,
+            ('l', 69) => {
+                let had_primary_horizontal_margins = self.primary_horizontal_margins.is_some();
+                let had_alternate_horizontal_margins = self.alternate_horizontal_margins.is_some();
+                self.modes.declrmm = false;
+                self.primary_horizontal_margins = None;
+                self.alternate_horizontal_margins = None;
+                if had_primary_horizontal_margins {
+                    self.primary_cursor.pending_wrap = false;
+                }
+                if had_alternate_horizontal_margins {
+                    self.alternate_cursor.pending_wrap = false;
+                }
+            }
+            // `?6` (DECOM) makes cursor coordinates relative to the active
+            // vertical and horizontal margins and homes the cursor on each
+            // toggle.
+            ('h', 6) => {
+                self.active_cursor_mut().origin = true;
+                self.move_cursor_to(0, 0);
+            }
+            ('l', 6) => {
+                self.active_cursor_mut().origin = false;
+                self.move_cursor_to(0, 0);
+            }
             // Mouse tracking level (`?9`/`?1000`/`?1002`/`?1003`): the four
             // levels are mutually exclusive, and each enable replaces the
             // prior one. A reset turns reporting off only when it names the
