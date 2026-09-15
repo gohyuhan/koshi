@@ -77,6 +77,7 @@ fn new_starts_on_primary_with_default_cursor_style_and_no_title() {
         column: 0,
         is_visible: true,
         pending_wrap: false,
+        origin: false,
         saved: None,
     };
     assert_eq!(terminal_state.primary_cursor, expected_cursor);
@@ -113,6 +114,76 @@ fn state_without_shell_metadata_deserializes_as_prompt() {
     assert_eq!(
         restored.shell_integration_state,
         ShellIntegrationState::Prompt
+    );
+}
+
+#[test]
+fn state_round_trip_preserves_origin_and_horizontal_margins() {
+    let mut terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 8,
+        row_count: 5,
+    });
+    process_terminal_bytes(
+        &mut terminal_state,
+        b"\x1b[2;4r\x1b[?69h\x1b[2;6s\x1b[?6h\x1b[?47h\x1b[3;7s",
+    );
+
+    let serialized_state = serde_json::to_value(&terminal_state).expect("state serializes");
+    let restored: TerminalState =
+        serde_json::from_value(serialized_state).expect("state deserializes");
+
+    assert_eq!(restored.primary_horizontal_margins, Some((1, 5)));
+    assert_eq!(restored.alternate_horizontal_margins, Some((2, 6)));
+    assert!(restored.modes.declrmm);
+    assert!(restored.primary_cursor.origin);
+}
+
+#[test]
+fn state_without_origin_and_horizontal_margin_fields_deserializes() {
+    let mut terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 5,
+        row_count: 3,
+    });
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?6h\x1b7");
+    let mut serialized_state = serde_json::to_value(&terminal_state).expect("state serializes");
+    let object = serialized_state
+        .as_object_mut()
+        .expect("state is an object");
+    object.remove("primary_h_margins");
+    object.remove("alternate_h_margins");
+    object
+        .get_mut("modes")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("modes is an object")
+        .remove("declrmm");
+    for cursor_field_name in ["primary_cursor", "alternate_cursor"] {
+        let cursor_object = object
+            .get_mut(cursor_field_name)
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("cursor is an object");
+        cursor_object.remove("origin");
+        if let Some(saved_cursor_object) = cursor_object
+            .get_mut("saved")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            saved_cursor_object.remove("origin");
+        }
+    }
+
+    let restored: TerminalState =
+        serde_json::from_value(serialized_state).expect("legacy state deserializes");
+
+    assert_eq!(restored.primary_horizontal_margins, None);
+    assert_eq!(restored.alternate_horizontal_margins, None);
+    assert!(!restored.modes.declrmm);
+    assert!(!restored.primary_cursor.origin);
+    assert!(!restored.alternate_cursor.origin);
+    assert!(
+        !restored
+            .primary_cursor
+            .saved
+            .expect("saved cursor is retained")
+            .origin
     );
 }
 

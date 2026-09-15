@@ -10,6 +10,7 @@ fn cursor_at(row_index: u16, column_index: u16) -> Cursor {
         column: column_index,
         is_visible: true,
         pending_wrap: false,
+        origin: false,
         saved: None,
     }
 }
@@ -55,6 +56,7 @@ fn saved_cursor_carries_position_wrap_latch_and_render_snapshot() {
         row: 3,
         column: 8,
         pending_wrap: true,
+        origin: false,
         render: RenderState::fresh(),
     };
     assert_eq!(saved.row, 3);
@@ -69,6 +71,7 @@ fn saved_cursors_differing_only_by_their_render_snapshot_are_not_equal() {
         row: 0,
         column: 0,
         pending_wrap: false,
+        origin: false,
         render: RenderState::fresh(),
     };
     let mut other_render = RenderState::fresh();
@@ -87,6 +90,7 @@ fn a_cursor_holding_a_saved_snapshot_differs_from_one_without() {
         row: 0,
         column: 0,
         pending_wrap: false,
+        origin: false,
         render: RenderState::fresh(),
     };
     let with_saved = Cursor {
@@ -105,10 +109,12 @@ fn a_cursor_with_a_saved_snapshot_survives_a_serde_round_trip() {
         column: 8,
         is_visible: false,
         pending_wrap: true,
+        origin: true,
         saved: Some(SavedCursor {
             row: 1,
             column: 2,
             pending_wrap: true,
+            origin: true,
             render: other_render,
         }),
     };

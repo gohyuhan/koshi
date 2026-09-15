@@ -91,11 +91,11 @@ pub struct TerminalState {
     /// Which buffer — `primary` or `alternate` — output currently writes to and
     /// the renderer displays.
     active_screen: Screen,
-    /// The cursor for the primary screen, holding its own position, visibility,
-    /// wrap latch, and saved snapshot.
+    /// The cursor for the primary screen, holding its own position, origin
+    /// mode, visibility, wrap latch, and saved snapshot.
     primary_cursor: Cursor,
     /// The cursor for the alternate screen, independent of the primary cursor:
-    /// position and wrap state do not carry across screen switches.
+    /// position, origin mode, and wrap state do not carry across screen switches.
     alternate_cursor: Cursor,
     /// The primary screen's [`RenderState`] (pen, charsets, GL slot).
     primary_render: RenderState,
@@ -142,6 +142,12 @@ pub struct TerminalState {
     primary_scroll_region: Option<(u16, u16)>,
     /// Alternate screen's scroll-region margins; see `primary_scroll_region`.
     alternate_scroll_region: Option<(u16, u16)>,
+    /// Primary screen's DECSLRM left/right margins, 0-based inclusive
+    /// `(left, right)`; `None` uses the full width.
+    primary_horizontal_margins: Option<(u16, u16)>,
+    /// Alternate screen's DECSLRM left/right margins; see
+    /// `primary_horizontal_margins`.
+    alternate_horizontal_margins: Option<(u16, u16)>,
     /// The grapheme cluster currently being built at the cursor — the run of
     /// printed code points that fold into one cell (a base plus its combining
     /// marks and any emoji continuation: ZWJ-joined parts, variation selectors,
@@ -188,6 +194,10 @@ struct TerminalStateSerializeFields<'a> {
     scrollback: &'a Scrollback,
     primary_scroll_region: &'a Option<(u16, u16)>,
     alternate_scroll_region: &'a Option<(u16, u16)>,
+    #[serde(rename = "primary_h_margins")]
+    primary_horizontal_margins: &'a Option<(u16, u16)>,
+    #[serde(rename = "alternate_h_margins")]
+    alternate_horizontal_margins: &'a Option<(u16, u16)>,
     cluster: &'a String,
     cluster_base: &'a Option<(u16, u16)>,
     #[serde(rename = "replies")]
@@ -264,6 +274,8 @@ impl Serialize for TerminalState {
             scrollback: &self.scrollback,
             primary_scroll_region: &self.primary_scroll_region,
             alternate_scroll_region: &self.alternate_scroll_region,
+            primary_horizontal_margins: &self.primary_horizontal_margins,
+            alternate_horizontal_margins: &self.alternate_horizontal_margins,
             cluster: &self.cluster,
             cluster_base: &self.cluster_base,
             device_query_replies: &self.device_query_replies,
@@ -298,6 +310,8 @@ struct TerminalStateFields {
     scrollback: Scrollback,
     primary_scroll_region: Option<(u16, u16)>,
     alternate_scroll_region: Option<(u16, u16)>,
+    primary_horizontal_margins: Option<(u16, u16)>,
+    alternate_horizontal_margins: Option<(u16, u16)>,
     cluster: String,
     cluster_base: Option<(u16, u16)>,
     device_query_replies: Vec<u8>,
@@ -330,6 +344,8 @@ struct RawTerminalStateFields {
     scrollback: Scrollback,
     primary_scroll_region: Option<(u16, u16)>,
     alternate_scroll_region: Option<(u16, u16)>,
+    primary_horizontal_margins: Option<(u16, u16)>,
+    alternate_horizontal_margins: Option<(u16, u16)>,
     cluster: String,
     cluster_base: Option<(u16, u16)>,
     device_query_replies: Vec<u8>,
@@ -365,6 +381,10 @@ enum RawTerminalStateField {
     Scrollback,
     PrimaryScrollRegion,
     AlternateScrollRegion,
+    #[serde(rename = "primary_h_margins")]
+    PrimaryHorizontalMargins,
+    #[serde(rename = "alternate_h_margins")]
+    AlternateHorizontalMargins,
     Cluster,
     ClusterBase,
     #[serde(rename = "replies")]
@@ -414,6 +434,8 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
         let mut scrollback = None;
         let mut primary_scroll_region = None;
         let mut alternate_scroll_region = None;
+        let mut primary_horizontal_margins = None;
+        let mut alternate_horizontal_margins = None;
         let mut cluster = None;
         let mut cluster_base = None;
         let mut device_query_replies = None;
@@ -594,6 +616,18 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
                     }
                     alternate_scroll_region = Some(map.next_value()?);
                 }
+                RawTerminalStateField::PrimaryHorizontalMargins => {
+                    if primary_horizontal_margins.is_some() {
+                        return Err(serde::de::Error::duplicate_field("primary_h_margins"));
+                    }
+                    primary_horizontal_margins = Some(map.next_value()?);
+                }
+                RawTerminalStateField::AlternateHorizontalMargins => {
+                    if alternate_horizontal_margins.is_some() {
+                        return Err(serde::de::Error::duplicate_field("alternate_h_margins"));
+                    }
+                    alternate_horizontal_margins = Some(map.next_value()?);
+                }
                 RawTerminalStateField::Cluster => {
                     if cluster.is_some() {
                         return Err(serde::de::Error::duplicate_field("cluster"));
@@ -655,6 +689,8 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
                 .ok_or_else(|| serde::de::Error::missing_field("primary_scroll_region"))?,
             alternate_scroll_region: alternate_scroll_region
                 .ok_or_else(|| serde::de::Error::missing_field("alternate_scroll_region"))?,
+            primary_horizontal_margins: primary_horizontal_margins.unwrap_or_default(),
+            alternate_horizontal_margins: alternate_horizontal_margins.unwrap_or_default(),
             cluster: cluster.ok_or_else(|| serde::de::Error::missing_field("cluster"))?,
             cluster_base: cluster_base
                 .ok_or_else(|| serde::de::Error::missing_field("cluster_base"))?,
@@ -727,6 +763,8 @@ impl<'de> Deserialize<'de> for TerminalStateFields {
             scrollback: serialized_terminal_state.scrollback,
             primary_scroll_region: serialized_terminal_state.primary_scroll_region,
             alternate_scroll_region: serialized_terminal_state.alternate_scroll_region,
+            primary_horizontal_margins: serialized_terminal_state.primary_horizontal_margins,
+            alternate_horizontal_margins: serialized_terminal_state.alternate_horizontal_margins,
             cluster: serialized_terminal_state.cluster,
             cluster_base: serialized_terminal_state.cluster_base,
             device_query_replies: serialized_terminal_state.device_query_replies,
@@ -770,6 +808,8 @@ impl<'de> Deserialize<'de> for TerminalState {
             scrollback: fields.scrollback,
             primary_scroll_region: fields.primary_scroll_region,
             alternate_scroll_region: fields.alternate_scroll_region,
+            primary_horizontal_margins: fields.primary_horizontal_margins,
+            alternate_horizontal_margins: fields.alternate_horizontal_margins,
             cluster: fields.cluster,
             cluster_base: fields.cluster_base,
             device_query_replies: fields.device_query_replies,
@@ -874,6 +914,7 @@ impl TerminalState {
             column: 0,
             is_visible: true,
             pending_wrap: false,
+            origin: false,
             saved: None,
         };
         TerminalState {
@@ -903,6 +944,8 @@ impl TerminalState {
             scrollback: Scrollback::from_scrollback_limit(scrollback_limit),
             primary_scroll_region: None,
             alternate_scroll_region: None,
+            primary_horizontal_margins: None,
+            alternate_horizontal_margins: None,
             cluster: String::new(),
             cluster_base: None,
             device_query_replies: Vec::new(),
@@ -932,7 +975,8 @@ impl TerminalState {
     /// The alternate screen has no history: each row crops on the right or
     /// pads with the screen's own background (a wide glyph whose right half is
     /// cut off is blanked), and a height shrink crops off the top. Both
-    /// screens' scroll margins are dropped until the app issues DECSTBM again.
+    /// screens' vertical and horizontal margins are dropped until the app
+    /// issues DECSTBM or DECSLRM again.
     /// Primary image anchors follow their row's reflowed text and remain in the
     /// primary history list while any of their cells stay addressable.
     /// Alternate placements follow the cropped rows and retain their image scale.
@@ -1011,10 +1055,12 @@ impl TerminalState {
         );
         self.alternate_cursor.pending_wrap = false;
 
-        // Both scroll regions are dropped: the resized screen scrolls in full
-        // until the app issues DECSTBM again.
+        // Both margin axes are dropped: the resized screens use their full
+        // dimensions until the app issues DECSTBM or DECSLRM again.
         self.primary_scroll_region = None;
         self.alternate_scroll_region = None;
+        self.primary_horizontal_margins = None;
+        self.alternate_horizontal_margins = None;
 
         // An in-progress cluster is dropped: its recorded base position indexes
         // the old geometry.
@@ -1267,6 +1313,23 @@ impl TerminalState {
         match self.active_screen {
             Screen::Primary => &mut self.primary_scroll_region,
             Screen::Alternate => &mut self.alternate_scroll_region,
+        }
+    }
+
+    /// The horizontal margins `(left, right)` for the active screen, or `None`
+    /// when horizontal operations use the full width.
+    pub fn get_horizontal_margins(&self) -> Option<(u16, u16)> {
+        match self.active_screen {
+            Screen::Primary => self.primary_horizontal_margins,
+            Screen::Alternate => self.alternate_horizontal_margins,
+        }
+    }
+
+    /// Mutable access to the horizontal margins for the active screen.
+    pub(crate) fn horizontal_margins_mut(&mut self) -> &mut Option<(u16, u16)> {
+        match self.active_screen {
+            Screen::Primary => &mut self.primary_horizontal_margins,
+            Screen::Alternate => &mut self.alternate_horizontal_margins,
         }
     }
 

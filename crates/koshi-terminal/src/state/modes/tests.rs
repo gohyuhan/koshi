@@ -86,7 +86,7 @@ fn terminal_modes_default_serializes_to_the_resume_body_shape() {
     let json = serde_json::to_string(&TerminalModes::default()).expect("serializes");
     assert_eq!(
         json,
-        r#"{"bracketed_paste":false,"mouse_tracking":"Off","mouse_encoding":"Default","alt_scroll":false,"autowrap":true,"app_cursor_keys":false,"reverse_video":false,"cursor_blink":false,"cursor_shape":null,"sixel_scrolling":true,"sixel_private_color_registers":true,"sixel_cursor_right":false}"#
+        r#"{"bracketed_paste":false,"mouse_tracking":"Off","mouse_encoding":"Default","alt_scroll":false,"autowrap":true,"app_cursor_keys":false,"declrmm":false,"reverse_video":false,"cursor_blink":false,"cursor_shape":null,"sixel_scrolling":true,"sixel_private_color_registers":true,"sixel_cursor_right":false}"#
     );
 }
 
@@ -99,6 +99,7 @@ fn terminal_modes_with_every_value_flipped_round_trip_through_json() {
         alternate_scroll: true,
         autowrap: false,
         application_cursor_keys: true,
+        declrmm: true,
         reverse_video: true,
         cursor_blink: true,
         cursor_shape: Some(CursorShape::Bar),
@@ -109,7 +110,7 @@ fn terminal_modes_with_every_value_flipped_round_trip_through_json() {
     let json = serde_json::to_string(&modes).expect("serializes");
     assert_eq!(
         json,
-        r#"{"bracketed_paste":true,"mouse_tracking":"AnyMotion","mouse_encoding":"Sgr","alt_scroll":true,"autowrap":false,"app_cursor_keys":true,"reverse_video":true,"cursor_blink":true,"cursor_shape":"Bar","sixel_scrolling":false,"sixel_private_color_registers":false,"sixel_cursor_right":true}"#
+        r#"{"bracketed_paste":true,"mouse_tracking":"AnyMotion","mouse_encoding":"Sgr","alt_scroll":true,"autowrap":false,"app_cursor_keys":true,"declrmm":true,"reverse_video":true,"cursor_blink":true,"cursor_shape":"Bar","sixel_scrolling":false,"sixel_private_color_registers":false,"sixel_cursor_right":true}"#
     );
     let read_back: TerminalModes = serde_json::from_str(&json).expect("reads back");
     assert_eq!(read_back, modes);

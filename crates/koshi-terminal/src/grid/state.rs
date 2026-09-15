@@ -723,6 +723,158 @@ impl Grid {
         self.set_row_end(row_index, RowEnd::Hard);
     }
 
+    /// Insert blank cells within the inclusive column range. Cells pushed past
+    /// `last_column_index` are dropped, and the row end resets to hard.
+    pub(crate) fn insert_cells_in_columns(
+        &mut self,
+        row_index: u16,
+        first_column_index: u16,
+        last_column_index: u16,
+        insert_cell_count: u16,
+        fill_style: Style,
+    ) {
+        let Some(row_cells) = self.rows.get_mut(row_index as usize) else {
+            return;
+        };
+        let first_column_index = first_column_index as usize;
+        let last_column_index = (last_column_index as usize + 1).min(row_cells.len());
+        if first_column_index >= last_column_index {
+            return;
+        }
+
+        let column_span = last_column_index - first_column_index;
+        let inserted_cell_count = column_span.min(insert_cell_count as usize);
+        for destination_column_index in (first_column_index..last_column_index).rev() {
+            let Some(source_column_index) = destination_column_index
+                .checked_sub(inserted_cell_count)
+                .filter(|&source_column_index| source_column_index >= first_column_index)
+            else {
+                row_cells[destination_column_index] = Cell::blank_with(fill_style);
+                continue;
+            };
+            row_cells.swap(destination_column_index, source_column_index);
+        }
+        self.set_row_end(row_index, RowEnd::Hard);
+    }
+
+    /// Delete cells within the inclusive column range. Freed cells at the
+    /// range's right edge are filled with `fill_style`, and the row end resets
+    /// to hard.
+    pub(crate) fn delete_cells_in_columns(
+        &mut self,
+        row_index: u16,
+        first_column_index: u16,
+        last_column_index: u16,
+        delete_cell_count: u16,
+        fill_style: Style,
+    ) {
+        let Some(row_cells) = self.rows.get_mut(row_index as usize) else {
+            return;
+        };
+        let first_column_index = first_column_index as usize;
+        let last_column_index = (last_column_index as usize + 1).min(row_cells.len());
+        if first_column_index >= last_column_index {
+            return;
+        }
+
+        let column_span = last_column_index - first_column_index;
+        let deleted_cell_count = column_span.min(delete_cell_count as usize);
+        for destination_column_index in first_column_index..last_column_index {
+            let source_column_index = destination_column_index + deleted_cell_count;
+            if source_column_index < last_column_index {
+                row_cells.swap(destination_column_index, source_column_index);
+            } else {
+                row_cells[destination_column_index] = Cell::blank_with(fill_style);
+            }
+        }
+        self.set_row_end(row_index, RowEnd::Hard);
+    }
+
+    /// Delete lines while moving only the inclusive column range. Row metadata
+    /// stays with each row because this is a partial-width scroll.
+    pub(crate) fn delete_lines_in_columns(
+        &mut self,
+        first_row_index: u16,
+        last_row_index: u16,
+        delete_row_count: u16,
+        first_column_index: u16,
+        last_column_index: u16,
+        fill_style: Style,
+    ) {
+        let (row_count, column_count) = self.get_grid_dimensions();
+        if first_row_index >= row_count
+            || last_row_index >= row_count
+            || first_row_index > last_row_index
+            || column_count == 0
+        {
+            return;
+        }
+        let first_column_index = first_column_index.min(column_count - 1) as usize;
+        let last_column_index = (last_column_index.min(column_count - 1) as usize) + 1;
+        if first_column_index >= last_column_index {
+            return;
+        }
+
+        let removed_row_count =
+            min(delete_row_count, last_row_index - first_row_index + 1) as usize;
+        for _ in 0..removed_row_count {
+            for column_index in first_column_index..last_column_index {
+                for row_index in usize::from(first_row_index)..usize::from(last_row_index) {
+                    let (upper_rows, lower_rows) = self.rows.split_at_mut(row_index + 1);
+                    std::mem::swap(
+                        &mut upper_rows[row_index][column_index],
+                        &mut lower_rows[0][column_index],
+                    );
+                }
+                self.rows[usize::from(last_row_index)][column_index] = Cell::blank_with(fill_style);
+            }
+        }
+    }
+
+    /// Insert lines while moving only the inclusive column range. Row metadata
+    /// stays with each row because this is a partial-width scroll.
+    pub(crate) fn insert_lines_in_columns(
+        &mut self,
+        first_row_index: u16,
+        last_row_index: u16,
+        insert_row_count: u16,
+        first_column_index: u16,
+        last_column_index: u16,
+        fill_style: Style,
+    ) {
+        let (row_count, column_count) = self.get_grid_dimensions();
+        if first_row_index >= row_count
+            || last_row_index >= row_count
+            || first_row_index > last_row_index
+            || column_count == 0
+        {
+            return;
+        }
+        let first_column_index = first_column_index.min(column_count - 1) as usize;
+        let last_column_index = (last_column_index.min(column_count - 1) as usize) + 1;
+        if first_column_index >= last_column_index {
+            return;
+        }
+
+        let inserted_row_count =
+            min(insert_row_count, last_row_index - first_row_index + 1) as usize;
+        for _ in 0..inserted_row_count {
+            for column_index in first_column_index..last_column_index {
+                for row_index in
+                    (usize::from(first_row_index) + 1..=usize::from(last_row_index)).rev()
+                {
+                    let (upper_rows, lower_rows) = self.rows.split_at_mut(row_index);
+                    std::mem::swap(
+                        &mut upper_rows[row_index - 1][column_index],
+                        &mut lower_rows[0][column_index],
+                    );
+                }
+                self.rows[usize::from(first_row_index)][column_index] =
+                    Cell::blank_with(fill_style);
+            }
+        }
+    }
+
     /// Delete `delete_row_count` lines from the band
     /// `[first_row_index, last_row_index]` (both inclusive), shifting
     /// lines below the band upward; blank lines are inserted at the bottom of the
