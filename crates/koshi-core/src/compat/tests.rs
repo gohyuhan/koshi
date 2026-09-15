@@ -167,7 +167,19 @@ fn a_surface_no_release_carries_is_checked_on_the_floor_alone() {
 fn the_session_protocol_speaks_three_and_accepts_nothing_older() {
     assert_eq!(SESSION_PROTOCOL.minimum_version, 3);
     assert_eq!(SESSION_PROTOCOL.maximum_version, 3);
-    assert_eq!(SESSION_PROTOCOL.released_version, Some(2));
+    assert_eq!(SESSION_PROTOCOL.released_version, Some(3));
+}
+
+#[test]
+fn the_current_release_anchors_match_their_surface_maxima() {
+    assert_eq!(
+        SESSION_PROTOCOL.released_version,
+        Some(SESSION_PROTOCOL.maximum_version)
+    );
+    assert_eq!(
+        RESUME_FORMAT.released_version,
+        Some(RESUME_FORMAT.maximum_version)
+    );
 }
 
 #[test]
@@ -177,10 +189,10 @@ fn the_control_plane_speaks_two_and_still_accepts_one() {
     assert_eq!(CONTROL_PROTOCOL.released_version, Some(2));
 }
 
-/// The `max` each surface reads in the `v0.3.0` tag, which is the last
+/// The `max` each surface reads in the `v0.4.0` tag, which is the last
 /// release. A surface that tag does not carry reads `None`.
-const WHAT_V0_3_0_SPEAKS: [(&str, Option<u32>); 10] = [
-    ("session protocol", Some(2)),
+const WHAT_V0_4_0_SPEAKS: [(&str, Option<u32>); 10] = [
+    ("session protocol", Some(3)),
     ("control plane", Some(2)),
     ("supervisor link", Some(1)),
     ("token store format", Some(1)),
@@ -188,18 +200,18 @@ const WHAT_V0_3_0_SPEAKS: [(&str, Option<u32>); 10] = [
     ("saved server file format", Some(1)),
     ("remote certificate file format", Some(1)),
     ("remote access record format", Some(1)),
-    ("resume file format", Some(2)),
+    ("resume file format", Some(3)),
     ("config schema", Some(1)),
 ];
 
 #[test]
-fn every_anchor_holds_the_version_the_v0_3_0_tag_speaks() {
+fn every_anchor_holds_the_version_the_v0_4_0_tag_speaks() {
     let released_versions: Vec<(&str, Option<u32>)> = SURFACES
         .iter()
         .map(|surface| (surface.surface_name, surface.released_version))
         .collect();
 
-    assert_eq!(released_versions, WHAT_V0_3_0_SPEAKS);
+    assert_eq!(released_versions, WHAT_V0_4_0_SPEAKS);
 }
 
 #[test]
@@ -219,7 +231,7 @@ fn the_table_pins_every_surface_by_name_and_numbers() {
     assert_eq!(
         surface_versions,
         [
-            ("session protocol", 3, 3, Some(2)),
+            ("session protocol", 3, 3, Some(3)),
             ("control plane", 1, 2, Some(2)),
             ("supervisor link", 1, 1, Some(1)),
             ("token store format", 1, 1, Some(1)),
@@ -227,7 +239,7 @@ fn the_table_pins_every_surface_by_name_and_numbers() {
             ("saved server file format", 1, 1, Some(1)),
             ("remote certificate file format", 1, 1, Some(1)),
             ("remote access record format", 1, 1, Some(1)),
-            ("resume file format", 1, 3, Some(2)),
+            ("resume file format", 1, 3, Some(3)),
             ("config schema", 1, 1, Some(1)),
         ]
     );

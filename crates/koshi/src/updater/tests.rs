@@ -1,6 +1,7 @@
 //! Tests for the self-update helpers: version comparison, check scheduling,
-//! archive URL construction, state serialization, the restart confirmation
-//! wait, and the walk that restarts every running session.
+//! archive URL construction, bounded downloads, checksum verification, state
+//! serialization, the restart confirmation wait, and the walk that restarts every
+//! running session.
 
 use super::*;
 
@@ -454,12 +455,176 @@ fn compute_binary_url_matches_release_naming_on_supported_platforms() {
 }
 
 #[test]
+fn a_standard_shasum_row_returns_the_archive_checksum() {
+    let archive_file_name = "koshi-v0.5.0-linux-amd64.tar.gz";
+    let checksums_text = format!(
+        "0000000000000000000000000000000000000000000000000000000000000000  other-file\nBA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD  {archive_file_name}\n"
+    );
+
+    assert_eq!(
+        find_release_checksum(&checksums_text, archive_file_name)
+            .expect("the archive row has a valid checksum"),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+}
+
+#[test]
+fn a_missing_checksum_row_names_the_release_archive() {
+    let archive_file_name = "koshi-v0.5.0-linux-amd64.tar.gz";
+    let error = find_release_checksum(
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  other-file\n",
+        archive_file_name,
+    )
+    .expect_err("an absent archive row must fail");
+
+    assert_eq!(
+        error,
+        "checksums.txt has no row for release archive koshi-v0.5.0-linux-amd64.tar.gz"
+    );
+}
+
+#[test]
+fn duplicate_checksum_rows_name_the_release_archive() {
+    let archive_file_name = "koshi-v0.5.0-linux-amd64.tar.gz";
+    let checksums_text = format!(
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  {archive_file_name}\nba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  {archive_file_name}\n"
+    );
+    let error = find_release_checksum(&checksums_text, archive_file_name)
+        .expect_err("duplicate archive rows must fail");
+
+    assert_eq!(
+        error,
+        "checksums.txt has multiple rows for release archive koshi-v0.5.0-linux-amd64.tar.gz"
+    );
+}
+
+#[test]
+fn malformed_checksum_row_for_the_release_archive_is_rejected() {
+    let archive_file_name = "koshi-v0.5.0-linux-amd64.tar.gz";
+    let checksums_text = format!(
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  {archive_file_name} extra\n"
+    );
+    let error = find_release_checksum(&checksums_text, archive_file_name)
+        .expect_err("an archive row with extra fields must fail");
+
+    assert_eq!(
+        error,
+        "checksums.txt has a malformed row for release archive koshi-v0.5.0-linux-amd64.tar.gz"
+    );
+}
+
+#[test]
+fn invalid_checksum_for_the_release_archive_is_rejected() {
+    let archive_file_name = "koshi-v0.5.0-linux-amd64.tar.gz";
+    let checksums_text = format!("{}  {archive_file_name}\n", "z".repeat(64));
+    let error = find_release_checksum(&checksums_text, archive_file_name)
+        .expect_err("a non-hex checksum must fail");
+
+    assert_eq!(
+        error,
+        "checksums.txt has an invalid SHA-256 checksum for release archive koshi-v0.5.0-linux-amd64.tar.gz"
+    );
+}
+
+#[test]
+fn a_stream_at_the_byte_limit_is_copied() {
+    let mut release_file_reader = b"abc".as_slice();
+    let mut copied_bytes = Vec::new();
+
+    copy_stream_with_byte_limit(&mut release_file_reader, &mut copied_bytes, 3)
+        .expect("a stream at the limit is accepted");
+
+    assert_eq!(copied_bytes, b"abc");
+}
+
+#[test]
+fn a_stream_over_the_byte_limit_is_rejected_without_copying_the_extra_byte() {
+    let mut release_file_reader = b"abcd".as_slice();
+    let mut copied_bytes = Vec::new();
+
+    let error = copy_stream_with_byte_limit(&mut release_file_reader, &mut copied_bytes, 3)
+        .expect_err("a stream over the limit must fail");
+
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert_eq!(error.to_string(), "download response exceeds 3 bytes");
+    assert_eq!(copied_bytes, b"abc");
+}
+
+fn write_release_file(release_file_bytes: &[u8]) -> TempPath {
+    let mut release_file = Builder::new()
+        .prefix("koshi-test-")
+        .tempfile()
+        .expect("release tempfile");
+    release_file
+        .as_file_mut()
+        .write_all(release_file_bytes)
+        .expect("write release file");
+    release_file.into_temp_path()
+}
+
+#[test]
+fn matching_release_archive_checksum_is_accepted() {
+    let archive_path = write_release_file(b"abc");
+
+    verify_release_archive(
+        archive_path.as_ref(),
+        "koshi-v0.5.0-linux-amd64.tar.gz",
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+    )
+    .expect("the matching checksum is accepted");
+}
+
+#[test]
+fn mismatched_release_archive_checksum_names_both_digests() {
+    let archive_path = write_release_file(b"abc");
+    let expected_checksum = "0000000000000000000000000000000000000000000000000000000000000000";
+    let error = extract_verified_release_binary(
+        archive_path.as_ref(),
+        "koshi.tar.gz",
+        "koshi-v0.5.0-linux-amd64.tar.gz",
+        expected_checksum,
+    )
+    .expect_err("the changed checksum must fail before unpacking");
+
+    assert_eq!(
+        error,
+        "checksum mismatch for release archive koshi-v0.5.0-linux-amd64.tar.gz: expected 0000000000000000000000000000000000000000000000000000000000000000, computed ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+}
+
+#[test]
 fn get_binary_file_name_is_platform_specific() {
     if cfg!(windows) {
         assert_eq!(get_binary_file_name(), "koshi.exe");
     } else {
         assert_eq!(get_binary_file_name(), "koshi");
     }
+}
+
+#[cfg(windows)]
+#[test]
+fn a_windows_swap_replaces_the_executable_and_cleans_the_backup() {
+    let test_directory = Builder::new()
+        .prefix("koshi-test-")
+        .tempdir()
+        .expect("swap directory");
+    let executable_path = test_directory.path().join("koshi.exe");
+    let new_binary_path = test_directory.path().join("new-binary.exe");
+    let staged_binary_path = test_directory
+        .path()
+        .join(format!("koshi-update-{}.exe", std::process::id()));
+    let backup_executable_path = executable_path.with_extension("old");
+    fs::write(&executable_path, b"old-binary").expect("write the old executable");
+    fs::write(&new_binary_path, b"new-binary").expect("write the replacement executable");
+
+    swap_executable(&new_binary_path, &executable_path).expect("replace the executable");
+
+    assert_eq!(
+        fs::read(&executable_path).expect("read the replacement executable"),
+        b"new-binary"
+    );
+    assert!(!backup_executable_path.exists());
+    assert!(!staged_binary_path.exists());
 }
 
 #[test]
@@ -533,7 +698,7 @@ fn write_tar_gz(archive_entries: &[(&str, &[u8])]) -> TempPath {
         .prefix("koshi-test-")
         .suffix(".tar.gz")
         .tempfile()
-        .expect("temporary archive file");
+        .expect("archive tempfile");
     {
         let gzip_encoder =
             flate2::write::GzEncoder::new(archive_file.as_file(), flate2::Compression::default());
@@ -565,7 +730,7 @@ fn write_zip(archive_entries: &[(&str, &[u8])]) -> TempPath {
         .prefix("koshi-test-")
         .suffix(".zip")
         .tempfile()
-        .expect("temporary archive file");
+        .expect("archive tempfile");
     {
         let mut zip_archive = zip::ZipWriter::new(archive_file.as_file());
         let zip_entry_options = zip::write::SimpleFileOptions::default();
@@ -635,7 +800,7 @@ fn write_tar_gz_of_kinds(archive_entries: &[(&str, tar::EntryType, &[u8])]) -> T
         .prefix("koshi-test-")
         .suffix(".tar.gz")
         .tempfile()
-        .expect("temporary archive file");
+        .expect("archive tempfile");
     {
         let gzip_encoder =
             flate2::write::GzEncoder::new(archive_file.as_file(), flate2::Compression::default());
