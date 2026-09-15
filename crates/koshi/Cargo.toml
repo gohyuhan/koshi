@@ -38,6 +38,7 @@ tar = "0.4.46"
 # already pulled for tar.gz.
 zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2"] }
 tempfile.workspace = true
+sha2 = "0.11.0"
 
 [target."cfg(unix)".dependencies]
 libc.workspace = true

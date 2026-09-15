@@ -46,7 +46,7 @@ libc = "0.2.189"
 proptest = "1.11.0"
 ratatui = { version = "0.30.2", default-features = false }
 rcgen = { version = "0.14.9", default-features = false, features = ["aws_lc_rs"] }
-rustls = { version = "0.23.43", default-features = false, features = [
+rustls = { version = "0.23.45", default-features = false, features = [
   "aws_lc_rs",
   "logging",
   "prefer-post-quantum",

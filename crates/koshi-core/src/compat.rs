@@ -49,8 +49,9 @@ pub struct Surface {
 /// The session protocol: what an attached client and a session server speak
 /// over that session's control socket.
 ///
-/// `v0.1.0` spoke 1, `v0.2.0` and `v0.3.0` speak 2, and this build speaks 3.
-/// The floor is 3: a peer that speaks 2 is refused at the handshake.
+/// `v0.1.0` spoke 1, `v0.2.0` and `v0.3.0` spoke 2, and `v0.4.0` and this
+/// build speak 3. The floor is 3: a peer that speaks 2 is refused at the
+/// handshake.
 ///
 /// Four shapes differ between 2 and 3. This build writes version 3 on every
 /// session connection:
@@ -68,13 +69,13 @@ pub struct Surface {
 ///
 /// The readers still accept the two legacy encodings that can occur in stored
 /// data: a `HostWrite` holding a list of numbers and a split child wrapped in a
-/// `{"node": …}` record both decode. [`RESUME_FORMAT`] reads back to 1, and a
+/// `{"node": …}` record both decode. The resume reader accepts format 1, and a
 /// resume file written by an earlier build can carry the wrapped split shape.
 pub const SESSION_PROTOCOL: Surface = Surface {
     surface_name: "session protocol",
     minimum_version: 3,
     maximum_version: 3,
-    released_version: Some(2),
+    released_version: Some(3),
 };
 
 /// The control plane: what a caller and the router speak over the router's
@@ -162,11 +163,11 @@ pub const REMOTE_ACCESS_MARK_FORMAT: Surface = Surface {
 /// The resume file: the state a session server writes before it replaces its
 /// own process image, and the next image reads back.
 ///
-/// `v0.3.0` writes 2 and this build writes 3. Format 3 adds prompt metadata to
-/// every terminal row, and writes each entry of a layout split's `children` as
-/// the child node itself. 1 and 2 wrapped it in a `{"node": …}` record. This
-/// build reads either shape, so a session server upgraded from `v0.3.0` keeps
-/// its layout trees across the swap.
+/// `v0.3.0` writes 2, and `v0.4.0` and this build write 3. Format 3 adds
+/// prompt metadata to every terminal row, and writes each entry of a layout
+/// split's `children` as the child node itself. 1 and 2 wrapped it in a
+/// `{"node": …}` record. This build reads either shape, so a session server
+/// upgraded from `v0.3.0` keeps its layout trees across the swap.
 ///
 /// The build being installed states which formats it reads. The running server
 /// reads that answer before it commits to the swap.
@@ -174,7 +175,7 @@ pub const RESUME_FORMAT: Surface = Surface {
     surface_name: "resume file format",
     minimum_version: 1,
     maximum_version: 3,
-    released_version: Some(2),
+    released_version: Some(3),
 };
 
 /// The config schema: the shape of the files under the config directory.

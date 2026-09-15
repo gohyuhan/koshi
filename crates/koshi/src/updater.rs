@@ -2,9 +2,9 @@
 //!
 //! `koshi update` (`run_update_command`) checks the project's GitHub releases
 //! and, when a newer one exists, downloads the prebuilt archive for this
-//! OS/arch, unpacks the `koshi` binary, and swaps it for the running executable
-//! in place. An interactive launch also calls `maybe_prompt_startup_update`,
-//! which does the same check on a timer and offers to install.
+//! OS/arch, verifies its SHA-256 checksum, unpacks the `koshi` binary, and swaps it
+//! for the running executable in place. An interactive launch also calls
+//! `maybe_prompt_startup_update`, which does the same check on a timer and offers to install.
 //!
 //! Two small files back this. The user's hand-authored `koshi.kdl` holds every
 //! preference koshi only reads — `update.auto-check`,
@@ -28,6 +28,7 @@ use koshi_config::types::{ClientConfig, UpdateConfig};
 use koshi_core::ids::SessionId;
 use semver::Version;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tempfile::{Builder, TempPath};
 use ureq::tls::TlsConfig;
 use ureq::Agent;
@@ -51,6 +52,12 @@ const UPDATE_API_TIMEOUT_DURATION: Duration = Duration::from_secs(15);
 /// How long a binary download may run before it is abandoned. Bounds the whole
 /// call, connection through the streamed archive body.
 const UPDATE_DOWNLOAD_TIMEOUT_DURATION: Duration = Duration::from_secs(600);
+
+/// The largest checksum response accepted from the release server.
+const MAX_CHECKSUM_FILE_BYTE_COUNT: u64 = 64 * 1024;
+
+/// The largest release archive response accepted from the release server.
+const MAX_RELEASE_ARCHIVE_BYTE_COUNT: u64 = 256 * 1024 * 1024;
 
 /// Seconds in a day, for turning the check interval into a duration.
 const SECONDS_PER_DAY: u64 = 86_400;
@@ -426,10 +433,9 @@ fn is_release_newer(release_tag: &str) -> bool {
 // Download, extract, install
 // ---------------------------------------------------------------------------
 
-/// Downloads the release archive `release_tag` names, unpacks the binary, and swaps it
-/// for the running executable. Both temp files are securely created and
-/// auto-removed when their [`TempPath`] drops at the end of this function,
-/// whichever way it ends.
+/// Downloads the release archive `release_tag` names, verifies its checksum, unpacks the binary,
+/// and swaps it for the running executable. The temp files are securely created and auto-removed
+/// when their [`TempPath`] drops at the end of this function, whichever way it ends.
 fn install_release(release_tag: &str) -> Result<(), String> {
     let archive_url = compute_binary_url(release_tag).ok_or_else(|| {
         format!(
@@ -438,9 +444,37 @@ fn install_release(release_tag: &str) -> Result<(), String> {
             std::env::consts::ARCH
         )
     })?;
+    let archive_file_name = archive_url
+        .rsplit('/')
+        .next()
+        .filter(|archive_file_name| !archive_file_name.is_empty())
+        .ok_or_else(|| "release archive URL has no file name".to_string())?;
+    let checksums_url = format!(
+        "https://github.com/{RELEASE_REPOSITORY}/releases/download/{release_tag}/checksums.txt"
+    );
     println!("downloading koshi {} …", strip_version_prefix(release_tag));
-    let release_archive = download_release_archive(&archive_url)?;
-    let release_binary = extract_release_binary(release_archive.as_ref(), &archive_url)?;
+    let checksums_file = download_release_file(&checksums_url, MAX_CHECKSUM_FILE_BYTE_COUNT)
+        .map_err(|download_error| {
+            format!(
+                "could not download checksums.txt for release archive {archive_file_name}: {download_error}"
+            )
+        })?;
+    let checksums_text = fs::read_to_string(&checksums_file).map_err(|read_error| {
+        format!(
+            "could not read checksums.txt for release archive {archive_file_name}: {read_error}"
+        )
+    })?;
+    let expected_checksum = find_release_checksum(&checksums_text, archive_file_name)?;
+    let release_archive = download_release_file(&archive_url, MAX_RELEASE_ARCHIVE_BYTE_COUNT)
+        .map_err(|download_error| {
+            format!("could not download release archive {archive_file_name}: {download_error}")
+        })?;
+    let release_binary = extract_verified_release_binary(
+        release_archive.as_ref(),
+        &archive_url,
+        archive_file_name,
+        &expected_checksum,
+    )?;
     install_binary(release_binary.as_ref())
 }
 
@@ -475,21 +509,126 @@ fn compute_binary_url(release_tag: &str) -> Option<String> {
 
 /// Downloads `url` into a temp file and returns its path. The file is created
 /// exclusively under a random name: it follows and truncates no existing file
-/// or symbolic link.
-fn download_release_archive(archive_url: &str) -> Result<TempPath, String> {
+/// or symbolic link. The response must not exceed `maximum_byte_count` bytes.
+fn download_release_file(url: &str, maximum_byte_count: u64) -> Result<TempPath, String> {
     let mut http_response = build_http_agent(UPDATE_DOWNLOAD_TIMEOUT_DURATION)
-        .get(archive_url)
+        .get(url)
         .header("User-Agent", "koshi")
         .call()
         .map_err(|download_error| download_error.to_string())?;
-    let mut archive_file = Builder::new()
+    let mut release_file = Builder::new()
         .prefix("koshi-update-")
         .tempfile()
-        .map_err(|temporary_archive_error| temporary_archive_error.to_string())?;
-    let mut archive_reader = http_response.body_mut().as_reader();
-    io::copy(&mut archive_reader, archive_file.as_file_mut())
-        .map_err(|archive_copy_error| archive_copy_error.to_string())?;
-    Ok(archive_file.into_temp_path())
+        .map_err(|release_file_tempfile_error| release_file_tempfile_error.to_string())?;
+    let mut release_file_reader = http_response.body_mut().as_reader();
+    copy_stream_with_byte_limit(
+        &mut release_file_reader,
+        release_file.as_file_mut(),
+        maximum_byte_count,
+    )
+    .map_err(|release_file_copy_error| release_file_copy_error.to_string())?;
+    Ok(release_file.into_temp_path())
+}
+
+/// Copies at most `maximum_byte_count` bytes and rejects a stream with more.
+fn copy_stream_with_byte_limit(
+    reader: &mut impl Read,
+    writer: &mut impl io::Write,
+    maximum_byte_count: u64,
+) -> io::Result<()> {
+    let copied_byte_count = {
+        let mut limited_reader = reader.take(maximum_byte_count);
+        io::copy(&mut limited_reader, writer)?
+    };
+    if copied_byte_count < maximum_byte_count {
+        return Ok(());
+    }
+
+    let mut extra_byte = [0_u8; 1];
+    if reader.read(&mut extra_byte)? == 0 {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("download response exceeds {maximum_byte_count} bytes"),
+    ))
+}
+
+/// Returns the checksum for `archive_file_name` from a `shasum -a 256` file.
+fn find_release_checksum(checksums_text: &str, archive_file_name: &str) -> Result<String, String> {
+    let mut matching_checksum = None;
+    for checksum_line in checksums_text.lines() {
+        let mut checksum_fields = checksum_line.split_whitespace();
+        let Some(checksum) = checksum_fields.next() else {
+            continue;
+        };
+        let Some(checksum_file_name) = checksum_fields.next() else {
+            continue;
+        };
+        if checksum_file_name != archive_file_name {
+            continue;
+        }
+        if checksum_fields.next().is_some() {
+            return Err(format!(
+                "checksums.txt has a malformed row for release archive {archive_file_name}"
+            ));
+        }
+        if checksum.len() != 64 || !checksum.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(format!(
+                "checksums.txt has an invalid SHA-256 checksum for release archive {archive_file_name}"
+            ));
+        }
+        if matching_checksum.is_some() {
+            return Err(format!(
+                "checksums.txt has multiple rows for release archive {archive_file_name}"
+            ));
+        }
+        matching_checksum = Some(checksum.to_ascii_lowercase());
+    }
+    matching_checksum
+        .ok_or_else(|| format!("checksums.txt has no row for release archive {archive_file_name}"))
+}
+
+/// Hashes `archive_path` and compares it with the checksum from `checksums.txt`.
+fn verify_release_archive(
+    archive_path: &Path,
+    archive_file_name: &str,
+    expected_checksum: &str,
+) -> Result<(), String> {
+    let mut archive_file = fs::File::open(archive_path).map_err(|open_error| {
+        format!("could not open release archive {archive_file_name}: {open_error}")
+    })?;
+    let mut checksum_hasher = Sha256::new();
+    let mut archive_read_buffer = [0_u8; 64 * 1024];
+    loop {
+        let bytes_read = archive_file
+            .read(&mut archive_read_buffer)
+            .map_err(|read_error| {
+                format!("could not hash release archive {archive_file_name}: {read_error}")
+            })?;
+        if bytes_read == 0 {
+            break;
+        }
+        checksum_hasher.update(&archive_read_buffer[..bytes_read]);
+    }
+    let computed_checksum = koshi_ipc::bytes::format_hex(&checksum_hasher.finalize());
+    if computed_checksum == expected_checksum {
+        return Ok(());
+    }
+    Err(format!(
+        "checksum mismatch for release archive {archive_file_name}: expected {expected_checksum}, computed {computed_checksum}"
+    ))
+}
+
+/// Verifies the downloaded archive before unpacking its binary.
+fn extract_verified_release_binary(
+    archive_path: &Path,
+    archive_url: &str,
+    archive_file_name: &str,
+    expected_checksum: &str,
+) -> Result<TempPath, String> {
+    verify_release_archive(archive_path, archive_file_name, expected_checksum)?;
+    extract_release_binary(archive_path, archive_url)
 }
 
 /// Unpacks the koshi binary out of the downloaded archive to a temp file,
@@ -562,7 +701,7 @@ fn save_extracted_binary(binary_source: &mut impl Read) -> Result<TempPath, Stri
     let mut binary_file = Builder::new()
         .prefix("koshi-update-")
         .tempfile()
-        .map_err(|temporary_binary_error| temporary_binary_error.to_string())?;
+        .map_err(|binary_tempfile_error| binary_tempfile_error.to_string())?;
     io::copy(binary_source, binary_file.as_file_mut())
         .map_err(|binary_copy_error| binary_copy_error.to_string())?;
     #[cfg(unix)]
@@ -641,23 +780,33 @@ fn swap_executable(new_binary: &Path, executable_path: &Path) -> Result<(), Stri
 /// Replaces the executable on Windows: a running binary cannot be overwritten,
 /// so stage the new one beside the exe (a copy crosses drives, so both following
 /// renames stay on the exe's own volume), rename the running exe aside, move the
-/// staged one into place, and restore the old one if that final move fails.
+/// staged one into place, and attempt to restore the old one if that move fails.
+/// A failed restoration returns both errors and the backup path.
 #[cfg(windows)]
 fn swap_executable(new_binary: &Path, executable_path: &Path) -> Result<(), String> {
     // The staging name sits beside the exe, on the exe's own volume, so both
     // renames below stay within one volume.
     let staged_binary_path =
         executable_path.with_file_name(format!("koshi-update-{}.exe", std::process::id()));
-    fs::copy(new_binary, &staged_binary_path).map_err(|error| error.to_string())?;
+    fs::copy(new_binary, &staged_binary_path)
+        .map_err(|staged_copy_error| staged_copy_error.to_string())?;
     let backup_executable_path = executable_path.with_extension("old");
-    if let Err(error) = fs::rename(executable_path, &backup_executable_path) {
+    if let Err(backup_rename_error) = fs::rename(executable_path, &backup_executable_path) {
         let _ = fs::remove_file(&staged_binary_path);
-        return Err(error.to_string());
+        return Err(backup_rename_error.to_string());
     }
-    if let Err(error) = fs::rename(&staged_binary_path, executable_path) {
-        let _ = fs::rename(&backup_executable_path, executable_path);
+    if let Err(staged_rename_error) = fs::rename(&staged_binary_path, executable_path) {
+        let rollback_error = fs::rename(&backup_executable_path, executable_path).err();
         let _ = fs::remove_file(&staged_binary_path);
-        return Err(error.to_string());
+        if let Some(rollback_error) = rollback_error {
+            return Err(format!(
+                "could not install replacement at {}: {staged_rename_error}; could not restore the original executable: {rollback_error}; manual recovery: restore {} as {}",
+                executable_path.display(),
+                backup_executable_path.display(),
+                executable_path.display()
+            ));
+        }
+        return Err(staged_rename_error.to_string());
     }
     // The old image is locked against deletion while it runs; `remove_stale_backup`
     // clears it on the next launch.
