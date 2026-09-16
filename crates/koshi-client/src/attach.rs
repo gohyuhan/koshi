@@ -2678,19 +2678,26 @@ fn process_runtime_input_with_cell_size(
                 });
             }
         }
-        RuntimeEvent::KeyInput { chord, .. } => match client.resolve_key(chord, Instant::now()) {
-            KeyOutcome::Fire(bound_action) => uplink.submit_bound_action(client, bound_action),
-            KeyOutcome::PassThrough(chord) => {
-                // The key belongs to the program in the pane, so a selection
-                // gesture over it is over.
-                client.end_mouse_selection();
-                uplink.send_request(IpcRequestKind::KeyPress { chord });
+        RuntimeEvent::KeyInput { key_input, .. } => {
+            // A release, and a key no binding can name, resolve nothing.
+            let Some(chord) = key_input.to_binding_chord() else {
+                return;
+            };
+            match client.resolve_key(chord, Instant::now()) {
+                KeyOutcome::Fire(bound_action) => uplink.submit_bound_action(client, bound_action),
+                KeyOutcome::PassThrough(chord) => {
+                    // The key belongs to the program in the pane, so a
+                    // selection gesture over it is over.
+                    client.end_mouse_selection();
+                    uplink.send_request(IpcRequestKind::KeyPress { chord });
+                }
+                // Held or dropped: nothing reaches the session. A chord
+                // that opens or closes a sequence moves the breadcrumb the
+                // hint bar draws, and the pass draws it. A discard moves
+                // nothing and draws nothing.
+                KeyOutcome::Pending | KeyOutcome::Discard => {}
             }
-            // Held or dropped: nothing reaches the session. A chord that opens
-            // or closes a sequence moves the breadcrumb the hint bar draws, and
-            // the pass draws it. A discard moves nothing and draws nothing.
-            KeyOutcome::Pending | KeyOutcome::Discard => {}
-        },
+        }
         RuntimeEvent::Resize {
             viewport_size,
             pane_area,

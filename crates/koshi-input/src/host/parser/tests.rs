@@ -178,9 +178,11 @@ fn legacy_named_keys_and_modifiers_decode_exactly() {
 }
 
 #[test]
-fn kitty_keys_keep_event_kind_and_six_modifiers() {
+fn kitty_keys_keep_event_kind_and_all_eight_modifiers() {
     let mut parser = Parser::default();
-    parser.process_input_bytes(b"\x1b[97;63:2u\x1b[97;5:3u");
+    // 255 is 1 + 254, so every modifier but Shift is held; 256 is 1 + 255, so
+    // all eight are.
+    parser.process_input_bytes(b"\x1b[97;255:2u\x1b[97;5:3u\x1b[97;256u");
     assert_eq!(
         drain_pending_events(&mut parser),
         vec![
@@ -191,12 +193,35 @@ fn kitty_keys_keep_event_kind_and_six_modifiers() {
                     | Modifiers::ALT
                     | Modifiers::SUPER
                     | Modifiers::HYPER
-                    | Modifiers::META,
+                    | Modifiers::META
+                    | Modifiers::CAPS_LOCK
+                    | Modifiers::NUM_LOCK,
+                shifted_key: None,
+                base_layout_key: None,
+                associated_text: String::new(),
             }),
             Event::Key(KeyEvent {
                 code: KeyCode::Char('a'),
                 key_event_kind: KeyEventKind::Release,
                 modifiers: Modifiers::CONTROL,
+                shifted_key: None,
+                base_layout_key: None,
+                associated_text: String::new(),
+            }),
+            Event::Key(KeyEvent {
+                code: KeyCode::Char('a'),
+                key_event_kind: KeyEventKind::Press,
+                modifiers: Modifiers::SHIFT
+                    | Modifiers::CONTROL
+                    | Modifiers::ALT
+                    | Modifiers::SUPER
+                    | Modifiers::HYPER
+                    | Modifiers::META
+                    | Modifiers::CAPS_LOCK
+                    | Modifiers::NUM_LOCK,
+                shifted_key: None,
+                base_layout_key: None,
+                associated_text: String::new(),
             }),
         ]
     );
@@ -209,10 +234,20 @@ fn kitty_shifted_and_functional_keys_decode_exactly() {
     assert_eq!(
         drain_pending_events(&mut parser),
         vec![
-            build_key_event(KeyCode::Char('!'), Modifiers::NONE),
+            // The primary key and its shifted alternative stay separate: the
+            // key is `1`, and `!` is what Shift makes of it.
+            Event::Key(KeyEvent {
+                code: KeyCode::Char('1'),
+                key_event_kind: KeyEventKind::Press,
+                modifiers: Modifiers::SHIFT,
+                shifted_key: Some('!'),
+                base_layout_key: None,
+                associated_text: String::new(),
+            }),
             build_key_event(KeyCode::Function(13), Modifiers::NONE),
             build_key_event(KeyCode::Function(24), Modifiers::ALT),
-            build_key_event(KeyCode::Unsupported, Modifiers::NONE),
+            // Left Shift has no Koshi key form and keeps its codepoint.
+            build_key_event(KeyCode::Codepoint(57_388), Modifiers::NONE),
             build_key_event(KeyCode::Enter, Modifiers::NONE),
         ]
     );
@@ -222,7 +257,14 @@ fn kitty_shifted_and_functional_keys_decode_exactly() {
 fn kitty_shifted_keys_survive_every_byte_split() {
     assert_event_at_every_split(
         b"\x1b[49:33;2u",
-        build_key_event(KeyCode::Char('!'), Modifiers::NONE),
+        Event::Key(KeyEvent {
+            code: KeyCode::Char('1'),
+            key_event_kind: KeyEventKind::Press,
+            modifiers: Modifiers::SHIFT,
+            shifted_key: Some('!'),
+            base_layout_key: None,
+            associated_text: String::new(),
+        }),
     );
 }
 
@@ -800,4 +842,268 @@ fn invalid_utf8_does_not_consume_the_next_ascii_key() {
         drain_pending_events(&mut parser),
         vec![build_key_event(KeyCode::Char('x'), Modifiers::NONE)]
     );
+}
+
+// ---------------------------------------- kitty capture: text and layouts ----
+
+/// The one event these bytes parse into, or a panic naming what came out.
+fn parse_one_event(terminal_input_bytes: &[u8]) -> Event {
+    let mut parser = Parser::default();
+    parser.process_input_bytes(terminal_input_bytes);
+    let parsed_events = drain_pending_events(&mut parser);
+    assert_eq!(parsed_events.len(), 1, "{parsed_events:?}");
+    parsed_events.into_iter().next().expect("one event")
+}
+
+/// The events these bytes parse into.
+fn parse_events(terminal_input_bytes: &[u8]) -> Vec<Event> {
+    let mut parser = Parser::default();
+    parser.process_input_bytes(terminal_input_bytes);
+    drain_pending_events(&mut parser)
+}
+
+#[test]
+fn associated_text_reaches_the_event_beside_the_key() {
+    // With report-all-keys and associated text active, a plain `a` arrives as
+    // an escape code carrying its own text.
+    assert_eq!(
+        parse_one_event(b"\x1b[97;;97u"),
+        Event::Key(KeyEvent {
+            code: KeyCode::Char('a'),
+            key_event_kind: KeyEventKind::Press,
+            modifiers: Modifiers::NONE,
+            shifted_key: None,
+            base_layout_key: None,
+            associated_text: "a".to_string(),
+        })
+    );
+}
+
+#[test]
+fn associated_text_accepts_more_than_one_code_point() {
+    // `e` plus a combining acute accent is one key event carrying two code
+    // points.
+    assert_eq!(
+        parse_one_event(b"\x1b[101;;101:769u"),
+        Event::Key(KeyEvent {
+            code: KeyCode::Char('e'),
+            key_event_kind: KeyEventKind::Press,
+            modifiers: Modifiers::NONE,
+            shifted_key: None,
+            base_layout_key: None,
+            associated_text: "e\u{0301}".to_string(),
+        })
+    );
+}
+
+#[test]
+fn text_with_no_known_key_uses_key_number_zero_and_invents_nothing() {
+    // The specification's own example: `CSI 0 ; ; 229 u` reports the text `å`.
+    assert_eq!(
+        parse_one_event(b"\x1b[0;;229u"),
+        Event::Key(KeyEvent {
+            code: KeyCode::Codepoint(0),
+            key_event_kind: KeyEventKind::Press,
+            modifiers: Modifiers::NONE,
+            shifted_key: None,
+            base_layout_key: None,
+            associated_text: "å".to_string(),
+        })
+    );
+}
+
+#[test]
+fn a_malformed_text_parameter_never_costs_the_key_it_came_with() {
+    // The key is named by the first parameter and stands on its own, so a
+    // text parameter Koshi cannot use empties the text and nothing more. A
+    // terminal that reports Enter with its own byte as text keeps Enter
+    // working either way.
+    let malformed_text_reports: [&[u8]; 4] = [
+        // A carriage return is not text a key produced.
+        b"\x1b[13;;13u",
+        // An escape among otherwise good text.
+        b"\x1b[13;;13:27u",
+        // A code point above the last Unicode scalar value.
+        b"\x1b[13;;1114112u",
+        // A surrogate, which is no character.
+        b"\x1b[13;;55296u",
+    ];
+    for terminal_input_bytes in malformed_text_reports {
+        assert_eq!(
+            parse_one_event(terminal_input_bytes),
+            build_key_event(KeyCode::Enter, Modifiers::NONE),
+            "{terminal_input_bytes:?}"
+        );
+    }
+}
+
+#[test]
+fn one_bad_code_point_empties_the_text_instead_of_truncating_it() {
+    // Keeping the readable part would hand a pane text the terminal never
+    // sent. The whole field goes, and the key stays.
+    let partly_readable_text_reports: [&[u8]; 3] = [
+        // A valid character, then a code point that is no character.
+        b"\x1b[97;;97:1114112:98u",
+        // A valid character, then a control character.
+        b"\x1b[97;;97:27:98u",
+        // A valid character, then a field that is no number. `<` is a
+        // parameter byte, so it stays inside the sequence.
+        b"\x1b[97;;97:<:98u",
+    ];
+    for terminal_input_bytes in partly_readable_text_reports {
+        assert_eq!(
+            parse_one_event(terminal_input_bytes),
+            build_key_event(KeyCode::Char('a'), Modifiers::NONE),
+            "{terminal_input_bytes:?}"
+        );
+    }
+}
+
+#[test]
+fn both_alternate_keys_reach_the_event() {
+    // The key labelled `Q`, pressed with a Dvorak layout active: the layout
+    // makes it `'`, Shift makes it `"`, and the standard layout would have
+    // made it `q`.
+    assert_eq!(
+        parse_one_event(b"\x1b[39:34:113;2u"),
+        Event::Key(KeyEvent {
+            code: KeyCode::Char('\''),
+            key_event_kind: KeyEventKind::Press,
+            modifiers: Modifiers::SHIFT,
+            shifted_key: Some('"'),
+            base_layout_key: Some('q'),
+            associated_text: String::new(),
+        })
+    );
+}
+
+#[test]
+fn a_base_layout_key_arrives_with_an_empty_shifted_sub_field() {
+    // `CSI key::base` is the form for a base layout key with no shifted key.
+    assert_eq!(
+        parse_one_event(b"\x1b[39::113u"),
+        Event::Key(KeyEvent {
+            code: KeyCode::Char('\''),
+            key_event_kind: KeyEventKind::Press,
+            modifiers: Modifiers::NONE,
+            shifted_key: None,
+            base_layout_key: Some('q'),
+            associated_text: String::new(),
+        })
+    );
+}
+
+#[test]
+fn a_modifier_key_keeps_its_codepoint_instead_of_losing_its_identity() {
+    // Left Shift, Menu and a media key each name no Koshi key, and each stays
+    // a different event.
+    let unnamed_key_reports: [(&[u8], u32); 3] = [
+        (b"\x1b[57441u", 57_441),
+        (b"\x1b[57363u", 57_363),
+        (b"\x1b[57430u", 57_430),
+    ];
+    for (terminal_input_bytes, expected_codepoint) in unnamed_key_reports {
+        assert_eq!(
+            parse_one_event(terminal_input_bytes),
+            build_key_event(KeyCode::Codepoint(expected_codepoint), Modifiers::NONE),
+            "{terminal_input_bytes:?}"
+        );
+    }
+}
+
+#[test]
+fn a_release_of_a_key_with_text_stays_a_release() {
+    assert_eq!(
+        parse_one_event(b"\x1b[97;1:3;97u"),
+        Event::Key(KeyEvent {
+            code: KeyCode::Char('a'),
+            key_event_kind: KeyEventKind::Release,
+            modifiers: Modifiers::NONE,
+            shifted_key: None,
+            base_layout_key: None,
+            associated_text: "a".to_string(),
+        })
+    );
+}
+
+#[test]
+fn a_complete_event_survives_every_byte_split() {
+    assert_event_at_every_split(
+        b"\x1b[39:34:113;130:2;34u",
+        Event::Key(KeyEvent {
+            code: KeyCode::Char('\''),
+            key_event_kind: KeyEventKind::Repeat,
+            modifiers: Modifiers::SHIFT | Modifiers::NUM_LOCK,
+            shifted_key: Some('"'),
+            base_layout_key: Some('q'),
+            associated_text: "\"".to_string(),
+        }),
+    );
+}
+
+#[test]
+fn out_of_range_and_malformed_key_fields_are_refused_without_saturating() {
+    let refused_terminal_input_sequences: [&[u8]; 6] = [
+        // A codepoint above the last Unicode scalar value.
+        b"\x1b[1114112:65u",
+        // A surrogate, which is no character.
+        b"\x1b[97:55296u",
+        // A number wider than the field holds.
+        b"\x1b[99999999999u",
+        // A fourth key sub-field names nothing.
+        b"\x1b[97:65:97:97u",
+        // A fourth parameter names nothing.
+        b"\x1b[97;2;97;97u",
+        // An event type outside press, repeat and release.
+        b"\x1b[97;1:4u",
+    ];
+    for terminal_input_bytes in refused_terminal_input_sequences {
+        assert_eq!(
+            parse_events(terminal_input_bytes),
+            vec![],
+            "{terminal_input_bytes:?}"
+        );
+    }
+}
+
+#[test]
+fn the_last_unicode_scalar_value_is_still_a_character_key() {
+    // `1114111` is the highest codepoint a character holds, so it names a
+    // character key rather than an unnamed one.
+    assert_eq!(
+        parse_one_event(b"\x1b[1114111u"),
+        build_key_event(KeyCode::Char('\u{10ffff}'), Modifiers::NONE)
+    );
+}
+
+// ------------------------------------ the keyboard enhancement flag query ----
+
+#[test]
+fn the_terminal_answer_reports_the_flags_it_applied() {
+    assert_eq!(
+        parse_one_event(b"\x1b[?7u"),
+        Event::KeyboardEnhancementFlags(7)
+    );
+    assert_eq!(
+        parse_one_event(b"\x1b[?31u"),
+        Event::KeyboardEnhancementFlags(31)
+    );
+    // A terminal that applied nothing answers zero.
+    assert_eq!(
+        parse_one_event(b"\x1b[?0u"),
+        Event::KeyboardEnhancementFlags(0)
+    );
+}
+
+#[test]
+fn an_enhancement_answer_wider_than_the_flag_bits_is_refused() {
+    // 256 does not fit the eight flag bits, and truncating it would report
+    // flags the terminal never named.
+    assert_eq!(parse_events(b"\x1b[?256u"), vec![]);
+    assert_eq!(parse_events(b"\x1b[?u"), vec![]);
+}
+
+#[test]
+fn an_enhancement_answer_survives_every_byte_split() {
+    assert_event_at_every_split(b"\x1b[?31u", Event::KeyboardEnhancementFlags(31));
 }

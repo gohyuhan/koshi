@@ -2867,7 +2867,10 @@ fn a_key_the_keymap_does_not_bind_goes_up_the_connection_as_that_chord() {
         &mut wire.uplink,
         RuntimeEvent::KeyInput {
             client_id,
-            chord: KeyChord::from_parts(ModFlags::NONE, Key::Char('a')),
+            key_input: crate::tests::build_key_input_for_chord(KeyChord::from_parts(
+                ModFlags::NONE,
+                Key::Char('a'),
+            )),
         },
     );
 
@@ -2934,7 +2937,10 @@ fn a_key_the_pane_gets_ends_this_viewers_selection_gesture() {
         &mut wire.uplink,
         RuntimeEvent::KeyInput {
             client_id,
-            chord: KeyChord::from_parts(ModFlags::NONE, Key::Char('a')),
+            key_input: crate::tests::build_key_input_for_chord(KeyChord::from_parts(
+                ModFlags::NONE,
+                Key::Char('a'),
+            )),
         },
     );
 
@@ -4109,7 +4115,7 @@ fn every_event_from_the_blackout_is_dropped_and_the_hangup_still_reported() {
     incoming_tx
         .send(Incoming::Input(Box::new(RuntimeEvent::KeyInput {
             client_id: client.get_client_id(),
-            chord: sequence_opener_chord,
+            key_input: crate::tests::build_key_input_for_chord(sequence_opener_chord),
         })))
         .expect("the loop's channel takes it");
     incoming_tx

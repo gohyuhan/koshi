@@ -1,10 +1,11 @@
-//! Keyboard-boundary tests: the decode table (host event → canonical chord)
-//! and the encode table (chord → the bytes a program in a pane expects), with
-//! modifiers, named keys, function keys, unsupported keys, release
-//! suppression, and application-cursor-keys mode.
+//! Keyboard-boundary tests: the complete-event decode (host event → stored
+//! event), the decode table (host event → canonical chord) and the encode
+//! table (chord → the bytes a program in a pane expects), with modifiers,
+//! named keys, function keys, unnamed keys, release suppression, and
+//! application-cursor-keys mode.
 
 use super::*;
-use crate::host::KeyCode;
+use crate::host::{KeyCode, KeyEventKind};
 
 #[derive(Clone, Copy)]
 struct KeyModifiers(Modifiers);
@@ -42,6 +43,13 @@ fn encode_application_key_chord_bytes(modifier_flags: ModFlags, key: Key) -> Vec
 
 fn build_key_event(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
     KeyEvent::from_key_code_and_modifiers(code, modifiers.0)
+}
+
+/// The chord one host key event resolves a keybinding against, or `None` when
+/// no binding can name it. This is the pair the viewer uses: decode the whole
+/// event, then project it.
+fn decode_key(host_key_event: KeyEvent) -> Option<KeyChord> {
+    decode_key_event(host_key_event).to_binding_chord()
 }
 
 fn build_optional_key_chord(modifier_flags: ModFlags, key: Key) -> Option<KeyChord> {
@@ -225,7 +233,7 @@ fn repeat_decodes_and_release_does_not() {
 
 #[test]
 fn keys_the_chord_model_cannot_name_are_not_input() {
-    let unsupported_host_key_codes = [KeyCode::Function(25), KeyCode::Unsupported];
+    let unsupported_host_key_codes = [KeyCode::Function(25), KeyCode::Codepoint(57_441)];
     for host_key_code in unsupported_host_key_codes {
         assert_eq!(
             decode_key(build_key_event(host_key_code, KeyModifiers::NONE)),
@@ -609,7 +617,7 @@ fn a_decoded_key_round_trips_through_the_encoder() {
     for (host_key_event, expected_key_bytes) in
         host_key_events.into_iter().zip(expected_encoded_key_bytes)
     {
-        let key_chord = decode_key(host_key_event).expect("decodes");
+        let key_chord = decode_key(host_key_event.clone()).expect("decodes");
         assert_eq!(
             encode_key_chord(key_chord, false),
             expected_key_bytes.to_vec(),
@@ -1157,4 +1165,231 @@ fn append_decimal_writes_every_digit_of_the_decimal_number() {
         append_decimal(&mut decimal_digits, decimal_number);
         assert_eq!(decimal_digits, expected_bytes.to_vec(), "{decimal_number}");
     }
+}
+
+// ------------------------------------------ decode: the complete event ----
+
+#[test]
+fn the_complete_event_keeps_every_field_the_host_reported() {
+    let host_key_event = KeyEvent {
+        code: KeyCode::Char('q'),
+        key_event_kind: KeyEventKind::Release,
+        modifiers: Modifiers::SHIFT | Modifiers::CAPS_LOCK | Modifiers::NUM_LOCK,
+        shifted_key: Some('"'),
+        base_layout_key: Some('\''),
+        associated_text: "q".to_string(),
+    };
+    assert_eq!(
+        decode_key_event(host_key_event),
+        KeyInput {
+            key: KeyIdentity::Key(Key::Char('q')),
+            key_event_kind: KeyEventKind::Release,
+            shifted_key: Some('"'),
+            base_layout_key: Some('\''),
+            associated_text: "q".to_string(),
+            modifier_flags: KeyModifierFlags::SHIFT
+                | KeyModifierFlags::CAPS_LOCK
+                | KeyModifierFlags::NUM_LOCK,
+        }
+    );
+}
+
+#[test]
+fn a_release_keeps_its_kind_in_the_stored_event() {
+    let mut host_key_event = build_key_event(KeyCode::Char('a'), KeyModifiers::NONE);
+    host_key_event.key_event_kind = KeyEventKind::Release;
+    let key_input = decode_key_event(host_key_event);
+    assert_eq!(key_input.key_event_kind, KeyEventKind::Release);
+    assert_eq!(key_input.key, KeyIdentity::Key(Key::Char('a')));
+    // Only the binding projection refuses a release.
+    assert_eq!(key_input.to_binding_chord(), None);
+}
+
+#[test]
+fn every_host_modifier_bit_reaches_the_stored_bitmap() {
+    let host_modifiers = Modifiers::SHIFT
+        | Modifiers::ALT
+        | Modifiers::CONTROL
+        | Modifiers::SUPER
+        | Modifiers::HYPER
+        | Modifiers::META
+        | Modifiers::CAPS_LOCK
+        | Modifiers::NUM_LOCK;
+    let key_input = decode_key_event(KeyEvent::from_key_code_and_modifiers(
+        KeyCode::Char('a'),
+        host_modifiers,
+    ));
+    assert_eq!(key_input.modifier_flags.bits(), 0b1111_1111);
+}
+
+#[test]
+fn back_tab_becomes_tab_with_shift_held() {
+    let key_input = decode_key_event(build_key_event(KeyCode::BackTab, KeyModifiers::NONE));
+    assert_eq!(key_input.key, KeyIdentity::Key(Key::Named(NamedKey::Tab)));
+    assert!(key_input
+        .modifier_flags
+        .has_all_modifiers(KeyModifierFlags::SHIFT));
+}
+
+#[test]
+fn an_unnamed_key_keeps_its_codepoint_through_the_decode() {
+    assert_eq!(
+        decode_key_event(build_key_event(
+            KeyCode::Codepoint(57_441),
+            KeyModifiers::NONE
+        ))
+        .key,
+        KeyIdentity::Codepoint(57_441)
+    );
+    // Key number 0 marks an event that carries only text.
+    let text_only = decode_key_event(KeyEvent {
+        associated_text: "å".to_string(),
+        ..build_key_event(KeyCode::Codepoint(0), KeyModifiers::NONE)
+    });
+    assert_eq!(
+        text_only.key,
+        KeyIdentity::Codepoint(koshi_core::key::TEXT_ONLY_KEY_CODEPOINT)
+    );
+    assert_eq!(text_only.associated_text, "å");
+    assert_eq!(text_only.shifted_key, None);
+    assert_eq!(text_only.base_layout_key, None);
+    assert_eq!(text_only.modifier_flags, KeyModifierFlags::NONE);
+}
+
+#[test]
+fn a_function_key_above_the_last_one_is_unnamed_rather_than_dropped() {
+    let key_input = decode_key_event(build_key_event(KeyCode::Function(25), KeyModifiers::NONE));
+    assert_eq!(key_input.key, KeyIdentity::Unnamed);
+    assert_eq!(key_input.to_binding_chord(), None);
+}
+
+#[test]
+fn a_shifted_alternative_leaves_the_binding_projection_unchanged() {
+    // Shift plus `1` reports `!` as the shifted key; the binding still sees `!`.
+    let shifted_digit = KeyEvent {
+        shifted_key: Some('!'),
+        ..KeyEvent::from_key_code_and_modifiers(KeyCode::Char('1'), Modifiers::SHIFT)
+    };
+    assert_eq!(
+        decode_key(shifted_digit),
+        build_optional_key_chord(ModFlags::NONE, Key::Char('!'))
+    );
+
+    // Shift plus `a` reports `A`; the binding still sees `<S-a>`.
+    let shifted_letter = KeyEvent {
+        shifted_key: Some('A'),
+        ..KeyEvent::from_key_code_and_modifiers(KeyCode::Char('a'), Modifiers::SHIFT)
+    };
+    assert_eq!(
+        decode_key(shifted_letter),
+        build_optional_key_chord(ModFlags::SHIFT, Key::Char('a'))
+    );
+}
+
+#[test]
+fn associated_text_never_reaches_the_binding_chord() {
+    // A key that carries text still binds on the key, not on the text.
+    let key_with_text = KeyEvent {
+        associated_text: "a".to_string(),
+        ..build_key_event(KeyCode::Char('a'), KeyModifiers::CONTROL)
+    };
+    assert_eq!(
+        decode_key(key_with_text),
+        build_optional_key_chord(ModFlags::CTRL, Key::Char('a'))
+    );
+}
+
+#[test]
+fn the_host_and_stored_modifier_bitmaps_use_the_same_bit_for_the_same_modifier() {
+    // `to_key_modifier_flags` reinterprets the raw byte, so a bit that moves
+    // in one bitmap and not the other would remap every modifier silently.
+    let paired_modifiers = [
+        (Modifiers::SHIFT, KeyModifierFlags::SHIFT),
+        (Modifiers::ALT, KeyModifierFlags::ALT),
+        (Modifiers::CONTROL, KeyModifierFlags::CTRL),
+        (Modifiers::SUPER, KeyModifierFlags::SUPER),
+        (Modifiers::HYPER, KeyModifierFlags::HYPER),
+        (Modifiers::META, KeyModifierFlags::META),
+        (Modifiers::CAPS_LOCK, KeyModifierFlags::CAPS_LOCK),
+        (Modifiers::NUM_LOCK, KeyModifierFlags::NUM_LOCK),
+    ];
+    for (host_modifier, stored_modifier) in paired_modifiers {
+        assert_eq!(
+            host_modifier.to_key_modifier_flags(),
+            stored_modifier,
+            "{host_modifier:?} and {stored_modifier:?} must share one bit"
+        );
+    }
+}
+
+// ------------------------------- end to end: host bytes to the pane bytes ----
+
+/// The bytes a pane receives for one run of terminal input, with the keys no
+/// binding consumed encoded in order.
+///
+/// This is the pair the runtime uses at `handle_key_press`: [`decode_key`] for
+/// the chord, then [`encode_key_chord`] for the bytes it writes to the pane.
+fn encode_terminal_input_for_pane(terminal_input_bytes: &[u8]) -> Vec<u8> {
+    let mut parser = crate::host::Parser::default();
+    parser.process_input_bytes(terminal_input_bytes);
+    let mut pane_bytes = Vec::new();
+    while let Some(host_event) = parser.remove_next_pending_event() {
+        let crate::host::Event::Key(host_key_event) = host_event else {
+            continue;
+        };
+        if let Some(key_chord) = decode_key(host_key_event) {
+            pane_bytes.extend(encode_key_chord(key_chord, false));
+        }
+    }
+    pane_bytes
+}
+
+#[test]
+fn a_lock_modifier_is_captured_and_still_reaches_the_pane_as_the_plain_key() {
+    // The modifier field reports Caps Lock as 64 and Num Lock as 128, always
+    // one more in the escape code. Both are stored and neither reaches a pane.
+    assert_eq!(encode_terminal_input_for_pane(b"\x1b[97;65u"), b"a");
+    assert_eq!(encode_terminal_input_for_pane(b"\x1b[97;129u"), b"a");
+    assert_eq!(encode_terminal_input_for_pane(b"\x1b[97;193u"), b"a");
+    // Control still lands beside a held lock: 69 is 1 + 4 + 64.
+    assert_eq!(encode_terminal_input_for_pane(b"\x1b[97;69u"), b"\x01");
+}
+
+#[test]
+fn every_reachable_key_report_writes_the_bytes_it_always_wrote() {
+    let key_reports_and_pane_bytes: [(&[u8], &[u8]); 9] = [
+        // A plain character on the byte path.
+        (b"a", b"a"),
+        // The same character as a disambiguated escape code.
+        (b"\x1b[97u", b"a"),
+        // Shift with the terminal's shifted alternative.
+        (b"\x1b[97:65;2u", b"A"),
+        // Shift on a digit: the shifted alternative stands for itself.
+        (b"\x1b[49:33;2u", b"!"),
+        // Control folds into the C0 byte.
+        (b"\x1b[97;5u", b"\x01"),
+        // A release writes nothing.
+        (b"\x1b[97;1:3u", b""),
+        // A repeat writes the key again.
+        (b"\x1b[97;1:2u", b"a"),
+        // Shift+Tab keeps its own sequence.
+        (b"\x1b[Z", b"\x1b[Z"),
+        // A key no binding can name writes nothing.
+        (b"\x1b[57441u", b""),
+    ];
+    for (terminal_input_bytes, expected_pane_bytes) in key_reports_and_pane_bytes {
+        assert_eq!(
+            encode_terminal_input_for_pane(terminal_input_bytes),
+            expected_pane_bytes,
+            "{terminal_input_bytes:?}"
+        );
+    }
+}
+
+#[test]
+fn a_text_parameter_koshi_cannot_use_never_costs_the_pane_its_key() {
+    // Enter reported with its own byte as text, and with a number that is no
+    // character at all, both still write a carriage return.
+    assert_eq!(encode_terminal_input_for_pane(b"\x1b[13;;13u"), b"\r");
+    assert_eq!(encode_terminal_input_for_pane(b"\x1b[13;;1114112u"), b"\r");
 }

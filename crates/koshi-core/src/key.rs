@@ -381,5 +381,242 @@ pub struct PendingKeySequence {
     pub deadline: Option<Instant>,
 }
 
+/// The modifier keys the outer terminal reported with one keyboard event,
+/// packed one per bit.
+///
+/// This is the stored bitmap: it keeps every modifier the Kitty keyboard
+/// protocol names, including the two lock states a pane encoding leaves out.
+/// [`ModFlags`] is the narrower projection a keybinding matches on.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(transparent)]
+pub struct KeyModifierFlags(u8);
+
+impl KeyModifierFlags {
+    /// No modifier key held.
+    pub const NONE: Self = Self(0);
+    /// Shift.
+    pub const SHIFT: Self = Self(1 << 0);
+    /// Alt or Option.
+    pub const ALT: Self = Self(1 << 1);
+    /// Control.
+    pub const CTRL: Self = Self(1 << 2);
+    /// Super, Command, or Windows.
+    pub const SUPER: Self = Self(1 << 3);
+    /// Hyper.
+    pub const HYPER: Self = Self(1 << 4);
+    /// Meta.
+    pub const META: Self = Self(1 << 5);
+    /// Caps Lock, reported as a held state rather than a press.
+    pub const CAPS_LOCK: Self = Self(1 << 6);
+    /// Num Lock, reported as a held state rather than a press.
+    pub const NUM_LOCK: Self = Self(1 << 7);
+
+    /// The raw bit pattern. Every one of the eight bits names a modifier.
+    #[must_use]
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+
+    /// The modifiers a raw bit pattern names. Every bit names a modifier, so
+    /// no pattern is refused.
+    #[must_use]
+    pub const fn from_bits(modifier_bits: u8) -> Self {
+        Self(modifier_bits)
+    }
+
+    /// True when every modifier in `required_modifiers` is held.
+    #[must_use]
+    pub const fn has_all_modifiers(self, required_modifiers: Self) -> bool {
+        self.0 & required_modifiers.0 == required_modifiers.0
+    }
+
+    /// The modifiers held in either set.
+    #[must_use]
+    pub const fn union(self, other_modifier_flags: Self) -> Self {
+        Self(self.0 | other_modifier_flags.0)
+    }
+
+    /// The four modifiers a keybinding matches on.
+    ///
+    /// Control, Alt and Shift carry across unchanged. Meta counts as Super,
+    /// the same fold the chord parser applies. Hyper, Caps Lock and Num Lock
+    /// name no binding modifier and are dropped.
+    ///
+    /// `CTRL | META | CAPS_LOCK` becomes `ModFlags::CTRL | ModFlags::SUPER`.
+    #[must_use]
+    pub const fn to_binding_modifiers(self) -> ModFlags {
+        let mut binding_bits = 0;
+        if self.has_all_modifiers(Self::CTRL) {
+            binding_bits |= ModFlags::CTRL.0;
+        }
+        if self.has_all_modifiers(Self::ALT) {
+            binding_bits |= ModFlags::ALT.0;
+        }
+        if self.has_all_modifiers(Self::SHIFT) {
+            binding_bits |= ModFlags::SHIFT.0;
+        }
+        if self.has_all_modifiers(Self::SUPER) || self.has_all_modifiers(Self::META) {
+            binding_bits |= ModFlags::SUPER.0;
+        }
+        ModFlags(binding_bits)
+    }
+}
+
+impl std::ops::BitOr for KeyModifierFlags {
+    type Output = Self;
+
+    fn bitor(self, right_modifier_flags: Self) -> Self {
+        self.union(right_modifier_flags)
+    }
+}
+
+impl std::ops::BitOrAssign for KeyModifierFlags {
+    fn bitor_assign(&mut self, right_modifier_flags: Self) {
+        self.0 |= right_modifier_flags.0;
+    }
+}
+
+/// The physical action one keyboard event reports.
+///
+/// The Kitty keyboard protocol numbers these 1, 2 and 3, and a missing event
+/// type means [`KeyEventKind::Press`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum KeyEventKind {
+    /// A key went down.
+    Press,
+    /// A held key repeated.
+    Repeat,
+    /// A key came up.
+    Release,
+}
+
+/// The key a keyboard event reports.
+///
+/// A key the keybinding grammar can name arrives as [`KeyIdentity::Key`].
+/// Anything else keeps its reported codepoint rather than losing its identity:
+/// Left Shift (`57441`), Menu (`57363`) and the media keys have no [`Key`]
+/// form, and codepoint `0` is the value the Kitty keyboard protocol uses for
+/// an event that carries only text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum KeyIdentity {
+    /// A key the keybinding grammar names.
+    Key(Key),
+    /// A reported codepoint with no [`Key`] form. `0` means the event carries
+    /// only text.
+    Codepoint(u32),
+    /// A key the terminal named that has neither a [`Key`] form nor a
+    /// reported codepoint, such as a function key above `F24`.
+    Unnamed,
+}
+
+/// The codepoint the Kitty keyboard protocol uses when an event carries text
+/// and no key.
+pub const TEXT_ONLY_KEY_CODEPOINT: u32 = 0;
+
+/// One complete keyboard event, holding everything the outer terminal
+/// reported about a single key action.
+///
+/// [`KeyChord`] is the projection a keybinding matches on and drops what a
+/// binding cannot name. This type drops nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyInput {
+    /// The key the event reports.
+    pub key: KeyIdentity,
+    /// Whether the key went down, repeated, or came up.
+    pub key_event_kind: KeyEventKind,
+    /// The character the key produces with Shift, when the terminal reports
+    /// it. Shift+`a` on a US layout reports `'A'`.
+    pub shifted_key: Option<char>,
+    /// The character the physical key produces on the standard layout, when
+    /// the terminal reports it. With a Dvorak layout active, the key labelled
+    /// `Q` produces `'`, and this field holds `'q'`.
+    pub base_layout_key: Option<char>,
+    /// The text the key produced, empty when the event produced none.
+    ///
+    /// Holds more than one character when one key press produces several: `e`
+    /// with a combining acute accent is `"e\u{301}"`. A control character is
+    /// not text, so a key that reports one produces empty text here.
+    pub associated_text: String,
+    /// Every modifier the terminal reported, including Caps Lock and Num Lock.
+    pub modifier_flags: KeyModifierFlags,
+}
+
+impl KeyInput {
+    /// The chord a keybinding matches this event against, or `None` when no
+    /// binding can name it.
+    ///
+    /// Returns `None` for a release, and for an event whose key has no
+    /// [`Key`] form. A press and a repeat both produce a chord.
+    ///
+    /// The chord is the canonical form the config parser produces: `' '`
+    /// becomes [`NamedKey::Space`], a capital folds to lowercase plus Shift,
+    /// and a named key takes Shift as a modifier. `Ctrl+Shift+A` with Caps
+    /// Lock held projects to `<C-S-a>`.
+    ///
+    /// With Shift held on a character key, a reported [`KeyInput::shifted_key`]
+    /// replaces the key and consumes the Shift: key `'1'` with shifted key
+    /// `'!'` projects to `!`, and key `'a'` with shifted key `'A'` projects to
+    /// `<S-a>`.
+    #[must_use]
+    pub fn to_binding_chord(&self) -> Option<KeyChord> {
+        if self.key_event_kind == KeyEventKind::Release {
+            return None;
+        }
+        let KeyIdentity::Key(key) = self.key else {
+            return None;
+        };
+        let binding_modifiers = self.modifier_flags.to_binding_modifiers();
+        let is_shift_held = binding_modifiers.has_all_modifiers(ModFlags::SHIFT);
+        let modifiers_without_shift = ModFlags(binding_modifiers.0 & !ModFlags::SHIFT.0);
+        // A reported shifted character stands for the key itself: Shift plus
+        // `1` reports `!`, and `!` is the character a binding names.
+        if let (true, Key::Char(_), Some(shifted_character)) =
+            (is_shift_held, key, self.shifted_key)
+        {
+            return Some(build_canonical_chord(
+                Key::Char(shifted_character),
+                modifiers_without_shift,
+                false,
+            ));
+        }
+        Some(build_canonical_chord(
+            key,
+            modifiers_without_shift,
+            is_shift_held,
+        ))
+    }
+}
+
+/// The canonical chord for one key and the modifiers held with it.
+///
+/// `' '` becomes [`NamedKey::Space`]. A named key takes `is_shift_held` as a
+/// modifier. A capital that [`fold_uppercase_character`] folds becomes
+/// lowercase plus Shift; a lowercase letter takes `is_shift_held`; any other
+/// character drops it, because a shifted `1` arrives as `!`.
+#[must_use]
+fn build_canonical_chord(
+    input_key: Key,
+    modifier_flags: ModFlags,
+    is_shift_held: bool,
+) -> KeyChord {
+    let (normalized_key, is_shift_active) = match input_key {
+        Key::Char(' ') => (Key::Named(NamedKey::Space), is_shift_held),
+        Key::Named(_) => (input_key, is_shift_held),
+        Key::Char(character) => {
+            let (folded_character, was_shifted) = fold_uppercase_character(character);
+            let is_shift_active = was_shifted || (folded_character.is_lowercase() && is_shift_held);
+            (Key::Char(folded_character), is_shift_active)
+        }
+    };
+    let modifier_flags = if is_shift_active {
+        modifier_flags.union(ModFlags::SHIFT)
+    } else {
+        modifier_flags
+    };
+    KeyChord::from_parts(modifier_flags, normalized_key)
+}
+
 #[cfg(test)]
 mod tests;

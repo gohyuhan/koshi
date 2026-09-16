@@ -1,6 +1,7 @@
 //! Tests for the key chord model: modifier bit operations, the canonical text
-//! form each type renders, the typeable predicate, uppercase folding, and the
-//! serde wire form a chord travels in.
+//! form each type renders, the typeable predicate, uppercase folding, the
+//! serde wire form a chord travels in, and the complete keyboard event with
+//! the binding chord it projects to.
 
 use super::*;
 
@@ -440,4 +441,245 @@ fn fold_uppercase_leaves_a_titlecase_letter_and_folds_its_uppercase_form() {
     assert_eq!(fold_uppercase_character('\u{01C5}'), ('\u{01C5}', false));
     // `Ǆ` is uppercase and lowercases to the single `ǆ`, which uppercases back.
     assert_eq!(fold_uppercase_character('\u{01C4}'), ('\u{01C6}', true));
+}
+
+// ------------------------------------------------ the complete key event ----
+
+/// An event that reports one key press with no alternatives and no text.
+fn build_key_press(key: Key) -> KeyInput {
+    KeyInput {
+        key: KeyIdentity::Key(key),
+        key_event_kind: KeyEventKind::Press,
+        shifted_key: None,
+        base_layout_key: None,
+        associated_text: String::new(),
+        modifier_flags: KeyModifierFlags::NONE,
+    }
+}
+
+/// An event that reports one key press with the given modifiers held.
+fn build_key_input(key: Key, modifier_flags: KeyModifierFlags) -> KeyInput {
+    KeyInput {
+        modifier_flags,
+        ..build_key_press(key)
+    }
+}
+
+#[test]
+fn every_reported_modifier_is_a_distinct_bit() {
+    assert_eq!(KeyModifierFlags::SHIFT.bits(), 1);
+    assert_eq!(KeyModifierFlags::ALT.bits(), 2);
+    assert_eq!(KeyModifierFlags::CTRL.bits(), 4);
+    assert_eq!(KeyModifierFlags::SUPER.bits(), 8);
+    assert_eq!(KeyModifierFlags::HYPER.bits(), 16);
+    assert_eq!(KeyModifierFlags::META.bits(), 32);
+    assert_eq!(KeyModifierFlags::CAPS_LOCK.bits(), 64);
+    assert_eq!(KeyModifierFlags::NUM_LOCK.bits(), 128);
+    assert_eq!(KeyModifierFlags::NONE.bits(), 0);
+}
+
+#[test]
+fn the_stored_bitmap_keeps_all_eight_bits() {
+    let every_modifier_flags = KeyModifierFlags::from_bits(0b1111_1111);
+    for one_modifier in [
+        KeyModifierFlags::SHIFT,
+        KeyModifierFlags::ALT,
+        KeyModifierFlags::CTRL,
+        KeyModifierFlags::SUPER,
+        KeyModifierFlags::HYPER,
+        KeyModifierFlags::META,
+        KeyModifierFlags::CAPS_LOCK,
+        KeyModifierFlags::NUM_LOCK,
+    ] {
+        assert!(
+            every_modifier_flags.has_all_modifiers(one_modifier),
+            "{one_modifier:?}"
+        );
+    }
+    assert_eq!(every_modifier_flags.bits(), 255);
+}
+
+#[test]
+fn the_binding_projection_keeps_four_modifiers_and_folds_meta_onto_super() {
+    assert_eq!(
+        KeyModifierFlags::CTRL.to_binding_modifiers(),
+        ModFlags::CTRL
+    );
+    assert_eq!(
+        KeyModifierFlags::META.to_binding_modifiers(),
+        ModFlags::SUPER
+    );
+    assert_eq!(
+        KeyModifierFlags::SUPER.to_binding_modifiers(),
+        ModFlags::SUPER
+    );
+    // Hyper, Caps Lock and Num Lock name no binding modifier.
+    assert_eq!(
+        KeyModifierFlags::HYPER
+            .union(KeyModifierFlags::CAPS_LOCK)
+            .union(KeyModifierFlags::NUM_LOCK)
+            .to_binding_modifiers(),
+        ModFlags::NONE
+    );
+    assert_eq!(
+        KeyModifierFlags::from_bits(0b1111_1111).to_binding_modifiers(),
+        ModFlags::CTRL | ModFlags::ALT | ModFlags::SHIFT | ModFlags::SUPER
+    );
+}
+
+#[test]
+fn caps_lock_and_num_lock_survive_beside_a_binding_modifier() {
+    let key_input = build_key_input(
+        Key::Char('a'),
+        KeyModifierFlags::CTRL
+            .union(KeyModifierFlags::CAPS_LOCK)
+            .union(KeyModifierFlags::NUM_LOCK),
+    );
+    assert!(key_input
+        .modifier_flags
+        .has_all_modifiers(KeyModifierFlags::CAPS_LOCK));
+    assert!(key_input
+        .modifier_flags
+        .has_all_modifiers(KeyModifierFlags::NUM_LOCK));
+    // The pane encoding has no place for either, so the chord holds Control alone.
+    assert_eq!(
+        key_input.to_binding_chord(),
+        Some(KeyChord::from_parts(ModFlags::CTRL, Key::Char('a')))
+    );
+}
+
+#[test]
+fn a_release_projects_to_no_chord_and_a_repeat_projects_like_a_press() {
+    let mut key_input = build_key_input(Key::Char('a'), KeyModifierFlags::NONE);
+    let pressed_chord = key_input.to_binding_chord();
+    assert_eq!(
+        pressed_chord,
+        Some(KeyChord::from_parts(ModFlags::NONE, Key::Char('a')))
+    );
+
+    key_input.key_event_kind = KeyEventKind::Repeat;
+    assert_eq!(key_input.to_binding_chord(), pressed_chord);
+
+    key_input.key_event_kind = KeyEventKind::Release;
+    assert_eq!(key_input.to_binding_chord(), None);
+    // The release keeps every field; only the projection refuses it.
+    assert_eq!(key_input.key, KeyIdentity::Key(Key::Char('a')));
+    assert_eq!(key_input.key_event_kind, KeyEventKind::Release);
+}
+
+#[test]
+fn a_shifted_alternative_replaces_the_key_and_consumes_the_shift() {
+    // Shift plus `1` reports `!`, and `!` is the character a binding names.
+    let shifted_digit = KeyInput {
+        shifted_key: Some('!'),
+        modifier_flags: KeyModifierFlags::SHIFT,
+        ..build_key_press(Key::Char('1'))
+    };
+    assert_eq!(
+        shifted_digit.to_binding_chord(),
+        Some(KeyChord::from_parts(ModFlags::NONE, Key::Char('!')))
+    );
+    // The stored event still holds both halves.
+    assert_eq!(shifted_digit.key, KeyIdentity::Key(Key::Char('1')));
+    assert_eq!(shifted_digit.shifted_key, Some('!'));
+
+    // Shift plus `a` reports `A`, which folds back to lowercase plus Shift.
+    let shifted_letter = KeyInput {
+        shifted_key: Some('A'),
+        modifier_flags: KeyModifierFlags::SHIFT,
+        ..build_key_press(Key::Char('a'))
+    };
+    assert_eq!(
+        shifted_letter.to_binding_chord(),
+        Some(KeyChord::from_parts(ModFlags::SHIFT, Key::Char('a')))
+    );
+}
+
+#[test]
+fn a_shifted_alternative_never_replaces_a_named_key() {
+    let shifted_tab = KeyInput {
+        shifted_key: Some('A'),
+        modifier_flags: KeyModifierFlags::SHIFT,
+        ..build_key_press(Key::Named(NamedKey::Tab))
+    };
+    assert_eq!(
+        shifted_tab.to_binding_chord(),
+        Some(KeyChord::from_parts(
+            ModFlags::SHIFT,
+            Key::Named(NamedKey::Tab)
+        ))
+    );
+}
+
+#[test]
+fn a_key_the_binding_grammar_cannot_name_projects_to_no_chord() {
+    // Left Shift is codepoint 57441 and no binding names it.
+    let left_shift = KeyInput {
+        key: KeyIdentity::Codepoint(57_441),
+        ..build_key_press(Key::Char('a'))
+    };
+    assert_eq!(left_shift.to_binding_chord(), None);
+    assert_ne!(
+        left_shift.key,
+        KeyIdentity::Codepoint(TEXT_ONLY_KEY_CODEPOINT)
+    );
+
+    let unnamed_function_key_input = KeyInput {
+        key: KeyIdentity::Unnamed,
+        ..build_key_press(Key::Char('a'))
+    };
+    assert_eq!(unnamed_function_key_input.to_binding_chord(), None);
+}
+
+#[test]
+fn a_text_only_event_names_codepoint_zero_and_projects_to_no_chord() {
+    let text_only = KeyInput {
+        key: KeyIdentity::Codepoint(TEXT_ONLY_KEY_CODEPOINT),
+        associated_text: "å".to_string(),
+        ..build_key_press(Key::Char('a'))
+    };
+    assert_eq!(
+        text_only.key,
+        KeyIdentity::Codepoint(TEXT_ONLY_KEY_CODEPOINT)
+    );
+    assert_eq!(text_only.to_binding_chord(), None);
+    // No physical key, alternative or modifier is invented for it.
+    assert_eq!(text_only.shifted_key, None);
+    assert_eq!(text_only.base_layout_key, None);
+    assert_eq!(text_only.modifier_flags, KeyModifierFlags::NONE);
+}
+
+#[test]
+fn the_space_bar_and_a_capital_reach_their_canonical_chords() {
+    assert_eq!(
+        build_key_input(Key::Char(' '), KeyModifierFlags::CTRL).to_binding_chord(),
+        Some(KeyChord::from_parts(
+            ModFlags::CTRL,
+            Key::Named(NamedKey::Space)
+        ))
+    );
+    assert_eq!(
+        build_key_input(Key::Char('A'), KeyModifierFlags::ALT).to_binding_chord(),
+        Some(KeyChord::from_parts(
+            ModFlags::ALT | ModFlags::SHIFT,
+            Key::Char('a')
+        ))
+    );
+}
+
+#[test]
+fn a_complete_event_survives_its_serde_round_trip() {
+    let key_input = KeyInput {
+        key: KeyIdentity::Key(Key::Char('q')),
+        key_event_kind: KeyEventKind::Release,
+        shifted_key: Some('Q'),
+        base_layout_key: Some('\''),
+        associated_text: "łó".to_string(),
+        modifier_flags: KeyModifierFlags::from_bits(0b1111_1111),
+    };
+    let encoded_key_input = serde_json::to_string(&key_input).expect("serializes");
+    assert_eq!(
+        serde_json::from_str::<KeyInput>(&encoded_key_input).expect("deserializes"),
+        key_input
+    );
 }

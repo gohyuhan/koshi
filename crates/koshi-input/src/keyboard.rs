@@ -1,9 +1,12 @@
 //! Host keyboard boundary: the two halves of one key press.
 //!
-//! [`decode_key`] turns one host key event into a canonical [`KeyChord`]: one
-//! key plus the modifiers held with it, such as `<C-a>`, in the form the keymap
-//! matches keybindings against. [`encode_key_chord`] turns a chord back into the bytes a
-//! program running inside a pane expects, for the keys no keybinding consumed.
+//! [`decode_key_event`] turns one host key event into a [`KeyInput`], which
+//! keeps every field the terminal reported. [`KeyInput::to_binding_chord`]
+//! projects that event onto a canonical [`KeyChord`]: one key plus the
+//! modifiers held with it, such as `<C-a>`, in the form the keymap matches
+//! keybindings against. [`encode_key_chord`] turns a chord back into the bytes
+//! a program running inside a pane expects, for the keys no keybinding
+//! consumed.
 //!
 //! Encoding reads the chord and the receiving pane's application-cursor-keys
 //! mode (DECCKM, `ESCAPE_BYTE [ ? 1 h`). A bare Up arrow is `ESCAPE_BYTE [ A` with the mode off
@@ -20,8 +23,8 @@
 //!   `Ctrl-Right` is `ESCAPE_BYTE [ 1 ; 5 C`, where `5` = 1 + 4 (Control). Shift adds
 //!   1, Alt 2, Control 4, Super 8.
 
-use crate::host::{KeyCode as HostKey, KeyEvent, KeyEventKind, Modifiers};
-use koshi_core::key::{fold_uppercase_character, Key, KeyChord, ModFlags, NamedKey};
+use crate::host::{KeyCode as HostKey, KeyEvent, Modifiers};
+use koshi_core::key::{Key, KeyChord, KeyIdentity, KeyInput, KeyModifierFlags, ModFlags, NamedKey};
 
 /// The escape byte that opens every control sequence.
 const ESCAPE_BYTE: u8 = 0x1b;
@@ -30,28 +33,32 @@ const ESCAPE_BYTE: u8 = 0x1b;
 /// bitmap of the held modifiers.
 const UNMODIFIED_PARAMETER: u8 = 1;
 
-/// Decode one press or repeat into its canonical chord.
+/// Decode one host key event into the complete event Koshi stores.
 ///
-/// Returns `None` for a release, for a function key above F24, and for a host
-/// key added after this boundary that has no [`Key`] form. `BackTab` supplies
-/// Shift even when the host flag is absent. Meta counts as Super; Hyper and
-/// lock-state flags are dropped.
+/// Nothing the host reported is dropped: the key keeps its identity even when
+/// no keybinding can name it, both alternatives and the associated text carry
+/// through, and the modifier bitmap keeps all eight bits including Caps Lock
+/// and Num Lock.
+///
+/// `BackTab` becomes Tab with Shift held, because the host reports Shift+Tab
+/// as one key rather than as Tab plus a modifier.
+///
+/// `CSI 97:65;2u` becomes key `'a'`, shifted key `'A'`, kind
+/// [`KeyEventKind::Press`](crate::host::KeyEventKind::Press), Shift held.
 #[must_use]
-pub fn decode_key(host_key_event: KeyEvent) -> Option<KeyChord> {
-    if host_key_event.key_event_kind == KeyEventKind::Release {
-        return None;
+pub fn decode_key_event(host_key_event: KeyEvent) -> KeyInput {
+    let mut modifier_flags = host_key_event.modifiers.to_key_modifier_flags();
+    if host_key_event.code == HostKey::BackTab {
+        modifier_flags |= KeyModifierFlags::SHIFT;
     }
-
-    let host_modifiers = host_key_event.modifiers;
-    let is_shift_held = host_modifiers.has_all_modifiers(Modifiers::SHIFT)
-        || host_key_event.code == HostKey::BackTab;
-    let decoded_key = decode_host_key(host_key_event.code)?;
-    let modifier_flags = decode_modifiers(host_modifiers);
-    Some(normalize_key_chord(
-        decoded_key,
+    KeyInput {
+        key: decode_key_identity(host_key_event.code),
+        key_event_kind: host_key_event.key_event_kind,
+        shifted_key: host_key_event.shifted_key,
+        base_layout_key: host_key_event.base_layout_key,
+        associated_text: host_key_event.associated_text,
         modifier_flags,
-        is_shift_held,
-    ))
+    }
 }
 
 /// Encode a chord as the bytes the focused pane's program expects.
@@ -86,31 +93,33 @@ pub fn encode_key_chord(chord: KeyChord, is_application_cursor_keys_enabled: boo
     }
 }
 
-/// The [`Key`] a host code stands for, or `None` for a code with no
-/// [`Key`] form.
-fn decode_host_key(host_key_code: HostKey) -> Option<Key> {
-    let decoded_key = match host_key_code {
-        HostKey::Char(character) => Key::Char(character),
-        HostKey::Enter => Key::Named(NamedKey::Enter),
-        HostKey::Backspace => Key::Named(NamedKey::Backspace),
-        HostKey::Tab => Key::Named(NamedKey::Tab),
-        HostKey::Escape => Key::Named(NamedKey::Esc),
-        HostKey::Up => Key::Named(NamedKey::Up),
-        HostKey::Down => Key::Named(NamedKey::Down),
-        HostKey::Right => Key::Named(NamedKey::Right),
-        HostKey::Left => Key::Named(NamedKey::Left),
-        HostKey::Home => Key::Named(NamedKey::Home),
-        HostKey::End => Key::Named(NamedKey::End),
-        HostKey::Insert => Key::Named(NamedKey::Insert),
-        HostKey::Delete => Key::Named(NamedKey::Delete),
-        HostKey::PageUp => Key::Named(NamedKey::PageUp),
-        HostKey::PageDown => Key::Named(NamedKey::PageDown),
-        HostKey::BackTab => Key::Named(NamedKey::Tab),
-        HostKey::Function(function_number @ 1..=24) => Key::Named(NamedKey::F(function_number)),
-        HostKey::Function(_) => return None,
-        HostKey::Unsupported => return None,
+/// The stored identity a host code stands for.
+///
+/// A code Koshi names becomes [`KeyIdentity::Key`]. A code the terminal
+/// reported by codepoint keeps that codepoint. A function key above `F24` has
+/// neither form and becomes [`KeyIdentity::Unnamed`].
+fn decode_key_identity(host_key_code: HostKey) -> KeyIdentity {
+    let named_key = match host_key_code {
+        HostKey::Char(character) => return KeyIdentity::Key(Key::Char(character)),
+        HostKey::Codepoint(codepoint) => return KeyIdentity::Codepoint(codepoint),
+        HostKey::Function(function_number @ 1..=24) => NamedKey::F(function_number),
+        HostKey::Function(_) => return KeyIdentity::Unnamed,
+        HostKey::Enter => NamedKey::Enter,
+        HostKey::Backspace => NamedKey::Backspace,
+        HostKey::Tab | HostKey::BackTab => NamedKey::Tab,
+        HostKey::Escape => NamedKey::Esc,
+        HostKey::Up => NamedKey::Up,
+        HostKey::Down => NamedKey::Down,
+        HostKey::Right => NamedKey::Right,
+        HostKey::Left => NamedKey::Left,
+        HostKey::Home => NamedKey::Home,
+        HostKey::End => NamedKey::End,
+        HostKey::Insert => NamedKey::Insert,
+        HostKey::Delete => NamedKey::Delete,
+        HostKey::PageUp => NamedKey::PageUp,
+        HostKey::PageDown => NamedKey::PageDown,
     };
-    Some(decoded_key)
+    KeyIdentity::Key(Key::Named(named_key))
 }
 
 /// The host's Control, Alt and Super as [`ModFlags`]. Meta counts as Super;
@@ -130,31 +139,6 @@ pub(crate) fn decode_modifiers(host_modifiers: Modifiers) -> ModFlags {
         modifier_flags = modifier_flags.union(ModFlags::SUPER);
     }
     modifier_flags
-}
-
-/// The canonical chord for one press, the form the config parser produces.
-/// `is_shift_held` is the host's Shift state. `' '` becomes [`NamedKey::Space`].
-/// A named key takes `shift_held` as a modifier. A capital that
-/// [`fold_uppercase_character`] folds becomes lowercase plus Shift; a lowercase letter
-/// takes `shift_held`; any other character drops it.
-fn normalize_key_chord(input_key: Key, modifier_flags: ModFlags, is_shift_held: bool) -> KeyChord {
-    let (normalized_key, is_shift_active) = match input_key {
-        Key::Char(' ') => (Key::Named(NamedKey::Space), is_shift_held),
-        Key::Named(_) => (input_key, is_shift_held),
-        // An uppercase letter folds to lowercase plus Shift. A held Shift
-        // counts only on a lowercase letter: a shifted `1` arrives as `!`.
-        Key::Char(character) => {
-            let (folded_character, was_shifted) = fold_uppercase_character(character);
-            let is_shift_active = was_shifted || (folded_character.is_lowercase() && is_shift_held);
-            (Key::Char(folded_character), is_shift_active)
-        }
-    };
-    let modifier_flags = if is_shift_active {
-        modifier_flags.union(ModFlags::SHIFT)
-    } else {
-        modifier_flags
-    };
-    KeyChord::from_parts(modifier_flags, normalized_key)
 }
 
 /// A character key: Shift restores the capital, Control folds the character

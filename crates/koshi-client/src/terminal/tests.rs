@@ -19,6 +19,7 @@ use koshi_config::layer::{PartialColorPalette, PartialKeybindingsConfig, Partial
 use koshi_config::types::RgbColor;
 use koshi_core::command::{Command, CommandEnvelope, CommandSource};
 use koshi_core::ids::{CommandId, PaneId, SessionId};
+use koshi_core::key::{Key, KeyChord, KeyEventKind, KeyIdentity, KeyModifierFlags, ModFlags};
 use koshi_core::process::PtySize;
 use koshi_input::host::{GraphicAttributeError, GraphicAttributeReply, KeyCode};
 use koshi_ipc::protocol::WireMouseAction;
@@ -2201,7 +2202,7 @@ fn terminal_modes_are_enabled_after_entering_the_alternate_screen() {
 
     assert_eq!(
         terminal_mode_bytes,
-        b"\x1b[?1049h\x1b[>7u\x1b[?1003h\x1b[?1006h\x1b[?2004h"
+        b"\x1b[?1049h\x1b[>7u\x1b[?1003h\x1b[?1006h\x1b[?2004h\x1b[?u"
     );
 }
 
@@ -2218,7 +2219,7 @@ fn sixel_modes_are_saved_before_application_modes() {
 
     assert_eq!(
         terminal_mode_bytes,
-        b"\x1b[?80s\x1b[?8452s\x1b[?1070s\x1b[?1049h\x1b[>7u\x1b[?1003h\x1b[?1006h\x1b[?2004h"
+        b"\x1b[?80s\x1b[?8452s\x1b[?1070s\x1b[?1049h\x1b[>7u\x1b[?1003h\x1b[?1006h\x1b[?2004h\x1b[?u"
     );
 }
 
@@ -2630,4 +2631,116 @@ fn image_cleanup_has_one_owner() {
 
     assert!(claim_image_cleanup(&claimed));
     assert!(!claim_image_cleanup(&claimed));
+}
+
+// ------------------------------------ the keyboard enhancement flag query ----
+
+#[test]
+fn the_mode_setup_pushes_the_keyboard_flags_and_asks_what_landed() {
+    let mut terminal_mode_bytes = Vec::new();
+
+    enable_terminal_modes(&mut terminal_mode_bytes, GraphicsSupport::Unsupported)
+        .expect("terminal modes write");
+
+    // The push asks for flags 1|2|4, and the query follows it in the same
+    // batch so the answer describes the push.
+    let mode_setup_text = String::from_utf8(terminal_mode_bytes).expect("mode bytes are text");
+    let push_position = mode_setup_text
+        .find("\x1b[>7u")
+        .expect("the keyboard push is written");
+    let query_position = mode_setup_text
+        .find("\x1b[?u")
+        .expect("the keyboard query is written");
+    assert!(
+        push_position < query_position,
+        "the query must follow the push: {mode_setup_text:?}"
+    );
+}
+
+#[test]
+fn ordinary_typing_still_reaches_a_pane_as_the_character_typed() {
+    // Flag 8 would move typing off the plain-byte path into `CSI u` reports
+    // whose text no pane encoding reads yet. Without it, a typed character
+    // still arrives as itself.
+    let mut parser = koshi_input::host::Parser::default();
+    parser.process_input_bytes("å".as_bytes());
+    let host_event = parser.remove_next_pending_event().expect("one key event");
+
+    let runtime_event = build_terminal_runtime_event(ClientId::new(), host_event)
+        .expect("a typed character is input");
+
+    match runtime_event {
+        RuntimeEvent::KeyInput { key_input, .. } => {
+            assert_eq!(
+                key_input.to_binding_chord(),
+                Some(KeyChord::from_parts(ModFlags::NONE, Key::Char('å')))
+            );
+        }
+        other_runtime_event => panic!("expected a key, got {other_runtime_event:?}"),
+    }
+}
+
+#[test]
+fn a_release_reaches_the_runtime_and_resolves_no_binding() {
+    // The boundary no longer drops what a chord cannot hold. The release
+    // travels, and the viewer is what declines to resolve it.
+    let mut parser = koshi_input::host::Parser::default();
+    parser.process_input_bytes(b"\x1b[97;1:3u");
+    let host_event = parser.remove_next_pending_event().expect("one key event");
+
+    let runtime_event = build_terminal_runtime_event(ClientId::new(), host_event)
+        .expect("a release is still an event");
+
+    match runtime_event {
+        RuntimeEvent::KeyInput { key_input, .. } => {
+            assert_eq!(key_input.key_event_kind, KeyEventKind::Release);
+            assert_eq!(key_input.to_binding_chord(), None);
+        }
+        other_runtime_event => panic!("expected a key, got {other_runtime_event:?}"),
+    }
+}
+
+#[test]
+fn every_captured_field_survives_the_runtime_boundary() {
+    // The whole point of the capture: alternate keys, associated text and the
+    // lock modifiers reach the runtime instead of dying at the decode.
+    let mut parser = koshi_input::host::Parser::default();
+    parser.process_input_bytes(b"\x1b[39:34:113;130:2;34u");
+    let host_event = parser.remove_next_pending_event().expect("one key event");
+
+    let runtime_event =
+        build_terminal_runtime_event(ClientId::new(), host_event).expect("a key is input");
+
+    match runtime_event {
+        RuntimeEvent::KeyInput { key_input, .. } => {
+            assert_eq!(key_input.key, KeyIdentity::Key(Key::Char('\'')));
+            assert_eq!(key_input.key_event_kind, KeyEventKind::Repeat);
+            assert_eq!(key_input.shifted_key, Some('"'));
+            assert_eq!(key_input.base_layout_key, Some('q'));
+            assert_eq!(key_input.associated_text, "\"");
+            assert!(key_input
+                .modifier_flags
+                .has_all_modifiers(KeyModifierFlags::NUM_LOCK));
+        }
+        other_runtime_event => panic!("expected a key, got {other_runtime_event:?}"),
+    }
+}
+
+#[test]
+fn the_enhancement_answer_reaches_no_runtime_event() {
+    // The answer is a terminal reply, not input. It records what the terminal
+    // applied and produces nothing for the viewer to act on.
+    assert!(
+        build_terminal_runtime_event(ClientId::new(), Event::KeyboardEnhancementFlags(31))
+            .is_none()
+    );
+}
+
+#[test]
+fn a_typed_key_still_becomes_a_runtime_event() {
+    // The added reply arm must not swallow ordinary keys.
+    let runtime_event =
+        build_terminal_runtime_event(ClientId::new(), Event::Key(KeyCode::Char('x').into()))
+            .expect("a typed key is input");
+    assert!(matches!(runtime_event, RuntimeEvent::KeyInput { .. }));
 }
