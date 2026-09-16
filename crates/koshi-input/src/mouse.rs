@@ -1,9 +1,10 @@
 //! Host mouse boundary: one host mouse event becomes one canonical
 //! [`MouseInput`].
 //!
-//! This is the mouse peer of [`decode_key`](crate::keyboard::decode_key). Every
-//! host event turns into exactly one koshi event: a mouse release and a bare
-//! motion are both kept.
+//! This is the mouse peer of
+//! [`decode_key_event`](crate::keyboard::decode_key_event). Every host event
+//! turns into exactly one koshi event: a mouse release and a bare motion are
+//! both kept.
 //!
 //! The coordinate that comes out is a raw client cell. A hit-test against the
 //! client's render layout, elsewhere, decides which pane, border, or bar it

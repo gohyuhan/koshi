@@ -59,6 +59,18 @@ const SINK_HOLDER_COUNT_AFTER_CLOSE: usize = 2;
 /// `EXIT_PUBLISH_LIMIT_DURATION` in the backend, which is private.
 const EXIT_PUBLISH_LIMIT_DURATION: Duration = Duration::from_secs(1);
 
+/// The longest a closed pane's reader may take to let go of its sink.
+///
+/// Two bounds pin this. It must exceed one watcher round, because on Windows
+/// the reader is still inside `read` when the pane closes and only the
+/// watcher's next round releases it — one round exactly is the round the exit
+/// publish already spent, which leaves nothing for the release. It must stay
+/// well under the life of the descendant in
+/// `SCRIPT_LEAVES_DESCENDANT_RUNNING_BRIEFLY`, roughly five seconds, or a
+/// reader released only when that descendant closes the terminal would pass
+/// for the wrong reason.
+const READER_RELEASE_LIMIT_DURATION: Duration = Duration::from_secs(2);
+
 /// The grace `kill` gives a child to exit on the stop request. The child in
 /// the test that uses it exits on the request inside this window, so `kill`
 /// polls for that exit instead of forcing it.
@@ -585,7 +597,7 @@ fn closing_a_pane_releases_its_reader_while_a_descendant_still_holds_the_termina
     // `kill` joins the watcher, so its hold is already gone. The descendant
     // holds the terminal open for seconds past this deadline, so a reader
     // released only by end-of-file would still be running here.
-    let deadline = Instant::now() + EXIT_PUBLISH_LIMIT_DURATION;
+    let deadline = Instant::now() + READER_RELEASE_LIMIT_DURATION;
     while Arc::strong_count(&sink_recorder) > SINK_HOLDER_COUNT_AFTER_CLOSE
         && Instant::now() < deadline
     {

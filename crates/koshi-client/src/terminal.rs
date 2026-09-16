@@ -26,7 +26,7 @@ use koshi_core::geometry::{PixelCellSize, Size};
 use koshi_core::ids::ClientId;
 use koshi_core::key::KeySequence;
 use koshi_input::host::{Event, WindowSize};
-use koshi_input::keyboard::decode_key;
+use koshi_input::keyboard::decode_key_event;
 use koshi_input::mouse::decode_mouse;
 use koshi_ipc::protocol::GraphicsCapabilities;
 use koshi_iterm::{
@@ -65,7 +65,22 @@ const TERMINAL_QUERY_TIMEOUT_DURATION: Duration = Duration::from_millis(300);
 const CELL_SIZE_QUERY_BYTES: &[u8] = b"\x1b[16t";
 
 /// Enter the alternate screen and enable keyboard, mouse, and paste reports.
+///
+/// The keyboard push asks for flags `1|2|4`: disambiguate escape codes, report
+/// event types, and report alternate keys. Every one of those reaches a pane
+/// through the chord Koshi already sends.
+///
+/// It does not ask for flag `8`, report all keys as escape codes. Flag `8`
+/// moves ordinary typing off the plain-byte path and into `CSI u` reports
+/// whose text rides a parameter that no pane encoding reads yet, so typing
+/// `å` would reach a pane as `ESC a` or as nothing. Flag `16`, report
+/// associated text, is defined only alongside flag `8`, so neither is
+/// requested here.
 const APPLICATION_MODE_SETUP_BYTES: &[u8] = b"\x1b[?1049h\x1b[>7u\x1b[?1003h\x1b[?1006h\x1b[?2004h";
+
+/// Ask which Kitty keyboard enhancements the terminal applied. The answer is
+/// `ESC [ ? flags u`.
+const KEYBOARD_ENHANCEMENT_QUERY_BYTES: &[u8] = b"\x1b[?u";
 
 /// Disable paste, mouse, keyboard, and alternate-screen modes; restore cursor state.
 const APPLICATION_MODE_CLEANUP_BYTES: &[u8] =
@@ -749,7 +764,8 @@ impl ProbeReplies {
             | Event::WindowResized(_)
             | Event::Paste(_)
             | Event::FocusIn
-            | Event::FocusOut => {}
+            | Event::FocusOut
+            | Event::KeyboardEnhancementFlags(_) => {}
         }
     }
 
@@ -826,6 +842,7 @@ fn enable_terminal_modes<W: Write>(
         writer.write_all(image_output::get_sixel_mode_save_bytes())?;
     }
     writer.write_all(APPLICATION_MODE_SETUP_BYTES)?;
+    writer.write_all(KEYBOARD_ENHANCEMENT_QUERY_BYTES)?;
     writer.flush()
 }
 
@@ -926,9 +943,9 @@ fn run_terminal_input(
 /// Convert one host-terminal event into the runtime event the viewer consumes.
 fn build_terminal_runtime_event(client_id: ClientId, host_event: Event) -> Option<RuntimeEvent> {
     match host_event {
-        Event::Key(key_event) => decode_key(key_event).map(|key_chord| RuntimeEvent::KeyInput {
+        Event::Key(host_key_event) => Some(RuntimeEvent::KeyInput {
             client_id,
-            chord: key_chord,
+            key_input: decode_key_event(host_key_event),
         }),
         Event::CellSize(cell_size) => Some(RuntimeEvent::CellSize {
             client_id,
@@ -945,6 +962,13 @@ fn build_terminal_runtime_event(client_id: ClientId, host_event: Event) -> Optio
             client_id,
             pasted_text,
         }),
+        Event::KeyboardEnhancementFlags(enhancement_flags) => {
+            tracing::debug!(
+                enhancement_flags,
+                "the terminal reported the keyboard enhancements it applied"
+            );
+            None
+        }
         Event::FocusIn
         | Event::FocusOut
         | Event::PrimaryDeviceAttributes(_)

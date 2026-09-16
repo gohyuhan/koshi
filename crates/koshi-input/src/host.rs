@@ -6,6 +6,10 @@
 
 use std::ops::{BitOr, BitOrAssign};
 
+use koshi_core::key::KeyModifierFlags;
+
+pub use koshi_core::key::KeyEventKind;
+
 mod parser;
 
 pub use parser::Parser;
@@ -29,6 +33,10 @@ impl Modifiers {
     pub const HYPER: Self = Self(1 << 4);
     /// Meta.
     pub const META: Self = Self(1 << 5);
+    /// Caps Lock, reported as a held state rather than a press.
+    pub const CAPS_LOCK: Self = Self(1 << 6);
+    /// Num Lock, reported as a held state rather than a press.
+    pub const NUM_LOCK: Self = Self(1 << 7);
 
     /// Return an empty modifier set.
     #[must_use]
@@ -46,6 +54,13 @@ impl Modifiers {
     #[must_use]
     pub const fn combine_modifiers(self, additional_modifiers: Self) -> Self {
         Self(self.0 | additional_modifiers.0)
+    }
+
+    /// Return these modifiers as the stored bitmap a complete keyboard event
+    /// carries. The two sets use the same bit for the same modifier.
+    #[must_use]
+    pub const fn to_key_modifier_flags(self) -> KeyModifierFlags {
+        KeyModifierFlags::from_bits(self.0)
     }
 }
 
@@ -100,23 +115,17 @@ pub enum KeyCode {
     Delete,
     /// Function key number.
     Function(u8),
-    /// A protocol key that has no Koshi key form.
-    Unsupported,
+    /// A reported key with no Koshi key form, holding the codepoint the
+    /// terminal sent. Left Shift is `57441`, Menu is `57363`, and `0` means
+    /// the event carries only text.
+    Codepoint(u32),
 }
 
-/// The physical action represented by one key event.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KeyEventKind {
-    /// A key was pressed.
-    Press,
-    /// A held key repeated.
-    Repeat,
-    /// A key was released.
-    Release,
-}
-
-/// One parsed key event.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// One parsed key event, holding everything the terminal reported about it.
+///
+/// The terminal reports the alternatives and the text only when the Kitty
+/// keyboard protocol enhancements that carry them are active.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyEvent {
     /// Key identity.
     pub code: KeyCode,
@@ -124,16 +133,25 @@ pub struct KeyEvent {
     pub key_event_kind: KeyEventKind,
     /// Active modifiers.
     pub modifiers: Modifiers,
+    /// The character this key produces with Shift, when reported.
+    pub shifted_key: Option<char>,
+    /// The character this key produces on the base layout, when reported.
+    pub base_layout_key: Option<char>,
+    /// The text this key produced, empty when none was reported.
+    pub associated_text: String,
 }
 
 impl KeyEvent {
-    /// Build a key press.
+    /// Build a key press with no alternatives and no text.
     #[must_use]
-    pub const fn from_key_code_and_modifiers(code: KeyCode, modifiers: Modifiers) -> Self {
+    pub fn from_key_code_and_modifiers(code: KeyCode, modifiers: Modifiers) -> Self {
         Self {
             code,
             key_event_kind: KeyEventKind::Press,
             modifiers,
+            shifted_key: None,
+            base_layout_key: None,
+            associated_text: String::new(),
         }
     }
 }
@@ -256,4 +274,7 @@ pub enum Event {
     SixelGraphicsAttributeReply(GraphicAttributeReply),
     /// A Kitty graphics answer.
     KittyGraphicsReply(KittyGraphicsReply),
+    /// The Kitty keyboard enhancements the terminal reports as active, as the
+    /// flag bits of its `CSI ? flags u` answer.
+    KeyboardEnhancementFlags(u8),
 }

@@ -11,7 +11,9 @@ use std::time::SystemTime;
 use koshi_core::command::{Command, CommandEnvelope, CommandSource, ToggleLockModeArgs};
 use koshi_core::geometry::{Point, Size};
 use koshi_core::ids::{CommandId, PaneId, SessionId};
-use koshi_core::key::{Key, KeyChord, ModFlags};
+use koshi_core::key::{
+    Key, KeyChord, KeyEventKind, KeyIdentity, KeyInput, KeyModifierFlags, ModFlags,
+};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseButton, MouseInput, MouseKind};
 use koshi_core::process::{PtySize, SpawnSpec};
@@ -208,7 +210,14 @@ fn a_key_no_attached_viewer_resolved_is_dropped_instead_of_written() {
 
     let control_flow = server.handle_runtime_event(RuntimeEvent::KeyInput {
         client_id,
-        chord: KeyChord::from_parts(ModFlags::NONE, Key::Char('a')),
+        key_input: KeyInput {
+            key: KeyIdentity::Key(Key::Char('a')),
+            key_event_kind: KeyEventKind::Press,
+            shifted_key: None,
+            base_layout_key: None,
+            associated_text: String::new(),
+            modifier_flags: KeyModifierFlags::NONE,
+        },
     });
 
     assert_eq!(control_flow, ControlFlow::Continue(()));

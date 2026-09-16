@@ -7,6 +7,8 @@
 
 use std::collections::VecDeque;
 
+use koshi_core::key::TEXT_ONLY_KEY_CODEPOINT;
+
 use super::{
     Event, GraphicAttributeError, GraphicAttributeReply, KeyCode, KeyEvent, KeyEventKind,
     KittyGraphicsReply, Modifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -545,7 +547,8 @@ fn parse_csi(control_sequence: &[u8]) -> Option<Event> {
         }
         b'M' => parse_rxvt_mouse(csi_body).map(Event::Mouse),
         b'~' => parse_tilde_key(csi_body).map(Event::Key),
-        b'u' if csi_body.first() != Some(&b'?') => parse_kitty_key(csi_body).map(Event::Key),
+        b'u' if csi_body.first() == Some(&b'?') => parse_keyboard_enhancement_flags(&csi_body[1..]),
+        b'u' => parse_kitty_key(csi_body).map(Event::Key),
         _ => None,
     }
 }
@@ -648,6 +651,9 @@ fn parse_modified_key(csi_body: &[u8], final_byte: u8) -> Option<KeyEvent> {
         code: key_code,
         key_event_kind,
         modifiers,
+        shifted_key: None,
+        base_layout_key: None,
+        associated_text: String::new(),
     })
 }
 
@@ -676,6 +682,9 @@ fn parse_tilde_key(csi_body: &[u8]) -> Option<KeyEvent> {
         code: key_code,
         key_event_kind,
         modifiers,
+        shifted_key: None,
+        base_layout_key: None,
+        associated_text: String::new(),
     })
 }
 
@@ -684,39 +693,110 @@ fn parse_kitty_key(csi_body: &[u8]) -> Option<KeyEvent> {
     let encoded_key_parameter = key_parameter_fields.next()?;
     let mut key_code_fields = encoded_key_parameter.split(|field_byte| *field_byte == b':');
     let codepoint = parse_decimal(key_code_fields.next()?)?;
-    let shifted_codepoint = key_code_fields
-        .next()
-        .filter(|field| !field.is_empty())
-        .and_then(parse_decimal);
-    let (mut modifiers, key_event_kind) = parse_modifier_or_default(key_parameter_fields.next())?;
-    let mut key_code = find_functional_key(codepoint).or_else(|| {
-        let character = char::from_u32(codepoint)?;
-        Some(match character {
-            '\x1b' => KeyCode::Escape,
-            '\r' => KeyCode::Enter,
-            '\t' if modifiers.has_all_modifiers(Modifiers::SHIFT) => KeyCode::BackTab,
-            '\t' => KeyCode::Tab,
-            '\x7f' => KeyCode::Backspace,
-            character => KeyCode::Char(character),
-        })
-    })?;
-    if modifiers.has_all_modifiers(Modifiers::SHIFT) {
-        if let Some(character) = shifted_codepoint.and_then(char::from_u32) {
-            key_code = KeyCode::Char(character);
-            modifiers = remove_modifiers(modifiers, Modifiers::SHIFT);
-        }
+    let shifted_key = parse_alternate_key(key_code_fields.next())?;
+    let base_layout_key = parse_alternate_key(key_code_fields.next())?;
+    if key_code_fields.next().is_some() {
+        return None;
     }
+    let (modifiers, key_event_kind) = parse_modifier_or_default(key_parameter_fields.next())?;
+    let associated_text = parse_associated_text(key_parameter_fields.next());
+    if key_parameter_fields.next().is_some() {
+        return None;
+    }
+    let key_code = find_reported_key(codepoint, modifiers)?;
     Some(KeyEvent {
         code: key_code,
         key_event_kind,
         modifiers,
+        shifted_key,
+        base_layout_key,
+        associated_text,
     })
+}
+
+/// The character one alternate-key sub-field names, or `None` when the field
+/// is absent or empty.
+///
+/// The outer `Option` separates a refusal from an absent field: `Some(None)`
+/// is an absent or empty field, and `None` is a field that names no character.
+/// A base layout key with no shifted key arrives as `CSI key::base`, so an
+/// empty sub-field is ordinary.
+fn parse_alternate_key(alternate_key_field: Option<&[u8]>) -> Option<Option<char>> {
+    match alternate_key_field {
+        None => Some(None),
+        Some([]) => Some(None),
+        Some(alternate_key_field) => {
+            let codepoint = parse_decimal(alternate_key_field)?;
+            Some(Some(char::from_u32(codepoint)?))
+        }
+    }
+}
+
+/// The text one key event produced, from the colon-separated codepoints of
+/// the third parameter. An absent or empty field produces empty text.
+///
+/// A malformed field produces empty text and never refuses the event, because
+/// the key is named by the first parameter and stands on its own. `CSI 13;;13u`
+/// and `CSI 13;;1114112u` both stay the Enter key and carry no text: a carriage
+/// return is not text a key produced, and `1114112` is no character at all.
+fn parse_associated_text(text_field: Option<&[u8]>) -> String {
+    let Some(text_field) = text_field.filter(|field| !field.is_empty()) else {
+        return String::new();
+    };
+    let mut associated_text = String::new();
+    for text_codepoint_field in text_field.split(|field_byte| *field_byte == b':') {
+        let Some(character) = parse_decimal(text_codepoint_field).and_then(char::from_u32) else {
+            return String::new();
+        };
+        if character.is_control() {
+            return String::new();
+        }
+        associated_text.push(character);
+    }
+    associated_text
+}
+
+/// The key one reported codepoint names, or `None` when the codepoint names
+/// no character.
+///
+/// A codepoint with a Koshi key form takes it. A codepoint without one keeps
+/// its number through [`KeyCode::Codepoint`], so a key the binding grammar
+/// cannot name still reaches the event: Left Shift is `Unnamed(57441)`, and a
+/// text-only event is `Unnamed(0)`. A codepoint that is no Unicode scalar
+/// value — a surrogate, or a number above `1114111` — is refused rather than
+/// given an identity it does not have.
+fn find_reported_key(codepoint: u32, modifiers: Modifiers) -> Option<KeyCode> {
+    if let Some(key_code) = find_functional_key(codepoint) {
+        return Some(key_code);
+    }
+    if codepoint == TEXT_ONLY_KEY_CODEPOINT {
+        return Some(KeyCode::Codepoint(codepoint));
+    }
+    let character = char::from_u32(codepoint)?;
+    Some(match character {
+        '\x1b' => KeyCode::Escape,
+        '\r' => KeyCode::Enter,
+        '\t' if modifiers.has_all_modifiers(Modifiers::SHIFT) => KeyCode::BackTab,
+        '\t' => KeyCode::Tab,
+        '\x7f' => KeyCode::Backspace,
+        character => KeyCode::Char(character),
+    })
+}
+
+/// The `CSI ? flags u` answer to a `CSI ? u` query, as the flag bits the
+/// terminal reports active.
+///
+/// `ESC [ ? 7 u` reports flags 1, 2 and 4. A value above the eight bits a
+/// `u8` holds is refused rather than truncated.
+fn parse_keyboard_enhancement_flags(flag_field: &[u8]) -> Option<Event> {
+    let enhancement_flags = u8::try_from(parse_decimal(flag_field)?).ok()?;
+    Some(Event::KeyboardEnhancementFlags(enhancement_flags))
 }
 
 fn find_functional_key(codepoint: u32) -> Option<KeyCode> {
     let key_code = match codepoint {
         57_376..=57_387 => KeyCode::Function(u8::try_from(codepoint - 57_376 + 13).ok()?),
-        57_388..=57_398 | 57_358..=57_363 | 57_428..=57_454 => KeyCode::Unsupported,
+        57_388..=57_398 | 57_358..=57_363 | 57_428..=57_454 => KeyCode::Codepoint(codepoint),
         57_399..=57_408 => KeyCode::Char(char::from_digit(codepoint - 57_399, 10)?),
         57_409 => KeyCode::Char('.'),
         57_410 => KeyCode::Char('/'),
@@ -736,7 +816,7 @@ fn find_functional_key(codepoint: u32) -> Option<KeyCode> {
         57_424 => KeyCode::End,
         57_425 => KeyCode::Insert,
         57_426 => KeyCode::Delete,
-        57_427 => KeyCode::Unsupported,
+        57_427 => KeyCode::Codepoint(codepoint),
         _ => return None,
     };
     Some(key_code)
@@ -744,8 +824,8 @@ fn find_functional_key(codepoint: u32) -> Option<KeyCode> {
 
 fn parse_modifier_or_default(modifier_field: Option<&[u8]>) -> Option<(Modifiers, KeyEventKind)> {
     match modifier_field {
-        Some(modifier_field) => parse_modifier_field(modifier_field),
-        None => Some((Modifiers::NONE, KeyEventKind::Press)),
+        Some(modifier_field) if !modifier_field.is_empty() => parse_modifier_field(modifier_field),
+        _ => Some((Modifiers::NONE, KeyEventKind::Press)),
     }
 }
 
@@ -761,6 +841,8 @@ fn parse_modifier_field(modifier_field: &[u8]) -> Option<(Modifiers, KeyEventKin
         (8, Modifiers::SUPER),
         (16, Modifiers::HYPER),
         (32, Modifiers::META),
+        (64, Modifiers::CAPS_LOCK),
+        (128, Modifiers::NUM_LOCK),
     ] {
         if modifier_bits & modifier_bit != 0 {
             modifiers |= modifier;
@@ -779,10 +861,6 @@ fn parse_modifier_field(modifier_field: &[u8]) -> Option<(Modifiers, KeyEventKin
         return None;
     }
     Some((modifiers, key_event_kind))
-}
-
-fn remove_modifiers(modifiers: Modifiers, removed_modifiers: Modifiers) -> Modifiers {
-    Modifiers(modifiers.0 & !removed_modifiers.0)
 }
 
 fn parse_sgr_mouse(csi_body: &[u8], final_byte: u8) -> Option<MouseEvent> {

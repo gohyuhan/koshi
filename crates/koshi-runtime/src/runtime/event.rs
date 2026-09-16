@@ -25,7 +25,7 @@ use koshi_core::{
     discovery::SessionOverview,
     geometry::{PaneArea, Size},
     ids::{ClientId, PaneId, SessionId, TabId},
-    key::KeyChord,
+    key::{KeyChord, KeyInput},
     mouse::MouseInput,
     process::ExitStatus,
 };
@@ -97,14 +97,16 @@ pub enum RuntimeEvent {
     /// reaching end of stream. Explicit quit travels through the `core:quit`
     /// command instead.
     Quit,
-    /// One decoded outer-terminal key awaiting keybinding resolution. Carries
-    /// the chord alone: the bytes a fallthrough writes are encoded from it
-    /// when they are written, against the receiving pane's mode.
+    /// One decoded outer-terminal key awaiting keybinding resolution.
+    ///
+    /// Carries everything the terminal reported, including the key kinds and
+    /// fields no chord can hold. The viewer projects it to a chord for the
+    /// keymap lookup, and a key that projects to no chord resolves nothing.
     KeyInput {
         /// Client whose terminal produced the key.
         client_id: ClientId,
-        /// Canonical chord used for keymap lookup.
-        chord: KeyChord,
+        /// The complete key event the client's terminal reported.
+        key_input: KeyInput,
     },
     /// One key press an attached client's keymap did not bind, for the pane
     /// that client is typing into.

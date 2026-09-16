@@ -17,7 +17,9 @@ use koshi_core::action::{ActionReference, MOUSE_SELECT_HINT, MOUSE_UNSELECT_HINT
 use koshi_core::event::{EventClass, InputModeChanged, MouseSelectChanged, SubscriberLagged};
 use koshi_core::geometry::Direction;
 use koshi_core::ids::{PaneId, SessionId, SubscriberId, TabId};
-use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags};
+use koshi_core::key::{
+    Key, KeyChord, KeyEventKind, KeyIdentity, KeyInput, KeyModifierFlags, KeySequence, ModFlags,
+};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::MouseAnswer;
 use koshi_core::resolve::ActionArgs;
@@ -30,6 +32,19 @@ use koshi_renderer::snapshot::{
 use super::*;
 
 /// The terminal size every fixture in this crate's tests is built at.
+/// The complete key event a viewer would have read for one chord: a press,
+/// with no alternatives and no associated text.
+pub(crate) fn build_key_input_for_chord(chord: KeyChord) -> KeyInput {
+    KeyInput {
+        key: KeyIdentity::Key(chord.key),
+        key_event_kind: KeyEventKind::Press,
+        shifted_key: None,
+        base_layout_key: None,
+        associated_text: String::new(),
+        modifier_flags: KeyModifierFlags::from_bits(chord.modifier_flags.bits()),
+    }
+}
+
 pub(crate) const TEST_VIEWPORT_SIZE: Size = Size {
     column_count: 80,
     row_count: 24,
