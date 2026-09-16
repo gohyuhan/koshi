@@ -86,8 +86,8 @@ impl TerminalState {
         self.alternate_scroll_region = None;
         self.primary_horizontal_margins = None;
         self.alternate_horizontal_margins = None;
-        self.primary_keyboard_stack.clear_entries();
-        self.alternate_keyboard_stack.clear_entries();
+        self.primary_keyboard_stack.clear_keyboard_flag_entries();
+        self.alternate_keyboard_stack.clear_keyboard_flag_entries();
         self.tab_stops = build_default_tab_stops(column_count);
         self.title = None;
         self.shell_integration_state = ShellIntegrationState::default();

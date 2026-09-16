@@ -10,7 +10,8 @@ impl TerminalState {
     /// parameter pushes flags `0`.
     pub(super) fn push_keyboard_flags(&mut self, params: &vte::Params) {
         let flags = get_first_parameter_number(params).unwrap_or(0);
-        self.active_keyboard_stack_mut().push_flags(flags);
+        self.get_active_keyboard_stack_mut()
+            .push_keyboard_flags(flags);
     }
 
     /// `CSI < count u` — pop `count` entries off the active screen's stack. An
@@ -20,7 +21,8 @@ impl TerminalState {
         let entry_count = get_first_parameter_number(params)
             .filter(|&parameter_value| parameter_value != 0)
             .unwrap_or(1);
-        self.active_keyboard_stack_mut().pop_entries(entry_count);
+        self.get_active_keyboard_stack_mut()
+            .pop_keyboard_flag_entries(entry_count);
     }
 
     /// `CSI = flags ; mode u` — change the active screen's current entry,
@@ -32,8 +34,8 @@ impl TerminalState {
         let mode = get_parameter_number_at(params, 1)
             .filter(|&parameter_value| parameter_value != 0)
             .unwrap_or(1);
-        self.active_keyboard_stack_mut()
-            .set_current_flags(flags, mode);
+        self.get_active_keyboard_stack_mut()
+            .set_current_keyboard_flags(flags, mode);
     }
 
     /// `CSI ? u` — queue `CSI ? flags u` for the app, reporting the active

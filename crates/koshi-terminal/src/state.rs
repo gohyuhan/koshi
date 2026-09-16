@@ -1463,13 +1463,13 @@ impl TerminalState {
     /// of that screen's stack, or `0` when the stack is empty.
     pub(crate) fn get_keyboard_flags(&self) -> u8 {
         match self.active_screen {
-            Screen::Primary => self.primary_keyboard_stack.get_current_flags(),
-            Screen::Alternate => self.alternate_keyboard_stack.get_current_flags(),
+            Screen::Primary => self.primary_keyboard_stack.get_current_keyboard_flags(),
+            Screen::Alternate => self.alternate_keyboard_stack.get_current_keyboard_flags(),
         }
     }
 
     /// Mutable access to the Kitty keyboard flag stack for the active screen.
-    pub(crate) fn active_keyboard_stack_mut(&mut self) -> &mut KeyboardStack {
+    pub(crate) fn get_active_keyboard_stack_mut(&mut self) -> &mut KeyboardStack {
         match self.active_screen {
             Screen::Primary => &mut self.primary_keyboard_stack,
             Screen::Alternate => &mut self.alternate_keyboard_stack,

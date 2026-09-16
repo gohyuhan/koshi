@@ -54,14 +54,14 @@ impl From<KeyboardStack> for Vec<u8> {
 
 impl KeyboardStack {
     /// The flags in effect: the last entry, or `0` when the stack is empty.
-    pub(crate) fn get_current_flags(&self) -> u8 {
+    pub(crate) fn get_current_keyboard_flags(&self) -> u8 {
         self.flag_entries.last().copied().unwrap_or(0)
     }
 
     /// Append `flags` as the new last entry, keeping only the known bits.
     /// A push onto a full stack drops the oldest entry first, so pushing `1`
     /// through `9` onto an empty stack leaves `[2, 3, 4, 5, 6, 7, 8, 9]`.
-    pub(crate) fn push_flags(&mut self, flags: u16) {
+    pub(crate) fn push_keyboard_flags(&mut self, flags: u16) {
         if self.flag_entries.len() >= MAX_KEYBOARD_STACK_DEPTH {
             self.flag_entries.remove(0);
         }
@@ -70,7 +70,7 @@ impl KeyboardStack {
 
     /// Remove the last `entry_count` entries. A count past the entries held
     /// empties the stack, which leaves flags `0`.
-    pub(crate) fn pop_entries(&mut self, entry_count: u16) {
+    pub(crate) fn pop_keyboard_flag_entries(&mut self, entry_count: u16) {
         let retained_entry_count = self
             .flag_entries
             .len()
@@ -84,9 +84,9 @@ impl KeyboardStack {
     /// `flags` take part, and the preceding entries stay as they are.
     ///
     /// Last entry `9`, `flags` `4`, mode `2` → last entry `13`.
-    pub(crate) fn set_current_flags(&mut self, flags: u16, mode: u16) {
+    pub(crate) fn set_current_keyboard_flags(&mut self, flags: u16, mode: u16) {
         let masked_flags = mask_known_keyboard_flags(flags);
-        let current_flags = self.get_current_flags();
+        let current_flags = self.get_current_keyboard_flags();
         let updated_flags = match mode {
             1 => masked_flags,
             2 => current_flags | masked_flags,
@@ -100,7 +100,7 @@ impl KeyboardStack {
     }
 
     /// Remove every entry, which leaves flags `0`.
-    pub(crate) fn clear_entries(&mut self) {
+    pub(crate) fn clear_keyboard_flag_entries(&mut self) {
         self.flag_entries.clear();
     }
 }

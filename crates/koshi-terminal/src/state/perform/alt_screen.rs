@@ -44,7 +44,7 @@ impl TerminalState {
         }
         self.alternate_scroll_region = None;
         self.alternate_horizontal_margins = None;
-        self.alternate_keyboard_stack.clear_entries();
+        self.alternate_keyboard_stack.clear_keyboard_flag_entries();
         self.alternate_cursor.row = 0;
         self.alternate_cursor.column = 0;
         self.alternate_cursor.is_visible = true;
