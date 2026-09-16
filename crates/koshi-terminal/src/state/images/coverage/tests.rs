@@ -256,6 +256,43 @@ fn native_insert_delete_cells_move_the_source_coordinates_with_cells() {
 }
 
 #[test]
+fn native_partial_line_operations_move_source_coordinates_with_cells() {
+    for protocol in [GraphicsProtocol::Iterm2, GraphicsProtocol::Sixel] {
+        let mut terminal_state = build_terminal_state();
+        assert_eq!(
+            terminal_state.apply_image_record(&build_image_record(protocol, 1, 1, (1, 3))),
+            Ok(())
+        );
+        assert_eq!(
+            terminal_state.native_fragment_count_by_image_source_id,
+            HashMap::from([(1, 1)])
+        );
+
+        apply_terminal_text(&mut terminal_state, "\x1b[?69h\x1b[4;5s\x1b[2;1H\x1b[L");
+
+        assert_eq!(
+            list_image_portions(&terminal_state, 0),
+            [((2, 3), (0, 0), [0, 0, 100, 255])]
+        );
+        assert_eq!(
+            terminal_state.native_fragment_count_by_image_source_id,
+            HashMap::from([(1, 1)])
+        );
+
+        apply_terminal_text(&mut terminal_state, "\x1b[M");
+
+        assert_eq!(
+            list_image_portions(&terminal_state, 0),
+            [((1, 3), (0, 0), [0, 0, 100, 255])]
+        );
+        assert_eq!(
+            terminal_state.native_fragment_count_by_image_source_id,
+            HashMap::from([(1, 1)])
+        );
+    }
+}
+
+#[test]
 fn iterm_rows_scroll_into_history_and_cursor_ends_on_last_image_row() {
     let mut terminal_state = build_terminal_state();
     assert_eq!(

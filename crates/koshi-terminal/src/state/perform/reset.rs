@@ -14,18 +14,31 @@ use crate::style::Style;
 impl TerminalState {
     /// DECSTR (`CSI ! p`). On the active screen: shows the cursor, clears the
     /// deferred-wrap latch, drops the saved cursor, resets the pen, charsets, and
-    /// GL slot, and clears the scroll region. Turns off application cursor keys
-    /// (`?1`) and autowrap (`?7`). Ends the in-progress grapheme cluster. Cells,
+    /// GL slot, clears origin mode and the scroll region, and clears both screens'
+    /// horizontal margins and DECLRMM. Turns off application cursor keys (`?1`)
+    /// and autowrap (`?7`). Ends the in-progress grapheme cluster. Cells,
     /// image placements, the cursor position, tab stops, the title, the
     /// reported cwd, scrollback, and every other mode stay.
     pub(super) fn soft_reset(&mut self) {
         let cursor = self.active_cursor_mut();
         cursor.is_visible = true;
         cursor.pending_wrap = false;
+        cursor.origin = false;
         cursor.saved = None;
 
         *self.active_render_mut() = RenderState::fresh();
         *self.scroll_region_mut() = None;
+        let had_primary_horizontal_margins = self.primary_horizontal_margins.is_some();
+        let had_alternate_horizontal_margins = self.alternate_horizontal_margins.is_some();
+        self.primary_horizontal_margins = None;
+        self.alternate_horizontal_margins = None;
+        if had_primary_horizontal_margins {
+            self.primary_cursor.pending_wrap = false;
+        }
+        if had_alternate_horizontal_margins {
+            self.alternate_cursor.pending_wrap = false;
+        }
+        self.modes.declrmm = false;
         self.modes.application_cursor_keys = false;
         self.modes.autowrap = false;
         self.reset_cluster();
@@ -35,7 +48,7 @@ impl TerminalState {
     /// style, makes the primary screen active, clears scrollback, homes and
     /// shows both cursors with no wrap latch and no saved cursor, clears both
     /// image-placement lists, resets both render states, every mode, both
-    /// scroll regions, the tab stops (every eighth column), the
+    /// vertical and horizontal margin pairs, the tab stops (every eighth column), the
     /// title, and the OSC 133 shell state, and ends the
     /// in-progress grapheme cluster. The reported cwd, queued device replies,
     /// queued shell-integration facts, and the scrollback tallies stay.
@@ -58,6 +71,7 @@ impl TerminalState {
             column: 0,
             is_visible: true,
             pending_wrap: false,
+            origin: false,
             saved: None,
         };
         self.primary_cursor = cursor;
@@ -68,6 +82,8 @@ impl TerminalState {
         self.sixel_palette = SixelPalette::default();
         self.primary_scroll_region = None;
         self.alternate_scroll_region = None;
+        self.primary_horizontal_margins = None;
+        self.alternate_horizontal_margins = None;
         self.tab_stops = build_default_tab_stops(column_count);
         self.title = None;
         self.shell_integration_state = ShellIntegrationState::default();

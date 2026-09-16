@@ -54,8 +54,9 @@ pub enum CursorShape {
 /// (`?12`), cursor [shape][CursorShape] (DECSCUSR), bracketed paste (`?2004`),
 /// the mouse [tracking][MouseTracking] level and [encoding][MouseEncoding]
 /// (`?9`/`?1000`/`?1002`/`?1003` and `?1005`/`?1006`/`?1015`),
-/// alternate-scroll (`?1007`), Sixel scrolling (`?80`), Sixel register scope
-/// (`?1070`), and Sixel cursor movement (`?8452`).
+/// alternate-scroll (`?1007`), left/right margin mode (`?69`), Sixel
+/// scrolling (`?80`), Sixel register scope (`?1070`), and Sixel cursor
+/// movement (`?8452`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct TerminalModes {
     /// `?2004` — bracketed paste: the input layer wraps pasted text in
@@ -70,13 +71,16 @@ pub(crate) struct TerminalModes {
     #[serde(rename = "alt_scroll")]
     pub(in crate::state) alternate_scroll: bool,
     /// `?7` (DECAWM) — autowrap. On (the default), a glyph printed into the
-    /// last column parks the cursor there and the next glyph wraps to a new
-    /// line. Off, the next glyph overwrites the last column in place.
+    /// effective right bound parks the cursor there and the next glyph wraps to
+    /// a new line. Off, the next glyph overwrites the bound in place.
     pub(in crate::state) autowrap: bool,
     /// `?1` (DECCKM) — application cursor keys: the input layer sends `ESC O A`
     /// for the arrow keys; off, it sends `ESC [ A`.
     #[serde(rename = "app_cursor_keys")]
     pub(in crate::state) application_cursor_keys: bool,
+    /// `?69` (DECLRMM) — enables DECSLRM left/right margin setting and use.
+    #[serde(default)]
+    pub(in crate::state) declrmm: bool,
     /// `?5` (DECSCNM) — reverse video: the renderer swaps foreground and
     /// background across the whole screen.
     pub(in crate::state) reverse_video: bool,
@@ -110,6 +114,7 @@ impl Default for TerminalModes {
             alternate_scroll: false,
             autowrap: true,
             application_cursor_keys: false,
+            declrmm: false,
             reverse_video: false,
             cursor_blink: false,
             cursor_shape: None,

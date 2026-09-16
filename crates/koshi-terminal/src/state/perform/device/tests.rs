@@ -130,6 +130,22 @@ fn dsr_6_reports_the_cursor_after_motion() {
 }
 
 #[test]
+fn dsr_6_reports_origin_relative_coordinates() {
+    assert_eq!(
+        collect_device_replies_for(b"\x1b[2;4r\x1b[?69h\x1b[2;6s\x1b[?6h\x1b[2;3H\x1b[6n"),
+        b"\x1b[2;3R"
+    );
+}
+
+#[test]
+fn decxcpr_reports_origin_relative_coordinates() {
+    assert_eq!(
+        collect_device_replies_for(b"\x1b[2;4r\x1b[?69h\x1b[2;6s\x1b[?6h\x1b[2;3H\x1b[?6n"),
+        b"\x1b[?2;3R"
+    );
+}
+
+#[test]
 fn dsr_6_reports_the_alternate_screens_cursor_while_active() {
     let mut terminal_state = build_terminal_state(8, 4);
     // Move on the primary, enter the alternate (fresh cursor seeded from the
@@ -228,6 +244,22 @@ fn decrqm_reports_a_set_mode_as_set() {
     assert_eq!(
         collect_device_replies_for(b"\x1b[?2004h\x1b[?2004$p"),
         b"\x1b[?2004;1$y"
+    );
+}
+
+#[test]
+fn decrqm_reports_origin_and_horizontal_margin_modes() {
+    assert_eq!(
+        collect_device_replies_for(b"\x1b[?6$p\x1b[?69$p"),
+        b"\x1b[?6;2$y\x1b[?69;2$y"
+    );
+    assert_eq!(
+        collect_device_replies_for(b"\x1b[?6h\x1b[?69h\x1b[?6$p\x1b[?69$p"),
+        b"\x1b[?6;1$y\x1b[?69;1$y"
+    );
+    assert_eq!(
+        collect_device_replies_for(b"\x1b[?6h\x1b[?69h\x1b[?6l\x1b[?69l\x1b[?6$p\x1b[?69$p"),
+        b"\x1b[?6;2$y\x1b[?69;2$y"
     );
 }
 

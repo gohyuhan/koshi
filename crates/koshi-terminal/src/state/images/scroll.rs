@@ -3,14 +3,16 @@
 use super::*;
 
 impl TerminalState {
-    pub(in crate::state) fn scroll_image_rows(
+    pub(in crate::state) fn scroll_image_rows_in_columns(
         &mut self,
         first_row_index: u16,
         bottom_row_index: u16,
         row_shift_count: u16,
         is_scrolling_up: bool,
+        horizontal_margin_bounds: (u16, u16),
         old_live_top_row_index: u64,
     ) {
+        let (left_column_index, right_column_index) = horizontal_margin_bounds;
         let is_primary_screen = self.active_screen == Screen::Primary;
         let new_live_top_row_index = if is_primary_screen {
             self.scrollback.get_total_pushed_line_count()
@@ -22,7 +24,11 @@ impl TerminalState {
         } else {
             0
         };
+        let (grid_row_count, grid_column_count) = self.get_active_grid().get_grid_dimensions();
+        let is_full_width =
+            left_column_index == 0 && right_column_index == grid_column_count.saturating_sub(1);
         let is_full_history_scroll = is_primary_screen
+            && is_full_width
             && is_scrolling_up
             && first_row_index == 0
             && bottom_row_index + 1 == self.primary.get_grid_dimensions().0;
@@ -36,7 +42,6 @@ impl TerminalState {
                 })
                 .collect()
         };
-        let (grid_row_count, grid_column_count) = self.get_active_grid().get_grid_dimensions();
         let mut mapped_absolute_image_placements = absolute_image_placements
             .into_iter()
             .filter_map(|mut image_placement| {
@@ -55,9 +60,15 @@ impl TerminalState {
                 let relative_row_offset = image_placement.anchor.0 - old_live_top_row_index;
                 let relative_end_row_offset =
                     relative_row_offset + u64::from(image_placement.row_count);
-                let is_image_fully_contained = relative_row_offset >= u64::from(first_row_index)
+                let is_image_fully_contained_vertically = relative_row_offset
+                    >= u64::from(first_row_index)
                     && relative_end_row_offset <= u64::from(bottom_row_index) + 1;
-                if !is_image_fully_contained {
+                let image_column_end =
+                    u32::from(image_placement.anchor.1) + u32::from(image_placement.column_count);
+                let is_image_fully_contained_horizontally = image_placement.anchor.1
+                    >= left_column_index
+                    && image_column_end <= u32::from(right_column_index) + 1;
+                if !is_image_fully_contained_vertically || !is_image_fully_contained_horizontally {
                     image_placement.anchor.0 =
                         new_live_top_row_index.checked_add(relative_row_offset)?;
                     return Some(image_placement);

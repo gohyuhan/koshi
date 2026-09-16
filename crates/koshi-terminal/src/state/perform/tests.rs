@@ -607,6 +607,36 @@ fn reverse_index_moves_image_placements_with_inserted_rows() {
 }
 
 #[test]
+fn partial_line_operations_move_only_fully_contained_kitty_placements() {
+    let mut terminal_state = build_terminal_state(8, 6);
+    for image_record in [
+        build_image_record((2, 2), 1, 1),
+        build_image_record((2, 0), 1, 1),
+        build_image_record((2, 1), 2, 1),
+    ] {
+        terminal_state
+            .apply_image_record(&image_record)
+            .expect("the image fits the grid");
+    }
+
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?69h\x1b[3;6s\x1b[3;1H\x1b[L");
+    let moved_image_anchors = terminal_state
+        .list_image_placements()
+        .iter()
+        .map(|image_placement| image_placement.get_image_anchor())
+        .collect::<Vec<_>>();
+    assert_eq!(moved_image_anchors, [(3, 2), (2, 0), (2, 1)]);
+
+    process_terminal_bytes(&mut terminal_state, b"\x1b[M");
+    let restored_image_anchors = terminal_state
+        .list_image_placements()
+        .iter()
+        .map(|image_placement| image_placement.get_image_anchor())
+        .collect::<Vec<_>>();
+    assert_eq!(restored_image_anchors, [(2, 2), (2, 0), (2, 1)]);
+}
+
+#[test]
 fn alternate_line_operations_move_or_drop_image_placements() {
     let mut terminal_state = build_terminal_state(8, 6);
     process_terminal_bytes(&mut terminal_state, b"\x1b[?47h");
@@ -1554,6 +1584,308 @@ fn decstbm_top_equal_bottom_is_ignored() {
     assert_eq!(terminal_state.primary_scroll_region, Some((1, 3))); // region unchanged
     let cursor_position = terminal_state.active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (2, 2)); // cursor NOT homed by the ignored request
+}
+
+#[test]
+fn decslrm_requires_declrmm_and_clears_on_reset() {
+    let mut terminal_state = build_terminal_state(8, 3);
+    process_terminal_bytes(&mut terminal_state, b"\x1b[2;5s");
+    assert_eq!(terminal_state.primary_horizontal_margins, None);
+
+    process_terminal_bytes(&mut terminal_state, b"\x1b[3;4H\x1b[?69h\x1b[2;5s");
+    assert_eq!(terminal_state.primary_horizontal_margins, Some((1, 4)));
+    assert_eq!(terminal_state.get_active_cursor_position(), (0, 0));
+
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?69l");
+    assert_eq!(terminal_state.primary_horizontal_margins, None);
+    assert!(!terminal_state.modes.declrmm);
+}
+
+#[test]
+fn decslrm_rejects_an_invalid_range_and_accepts_the_full_width() {
+    let mut terminal_state = build_terminal_state(8, 3);
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?69h\x1b[2;5s");
+    process_terminal_bytes(&mut terminal_state, b"\x1b[6;3s");
+    assert_eq!(terminal_state.primary_horizontal_margins, Some((1, 4)));
+
+    process_terminal_bytes(&mut terminal_state, b"\x1b[1;8s");
+    assert_eq!(terminal_state.primary_horizontal_margins, None);
+}
+
+#[test]
+fn horizontal_margins_are_independent_per_screen() {
+    let mut terminal_state = build_terminal_state(8, 3);
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?69h\x1b[2;5s");
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?47h\x1b[3;7s");
+    assert_eq!(terminal_state.alternate_horizontal_margins, Some((2, 6)));
+
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?47l");
+    assert_eq!(terminal_state.primary_horizontal_margins, Some((1, 4)));
+}
+
+#[test]
+fn origin_mode_addresses_and_clamps_to_both_margin_axes() {
+    let mut terminal_state = build_terminal_state(8, 5);
+    process_terminal_bytes(&mut terminal_state, b"\x1b[2;4r\x1b[?69h\x1b[2;6s\x1b[?6h");
+
+    process_terminal_bytes(&mut terminal_state, b"\x1b[1;1H");
+    assert_eq!(terminal_state.get_active_cursor_position(), (1, 1));
+
+    process_terminal_bytes(&mut terminal_state, b"\x1b[99;99H");
+    assert_eq!(terminal_state.get_active_cursor_position(), (3, 5));
+
+    process_terminal_bytes(&mut terminal_state, b"\x1b[99A\x1b[99D");
+    assert_eq!(terminal_state.get_active_cursor_position(), (1, 1));
+    process_terminal_bytes(&mut terminal_state, b"\x1b[99B\x1b[99C");
+    assert_eq!(terminal_state.get_active_cursor_position(), (3, 5));
+
+    process_terminal_bytes(
+        &mut terminal_state,
+        b"\x1b[?6l\x1b[1;1H\x1b[?6h\x1b[B\x1b[C",
+    );
+    assert_eq!(terminal_state.get_active_cursor_position(), (2, 2));
+    process_terminal_bytes(
+        &mut terminal_state,
+        b"\x1b[?6l\x1b[5;8H\x1b[?6h\x1b[A\x1b[D",
+    );
+    assert_eq!(terminal_state.get_active_cursor_position(), (1, 1));
+
+    process_terminal_bytes(
+        &mut terminal_state,
+        b"\x1b[?6l\x1b[1;2H\x1bH\x1b[1;1H\x1b[?6h\x1b[I",
+    );
+    assert_eq!(terminal_state.get_active_cursor_position(), (1, 5));
+    process_terminal_bytes(
+        &mut terminal_state,
+        b"\x1b[?6l\x1b[5;7H\x1bH\x1b[5;8H\x1b[?6h\x1b[Z",
+    );
+    assert_eq!(terminal_state.get_active_cursor_position(), (1, 1));
+}
+
+#[test]
+fn origin_mode_toggles_home_the_cursor_to_the_active_origin() {
+    let mut terminal_state = build_terminal_state(8, 5);
+    process_terminal_bytes(&mut terminal_state, b"\x1b[2;4r\x1b[?69h\x1b[2;6s\x1b[4;6H");
+    assert_eq!(terminal_state.get_active_cursor_position(), (3, 5));
+
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?6h");
+    assert_eq!(terminal_state.get_active_cursor_position(), (1, 1));
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?6l");
+    assert_eq!(terminal_state.get_active_cursor_position(), (0, 0));
+}
+
+#[test]
+fn origin_mode_offsets_vpa_but_clamps_cha_without_an_offset() {
+    let mut terminal_state = build_terminal_state(8, 5);
+    process_terminal_bytes(&mut terminal_state, b"\x1b[2;4r\x1b[?69h\x1b[2;6s\x1b[?6h");
+
+    process_terminal_bytes(&mut terminal_state, b"\x1b[2d");
+    assert_eq!(terminal_state.get_active_cursor_position(), (2, 1));
+    process_terminal_bytes(&mut terminal_state, b"\x1b[1G");
+    assert_eq!(terminal_state.get_active_cursor_position(), (2, 1));
+}
+
+#[test]
+fn decsc_decrc_save_and_restore_origin_mode() {
+    let mut terminal_state = build_terminal_state(8, 5);
+    process_terminal_bytes(
+        &mut terminal_state,
+        b"\x1b[2;4r\x1b[?69h\x1b[2;6s\x1b[?6h\x1b[2;3H",
+    );
+    process_terminal_bytes(&mut terminal_state, b"\x1b7\x1b[?6l\x1b[1;1H\x1b8");
+
+    assert!(terminal_state.active_cursor().origin);
+    assert_eq!(terminal_state.get_active_cursor_position(), (2, 3));
+}
+
+#[test]
+fn origin_mode_clamps_control_cursor_moves_to_horizontal_margins() {
+    let mut terminal_state = build_terminal_state(8, 5);
+    process_terminal_bytes(
+        &mut terminal_state,
+        b"\x1b[2;4r\x1b[?69h\x1b[2;6s\x1b[?6h\x1b[2;3H",
+    );
+
+    process_terminal_bytes(&mut terminal_state, b"\r\x08");
+    assert_eq!(terminal_state.get_active_cursor_position(), (2, 1));
+
+    process_terminal_bytes(&mut terminal_state, b"\x09");
+    assert_eq!(terminal_state.get_active_cursor_position(), (2, 5));
+
+    process_terminal_bytes(&mut terminal_state, b"\x1b[3;3H\x85");
+    assert_eq!(terminal_state.get_active_cursor_position(), (3, 1));
+
+    process_terminal_bytes(&mut terminal_state, b"\x1b[3;3H\x1bE");
+    assert_eq!(terminal_state.get_active_cursor_position(), (3, 1));
+}
+
+#[test]
+fn horizontal_margins_bound_c0_controls_without_origin_mode() {
+    let mut terminal_state = build_terminal_state(8, 5);
+    process_terminal_bytes(
+        &mut terminal_state,
+        b"\x1b[?69h\x1b[3;6s\x1b[1;1H\r\x08\x09",
+    );
+    assert_eq!(terminal_state.get_active_cursor_position(), (0, 5));
+
+    process_terminal_bytes(&mut terminal_state, b"\x1b[2;1H\x1bE");
+    assert_eq!(terminal_state.get_active_cursor_position(), (2, 2));
+}
+
+#[test]
+fn disabling_horizontal_margins_clears_pending_wrap_latches() {
+    let mut terminal_state = build_terminal_state(8, 2);
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?69h\x1b[3;6s\x1b[1;3Hcdef");
+    assert!(terminal_state.active_cursor().pending_wrap);
+
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?69l");
+    assert!(!terminal_state.active_cursor().pending_wrap);
+    process_terminal_bytes(&mut terminal_state, b"x");
+    assert_eq!(terminal_state.get_active_cursor_position(), (0, 6));
+}
+
+#[test]
+fn soft_reset_clears_pending_wrap_latches_on_both_screens() {
+    let mut terminal_state = build_terminal_state(8, 2);
+    process_terminal_bytes(
+        &mut terminal_state,
+        b"\x1b[?69h\x1b[?47h\x1b[3;6s\x1b[1;3Hcdef\x1b[?47l",
+    );
+    process_terminal_bytes(&mut terminal_state, b"\x1b[!p\x1b[?47h");
+    assert!(!terminal_state.active_cursor().pending_wrap);
+    process_terminal_bytes(&mut terminal_state, b"x");
+    assert_eq!(terminal_state.get_active_cursor_position(), (0, 6));
+}
+
+#[test]
+fn margin_cell_operations_leave_outer_columns_unchanged() {
+    let mut terminal_state = build_terminal_state(8, 1);
+    process_terminal_bytes(
+        &mut terminal_state,
+        b"abcdefgh\x1b[?69h\x1b[3;6s\x1b[?6h\x1b[1;2H\x1b[@",
+    );
+    assert_eq!(get_row_text(&terminal_state, 0), "abc degh");
+
+    process_terminal_bytes(&mut terminal_state, b"\x1b[1;1H\x1b[P");
+    assert_eq!(get_row_text(&terminal_state, 0), "ab de gh");
+}
+
+#[test]
+fn printing_wraps_at_the_right_horizontal_margin() {
+    let mut terminal_state = build_terminal_state(8, 2);
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?69h\x1b[3;6s\x1b[1;3Hcdefg");
+
+    assert_eq!(get_row_text(&terminal_state, 0), "  cdef  ");
+    assert_eq!(get_row_text(&terminal_state, 1), "  g     ");
+}
+
+#[test]
+fn printing_outside_horizontal_margins_wraps_at_the_grid_edge() {
+    let mut terminal_state = build_terminal_state(8, 2);
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?69h\x1b[3;6s\x1b[1;8HXY");
+
+    assert_eq!(get_terminal_glyph(&terminal_state, 0, 7), Some('X'));
+    assert_eq!(get_terminal_glyph(&terminal_state, 1, 0), Some('Y'));
+    assert_eq!(terminal_state.get_active_cursor_position(), (1, 1));
+    assert!(!terminal_state.active_cursor().pending_wrap);
+}
+
+#[test]
+fn wide_printing_outside_horizontal_margins_wraps_at_the_grid_edge() {
+    let mut terminal_state = build_terminal_state(8, 2);
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?69h\x1b[3;6s\x1b[1;8H");
+    terminal_state.print('中');
+
+    assert_eq!(get_terminal_glyph(&terminal_state, 0, 7), Some(' '));
+    assert_eq!(get_terminal_glyph(&terminal_state, 1, 0), Some('中'));
+    assert_eq!(
+        terminal_state
+            .get_active_grid()
+            .get_cell(1, 1)
+            .map(Cell::get_display_width),
+        Some(0)
+    );
+    assert_eq!(terminal_state.get_active_cursor_position(), (1, 2));
+    assert!(!terminal_state.active_cursor().pending_wrap);
+}
+
+#[test]
+fn printing_outside_horizontal_margins_with_autowrap_off_stays_at_the_grid_edge() {
+    let mut terminal_state = build_terminal_state(8, 2);
+    process_terminal_bytes(
+        &mut terminal_state,
+        b"\x1b[?69h\x1b[3;6s\x1b[?7l\x1b[1;8HXY",
+    );
+
+    assert_eq!(get_terminal_glyph(&terminal_state, 0, 7), Some('Y'));
+    assert_eq!(get_terminal_glyph(&terminal_state, 1, 0), Some(' '));
+    assert_eq!(terminal_state.get_active_cursor_position(), (0, 7));
+    assert!(!terminal_state.active_cursor().pending_wrap);
+}
+
+#[test]
+fn vs16_promotion_outside_horizontal_margins_uses_the_grid_edge() {
+    let mut terminal_state = build_terminal_state(8, 2);
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?69h\x1b[3;6s\x1b[1;7H");
+    terminal_state.print('\u{2764}');
+    terminal_state.print('\u{FE0F}');
+
+    assert_eq!(
+        terminal_state
+            .get_active_grid()
+            .get_cell(0, 6)
+            .map(Cell::get_display_width),
+        Some(2)
+    );
+    assert_eq!(
+        terminal_state
+            .get_active_grid()
+            .get_cell(0, 7)
+            .map(Cell::get_display_width),
+        Some(0)
+    );
+    assert_eq!(terminal_state.get_active_cursor_position(), (0, 7));
+    assert!(terminal_state.active_cursor().pending_wrap);
+}
+
+#[test]
+fn margin_line_scroll_moves_only_the_margin_columns_and_not_scrollback() {
+    let mut terminal_state = build_terminal_state(8, 3);
+    process_terminal_bytes(&mut terminal_state, b"abcdefgh\r\njiqklmno\r\npqrstuvw");
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?69h\x1b[3;6s\x1b[3;1H");
+    terminal_state.execute(b'\n');
+
+    assert_eq!(get_row_text(&terminal_state, 0), "abqklmgh");
+    assert_eq!(get_row_text(&terminal_state, 1), "jirstuno");
+    assert_eq!(get_row_text(&terminal_state, 2), "pq    vw");
+    assert_eq!(terminal_state.get_scrollback().get_retained_line_count(), 0);
+}
+
+#[test]
+fn scroll_commands_use_horizontal_margins() {
+    let mut scroll_up = build_terminal_state(8, 3);
+    process_terminal_bytes(&mut scroll_up, b"abcdefgh\r\njiqklmno\r\npqrstuvw");
+    process_terminal_bytes(&mut scroll_up, b"\x1b[?69h\x1b[3;6s\x1b[1;1H\x1b[S");
+    assert_eq!(get_row_text(&scroll_up, 0), "abqklmgh");
+    assert_eq!(get_row_text(&scroll_up, 1), "jirstuno");
+    assert_eq!(get_row_text(&scroll_up, 2), "pq    vw");
+
+    let mut scroll_down = build_terminal_state(8, 3);
+    process_terminal_bytes(&mut scroll_down, b"abcdefgh\r\njiqklmno\r\npqrstuvw");
+    process_terminal_bytes(&mut scroll_down, b"\x1b[?69h\x1b[3;6s\x1b[3;1H\x1b[T");
+    assert_eq!(get_row_text(&scroll_down, 0), "ab    gh");
+    assert_eq!(get_row_text(&scroll_down, 1), "jicdefno");
+    assert_eq!(get_row_text(&scroll_down, 2), "pqqklmvw");
+}
+
+#[test]
+fn line_operations_use_horizontal_margins() {
+    let mut terminal_state = build_terminal_state(8, 3);
+    process_terminal_bytes(&mut terminal_state, b"abcdefgh\r\nijqklmno\r\npqrstuvw");
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?69h\x1b[3;6s\x1b[2;1H\x1b[L");
+    assert_eq!(get_row_text(&terminal_state, 0), "abcdefgh");
+    assert_eq!(get_row_text(&terminal_state, 1), "ij    no");
+    assert_eq!(get_row_text(&terminal_state, 2), "pqqklmvw");
 }
 
 #[test]
@@ -2530,28 +2862,34 @@ fn scroll_region_does_not_leak_from_the_alternate_to_the_primary() {
 #[test]
 fn each_screen_keeps_its_own_scroll_region_across_a_round_trip() {
     let mut terminal_state = build_terminal_state(10, 6);
-    process_terminal_bytes(&mut terminal_state, b"\x1b[2;4r"); // primary margins -> (1, 3)
+    process_terminal_bytes(&mut terminal_state, b"\x1b[2;4r\x1b[?69h\x1b[2;8s");
     assert_eq!(terminal_state.primary_scroll_region, Some((1, 3)));
-    process_terminal_bytes(&mut terminal_state, b"\x1b[?1049h"); // enter the alternate
-    assert_eq!(terminal_state.alternate_scroll_region, None); // alt starts unconstrained
-    process_terminal_bytes(&mut terminal_state, b"\x1b[1;3r"); // alt margins -> (0, 2)
+    assert_eq!(terminal_state.primary_horizontal_margins, Some((1, 7)));
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?1049h");
+    assert_eq!(terminal_state.alternate_scroll_region, None);
+    assert_eq!(terminal_state.alternate_horizontal_margins, None);
+    process_terminal_bytes(&mut terminal_state, b"\x1b[1;3r\x1b[3;7s");
     assert_eq!(terminal_state.alternate_scroll_region, Some((0, 2)));
-    process_terminal_bytes(&mut terminal_state, b"\x1b[?1049l"); // back to the primary
-    assert_eq!(terminal_state.primary_scroll_region, Some((1, 3))); // primary margins survived
+    assert_eq!(terminal_state.alternate_horizontal_margins, Some((2, 6)));
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?1049l");
+    assert_eq!(terminal_state.primary_scroll_region, Some((1, 3)));
+    assert_eq!(terminal_state.primary_horizontal_margins, Some((1, 7)));
 }
 
 #[test]
 fn resize_clears_both_screens_scroll_regions() {
     let mut terminal_state = build_terminal_state(10, 6);
-    process_terminal_bytes(&mut terminal_state, b"\x1b[2;4r"); // primary region -> (1, 3)
-    process_terminal_bytes(&mut terminal_state, b"\x1b[?1049h"); // enter the alternate
-    process_terminal_bytes(&mut terminal_state, b"\x1b[1;3r"); // alt region -> (0, 2)
+    process_terminal_bytes(&mut terminal_state, b"\x1b[2;4r\x1b[?69h\x1b[2;8s");
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?1049h");
+    process_terminal_bytes(&mut terminal_state, b"\x1b[1;3r\x1b[3;7s");
     terminal_state.resize_terminal_state(PtySize {
         column_count: 8,
         row_count: 4,
     });
     assert_eq!(terminal_state.primary_scroll_region, None);
     assert_eq!(terminal_state.alternate_scroll_region, None);
+    assert_eq!(terminal_state.primary_horizontal_margins, None);
+    assert_eq!(terminal_state.alternate_horizontal_margins, None);
 }
 
 #[test]

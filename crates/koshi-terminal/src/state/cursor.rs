@@ -13,8 +13,12 @@ pub(crate) struct SavedCursor {
     #[serde(rename = "col")]
     pub(in crate::state) column: u16,
     /// The deferred-wrap latch at save time, restored with the position: a
-    /// glyph parked at the last column still wraps after a save/restore.
+    /// glyph parked at the effective horizontal right bound still wraps after
+    /// a save/restore.
     pub(in crate::state) pending_wrap: bool,
+    /// Whether saved cursor coordinates are relative to the active margins.
+    #[serde(default)]
+    pub(in crate::state) origin: bool,
     /// Snapshot of the active screen's `RenderState` (pen, charsets, GL slot)
     /// at save time, restored with the position. An app that changes the pen
     /// or a designation, saves, changes it again, then restores gets the
@@ -22,7 +26,7 @@ pub(crate) struct SavedCursor {
     pub(in crate::state) render: RenderState,
 }
 
-/// The text cursor: position, visibility, and the deferred-wrap latch.
+/// The text cursor: position, origin mode, visibility, and the deferred-wrap latch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Cursor {
     /// Zero-based row within the active grid. ANSI addressing is 1-based;
@@ -33,12 +37,15 @@ pub(crate) struct Cursor {
     pub(in crate::state) column: u16,
     /// Whether the cursor is currently shown (toggled by DEC mode `?25`).
     pub(in crate::state) is_visible: bool,
-    /// Deferred-wrap latch (xterm-style): set when a glyph is printed into the
-    /// last column, leaving the cursor parked there. The next printable glyph
-    /// first wraps to the following line: a row that exactly fills the width
-    /// does not scroll until that glyph arrives. Any cursor-moving operation
-    /// clears it.
+    /// Deferred-wrap latch: set when autowrap is enabled and a glyph is printed
+    /// at the effective horizontal right bound, leaving the cursor parked
+    /// there. The next printable glyph first wraps to the following line: a row
+    /// that exactly fills the active width does not scroll until that glyph
+    /// arrives. Any cursor-moving operation clears it.
     pub(in crate::state) pending_wrap: bool,
+    /// Whether CUP and related coordinates are relative to the active margins.
+    #[serde(default)]
+    pub(in crate::state) origin: bool,
     /// Saved cursor position and style from DECSC/DECRC (xterm form) or
     /// SCOSC/SCORC (ANSI form). Each screen buffer keeps its own snapshot.
     pub(in crate::state) saved: Option<SavedCursor>,

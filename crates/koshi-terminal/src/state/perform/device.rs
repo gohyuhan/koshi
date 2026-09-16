@@ -106,6 +106,21 @@ impl TerminalState {
             .extend_from_slice(device_reply_bytes.as_bytes());
     }
 
+    /// Return the cursor coordinates used by CPR and DECXCPR. DECOM reports
+    /// coordinates relative to the active vertical and horizontal margins.
+    fn get_reported_cursor_position(&self) -> (u16, u16) {
+        let (cursor_row_index, cursor_column_index) = self.get_active_cursor_position();
+        if !self.active_cursor().origin {
+            return (cursor_row_index, cursor_column_index);
+        }
+        let top_row_index = self.get_scroll_region().map_or(0, |(top, _)| top);
+        let left_column_index = self.get_horizontal_margins().map_or(0, |(left, _)| left);
+        (
+            cursor_row_index.saturating_sub(top_row_index),
+            cursor_column_index.saturating_sub(left_column_index),
+        )
+    }
+
     /// Reply to a Device Status Report (DSR, `CSI Ps n`): `Ps = 5` (operating
     /// status) queues the all-good `CSI 0 n`; `Ps = 6` (CPR, cursor position
     /// report) queues `CSI row ; column R` with the active cursor's 1-based
@@ -114,7 +129,7 @@ impl TerminalState {
         match get_first_parameter_number(params).unwrap_or(0) {
             5 => self.device_query_replies.extend_from_slice(b"\x1b[0n"),
             6 => {
-                let (cursor_row_index, cursor_column_index) = self.get_active_cursor_position();
+                let (cursor_row_index, cursor_column_index) = self.get_reported_cursor_position();
                 let device_reply_bytes =
                     format!("\x1b[{};{}R", cursor_row_index + 1, cursor_column_index + 1);
                 self.device_query_replies
@@ -155,7 +170,7 @@ impl TerminalState {
     pub(super) fn report_dec_device_status(&mut self, params: &vte::Params) {
         match get_first_parameter_number(params).unwrap_or(0) {
             6 => {
-                let (cursor_row_index, cursor_column_index) = self.get_active_cursor_position();
+                let (cursor_row_index, cursor_column_index) = self.get_reported_cursor_position();
                 let device_reply_bytes = format!(
                     "\x1b[?{};{}R",
                     cursor_row_index + 1,
@@ -220,7 +235,9 @@ impl TerminalState {
         match mode_number {
             1 => compute_mode_state_number(self.modes.application_cursor_keys),
             5 => compute_mode_state_number(self.modes.reverse_video),
+            6 => compute_mode_state_number(self.active_cursor().origin),
             7 => compute_mode_state_number(self.modes.autowrap),
+            69 => compute_mode_state_number(self.modes.declrmm),
             9 => compute_mode_state_number(self.modes.mouse_tracking == MouseTracking::X10),
             12 => compute_mode_state_number(self.modes.cursor_blink),
             25 => compute_mode_state_number(self.active_cursor().is_visible),

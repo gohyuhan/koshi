@@ -92,9 +92,9 @@ impl TerminalState {
     /// selector (VS15, `U+FE0E`) on an emoji-presentation base. The base keeps
     /// its character, combining marks, and style with `width == 1`; the cell to
     /// its right is blanked in the pen background. The cursor moves to
-    /// `column + 1` with the wrap latch cleared. When the base sits in the last
-    /// column (kept narrow there by a refused promotion), the cursor stays
-    /// parked on it, with the wrap latch armed under autowrap.
+    /// `column + 1` with the wrap latch cleared. When the base sits at the
+    /// effective right bound (kept narrow there by a refused promotion), the
+    /// cursor stays parked on it, with the wrap latch armed under autowrap.
     fn demote_cluster_to_narrow(&mut self, row_index: u16, column_index: u16) {
         self.clear_images_at_cells(row_index, column_index, 2);
         if let Some(slot) = self.active_grid_mut().get_cell_mut(row_index, column_index) {
@@ -108,10 +108,9 @@ impl TerminalState {
             *slot = Cell::blank_with(background_style);
         }
         // The glyph occupies one column; the cursor sits just past the base.
-        let (_, column_count) = self.get_active_grid().get_grid_dimensions();
-        let last_column_index = column_count.saturating_sub(1);
+        let (_, last_column_index) = self.get_horizontal_wrap_bounds_for_column(column_index);
         if column_index >= last_column_index {
-            self.arm_wrap_latch(last_column_index);
+            self.arm_wrap_latch();
         } else {
             self.active_cursor_mut().column = column_index + 1;
             self.clear_wrap_latch();
@@ -123,14 +122,14 @@ impl TerminalState {
     /// (`column < last_column_index`): the base keeps its character, combining marks, and
     /// style with `width == 2`, the column to its right becomes a width-0
     /// continuation, and the cursor steps past the claimed column or parks on
-    /// the last column. In the last column of a multi-column grid: under
-    /// autowrap the whole cluster moves to column 0 of the next line as a wide
-    /// glyph, the vacated cell is blanked, and the row ends `SoftWide`; with
-    /// autowrap off the base stays narrow where it sits. In a 1-column grid
-    /// the base stays narrow where it sits.
+    /// the effective right bound. At the effective right bound of a multi-column
+    /// region: under autowrap the whole cluster moves to the region's left bound
+    /// on the next line as a wide glyph, the vacated cell is blanked, and the row
+    /// ends `SoftWide`; with autowrap off the base stays narrow where it sits. In
+    /// a 1-column region the base stays narrow where it sits.
     fn promote_cluster_to_wide(&mut self, row_index: u16, column_index: u16) {
-        let (_, column_count) = self.get_active_grid().get_grid_dimensions();
-        let last_column_index = column_count.saturating_sub(1);
+        let (first_column_index, last_column_index) =
+            self.get_horizontal_wrap_bounds_for_column(column_index);
 
         if column_index < last_column_index {
             // Room to the right: widen the base in place and claim column + 1.
@@ -142,17 +141,17 @@ impl TerminalState {
                 return;
             };
             self.place_glyph(row_index, column_index, widened);
-            // The glyph ends at column + 1: park there when that is the last
-            // column, else step past it.
+            // The glyph ends at column + 1: park there when that is the
+            // effective right bound, else step past it.
             if column_index + 1 >= last_column_index {
-                self.arm_wrap_latch(last_column_index);
+                self.arm_wrap_latch();
             } else {
                 self.active_cursor_mut().column = column_index + 2;
             }
-        } else if last_column_index > 0 {
-            // Base in the last column of a multi-column grid. With autowrap off
-            // the base stays narrow where it sits (the continuation is already
-            // on it) and the cursor stays put.
+        } else if first_column_index < last_column_index {
+            // Base at the effective right bound of a multi-column region. With
+            // autowrap off the base stays narrow where it sits (the continuation
+            // is already on it) and the cursor stays put.
             if !self.modes.autowrap {
                 return;
             }
@@ -176,10 +175,10 @@ impl TerminalState {
             if let Some(slot) = self.active_grid_mut().get_cell_mut(row_index, column_index) {
                 *slot = Cell::blank_with(background_style);
             }
-            // The vacated last column is a wide-glyph spacer; `SoftWide` marks
+            // The vacated right bound is a wide-glyph spacer; `SoftWide` marks
             // the row so a reflow re-joins the rows and drops the spacer.
             self.wrap_linefeed(RowEnd::SoftWide);
-            self.active_cursor_mut().column = 0;
+            self.active_cursor_mut().column = first_column_index;
             self.clear_wrap_latch();
 
             let new_row_index = self.active_cursor().row;
@@ -187,18 +186,18 @@ impl TerminalState {
             for combining_character in &combining_characters {
                 widened.push_combining(*combining_character);
             }
-            // `place_glyph` clears any wide pair at columns 0–1 that this write
-            // would split.
-            self.place_glyph(new_row_index, 0, widened);
-            self.cluster_base = Some((new_row_index, 0));
-            if 1 >= last_column_index {
-                self.arm_wrap_latch(last_column_index);
+            // `place_glyph` clears any wide pair at the new left bound that
+            // this write would split.
+            self.place_glyph(new_row_index, first_column_index, widened);
+            self.cluster_base = Some((new_row_index, first_column_index));
+            if first_column_index.saturating_add(1) >= last_column_index {
+                self.arm_wrap_latch();
             } else {
-                self.active_cursor_mut().column = 2;
+                self.active_cursor_mut().column = first_column_index.saturating_add(2);
             }
         }
-        // 1-column pane (`last_column_index == 0`): the base stays narrow where it sits,
-        // with the promoting mark already on it.
+        // 1-column region (`last_column_index == first_column_index`): the base stays narrow
+        // where it sits, with the promoting mark already on it.
     }
 
     /// Blank the orphaned half of any wide glyph a write at (`row`, `column`)
