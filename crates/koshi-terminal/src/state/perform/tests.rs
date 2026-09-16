@@ -1780,6 +1780,75 @@ fn printing_wraps_at_the_right_horizontal_margin() {
 }
 
 #[test]
+fn printing_outside_horizontal_margins_wraps_at_the_grid_edge() {
+    let mut terminal_state = build_terminal_state(8, 2);
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?69h\x1b[3;6s\x1b[1;8HXY");
+
+    assert_eq!(get_terminal_glyph(&terminal_state, 0, 7), Some('X'));
+    assert_eq!(get_terminal_glyph(&terminal_state, 1, 0), Some('Y'));
+    assert_eq!(terminal_state.get_active_cursor_position(), (1, 1));
+    assert!(!terminal_state.active_cursor().pending_wrap);
+}
+
+#[test]
+fn wide_printing_outside_horizontal_margins_wraps_at_the_grid_edge() {
+    let mut terminal_state = build_terminal_state(8, 2);
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?69h\x1b[3;6s\x1b[1;8H");
+    terminal_state.print('中');
+
+    assert_eq!(get_terminal_glyph(&terminal_state, 0, 7), Some(' '));
+    assert_eq!(get_terminal_glyph(&terminal_state, 1, 0), Some('中'));
+    assert_eq!(
+        terminal_state
+            .get_active_grid()
+            .get_cell(1, 1)
+            .map(Cell::get_display_width),
+        Some(0)
+    );
+    assert_eq!(terminal_state.get_active_cursor_position(), (1, 2));
+    assert!(!terminal_state.active_cursor().pending_wrap);
+}
+
+#[test]
+fn printing_outside_horizontal_margins_with_autowrap_off_stays_at_the_grid_edge() {
+    let mut terminal_state = build_terminal_state(8, 2);
+    process_terminal_bytes(
+        &mut terminal_state,
+        b"\x1b[?69h\x1b[3;6s\x1b[?7l\x1b[1;8HXY",
+    );
+
+    assert_eq!(get_terminal_glyph(&terminal_state, 0, 7), Some('Y'));
+    assert_eq!(get_terminal_glyph(&terminal_state, 1, 0), Some(' '));
+    assert_eq!(terminal_state.get_active_cursor_position(), (0, 7));
+    assert!(!terminal_state.active_cursor().pending_wrap);
+}
+
+#[test]
+fn vs16_promotion_outside_horizontal_margins_uses_the_grid_edge() {
+    let mut terminal_state = build_terminal_state(8, 2);
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?69h\x1b[3;6s\x1b[1;7H");
+    terminal_state.print('\u{2764}');
+    terminal_state.print('\u{FE0F}');
+
+    assert_eq!(
+        terminal_state
+            .get_active_grid()
+            .get_cell(0, 6)
+            .map(Cell::get_display_width),
+        Some(2)
+    );
+    assert_eq!(
+        terminal_state
+            .get_active_grid()
+            .get_cell(0, 7)
+            .map(Cell::get_display_width),
+        Some(0)
+    );
+    assert_eq!(terminal_state.get_active_cursor_position(), (0, 7));
+    assert!(terminal_state.active_cursor().pending_wrap);
+}
+
+#[test]
 fn margin_line_scroll_moves_only_the_margin_columns_and_not_scrollback() {
     let mut terminal_state = build_terminal_state(8, 3);
     process_terminal_bytes(&mut terminal_state, b"abcdefgh\r\njiqklmno\r\npqrstuvw");

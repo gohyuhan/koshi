@@ -129,6 +129,15 @@ fn state_round_trip_preserves_origin_and_horizontal_margins() {
     );
 
     let serialized_state = serde_json::to_value(&terminal_state).expect("state serializes");
+    assert_eq!(
+        serialized_state["primary_horizontal_margins"],
+        serde_json::json!([1, 5])
+    );
+    assert_eq!(
+        serialized_state["alternate_horizontal_margins"],
+        serde_json::json!([2, 6])
+    );
+
     let restored: TerminalState =
         serde_json::from_value(serialized_state).expect("state deserializes");
 
@@ -136,6 +145,111 @@ fn state_round_trip_preserves_origin_and_horizontal_margins() {
     assert_eq!(restored.alternate_horizontal_margins, Some((2, 6)));
     assert!(restored.modes.declrmm);
     assert!(restored.primary_cursor.origin);
+}
+
+#[test]
+fn state_deserialization_rejects_reversed_horizontal_margins() {
+    let terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 5,
+        row_count: 3,
+    });
+    let mut serialized_state = serde_json::to_value(&terminal_state).expect("state serializes");
+    serialized_state["primary_horizontal_margins"] = serde_json::json!([4, 2]);
+
+    let deserialization_error = serde_json::from_value::<TerminalState>(serialized_state)
+        .expect_err("reversed margins must be rejected");
+    assert_eq!(
+        deserialization_error.to_string(),
+        "primary horizontal margins (4, 2) must satisfy 0 <= left < right <= 4"
+    );
+}
+
+#[test]
+fn state_deserialization_rejects_horizontal_margins_past_grid_edge() {
+    let terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 5,
+        row_count: 3,
+    });
+    let mut serialized_state = serde_json::to_value(&terminal_state).expect("state serializes");
+    serialized_state["alternate_horizontal_margins"] = serde_json::json!([1, 5]);
+
+    let deserialization_error = serde_json::from_value::<TerminalState>(serialized_state)
+        .expect_err("out-of-bounds margins must be rejected");
+    assert_eq!(
+        deserialization_error.to_string(),
+        "alternate horizontal margins (1, 5) must satisfy 0 <= left < right <= 4"
+    );
+}
+
+#[test]
+fn state_deserialization_rejects_single_column_horizontal_margins() {
+    let terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 5,
+        row_count: 3,
+    });
+    let mut serialized_state = serde_json::to_value(&terminal_state).expect("state serializes");
+    serialized_state["modes"]["declrmm"] = serde_json::json!(true);
+    serialized_state["primary_horizontal_margins"] = serde_json::json!([2, 2]);
+
+    let deserialization_error = serde_json::from_value::<TerminalState>(serialized_state)
+        .expect_err("single-column margins must be rejected");
+    assert_eq!(
+        deserialization_error.to_string(),
+        "primary horizontal margins (2, 2) must satisfy 0 <= left < right <= 4"
+    );
+}
+
+#[test]
+fn state_deserialization_normalizes_single_column_full_width_margins() {
+    let terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 1,
+        row_count: 3,
+    });
+    let mut serialized_state = serde_json::to_value(&terminal_state).expect("state serializes");
+    serialized_state["modes"]["declrmm"] = serde_json::json!(true);
+    serialized_state["primary_horizontal_margins"] = serde_json::json!([0, 0]);
+
+    let restored: TerminalState =
+        serde_json::from_value(serialized_state).expect("full-width margins are valid");
+
+    assert_eq!(restored.primary_horizontal_margins, None);
+}
+
+#[test]
+fn state_deserialization_clears_margins_when_declrmm_is_disabled() {
+    let terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 5,
+        row_count: 3,
+    });
+    let mut serialized_state = serde_json::to_value(&terminal_state).expect("state serializes");
+    serialized_state["primary_horizontal_margins"] = serde_json::json!([1, 3]);
+    serialized_state["alternate_horizontal_margins"] = serde_json::json!([0, 4]);
+
+    let restored: TerminalState =
+        serde_json::from_value(serialized_state).expect("disabled margins can be normalized");
+
+    assert_eq!(restored.primary_horizontal_margins, None);
+    assert_eq!(restored.alternate_horizontal_margins, None);
+    assert!(!restored.modes.declrmm);
+}
+
+#[test]
+fn state_deserialization_normalizes_full_width_horizontal_margins() {
+    let terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 5,
+        row_count: 3,
+    });
+    let mut serialized_state = serde_json::to_value(&terminal_state).expect("state serializes");
+    serialized_state["modes"]["declrmm"] = serde_json::json!(true);
+    serialized_state["primary_horizontal_margins"] = serde_json::json!([0, 4]);
+    serialized_state["alternate_horizontal_margins"] = serde_json::json!([1, 3]);
+
+    let restored: TerminalState =
+        serde_json::from_value(serialized_state).expect("full-width margins are valid");
+
+    assert_eq!(restored.primary_horizontal_margins, None);
+    assert_eq!(restored.alternate_horizontal_margins, Some((1, 3)));
+    assert!(restored.modes.declrmm);
 }
 
 #[test]
@@ -149,8 +263,8 @@ fn state_without_origin_and_horizontal_margin_fields_deserializes() {
     let object = serialized_state
         .as_object_mut()
         .expect("state is an object");
-    object.remove("primary_h_margins");
-    object.remove("alternate_h_margins");
+    object.remove("primary_horizontal_margins");
+    object.remove("alternate_horizontal_margins");
     object
         .get_mut("modes")
         .and_then(serde_json::Value::as_object_mut)

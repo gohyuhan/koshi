@@ -13,7 +13,8 @@ pub(crate) struct SavedCursor {
     #[serde(rename = "col")]
     pub(in crate::state) column: u16,
     /// The deferred-wrap latch at save time, restored with the position: a
-    /// glyph parked at the active right margin still wraps after a save/restore.
+    /// glyph parked at the effective horizontal right bound still wraps after
+    /// a save/restore.
     pub(in crate::state) pending_wrap: bool,
     /// Whether saved cursor coordinates are relative to the active margins.
     #[serde(default)]
@@ -37,10 +38,10 @@ pub(crate) struct Cursor {
     /// Whether the cursor is currently shown (toggled by DEC mode `?25`).
     pub(in crate::state) is_visible: bool,
     /// Deferred-wrap latch: set when autowrap is enabled and a glyph is printed
-    /// into the active right margin, leaving the cursor parked there. The next
-    /// printable glyph first wraps to the following line: a row that exactly
-    /// fills the active width does not scroll until that glyph arrives. Any
-    /// cursor-moving operation clears it.
+    /// at the effective horizontal right bound, leaving the cursor parked
+    /// there. The next printable glyph first wraps to the following line: a row
+    /// that exactly fills the active width does not scroll until that glyph
+    /// arrives. Any cursor-moving operation clears it.
     pub(in crate::state) pending_wrap: bool,
     /// Whether CUP and related coordinates are relative to the active margins.
     #[serde(default)]

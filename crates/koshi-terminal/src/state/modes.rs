@@ -71,8 +71,8 @@ pub(crate) struct TerminalModes {
     #[serde(rename = "alt_scroll")]
     pub(in crate::state) alternate_scroll: bool,
     /// `?7` (DECAWM) — autowrap. On (the default), a glyph printed into the
-    /// last column parks the cursor there and the next glyph wraps to a new
-    /// line. Off, the next glyph overwrites the last column in place.
+    /// effective right bound parks the cursor there and the next glyph wraps to
+    /// a new line. Off, the next glyph overwrites the bound in place.
     pub(in crate::state) autowrap: bool,
     /// `?1` (DECCKM) — application cursor keys: the input layer sends `ESC O A`
     /// for the arrow keys; off, it sends `ESC [ A`.

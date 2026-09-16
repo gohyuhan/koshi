@@ -31,6 +31,28 @@ impl TerminalState {
             .unwrap_or((0, last_grid_column_index))
     }
 
+    /// The horizontal bounds used by autowrap. A cursor inside the margins
+    /// wraps within them; a cursor outside them wraps at the grid edge.
+    pub(super) fn get_horizontal_wrap_bounds(&self) -> (u16, u16) {
+        self.get_horizontal_wrap_bounds_for_column(self.active_cursor().column)
+    }
+
+    /// The horizontal bounds used by autowrap for `column_index`.
+    pub(super) fn get_horizontal_wrap_bounds_for_column(&self, column_index: u16) -> (u16, u16) {
+        if let Some(horizontal_margin_bounds) = self.get_horizontal_margins() {
+            if (horizontal_margin_bounds.0..=horizontal_margin_bounds.1).contains(&column_index) {
+                return horizontal_margin_bounds;
+            }
+        }
+
+        let last_grid_column_index = self
+            .get_active_grid()
+            .get_grid_dimensions()
+            .1
+            .saturating_sub(1);
+        (0, last_grid_column_index)
+    }
+
     /// The row bounds used by cursor movement. DECOM confines movement to the
     /// active vertical region; normal mode uses the full active grid.
     pub(super) fn get_cursor_row_bounds(&self) -> (u16, u16) {
@@ -393,12 +415,12 @@ impl TerminalState {
         cursor.pending_wrap = false;
     }
 
-    /// Park the cursor on the active horizontal right margin. With autowrap
+    /// Park the cursor on the effective horizontal right bound. With autowrap
     /// (DECAWM `?7`) on, arm the deferred-wrap latch: the next glyph wraps
     /// before printing. With autowrap off, clear the latch so the next glyph
-    /// overwrites the margin in place.
+    /// overwrites the bound in place.
     pub(super) fn arm_wrap_latch(&mut self) {
-        let (_, right_column_index) = self.get_horizontal_margin_bounds();
+        let (_, right_column_index) = self.get_horizontal_wrap_bounds();
         let should_arm_wrap_latch = self.modes.autowrap;
         let cursor = self.active_cursor_mut();
         cursor.column = right_column_index;

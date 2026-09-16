@@ -22,6 +22,7 @@
 
 use std::cmp::min;
 use std::collections::HashMap;
+use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 
 use koshi_core::process::PtySize;
@@ -194,9 +195,9 @@ struct TerminalStateSerializeFields<'a> {
     scrollback: &'a Scrollback,
     primary_scroll_region: &'a Option<(u16, u16)>,
     alternate_scroll_region: &'a Option<(u16, u16)>,
-    #[serde(rename = "primary_h_margins")]
+    #[serde(rename = "primary_horizontal_margins")]
     primary_horizontal_margins: &'a Option<(u16, u16)>,
-    #[serde(rename = "alternate_h_margins")]
+    #[serde(rename = "alternate_horizontal_margins")]
     alternate_horizontal_margins: &'a Option<(u16, u16)>,
     cluster: &'a String,
     cluster_base: &'a Option<(u16, u16)>,
@@ -351,6 +352,67 @@ struct RawTerminalStateFields {
     device_query_replies: Vec<u8>,
 }
 
+#[derive(Debug)]
+enum HorizontalMarginsRestoreError {
+    EmptyGrid {
+        screen_name: &'static str,
+    },
+    InvalidRange {
+        screen_name: &'static str,
+        left_column_index: u16,
+        right_column_index: u16,
+        last_column_index: u16,
+    },
+}
+
+impl Display for HorizontalMarginsRestoreError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyGrid { screen_name } => {
+                write!(formatter, "{screen_name} horizontal margins require a non-empty grid")
+            }
+            Self::InvalidRange {
+                screen_name,
+                left_column_index,
+                right_column_index,
+                last_column_index,
+            } => write!(formatter, "{screen_name} horizontal margins ({left_column_index}, {right_column_index}) must satisfy 0 <= left < right <= {last_column_index}"),
+        }
+    }
+}
+
+impl std::error::Error for HorizontalMarginsRestoreError {}
+
+fn normalize_restored_horizontal_margins(
+    grid: &Grid,
+    horizontal_margins: Option<(u16, u16)>,
+    is_declrmm_enabled: bool,
+    screen_name: &'static str,
+) -> Result<Option<(u16, u16)>, HorizontalMarginsRestoreError> {
+    let Some((left_column_index, right_column_index)) = horizontal_margins else {
+        return Ok(None);
+    };
+    let column_count = grid.get_grid_dimensions().1;
+    let Some(last_column_index) = column_count.checked_sub(1) else {
+        return Err(HorizontalMarginsRestoreError::EmptyGrid { screen_name });
+    };
+    if left_column_index == 0 && right_column_index == last_column_index {
+        return Ok(None);
+    }
+    if left_column_index >= right_column_index || right_column_index > last_column_index {
+        return Err(HorizontalMarginsRestoreError::InvalidRange {
+            screen_name,
+            left_column_index,
+            right_column_index,
+            last_column_index,
+        });
+    }
+    if !is_declrmm_enabled {
+        return Ok(None);
+    }
+    Ok(Some((left_column_index, right_column_index)))
+}
+
 #[derive(Deserialize)]
 #[serde(field_identifier, rename_all = "snake_case")]
 enum RawTerminalStateField {
@@ -381,9 +443,9 @@ enum RawTerminalStateField {
     Scrollback,
     PrimaryScrollRegion,
     AlternateScrollRegion,
-    #[serde(rename = "primary_h_margins")]
+    #[serde(rename = "primary_horizontal_margins")]
     PrimaryHorizontalMargins,
-    #[serde(rename = "alternate_h_margins")]
+    #[serde(rename = "alternate_horizontal_margins")]
     AlternateHorizontalMargins,
     Cluster,
     ClusterBase,
@@ -618,13 +680,17 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
                 }
                 RawTerminalStateField::PrimaryHorizontalMargins => {
                     if primary_horizontal_margins.is_some() {
-                        return Err(serde::de::Error::duplicate_field("primary_h_margins"));
+                        return Err(serde::de::Error::duplicate_field(
+                            "primary_horizontal_margins",
+                        ));
                     }
                     primary_horizontal_margins = Some(map.next_value()?);
                 }
                 RawTerminalStateField::AlternateHorizontalMargins => {
                     if alternate_horizontal_margins.is_some() {
-                        return Err(serde::de::Error::duplicate_field("alternate_h_margins"));
+                        return Err(serde::de::Error::duplicate_field(
+                            "alternate_horizontal_margins",
+                        ));
                     }
                     alternate_horizontal_margins = Some(map.next_value()?);
                 }
@@ -728,6 +794,21 @@ impl<'de> Deserialize<'de> for TerminalStateFields {
         Deserializer: serde::Deserializer<'de>,
     {
         let serialized_terminal_state = RawTerminalStateFields::deserialize(deserializer)?;
+        let is_declrmm_enabled = serialized_terminal_state.modes.declrmm;
+        let primary_horizontal_margins = normalize_restored_horizontal_margins(
+            &serialized_terminal_state.primary,
+            serialized_terminal_state.primary_horizontal_margins,
+            is_declrmm_enabled,
+            "primary",
+        )
+        .map_err(serde::de::Error::custom)?;
+        let alternate_horizontal_margins = normalize_restored_horizontal_margins(
+            &serialized_terminal_state.alternate,
+            serialized_terminal_state.alternate_horizontal_margins,
+            is_declrmm_enabled,
+            "alternate",
+        )
+        .map_err(serde::de::Error::custom)?;
         let images = images::restore_serialized_image_state(
             serialized_terminal_state.primary_image_placements,
             serialized_terminal_state.primary_image_history,
@@ -763,8 +844,8 @@ impl<'de> Deserialize<'de> for TerminalStateFields {
             scrollback: serialized_terminal_state.scrollback,
             primary_scroll_region: serialized_terminal_state.primary_scroll_region,
             alternate_scroll_region: serialized_terminal_state.alternate_scroll_region,
-            primary_horizontal_margins: serialized_terminal_state.primary_horizontal_margins,
-            alternate_horizontal_margins: serialized_terminal_state.alternate_horizontal_margins,
+            primary_horizontal_margins,
+            alternate_horizontal_margins,
             cluster: serialized_terminal_state.cluster,
             cluster_base: serialized_terminal_state.cluster_base,
             device_query_replies: serialized_terminal_state.device_query_replies,
@@ -1246,7 +1327,8 @@ impl TerminalState {
     }
 
     /// Whether autowrap (DECAWM `?7`) is active — `print` reads this to decide
-    /// whether a glyph at the last column wraps onto a new line. Default on.
+    /// whether a glyph at the effective right bound wraps onto a new line.
+    /// Default on.
     pub fn is_autowrap_enabled(&self) -> bool {
         self.modes.autowrap
     }

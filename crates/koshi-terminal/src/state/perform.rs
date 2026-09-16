@@ -73,7 +73,7 @@ impl vte::Perform for TerminalState {
     /// passthrough), folds continuations (combining marks, ZWJ emoji parts,
     /// variation selectors) onto the preceding base, handles display width
     /// (narrow single-column or wide CJK/emoji two-column), and respects
-    /// autowrap at the line end.
+    /// autowrap at the effective horizontal right bound.
     fn print(&mut self, character: char) {
         // Translate through the active GL charset (DEC line drawing, UK). The
         // cell stores the remapped glyph and width is computed on it; the
@@ -109,44 +109,45 @@ impl vte::Perform for TerminalState {
         }
         let glyph_width: u16 = if raw_width >= 2 { 2 } else { 1 };
 
-        // Deferred wrap: a prior print parked on the last column. Under autowrap
-        // (DECAWM `?7`, the default) the cursor wraps to the next line before
-        // this glyph is placed (a row that exactly fills the width scrolls only
-        // when the next glyph arrives). With autowrap off the cursor stays on
-        // the last column and this glyph overwrites in place. Either way the
-        // latch clears.
+        // Deferred wrap: a prior print parked on the effective right bound.
+        // Under autowrap (DECAWM `?7`, the default) the cursor wraps to the
+        // next line before this glyph is placed (a row that exactly fills the
+        // width scrolls only when the next glyph arrives). With autowrap off
+        // the cursor stays on the bound and this glyph overwrites in place.
+        // Either way the latch clears.
         if self.active_cursor().pending_wrap {
             if self.modes.autowrap {
                 // The row the cursor leaves soft-wraps into the next, including
                 // when a bottom-margin scroll moves it above a fresh blank row.
+                let (first_wrap_column_index, _) = self.get_horizontal_wrap_bounds();
                 self.wrap_linefeed(RowEnd::Soft);
-                self.active_cursor_mut().column = self.get_horizontal_margin_bounds().0;
+                self.active_cursor_mut().column = first_wrap_column_index;
             }
             self.clear_wrap_latch();
         }
 
-        let (first_column_index, last_column_index) = self.get_horizontal_margin_bounds();
+        let (first_column_index, last_column_index) = self.get_horizontal_wrap_bounds();
         let style = self.active_render().style;
 
-        // A wide glyph at the last column of a multi-column pane: blank that
-        // column and wrap, and the glyph begins the next line as one whole
-        // cell. In a 1-column pane (`last_column_index == 0`) this is skipped and
-        // `place_glyph` stores the glyph narrow in place.
+        // A wide glyph at the effective right bound of a multi-column region:
+        // blank that bound and wrap, and the glyph begins the next line as one
+        // whole cell. In a 1-column region (`last_column_index == 0`) this is
+        // skipped and `place_glyph` stores the glyph narrow in place.
         if glyph_width == 2
             && self.active_cursor().column == last_column_index
             && first_column_index < last_column_index
         {
             // With autowrap off the glyph is dropped: the cursor rests on the
-            // last column with no wrap armed, and the next glyph overwrites
-            // there. The cluster resets: a combining mark that follows does not
-            // fold onto the previous cell.
+            // effective right bound with no wrap armed, and the next glyph
+            // overwrites there. The cluster resets: a combining mark that
+            // follows does not fold onto the previous cell.
             if !self.modes.autowrap {
                 self.reset_cluster();
                 return;
             }
             let cursor_row_index = self.active_cursor().row;
-            // When the last column is the continuation of a wide glyph, its base
-            // one column to the left is cleared too.
+            // When the effective right bound is the continuation of a wide glyph,
+            // its base one column to the left is cleared too.
             self.clear_wide_glyph_at(cursor_row_index, last_column_index);
             if let Some(cell) = self
                 .active_grid_mut()
@@ -154,7 +155,7 @@ impl vte::Perform for TerminalState {
             {
                 *cell = Cell::blank_with(style.get_background_fill_style());
             }
-            // The freed last column is a wide-glyph spacer; `SoftWide` marks the
+            // The freed right bound is a wide-glyph spacer; `SoftWide` marks the
             // row so a reflow re-joins the rows and drops the spacer.
             self.wrap_linefeed(RowEnd::SoftWide);
             self.active_cursor_mut().column = first_column_index;
