@@ -23,6 +23,7 @@ impl TerminalState {
     /// - scroll region (DECSTBM, the CSI sequence that sets the top/bottom
     ///   scroll margins) back to the full screen,
     /// - horizontal margins (DECSLRM) back to the full width,
+    /// - the Kitty keyboard flag stack emptied, which leaves its flags `0`,
     /// - image placements cleared,
     /// - cursor home, shown, no wrap latch, no DECSC stash.
     ///
@@ -43,6 +44,7 @@ impl TerminalState {
         }
         self.alternate_scroll_region = None;
         self.alternate_horizontal_margins = None;
+        self.alternate_keyboard_stack.clear_entries();
         self.alternate_cursor.row = 0;
         self.alternate_cursor.column = 0;
         self.alternate_cursor.is_visible = true;

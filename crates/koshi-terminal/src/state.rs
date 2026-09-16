@@ -1,8 +1,9 @@
 //! Per-pane terminal state: screen buffers, cursor, pen style (the
 //! foreground/background color and attributes applied to newly written
-//! text), modes, horizontal tab stops, title, reported working directory,
-//! shell integration state and facts, image placements, prompt-row marks,
-//! scrollback, and the device-reply queue.
+//! text), modes, per-screen Kitty keyboard flag stacks, horizontal tab stops,
+//! title, reported working directory, shell integration state and facts,
+//! image placements, prompt-row marks, scrollback, and the device-reply
+//! queue.
 //!
 //! One [`TerminalState`] backs a single terminal pane; panes never share
 //! buffers. The state travels inside a per-pane
@@ -38,6 +39,7 @@ use crate::style::Style;
 
 mod cursor;
 pub(crate) mod images;
+mod keyboard;
 mod modes;
 mod perform;
 mod reflow;
@@ -48,6 +50,7 @@ mod working_directory;
 pub(crate) use cursor::{Cursor, SavedCursor};
 pub(crate) use images::SixelImageSource;
 pub use images::{ImagePlacement, ImagePlacementError, ImagePlacementId};
+pub(crate) use keyboard::KeyboardStack;
 pub(crate) use modes::TerminalModes;
 pub use modes::{CursorShape, MouseEncoding, MouseTracking};
 pub(crate) use render::{Charset, RenderState};
@@ -149,6 +152,13 @@ pub struct TerminalState {
     /// Alternate screen's DECSLRM left/right margins; see
     /// `primary_horizontal_margins`.
     alternate_horizontal_margins: Option<(u16, u16)>,
+    /// The primary screen's Kitty keyboard flag stack. Kept per screen (not
+    /// shared): an alt-screen app's flags never reach the primary.
+    primary_keyboard_stack: KeyboardStack,
+    /// The alternate screen's Kitty keyboard flag stack; see
+    /// `primary_keyboard_stack`. Starts empty on each actual alternate-buffer
+    /// reset and inherits nothing from the primary.
+    alternate_keyboard_stack: KeyboardStack,
     /// The grapheme cluster currently being built at the cursor — the run of
     /// printed code points that fold into one cell (a base plus its combining
     /// marks and any emoji continuation: ZWJ-joined parts, variation selectors,
@@ -199,6 +209,8 @@ struct TerminalStateSerializeFields<'a> {
     primary_horizontal_margins: &'a Option<(u16, u16)>,
     #[serde(rename = "alternate_horizontal_margins")]
     alternate_horizontal_margins: &'a Option<(u16, u16)>,
+    primary_keyboard_stack: &'a KeyboardStack,
+    alternate_keyboard_stack: &'a KeyboardStack,
     cluster: &'a String,
     cluster_base: &'a Option<(u16, u16)>,
     #[serde(rename = "replies")]
@@ -277,6 +289,8 @@ impl Serialize for TerminalState {
             alternate_scroll_region: &self.alternate_scroll_region,
             primary_horizontal_margins: &self.primary_horizontal_margins,
             alternate_horizontal_margins: &self.alternate_horizontal_margins,
+            primary_keyboard_stack: &self.primary_keyboard_stack,
+            alternate_keyboard_stack: &self.alternate_keyboard_stack,
             cluster: &self.cluster,
             cluster_base: &self.cluster_base,
             device_query_replies: &self.device_query_replies,
@@ -313,6 +327,8 @@ struct TerminalStateFields {
     alternate_scroll_region: Option<(u16, u16)>,
     primary_horizontal_margins: Option<(u16, u16)>,
     alternate_horizontal_margins: Option<(u16, u16)>,
+    primary_keyboard_stack: KeyboardStack,
+    alternate_keyboard_stack: KeyboardStack,
     cluster: String,
     cluster_base: Option<(u16, u16)>,
     device_query_replies: Vec<u8>,
@@ -347,6 +363,8 @@ struct RawTerminalStateFields {
     alternate_scroll_region: Option<(u16, u16)>,
     primary_horizontal_margins: Option<(u16, u16)>,
     alternate_horizontal_margins: Option<(u16, u16)>,
+    primary_keyboard_stack: KeyboardStack,
+    alternate_keyboard_stack: KeyboardStack,
     cluster: String,
     cluster_base: Option<(u16, u16)>,
     device_query_replies: Vec<u8>,
@@ -447,6 +465,8 @@ enum RawTerminalStateField {
     PrimaryHorizontalMargins,
     #[serde(rename = "alternate_horizontal_margins")]
     AlternateHorizontalMargins,
+    PrimaryKeyboardStack,
+    AlternateKeyboardStack,
     Cluster,
     ClusterBase,
     #[serde(rename = "replies")]
@@ -498,6 +518,8 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
         let mut alternate_scroll_region = None;
         let mut primary_horizontal_margins = None;
         let mut alternate_horizontal_margins = None;
+        let mut primary_keyboard_stack = None;
+        let mut alternate_keyboard_stack = None;
         let mut cluster = None;
         let mut cluster_base = None;
         let mut device_query_replies = None;
@@ -694,6 +716,20 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
                     }
                     alternate_horizontal_margins = Some(map.next_value()?);
                 }
+                RawTerminalStateField::PrimaryKeyboardStack => {
+                    if primary_keyboard_stack.is_some() {
+                        return Err(serde::de::Error::duplicate_field("primary_keyboard_stack"));
+                    }
+                    primary_keyboard_stack = Some(map.next_value()?);
+                }
+                RawTerminalStateField::AlternateKeyboardStack => {
+                    if alternate_keyboard_stack.is_some() {
+                        return Err(serde::de::Error::duplicate_field(
+                            "alternate_keyboard_stack",
+                        ));
+                    }
+                    alternate_keyboard_stack = Some(map.next_value()?);
+                }
                 RawTerminalStateField::Cluster => {
                     if cluster.is_some() {
                         return Err(serde::de::Error::duplicate_field("cluster"));
@@ -757,6 +793,8 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
                 .ok_or_else(|| serde::de::Error::missing_field("alternate_scroll_region"))?,
             primary_horizontal_margins: primary_horizontal_margins.unwrap_or_default(),
             alternate_horizontal_margins: alternate_horizontal_margins.unwrap_or_default(),
+            primary_keyboard_stack: primary_keyboard_stack.unwrap_or_default(),
+            alternate_keyboard_stack: alternate_keyboard_stack.unwrap_or_default(),
             cluster: cluster.ok_or_else(|| serde::de::Error::missing_field("cluster"))?,
             cluster_base: cluster_base
                 .ok_or_else(|| serde::de::Error::missing_field("cluster_base"))?,
@@ -846,6 +884,8 @@ impl<'de> Deserialize<'de> for TerminalStateFields {
             alternate_scroll_region: serialized_terminal_state.alternate_scroll_region,
             primary_horizontal_margins,
             alternate_horizontal_margins,
+            primary_keyboard_stack: serialized_terminal_state.primary_keyboard_stack,
+            alternate_keyboard_stack: serialized_terminal_state.alternate_keyboard_stack,
             cluster: serialized_terminal_state.cluster,
             cluster_base: serialized_terminal_state.cluster_base,
             device_query_replies: serialized_terminal_state.device_query_replies,
@@ -891,6 +931,8 @@ impl<'de> Deserialize<'de> for TerminalState {
             alternate_scroll_region: fields.alternate_scroll_region,
             primary_horizontal_margins: fields.primary_horizontal_margins,
             alternate_horizontal_margins: fields.alternate_horizontal_margins,
+            primary_keyboard_stack: fields.primary_keyboard_stack,
+            alternate_keyboard_stack: fields.alternate_keyboard_stack,
             cluster: fields.cluster,
             cluster_base: fields.cluster_base,
             device_query_replies: fields.device_query_replies,
@@ -1027,6 +1069,8 @@ impl TerminalState {
             alternate_scroll_region: None,
             primary_horizontal_margins: None,
             alternate_horizontal_margins: None,
+            primary_keyboard_stack: KeyboardStack::default(),
+            alternate_keyboard_stack: KeyboardStack::default(),
             cluster: String::new(),
             cluster_base: None,
             device_query_replies: Vec::new(),
@@ -1412,6 +1456,23 @@ impl TerminalState {
         match self.active_screen {
             Screen::Primary => &mut self.primary_horizontal_margins,
             Screen::Alternate => &mut self.alternate_horizontal_margins,
+        }
+    }
+
+    /// The Kitty keyboard flags in effect on the active screen: the top entry
+    /// of that screen's stack, or `0` when the stack is empty.
+    pub(crate) fn get_keyboard_flags(&self) -> u8 {
+        match self.active_screen {
+            Screen::Primary => self.primary_keyboard_stack.get_current_flags(),
+            Screen::Alternate => self.alternate_keyboard_stack.get_current_flags(),
+        }
+    }
+
+    /// Mutable access to the Kitty keyboard flag stack for the active screen.
+    pub(crate) fn active_keyboard_stack_mut(&mut self) -> &mut KeyboardStack {
+        match self.active_screen {
+            Screen::Primary => &mut self.primary_keyboard_stack,
+            Screen::Alternate => &mut self.alternate_keyboard_stack,
         }
     }
 

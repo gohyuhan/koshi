@@ -19,9 +19,9 @@
 //!   for whole-screen erase, SGR text attributes (Select Graphic
 //!   Rendition: color, bold, underline, …), insert/delete char and line,
 //!   scroll up/down, the DECSTBM scroll region, the DEC private modes
-//!   (alternate screen, cursor visibility, …), and the device queries
-//!   (DA1/DA2/DA3, the DSR family, DECRQM), whose replies land on the
-//!   state's reply queue.
+//!   (alternate screen, cursor visibility, …), the Kitty keyboard flag stack
+//!   sequences, and the device queries (DA1/DA2/DA3, the DSR family, DECRQM),
+//!   whose replies land on the state's reply queue.
 //! - `esc_dispatch` — plain ESC sequences: cursor save/restore, line movement,
 //!   tab-stop setup, terminal reset, and `G0`–`G3` charset designation.
 //! - `osc_dispatch` — OSC sequences (Operating System Command, `ESC ] …`,
@@ -34,7 +34,8 @@
 //!
 //! The performer's helpers are split across submodules by concern — charset
 //! translation ([`charset`]), device-query replies ([`device`]), grapheme
-//! clustering and wide-glyph placement ([`glyph`]), cursor motion / scrolling
+//! clustering and wide-glyph placement ([`glyph`]), the Kitty keyboard flag
+//! stacks ([`keyboard`]), cursor motion / scrolling
 //! / the scroll region ([`motion`]), alternate-screen entry/exit
 //! ([`alt_screen`]), hard/soft reset ([`reset`]), SGR ([`sgr`]), OSC parsing
 //! ([`osc`]), and CSI parameter accessors ([`params`]) — while the
@@ -61,6 +62,7 @@ mod alt_screen;
 mod charset;
 mod device;
 mod glyph;
+mod keyboard;
 mod motion;
 mod osc;
 mod params;
@@ -295,12 +297,13 @@ impl vte::Perform for TerminalState {
             return;
         }
 
-        // Device queries (DA1/DA2/DA3, DSR, DECRQM/RQM) and DECSCUSR, matched on
-        // the exact (intermediates, action) pair. Each query queues its reply
-        // bytes for the runtime to write back into the PTY. This match runs
-        // first: the `?` private-mode block below also matches the `?`
-        // intermediate of `CSI ? Ps n` and `CSI ? Ps $ p`. `CSI ! p` falls
-        // through to the soft-reset check.
+        // Device queries (DA1/DA2/DA3, DSR, DECRQM/RQM), DECSCUSR and the
+        // Kitty keyboard sequences, matched on the exact (intermediates,
+        // action) pair. Each query queues its reply bytes for the runtime to
+        // write back into the PTY. This match runs first: the `?`
+        // private-mode block below also matches the `?` intermediate of
+        // `CSI ? Ps n`, `CSI ? Ps $ p` and `CSI ? u`. `CSI ! p` falls through
+        // to the soft-reset check.
         match (intermediates, action) {
             // DA1 — primary device attributes.
             (b"", 'c') => return self.report_primary_device_attributes(params),
@@ -320,6 +323,13 @@ impl vte::Perform for TerminalState {
             // DECSCUSR — set the cursor style. The SPACE intermediate is part
             // of the sequence (`CSI Ps SP q`), not padding.
             (b" ", 'q') => return self.set_cursor_style(params),
+            // Kitty keyboard protocol — push, pop and set the active screen's
+            // flag stack, and report its current flags. `CSI u` with no
+            // intermediate is SCORC and stays with the cursor arms below.
+            (b">", 'u') => return self.push_keyboard_flags(params),
+            (b"<", 'u') => return self.pop_keyboard_flags(params),
+            (b"=", 'u') => return self.set_keyboard_flags(params),
+            (b"?", 'u') => return self.report_keyboard_flags(),
             _ => {}
         }
 
