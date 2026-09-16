@@ -148,6 +148,100 @@ fn state_round_trip_preserves_origin_and_horizontal_margins() {
 }
 
 #[test]
+fn state_round_trip_preserves_each_screen_keyboard_stack() {
+    let mut terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 8,
+        row_count: 5,
+    });
+    process_terminal_bytes(
+        &mut terminal_state,
+        b"\x1b[>1u\x1b[>4u\x1b[?1049h\x1b[>8u\x1b[>17u",
+    );
+
+    let serialized_state = serde_json::to_value(&terminal_state).expect("state serializes");
+    assert_eq!(
+        serialized_state["primary_keyboard_stack"],
+        serde_json::json!([1, 4])
+    );
+    assert_eq!(
+        serialized_state["alternate_keyboard_stack"],
+        serde_json::json!([8, 17])
+    );
+
+    let mut restored: TerminalState =
+        serde_json::from_value(serialized_state).expect("state deserializes");
+
+    assert_eq!(restored.get_keyboard_flags(), 17);
+    process_terminal_bytes(&mut restored, b"\x1b[?1049l");
+    assert_eq!(restored.get_keyboard_flags(), 4);
+}
+
+#[test]
+fn state_deserialization_cuts_an_overlong_keyboard_stack_to_its_newest_entries() {
+    let terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 5,
+        row_count: 3,
+    });
+    let mut serialized_state = serde_json::to_value(&terminal_state).expect("state serializes");
+    serialized_state["primary_keyboard_stack"] = serde_json::json!([1, 2, 3, 4, 5, 6, 7, 8, 9, 16]);
+
+    let mut restored: TerminalState =
+        serde_json::from_value(serialized_state).expect("state deserializes");
+
+    assert_eq!(restored.get_keyboard_flags(), 16);
+    process_terminal_bytes(&mut restored, b"\x1b[<8u");
+    assert_eq!(restored.get_keyboard_flags(), 0);
+}
+
+#[test]
+fn state_round_trip_keeps_one_screen_stack_empty() {
+    let mut terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 5,
+        row_count: 3,
+    });
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?1049h\x1b[>8u");
+
+    let serialized_state = serde_json::to_value(&terminal_state).expect("state serializes");
+    assert_eq!(
+        serialized_state["primary_keyboard_stack"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        serialized_state["alternate_keyboard_stack"],
+        serde_json::json!([8])
+    );
+
+    let mut restored: TerminalState =
+        serde_json::from_value(serialized_state).expect("state deserializes");
+
+    assert_eq!(restored.get_keyboard_flags(), 8);
+    process_terminal_bytes(&mut restored, b"\x1b[?1049l");
+    assert_eq!(restored.get_keyboard_flags(), 0);
+}
+
+#[test]
+fn state_without_keyboard_stacks_deserializes_with_no_flags() {
+    let mut terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 5,
+        row_count: 3,
+    });
+    process_terminal_bytes(&mut terminal_state, b"\x1b[>8u");
+    let mut serialized_state = serde_json::to_value(&terminal_state).expect("state serializes");
+    let serialized_fields = serialized_state
+        .as_object_mut()
+        .expect("state is an object");
+    serialized_fields.remove("primary_keyboard_stack");
+    serialized_fields.remove("alternate_keyboard_stack");
+
+    let mut restored: TerminalState =
+        serde_json::from_value(serialized_state).expect("legacy state deserializes");
+
+    assert_eq!(restored.get_keyboard_flags(), 0);
+    process_terminal_bytes(&mut restored, b"\x1b[?1049h");
+    assert_eq!(restored.get_keyboard_flags(), 0);
+}
+
+#[test]
 fn state_deserialization_rejects_reversed_horizontal_margins() {
     let terminal_state = TerminalState::from_pty_size(PtySize {
         column_count: 5,

@@ -18,7 +18,8 @@ impl TerminalState {
     /// horizontal margins and DECLRMM. Turns off application cursor keys (`?1`)
     /// and autowrap (`?7`). Ends the in-progress grapheme cluster. Cells,
     /// image placements, the cursor position, tab stops, the title, the
-    /// reported cwd, scrollback, and every other mode stay.
+    /// reported cwd, scrollback, both screens' Kitty keyboard flag stacks, and
+    /// every other mode stay.
     pub(super) fn soft_reset(&mut self) {
         let cursor = self.active_cursor_mut();
         cursor.is_visible = true;
@@ -48,7 +49,8 @@ impl TerminalState {
     /// style, makes the primary screen active, clears scrollback, homes and
     /// shows both cursors with no wrap latch and no saved cursor, clears both
     /// image-placement lists, resets both render states, every mode, both
-    /// vertical and horizontal margin pairs, the tab stops (every eighth column), the
+    /// vertical and horizontal margin pairs, both Kitty keyboard flag stacks,
+    /// the tab stops (every eighth column), the
     /// title, and the OSC 133 shell state, and ends the
     /// in-progress grapheme cluster. The reported cwd, queued device replies,
     /// queued shell-integration facts, and the scrollback tallies stay.
@@ -84,6 +86,8 @@ impl TerminalState {
         self.alternate_scroll_region = None;
         self.primary_horizontal_margins = None;
         self.alternate_horizontal_margins = None;
+        self.primary_keyboard_stack.clear_keyboard_flag_entries();
+        self.alternate_keyboard_stack.clear_keyboard_flag_entries();
         self.tab_stops = build_default_tab_stops(column_count);
         self.title = None;
         self.shell_integration_state = ShellIntegrationState::default();
