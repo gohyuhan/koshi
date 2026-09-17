@@ -6,7 +6,6 @@
 
 use super::*;
 
-use koshi_core::command::CliExitCode;
 use koshi_core::event::RejectReason;
 use koshi_ipc::protocol::{IpcErrorCode, IpcResult};
 
@@ -22,8 +21,8 @@ fn extract_ipc_unavailable_detail(cli_error: CliError) -> String {
 #[test]
 fn a_version_inside_the_range_this_build_sent_is_accepted() {
     SESSION_PEER_WORDS
-        .validate_settled_protocol_version(3)
-        .expect("3 is the only session version");
+        .validate_settled_protocol_version(4)
+        .expect("4 is the only session version");
     ROUTER_PEER_WORDS
         .validate_settled_protocol_version(1)
         .expect("1 is the router floor");
@@ -35,12 +34,12 @@ fn a_version_inside_the_range_this_build_sent_is_accepted() {
 #[test]
 fn a_session_version_above_the_range_names_both_the_version_and_the_range() {
     let refusal = SESSION_PEER_WORDS
-        .validate_settled_protocol_version(4)
-        .expect_err("4 is outside the 3 to 3 this build speaks");
+        .validate_settled_protocol_version(5)
+        .expect_err("5 is outside the 4 to 4 this build speaks");
 
     assert_eq!(
         extract_ipc_unavailable_detail(refusal),
-        "the session settled on protocol version 4, which is outside the 3 to 3 this koshi \
+        "the session settled on protocol version 5, which is outside the 4 to 4 this koshi \
          asked for"
     );
 }
@@ -61,12 +60,12 @@ fn a_router_version_above_the_range_names_the_control_plane_in_its_own_words() {
 #[test]
 fn a_version_below_the_floor_is_refused_the_same_way() {
     let refusal = SESSION_PEER_WORDS
-        .validate_settled_protocol_version(2)
-        .expect_err("2 is below the floor of 3");
+        .validate_settled_protocol_version(3)
+        .expect_err("3 is below the floor of 4");
 
     assert_eq!(
         extract_ipc_unavailable_detail(refusal),
-        "the session settled on protocol version 2, which is outside the 3 to 3 this koshi \
+        "the session settled on protocol version 3, which is outside the 4 to 4 this koshi \
          asked for"
     );
 }
@@ -88,11 +87,11 @@ fn a_router_version_below_the_floor_names_the_control_plane_range() {
 fn the_largest_version_a_peer_can_name_is_outside_the_range() {
     let refusal = SESSION_PEER_WORDS
         .validate_settled_protocol_version(u32::MAX)
-        .expect_err("4294967295 is outside the 3 to 3 this build speaks");
+        .expect_err("4294967295 is outside the 4 to 4 this build speaks");
 
     assert_eq!(
         extract_ipc_unavailable_detail(refusal),
-        "the session settled on protocol version 4294967295, which is outside the 3 to 3 this \
+        "the session settled on protocol version 4294967295, which is outside the 4 to 4 this \
          koshi asked for"
     );
 }
@@ -271,44 +270,44 @@ fn build_router_response(router_result: RouterResult) -> IncomingRouterResponse 
 #[test]
 fn a_session_hello_hands_back_the_build_the_session_named() {
     let incoming_response = build_session_response(IpcResult::Hello {
-        protocol_version: 3,
+        protocol_version: 4,
         build_version: "0.9.9".to_string(),
     });
 
     assert_eq!(
         parse_session_hello_version(incoming_response)
-            .expect("3 is the only version this build speaks"),
-        (3, "0.9.9".to_string())
+            .expect("4 is the only version this build speaks"),
+        (4, "0.9.9".to_string())
     );
 }
 
 #[test]
 fn a_session_predating_the_build_field_hands_back_an_empty_string() {
     let incoming_response = build_session_response(IpcResult::Hello {
-        protocol_version: 3,
+        protocol_version: 4,
         build_version: String::new(),
     });
 
     assert_eq!(
         parse_session_hello_version(incoming_response)
             .expect("a build with no version field still opens"),
-        (3, String::new())
+        (4, String::new())
     );
 }
 
 #[test]
 fn a_session_hello_naming_a_version_outside_the_range_stops_the_exchange() {
     let incoming_response = build_session_response(IpcResult::Hello {
-        protocol_version: 4,
+        protocol_version: 5,
         build_version: "0.9.9".to_string(),
     });
 
     let refusal =
-        parse_session_hello_version(incoming_response).expect_err("4 is outside the 3 to 3");
+        parse_session_hello_version(incoming_response).expect_err("5 is outside the 4 to 4");
 
     assert_eq!(
         extract_ipc_unavailable_detail(refusal),
-        "the session settled on protocol version 4, which is outside the 3 to 3 this koshi \
+        "the session settled on protocol version 5, which is outside the 4 to 4 this koshi \
          asked for"
     );
 }
@@ -421,41 +420,6 @@ fn a_router_answering_no_hello_at_all_names_the_reply_that_arrived() {
 }
 
 #[test]
-fn the_target_client_refusal_names_the_version_and_the_release() {
-    assert_eq!(TARGET_CLIENT_PROTOCOL, 3);
-
-    let refusal =
-        validate_client_targeting(2, true).expect_err("a session settled on 2 is below 3");
-    assert_eq!(
-        extract_ipc_unavailable_detail(refusal),
-        "this session speaks protocol 2; --client needs a session started by koshi 0.4.0 or \
-         later"
-    );
-
-    let refusal =
-        validate_client_targeting(2, true).expect_err("a session settled on 2 is below 3");
-    assert_eq!(CliExitCode::from(&refusal).get_exit_code(), 4);
-
-    let refusal =
-        validate_client_targeting(0, true).expect_err("a session settled on 0 is below 3");
-    assert_eq!(
-        extract_ipc_unavailable_detail(refusal),
-        "this session speaks protocol 0; --client needs a session started by koshi 0.4.0 or \
-         later"
-    );
-}
-
-#[test]
-fn a_settled_version_at_or_above_three_is_accepted_and_no_named_client_accepts_any() {
-    validate_client_targeting(3, true).expect("3 meets a floor of 3");
-    validate_client_targeting(4, true).expect("4 is above a floor of 3");
-    // A command naming no client takes every settled version, including one
-    // below 3.
-    validate_client_targeting(2, false).expect("no named client takes 2");
-    validate_client_targeting(0, false).expect("no named client takes 0");
-}
-
-#[test]
 fn a_transport_failure_carrying_peer_bytes_is_filtered() {
     // `MalformedFrame` carries the decoder's message, which quotes the name
     // the peer sent.
@@ -519,13 +483,13 @@ fn a_session_hello_filters_the_build_it_named() {
     // `koshi server-version` prints this string, and the session that answered
     // is another user's process or another machine's.
     let incoming_response = build_session_response(IpcResult::Hello {
-        protocol_version: 3,
+        protocol_version: 4,
         build_version: "\u{1b}]0;pwned\u{7}0.9.9".to_string(),
     });
 
     assert_eq!(
         parse_session_hello_version(incoming_response)
-            .expect("3 is the only version this build speaks"),
-        (3, "]0;pwned0.9.9".to_string())
+            .expect("4 is the only version this build speaks"),
+        (4, "]0;pwned0.9.9".to_string())
     );
 }

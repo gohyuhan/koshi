@@ -164,18 +164,23 @@ fn a_surface_no_release_carries_is_checked_on_the_floor_alone() {
 }
 
 #[test]
-fn the_session_protocol_speaks_three_and_accepts_nothing_older() {
-    assert_eq!(SESSION_PROTOCOL.minimum_version, 3);
-    assert_eq!(SESSION_PROTOCOL.maximum_version, 3);
+fn the_session_protocol_speaks_four_and_accepts_nothing_older() {
+    assert_eq!(SESSION_PROTOCOL.minimum_version, 4);
+    assert_eq!(SESSION_PROTOCOL.maximum_version, 4);
     assert_eq!(SESSION_PROTOCOL.released_version, Some(3));
 }
 
 #[test]
-fn the_current_release_anchors_match_their_surface_maxima() {
+fn the_session_protocol_stands_one_step_above_its_release_anchor() {
     assert_eq!(
         SESSION_PROTOCOL.released_version,
-        Some(SESSION_PROTOCOL.maximum_version)
+        Some(SESSION_PROTOCOL.maximum_version - 1)
     );
+    assert_eq!(SESSION_PROTOCOL.find_version_problem(), None);
+}
+
+#[test]
+fn the_resume_format_anchor_matches_its_surface_maximum() {
     assert_eq!(
         RESUME_FORMAT.released_version,
         Some(RESUME_FORMAT.maximum_version)
@@ -231,7 +236,7 @@ fn the_table_pins_every_surface_by_name_and_numbers() {
     assert_eq!(
         surface_versions,
         [
-            ("session protocol", 3, 3, Some(3)),
+            ("session protocol", 4, 4, Some(3)),
             ("control plane", 1, 2, Some(2)),
             ("supervisor link", 1, 1, Some(1)),
             ("token store format", 1, 1, Some(1)),

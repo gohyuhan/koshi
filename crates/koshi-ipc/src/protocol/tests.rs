@@ -15,7 +15,7 @@ use koshi_core::discovery::{
 use koshi_core::event::RejectReason;
 use koshi_core::geometry::{Direction, PaneArea, Point, Rect, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
-use koshi_core::key::{Key, ModFlags};
+use koshi_core::key::{Key, KeyEventKind, KeyIdentity, KeyInput, KeyModifierFlags, ModFlags};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseButton, MouseInput, MouseKind};
 use koshi_core::process::{ShellKind, SpawnSpec};
@@ -281,8 +281,8 @@ fn every_request_kind() -> Vec<IpcRequestKind> {
             graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
             cell_size: None,
         },
-        IpcRequestKind::KeyPress {
-            chord: KeyChord::from_parts(ModFlags::CTRL, Key::Char('c')),
+        IpcRequestKind::Keyboard {
+            key_input: build_control_c_key_input(),
         },
         IpcRequestKind::Resize {
             viewport: Size {
@@ -370,13 +370,13 @@ fn tag_of(encoded_json: &serde_json::Value) -> String {
 }
 
 #[test]
-fn the_protocol_version_this_build_speaks_is_three() {
-    assert_eq!(PROTOCOL_VERSION, 3);
+fn the_protocol_version_this_build_speaks_is_four() {
+    assert_eq!(PROTOCOL_VERSION, 4);
 }
 
 #[test]
-fn the_lowest_protocol_version_this_build_speaks_is_three() {
-    assert_eq!(MIN_PROTOCOL_VERSION, 3);
+fn the_lowest_protocol_version_this_build_speaks_is_four() {
+    assert_eq!(MIN_PROTOCOL_VERSION, 4);
 }
 
 #[test]
@@ -1434,15 +1434,58 @@ fn an_attach_naming_its_own_authority_carries_none_of_it() {
 }
 
 #[test]
-fn key_press_request_round_trips() {
+fn keyboard_request_round_trips() {
     let request = IpcRequest {
         request_id: 5,
-        request_kind: IpcRequestKind::KeyPress {
-            chord: KeyChord::from_parts(ModFlags::CTRL, Key::Char('c')),
+        request_kind: IpcRequestKind::Keyboard {
+            key_input: build_control_c_key_input(),
         },
     };
 
     assert_eq!(round_trip_wire_message(&request), request);
+}
+
+#[test]
+fn a_keyboard_request_carries_every_reported_field() {
+    let all_modifier_flags = KeyModifierFlags::from_bits(0b1111_1111);
+    let request = IpcRequest {
+        request_id: 5,
+        request_kind: IpcRequestKind::Keyboard {
+            key_input: KeyInput {
+                key: KeyIdentity::Key(Key::Char('1')),
+                key_event_kind: KeyEventKind::Release,
+                shifted_key: Some('!'),
+                base_layout_key: Some('q'),
+                associated_text: "e\u{301}".to_string(),
+                modifier_flags: all_modifier_flags,
+            },
+        },
+    };
+
+    let decoded_request = round_trip_wire_message(&request);
+
+    let IpcRequestKind::Keyboard { key_input } = decoded_request.request_kind else {
+        panic!("expected a Keyboard request");
+    };
+    assert_eq!(key_input.key, KeyIdentity::Key(Key::Char('1')));
+    assert_eq!(key_input.key_event_kind, KeyEventKind::Release);
+    assert_eq!(key_input.shifted_key, Some('!'));
+    assert_eq!(key_input.base_layout_key, Some('q'));
+    assert_eq!(key_input.associated_text, "e\u{301}");
+    assert_eq!(key_input.modifier_flags, all_modifier_flags);
+}
+
+/// The complete key event a viewer reads for `Ctrl+c`: a press, with no
+/// alternative keys and no associated text.
+fn build_control_c_key_input() -> KeyInput {
+    KeyInput {
+        key: KeyIdentity::Key(Key::Char('c')),
+        key_event_kind: KeyEventKind::Press,
+        shifted_key: None,
+        base_layout_key: None,
+        associated_text: String::new(),
+        modifier_flags: KeyModifierFlags::CTRL,
+    }
 }
 
 #[test]
@@ -2419,11 +2462,11 @@ fn every_request_kind_names_itself_without_its_payload() {
         "Attach"
     );
     assert_eq!(
-        IpcRequestKind::KeyPress {
-            chord: KeyChord::from_parts(ModFlags::CTRL, Key::Char('c')),
+        IpcRequestKind::Keyboard {
+            key_input: build_control_c_key_input(),
         }
         .get_request_kind_name(),
-        "KeyPress"
+        "Keyboard"
     );
     assert_eq!(
         IpcRequestKind::Resize {

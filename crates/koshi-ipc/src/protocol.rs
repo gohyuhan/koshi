@@ -22,7 +22,7 @@ use koshi_core::compat::SESSION_PROTOCOL;
 use koshi_core::discovery::SessionOverview;
 use koshi_core::geometry::{Direction, PaneArea, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
-use koshi_core::key::KeyChord;
+use koshi_core::key::KeyInput;
 use koshi_core::mouse::MouseInput;
 use koshi_core::recent_event::RecentEvent;
 use koshi_core::redact::REDACTED;
@@ -44,7 +44,7 @@ pub const PROTOCOL_VERSION: u32 = SESSION_PROTOCOL.maximum_version;
 /// below this one is refused with
 /// [`IpcErrorCode::UnsupportedVersion`].
 ///
-/// The floor is 3, the version this build speaks. Raising it drops support
+/// The floor is 4, the version this build speaks. Raising it drops support
 /// for every build below it.
 pub const MIN_PROTOCOL_VERSION: u32 = SESSION_PROTOCOL.minimum_version;
 
@@ -192,7 +192,7 @@ impl GraphicsCapabilities {
 /// What a request asks for.
 ///
 /// On a connection already serving an attached client's event stream,
-/// [`KeyPress`](Self::KeyPress), [`Resize`](Self::Resize),
+/// [`Keyboard`](Self::Keyboard), [`Resize`](Self::Resize),
 /// [`Paste`](Self::Paste) and [`SubmitCommand`](Self::SubmitCommand) are
 /// answered by the next painted frame, not by an [`IpcResponse`].
 ///
@@ -278,11 +278,15 @@ pub enum IpcRequestKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cell_size: Option<koshi_core::geometry::PixelCellSize>,
     },
-    /// One key press the attached client's keymap did not bind, for the pane
-    /// it is typing into.
-    KeyPress {
-        /// The chord the client read from its terminal.
-        chord: KeyChord,
+    /// One keyboard event an attached client sends for the pane it is typing
+    /// into: its keymap bound nothing to the event, or no chord could name it.
+    ///
+    /// Carries every field the client's terminal reported, a release and a key
+    /// no keybinding can name included. The session decides what reaches the
+    /// pane.
+    Keyboard {
+        /// The keyboard event the client read from its terminal.
+        key_input: KeyInput,
     },
     /// The attached client's terminal changed size.
     Resize {
@@ -368,7 +372,7 @@ impl IpcRequestKind {
         match self {
             IpcRequestKind::Hello { .. } => "Hello",
             IpcRequestKind::Attach { .. } => "Attach",
-            IpcRequestKind::KeyPress { .. } => "KeyPress",
+            IpcRequestKind::Keyboard { .. } => "Keyboard",
             IpcRequestKind::Resize { .. } => "Resize",
             IpcRequestKind::CellSize { .. } => "CellSize",
             IpcRequestKind::Paste { .. } => "Paste",
@@ -609,7 +613,7 @@ impl WireVariants for IpcRequestKind {
     const VARIANTS: &'static [&'static str] = &[
         "Hello",
         "Attach",
-        "KeyPress",
+        "Keyboard",
         "Resize",
         "CellSize",
         "Paste",

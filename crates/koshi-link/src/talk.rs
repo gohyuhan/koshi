@@ -59,9 +59,9 @@ impl PeerWords {
     /// The peer picks from the range the Hello named. A version outside that
     /// range stops the exchange.
     ///
-    /// Example — this build asks for 3 to 3 and the reply names 4, so the verb
-    /// fails with `the session settled on protocol version 4, which is outside
-    /// the 3 to 3 this koshi asked for`.
+    /// Example — this build asks for 4 to 4 and the reply names 5, so the verb
+    /// fails with `the session settled on protocol version 5, which is outside
+    /// the 4 to 4 this koshi asked for`.
     pub fn validate_settled_protocol_version(&self, protocol_version: u32) -> Result<(), CliError> {
         let minimum_version = self.surface.minimum_version;
         let maximum_version = self.surface.maximum_version;
@@ -219,36 +219,6 @@ pub(crate) fn parse_router_hello_version(
             Err(ROUTER_PEER_WORDS.build_unexpected_reply_error(&unexpected_result))
         }
     }
-}
-
-/// The lowest session protocol version that carries a command's target client
-/// on its source. A session that settled below it ignores the field, and a
-/// command naming a client is refused before it is sent.
-pub(crate) const TARGET_CLIENT_PROTOCOL: u32 = 3;
-
-/// Check the version a session settled on against
-/// [`TARGET_CLIENT_PROTOCOL`], for a command that names a target client.
-/// `has_client_target` `false` accepts every settled version.
-///
-/// # Errors
-/// [`CliError::IpcUnavailable`] when `has_client_target` is `true` and
-/// `settled_protocol_version` is below [`TARGET_CLIENT_PROTOCOL`]. For
-/// `settled_protocol_version == 2` the sentence reads
-/// `this session speaks protocol 2; --client needs a session started by koshi
-/// 0.4.0 or later`.
-pub(crate) fn validate_client_targeting(
-    settled_protocol_version: u32,
-    has_client_target: bool,
-) -> Result<(), CliError> {
-    if has_client_target && settled_protocol_version < TARGET_CLIENT_PROTOCOL {
-        return Err(CliError::IpcUnavailable {
-            detail: format!(
-                "this session speaks protocol {settled_protocol_version}; --client needs a session started by \
-                 koshi 0.4.0 or later"
-            ),
-        });
-    }
-    Ok(())
 }
 
 #[cfg(test)]

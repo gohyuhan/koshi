@@ -1203,6 +1203,7 @@ mod bridge_round_trip {
     use koshi_core::event::Event;
     use koshi_core::geometry::Size;
     use koshi_core::ids::CommandId;
+    use koshi_core::key::{Key, KeyEventKind, KeyIdentity, KeyInput, KeyModifierFlags};
     use koshi_ipc::event::SessionEvent;
     use koshi_ipc::protocol::{EventFilterSpec, IpcResponse, IpcResult};
     use koshi_ipc::router::SessionSelector;
@@ -1228,6 +1229,9 @@ mod bridge_round_trip {
     /// How long one emitted event has to reach the remote client.
     const EVENT_DELIVERY_TIMEOUT_DURATION: Duration = Duration::from_secs(3);
 
+    /// How long the pane's writes must stop changing before they are read.
+    const PANE_WRITE_SETTLE_DURATION: Duration = Duration::from_millis(300);
+
     /// One session server on its own thread, serving a real control socket in
     /// its own runtime directory over a fake PTY backend.
     struct RunningSession {
@@ -1235,6 +1239,7 @@ mod bridge_round_trip {
         session_id: SessionId,
         runtime_event_sender: mpsc::Sender<RuntimeEvent>,
         session_server_thread: Option<JoinHandle<()>>,
+        fake_pty_backend: Arc<FakePtyBackend>,
     }
 
     impl RunningSession {
@@ -1246,11 +1251,12 @@ mod bridge_round_trip {
 
             let session_server_runtime_directory = runtime_directory.path().to_path_buf();
             let session_server_event_sender = runtime_event_sender.clone();
+            let session_server_pty_backend = Arc::clone(&fake_pty_backend);
             let session_server_thread = std::thread::spawn(move || {
                 run_test_session_server(
                     &session_server_runtime_directory,
                     session_id,
-                    fake_pty_backend,
+                    session_server_pty_backend,
                     runtime_event_receiver,
                     session_server_event_sender,
                 );
@@ -1261,6 +1267,7 @@ mod bridge_round_trip {
                 session_id,
                 runtime_event_sender,
                 session_server_thread: Some(session_server_thread),
+                fake_pty_backend,
             };
             let session_server_start_deadline =
                 Instant::now() + SESSION_SERVER_START_TIMEOUT_DURATION;
@@ -1281,6 +1288,39 @@ mod bridge_round_trip {
 
         fn get_endpoint_path(&self) -> PathBuf {
             EndpointFile::resolve_endpoint_file_path(self.runtime_directory.path(), self.session_id)
+        }
+
+        /// The bytes the session's only pane has been written, once they stop
+        /// changing for `PANE_WRITE_SETTLE_DURATION`.
+        ///
+        /// # Panics
+        ///
+        /// Panics when the session has not spawned its pane within
+        /// [`SESSION_SERVER_START_TIMEOUT_DURATION`].
+        fn wait_for_settled_pane_write_bytes(&self) -> Vec<Vec<u8>> {
+            let spawn_deadline = Instant::now() + SESSION_SERVER_START_TIMEOUT_DURATION;
+            let pane_id = loop {
+                if let Some(pane_id) = self.fake_pty_backend.list_spawned_pane_ids().first() {
+                    break *pane_id;
+                }
+                assert!(
+                    Instant::now() < spawn_deadline,
+                    "the session never spawned a pane"
+                );
+                std::thread::sleep(SESSION_SERVER_POLL_INTERVAL_DURATION);
+            };
+            let mut settled_write_bytes = Vec::new();
+            loop {
+                std::thread::sleep(PANE_WRITE_SETTLE_DURATION);
+                let write_bytes = self
+                    .fake_pty_backend
+                    .list_pane_write_bytes(pane_id)
+                    .expect("the pane is spawned");
+                if write_bytes == settled_write_bytes {
+                    return settled_write_bytes;
+                }
+                settled_write_bytes = write_bytes;
+            }
         }
     }
 
@@ -1476,6 +1516,103 @@ mod bridge_round_trip {
 
     fn get_agreed_maximum_protocol_version() -> u32 {
         koshi_ipc::protocol::PROTOCOL_VERSION
+    }
+
+    /// A key the remote client's keymap does not bind crosses the TLS
+    /// doorway, the router's bridge and the session's control socket with
+    /// every field the terminal reported. The shifted key is one of those
+    /// fields, and it alone decides the byte the pane reads: key `1` with
+    /// Shift and shifted key `!` writes `!`, never `1`.
+    #[test]
+    fn a_bridged_keyboard_request_reaches_the_pane_with_the_field_that_decides_its_byte() {
+        let running_session = RunningSession::start_running_session();
+        let remote_listen_address = start_test_remote_listener(running_session.get_endpoint_path());
+
+        let link = remote_client::connect_remote_server(
+            &remote_listen_address,
+            &ConnectionToken::from_secret("testSecret"),
+            None,
+            Duration::from_secs(5),
+            None,
+        )
+        .expect("the listener admits the client");
+        let (mut reader, mut writer) = remote_client::attach_remote_session(
+            link,
+            SessionSelector::SessionId(running_session.session_id),
+        )
+        .expect("the attach request is written");
+
+        let hello_response: IpcResponse = reader.recv().expect("the session answers the Hello");
+        match hello_response.answer_result {
+            IpcResult::Hello {
+                protocol_version, ..
+            } => assert_eq!(protocol_version, get_agreed_maximum_protocol_version()),
+            unexpected_response => panic!("the Hello was answered with {unexpected_response:?}"),
+        }
+
+        writer
+            .send(&IpcRequest {
+                request_id: 2,
+                request_kind: IpcRequestKind::Attach {
+                    viewport: TEST_VIEWPORT_SIZE,
+                    event_filter: EventFilterSpec::All,
+                    resume_client_id: None,
+                    resume_token: None,
+                    pane_area: None,
+                    graphics_capabilities: koshi_ipc::protocol::GraphicsCapabilities::default(),
+                    cell_size: None,
+                },
+            })
+            .expect("the attach is written");
+        let attach_response: IpcResponse = reader.recv().expect("the session answers the attach");
+        assert!(
+            matches!(attach_response.answer_result, IpcResult::Attached { .. }),
+            "expected an attach reply, got {:?}",
+            attach_response.answer_result
+        );
+
+        let shifted_digit = KeyInput {
+            key: KeyIdentity::Key(Key::Char('1')),
+            key_event_kind: KeyEventKind::Press,
+            shifted_key: Some('!'),
+            base_layout_key: Some('1'),
+            associated_text: "!".to_string(),
+            modifier_flags: KeyModifierFlags::SHIFT,
+        };
+        writer
+            .send(&IpcRequest {
+                request_id: 3,
+                request_kind: IpcRequestKind::Keyboard {
+                    key_input: shifted_digit.clone(),
+                },
+            })
+            .expect("the keyboard request is written");
+
+        assert_eq!(
+            running_session.wait_for_settled_pane_write_bytes(),
+            vec![b"!".to_vec()],
+            "the shifted key crossed the bridge and decided the byte"
+        );
+
+        // The release of the same key crosses too, and legacy pane delivery
+        // writes nothing for it.
+        writer
+            .send(&IpcRequest {
+                request_id: 4,
+                request_kind: IpcRequestKind::Keyboard {
+                    key_input: KeyInput {
+                        key_event_kind: KeyEventKind::Release,
+                        ..shifted_digit
+                    },
+                },
+            })
+            .expect("the release is written");
+
+        assert_eq!(
+            running_session.wait_for_settled_pane_write_bytes(),
+            vec![b"!".to_vec()],
+            "the release added no byte"
+        );
     }
 
     #[test]

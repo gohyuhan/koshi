@@ -5,9 +5,9 @@
 //! session's socket address and connection token; reading it is the
 //! same-user proof the Hello presents. The Hello and the command are written
 //! back to back before either reply is read, so a submission costs one round
-//! trip. A command naming a target client is the exception: the Hello answer
-//! is read first, and a session that settled below protocol version 3 is
-//! refused before the command is written.
+//! trip, whether or not it names a target client. A session that settles on a
+//! version this build does not speak reads both, and the caller is refused on
+//! the Hello answer and never given a command result.
 //!
 //! A session another local user started advertises no endpoint file here. It
 //! is found by name in the machine-wide shared directory instead, and reached
@@ -70,10 +70,8 @@ pub fn submit_in_session_command(
 /// the target session's acting client rather than an issuing pane.
 ///
 /// `client_id` is the client the command acts for, and rides on the source.
-/// Naming one costs a second round trip: the session's Hello answer is read
-/// before the command is written, and a session that settled below protocol
-/// version 3 is refused with [`CliError::IpcUnavailable`]. `None` names no
-/// client and keeps the exchange at one round trip.
+/// Naming one changes nothing about the exchange: the Hello and the command go
+/// out back to back, and it costs one round trip either way.
 pub fn submit_external_command(
     session_id: SessionId,
     client_id: Option<ClientId>,
@@ -106,14 +104,12 @@ fn submit_command_via_runtime_directory(
         in_session_context.session_id,
         command_source,
         command,
-        false,
     )
 }
 
 /// [`submit_external_command`] against an explicit runtime directory: the whole
 /// exchange, with the endpoint lookup rooted where the caller says.
-/// `client_id` rides on the source and costs the second round trip
-/// [`submit_external_command`] describes.
+/// `client_id` rides on the source.
 pub fn submit_external_command_via_runtime_directory(
     runtime_directory: &Path,
     session_id: SessionId,
@@ -122,13 +118,7 @@ pub fn submit_external_command_via_runtime_directory(
 ) -> Result<CommandResult, CliError> {
     let endpoint_file = load_session_endpoint(runtime_directory, session_id)?;
     let command_source = CommandSource::from_external_cli(Some(session_id), client_id);
-    submit_command_envelope(
-        &endpoint_file,
-        session_id,
-        command_source,
-        command,
-        client_id.is_some(),
-    )
+    submit_command_envelope(&endpoint_file, session_id, command_source, command)
 }
 
 /// Fill a pane-creating command's unset working directory with this CLI
@@ -153,17 +143,11 @@ fn capture_current_working_directory(mut command: Command) -> Command {
 /// with no directory of its own gets this process's current directory, and a
 /// rejection's hint is filtered by
 /// [`filter_rejection_hint`](crate::talk::filter_rejection_hint).
-///
-/// `has_client_target` goes to [`exchange_session_request`] unchanged: `false` writes the Hello and
-/// the command back to back, and `true` refuses a session that settled below
-/// [`TARGET_CLIENT_PROTOCOL`](crate::talk::TARGET_CLIENT_PROTOCOL) before the
-/// command is written.
 fn submit_command_envelope(
     endpoint: &EndpointFile,
     session_id: SessionId,
     command_source: CommandSource,
     command: Command,
-    has_client_target: bool,
 ) -> Result<CommandResult, CliError> {
     let prepared_command = capture_current_working_directory(command);
     let command_envelope = CommandEnvelope::from_parts(
@@ -176,7 +160,7 @@ fn submit_command_envelope(
         request_id: 2,
         request_kind: IpcRequestKind::SubmitCommand(Box::new(command_envelope)),
     };
-    match exchange_session_request(endpoint, session_id, ipc_request, has_client_target)? {
+    match exchange_session_request(endpoint, session_id, ipc_request)? {
         IpcResult::CommandResult(command_result) => Ok(talk::filter_rejection_hint(command_result)),
         IpcResult::Error(refusal) => Err(build_peer_refusal_error(&refusal)),
         unexpected_result => {
@@ -226,7 +210,7 @@ fn describe_session(
         request_id: 2,
         request_kind: IpcRequestKind::Discovery,
     };
-    match exchange_session_request(endpoint, session_id, ipc_request, false)? {
+    match exchange_session_request(endpoint, session_id, ipc_request)? {
         IpcResult::Overview(mut session_overview) => {
             crate::discovery::filter_session_overview_text(&mut session_overview);
             Ok(session_overview)
@@ -264,7 +248,7 @@ pub fn fetch_layout(
         request_id: 2,
         request_kind: IpcRequestKind::Layout { tab_id },
     };
-    match exchange_session_request(&session_endpoint, session_id, ipc_request, false)? {
+    match exchange_session_request(&session_endpoint, session_id, ipc_request)? {
         IpcResult::Layout(session_layout) => match tab_id {
             Some(tab_id) if session_layout.tabs.is_empty() => Err(CliError::CommandRejected {
                 reason: RejectReason::TargetNotFound,
@@ -302,7 +286,7 @@ pub fn fetch_recent_events(
         request_id: 2,
         request_kind: IpcRequestKind::RecentEvents,
     };
-    match exchange_session_request(&session_endpoint, session_id, ipc_request, false)? {
+    match exchange_session_request(&session_endpoint, session_id, ipc_request)? {
         IpcResult::RecentEvents(recent_events) => Ok(recent_events),
         IpcResult::Error(refusal) if is_session_request_unavailable(refusal.code) => {
             Err(CliError::IpcUnavailable {
@@ -368,7 +352,7 @@ pub fn restart_running_session(
         request_id: 2,
         request_kind: IpcRequestKind::Restart,
     };
-    match exchange_session_request(&session_endpoint, session_id, ipc_request, false) {
+    match exchange_session_request(&session_endpoint, session_id, ipc_request) {
         Ok(IpcResult::Restarting) => Ok(SessionRestart::Restarting),
         Ok(IpcResult::Error(refusal)) if is_session_request_unavailable(refusal.code) => {
             Ok(SessionRestart::TooOld)
@@ -578,19 +562,13 @@ fn build_foreign_session_endpoint(socket_address: String) -> EndpointFile {
 /// Connect to `endpoint`, open with the Hello, and run `ipc_request` on the same
 /// connection. Returns `ipc_request`'s result; a failed Hello is an error.
 ///
-/// With `has_client_target` `false` the Hello and `ipc_request` go out back to back
-/// before either reply is read, and the server answers every request in
-/// order, so the exchange costs one round trip.
-///
-/// With `true` the Hello answer is read first, and a session that settled
-/// below [`TARGET_CLIENT_PROTOCOL`](crate::talk::TARGET_CLIENT_PROTOCOL) is
-/// refused with [`CliError::IpcUnavailable`] before `ipc_request` is written, so
-/// it is never sent. That costs a second round trip.
+/// The Hello and `ipc_request` go out back to back before either reply is read,
+/// and the server answers every request in order, so the exchange costs one
+/// round trip.
 fn exchange_session_request(
     endpoint: &EndpointFile,
     session_id: SessionId,
     ipc_request: IpcRequest,
-    has_client_target: bool,
 ) -> Result<IpcResult, CliError> {
     let mut connection = connect_to_session(endpoint, session_id)?;
     let hello_request = IpcRequest {
@@ -601,22 +579,12 @@ fn exchange_session_request(
         .send(&hello_request)
         .map_err(build_ipc_unavailable_error)?;
 
-    if has_client_target {
-        let hello_response: IncomingResponse =
-            connection.recv().map_err(build_ipc_unavailable_error)?;
-        let (settled_protocol_version, _) = talk::parse_session_hello_version(hello_response)?;
-        talk::validate_client_targeting(settled_protocol_version, true)?;
-        connection
-            .send(&ipc_request)
-            .map_err(build_ipc_unavailable_error)?;
-    } else {
-        connection
-            .send(&ipc_request)
-            .map_err(build_ipc_unavailable_error)?;
-        let hello_response: IncomingResponse =
-            connection.recv().map_err(build_ipc_unavailable_error)?;
-        talk::parse_session_hello_version(hello_response)?;
-    }
+    connection
+        .send(&ipc_request)
+        .map_err(build_ipc_unavailable_error)?;
+    let hello_response: IncomingResponse =
+        connection.recv().map_err(build_ipc_unavailable_error)?;
+    talk::parse_session_hello_version(hello_response)?;
 
     let ipc_response: IncomingResponse = connection.recv().map_err(build_ipc_unavailable_error)?;
     talk::SESSION_PEER_WORDS.take_response_result(ipc_response)

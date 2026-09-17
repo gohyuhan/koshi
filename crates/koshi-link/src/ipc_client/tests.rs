@@ -1717,7 +1717,9 @@ fn spawn_settled_session(
             .expect("report the hello");
         if let Some(next_request) = next_request {
             if let IpcRequestKind::SubmitCommand(command_envelope) = &next_request.request_kind {
-                send_ipc_result(
+                // A caller that refused this session's version has already
+                // closed the connection, so this reply has nowhere to land.
+                send_ipc_result_best_effort(
                     &mut session_connection,
                     next_request.request_id,
                     IpcResult::CommandResult(CommandResult::Ok {
@@ -1734,13 +1736,18 @@ fn spawn_settled_session(
     (session_thread, request_receiver)
 }
 
+/// The Hello and the command go out back to back, so a session that settles on
+/// a version this build does not speak reads both. The caller still gets the
+/// version refusal and never a command result. A session that shares no version
+/// answers every request after the failed Hello with `HelloRequired`, so the
+/// command it read is not acted on.
 #[test]
-fn a_session_speaking_two_is_refused_before_the_command_is_written() {
-    let runtime_directory = build_test_runtime_directory("client-protocol-two");
+fn a_session_speaking_three_refuses_the_caller_and_answers_no_command() {
+    let runtime_directory = build_test_runtime_directory("client-protocol-three-refused");
     let session_id = SessionId::new();
     let client_id = ClientId::new();
     let (session_thread, received_requests) =
-        spawn_settled_session(&runtime_directory, session_id, 2, HelloTiming::AtOnce);
+        spawn_settled_session(&runtime_directory, session_id, 3, HelloTiming::AtOnce);
 
     let command_error = submit_external_command_via_runtime_directory(
         &runtime_directory,
@@ -1748,14 +1755,14 @@ fn a_session_speaking_two_is_refused_before_the_command_is_written() {
         Some(client_id),
         Command::TogglePaneFullscreen,
     )
-    .expect_err("a session speaking 2 is below this build's floor of 3");
+    .expect_err("a session speaking 3 is below this build's floor of 4");
 
     let CliError::IpcUnavailable { detail } = command_error else {
         panic!("expected IpcUnavailable, got {command_error:?}");
     };
     assert_eq!(
         detail,
-        "the session settled on protocol version 2, which is outside the 3 to 3 this koshi \
+        "the session settled on protocol version 3, which is outside the 4 to 4 this koshi \
          asked for"
     );
 
@@ -1769,21 +1776,31 @@ fn a_session_speaking_two_is_refused_before_the_command_is_written() {
         "Hello",
     );
     assert_eq!(
-        received_requests.recv(),
-        Err(mpsc::RecvError),
-        "no command reached the session",
+        received_requests
+            .recv()
+            .expect("the session read the command behind the Hello")
+            .request_kind
+            .get_request_kind_name(),
+        "SubmitCommand",
     );
 
     let _ = std::fs::remove_dir_all(&runtime_directory);
 }
 
+/// A command naming a target client costs one round trip, the same as every
+/// other command: the session reads the command before it answers the Hello,
+/// and still answers both in order.
 #[test]
-fn a_named_client_reaches_a_session_that_speaks_three() {
-    let runtime_directory = build_test_runtime_directory("client-protocol-three");
+fn a_named_client_command_reaches_a_session_that_answers_the_hello_last() {
+    let runtime_directory = build_test_runtime_directory("client-hello-last");
     let session_id = SessionId::new();
     let client_id = ClientId::new();
-    let (session_thread, received_requests) =
-        spawn_settled_session(&runtime_directory, session_id, 3, HelloTiming::AtOnce);
+    let (session_thread, received_requests) = spawn_settled_session(
+        &runtime_directory,
+        session_id,
+        4,
+        HelloTiming::AfterTheNextRequest,
+    );
 
     let command_result = submit_external_command_via_runtime_directory(
         &runtime_directory,
@@ -1791,7 +1808,53 @@ fn a_named_client_reaches_a_session_that_speaks_three() {
         Some(client_id),
         Command::TogglePaneFullscreen,
     )
-    .expect("a session speaking 3 reads the target client");
+    .expect("the session answers the command");
+
+    session_thread.join().expect("fake session exits");
+    assert_eq!(
+        received_requests
+            .recv()
+            .expect("the session read the Hello")
+            .request_kind
+            .get_request_kind_name(),
+        "Hello",
+    );
+    let submitted_request = received_requests
+        .recv()
+        .expect("the session read the SubmitCommand");
+    let IpcRequestKind::SubmitCommand(command_envelope) = submitted_request.request_kind else {
+        panic!("expected a SubmitCommand after the Hello, got {submitted_request:?}");
+    };
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id: command_envelope.command_id,
+            emitted_events: Vec::new(),
+        },
+    );
+    assert_eq!(
+        command_envelope.command_source,
+        CommandSource::from_external_cli(Some(session_id), Some(client_id)),
+    );
+
+    let _ = std::fs::remove_dir_all(&runtime_directory);
+}
+
+#[test]
+fn a_named_client_reaches_a_session_that_speaks_four() {
+    let runtime_directory = build_test_runtime_directory("client-protocol-four");
+    let session_id = SessionId::new();
+    let client_id = ClientId::new();
+    let (session_thread, received_requests) =
+        spawn_settled_session(&runtime_directory, session_id, 4, HelloTiming::AtOnce);
+
+    let command_result = submit_external_command_via_runtime_directory(
+        &runtime_directory,
+        session_id,
+        Some(client_id),
+        Command::TogglePaneFullscreen,
+    )
+    .expect("a session speaking 4 reads the target client");
 
     session_thread.join().expect("fake session exits");
     assert_eq!(

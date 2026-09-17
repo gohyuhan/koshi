@@ -49,12 +49,19 @@ pub struct Surface {
 /// The session protocol: what an attached client and a session server speak
 /// over that session's control socket.
 ///
-/// `v0.1.0` spoke 1, `v0.2.0` and `v0.3.0` spoke 2, and `v0.4.0` and this
-/// build speak 3. The floor is 3: a peer that speaks 2 is refused at the
+/// `v0.1.0` spoke 1, `v0.2.0` and `v0.3.0` spoke 2, and `v0.4.0` spoke 3. This
+/// build speaks 4. The floor is 4: a peer that speaks 3 is refused at the
 /// handshake.
 ///
-/// Four shapes differ between 2 and 3. This build writes version 3 on every
+/// One shape differs between 3 and 4. This build writes version 4 on every
 /// session connection:
+///
+/// - The keyboard request carries the whole event the client's terminal
+///   reported: the key, whether it went down, repeated or came up, the shifted
+///   and base-layout keys, the text, and all eight modifiers. 3 carried one
+///   chord, which holds no event kind, no text, and neither lock modifier.
+///
+/// Four shapes differ between 2 and 3:
 ///
 /// - A command naming a target client carries `target_client`. A peer speaking
 ///   2 has no field for it.
@@ -73,8 +80,8 @@ pub struct Surface {
 /// resume file written by an earlier build can carry the wrapped split shape.
 pub const SESSION_PROTOCOL: Surface = Surface {
     surface_name: "session protocol",
-    minimum_version: 3,
-    maximum_version: 3,
+    minimum_version: 4,
+    maximum_version: 4,
     released_version: Some(3),
 };
 

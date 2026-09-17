@@ -33,7 +33,10 @@ use koshi_core::command::{
 };
 use koshi_core::geometry::{Direction, PaneArea, Point, Rect};
 use koshi_core::ids::{ClientId, PaneId, PluginId, TabId};
-use koshi_core::key::{Key, KeyChord, ModFlags};
+use koshi_core::key::{
+    Key, KeyChord, KeyEventKind, KeyIdentity, KeyInput, KeyModifierFlags, ModFlags,
+    TEXT_ONLY_KEY_CODEPOINT,
+};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseAnswer, MouseButton, MouseTracking, ScrollDirection};
 use koshi_core::resolve::ActionArgs;
@@ -1787,7 +1790,7 @@ fn build_sent_top_border_move(
 fn an_answer_moves_the_drag_anchor_whatever_round_it_came_back_in() {
     let (mut client, frame, to) = build_border_drag_fixture();
     let mut sent = Vec::new();
-    let mut pending = Vec::new();
+    let mut pending_mouse_actions = Vec::new();
 
     apply_mouse_answers(
         &mut client,
@@ -1798,11 +1801,11 @@ fn an_answer_moves_the_drag_anchor_whatever_round_it_came_back_in() {
             frame.mouse_panes[1].pane_id,
             3,
         )],
-        &mut pending,
+        &mut pending_mouse_actions,
     );
 
     assert_eq!(sent, Vec::new());
-    assert_eq!(pending, Vec::new());
+    assert_eq!(pending_mouse_actions, Vec::new());
     assert_eq!(
         client.handle_mouse(build_mouse_drag(to), &frame, Instant::now()),
         Vec::new(),
@@ -1818,7 +1821,7 @@ fn a_resized_forgets_only_the_border_move_its_own_round_wrote() {
         build_sent_top_border_move(7, pane_id, 3),
         build_sent_top_border_move(8, pane_id, 1),
     ];
-    let mut pending = Vec::new();
+    let mut pending_mouse_actions = Vec::new();
 
     apply_mouse_answers(
         &mut client,
@@ -1826,7 +1829,7 @@ fn a_resized_forgets_only_the_border_move_its_own_round_wrote() {
         &mut sent,
         7,
         vec![build_top_border_resize_answer(pane_id, 3)],
-        &mut pending,
+        &mut pending_mouse_actions,
     );
 
     assert_eq!(
@@ -1848,9 +1851,16 @@ fn an_empty_answer_changes_nothing() {
         frame.mouse_panes[1].pane_id,
         3,
     )];
-    let mut pending = Vec::new();
+    let mut pending_mouse_actions = Vec::new();
 
-    apply_mouse_answers(&mut client, &frame, &mut sent, 7, Vec::new(), &mut pending);
+    apply_mouse_answers(
+        &mut client,
+        &frame,
+        &mut sent,
+        7,
+        Vec::new(),
+        &mut pending_mouse_actions,
+    );
 
     assert_eq!(
         sent,
@@ -1861,7 +1871,7 @@ fn an_empty_answer_changes_nothing() {
         )],
         "a round that reported no border move forgets none"
     );
-    assert_eq!(pending, Vec::new());
+    assert_eq!(pending_mouse_actions, Vec::new());
     assert_eq!(
         client.handle_mouse(build_mouse_drag(to), &frame, Instant::now()),
         vec![MouseAction::Resize {
@@ -1882,7 +1892,7 @@ fn a_tick_reaches_the_wire_at_once_with_rounds_already_out() {
     let mut client = build_test_client();
     let mut wire = build_test_wire();
     let mut sent = Vec::new();
-    let mut pending = Vec::new();
+    let mut pending_mouse_actions = Vec::new();
 
     // Four ticks, one per pass of the loop, none of them answered. Every pass
     // writes what it decided, so four rounds are on the wire unanswered.
@@ -1891,10 +1901,14 @@ fn a_tick_reaches_the_wire_at_once_with_rounds_already_out() {
             &mut client,
             &frame,
             build_mouse_wheel(ScrollDirection::Up, screen_point),
-            &mut pending,
+            &mut pending_mouse_actions,
         );
-        flush_mouse_round(&mut wire.uplink, &mut sent, &mut pending);
-        assert_eq!(pending, Vec::new(), "the pass that decided it wrote it");
+        flush_mouse_round(&mut wire.uplink, &mut sent, &mut pending_mouse_actions);
+        assert_eq!(
+            pending_mouse_actions,
+            Vec::new(),
+            "the pass that decided it wrote it"
+        );
         let request: IpcRequest = wire.session.recv().expect("read the round");
         assert_eq!(
             request,
@@ -1915,9 +1929,9 @@ fn a_tick_reaches_the_wire_at_once_with_rounds_already_out() {
         &mut client,
         &frame,
         build_mouse_wheel(ScrollDirection::Up, screen_point),
-        &mut pending,
+        &mut pending_mouse_actions,
     );
-    flush_mouse_round(&mut wire.uplink, &mut sent, &mut pending);
+    flush_mouse_round(&mut wire.uplink, &mut sent, &mut pending_mouse_actions);
     let sentinel = wire.uplink.send_request(IpcRequestKind::Discovery);
 
     let request: IpcRequest = wire.session.recv().expect("read the fifth round");
@@ -1952,7 +1966,7 @@ fn ten_ticks_in_one_pass_leave_as_one_scroll_of_the_summed_lines() {
     let mut client = build_test_client();
     let mut wire = build_test_wire();
     let mut sent = Vec::new();
-    let mut pending = Vec::new();
+    let mut pending_mouse_actions = Vec::new();
 
     // A burst of ten ticks read out of the channel as one batch, so all ten are
     // decided before the pass writes. No clock is read anywhere here.
@@ -1961,11 +1975,11 @@ fn ten_ticks_in_one_pass_leave_as_one_scroll_of_the_summed_lines() {
             &mut client,
             &frame,
             build_mouse_wheel(ScrollDirection::Up, screen_point),
-            &mut pending,
+            &mut pending_mouse_actions,
         );
     }
     assert_eq!(
-        pending,
+        pending_mouse_actions,
         vec![
             MouseAction::Scroll {
                 pane_id,
@@ -1977,9 +1991,9 @@ fn ten_ticks_in_one_pass_leave_as_one_scroll_of_the_summed_lines() {
         "one three-line scroll per tick, none written yet"
     );
 
-    flush_mouse_round(&mut wire.uplink, &mut sent, &mut pending);
+    flush_mouse_round(&mut wire.uplink, &mut sent, &mut pending_mouse_actions);
 
-    assert_eq!(pending, Vec::new());
+    assert_eq!(pending_mouse_actions, Vec::new());
     let request: IpcRequest = wire.session.recv().expect("read the folded burst");
     assert_eq!(
         request,
@@ -2013,7 +2027,7 @@ fn a_run_of_drag_moves_in_one_pass_leaves_as_the_newest_highlight() {
     let mut client = build_test_client();
     let mut wire = build_test_wire();
     let mut sent = Vec::new();
-    let mut pending = Vec::new();
+    let mut pending_mouse_actions = Vec::new();
 
     // The press arrives in a pass of its own and goes out as its own round, so
     // the drag moves below are the only thing the next pass holds.
@@ -2021,9 +2035,9 @@ fn a_run_of_drag_moves_in_one_pass_leaves_as_the_newest_highlight() {
         &mut client,
         &frame,
         build_mouse_press(get_content_cell(&frame, 0)),
-        &mut pending,
+        &mut pending_mouse_actions,
     );
-    flush_mouse_round(&mut wire.uplink, &mut sent, &mut pending);
+    flush_mouse_round(&mut wire.uplink, &mut sent, &mut pending_mouse_actions);
     let request: IpcRequest = wire.session.recv().expect("read the press");
     assert_eq!(
         request,
@@ -2052,11 +2066,11 @@ fn a_run_of_drag_moves_in_one_pass_leaves_as_the_newest_highlight() {
             &mut client,
             &frame,
             build_mouse_drag(screen_point),
-            &mut pending,
+            &mut pending_mouse_actions,
         );
     }
     assert_eq!(
-        pending,
+        pending_mouse_actions,
         [
             GridPosition {
                 row_index: 3,
@@ -2090,9 +2104,9 @@ fn a_run_of_drag_moves_in_one_pass_leaves_as_the_newest_highlight() {
         "one whole highlight per move, none written yet"
     );
 
-    flush_mouse_round(&mut wire.uplink, &mut sent, &mut pending);
+    flush_mouse_round(&mut wire.uplink, &mut sent, &mut pending_mouse_actions);
 
-    assert_eq!(pending, Vec::new());
+    assert_eq!(pending_mouse_actions, Vec::new());
     let request: IpcRequest = wire.session.recv().expect("read the folded run");
     assert_eq!(
         request,
@@ -2139,7 +2153,7 @@ fn every_report_in_one_pass_leaves_as_its_own_forward_in_order() {
     let mut client = build_test_client();
     let mut wire = build_test_wire();
     let mut sent = Vec::new();
-    let mut pending = Vec::new();
+    let mut pending_mouse_actions = Vec::new();
 
     // Five ticks on the pane whose program reads the mouse, arriving together in
     // one pass. The first two are the same tick twice: the pair a fold would
@@ -2164,7 +2178,7 @@ fn every_report_in_one_pass_leaves_as_its_own_forward_in_order() {
         ),
     ];
     for mouse_input in forwarded_mouse_inputs {
-        handle_mouse_event(&mut client, &frame, mouse_input, &mut pending);
+        handle_mouse_event(&mut client, &frame, mouse_input, &mut pending_mouse_actions);
     }
 
     let forwarded_actions: Vec<MouseAction> = forwarded_mouse_inputs
@@ -2175,13 +2189,13 @@ fn every_report_in_one_pass_leaves_as_its_own_forward_in_order() {
         })
         .collect();
     assert_eq!(
-        pending, forwarded_actions,
+        pending_mouse_actions, forwarded_actions,
         "one report per tick, none written yet"
     );
 
-    flush_mouse_round(&mut wire.uplink, &mut sent, &mut pending);
+    flush_mouse_round(&mut wire.uplink, &mut sent, &mut pending_mouse_actions);
 
-    assert_eq!(pending, Vec::new());
+    assert_eq!(pending_mouse_actions, Vec::new());
     let request: IpcRequest = wire.session.recv().expect("read the round of reports");
     assert_eq!(
         request,
@@ -2226,7 +2240,7 @@ fn the_pile_stops_at_the_cap_and_keeps_every_forwarded_report() {
     let over_plain = get_content_cell(&frame, 0);
     let over_watched = get_content_cell(&frame, 1);
     let mut client = build_test_client();
-    let mut pending = Vec::new();
+    let mut pending_mouse_actions = Vec::new();
     let mut forwarded_actions = Vec::new();
 
     // One pass holding more ticks than the cap. Ticks in alternating directions
@@ -2246,7 +2260,7 @@ fn the_pile_stops_at_the_cap_and_keeps_every_forwarded_report() {
                 row: over_watched.row,
             };
             let mouse = build_mouse_wheel(direction, screen_point);
-            handle_mouse_event(&mut client, &frame, mouse, &mut pending);
+            handle_mouse_event(&mut client, &frame, mouse, &mut pending_mouse_actions);
             forwarded_actions.push(MouseAction::Forward {
                 pane_id: watched,
                 mouse_input: mouse,
@@ -2256,13 +2270,13 @@ fn the_pile_stops_at_the_cap_and_keeps_every_forwarded_report() {
                 &mut client,
                 &frame,
                 build_mouse_wheel(direction, over_plain),
-                &mut pending,
+                &mut pending_mouse_actions,
             );
         }
     }
 
     assert_eq!(
-        pending.len(),
+        pending_mouse_actions.len(),
         MAX_PENDING_MOUSE_ACTION_COUNT,
         "the pile stopped at the cap"
     );
@@ -2271,7 +2285,7 @@ fn the_pile_stops_at_the_cap_and_keeps_every_forwarded_report() {
         6,
         "six ticks landed on the watched pane"
     );
-    let retained_forwarded_actions: Vec<MouseAction> = pending
+    let retained_forwarded_actions: Vec<MouseAction> = pending_mouse_actions
         .iter()
         .filter(|mouse_action| forwarded_actions.contains(mouse_action))
         .cloned()
@@ -2295,13 +2309,18 @@ fn a_border_move_decided_before_the_answer_asks_only_for_what_the_answer_left() 
         frame.mouse_panes[1].pane_id,
         3,
     )];
-    let mut pending = Vec::new();
+    let mut pending_mouse_actions = Vec::new();
 
     // One more cell of travel while round 7 is out. It is measured from the
     // anchor round 7 started position, so it names all four cells.
-    handle_mouse_event(&mut client, &frame, build_mouse_drag(further), &mut pending);
+    handle_mouse_event(
+        &mut client,
+        &frame,
+        build_mouse_drag(further),
+        &mut pending_mouse_actions,
+    );
     assert_eq!(
-        pending,
+        pending_mouse_actions,
         vec![MouseAction::Resize {
             pane_id: frame.mouse_panes[1].pane_id,
             border_side: Direction::Up,
@@ -2319,10 +2338,10 @@ fn a_border_move_decided_before_the_answer_asks_only_for_what_the_answer_left() 
             frame.mouse_panes[1].pane_id,
             3,
         )],
-        &mut pending,
+        &mut pending_mouse_actions,
     );
     assert_eq!(sent, Vec::new(), "round 7 is answered and forgotten");
-    flush_mouse_round(&mut wire.uplink, &mut sent, &mut pending);
+    flush_mouse_round(&mut wire.uplink, &mut sent, &mut pending_mouse_actions);
 
     // Three of the four cells are already travelled, so the round that goes out
     // asks for the one the pointer is still ahead by.
@@ -2354,12 +2373,22 @@ fn a_border_move_the_answer_covered_whole_leaves_nothing_to_send() {
         frame.mouse_panes[1].pane_id,
         3,
     )];
-    let mut pending = Vec::new();
+    let mut pending_mouse_actions = Vec::new();
 
     // The pointer goes one cell further and comes straight back, so the newest
     // buffered move names exactly the three cells round 7 asked for.
-    handle_mouse_event(&mut client, &frame, build_mouse_drag(further), &mut pending);
-    handle_mouse_event(&mut client, &frame, build_mouse_drag(to), &mut pending);
+    handle_mouse_event(
+        &mut client,
+        &frame,
+        build_mouse_drag(further),
+        &mut pending_mouse_actions,
+    );
+    handle_mouse_event(
+        &mut client,
+        &frame,
+        build_mouse_drag(to),
+        &mut pending_mouse_actions,
+    );
 
     apply_mouse_answers(
         &mut client,
@@ -2370,12 +2399,12 @@ fn a_border_move_the_answer_covered_whole_leaves_nothing_to_send() {
             frame.mouse_panes[1].pane_id,
             3,
         )],
-        &mut pending,
+        &mut pending_mouse_actions,
     );
-    flush_mouse_round(&mut wire.uplink, &mut sent, &mut pending);
+    flush_mouse_round(&mut wire.uplink, &mut sent, &mut pending_mouse_actions);
 
     assert_eq!(sent, Vec::new(), "nothing was left to ask for");
-    assert_eq!(pending, Vec::new());
+    assert_eq!(pending_mouse_actions, Vec::new());
     // Nothing reached the wire: the sentinel is the first request read.
     let sentinel = wire.uplink.send_request(IpcRequestKind::Discovery);
     let request: IpcRequest = wire.session.recv().expect("read the sentinel");
@@ -2394,7 +2423,7 @@ fn an_answer_that_lands_while_the_pointer_is_still_moves_the_drag_anchor() {
     let pane_id = frame.mouse_panes[1].pane_id;
     let mut wire = build_test_wire();
     let mut sent = vec![build_sent_top_border_move(7, pane_id, 3)];
-    let mut pending = Vec::new();
+    let mut pending_mouse_actions = Vec::new();
 
     // A fourth cell of travel while round 7 is out, then round 7's answer: the
     // anchor takes the three cells the session moved and the one cell left over
@@ -2406,7 +2435,7 @@ fn an_answer_that_lands_while_the_pointer_is_still_moves_the_drag_anchor() {
             row: to.row + 1,
             ..to
         }),
-        &mut pending,
+        &mut pending_mouse_actions,
     );
     apply_mouse_answers(
         &mut client,
@@ -2417,9 +2446,9 @@ fn an_answer_that_lands_while_the_pointer_is_still_moves_the_drag_anchor() {
             frame.mouse_panes[1].pane_id,
             3,
         )],
-        &mut pending,
+        &mut pending_mouse_actions,
     );
-    flush_mouse_round(&mut wire.uplink, &mut sent, &mut pending);
+    flush_mouse_round(&mut wire.uplink, &mut sent, &mut pending_mouse_actions);
 
     let request: IpcRequest = wire.session.recv().expect("read the second round");
     assert_eq!(
@@ -2446,10 +2475,10 @@ fn an_answer_that_lands_while_the_pointer_is_still_moves_the_drag_anchor() {
             frame.mouse_panes[1].pane_id,
             1,
         )],
-        &mut pending,
+        &mut pending_mouse_actions,
     );
     assert_eq!(sent, Vec::new());
-    assert_eq!(pending, Vec::new());
+    assert_eq!(pending_mouse_actions, Vec::new());
 
     // One more cell of travel past the border it moved: the anchor sits on the
     // border's real row, so one cell of pointer travel asks for one cell.
@@ -2460,10 +2489,10 @@ fn an_answer_that_lands_while_the_pointer_is_still_moves_the_drag_anchor() {
             row: to.row + 2,
             ..to
         }),
-        &mut pending,
+        &mut pending_mouse_actions,
     );
     assert_eq!(
-        pending,
+        pending_mouse_actions,
         vec![MouseAction::Resize {
             pane_id,
             border_side: Direction::Up,
@@ -2492,7 +2521,7 @@ fn two_border_moves_in_one_round_each_land_on_their_own_border() {
         },
     ];
     // A move of another pane's left border, buffered before round 7 went out.
-    let mut pending = vec![MouseAction::Resize {
+    let mut pending_mouse_actions = vec![MouseAction::Resize {
         pane_id: other_pane_id,
         border_side: Direction::Left,
         resize_step: 1,
@@ -2501,7 +2530,12 @@ fn two_border_moves_in_one_round_each_land_on_their_own_border() {
 
     // One more cell of travel on the grabbed border, so the pile holds one move
     // per border.
-    handle_mouse_event(&mut client, &frame, build_mouse_drag(further), &mut pending);
+    handle_mouse_event(
+        &mut client,
+        &frame,
+        build_mouse_drag(further),
+        &mut pending_mouse_actions,
+    );
 
     apply_mouse_answers(
         &mut client,
@@ -2517,12 +2551,12 @@ fn two_border_moves_in_one_round_each_land_on_their_own_border() {
                 applied_cell_count: 1,
             },
         ],
-        &mut pending,
+        &mut pending_mouse_actions,
     );
 
     assert_eq!(sent, Vec::new(), "both of round 7's moves are answered");
     assert_eq!(
-        pending,
+        pending_mouse_actions,
         vec![
             MouseAction::Resize {
                 pane_id: other_pane_id,
@@ -2559,7 +2593,7 @@ fn two_moves_of_one_border_in_one_round_travel_the_newest_distance() {
     // A wheel tick between two moves of one border keeps them apart through the
     // fold. Both measure the whole travel from the same drag anchor: three cells
     // out, then five.
-    let mut pending = vec![
+    let mut pending_mouse_actions = vec![
         MouseAction::Resize {
             pane_id,
             border_side: Direction::Up,
@@ -2579,9 +2613,9 @@ fn two_moves_of_one_border_in_one_round_travel_the_newest_distance() {
         },
     ];
 
-    flush_mouse_round(&mut wire.uplink, &mut sent, &mut pending);
+    flush_mouse_round(&mut wire.uplink, &mut sent, &mut pending_mouse_actions);
 
-    assert_eq!(pending, Vec::new());
+    assert_eq!(pending_mouse_actions, Vec::new());
     let request: IpcRequest = wire.session.recv().expect("read the round");
     assert_eq!(
         request,
@@ -2651,7 +2685,7 @@ fn an_answer_for_a_border_drag_that_already_ended_changes_nothing() {
     let mut client = build_test_client();
     let now = Instant::now();
     let mut sent = vec![build_sent_top_border_move(7, first_pane_id, 3)];
-    let mut pending = Vec::new();
+    let mut pending_mouse_actions = Vec::new();
 
     // Round 7 asks for three cells of the upper divider.
     client.handle_mouse(build_mouse_press(upper), &frame, now);
@@ -2686,9 +2720,14 @@ fn an_answer_for_a_border_drag_that_already_ended_changes_nothing() {
         Vec::new()
     );
     client.handle_mouse(build_mouse_press(lower), &frame, now);
-    handle_mouse_event(&mut client, &frame, build_mouse_drag(held), &mut pending);
+    handle_mouse_event(
+        &mut client,
+        &frame,
+        build_mouse_drag(held),
+        &mut pending_mouse_actions,
+    );
     assert_eq!(
-        pending,
+        pending_mouse_actions,
         vec![MouseAction::Resize {
             pane_id: second_pane_id,
             border_side: Direction::Up,
@@ -2703,12 +2742,12 @@ fn an_answer_for_a_border_drag_that_already_ended_changes_nothing() {
         &mut sent,
         7,
         vec![build_top_border_resize_answer(first_pane_id, 3)],
-        &mut pending,
+        &mut pending_mouse_actions,
     );
 
     assert_eq!(sent, Vec::new(), "round 7's move is answered and forgotten");
     assert_eq!(
-        pending,
+        pending_mouse_actions,
         vec![MouseAction::Resize {
             pane_id: second_pane_id,
             border_side: Direction::Up,
@@ -2740,7 +2779,7 @@ fn border_moves_written_back_to_back_ask_only_for_the_cells_no_round_asked_yet()
     let mut client = build_test_client();
     let mut wire = build_test_wire();
     let mut sent = Vec::new();
-    let mut pending = Vec::new();
+    let mut pending_mouse_actions = Vec::new();
 
     client.handle_mouse(build_mouse_press(grabbed), &frame, Instant::now());
 
@@ -2756,10 +2795,10 @@ fn border_moves_written_back_to_back_ask_only_for_the_cells_no_round_asked_yet()
                 row: grabbed.row + cell,
                 ..grabbed
             }),
-            &mut pending,
+            &mut pending_mouse_actions,
         );
         assert_eq!(
-            pending,
+            pending_mouse_actions,
             vec![MouseAction::Resize {
                 pane_id,
                 border_side: Direction::Up,
@@ -2768,7 +2807,7 @@ fn border_moves_written_back_to_back_ask_only_for_the_cells_no_round_asked_yet()
             }],
             "the anchor has not moved, so the whole distance is named again"
         );
-        flush_mouse_round(&mut wire.uplink, &mut sent, &mut pending);
+        flush_mouse_round(&mut wire.uplink, &mut sent, &mut pending_mouse_actions);
         let request: IpcRequest = wire.session.recv().expect("read the round");
         assert_eq!(
             request,
@@ -2797,7 +2836,7 @@ fn border_moves_written_back_to_back_ask_only_for_the_cells_no_round_asked_yet()
             &mut sent,
             FIRST_POST_ATTACH_REQUEST_ID + round,
             vec![build_top_border_resize_answer(pane_id, 1)],
-            &mut pending,
+            &mut pending_mouse_actions,
         );
     }
 
@@ -2822,7 +2861,7 @@ fn a_border_move_the_session_refused_stops_coming_off_the_next_one() {
     let pane_id = frame.mouse_panes[1].pane_id;
     let mut wire = build_test_wire();
     let mut sent = vec![build_sent_top_border_move(7, pane_id, 3)];
-    let mut pending = Vec::new();
+    let mut pending_mouse_actions = Vec::new();
 
     // Round 7 asked for three cells and the session took none: the border is
     // against a wall. The anchor stays put and the image record goes, so the pointer's
@@ -2833,12 +2872,17 @@ fn a_border_move_the_session_refused_stops_coming_off_the_next_one() {
         &mut sent,
         7,
         vec![build_top_border_resize_answer(pane_id, 0)],
-        &mut pending,
+        &mut pending_mouse_actions,
     );
     assert_eq!(sent, Vec::new());
 
-    handle_mouse_event(&mut client, &frame, build_mouse_drag(to), &mut pending);
-    flush_mouse_round(&mut wire.uplink, &mut sent, &mut pending);
+    handle_mouse_event(
+        &mut client,
+        &frame,
+        build_mouse_drag(to),
+        &mut pending_mouse_actions,
+    );
+    flush_mouse_round(&mut wire.uplink, &mut sent, &mut pending_mouse_actions);
 
     let request: IpcRequest = wire.session.recv().expect("read the next round");
     assert_eq!(
@@ -2857,7 +2901,7 @@ fn a_border_move_the_session_refused_stops_coming_off_the_next_one() {
 }
 
 #[test]
-fn a_key_the_keymap_does_not_bind_goes_up_the_connection_as_that_chord() {
+fn a_key_the_keymap_does_not_bind_goes_up_the_connection_whole() {
     let mut client = build_test_client();
     let client_id = client.get_client_id();
     let mut wire = build_test_wire();
@@ -2882,10 +2926,214 @@ fn a_key_the_keymap_does_not_bind_goes_up_the_connection_as_that_chord() {
         request,
         IpcRequest {
             request_id: FIRST_POST_ATTACH_REQUEST_ID,
-            request_kind: IpcRequestKind::KeyPress {
-                chord: KeyChord::from_parts(ModFlags::NONE, Key::Char('a')),
+            request_kind: IpcRequestKind::Keyboard {
+                key_input: crate::tests::build_key_input_for_chord(KeyChord::from_parts(
+                    ModFlags::NONE,
+                    Key::Char('a'),
+                )),
             },
         }
+    );
+}
+
+/// The release the outer terminal reports for one chord.
+fn build_key_release_for_chord(chord: KeyChord) -> KeyInput {
+    KeyInput {
+        key_event_kind: KeyEventKind::Release,
+        ..crate::tests::build_key_input_for_chord(chord)
+    }
+}
+
+#[test]
+fn a_key_release_goes_up_the_connection_and_leaves_an_open_sequence_open() {
+    let mut client = build_test_client();
+    let client_id = client.get_client_id();
+    let mut wire = build_test_wire();
+    // `<C-p>` is the default pane prefix: it binds nothing on its own, so it
+    // opens a sequence and holds the keyboard.
+    let sequence_opener_chord = KeyChord::from_parts(ModFlags::CTRL, Key::Char('p'));
+
+    process_runtime_input(
+        &mut client,
+        &mut wire.uplink,
+        RuntimeEvent::KeyInput {
+            client_id,
+            key_input: crate::tests::build_key_input_for_chord(sequence_opener_chord),
+        },
+    );
+    let chords_after_opener = client
+        .get_pending_key_sequence()
+        .expect("the opener left a sequence open")
+        .list_chords()
+        .to_vec();
+
+    let released_key_input = build_key_release_for_chord(sequence_opener_chord);
+    process_runtime_input(
+        &mut client,
+        &mut wire.uplink,
+        RuntimeEvent::KeyInput {
+            client_id,
+            key_input: released_key_input.clone(),
+        },
+    );
+
+    assert_eq!(
+        client
+            .get_pending_key_sequence()
+            .expect("the sequence is still open")
+            .list_chords(),
+        chords_after_opener,
+        "the release advanced no sequence"
+    );
+
+    // The opener was held, so the release is the first thing this connection
+    // carries. The sentinel behind it keeps a missing release from waiting.
+    wire.uplink.send_request(IpcRequestKind::Discovery);
+    let request: IpcRequest = wire.session.recv().expect("read the release");
+    assert_eq!(
+        request,
+        IpcRequest {
+            request_id: FIRST_POST_ATTACH_REQUEST_ID,
+            request_kind: IpcRequestKind::Keyboard {
+                key_input: released_key_input
+            },
+        }
+    );
+}
+
+#[test]
+fn a_key_no_binding_can_name_goes_up_the_connection_whole() {
+    let mut client = build_test_client();
+    let client_id = client.get_client_id();
+    let mut wire = build_test_wire();
+    // Left Shift reports as codepoint 57441 and has no chord form at all.
+    let left_shift_key_input = KeyInput {
+        key: KeyIdentity::Codepoint(57441),
+        key_event_kind: KeyEventKind::Press,
+        shifted_key: None,
+        base_layout_key: None,
+        associated_text: String::new(),
+        modifier_flags: KeyModifierFlags::SHIFT,
+    };
+
+    process_runtime_input(
+        &mut client,
+        &mut wire.uplink,
+        RuntimeEvent::KeyInput {
+            client_id,
+            key_input: left_shift_key_input.clone(),
+        },
+    );
+
+    wire.uplink.send_request(IpcRequestKind::Discovery);
+    let request: IpcRequest = wire.session.recv().expect("read the key");
+    assert_eq!(
+        request,
+        IpcRequest {
+            request_id: FIRST_POST_ATTACH_REQUEST_ID,
+            request_kind: IpcRequestKind::Keyboard {
+                key_input: left_shift_key_input
+            },
+        }
+    );
+}
+
+#[test]
+fn a_text_only_event_goes_up_the_connection_whole() {
+    let mut client = build_test_client();
+    let client_id = client.get_client_id();
+    let mut wire = build_test_wire();
+    // A terminal that reports text with no key sends codepoint 0, and no
+    // keybinding can name it.
+    let text_only_key_input = KeyInput {
+        key: KeyIdentity::Codepoint(TEXT_ONLY_KEY_CODEPOINT),
+        key_event_kind: KeyEventKind::Press,
+        shifted_key: None,
+        base_layout_key: None,
+        associated_text: "é".to_string(),
+        modifier_flags: KeyModifierFlags::NONE,
+    };
+
+    process_runtime_input(
+        &mut client,
+        &mut wire.uplink,
+        RuntimeEvent::KeyInput {
+            client_id,
+            key_input: text_only_key_input.clone(),
+        },
+    );
+
+    wire.uplink.send_request(IpcRequestKind::Discovery);
+    let request: IpcRequest = wire.session.recv().expect("read the text-only event");
+    assert_eq!(
+        request,
+        IpcRequest {
+            request_id: FIRST_POST_ATTACH_REQUEST_ID,
+            request_kind: IpcRequestKind::Keyboard {
+                key_input: text_only_key_input
+            },
+        }
+    );
+}
+
+#[test]
+fn a_key_release_leaves_this_viewers_selection_gesture_running() {
+    // The press that typed into the pane already ended the gesture. A release
+    // arriving after a fresh press must not end the next one.
+    let pane_id = PaneId::new();
+    let frame = build_mouse_frame(&[build_plain_mouse_pane(pane_id)]);
+    let mut client = build_test_client();
+    let client_id = client.get_client_id();
+    let mut wire = build_test_wire();
+    let mut pending_mouse_actions = Vec::new();
+
+    handle_mouse_event(
+        &mut client,
+        &frame,
+        build_mouse_press(get_content_cell(&frame, 0)),
+        &mut pending_mouse_actions,
+    );
+
+    process_runtime_input(
+        &mut client,
+        &mut wire.uplink,
+        RuntimeEvent::KeyInput {
+            client_id,
+            key_input: build_key_release_for_chord(KeyChord::from_parts(
+                ModFlags::NONE,
+                Key::Char('a'),
+            )),
+        },
+    );
+
+    pending_mouse_actions.clear();
+    handle_mouse_event(
+        &mut client,
+        &frame,
+        build_mouse_drag(Point { column: 9, row: 8 }),
+        &mut pending_mouse_actions,
+    );
+
+    assert_eq!(
+        pending_mouse_actions
+            .last()
+            .expect("the drag extended the gesture"),
+        &MouseAction::Command(Command::Visual(VisualCommand::SetSelection(
+            SetSelectionArgs {
+                pane_id,
+                selection: Selection {
+                    selection_kind: SelectionKind::Character,
+                    anchor: GridPosition {
+                        row_index: 1,
+                        column_index: 1
+                    },
+                    cursor: GridPosition {
+                        row_index: 6,
+                        column_index: 8
+                    },
+                },
+            }
+        )))
     );
 }
 
@@ -2898,22 +3146,24 @@ fn a_key_the_pane_gets_ends_this_viewers_selection_gesture() {
     let mut client = build_test_client();
     let client_id = client.get_client_id();
     let mut wire = build_test_wire();
-    let mut pending = Vec::new();
+    let mut pending_mouse_actions = Vec::new();
 
     handle_mouse_event(
         &mut client,
         &frame,
         build_mouse_press(get_content_cell(&frame, 0)),
-        &mut pending,
+        &mut pending_mouse_actions,
     );
     handle_mouse_event(
         &mut client,
         &frame,
         build_mouse_drag(Point { column: 9, row: 8 }),
-        &mut pending,
+        &mut pending_mouse_actions,
     );
     assert_eq!(
-        pending.last().expect("the drag decided something"),
+        pending_mouse_actions
+            .last()
+            .expect("the drag decided something"),
         &MouseAction::Command(Command::Visual(VisualCommand::SetSelection(
             SetSelectionArgs {
                 pane_id,
@@ -2945,7 +3195,7 @@ fn a_key_the_pane_gets_ends_this_viewers_selection_gesture() {
     );
 
     // The same move again, with no gesture left to extend.
-    pending.clear();
+    pending_mouse_actions.clear();
     handle_mouse_event(
         &mut client,
         &frame,
@@ -2953,9 +3203,9 @@ fn a_key_the_pane_gets_ends_this_viewers_selection_gesture() {
             column: 20,
             row: 12,
         }),
-        &mut pending,
+        &mut pending_mouse_actions,
     );
-    assert_eq!(pending, Vec::new());
+    assert_eq!(pending_mouse_actions, Vec::new());
 }
 
 #[test]
@@ -3115,23 +3365,25 @@ fn a_paste_ends_this_viewers_selection_gesture() {
     let mut client = build_test_client();
     let client_id = client.get_client_id();
     let mut wire = build_test_wire();
-    let mut pending = Vec::new();
+    let mut pending_mouse_actions = Vec::new();
 
     // Press and drag: the gesture is under way, so the move names a highlight.
     handle_mouse_event(
         &mut client,
         &frame,
         build_mouse_press(get_content_cell(&frame, 0)),
-        &mut pending,
+        &mut pending_mouse_actions,
     );
     handle_mouse_event(
         &mut client,
         &frame,
         build_mouse_drag(Point { column: 9, row: 8 }),
-        &mut pending,
+        &mut pending_mouse_actions,
     );
     assert_eq!(
-        pending.last().expect("the drag decided something"),
+        pending_mouse_actions
+            .last()
+            .expect("the drag decided something"),
         &MouseAction::Command(Command::Visual(VisualCommand::SetSelection(
             SetSelectionArgs {
                 pane_id,
@@ -3160,7 +3412,7 @@ fn a_paste_ends_this_viewers_selection_gesture() {
     );
 
     // The same move again, with no gesture left to extend.
-    pending.clear();
+    pending_mouse_actions.clear();
     handle_mouse_event(
         &mut client,
         &frame,
@@ -3168,9 +3420,9 @@ fn a_paste_ends_this_viewers_selection_gesture() {
             column: 20,
             row: 12,
         }),
-        &mut pending,
+        &mut pending_mouse_actions,
     );
-    assert_eq!(pending, Vec::new());
+    assert_eq!(pending_mouse_actions, Vec::new());
 }
 
 #[test]
@@ -3981,7 +4233,7 @@ fn a_pointer_moved_after_a_frame_in_one_pass_still_draws_the_new_hover() {
         build_plain_mouse_pane(first_pane_id),
         build_plain_mouse_pane(second_pane_id),
     ]);
-    let mut pending = Vec::new();
+    let mut pending_mouse_actions = Vec::new();
 
     screen
         .draw_painted_frame(&mut client, Box::new(painted))
@@ -3994,7 +4246,7 @@ fn a_pointer_moved_after_a_frame_in_one_pass_still_draws_the_new_hover() {
         &mut client,
         &mouse,
         build_mouse_motion(get_content_cell(&mouse, 1)),
-        &mut pending,
+        &mut pending_mouse_actions,
     );
     let hovered_after = ViewerPaint::from_client_and_tab(&client, active_tab_id)
         .chrome
