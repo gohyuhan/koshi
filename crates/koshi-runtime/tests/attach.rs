@@ -4,7 +4,8 @@
 //! still sets, what a client's key presses and resizes reach, what a client's
 //! mouse rounds do to its panes and what the one answer each round is given
 //! carries, what a detach leaves behind for the clients that stay and for the
-//! panes, and what a dropped connection leaves behind.
+//! panes, what a dropped connection leaves behind, and what a frame this build
+//! cannot read costs the client that sent it.
 //!
 //! Each test runs the shape the per-session server process runs in: a headless
 //! session seeded with no client, its inbox drained and its frames pushed on
@@ -321,6 +322,23 @@ fn wait_for_client_count(
         request_id += 1;
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+/// One envelope asking `session_id` for a new tab, issued by the external CLI
+/// at [`SystemTime::UNIX_EPOCH`] under a fresh command id.
+fn build_new_tab_envelope(session_id: SessionId) -> CommandEnvelope {
+    CommandEnvelope::from_parts(
+        CommandId::new(),
+        CommandSource::ExternalCli {
+            session_id: Some(session_id),
+            target_client_id: None,
+        },
+        SystemTime::UNIX_EPOCH,
+        Command::NewTab(NewTabArgs {
+            working_directory: None,
+            client_id: None,
+        }),
+    )
 }
 
 /// Submit a command over `connection` and return the events it emitted.
@@ -840,6 +858,75 @@ fn dropping_an_attached_connection_removes_its_client_record() {
             .map(|pane| pane.get_pane_id()),
         Some(pane_id)
     );
+}
+
+#[test]
+fn a_frame_this_build_cannot_read_costs_one_request_not_the_stream() {
+    let (server, _fake, (session_id, client_id, added_tab_id)) = serve_test_session(
+        "unreadable-frame",
+        |runtime_directory, session_id, _fake| {
+            let mut viewer = open_session_connection(&runtime_directory, session_id);
+            let (client_id, _, structure, _) = attach_test_client(&mut viewer, 2);
+            assert_eq!(structure.tabs.len(), 1, "the session starts with one tab");
+            let mut caller = open_session_connection(&runtime_directory, session_id);
+            wait_for_client_count(&mut caller, 1, 3);
+
+            // A frame this build cannot read: `SubmitCommand` is a kind it has,
+            // and the command inside names a variant no build has, so the whole
+            // frame fails to decode.
+            let mut command_envelope_json =
+                serde_json::to_value(build_new_tab_envelope(session_id))
+                    .expect("the envelope encodes");
+            command_envelope_json["command"] = serde_json::json!({ "CommandFromALaterKoshi": {} });
+            viewer
+                .send(&serde_json::json!({
+                    "request_id": 20,
+                    "kind": { "SubmitCommand": command_envelope_json },
+                }))
+                .expect("send a frame this build cannot read");
+
+            // The frame after it is served: this one adds a tab, and the tab
+            // reaches this viewer's own stream. Every frame read here decodes as
+            // a `SessionEvent`, so nothing was written back for the frame above.
+            viewer
+                .send(&IpcRequest {
+                    request_id: 21,
+                    request_kind: IpcRequestKind::SubmitCommand(Box::new(build_new_tab_envelope(
+                        session_id,
+                    ))),
+                })
+                .expect("send the next request");
+            let (viewer, session_events) = read_session_frames_until(viewer, |session_event| {
+                matches!(session_event, SessionEvent::TabCreated { .. })
+            });
+            let added_tab_id = session_events
+                .iter()
+                .find_map(|session_event| match session_event {
+                    SessionEvent::TabCreated { tab_id } => Some(*tab_id),
+                    _ => None,
+                })
+                .expect("the new tab reaches the stream");
+
+            assert_eq!(
+                attached_client_count(&mut caller, 30),
+                1,
+                "the client that sent the unreadable frame is still attached"
+            );
+            (vec![viewer, caller], (session_id, client_id, added_tab_id))
+        },
+    );
+
+    let session = server
+        .list_sessions()
+        .get(&session_id)
+        .expect("session running");
+    assert_eq!(session.clients.client_count(), 1);
+    assert!(session.clients.get_client_by_id(client_id).is_some());
+    assert!(
+        session.tabs.contains_key(&added_tab_id),
+        "the request after the unreadable one applied"
+    );
+    assert_eq!(session.tabs.len(), 2, "the unreadable frame added no tab");
 }
 
 #[test]
