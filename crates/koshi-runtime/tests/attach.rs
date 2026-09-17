@@ -46,6 +46,7 @@ use koshi_runtime::runtime::event::RuntimeEvent;
 use koshi_runtime::server::Server;
 use koshi_session::client::{pane_viewport, ClientOrigin};
 use koshi_test_support::fake_pty::FakePtyBackend;
+use koshi_test_support::fixtures::build_key_input_for_chord;
 
 /// The terminal size [`attach`] reports, and the size the seeded session is
 /// bootstrapped at.
@@ -1271,8 +1272,8 @@ fn an_attached_client_types_into_its_pane_and_resizes_the_tab_it_views() {
             viewer
                 .send(&IpcRequest {
                     request_id: 4,
-                    request_kind: IpcRequestKind::KeyPress {
-                        chord: TYPED_KEY_CHORD,
+                    request_kind: IpcRequestKind::Keyboard {
+                        key_input: build_key_input_for_chord(TYPED_KEY_CHORD),
                     },
                 })
                 .expect("send key press");

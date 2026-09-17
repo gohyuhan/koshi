@@ -5,7 +5,8 @@
 use super::*;
 use koshi_core::command::{Command, CommandSource, ToggleLockModeArgs};
 use koshi_core::ids::CommandId;
-use koshi_core::key::{Key, ModFlags};
+use koshi_core::key::{Key, KeyChord, ModFlags};
+use koshi_test_support::fixtures::build_key_input_for_chord;
 use std::time::SystemTime;
 
 /// A deterministic, boundary-free envelope for the IPC/plugin variants.
@@ -125,22 +126,23 @@ fn resize_carries_a_reported_pane_area() {
 }
 
 #[test]
-fn client_key_press_carries_its_client_and_chord() {
+fn client_keyboard_carries_its_client_and_the_whole_key_input() {
     let expected_client_id = ClientId::new();
-    let pressed_chord = KeyChord::from_parts(ModFlags::CTRL, Key::Char('t'));
-    let runtime_event = RuntimeEvent::ClientKeyPress {
+    let pressed_key_input =
+        build_key_input_for_chord(KeyChord::from_parts(ModFlags::CTRL, Key::Char('t')));
+    let runtime_event = RuntimeEvent::ClientKeyboard {
         client_id: expected_client_id,
-        chord: pressed_chord,
+        key_input: pressed_key_input.clone(),
     };
-    let RuntimeEvent::ClientKeyPress {
+    let RuntimeEvent::ClientKeyboard {
         client_id: carried_client_id,
-        chord,
+        key_input,
     } = &runtime_event
     else {
-        panic!("expected ClientKeyPress");
+        panic!("expected ClientKeyboard");
     };
     assert_eq!(*carried_client_id, expected_client_id);
-    assert_eq!(*chord, pressed_chord);
+    assert_eq!(*key_input, pressed_key_input);
 }
 
 #[test]

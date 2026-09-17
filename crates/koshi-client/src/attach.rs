@@ -2638,9 +2638,11 @@ fn build_input_channel() -> (mpsc::SyncSender<RuntimeEvent>, mpsc::Receiver<Runt
 ///
 /// A key belongs to the viewer that received it: the keymap, the input mode and
 /// any open sequence all live here, so this decides what the press means and
-/// the session sees only the answer — the commands a binding runs, or a press
-/// to write. A press that goes to the pane's program also ends the selection
-/// gesture under way, since the input is the program's. A resize records the
+/// the session sees only the answer — the commands a binding runs, or the whole
+/// key event to write. A release, and a key no keybinding can name, resolve
+/// nothing and reach the session as they are. A press that goes to the pane's
+/// program also ends the selection gesture under way, since the input is the
+/// program's. A resize records the
 /// viewport and pane area, since the session reconciles tab sizes from every
 /// viewer's report. Pasted text goes up whole and ends the gesture too; the
 /// session writes it into the pane, bracketing it when that pane asked for
@@ -2679,17 +2681,19 @@ fn process_runtime_input_with_cell_size(
             }
         }
         RuntimeEvent::KeyInput { key_input, .. } => {
-            // A release, and a key no binding can name, resolve nothing.
+            // A release, and a key no binding can name, resolve nothing: both
+            // go up whole, and an open selection gesture stays open.
             let Some(chord) = key_input.to_binding_chord() else {
+                uplink.send_request(IpcRequestKind::Keyboard { key_input });
                 return;
             };
             match client.resolve_key(chord, Instant::now()) {
                 KeyOutcome::Fire(bound_action) => uplink.submit_bound_action(client, bound_action),
-                KeyOutcome::PassThrough(chord) => {
+                KeyOutcome::PassThrough(_) => {
                     // The key belongs to the program in the pane, so a
                     // selection gesture over it is over.
                     client.end_mouse_selection();
-                    uplink.send_request(IpcRequestKind::KeyPress { chord });
+                    uplink.send_request(IpcRequestKind::Keyboard { key_input });
                 }
                 // Held or dropped: nothing reaches the session. A chord
                 // that opens or closes a sequence moves the breadcrumb the

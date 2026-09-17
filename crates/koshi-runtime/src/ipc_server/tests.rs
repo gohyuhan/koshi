@@ -13,7 +13,9 @@ use koshi_core::command::{
 use koshi_core::discovery::{SessionDiscovery, SessionOverview};
 use koshi_core::geometry::{PixelCellSize, Size};
 use koshi_core::ids::{CommandId, PaneId, SessionId, TabId};
-use koshi_core::key::{Key, KeyChord, ModFlags};
+use koshi_core::key::{
+    Key, KeyChord, KeyEventKind, KeyIdentity, KeyInput, KeyModifierFlags, ModFlags,
+};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::MouseTracking;
 use koshi_ipc::attach::AttachedSessionStructureSnapshot;
@@ -30,6 +32,7 @@ use koshi_renderer::snapshot::{
 use koshi_terminal::graphics::{
     DecodedImage, GraphicsProtocol, ImageAction, ImageDisplay, ImageRecord,
 };
+use koshi_test_support::fixtures::build_key_input_for_chord;
 
 use crate::runtime::event::{AttachAccepted, EndingNotice, SessionEnding};
 
@@ -239,7 +242,7 @@ fn spawn_attaching_dispatcher(
     client_id: ClientId,
     session_id: SessionId,
 ) -> (JoinHandle<()>, Receiver<RuntimeEvent>) {
-    let (seen_tx, seen_rx) = mpsc::channel();
+    let (runtime_event_sender, runtime_event_receiver) = mpsc::channel();
     let handle = std::thread::spawn(move || {
         let mut queues = Vec::new();
         let ending_notice = Arc::new(EndingNotice::default());
@@ -262,19 +265,19 @@ fn spawn_attaching_dispatcher(
                 }
                 detached @ RuntimeEvent::ClientDetached { .. } => {
                     queues.clear();
-                    if seen_tx.send(detached).is_err() {
+                    if runtime_event_sender.send(detached).is_err() {
                         break;
                     }
                 }
                 other => {
-                    if seen_tx.send(other).is_err() {
+                    if runtime_event_sender.send(other).is_err() {
                         break;
                     }
                 }
             }
         }
     });
-    (handle, seen_rx)
+    (handle, runtime_event_receiver)
 }
 
 /// A stand-in dispatcher that answers the first attach with `events` and
@@ -550,10 +553,17 @@ fn serve_attachable(
     let runtime_directory = build_test_runtime_directory(tag);
     let session = SessionId::new();
     let (inbox_tx, inbox_rx) = mpsc::channel();
-    let (dispatcher, seen) = spawn_attaching_dispatcher(inbox_rx, client_id, session);
+    let (dispatcher, received_runtime_events) =
+        spawn_attaching_dispatcher(inbox_rx, client_id, session);
     let server =
         IpcServer::start(&runtime_directory, session, inbox_tx, None).expect("start serving");
-    (server, session, runtime_directory, dispatcher, seen)
+    (
+        server,
+        session,
+        runtime_directory,
+        dispatcher,
+        received_runtime_events,
+    )
 }
 
 /// Open a connection, say hello, attach on it, and read both replies back.
@@ -1285,7 +1295,7 @@ fn serve_shared(
 fn spawn_reporting_dispatcher(
     inbox_rx: Receiver<RuntimeEvent>,
 ) -> (JoinHandle<()>, Receiver<CommandEnvelope>) {
-    let (seen_tx, seen_rx) = mpsc::channel();
+    let (command_envelope_sender, command_envelope_receiver) = mpsc::channel();
     let handle = std::thread::spawn(move || {
         while let Ok(event) = inbox_rx.recv() {
             if let RuntimeEvent::Ipc {
@@ -1297,13 +1307,13 @@ fn spawn_reporting_dispatcher(
                     command_id: envelope.command_id,
                     emitted_events: Vec::new(),
                 });
-                if seen_tx.send(envelope).is_err() {
+                if command_envelope_sender.send(envelope).is_err() {
                     break;
                 }
             }
         }
     });
-    (handle, seen_rx)
+    (handle, command_envelope_receiver)
 }
 
 /// A served socket in a fresh runtime directory whose stand-in dispatcher reports
@@ -1320,10 +1330,16 @@ fn serve_reporting(
     let runtime_directory = build_test_runtime_directory(tag);
     let session = SessionId::new();
     let (inbox_tx, inbox_rx) = mpsc::channel();
-    let (dispatcher, seen) = spawn_reporting_dispatcher(inbox_rx);
+    let (dispatcher, received_command_envelopes) = spawn_reporting_dispatcher(inbox_rx);
     let server =
         IpcServer::start(&runtime_directory, session, inbox_tx, None).expect("start serving");
-    (server, session, runtime_directory, dispatcher, seen)
+    (
+        server,
+        session,
+        runtime_directory,
+        dispatcher,
+        received_command_envelopes,
+    )
 }
 
 /// Open a control connection to `session`, send the Hello, read its answer, and
@@ -1342,7 +1358,7 @@ fn greeted(runtime_directory: &Path, session: SessionId) -> Connection {
 /// was given, after reading the reply the submission earns.
 fn submitted(
     connection: &mut Connection,
-    seen: &Receiver<CommandEnvelope>,
+    received_command_envelopes: &Receiver<CommandEnvelope>,
     envelope: CommandEnvelope,
 ) -> CommandEnvelope {
     connection
@@ -1351,7 +1367,9 @@ fn submitted(
             request_kind: IpcRequestKind::SubmitCommand(Box::new(envelope)),
         })
         .expect("send submit");
-    let dispatched = seen.recv().expect("the dispatcher was given the command");
+    let dispatched = received_command_envelopes
+        .recv()
+        .expect("the dispatcher was given the command");
     let _: IpcResponse = connection.recv().expect("submit reply");
     dispatched
 }
@@ -1478,7 +1496,8 @@ fn a_control_connection_replaces_an_internal_source_with_an_external_cli_one() {
     // The CLI-admission check lets every command through an `Internal` source.
     // A peer presenting one on a control connection is stamped back to the
     // source that connection carries.
-    let (server, session, runtime_directory, dispatcher, seen) = serve_reporting("stamp-internal");
+    let (server, session, runtime_directory, dispatcher, received_command_envelopes) =
+        serve_reporting("stamp-internal");
     let mut connection = greeted(&runtime_directory, session);
     let sent = CommandEnvelope::from_parts(
         CommandId::new(),
@@ -1487,7 +1506,7 @@ fn a_control_connection_replaces_an_internal_source_with_an_external_cli_one() {
         Command::ToggleMouseSelect,
     );
 
-    let dispatched = submitted(&mut connection, &seen, sent.clone());
+    let dispatched = submitted(&mut connection, &received_command_envelopes, sent.clone());
 
     assert_eq!(
         dispatched.command_source,
@@ -1505,7 +1524,7 @@ fn a_control_connection_replaces_an_internal_source_with_an_external_cli_one() {
 
 #[test]
 fn a_control_connection_cannot_present_another_clients_keybinding_source() {
-    let (server, session, runtime_directory, dispatcher, seen) =
+    let (server, session, runtime_directory, dispatcher, received_command_envelopes) =
         serve_reporting("stamp-keybinding");
     let mut connection = greeted(&runtime_directory, session);
     let victim = ClientId::new();
@@ -1516,7 +1535,7 @@ fn a_control_connection_cannot_present_another_clients_keybinding_source() {
         Command::ToggleMouseSelect,
     );
 
-    let dispatched = submitted(&mut connection, &seen, sent);
+    let dispatched = submitted(&mut connection, &received_command_envelopes, sent);
 
     assert_eq!(
         dispatched.command_source,
@@ -1532,7 +1551,8 @@ fn a_control_connection_cannot_present_another_clients_keybinding_source() {
 
 #[test]
 fn a_control_connection_keeps_the_two_cli_sources_a_koshi_invocation_sends() {
-    let (server, session, runtime_directory, dispatcher, seen) = serve_reporting("stamp-cli");
+    let (server, session, runtime_directory, dispatcher, received_command_envelopes) =
+        serve_reporting("stamp-cli");
     let mut connection = greeted(&runtime_directory, session);
     let client = ClientId::new();
     let in_session = CommandSource::from_in_session_cli(
@@ -1545,7 +1565,7 @@ fn a_control_connection_keeps_the_two_cli_sources_a_koshi_invocation_sends() {
 
     let dispatched = submitted(
         &mut connection,
-        &seen,
+        &received_command_envelopes,
         CommandEnvelope::from_parts(
             CommandId::new(),
             in_session.clone(),
@@ -1558,7 +1578,7 @@ fn a_control_connection_keeps_the_two_cli_sources_a_koshi_invocation_sends() {
 
     let dispatched = submitted(
         &mut connection,
-        &seen,
+        &received_command_envelopes,
         CommandEnvelope::from_parts(
             CommandId::new(),
             external.clone(),
@@ -1818,6 +1838,125 @@ fn a_caller_sharing_no_version_is_refused_and_serves_nothing() {
     cleanup(&runtime_directory);
 }
 
+/// A peer that speaks only the protocol the last release spoke shares no
+/// version with this build, so the connection is refused and the session it
+/// aimed at goes on serving.
+#[test]
+fn a_peer_speaking_the_previous_protocol_is_refused_and_the_session_keeps_serving() {
+    let client = ClientId::new();
+    let (server, session, runtime_directory, dispatcher, received_runtime_events) =
+        serve_attachable("previous-protocol", client);
+    // The protocol the last release speaks, written out: a floor that moved
+    // down to meet it would let this peer in, and this test would not see it.
+    let previous_release_protocol_version = 3;
+    let endpoint = EndpointFile::load_from_path(&EndpointFile::resolve_endpoint_file_path(
+        &runtime_directory,
+        session,
+    ))
+    .expect("endpoint file readable");
+
+    let mut old_peer = connect_to(&runtime_directory, session);
+    old_peer
+        .send(&IpcRequest {
+            request_id: 1,
+            request_kind: IpcRequestKind::Hello {
+                min_protocol_version: previous_release_protocol_version,
+                max_protocol_version: previous_release_protocol_version,
+                connection_token: endpoint.connection_token,
+                is_remote: false,
+            },
+        })
+        .expect("send a hello from the protocol before this one");
+
+    let refusal: IpcResponse = old_peer.recv().expect("hello reply");
+    assert_eq!(
+        refusal.answer_result,
+        IpcResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::UnsupportedVersion,
+            message: format!(
+                "the caller speaks protocol versions \
+                 {previous_release_protocol_version} to {previous_release_protocol_version}, \
+                 this Koshi speaks {MIN_PROTOCOL_VERSION} to {PROTOCOL_VERSION}"
+            ),
+        }),
+    );
+    drop(old_peer);
+
+    // The session and its panes took nothing from the refusal: a peer on this
+    // protocol still attaches, and its typing still reaches the dispatcher.
+    let mut connection = attach_to(&runtime_directory, session, client);
+    let typed_key_chord = KeyChord::from_parts(ModFlags::CTRL, Key::Char('t'));
+    connection
+        .send(&IpcRequest {
+            request_id: 3,
+            request_kind: IpcRequestKind::Keyboard {
+                key_input: build_key_input_for_chord(typed_key_chord),
+            },
+        })
+        .expect("send the keyboard request");
+    let RuntimeEvent::ClientKeyboard {
+        client_id,
+        key_input,
+    } = received_runtime_events
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the keyboard request reached the dispatcher")
+    else {
+        panic!("expected ClientKeyboard");
+    };
+    assert_eq!(client_id, client);
+    assert_eq!(key_input, build_key_input_for_chord(typed_key_chord));
+
+    drop(connection);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_directory);
+}
+
+/// Every field the client's terminal reported crosses the attached
+/// connection: the event kind, both alternative keys, the text, and all eight
+/// modifiers.
+#[test]
+fn an_attached_connection_carries_every_field_of_the_key_input() {
+    let client = ClientId::new();
+    let (server, session, runtime_directory, dispatcher, received_runtime_events) =
+        serve_attachable("attached-whole-key", client);
+    let mut connection = attach_to(&runtime_directory, session, client);
+    let reported_key_input = KeyInput {
+        key: KeyIdentity::Key(Key::Char('1')),
+        key_event_kind: KeyEventKind::Release,
+        shifted_key: Some('!'),
+        base_layout_key: Some('q'),
+        associated_text: "e\u{301}".to_string(),
+        modifier_flags: KeyModifierFlags::from_bits(0b1111_1111),
+    };
+
+    connection
+        .send(&IpcRequest {
+            request_id: 3,
+            request_kind: IpcRequestKind::Keyboard {
+                key_input: reported_key_input.clone(),
+            },
+        })
+        .expect("send the keyboard request");
+
+    let RuntimeEvent::ClientKeyboard {
+        client_id,
+        key_input,
+    } = received_runtime_events
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the keyboard request reached the dispatcher")
+    else {
+        panic!("expected ClientKeyboard");
+    };
+    assert_eq!(client_id, client);
+    assert_eq!(key_input, reported_key_input);
+
+    drop(connection);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_directory);
+}
+
 #[test]
 fn a_request_before_hello_is_refused_and_the_connection_keeps_serving() {
     let (server, session, runtime_directory, dispatcher) = serve("hello-first", None);
@@ -1941,7 +2080,7 @@ fn a_restart_advertises_a_fresh_token_and_refuses_the_old_one() {
 #[test]
 fn a_detach_leaves_the_sessions_token_unchanged() {
     let client = ClientId::new();
-    let (server, session, runtime_directory, dispatcher, seen) =
+    let (server, session, runtime_directory, dispatcher, received_runtime_events) =
         serve_attachable("detach-token", client);
     let endpoint_path = EndpointFile::resolve_endpoint_file_path(&runtime_directory, session);
     let endpoint_before_detach =
@@ -1949,7 +2088,9 @@ fn a_detach_leaves_the_sessions_token_unchanged() {
 
     let attached = attach_to(&runtime_directory, session, client);
     drop(attached);
-    let RuntimeEvent::ClientDetached { client_id, .. } = seen.recv().expect("detach event") else {
+    let RuntimeEvent::ClientDetached { client_id, .. } =
+        received_runtime_events.recv().expect("detach event")
+    else {
         panic!("expected ClientDetached");
     };
     assert_eq!(client_id, client);
@@ -2058,7 +2199,7 @@ fn raw_connect(socket_address: &str) -> std::fs::File {
 #[test]
 fn an_attached_connection_forwards_input_unanswered_and_detaches_on_any_other_request() {
     let client = ClientId::new();
-    let (server, session, runtime_directory, dispatcher, seen) =
+    let (server, session, runtime_directory, dispatcher, received_runtime_events) =
         serve_attachable("attached-input", client);
     let mut connection = attach_to(&runtime_directory, session, client);
     let pressed = KeyChord::from_parts(ModFlags::CTRL, Key::Char('t'));
@@ -2071,15 +2212,20 @@ fn an_attached_connection_forwards_input_unanswered_and_detaches_on_any_other_re
     connection
         .send(&IpcRequest {
             request_id: 3,
-            request_kind: IpcRequestKind::KeyPress { chord: pressed },
+            request_kind: IpcRequestKind::Keyboard {
+                key_input: build_key_input_for_chord(pressed),
+            },
         })
         .expect("send key press");
-    let RuntimeEvent::ClientKeyPress { client_id, chord } = seen.recv().expect("key press event")
+    let RuntimeEvent::ClientKeyboard {
+        client_id,
+        key_input,
+    } = received_runtime_events.recv().expect("key press event")
     else {
-        panic!("expected ClientKeyPress");
+        panic!("expected ClientKeyboard");
     };
     assert_eq!(client_id, client);
-    assert_eq!(chord, pressed);
+    assert_eq!(key_input, build_key_input_for_chord(pressed));
 
     connection
         .send(&IpcRequest {
@@ -2096,7 +2242,7 @@ fn an_attached_connection_forwards_input_unanswered_and_detaches_on_any_other_re
         viewport_size,
         pane_area,
         cell_size,
-    } = seen.recv().expect("resize event")
+    } = received_runtime_events.recv().expect("resize event")
     else {
         panic!("expected Resize");
     };
@@ -2114,7 +2260,7 @@ fn an_attached_connection_forwards_input_unanswered_and_detaches_on_any_other_re
     let RuntimeEvent::Ipc {
         envelope,
         response_sender,
-    } = seen.recv().expect("submit event")
+    } = received_runtime_events.recv().expect("submit event")
     else {
         panic!("expected Ipc");
     };
@@ -2152,7 +2298,7 @@ fn an_attached_connection_forwards_input_unanswered_and_detaches_on_any_other_re
         client_id,
         request_id,
         mouse_actions,
-    } = seen.recv().expect("mouse round event")
+    } = received_runtime_events.recv().expect("mouse round event")
     else {
         panic!("expected ClientMouse");
     };
@@ -2171,7 +2317,7 @@ fn an_attached_connection_forwards_input_unanswered_and_detaches_on_any_other_re
     let RuntimeEvent::HostPaste {
         client_id,
         pasted_text,
-    } = seen.recv().expect("paste event")
+    } = received_runtime_events.recv().expect("paste event")
     else {
         panic!("expected HostPaste");
     };
@@ -2185,7 +2331,9 @@ fn an_attached_connection_forwards_input_unanswered_and_detaches_on_any_other_re
             request_kind: IpcRequestKind::Discovery,
         })
         .expect("send discovery");
-    let RuntimeEvent::ClientDetached { client_id, .. } = seen.recv().expect("detach event") else {
+    let RuntimeEvent::ClientDetached { client_id, .. } =
+        received_runtime_events.recv().expect("detach event")
+    else {
         panic!("expected ClientDetached");
     };
     assert_eq!(client_id, client);
@@ -2213,7 +2361,7 @@ fn an_attached_connection_forwards_input_unanswered_and_detaches_on_any_other_re
 #[test]
 fn a_request_kind_this_build_lacks_on_an_attached_connection_is_dropped_and_the_stream_goes_on() {
     let client = ClientId::new();
-    let (server, session, runtime_directory, dispatcher, seen) =
+    let (server, session, runtime_directory, dispatcher, received_runtime_events) =
         serve_attachable("attached-unknown-kind", client);
     let mut connection = attach_to(&runtime_directory, session, client);
     let pressed = KeyChord::from_parts(ModFlags::CTRL, Key::Char('t'));
@@ -2228,20 +2376,25 @@ fn a_request_kind_this_build_lacks_on_an_attached_connection_is_dropped_and_the_
     connection
         .send(&IpcRequest {
             request_id: 4,
-            request_kind: IpcRequestKind::KeyPress { chord: pressed },
+            request_kind: IpcRequestKind::Keyboard {
+                key_input: build_key_input_for_chord(pressed),
+            },
         })
         .expect("send key press");
 
     // The key press is the first event the dispatcher sees, so the unfamiliar
     // request crossed nothing, and the stream carried the one behind it.
-    let RuntimeEvent::ClientKeyPress { client_id, chord } = seen
+    let RuntimeEvent::ClientKeyboard {
+        client_id,
+        key_input,
+    } = received_runtime_events
         .recv_timeout(Duration::from_secs(5))
         .expect("key press event")
     else {
-        panic!("expected ClientKeyPress");
+        panic!("expected ClientKeyboard");
     };
     assert_eq!(client_id, client);
-    assert_eq!(chord, pressed);
+    assert_eq!(key_input, build_key_input_for_chord(pressed));
 
     drop(connection);
     server.shutdown();
@@ -2252,7 +2405,7 @@ fn a_request_kind_this_build_lacks_on_an_attached_connection_is_dropped_and_the_
 #[test]
 fn a_malformed_frame_on_an_attached_connection_is_dropped_and_the_stream_goes_on() {
     let client = ClientId::new();
-    let (server, session, runtime_directory, dispatcher, seen) =
+    let (server, session, runtime_directory, dispatcher, received_runtime_events) =
         serve_attachable("attached-malformed", client);
     let mut connection = attach_to(&runtime_directory, session, client);
     let pressed = KeyChord::from_parts(ModFlags::CTRL, Key::Char('t'));
@@ -2262,20 +2415,63 @@ fn a_malformed_frame_on_an_attached_connection_is_dropped_and_the_stream_goes_on
     connection
         .send(&IpcRequest {
             request_id: 3,
-            request_kind: IpcRequestKind::KeyPress { chord: pressed },
+            request_kind: IpcRequestKind::Keyboard {
+                key_input: build_key_input_for_chord(pressed),
+            },
         })
         .expect("send key press");
 
     // The key press is the first event the dispatcher sees, so the unreadable
     // frame crossed nothing, and the stream carried the one behind it.
-    let RuntimeEvent::ClientKeyPress { client_id, chord } = seen
+    let RuntimeEvent::ClientKeyboard {
+        client_id,
+        key_input,
+    } = received_runtime_events
         .recv_timeout(Duration::from_secs(5))
         .expect("key press event")
     else {
-        panic!("expected ClientKeyPress");
+        panic!("expected ClientKeyboard");
     };
     assert_eq!(client_id, client);
-    assert_eq!(chord, pressed);
+    assert_eq!(key_input, build_key_input_for_chord(pressed));
+
+    drop(connection);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_directory);
+}
+
+#[test]
+fn a_keyboard_request_before_an_attach_closes_the_connection() {
+    // A keyboard event names no client until the connection carries one, so it
+    // belongs on an attached connection only.
+    let (server, session, runtime_directory, dispatcher) = serve("key-unattached", None);
+    let mut connection = connect_to(&runtime_directory, session);
+
+    connection
+        .send(&hello_for(&runtime_directory, session))
+        .expect("send hello");
+    let hello_reply: IpcResponse = connection.recv().expect("hello reply");
+    assert_eq!(hello_reply.answer_result, hello_accepted());
+
+    connection
+        .send(&IpcRequest {
+            request_id: 2,
+            request_kind: IpcRequestKind::Keyboard {
+                key_input: build_key_input_for_chord(KeyChord::from_parts(
+                    ModFlags::CTRL,
+                    Key::Char('t'),
+                )),
+            },
+        })
+        .expect("send the keyboard request");
+    assert!(
+        matches!(
+            connection.recv::<IpcResponse>(),
+            Err(IpcError::Disconnected),
+        ),
+        "no reply comes back, and the connection is closed",
+    );
 
     drop(connection);
     server.shutdown();
@@ -2531,7 +2727,7 @@ fn a_layout_request_with_no_running_session_closes_the_connection() {
 #[test]
 fn a_layout_request_on_an_attached_connection_ends_that_client_stream() {
     let client = ClientId::new();
-    let (server, session, runtime_directory, dispatcher, seen) =
+    let (server, session, runtime_directory, dispatcher, received_runtime_events) =
         serve_attachable("layout-attached", client);
     let mut connection = attach_to(&runtime_directory, session, client);
 
@@ -2542,7 +2738,9 @@ fn a_layout_request_on_an_attached_connection_ends_that_client_stream() {
         })
         .expect("send layout request");
 
-    let RuntimeEvent::ClientDetached { client_id, .. } = seen.recv().expect("detach event") else {
+    let RuntimeEvent::ClientDetached { client_id, .. } =
+        received_runtime_events.recv().expect("detach event")
+    else {
         panic!("expected ClientDetached");
     };
     assert_eq!(client_id, client);
@@ -2870,7 +3068,8 @@ fn the_user_who_started_the_session_attaches_over_the_shared_socket_with_the_tok
     let session = SessionId::new();
     let client = ClientId::new();
     let (inbox_tx, inbox_rx) = mpsc::channel();
-    let (dispatcher, _seen) = spawn_attaching_dispatcher(inbox_rx, client, session);
+    let (dispatcher, _received_runtime_events) =
+        spawn_attaching_dispatcher(inbox_rx, client, session);
     let server = IpcServer::start(
         &runtime_directory,
         session,
@@ -3085,7 +3284,8 @@ fn an_attached_client_of_another_local_user_is_detached_when_the_setting_goes_of
     let session = SessionId::new();
     let is_enabled = Arc::new(AtomicBool::new(true));
     let (inbox_tx, inbox_rx) = mpsc::channel();
-    let (dispatcher, seen) = spawn_attaching_dispatcher(inbox_rx, client, session);
+    let (dispatcher, received_runtime_events) =
+        spawn_attaching_dispatcher(inbox_rx, client, session);
     let (mut caller, serving, socket_address) =
         serve_other_user("attached-off", &is_enabled, inbox_tx);
 
@@ -3095,27 +3295,36 @@ fn an_attached_client_of_another_local_user_is_detached_when_the_setting_goes_of
     caller
         .send(&IpcRequest {
             request_id: 3,
-            request_kind: IpcRequestKind::KeyPress { chord: pressed },
+            request_kind: IpcRequestKind::Keyboard {
+                key_input: build_key_input_for_chord(pressed),
+            },
         })
         .expect("send key press");
-    let RuntimeEvent::ClientKeyPress { client_id, chord } = seen.recv().expect("key press event")
+    let RuntimeEvent::ClientKeyboard {
+        client_id,
+        key_input,
+    } = received_runtime_events.recv().expect("key press event")
     else {
-        panic!("expected ClientKeyPress");
+        panic!("expected ClientKeyboard");
     };
     assert_eq!(client_id, client);
-    assert_eq!(chord, pressed);
+    assert_eq!(key_input, build_key_input_for_chord(pressed));
 
     is_enabled.store(false, Ordering::SeqCst);
     caller
         .send(&IpcRequest {
             request_id: 4,
-            request_kind: IpcRequestKind::KeyPress { chord: pressed },
+            request_kind: IpcRequestKind::Keyboard {
+                key_input: build_key_input_for_chord(pressed),
+            },
         })
         .expect("send key press");
 
     // The typing that arrived after the setting went off never reached the
     // session; the client left instead.
-    let RuntimeEvent::ClientDetached { client_id, .. } = seen.recv().expect("detach event") else {
+    let RuntimeEvent::ClientDetached { client_id, .. } =
+        received_runtime_events.recv().expect("detach event")
+    else {
         panic!("expected ClientDetached");
     };
     assert_eq!(client_id, client);
@@ -3136,7 +3345,8 @@ fn a_withdrawn_local_user_is_detached_by_a_frame_this_build_cannot_read() {
     let session = SessionId::new();
     let is_enabled = Arc::new(AtomicBool::new(true));
     let (inbox_tx, inbox_rx) = mpsc::channel();
-    let (dispatcher, seen) = spawn_attaching_dispatcher(inbox_rx, client, session);
+    let (dispatcher, received_runtime_events) =
+        spawn_attaching_dispatcher(inbox_rx, client, session);
     let (mut caller, serving, socket_address) =
         serve_other_user("attached-off-junk", &is_enabled, inbox_tx);
     attach_as_other_user(&mut caller, client, session);
@@ -3147,7 +3357,7 @@ fn a_withdrawn_local_user_is_detached_by_a_frame_this_build_cannot_read() {
     is_enabled.store(false, Ordering::SeqCst);
     caller.send(&"not a request").expect("send junk frame");
 
-    let RuntimeEvent::ClientDetached { client_id, .. } = seen
+    let RuntimeEvent::ClientDetached { client_id, .. } = received_runtime_events
         .recv_timeout(Duration::from_secs(5))
         .expect("detach event")
     else {
@@ -3171,7 +3381,8 @@ fn a_lost_connection_ends_an_attached_clients_reading_half() {
     let session = SessionId::new();
     let is_enabled = Arc::new(AtomicBool::new(true));
     let (inbox_tx, inbox_rx) = mpsc::channel();
-    let (dispatcher, seen) = spawn_attaching_dispatcher(inbox_rx, client, session);
+    let (dispatcher, received_runtime_events) =
+        spawn_attaching_dispatcher(inbox_rx, client, session);
     let (mut caller, serving, socket_address) =
         serve_other_user("attached-lost", &is_enabled, inbox_tx);
     attach_as_other_user(&mut caller, client, session);
@@ -3180,7 +3391,7 @@ fn a_lost_connection_ends_an_attached_clients_reading_half() {
     // open queue and notices nothing. The detach below is the reading half's.
     drop(caller);
 
-    let RuntimeEvent::ClientDetached { client_id, .. } = seen
+    let RuntimeEvent::ClientDetached { client_id, .. } = received_runtime_events
         .recv_timeout(Duration::from_secs(5))
         .expect("detach event")
     else {
@@ -3518,7 +3729,7 @@ fn a_restart_on_an_attached_connection_detaches_that_client_and_restarts_nothing
     // requests. An attached connection is carrying one client's events instead,
     // so the request ends that stream and no restart request is made.
     let client = ClientId::new();
-    let (server, session, runtime_directory, dispatcher, seen) =
+    let (server, session, runtime_directory, dispatcher, received_runtime_events) =
         serve_attachable("attached-restart", client);
     let mut connection = attach_to(&runtime_directory, session, client);
 
@@ -3529,7 +3740,9 @@ fn a_restart_on_an_attached_connection_detaches_that_client_and_restarts_nothing
         })
         .expect("send restart");
 
-    let RuntimeEvent::ClientDetached { client_id, .. } = seen.recv().expect("detach event") else {
+    let RuntimeEvent::ClientDetached { client_id, .. } =
+        received_runtime_events.recv().expect("detach event")
+    else {
         panic!("expected ClientDetached");
     };
     assert_eq!(client_id, client);
@@ -3577,7 +3790,7 @@ fn wait_for_attached(server: &IpcServer, want: usize) -> usize {
 #[test]
 fn every_attached_clients_connection_is_counted_while_it_is_read() {
     let client = ClientId::new();
-    let (server, session, runtime_directory, dispatcher, _seen) =
+    let (server, session, runtime_directory, dispatcher, _received_runtime_events) =
         serve_attachable("two-attached", client);
 
     let first_attached_connection = attach_to(&runtime_directory, session, client);
@@ -3610,7 +3823,7 @@ fn every_key_a_client_sent_reaches_the_dispatcher_before_that_client_leaves() {
     // that one is what says the session holds every key that client typed. The
     // image swap waits for exactly this before it carries the session out.
     let client = ClientId::new();
-    let (server, session, runtime_directory, dispatcher, seen) =
+    let (server, session, runtime_directory, dispatcher, received_runtime_events) =
         serve_attachable("leaving", client);
     let mut connection = attach_to(&runtime_directory, session, client);
     assert_eq!(
@@ -3619,16 +3832,18 @@ fn every_key_a_client_sent_reaches_the_dispatcher_before_that_client_leaves() {
         "the attached client's connection is counted while it is read"
     );
 
-    let typed = [
+    let typed_key_chords = [
         KeyChord::from_parts(ModFlags::CTRL, Key::Char('a')),
         KeyChord::from_parts(ModFlags::CTRL, Key::Char('b')),
         KeyChord::from_parts(ModFlags::CTRL, Key::Char('c')),
     ];
-    for (round, chord) in typed.iter().enumerate() {
+    for (round, chord) in typed_key_chords.iter().enumerate() {
         connection
             .send(&IpcRequest {
                 request_id: 3 + round as u64,
-                request_kind: IpcRequestKind::KeyPress { chord: *chord },
+                request_kind: IpcRequestKind::Keyboard {
+                    key_input: build_key_input_for_chord(*chord),
+                },
             })
             .expect("send the key press");
     }
@@ -3639,18 +3854,18 @@ fn every_key_a_client_sent_reaches_the_dispatcher_before_that_client_leaves() {
         })
         .expect("send leaving");
 
-    for chord in typed {
-        let RuntimeEvent::ClientKeyPress {
+    for chord in typed_key_chords {
+        let RuntimeEvent::ClientKeyboard {
             client_id,
-            chord: pressed,
-        } = seen
+            key_input,
+        } = received_runtime_events
             .recv_timeout(Duration::from_secs(5))
             .expect("key press event")
         else {
-            panic!("expected ClientKeyPress");
+            panic!("expected ClientKeyboard");
         };
         assert_eq!(client_id, client);
-        assert_eq!(pressed, chord);
+        assert_eq!(key_input, build_key_input_for_chord(chord));
     }
     // The reading half ends on the request that follows those keys, so the
     // client's image record is released here and nowhere earlier.
@@ -3658,7 +3873,7 @@ fn every_key_a_client_sent_reaches_the_dispatcher_before_that_client_leaves() {
         client_id,
         is_streamed,
         ..
-    } = seen
+    } = received_runtime_events
         .recv_timeout(Duration::from_secs(5))
         .expect("detach event")
     else {
@@ -3697,7 +3912,7 @@ fn a_control_connection_that_leaves_is_closed_with_no_answer() {
     // every request it sent was answered as it was served, and the request that
     // ends it carries no answer of its own.
     let client = ClientId::new();
-    let (server, session, runtime_directory, dispatcher, seen) =
+    let (server, session, runtime_directory, dispatcher, received_runtime_events) =
         serve_attachable("leaving-control", client);
 
     let mut connection = connect_to(&runtime_directory, session);
@@ -3723,7 +3938,9 @@ fn a_control_connection_that_leaves_is_closed_with_no_answer() {
     // A control connection carries no client, so nothing about it reaches the
     // session.
     assert_eq!(
-        seen.recv_timeout(Duration::from_secs(2)).unwrap_err(),
+        received_runtime_events
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap_err(),
         mpsc::RecvTimeoutError::Timeout,
     );
     assert_eq!(server.attached_connections(), 0);
@@ -3799,7 +4016,7 @@ fn rotating_the_token_takes_connections_again_after_the_intake_closed() {
     // with the swap. The session keeps this socket, so it has to serve on it
     // again.
     let client = ClientId::new();
-    let (server, session, runtime_directory, dispatcher, seen) =
+    let (server, session, runtime_directory, dispatcher, received_runtime_events) =
         serve_attachable("rotate-reopen", client);
 
     server.close_intake();
@@ -3836,20 +4053,22 @@ fn rotating_the_token_takes_connections_again_after_the_intake_closed() {
     connection
         .send(&IpcRequest {
             request_id: 3,
-            request_kind: IpcRequestKind::KeyPress { chord },
+            request_kind: IpcRequestKind::Keyboard {
+                key_input: build_key_input_for_chord(chord),
+            },
         })
         .expect("send the key press");
-    let RuntimeEvent::ClientKeyPress {
+    let RuntimeEvent::ClientKeyboard {
         client_id,
-        chord: pressed,
-    } = seen
+        key_input,
+    } = received_runtime_events
         .recv_timeout(Duration::from_secs(5))
         .expect("key press")
     else {
-        panic!("expected ClientKeyPress");
+        panic!("expected ClientKeyboard");
     };
     assert_eq!(client_id, client);
-    assert_eq!(pressed, chord);
+    assert_eq!(key_input, build_key_input_for_chord(chord));
 
     drop(connection);
     server.shutdown();
@@ -3920,7 +4139,8 @@ fn a_request_a_client_sends_after_the_intake_closes_never_reaches_the_dispatcher
     // The test keeps an inbox sender of its own, so it can end this client's
     // writing thread once the intake refuses the detach that would.
     let (inbox_tx, inbox_rx) = mpsc::channel();
-    let (dispatcher, seen) = spawn_attaching_dispatcher(inbox_rx, client, session);
+    let (dispatcher, received_runtime_events) =
+        spawn_attaching_dispatcher(inbox_rx, client, session);
     let server = IpcServer::start(&runtime_directory, session, inbox_tx.clone(), None)
         .expect("start serving");
     let mut connection = attach_to(&runtime_directory, session, client);
@@ -3932,15 +4152,20 @@ fn a_request_a_client_sends_after_the_intake_closes_never_reaches_the_dispatcher
     connection
         .send(&IpcRequest {
             request_id: 3,
-            request_kind: IpcRequestKind::KeyPress { chord: taken },
+            request_kind: IpcRequestKind::Keyboard {
+                key_input: build_key_input_for_chord(taken),
+            },
         })
         .expect("send the key press the session takes");
-    let RuntimeEvent::ClientKeyPress { client_id, chord } = seen.recv().expect("key press event")
+    let RuntimeEvent::ClientKeyboard {
+        client_id,
+        key_input,
+    } = received_runtime_events.recv().expect("key press event")
     else {
-        panic!("expected ClientKeyPress");
+        panic!("expected ClientKeyboard");
     };
     assert_eq!(client_id, client);
-    assert_eq!(chord, taken);
+    assert_eq!(key_input, build_key_input_for_chord(taken));
 
     server.close_intake();
 
@@ -3950,10 +4175,14 @@ fn a_request_a_client_sends_after_the_intake_closes_never_reaches_the_dispatcher
     // otherwise queue, which is what keeps this client's image record carried across.
     let _ = connection.send(&IpcRequest {
         request_id: 4,
-        request_kind: IpcRequestKind::KeyPress { chord: refused },
+        request_kind: IpcRequestKind::Keyboard {
+            key_input: build_key_input_for_chord(refused),
+        },
     });
     assert_eq!(
-        seen.recv_timeout(Duration::from_secs(2)).unwrap_err(),
+        received_runtime_events
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap_err(),
         mpsc::RecvTimeoutError::Timeout,
     );
 
@@ -3978,7 +4207,7 @@ fn a_connection_accepted_after_the_intake_closes_is_not_served() {
     // A caller that connects while the swap is carrying the state out must not
     // be answered: the session it would reach is about to be replaced.
     let client = ClientId::new();
-    let (server, session, runtime_directory, dispatcher, seen) =
+    let (server, session, runtime_directory, dispatcher, received_runtime_events) =
         serve_attachable("intake-closed-accept", client);
 
     server.close_intake();
@@ -3995,7 +4224,9 @@ fn a_connection_accepted_after_the_intake_closes_is_not_served() {
         "a connection accepted after the intake closed is closed unanswered",
     );
     assert_eq!(
-        seen.recv_timeout(Duration::from_secs(2)).unwrap_err(),
+        received_runtime_events
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap_err(),
         mpsc::RecvTimeoutError::Timeout,
     );
 
@@ -4074,7 +4305,7 @@ fn spawn_origin_reporting_dispatcher(
     client_id: ClientId,
     session_id: SessionId,
 ) -> (JoinHandle<()>, Receiver<bool>) {
-    let (seen_tx, seen_rx) = mpsc::channel();
+    let (remote_flag_sender, remote_flag_receiver) = mpsc::channel();
     let handle = std::thread::spawn(move || {
         let mut queues = Vec::new();
         let ending_notice = Arc::new(EndingNotice::default());
@@ -4087,7 +4318,7 @@ fn spawn_origin_reporting_dispatcher(
                 } => {
                     let (events_tx, events_rx) = mpsc::channel();
                     queues.push(events_tx);
-                    if seen_tx.send(is_remote).is_err() {
+                    if remote_flag_sender.send(is_remote).is_err() {
                         break;
                     }
                     let _ = response_sender.send(Some(AttachAccepted {
@@ -4105,7 +4336,7 @@ fn spawn_origin_reporting_dispatcher(
             }
         }
     });
-    (handle, seen_rx)
+    (handle, remote_flag_receiver)
 }
 
 /// Open a connection, say hello naming whether the caller reached this session
@@ -4178,20 +4409,21 @@ fn an_attach_is_marked_remote_exactly_when_its_hello_named_another_machine() {
     let session = SessionId::new();
     let runtime_directory = build_test_runtime_directory("attach-origin");
     let (inbox_tx, inbox_rx) = mpsc::channel();
-    let (dispatcher, seen) = spawn_origin_reporting_dispatcher(inbox_rx, client, session);
+    let (dispatcher, received_remote_flags) =
+        spawn_origin_reporting_dispatcher(inbox_rx, client, session);
     let server =
         IpcServer::start(&runtime_directory, session, inbox_tx, None).expect("start serving");
 
     let local = attach_saying_remote(&runtime_directory, session, client, false);
     assert_eq!(
-        seen.recv_timeout(Duration::from_secs(5)),
+        received_remote_flags.recv_timeout(Duration::from_secs(5)),
         Ok(false),
         "a hello naming no other machine leaves the attach it carries local",
     );
 
     let remote = attach_saying_remote(&runtime_directory, session, client, true);
     assert_eq!(
-        seen.recv_timeout(Duration::from_secs(5)),
+        received_remote_flags.recv_timeout(Duration::from_secs(5)),
         Ok(true),
         "a hello naming another machine marks the attach it carries remote",
     );

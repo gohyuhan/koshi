@@ -932,10 +932,9 @@ pub fn attach_remote_session(
 /// working directory keeps none. A rejection's hint is filtered by
 /// [`sanitize_reported_text`].
 ///
-/// A named `client` reaches only a session that settled on protocol version 3
-/// or newer; a session that settled below it is refused with
-/// [`CliError::IpcUnavailable`] before the command is written. `None` names no
-/// client, and the command is written whatever the session settled on.
+/// Naming a `client` changes nothing about the exchange: the session's Hello
+/// answer settles the version either way, and a session that settled on a
+/// version this build does not speak is refused before the command is written.
 ///
 /// # Errors
 /// Whatever [`connect_saved_server`] reports, and [`CliError::IpcUnavailable`] when
@@ -956,12 +955,7 @@ pub fn submit_remote_command(
         request_id: 2,
         request_kind: IpcRequestKind::SubmitCommand(Box::new(command_envelope)),
     };
-    match send_remote_ipc_request(
-        server_reference,
-        session_id,
-        command_request,
-        client_id.is_some(),
-    )? {
+    match send_remote_ipc_request(server_reference, session_id, command_request)? {
         IpcResult::CommandResult(command_result) => Ok(talk::filter_rejection_hint(command_result)),
         IpcResult::Error(refusal) => Err(build_peer_refusal_error(&refusal)),
         unexpected_result => {
@@ -990,7 +984,7 @@ pub fn fetch_remote_overview(
         request_id: 2,
         request_kind: IpcRequestKind::Discovery,
     };
-    match send_remote_ipc_request(server_reference, session_id, discovery_request, false)? {
+    match send_remote_ipc_request(server_reference, session_id, discovery_request)? {
         IpcResult::Overview(mut session_overview) => {
             crate::discovery::filter_session_overview_text(&mut session_overview);
             Ok(session_overview)
@@ -1005,16 +999,10 @@ pub fn fetch_remote_overview(
 /// One request against one remote session: dial, attach, settle the version
 /// from the Hello answer the server sent on this caller's behalf, then send
 /// the IPC request and read its answer.
-///
-/// `has_client_target` `true` refuses a session that settled below
-/// [`TARGET_CLIENT_PROTOCOL`](crate::talk::TARGET_CLIENT_PROTOCOL) with
-/// [`CliError::IpcUnavailable`], before the IPC request is written. `false`
-/// writes the IPC request whatever the session settled on.
 fn send_remote_ipc_request(
     server_reference: &ServerReference,
     session_id: SessionId,
     ipc_request: IpcRequest,
-    has_client_target: bool,
 ) -> Result<IpcResult, CliError> {
     let (remote_link, _) =
         connect_saved_server(server_reference, None, Some(REPLY_TIMEOUT_DURATION))?;
@@ -1023,8 +1011,7 @@ fn send_remote_ipc_request(
 
     let hello_response: IncomingResponse =
         frame_reader.recv().map_err(build_ipc_unavailable_error)?;
-    let (settled_protocol_version, _) = talk::parse_session_hello_version(hello_response)?;
-    talk::validate_client_targeting(settled_protocol_version, has_client_target)?;
+    talk::parse_session_hello_version(hello_response)?;
 
     frame_writer
         .send(&ipc_request)

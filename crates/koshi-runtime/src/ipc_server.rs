@@ -815,11 +815,11 @@ fn serve_connection(
                 );
                 return;
             }
-            // A key press, a resize, a paste and a mouse round belong on an
-            // attached client's connection, which the `Attach` arm above
+            // A keyboard event, a resize, a paste and a mouse round belong on
+            // an attached client's connection, which the `Attach` arm above
             // hands to `stream_events`. On this control path they name no
             // client, so they close the connection.
-            IpcRequestKind::KeyPress { .. }
+            IpcRequestKind::Keyboard { .. }
             | IpcRequestKind::Resize { .. }
             | IpcRequestKind::CellSize { .. }
             | IpcRequestKind::Paste { .. }
@@ -902,7 +902,7 @@ fn serve_connection(
 ///
 /// The connection is split: a spawned thread drains the client's queue and
 /// writes one frame per delivery that says something about the session's
-/// structure, while this thread reads the client's own frames. A `KeyPress`, a
+/// structure, while this thread reads the client's own frames. A `Keyboard`, a
 /// `Resize`, a `Paste`, a `SubmitCommand` and a `Mouse` round all cross to the
 /// dispatcher over the inbox, and this half writes nothing back for any of
 /// them: the first four are answered by the next painted frame, and a `Mouse`
@@ -1100,7 +1100,10 @@ fn stream_events(
                 client_id,
                 cell_size,
             },
-            IpcRequestKind::KeyPress { chord } => RuntimeEvent::ClientKeyPress { client_id, chord },
+            IpcRequestKind::Keyboard { key_input } => RuntimeEvent::ClientKeyboard {
+                client_id,
+                key_input,
+            },
             IpcRequestKind::Resize {
                 viewport: viewport_size,
                 pane_area,

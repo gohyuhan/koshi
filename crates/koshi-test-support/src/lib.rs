@@ -17,7 +17,8 @@ pub mod event_assert;
 /// output and child exit.
 pub mod fake_pty;
 
-/// Shared test fixtures, including the runtime directory.
+/// Shared test fixtures, including the runtime directory and the complete key
+/// event for one chord.
 pub mod fixtures;
 
 /// Layout invariant checks for pure-layout tests.

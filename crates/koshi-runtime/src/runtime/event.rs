@@ -25,7 +25,7 @@ use koshi_core::{
     discovery::SessionOverview,
     geometry::{PaneArea, Size},
     ids::{ClientId, PaneId, SessionId, TabId},
-    key::{KeyChord, KeyInput},
+    key::KeyInput,
     mouse::MouseInput,
     process::ExitStatus,
 };
@@ -108,13 +108,16 @@ pub enum RuntimeEvent {
         /// The complete key event the client's terminal reported.
         key_input: KeyInput,
     },
-    /// One key press an attached client's keymap did not bind, for the pane
-    /// that client is typing into.
-    ClientKeyPress {
-        /// Client whose keymap left the press unbound.
+    /// One keyboard event an attached client sent for the pane it is typing
+    /// into: its keymap bound nothing to the event, or no chord could name it.
+    ///
+    /// Carries every field the client's terminal reported, a release and a key
+    /// no keybinding can name included.
+    ClientKeyboard {
+        /// Client whose keymap left the event unbound.
         client_id: ClientId,
-        /// The chord the client read from its terminal.
-        chord: KeyChord,
+        /// The keyboard event the client read from its terminal.
+        key_input: KeyInput,
     },
     /// One round of mouse actions an attached client's viewer decided for one
     /// host mouse event, in the order the session must run them.

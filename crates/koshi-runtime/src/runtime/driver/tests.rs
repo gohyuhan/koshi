@@ -19,6 +19,7 @@ use koshi_core::mouse::{MouseButton, MouseInput, MouseKind};
 use koshi_core::process::{PtySize, SpawnSpec};
 use koshi_pty::backend::state::PtyBackend;
 use koshi_test_support::fake_pty::FakePtyBackend;
+use koshi_test_support::fixtures::build_key_input_for_chord;
 
 use crate::runtime::event::RuntimeEvent;
 use crate::runtime::render_schedule::FRAME_INTERVAL_DURATION;
@@ -119,9 +120,9 @@ fn a_client_key_press_is_written_to_that_clients_focused_pane() {
         .next()
         .expect("one pane");
 
-    let control_flow = server.handle_runtime_event(RuntimeEvent::ClientKeyPress {
+    let control_flow = server.handle_runtime_event(RuntimeEvent::ClientKeyboard {
         client_id,
-        chord: KeyChord::from_parts(ModFlags::NONE, Key::Char('a')),
+        key_input: build_key_input_for_chord(KeyChord::from_parts(ModFlags::NONE, Key::Char('a'))),
     });
 
     assert_eq!(control_flow, ControlFlow::Continue(()));
@@ -130,6 +131,128 @@ fn a_client_key_press_is_written_to_that_clients_focused_pane() {
             .list_pane_write_bytes(pane_id)
             .expect("writes"),
         vec![vec![b'a']]
+    );
+}
+
+/// A repeat carries a chord the same way a press does, so the pane reads the
+/// key again.
+#[test]
+fn a_client_key_repeat_is_written_to_that_clients_focused_pane() {
+    let (mut server, fake_pty_backend, _event_sender) = build_test_runtime_with_fake_pty_backend();
+    let client_id = server
+        .bootstrap_local(
+            SessionId::new(),
+            Size {
+                column_count: 80,
+                row_count: 24,
+            },
+            SystemTime::UNIX_EPOCH,
+        )
+        .expect("bootstrap");
+    let pane_id = *server
+        .pty_handle_by_pane_id
+        .keys()
+        .next()
+        .expect("one pane");
+    let repeated_key_input = KeyInput {
+        key_event_kind: KeyEventKind::Repeat,
+        ..build_key_input_for_chord(KeyChord::from_parts(ModFlags::NONE, Key::Char('a')))
+    };
+
+    let control_flow = server.handle_runtime_event(RuntimeEvent::ClientKeyboard {
+        client_id,
+        key_input: repeated_key_input,
+    });
+
+    assert_eq!(control_flow, ControlFlow::Continue(()));
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        vec![vec![b'a']]
+    );
+}
+
+/// Legacy pane delivery writes a chord, and a release has none, so the pane
+/// reads nothing. The enhanced encoding that gives a release its own bytes is
+/// not integrated yet.
+#[test]
+fn a_client_key_release_writes_nothing_to_that_clients_focused_pane() {
+    let (mut server, fake_pty_backend, _event_sender) = build_test_runtime_with_fake_pty_backend();
+    let client_id = server
+        .bootstrap_local(
+            SessionId::new(),
+            Size {
+                column_count: 80,
+                row_count: 24,
+            },
+            SystemTime::UNIX_EPOCH,
+        )
+        .expect("bootstrap");
+    let pane_id = *server
+        .pty_handle_by_pane_id
+        .keys()
+        .next()
+        .expect("one pane");
+    let released_key_input = KeyInput {
+        key_event_kind: KeyEventKind::Release,
+        ..build_key_input_for_chord(KeyChord::from_parts(ModFlags::NONE, Key::Char('a')))
+    };
+
+    let control_flow = server.handle_runtime_event(RuntimeEvent::ClientKeyboard {
+        client_id,
+        key_input: released_key_input,
+    });
+
+    assert_eq!(control_flow, ControlFlow::Continue(()));
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
+}
+
+/// Left Shift reports as codepoint 57441, which no chord can hold, so legacy
+/// pane delivery writes nothing for it.
+#[test]
+fn a_client_key_that_no_chord_can_name_writes_nothing_to_that_clients_focused_pane() {
+    let (mut server, fake_pty_backend, _event_sender) = build_test_runtime_with_fake_pty_backend();
+    let client_id = server
+        .bootstrap_local(
+            SessionId::new(),
+            Size {
+                column_count: 80,
+                row_count: 24,
+            },
+            SystemTime::UNIX_EPOCH,
+        )
+        .expect("bootstrap");
+    let pane_id = *server
+        .pty_handle_by_pane_id
+        .keys()
+        .next()
+        .expect("one pane");
+    let left_shift_key_input = KeyInput {
+        key: KeyIdentity::Codepoint(57441),
+        key_event_kind: KeyEventKind::Press,
+        shifted_key: None,
+        base_layout_key: None,
+        associated_text: String::new(),
+        modifier_flags: KeyModifierFlags::SHIFT,
+    };
+
+    let control_flow = server.handle_runtime_event(RuntimeEvent::ClientKeyboard {
+        client_id,
+        key_input: left_shift_key_input,
+    });
+
+    assert_eq!(control_flow, ControlFlow::Continue(()));
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
     );
 }
 

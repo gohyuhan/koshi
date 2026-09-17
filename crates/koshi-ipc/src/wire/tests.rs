@@ -710,11 +710,15 @@ fn sample_request_kinds() -> Vec<IpcRequestKind> {
             graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
             cell_size: None,
         },
-        IpcRequestKind::KeyPress {
-            chord: koshi_core::key::KeyChord::from_parts(
-                koshi_core::key::ModFlags::NONE,
-                koshi_core::key::Key::Char('a'),
-            ),
+        IpcRequestKind::Keyboard {
+            key_input: koshi_core::key::KeyInput {
+                key: koshi_core::key::KeyIdentity::Key(koshi_core::key::Key::Char('a')),
+                key_event_kind: koshi_core::key::KeyEventKind::Press,
+                shifted_key: None,
+                base_layout_key: None,
+                associated_text: "a".to_string(),
+                modifier_flags: koshi_core::key::KeyModifierFlags::NONE,
+            },
         },
         IpcRequestKind::Resize {
             viewport: Size {
