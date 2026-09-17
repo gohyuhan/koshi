@@ -35,6 +35,12 @@
 //! requests through. None of them reaches the session, any pane, or any other
 //! connection.
 //!
+//! An attached client's connection is read on a loop of its own, which writes
+//! no frame back. That loop reads the `allow-other-users` setting after each
+//! read on the connection, whether or not the frame decoded, then drops a
+//! request kind this build does not have and a malformed-but-aligned frame. It
+//! ends on an oversize frame, a disconnect and a transport fault.
+//!
 //! A `Leaving` request ends the connection it arrives on: the thread serving it
 //! stops reading and the connection closes. Requests arrive in the order the
 //! peer queued them, so every request that peer sent is already with the
@@ -902,8 +908,13 @@ fn serve_connection(
 /// them: the first four are answered by the next painted frame, and a `Mouse`
 /// round is answered on the writing half by exactly one
 /// [`SessionEvent::MouseAnswer`] carrying that round's `request_id`. A request
-/// of any other kind, end of stream, a transport fault, or a dispatcher that is
-/// gone all end the reading loop.
+/// of any other kind, end of stream, a transport fault, an oversize frame, or a
+/// dispatcher that is gone all end the reading loop.
+///
+/// A frame that arrives whole and does not decode costs the client that one
+/// request. The reading half drops it and reads the next frame, and the client
+/// stays attached. A request kind this build does not have is dropped the same
+/// way. Nothing is written back for either: this half writes no frames.
 ///
 /// A `SubmitCommand` on this connection has its source stamped by
 /// [`stamp_client_command_source`], so it is attributed to `client_id` and to no other
@@ -934,8 +945,9 @@ fn serve_connection(
 ///
 /// `live_setting` is the live read of the `allow-other-users` setting on a
 /// connection from another local user, and `None` on one from the user who
-/// started the session. It is read before each frame that client sends is
-/// acted on, so turning the setting off detaches them at their next input.
+/// started the session. It is read after each read on this connection,
+/// whether or not the frame decoded, and turning the setting off detaches that
+/// client at its next frame.
 ///
 /// This connection's place in the intake's attached count is held by the
 /// caller: taken before the `Attached` frame is written, dropped once this
@@ -1046,15 +1058,33 @@ fn stream_events(
         ending_notice.record_writer_ended();
     });
 
-    while let Ok(incoming_request) = reader.recv::<IncomingRequest>() {
-        // The setting can change while this client is attached, so it is read
-        // again for each frame that client sends.
+    loop {
+        let incoming_request_result = reader.recv::<IncomingRequest>();
+        // The setting can change while this client is attached. It is read
+        // again after each read on this connection, whether or not the frame
+        // decoded. A client whose access was withdrawn reads no further frame
+        // of this session.
         if live_setting
             .as_ref()
             .is_some_and(|is_enabled| !is_enabled())
         {
             break;
         }
+        let incoming_request = match incoming_request_result {
+            Ok(incoming_request) => incoming_request,
+            // The frame arrived whole and its bytes did not decode.
+            // `read_message` consumed exactly that frame, and the next read
+            // starts on a frame boundary. This one request is dropped, the
+            // loop reads the next frame, and the client keeps its stream. The
+            // line carries the client id and none of the peer's bytes.
+            Err(IpcError::MalformedFrame { .. }) => {
+                tracing::debug!(%client_id, "frame this build cannot read");
+                continue;
+            }
+            // An oversize frame leaves its payload unread, and a disconnect
+            // or a transport fault leaves no stream. All three end this loop.
+            Err(_) => break,
+        };
         let request_kind = match incoming_request.request_kind {
             MaybeKnown::Known(request_kind) => request_kind,
             // A kind this build does not have comes from a newer koshi. This

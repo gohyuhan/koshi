@@ -2250,31 +2250,32 @@ fn a_request_kind_this_build_lacks_on_an_attached_connection_is_dropped_and_the_
 }
 
 #[test]
-fn a_malformed_frame_on_an_attached_connection_detaches_that_client() {
+fn a_malformed_frame_on_an_attached_connection_is_dropped_and_the_stream_goes_on() {
     let client = ClientId::new();
     let (server, session, runtime_directory, dispatcher, seen) =
         serve_attachable("attached-malformed", client);
     let mut connection = attach_to(&runtime_directory, session, client);
+    let pressed = KeyChord::from_parts(ModFlags::CTRL, Key::Char('t'));
 
     // A well-framed message that is not a request at all.
     connection.send(&"not a request").expect("send junk frame");
+    connection
+        .send(&IpcRequest {
+            request_id: 3,
+            request_kind: IpcRequestKind::KeyPress { chord: pressed },
+        })
+        .expect("send key press");
 
-    let RuntimeEvent::ClientDetached {
-        client_id,
-        is_streamed,
-        ..
-    } = seen
+    // The key press is the first event the dispatcher sees, so the unreadable
+    // frame crossed nothing, and the stream carried the one behind it.
+    let RuntimeEvent::ClientKeyPress { client_id, chord } = seen
         .recv_timeout(Duration::from_secs(5))
-        .expect("detach event")
+        .expect("key press event")
     else {
-        panic!("expected ClientDetached");
+        panic!("expected ClientKeyPress");
     };
     assert_eq!(client_id, client);
-    assert!(is_streamed, "the detached client was carrying a stream");
-    assert_eq!(
-        connection.recv::<SessionEvent>().expect("goodbye frame"),
-        SessionEvent::Detached,
-    );
+    assert_eq!(chord, pressed);
 
     drop(connection);
     server.shutdown();
@@ -2963,6 +2964,39 @@ fn other_user_hello() -> IpcRequest {
     }
 }
 
+/// Say hello and attach as another local user on `caller`, checking both
+/// replies. The connection carries `client_id`'s event stream afterwards.
+fn attach_as_other_user(caller: &mut Connection, client_id: ClientId, session_id: SessionId) {
+    caller.send(&other_user_hello()).expect("send hello");
+    let hello_response: IpcResponse = caller.recv().expect("hello reply");
+    assert_eq!(hello_response.answer_result, hello_accepted());
+    caller
+        .send(&IpcRequest {
+            request_id: 2,
+            request_kind: IpcRequestKind::Attach {
+                viewport: TEST_VIEWPORT_SIZE,
+                event_filter: EventFilterSpec::All,
+                resume_client_id: None,
+                resume_token: None,
+                pane_area: None,
+                graphics_capabilities: GraphicsCapabilities::default(),
+                cell_size: None,
+            },
+        })
+        .expect("send attach");
+    let attach_response: IpcResponse = caller.recv().expect("attach reply");
+    assert_eq!(
+        attach_response.answer_result,
+        IpcResult::Attached {
+            client_id,
+            session_id,
+            session_structure: attached_structure(session_id),
+            resume_token: Some(ConnectionToken::from_secret(MINTED_CONNECTION_TOKEN)),
+            pane_area: None,
+        }
+    );
+}
+
 #[test]
 fn another_local_user_keeps_being_served_while_the_setting_stays_on() {
     let is_enabled = Arc::new(AtomicBool::new(true));
@@ -3055,34 +3089,7 @@ fn an_attached_client_of_another_local_user_is_detached_when_the_setting_goes_of
     let (mut caller, serving, socket_address) =
         serve_other_user("attached-off", &is_enabled, inbox_tx);
 
-    caller.send(&other_user_hello()).expect("send hello");
-    let ipc_response: IpcResponse = caller.recv().expect("hello reply");
-    assert_eq!(ipc_response.answer_result, hello_accepted());
-    caller
-        .send(&IpcRequest {
-            request_id: 2,
-            request_kind: IpcRequestKind::Attach {
-                viewport: TEST_VIEWPORT_SIZE,
-                event_filter: EventFilterSpec::All,
-                resume_client_id: None,
-                resume_token: None,
-                pane_area: None,
-                graphics_capabilities: koshi_ipc::protocol::GraphicsCapabilities::default(),
-                cell_size: None,
-            },
-        })
-        .expect("send attach");
-    let ipc_response: IpcResponse = caller.recv().expect("attach reply");
-    assert_eq!(
-        ipc_response.answer_result,
-        IpcResult::Attached {
-            client_id: client,
-            session_id: session,
-            session_structure: attached_structure(session),
-            resume_token: Some(ConnectionToken::from_secret(MINTED_CONNECTION_TOKEN)),
-            pane_area: None,
-        }
-    );
+    attach_as_other_user(&mut caller, client, session);
 
     let pressed = KeyChord::from_parts(ModFlags::NONE, Key::Char('k'));
     caller
@@ -3118,6 +3125,69 @@ fn an_attached_client_of_another_local_user_is_detached_when_the_setting_goes_of
     );
 
     drop(caller);
+    serving.join().expect("serving thread");
+    dispatcher.join().expect("dispatcher exits");
+    remove_socket_file(&socket_address);
+}
+
+#[test]
+fn a_withdrawn_local_user_is_detached_by_a_frame_this_build_cannot_read() {
+    let client = ClientId::new();
+    let session = SessionId::new();
+    let is_enabled = Arc::new(AtomicBool::new(true));
+    let (inbox_tx, inbox_rx) = mpsc::channel();
+    let (dispatcher, seen) = spawn_attaching_dispatcher(inbox_rx, client, session);
+    let (mut caller, serving, socket_address) =
+        serve_other_user("attached-off-junk", &is_enabled, inbox_tx);
+    attach_as_other_user(&mut caller, client, session);
+
+    // The frame that arrives after the setting goes off is one this build
+    // cannot read, so the drop that keeps a readable stream alive must not
+    // carry this client past the withdrawal.
+    is_enabled.store(false, Ordering::SeqCst);
+    caller.send(&"not a request").expect("send junk frame");
+
+    let RuntimeEvent::ClientDetached { client_id, .. } = seen
+        .recv_timeout(Duration::from_secs(5))
+        .expect("detach event")
+    else {
+        panic!("expected ClientDetached");
+    };
+    assert_eq!(client_id, client);
+    assert_eq!(
+        caller.recv::<SessionEvent>().expect("goodbye frame"),
+        SessionEvent::Detached,
+    );
+
+    drop(caller);
+    serving.join().expect("serving thread");
+    dispatcher.join().expect("dispatcher exits");
+    remove_socket_file(&socket_address);
+}
+
+#[test]
+fn a_lost_connection_ends_an_attached_clients_reading_half() {
+    let client = ClientId::new();
+    let session = SessionId::new();
+    let is_enabled = Arc::new(AtomicBool::new(true));
+    let (inbox_tx, inbox_rx) = mpsc::channel();
+    let (dispatcher, seen) = spawn_attaching_dispatcher(inbox_rx, client, session);
+    let (mut caller, serving, socket_address) =
+        serve_other_user("attached-lost", &is_enabled, inbox_tx);
+    attach_as_other_user(&mut caller, client, session);
+
+    // Nothing is queued for this client, so its writing half is blocked on an
+    // open queue and notices nothing. The detach below is the reading half's.
+    drop(caller);
+
+    let RuntimeEvent::ClientDetached { client_id, .. } = seen
+        .recv_timeout(Duration::from_secs(5))
+        .expect("detach event")
+    else {
+        panic!("expected ClientDetached");
+    };
+    assert_eq!(client_id, client);
+
     serving.join().expect("serving thread");
     dispatcher.join().expect("dispatcher exits");
     remove_socket_file(&socket_address);
